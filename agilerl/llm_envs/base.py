@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 """Base helpers and classes for LLM gym-style environments."""
 
 from __future__ import annotations
@@ -5,28 +8,36 @@ from __future__ import annotations
 import copy
 import warnings
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Generator
+from collections.abc import Callable, Generator, Mapping
 from contextlib import contextmanager
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Generic, TypeVar
 
-import gymnasium as gym
 import torch
 from torch.utils.data import DataLoader
-
-from agilerl.typing import ReasoningPrompts
 
 if TYPE_CHECKING:
     from accelerate import Accelerator
     from datasets import Dataset
-    from transformers import AutoTokenizer
-    from transformers.tokenization_utils_base import BatchEncoding
+    from transformers.tokenization_utils_base import (
+        BatchEncoding,
+        PreTrainedTokenizerBase,
+    )
+
+# The batch a HuggingFaceGym yields per reset/step. Each paradigm binds it to
+# its own prompt structure (ReasoningGym -> list[ReasoningPrompts],
+# PreferenceGym -> PreferencePrompts, SFTGym -> SFTPrompts), so the base can
+# type reset/step precisely instead of falling back to Any.
+PromptT = TypeVar("PromptT")
+# The completions a step consumes. ReasoningGym scores a whole group at once
+# (list[Tensor]); the dataloader-only gyms ignore completions (Tensor | None).
+CompletionT = TypeVar("CompletionT")
 
 
 def apply_chat_template(
     conversation_template: list[dict[str, str]],
     question: str,
     answer: str,
-    tokenizer: AutoTokenizer,
+    tokenizer: PreTrainedTokenizerBase,
 ) -> BatchEncoding:
     """Create and tokenize a chat template for a reasoning task.
 
@@ -37,7 +48,7 @@ def apply_chat_template(
     :param answer: The answer to be tokenized.
     :type answer: str
     :param tokenizer: The tokenizer to be used.
-    :type tokenizer: AutoTokenizer
+    :type tokenizer: PreTrainedTokenizerBase
     :return: The tokenized prompt.
     :rtype: BatchEncoding
     """
@@ -62,8 +73,8 @@ def apply_chat_template(
     )
 
 
-class HuggingFaceGym(gym.Env, ABC):
-    """Abstract base class for HuggingFace Gymnasium environments."""
+class HuggingFaceGym(ABC, Generic[PromptT, CompletionT]):
+    """Abstract base class for HuggingFace prompt-batch environments."""
 
     _batch_state_attrs: tuple[str, ...] = ()
 
@@ -71,7 +82,7 @@ class HuggingFaceGym(gym.Env, ABC):
         self,
         train_dataset: Dataset,
         test_dataset: Dataset,
-        tokenizer: AutoTokenizer,
+        tokenizer: PreTrainedTokenizerBase,
         conversation_template: list[dict[str, str]] | None,
         data_batch_size_per_gpu: int = 8,
         max_context_length: int | None = None,
@@ -91,7 +102,7 @@ class HuggingFaceGym(gym.Env, ABC):
         generator = torch.Generator().manual_seed(seed)
         self.conversation_template = conversation_template
         custom_collate_fn = self.create_collate_fn(tokenizer)
-        dataloader_kwargs = {"collate_fn": custom_collate_fn}
+        dataloader_kwargs: dict[str, Any] = {"collate_fn": custom_collate_fn}
         train_dataset = self._filter_dataset_by_max_context_length(
             train_dataset,
             "train dataset",
@@ -100,15 +111,20 @@ class HuggingFaceGym(gym.Env, ABC):
             test_dataset,
             "test dataset",
         )
+        # A HuggingFace Dataset is map-style (__getitem__/__len__) but does not
+        # inherit torch's Dataset, which is what DataLoader declares; bridge the
+        # cross-library datasets through Any.
+        train_data: Any = train_dataset
+        test_data: Any = test_dataset
         self.train_dataloader = DataLoader(
-            train_dataset,
+            train_data,
             batch_size=data_batch_size_per_gpu,
             shuffle=True,
             **dataloader_kwargs,
             generator=generator,
         )
         self.test_dataloader = DataLoader(
-            test_dataset,
+            test_data,
             batch_size=data_batch_size_per_gpu,
             shuffle=False,
             **dataloader_kwargs,
@@ -128,18 +144,23 @@ class HuggingFaceGym(gym.Env, ABC):
         self.evaluation_mode = False
         self.num_epochs = 0
 
+    # A step consumes generated completions rather than an action; a reset
+    # advances a dataloader rather than accepting seed/options. The batch shape
+    # is the subclass's contract - a rollout environment yields tokenized
+    # prompts and rewards, a dataset environment yields a whole training batch -
+    # so ``PromptT``/``CompletionT`` carry those per-subclass.
     @abstractmethod
     def reset(
         self,
         reset_dataloaders: bool = False,
-    ) -> tuple[list[ReasoningPrompts], dict[str, Any]]:
+    ) -> PromptT:
         """Reset the environment and get the next batch of tokenized prompts."""
 
     @abstractmethod
     def step(
         self,
-        completions: torch.Tensor,
-    ) -> tuple[list[ReasoningPrompts], torch.Tensor]:
+        completions: CompletionT,
+    ) -> PromptT | tuple[PromptT, torch.Tensor]:
         """Take a step in a HuggingFaceGym environment."""
 
     @contextmanager
@@ -163,17 +184,15 @@ class HuggingFaceGym(gym.Env, ABC):
     @abstractmethod
     def create_collate_fn(
         self,
-        tokenizer: AutoTokenizer,
+        tokenizer: PreTrainedTokenizerBase,
         *args: Any,
         **kwargs: Any,
-    ) -> Callable[[list[dict[str, Any]]], dict[str, Any]]:
+    ) -> Callable[[list[dict[str, Any]]], Mapping[str, Any]]:
         """Create a collate function for this environment."""
 
     def __len__(self) -> int:
         """Return the length of the dataset."""
-        if self.evaluation_mode:
-            return len(self.test_dataloader.dataset)
-        return len(self.train_dataloader.dataset)
+        return self.dataset_size["test" if self.evaluation_mode else "train"]
 
     def _reset_dataloaders(
         self, reset_train: bool = True, reset_test: bool = True
@@ -197,15 +216,17 @@ class HuggingFaceGym(gym.Env, ABC):
         """Filter the dataset by the max context length."""
         dataset_type = "dataset" if dataset_type is None else dataset_type
         filter_keyword = "prompt" if "prompt" in dataset.features else "question"
-        if self.max_context_length is None or not isinstance(
+        max_context_length = self.max_context_length
+        if max_context_length is None or not isinstance(
             dataset[0][filter_keyword],
             str,
         ):
             return dataset
+
+        max_prompt_length = max_context_length - self.min_completion_length
         filtered_dataset = dataset.filter(
             lambda x: (
-                len(self.tokenizer.encode(x[filter_keyword]))
-                <= self.max_context_length - self.min_completion_length
+                len(self.tokenizer.encode(x[filter_keyword])) <= max_prompt_length
             ),
         )
         if len(filtered_dataset) == 0:
@@ -219,13 +240,13 @@ class HuggingFaceGym(gym.Env, ABC):
         return filtered_dataset
 
 
-class IterablePromptBatchGym(HuggingFaceGym):
+class IterablePromptBatchGym(HuggingFaceGym[PromptT, torch.Tensor | None]):
     """HuggingFaceGym whose ``step`` only advances the dataloader."""
 
     def reset(
         self,
         reset_dataloaders: bool = False,
-    ) -> Any:
+    ) -> PromptT:
         """Reset the environment and get the next batch from the dataloader."""
         if reset_dataloaders:
             self._reset_dataloaders()
@@ -246,12 +267,12 @@ class IterablePromptBatchGym(HuggingFaceGym):
     def step(
         self,
         completions: torch.Tensor | None = None,
-    ) -> Any:
+    ) -> PromptT:
         """Advance the iterator and return the next batch."""
         self.reset_called = False
         return self._get_next_batch()
 
-    def _get_next_batch(self) -> Any:
+    def _get_next_batch(self) -> PromptT:
         try:
             batch = next(self.dataloader)
         except StopIteration:

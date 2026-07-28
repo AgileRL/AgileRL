@@ -1,6 +1,8 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 import warnings
 from dataclasses import asdict
-from typing import Any
 
 import torch
 from gymnasium import spaces
@@ -9,7 +11,7 @@ from agilerl.modules import EvolvableModule
 from agilerl.modules.configs import MlpNetConfig, NetConfig
 from agilerl.networks.base import EvolvableNetwork
 from agilerl.networks.custom_modules import DuelingDistributionalMLP
-from agilerl.typing import ArrayOrTensor, NetConfigType, TorchObsType
+from agilerl.typing import ArrayOrTensor, DeviceType, NetConfigType, TorchObsType
 from agilerl.utils.evolvable_networks import (
     get_default_encoder_config,
     is_image_space,
@@ -48,7 +50,7 @@ class QNetwork(EvolvableNetwork):
     Otherwise, an `EvolvableLSTM` is used as an encoder.
     :type recurrent: bool
     :param device: Device to use for the network.
-    :type device: str
+    :type device: DeviceType
     :param random_seed: Random seed to use for the network. Defaults to None.
     :type random_seed: int | None
     """
@@ -67,7 +69,7 @@ class QNetwork(EvolvableNetwork):
         latent_dim: int = 64,
         simba: bool = False,
         recurrent: bool = False,
-        device: str = "cpu",
+        device: DeviceType = "cpu",
         random_seed: int | None = None,
     ) -> None:
         super().__init__(
@@ -98,11 +100,11 @@ class QNetwork(EvolvableNetwork):
         # Build value network
         self.build_network_head(head_config)
 
-    def build_network_head(self, net_config: dict[str, Any]) -> None:
+    def build_network_head(self, net_config: NetConfigType) -> None:
         """Build the head of the network based on the passed configuration.
 
         :param net_config: Configuration of the network head.
-        :type net_config: dict[str, Any]
+        :type net_config: NetConfigType
         """
         self.head_net = self.create_mlp(
             num_inputs=self.latent_dim,
@@ -165,7 +167,7 @@ class RainbowQNetwork(EvolvableNetwork):
     :param latent_dim: Dimension of the latent space representation.
     :type latent_dim: int
     :param device: Device to use for the network.
-    :type device: str
+    :type device: DeviceType
     :param random_seed: Random seed to use for the network. Defaults to None.
     :type random_seed: int | None
     """
@@ -182,7 +184,7 @@ class RainbowQNetwork(EvolvableNetwork):
         min_latent_dim: int = 8,
         max_latent_dim: int = 128,
         latent_dim: int = 64,
-        device: str = "cpu",
+        device: DeviceType = "cpu",
         random_seed: int | None = None,
     ) -> None:
 
@@ -247,11 +249,11 @@ class RainbowQNetwork(EvolvableNetwork):
         # Build value and advantage networks
         self.build_network_head(head_config)
 
-    def build_network_head(self, net_config: dict[str, Any]) -> None:
+    def build_network_head(self, net_config: NetConfigType) -> None:
         """Build the value and advantage heads of the network based on the passed configuration.
 
         :param net_config: Configuration of the network head.
-        :type net_config: dict[str, Any]
+        :type net_config: NetConfigType
         """
         self.head_net = DuelingDistributionalMLP(
             num_inputs=self.latent_dim,
@@ -308,8 +310,11 @@ class ContinuousQNetwork(EvolvableNetwork):
 
     :param observation_space: Observation space of the environment.
     :type observation_space: spaces.Space
-    :param action_space: Action space of the environment
-    :type action_space: spaces.Box
+    :param action_space: Action space of the environment. Any space with a
+        defined ``spaces.flatdim`` is supported: continuous ``Box`` actions
+        (DDPG/TD3) as well as the ``Discrete``/``MultiDiscrete`` joint action
+        spaces used by the multi-agent critics.
+    :type action_space: spaces.Space
     :param encoder_cls: Encoder class to use for the network. Defaults to None, whereby it is
         automatically built using an AgileRL module according the observation space.
     :type encoder_cls: str | type[EvolvableModule] | None
@@ -328,7 +333,7 @@ class ContinuousQNetwork(EvolvableNetwork):
     :param recurrent: Whether to use a recurrent network. Defaults to False.
     :type recurrent: bool
     :param device: Device to use for the network.
-    :type device: str
+    :type device: DeviceType
     :param random_seed: Random seed to use for the network. Defaults to None.
     :type random_seed: int | None
     """
@@ -340,7 +345,7 @@ class ContinuousQNetwork(EvolvableNetwork):
     def __init__(
         self,
         observation_space: spaces.Space,
-        action_space: spaces.Box,
+        action_space: spaces.Space,
         encoder_cls: type[EvolvableModule] | None = None,
         encoder_config: NetConfigType | None = None,
         head_config: NetConfigType | None = None,
@@ -349,7 +354,7 @@ class ContinuousQNetwork(EvolvableNetwork):
         latent_dim: int = 64,
         simba: bool = False,
         recurrent: bool = False,
-        device: str = "cpu",
+        device: DeviceType = "cpu",
         random_seed: int | None = None,
     ) -> None:
         # NOTE: Need to disable layer normalization for the encoder since we're

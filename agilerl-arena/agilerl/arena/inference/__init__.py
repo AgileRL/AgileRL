@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 """HTTP clients and persistence for deployed Arena agents."""
 
 from agilerl.arena.inference.agent import (

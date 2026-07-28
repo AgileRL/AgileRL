@@ -1,6 +1,9 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 import warnings
-from collections.abc import Callable
-from typing import TYPE_CHECKING, Any, Literal
+from collections.abc import Callable, Sequence
+from typing import TYPE_CHECKING, Any, Literal, TypeVar
 
 from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.hpo.mutation import Mutations
@@ -8,6 +11,8 @@ from agilerl.hpo.tournament import TournamentSelection
 
 if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
     from agilerl.llm_envs import PreferenceGym, ReasoningGym
+
+EnvT = TypeVar("EnvT", bound="ReasoningGym | PreferenceGym")
 
 
 def _validate_finetune_args(
@@ -88,9 +93,9 @@ def _compute_training_steps(
 
 def _resolve_training_envs(
     pop: list[Any],
-    env: ReasoningGym | PreferenceGym | None,
-    env_fn: Callable[[], ReasoningGym | PreferenceGym] | None,
-) -> tuple[list[ReasoningGym | PreferenceGym], bool]:
+    env: EnvT | None,
+    env_fn: Callable[[], EnvT] | None,
+) -> tuple[list[EnvT], bool]:
     """Resolve shared or per-agent training environments.
 
     :param pop: Population of agents being trained.
@@ -123,12 +128,16 @@ def _resolve_training_envs(
 
 
 def _num_epochs_reached(
-    envs: list[ReasoningGym | PreferenceGym], num_epochs: int | None
+    envs: Sequence[ReasoningGym | PreferenceGym], num_epochs: int | None
 ) -> bool:
     """Check whether all active environments have reached the epoch budget."""
     if num_epochs is None:
         return False
-    epoch_counts = [getattr(e, "num_epochs", None) for e in envs]
-    if not all(isinstance(c, int) for c in epoch_counts):
+    epoch_counts = [
+        count
+        for count in (getattr(e, "num_epochs", None) for e in envs)
+        if isinstance(count, int)
+    ]
+    if len(epoch_counts) != len(envs):
         return False
-    return all(c >= num_epochs for c in epoch_counts)
+    return all(count >= num_epochs for count in epoch_counts)

@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 import gymnasium as gym
 import numpy as np
 import pandas as pd
@@ -52,6 +55,7 @@ from agilerl.protocols import (
     PretrainedConfigProtocol,
     PreTrainedModelProtocol,
 )
+from agilerl.wrappers.agent import RSNorm
 from agilerl.wrappers.learning import BanditEnv
 from tests.helper_functions import (
     generate_dict_or_tuple_space,
@@ -151,6 +155,8 @@ class TestEvolvableAlgorithmProtocol:
         _ = EvolvableAlgorithmProtocol.inspect_attributes(inst, input_args_only=True)
         EvolvableAlgorithmProtocol.recompile(inst)
         EvolvableAlgorithmProtocol.mutation_hook(inst)
+        EvolvableAlgorithmProtocol.clean_up(inst)
+        _ = EvolvableAlgorithmProtocol.scores.fget(inst)
 
     @pytest.mark.parametrize(
         ("algo_cls", "obs", "act"),
@@ -172,9 +178,7 @@ class TestEvolvableAlgorithmProtocol:
     ):
         inst = algo_cls(obs, act)
         EvolvableAlgorithmProtocol.save_checkpoint(inst, str(tmp_path / "ckpt.pt"))
-        EvolvableAlgorithmProtocol.load_checkpoint(
-            inst, str(tmp_path / "ckpt.pt"), "cpu", None
-        )
+        EvolvableAlgorithmProtocol.load_checkpoint(inst, str(tmp_path / "ckpt.pt"))
         _ = EvolvableAlgorithmProtocol.load(algo_cls, str(tmp_path / "ckpt.pt"))
         exp = (
             (
@@ -196,7 +200,7 @@ class TestEvolvableAlgorithmProtocol:
             )
         )
         EvolvableAlgorithmProtocol.learn(inst, exp)
-        _ = EvolvableAlgorithmProtocol.test(inst)
+        _ = EvolvableAlgorithmProtocol.test(inst, None)
         _ = EvolvableAlgorithmProtocol.clone(inst, None, False)
 
 
@@ -342,6 +346,15 @@ class TestEvolvableModuleProtocol:
         _ = EvolvableModuleProtocol.sample_mutation_method(mod, 0.5, None)
         _ = EvolvableModuleProtocol.clone(mod)
         EvolvableModuleProtocol.load_state_dict(mod, mod.state_dict())
+        # Read-only property bodies.
+        _ = EvolvableModuleProtocol.init_dict.fget(mod)
+        _ = EvolvableModuleProtocol.layer_mutation_methods.fget(mod)
+        _ = EvolvableModuleProtocol.node_mutation_methods.fget(mod)
+        _ = EvolvableModuleProtocol.mutation_methods.fget(mod)
+        _ = EvolvableModuleProtocol.last_mutation_attr.fget(mod)
+        _ = EvolvableModuleProtocol.last_mutation.fget(mod)
+        _ = EvolvableModuleProtocol.rng.fget(mod)
+        _ = EvolvableModuleProtocol.device.fget(mod)
         for m in mod.get_mutation_methods().values():
             MutationMethodProtocol.__call__(m, mod)
 
@@ -453,12 +466,13 @@ class TestModuleDictProtocol:
         _ = ModuleDictProtocol.keys(mdl)
         _ = ModuleDictProtocol.values(mdl)
         _ = ModuleDictProtocol.items(mdl)
-        _ = ModuleDictProtocol.modules(mdl)
+        _ = ModuleDictProtocol.evolvable_modules(mdl)
         _ = ModuleDictProtocol.get_mutation_methods(mdl)
         ModuleDictProtocol.filter_mutation_methods(mdl, "add")
         _ = ModuleDictProtocol.mutation_methods.fget(mdl)
         _ = ModuleDictProtocol.layer_mutation_methods.fget(mdl)
         _ = ModuleDictProtocol.node_mutation_methods.fget(mdl)
+        _ = ModuleDictProtocol.device.fget(mdl)
 
 
 class TestOptimizerConfig:
@@ -482,6 +496,35 @@ class TestOptimizerConfig:
         _ = MutationRegistryProtocol.networks(reg)
 
 
+class TestNStepAgentAccess:
+    """The prioritized-replay path must keep working for wrapped agents."""
+
+    def test_wrapper_is_not_a_rainbow_instance(self):
+        rainbow = RainbowDQN(
+            generate_random_box_space(shape=(4,)), generate_discrete_space(2)
+        )
+        assert not isinstance(RSNorm(rainbow), RainbowDQN)
+
+    def test_accessor_passes_wrapped_agents_through(self):
+        from agilerl.training.train_off_policy import _as_n_step_agent
+
+        rainbow = RainbowDQN(
+            generate_random_box_space(shape=(4,)), generate_discrete_space(2)
+        )
+        wrapper = RSNorm(rainbow)
+        assert _as_n_step_agent(wrapper) is wrapper
+
+    def test_wrapper_proxies_beta_reads_and_writes(self):
+        rainbow = RainbowDQN(
+            generate_random_box_space(shape=(4,)), generate_discrete_space(2)
+        )
+        wrapper = RSNorm(rainbow)
+        start = rainbow.beta
+        wrapper.beta += 0.1
+        assert wrapper.beta == pytest.approx(start + 0.1)
+        assert rainbow.beta == pytest.approx(start + 0.1)
+
+
 class TestAgentWrapperProtocol:
     def test_agent_wrapper_protocol_methods_executed(self):
         from agilerl.wrappers.agent import RSNorm
@@ -501,6 +544,20 @@ class TestAgentWrapperProtocol:
                 torch.zeros(4, dtype=torch.bool),
             ),
         )
+        _ = AgentWrapperProtocol.evolvable_attributes(wrapper)
+
+
+class TestTokenizedMultiTurnEnvProtocol:
+    def test_protocol_methods_executed(self):
+        from unittest.mock import MagicMock
+
+        from agilerl.protocols import TokenizedMultiTurnEnv
+
+        env = MagicMock()
+        _ = TokenizedMultiTurnEnv.reset(env)
+        _ = TokenizedMultiTurnEnv.step(env, torch.zeros(1, dtype=torch.long))
+        TokenizedMultiTurnEnv.close(env)
+        _ = TokenizedMultiTurnEnv.get_episode_data(env)
 
 
 class TestLoraConfigProtocol:

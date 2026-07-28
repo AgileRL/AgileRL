@@ -1,5 +1,7 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 import warnings
-from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
@@ -665,7 +667,7 @@ class TestRolloutBufferDataRetrieval:
         assert data == {}
 
     def test_get_tensor_batch_empty_buffer(self):
-        """Test get_tensor_batch() returns empty dict when buffer is empty."""
+        """Test get_tensor_batch() returns an empty TensorDict when the buffer is empty."""
         obs_space = spaces.Box(low=-1, high=1, shape=(2,), dtype=np.float32)
         action_space = spaces.Discrete(2)
         buffer = RolloutBuffer(
@@ -676,7 +678,9 @@ class TestRolloutBufferDataRetrieval:
             device="cpu",
         )
         batch = buffer.get_tensor_batch()
-        assert batch == {}
+        # An empty TensorDict (not a plain dict) so callers can uniformly rely
+        # on TensorDict semantics such as ``is_empty()``.
+        assert batch.is_empty()
 
     def test_get_batch_size_larger_than_total(self):
         """Test get() with batch_size > total_samples triggers warning and returns all data."""
@@ -1515,6 +1519,20 @@ class TestRolloutBufferSequences:
 class TestRolloutBufferUtilities:
     """Test utility methods and edge cases."""
 
+    def test_extract_td_sequences_rejects_unknown_sequence_type(self):
+        obs_space = spaces.Box(low=-1, high=1, shape=(2,), dtype=np.float32)
+        buffer = RolloutBuffer(
+            capacity=8,
+            observation_space=obs_space,
+            action_space=spaces.Discrete(2),
+            num_envs=1,
+            max_seq_len=2,
+        )
+        buffer.bptt_sequence_type = "not-a-sequence-type"
+        episode = TensorDict({"x": torch.ones((6, 2))}, batch_size=[6])
+        with pytest.raises(NotImplementedError, match="unrecognized sequence type"):
+            buffer._extract_td_sequences(episode, 2)
+
     @pytest.mark.parametrize(
         "bptt_sequence_type",
         [
@@ -1636,28 +1654,6 @@ class TestRolloutBufferUtilities:
         if isinstance(np_dict["observations"], dict):
             assert "vec" in np_dict["observations"]
             assert isinstance(np_dict["observations"]["vec"], np.ndarray)
-
-    def test_convert_td_to_np_dict_observations_plain_dict_items(self):
-        """Force the observations dict branch when TensorDict stores plain dicts."""
-        obs_space = spaces.Box(low=-1, high=1, shape=(2,), dtype=np.float32)
-        action_space = spaces.Discrete(2)
-        buffer = RolloutBuffer(
-            capacity=5,
-            observation_space=obs_space,
-            action_space=action_space,
-            num_envs=1,
-            device="cpu",
-        )
-        td = MagicMock()
-        td.items.return_value = [
-            ("observations", {"vec": torch.randn(2, 2)}),
-            ("next_observations", {"vec": torch.randn(2, 2)}),
-            ("actions", torch.randn(2, 1)),
-        ]
-        np_dict = buffer._convert_td_to_np_dict(td)
-        assert isinstance(np_dict["observations"], dict)
-        assert isinstance(np_dict["observations"]["vec"], np.ndarray)
-        assert isinstance(np_dict["next_observations"]["vec"], np.ndarray)
 
     def test_sequence_preparation_with_multiple_episodes_per_env(self):
         """Test sequence preparation with multiple episodes per environment."""

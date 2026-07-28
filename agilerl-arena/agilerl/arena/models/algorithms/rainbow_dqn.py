@@ -1,11 +1,15 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 """Rainbow DQN algorithm specification."""
 
 from __future__ import annotations
 
-from agilerl.arena.models.algo import RLAlgorithmSpec, register
-from agilerl.arena.models.networks import RainbowQNetworkSpec
 from pydantic import Field, model_validator
 from typing_extensions import Self
+
+from agilerl.arena.models.algo import RLAlgorithmSpec, register
+from agilerl.arena.models.networks import RainbowQNetworkSpec
 
 
 @register()

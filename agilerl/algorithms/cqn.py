@@ -1,10 +1,16 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 import random
 from typing import Any
 
+import gymnasium as gym
 import numpy as np
+import numpy.typing as npt
 import torch
 from accelerate import Accelerator
 from gymnasium import spaces
+from tensordict import TensorDict
 from torch import nn, optim
 from torch.nn.utils import clip_grad_norm_
 
@@ -16,11 +22,16 @@ from agilerl.algorithms.core.registry import (
 )
 from agilerl.modules.base import EvolvableModule
 from agilerl.networks.q_networks import QNetwork
-from agilerl.typing import ExperiencesType, GymEnvType, ObservationType
+from agilerl.typing import (
+    ActionMaskInput,
+    ObservationType,
+    ReplayBatch,
+    numpy_action_mask,
+)
 from agilerl.utils.algo_utils import make_safe_deepcopies
 
 
-class CQN(RLAlgorithm):
+class CQN(RLAlgorithm[TensorDict]):
     """Conservative Q-Learning for Offline Reinforcement Learning.
 
     Paper: https://arxiv.org/abs/2006.04779
@@ -60,6 +71,12 @@ class CQN(RLAlgorithm):
     :param wrap: Wrap models for distributed training upon creation, defaults to True
     :type wrap: bool, optional
     """
+
+    # Narrowed from RLAlgorithm.action_space; enforced at construction.
+    action_space: spaces.Discrete | spaces.MultiDiscrete
+
+    # Discrete action space, so the network output size is a plain int
+    action_dim: int
 
     def __init__(
         self,
@@ -134,7 +151,7 @@ class CQN(RLAlgorithm):
                     msg,
                 )
 
-            # Need to make deepcopies for target and detached networks
+            # Need to make deepcopies for target and detached networks.
             self.actor, self.actor_target = make_safe_deepcopies(
                 actor_network,
                 actor_network,
@@ -183,10 +200,10 @@ class CQN(RLAlgorithm):
         self,
         obs: ObservationType,
         epsilon: float = 0,
-        action_mask: np.ndarray | None = None,
+        action_mask: ActionMaskInput = None,
         *args: Any,
         **kwargs: Any,
-    ) -> np.ndarray:
+    ) -> npt.NDArray:
         """Return the next action to take in the environment. Epsilon is the
         probability of taking a random action, used for exploration.
         For greedy behaviour, set epsilon to 0.
@@ -196,7 +213,7 @@ class CQN(RLAlgorithm):
         :param epsilon: Probability of taking a random action for exploration, defaults to 0
         :type epsilon: float, optional
         :param action_mask: Mask of legal actions 1=legal 0=illegal, defaults to None
-        :type action_mask: numpy.ndarray, optional
+        :type action_mask: ActionMaskInput
 
         :return: Action to take in the environment
         :rtype: numpy.ndarray[int]
@@ -208,11 +225,9 @@ class CQN(RLAlgorithm):
             if action_mask is None:
                 action = np.random.randint(0, self.action_dim, size=len(obs))
             else:
+                mask = numpy_action_mask(action_mask)
                 action = np.argmax(
-                    (
-                        np.random.uniform(0, 1, (len(obs), self.action_dim))
-                        * action_mask
-                    ),
+                    (np.random.uniform(0, 1, (len(obs), self.action_dim)) * mask),
                     axis=1,
                 )
         else:
@@ -224,26 +239,28 @@ class CQN(RLAlgorithm):
             if action_mask is None:
                 action = np.argmax(action_values, axis=-1)
             else:
-                inv_mask = 1 - action_mask
+                inv_mask = 1 - numpy_action_mask(action_mask)
                 masked_action_values = np.ma.array(action_values, mask=inv_mask)
                 action = np.argmax(masked_action_values, axis=-1)
 
         return action
 
-    def learn(self, experiences: ExperiencesType) -> float:
+    def learn(self, experiences: TensorDict) -> float:
         """Update agent network parameters to learn from experiences.
 
-        :param experiences: TensorDict of batched observations, actions, rewards, next_observations, dones.
-        :type experiences: tensordict.TensorDict
+        :param experiences: Batch of observations, actions, rewards, next
+            observations and dones sampled from an off-policy replay buffer.
+        :type experiences: TensorDict
 
         :return: Loss from learning
         :rtype: float
         """
-        states = experiences["obs"]
-        actions = experiences["action"]
-        rewards = experiences["reward"]
-        next_states = experiences["next_obs"]
-        dones = experiences["done"]
+        batch: ReplayBatch = ReplayBatch.from_tensordict(experiences)
+        states = batch.obs
+        actions = batch.action
+        rewards = batch.reward
+        next_states = batch.next_obs
+        dones = batch.done
 
         if self.accelerator is not None:
             actions = actions.to(self.accelerator.device)
@@ -260,7 +277,7 @@ class CQN(RLAlgorithm):
             )
         else:
             q_target_next = (
-                self.actor_target(next_states).detach().max(axis=1)[0].unsqueeze(1)
+                self.actor_target(next_states).detach().max(dim=1)[0].unsqueeze(1)
             )
 
         # target, if terminal then y_j = rewards
@@ -301,14 +318,14 @@ class CQN(RLAlgorithm):
 
     def test(
         self,
-        env: GymEnvType,
+        env: gym.vector.VectorEnv,
         max_steps: int | None = None,
         loop: int = 3,
     ) -> float:
         """Return mean test score of agent in environment with epsilon-greedy policy.
 
-        :param env: The environment to be tested in
-        :type env: Gym-style environment
+        :param env: The vectorized environment to be tested in
+        :type env: gym.vector.VectorEnv
         :param max_steps: Maximum number of testing steps, defaults to None.
         :type max_steps: int, optional
         :param loop: Number of testing loops/episodes to complete. The returned score is the mean. Defaults to 3
@@ -338,6 +355,6 @@ class CQN(RLAlgorithm):
                             completed_episode_scores[idx] = scores[idx]
                             finished[idx] = 1
                 rewards.append(np.mean(completed_episode_scores))
-        mean_fit = np.mean(rewards)
+        mean_fit = float(np.mean(rewards))
         self.metrics.add_fitness(mean_fit)
         return mean_fit

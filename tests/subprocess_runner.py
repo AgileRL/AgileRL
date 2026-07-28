@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 """Lightweight test runner for subprocess-isolated tests.
 
 Replaces the pytest entrypoint with a direct python3 invocation to eliminate
@@ -15,6 +18,7 @@ Usage:
 import argparse
 import functools
 import importlib.util
+import itertools
 import json
 import os
 import random
@@ -31,8 +35,26 @@ from torch._inductor.utils import fresh_cache
 
 from tests.utils import force_gpu_memory_release, wait_for_gpu_memory_to_clear
 
+_port_counter = itertools.count()
+
 
 def get_free_port():
+    """Pick a MASTER_PORT that won't collide across xdist workers."""
+    worker = os.environ.get("PYTEST_XDIST_WORKER", "gw0")
+    try:
+        worker_num = int(worker.lstrip("gw"))
+    except ValueError:
+        worker_num = 0
+    base = 20000 + (worker_num % 100) * 300
+    for _ in range(300):
+        port = base + next(_port_counter) % 300
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                s.bind(("127.0.0.1", port))
+            except OSError:
+                continue
+            return port
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(("127.0.0.1", 0))
         return s.getsockname()[1]

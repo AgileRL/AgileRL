@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 """Filesystem handling for the downloaded deployment bundle.
 
 Covers unzipping, locating the bundle root, marking scripts executable,
@@ -12,6 +15,7 @@ import zipfile
 from pathlib import Path
 
 import click
+
 from agilerl.arena.on_prem.endpoints import SetupKind
 
 

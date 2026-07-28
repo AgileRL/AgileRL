@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for arena.cli — Click CLI commands and config."""
 
 from __future__ import annotations
@@ -7,6 +10,8 @@ from unittest.mock import MagicMock, patch
 
 import click
 import pytest
+from click.testing import CliRunner
+
 from agilerl.arena.cli import (
     _redact_agent_rows_for_display,
     arena_client,
@@ -14,7 +19,6 @@ from agilerl.arena.cli import (
 )
 from agilerl.arena.config import CommandConfig, build_client
 from agilerl.arena.exceptions import ArenaAPIError
-from click.testing import CliRunner
 
 
 @pytest.fixture
@@ -686,6 +690,16 @@ class TestDatasetsCreateCommand:
             hf_config=None,
             hf_split=None,
         )
+
+    def test_create_without_mapping_raises_usage_error(self, runner, mock_client):
+        with _patched_arena_client(mock_client):
+            result = runner.invoke(
+                main,
+                ["datasets", "create", "new-ds", "--category", "reasoning"],
+            )
+        assert result.exit_code != 0
+        assert "Provide --column-mapping or --column-mapping-file." in result.output
+        mock_client.create_dataset.assert_not_called()
 
 
 class TestDatasetsDeleteCommand:

@@ -1,9 +1,12 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 from typing import Any
 
 import torch
 
 from agilerl.modules.base import EvolvableModule, MutationType, mutation
-from agilerl.typing import ObservationType
+from agilerl.typing import DeviceType, MutationApplyDict, ObservationType
 from agilerl.utils.evolvable_networks import create_simba
 
 
@@ -41,7 +44,7 @@ class EvolvableSimBa(EvolvableModule):
     :param max_mlp_nodes: Maximum number of nodes a layer can have within the network, defaults to 500
     :type max_mlp_nodes: int, optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
-    :type device: str, optional
+    :type device: DeviceType, optional
     :param name: Name of the network, defaults to 'mlp'
     :type name: str, optional
     :param random_seed: Random seed to use for the network. Defaults to None.
@@ -60,7 +63,7 @@ class EvolvableSimBa(EvolvableModule):
         max_blocks: int = 4,
         min_mlp_nodes: int = 16,
         max_mlp_nodes: int = 500,
-        device: str = "cpu",
+        device: DeviceType = "cpu",
         name: str = "simba",
         random_seed: int | None = None,
     ) -> None:
@@ -127,11 +130,11 @@ class EvolvableSimBa(EvolvableModule):
         output_coeff: float = 4,
     ) -> None:
         """Initialise weights of neural network using Gaussian distribution."""
-        EvolvableModule.init_weights_gaussian(self.model, std_coeff=std_coeff)
+        EvolvableModule.apply_gaussian_init(self.model, std_coeff=std_coeff)
 
         # Output layer is initialised with std_coeff=2
         output_layer = self.get_output_dense()
-        EvolvableModule.init_weights_gaussian(output_layer, std_coeff=output_coeff)
+        EvolvableModule.apply_gaussian_init(output_layer, std_coeff=output_coeff)
 
     @mutation(MutationType.ACTIVATION)
     def change_activation(self, activation: str, output: bool = False) -> None:
@@ -167,7 +170,7 @@ class EvolvableSimBa(EvolvableModule):
         return None
 
     @mutation(MutationType.NODE)
-    def add_node(self, numb_new_nodes: int | None = None) -> dict[str, int]:
+    def add_node(self, numb_new_nodes: int | None = None) -> MutationApplyDict:
         """Add nodes to residual blocks of the neural network.
 
         :param numb_new_nodes: Number of nodes to add, defaults to None
@@ -182,7 +185,7 @@ class EvolvableSimBa(EvolvableModule):
         return {"numb_new_nodes": numb_new_nodes}
 
     @mutation(MutationType.NODE)
-    def remove_node(self, numb_new_nodes: int | None = None) -> dict[str, int]:
+    def remove_node(self, numb_new_nodes: int | None = None) -> MutationApplyDict:
         """Remove nodes from hidden layer of neural network.
 
         :param hidden_layer: Depth of hidden layer to remove nodes from, defaults to None

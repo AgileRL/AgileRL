@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 """LLMPPO algorithm specification."""
 
 from __future__ import annotations
@@ -8,9 +11,9 @@ from typing import TYPE_CHECKING, Any, ClassVar, Literal
 from pydantic import Field, model_validator
 
 from agilerl.models.algo import LLMAlgorithmSpec, register
+from agilerl.models.env_types import LLMEnvType
 
 if TYPE_CHECKING:
-    from agilerl.models.env import LLMEnvType
     from agilerl.utils.algo_utils import CosineLRScheduleConfig, VLLMConfig
 else:
     CosineLRScheduleConfig = Any
@@ -42,10 +45,10 @@ class LLMPPOSpec(LLMAlgorithmSpec):
     turn_ratio_pooling: Literal["sum", "mean"] = Field(default="sum")
     whiten_advantages: bool = Field(default=True)
 
-    env_type: ClassVar[LLMEnvType] = "reasoning"
+    env_type: ClassVar[LLMEnvType] = LLMEnvType.REASONING
 
     @model_validator(mode="after")
-    def _validate_vllm_config(self):
+    def _validate_vllm_config(self) -> LLMPPOSpec:
         if self.use_vllm and not self.vllm_config:
             msg = "VLLM config is not set, please provide a VLLM config in the algorithm section of the manifest."
             raise ValueError(msg)

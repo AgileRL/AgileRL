@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 """Padding-free sequence packing helpers for LLM RL training.
 
 A right-padded ``(B, T)`` batch wastes the model forward on pad tokens. Packing

@@ -1,6 +1,10 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 import os
 import tarfile
 import tempfile
+from collections.abc import Callable
 from pathlib import Path
 from typing import BinaryIO
 
@@ -19,8 +23,8 @@ def extract_filename(disposition: str | None) -> str | None:
 
 
 def order_dataset_fields(
-    row: dict[str, str | None | int],
-) -> dict[str, str | None | int]:
+    row: dict[str, str | int | None],
+) -> dict[str, str | int | None]:
     """Return a copy of a dataset row with ``name`` and ``hf_dataset_id`` first.
 
     :param row: The dataset row to order.
@@ -39,8 +43,8 @@ def order_dataset_fields(
 
 
 def sort_dataset_search_by_downloads(
-    results: list[dict[str, str | None | int]],
-) -> list[dict[str, str | None | int]]:
+    results: list[dict[str, str | int | None]],
+) -> list[dict[str, str | int | None]]:
     """Sort HuggingFace search rows by ``downloads`` descending."""
     return sorted(results, key=lambda row: row.get("downloads") or 0, reverse=True)
 
@@ -56,7 +60,7 @@ def multipart_text_fields(
     return {key: (None, value) for key, value in fields.items() if value is not None}
 
 
-def _tar_to_tempfile(add_entries) -> BinaryIO:
+def _tar_to_tempfile(add_entries: Callable[[tarfile.TarFile], None]) -> BinaryIO:
     """Write a ``.tar.gz`` to an unlinked temporary file and rewind it.
 
     Spooling to disk instead of memory keeps large artifact uploads from

@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 import copy
 
 import numpy as np
@@ -938,8 +941,8 @@ class TestMutableKernelSizesChangeKernelSize:
         assert result == 5
         assert mut.sizes[0] == 5
 
-    def test_change_kernel_size_with_int_conversion(self, device):
-        """Covers change_kernel_size int conversion when kernel_size is float-like."""
+    def test_change_kernel_size_rejects_non_integer(self, device):
+        """kernel_size must be an integer; a float is rejected."""
         from agilerl.modules.cnn import MutableKernelSizes
 
         mut = MutableKernelSizes(
@@ -948,14 +951,14 @@ class TestMutableKernelSizesChangeKernelSize:
             sample_input=torch.zeros(1, 1, 16, 16, device=device),
             rng=np.random.default_rng(42),
         )
-        result = mut.change_kernel_size(
-            hidden_layer=0,
-            channel_size=[32],
-            stride_size=[1],
-            input_shape=(1, 16, 16),
-            kernel_size=5.0,
-        )
-        assert result == 5
+        with pytest.raises(AssertionError, match="must be an integer"):
+            mut.change_kernel_size(
+                hidden_layer=0,
+                channel_size=[32],
+                stride_size=[1],
+                input_shape=(1, 16, 16),
+                kernel_size=5.0,
+            )
 
 
 class TestEvolvableCNNShrinkPreserveParameters:

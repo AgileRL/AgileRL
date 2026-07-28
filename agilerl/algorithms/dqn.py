@@ -1,10 +1,17 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 import warnings
+from collections.abc import Callable
 from typing import Any
 
+import gymnasium as gym
 import numpy as np
+import numpy.typing as npt
 import torch
 from accelerate import Accelerator
 from gymnasium import spaces
+from tensordict import TensorDict
 from tensordict.nn import CudaGraphModule
 from torch import nn, optim
 
@@ -17,16 +24,17 @@ from agilerl.algorithms.core.registry import (
 from agilerl.modules.base import EvolvableModule
 from agilerl.networks.q_networks import QNetwork
 from agilerl.typing import (
-    ExperiencesType,
-    GymEnvType,
+    ActionMaskInput,
     ObservationType,
+    ReplayBatch,
     SupportedObservationSpace,
     TorchObsType,
+    numpy_action_mask,
 )
 from agilerl.utils.algo_utils import make_safe_deepcopies
 
 
-class DQN(RLAlgorithm):
+class DQN(RLAlgorithm[TensorDict]):
     """Deep Q-Network (DQN).
 
     Paper: https://arxiv.org/abs/1312.5602
@@ -68,6 +76,22 @@ class DQN(RLAlgorithm):
     :param wrap: Wrap models for distributed training upon creation, defaults to True
     :type wrap: bool, optional
     """
+
+    # Narrowed from RLAlgorithm.action_space; enforced at construction.
+    action_space: spaces.Discrete | spaces.MultiDiscrete
+
+    # Discrete action space, so the network output size is a plain int
+    action_dim: int
+
+    # Hot-path callables: bound methods by default, CudaGraph wrappers when enabled.
+    _get_action_impl: Callable[
+        [TorchObsType, torch.Tensor, torch.Tensor],
+        torch.Tensor,
+    ]
+    _update_impl: Callable[
+        [TorchObsType, torch.Tensor, torch.Tensor, TorchObsType, torch.Tensor],
+        torch.Tensor,
+    ]
 
     def __init__(
         self,
@@ -144,7 +168,7 @@ class DQN(RLAlgorithm):
                     msg,
                 )
 
-            # Need to make deepcopies for target and detached networks
+            # Need to make deepcopies for target and detached networks.
             self.actor, self.actor_target = make_safe_deepcopies(
                 actor_network,
                 actor_network,
@@ -179,20 +203,22 @@ class DQN(RLAlgorithm):
 
         self.criterion = nn.MSELoss()
 
-        # torch.compile and cuda graph optimizations
+        # Hot-path dispatch: methods by default; CudaGraph wrappers when enabled.
+        self._update_impl = self.update
+        self._get_action_impl = self._get_action
         if self.cudagraphs:
             warnings.warn(
                 "CUDA graphs for DQN are implemented experimentally and may not work as expected.",
                 stacklevel=2,
             )
-            self.update = torch.compile(self.update, mode=None)
-            self._get_action = torch.compile(
+            compiled_update: Any = torch.compile(self.update, mode=None)
+            compiled_get_action: Any = torch.compile(
                 self._get_action,
                 mode=None,
                 fullgraph=True,
             )
-            self.update = CudaGraphModule(self.update)
-            self._get_action = CudaGraphModule(self._get_action)
+            self._update_impl = CudaGraphModule(compiled_update)
+            self._get_action_impl = CudaGraphModule(compiled_get_action)
 
         # Register DQN network groups
         self.register_network_group(
@@ -211,44 +237,43 @@ class DQN(RLAlgorithm):
         self,
         obs: ObservationType,
         epsilon: float = 0.0,
-        action_mask: np.ndarray | None = None,
+        action_mask: ActionMaskInput = None,
         *args: Any,
         **kwargs: Any,
-    ) -> np.ndarray:
+    ) -> npt.NDArray:
         """Return the next action to take in the environment.
 
         :param obs: The current observation from the environment
-        :type obs: np.ndarray, dict[str, np.ndarray], tuple[np.ndarray]
+        :type obs: npt.NDArray, dict[str, npt.NDArray], tuple[npt.NDArray]
         :param epsilon: Probability of taking a random action for exploration, defaults to 0
         :type epsilon: float, optional
         :param action_mask: Mask of legal actions 1=legal 0=illegal, defaults to None
-        :type action_mask: numpy.ndarray, optional
+        :type action_mask: ActionMaskInput
         :return: Selected action(s) for the given observation(s)
         :rtype: numpy.ndarray
         """
         # Preprocess observations and convert inputs to torch tensors
         torch_obs = self.preprocess_observation(obs)
-        epsilon = torch.tensor(epsilon, device=self.device)
+        eps = torch.tensor(epsilon, device=self.device)
         if action_mask is not None:
-            # Need to stack if vectorized env
-            action_mask = (
-                np.stack(action_mask)
-                if action_mask.dtype == object or isinstance(action_mask, list)
-                else action_mask
+            mask = torch.as_tensor(
+                numpy_action_mask(action_mask),
+                device=self.device,
             )
-            action_mask = torch.as_tensor(action_mask, device=self.device)
         else:
-            if isinstance(torch_obs, dict):
+            if isinstance(torch_obs, torch.Tensor):
+                batch_size = torch_obs.size(0)
+            elif isinstance(torch_obs, TensorDict):
+                batch_size = torch_obs.batch_size[0]
+            elif isinstance(torch_obs, dict):
                 sample = next(iter(torch_obs.values()))
                 batch_size = sample.size(0)
-            elif isinstance(torch_obs, tuple):
-                batch_size = torch_obs[0].size(0)
             else:
-                batch_size = torch_obs.size(0)
+                batch_size = torch_obs[0].size(0)
 
-            action_mask = torch.ones((batch_size, self.action_dim), device=self.device)
+            mask = torch.ones((batch_size, self.action_dim), device=self.device)
 
-        action = self._get_action(torch_obs, epsilon, action_mask).cpu().numpy()
+        action = self._get_action_impl(torch_obs, eps, mask).cpu().numpy()
 
         if self.training:
             self.metrics.log_histogram("action_dist", action)
@@ -269,8 +294,8 @@ class DQN(RLAlgorithm):
         :type obs: torch.Tensor, dict[str, torch.Tensor], tuple[torch.Tensor]
         :param epsilon: Probability of taking a random action for exploration, defaults to 0
         :type epsilon: float, optional
-        :param action_mask: Mask of legal actions 1=legal 0=illegal, defaults to None
-        :type action_mask: numpy.ndarray, optional
+        :param action_mask: Mask of legal actions 1=legal 0=illegal
+        :type action_mask: torch.Tensor
         :return: Selected action(s) as tensor
         :rtype: torch.Tensor
         """
@@ -328,7 +353,7 @@ class DQN(RLAlgorithm):
                     self.actor_target(next_obs).gather(dim=1, index=q_idx).detach()
                 )
             else:
-                q_target = self.actor_target(next_obs).max(axis=1)[0].unsqueeze(1)
+                q_target = self.actor_target(next_obs).max(dim=1)[0].unsqueeze(1)
 
             # target, if terminal then y_j = rewards
             y_j = rewards + self.gamma * q_target * (1 - dones)
@@ -350,31 +375,31 @@ class DQN(RLAlgorithm):
         self.optimizer.step()
         return loss.detach()
 
-    def learn(self, experiences: ExperiencesType) -> float:
+    def learn(self, experiences: TensorDict) -> float:
         """Update agent network parameters to learn from experiences.
 
-        :param experiences: TensorDict of batched observations, actions, rewards, next_observations, dones in that order.
-        :type experiences: tensordict.TensorDict
+        :param experiences: Batch of observations, actions, rewards, next
+            observations and dones sampled from an off-policy replay buffer.
+        :type experiences: TensorDict
         :return: Loss value from the learning step
         :rtype: float
         """
-        obs = experiences["obs"]
-        actions = experiences["action"]
-        rewards = experiences["reward"]
-        next_obs = experiences["next_obs"]
-        dones = experiences["done"]
+        batch: ReplayBatch = ReplayBatch.from_tensordict(experiences)
+        actions = batch.action
+        rewards = batch.reward
+        dones = batch.done
 
-        obs = self.preprocess_observation(obs)
-        next_obs = self.preprocess_observation(next_obs)
+        obs = self.preprocess_observation(batch.obs)
+        next_obs = self.preprocess_observation(batch.next_obs)
 
-        loss = self.update(obs, actions, rewards, next_obs, dones)
+        loss = self._update_impl(obs, actions, rewards, next_obs, dones)
 
         # soft update target network
         self.soft_update()
 
-        loss = loss.item()
-        self.metrics.log("loss", loss)
-        return loss
+        loss_value = loss.item()
+        self.metrics.log("loss", loss_value)
+        return loss_value
 
     def soft_update(self) -> None:
         """Soft updates target network."""
@@ -389,14 +414,14 @@ class DQN(RLAlgorithm):
 
     def test(
         self,
-        env: GymEnvType,
+        env: gym.vector.VectorEnv,
         max_steps: int | None = None,
         loop: int = 1,
     ) -> float:
         """Return mean test score of agent in environment with epsilon-greedy policy.
 
-        :param env: The environment to be tested in
-        :type env: Gym-style environment
+        :param env: The vectorized environment to be tested in
+        :type env: gym.vector.VectorEnv
         :param max_steps: Maximum number of testing steps, defaults to None
         :type max_steps: int, optional
         :param loop: Number of testing loops/episodes to complete. The returned score is the mean over these tests. Defaults to 1
@@ -427,6 +452,6 @@ class DQN(RLAlgorithm):
                             completed_episode_scores[idx] = scores[idx]
                             finished[idx] = 1
                 rewards.append(np.mean(completed_episode_scores))
-        mean_fit = np.mean(rewards)
+        mean_fit = float(np.mean(rewards))
         self.metrics.add_fitness(mean_fit)
         return mean_fit

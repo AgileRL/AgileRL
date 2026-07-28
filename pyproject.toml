@@ -1,6 +1,6 @@
 [project]
 name = "agilerl"
-version = "2.8.2"
+version = "2.8.3"
 description = "AgileRL is a deep reinforcement learning library focused on improving RL development through RLOps."
 authors = [{ name = "Nick Ustaran-Anderegg", email = "dev@agilerl.com" }]
 license = "Apache-2.0"
@@ -52,14 +52,14 @@ llm = [
     "bitsandbytes==0.49.2; sys_platform == 'linux'",
     "datasets==5.0.0",
     "deepspeed>=0.19.1; sys_platform == 'linux'",
-    "liger-kernel==0.8.0; sys_platform == 'linux'",
+    "liger-kernel==0.8.1; sys_platform == 'linux'",
     "peft==0.19.1",
     # transformers does not depend on sentencepiece, so checkpoints with a
     # sentencepiece tokenizer (Granite, Llama-2 lineage, older Gemma) fail to
     # load with "Couldn't instantiate the backend tokenizer".
     "sentencepiece>=0.2.0",
-    "transformers==5.11.0",
-    "vllm>=0.23; sys_platform == 'linux'",
+    "transformers==5.14.1",
+    "vllm>=0.24; sys_platform == 'linux'",
 ]
 arena = [
     "agilerl-arena==0.1.1",
@@ -70,14 +70,14 @@ all = [
     "bitsandbytes==0.49.2; sys_platform == 'linux'",
     "datasets==5.0.0",
     "deepspeed>=0.19.1; sys_platform == 'linux'",
-    "liger-kernel==0.8.0; sys_platform == 'linux'",
+    "liger-kernel==0.8.1; sys_platform == 'linux'",
     "peft==0.19.1",
     # transformers does not depend on sentencepiece, so checkpoints with a
     # sentencepiece tokenizer (Granite, Llama-2 lineage, older Gemma) fail to
     # load with "Couldn't instantiate the backend tokenizer".
     "sentencepiece>=0.2.0",
-    "transformers==5.11.0",
-    "vllm>=0.23; sys_platform == 'linux'",
+    "transformers==5.14.1",
+    "vllm>=0.24; sys_platform == 'linux'",
     "agilerl-arena==0.1.1",
 ]
 
@@ -191,10 +191,51 @@ exclude = ["agilerl/arena"]
 include = ["agilerl", "README.md", "LICENSE", "pyproject.toml"]
 exclude = ["agilerl-arena", "agilerl/arena"]
 
+# ---------------------------------------------------------------------------
+# ty — static type checking (run with `just typecheck`)
+# ---------------------------------------------------------------------------
+# Strict: the whole of agilerl/ is checked and blocks CI. `agilerl/arena` is the
+# gitignored dev symlink into agilerl-arena/agilerl/arena; `just typecheck`
+# creates it and passes both paths explicitly (ty does not traverse symlinked
+# directories during discovery).
+
+[tool.ty.environment]
+python-version = "3.13"
+
+[tool.ty.src]
+include = ["agilerl", "agilerl/arena"]
+
+# Imports that only resolve on some platforms/extras: vllm, deepspeed and
+# liger_kernel are Linux-only; Box2D needs the box2d extra. CI (Linux,
+# --extra all) resolves them; macOS/Windows checkouts cannot.
+[[tool.ty.overrides]]
+include = [
+    "agilerl/algorithms/core/base.py",
+    "agilerl/algorithms/core/llm_ops/fused_loss.py",
+    "agilerl/algorithms/grpo.py",
+    "agilerl/algorithms/sft.py",
+    "agilerl/utils/llm_utils.py",
+    "agilerl/utils/utils.py",
+]
+
+[tool.ty.overrides.rules]
+unresolved-import = "ignore"
+# Suppressions these files need on Linux (where vllm/liger/deepspeed resolve
+# and their base classes become checkable) are necessarily unused elsewhere.
+unused-ignore-comment = "ignore"
+
 [tool.ruff]
 target-version = "py310"
 line-length = 88
 extend-exclude = ["tests/assets/tiny_llm", "docs/_static/examples"]
+
+[tool.ruff.lint.isort]
+# Pin first-party classification: `agilerl` is our own package in both
+# distributions. Without this, isort infers it from the filesystem and the
+# gitignored agilerl/arena dev symlink (created by `just typecheck`) flips
+# arena imports between first- and third-party, so local runs and
+# pre-commit.ci would reorder each other's imports indefinitely.
+known-first-party = ["agilerl"]
 
 [tool.ruff.lint]
 select = ["ALL"]
@@ -204,7 +245,6 @@ ignore = [
     "D203", "D213",  # Specific docstring conflicts
     "D100", "D107",  # Missing docstrings (module/init)
     "ARG",           # All unused argument rules (ARG002, 004, etc.)
-    "ANN",           # All annotation rules (ANN002, 003, 401)
     "FBT",           # All boolean trap rules (FBT001, 002, 003)
     "PLR09",         # All "Too Many..." complexity rules (branches, args, returns)
     "C901",          # complexity
@@ -216,6 +256,11 @@ ignore = [
     "COM812",        # issues with ruff-format
     "PYI024",        # namedtuple issue
 ]
+
+[tool.ruff.lint.flake8-annotations]
+# `Any` is banned in annotations (ANN401), except for genuinely variadic
+# ``*args`` / ``**kwargs`` where a precise type isn't expressible.
+allow-star-arg-any = true
 
 [tool.ruff.lint.per-file-ignores]
 "{agilerl,agilerl-arena/agilerl,tests,agilerl-arena/tests}/**" = [
@@ -237,4 +282,10 @@ ignore = [
     "PIE790",        # unnecessary ...
     "PD011",         # .values -> .to_numpy()
 ]
+"{tests,agilerl-arena/tests}/**" = [
+    "ANN",           # test signatures don't need annotations
+]
 "{benchmarking,demos,tutorials}/**" = ["ALL"]
+".github/**" = [
+    "INP001",        # standalone CI scripts, not a package
+]

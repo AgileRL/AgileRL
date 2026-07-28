@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 """The hardcoded ``arena on-prem install`` / ``teardown`` Click commands."""
 
 from __future__ import annotations
@@ -5,6 +8,7 @@ from __future__ import annotations
 import logging
 
 import click
+
 from agilerl.arena.config import CommandConfig, arena_client
 from agilerl.arena.on_prem.installer import (
     run_on_prem_down,

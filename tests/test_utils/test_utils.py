@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 import copy
 from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, Mock, call, patch
@@ -939,7 +942,9 @@ class TestInitWandb:
             mock_wandb.init.assert_called_once()
             assert mock_wandb.init.call_args[1].get("tags") == ["test"]
 
-    def test_no_api_warns(self):
+    def test_no_api_warns(self, monkeypatch):
+        monkeypatch.delenv("WANDB_API_KEY", raising=False)
+
         class FakeWandb:
             def init(self, **kwargs):
                 pass
@@ -1000,6 +1005,17 @@ class TestInitLoggers:
         assert isinstance(loggers[0], TensorboardLogger)
         assert isinstance(loggers[1], CSVLogger)
         mock_sw.assert_called_once()
+
+    def test_csv_without_log_dir_raises(self):
+        with pytest.raises(ValueError, match="csv_log_dir must be provided"):
+            init_loggers(
+                algo="PPO",
+                env_name="CartPole-v1",
+                pbar=MagicMock(),
+                verbose=False,
+                csv=True,
+                csv_log_dir=None,
+            )
 
     def test_stdout_logger_receives_accelerator(self):
         """StdOutLogger must get the accelerator so non-main ranks skip prints

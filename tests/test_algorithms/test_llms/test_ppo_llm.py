@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 import gc
 import warnings
 from contextlib import contextmanager, nullcontext
@@ -404,7 +407,7 @@ class TestPPOInit:
             )
         ppo.clean_up()
 
-    def test_init_requires_max_output_or_max_model_len(self):
+    def test_init_rejects_output_tokens_not_less_than_model_len(self):
         actor = create_module(10, 8, 100, "cpu")
         lora = LoraConfig(
             r=4,
@@ -413,16 +416,14 @@ class TestPPOInit:
             task_type="CAUSAL_LM",
             modules_to_save=["summary"],
         )
-        with pytest.raises(
-            ValueError, match="Either max_output_tokens or max_model_len"
-        ):
+        with pytest.raises(ValueError, match="must be less than"):
             LLMPPO(
                 actor_network=actor,
                 pad_token_id=99,
                 pad_token="<pad>",
                 lora_config=lora,
-                max_output_tokens=None,
-                max_model_len=None,
+                max_output_tokens=32,
+                max_model_len=16,
                 wrap=False,
                 gradient_checkpointing=False,
             )
@@ -1224,6 +1225,14 @@ class TestPPOTest:
                 del full_completion_ids
                 return {}, 1.0, True, False, {}
 
+            def get_episode_data(self):
+                return (
+                    torch.ones(1, 4, dtype=torch.long),
+                    torch.ones(1, 3, dtype=torch.bool),
+                    torch.zeros(1, 3, dtype=torch.long),
+                    torch.tensor([1.0], dtype=torch.float32),
+                )
+
             def close(self):
                 return None
 
@@ -1265,6 +1274,14 @@ class TestPPOTest:
                 if self._step_count == 1:
                     return self.prompt_b, 0.5, False, False, {}
                 return {}, 1.0, True, False, {}
+
+            def get_episode_data(self):
+                return (
+                    torch.ones(1, 6, dtype=torch.long),
+                    torch.ones(1, 5, dtype=torch.bool),
+                    torch.zeros(1, 5, dtype=torch.long),
+                    torch.tensor([0.5, 1.0], dtype=torch.float32),
+                )
 
             def close(self):
                 return None

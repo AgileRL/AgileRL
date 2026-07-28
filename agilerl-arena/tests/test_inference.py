@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for arena.inference (agent, cache, serde)."""
 
 from __future__ import annotations
@@ -8,6 +11,7 @@ from unittest.mock import MagicMock, patch
 import httpx
 import numpy as np
 import pytest
+
 from agilerl.arena.exceptions import ArenaAuthError, ArenaInferenceError
 from agilerl.arena.inference import (
     Agent,
@@ -120,6 +124,10 @@ class TestGetBatchSize:
     def test_nested_dict_tuple(self):
         obs = {"a": (np.zeros((5, 3)),)}
         assert Agent.get_batch_size(obs) == 5
+
+    def test_none_leaf_raises(self):
+        with pytest.raises(ValueError, match="None observation"):
+            Agent.get_batch_size({"a": None})
 
 
 class TestBuildPayload:
@@ -497,6 +505,22 @@ class TestPredict:
         assert meta.inference_time_ms == 12.3
         sent = agent._http.request.call_args[1]["json"]
         assert sent == {"inputs": Agent.serialize(inputs, batched=False)}
+
+    def test_predict_rejects_null_results(self):
+        agent = self._make_agent_with_mock_http()
+        body = {
+            "results": None,
+            "batch_size": 1,
+            "inference_time_ms": 1.0,
+            "success": True,
+        }
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = body
+        agent._http.request.return_value = mock_resp
+
+        with pytest.raises(ArenaInferenceError, match="no results"):
+            agent.predict(np.array([1.0]))
 
 
 class TestGenerate:
@@ -911,6 +935,15 @@ class TestAgentHttpHelpers:
                 {"action": Agent.serialize(np.array([1.0]), batched=False)},
                 batched=False,
                 multi_agent=True,
+                recurrent=False,
+            )
+
+    def test_parse_get_action_rejects_null_single_agent_action(self):
+        with pytest.raises(ArenaInferenceError, match="no action"):
+            Agent._parse_get_action_response(
+                {"action": None},
+                batched=False,
+                multi_agent=False,
                 recurrent=False,
             )
 

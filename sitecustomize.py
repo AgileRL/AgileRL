@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 """Sitecustomize module to enable coverage tracking in subprocesses.
 
 This file is automatically loaded by Python when the repository root is in PYTHONPATH.

@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 import warnings
 from enum import Enum
 from importlib.metadata import PackageNotFoundError, metadata, version
@@ -28,8 +31,7 @@ warnings.filterwarnings(
 
 def get_extra_dependencies(package: str, extra: str) -> list[str]:
     requires = metadata(package).get_all("Requires-Dist") or []
-    marker_environment = default_environment()
-    marker_environment["extra"] = extra
+    marker_environment: dict[str, str] = {**default_environment(), "extra": extra}
     deps = []
     for req in requires:
         r = Requirement(req)

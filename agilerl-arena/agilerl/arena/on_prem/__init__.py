@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 """On-prem worker cluster install/teardown for the Arena CLI.
 
 The capability-gated command groups live in :mod:`group`, the Click commands in

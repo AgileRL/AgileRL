@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 import torch
 
 from agilerl.modules.custom_components import GumbelSoftmax

@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for TorchDistribution and distribution dispatch (torch-primitive based)."""
 
 import numpy as np
@@ -242,7 +245,12 @@ class TestEvolvableDistributionForward:
         ed = EvolvableDistribution(action_space=action_space, network=net)
         latent = torch.randn(2, 4)
         bad_mask = [np.array([1, 0, 1]), np.array([1, 0])]  # non-uniform lengths
-        with pytest.raises(ValueError, match="expected sequence of length 3 at dim 1"):
+        # Ragged masks fail at stack time; the exact message depends on whether
+        # numpy or torch does the stacking, so match either.
+        with pytest.raises(
+            ValueError,
+            match=r"same shape|expected sequence of length",
+        ):
             ed(latent, action_mask=bad_mask)
 
 

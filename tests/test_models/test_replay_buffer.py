@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for ReplayBufferSpec, NStepBufferArgs, and PerBufferArgs.
 
 Covers Pydantic validation, field defaults, aliases, and ``init_buffer``

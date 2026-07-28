@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for arena.utils — upload helpers and filename parsing."""
 
 from __future__ import annotations
@@ -7,6 +10,7 @@ import tarfile
 from pathlib import Path
 
 import pytest
+
 from agilerl.arena.exceptions import ArenaFileNotFoundError
 from agilerl.arena.utils import (
     discover_env_sidecars,

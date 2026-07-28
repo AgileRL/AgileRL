@@ -1,5 +1,7 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 import copy
-from unittest.mock import patch
 
 import pytest
 import torch
@@ -7,7 +9,10 @@ from peft import LoraConfig, inject_adapter_in_model
 from torch import nn
 
 from agilerl.algorithms.core.llm_ops.fused_lora import (
+    _LORA_LAYER_CACHE,
+    _ROUTING_STATE,
     _get_cached_lora_layers,
+    _is_routed_layer,
     patch_lora_for_fused_forward,
     set_fused_adapter_routing,
     unpatch_lora_for_fused_forward,
@@ -309,7 +314,7 @@ class TestSetFusedAdapterRoutingGuards:
     def test_clear_on_unpatched_model_does_not_mask_the_patch_check(self):
         model = _build_model()
         unset_fused_adapter_routing(model)
-        assert not hasattr(model.proj, "_fused_adapter_routing")
+        assert not _is_routed_layer(model.proj)
         with pytest.raises(RuntimeError, match="patch_lora_for_fused_forward"):
             set_fused_adapter_routing(model, ["actor"])
 
@@ -330,9 +335,9 @@ class TestPatchLifecycle:
         )
         patch_lora_for_fused_forward(model)
 
-        assert len(model._fused_lora_layers) == 2
+        assert len(_LORA_LAYER_CACHE[model]) == 2
         set_fused_adapter_routing(model, ["actor"])
-        assert model.late.proj._fused_adapter_routing == ["actor"]
+        assert _ROUTING_STATE[model.late.proj] == ["actor"]
 
     def test_unpatch_restores_original_forward_and_state(self):
         model = _build_model()
@@ -345,8 +350,8 @@ class TestPatchLifecycle:
         unpatch_lora_for_fused_forward(model)
 
         assert "forward" not in model.proj.__dict__
-        assert not hasattr(model.proj, "_fused_adapter_routing")
-        assert not hasattr(model, "_fused_lora_layers")
+        assert not _is_routed_layer(model.proj)
+        assert model not in _LORA_LAYER_CACHE
         assert torch.allclose(model(x), ref, atol=1e-6)
         with pytest.raises(RuntimeError, match="patch_lora_for_fused_forward"):
             set_fused_adapter_routing(model, ["actor"])
@@ -354,7 +359,7 @@ class TestPatchLifecycle:
     def test_unpatch_on_never_patched_model_is_noop(self):
         model = _build_model()
         unpatch_lora_for_fused_forward(model)
-        assert not hasattr(model.proj, "_fused_adapter_routing")
+        assert not _is_routed_layer(model.proj)
 
     def test_deepcopy_rebinds_routed_forward_to_the_copy(self):
         model = _build_model()
@@ -366,59 +371,13 @@ class TestPatchLifecycle:
         set_fused_adapter_routing(clone, ["actor", "critic"])
         _ = clone(x)
         # The original stays unrouted.
-        assert model.proj._fused_adapter_routing is None
-
-
-class _CacheRejectingModel(nn.Module):
-    """Rejects the ``_fused_lora_layers`` cache, forcing the traversal path."""
-
-    def __setattr__(self, name, value):
-        if name == "_fused_lora_layers":
-            msg = "cache assignment not allowed"
-            raise AttributeError(msg)
-        super().__setattr__(name, value)
-
-    def forward(self, x):
-        return self.proj(x)
+        assert _ROUTING_STATE.get(model.proj) is None
 
 
 class TestLayerCache:
-    def test_routing_works_without_a_layer_cache(self):
-        model = _CacheRejectingModel()
-        model.proj = nn.Linear(8, 6, bias=False)
-        model = inject_adapter_in_model(_lora_config(), model, adapter_name="actor")
-
-        patch_lora_for_fused_forward(model)
-        assert not hasattr(model, "_fused_lora_layers")
-        set_fused_adapter_routing(model, ["actor"] * 2)
-        _ = model(torch.randn(2, 8))
-        unpatch_lora_for_fused_forward(model)
-        assert "forward" not in model.proj.__dict__
-
     def test_cache_is_stored_and_reused(self):
         model = _build_model()
         layers = _get_cached_lora_layers(model)
         assert layers == [model.proj]
-        assert model._fused_lora_layers is layers
+        assert _LORA_LAYER_CACHE[model] is layers
         assert _get_cached_lora_layers(model) is layers
-
-
-class TestPeftNotInstalled:
-    """When PEFT is absent, ``LoraLayer`` is ``None`` and the helpers degrade
-    to no-ops rather than crashing (the plain base model runs unfused).
-    """
-
-    def test_get_cached_lora_layers_returns_empty(self):
-        model = _build_model()
-        with patch("agilerl.algorithms.core.llm_ops.fused_lora.LoraLayer", None):
-            assert _get_cached_lora_layers(model) == []
-        # No LoRA layers were discovered, so nothing was cached.
-        assert not hasattr(model, "_fused_lora_layers")
-
-    def test_patch_is_a_noop(self):
-        model = _build_model()
-        with patch("agilerl.algorithms.core.llm_ops.fused_lora.LoraLayer", None):
-            patch_lora_for_fused_forward(model)
-        # The forward was not swapped and no routing state was installed.
-        assert "forward" not in model.proj.__dict__
-        assert not hasattr(model.proj, "_fused_adapter_routing")

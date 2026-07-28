@@ -1,12 +1,15 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 import copy
 import logging
 import warnings
 from collections import OrderedDict
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from functools import wraps
-from typing import Any, TypeVar
+from typing import Any, TypeGuard, TypeVar
 
-import fastrand
+import fastrand  # ty: ignore[unresolved-import] — C extension without type stubs
 import numpy as np
 import torch
 from accelerate import Accelerator
@@ -20,19 +23,21 @@ from agilerl.algorithms.core import (
     RLAlgorithm,
 )
 from agilerl.modules import EvolvableModule, ModuleDict
-from agilerl.typing import (
-    EvolvableNetworkType,
-    MutationMethod,
-    MutationReturnType,
-)
+from agilerl.protocols import EvolvableAlgorithmProtocol
+from agilerl.typing import MutationReturn
 from agilerl.utils.algo_utils import remove_compile_prefix
 from agilerl.utils.evolvable_networks import compile_model
 from agilerl.wrappers.agent import AgentWrapper
 
-IndividualType = TypeVar("IndividualType", bound=EvolvableAlgorithm)
-MutationsType = TypeVar("MutationsType", bound="Mutations")
-PopulationType = list[IndividualType]
+AgentT = TypeVar("AgentT", bound=EvolvableAlgorithmProtocol)
+IndividualT = TypeVar("IndividualT", bound=EvolvableAlgorithm)
+SingleAgentT = TypeVar("SingleAgentT", bound=RLAlgorithm)
+MultiAgentT = TypeVar("MultiAgentT", bound=MultiAgentRLAlgorithm)
 BanditAlgorithm = NeuralUCB | NeuralTS
+
+# A bound mutation method of `Mutations`: maps an individual to a mutated
+# individual of the same type.
+MutationFunc = Callable[[IndividualT], IndividualT]
 
 torch._dynamo.config.cache_size_limit = 64
 torch._logging.set_logs(dynamo=logging.FATAL)
@@ -59,113 +64,144 @@ def set_global_seed(seed: int | None) -> None:
 
 
 def get_offspring_eval_modules(
-    individual: IndividualType,
-) -> tuple[dict[str, EvolvableNetworkType], dict[str, EvolvableNetworkType]]:
+    individual: EvolvableAlgorithm,
+) -> tuple[dict[str, EvolvableModule], dict[str, EvolvableModule]]:
     """Get the offsprings of all of the evaluation modules in the individual.
 
     :param individual: The individual to inspect
     :type individual: EvolvableAlgorithm
 
     :return: Tuple of offspring policy and the rest of the evaluation modules
-    :rtype: tuple[dict[str, NetworkType], dict[str, NetworkType]]
+    :rtype: tuple[dict[str, EvolvableModule], dict[str, EvolvableModule]]
     """
     registry = individual.registry
 
-    offspring_modules = {}
-    offspring_policy = {}
+    offspring_modules: dict[str, EvolvableModule] = {}
+    offspring_policy: dict[str, EvolvableModule] = {}
     for group in registry.groups:
-        eval_module: EvolvableNetworkType = getattr(individual, group.eval_network)
+        eval_name = group.eval_network_name()
+        eval_module: EvolvableModule = getattr(individual, eval_name)
 
         # Clone the offspring prior to applying mutations
         offspring = eval_module.clone()
         if group.policy:
-            offspring_policy[group.eval_network] = offspring
+            offspring_policy[eval_name] = offspring
         else:
-            offspring_modules[group.eval_network] = offspring
+            offspring_modules[eval_name] = offspring
 
     return offspring_policy, offspring_modules
 
 
-def get_exp_layer(offspring: EvolvableModule) -> nn.Module:
+def _is_module_dict(
+    module: EvolvableModule,
+) -> TypeGuard["ModuleDict[EvolvableModule]"]:
+    """Narrow an evaluation module to its per-agent ``ModuleDict`` mapping.
+
+    :param module: The evaluation module to check
+    :type module: EvolvableModule
+    :return: Whether the module is a per-agent ``ModuleDict``
+    :rtype: TypeGuard[ModuleDict[EvolvableModule]]
+    """
+    return isinstance(module, ModuleDict)
+
+
+def _as_module_dict(module: EvolvableModule) -> "ModuleDict[EvolvableModule]":
+    """Narrow a multi-agent evaluation module to its per-agent mapping.
+
+    :param module: The evaluation module to reinterpret
+    :type module: EvolvableModule
+    :return: The module as a mapping of per-agent modules
+    :rtype: ModuleDict[EvolvableModule]
+    """
+    assert _is_module_dict(module), (
+        "Multi-agent mutation requires a per-agent ModuleDict container."
+    )
+    return module
+
+
+def get_exp_layer(offspring: EvolvableModule) -> nn.Linear:
     """Get the output layer of different types of offsprings for bandit algorithms.
-    Returns None if algorithm is not a bandit algorithm.
 
     :param offspring: The offspring to inspect
     :type offspring: EvolvableModule
 
     :return: The output layer of the offspring
-    :rtype: nn.Module
+    :rtype: nn.Linear
     """
-    if isinstance(offspring, EvolvableModule):
-        exp_layer = offspring.get_output_dense()
-    else:
+    if not isinstance(offspring, EvolvableModule):
         msg = f"Bandit algorithm architecture {type(offspring)} not supported."
+        raise TypeError(msg)
+
+    exp_layer = offspring.get_output_dense()
+    if not isinstance(exp_layer, nn.Linear):
+        msg = (
+            f"Bandit algorithm architecture {type(offspring)} not supported: expected "
+            f"a linear output layer, found {type(exp_layer)}."
+        )
         raise TypeError(msg)
 
     return exp_layer
 
 
 def reinit_shared_networks(
-    mutation_func: Any = None,
-) -> Callable[..., Any]:
+    mutation_func: Callable[["Mutations", IndividualT], IndividualT],
+) -> Callable[["Mutations", IndividualT], IndividualT]:
     """Reinitialize shared networks after architecture and parameter mutations (decorator).
 
     :param mutation_func: The mutation function to decorate
-    :type mutation_func: Callable[[IndividualType], IndividualType] | None
-    :return: The decorated mutation function or decorator
-    :rtype: Callable
+    :type mutation_func: Callable[[Mutations, IndividualT], IndividualT]
+    :return: The decorated mutation function
+    :rtype: Callable[[Mutations, IndividualT], IndividualT]
     """
 
-    def decorator(func: MutationMethod) -> Callable:
-        @wraps(func)
-        def wrapper(self: MutationsType, individual: IndividualType) -> IndividualType:
-            # Call the original mutation function
-            individual = func(self, individual)
+    @wraps(mutation_func)
+    def wrapper(self: "Mutations", individual: IndividualT) -> IndividualT:
+        # Call the original mutation function
+        individual = mutation_func(self, individual)
 
-            torch._dynamo.reset()  # NOTE: Should we do this?
+        torch._dynamo.reset()  # NOTE: Should we do this?
 
-            # Only proceed if mutation was actually applied
-            if individual.mut == "None":
-                return individual
-
-            # Recompile individual if necessary
-            compiled_model = individual.torch_compiler is not None
-            if compiled_model:
-                # Set dynamo config before recompilation to avoid guard failures
-                torch._dynamo.config.force_parameter_static_shapes = False
-                individual.recompile()
-
-            # Reinitialize shared networks to mutated evaluation networks
-            for net_group in individual.registry.groups:
-                if net_group.shared_networks is not None:
-                    for shared_name in net_group.shared_networks:
-                        eval_offspring: EvolvableNetworkType = getattr(
-                            individual,
-                            net_group.eval_network,
-                        )
-                        # Reinitialize shared with frozen weights due to
-                        # potential mutation in architecture
-                        ind_shared = self._reinit_from_mutated(
-                            eval_offspring,
-                            remove_prefix=compiled_model,
-                        )
-                        if self.accelerator is None:
-                            ind_shared = ind_shared.to(self.device)
-
-                        if compiled_model:
-                            torch._dynamo.config.force_parameter_static_shapes = False
-                            ind_shared = compile_model(
-                                ind_shared,
-                                individual.torch_compiler,
-                            )
-
-                        setattr(individual, shared_name, ind_shared)
-
+        # Only proceed if mutation was actually applied
+        if individual.mut == "None":
             return individual
 
-        return wrapper
+        # Recompile individual if necessary
+        compiled_model = individual.torch_compiler is not None
+        if compiled_model:
+            # Set dynamo config before recompilation to avoid guard failures.
+            # The ignores below are needed because dynamo's config module infers
+            # its attribute types from the default values, so they read as literals.
+            torch._dynamo.config.force_parameter_static_shapes = False  # ty: ignore[invalid-assignment]
+            individual.recompile()
 
-    return decorator(mutation_func)
+        # Reinitialize shared networks to mutated evaluation networks
+        for net_group in individual.registry.groups:
+            for shared_name in net_group.shared_network_names():
+                eval_offspring: EvolvableModule = getattr(
+                    individual,
+                    net_group.eval_network_name(),
+                )
+                # Reinitialize shared with frozen weights due to
+                # potential mutation in architecture
+                ind_shared: nn.Module = self._reinit_from_mutated(
+                    eval_offspring,
+                    remove_prefix=compiled_model,
+                )
+                if self.accelerator is None:
+                    ind_shared = ind_shared.to(self.device)
+
+                if compiled_model:
+                    torch._dynamo.config.force_parameter_static_shapes = False  # ty: ignore[invalid-assignment]
+                    ind_shared = compile_model(
+                        ind_shared,
+                        individual.torch_compiler,
+                    )
+
+                setattr(individual, shared_name, ind_shared)
+
+        return individual
+
+    return wrapper
 
 
 class Mutations:
@@ -314,9 +350,9 @@ class Mutations:
 
     def mutation(
         self,
-        population: PopulationType,
+        population: list[AgentT],
         pre_training_mut: bool = False,
-    ) -> PopulationType:
+    ) -> list[AgentT]:
         """Return a mutated population of agents. See :ref:`evo_hyperparam_opt` for more details.
 
         :param population: Population of agents
@@ -337,18 +373,21 @@ class Mutations:
 
         # Randomly choose mutation for each agent in population from options with
         # relative probabilities
-        mutation_choice: list[MutationMethod] = self.rng.choice(
-            mutation_options,
+        sampled_indices = self.rng.choice(
+            len(mutation_options),
             len(population),
             p=mutation_proba,
         )
+        mutation_choice: list[MutationFunc[Any]] = [
+            mutation_options[int(index)] for index in sampled_indices
+        ]
 
         # If not mutating elite member of population (first in list from tournament selection),
         # set this as the first mutation choice
         if not self.mutate_elite:
             mutation_choice[0] = self.no_mutation
 
-        mutated_population = []
+        mutated_population: list[AgentT] = []
         for mutation, individual in zip(mutation_choice, population, strict=False):
             wrapped_ind = isinstance(individual, AgentWrapper)
             agent = individual.agent if wrapped_ind else individual
@@ -365,7 +404,7 @@ class Mutations:
 
         return mutated_population
 
-    def no_mutation(self, individual: IndividualType) -> IndividualType:
+    def no_mutation(self, individual: IndividualT) -> IndividualT:
         """Return individual from population without mutation.
 
         :param individual: Individual agent from population
@@ -375,7 +414,7 @@ class Mutations:
         return individual
 
     @reinit_shared_networks
-    def architecture_mutate(self, individual: IndividualType) -> IndividualType:
+    def architecture_mutate(self, individual: IndividualT) -> IndividualT:
         """Perform a random mutation to the architecture of the policy network of an agent. The way in
         which we apply an architecture mutation to single and multi-agent RL algorithms inherently differs
         given the nested nature of the networks in the latter.
@@ -414,7 +453,7 @@ class Mutations:
 
         return individual
 
-    def rl_hyperparam_mutation(self, individual: IndividualType) -> IndividualType:
+    def rl_hyperparam_mutation(self, individual: IndividualT) -> IndividualT:
         """Perform a random mutation of a learning hyperparameter of an agent. To do this, sample a hyperparameter from those
         specified through the :class:`HyperparameterConfig <agilerl.algorithms.core.registry.HyperparameterConfig>`
         passed during initialization of the agent. The hyperparameter is then mutated and the optimizer is reinitialized if the
@@ -458,7 +497,7 @@ class Mutations:
 
     # TODO: Activation mutations should really be integrated as architecture mutations
     @reinit_shared_networks
-    def activation_mutation(self, individual: IndividualType) -> IndividualType:
+    def activation_mutation(self, individual: IndividualT) -> IndividualT:
         """Perform a random mutation of the activation layer of the evaluation networks of an agent.
 
         .. note::
@@ -493,10 +532,8 @@ class Mutations:
         registry = individual.registry
         no_activation = False
         for network_group in registry.groups:
-            eval_module: EvolvableNetworkType = getattr(
-                individual,
-                network_group.eval_network,
-            )
+            eval_name = network_group.eval_network_name()
+            eval_module: EvolvableModule = getattr(individual, eval_name)
 
             if eval_module.activation is None:
                 no_activation = True
@@ -517,13 +554,13 @@ class Mutations:
             if isinstance(individual, (NeuralTS, NeuralUCB)):
                 individual.exp_layer = get_exp_layer(eval_module)
 
-            setattr(individual, network_group.eval_network, eval_module)
+            setattr(individual, eval_name, eval_module)
 
         individual.reinit_optimizers()  # Reinitialize optimizer
         individual.mut = "act" if not no_activation else "None"
         return individual
 
-    def parameter_mutation(self, individual: IndividualType) -> IndividualType:
+    def parameter_mutation(self, individual: IndividualT) -> IndividualT:
         """Perform a random mutation to the weights of the policy network of an agent through
         the addition of Gaussian noise.
 
@@ -549,11 +586,16 @@ class Mutations:
         # We only apply parameter mutations to the evaluation policy network
         # (i.e. the network used to select actions)
         policy_group = registry.policy(return_group=True)
-        offspring_policy: EvolvableNetworkType = getattr(
-            individual,
-            policy_group.eval_network,
-        )
-        if isinstance(offspring_policy, ModuleDict):
+        if policy_group is None:
+            msg = (
+                f"No policy network group registered for {individual.__class__.__name__}. "
+                "Please register one of the network groups with 'policy=True'."
+            )
+            raise MutationError(msg)
+
+        policy_name = policy_group.eval_network_name()
+        offspring_policy: EvolvableModule = getattr(individual, policy_name)
+        if _is_module_dict(offspring_policy):
             for agent_id, module in offspring_policy.items():
                 offspring_policy[agent_id] = self._gaussian_parameter_mutation(module)
         else:
@@ -561,19 +603,18 @@ class Mutations:
 
         self._to_device_and_set_individual(
             individual,
-            policy_group.eval_network,
+            policy_name,
             offspring_policy,
         )
 
         # Load state dicts for shared networks
-        if policy_group.shared_networks is not None:
-            for shared in policy_group.shared_networks:
-                offspring_shared: EvolvableNetworkType = getattr(individual, shared)
-                offspring_shared.load_state_dict(
-                    offspring_policy.state_dict(),
-                    strict=False,
-                )
-                self._to_device_and_set_individual(individual, shared, offspring_shared)
+        for shared in policy_group.shared_network_names():
+            offspring_shared: EvolvableModule = getattr(individual, shared)
+            offspring_shared.load_state_dict(
+                offspring_policy.state_dict(),
+                strict=False,
+            )
+            self._to_device_and_set_individual(individual, shared, offspring_shared)
 
         individual.reinit_optimizers()  # Reinitialize optimizer
         individual.mut = "param"
@@ -583,44 +624,48 @@ class Mutations:
     def _get_mutations_options(
         self,
         pretraining: bool = False,
-    ) -> tuple[list[Callable], list[float]]:
+    ) -> tuple[list[MutationFunc[Any]], list[float]]:
         """Get the mutation options and probabilities for the given mutation
         configuration.
 
         :param pretraining: Boolean flag indicating if the mutation is before the training loop
         :type pretraining: bool
         :return: Mutation functions and their respective relative probabilities
-        :rtype: tuple[list[Callable], list[float]]
+        :rtype: tuple[list[MutationFunc], list[float]]
         """
         # Create lists of possible mutation functions and their
-        # respective relative probabilities
-        mutation_options = [
-            (self.no_mutation, self.no_mut),
+        # respective relative probabilities. No mutation is never sampled
+        # during pre-training mutations.
+        weighted_options = (
+            (self.no_mutation, 0.0 if pretraining else self.no_mut),
             (self.architecture_mutate, self.architecture_mut),
             (self.parameter_mutation, self.parameters_mut),
             (self.activation_mutation, self.activation_mut),
             (self.rl_hyperparam_mutation, self.rl_hp_mut),
-        ]
+        )
 
-        if pretraining:
-            mutation_options[0] = (self.no_mutation, 0)
-
-        mutation_options = [(func, prob) for func, prob in mutation_options if prob > 0]
+        mutation_funcs: list[MutationFunc[Any]] = []
+        weights: list[float] = []
+        for func, prob in weighted_options:
+            if prob > 0:
+                mutation_funcs.append(func)
+                weights.append(prob)
 
         # This will really only happen when pretraining is True and user has set
         # all mutation probabilities to zero, hence we apply no mutation
-        if len(mutation_options) == 0:
-            mutation_options = [(self.no_mutation, 1)]
+        if not mutation_funcs:
+            mutation_funcs.append(self.no_mutation)
+            weights.append(1.0)
 
-        mutation_funcs, mutation_proba = zip(*mutation_options, strict=False)
-        mutation_proba = np.array(mutation_proba) / np.sum(mutation_proba)
+        total = sum(weights)
+        mutation_proba = [weight / total for weight in weights]
         return mutation_funcs, mutation_proba
 
     def _to_device_and_set_individual(
         self,
-        individual: IndividualType,
+        individual: EvolvableAlgorithm,
         name: str,
-        networks: EvolvableNetworkType,
+        networks: EvolvableModule,
     ) -> None:
         """Move networks to the device and assigns them back to the individual.
 
@@ -629,7 +674,7 @@ class Mutations:
         :param name: The name of the attribute to assign the networks to
         :type name: str
         :param networks: The networks to move to the device
-        :type networks: EvolvableNetworkType
+        :type networks: EvolvableModule
         """
         if self.accelerator is None:
             networks = networks.to(self.device)
@@ -660,31 +705,30 @@ class Mutations:
 
     def _reinit_from_mutated(
         self,
-        offspring: EvolvableNetworkType,
+        offspring: EvolvableModule,
         remove_prefix: bool = False,
-    ) -> EvolvableNetworkType:
+    ) -> EvolvableModule:
         """Reinitialize the mutated offspring with their state dictionary.
 
         :param offspring: The offspring to reinitialize
-        :type offspring: NetworkType
+        :type offspring: EvolvableModule
         :param remove_prefix: Whether to remove the prefix from the offspring
         :type remove_prefix: bool
 
         :return: The reinitialized offspring
-        :rtype: EvolvableNetworkType
+        :rtype: EvolvableModule
         """
-        if isinstance(offspring, ModuleDict):
+        ind_shared: EvolvableModule
+        if _is_module_dict(offspring):
             reinit_modules: dict[str, EvolvableModule] = OrderedDict()
-            for agent_id in offspring:
-                nested_offspring: EvolvableModule = offspring[agent_id]
+            for agent_id, nested_offspring in offspring.items():
                 reinit_modules[agent_id] = self._reinit_module(
                     nested_offspring,
                     nested_offspring.init_dict,
                 )
 
             state_dicts = {
-                agent_id: nested_offspring.state_dict()
-                for agent_id, nested_offspring in offspring.items()
+                agent_id: nested.state_dict() for agent_id, nested in offspring.items()
             }
             self._load_state_dicts(reinit_modules, state_dicts, remove_prefix)
 
@@ -697,16 +741,16 @@ class Mutations:
 
     def _load_state_dicts(
         self,
-        modules: ModuleDict[EvolvableModule],
-        state_dicts: dict[str, dict[str, Any]],
+        modules: Mapping[str, EvolvableModule],
+        state_dicts: Mapping[str, dict[str, Any]],
         remove_prefix: bool = False,
     ) -> None:
         """Load the state dictionaries for a multi-agent ModuleDict.
 
         :param modules: The modules to load the state dictionary into
-        :type modules: ModuleDict[EvolvableModule]
+        :type modules: Mapping[str, EvolvableModule]
         :param state_dicts: The state dictionary to load
-        :type state_dicts: dict[str, dict[str, Any]]
+        :type state_dicts: Mapping[str, dict[str, Any]]
         :param remove_prefix: Whether to remove the prefix from the state dictionary
         :type remove_prefix: bool
         """
@@ -810,10 +854,11 @@ class Mutations:
                 new_vals[mask_super] = current_vals[mask_super] + noise_super
 
             # Reset mutation: completely reset the weight using N(0, 1)
-            if mask_reset.sum() > 0:
+            num_reset = int(mask_reset.sum())
+            if num_reset > 0:
                 noise_reset = torch.normal(
-                    mean=torch.zeros(mask_reset.sum(), device=W.device),
-                    std=torch.ones(mask_reset.sum(), device=W.device),
+                    mean=torch.zeros(num_reset, device=W.device),
+                    std=torch.ones(num_reset, device=W.device),
                 )
                 new_vals[mask_reset] = noise_reset
 
@@ -837,7 +882,10 @@ class Mutations:
 
         return network
 
-    def _architecture_mutate_single(self, individual: RLAlgorithm) -> RLAlgorithm:
+    def _architecture_mutate_single(
+        self,
+        individual: SingleAgentT,
+    ) -> SingleAgentT:
         """Apply an architecture mutation to a single-agent RL algorithm. Since all of the
         networks in a single-agent algorithm share the same architecture (given there is
         only one observation space), we first sample a mutation method from the policy network
@@ -867,10 +915,10 @@ class Mutations:
             individual.mut = "None"
             return individual
 
-        # Sample mutation method from policy network
-        mut_method = policy_offspring.sample_mutation_method(
-            self.new_layer_prob,
-            self.rng,
+        # Sample mutation method from policy network. The sampled method is the
+        # attribute name of the mutation, drawn as a numpy string.
+        mut_method = str(
+            policy_offspring.sample_mutation_method(self.new_layer_prob, self.rng),
         )
 
         applied_mutation, mut_dict = self._apply_arch_mutation(
@@ -897,8 +945,8 @@ class Mutations:
 
     def _architecture_mutate_multi(
         self,
-        individual: MultiAgentRLAlgorithm,
-    ) -> MultiAgentRLAlgorithm:
+        individual: MultiAgentT,
+    ) -> MultiAgentT:
         """Apply an architecture mutation to a multi-agent RL algorithm. Since each agent has its own
         observation space, we can't generally apply the same architecture mutation to all sub-agents.
         Instead, we sample a sub-agent to perform the mutation on for the policy. We then iterate over
@@ -922,9 +970,9 @@ class Mutations:
         # We first extract and apply a mutation to the policy and then apply
         # the same mutation to the rest of the evaluation modules e.g. critics
         policy, offspring_evals = get_offspring_eval_modules(individual)
-        policy_name, policy_offspring = next(iter(policy.items()))
+        policy_name, policy_module = next(iter(policy.items()))
 
-        if not policy_offspring.mutation_methods:
+        if not policy_module.mutation_methods:
             warnings.warn(
                 "No mutation methods found for the policy network. Skipping architecture mutation. "
                 "We advise setting the probability of architecture mutations to zero when using non-evolvable networks.",
@@ -933,19 +981,18 @@ class Mutations:
             individual.mut = "None"
             return individual
 
-        # Sample mutation method from policy network
-        mut_method = policy_offspring.sample_mutation_method(
-            self.new_layer_prob,
-            self.rng,
+        # Sample mutation method from policy network.
+        mut_method = str(
+            policy_module.sample_mutation_method(self.new_layer_prob, self.rng),
         )
 
         # Apply the sampled method to the policy network (will only apply to one sub-agent)
         applied_mutation, mut_dict = self._apply_arch_mutation(
-            policy_offspring,
+            policy_module,
             mut_method,
         )
 
-        applied_mutations = []
+        applied_mutations: list[str] = []
         if applied_mutation is not None:
             split_mutation = applied_mutation.split(".")
             sampled_agent_id = split_mutation[0]
@@ -955,7 +1002,8 @@ class Mutations:
             sampled_agent_id = mut_method.split(".")[0]
             sampled_mutation = None
 
-        # Apply the sampled method to the sub-agents that share the same observation space
+        # Applying to the remaining sub-agents needs the per-agent mapping.
+        policy_offspring = _as_module_dict(policy_module)
         for agent_id, policy in policy_offspring.items():
             if agent_id == sampled_agent_id:
                 continue
@@ -975,11 +1023,13 @@ class Mutations:
         self._to_device_and_set_individual(individual, policy_name, policy_offspring)
 
         # Try to apply an analogous mutation to the rest of the evaluation modules
-        for name, offspring_eval in offspring_evals.items():
+        for name, eval_module in offspring_evals.items():
+            offspring_eval = _as_module_dict(eval_module)
+
             # Iterate over the agents in the offspring evaluation module
             for agent_id, agent_eval in offspring_eval.items():
                 # Iterate over the the agents whose policies were mutated
-                analogous_method = False
+                analogous_method: str | None = None
                 for mutated_agent in applied_mutations:
                     # Don't want to reapply the same method redundantly
                     if (
@@ -1023,21 +1073,21 @@ class Mutations:
 
     def _apply_arch_mutation(
         self,
-        network: EvolvableNetworkType,
+        network: EvolvableModule,
         mut_method: str | None,
-        applied_mut_dict: dict[str, Any] | None = None,
-    ) -> tuple[str | None, MutationReturnType]:
+        applied_mut_dict: MutationReturn | None = None,
+    ) -> tuple[str | None, MutationReturn]:
         """Apply the mutation method to networks and returns mutation data if needed.
 
         :param networks: The networks to apply the mutation to
-        :type networks: EvolvableNetworkType
+        :type networks: EvolvableModule
         :param mut_method: The mutation method to apply
         :type mut_method: str | None
         :param applied_mut_dict: The mutation dictionary, defaults to None
-        :type applied_mut_dict: dict[str, Any] | None, optional
+        :type applied_mut_dict: MutationReturn | None, optional
 
         :return: The mutation method name and the mutation dictionary
-        :rtype: tuple[str | None, MutationReturnType]
+        :rtype: tuple[str | None, MutationReturn]
         """
         if not isinstance(network, EvolvableModule):
             msg = (
@@ -1088,14 +1138,12 @@ class Mutations:
         :type old_exp_layer: nn.Module
         """
         if isinstance(offspring_actor, EvolvableModule):
-            exp_layer = offspring_actor.get_output_dense()
+            exp_layer = get_exp_layer(offspring_actor)
         else:
             msg = (
                 f"Bandit algorithm architecture {type(offspring_actor)} not supported."
             )
-            raise ValueError(
-                msg,
-            )
+            raise ValueError(msg)
 
         individual.numel = sum(
             w.numel() for w in exp_layer.parameters() if w.requires_grad
@@ -1162,6 +1210,8 @@ class Mutations:
             for i in to_add:
                 new_sigma_inv[i, i] = individual.lamb
 
+        # Bandit actors always expose a linear output layer (asserted where
+        # the algorithm first resolves it).
         individual.exp_layer = exp_layer
         individual.sigma_inv = torch.from_numpy(new_sigma_inv).to(
             (
@@ -1173,7 +1223,7 @@ class Mutations:
 
     def _find_analogous_mutation(
         self,
-        sampled_mutation: str,
+        sampled_mutation: str | None,
         available_methods: list[str],
         policy_agent: str,
     ) -> str | None:
@@ -1182,7 +1232,7 @@ class Mutations:
         Tries to match based on bottom-level method and agent ID.
 
         :param sampled_mutation: The mutation method that was sampled (e.g., 'encoder.add_channel')
-        :type sampled_mutation: str
+        :type sampled_mutation: str | None
         :param available_methods: List of available mutation methods
         :type available_methods: list[str]
         :param policy_agent: The agent ID to match (e.g., 'agent_0')

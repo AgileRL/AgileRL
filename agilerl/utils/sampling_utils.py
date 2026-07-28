@@ -1,9 +1,13 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 from collections.abc import Callable
 from typing import Any
 
-import numpy as np
 import torch
 import torch.nn.functional as F
+
+from agilerl.typing import PastKeyValues
 
 
 def select_batch_idxs(x: torch.Tensor, idxs: torch.Tensor) -> torch.Tensor:
@@ -19,15 +23,15 @@ def select_batch_idxs(x: torch.Tensor, idxs: torch.Tensor) -> torch.Tensor:
 
 def map_all_kvs(
     f: Callable[..., Any],
-    kvs: tuple[tuple[Any, ...], ...],
-) -> tuple[tuple[Any, ...], ...]:
+    kvs: PastKeyValues,
+) -> PastKeyValues:
     return tuple([tuple(map(f, items)) for items in kvs])
 
 
 def map_decoder_kvs(
     f: Callable[..., Any],
-    kvs: tuple[tuple[Any, ...], ...],
-) -> tuple[tuple[Any, ...], ...]:
+    kvs: PastKeyValues,
+) -> PastKeyValues:
     return tuple([(tuple(map(f, items[:2])) + tuple(items[2:])) for items in kvs])
 
 
@@ -51,11 +55,11 @@ def pad_sequence(
 
 
 def update_kvs(
-    kvs: Any,
-    updated_kvs: Any,
+    kvs: tuple[tuple[torch.Tensor, ...], ...],
+    updated_kvs: tuple[tuple[torch.Tensor, ...], ...],
     lens_chosen: torch.Tensor,
     idx: int,
-) -> Any:
+) -> tuple[tuple[torch.Tensor, ...], ...]:
     for i, layer in enumerate(kvs):
         for x, item in enumerate(layer):
             item[lens_chosen, :, idx, :] = updated_kvs[i][x][:, :, idx, :]
@@ -63,11 +67,11 @@ def update_kvs(
 
 
 def update_decoder_kvs(
-    kvs: Any,
-    updated_kvs: Any,
+    kvs: tuple[tuple[torch.Tensor, ...], ...],
+    updated_kvs: tuple[tuple[torch.Tensor, ...], ...],
     lens_chosen: torch.Tensor,
     idx: int,
-) -> Any:
+) -> tuple[tuple[torch.Tensor, ...], ...]:
     for i, layer in enumerate(kvs):
         for x, item in enumerate(layer[:2]):
             item[lens_chosen, :, idx, :] = updated_kvs[i][x][:, :, idx, :]
@@ -75,10 +79,10 @@ def update_decoder_kvs(
 
 
 def get_relevant_kvs(
-    kvs: Any,
+    kvs: tuple[tuple[torch.Tensor, ...], ...],
     lens_chosen: torch.Tensor,
     idx: int,
-) -> tuple[tuple[Any, ...], ...]:
+) -> PastKeyValues:
     kvs = map_all_kvs(lambda x: select_batch_idxs(x, lens_chosen), kvs)
     return map_all_kvs(lambda x: x[:, :, :idx, :], kvs)
 
@@ -118,5 +122,5 @@ def process_logits(
     return logits
 
 
-def always_terminate(s: np.ndarray) -> bool:
+def always_terminate(s: str) -> bool:
     return True

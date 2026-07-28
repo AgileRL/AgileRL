@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 """Build full Arena training manifests for every registered algorithm.
 
 Used by ``test_arena_models.py`` and as a manual helper to inspect manifests::
@@ -13,6 +16,7 @@ from pathlib import Path
 from typing import Any, get_args
 
 import yaml
+
 from agilerl.arena import AgentType
 from agilerl.arena.models import TrainingManifest as ArenaManifest
 from agilerl.arena.models.algo import ARENA_REGISTRY, LLMAlgorithmSpec

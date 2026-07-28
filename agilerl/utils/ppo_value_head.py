@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 """Lean causal LM + value head for PPO (replaces TRL experimental wrapper).
 
 No dtype upcasts/downcasts in the value head or wrapper forward; tensors stay in
@@ -7,17 +10,21 @@ the dtype of hidden states and ``nn.Linear`` weights.
 from __future__ import annotations
 
 import os
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
 import torch.nn as nn
-from transformers import AutoModelForCausalLM, PreTrainedModel
+from transformers import AutoModelForCausalLM, GenerationConfig, PreTrainedModel
+
+if TYPE_CHECKING:
+    from transformers.generation.utils import GenerateOutput
 
 try:
     from peft import PeftModel, get_peft_model
 except ImportError:  # pragma: no cover
-    PeftModel = None  # type: ignore[misc, assignment]
-    get_peft_model = None  # type: ignore[misc, assignment]
+    # peft is optional; None sentinels that downstream ``is None`` checks gate on.
+    PeftModel = None  # ty: ignore[invalid-assignment]
+    get_peft_model = None  # ty: ignore[invalid-assignment]
 
 
 VALUE_HEAD_KWARGS = (
@@ -27,9 +34,12 @@ VALUE_HEAD_KWARGS = (
 )
 
 
-def _resolve_hidden_size(config: Any) -> int:
-    if getattr(config, "word_embed_proj_dim", None) is not None:
-        return int(config.word_embed_proj_dim)
+def _resolve_hidden_size(config: object) -> int:
+    # HF configs expose model-specific fields as dynamic attributes, so read
+    # them via ``getattr`` rather than static attribute access.
+    word_embed_proj_dim = getattr(config, "word_embed_proj_dim", None)
+    if word_embed_proj_dim is not None:
+        return int(word_embed_proj_dim)
     hidden = getattr(config, "hidden_size", None)
     if hidden is None:
         # Gemma-4 and other multimodal wrappers keep text dims nested.
@@ -57,7 +67,7 @@ class PPOValueHead(nn.Module):
 
     def __init__(
         self,
-        config: Any,
+        config: object,
         **kwargs: Any,
     ) -> None:
         super().__init__()
@@ -131,11 +141,11 @@ class AutoModelForCausalLMWithValueHead(nn.Module):
         self.pretrained_model.name_or_path = value
 
     @property
-    def generation_config(self):
+    def generation_config(self) -> GenerationConfig:
         return self.pretrained_model.generation_config
 
     @generation_config.setter
-    def generation_config(self, value) -> None:
+    def generation_config(self, value: GenerationConfig) -> None:
         self.pretrained_model.generation_config = value
 
     @property
@@ -145,10 +155,10 @@ class AutoModelForCausalLMWithValueHead(nn.Module):
     def forward(
         self,
         input_ids: torch.Tensor | None = None,
-        past_key_values: Any = None,
+        past_key_values: object = None,
         attention_mask: torch.Tensor | None = None,
         **kwargs: Any,
-    ):
+    ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor]:
         if past_key_values is not None:
             kwargs["past_key_values"] = past_key_values
 
@@ -177,8 +187,12 @@ class AutoModelForCausalLMWithValueHead(nn.Module):
 
         return (lm_logits, loss, value)
 
-    def generate(self, *args: Any, **kwargs: Any):
-        return self.pretrained_model.generate(*args, **kwargs)
+    def generate(self, *args: Any, **kwargs: Any) -> torch.Tensor | GenerateOutput:
+        # ``generate`` is provided by GenerationMixin but resolves through
+        # ``nn.Module.__getattr__`` (typed ``Tensor | Module``), so recover its
+        # callable signature through ``Any`` before invoking it.
+        generate_fn: Any = self.pretrained_model.generate
+        return generate_fn(*args, **kwargs)
 
     def state_dict(self, *args: Any, **kwargs: Any) -> dict[str, torch.Tensor]:
         if not self.is_peft_model:

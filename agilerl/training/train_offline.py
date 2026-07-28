@@ -1,19 +1,28 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 import logging
 import warnings
 from datetime import datetime
 from typing import Any
 
+import gymnasium as gym
+import torch
 from accelerate import Accelerator
 from torch.utils.data import DataLoader
 
 from agilerl.algorithms import CQN
-from agilerl.components.data import ReplayDataset, Transition
+from agilerl.components.data import (
+    ReplayDataset,
+    Transition,
+    transition_to_tensordict,
+)
 from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.components.sampler import Sampler
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.population import Population
-from agilerl.typing import GymEnvType
+from agilerl.typing import InitHyperparams
 from agilerl.utils.minari_utils import minari_to_agile_buffer
 from agilerl.utils.utils import (
     default_progress_bar,
@@ -22,20 +31,19 @@ from agilerl.utils.utils import (
     tournament_selection_and_mutation,
 )
 
-InitDictType = dict[str, Any] | None
 PopulationType = list[CQN]
 
 logger = logging.getLogger(__name__)
 
 
 def train_offline(
-    env: GymEnvType,
+    env: gym.vector.VectorEnv,
     env_name: str,
     algo: str,
     pop: PopulationType,
     memory: ReplayBuffer,
-    init_hp: InitDictType = None,
-    mut_p: InitDictType = None,
+    init_hp: InitHyperparams = None,
+    mut_p: InitHyperparams = None,
     max_steps: int = 1000000,
     evo_steps: int = 10000,
     eval_steps: int | None = None,
@@ -61,8 +69,8 @@ def train_offline(
 ) -> tuple[PopulationType, list[float]]:
     """Run the general offline RL training; returns trained population of agents and their fitnesses.
 
-    :param env: The environment to train in
-    :type env: Gym-style environment
+    :param env: The vectorized environment used to evaluate the population
+    :type env: gym.vector.VectorEnv
     :param env_name: Environment name
     :type env_name: str
     :param algo: RL algorithm name
@@ -187,7 +195,7 @@ def train_offline(
             done = bool(dataset["terminals"][i])
 
             # Add transition to memory
-            transition = (
+            transition = transition_to_tensordict(
                 Transition(
                     obs=obs,
                     action=action,
@@ -195,10 +203,8 @@ def train_offline(
                     next_obs=next_obs,
                     done=done,
                 )
-                .to_tensordict()
-                .unsqueeze(0)
-            )
-            transition.batch_size = [1]
+            ).unsqueeze(0)
+            transition.batch_size = torch.Size([1])
             memory.add(transition)
 
         if accelerator is not None:
@@ -257,6 +263,8 @@ def train_offline(
             agent.set_training_mode(True)
             agent.init_training_step()
 
+            # `Sampler.sample` is typed as returning a bare `TensorDict`; the cast
+            # asserts the concrete replay-batch layout `CQN.learn` consumes.
             for _idx_step in range(evo_steps):
                 experiences = sampler.sample(agent.batch_size)
                 agent.learn(experiences)
@@ -281,7 +289,9 @@ def train_offline(
             logger.info("Target score has been reached. Stopping training.")
             population.finish()
             pbar.close()
-            return population.agents, population.last_fitnesses
+            # Single-agent fitnesses are scalars; `Population` types them as the
+            # wider scalar-or-per-agent-dict row shared with multi-agent training.
+            return population.agents, population.last_scalar_fitnesses
 
         # Tournament selection and population mutation
         if tournament and mutation is not None:
@@ -311,4 +321,4 @@ def train_offline(
 
     population.finish()
     pbar.close()
-    return population.agents, population.last_fitnesses
+    return population.agents, population.last_scalar_fitnesses

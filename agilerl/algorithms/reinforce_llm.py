@@ -1,8 +1,14 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
+from __future__ import annotations
+
 import warnings
 from contextlib import nullcontext
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
+import numpy.typing as npt
 import torch
 from accelerate import Accelerator
 
@@ -11,7 +17,10 @@ from agilerl.algorithms.core import ActionResult, LLMAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
 from agilerl.llm_envs import ReasoningGym
 
-if HAS_LIGER_KERNEL:
+if TYPE_CHECKING:
+    from peft import LoraConfig
+
+if HAS_LIGER_KERNEL or TYPE_CHECKING:
     from agilerl.algorithms.core.llm_ops.fused_loss import (
         LigerFusedLinearPolicyLossFunction,
         apply_fused_policy_loss,
@@ -22,12 +31,11 @@ else:
     LigerFusedLinearPolicyLossFunction = None  # type: ignore[assignment]
     apply_fused_policy_loss = None  # type: ignore[assignment]
 from agilerl.protocols import (
-    LoraConfigProtocol,
-    MultiTurnEnv,
     PeftModelProtocol,
     PreTrainedModelProtocol,
+    TokenizedMultiTurnEnv,
 )
-from agilerl.typing import ExperiencesType, LLMObsType
+from agilerl.typing import LLMObsType, LLMRolloutExperiences
 from agilerl.utils.algo_utils import (
     CosineLRScheduleConfig,
     VLLMConfig,
@@ -39,6 +47,7 @@ from agilerl.utils.llm_utils import (
     aggregate_metrics_dict,
     build_completion_mask,
     clipped_is_surrogate,
+    is_reasoning_prompts,
     masked_mean,
     normalize_reasoning_prompt_batch,
     pool_by_turns,
@@ -52,7 +61,7 @@ if HAS_LLM_DEPENDENCIES:
     from transformers import GenerationConfig
 
 
-class REINFORCE(LLMAlgorithm):
+class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
     """Turn-level REINFORCE with Return Batch Normalization (ReBN) for LLM
     finetuning.
 
@@ -113,7 +122,7 @@ class REINFORCE(LLMAlgorithm):
     :param min_output_tokens: Minimum new tokens per generation.
     :type min_output_tokens: int | None
     :param max_model_len: Maximum context window length.
-    :type max_model_len: int | None
+    :type max_model_len: int
     :param hf_generate_chunk_size: Number of prompts per HuggingFace generation
         chunk. Ignored when ``use_vllm=True``.
     :type hf_generate_chunk_size: int | None, optional
@@ -124,7 +133,7 @@ class REINFORCE(LLMAlgorithm):
         DeepSpeed ZeRO-3.
     :type use_memory_efficient_params: bool
     :param lora_config: LoRA adapter configuration.
-    :type lora_config: LoraConfigProtocol | None
+    :type lora_config: LoraConfig | None
     :param cosine_lr_schedule_config: Cosine LR schedule configuration.
     :type cosine_lr_schedule_config: CosineLRScheduleConfig | None
     :param accelerator: HuggingFace Accelerator for distributed training.
@@ -228,7 +237,7 @@ class REINFORCE(LLMAlgorithm):
         pad_token_id: int,
         pad_token: str,
         model_name: str | None = None,
-        actor_network: Any | None = None,
+        actor_network: PreTrainedModelProtocol | None = None,
         model_config: dict[str, Any] | None = None,
         hp_config: HyperparameterConfig | None = None,
         index: int = 0,
@@ -250,9 +259,9 @@ class REINFORCE(LLMAlgorithm):
         micro_batch_size_per_gpu: int | None = None,
         max_output_tokens: int | None = None,
         min_output_tokens: int | None = None,
-        max_model_len: int | None = 1024,
+        max_model_len: int = 1024,
         hf_generate_chunk_size: int | None = None,
-        lora_config: LoraConfigProtocol | None = None,
+        lora_config: LoraConfig | None = None,
         cosine_lr_schedule_config: CosineLRScheduleConfig | None = None,
         accelerator: Accelerator | None = None,
         device: str = "cpu",
@@ -399,10 +408,13 @@ class REINFORCE(LLMAlgorithm):
                             prompt = prepare_prompt_hf_generate(
                                 prompt_dict, actor_device
                             )
-                            stitch_ids = prompt.pop("stitch_prefix_ids", None)
-                            initial_prompt_len = prompt.pop("initial_prompt_len", None)
+                            input_ids = prompt["input_ids"]
+                            attention_mask = prompt["attention_mask"]
+                            stitch_ids = prompt["stitch_prefix_ids"]
+                            initial_prompt_len = prompt["initial_prompt_len"]
                             completion_id = self.actor.generate(
-                                **prompt,
+                                input_ids=input_ids,
+                                attention_mask=attention_mask,
                                 generation_config=self.generation_config,
                             )
                             completion_id, full_prompt_len = (
@@ -427,6 +439,8 @@ class REINFORCE(LLMAlgorithm):
                     completion_masks,
                     sampling_logps,
                 ) = self._generate_with_vllm_colocate(
+                    # ReasoningPrompts is a TypedDict, i.e. a plain dict at
+                    # runtime; the base helper takes untyped prompt dicts.
                     prompt_batch,
                     1,
                     temperature=self.temperature
@@ -439,7 +453,7 @@ class REINFORCE(LLMAlgorithm):
 
     def learn(
         self,
-        experiences: ExperiencesType,
+        experiences: LLMRolloutExperiences,
         turn_ids: torch.Tensor | None = None,
         sampling_logps: list[torch.Tensor | None] | None = None,
     ) -> dict[str, float]:
@@ -448,7 +462,7 @@ class REINFORCE(LLMAlgorithm):
         :param experiences: ``(completion_ids, action_masks, rewards)``. For
             single-turn, ``rewards`` is a flat tensor of scalars; for multi-turn,
             shape ``[batch, max_turns]`` per-turn rewards.
-        :type experiences: ExperiencesType
+        :type experiences: LLMRolloutExperiences
         :param turn_ids: Optional ``[batch, seq_len - 1]`` tensor of turn indices per
             token; ``-1`` for non-action tokens. If ``None``, all action tokens are
             treated as turn ``0``.
@@ -544,6 +558,9 @@ class REINFORCE(LLMAlgorithm):
                     minibatch_idxs = batch_idxs[
                         start : min((start + batch_size), num_samples)
                     ]
+                    # ``get_experiences_samples`` indexes each input
+                    # positionally: Tensor in -> Tensor out, so the tuple
+                    # mirrors the all-Tensor inputs.
                     (
                         batch_ids,
                         batch_action_mask,
@@ -675,8 +692,10 @@ class REINFORCE(LLMAlgorithm):
         # they bypass the per-update averaging above.
         result.update(is_metrics)
 
-        # Wire averaged metrics into the metrics tracker (new API).
-        completion_length = float(np.mean([c.shape[-1] for c in experiences[0]]))
+        # Wire averaged metrics into the metrics tracker; position 0 is the
+        # per-trajectory completion-id batch.
+        completion_list = experiences[0]
+        completion_length = float(np.mean([c.shape[-1] for c in completion_list]))
         agg = aggregate_metrics_dict(
             self.accelerator,
             {
@@ -694,12 +713,12 @@ class REINFORCE(LLMAlgorithm):
 
     def test(
         self,
-        env: ReasoningGym | MultiTurnEnv,
+        env: ReasoningGym | TokenizedMultiTurnEnv,
         loop: int = 1,
         *args: Any,
         **kwargs: Any,
-    ) -> torch.Tensor:
-        """Return fitness (test) score tensor of llm on test sub-set.
+    ) -> npt.NDArray:
+        """Return fitness (test) score of llm on test sub-set.
 
         ``ReasoningGym`` (and compatible dataset envs): ``reset`` returns a batch
         of prompt dicts; each ``step`` accepts completion id tensors and returns
@@ -708,11 +727,11 @@ class REINFORCE(LLMAlgorithm):
 
         :param env: A :class:`~agilerl.utils.llm_utils.ReasoningGym` or
             :class:`~agilerl.llm_envs.TokenObservationWrapper`.
-        :type env: ReasoningGym | MultiTurnEnv
+        :type env: ReasoningGym | TokenizedMultiTurnEnv
         :param loop: Number of outer test iterations (dataloader passes or episodes).
         :type loop: int
-        :return: Concatenated per-step rewards from the test loop.
-        :rtype: torch.Tensor
+        :return: Mean reward from the test loop (scalar numpy array).
+        :rtype: npt.NDArray
         """
         eval_context = getattr(env, "eval_mode", nullcontext)
         with eval_context():
@@ -727,7 +746,7 @@ class REINFORCE(LLMAlgorithm):
                     prompts = next_prompts
                     rewards.append(reward)
                 reward_tensor = torch.cat(rewards)
-            elif isinstance(env, MultiTurnEnv):
+            elif isinstance(env, TokenizedMultiTurnEnv):
                 all_rewards: list[torch.Tensor] = []
                 for _ in range(loop):
                     prompt_dict, _info = env.reset()
@@ -738,9 +757,11 @@ class REINFORCE(LLMAlgorithm):
                             training=False,
                         ).completion_ids
                         full = completion_ids[0]
-                        prompt_dict, reward, terminated, truncated, _info = env.step(
-                            full,
-                        )
+                        obs, reward, terminated, truncated, _info = env.step(full)
+                        # ``obs`` is the empty sentinel once the episode ends;
+                        # only live prompts feed the next turn.
+                        if is_reasoning_prompts(obs):
+                            prompt_dict = obs
                         all_rewards.append(
                             torch.tensor(
                                 [float(reward)],
@@ -752,7 +773,7 @@ class REINFORCE(LLMAlgorithm):
             else:
                 msg = (
                     "env must be a ReasoningGym (or subclass) or "
-                    f"MultiTurnEnv; got {type(env).__name__}"
+                    f"TokenizedMultiTurnEnv; got {type(env).__name__}"
                 )
                 raise TypeError(msg)
         mean_fit = torch.mean(reward_tensor.float()).item()
@@ -767,7 +788,7 @@ class REINFORCE(LLMAlgorithm):
         lr: float,
         clip_coef: float,
         update_epochs: int,
-        actor_network: Any | None,
+        actor_network: PreTrainedModelProtocol | None,
         clone: bool,
     ) -> None:
         """Validate the core training arguments."""
@@ -855,20 +876,15 @@ class REINFORCE(LLMAlgorithm):
         self,
         max_output_tokens: int | None,
         min_output_tokens: int | None,
-        max_model_len: int | None,
+        max_model_len: int,
         hf_generate_chunk_size: int | None,
     ) -> None:
         """Validate context lengths and build the HF generation config."""
-        if max_output_tokens is None and max_model_len is None:
-            msg = "Either max_output_tokens or max_model_len must be specified"
-            raise ValueError(msg)
         self.max_output_tokens = (
             max_output_tokens if max_output_tokens is not None else max_model_len
         )
         self.min_output_tokens = min_output_tokens
-        self.max_model_len = (
-            max_model_len if max_model_len is not None else max_output_tokens
-        )
+        self.max_model_len = max_model_len
         validate_llm_context_lengths(self.max_model_len, max_output_tokens)
         self.hf_generate_chunk_size = int(
             1 if hf_generate_chunk_size is None else max(1, hf_generate_chunk_size)
@@ -1088,7 +1104,7 @@ class REINFORCE(LLMAlgorithm):
         :rtype: torch.Tensor
         """
         batch_size = rewards.shape[0]
-        num_turns = turn_ids.max().item() + 1
+        num_turns = int(turn_ids.max().item()) + 1
 
         turn_rewards = pool_by_turns(rewards, turn_ids, num_turns)
 

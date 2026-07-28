@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 import copy
 from dataclasses import asdict
 
@@ -558,7 +561,7 @@ class TestEvolvableMultiInputChangeActivation:
 
         new_activation = "Tanh"
         evolvable_composed.change_activation(new_activation)
-        for net in evolvable_composed.feature_net.modules().values():
+        for net in evolvable_composed.feature_net.evolvable_modules().values():
             assert net.activation == new_activation
 
 

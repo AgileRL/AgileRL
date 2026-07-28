@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 from __future__ import annotations
 
 import base64
@@ -11,9 +14,10 @@ import webbrowser
 from pathlib import Path
 from typing import Any
 
-from agilerl.arena.exceptions import ArenaAuthError, ArenaTimeoutError
 from keycloak import KeycloakOpenID
 from keycloak.exceptions import KeycloakError
+
+from agilerl.arena.exceptions import ArenaAuthError, ArenaTimeoutError
 
 logger = logging.getLogger(__name__)
 
@@ -97,12 +101,12 @@ def load_credentials_payload(
 
 
 def load_credentials(
-    credentials_path: Path | os.PathLike[str] = "~/.arena/credentials.json",
+    credentials_path: str | os.PathLike[str] = "~/.arena/credentials.json",
 ) -> dict[str, Any] | None:
     """Read stored credentials from ``~/.arena/credentials.json``.
 
     :param credentials_path: The path to the credentials file.
-    :type credentials_path: Path | os.PathLike[str]
+    :type credentials_path: str | os.PathLike[str]
     :returns: Token dictionary, or ``None`` if absent or malformed.
     :rtype: dict[str, Any] | None
     """
@@ -131,7 +135,7 @@ class ArenaOAuth2:
     REALM = "arena"
     CLIENT_ID = "arena-cli"
 
-    def __init__(self):
+    def __init__(self) -> None:
         # Create a Keycloak OpenID client with the configured URL, realm, and client ID.
         self.kc = KeycloakOpenID(
             server_url=os.environ.get("ARENA_KEYCLOAK_URL") or self.KEYCLOAK_URL,

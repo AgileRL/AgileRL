@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 """Unit tests for the LLM memory-optimization plumbing (quantization +
 activation offload) through LLMAlgorithm + VLLMConfig.
 

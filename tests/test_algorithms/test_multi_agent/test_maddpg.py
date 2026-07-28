@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 import copy
 from unittest.mock import MagicMock
 
@@ -312,13 +315,16 @@ def experiences(
             for agent in agent_ids
         }
 
-    return {
-        "obs": states,
-        "action": actions,
-        "reward": rewards,
-        "next_obs": next_states,
-        "done": dones,
-    }
+    return TensorDict(
+        {
+            "obs": TensorDict(states, batch_size=[batch_size]),
+            "action": TensorDict(actions, batch_size=[batch_size]),
+            "reward": TensorDict(rewards, batch_size=[batch_size]),
+            "next_obs": TensorDict(next_states, batch_size=[batch_size]),
+            "done": TensorDict(dones, batch_size=[batch_size]),
+        },
+        batch_size=[batch_size],
+    )
 
 
 def no_sync(self):
@@ -1496,13 +1502,16 @@ class TestMADDPGLearn:
         dones = {agent_id: torch.zeros(batch_size, 1) for agent_id in agent_ids}
 
         loss = maddpg.learn(
-            {
-                "obs": states,
-                "action": actions,
-                "reward": rewards,
-                "next_obs": next_states,
-                "done": dones,
-            }
+            TensorDict(
+                {
+                    "obs": TensorDict(states, batch_size=[batch_size]),
+                    "action": TensorDict(actions, batch_size=[batch_size]),
+                    "reward": TensorDict(rewards, batch_size=[batch_size]),
+                    "next_obs": TensorDict(next_states, batch_size=[batch_size]),
+                    "done": TensorDict(dones, batch_size=[batch_size]),
+                },
+                batch_size=[batch_size],
+            )
         )
         assert set(loss.keys()) == set(maddpg.shared_agent_ids)
         maddpg.clean_up()
@@ -1538,13 +1547,16 @@ class TestMADDPGLearn:
         dones = {agent_id: torch.zeros(batch_size, 1) for agent_id in agent_ids}
 
         maddpg.learn(
-            {
-                "obs": states,
-                "action": actions,
-                "reward": rewards,
-                "next_obs": next_states,
-                "done": dones,
-            }
+            TensorDict(
+                {
+                    "obs": TensorDict(states, batch_size=[batch_size]),
+                    "action": TensorDict(actions, batch_size=[batch_size]),
+                    "reward": TensorDict(rewards, batch_size=[batch_size]),
+                    "next_obs": TensorDict(next_states, batch_size=[batch_size]),
+                    "done": TensorDict(dones, batch_size=[batch_size]),
+                },
+                batch_size=[batch_size],
+            )
         )
 
         # Losses are recorded per shared group, with no raw-agent keys leaking
@@ -1953,13 +1965,16 @@ class TestMADDPGClone:
         }
         dones = {agent_id: torch.zeros(batch_size, 1) for agent_id in agent_ids}
 
-        experiences = {
-            "obs": states,
-            "action": actions,
-            "reward": rewards,
-            "next_obs": next_states,
-            "done": dones,
-        }
+        experiences = TensorDict(
+            {
+                "obs": TensorDict(states, batch_size=[batch_size]),
+                "action": TensorDict(actions, batch_size=[batch_size]),
+                "reward": TensorDict(rewards, batch_size=[batch_size]),
+                "next_obs": TensorDict(next_states, batch_size=[batch_size]),
+                "done": TensorDict(dones, batch_size=[batch_size]),
+            },
+            batch_size=[batch_size],
+        )
         maddpg.learn(experiences)
         clone_agent = maddpg.clone()
         assert isinstance(clone_agent, MADDPG)

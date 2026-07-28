@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for bundle extraction, WireGuard validation, and Helm id parsing."""
 
 from __future__ import annotations
@@ -7,13 +10,14 @@ from collections.abc import Callable
 from pathlib import Path
 
 import pytest
+from click import ClickException
+
 from agilerl.arena.on_prem.bundle import (
     extract_bundle,
     parse_helm_release_ids,
     resolve_bundle_root,
     validate_wireguard_bundle,
 )
-from click import ClickException
 
 
 class TestExtractBundle:

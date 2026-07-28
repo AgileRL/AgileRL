@@ -1,16 +1,24 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 import copy
 from collections import OrderedDict
 from dataclasses import asdict
-from typing import Any, TypeVar
+from typing import Any
 
 import torch
 from gymnasium import spaces
 from torch import nn
 
-from agilerl.modules import EvolvableCNN, EvolvableLSTM, EvolvableMLP
+from agilerl.modules import EvolvableCNN, EvolvableMLP
 from agilerl.modules.base import EvolvableModule, ModuleDict, MutationType, mutation
-from agilerl.modules.configs import CnnNetConfig, MlpNetConfig, NetConfig
-from agilerl.typing import ArrayOrTensor, ConfigType, ModuleType, NetConfigType
+from agilerl.modules.configs import CnnNetConfig, MlpNetConfig, NetConfig, NetConfigType
+from agilerl.typing import (
+    DeviceType,
+    ModuleType,
+    MutationApplyDict,
+    TupleOrDictObsType,
+)
 from agilerl.utils.evolvable_networks import (
     get_activation,
     is_image_space,
@@ -18,11 +26,10 @@ from agilerl.utils.evolvable_networks import (
     tuple_to_dict_space,
 )
 
-SelfMultiInput = TypeVar("SelfMultiInput", bound="EvolvableMultiInput")
-SupportedEncoderTypes = EvolvableCNN | EvolvableMLP | EvolvableLSTM | SelfMultiInput
-MultiInputConfigType = ConfigType | dict[str, ConfigType]
+# Feature-extractor configurations are either NetConfig dataclasses or plain
+# dictionaries (possibly nested per observation key)
+MultiInputConfigType = NetConfigType
 TupleOrDictSpace = spaces.Tuple | spaces.Dict
-TupleOrDictObservation = dict[str, ArrayOrTensor] | tuple[ArrayOrTensor]
 
 # Default configurations for the feature extractors
 DefaultCnnConfig = CnnNetConfig(
@@ -98,7 +105,7 @@ class EvolvableMultiInput(EvolvableModule):
     :param max_latent_dim: Maximum dimension of the latent space. Default is 128.
     :type max_latent_dim: int, optional
     :param device: Device to use for the network. Default is "cpu".
-    :type device: str, optional
+    :type device: DeviceType, optional
     :param name: Name of the network. Default is "multi_input".
     :type name: str, optional
     :param random_seed: Random seed to use for the network. Defaults to None.
@@ -115,12 +122,12 @@ class EvolvableMultiInput(EvolvableModule):
         vector_space_mlp: bool = False,
         cnn_config: MultiInputConfigType | None = None,
         mlp_config: MultiInputConfigType | None = None,
-        init_dicts: MultiInputConfigType | None = None,
+        init_dicts: dict[str, dict[str, Any]] | None = None,
         output_activation: str | None = None,
         output_layernorm: bool = False,
         min_latent_dim: int = 8,
         max_latent_dim: int = 128,
-        device: str = "cpu",
+        device: DeviceType = "cpu",
         name: str = "multi_input",
         random_seed: int | None = None,
     ) -> None:
@@ -150,8 +157,8 @@ class EvolvableMultiInput(EvolvableModule):
         self.cnn_config = cnn_config or DefaultCnnConfig
         self.mlp_config = mlp_config or DefaultMlpConfig
         self._init_dicts = init_dicts or {}
-        self._activation = None
-        self.mlp_name = None
+        self._activation: str | None = None
+        self.mlp_name: str | None = None
         self.vector_space_mlp = vector_space_mlp
         self.latent_dim = latent_dim
         self.output_activation = output_activation
@@ -214,11 +221,11 @@ class EvolvableMultiInput(EvolvableModule):
         return net_config
 
     @property
-    def activation(self) -> str:
+    def activation(self) -> str | None:
         """Get the activation function for the network.
 
         :return: Activation function
-        :rtype: str
+        :rtype: str | None
         """
         return self._activation
 
@@ -243,7 +250,7 @@ class EvolvableMultiInput(EvolvableModule):
             return self._init_dicts
 
         reformatted_dicts = {}
-        for key, net in self.feature_net.modules().items():
+        for key, net in self.feature_net.evolvable_modules().items():
             init_dict = net.init_dict
             init_dict.pop("observation_space", None)  # MultiInput
             init_dict.pop("input_size", None)  # LSTM
@@ -255,13 +262,13 @@ class EvolvableMultiInput(EvolvableModule):
         return reformatted_dicts
 
     @property
-    def cnn_init_dict(self) -> dict[str, Any]:
-        """Return the initialization dictionary for the CNN."""
+    def cnn_init_dict(self) -> MultiInputConfigType:
+        """Return the initialization configuration for the CNN."""
         return copy.deepcopy(self.cnn_config)
 
     @property
-    def mlp_init_dict(self) -> dict[str, Any]:
-        """Return the initialization dictionary for the MLP."""
+    def mlp_init_dict(self) -> MultiInputConfigType:
+        """Return the initialization configuration for the MLP."""
         return copy.deepcopy(self.mlp_config)
 
     def _reformat_mlp_config(self, config: dict[str, Any]) -> dict[str, Any]:
@@ -286,11 +293,15 @@ class EvolvableMultiInput(EvolvableModule):
         output_coeff: float = 4,
     ) -> None:
         """Initialise weights of linear layers using Gaussian distribution."""
-        for module in self.feature_net.modules().values():
+        for module in self.feature_net.evolvable_modules().values():
+            assert isinstance(
+                module,
+                (EvolvableCNN, EvolvableMLP, EvolvableMultiInput),
+            ), "Feature extractors must implement init_weights_gaussian."
             module.init_weights_gaussian(std_coeff=std_coeff)
 
         # Initialise final dense layer
-        EvolvableModule.init_weights_gaussian(self.final_dense, std_coeff=output_coeff)
+        EvolvableModule.apply_gaussian_init(self.final_dense, std_coeff=output_coeff)
 
     def calc_extracted_features_dim(self) -> int:
         """Calculate the toal dimension of the features extracted by the evolvable
@@ -307,7 +318,7 @@ class EvolvableMultiInput(EvolvableModule):
             ],
         )
 
-    def get_inner_init_dict(self, key: str, default: ModuleType) -> NetConfigType:
+    def get_inner_init_dict(self, key: str, default: ModuleType) -> dict[str, Any]:
         """Return the initialization dictionary for the specified key.
 
         :param key: Key of the observation space.
@@ -315,7 +326,7 @@ class EvolvableMultiInput(EvolvableModule):
         :param default: Default value to return if the key is not found.
         :type default: ModuleType
         :return: Initialization dictionary.
-        :rtype: ConfigType
+        :rtype: dict[str, Any]
         """
         init_dicts = self.init_dicts
         if key in init_dicts:
@@ -324,37 +335,35 @@ class EvolvableMultiInput(EvolvableModule):
             init_dict["device"] = self.device
             return init_dict
 
-        init_dict = {
+        default_config: MultiInputConfigType | None = {
             ModuleType.CNN: self.cnn_init_dict,
             ModuleType.MLP: self.mlp_init_dict,
             ModuleType.MULTI_INPUT: self.net_config,
         }.get(default)
 
-        if init_dict is None:
+        if default_config is None:
             msg = "Invalid default value provided, must be 'cnn' or 'mlp' or 'multi_input'."
             raise ValueError(
                 msg,
             )
-        # Check if we are extracting a nested dict
-        nested_dict = init_dict.get(key)
-        init_dict = (
-            copy.deepcopy(nested_dict)
-            if nested_dict is not None
-            else copy.deepcopy(init_dict)
-        )
-
-        if isinstance(init_dict, NetConfig):
-            init_dict = asdict(init_dict)
+        # Dataclass configs are flat; only dict configs may hold a nested config
+        # keyed by the observation key.
+        if isinstance(default_config, NetConfig):
+            init_dict = asdict(default_config)
+        else:
+            nested_config = default_config.get(key)
+            source = default_config if nested_config is None else nested_config
+            init_dict = copy.deepcopy(source)
 
         init_dict["num_outputs"] = self.latent_dim
         init_dict["device"] = self.device
         return init_dict
 
-    def build_feature_extractor(self) -> dict[str, SupportedEncoderTypes]:
+    def build_feature_extractor(self) -> ModuleDict:
         """Create the feature extractor and final MLP networks.
 
-        :return: Dictionary of feature extractors.
-        :rtype: dict[str, EvolvableMLP | EvolvableCNN | EvolvableLSTM | EvolvableMultiInput]
+        :return: Feature extractors indexed by observation key.
+        :rtype: ModuleDict
         """
         # Automatically build feature extractors from subspaces
         feature_net = ModuleDict(device=self.device)
@@ -363,6 +372,7 @@ class EvolvableMultiInput(EvolvableModule):
                 continue
 
             # EvolvableMultiInput for nested multi-input spaces
+            feature_extractor: nn.Module
             if isinstance(space, (spaces.Dict, spaces.Tuple)):
                 init_dict = self.get_inner_init_dict(
                     key,
@@ -377,8 +387,9 @@ class EvolvableMultiInput(EvolvableModule):
             # EvolvableCNN for image spaces
             elif is_image_space(space):
                 init_dict = self.get_inner_init_dict(key, default=ModuleType.CNN)
+                assert space.shape is not None
                 feature_extractor = EvolvableCNN(
-                    input_shape=space.shape,
+                    input_shape=list(space.shape),
                     name=init_dict.pop("name", key),
                     **init_dict,
                 )
@@ -401,7 +412,7 @@ class EvolvableMultiInput(EvolvableModule):
 
         return feature_net
 
-    def forward(self, x: TupleOrDictObservation) -> torch.Tensor:
+    def forward(self, x: TupleOrDictObsType) -> torch.Tensor:
         """Forward pass of the composed network. Extracts features from each observation key and concatenates
         them with the corresponding observation key if specified. The concatenated features are then passed
         through the final MLP to produce the output tensor.
@@ -414,51 +425,60 @@ class EvolvableMultiInput(EvolvableModule):
         if isinstance(x, tuple):
             x = dict(zip(self.observation_space.spaces.keys(), x, strict=False))
 
-        for key, obs in x.items():
-            if not isinstance(obs, torch.Tensor):
-                x[key] = torch.tensor(obs, device=self.device, dtype=torch.float32)
+        # Ensure every observation is a tensor
+        obs_dict: dict[str, torch.Tensor] = {
+            key: (
+                obs
+                if isinstance(obs, torch.Tensor)
+                else torch.tensor(obs, device=self.device, dtype=torch.float32)
+            )
+            for key, obs in x.items()
+        }
 
         # Extract features from non-vector subspaces
-        extracted_features = OrderedDict()
+        extracted_features: dict[str, torch.Tensor] = OrderedDict()
         if self.extracted_features_dim > 0:
-            for key in x:
+            for key in obs_dict:
                 if key in self.feature_net:
-                    extracted_features[key] = self.feature_net[key](x[key])
+                    extracted_features[key] = self.feature_net[key](obs_dict[key])
 
         # Extract raw features from vector spaces
-        vector_inputs = []
+        vector_inputs: list[torch.Tensor] = []
         for key, space in self.vector_spaces.items():
-            _obs = extracted_features.pop(key) if key in extracted_features else x[key]
+            _obs = (
+                extracted_features.pop(key)
+                if key in extracted_features
+                else obs_dict[key]
+            )
             if len(_obs.shape) == 1:
+                assert space.shape is not None
                 dim = len(space.shape) - 1
                 _obs = _obs.unsqueeze(dim)
 
             vector_inputs.append(_obs)
 
         # Concatenate vector inputs and, optionally, pass through additional EvolvableMLP
-        vector_inputs = (
+        vector_features = (
             torch.cat(vector_inputs, dim=1)
             if vector_inputs
             else torch.tensor([], device=self.device)
         )
-        vector_features = (
-            self.feature_net[self.mlp_name](vector_inputs)
-            if self.vector_space_mlp
-            else vector_inputs
-        )
+        if self.vector_space_mlp:
+            assert self.mlp_name is not None
+            vector_features = self.feature_net[self.mlp_name](vector_features)
 
         # Concatenate extracted latent features
-        extracted_features = (
+        latent_features = (
             torch.cat(list(extracted_features.values()), dim=1)
             if extracted_features
             else torch.tensor([], device=self.device)
         )
 
         # Concatenate all features and pass through final MLP
-        features = torch.cat([extracted_features, vector_features], dim=1)
+        features = torch.cat([latent_features, vector_features], dim=1)
         latent = self.final_dense(features)
 
-        if self.output_layernorm:
+        if self.final_layernorm is not None:
             latent = self.final_layernorm(latent)
 
         return self.output(latent)
@@ -480,7 +500,7 @@ class EvolvableMultiInput(EvolvableModule):
             self.output = get_activation(activation)
 
     @mutation(MutationType.NODE)
-    def add_latent_node(self, numb_new_nodes: int | None = None) -> dict[str, Any]:
+    def add_latent_node(self, numb_new_nodes: int | None = None) -> MutationApplyDict:
         """Add a latent node to the network.
 
         :param numb_new_nodes: Number of new nodes to add, defaults to None
@@ -498,7 +518,9 @@ class EvolvableMultiInput(EvolvableModule):
         return {"numb_new_nodes": numb_new_nodes}
 
     @mutation(MutationType.NODE)
-    def remove_latent_node(self, numb_new_nodes: int | None = None) -> dict[str, Any]:
+    def remove_latent_node(
+        self, numb_new_nodes: int | None = None
+    ) -> MutationApplyDict:
         """Remove a latent node from the network.
 
         :param numb_new_nodes: Number of nodes to remove, defaults to None

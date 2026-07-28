@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for ArenaClient dataset methods."""
 
 from __future__ import annotations
@@ -6,6 +9,7 @@ import json
 from unittest.mock import MagicMock, patch
 
 import pytest
+
 from agilerl.arena.client import ArenaClient
 from agilerl.arena.exceptions import ArenaFileNotFoundError, ArenaValidationError
 

@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 """Generic machinery for building Click commands from a server manifest node.
 
 Turns a manifest command/group tree (from ``GET /api/cli/v1/capabilities``) into
@@ -17,10 +20,12 @@ from pathlib import Path
 from typing import Any
 
 import click
+
 from agilerl.arena.client import ManifestInvoke, ManifestParamSpec
 from agilerl.arena.config import CommandConfig, arena_client
 from agilerl.arena.exceptions import ArenaValidationError
 from agilerl.arena.output import emit_result
+from agilerl.arena.typing import JSONValue
 
 logger = logging.getLogger(__name__)
 
@@ -217,13 +222,13 @@ def _manifest_spec_to_click_option(spec: ManifestParamSpec) -> Callable[[Any], A
     return _typed_option(spec)
 
 
-def _parse_json_cli_value(raw: str) -> Any:
+def _parse_json_cli_value(raw: str) -> JSONValue:
     """Parse a JSON CLI value, or load JSON from a file when prefixed with ``@``.
 
     :param raw: The raw option string; a leading ``@`` reads JSON from that path.
     :type raw: str
     :returns: The decoded JSON value.
-    :rtype: Any
+    :rtype: JSONValue
     """
     path_raw = raw.strip()
     if path_raw.startswith("@"):
@@ -339,7 +344,7 @@ def attach_manifest_tree(group: click.Group, node: dict[str, Any]) -> None:
             attach_manifest_tree(sub, child)
             group.add_command(sub, name=child["name"])
         elif typ == "command":
-            invoke = child.get("invoke") or {}
+            invoke: ManifestInvoke = child.get("invoke") or {}
             cmd = build_manifest_click_command(
                 child["name"],
                 child.get("help"),

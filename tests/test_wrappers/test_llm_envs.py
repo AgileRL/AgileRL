@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for :mod:`agilerl.llm_envs` (reasoning, preference, and SFT gyms)."""
 
 import importlib
@@ -20,6 +23,7 @@ from agilerl.llm_envs import (
     PreferenceGym,
     ReasoningGym,
     SFTGym,
+    TokenObservationWrapper,
     apply_chat_template,
 )
 from tests import TINY_LLM_FIXTURE_PATH
@@ -473,6 +477,28 @@ class TestReasoningGymCreateCollateFn:
             assert "attention_mask" in prompt
             assert isinstance(prompt["input_ids"], torch.Tensor)
             assert isinstance(prompt["attention_mask"], torch.Tensor)
+
+    @pytest.mark.parametrize("num_samples", [20])
+    def test_reasoning_gym_collate_fn_requires_conversation_template(
+        self, reasoning_dataset, num_samples
+    ):
+        """collate_fn raises when no conversation template is configured."""
+        tokenizer = AutoTokenizer.from_pretrained(TINY_LLM_FIXTURE_PATH)
+        train_dataset, test_dataset = reasoning_dataset
+
+        env = ReasoningGym(
+            train_dataset=train_dataset,
+            test_dataset=test_dataset,
+            tokenizer=tokenizer,
+            reward_fn=dummy_reward_fn,
+            conversation_template=DUMMY_CONVERSATION_TEMPLATE,
+            data_batch_size_per_gpu=8,
+        )
+        collate_fn = env.create_collate_fn(tokenizer)
+        env.conversation_template = None
+
+        with pytest.raises(ValueError, match="requires a conversation template"):
+            collate_fn([{"question": "What is 2+2?", "answer": "4"}])
 
 
 class TestReasoningGymGetNextBatch:
@@ -1251,5 +1277,21 @@ def test_apply_chat_template():
     assert "attention_mask" in result
     assert isinstance(result["input_ids"], torch.Tensor)
     assert result["input_ids"].ndim == 2
+
     decoded = tokenizer.decode(result["input_ids"][0], skip_special_tokens=False)
     assert "2+2" in decoded
+
+
+class TestTokenObservationWrapperStepGuard:
+    def test_step_before_reset_raises(self):
+        """Stepping before reset() has populated the prompt state raises."""
+        tokenizer = AutoTokenizer.from_pretrained(TINY_LLM_FIXTURE_PATH)
+        wrapper = TokenObservationWrapper(
+            env=None,
+            tokenizer=tokenizer,
+            max_turns=1,
+            apply_chat_template=False,
+        )
+        assert wrapper.full_ids is None
+        with pytest.raises(RuntimeError, match="reset\\(\\) was never called"):
+            wrapper._step(torch.ones(1, 2, dtype=torch.long), "gen")

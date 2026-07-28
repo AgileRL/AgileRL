@@ -1,8 +1,12 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 import random
-from typing import Any
+from typing import Any, SupportsFloat
 
 import gymnasium as gym
 import numpy as np
+import numpy.typing as npt
 import pandas as pd
 from gymnasium import spaces
 
@@ -21,32 +25,32 @@ class Skill(gym.Wrapper, gym.utils.RecordConstructorArgs):
 
     def step(
         self,
-        action: Any,
-    ) -> tuple[Any, float, bool, bool, dict[str, Any]]:
+        action: object,
+    ) -> tuple[Any, SupportsFloat, bool, bool, dict[str, Any]]:
         """Step the environment and return the observation, reward, terminated, truncated, and info.
 
         :param action: Action
-        :type action: Any
+        :type action: object
         :return: Tuple of (observation, reward, terminated, truncated, info)
-        :rtype: tuple[Any, float, bool, bool, dict[str, Any]]
+        :rtype: tuple[Any, SupportsFloat, bool, bool, dict[str, Any]]
         """
         observation, reward, terminated, truncated, info = self.env.step(action)
         return self.skill_reward(observation, reward, terminated, truncated, info)
 
     def skill_reward(
         self,
-        observation: Any,
-        reward: float,
+        observation: object,
+        reward: SupportsFloat,
         terminated: bool,
         truncated: bool,
         info: dict[str, Any],
-    ) -> tuple[Any, float, bool, bool, dict[str, Any]]:
+    ) -> tuple[Any, SupportsFloat, bool, bool, dict[str, Any]]:
         """Calculate the reward for the given observation, reward, terminated, truncated, and info.
 
         :param observation: Observation
-        :type observation: Any
-        :param reward: Reward
-        :type reward: float
+        :type observation: object
+        :param reward: Reward, as returned by the wrapped environment
+        :type reward: SupportsFloat
         :param terminated: Terminated
         :type terminated: bool
         :param truncated: Truncated
@@ -54,7 +58,7 @@ class Skill(gym.Wrapper, gym.utils.RecordConstructorArgs):
         :param info: Info
         :type info: dict[str, Any]
         :return: Tuple of (observation, reward, terminated, truncated, info)
-        :rtype: tuple[Any, float, bool, bool, dict[str, Any]]
+        :rtype: tuple[Any, SupportsFloat, bool, bool, dict[str, Any]]
         """
         return observation, reward, terminated, truncated, info
 
@@ -87,11 +91,11 @@ class BanditEnv:
         )
         self.single_action_space = spaces.Discrete(self.arms)
 
-    def _new_state_and_target_action(self) -> tuple[np.ndarray, int]:
+    def _new_state_and_target_action(self) -> tuple[npt.NDArray, int]:
         """Generate a new state and target action.
 
         :return: Tuple of (state, target)
-        :rtype: tuple[np.ndarray, int]
+        :rtype: tuple[npt.NDArray, int]
         """
         # Randomly select next context
         r = random.randint(0, len(self.features) - 1)
@@ -107,13 +111,13 @@ class BanditEnv:
 
         return next_state, target
 
-    def step(self, k: int) -> tuple[np.ndarray, float]:
+    def step(self, k: int) -> tuple[npt.NDArray, float]:
         """Step the environment and return the state and reward.
 
         :param k: Action
         :type k: int
         :return: Tuple of (state, reward)
-        :rtype: tuple[np.ndarray, float]
+        :rtype: tuple[npt.NDArray, float]
         """
         # Calculate reward from action in previous state
         reward = self.prev_reward[k]
@@ -128,11 +132,11 @@ class BanditEnv:
 
         return next_state, float(reward)
 
-    def reset(self) -> np.ndarray:
+    def reset(self) -> npt.NDArray:
         """Reset the environment and return the initial state.
 
         :return: Initial state
-        :rtype: np.ndarray
+        :rtype: npt.NDArray
         """
         next_state, target = self._new_state_and_target_action()
         next_reward = np.zeros(self.arms, dtype=np.float32)

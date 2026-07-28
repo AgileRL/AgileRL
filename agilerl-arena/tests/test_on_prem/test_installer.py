@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for the provider installers and the functional facade."""
 
 from __future__ import annotations
@@ -6,6 +9,8 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+from click import ClickException
+
 from agilerl.arena.client import ArenaClient
 from agilerl.arena.on_prem import OnPremApi
 from agilerl.arena.on_prem.installer import (
@@ -24,7 +29,6 @@ from agilerl.arena.on_prem.installer import (
 )
 from agilerl.arena.on_prem.scripts import BundleScriptRunner, StageFailed
 from agilerl.arena.on_prem.ssh import SshExecutor
-from click import ClickException
 
 
 @pytest.fixture

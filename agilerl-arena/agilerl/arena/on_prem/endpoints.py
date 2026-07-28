@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 """Hardcoded Arena on-prem API call descriptors (:class:`ManifestInvoke`).
 
 These mirror the dynamic on-prem manifest the server publishes, but are baked
