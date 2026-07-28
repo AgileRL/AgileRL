@@ -161,6 +161,13 @@ def estimate_training(
 
     variant = model.variant(trainer_variant)
     kbit = knobs.quantization != "none"
+    if kbit and arch.is_moe:
+        warnings.append(
+            f"Quantization barely helps this MoE: {counts.moe_experts / 1e9:.1f}B "
+            f"of {counts.total / 1e9:.1f}B parameters are fused expert tensors, "
+            "which bitsandbytes cannot reach, so they stay at the base dtype. "
+            "Only the attention and router matrices shrink."
+        )
     base = formulas.weight_bytes(
         counts, knobs.weight_dtype, variant, kbit_prepared=kbit
     )

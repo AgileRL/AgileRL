@@ -66,6 +66,24 @@ class ParamCounts:
 
     The split matters because quantization, LoRA targeting, and k-bit
     upcasting all act on different groups.
+
+    ``moe_experts`` is separate from ``mlp`` because transformers 5.x stores
+    expert weights as one fused 3D parameter per layer
+    (``layers.N.experts.gate_up_proj``) rather than per-expert ``nn.Linear``.
+    Both bitsandbytes and PEFT dispatch on ``nn.Linear``, so neither reaches
+    them: an MoE cannot be bnb-quantized and ``all-linear`` LoRA wraps only
+    its attention. Measured on transformers 5.14 by counting parameters
+    inside ``nn.Linear`` on a meta-device instantiation:
+
+    ==========================  ======  ==============  ============
+    model                       total   in ``nn.Linear``  quantizable
+    ==========================  ======  ==============  ============
+    google/gemma-4-26B-A4B-it   25.81B  2.94B           11.4%
+    allenai/OLMoE-1B-7B-0924    6.92B   0.37B           5.4%
+    ==========================  ======  ==============  ============
+
+    So "26B at nf4" is 22.9B still in bf16 (45.7 GB) and will not load on a
+    40 GB A100 — which is exactly what it did, mid-load, at 38.8 GB resident.
     """
 
     embedding: int
@@ -74,6 +92,7 @@ class ParamCounts:
     mlp: int
     norms: int
     multimodal_towers: int
+    moe_experts: int = 0
 
     @property
     def total(self) -> int:
@@ -84,12 +103,14 @@ class ParamCounts:
             + self.mlp
             + self.norms
             + self.multimodal_towers
+            + self.moe_experts
         )
 
     @property
     def quantizable(self) -> int:
         """Params bnb quantizes: every linear except ``lm_head`` (which the
-        framework force-keeps unquantized for exact fused logprobs).
+        framework force-keeps unquantized for exact fused logprobs) and the
+        MoE experts (see :attr:`moe_experts`).
         """
         return self.attention + self.mlp
 
@@ -104,12 +125,13 @@ def param_counts(arch: ModelArch) -> ParamCounts:
         attn_per_layer += q_dim + 2 * kv_dim
 
     mlp_matrices = 3 if arch.gated_mlp else 2
+    experts_per_layer = 0
     if arch.is_moe:
         assert arch.n_experts is not None
         expert_inter = arch.expert_intermediate_size or arch.intermediate_size
         n_ffn = arch.n_experts + arch.n_shared_experts
-        mlp_per_layer = n_ffn * mlp_matrices * h * expert_inter
-        mlp_per_layer += h * arch.n_experts  # router
+        experts_per_layer = n_ffn * mlp_matrices * h * expert_inter
+        mlp_per_layer = h * arch.n_experts  # router
     else:
         mlp_per_layer = mlp_matrices * h * arch.intermediate_size
 
@@ -123,6 +145,7 @@ def param_counts(arch: ModelArch) -> ParamCounts:
         mlp=arch.n_layers * mlp_per_layer,
         norms=norms,
         multimodal_towers=arch.multimodal_tower_params,
+        moe_experts=arch.n_layers * experts_per_layer,
     )
 
 
@@ -140,15 +163,12 @@ def lora_param_count(
     kv_dim = arch.n_kv_heads * dh
     attn = (h + q_dim) + 2 * (h + kv_dim) + (q_dim + h)
     per_layer = attn
-    if scope == "all-linear":
-        inter = (
-            arch.expert_intermediate_size or arch.intermediate_size
-            if arch.is_moe
-            else arch.intermediate_size
-        )
-        n_ffn = (arch.n_experts or 0) + arch.n_shared_experts if arch.is_moe else 1
+    # On a MoE, ``all-linear`` degenerates to attention-only: PEFT resolves the
+    # target list by walking ``nn.Linear`` modules, and the experts are not
+    # any. See :attr:`ParamCounts.moe_experts`.
+    if scope == "all-linear" and not arch.is_moe:
         mlp_matrices = 3 if arch.gated_mlp else 2
-        per_layer += n_ffn * mlp_matrices * (h + inter)
+        per_layer += mlp_matrices * (h + arch.intermediate_size)
     return rank * per_layer * arch.n_layers
 
 
@@ -178,6 +198,7 @@ def weight_bytes(
                 + counts.attention
                 + counts.mlp
                 + counts.norms
+                + counts.moe_experts
                 + towers
             )
             * base_bytes
@@ -190,6 +211,7 @@ def weight_bytes(
         + counts.embedding * base_bytes
         + (counts.lm_head + counts.norms) * held_out_bytes
         + towers * base_bytes
+        + counts.moe_experts * base_bytes
     )
 
 
