@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 """Training manifest model for deserializing YAML/JSON training configurations."""
 
 from __future__ import annotations
@@ -5,18 +8,9 @@ from __future__ import annotations
 import copy
 import logging
 from pathlib import Path
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, overload
 
-import agilerl.arena.models.algorithms as _arena_algorithms  # noqa: F401
 import yaml
-from agilerl.arena.models.algo import (
-    ARENA_REGISTRY,
-    AlgoSpecT,
-    LLMAlgorithmSpec,
-)
-from agilerl.arena.models.hpo import MutationSpec, TournamentSelectionSpec
-from agilerl.arena.models.networks import FinetuningNetworkSpec
-from agilerl.arena.models.training import ReplayBufferSpec, TrainingSpec
 from pydantic import (
     AliasChoices,
     BaseModel,
@@ -26,6 +20,15 @@ from pydantic import (
     model_validator,
 )
 from typing_extensions import Self
+
+from agilerl.arena.models.algo import (
+    ARENA_REGISTRY,
+    AlgoSpec,
+    LLMAlgorithmSpec,
+)
+from agilerl.arena.models.hpo import MutationSpec, TournamentSelectionSpec
+from agilerl.arena.models.networks import FinetuningNetworkSpec
+from agilerl.arena.models.training import ReplayBufferSpec, TrainingSpec
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +43,7 @@ def _ensure_platform_run_spec_keys(data: dict[str, Any]) -> None:
         data.setdefault(key, {})
 
 
-def _resolve_algorithm(data: Any) -> AlgoSpecT:
+def _resolve_algorithm(data: dict[str, Any] | AlgoSpec) -> AlgoSpec:
     """Dispatch to the concrete algorithm spec using ``ARENA_REGISTRY``.
 
     Reads the ``name`` key from the raw dict (e.g. ``"DQN"``), looks up
@@ -48,13 +51,13 @@ def _resolve_algorithm(data: Any) -> AlgoSpecT:
     with the remaining fields.
 
     :param data: The raw dict or AlgorithmSpec to resolve.
-    :type data: Any
+    :type data: dict[str, Any] | AlgoSpec
     :returns: The resolved AlgorithmSpec.
-    :rtype: AlgoSpecT
+    :rtype: AlgoSpec
     :raises TypeError: If the input is not a dict or AlgorithmSpec.
     :raises ValueError: If the 'name' field is not present.
     """
-    if isinstance(data, AlgoSpecT):
+    if isinstance(data, AlgoSpec):
         return data
     if not isinstance(data, dict):
         msg = f"Expected a dict or AlgorithmSpec, got {type(data).__name__}"
@@ -70,7 +73,7 @@ def _resolve_algorithm(data: Any) -> AlgoSpecT:
     return entry.spec_cls(**payload)
 
 
-def _coerce_environment(data: Any) -> dict[str, Any]:
+def _coerce_environment(data: dict[str, Any] | BaseModel) -> dict[str, Any]:
     """Accept environment spec objects or raw dicts.
 
     If *data* is a Pydantic ``BaseModel`` (e.g. :class:`ArenaEnvSpec`,
@@ -78,7 +81,7 @@ def _coerce_environment(data: Any) -> dict[str, Any]:
     Plain dicts are passed through unchanged.
 
     :param data: An environment spec or raw dict.
-    :type data: Any
+    :type data: dict[str, Any] | BaseModel
     :returns: A plain dictionary suitable for manifest serialization.
     :rtype: dict[str, Any]
     """
@@ -112,7 +115,7 @@ def _resolve_network(data: dict[str, Any] | BaseModel) -> dict[str, Any]:
     return data
 
 
-def _serialize_algorithm(spec: AlgoSpecT) -> dict[str, Any]:
+def _serialize_algorithm(spec: AlgoSpec) -> dict[str, Any]:
     """Serialize an algorithm spec to a JSON-safe dict for manifest storage."""
     dumped = spec.model_dump(mode="json", exclude_none=True)
     dumped["name"] = spec.name
@@ -123,7 +126,7 @@ def _serialize_algorithm(spec: AlgoSpecT) -> dict[str, Any]:
 # TrainingManifest's algorithm section in "python" mode, which is fine since we only serialize
 # when submitting jobs to Arena.
 AlgorithmFromManifest = Annotated[
-    AlgoSpecT,
+    AlgoSpec,
     BeforeValidator(_resolve_algorithm),
     PlainSerializer(_serialize_algorithm, return_type=dict[str, Any]),
 ]
@@ -185,7 +188,7 @@ def _collect_unknown_fields(
         known = _known_field_names(model)
         dumped_section = dumped.get(section)
         if isinstance(dumped_section, dict):
-            known |= set(dumped_section)
+            known.update(dumped_section)
         unknown.extend(f"{section}.{key}" for key in raw_section if key not in known)
 
     return unknown
@@ -219,9 +222,8 @@ class TrainingManifest(BaseModel):
         # networks. `arch` is resolved server-side, so `net_config` is never
         # populated on the algorithm spec here (the platform rejects a set
         # `net_config`).
-        algo_spec_cls = type(self.algorithm)
         # LLM algorithms expect a pretrained model
-        if self.network is not None and issubclass(algo_spec_cls, LLMAlgorithmSpec):
+        if self.network is not None and isinstance(self.algorithm, LLMAlgorithmSpec):
             llm_network = FinetuningNetworkSpec.model_validate(self.network)
             self.algorithm.pretrained_model_name_or_path = (
                 llm_network.pretrained_model_name_or_path
@@ -229,7 +231,7 @@ class TrainingManifest(BaseModel):
             self.algorithm.max_model_len = llm_network.max_context_length
 
         if (
-            issubclass(algo_spec_cls, LLMAlgorithmSpec)
+            isinstance(self.algorithm, LLMAlgorithmSpec)
             and self.algorithm.pretrained_model_name_or_path is None
         ):
             msg = (
@@ -251,12 +253,28 @@ class TrainingManifest(BaseModel):
         return self
 
     @staticmethod
-    def _load_yaml(manifest: str | Path | dict[str, Any]) -> dict[str, Any]:
-        """Read a YAML/JSON file or pass through a raw dict."""
-        if isinstance(manifest, (str, Path)):
-            with open(manifest) as fh:
-                return yaml.safe_load(fh)
-        return manifest
+    def _load_yaml(path: str | Path) -> dict[str, Any]:
+        """Read a YAML/JSON file into a dict."""
+        with open(path) as fh:
+            return yaml.safe_load(fh)
+
+    @overload
+    @classmethod
+    def get_validated(
+        cls,
+        manifest: str | Path | dict[str, Any],
+        *,
+        mode: Literal["json"] = ...,
+    ) -> dict[str, Any]: ...
+
+    @overload
+    @classmethod
+    def get_validated(
+        cls,
+        manifest: str | Path | dict[str, Any],
+        *,
+        mode: Literal["python"],
+    ) -> TrainingManifest: ...
 
     @classmethod
     def get_validated(
@@ -275,8 +293,11 @@ class TrainingManifest(BaseModel):
         :returns: A JSON-serializable dict or :class:`TrainingManifest`.
         :rtype: dict[str, Any] | TrainingManifest
         """
-        data = TrainingManifest._load_yaml(manifest)
-        raw_snapshot = copy.deepcopy(data) if isinstance(data, dict) else {}
+        if isinstance(manifest, dict):
+            data: dict[str, Any] = manifest
+        else:
+            data = cls._load_yaml(manifest)
+        raw_snapshot = copy.deepcopy(data)
         validated = cls.model_validate(data)
 
         unknown = _collect_unknown_fields(raw_snapshot, validated)

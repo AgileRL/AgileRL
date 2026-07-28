@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 import os
 import random
 import shutil
@@ -12,6 +15,8 @@ import pytest
 import torch
 from accelerate import Accelerator
 from gymnasium.spaces import Box, Dict, Discrete
+from gymnasium.vector import VectorEnv
+from gymnasium.vector.utils import batch_space
 from pettingzoo import ParallelEnv
 from tensordict import TensorDict
 
@@ -45,6 +50,7 @@ from agilerl.training.train_off_policy import train_off_policy
 from agilerl.training.train_offline import train_offline
 from agilerl.training.train_on_policy import train_on_policy
 from agilerl.utils.utils import make_multi_agent_vect_envs
+from agilerl.vector.pz_vec_env import PettingZooVecEnv
 
 # Common parametrize constants
 _FLAT_VECT = [((6,), 2, True)]
@@ -73,38 +79,32 @@ def _assert_wandb_summary_log(mock_wandb_log: MagicMock) -> None:
         assert key in logged
 
 
-class DummyEnv:
+class DummyEnv(VectorEnv):
+    """Minimal vectorized env double. ``vect`` selects ``num_envs`` (2 vs 1);"""
+
     def __init__(self, state_size, action_size, vect=True, num_envs=2):
         self._single_state_size = tuple(state_size)
-        self.state_size = state_size
         self.action_size = action_size
-        self.observation_space = Box(0.0, 1.0, self._single_state_size)
-        self.action_space = Box(-1.0, 1.0, (action_size,))
         self.vect = vect
-        if self.vect:
-            self.state_size = (num_envs, *self.state_size)
-            self.num_envs = num_envs
-            self.n_envs = num_envs
-        else:
-            self.n_envs = 1
+        self.num_envs = num_envs if vect else 1
+        self.n_envs = self.num_envs
+        self.state_size = (self.num_envs, *self._single_state_size)
+        self.single_observation_space = Box(0.0, 1.0, self._single_state_size)
+        self.single_action_space = Box(-1.0, 1.0, (action_size,))
+        self.observation_space = batch_space(
+            self.single_observation_space, self.num_envs
+        )
+        self.action_space = batch_space(self.single_action_space, self.num_envs)
 
     def reset(self, seed=None, options=None):
-        return np.random.rand(*self.state_size), {}
+        return np.random.rand(*self.state_size).astype(np.float32), {}
 
     def step(self, action):
-        if not self.vect:
-            return (
-                np.random.rand(*self.state_size),
-                float(np.random.randint(0, 5)),
-                bool(np.random.randint(0, 2)),
-                bool(np.random.randint(0, 2)),
-                {},
-            )
         return (
-            np.random.rand(*self.state_size),
-            np.random.randint(0, 5, self.n_envs),
-            np.random.randint(0, 2, self.n_envs),
-            np.random.randint(0, 2, self.n_envs),
+            np.random.rand(*self.state_size).astype(np.float32),
+            np.random.randint(0, 5, self.num_envs),
+            np.random.randint(0, 2, self.num_envs),
+            np.random.randint(0, 2, self.num_envs),
             {},
         )
 
@@ -184,7 +184,13 @@ class DummyAgentOffPolicy:
     def learn(self, experiences, n_experiences=None, per=False):
         loss = random.random()
         if n_experiences is not None or per:
-            return loss, None, None
+            # Prioritized / n-step path expects idxs + priorities for update_priorities
+            if "idxs" in experiences.keys():
+                idxs = experiences["idxs"]
+            else:
+                idxs = torch.tensor([0])
+            priorities = np.ones(len(idxs), dtype=np.float32)
+            return loss, idxs, priorities
         return loss
 
     def test(self, env, max_steps=None, loop=3, **kwargs):
@@ -316,18 +322,21 @@ class DummyCompiledPolicy:
         self._orig_mod = orig_mod if orig_mod is not None else DummyStochastic()
 
 
-class DummyMultiEnv(ParallelEnv):  # pylint: disable=overwritten-inherited-attribute
+class DummyMultiEnv(PettingZooVecEnv):  # pylint: disable=overwritten-inherited-attribute
     """Mimics a vectorized multi-agent parallel environment with num_envs=1."""
 
     def __init__(self, state_dims, action_dims):
+        agents = ["agent_0", "other_agent_0"]
+        super().__init__(
+            num_envs=1,
+            observation_spaces={agent: Box(0, 255, state_dims) for agent in agents},
+            action_spaces={agent: Discrete(5) for agent in agents},
+            possible_agents=agents,
+        )
         self.state_dims = state_dims
         self.state_size = self.state_dims
         self.action_dims = action_dims
         self.action_size = self.action_dims
-        self.num_envs = 1
-        self.agents = ["agent_0", "other_agent_0"]
-        self.possible_agents = ["agent_0", "other_agent_0"]
-        self.render_mode = None
         self.metadata = None
         self.info = {
             agent: {
@@ -359,6 +368,48 @@ class DummyMultiEnv(ParallelEnv):  # pylint: disable=overwritten-inherited-attri
                 agent: np.random.randint(0, 2, size=(self.num_envs,)).astype(bool)
                 for agent in self.agents
             },
+            self.info,
+        )
+
+    def action_space(self, agent):
+        return Discrete(5)
+
+    def observation_space(self, agent):
+        return Box(0, 255, self.state_dims)
+
+
+class DummyMultiParallelEnv(ParallelEnv):
+    """Single PettingZoo ParallelEnv double with non-batched dict returns."""
+
+    def __init__(self, state_dims, action_dims):
+        self.state_dims = state_dims
+        self.state_size = self.state_dims
+        self.action_dims = action_dims
+        self.action_size = self.action_dims
+        self.agents = ["agent_0", "other_agent_0"]
+        self.possible_agents = ["agent_0", "other_agent_0"]
+        self.render_mode = None
+        self.metadata = {"name": "dummy_multi_parallel_v0"}
+        self.info = {
+            agent: {
+                "env_defined_actions": (
+                    None if agent == "other_agent_0" else np.array([0, 1])
+                ),
+            }
+            for agent in self.agents
+        }
+
+    def reset(self, seed=None, options=None):
+        return {
+            agent: np.random.rand(*self.state_dims) for agent in self.agents
+        }, self.info
+
+    def step(self, action):
+        return (
+            {agent: np.random.rand(*self.state_dims) for agent in self.agents},
+            {agent: float(np.random.rand()) for agent in self.agents},
+            {agent: bool(np.random.randint(0, 2)) for agent in self.agents},
+            {agent: bool(np.random.randint(0, 2)) for agent in self.agents},
             self.info,
         )
 
@@ -843,8 +894,36 @@ def _make_base_mock_agent(spec_cls, state_size, action_size, *, metrics=None):
     return mock
 
 
+def _instrument_callable_methods(agent, *method_names):
+    """Wrap real methods in MagicMock so tests can use assert_called()."""
+    for name in method_names:
+        setattr(agent, name, MagicMock(side_effect=getattr(agent, name)))
+    return agent
+
+
 @pytest.fixture
 def mocked_agent_off_policy(env, algo):
+    # DummyAgentOffPolicy provides the `NStepAgent` members (batch_size, beta,
+    # learn) that the prioritized/n-step path reads.
+    if algo == RainbowDQN:
+        agent = DummyAgentOffPolicy(5, env, 0.4, algo="Rainbow DQN")
+        agent.action_dim = 2
+        return _instrument_callable_methods(
+            agent,
+            "get_action",
+            "learn",
+            "test",
+            "wrap_models",
+            "unwrap_models",
+            "set_training_mode",
+            "init_training_step",
+            "add_scores",
+            "finalize_training_step",
+            "save_checkpoint",
+            "load_checkpoint",
+            "reset_action_noise",
+        )
+
     mock_agent = _make_base_mock_agent(algo, env.state_size, 2)
     mock_agent.action_dim = 2
 
@@ -868,18 +947,10 @@ def mocked_agent_off_policy(env, algo):
             np.random.randint(env.action_size, size=(env.n_envs,))
         )
 
-    if algo == RainbowDQN:
-        mock_agent.learn.side_effect = lambda experiences, **kwargs: (
-            random.random(),
-            random.random(),
-            random.random(),
-        )
-    else:
-        mock_agent.learn.side_effect = lambda experiences, **kwargs: random.random()
+    mock_agent.learn.side_effect = lambda experiences, **kwargs: random.random()
 
     mock_agent.algo = {
         DQN: "DQN",
-        RainbowDQN: "Rainbow DQN",
         DDPG: "DDPG",
         TD3: "TD3",
         CQN: "CQN",
@@ -1196,24 +1267,27 @@ def mocked_multi_memory():
 
 @pytest.fixture
 def mocked_env(state_size, action_size, vect=True, num_envs=2):
-    mock_env = MagicMock()
-    mock_env.state_size = state_size
+    # ``spec=VectorEnv`` makes ``isinstance(env, VectorEnv)`` True so
+    # train_off/on_policy skips DummyVecEnv wrapping (which requires real Spaces).
+    mock_env = MagicMock(spec=VectorEnv)
     mock_env.action_size = action_size
     mock_env.vect = vect
-    if mock_env.vect:
-        mock_env.state_size = (num_envs, *mock_env.state_size)
-        mock_env.num_envs = num_envs
-    else:
-        mock_env.num_envs = 1
+    n_envs = num_envs if vect else 1
+    mock_env.num_envs = n_envs
+    mock_env.state_size = (n_envs, *state_size)
+    mock_env.single_observation_space = Box(0.0, 1.0, tuple(state_size))
+    mock_env.single_action_space = Box(-1.0, 1.0, (action_size,))
+    mock_env.observation_space = batch_space(mock_env.single_observation_space, n_envs)
+    mock_env.action_space = batch_space(mock_env.single_action_space, n_envs)
 
-    def reset():
-        return np.random.rand(*mock_env.state_size), {}
+    def reset(seed=None, options=None):
+        return np.random.rand(*mock_env.state_size).astype(np.float32), {}
 
     mock_env.reset.side_effect = reset
 
     def step(action):
         return (
-            np.random.rand(*mock_env.state_size),
+            np.random.rand(*mock_env.state_size).astype(np.float32),
             np.random.randint(0, 5, mock_env.num_envs),
             np.random.randint(0, 2, mock_env.num_envs),
             np.random.randint(0, 2, mock_env.num_envs),
@@ -1354,6 +1428,34 @@ def dummy_h5py_data(action_size, state_size):
 
 
 class TestTrainOffPolicy:
+    def test_real_rainbow_takes_the_rainbow_action_branch(self):
+        """The action-selection dispatch is by concrete class."""
+        import gymnasium as gym
+
+        from agilerl.algorithms import RainbowDQN
+
+        vec_env = gym.vector.SyncVectorEnv([lambda: gym.make("CartPole-v1")])
+        agent = RainbowDQN(
+            vec_env.single_observation_space,
+            vec_env.single_action_space,
+            batch_size=4,
+            learn_step=1,
+        )
+        pop, fitnesses = train_off_policy(
+            vec_env,
+            "CartPole-v1",
+            "Rainbow DQN",
+            [agent],
+            PrioritizedReplayBuffer(max_size=100, device="cpu"),
+            max_steps=12,
+            evo_steps=12,
+            eval_steps=2,
+            eval_loop=1,
+            verbose=False,
+        )
+        assert len(pop) == 1
+        assert len(fitnesses) == 1
+
     @pytest.mark.parametrize(("state_size", "action_size", "vect"), _FLAT_BOTH)
     def test_train_off_policy(
         self, env, population_off_policy, tournament, mutations, memory
@@ -2983,8 +3085,7 @@ class TestTrainOnPolicy:
 class TestTrainMultiAgentOffPolicy:
     @pytest.mark.parametrize(("state_size", "action_size"), _FLAT)
     def test_wraps_env_without_num_envs(self, state_size, action_size, multi_memory):
-        env = DummyMultiEnv(state_size, action_size)
-        del env.num_envs
+        env = DummyMultiParallelEnv(state_size, action_size)
         agent = DummyMultiAgent(1, env, on_policy=False)
         wrapped = DummyMultiEnv(state_size, action_size)
 
@@ -3113,7 +3214,7 @@ class TestTrainMultiAgentOffPolicy:
         action_size,
     ):
         env = make_multi_agent_vect_envs(
-            DummyMultiEnv,
+            DummyMultiParallelEnv,
             num_envs=4,
             state_dims=state_size,
             action_dims=action_size,
@@ -3611,8 +3712,7 @@ class TestTrainMultiAgentOffPolicy:
 class TestTrainMultiAgentOnPolicy:
     @pytest.mark.parametrize(("state_size", "action_size"), _FLAT)
     def test_wraps_env_without_num_envs(self, state_size, action_size):
-        env = DummyMultiEnv(state_size, action_size)
-        del env.num_envs
+        env = DummyMultiParallelEnv(state_size, action_size)
         agent = DummyMultiAgent(1, env, on_policy=True)
         wrapped = DummyMultiEnv(state_size, action_size)
 
@@ -3679,7 +3779,7 @@ class TestTrainMultiAgentOnPolicy:
         action_size,
     ):
         env = make_multi_agent_vect_envs(
-            DummyMultiEnv,
+            DummyMultiParallelEnv,
             num_envs=4,
             state_dims=state_size,
             action_dims=action_size,

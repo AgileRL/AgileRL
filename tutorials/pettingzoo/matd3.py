@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 """This tutorial shows how to train an MATD3 agent on the simple speaker listener multi-particle environment.
 
 Authors: Michael (https://github.com/mikepratt1), Nickua (https://github.com/nicku-a)

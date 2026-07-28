@@ -1,4 +1,6 @@
-# noqa: INP001
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 """Run local CodeQL and fail on findings.
 
 This script is designed for local developer use (including pre-commit).

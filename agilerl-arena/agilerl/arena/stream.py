@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 """Typed event model and NDJSON stream wrapper for Arena streaming endpoints.
 
 Handles newline-delimited JSON (NDJSON) responses from Arena streaming endpoints.
@@ -8,7 +11,9 @@ from __future__ import annotations
 import json
 from collections.abc import Callable, Generator
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol
+
+from typing_extensions import Self
 
 from agilerl.arena.exceptions import (
     ArenaAPIError,
@@ -16,7 +21,6 @@ from agilerl.arena.exceptions import (
     _sanitize_detail,
     resolve_api_error_class,
 )
-from typing_extensions import Self
 
 if TYPE_CHECKING:
     import httpx
@@ -182,6 +186,10 @@ def parse_ndjson_line(line: str) -> StreamEvent:
     return LogEvent(text=json.dumps(payload, default=str))
 
 
+class SupportsClose(Protocol):
+    def close(self) -> None: ...
+
+
 class NDJsonStream:
     """Iterator + context-manager over an NDJSON HTTP response.
 
@@ -212,7 +220,7 @@ class NDJsonStream:
         response: httpx.Response,
         *,
         handler: Callable[[StreamEvent], None] | None = None,
-        renderer: Any | None = None,
+        renderer: SupportsClose | None = None,
         error_cls: type[ArenaAPIError] | None = None,
     ) -> None:
         self._response: httpx.Response = response

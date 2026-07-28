@@ -1,8 +1,11 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 from __future__ import annotations
 
 from agilerl.arena.models.algo import (  # noqa: F401
     ARENA_REGISTRY,
-    AlgoSpecT,
+    AlgoSpec,
     LLMAlgorithmSpec,
     MultiAgentRLAlgorithmSpec,
     RLAlgorithmSpec,

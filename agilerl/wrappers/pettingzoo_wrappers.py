@@ -1,9 +1,13 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 from __future__ import annotations
 
 import contextlib
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
+import numpy.typing as npt
 from gymnasium.utils import seeding
 from pettingzoo.utils.env import ActionType, AgentID, ObsType, ParallelEnv
 
@@ -11,7 +15,7 @@ if TYPE_CHECKING:
     from gymnasium import spaces
 
 
-class PettingZooAutoResetParallelWrapper(ParallelEnv):
+class PettingZooAutoResetParallelWrapper(ParallelEnv[AgentID, ObsType, ActionType]):
     """Wrapper to automatically reset the environment when all agents terminate or truncate.
 
     :param env: The environment to wrap
@@ -22,7 +26,7 @@ class PettingZooAutoResetParallelWrapper(ParallelEnv):
     metadata: dict[str, Any]
     possible_agents: list[AgentID]
     state_space: spaces.Space | None
-    np_random: np.random.RandomState
+    np_random: np.random.Generator
     agents: list[AgentID]
 
     def __init__(self, env: ParallelEnv[AgentID, ObsType, ActionType]) -> None:
@@ -33,7 +37,7 @@ class PettingZooAutoResetParallelWrapper(ParallelEnv):
         # Not every environment has the .state_space attribute implemented
         with contextlib.suppress(AttributeError):
             self.state_space = (
-                self.env.state_space  # pyright: ignore[reportGeneralTypeIssues]
+                self.env.state_space  # ty: ignore[unresolved-attribute] # optional PettingZoo extension, guarded by suppress(AttributeError)
             )
 
     def reset(
@@ -48,7 +52,7 @@ class PettingZooAutoResetParallelWrapper(ParallelEnv):
         :param options: Options dictionary, defaults to None
         :type options: dict | None, optional
         :return: Tuple of (observations, infos)
-        :rtype: tuple[dict[str, np.ndarray], dict[str, Any]]
+        :rtype: tuple[dict[str, npt.NDArray], dict[str, Any]]
         """
         self.np_random, _ = seeding.np_random(seed)
 
@@ -70,18 +74,18 @@ class PettingZooAutoResetParallelWrapper(ParallelEnv):
         :param actions: Actions dictionary
         :type actions: dict[str, ActionType]
         :return: Tuple of (observations, rewards, terminations, truncations, infos)
-        :rtype: tuple[dict[str, np.ndarray], dict[str, float], dict[str, bool], dict[str, bool], dict[str, Any]]
+        :rtype: tuple[dict[str, npt.NDArray], dict[str, float], dict[str, bool], dict[str, bool], dict[str, Any]]
         """
         obs, rewards, terminations, truncations, infos = self.env.step(actions)
         if np.all(list(terminations.values()) or list(truncations.values())):
             obs, infos = self.env.reset()
         return obs, rewards, terminations, truncations, infos
 
-    def render(self) -> None | np.ndarray | str | list:
+    def render(self) -> npt.NDArray | str | list | None:
         """Render the environment.
 
         :return: Rendered environment
-        :rtype: None | np.ndarray | str | list
+        :rtype: None | npt.NDArray | str | list
         """
         return self.env.render()
 
@@ -99,11 +103,11 @@ class PettingZooAutoResetParallelWrapper(ParallelEnv):
         return self.env.unwrapped
 
     @property
-    def state(self) -> np.ndarray:
-        """Return the state of the environment.
+    def state(self) -> Any:  # noqa: ANN401 -- wrapped env exposes state as either a method or an observations attribute
+        """Return the state of the wrapped environment.
 
         :return: State of the environment
-        :rtype: np.ndarray
+        :rtype: Any
         """
         return self.env.state
 

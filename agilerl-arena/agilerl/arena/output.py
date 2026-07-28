@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 from __future__ import annotations
 
 import csv
@@ -9,6 +12,11 @@ from functools import singledispatch
 from typing import Any
 
 import click
+from rich.live import Live
+from rich.markup import escape
+from rich.table import Table
+from typing_extensions import Self
+
 from agilerl.arena import console, error_console
 from agilerl.arena.exceptions import ArenaAPIError, ArenaError, resolve_api_error_class
 from agilerl.arena.stream import (
@@ -18,15 +26,11 @@ from agilerl.arena.stream import (
     StatusEvent,
     StreamEvent,
 )
-from rich.live import Live
-from rich.markup import escape
-from rich.table import Table
-from typing_extensions import Self
 
 logger = logging.getLogger(__name__)
 
 
-def _print_rich(renderable: Any, *, is_error: bool = False) -> None:
+def _print_rich(renderable: object, *, is_error: bool = False) -> None:
     if is_error:
         error_console.print(renderable)
         return
@@ -35,7 +39,7 @@ def _print_rich(renderable: Any, *, is_error: bool = False) -> None:
 
 @singledispatch
 def emit_result(
-    result: Any,
+    result: object,
     *,
     is_error: bool = False,
     columns: list[str] | None = None,
@@ -167,7 +171,7 @@ def _emit_environment_catalog(
     _print_rich(table, is_error=is_error)
 
 
-def _format_cell(value: Any) -> str:
+def _format_cell(value: object) -> str:
     if isinstance(value, (dict, list)):
         return json.dumps(value, default=str)
     return str(value)

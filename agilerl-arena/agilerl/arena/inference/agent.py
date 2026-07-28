@@ -1,15 +1,15 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 from __future__ import annotations
 
 import logging
 from collections.abc import Iterator
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import httpx
 from pydantic import BaseModel, ConfigDict, Field
 from typing_extensions import Self
-
-if TYPE_CHECKING:
-    import numpy as np
 
 from agilerl.arena.exceptions import ArenaAuthError, ArenaInferenceError
 from agilerl.arena.inference.serde import (
@@ -336,11 +336,11 @@ class Agent:
             )
 
     @staticmethod
-    def serialize(data: RLData | None, batched: bool = False) -> SerializedRLData:
+    def serialize(data: RLData, batched: bool = False) -> SerializedRLData:
         return _serialize(data, batched)
 
     @staticmethod
-    def deserialize(data: SerializedRLData, batched: bool = False) -> RLData | None:
+    def deserialize(data: SerializedRLData, batched: bool = False) -> RLData:
         return _deserialize(data, batched)
 
     @staticmethod
@@ -360,7 +360,7 @@ class Agent:
     @staticmethod
     def _multi_agent_mask(
         info: dict[str, RLData] | None,
-    ) -> dict[str, RLData] | None:
+    ) -> RLData:
         if info is None or "action_mask" not in info:
             return None
         mask = info["action_mask"]
@@ -391,9 +391,9 @@ class Agent:
         self,
         observation: RLData,
         batched: bool,
-        hidden_state: dict[str, np.ndarray] | None,
+        hidden_state: RLData | None,
         info: dict[str, RLData] | None,
-        env_defined_actions: dict[str, RLData] | None,
+        env_defined_actions: RLData,
     ) -> dict[str, Any]:
         """Build the payload for the POST /get_action request."""
         agent = self._agent_info()
@@ -450,7 +450,7 @@ class Agent:
         *,
         multi_agent: bool,
         recurrent: bool,
-    ) -> tuple[RLData, dict[str, np.ndarray] | None]:
+    ) -> tuple[RLData, RLData | None]:
         """Parse the response from the POST /get_action request."""
         action_raw = response_json["action"]
         if multi_agent:
@@ -462,15 +462,17 @@ class Agent:
                 for agent_id, serialized in action_raw.items()
             }
         else:
-            action = Agent.deserialize(action_raw, batched)
+            deserialized_action = Agent.deserialize(action_raw, batched)
+            if deserialized_action is None:
+                msg = "Response contained no action."
+                raise ArenaInferenceError(status_code=200, detail=msg)
+            action = deserialized_action
 
-        hidden_state = None
+        hidden_state: RLData | None = None
         if recurrent:
             hidden_raw = response_json.get("hidden_state")
             if hidden_raw is not None:
-                deserialized = Agent.deserialize(hidden_raw, batched)
-                if isinstance(deserialized, dict):
-                    hidden_state = deserialized
+                hidden_state = Agent.deserialize(hidden_raw, batched)
         return action, hidden_state
 
     def status(self, *, refresh: bool = False) -> StatusResponse:
@@ -491,10 +493,10 @@ class Agent:
         observation: RLData,
         *,
         batched: bool = False,
-        hidden_state: dict[str, np.ndarray] | None = None,
+        hidden_state: RLData | None = None,
         info: dict[str, RLData] | None = None,
-        env_defined_actions: dict[str, RLData] | None = None,
-    ) -> tuple[RLData, dict[str, np.ndarray] | None]:
+        env_defined_actions: RLData = None,
+    ) -> tuple[RLData, RLData | None]:
         """Get actions from a deployed RL agent.
 
         For multi-agent deployments, pass *observation* as ``dict[agent_id, obs]``.
@@ -505,13 +507,13 @@ class Agent:
         :param batched: Whether to batch the observation.
         :type batched: bool
         :param hidden_state: The hidden state of the agent.
-        :type hidden_state: dict[str, np.ndarray] | None
+        :type hidden_state: RLData | None
         :param info: The info of the agent.
         :type info: dict[str, RLData] | None
         :param env_defined_actions: The env defined actions of the agent.
-        :type env_defined_actions: dict[str, RLData] | None
+        :type env_defined_actions: RLData | None
         :return: A tuple containing the action and the hidden state.
-        :rtype: tuple[RLData, dict[str, np.ndarray] | None]
+        :rtype: tuple[RLData, RLData | None]
         """
         self._ensure(rl=True)
         agent = self._agent_info()
@@ -554,6 +556,9 @@ class Agent:
         )
         meta = PredictResult.model_validate(body)
         results = self.deserialize(body["results"], batched)
+        if results is None:
+            msg = "Response contained no results."
+            raise ArenaInferenceError(status_code=200, detail=msg)
         return results, meta
 
     def generate(

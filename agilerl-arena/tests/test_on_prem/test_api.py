@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for OnPremApi and its pure helpers."""
 
 from __future__ import annotations
@@ -5,6 +8,7 @@ from __future__ import annotations
 from unittest.mock import MagicMock
 
 import pytest
+
 from agilerl.arena.exceptions import ArenaAPIError
 from agilerl.arena.on_prem import OnPremApi
 from agilerl.arena.on_prem.api import class_by_name

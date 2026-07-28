@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 """Build the tiny LLM test fixture used by unit tests.
 
 Constructs a randomly-initialised Qwen2 model with the upstream

@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 from collections.abc import Callable
 from typing import Any
 
@@ -9,7 +12,7 @@ from agilerl.typing import DeviceType
 
 
 def to_evolvable(
-    module_fn: Callable[[], nn.Module],
+    module_fn: Callable[..., nn.Module],
     module_kwargs: dict[str, Any],
     device: DeviceType,
 ) -> EvolvableModule:
@@ -30,7 +33,7 @@ class DummyEvolvable(EvolvableModule):
         class hierarchy directly. Please refer to the documentation for more information on how to do this.
 
     :param module_fn: Function that returns a PyTorch nn.Module object.
-    :type module_fn: Callable[[], nn.Module]
+    :type module_fn: Callable[..., nn.Module]
     :param module_kwargs: Keyword arguments to pass to the module_fn.
     :type module_kwargs: dict[str, Any]
     :param device: Device to run the module on.
@@ -41,7 +44,7 @@ class DummyEvolvable(EvolvableModule):
         self,
         device: DeviceType,
         module: nn.Module | None = None,
-        module_fn: Callable[[], nn.Module] | None = None,
+        module_fn: Callable[..., nn.Module] | None = None,
         module_kwargs: dict[str, Any] | None = None,
     ) -> None:
 
@@ -53,6 +56,8 @@ class DummyEvolvable(EvolvableModule):
             module_kwargs = {}
 
         if module is None:
+            assert module_fn is not None
+            assert module_kwargs is not None
             module = module_fn(**module_kwargs).to(device)
         else:
             module = module.to(device)
@@ -68,7 +73,7 @@ class DummyEvolvable(EvolvableModule):
     def forward(self, *args: Any, **kwargs: Any) -> torch.Tensor:
         return self.module(*args, **kwargs)
 
-    def __getattr__(self, name: str) -> Any:
+    def __getattr__(self, name: str) -> Any:  # noqa: ANN401 -- proxies arbitrary attributes of the wrapped module
         module = self.__dict__["_modules"]["module"]
         if name == "module":
             return module

@@ -1,16 +1,21 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 import logging
 import warnings
 from collections.abc import Callable
 from datetime import datetime
 from typing import Any
 
+import gymnasium as gym
 from accelerate import Accelerator
 
 from agilerl.algorithms import PPO
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.population import Population
-from agilerl.typing import GymEnvType
+from agilerl.typing import InitHyperparams, RolloutReturn
+from agilerl.utils.algo_utils import get_num_envs
 from agilerl.utils.utils import (
     default_progress_bar,
     init_loggers,
@@ -19,20 +24,23 @@ from agilerl.utils.utils import (
 )
 from agilerl.vector import DummyVecEnv
 
-InitDictType = dict[str, Any] | None
 OnPolicyAlgorithms = PPO
 PopulationType = list[OnPolicyAlgorithms]
+
+# Rollout collectors take the agent and environment positionally and the rest of
+# the rollout state by keyword.
+CollectRolloutsFn = Callable[..., RolloutReturn]
 
 logger = logging.getLogger(__name__)
 
 
 def train_on_policy(
-    env: GymEnvType,
+    env: gym.Env | gym.vector.VectorEnv,
     env_name: str,
     algo: str,
     pop: PopulationType,
-    init_hp: InitDictType = None,
-    mut_p: InitDictType = None,
+    init_hp: InitHyperparams = None,
+    mut_p: InitHyperparams = None,
     max_steps: int = 1000000,
     evo_steps: int = 10000,
     eval_steps: int | None = None,
@@ -52,9 +60,7 @@ def train_on_policy(
     accelerator: Accelerator | None = None,
     wandb_api_key: str | None = None,
     wandb_kwargs: dict[str, Any] | None = None,
-    collect_rollouts_fn: (
-        Callable[[OnPolicyAlgorithms, GymEnvType, int], None] | None
-    ) = None,
+    collect_rollouts_fn: CollectRolloutsFn | None = None,
 ) -> tuple[PopulationType, list[float]]:
     """Run the general on-policy RL training; returns trained population of agents
     and their fitnesses.
@@ -150,11 +156,14 @@ def train_on_policy(
             stacklevel=2,
         )
 
-    # Ensure environment has vectorized interface
-    if not hasattr(env, "num_envs"):
-        env = DummyVecEnv(env)
+    # Ensure environment has vectorized interface. `DummyVecEnv` duck-types the
+    # `VectorEnv` API rather than subclassing it, so the cast matches the annotations
+    # of the rollout and evaluation helpers it is handed to.
+    vec_env: gym.vector.VectorEnv = (
+        env if isinstance(env, gym.vector.VectorEnv) else DummyVecEnv(env)
+    )
 
-    num_envs = env.num_envs
+    num_envs = get_num_envs(vec_env)
     save_path = (
         checkpoint_path.split(".pt")[0]
         if checkpoint_path is not None
@@ -223,7 +232,7 @@ def train_on_policy(
                 episode_scores, last_obs, last_done, last_scores, last_info = (
                     active_collect(
                         agent,
-                        env,
+                        vec_env,
                         n_steps=n_steps,
                         last_obs=last_obs,
                         last_done=last_done,
@@ -245,7 +254,7 @@ def train_on_policy(
         # Evaluate population
         for agent in population.agents:
             agent.test(
-                env,
+                vec_env,
                 max_steps=eval_steps,
                 loop=eval_loop,
             )
@@ -259,7 +268,9 @@ def train_on_policy(
             logger.info("Target score has been reached. Stopping training.")
             population.finish()
             pbar.close()
-            return population.agents, population.last_fitnesses
+            # Single-agent fitnesses are scalars; `Population` types them as the
+            # wider scalar-or-per-agent-dict row shared with multi-agent training.
+            return population.agents, population.last_scalar_fitnesses
 
         # Tournament selection and population mutation
         if tournament and mutation is not None:
@@ -289,4 +300,4 @@ def train_on_policy(
 
     population.finish()
     pbar.close()
-    return population.agents, population.last_fitnesses
+    return population.agents, population.last_scalar_fitnesses

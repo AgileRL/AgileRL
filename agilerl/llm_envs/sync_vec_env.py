@@ -1,24 +1,46 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 """Synchronous multi-turn vector environment utilities for LLM rollouts."""
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 import torch
 
+from agilerl.typing import ReasoningPrompts
+from agilerl.utils.llm_utils import is_reasoning_prompts
+
 if TYPE_CHECKING:
-    from agilerl.protocols import MultiTurnEnv
-    from agilerl.typing import ReasoningPrompts
+    from agilerl.protocols import TokenizedMultiTurnEnv
+
+
+def _as_prompt(obs: str | Mapping[str, object]) -> ReasoningPrompts:
+    """Read a multi-turn observation as a tokenized prompt.
+
+    :param obs: The observation returned by the wrapped environment.
+    :type obs: str | Mapping[str, object]
+    :returns: The observation as a tokenized prompt.
+    :rtype: ReasoningPrompts
+    """
+    if isinstance(obs, str):
+        msg = "SyncMultiTurnVecEnv expects tokenized prompt observations, got str"
+        raise TypeError(msg)
+    if not is_reasoning_prompts(obs):
+        msg = "SyncMultiTurnVecEnv expects ReasoningPrompts observations"
+        raise TypeError(msg)
+    return obs
 
 
 @dataclass
 class Trajectory:
     """State for one environment rollout within a synchronized vector batch.
 
-    :param env: The multi-turn environment this trajectory steps.
-    :type env: MultiTurnEnv
+    :param env: The tokenized multi-turn environment this trajectory steps.
+    :type env: TokenizedMultiTurnEnv
     :param batch_idx: Index of the logical batch item this trajectory belongs to.
     :type batch_idx: int
     :param group_idx: Index of this trajectory within its group (the buffer holds
@@ -34,7 +56,7 @@ class Trajectory:
     :type sampling_logps: list[torch.Tensor]
     """
 
-    env: MultiTurnEnv
+    env: TokenizedMultiTurnEnv
     batch_idx: int
     group_idx: int
     prompt: ReasoningPrompts
@@ -45,7 +67,7 @@ class Trajectory:
 class TrajectoryBuffer:
     """Container for synchronized rollout trajectories."""
 
-    def __init__(self, batch_size: int, group_size: int):
+    def __init__(self, batch_size: int, group_size: int) -> None:
         """Initialize an empty trajectory buffer.
 
         :param batch_size: Number of logical batch items.
@@ -128,7 +150,7 @@ class TrajectoryBuffer:
             )
             raise IndexError(msg)
         prompt_dict, _ = self.trajectories[env_idx].env.reset(seed=seed)
-        self.trajectories[env_idx].prompt = prompt_dict
+        self.trajectories[env_idx].prompt = _as_prompt(prompt_dict)
         self.trajectories[env_idx].done = False
         self.trajectories[env_idx].sampling_logps.clear()
 
@@ -148,15 +170,15 @@ class SyncMultiTurnVecEnv:
 
     def __init__(
         self,
-        env_factory: Callable[..., MultiTurnEnv],
+        env_factory: Callable[..., TokenizedMultiTurnEnv],
         batch_size: int,
         group_size: int,
         env_config: dict[str, Any] | None = None,
-    ):
+    ) -> None:
         """Create ``batch_size * group_size`` independent environments.
 
-        :param env_factory: Factory that builds one multi-turn environment.
-        :type env_factory: Callable[..., MultiTurnEnv]
+        :param env_factory: Factory that builds one tokenized multi-turn environment.
+        :type env_factory: Callable[..., TokenizedMultiTurnEnv]
         :param batch_size: Number of logical batch items.
         :type batch_size: int
         :param group_size: Number of grouped trajectories per batch item.
@@ -206,7 +228,7 @@ class SyncMultiTurnVecEnv:
                             env=env_i,
                             batch_idx=batch_idx,
                             group_idx=group_idx,
-                            prompt=prompt_dict,
+                            prompt=_as_prompt(prompt_dict),
                             done=False,
                         )
                     )
@@ -256,7 +278,7 @@ class SyncMultiTurnVecEnv:
             )
             traj.done = bool(terminated or truncated)
             if not traj.done:
-                traj.prompt = next_prompt
+                traj.prompt = _as_prompt(next_prompt)
         return self.trajectories.get_prompts()
 
     def close(self) -> None:

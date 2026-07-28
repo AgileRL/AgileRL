@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 """Value head smoke test: constant reward through the LLMPPO learn path."""
 
 from __future__ import annotations
@@ -43,11 +46,9 @@ def get_terminal_values(
     stacked_ids = stacked_ids.to(agent.device)
     stacked_masks = stacked_masks.to(agent.device)
 
-    _, values = agent._get_logprobs_and_values(
+    _, _, values = agent._fused_forward_no_grad(
         stacked_ids,
         batch_size=stacked_ids.shape[0],
-        use_reference=False,
-        eval_mode=True,
     )
 
     last_action_idx = stacked_masks.long().cumsum(dim=1).argmax(dim=1)
@@ -65,7 +66,7 @@ def main(cfg: dict) -> None:
 
     torch.manual_seed(0)
     tokenizer = TinyDigitTokenizer()
-    actor_network = build_tiny_actor_network()
+    actor_network = build_tiny_actor_network(use_value_head=True)
     train_dataset, test_dataset = make_dataset(int(dbg["dataset_size"]))
 
     conversation_template = [
@@ -125,7 +126,8 @@ def main(cfg: dict) -> None:
 
     prompts = env.reset(reset_dataloaders=True)
     with torch.no_grad():
-        init_ids, init_masks = agent.get_action(prompts, training=False)
+        init_result = agent.get_action(prompts, training=False)
+        init_ids, init_masks = init_result.completion_ids, init_result.action_masks
         init_values = get_terminal_values(agent, init_ids, init_masks)
 
     init_mean = float(init_values.mean().item())
@@ -138,17 +140,21 @@ def main(cfg: dict) -> None:
 
     for step in range(num_steps):
         agent.set_reference_policy(env.num_epochs)
-        completion_ids, action_masks = agent.get_action(prompts)
+        rollout = agent.get_action(prompts)
+        completion_ids, action_masks = rollout.completion_ids, rollout.action_masks
         next_prompts, rewards = env.step(completion_ids)
 
-        loss, kl, pg_loss, vf_loss, entropy = agent.learn(
+        metrics = agent.learn(
             (completion_ids, action_masks, rewards),
+            sampling_logps=rollout.sampling_logps,
         )
+        vf_loss = metrics["vf_loss"]
         prompts = next_prompts
 
         if (step + 1) % log_interval == 0:
             with torch.no_grad():
-                snap_ids, snap_masks = agent.get_action(prompts, training=False)
+                snap = agent.get_action(prompts, training=False)
+                snap_ids, snap_masks = snap.completion_ids, snap.action_masks
                 snap_values = get_terminal_values(agent, snap_ids, snap_masks)
             print(
                 f"[value-debug] step {step + 1:4d} | "
@@ -158,7 +164,11 @@ def main(cfg: dict) -> None:
             )
 
     with torch.no_grad():
-        final_ids, final_masks = agent.get_action(prompts, training=False)
+        final_result = agent.get_action(prompts, training=False)
+        final_ids, final_masks = (
+            final_result.completion_ids,
+            final_result.action_masks,
+        )
         final_values = get_terminal_values(agent, final_ids, final_masks)
 
     final_mean = float(final_values.mean().item())

@@ -1,9 +1,15 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
+from __future__ import annotations
+
 from collections.abc import Callable
-from typing import Any, Literal, TypeVar, get_args
+from typing import TYPE_CHECKING, Any, Literal, TypeVar, get_args, overload
 
 from gymnasium import spaces
 from pydantic import (
     BaseModel,
+    ConfigDict,
     Field,
     SerializationInfo,
     field_serializer,
@@ -13,7 +19,12 @@ from typing_extensions import Self
 
 from agilerl import HAS_LLM_DEPENDENCIES
 
-LoraConfig = None
+if TYPE_CHECKING:
+    from peft import LoraConfig
+else:
+    # peft is optional and LoraConfig is not a pydantic type; at runtime it is
+    # Any so the field annotation stays resolvable without peft installed.
+    LoraConfig = Any
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -65,7 +76,11 @@ def network_arch_is_resolvable(network: dict) -> bool:
     return isinstance(encoder_config, dict) and bool(encoder_config.get("arch"))
 
 
-def normalize_manifest_network(data: Any) -> Any:
+@overload
+def normalize_manifest_network(data: dict[str, Any]) -> dict[str, Any]: ...
+@overload
+def normalize_manifest_network(data: object) -> object: ...
+def normalize_manifest_network(data: object) -> object:
     """Move a top-level ``arch`` key into ``encoder_config.arch`` when present.
 
     Raw YAML/JSON manifests place ``arch`` at the network section root, but
@@ -472,13 +487,19 @@ def _peft_lora_config_to_manifest_dict(cfg: LoraConfig) -> dict[str, Any]:
 class FinetuningNetworkSpec(BaseModel):
     """Model specification for LLM finetuning networks."""
 
+    # Allow arbitrary types so the resolved peft ``LoraConfig`` (Any at runtime,
+    # the real type under TYPE_CHECKING) can live in the ``lora_config`` field.
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
     pretrained_model_name_or_path: str = Field(..., min_length=1)
     max_context_length: int = Field(..., ge=1)
-    lora_config: LoraConfigDict | None = Field(default=None)
+    # Validated from a manifest ``LoraConfigDict``; ``_resolve_lora_config``
+    # replaces it in place with the peft ``LoraConfig`` after validation.
+    lora_config: LoraConfigDict | LoraConfig | None = Field(default=None)
 
     @model_validator(mode="before")
     @classmethod
-    def _coerce_peft_lora(cls, data: Any) -> Any:
+    def _coerce_peft_lora(cls, data: Any) -> Any:  # noqa: ANN401 -- pydantic before-validator; raw input may be a non-JSON peft LoraConfig instance
         """Accept a peft ``LoraConfig`` instance and convert it to a dict
         that Pydantic can validate as :class:`LoraConfigDict`.
         """
@@ -505,7 +526,9 @@ class FinetuningNetworkSpec(BaseModel):
         return self
 
     @field_serializer("lora_config")
-    def _serialize_lora_config(self, value: Any, info: SerializationInfo) -> Any:
+    def _serialize_lora_config(
+        self, value: LoraConfigDict | LoraConfig | None, info: SerializationInfo
+    ) -> LoraConfigDict | LoraConfig | dict[str, Any] | None:
         if info.mode != "json":
             return value
         if value is None:

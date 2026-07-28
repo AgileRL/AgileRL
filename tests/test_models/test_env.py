@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
@@ -799,6 +802,20 @@ class TestBanditEnvSpecExtended:
         assert data["features"] is None
         assert data["targets"] is None
 
+    def test_make_env_dataset_mode_missing_targets_raises(self):
+        import pandas as pd
+
+        features = pd.DataFrame(np.random.randn(5, 3).astype(np.float32))
+        # The "features + targets together" validator normally blocks this;
+        # model_construct bypasses it to reach make_env's dataset-mode guard.
+        spec = BanditEnvSpec.model_construct(features=features)
+        assert spec.targets is None
+        assert spec.entrypoint is None
+        with pytest.raises(
+            ValueError, match="Both 'features' and 'targets' are required"
+        ):
+            spec.make_env()
+
 
 # ---------------------------------------------------------------------------
 # LLM Multiturn
@@ -996,6 +1013,16 @@ class TestLLMEnvSpecMultiturn:
 
         assert spec.max_turns == 12
 
+    def test_factory_requires_env_name_or_entrypoint(self):
+        # A validated multiturn spec always has exactly one of env_name /
+        # entrypoint; model_construct bypasses that validator so we can reach
+        # the factory's own defensive guard for the missing-both state.
+        spec = LLMEnvSpec.model_construct(env_type=LLMEnvType.MULTITURN)
+        assert spec.env_name is None
+        assert spec.entrypoint is None
+        with pytest.raises(ValueError, match="Exactly one of env_name or entrypoint"):
+            spec.make_multiturn_env_factory(MagicMock())
+
     def test_dataset_still_required_for_reasoning(self):
         with pytest.raises(ValueError, match="dataset is required"):
             LLMEnvSpec(
@@ -1011,6 +1038,45 @@ class TestLLMEnvSpecMultiturn:
             env_name="game:Test-v0",
         )
         assert spec.dataset is None
+
+
+class TestLLMEnvSpecLoadDataset:
+    """Defensive ``dataset is None`` guards in the private dataset loaders."""
+
+    def _spec_without_dataset(self) -> LLMEnvSpec:
+        spec = LLMEnvSpec(env_type=LLMEnvType.MULTITURN, env_name="game:Test-v0")
+        assert spec.dataset is None
+        return spec
+
+    def test_load_dataset_requires_dataset(self):
+        spec = self._spec_without_dataset()
+        with pytest.raises(ValueError, match="dataset is required to load"):
+            spec._load_dataset()
+
+    def test_load_dataset_hf_requires_dataset(self):
+        spec = self._spec_without_dataset()
+        with pytest.raises(ValueError, match="dataset is required to load"):
+            spec._load_dataset_hf()
+
+    def test_load_dataset_file_requires_dataset(self):
+        spec = self._spec_without_dataset()
+        with pytest.raises(ValueError, match="dataset is required to load"):
+            spec._load_dataset_file()
+
+
+class TestLLMEnvSpecMakeReasoningEnv:
+    """Defensive guard in ``_make_reasoning_env`` for missing reward fields."""
+
+    def test_missing_reward_fields_raises(self):
+        # A multiturn spec has reward_fn_name / reward_file_path /
+        # prompt_template all None; the reasoning builder's guard rejects it
+        # before the (mocked) datasets/tokenizer are ever used.
+        spec = LLMEnvSpec(env_type=LLMEnvType.MULTITURN, env_name="game:Test-v0")
+        with pytest.raises(
+            ValueError,
+            match="reward_fn_name, reward_file_path, and prompt_template",
+        ):
+            spec._make_reasoning_env(MagicMock(), MagicMock(), MagicMock())
 
 
 class TestRequireDatasets:

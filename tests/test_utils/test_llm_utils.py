@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 import json
 import logging
 import re
@@ -66,6 +69,7 @@ from agilerl.utils.llm_utils import (
     pool_log_ratio_by_level,
     remap_peft_lora_key_for_vllm,
     resolve_attn_implementation,
+    resolve_llm_device,
     resolve_vllm_max_lora_rank,
     resolve_vllm_max_num_batched_tokens,
     sample_eval_prompts,
@@ -173,6 +177,41 @@ class TestStitchCompletionAfterWindowedVllmGenerate:
             prompts=[{}],
         )
         assert torch.equal(out[0], torch.tensor([[10, 99, 98, 11, 12, 13]]))
+
+    @pytest.mark.parametrize(
+        "initial_prompt_len",
+        [1, torch.tensor(1), [1]],
+        ids=["int", "tensor", "list"],
+    )
+    def test_accepts_scalar_tensor_or_list_initial_prompt_len(self, initial_prompt_len):
+        out = stitch_completion_after_windowed_vllm_generate(
+            completion_ids=[torch.tensor([[10, 11, 12, 13]], dtype=torch.long)],
+            stitch_prefixes=[torch.tensor([[99, 98]], dtype=torch.long)],
+            group_prompts=[{"initial_prompt_len": initial_prompt_len}],
+            group_size=1,
+            prompts=[{}],
+        )
+        assert torch.equal(out[0], torch.tensor([[10, 99, 98, 11, 12, 13]]))
+
+    def test_rejects_empty_initial_prompt_len_list(self):
+        with pytest.raises(ValueError, match="initial_prompt_len list is empty"):
+            stitch_completion_after_windowed_vllm_generate(
+                completion_ids=[torch.tensor([[10, 11]], dtype=torch.long)],
+                stitch_prefixes=[torch.tensor([[99]], dtype=torch.long)],
+                group_prompts=[{"initial_prompt_len": []}],
+                group_size=1,
+                prompts=[{}],
+            )
+
+    def test_requires_initial_prompt_len_when_stitching(self):
+        with pytest.raises(ValueError, match="initial_prompt_len required"):
+            stitch_completion_after_windowed_vllm_generate(
+                completion_ids=[torch.tensor([[10, 11]], dtype=torch.long)],
+                stitch_prefixes=[torch.tensor([[99]], dtype=torch.long)],
+                group_prompts=[{}],
+                group_size=1,
+                prompts=[{}],
+            )
 
     def test_broadcasts_single_stitch_row_across_group_rows(self):
         completion_ids = [torch.tensor([[1, 2, 7], [3, 4, 8]], dtype=torch.long)]
@@ -1051,7 +1090,7 @@ class TestPreferenceGymInit:
 
 
 def test_llm_utils_fallback_types_when_no_llm_dependencies():
-    """Test that llm_utils sets type aliases to Any when HAS_LLM_DEPENDENCIES is False."""
+    """Test that llm_utils sets fallback sentinels when HAS_LLM_DEPENDENCIES is False:"""
     import agilerl.utils as agilerl_utils_pkg
 
     # Remove the module from cache to force reimport
@@ -1063,10 +1102,12 @@ def test_llm_utils_fallback_types_when_no_llm_dependencies():
             # Reimport the module - it will see HAS_LLM_DEPENDENCIES as False
             import agilerl.utils.llm_utils as llm_utils_reloaded
 
-            # Verify the fallback type aliases are set to Any
+            # Verify the fallback sentinels
             assert llm_utils_reloaded.PreTrainedModel is Any
             assert llm_utils_reloaded.Dataset is Any
-            assert llm_utils_reloaded.AutoModelForCausalLM is Any
+            assert llm_utils_reloaded.AutoModelForCausalLM is None
+            assert llm_utils_reloaded.AutoModelForCausalLMWithValueHead is None
+            assert llm_utils_reloaded.BitsAndBytesConfig is None
     finally:
         # Restore original module to avoid affecting other tests. Both the
         # sys.modules entry AND the parent-package attribute have to be
@@ -1314,6 +1355,47 @@ class TestLlmUtilsDeprecatedReexports:
         d = dir(llm_utils_module)
         assert "ReasoningGym" in d
         assert "PreferenceGym" in d
+
+
+class TestResolveLlmDevice:
+    """Accelerator outranks an explicit device, which outranks auto-detection."""
+
+    def test_accelerator_gives_the_ranks_device(self):
+        accelerator = MagicMock()
+        accelerator.process_index = 3
+        assert resolve_llm_device(accelerator) == "cuda:3"
+
+    def test_accelerator_outranks_an_explicit_device(self):
+        # A bare "cuda" from the caller would otherwise collapse every rank
+        # onto device 0.
+        accelerator = MagicMock()
+        accelerator.process_index = 2
+        assert resolve_llm_device(accelerator, "cuda") == "cuda:2"
+
+    def test_explicit_device_used_without_accelerator(self):
+        with patch("torch.cuda.is_available", return_value=True):
+            assert resolve_llm_device(None, "cpu") == "cpu"
+
+    def test_torch_device_is_stringified(self):
+        assert resolve_llm_device(None, torch.device("cuda", 1)) == "cuda:1"
+
+    def test_cuda_preferred_when_nothing_requested(self):
+        with patch("torch.cuda.is_available", return_value=True):
+            assert resolve_llm_device(None) == "cuda"
+
+    def test_mps_used_when_cuda_unavailable(self):
+        with (
+            patch("torch.cuda.is_available", return_value=False),
+            patch("torch.backends.mps.is_available", return_value=True),
+        ):
+            assert resolve_llm_device(None) == "mps"
+
+    def test_cpu_when_no_accelerator_available(self):
+        with (
+            patch("torch.cuda.is_available", return_value=False),
+            patch("torch.backends.mps.is_available", return_value=False),
+        ):
+            assert resolve_llm_device(None) == "cpu"
 
 
 def test_move_params_helpers_call_model_move_and_cuda_sync():
@@ -1607,6 +1689,17 @@ class TestPreparePromptHfGenerateTensorInitialLen:
         assert out["initial_prompt_len"] == 2
         assert isinstance(out["initial_prompt_len"], int)
 
+    def test_list_initial_prompt_len_takes_first(self) -> None:
+        from agilerl.utils.llm_utils import prepare_prompt_hf_generate
+
+        prompt = {
+            "input_ids": torch.tensor([[1, 2, 3, 4]], dtype=torch.long),
+            "attention_mask": torch.tensor([[1, 1, 1, 1]], dtype=torch.long),
+            "initial_prompt_len": [3, 7],
+        }
+        out = prepare_prompt_hf_generate(prompt, torch.device("cpu"))
+        assert out["initial_prompt_len"] == 3
+
 
 class TestGetModelNameOrPathBaseModelBranches:
     """``get_model_name_or_path`` falls through several optional attribute
@@ -1898,6 +1991,14 @@ class TestProjectionNameResolution:
         assert (
             llm_utils_module._projection_names_for_clippable_lora(
                 _PlainLinearModel(), r".*\.q_proj"
+            )
+            is None
+        )
+
+    def test_none_targets_returns_none(self):
+        assert (
+            llm_utils_module._projection_names_for_clippable_lora(
+                _PlainLinearModel(), None
             )
             is None
         )

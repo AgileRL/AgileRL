@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 """Running bundle shell scripts locally, with quiet-on-success capture."""
 
 from __future__ import annotations

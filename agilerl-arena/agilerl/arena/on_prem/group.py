@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 """Capability-gated Click groups for the ``arena on-prem`` command tree.
 
 ``ArenaRootGroup`` hides ``on-prem`` at the CLI root unless capabilities grant
@@ -12,6 +15,7 @@ import logging
 from typing import Any
 
 import click
+
 from agilerl.arena.cli_manifest import attach_manifest_tree
 from agilerl.arena.config import (
     CommandConfig,

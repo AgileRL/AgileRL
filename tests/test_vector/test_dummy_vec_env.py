@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 """Comprehensive tests for DummyVecEnv and PzDummyVecEnv."""
 
 from __future__ import annotations
@@ -6,6 +9,7 @@ from typing import Any, ClassVar
 from unittest.mock import MagicMock
 
 import numpy as np
+import numpy.typing as npt
 import pytest
 from gymnasium import spaces
 
@@ -29,11 +33,11 @@ class FakeGymEnv:
 
     def reset(
         self, *, seed: int | None = None, options: dict | None = None
-    ) -> tuple[np.ndarray, dict]:
+    ) -> tuple[npt.NDArray, dict]:
         self._step_count = 0
         return np.ones(self.observation_space.shape, dtype=np.float32), {"seed": seed}
 
-    def step(self, action: int) -> tuple[np.ndarray, float, bool, bool, dict]:
+    def step(self, action: int) -> tuple[npt.NDArray, float, bool, bool, dict]:
         self._step_count += 1
         obs = np.full(self.observation_space.shape, float(action), dtype=np.float32)
         done = self._step_count >= 5
@@ -260,7 +264,13 @@ class TestDummyVecEnvStep:
 class TestDummyVecEnvMisc:
     def test_render_delegates(self):
         env = DummyVecEnv(FakeGymEnv())
-        assert env.render() == "frame"
+        # VectorEnv.render returns one tuple element per sub-env.
+        assert env.render() == ("frame",)
+
+    def test_render_passes_through_none(self):
+        inner = FakeGymEnv()
+        inner.render = lambda: None
+        assert DummyVecEnv(inner).render() is None
 
     def test_close_delegates(self):
         inner = MagicMock()

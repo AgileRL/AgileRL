@@ -40,8 +40,17 @@ To make a code contribution:
 3. Do the changes in your fork.
 4. Run the tests with `pytest tests`
 5. Make the test pass.
-6. Commit your changes. Please use an appropriate commit prefix. If your pull request fixes an issue specify it in the commit message.
-7. Push to your fork and submit a pull request **to the `nightly` branch**. Please provide us with some explanation of why you made the changes you made. For new features make sure to explain a standard use case to us.
+6. Run the type checker with `just typecheck` (or `uv run ty check agilerl agilerl/arena`) and fix any errors it reports.
+7. Commit your changes. Please use an appropriate commit prefix. If your pull request fixes an issue specify it in the commit message.
+8. Push to your fork and submit a pull request **to the `nightly` branch**. Please provide us with some explanation of why you made the changes you made. For new features make sure to explain a standard use case to us.
+
+#### Type checking
+AgileRL is type-checked with [`ty`](https://docs.astral.sh/ty/) and ships `py.typed` markers, so the public API's annotations are part of the released package. The configuration lives in `pyproject.toml` under `[tool.ty]`: the whole `agilerl` package is checked strictly. The `Type checks` GitHub workflow blocks PRs on new type errors, so run `just typecheck` before pushing.
+
+Prefer fixing types at the source — tighter annotations, `@overload`s, or a small typed wrapper — over narrowing with `cast()` / `assert isinstance(...)`, or suppressing with `# ty: ignore`. Reach for a suppression only for genuine third-party or stub gaps, and justify it with an inline comment.
+
+#### Naming conventions
+Avoid leading-underscore "private" names unless the privacy is genuinely meaningful (e.g. a helper defined *inside* another function). Module-level classes, functions, type aliases, and `TypeVar`s should use plain public names even when they are only referenced within their own module — a leading underscore reads as "deliberately hidden", so reserve it for cases where that is actually true.
 
 #### Pre-commit hooks
 Checks will be run automatically by the CI on code pushed to the AgileRL repository. These checks can also be run locally with the following steps:

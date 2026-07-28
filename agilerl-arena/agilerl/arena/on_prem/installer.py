@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 """Provider-specific install/teardown orchestration.
 
 :class:`OnPremInstaller` holds the shared install/teardown flow (enable, require
@@ -22,6 +25,7 @@ from pathlib import Path
 from typing import ClassVar
 
 import click
+
 from agilerl.arena.client import ArenaClient
 from agilerl.arena.on_prem.api import OnPremApi
 from agilerl.arena.on_prem.bundle import (

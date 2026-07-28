@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for SshTarget parsing and SshExecutor dispatch."""
 
 from __future__ import annotations
@@ -5,8 +8,9 @@ from __future__ import annotations
 from unittest.mock import MagicMock, patch
 
 import pytest
-from agilerl.arena.on_prem.ssh import SshExecutor, SshTarget
 from click import ClickException
+
+from agilerl.arena.on_prem.ssh import SshExecutor, SshTarget
 
 
 class TestSshTarget:

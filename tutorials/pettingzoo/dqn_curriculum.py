@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 """This tutorial shows how to train a DQN agent on the connect four environment, using curriculum learning and self play.
 
 Author: Nick (https://github.com/nicku-a)

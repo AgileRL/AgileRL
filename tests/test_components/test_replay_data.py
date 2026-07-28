@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 import numpy as np
 import pytest
 import torch
@@ -93,7 +96,7 @@ class TestTransitionPostInit:
         assert "tuple_obs_1" in obs_td
 
     def test_transition_tuple_observation_invalid_element_raises(self):
-        with pytest.raises(AssertionError, match="Expected all elements of the tuple"):
+        with pytest.raises(TypeError):
             Transition(
                 obs=(np.array([1.0]), object()),
                 action=0,
@@ -139,8 +142,19 @@ class TestToTensordict:
         assert td.dtype == torch.float32
 
     def test_to_tensordict_dict_invalid_value_raises(self):
-        with pytest.raises(AssertionError, match="Expected all values of the dict"):
+        with pytest.raises(TypeError):
             to_tensordict({"a": np.array([1.0]), "b": "invalid"})
+
+    def test_to_tensordict_tensordict_input_recasts_dtype(self):
+        """An existing TensorDict is returned recast to the requested dtype."""
+        td = to_tensordict({"a": np.array([1.0, 2.0])}, dtype=torch.float64)
+        recast = to_tensordict(td, dtype=torch.float32)
+        assert recast["a"].dtype == torch.float32
+
+    def test_to_tensordict_unconvertible_type_raises(self):
+        """A value that is not a TensorDict, tuple, or dict raises TypeError."""
+        with pytest.raises(TypeError, match="Cannot convert data of type"):
+            to_tensordict(42)
 
 
 class TestToTorchTensor:

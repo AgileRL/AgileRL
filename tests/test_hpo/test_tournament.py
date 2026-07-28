@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 from unittest.mock import MagicMock
 
 import numpy as np
@@ -249,10 +252,11 @@ class TestTournamentSelectionSelect:
         reason="Need to install agilerl with deepspeed + vllm",
     )
     @pytest.mark.parametrize("use_accelerator", [True, False])
-    @pytest.mark.parametrize("elitism", [True, False])
     @pytest.mark.parametrize("num_processes", [1, 2])
-    def test_language_model_tournament(self, use_accelerator, elitism, num_processes):
-        tournament_selection = TournamentSelection(3, elitism, 4)
+    def test_language_model_tournament(self, use_accelerator, num_processes):
+        # LLM populations require elitism; the elitism=False path is rejected and
+        # covered separately by test_llm_without_elitism_rejected.
+        tournament_selection = TournamentSelection(3, True, 4)
         population_size = 4
 
         init_hp = {
@@ -335,9 +339,9 @@ class TestTournamentSelectionSelect:
 
         for agent in population:
             # Create a mock clone that returns a new mock agent
-            def mock_clone(new_idx, wrap=False, _agent=agent):
+            def mock_clone(index=None, wrap=False, _agent=agent):
                 mock_agent = MagicMock()
-                mock_agent.index = new_idx
+                mock_agent.index = index
                 mock_agent.accelerator = accelerator
                 mock_agent.clean_up = MagicMock()
                 mock_agent.fitness = _agent.fitness
@@ -426,6 +430,16 @@ class TestTournamentSelectionSelect:
 
         assert llm_called["value"] is True
         assert std_called["value"] is False
+
+    def test_llm_without_elitism_rejected(self):
+        """LLM populations require elitism. ``select`` raises ``ValueError``"""
+        population = [MagicMock()]
+
+        tournament_selection = TournamentSelection(3, False, 4)
+        tournament_selection.language_model = True
+
+        with pytest.raises(ValueError, match=r"elitism=False.*not supported"):
+            tournament_selection.select(population)
 
 
 class TestTournamentSelectionTournament:

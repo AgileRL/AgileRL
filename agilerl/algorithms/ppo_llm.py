@@ -1,8 +1,14 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
+from __future__ import annotations
+
 import warnings
 from contextlib import nullcontext
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
+import numpy.typing as npt
 import torch
 from accelerate import Accelerator
 
@@ -12,7 +18,10 @@ from agilerl.algorithms.core.llm_ops.fused_lora import unset_fused_adapter_routi
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
 from agilerl.llm_envs import ReasoningGym
 
-if HAS_LIGER_KERNEL:
+if TYPE_CHECKING:
+    from peft import LoraConfig
+
+if HAS_LIGER_KERNEL or TYPE_CHECKING:
     from agilerl.algorithms.core.llm_ops.fused_loss import (
         LigerFusedLinearPolicyLossFunction,
         apply_fused_policy_loss,
@@ -23,12 +32,11 @@ else:
     LigerFusedLinearPolicyLossFunction = None  # type: ignore[assignment]
     apply_fused_policy_loss = None  # type: ignore[assignment]
 from agilerl.protocols import (
-    LoraConfigProtocol,
-    MultiTurnEnv,
     PeftModelProtocol,
     PreTrainedModelProtocol,
+    TokenizedMultiTurnEnv,
 )
-from agilerl.typing import ExperiencesType, LLMObsType
+from agilerl.typing import LLMObsType, LLMRolloutExperiences
 from agilerl.utils.algo_utils import (
     CosineLRScheduleConfig,
     VLLMConfig,
@@ -41,11 +49,13 @@ from agilerl.utils.llm_utils import (
     build_completion_mask,
     calculate_k3_kl,
     clipped_is_surrogate,
+    is_reasoning_prompts,
     masked_mean,
     masked_whiten,
     normalize_reasoning_prompt_batch,
     pool_by_turns,
     prepare_prompt_hf_generate,
+    resolve_llm_device,
     stitch_completion_after_windowed_hf_generate,
     validate_importance_sampling_level,
     validate_llm_context_lengths,
@@ -55,7 +65,7 @@ if HAS_LLM_DEPENDENCIES:
     from transformers import GenerationConfig
 
 
-class PPO(LLMAlgorithm):
+class PPO(LLMAlgorithm[LLMRolloutExperiences]):
     """Turn-level PPO for LLM finetuning with actor/reference adapters.
 
     Each generation sequence (turn) is treated as a single RL action.
@@ -117,17 +127,18 @@ class PPO(LLMAlgorithm):
     :param min_output_tokens: Minimum newly generated tokens per completion.
     :type min_output_tokens: int | None, optional
     :param max_model_len: Maximum model context length.
-    :type max_model_len: int | None, optional
+    :type max_model_len: int, optional
     :param hf_generate_chunk_size: Number of prompts per HuggingFace generation chunk.
         Ignored when ``use_vllm=True``.
     :type hf_generate_chunk_size: int | None, optional
     :param lora_config: LoRA configuration.
-    :type lora_config: LoraConfigProtocol | None, optional
+    :type lora_config: LoraConfig | None, optional
     :param cosine_lr_schedule_config: Cosine LR scheduler configuration.
     :type cosine_lr_schedule_config: CosineLRScheduleConfig | None, optional
     :param accelerator: Optional HuggingFace ``Accelerator`` instance.
     :type accelerator: Accelerator | None, optional
-    :param device: Device string used when no accelerator is provided.
+    :param device: Device to train on. Ignored when an accelerator is given (each rank
+        owns its own GPU); ``None`` auto-detects CUDA/MPS/CPU.
     :type device: str, optional
     :param wrap: Whether to wrap models for distributed execution.
     :type wrap: bool, optional
@@ -246,7 +257,7 @@ class PPO(LLMAlgorithm):
         pad_token_id: int,
         pad_token: str,
         model_name: str | None = None,
-        actor_network: Any | None = None,
+        actor_network: PreTrainedModelProtocol | None = None,
         model_config: dict[str, Any] | None = None,
         hp_config: HyperparameterConfig | None = None,
         index: int = 0,
@@ -270,12 +281,12 @@ class PPO(LLMAlgorithm):
         micro_batch_size_per_gpu: int | None = None,
         max_output_tokens: int | None = None,
         min_output_tokens: int | None = None,
-        max_model_len: int | None = 1024,
+        max_model_len: int = 1024,
         hf_generate_chunk_size: int | None = None,
-        lora_config: LoraConfigProtocol | None = None,
+        lora_config: LoraConfig | None = None,
         cosine_lr_schedule_config: CosineLRScheduleConfig | None = None,
         accelerator: Accelerator | None = None,
-        device: str = "cpu",
+        device: str | torch.device | None = None,
         wrap: bool = True,
         clone: bool = False,
         use_vllm: bool = False,
@@ -305,9 +316,7 @@ class PPO(LLMAlgorithm):
         vllm_importance_sampling_cap: float = 2.0,
     ) -> None:
 
-        device = (
-            f"cuda:{accelerator.process_index}" if accelerator is not None else device
-        )
+        resolved_device = resolve_llm_device(accelerator, device)
         super().__init__(
             index=index,
             batch_size=batch_size,
@@ -333,7 +342,7 @@ class PPO(LLMAlgorithm):
             hp_config=hp_config,
             use_memory_efficient_params=use_memory_efficient_params,
             wrap=wrap,
-            device=device,
+            device=resolved_device,
             accelerator=accelerator,
             name="LLMPPO",
             gradient_checkpointing=gradient_checkpointing,
@@ -450,10 +459,13 @@ class PPO(LLMAlgorithm):
                             prompt = prepare_prompt_hf_generate(
                                 prompt_dict, actor_device
                             )
-                            stitch_ids = prompt.pop("stitch_prefix_ids", None)
-                            initial_prompt_len = prompt.pop("initial_prompt_len", None)
+                            input_ids = prompt["input_ids"]
+                            attention_mask = prompt["attention_mask"]
+                            stitch_ids = prompt["stitch_prefix_ids"]
+                            initial_prompt_len = prompt["initial_prompt_len"]
                             completion_id = self.actor.generate(
-                                **prompt,
+                                input_ids=input_ids,
+                                attention_mask=attention_mask,
                                 generation_config=self.generation_config,
                             )
                             completion_id, full_prompt_len = (
@@ -478,6 +490,8 @@ class PPO(LLMAlgorithm):
                     completion_masks,
                     sampling_logps,
                 ) = self._generate_with_vllm_colocate(
+                    # ReasoningPrompts is a TypedDict, i.e. a plain dict at
+                    # runtime; the base helper takes untyped prompt dicts.
                     prompt_batch,
                     1,
                     temperature=self.temperature
@@ -488,9 +502,19 @@ class PPO(LLMAlgorithm):
 
         return ActionResult(completion_ids, completion_masks, sampling_logps)
 
+    if TYPE_CHECKING:
+        # PPO always trains with a value head, so the fused forward always
+        # returns critic values; narrow the base ``Tensor | None`` here.
+        def _fused_forward(
+            self,
+            ids: torch.Tensor,
+            batch_size: int,
+            attention_mask: torch.Tensor | None = None,
+        ) -> tuple[torch.Tensor, torch.Tensor]: ...
+
     def learn(
         self,
-        experiences: ExperiencesType,
+        experiences: LLMRolloutExperiences,
         turn_ids: torch.Tensor | None = None,
         sampling_logps: list[torch.Tensor | None] | None = None,
     ) -> dict[str, float]:
@@ -499,7 +523,7 @@ class PPO(LLMAlgorithm):
         :param experiences: ``(completion_ids, action_masks, rewards)``. For
             single-turn, ``rewards`` is a flat tensor of scalars; for multi-turn,
             shape ``[batch, max_turns]`` per-turn rewards.
-        :type experiences: ExperiencesType
+        :type experiences: LLMRolloutExperiences
         :param turn_ids: Optional ``[batch, seq_len - 1]`` tensor of turn indices;
             ``-1`` for non-action tokens. If ``None``, all action tokens are turn ``0``.
         :type turn_ids: torch.Tensor | None
@@ -560,6 +584,8 @@ class PPO(LLMAlgorithm):
                     batch_size=batch_size,
                 )
             )
+            # PPO always trains with a value head, so critic values are present.
+            assert old_values is not None
             old_values = torch.masked_fill(old_values, ~action_mask_bool, 0.0)
 
             token_rewards = self._compute_token_rewards(
@@ -596,6 +622,9 @@ class PPO(LLMAlgorithm):
                     minibatch_idxs = batch_idxs[
                         start : min((start + batch_size), num_samples)
                     ]
+                    # ``get_experiences_samples`` indexes each input
+                    # positionally: Tensor in -> Tensor out, so the tuple
+                    # mirrors the all-Tensor inputs.
                     (
                         batch_ids,
                         batch_action_mask,
@@ -718,7 +747,7 @@ class PPO(LLMAlgorithm):
                     # Value loss granularity follows the GAE advantage axis
                     # (``ppo_granularity``), independent of the IS level.
                     if ppo_granularity == "turn":
-                        mb_num_turns = batch_turn_ids.max().item() + 1
+                        mb_num_turns = int(batch_turn_ids.max().item()) + 1
                         turn_pred = pool_by_turns(
                             batch_values,
                             batch_turn_ids,
@@ -779,8 +808,9 @@ class PPO(LLMAlgorithm):
         # they bypass the per-update averaging above.
         result.update(is_metrics)
 
-        # Wire averaged metrics into the metrics tracker (new API).
-        completion_length = np.mean([c.shape[-1] for c in experiences[0]])
+        # Wire averaged metrics into the metrics tracker.
+        completion_list = experiences[0]
+        completion_length = np.mean([c.shape[-1] for c in completion_list])
         agg = aggregate_metrics_dict(
             self.accelerator,
             {
@@ -801,12 +831,12 @@ class PPO(LLMAlgorithm):
 
     def test(
         self,
-        env: ReasoningGym | MultiTurnEnv,
+        env: ReasoningGym | TokenizedMultiTurnEnv,
         loop: int = 1,
         *args: Any,
         **kwargs: Any,
-    ) -> torch.Tensor:
-        """Return fitness (test) score tensor of llm on test sub-set.
+    ) -> npt.NDArray:
+        """Return fitness (test) score of llm on test sub-set.
 
         ``ReasoningGym`` (and compatible dataset envs): ``reset`` returns a batch
         of prompt dicts; each ``step`` accepts completion id tensors and returns
@@ -815,11 +845,11 @@ class PPO(LLMAlgorithm):
 
         :param env: A :class:`~agilerl.utils.llm_utils.ReasoningGym` or
             :class:`~agilerl.llm_envs.TokenObservationWrapper`.
-        :type env: ReasoningGym | MultiTurnEnv
+        :type env: ReasoningGym | TokenizedMultiTurnEnv
         :param loop: Number of outer test iterations (dataloader passes or episodes).
         :type loop: int
-        :return: Concatenated per-step rewards from the test loop.
-        :rtype: torch.Tensor
+        :return: Mean reward from the test loop (scalar numpy array).
+        :rtype: npt.NDArray
         """
         eval_context = getattr(env, "eval_mode", nullcontext)
         with eval_context():
@@ -834,7 +864,7 @@ class PPO(LLMAlgorithm):
                     prompts = next_prompts
                     rewards.append(reward)
                 reward_tensor = torch.cat(rewards)
-            elif isinstance(env, MultiTurnEnv):
+            elif isinstance(env, TokenizedMultiTurnEnv):
                 all_rewards: list[torch.Tensor] = []
                 for _ in range(loop):
                     prompt_dict, _info = env.reset()
@@ -845,9 +875,11 @@ class PPO(LLMAlgorithm):
                             training=False,
                         ).completion_ids
                         full = completion_ids[0]
-                        prompt_dict, reward, terminated, truncated, _info = env.step(
-                            full,
-                        )
+                        obs, reward, terminated, truncated, _info = env.step(full)
+                        # ``obs`` is the empty sentinel once the episode ends;
+                        # only live prompts feed the next turn.
+                        if is_reasoning_prompts(obs):
+                            prompt_dict = obs
                         all_rewards.append(
                             torch.tensor(
                                 [float(reward)],
@@ -859,7 +891,7 @@ class PPO(LLMAlgorithm):
             else:
                 msg = (
                     "env must be a ReasoningGym (or subclass) or "
-                    f"MultiTurnEnv; got {type(env).__name__}"
+                    f"TokenizedMultiTurnEnv; got {type(env).__name__}"
                 )
                 raise TypeError(msg)
         mean_fit = torch.mean(reward_tensor.float()).item()
@@ -874,7 +906,7 @@ class PPO(LLMAlgorithm):
         lr: float,
         clip_coef: float,
         update_epochs: int,
-        actor_network: Any | None,
+        actor_network: PreTrainedModelProtocol | None,
         clone: bool,
     ) -> None:
         """Validate the core training arguments."""
@@ -977,20 +1009,15 @@ class PPO(LLMAlgorithm):
         self,
         max_output_tokens: int | None,
         min_output_tokens: int | None,
-        max_model_len: int | None,
+        max_model_len: int,
         hf_generate_chunk_size: int | None,
     ) -> None:
         """Validate context lengths and build the HF generation config."""
-        if max_output_tokens is None and max_model_len is None:
-            msg = "Either max_output_tokens or max_model_len must be specified"
-            raise ValueError(msg)
         self.max_output_tokens = (
             max_output_tokens if max_output_tokens is not None else max_model_len
         )
         self.min_output_tokens = min_output_tokens
-        self.max_model_len = (
-            max_model_len if max_model_len is not None else max_output_tokens
-        )
+        self.max_model_len = max_model_len
         validate_llm_context_lengths(self.max_model_len, max_output_tokens)
         self.hf_generate_chunk_size = int(
             1 if hf_generate_chunk_size is None else max(1, hf_generate_chunk_size)
@@ -1116,7 +1143,7 @@ class PPO(LLMAlgorithm):
         :rtype: tuple[torch.Tensor, torch.Tensor]
         """
         batch_size = values.shape[0]
-        num_turns = turn_ids.max().item() + 1
+        num_turns = int(turn_ids.max().item()) + 1
 
         turn_values = pool_by_turns(
             values,

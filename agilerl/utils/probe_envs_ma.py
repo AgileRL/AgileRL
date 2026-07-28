@@ -1,16 +1,18 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 import random
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import numpy as np
+import numpy.typing as npt
 import torch
 from gymnasium import spaces
 from torch import nn
 from tqdm import trange
 
-from agilerl.components.data import MultiAgentTransition
-
-if TYPE_CHECKING:
-    from tensordict import TensorDictBase
+from agilerl.components.data import MultiAgentTransition, transition_to_tensordict
+from agilerl.components.replay_buffer import ReplayBuffer
 
 
 class ConstantRewardEnv:
@@ -48,7 +50,7 @@ class ConstantRewardEnv:
 
     def step(
         self,
-        action: dict[str, np.ndarray] | np.ndarray,
+        action: dict[str, npt.NDArray] | npt.NDArray,
     ) -> tuple[Any, Any, Any, Any, dict[str, Any]]:
         observation = {"agent_0": np.array([0]), "other_agent_0": np.array([0])}
         reward = {"agent_0": 1, "other_agent_0": 0}  # Constant reward of 1
@@ -105,7 +107,7 @@ class ConstantRewardImageEnv:
 
     def step(
         self,
-        action: dict[str, np.ndarray] | np.ndarray,
+        action: dict[str, npt.NDArray] | npt.NDArray,
     ) -> tuple[Any, Any, Any, Any, dict[str, Any]]:
         observation = {
             "agent_0": np.zeros((1, 3, 3)),
@@ -162,7 +164,7 @@ class ConstantRewardContActionsEnv:
 
     def step(
         self,
-        action: dict[str, np.ndarray] | np.ndarray,
+        action: dict[str, npt.NDArray] | npt.NDArray,
     ) -> tuple[Any, Any, Any, Any, dict[str, Any]]:
         observation = {"agent_0": np.array([0]), "other_agent_0": np.array([0])}
         reward = {"agent_0": 1, "other_agent_0": 0}  # Constant reward
@@ -216,7 +218,7 @@ class ConstantRewardContActionsImageEnv:
 
     def step(
         self,
-        action: dict[str, np.ndarray] | np.ndarray,
+        action: dict[str, npt.NDArray] | npt.NDArray,
     ) -> tuple[Any, Any, Any, Any, dict[str, Any]]:
         observation = {
             "agent_0": np.zeros((1, 3, 3)),
@@ -284,7 +286,7 @@ class ObsDependentRewardEnv:
 
     def step(
         self,
-        action: dict[str, np.ndarray] | np.ndarray,
+        action: dict[str, npt.NDArray] | npt.NDArray,
     ) -> tuple[Any, Any, Any, Any, dict[str, Any]]:
         observation = self.last_obs
         reward = (
@@ -361,7 +363,7 @@ class ObsDependentRewardImageEnv:
 
     def step(
         self,
-        action: dict[str, np.ndarray] | np.ndarray,
+        action: dict[str, npt.NDArray] | npt.NDArray,
     ) -> tuple[Any, Any, Any, Any, dict[str, Any]]:
         observation = self.last_obs
         reward = (
@@ -426,7 +428,7 @@ class ObsDependentRewardContActionsEnv:
 
     def step(
         self,
-        action: dict[str, np.ndarray] | np.ndarray,
+        action: dict[str, npt.NDArray] | npt.NDArray,
     ) -> tuple[Any, Any, Any, Any, dict[str, Any]]:
         observation = self.last_obs
         reward = (
@@ -494,7 +496,7 @@ class ObsDependentRewardContActionsImageEnv:
 
     def step(
         self,
-        action: dict[str, np.ndarray] | np.ndarray,
+        action: dict[str, npt.NDArray] | npt.NDArray,
     ) -> tuple[Any, Any, Any, Any, dict[str, Any]]:
         observation = self.last_obs
         reward = (
@@ -565,7 +567,7 @@ class DiscountedRewardEnv:
 
     def step(
         self,
-        action: dict[str, np.ndarray] | np.ndarray,
+        action: dict[str, npt.NDArray] | npt.NDArray,
     ) -> tuple[Any, Any, Any, Any, dict[str, Any]]:
         observation = {"agent_0": np.array([1]), "other_agent_0": np.array([1])}
         reward = (
@@ -640,7 +642,7 @@ class DiscountedRewardImageEnv:
 
     def step(
         self,
-        action: dict[str, np.ndarray] | np.ndarray,
+        action: dict[str, npt.NDArray] | npt.NDArray,
     ) -> tuple[Any, Any, Any, Any, dict[str, Any]]:
         observation = {
             "agent_0": np.ones((1, 3, 3)),
@@ -713,7 +715,7 @@ class DiscountedRewardContActionsEnv:
 
     def step(
         self,
-        action: dict[str, np.ndarray] | np.ndarray,
+        action: dict[str, npt.NDArray] | npt.NDArray,
     ) -> tuple[Any, Any, Any, Any, dict[str, Any]]:
         observation = {"agent_0": np.array([1]), "other_agent_0": np.array([1])}
         reward = (
@@ -782,7 +784,7 @@ class DiscountedRewardContActionsImageEnv:
 
     def step(
         self,
-        action: dict[str, np.ndarray] | np.ndarray,
+        action: dict[str, npt.NDArray] | npt.NDArray,
     ) -> tuple[Any, Any, Any, Any, dict[str, Any]]:
         observation = {
             "agent_0": np.ones((1, 3, 3)),
@@ -857,7 +859,7 @@ class FixedObsPolicyEnv:
 
     def step(
         self,
-        action: dict[str, np.ndarray] | np.ndarray,
+        action: dict[str, npt.NDArray] | npt.NDArray,
     ) -> tuple[Any, Any, Any, Any, dict[str, Any]]:
         observation = {"agent_0": np.array([0]), "other_agent_0": np.array([0])}
         reward = {
@@ -924,7 +926,7 @@ class FixedObsPolicyImageEnv:
 
     def step(
         self,
-        action: dict[str, np.ndarray] | np.ndarray,
+        action: dict[str, npt.NDArray] | npt.NDArray,
     ) -> tuple[Any, Any, Any, Any, dict[str, Any]]:
         observation = {
             "agent_0": np.zeros((1, 3, 3)),
@@ -985,7 +987,7 @@ class FixedObsPolicyContActionsEnv:
 
     def step(
         self,
-        action: dict[str, np.ndarray] | np.ndarray,
+        action: dict[str, npt.NDArray] | npt.NDArray,
     ) -> tuple[Any, Any, Any, Any, dict[str, Any]]:
         observation = {"agent_0": np.array([0]), "other_agent_0": np.array([0])}
         reward = {
@@ -1046,7 +1048,7 @@ class FixedObsPolicyContActionsImageEnv:
 
     def step(
         self,
-        action: dict[str, np.ndarray] | np.ndarray,
+        action: dict[str, npt.NDArray] | npt.NDArray,
     ) -> tuple[Any, Any, Any, Any, dict[str, Any]]:
         observation = {
             "agent_0": np.zeros((1, 3, 3)),
@@ -1142,7 +1144,7 @@ class PolicyEnv:
 
     def step(
         self,
-        action: dict[str, np.ndarray] | np.ndarray,
+        action: dict[str, npt.NDArray] | npt.NDArray,
     ) -> tuple[Any, Any, Any, Any, dict[str, Any]]:
         observation = self.last_obs
         reward = {
@@ -1242,7 +1244,7 @@ class PolicyImageEnv:
 
     def step(
         self,
-        action: dict[str, np.ndarray] | np.ndarray,
+        action: dict[str, npt.NDArray] | npt.NDArray,
     ) -> tuple[Any, Any, Any, Any, dict[str, Any]]:
         observation = self.last_obs
         reward = {
@@ -1360,7 +1362,7 @@ class PolicyContActionsEnv:
 
     def step(
         self,
-        action: dict[str, np.ndarray] | np.ndarray,
+        action: dict[str, npt.NDArray] | npt.NDArray,
     ) -> tuple[Any, Any, Any, Any, dict[str, Any]]:
         observation = self.last_obs
         reward = {}
@@ -1496,7 +1498,7 @@ class PolicyContActionsImageEnv:
 
     def step(
         self,
-        action: dict[str, np.ndarray] | np.ndarray,
+        action: dict[str, npt.NDArray] | npt.NDArray,
     ) -> tuple[Any, Any, Any, Any, dict[str, Any]]:
         observation = self.last_obs
         reward = {}
@@ -1653,7 +1655,7 @@ class MultiPolicyEnv:
 
     def step(
         self,
-        action: dict[str, np.ndarray] | np.ndarray,
+        action: dict[str, npt.NDArray] | npt.NDArray,
     ) -> tuple[Any, Any, Any, Any, dict[str, Any]]:
         observation = self.last_obs
         reward = {
@@ -1797,7 +1799,7 @@ class MultiPolicyImageEnv:
 
     def step(
         self,
-        action: dict[str, np.ndarray] | np.ndarray,
+        action: dict[str, npt.NDArray] | npt.NDArray,
     ) -> tuple[Any, Any, Any, Any, dict[str, Any]]:
         observation = self.last_obs
         reward = {
@@ -1837,7 +1839,7 @@ class MultiPolicyImageEnv:
 
 
 def prepare_ma_states(
-    states: dict[str, np.ndarray],
+    states: dict[str, npt.NDArray],
     observation_space: dict[str, spaces.Space[Any]],
     device: str = "cpu",
 ) -> dict[str, torch.Tensor]:
@@ -1860,7 +1862,7 @@ def prepare_ma_states(
 
 
 def prepare_ma_actions(
-    actions: dict[str, np.ndarray],
+    actions: dict[str, npt.NDArray],
     device: str = "cpu",
 ) -> dict[str, torch.Tensor]:
     return {
@@ -1870,10 +1872,10 @@ def prepare_ma_actions(
 
 
 def check_policy_q_learning_with_probe_env(
-    env: Any,
+    env: Any,  # noqa: ANN401 -- multi-agent probe envs share no base class
     algo_class: type[Any],
     algo_args: dict[str, Any],
-    memory: Any,
+    memory: ReplayBuffer,
     learn_steps: int = 1000,
     device: str = "cpu",
 ) -> None:
@@ -1896,15 +1898,16 @@ def check_policy_q_learning_with_probe_env(
         mem_next_state = {
             agent_id: np.expand_dims(ns, 0) for agent_id, ns in next_state.items()
         }
-        transition: TensorDictBase = MultiAgentTransition(
-            obs=state,
-            action=raw_action,
-            reward=reward,
-            next_obs=mem_next_state,
-            done=done,
+        transition = transition_to_tensordict(
+            MultiAgentTransition(
+                obs=state,
+                action=raw_action,
+                reward=reward,
+                next_obs=mem_next_state,
+                done=done,
+            )
         )
-        transition = transition.to_tensordict()
-        transition.batch_size = [1]
+        transition.batch_size = torch.Size([1])
         memory.add(transition)
         state = next_state
         if done[agent.agent_ids[0]]:
@@ -1961,7 +1964,7 @@ def check_policy_q_learning_with_probe_env(
 
 
 def check_on_policy_learning_with_probe_env(
-    env: Any,
+    env: Any,  # noqa: ANN401 -- multi-agent probe envs share no base class
     algo_class: type[Any],
     algo_args: dict[str, Any],
     learn_steps: int = 1000,

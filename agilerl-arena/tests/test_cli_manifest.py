@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for the generic manifest -> Click machinery and client dispatch."""
 
 from __future__ import annotations
@@ -7,6 +10,8 @@ from unittest.mock import MagicMock, patch
 
 import click
 import pytest
+from click.testing import CliRunner
+
 from agilerl.arena.cli_manifest import (
     _manifest_spec_to_click_option,
     _parse_json_cli_value,
@@ -18,7 +23,6 @@ from agilerl.arena.cli_manifest import (
 from agilerl.arena.client import ArenaClient
 from agilerl.arena.config import CommandConfig
 from agilerl.arena.exceptions import ArenaValidationError
-from click.testing import CliRunner
 
 
 def _command_config() -> CommandConfig:

@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 from dataclasses import asdict
 
 import pytest
@@ -15,6 +18,7 @@ from agilerl.modules import (
 )
 from agilerl.modules.configs import MlpNetConfig
 from agilerl.networks.base import EvolvableNetwork
+from agilerl.networks.custom_modules import DuelingDistributionalMLP
 from agilerl.networks.q_networks import ContinuousQNetwork, QNetwork, RainbowQNetwork
 from tests.helper_functions import (
     assert_close_dict,
@@ -97,7 +101,7 @@ class TestQNetworkInit:
         elif encoder_type == "cnn":
             assert isinstance(network.encoder, EvolvableCNN)
 
-        evolvable_modules = network.modules()
+        evolvable_modules = network.evolvable_modules()
         assert "encoder" in evolvable_modules
         assert "head_net" in evolvable_modules
 
@@ -109,7 +113,7 @@ class TestQNetworkInit:
         assert network.observation_space == observation_space
         assert isinstance(network.encoder, EvolvableLSTM)
 
-        evolvable_modules = network.modules()
+        evolvable_modules = network.evolvable_modules()
         assert "encoder" in evolvable_modules
         assert "head_net" in evolvable_modules
 
@@ -127,7 +131,7 @@ class TestQNetworkInit:
         elif encoder_type == "simba":
             assert isinstance(network.encoder, EvolvableSimBa)
 
-        evolvable_modules = network.modules()
+        evolvable_modules = network.evolvable_modules()
         assert "encoder" in evolvable_modules
         assert "head_net" in evolvable_modules
 
@@ -283,7 +287,7 @@ class TestRainbowQNetworkInit:
         elif encoder_type == "cnn":
             assert isinstance(network.encoder, EvolvableCNN)
 
-        evolvable_modules = network.modules()
+        evolvable_modules = network.evolvable_modules()
         assert "encoder" in evolvable_modules
         assert "head_net" in evolvable_modules
 
@@ -421,6 +425,24 @@ class TestRainbowQNetworkForward:
         assert isinstance(out, torch.Tensor)
         assert out.shape == torch.Size([1, discrete_space.n])
 
+    def test_dueling_distributional_mlp_forward_numpy(self):
+        num_atoms = 51
+        support = torch.linspace(-10, 10, num_atoms)
+        network = DuelingDistributionalMLP(
+            num_inputs=4,
+            num_outputs=2,
+            hidden_size=[64],
+            num_atoms=num_atoms,
+            support=support,
+        )
+
+        x_np = torch.randn(1, 4).numpy()
+        with torch.no_grad():
+            out = network(x_np)
+
+        assert isinstance(out, torch.Tensor)
+        assert out.shape == torch.Size([1, 2])
+
 
 class TestRainbowQNetworkClone:
     @pytest.mark.parametrize(
@@ -477,7 +499,7 @@ class TestContinuousQNetworkInit:
         elif encoder_type == "cnn":
             assert isinstance(network.encoder, EvolvableCNN)
 
-        evolvable_modules = network.modules()
+        evolvable_modules = network.evolvable_modules()
         assert "encoder" in evolvable_modules
         assert "head_net" in evolvable_modules
 
@@ -491,7 +513,7 @@ class TestContinuousQNetworkInit:
         assert network.observation_space == observation_space
         assert isinstance(network.encoder, EvolvableLSTM)
 
-        evolvable_modules = network.modules()
+        evolvable_modules = network.evolvable_modules()
         assert "encoder" in evolvable_modules
         assert "head_net" in evolvable_modules
 
@@ -512,7 +534,7 @@ class TestContinuousQNetworkInit:
         elif encoder_type == "simba":
             assert isinstance(network.encoder, EvolvableSimBa)
 
-        evolvable_modules = network.modules()
+        evolvable_modules = network.evolvable_modules()
         assert "encoder" in evolvable_modules
         assert "head_net" in evolvable_modules
 

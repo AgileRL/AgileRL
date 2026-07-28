@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for arena.payloads — filename_from_disposition, resolve_metrics_output_path."""
 
 from __future__ import annotations

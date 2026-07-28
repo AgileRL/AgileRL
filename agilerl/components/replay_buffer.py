@@ -1,13 +1,29 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 from collections import deque
 
 import numpy as np
+import numpy.typing as npt
 import torch
-from tensordict import TensorDict, is_tensor_collection
+from tensordict import TensorDict
 
 from agilerl.components.segment_tree import MinSegmentTree, SumSegmentTree
-from agilerl.typing import ArrayOrTensor
+from agilerl.utils.algo_utils import narrow_tensor
 
-DataType = dict[str, ArrayOrTensor] | TensorDict
+
+def _read_tensor(transition: TensorDict, key: str) -> torch.Tensor:
+    """Read ``key`` from ``transition``; the n-step keys always hold tensors."""
+    return narrow_tensor(transition[key])
+
+
+def _read_row(data: TensorDict, index: int) -> TensorDict:
+    """Read one transition row; buffer rows are always TensorDicts."""
+    row = data[index]
+    assert isinstance(row, TensorDict), (
+        f"Expected a TensorDict row, got {type(row).__name__}."
+    )
+    return row
 
 
 class ReplayBuffer:
@@ -38,8 +54,8 @@ class ReplayBuffer:
         self._storage: TensorDict | None = None
 
     @property
-    def storage(self) -> TensorDict:
-        """Storage of the buffer."""
+    def storage(self) -> TensorDict | None:
+        """Storage of the buffer, or ``None`` if no data has been added yet."""
         return self._storage
 
     @property
@@ -75,30 +91,38 @@ class ReplayBuffer:
         :rtype: TensorDict
         """
         for key, item in data.items():
-            if is_tensor_collection(item):
+            if isinstance(item, TensorDict):
+                # Nested collections in buffer storage are TensorDicts
                 ReplayBuffer._normalize_dims(item, n)
             elif item.ndim == 1:
                 data[key] = item.reshape(n, 1)
 
         return data
 
-    def _init(self, data: TensorDict) -> None:
+    def _init(self, data: TensorDict) -> TensorDict:
         """Initialize the buffer given the passed data. For each key,
         we inspect the shape of the value and initialize the storage
         tensor with the correct shape.
 
         :param data: Data to initialize the buffer with
         :type data: TensorDict
+        :return: The initialized storage
+        :rtype: TensorDict
         """
-        _data: TensorDict = data[0]
-        self._storage = torch.zeros_like(_data.expand((self.max_size, *_data.shape)))
+        self._storage = (
+            _read_row(data, 0).expand((self.max_size, *data.shape[1:])).clone()
+        )
+        self._storage.zero_()
         self.initialized = True
+        return self._storage
 
-    def add(self, data: TensorDict) -> None:
+    def add(self, data: TensorDict) -> TensorDict | None:
         """Add a transition to the buffer.
 
         :param data: Transition to add to the buffer
         :type data: TensorDict | dict[str, Any]
+        :return: The first transition leaving the n-step window for n-step buffers, None otherwise
+        :rtype: TensorDict | None
         """
         # Initialize storage
         data = data.to(self.device)
@@ -109,18 +133,17 @@ class ReplayBuffer:
         # instead of (batch_size, 1)
         data = self._normalize_dims(data, _n_transitions)
 
-        if self._storage is None:
-            self._init(data)
+        storage = self._storage if self._storage is not None else self._init(data)
 
         # Add to circular storage
         start = self._cursor
         end = self._cursor + _n_transitions
         if end > self.max_size:
             n = self.max_size - start
-            self._storage[start:] = data[:n]
-            self._storage[: _n_transitions - n] = data[n:]
+            storage[start:] = data[:n]
+            storage[: _n_transitions - n] = data[n:]
         else:
-            self._storage[start:end] = data
+            storage[start:end] = data
 
         # Update cursor and size
         self._cursor = end % self.max_size
@@ -156,18 +179,29 @@ class ReplayBuffer:
         # Otherwise sample without replacement (no intra-batch duplicates).
         return torch.randperm(self.size)[:k]
 
-    def sample(self, batch_size: int, return_idx: bool = False) -> TensorDict:
+    def sample(
+        self,
+        batch_size: int,
+        return_idx: bool = False,
+        *,
+        beta: float = 0.4,
+    ) -> TensorDict:
         """Sample a batch of transitions.
 
         :param batch_size: Number of samples to return
         :type batch_size: int
         :param return_idx: Boolean flag to return index of samples randomly selected, defaults to False
         :type return_idx: bool, optional
+        :param beta: Unused; accepted for API compatibility with prioritized replay buffers
+        :type beta: float, optional
         :return: TensorDict containing sampled experiences
         :rtype: TensorDict
         """
+        assert self._storage is not None, "Cannot sample from an empty buffer."
+
         indices = self._sample_indices(min(batch_size, self.size))
-        samples: TensorDict = self._storage[indices]
+        samples = self._storage[indices]
+        assert isinstance(samples, TensorDict)
 
         if return_idx:
             samples["idxs"] = indices
@@ -211,7 +245,7 @@ class MultiStepReplayBuffer(ReplayBuffer):
         self.gamma = gamma
         self.n_step_buffer: deque[TensorDict] = deque(maxlen=n_step)
         self.reward_key = "reward"
-        self.done_key = None
+        self.done_key: str | None = None
         self.ns_key = "next_obs"
 
     def add(self, data: TensorDict) -> TensorDict | None:
@@ -245,7 +279,10 @@ class MultiStepReplayBuffer(ReplayBuffer):
         :return: TensorDict containing sampled experiences
         :rtype: TensorDict
         """
-        return self.storage[idxs]
+        assert self._storage is not None, "Cannot sample from an empty buffer."
+        samples = self._storage[idxs]
+        assert isinstance(samples, TensorDict)
+        return samples
 
     def _get_n_step_info(self) -> TensorDict:
         """Calculate the n-step return information.
@@ -277,21 +314,22 @@ class MultiStepReplayBuffer(ReplayBuffer):
             )
             self.done_key = done_key
 
-        # Start with reward from first transition
-        n_step_reward: torch.Tensor = first_transition[self.reward_key]
-        n_step_reward = n_step_reward.clone()
+        done_key = self.done_key
+        assert done_key is not None, "Done key is resolved on the first transition."
+
+        n_step_reward = _read_tensor(first_transition, self.reward_key).clone()
 
         # Get the last next_state and done flag
         for i, transition in enumerate(list(self.n_step_buffer)[1:]):
             # Add discounted reward
-            reward: torch.Tensor = transition[self.reward_key]
+            reward = _read_tensor(transition, self.reward_key)
             n_step_reward += reward * (self.gamma ** (i + 1))
 
             # Update next_state and done flag
-            done: torch.Tensor = transition[self.done_key]
-            next_obs: torch.Tensor = transition[self.ns_key]
+            done = _read_tensor(transition, done_key)
+            next_obs = _read_tensor(transition, self.ns_key)
             first_transition[self.ns_key] = next_obs.clone()
-            first_transition[self.done_key] = done.clone()
+            first_transition[done_key] = done.clone()
 
             if done.bool().any():  # Stop if episode terminated
                 break
@@ -376,22 +414,32 @@ class PrioritizedReplayBuffer(ReplayBuffer):
         # Update max priority
         self.max_priority = max(self.max_priority, priority)
 
-    def sample(self, batch_size: int, beta: float = 0.4) -> TensorDict:
+    def sample(
+        self,
+        batch_size: int,
+        return_idx: bool = False,
+        *,
+        beta: float = 0.4,
+    ) -> TensorDict:
         """Sample a batch of transitions based on priorities.
 
         :param batch_size: Number of samples to return
         :type batch_size: int
+        :param return_idx: Unused; indices are always included in the batch
+        :type return_idx: bool, optional
         :param beta: Beta parameter for importance sampling, defaults to 0.4
         :type beta: float, optional
         :return: Batch of transitions
         :rtype: TensorDict
         """
+        assert self._storage is not None, "Cannot sample from an empty buffer."
+
         # Sample indices based on priorities
         indices = self._sample_proportional(batch_size)
 
-        # Gather transitions
-        samples: TensorDict = self.storage[indices]
-        samples = samples.clone()
+        sampled = self._storage[indices]
+        assert isinstance(sampled, TensorDict)
+        samples = sampled.clone()
 
         # Calculate importance sampling weights
         weights = self._calculate_weights(indices, beta)
@@ -447,15 +495,15 @@ class PrioritizedReplayBuffer(ReplayBuffer):
 
     def update_priorities(
         self,
-        indices: torch.Tensor,
-        priorities: torch.Tensor,
+        indices: torch.Tensor | npt.NDArray,
+        priorities: torch.Tensor | npt.NDArray,
     ) -> None:
         """Update priorities of the sampled transitions.
 
         :param indices: Indices of transitions to update
-        :type indices: torch.Tensor
+        :type indices: torch.Tensor | npt.NDArray
         :param priorities: New priorities
-        :type priorities: torch.Tensor
+        :type priorities: torch.Tensor | npt.NDArray
         """
         # float64 matches the original max(priority.item(), 1e-5) clamp precision.
         idx_np = torch.as_tensor(indices).flatten().cpu().numpy()
@@ -473,3 +521,7 @@ class PrioritizedReplayBuffer(ReplayBuffer):
         self.sum_tree.update_batch(idx_np, priority_alpha)
         self.min_tree.update_batch(idx_np, priority_alpha)
         self.max_priority = max(self.max_priority, float(priorities.max()))
+
+
+# Any off-policy replay buffer, canonical here so consumers share one definition.
+BufferType = ReplayBuffer | PrioritizedReplayBuffer | MultiStepReplayBuffer

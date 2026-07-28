@@ -1,5 +1,9 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 import gymnasium
 import numpy as np
+import numpy.typing as npt
 import pytest
 import torch
 from accelerate import Accelerator
@@ -11,6 +15,8 @@ from torch import nn, optim
 from agilerl.algorithms.ppo import PPO
 from agilerl.components.rollout_buffer import RolloutBuffer
 from agilerl.modules import EvolvableCNN, EvolvableMLP, EvolvableMultiInput
+from agilerl.networks import StochasticActor
+from agilerl.networks.value_networks import ValueNetwork
 from agilerl.rollouts import collect_rollouts, collect_rollouts_recurrent
 from agilerl.typing import BPTTSequenceType
 from agilerl.wrappers.make_evolvable import MakeEvolvable
@@ -89,7 +95,7 @@ def _obs_batch_at(
     observation_space: spaces.Space,
     states,
     index: int,
-) -> np.ndarray | dict[str, np.ndarray] | tuple[np.ndarray, ...]:
+) -> npt.NDArray | dict[str, npt.NDArray] | tuple[npt.NDArray, ...]:
     """Single env observation batch (shape (1, ...)) at time ``index`` from stacked tensors."""
     if isinstance(observation_space, spaces.Dict):
         return {
@@ -109,7 +115,7 @@ def _obs_batch_at(
 def _bootstrap_next_obs(
     observation_space: spaces.Space,
     next_states,
-) -> np.ndarray | dict[str, np.ndarray] | tuple[np.ndarray, ...]:
+) -> npt.NDArray | dict[str, npt.NDArray] | tuple[npt.NDArray, ...]:
     """Bootstrap next observation batch already shaped for ``num_envs == 1``."""
     if isinstance(observation_space, spaces.Dict):
         return {
@@ -275,71 +281,97 @@ class TestPPOInit:
     # Can initialize ppo with an actor network
     # TODO: Will be deprecated in the future
     @pytest.mark.parametrize(
-        (
-            "obs_space",
-            "action_space",
-            "actor_network",
-            "critic_network",
-            "input_tensor",
-            "input_tensor_critic",
-        ),
-        [
-            (
-                "vector_space",
-                "discrete_space",
-                "simple_mlp",
-                "simple_mlp_critic",
-                torch.randn(1, 4),
-                torch.randn(1, 6),
-            ),
-        ],
+        ("obs_space", "action_space", "actor_network", "input_tensor"),
+        [("vector_space", "discrete_space", "simple_mlp", torch.randn(1, 4))],
     )
     def test_initialize_ppo_with_make_evo(
         self,
         obs_space,
         action_space,
         actor_network,
-        critic_network,
         input_tensor,
-        input_tensor_critic,
         request,
     ):
+        # A flat MakeEvolvable network does not implement PPO's
+        # StochasticActor/ValueNetwork interface (extract_features/forward_head/
+        # action_log_prob/...). PPO adopts it as the encoder of a
+        # StochasticActor/ValueNetwork so it becomes the feature extractor while
+        # PPO supplies the distribution / value head, and it works end to end.
         obs_space = request.getfixturevalue(obs_space)
         action_space = request.getfixturevalue(action_space)
-        actor_network = request.getfixturevalue(actor_network)
-        actor_network = MakeEvolvable(actor_network, input_tensor)
-        critic_network = request.getfixturevalue(critic_network)
-        critic_network = MakeEvolvable(critic_network, input_tensor_critic)
+        actor_network = MakeEvolvable(
+            request.getfixturevalue(actor_network), input_tensor
+        )
+        # Critic maps the same observation to a scalar value.
+        critic_network = MakeEvolvable(
+            nn.Sequential(nn.Linear(4, 20), nn.ReLU(), nn.Linear(20, 1)),
+            input_tensor,
+        )
 
         ppo = PPO(
             obs_space,
             action_space,
+            learn_step=8,
+            batch_size=4,
+            update_epochs=1,
             actor_network=actor_network,
             critic_network=critic_network,
         )
 
-        assert ppo.observation_space == obs_space
-        assert ppo.action_space == action_space
-        assert ppo.batch_size == 64
-        assert ppo.lr == 1e-4
-        assert ppo.gamma == 0.99
-        assert ppo.gae_lambda == 0.95
-        assert ppo.mut is None
-        assert ppo.action_std_init == 0.0
-        assert ppo.clip_coef == 0.2
-        assert ppo.ent_coef == 0.01
-        assert ppo.vf_coef == 0.5
-        assert ppo.max_grad_norm == 0.5
-        assert ppo.target_kl is None
-        assert ppo.update_epochs == 4
-        assert ppo.device == "cpu"
-        assert ppo.accelerator is None
-        assert ppo.index == 0
-        assert ppo.scores == []
-        assert ppo.fitness == []
-        assert ppo.steps == 0
-        assert isinstance(ppo.optimizer.optimizer, optim.Adam)
-        assert ppo.num_envs == 1
+        # The custom networks are adopted as the encoders of PPO's actor/critic.
+        assert isinstance(ppo.actor, StochasticActor)
+        assert isinstance(ppo.critic, ValueNetwork)
+        assert isinstance(ppo.actor.encoder, MakeEvolvable)
+        assert isinstance(ppo.critic.encoder, MakeEvolvable)
+        assert ppo.actor.encoder is not actor_network  # deep-copied, not aliased
+        # Independent user-supplied networks cannot share an encoder.
+        assert ppo.share_encoders is False
+
+        # get_action works (previously crashed with AttributeError).
+        obs, _ = get_batch_states(obs_space, 1)
+        action, _, _, _ = ppo.get_action(obs)
+        assert action.shape[0] == ppo.num_envs
+
+        # A full learn cycle works.
+        for i in range(ppo.learn_step):
+            step_obs, step_next = get_batch_states(obs_space, 1)
+            step_action = np.array([action_space.sample()], dtype=action_space.dtype)
+            ppo.rollout_buffer.add(
+                step_obs,
+                step_action,
+                1.0,
+                i == (ppo.learn_step - 1),
+                0.5,
+                -0.5,
+                step_next,
+            )
+        last_value = torch.zeros((ppo.num_envs, 1), device=ppo.device)
+        last_done = torch.zeros((ppo.num_envs, 1), device=ppo.device)
+        ppo.rollout_buffer.compute_returns_and_advantages(last_value, last_done)
+        loss = ppo.learn()
+        assert isinstance(loss, float)
+        ppo.clean_up()
+
+    def test_initialize_ppo_with_prewrapped_networks(
+        self, vector_space, discrete_space
+    ):
+        # Networks that already are a StochasticActor/ValueNetwork are adopted
+        # as-is rather than wrapped a second time.
+        actor_network = StochasticActor(vector_space, discrete_space)
+        critic_network = ValueNetwork(vector_space)
+
+        ppo = PPO(
+            vector_space,
+            discrete_space,
+            actor_network=actor_network,
+            critic_network=critic_network,
+        )
+
+        assert isinstance(ppo.actor, StochasticActor)
+        assert isinstance(ppo.critic, ValueNetwork)
+        # Adopted directly: the encoder is not itself a StochasticActor.
+        assert not isinstance(ppo.actor.encoder, StochasticActor)
+        assert not isinstance(ppo.critic.encoder, ValueNetwork)
         ppo.clean_up()
 
     def test_initialize_ppo_with_incorrect_actor_net(
@@ -619,13 +651,13 @@ class TestPPOGetAction:
 
         if isinstance(action_space, spaces.Discrete):
             for act in action:
-                assert act.is_integer()
+                assert float(act).is_integer()
                 assert act >= 0
                 assert act < action_space.n
         elif isinstance(action_space, spaces.MultiDiscrete):
             assert len(action[0]) == len(action_space.nvec)
             for i, act in enumerate(action[0]):
-                assert act.is_integer()
+                assert float(act).is_integer()
                 assert act >= 0
                 assert act < action_space.nvec[i]
         elif isinstance(action_space, spaces.MultiBinary):
@@ -696,13 +728,13 @@ class TestPPOGetAction:
 
         if isinstance(action_space, spaces.Discrete):
             for act in action:
-                assert act.is_integer()
+                assert float(act).is_integer()
                 assert act >= 0
                 assert act < action_space.n
         elif isinstance(action_space, spaces.MultiDiscrete):
             assert len(action[0]) == len(action_space.nvec)
             for i, act in enumerate(action[0]):
-                assert act.is_integer()
+                assert float(act).is_integer()
                 assert act >= 0
                 assert act < action_space.nvec[i]
         elif isinstance(action_space, spaces.MultiBinary):

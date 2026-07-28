@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 import importlib.util
 from unittest.mock import MagicMock, patch
 

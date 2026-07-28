@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
@@ -7,7 +10,7 @@ import lazy_loader as lazy
 from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.models.algo import (  # noqa: F401
     ALGO_REGISTRY,
-    AlgoSpecT,
+    AlgoSpec,
     LLMAlgorithmSpec,
     MultiAgentRLAlgorithmSpec,
     RLAlgorithmSpec,
@@ -57,7 +60,6 @@ __getattr__, __dir__, _ = lazy.attach(
     __name__,
     submod_attrs={
         "env": [
-            "ArenaEnvSpec",
             "GymEnvSpec",
             "LLMEnvSpec",
             "OfflineEnvSpec",
@@ -68,15 +70,13 @@ __getattr__, __dir__, _ = lazy.attach(
 
 if TYPE_CHECKING:
     from agilerl.models.env import (
-        ArenaEnvSpec,
         GymEnvSpec,
         LLMEnvSpec,
         OfflineEnvSpec,
         PzEnvSpec,
     )
 
-    EnvironmentSpecT = GymEnvSpec | PzEnvSpec | LLMEnvSpec | OfflineEnvSpec
-    ArenaEnvSpecT = ArenaEnvSpec | dict[str, str]
-    ReplayBufferSpecT = ReplayBufferSpec | None
-    TrainingSpecT = TrainingSpec | None
-    MutationSpecT = MutationSpec | None
+    EnvironmentSpecType = GymEnvSpec | PzEnvSpec | LLMEnvSpec | OfflineEnvSpec
+    ReplayBufferSpecType = ReplayBufferSpec | None
+    TrainingSpecType = TrainingSpec | None
+    MutationSpecType = MutationSpec | None

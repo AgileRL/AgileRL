@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 from collections.abc import Callable
 from typing import Any, Literal, TypeVar
 
@@ -349,7 +352,6 @@ class VLLMConfig(BaseModel):
     tensor_parallel_size: int = Field(default=1, ge=1)
     gpu_memory_utilization: float = Field(default=0.3, ge=0.0, le=1.0)
     max_num_seqs: int = Field(default=8, ge=1)
-    swap_space: float | None = Field(default=None, ge=0.0)
     enforce_eager: bool | None = Field(default=None)
     sleep_mode: bool = Field(default=False)
 

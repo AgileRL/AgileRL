@@ -1,10 +1,13 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 from typing import Any
 
 import torch
 from torch import nn
 
 from agilerl.modules.base import EvolvableModule, MutationType, mutation
-from agilerl.typing import ArrayOrTensor, BatchDimension
+from agilerl.typing import ArrayOrTensor, BatchDimension, DeviceType, MutationApplyDict
 from agilerl.utils.evolvable_networks import get_activation
 
 
@@ -32,7 +35,7 @@ class EvolvableLSTM(EvolvableModule):
     :param dropout: Dropout probability between LSTM layers, defaults to 0.0
     :type dropout: float, optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
-    :type device: str, optional
+    :type device: DeviceType, optional
     :param name: Name of the network, defaults to 'lstm'
     :type name: str, optional
     :param random_seed: Random seed to use for the network. Defaults to None.
@@ -51,7 +54,7 @@ class EvolvableLSTM(EvolvableModule):
         min_layers: int = 1,
         max_layers: int = 3,
         dropout: float = 0.0,
-        device: str = "cpu",
+        device: DeviceType = "cpu",
         name: str = "lstm",
         random_seed: int | None = None,
     ) -> None:
@@ -91,8 +94,10 @@ class EvolvableLSTM(EvolvableModule):
         self.model = self.create_lstm()
 
     @property
-    def hidden_state_architecture(self) -> dict[str, tuple[int, ...]]:
-        """Return the hidden state architecture."""
+    def hidden_state_architecture(
+        self,
+    ) -> dict[str, tuple[int | type[BatchDimension], ...]]:
+        """Return the hidden state architecture. The batch dimension is represented"""
         # For LSTM, hidden state and cell state have shape (num_layers * num_directions, batch_size, hidden_size)
         # Assuming unidirectional LSTM (num_directions=1) !TODO: SHOULD WE HAVE A DIRECTIONAL LSTM IN THE FUTURE?
         return {
@@ -142,9 +147,9 @@ class EvolvableLSTM(EvolvableModule):
         return net_config
 
     @property
-    def activation(self) -> str:
-        """Return activation function."""
-        return
+    def activation(self) -> None:
+        """LSTM has no activation function."""
+        return None
 
     @activation.setter
     def activation(self, activation: str) -> None:
@@ -165,7 +170,7 @@ class EvolvableLSTM(EvolvableModule):
     def forward(
         self,
         x: ArrayOrTensor,
-        hidden_state: dict[str, ArrayOrTensor] | None = None,
+        hidden_state: dict[str, torch.Tensor] | None = None,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         """Forward pass of the network.
 
@@ -194,8 +199,8 @@ class EvolvableLSTM(EvolvableModule):
 
         # Use provided hidden state if available
         if hidden_state is not None:
-            h0 = hidden_state.get(f"{self.name}_h", None)
-            c0 = hidden_state.get(f"{self.name}_c", None)
+            h0 = hidden_state[f"{self.name}_h"]
+            c0 = hidden_state[f"{self.name}_c"]
 
             # Reshape to (batch_seq_size, seq_len, features)
             sequence_input = False
@@ -258,7 +263,7 @@ class EvolvableLSTM(EvolvableModule):
         return None
 
     @mutation(MutationType.NODE)
-    def add_node(self, numb_new_nodes: int | None = None) -> dict[str, int]:
+    def add_node(self, numb_new_nodes: int | None = None) -> MutationApplyDict:
         """Increases hidden size of the LSTM.
 
         :param numb_new_nodes: Number of nodes to add to hidden size, defaults to None
@@ -277,7 +282,7 @@ class EvolvableLSTM(EvolvableModule):
         return {"numb_new_nodes": numb_new_nodes}
 
     @mutation(MutationType.NODE)
-    def remove_node(self, numb_new_nodes: int | None = None) -> dict[str, int]:
+    def remove_node(self, numb_new_nodes: int | None = None) -> MutationApplyDict:
         """Decreases hidden size of the LSTM.
 
         :param numb_new_nodes: Number of nodes to remove from hidden size, defaults to None

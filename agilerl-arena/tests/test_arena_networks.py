@@ -1,8 +1,12 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for ``agilerl.arena.models.networks`` validation helpers and specs."""
 
 from __future__ import annotations
 
 import pytest
+
 from agilerl.arena.models.algorithms.grpo import GRPOSpec
 from agilerl.arena.models.algorithms.llmppo import LLMPPOSpec
 from agilerl.arena.models.algorithms.llmreinforce import LLMREINFORCESpec

@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 import hydra
 from omegaconf import DictConfig, OmegaConf
 from train_ilql import train

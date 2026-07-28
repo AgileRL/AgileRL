@@ -46,3 +46,15 @@ build-docs:
 #   just test [no-parallel] [cov] [pytest args...]
 test *args:
     bash scripts/run-tests.sh {{args}}
+
+# ---------------------------------------------------------------------------
+# Type checking
+# ---------------------------------------------------------------------------
+
+# Static type checking with ty (config in pyproject.toml [tool.ty]).
+# Runs the pinned ty pre-commit hook so local type-checking stays identical to
+# CI, reproducing the two setup steps the Type checks workflow performs first.
+typecheck:
+    uv sync --all-groups --extra all
+    uv run pre-commit run arena-symlink --all-files
+    uv run pre-commit run ty --all-files

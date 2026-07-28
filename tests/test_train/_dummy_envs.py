@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 """Importable dummy gym envs for manifest entrypoint resolution in tests."""
 
 from __future__ import annotations

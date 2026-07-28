@@ -1,10 +1,14 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 """TD3 algorithm specification."""
 
 from __future__ import annotations
 
+from pydantic import Field
+
 from agilerl.arena.models.algo import RLAlgorithmSpec, register
 from agilerl.arena.models.networks import DeterministicActorSpec
-from pydantic import Field
 
 
 @register()

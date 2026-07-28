@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 from .actors import DeterministicActor, StochasticActor
 from .base import EvolvableNetwork
 from .q_networks import ContinuousQNetwork, QNetwork, RainbowQNetwork

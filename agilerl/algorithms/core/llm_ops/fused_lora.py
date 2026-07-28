@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 """Fused multi-adapter LoRA forward pass.
 
 Runs several LoRA adapters (e.g. actor + critic) in one forward pass by
@@ -16,26 +19,36 @@ view of a custom autograd Function that autograd forbids editing in place.
 from __future__ import annotations
 
 import itertools
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from functools import partial
+from typing import Any
+from weakref import WeakKeyDictionary
 
 import torch
 import torch.nn as nn
+from peft.tuners.lora.layer import LoraLayer
 
-try:
-    from peft.tuners.lora.layer import LoraLayer
-except ImportError:  # pragma: no cover
-    LoraLayer = None  # type: ignore[assignment, misc]
+# Remembers each model's LoRA layers so we don't rescan on every call.
+# Weak keys: caching a model here never stops it being garbage-collected.
+_LORA_LAYER_CACHE: WeakKeyDictionary[nn.Module, list[LoraLayer]] = WeakKeyDictionary()
+
+# Which adapter each layer currently routes to (kept off the layer so it stays typed).
+# Weak keys: tracking a layer here never stops it being garbage-collected.
+_ROUTING_STATE: WeakKeyDictionary[LoraLayer, list[str] | None] = WeakKeyDictionary()
 
 
-def _lora_delta(layer: nn.Module, adapter: str, rows: torch.Tensor) -> torch.Tensor:
+def _lora_delta(layer: LoraLayer, adapter: str, rows: torch.Tensor) -> torch.Tensor:
     """One adapter's low-rank delta for a slice of input rows."""
     lora_a = layer.lora_A[adapter]
-    rows = layer.lora_dropout[adapter](rows.to(lora_a.weight.dtype))
+    # lora_A is an nn.ModuleDict, so its members' `.weight` resolves through
+    # nn.Module.__getattr__ as the loose Tensor | Module; narrow it to Tensor.
+    lora_a_weight = lora_a.weight
+    assert isinstance(lora_a_weight, torch.Tensor)
+    rows = layer.lora_dropout[adapter](rows.to(lora_a_weight.dtype))
     return layer.lora_B[adapter](lora_a(rows)) * layer.scaling[adapter]
 
 
-def _needs_peft_mixed_forward(layer: nn.Module, routing: Sequence[str]) -> bool:
+def _needs_peft_mixed_forward(layer: LoraLayer, routing: Sequence[str]) -> bool:
     """Whether any routed adapter needs PEFT's own mixed-batch forward.
 
     The sliced path computes the standard linear delta; embedding adapters
@@ -48,10 +61,11 @@ def _needs_peft_mixed_forward(layer: nn.Module, routing: Sequence[str]) -> bool:
 
 
 def _routed_forward(
-    layer: nn.Module,
+    layer: LoraLayer,
+    original_forward: Callable[..., torch.Tensor],
     x: torch.Tensor,
-    *forward_args,
-    **forward_kwargs,
+    *forward_args: Any,
+    **forward_kwargs: Any,
 ) -> torch.Tensor:
     """Replacement ``forward`` installed on patched LoRA layers.
 
@@ -63,9 +77,9 @@ def _routed_forward(
     matching PEFT's mixed-batch behaviour. Falls back to the layer's ordinary
     forward while routing is unset.
     """
-    routing = layer._fused_adapter_routing
+    routing = _ROUTING_STATE.get(layer)
     if routing is None:
-        return type(layer).forward(layer, x, *forward_args, **forward_kwargs)
+        return original_forward(layer, x, *forward_args, **forward_kwargs)
 
     # Layers that flatten (batch, seq, hidden) -> (batch * seq, hidden) before
     # their linears (OPT's MLP, MoE experts) show seq rows per routed sample.
@@ -99,32 +113,35 @@ def _routed_forward(
     return pieces[0] if len(pieces) == 1 else torch.cat(pieces)
 
 
-def _store_layer_cache(model: nn.Module, layers: list[nn.Module]) -> None:
-    try:
-        model._fused_lora_layers = layers  # type: ignore[attr-defined]
-    except (AttributeError, TypeError):
-        pass  # Best-effort cache; routing falls back to a module traversal.
+def _is_routed_layer(module: LoraLayer) -> bool:
+    """Whether *module* has the fused-routing ``forward`` installed."""
+    fwd = module.__dict__.get("forward")
+    return isinstance(fwd, partial) and fwd.func is _routed_forward
 
 
-def _get_cached_lora_layers(model: nn.Module) -> list[nn.Module]:
+def _store_layer_cache(model: nn.Module, layers: list[LoraLayer]) -> None:
+    _LORA_LAYER_CACHE[model] = layers
+
+
+def _get_cached_lora_layers(model: nn.Module) -> list[LoraLayer]:
     """All ``LoraLayer`` modules under *model*, cached after the first traversal.
 
     :param model: A ``PeftModel`` or any module containing ``LoraLayer`` s.
     :return: The LoRA layers under *model*.
     """
-    cached = getattr(model, "_fused_lora_layers", None)
+    cached = _LORA_LAYER_CACHE.get(model)
     if cached is not None:
         return cached
-    if LoraLayer is None:
-        return []
     # nn.Module.modules rather than model.modules: EvolvableModule overrides
     # modules() to return only evolvable children, which excludes LoRA layers.
-    layers = [m for m in nn.Module.modules(model) if isinstance(m, LoraLayer)]
+    layers: list[LoraLayer] = [
+        m for m in nn.Module.modules(model) if isinstance(m, LoraLayer)
+    ]
     _store_layer_cache(model, layers)
     return layers
 
 
-def _validate_routing(layers: list[nn.Module], routing: Sequence[str]) -> None:
+def _validate_routing(layers: list[LoraLayer], routing: Sequence[str]) -> None:
     """Reject routings PEFT would compute silently wrongly (unknown names)
     or that the fused forward cannot compute (merged weights, DoRA).
 
@@ -173,16 +190,13 @@ def patch_lora_for_fused_forward(model: nn.Module) -> None:
 
     :param model: A ``PeftModel`` or any module containing ``LoraLayer`` s.
     """
-    if LoraLayer is None:
-        return
-    layers: list[nn.Module] = []
+    layers: list[LoraLayer] = []
     for module in nn.Module.modules(model):
         if not isinstance(module, LoraLayer):
             continue
         layers.append(module)
-        if not hasattr(module, "_fused_adapter_routing"):
-            module._fused_adapter_routing = None  # type: ignore[attr-defined]
-            module.forward = partial(_routed_forward, module)  # type: ignore[method-assign]
+        if not _is_routed_layer(module):
+            module.forward = partial(_routed_forward, module, type(module).forward)
     _store_layer_cache(model, layers)
 
 
@@ -195,11 +209,11 @@ def unpatch_lora_for_fused_forward(model: nn.Module) -> None:
     :param model: The model to release from fused-routing control.
     """
     for module in _get_cached_lora_layers(model):
-        if hasattr(module, "_fused_adapter_routing"):
-            del module._fused_adapter_routing
-            del module.forward
-    if hasattr(model, "_fused_lora_layers"):
-        del model._fused_lora_layers
+        if _is_routed_layer(module):
+            # Drop the monkeypatched instance forward, restoring the class one.
+            module.__dict__.pop("forward", None)
+            _ROUTING_STATE.pop(module, None)
+    _LORA_LAYER_CACHE.pop(model, None)
 
 
 def set_fused_adapter_routing(model: nn.Module, routing: Sequence[str]) -> None:
@@ -222,7 +236,7 @@ def set_fused_adapter_routing(model: nn.Module, routing: Sequence[str]) -> None:
         # Plain base model (no adapters) or PEFT not installed: nothing to
         # route, and the unfused forward is already correct.
         return
-    if any(not hasattr(m, "_fused_adapter_routing") for m in layers):
+    if any(not _is_routed_layer(m) for m in layers):
         msg = (
             "set_fused_adapter_routing called on a model with LoRA layers that "
             "have no fused-routing forward; the routing would be silently "
@@ -237,7 +251,7 @@ def set_fused_adapter_routing(model: nn.Module, routing: Sequence[str]) -> None:
         raise ValueError(msg)
     _validate_routing(layers, routing)
     for module in layers:
-        module._fused_adapter_routing = routing  # type: ignore[attr-defined]
+        _ROUTING_STATE[module] = routing
 
 
 def unset_fused_adapter_routing(model: nn.Module) -> None:
@@ -246,5 +260,5 @@ def unset_fused_adapter_routing(model: nn.Module) -> None:
     :param model: The model whose LoRA layers should clear fused routing.
     """
     for module in _get_cached_lora_layers(model):
-        if hasattr(module, "_fused_adapter_routing"):
-            module._fused_adapter_routing = None  # type: ignore[attr-defined]
+        if _is_routed_layer(module):
+            _ROUTING_STATE[module] = None

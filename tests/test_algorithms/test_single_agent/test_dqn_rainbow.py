@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 import copy
 
 import numpy as np
@@ -245,7 +248,7 @@ class TestRainbowDQNGetAction:
 
         action = dqn.get_action(state, action_mask)[0]
 
-        assert action.is_integer()
+        assert float(action).is_integer()
         assert action >= 0
         assert action < discrete_space.n
 
@@ -253,7 +256,7 @@ class TestRainbowDQNGetAction:
 
         action = dqn.get_action(state, action_mask)[0]
 
-        assert action.is_integer()
+        assert float(action).is_integer()
         assert action == 1
         dqn.clean_up()
 
@@ -276,6 +279,12 @@ class TestRainbowDQNGetAction:
         action_mask = np.array([[0, 1], [1, 0]])
 
         action = dqn.get_action(state, action_mask)
+
+        assert np.array_equal(action, [1, 0])
+
+        list_action_mask = [np.array([0, 1]), np.array([1, 0])]
+
+        action = dqn.get_action(state, list_action_mask)
 
         assert np.array_equal(action, [1, 0])
         dqn.clean_up()

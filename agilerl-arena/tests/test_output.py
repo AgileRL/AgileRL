@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for arena.output — StreamRichRenderer, emit_result, handle_error."""
 
 from __future__ import annotations
@@ -6,6 +9,7 @@ from unittest.mock import MagicMock, patch
 
 import click
 import pytest
+
 from agilerl.arena.exceptions import (
     ArenaAPIError,
     ArenaTrainingError,

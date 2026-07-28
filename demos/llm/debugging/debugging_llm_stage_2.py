@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 """Two-digit conditional target probe (``MultiInputConditionalEnv``)."""
 
 from __future__ import annotations

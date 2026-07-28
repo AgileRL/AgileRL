@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for infer_encoder_arch: obs-space -> encoder arch inference."""
 
 from __future__ import annotations

@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -536,21 +539,12 @@ class TestBC_LMInitialScore:
             "attn_mask": torch.ones(2, 5),
         }
 
-        # The current implementation has a bug where it tries to access past_key_values
-        # from logits tensor. Let's test the basic functionality without the buggy part.
-        prepared_inputs = bc_lm.prepare_inputs(items)
-        tokens = prepared_inputs["tokens"]
-        scores, logits = bc_lm.score((tokens, None), {}, temp=0.5, top_k=3)
+        scores, past_key_values = bc_lm.initial_score(items, temp=0.5, top_k=3)
 
         assert isinstance(scores, torch.Tensor)
-        assert isinstance(logits, torch.Tensor)
-        assert scores.shape == logits.shape
-        assert scores.shape == (2, 5, 9)  # batch, seq_len, vocab_size
-
-    def test_initial_score_attribute_error(self, bc_lm):
-        items = {"tokens": torch.randint(0, 9, (2, 5)), "attn_mask": torch.ones(2, 5)}
-        with pytest.raises(AttributeError):
-            bc_lm.initial_score(items)
+        assert scores.shape == (2, 9)  # batch, vocab_size (last position only)
+        assert isinstance(past_key_values, tuple)
+        assert len(past_key_values) > 0
 
 
 class TestBC_LMNextScore:
@@ -562,27 +556,12 @@ class TestBC_LMNextScore:
             [(torch.randn(2, 4, 3, 16), torch.randn(2, 4, 3, 16)) for _ in range(2)],
         )
 
-        # The current implementation has a bug where it tries to access past_key_values
-        # from logits tensor. Let's test the basic functionality without the buggy part.
-        scores, logits = bc_lm.score(
-            (tokens.unsqueeze(1), None),
-            {"past_key_values": obs},
-            temp=0.5,
-            top_k=3,
-        )
+        scores, past_key_values = bc_lm.next_score(tokens, obs, temp=0.5, top_k=3)
 
         assert isinstance(scores, torch.Tensor)
-        assert isinstance(logits, torch.Tensor)
-        assert scores.shape == logits.shape
-        assert scores.shape == (2, 1, 9)  # batch, seq_len=1, vocab_size
-
-    def test_next_score_attribute_error(self, bc_lm):
-        tokens = torch.randint(0, 9, (2,))
-        obs = tuple(
-            [(torch.randn(2, 4, 3, 16), torch.randn(2, 4, 3, 16)) for _ in range(2)],
-        )
-        with pytest.raises(AttributeError):
-            bc_lm.next_score(tokens, obs)
+        assert scores.shape == (2, 9)  # batch, vocab_size
+        assert isinstance(past_key_values, tuple)
+        assert len(past_key_values) > 0
 
 
 class TestBC_PolicyInit:

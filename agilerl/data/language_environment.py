@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
@@ -8,7 +11,7 @@ from agilerl.utils.cache import Cache
 
 class Language_Observation(ABC):
     @abstractmethod
-    def to_sequence(self) -> tuple[list[str, float | None], bool]:
+    def to_sequence(self) -> tuple[list[tuple[str, float | None]], bool]:
         # returns a List of Tuples and a bool indicating terminal
         # each state Tuple should be: (str, None)
         # each action Tuple should be: (str, reward)

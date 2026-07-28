@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 """Guard: every algorithm constructor argument must be documented.
 
 With so many tunable knobs across the RL and LLM algorithms it is easy for a

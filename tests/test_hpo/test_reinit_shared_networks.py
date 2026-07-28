@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 from typing import ClassVar
 
 from agilerl.hpo.mutation import Mutations, reinit_shared_networks
@@ -9,6 +12,12 @@ class TestReinitSharedNetworksDecorator:
         class DummyGroup:
             eval_network = "actor"
             shared_networks: ClassVar[list[str]] = ["target_actor"]
+
+            def eval_network_name(self):
+                return self.eval_network
+
+            def shared_network_names(self):
+                return self.shared_networks
 
         class DummyIndividual:
             mut = "arch"

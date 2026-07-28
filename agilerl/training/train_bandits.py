@@ -1,8 +1,12 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 import logging
 import warnings
 from datetime import datetime
 from typing import Any
 
+import torch
 from accelerate import Accelerator
 from tensordict import TensorDict
 from torch.utils.data import DataLoader
@@ -15,6 +19,7 @@ from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.population import Population
 from agilerl.protocols import BanditEnvProtocol
+from agilerl.typing import InitHyperparams
 from agilerl.utils.utils import (
     default_progress_bar,
     init_loggers,
@@ -22,7 +27,6 @@ from agilerl.utils.utils import (
     tournament_selection_and_mutation,
 )
 
-InitDictType = dict[str, Any] | None
 PopulationType = list[NeuralTS | NeuralUCB]
 
 logger = logging.getLogger(__name__)
@@ -34,8 +38,8 @@ def train_bandits(
     algo: str,
     pop: PopulationType,
     memory: ReplayBuffer,
-    init_hp: InitDictType = None,
-    mut_p: InitDictType = None,
+    init_hp: InitHyperparams = None,
+    mut_p: InitHyperparams = None,
     max_steps: int = 20000,
     episode_steps: int = 500,
     evo_steps: int = 2500,
@@ -210,15 +214,22 @@ def train_bandits(
             agent.set_training_mode(True)
             agent.init_training_step()
 
-            score = 0
+            sample = sampler.sample
+
+            score = 0.0
             context = env.reset()
             for _idx_step in range(episode_steps):
                 # Get next action from agent
                 action = agent.get_action(context)
                 next_context, reward = env.step(action)
 
-                # Save experience to replay buffer
-                transition = TensorDict({"obs": context[action], "reward": reward})
+                # Save experience to replay buffer.
+                transition = TensorDict(
+                    {
+                        "obs": torch.as_tensor(context[action]),
+                        "reward": torch.as_tensor(reward),
+                    },
+                )
                 transition = transition.unsqueeze(0)
                 transition.batch_size = [1]
                 memory.add(transition)
@@ -226,10 +237,15 @@ def train_bandits(
                 # Learn according to learning frequency
                 if len(memory) >= agent.batch_size:
                     for _ in range(agent.learn_step):
-                        experiences = sampler.sample(agent.batch_size)
+                        experiences = sample(agent.batch_size)
+                        # `Sampler.sample` is typed as returning a bare
+                        # `TensorDict`; the cast asserts the concrete bandit-batch
+                        # layout the algorithm's `learn` consumes.
                         agent.learn(experiences)
 
                 score += reward
+                # Regret accumulates the fractional reward gap between the best
+                # possible and the achieved reward.
                 agent.regret.append(agent.regret[-1] + 1 - reward)
 
                 context = next_context
@@ -255,7 +271,9 @@ def train_bandits(
             logger.info("Target score has been reached. Stopping training.")
             population.finish()
             pbar.close()
-            return population.agents, population.last_fitnesses
+            # Single-agent fitnesses are scalars; `Population` types them as the
+            # wider scalar-or-per-agent-dict row shared with multi-agent training.
+            return population.agents, population.last_scalar_fitnesses
 
         # Tournament selection and population mutation
         if tournament and mutation is not None:
@@ -287,4 +305,4 @@ def train_bandits(
 
     population.finish()
     pbar.close()
-    return population.agents, population.last_fitnesses
+    return population.agents, population.last_scalar_fitnesses

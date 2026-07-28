@@ -1,7 +1,11 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 """SFT LLM Gym environment."""
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 from agilerl.llm_envs.base import IterablePromptBatchGym
@@ -11,10 +15,10 @@ if TYPE_CHECKING:
     import torch
     from accelerate import Accelerator
     from datasets import Dataset
-    from transformers import AutoTokenizer
+    from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 
 
-class SFTGym(IterablePromptBatchGym):
+class SFTGym(IterablePromptBatchGym[SFTPrompts]):
     """Gymnasium-style environment for supervised fine-tuning (SFT) datasets.
 
     :param train_dataset: The training dataset.
@@ -22,7 +26,7 @@ class SFTGym(IterablePromptBatchGym):
     :param test_dataset: The test dataset.
     :type test_dataset: Dataset
     :param tokenizer: The tokenizer.
-    :type tokenizer: AutoTokenizer
+    :type tokenizer: PreTrainedTokenizerBase
     :param data_batch_size_per_gpu: The batch size per GPU.
     :type data_batch_size_per_gpu: int
     :param response_column: The column name for the response in the dataset.
@@ -39,7 +43,7 @@ class SFTGym(IterablePromptBatchGym):
         self,
         train_dataset: Dataset,
         test_dataset: Dataset,
-        tokenizer: AutoTokenizer,
+        tokenizer: PreTrainedTokenizerBase,
         data_batch_size_per_gpu: int = 8,
         response_column: str = "target",
         accelerator: Accelerator | None = None,
@@ -91,17 +95,17 @@ class SFTGym(IterablePromptBatchGym):
 
     def create_collate_fn(
         self,
-        tokenizer: AutoTokenizer,
+        tokenizer: PreTrainedTokenizerBase,
         max_context_length: int | None = None,
-    ) -> Any:
+    ) -> Callable[[list[dict[str, Any]]], SFTPrompts]:
         """Build a collate function that tokenises ``(prompt, response)`` pairs.
 
         :param tokenizer: The tokenizer.
-        :type tokenizer: AutoTokenizer
+        :type tokenizer: PreTrainedTokenizerBase
         :param max_context_length: The maximum context length for the LLM model.
         :type max_context_length: int | None
         :return: The collate function.
-        :rtype: Any
+        :rtype: Callable[[list[dict[str, Any]]], SFTPrompts]
         """
         response_column = self.response_column
 
@@ -126,12 +130,13 @@ class SFTGym(IterablePromptBatchGym):
                 return_tensors="pt",
             )
 
-            return {
+            result: SFTPrompts = {
                 "prompt": prompts,
                 "prompt_lengths": prompt_lengths,
                 "response": responses,
                 "input_ids": pair_enc["input_ids"],
                 "attention_mask": pair_enc["attention_mask"].long(),
             }
+            return result
 
         return collate_fn

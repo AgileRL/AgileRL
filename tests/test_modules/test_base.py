@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 from typing import ClassVar
 from unittest.mock import Mock
 
@@ -692,8 +695,8 @@ class TestModuleDictModules:
         assert items[0][0] == "module1" or items[1][0] == "module1"
         assert all(isinstance(item[1], DummyEvolvableModule) for item in items)
 
-        # Test modules()
-        modules = module_dict.modules()
+        # Test evolvable_modules()
+        modules = module_dict.evolvable_modules()
         assert len(modules) == 2
         assert "module1" in modules
         assert "module2" in modules

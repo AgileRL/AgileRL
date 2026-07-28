@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 """CPU-only CNN module tests (no GPU mark)."""
 
 from unittest.mock import MagicMock, patch
@@ -56,7 +59,7 @@ class TestEvolvableCNNRngSetter:
         evolvable_cnn.rng = new_rng
         assert evolvable_cnn.rng is new_rng
         assert evolvable_cnn.mut_kernel_size.rng is new_rng
-        for module in evolvable_cnn.modules():
+        for module in evolvable_cnn.evolvable_modules().values():
             if module is evolvable_cnn:
                 continue
             assert module.rng is new_rng

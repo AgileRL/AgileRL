@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 """Helpers for a colocated vLLM rollout engine (rollout + HF/PEFT trainer in
 one process, sharing the GPU via vLLM native sleep/wake).
 
@@ -17,7 +20,7 @@ See ``docs/llm_finetuning/quantization.rst`` for the full colocated picture.
 from __future__ import annotations
 
 import gc
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NoReturn
 
 import torch
 
@@ -55,12 +58,12 @@ class _StrippedTower:
     def __call__(self, *args: Any, **kwargs: Any) -> None:
         raise RuntimeError(self._error("called as a forward path"))
 
-    def __getattr__(self, name: str) -> Any:
+    def __getattr__(self, name: str) -> NoReturn:
         raise AttributeError(self._error(f"attribute '{name}' accessed"))
 
 
 def patch_vllm_strip_multimodal_towers(
-    llm: Any,
+    llm: Any,  # noqa: ANN401 -- opaque vLLM engine handle walked via getattr
     tower_attrs: tuple[str, ...] | list[str] | None = None,
 ) -> dict[str, int]:
     """Free the GPU memory held by a multimodal base's unused towers.
@@ -126,7 +129,7 @@ def patch_vllm_strip_multimodal_towers(
     return freed
 
 
-def patch_vllm_lora_keep_resident(llm: Any) -> int:
+def patch_vllm_lora_keep_resident(llm: Any) -> int:  # noqa: ANN401 -- opaque vLLM engine handle walked via getattr
     """Keep vLLM's LoRA slot weights resident by neutralizing ``reset_lora``.
 
     vLLM (V1) zeroes a LoRA layer's GPU slot via ``reset_lora`` whenever a
@@ -156,13 +159,14 @@ def patch_vllm_lora_keep_resident(llm: Any) -> int:
             and hasattr(module, "lora_b_stacked")
             and not getattr(module, "_agilerl_lora_resident", False)
         ):
-            module.reset_lora = lambda *args, **kwargs: None
-            module._agilerl_lora_resident = True
+            # Deliberate monkeypatch of a live vLLM module.
+            module.reset_lora = lambda *args, **kwargs: None  # ty: ignore[unresolved-attribute]
+            module._agilerl_lora_resident = True  # ty: ignore[unresolved-attribute]
             count += 1
     return count
 
 
-def get_vllm_internal_model(llm: Any) -> nn.Module:
+def get_vllm_internal_model(llm: Any) -> nn.Module:  # noqa: ANN401 -- opaque vLLM engine handle walked via getattr
     """Return the live ``nn.Module`` inside an in-process vLLM ``LLM``.
 
     The other colocated patches need to mutate vLLM's running model in place —
@@ -184,7 +188,7 @@ def get_vllm_internal_model(llm: Any) -> nn.Module:
         candidates.append(getattr(core, "engine_core", core))
     candidates.append(engine)
 
-    def _model_from(base: Any) -> nn.Module | None:
+    def _model_from(base: Any) -> nn.Module | None:  # noqa: ANN401 -- opaque vLLM engine-core object walked via getattr
         try:
             return base.model_executor.driver_worker.model_runner.model
         except AttributeError:

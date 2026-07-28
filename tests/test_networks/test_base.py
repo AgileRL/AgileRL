@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 import pytest
 import torch
 import torch.nn.functional as F
@@ -515,7 +518,7 @@ class TestEvolvableNetworkBuildNetworkHead:
         with pytest.raises(
             NotImplementedError, match="build_network_head must be implemented"
         ):
-            minimal.build_network_head()
+            minimal.build_network_head({})
 
 
 class TestEvolvableNetworkInitWeightsGaussian:
@@ -548,3 +551,27 @@ class TestEvolvableNetworkExtractFeatures:
         features = net.extract_features(x)
         assert isinstance(features, torch.Tensor)
         assert features.shape[0] == 1
+
+
+class TestEvolvableNetworkRecreateNetwork:
+    def test_base_recreate_network_delegates_to_super(self, vector_space):
+        class BaseRecreateNetwork(EvolvableNetwork):
+            def __init__(self, obs_space):
+                super().__init__(obs_space)
+                self.name = "base_recreate"
+                self.build_network_head(net_config={"hidden_size": [16]})
+
+            def build_network_head(self, net_config=None):
+                self.head_net = self.create_mlp(
+                    num_inputs=self.latent_dim,
+                    num_outputs=1,
+                    name=self.name,
+                    net_config=net_config,
+                )
+
+            def forward(self, x):
+                return self.head_net(self.encoder(x))
+
+        net = BaseRecreateNetwork(vector_space)
+        with pytest.raises(NotImplementedError):
+            net.recreate_network()

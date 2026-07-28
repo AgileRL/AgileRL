@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 from __future__ import annotations
 
 import logging
@@ -5,15 +8,17 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import ClassVar, TypeVar
 
+from pydantic import BaseModel, ConfigDict, Field
+
 from agilerl.arena import AgentType
 from agilerl.arena.models.env import LLMEnvType
 from agilerl.arena.models.hpo import RLHyperparameter
 from agilerl.arena.models.networks import LoraConfigDict
-from pydantic import BaseModel, ConfigDict, Field
 
 logger = logging.getLogger(__name__)
 
-AlgoSpecTV = TypeVar("AlgoSpecTV", bound="AlgorithmSpec")
+# TypeVar over the AlgoSpec union so registration decorators return the concrete spec subclass.
+AlgoSpecT = TypeVar("AlgoSpecT", bound="AlgoSpec")
 
 
 @dataclass(frozen=True, slots=True)
@@ -21,10 +26,10 @@ class RegistryEntry:
     """A single entry in the algorithm registry.
 
     :param spec_cls: The algorithm spec class.
-    :type spec_cls: type[AlgorithmSpec]
+    :type spec_cls: type[AlgoSpec]
     """
 
-    spec_cls: type[AlgorithmSpec]
+    spec_cls: type[AlgoSpec]
 
 
 class AlgorithmRegistry:
@@ -37,13 +42,13 @@ class AlgorithmRegistry:
     def __init__(self) -> None:
         self._entries: dict[str, RegistryEntry] = {}
 
-    def add(self, name: str, spec_cls: type[AlgorithmSpec]) -> None:
+    def add(self, name: str, spec_cls: type[AlgoSpec]) -> None:
         """Register a spec class under *name*.
 
         :param name: Algorithm name (e.g. ``"DQN"``).
         :type name: str
         :param spec_cls: The spec class to register.
-        :type spec_cls: type[AlgorithmSpec]
+        :type spec_cls: type[AlgoSpec]
         """
         if name in self._entries:
             logger.warning("Overriding existing registration for algorithm %r", name)
@@ -70,14 +75,14 @@ class AlgorithmRegistry:
 ARENA_REGISTRY = AlgorithmRegistry()
 
 
-def register() -> Callable[[type[AlgorithmSpec]], type[AlgorithmSpec]]:
+def register() -> Callable[[type[AlgoSpecT]], type[AlgoSpecT]]:
     """Class decorator that registers an algorithm spec for Arena.
 
     The registry key is derived from the spec class name by stripping
     the ``"Spec"`` suffix (e.g. ``DQNSpec`` -> ``"DQN"``).
 
     :returns: The decorator function.
-    :rtype: Callable[[type[AlgorithmSpec]], type[AlgorithmSpec]]
+    :rtype: Callable[[type[AlgoSpecT]], type[AlgoSpecT]]
 
     Example::
 
@@ -86,7 +91,7 @@ def register() -> Callable[[type[AlgorithmSpec]], type[AlgorithmSpec]]:
             ...
     """
 
-    def decorator(spec_cls: type[AlgorithmSpec]) -> type[AlgorithmSpec]:
+    def decorator(spec_cls: type[AlgoSpecT]) -> type[AlgoSpecT]:
         name = spec_cls.__name__.removesuffix("Spec")
         ARENA_REGISTRY.add(name, spec_cls)
         return spec_cls
@@ -174,4 +179,4 @@ class LLMAlgorithmSpec(AlgorithmSpec):
     env_type: ClassVar[LLMEnvType]
 
 
-AlgoSpecT = RLAlgorithmSpec | MultiAgentRLAlgorithmSpec | LLMAlgorithmSpec
+AlgoSpec = RLAlgorithmSpec | MultiAgentRLAlgorithmSpec | LLMAlgorithmSpec

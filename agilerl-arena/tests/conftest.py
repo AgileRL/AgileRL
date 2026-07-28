@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 """Shared fixtures for Arena auth/client tests."""
 
 from __future__ import annotations

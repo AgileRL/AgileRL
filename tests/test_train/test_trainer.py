@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for the refactored Trainer abstraction.
 
 Covers:
@@ -13,6 +16,7 @@ from __future__ import annotations
 import contextlib
 import importlib
 import types
+from pathlib import Path
 from typing import ClassVar
 from unittest.mock import MagicMock, patch
 
@@ -205,6 +209,23 @@ class TestBuildReplayBuffer:
         assert result.max_size == 10_000
 
 
+class TestAlgoNetSpecCls:
+    def test_falls_back_to_networkspec_without_net_config_field(self):
+        from agilerl.models.algorithms.dpo import DPOSpec
+        from agilerl.models.networks import NetworkSpec
+
+        # LLM specs carry no ``net_config`` field, so there is no concrete
+        # subclass to resolve and the base spec is used.
+        trainer = LocalTrainer.__new__(LocalTrainer)
+        trainer.algorithm_spec = DPOSpec()
+        assert trainer._algo_net_spec_cls() is NetworkSpec
+
+    def test_resolves_concrete_spec_from_net_config_annotation(self):
+        trainer = LocalTrainer.__new__(LocalTrainer)
+        trainer.algorithm_spec = DQNSpec()
+        assert issubclass(trainer._algo_net_spec_cls(), QNetworkSpec)
+
+
 class TestGetTrainingKwargs:
     @pytest.fixture
     def gym_env_spec(self):
@@ -386,6 +407,38 @@ class TestArenaTrainerMissingDependencies:
                 environment=env_spec,
                 training=training_spec,
             )
+
+    def test_string_environment_raises_import_error_without_env_spec(
+        self, training_spec
+    ):
+        with (
+            patch("agilerl.training.trainer.ArenaEnvSpec", None),
+            pytest.raises(ImportError, match="Arena dependencies are not installed"),
+        ):
+            ArenaTrainer(
+                algorithm="PPO",
+                environment="CartPole-v1",
+                training=training_spec,
+            )
+
+    def test_from_manifest_raises_import_error_without_arena_manifest(self):
+        manifest = {
+            "algorithm": {"name": "PPO"},
+            "environment": {"name": "CartPole-v1"},
+            "training": {"max_steps": 100, "evo_steps": 50, "pop_size": 2},
+        }
+        with (
+            patch("agilerl.training.trainer.ArenaManifest", None),
+            pytest.raises(ImportError, match="Arena dependencies are not installed"),
+        ):
+            ArenaTrainer.from_manifest(manifest)
+
+    def test_resolve_env_spec_raises_import_error_without_env_spec(self):
+        with (
+            patch("agilerl.training.trainer.ArenaEnvSpec", None),
+            pytest.raises(ImportError, match="Arena dependencies are not installed"),
+        ):
+            ArenaTrainer._resolve_env_spec(MagicMock())
 
 
 class TestLocalTrainerConstruction:
@@ -855,6 +908,18 @@ class TestArenaTrainerDelegation:
 class TestArenaTrainerFromManifest:
     """Tests for ArenaTrainer.from_manifest()."""
 
+    def test_rejects_prevalidated_core_manifest(self):
+        from agilerl.models.manifest import TrainingManifest
+
+        data = {
+            "algorithm": {"name": "PPO"},
+            "environment": {"name": "CartPole-v1"},
+            "training": {"max_steps": 10},
+        }
+        manifest = TrainingManifest.get_validated(data, mode="python")
+        with pytest.raises(TypeError, match="expects a serialized manifest"):
+            ArenaTrainer.from_manifest(manifest)
+
     def test_from_dict(self):
         from agilerl.arena.models import DQNSpec as ArenaDQNSpec
 
@@ -907,7 +972,8 @@ class TestArenaTrainerFromManifest:
     def test_from_yaml_manifest_train_round_trip(self, mock_client):
         """YAML ``from_manifest(...).train()`` round-trips through arena validation."""
         trainer = ArenaTrainer.from_manifest(
-            "configs/training/ppo/ppo.yaml", client=mock_client
+            str(Path(__file__).parents[2] / "configs/training/ppo/ppo.yaml"),
+            client=mock_client,
         )
         result = trainer.train()
 
@@ -943,7 +1009,8 @@ class TestArenaTrainerFromManifest:
     def test_from_yaml_file(self):
         mock_client = MagicMock()
         trainer = ArenaTrainer.from_manifest(
-            "configs/training/ppo/ppo.yaml", client=mock_client
+            str(Path(__file__).parents[2] / "configs/training/ppo/ppo.yaml"),
+            client=mock_client,
         )
         assert isinstance(trainer, ArenaTrainer)
         assert trainer.algorithm_spec.name == "PPO"
@@ -1054,6 +1121,8 @@ class TestLocalTrainerCustomNetworks:
 
     def test_ppo_custom_actor_critic(self):
         from agilerl.modules.mlp import EvolvableMLP
+        from agilerl.networks import StochasticActor
+        from agilerl.networks.value_networks import ValueNetwork
 
         actor = self._make_mlp(self.OBS_DIM, self.DISCRETE_ACTIONS)
         critic = self._make_mlp(self.OBS_DIM, 1)
@@ -1063,10 +1132,14 @@ class TestLocalTrainerCustomNetworks:
 
         assert len(trainer.population) == self.POP_SIZE
         for agent in trainer.population:
-            assert isinstance(agent.actor, EvolvableMLP)
-            assert isinstance(agent.critic, EvolvableMLP)
-            assert agent.actor.hidden_size == self.HIDDEN
-            assert agent.critic.hidden_size == self.HIDDEN
+            # PPO adopts the custom MLP as the encoder of its stochastic
+            # actor / value network and adds the distribution / value head.
+            assert isinstance(agent.actor, StochasticActor)
+            assert isinstance(agent.critic, ValueNetwork)
+            assert isinstance(agent.actor.encoder, EvolvableMLP)
+            assert isinstance(agent.critic.encoder, EvolvableMLP)
+            assert agent.actor.encoder.hidden_size == self.HIDDEN
+            assert agent.critic.encoder.hidden_size == self.HIDDEN
 
     # -- DDPG (continuous, actor + critic) ----------------------------------
 
@@ -1265,7 +1338,9 @@ class TestLLMGetTrainingKwargs:
         assert "num_epochs" not in kwargs
 
     def test_llm_kwargs_include_max_reward(self, grpo_spec):
-        env_spec = MagicMock(max_reward=5.0)
+        from agilerl.models.env import LLMEnvSpec
+
+        env_spec = LLMEnvSpec(env_type="preference", dataset="dummy", max_reward=5.0)
         training = TrainingSpec(max_steps=100, evo_steps=10, pop_size=2)
         kwargs = grpo_spec.get_training_kwargs(training=training, env_spec=env_spec)
         assert kwargs["max_reward"] == 5.0
@@ -1298,7 +1373,7 @@ class TestLLMBuildAlgorithm:
         mock_tokenizer.eos_token_id = 50256
         mock_tokenizer.eos_token = "<|endoftext|>"
 
-        with patch.object(type(dpo_spec), "_algo_class_cache", mock_algo):
+        with patch.object(type(dpo_spec), "algo_class", return_value=mock_algo):
             dpo_spec.build_algorithm(tokenizer=mock_tokenizer, index=0)
 
         mock_algo.assert_called_once()
@@ -1314,7 +1389,7 @@ class TestLLMBuildAlgorithm:
         mock_tokenizer.eos_token_id = 50256
         mock_tokenizer.eos_token = "<|endoftext|>"
 
-        with patch.object(type(grpo_spec), "_algo_class_cache", mock_algo):
+        with patch.object(type(grpo_spec), "algo_class", return_value=mock_algo):
             grpo_spec.build_algorithm(tokenizer=mock_tokenizer, index=1)
 
         mock_algo.assert_called_once()
@@ -1330,7 +1405,7 @@ class TestLLMBuildAlgorithm:
         mock_accel = MagicMock()
         mock_accel.num_processes = 2
 
-        with patch.object(type(dpo_spec), "_algo_class_cache", mock_algo):
+        with patch.object(type(dpo_spec), "algo_class", return_value=mock_algo):
             dpo_spec.build_algorithm(
                 tokenizer=mock_tokenizer, index=0, accelerator=mock_accel
             )
@@ -2116,7 +2191,8 @@ class TestGetValidatedManifest:
         from agilerl.models.manifest import TrainingManifest
 
         manifest = TrainingManifest.get_validated(
-            "configs/training/ppo/ppo.yaml", mode="python"
+            str(Path(__file__).parents[2] / "configs/training/ppo/ppo.yaml"),
+            mode="python",
         )
         assert manifest.algorithm.name == "PPO"
         assert manifest.training.max_steps == 6_000_000
@@ -2500,6 +2576,7 @@ class TestMakeEnvBranches:
 
     def test_llm_non_multiturn_calls_make_env(self):
         """LLMEnvSpec non-multiturn sets fields and calls make_env."""
+        from agilerl.models import LLMAlgorithmSpec
         from agilerl.models.env import LLMEnvSpec, LLMEnvType
 
         mock_env = MagicMock()
@@ -2519,7 +2596,8 @@ class TestMakeEnvBranches:
             "agilerl.training.trainer.isinstance",
             side_effect=lambda o, c: (
                 True
-                if c is LLMEnvSpec and o is trainer.env_spec
+                if (c is LLMEnvSpec and o is trainer.env_spec)
+                or (c is LLMAlgorithmSpec and o is trainer.algorithm_spec)
                 else type.__instancecheck__(c, o)
                 if isinstance(c, type)
                 else False
@@ -2552,10 +2630,14 @@ class TestMakeEnvBranches:
 class TestLocalTrainerResolveEnvSpecBranches:
     """Tests for LocalTrainer._resolve_env_spec covering all agent types."""
 
-    def _make_manifest(self, agent_type, env_data=None, **algo_attrs):
+    def _make_manifest(self, agent_type, env_data=None, algo_cls=None, **algo_attrs):
         manifest = MagicMock()
         manifest.environment = env_data or {"name": "TestEnv-v0", "num_envs": 4}
         manifest.algorithm = MagicMock()
+        if algo_cls is not None:
+            # `_resolve_env_spec` narrows on the concrete spec type, so the
+            # double must satisfy `isinstance(..., algo_cls)`.
+            manifest.algorithm.__class__ = algo_cls
         manifest.algorithm.agent_type = agent_type
         for k, v in algo_attrs.items():
             setattr(manifest.algorithm, k, v)
@@ -2612,6 +2694,7 @@ class TestLocalTrainerResolveEnvSpecBranches:
                 "reward_fn_name": "reward_fn",
                 "prompt_template": {"system": "You are helpful"},
             },
+            algo_cls=LLMAlgorithmSpec,
             env_type=LLMEnvType.REASONING,
         )
         result = LocalTrainer._resolve_env_spec(manifest)

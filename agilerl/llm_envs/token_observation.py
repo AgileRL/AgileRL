@@ -1,15 +1,39 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 """Token-level wrapper for multi-turn LLM environments."""
 
 from __future__ import annotations
 
 import inspect
 import warnings
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
 
 from agilerl.protocols import MultiTurnEnv
+from agilerl.typing import (
+    ModelPromptFields,
+    ReasoningPrompts,
+    TokenObsStepReturn,
+    TokenObsType,
+)
 from agilerl.utils.llm_utils import max_prompt_tokens_for_sliding_window
+
+if TYPE_CHECKING:
+    from transformers.tokenization_utils_base import PreTrainedTokenizerBase
+
+
+def _decode_str(
+    tokenizer: PreTrainedTokenizerBase,
+    ids: list[int],
+    *,
+    skip_special_tokens: bool = False,
+) -> str:
+    """Decode a single token sequence to text."""
+    text = tokenizer.decode(ids, skip_special_tokens=skip_special_tokens)
+    assert isinstance(text, str), f"Expected decoded text, got {type(text).__name__}."
+    return text
 
 
 class TokenObservationWrapper:
@@ -22,7 +46,7 @@ class TokenObservationWrapper:
     def __init__(
         self,
         env: MultiTurnEnv,
-        tokenizer: Any,
+        tokenizer: PreTrainedTokenizerBase,
         max_turns: int,
         pad_id: int | None = None,
         apply_chat_template: bool = True,
@@ -64,7 +88,7 @@ class TokenObservationWrapper:
         self._last_full_prompt_token_len: int | None = None
 
     @staticmethod
-    def _format_obs(obs: str, info: dict[str, Any] | None) -> str:
+    def _format_obs(obs: str | dict[str, Any], info: dict[str, Any] | None) -> str:
         """Apply prefix/suffix from info dict to an observation string."""
         text = str(obs)
         if not info:
@@ -80,12 +104,15 @@ class TokenObservationWrapper:
     def _tokenize_initial_prompt(self, obs_text: str) -> dict[str, torch.Tensor]:
         """Tokenize the initial observation, optionally with chat template."""
         if self.apply_chat_template:
-            result = self.tokenizer.apply_chat_template(
+            # transformers v5 ``apply_chat_template(tokenize=True)`` returns a
+            # BatchEncoding mapping (``return_dict`` defaults to ``True``); the
+            # packaged stub widens the return to ``str | list``, so treat it as
+            # the dynamic mapping transformers actually returns.
+            result: Any = self.tokenizer.apply_chat_template(
                 [{"role": "user", "content": obs_text}],
                 tokenize=True,
                 add_generation_prompt=True,
             )
-            # Transformers v5 apply_chat_template returns a dict
             token_ids = result["input_ids"]
             if (
                 isinstance(token_ids, list)
@@ -202,28 +229,30 @@ class TokenObservationWrapper:
             self._sw_max_output_tokens,
         )
 
-    def _policy_observation_from_state(self) -> dict[str, Any]:
+    def _policy_observation_from_state(self) -> ReasoningPrompts:
         """Build observation dict for ``get_action`` from current ``full_ids``."""
         if self.full_ids is None:
             msg = "No prompt: reset() was never called"
             raise RuntimeError(msg)
         self._last_full_prompt_token_len = int(self.full_ids.shape[1])
         prompt_ids_1d = self.full_ids[0]
-        obs: dict[str, Any] = {
+        text = _decode_str(
+            self.tokenizer,
+            prompt_ids_1d.tolist(),
+            skip_special_tokens=True,
+        )
+        obs: ReasoningPrompts = {
             "input_ids": self.full_ids,
             "attention_mask": torch.ones_like(self.full_ids),
-            "text": self.tokenizer.decode(
-                prompt_ids_1d.tolist(),
-                skip_special_tokens=True,
-            ),
+            "text": text,
         }
         if self._sw_enabled:
             max_pt = self._prompt_budget()
             if max_pt is not None:
-                obs.update(self.build_model_prompt_fields(max_pt))
+                obs = obs | self.build_model_prompt_fields(max_pt)
         return obs
 
-    def reset(self, seed: int | None = None) -> tuple[dict[str, Any], dict[str, Any]]:
+    def reset(self, seed: int | None = None) -> tuple[ReasoningPrompts, dict[str, Any]]:
         """Create a fresh episode and return the policy-ready observation plus info."""
         if seed is not None:
             reset_sig = inspect.signature(self._env.reset)
@@ -260,8 +289,12 @@ class TokenObservationWrapper:
         self,
         full_completion_ids: torch.Tensor,
         gen_text: str,
-    ) -> tuple[dict[str, Any], float, bool, bool, dict[str, Any]]:
+    ) -> TokenObsStepReturn:
         """Record a generation and step the underlying environment."""
+        if self.full_ids is None:
+            msg = "No prompt: reset() was never called"
+            raise RuntimeError(msg)
+
         prompt_len = self.full_ids.shape[1]
         self.full_ids = full_completion_ids.detach().to(self.full_ids.device)
         gen_end = self.full_ids.shape[1]
@@ -272,7 +305,9 @@ class TokenObservationWrapper:
         self.turn_rewards.append(float(reward))
         self._turn_idx += 1
 
-        prompt_dict: dict[str, Any] = {}
+        # Empty mapping when the episode has ended; callers only read obs on
+        # continuing turns (see SyncMultiTurnVecEnv.step).
+        prompt_dict: TokenObsType = {}
         if not (terminated or truncated):
             feedback_text = self._format_obs(next_obs, info)
             self._feedback_texts.append(feedback_text)
@@ -285,6 +320,7 @@ class TokenObservationWrapper:
             # longer fit under ``max_model_len`` with room for at least one
             # generation, terminate the trajectory cleanly. With sliding
             # window enabled, the older turns get dropped and we keep going.
+            max_model_len = self._sw_max_model_len
             if not self._sw_enabled and (max_pt := self._prompt_budget()) is not None:
                 prompt_len = int(self.full_ids.shape[1])
                 if prompt_len > max_pt:
@@ -294,7 +330,7 @@ class TokenObservationWrapper:
                         "agilerl_context_overflow": {
                             "full_prompt_len": prompt_len,
                             "max_prompt_tokens": int(max_pt),
-                            "max_model_len": int(self._sw_max_model_len),
+                            "max_model_len": max_model_len,
                             "max_output_tokens": (
                                 int(self._sw_max_output_tokens)
                                 if self._sw_max_output_tokens is not None
@@ -311,7 +347,7 @@ class TokenObservationWrapper:
     def step(
         self,
         full_completion_ids: torch.Tensor,
-    ) -> tuple[dict[str, Any], float, bool, bool, dict[str, Any]]:
+    ) -> TokenObsStepReturn:
         """Decode the generation from completion IDs and step the environment."""
         if self._last_full_prompt_token_len is None:
             msg = (
@@ -321,16 +357,17 @@ class TokenObservationWrapper:
             raise RuntimeError(msg)
         pl = self._last_full_prompt_token_len
         gen_tokens = full_completion_ids[0, pl:]
-        gen_text = self.tokenizer.decode(
-            gen_tokens.tolist(),
-            skip_special_tokens=True,
+        # Decoding a single sequence returns ``str``; the stub widens
+        # ``decode`` to ``str | list[str]``.
+        gen_text = _decode_str(
+            self.tokenizer, gen_tokens.tolist(), skip_special_tokens=True
         )
         return self._step(full_completion_ids, gen_text)
 
     def build_model_prompt_fields(
         self,
         max_prompt_tokens: int,
-    ) -> dict[str, Any]:
+    ) -> ModelPromptFields:
         """Build truncated prompt tensors for model-window operation."""
         if self.full_ids is None:
             msg = "No prompt: reset() was never called"
@@ -384,17 +421,19 @@ class TokenObservationWrapper:
         stitch = full[:, initial_len:drop_from_final]
 
         prompt_ids_1d = trunc[0]
-        trajectory_text = self.tokenizer.decode(
+        trajectory_text = _decode_str(
+            self.tokenizer,
             prompt_ids_1d.tolist(),
             skip_special_tokens=True,
         )
-        return {
+        result: ModelPromptFields = {
             "trajectory_input_ids": trunc,
             "trajectory_attention_mask": torch.ones_like(trunc),
             "trajectory_text": trajectory_text,
             "stitch_prefix_ids": stitch,
             "initial_prompt_len": initial_len,
         }
+        return result
 
     def get_episode_data(
         self,
