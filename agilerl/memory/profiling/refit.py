@@ -24,6 +24,7 @@ from agilerl.memory.calibration import (
     FIXTURES_DIR,
     MeasuredPoint,
     ModelProfile,
+    calibration_target_bytes,
     curated_profiles,
     load_profile,
     save_profile,
@@ -109,6 +110,7 @@ def refit(profile: ModelProfile) -> ModelProfile:
                 fit_pairs["training"],
                 holdout_pairs["training"],
                 "training",
+                canonical_baseline_bytes=profile.canonical_sleeping_baseline_bytes,
             ),
             "generation": calibrate_phase(
                 model,
@@ -171,10 +173,10 @@ def prediction_errors(
                 colocated=True,
                 profile=applied,
             )
-        errors[measured.phase].append(
-            abs(breakdown.total_bytes - measured.device_peak_bytes)
-            / measured.device_peak_bytes
+        target = calibration_target_bytes(
+            measured, profile.canonical_sleeping_baseline_bytes
         )
+        errors[measured.phase].append(abs(breakdown.total_bytes - target) / target)
     return errors
 
 

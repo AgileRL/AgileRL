@@ -105,6 +105,30 @@ class MeasuredPoint(BaseModel):
     analytic_bytes: int | None = None
 
 
+def calibration_target_bytes(
+    measured: MeasuredPoint, canonical_baseline_bytes: int
+) -> int:
+    """The peak to fit against, with engine-teardown noise normalised out.
+
+    Fitting raw ``device_peak_bytes`` makes the fit hostage to whatever the
+    device floor happened to be when the point started. Two points in the
+    32k sweep sampled a floor of 4.33 and 8.03 GiB against a typical 1.2,
+    and the estimator was charged for the difference — reading as a 27-29%
+    under-prediction on points whose trainer cost was in fact normal, and
+    dragging the training holdout to 17.4% on a sweep whose 32k corners were
+    otherwise within 10%.
+
+    Re-basing each training point onto the sweep's median floor keeps the
+    quantity being fitted the one the formulas actually model: what the
+    trainer adds on top of a sleeping engine. Generation points are measured
+    with the engine awake and pass through unchanged.
+    """
+    if measured.phase != "training" or not measured.sleeping_baseline_bytes:
+        return measured.device_peak_bytes
+    trainer_delta = measured.device_peak_bytes - measured.sleeping_baseline_bytes
+    return trainer_delta + canonical_baseline_bytes
+
+
 class PhaseCalibration(BaseModel):
     """Fit plus its validation record for one phase."""
 
@@ -166,6 +190,22 @@ class ModelProfile(BaseModel):
         if self.device is None or device.name is None:
             return True
         return self.device.name == device.name
+
+    @property
+    def canonical_sleeping_baseline_bytes(self) -> int:
+        """Median device floor under a sleeping engine, across training points.
+
+        Individual points sometimes sample this floor before the *previous*
+        point's subprocess has released its CUDA memory, reading 4-8 GiB where
+        the true floor is ~1.2. Taking the median across the sweep rejects
+        those without discarding the point.
+        """
+        baselines = sorted(
+            point.sleeping_baseline_bytes
+            for point in self.measured
+            if point.phase == "training" and point.sleeping_baseline_bytes
+        )
+        return baselines[len(baselines) // 2] if baselines else 0
 
     @property
     def sleeping_engine_residual_bytes(self) -> int | None:

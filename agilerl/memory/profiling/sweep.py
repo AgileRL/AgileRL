@@ -38,12 +38,14 @@ from agilerl.memory.calibration import (
     ModelProfile,
     PhaseCalibration,
     ResidualFit,
+    calibration_target_bytes,
     generation_basis,
     save_profile,
     training_basis,
 )
 from agilerl.memory.estimator import estimate_generation, estimate_training
 from agilerl.memory.profiling.harness import SweepPoint
+from agilerl.memory.profiling.nvml import wait_for_idle
 from agilerl.memory.specs import DeviceSpec, ModelSpec, QuantizationMethod
 
 #: Corner levels per knob. Corners pin the fit; centre points validate
@@ -189,6 +191,7 @@ def calibrate_phase(
     fit_points: list[tuple[SweepPoint, MeasuredPoint]],
     holdout_points: list[tuple[SweepPoint, MeasuredPoint]],
     phase: str,
+    canonical_baseline_bytes: int = 0,
 ) -> PhaseCalibration:
     """Fit one phase's residual model and validate on held-out combinations."""
     basis_rows: list[dict[str, float]] = []
@@ -196,7 +199,8 @@ def calibrate_phase(
     for point, measured in fit_points:
         analytic, basis = _analytic_bytes(model, device, point, phase)
         basis_rows.append(basis)
-        residuals.append(measured.device_peak_bytes - analytic)
+        target = calibration_target_bytes(measured, canonical_baseline_bytes)
+        residuals.append(target - analytic)
     fit = fit_residuals(basis_rows, residuals)
 
     max_rel_error = None
@@ -206,9 +210,8 @@ def calibrate_phase(
         for point, measured in holdout_points:
             analytic, basis = _analytic_bytes(model, device, point, phase)
             predicted = analytic + fit.correction_bytes(basis)
-            errors.append(
-                abs(predicted - measured.device_peak_bytes) / measured.device_peak_bytes
-            )
+            target = calibration_target_bytes(measured, canonical_baseline_bytes)
+            errors.append(abs(predicted - target) / target)
         max_rel_error = max(errors)
         mean_rel_error = sum(errors) / len(errors)
     return PhaseCalibration(
@@ -462,6 +465,8 @@ def run_sweep(
             f"{' (holdout)' if held_out else ''}",
             flush=True,
         )
+        floor = wait_for_idle(device_index)
+        print(f"    device floor {floor / 1024**3:.2f} GiB", flush=True)
         try:
             generation, training = _measure_point_subprocess(
                 model_name, point, device_index=device_index
@@ -489,6 +494,13 @@ def run_sweep(
         for entry in skipped:
             print(f"  - {entry}", flush=True)
 
+    baselines = sorted(
+        p.sleeping_baseline_bytes
+        for p in measured
+        if p.phase == "training" and p.sleeping_baseline_bytes
+    )
+    canonical_baseline = baselines[len(baselines) // 2] if baselines else 0
+
     return ModelProfile(
         model_id=model_name,
         model_spec=model,
@@ -504,6 +516,7 @@ def run_sweep(
             fit_pairs["training"],
             holdout_pairs["training"],
             "training",
+            canonical_baseline_bytes=canonical_baseline,
         ),
         generation=(
             calibrate_phase(
