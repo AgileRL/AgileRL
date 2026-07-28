@@ -166,7 +166,7 @@ class PettingZooVecEnv:
         self.step_async(passed_actions_list)
         return self.step_wait()
 
-    def render(self) -> None | npt.NDArray | str | list | tuple[Any, ...]:
+    def render(self) -> npt.NDArray | str | list | tuple[Any, ...] | None:
         """Return the rendered frames from the parallel environments."""
         msg = f"{self.__str__()} render function is not implemented."
         raise NotImplementedError(
