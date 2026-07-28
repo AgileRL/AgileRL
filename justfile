@@ -54,13 +54,6 @@ test *args:
 # Static type checking with ty (config in pyproject.toml [tool.ty]).
 # Runs the pinned ty pre-commit hook so local type-checking stays identical to
 # CI, reproducing the two setup steps the Type checks workflow performs first.
-#
-# ty resolves imports from .venv, so without the extras every LLM import reads
-# as unresolved. Off Linux the platform-gated ones (vllm, deepspeed,
-# liger-kernel, bitsandbytes; box2d on Windows) are skipped by their markers,
-# so this resolves on every platform. agilerl.arena is a namespace portion
-# shipped by agilerl-arena, which ty only sees through the dev symlink; the
-# arena-symlink hook creates it, and `pre-commit run` takes one hook at a time.
 typecheck:
     uv sync --all-groups --extra all
     uv run pre-commit run arena-symlink --all-files
