@@ -1,3 +1,4 @@
+import functools
 import sys
 from unittest.mock import MagicMock, Mock, patch
 
@@ -1542,6 +1543,34 @@ def test_optimizer_wrapper_infers_parent_container_from_constructor_stack():
             )
 
     container = _Container()
+
+    assert container.wrapper.network_names == ["network"]
+    assert container.wrapper.lr_name == "lr"
+
+
+def test_optimizer_wrapper_infers_parent_container_through_decorator_frames():
+    """Parent inference must survive frames a decorator inserts before ``__init__``."""
+
+    def add_frame(fn):
+        @functools.wraps(fn)
+        def wrapper(*args, **kwargs):
+            return fn(*args, **kwargs)
+
+        return wrapper
+
+    class _Container:
+        def __init__(self) -> None:
+            self.lr = 0.001
+            self.network = MockEvolvableNetwork()
+            self.wrapper = OptimizerWrapper(
+                torch.optim.Adam,
+                self.network,
+                self.lr,
+            )
+
+    wrapped_init = add_frame(add_frame(OptimizerWrapper.__init__))
+    with patch.object(OptimizerWrapper, "__init__", wrapped_init):
+        container = _Container()
 
     assert container.wrapper.network_names == ["network"]
     assert container.wrapper.lr_name == "lr"

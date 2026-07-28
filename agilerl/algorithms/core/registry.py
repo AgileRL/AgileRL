@@ -369,14 +369,18 @@ class NetworkGroup:
         # NOTE: Here the assumption is that NetworkGroup is used inside the __init__
         # method of the implemented algorithm, such that we can access the defined locals
         # and extract the corresponding attribute names to the passed networks.
-        # Walk three frames up (this method -> caller -> ... -> algorithm __init__);
-        # each ``f_back`` is Optional, so narrow before dereferencing.
         frame = inspect.currentframe()
-        for _ in range(3):
-            assert frame is not None, "expected an active caller frame"
+        while frame is not None:
+            container = frame.f_locals.get("self")
+            if container is not None and container is not self:
+                return container
             frame = frame.f_back
-        assert frame is not None, "expected the algorithm __init__ frame"
-        return frame.f_locals["self"]
+
+        msg = (
+            "NetworkGroup could not find the algorithm that owns it. It must be "
+            "constructed inside the __init__ of an EvolvableAlgorithm."
+        )
+        raise RuntimeError(msg)
 
     def _infer_attribute_names(
         self,

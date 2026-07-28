@@ -327,13 +327,18 @@ class OptimizerWrapper:
         # Here the assumption is that OptimizerWrapper is used inside the __init__
         # method of the implemented algorithm, such that we can access the defined locals
         # and extract the corresponding attribute names to the passed networks.
-        current_frame = inspect.currentframe()
-        assert current_frame is not None
-        caller_frame = current_frame.f_back
-        assert caller_frame is not None
-        algorithm_frame = caller_frame.f_back
-        assert algorithm_frame is not None
-        return algorithm_frame.f_locals["self"]
+        frame = inspect.currentframe()
+        while frame is not None:
+            container = frame.f_locals.get("self")
+            if container is not None and container is not self:
+                return container
+            frame = frame.f_back
+
+        msg = (
+            "OptimizerWrapper could not find the algorithm that owns it. It must be "
+            "constructed inside the __init__ of an EvolvableAlgorithm."
+        )
+        raise RuntimeError(msg)
 
     def _infer_network_attr_names(
         self, container: EvolvableAlgorithmProtocol
