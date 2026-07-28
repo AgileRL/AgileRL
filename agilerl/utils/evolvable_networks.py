@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 from collections import OrderedDict
 from collections.abc import Callable, Sequence
 from dataclasses import asdict

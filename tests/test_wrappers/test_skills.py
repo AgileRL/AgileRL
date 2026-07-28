@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 import gymnasium as gym
 
 from agilerl.wrappers.learning import Skill

@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests targeting uncovered lines in agilerl/models/ Pydantic models.
 
 Covers validators, edge-case coercion, optional field handling, and

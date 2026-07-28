@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 """This tutorial shows how to train an NeuralUCB agent on the IRIS dataset.
 
 Authors: Nick (https://github.com/nicku-a)

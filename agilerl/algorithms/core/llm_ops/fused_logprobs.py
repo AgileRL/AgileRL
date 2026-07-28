@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 """Memory-bounded fused-linear log-prob computation.
 
 Computes per-token target logprobs straight from last-hidden-states with the

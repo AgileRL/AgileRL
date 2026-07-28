@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 from pathlib import Path
 
 # Vendored tiny LLM (Qwen2 architecture) for offline testing.

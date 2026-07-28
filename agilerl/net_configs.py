@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 from collections.abc import ItemsView, Iterator, Mapping
 from copy import deepcopy
 from dataclasses import dataclass, field

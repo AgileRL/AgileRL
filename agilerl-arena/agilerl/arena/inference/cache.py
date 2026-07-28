@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 """Persist deployment bindings and active agent selection in ``~/.arena/inference.json``."""
 
 from __future__ import annotations

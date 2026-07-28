@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 """Shared type aliases, TypedDicts, and batch dataclasses used across AgileRL.
 
 Naming conventions (keep new aliases consistent with these):

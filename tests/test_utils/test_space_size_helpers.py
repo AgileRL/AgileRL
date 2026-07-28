@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 from gymnasium import spaces
 
 from agilerl.utils.algo_utils import _input_size, _output_size

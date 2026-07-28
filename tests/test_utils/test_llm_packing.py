@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for padding-free sequence packing helpers.
 
 These exercise the pure-tensor pack/unpack logic and the backend gate; they do

@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for :mod:`agilerl.llm_envs` (reasoning, preference, and SFT gyms)."""
 
 import importlib

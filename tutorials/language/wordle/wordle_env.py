@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 from agilerl.data.language_environment import Language_Environment, Language_Observation
 from wordle.wordle_game import Vocabulary, WordleGame
 

@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 """Typed event model and NDJSON stream wrapper for Arena streaming endpoints.
 
 Handles newline-delimited JSON (NDJSON) responses from Arena streaming endpoints.

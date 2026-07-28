@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 # AgileRL Performance Profiling with Flamegraphs
 # This script demonstrates profiling AgileRL training using flamegraphs to identify bottlenecks
 # for the Memory Game RNN/MLP demo (see demo_on_policy_rnn_memory.py).

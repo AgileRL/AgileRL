@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 """Lightweight string-observation probe environments for multi-turn LLM debugging.
 
 These are ordered by increasing complexity for debugging LLM PPO training

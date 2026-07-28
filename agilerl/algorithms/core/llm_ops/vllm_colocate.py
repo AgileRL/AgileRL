@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 """Helpers for a colocated vLLM rollout engine (rollout + HF/PEFT trainer in
 one process, sharing the GPU via vLLM native sleep/wake).
 
