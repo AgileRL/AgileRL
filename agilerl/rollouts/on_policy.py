@@ -15,6 +15,12 @@ from gymnasium import spaces
 
 from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.algorithms import PPO
+from agilerl.components.llm_rollout_buffer import (
+    LLMExperienceBatch,
+    LLMRolloutBuffer,
+    RolloutGroup,
+    Trajectory,
+)
 from agilerl.networks import StochasticActor
 from agilerl.typing import RolloutReturn
 
@@ -339,3 +345,69 @@ def collect_rollouts_llm(
         group_seed,
         all_sampling_logps,
     )
+
+
+def buffer_llm_rollouts(
+    completion_ids_list: list[torch.Tensor],
+    action_masks_list: list[torch.Tensor],
+    all_turn_ids: list[torch.Tensor],
+    all_rewards: list[torch.Tensor],
+    *,
+    group_size: int,
+) -> LLMExperienceBatch:
+    """Stage a collected LLM rollout through a :class:`LLMRolloutBuffer` and drain it.
+
+    Trajectories from :func:`collect_rollouts_llm` are group-contiguous, so each
+    ``group_size`` consecutive trajectories form one prompt group. ``group_size``
+    is the number of completions sampled per prompt (e.g. for GRPO);
+    ``group_size=1`` (PPO/REINFORCE) makes each group a single trajectory, i.e. a
+    plain batch.
+
+    :param completion_ids_list: Per-trajectory ``(1, T)`` token-id tensors.
+    :type completion_ids_list: list[torch.Tensor]
+    :param action_masks_list: Per-trajectory ``(1, T - 1)`` boolean masks.
+    :type action_masks_list: list[torch.Tensor]
+    :param all_turn_ids: Per-trajectory ``(1, T - 1)`` turn-index tensors.
+    :type all_turn_ids: list[torch.Tensor]
+    :param all_rewards: Per-trajectory ``(max_turns,)`` reward tensors.
+    :type all_rewards: list[torch.Tensor]
+    :param group_size: Number of trajectories per group.
+    :type group_size: int
+    :return: The drained, collated batch.
+    :rtype: LLMExperienceBatch
+    """
+    n = len(completion_ids_list)
+    if n == 0:
+        return LLMRolloutBuffer.collate([])
+    if n % group_size != 0:
+        msg = f"Number of trajectories ({n}) must be divisible by group_size ({group_size})."
+        raise ValueError(msg)
+
+    n_groups = n // group_size
+    buffer = LLMRolloutBuffer(memory_size=n_groups)
+    for g in range(n_groups):
+        sl = slice(g * group_size, (g + 1) * group_size)
+        buffer.add_group(
+            RolloutGroup(
+                group_size=group_size,
+                trajectories=[
+                    Trajectory(
+                        completion_ids=completion_ids,
+                        action_masks=action_masks,
+                        turn_ids=turn_ids,
+                        rewards=rewards,
+                    )
+                    for completion_ids, action_masks, turn_ids, rewards in zip(
+                        completion_ids_list[sl],
+                        action_masks_list[sl],
+                        all_turn_ids[sl],
+                        all_rewards[sl],
+                        strict=True,
+                    )
+                ],
+            )
+        )
+    if len(buffer) != n_groups:
+        msg = f"Expected {n_groups} buffered groups, got {len(buffer)}."
+        raise ValueError(msg)
+    return buffer.pop_all()

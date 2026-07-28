@@ -264,10 +264,12 @@ def _make_multiturn_mock_agent(*, spec=LLMPPO):
 
 def _multiturn_collect_return(*, batch_steps=3):
     """Standard return value for a mocked collect_rollouts_llm call."""
+    # Full ids are length L, while the per-action-token mask / turn ids are
+    # length L - 1. The packed rollout buffer enforces this relationship.
     return (
         [torch.ones(1, 8, dtype=torch.long)],
-        [torch.ones(1, 8, dtype=torch.bool)],
-        [torch.zeros(1, 8, dtype=torch.long)],
+        [torch.ones(1, 7, dtype=torch.bool)],
+        [torch.zeros(1, 7, dtype=torch.long)],
         [torch.ones(2, dtype=torch.float32)],
         batch_steps,
         42,
@@ -1273,16 +1275,12 @@ class TestFinetuneLlmMultiturn:
             patch(
                 "agilerl.training.llm.multiturn.collect_rollouts_llm"
             ) as mock_collect,
-            patch(
-                "agilerl.training.llm.multiturn.stack_and_pad_experiences"
-            ) as mock_stack,
         ):
             mock_pbar_fn.return_value = MagicMock()
             mock_agg.return_value = 0.5
             mock_collect.return_value = _multiturn_collect_return(
                 batch_steps=batch_steps
             )
-            mock_stack.return_value = (torch.zeros(1, 8, dtype=torch.long),)
 
             finetune_llm_multiturn(
                 pop=[mock_agent],
@@ -1310,8 +1308,8 @@ class TestFinetuneLlmMultiturn:
         sampling_logps = [torch.zeros(1, 8)]
         rollout_return = (
             [torch.ones(1, 8, dtype=torch.long)],  # completion_ids_list
-            [torch.ones(1, 8, dtype=torch.bool)],  # action_masks_list
-            [torch.zeros(1, 8, dtype=torch.long)],  # all_turn_ids
+            [torch.ones(1, 7, dtype=torch.bool)],  # action_masks_list
+            [torch.zeros(1, 7, dtype=torch.long)],  # all_turn_ids
             [torch.ones(2, dtype=torch.float32)],  # all_rewards
             3,  # batch_steps
             123,  # group_seed
@@ -1333,11 +1331,7 @@ class TestFinetuneLlmMultiturn:
                 "agilerl.training.llm.multiturn.collect_rollouts_llm",
                 return_value=rollout_return,
             ),
-            patch(
-                "agilerl.training.llm.multiturn.stack_and_pad_experiences"
-            ) as mock_stack,
         ):
-            mock_stack.return_value = (torch.zeros(1, 8, dtype=torch.long),)
             finetune_llm_multiturn(
                 pop=[mock_agent],
                 env_factory=MagicMock(),
@@ -1400,15 +1394,11 @@ class TestFinetuneLlmMultiturn:
             patch(
                 "agilerl.training.llm.multiturn.collect_rollouts_llm"
             ) as mock_collect,
-            patch(
-                "agilerl.training.llm.multiturn.stack_and_pad_experiences"
-            ) as mock_stack,
         ):
             mock_pbar_fn.return_value = MagicMock()
             mock_init_loggers.return_value = []
             mock_agg.return_value = 0.5
             mock_collect.return_value = _multiturn_collect_return(batch_steps=3)
-            mock_stack.return_value = (torch.zeros(1, 8, dtype=torch.long),)
 
             finetune_llm_multiturn(
                 pop=[mock_agent],
@@ -1449,16 +1439,12 @@ class TestFinetuneLlmMultiturn:
                 "agilerl.training.llm.multiturn.collect_rollouts_llm"
             ) as mock_collect,
             patch(
-                "agilerl.training.llm.multiturn.stack_and_pad_experiences"
-            ) as mock_stack,
-            patch(
                 "agilerl.training.llm.multiturn.tournament_selection_and_mutation"
             ) as mock_tourn,
         ):
             mock_pbar_fn.return_value = MagicMock()
             mock_agg.return_value = 0.5
             mock_collect.return_value = _multiturn_collect_return(batch_steps=3)
-            mock_stack.return_value = (torch.zeros(1, 8, dtype=torch.long),)
             mock_tourn.return_value = [mock_agent]
 
             finetune_llm_multiturn(
@@ -1546,14 +1532,10 @@ class TestFinetuneLlmMultiturn:
             patch(
                 "agilerl.training.llm.multiturn.collect_rollouts_llm"
             ) as mock_collect,
-            patch(
-                "agilerl.training.llm.multiturn.stack_and_pad_experiences"
-            ) as mock_stack,
         ):
             mock_pbar_fn.return_value = MagicMock()
             mock_agg.return_value = 0.5
             mock_collect.return_value = _multiturn_collect_return(batch_steps=3)
-            mock_stack.return_value = (torch.zeros(1, 8, dtype=torch.long),)
             finetune_llm_multiturn(
                 pop=[mock_agent],
                 env_factory=MagicMock(),
@@ -1585,14 +1567,10 @@ class TestFinetuneLlmMultiturn:
             patch(
                 "agilerl.training.llm.multiturn.collect_rollouts_llm"
             ) as mock_collect,
-            patch(
-                "agilerl.training.llm.multiturn.stack_and_pad_experiences"
-            ) as mock_stack,
         ):
             mock_pbar_fn.return_value = MagicMock()
             mock_agg.return_value = 0.5
             mock_collect.return_value = _multiturn_collect_return(batch_steps=3)
-            mock_stack.return_value = (torch.zeros(1, 8, dtype=torch.long),)
             finetune_llm_multiturn(
                 pop=[mock_agent],
                 env_factory=MagicMock(),
@@ -1622,9 +1600,6 @@ class TestFinetuneLlmMultiturn:
                 "agilerl.training.llm.multiturn.collect_rollouts_llm"
             ) as mock_collect,
             patch(
-                "agilerl.training.llm.multiturn.stack_and_pad_experiences"
-            ) as mock_stack,
-            patch(
                 "agilerl.training.llm.multiturn.time.monotonic",
                 side_effect=itertools.count(100, 100).__next__,
             ),
@@ -1632,7 +1607,6 @@ class TestFinetuneLlmMultiturn:
             mock_pbar_fn.return_value = MagicMock()
             mock_agg.return_value = 0.5
             mock_collect.return_value = _multiturn_collect_return(batch_steps=3)
-            mock_stack.return_value = (torch.zeros(1, 8, dtype=torch.long),)
             finetune_llm_multiturn(
                 pop=[mock_agent],
                 env_factory=MagicMock(),
@@ -1664,16 +1638,12 @@ class TestFinetuneLlmMultiturn:
             patch(
                 "agilerl.training.llm.multiturn.collect_rollouts_llm"
             ) as mock_collect,
-            patch(
-                "agilerl.training.llm.multiturn.stack_and_pad_experiences"
-            ) as mock_stack,
         ):
             mock_pbar_fn.return_value = MagicMock()
             mock_agg.return_value = 0.5
             mock_collect.return_value = _multiturn_collect_return(
                 batch_steps=batch_steps
             )
-            mock_stack.return_value = (torch.zeros(1, 8, dtype=torch.long),)
             finetune_llm_multiturn(
                 pop=[mock_agent],
                 env_factory=MagicMock(),
@@ -1705,15 +1675,11 @@ class TestFinetuneLlmMultiturn:
             patch(
                 "agilerl.training.llm.multiturn.collect_rollouts_llm"
             ) as mock_collect,
-            patch(
-                "agilerl.training.llm.multiturn.stack_and_pad_experiences"
-            ) as mock_stack,
             _population_init_skip_per_mock_class(),
         ):
             mock_pbar_fn.return_value = MagicMock()
             mock_agg.return_value = 0.5
             mock_collect.return_value = _multiturn_collect_return(batch_steps=3)
-            mock_stack.return_value = (torch.zeros(1, 8, dtype=torch.long),)
             finetune_llm_multiturn(
                 pop=[weaker, stronger],
                 env_factory=MagicMock(),
@@ -1745,15 +1711,11 @@ class TestFinetuneLlmMultiturn:
             patch(
                 "agilerl.training.llm.multiturn.collect_rollouts_llm"
             ) as mock_collect,
-            patch(
-                "agilerl.training.llm.multiturn.stack_and_pad_experiences"
-            ) as mock_stack,
         ):
             mock_pbar_fn.return_value = MagicMock()
             mock_init_loggers.return_value = []
             mock_agg.return_value = 0.5
             mock_collect.return_value = _multiturn_collect_return(batch_steps=3)
-            mock_stack.return_value = (torch.zeros(1, 8, dtype=torch.long),)
             finetune_llm_multiturn(
                 pop=[mock_agent],
                 env_factory=MagicMock(),
@@ -1921,10 +1883,6 @@ def test_report_metrics_called_on_non_main_process(loop):
                     "agilerl.training.llm.multiturn.collect_rollouts_llm",
                     return_value=_multiturn_collect_return(batch_steps=2),
                 ),
-                patch(
-                    "agilerl.training.llm.multiturn.stack_and_pad_experiences",
-                    return_value=(torch.zeros(1, 8, dtype=torch.long),),
-                ),
             ):
                 finetune_llm_multiturn(
                     pop=[mock_agent],
@@ -2014,11 +1972,11 @@ def test_finetune_llm_multiturn_aligns_and_pads_turn_ids():
     mock_agent.use_liger_loss = True
     mock_agent.importance_sampling_level = "token"
 
+    # The rollout yields 7-wide turn ids; the cross-rank align widens the mask
+    # to 9, so turn_ids must be padded out to match.
     aligned_ids = torch.ones(1, 10, dtype=torch.long)
     aligned_masks = torch.ones(1, 9, dtype=torch.bool)
     aligned_rewards = torch.ones(1, 2, dtype=torch.float32)
-    short_turn_ids = torch.zeros(1, 7, dtype=torch.long)
-    rewards_2d = torch.ones(1, 2, dtype=torch.float32)
 
     acc = MagicMock()
     acc.is_main_process = True
@@ -2038,13 +1996,6 @@ def test_finetune_llm_multiturn_aligns_and_pads_turn_ids():
         patch(
             "agilerl.training.llm.multiturn.collect_rollouts_llm",
             return_value=_multiturn_collect_return(batch_steps=2),
-        ),
-        patch(
-            "agilerl.training.llm.multiturn.stack_and_pad_experiences",
-            side_effect=[
-                (short_turn_ids,),
-                (rewards_2d,),
-            ],
         ),
         patch(
             "agilerl.training.llm.multiturn.needs_cross_rank_seq_padding",

@@ -92,11 +92,19 @@ This example demonstrates how to use the GRPO algorithm to fine-tune a LLM on a 
    :ref:`multiturn_grpo_ppo_tutorial`
       Multi-turn GRPO and PPO for LLMs.
 
+.. toctree::
+   :maxdepth: 1
+   :caption: Developer notes
+
+   dev/vllm_sleep_handoff
+   dev/llm_rollout_buffer
+
 .. note::
 
-   Colocated rollouts (where the trainer and vLLM share a single GPU and hand it
-   back and forth using vLLM's native sleep/wake) are covered for users under
-   "Colocated rollout (native vLLM sleep/wake)" in the :doc:`quantization` topic.
-   A deeper, code-level walkthrough of the same mechanism lives in
-   ``docs/llm_finetuning/vllm_sleep_handoff.md`` (a developer note kept in the
-   repository, not built into this documentation site).
+   The **Developer notes** below are implementation-level walkthroughs of the
+   LLM training internals, aimed at contributors rather than users; you do not
+   need them to use AgileRL. For example, colocated rollouts (where the trainer
+   and vLLM share a single GPU via vLLM's native sleep/wake) are covered for
+   users under "Colocated rollout (native vLLM sleep/wake)" in the
+   :doc:`quantization` topic, while :doc:`dev/vllm_sleep_handoff` walks through
+   how it works in the code.

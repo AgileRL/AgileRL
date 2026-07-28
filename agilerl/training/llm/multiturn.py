@@ -31,8 +31,7 @@ if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
     from agilerl.algorithms import LLMPPO, LLMREINFORCE
     from agilerl.llm_envs import SyncMultiTurnVecEnv
     from agilerl.protocols import TokenizedMultiTurnEnv
-    from agilerl.rollouts.on_policy import collect_rollouts_llm
-    from agilerl.utils.algo_utils import stack_and_pad_experiences
+    from agilerl.rollouts.on_policy import buffer_llm_rollouts, collect_rollouts_llm
 
 if TYPE_CHECKING:
     SupportedMultiturn = LLMPPO | LLMREINFORCE | GRPO
@@ -226,44 +225,32 @@ def finetune_llm_multiturn(
                 group_seed=group_seed,
             )
 
-            normalized_rewards = [
-                reward.unsqueeze(0) if reward.dim() == 1 else reward
-                for reward in all_rewards
-            ]
-            (turn_ids_padded,) = stack_and_pad_experiences(
+            batch = buffer_llm_rollouts(
+                completion_ids_list,
+                action_masks_list,
                 all_turn_ids,
-                padding_values=[-1],
+                all_rewards,
+                group_size=group_size,
             )
-            (rewards_stacked,) = stack_and_pad_experiences(
-                normalized_rewards,
-                padding_values=[0.0],
-            )
-            rewards_2d = rewards_stacked.float()
+            turn_ids_padded = batch.turn_ids
+            rewards_2d = batch.rewards.float()
 
             episode_scores = (
                 rewards_2d.sum(dim=1) if rewards_2d.dim() > 1 else rewards_2d
             )
             mean_score = episode_scores.mean().to(agent.device)
 
-            experiences = (
-                completion_ids_list,
-                action_masks_list,
-                rewards_2d,
-            )
+            experiences = batch.experiences()
 
-            # Pass turn_ids to every multi-turn RL agent that accepts it
-            # (LLMPPO/LLMREINFORCE, and the GRPO family — GRPO/CISPO/GSPO —
-            # which use it for turn-level importance sampling + per-turn
-            # group-relative advantages). Agents that don't need it (e.g.
-            # token/sequence levels, GSPO) simply ignore it.
-            learn_kwargs = (
-                {"turn_ids": turn_ids_padded}
-                if isinstance(agent, (LLMREINFORCE, LLMPPO, GRPO))
-                else {}
-            )
-            if all_sampling_logps is not None and isinstance(
-                agent, (GRPO, LLMPPO, LLMREINFORCE)
-            ):
+            # Every multi-turn LLM algo reaching this loop (GRPO/CISPO/GSPO,
+            # LLMPPO, LLMREINFORCE) shares the same
+            # learn(turn_ids=..., sampling_logps=...) signature, so just forward
+            # whatever the rollout produced; algos that don't use a field (e.g.
+            # GSPO ignores turn_ids) leave it unused.
+            learn_kwargs: dict[str, Any] = {}
+            if turn_ids_padded is not None:
+                learn_kwargs["turn_ids"] = turn_ids_padded
+            if all_sampling_logps is not None:
                 learn_kwargs["sampling_logps"] = all_sampling_logps
             if accelerator is not None and needs_cross_rank_seq_padding(
                 agent,
@@ -271,8 +258,8 @@ def finetune_llm_multiturn(
             ):
                 completion_ids, action_masks, rewards_2d = (
                     align_completion_batch_shapes_across_ranks(
-                        completion_ids_list,
-                        action_masks_list,
+                        batch.completion_ids,
+                        batch.action_masks,
                         rewards_2d,
                         pad_token_id=agent.pad_token_id,
                         accelerator=accelerator,
