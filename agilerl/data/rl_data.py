@@ -16,8 +16,7 @@ from agilerl.data.tokenizer import Tokenizer
 
 class TokenReward(ABC):
     @abstractmethod
-    def get_token_reward(self, tokens: list[int]) -> list[float]:
-        pass
+    def get_token_reward(self, tokens: list[int]) -> list[float]: ...
 
 
 class ConstantTokenReward(TokenReward):
@@ -179,7 +178,7 @@ class RL_Dataset(ABC):
     @abstractmethod
     def __iter__(self) -> Iterator[DataPoint]:
         """Return an iterator over data points. Implemented by subclasses."""
-        pass
+        ...
 
     def __init__(
         self,
@@ -270,12 +269,10 @@ class RL_Dataset(ABC):
 
 class List_RL_Dataset(RL_Dataset):
     @abstractmethod
-    def get_item(self, idx: int) -> DataPoint:
-        pass
+    def get_item(self, idx: int) -> DataPoint: ...
 
     @abstractmethod
-    def size(self) -> int:
-        pass
+    def size(self) -> int: ...
 
     def __iter__(self) -> Iterator[DataPoint]:
         for i in range(self.size()):
@@ -284,8 +281,7 @@ class List_RL_Dataset(RL_Dataset):
 
 class Iterable_RL_Dataset(RL_Dataset):
     @abstractmethod
-    def sample_item(self) -> DataPoint:
-        pass
+    def sample_item(self) -> DataPoint: ...
 
     def __iter__(self) -> Iterator[DataPoint]:
         while True:
