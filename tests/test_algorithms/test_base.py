@@ -1201,7 +1201,7 @@ class TestRLAlgorithmLoadCheckpoint:
 
         test_script = f"""
 import sys
-sys.path.insert(0, "{os.getcwd()}")
+sys.path.insert(0, "{Path(__file__).parents[2]}")
 import torch
 import numpy as np
 from pathlib import Path
@@ -1240,6 +1240,7 @@ print("SUCCESS: GPU-saved checkpoint loaded via load_checkpoint in no-CUDA envir
         result = subprocess.run(
             [sys.executable, str(script_path)],
             env=env,
+            cwd=Path(__file__).parents[2],
             capture_output=True,
             text=True,
             check=False,
@@ -1404,7 +1405,7 @@ class TestMultiAgentRLAlgorithmLoadCheckpoint:
 
         test_script = f"""
 import sys
-sys.path.insert(0, "{os.getcwd()}")
+sys.path.insert(0, "{Path(__file__).parents[2]}")
 import torch
 import numpy as np
 from pathlib import Path
@@ -1445,6 +1446,7 @@ print("SUCCESS: GPU-saved multi-agent checkpoint loaded via load_checkpoint in n
         result = subprocess.run(
             [sys.executable, str(script_path)],
             env=env,
+            cwd=Path(__file__).parents[2],
             capture_output=True,
             text=True,
             check=False,
@@ -1537,7 +1539,7 @@ class TestRLAlgorithmLoad:
         # Create a subprocess that runs with CUDA_VISIBLE_DEVICES="" to simulate no GPU environment
         test_script = f"""
 import sys
-sys.path.insert(0, "{os.getcwd()}")
+sys.path.insert(0, "{Path(__file__).parents[2]}")
 import torch
 from pathlib import Path
 from tests.test_algorithms.test_base import DummyRLAlgorithm
@@ -1566,6 +1568,7 @@ print("SUCCESS: GPU-saved checkpoint loaded successfully in no-CUDA environment"
         result = subprocess.run(
             [sys.executable, str(script_path)],
             env=env,
+            cwd=Path(__file__).parents[2],
             capture_output=True,
             text=True,
             check=False,
@@ -1724,7 +1727,7 @@ class TestMultiAgentRLAlgorithmLoad:
         # Create a subprocess that runs with CUDA_VISIBLE_DEVICES="" to simulate no GPU environment
         test_script = f"""
 import sys
-sys.path.insert(0, "{os.getcwd()}")
+sys.path.insert(0, "{Path(__file__).parents[2]}")
 import torch
 from pathlib import Path
 from tests.test_algorithms.test_base import DummyMARLAlgorithm
@@ -1755,6 +1758,7 @@ print("SUCCESS: GPU-saved multi-agent checkpoint loaded successfully in no-CUDA 
         result = subprocess.run(
             [sys.executable, str(script_path)],
             env=env,
+            cwd=Path(__file__).parents[2],
             capture_output=True,
             text=True,
             check=False,

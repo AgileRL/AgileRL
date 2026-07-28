@@ -16,6 +16,7 @@ from __future__ import annotations
 import contextlib
 import importlib
 import types
+from pathlib import Path
 from typing import ClassVar
 from unittest.mock import MagicMock, patch
 
@@ -971,7 +972,8 @@ class TestArenaTrainerFromManifest:
     def test_from_yaml_manifest_train_round_trip(self, mock_client):
         """YAML ``from_manifest(...).train()`` round-trips through arena validation."""
         trainer = ArenaTrainer.from_manifest(
-            "configs/training/ppo/ppo.yaml", client=mock_client
+            str(Path(__file__).parents[2] / "configs/training/ppo/ppo.yaml"),
+            client=mock_client,
         )
         result = trainer.train()
 
@@ -1007,7 +1009,8 @@ class TestArenaTrainerFromManifest:
     def test_from_yaml_file(self):
         mock_client = MagicMock()
         trainer = ArenaTrainer.from_manifest(
-            "configs/training/ppo/ppo.yaml", client=mock_client
+            str(Path(__file__).parents[2] / "configs/training/ppo/ppo.yaml"),
+            client=mock_client,
         )
         assert isinstance(trainer, ArenaTrainer)
         assert trainer.algorithm_spec.name == "PPO"
@@ -2188,7 +2191,8 @@ class TestGetValidatedManifest:
         from agilerl.models.manifest import TrainingManifest
 
         manifest = TrainingManifest.get_validated(
-            "configs/training/ppo/ppo.yaml", mode="python"
+            str(Path(__file__).parents[2] / "configs/training/ppo/ppo.yaml"),
+            mode="python",
         )
         assert manifest.algorithm.name == "PPO"
         assert manifest.training.max_steps == 6_000_000

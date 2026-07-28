@@ -216,6 +216,14 @@ def cleanup():
         gc.collect()
 
 
+@pytest.fixture(scope="session", autouse=True)
+def isolate_working_directory(tmp_path_factory):
+    """Run the test session in a temporary working directory."""
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        monkeypatch.chdir(tmp_path_factory.mktemp("cwd"))
+        yield
+
+
 @pytest.fixture(autouse=True)
 def skip_cuda_parametrization_when_unavailable(request):
     """Skip CUDA-specific parametrized tests on environments without CUDA."""

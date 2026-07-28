@@ -5,6 +5,7 @@ import os
 
 import accelerate
 
+from agilerl.utils import ilql_utils
 from agilerl.utils.ilql_utils import (
     add_system_configs,
     convert_path,
@@ -24,7 +25,7 @@ class TestConvertPath:
         path = "example_path"
         converted_path = convert_path(path)
         assert converted_path == os.path.join(
-            os.path.dirname(os.path.realpath("agilerl/utils/ilql_utils.py")),
+            os.path.dirname(os.path.realpath(ilql_utils.__file__)),
             "../../",
             path,
         )
