@@ -912,17 +912,17 @@
   "trainer_variant": "base",
   "training": {
     "fit": {
-      "intercept_bytes": -198592612.98221767,
+      "intercept_bytes": -189705193.57891938,
       "slopes": {
-        "extra_micro_batches": 29970298.94044843,
-        "grad_tokens": 62292.361589873275,
-        "nograd_tokens": 124584.72198614491,
-        "seq_len": 324889.13211376895,
-        "update_tokens": 7008.332503359759
+        "extra_micro_batches": 23839213.1140341,
+        "grad_tokens": 61690.16094249518,
+        "nograd_tokens": 123380.32074707995,
+        "seq_len": 358434.3704493464,
+        "update_tokens": 4804.884135607773
       }
     },
-    "holdout_max_rel_error": 0.008498260069897227,
-    "holdout_mean_rel_error": 0.00782642562462524,
+    "holdout_max_rel_error": 0.008821492396670369,
+    "holdout_mean_rel_error": 0.007788862744897888,
     "n_points": 15
   }
 }

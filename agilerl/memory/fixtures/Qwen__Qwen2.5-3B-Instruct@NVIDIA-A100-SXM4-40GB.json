@@ -824,17 +824,17 @@
   "trainer_variant": "base",
   "training": {
     "fit": {
-      "intercept_bytes": 188786142.9689799,
+      "intercept_bytes": 181727323.6792019,
       "slopes": {
-        "extra_micro_batches": 32719378.502795603,
-        "grad_tokens": 33945.23865290121,
-        "nograd_tokens": 67890.4774641496,
-        "seq_len": -151527.07596367353,
-        "update_tokens": 2879.8541286599157
+        "extra_micro_batches": 28860073.330715947,
+        "grad_tokens": 34506.147179477004,
+        "nograd_tokens": 69012.2945120206,
+        "seq_len": -134550.23627879267,
+        "update_tokens": -1035.5340433483127
       }
     },
-    "holdout_max_rel_error": 0.006566523016357216,
-    "holdout_mean_rel_error": 0.005188726380007747,
+    "holdout_max_rel_error": 0.00794924583919653,
+    "holdout_mean_rel_error": 0.006767454748563083,
     "n_points": 16
   }
 }

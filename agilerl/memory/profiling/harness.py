@@ -180,6 +180,10 @@ class SweepPoint:
             max_prompt_len=self.prompt_len,
             max_lora_rank=self.lora_rank,
             concurrent_requests=self.group_size * self.n_prompts,
+            # The engine loads the same checkpoint the point names. Leaving
+            # this at the default asks for a "base" variant that a sweep
+            # restricted to quantized variants never builds.
+            weight_variant="base" if self.quantization == "none" else self.quantization,
         )
 
 

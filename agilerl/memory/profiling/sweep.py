@@ -171,6 +171,9 @@ def _analytic_bytes(
             model,
             device,
             knobs,
+            trainer_variant=(
+                "base" if point.quantization == "none" else point.quantization
+            ),
             colocated=True,
             profile=None,
             colocated_engine_reservation_bytes=(
