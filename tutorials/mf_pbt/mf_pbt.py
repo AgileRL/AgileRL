@@ -80,7 +80,7 @@ if __name__ == "__main__":
 
     # The only line that differs from a tournament-selection run: build a
     # MultiFrequencySelection instead of a TournamentSelection. Its arguments map
-    # one-to-one onto the manifest's `tournament_selection` block. Subpopulations are
+    # one-to-one onto the manifest's `selection_strategy` block. Subpopulations are
     # tagged automatically (by population index) on the first call to `select`, so we do
     # not tag the agents ourselves. `seed` seeds the RNG that picks which winner replaces
     # each loser; the manifest path derives it from `mutation.rand_seed` instead

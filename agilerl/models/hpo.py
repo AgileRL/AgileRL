@@ -74,16 +74,16 @@ class MutationSpec(BaseModel):
 class TournamentSelectionSpec(BaseModel):
     """Pydantic model for TournamentSelection object.
 
-    :param selection_strategy: Discriminator selecting this (tournament) branch of the
-        manifest's tournament_selection union. Fixed to "tournament".
-    :type selection_strategy: Literal["tournament"]
+    :param strategy: Discriminator selecting this (tournament) branch of the
+        manifest's selection_strategy union. Fixed to "tournament".
+    :type strategy: Literal["tournament"]
     :param tournament_size: Size of the tournament.
     :type tournament_size: int
     :param elitism: Whether elitism is enabled.
     :type elitism: bool
     """
 
-    selection_strategy: Literal["tournament"] = "tournament"
+    strategy: Literal["tournament"] = "tournament"
     tournament_size: int = Field(default=2, ge=2)
     elitism: bool = True
 
@@ -131,9 +131,9 @@ class MultiFrequencySelectionSpec(BaseModel):
     not on this spec. This spec only validates the population-size-independent
     constraints.
 
-    :param selection_strategy: Discriminator selecting this (MF-PBT) branch of the
-        manifest's tournament_selection union. Fixed to "multi_frequency".
-    :type selection_strategy: Literal["multi_frequency"]
+    :param strategy: Discriminator selecting this (MF-PBT) branch of the
+        manifest's selection_strategy union. Fixed to "multi_frequency".
+    :type strategy: Literal["multi_frequency"]
     :param n_subpopulations: Number of subpopulations (>= 2, since MF-PBT migration
         draws from *other* subpopulations).
     :type n_subpopulations: int
@@ -157,7 +157,7 @@ class MultiFrequencySelectionSpec(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    selection_strategy: Literal["multi_frequency"] = "multi_frequency"
+    strategy: Literal["multi_frequency"] = "multi_frequency"
     n_subpopulations: int = Field(default=2, ge=2)
     n_winners: int | None = Field(default=None, ge=1)
     n_survivors: int = Field(default=0, ge=0)
@@ -175,32 +175,32 @@ class MultiFrequencySelectionSpec(BaseModel):
 
 
 def default_selection_strategy(value: Any) -> Any:
-    """Inject the default selection_strategy for config dicts that omit it.
+    """Inject the default strategy discriminator for config dicts that omit it.
 
-    :param value: Raw tournament_selection value from the manifest.
+    :param value: Raw selection_strategy value from the manifest.
     :type value: Any
-    :returns: The value with selection_strategy defaulted to "tournament" when it
-        was a discriminator-less dict; otherwise the value unchanged.
+    :returns: The value with strategy defaulted to "tournament" when it was a
+        discriminator-less dict; otherwise the value unchanged.
     :rtype: Any
     """
-    if isinstance(value, dict) and "selection_strategy" not in value:
-        return {**value, "selection_strategy": "tournament"}
+    if isinstance(value, dict) and "strategy" not in value:
+        return {**value, "strategy": "tournament"}
     return value
 
 
 SelectionStrategySpec = Annotated[
     TournamentSelectionSpec | MultiFrequencySelectionSpec,
-    Field(discriminator="selection_strategy"),
+    Field(discriminator="strategy"),
 ]
-"""Discriminated union for the manifest's tournament_selection block."""
+"""Discriminated union for the manifest's selection_strategy block."""
 
 
 def split_selection_spec(
     selection: TournamentSelectionSpec | MultiFrequencySelectionSpec | None,
 ) -> tuple[TournamentSelectionSpec | None, MultiFrequencySelectionSpec | None]:
-    """Split a unified tournament_selection value into the two trainer kwargs.
+    """Split a unified selection_strategy value into the two trainer kwargs.
 
-    :param selection: The resolved tournament_selection spec, or None when unset.
+    :param selection: The resolved selection_strategy spec, or None when unset.
     :type selection: TournamentSelectionSpec | MultiFrequencySelectionSpec | None
     :returns: (tournament_spec, multi_frequency_selection_spec) with at most one set.
     :rtype: tuple[TournamentSelectionSpec | None, MultiFrequencySelectionSpec | None]
@@ -223,5 +223,5 @@ def check_selection_strategy_exclusive(
     :raises ValueError: If both strategies are configured simultaneously.
     """
     if multi_frequency_selection_spec is not None and tournament_selection is not None:
-        msg = "Cannot set both 'tournament_selection' and 'multi_frequency_selection'."
+        msg = "Cannot set both 'tournament' and 'multi_frequency_selection'."
         raise ValueError(msg)

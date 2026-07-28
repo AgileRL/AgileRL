@@ -2,12 +2,14 @@ HPO Specifications
 ==================
 
 A training manifest selects its evolution regime through the single
-``tournament_selection`` block, a discriminated union keyed on ``selection_strategy``:
+``selection_strategy`` block, a discriminated union keyed on ``strategy``:
 ``tournament`` (the default) validates the block as :class:`TournamentSelectionSpec`, and
 ``multi_frequency`` validates it as :class:`MultiFrequencySelectionSpec`. The two regimes
-are therefore mutually exclusive by construction, and a block that omits
-``selection_strategy`` is treated as tournament selection so existing configs are
-unchanged.
+are therefore mutually exclusive by construction, and a block that omits ``strategy``
+is treated as tournament selection so existing configs are unchanged.
+
+The block was previously named ``tournament_selection``; that spelling is still
+accepted as an alias, so manifests written against earlier versions keep validating.
 
 Both regimes take their population size from the mandatory ``training.pop_size`` field.
 

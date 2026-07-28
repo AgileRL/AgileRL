@@ -103,7 +103,7 @@ def test_get_validated_json_omits_unset_optional_sections() -> None:
     }
     out = TrainingManifest.get_validated(raw, mode="json")
     assert "mutation" not in out
-    assert "tournament_selection" not in out
+    assert "selection_strategy" not in out
     assert "network" not in out
 
 
@@ -149,6 +149,57 @@ def test_get_validated_no_warning_for_known_aliased_or_excluded_fields() -> None
             )
         )
     mock_logger.warning.assert_not_called()
+
+
+def test_get_validated_no_warning_for_legacy_selection_key() -> None:
+    with patch("agilerl.models.manifest.logger") as mock_logger:
+        TrainingManifest.get_validated(
+            _make_manifest(
+                {"name": "DQN"},
+                env={"name": "CartPole-v1"},
+                tournament_selection={"tournament_size": 3},
+            )
+        )
+    mock_logger.warning.assert_not_called()
+
+
+def test_get_validated_reports_unknown_keys_under_the_legacy_selection_key() -> None:
+    with patch("agilerl.models.manifest.logger") as mock_logger:
+        TrainingManifest.get_validated(
+            _make_manifest(
+                {"name": "DQN"},
+                env={"name": "CartPole-v1"},
+                tournament_selection={"tournament_size": 3, "bogus_key": 1},
+            )
+        )
+    mock_logger.warning.assert_called_once()
+    assert "tournament_selection.bogus_key" in mock_logger.warning.call_args.args[1]
+
+
+def test_get_validated_reports_unknown_keys_under_the_current_selection_key() -> None:
+    with patch("agilerl.models.manifest.logger") as mock_logger:
+        TrainingManifest.get_validated(
+            _make_manifest(
+                {"name": "DQN"},
+                env={"name": "CartPole-v1"},
+                selection_strategy={"tournament_size": 3, "bogus_key": 1},
+            )
+        )
+    mock_logger.warning.assert_called_once()
+    assert "selection_strategy.bogus_key" in mock_logger.warning.call_args.args[1]
+
+
+def test_get_validated_json_writes_the_current_selection_key() -> None:
+    out = TrainingManifest.get_validated(
+        _make_manifest(
+            {"name": "DQN"},
+            env={"name": "CartPole-v1"},
+            tournament_selection={"tournament_size": 3},
+        ),
+        mode="json",
+    )
+    assert out["selection_strategy"]["tournament_size"] == 3
+    assert "tournament_selection" not in out
 
 
 def test_collect_unknown_fields_ignores_non_dict_raw() -> None:
@@ -429,7 +480,7 @@ class TestTrainingManifest:
         assert manifest.network is None
         assert manifest.mutation is None
         assert manifest.replay_buffer is None
-        assert manifest.tournament_selection is None
+        assert manifest.selection_strategy is None
 
     def test_environment_required(self):
         data = {"algorithm": {"name": "DQN"}, "training": _TRAINING}
@@ -472,7 +523,7 @@ class TestTrainingManifest:
         assert manifest.network["encoder_config"]["arch"] == "mlp"
         assert isinstance(manifest.replay_buffer, ReplayBufferSpec)
         assert manifest.replay_buffer.max_size == 100_000
-        assert isinstance(manifest.tournament_selection, TournamentSelectionSpec)
+        assert isinstance(manifest.selection_strategy, TournamentSelectionSpec)
         assert isinstance(manifest.training, TrainingSpec)
         assert manifest.training.pop_size == 4
         assert manifest.training.eps_start == 1.0

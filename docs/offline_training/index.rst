@@ -77,7 +77,7 @@ Below is an example manifest for training CQN on the CartPole-v1 environment (Mi
         mutation_sd: 0.1
         rand_seed: 42
 
-      tournament_selection:
+      selection_strategy:
         tournament_size: 2
         elitism: true
 

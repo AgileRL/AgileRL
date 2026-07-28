@@ -395,7 +395,7 @@ Here is an example manifest for training DQN on LunarLander-v3:
       mutation_sd: 0.1
       rand_seed: 42
 
-    tournament_selection:
+    selection_strategy:
       tournament_size: 2
       elitism: true
 

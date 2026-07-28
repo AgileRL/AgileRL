@@ -68,9 +68,9 @@ network:
         layer_norm: true
 
 # MF-PBT replaces tournament selection (both share this block, discriminated by
-# selection_strategy). The recommended MF-PBT configuration is defined
-tournament_selection:
-    selection_strategy: multi_frequency
+# strategy). The recommended MF-PBT configuration is defined
+selection_strategy:
+    strategy: multi_frequency
     n_subpopulations: 2
     n_winners: 2
     n_survivors: 0

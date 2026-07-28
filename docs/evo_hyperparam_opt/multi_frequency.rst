@@ -47,19 +47,20 @@ schedules. The trade-offs are that it needs a larger population to be worthwhile
 exposes more configuration parameters. For small populations, prefer
 :ref:`tournament_selection`.
 
-Multi-frequency and tournament selection share the single ``tournament_selection`` manifest block,
-discriminated by a ``selection_strategy`` field that defaults to ``tournament``. To use
-MF-PBT, set ``selection_strategy: multi_frequency`` and supply the subpopulation layout in
-the same block (the two regimes are mutually exclusive, so only one is ever configured).
+Multi-frequency and tournament selection share the single ``selection_strategy`` manifest block
+(also accepted under its former name, ``tournament_selection``), discriminated by a ``strategy``
+field that defaults to ``tournament``. To use MF-PBT, set ``strategy: multi_frequency`` and supply
+the subpopulation layout in the same block (the two regimes are mutually exclusive, so only one
+is ever configured).
 As with tournament selection, ``training.pop_size`` is the mandatory population size; MF-PBT
 reads it and derives the per-subpopulation size as ``pop_size // n_subpopulations``. The bracket
 sizes and frequency ratios have sensible defaults (leave them out to accept them):
 
 .. code-block:: yaml
 
-    # `selection_strategy` defaults to `tournament`; set it to `multi_frequency` for MF-PBT.
-    tournament_selection:
-      selection_strategy: multi_frequency
+    # `strategy` defaults to `tournament`; set it to `multi_frequency` for MF-PBT.
+    selection_strategy:
+      strategy: multi_frequency
       n_subpopulations: 2                 # >= 2
       n_winners: 2                        # >= 1
       n_survivors: 0                      # >= 0

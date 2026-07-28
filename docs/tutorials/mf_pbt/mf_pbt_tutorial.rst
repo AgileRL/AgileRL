@@ -69,9 +69,10 @@ The recommended way to run MF-PBT is through a YAML manifest and
 :class:`~agilerl.training.trainer.LocalTrainer`, which handles population creation, rollout
 collection, the evolutionary HPO loop and the training loop for you.
 
-Multi-frequency and tournament selection share the single ``tournament_selection`` manifest block,
-disambiguated by a ``selection_strategy`` field that defaults to ``tournament``. To use MF-PBT, set
-``selection_strategy: multi_frequency`` and describe the subpopulation layout in that same block. The
+Multi-frequency and tournament selection share the single ``selection_strategy`` manifest block
+(also accepted under its former name, ``tournament_selection``), disambiguated by a ``strategy``
+field that defaults to ``tournament``. To use MF-PBT, set
+``strategy: multi_frequency`` and describe the subpopulation layout in that same block. The
 population size lives in the ``training`` block as ``pop_size`` (mandatory for MF-PBT); the operator
 derives the per-subpopulation size as ``pop_size // n_subpopulations``.
 
@@ -145,9 +146,9 @@ derives the per-subpopulation size as ``pop_size // n_subpopulations``.
             rand_seed: 42
 
         # MF-PBT replaces tournament selection; both regimes share this block and
-        # are disambiguated by `selection_strategy`.
-        tournament_selection:
-            selection_strategy: multi_frequency
+        # are disambiguated by `strategy`.
+        selection_strategy:
+            strategy: multi_frequency
             n_subpopulations: 2                 # >= 2
             n_winners: 2                        # >= 1
             n_survivors: 0                      # >= 0

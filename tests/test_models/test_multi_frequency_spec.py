@@ -21,9 +21,9 @@ VALID_MULTI_FREQUENCY = {
     "n_losers": 1,
 }
 
-# The same spec as it appears under the unified ``tournament_selection`` manifest block
+# The same spec as it appears under the unified ``selection_strategy`` manifest block
 VALID_MULTI_FREQUENCY_BLOCK = {
-    "selection_strategy": "multi_frequency",
+    "strategy": "multi_frequency",
     **VALID_MULTI_FREQUENCY,
 }
 
@@ -44,12 +44,12 @@ def _validated_multi_frequency(
     """Validate a manifest under MF-PBT and return its finalized selection spec."""
     data = _manifest(
         training,
-        tournament_selection={
-            "selection_strategy": "multi_frequency",
+        selection_strategy={
+            "strategy": "multi_frequency",
             **multi_frequency,
         },
     )
-    return TrainingManifest.model_validate(data).tournament_selection
+    return TrainingManifest.model_validate(data).selection_strategy
 
 
 class TestMultiFrequencySelectionSpec:
@@ -229,43 +229,43 @@ class TestManifestIntegration:
     def test_tournament_is_the_default_selection_strategy(self):
         data = _manifest(
             {"max_steps": 1000, "evo_steps": 100, "pop_size": 2},
-            tournament_selection={"tournament_size": 3, "elitism": False},
+            selection_strategy={"tournament_size": 3, "elitism": False},
         )
         manifest = TrainingManifest.model_validate(data)
-        assert isinstance(manifest.tournament_selection, TournamentSelectionSpec)
-        assert manifest.tournament_selection.selection_strategy == "tournament"
-        assert manifest.tournament_selection.tournament_size == 3
+        assert isinstance(manifest.selection_strategy, TournamentSelectionSpec)
+        assert manifest.selection_strategy.strategy == "tournament"
+        assert manifest.selection_strategy.tournament_size == 3
 
     def test_explicit_tournament_selection_strategy(self):
         data = _manifest(
             {"max_steps": 1000, "evo_steps": 100, "pop_size": 2},
-            tournament_selection={
-                "selection_strategy": "tournament",
+            selection_strategy={
+                "strategy": "tournament",
                 "tournament_size": 2,
             },
         )
         manifest = TrainingManifest.model_validate(data)
-        assert isinstance(manifest.tournament_selection, TournamentSelectionSpec)
+        assert isinstance(manifest.selection_strategy, TournamentSelectionSpec)
 
     def test_omitted_selection_block_leaves_none(self):
         # Omitting the block is how the no-HPO regime is selected
         data = _manifest({"max_steps": 1000, "evo_steps": 100, "pop_size": 2})
         manifest = TrainingManifest.model_validate(data)
-        assert manifest.tournament_selection is None
+        assert manifest.selection_strategy is None
 
     def test_multi_frequency_routes_to_spec(self):
         data = _manifest(
             {"max_steps": 1000, "evo_steps": 100, "pop_size": 16},
-            tournament_selection=VALID_MULTI_FREQUENCY_BLOCK,
+            selection_strategy=VALID_MULTI_FREQUENCY_BLOCK,
         )
         manifest = TrainingManifest.model_validate(data)
-        assert isinstance(manifest.tournament_selection, MultiFrequencySelectionSpec)
-        assert manifest.tournament_selection.selection_strategy == "multi_frequency"
+        assert isinstance(manifest.selection_strategy, MultiFrequencySelectionSpec)
+        assert manifest.selection_strategy.strategy == "multi_frequency"
 
     def test_invalid_selection_strategy_rejected(self):
         data = _manifest(
             {"max_steps": 1000, "evo_steps": 100},
-            tournament_selection={"selection_strategy": "bogus"},
+            selection_strategy={"strategy": "bogus"},
         )
         with pytest.raises(
             ValidationError,
@@ -276,8 +276,8 @@ class TestManifestIntegration:
     def test_tournament_keys_rejected_under_multi_frequency(self):
         data = _manifest(
             {"max_steps": 1000, "evo_steps": 100, "pop_size": 16},
-            tournament_selection={
-                "selection_strategy": "multi_frequency",
+            selection_strategy={
+                "strategy": "multi_frequency",
                 "tournament_size": 2,
             },
         )
@@ -288,14 +288,55 @@ class TestManifestIntegration:
             TrainingManifest.model_validate(data)
 
     def test_multi_frequency_manifest_dump_uses_unified_block(self):
-        # Multi-frequency selection serializes under the single tournament_selection field, never a separate
-        # multi_frequency_selection key
+        # Multi-frequency selection serializes under the single selection_strategy
+        # field, never a separate multi_frequency_selection key
         data = _manifest(
             {"max_steps": 1000, "evo_steps": 100, "pop_size": 16},
-            tournament_selection=VALID_MULTI_FREQUENCY_BLOCK,
+            selection_strategy=VALID_MULTI_FREQUENCY_BLOCK,
         )
         dumped = TrainingManifest.model_validate(data).model_dump(
             mode="json", exclude_none=True
         )
-        assert dumped["tournament_selection"]["selection_strategy"] == "multi_frequency"
+        assert dumped["selection_strategy"]["strategy"] == "multi_frequency"
         assert "multi_frequency_selection" not in dumped
+
+
+class TestSelectionStrategyBackwardsCompatibility:
+    """The block's pre-rename key tournament_selection is still accepted."""
+
+    def test_legacy_manifest_key_resolves_to_selection_strategy(self):
+        data = _manifest(
+            {"max_steps": 1000, "evo_steps": 100, "pop_size": 2},
+            tournament_selection={"tournament_size": 3, "elitism": False},
+        )
+        manifest = TrainingManifest.model_validate(data)
+        assert isinstance(manifest.selection_strategy, TournamentSelectionSpec)
+        assert manifest.selection_strategy.tournament_size == 3
+
+    def test_legacy_manifest_key_carries_multi_frequency(self):
+        data = _manifest(
+            {"max_steps": 1000, "evo_steps": 100, "pop_size": 16},
+            tournament_selection=VALID_MULTI_FREQUENCY_BLOCK,
+        )
+        manifest = TrainingManifest.model_validate(data)
+        assert isinstance(manifest.selection_strategy, MultiFrequencySelectionSpec)
+
+    def test_both_manifest_keys_produce_equal_specs(self):
+        training = {"max_steps": 1000, "evo_steps": 100, "pop_size": 16}
+        legacy = TrainingManifest.model_validate(
+            _manifest(training, tournament_selection=VALID_MULTI_FREQUENCY_BLOCK)
+        )
+        current = TrainingManifest.model_validate(
+            _manifest(training, selection_strategy=VALID_MULTI_FREQUENCY_BLOCK)
+        )
+        assert legacy.selection_strategy == current.selection_strategy
+
+    def test_keyword_construction_accepts_either_spelling(self):
+        common = {
+            "algorithm": {"name": "DQN"},
+            "environment": {"name": "CartPole-v1"},
+            "training": {"max_steps": 1000, "pop_size": 2},
+        }
+        legacy = TrainingManifest(**common, tournament_selection={"tournament_size": 3})
+        current = TrainingManifest(**common, selection_strategy={"tournament_size": 3})
+        assert legacy.selection_strategy == current.selection_strategy

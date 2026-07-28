@@ -239,10 +239,10 @@ class Trainer(ABC):
             else manifest
         )
         env_spec = cls._resolve_env_spec(validated_manifest)
-        # The manifest carries one discriminated tournament_selection field; route it
+        # The manifest carries one discriminated selection_strategy field; route it
         # to the constructor's tournament / multi_frequency_selection kwargs.
         tournament, multi_frequency_selection = split_selection_spec(
-            validated_manifest.tournament_selection
+            validated_manifest.selection_strategy
         )
         return cls(
             algorithm=validated_manifest.algorithm,
@@ -883,6 +883,7 @@ class ArenaTrainer(Trainer):
             api_key=api_key,
             training=validated_manifest.training,
             mutation=validated_manifest.mutation,
+            # ArenaManifest keeps the tournament_selection field name
             tournament=validated_manifest.tournament_selection,
             replay_buffer=validated_manifest.replay_buffer,
         )

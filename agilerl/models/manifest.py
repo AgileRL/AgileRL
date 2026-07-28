@@ -218,6 +218,10 @@ def _known_field_names(model: BaseModel) -> set[str]:
     return names
 
 
+_LEGACY_SECTION_KEYS: dict[str, str] = {"selection_strategy": "tournament_selection"}
+"""Manifest section field names mapped to the legacy key they still accept."""
+
+
 def _collect_unknown_fields(
     raw: dict[str, Any], validated: TrainingManifest
 ) -> list[str]:
@@ -241,17 +245,20 @@ def _collect_unknown_fields(
         "training": validated.training,
         "mutation": validated.mutation,
         "replay_buffer": validated.replay_buffer,
-        "tournament_selection": validated.tournament_selection,
+        "selection_strategy": validated.selection_strategy,
     }
     for section, model in sections.items():
-        raw_section = raw.get(section)
+        raw_key = (
+            section if section in raw else _LEGACY_SECTION_KEYS.get(section, section)
+        )
+        raw_section = raw.get(raw_key)
         if not isinstance(raw_section, dict) or not isinstance(model, BaseModel):
             continue
         known = _known_field_names(model)
         dumped_section = dumped.get(section)
         if isinstance(dumped_section, dict):
             known |= set(dumped_section)
-        unknown.extend(f"{section}.{key}" for key in raw_section if key not in known)
+        unknown.extend(f"{raw_key}.{key}" for key in raw_section if key not in known)
 
     return unknown
 
@@ -275,10 +282,14 @@ class TrainingManifest(BaseModel):
     network: NetworkFromManifest | None = Field(default=None)
     mutation: MutationSpec | None = Field(default=None)
     replay_buffer: ReplayBufferSpec | None = Field(default=None)
-    tournament_selection: Annotated[
+    selection_strategy: Annotated[
         SelectionStrategySpec | None,
         BeforeValidator(default_selection_strategy),
-    ] = Field(default=None)
+    ] = Field(
+        default=None,
+        validation_alias=AliasChoices("selection_strategy", "tournament_selection"),
+        serialization_alias="tournament_selection",
+    )
 
     @model_validator(mode="after")
     def _resolve_and_validate_compatibility_with_multi_frequency(self) -> Self:
@@ -288,7 +299,7 @@ class TrainingManifest(BaseModel):
         :return: The validated manifest.
         :rtype: Self
         """
-        spec = self.tournament_selection
+        spec = self.selection_strategy
         if not isinstance(spec, MultiFrequencySelectionSpec):
             return self
 
@@ -420,8 +431,8 @@ class TrainingManifest(BaseModel):
         :param tournament_selection: Optional tournament-selection spec.
         :type tournament_selection: TournamentSelectionSpec | None
         :param multi_frequency_selection: Optional MF-PBT spec (mutually exclusive with
-            tournament_selection; both collapse into the single tournament_selection
-            manifest field, discriminated by selection_strategy).
+            tournament_selection; both collapse into the single selection_strategy
+            manifest field, discriminated by strategy).
         :type multi_frequency_selection: MultiFrequencySelectionSpec | None
         :returns: A validated :class:`TrainingManifest`.
         :rtype: TrainingManifest
@@ -454,7 +465,7 @@ class TrainingManifest(BaseModel):
             network=cls._network_from_algorithm(algorithm),
             mutation=_coerce(mutation, MutationSpec),
             replay_buffer=_coerce(replay_buffer, ReplayBufferSpec),
-            tournament_selection=_coerce(selection, selection_cls),
+            selection_strategy=_coerce(selection, selection_cls),
         )
 
     @classmethod
@@ -488,7 +499,7 @@ class TrainingManifest(BaseModel):
         from agilerl.arena.models import TrainingManifest as ArenaManifest
 
         if isinstance(manifest, cls):
-            data = manifest.model_dump(mode="json", exclude_none=True)
+            data = manifest.model_dump(mode="json", exclude_none=True, by_alias=True)
         elif isinstance(manifest, dict):
             data = manifest
         else:

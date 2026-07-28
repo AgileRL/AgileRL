@@ -60,16 +60,17 @@ Configuring from a manifest
 ---------------------------
 
 In a training manifest, multi-frequency and tournament selection share the single
-``tournament_selection`` block, discriminated by a ``selection_strategy`` field that
-defaults to ``tournament``. Set ``selection_strategy: multi_frequency`` and provide the
+``selection_strategy`` block (also accepted under its former name, ``tournament_selection``),
+discriminated by a ``strategy`` field that defaults to ``tournament``. Set
+``strategy: multi_frequency`` and provide the
 subpopulation layout in the same block. As with tournament selection, ``training.pop_size``
 is the mandatory population size; MF-PBT reads it and derives the per-subpopulation size as
 ``pop_size // n_subpopulations``:
 
 .. code-block:: yaml
 
-    tournament_selection:
-      selection_strategy: multi_frequency
+    selection_strategy:
+      strategy: multi_frequency
       n_subpopulations: 2                 # >= 2
       evolution_frequency_ratios: [1, 5]  # strictly increasing ints >= 1, one per subpop
       n_winners: 2                        # >= 1

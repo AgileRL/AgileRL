@@ -2941,7 +2941,7 @@ class TestLocalTrainerMultiFrequency:
         )
         with (
             patch.object(LocalTrainer, "_make_env", return_value=VectorizedDummyEnv()),
-            pytest.raises(ValueError, match="tournament_selection"),
+            pytest.raises(ValueError, match="Cannot set both 'tournament'"),
         ):
             LocalTrainer(
                 algorithm=ppo,
@@ -2976,11 +2976,11 @@ class TestLocalTrainerMultiFrequency:
             1,
         )
         assert spec.n_losers == 2  # 4 - 1 - 0 - 1
-        assert trainer.to_manifest()["tournament_selection"]["n_losers"] == 2
+        assert trainer.to_manifest()["selection_strategy"]["n_losers"] == 2
 
 
 class TestLocalTrainerMultiFrequencyManifest:
-    """Multi-frequency selection round-trips through the ``tournament_selection`` union."""
+    """Multi-frequency selection round-trips through the ``selection_strategy`` union."""
 
     def test_trainer_to_manifest_uses_the_unified_block(self):
         trainer = _make_multi_frequency_ppo_trainer()
@@ -2988,9 +2988,7 @@ class TestLocalTrainerMultiFrequencyManifest:
         manifest = trainer.to_manifest()
 
         assert manifest["training"]["pop_size"] == 8
-        assert manifest["tournament_selection"]["selection_strategy"] == (
-            "multi_frequency"
-        )
+        assert manifest["selection_strategy"]["strategy"] == "multi_frequency"
         assert "multi_frequency_selection" not in manifest
 
     def test_manifest_round_trip_rebuilds_via_unified_block(self):
