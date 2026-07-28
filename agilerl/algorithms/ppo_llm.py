@@ -55,6 +55,7 @@ from agilerl.utils.llm_utils import (
     normalize_reasoning_prompt_batch,
     pool_by_turns,
     prepare_prompt_hf_generate,
+    resolve_llm_device,
     stitch_completion_after_windowed_hf_generate,
     validate_importance_sampling_level,
     validate_llm_context_lengths,
@@ -136,7 +137,8 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
     :type cosine_lr_schedule_config: CosineLRScheduleConfig | None, optional
     :param accelerator: Optional HuggingFace ``Accelerator`` instance.
     :type accelerator: Accelerator | None, optional
-    :param device: Device string used when no accelerator is provided.
+    :param device: Device to train on. Ignored when an accelerator is given (each rank
+        owns its own GPU); ``None`` auto-detects CUDA/MPS/CPU.
     :type device: str, optional
     :param wrap: Whether to wrap models for distributed execution.
     :type wrap: bool, optional
@@ -284,7 +286,7 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
         lora_config: LoraConfig | None = None,
         cosine_lr_schedule_config: CosineLRScheduleConfig | None = None,
         accelerator: Accelerator | None = None,
-        device: str = "cpu",
+        device: str | torch.device | None = None,
         wrap: bool = True,
         clone: bool = False,
         use_vllm: bool = False,
@@ -314,9 +316,7 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
         vllm_importance_sampling_cap: float = 2.0,
     ) -> None:
 
-        device = (
-            f"cuda:{accelerator.process_index}" if accelerator is not None else device
-        )
+        resolved_device = resolve_llm_device(accelerator, device)
         super().__init__(
             index=index,
             batch_size=batch_size,
@@ -342,7 +342,7 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
             hp_config=hp_config,
             use_memory_efficient_params=use_memory_efficient_params,
             wrap=wrap,
-            device=device,
+            device=resolved_device,
             accelerator=accelerator,
             name="LLMPPO",
             gradient_checkpointing=gradient_checkpointing,

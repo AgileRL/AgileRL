@@ -30,6 +30,7 @@ from tests import TINY_LLM_FIXTURE_PATH
 from tests.utils import (
     assert_vllm_get_action_contract,
     make_mock_vllm_instance,
+    spawn_new_process_for_each_test,
 )
 
 deepspeed_base_config = {
@@ -334,6 +335,24 @@ class _PPOStub:
 
 
 class TestPPOInit:
+    def test_init_auto_detects_device_when_none_given(self):
+        """Regression: no ``device`` must auto-detect, not silently fall back to CPU."""
+        with patch(
+            "agilerl.algorithms.ppo_llm.resolve_llm_device", return_value="cpu"
+        ) as mock_resolve:
+            ppo = _cpu_llmppo(device=None)
+
+        mock_resolve.assert_called_once_with(None, None)
+        assert ppo.device == "cpu"
+
+    def test_init_honours_an_explicitly_requested_device(self):
+        """An explicit ``device`` is used as-is when no accelerator is present."""
+        with patch("torch.cuda.is_available", return_value=True):
+            ppo = _cpu_llmppo(device="cpu")
+
+        assert ppo.device == "cpu"
+        assert all(param.device.type == "cpu" for param in ppo.actor.parameters())
+
     @patch("agilerl.algorithms.core.base.LLM")
     def test_init_llmppo_vllm_sleep_mode_calls_sleep(self, MockLLM):
         mock_instance = make_mock_vllm_instance()
@@ -1960,3 +1979,78 @@ class TestPPOSaveLoadValueHead:
         ppo.clean_up()
         new_ppo.clean_up()
         AcceleratorState._reset_state(True)
+
+
+class TestPPOColocatedVllm:
+    @spawn_new_process_for_each_test
+    @pytest.mark.vllm
+    @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+    @pytest.mark.parametrize("pretrained_model_name_or_path", [TINY_LLM_FIXTURE_PATH])
+    def test_colocated_learn_with_memory_efficient_params(
+        self, pretrained_model_name_or_path
+    ):
+        """Regression: colocated PPO with framework defaults trains on the GPU.
+
+        Constructed the way the docs and profiling harness do — no ``device``
+        argument, ``use_memory_efficient_params`` left at its default — the
+        trainer used to stay on CPU for the whole run, so ``learn`` fed CPU
+        tensors to the Liger Triton kernels patched into the base model.
+        """
+        input_size, max_tokens, batch_size = 8, 8, 2
+        ppo = LLMPPO(
+            model_name=pretrained_model_name_or_path,
+            pad_token_id=0,
+            pad_token="<pad>",
+            lora_config=LoraConfig(
+                r=8,
+                lora_alpha=16,
+                target_modules=["q_proj", "v_proj"],
+                task_type="CAUSAL_LM",
+            ),
+            use_vllm=True,
+            # Both knobs are load-bearing under parallel vLLM testing; see the
+            # rationale on ``generate_grpo`` in test_grpo.py.
+            vllm_config=VLLMConfig(
+                gpu_memory_utilization=0.22,
+                kv_cache_memory_bytes=32 * 1024 * 1024,
+                max_num_seqs=batch_size,
+                sleep_mode=True,
+            ),
+            max_output_tokens=max_tokens,
+            max_model_len=input_size + max_tokens + 4,
+            batch_size=batch_size,
+            micro_batch_size_per_gpu=1,
+            update_epochs=1,
+        )
+        assert ppo.use_memory_efficient_params
+        assert torch.device(ppo.device).type == "cuda"
+
+        vocab_size = ppo._get_unwrapped_actor().config.vocab_size
+        prompts = [
+            {
+                "input_ids": torch.randint(
+                    0, vocab_size, (1, input_size), device=ppo.device
+                ),
+                "attention_mask": torch.ones(1, input_size, device=ppo.device),
+                "text": "Write me a short story about a cat.",
+            }
+            for _ in range(batch_size)
+        ]
+
+        completion_ids, action_masks, sampling_logps = ppo.get_action(
+            prompts, training=True
+        )
+        # The rollout parks the trainer on CPU; ``learn`` must bring the whole
+        # tree — base weights and value head alike — back onto the GPU.
+        unwrapped = ppo._get_unwrapped_actor()
+        assert all(p.device.type == "cpu" for p in unwrapped.parameters())
+
+        rewards = torch.randn(len(completion_ids), device=ppo.device)
+        metrics = ppo.learn(
+            (completion_ids, action_masks, rewards),
+            sampling_logps=sampling_logps,
+        )
+        for key in ("loss", "pg_loss", "vf_loss"):
+            assert torch.isfinite(torch.tensor(metrics[key])), f"{key} not finite"
+
+        ppo.clean_up()

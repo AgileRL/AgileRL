@@ -29,7 +29,7 @@ from agilerl.typing import (
     PreferencePrompts,
 )
 from agilerl.utils.algo_utils import get_experiences_samples
-from agilerl.utils.llm_utils import aggregate_metrics_dict
+from agilerl.utils.llm_utils import aggregate_metrics_dict, resolve_llm_device
 
 if HAS_LIGER_KERNEL:
     from agilerl.algorithms.core.llm_ops.fused_loss import LigerDPOWithAlpha
@@ -71,7 +71,8 @@ class DPO(LLMAlgorithm[PreferencePrompts]):
     :type calc_position_embeddings: bool, optional
     :param micro_batch_size_per_gpu: Micro batch size per GPU, defaults to None
     :type micro_batch_size_per_gpu: int, optional
-    :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
+    :param device: Device to train on. Ignored when an accelerator is given (each rank
+        owns its own GPU); ``None`` auto-detects CUDA/MPS/CPU.
     :type device: str, optional
     :param lora_config: Config for LoRA, defaults to None
     :type lora_config: LoraConfig, optional
@@ -144,7 +145,7 @@ class DPO(LLMAlgorithm[PreferencePrompts]):
         update_epochs: int = 1,
         calc_position_embeddings: bool = True,
         micro_batch_size_per_gpu: int | None = None,
-        device: str = "cpu",
+        device: str | torch.device | None = None,
         lora_config: LoraConfig | None = None,
         accelerator: Accelerator | None = None,
         wrap: bool = True,
@@ -161,17 +162,7 @@ class DPO(LLMAlgorithm[PreferencePrompts]):
         activation_offload: bool = False,
         lora_target_scope: str | None = None,
     ) -> None:
-        resolved_device = (
-            f"cuda:{accelerator.process_index}"
-            if accelerator is not None
-            else (
-                "cuda"
-                if torch.cuda.is_available()
-                else "mps"
-                if torch.backends.mps.is_available()
-                else "cpu"
-            )
-        )
+        resolved_device = resolve_llm_device(accelerator, device)
         super().__init__(
             index=index,
             batch_size=batch_size,

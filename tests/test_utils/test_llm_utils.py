@@ -69,6 +69,7 @@ from agilerl.utils.llm_utils import (
     pool_log_ratio_by_level,
     remap_peft_lora_key_for_vllm,
     resolve_attn_implementation,
+    resolve_llm_device,
     resolve_vllm_max_lora_rank,
     resolve_vllm_max_num_batched_tokens,
     sample_eval_prompts,
@@ -1354,6 +1355,47 @@ class TestLlmUtilsDeprecatedReexports:
         d = dir(llm_utils_module)
         assert "ReasoningGym" in d
         assert "PreferenceGym" in d
+
+
+class TestResolveLlmDevice:
+    """Accelerator outranks an explicit device, which outranks auto-detection."""
+
+    def test_accelerator_gives_the_ranks_device(self):
+        accelerator = MagicMock()
+        accelerator.process_index = 3
+        assert resolve_llm_device(accelerator) == "cuda:3"
+
+    def test_accelerator_outranks_an_explicit_device(self):
+        # A bare "cuda" from the caller would otherwise collapse every rank
+        # onto device 0.
+        accelerator = MagicMock()
+        accelerator.process_index = 2
+        assert resolve_llm_device(accelerator, "cuda") == "cuda:2"
+
+    def test_explicit_device_used_without_accelerator(self):
+        with patch("torch.cuda.is_available", return_value=True):
+            assert resolve_llm_device(None, "cpu") == "cpu"
+
+    def test_torch_device_is_stringified(self):
+        assert resolve_llm_device(None, torch.device("cuda", 1)) == "cuda:1"
+
+    def test_cuda_preferred_when_nothing_requested(self):
+        with patch("torch.cuda.is_available", return_value=True):
+            assert resolve_llm_device(None) == "cuda"
+
+    def test_mps_used_when_cuda_unavailable(self):
+        with (
+            patch("torch.cuda.is_available", return_value=False),
+            patch("torch.backends.mps.is_available", return_value=True),
+        ):
+            assert resolve_llm_device(None) == "mps"
+
+    def test_cpu_when_no_accelerator_available(self):
+        with (
+            patch("torch.cuda.is_available", return_value=False),
+            patch("torch.backends.mps.is_available", return_value=False),
+        ):
+            assert resolve_llm_device(None) == "cpu"
 
 
 def test_move_params_helpers_call_model_move_and_cuda_sync():

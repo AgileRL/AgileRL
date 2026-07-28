@@ -19,7 +19,7 @@ from agilerl.typing import (
     ObservationType,
     SFTPrompts,
 )
-from agilerl.utils.llm_utils import aggregate_metrics_dict
+from agilerl.utils.llm_utils import aggregate_metrics_dict, resolve_llm_device
 
 if TYPE_CHECKING:
     from accelerate import Accelerator
@@ -79,7 +79,8 @@ class SFT(LLMAlgorithm[SFTPrompts]):
     :param micro_batch_size_per_gpu: Micro-batch size for gradient accumulation.
         When None the full batch is used in a single forward pass.
     :type micro_batch_size_per_gpu: int, optional
-    :param device: Compute device, defaults to ``"cpu"``
+    :param device: Device to train on. Ignored when an accelerator is given (each rank
+        owns its own GPU); ``None`` auto-detects CUDA/MPS/CPU.
     :type device: str, optional
     :param lora_config: LoRA config; when supplied the base model is wrapped with
         PEFT adapters, defaults to None
@@ -147,7 +148,7 @@ class SFT(LLMAlgorithm[SFTPrompts]):
         update_epochs: int = 1,
         calc_position_embeddings: bool = True,
         micro_batch_size_per_gpu: int | None = None,
-        device: str = "cpu",
+        device: str | torch.device | None = None,
         lora_config: LoraConfig | None = None,
         accelerator: Accelerator | None = None,
         wrap: bool = True,
@@ -162,17 +163,7 @@ class SFT(LLMAlgorithm[SFTPrompts]):
         activation_offload: bool = False,
         lora_target_scope: str | None = None,
     ) -> None:
-        resolved_device = (
-            f"cuda:{accelerator.process_index}"
-            if accelerator is not None
-            else (
-                "cuda"
-                if torch.cuda.is_available()
-                else "mps"
-                if torch.backends.mps.is_available()
-                else "cpu"
-            )
-        )
+        resolved_device = resolve_llm_device(accelerator, device)
         super().__init__(
             index=index,
             batch_size=batch_size,

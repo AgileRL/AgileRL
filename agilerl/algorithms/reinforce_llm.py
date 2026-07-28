@@ -52,6 +52,7 @@ from agilerl.utils.llm_utils import (
     normalize_reasoning_prompt_batch,
     pool_by_turns,
     prepare_prompt_hf_generate,
+    resolve_llm_device,
     stitch_completion_after_windowed_hf_generate,
     validate_importance_sampling_level,
     validate_llm_context_lengths,
@@ -138,7 +139,8 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
     :type cosine_lr_schedule_config: CosineLRScheduleConfig | None
     :param accelerator: HuggingFace Accelerator for distributed training.
     :type accelerator: Accelerator | None
-    :param device: Device string.
+    :param device: Device to train on. Ignored when an accelerator is given (each rank
+        owns its own GPU); ``None`` auto-detects CUDA/MPS/CPU.
     :type device: str
     :param wrap: Wrap models for distributed training upon creation.
     :type wrap: bool
@@ -264,7 +266,7 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
         lora_config: LoraConfig | None = None,
         cosine_lr_schedule_config: CosineLRScheduleConfig | None = None,
         accelerator: Accelerator | None = None,
-        device: str = "cpu",
+        device: str | torch.device | None = None,
         wrap: bool = True,
         clone: bool = False,
         use_vllm: bool = False,
@@ -288,9 +290,7 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
         vllm_importance_sampling_cap: float = 2.0,
     ) -> None:
 
-        device = (
-            f"cuda:{accelerator.process_index}" if accelerator is not None else device
-        )
+        resolved_device = resolve_llm_device(accelerator, device)
         super().__init__(
             index=index,
             batch_size=batch_size,
@@ -315,7 +315,7 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
             cosine_lr_schedule_config=cosine_lr_schedule_config,
             hp_config=hp_config,
             wrap=wrap,
-            device=device,
+            device=resolved_device,
             accelerator=accelerator,
             name="LLMREINFORCE",
             gradient_checkpointing=gradient_checkpointing,

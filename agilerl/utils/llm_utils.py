@@ -1555,6 +1555,35 @@ def collect_trainable_param_stats(pop: PopulationType) -> dict[str, Any]:
     return out
 
 
+def resolve_llm_device(
+    accelerator: Accelerator | None,
+    device: str | torch.device | None = None,
+) -> str:
+    """Resolve the training device for an LLM algorithm.
+
+    The accelerator outranks *device*: under ``accelerate``/DeepSpeed each rank
+    must own its own GPU, so a caller passing a bare ``"cuda"`` cannot be allowed
+    to collapse every rank onto device 0.
+
+    :param accelerator: Accelerator object, or ``None`` for single-process runs.
+    :type accelerator: accelerate.Accelerator | None
+    :param device: Caller-requested device, or ``None`` to auto-detect.
+    :type device: str | torch.device | None
+    :return: The rank's device under an accelerator, else *device*, else the best
+        locally available device.
+    :rtype: str
+    """
+    if accelerator is not None:
+        return f"cuda:{accelerator.process_index}"
+    if device is not None:
+        return str(device)
+    if torch.cuda.is_available():
+        return "cuda"
+    if torch.backends.mps.is_available():
+        return "mps"
+    return "cpu"
+
+
 def offload_colocated_trainer_from_gpu(unwrapped_model: torch.nn.Module) -> int:
     """Force the trainer module tree onto CPU before colocated vLLM ``LLM()`` init.
 

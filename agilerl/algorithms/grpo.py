@@ -15,6 +15,7 @@ import torch
 from agilerl import HAS_LIGER_KERNEL, HAS_LLM_DEPENDENCIES
 from agilerl.utils.llm_utils import (
     calculate_k3_kl,
+    resolve_llm_device,
 )
 
 if TYPE_CHECKING:
@@ -153,7 +154,8 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
     :type use_memory_efficient_params: bool
     :param accelerator: Accelerator for distributed computing, defaults to None
     :type accelerator: accelerate.Accelerator(), optional
-    :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
+    :param device: Device to train on. Ignored when an accelerator is given (each rank
+        owns its own GPU); ``None`` auto-detects CUDA/MPS/CPU.
     :type device: str, optional
     :param wrap: Wrap models for distributed training upon creation, defaults to True
     :type wrap: bool, optional
@@ -320,7 +322,7 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
         lora_config: LoraConfig | None = None,
         cosine_lr_schedule_config: CosineLRScheduleConfig | None = None,
         accelerator: Accelerator | None = None,
-        device: str = "cpu",
+        device: str | torch.device | None = None,
         wrap: bool = True,
         clone: bool = False,
         use_vllm: bool = False,
@@ -350,17 +352,7 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
         vllm_importance_sampling_cap: float = 2.0,
         use_sequence_packing: bool = False,
     ) -> None:
-        resolved_device = (
-            f"cuda:{accelerator.process_index}"
-            if accelerator is not None
-            else (
-                "cuda"
-                if torch.cuda.is_available()
-                else "mps"
-                if torch.backends.mps.is_available()
-                else "cpu"
-            )
-        )
+        resolved_device = resolve_llm_device(accelerator, device)
         super().__init__(
             index=index,
             batch_size=batch_size,
