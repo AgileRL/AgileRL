@@ -357,22 +357,10 @@ class Mutations:
         if not self.mutate_elite:
             mutation_choice[0] = self.no_mutation
 
-        mutated_population = []
-        for mutation, individual in zip(mutation_choice, population, strict=False):
-            wrapped_ind = isinstance(individual, AgentWrapper)
-            agent = individual.agent if wrapped_ind else individual
-
-            agent = mutation(agent)  # Call sampled mutation for individual
-            agent.mutation_hook()  # Call hooks specified by user
-
-            if wrapped_ind:
-                individual.agent = agent
-            else:
-                individual = agent
-
-            mutated_population.append(individual)
-
-        return mutated_population
+        return [
+            self._apply_mutation(individual, mutation)
+            for mutation, individual in zip(mutation_choice, population, strict=False)
+        ]
 
     def _mutate_selected(
         self,
@@ -419,20 +407,36 @@ class Mutations:
             if mutation is None:  # a non-selected agent passes through untouched
                 mutated_population.append(individual)
                 continue
-            wrapped_ind = isinstance(individual, AgentWrapper)
-            agent = individual.agent if wrapped_ind else individual
-
-            agent = mutation(agent)
-            agent.mutation_hook()
-
-            if wrapped_ind:
-                individual.agent = agent
-            else:
-                individual = agent
-
-            mutated_population.append(individual)
+            mutated_population.append(self._apply_mutation(individual, mutation))
 
         return mutated_population
+
+    def _apply_mutation(
+        self,
+        individual: IndividualType,
+        mutation: MutationMethod,
+    ) -> IndividualType:
+        """Apply a single sampled mutation to one individual.
+
+        :param individual: Individual to mutate, optionally wrapped.
+        :type individual: EvolvableAlgorithm
+        :param mutation: Sampled mutation method to apply to the underlying agent.
+        :type mutation: MutationMethod
+
+        :return: The mutated individual, wrapped exactly as it came in.
+        :rtype: EvolvableAlgorithm
+        """
+        wrapped_ind = isinstance(individual, AgentWrapper)
+        agent = individual.agent if wrapped_ind else individual
+
+        agent = mutation(agent)
+        agent.mutation_hook()
+
+        if wrapped_ind:
+            individual.agent = agent
+            return individual
+
+        return agent
 
     def no_mutation(self, individual: IndividualType) -> IndividualType:
         """Return individual from population without mutation.

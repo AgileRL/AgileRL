@@ -2446,3 +2446,20 @@ class TestMutationsMutationIndices:
 
         assert pop[2].mut == "tagged"
         assert [pop[0].mut, pop[1].mut] == [None, None]
+
+
+class TestMutationsApplyMutation:
+    """The wrapper-preserving per-individual apply shared by both entry points."""
+
+    def test_whole_population_replaces_the_agent_inside_a_wrapper(self):
+        muts = _replacing_mutations()
+        pop = [_StubWrapper(_IndexedAgent(i)) for i in range(3)]
+        originals = [wrapper.agent for wrapper in pop]
+
+        out = muts.mutation(pop)
+
+        assert out == pop  # the wrapper objects themselves are preserved
+        for wrapper, original in zip(out, originals, strict=True):
+            assert wrapper.agent is not original
+            assert wrapper.agent.mut == "tagged"
+            assert wrapper.agent.hook_calls == 1

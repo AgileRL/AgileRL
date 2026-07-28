@@ -9,12 +9,12 @@ from typing import TYPE_CHECKING, Any
 import gymnasium as gym
 import numpy as np
 import tqdm
-import wandb
 from accelerate import Accelerator
 from accelerate.utils import broadcast_object_list
 from gymnasium import spaces
 from pettingzoo.utils.env import ParallelEnv
 
+import wandb
 from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.algorithms import (
     CQN,
@@ -1227,7 +1227,6 @@ def _save_standard_elite(
 
 def run_selection_and_mutation(
     selection_strategy: SelectionStrategyProtocol | None,
-    *,
     population: PopulationType,
     mutation: Mutations,
     env_name: str,
@@ -1291,10 +1290,6 @@ def run_selection_and_mutation(
         if accelerator.is_main_process:
             elite, population, indices = selection_strategy.select(population)
             population = mutation.mutation(population, indices=indices)
-            if save_elite and elite is not None:
-                _save_standard_elite(
-                    elite, env_name=env_name, algo=algo, elite_path=elite_path
-                )
             for pop_i, model in enumerate(population):
                 model.save_checkpoint(f"{accel_temp_models_path}/{algo}_{pop_i}.pt")
         accelerator.wait_for_everyone()
@@ -1311,10 +1306,9 @@ def run_selection_and_mutation(
     else:
         elite, population, indices = selection_strategy.select(population)
         population = mutation.mutation(population, indices=indices)
-        if save_elite and elite is not None:
-            _save_standard_elite(
-                elite, env_name=env_name, algo=algo, elite_path=elite_path
-            )
+
+    if save_elite and elite is not None:
+        _save_standard_elite(elite, env_name=env_name, algo=algo, elite_path=elite_path)
 
     return population
 

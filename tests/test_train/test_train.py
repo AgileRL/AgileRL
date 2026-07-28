@@ -1,6 +1,7 @@
 import os
 import random
 import shutil
+from collections import Counter
 from copy import deepcopy
 from pathlib import Path
 from typing import ClassVar
@@ -29,7 +30,8 @@ from agilerl.algorithms import (
     NeuralUCB,
     RainbowDQN,
 )
-from agilerl.algorithms.core.base import MultiAgentRLAlgorithm
+from agilerl.algorithms.core.base import EvolvableAlgorithm, MultiAgentRLAlgorithm
+from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
 from agilerl.components.data import Transition
 from agilerl.components.replay_buffer import (
     MultiStepReplayBuffer,
@@ -37,6 +39,7 @@ from agilerl.components.replay_buffer import (
     ReplayBuffer,
 )
 from agilerl.hpo.multi_frequency import MultiFrequencySelection
+from agilerl.hpo.mutation import Mutations
 from agilerl.metrics import AgentMetrics, MultiAgentMetrics
 from agilerl.population import Population
 from agilerl.training.train_bandits import train_bandits
@@ -45,7 +48,15 @@ from agilerl.training.train_multi_agent_on_policy import train_multi_agent_on_po
 from agilerl.training.train_off_policy import train_off_policy
 from agilerl.training.train_offline import train_offline
 from agilerl.training.train_on_policy import train_on_policy
-from agilerl.utils.utils import make_multi_agent_vect_envs
+from agilerl.utils.utils import make_multi_agent_vect_envs, run_selection_and_mutation
+from tests.helper_functions import (
+    generate_discrete_space,
+    generate_multi_agent_box_spaces,
+    generate_multi_agent_discrete_spaces,
+    generate_random_box_space,
+    rank_population_by_subpopulation,
+    weakest_agent_index,
+)
 
 # Common parametrize constants
 _FLAT_VECT = [((6,), 2, True)]
@@ -5511,6 +5522,131 @@ class TestTrainerDeprecatedTournamentArgument:
         spy.assert_called_once()
         assert spy.call_args.args[0] is strategy
         assert len(pop) == 6
+
+
+_CROSS_FAMILY_NET_CONFIG = {
+    "encoder_config": {"hidden_size": [8, 8], "min_mlp_nodes": 7}
+}
+
+
+def _single_agent_hp_config() -> HyperparameterConfig:
+    return HyperparameterConfig(
+        lr=RLParameter(min=6.25e-5, max=1e-2),
+        batch_size=RLParameter(min=8, max=64, dtype=int),
+    )
+
+
+def _multi_agent_hp_config() -> HyperparameterConfig:
+    return HyperparameterConfig(
+        lr_actor=RLParameter(min=1e-4, max=1e-2),
+        lr_critic=RLParameter(min=1e-4, max=1e-2),
+        batch_size=RLParameter(min=8, max=64, dtype=int),
+    )
+
+
+def _build_single_agent_population(algo_cls):
+    return algo_cls.population(
+        size=8,
+        observation_space=generate_random_box_space((4,)),
+        action_space=generate_discrete_space(2),
+        hp_config=_single_agent_hp_config(),
+        net_config=_CROSS_FAMILY_NET_CONFIG,
+        device="cpu",
+    )
+
+
+def _build_maddpg_population():
+    return MADDPG.population(
+        size=8,
+        observation_space=generate_multi_agent_box_spaces(2, (4,)),
+        action_space=generate_multi_agent_discrete_spaces(2, 2),
+        agent_ids=["agent_0", "agent_1"],
+        hp_config=_multi_agent_hp_config(),
+        net_config=_CROSS_FAMILY_NET_CONFIG,
+        device="cpu",
+    )
+
+
+def _build_ippo_population():
+    return IPPO.population(
+        size=8,
+        observation_space=generate_multi_agent_box_spaces(2, (4,)),
+        action_space=generate_multi_agent_discrete_spaces(2, 2),
+        agent_ids=["agent_0", "agent_1"],
+        hp_config=_single_agent_hp_config(),
+        net_config=_CROSS_FAMILY_NET_CONFIG,
+        device="cpu",
+    )
+
+
+# One real population per non-LLM algorithm family the operator must support
+_CROSS_FAMILY_CASES = {
+    "off-policy (DQN)": ("DQN", lambda: _build_single_agent_population(DQN)),
+    "multi-agent off-policy (MADDPG)": ("MADDPG", _build_maddpg_population),
+    "multi-agent on-policy (IPPO)": ("IPPO", _build_ippo_population),
+    "bandit (NeuralUCB)": (
+        "NeuralUCB",
+        lambda: _build_single_agent_population(NeuralUCB),
+    ),
+    "offline (CQN)": ("CQN", lambda: _build_single_agent_population(CQN)),
+}
+
+
+class TestMultiFrequencyCrossFamilyEvolution:
+    """Multi-frequency selection evolves a real population of every algorithm family."""
+
+    @pytest.mark.parametrize(
+        "family", list(_CROSS_FAMILY_CASES), ids=list(_CROSS_FAMILY_CASES)
+    )
+    def test_evolves_a_real_population_of_every_family(self, family):
+        algo_name, build_population = _CROSS_FAMILY_CASES[family]
+        population = build_population()
+        for agent in population:
+            agent.subpopulation_id = agent.index // 4
+        strategy = MultiFrequencySelection(
+            population_size=8,
+            n_subpopulations=2,
+            evolution_frequency_ratios=[1, 2],
+            n_winners=1,
+            n_survivors=1,
+            n_open_for_migration=1,
+            n_losers=1,
+            seed=0,
+        )
+        mutation = Mutations(
+            no_mutation=0.2,
+            architecture=0.0,
+            new_layer_prob=0.0,
+            parameters=0.4,
+            activation=0.0,
+            rl_hp=0.4,
+            mutation_sd=0.1,
+            rand_seed=0,
+            device="cpu",
+        )
+
+        for cycle in range(3):
+            rank_population_by_subpopulation(population)
+            doomed = {weakest_agent_index(population, subpop=0)}
+            if cycle % 2 == 1:
+                doomed.add(weakest_agent_index(population, subpop=1))
+
+            population = run_selection_and_mutation(
+                strategy,
+                population=population,
+                mutation=mutation,
+                env_name="Env",
+                algo=algo_name,
+            )
+
+            surviving = {a.index for a in population}
+            assert not (doomed & surviving)  # the due subpops really did evolve
+            assert len(population) == 8
+            assert Counter(a.subpopulation_id for a in population) == Counter(
+                {0: 4, 1: 4}
+            )
+            assert len({a.index for a in population}) == 8
+            assert all(isinstance(a, EvolvableAlgorithm) for a in population)
 
 
 def _try_remove_models_dir() -> bool:

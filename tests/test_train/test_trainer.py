@@ -6,6 +6,7 @@ Covers:
 - ArenaTrainer (construction, manifest building, train delegation)
 - trainer_utils pure functions
 - LLM algorithm integration (DPO, GRPO) with mocked dependencies
+- Multi-frequency selection wiring (construction, manifest round trip, evolution)
 """
 
 from __future__ import annotations
@@ -13,6 +14,7 @@ from __future__ import annotations
 import contextlib
 import importlib
 import types
+from collections import Counter
 from typing import ClassVar
 from unittest.mock import MagicMock, patch
 
@@ -20,7 +22,10 @@ import pytest
 from gymnasium.spaces import Box, Discrete
 
 from agilerl import HAS_ARENA_DEPENDENCIES, HAS_LLM_DEPENDENCIES, AgentType
+from agilerl.algorithms import DQN
+from agilerl.algorithms.core.base import EvolvableAlgorithm
 from agilerl.components.replay_buffer import MultiStepReplayBuffer, ReplayBuffer
+from agilerl.hpo.multi_frequency import MultiFrequencySelection
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.models import (
@@ -31,9 +36,12 @@ from agilerl.models import (
     TD3Spec,
 )
 from agilerl.models.algo import LLMAlgorithmSpec
+from agilerl.models.env import GymEnvSpec
 from agilerl.models.hpo import (
+    MultiFrequencySelectionSpec,
     MutationProbabilities,
     MutationSpec,
+    RLHyperparameter,
     TournamentSelectionSpec,
 )
 from agilerl.models.networks import MlpSpec, QNetworkSpec, StochasticActorSpec
@@ -43,6 +51,12 @@ from agilerl.utils.trainer_utils import (
     build_mutations_from_spec,
     build_replay_buffer_from_spec,
     build_tournament_from_spec,
+    create_population_from_spec,
+)
+from agilerl.utils.utils import run_selection_and_mutation
+from tests.helper_functions import (
+    rank_population_by_subpopulation,
+    weakest_agent_index,
 )
 
 if HAS_ARENA_DEPENDENCIES:
@@ -2838,3 +2852,225 @@ def test_from_manifest_multi_agent_homogeneous(tmp_path):
     assert len(agent.actors) >= 1
     for net in agent.actors.values():
         assert isinstance(net.encoder, EvolvableMLP)
+
+
+def _make_multi_frequency_ppo_trainer(
+    training: TrainingSpec | None = None,
+    accelerator: object | None = None,
+) -> LocalTrainer:
+    """Build an eight-slot PPO LocalTrainer driven by multi-frequency selection."""
+    multi_frequency_selection = MultiFrequencySelectionSpec(
+        n_subpopulations=2,
+        evolution_frequency_ratios=[1, 2],
+        n_winners=1,
+        n_survivors=1,
+        n_open_for_migration=1,
+        n_losers=1,
+    )
+    mutation = MutationSpec(
+        probabilities=MutationProbabilities(no_mut=0.5, params_mut=0.3, rl_hp_mut=0.2),
+        rl_hp_selection={
+            "lr": RLHyperparameter(min=1e-5, max=1e-2),
+            # learn_step resizes the rollout buffer
+            "learn_step": RLHyperparameter(min=64, max=2048),
+        },
+    )
+    ppo = PPOSpec(
+        learn_step=128,
+        net_config=StochasticActorSpec(
+            encoder_config=MlpSpec(hidden_size=[16]),
+            head_config=MlpSpec(hidden_size=[16]),
+        ),
+    )
+    with patch.object(LocalTrainer, "_make_env", return_value=VectorizedDummyEnv()):
+        return LocalTrainer(
+            algorithm=ppo,
+            environment=GymEnvSpec(name="CartPole-v1", num_envs=1),
+            training=training or TrainingSpec(max_steps=200, evo_steps=50, pop_size=8),
+            mutation=mutation,
+            multi_frequency_selection=multi_frequency_selection,
+            accelerator=accelerator,
+        )
+
+
+class TestLocalTrainerMultiFrequency:
+    """LocalTrainer builds the operator, tags subpopulations and rejects bad specs."""
+
+    def test_builds_multi_frequency_and_tags_subpopulations(self):
+        trainer = _make_multi_frequency_ppo_trainer()
+
+        assert isinstance(trainer.multi_frequency_selection, MultiFrequencySelection)
+        assert trainer.tournament_selection is None
+        assert trainer.selection_strategy is trainer.multi_frequency_selection
+        subpops = sorted(a.subpopulation_id for a in trainer.population)
+        assert subpops == [0, 0, 0, 0, 1, 1, 1, 1]
+        assert len({a.index for a in trainer.population}) == 8
+
+    def test_accepts_multi_frequency_with_accelerator(self):
+        accelerator = MagicMock()
+        fake_population = [MagicMock() for _ in range(8)]
+        with patch(
+            "agilerl.training.trainer.create_population_from_spec",
+            return_value=fake_population,
+        ):
+            trainer = _make_multi_frequency_ppo_trainer(accelerator=accelerator)
+
+        assert trainer.accelerator is accelerator
+        assert isinstance(trainer.multi_frequency_selection, MultiFrequencySelection)
+        assert trainer.selection_strategy is trainer.multi_frequency_selection
+
+    def test_rejects_both_multi_frequency_and_tournament(self):
+        multi_frequency_selection = MultiFrequencySelectionSpec(
+            n_subpopulations=2,
+            evolution_frequency_ratios=[1, 2],
+            n_winners=1,
+            n_survivors=1,
+            n_open_for_migration=1,
+            n_losers=1,
+        )
+        ppo = PPOSpec(
+            learn_step=128,
+            net_config=StochasticActorSpec(
+                encoder_config=MlpSpec(hidden_size=[16]),
+                head_config=MlpSpec(hidden_size=[16]),
+            ),
+        )
+        with (
+            patch.object(LocalTrainer, "_make_env", return_value=VectorizedDummyEnv()),
+            pytest.raises(ValueError, match="tournament_selection"),
+        ):
+            LocalTrainer(
+                algorithm=ppo,
+                environment=GymEnvSpec(name="CartPole-v1", num_envs=1),
+                training=TrainingSpec(max_steps=200, evo_steps=50, pop_size=8),
+                multi_frequency_selection=multi_frequency_selection,
+                tournament=TournamentSelectionSpec(tournament_size=2, elitism=True),
+            )
+
+    def test_requires_explicit_pop_size_without_manifest(self):
+        # pop_size is mandatory under MF-PBT
+        with pytest.raises(ValueError, match="pop_size is required"):
+            _make_multi_frequency_ppo_trainer(
+                training=TrainingSpec(max_steps=200, evo_steps=50)
+            )
+
+    def test_rejects_pop_size_below_six_without_manifest(self):
+        with pytest.raises(ValueError, match="population_size must be >= 6"):
+            _make_multi_frequency_ppo_trainer(
+                training=TrainingSpec(max_steps=200, evo_steps=50, pop_size=4)
+            )
+
+
+class TestLocalTrainerMultiFrequencyManifest:
+    """Multi-frequency selection round-trips through the ``tournament_selection`` union."""
+
+    def test_trainer_to_manifest_uses_the_unified_block(self):
+        trainer = _make_multi_frequency_ppo_trainer()
+
+        manifest = trainer.to_manifest()
+
+        assert manifest["training"]["pop_size"] == 8
+        assert manifest["tournament_selection"]["selection_strategy"] == (
+            "multi_frequency"
+        )
+        assert "multi_frequency_selection" not in manifest
+
+    def test_manifest_round_trip_rebuilds_via_unified_block(self):
+        trainer = _make_multi_frequency_ppo_trainer()
+        manifest = trainer.to_manifest()
+
+        with patch.object(LocalTrainer, "_make_env", return_value=VectorizedDummyEnv()):
+            rebuilt = LocalTrainer.from_manifest(manifest)
+
+        assert isinstance(rebuilt.multi_frequency_selection, MultiFrequencySelection)
+        assert rebuilt.tournament_selection is None
+        assert rebuilt.selection_strategy is rebuilt.multi_frequency_selection
+        assert rebuilt.training_spec.pop_size == 8
+
+
+class TestCreatePopulationFromSpecMultiFrequency:
+    """A resumed population keeps its slot layout, so subpopulation tags stay valid."""
+
+    def test_resumed_population_keeps_slot_indices_and_evolves(self, tmp_path):
+        env = VectorizedDummyEnv()
+        checkpoint = tmp_path / "resume.pt"
+        DQN(
+            observation_space=env.observation_space,
+            action_space=env.action_space,
+            index=3,
+        ).save_checkpoint(str(checkpoint))
+
+        mf_spec = MultiFrequencySelectionSpec(n_subpopulations=2)
+        population = create_population_from_spec(
+            population_size=6,
+            algo_spec=DQNSpec(),
+            env=env,
+            mutation_spec=None,
+            replay_buffer_spec=None,
+            resume_from_checkpoint=str(checkpoint),
+            multi_frequency_selection_spec=mf_spec,
+        )
+
+        assert [agent.index for agent in population] == [0, 1, 2, 3, 4, 5]
+        assert [agent.subpopulation_id for agent in population] == [0, 0, 0, 1, 1, 1]
+
+        for i, agent in enumerate(population):
+            agent.fitness = [float(6 - i)]
+        strategy = MultiFrequencySelection(
+            population_size=6, n_subpopulations=2, evolution_frequency_ratios=[1, 2]
+        )
+        _elite, evolved, _indices = strategy.select(population)
+
+        assert len({agent.index for agent in evolved}) == len(evolved)
+
+
+class TestMultiFrequencyRealPopulationEvolution:
+    """The operator evolves a real, trainer-built PPO population cycle after cycle."""
+
+    def test_evolves_real_ppo_population_across_cycles(self):
+        trainer = _make_multi_frequency_ppo_trainer()
+        agents = list(trainer.population)
+
+        for _cycle in range(3):
+            rank_population_by_subpopulation(agents)
+            # Subpopulation 0 evolves every cycle (delta 1), so its weakest member is
+            # always cloned over
+            doomed = weakest_agent_index(agents, subpop=0)
+
+            agents = run_selection_and_mutation(
+                trainer.multi_frequency_selection,
+                population=agents,
+                mutation=trainer.mutations,
+                env_name="CartPole-v1",
+                algo="PPO",
+            )
+
+            assert doomed not in {a.index for a in agents}
+            assert len(agents) == 8
+            assert Counter(a.subpopulation_id for a in agents) == Counter({0: 4, 1: 4})
+            assert len({a.index for a in agents}) == 8  # indices stay unique
+            assert all(isinstance(a, EvolvableAlgorithm) for a in agents)
+
+    def test_migration_weights_resizes_rollout_buffer(self):
+        # A fast-to-slow migrant clones the external agent's networks but takes the
+        # studied subpop elite's mutable HPs, including learn_step. PPO sizes its
+        # rollout buffer from learn_step via a mutation hook, so the migrant's buffer
+        # must be rebuilt to match the elite's learn_step, or rollout collection
+        # overflows it.
+        trainer = _make_multi_frequency_ppo_trainer()
+        agents = list(trainer.population)
+        external, elite = agents[4], agents[0]
+
+        external.learn_step = 256
+        external.mutation_hook()  # buffer sized to 256
+        elite.learn_step = 512
+        elite.mutation_hook()  # buffer sized to 512
+
+        trainer.multi_frequency_selection._sync_index(agents)
+        migrant = trainer.multi_frequency_selection._migrate_weights(
+            external, elite, subpop=1
+        )
+
+        assert migrant.learn_step == 512  # took the elite's learn_step
+        # Buffer capacity must follow the new learn_step (ceil(learn_step / num_envs))
+        assert migrant.rollout_buffer.capacity == -(512 // -migrant.num_envs)

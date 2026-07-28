@@ -424,3 +424,28 @@ def patch_actor_scalar_mu_repeat(
     monkeypatch.setattr(actor, "forward", forwarding)
     monkeypatch.setattr(torch.Tensor, "repeat", selective_repeat)
     _broadcast_by_storage.clear()
+
+
+def rank_population_by_subpopulation(population: list[Any]) -> None:
+    """Give every agent a distinct fitness, subpopulation 0 dominating subpopulation 1.
+
+    :param population: Agents tagged with a subpopulation_id.
+    :type population: list[Any]
+    """
+    for position, agent in enumerate(population):
+        base = 100.0 if agent.subpopulation_id == 0 else 0.0
+        agent.fitness = [base - position]
+
+
+def weakest_agent_index(population: list[Any], subpop: int) -> int:
+    """Return the index of the lowest-fitness member of a subpopulation.
+
+    :param population: Agents tagged with a subpopulation_id.
+    :type population: list[Any]
+    :param subpop: Subpopulation to search.
+    :type subpop: int
+    :return: Index of that subpopulation's weakest agent.
+    :rtype: int
+    """
+    members = [agent for agent in population if agent.subpopulation_id == subpop]
+    return min(members, key=lambda agent: agent.fitness[-1]).index
