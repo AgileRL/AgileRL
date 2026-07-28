@@ -20,6 +20,7 @@ multi-point sweep must isolate each point in its own process.
 from __future__ import annotations
 
 import argparse
+import inspect
 import json
 import sys
 from dataclasses import dataclass, replace
@@ -231,43 +232,50 @@ def measure_point(
     # SFT and DPO train from a fixed dataset: they hard-set use_vllm=False and
     # so have no generation phase to measure at all.
     rollout_based = point.algorithm in ("grpo", "ppo")
-    algorithm_kwargs: dict[str, object] = {}
-    if point.algorithm == "grpo":
-        # Only GRPO groups completions; the others batch trajectories.
-        algorithm_kwargs["group_size"] = point.group_size
-    if rollout_based:
-        algorithm_kwargs["use_memory_efficient_params"] = point.memory_efficient_params
-        algorithm_kwargs["use_vllm"] = True
-        algorithm_kwargs["vllm_config"] = VLLMConfig(
-            gpu_memory_utilization=point.gpu_memory_utilization,
-            max_num_seqs=point.group_size,
-            max_lora_rank=point.lora_rank,
-            sleep_mode=True,
-        )
-        algorithm_kwargs["max_output_tokens"] = point.seq_len - prompt_len
-
-    agent = Algorithm(
-        pad_token_id=tokenizer.pad_token_id or tokenizer.eos_token_id,
-        pad_token=tokenizer.pad_token or tokenizer.eos_token,
-        model_name=model_name,
-        model_config=(
+    # The four algorithms take overlapping but unequal constructor
+    # arguments — SFT and DPO have no max_model_len, PPO has no group_size —
+    # so build the superset and keep only what this one accepts rather than
+    # maintaining a list per algorithm.
+    rollout_based = point.algorithm in ("grpo", "ppo")
+    candidate_kwargs: dict[str, object] = {
+        "pad_token_id": tokenizer.pad_token_id or tokenizer.eos_token_id,
+        "pad_token": tokenizer.pad_token or tokenizer.eos_token,
+        "model_name": model_name,
+        "model_config": (
             {"attn_implementation": point.attn_implementation}
             if point.attn_implementation != "auto"
             else None
         ),
-        micro_batch_size_per_gpu=point.micro_batch,
-        batch_size=point.micro_batch,
-        max_model_len=point.seq_len,
-        lora_config=LoraConfig(
+        "group_size": point.group_size,
+        "micro_batch_size_per_gpu": point.micro_batch,
+        "batch_size": point.micro_batch,
+        "max_model_len": point.seq_len,
+        "lora_config": LoraConfig(
             r=point.lora_rank,
             lora_alpha=2 * point.lora_rank,
             target_modules=targets,
             task_type="CAUSAL_LM",
         ),
-        lora_target_scope=point.lora_target_scope,
-        quantization_config=quantization_config,
-        **algorithm_kwargs,
-    )
+        "lora_target_scope": point.lora_target_scope,
+        "quantization_config": quantization_config,
+    }
+    if rollout_based:
+        candidate_kwargs.update(
+            {
+                "max_output_tokens": point.seq_len - prompt_len,
+                "use_memory_efficient_params": point.memory_efficient_params,
+                "use_vllm": True,
+                "vllm_config": VLLMConfig(
+                    gpu_memory_utilization=point.gpu_memory_utilization,
+                    max_num_seqs=point.group_size,
+                    max_lora_rank=point.lora_rank,
+                    sleep_mode=True,
+                ),
+            }
+        )
+
+    accepted = set(inspect.signature(Algorithm.__init__).parameters)
+    agent = Algorithm(**{k: v for k, v in candidate_kwargs.items() if k in accepted})
 
     # Fixed-content prompts of controlled token length; content is irrelevant
     # to memory, shape is everything.

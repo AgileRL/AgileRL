@@ -76,17 +76,33 @@ HOLDOUT_POINTS: tuple[SweepPoint, ...] = (
 )
 
 
-def corner_plan() -> list[SweepPoint]:
+def corner_plan(seq_lens: tuple[int, ...] | None = None) -> list[SweepPoint]:
     """The fit set: every corner of the knob space (16 points)."""
     return [
         SweepPoint(seq_len=s, micro_batch=b, group_size=g, lora_rank=r)
         for s, b, g, r in itertools.product(
-            CORNER_LEVELS["seq_len"],
+            seq_lens or CORNER_LEVELS["seq_len"],
             CORNER_LEVELS["micro_batch"],
             CORNER_LEVELS["group_size"],
             CORNER_LEVELS["lora_rank"],
         )
     ]
+
+
+def budget_for(model: ModelSpec, device: DeviceSpec, point: SweepPoint) -> float:
+    """Engine budget large enough to serve this point's KV demand.
+
+    A fixed budget is why the two hardest models lost corners: a 14 GiB model
+    plus long-context, high-concurrency KV does not fit 45% of a 40 GiB card,
+    so exactly the corners that anchor the long-context slopes went missing
+    and the fits were left extrapolating. Sizing the budget per point keeps
+    them, and since the engine sleeps during training it costs the training
+    phase nothing.
+    """
+    from agilerl.memory.estimator import recommend_engine_budget
+
+    required, _ = recommend_engine_budget(model, device, point.generation_knobs())
+    return min(max(required * 1.1, 0.2), 0.9)
 
 
 def fit_residuals(
@@ -337,6 +353,8 @@ def run_sweep(
     algorithm: str = "grpo",
     lora_target_modules: str = "all-linear",
     memory_efficient_params: bool = True,
+    seq_lens: tuple[int, ...] | None = None,
+    auto_budget: bool = False,
 ) -> ModelProfile:
     """Measure every plan point on the local GPU and build the profile.
 
@@ -395,6 +413,11 @@ def run_sweep(
         "training": [],
         "generation": [],
     }
+    total_bytes, capability = _device_identity(device_index)
+    device = DeviceSpec.from_compute_capability(
+        total_bytes, *capability, name=device_name
+    )
+
     plan = [
         replace(
             point,
@@ -405,7 +428,7 @@ def run_sweep(
             lora_target_modules=lora_target_modules,
             memory_efficient_params=memory_efficient_params,
         )
-        for point in corner_plan()
+        for point in corner_plan(seq_lens)
     ]
     holdout_plan = [
         replace(
@@ -418,6 +441,16 @@ def run_sweep(
         )
         for point in HOLDOUT_POINTS
     ]
+    if auto_budget:
+        plan = [
+            replace(p, gpu_memory_utilization=budget_for(model, device, p))
+            for p in plan
+        ]
+        holdout_plan = [
+            replace(p, gpu_memory_utilization=budget_for(model, device, p))
+            for p in holdout_plan
+        ]
+
     skipped: list[str] = []
     for i, point in enumerate(plan + holdout_plan):
         held_out = i >= len(plan)
@@ -452,11 +485,6 @@ def run_sweep(
         print(f"\n{len(skipped)} point(s) skipped:", flush=True)
         for entry in skipped:
             print(f"  - {entry}", flush=True)
-
-    total_bytes, capability = _device_identity(device_index)
-    device = DeviceSpec.from_compute_capability(
-        total_bytes, *capability, name=device_name
-    )
 
     return ModelProfile(
         model_id=model_name,
@@ -533,6 +561,19 @@ def main(argv: list[str] | None = None) -> int:
             "for PPO, whose value head is not moved back and faults in Triton."
         ),
     )
+    parser.add_argument(
+        "--seq-lens",
+        default=None,
+        help="Comma-separated context lengths to use as the corner levels",
+    )
+    parser.add_argument(
+        "--auto-budget",
+        action="store_true",
+        help=(
+            "Size gpu_memory_utilization per point from the KV demand, so "
+            "long-context and high-concurrency corners do not OOM away"
+        ),
+    )
     parser.add_argument("--output-dir", default=None)
     parser.add_argument(
         "--dry-run",
@@ -559,6 +600,10 @@ def main(argv: list[str] | None = None) -> int:
         algorithm=args.algorithm,
         lora_target_modules=args.lora_target_modules,
         memory_efficient_params=not args.no_memory_efficient_params,
+        seq_lens=(
+            tuple(int(s) for s in args.seq_lens.split(",")) if args.seq_lens else None
+        ),
+        auto_budget=args.auto_budget,
     )
     output_dir = Path(args.output_dir) if args.output_dir else None
     path = save_profile(profile, output_dir)
