@@ -103,6 +103,25 @@ class SweepPoint:
     def with_utilization(self, gpu_memory_utilization: float) -> SweepPoint:
         return replace(self, gpu_memory_utilization=gpu_memory_utilization)
 
+    @property
+    def scope(self) -> str:
+        """Estimator-side LoRA scope implied by the targeted modules.
+
+        The distinction matters enormously on an MoE: ``all-linear`` sizes
+        adapters across every expert's projections, which on a 64-expert
+        model over-predicts by ~10 GiB at rank 64 against an attention-only
+        adapter.
+        """
+        if self.lora_target_modules == "all-linear":
+            return "all-linear"
+        mlp_markers = ("gate", "up_proj", "down_proj", "expert", "fc")
+        targeted = self.lora_target_modules.lower()
+        return (
+            "all-linear"
+            if any(marker in targeted for marker in mlp_markers)
+            else "attention-only"
+        )
+
     def training_knobs(self) -> TrainingKnobs:
         return TrainingKnobs(
             micro_batch_size_per_gpu=self.micro_batch,
@@ -113,6 +132,7 @@ class SweepPoint:
             trajectories_per_update=self.group_size * self.n_prompts,
             max_model_len=self.seq_len,
             lora_rank=self.lora_rank,
+            lora_target_scope=self.scope,  # type: ignore[arg-type]
             quantization=self.quantization,  # type: ignore[arg-type]
             attn_implementation=self.attn_implementation,  # type: ignore[arg-type]
             algorithm=self.algorithm,  # type: ignore[arg-type]

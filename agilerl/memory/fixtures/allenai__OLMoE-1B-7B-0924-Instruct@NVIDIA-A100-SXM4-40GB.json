@@ -1,0 +1,788 @@
+{
+  "device": {
+    "compute_capability": "8.0",
+    "name": "NVIDIA A100-SXM4-40GB",
+    "total_bytes": 42404806656
+  },
+  "framework_versions": {
+    "agilerl": "2.8.2",
+    "peft": "0.19.1",
+    "torch": "2.11.0",
+    "transformers": "5.11.0",
+    "vllm": "0.26.0"
+  },
+  "generation": {
+    "fit": {
+      "intercept_bytes": 379753033.14285725,
+      "slopes": {
+        "batched_tokens": 23978.666606136216,
+        "kv_tokens": 23978.66672717914,
+        "seq_len": -80798.47619039202
+      }
+    },
+    "holdout_max_rel_error": 0.005842939842216858,
+    "holdout_mean_rel_error": 0.003304656359097907,
+    "n_points": 12
+  },
+  "generation_variant": "base",
+  "measured": [
+    {
+      "analytic_bytes": null,
+      "device_peak_bytes": 22250323968,
+      "knobs": {
+        "algorithm": "grpo",
+        "attn_implementation": "auto",
+        "gpu_memory_utilization": 0.5,
+        "group_size": 4,
+        "lora_rank": 8,
+        "lora_target_modules": "q_proj,k_proj,v_proj,o_proj",
+        "lora_target_scope": "",
+        "micro_batch": 1,
+        "n_prompts": 1,
+        "quantization": "none",
+        "seq_len": 512
+      },
+      "nvml_polled_bytes": 22250323968,
+      "phase": "generation",
+      "sleeping_baseline_bytes": null,
+      "torch_max_allocated_bytes": null,
+      "torch_max_reserved_bytes": null
+    },
+    {
+      "analytic_bytes": null,
+      "device_peak_bytes": 15740764160,
+      "knobs": {
+        "algorithm": "grpo",
+        "attn_implementation": "auto",
+        "gpu_memory_utilization": 0.5,
+        "group_size": 4,
+        "lora_rank": 8,
+        "lora_target_modules": "q_proj,k_proj,v_proj,o_proj",
+        "lora_target_scope": "",
+        "micro_batch": 1,
+        "n_prompts": 1,
+        "quantization": "none",
+        "seq_len": 512
+      },
+      "nvml_polled_bytes": 15740764160,
+      "phase": "training",
+      "sleeping_baseline_bytes": 1454964736,
+      "torch_max_allocated_bytes": 35047810048,
+      "torch_max_reserved_bytes": 35295068160
+    },
+    {
+      "analytic_bytes": null,
+      "device_peak_bytes": 22409707520,
+      "knobs": {
+        "algorithm": "grpo",
+        "attn_implementation": "auto",
+        "gpu_memory_utilization": 0.5,
+        "group_size": 4,
+        "lora_rank": 64,
+        "lora_target_modules": "q_proj,k_proj,v_proj,o_proj",
+        "lora_target_scope": "",
+        "micro_batch": 1,
+        "n_prompts": 1,
+        "quantization": "none",
+        "seq_len": 512
+      },
+      "nvml_polled_bytes": 22409707520,
+      "phase": "generation",
+      "sleeping_baseline_bytes": null,
+      "torch_max_allocated_bytes": null,
+      "torch_max_reserved_bytes": null
+    },
+    {
+      "analytic_bytes": null,
+      "device_peak_bytes": 16099377152,
+      "knobs": {
+        "algorithm": "grpo",
+        "attn_implementation": "auto",
+        "gpu_memory_utilization": 0.5,
+        "group_size": 4,
+        "lora_rank": 64,
+        "lora_target_modules": "q_proj,k_proj,v_proj,o_proj",
+        "lora_target_scope": "",
+        "micro_batch": 1,
+        "n_prompts": 1,
+        "quantization": "none",
+        "seq_len": 512
+      },
+      "nvml_polled_bytes": 16099377152,
+      "phase": "training",
+      "sleeping_baseline_bytes": 1478033408,
+      "torch_max_allocated_bytes": 35251485184,
+      "torch_max_reserved_bytes": 35783704576
+    },
+    {
+      "analytic_bytes": null,
+      "device_peak_bytes": 22325821440,
+      "knobs": {
+        "algorithm": "grpo",
+        "attn_implementation": "auto",
+        "gpu_memory_utilization": 0.5,
+        "group_size": 16,
+        "lora_rank": 8,
+        "lora_target_modules": "q_proj,k_proj,v_proj,o_proj",
+        "lora_target_scope": "",
+        "micro_batch": 1,
+        "n_prompts": 1,
+        "quantization": "none",
+        "seq_len": 512
+      },
+      "nvml_polled_bytes": 22325821440,
+      "phase": "generation",
+      "sleeping_baseline_bytes": null,
+      "torch_max_allocated_bytes": null,
+      "torch_max_reserved_bytes": null
+    },
+    {
+      "analytic_bytes": null,
+      "device_peak_bytes": 16176971776,
+      "knobs": {
+        "algorithm": "grpo",
+        "attn_implementation": "auto",
+        "gpu_memory_utilization": 0.5,
+        "group_size": 16,
+        "lora_rank": 8,
+        "lora_target_modules": "q_proj,k_proj,v_proj,o_proj",
+        "lora_target_scope": "",
+        "micro_batch": 1,
+        "n_prompts": 1,
+        "quantization": "none",
+        "seq_len": 512
+      },
+      "nvml_polled_bytes": 16176971776,
+      "phase": "training",
+      "sleeping_baseline_bytes": 2201550848,
+      "torch_max_allocated_bytes": 34808498688,
+      "torch_max_reserved_bytes": 35014049792
+    },
+    {
+      "analytic_bytes": null,
+      "device_peak_bytes": 22462136320,
+      "knobs": {
+        "algorithm": "grpo",
+        "attn_implementation": "auto",
+        "gpu_memory_utilization": 0.5,
+        "group_size": 16,
+        "lora_rank": 64,
+        "lora_target_modules": "q_proj,k_proj,v_proj,o_proj",
+        "lora_target_scope": "",
+        "micro_batch": 1,
+        "n_prompts": 1,
+        "quantization": "none",
+        "seq_len": 512
+      },
+      "nvml_polled_bytes": 22462136320,
+      "phase": "generation",
+      "sleeping_baseline_bytes": null,
+      "torch_max_allocated_bytes": null,
+      "torch_max_reserved_bytes": null
+    },
+    {
+      "analytic_bytes": null,
+      "device_peak_bytes": 16531390464,
+      "knobs": {
+        "algorithm": "grpo",
+        "attn_implementation": "auto",
+        "gpu_memory_utilization": 0.5,
+        "group_size": 16,
+        "lora_rank": 64,
+        "lora_target_modules": "q_proj,k_proj,v_proj,o_proj",
+        "lora_target_scope": "",
+        "micro_batch": 1,
+        "n_prompts": 1,
+        "quantization": "none",
+        "seq_len": 512
+      },
+      "nvml_polled_bytes": 16531390464,
+      "phase": "training",
+      "sleeping_baseline_bytes": 2205745152,
+      "torch_max_allocated_bytes": 35017154560,
+      "torch_max_reserved_bytes": 35498491904
+    },
+    {
+      "analytic_bytes": null,
+      "device_peak_bytes": 22250323968,
+      "knobs": {
+        "algorithm": "grpo",
+        "attn_implementation": "auto",
+        "gpu_memory_utilization": 0.5,
+        "group_size": 4,
+        "lora_rank": 8,
+        "lora_target_modules": "q_proj,k_proj,v_proj,o_proj",
+        "lora_target_scope": "",
+        "micro_batch": 8,
+        "n_prompts": 1,
+        "quantization": "none",
+        "seq_len": 512
+      },
+      "nvml_polled_bytes": 22250323968,
+      "phase": "generation",
+      "sleeping_baseline_bytes": null,
+      "torch_max_allocated_bytes": null,
+      "torch_max_reserved_bytes": null
+    },
+    {
+      "analytic_bytes": null,
+      "device_peak_bytes": 16319578112,
+      "knobs": {
+        "algorithm": "grpo",
+        "attn_implementation": "auto",
+        "gpu_memory_utilization": 0.5,
+        "group_size": 4,
+        "lora_rank": 8,
+        "lora_target_modules": "q_proj,k_proj,v_proj,o_proj",
+        "lora_target_scope": "",
+        "micro_batch": 8,
+        "n_prompts": 1,
+        "quantization": "none",
+        "seq_len": 512
+      },
+      "nvml_polled_bytes": 16319578112,
+      "phase": "training",
+      "sleeping_baseline_bytes": 1454964736,
+      "torch_max_allocated_bytes": 35474440192,
+      "torch_max_reserved_bytes": 35875979264
+    },
+    {
+      "analytic_bytes": null,
+      "device_peak_bytes": 22388736000,
+      "knobs": {
+        "algorithm": "grpo",
+        "attn_implementation": "auto",
+        "gpu_memory_utilization": 0.5,
+        "group_size": 4,
+        "lora_rank": 64,
+        "lora_target_modules": "q_proj,k_proj,v_proj,o_proj",
+        "lora_target_scope": "",
+        "micro_batch": 8,
+        "n_prompts": 1,
+        "quantization": "none",
+        "seq_len": 512
+      },
+      "nvml_polled_bytes": 22388736000,
+      "phase": "generation",
+      "sleeping_baseline_bytes": null,
+      "torch_max_allocated_bytes": null,
+      "torch_max_reserved_bytes": null
+    },
+    {
+      "analytic_bytes": null,
+      "device_peak_bytes": 16680288256,
+      "knobs": {
+        "algorithm": "grpo",
+        "attn_implementation": "auto",
+        "gpu_memory_utilization": 0.5,
+        "group_size": 4,
+        "lora_rank": 64,
+        "lora_target_modules": "q_proj,k_proj,v_proj,o_proj",
+        "lora_target_scope": "",
+        "micro_batch": 8,
+        "n_prompts": 1,
+        "quantization": "none",
+        "seq_len": 512
+      },
+      "nvml_polled_bytes": 16680288256,
+      "phase": "training",
+      "sleeping_baseline_bytes": 1457061888,
+      "torch_max_allocated_bytes": 35593174016,
+      "torch_max_reserved_bytes": 36364615680
+    },
+    {
+      "analytic_bytes": null,
+      "device_peak_bytes": 22059483136,
+      "knobs": {
+        "algorithm": "grpo",
+        "attn_implementation": "auto",
+        "gpu_memory_utilization": 0.5,
+        "group_size": 16,
+        "lora_rank": 8,
+        "lora_target_modules": "q_proj,k_proj,v_proj,o_proj",
+        "lora_target_scope": "",
+        "micro_batch": 8,
+        "n_prompts": 1,
+        "quantization": "none",
+        "seq_len": 512
+      },
+      "nvml_polled_bytes": 22059483136,
+      "phase": "generation",
+      "sleeping_baseline_bytes": null,
+      "torch_max_allocated_bytes": null,
+      "torch_max_reserved_bytes": null
+    },
+    {
+      "analytic_bytes": null,
+      "device_peak_bytes": 17479303168,
+      "knobs": {
+        "algorithm": "grpo",
+        "attn_implementation": "auto",
+        "gpu_memory_utilization": 0.5,
+        "group_size": 16,
+        "lora_rank": 8,
+        "lora_target_modules": "q_proj,k_proj,v_proj,o_proj",
+        "lora_target_scope": "",
+        "micro_batch": 8,
+        "n_prompts": 1,
+        "quantization": "none",
+        "seq_len": 512
+      },
+      "nvml_polled_bytes": 17479303168,
+      "phase": "training",
+      "sleeping_baseline_bytes": 1914241024,
+      "torch_max_allocated_bytes": 35923978752,
+      "torch_max_reserved_bytes": 36318478336
+    },
+    {
+      "analytic_bytes": null,
+      "device_peak_bytes": 22195798016,
+      "knobs": {
+        "algorithm": "grpo",
+        "attn_implementation": "auto",
+        "gpu_memory_utilization": 0.5,
+        "group_size": 16,
+        "lora_rank": 64,
+        "lora_target_modules": "q_proj,k_proj,v_proj,o_proj",
+        "lora_target_scope": "",
+        "micro_batch": 8,
+        "n_prompts": 1,
+        "quantization": "none",
+        "seq_len": 512
+      },
+      "nvml_polled_bytes": 22195798016,
+      "phase": "generation",
+      "sleeping_baseline_bytes": null,
+      "torch_max_allocated_bytes": null,
+      "torch_max_reserved_bytes": null
+    },
+    {
+      "analytic_bytes": null,
+      "device_peak_bytes": 17837916160,
+      "knobs": {
+        "algorithm": "grpo",
+        "attn_implementation": "auto",
+        "gpu_memory_utilization": 0.5,
+        "group_size": 16,
+        "lora_rank": 64,
+        "lora_target_modules": "q_proj,k_proj,v_proj,o_proj",
+        "lora_target_scope": "",
+        "micro_batch": 8,
+        "n_prompts": 1,
+        "quantization": "none",
+        "seq_len": 512
+      },
+      "nvml_polled_bytes": 17837916160,
+      "phase": "training",
+      "sleeping_baseline_bytes": 1918435328,
+      "torch_max_allocated_bytes": 36158901760,
+      "torch_max_reserved_bytes": 36805017600
+    },
+    {
+      "analytic_bytes": null,
+      "device_peak_bytes": 21832990720,
+      "knobs": {
+        "algorithm": "grpo",
+        "attn_implementation": "auto",
+        "gpu_memory_utilization": 0.5,
+        "group_size": 4,
+        "lora_rank": 8,
+        "lora_target_modules": "q_proj,k_proj,v_proj,o_proj",
+        "lora_target_scope": "",
+        "micro_batch": 1,
+        "n_prompts": 1,
+        "quantization": "none",
+        "seq_len": 4096
+      },
+      "nvml_polled_bytes": 21832990720,
+      "phase": "generation",
+      "sleeping_baseline_bytes": null,
+      "torch_max_allocated_bytes": null,
+      "torch_max_reserved_bytes": null
+    },
+    {
+      "analytic_bytes": null,
+      "device_peak_bytes": 18007785472,
+      "knobs": {
+        "algorithm": "grpo",
+        "attn_implementation": "auto",
+        "gpu_memory_utilization": 0.5,
+        "group_size": 4,
+        "lora_rank": 8,
+        "lora_target_modules": "q_proj,k_proj,v_proj,o_proj",
+        "lora_target_scope": "",
+        "micro_batch": 1,
+        "n_prompts": 1,
+        "quantization": "none",
+        "seq_len": 4096
+      },
+      "nvml_polled_bytes": 18007785472,
+      "phase": "training",
+      "sleeping_baseline_bytes": 2461597696,
+      "torch_max_allocated_bytes": 35732999680,
+      "torch_max_reserved_bytes": 36117151744
+    },
+    {
+      "analytic_bytes": null,
+      "device_peak_bytes": 21944139776,
+      "knobs": {
+        "algorithm": "grpo",
+        "attn_implementation": "auto",
+        "gpu_memory_utilization": 0.5,
+        "group_size": 4,
+        "lora_rank": 64,
+        "lora_target_modules": "q_proj,k_proj,v_proj,o_proj",
+        "lora_target_scope": "",
+        "micro_batch": 1,
+        "n_prompts": 1,
+        "quantization": "none",
+        "seq_len": 4096
+      },
+      "nvml_polled_bytes": 21944139776,
+      "phase": "generation",
+      "sleeping_baseline_bytes": null,
+      "torch_max_allocated_bytes": null,
+      "torch_max_reserved_bytes": null
+    },
+    {
+      "analytic_bytes": null,
+      "device_peak_bytes": 18364301312,
+      "knobs": {
+        "algorithm": "grpo",
+        "attn_implementation": "auto",
+        "gpu_memory_utilization": 0.5,
+        "group_size": 4,
+        "lora_rank": 64,
+        "lora_target_modules": "q_proj,k_proj,v_proj,o_proj",
+        "lora_target_scope": "",
+        "micro_batch": 1,
+        "n_prompts": 1,
+        "quantization": "none",
+        "seq_len": 4096
+      },
+      "nvml_polled_bytes": 18364301312,
+      "phase": "training",
+      "sleeping_baseline_bytes": 2465792000,
+      "torch_max_allocated_bytes": 35985818624,
+      "torch_max_reserved_bytes": 36572233728
+    },
+    {
+      "analytic_bytes": null,
+      "device_peak_bytes": 21830893568,
+      "knobs": {
+        "algorithm": "grpo",
+        "attn_implementation": "auto",
+        "gpu_memory_utilization": 0.5,
+        "group_size": 4,
+        "lora_rank": 8,
+        "lora_target_modules": "q_proj,k_proj,v_proj,o_proj",
+        "lora_target_scope": "",
+        "micro_batch": 8,
+        "n_prompts": 1,
+        "quantization": "none",
+        "seq_len": 4096
+      },
+      "nvml_polled_bytes": 21830893568,
+      "phase": "generation",
+      "sleeping_baseline_bytes": null,
+      "torch_max_allocated_bytes": null,
+      "torch_max_reserved_bytes": null
+    },
+    {
+      "analytic_bytes": null,
+      "device_peak_bytes": 22415998976,
+      "knobs": {
+        "algorithm": "grpo",
+        "attn_implementation": "auto",
+        "gpu_memory_utilization": 0.5,
+        "group_size": 4,
+        "lora_rank": 8,
+        "lora_target_modules": "q_proj,k_proj,v_proj,o_proj",
+        "lora_target_scope": "",
+        "micro_batch": 8,
+        "n_prompts": 1,
+        "quantization": "none",
+        "seq_len": 4096
+      },
+      "nvml_polled_bytes": 22415998976,
+      "phase": "training",
+      "sleeping_baseline_bytes": 2438529024,
+      "torch_max_allocated_bytes": 39862304256,
+      "torch_max_reserved_bytes": 40529559552
+    },
+    {
+      "analytic_bytes": null,
+      "device_peak_bytes": 21935751168,
+      "knobs": {
+        "algorithm": "grpo",
+        "attn_implementation": "auto",
+        "gpu_memory_utilization": 0.5,
+        "group_size": 4,
+        "lora_rank": 64,
+        "lora_target_modules": "q_proj,k_proj,v_proj,o_proj",
+        "lora_target_scope": "",
+        "micro_batch": 8,
+        "n_prompts": 1,
+        "quantization": "none",
+        "seq_len": 4096
+      },
+      "nvml_polled_bytes": 21935751168,
+      "phase": "generation",
+      "sleeping_baseline_bytes": null,
+      "torch_max_allocated_bytes": null,
+      "torch_max_reserved_bytes": null
+    },
+    {
+      "analytic_bytes": null,
+      "device_peak_bytes": 22774611968,
+      "knobs": {
+        "algorithm": "grpo",
+        "attn_implementation": "auto",
+        "gpu_memory_utilization": 0.5,
+        "group_size": 4,
+        "lora_rank": 64,
+        "lora_target_modules": "q_proj,k_proj,v_proj,o_proj",
+        "lora_target_scope": "",
+        "micro_batch": 8,
+        "n_prompts": 1,
+        "quantization": "none",
+        "seq_len": 4096
+      },
+      "nvml_polled_bytes": 22774611968,
+      "phase": "training",
+      "sleeping_baseline_bytes": 2442723328,
+      "torch_max_allocated_bytes": 40002794496,
+      "torch_max_reserved_bytes": 40984641536
+    },
+    {
+      "analytic_bytes": null,
+      "device_peak_bytes": 20197212160,
+      "knobs": {
+        "algorithm": "grpo",
+        "attn_implementation": "auto",
+        "gpu_memory_utilization": 0.45,
+        "group_size": 8,
+        "lora_rank": 16,
+        "lora_target_modules": "q_proj,k_proj,v_proj,o_proj",
+        "lora_target_scope": "",
+        "micro_batch": 4,
+        "n_prompts": 1,
+        "quantization": "none",
+        "seq_len": 1024
+      },
+      "nvml_polled_bytes": 20197212160,
+      "phase": "generation",
+      "sleeping_baseline_bytes": null,
+      "torch_max_allocated_bytes": null,
+      "torch_max_reserved_bytes": null
+    },
+    {
+      "analytic_bytes": null,
+      "device_peak_bytes": 17433165824,
+      "knobs": {
+        "algorithm": "grpo",
+        "attn_implementation": "auto",
+        "gpu_memory_utilization": 0.45,
+        "group_size": 8,
+        "lora_rank": 16,
+        "lora_target_modules": "q_proj,k_proj,v_proj,o_proj",
+        "lora_target_scope": "",
+        "micro_batch": 4,
+        "n_prompts": 1,
+        "quantization": "none",
+        "seq_len": 1024
+      },
+      "nvml_polled_bytes": 17433165824,
+      "phase": "training",
+      "sleeping_baseline_bytes": 2176385024,
+      "torch_max_allocated_bytes": 33870322688,
+      "torch_max_reserved_bytes": 34194063360
+    },
+    {
+      "analytic_bytes": null,
+      "device_peak_bytes": 19891027968,
+      "knobs": {
+        "algorithm": "grpo",
+        "attn_implementation": "auto",
+        "gpu_memory_utilization": 0.45,
+        "group_size": 8,
+        "lora_rank": 32,
+        "lora_target_modules": "q_proj,k_proj,v_proj,o_proj",
+        "lora_target_scope": "",
+        "micro_batch": 2,
+        "n_prompts": 1,
+        "quantization": "none",
+        "seq_len": 2048
+      },
+      "nvml_polled_bytes": 19891027968,
+      "phase": "generation",
+      "sleeping_baseline_bytes": null,
+      "torch_max_allocated_bytes": null,
+      "torch_max_reserved_bytes": null
+    },
+    {
+      "analytic_bytes": null,
+      "device_peak_bytes": 18131517440,
+      "knobs": {
+        "algorithm": "grpo",
+        "attn_implementation": "auto",
+        "gpu_memory_utilization": 0.45,
+        "group_size": 8,
+        "lora_rank": 32,
+        "lora_target_modules": "q_proj,k_proj,v_proj,o_proj",
+        "lora_target_scope": "",
+        "micro_batch": 2,
+        "n_prompts": 1,
+        "quantization": "none",
+        "seq_len": 2048
+      },
+      "nvml_polled_bytes": 18131517440,
+      "phase": "training",
+      "sleeping_baseline_bytes": 2685992960,
+      "torch_max_allocated_bytes": 33674207744,
+      "torch_max_reserved_bytes": 34076622848
+    },
+    {
+      "analytic_bytes": null,
+      "device_peak_bytes": 20006371328,
+      "knobs": {
+        "algorithm": "grpo",
+        "attn_implementation": "auto",
+        "gpu_memory_utilization": 0.45,
+        "group_size": 4,
+        "lora_rank": 16,
+        "lora_target_modules": "q_proj,k_proj,v_proj,o_proj",
+        "lora_target_scope": "",
+        "micro_batch": 8,
+        "n_prompts": 1,
+        "quantization": "none",
+        "seq_len": 2048
+      },
+      "nvml_polled_bytes": 20006371328,
+      "phase": "generation",
+      "sleeping_baseline_bytes": null,
+      "torch_max_allocated_bytes": null,
+      "torch_max_reserved_bytes": null
+    },
+    {
+      "analytic_bytes": null,
+      "device_peak_bytes": 18989252608,
+      "knobs": {
+        "algorithm": "grpo",
+        "attn_implementation": "auto",
+        "gpu_memory_utilization": 0.45,
+        "group_size": 4,
+        "lora_rank": 16,
+        "lora_target_modules": "q_proj,k_proj,v_proj,o_proj",
+        "lora_target_scope": "",
+        "micro_batch": 8,
+        "n_prompts": 1,
+        "quantization": "none",
+        "seq_len": 2048
+      },
+      "nvml_polled_bytes": 18989252608,
+      "phase": "training",
+      "sleeping_baseline_bytes": 1951989760,
+      "torch_max_allocated_bytes": 35162791424,
+      "torch_max_reserved_bytes": 35798384640
+    },
+    {
+      "analytic_bytes": null,
+      "device_peak_bytes": 26306215936,
+      "knobs": {
+        "algorithm": "grpo",
+        "attn_implementation": "auto",
+        "gpu_memory_utilization": 0.6,
+        "group_size": 8,
+        "lora_rank": 16,
+        "lora_target_modules": "q_proj,k_proj,v_proj,o_proj",
+        "lora_target_scope": "",
+        "micro_batch": 4,
+        "n_prompts": 1,
+        "quantization": "none",
+        "seq_len": 1024
+      },
+      "nvml_polled_bytes": 26306215936,
+      "phase": "generation",
+      "sleeping_baseline_bytes": null,
+      "torch_max_allocated_bytes": null,
+      "torch_max_reserved_bytes": null
+    },
+    {
+      "analytic_bytes": null,
+      "device_peak_bytes": 17502371840,
+      "knobs": {
+        "algorithm": "grpo",
+        "attn_implementation": "auto",
+        "gpu_memory_utilization": 0.6,
+        "group_size": 8,
+        "lora_rank": 16,
+        "lora_target_modules": "q_proj,k_proj,v_proj,o_proj",
+        "lora_target_scope": "",
+        "micro_batch": 4,
+        "n_prompts": 1,
+        "quantization": "none",
+        "seq_len": 1024
+      },
+      "nvml_polled_bytes": 17502371840,
+      "phase": "training",
+      "sleeping_baseline_bytes": 1889075200,
+      "torch_max_allocated_bytes": 40222596096,
+      "torch_max_reserved_bytes": 40638611456
+    }
+  ],
+  "model_id": "allenai/OLMoE-1B-7B-0924-Instruct",
+  "model_spec": {
+    "arch": {
+      "attn_bias": false,
+      "expert_intermediate_size": null,
+      "gated_mlp": true,
+      "head_dim": 128,
+      "hidden_size": 2048,
+      "intermediate_size": 1024,
+      "max_position_embeddings": 4096,
+      "multimodal_tower_params": 0,
+      "n_experts": 64,
+      "n_experts_per_tok": 8,
+      "n_heads": 16,
+      "n_kv_heads": 16,
+      "n_layers": 16,
+      "n_shared_experts": 0,
+      "sliding_window": null,
+      "sliding_window_layer_fraction": 1.0,
+      "tied_embeddings": false,
+      "vocab_size": 50304
+    },
+    "checkpoint_dtype": "bf16",
+    "model_id": "allenai/OLMoE-1B-7B-0924-Instruct",
+    "n_params": null,
+    "variants": [
+      {
+        "name": "base",
+        "quantization": "none",
+        "realised_bytes": 13838324224,
+        "stripped_multimodal": false
+      }
+    ]
+  },
+  "realised_weight_bytes": {
+    "base": 13838324224
+  },
+  "schema_version": 1,
+  "trainer_variant": "base",
+  "training": {
+    "fit": {
+      "intercept_bytes": -22357716.269909773,
+      "slopes": {
+        "extra_micro_batches": -1688873.3438703783,
+        "grad_tokens": 38896.18742569369,
+        "nograd_tokens": 77792.37477752769,
+        "seq_len": -16071.690374873691,
+        "update_tokens": 71579.9084093213
+      }
+    },
+    "holdout_max_rel_error": 0.006538008767618417,
+    "holdout_mean_rel_error": 0.0033374751705665317,
+    "n_points": 12
+  }
+}
