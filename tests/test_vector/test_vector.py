@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for pz_async_vec_env.py and pz_vec_env.py"""
 
 import multiprocessing as mp

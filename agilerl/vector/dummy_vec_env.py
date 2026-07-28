@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 """Lightweight single-env wrappers that expose vectorized-env interfaces."""
 
 from __future__ import annotations

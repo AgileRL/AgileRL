@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 """Trainer abstraction for AgileRL evolutionary training."""
 
 from __future__ import annotations

@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 # AgileRL On-policy (RNN/MLP) Memory Game Demo
 #
 # This script demonstrates how to use recurrent neural networks (RNNs) or MLPs with PPO to solve a simple "remember the input" memory game.

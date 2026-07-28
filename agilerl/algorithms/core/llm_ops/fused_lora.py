@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 """Fused multi-adapter LoRA forward pass.
 
 Runs several LoRA adapters (e.g. actor + critic) in one forward pass by

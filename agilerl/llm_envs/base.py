@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 """Base helpers and classes for LLM gym-style environments."""
 
 from __future__ import annotations

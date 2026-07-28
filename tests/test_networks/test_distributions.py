@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for TorchDistribution and distribution dispatch (torch-primitive based)."""
 
 import numpy as np

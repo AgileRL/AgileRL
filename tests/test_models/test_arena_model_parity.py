@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 """Parity tests between core ``agilerl.models`` and ``agilerl.arena.models``.
 
 The check is directional: every field on an Arena spec must also exist on the

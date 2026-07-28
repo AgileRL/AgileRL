@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 """Gymnasium-style environments for LLM training."""
 
 from agilerl.llm_envs import search as _search

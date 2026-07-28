@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 """LLM fine-tuning demo -- SFT and DPO with full CLI support.
 
 Train, warm-start, or interactively evaluate LoRA-adapted language models.

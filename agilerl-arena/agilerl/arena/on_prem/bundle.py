@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 """Filesystem handling for the downloaded deployment bundle.
 
 Covers unzipping, locating the bundle root, marking scripts executable,

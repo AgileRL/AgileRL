@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for on-prem capability gating and the lazy dynamic group."""
 
 from __future__ import annotations

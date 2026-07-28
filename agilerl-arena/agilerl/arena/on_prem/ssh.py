@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 """SSH target parsing and local/remote command execution for Swarm installs."""
 
 from __future__ import annotations

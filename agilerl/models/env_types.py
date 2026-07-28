@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 """Environment type vocabulary, importable without the heavy env-spec deps."""
 
 from __future__ import annotations

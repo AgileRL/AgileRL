@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for TrainingManifest parsing and Trainer.from_manifest().
 
 Covers single-agent (on-policy, off-policy, offline, bandit), multi-agent,

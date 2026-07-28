@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 from agilerl import HAS_LLM_DEPENDENCIES
 
 from .bc_lm import BC_LM, BC_Evaluator, BC_Policy

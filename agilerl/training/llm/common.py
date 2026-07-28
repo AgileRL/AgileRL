@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 import warnings
 from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING, Any, Literal, TypeVar

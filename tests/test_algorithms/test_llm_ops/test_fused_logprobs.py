@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 """Unit tests for the chunked fused-logprob compile dispatch."""
 
 from unittest.mock import patch

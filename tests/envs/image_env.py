@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 """Minimal image-observation environment for testing CNN architectures."""
 
 from __future__ import annotations
