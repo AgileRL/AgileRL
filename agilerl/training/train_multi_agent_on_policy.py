@@ -25,7 +25,6 @@ from agilerl.utils.utils import (
     tournament_selection_and_mutation,
 )
 from agilerl.vector import PzDummyVecEnv
-from agilerl.vector.pz_async_vec_env import AsyncPettingZooVecEnv
 from agilerl.vector.pz_vec_env import PettingZooVecEnv
 
 if TYPE_CHECKING:
@@ -38,7 +37,7 @@ logger = logging.getLogger(__name__)
 
 
 def train_multi_agent_on_policy(
-    env: ParallelEnv | AsyncPettingZooVecEnv,
+    env: ParallelEnv | PettingZooVecEnv,
     env_name: str,
     algo: str,
     pop: PopulationType,
@@ -158,7 +157,7 @@ def train_multi_agent_on_policy(
     # `PettingZooVecEnv`; a raw `ParallelEnv` is wrapped so the loop always drives
     # the vectorized API.
     vec_env: PettingZooVecEnv = (
-        env if isinstance(env, AsyncPettingZooVecEnv) else PzDummyVecEnv(env)
+        env if isinstance(env, PettingZooVecEnv) else PzDummyVecEnv(env)
     )
 
     num_envs = get_num_envs(vec_env)

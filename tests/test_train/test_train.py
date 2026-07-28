@@ -50,7 +50,7 @@ from agilerl.training.train_off_policy import train_off_policy
 from agilerl.training.train_offline import train_offline
 from agilerl.training.train_on_policy import train_on_policy
 from agilerl.utils.utils import make_multi_agent_vect_envs
-from agilerl.vector.pz_async_vec_env import AsyncPettingZooVecEnv
+from agilerl.vector.pz_vec_env import PettingZooVecEnv
 
 # Common parametrize constants
 _FLAT_VECT = [((6,), 2, True)]
@@ -322,12 +322,12 @@ class DummyCompiledPolicy:
         self._orig_mod = orig_mod if orig_mod is not None else DummyStochastic()
 
 
-class DummyMultiEnv(AsyncPettingZooVecEnv):  # pylint: disable=overwritten-inherited-attribute
+class DummyMultiEnv(PettingZooVecEnv):  # pylint: disable=overwritten-inherited-attribute
     """Mimics a vectorized multi-agent parallel environment with num_envs=1."""
 
     def __init__(self, state_dims, action_dims):
         agents = ["agent_0", "other_agent_0"]
-        super(AsyncPettingZooVecEnv, self).__init__(
+        super().__init__(
             num_envs=1,
             observation_spaces={agent: Box(0, 255, state_dims) for agent in agents},
             action_spaces={agent: Discrete(5) for agent in agents},
