@@ -155,25 +155,29 @@ def to_agent_tensors(per_agent: TensorDict, device: DeviceType) -> TensorMapping
 
 
 @overload
-def get_input_size_from_space(observation_space: LeafSpace) -> tuple[int, ...]: ...
+def get_input_size_from_space(observation_space: LeafSpace) -> tuple[int, ...]:
+    pass
 
 
 @overload
 def get_input_size_from_space(
     observation_space: spaces.Dict | dict[str, spaces.Space],
-) -> dict[str, tuple[int, ...]]: ...
+) -> dict[str, tuple[int, ...]]:
+    pass
 
 
 @overload
 def get_input_size_from_space(
     observation_space: spaces.Tuple | list[spaces.Space] | tuple[spaces.Space, ...],
-) -> tuple[tuple[int, ...] | dict[str, tuple[int, ...]], ...]: ...
+) -> tuple[tuple[int, ...] | dict[str, tuple[int, ...]], ...]:
+    pass
 
 
 @overload
 def get_input_size_from_space(
     observation_space: SpaceLike,
-) -> InputSizeFromSpace: ...
+) -> InputSizeFromSpace:
+    pass
 
 
 def get_input_size_from_space(observation_space: SpaceLike) -> InputSizeFromSpace:
@@ -233,25 +237,29 @@ def _input_size(space: spaces.Space) -> InputSizeFromSpace:
 
 
 @overload
-def get_output_size_from_space(action_space: LeafSpace) -> int: ...
+def get_output_size_from_space(action_space: LeafSpace) -> int:
+    pass
 
 
 @overload
 def get_output_size_from_space(
     action_space: spaces.Dict | dict[str, spaces.Space],
-) -> dict[str, int]: ...
+) -> dict[str, int]:
+    pass
 
 
 @overload
 def get_output_size_from_space(
     action_space: list[spaces.Space] | tuple[spaces.Space, ...],
-) -> tuple[int | dict[str, int], ...]: ...
+) -> tuple[int | dict[str, int], ...]:
+    pass
 
 
 @overload
 def get_output_size_from_space(
     action_space: SpaceLike,
-) -> OutputSizeFromSpace: ...
+) -> OutputSizeFromSpace:
+    pass
 
 
 def get_output_size_from_space(action_space: SpaceLike) -> OutputSizeFromSpace:
@@ -522,25 +530,29 @@ def transpose_image_space(space: spaces.Space) -> spaces.Space:
 @overload
 def transpose_image_observation(
     observation: torch.Tensor, original_space: spaces.Space
-) -> torch.Tensor: ...
+) -> torch.Tensor:
+    pass
 
 
 @overload
 def transpose_image_observation(
     observation: np.ndarray, original_space: spaces.Space
-) -> np.ndarray: ...
+) -> np.ndarray:
+    pass
 
 
 @overload
 def transpose_image_observation(
     observation: dict[str, np.ndarray], original_space: spaces.Space
-) -> dict[str, np.ndarray]: ...
+) -> dict[str, np.ndarray]:
+    pass
 
 
 @overload
 def transpose_image_observation(
     observation: tuple[np.ndarray, ...], original_space: spaces.Space
-) -> tuple[np.ndarray, ...]: ...
+) -> tuple[np.ndarray, ...]:
+    pass
 
 
 def transpose_image_observation(
@@ -612,19 +624,23 @@ def transpose_image_observation(
 
 
 @overload
-def get_obs_shape(space: LeafSpace) -> tuple[int, ...]: ...
+def get_obs_shape(space: LeafSpace) -> tuple[int, ...]:
+    pass
 
 
 @overload
-def get_obs_shape(space: spaces.Dict) -> dict[str, tuple[int, ...]]: ...
+def get_obs_shape(space: spaces.Dict) -> dict[str, tuple[int, ...]]:
+    pass
 
 
 @overload
-def get_obs_shape(space: spaces.Tuple) -> tuple[tuple[int, ...], ...]: ...
+def get_obs_shape(space: spaces.Tuple) -> tuple[tuple[int, ...], ...]:
+    pass
 
 
 @overload
-def get_obs_shape(space: spaces.Space) -> ObsShape: ...
+def get_obs_shape(space: spaces.Space) -> ObsShape:
+    pass
 
 
 def get_obs_shape(space: spaces.Space) -> ObsShape:
@@ -721,21 +737,25 @@ CopyT3 = TypeVar("CopyT3")
 
 
 @overload
-def make_safe_deepcopies(args: list[ModuleT], /) -> list[ModuleT]: ...
+def make_safe_deepcopies(args: list[ModuleT], /) -> list[ModuleT]:
+    pass
 
 
 @overload
-def make_safe_deepcopies(args: ModuleT, /) -> ModuleT: ...
+def make_safe_deepcopies(args: ModuleT, /) -> ModuleT:
+    pass
 
 
 @overload
-def make_safe_deepcopies(a: CopyT1, b: CopyT2, /) -> tuple[CopyT1, CopyT2]: ...
+def make_safe_deepcopies(a: CopyT1, b: CopyT2, /) -> tuple[CopyT1, CopyT2]:
+    pass
 
 
 @overload
 def make_safe_deepcopies(
     a: CopyT1, b: CopyT2, c: CopyT3, /
-) -> tuple[CopyT1, CopyT2, CopyT3]: ...
+) -> tuple[CopyT1, CopyT2, CopyT3]:
+    pass
 
 
 def make_safe_deepcopies(
@@ -827,14 +847,16 @@ def recursive_check_module_attrs(obj: object, networks_only: bool = False) -> bo
 def chkpt_attribute_to_device(
     chkpt_dict: dict[str, Any],
     device: str | torch.device,
-) -> dict[str, Any]: ...
+) -> dict[str, Any]:
+    pass
 
 
 @overload
 def chkpt_attribute_to_device(
     chkpt_dict: list[dict[str, Any]],
     device: str | torch.device,
-) -> list[dict[str, Any]]: ...
+) -> list[dict[str, Any]]:
+    pass
 
 
 def chkpt_attribute_to_device(
@@ -1138,35 +1160,41 @@ def concatenate_spaces(space_list: list[spaces.Space]) -> spaces.Space:
 
 
 @overload
-def obs_to_tensor(obs: TensorDict, device: str | torch.device) -> TensorDict: ...
+def obs_to_tensor(obs: TensorDict, device: str | torch.device) -> TensorDict:
+    pass
 
 
 @overload
 def obs_to_tensor(
     obs: ArrayOrTensor | Number | list[Any], device: str | torch.device
-) -> torch.Tensor: ...
+) -> torch.Tensor:
+    pass
 
 
 @overload
 def obs_to_tensor(
     obs: Mapping[str, ArrayOrTensor], device: str | torch.device
-) -> dict[str, torch.Tensor]: ...
+) -> dict[str, torch.Tensor]:
+    pass
 
 
 @overload
 def obs_to_tensor(
     obs: tuple[ArrayOrTensor, ...], device: str | torch.device
-) -> tuple[torch.Tensor, ...]: ...
+) -> tuple[torch.Tensor, ...]:
+    pass
 
 
 @overload
-def obs_to_tensor(obs: ObservationType, device: str | torch.device) -> TorchObsType: ...
+def obs_to_tensor(obs: ObservationType, device: str | torch.device) -> TorchObsType:
+    pass
 
 
 @overload
 def obs_to_tensor(
     obs: dict[str, ObservationType], device: str | torch.device
-) -> dict[str, TorchObsType]: ...
+) -> dict[str, TorchObsType]:
+    pass
 
 
 def obs_to_tensor(
@@ -1635,14 +1663,16 @@ def preprocess_multibinary_observation(
 def apply_image_normalization(
     observation: torch.Tensor,
     observation_space: spaces.Box,
-) -> torch.Tensor: ...
+) -> torch.Tensor:
+    pass
 
 
 @overload
 def apply_image_normalization(
     observation: npt.NDArray,
     observation_space: spaces.Box,
-) -> np.ndarray: ...
+) -> np.ndarray:
+    pass
 
 
 def apply_image_normalization(

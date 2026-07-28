@@ -326,14 +326,17 @@ class DummyMultiEnv(AsyncPettingZooVecEnv):  # pylint: disable=overwritten-inher
     """Mimics a vectorized multi-agent parallel environment with num_envs=1."""
 
     def __init__(self, state_dims, action_dims):
+        agents = ["agent_0", "other_agent_0"]
+        super(AsyncPettingZooVecEnv, self).__init__(
+            num_envs=1,
+            observation_spaces={agent: Box(0, 255, state_dims) for agent in agents},
+            action_spaces={agent: Discrete(5) for agent in agents},
+            possible_agents=agents,
+        )
         self.state_dims = state_dims
         self.state_size = self.state_dims
         self.action_dims = action_dims
         self.action_size = self.action_dims
-        self.num_envs = 1
-        self.agents = ["agent_0", "other_agent_0"]
-        self.possible_agents = ["agent_0", "other_agent_0"]
-        self.render_mode = None
         self.metadata = None
         self.info = {
             agent: {
