@@ -94,12 +94,12 @@ class _TokenStore:
 
 
 def _check_writable_target(path: Path) -> None:
-    """Raise if *path* cannot be created as a new file.
+    """Ensure *path* can be created as a new file, making parent dirs as needed.
 
     :param path: The intended destination file.
     :type path: Path
     :raises FileExistsError: If something already exists at *path*.
-    :raises FileNotFoundError: If the parent directory does not exist.
+    :raises NotADirectoryError: If the parent path exists but is not a directory.
     """
     if path.exists():
         kind = "directory" if path.is_dir() else "file"
@@ -110,15 +110,10 @@ def _check_writable_target(path: Path) -> None:
         raise FileExistsError(msg)
 
     parent = path.parent
-    if not parent.exists():
-        msg = (
-            f"Cannot write to {path}: the directory {parent} does not exist. "
-            f"Create it, or choose a different output path."
-        )
-        raise FileNotFoundError(msg)
-    if not parent.is_dir():
+    if parent.exists() and not parent.is_dir():
         msg = f"Cannot write to {path}: {parent} is not a directory."
         raise NotADirectoryError(msg)
+    parent.mkdir(parents=True, exist_ok=True)
 
 
 class ArenaClient:
@@ -1091,7 +1086,7 @@ class ArenaClient:
         :returns: The path to the written file.
         :rtype: Path
         :raises FileExistsError: If the resolved output path already exists.
-        :raises FileNotFoundError: If the parent directory does not exist.
+        :raises NotADirectoryError: If the parent path exists but is not a directory.
         """
         path = (
             Path(f"{experiment_name}_metrics.csv")

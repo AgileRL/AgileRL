@@ -1541,14 +1541,23 @@ class TestDownloadExperimentMetrics:
         api_key_client.preview_experiment_metrics_csv.assert_not_called()
         assert existing.read_text() == "old"
 
-    def test_raises_if_parent_directory_missing_before_downloading(
-        self, api_key_client, tmp_path
-    ):
+    def test_creates_parent_directory_if_missing(self, api_key_client, tmp_path):
         api_key_client.preview_experiment_metrics_csv = MagicMock(
             return_value=(b"new", "text/csv", None)
         )
-        target = tmp_path / "nope" / "metrics.csv"
-        with pytest.raises(FileNotFoundError, match="does not exist"):
+        target = tmp_path / "nested" / "dirs" / "metrics.csv"
+        result = api_key_client.download_experiment_metrics("exp1", output_path=target)
+        assert result == target
+        assert target.read_bytes() == b"new"
+
+    def test_raises_if_parent_is_not_a_directory(self, api_key_client, tmp_path):
+        not_a_dir = tmp_path / "blocker"
+        not_a_dir.write_text("x")
+        api_key_client.preview_experiment_metrics_csv = MagicMock(
+            return_value=(b"new", "text/csv", None)
+        )
+        target = not_a_dir / "metrics.csv"
+        with pytest.raises(NotADirectoryError, match="is not a directory"):
             api_key_client.download_experiment_metrics("exp1", output_path=target)
         api_key_client.preview_experiment_metrics_csv.assert_not_called()
 
