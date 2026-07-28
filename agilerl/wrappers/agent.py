@@ -694,10 +694,15 @@ class AsyncAgentsWrapper(AgentWrapper[MultiAgentRLAlgorithm]):
             if len(sample.shape) == 1:
                 continue
 
-            # Create boolean mask for active agents. Reducing over a single axis of a
-            # multi-dimensional sample always yields an array, but numpy's ``.all``
-            # overloads widen the result to a scalar-or-array union.
-            active_mask: ActiveMask = np.asarray(~np.isnan(sample).all(axis=1))
+            # Create boolean mask for active agents, one entry per env. Every axis
+            # but the first is reduced: an image observation carries three of them,
+            # and reducing only the channel axis would leave a (num_envs, H, W) mask
+            # whose ``np.where`` yields one index per inactive pixel. Reducing over a
+            # single axis always yields an array, but numpy's ``.all`` overloads
+            # widen the result to a scalar-or-array union.
+            active_mask: ActiveMask = np.asarray(
+                ~np.isnan(sample).all(axis=tuple(range(1, sample.ndim)))
+            )
 
             # If all agents are active, skip
             if active_mask.all():

@@ -1012,6 +1012,22 @@ class TestAsyncAgentsWrapperExtractInactiveAgents:
         inactive, _filtered = wrapper.extract_inactive_agents(obs)
         assert "agent_0" in inactive
 
+    def test_async_extract_inactive_agents_image_obs(self, ma_discrete_space):
+        """An image observation must yield one inactive index per env, not per pixel."""
+        image_space = spaces.Box(low=0, high=1, shape=(3, 8, 8))
+        agent = IPPO(
+            observation_spaces=[image_space],
+            action_spaces=ma_discrete_space[:1],
+            agent_ids=["agent_0"],
+            device="cpu",
+        )
+        wrapper = AsyncAgentsWrapper(agent)
+        sample = np.ones((3, 3, 8, 8), dtype=np.float32)
+        sample[1] = np.nan
+        inactive, _filtered = wrapper.extract_inactive_agents({"agent_0": sample})
+
+        assert np.array_equal(inactive["agent_0"], np.array([1]))
+
     def test_async_extract_inactive_agents_all_inactive(
         self, ma_vector_space, ma_discrete_space
     ):

@@ -42,6 +42,7 @@ from agilerl.typing import (
     SupportedObservationSpace,
     TorchObsType,
     ValueArray,
+    ValueTensor,
 )
 from agilerl.utils.algo_utils import (
     get_num_envs,
@@ -628,7 +629,7 @@ class PPO(RLAlgorithm[TensorDict]):
         actions: Shaped[torch.Tensor, "batch ..."],
         hidden_state: SequenceHiddenStateDict | None = None,
         action_mask: ActionMaskInput = None,
-    ) -> tuple[LogProbs, Float[torch.Tensor, "..."], Float[torch.Tensor, " batch"]]:
+    ) -> tuple[LogProbs, Float[torch.Tensor, "..."], ValueTensor]:
         """Evaluate the actions.
 
         :param obs: Environment observation, or multiple observations in a batch
@@ -640,7 +641,7 @@ class PPO(RLAlgorithm[TensorDict]):
         :param action_mask: Mask of legal actions 1=legal 0=illegal, defaults to None
         :type action_mask: ActionMaskInput
         :return: Log probability, entropy, state values
-        :rtype: tuple[LogProbs, Float[torch.Tensor, "..."], Float[torch.Tensor, " batch"]]
+        :rtype: tuple[LogProbs, Float[torch.Tensor, "..."], ValueTensor]
         """
         preprocessed_obs = self.preprocess_observation(obs)
 

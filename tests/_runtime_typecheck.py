@@ -1,13 +1,59 @@
 """Runtime checker for the jaxtyping import hook installed in ``tests/conftest.py``."""
 
 import copyreg
+import os
+import pathlib
+import sys
 import typing
 import weakref
 
 import jaxtyping
 from beartype import beartype
+from jaxtyping import _import_hook
 
 _JAXTYPING_DECORATOR = jaxtyping._decorator.__file__
+
+_instrumented_exec_module = _import_hook._JaxtypingLoader.exec_module
+
+
+def _exec_module_uncached(loader, module) -> None:
+    """Execute an instrumented module without letting it reach the bytecode cache."""
+    previous = sys.dont_write_bytecode
+    sys.dont_write_bytecode = True
+    try:
+        _instrumented_exec_module(loader, module)
+    finally:
+        sys.dont_write_bytecode = previous
+
+
+# jaxtyping redirects instrumented modules to their own ``.pyc`` tag by patching
+# ``cache_from_source`` process-wide for the duration of one ``exec_module``,
+# reasoning that the import lock makes that safe. The import lock is per module,
+# so anything imported inside that window - a transitive dependency, another
+# thread, an xdist worker - has its bytecode written to the jaxtyping-tagged path
+# WITHOUT being instrumented. The next run finds a tagged file, takes it for
+# already-transformed, and silently loads that module unchecked while the suite
+# stays green. Not writing the tagged file at all removes the failure mode; the
+# instrumented modules are recompiled each session, which is cheap because it is
+# only agilerl's own pure-Python sources and not its dependencies.
+_import_hook._JaxtypingLoader.exec_module = _exec_module_uncached
+
+
+def _purge_stale_instrumented_bytecode() -> None:
+    """Delete jaxtyping-tagged bytecode left by a run that still wrote it.
+
+    Only the xdist controller sweeps, before any worker starts, so no process can
+    be reading a file another is unlinking. Nothing writes these any more, so on
+    every run after the first this finds nothing.
+    """
+    if os.environ.get("PYTEST_XDIST_WORKER"):
+        return
+    root = pathlib.Path(__file__).resolve().parent.parent / "agilerl"
+    for stale in root.rglob("__pycache__/*jaxtyping*.pyc"):
+        stale.unlink(missing_ok=True)
+
+
+_purge_stale_instrumented_bytecode()
 
 
 class _DeadReferent:
