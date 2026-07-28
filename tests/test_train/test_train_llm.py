@@ -445,9 +445,6 @@ class TestFinetuneLlmReasoning:
             assert mock_run_selection_and_mutation.call_count == 6
 
     def test_finetune_llm_reasoning_deprecated_tournament_argument(self):
-        # The superseded ``tournament`` argument warns but still drives evolution:
-        # the LLM finetuners fold it into ``selection_strategy`` the same way the
-        # non-LLM trainers do, so old-signature callers keep working.
         mock_agent = _mock_grpo_agent()
 
         mock_env = MagicMock()

@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 
 import agilerl.hpo.multi_frequency as mf_module
-from agilerl.hpo.multi_frequency import MultiFrequencySelection
+from agilerl.hpo.multi_frequency import MultiFrequencyOp, MultiFrequencySelection
 
 
 class _FakeParam:
@@ -68,10 +68,10 @@ class FakeAgent:
     """Stand-in for an EvolvableAlgorithm."""
 
     def __init__(
-        self, index, subpopulation, fitness, weights="w", lr=1e-3, batch_size=64
+        self, index, subpopulation_id, fitness, weights="w", lr=1e-3, batch_size=64
     ):
         self.index = index
-        self.subpopulation = subpopulation
+        self.subpopulation_id = subpopulation_id
         self.fitness = [fitness]
         self.weights = weights
         self.lr = lr
@@ -84,7 +84,7 @@ class FakeAgent:
         # type(self) so subclasses adding their own bookkeeping survive cloning
         new = type(self)(
             self.index if index is None else index,
-            self.subpopulation,
+            self.subpopulation_id,
             self.fitness[-1],
             weights=self.weights,
             lr=self.lr,
@@ -142,7 +142,7 @@ def new_agents(before, after):
 
 def run_migration(strategy, population, subpop, external_pool):
     """Bracket then migrate."""
-    winners, _survivors, open_for_migration, _losers = strategy._brackets(
+    winners, _survivors, open_for_migration, _losers = strategy._bracket_subpopulation(
         population, subpop
     )
     return strategy._migrate(
@@ -282,9 +282,8 @@ class TestMultiFrequencySelectionInit:
             make_strategy(n_subpop=2, population_size=8, ratios=[1, 2], **kwargs)
 
     def test_open_for_migration_may_exceed_winners_plus_survivors(self):
-        # Migration sources migrants from the frozen pre-evolution snapshot rather than
-        # the live population, so a subpopulation may open more slots for migration than
-        # it preserves natively
+        # Migration sources migrants from the frozen pre-evolution snapshot, so a
+        # subpopulation may open more slots for migration than 00it preserves natively
         strategy = make_strategy(
             n_subpop=2, population_size=8, ratios=[1, 2], w=1, s=0, o=2, ln=1
         )
@@ -362,7 +361,7 @@ class TestSubpopulationAssignment:
 
         strategy._assign_initial_subpopulations(pop)
 
-        assert [a.subpopulation for a in pop] == [0, 0, 0, 0, 1, 1, 1, 1]
+        assert [a.subpopulation_id for a in pop] == [0, 0, 0, 0, 1, 1, 1, 1]
 
     def test_assign_initial_subpopulations_tags_only_untagged_agents(self):
         strategy = make_strategy(n_subpop=2, population_size=8)
@@ -372,7 +371,7 @@ class TestSubpopulationAssignment:
 
         strategy._assign_initial_subpopulations(pop)
 
-        assert [a.subpopulation for a in pop] == [1, 0, 0, 0, 1, 0, 1, 1]
+        assert [a.subpopulation_id for a in pop] == [1, 0, 0, 0, 1, 0, 1, 1]
 
     @pytest.mark.parametrize("size", [6, 10])
     def test_assign_initial_subpopulations_rejects_wrong_population_size(self, size):
@@ -388,7 +387,7 @@ class TestSubpopulationAssignment:
 
         strategy._assign_initial_subpopulations(pop)
 
-        assert [a.subpopulation for a in pop] == [0, 0, 0, 0, 1, 1, 1, 1]
+        assert [a.subpopulation_id for a in pop] == [0, 0, 0, 0, 1, 1, 1, 1]
 
     @pytest.mark.parametrize(
         "indices",
@@ -418,7 +417,9 @@ class TestBrackets:
         strategy = make_strategy(n_subpop=2, population_size=8, w=w, s=s, o=o, ln=ln)
         pop = make_population({0: [2.0, 4.0, 1.0, 3.0], 1: [8.0, 7.0, 6.0, 5.0]})
 
-        winners, survivors, open_, losers = strategy._brackets(pop, subpop=0)
+        winners, survivors, open_, losers = strategy._bracket_subpopulation(
+            pop, subpop=0
+        )
 
         assert [a.fitness[-1] for a in winners] == expected[0]
         assert [a.fitness[-1] for a in survivors] == expected[1]
@@ -426,22 +427,24 @@ class TestBrackets:
         assert [a.fitness[-1] for a in losers] == expected[3]
         # Only the studied subpopulation's agents are ever bracketed
         for bracket in (winners, survivors, open_, losers):
-            assert all(a.subpopulation == 0 for a in bracket)
+            assert all(a.subpopulation_id == 0 for a in bracket)
 
-    def test_brackets_selects_the_requested_subpopulation(self):
+    def test_brackets_select_the_requested_subpopulation(self):
         strategy = make_strategy(n_subpop=2, population_size=8)
         pop = make_population({0: [4.0, 3.0, 2.0, 1.0], 1: [8.0, 7.0, 6.0, 5.0]})
 
-        winners, survivors, open_, losers = strategy._brackets(pop, subpop=1)
+        winners, survivors, open_, losers = strategy._bracket_subpopulation(
+            pop, subpop=1
+        )
 
         assert [a.fitness[-1] for a in winners] == [8.0]
         assert [a.fitness[-1] for a in survivors] == [7.0]
         assert [a.fitness[-1] for a in open_] == [6.0]
         assert [a.fitness[-1] for a in losers] == [5.0]
         for bracket in (winners, survivors, open_, losers):
-            assert all(a.subpopulation == 1 for a in bracket)
+            assert all(a.subpopulation_id == 1 for a in bracket)
 
-    def test_brackets_rejects_wrong_member_count(self):
+    def test_brackets_reject_wrong_member_count(self):
         # A mis-tagged subpop is rejected up front rather than silently mis-sliced
         strategy = make_strategy(n_subpop=2, population_size=8)
         pop = [FakeAgent(i, 0, fitness=float(i)) for i in range(3)]
@@ -449,7 +452,7 @@ class TestBrackets:
         with pytest.raises(
             ValueError, match="Subpopulation 0 has 3 members, expected 4"
         ):
-            strategy._brackets(pop, subpop=0)
+            strategy._bracket_subpopulation(pop, subpop=0)
 
 
 class TestCloneWinnersOverLosers:
@@ -457,22 +460,22 @@ class TestCloneWinnersOverLosers:
         strategy = make_strategy(n_subpop=2, population_size=8)
         pop = make_population({0: [4.0, 3.0, 2.0, 1.0], 1: [8.0, 7.0, 6.0, 5.0]})
         max_index_before = max(a.index for a in pop)
-        winners, _s, _o, losers = strategy._brackets(pop, subpop=0)
+        winners, _s, _o, losers = strategy._bracket_subpopulation(pop, subpop=0)
 
         new_pop, new_indices = strategy._clone_winners_over_losers(
             pop, winners, losers, subpop=0
         )
 
         assert len(new_pop) == len(pop)
-        assert sum(a.subpopulation == 0 for a in new_pop) == 4
+        assert sum(a.subpopulation_id == 0 for a in new_pop) == 4
         # The loser (fitness 1.0) was replaced
-        assert 1.0 not in [a.fitness[-1] for a in new_pop if a.subpopulation == 0]
+        assert 1.0 not in [a.fitness[-1] for a in new_pop if a.subpopulation_id == 0]
         clones = new_agents(pop, new_pop)
         assert len(clones) == 1
         clone = clones[0]
         assert clone.index in new_indices
         assert clone.index > max_index_before
-        assert clone.subpopulation == 0
+        assert clone.subpopulation_id == 0
         # The clone inherits its winner-parent's fitness (4.0)
         assert clone.fitness[-1] == 4.0
 
@@ -481,7 +484,7 @@ class TestCloneWinnersOverLosers:
         strategy = make_strategy()
         pop = make_population({0: [4.0, 3.0, 2.0, 1.0], 1: [8.0, 7.0, 6.0, 5.0]})
         pop_copy = list(pop)
-        winners, _s, _o, losers = strategy._brackets(pop, subpop=0)
+        winners, _s, _o, losers = strategy._bracket_subpopulation(pop, subpop=0)
 
         strategy._clone_winners_over_losers(pop, winners, losers, subpop=0)
 
@@ -490,8 +493,10 @@ class TestCloneWinnersOverLosers:
     def test_clone_winners_over_losers_clones_are_independent_of_parents(self):
         strategy = make_strategy(n_subpop=2, population_size=8, w=1, s=0, o=1, ln=2)
         pop = make_population({0: [4.0, 3.0, 2.0, 1.0], 1: [8.0, 7.0, 6.0, 5.0]})
-        winner = next(a for a in pop if a.subpopulation == 0 and a.fitness[-1] == 4.0)
-        winners, _s, _o, losers = strategy._brackets(pop, subpop=0)
+        winner = next(
+            a for a in pop if a.subpopulation_id == 0 and a.fitness[-1] == 4.0
+        )
+        winners, _s, _o, losers = strategy._bracket_subpopulation(pop, subpop=0)
 
         new_pop, _ = strategy._clone_winners_over_losers(pop, winners, losers, subpop=0)
 
@@ -506,13 +511,13 @@ class TestCloneWinnersOverLosers:
         # Brackets 1/0/1/2: one winner, no survivors, one open, two losers.
         strategy = make_strategy(n_subpop=2, population_size=8, w=1, s=0, o=1, ln=2)
         pop = make_population({0: [4.0, 3.0, 2.0, 1.0], 1: [8.0, 7.0, 6.0, 5.0]})
-        winners, _s, _o, losers = strategy._brackets(pop, subpop=0)
+        winners, _s, _o, losers = strategy._bracket_subpopulation(pop, subpop=0)
 
         new_pop, new_indices = strategy._clone_winners_over_losers(
             pop, winners, losers, subpop=0
         )
 
-        assert sum(a.subpopulation == 0 for a in new_pop) == 4
+        assert sum(a.subpopulation_id == 0 for a in new_pop) == 4
         clones = new_agents(pop, new_pop)
         assert len(clones) == 2
         assert {c.index for c in clones} == set(new_indices)
@@ -527,7 +532,7 @@ class TestCloneWinnersOverLosers:
         def run():
             pop = make_population(**pop_kwargs)
             strategy = make_strategy(population_size=10, w=2, s=0, o=1, ln=2, seed=7)
-            winners, _s, _o, losers = strategy._brackets(pop, subpop=0)
+            winners, _s, _o, losers = strategy._bracket_subpopulation(pop, subpop=0)
             new_pop, _ = strategy._clone_winners_over_losers(
                 pop, winners, losers, subpop=0
             )
@@ -550,7 +555,7 @@ class TestCloneWinnersOverLosers:
                 strategy = make_strategy(
                     population_size=10, w=2, s=0, o=1, ln=2, seed=seed
                 )
-                winners, _s, _o, losers = strategy._brackets(pop, subpop=0)
+                winners, _s, _o, losers = strategy._bracket_subpopulation(pop, subpop=0)
                 new_pop, _ = strategy._clone_winners_over_losers(
                     pop, winners, losers, subpop=0
                 )
@@ -571,7 +576,7 @@ class TestSelect:
             fired.extend(
                 (cycle, subpop)
                 for subpop in sorted(
-                    {a.subpopulation for a in new_agents(pop, new_pop)}
+                    {a.subpopulation_id for a in new_agents(pop, new_pop)}
                 )
             )
             pop = new_pop
@@ -594,13 +599,13 @@ class TestSelect:
         # Only the due subpopulation introduced fresh agents
         fresh = new_agents(pop, new_pop)
         assert fresh
-        assert all(a.subpopulation == 0 for a in fresh)
+        assert all(a.subpopulation_id == 0 for a in fresh)
         # Exactly the winner-clone is marked for mutation, never the migrant
         assert len(indices) == 1
         clone = next(a for a in fresh if a.index in indices)
         assert clone.fitness[-1] == 4.0
         # The not-due subpopulation is left entirely untouched
-        original_subpop1 = [a for a in pop if a.subpopulation == 1]
+        original_subpop1 = [a for a in pop if a.subpopulation_id == 1]
         assert all(a in new_pop for a in original_subpop1)
 
     def test_select_rejects_duplicate_indices(self):
@@ -625,7 +630,7 @@ class TestMigration:
         strategy = make_strategy(n_subpop=2, population_size=8, ratios=[1, 2])
         pop = make_population({0: [9.0, 8.0, 7.0, 6.0], 1: [5.0, 4.0, 3.0, 2.0]})
         for a in pop:
-            if a.subpopulation == 0:
+            if a.subpopulation_id == 0:
                 a.weights = "EXT"
                 a.lr = 0.5
                 a.optimizer = FakeOptimizerWrapper(0.5)
@@ -652,7 +657,7 @@ class TestMigration:
         strategy = make_strategy(n_subpop=2, population_size=8, ratios=[1, 2])
         pop = make_population({0: [5.0, 4.0, 3.0, 2.0], 1: [9.0, 8.0, 7.0, 6.0]})
         for a in pop:
-            if a.subpopulation == 1:
+            if a.subpopulation_id == 1:
                 a.weights = "EXT"
                 a.lr = 0.5
 
@@ -666,7 +671,9 @@ class TestMigration:
     def test_migration_migrant_is_independent_of_external_parent(self):
         strategy = make_strategy(n_subpop=2, population_size=8, ratios=[1, 2])
         pop = make_population({0: [5.0, 4.0, 3.0, 2.0], 1: [9.0, 8.0, 7.0, 6.0]})
-        external = next(a for a in pop if a.subpopulation == 1 and a.fitness[-1] == 9.0)
+        external = next(
+            a for a in pop if a.subpopulation_id == 1 and a.fitness[-1] == 9.0
+        )
 
         migrated = run_migration(strategy, pop, subpop=0, external_pool=pop)
 
@@ -679,7 +686,7 @@ class TestMigration:
         strategy = make_strategy(n_subpop=2, population_size=8, ratios=[1, 2])
         pop = make_population({0: [100.0, 99.0, 98.0, 1.0], 1: [9.0, 8.0, 7.0, 6.0]})
         open_agent = next(
-            a for a in pop if a.subpopulation == 0 and a.fitness[-1] == 98.0
+            a for a in pop if a.subpopulation_id == 0 and a.fitness[-1] == 98.0
         )
 
         migrated = run_migration(strategy, pop, subpop=0, external_pool=pop)
@@ -693,11 +700,11 @@ class TestMigration:
         )
         pop = make_population({0: [4.0, 3.0, 2.0, 1.0], 1: [5.0, 4.0, 3.0, 2.0]})
         for a in pop:  # subpop 0 already evolved this cycle -> its members are spent
-            if a.subpopulation == 0:
+            if a.subpopulation_id == 0:
                 a.weights = "SPENT"
         frozen = make_population({0: [9.0, 8.0, 7.0, 6.0], 1: [5.0, 4.0, 3.0, 2.0]})
         for a in frozen:
-            if a.subpopulation == 0:
+            if a.subpopulation_id == 0:
                 a.weights = "FROZEN"
 
         migrated = run_migration(strategy, pop, subpop=1, external_pool=frozen)
@@ -724,9 +731,11 @@ class TestMigration:
             n_subpop=2, population_size=8, ratios=[1, 2], w=1, s=0, o=2, ln=1
         )
         pop = make_population({0: [50.0, 30.0, 20.0, 5.0], 1: [40.0, 15.0, 10.0, 8.0]})
-        e0 = next(a for a in pop if a.subpopulation == 1 and a.fitness[-1] == 40.0)
+        e0 = next(a for a in pop if a.subpopulation_id == 1 and a.fitness[-1] == 40.0)
         e0.weights = "E0"
-        open1 = next(a for a in pop if a.subpopulation == 0 and a.fitness[-1] == 20.0)
+        open1 = next(
+            a for a in pop if a.subpopulation_id == 0 and a.fitness[-1] == 20.0
+        )
 
         migrated = run_migration(strategy, pop, subpop=0, external_pool=pop)
 
@@ -769,9 +778,11 @@ class TestMigration:
             n_subpop=2, population_size=8, ratios=[1, 2], w=1, s=0, o=2, ln=1
         )
         pop = make_population({0: [50.0, 30.0, 20.0, 5.0], 1: [25.0, 12.0, 10.0, 8.0]})
-        e0 = next(a for a in pop if a.subpopulation == 1 and a.fitness[-1] == 25.0)
+        e0 = next(a for a in pop if a.subpopulation_id == 1 and a.fitness[-1] == 25.0)
         e0.weights = "E0"
-        open0 = next(a for a in pop if a.subpopulation == 0 and a.fitness[-1] == 30.0)
+        open0 = next(
+            a for a in pop if a.subpopulation_id == 0 and a.fitness[-1] == 30.0
+        )
 
         migrated = run_migration(strategy, pop, subpop=0, external_pool=pop)
 
@@ -787,7 +798,7 @@ class FakeLLMAgent:
     def __init__(
         self,
         index,
-        subpopulation,
+        subpopulation_id,
         fitness,
         weights="w",
         lr=1e-3,
@@ -796,7 +807,7 @@ class FakeLLMAgent:
         mut="stale-mut",
     ):
         self.index = index
-        self.subpopulation = subpopulation
+        self.subpopulation_id = subpopulation_id
         self.fitness = [fitness]
         self.weights = weights
         self.lr = lr
@@ -817,7 +828,7 @@ class FakeLLMAgent:
             raise AssertionError(msg)
         new = FakeLLMAgent(
             self.index if index is None else index,
-            self.subpopulation,
+            self.subpopulation_id,
             self.fitness[-1],
             weights=self.weights,
             lr=self.lr,
@@ -924,9 +935,9 @@ class TestSelectLLM:
         # (2.0) is migrated over. Both are freed; neither is a clone/migration source
         strategy = make_strategy(n_subpop=2, population_size=8, ratios=[1, 2])
         pop = make_llm_population({0: [4.0, 3.0, 2.0, 1.0], 1: [8.0, 7.0, 6.0, 5.0]})
-        loser = next(a for a in pop if a.subpopulation == 0 and a.fitness[-1] == 1.0)
+        loser = next(a for a in pop if a.subpopulation_id == 0 and a.fitness[-1] == 1.0)
         open_agent = next(
-            a for a in pop if a.subpopulation == 0 and a.fitness[-1] == 2.0
+            a for a in pop if a.subpopulation_id == 0 and a.fitness[-1] == 2.0
         )
 
         strategy.select(pop)
@@ -935,9 +946,8 @@ class TestSelectLLM:
         assert open_agent.clean_up_calls == 1
 
     def test_select_frees_a_replaced_agent_only_after_its_last_use_as_a_source(self):
-        # Subpop 0's weaker open slot (30.0) is migrated over, yet it is also the agent
-        # subpop 1 imports. It therefore cannot be freed in the up-front sweep, only
-        # once the migration that reads it has run.
+        # Subpop 0's weaker open slot (30.0) is migrated over, yet it is also the agent subpop
+        # 1 imports. It therefore cannot be freed until the migration that reads it has run.
         strategy = make_strategy(
             n_subpop=2, population_size=8, ratios=[1, 2], w=1, s=0, o=2, ln=1
         )
@@ -950,15 +960,19 @@ class TestSelectLLM:
 
         _elite, new_pop, _indices = strategy.select(pop)
 
-        assert any(a.subpopulation == 1 and a.weights == "SRC30" for a in new_pop)
+        assert any(a.subpopulation_id == 1 and a.weights == "SRC30" for a in new_pop)
         assert source not in new_pop  # its own slot was taken by a migrant
         assert source.clean_up_calls == 1  # and it was freed exactly once, afterwards
 
     def test_select_does_not_free_surviving_agents(self):
         strategy = make_strategy(n_subpop=2, population_size=8, ratios=[1, 2])
         pop = make_llm_population({0: [4.0, 3.0, 2.0, 1.0], 1: [8.0, 7.0, 6.0, 5.0]})
-        winner = next(a for a in pop if a.subpopulation == 0 and a.fitness[-1] == 4.0)
-        survivor = next(a for a in pop if a.subpopulation == 0 and a.fitness[-1] == 3.0)
+        winner = next(
+            a for a in pop if a.subpopulation_id == 0 and a.fitness[-1] == 4.0
+        )
+        survivor = next(
+            a for a in pop if a.subpopulation_id == 0 and a.fitness[-1] == 3.0
+        )
 
         strategy.select(pop)
 
@@ -966,7 +980,7 @@ class TestSelectLLM:
         assert survivor.clean_up_calls == 0
         # The whole not-due subpopulation is untouched
         for a in pop:
-            if a.subpopulation == 1:
+            if a.subpopulation_id == 1:
                 assert a.clean_up_calls == 0
 
     def test_select_schedules_subpopulations_at_their_frequency(self):
@@ -1002,7 +1016,7 @@ class TestSelectLLM:
         _elite, new_pop, _indices = strategy.select(pop)
 
         migrant = next(
-            a for a in new_pop if a.subpopulation == 0 and a.weights == "EXT8"
+            a for a in new_pop if a.subpopulation_id == 0 and a.weights == "EXT8"
         )
         assert migrant.lr == 0.5  # full clone keeps the external agent's lr
         assert migrant is not ext
@@ -1013,7 +1027,7 @@ class TestSelectLLM:
         strategy.counters = [0, 1]
         pop = make_llm_population({0: [9.0, 8.0, 7.0, 6.0], 1: [5.0, 4.0, 3.0, 2.0]})
         for a in pop:
-            if a.subpopulation == 0:
+            if a.subpopulation_id == 0:
                 a.weights = "FAST"
                 a.lr = 0.5
                 a.registry.hp_config["lr"].value = 0.5
@@ -1024,7 +1038,7 @@ class TestSelectLLM:
         _elite, new_pop, _indices = strategy.select(pop)
 
         migrant = next(
-            a for a in new_pop if a.subpopulation == 1 and a.weights == "FAST"
+            a for a in new_pop if a.subpopulation_id == 1 and a.weights == "FAST"
         )
         assert migrant.lr == 0.001
         assert migrant.reinit_called is True
@@ -1083,13 +1097,13 @@ class TestSelectLLMAccelerator:
             accelerator=accelerator,
         )
 
-        keep = ("keep",)
+        keep = (MultiFrequencyOp.KEEP,)
         plan = {
             "ops": [
                 keep,
                 keep,
                 keep,
-                ("clone", 0, 8, 0),
+                (MultiFrequencyOp.CLONE, 0, 8, 0),
                 keep,
                 keep,
                 keep,

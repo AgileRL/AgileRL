@@ -5,7 +5,7 @@ Lunar Lander with PPO & MF-PBT
 
 In this tutorial we train a population of PPO agents on the Gymnasium ``LunarLander-v3``
 environment, but instead of the default :ref:`tournament selection <tournament_selection>` we drive
-the evolutionary loop with **multi-frequency selection** — the selection strategy that, combined
+the evolutionary loop with **multi-frequency selection**: the selection strategy that, combined
 with AgileRL's :ref:`mutation <mutations>` step, yields **Multiple-Frequencies Population-Based
 Training** (MF-PBT, `Doulazmi et al. <https://arxiv.org/abs/2506.03225>`_).
 
@@ -28,10 +28,10 @@ Multi-Frequency PBT Overview
 Rather than evolving the whole population together, MF-PBT splits it into ``n_subpopulations``
 subpopulations that each evolve at their **own frequency**: subpopulation ``i`` only evolves every
 ``evolution_frequency_ratios[i]`` evaluation cycles. Keeping several frequencies alive at once
-counteracts the greediness of single-frequency PBT — the slower subpopulations resist premature
+counteracts the greediness of single-frequency PBT: the slower subpopulations resist premature
 convergence, while the faster ones refine promising hyperparameter schedules.
 
-Each time a subpopulation evolves, its members are ranked by fitness into four brackets — **winners**,
+Each time a subpopulation evolves, its members are ranked by fitness into four brackets: **winners**,
 **survivors**, **open-for-migration** and **losers**. Every loser is replaced by a clone of a
 winner (and only those clones are later perturbed by mutation); winners and survivors are kept
 unchanged; and the open-for-migration slots may be filled by stronger agents **migrating** in from
@@ -315,9 +315,9 @@ Training with ``train_on_policy``
 With the pieces in hand, :func:`~agilerl.training.train_on_policy.train_on_policy` orchestrates the
 whole evolutionary run: it collects rollouts, trains each agent, evaluates the population and runs
 the selection-plus-mutation step every ``evo_steps``. Passing ``selection_strategy=mf_selection`` is
-the single switch that makes it MF-PBT — swap in a
+the single switch that makes it MF-PBT (swap in a
 :class:`~agilerl.hpo.tournament.TournamentSelection` and the exact same call runs tournament HPO
-instead.
+instead).
 
 .. code-block:: python
 

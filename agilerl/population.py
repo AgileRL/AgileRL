@@ -629,7 +629,7 @@ class Population(Generic[AgentT]):
             additional_metrics=self._collect_additional_metrics(),
             hyperparameters=self._collect_hyperparameters(),
             nonscalar_additional_metrics=self._collect_nonscalar_metrics(),
-            subpopulations=[getattr(a, "subpopulation", None) for a in self.agents],
+            subpopulations=[getattr(a, "subpopulation_id", None) for a in self.agents],
         )
 
     def _collect_fitnesses(self) -> ScalarOrNestedRow:

@@ -183,19 +183,19 @@ class TestAssignSubpopulations:
         from agilerl.models.hpo import MultiFrequencySelectionSpec
         from agilerl.utils.trainer_utils import _assign_subpopulations
 
-        agents = [MagicMock(index=i, subpopulation=None) for i in range(8)]
+        agents = [MagicMock(index=i, subpopulation_id=None) for i in range(8)]
         spec = MultiFrequencySelectionSpec(n_subpopulations=2)
         _assign_subpopulations(agents, spec)
 
-        assert [a.subpopulation for a in agents] == [0, 0, 0, 0, 1, 1, 1, 1]
+        assert [a.subpopulation_id for a in agents] == [0, 0, 0, 0, 1, 1, 1, 1]
 
     def test_noop_when_spec_is_none(self):
         from agilerl.utils.trainer_utils import _assign_subpopulations
 
-        agents = [MagicMock(index=i, subpopulation=None) for i in range(4)]
+        agents = [MagicMock(index=i, subpopulation_id=None) for i in range(4)]
         _assign_subpopulations(agents, None)
 
-        assert all(a.subpopulation is None for a in agents)
+        assert all(a.subpopulation_id is None for a in agents)
 
     def test_tags_by_slot_not_restored_index_on_resume(self):
         """Resume must derive the layout from the population slot.
@@ -209,8 +209,8 @@ class TestAssignSubpopulations:
         from agilerl.utils.trainer_utils import _assign_subpopulations
 
         restored_indices = [12, 5, 40, 3, 27, 9, 33, 18]
-        agents = [MagicMock(index=idx, subpopulation=99) for idx in restored_indices]
+        agents = [MagicMock(index=idx, subpopulation_id=99) for idx in restored_indices]
         spec = MultiFrequencySelectionSpec(n_subpopulations=2)
         _assign_subpopulations(agents, spec)
 
-        assert [a.subpopulation for a in agents] == [0, 0, 0, 0, 1, 1, 1, 1]
+        assert [a.subpopulation_id for a in agents] == [0, 0, 0, 0, 1, 1, 1, 1]

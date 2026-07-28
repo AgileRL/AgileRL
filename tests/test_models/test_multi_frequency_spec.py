@@ -202,8 +202,7 @@ class TestResolveAndValidateMultiFrequencyPopulation:
             resolve_and_validate_multi_frequency_population(spec, training)
 
     def test_rejects_negative_derived_n_losers(self):
-        # With n_losers left to default, the remainder subpopulation_size - n_winners
-        # - n_survivors - n_open_for_migration can go negative when the explicit
+        # With n_losers left to default, the remainder can go negative when the explicit
         # brackets already over-fill the subpopulation (4 - 2 - 2 - 1 = -1 here)
         spec = MultiFrequencySelectionSpec(
             n_subpopulations=2,

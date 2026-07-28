@@ -216,7 +216,7 @@ class TestMultiFrequencyOrchestration:
             fired.extend(
                 (cycle, subpop)
                 for subpop in sorted(
-                    {a.subpopulation for a in new_agents(pop, new_pop)}
+                    {a.subpopulation_id for a in new_agents(pop, new_pop)}
                 )
             )
             pop = new_pop
@@ -299,13 +299,13 @@ class TestMultiFrequencyOrchestration:
         strategy = make_strategy(n_subpop=2, population_size=8, ratios=[1, 2])
         pop = make_population({None: [8, 7, 6, 5, 4, 3, 2, 1]})
         for agent in pop:
-            agent.subpopulation = None
+            agent.subpopulation_id = None
 
         run_selection_and_mutation(
             strategy, population=pop, mutation=FakeMutations(), env_name="env"
         )
 
-        assert sorted(a.subpopulation for a in pop) == [0, 0, 0, 0, 1, 1, 1, 1]
+        assert sorted(a.subpopulation_id for a in pop) == [0, 0, 0, 0, 1, 1, 1, 1]
 
     def test_orchestration_migrates_against_pre_evolution_snapshot(self):
         strategy = make_strategy(n_subpop=2, population_size=8, ratios=[1, 2])
@@ -316,7 +316,7 @@ class TestMultiFrequencyOrchestration:
         # population would be visibly different from the pre-evolution snapshot.
         def fake_clone(population, winners, losers, subpop):
             fresh = [
-                FakeAgent(100 + i, a.subpopulation, a.fitness[-1])
+                FakeAgent(100 + i, a.subpopulation_id, a.fitness[-1])
                 for i, a in enumerate(population)
             ]
             return fresh, []

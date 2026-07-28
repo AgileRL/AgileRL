@@ -8,31 +8,31 @@ reshapes the population and nominates the agents to perturb, and the shared muta
 then perturbs them.
 
 Multi-frequency selection replaces tournament selection. The population is split into
-``n_subpopulations`` subpopulations that each evolve at their own frequency — a slow
+``n_subpopulations`` subpopulations that each evolve at their own frequency: a slow
 subpopulation only exploits/explores every few evaluation cycles. Preserving several
 evolution frequencies keeps the greedy short-horizon behaviour of single-frequency PBT
 from collapsing the whole population onto one hyperparameter schedule.
 
-Within each subpopulation, agents are ranked by fitness into four brackets —
+Within each subpopulation, agents are ranked by fitness into four brackets:
 **winners**, **survivors**, **open-for-migration** and **losers**. Each evolution step
 keeps the winners and survivors unchanged and replaces every loser with a clone of a
 winner; migration then fills the open-for-migration slots with stronger agents from other
-subpopulations, importing their weights but resetting hyperparameters to the local elite
-when the migrant comes from a faster subpopulation. On the other hand, if the agent comes
-from a slower subpopulation, a full clone is migrated.
+subpopulations. When a migrant moves from a faster subpopulation to a slower subpopulation,
+only the network weights are transferred. However, if an agent moves from a slower
+subpopulation to a faster one, a full clone is migrated. We use asymmetric migration so the
+long-horizon subpopulations only inherit good weights and never a potentially
+over-optimized hyperparameter schedule, while collapsed faster subpopulations get a full
+clone to restore diversity and escape convergence traps.
 
 Selection returns the indices of those winner-clones, which are finally perturbed by the
-shared :func:`Mutations.mutation() <agilerl.hpo.mutation.Mutations.mutation>` step — called
+shared :func:`Mutations.mutation() <agilerl.hpo.mutation.Mutations.mutation>` step, called
 with its ``indices`` argument so only the clones are mutated (see :ref:`mutations`).
 
 The class :class:`MultiFrequencySelection <agilerl.hpo.multi_frequency.MultiFrequencySelection>`
 implements the multi-frequency selection operator needed in MF-PBT; its
 :func:`select() <agilerl.hpo.multi_frequency.MultiFrequencySelection.select>` returns the
-global elite, the evolved population, and the winner-clone indices to mutate. The per-cycle
-scheduling and elite saving are driven from the trainers via
-:func:`run_selection_and_mutation <agilerl.utils.utils.run_selection_and_mutation>`, the single
-entry point shared with tournament selection.
-MF-PBT supports an ``accelerator`` and both the classic-RL and the LLM finetuning algorithms.
+global elite, the evolved population, and the winner-clone indices to mutate. MF-PBT supports
+an ``accelerator`` and both the classic-RL and the LLM finetuning algorithms.
 
 .. code-block:: python
 
@@ -84,7 +84,7 @@ is the mandatory population size; MF-PBT reads it and derives the per-subpopulat
 size ``pop_size // n_subpopulations``; when omitted they default to ``round(0.25 * subpop)``
 winners and open-for-migration agents, ``0`` survivors and the remainder as losers, and
 ``evolution_frequency_ratios`` defaults to ``[1, 5, 10, …]``. The recommended configuration
-is the one shown above — **16 agents in 2 subpopulations of 8**, split into
+is the one shown above: **16 agents in 2 subpopulations of 8**, split into
 **2 winners / 0 survivors / 2 open-for-migration / 4 losers** with frequency ratios
 **[1, 5]**.
 

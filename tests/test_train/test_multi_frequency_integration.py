@@ -93,13 +93,13 @@ def _make_ppo_trainer(
 def _rank_population_by_slot(population):
     """Give every agent a distinct fitness, subpopulation 0 dominating subpopulation 1."""
     for position, agent in enumerate(population):
-        base = 100.0 if agent.subpopulation == 0 else 0.0
+        base = 100.0 if agent.subpopulation_id == 0 else 0.0
         agent.fitness = [base - position]
 
 
 def _weakest_index(population, subpop):
     """Index of the lowest-fitness member of a subpopulation."""
-    members = [a for a in population if a.subpopulation == subpop]
+    members = [a for a in population if a.subpopulation_id == subpop]
     return min(members, key=lambda a: a.fitness[-1]).index
 
 
@@ -110,7 +110,7 @@ class TestLocalTrainerWiring:
         assert isinstance(trainer.multi_frequency_selection, MultiFrequencySelection)
         assert trainer.tournament_selection is None
         assert trainer.selection_strategy is trainer.multi_frequency_selection
-        subpops = sorted(a.subpopulation for a in trainer.population)
+        subpops = sorted(a.subpopulation_id for a in trainer.population)
         assert subpops == [0, 0, 0, 0, 1, 1, 1, 1]
         assert len({a.index for a in trainer.population}) == 8
 
@@ -217,7 +217,7 @@ class TestPopulationResume:
         )
 
         assert [agent.index for agent in population] == [0, 1, 2, 3, 4, 5]
-        assert [agent.subpopulation for agent in population] == [0, 0, 0, 1, 1, 1]
+        assert [agent.subpopulation_id for agent in population] == [0, 0, 0, 1, 1, 1]
 
         for i, agent in enumerate(population):
             agent.fitness = [float(6 - i)]
@@ -274,7 +274,7 @@ class TestRealPopulationEvolution:
 
             assert doomed not in {a.index for a in agents}
             assert len(agents) == 8
-            assert Counter(a.subpopulation for a in agents) == Counter({0: 4, 1: 4})
+            assert Counter(a.subpopulation_id for a in agents) == Counter({0: 4, 1: 4})
             assert len({a.index for a in agents}) == 8  # indices stay unique
             assert all(isinstance(a, EvolvableAlgorithm) for a in agents)
 
@@ -347,7 +347,7 @@ class TestCrossFamilyEvolution:
         algo_name, build_population = CROSS_FAMILY[family]
         population = build_population()
         for agent in population:
-            agent.subpopulation = agent.index // 4
+            agent.subpopulation_id = agent.index // 4
         strategy = MultiFrequencySelection(
             population_size=8,
             n_subpopulations=2,
@@ -387,7 +387,9 @@ class TestCrossFamilyEvolution:
             surviving = {a.index for a in population}
             assert not (doomed & surviving)  # the due subpops really did evolve
             assert len(population) == 8
-            assert Counter(a.subpopulation for a in population) == Counter({0: 4, 1: 4})
+            assert Counter(a.subpopulation_id for a in population) == Counter(
+                {0: 4, 1: 4}
+            )
             assert len({a.index for a in population}) == 8
             assert all(isinstance(a, EvolvableAlgorithm) for a in population)
 
@@ -419,9 +421,9 @@ class _LLMHPConfig:
 class _LLMFinetuneAgent:
     """Fake :class:`LLMAlgorithm`."""
 
-    def __init__(self, index, subpopulation, fitness, lr=1e-3):
+    def __init__(self, index, subpopulation_id, fitness, lr=1e-3):
         self.index = index
-        self.subpopulation = subpopulation
+        self.subpopulation_id = subpopulation_id
         self.fitness = [fitness]
         self.lr = lr
         self.accelerator = None
@@ -434,7 +436,7 @@ class _LLMFinetuneAgent:
     def clone(self, index=None, wrap=False):
         twin = _LLMFinetuneAgent(
             self.index if index is None else index,
-            self.subpopulation,
+            self.subpopulation_id,
             self.fitness[-1],
             lr=self.lr,
         )
@@ -507,7 +509,9 @@ class TestLLMEvolution:
 
             assert not (doomed & {a.index for a in population})
             assert len(population) == 8
-            assert Counter(a.subpopulation for a in population) == Counter({0: 4, 1: 4})
+            assert Counter(a.subpopulation_id for a in population) == Counter(
+                {0: 4, 1: 4}
+            )
             assert len({a.index for a in population}) == 8  # indices stay unique
             assert all(a.mut == "None" for a in population)
 
