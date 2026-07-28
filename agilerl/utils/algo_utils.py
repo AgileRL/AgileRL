@@ -46,7 +46,6 @@ from agilerl.typing import (
     BatchDimension,
     BPTTSequenceType,
     DeviceType,
-    ImageTensor,
     InputSizeFromSpace,
     LeafSpace,
     MaybeObsList,
@@ -86,8 +85,6 @@ BatchedFloatTensor = Float[torch.Tensor, "batch ..."]
 # axis via ``dim``, and per-agent scalars stack into a rank-1 result, so neither
 # the rank nor the position of the agent axis is fixed.
 StackedAgentTensor = Float[torch.Tensor, "..."]
-# A channels-first image observation: the layout the HWC -> CHW transpose returns.
-ImageArray = Shaped[npt.NDArray[Any], "... channels height width"]
 # One agent's actions across the vectorized envs.
 AgentActionArray = Shaped[npt.NDArray[Any], "num_envs ..."]
 # Rollout experiences with the step and env axes already merged.
@@ -549,13 +546,13 @@ def transpose_image_space(space: spaces.Space) -> spaces.Space:
 @overload
 def transpose_image_observation(
     observation: AnyTensor, original_space: spaces.Space
-) -> ImageTensor: ...
+) -> AnyTensor: ...
 
 
 @overload
 def transpose_image_observation(
     observation: AnyArray, original_space: spaces.Space
-) -> ImageArray: ...
+) -> AnyArray: ...
 
 
 @overload
@@ -2264,7 +2261,7 @@ def vectorize_experiences_by_agent(
         )
         return vectorized_tuple
     # Original implementation for array/tensor observations
-    tensors: list[Float[torch.Tensor, "num_steps ..."]] = []
+    tensors: list[AnyFloatTensor] = []
     for experience in experiences.values():
         if experience is None:
             continue

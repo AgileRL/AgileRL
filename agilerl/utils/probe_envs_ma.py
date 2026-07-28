@@ -23,11 +23,12 @@ ProbeImageSampleArray = Float[
 ]
 MultiAgentProbeActionType = Mapping[str, NumArray]
 MultiAgentProbeDiscreteActionType = Mapping[str, NumArray | np.integer]
-MultiAgentFlatObsType = dict[str, Int[npt.NDArray[np.int64], " obs_dim"]]
+# The flat probe envs all have ``Discrete`` observation spaces, so an observation
+# is a single state index rather than an ``obs_dim``-wide vector;
+# ``prepare_ma_states`` one-hots it to the network's input width.
+MultiAgentFlatObsType = dict[str, Int[npt.NDArray[np.int64], " 1"]]
 MultiAgentImageObsType = dict[str, ProbeImageArray]
-MultiAgentFlatSampleObsType = list[
-    dict[str, Int[npt.NDArray[np.int64], "batch obs_dim"]]
-]
+MultiAgentFlatSampleObsType = list[dict[str, Int[npt.NDArray[np.int64], "batch 1"]]]
 MultiAgentImageSampleObsType = list[dict[str, ProbeImageSampleArray]]
 MultiAgentSampleActionType = list[
     dict[str, Float[npt.NDArray[np.float64], "batch action_dim"]]

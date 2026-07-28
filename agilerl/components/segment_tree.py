@@ -117,28 +117,28 @@ class SegmentTree:
         return float(self.tree[self.capacity + idx])
 
     def get_batch(
-        self, indices: Integer[npt.NDArray[np.integer], " batch"]
-    ) -> Float[npt.NDArray[np.float64], " batch"]:
+        self, indices: Integer[npt.NDArray[np.integer], " num_indices"]
+    ) -> Float[npt.NDArray[np.float64], " num_indices"]:
         """Vectorised leaf read for many indices at once.
 
         :param indices: Leaf indices in ``[0, capacity)``.
-        :type indices: Integer[npt.NDArray[np.integer], " batch"]
+        :type indices: Integer[npt.NDArray[np.integer], " num_indices"]
         :return: Leaf values, one per index.
-        :rtype: Float[npt.NDArray[np.float64], " batch"]
+        :rtype: Float[npt.NDArray[np.float64], " num_indices"]
         """
         return self.tree[self.capacity + np.asarray(indices, dtype=np.intp)]
 
     def update_batch(
         self,
-        indices: Integer[npt.NDArray[np.integer], " batch"],
-        values: Float[npt.NDArray[np.floating], " batch"],
+        indices: Integer[npt.NDArray[np.integer], " num_indices"],
+        values: Float[npt.NDArray[np.floating], " num_indices"],
     ) -> None:
         """Set many leaf values at once and update their ancestors.
 
         :param indices: Leaf indices in ``[0, capacity)``.
-        :type indices: Integer[npt.NDArray[np.integer], " batch"]
+        :type indices: Integer[npt.NDArray[np.integer], " num_indices"]
         :param values: New leaf values, one per index.
-        :type values: Float[npt.NDArray[np.floating], " batch"]
+        :type values: Float[npt.NDArray[np.floating], " num_indices"]
         """
         indices = np.asarray(indices, dtype=np.intp)
         if indices.size == 0:
@@ -205,14 +205,14 @@ class SumSegmentTree(SegmentTree):
         return idx - self.capacity
 
     def retrieve_batch(
-        self, upperbounds: Float[npt.NDArray[np.floating], " batch"]
-    ) -> Integer[npt.NDArray[np.intp], " batch"]:
-        """Vectorised :meth:`retrieve` for a whole batch of upper bounds.
+        self, upperbounds: Float[npt.NDArray[np.floating], " num_indices"]
+    ) -> Integer[npt.NDArray[np.intp], " num_indices"]:
+        """Vectorised :meth:`retrieve` for many upper bounds at once.
 
-        :param upperbounds: Upper bounds for cumulative sum, one per sample.
-        :type upperbounds: Float[npt.NDArray[np.floating], " batch"]
+        :param upperbounds: Upper bounds for cumulative sum, one per index to retrieve.
+        :type upperbounds: Float[npt.NDArray[np.floating], " num_indices"]
         :return: Leaf indices in ``[0, capacity)``, one per upper bound.
-        :rtype: Integer[npt.NDArray[np.intp], " batch"]
+        :rtype: Integer[npt.NDArray[np.intp], " num_indices"]
         """
         ub = np.asarray(upperbounds, dtype=np.float64).copy()
         idx = np.ones(ub.shape, dtype=np.intp)  # start every query at the root

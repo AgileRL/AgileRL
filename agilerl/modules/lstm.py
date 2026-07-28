@@ -185,7 +185,7 @@ class EvolvableLSTM(EvolvableModule):
         self,
         x: SequenceInput,
         hidden_state: SequenceHiddenState | None = None,
-    ) -> tuple[Float[torch.Tensor, "batch num_outputs"], SequenceHiddenState]:
+    ) -> tuple[Float[torch.Tensor, "batch *_seq_len num_outputs"], SequenceHiddenState]:
         """Forward pass of the network.
 
         :param x: Input tensor
@@ -193,7 +193,7 @@ class EvolvableLSTM(EvolvableModule):
         :param hidden_state: Dict containing hidden and cell states, defaults to None
         :type hidden_state: SequenceHiddenState | None
         :return: Output tensor and next hidden state
-        :rtype: tuple[Float[torch.Tensor, "batch num_outputs"], SequenceHiddenState]
+        :rtype: tuple[Float[torch.Tensor, "batch *_seq_len num_outputs"], SequenceHiddenState]
         """
         if not isinstance(x, torch.Tensor):
             x = torch.tensor(x, dtype=torch.float32, device=self.device)

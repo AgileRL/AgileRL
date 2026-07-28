@@ -89,9 +89,9 @@ class DQN(RLAlgorithm[TensorDict]):
         [
             TorchObsType,
             Real[torch.Tensor, ""],
-            Num[torch.Tensor, "... action_dim"],
+            Num[torch.Tensor, "... num_actions"],
         ],
-        Int[torch.Tensor, " batch"],
+        Int[torch.Tensor, " num_envs"],
     ]
     _update_impl: Callable[
         [
@@ -267,7 +267,7 @@ class DQN(RLAlgorithm[TensorDict]):
         torch_obs = self.preprocess_observation(obs)
         eps: Real[torch.Tensor, ""] = torch.tensor(epsilon, device=self.device)
         if action_mask is not None:
-            mask: Num[torch.Tensor, "... action_dim"] = torch.as_tensor(
+            mask: Num[torch.Tensor, "... num_actions"] = torch.as_tensor(
                 numpy_action_mask(action_mask),
                 device=self.device,
             )
@@ -297,8 +297,8 @@ class DQN(RLAlgorithm[TensorDict]):
         self,
         obs: TorchObsType,
         epsilon: Real[torch.Tensor, ""],
-        action_mask: Num[torch.Tensor, "... action_dim"],
-    ) -> Int[torch.Tensor, " batch"]:
+        action_mask: Num[torch.Tensor, "... num_actions"],
+    ) -> Int[torch.Tensor, " num_envs"]:
         """Return the next action to take in the environment.
         Epsilon is the probability of taking a random action, used for exploration.
         For greedy behaviour, set epsilon to 0.
@@ -308,9 +308,9 @@ class DQN(RLAlgorithm[TensorDict]):
         :param epsilon: Probability of taking a random action for exploration, defaults to 0
         :type epsilon: Real[torch.Tensor, ""]
         :param action_mask: Mask of legal actions 1=legal 0=illegal
-        :type action_mask: Num[torch.Tensor, "... action_dim"]
+        :type action_mask: Num[torch.Tensor, "... num_actions"]
         :return: Selected action(s) as tensor
-        :rtype: Int[torch.Tensor, " batch"]
+        :rtype: Int[torch.Tensor, " num_envs"]
         """
         self.actor.eval()
         with torch.no_grad():

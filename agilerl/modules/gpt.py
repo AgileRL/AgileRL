@@ -259,7 +259,7 @@ class EvolvableGPT(EvolvableModule):
         targets: TokenIds | None = None,
         attn_mask: torch.Tensor | None = None,
         past_key_values: tuple[KVCacheType | None, ...] | None = None,
-        pos: Int[torch.Tensor, "1 seq_len"] | None = None,
+        pos: Int[torch.Tensor, "_pos_rows seq_len"] | None = None,
         is_causal: bool = True,
     ) -> tuple[
         Float[torch.Tensor, "batch seq_len vocab_size"],
@@ -279,8 +279,8 @@ class EvolvableGPT(EvolvableModule):
         :type attn_mask: torch.Tensor, optional
         :param past_key_values: Per-layer cached (key, value) projections
         :type past_key_values: tuple[KVCacheType | None, ...], optional
-        :param pos: Position ids
-        :type pos: Int[torch.Tensor, "1 seq_len"], optional
+        :param pos: Position ids, one row broadcast over the batch or one row per sequence
+        :type pos: Int[torch.Tensor, "_pos_rows seq_len"], optional
         :param is_causal: Whether to apply causal mask
         :type is_causal: bool, optional
         :return: Tuple containing logits, all hidden states, presents, and loss
@@ -841,7 +841,7 @@ class CausalSelfAttention(nn.Module):
             )
         else:
             # manual implementation of attention
-            att: Float[torch.Tensor, "batch n_head seq_len seq_len"] = (
+            att: Float[torch.Tensor, "batch n_head seq_len kv_seq_len"] = (
                 q @ k.transpose(-2, -1)
             ) * (1.0 / math.sqrt(k.size(-1)))
             att = att.masked_fill(self.attention_bias[:, :, :T, :T] == 0, float("-inf"))

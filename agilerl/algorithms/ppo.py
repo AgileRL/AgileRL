@@ -28,9 +28,11 @@ from agilerl.networks.value_networks import ValueNetwork
 from agilerl.typing import (
     ActionMaskInput,
     BPTTSequenceType,
+    EntropyArray,
     EnvDoneArray,
     EnvScoreArray,
     HiddenStateDict,
+    LogProbArray,
     LogProbs,
     ObservationType,
     PolicyActionArray,
@@ -39,6 +41,7 @@ from agilerl.typing import (
     RolloutSequenceTargets,
     SupportedObservationSpace,
     TorchObsType,
+    ValueArray,
 )
 from agilerl.utils.algo_utils import (
     get_num_envs,
@@ -46,10 +49,6 @@ from agilerl.utils.algo_utils import (
     share_encoder_parameters,
 )
 
-# Per-env vectors copied off a network: log-probabilities and value estimates.
-EnvValueArray = Float[npt.NDArray[np.float32], " num_envs"]
-# Entropy: one value per env, or 0-d for the ``-log_prob.mean()`` fallback.
-EntropyArray = Float[npt.NDArray[np.float32], "..."]
 # Recurrent hidden states threaded through the actor and critic. Their batch axis
 # counts sequences, which under BPTT is smaller than the flattened timestep batch
 # carried by the observations, actions and values alongside them.
@@ -59,15 +58,15 @@ SequenceHiddenStateDict = dict[
 
 ActionReturnType = tuple[
     PolicyActionArray,
-    EnvValueArray,
+    LogProbArray,
     EntropyArray,
-    EnvValueArray,
+    ValueArray,
 ]
 RecurrentActionReturnType = tuple[
     PolicyActionArray,
-    EnvValueArray,
+    LogProbArray,
     EntropyArray,
-    EnvValueArray,
+    ValueArray,
     HiddenStateDict | None,
 ]
 
@@ -733,9 +732,9 @@ class PPO(RLAlgorithm[TensorDict]):
                     self.action_space.high,
                 )
 
-        log_prob_np: EnvValueArray = log_prob.cpu().data.numpy()
+        log_prob_np: LogProbArray = log_prob.cpu().data.numpy()
         entropy_np: EntropyArray = entropy.cpu().data.numpy()
-        values_np: EnvValueArray = values.cpu().data.numpy()
+        values_np: ValueArray = values.cpu().data.numpy()
 
         if self.recurrent:
             return (

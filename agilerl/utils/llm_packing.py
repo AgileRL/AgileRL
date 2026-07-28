@@ -29,9 +29,7 @@ import torch
 import torch.nn.functional as F
 from jaxtyping import Float, Int, Shaped
 
-# A packed float payload in the model's compute dtype, of unconstrained rank:
-# ``(N,)``, ``(1, N)`` and ``(N, 1)`` are all accepted and reshaped to ``(N,)``.
-PackedFloat = Float[torch.Tensor, "..."]
+from agilerl.typing import PackedLogProbTensor, PackedValueTensor
 
 # The padded batch as handed in: ``pack_padded_batch`` takes any rank and raises
 # ``ValueError`` for anything other than ``(B, T)``.
@@ -187,7 +185,7 @@ def _scatter_packed(
 
 
 def unpack_logprobs(
-    packed_logprobs: PackedFloat,
+    packed_logprobs: PackedLogProbTensor,
     packed: PackedBatch,
 ) -> Float[torch.Tensor, "batch seq_len_minus_one"]:
     """Scatter packed per-token logprobs back onto the padded ``(B, T-1)`` frame.
@@ -199,7 +197,7 @@ def unpack_logprobs(
     the module docstring for the shared scatter semantics.
 
     :param packed_logprobs: ``(N - 1,)`` packed per-token logprobs.
-    :type packed_logprobs: PackedFloat
+    :type packed_logprobs: PackedLogProbTensor
     :param packed: The :class:`PackedBatch` the logprobs were computed from.
     :type packed: PackedBatch
     :return: ``(B, T-1)`` per-token logprobs aligned to the dense frame.
@@ -218,7 +216,7 @@ def unpack_logprobs(
 
 
 def unpack_values(
-    packed_values: PackedFloat,
+    packed_values: PackedValueTensor,
     packed: PackedBatch,
 ) -> Float[torch.Tensor, "batch seq_len_minus_one"]:
     """Scatter packed per-token critic values back onto the ``(B, T-1)`` frame.
@@ -237,7 +235,7 @@ def unpack_values(
 
     :param packed_values: ``(N,)`` (or ``(1, N)`` / ``(N, 1)``) packed per-token
         critic values.
-    :type packed_values: PackedFloat
+    :type packed_values: PackedValueTensor
     :param packed: The :class:`PackedBatch` the values were computed from.
     :type packed: PackedBatch
     :return: ``(B, T-1)`` per-token values aligned to the dense frame.

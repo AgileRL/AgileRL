@@ -208,12 +208,47 @@ TokenIds = Int[torch.Tensor, "batch seq"]
 IndexTensor = Int[torch.Tensor, " batch"]
 HiddenStateDict = dict[str, Float[torch.Tensor, "num_layers batch hidden_size"]]
 
+# ── Learning quantities ──────────────────────────────────────────────────────
+# Named for WHAT the value holds, not for its shape. Several of these are
+# structurally identical and that duplication is deliberate: an alias is a claim
+# about meaning, so annotating a value estimate as a log-probability makes the
+# signature say something untrue even though the shapes agree. Pick by quantity
+# first and shape second; if a quantity turns up at a shape not covered here, add
+# it here rather than borrowing a neighbour's name.
+
+# Per training-batch element. ``LogProbs`` and ``ActionEntropy`` are declared with
+# the action aliases below, and are the log-probability and entropy of this set.
+ValueTensor = Float[torch.Tensor, " batch"]
+AdvantageTensor = Float[torch.Tensor, " batch"]
+ReturnTensor = Float[torch.Tensor, " batch"]
+RewardTensor = Float[torch.Tensor, " batch"]
+
+# Copied off the network during rollout collection, one per vectorized env.
+LogProbArray = Float[npt.NDArray[np.float32], " num_envs"]
+ValueArray = Float[npt.NDArray[np.float32], " num_envs"]
+# Entropy is per-env, or 0-d for the ``-log_prob.mean()`` fallback.
+EntropyArray = Float[npt.NDArray[np.float32], "..."]
+
+# Rollout-buffer storage, laid out timestep-major.
+BufferRewardArray = Float[npt.NDArray[np.float32], "buffer_size num_envs"]
+BufferValueArray = Float[npt.NDArray[np.float32], "buffer_size num_envs"]
+BufferLogProbArray = Float[npt.NDArray[np.float32], "buffer_size num_envs"]
+BufferAdvantageArray = Float[npt.NDArray[np.float32], "buffer_size num_envs"]
+BufferReturnArray = Float[npt.NDArray[np.float32], "buffer_size num_envs"]
+
+# LLM token frames. The action frame is the ``(batch, seq - 1)`` slice that
+# log-probs and masks share; packed frames are the flattened variable-length form.
+TokenLogProbTensor = Float[torch.Tensor, "batch action_seq"]
+TokenValueTensor = Float[torch.Tensor, "batch action_seq"]
+PackedLogProbTensor = Float[torch.Tensor, "..."]
+PackedValueTensor = Float[torch.Tensor, "..."]
+
 # Actions, as the policy emits them and as the algorithms consume them.
 DiscreteActionArray = Int[npt.NDArray[np.int64], " num_envs"]
 ContinuousActionArray = Float[npt.NDArray[np.float32], "num_envs action_dim"]
 PolicyActionArray = Shaped[npt.NDArray, "num_envs ..."]
 ActionBoundTensor = Float[torch.Tensor, " action_dim"]
-SampledAction = Shaped[torch.Tensor, "batch *action_dim"]
+SampledAction = Shaped[torch.Tensor, "batch ..."]
 ActionEntropy = Float[torch.Tensor, " batch"]
 # Distribution masks are per action dimension; the LLM algorithms mask per token
 # position instead, which is ``TokenActionMask`` — the two are not interchangeable.
@@ -242,7 +277,7 @@ FitnessRow = Float[npt.NDArray[np.float64], " num_agents"]
 # Bandit posterior over the flattened network parameters.
 PosteriorTensor = Float[torch.Tensor, "numel numel"]
 ParamVector = Float[torch.Tensor, " numel"]
-GradientMatrix = Float[torch.Tensor, "action_dim numel"]
+GradientMatrix = Float[torch.Tensor, "num_actions numel"]
 
 # Encoder output consumed by the network heads.
 LatentTensor = Float[torch.Tensor, "batch latent_dim"]

@@ -691,7 +691,7 @@ class Population(Generic[AgentT]):
                 msg = "Received nested fitness values without configured agent_ids."
                 raise ValueError(msg)
             if isinstance(latest, (list, tuple, np.ndarray)):
-                row: Shaped[npt.NDArray, " num_agents"] = np.asarray(latest).ravel()
+                row: Shaped[npt.NDArray, " _fitness_cols"] = np.asarray(latest).ravel()
                 fitnesses.append(
                     {aid: float(row[i]) for i, aid in enumerate(self.agent_ids)}
                 )
@@ -732,11 +732,12 @@ class Population(Generic[AgentT]):
             msg = "Received nested scores without configured agent_ids."
             raise ValueError(msg)
 
-        # Multi-agent, non-summed: per-sub-agent mean scores
+        # Multi-agent, non-summed: one mean score per tracked id, which is a
+        # shared-policy group id whenever agents are grouped.
         scores: NestedRow = []
         for agent in self.agents:
             if agent.metrics.scores:
-                mean_score_subagent: Float[npt.NDArray[np.float64], " num_agents"] = (
+                mean_score_subagent: Float[npt.NDArray[np.float64], " num_groups"] = (
                     np.mean(np.array(agent.metrics.scores), axis=0)
                 )
                 scores.append(

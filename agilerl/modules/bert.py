@@ -13,6 +13,11 @@ from agilerl.typing import AnyTensor, DeviceType
 SeqTokenIds = Int[torch.Tensor, "seq_len batch"]
 SeqEmbeddings = Float[torch.Tensor, "seq_len batch emb_size"]
 
+SrcTokenIds = Int[torch.Tensor, "src_seq_len batch"]
+SrcEmbeddings = Float[torch.Tensor, "src_seq_len batch emb_size"]
+TgtTokenIds = Int[torch.Tensor, "tgt_seq_len batch"]
+TgtEmbeddings = Float[torch.Tensor, "tgt_seq_len batch emb_size"]
+
 
 class EvolvableBERT(EvolvableModule):
     """The Evolvable BERT class. Consists of a sequence of encoder and decoder layers with an optional
@@ -251,36 +256,38 @@ class EvolvableBERT(EvolvableModule):
 
     def forward(
         self,
-        src: SeqTokenIds | SeqEmbeddings,
-        tgt: SeqTokenIds | SeqEmbeddings,
-        src_mask: Shaped[torch.Tensor, "seq_len seq_len"] | None = None,
-        tgt_mask: Shaped[torch.Tensor, "seq_len seq_len"] | None = None,
-        memory_mask: Shaped[torch.Tensor, "seq_len seq_len"] | None = None,
-        src_key_padding_mask: Shaped[torch.Tensor, "batch seq_len"] | None = None,
-        tgt_key_padding_mask: Shaped[torch.Tensor, "batch seq_len"] | None = None,
-        memory_key_padding_mask: Shaped[torch.Tensor, "batch seq_len"] | None = None,
+        src: SrcTokenIds | SrcEmbeddings,
+        tgt: TgtTokenIds | TgtEmbeddings,
+        src_mask: Shaped[torch.Tensor, "src_seq_len src_seq_len"] | None = None,
+        tgt_mask: Shaped[torch.Tensor, "tgt_seq_len tgt_seq_len"] | None = None,
+        memory_mask: Shaped[torch.Tensor, "tgt_seq_len src_seq_len"] | None = None,
+        src_key_padding_mask: Shaped[torch.Tensor, "batch src_seq_len"] | None = None,
+        tgt_key_padding_mask: Shaped[torch.Tensor, "batch tgt_seq_len"] | None = None,
+        memory_key_padding_mask: (
+            Shaped[torch.Tensor, "batch src_seq_len"] | None
+        ) = None,
         is_causal: bool = False,
     ) -> torch.Tensor:
         """Return output of neural network.
 
         :param src: Encoder input sequence: token ids when ``end2end``, otherwise
             already-embedded inputs
-        :type src: SeqTokenIds | SeqEmbeddings
+        :type src: SrcTokenIds | SrcEmbeddings
         :param tgt: Decoder input sequence: token ids when ``end2end``, otherwise
             already-embedded inputs
-        :type tgt: SeqTokenIds | SeqEmbeddings
+        :type tgt: TgtTokenIds | TgtEmbeddings
         :param src_mask: Additive mask for the src sequence, defaults to None
-        :type src_mask: Shaped[torch.Tensor, "seq_len seq_len"] | None, optional
+        :type src_mask: Shaped[torch.Tensor, "src_seq_len src_seq_len"] | None, optional
         :param tgt_mask: Additive mask for the tgt sequence, defaults to None
-        :type tgt_mask: Shaped[torch.Tensor, "seq_len seq_len"] | None, optional
+        :type tgt_mask: Shaped[torch.Tensor, "tgt_seq_len tgt_seq_len"] | None, optional
         :param memory_mask: Additive mask for the encoder output, defaults to None
-        :type memory_mask: Shaped[torch.Tensor, "seq_len seq_len"] | None, optional
+        :type memory_mask: Shaped[torch.Tensor, "tgt_seq_len src_seq_len"] | None, optional
         :param src_key_padding_mask: Bool or additive-float mask for src keys per batch, defaults to None
-        :type src_key_padding_mask: Shaped[torch.Tensor, "batch seq_len"] | None, optional
+        :type src_key_padding_mask: Shaped[torch.Tensor, "batch src_seq_len"] | None, optional
         :param tgt_key_padding_mask: Bool or additive-float mask for tgt keys per batch, defaults to None
-        :type tgt_key_padding_mask: Shaped[torch.Tensor, "batch seq_len"] | None, optional
+        :type tgt_key_padding_mask: Shaped[torch.Tensor, "batch tgt_seq_len"] | None, optional
         :param memory_key_padding_mask: Bool or additive-float mask for memory keys per batch, defaults to None
-        :type memory_key_padding_mask: Shaped[torch.Tensor, "batch seq_len"] | None, optional
+        :type memory_key_padding_mask: Shaped[torch.Tensor, "batch src_seq_len"] | None, optional
         :param is_causal: Applies a causal mask as mask and ignores attn_mask for computing scaled dot product attention, defaults to False
         :type is_causal: bool, optional
         """

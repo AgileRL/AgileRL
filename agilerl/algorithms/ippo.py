@@ -29,7 +29,6 @@ from agilerl.typing import (
     InfosDict,
     IPPOActionMasks,
     IPPOProcessInfosReturn,
-    LogProbs,
     MaybeActionMask,
     ObservationType,
     PolicyActionArray,
@@ -56,12 +55,24 @@ from agilerl.vector.pz_vec_env import PettingZooVecEnv
 
 # Per-group legality masks. ``torch.Tensor(...)`` yields float32, not bool.
 GroupActionMask = Float[torch.Tensor, "num_group_agents ..."]
-# Per-agent vectors copied off a network: log-probabilities, entropies, values.
-AgentValueArray = Float[npt.NDArray[np.float32], " batch"]
-# The same values once disassembled back into per-agent, per-env rows.
+# Actions a group's policy produced, before they are split per agent. A group is
+# run as one batch of ``len(grouped_agents[group_id]) * num_envs`` rows.
+GroupActionArray = Shaped[npt.NDArray, "group_batch ..."]
+# Per-group vectors copied off a network. Same leading axis as above: rows are
+# agents-in-group x envs, not envs.
+GroupLogProbArray = Float[npt.NDArray[np.float32], " group_batch"]
+GroupEntropyArray = Float[npt.NDArray[np.float32], " group_batch"]
+GroupValueArray = Float[npt.NDArray[np.float32], " group_batch"]
+# The same quantities once disassembled back into per-agent, per-env rows.
+AgentLogProbRows = Float[npt.NDArray[np.float32], "num_envs ..."]
+AgentEntropyRows = Float[npt.NDArray[np.float32], "num_envs ..."]
 AgentValueRows = Float[npt.NDArray[np.float32], "num_envs ..."]
-# Per-env, per-agent score rows accumulated during evaluation.
-AgentScoreArray = Float[npt.NDArray[np.float64], "num_envs num_agents"]
+# Per-env score rows accumulated during evaluation. The column axis is one per
+# shared-policy group, or a single summed column when ``sum_scores``.
+AgentScoreArray = Float[npt.NDArray[np.float64], "num_envs _score_cols"]
+# Per-env reward rows for a single step, one column per shared-policy group. These
+# are not scores: the score columns collapse to one column when ``sum_scores``.
+AgentRewardArray = Float[npt.NDArray[np.float64], "num_envs _reward_cols"]
 
 
 class IPPO(MultiAgentRLAlgorithm[tuple[Mapping[str, Any], ...]]):
@@ -492,10 +503,10 @@ class IPPO(MultiAgentRLAlgorithm[tuple[Mapping[str, Any], ...]]):
         action_mask: GroupActionMask | None = None,
         batch_size: int | None = None,
     ) -> tuple[
-        Shaped[torch.Tensor, "batch ..."],
-        LogProbs,
-        Float[torch.Tensor, " batch"],
-        Float[torch.Tensor, " batch"],
+        Shaped[torch.Tensor, "group_batch ..."],
+        Float[torch.Tensor, " group_batch"],
+        Float[torch.Tensor, " group_batch"],
+        Float[torch.Tensor, " group_batch"],
     ]:
         """Get actions and values for a batch of grouped observations.
 
@@ -509,8 +520,9 @@ class IPPO(MultiAgentRLAlgorithm[tuple[Mapping[str, Any], ...]]):
         :type action_mask: GroupActionMask, optional
         :param batch_size: Batch size
         :type batch_size: int, optional
-        :return: Tuple of actions, log probabilities, entropies, values
-        :rtype: tuple[Shaped[torch.Tensor, "batch ..."], LogProbs, Float[torch.Tensor, " batch"], Float[torch.Tensor, " batch"]]
+        :return: Tuple of actions, log probabilities, entropies, values. Each has
+            one row per agent in the group per vectorized env.
+        :rtype: tuple[Shaped[torch.Tensor, "group_batch ..."], Float[torch.Tensor, " group_batch"], Float[torch.Tensor, " group_batch"], Float[torch.Tensor, " group_batch"]]
         """
         # Process in batches. Mapping/tuple observations carry no direct
         # shape; they always take the single-pass branch (checking the leaf
@@ -570,8 +582,8 @@ class IPPO(MultiAgentRLAlgorithm[tuple[Mapping[str, Any], ...]]):
         **kwargs: Any,
     ) -> tuple[
         dict[str, PolicyActionArray],
-        dict[str, AgentValueRows],
-        dict[str, AgentValueRows],
+        dict[str, AgentLogProbRows],
+        dict[str, AgentEntropyRows],
         dict[str, AgentValueRows],
     ]:
         """Return the next action to take in the environment.
@@ -581,7 +593,7 @@ class IPPO(MultiAgentRLAlgorithm[tuple[Mapping[str, Any], ...]]):
         :param infos: Information dictionary returned by env.step(actions)
         :type infos: InfosDict | None
         :return: Tuple of actions, log probabilities, entropies, values
-        :rtype: tuple[dict[str, PolicyActionArray], dict[str, AgentValueRows], dict[str, AgentValueRows], dict[str, AgentValueRows]]
+        :rtype: tuple[dict[str, PolicyActionArray], dict[str, AgentLogProbRows], dict[str, AgentEntropyRows], dict[str, AgentValueRows]]
         """
         assert not key_in_nested_dict(
             obs,
@@ -610,10 +622,12 @@ class IPPO(MultiAgentRLAlgorithm[tuple[Mapping[str, Any], ...]]):
             list(grouped_agents.keys()),
         )
 
-        action_dict: dict[str, PolicyActionArray] = {}
-        action_logprob_dict: dict[str, AgentValueArray] = {}
-        dist_entropy_dict: dict[str, AgentValueArray] = {}
-        state_values_dict: dict[str, AgentValueArray] = {}
+        # Keyed by group id and stacked over the group's agents until
+        # ``disassemble_grouped_outputs`` splits them into per-agent, per-env rows.
+        action_dict: dict[str, GroupActionArray] = {}
+        action_logprob_dict: dict[str, GroupLogProbArray] = {}
+        dist_entropy_dict: dict[str, GroupEntropyArray] = {}
+        state_values_dict: dict[str, GroupValueArray] = {}
         for agent_id, agent_obs in preprocessed.items():
             action_mask = action_masks[agent_id]
             actor = self.actors[agent_id]
@@ -960,7 +974,7 @@ class IPPO(MultiAgentRLAlgorithm[tuple[Mapping[str, Any], ...]]):
         max_steps: int | None = None,
         loop: int = 3,
         sum_scores: bool = True,
-    ) -> float | Float[npt.NDArray[np.float64], " num_agents"]:
+    ) -> float | Float[npt.NDArray[np.float64], " num_groups"]:
         """Return mean test score of agent in environment with epsilon-greedy policy.
 
         :param env: The environment to be tested in
@@ -971,8 +985,9 @@ class IPPO(MultiAgentRLAlgorithm[tuple[Mapping[str, Any], ...]]):
         :type loop: int, optional
         :param sum_scores: Boolean flag to indicate whether to sum sub-agent scores, defaults to True
         :type sum_scores: bool, optional
-        :return: Mean test score, or per-agent scores when ``sum_scores`` is False
-        :rtype: float | Float[npt.NDArray[np.float64], " num_agents"]
+        :return: Mean test score, or one score per shared-policy group when
+            ``sum_scores`` is False
+        :rtype: float | Float[npt.NDArray[np.float64], " num_groups"]
         """
         self.set_training_mode(False)
         with torch.no_grad():
@@ -1008,7 +1023,7 @@ class IPPO(MultiAgentRLAlgorithm[tuple[Mapping[str, Any], ...]]):
                     reward = self.sum_shared_rewards(reward)
 
                     # Compute score increment (replace NaNs representing inactive agents with 0)
-                    agent_rewards: AgentScoreArray = np.array(
+                    agent_rewards: AgentRewardArray = np.array(
                         list(reward.values()),
                     ).transpose()
                     agent_rewards = np.where(np.isnan(agent_rewards), 0, agent_rewards)
@@ -1060,7 +1075,8 @@ class IPPO(MultiAgentRLAlgorithm[tuple[Mapping[str, Any], ...]]):
 
                 rewards.append(np.mean(completed_episode_scores, axis=0))
 
-        mean_fit_row: Float[npt.NDArray[np.float64], " num_agents"] = np.mean(
+        # One column per group, or the single summed column, as in AgentScoreArray.
+        mean_fit_row: Float[npt.NDArray[np.float64], " _score_cols"] = np.mean(
             rewards,
             axis=0,
         )

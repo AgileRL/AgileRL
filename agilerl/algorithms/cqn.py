@@ -233,9 +233,9 @@ class CQN(RLAlgorithm[TensorDict]):
         else:
             self.actor.eval()
             with torch.no_grad():
-                action_values: Float[npt.NDArray[np.float32], "num_envs action_dim"] = (
-                    self.actor(obs).cpu().data.numpy()
-                )
+                action_values: Float[
+                    npt.NDArray[np.float32], "num_envs num_actions"
+                ] = self.actor(obs).cpu().data.numpy()
             self.actor.train()
 
             if action_mask is None:

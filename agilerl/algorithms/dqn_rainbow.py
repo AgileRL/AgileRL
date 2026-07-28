@@ -295,7 +295,7 @@ class RainbowDQN(RLAlgorithm[TensorDict]):
 
         self.actor.train(mode=training)
         with torch.no_grad():
-            action_values: Float[torch.Tensor, "num_envs action_dim"] = self.actor(obs)
+            action_values: Float[torch.Tensor, "num_envs num_actions"] = self.actor(obs)
 
         if action_mask is None:
             action = np.argmax(action_values.cpu().data.numpy(), axis=-1)

@@ -14,6 +14,10 @@ from agilerl.typing import (
     AnyArray,
     AnyTensor,
     BPTTSequenceType,
+    BufferAdvantageArray,
+    BufferReturnArray,
+    BufferRewardArray,
+    BufferValueArray,
     EnvDoneArray,
     HiddenStateDict,
     IndexTensor,
@@ -41,8 +45,7 @@ StepFloatArray = Float[npt.NDArray[np.floating], "..."]
 # Rewards as the environments emit them: integer-valued envs hand over an int
 # array rather than a float one.
 StepNumArray = Num[npt.NDArray[np.number], "..."]
-# The float32 / bool matrices read back out of the buffer leaves for GAE.
-BufferFloatArray = Float[npt.NDArray[np.float32], "buffer_size num_envs"]
+# The bool matrix read back out of the buffer leaves for GAE.
 BufferBoolArray = Bool[npt.NDArray[np.bool_], "buffer_size num_envs"]
 # One BPTT sequence sliced out of the buffer (the env axis has been dropped).
 # Episodes end at different timesteps, so lengths differ between sequences.
@@ -530,22 +533,22 @@ class RolloutBuffer:
         buffer_size = self.capacity if self.full else self.pos
 
         # Temporary numpy arrays for computation, will be assigned back to TensorDict
-        advantages_np: BufferFloatArray = np.zeros(
+        advantages_np: BufferAdvantageArray = np.zeros(
             (buffer_size, self.num_envs), dtype=np.float32
         )
-        returns_np: BufferFloatArray = np.zeros(
+        returns_np: BufferReturnArray = np.zeros(
             (buffer_size, self.num_envs), dtype=np.float32
         )
 
         # Get necessary data from TensorDict as numpy arrays for computation
         # Slicing to buffer_size for all components.
-        rewards_np: BufferFloatArray = (
+        rewards_np: BufferRewardArray = (
             narrow_tensor(self.buffer["rewards"])[:buffer_size].cpu().numpy()
         )
         dones_np: BufferBoolArray = (
             narrow_tensor(self.buffer["dones"])[:buffer_size].cpu().numpy()
         )
-        values_np: BufferFloatArray = (
+        values_np: BufferValueArray = (
             narrow_tensor(self.buffer["values"])[:buffer_size].cpu().numpy()
         )
 
@@ -1026,7 +1029,7 @@ class RolloutBuffer:
 
         # Prepare indices, but only shuffle the sequence indices and not the
         # entire batch to ensure that sequences are maintained as a whole.
-        indices: Int[torch.Tensor, "num_sequences max_seq_len"] = torch.arange(
+        indices: Int[torch.Tensor, "num_sequences padded_seq_len"] = torch.arange(
             start=0,
             end=total_sequences * max_sequence_length,
         ).reshape(total_sequences, max_sequence_length)

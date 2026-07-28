@@ -416,15 +416,15 @@ class ContinuousQNetwork(EvolvableNetwork):
     def forward(
         self,
         obs: TorchObsType,
-        actions: Shaped[npt.NDArray, "*batch num_actions"]
-        | Shaped[torch.Tensor, "*batch num_actions"],
+        actions: Shaped[npt.NDArray, "*batch action_dim"]
+        | Shaped[torch.Tensor, "*batch action_dim"],
     ) -> Float[torch.Tensor, "batch 1"]:
         """Forward pass of the network.
 
         :param obs: Input tensor.
         :type obs: torch.Tensor, dict[str, torch.Tensor], or list[torch.Tensor]
         :param actions: Actions tensor.
-        :type actions: Shaped[npt.NDArray, "*batch num_actions"] | Shaped[torch.Tensor, "*batch num_actions"]
+        :type actions: Shaped[npt.NDArray, "*batch action_dim"] | Shaped[torch.Tensor, "*batch action_dim"]
         :return: Output tensor.
         :rtype: Float[torch.Tensor, "batch 1"]
         """

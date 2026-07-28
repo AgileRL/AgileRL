@@ -248,8 +248,10 @@ def log_prob_continuous(
     :type mu: Float[torch.Tensor, "batch action_dim"]
     :param log_std: Log standard deviation of the distribution.
     :type log_std: Float[torch.Tensor, "batch action_dim"]
-    :param action: Action, broadcast against ``mu``; a single-dimensional action
-        space may supply it without its trailing action axis.
+    :param action: Action, shaped like ``mu``. The rank is left unconstrained
+        because callers reach here having dropped the trailing axis of a width-1
+        action space, which broadcasts to ``(batch, batch)`` and collapses to one
+        log probability repeated across the batch.
     :type action: Float[torch.Tensor, "batch ..."]
     :return: Log probability of the action.
     :rtype: LogProbs

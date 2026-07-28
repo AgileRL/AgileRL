@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from numbers import Number
 from typing import TYPE_CHECKING, Any
 
 import gymnasium as gym
@@ -13,9 +14,9 @@ from jaxtyping import Bool, Float, Int, Shaped
 
 from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.algorithms import PPO
-from agilerl.algorithms.ppo import EnvValueArray, PolicyActionArray
+from agilerl.algorithms.ppo import PolicyActionArray
 from agilerl.networks import StochasticActor
-from agilerl.typing import EnvDoneArray, EnvScoreArray, RolloutReturn
+from agilerl.typing import EnvDoneArray, EnvScoreArray, LogProbArray, ValueArray
 
 if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
     from agilerl.algorithms import GRPO, LLMPPO, LLMREINFORCE
@@ -24,13 +25,29 @@ if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
 SupportedOnPolicy = PPO
 RolloutEnv = gym.Env | gym.vector.VectorEnv
 
-# Batched environment observation. Dict/Tuple observation spaces yield a dict or
-# tuple of these rather than a single array.
-BatchedObsArray = Shaped[npt.NDArray, "num_envs ..."]
+# Environment observation. Dict and Tuple observation spaces yield a dict or tuple
+# of these leaves rather than a single array. The leading axis counts envs only for
+# a vectorized env; a plain ``gym.Env`` hands back one unbatched observation, and a
+# plain ``gym.Env`` over a ``Discrete`` space hands back a bare ``int``.
+BatchedObsLeaf = Shaped[npt.NDArray, "_num_envs ..."]
+BatchedObsArray = (
+    BatchedObsLeaf | dict[str, BatchedObsLeaf] | tuple[BatchedObsLeaf, ...] | Number
+)
 
 # Per-env done flag carried between rollouts. Its dtype is bool once a step has
 # been taken and float64 on the freshly reset flags a caller may start from.
 LastDoneArray = Shaped[npt.NDArray, " num_envs"]
+
+# Episode scores completed this rollout, then the observation, done flag, scores
+# and info to resume from. The done flag is sized by the environment and the score
+# row by ``agent.num_envs``, which agree only for a vectorized env.
+OnPolicyRolloutReturn = tuple[
+    list[float],
+    BatchedObsArray,
+    Shaped[npt.NDArray, " _num_envs"],
+    Float[npt.NDArray[np.float64], " _num_envs"],
+    dict[str, Any],
+]
 
 
 def _collect_rollouts(
@@ -43,7 +60,7 @@ def _collect_rollouts(
     last_info: dict[str, Any] | None = None,
     *,
     recurrent: bool,
-) -> RolloutReturn:
+) -> OnPolicyRolloutReturn:
     """Collect rollouts for on-policy algorithms.
 
     :param agent: The agent to collect rollouts for.
@@ -65,7 +82,7 @@ def _collect_rollouts(
 
     :return: The scores for the episodes completed in the rollouts, followed by
         the observation, done flag, scores, and info for the current step.
-    :rtype: tuple[list[float], npt.NDArray, npt.NDArray, npt.NDArray, dict[str, Any]]
+    :rtype: OnPolicyRolloutReturn
     """
     if (
         last_obs is None
@@ -154,8 +171,8 @@ def _collect_rollouts(
             np.asarray(reward),
         )
         is_terminal_np: EnvDoneArray = np.atleast_1d(is_terminal)
-        value_np: EnvValueArray = np.atleast_1d(value)
-        log_prob_np: EnvValueArray = np.atleast_1d(log_prob)
+        value_np: ValueArray = np.atleast_1d(value)
+        log_prob_np: LogProbArray = np.atleast_1d(log_prob)
 
         current_action_mask = info.get("action_mask", None)
         agent.rollout_buffer.add(
@@ -234,7 +251,7 @@ def collect_rollouts(
     env: RolloutEnv,
     n_steps: int | None = None,
     **kwargs: Any,
-) -> RolloutReturn:
+) -> OnPolicyRolloutReturn:
     """Collect rollouts for non-recurrent on-policy algorithms.
 
     :param agent: The agent to collect rollouts for.
@@ -246,7 +263,7 @@ def collect_rollouts(
 
     :return: The scores for the episodes completed in the rollouts, followed by
         the observation, done flag, scores, and info for the current step.
-    :rtype: tuple[list[float], npt.NDArray, npt.NDArray, npt.NDArray, dict[str, Any]]
+    :rtype: OnPolicyRolloutReturn
     """
     return _collect_rollouts(agent, env, n_steps, recurrent=False, **kwargs)
 
@@ -256,7 +273,7 @@ def collect_rollouts_recurrent(
     env: RolloutEnv,
     n_steps: int | None = None,
     **kwargs: Any,
-) -> RolloutReturn:
+) -> OnPolicyRolloutReturn:
     """Collect rollouts for recurrent on-policy algorithms.
 
     :param agent: The agent to collect rollouts for.
@@ -268,7 +285,7 @@ def collect_rollouts_recurrent(
 
     :return: The scores for the episodes completed in the rollouts, followed by
         the observation, done flag, scores, and info for the current step.
-    :rtype: tuple[list[float], npt.NDArray, npt.NDArray, npt.NDArray, dict[str, Any]]
+    :rtype: OnPolicyRolloutReturn
     """
     return _collect_rollouts(agent, env, n_steps, recurrent=True, **kwargs)
 

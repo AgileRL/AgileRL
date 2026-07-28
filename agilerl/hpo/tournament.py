@@ -16,15 +16,16 @@ AgentT = TypeVar("AgentT", bound=EvolvableAlgorithmProtocol)
 # The double-argsort rank vector ``_elitism`` produces and ``_tournament`` consumes.
 RankArray = Int[npt.NDArray[np.int64], " pop_size"]
 
-# One generation's fitness entry: a scalar score, a per-sub-agent sequence or
-# array, or a per-sub-agent mapping.
+# One generation's fitness entry: a scalar score, or a row of them. The row is
+# one column per sub-agent or one per shared-policy group depending on which
+# algorithm recorded it, and is collapsed to a scalar either way.
 FitnessEntry = (
     float
     | int
     | dict[str, float]
     | list[float | int]
     | tuple[float | int, ...]
-    | Num[npt.NDArray[np.number], " num_agents"]
+    | Num[npt.NDArray[np.number], " _fitness_cols"]
 )
 
 
