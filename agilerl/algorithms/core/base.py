@@ -202,11 +202,9 @@ class ClassicRLPopulationFactory(Protocol):
         index: int,
         device: DeviceType = "cpu",
         **kwargs: Any,
-    ) -> None:
-        pass
+    ) -> None: ...
 
-    def load_checkpoint(self, path: str) -> None:
-        pass
+    def load_checkpoint(self, path: str) -> None: ...
 
 
 ClassicRLAlgoT = TypeVar("ClassicRLAlgoT", bound=ClassicRLPopulationFactory)
@@ -2009,8 +2007,7 @@ class MultiAgentRLAlgorithm(
         net_config: NetConfigType | None = ...,
         flatten: bool = ...,
         return_encoders: Literal[False] = ...,
-    ) -> NetConfigType:
-        pass
+    ) -> NetConfigType: ...
 
     @overload
     def build_net_config(
@@ -2019,8 +2016,7 @@ class MultiAgentRLAlgorithm(
         flatten: bool = ...,
         *,
         return_encoders: Literal[True],
-    ) -> tuple[NetConfigType, dict[str, NetConfigType]]:
-        pass
+    ) -> tuple[NetConfigType, dict[str, NetConfigType]]: ...
 
     def build_net_config(
         self,

@@ -134,7 +134,7 @@ concurrency = ["multiprocessing", "thread"]
 sigterm = true
 
 [tool.coverage.report]
-exclude_lines = [
+exclude_also = [
     "pragma: no cover",
     "if TYPE_CHECKING:",
 ]

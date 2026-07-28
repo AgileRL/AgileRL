@@ -220,6 +220,10 @@ def cleanup():
 def isolate_working_directory(tmp_path_factory):
     """Run the test session in a temporary working directory."""
     with pytest.MonkeyPatch.context() as monkeypatch:
+        monkeypatch.setenv(
+            "COVERAGE_FILE",
+            os.path.abspath(os.environ.get("COVERAGE_FILE", ".coverage")),
+        )
         monkeypatch.chdir(tmp_path_factory.mktemp("cwd"))
         yield
 
