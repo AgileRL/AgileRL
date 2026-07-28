@@ -33,6 +33,7 @@ from typing import cast
 
 from agilerl.memory import formulas
 from agilerl.memory.calibration import (
+    FIXTURES_DIR,
     DeviceFingerprint,
     MeasuredPoint,
     ModelProfile,
@@ -186,6 +187,106 @@ def _analytic_bytes(
         model, device, gen_knobs, colocated=True, profile=None
     )
     return breakdown.total_bytes, generation_basis(model, gen_knobs)
+
+
+def _model_spec_for(model_name: str, quantizations: set[str]) -> ModelSpec:
+    """Analytic spec for a model, without measuring weights on a GPU.
+
+    The sweep proper measures realised weight bytes per variant; recovery
+    from a checkpoint cannot, so it falls back to the analytic sizes.
+    """
+    from transformers import AutoConfig
+
+    from agilerl.memory.specs import ModelArch, WeightVariant
+
+    arch = ModelArch.from_hf_config(AutoConfig.from_pretrained(model_name).to_dict())
+    variants = tuple(
+        WeightVariant(
+            name="base" if q == "none" else q,
+            quantization=cast("QuantizationMethod", q),
+        )
+        for q in sorted(quantizations)
+    )
+    return ModelSpec(model_id=model_name, arch=arch, variants=variants)
+
+
+def _append_checkpoint(path: Path, points: list[MeasuredPoint]) -> None:
+    """Append measurements to the crash-safe sidecar, one JSON object a line."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a") as handle:
+        for point in points:
+            handle.write(json.dumps(point.model_dump(mode="json")) + "\n")
+
+
+def profile_from_checkpoint(
+    checkpoint_path: Path,
+    model_name: str,
+    device_name: str,
+    device_index: int = 0,
+) -> ModelProfile:
+    """Rebuild a fitted profile from an interrupted sweep's measurements.
+
+    The corners a partial sweep did reach still anchor a usable fit, so an
+    hour of GPU time is not lost to the sweep being killed at point 12.
+    Holdout error is left unset: which points were held out is a property of
+    the plan, and a partial run has no guarantee of having reached them.
+    """
+    measured = [
+        MeasuredPoint.model_validate(json.loads(line))
+        for line in checkpoint_path.read_text().splitlines()
+        if line.strip()
+    ]
+    if not measured:
+        msg = f"{checkpoint_path} holds no measurements."
+        raise ValueError(msg)
+
+    total_bytes, capability = _device_identity(device_index)
+    device = DeviceSpec.from_compute_capability(
+        total_bytes, *capability, name=device_name
+    )
+    model = _model_spec_for(
+        model_name, {str(p.knobs.get("quantization", "none")) for p in measured}
+    )
+
+    baselines = sorted(
+        p.sleeping_baseline_bytes
+        for p in measured
+        if p.phase == "training" and p.sleeping_baseline_bytes
+    )
+    canonical = baselines[len(baselines) // 2] if baselines else 0
+    pairs: dict[str, list[tuple[SweepPoint, MeasuredPoint]]] = {
+        "training": [],
+        "generation": [],
+    }
+    for point in measured:
+        pairs[point.phase].append((SweepPoint.from_dict(point.knobs), point))
+
+    return ModelProfile(
+        model_id=model_name,
+        model_spec=model,
+        algorithm=str(measured[0].knobs.get("algorithm", "grpo")),
+        quantization=str(measured[0].knobs.get("quantization", "none")),
+        device=DeviceFingerprint(
+            name=device_name,
+            total_bytes=total_bytes,
+            compute_capability=f"{capability[0]}.{capability[1]}",
+        ),
+        framework_versions=_framework_versions(),
+        training=calibrate_phase(
+            model,
+            device,
+            pairs["training"],
+            [],
+            "training",
+            canonical_baseline_bytes=canonical,
+        ),
+        generation=(
+            calibrate_phase(model, device, pairs["generation"], [], "generation")
+            if pairs["generation"]
+            else PhaseCalibration()
+        ),
+        measured=tuple(measured),
+    )
 
 
 def calibrate_phase(
@@ -364,6 +465,7 @@ def run_sweep(
     memory_efficient_params: bool = True,
     seq_lens: tuple[int, ...] | None = None,
     auto_budget: bool = False,
+    checkpoint_path: Path | None = None,
 ) -> ModelProfile:
     """Measure every plan point on the local GPU and build the profile.
 
@@ -371,6 +473,12 @@ def run_sweep(
     this parent process never touches CUDA. A point that fails (OOM on a
     corner too large for the device) is logged and skipped rather than
     aborting the sweep.
+
+    Measurements are appended to ``checkpoint_path`` as they land. A sweep is
+    an hour of GPU time and the profile is only written at the end, so
+    without this a sweep interrupted at point 12 of 21 loses all twelve --
+    which is exactly what happened when a long-context re-run was cut short.
+    Rebuild a profile from a partial run with :func:`profile_from_checkpoint`.
     """
     from transformers import AutoConfig
 
@@ -491,6 +599,11 @@ def run_sweep(
         if generation is not None:
             measured.append(generation)
             target["generation"].append((point, generation))
+        if checkpoint_path is not None:
+            _append_checkpoint(
+                checkpoint_path,
+                [p for p in (training, generation) if p is not None],
+            )
 
     if skipped:
         print(f"\n{len(skipped)} point(s) skipped:", flush=True)
@@ -507,6 +620,8 @@ def run_sweep(
     return ModelProfile(
         model_id=model_name,
         model_spec=model,
+        algorithm=algorithm,
+        quantization=point_quantization,
         device=DeviceFingerprint(
             name=device_name,
             total_bytes=total_bytes,
@@ -595,11 +710,40 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--output-dir", default=None)
     parser.add_argument(
+        "--checkpoint",
+        default=None,
+        help=(
+            "Append each measurement here as it lands, so an interrupted "
+            "sweep is recoverable (default: <output-dir>/<model>.partial.jsonl)"
+        ),
+    )
+    parser.add_argument(
+        "--from-checkpoint",
+        action="store_true",
+        help="Rebuild a profile from an interrupted sweep's --checkpoint file",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Print the sweep plan and exit (no GPU needed)",
     )
     args = parser.parse_args(argv)
+
+    output_dir = Path(args.output_dir) if args.output_dir else None
+    checkpoint = (
+        Path(args.checkpoint)
+        if args.checkpoint
+        else (output_dir or FIXTURES_DIR)
+        / f"{args.model.replace('/', '__')}.partial.jsonl"
+    )
+
+    if args.from_checkpoint:
+        recovered = profile_from_checkpoint(
+            checkpoint, args.model, args.device_name, device_index=args.device_index
+        )
+        print(f"Recovered {len(recovered.measured)} measurements from {checkpoint}")
+        print(f"Wrote {save_profile(recovered, output_dir)}")
+        return 0
 
     if args.dry_run:
         for point in corner_plan():
@@ -623,8 +767,8 @@ def main(argv: list[str] | None = None) -> int:
             tuple(int(s) for s in args.seq_lens.split(",")) if args.seq_lens else None
         ),
         auto_budget=args.auto_budget,
+        checkpoint_path=checkpoint,
     )
-    output_dir = Path(args.output_dir) if args.output_dir else None
     path = save_profile(profile, output_dir)
     print(f"Wrote {path}")
     print(

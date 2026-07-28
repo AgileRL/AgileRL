@@ -166,6 +166,13 @@ class ModelProfile(BaseModel):
     model_spec: ModelSpec | None = None
     trainer_variant: str = "base"
     generation_variant: str = "base"
+    #: Part of the profile's identity, not just metadata. A sweep's constants
+    #: are specific to the algorithm (PPO carries a critic adapter and a value
+    #: head that GRPO does not) and to the trainer quantization, so a profile
+    #: keyed only by (model, device) lets an SFT sweep silently overwrite a
+    #: GRPO one — which it did.
+    algorithm: str = "grpo"
+    quantization: str = "none"
     device: DeviceFingerprint | None = None
     #: Versions the constants were measured under; drift in these moves the
     #: constants (e.g. a change to the fused-logprob chunking).
@@ -248,22 +255,43 @@ def profile_path(
     model_id: str,
     fixtures_dir: Path | None = None,
     device_name: str | None = None,
+    algorithm: str = "grpo",
+    quantization: str = "none",
 ) -> Path:
-    """Canonical fixture path for a (model, device) pair.
+    """Canonical fixture path for one (model, device, algorithm, quantization).
 
-    Calibration is per device, not per model, so the device belongs in the
-    filename — otherwise profiling the same model on a second GPU silently
-    overwrites the first.
+    Every part of that tuple moves the constants, so every part belongs in the
+    filename: profiling the same model on a second GPU, under SFT, or at nf4
+    would otherwise silently overwrite the first — all three of which happened
+    before this was keyed properly.
+
+    The default ``grpo``/``none`` combination stays suffix-free, so the common
+    case reads as ``Model__Name@Device.json``.
     """
     directory = fixtures_dir or FIXTURES_DIR
     stem = _slug(model_id)
     if device_name:
         stem = f"{stem}@{_slug(device_name)}"
+    if algorithm != "grpo":
+        stem = f"{stem}.{algorithm}"
+    if quantization != "none":
+        stem = f"{stem}.{quantization}"
     return directory / f"{stem}.json"
 
 
+#: Suffix tokens ``profile_path`` may append. Matched explicitly rather than
+#: by splitting on ".", because model names contain dots of their own
+#: ("Qwen2.5-0.5B-Instruct") and a naive split truncates them to "Qwen2".
+_STEM_SUFFIXES = frozenset({"grpo", "ppo", "sft", "dpo", "nf4", "int8", "awq", "gptq"})
+
+
 def _parse_stem(stem: str) -> tuple[str, str | None]:
-    model_part, _, device_part = stem.partition("@")
+    # Callers key off (model, device); the algorithm and quantization tokens
+    # identify the file on disk but are carried inside the profile itself.
+    parts = stem.split(".")
+    while len(parts) > 1 and parts[-1] in _STEM_SUFFIXES:
+        parts.pop()
+    model_part, _, device_part = ".".join(parts).partition("@")
     return model_part.replace("__", "/"), (
         device_part.replace("-", " ") if device_part else None
     )
@@ -321,6 +349,8 @@ def save_profile(profile: ModelProfile, fixtures_dir: Path | None = None) -> Pat
         profile.model_id,
         fixtures_dir,
         device_name=profile.device.name if profile.device else None,
+        algorithm=profile.algorithm,
+        quantization=profile.quantization,
     )
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
