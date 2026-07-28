@@ -29,6 +29,7 @@ import numpy as np
 from accelerate.utils import broadcast_object_list
 
 from agilerl.algorithms.core.base import EvolvableAlgorithm, LLMAlgorithm
+from agilerl.models.hpo import resolve_and_validate_frequency_ratios
 
 PopulationT = list[EvolvableAlgorithm]
 
@@ -227,27 +228,9 @@ class MultiFrequencySelection:
             )
             raise ValueError(msg)
 
-        if not evolution_frequency_ratios:
-            evolution_frequency_ratios = [1] + [
-                5 * i for i in range(1, n_subpopulations)
-            ]
-        else:
-            evolution_frequency_ratios = list(evolution_frequency_ratios)
-        if len(evolution_frequency_ratios) != n_subpopulations:
-            msg = (
-                f"evolution_frequency_ratios must have length n_subpopulations "
-                f"({n_subpopulations}), got {len(evolution_frequency_ratios)}."
-            )
-            raise ValueError(msg)
-        if any(r < 1 for r in evolution_frequency_ratios):
-            msg = "Each evolution_frequency_ratio must be >= 1."
-            raise ValueError(msg)
-        if any(
-            evolution_frequency_ratios[i] >= evolution_frequency_ratios[i + 1]
-            for i in range(len(evolution_frequency_ratios) - 1)
-        ):
-            msg = "evolution_frequency_ratios must be strictly increasing."
-            raise ValueError(msg)
+        evolution_frequency_ratios = resolve_and_validate_frequency_ratios(
+            evolution_frequency_ratios, n_subpopulations
+        )
 
         return (
             population_size,

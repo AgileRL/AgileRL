@@ -1,12 +1,9 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Annotated, Any, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from typing_extensions import Self
-
-if TYPE_CHECKING:
-    from agilerl.models.training import TrainingSpec
 
 
 class RLHyperparameter(BaseModel):
@@ -91,6 +88,42 @@ class TournamentSelectionSpec(BaseModel):
     elitism: bool = True
 
 
+def resolve_and_validate_frequency_ratios(
+    evolution_frequency_ratios: list[int] | None,
+    n_subpopulations: int,
+) -> list[int]:
+    """Default and validate the MF-PBT per-subpopulation evolution-frequency ratios.
+
+    :param evolution_frequency_ratios: The configured ratios, or None/[]
+        to default to [1, 5, 10, ...].
+    :type evolution_frequency_ratios: list[int] | None
+    :param n_subpopulations: Number of subpopulations the ratios must cover.
+    :type n_subpopulations: int
+    :return: A new list of n_subpopulations strictly-increasing ratios >= 1.
+    :rtype: list[int]
+    :raises ValueError: If the ratios are not n_subpopulations strictly-increasing
+        integers >= 1.
+    """
+    ratios = (
+        list(evolution_frequency_ratios)
+        if evolution_frequency_ratios
+        else [1] + [5 * i for i in range(1, n_subpopulations)]
+    )
+    if len(ratios) != n_subpopulations:
+        msg = (
+            f"evolution_frequency_ratios must have length n_subpopulations "
+            f"({n_subpopulations}), got {len(ratios)}."
+        )
+        raise ValueError(msg)
+    if any(r < 1 for r in ratios):
+        msg = "Each evolution_frequency_ratio must be >= 1."
+        raise ValueError(msg)
+    if any(ratios[i] >= ratios[i + 1] for i in range(len(ratios) - 1)):
+        msg = "evolution_frequency_ratios must be strictly increasing."
+        raise ValueError(msg)
+    return ratios
+
+
 class MultiFrequencySelectionSpec(BaseModel):
     """Pydantic model for the MultiFrequencySelection object.
 
@@ -135,23 +168,9 @@ class MultiFrequencySelectionSpec(BaseModel):
     @model_validator(mode="after")
     def _resolve_and_validate_ratios(self) -> Self:
         """Default and validate the frequency ratios (population-size independent)."""
-        if not self.evolution_frequency_ratios:
-            self.evolution_frequency_ratios = [1] + [
-                5 * i for i in range(1, self.n_subpopulations)
-            ]
-        ratios = self.evolution_frequency_ratios
-        if len(ratios) != self.n_subpopulations:
-            msg = (
-                f"evolution_frequency_ratios must have length n_subpopulations "
-                f"({self.n_subpopulations}), got {len(ratios)}."
-            )
-            raise ValueError(msg)
-        if any(r < 1 for r in ratios):
-            msg = "Each evolution_frequency_ratio must be >= 1."
-            raise ValueError(msg)
-        if any(ratios[i] >= ratios[i + 1] for i in range(len(ratios) - 1)):
-            msg = "evolution_frequency_ratios must be strictly increasing."
-            raise ValueError(msg)
+        self.evolution_frequency_ratios = resolve_and_validate_frequency_ratios(
+            self.evolution_frequency_ratios, self.n_subpopulations
+        )
         return self
 
 
@@ -205,77 +224,4 @@ def check_selection_strategy_exclusive(
     """
     if multi_frequency_selection_spec is not None and tournament_selection is not None:
         msg = "Cannot set both 'tournament_selection' and 'multi_frequency_selection'."
-        raise ValueError(msg)
-
-
-def resolve_and_validate_multi_frequency_population(
-    multi_frequency_selection_spec: MultiFrequencySelectionSpec | None,
-    training: TrainingSpec,
-) -> None:
-    """Enforce the MF-PBT population size and finalize the bracket layout.
-
-    :param multi_frequency_selection_spec: MF-PBT spec, or None when unset.
-    :type multi_frequency_selection_spec: MultiFrequencySelectionSpec | None
-    :param training: Training spec carrying the population size.
-    :type training: ~agilerl.models.training.TrainingSpec
-    :raises ValueError: If pop_size is not set, population_size < 6,
-        population_size is not a multiple of n_subpopulations,
-        population_size // n_subpopulations < 3, a resolved bracket size is below
-        its minimum, or the resolved bracket sizes do not sum to
-        population_size // n_subpopulations.
-    """
-    if multi_frequency_selection_spec is None:
-        return
-
-    spec = multi_frequency_selection_spec
-    # pop_size is mandatory under MF-PBT
-    if "pop_size" not in training.model_fields_set:
-        msg = "pop_size is required in the training block."
-        raise ValueError(msg)
-
-    population_size = training.pop_size
-    if population_size < 6:
-        msg = (
-            "population_size must be >= 6 (the smallest MF-PBT layout is 2 "
-            f"subpopulations of 3 agents), got {population_size}."
-        )
-        raise ValueError(msg)
-    if population_size % spec.n_subpopulations != 0:
-        msg = (
-            f"population_size ({population_size}) must be divisible by "
-            f"n_subpopulations ({spec.n_subpopulations})."
-        )
-        raise ValueError(msg)
-
-    subpop_size = population_size // spec.n_subpopulations
-    if subpop_size < 3:
-        msg = (
-            "population_size // n_subpopulations must be >= 3 so each subpopulation "
-            "can host at least one winner, one open-for-migration agent and one "
-            f"loser; got population_size={population_size}, "
-            f"n_subpopulations={spec.n_subpopulations} -> subpopulation_size={subpop_size}."
-        )
-        raise ValueError(msg)
-
-    # Resolve the None bracket defaults
-    if spec.n_winners is None:
-        spec.n_winners = round(0.25 * subpop_size)
-    if spec.n_open_for_migration is None:
-        spec.n_open_for_migration = round(0.25 * subpop_size)
-    if spec.n_losers is None:
-        spec.n_losers = (
-            subpop_size - spec.n_winners - spec.n_survivors - spec.n_open_for_migration
-        )
-    if spec.n_losers < 1:
-        msg = f"n_losers must be >= 1, got {spec.n_losers}."
-        raise ValueError(msg)
-    bracket_sum = (
-        spec.n_winners + spec.n_survivors + spec.n_open_for_migration + spec.n_losers
-    )
-    if bracket_sum != subpop_size:
-        msg = (
-            f"n_winners + n_survivors + n_open_for_migration + n_losers "
-            f"({bracket_sum}) must equal population_size // n_subpopulations "
-            f"({subpop_size})."
-        )
         raise ValueError(msg)

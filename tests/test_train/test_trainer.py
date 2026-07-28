@@ -2857,15 +2857,19 @@ def test_from_manifest_multi_agent_homogeneous(tmp_path):
 def _make_multi_frequency_ppo_trainer(
     training: TrainingSpec | None = None,
     accelerator: object | None = None,
+    multi_frequency_selection: MultiFrequencySelectionSpec | None = None,
 ) -> LocalTrainer:
     """Build an eight-slot PPO LocalTrainer driven by multi-frequency selection."""
-    multi_frequency_selection = MultiFrequencySelectionSpec(
-        n_subpopulations=2,
-        evolution_frequency_ratios=[1, 2],
-        n_winners=1,
-        n_survivors=1,
-        n_open_for_migration=1,
-        n_losers=1,
+    multi_frequency_selection = (
+        multi_frequency_selection
+        or MultiFrequencySelectionSpec(
+            n_subpopulations=2,
+            evolution_frequency_ratios=[1, 2],
+            n_winners=1,
+            n_survivors=1,
+            n_open_for_migration=1,
+            n_losers=1,
+        )
     )
     mutation = MutationSpec(
         probabilities=MutationProbabilities(no_mut=0.5, params_mut=0.3, rl_hp_mut=0.2),
@@ -2959,6 +2963,20 @@ class TestLocalTrainerMultiFrequency:
             _make_multi_frequency_ppo_trainer(
                 training=TrainingSpec(max_steps=200, evo_steps=50, pop_size=4)
             )
+
+    def test_resolves_bracket_defaults_onto_the_spec(self):
+        trainer = _make_multi_frequency_ppo_trainer(
+            multi_frequency_selection=MultiFrequencySelectionSpec(n_subpopulations=2)
+        )
+
+        spec = trainer.multi_frequency_selection_spec
+        assert (spec.n_winners, spec.n_survivors, spec.n_open_for_migration) == (
+            1,
+            0,
+            1,
+        )
+        assert spec.n_losers == 2  # 4 - 1 - 0 - 1
+        assert trainer.to_manifest()["tournament_selection"]["n_losers"] == 2
 
 
 class TestLocalTrainerMultiFrequencyManifest:

@@ -15,6 +15,7 @@ from agilerl.algorithms.core.base import (
     MultiAgentRLAlgorithm,
     RLAlgorithm,
 )
+from agilerl.hpo.multi_frequency import MultiFrequencySelection
 from agilerl.models import (
     ALGO_REGISTRY,
     AlgoSpecT,
@@ -36,7 +37,6 @@ from agilerl.models.env import (
 )
 from agilerl.models.hpo import (
     check_selection_strategy_exclusive,
-    resolve_and_validate_multi_frequency_population,
     split_selection_spec,
 )
 from agilerl.models.networks import (
@@ -152,9 +152,31 @@ class Trainer(ABC):
         self.accelerator = accelerator
         self._resume_checkpoint = resume_from_checkpoint
 
-        resolve_and_validate_multi_frequency_population(
-            multi_frequency_selection, self.training_spec
-        )
+        if multi_frequency_selection is not None:
+            if "pop_size" not in self.training_spec.model_fields_set:
+                msg = "pop_size is required in the training block."
+                raise ValueError(msg)
+
+            spec = multi_frequency_selection
+            # Only the bracket sizes are written back: the spec's own validator
+            # already resolved the rest
+            (
+                _,
+                _,
+                _,
+                spec.n_winners,
+                spec.n_survivors,
+                spec.n_open_for_migration,
+                spec.n_losers,
+            ) = MultiFrequencySelection._resolve_and_validate(
+                self.training_spec.pop_size,
+                spec.n_subpopulations,
+                spec.evolution_frequency_ratios,
+                spec.n_winners,
+                spec.n_survivors,
+                spec.n_open_for_migration,
+                spec.n_losers,
+            )
 
     @staticmethod
     def _env_spec_from_string(

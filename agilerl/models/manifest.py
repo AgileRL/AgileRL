@@ -30,7 +30,6 @@ from agilerl.models.hpo import (
     SelectionStrategySpec,
     TournamentSelectionSpec,
     default_selection_strategy,
-    resolve_and_validate_multi_frequency_population,
 )
 from agilerl.models.networks import (
     FinetuningNetworkSpec,
@@ -285,17 +284,39 @@ class TrainingManifest(BaseModel):
     def _resolve_and_validate_compatibility_with_multi_frequency(self) -> Self:
         """Check the training block is compatible with multi-frequency selection.
 
-        When MF-PBT is the configured selection strategy, this requires an explicit
-        training.pop_size.
-
         :raises ValueError: If pop_size is unset or the MF-PBT layout is invalid.
         :return: The validated manifest.
         :rtype: Self
         """
-        if isinstance(self.tournament_selection, MultiFrequencySelectionSpec):
-            resolve_and_validate_multi_frequency_population(
-                self.tournament_selection, self.training
-            )
+        spec = self.tournament_selection
+        if not isinstance(spec, MultiFrequencySelectionSpec):
+            return self
+
+        from agilerl.hpo.multi_frequency import MultiFrequencySelection
+
+        if "pop_size" not in self.training.model_fields_set:
+            msg = "pop_size is required in the training block."
+            raise ValueError(msg)
+
+        # Only the bracket sizes are written back: the spec's own validator already
+        # resolved the rest
+        (
+            _,
+            _,
+            _,
+            spec.n_winners,
+            spec.n_survivors,
+            spec.n_open_for_migration,
+            spec.n_losers,
+        ) = MultiFrequencySelection._resolve_and_validate(
+            self.training.pop_size,
+            spec.n_subpopulations,
+            spec.evolution_frequency_ratios,
+            spec.n_winners,
+            spec.n_survivors,
+            spec.n_open_for_migration,
+            spec.n_losers,
+        )
         return self
 
     @model_validator(mode="after")

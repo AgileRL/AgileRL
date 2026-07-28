@@ -8,10 +8,8 @@ from pydantic import ValidationError
 from agilerl.models.hpo import (
     MultiFrequencySelectionSpec,
     TournamentSelectionSpec,
-    resolve_and_validate_multi_frequency_population,
 )
 from agilerl.models.manifest import TrainingManifest
-from agilerl.models.training import TrainingSpec
 
 # A fully-specified valid spec (for pop_size = 16)
 VALID_MULTI_FREQUENCY = {
@@ -38,6 +36,20 @@ def _manifest(training: dict, **sections) -> dict:
     }
     data.update(sections)
     return data
+
+
+def _validated_multi_frequency(
+    training: dict, **multi_frequency
+) -> MultiFrequencySelectionSpec:
+    """Validate a manifest under MF-PBT and return its finalized selection spec."""
+    data = _manifest(
+        training,
+        tournament_selection={
+            "selection_strategy": "multi_frequency",
+            **multi_frequency,
+        },
+    )
+    return TrainingManifest.model_validate(data).tournament_selection
 
 
 class TestMultiFrequencySelectionSpec:
@@ -121,14 +133,15 @@ class TestMultiFrequencySelectionSpec:
             MultiFrequencySelectionSpec(n_subpopulations=1)
 
 
-class TestResolveAndValidateMultiFrequencyPopulation:
-    """The pop_size-dependent finalization: mandatory pop_size + bracket resolution."""
+class TestMultiFrequencyPopulationLayout:
+    """The pop_size-dependent finalization: mandatory pop_size + bracket resolution.
+
+    The manifest defers this to the operator's own resolver, so these cases pin the
+    layout rules as the manifest applies them end to end.
+    """
 
     def test_resolves_bracket_defaults_onto_spec(self):
-        spec = MultiFrequencySelectionSpec()
-        training = TrainingSpec(pop_size=16)
-
-        resolve_and_validate_multi_frequency_population(spec, training)
+        spec = _validated_multi_frequency({"max_steps": 1000, "pop_size": 16})
 
         assert spec.n_winners == 2
         assert spec.n_survivors == 0
@@ -136,10 +149,10 @@ class TestResolveAndValidateMultiFrequencyPopulation:
         assert spec.n_losers == 4
 
     def test_accepts_matching_explicit_brackets(self):
-        spec = MultiFrequencySelectionSpec(**VALID_MULTI_FREQUENCY)
-        training = TrainingSpec(pop_size=16)  # 4 subpopulations of 4
-
-        resolve_and_validate_multi_frequency_population(spec, training)
+        # 4 subpopulations of 4
+        spec = _validated_multi_frequency(
+            {"max_steps": 1000, "pop_size": 16}, **VALID_MULTI_FREQUENCY
+        )
 
         assert spec.n_winners == 1
         assert spec.n_survivors == 1
@@ -147,86 +160,69 @@ class TestResolveAndValidateMultiFrequencyPopulation:
         assert spec.n_losers == 1
 
     def test_rejects_missing_pop_size(self):
-        spec = MultiFrequencySelectionSpec()
-        training = TrainingSpec(max_steps=1000, evo_steps=100)
-
-        with pytest.raises(ValueError, match="pop_size is required"):
-            resolve_and_validate_multi_frequency_population(spec, training)
+        with pytest.raises(ValidationError, match="pop_size is required"):
+            _validated_multi_frequency({"max_steps": 1000, "evo_steps": 100})
 
     def test_rejects_pop_size_below_six(self):
-        spec = MultiFrequencySelectionSpec()
-        training = TrainingSpec(pop_size=4)
-
-        with pytest.raises(ValueError, match="population_size must be >= 6"):
-            resolve_and_validate_multi_frequency_population(spec, training)
+        with pytest.raises(ValidationError, match="population_size must be >= 6"):
+            _validated_multi_frequency({"max_steps": 1000, "pop_size": 4})
 
     def test_rejects_pop_size_not_divisible_by_subpopulations(self):
-        spec = MultiFrequencySelectionSpec(n_subpopulations=4)
-        training = TrainingSpec(pop_size=10)
-
-        with pytest.raises(ValueError, match="must be divisible by n_subpopulations"):
-            resolve_and_validate_multi_frequency_population(spec, training)
+        with pytest.raises(
+            ValidationError, match="must be divisible by n_subpopulations"
+        ):
+            _validated_multi_frequency(
+                {"max_steps": 1000, "pop_size": 10}, n_subpopulations=4
+            )
 
     @pytest.mark.parametrize(("pop_size", "n_subpopulations"), [(6, 3), (8, 4)])
     def test_rejects_subpopulation_size_below_three(self, pop_size, n_subpopulations):
-        spec = MultiFrequencySelectionSpec(n_subpopulations=n_subpopulations)
-        training = TrainingSpec(pop_size=pop_size)
-
-        with pytest.raises(ValueError, match="must be >= 3 so each subpopulation"):
-            resolve_and_validate_multi_frequency_population(spec, training)
+        with pytest.raises(ValidationError, match="must be >= 3 so each subpopulation"):
+            _validated_multi_frequency(
+                {"max_steps": 1000, "pop_size": pop_size},
+                n_subpopulations=n_subpopulations,
+            )
 
     @pytest.mark.parametrize(
         ("pop_size", "n_subpopulations"), [(6, 2), (9, 3), (12, 4)]
     )
     def test_accepts_smallest_valid_subpopulation(self, pop_size, n_subpopulations):
-        spec = MultiFrequencySelectionSpec(n_subpopulations=n_subpopulations)
-        training = TrainingSpec(pop_size=pop_size)
-
-        resolve_and_validate_multi_frequency_population(spec, training)
+        spec = _validated_multi_frequency(
+            {"max_steps": 1000, "pop_size": pop_size},
+            n_subpopulations=n_subpopulations,
+        )
 
         assert (spec.n_winners, spec.n_open_for_migration, spec.n_losers) == (1, 1, 1)
 
     def test_rejects_bracket_sizes_that_do_not_sum_to_subpopulation_size(self):
-        spec = MultiFrequencySelectionSpec(
-            n_subpopulations=2,
-            n_winners=1,
-            n_survivors=1,
-            n_open_for_migration=1,
-            n_losers=1,
-        )
-        training = TrainingSpec(pop_size=16)
-
         with pytest.raises(
-            ValueError, match="must equal population_size // n_subpopulations"
+            ValidationError, match="must equal population_size // n_subpopulations"
         ):
-            resolve_and_validate_multi_frequency_population(spec, training)
+            _validated_multi_frequency(
+                {"max_steps": 1000, "pop_size": 16},
+                n_subpopulations=2,
+                n_winners=1,
+                n_survivors=1,
+                n_open_for_migration=1,
+                n_losers=1,
+            )
 
     def test_rejects_negative_derived_n_losers(self):
         # With n_losers left to default, the remainder can go negative when the explicit
         # brackets already over-fill the subpopulation (4 - 2 - 2 - 1 = -1 here)
-        spec = MultiFrequencySelectionSpec(
-            n_subpopulations=2,
-            n_winners=2,
-            n_survivors=2,
-            n_open_for_migration=1,
-        )
-        training = TrainingSpec(pop_size=8)  # subpopulation_size = 4
-
-        with pytest.raises(ValueError, match="n_losers must be >= 1, got -1"):
-            resolve_and_validate_multi_frequency_population(spec, training)
+        with pytest.raises(ValidationError, match="n_losers must be >= 1, got -1"):
+            _validated_multi_frequency(
+                {"max_steps": 1000, "pop_size": 8},  # subpopulation_size = 4
+                n_subpopulations=2,
+                n_winners=2,
+                n_survivors=2,
+                n_open_for_migration=1,
+            )
 
     def test_honors_population_size_alias(self):
-        spec = MultiFrequencySelectionSpec()
-        training = TrainingSpec(population_size=16)
-
-        resolve_and_validate_multi_frequency_population(spec, training)
+        spec = _validated_multi_frequency({"max_steps": 1000, "population_size": 16})
 
         assert spec.n_losers == 4
-
-    def test_none_spec_leaves_training_untouched(self):
-        training = TrainingSpec(pop_size=3)
-        resolve_and_validate_multi_frequency_population(None, training)
-        assert training.pop_size == 3
 
 
 class TestManifestIntegration:
@@ -265,56 +261,6 @@ class TestManifestIntegration:
         manifest = TrainingManifest.model_validate(data)
         assert isinstance(manifest.tournament_selection, MultiFrequencySelectionSpec)
         assert manifest.tournament_selection.selection_strategy == "multi_frequency"
-
-    def test_multi_frequency_resolves_brackets_from_explicit_pop_size(self):
-        data = _manifest(
-            {"max_steps": 1000, "evo_steps": 100, "pop_size": 16},
-            tournament_selection={"selection_strategy": "multi_frequency"},
-        )
-        manifest = TrainingManifest.model_validate(data)
-        assert manifest.training.pop_size == 16
-        assert manifest.tournament_selection.n_losers == 4  # 8 - 2 - 0 - 2
-
-    def test_multi_frequency_requires_explicit_pop_size(self):
-        data = _manifest(
-            {"max_steps": 1000, "evo_steps": 100},
-            tournament_selection={"selection_strategy": "multi_frequency"},
-        )
-        with pytest.raises(ValidationError, match="pop_size is required"):
-            TrainingManifest.model_validate(data)
-
-    def test_multi_frequency_rejects_pop_size_below_six(self):
-        data = _manifest(
-            {"max_steps": 1000, "evo_steps": 100, "pop_size": 4},
-            tournament_selection={"selection_strategy": "multi_frequency"},
-        )
-        with pytest.raises(ValidationError, match="population_size must be >= 6"):
-            TrainingManifest.model_validate(data)
-
-    def test_multi_frequency_rejects_pop_size_not_divisible(self):
-        data = _manifest(
-            {"max_steps": 1000, "evo_steps": 100, "pop_size": 9},
-            tournament_selection={
-                "selection_strategy": "multi_frequency",
-                "n_subpopulations": 2,
-            },
-        )
-        with pytest.raises(ValidationError, match="must be divisible"):
-            TrainingManifest.model_validate(data)
-
-    @pytest.mark.parametrize(("pop_size", "n_subpopulations"), [(6, 3), (8, 4)])
-    def test_multi_frequency_rejects_subpopulation_size_below_three(
-        self, pop_size, n_subpopulations
-    ):
-        data = _manifest(
-            {"max_steps": 1000, "evo_steps": 100, "pop_size": pop_size},
-            tournament_selection={
-                "selection_strategy": "multi_frequency",
-                "n_subpopulations": n_subpopulations,
-            },
-        )
-        with pytest.raises(ValidationError, match="must be >= 3 so each subpopulation"):
-            TrainingManifest.model_validate(data)
 
     def test_invalid_selection_strategy_rejected(self):
         data = _manifest(
