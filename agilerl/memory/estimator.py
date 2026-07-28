@@ -550,6 +550,66 @@ def estimate_generation(
     )
 
 
+def recommend_engine_budget(
+    model: ModelSpec,
+    device: DeviceSpec,
+    knobs: GenerationKnobs,
+) -> tuple[float, dict[str, int]]:
+    """Smallest ``gpu_memory_utilization`` that serves the workload's KV demand.
+
+    The generation model is invertible. vLLM sizes its KV pool as the budget
+    minus what the engine needs for weights, the start-up profiling step,
+    CUDA graphs and LoRA slots, so requiring the pool to cover worst-case
+    demand fixes the budget:
+
+        budget >= weights + profiling peak + graphs + LoRA + KV demand
+
+    Below that the engine still starts but preempts and recomputes under
+    load — a throughput cliff rather than an OOM — which is why guessing
+    this number is worth avoiding. Returns the fraction and the terms it is
+    built from; a fraction above 1.0 means the workload cannot be served on
+    this device at this context and concurrency.
+    """
+    arch = model.arch
+    act_bytes = DTYPE_BYTES[knobs.weight_dtype]
+    counts = formulas.param_counts(arch)
+    variant = model.variant(knobs.weight_variant)
+    weights = formulas.weight_bytes(counts, knobs.weight_dtype, variant)
+
+    batched_tokens = formulas.resolve_max_num_batched_tokens(
+        knobs.max_num_seqs, knobs.max_model_len, knobs.max_num_batched_tokens
+    )
+    profiling_peak = (
+        formulas.block_recompute_bytes(
+            arch, 1, batched_tokens, act_bytes, device.has_flash_attention
+        )
+        + 2 * knobs.max_num_seqs * arch.vocab_size * 4
+    )
+    graphs = 0 if knobs.enforce_eager else formulas.CUDA_GRAPH_POOL_BYTES
+    lora_slots = int(
+        knobs.max_loras
+        * formulas.lora_param_count(arch, knobs.max_lora_rank)
+        * act_bytes
+    )
+    kv_demand = formulas.kv_cache_demand_bytes(
+        arch,
+        knobs.kv_cache_dtype,
+        knobs.weight_dtype,
+        knobs.concurrency,
+        knobs.max_model_len,
+    )
+
+    terms = {
+        "weights": weights,
+        "startup_profiling_peak": profiling_peak,
+        "cuda_graphs": graphs,
+        "lora_slots": lora_slots,
+        "kv_demand": kv_demand,
+    }
+    required = sum(terms.values())
+    return required / device.total_bytes, terms
+
+
 def estimate_run(config: RunConfig, profile: ModelProfile | None = None) -> RunEstimate:
     """Estimate both phases for a run configuration."""
     model = config.model

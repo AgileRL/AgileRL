@@ -60,6 +60,11 @@ class SweepPoint:
     #: MoE is pathological regardless, so MoE sweeps name the attention
     #: projections instead.
     lora_target_modules: str = "all-linear"
+    #: Offload trainer weights to host RAM across the rollout. On by default
+    #: because it is the framework default, but PPO faults with it: the value
+    #: head is not brought back onto the device and its forward hits a Triton
+    #: kernel with a CPU tensor.
+    memory_efficient_params: bool = True
     #: Engine budget fraction. A real sweep axis, not a fixed setting: the
     #: colocated training floor is driven by it, so holding out points at
     #: other utilizations is what validates that the floor is modelled
@@ -78,6 +83,7 @@ class SweepPoint:
             "attn_implementation": self.attn_implementation,
             "algorithm": self.algorithm,
             "lora_target_modules": self.lora_target_modules,
+            "memory_efficient_params": self.memory_efficient_params,
             "gpu_memory_utilization": self.gpu_memory_utilization,
         }
 
@@ -97,6 +103,7 @@ class SweepPoint:
             attn_implementation=str(knobs.get("attn_implementation") or "auto"),
             algorithm=str(knobs.get("algorithm") or "grpo"),
             lora_target_modules=str(knobs.get("lora_target_modules") or "all-linear"),
+            memory_efficient_params=bool(knobs.get("memory_efficient_params", True)),
             gpu_memory_utilization=float(knobs.get("gpu_memory_utilization", 0.45)),
         )
 
@@ -229,6 +236,7 @@ def measure_point(
         # Only GRPO groups completions; the others batch trajectories.
         algorithm_kwargs["group_size"] = point.group_size
     if rollout_based:
+        algorithm_kwargs["use_memory_efficient_params"] = point.memory_efficient_params
         algorithm_kwargs["use_vllm"] = True
         algorithm_kwargs["vllm_config"] = VLLMConfig(
             gpu_memory_utilization=point.gpu_memory_utilization,
@@ -483,6 +491,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--algorithm", default="grpo", choices=["grpo", "ppo", "sft", "dpo"]
     )
+    parser.add_argument("--no-memory-efficient-params", action="store_true")
     parser.add_argument(
         "--lora-target-modules",
         default="all-linear",
@@ -533,6 +542,7 @@ def main(argv: list[str] | None = None) -> int:
             attn_implementation=args.attn_implementation,
             algorithm=args.algorithm,
             lora_target_modules=args.lora_target_modules,
+            memory_efficient_params=not args.no_memory_efficient_params,
             gpu_memory_utilization=args.gpu_memory_utilization,
         )
         generation, training = measure_point(
