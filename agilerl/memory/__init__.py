@@ -1,3 +1,5 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
 """GPU memory estimation for LLM RL training and generation.
 
 A first-principles model of peak GPU memory occupancy for the framework's

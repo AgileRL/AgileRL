@@ -1,3 +1,5 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
 """Estimator behaviour: breakdown structure, monotonicity, budget checks."""
 
 import pytest

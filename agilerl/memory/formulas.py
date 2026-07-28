@@ -1,3 +1,5 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
 """Closed-form memory terms for LLM RL training and generation.
 
 Every function here is a pure function of the specs in

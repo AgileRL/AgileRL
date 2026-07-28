@@ -1,3 +1,5 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
 """Closed-form peak-memory estimation for LLM RL training and generation.
 
 Produces one stacked-bar breakdown per phase. Training and generation are

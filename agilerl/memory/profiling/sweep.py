@@ -1,3 +1,5 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
 r"""Profiling sweep: corner plan, residual fit, and fixture emission.
 
 A model joins the curated list by running this sweep on a reference device:
@@ -27,6 +29,7 @@ import sys
 import tempfile
 from dataclasses import replace
 from pathlib import Path
+from typing import cast
 
 from agilerl.memory import formulas
 from agilerl.memory.calibration import (
@@ -41,7 +44,7 @@ from agilerl.memory.calibration import (
 )
 from agilerl.memory.estimator import estimate_generation, estimate_training
 from agilerl.memory.profiling.harness import SweepPoint
-from agilerl.memory.specs import DeviceSpec, ModelSpec
+from agilerl.memory.specs import DeviceSpec, ModelSpec, QuantizationMethod
 
 #: Corner levels per knob. Corners pin the fit; centre points validate
 #: interpolation. Sequence length is the only effectively-continuous axis, so
@@ -381,7 +384,7 @@ def run_sweep(
         variants.append(
             WeightVariant(
                 name=name,
-                quantization=quantization,  # type: ignore[arg-type]
+                quantization=cast("QuantizationMethod", quantization),
                 realised_bytes=sizes["full"],
             )
         )
@@ -392,7 +395,7 @@ def run_sweep(
             variants.append(
                 WeightVariant(
                     name=stripped_name,
-                    quantization=quantization,  # type: ignore[arg-type]
+                    quantization=cast("QuantizationMethod", quantization),
                     stripped_multimodal=True,
                     realised_bytes=sizes["stripped"],
                 )

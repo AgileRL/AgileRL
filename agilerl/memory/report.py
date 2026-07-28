@@ -1,3 +1,5 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
 """Per-component memory breakdown for every calibrated model.
 
 The sweep summary reports one error figure per phase, which says whether a
@@ -16,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from typing import cast
 
 from agilerl.memory import formulas
 from agilerl.memory.calibration import (
@@ -29,7 +32,14 @@ from agilerl.memory.estimator import (
     recommend_engine_budget,
 )
 from agilerl.memory.profiling.harness import SweepPoint
-from agilerl.memory.specs import DeviceSpec, GenerationKnobs, GiB, TrainingKnobs
+from agilerl.memory.specs import (
+    Algorithm,
+    DeviceSpec,
+    GenerationKnobs,
+    GiB,
+    LoraTargetScope,
+    TrainingKnobs,
+)
 
 TRAINING_KEYS = (
     "base_weights",
@@ -117,8 +127,8 @@ def main(argv: list[str] | None = None) -> int:
             trajectories_per_update=args.group_size,
             max_model_len=args.seq_len,
             lora_rank=args.lora_rank,
-            lora_target_scope=measured_point.scope,
-            algorithm=measured_point.algorithm,
+            lora_target_scope=cast("LoraTargetScope", measured_point.scope),
+            algorithm=cast("Algorithm", measured_point.algorithm),
         )
         gen_knobs = GenerationKnobs(
             gpu_memory_utilization=args.gpu_memory_utilization,

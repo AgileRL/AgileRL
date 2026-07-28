@@ -1,3 +1,5 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
 """Per-(model, device) calibration of the analytic memory model.
 
 The runtime object is the closed-form estimator; profiling produces a small

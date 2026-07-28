@@ -1,3 +1,5 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
 """Device-level peak-memory sampling via NVML.
 
 ``torch.cuda.max_memory_allocated`` only sees the torch caching allocator.

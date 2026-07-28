@@ -1,3 +1,5 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
 """Prescriptive advice: which knob to turn when a phase is over budget.
 
 Rather than hand-maintaining savings formulas per lever, each candidate is a
@@ -48,17 +50,21 @@ def _training_candidates(
     if t.grad_rows > 1:
         candidates.append(
             (
-                f"Halve the training micro-batch "
-                f"({t.grad_rows} -> {max(1, t.grad_rows // 2)}); keep the "
-                "effective batch via gradient accumulation",
+                (
+                    f"Halve the training micro-batch "
+                    f"({t.grad_rows} -> {max(1, t.grad_rows // 2)}); keep the "
+                    "effective batch via gradient accumulation"
+                ),
                 with_training(micro_batch_size_per_gpu=max(1, t.grad_rows // 2)),
             )
         )
     if t.batch_size > 1:
         candidates.append(
             (
-                f"Halve the no-grad logprob batch "
-                f"({t.batch_size} -> {max(1, t.batch_size // 2)})",
+                (
+                    f"Halve the no-grad logprob batch "
+                    f"({t.batch_size} -> {max(1, t.batch_size // 2)})"
+                ),
                 with_training(batch_size=max(1, t.batch_size // 2)),
             )
         )
@@ -80,8 +86,10 @@ def _training_candidates(
     if not t.activation_offload:
         candidates.append(
             (
-                "Offload backward-saved activations to host RAM "
-                "(activation_offload=True)",
+                (
+                    "Offload backward-saved activations to host RAM "
+                    "(activation_offload=True)"
+                ),
                 with_training(activation_offload=True),
             )
         )
@@ -95,8 +103,10 @@ def _training_candidates(
     if t.use_separate_reference_adapter:
         candidates.append(
             (
-                "Drop the separate reference adapter (pins the reference to "
-                "the initial policy)",
+                (
+                    "Drop the separate reference adapter (pins the reference to "
+                    "the initial policy)"
+                ),
                 with_training(use_separate_reference_adapter=False),
             )
         )
@@ -135,8 +145,10 @@ def _generation_candidates(
     if g.max_num_seqs > 1:
         candidates.append(
             (
-                f"Halve max_num_seqs ({g.max_num_seqs} -> "
-                f"{max(1, g.max_num_seqs // 2)})",
+                (
+                    f"Halve max_num_seqs ({g.max_num_seqs} -> "
+                    f"{max(1, g.max_num_seqs // 2)})"
+                ),
                 with_generation(max_num_seqs=max(1, g.max_num_seqs // 2)),
             )
         )
@@ -152,8 +164,10 @@ def _generation_candidates(
         lower = round(g.gpu_memory_utilization - 0.1, 2)
         candidates.append(
             (
-                f"Lower gpu_memory_utilization "
-                f"({g.gpu_memory_utilization} -> {lower}; shrinks the KV pool)",
+                (
+                    f"Lower gpu_memory_utilization "
+                    f"({g.gpu_memory_utilization} -> {lower}; shrinks the KV pool)"
+                ),
                 with_generation(gpu_memory_utilization=lower),
             )
         )

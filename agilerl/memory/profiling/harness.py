@@ -1,3 +1,5 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
 """Measure one profiling point: real GRPO generation + training peaks.
 
 Each point instantiates a colocated GRPO agent with the point's knobs, runs
@@ -23,11 +25,28 @@ import argparse
 import inspect
 import json
 import sys
+from collections.abc import Iterable
 from dataclasses import dataclass, replace
 from pathlib import Path
+from typing import Any, Protocol, cast
 
 from agilerl.memory.calibration import MeasuredPoint
-from agilerl.memory.specs import GenerationKnobs, TrainingKnobs
+from agilerl.memory.specs import (
+    Algorithm,
+    AttnImplementation,
+    GenerationKnobs,
+    LoraTargetScope,
+    TrainerQuantization,
+    TrainingKnobs,
+)
+
+
+class TensorContainer(Protocol):
+    """The slice of ``nn.Module`` the weight measurement touches."""
+
+    def parameters(self) -> Iterable[Any]: ...
+
+    def buffers(self) -> Iterable[Any]: ...
 
 
 @dataclass(frozen=True)
@@ -140,10 +159,10 @@ class SweepPoint:
             trajectories_per_update=self.group_size * self.n_prompts,
             max_model_len=self.seq_len,
             lora_rank=self.lora_rank,
-            lora_target_scope=self.scope,  # type: ignore[arg-type]
-            quantization=self.quantization,  # type: ignore[arg-type]
-            attn_implementation=self.attn_implementation,  # type: ignore[arg-type]
-            algorithm=self.algorithm,  # type: ignore[arg-type]
+            lora_target_scope=cast("LoraTargetScope", self.scope),
+            quantization=cast("TrainerQuantization", self.quantization),
+            attn_implementation=cast("AttnImplementation", self.attn_implementation),
+            algorithm=cast("Algorithm", self.algorithm),
         )
 
     @property
@@ -237,7 +256,7 @@ def measure_point(
     # so build the superset and keep only what this one accepts rather than
     # maintaining a list per algorithm.
     rollout_based = point.algorithm in ("grpo", "ppo")
-    candidate_kwargs: dict[str, object] = {
+    candidate_kwargs: dict[str, Any] = {
         "pad_token_id": tokenizer.pad_token_id or tokenizer.eos_token_id,
         "pad_token": tokenizer.pad_token or tokenizer.eos_token,
         "model_name": model_name,
@@ -282,7 +301,7 @@ def measure_point(
     prompt_ids = torch.randint(
         low=10, high=tokenizer.vocab_size - 10, size=(1, prompt_len)
     )
-    prompts = [
+    prompts: list[Any] = [
         {
             "input_ids": prompt_ids.clone(),
             "attention_mask": torch.ones_like(prompt_ids),
@@ -307,12 +326,12 @@ def measure_point(
             # One reward per trajectory row; completions arrive as one
             # (group_size, seq) tensor per prompt.
             n_trajectories = sum(ids.shape[0] for ids in completion_ids)
-            experiences = (
+            experiences: Any = (
                 completion_ids,
                 action_masks,
                 torch.randn(n_trajectories),
             )
-            learn_kwargs = {"sampling_logps": sampling_logps}
+            learn_kwargs: dict[str, Any] = {"sampling_logps": sampling_logps}
             generation_peak = generation_sampler.peak_bytes
         else:
             # SFT and DPO train from a dataset, so there is no rollout to
@@ -361,7 +380,8 @@ def measure_point(
                 clear_history=True,
             )
         with NvmlPeakSampler(device_index) as training_sampler:
-            agent.learn(experiences, **learn_kwargs)
+            learn = cast("Any", agent).learn
+            learn(experiences, **learn_kwargs)
         if snapshot_path:
             torch.cuda.memory._dump_snapshot(snapshot_path)
             torch.cuda.memory._record_memory_history(enabled=None)
@@ -416,7 +436,7 @@ MULTIMODAL_TOWER_ATTRS = (
 )
 
 
-def _storage_bytes(module: object) -> int:
+def _storage_bytes(module: TensorContainer) -> int:
     """Realised bytes of a module's parameters and buffers.
 
     Sums distinct storages rather than trusting nominal dtypes: quantized
@@ -424,7 +444,7 @@ def _storage_bytes(module: object) -> int:
     """
     total = 0
     seen: set[int] = set()
-    for tensor in list(module.parameters()) + list(module.buffers()):  # type: ignore[attr-defined]
+    for tensor in list(module.parameters()) + list(module.buffers()):
         storage = tensor.untyped_storage()
         if storage.data_ptr() in seen:
             continue
@@ -452,7 +472,7 @@ def measure_realised_weight_bytes(
 
     from agilerl.utils.llm_utils import create_model_from_name_or_path
 
-    model_config: dict[str, object] | None = None
+    model_config: dict[str, Any] | None = None
     if quantization == "nf4":
         from transformers import BitsAndBytesConfig
 
@@ -467,14 +487,15 @@ def measure_realised_weight_bytes(
     model = create_model_from_name_or_path(model_name, model_config=model_config)
 
     sizes = {"full": _storage_bytes(model)}
-    towers = {
-        attr: getattr(model, attr, None) or getattr(model.base_model, attr, None)
-        for attr in MULTIMODAL_TOWER_ATTRS
-        if getattr(model, attr, None) is not None
-        or getattr(getattr(model, "base_model", None), attr, None) is not None
-    }
+    towers = []
+    for attr in MULTIMODAL_TOWER_ATTRS:
+        tower = getattr(model, attr, None) or getattr(
+            getattr(model, "base_model", None), attr, None
+        )
+        if tower is not None:
+            towers.append(tower)
     if towers:
-        tower_bytes = sum(_storage_bytes(module) for module in towers.values())
+        tower_bytes = sum(_storage_bytes(tower) for tower in towers)
         sizes["stripped"] = sizes["full"] - tower_bytes
         sizes["towers"] = tower_bytes
 

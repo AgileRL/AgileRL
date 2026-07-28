@@ -1,3 +1,5 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
 """Attribute a torch allocator snapshot to the estimator's components.
 
 The sweep validates predicted *totals*: it compares one measured peak per

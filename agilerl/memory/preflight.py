@@ -1,3 +1,5 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
 r"""CLI preflight: size an LLM RL run before launching it.
 
 Prints the two independent phase bars (training and generation), flags

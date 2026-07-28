@@ -1,3 +1,5 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
 """Preflight CLI smoke tests (CPU-only, no model downloads)."""
 
 import json

@@ -1,3 +1,5 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
 """Calibration schema, fixture round-trips, and the residual fitter."""
 
 import pytest

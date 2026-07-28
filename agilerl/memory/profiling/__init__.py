@@ -1,3 +1,5 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
 """GPU profiling that pins the calibration constants for curated models.
 
 The analytic core carries the shape of every memory component; profiling

@@ -1,3 +1,5 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
 """Re-fit checked-in profiles from their stored measurements — no GPU.
 
 Every profile keeps its raw sweep points, so when the analytic core changes
@@ -20,6 +22,7 @@ from pathlib import Path
 
 from agilerl.memory.calibration import (
     FIXTURES_DIR,
+    MeasuredPoint,
     ModelProfile,
     curated_profiles,
     load_profile,
@@ -78,11 +81,11 @@ def refit(profile: ModelProfile) -> ModelProfile:
     )
 
     holdout = _holdout_keys()
-    fit_pairs: dict[str, list[tuple[SweepPoint, object]]] = {
+    fit_pairs: dict[str, list[tuple[SweepPoint, MeasuredPoint]]] = {
         "training": [],
         "generation": [],
     }
-    holdout_pairs: dict[str, list[tuple[SweepPoint, object]]] = {
+    holdout_pairs: dict[str, list[tuple[SweepPoint, MeasuredPoint]]] = {
         "training": [],
         "generation": [],
     }
@@ -103,15 +106,15 @@ def refit(profile: ModelProfile) -> ModelProfile:
             "training": calibrate_phase(
                 model,
                 device,
-                fit_pairs["training"],  # type: ignore[arg-type]
-                holdout_pairs["training"],  # type: ignore[arg-type]
+                fit_pairs["training"],
+                holdout_pairs["training"],
                 "training",
             ),
             "generation": calibrate_phase(
                 model,
                 device,
-                fit_pairs["generation"],  # type: ignore[arg-type]
-                holdout_pairs["generation"],  # type: ignore[arg-type]
+                fit_pairs["generation"],
+                holdout_pairs["generation"],
                 "generation",
             ),
         }

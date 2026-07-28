@@ -1,3 +1,5 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
 """Input specifications for the GPU memory estimator.
 
 Everything in this module is plain data: pydantic models that describe the
@@ -39,6 +41,9 @@ AttnImplementation = Literal[
 ]
 KVCacheDtype = Literal["auto", "fp8", "int8"]
 QuantizationMethod = Literal["none", "nf4", "int8", "awq", "gptq"]
+#: What bitsandbytes can apply to the trainer copy, a subset of the engine-side
+#: methods (AWQ and GPTQ are load-time formats, not runtime quantizers).
+TrainerQuantization = Literal["none", "nf4", "int8"]
 Algorithm = Literal["grpo", "gspo", "cispo", "ppo", "reinforce", "dpo", "sft"]
 LoraTargetScope = Literal["all-linear", "attention-only"]
 DistributedBackend = Literal["none", "deepspeed"]
@@ -299,7 +304,7 @@ class TrainingKnobs(BaseModel):
     weight_dtype: WeightDtype = "bf16"
     #: Trainer-side base quantization (QLoRA). ``lm_head`` stays unquantized
     #: and norms + lm_head are upcast to fp32 by k-bit preparation.
-    quantization: Literal["none", "nf4", "int8"] = "none"
+    quantization: TrainerQuantization = "none"
     #: Attention backend. ``auto`` mirrors the framework's resolution:
     #: FlashAttention-2 when the ``flash_attn`` package is importable,
     #: otherwise SDPA. Left explicit because the choice decides whether the

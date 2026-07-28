@@ -214,6 +214,9 @@ include = [
     "agilerl/algorithms/core/llm_ops/fused_loss.py",
     "agilerl/algorithms/grpo.py",
     "agilerl/algorithms/sft.py",
+    "agilerl/memory/preflight.py",
+    "agilerl/memory/profiling/harness.py",
+    "agilerl/memory/profiling/sweep.py",
     "agilerl/utils/llm_utils.py",
     "agilerl/utils/utils.py",
 ]
