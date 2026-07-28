@@ -967,12 +967,12 @@ class MLP(EvolvableMLP):
 
     def forward(
         self,
-        x: HiddenStates | Shaped[npt.NDArray, "batch seq_len n_embd"],
-    ) -> HiddenStates:
+        x: Float[torch.Tensor, "*batch n_embd"] | Shaped[npt.NDArray, "*batch n_embd"],
+    ) -> Float[torch.Tensor, "*batch n_embd"]:
         """Return output of neural network.
 
         :param x: Neural network input
-        :type x: HiddenStates | Shaped[npt.NDArray, "batch seq_len n_embd"]
+        :type x: Float[torch.Tensor, "*batch n_embd"] | Shaped[npt.NDArray, "*batch n_embd"]
         """
         # convert input to tensor if it is not already
         if not isinstance(x, torch.Tensor):

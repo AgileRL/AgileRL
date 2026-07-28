@@ -82,8 +82,10 @@ else:
 AnyFloatTensor = Float[torch.Tensor, "..."]
 # Float tensor with the leading batch axis that every ``preprocess_*`` return carries.
 BatchedFloatTensor = Float[torch.Tensor, "batch ..."]
-# Per-agent experiences stacked along a new agent axis.
-StackedAgentTensor = Float[torch.Tensor, "num_steps num_agents ..."]
+# Per-agent experiences stacked along a new agent axis. The caller chooses that
+# axis via ``dim``, and per-agent scalars stack into a rank-1 result, so neither
+# the rank nor the position of the agent axis is fixed.
+StackedAgentTensor = Float[torch.Tensor, "..."]
 # A channels-first image observation: the layout the HWC -> CHW transpose returns.
 ImageArray = Shaped[npt.NDArray[Any], "... channels height width"]
 # One agent's actions across the vectorized envs.
@@ -92,8 +94,15 @@ AgentActionArray = Shaped[npt.NDArray[Any], "num_envs ..."]
 BatchedArrayOrTensor = (
     Shaped[npt.NDArray[Any], "batch ..."] | Shaped[torch.Tensor, "batch ..."]
 )
-# The LLM stacking path pads every trajectory to a common sequence length.
-PaddedTokenBatch = Shaped[torch.Tensor, "batch seq_len"]
+# Flattening preserves each experience's container: a leaf, or a dict/tuple of leaves.
+FlattenedExperience = (
+    BatchedArrayOrTensor
+    | dict[str, BatchedArrayOrTensor]
+    | tuple[BatchedArrayOrTensor, ...]
+)
+# The LLM stacking path pads a list of 2-D tensors, each with its own row count
+# and sequence length, into a single 2-D batch that shares neither with them.
+PaddedTokenBatch = Shaped[torch.Tensor, "_ _"]
 
 
 def configure_tf32_precision() -> None:
@@ -1379,7 +1388,7 @@ def preprocess_observation(
 @preprocess_observation.register(spaces.Dict)
 def preprocess_dict_observation(
     observation_space: spaces.Dict,
-    observation: dict[str, AnyArray | AnyTensor],
+    observation: dict[str, ArrayOrTensor] | TensorDict,
     device: str | torch.device = "cpu",
     normalize_images: bool = True,
     placeholder_value: float | None = None,
@@ -1388,7 +1397,7 @@ def preprocess_dict_observation(
     """Preprocess dictionary observations.
 
     :param observation: Dictionary observation
-    :type observation: dict[str, npt.NDArray | torch.Tensor]
+    :type observation: dict[str, npt.NDArray | torch.Tensor] | TensorDict
     :param observation_space: Dictionary observation space
     :type observation_space: spaces.Dict
     :param device: Computing device
@@ -1424,7 +1433,7 @@ def preprocess_dict_observation(
 @preprocess_observation.register(spaces.Tuple)
 def preprocess_tuple_observation(
     observation_space: spaces.Tuple,
-    observation: tuple[AnyArray | AnyTensor, ...],
+    observation: tuple[ArrayOrTensor, ...] | TensorDict,
     device: str | torch.device = "cpu",
     normalize_images: bool = True,
     placeholder_value: float | None = None,
@@ -1433,7 +1442,7 @@ def preprocess_tuple_observation(
     """Preprocess tuple observations.
 
     :param observation: Tuple observation
-    :type observation: tuple[npt.NDArray | torch.Tensor, ...]
+    :type observation: tuple[npt.NDArray | torch.Tensor, ...] | TensorDict
     :param observation_space: Tuple observation space
     :type observation_space: spaces.Tuple
     :param device: Computing device
@@ -1521,7 +1530,7 @@ def preprocess_box_observation(
 @preprocess_observation.register(spaces.Discrete)
 def preprocess_discrete_observation(
     observation_space: spaces.Discrete,
-    observation: AnyArray | AnyTensor,
+    observation: AnyArray | AnyTensor | Number,
     device: str | torch.device = "cpu",
     normalize_images: bool = True,
     placeholder_value: float | None = None,
@@ -1529,8 +1538,8 @@ def preprocess_discrete_observation(
 ) -> Float[torch.Tensor, "batch num_classes"]:
     """Preprocess discrete observations.
 
-    :param observation: Discrete observation
-    :type observation: npt.NDArray | torch.Tensor
+    :param observation: Discrete observation, as an array or a bare scalar
+    :type observation: npt.NDArray | torch.Tensor | Number
     :param observation_space: Discrete observation space
     :type observation_space: spaces.Discrete
     :param device: Computing device
@@ -1840,7 +1849,7 @@ def stack_and_pad_experiences(
     padding_values: list[int | float | bool | None],
     padding_side: str = "right",
     device: str | torch.device | None = None,
-) -> tuple[PaddedTokenBatch, ...]:
+) -> tuple[AnyTensor, ...]:
     """Stacks experiences into a single tensor, padding them to the maximum length.
 
     :param experiences: Experiences to stack: per-position tensor lists or
@@ -1878,7 +1887,7 @@ def stack_and_pad_experiences(
 
 
 def _stack_and_pad_tensor_list(
-    exp: list[Shaped[torch.Tensor, "rows seq_len"]],
+    exp: list[PaddedTokenBatch],
     padding: float | bool | None,
     padding_side: str = "right",
 ) -> PaddedTokenBatch:
@@ -1907,14 +1916,14 @@ def _stack_and_pad_tensor_list(
 
 def flatten_experiences(
     *experiences: ObservationType,
-) -> tuple[BatchedArrayOrTensor, ...]:
+) -> tuple[FlattenedExperience, ...]:
     """Flattens experiences into a single array or tensor.
 
     :param experiences: Experiences to flatten
     :type experiences: tuple[npt.NDArray, ...] or tuple[torch.Tensor[float], ...]
 
-    :return: Flattened experiences
-    :rtype: tuple[npt.NDArray, ...] or tuple[torch.Tensor[float], ...]
+    :return: Flattened experiences, each keeping the container of its input
+    :rtype: tuple[ArrayOrTensor | dict[str, ArrayOrTensor] | tuple[ArrayOrTensor, ...], ...]
     """
 
     def flatten(
@@ -2211,9 +2220,7 @@ def remove_nested_files(files: list[str]) -> None:
 def vectorize_experiences_by_agent(
     experiences: dict[str, Any],
     dim: int = 1,
-) -> (
-    StackedAgentTensor | dict[str, StackedAgentTensor] | tuple[StackedAgentTensor, ...]
-):
+) -> AnyFloatTensor | dict[str, AnyFloatTensor] | tuple[AnyFloatTensor, ...]:
     """Reorganizes experiences into a tensor, vectorized by time step.
 
     Example input:

@@ -83,6 +83,7 @@ dev = [
     "pytest-env>=1.2.0",
     "pytest-xdist>=3.5",
     "nvidia-ml-py>=12.0.0",  # For GPU memory monitoring in tests
+    "beartype>=0.22.9",
 ]
 docs = [
     "furo>=2025.12.19",

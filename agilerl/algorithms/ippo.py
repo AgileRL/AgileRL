@@ -58,6 +58,8 @@ from agilerl.vector.pz_vec_env import PettingZooVecEnv
 GroupActionMask = Float[torch.Tensor, "num_group_agents ..."]
 # Per-agent vectors copied off a network: log-probabilities, entropies, values.
 AgentValueArray = Float[npt.NDArray[np.float32], " batch"]
+# The same values once disassembled back into per-agent, per-env rows.
+AgentValueRows = Float[npt.NDArray[np.float32], "num_envs ..."]
 # Per-env, per-agent score rows accumulated during evaluation.
 AgentScoreArray = Float[npt.NDArray[np.float64], "num_envs num_agents"]
 
@@ -568,9 +570,9 @@ class IPPO(MultiAgentRLAlgorithm[tuple[Mapping[str, Any], ...]]):
         **kwargs: Any,
     ) -> tuple[
         dict[str, PolicyActionArray],
-        dict[str, AgentValueArray],
-        dict[str, AgentValueArray],
-        dict[str, AgentValueArray],
+        dict[str, AgentValueRows],
+        dict[str, AgentValueRows],
+        dict[str, AgentValueRows],
     ]:
         """Return the next action to take in the environment.
 
@@ -579,7 +581,7 @@ class IPPO(MultiAgentRLAlgorithm[tuple[Mapping[str, Any], ...]]):
         :param infos: Information dictionary returned by env.step(actions)
         :type infos: InfosDict | None
         :return: Tuple of actions, log probabilities, entropies, values
-        :rtype: tuple[dict[str, PolicyActionArray], dict[str, AgentValueArray], dict[str, AgentValueArray], dict[str, AgentValueArray]]
+        :rtype: tuple[dict[str, PolicyActionArray], dict[str, AgentValueRows], dict[str, AgentValueRows], dict[str, AgentValueRows]]
         """
         assert not key_in_nested_dict(
             obs,

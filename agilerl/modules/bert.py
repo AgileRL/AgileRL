@@ -12,7 +12,6 @@ from agilerl.typing import AnyTensor, DeviceType
 
 SeqTokenIds = Int[torch.Tensor, "seq_len batch"]
 SeqEmbeddings = Float[torch.Tensor, "seq_len batch emb_size"]
-KeyPaddingMask = Bool[torch.Tensor, "batch seq_len"]
 
 
 class EvolvableBERT(EvolvableModule):
@@ -209,21 +208,21 @@ class EvolvableBERT(EvolvableModule):
 
     def create_mask(
         self,
-        src: SeqTokenIds,
-        tgt: SeqTokenIds,
+        src: Shaped[torch.Tensor, "src_seq_len src_batch"],
+        tgt: Shaped[torch.Tensor, "tgt_seq_len tgt_batch"],
         pad_idx: int,
     ) -> tuple[
         Bool[torch.Tensor, "src_seq_len src_seq_len"],
         Float[torch.Tensor, "tgt_seq_len tgt_seq_len"],
-        KeyPaddingMask,
-        KeyPaddingMask,
+        Bool[torch.Tensor, "src_batch src_seq_len"],
+        Bool[torch.Tensor, "tgt_batch tgt_seq_len"],
     ]:
         """Return masks to hide source and target padding tokens.
 
         :param src: Source
-        :type src: SeqTokenIds
+        :type src: Shaped[torch.Tensor, "src_seq_len src_batch"]
         :param tgt: Target
-        :type tgt: SeqTokenIds
+        :type tgt: Shaped[torch.Tensor, "tgt_seq_len tgt_batch"]
         :param pad_idx: Index of padding symbol <pad> in special symbols list
         :type pad_idx: int
         """

@@ -153,15 +153,16 @@ def sample_discrete(
 
 def log_prob_discrete(
     logits: Float[torch.Tensor, "batch num_actions"],
-    action: Num[torch.Tensor, "batch ..."],
+    action: Num[torch.Tensor, "..."],
     n_actions: int | None = None,
 ) -> LogProbs:
     """Log probability of actions under a categorical distribution.
 
     :param logits: Logits of the distribution.
     :type logits: Float[torch.Tensor, "batch num_actions"]
-    :param action: Action, as ``(batch,)``, ``(batch, 1)`` or one-hot ``(batch, num_actions)``.
-    :type action: Num[torch.Tensor, "batch ..."]
+    :param action: Action, as ``(batch,)``, ``(batch, 1)`` or one-hot ``(batch, num_actions)``;
+        any other rank or leading size raises ``ValueError``.
+    :type action: Num[torch.Tensor, "..."]
     :param n_actions: Number of actions.
     :type n_actions: int | None
     :return: Log probability of the action.
@@ -239,7 +240,7 @@ def sample_continuous(
 def log_prob_continuous(
     mu: Float[torch.Tensor, "batch action_dim"],
     log_std: Float[torch.Tensor, "batch action_dim"],
-    action: Float[torch.Tensor, "batch action_dim"],
+    action: Float[torch.Tensor, "batch ..."],
 ) -> LogProbs:
     """Log probability of actions under a diagonal Gaussian.
 
@@ -247,8 +248,9 @@ def log_prob_continuous(
     :type mu: Float[torch.Tensor, "batch action_dim"]
     :param log_std: Log standard deviation of the distribution.
     :type log_std: Float[torch.Tensor, "batch action_dim"]
-    :param action: Action.
-    :type action: Float[torch.Tensor, "batch action_dim"]
+    :param action: Action, broadcast against ``mu``; a single-dimensional action
+        space may supply it without its trailing action axis.
+    :type action: Float[torch.Tensor, "batch ..."]
     :return: Log probability of the action.
     :rtype: LogProbs
     """

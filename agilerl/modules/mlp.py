@@ -191,14 +191,14 @@ class EvolvableMLP(EvolvableModule):
         output_layer = self.get_output_dense()
         EvolvableModule.apply_gaussian_init(output_layer, std_coeff=output_coeff)
 
-    def forward(self, x: VectorInput) -> Float[torch.Tensor, "batch num_outputs"]:
+    def forward(self, x: VectorInput) -> Float[torch.Tensor, "... num_outputs"]:
         """Return output of neural network.
 
         :param x: Neural network input
         :type x: VectorInput
 
         :return: Neural network output
-        :rtype: Float[torch.Tensor, "batch num_outputs"]
+        :rtype: Float[torch.Tensor, "... num_outputs"]
         """
         if not isinstance(x, torch.Tensor):
             x = torch.tensor(x, dtype=torch.float32, device=self.device)

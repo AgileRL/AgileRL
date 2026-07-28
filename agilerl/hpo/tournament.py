@@ -6,16 +6,26 @@ from typing import Any, TypeVar
 import numpy as np
 import numpy.typing as npt
 from accelerate.utils import broadcast_object_list
-from jaxtyping import Int
+from jaxtyping import Int, Num
 
 from agilerl.algorithms.core.base import LLMAlgorithm
 from agilerl.protocols import EvolvableAlgorithmProtocol
-from agilerl.typing import FitnessRow
 
 AgentT = TypeVar("AgentT", bound=EvolvableAlgorithmProtocol)
 
 # The double-argsort rank vector ``_elitism`` produces and ``_tournament`` consumes.
 RankArray = Int[npt.NDArray[np.int64], " pop_size"]
+
+# One generation's fitness entry: a scalar score, a per-sub-agent sequence or
+# array, or a per-sub-agent mapping.
+FitnessEntry = (
+    float
+    | int
+    | dict[str, float]
+    | list[float | int]
+    | tuple[float | int, ...]
+    | Num[npt.NDArray[np.number], " num_agents"]
+)
 
 
 class TournamentSelection:
@@ -46,7 +56,7 @@ class TournamentSelection:
         self.language_model = None
 
     @staticmethod
-    def _scalar_fitness(fitness: float | FitnessRow | dict[str, float]) -> float:
+    def _scalar_fitness(fitness: FitnessEntry) -> float:
         """Reduce a possibly vector-valued fitness to a single scalar for ranking.
 
         When ``sum_scores=False``, multi-agent algorithms store per-sub-agent

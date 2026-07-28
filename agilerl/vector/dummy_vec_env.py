@@ -257,8 +257,9 @@ class PzDummyVecEnv(PettingZooVecEnv):
         """Take a step in the environment.
 
         :param actions: Dict of batched actions per agent, each with shape
-            ``(1, ...)``.  Values may be arrays or tensors (converted via
-            ``np.asarray``).  NaN actions are filtered (agent treated as inactive).
+            ``(1, ...)``.  Values may be arrays, tensors, or a per-environment
+            sequence of actions (converted via ``np.asarray``).  NaN actions are
+            filtered (agent treated as inactive).
         :type actions: VecActionMapping
         :returns: ``(obs, rewards, terminated, truncated, info)`` with leading
             batch dimension of 1 on all per-agent arrays.

@@ -7,7 +7,7 @@ import numpy as np
 import numpy.typing as npt
 import torch
 from gymnasium import spaces
-from jaxtyping import Bool, Float, Int, Shaped
+from jaxtyping import Bool, Float, Int, Num, Shaped
 from tensordict import TensorDict, TensorDictBase
 
 from agilerl.typing import (
@@ -35,11 +35,18 @@ NumpyBufferTree = dict[str, AnyArray | dict[str, AnyArray]]
 # One scalar per vectorized environment. Stays ``np.floating``: the vector envs
 # emit float64 and the network path emits float32.
 PerEnvFloatArray = Float[npt.NDArray[np.floating], " num_envs"]
+# The same per-env scalars as they reach ``add``, where a single-environment
+# caller may hand over a 0-d array rather than a ``(num_envs,)`` one.
+StepFloatArray = Float[npt.NDArray[np.floating], "..."]
+# Rewards as the environments emit them: integer-valued envs hand over an int
+# array rather than a float one.
+StepNumArray = Num[npt.NDArray[np.number], "..."]
 # The float32 / bool matrices read back out of the buffer leaves for GAE.
 BufferFloatArray = Float[npt.NDArray[np.float32], "buffer_size num_envs"]
 BufferBoolArray = Bool[npt.NDArray[np.bool_], "buffer_size num_envs"]
 # One BPTT sequence sliced out of the buffer (the env axis has been dropped).
-SequenceTensor = Shaped[torch.Tensor, "seq_len ..."]
+# Episodes end at different timesteps, so lengths differ between sequences.
+SequenceTensor = Shaped[torch.Tensor, "_seq_len ..."]
 # Per-sequence starting hidden states handed to the recurrent policy.
 InitialHiddenStates = dict[
     str, Float[torch.Tensor, "num_sequences num_layers hidden_size"]
@@ -118,7 +125,7 @@ class RolloutBuffer:
     buffer: TensorDict
     padded_data: TensorDict | None
     unpadded_data: TensorDict | None
-    unpadded_slices: list[Int[torch.Tensor, " seq_len"]] | None
+    unpadded_slices: list[Int[torch.Tensor, " _seq_len"]] | None
     num_sequences: int | None
     max_sequence_length: int | None
 
@@ -306,14 +313,11 @@ class RolloutBuffer:
     def add(
         self,
         obs: ObservationType,
-        action: (
-            Shaped[npt.NDArray, " num_envs *action_shape"]
-            | Shaped[torch.Tensor, " num_envs *action_shape"]
-        ),
-        reward: float | PerEnvFloatArray,
-        done: bool | EnvDoneArray,
-        value: float | PerEnvFloatArray,
-        log_prob: float | PerEnvFloatArray,
+        action: AnyArray | AnyTensor,
+        reward: float | StepNumArray,
+        done: bool | Bool[npt.NDArray[np.bool_], "..."],
+        value: float | StepFloatArray,
+        log_prob: float | StepFloatArray,
         next_obs: ObservationType | None = None,
         hidden_state: HiddenStateDict | None = None,
         next_hidden_state: (
@@ -331,15 +335,15 @@ class RolloutBuffer:
         :param obs: Current observation batch (shape: (num_envs, *obs_shape))
         :type obs: ObservationType
         :param action: Action batch taken (shape: (num_envs, *action_shape))
-        :type action: Shaped[npt.NDArray, " num_envs *action_shape"] | Shaped[torch.Tensor, " num_envs *action_shape"]
+        :type action: AnyArray | AnyTensor
         :param reward: Reward batch received (shape: (num_envs,))
-        :type reward: float | PerEnvFloatArray
+        :type reward: float | StepNumArray
         :param done: Done flag batch (shape: (num_envs,))
-        :type done: bool | EnvDoneArray
+        :type done: bool | Bool[npt.NDArray[np.bool_], "..."]
         :param value: Value estimate batch (shape: (num_envs,))
-        :type value: float | PerEnvFloatArray
+        :type value: float | StepFloatArray
         :param log_prob: Log probability batch of the actions (shape: (num_envs,))
-        :type log_prob: float | PerEnvFloatArray
+        :type log_prob: float | StepFloatArray
         :param next_obs: Next observation batch (shape: (num_envs, *obs_shape)), defaults to None
         :type next_obs: ObservationType | None
         :param hidden_state: Current hidden state batch (shape: (num_layers, num_envs, hidden_size)), defaults to None
@@ -910,7 +914,7 @@ class RolloutBuffer:
             episode_done_indices,
         )
         # flat_timesteps is a tensor, so every returned slice is a tensor.
-        unpadded_slices: list[Int[torch.Tensor, " seq_len"]] = []
+        unpadded_slices: list[Int[torch.Tensor, " _seq_len"]] = []
         for timestep_slice in timestep_sequences:
             assert isinstance(timestep_slice, torch.Tensor)
             unpadded_slices.append(timestep_slice)

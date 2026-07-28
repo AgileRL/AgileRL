@@ -23,6 +23,7 @@ from agilerl.algorithms.core.base import get_checkpoint_dict
 from agilerl.protocols import EvolvableAttributeDict
 from agilerl.typing import (
     ActionReturn,
+    AnyArray,
     ArrayDict,
     ArrayTuple,
     DeviceType,
@@ -752,9 +753,9 @@ class AsyncAgentsWrapper(AgentWrapper[MultiAgentRLAlgorithm]):
 
     def _insert_placeholder_actions(
         self,
-        action_dict: dict[str, ObsLeaf | None],
+        action_dict: dict[str, AnyArray | None],
         inactive_agents: Mapping[str, InactiveIndices],
-    ) -> dict[str, ObsLeaf | None]:
+    ) -> dict[str, AnyArray | None]:
         """Insert placeholder actions for inactive agents back into action dict."""
         for agent_id, inactive_array in inactive_agents.items():
             if agent_id not in action_dict:

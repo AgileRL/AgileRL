@@ -31,7 +31,7 @@ import numpy.typing as npt
 import torch
 from accelerate import Accelerator
 from gymnasium import spaces
-from jaxtyping import Bool, Float, Int, Shaped
+from jaxtyping import Float, Int, Shaped
 from torch._dynamo import OptimizedModule
 from torch.nn import Module
 from torch.optim.optimizer import Optimizer
@@ -220,9 +220,7 @@ class EvolvableNetworkProtocol(EvolvableModuleProtocol, Protocol):
     ) -> torch.Tensor:
         pass
 
-    def extract_features(
-        self, x: TorchObsType, /
-    ) -> Float[torch.Tensor, "batch latent_dim"]:
+    def extract_features(self, x: TorchObsType, /) -> torch.Tensor:
         pass
 
     def build_network_head(self, *args: Any, **kwargs: Any) -> None:
@@ -243,7 +241,7 @@ class EvolvableNetworkProtocol(EvolvableModuleProtocol, Protocol):
     def initialize_hidden_state(
         self,
         batch_size: int = 1,
-    ) -> dict[str, Float[torch.Tensor, "num_layers batch hidden_size"]]:
+    ) -> dict[str, torch.Tensor]:
         pass
 
     def init_weights_gaussian(
@@ -605,7 +603,7 @@ class PreTrainedModelProtocol(Protocol):
         attention_mask: Shaped[torch.Tensor, "batch seq"] | None = None,
         generation_config: GenerationConfigProtocol | None = None,
         **kwargs: Any,
-    ) -> Int[torch.Tensor, "batch full_seq"]:
+    ) -> torch.Tensor:
         pass
 
     def forward(self, *args: Any, **kwargs: Any) -> Any:  # noqa: ANN401 -- model forward output type varies (logits, tuples, ModelOutput)
@@ -650,7 +648,7 @@ class PeftModelProtocol(Protocol):
         attention_mask: Shaped[torch.Tensor, "batch seq"] | None = None,
         generation_config: GenerationConfigProtocol | None = None,
         **kwargs: Any,
-    ) -> Int[torch.Tensor, "batch full_seq"]:
+    ) -> torch.Tensor:
         pass
 
     def forward(self, *args: Any, **kwargs: Any) -> Any:  # noqa: ANN401 -- model forward output type varies (logits, tuples, ModelOutput)
@@ -711,12 +709,10 @@ class BanditEnvProtocol(Protocol):
     @property
     def single_action_space(self) -> spaces.Discrete: ...
 
-    def reset(self) -> Float[npt.NDArray[np.float32], "arms context_dim"]:
+    def reset(self) -> npt.NDArray[np.float32]:
         pass
 
-    def step(
-        self, k: int
-    ) -> tuple[Float[npt.NDArray[np.float32], "arms context_dim"], float]:
+    def step(self, k: int) -> tuple[npt.NDArray[np.float32], float]:
         pass
 
 
@@ -752,7 +748,7 @@ class TokenizedMultiTurnEnv(Protocol):
         pass
 
     def step(
-        self, full_completion_ids: Int[torch.Tensor, "batch seq"], /
+        self, full_completion_ids: Int[torch.Tensor, "..."], /
     ) -> "TokenObsStepReturn":
         pass
 
@@ -761,10 +757,5 @@ class TokenizedMultiTurnEnv(Protocol):
 
     def get_episode_data(
         self,
-    ) -> tuple[
-        Int[torch.Tensor, "batch seq"],
-        Bool[torch.Tensor, "batch action_seq"],
-        Int[torch.Tensor, "batch action_seq"],
-        Float[torch.Tensor, " max_turns"],
-    ]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         pass

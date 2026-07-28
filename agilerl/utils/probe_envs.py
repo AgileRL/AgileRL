@@ -18,8 +18,12 @@ ProbeImageObsType = Float[
     np.ndarray[tuple[int, int, int], np.dtype[np.float64]], "channels height width"
 ]
 ProbeDictObsType = dict[str, int | ProbeImageObsType]
-ProbeActionType = int | NumArray
-ProbeContActionType = Float[npt.NDArray[np.float32], " action_dim"]
+ProbeActionType = int | NumArray | list[Any]
+ProbeContActionType = (
+    Float[npt.NDArray[np.float32], " action_dim"]
+    | list[Float[npt.NDArray[np.float32], " action_dim"]]
+)
+ProbeContRewardType = np.floating[Any] | NumArray
 
 
 class ProbeEnv(gym.Env[Any, Any]):
@@ -44,7 +48,7 @@ class ConstantRewardEnv(ProbeEnv):
     def step(
         self,
         action: ProbeActionType,
-    ) -> tuple[int, float, bool, bool, dict[str, Any]]:
+    ) -> tuple[int, int, bool, bool, dict[str, Any]]:
         observation = 0
         reward = 1  # Constant reward of 1
         terminated = True
@@ -74,7 +78,7 @@ class ConstantRewardImageEnv(ProbeEnv):
     def step(
         self,
         action: ProbeActionType,
-    ) -> tuple[ProbeImageObsType, float, bool, bool, dict[str, Any]]:
+    ) -> tuple[ProbeImageObsType, int, bool, bool, dict[str, Any]]:
         observation = np.zeros((1, 3, 3))
         reward = 1  # Constant reward of 1
         terminated = True
@@ -106,7 +110,7 @@ class ConstantRewardDictEnv(ProbeEnv):
     def step(
         self,
         action: ProbeActionType,
-    ) -> tuple[ProbeDictObsType, float, bool, bool, dict[str, Any]]:
+    ) -> tuple[ProbeDictObsType, int, bool, bool, dict[str, Any]]:
         observation = {"discrete": 0, "box": np.zeros((1, 3, 3))}
         reward = 1  # Constant reward of 1
         terminated = True
@@ -137,7 +141,7 @@ class ConstantRewardContActionsEnv(ProbeEnv):
     def step(
         self,
         action: ProbeActionType,
-    ) -> tuple[Any, float, bool, bool, dict[str, Any]]:
+    ) -> tuple[Any, int, bool, bool, dict[str, Any]]:
         observation = 0
         reward = 1  # Constant reward of 1
         terminated = True
@@ -168,7 +172,7 @@ class ConstantRewardContActionsImageEnv(ProbeEnv):
     def step(
         self,
         action: ProbeActionType,
-    ) -> tuple[ProbeImageObsType, float, bool, bool, dict[str, Any]]:
+    ) -> tuple[ProbeImageObsType, int, bool, bool, dict[str, Any]]:
         observation = np.zeros((1, 3, 3))
         reward = 1  # Constant reward of 1
         terminated = True
@@ -201,7 +205,7 @@ class ConstantRewardContActionsDictEnv(ProbeEnv):
     def step(
         self,
         action: ProbeActionType,
-    ) -> tuple[ProbeDictObsType, float, bool, bool, dict[str, Any]]:
+    ) -> tuple[ProbeDictObsType, int, bool, bool, dict[str, Any]]:
         observation = {"discrete": 0, "box": np.zeros((1, 3, 3))}
         reward = 1  # Constant reward of 1
         terminated = True
@@ -231,7 +235,7 @@ class ObsDependentRewardEnv(ProbeEnv):
     def step(
         self,
         action: ProbeActionType,
-    ) -> tuple[Any, float, bool, bool, dict[str, Any]]:
+    ) -> tuple[Any, int, bool, bool, dict[str, Any]]:
         observation = self.last_obs
         reward = -1 if self.last_obs == 0 else 1  # Reward depends on observation
         terminated = True
@@ -261,7 +265,7 @@ class ObsDependentRewardImageEnv(ProbeEnv):
     def step(
         self,
         action: ProbeActionType,
-    ) -> tuple[ProbeImageObsType, float, bool, bool, dict[str, Any]]:
+    ) -> tuple[ProbeImageObsType, int, bool, bool, dict[str, Any]]:
         observation = self.last_obs
         reward = (
             -1 if np.mean(self.last_obs) == 0.0 else 1
@@ -300,7 +304,7 @@ class ObsDependentRewardDictEnv(ProbeEnv):
     def step(
         self,
         action: ProbeActionType,
-    ) -> tuple[ProbeDictObsType, float, bool, bool, dict[str, Any]]:
+    ) -> tuple[ProbeDictObsType, int, bool, bool, dict[str, Any]]:
         observation = {
             "discrete": self.last_obs["discrete"],
             "box": self.last_obs["box"],
@@ -340,7 +344,7 @@ class ObsDependentRewardContActionsEnv(ProbeEnv):
     def step(
         self,
         action: ProbeActionType,
-    ) -> tuple[Any, float, bool, bool, dict[str, Any]]:
+    ) -> tuple[Any, int, bool, bool, dict[str, Any]]:
         observation = self.last_obs
         reward = -1 if self.last_obs == 0 else 1  # Reward depends on observation
         terminated = True
@@ -372,7 +376,7 @@ class ObsDependentRewardContActionsImageEnv(ProbeEnv):
     def step(
         self,
         action: ProbeActionType,
-    ) -> tuple[ProbeImageObsType, float, bool, bool, dict[str, Any]]:
+    ) -> tuple[ProbeImageObsType, int, bool, bool, dict[str, Any]]:
         observation = self.last_obs
         reward = (
             -1 if np.mean(self.last_obs) == 0.0 else 1
@@ -413,7 +417,7 @@ class ObsDependentRewardContActionsDictEnv(ProbeEnv):
     def step(
         self,
         action: ProbeActionType,
-    ) -> tuple[ProbeDictObsType, float, bool, bool, dict[str, Any]]:
+    ) -> tuple[ProbeDictObsType, int, bool, bool, dict[str, Any]]:
         observation = {
             "discrete": self.last_obs["discrete"],
             "box": self.last_obs["box"],
@@ -451,7 +455,7 @@ class DiscountedRewardEnv(ProbeEnv):
     def step(
         self,
         action: ProbeActionType,
-    ) -> tuple[Any, float, bool, bool, dict[str, Any]]:
+    ) -> tuple[Any, int, bool, bool, dict[str, Any]]:
         observation = 1
         reward = self.last_obs  # Reward depends on observation
         terminated = bool(self.last_obs)  # Terminate after second step
@@ -557,7 +561,7 @@ class DiscountedRewardContActionsEnv(ProbeEnv):
     def step(
         self,
         action: ProbeActionType,
-    ) -> tuple[Any, float, bool, bool, dict[str, Any]]:
+    ) -> tuple[Any, int, bool, bool, dict[str, Any]]:
         observation = 1
         reward = self.last_obs  # Reward depends on observation
         terminated = bool(self.last_obs)  # Terminate after second step
@@ -663,7 +667,7 @@ class FixedObsPolicyEnv(ProbeEnv):
     def step(
         self,
         action: ProbeActionType,
-    ) -> tuple[Any, float, bool, bool, dict[str, Any]]:
+    ) -> tuple[Any, int, bool, bool, dict[str, Any]]:
         if isinstance(action, (np.ndarray, list)):
             action = int(np.asarray(action)[0])
         observation = 0
@@ -695,7 +699,7 @@ class FixedObsPolicyImageEnv(ProbeEnv):
     def step(
         self,
         action: ProbeActionType,
-    ) -> tuple[ProbeImageObsType, float, bool, bool, dict[str, Any]]:
+    ) -> tuple[ProbeImageObsType, int, bool, bool, dict[str, Any]]:
         observation = np.zeros((1, 3, 3))
         if isinstance(action, (np.ndarray, list)):
             action = int(np.asarray(action)[0])
@@ -729,7 +733,7 @@ class FixedObsPolicyDictEnv(ProbeEnv):
     def step(
         self,
         action: ProbeActionType,
-    ) -> tuple[ProbeDictObsType, float, bool, bool, dict[str, Any]]:
+    ) -> tuple[ProbeDictObsType, int, bool, bool, dict[str, Any]]:
         observation = {"discrete": 0, "box": np.zeros((1, 3, 3))}
         if isinstance(action, (np.ndarray, list)):
             action = int(np.asarray(action)[0])
@@ -762,7 +766,7 @@ class FixedObsPolicyContActionsEnv(ProbeEnv):
     def step(
         self,
         action: ProbeContActionType,
-    ) -> tuple[Any, float, bool, bool, dict[str, Any]]:
+    ) -> tuple[Any, ProbeContRewardType, bool, bool, dict[str, Any]]:
         observation = 0
         reward = -((1 - action[0]) ** 2)  # Reward depends on action
         terminated = True
@@ -793,7 +797,7 @@ class FixedObsPolicyContActionsImageEnv(ProbeEnv):
     def step(
         self,
         action: ProbeContActionType,
-    ) -> tuple[ProbeImageObsType, float, bool, bool, dict[str, Any]]:
+    ) -> tuple[ProbeImageObsType, ProbeContRewardType, bool, bool, dict[str, Any]]:
         observation = np.zeros((1, 3, 3))
         reward = -((1 - action[0]) ** 2)  # Reward depends on action
         terminated = True
@@ -826,7 +830,7 @@ class FixedObsPolicyContActionsDictEnv(ProbeEnv):
     def step(
         self,
         action: ProbeContActionType,
-    ) -> tuple[ProbeDictObsType, float, bool, bool, dict[str, Any]]:
+    ) -> tuple[ProbeDictObsType, ProbeContRewardType, bool, bool, dict[str, Any]]:
         observation = {"discrete": 0, "box": np.zeros((1, 3, 3))}
         reward = -((1 - action[0]) ** 2)  # Reward depends on action
         terminated = True
@@ -859,7 +863,7 @@ class PolicyEnv(ProbeEnv):
     def step(
         self,
         action: ProbeActionType,
-    ) -> tuple[Any, float, bool, bool, dict[str, Any]]:
+    ) -> tuple[Any, int, bool, bool, dict[str, Any]]:
         observation = self.last_obs
         reward = (
             1 if action == self.last_obs else -1
@@ -894,7 +898,7 @@ class PolicyImageEnv(ProbeEnv):
     def step(
         self,
         action: ProbeActionType,
-    ) -> tuple[ProbeImageObsType, float, bool, bool, dict[str, Any]]:
+    ) -> tuple[ProbeImageObsType, int, bool, bool, dict[str, Any]]:
         observation = self.last_obs
         reward = (
             1 if action == int(np.mean(self.last_obs)) else -1
@@ -938,7 +942,7 @@ class PolicyDictEnv(ProbeEnv):
     def step(
         self,
         action: ProbeActionType,
-    ) -> tuple[ProbeDictObsType, float, bool, bool, dict[str, Any]]:
+    ) -> tuple[ProbeDictObsType, int, bool, bool, dict[str, Any]]:
         if isinstance(action, (np.ndarray, list)):
             action = int(np.asarray(action)[0])
         observation = {
@@ -983,7 +987,7 @@ class PolicyContActionsEnv(ProbeEnv):
     def step(
         self,
         action: ProbeContActionType,
-    ) -> tuple[Any, float, bool, bool, dict[str, Any]]:
+    ) -> tuple[Any, ProbeContRewardType, bool, bool, dict[str, Any]]:
         observation = self.last_obs
         if self.last_obs:  # last obs = 1, policy should be [0, 1]
             reward = -((0 - action[0]) ** 2) - (1 - action[1]) ** 2
@@ -1028,7 +1032,7 @@ class PolicyContActionsImageEnvSimple(ProbeEnv):
     def step(
         self,
         action: ProbeContActionType,
-    ) -> tuple[ProbeImageObsType, float, bool, bool, dict[str, Any]]:
+    ) -> tuple[ProbeImageObsType, ProbeContRewardType, bool, bool, dict[str, Any]]:
         observation = self.last_obs
         if int(np.mean(self.last_obs)):  # last obs = 1, policy should be [1]
             reward = -((1 - action[0]) ** 2)
@@ -1068,7 +1072,7 @@ class PolicyContActionsImageEnv(ProbeEnv):
     def step(
         self,
         action: ProbeContActionType,
-    ) -> tuple[ProbeImageObsType, float, bool, bool, dict[str, Any]]:
+    ) -> tuple[ProbeImageObsType, ProbeContRewardType, bool, bool, dict[str, Any]]:
         observation = self.last_obs
         if int(np.mean(self.last_obs)):  # last obs = 1, policy should be [0, 1]
             reward = -((0 - action[0]) ** 2) - (1 - action[1]) ** 2
@@ -1108,7 +1112,7 @@ class PolicyContActionsDictEnv(ProbeEnv):
     def step(
         self,
         action: ProbeContActionType,
-    ) -> tuple[ProbeDictObsType, float, bool, bool, dict[str, Any]]:
+    ) -> tuple[ProbeDictObsType, ProbeContRewardType, bool, bool, dict[str, Any]]:
         observation = {
             "discrete": self.last_obs["discrete"],
             "box": self.last_obs["box"],

@@ -1,10 +1,8 @@
 from typing import Literal, overload
 
 import numpy as np
-import numpy.typing as npt
 import torch
 from gymnasium import spaces
-from jaxtyping import Shaped
 
 from agilerl.modules.base import EvolvableModule, EvolvableWrapper
 from agilerl.typing import (
@@ -12,6 +10,8 @@ from agilerl.typing import (
     ActionLogits,
     ActionMaskInput,
     ActionMaskTensor,
+    AnyArray,
+    AnyTensor,
     ArrayOrTensor,
     DeviceType,
     LatentTensor,
@@ -258,16 +258,16 @@ class EvolvableDistribution(EvolvableWrapper):
     def apply_mask(
         self,
         logits: ActionLogits,
-        mask: Shaped[torch.Tensor, "batch action_dim"]
-        | Shaped[npt.NDArray, "batch action_dim"],
+        mask: AnyTensor | AnyArray,
     ) -> ActionLogits:
         """Apply a mask to the logits.
 
         :param logits: Logits.
         :type logits: ActionLogits
-        :param mask: Mask. Any dtype ``torch.as_tensor`` can cast to bool; env
-            masks arrive as 1/0 integers.
-        :type mask: Shaped[torch.Tensor, "batch action_dim"] | Shaped[npt.NDArray, "batch action_dim"]
+        :param mask: Mask, reshaped internally to ``logits.shape``, so any shape
+            with the same number of elements and any dtype ``torch.as_tensor``
+            can cast to bool; env masks arrive unbatched and as 1/0 integers.
+        :type mask: AnyTensor | AnyArray
         :return: Logits with mask applied.
         :rtype: ActionLogits
         """

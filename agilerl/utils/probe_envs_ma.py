@@ -22,6 +22,7 @@ ProbeImageSampleArray = Float[
     "batch channels height width",
 ]
 MultiAgentProbeActionType = Mapping[str, NumArray]
+MultiAgentProbeDiscreteActionType = Mapping[str, NumArray | np.integer]
 MultiAgentFlatObsType = dict[str, Int[npt.NDArray[np.int64], " obs_dim"]]
 MultiAgentImageObsType = dict[str, ProbeImageArray]
 MultiAgentFlatSampleObsType = list[
@@ -73,7 +74,7 @@ class ConstantRewardEnv:
 
     def step(
         self,
-        action: MultiAgentProbeActionType,
+        action: MultiAgentProbeDiscreteActionType,
     ) -> tuple[MultiAgentFlatObsType, Any, Any, Any, dict[str, Any]]:
         observation = {"agent_0": np.array([0]), "other_agent_0": np.array([0])}
         reward = {"agent_0": 1, "other_agent_0": 0}  # Constant reward of 1
@@ -130,7 +131,7 @@ class ConstantRewardImageEnv:
 
     def step(
         self,
-        action: MultiAgentProbeActionType,
+        action: MultiAgentProbeDiscreteActionType,
     ) -> tuple[MultiAgentImageObsType, Any, Any, Any, dict[str, Any]]:
         observation = {
             "agent_0": np.zeros((1, 3, 3)),
@@ -312,7 +313,7 @@ class ObsDependentRewardEnv:
 
     def step(
         self,
-        action: MultiAgentProbeActionType,
+        action: MultiAgentProbeDiscreteActionType,
     ) -> tuple[MultiAgentFlatObsType, Any, Any, Any, dict[str, Any]]:
         observation = self.last_obs
         reward = (
@@ -389,7 +390,7 @@ class ObsDependentRewardImageEnv:
 
     def step(
         self,
-        action: MultiAgentProbeActionType,
+        action: MultiAgentProbeDiscreteActionType,
     ) -> tuple[MultiAgentImageObsType, Any, Any, Any, dict[str, Any]]:
         observation = self.last_obs
         reward = (
@@ -602,7 +603,7 @@ class DiscountedRewardEnv:
 
     def step(
         self,
-        action: MultiAgentProbeActionType,
+        action: MultiAgentProbeDiscreteActionType,
     ) -> tuple[MultiAgentFlatObsType, Any, Any, Any, dict[str, Any]]:
         observation = {"agent_0": np.array([1]), "other_agent_0": np.array([1])}
         reward = (
@@ -677,7 +678,7 @@ class DiscountedRewardImageEnv:
 
     def step(
         self,
-        action: MultiAgentProbeActionType,
+        action: MultiAgentProbeDiscreteActionType,
     ) -> tuple[MultiAgentImageObsType, Any, Any, Any, dict[str, Any]]:
         observation = {
             "agent_0": np.ones((1, 3, 3)),
@@ -900,7 +901,7 @@ class FixedObsPolicyEnv:
 
     def step(
         self,
-        action: MultiAgentProbeActionType,
+        action: MultiAgentProbeDiscreteActionType,
     ) -> tuple[MultiAgentFlatObsType, Any, Any, Any, dict[str, Any]]:
         observation = {"agent_0": np.array([0]), "other_agent_0": np.array([0])}
         reward = {
@@ -967,7 +968,7 @@ class FixedObsPolicyImageEnv:
 
     def step(
         self,
-        action: MultiAgentProbeActionType,
+        action: MultiAgentProbeDiscreteActionType,
     ) -> tuple[MultiAgentImageObsType, Any, Any, Any, dict[str, Any]]:
         observation = {
             "agent_0": np.zeros((1, 3, 3)),
@@ -1191,7 +1192,7 @@ class PolicyEnv:
 
     def step(
         self,
-        action: MultiAgentProbeActionType,
+        action: MultiAgentProbeDiscreteActionType,
     ) -> tuple[MultiAgentFlatObsType, Any, Any, Any, dict[str, Any]]:
         observation = self.last_obs
         reward = {
@@ -1291,7 +1292,7 @@ class PolicyImageEnv:
 
     def step(
         self,
-        action: MultiAgentProbeActionType,
+        action: MultiAgentProbeDiscreteActionType,
     ) -> tuple[MultiAgentImageObsType, Any, Any, Any, dict[str, Any]]:
         observation = self.last_obs
         reward = {
@@ -1708,7 +1709,7 @@ class MultiPolicyEnv:
 
     def step(
         self,
-        action: MultiAgentProbeActionType,
+        action: MultiAgentProbeDiscreteActionType,
     ) -> tuple[MultiAgentFlatObsType, Any, Any, Any, dict[str, Any]]:
         observation = self.last_obs
         reward = {
@@ -1852,7 +1853,7 @@ class MultiPolicyImageEnv:
 
     def step(
         self,
-        action: MultiAgentProbeActionType,
+        action: MultiAgentProbeDiscreteActionType,
     ) -> tuple[MultiAgentImageObsType, Any, Any, Any, dict[str, Any]]:
         observation = self.last_obs
         reward = {

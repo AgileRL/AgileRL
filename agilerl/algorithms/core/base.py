@@ -93,7 +93,6 @@ from agilerl.typing import (
     ObservationType,
     OptimizerType,
     ReasoningPrompts,
-    ScalarLoss,
     TokenActionMask,
     TokenIds,
     TorchObsType,
@@ -2258,7 +2257,7 @@ class MultiAgentRLAlgorithm(
 
     def disassemble_grouped_outputs(
         self,
-        group_outputs: dict[str, Shaped[npt.NDArray, "group_batch ..."]],
+        group_outputs: dict[str, Shaped[npt.NDArray, "_group_batch ..."]],
         vect_dim: int,
         grouped_agents: dict[str, list[str]],
     ) -> dict[str, Shaped[npt.NDArray, "num_envs ..."]]:
@@ -2268,7 +2267,7 @@ class MultiAgentRLAlgorithm(
             i.e. any given agent will always terminate at the same timestep in different vectorized environments.
 
         :param group_outputs: Dictionary to be disassembled, has the form {'agent': [4, 7, 8]}
-        :type group_outputs: dict[str, Shaped[npt.NDArray, "group_batch ..."]]
+        :type group_outputs: dict[str, Shaped[npt.NDArray, "_group_batch ..."]]
         :param vect_dim: Vectorization dimension size, i.e. number of vect envs
         :type vect_dim: int
         :param grouped_agents: Dictionary of grouped agent IDs
@@ -2321,7 +2320,7 @@ class MultiAgentRLAlgorithm(
         self,
         agent_outputs: dict[str, Shaped[npt.NDArray, "num_envs ..."]],
         vect_dim: int,
-    ) -> dict[str, Shaped[npt.NDArray, "group_batch flat_dim"]]:
+    ) -> dict[str, Shaped[npt.NDArray, "_group_batch _flat_dim"]]:
         """Assembles individual agent outputs into batched outputs for shared policies.
 
         :param agent_outputs: Dictionary with individual agent outputs, e.g. {'agent_0': 4, 'agent_1': 7, 'agent_2': 8}
@@ -2329,7 +2328,7 @@ class MultiAgentRLAlgorithm(
         :param vect_dim: Vectorization dimension size, i.e. number of vect envs
         :type vect_dim: int
         :return: Assembled dictionary with the form {'agent': [4, 7, 8]}
-        :rtype: dict[str, Shaped[npt.NDArray, "group_batch flat_dim"]]
+        :rtype: dict[str, Shaped[npt.NDArray, "_group_batch _flat_dim"]]
         """
         group_outputs = {}
         for group_id in self.shared_agent_ids:
@@ -3899,11 +3898,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
 
     def _fused_logprob_fn_and_head(
         self,
-    ) -> tuple[
-        Callable,
-        Float[torch.Tensor, "vocab hidden"],
-        Float[torch.Tensor, " vocab"] | None,
-    ]:
+    ) -> tuple[Callable, torch.Tensor, torch.Tensor | None]:
         """Resolve the fused per-token-logprob fn and the lm_head weight/bias.
 
         Fused-linear-logprob path (the only path): the lm_head is identity-
@@ -3914,7 +3909,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         stays bounded too; under no_grad the lighter static method is used.
 
         :return: ``(fused_fn, lm_head_weight, lm_head_bias)``.
-        :rtype: tuple[Callable, Float[torch.Tensor, "vocab hidden"], Float[torch.Tensor, " vocab"] | None]
+        :rtype: tuple[Callable, torch.Tensor, torch.Tensor | None]
         """
         fused_fn = (
             LLMAlgorithm._logprobs_from_hidden_fused_grad
@@ -4997,11 +4992,11 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
                 log_probs.append(log_prob)
         return torch.cat(log_probs, dim=0)
 
-    def _backward_pass(self, loss: ScalarLoss) -> None:
+    def _backward_pass(self, loss: torch.Tensor) -> None:
         """Perform a backward pass and optimizer step.
 
         :param loss: Combined loss.
-        :type loss: ScalarLoss
+        :type loss: torch.Tensor
         """
         if self._uses_deepspeed:
             assert self.accelerator is not None  # _uses_deepspeed implies one
@@ -5194,8 +5189,8 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         temperature: float | None,
         capture_sampling_logps: bool = False,
     ) -> tuple[
-        list[Int[torch.Tensor, "group_size seq"]],
-        list[Bool[torch.Tensor, "group_size action_seq"]],
+        list[Shaped[torch.Tensor, "group_size _"]],
+        list[Bool[torch.Tensor, "group_size _"]],
         list[SamplingLogProbs | None] | None,
     ]:
         """Generate completions with colocated vLLM for GRPO/LLMPPO-style batches.
@@ -5216,8 +5211,9 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         :type group_size: int
         :param temperature: Temperature for sampling.
         :type temperature: float | None
-        :return: Per-prompt completion token tensors and matching action masks.
-        :rtype: tuple[list[Int[torch.Tensor, "group_size seq"]], list[Bool[torch.Tensor, "group_size action_seq"]], list[SamplingLogProbs | None] | None]
+        :return: Per-prompt completion token tensors and matching action masks. Each
+            entry keeps its own sequence length, so the trailing axis is unnamed.
+        :rtype: tuple[list[Shaped[torch.Tensor, "group_size _"]], list[Bool[torch.Tensor, "group_size _"]], list[SamplingLogProbs | None] | None]
         """
         if SamplingParams is None:
             msg = "vLLM is required when use_vllm=True. Install AgileRL with vLLM support for this platform: `pip install agilerl[llm]`."

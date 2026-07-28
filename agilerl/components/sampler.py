@@ -3,7 +3,7 @@ from collections.abc import Callable
 from typing import Any
 
 import torch
-from jaxtyping import Int
+from jaxtyping import Shaped
 from tensordict import TensorDict
 from torch.utils.data import DataLoader
 
@@ -192,11 +192,11 @@ class Sampler:
         )
         return self.memory.sample(batch_size, beta=beta)
 
-    def sample_n_step(self, idxs: Int[torch.Tensor, "batch ..."]) -> TensorDict:
+    def sample_n_step(self, idxs: Shaped[torch.Tensor, "batch ..."]) -> TensorDict:
         """Sample a batch of experiences from the n-step replay buffer.
 
         :param idxs: Indices to sample from, shape ``(batch,)`` or ``(batch, 1)``
-        :type idxs: Int[torch.Tensor, "batch ..."]
+        :type idxs: Shaped[torch.Tensor, "batch ..."]
         :return: Sampled batch of experiences
         :rtype: TensorDict
         """

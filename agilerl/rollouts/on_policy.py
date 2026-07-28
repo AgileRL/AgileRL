@@ -28,13 +28,17 @@ RolloutEnv = gym.Env | gym.vector.VectorEnv
 # tuple of these rather than a single array.
 BatchedObsArray = Shaped[npt.NDArray, "num_envs ..."]
 
+# Per-env done flag carried between rollouts. Its dtype is bool once a step has
+# been taken and float64 on the freshly reset flags a caller may start from.
+LastDoneArray = Shaped[npt.NDArray, " num_envs"]
+
 
 def _collect_rollouts(
     agent: SupportedOnPolicy,
     env: RolloutEnv,
     n_steps: int | None = None,
     last_obs: BatchedObsArray | None = None,
-    last_done: EnvDoneArray | None = None,
+    last_done: LastDoneArray | None = None,
     last_scores: EnvScoreArray | None = None,
     last_info: dict[str, Any] | None = None,
     *,
@@ -51,7 +55,7 @@ def _collect_rollouts(
     :param last_obs: The observation to use for the first step. Defaults to None, where the environment is reset.
     :type last_obs: BatchedObsArray | None
     :param last_done: The done flag to use for the first step. Defaults to None, where the environment is reset.
-    :type last_done: EnvDoneArray | None
+    :type last_done: LastDoneArray | None
     :param last_scores: The scores to use for the first step. Defaults to None, where the environment is reset.
     :type last_scores: EnvScoreArray | None
     :param last_info: The info for the current step. Defaults to None, where the environment is reset.

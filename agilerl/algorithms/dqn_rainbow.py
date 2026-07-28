@@ -6,7 +6,7 @@ import numpy.typing as npt
 import torch
 from accelerate import Accelerator
 from gymnasium import spaces
-from jaxtyping import Float, Int
+from jaxtyping import Float, Int, Num
 from tensordict import TensorDict
 from torch import optim
 from torch.nn.utils import clip_grad_norm_
@@ -317,10 +317,10 @@ class RainbowDQN(RLAlgorithm[TensorDict]):
     def _dqn_loss(
         self,
         obs: TorchObsType,
-        actions: Float[torch.Tensor, "batch 1"],
+        actions: Num[torch.Tensor, "batch 1"],
         rewards: Float[torch.Tensor, "batch 1"],
         next_obs: TorchObsType,
-        dones: Float[torch.Tensor, "batch 1"],
+        dones: Num[torch.Tensor, "batch 1"],
         gamma: float,
     ) -> ElementwiseLoss:
         """Calculate the DQN loss.
@@ -328,13 +328,13 @@ class RainbowDQN(RLAlgorithm[TensorDict]):
         :param obs: Batch of current states
         :type obs: torch.Tensor
         :param actions: Batch of actions taken
-        :type actions: Float[torch.Tensor, "batch 1"]
+        :type actions: Num[torch.Tensor, "batch 1"]
         :param rewards: Batch of rewards received
         :type rewards: Float[torch.Tensor, "batch 1"]
         :param next_obs: Batch of next states
         :type next_obs: torch.Tensor, dict[str, torch.Tensor], tuple[torch.Tensor]
         :param dones: Batch of done flags indicating episode termination
-        :type dones: Float[torch.Tensor, "batch 1"]
+        :type dones: Num[torch.Tensor, "batch 1"]
         :param gamma: Discount factor
         :type gamma: float
         :return: Element-wise loss
@@ -406,7 +406,7 @@ class RainbowDQN(RLAlgorithm[TensorDict]):
         per: bool = False,
     ) -> tuple[
         float,
-        Int[torch.Tensor, "batch 1"] | None,
+        Int[torch.Tensor, "batch ..."] | None,
         Float[npt.NDArray[np.float32], " batch"] | None,
     ]:
         """Update agent network parameters to learn from experiences.
@@ -421,7 +421,7 @@ class RainbowDQN(RLAlgorithm[TensorDict]):
         :type per: bool, optional
 
         :return: Tuple of loss, indices, and new priorities
-        :rtype: tuple[float, Int[torch.Tensor, "batch 1"] | None, Float[npt.NDArray[np.float32], " batch"] | None]
+        :rtype: tuple[float, Int[torch.Tensor, "batch ..."] | None, Float[npt.NDArray[np.float32], " batch"] | None]
         """
         n_step = n_experiences is not None
         batch: PrioritizedReplayBatch = PrioritizedReplayBatch.from_tensordict(
@@ -444,7 +444,7 @@ class RainbowDQN(RLAlgorithm[TensorDict]):
 
         elementwise_loss: ElementwiseLoss | None = None
         if per:
-            weights: Float[torch.Tensor, "batch 1"] = batch.weights
+            weights: Float[torch.Tensor, "batch ..."] = batch.weights
             idxs = batch.idxs
 
             if self.combined_reward or not n_step:

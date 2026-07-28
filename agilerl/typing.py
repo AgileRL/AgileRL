@@ -22,11 +22,15 @@ document the contract without enforcing it. Parameters take abstract dtypes
 the concrete dtype. Single-axis strings keep a leading space (``" num_envs"``) so
 they trip the repo-ignored F722 instead of resolving as an F821 undefined name.
 
-Two places must never receive a jaxtyping annotation, because both fail at
-runtime rather than at type-check time: pydantic model fields (schema generation
-raises), and the dispatched first parameter of a ``functools.singledispatch``
-function (jaxtyping types are not subclasses of what they wrap, so the
-registration silently never matches).
+The axis string constrains nothing statically: ``Float[npt.NDArray[np.float32],
+"b d"]`` resolves to the same type as a bare ``npt.NDArray[np.float32]`` and
+accepts a 1-D array. Rank is checked only when the *wrapped* type spells it out
+as ``np.ndarray[tuple[int, int], np.dtype[...]]``.
+
+The dispatched first parameter of a ``functools.singledispatch`` function must
+never carry a jaxtyping annotation: jaxtyping types are not subclasses of what
+they wrap, so ``@f.register`` binds the implementation to the jaxtyping class and
+dispatch silently falls through to the base case. Later parameters are fine.
 """
 
 from collections.abc import Callable, Iterable, Mapping, Sequence

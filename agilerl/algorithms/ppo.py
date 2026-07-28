@@ -1,7 +1,7 @@
 import copy
 import warnings
 from collections.abc import Callable
-from typing import Any, overload
+from typing import Any, Literal, overload
 
 import gymnasium as gym
 import numpy as np
@@ -50,6 +50,12 @@ from agilerl.utils.algo_utils import (
 EnvValueArray = Float[npt.NDArray[np.float32], " num_envs"]
 # Entropy: one value per env, or 0-d for the ``-log_prob.mean()`` fallback.
 EntropyArray = Float[npt.NDArray[np.float32], "..."]
+# Recurrent hidden states threaded through the actor and critic. Their batch axis
+# counts sequences, which under BPTT is smaller than the flattened timestep batch
+# carried by the observations, actions and values alongside them.
+SequenceHiddenStateDict = dict[
+    str, Float[torch.Tensor, "num_layers num_sequences hidden_size"]
+]
 
 ActionReturnType = tuple[
     PolicyActionArray,
@@ -454,34 +460,68 @@ class PPO(RLAlgorithm[TensorDict]):
             if key.startswith(encoder_name)
         }
 
+    @overload
     def _get_action_and_values(
         self,
         obs: TorchObsType,
         action_mask: ActionMaskInput = None,
-        hidden_state: (
-            HiddenStateDict | None
-        ) = None,  # Hidden state is a dict for recurrent policies
+        hidden_state: SequenceHiddenStateDict | None = None,
         *,
-        sample: bool = True,
+        sample: Literal[True] = True,
     ) -> tuple[
         Shaped[torch.Tensor, "batch ..."],
         LogProbs,
         Float[torch.Tensor, "..."],
         Float[torch.Tensor, " batch"],
-        HiddenStateDict | None,
+        SequenceHiddenStateDict | None,
+    ]: ...
+
+    @overload
+    def _get_action_and_values(
+        self,
+        obs: TorchObsType,
+        action_mask: ActionMaskInput = None,
+        hidden_state: SequenceHiddenStateDict | None = None,
+        *,
+        sample: Literal[False],
+    ) -> tuple[
+        None,
+        None,
+        Float[torch.Tensor, "..."],
+        Float[torch.Tensor, " batch"],
+        SequenceHiddenStateDict | None,
+    ]: ...
+
+    def _get_action_and_values(
+        self,
+        obs: TorchObsType,
+        action_mask: ActionMaskInput = None,
+        hidden_state: (
+            SequenceHiddenStateDict | None
+        ) = None,  # Hidden state is a dict for recurrent policies
+        *,
+        sample: bool = True,
+    ) -> tuple[
+        Shaped[torch.Tensor, "batch ..."] | None,
+        LogProbs | None,
+        Float[torch.Tensor, "..."],
+        Float[torch.Tensor, " batch"],
+        SequenceHiddenStateDict | None,
     ]:
         """Return the next action to take in the environment and the values.
+
+        Action and log probability are ``None`` when ``sample`` is False.
 
         :param obs: Environment observation, or multiple observations in a batch
         :type obs: TorchObsType
         :param action_mask: Mask of legal actions 1=legal 0=illegal, defaults to None
         :type action_mask: ActionMaskInput
         :param hidden_state: Hidden state for recurrent policies, defaults to None
-        :type hidden_state: HiddenStateDict | None
+        :type hidden_state: SequenceHiddenStateDict | None
         :param sample: Whether to sample an action, defaults to True
         :type sample: bool
         :return: Action, log probability, entropy, state values, and (if recurrent) next hidden state
-        :rtype: tuple[Shaped[torch.Tensor, "batch ..."], LogProbs, Float[torch.Tensor, "..."], Float[torch.Tensor, " batch"], HiddenStateDict | None]
+        :rtype: tuple[Shaped[torch.Tensor, "batch ..."] | None, LogProbs | None, Float[torch.Tensor, "..."], Float[torch.Tensor, " batch"], SequenceHiddenStateDict | None]
         """
         if hidden_state is not None:
             if self.share_encoders:
@@ -524,7 +564,7 @@ class PPO(RLAlgorithm[TensorDict]):
                 values = values.squeeze(-1)
 
                 # Combine the next hidden states from both networks
-                next_hidden_combined: HiddenStateDict = {}
+                next_hidden_combined: SequenceHiddenStateDict = {}
                 if next_hidden_actor is not None:
                     next_hidden_combined.update(next_hidden_actor)
                 if next_hidden_critic is not None:
@@ -586,8 +626,8 @@ class PPO(RLAlgorithm[TensorDict]):
     def evaluate_actions(
         self,
         obs: ObservationType,
-        actions: Float[torch.Tensor, "batch ..."],
-        hidden_state: HiddenStateDict | None = None,
+        actions: Shaped[torch.Tensor, "batch ..."],
+        hidden_state: SequenceHiddenStateDict | None = None,
         action_mask: ActionMaskInput = None,
     ) -> tuple[LogProbs, Float[torch.Tensor, "..."], Float[torch.Tensor, " batch"]]:
         """Evaluate the actions.
@@ -595,9 +635,9 @@ class PPO(RLAlgorithm[TensorDict]):
         :param obs: Environment observation, or multiple observations in a batch
         :type obs: ObservationType
         :param actions: Actions to evaluate
-        :type actions: Float[torch.Tensor, "batch ..."]
-        :param hidden_state: Hidden state for recurrent policies, defaults to None. Expected shape: dict with tensors of shape (batch_size, 1, hidden_size).
-        :type hidden_state: HiddenStateDict | None
+        :type actions: Shaped[torch.Tensor, "batch ..."]
+        :param hidden_state: Hidden state for recurrent policies, defaults to None. Expected shape: dict with tensors of shape (num_layers, num_sequences, hidden_size).
+        :type hidden_state: SequenceHiddenStateDict | None
         :param action_mask: Mask of legal actions 1=legal 0=illegal, defaults to None
         :type action_mask: ActionMaskInput
         :return: Log probability, entropy, state values

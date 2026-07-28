@@ -1,4 +1,4 @@
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
 import numpy as np
@@ -19,7 +19,9 @@ from agilerl.typing import (
 # an inactive agent's NaN row.
 VecActionArray = Shaped[npt.NDArray, "num_envs *action_shape"]
 # The ``actions`` mapping ``step`` accepts, shared with the subclass overrides.
-VecActionMapping = Mapping[str, VecActionArray | torch.Tensor]
+# ``step`` only takes the length and indexes per environment, so a plain
+# per-environment sequence of actions is accepted alongside arrays and tensors.
+VecActionMapping = Mapping[str, VecActionArray | torch.Tensor | Sequence[Any]]
 
 
 class PettingZooVecEnv:
@@ -138,7 +140,8 @@ class PettingZooVecEnv:
         """Take an action for each parallel environment.
 
         :param actions: Dictionary of vectorized actions for each agent, each of
-            shape ``(num_envs, *action_shape)``. Values may be arrays or tensors.
+            shape ``(num_envs, *action_shape)``. Values may be arrays, tensors,
+            or a per-environment sequence of actions.
         :type actions: VecActionMapping
 
         :return: Tuple of observations, rewards, terminated, truncated, infos

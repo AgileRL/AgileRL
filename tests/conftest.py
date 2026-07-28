@@ -6,6 +6,52 @@ import socket
 import sys
 import tempfile
 
+# Opt-in audit of the jaxtyping annotations. Run `AGILERL_TYPE_HOOK=1 pytest ...`
+# and beartype checks every call's dtype, rank, and that a repeated axis name
+# means the same size across arguments -- none of which a static checker can see.
+# Use it after changing array annotations, or periodically to catch drift.
+#
+# Off by default because the hook is instrumentation, not a check: it wraps every
+# function in the listed packages, and those wrappers hold weakrefs that make the
+# env factories unpicklable, so the async vectorized envs fail to spawn workers
+# under cloudpickle. It also costs ~11x on small hot functions, so it must never
+# be live on a training path.
+#
+# agilerl.typing and agilerl.components.data are left out because they define the
+# tensordict TensorClass batches. The hook wraps the generated __init__, whose
+# signature makes batch_size a required keyword, but tensordict constructs those
+# classes internally passing only self, so the wrapper's signature bind raises
+# before the body runs. Neither module loses coverage worth having: typing.py is
+# aliases and class definitions, and data.py's helpers are exercised through the
+# buffers. Any new module defining a TensorClass belongs on that list too.
+if os.environ.get("AGILERL_TYPE_HOOK"):
+    from jaxtyping import install_import_hook
+
+    import tests._runtime_typecheck  # noqa: F401 -- binds the attribute the hook resolves by name
+
+    install_import_hook(
+        [
+            "agilerl.algorithms",
+            "agilerl.components.replay_buffer",
+            "agilerl.components.rollout_buffer",
+            "agilerl.components.sampler",
+            "agilerl.components.segment_tree",
+            "agilerl.hpo",
+            "agilerl.llm_envs",
+            "agilerl.metrics",
+            "agilerl.modules",
+            "agilerl.networks",
+            "agilerl.population",
+            "agilerl.protocols",
+            "agilerl.rollouts",
+            "agilerl.training",
+            "agilerl.utils",
+            "agilerl.vector",
+            "agilerl.wrappers",
+        ],
+        "tests._runtime_typecheck.typechecker",
+    ).__enter__()
+
 import gymnasium as gym
 
 # Register lightweight test environments

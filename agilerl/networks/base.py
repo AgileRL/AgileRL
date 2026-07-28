@@ -7,6 +7,7 @@ from typing import Any, ClassVar, Protocol, TypeVar, overload, runtime_checkable
 import numpy as np
 import torch
 from gymnasium import spaces
+from jaxtyping import Float
 from torch import nn
 
 from agilerl.modules import (
@@ -43,6 +44,12 @@ class SupportsNumOutputs(Protocol):
 DefaultEncoderType = (
     EvolvableCNN | EvolvableMLP | EvolvableMultiInput | EvolvableSimBa | EvolvableLSTM
 )
+# Recurrent hidden states threaded through the encoders. Their batch axis counts
+# sequences, which under BPTT is smaller than the flattened timestep batch of the
+# latent features returned alongside them.
+SequenceHiddenState = dict[
+    str, Float[torch.Tensor, "num_layers num_sequences hidden_size"]
+]
 
 
 def preserve_parameters(old_net: nn.Module, new_net: ModuleT) -> ModuleT:
@@ -390,23 +397,23 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
     def extract_features(
         self,
         x: TorchObsType,
-        hidden_state: HiddenStateDict,
-    ) -> tuple[LatentTensor, HiddenStateDict]: ...
+        hidden_state: SequenceHiddenState,
+    ) -> tuple[LatentTensor, SequenceHiddenState]: ...
 
     def extract_features(
         self,
         x: TorchObsType,
-        hidden_state: HiddenStateDict | None = None,
-    ) -> LatentTensor | tuple[LatentTensor, HiddenStateDict]:
+        hidden_state: SequenceHiddenState | None = None,
+    ) -> LatentTensor | tuple[LatentTensor, SequenceHiddenState]:
         """Extract features from the encoder part of the network.
 
         :param x: Input observation to extract features from
         :type x: TorchObsType
         :param hidden_state: Hidden states for recurrent networks (unused in non-recurrent networks)
-        :type hidden_state: HiddenStateDict, optional
+        :type hidden_state: SequenceHiddenState, optional
         :return: The encoded features, and (for recurrent networks) the next
             hidden-state dict if a hidden state was passed
-        :rtype: LatentTensor | tuple[LatentTensor, HiddenStateDict]
+        :rtype: LatentTensor | tuple[LatentTensor, SequenceHiddenState]
         """
         # For compatibility with both recurrent and non-recurrent networks
         if hidden_state is None:

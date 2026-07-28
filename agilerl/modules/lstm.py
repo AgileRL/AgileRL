@@ -9,7 +9,6 @@ from agilerl.modules.base import EvolvableModule, MutationType, mutation
 from agilerl.typing import (
     BatchDimension,
     DeviceType,
-    HiddenStateDict,
     MutationApplyDict,
 )
 from agilerl.utils.evolvable_networks import get_activation
@@ -18,6 +17,12 @@ SequenceInput = (
     Shaped[npt.NDArray, "batch *seq_len input_size"]
     | Shaped[torch.Tensor, "batch *seq_len input_size"]
 )
+# Hidden and cell states. Their batch axis counts sequences: when it disagrees
+# with the leading axis of ``x``, the forward pass folds ``x`` into that many
+# sequences, so the two axes are independent.
+SequenceHiddenState = dict[
+    str, Float[torch.Tensor, "num_layers num_sequences hidden_state_size"]
+]
 
 
 class EvolvableLSTM(EvolvableModule):
@@ -179,16 +184,16 @@ class EvolvableLSTM(EvolvableModule):
     def forward(
         self,
         x: SequenceInput,
-        hidden_state: HiddenStateDict | None = None,
-    ) -> tuple[Float[torch.Tensor, "batch num_outputs"], HiddenStateDict]:
+        hidden_state: SequenceHiddenState | None = None,
+    ) -> tuple[Float[torch.Tensor, "batch num_outputs"], SequenceHiddenState]:
         """Forward pass of the network.
 
         :param x: Input tensor
         :type x: SequenceInput
         :param hidden_state: Dict containing hidden and cell states, defaults to None
-        :type hidden_state: HiddenStateDict | None
+        :type hidden_state: SequenceHiddenState | None
         :return: Output tensor and next hidden state
-        :rtype: tuple[Float[torch.Tensor, "batch num_outputs"], HiddenStateDict]
+        :rtype: tuple[Float[torch.Tensor, "batch num_outputs"], SequenceHiddenState]
         """
         if not isinstance(x, torch.Tensor):
             x = torch.tensor(x, dtype=torch.float32, device=self.device)

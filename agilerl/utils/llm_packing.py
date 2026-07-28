@@ -33,6 +33,11 @@ from jaxtyping import Float, Int, Shaped
 # ``(N,)``, ``(1, N)`` and ``(N, 1)`` are all accepted and reshaped to ``(N,)``.
 PackedFloat = Float[torch.Tensor, "..."]
 
+# The padded batch as handed in: ``pack_padded_batch`` takes any rank and raises
+# ``ValueError`` for anything other than ``(B, T)``.
+PaddedIds = Int[torch.Tensor, "..."]
+PaddedMask = Shaped[torch.Tensor, "..."]
+
 
 class PackedBatch(NamedTuple):
     """Flattened batch plus the metadata needed to unpack it again.
@@ -59,8 +64,8 @@ class PackedBatch(NamedTuple):
 
 
 def pack_padded_batch(
-    input_ids: Int[torch.Tensor, "batch seq_len"],
-    attention_mask: Shaped[torch.Tensor, "batch seq_len"],
+    input_ids: PaddedIds,
+    attention_mask: PaddedMask,
 ) -> PackedBatch:
     """Flatten a padded ``(B, T)`` batch into a single padding-free row.
 
@@ -70,12 +75,13 @@ def pack_padded_batch(
     restart at 0, matching the ``cumsum(mask) - 1`` convention the dense path
     uses for real tokens.
 
-    :param input_ids: ``(B, T)`` token ids.
-    :type input_ids: Int[torch.Tensor, "batch seq_len"]
+    :param input_ids: ``(B, T)`` token ids; any other rank raises ``ValueError``.
+    :type input_ids: PaddedIds
     :param attention_mask: ``(B, T)`` mask; non-zero marks real tokens (bool or integer).
-    :type attention_mask: Shaped[torch.Tensor, "batch seq_len"]
+    :type attention_mask: PaddedMask
     :return: A :class:`PackedBatch`.
     :rtype: PackedBatch
+    :raises ValueError: If ``input_ids`` is not two-dimensional.
     """
     if input_ids.dim() != 2:
         msg = (
