@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 """Lightweight tokenizer stand-in for tests that must not import transformers.
 
 For the vendored Qwen2 weights and HuggingFace tokenizer, use

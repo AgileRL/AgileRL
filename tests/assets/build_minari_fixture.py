@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 """Build the Minari test fixture used by tests/test_utils/test_minari_utils.py.
 
 Downloads ``D4RL/door/human-v2`` from the Farama/HuggingFace registry once and

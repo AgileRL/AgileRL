@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 from agilerl.modules.configs import MlpNetConfig
 from agilerl.utils.evolvable_networks import config_from_dict
 

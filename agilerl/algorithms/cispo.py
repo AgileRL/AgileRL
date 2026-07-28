@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 """CISPO algorithm variant built on top of GRPO."""
 
 from __future__ import annotations

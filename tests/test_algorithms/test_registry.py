@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 # Mock NetworkGroup for testing (avoids frame inspection issues)
 from dataclasses import dataclass, field
 from unittest.mock import patch

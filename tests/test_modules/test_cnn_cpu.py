@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 """CPU-only CNN module tests (no GPU mark)."""
 
 from unittest.mock import MagicMock, patch

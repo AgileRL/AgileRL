@@ -272,3 +272,6 @@ allow-star-arg-any = true
     "ANN",           # test signatures don't need annotations
 ]
 "{benchmarking,demos,tutorials}/**" = ["ALL"]
+".github/**" = [
+    "INP001",        # standalone CI scripts, not a package
+]

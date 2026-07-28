@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 """Protocol definitions for AgileRL's evolvable algorithms and neural networks.
 
 This module contains Protocol classes and type definitions that define the interfaces

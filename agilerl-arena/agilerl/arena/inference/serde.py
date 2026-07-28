@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 """Base64 ``.npy`` serialization for Arena RL and supervised inference payloads."""
 
 from __future__ import annotations

@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 from agilerl.training.llm.multiturn import finetune_llm_multiturn
 from agilerl.training.llm.preference import finetune_llm_preference
 from agilerl.training.llm.reasoning import finetune_llm_reasoning

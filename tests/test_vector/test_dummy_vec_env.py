@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 """Comprehensive tests for DummyVecEnv and PzDummyVecEnv."""
 
 from __future__ import annotations

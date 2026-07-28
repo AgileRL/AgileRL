@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 """This tutorial shows how to train an NeuralTS agent on the PenDigits dataset with evolutionary HPO.
 
 Authors: Nick (https://github.com/nicku-a)

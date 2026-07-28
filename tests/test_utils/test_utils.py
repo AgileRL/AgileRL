@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 import copy
 from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, Mock, call, patch

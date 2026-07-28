@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 """Synchronous multi-turn vector environment utilities for LLM rollouts."""
 
 from __future__ import annotations

@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 """Fused linear PPO-style policy gradient loss with per-token / per-turn advantages.
 
 Liger's ``LigerFusedLinearGRPOFunction`` only handles GRPO's

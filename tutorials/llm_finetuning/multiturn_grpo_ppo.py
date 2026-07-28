@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 """Train LLMPPO, LLMREINFORCE, or GRPO on multi-turn GuessTheNumber.
 
 This script is used by the multi-turn GRPO vs LLMPPO tutorial and keeps the

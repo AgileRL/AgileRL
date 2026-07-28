@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 """Lightweight test runner for subprocess-isolated tests.
 
 Replaces the pytest entrypoint with a direct python3 invocation to eliminate

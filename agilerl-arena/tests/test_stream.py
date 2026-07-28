@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for arena.stream — event types, parsing, and NDJsonStream."""
 
 from __future__ import annotations

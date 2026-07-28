@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for ``agilerl.algorithms.core.llm_ops.fused_loss``.
 
 ``fused_loss`` requires ``liger-kernel`` at import time, so this whole

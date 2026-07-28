@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 """Generic machinery for building Click commands from a server manifest node.
 
 Turns a manifest command/group tree (from ``GET /api/cli/v1/capabilities``) into

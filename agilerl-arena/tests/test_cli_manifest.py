@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for the generic manifest -> Click machinery and client dispatch."""
 
 from __future__ import annotations

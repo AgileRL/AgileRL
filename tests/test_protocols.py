@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 import gymnasium as gym
 import numpy as np
 import pandas as pd

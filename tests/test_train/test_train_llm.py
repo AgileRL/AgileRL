@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 import itertools
 from contextlib import contextmanager, nullcontext
 from unittest.mock import ANY, MagicMock, Mock, call, patch

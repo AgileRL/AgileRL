@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 """Lean causal LM + value head for PPO (replaces TRL experimental wrapper).
 
 No dtype upcasts/downcasts in the value head or wrapper forward; tensors stay in

@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 """Rainbow DQN algorithm specification."""
 
 from __future__ import annotations

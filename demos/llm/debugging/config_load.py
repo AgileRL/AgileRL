@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 """Load YAML from ``debugging/configs/`` relative to the repo root."""
 
 from __future__ import annotations

@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 """Capability-gated Click groups for the ``arena on-prem`` command tree.
 
 ``ArenaRootGroup`` hides ``on-prem`` at the CLI root unless capabilities grant

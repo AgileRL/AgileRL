@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for agilerl.algorithms.core.base module.
 
 For LLMAlgorithm.save_checkpoint / load_checkpoint, the following cases are considered
