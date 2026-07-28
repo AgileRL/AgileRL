@@ -98,6 +98,29 @@ class _TokenStore:
         self.refresh_token = None
 
 
+def _check_writable_target(path: Path) -> None:
+    """Ensure *path* can be created as a new file, making parent dirs as needed.
+
+    :param path: The intended destination file.
+    :type path: Path
+    :raises FileExistsError: If something already exists at *path*.
+    :raises NotADirectoryError: If the parent path exists but is not a directory.
+    """
+    if path.exists():
+        kind = "directory" if path.is_dir() else "file"
+        msg = (
+            f"Cannot write to {path}: a {kind} of that name already exists. "
+            f"Remove it, or choose a different output path."
+        )
+        raise FileExistsError(msg)
+
+    parent = path.parent
+    if parent.exists() and not parent.is_dir():
+        msg = f"Cannot write to {path}: {parent} is not a directory."
+        raise NotADirectoryError(msg)
+    parent.mkdir(parents=True, exist_ok=True)
+
+
 class ArenaClient:
     """Client for the Arena RLOps platform.
 
@@ -1072,9 +1095,19 @@ class ArenaClient:
         :returns: The path to the written file.
         :rtype: Path
         :raises FileExistsError: If the resolved output path already exists.
+        :raises NotADirectoryError: If the parent path exists but is not a directory.
         """
-        # Platform serves CSV via GET /api/cli/v1/experiments/metrics?preview_rows=…
-        # (not POST …/experiments/{name}/metrics — that path 404s to Loco's HTML fallback).
+        path = (
+            Path(f"{experiment_name}_metrics.csv")
+            if output_path is None
+            else Path(output_path)
+        )
+        # A directory target takes its filename from the response's
+        # content-disposition, so it can only be checked after the download.
+        resolve_after_download = path.is_dir()
+        if not resolve_after_download:
+            _check_writable_target(path)
+
         payload, content_type, disposition = self.preview_experiment_metrics_csv(
             experiment_name,
             preview_rows=50_000,
@@ -1084,19 +1117,10 @@ class ArenaClient:
             body_preview = payload.decode("utf-8", errors="replace")[:500]
             raise ArenaAPIError.from_response_body(body_preview)
 
-        if output_path is None:
-            path = Path(f"{experiment_name}_metrics.csv")
-        else:
-            path = Path(output_path)
-            if path.is_dir():
-                filename = (
-                    extract_filename(disposition) or f"{experiment_name}_metrics.csv"
-                )
-                path = path / filename
-
-        if path.exists():
-            msg = f"Output path already exists: {path}. Please remove it or specify a different path."
-            raise FileExistsError(msg)
+        if resolve_after_download:
+            filename = extract_filename(disposition) or f"{experiment_name}_metrics.csv"
+            path = path / filename
+            _check_writable_target(path)
 
         path.write_bytes(payload)
         logger.info("Metrics saved to %s", path)

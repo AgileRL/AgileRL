@@ -1531,15 +1531,48 @@ class TestDownloadExperimentMetrics:
         )
         assert result == tmp_path / "exp1_metrics.csv"
 
-    def test_raises_if_file_exists(self, api_key_client, tmp_path, monkeypatch):
+    def test_raises_if_file_exists_before_downloading(
+        self, api_key_client, tmp_path, monkeypatch
+    ):
         monkeypatch.chdir(tmp_path)
         existing = tmp_path / "exp1_metrics.csv"
         existing.write_text("old")
         api_key_client.preview_experiment_metrics_csv = MagicMock(
             return_value=(b"new", "text/csv", None)
         )
-        with pytest.raises(FileExistsError, match="already exists"):
+        with pytest.raises(FileExistsError, match="a file of that name already exists"):
             api_key_client.download_experiment_metrics("exp1")
+        api_key_client.preview_experiment_metrics_csv.assert_not_called()
+        assert existing.read_text() == "old"
+
+    def test_creates_parent_directory_if_missing(self, api_key_client, tmp_path):
+        api_key_client.preview_experiment_metrics_csv = MagicMock(
+            return_value=(b"new", "text/csv", None)
+        )
+        target = tmp_path / "nested" / "dirs" / "metrics.csv"
+        result = api_key_client.download_experiment_metrics("exp1", output_path=target)
+        assert result == target
+        assert target.read_bytes() == b"new"
+
+    def test_raises_if_parent_is_not_a_directory(self, api_key_client, tmp_path):
+        not_a_dir = tmp_path / "blocker"
+        not_a_dir.write_text("x")
+        api_key_client.preview_experiment_metrics_csv = MagicMock(
+            return_value=(b"new", "text/csv", None)
+        )
+        target = not_a_dir / "metrics.csv"
+        with pytest.raises(NotADirectoryError, match="is not a directory"):
+            api_key_client.download_experiment_metrics("exp1", output_path=target)
+        api_key_client.preview_experiment_metrics_csv.assert_not_called()
+
+    def test_raises_if_resolved_directory_target_exists(self, api_key_client, tmp_path):
+        (tmp_path / "custom.csv").write_text("old")
+        api_key_client.preview_experiment_metrics_csv = MagicMock(
+            return_value=(b"new", "text/csv", 'attachment; filename="custom.csv"')
+        )
+        with pytest.raises(FileExistsError, match="a file of that name already exists"):
+            api_key_client.download_experiment_metrics("exp1", output_path=tmp_path)
+        assert (tmp_path / "custom.csv").read_text() == "old"
 
     def test_metrics_param_forwarded(self, api_key_client, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
