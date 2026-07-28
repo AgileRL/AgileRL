@@ -23,8 +23,8 @@ def extract_filename(disposition: str | None) -> str | None:
 
 
 def order_dataset_fields(
-    row: dict[str, str | None | int],
-) -> dict[str, str | None | int]:
+    row: dict[str, str | int | None],
+) -> dict[str, str | int | None]:
     """Return a copy of a dataset row with ``name`` and ``hf_dataset_id`` first.
 
     :param row: The dataset row to order.
@@ -43,8 +43,8 @@ def order_dataset_fields(
 
 
 def sort_dataset_search_by_downloads(
-    results: list[dict[str, str | None | int]],
-) -> list[dict[str, str | None | int]]:
+    results: list[dict[str, str | int | None]],
+) -> list[dict[str, str | int | None]]:
     """Sort HuggingFace search rows by ``downloads`` descending."""
     return sorted(results, key=lambda row: row.get("downloads") or 0, reverse=True)
 

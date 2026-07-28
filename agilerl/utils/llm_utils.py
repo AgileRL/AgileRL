@@ -878,8 +878,10 @@ def format_colocated_vllm_oom_hint(
     alloc_gib = alloc_bytes / (1024**3)
 
     lines = [
-        f"CUDA device {device_index}: {total_gib:.2f} GiB total, "
-        f"{alloc_gib:.2f} GiB torch-allocated, {free_gib:.2f} GiB free (driver).",
+        (
+            f"CUDA device {device_index}: {total_gib:.2f} GiB total, "
+            f"{alloc_gib:.2f} GiB torch-allocated, {free_gib:.2f} GiB free (driver)."
+        ),
     ]
     if kv_cache_memory_bytes is not None:
         kv_gib = kv_cache_memory_bytes / (1024**3)
