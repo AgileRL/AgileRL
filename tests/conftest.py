@@ -8,11 +8,10 @@ import tempfile
 
 # Validate the jaxtyping annotations at runtime for the whole test session:
 # beartype checks each call's dtype, rank, and that a repeated axis name means the
-# same size across arguments -- none of which a static checker can see. Installed
-# here rather than in the library because it costs ~11x on small hot functions, so
-# it must never be live on a training path. Must run before agilerl is imported
-# for the hook to instrument it. Set AGILERL_NO_TYPE_HOOK=1 to profile or bisect
-# without it.
+# same size across arguments -- none of which a static checker can see. Lives here
+# rather than in the library because it costs ~11x on small hot functions, so it
+# must never be live on a training path. Must run before agilerl is imported for
+# the hook to instrument it.
 #
 # agilerl.typing and agilerl.components.data are left out because they define the
 # tensordict TensorClass batches. The hook wraps the generated __init__, whose
@@ -21,35 +20,34 @@ import tempfile
 # before the body runs. Neither module loses coverage worth having: typing.py is
 # aliases and class definitions, and data.py's helpers are exercised through the
 # buffers. Any new module defining a TensorClass belongs on that list too.
-if not os.environ.get("AGILERL_NO_TYPE_HOOK"):
-    from jaxtyping import install_import_hook
+from jaxtyping import install_import_hook
 
-    import tests._runtime_typecheck  # noqa: F401 -- binds the attribute the hook resolves by name
+import tests._runtime_typecheck  # noqa: F401 -- binds the attribute the hook resolves by name
 
-    install_import_hook(
-        [
-            "agilerl.algorithms",
-            "agilerl.components.replay_buffer",
-            "agilerl.components.rollout_buffer",
-            "agilerl.components.sampler",
-            "agilerl.components.segment_tree",
-            "agilerl.hpo",
-            "agilerl.llm_envs",
-            "agilerl.metrics",
-            "agilerl.modules",
-            "agilerl.networks",
-            "agilerl.population",
-            "agilerl.protocols",
-            "agilerl.rollouts",
-            "agilerl.training",
-            "agilerl.utils",
-            "agilerl.vector",
-            "agilerl.wrappers",
-        ],
-        "tests._runtime_typecheck.typechecker",
-    ).__enter__()
+install_import_hook(
+    [
+        "agilerl.algorithms",
+        "agilerl.components.replay_buffer",
+        "agilerl.components.rollout_buffer",
+        "agilerl.components.sampler",
+        "agilerl.components.segment_tree",
+        "agilerl.hpo",
+        "agilerl.llm_envs",
+        "agilerl.metrics",
+        "agilerl.modules",
+        "agilerl.networks",
+        "agilerl.population",
+        "agilerl.protocols",
+        "agilerl.rollouts",
+        "agilerl.training",
+        "agilerl.utils",
+        "agilerl.vector",
+        "agilerl.wrappers",
+    ],
+    "tests._runtime_typecheck.typechecker",
+).__enter__()
 
-import gymnasium as gym
+import gymnasium as gym  # noqa: E402
 
 # Register lightweight test environments
 gym.register(
