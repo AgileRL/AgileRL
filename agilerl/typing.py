@@ -13,19 +13,29 @@ Naming conventions (keep new aliases consistent with these):
   ``ObservationType`` / ``MultiAgentObservationType`` keep the fuller word.
 * Function / tuple return aliases use the ``*Return`` suffix (not ``*ReturnType``).
 
-Array and tensor annotations use jaxtyping. The axis string documents the shape;
-the *wrapped* type is what ``ty`` actually enforces, so always wrap a
-dtype-parameterized numpy type — bare ``Float[np.ndarray, "b d"]`` erases the
-dtype and checks nothing. ``torch.Tensor`` is not generic, so tensor annotations
-document the contract without enforcing it. Parameters take abstract dtypes
-(``np.floating``, ``np.integer``) so platform int widths still bind; returns name
-the concrete dtype. Single-axis strings keep a leading space (``" num_envs"``) so
-they trip the repo-ignored F722 instead of resolving as an F821 undefined name.
+Array and tensor annotations use jaxtyping, and the two halves of the annotation
+are enforced by different things.
 
-The axis string constrains nothing statically: ``Float[npt.NDArray[np.float32],
-"b d"]`` resolves to the same type as a bare ``npt.NDArray[np.float32]`` and
-accepts a 1-D array. Rank is checked only when the *wrapped* type spells it out
-as ``np.ndarray[tuple[int, int], np.dtype[...]]``.
+``ty`` reads only the *wrapped* type and ignores the axis string entirely, so
+always wrap a dtype-parameterized numpy type: bare ``Float[np.ndarray, "b d"]``
+checks nothing. It enforces the exact dtype, and the rank only when the wrapped
+type spells it out as ``np.ndarray[tuple[int, int], np.dtype[...]]``.
+``torch.Tensor`` takes no parameters, so ``ty`` gets nothing from a tensor
+annotation.
+
+The test suite's runtime checker reads only the axis string and jaxtyping's
+``Float``/``Int``/``Bool`` prefix, for numpy and torch alike. It enforces the rank
+the axis string implies and that a repeated axis name binds to one size within a
+call — the one property nothing static can reach — but only the dtype KIND, never
+the width: ``Float[npt.NDArray[np.float32], " n"]`` accepts a float64 array at
+runtime. Width is a ``ty``-only guarantee.
+
+So parameters take abstract dtypes (``np.floating``, ``np.integer``) to keep
+platform int widths assignable under ``ty``, and returns name the concrete dtype.
+Single-axis strings keep a leading space (``" num_envs"``) so they trip the
+repo-ignored F722 instead of resolving as an F821 undefined name. An axis name
+starting with an underscore is deliberately non-binding: it documents the axis
+without asserting it matches any other occurrence in the same signature.
 
 The dispatched first parameter of a ``functools.singledispatch`` function must
 never carry a jaxtyping annotation: jaxtyping types are not subclasses of what
@@ -196,8 +206,6 @@ NumArray = Num[npt.NDArray[np.number], "..."]
 # Per-environment vectors produced by the vectorized envs and the rollout loops.
 EnvScoreArray = Float[npt.NDArray[np.float64], " num_envs"]
 EnvDoneArray = Bool[npt.NDArray[np.bool_], " num_envs"]
-# Storage indices. Abstract ``np.integer`` so Windows' int32 default still binds.
-IndexArray = Int[npt.NDArray[np.integer], " batch"]
 
 # Training tensors. Documentation only — ``torch.Tensor`` carries no dtype or
 # shape parameters for ``ty`` to check.
@@ -219,22 +227,12 @@ HiddenStateDict = dict[str, Float[torch.Tensor, "num_layers batch hidden_size"]]
 # Per training-batch element. ``LogProbs`` and ``ActionEntropy`` are declared with
 # the action aliases below, and are the log-probability and entropy of this set.
 ValueTensor = Float[torch.Tensor, " batch"]
-AdvantageTensor = Float[torch.Tensor, " batch"]
-ReturnTensor = Float[torch.Tensor, " batch"]
-RewardTensor = Float[torch.Tensor, " batch"]
 
 # Copied off the network during rollout collection, one per vectorized env.
 LogProbArray = Float[npt.NDArray[np.float32], " num_envs"]
 ValueArray = Float[npt.NDArray[np.float32], " num_envs"]
 # Entropy is per-env, or 0-d for the ``-log_prob.mean()`` fallback.
 EntropyArray = Float[npt.NDArray[np.float32], "..."]
-
-# Rollout-buffer storage, laid out timestep-major.
-BufferRewardArray = Float[npt.NDArray[np.float32], "buffer_size num_envs"]
-BufferValueArray = Float[npt.NDArray[np.float32], "buffer_size num_envs"]
-BufferLogProbArray = Float[npt.NDArray[np.float32], "buffer_size num_envs"]
-BufferAdvantageArray = Float[npt.NDArray[np.float32], "buffer_size num_envs"]
-BufferReturnArray = Float[npt.NDArray[np.float32], "buffer_size num_envs"]
 
 # LLM token frames. The action frame is the ``(batch, seq - 1)`` slice that
 # log-probs and masks share; packed frames are the flattened variable-length form.
@@ -254,6 +252,9 @@ ActionEntropy = Float[torch.Tensor, " batch"]
 # position instead, which is ``TokenActionMask`` — the two are not interchangeable.
 ActionMaskTensor = Bool[torch.Tensor, "batch action_dim"]
 TokenActionMask = Bool[torch.Tensor, "batch action_seq"]
+# The same token frame as a mask, but as whatever dtype the generator produced:
+# vLLM hands these back float32, the HF path bool.
+TokenActionFrame = Num[torch.Tensor, "batch action_seq"]
 
 # Ornstein-Uhlenbeck exploration noise, shared by DDPG and TD3.
 NoiseParamArray = Shaped[npt.NDArray[Any], "vect_noise_dim action_dim"]
@@ -281,8 +282,6 @@ GradientMatrix = Float[torch.Tensor, "num_actions numel"]
 
 # Encoder output consumed by the network heads.
 LatentTensor = Float[torch.Tensor, "batch latent_dim"]
-# Channels-first image, batched or not.
-ImageTensor = Shaped[torch.Tensor, "... channels height width"]
 
 # ── Array / tensor container aliases ─────────────────────────────────────────
 ArrayOrTensor = npt.NDArray | torch.Tensor

@@ -3,7 +3,7 @@ import os
 import shutil
 import warnings
 from collections import OrderedDict, defaultdict
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from functools import singledispatch
 from numbers import Number
@@ -1729,13 +1729,14 @@ _ExperienceTs = TypeVarTuple("_ExperienceTs")
 
 
 def get_experiences_samples(
-    minibatch_indices: Int[npt.NDArray[np.integer], " minibatch"],
+    minibatch_indices: Int[npt.NDArray[np.integer], " minibatch"]
+    | Int[torch.Tensor, " minibatch"],
     *experiences: Unpack[_ExperienceTs],
 ) -> tuple[Unpack[_ExperienceTs]]:
     """Sample experiences given minibatch indices.
 
     :param minibatch_indices: Minibatch indices
-    :type minibatch_indices: npt.NDArray[np.integer]
+    :type minibatch_indices: Int[npt.NDArray[np.integer], " minibatch"] | Int[torch.Tensor, " minibatch"]
     :param experiences: Experiences to sample from
     :type experiences: tuple[torch.Tensor[float], ...]
 
@@ -2569,11 +2570,13 @@ def clone_llm(
 class DummyOptimizer:
     """Placeholder optimizer class to pass to the OptimizerWrapper when the optimizer is defined in the deepspeed config."""
 
-    def __init__(self, params: list[AnyTensor], **kwargs: Any) -> None:
+    def __init__(
+        self, params: Iterable[torch.Tensor | dict[str, Any]], **kwargs: Any
+    ) -> None:
         """Sentinel class to use for the optimizer when the optimizer is defined in the deepspeed config.
 
-        :param params: Parameters to optimize.
-        :type params: list[torch.Tensor]
+        :param params: Parameters to optimize, as tensors or torch param groups.
+        :type params: Iterable[torch.Tensor | dict[str, Any]]
         """
 
     def step(self, closure: Callable[[], ScalarLoss] | None = None) -> NoReturn:

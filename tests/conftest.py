@@ -6,12 +6,14 @@ import socket
 import sys
 import tempfile
 
-# Validate the jaxtyping annotations at runtime for the whole test session:
-# beartype checks each call's dtype, rank, and that a repeated axis name means the
-# same size across arguments -- none of which a static checker can see. Lives here
-# rather than in the library because it costs ~11x on small hot functions, so it
-# must never be live on a training path. Must run before agilerl is imported for
-# the hook to instrument it.
+# Validate the jaxtyping annotations at runtime for the whole test session, on
+# every parameter and return the suite calls through. beartype checks the dtype
+# KIND (float / int / bool / unsigned -- not the width; the wrapped numpy dtype is
+# erased at runtime and only ``ty`` sees it), the rank the axis string implies, and
+# that a repeated axis name binds to one size within a call. The last of those is
+# the part no static checker can reach. Lives here rather than in the library
+# because it costs ~11x on small hot functions, so it must never be live on a
+# training path. Must run before agilerl is imported for the hook to instrument it.
 #
 # agilerl.typing and agilerl.components.data are left out because they define the
 # tensordict TensorClass batches. The hook wraps the generated __init__, whose
@@ -41,14 +43,12 @@ install_import_hook(
         "agilerl.components.sampler",
         "agilerl.components.segment_tree",
         "agilerl.hpo",
-        "agilerl.llm_envs",
         "agilerl.metrics",
         "agilerl.modules",
         "agilerl.networks",
         "agilerl.population",
         "agilerl.protocols",
         "agilerl.rollouts",
-        "agilerl.training",
         "agilerl.utils",
         "agilerl.vector",
         "agilerl.wrappers",

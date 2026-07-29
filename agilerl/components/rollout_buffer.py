@@ -14,10 +14,6 @@ from agilerl.typing import (
     AnyArray,
     AnyTensor,
     BPTTSequenceType,
-    BufferAdvantageArray,
-    BufferReturnArray,
-    BufferRewardArray,
-    BufferValueArray,
     EnvDoneArray,
     HiddenStateDict,
     IndexTensor,
@@ -533,24 +529,16 @@ class RolloutBuffer:
         buffer_size = self.capacity if self.full else self.pos
 
         # Temporary numpy arrays for computation, will be assigned back to TensorDict
-        advantages_np: BufferAdvantageArray = np.zeros(
-            (buffer_size, self.num_envs), dtype=np.float32
-        )
-        returns_np: BufferReturnArray = np.zeros(
-            (buffer_size, self.num_envs), dtype=np.float32
-        )
+        advantages_np = np.zeros((buffer_size, self.num_envs), dtype=np.float32)
+        returns_np = np.zeros((buffer_size, self.num_envs), dtype=np.float32)
 
         # Get necessary data from TensorDict as numpy arrays for computation
         # Slicing to buffer_size for all components.
-        rewards_np: BufferRewardArray = (
-            narrow_tensor(self.buffer["rewards"])[:buffer_size].cpu().numpy()
-        )
+        rewards_np = narrow_tensor(self.buffer["rewards"])[:buffer_size].cpu().numpy()
         dones_np: BufferBoolArray = (
             narrow_tensor(self.buffer["dones"])[:buffer_size].cpu().numpy()
         )
-        values_np: BufferValueArray = (
-            narrow_tensor(self.buffer["values"])[:buffer_size].cpu().numpy()
-        )
+        values_np = narrow_tensor(self.buffer["values"])[:buffer_size].cpu().numpy()
 
         if self.use_gae:
             last_gae_lambda: PerEnvFloatArray = np.zeros(

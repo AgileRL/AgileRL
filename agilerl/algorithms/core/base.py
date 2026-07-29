@@ -93,7 +93,7 @@ from agilerl.typing import (
     ObservationType,
     OptimizerType,
     ReasoningPrompts,
-    TokenActionMask,
+    TokenActionFrame,
     TokenIds,
     TokenLogProbTensor,
     TokenValueTensor,
@@ -3958,7 +3958,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
     def _align_sampling_logprobs(
         self,
         sampling_logps: list[SamplingLogProbs | None] | None,
-        action_masks: TokenActionMask,
+        action_masks: TokenActionFrame,
         old_log_probs: TokenLogProbTensor,
     ) -> tuple[TokenLogProbTensor | None, int]:
         """Scatter per-row flat vLLM logprobs onto the ``(B, T-1)`` action frame.
@@ -3974,7 +3974,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         :param sampling_logps: Per-row flat logprobs, or ``None``.
         :type sampling_logps: list[SamplingLogProbs | None] | None
         :param action_masks: ``(B, T-1)`` action-token mask.
-        :type action_masks: TokenActionMask
+        :type action_masks: TokenActionFrame
         :param old_log_probs: ``(B, T-1)`` trainer old-policy logprobs (the
             fallback where data is missing → unit ratio).
         :type old_log_probs: TokenLogProbTensor
@@ -4003,7 +4003,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         self,
         old_log_probs: TokenLogProbTensor,
         sampling_log_probs: TokenLogProbTensor,
-        action_masks: TokenActionMask,
+        action_masks: TokenActionFrame,
     ) -> dict[str, float]:
         """Summarise the vLLM-vs-trainer logprob divergence over action tokens.
 
@@ -4032,7 +4032,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
     def _aligned_sampling_logprobs_and_metrics(
         self,
         sampling_logps: list[SamplingLogProbs | None] | None,
-        action_masks: TokenActionMask,
+        action_masks: TokenActionFrame,
         old_log_probs: TokenLogProbTensor,
     ) -> tuple[TokenLogProbTensor | None, dict[str, float]]:
         """Align captured vLLM sampling logprobs and summarise the mismatch.
@@ -4048,7 +4048,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             ``None`` when none were captured.
         :type sampling_logps: list[SamplingLogProbs | None] | None
         :param action_masks: ``(B, T-1)`` action-token mask.
-        :type action_masks: TokenActionMask
+        :type action_masks: TokenActionFrame
         :param old_log_probs: ``(B, T-1)`` frozen-policy logprobs.
         :type old_log_probs: TokenLogProbTensor
         :return: ``(aligned_logprobs_or_None, metrics)``.

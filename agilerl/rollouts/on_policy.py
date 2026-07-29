@@ -35,8 +35,10 @@ BatchedObsArray = (
 )
 
 # Per-env done flag carried between rollouts. Its dtype is bool once a step has
-# been taken and float64 on the freshly reset flags a caller may start from.
-LastDoneArray = Shaped[npt.NDArray, " num_envs"]
+# been taken and float64 on the freshly reset flags a caller may start from. The
+# axis does not bind: the flag is sized by the environment and the score row it
+# travels with by ``agent.num_envs``, which agree only for a vectorized env.
+LastDoneArray = Shaped[npt.NDArray, " _num_envs"]
 
 # Episode scores completed this rollout, then the observation, done flag, scores
 # and info to resume from. The done flag is sized by the environment and the score
