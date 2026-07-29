@@ -15,11 +15,10 @@ class Language_Observation(ABC):
         # returns a List of Tuples and a bool indicating terminal
         # each state Tuple should be: (str, None)
         # each action Tuple should be: (str, reward)
-        pass
+        ...
 
     @abstractmethod
-    def __str__(self) -> str:
-        pass
+    def __str__(self) -> str: ...
 
     def metadata(self) -> dict[str, Any] | None:
         return None
@@ -27,16 +26,13 @@ class Language_Observation(ABC):
 
 class Language_Environment(ABC):
     @abstractmethod
-    def step(self, action: str) -> tuple[Language_Observation, float, bool]:
-        pass
+    def step(self, action: str) -> tuple[Language_Observation, float, bool]: ...
 
     @abstractmethod
-    def reset(self) -> Language_Observation:
-        pass
+    def reset(self) -> Language_Observation: ...
 
     @abstractmethod
-    def is_terminal(self) -> bool:
-        pass
+    def is_terminal(self) -> bool: ...
 
 
 class Policy(ABC):
@@ -44,18 +40,17 @@ class Policy(ABC):
         self.cache = Cache()
 
     @abstractmethod
-    def act(self, obs: Language_Observation) -> str:
-        pass
+    def act(self, obs: Language_Observation) -> str: ...
 
     @abstractmethod
     def train(self) -> None:
         """Set policy to training mode; override in subclasses if needed."""
-        pass
+        ...
 
     @abstractmethod
     def eval(self) -> None:
         """Set policy to eval mode; override in subclasses if needed."""
-        pass
+        ...
 
 
 def interact_environment(
