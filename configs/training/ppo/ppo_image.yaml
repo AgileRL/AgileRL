@@ -79,7 +79,7 @@ network:
         layer_norm: false
         init_layers: true
 
-tournament_selection:
+selection_strategy:
     tournament_size: 2
     elitism: true
 

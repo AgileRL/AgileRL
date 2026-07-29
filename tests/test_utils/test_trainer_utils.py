@@ -10,6 +10,37 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 
+class TestAutoTokenizerGuard:
+    def test_auto_tokenizer_attr_exists(self):
+        from agilerl.utils import trainer_utils
+
+        assert hasattr(trainer_utils, "AutoTokenizer")
+
+
+def test_trainer_utils_fallback_auto_tokenizer_when_no_llm_dependencies():
+    """Test that trainer_utils sets AutoTokenizer to None when HAS_LLM_DEPENDENCIES is False."""
+    original_module = sys.modules.pop("agilerl.utils.trainer_utils", None)
+
+    try:
+        with patch("agilerl.HAS_LLM_DEPENDENCIES", False):
+            trainer_utils_reloaded = importlib.import_module(
+                "agilerl.utils.trainer_utils"
+            )
+
+            assert trainer_utils_reloaded.AutoTokenizer is None
+    finally:
+        import agilerl.utils as _utils_pkg
+
+        if original_module is not None:
+            sys.modules["agilerl.utils.trainer_utils"] = original_module
+            _utils_pkg.trainer_utils = original_module
+        else:
+            sys.modules.pop("agilerl.utils.trainer_utils", None)
+            _utils_pkg.trainer_utils = importlib.import_module(
+                "agilerl.utils.trainer_utils"
+            )
+
+
 class TestHpConfigFromMutationSpec:
     def test_returns_none_when_empty(self):
         from agilerl.models.hpo import MutationSpec
@@ -105,3 +136,276 @@ class TestCreatePopulationLLM:
                 tokenizer=MagicMock(),
             )
         assert len(pop) == 2
+
+
+class TestBuildMutations:
+    def test_none_returns_none(self):
+        from agilerl.utils.trainer_utils import build_mutations_from_spec
+
+        assert build_mutations_from_spec(None, "cpu") is None
+
+    def test_from_spec(self):
+        from agilerl.hpo.mutation import Mutations
+        from agilerl.models.hpo import MutationProbabilities, MutationSpec
+        from agilerl.utils.trainer_utils import build_mutations_from_spec
+
+        spec = MutationSpec(
+            probabilities=MutationProbabilities(
+                no_mut=0.5, params_mut=0.3, rl_hp_mut=0.2
+            ),
+            mutation_sd=0.05,
+        )
+
+        result = build_mutations_from_spec(spec, "cpu")
+
+        assert isinstance(result, Mutations)
+        assert result.no_mut == 0.5
+        assert result.parameters_mut == 0.3
+        assert result.mutation_sd == 0.05
+
+
+class TestBuildTournament:
+    def test_none_returns_none(self):
+        from agilerl.models.training import TrainingSpec
+        from agilerl.utils.trainer_utils import build_tournament_from_spec
+
+        assert build_tournament_from_spec(None, TrainingSpec()) is None
+
+    def test_from_spec(self):
+        from agilerl.hpo.tournament import TournamentSelection
+        from agilerl.models.hpo import TournamentSelectionSpec
+        from agilerl.models.training import TrainingSpec
+        from agilerl.utils.trainer_utils import build_tournament_from_spec
+
+        result = build_tournament_from_spec(
+            TournamentSelectionSpec(tournament_size=3, elitism=True),
+            TrainingSpec(pop_size=8),
+        )
+
+        assert isinstance(result, TournamentSelection)
+        assert result.tournament_size == 3
+        assert result.elitism is True
+
+    def test_returns_none_for_a_multi_frequency_spec(self):
+        """The builder accepts the union, so the other regime is simply not built."""
+        from agilerl.models.hpo import MultiFrequencySelectionSpec
+        from agilerl.models.training import TrainingSpec
+        from agilerl.utils.trainer_utils import build_tournament_from_spec
+
+        assert (
+            build_tournament_from_spec(
+                MultiFrequencySelectionSpec(), TrainingSpec(pop_size=8)
+            )
+            is None
+        )
+
+
+class TestBuildMultiFrequencyFromSpec:
+    def test_returns_none_when_spec_is_none(self):
+        from agilerl.models.training import TrainingSpec
+        from agilerl.utils.trainer_utils import (
+            build_multi_frequency_selection_from_spec,
+        )
+
+        assert build_multi_frequency_selection_from_spec(None, TrainingSpec()) is None
+
+    def test_builds_strategy_and_forwards_seed(self):
+        from agilerl.hpo.multi_frequency import MultiFrequencySelection
+        from agilerl.models.hpo import MultiFrequencySelectionSpec
+        from agilerl.models.training import TrainingSpec
+        from agilerl.utils.trainer_utils import (
+            build_multi_frequency_selection_from_spec,
+        )
+
+        spec = MultiFrequencySelectionSpec(
+            n_subpopulations=2,
+            evolution_frequency_ratios=[1, 2],
+            n_winners=1,
+            n_survivors=1,
+            n_open_for_migration=1,
+            n_losers=1,
+        )
+        strategy = build_multi_frequency_selection_from_spec(
+            spec, TrainingSpec(pop_size=8), seed=123
+        )
+
+        assert isinstance(strategy, MultiFrequencySelection)
+        assert strategy.population_size == 8
+        assert strategy.n_subpopulations == 2
+        assert strategy.deltas == [1, 2]
+        assert strategy.bracket_sizes == (1, 1, 1, 1)
+
+        seeded = build_multi_frequency_selection_from_spec(
+            spec, TrainingSpec(pop_size=8), seed=123
+        )
+        assert strategy.rng.integers(1_000_000) == seeded.rng.integers(1_000_000)
+
+    def test_returns_none_for_a_tournament_spec(self):
+        from agilerl.models.hpo import TournamentSelectionSpec
+        from agilerl.models.training import TrainingSpec
+        from agilerl.utils.trainer_utils import (
+            build_multi_frequency_selection_from_spec,
+        )
+
+        assert (
+            build_multi_frequency_selection_from_spec(
+                TournamentSelectionSpec(), TrainingSpec(pop_size=8)
+            )
+            is None
+        )
+
+
+class TestBuildSelectionFromSpec:
+    """The dispatcher branches the union onto the two concrete operators."""
+
+    def test_returns_none_when_spec_is_none(self):
+        from agilerl.models.training import TrainingSpec
+        from agilerl.utils.trainer_utils import build_selection_from_spec
+
+        assert build_selection_from_spec(None, TrainingSpec()) is None
+
+    def test_builds_tournament_from_a_tournament_spec(self):
+        from agilerl.hpo.tournament import TournamentSelection
+        from agilerl.models.hpo import TournamentSelectionSpec
+        from agilerl.models.training import TrainingSpec
+        from agilerl.utils.trainer_utils import build_selection_from_spec
+
+        strategy = build_selection_from_spec(
+            TournamentSelectionSpec(tournament_size=3, elitism=False),
+            TrainingSpec(pop_size=8),
+        )
+
+        assert isinstance(strategy, TournamentSelection)
+        assert strategy.tournament_size == 3
+        assert strategy.elitism is False
+        assert strategy.population_size == 8
+
+    def test_builds_multi_frequency_from_a_multi_frequency_spec(self):
+        from agilerl.hpo.multi_frequency import MultiFrequencySelection
+        from agilerl.models.hpo import MultiFrequencySelectionSpec
+        from agilerl.models.training import TrainingSpec
+        from agilerl.utils.trainer_utils import build_selection_from_spec
+
+        strategy = build_selection_from_spec(
+            MultiFrequencySelectionSpec(
+                n_subpopulations=2, evolution_frequency_ratios=[1, 2]
+            ),
+            TrainingSpec(pop_size=8),
+        )
+
+        assert isinstance(strategy, MultiFrequencySelection)
+        assert strategy.n_subpopulations == 2
+        assert strategy.deltas == [1, 2]
+        assert strategy.bracket_sizes == (1, 0, 1, 2)
+
+    def test_forwards_seed_to_multi_frequency(self):
+        from agilerl.models.hpo import MultiFrequencySelectionSpec
+        from agilerl.models.training import TrainingSpec
+        from agilerl.utils.trainer_utils import build_selection_from_spec
+
+        spec = MultiFrequencySelectionSpec(n_subpopulations=2)
+        first = build_selection_from_spec(spec, TrainingSpec(pop_size=8), seed=7)
+        second = build_selection_from_spec(spec, TrainingSpec(pop_size=8), seed=7)
+
+        assert first.rng.integers(1_000_000) == second.rng.integers(1_000_000)
+
+    def test_rejects_an_unknown_spec_type(self):
+        from agilerl.models.training import TrainingSpec
+        from agilerl.utils.trainer_utils import build_selection_from_spec
+
+        with pytest.raises(TypeError, match="TournamentSelectionSpec"):
+            build_selection_from_spec(object(), TrainingSpec(pop_size=8))
+
+
+class TestBuildReplayBuffer:
+    def test_none_with_on_policy_returns_none(self):
+        from agilerl.models import PPOSpec
+        from agilerl.utils.trainer_utils import build_replay_buffer_from_spec
+
+        assert build_replay_buffer_from_spec(PPOSpec(), None, "cpu") is None
+
+    def test_none_with_off_policy_creates_default(self):
+        from agilerl.components.replay_buffer import ReplayBuffer
+        from agilerl.models import DQNSpec
+        from agilerl.utils.trainer_utils import build_replay_buffer_from_spec
+
+        result = build_replay_buffer_from_spec(DQNSpec(), None, "cpu")
+
+        assert isinstance(result, ReplayBuffer)
+        assert result.max_size == 100_000
+
+    def test_from_spec_standard(self):
+        from agilerl.components.replay_buffer import ReplayBuffer
+        from agilerl.models import DQNSpec
+        from agilerl.models.training import ReplayBufferSpec
+        from agilerl.utils.trainer_utils import build_replay_buffer_from_spec
+
+        result = build_replay_buffer_from_spec(
+            DQNSpec(), ReplayBufferSpec(memory_size=5_000), "cpu"
+        )
+
+        assert isinstance(result, ReplayBuffer)
+        assert result.max_size == 5_000
+
+    def test_from_spec_n_step(self):
+        from agilerl.components.replay_buffer import MultiStepReplayBuffer
+        from agilerl.models import RainbowDQNSpec
+        from agilerl.models.training import ReplayBufferSpec
+        from agilerl.utils.trainer_utils import build_replay_buffer_from_spec
+
+        result = build_replay_buffer_from_spec(
+            RainbowDQNSpec(),
+            ReplayBufferSpec(memory_size=10_000, n_step_buffer=True),
+            "cpu",
+        )
+
+        assert isinstance(result, MultiStepReplayBuffer)
+        assert result.max_size == 10_000
+
+
+class TestAssignSubpopulations:
+    def test_tags_agents_by_contiguous_index_blocks(self):
+        from agilerl.models.hpo import MultiFrequencySelectionSpec
+        from agilerl.utils.trainer_utils import _assign_subpopulations
+
+        agents = [MagicMock(index=i, subpopulation_id=None) for i in range(8)]
+        spec = MultiFrequencySelectionSpec(n_subpopulations=2)
+        _assign_subpopulations(agents, spec)
+
+        assert [a.subpopulation_id for a in agents] == [0, 0, 0, 0, 1, 1, 1, 1]
+
+    def test_noop_when_spec_is_none(self):
+        from agilerl.utils.trainer_utils import _assign_subpopulations
+
+        agents = [MagicMock(index=i, subpopulation_id=None) for i in range(4)]
+        _assign_subpopulations(agents, None)
+
+        assert all(a.subpopulation_id is None for a in agents)
+
+    def test_noop_under_a_tournament_spec(self):
+        """Subpopulations only exist in the MF-PBT regime."""
+        from agilerl.models.hpo import TournamentSelectionSpec
+        from agilerl.utils.trainer_utils import _assign_subpopulations
+
+        agents = [MagicMock(index=i, subpopulation_id=None) for i in range(8)]
+        _assign_subpopulations(agents, TournamentSelectionSpec())
+
+        assert all(a.subpopulation_id is None for a in agents)
+
+    def test_tags_by_slot_not_restored_index_on_resume(self):
+        """Resume must derive the layout from the population slot.
+
+        On resume_from_checkpoint every agent is rebuilt in slot order but
+        restores its own persisted index and may exceed pop_size.  So
+        the tag must come from the enumeration slot and overwrite any stale
+        restored subpopulation.
+        """
+        from agilerl.models.hpo import MultiFrequencySelectionSpec
+        from agilerl.utils.trainer_utils import _assign_subpopulations
+
+        restored_indices = [12, 5, 40, 3, 27, 9, 33, 18]
+        agents = [MagicMock(index=idx, subpopulation_id=99) for idx in restored_indices]
+        spec = MultiFrequencySelectionSpec(n_subpopulations=2)
+        _assign_subpopulations(agents, spec)
+
+        assert [a.subpopulation_id for a in agents] == [0, 0, 0, 0, 1, 1, 1, 1]

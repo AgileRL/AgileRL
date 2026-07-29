@@ -146,7 +146,7 @@ if __name__ == "__main__":
 
         # Tournament selection and population mutation (enable via AGILERL_DEMO_EVOLUTION=1)
         if os.environ.get("AGILERL_DEMO_EVOLUTION", "0") == "1":
-            _, pop = tournament.select(pop)
+            _, pop, _ = tournament.select(pop)
             pop = mutations.mutation(pop)
 
     pbar.close()

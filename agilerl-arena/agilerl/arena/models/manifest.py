@@ -156,6 +156,10 @@ def _known_field_names(model: BaseModel) -> set[str]:
     return names
 
 
+_ALTERNATE_SECTION_KEYS: dict[str, str] = {"tournament_selection": "selection_strategy"}
+"""Manifest section field names mapped to the other key they also accept."""
+
+
 def _collect_unknown_fields(
     raw: dict[str, Any], validated: TrainingManifest
 ) -> list[str]:
@@ -182,10 +186,14 @@ def _collect_unknown_fields(
         "tournament_selection": validated.tournament_selection,
     }
     for section, model in sections.items():
-        raw_section = raw.get(section)
+        raw_key = (
+            section if section in raw else _ALTERNATE_SECTION_KEYS.get(section, section)
+        )
+        raw_section = raw.get(raw_key)
         if not isinstance(raw_section, dict) or not isinstance(model, BaseModel):
             continue
         known = _known_field_names(model)
+        # `dumped` is serialized without by_alias, so it is keyed on field names.
         dumped_section = dumped.get(section)
         if isinstance(dumped_section, dict):
             known.update(dumped_section)
@@ -213,7 +221,10 @@ class TrainingManifest(BaseModel):
     network: NetworkFromManifest | None = Field(default=None)
     mutation: MutationSpec | None = Field(default=None)
     replay_buffer: ReplayBufferSpec | None = Field(default=None)
-    tournament_selection: TournamentSelectionSpec | None = Field(default=None)
+    tournament_selection: TournamentSelectionSpec | None = Field(
+        default=None,
+        validation_alias=AliasChoices("tournament_selection", "selection_strategy"),
+    )
 
     @model_validator(mode="after")
     def _process_manifest(self) -> Self:
@@ -308,6 +319,6 @@ class TrainingManifest(BaseModel):
         if mode == "python":
             return validated
 
-        payload = validated.model_dump(mode="json", exclude_none=True)
+        payload = validated.model_dump(mode="json", exclude_none=True, by_alias=True)
         _ensure_platform_run_spec_keys(payload)
         return payload

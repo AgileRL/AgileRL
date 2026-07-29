@@ -424,6 +424,23 @@ class EvolvableAlgorithmProtocol(Protocol):
     def mutation_hook(self) -> None: ...
 
 
+@runtime_checkable
+class SelectionStrategyProtocol(Protocol):
+    """Protocol for population selection strategies that drive evolutionary HPO.
+
+    :ivar population_size: Total number of agents in the population.
+    :vartype population_size: int
+    """
+
+    population_size: int
+
+    def select(
+        self,
+        population: list[Any],
+    ) -> tuple[Any, list[Any], list[int] | None]:
+        pass
+
+
 # Define a TypeVar for EvolvableAlgorithm that can be used for generic typing
 EvolvableAlgorithmT = TypeVar("EvolvableAlgorithmT", bound=EvolvableAlgorithmProtocol)
 

@@ -4,6 +4,7 @@
 import os
 import random
 import shutil
+from collections import Counter
 from copy import deepcopy
 from pathlib import Path
 from typing import ClassVar
@@ -34,13 +35,16 @@ from agilerl.algorithms import (
     NeuralUCB,
     RainbowDQN,
 )
-from agilerl.algorithms.core.base import MultiAgentRLAlgorithm
+from agilerl.algorithms.core.base import EvolvableAlgorithm, MultiAgentRLAlgorithm
+from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
 from agilerl.components.data import Transition
 from agilerl.components.replay_buffer import (
     MultiStepReplayBuffer,
     PrioritizedReplayBuffer,
     ReplayBuffer,
 )
+from agilerl.hpo.multi_frequency import MultiFrequencySelection
+from agilerl.hpo.mutation import Mutations
 from agilerl.metrics import AgentMetrics, MultiAgentMetrics
 from agilerl.population import Population
 from agilerl.training.train_bandits import train_bandits
@@ -49,7 +53,15 @@ from agilerl.training.train_multi_agent_on_policy import train_multi_agent_on_po
 from agilerl.training.train_off_policy import train_off_policy
 from agilerl.training.train_offline import train_offline
 from agilerl.training.train_on_policy import train_on_policy
-from agilerl.utils.utils import make_multi_agent_vect_envs
+from agilerl.utils.utils import make_multi_agent_vect_envs, run_selection_and_mutation
+from tests.helper_functions import (
+    generate_discrete_space,
+    generate_multi_agent_box_spaces,
+    generate_multi_agent_discrete_spaces,
+    generate_random_box_space,
+    rank_population_by_subpopulation,
+    weakest_agent_index,
+)
 from agilerl.vector.pz_vec_env import PettingZooVecEnv
 
 # Common parametrize constants
@@ -77,6 +89,46 @@ def _assert_wandb_summary_log(mock_wandb_log: MagicMock) -> None:
     logged = mock_wandb_log.call_args[0][0]
     for key in _WANDB_SUMMARY_KEYS:
         assert key in logged
+
+
+def _make_multi_frequency_selection(seed: int = 0) -> MultiFrequencySelection:
+    """Build a six-slot multi-frequency selection (2 subpops x 3) for trainer-routing tests.
+
+    :param seed: Seed for the selection's RNG, defaults to 0.
+    :type seed: int, optional
+    :return: A six-slot multi-frequency selection with fast/slow subpopulation frequencies.
+    :rtype: MultiFrequencySelection
+    """
+    return MultiFrequencySelection(
+        population_size=6,
+        n_subpopulations=2,
+        evolution_frequency_ratios=[1, 2],
+        n_winners=1,
+        n_survivors=0,
+        n_open_for_migration=1,
+        n_losers=1,
+        seed=seed,
+    )
+
+
+def _make_multi_frequency_selection(seed: int = 0) -> MultiFrequencySelection:
+    """Build a six-slot multi-frequency selection (2 subpops x 3) for trainer-routing tests.
+
+    :param seed: Seed for the selection's RNG, defaults to 0.
+    :type seed: int, optional
+    :return: A six-slot multi-frequency selection with fast/slow subpopulation frequencies.
+    :rtype: MultiFrequencySelection
+    """
+    return MultiFrequencySelection(
+        population_size=6,
+        n_subpopulations=2,
+        evolution_frequency_ratios=[1, 2],
+        n_winners=1,
+        n_survivors=0,
+        n_open_for_migration=1,
+        n_losers=1,
+        seed=seed,
+    )
 
 
 class DummyEnv(VectorEnv):
@@ -555,14 +607,14 @@ class DummyTournament:
         pass
 
     def select(self, pop):
-        return pop[0], pop
+        return pop[0], pop, None
 
 
 class DummyMutations:
     def __init__(self):
         pass
 
-    def mutation(self, pop, pre_training_mut=False):
+    def mutation(self, pop, pre_training_mut=False, indices=None):
         return pop
 
 
@@ -1378,7 +1430,7 @@ def mocked_multi_env(state_size, action_size):
 def mocked_mutations():
     mock_mutations = MagicMock()
 
-    def mutation(pop, pre_training_mut=False):
+    def mutation(pop, pre_training_mut=False, indices=None):
         return pop
 
     mock_mutations.mutation.side_effect = mutation
@@ -1390,7 +1442,7 @@ def mocked_tournament():
     mock_tournament = MagicMock()
 
     def select(pop):
-        return pop[0], pop
+        return pop[0], pop, None
 
     mock_tournament.select.side_effect = select
     return mock_tournament
@@ -1472,7 +1524,7 @@ class TestTrainOffPolicy:
             evo_steps=50,
             eval_loop=1,
             n_step_memory=None,
-            tournament=tournament,
+            selection_strategy=tournament,
             mutation=mutations,
             wb=False,
         )
@@ -1518,7 +1570,7 @@ class TestTrainOffPolicy:
                 evo_steps=50,
                 eval_loop=1,
                 n_step_memory=None,
-                tournament=tournament,
+                selection_strategy=tournament,
                 mutation=mutations,
                 wb=False,
                 accelerator=accelerator,
@@ -1579,7 +1631,7 @@ class TestTrainOffPolicy:
             evo_steps=50,
             eval_loop=1,
             n_step_memory=n_step_memory,
-            tournament=tournament,
+            selection_strategy=tournament,
             mutation=mutations,
             wb=False,
             accelerator=accelerator,
@@ -1619,7 +1671,7 @@ class TestTrainOffPolicy:
                 evo_steps=50,
                 eval_loop=1,
                 n_step_memory=None,
-                tournament=tournament,
+                selection_strategy=tournament,
                 mutation=mutations,
                 wb=False,
                 save_elite=False,
@@ -1652,7 +1704,7 @@ class TestTrainOffPolicy:
                 evo_steps=50,
                 eval_loop=1,
                 n_step_memory=None,
-                tournament=tournament,
+                selection_strategy=tournament,
                 mutation=mutations,
                 wb=False,
                 checkpoint=None,
@@ -1675,7 +1727,7 @@ class TestTrainOffPolicy:
             evo_steps=50,
             eval_loop=1,
             n_step_memory=None,
-            tournament=tournament,
+            selection_strategy=tournament,
             mutation=mutations,
             wb=False,
         )
@@ -1704,7 +1756,7 @@ class TestTrainOffPolicy:
             evo_steps=50,
             eval_loop=1,
             n_step_memory=None,
-            tournament=tournament,
+            selection_strategy=tournament,
             mutation=mutations,
             wb=False,
         )
@@ -1737,7 +1789,7 @@ class TestTrainOffPolicy:
             evo_steps=50,
             eval_loop=1,
             n_step_memory=mocked_n_step_memory,
-            tournament=tournament,
+            selection_strategy=tournament,
             mutation=mutations,
             wb=False,
         )
@@ -1770,7 +1822,7 @@ class TestTrainOffPolicy:
             evo_steps=50,
             eval_loop=1,
             n_step_memory=None,
-            tournament=tournament,
+            selection_strategy=tournament,
             mutation=mutations,
             wb=False,
         )
@@ -1798,7 +1850,7 @@ class TestTrainOffPolicy:
             evo_steps=50,
             eval_loop=1,
             n_step_memory=None,
-            tournament=mocked_tournament,
+            selection_strategy=mocked_tournament,
             mutation=mocked_mutations,
             wb=False,
         )
@@ -1826,7 +1878,7 @@ class TestTrainOffPolicy:
             evo_steps=50,
             eval_loop=1,
             n_step_memory=None,
-            tournament=tournament,
+            selection_strategy=tournament,
             mutation=mutations,
             wb=False,
         )
@@ -1859,7 +1911,7 @@ class TestTrainOffPolicy:
             evo_steps=50,
             eval_loop=1,
             n_step_memory=n_step_memory,
-            tournament=tournament,
+            selection_strategy=tournament,
             mutation=mutations,
             wb=False,
         )
@@ -1889,7 +1941,7 @@ class TestTrainOffPolicy:
             evo_steps=50,
             eval_loop=1,
             n_step_memory=n_step_memory,
-            tournament=tournament,
+            selection_strategy=tournament,
             mutation=mutations,
             wb=False,
         )
@@ -1919,7 +1971,7 @@ class TestTrainOffPolicy:
             evo_steps=50,
             eval_loop=1,
             n_step_memory=None,
-            tournament=tournament,
+            selection_strategy=tournament,
             mutation=mutations,
             wb=False,
             accelerator=accelerator,
@@ -1968,7 +2020,7 @@ class TestTrainOffPolicy:
                 evo_steps=50,
                 eval_loop=1,
                 n_step_memory=None,
-                tournament=tournament,
+                selection_strategy=tournament,
                 mutation=mutations,
                 wb=True,
                 wandb_api_key="testing",
@@ -2033,7 +2085,7 @@ class TestTrainOffPolicy:
                 evo_steps=50,
                 eval_loop=1,
                 n_step_memory=None,
-                tournament=tournament,
+                selection_strategy=tournament,
                 mutation=mutations,
                 wb=True,
                 accelerator=accelerator,
@@ -2092,7 +2144,7 @@ class TestTrainOffPolicy:
                 evo_steps=50,
                 eval_loop=1,
                 n_step_memory=None,
-                tournament=tournament,
+                selection_strategy=tournament,
                 mutation=mutations,
                 wb=True,
                 wandb_api_key="testing",
@@ -2123,7 +2175,7 @@ class TestTrainOffPolicy:
             evo_steps=50,
             eval_loop=1,
             n_step_memory=None,
-            tournament=tournament,
+            selection_strategy=tournament,
             mutation=mutations,
             wb=False,
             save_elite=True,
@@ -2157,7 +2209,7 @@ class TestTrainOffPolicy:
             evo_steps=50,
             eval_loop=1,
             n_step_memory=None,
-            tournament=tournament,
+            selection_strategy=tournament,
             mutation=mutations,
             wb=False,
             checkpoint=10,
@@ -2569,7 +2621,7 @@ class TestTrainOnPolicy:
                 max_steps=50,
                 evo_steps=50,
                 eval_loop=1,
-                tournament=tournament,
+                selection_strategy=tournament,
                 mutation=mutations,
                 wb=False,
                 accelerator=accelerator,
@@ -2611,7 +2663,7 @@ class TestTrainOnPolicy:
                 max_steps=50,
                 evo_steps=50,
                 eval_loop=1,
-                tournament=tournament,
+                selection_strategy=tournament,
                 mutation=mutations,
                 wb=False,
                 save_elite=False,
@@ -2641,7 +2693,7 @@ class TestTrainOnPolicy:
                 max_steps=50,
                 evo_steps=50,
                 eval_loop=1,
-                tournament=tournament,
+                selection_strategy=tournament,
                 mutation=mutations,
                 wb=False,
                 checkpoint=None,
@@ -2666,7 +2718,7 @@ class TestTrainOnPolicy:
             max_steps=50,
             evo_steps=50,
             eval_loop=1,
-            tournament=tournament,
+            selection_strategy=tournament,
             mutation=mutations,
             wb=False,
         )
@@ -2691,7 +2743,7 @@ class TestTrainOnPolicy:
             max_steps=50,
             evo_steps=50,
             eval_loop=1,
-            tournament=mocked_tournament,
+            selection_strategy=mocked_tournament,
             mutation=mocked_mutations,
             wb=False,
         )
@@ -2716,7 +2768,7 @@ class TestTrainOnPolicy:
             max_steps=256,
             evo_steps=256,
             eval_loop=1,
-            tournament=tournament,
+            selection_strategy=tournament,
             mutation=mutations,
             wb=False,
         )
@@ -2738,7 +2790,7 @@ class TestTrainOnPolicy:
             max_steps=50,
             evo_steps=50,
             eval_loop=1,
-            tournament=tournament,
+            selection_strategy=tournament,
             mutation=mutations,
             wb=False,
         )
@@ -2761,7 +2813,7 @@ class TestTrainOnPolicy:
             max_steps=50,
             evo_steps=50,
             eval_loop=1,
-            tournament=tournament,
+            selection_strategy=tournament,
             mutation=mutations,
             wb=False,
             accelerator=accelerator,
@@ -2814,7 +2866,7 @@ class TestTrainOnPolicy:
                 max_steps=50,
                 evo_steps=10,
                 eval_loop=1,
-                tournament=tournament,
+                selection_strategy=tournament,
                 mutation=mutations,
                 wb=True,
                 accelerator=accelerator,
@@ -2881,7 +2933,7 @@ class TestTrainOnPolicy:
                 max_steps=500,
                 evo_steps=10,
                 eval_loop=1,
-                tournament=tournament,
+                selection_strategy=tournament,
                 mutation=mutations,
                 wb=True,
                 wandb_api_key="testing",
@@ -2912,7 +2964,7 @@ class TestTrainOnPolicy:
             max_steps=50,
             evo_steps=50,
             eval_loop=1,
-            tournament=tournament,
+            selection_strategy=tournament,
             mutation=mutations,
             wb=False,
             save_elite=True,
@@ -2944,7 +2996,7 @@ class TestTrainOnPolicy:
             max_steps=500,
             evo_steps=500,
             eval_loop=1,
-            tournament=tournament,
+            selection_strategy=tournament,
             mutation=mutations,
             wb=False,
             checkpoint=10,
@@ -3130,7 +3182,7 @@ class TestTrainMultiAgentOffPolicy:
             max_steps=50,
             evo_steps=50,
             eval_loop=1,
-            tournament=tournament,
+            selection_strategy=tournament,
             mutation=mutations,
             sum_scores=sum_scores,
         )
@@ -3160,7 +3212,7 @@ class TestTrainMultiAgentOffPolicy:
             max_steps=50,
             evo_steps=50,
             eval_loop=1,
-            tournament=tournament,
+            selection_strategy=tournament,
             mutation=mutations,
             accelerator=accelerator,
         )
@@ -3193,7 +3245,7 @@ class TestTrainMultiAgentOffPolicy:
             max_steps=50,
             evo_steps=50,
             eval_loop=1,
-            tournament=tournament,
+            selection_strategy=tournament,
             mutation=mutations,
         )
 
@@ -3234,7 +3286,7 @@ class TestTrainMultiAgentOffPolicy:
             max_steps=10,
             evo_steps=5,
             eval_loop=1,
-            tournament=tournament,
+            selection_strategy=tournament,
             mutation=mutations,
         )
         assert len(pop) == len(population_multi_agent)
@@ -3267,7 +3319,7 @@ class TestTrainMultiAgentOffPolicy:
                 max_steps=50,
                 evo_steps=50,
                 eval_loop=1,
-                tournament=tournament,
+                selection_strategy=tournament,
                 mutation=mutations,
                 save_elite=False,
                 elite_path="path",
@@ -3300,7 +3352,7 @@ class TestTrainMultiAgentOffPolicy:
                 max_steps=50,
                 evo_steps=50,
                 eval_loop=1,
-                tournament=tournament,
+                selection_strategy=tournament,
                 mutation=mutations,
                 checkpoint=None,
                 checkpoint_path="path",
@@ -3362,7 +3414,7 @@ class TestTrainMultiAgentOffPolicy:
                 max_steps=50,
                 evo_steps=10,
                 eval_loop=1,
-                tournament=tournament,
+                selection_strategy=tournament,
                 mutation=mutations,
                 wb=True,
                 accelerator=accelerator,
@@ -3440,7 +3492,7 @@ class TestTrainMultiAgentOffPolicy:
                 max_steps=500,
                 evo_steps=10,
                 eval_loop=1,
-                tournament=tournament,
+                selection_strategy=tournament,
                 mutation=mutations,
                 wb=True,
                 wandb_api_key="testing",
@@ -3478,7 +3530,7 @@ class TestTrainMultiAgentOffPolicy:
             max_steps=50,
             evo_steps=50,
             eval_loop=1,
-            tournament=tournament,
+            selection_strategy=tournament,
             mutation=mutations,
             wb=False,
             accelerator=accelerator,
@@ -3521,7 +3573,7 @@ class TestTrainMultiAgentOffPolicy:
             max_steps=50,
             evo_steps=50,
             eval_loop=1,
-            tournament=tournament,
+            selection_strategy=tournament,
             mutation=mutations,
             wb=False,
         )
@@ -3550,7 +3602,7 @@ class TestTrainMultiAgentOffPolicy:
             max_steps=50,
             evo_steps=50,
             eval_loop=1,
-            tournament=mocked_tournament,
+            selection_strategy=mocked_tournament,
             mutation=mocked_mutations,
             wb=False,
         )
@@ -3579,7 +3631,7 @@ class TestTrainMultiAgentOffPolicy:
             max_steps=50,
             evo_steps=50,
             eval_loop=1,
-            tournament=tournament,
+            selection_strategy=tournament,
             mutation=mutations,
             wb=False,
         )
@@ -3613,7 +3665,7 @@ class TestTrainMultiAgentOffPolicy:
             max_steps=50,
             evo_steps=50,
             eval_loop=1,
-            tournament=tournament,
+            selection_strategy=tournament,
             mutation=mutations,
             wb=False,
             save_elite=True,
@@ -3649,7 +3701,7 @@ class TestTrainMultiAgentOffPolicy:
             max_steps=50,
             evo_steps=50,
             eval_loop=1,
-            tournament=tournament,
+            selection_strategy=tournament,
             mutation=mutations,
             wb=False,
             checkpoint=10,
@@ -3757,7 +3809,7 @@ class TestTrainMultiAgentOnPolicy:
             max_steps=50,
             evo_steps=50,
             eval_loop=1,
-            tournament=tournament,
+            selection_strategy=tournament,
             mutation=mutations,
             sum_scores=sum_scores,
             accelerator=accelerator,
@@ -3798,7 +3850,7 @@ class TestTrainMultiAgentOnPolicy:
             max_steps=10,
             evo_steps=5,
             eval_loop=1,
-            tournament=tournament,
+            selection_strategy=tournament,
             mutation=mutations,
         )
         assert len(pop) == len(population_multi_agent)
@@ -3830,7 +3882,7 @@ class TestTrainMultiAgentOnPolicy:
                 max_steps=50,
                 evo_steps=50,
                 eval_loop=1,
-                tournament=tournament,
+                selection_strategy=tournament,
                 mutation=mutations,
                 save_elite=False,
                 elite_path="path",
@@ -3862,7 +3914,7 @@ class TestTrainMultiAgentOnPolicy:
                 max_steps=50,
                 evo_steps=50,
                 eval_loop=1,
-                tournament=tournament,
+                selection_strategy=tournament,
                 mutation=mutations,
                 checkpoint=None,
                 checkpoint_path="path",
@@ -3923,7 +3975,7 @@ class TestTrainMultiAgentOnPolicy:
                 max_steps=50,
                 evo_steps=10,
                 eval_loop=1,
-                tournament=tournament,
+                selection_strategy=tournament,
                 mutation=mutations,
                 wb=True,
                 accelerator=accelerator,
@@ -3988,7 +4040,7 @@ class TestTrainMultiAgentOnPolicy:
                 max_steps=500,
                 evo_steps=10,
                 eval_loop=1,
-                tournament=tournament,
+                selection_strategy=tournament,
                 mutation=mutations,
                 wb=True,
                 wandb_api_key="testing",
@@ -4024,7 +4076,7 @@ class TestTrainMultiAgentOnPolicy:
             max_steps=50,
             evo_steps=50,
             eval_loop=1,
-            tournament=tournament,
+            selection_strategy=tournament,
             mutation=mutations,
             wb=False,
             accelerator=accelerator,
@@ -4059,7 +4111,7 @@ class TestTrainMultiAgentOnPolicy:
             max_steps=50,
             evo_steps=50,
             eval_loop=1,
-            tournament=tournament,
+            selection_strategy=tournament,
             mutation=mutations,
             wb=False,
         )
@@ -4087,7 +4139,7 @@ class TestTrainMultiAgentOnPolicy:
             max_steps=50,
             evo_steps=50,
             eval_loop=1,
-            tournament=mocked_tournament,
+            selection_strategy=mocked_tournament,
             mutation=mocked_mutations,
             wb=False,
         )
@@ -4120,7 +4172,7 @@ class TestTrainMultiAgentOnPolicy:
             max_steps=50,
             evo_steps=50,
             eval_loop=1,
-            tournament=tournament,
+            selection_strategy=tournament,
             mutation=mutations,
             wb=False,
             save_elite=True,
@@ -4155,7 +4207,7 @@ class TestTrainMultiAgentOnPolicy:
             max_steps=50,
             evo_steps=50,
             eval_loop=1,
-            tournament=tournament,
+            selection_strategy=tournament,
             mutation=mutations,
             wb=False,
             checkpoint=10,
@@ -4329,7 +4381,7 @@ class TestTrainOffline:
                 max_steps=50,
                 evo_steps=50,
                 eval_loop=1,
-                tournament=tournament,
+                selection_strategy=tournament,
                 mutation=mutations,
                 wb=False,
                 accelerator=accelerator,
@@ -4366,7 +4418,7 @@ class TestTrainOffline:
                 max_steps=50,
                 evo_steps=50,
                 eval_loop=1,
-                tournament=tournament,
+                selection_strategy=tournament,
                 mutation=mutations,
                 wb=False,
                 save_elite=False,
@@ -4401,7 +4453,7 @@ class TestTrainOffline:
                 max_steps=50,
                 evo_steps=50,
                 eval_loop=1,
-                tournament=tournament,
+                selection_strategy=tournament,
                 mutation=mutations,
                 wb=False,
                 checkpoint=None,
@@ -4449,7 +4501,7 @@ class TestTrainOffline:
                 max_steps=50,
                 evo_steps=10,
                 eval_loop=1,
-                tournament=tournament,
+                selection_strategy=tournament,
                 mutation=mutations,
                 wb=True,
                 accelerator=accelerator,
@@ -4518,7 +4570,7 @@ class TestTrainOffline:
                     max_steps=50,
                     evo_steps=10,
                     eval_loop=1,
-                    tournament=tournament,
+                    selection_strategy=tournament,
                     mutation=mutations,
                     wb=True,
                     accelerator=accelerator,
@@ -4556,7 +4608,7 @@ class TestTrainOffline:
                 max_steps=50,
                 evo_steps=50,
                 eval_loop=1,
-                tournament=tournament,
+                selection_strategy=tournament,
                 mutation=mutations,
                 wb=False,
                 accelerator=accelerator,
@@ -4598,7 +4650,7 @@ class TestTrainOffline:
                 max_steps=50,
                 evo_steps=50,
                 eval_loop=1,
-                tournament=tournament,
+                selection_strategy=tournament,
                 mutation=mutations,
                 wb=False,
                 accelerator=accelerator,
@@ -4632,7 +4684,7 @@ class TestTrainOffline:
                 max_steps=50,
                 evo_steps=50,
                 eval_loop=1,
-                tournament=mocked_tournament,
+                selection_strategy=mocked_tournament,
                 mutation=mocked_mutations,
                 wb=False,
                 accelerator=accelerator,
@@ -4668,7 +4720,7 @@ class TestTrainOffline:
             max_steps=50,
             evo_steps=50,
             eval_loop=1,
-            tournament=tournament,
+            selection_strategy=tournament,
             mutation=mutations,
             wb=False,
             accelerator=accelerator,
@@ -4705,7 +4757,7 @@ class TestTrainOffline:
             max_steps=50,
             evo_steps=50,
             eval_loop=1,
-            tournament=tournament,
+            selection_strategy=tournament,
             mutation=mutations,
             wb=False,
             accelerator=accelerator,
@@ -4782,7 +4834,7 @@ class TestTrainBandits:
             evo_steps=25,
             eval_steps=5,
             eval_loop=1,
-            tournament=tournament,
+            selection_strategy=tournament,
             mutation=mutations,
             wb=False,
         )
@@ -4817,7 +4869,7 @@ class TestTrainBandits:
                 evo_steps=25,
                 eval_steps=5,
                 eval_loop=1,
-                tournament=tournament,
+                selection_strategy=tournament,
                 mutation=mutations,
                 wb=False,
                 accelerator=accelerator,
@@ -4864,7 +4916,7 @@ class TestTrainBandits:
                 evo_steps=25,
                 eval_steps=5,
                 eval_loop=1,
-                tournament=tournament,
+                selection_strategy=tournament,
                 mutation=mutations,
                 wb=False,
                 save_elite=False,
@@ -4898,7 +4950,7 @@ class TestTrainBandits:
                 evo_steps=25,
                 eval_steps=5,
                 eval_loop=1,
-                tournament=tournament,
+                selection_strategy=tournament,
                 mutation=mutations,
                 wb=False,
                 checkpoint=None,
@@ -4927,7 +4979,7 @@ class TestTrainBandits:
             evo_steps=25,
             eval_steps=5,
             eval_loop=1,
-            tournament=tournament,
+            selection_strategy=tournament,
             mutation=mutations,
             wb=False,
         )
@@ -4957,7 +5009,7 @@ class TestTrainBandits:
             evo_steps=25,
             eval_steps=5,
             eval_loop=1,
-            tournament=tournament,
+            selection_strategy=tournament,
             mutation=mutations,
             wb=False,
         )
@@ -4986,7 +5038,7 @@ class TestTrainBandits:
             evo_steps=25,
             eval_steps=5,
             eval_loop=1,
-            tournament=tournament,
+            selection_strategy=tournament,
             mutation=mutations,
             wb=False,
         )
@@ -5015,7 +5067,7 @@ class TestTrainBandits:
             evo_steps=25,
             eval_steps=5,
             eval_loop=1,
-            tournament=mocked_tournament,
+            selection_strategy=mocked_tournament,
             mutation=mocked_mutations,
             wb=False,
         )
@@ -5044,7 +5096,7 @@ class TestTrainBandits:
             evo_steps=25,
             eval_steps=5,
             eval_loop=1,
-            tournament=tournament,
+            selection_strategy=tournament,
             mutation=mutations,
             wb=False,
         )
@@ -5074,7 +5126,7 @@ class TestTrainBandits:
             evo_steps=25,
             eval_steps=5,
             eval_loop=1,
-            tournament=tournament,
+            selection_strategy=tournament,
             mutation=mutations,
             wb=False,
         )
@@ -5104,7 +5156,7 @@ class TestTrainBandits:
             evo_steps=25,
             eval_steps=5,
             eval_loop=1,
-            tournament=tournament,
+            selection_strategy=tournament,
             mutation=mutations,
             wb=False,
         )
@@ -5135,7 +5187,7 @@ class TestTrainBandits:
             evo_steps=25,
             eval_steps=5,
             eval_loop=1,
-            tournament=tournament,
+            selection_strategy=tournament,
             mutation=mutations,
             wb=False,
             accelerator=accelerator,
@@ -5191,7 +5243,7 @@ class TestTrainBandits:
                 evo_steps=25,
                 eval_steps=5,
                 eval_loop=1,
-                tournament=tournament,
+                selection_strategy=tournament,
                 mutation=mutations,
                 wb=True,
                 wandb_api_key="testing",
@@ -5258,7 +5310,7 @@ class TestTrainBandits:
                 evo_steps=25,
                 eval_steps=5,
                 eval_loop=1,
-                tournament=tournament,
+                selection_strategy=tournament,
                 mutation=mutations,
                 wb=True,
                 accelerator=accelerator,
@@ -5324,7 +5376,7 @@ class TestTrainBandits:
                 evo_steps=25,
                 eval_steps=5,
                 eval_loop=1,
-                tournament=tournament,
+                selection_strategy=tournament,
                 mutation=mutations,
                 wb=True,
                 wandb_api_key="testing",
@@ -5356,7 +5408,7 @@ class TestTrainBandits:
             evo_steps=25,
             eval_steps=5,
             eval_loop=1,
-            tournament=tournament,
+            selection_strategy=tournament,
             mutation=mutations,
             wb=False,
             save_elite=True,
@@ -5391,7 +5443,7 @@ class TestTrainBandits:
             evo_steps=25,
             eval_steps=5,
             eval_loop=1,
-            tournament=tournament,
+            selection_strategy=tournament,
             mutation=mutations,
             wb=False,
             checkpoint=10,
@@ -5401,6 +5453,320 @@ class TestTrainBandits:
         for i in range(6):  # iterate through the population indices
             for s in range(5):
                 assert os.path.isfile(f"{checkpoint_path}_{i}_{10 * (s + 1)}.pt")
+
+
+def _route_off_policy(get, **strategy_kwarg):
+    pop, _ = train_off_policy(
+        get("env"),
+        "env_name",
+        "algo",
+        get("population_off_policy"),
+        get("memory"),
+        init_hp=None,
+        mut_p=None,
+        max_steps=50,
+        evo_steps=50,
+        eval_loop=1,
+        n_step_memory=None,
+        **strategy_kwarg,
+        mutation=get("mutations"),
+        wb=False,
+    )
+    return pop
+
+
+def _route_on_policy(get, **strategy_kwarg):
+    pop, _ = train_on_policy(
+        get("env"),
+        "env_name",
+        "algo",
+        get("population_on_policy"),
+        init_hp=None,
+        mut_p=None,
+        max_steps=50,
+        evo_steps=50,
+        eval_loop=1,
+        **strategy_kwarg,
+        mutation=get("mutations"),
+        wb=False,
+    )
+    return pop
+
+
+def _route_multi_agent_off_policy(get, **strategy_kwarg):
+    multi_env = get("multi_env")
+    pop, _ = train_multi_agent_off_policy(
+        multi_env,
+        "env_name",
+        "algo",
+        pop=[DummyMultiAgent(5, multi_env, False) for _ in range(6)],
+        memory=get("multi_memory"),
+        init_hp=None,
+        mut_p=None,
+        max_steps=50,
+        evo_steps=50,
+        eval_loop=1,
+        **strategy_kwarg,
+        mutation=get("mutations"),
+    )
+    return pop
+
+
+def _route_multi_agent_on_policy(get, **strategy_kwarg):
+    multi_env = get("multi_env")
+    pop, _ = train_multi_agent_on_policy(
+        multi_env,
+        "env_name",
+        "algo",
+        pop=[DummyMultiAgent(5, multi_env, True) for _ in range(6)],
+        init_hp=None,
+        mut_p=None,
+        max_steps=50,
+        evo_steps=50,
+        eval_loop=1,
+        **strategy_kwarg,
+        mutation=get("mutations"),
+    )
+    return pop
+
+
+def _route_offline(get, **strategy_kwarg):
+    pop, _ = train_offline(
+        get("env"),
+        "env_name",
+        "algo",
+        get("population_off_policy"),
+        get("memory"),
+        dataset=get("dummy_h5py_data"),
+        init_hp=get("offline_init_hp"),
+        mut_p=None,
+        max_steps=50,
+        evo_steps=50,
+        eval_loop=1,
+        **strategy_kwarg,
+        mutation=get("mutations"),
+        wb=False,
+    )
+    return pop
+
+
+def _route_bandits(get, **strategy_kwarg):
+    pop, _ = train_bandits(
+        get("bandit_env"),
+        "bandit_env_name",
+        "algo",
+        get("population_bandit"),
+        get("bandit_memory"),
+        init_hp=None,
+        mut_p=None,
+        max_steps=50,
+        episode_steps=5,
+        evo_steps=50,
+        eval_steps=5,
+        eval_loop=1,
+        **strategy_kwarg,
+        mutation=get("mutations"),
+        wb=False,
+    )
+    return pop
+
+
+# (trainer module, runner) per non-LLM trainer
+_SELECTION_ROUTING_CASES = {
+    "off-policy": ("agilerl.training.train_off_policy", _route_off_policy),
+    "on-policy": ("agilerl.training.train_on_policy", _route_on_policy),
+    "multi-agent off-policy": (
+        "agilerl.training.train_multi_agent_off_policy",
+        _route_multi_agent_off_policy,
+    ),
+    "multi-agent on-policy": (
+        "agilerl.training.train_multi_agent_on_policy",
+        _route_multi_agent_on_policy,
+    ),
+    "offline": ("agilerl.training.train_offline", _route_offline),
+    "bandits": ("agilerl.training.train_bandits", _route_bandits),
+}
+
+
+class TestTrainerSelectionStrategyRouting:
+    """Every trainer hands its selection strategy to the one shared entry point."""
+
+    @pytest.mark.parametrize(("state_size", "action_size", "vect"), _FLAT_VECT)
+    @pytest.mark.parametrize(
+        "case", list(_SELECTION_ROUTING_CASES), ids=list(_SELECTION_ROUTING_CASES)
+    )
+    def test_trainer_forwards_selection_strategy(
+        self, request, case, state_size, action_size, vect
+    ):
+        module, route = _SELECTION_ROUTING_CASES[case]
+        strategy = _make_multi_frequency_selection()
+
+        with patch(
+            f"{module}.run_selection_and_mutation",
+            side_effect=lambda _strategy, **kwargs: kwargs["population"],
+        ) as spy:
+            pop = route(request.getfixturevalue, selection_strategy=strategy)
+
+        spy.assert_called_once()
+        assert spy.call_args.args[0] is strategy
+        assert len(pop) == 6
+
+
+class TestTrainerDeprecatedTournamentArgument:
+    """The superseded ``tournament`` argument still drives evolution, with a warning.
+
+    Every trainer folds it into ``selection_strategy`` via
+    :func:`~agilerl.utils.utils.resolve_selection_strategy`, so callers written
+    against the old signature keep working unchanged.
+    """
+
+    @pytest.mark.parametrize(("state_size", "action_size", "vect"), _FLAT_VECT)
+    @pytest.mark.parametrize(
+        "case", list(_SELECTION_ROUTING_CASES), ids=list(_SELECTION_ROUTING_CASES)
+    )
+    def test_deprecated_tournament_argument_reaches_the_entry_point(
+        self, request, case, state_size, action_size, vect
+    ):
+        module, route = _SELECTION_ROUTING_CASES[case]
+        strategy = DummyTournament()
+
+        with (
+            patch(
+                f"{module}.run_selection_and_mutation",
+                side_effect=lambda _strategy, **kwargs: kwargs["population"],
+            ) as spy,
+            pytest.warns(DeprecationWarning, match="'tournament' argument"),
+        ):
+            pop = route(request.getfixturevalue, tournament=strategy)
+
+        spy.assert_called_once()
+        assert spy.call_args.args[0] is strategy
+        assert len(pop) == 6
+
+
+_CROSS_FAMILY_NET_CONFIG = {
+    "encoder_config": {"hidden_size": [8, 8], "min_mlp_nodes": 7}
+}
+
+
+def _single_agent_hp_config() -> HyperparameterConfig:
+    return HyperparameterConfig(
+        lr=RLParameter(min=6.25e-5, max=1e-2),
+        batch_size=RLParameter(min=8, max=64, dtype=int),
+    )
+
+
+def _multi_agent_hp_config() -> HyperparameterConfig:
+    return HyperparameterConfig(
+        lr_actor=RLParameter(min=1e-4, max=1e-2),
+        lr_critic=RLParameter(min=1e-4, max=1e-2),
+        batch_size=RLParameter(min=8, max=64, dtype=int),
+    )
+
+
+def _build_single_agent_population(algo_cls):
+    return algo_cls.population(
+        size=8,
+        observation_space=generate_random_box_space((4,)),
+        action_space=generate_discrete_space(2),
+        hp_config=_single_agent_hp_config(),
+        net_config=_CROSS_FAMILY_NET_CONFIG,
+        device="cpu",
+    )
+
+
+def _build_maddpg_population():
+    return MADDPG.population(
+        size=8,
+        observation_space=generate_multi_agent_box_spaces(2, (4,)),
+        action_space=generate_multi_agent_discrete_spaces(2, 2),
+        agent_ids=["agent_0", "agent_1"],
+        hp_config=_multi_agent_hp_config(),
+        net_config=_CROSS_FAMILY_NET_CONFIG,
+        device="cpu",
+    )
+
+
+def _build_ippo_population():
+    return IPPO.population(
+        size=8,
+        observation_space=generate_multi_agent_box_spaces(2, (4,)),
+        action_space=generate_multi_agent_discrete_spaces(2, 2),
+        agent_ids=["agent_0", "agent_1"],
+        hp_config=_single_agent_hp_config(),
+        net_config=_CROSS_FAMILY_NET_CONFIG,
+        device="cpu",
+    )
+
+
+# One real population per non-LLM algorithm family the operator must support
+_CROSS_FAMILY_CASES = {
+    "off-policy (DQN)": ("DQN", lambda: _build_single_agent_population(DQN)),
+    "multi-agent off-policy (MADDPG)": ("MADDPG", _build_maddpg_population),
+    "multi-agent on-policy (IPPO)": ("IPPO", _build_ippo_population),
+    "bandit (NeuralUCB)": (
+        "NeuralUCB",
+        lambda: _build_single_agent_population(NeuralUCB),
+    ),
+    "offline (CQN)": ("CQN", lambda: _build_single_agent_population(CQN)),
+}
+
+
+class TestMultiFrequencyCrossFamilyEvolution:
+    """Multi-frequency selection evolves a real population of every algorithm family."""
+
+    @pytest.mark.parametrize(
+        "family", list(_CROSS_FAMILY_CASES), ids=list(_CROSS_FAMILY_CASES)
+    )
+    def test_evolves_a_real_population_of_every_family(self, family):
+        algo_name, build_population = _CROSS_FAMILY_CASES[family]
+        population = build_population()
+        for agent in population:
+            agent.subpopulation_id = agent.index // 4
+        strategy = MultiFrequencySelection(
+            population_size=8,
+            n_subpopulations=2,
+            evolution_frequency_ratios=[1, 2],
+            n_winners=1,
+            n_survivors=1,
+            n_open_for_migration=1,
+            n_losers=1,
+            seed=0,
+        )
+        mutation = Mutations(
+            no_mutation=0.2,
+            architecture=0.0,
+            new_layer_prob=0.0,
+            parameters=0.4,
+            activation=0.0,
+            rl_hp=0.4,
+            mutation_sd=0.1,
+            rand_seed=0,
+            device="cpu",
+        )
+
+        for cycle in range(3):
+            rank_population_by_subpopulation(population)
+            doomed = {weakest_agent_index(population, subpop=0)}
+            if cycle % 2 == 1:
+                doomed.add(weakest_agent_index(population, subpop=1))
+
+            population = run_selection_and_mutation(
+                strategy,
+                population=population,
+                mutation=mutation,
+                env_name="Env",
+                algo=algo_name,
+            )
+
+            surviving = {a.index for a in population}
+            assert not (doomed & surviving)  # the due subpops really did evolve
+            assert len(population) == 8
+            assert Counter(a.subpopulation_id for a in population) == Counter(
+                {0: 4, 1: 4}
+            )
+            assert len({a.index for a in population}) == 8
+            assert all(isinstance(a, EvolvableAlgorithm) for a in population)
 
 
 def _try_remove_models_dir() -> bool:

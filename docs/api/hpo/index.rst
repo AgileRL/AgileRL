@@ -12,3 +12,4 @@ without requiring numerous training runs.
 
    mutation
    tournament
+   multi_frequency

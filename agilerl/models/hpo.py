@@ -3,7 +3,11 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict, Field
+import warnings
+from typing import Annotated, Any, Literal
+
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+from typing_extensions import Self
 
 
 class RLHyperparameter(BaseModel):
@@ -74,11 +78,186 @@ class MutationSpec(BaseModel):
 class TournamentSelectionSpec(BaseModel):
     """Pydantic model for TournamentSelection object.
 
+    :param strategy: Discriminator selecting this (tournament) branch of the
+        manifest's selection_strategy union. Fixed to "tournament".
+    :type strategy: Literal["tournament"]
     :param tournament_size: Size of the tournament.
     :type tournament_size: int
     :param elitism: Whether elitism is enabled.
     :type elitism: bool
     """
 
+    strategy: Literal["tournament"] = "tournament"
     tournament_size: int = Field(default=2, ge=2)
     elitism: bool = True
+
+
+def resolve_and_validate_frequency_ratios(
+    evolution_frequency_ratios: list[int] | None,
+    n_subpopulations: int,
+) -> list[int]:
+    """Default and validate the MF-PBT per-subpopulation evolution-frequency ratios.
+
+    :param evolution_frequency_ratios: The configured ratios, or None/[]
+        to default to [1, 5, 10, ...].
+    :type evolution_frequency_ratios: list[int] | None
+    :param n_subpopulations: Number of subpopulations the ratios must cover.
+    :type n_subpopulations: int
+    :return: A new list of n_subpopulations strictly-increasing ratios >= 1.
+    :rtype: list[int]
+    :raises ValueError: If the ratios are not n_subpopulations strictly-increasing
+        integers >= 1.
+    """
+    ratios = (
+        list(evolution_frequency_ratios)
+        if evolution_frequency_ratios
+        else [1] + [5 * i for i in range(1, n_subpopulations)]
+    )
+    if len(ratios) != n_subpopulations:
+        msg = (
+            f"evolution_frequency_ratios must have length n_subpopulations "
+            f"({n_subpopulations}), got {len(ratios)}."
+        )
+        raise ValueError(msg)
+    if any(r < 1 for r in ratios):
+        msg = "Each evolution_frequency_ratio must be >= 1."
+        raise ValueError(msg)
+    if any(ratios[i] >= ratios[i + 1] for i in range(len(ratios) - 1)):
+        msg = "evolution_frequency_ratios must be strictly increasing."
+        raise ValueError(msg)
+    return ratios
+
+
+class MultiFrequencySelectionSpec(BaseModel):
+    """Pydantic model for the MultiFrequencySelection object.
+
+    The total population size is configured in the manifest's training block,
+    not on this spec. This spec only validates the population-size-independent
+    constraints.
+
+    :param strategy: Discriminator selecting this (MF-PBT) branch of the
+        manifest's selection_strategy union. Fixed to "multi_frequency".
+    :type strategy: Literal["multi_frequency"]
+    :param n_subpopulations: Number of subpopulations (>= 2, since MF-PBT migration
+        draws from *other* subpopulations).
+    :type n_subpopulations: int
+    :param n_winners: Agents in the winners bracket (>= 1; default round(0.25 *
+        population_size // n_subpopulations)).
+    :type n_winners: int | None
+    :param n_survivors: Agents in the survivors bracket (>= 0).
+    :type n_survivors: int
+    :param n_open_for_migration: Agents in the open-for-migration bracket (>= 1;
+        default round(0.25 * population_size // n_subpopulations)).
+    :type n_open_for_migration: int | None
+    :param n_losers: Agents in the losers bracket (>= 1; default the remainder
+        population_size // n_subpopulations - n_winners - n_survivors -
+        n_open_for_migration).
+    :type n_losers: int | None
+    :param evolution_frequency_ratios: Per-subpopulation evolution-frequency ratios
+        (strictly increasing integers, each >= 1; one per subpopulation; default
+        [1, 5, 10, ...]).
+    :type evolution_frequency_ratios: list[int] | None
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    strategy: Literal["multi_frequency"] = "multi_frequency"
+    n_subpopulations: int = Field(default=2, ge=2)
+    n_winners: int | None = Field(default=None, ge=1)
+    n_survivors: int = Field(default=0, ge=0)
+    n_open_for_migration: int | None = Field(default=None, ge=1)
+    n_losers: int | None = Field(default=None, ge=1)
+    evolution_frequency_ratios: list[int] | None = Field(default=None)
+
+    @model_validator(mode="after")
+    def _resolve_and_validate_ratios(self) -> Self:
+        """Default and validate the frequency ratios (population-size independent)."""
+        self.evolution_frequency_ratios = resolve_and_validate_frequency_ratios(
+            self.evolution_frequency_ratios, self.n_subpopulations
+        )
+        return self
+
+
+def default_selection_strategy(value: Any) -> Any:
+    """Inject the default strategy discriminator for config dicts that omit it.
+
+    :param value: Raw selection_strategy value from the manifest.
+    :type value: Any
+    :returns: The value with strategy defaulted to "tournament" when it was a
+        discriminator-less dict; otherwise the value unchanged.
+    :rtype: Any
+    """
+    if isinstance(value, dict) and "strategy" not in value:
+        return {**value, "strategy": "tournament"}
+    return value
+
+
+SelectionStrategySpec = Annotated[
+    TournamentSelectionSpec | MultiFrequencySelectionSpec,
+    Field(discriminator="strategy"),
+]
+"""Discriminated union for the manifest's selection_strategy block."""
+
+
+def resolve_deprecated_selection_kwargs(
+    selection_strategy: SelectionStrategySpec | None,
+    kwargs: dict[str, Any],
+    *,
+    deprecated_key: str = "tournament",
+    caller: str,
+) -> SelectionStrategySpec | None:
+    """Fold a deprecated selection keyword argument into selection_strategy.
+
+    :param selection_strategy: The spec passed via the current argument, or None
+        when unset.
+    :type selection_strategy: SelectionStrategySpec | None
+    :param kwargs: The catch-all keyword arguments of the calling API.
+    :type kwargs: dict[str, Any]
+    :param deprecated_key: The superseded keyword the caller still accepts,
+        defaults to "tournament".
+    :type deprecated_key: str
+    :param caller: Name of the calling API, used in the warning and error messages.
+    :type caller: str
+    :returns: The resolved selection-strategy spec, or None when neither spelling
+        supplied one.
+    :rtype: SelectionStrategySpec | None
+    :raises TypeError: If kwargs holds any key other than deprecated_key.
+    :raises ValueError: If both spellings were used and carry different specs.
+    """
+    unexpected = sorted(key for key in kwargs if key != deprecated_key)
+    if unexpected:
+        msg = (
+            f"{caller} got unexpected keyword argument(s): "
+            f"{', '.join(repr(key) for key in unexpected)}."
+        )
+        raise TypeError(msg)
+
+    if deprecated_key not in kwargs:
+        return selection_strategy
+
+    warnings.warn(
+        f"The {deprecated_key!r} argument to {caller} is deprecated and will be "
+        "removed in a future release; pass the selection strategy via "
+        "selection_strategy instead.",
+        DeprecationWarning,
+        stacklevel=3,
+    )
+
+    deprecated_spec = kwargs[deprecated_key]
+    if deprecated_spec is None:
+        return selection_strategy
+
+    if selection_strategy is None:
+        return deprecated_spec
+
+    # Pydantic equality compares class and field values, so equal-but-distinct
+    # specs route cleanly while a tournament spec and an MF-PBT spec never match
+    if selection_strategy != deprecated_spec:
+        msg = (
+            f"{caller} received conflicting selection strategies: "
+            f"'selection_strategy'={selection_strategy!r} and the deprecated "
+            f"{deprecated_key!r}={deprecated_spec!r}. Pass only 'selection_strategy'."
+        )
+        raise ValueError(msg)
+
+    return selection_strategy

@@ -471,7 +471,7 @@ to have access to the ``HalfCheetah-v4`` environment.
             evo_steps=15_000,
             eval_loop=1,
             learning_delay=10_000,
-            tournament=tournament,
+            selection_strategy=tournament,
             mutation=mutations
         )
 

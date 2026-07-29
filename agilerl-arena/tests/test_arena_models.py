@@ -78,6 +78,56 @@ def test_get_validated_inserts_empty_platform_sections() -> None:
     assert payload["algorithm"]["name"] == "DQN"
 
 
+def test_get_validated_accepts_the_core_selection_strategy_key() -> None:
+    payload = TrainingManifest.get_validated(
+        _manifest(selection_strategy={"tournament_size": 3, "elitism": False})
+    )
+    # Arena's payload keeps tournament_selection for compatibility purposes
+    assert payload["tournament_selection"] == {"tournament_size": 3, "elitism": False}
+    assert "selection_strategy" not in payload
+
+
+def test_get_validated_payload_is_unchanged_by_the_selection_key_used() -> None:
+    legacy = TrainingManifest.get_validated(
+        _manifest(tournament_selection={"tournament_size": 3})
+    )
+    current = TrainingManifest.get_validated(
+        _manifest(selection_strategy={"tournament_size": 3})
+    )
+    assert legacy == current
+
+
+def test_get_validated_accepts_the_core_discriminator() -> None:
+    # The (selection) strategy discriminator is accepted but never forwarded to Arena
+    with patch("agilerl.arena.models.manifest.logger") as mock_logger:
+        payload = TrainingManifest.get_validated(
+            _manifest(
+                selection_strategy={"strategy": "tournament", "tournament_size": 3}
+            )
+        )
+    mock_logger.warning.assert_not_called()
+    assert payload["tournament_selection"] == {"tournament_size": 3, "elitism": True}
+
+
+def test_get_validated_rejects_a_non_tournament_strategy() -> None:
+    # Arena runs tournament selection only
+    with pytest.raises(ValidationError):
+        TrainingManifest.get_validated(
+            _manifest(
+                selection_strategy={"strategy": "multi_frequency", "n_winners": 1}
+            )
+        )
+
+
+def test_get_validated_reports_unknown_keys_under_the_core_selection_key() -> None:
+    with patch("agilerl.arena.models.manifest.logger") as mock_logger:
+        TrainingManifest.get_validated(
+            _manifest(selection_strategy={"tournament_size": 3, "bogus_key": 1})
+        )
+    mock_logger.warning.assert_called_once()
+    assert "selection_strategy.bogus_key" in mock_logger.warning.call_args.args[1]
+
+
 def test_get_validated_warns_on_unknown_algorithm_field() -> None:
     with patch("agilerl.arena.models.manifest.logger") as mock_logger:
         TrainingManifest.get_validated(

@@ -88,13 +88,13 @@ class TournamentSelection:
     def select(
         self,
         population: list[AgentT],
-    ) -> tuple[AgentT, list[AgentT]]:
+    ) -> tuple[AgentT, list[AgentT], list[int] | None]:
         """Select the best agent and new population of agents following tournament selection.
 
         :param population: Population of agents
         :type population: list[AgentT]
-        :return: Elite agent and new population
-        :rtype: tuple[AgentT, list[AgentT]]
+        :return: Elite agent, new population, and None (mutate the whole population)
+        :rtype: tuple[AgentT, list[AgentT], list[int] | None]
         """
         if self.language_model is None:
             self.language_model = isinstance(population[0], LLMAlgorithm)
@@ -115,15 +115,15 @@ class TournamentSelection:
     def _select_standard_agents(
         self,
         population: list[AgentT],
-    ) -> tuple[AgentT, list[AgentT]]:
+    ) -> tuple[AgentT, list[AgentT], None]:
         """Return best agent and new population of agents following tournament selection. Used for
         a population of :class:`RLAlgorithm <agilerl.algorithms.core.RLAlgorithm>` or
         :class:`MultiAgentRLAlgorithm <agilerl.algorithms.core.MultiAgentRLAlgorithm>` agents.
 
         :param population: Population of agents
         :type population: list[AgentT]
-        :return: Elite agent and new population
-        :rtype: tuple[AgentT, list[AgentT]]
+        :return: Elite agent, new population, and None (mutate the whole population)
+        :rtype: tuple[AgentT, list[AgentT], None]
         """
         best_agent, rank, max_id = self._elitism(population)
         elite = best_agent.clone(index=None, wrap=True)
@@ -141,19 +141,19 @@ class TournamentSelection:
             new_individual = actor_parent.clone(index=max_id, wrap=False)
             new_population.append(new_individual)
 
-        return elite, new_population
+        return elite, new_population, None
 
     def _select_llm_agents(
         self,
         population: list[AgentT],
-    ) -> tuple[AgentT, list[AgentT]]:
+    ) -> tuple[AgentT, list[AgentT], None]:
         """Return best agent and new population of agents following tournament selection. Used for
         a population of :class:`LLMAlgorithm <agilerl.algorithms.core.LLMAlgorithm>` agents.
 
         :param population: Population of agents
         :type population: list[AgentT]
-        :return: Elite agent and new population
-        :rtype: tuple[AgentT, list[AgentT]]
+        :return: Elite agent, new population, and None (mutate the whole population)
+        :rtype: tuple[AgentT, list[AgentT], None]
         """
         agent_slots: Any = population
 
@@ -227,6 +227,4 @@ class TournamentSelection:
                     wrap=False,
                 )
             new_population.append(actor_parent)
-
-        elite = new_population[0]
-        return elite, new_population
+        return elite, new_population, None
