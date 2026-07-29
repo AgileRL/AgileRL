@@ -51,6 +51,7 @@ from agilerl.utils.llm_utils import (
     format_colocated_vllm_oom_hint,
     gather_if_zero3,
     get_llm_accelerator,
+    get_lora_params,
     get_model_name_or_path,
     get_state_dict,
     list_peft_matched_module_keys,
@@ -826,6 +827,43 @@ def test_get_state_dict():
     for key, value in state_dict.items():
         assert isinstance(key, str)
         assert isinstance(value, torch.Tensor)
+
+
+def test_get_lora_params_filters_adapter_params_only():
+    """get_lora_params must return only adapter params, never base params."""
+    model = nn.Sequential(
+        nn.Linear(10, 10),
+        nn.Linear(10, 10),
+    )
+
+    # Manually register LoRA-style named params by wrapping in a module
+    # that uses the "lora" naming convention.
+    class FakeLora(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.lora_A = nn.Linear(10, 10, bias=False)
+            self.lora_B = nn.Linear(10, 10, bias=False)
+
+    wrapper = nn.ModuleDict({"base": model, "lora_adapter": FakeLora()})
+
+    lora_params = get_lora_params(wrapper)
+    lora_names = {n for n, p in wrapper.named_parameters() if "lora" in n}
+    expected_count = sum(1 for n, _ in wrapper.named_parameters() if "lora" in n)
+
+    assert len(lora_params) == expected_count
+    assert all(p is not None for p in lora_params)
+    # Base params must NOT appear in the filtered set
+    base_params = {p for n, p in wrapper.named_parameters() if "lora" not in n}
+    for lp in lora_params:
+        assert not any(lp is bp for bp in base_params)
+    # Sanity: lora_names are non-empty (the test setup is valid)
+    assert len(lora_names) > 0
+
+
+def test_get_lora_params_empty_model():
+    """get_lora_params on a model with no adapter params returns []."""
+    model = nn.Linear(10, 10)
+    assert get_lora_params(model) == []
 
 
 def _make_tokenizer(vocab_size: int = 100, prompt_len: int = 3) -> MagicMock:

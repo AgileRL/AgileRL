@@ -459,6 +459,23 @@ def gather_if_zero3(
         yield
 
 
+def get_lora_params(model: nn.Module) -> list[torch.Tensor]:
+    """Return adapter parameters for scoped ZeRO-3 gathers.
+
+    Under ZeRO-3, save/export/copy operations only touch adapter parameters.
+    Base parameters remain sharded and are filtered out by PEFT's name-based
+    key matching inside ``save_pretrained`` / ``get_peft_model_state_dict``.
+    Gathering only adapter parameters avoids materialising the full base
+    model on every rank.
+
+    :param model: The model to extract adapter parameters from.
+    :type model: nn.Module
+    :return: List of adapter parameters (LoRA A/B, DoRA magnitude, optional bias).
+    :rtype: list[torch.Tensor]
+    """
+    return [p for n, p in model.named_parameters() if "lora" in n]
+
+
 def get_state_dict(model: nn.Module) -> dict[str, torch.Tensor]:
     """Get the state dict of the model for zero3.
 

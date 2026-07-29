@@ -71,8 +71,6 @@ if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
     from peft import PeftConfig, PeftModel, get_peft_model
     from transformers import PreTrainedModel
 
-    from agilerl.utils.llm_utils import gather_if_zero3
-
     PreTrainedModelType = PeftModel | PreTrainedModel
 else:
     # Annotations referencing PreTrainedModelType are evaluated at function
@@ -2569,53 +2567,50 @@ def clone_llm(
         case _:
             msg = f"Invalid 'original_model' type: {type(original_model)}"
             raise ValueError(msg)
-    with gather_if_zero3(zero_stage, list(source_model.parameters())):
-        model_config = source_model.config
-        base_model = source_model.model
-        assert isinstance(base_model, nn.Module)
-        model: nn.Module = type(base_model)(model_config)
-        adapter_names: list[str] = []
+    model_config = source_model.config
+    base_model = source_model.model
+    assert isinstance(base_model, nn.Module)
+    model: nn.Module = type(base_model)(model_config)
+    adapter_names: list[str] = []
 
-        # Any model carrying peft_config has adapters to copy, including
-        # wrappers that are not PeftModel subclasses. The attribute is dynamic,
-        # so pin the adapter-name/config pairs to their concrete peft types.
-        if hasattr(source_model, "peft_config"):
-            raw_peft_config = source_model.peft_config
-            assert is_str_keyed_dict(raw_peft_config)
-            peft_configs: dict[str, PeftConfig] = {
-                name: config
-                for name, config in raw_peft_config.items()
-                if isinstance(config, PeftConfig)
-            }
-            adapter_names = list(peft_configs.keys())
+    # Any model carrying peft_config has adapters to copy, including
+    # wrappers that are not PeftModel subclasses. The attribute is dynamic,
+    # so pin the adapter-name/config pairs to their concrete peft types.
+    if hasattr(source_model, "peft_config"):
+        raw_peft_config = source_model.peft_config
+        assert is_str_keyed_dict(raw_peft_config)
+        peft_configs: dict[str, PeftConfig] = {
+            name: config
+            for name, config in raw_peft_config.items()
+            if isinstance(config, PeftConfig)
+        }
+        adapter_names = list(peft_configs.keys())
 
-            if len(adapter_names) > 1:
-                warnings.warn(
-                    "Multiple adapters detected. Only the first adapter will be used for RL finetuning.",
-                    stacklevel=2,
-                )
-            # AgileRL standardizes on adapter name "actor" for the primary adapter.
-            first_adapter = adapter_names[0]
-            model = get_peft_model(
-                model, peft_configs[first_adapter], adapter_name="actor"
+        if len(adapter_names) > 1:
+            warnings.warn(
+                "Multiple adapters detected. Only the first adapter will be used for RL finetuning.",
+                stacklevel=2,
             )
+        # AgileRL standardizes on adapter name "actor" for the primary adapter.
+        first_adapter = adapter_names[0]
+        model = get_peft_model(model, peft_configs[first_adapter], adapter_name="actor")
 
-            # Add remaining adapters using add_adapter
-            for adapter_name in adapter_names[1:]:
-                model.add_adapter(
-                    peft_config=peft_configs[adapter_name], adapter_name=adapter_name
-                )
-            model.disable_adapter()
+        # Add remaining adapters using add_adapter
+        for adapter_name in adapter_names[1:]:
+            model.add_adapter(
+                peft_config=peft_configs[adapter_name], adapter_name=adapter_name
+            )
+        model.disable_adapter()
 
-        if state_dict is not None:
-            sd = state_dict
-            if adapter_names and adapter_names[0] != "actor":
-                sd = _rename_peft_primary_adapter_keys_in_state_dict(
-                    sd,
-                    old_adapter=adapter_names[0],
-                    new_adapter="actor",
-                )
-            model.load_state_dict(sd, strict=False)
+    if state_dict is not None:
+        sd = state_dict
+        if adapter_names and adapter_names[0] != "actor":
+            sd = _rename_peft_primary_adapter_keys_in_state_dict(
+                sd,
+                old_adapter=adapter_names[0],
+                new_adapter="actor",
+            )
+        model.load_state_dict(sd, strict=False)
     return model
 
 
