@@ -2593,7 +2593,12 @@ def clone_llm(
             )
         # AgileRL standardizes on adapter name "actor" for the primary adapter.
         first_adapter = adapter_names[0]
-        model = get_peft_model(model, peft_configs[first_adapter], adapter_name="actor")
+        model = get_peft_model(
+            model,
+            peft_configs[first_adapter],
+            adapter_name="actor",
+            autocast_adapter_dtype=zero_stage != 3,
+        )
 
         # Add remaining adapters using add_adapter
         for adapter_name in adapter_names[1:]:
