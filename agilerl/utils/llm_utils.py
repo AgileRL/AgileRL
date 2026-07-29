@@ -459,6 +459,27 @@ def gather_if_zero3(
         yield
 
 
+@contextmanager
+def gather_if_ds_param(
+    *tensors: torch.Tensor | None,
+) -> Generator[None, None, None]:
+    """Allgather ZeRO-3 params for the duration of the block.
+
+    No-op when none of ``tensors`` carry a DeepSpeed ``ds_id``. The gather
+    must wrap only the matmul / fused loss that reads the weight — not a
+    module ``forward`` — because ZeRO-3's post-forward hooks re-partition
+    the param and free the gathered buffer.
+    """
+    params: list[torch.Tensor] = [
+        t for t in tensors if t is not None and hasattr(t, "ds_id")
+    ]
+    if not params:
+        yield
+        return
+    with gather_if_zero3(3, params):
+        yield
+
+
 def get_lora_params(model: nn.Module) -> list[torch.Tensor]:
     """Return adapter parameters for scoped ZeRO-3 gathers.
 

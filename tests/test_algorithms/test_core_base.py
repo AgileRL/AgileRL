@@ -2995,16 +2995,32 @@ class TestLLMGetLmHead:
         assert got_w is weight
         assert got_b is None
 
-    def test_gather_if_ds_param_noops_without_ds_id(self):
-        from agilerl.algorithms.core.llm_ops.fused_logprobs import (
-            _gather_if_ds_param,
-        )
-
+    def test_liger_head_gather_calls_gather_if_ds_param(self):
+        agent = _make_llm_agent()
         weight = torch.randn(4, 2)
-        entered = False
-        with _gather_if_ds_param(weight, None):
-            entered = True
-        assert entered
+        bias = torch.randn(4)
+        lm_head = MagicMock()
+        lm_head.weight = weight
+        lm_head.bias = bias
+        agent._get_lm_head = MagicMock(return_value=lm_head)
+        sentinel = object()
+
+        with patch(
+            "agilerl.algorithms.core.base.gather_if_ds_param",
+            return_value=sentinel,
+        ) as mock_gather:
+            result = agent._liger_head_gather()
+
+        mock_gather.assert_called_once_with(weight, bias)
+        assert result is sentinel
+
+    def test_resolve_fused_chunk_rows_uses_ds_shape(self):
+        weight = torch.empty(0)
+        weight.ds_shape = (49152, 2048)
+        vocab = getattr(weight, "ds_shape", weight.shape)[0]
+        rows = LLMAlgorithm._resolve_fused_chunk_rows(vocab, None)
+        assert rows > 0
+        assert vocab == 49152
 
 
 @pytest.mark.skipif(
@@ -4177,6 +4193,22 @@ class TestLLMInitMiscPaths:
             with pytest.warns(UserWarning, match="Liger Loss"):
                 _make_llm_agent(accelerator=acc, use_liger_loss=True, lora_config=lora)
         assert lora.exclude_modules == ["lm_head"]
+
+    def test_use_liger_loss_survives_zero_stage_three(self):
+        lora = MagicMock()
+        acc = _make_mock_accelerator(
+            ds_config={
+                "zero_optimization": {"stage": 3},
+                "train_micro_batch_size_per_gpu": "auto",
+            }
+        )
+        with patch("agilerl.algorithms.core.base.HAS_LIGER_KERNEL", True):
+            with pytest.warns(UserWarning, match="ZeRO Stage 3|Liger Loss"):
+                agent = _make_llm_agent(
+                    accelerator=acc, use_liger_loss=True, lora_config=lora
+                )
+        assert agent.zero_stage == 3
+        assert agent.use_liger_loss is True
 
     def test_seed_broadcast_with_multi_process(self):
         acc = _make_mock_accelerator(num_processes=2)

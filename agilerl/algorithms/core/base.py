@@ -15,7 +15,7 @@ import warnings
 from abc import ABC, ABCMeta, abstractmethod
 from collections import OrderedDict, defaultdict, deque
 from collections.abc import Callable, Generator, Iterable, Mapping, Sequence
-from contextlib import contextmanager, nullcontext
+from contextlib import AbstractContextManager, contextmanager, nullcontext
 from dataclasses import asdict
 from importlib.metadata import version
 from pathlib import Path
@@ -165,6 +165,7 @@ if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
         build_vllm_llm_init_kwargs,
         build_vllm_rollout_lora_request,
         create_model_from_name_or_path,
+        gather_if_ds_param,
         gather_if_zero3,
         get_lora_params,
         get_model_name_or_path,
@@ -2708,16 +2709,6 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
                 stacklevel=2,
             )
             use_memory_efficient_params = False
-        # Liger kernels matmul ``lm_head.weight`` inside their own autograd
-        # backward, which ZeRO-3 cannot keep gathered; use the fused-linear
-        # logprob path instead (also memory-bounded).
-        if self.zero_stage == 3 and self.use_liger_loss:
-            warnings.warn(
-                "Liger fused losses are not compatible with DeepSpeed ZeRO-3; "
-                "falling back to the fused-linear-logprob path.",
-                stacklevel=2,
-            )
-            self.use_liger_loss = False
         self.use_memory_efficient_params = use_memory_efficient_params
         self.memory_efficient_params_context = (
             self._memory_efficient_params
@@ -3929,7 +3920,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         stays bounded too; under no_grad the lighter static method is used.
 
         Under ZeRO-3 the fused kernel gathers ``lm_head`` for the matmul only
-        (not across ``actor.forward``); see ``_gather_if_ds_param``.
+        (not across ``actor.forward``); see ``gather_if_ds_param``.
         """
         fused_fn = (
             LLMAlgorithm._logprobs_from_hidden_fused_grad
@@ -3938,6 +3929,17 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         )
         lm_head = self._get_lm_head()
         return fused_fn, lm_head.weight, lm_head.bias
+
+    def _liger_head_gather(self) -> AbstractContextManager[None]:
+        """Gather ``lm_head`` for one Liger fused-loss call.
+
+        Liger computes its gradients inside ``forward`` and saves them, so the
+        weight is read only during ``apply``. Must wrap the ``apply`` call
+        alone, never ``actor.forward``, whose post-forward hooks re-partition
+        the param.
+        """
+        lm_head = self._get_lm_head()
+        return gather_if_ds_param(lm_head.weight, lm_head.bias)
 
     def _warn_liger_non_token_is(
         self,

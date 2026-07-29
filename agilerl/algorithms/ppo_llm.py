@@ -1365,29 +1365,31 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
         # Token level token-flattens the hidden states so the fused kernel
         # chunks tokens (bounded); turn/sequence keep the batch path. See
         # :func:`apply_fused_policy_loss`.
-        loss_pg_kl, aux = apply_fused_policy_loss(
-            policy_hidden[:, :-1],
-            lm_head_weight,
-            lm_head_bias,
-            target_ids,
-            mask,
-            adv_for_liger,
-            ref_log_probs,
-            old_log_probs,
-            self.beta,
-            self.clip_coef,  # epsilon_low
-            self.clip_coef,  # epsilon_high
-            self.temperature,
-            is_level,
-            turn_ids=turn_ids_arg,
-            full_turn_mask=full_turn_mask,
-            max_turns=max_turns,
-            token_chunk_size=self._resolve_fused_chunk_rows(
-                lm_head_weight.shape[0], self.chunk_rows
-            ),
-            turn_log_ratio_reduction=self.turn_ratio_pooling,
-            vllm_is_ratio=vllm_is_ratio,
-        )
+        with self._liger_head_gather():
+            loss_pg_kl, aux = apply_fused_policy_loss(
+                policy_hidden[:, :-1],
+                lm_head_weight,
+                lm_head_bias,
+                target_ids,
+                mask,
+                adv_for_liger,
+                ref_log_probs,
+                old_log_probs,
+                self.beta,
+                self.clip_coef,  # epsilon_low
+                self.clip_coef,  # epsilon_high
+                self.temperature,
+                is_level,
+                turn_ids=turn_ids_arg,
+                full_turn_mask=full_turn_mask,
+                max_turns=max_turns,
+                token_chunk_size=self._resolve_fused_chunk_rows(
+                    getattr(lm_head_weight, "ds_shape", lm_head_weight.shape)[0],
+                    self.chunk_rows,
+                ),
+                turn_log_ratio_reduction=self.turn_ratio_pooling,
+                vllm_is_ratio=vllm_is_ratio,
+            )
         kl_metric = float(aux[0].item())
         clipfrac_metric = float(aux[1].item())
         pg_loss_metric = float(aux[2].item())

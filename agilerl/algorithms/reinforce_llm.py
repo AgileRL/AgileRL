@@ -1031,29 +1031,31 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
         # hidden[:, :-1]. Token level token-flattens the hidden states so the
         # fused kernel chunks tokens (bounded); turn/sequence keep the batch
         # path. beta=0: KL handled upstream via the ReBN advantage.
-        loss, aux = apply_fused_policy_loss(
-            policy_hidden[:, :-1],
-            lm_head_weight,
-            lm_head_bias,
-            target_ids,
-            mask,
-            advantages,
-            ref_log_probs,
-            old_log_probs,
-            0.0,  # beta
-            self.clip_coef,  # epsilon_low
-            self.clip_coef,  # epsilon_high
-            self.temperature,
-            is_level,
-            turn_ids=turn_ids_arg,
-            full_turn_mask=full_turn_mask,
-            max_turns=max_turns,
-            token_chunk_size=self._resolve_fused_chunk_rows(
-                lm_head_weight.shape[0], self.chunk_rows
-            ),
-            turn_log_ratio_reduction=self.turn_ratio_pooling,
-            vllm_is_ratio=vllm_is_ratio,
-        )
+        with self._liger_head_gather():
+            loss, aux = apply_fused_policy_loss(
+                policy_hidden[:, :-1],
+                lm_head_weight,
+                lm_head_bias,
+                target_ids,
+                mask,
+                advantages,
+                ref_log_probs,
+                old_log_probs,
+                0.0,  # beta
+                self.clip_coef,  # epsilon_low
+                self.clip_coef,  # epsilon_high
+                self.temperature,
+                is_level,
+                turn_ids=turn_ids_arg,
+                full_turn_mask=full_turn_mask,
+                max_turns=max_turns,
+                token_chunk_size=self._resolve_fused_chunk_rows(
+                    getattr(lm_head_weight, "ds_shape", lm_head_weight.shape)[0],
+                    self.chunk_rows,
+                ),
+                turn_log_ratio_reduction=self.turn_ratio_pooling,
+                vllm_is_ratio=vllm_is_ratio,
+            )
         # aux = [kl, clipfrac, pg_loss, entropy] scalars in fp32.
         metrics = {
             "kl": float(aux[0].item()),
