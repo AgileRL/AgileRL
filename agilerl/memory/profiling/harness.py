@@ -226,11 +226,17 @@ def measure_point(
     if snapshot_path:
         # Record from before the model exists: allocations predating the
         # recording carry no stack, and the weights are allocated during
-        # construction. Keep it cheap — python-only frames and a bounded
-        # entry count. The default (all C++ frames, unbounded) costs many GiB
-        # of host RAM across vLLM init and took a 23 GiB box off the network.
+        # construction. Keep it cheap — python-only frames rather than the
+        # default all-C++, which costs many GiB of host RAM across vLLM init
+        # and once took a 23 GiB box off the network.
+        #
+        # The cap is a ring buffer, so setting it too low silently evicts the
+        # *earliest* events — which are exactly the weight allocations. At
+        # 100k, a 24-layer Qwen and a 35-layer Gemma both overflowed and
+        # reported 0 MiB of base weights against a ~1-9 GiB reality. 2M holds
+        # a 35-layer model's full run in a few hundred MiB of host RAM.
         torch.cuda.memory._record_memory_history(
-            enabled="all", context="all", stacks="python", max_entries=100_000
+            enabled="all", context="all", stacks="python", max_entries=2_000_000
         )
 
     prompt_len = prompt_len or point.prompt_len

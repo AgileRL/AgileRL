@@ -65,6 +65,41 @@ LoraTargetScope = Literal["all-linear", "attention-only"]
 DistributedBackend = Literal["none", "deepspeed"]
 
 
+def _encoder_params(cfg: dict[str, Any]) -> int:
+    """Rough parameter count of a transformer encoder from its config."""
+    h = int(cfg.get("hidden_size") or 0)
+    layers = int(cfg.get("num_hidden_layers") or 0)
+    if not h or not layers:
+        return 0
+    heads = int(cfg.get("num_attention_heads") or 1)
+    head_dim = int(cfg.get("head_dim") or (h // heads if heads else 0))
+    kv_heads = int(cfg.get("num_key_value_heads") or heads)
+    intermediate = int(cfg.get("intermediate_size") or 4 * h)
+    attn = h * heads * head_dim + 2 * h * kv_heads * head_dim + heads * head_dim * h
+    per_layer = attn + 2 * h * intermediate + 2 * h
+    return layers * per_layer + int(cfg.get("position_embedding_size") or 0) * h
+
+
+def multimodal_tower_params(config: dict[str, Any]) -> int:
+    """Approximate parameters in vision and audio towers.
+
+    A lower bound, and knowingly so: the formula assumes plain transformer
+    encoders, while real towers are convolutional. On Gemma 4 it returns
+    519 MiB of bf16 weights against a measured 951 (E2B) and 965 (E4B) —
+    45% short, because the vision tower is MobileNet-style and the audio
+    tower a conformer, neither of which is a stack of attention blocks.
+
+    Still far better than the 0 it replaces, which made a multimodal
+    checkpoint look 68% smaller than it is. A profiled ``realised_bytes``
+    supersedes this whenever one exists.
+    """
+    return sum(
+        _encoder_params(config[key])
+        for key in ("vision_config", "audio_config")
+        if isinstance(config.get(key), dict)
+    )
+
+
 def _sliding_layer_fraction(text_cfg: dict[str, Any]) -> float:
     """Fraction of layers using windowed attention.
 
@@ -213,6 +248,7 @@ class ModelArch(BaseModel):
             double_wide_mlp=bool(text_cfg.get("use_double_wide_mlp", False)),
             per_layer_input_dim=int(text_cfg.get("hidden_size_per_layer_input") or 0),
             per_layer_input_vocab=int(text_cfg.get("vocab_size_per_layer_input") or 0),
+            multimodal_tower_params=multimodal_tower_params(config),
             n_experts=int(moe_experts) if moe_experts else None,
             n_experts_per_tok=(
                 int(text_cfg["num_experts_per_tok"])
