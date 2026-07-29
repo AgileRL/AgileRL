@@ -46,6 +46,7 @@ from agilerl.utils.algo_utils import (
     get_deepest_head_config,
     get_num_envs,
     get_vect_dim,
+    is_train_eval_invariant,
     key_in_nested_dict,
     make_safe_deepcopies,
     to_agent_tensors,
@@ -466,18 +467,21 @@ class MATD3(MultiAgentRLAlgorithm[TensorDict]):
             optim.Adam,
             networks=self.actors,
             lr=lr_actor,
+            optimizer_kwargs=self._adam_kwargs(),
         )
 
         self.critic_1_optimizers = OptimizerWrapper(
             optim.Adam,
             networks=self.critics_1,
             lr=lr_critic,
+            optimizer_kwargs=self._adam_kwargs(),
         )
 
         self.critic_2_optimizers = OptimizerWrapper(
             optim.Adam,
             networks=self.critics_2,
             lr=lr_critic,
+            optimizer_kwargs=self._adam_kwargs(),
         )
 
         if self.accelerator is not None and wrap:
@@ -500,6 +504,10 @@ class MATD3(MultiAgentRLAlgorithm[TensorDict]):
             self.recompile()
 
         self.criterion = nn.MSELoss()
+
+        self._actors_mode_invariant = all(
+            is_train_eval_invariant(actor) for actor in self.actors.values()
+        )
 
         # Register network groups for mutations
         self.register_network_group(
@@ -591,7 +599,8 @@ class MATD3(MultiAgentRLAlgorithm[TensorDict]):
         grouped_actions: dict[str, npt.NDArray] = {}
         for group_id in grouped_agents:
             actor = self.actors[group_id]
-            actor.eval()
+            if not self._actors_mode_invariant:
+                actor.eval()
             grouped_obs = preprocessed_states[group_id]
             if self.accelerator is not None:
                 with self.accelerator.no_sync(actor), torch.no_grad():
@@ -615,7 +624,8 @@ class MATD3(MultiAgentRLAlgorithm[TensorDict]):
 
         for agent_id, actions in tensor_actions.items():
             actor = self.actors[self.get_network_id(agent_id)]
-            actor.train()
+            if not self._actors_mode_invariant:
+                actor.train()
             if self.training:
                 if isinstance(self.possible_action_spaces[agent_id], spaces.Discrete):
                     min_output, max_output = 0, 1
@@ -964,12 +974,7 @@ class MATD3(MultiAgentRLAlgorithm[TensorDict]):
         :param target: Target network
         :type target: nn.Module
         """
-        for eval_param, target_param in zip(
-            net.parameters(), target.parameters(), strict=False
-        ):
-            target_param.data.copy_(
-                self.tau * eval_param.data + (1.0 - self.tau) * target_param.data,
-            )
+        self._soft_update(net, target, self.tau)
 
     def test(
         self,

@@ -84,10 +84,11 @@ def parameter_norm(model: nn.Module) -> float:
     :return: L2 norm of all model parameters
     :rtype: float
     """
-    norm = 0.0
-    for param in model.parameters():
-        norm += (param.norm() ** 2).item()
-    return math.sqrt(norm)
+    params: list[torch.Tensor] = list(model.parameters())
+    if not params:
+        return 0.0
+    # One device-to-host sync for the whole model rather than one per parameter.
+    return torch.linalg.vector_norm(torch.stack(torch._foreach_norm(params))).item()
 
 
 def get_transformer_logs(

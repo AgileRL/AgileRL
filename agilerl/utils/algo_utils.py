@@ -35,6 +35,7 @@ from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
 from typing_extensions import TypeVarTuple, Unpack
 
 from agilerl import HAS_LLM_DEPENDENCIES
+from agilerl.modules.custom_components import NoisyLinear
 from agilerl.modules.dummy import DummyEvolvable
 from agilerl.protocols import (
     EvolvableAttributeType,
@@ -76,6 +77,26 @@ else:
     # definition time, so provide a runtime placeholder when the LLM
     # dependencies are not installed.
     PreTrainedModelType = Any
+
+
+# Layers whose forward output differs between train() and eval() mode.
+MODE_SENSITIVE_MODULES = (
+    nn.modules.batchnorm._BatchNorm,
+    nn.modules.instancenorm._InstanceNorm,
+    nn.modules.dropout._DropoutNd,
+    NoisyLinear,
+)
+
+
+def is_train_eval_invariant(module: nn.Module) -> bool:
+    """Whether ``module`` produces identical outputs in train and eval mode.
+
+    :param module: Network to inspect.
+    :type module: torch.nn.Module
+    :return: True if train/eval modes are equivalent.
+    :rtype: bool
+    """
+    return not any(isinstance(m, MODE_SENSITIVE_MODULES) for m in module.modules())
 
 
 def configure_tf32_precision() -> None:

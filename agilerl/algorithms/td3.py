@@ -33,6 +33,7 @@ from agilerl.typing import (
     SupportedObservationSpace,
 )
 from agilerl.utils.algo_utils import (
+    is_train_eval_invariant,
     make_safe_deepcopies,
     multi_dim_clamp,
     share_encoder_parameters,
@@ -343,23 +344,28 @@ class TD3(RLAlgorithm[TensorDict]):
         self.critic_target_1.load_state_dict(self.critic_1.state_dict())
         self.critic_target_2.load_state_dict(self.critic_2.state_dict())
 
+        self._actor_mode_invariant = is_train_eval_invariant(self.actor)
+
         # Optimizers
         self.actor_optimizer = OptimizerWrapper(
             optim.Adam,
             networks=self.actor,
             lr=self.lr_actor,
+            optimizer_kwargs=self._adam_kwargs(),
         )
 
         self.critic_1_optimizer = OptimizerWrapper(
             optim.Adam,
             networks=self.critic_1,
             lr=self.lr_critic,
+            optimizer_kwargs=self._adam_kwargs(),
         )
 
         self.critic_2_optimizer = OptimizerWrapper(
             optim.Adam,
             networks=self.critic_2,
             lr=self.lr_critic,
+            optimizer_kwargs=self._adam_kwargs(),
         )
 
         if self.accelerator is not None and wrap:
@@ -439,11 +445,13 @@ class TD3(RLAlgorithm[TensorDict]):
         :rtype: numpy.ndarray[float]
         """
         obs = self.preprocess_observation(obs)
-        self.actor.eval()
+        toggle_mode = not self._actor_mode_invariant
+        if toggle_mode:
+            self.actor.eval()
         with torch.no_grad():
             action: torch.Tensor = self.actor(obs)
-
-        self.actor.train()
+        if toggle_mode:
+            self.actor.train()
 
         # Add noise for exploration
         if training:
@@ -596,12 +604,7 @@ class TD3(RLAlgorithm[TensorDict]):
         :param target: Target network
         :type target: EvolvableModule
         """
-        for eval_param, target_param in zip(
-            net.parameters(), target.parameters(), strict=False
-        ):
-            target_param.data.copy_(
-                self.tau * eval_param.data + (1.0 - self.tau) * target_param.data,
-            )
+        self._soft_update(net, target, self.tau)
 
     def test(
         self,

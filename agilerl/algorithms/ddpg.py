@@ -33,6 +33,7 @@ from agilerl.typing import (
     SupportedObservationSpace,
 )
 from agilerl.utils.algo_utils import (
+    is_train_eval_invariant,
     make_safe_deepcopies,
     multi_dim_clamp,
     share_encoder_parameters,
@@ -320,16 +321,20 @@ class DDPG(RLAlgorithm[TensorDict]):
         self.actor_target.load_state_dict(self.actor.state_dict())
         self.critic_target.load_state_dict(self.critic.state_dict())
 
+        self._actor_mode_invariant = is_train_eval_invariant(self.actor)
+
         # Optimizers
         self.actor_optimizer = OptimizerWrapper(
             optim.Adam,
             networks=self.actor,
             lr=lr_actor,
+            optimizer_kwargs=self._adam_kwargs(),
         )
         self.critic_optimizer = OptimizerWrapper(
             optim.Adam,
             networks=self.critic,
             lr=lr_critic,
+            optimizer_kwargs=self._adam_kwargs(),
         )
 
         if self.accelerator is not None and wrap:
@@ -397,11 +402,13 @@ class DDPG(RLAlgorithm[TensorDict]):
         :rtype: numpy.ndarray[float]
         """
         obs = self.preprocess_observation(obs)
-        self.actor.eval()
+        toggle_mode = not self._actor_mode_invariant
+        if toggle_mode:
+            self.actor.eval()
         with torch.no_grad():
             action: torch.Tensor = self.actor(obs)
-
-        self.actor.train()
+        if toggle_mode:
+            self.actor.train()
 
         # Add noise for exploration
         if training:
@@ -537,12 +544,7 @@ class DDPG(RLAlgorithm[TensorDict]):
         :param target: Target network with parameters to be updated
         :type target: nn.Module
         """
-        for eval_param, target_param in zip(
-            net.parameters(), target.parameters(), strict=False
-        ):
-            target_param.data.copy_(
-                self.tau * eval_param.data + (1.0 - self.tau) * target_param.data,
-            )
+        self._soft_update(net, target, self.tau)
 
     def test(
         self,

@@ -1115,52 +1115,34 @@ class ILQL(nn.Module):
             action_mask,
         )
 
+    @torch.no_grad()
     def soft_update(self) -> None:
         """Soft updates target networks."""
-        for target_param, local_param in zip(
-            self.target_q.parameters(),
-            self.q.parameters(),
-            strict=False,
-        ):
-            target_param.data.copy_(
-                self.alpha * local_param.data + (1.0 - self.alpha) * target_param.data,
-            )
+        pairs = [(self.q, self.target_q)]
         if self.double_q:
-            for target_param, local_param in zip(
-                self.target_q2.parameters(),
-                self.q2.parameters(),
-                strict=False,
-            ):
-                target_param.data.copy_(
-                    self.alpha * local_param.data
-                    + (1.0 - self.alpha) * target_param.data,
-                )
+            pairs.append((self.q2, self.target_q2))
         if self.actor_target is not None:
-            for target_param, local_param in zip(
-                self.actor_target.parameters(),
-                self.model.parameters(),
-                strict=False,
-            ):
-                target_param.data.copy_(
-                    self.alpha * local_param.data
-                    + (1.0 - self.alpha) * target_param.data,
-                )
+            pairs.append((self.model, self.actor_target))
 
+        for source, target in pairs:
+            torch._foreach_lerp_(
+                list(target.parameters()),
+                list(source.parameters()),
+                self.alpha,
+            )
+
+    @torch.no_grad()
     def hard_update(self) -> None:
         """Hard update target networks."""
-        for target_param, local_param in zip(
-            self.target_q.parameters(),
-            self.q.parameters(),
-            strict=False,
-        ):
-            target_param.data.copy_(local_param.data)
+        torch._foreach_copy_(
+            list(self.target_q.parameters()),
+            list(self.q.parameters()),
+        )
         if self.double_q:
-            for target_param, local_param in zip(
-                self.target_q2.parameters(),
-                self.q2.parameters(),
-                strict=False,
-            ):
-                target_param.data.copy_(local_param.data)
+            torch._foreach_copy_(
+                list(self.target_q2.parameters()),
+                list(self.q2.parameters()),
+            )
         if self.actor_target is not None:
             del self.actor_target
             self.actor_target = copy.deepcopy(self.model)
@@ -2278,7 +2260,8 @@ def to_decorator(
 
 
 def parameter_norm(model: nn.Module) -> float:
-    norm = 0.0
-    for param in model.parameters():
-        norm += (param.norm() ** 2).item()
-    return math.sqrt(norm)
+    params: list[torch.Tensor] = list(model.parameters())
+    if not params:
+        return 0.0
+    # One device-to-host sync for the whole model rather than one per parameter.
+    return torch.linalg.vector_norm(torch.stack(torch._foreach_norm(params))).item()
