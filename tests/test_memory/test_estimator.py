@@ -124,24 +124,21 @@ def test_beta_zero_skips_the_reference_forward_but_keeps_the_adapter(model, devi
     hot = estimate_training(model, device, with_kl)
     cold = estimate_training(model, device, without_kl)
 
-    # The no-grad pass halves, since it drops one of its two fused rows.
+    # The no-grad instant halves, since it drops one of its two fused rows.
     assert (
-        component(cold, "activations").detail["nograd_logprob_pass"]
-        < (component(hot, "activations").detail["nograd_logprob_pass"])
+        component(cold, "activations").detail["nograd_peak"]
+        < (component(hot, "activations").detail["nograd_peak"])
     )
     assert component(cold, "adapters").bytes_ == component(hot, "adapters").bytes_
-    assert component(cold, "activations").bytes_ <= (
-        component(hot, "activations").bytes_
-    )
+    assert cold.total_bytes <= hot.total_bytes
 
-    # But the bar only moves when the no-grad pass is the binding peak. Under
-    # gradient checkpointing the grad pass carries a saved hidden state per
-    # layer, so it usually dominates and the beta=0 saving is masked — worth
+    # But the bar only moves when the no-grad instant is the binding one.
+    # Under gradient checkpointing the backward carries a saved hidden state
+    # per layer and usually dominates, masking the beta=0 saving — worth
     # knowing before promising users that beta=0 frees memory.
-    assert (
-        component(hot, "activations").bytes_
-        == (component(hot, "activations").detail["grad_pass"])
-    )
+    detail = component(hot, "activations").detail
+    assert detail["backward_peak"] >= detail["nograd_peak"]
+    assert component(hot, "activations").bytes_ == detail["backward_peak"]
 
     # And the saving is only real once the framework short-circuits that row.
     assert any("beta=0" in w for w in cold.warnings)
@@ -165,14 +162,14 @@ def test_ppo_carries_a_critic_adapter_and_value_head(model, device):
         component(ppo_bd, "grads_optimizer").bytes_
         > component(grpo_bd, "grads_optimizer").bytes_
     )
-    # PPO's third fused row makes its no-grad pass wider, but that only shows
-    # in the bar when the no-grad pass is the binding peak. Once the LoRA
-    # fp32 input casts are counted the gradient pass usually dominates, and
-    # that pass is identical for both algorithms — so activations may tie.
-    # The costs PPO genuinely adds are the critic adapter and the value head.
+    # PPO's third fused row widens the no-grad instant, which can make that
+    # instant rather than the backward the binding one. When it does, the
+    # "activations" component reports what is live *then* — which excludes
+    # the block recompute and so reads lower than GRPO's, even though PPO's
+    # total is higher. Compare totals, not components, across algorithms.
     assert (
-        component(ppo_bd, "activations").bytes_
-        >= component(grpo_bd, "activations").bytes_
+        component(ppo_bd, "activations").detail["nograd_peak"]
+        > component(grpo_bd, "activations").detail["nograd_peak"]
     )
     assert ppo_bd.total_bytes > grpo_bd.total_bytes
 

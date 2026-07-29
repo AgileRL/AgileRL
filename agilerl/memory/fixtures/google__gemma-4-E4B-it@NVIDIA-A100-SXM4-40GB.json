@@ -14,15 +14,15 @@
   },
   "generation": {
     "fit": {
-      "intercept_bytes": 2859962289.521711,
+      "intercept_bytes": 2125959089.5217106,
       "slopes": {
-        "batched_tokens": -12342.129015577942,
-        "kv_tokens": -12342.147049030284,
-        "seq_len": -26604.620096532093
+        "batched_tokens": -12342.131329701755,
+        "kv_tokens": -12342.14473490714,
+        "seq_len": -26604.62009652318
       }
     },
-    "holdout_max_rel_error": 0.027464604490819,
-    "holdout_mean_rel_error": 0.007896703013612404,
+    "holdout_max_rel_error": 0.027464604490819364,
+    "holdout_mean_rel_error": 0.007896703013612706,
     "n_points": 15
   },
   "generation_variant": "base",
@@ -868,8 +868,10 @@
   "model_spec": {
     "arch": {
       "attn_bias": false,
+      "double_wide_mlp": false,
       "expert_intermediate_size": null,
       "gated_mlp": true,
+      "global_head_dim": null,
       "head_dim": 256,
       "hidden_size": 2560,
       "intermediate_size": 10240,
@@ -879,8 +881,11 @@
       "n_experts_per_tok": null,
       "n_heads": 8,
       "n_kv_heads": 2,
+      "n_kv_shared_layers": 0,
       "n_layers": 42,
       "n_shared_experts": 0,
+      "per_layer_input_dim": 0,
+      "per_layer_input_vocab": 0,
       "sliding_window": 512,
       "sliding_window_layer_fraction": 0.8333333333333334,
       "tied_embeddings": true,
@@ -914,17 +919,17 @@
   "trainer_variant": "base",
   "training": {
     "fit": {
-      "intercept_bytes": -375303145.5789198,
+      "intercept_bytes": -23777547.443079963,
       "slopes": {
-        "extra_micro_batches": 23839213.114034064,
-        "grad_tokens": 41210.161383366256,
-        "nograd_tokens": 82420.32052664467,
-        "seq_len": 358434.3704493487,
-        "update_tokens": 4804.884135609737
+        "extra_micro_batches": 804139.49916757,
+        "grad_tokens": 26582.16881412885,
+        "nograd_tokens": 53164.33748667164,
+        "seq_len": 412960.26613917184,
+        "update_tokens": 9926.81587350534
       }
     },
-    "holdout_max_rel_error": 0.008821492396671468,
-    "holdout_mean_rel_error": 0.007788862744899157,
+    "holdout_max_rel_error": 0.0036849994709159967,
+    "holdout_mean_rel_error": 0.0018940908593449903,
     "n_points": 15
   }
 }

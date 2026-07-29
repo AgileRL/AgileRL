@@ -58,16 +58,24 @@ CUDA_CONTEXT_BYTES = int(0.75 * 1024**3)
 #: (reference) + 4 (grad) + 8 (two moments) with fp32 adapters.
 ADAPTER_BYTES_PER_PARAM = 4.0
 
-#: What a sleeping (level 1) vLLM engine leaves on the device beyond the CUDA
-#: context: engine structures that survive the sleep.
+#: What a vLLM process holds on the device *outside* its
+#: ``gpu_memory_utilization`` budget, beyond the bare CUDA context: CUDA
+#: library workspaces (cuBLAS/NCCL/flashinfer handles) plus engine
+#: structures. Present whether the engine is asleep or awake.
 #:
-#: Re-derived from the measured floors of all ten fixtures, net of each
-#: device's own context rather than a flat one: A100 1224 - 501 = 723 MiB,
-#: L4 913 - 226 = 687 MiB. Near enough device-independent, unlike the
-#: context. The previous 256 MiB was low by roughly 2.7x, and paired with an
-#: over-large flat context it produced a floor that was too high on L4 and
-#: too low on A100 -- biasing those fleets in opposite directions.
-SLEEPING_ENGINE_RESIDUAL_BYTES = 700 * 1024**2
+#: Two independent derivations agree, which is why they are one constant
+#: rather than two. From the sleeping floors of all ten fixtures, net of each
+#: device's own context: A100 1224 - 501 = 723 MiB, L4 913 - 226 = 687. And
+#: from the median shortfall of the 198 *generation* points, where the engine
+#: is awake: A100 713 MiB, L4 596. Near enough device-independent, unlike the
+#: context itself.
+#:
+#: Charging it to the sleeping trainer but not to generation was worth a
+#: uniform +5.0% under-prediction on the generation phase.
+ENGINE_PROCESS_OVERHEAD_BYTES = 700 * 1024**2
+
+#: Deprecated alias: this was only ever the sleeping case of the above.
+SLEEPING_ENGINE_RESIDUAL_BYTES = ENGINE_PROCESS_OVERHEAD_BYTES
 
 
 @dataclass(frozen=True)
@@ -397,12 +405,27 @@ def block_recompute_bytes(
     seq_len: int,
     act_bytes: float,
     flash_attention: bool = True,
+    backward: bool = False,
 ) -> int:
-    """Peak transient activations of recomputing one transformer block during
-    backward (gradient checkpointing). Live tensors at the MLP peak: residual
-    stream copies, qkv projections, attention output, and the gated-MLP
-    intermediates. Without FlashAttention the SDPA math path additionally
-    materialises the ``heads x S x S`` score matrix.
+    """Peak transient activations of one transformer block.
+
+    Live tensors at the MLP peak: residual stream copies, qkv projections,
+    attention output, and the gated-MLP intermediates. Without FlashAttention
+    the SDPA math path additionally materialises the ``heads x S x S`` score
+    matrix.
+
+    ``backward=True`` is the checkpointed-recompute case, where the block is
+    replayed and then differentiated. Each gated-MLP intermediate then has a
+    gradient live alongside it, while the residual-stream and qkv tensors do
+    not — they are consumed in place or shared with the checkpoint boundary.
+    So the MLP term doubles and the rest does not.
+
+    That is a derivation, not a fitted constant, and the two agree. Sweeping
+    a *flat* whole-block multiplier over all 198 stored training points
+    minimised at 1.75; the MLP share of a Qwen2.5 block is 75.0-75.5%, which
+    implies 1.750-1.755 by this rule. Qwen is five of the ten fixtures, so
+    the flat optimum was fitting a Qwen-weighted average of what is really a
+    per-model quantity — Gemma 4 E2B and OLMoE imply 1.61 and 1.63.
     """
     h = arch.hidden_size
     inter = (
@@ -415,11 +438,12 @@ def block_recompute_bytes(
     else:
         active_ffn = 1
     qkv_dim = arch.mean_qkv_dim
-    per_token = 4 * h + qkv_dim + 3 * int(inter * arch.mlp_width_factor) * active_ffn
-    # Per-Layer Embeddings feed every layer, so the whole (tokens, layers,
-    # per_layer_dim) block is live through the forward. On Gemma 4 E2B that
-    # is 8960 per token, wider than hidden_size.
-    per_token += arch.n_layers * arch.per_layer_input_dim
+    mlp = 3 * int(inter * arch.mlp_width_factor) * active_ffn
+    ple = arch.n_layers * arch.per_layer_input_dim
+    if backward:
+        mlp *= 2
+        ple *= 2
+    per_token = 4 * h + qkv_dim + mlp + ple
     peak = rows * seq_len * per_token * act_bytes
     if not flash_attention:
         peak += rows * arch.n_heads * seq_len * seq_len * act_bytes

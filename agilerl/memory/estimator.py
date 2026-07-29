@@ -197,12 +197,12 @@ def estimate_training(
     if knobs.gradient_checkpointing:
         saved = formulas.activation_hidden_bytes(arch, grad_rows, s, act_bytes)
         recompute = formulas.block_recompute_bytes(
-            arch, grad_rows, s, act_bytes, flash_like
+            arch, grad_rows, s, act_bytes, flash_like, backward=True
         )
     else:
         # Without checkpointing every block's intermediates are saved.
         recompute = formulas.block_recompute_bytes(
-            arch, grad_rows, s, act_bytes, flash_like
+            arch, grad_rows, s, act_bytes, flash_like, backward=True
         )
         saved = recompute * arch.n_layers
         warnings.append(
@@ -222,7 +222,9 @@ def estimate_training(
         knobs.lora_target_scope,
         knobs.gradient_checkpointing,
     )
-    grad_pass = saved + recompute + loss_hidden + lora_casts
+    # The fused chunked path holds at most two vocab-width tiles (logits and
+    # their gradient) regardless of batch or sequence length.
+    logits = 2 * formulas.logit_workspace_bytes(arch.vocab_size, knobs.chunk_rows)
 
     # No-grad logprob pass: actor + reference (+ value) rows fused into one
     # forward — a wider batch, but nothing saved for backward. Micro-batched
@@ -232,11 +234,26 @@ def estimate_training(
         arch, nograd_rows, s, act_bytes, flash_like
     )
 
-    activations = max(grad_pass, nograd_pass)
+    # A training step peaks at one of three distinct instants, and different
+    # tensors are live at each. Summing the activation peak and the logit
+    # workspace assumes they coexist; allocator snapshots say they do not —
+    # the logit tiles measured 0 at the peak on all three architectures
+    # profiled (Qwen2.5-0.5B, Gemma 4 E2B, OLMoE), against a ~512 MiB
+    # prediction. By then the loss backward has freed them and the block
+    # recompute is at its widest.
+    backward_peak = saved + recompute + loss_hidden + lora_casts
+    loss_peak = saved + loss_hidden + lora_casts + logits
+    nograd_peak = nograd_pass + logits
+    peak = max(backward_peak, loss_peak, nograd_peak)
 
-    # The fused chunked path holds at most two vocab-width tiles (logits and
-    # their gradient) regardless of batch or sequence length.
-    logits = 2 * formulas.logit_workspace_bytes(arch.vocab_size, knobs.chunk_rows)
+    # Report the split that belongs to whichever instant binds, so the bar
+    # shows what is actually resident at the peak rather than a union.
+    if peak == backward_peak:
+        activations, logits = backward_peak, 0
+    elif peak == loss_peak:
+        activations, logits = loss_peak - logits, logits
+    else:
+        activations, logits = nograd_pass, logits
 
     # Held per-update tensors: completions, masks, old/ref/sampling logprobs,
     # advantages — (rows, S) fp32-ish, megabytes at most.
@@ -302,12 +319,13 @@ def estimate_training(
             "Activations",
             activations,
             detail={
-                "grad_pass": grad_pass,
+                "backward_peak": backward_peak,
+                "loss_peak": loss_peak,
+                "nograd_peak": nograd_peak,
                 "checkpoint_boundaries": saved,
                 "block_recompute": recompute,
                 "loss_hidden_state": loss_hidden,
                 "lora_fp32_input_casts": lora_casts,
-                "nograd_logprob_pass": nograd_pass,
             },
             note=(
                 "Peak of the gradient micro-batch pass vs the fused no-grad "
@@ -546,9 +564,10 @@ def estimate_generation(
         _component(
             "overhead",
             "Overhead & calibration",
-            device.context_bytes + correction,
+            device.context_bytes + formulas.ENGINE_PROCESS_OVERHEAD_BYTES + correction,
             detail={
                 "cuda_context": device.context_bytes,
+                "engine_process_overhead": formulas.ENGINE_PROCESS_OVERHEAD_BYTES,
                 "calibration_correction": correction,
             },
         ),
