@@ -679,19 +679,20 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
                         # for backward) plus an unfused critic pass for the
                         # value loss. The token-level vLLM correction is fused
                         # in via ``vllm_is_ratio``. See :meth:`_ppo_loss_liger`.
-                        total_loss, metrics = self._ppo_loss_liger(
-                            batch_ids,
-                            batch_action_mask,
-                            batch_old_log_probs,
-                            batch_reference_log_probs,
-                            batch_returns,
-                            batch_advantages,
-                            batch_old_values,
-                            batch_turn_ids,
-                            ppo_granularity,
-                            batch_sampling_log_probs,
-                        )
-                        self._backward_pass(total_loss)
+                        with self._gathered_lm_head():
+                            total_loss, metrics = self._ppo_loss_liger(
+                                batch_ids,
+                                batch_action_mask,
+                                batch_old_log_probs,
+                                batch_reference_log_probs,
+                                batch_returns,
+                                batch_advantages,
+                                batch_old_values,
+                                batch_turn_ids,
+                                ppo_granularity,
+                                batch_sampling_log_probs,
+                            )
+                            self._backward_pass(total_loss)
                         unset_fused_adapter_routing(self._get_unwrapped_actor())
                         learn_metrics["kl"] += metrics["kl"]
                         learn_metrics["entropy"] += metrics["entropy"]
@@ -703,93 +704,99 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
                         continue
 
                     # Fused forward: actor logprobs + critic values in one pass.
-                    batch_log_probs, batch_values = self._fused_forward(
-                        batch_ids,
-                        batch_size=batch_size,
-                    )
-                    batch_log_probs = torch.masked_fill(
-                        batch_log_probs, ~batch_mask_bool, 1.0
-                    )
-                    kl = calculate_k3_kl(batch_log_probs, batch_reference_log_probs)
-                    masked_entropy = masked_mean(
-                        -batch_log_probs.detach(), batch_action_mask
-                    )
-
-                    batch_values = torch.masked_fill(
-                        batch_values, ~batch_mask_bool, 0.0
-                    )
-                    token_log_ratio = batch_log_probs - batch_old_log_probs
-                    is_level = self._resolve_is_level(ppo_granularity)
-
-                    # Truncated importance sampling: reweight each token's
-                    # surrogate by the (detached, clamped) trainer/vLLM ratio to
-                    # correct for the rollout being drawn from vLLM rather than
-                    # the trainer policy. Applies only to the policy surrogate,
-                    # not the value/KL terms.
-                    loss_weight = None
-                    if batch_sampling_log_probs is not None:
-                        with torch.no_grad():
-                            mask_f = batch_action_mask.to(token_log_ratio.dtype)
-                            loss_weight = torch.exp(
-                                (batch_old_log_probs - batch_sampling_log_probs)
-                                * mask_f
-                            ).clamp(max=self.vllm_importance_sampling_cap)
-
-                    pg_loss, clipfrac = self._ppo_policy_surrogate(
-                        token_log_ratio,
-                        batch_advantages,
-                        batch_action_mask,
-                        batch_turn_ids,
-                        is_level,
-                        loss_weight=loss_weight,
-                    )
-
-                    # Value loss granularity follows the GAE advantage axis
-                    # (``ppo_granularity``), independent of the IS level.
-                    if ppo_granularity == "turn":
-                        mb_num_turns = int(batch_turn_ids.max().item()) + 1
-                        turn_pred = pool_by_turns(
-                            batch_values,
-                            batch_turn_ids,
-                            mb_num_turns,
-                            reduction=self.turn_value_reduction,
+                    # Hold lm_head gather through backward under ZeRO-3.
+                    with self._gathered_lm_head():
+                        batch_log_probs, batch_values = self._fused_forward(
+                            batch_ids,
+                            batch_size=batch_size,
                         )
-                        turn_old = pool_by_turns(
-                            batch_old_values,
-                            batch_turn_ids,
-                            mb_num_turns,
-                            reduction=self.turn_value_reduction,
+                        batch_log_probs = torch.masked_fill(
+                            batch_log_probs, ~batch_mask_bool, 1.0
                         )
-                        turn_ret = pool_by_turns(
-                            batch_returns, batch_turn_ids, mb_num_turns
+                        kl = calculate_k3_kl(batch_log_probs, batch_reference_log_probs)
+                        masked_entropy = masked_mean(
+                            -batch_log_probs.detach(), batch_action_mask
                         )
-                        turn_mask = torch.zeros_like(turn_pred)
-                        for t in range(mb_num_turns):
-                            turn_mask[:, t] = (batch_turn_ids == t).any(dim=1).float()
 
-                        vf_loss = (turn_ret - turn_pred).pow(2)
-                        clipped_turn_values = turn_old + torch.clamp(
-                            turn_pred - turn_old, -self.clip_coef, self.clip_coef
+                        batch_values = torch.masked_fill(
+                            batch_values, ~batch_mask_bool, 0.0
                         )
-                        clipped_vf_loss = (turn_ret - clipped_turn_values).pow(2)
-                        vf_loss = (
-                            0.5
-                            * (torch.max(vf_loss, clipped_vf_loss) * turn_mask).sum()
-                            / turn_mask.sum().clamp(min=1)
-                            * self.vf_coef
-                        )
-                    else:
-                        vf_loss = self._compute_vf_loss_token(
-                            batch_values,
-                            batch_old_values,
-                            batch_returns,
+                        token_log_ratio = batch_log_probs - batch_old_log_probs
+                        is_level = self._resolve_is_level(ppo_granularity)
+
+                        # Truncated importance sampling: reweight each token's
+                        # surrogate by the (detached, clamped) trainer/vLLM ratio to
+                        # correct for the rollout being drawn from vLLM rather than
+                        # the trainer policy. Applies only to the policy surrogate,
+                        # not the value/KL terms.
+                        loss_weight = None
+                        if batch_sampling_log_probs is not None:
+                            with torch.no_grad():
+                                mask_f = batch_action_mask.to(token_log_ratio.dtype)
+                                loss_weight = torch.exp(
+                                    (batch_old_log_probs - batch_sampling_log_probs)
+                                    * mask_f
+                                ).clamp(max=self.vllm_importance_sampling_cap)
+
+                        pg_loss, clipfrac = self._ppo_policy_surrogate(
+                            token_log_ratio,
+                            batch_advantages,
                             batch_action_mask,
+                            batch_turn_ids,
+                            is_level,
+                            loss_weight=loss_weight,
                         )
 
-                    kl_loss = masked_mean(kl, batch_action_mask)
-                    total_loss = pg_loss + vf_loss + self.beta * kl_loss
+                        # Value loss granularity follows the GAE advantage axis
+                        # (``ppo_granularity``), independent of the IS level.
+                        if ppo_granularity == "turn":
+                            mb_num_turns = int(batch_turn_ids.max().item()) + 1
+                            turn_pred = pool_by_turns(
+                                batch_values,
+                                batch_turn_ids,
+                                mb_num_turns,
+                                reduction=self.turn_value_reduction,
+                            )
+                            turn_old = pool_by_turns(
+                                batch_old_values,
+                                batch_turn_ids,
+                                mb_num_turns,
+                                reduction=self.turn_value_reduction,
+                            )
+                            turn_ret = pool_by_turns(
+                                batch_returns, batch_turn_ids, mb_num_turns
+                            )
+                            turn_mask = torch.zeros_like(turn_pred)
+                            for t in range(mb_num_turns):
+                                turn_mask[:, t] = (
+                                    (batch_turn_ids == t).any(dim=1).float()
+                                )
 
-                    self._backward_pass(total_loss)
+                            vf_loss = (turn_ret - turn_pred).pow(2)
+                            clipped_turn_values = turn_old + torch.clamp(
+                                turn_pred - turn_old, -self.clip_coef, self.clip_coef
+                            )
+                            clipped_vf_loss = (turn_ret - clipped_turn_values).pow(2)
+                            vf_loss = (
+                                0.5
+                                * (
+                                    torch.max(vf_loss, clipped_vf_loss) * turn_mask
+                                ).sum()
+                                / turn_mask.sum().clamp(min=1)
+                                * self.vf_coef
+                            )
+                        else:
+                            vf_loss = self._compute_vf_loss_token(
+                                batch_values,
+                                batch_old_values,
+                                batch_returns,
+                                batch_action_mask,
+                            )
+
+                        kl_loss = masked_mean(kl, batch_action_mask)
+                        total_loss = pg_loss + vf_loss + self.beta * kl_loss
+
+                        self._backward_pass(total_loss)
                     unset_fused_adapter_routing(self._get_unwrapped_actor())
 
                     learn_metrics["kl"] += kl_loss.item()
@@ -1342,11 +1349,11 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
                     (old_log_probs - sampling_log_probs.to(self.device)) * mask_f
                 ).clamp(max=self.vllm_importance_sampling_cap)
 
-        # ---- Actor pass (Liger fused policy + KL) ----
         # Identity-patch lm_head so the actor forward outputs the last hidden
         # state (B, T, H) directly instead of computing the full (B, T, V)
         # logits only to discard them. lm_head_weight is passed separately to
         # LigerFusedLinearPolicyLossFunction which handles the matmul and its grad.
+        # Caller must hold ``_gathered_lm_head`` open through backward under ZeRO-3.
         lm_head = self._get_lm_head()
         lm_head_weight = lm_head.weight
         lm_head_bias = lm_head.bias

@@ -1878,7 +1878,7 @@ class TestPPOSequencePacking:
                 patch.object(
                     ppo,
                     "_fused_logprob_fn_and_head",
-                    return_value=(fake_fused_fn, None, None),
+                    return_value=nullcontext((fake_fused_fn, None, None)),
                 ),
             ):
                 return ppo._fused_forward(

@@ -616,16 +616,17 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
                         # Works for both granularities since per-turn ReBN
                         # is already broadcast to per-token by the caller. The
                         # token-level vLLM correction is fused in via vllm_is_ratio.
-                        pg_loss, metrics = self._reinforce_loss_liger(
-                            batch_ids,
-                            batch_action_mask,
-                            batch_old_log_probs,
-                            batch_reference_log_probs,
-                            batch_advantages,
-                            batch_turn_ids,
-                            batch_sampling_log_probs,
-                        )
-                        self._backward_pass(pg_loss)
+                        with self._gathered_lm_head():
+                            pg_loss, metrics = self._reinforce_loss_liger(
+                                batch_ids,
+                                batch_action_mask,
+                                batch_old_log_probs,
+                                batch_reference_log_probs,
+                                batch_advantages,
+                                batch_turn_ids,
+                                batch_sampling_log_probs,
+                            )
+                            self._backward_pass(pg_loss)
                         learn_metrics["kl"] += metrics["kl"]
                         learn_metrics["entropy"] += metrics["entropy"]
                         learn_metrics["pg_loss"] += metrics["pg_loss"]
@@ -633,50 +634,51 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
                         updates += 1
                         continue
 
-                    with self.select_adapter("actor"):
-                        batch_log_probs = self._get_logprobs(
-                            batch_ids,
-                            batch_size=batch_size,
-                            use_reference=False,
-                            eval_mode=False,
+                    with self._gathered_lm_head():
+                        with self.select_adapter("actor"):
+                            batch_log_probs = self._get_logprobs(
+                                batch_ids,
+                                batch_size=batch_size,
+                                use_reference=False,
+                                eval_mode=False,
+                            )
+                        batch_log_probs = torch.masked_fill(
+                            batch_log_probs, ~batch_mask_bool, 1.0
                         )
-                    batch_log_probs = torch.masked_fill(
-                        batch_log_probs, ~batch_mask_bool, 1.0
-                    )
 
-                    kl = batch_log_probs - batch_reference_log_probs
-                    masked_entropy = masked_mean(
-                        -batch_log_probs.detach(), batch_action_mask
-                    )
+                        kl = batch_log_probs - batch_reference_log_probs
+                        masked_entropy = masked_mean(
+                            -batch_log_probs.detach(), batch_action_mask
+                        )
 
-                    # Clipped surrogate at the configured IS / ratio-pooling
-                    # level (token / turn / sequence). Pools ratio + advantage
-                    # to the bucket; token reduces to the original behavior.
-                    token_log_ratio = batch_log_probs - batch_old_log_probs
-                    # Truncated importance sampling: reweight each token's
-                    # surrogate by the (detached, clamped) trainer/vLLM ratio to
-                    # correct for the rollout being drawn from vLLM rather than
-                    # the trainer policy.
-                    loss_weight = None
-                    if batch_sampling_log_probs is not None:
-                        with torch.no_grad():
-                            mask_f = batch_action_mask.to(token_log_ratio.dtype)
-                            loss_weight = torch.exp(
-                                (batch_old_log_probs - batch_sampling_log_probs)
-                                * mask_f
-                            ).clamp(max=self.vllm_importance_sampling_cap)
-                    pg_loss, _clipfrac = clipped_is_surrogate(
-                        token_log_ratio,
-                        batch_advantages,
-                        batch_action_mask,
-                        batch_turn_ids,
-                        self.importance_sampling_level,
-                        self.clip_coef,
-                        loss_weight=loss_weight,
-                        turn_reduction=self.turn_ratio_pooling,
-                    )
+                        # Clipped surrogate at the configured IS / ratio-pooling
+                        # level (token / turn / sequence). Pools ratio + advantage
+                        # to the bucket; token reduces to the original behavior.
+                        token_log_ratio = batch_log_probs - batch_old_log_probs
+                        # Truncated importance sampling: reweight each token's
+                        # surrogate by the (detached, clamped) trainer/vLLM ratio to
+                        # correct for the rollout being drawn from vLLM rather than
+                        # the trainer policy.
+                        loss_weight = None
+                        if batch_sampling_log_probs is not None:
+                            with torch.no_grad():
+                                mask_f = batch_action_mask.to(token_log_ratio.dtype)
+                                loss_weight = torch.exp(
+                                    (batch_old_log_probs - batch_sampling_log_probs)
+                                    * mask_f
+                                ).clamp(max=self.vllm_importance_sampling_cap)
+                        pg_loss, _clipfrac = clipped_is_surrogate(
+                            token_log_ratio,
+                            batch_advantages,
+                            batch_action_mask,
+                            batch_turn_ids,
+                            self.importance_sampling_level,
+                            self.clip_coef,
+                            loss_weight=loss_weight,
+                            turn_reduction=self.turn_ratio_pooling,
+                        )
 
-                    self._backward_pass(pg_loss)
+                        self._backward_pass(pg_loss)
 
                     learn_metrics["kl"] += masked_mean(kl, batch_action_mask).item()
                     learn_metrics["entropy"] += masked_entropy.item()
