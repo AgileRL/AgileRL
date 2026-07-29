@@ -20,9 +20,18 @@ import tempfile
 # before the body runs. Neither module loses coverage worth having: typing.py is
 # aliases and class definitions, and data.py's helpers are exercised through the
 # buffers. Any new module defining a TensorClass belongs on that list too.
-from jaxtyping import install_import_hook
+#
+# Bytecode caching is off for the session. jaxtyping redirects instrumented
+# modules to its own .pyc tag by patching cache_from_source process-wide for one
+# module's execution, and the import lock it relies on is per module, so anything
+# imported inside that window lands in the tagged path uninstrumented. The next
+# run reads it back as already-transformed and that module is silently exempt
+# from every check while the suite still passes.
+sys.dont_write_bytecode = True
 
-import tests._runtime_typecheck  # noqa: F401 -- binds the attribute the hook resolves by name
+from jaxtyping import install_import_hook  # noqa: E402
+
+import tests._runtime_typecheck  # noqa: E402, F401 -- binds the attribute the hook resolves by name
 
 install_import_hook(
     [
