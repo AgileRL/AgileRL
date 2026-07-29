@@ -15,7 +15,7 @@ clean-dist:
 
 # Fail publish if agilerl's arena extra pin drifts from agilerl-arena version.
 check-arena-dep-pin:
-    uv run python scripts/check-arena-dep-pin.py
+    python scripts/check-arena-dep-pin.py
 
 build: clean-dist
     uv build --package agilerl-arena
