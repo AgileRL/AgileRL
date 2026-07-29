@@ -381,3 +381,28 @@ class TestLayerCache:
         assert layers == [model.proj]
         assert _LORA_LAYER_CACHE[model] is layers
         assert _get_cached_lora_layers(model) is layers
+
+
+class TestFusedLoraInputCast:
+    @staticmethod
+    def _bf16_base_fp32_adapters():
+        model = _build_model(adapters=("actor",))
+        for name, param in model.named_parameters():
+            param.data = param.data.to(
+                torch.float32 if "lora_" in name else torch.bfloat16
+            )
+        patch_lora_for_fused_forward(model)
+        set_fused_adapter_routing(model, ["actor", "actor"])
+        return model
+
+    def test_routed_forward_casts_inputs_by_default(self):
+        model = self._bf16_base_fp32_adapters()
+        assert model(torch.randn(2, 8, dtype=torch.bfloat16)).dtype == torch.bfloat16
+
+    def test_routed_forward_honours_disabled_cast(self):
+        model = self._bf16_base_fp32_adapters()
+        for layer in _get_cached_lora_layers(model):
+            layer.cast_input_dtype_enabled = False
+
+        with pytest.raises(RuntimeError):
+            model(torch.randn(2, 8, dtype=torch.bfloat16))

@@ -44,7 +44,9 @@ def _lora_delta(layer: LoraLayer, adapter: str, rows: torch.Tensor) -> torch.Ten
     # nn.Module.__getattr__ as the loose Tensor | Module; narrow it to Tensor.
     lora_a_weight = lora_a.weight
     assert isinstance(lora_a_weight, torch.Tensor)
-    rows = layer.lora_dropout[adapter](rows.to(lora_a_weight.dtype))
+    rows = layer.lora_dropout[adapter](
+        layer._cast_input_dtype(rows, lora_a_weight.dtype)
+    )
     return layer.lora_B[adapter](lora_a(rows)) * layer.scaling[adapter]
 
 
