@@ -14,15 +14,15 @@
   },
   "generation": {
     "fit": {
-      "intercept_bytes": 138023497.1428572,
+      "intercept_bytes": 706351689.1428574,
       "slopes": {
-        "batched_tokens": -609.0264495971011,
-        "kv_tokens": -609.0248324540048,
-        "seq_len": -26132.630036632436
+        "batched_tokens": -609.0297789863757,
+        "kv_tokens": -609.0215030640032,
+        "seq_len": -26132.63003664232
       }
     },
-    "holdout_max_rel_error": 0.004905223887875079,
-    "holdout_mean_rel_error": 0.0023028031717462474,
+    "holdout_max_rel_error": 0.004905223887874586,
+    "holdout_mean_rel_error": 0.0023028031717456203,
     "n_points": 16
   },
   "generation_variant": "base",
@@ -784,17 +784,17 @@
   "trainer_variant": "base",
   "training": {
     "fit": {
-      "intercept_bytes": -299789566.2632356,
+      "intercept_bytes": -197029118.26323572,
       "slopes": {
-        "extra_micro_batches": 7752395.664446392,
-        "grad_tokens": 7128.599261044637,
-        "nograd_tokens": 14257.198255972231,
-        "seq_len": -97917.35600180742,
-        "update_tokens": 2606.1727939188377
+        "extra_micro_batches": 7752395.664446388,
+        "grad_tokens": 7128.599224818891,
+        "nograd_tokens": 14257.198274086271,
+        "seq_len": -97917.3560018069,
+        "update_tokens": 2606.1727939196385
       }
     },
-    "holdout_max_rel_error": 0.06895419202792406,
-    "holdout_mean_rel_error": 0.044044543781760065,
+    "holdout_max_rel_error": 0.06895419202791721,
+    "holdout_mean_rel_error": 0.04404454378176363,
     "n_points": 16
   }
 }

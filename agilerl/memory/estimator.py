@@ -339,9 +339,9 @@ def estimate_training(
         _component(
             "overhead",
             "Overhead & calibration",
-            formulas.CUDA_CONTEXT_BYTES + rollout + correction,
+            device.context_bytes + rollout + correction,
             detail={
-                "cuda_context": formulas.CUDA_CONTEXT_BYTES,
+                "cuda_context": device.context_bytes,
                 "rollout_tensors": rollout,
                 "calibration_correction": correction,
             },
@@ -546,9 +546,9 @@ def estimate_generation(
         _component(
             "overhead",
             "Overhead & calibration",
-            formulas.CUDA_CONTEXT_BYTES + correction,
+            device.context_bytes + correction,
             detail={
-                "cuda_context": formulas.CUDA_CONTEXT_BYTES,
+                "cuda_context": device.context_bytes,
                 "calibration_correction": correction,
             },
         ),

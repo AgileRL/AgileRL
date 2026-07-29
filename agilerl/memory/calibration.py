@@ -22,9 +22,10 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from agilerl.memory import formulas
 from agilerl.memory.formulas import resolve_max_num_batched_tokens
 from agilerl.memory.specs import (
+    CUDA_CONTEXT_BYTES_DEFAULT,
+    MEASURED_CUDA_CONTEXT_BYTES,
     DeviceSpec,
     GenerationKnobs,
     ModelSpec,
@@ -219,6 +220,11 @@ class ModelProfile(BaseModel):
         """Measured device memory the sleeping engine leaves behind, net of
         the CUDA context the estimator already counts under overhead.
 
+        Subtracts *this device's* context. Using a flat one made the residual
+        absorb the difference between devices — the A100's context is 501 MiB
+        against the L4's 226 — and that error then travelled into every
+        prediction on the device.
+
         ``None`` when the profile predates the measurement, in which case the
         estimator falls back to its analytic constant.
         """
@@ -230,7 +236,14 @@ class ModelProfile(BaseModel):
         if not baselines:
             return None
         median = baselines[len(baselines) // 2]
-        return max(median - formulas.CUDA_CONTEXT_BYTES, 0)
+        context = (
+            MEASURED_CUDA_CONTEXT_BYTES.get(
+                self.device.name or "", CUDA_CONTEXT_BYTES_DEFAULT
+            )
+            if self.device
+            else CUDA_CONTEXT_BYTES_DEFAULT
+        )
+        return max(median - context, 0)
 
     def apply_realised_weights(self, model: ModelSpec) -> ModelSpec:
         """Return a copy of ``model`` with profiled realised sizes attached to

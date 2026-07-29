@@ -24,6 +24,22 @@ MiB = 1024**2
 #: prediction at 100% of total is not a run that fits.
 FRAGMENTATION_HEADROOM_FRACTION = 0.05
 
+#: Fallback CUDA context for a device whose own has not been measured. Set
+#: between the two devices measured so far (A100 501 MiB, L4 226 MiB) rather
+#: than at either, so an unknown device is wrong by less in both directions.
+#: Prefer ``DeviceSpec.cuda_context_bytes``.
+CUDA_CONTEXT_BYTES_DEFAULT = 384 * MiB
+
+#: Contexts measured per device, keyed by ``torch.cuda.get_device_name``.
+#: Read from NVML either side of a one-element allocation, torch 2.11/cu130.
+#: Compute capability does not predict this — the newer L4 (sm_89) costs less
+#: than half the older A100 (sm_80) — so it is a lookup, not a formula.
+MEASURED_CUDA_CONTEXT_BYTES: dict[str, int] = {
+    "NVIDIA A100-SXM4-40GB": 501 * MiB,
+    "NVIDIA A100-SXM4-80GB": 501 * MiB,
+    "NVIDIA L4": 226 * MiB,
+}
+
 #: Bytes per element for the dtypes the estimator reasons about. Sub-byte
 #: quantization formats (nf4) are handled via bytes-per-param factors in
 #: :mod:`agilerl.memory.formulas`, not through this table.
@@ -230,6 +246,23 @@ class DeviceSpec(BaseModel):
     #: ``llm`` extra, so a stock install resolves ``auto`` to SDPA rather
     #: than FlashAttention-2.
     flash_attn_installed: bool = False
+    #: Bytes a bare CUDA context costs, before the process allocates anything.
+    #: Device-dependent by a factor of two, so a single constant biases whole
+    #: fleets in opposite directions. Measured under torch 2.11 / cu130 by
+    #: reading NVML either side of a one-element allocation:
+    #:
+    #:     A100-SXM4-40GB (sm_80)   501 MiB
+    #:     L4             (sm_89)   226 MiB
+    #:
+    #: ``None`` falls back to :data:`CUDA_CONTEXT_BYTES_DEFAULT`.
+    cuda_context_bytes: int | None = None
+
+    @property
+    def context_bytes(self) -> int:
+        """This device's CUDA context, measured if known."""
+        if self.cuda_context_bytes is not None:
+            return self.cuda_context_bytes
+        return CUDA_CONTEXT_BYTES_DEFAULT
 
     @property
     def usable_bytes(self) -> int:
@@ -257,6 +290,7 @@ class DeviceSpec(BaseModel):
             supports_fp8=cc >= 8.9,
             supports_bf16=cc >= 8.0,
             has_flash_attention=cc >= 8.0,
+            cuda_context_bytes=MEASURED_CUDA_CONTEXT_BYTES.get(name),
         )
 
 

@@ -45,6 +45,10 @@ FUSED_CHUNK_ROWS_MAX = 4096
 #: Default CUDA-graph pool the vLLM engine captures unless enforce_eager.
 CUDA_GRAPH_POOL_BYTES = 2 * 1024**3
 #: CUDA context + driver reserve per process that owns the device.
+#: Deprecated as a modelling constant: the context is device-dependent by a
+#: factor of two (A100 501 MiB vs L4 226 MiB, both measured). Use
+#: ``DeviceSpec.context_bytes``. Retained only so older fixtures, whose
+#: residuals were derived against it, still replay.
 CUDA_CONTEXT_BYTES = int(0.75 * 1024**3)
 #: Bytes per LoRA parameter as actually stored. PEFT's ``get_peft_model``
 #: defaults to ``autocast_adapter_dtype=True``, keeping adapter weights fp32
@@ -55,9 +59,15 @@ CUDA_CONTEXT_BYTES = int(0.75 * 1024**3)
 ADAPTER_BYTES_PER_PARAM = 4.0
 
 #: What a sleeping (level 1) vLLM engine leaves on the device beyond the CUDA
-#: context: engine structures that survive the sleep. Measured at roughly
-#: 0.2-0.5 GiB on vLLM 0.23; calibration refines it per (model, device).
-SLEEPING_ENGINE_RESIDUAL_BYTES = int(0.25 * 1024**3)
+#: context: engine structures that survive the sleep.
+#:
+#: Re-derived from the measured floors of all ten fixtures, net of each
+#: device's own context rather than a flat one: A100 1224 - 501 = 723 MiB,
+#: L4 913 - 226 = 687 MiB. Near enough device-independent, unlike the
+#: context. The previous 256 MiB was low by roughly 2.7x, and paired with an
+#: over-large flat context it produced a floor that was too high on L4 and
+#: too low on A100 -- biasing those fleets in opposite directions.
+SLEEPING_ENGINE_RESIDUAL_BYTES = 700 * 1024**2
 
 
 @dataclass(frozen=True)
