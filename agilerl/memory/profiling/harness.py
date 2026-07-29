@@ -386,7 +386,12 @@ def measure_point(
                 enabled="all",
                 context="all",
                 stacks="python",
-                max_entries=100_000,
+                # A ring buffer: too small and it evicts the *earliest* events
+                # in the window, which is where ``learn`` moves the base
+                # weights onto the device. At 100k both a 24-layer Qwen and a
+                # 35-layer Gemma overflowed inside a single training step and
+                # attributed 0 MiB to base weights against a 1-9 GiB reality.
+                max_entries=2_000_000,
                 clear_history=True,
             )
         with NvmlPeakSampler(device_index) as training_sampler:
