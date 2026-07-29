@@ -15,6 +15,7 @@ from agilerl.llm_envs import (
     BatchRolloutEnv,
     RolloutEnv,
 )
+from agilerl.llm_envs.rubrics import reward_fn_to_rubric
 from tests.helpers.rollout_doubles import (
     FakeEnvClient,
     RolloutEnvDoubleMixin,
@@ -411,7 +412,7 @@ class TestRolloutEnvPolicyObservationFromState:
 
 
 class TestRolloutEnvFromDataset:
-    """from_dataset bundles (question, answer) rows + a reward fn into a single-turn env."""
+    """from_dataset bundles (question, answer) rows + a rubric into a single-turn env."""
 
     _ROWS: ClassVar[list[dict]] = [
         {"question": "q0", "answer": "a0"},
@@ -429,7 +430,7 @@ class TestRolloutEnvFromDataset:
 
         env = RolloutEnv.from_dataset(
             self._ROWS,
-            reward_fn,
+            reward_fn_to_rubric(reward_fn),
             _ChrTokenizer(),
             test_dataset=self._TEST_ROWS,
             prompt_builder=lambda row: f"P:{row['question']}",
@@ -471,7 +472,7 @@ class TestRolloutEnvFromDataset:
         """With no ``prompt_builder`` the prompt is ``str(question)`` verbatim."""
         env = RolloutEnv.from_dataset(
             self._ROWS,
-            lambda c, a, q: 0.0,
+            reward_fn_to_rubric(lambda c, a, q: 0.0),
             _ChrTokenizer(),
             pad_id=None,
             apply_chat_template=False,
@@ -482,7 +483,7 @@ class TestRolloutEnvFromDataset:
         with pytest.raises(TypeError, match="single-turn"):
             RolloutEnv.from_dataset(
                 self._ROWS,
-                lambda c, a, q: 0.0,
+                reward_fn_to_rubric(lambda c, a, q: 0.0),
                 _ChrTokenizer(),
                 max_turns=2,
             )

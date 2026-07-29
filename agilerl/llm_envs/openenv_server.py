@@ -47,21 +47,27 @@ class TextAction(Action):
 
 
 class TextObservation(Observation):
-    """OpenEnv observation carrying the next prompt text.
+    """OpenEnv observation carrying the next prompt text and optional labels.
 
     ``truncated`` is declared because the wire has only ``done`` (no
     terminated/truncated split), so it can travel and reconstruct the 5-tuple.
+
+    On reset, ``prompt`` is shown to the policy and the labels stay unset. On the
+    terminal step, ``question`` / ``answer`` are set so rubrics can score.
     """
 
     prompt: str = ""
     truncated: bool = False
+    question: Any = None
+    answer: Any = None
 
 
 class TextState(State):
-    """OpenEnv state carrying the inner env's dataset size and tool schemas."""
+    """OpenEnv state carrying dataset size, tool schemas, and rubric component names."""
 
     dataset_size: int = 0
     tools: list[Any] = Field(default_factory=list)
+    rubric_components: list[str] = Field(default_factory=list)
 
 
 class OpenEnvWrapper(Environment):
@@ -69,7 +75,7 @@ class OpenEnvWrapper(Environment):
 
     Translates between the env's string ``reset``/``step`` and OpenEnv's typed
     ``Action``/``Observation``/``State``, surfacing ``dataset_size``/``tools`` on
-    the state. Env ``info`` is not sent on the wire.
+    the state and forwarding env ``info`` into observation metadata.
 
     :param inner: The local env to host.
     :param env_name: Name in the OpenEnv metadata; defaults to ``inner``'s class name.
@@ -119,9 +125,11 @@ class OpenEnvWrapper(Environment):
         for name in ("row_index", "evaluation"):
             if name in self._reset_params and kwargs.get(name) is not None:
                 call[name] = kwargs[name]
-        prompt, _info = _normalize_reset(self._inner.reset(**call))
+        prompt, info = _normalize_reset(self._inner.reset(**call))
         self._state = State(episode_id=episode_id, step_count=0)
-        return TextObservation(prompt=prompt, reward=None, done=False)
+        return TextObservation(
+            prompt=prompt, reward=None, done=False, metadata=dict(info)
+        )
 
     def step(
         self,
@@ -131,7 +139,7 @@ class OpenEnvWrapper(Environment):
     ) -> TextObservation:
         """Step the inner env with the action's text, returning a ``TextObservation``."""
         del timeout_s, kwargs
-        prompt, reward, terminated, truncated, _info = _normalize_step(
+        prompt, reward, terminated, truncated, info = _normalize_step(
             self._inner.step(action.message)
         )
         self._state.step_count += 1
@@ -140,6 +148,7 @@ class OpenEnvWrapper(Environment):
             reward=reward,
             done=bool(terminated or truncated),
             truncated=bool(truncated),
+            metadata=dict(info),
         )
 
     @property
@@ -150,6 +159,9 @@ class OpenEnvWrapper(Environment):
             step_count=self._state.step_count,
             dataset_size=int(getattr(self._inner, "dataset_size", 0) or 0),
             tools=list(getattr(self._inner, "tools", None) or []),
+            rubric_components=list(
+                getattr(self._inner, "rubric_components", None) or []
+            ),
         )
 
     def close(self) -> None:
@@ -260,12 +272,18 @@ class OpenEnvServer:
         make_env = self._make_env
         env_name = self._env_name
 
-        def app_factory() -> OpenEnvWrapper:
+        def app_factory() -> Environment:
             # ``make_env`` -> a fresh owned env per session; ``env`` -> one shared.
-            if make_env is not None:
-                return OpenEnvWrapper(make_env(), env_name=env_name, owns_inner=True)
-            assert env is not None, "one of env / make_env is always provided"
-            return OpenEnvWrapper(env, env_name=env_name)
+            # OpenEnv Environments (e.g. PromptDatasetEnv) are hosted as-is.
+            built = make_env() if make_env is not None else env
+            assert built is not None, "one of env / make_env is always provided"
+            if isinstance(built, Environment):
+                return built
+            return OpenEnvWrapper(
+                built,
+                env_name=env_name,
+                owns_inner=make_env is not None,
+            )
 
         display_name = env_name or (
             type(env).__name__ if env is not None else "OpenEnvServer"

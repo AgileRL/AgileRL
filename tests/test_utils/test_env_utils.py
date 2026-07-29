@@ -49,35 +49,49 @@ class TestParseEntrypoint:
 
 
 class TestGetRewardFn:
+    def test_removed_raises_with_migration_hint(self, tmp_path):
+        rubric_file = tmp_path / "reward.py"
+        rubric_file.write_text("def reward(): return 1.0\n", encoding="utf-8")
+        with pytest.raises(ValueError, match="get_reward_fn is removed"):
+            env_utils.get_reward_fn("reward", str(rubric_file))
+
+
+class TestGetRubric:
     def test_missing_file_raises(self, tmp_path):
         missing = tmp_path / "missing.py"
         with pytest.raises(ValueError, match="not found"):
-            env_utils.get_reward_fn("reward", str(missing))
+            env_utils.get_rubric("rubric", str(missing))
 
     def test_import_error_wrapped(self, tmp_path):
         bad_file = tmp_path / "bad.py"
         bad_file.write_text(
             "raise RuntimeError('intentional import failure')\n", encoding="utf-8"
         )
-        with pytest.raises(ValueError, match="Error importing reward function"):
-            env_utils.get_reward_fn("reward", str(bad_file))
+        with pytest.raises(ValueError, match="Error importing rubric"):
+            env_utils.get_rubric("rubric", str(bad_file))
 
     def test_spec_none_raises(self, tmp_path):
-        reward_file = tmp_path / "reward.py"
-        reward_file.write_text("def reward(): return 1.0\n", encoding="utf-8")
+        rubric_file = tmp_path / "rubric.py"
+        rubric_file.write_text("def rubric(): return 1.0\n", encoding="utf-8")
         with patch(
             "agilerl.utils.env_utils.importlib_util.spec_from_file_location",
             return_value=None,
         ):
             with pytest.raises(ValueError, match="Could not create spec"):
-                env_utils.get_reward_fn("reward", str(reward_file))
+                env_utils.get_rubric("rubric", str(rubric_file))
 
-    def test_loads_callable(self, tmp_path):
-        reward_file = tmp_path / "reward.py"
-        reward_file.write_text("def my_reward(obs): return 1.0\n", encoding="utf-8")
-        fn = env_utils.get_reward_fn("my_reward", str(reward_file))
-        assert callable(fn)
-        assert fn({}) == 1.0
+    def test_loads_rubric_instance(self, tmp_path):
+        rubric_file = tmp_path / "rubric.py"
+        rubric_file.write_text(
+            "from agilerl.llm_envs.rubrics import reward_fn_to_rubric\n"
+            "def my_reward(obs): return 1.0\n"
+            "RUBRIC = reward_fn_to_rubric(my_reward)\n",
+            encoding="utf-8",
+        )
+        rubric = env_utils.get_rubric("RUBRIC", str(rubric_file))
+        from openenv.core.rubrics.base import Rubric
+
+        assert isinstance(rubric, Rubric)
 
 
 class TestResolveWrapper:

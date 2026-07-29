@@ -13,6 +13,7 @@ from agilerl.hpo.tournament import TournamentSelection
 from agilerl.training.llm import train_llm_rollout
 from agilerl.utils.algo_utils import VLLMConfig
 from agilerl.llm_envs import RolloutEnv
+from agilerl.llm_envs.rubrics import reward_fn_to_rubric
 from agilerl.utils.utils import create_population
 
 if HAS_LLM_DEPENDENCIES:
@@ -76,7 +77,7 @@ def equation_reward_func(completions, target, nums, **kwargs):
             equation = answer_tags[0].strip()
             used_numbers = [int(n) for n in re.findall(r"\d+", equation)]
 
-            if sorted(used_numbers) != sorted(numbers.flatten().tolist()):
+            if sorted(used_numbers) != sorted(list(numbers)):
                 rewards.append(0.0)
                 continue
 
@@ -137,9 +138,10 @@ def main(init_hp, mut_p):
     # them into one. The BatchRolloutEnv owns the dataset cursor, keeping each
     # GRPO group's dataset order deterministic and consistent.
     def env_factory(evaluation_mode: bool = False):
-        env = RolloutEnv.from_dataset(
+        del evaluation_mode
+        return RolloutEnv.from_dataset(
             train_dataset,
-            combined_rewards,
+            reward_fn_to_rubric(combined_rewards),
             tokenizer,
             test_dataset=test_dataset,
             prompt_builder=prompt_builder,
@@ -147,8 +149,6 @@ def main(init_hp, mut_p):
             apply_chat_template=True,
             max_model_len=init_hp["MAX_MODEL_LEN"],
         )
-        env.evaluation_mode = evaluation_mode
-        return env
 
     hp_config = HyperparameterConfig(
         beta=RLParameter(min=mut_p["MIN_BETA"], max=mut_p["MAX_BETA"]),

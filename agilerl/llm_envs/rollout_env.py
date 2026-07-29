@@ -39,6 +39,8 @@ __all__ = [
 ]
 
 if TYPE_CHECKING:
+    from openenv.core.env_server.interfaces import Environment
+    from openenv.core.rubrics.base import Rubric
     from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 
     from agilerl.typing import RolloutPrompts
@@ -105,6 +107,7 @@ class RolloutEnv:
         self.full_ids: torch.Tensor | None = None
         self.turn_boundaries: list[tuple[int, int, int]] = []
         self.turn_rewards: list[float] = []
+        self.rubric_score_sums: dict[str, float] = {}
         self._turn_idx = 0
         self._prompt_text: str = ""
         self._gen_texts: list[str] = []
@@ -120,7 +123,7 @@ class RolloutEnv:
     @classmethod
     def local(
         cls,
-        env: TextEnvProtocol,
+        env: TextEnvProtocol | Environment,
         tokenizer: PreTrainedTokenizerBase,
         max_turns: int = 1,
         *,
@@ -129,7 +132,7 @@ class RolloutEnv:
     ) -> RolloutEnv:
         """Drive a local env **in-process** (no HTTP) via a :class:`LocalEnvClient`.
 
-        :param env: A local env (plain-text ``reset`` / ``step``).
+        :param env: A plain-text env or an OpenEnv ``Environment``.
         :param tokenizer: Tokenizer for the token-level loop.
         :param max_turns: Generation turns per episode.
         :param instruction: Prompt returned when the env's reset obs renders empty.
@@ -150,7 +153,14 @@ class RolloutEnv:
         max_turns: int = 1,
         **kwargs: Any,
     ) -> RolloutEnv:
-        """Build a ``RolloutEnv`` from an env ``spec``: a URL is driven remotely, the rest in-process.
+        """Build a ``RolloutEnv`` from an env ``spec``.
+
+        A **URL** is driven remotely; anything else is built with ``env_config`` and
+        driven in-process: an **env factory callable** directly, a spec claimed by a
+        :func:`registered resolver <register_env_spec_resolver>` (GEM registry ids,
+        say) through the factory it returns, and otherwise a ``module:Class`` /
+        ``path.py:Class`` entrypoint. For rows + a rubric instead of an env, see
+        :meth:`from_dataset`.
 
         :param spec: A URL, an env factory callable, a resolver-claimed id, or a
             ``module:Class`` / ``path.py:Class`` entrypoint.
@@ -179,7 +189,7 @@ class RolloutEnv:
     def from_dataset(
         cls,
         dataset: Sequence[Mapping[str, Any]],
-        reward_fn: Callable[[str, Any, Any], float],
+        rubric: Rubric,
         tokenizer: PreTrainedTokenizerBase,
         *,
         test_dataset: Sequence[Mapping[str, Any]] | None = None,
@@ -188,13 +198,16 @@ class RolloutEnv:
         answer_column: str = "answer",
         **kwargs: Any,
     ) -> RolloutEnv:
-        """Build a single-turn ``RolloutEnv`` from (question, answer) rows and a reward fn.
+        """Build a single-turn ``RolloutEnv`` from (question, answer) rows and a rubric.
 
-        Rows + reward fn are served in-process as a single-turn env (``max_turns`` fixed
-        to 1); ``test_dataset`` rows are served under :meth:`eval_mode`.
+        Rows + rubric are served in-process as a single-turn
+        :class:`~agilerl.llm_envs.prompt_dataset.PromptDatasetEnv` (``max_turns`` fixed
+        to 1); ``test_dataset`` rows are served under :meth:`eval_mode`. Wrap a
+        ``(completion, answer, question) -> float`` callable with
+        :func:`~agilerl.llm_envs.rubrics.reward_fn_to_rubric` first.
 
         :param dataset: Train rows, indexable to mappings with the question/answer keys.
-        :param reward_fn: ``(completion, answer, question) -> float`` scorer.
+        :param rubric: OpenEnv ``Rubric`` scoring each completion.
         :param tokenizer: Tokenizer for the token-level loop.
         :param test_dataset: Held-out rows served under eval mode (falls back to ``dataset``).
         :param prompt_builder: Maps a row to the served prompt text; ``None`` serves
@@ -204,16 +217,19 @@ class RolloutEnv:
         :param kwargs: Forwarded to :class:`RolloutEnv`.
         :rtype: RolloutEnv
         """
+        from agilerl.llm_envs.prompt_dataset import PromptDatasetEnv
+        from agilerl.llm_envs.rubrics import _require_rubric
+
         if "max_turns" in kwargs:
             msg = "from_dataset builds a single-turn env; max_turns is fixed to 1"
             raise TypeError(msg)
-        env = _PromptDatasetEnv(
+        env = PromptDatasetEnv(
             dataset,
-            test_dataset,
-            reward_fn,
-            prompt_builder,
-            question_column,
-            answer_column,
+            rubric=_require_rubric(rubric),
+            test_dataset=test_dataset,
+            prompt_builder=prompt_builder,
+            question_column=question_column,
+            answer_column=answer_column,
         )
         return cls.local(env, tokenizer, max_turns=1, **kwargs)
 
@@ -367,6 +383,11 @@ class RolloutEnv:
         """Rows in the env's dataset (``0`` for a procedural env)."""
         return self._env_client.dataset_size
 
+    @property
+    def rubric_components(self) -> tuple[str, ...]:
+        """Leaf rubric names for component metrics (empty when none)."""
+        return tuple(self._env_client.rubric_components)
+
     @contextmanager
     def eval_mode(self) -> Iterator[None]:
         """Serve the env client's held-out split for the duration of the block."""
@@ -408,6 +429,7 @@ class RolloutEnv:
         self.full_ids = self._tokenize_initial_prompt(obs_text)
         self.turn_boundaries = []
         self.turn_rewards = []
+        self.rubric_score_sums = {}
         self._turn_idx = 0
         self._prompt_text = obs_text
         self._gen_texts = []
@@ -464,6 +486,10 @@ class RolloutEnv:
         """Apply the env round-trip result: rewards, truncation, feedback tokens."""
         next_obs, reward, terminated, truncated, info = env_result
         self.turn_rewards.append(float(reward))
+        for name, value in (info.get("rubric_scores") or {}).items():
+            self.rubric_score_sums[name] = self.rubric_score_sums.get(
+                name, 0.0
+            ) + float(value)
         self._turn_idx += 1
 
         if not (terminated or truncated) and self._turn_idx >= self.max_turns:
@@ -596,69 +622,6 @@ class RolloutEnv:
             "turn_details": turn_details,
             "feedback_texts": self._feedback_texts,
         }
-
-
-class _PromptDatasetEnv:
-    """(question, answer) rows + a reward fn, served as a single-turn text env.
-
-    Backend for :meth:`RolloutEnv.from_dataset`: ``reset`` serves the row's prompt (by
-    ``row_index`` or a cursor), ``step`` scores the completion with ``reward_fn``.
-    """
-
-    def __init__(
-        self,
-        dataset: Sequence[Mapping[str, Any]],
-        test_dataset: Sequence[Mapping[str, Any]] | None,
-        reward_fn: Callable[[str, Any, Any], float],
-        prompt_builder: Callable[[Mapping[str, Any]], str] | None,
-        question_column: str,
-        answer_column: str,
-    ) -> None:
-        self._train = dataset
-        self._test = test_dataset
-        self._reward_fn = reward_fn
-        self._prompt_builder = prompt_builder
-        self._question_column = question_column
-        self._answer_column = answer_column
-        # Cursor for the standalone (no row_index) path; the batch path always passes one.
-        self._cursor = 0
-        self._split = ""
-        self._question: Any = None
-        self._answer: Any = None
-
-    @property
-    def dataset_size(self) -> int:
-        """Number of train rows backing this env (sizes the ``TaskAssigner``)."""
-        return len(self._train)
-
-    def reset(
-        self,
-        seed: int | None = None,
-        *,
-        row_index: int | None = None,
-        evaluation: bool | None = None,
-    ) -> tuple[str, dict[str, Any]]:
-        """Select a row and return its prompt text plus an empty info dict."""
-        del seed
-        if evaluation and self._test is not None:
-            rows, split = self._test, "eval"
-        else:
-            rows, split = self._train, "train"
-        if row_index is None:
-            if split != self._split:
-                self._cursor, self._split = 0, split
-            row_index, self._cursor = self._cursor, self._cursor + 1
-        row = rows[int(row_index) % len(rows)]
-        self._question = row[self._question_column]
-        self._answer = row[self._answer_column]
-        if self._prompt_builder is not None:
-            return self._prompt_builder(row), {}
-        return str(self._question), {}
-
-    def step(self, action: str) -> tuple[str, float, bool, bool, dict[str, Any]]:
-        """Score the completion against the current row; always single-turn."""
-        reward = float(self._reward_fn(action, self._answer, self._question))
-        return "", reward, True, False, {}
 
 
 class TaskAssigner:
@@ -807,6 +770,8 @@ class BatchRolloutEnv:
         self._task_assigner: TaskAssigner | None = None
         # Thread pool for overlapping env round-trips; built lazily, closed in ``close``.
         self._io_pool: ThreadPoolExecutor | None = None
+        # Component key set for ``reward_*`` metrics, frozen when the envs are built.
+        self.rubric_component_names: tuple[str, ...] = ()
         self._rank = int(rank)
         self._world_size = int(world_size)
         # --- per-episode state (untouched by the lock-step path) ---
@@ -880,6 +845,22 @@ class BatchRolloutEnv:
             env._reset_apply(obs_text, info)
 
         return self._get_prompts()
+
+    def get_rubric_score_means(self) -> dict[str, float]:
+        """Mean per-episode component sums over the frozen component key set.
+
+        A component missing from every episode reports ``nan`` rather than ``0``,
+        so a never-scored criterion is not logged as a zero reward.
+        """
+        means: dict[str, float] = {}
+        for name in self.rubric_component_names:
+            values = [
+                env.rubric_score_sums[name]
+                for env in self.envs
+                if name in env.rubric_score_sums
+            ]
+            means[name] = sum(values) / len(values) if values else float("nan")
+        return means
 
     def step(
         self,
@@ -1100,6 +1081,7 @@ class BatchRolloutEnv:
                 rank=self._rank,
                 world_size=self._world_size,
             )
+            self.rubric_component_names = tuple(self.envs[0].rubric_components)
 
     def _ensure_slots(self) -> None:
         """Build the envs, the task assigner and the free-slot queue once (thread-safe)."""

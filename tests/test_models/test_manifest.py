@@ -1038,8 +1038,8 @@ class TestLocalTrainerLLM:
             algo=algo,
             env={
                 "dataset": "train.parquet",
-                "reward_file_path": "reward.py",
-                "reward_fn_name": "combined_rewards",
+                "rubric_file_path": "reward.py",
+                "rubric_name": "combined_rewards",
                 "prompt_template": {
                     "system_0": "You are a helpful assistant.",
                     "user_1": "Solve {question} to get {answer}.",
@@ -1123,8 +1123,8 @@ class TestLocalTrainerLLM:
     def test_grpo_env_fields(self):
         trainer = LocalTrainer.from_manifest(self._grpo_manifest())
         assert trainer.env_spec.dataset == "train.parquet"
-        assert trainer.env_spec.reward_file_path == "reward.py"
-        assert trainer.env_spec.reward_fn_name == "combined_rewards"
+        assert trainer.env_spec.rubric_file_path == "reward.py"
+        assert trainer.env_spec.rubric_name == "combined_rewards"
         assert trainer.env_spec.max_reward == 10.0
         assert trainer.env_spec.train_test_split == 0.8
         assert trainer.env_spec.prompt_template == {

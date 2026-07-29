@@ -1958,7 +1958,10 @@ class TestLocalTrainerIntegration:
 
         reward_file = tmp_path / "reward.py"
         reward_file.write_text(
-            "def simple_reward(completion, answer, prompt, **kwargs):\n    return 1.0\n"
+            "from agilerl.llm_envs.rubrics import reward_fn_to_rubric\n"
+            "def simple_reward(completion, answer, prompt, **kwargs):\n"
+            "    return 1.0\n"
+            "RUBRIC = reward_fn_to_rubric(simple_reward)\n"
         )
 
         import pandas as pd
@@ -1983,8 +1986,8 @@ class TestLocalTrainerIntegration:
         env_spec = LLMEnvSpec(
             env_type=LLMEnvType.ROLLOUT,
             dataset=str(dataset_path),
-            reward_file_path=str(reward_file),
-            reward_fn_name="simple_reward",
+            rubric_file_path=str(reward_file),
+            rubric_name="RUBRIC",
             prompt_template={"user_0": "Solve: {question}"},
             data_batch_size_per_gpu=4,
         )
@@ -2709,8 +2712,8 @@ class TestLocalTrainerResolveEnvSpecBranches:
             AgentType.LLMAgent,
             env_data={
                 "dataset": "gsm8k",
-                "reward_file_path": "/tmp/reward.py",
-                "reward_fn_name": "reward_fn",
+                "rubric_file_path": "/tmp/reward.py",
+                "rubric_name": "reward_fn",
                 "prompt_template": {"system": "You are helpful"},
             },
             algo_cls=LLMAlgorithmSpec,

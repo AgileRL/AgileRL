@@ -27,7 +27,7 @@ from agilerl.typing import EnvFactory, WrapperSpec
 from agilerl.utils.env_utils import (
     GymEnvType,
     apply_wrappers,
-    get_reward_fn,
+    get_rubric,
     make_conversation_template,
     resolve_entrypoint_target,
 )
@@ -288,11 +288,28 @@ class PzEnvSpec(EnvSpec):
 class LLMEnvSpec(BaseModel):
     """Environment specification for LLM training.
 
-    Builds a :class:`~agilerl.llm_envs.RolloutEnv` (generative) or a
-    :class:`~agilerl.llm_envs.DatasetEnv` (teacher-forced). A rollout env comes
-    from exactly one source — ``dataset`` + reward, ``env_name`` (GEM id),
-    ``entrypoint``, or ``env_url`` (already hosted; ``max_turns`` required);
-    a dataset env always from ``dataset`` + ``objective``.
+    Declaratively captures what is needed to build either a
+    :class:`~agilerl.llm_envs.RolloutEnv` (generative) or a
+    :class:`~agilerl.llm_envs.DatasetEnv` (teacher-forced). Fields are aligned
+    with what Arena expects for LLM training jobs.
+
+    A ``rollout`` env comes from exactly one source:
+
+    * ``dataset`` + ``rubric_file_path`` / ``rubric_name`` / ``prompt_template``
+      -- labelled ``(question, answer)`` rows scored by an OpenEnv rubric
+      (single-turn; ``max_turns`` is 1).
+    * ``env_name`` -- a GEM environment id (e.g. ``"game:Sudoku-v0-easy"``).
+    * ``entrypoint`` -- a dotted path to a callable returning a text env.
+    * ``env_url`` -- a URL to an already-hosted OpenEnv service (driven over
+      HTTP); ``max_turns`` must be set since it can't be probed remotely.
+
+    ``env_name`` / ``entrypoint`` run **in-process**; to run an env elsewhere,
+    host it as an OpenEnv service (a container, a Space, or a server a Ray actor
+    stands up) and point ``env_url`` at it. Transport is thus a deployment
+    concern, not a code change: the same env trains in-process for dev and
+    against a hosted URL in production.
+
+    A ``dataset`` env always comes from ``dataset`` and an ``objective``.
 
     :param env_type: ``"rollout"`` (generative) or ``"dataset"`` (teacher-forced).
     :type env_type: LLMEnvType
@@ -310,9 +327,12 @@ class LLMEnvSpec(BaseModel):
     :type max_reward: float | None
     :param train_test_split: Fraction of the dataset used for training.
     :type train_test_split: float
-    :param reward_file_path: Path to a Python file containing the reward
-        function. Required for a dataset-backed rollout env.
-    :type reward_file_path: str | None
+    :param rubric_file_path: Path to a Python file containing the rubric
+        (a ``Rubric`` instance or subclass). Required for a dataset-backed
+        rollout env.
+    :type rubric_file_path: str | None
+    :param rubric_name: Name of the rubric symbol in ``rubric_file_path``.
+    :type rubric_name: str | None
     :param dataset: Path to a Parquet dataset file or a HuggingFace dataset.
     :type dataset: str | None
     :param env_name: GEM environment id. Mutually exclusive with ``entrypoint``.
@@ -349,8 +369,8 @@ class LLMEnvSpec(BaseModel):
     prompt_template: dict[str, Any] | None = Field(default=None)
     max_reward: float | None = Field(default=None)
     train_test_split: float = Field(default=0.9, ge=0.0, le=1.0)
-    reward_file_path: str | None = Field(default=None)
-    reward_fn_name: str | None = Field(default=None)
+    rubric_file_path: str | None = Field(default=None)
+    rubric_name: str | None = Field(default=None)
     response_column: str = Field(default="response")
 
     # Env-backed rollout fields
@@ -391,6 +411,24 @@ class LLMEnvSpec(BaseModel):
             return 300.0
         return self.request_timeout_s or None
 
+    def _seed_kwargs(self) -> dict[str, int]:
+        """Seed kwarg for gym construction; omitted when unset so the gym default applies."""
+        return {} if self.seed is None else {"seed": self.seed}
+
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_legacy_reward_keys(cls, data: object) -> object:
+        if isinstance(data, dict):
+            legacy = [k for k in ("reward_file_path", "reward_fn_name") if data.get(k)]
+            if legacy:
+                msg = (
+                    f"{', '.join(legacy)} renamed to rubric_file_path / rubric_name; "
+                    "export a Rubric (or wrap a callable with reward_fn_to_rubric) "
+                    "and point rubric_name at it."
+                )
+                raise ValueError(msg)
+        return data
+
     @model_validator(mode="after")
     def _validate_rollout_fields(self) -> Self:
         if self.env_type != LLMEnvType.ROLLOUT:
@@ -420,13 +458,11 @@ class LLMEnvSpec(BaseModel):
             )
             raise ValueError(msg)
         if self.dataset is not None:
-            if self.reward_file_path is None:
-                msg = "reward_file_path is required for dataset-backed rollout environments"
+            if self.rubric_file_path is None:
+                msg = "rubric_file_path is required for dataset-backed rollout environments"
                 raise ValueError(msg)
-            if self.reward_fn_name is None:
-                msg = (
-                    "reward_fn_name is required for dataset-backed rollout environments"
-                )
+            if self.rubric_name is None:
+                msg = "rubric_name is required for dataset-backed rollout environments"
                 raise ValueError(msg)
             if self.prompt_template is None:
                 msg = "Prompt template is required for dataset-backed rollout environments"
@@ -435,9 +471,9 @@ class LLMEnvSpec(BaseModel):
                 msg = "A dataset-backed rollout environment is single-turn; max_turns must be 1."
                 raise ValueError(msg)
             self.max_turns = 1
-        elif self.reward_file_path is not None:
+        elif self.rubric_file_path is not None:
             msg = (
-                "Reward file path is not supported for env-backed rollout environments."
+                "rubric_file_path is not supported for env-backed rollout environments."
             )
             raise ValueError(msg)
         return self
@@ -452,8 +488,8 @@ class LLMEnvSpec(BaseModel):
         if self.objective is None:
             msg = "objective is required for dataset environments"
             raise ValueError(msg)
-        if self.reward_file_path is not None:
-            msg = "Reward file path has been specified, but is not supported for dataset environments."
+        if self.rubric_file_path is not None:
+            msg = "rubric_file_path has been specified, but is not supported for dataset environments."
             raise ValueError(msg)
         return self
 
@@ -601,7 +637,8 @@ class LLMEnvSpec(BaseModel):
         pad_id = tokenizer.pad_token_id
 
         if self.dataset_backed_rollout:
-            # Reward file + dataset load on the first env build, not factory construction.
+            # The rubric file and the dataset are read once, on the first env
+            # build, so constructing the factory stays free of I/O.
             resolved: dict[str, Any] = {}
 
             def _resolve() -> dict[str, Any]:
@@ -610,11 +647,11 @@ class LLMEnvSpec(BaseModel):
 
                     if (
                         self.prompt_template is None
-                        or self.reward_fn_name is None
-                        or self.reward_file_path is None
+                        or self.rubric_name is None
+                        or self.rubric_file_path is None
                     ):
                         msg = (
-                            "reward_fn_name, reward_file_path, and prompt_template "
+                            "rubric_name, rubric_file_path, and prompt_template "
                             "are required for dataset-backed rollout environments"
                         )
                         raise ValueError(msg)
@@ -632,9 +669,9 @@ class LLMEnvSpec(BaseModel):
                         train_ds=train_ds,
                         test_ds=test_ds,
                         prompt_builder=_prompt_builder,
-                        reward_fn=get_reward_fn(
-                            reward_fn_name=self.reward_fn_name,
-                            file_path=self.reward_file_path,
+                        rubric=get_rubric(
+                            rubric_name=self.rubric_name,
+                            file_path=self.rubric_file_path,
                         ),
                     )
                 return resolved
@@ -643,7 +680,7 @@ class LLMEnvSpec(BaseModel):
                 parts = _resolve()
                 return RolloutEnv.from_dataset(
                     parts["train_ds"],
-                    parts["reward_fn"],
+                    parts["rubric"],
                     tokenizer,
                     test_dataset=parts["test_ds"],
                     prompt_builder=parts["prompt_builder"],
@@ -680,7 +717,7 @@ class LLMEnvSpec(BaseModel):
         if self.env_name is not None:
             try:
                 # gem-llm is an optional runtime dependency, never installed for checks.
-                import gem  # ty: ignore[unresolved-import]
+                import gem
             except ImportError:
                 msg = (
                     f"The 'gem-llm' package is required to use env_name={self.env_name!r}. "

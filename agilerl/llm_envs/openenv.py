@@ -19,6 +19,7 @@ from typing import Any, TypeVar
 
 try:
     import websockets.exceptions
+    from openenv.core.env_server.interfaces import Environment
     from openenv.core.env_server.mcp_types import CallToolAction
 except ImportError as _exc:  # pragma: no cover - only reachable without the llm extra
     msg = (
@@ -62,18 +63,29 @@ _TransportT = TypeVar("_TransportT")
 class LocalEnvClient:
     """In-process ``EnvClientProtocol`` backend — the no-HTTP sibling of :class:`OpenEnvSessionClient`.
 
-    Drives the env through the same :class:`OpenEnvWrapper` the server hosts, so
-    in-process and URL transports behave identically on the same env. Used via
-    :meth:`RolloutEnv.local` / :meth:`RolloutEnv.from_spec`.
+    Plain-text envs are driven through the same :class:`OpenEnvWrapper` the server
+    hosts, so in-process and URL transports behave identically on the same env.
+    OpenEnv ``Environment`` worlds (e.g.
+    :class:`~agilerl.llm_envs.prompt_dataset.PromptDatasetEnv`) are driven as-is so
+    their rubric metadata is not wrapped away. Used via :meth:`RolloutEnv.local` /
+    :meth:`RolloutEnv.from_spec`.
 
-    :param env: The local env.
+    :param env: The local env — plain-text or an OpenEnv ``Environment``.
     :param instruction: Prompt returned from reset when the env's reset obs is empty.
     """
 
-    def __init__(self, env: TextEnvProtocol, *, instruction: str = "") -> None:
+    def __init__(
+        self,
+        env: TextEnvProtocol | Environment,
+        *,
+        instruction: str = "",
+    ) -> None:
         """Wrap a local ``env`` as an in-process backend."""
+        if isinstance(env, Environment):
+            self._backend: Environment = env
+        else:
+            self._backend = OpenEnvWrapper(env)
         self._env = env
-        self._wrapper = OpenEnvWrapper(env)
         self._instruction = instruction
         self._evaluation_mode = False
 
@@ -94,24 +106,31 @@ class LocalEnvClient:
         row_index: int | None = None,
     ) -> tuple[str, dict[str, Any]]:
         """Reset the local env and return ``(prompt, info)``."""
-        obs = self._wrapper.reset(
+        obs = self._backend.reset(
             seed=seed,
             row_index=row_index,
             evaluation=True if self._evaluation_mode else None,
         )
-        return (obs.prompt or self._instruction), {}
+        info = dict(obs.metadata) if obs.metadata else {}
+        prompt = getattr(obs, "prompt", None) or self._instruction
+        return str(prompt), info
 
     def step(self, action: object) -> tuple[str, float, bool, bool, dict[str, Any]]:
-        """Step the local env with the action text and return the Gym 5-tuple."""
+        """Step the local env with the action text and return the Gym 5-tuple.
+
+        Env ``info`` — including a rubric's ``rubric_scores`` — travels on the
+        observation's metadata.
+        """
         text = action if isinstance(action, str) else str(action)
-        obs = self._wrapper.step(TextAction(message=text))
-        truncated = bool(obs.truncated)
+        obs = self._backend.step(TextAction(message=text))
+        truncated = bool(getattr(obs, "truncated", False))
+        info = dict(obs.metadata) if obs.metadata else {}
         return (
-            obs.prompt,
+            str(getattr(obs, "prompt", "") or ""),
             float(obs.reward) if obs.reward is not None else 0.0,
             bool(obs.done) and not truncated,
             truncated,
-            {},
+            info,
         )
 
     def close(self) -> None:
@@ -124,12 +143,20 @@ class LocalEnvClient:
     @property
     def dataset_size(self) -> int:
         """Dataset rows the env serves (``0`` if not dataset-backed)."""
-        return int(self._wrapper.state.dataset_size or 0)
+        return int(getattr(self._backend.state, "dataset_size", 0) or 0)
 
     @property
     def tools(self) -> list[Any]:
         """Tool schemas the env advertises (empty when none)."""
-        return list(self._wrapper.state.tools or [])
+        return list(getattr(self._backend.state, "tools", None) or [])
+
+    @property
+    def rubric_components(self) -> tuple[str, ...]:
+        """Leaf rubric names for component metrics (empty when none)."""
+        components = getattr(self._backend, "rubric_components", None)
+        if components is not None:
+            return tuple(components)
+        return tuple(getattr(self._backend.state, "rubric_components", None) or ())
 
 
 class OpenEnvSessionClient:
@@ -278,7 +305,9 @@ class OpenEnvSessionClient:
             if not _is_transport_error(exc):
                 raise
             result = self._retry_on_fresh_session(lambda: self._sync.reset(**kwargs))
-        return (_observation_text(result.observation) or self._instruction), {}
+        raw_meta = getattr(result, "metadata", None)
+        info = dict(raw_meta) if isinstance(raw_meta, dict) else {}
+        return (_observation_text(result.observation) or self._instruction), info
 
     def step(self, action: object) -> tuple[str, float, bool, bool, dict[str, Any]]:
         """Send one action (model text) over the session and return the Gym 5-tuple."""
@@ -300,12 +329,23 @@ class OpenEnvSessionClient:
             bool(obs.get("truncated", False)) if isinstance(obs, dict) else False
         )
         done = bool(result.done)
+        # Env ``info`` (a rubric's ``rubric_scores``, say) rides on the step
+        # result's metadata; a server that stamps it on the obs instead is read too.
+        info: dict[str, Any] = {}
+        raw_meta = getattr(result, "metadata", None)
+        if isinstance(raw_meta, dict):
+            info.update(raw_meta)
+        if isinstance(obs, dict):
+            if isinstance(obs.get("metadata"), dict):
+                info.update(obs["metadata"])
+            if "rubric_scores" in obs and "rubric_scores" not in info:
+                info["rubric_scores"] = obs["rubric_scores"]
         return (
             _observation_text(obs),
             float(reward) if reward is not None else 0.0,
             done and not truncated,
             truncated,
-            {},
+            info,
         )
 
     def close(self) -> None:
@@ -323,6 +363,11 @@ class OpenEnvSessionClient:
     def tools(self) -> list[Any]:
         """Tool schemas the env advertises over the session (empty when none)."""
         return list(self._fetch_state().get("tools") or [])
+
+    @property
+    def rubric_components(self) -> tuple[str, ...]:
+        """Leaf rubric names advertised by the remote env (empty when none)."""
+        return tuple(self._fetch_state().get("rubric_components") or [])
 
     def _fetch_state(self) -> dict[str, Any]:
         """Fetch + cache the env's OpenEnv ``state`` (dataset size + tool schemas).

@@ -326,6 +326,7 @@ class TestEnvClientProtocol:
         EnvClientProtocol.close(client)
         _ = EnvClientProtocol.dataset_size.fget(client)
         _ = EnvClientProtocol.tools.fget(client)
+        _ = EnvClientProtocol.rubric_components.fget(client)
         _ = EnvClientProtocol.eval_mode(client)
 
 

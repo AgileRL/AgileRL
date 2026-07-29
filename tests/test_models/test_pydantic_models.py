@@ -335,13 +335,13 @@ class TestLLMEnvSpec:
         )
         assert spec.name == "my_dataset"
 
-    def test_reasoning_missing_reward_fn_name(self):
-        """reasoning without reward_fn_name."""
-        with pytest.raises(ValueError, match="reward_fn_name is required"):
+    def test_reasoning_missing_rubric_name(self):
+        """reasoning without rubric_name."""
+        with pytest.raises(ValueError, match="rubric_name is required"):
             LLMEnvSpec(
                 env_type=LLMEnvType.ROLLOUT,
                 dataset="ds",
-                reward_file_path="some/path.py",
+                rubric_file_path="some/path.py",
                 prompt_template={"system": "hi"},
             )
 
@@ -351,8 +351,8 @@ class TestLLMEnvSpec:
             LLMEnvSpec(
                 env_type=LLMEnvType.ROLLOUT,
                 dataset="ds",
-                reward_file_path="some/path.py",
-                reward_fn_name="my_fn",
+                rubric_file_path="some/path.py",
+                rubric_name="my_fn",
             )
 
     def test_dataset_missing_dataset(self):
@@ -437,8 +437,8 @@ class TestLLMEnvSpec:
         spec = LLMEnvSpec(
             env_type=LLMEnvType.ROLLOUT,
             dataset="ds",
-            reward_file_path="some/path.py",
-            reward_fn_name="my_fn",
+            rubric_file_path="some/path.py",
+            rubric_name="my_fn",
             prompt_template={"system_0": "hi"},
         )
         with pytest.raises(TypeError, match="make_rollout_env_factory"):
