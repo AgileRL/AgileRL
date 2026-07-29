@@ -64,7 +64,7 @@ import re
 import shutil
 import sys
 import warnings
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, PropertyMock, call, patch
@@ -5232,6 +5232,80 @@ class TestLLMQuantizedClone:
         clone_actor.v_head.load_state_dict.assert_called_once_with(parent_v_head_state)
         acc.wait_for_everyone.assert_called()
 
+    def test_save_clone_adapter_weights_gathers_lora_params_only(self):
+        """Under ZeRO-3, _save_clone_adapter_weights must gather adapter params only."""
+        acc = _make_mock_accelerator(num_processes=1)
+        agent = _make_llm_agent(accelerator=acc)
+        agent.zero_stage = 3
+        agent.selected_adapters = ("actor",)
+
+        lora_param = torch.nn.Parameter(torch.zeros(2))
+        base_param = torch.nn.Parameter(torch.zeros(10, 10))
+        model_ref = MagicMock(name="actor")
+        model_ref.named_parameters.return_value = [
+            ("base_model.model.layer.0.weight", base_param),
+            ("base_model.model.lora_A.actor.weight", lora_param),
+        ]
+
+        gather_calls = []
+
+        @contextmanager
+        def capture_gather(zero_stage, params, modifier_rank=None):
+            gather_calls.append((zero_stage, list(params), modifier_rank))
+            yield
+
+        with (
+            patch.object(LLMAlgorithm, "_get_unwrapped_actor", return_value=model_ref),
+            patch(
+                "agilerl.algorithms.core.base.gather_if_zero3",
+                side_effect=capture_gather,
+            ),
+        ):
+            agent._save_clone_adapter_weights("/tmp/work")
+
+        assert len(gather_calls) == 1
+        stage, params, modifier_rank = gather_calls[0]
+        assert stage == 3
+        assert any(p is lora_param for p in params)
+        assert not any(p is base_param for p in params)
+        assert modifier_rank is None
+
+    def test_copy_adapter_weights_gathers_lora_params_with_modifier_rank_zero(self):
+        """_copy_adapter_weights must gather lora params with modifier_rank=0 under ZeRO-3."""
+        agent = _make_llm_agent(accelerator=None)
+        agent.zero_stage = 3
+
+        src_lora = torch.nn.Parameter(torch.ones(4))
+        tgt_lora = torch.nn.Parameter(torch.zeros(4))
+        base_param = torch.nn.Parameter(torch.zeros(10, 10))
+        model_ref = MagicMock(name="actor")
+        model_ref.named_parameters.return_value = [
+            ("base_model.model.layer.0.weight", base_param),
+            ("base_model.model.lora_A.source.weight", src_lora),
+            ("base_model.model.lora_A.target.weight", tgt_lora),
+        ]
+        agent.actor = model_ref
+
+        gather_calls = []
+
+        @contextmanager
+        def capture_gather(zero_stage, params, modifier_rank=None):
+            gather_calls.append((zero_stage, list(params), modifier_rank))
+            yield
+
+        with patch(
+            "agilerl.algorithms.core.base.gather_if_zero3", side_effect=capture_gather
+        ):
+            agent._copy_adapter_weights("source", "target")
+
+        assert len(gather_calls) == 1
+        stage, params, modifier_rank = gather_calls[0]
+        assert stage == 3
+        assert any(p is src_lora for p in params)
+        assert any(p is tgt_lora for p in params)
+        assert not any(p is base_param for p in params)
+        assert modifier_rank == 0
+
     def test_setup_actors_attaches_adapters_when_rebuild_from_pretrained(self):
         agent = _make_llm_agent(accelerator=None, clone=True)
         agent.use_vllm = False
@@ -5709,6 +5783,10 @@ class TestLLMCloneActorNetwork:
             patch(
                 "agilerl.algorithms.core.base.clone_llm", return_value=cloned_inner
             ) as mock_clone_llm,
+            patch(
+                "agilerl.algorithms.core.base.gather_if_zero3",
+                return_value=nullcontext(),
+            ),
         ):
             agent._clone_actor_network()
 
