@@ -1,10 +1,12 @@
 """Runtime checker for the jaxtyping import hook installed in ``tests/conftest.py``."""
 
 import copyreg
+import functools
 import typing
 import weakref
 
 import jaxtyping
+import torch
 from beartype import beartype
 
 _JAXTYPING_DECORATOR = jaxtyping._decorator.__file__
@@ -84,5 +86,11 @@ def typechecker(fn):
     finally:
         fn.__annotations__ = original
 
-    checked.__annotations__ = original
-    return checked
+    @functools.wraps(fn)
+    def guarded(*args, **kwargs):
+        if torch.compiler.is_compiling():
+            return fn(*args, **kwargs)
+        return checked(*args, **kwargs)
+
+    guarded.__annotations__ = original
+    return guarded

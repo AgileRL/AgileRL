@@ -7,6 +7,7 @@ from jaxtyping import TypeCheckError
 
 from agilerl.algorithms.core.base import LLMAlgorithm
 from agilerl.components.segment_tree import SumSegmentTree
+from agilerl.modules.mlp import EvolvableMLP
 from agilerl.utils.algo_utils import is_str_keyed_dict
 
 
@@ -33,6 +34,13 @@ def test_hook_accepts_a_correct_call():
 def test_hook_ignores_non_array_annotations():
     """Only array hints are checked, so the rest of the annotation surface is free."""
     assert is_str_keyed_dict(12345) is False
+
+
+def test_hook_does_not_block_torch_compile():
+    """Dynamo cannot trace the checker, so the check stands aside while compiling."""
+    module = EvolvableMLP(num_inputs=4, num_outputs=2, hidden_size=[8], device="cpu")
+    torch._dynamo.reset()
+    assert torch.compile(module)(torch.randn(3, 4)).shape == (3, 2)
 
 
 def test_hook_reaches_a_second_package():
