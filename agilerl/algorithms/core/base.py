@@ -4828,7 +4828,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
 
         self.actor.eval()
 
-        with torch.inference_mode():
+        with torch.no_grad():
             reference_adapter = (
                 "reference" if self.use_separate_reference_adapter else "__base__"
             )
