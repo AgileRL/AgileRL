@@ -42,21 +42,44 @@ ATTRIBUTION_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
     # trainer memory, and after sleep it is not resident at all. Leaving it
     # in would swamp every other component.
     ("vllm_engine", ("vllm/", "cumem", "gpu_worker", "model_runner")),
+    # ``_apply``/``convert`` is nn.Module.to() walking parameters, which under
+    # use_memory_efficient_params is how the base lands on the device for the
+    # backward pass. It has to outrank the forward rules: the move happens
+    # inside the training step, not at construction.
+    (
+        "base_weights",
+        ("_apply", "convert", "from_pretrained", "load_state_dict", "move_params"),
+    ),
     ("logits_workspace", ("fused_logprobs", "fused_loss", "logsumexp", "lm_head")),
     (
         "grads_optimizer",
-        ("optimizer", "adamw", "accumulate_grad", "_engine.run_backward"),
+        ("optimizer", "adamw", "accumulate_grad", "run_backward"),
     ),
     # Before the adapter rule: a forward through a LoRA-wrapped layer has
     # peft frames in its stack but is allocating activations, not adapter
     # weights. Ordering these first stops activations being booked as
     # adapters — measured at 1.24 GiB mis-attributed on one corner.
-    ("activations", ("checkpoint", "decoder_layer", "attention", "mlp", "forward")),
+    # swiglu/rms_norm/sdpa/masking are the fused-kernel and attention sites
+    # that dominate in practice; without them 304 MiB of SwiGLU intermediates
+    # and 128 MiB of causal mask fell through to "unattributed".
     (
-        "base_weights",
-        ("from_pretrained", "load_state_dict", "modeling_", "_apply", "move_params"),
+        "activations",
+        (
+            "checkpoint",
+            "decoder_layer",
+            "attention",
+            "mlp",
+            "swiglu",
+            "rms_norm",
+            "masking_utils",
+            "repeat_kv",
+            "embedding",
+            "modeling_",
+            "linear.py",
+            "forward",
+        ),
     ),
-    ("adapters", ("lora", "peft")),
+    ("adapters", ("lora", "peft", "tuners")),
 )
 
 
@@ -91,11 +114,19 @@ def summarise_final(path: Path) -> dict[str, int]:
 
 
 def summarise(path: Path) -> dict[str, int]:
-    """Bytes per component at the moment of peak allocation.
+    """Bytes per component at the moment of peak *trainer* allocation.
 
     Replays the allocation event trace rather than reading the final block
     list, because the peak is what the estimator predicts and it has long
     passed by the time the snapshot is written.
+
+    The peak is taken over trainer bytes only, excluding vLLM's. Recording
+    starts before the model exists so the trace spans the whole run, and
+    vLLM's pool is registered with the torch allocator — so the *global*
+    peak lands mid-generation, when ``use_memory_efficient_params`` has the
+    trainer's weights parked on the host. Measured on Qwen2.5-0.5B: the
+    global peak reported 0 MiB of base weights against a 942 MiB
+    prediction, because at that instant there genuinely were none resident.
     """
     with path.open("rb") as handle:
         snapshot = pickle.load(handle)
@@ -105,8 +136,13 @@ def summarise(path: Path) -> dict[str, int]:
     if not events:
         return summarise_final(path)
 
-    allocs = {"alloc", "segment_alloc"}
-    frees = {"free_completed", "segment_free"}
+    # Block level only. ``segment_alloc`` is the cudaMalloc of a segment and
+    # ``alloc`` is a block carved from one, so counting both double-counts
+    # the same bytes -- it put the trainer peak at 12.3 GiB against a 6.8 GiB
+    # device delta. Blocks are also the level that carries a useful stack;
+    # a segment's stack is just whoever happened to trigger the growth.
+    allocs = {"alloc"}
+    frees = {"free_completed"}
 
     live: dict[int, int] = {}
     total = 0
@@ -116,6 +152,8 @@ def summarise(path: Path) -> dict[str, int]:
         action = event.get("action")
         size = int(event.get("size", 0))
         if action in allocs:
+            if classify(event.get("frames") or []) == "vllm_engine":
+                continue
             live[event.get("addr")] = size
             total += size
             if total > peak:

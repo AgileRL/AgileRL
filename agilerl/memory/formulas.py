@@ -326,6 +326,45 @@ def activation_hidden_bytes(
     return int(rows * seq_len * arch.hidden_size * arch.n_layers * act_bytes)
 
 
+def lora_input_cast_bytes(
+    arch: ModelArch,
+    rows: int,
+    seq_len: int,
+    scope: LoraTargetScope = "all-linear",
+    gradient_checkpointing: bool = True,
+) -> int:
+    """fp32 copies PEFT makes of every wrapped linear's input.
+
+    ``get_peft_model`` defaults to ``autocast_adapter_dtype=True``, so the
+    adapters are fp32 while the base is bf16. Each wrapped linear then runs
+    ``x.to(fp32)`` on its input (``BaseTunerLayer._cast_input_dtype``),
+    allocating a fresh tensor twice the size of the bf16 original — and these
+    stay live for the backward pass.
+
+    It is not a rounding error. Measured on Qwen2.5-0.5B at seq 4096 /
+    micro-batch 8 / rank 64, A/B-ing the cast off via the same switch PEFT's
+    own context manager flips: trainer peak 6826 -> 5530 MiB, a **19%**
+    saving. That is memory spent for nothing, since the adapters could
+    simply be bf16.
+
+    Under gradient checkpointing only the block being recomputed holds its
+    casts, so this is one layer's worth; without it, every layer's survive.
+    The one-layer form predicts 1280 MiB against 1296 measured, 1.2% out.
+    """
+    h = arch.hidden_size
+    # Sum of in_features over the linears PEFT wraps. q/k/v/o and the MLP's
+    # gate/up all read the residual stream; down reads the intermediate.
+    # ``all-linear`` degenerates to attention-only on a MoE, whose experts
+    # are not nn.Linear -- see ParamCounts.moe_experts.
+    if scope == "all-linear" and not arch.is_moe:
+        inter = arch.intermediate_size
+        width = 6 * h + inter if arch.gated_mlp else 5 * h + inter
+    else:
+        width = 4 * h
+    layers = 1 if gradient_checkpointing else arch.n_layers
+    return int(rows * seq_len * width * layers * DTYPE_BYTES["fp32"])
+
+
 def block_recompute_bytes(
     arch: ModelArch,
     rows: int,

@@ -212,7 +212,17 @@ def estimate_training(
     if knobs.activation_offload:
         saved = 0  # backward-saved tensors live in pinned host RAM
     loss_hidden = grad_rows * s * arch.hidden_size * act_bytes
-    grad_pass = saved + recompute + loss_hidden
+    # PEFT casts every wrapped linear's input to the fp32 adapter dtype, and
+    # those copies stay live for the backward pass. Worth 19% of the trainer
+    # peak at one measured corner, and unmodelled until now.
+    lora_casts = formulas.lora_input_cast_bytes(
+        arch,
+        grad_rows,
+        s,
+        knobs.lora_target_scope,
+        knobs.gradient_checkpointing,
+    )
+    grad_pass = saved + recompute + loss_hidden + lora_casts
 
     # No-grad logprob pass: actor + reference (+ value) rows fused into one
     # forward — a wider batch, but nothing saved for backward. Micro-batched
@@ -296,6 +306,7 @@ def estimate_training(
                 "checkpoint_boundaries": saved,
                 "block_recompute": recompute,
                 "loss_hidden_state": loss_hidden,
+                "lora_fp32_input_casts": lora_casts,
                 "nograd_logprob_pass": nograd_pass,
             },
             note=(

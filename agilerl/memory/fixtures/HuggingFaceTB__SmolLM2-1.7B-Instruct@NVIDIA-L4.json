@@ -1,4 +1,5 @@
 {
+  "algorithm": "grpo",
   "device": {
     "compute_capability": "8.9",
     "name": "NVIDIA L4",
@@ -799,6 +800,7 @@
       }
     ]
   },
+  "quantization": "none",
   "realised_weight_bytes": {
     "base": 3422753024
   },
@@ -806,17 +808,17 @@
   "trainer_variant": "base",
   "training": {
     "fit": {
-      "intercept_bytes": -553184362.8085524,
+      "intercept_bytes": -553184362.8085526,
       "slopes": {
-        "extra_micro_batches": 11898971.779253006,
-        "grad_tokens": 25671.240759784112,
-        "nograd_tokens": 51342.48102910768,
-        "seq_len": -74720.86742736808,
-        "update_tokens": 1702.5014707231164
+        "extra_micro_batches": 11898971.77925305,
+        "grad_tokens": 9287.240759783857,
+        "nograd_tokens": 18574.48102910717,
+        "seq_len": -74720.86742736817,
+        "update_tokens": 1702.5014707229213
       }
     },
-    "holdout_max_rel_error": 0.030873330723931613,
-    "holdout_mean_rel_error": 0.015245793596499474,
+    "holdout_max_rel_error": 0.030873330723933404,
+    "holdout_mean_rel_error": 0.01524579359650031,
     "n_points": 16
   }
 }

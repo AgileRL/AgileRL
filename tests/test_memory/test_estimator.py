@@ -165,10 +165,16 @@ def test_ppo_carries_a_critic_adapter_and_value_head(model, device):
         component(ppo_bd, "grads_optimizer").bytes_
         > component(grpo_bd, "grads_optimizer").bytes_
     )
+    # PPO's third fused row makes its no-grad pass wider, but that only shows
+    # in the bar when the no-grad pass is the binding peak. Once the LoRA
+    # fp32 input casts are counted the gradient pass usually dominates, and
+    # that pass is identical for both algorithms — so activations may tie.
+    # The costs PPO genuinely adds are the critic adapter and the value head.
     assert (
         component(ppo_bd, "activations").bytes_
-        > component(grpo_bd, "activations").bytes_
+        >= component(grpo_bd, "activations").bytes_
     )
+    assert ppo_bd.total_bytes > grpo_bd.total_bytes
 
 
 def test_sft_has_no_reference_or_critic():

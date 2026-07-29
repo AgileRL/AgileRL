@@ -1,4 +1,5 @@
 {
+  "algorithm": "grpo",
   "device": {
     "compute_capability": "8.0",
     "name": "NVIDIA A100-SXM4-40GB",
@@ -817,6 +818,7 @@
       }
     ]
   },
+  "quantization": "none",
   "realised_weight_bytes": {
     "base": 988065792
   },
@@ -824,17 +826,17 @@
   "trainer_variant": "base",
   "training": {
     "fit": {
-      "intercept_bytes": -4071591.961324725,
+      "intercept_bytes": -4071591.9613248156,
       "slopes": {
-        "extra_micro_batches": 11680441.49562596,
-        "grad_tokens": 16803.433630762163,
-        "nograd_tokens": 33606.86725506747,
-        "seq_len": -82335.31400873204,
-        "update_tokens": 497.8082658459174
+        "extra_micro_batches": 11680441.495625963,
+        "grad_tokens": 8611.433630761574,
+        "nograd_tokens": 17222.86725506629,
+        "seq_len": -82335.31400873221,
+        "update_tokens": 497.8082658442354
       }
     },
-    "holdout_max_rel_error": 0.06776870570349425,
-    "holdout_mean_rel_error": 0.05385684575771423,
+    "holdout_max_rel_error": 0.067768705703484,
+    "holdout_mean_rel_error": 0.053856845757718666,
     "n_points": 16
   }
 }
