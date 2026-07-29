@@ -133,6 +133,10 @@ def param_counts(arch: ModelArch) -> ParamCounts:
     attn_per_layer = h * q_dim + 2 * h * kv_dim + q_dim * h
     if arch.attn_bias:
         attn_per_layer += q_dim + 2 * kv_dim
+    if arch.global_head_dim and arch.global_head_dim != dh:
+        # Full-attention layers project to a wider head; scale the whole
+        # attention block by the layer-averaged width.
+        attn_per_layer = int(attn_per_layer * arch.mean_qkv_dim / (q_dim + 2 * kv_dim))
 
     mlp_matrices = 3 if arch.gated_mlp else 2
     experts_per_layer = 0
@@ -143,9 +147,16 @@ def param_counts(arch: ModelArch) -> ParamCounts:
         experts_per_layer = n_ffn * mlp_matrices * h * expert_inter
         mlp_per_layer = h * arch.n_experts  # router
     else:
-        mlp_per_layer = mlp_matrices * h * arch.intermediate_size
+        mlp_per_layer = int(
+            mlp_matrices * h * arch.intermediate_size * arch.mlp_width_factor
+        )
 
     embedding = arch.vocab_size * h
+    # Per-Layer Embeddings are a second, larger table: one vector per layer
+    # per vocabulary entry. On Gemma 4 E2B that is 262144 x 35 x 256 = 2.35B
+    # parameters, against 1.5B for everything else -- the reason a "2B
+    # effective" model is nothing like 2B on disk.
+    embedding += arch.per_layer_input_vocab * arch.n_layers * arch.per_layer_input_dim
     lm_head = 0 if arch.tied_embeddings else arch.vocab_size * h
     norms = arch.n_layers * 2 * h + h
     return ParamCounts(
@@ -228,11 +239,16 @@ def weight_bytes(
 def kv_cache_bytes_per_token(
     arch: ModelArch, kv_dtype: KVCacheDtype, weight_dtype: WeightDtype
 ) -> float:
-    """K + V bytes per cached token position across all layers."""
+    """K + V bytes per cached token position across all layers.
+
+    Layers that share an earlier layer's KV store nothing of their own, so
+    only the remainder counts -- 15 of Gemma 4 E2B's 35.
+    """
     kv_bytes = (
         DTYPE_BYTES[weight_dtype] if kv_dtype == "auto" else DTYPE_BYTES[kv_dtype]
     )
-    return 2 * arch.n_layers * arch.n_kv_heads * arch.head_dim * kv_bytes
+    storing_layers = arch.n_layers - min(arch.n_kv_shared_layers, arch.n_layers)
+    return 2 * storing_layers * arch.n_kv_heads * arch.head_dim * kv_bytes
 
 
 def kv_cache_demand_bytes(
@@ -362,15 +378,15 @@ def lora_input_cast_bytes(
     The one-layer form predicts 1280 MiB against 1296 measured, 1.2% out.
     """
     h = arch.hidden_size
-    # Sum of in_features over the linears PEFT wraps. q/k/v/o and the MLP's
-    # gate/up all read the residual stream; down reads the intermediate.
-    # ``all-linear`` degenerates to attention-only on a MoE, whose experts
-    # are not nn.Linear -- see ParamCounts.moe_experts.
+    # Sum of in_features over the linears PEFT wraps: q/k/v read the residual
+    # stream, o reads the concatenated head output, and the MLP's gate/up read
+    # the stream while down reads the intermediate. ``all-linear`` degenerates
+    # to attention-only on a MoE, whose experts are not nn.Linear -- see
+    # ParamCounts.moe_experts.
+    width = 3 * h + arch.mean_qkv_dim
     if scope == "all-linear" and not arch.is_moe:
-        inter = arch.intermediate_size
-        width = 6 * h + inter if arch.gated_mlp else 5 * h + inter
-    else:
-        width = 4 * h
+        inter = int(arch.intermediate_size * arch.mlp_width_factor)
+        width += (2 * h + inter) if arch.gated_mlp else (h + inter)
     layers = 1 if gradient_checkpointing else arch.n_layers
     return int(rows * seq_len * width * layers * DTYPE_BYTES["fp32"])
 
@@ -398,8 +414,12 @@ def block_recompute_bytes(
         active_ffn = (arch.n_experts_per_tok or 1) + arch.n_shared_experts
     else:
         active_ffn = 1
-    qkv_dim = (arch.n_heads + 2 * arch.n_kv_heads) * arch.head_dim
-    per_token = 4 * h + qkv_dim + 3 * inter * active_ffn
+    qkv_dim = arch.mean_qkv_dim
+    per_token = 4 * h + qkv_dim + 3 * int(inter * arch.mlp_width_factor) * active_ffn
+    # Per-Layer Embeddings feed every layer, so the whole (tokens, layers,
+    # per_layer_dim) block is live through the forward. On Gemma 4 E2B that
+    # is 8960 per token, wider than hidden_size.
+    per_token += arch.n_layers * arch.per_layer_input_dim
     peak = rows * seq_len * per_token * act_bytes
     if not flash_attention:
         peak += rows * arch.n_heads * seq_len * seq_len * act_bytes

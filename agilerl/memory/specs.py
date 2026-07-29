@@ -127,6 +127,51 @@ class ModelArch(BaseModel):
     #: much to model analytically; profiled realised sizes refine this.
     multimodal_tower_params: int = 0
 
+    # --- Gemma-4-style geometry -------------------------------------------
+    # Three features that break the "one width per layer" assumption the rest
+    # of this class makes. Each was measured to matter; see the formulas.
+    #: Head dim on the *full*-attention layers when it differs from the
+    #: sliding layers' (Gemma 4: 512 against 256), which widens q/k/v on
+    #: exactly the layers that are not windowed.
+    global_head_dim: int | None = None
+    #: Trailing layers that reuse an earlier layer's KV instead of storing
+    #: their own, so they add nothing to the cache.
+    n_kv_shared_layers: int = 0
+    #: Whether the KV-sharing layers carry a 2x-wide MLP (Gemma 4 E2B). Note
+    #: this applies only to those layers, not the whole model.
+    double_wide_mlp: bool = False
+    #: Per-Layer Embeddings: a per-layer input vector of this width, looked up
+    #: per token and fed into every layer. Both a large parameter block
+    #: (``vocab_size_per_layer_input x n_layers x this``) and a live
+    #: activation of ``tokens x n_layers x this`` — which for Gemma 4 E2B is
+    #: 8960 per token, wider than hidden_size itself.
+    per_layer_input_dim: int = 0
+    per_layer_input_vocab: int = 0
+
+    @property
+    def mlp_width_factor(self) -> float:
+        """Mean intermediate width relative to ``intermediate_size``.
+
+        Gemma 4 E2B doubles the MLP on its KV-shared layers only, so the flat
+        ``intermediate_size`` understates the model: 15 layers at 6144 and 20
+        at 12288 average 9655, a factor of 1.57.
+        """
+        if not self.double_wide_mlp or not self.n_kv_shared_layers:
+            return 1.0
+        wide = min(self.n_kv_shared_layers, self.n_layers)
+        return (self.n_layers + wide) / self.n_layers
+
+    @property
+    def mean_qkv_dim(self) -> int:
+        """q+k+v width per token, averaged over layer types."""
+        narrow = (self.n_heads + 2 * self.n_kv_heads) * self.head_dim
+        if not self.global_head_dim or self.global_head_dim == self.head_dim:
+            return narrow
+        wide = (self.n_heads + 2 * self.n_kv_heads) * self.global_head_dim
+        # ``sliding_window_layer_fraction`` is the share using the narrow head.
+        f = self.sliding_window_layer_fraction if self.sliding_window else 0.0
+        return int(f * narrow + (1.0 - f) * wide)
+
     @property
     def is_moe(self) -> bool:
         return self.n_experts is not None and self.n_experts > 1
@@ -163,6 +208,11 @@ class ModelArch(BaseModel):
             attn_bias=bool(
                 text_cfg.get("attention_bias", False) or text_cfg.get("qkv_bias", False)
             ),
+            global_head_dim=text_cfg.get("global_head_dim") or None,
+            n_kv_shared_layers=int(text_cfg.get("num_kv_shared_layers") or 0),
+            double_wide_mlp=bool(text_cfg.get("use_double_wide_mlp", False)),
+            per_layer_input_dim=int(text_cfg.get("hidden_size_per_layer_input") or 0),
+            per_layer_input_vocab=int(text_cfg.get("vocab_size_per_layer_input") or 0),
             n_experts=int(moe_experts) if moe_experts else None,
             n_experts_per_tok=(
                 int(text_cfg["num_experts_per_tok"])
