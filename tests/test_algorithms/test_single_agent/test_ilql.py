@@ -14,13 +14,13 @@ from agilerl.algorithms.ilql import (
     TopAdvantageNGrams,
     interact_environment,
     map_pytree,
-    parameter_norm,
     to,
     to_decorator,
 )
 from agilerl.data.language_environment import Language_Observation
 from agilerl.data.rl_data import ConstantTokenReward, DataPoint, List_RL_Dataset
 from agilerl.data.torch_datasets import GeneralDataset
+from agilerl.utils.torch_utils import parameter_norm
 from tests.helper_functions import assert_state_dicts_equal
 from tests.test_data import WordleTokenizer
 

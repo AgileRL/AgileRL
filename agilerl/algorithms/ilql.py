@@ -2257,11 +2257,3 @@ def to_decorator(
         return to(f(*args, **kwargs), device)
 
     return new_f
-
-
-def parameter_norm(model: nn.Module) -> float:
-    params: list[torch.Tensor] = list(model.parameters())
-    if not params:
-        return 0.0
-    # One device-to-host sync for the whole model rather than one per parameter.
-    return torch.linalg.vector_norm(torch.stack(torch._foreach_norm(params))).item()

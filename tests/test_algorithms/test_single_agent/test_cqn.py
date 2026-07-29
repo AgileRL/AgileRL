@@ -14,6 +14,7 @@ from torch import nn, optim
 
 from agilerl.algorithms.cqn import CQN
 from agilerl.modules import EvolvableCNN, EvolvableMLP, EvolvableMultiInput
+from agilerl.utils.algo_utils import is_train_eval_invariant
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 from tests.helper_functions import (
     assert_not_equal_state_dict,
@@ -246,6 +247,20 @@ class TestCQNInit:
 
 
 class TestCQNGetAction:
+    # A mode-sensitive actor takes the eval()/train() toggle path in get_action.
+    def test_mode_sensitive_actor_restores_train_mode(self, vector_space):
+        action_space = spaces.Discrete(2)
+        cqn = CQN(vector_space, action_space)
+        cqn.actor.add_module("dropout", nn.Dropout(0.5))
+        cqn._actor_mode_invariant = is_train_eval_invariant(cqn.actor)
+        assert not cqn._actor_mode_invariant
+
+        action = cqn.get_action(np.array([1, 2, 3, 4]), epsilon=0.0)[0]
+
+        assert action >= 0
+        assert action < action_space.n
+        assert cqn.actor.training
+
     # Returns the expected action when given a state observation and epsilon=0 or 1.
     def test_epsilon_greedy_returns_valid_action(self, vector_space):
         action_space = spaces.Discrete(2)

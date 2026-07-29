@@ -19,7 +19,7 @@ from agilerl.modules import EvolvableCNN, EvolvableMLP, EvolvableMultiInput, Mod
 from agilerl.modules.custom_components import GumbelSoftmax
 from agilerl.networks.actors import DeterministicActor
 from agilerl.networks.q_networks import ContinuousQNetwork
-from agilerl.utils.algo_utils import concatenate_spaces
+from agilerl.utils.algo_utils import concatenate_spaces, is_train_eval_invariant
 from agilerl.utils.evolvable_networks import get_default_encoder_config
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 from tests.helper_functions import (
@@ -1248,6 +1248,28 @@ class TestMATD3ActionNoise:
 
 
 class TestMATD3GetAction:
+    # Mode-sensitive actors take the eval()/train() toggle path in get_action.
+    def test_mode_sensitive_actors_restore_train_mode(
+        self, ma_vector_space, ma_discrete_space
+    ):
+        agent_ids = ["agent_0", "agent_1", "other_agent_0"]
+        matd3 = MATD3(ma_vector_space, ma_discrete_space, agent_ids=agent_ids)
+        for actor in matd3.actors.values():
+            actor.add_module("dropout", nn.Dropout(0.5))
+        matd3._actors_mode_invariant = all(
+            is_train_eval_invariant(actor) for actor in matd3.actors.values()
+        )
+        assert not matd3._actors_mode_invariant
+
+        state = {
+            agent: np.random.randn(*ma_vector_space[idx].shape)
+            for idx, agent in enumerate(agent_ids)
+        }
+        matd3.get_action(state)
+
+        assert all(actor.training for actor in matd3.actors.values())
+        matd3.clean_up()
+
     @pytest.mark.gpu
     @pytest.mark.parametrize(
         "observation_spaces",

@@ -16,6 +16,7 @@ from torch import nn, optim
 from agilerl.algorithms.dqn import DQN
 from agilerl.components.data import Transition
 from agilerl.modules import EvolvableCNN, EvolvableMLP, EvolvableMultiInput
+from agilerl.utils.algo_utils import is_train_eval_invariant
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 from tests.helper_functions import (
     assert_state_dicts_equal,
@@ -264,6 +265,21 @@ class TestDQNInit:
 
 
 class TestDQNGetAction:
+    # A mode-sensitive actor takes the eval()/train() toggle path in get_action.
+    def test_mode_sensitive_actor_restores_train_mode(
+        self, vector_space, discrete_space
+    ):
+        dqn = DQN(vector_space, discrete_space)
+        dqn.actor.add_module("dropout", nn.Dropout(0.5))
+        dqn._actor_mode_invariant = is_train_eval_invariant(dqn.actor)
+        assert not dqn._actor_mode_invariant
+
+        action = dqn.get_action(get_sample_from_space(vector_space), epsilon=0.0)[0]
+
+        assert action >= 0
+        assert action < discrete_space.n
+        assert dqn.actor.training
+
     @pytest.mark.parametrize(
         "observation_space",
         [
