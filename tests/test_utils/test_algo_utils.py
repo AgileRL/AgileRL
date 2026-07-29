@@ -2410,7 +2410,7 @@ class TestCloneLlm:
                 self.disabled = False
                 self.loaded = None
 
-            def add_adapter(self, peft_config, adapter_name):
+            def add_adapter(self, peft_config, adapter_name, **kwargs):
                 self.added.append((adapter_name, peft_config))
 
             def disable_adapter(self):

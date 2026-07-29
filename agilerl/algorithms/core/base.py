@@ -4340,15 +4340,12 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
                 lora_target_scope=self.lora_target_scope,
             )
             self.lora_config = lora_config
-            # Under ZeRO-3, LoRA adapters must share the base dtype so
-            # persistent-param allgather buffers stay homogeneous.
+            keep_adapter_base_dtype = self.zero_stage == 3 and not quantized_base
             peft_target = get_peft_model(
                 peft_target,
                 lora_config,
                 adapter_name="actor",
-                autocast_adapter_dtype=not (
-                    self.zero_stage == 3 and not quantized_base
-                ),
+                autocast_adapter_dtype=not keep_adapter_base_dtype,
             )
 
             # Add every adapter listed in ``selected_adapters`` beyond ``actor`` as a fresh
@@ -4361,6 +4358,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
                     peft_target.add_adapter(
                         adapter_name=name,
                         peft_config=self.lora_config,
+                        autocast_adapter_dtype=not keep_adapter_base_dtype,
                     )
 
             # Drop any adapters we don't own (e.g. from a user-supplied PEFT model).
@@ -4373,6 +4371,11 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
                         stacklevel=2,
                     )
                     peft_target.delete_adapter(stray)
+
+            if keep_adapter_base_dtype:
+                for name, param in peft_target.named_parameters():
+                    if "lora" in name and param.dtype != torch.bfloat16:
+                        param.data = param.data.to(torch.bfloat16)
 
             # Apply Liger Kernel optimizations (fused RMSNorm, RoPE, SwiGLU,
             # CrossEntropy) to the inner causal-LM *after* PEFT wrapping.
