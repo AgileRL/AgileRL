@@ -6,7 +6,8 @@ import os
 import shutil
 import warnings
 from collections import OrderedDict, defaultdict
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from functools import singledispatch
 from numbers import Number
@@ -25,6 +26,7 @@ import numpy as np
 import numpy.typing as npt
 import torch
 import torch.nn.functional as F
+from accelerate import Accelerator
 from gymnasium import spaces
 from tensordict import TensorDict, from_module
 from tensordict.nn import CudaGraphModule
@@ -97,6 +99,70 @@ def is_train_eval_invariant(module: nn.Module) -> bool:
     :rtype: bool
     """
     return not any(isinstance(m, MODE_SENSITIVE_MODULES) for m in module.modules())
+
+
+@contextmanager
+def eval_mode(*modules: nn.Module, mode_invariant: bool) -> Iterator[None]:
+    """Put ``modules`` in eval mode for the block, restoring train mode afterwards.
+
+    Does nothing when ``mode_invariant``, since the toggle would be a no-op and
+    each call otherwise walks the whole module tree twice.
+
+    :param modules: Networks to switch into eval mode.
+    :type modules: torch.nn.Module
+    :param mode_invariant: Whether train and eval modes are equivalent.
+    :type mode_invariant: bool
+    """
+    if mode_invariant:
+        yield
+        return
+
+    for module in modules:
+        module.eval()
+    try:
+        yield
+    finally:
+        for module in modules:
+            module.train()
+
+
+@torch.no_grad()
+def polyak_update(source: nn.Module, target: nn.Module, tau: float) -> None:
+    """Update ``target <- tau * source + (1 - tau) * target``, fused across parameters.
+
+    :param source: Network whose parameters are copied from.
+    :type source: torch.nn.Module
+    :param target: Target network updated in place.
+    :type target: torch.nn.Module
+    :param tau: Interpolation weight toward ``source``.
+    :type tau: float
+    """
+    torch._foreach_lerp_(list(target.parameters()), list(source.parameters()), tau)
+
+
+def adam_kwargs(
+    device: str | torch.device,
+    accelerator: Accelerator | None = None,
+    **kwargs: Any,
+) -> dict[str, Any]:
+    """Add ``fused=True`` to Adam kwargs when the fused CUDA kernel is usable.
+
+    :param device: Device the optimizer's parameters live on.
+    :type device: str | torch.device
+    :param accelerator: Accelerator owning the step, if any.
+    :type accelerator: accelerate.Accelerator | None
+    :param kwargs: Base optimizer keyword arguments to augment.
+    :return: ``kwargs``, with ``fused=True`` added when applicable.
+    :rtype: dict[str, Any]
+    """
+    if (
+        "fused" not in kwargs
+        and not kwargs.get("capturable")
+        and accelerator is None
+        and "cuda" in str(device)
+    ):
+        kwargs["fused"] = True
+    return kwargs
 
 
 def configure_tf32_precision() -> None:

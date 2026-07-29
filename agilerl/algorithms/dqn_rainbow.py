@@ -31,7 +31,11 @@ from agilerl.typing import (
     TorchObsType,
     numpy_action_mask,
 )
-from agilerl.utils.algo_utils import make_safe_deepcopies
+from agilerl.utils.algo_utils import (
+    adam_kwargs,
+    make_safe_deepcopies,
+    polyak_update,
+)
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 
 
@@ -252,7 +256,7 @@ class RainbowDQN(RLAlgorithm[TensorDict]):
             optim.Adam,
             networks=self.actor,
             lr=self.lr,
-            optimizer_kwargs=self._adam_kwargs(),
+            optimizer_kwargs=adam_kwargs(self.device, self.accelerator),
         )
 
         if self.accelerator is not None and wrap:
@@ -537,7 +541,7 @@ class RainbowDQN(RLAlgorithm[TensorDict]):
 
     def soft_update(self) -> None:
         """Soft updates target network."""
-        self._soft_update(self.actor, self.actor_target, self.tau)
+        polyak_update(self.actor, self.actor_target, self.tau)
 
     def test(
         self,

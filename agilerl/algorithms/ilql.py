@@ -24,6 +24,7 @@ from agilerl.data.tokenizer import Tokenizer
 from agilerl.modules.gpt import EvolvableGPT
 from agilerl.modules.mlp import EvolvableMLP
 from agilerl.typing import DeviceType, NetConfigType, PastKeyValues
+from agilerl.utils.algo_utils import polyak_update
 from agilerl.utils.sampling_utils import (
     always_terminate,
     map_all_kvs,
@@ -1125,11 +1126,7 @@ class ILQL(nn.Module):
             pairs.append((self.model, self.actor_target))
 
         for source, target in pairs:
-            torch._foreach_lerp_(
-                list(target.parameters()),
-                list(source.parameters()),
-                self.alpha,
-            )
+            polyak_update(source, target, self.alpha)
 
     @torch.no_grad()
     def hard_update(self) -> None:

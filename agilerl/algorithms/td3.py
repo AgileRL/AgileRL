@@ -33,9 +33,12 @@ from agilerl.typing import (
     SupportedObservationSpace,
 )
 from agilerl.utils.algo_utils import (
+    adam_kwargs,
+    eval_mode,
     is_train_eval_invariant,
     make_safe_deepcopies,
     multi_dim_clamp,
+    polyak_update,
     share_encoder_parameters,
 )
 from agilerl.utils.evolvable_networks import (
@@ -351,21 +354,21 @@ class TD3(RLAlgorithm[TensorDict]):
             optim.Adam,
             networks=self.actor,
             lr=self.lr_actor,
-            optimizer_kwargs=self._adam_kwargs(),
+            optimizer_kwargs=adam_kwargs(self.device, self.accelerator),
         )
 
         self.critic_1_optimizer = OptimizerWrapper(
             optim.Adam,
             networks=self.critic_1,
             lr=self.lr_critic,
-            optimizer_kwargs=self._adam_kwargs(),
+            optimizer_kwargs=adam_kwargs(self.device, self.accelerator),
         )
 
         self.critic_2_optimizer = OptimizerWrapper(
             optim.Adam,
             networks=self.critic_2,
             lr=self.lr_critic,
-            optimizer_kwargs=self._adam_kwargs(),
+            optimizer_kwargs=adam_kwargs(self.device, self.accelerator),
         )
 
         if self.accelerator is not None and wrap:
@@ -445,13 +448,9 @@ class TD3(RLAlgorithm[TensorDict]):
         :rtype: numpy.ndarray[float]
         """
         obs = self.preprocess_observation(obs)
-        toggle_mode = not self._actor_mode_invariant
-        if toggle_mode:
-            self.actor.eval()
-        with torch.no_grad():
-            action: torch.Tensor = self.actor(obs)
-        if toggle_mode:
-            self.actor.train()
+        with eval_mode(self.actor, mode_invariant=self._actor_mode_invariant):
+            with torch.no_grad():
+                action: torch.Tensor = self.actor(obs)
 
         # Add noise for exploration
         if training:
@@ -604,7 +603,7 @@ class TD3(RLAlgorithm[TensorDict]):
         :param target: Target network
         :type target: EvolvableModule
         """
-        self._soft_update(net, target, self.tau)
+        polyak_update(net, target, self.tau)
 
     def test(
         self,

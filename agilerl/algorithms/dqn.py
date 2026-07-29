@@ -31,7 +31,13 @@ from agilerl.typing import (
     TorchObsType,
     numpy_action_mask,
 )
-from agilerl.utils.algo_utils import is_train_eval_invariant, make_safe_deepcopies
+from agilerl.utils.algo_utils import (
+    adam_kwargs,
+    eval_mode,
+    is_train_eval_invariant,
+    make_safe_deepcopies,
+    polyak_update,
+)
 
 
 class DQN(RLAlgorithm[TensorDict]):
@@ -197,7 +203,9 @@ class DQN(RLAlgorithm[TensorDict]):
             optim.Adam,
             networks=self.actor,
             lr=self.lr,
-            optimizer_kwargs=self._adam_kwargs(capturable=self.capturable),
+            optimizer_kwargs=adam_kwargs(
+                self.device, self.accelerator, capturable=self.capturable
+            ),
         )
 
         if self.accelerator is not None and wrap:
@@ -302,13 +310,9 @@ class DQN(RLAlgorithm[TensorDict]):
         :return: Selected action(s) as tensor
         :rtype: torch.Tensor
         """
-        toggle_mode = not self._actor_mode_invariant
-        if toggle_mode:
-            self.actor.eval()
-        with torch.no_grad():
-            q_values = self.actor(obs)
-        if toggle_mode:
-            self.actor.train()
+        with eval_mode(self.actor, mode_invariant=self._actor_mode_invariant):
+            with torch.no_grad():
+                q_values = self.actor(obs)
 
         # Masked random actions
         masked_random_values = torch.rand_like(q_values) * action_mask
@@ -426,7 +430,7 @@ class DQN(RLAlgorithm[TensorDict]):
 
     def soft_update(self) -> None:
         """Soft updates target network."""
-        self._soft_update(self.actor, self.actor_target, self.tau)
+        polyak_update(self.actor, self.actor_target, self.tau)
 
     def test(
         self,

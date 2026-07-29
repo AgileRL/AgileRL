@@ -404,40 +404,6 @@ class EvolvableAlgorithm(ABC, Generic[ExperiencesT], metaclass=RegistryMeta):
         self.registry = MutationRegistry(hp_config)
         self.training = True
 
-    @torch.no_grad()
-    def _soft_update(
-        self,
-        source: torch.nn.Module,
-        target: torch.nn.Module,
-        tau: float,
-    ) -> None:
-        """Polyak update ``target <- tau * source + (1 - tau) * target``, fused across parameters.
-
-        :param source: Network whose parameters are copied from.
-        :type source: torch.nn.Module
-        :param target: Target network updated in place.
-        :type target: torch.nn.Module
-        :param tau: Interpolation weight toward ``source``.
-        :type tau: float
-        """
-        torch._foreach_lerp_(list(target.parameters()), list(source.parameters()), tau)
-
-    def _adam_kwargs(self, **kwargs: Any) -> dict[str, Any]:
-        """Add ``fused=True`` to Adam kwargs when the fused CUDA kernel is usable.
-
-        :param kwargs: Base optimizer keyword arguments to augment.
-        :return: ``kwargs``, with ``fused=True`` added when applicable.
-        :rtype: dict[str, Any]
-        """
-        if (
-            "fused" not in kwargs
-            and not kwargs.get("capturable")
-            and self.accelerator is None
-            and "cuda" in str(self.device)
-        ):
-            kwargs["fused"] = True
-        return kwargs
-
     @property
     def index(self) -> int:
         """Return the index of the algorithm."""
