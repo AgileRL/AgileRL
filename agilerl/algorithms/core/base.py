@@ -2699,6 +2699,15 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         self.use_vllm = use_vllm
         self.vllm_config = vllm_config
         self.max_grad_norm = max_grad_norm
+        # ZeRO-3 shards params in place; naive ``.to("cpu")`` breaks DeepSpeed
+        # parameter status and leaves weights on CPU for the next forward.
+        if self.zero_stage == 3 and use_memory_efficient_params:
+            warnings.warn(
+                "Memory efficient params is not compatible with DeepSpeed "
+                "ZeRO-3; disabling trainer CPU offload for this run.",
+                stacklevel=2,
+            )
+            use_memory_efficient_params = False
         self.use_memory_efficient_params = use_memory_efficient_params
         self.memory_efficient_params_context = (
             self._memory_efficient_params
@@ -6233,14 +6242,9 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         trainer's own base normally rests on CPU so the rollout engine owns the
         GPU; this moves it onto the GPU for the forward/backward and back to CPU
         afterwards, so the two bases never coexist on the GPU (no 2x-base peak).
-        Disabled under DeepSpeed ZeRO-3 (params are already sharded).
+        Disabled under DeepSpeed ZeRO-3 (params are already sharded; see init).
         """
         if self.zero_stage == 3:
-            warnings.warn(
-                "Memory efficient params is not yet compatible with DeepSpeed "
-                "ZeRO-3; memory efficient params will be disabled for this run.",
-                stacklevel=2,
-            )
             yield
             return
         unwrapped_model = self._get_unwrapped_actor()
@@ -6267,7 +6271,12 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
 
     def _prepare_vllm_for_generation(self) -> None:
         assert self.vllm_config is not None  # _configure_vllm guarantees a config
-        if self.use_memory_efficient_params:
+        if self.use_memory_efficient_params and self.zero_stage != 3:
+            # Colocated: park the trainer's own base on CPU *before* waking vLLM
+            # so the rollout engine owns the GPU and the two bases never coexist
+            # on-device. The training step brings it back via
+            # ``memory_efficient_params_context``. Skipped under ZeRO-3 — params
+            # are already sharded and must not be moved with ``.to("cpu")``.
             moved = move_params_to_cpu(self._get_unwrapped_actor())
             if moved and (self.accelerator is None or self.accelerator.is_main_process):
                 log_cuda_memory_snapshot(
