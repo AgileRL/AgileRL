@@ -610,24 +610,25 @@ class DPO(LLMAlgorithm[PreferencePrompts]):
         policy_hidden = policy_hidden[:, :-1, :].contiguous()
         ref_hidden = ref_hidden[:, :-1, :].contiguous()
 
-        loss, aux = LigerDPOWithAlpha.apply(
-            policy_hidden,
-            lm_head_weight,
-            stacked_target,
-            lm_head_bias,  # bias (None for most LLMs)
-            ref_hidden,  # ref_input
-            lm_head_weight,  # ref_weight (lm_head is never LoRA-adapted, so is the same as the policy weight)
-            lm_head_bias,  # ref_bias (same weight → same bias)
-            -100,  # ignore_index
-            self.beta,
-            self.nll_alpha,  # alpha — scales NLL in the fused kernel
-            self.nll_alpha > 0,  # compute_nll_loss
-            True,  # compiled
-            True,  # use_ref_model
-            False,  # average_log_prob (sum, matching _dpo_loss)
-            self.chunk_rows or 1,  # chunk_size (sequences per chunk)
-            "sigmoid",  # loss_type
-        )
+        with self._liger_head_gather():
+            loss, aux = LigerDPOWithAlpha.apply(
+                policy_hidden,
+                lm_head_weight,
+                stacked_target,
+                lm_head_bias,  # bias (None for most LLMs)
+                ref_hidden,  # ref_input
+                lm_head_weight,  # ref_weight (lm_head is never LoRA-adapted, so is the same as the policy weight)
+                lm_head_bias,  # ref_bias (same weight → same bias)
+                -100,  # ignore_index
+                self.beta,
+                self.nll_alpha,  # alpha — scales NLL in the fused kernel
+                self.nll_alpha > 0,  # compute_nll_loss
+                True,  # compiled
+                True,  # use_ref_model
+                False,  # average_log_prob (sum, matching _dpo_loss)
+                self.chunk_rows or 1,  # chunk_size (sequences per chunk)
+                "sigmoid",  # loss_type
+            )
         # aux = (chosen_logps, rejected_logps, chosen_logits_mean, rejected_logits_mean,
         #        nll_loss, chosen_rewards, rejected_rewards)
         chosen_reward = aux[5]  # beta * (chosen_logps  - ref_chosen_logps)

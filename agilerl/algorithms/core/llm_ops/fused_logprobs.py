@@ -12,34 +12,11 @@ no-grad old/reference passes and the gradient forward.
 
 from __future__ import annotations
 
-from collections.abc import Generator
-from contextlib import contextmanager
 from typing import Any
 
 import torch
 
-from agilerl.utils.llm_utils import gather_if_zero3
-
-
-@contextmanager
-def _gather_if_ds_param(
-    *tensors: torch.Tensor | None,
-) -> Generator[None, None, None]:
-    """Allgather ZeRO-3 params for the duration of the block.
-
-    No-op when none of ``tensors`` carry a DeepSpeed ``ds_id``. The gather
-    must wrap only the matmul that reads the weight — not a module
-    ``forward`` — because ZeRO-3's post-forward hooks re-partition the
-    param and free the gathered buffer.
-    """
-    params: list[torch.Tensor] = [
-        t for t in tensors if t is not None and hasattr(t, "ds_id")
-    ]
-    if not params:
-        yield
-        return
-    with gather_if_zero3(3, params):
-        yield
+from agilerl.utils.llm_utils import gather_if_ds_param as _gather_if_ds_param
 
 
 def _fused_logprob_chunk(

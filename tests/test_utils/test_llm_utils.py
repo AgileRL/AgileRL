@@ -49,6 +49,7 @@ from agilerl.utils.llm_utils import (
     discover_clippable_projection_leaf_names,
     filter_peft_state_dict_for_vllm_lora,
     format_colocated_vllm_oom_hint,
+    gather_if_ds_param,
     gather_if_zero3,
     get_llm_accelerator,
     get_lora_params,
@@ -807,6 +808,35 @@ class TestGatherIfZero3:
             with pytest.raises(ImportError, match="DeepSpeed is required for ZeRO"):
                 with gather_if_zero3(3, []):
                     pass
+
+    def test_gather_if_ds_param_noops_without_ds_id(self):
+        weight = torch.randn(4, 2)
+        entered = False
+        with gather_if_ds_param(weight, None):
+            entered = True
+        assert entered
+
+    def test_gather_if_ds_param_gathers_when_ds_id_present(self):
+        pytest.importorskip(
+            "deepspeed", reason="gather_if_ds_param requires deepspeed."
+        )
+        weight = torch.randn(4, 2)
+        weight.ds_id = 0
+        calls: list[list] = []
+
+        @contextmanager
+        def capture_gather(params=None, modifier_rank=None):
+            calls.append(list(params))
+            yield
+
+        with patch(
+            "deepspeed.zero.GatheredParameters",
+            side_effect=capture_gather,
+        ):
+            with gather_if_ds_param(weight, None):
+                pass
+        assert len(calls) == 1
+        assert calls[0] == [weight]
 
 
 def test_get_state_dict():

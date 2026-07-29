@@ -1819,7 +1819,8 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
                         .reshape(n_tokens, 1)
                     )
             chunk_size = self._resolve_fused_chunk_rows(
-                lm_head_weight.shape[0], self.chunk_rows
+                getattr(lm_head_weight, "ds_shape", lm_head_weight.shape)[0],
+                self.chunk_rows,
             )
         else:
             # Trajectory-level (GSPO): keep the padded layout and one-sequence-per-
@@ -1832,32 +1833,33 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
             adv_arg = adv
             chunk_size = 1
 
-        loss, aux = LigerFusedLinearGRPOFunction.apply(
-            policy_arg,
-            lm_head_weight,
-            target_ids_arg,
-            mask_arg,
-            adv_arg,
-            lm_head_bias,
-            ref_lp_arg,
-            old_lp_arg,
-            None,
-            None,
-            None,
-            self.beta,
-            epsilon_low,
-            epsilon_high,
-            liger_loss_type,
-            self.max_output_tokens,
-            importance_sampling_level,
-            None,
-            None,
-            self.temperature,
-            None,
-            ref_log_probs is not None,  # use_ref_model
-            chunk_size,
-            vllm_is_ratio_arg,
-        )
+        with self._liger_head_gather():
+            loss, aux = LigerFusedLinearGRPOFunction.apply(
+                policy_arg,
+                lm_head_weight,
+                target_ids_arg,
+                mask_arg,
+                adv_arg,
+                lm_head_bias,
+                ref_lp_arg,
+                old_lp_arg,
+                None,
+                None,
+                None,
+                self.beta,
+                epsilon_low,
+                epsilon_high,
+                liger_loss_type,
+                self.max_output_tokens,
+                importance_sampling_level,
+                None,
+                None,
+                self.temperature,
+                None,
+                ref_log_probs is not None,  # use_ref_model
+                chunk_size,
+                vllm_is_ratio_arg,
+            )
 
         kl = aux[0]
         return loss.mean(), kl

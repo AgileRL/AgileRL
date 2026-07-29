@@ -348,9 +348,10 @@ class SFT(LLMAlgorithm[SFTPrompts]):
             # Liger fused-linear CE: loss computed in bounded ``(chunk, V)`` tiles.
             flat_hidden = shift_hidden.view(-1, shift_hidden.size(-1))
             lm_head = self._get_lm_head()
-            loss = LigerFusedLinearCrossEntropyLoss(ignore_index=-100)(
-                lm_head.weight, flat_hidden, labels.view(-1), lm_head.bias
-            )
+            with self._liger_head_gather():
+                loss = LigerFusedLinearCrossEntropyLoss(ignore_index=-100)(
+                    lm_head.weight, flat_hidden, labels.view(-1), lm_head.bias
+                )
 
         else:
             # Standard path, also token-chunked: per-token target logprobs via the
