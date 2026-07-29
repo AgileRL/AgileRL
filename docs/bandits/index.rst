@@ -252,7 +252,7 @@ The easiest way to train a population of bandits is to use our training function
         eval_steps=500,  # Number of steps in evaluation episode,
         eval_loop=1,  # Number of evaluation episodes
         target=96.0,  # Target score for early stopping
-        tournament=tournament,  # Tournament selection object
+        selection_strategy=tournament,  # Selection strategy object
         mutation=mutations,  # Mutations object
         wb=True,  # Weights and Biases tracking
     )

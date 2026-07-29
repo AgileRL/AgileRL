@@ -327,7 +327,7 @@ The key training call is the same for all algorithms. Evolutionary fields are ex
         elite_path="saved_llms/multiturn_tutorial",
         wb=False,
         evo_steps=None,
-        tournament=None,
+        selection_strategy=None,
         mutation=None,
         evaluation_interval=10,
         max_reward=1.0,

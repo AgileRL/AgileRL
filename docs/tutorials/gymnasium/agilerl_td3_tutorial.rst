@@ -233,7 +233,7 @@ fitnesses (fitness is each agents test scores on the environment).
         eval_loop=eval_loop,
         learning_delay=learning_delay,
         target=target_score,
-        tournament=tournament,
+        selection_strategy=tournament,
         mutation=mutations,
         wb=False,  # Boolean flag to record run with Weights & Biases
         save_elite=True,  # Boolean flag to save the elite agent in the population

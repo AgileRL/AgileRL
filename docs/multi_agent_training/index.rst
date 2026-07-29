@@ -441,7 +441,7 @@ which returns a population of trained agents and logged training metrics.
         eval_loop=1,  # Number of evaluation episodes
         learning_delay=1000,  # Steps before starting learning
         target=-30.0,  # Target score for early stopping
-        tournament=tournament,  # Tournament selection object
+        selection_strategy=tournament,  # Selection strategy object
         mutation=mutations,  # Mutations object
         wb=False,  # Weights and Biases tracking
     )
@@ -736,7 +736,7 @@ You can use our off-the-shelf training function
             eval_steps=None,  # Number of steps in evaluation episode
             eval_loop=1,  # Number of evaluation episodes
             target=-30.0,  # Target score for early stopping
-            tournament=tournament,  # Tournament selection object
+            selection_strategy=tournament,  # Selection strategy object
             mutation=mutations,  # Mutations object
             wb=False,  # Weights and Biases tracking
             accelerator=accelerator,

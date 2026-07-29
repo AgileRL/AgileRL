@@ -36,7 +36,11 @@ from agilerl.models.env import (
     OfflineEnvSpec,
     PzEnvSpec,
 )
-from agilerl.models.hpo import MutationSpec, TournamentSelectionSpec
+from agilerl.models.hpo import (
+    MultiFrequencySelectionSpec,
+    MutationSpec,
+    TournamentSelectionSpec,
+)
 from agilerl.models.manifest import TrainingManifest
 from agilerl.models.networks import (
     CnnSpec,
@@ -711,7 +715,7 @@ class TestLocalTrainerSingleAgent:
     def test_mutation_and_tournament_forwarded(self):
         trainer = LocalTrainer.from_manifest(DQN_MANIFEST)
         assert isinstance(trainer.mutation_spec, MutationSpec)
-        assert isinstance(trainer.tournament_selection_spec, TournamentSelectionSpec)
+        assert isinstance(trainer.selection_strategy_spec, TournamentSelectionSpec)
 
     def test_replay_buffer_forwarded(self):
         trainer = LocalTrainer.from_manifest(DQN_MANIFEST)
@@ -725,7 +729,7 @@ class TestLocalTrainerSingleAgent:
         )
         trainer = LocalTrainer.from_manifest(data)
         assert trainer.mutation_spec is None
-        assert trainer.tournament_selection_spec is None
+        assert trainer.selection_strategy_spec is None
         assert trainer.replay_buffer_spec is None
 
     # -- Loading from files -------------------------------------------------
@@ -759,7 +763,7 @@ class TestLocalTrainerSingleAgent:
         assert trainer.algorithm_spec.batch_size == 128  # DQN default
         assert trainer.env_spec.name == "CartPole-v1"
         assert trainer.mutation_spec is None
-        assert trainer.tournament_selection_spec is None
+        assert trainer.selection_strategy_spec is None
         assert trainer.replay_buffer_spec is None
 
 
@@ -893,6 +897,74 @@ class TestTrainingManifestArenaBridge:
         )
         assert manifest.mutation is not None
         assert manifest.mutation.mutation_sd == 0.05
+
+    def test_from_trainer_specs_accepts_selection_strategy(self):
+        manifest = TrainingManifest.from_trainer_specs(
+            algorithm=PPOSpec(learn_step=64),
+            environment=GymEnvSpec(name="CartPole-v1"),
+            training=TrainingSpec(max_steps=200),
+            selection_strategy=TournamentSelectionSpec(tournament_size=3),
+        )
+        assert isinstance(manifest.selection_strategy, TournamentSelectionSpec)
+        assert manifest.selection_strategy.tournament_size == 3
+
+    def test_from_trainer_specs_accepts_multi_frequency_selection_strategy(self):
+        """Both regimes land in the one discriminated field."""
+        manifest = TrainingManifest.from_trainer_specs(
+            algorithm=PPOSpec(learn_step=64),
+            environment=GymEnvSpec(name="CartPole-v1"),
+            training=TrainingSpec(max_steps=200, pop_size=16),
+            selection_strategy=MultiFrequencySelectionSpec(n_subpopulations=2),
+        )
+        assert isinstance(manifest.selection_strategy, MultiFrequencySelectionSpec)
+        assert manifest.selection_strategy.strategy == "multi_frequency"
+
+    def test_from_trainer_specs_deprecated_tournament_selection_kwarg_warns(self):
+        spec = TournamentSelectionSpec(tournament_size=3)
+        with pytest.warns(DeprecationWarning, match="'tournament_selection' argument"):
+            manifest = TrainingManifest.from_trainer_specs(
+                algorithm=PPOSpec(learn_step=64),
+                environment=GymEnvSpec(name="CartPole-v1"),
+                training=TrainingSpec(max_steps=200),
+                tournament_selection=spec,
+            )
+        assert manifest.selection_strategy == spec
+
+    def test_from_trainer_specs_conflicting_selection_kwargs_raise(self):
+        with (
+            pytest.warns(DeprecationWarning, match="'tournament_selection' argument"),
+            pytest.raises(ValueError, match="conflicting selection strategies"),
+        ):
+            TrainingManifest.from_trainer_specs(
+                algorithm=PPOSpec(learn_step=64),
+                environment=GymEnvSpec(name="CartPole-v1"),
+                training=TrainingSpec(max_steps=200),
+                selection_strategy=TournamentSelectionSpec(tournament_size=2),
+                tournament_selection=TournamentSelectionSpec(tournament_size=3),
+            )
+
+    def test_from_trainer_specs_unknown_kwarg_raises_type_error(self):
+        with pytest.raises(TypeError, match="tournament_seletcion"):
+            TrainingManifest.from_trainer_specs(
+                algorithm=PPOSpec(learn_step=64),
+                environment=GymEnvSpec(name="CartPole-v1"),
+                training=TrainingSpec(max_steps=200),
+                tournament_seletcion=TournamentSelectionSpec(),
+            )
+
+    def test_from_trainer_specs_coerces_a_foreign_tournament_spec(self):
+        from agilerl.arena.models import (
+            TournamentSelectionSpec as ArenaTournamentSelectionSpec,
+        )
+
+        manifest = TrainingManifest.from_trainer_specs(
+            algorithm=PPOSpec(learn_step=64),
+            environment=ArenaEnvSpec(name="CartPole-v1"),
+            training=TrainingSpec(max_steps=200),
+            selection_strategy=ArenaTournamentSelectionSpec(tournament_size=4),
+        )
+        assert isinstance(manifest.selection_strategy, TournamentSelectionSpec)
+        assert manifest.selection_strategy.tournament_size == 4
 
     def test_to_arena_manifest_from_dict_payload(self):
         data = {

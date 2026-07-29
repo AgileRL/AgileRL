@@ -593,6 +593,6 @@ End-to-end example
             eval_loop=INIT_HP["EVAL_LOOP"],
             learning_delay=INIT_HP["LEARNING_DELAY"],
             target=INIT_HP["TARGET_SCORE"],
-            tournament=tournament,
+            selection_strategy=tournament,
             mutation=mutations,
         )

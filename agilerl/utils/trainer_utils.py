@@ -38,9 +38,11 @@ from agilerl.models.algo import (
 from agilerl.models.hpo import (
     MultiFrequencySelectionSpec,
     MutationSpec,
+    SelectionStrategySpec,
     TournamentSelectionSpec,
 )
 from agilerl.models.training import ReplayBufferSpec, TrainingSpec
+from agilerl.protocols import SelectionStrategyProtocol
 from agilerl.typing import GymEnvType, PzEnvType
 from agilerl.wrappers.learning import BanditEnv
 
@@ -137,7 +139,7 @@ def create_population_from_spec(
     resume_from_checkpoint: str | None = None,
     accelerator: Accelerator | None = None,
     tokenizer: AutoTokenizer | None = None,
-    multi_frequency_selection_spec: MultiFrequencySelectionSpec | None = None,
+    selection_strategy_spec: SelectionStrategySpec | None = None,
 ) -> PopulationT:
     """Instantiate a population of agents from an algorithm spec.
 
@@ -159,8 +161,9 @@ def create_population_from_spec(
     :type accelerator: Accelerator | None
     :param tokenizer: Pre-loaded HuggingFace tokenizer for LLM algorithms.
     :type tokenizer: AutoTokenizer | None
-    :param multi_frequency_selection_spec: Optional MF-PBT spec.
-    :type multi_frequency_selection_spec: MultiFrequencySelectionSpec | None
+    :param selection_strategy_spec: Selection-strategy spec. Only MF-PBT
+        consumes it here, to tag each agent with its subpopulation.
+    :type selection_strategy_spec: SelectionStrategySpec | None
     :returns: A list of algorithm instances.
     :rtype: PopulationT
     """
@@ -200,7 +203,7 @@ def create_population_from_spec(
             )
             for i in range(population_size)
         ]
-        _assign_subpopulations(population, multi_frequency_selection_spec)
+        _assign_subpopulations(population, selection_strategy_spec)
         return population
 
     # LLM algorithms — build agent 0 fully, then clone the actor for agents 1..N.
@@ -239,26 +242,24 @@ def create_population_from_spec(
                 actor_network=cloned_actor,
             )
         )
-    _assign_subpopulations(population, multi_frequency_selection_spec)
+    _assign_subpopulations(population, selection_strategy_spec)
     return population
 
 
 def _assign_subpopulations(
     population: PopulationT,
-    multi_frequency_selection_spec: MultiFrequencySelectionSpec | None,
+    selection_strategy_spec: SelectionStrategySpec | None,
 ) -> None:
     """Tag each agent with its MF-PBT subpopulation from its population slot.
 
     :param population: The freshly-built or resumed population, in slot order.
     :type population: PopulationT
-    :param multi_frequency_selection_spec: The MF-PBT spec, or None under tournament/no-HPO.
-    :type multi_frequency_selection_spec: MultiFrequencySelectionSpec | None
+    :param selection_strategy_spec: The resolved selection-strategy spec, or None.
+    :type selection_strategy_spec: SelectionStrategySpec | None
     """
-    if multi_frequency_selection_spec is None:
+    if not isinstance(selection_strategy_spec, MultiFrequencySelectionSpec):
         return
-    subpopulation_size = (
-        len(population) // multi_frequency_selection_spec.n_subpopulations
-    )
+    subpopulation_size = len(population) // selection_strategy_spec.n_subpopulations
     for slot, agent in enumerate(population):
         agent.subpopulation_id = MultiFrequencySelection._subpopulation_for_position(
             slot, subpopulation_size
@@ -300,60 +301,98 @@ def build_mutations_from_spec(
 
 
 def build_tournament_from_spec(
-    tournament_spec: TournamentSelectionSpec | None,
+    selection_spec: SelectionStrategySpec | None,
     training_spec: TrainingSpec,
 ) -> TournamentSelection | None:
     """Convert a :class:`TournamentSelectionSpec` into a :class:`TournamentSelection`.
 
-    :param tournament_spec: Tournament selection specification.
-    :type tournament_spec: TournamentSelectionSpec | None
+    :param selection_spec: The resolved selection-strategy spec, or ``None`` when unset.
+    :type selection_spec: SelectionStrategySpec | None
     :param training_spec: Training specification.
     :type training_spec: TrainingSpec
-    :returns: A :class:`TournamentSelection` instance, or ``None`` if *tournament_spec* is ``None``.
+    :returns: A :class:`TournamentSelection` instance, or None when tournament
+        selection is not the configured strategy.
     :rtype: TournamentSelection | None
     """
-    if tournament_spec is None:
+    if not isinstance(selection_spec, TournamentSelectionSpec):
         return None
 
     return TournamentSelection(
-        tournament_size=tournament_spec.tournament_size,
-        elitism=tournament_spec.elitism,
+        tournament_size=selection_spec.tournament_size,
+        elitism=selection_spec.elitism,
         population_size=training_spec.pop_size,
     )
 
 
 def build_multi_frequency_selection_from_spec(
-    multi_frequency_selection_spec: MultiFrequencySelectionSpec | None,
+    selection_spec: SelectionStrategySpec | None,
     training_spec: TrainingSpec,
     seed: int | None = None,
 ) -> MultiFrequencySelection | None:
     """Convert a spec into a :class:`MultiFrequencySelection` instance.
 
-    :param multi_frequency_selection_spec: MF-PBT specification.
-    :type multi_frequency_selection_spec: MultiFrequencySelectionSpec | None
+    :param selection_spec: The resolved selection-strategy spec, or ``None`` when unset.
+    :type selection_spec: SelectionStrategySpec | None
     :param training_spec: Training specification supplying the population size.
     :type training_spec: TrainingSpec
     :param seed: The run's global seed, forwarded to the operator's RNG so the
         winner-clone selection varies (reproducibly) with the run seed, defaults to
         None.
     :type seed: int | None
-    :returns: A :class:`MultiFrequencySelection` instance, or None if *multi_frequency_selection_spec*
-        is None.
+    :returns: A :class:`MultiFrequencySelection` instance, or None when MF-PBT
+        is not the configured strategy.
     :rtype: MultiFrequencySelection | None
     """
-    if multi_frequency_selection_spec is None:
+    if not isinstance(selection_spec, MultiFrequencySelectionSpec):
         return None
 
     return MultiFrequencySelection(
         population_size=training_spec.pop_size,
-        n_subpopulations=multi_frequency_selection_spec.n_subpopulations,
-        evolution_frequency_ratios=multi_frequency_selection_spec.evolution_frequency_ratios,
-        n_winners=multi_frequency_selection_spec.n_winners,
-        n_survivors=multi_frequency_selection_spec.n_survivors,
-        n_open_for_migration=multi_frequency_selection_spec.n_open_for_migration,
-        n_losers=multi_frequency_selection_spec.n_losers,
+        n_subpopulations=selection_spec.n_subpopulations,
+        evolution_frequency_ratios=selection_spec.evolution_frequency_ratios,
+        n_winners=selection_spec.n_winners,
+        n_survivors=selection_spec.n_survivors,
+        n_open_for_migration=selection_spec.n_open_for_migration,
+        n_losers=selection_spec.n_losers,
         seed=seed,
     )
+
+
+def build_selection_from_spec(
+    selection_spec: SelectionStrategySpec | None,
+    training_spec: TrainingSpec,
+    seed: int | None = None,
+) -> SelectionStrategyProtocol | None:
+    """Build the selection operator named by the manifest's selection_strategy block.
+
+    :param selection_spec: The resolved selection-strategy spec, or ``None`` when no
+        selection strategy is configured.
+    :type selection_spec: SelectionStrategySpec | None
+    :param training_spec: Training specification supplying the population size.
+    :type training_spec: TrainingSpec
+    :param seed: The run's global seed, forwarded to MF-PBT's RNG. Defaults to None.
+    :type seed: int | None
+    :returns: The selection operator, or ``None`` when *selection_spec* is ``None``.
+    :rtype: SelectionStrategyProtocol | None
+    :raises TypeError: If *selection_spec* is neither ``None`` nor a known
+        selection-strategy spec.
+    """
+    if selection_spec is None:
+        return None
+
+    if isinstance(selection_spec, MultiFrequencySelectionSpec):
+        return build_multi_frequency_selection_from_spec(
+            selection_spec, training_spec, seed=seed
+        )
+
+    if isinstance(selection_spec, TournamentSelectionSpec):
+        return build_tournament_from_spec(selection_spec, training_spec)
+
+    msg = (
+        "selection_spec must be a TournamentSelectionSpec or a "
+        f"MultiFrequencySelectionSpec, got {type(selection_spec).__name__}."
+    )
+    raise TypeError(msg)
 
 
 def build_replay_buffer_from_spec(

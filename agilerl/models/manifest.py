@@ -30,6 +30,7 @@ from agilerl.models.hpo import (
     SelectionStrategySpec,
     TournamentSelectionSpec,
     default_selection_strategy,
+    resolve_deprecated_selection_kwargs,
 )
 from agilerl.models.networks import (
     FinetuningNetworkSpec,
@@ -413,8 +414,8 @@ class TrainingManifest(BaseModel):
         training: TrainingSpec,
         mutation: MutationSpec | None = None,
         replay_buffer: ReplayBufferSpec | None = None,
-        tournament_selection: TournamentSelectionSpec | None = None,
-        multi_frequency_selection: MultiFrequencySelectionSpec | None = None,
+        selection_strategy: SelectionStrategySpec | None = None,
+        **kwargs: Any,
     ) -> TrainingManifest:
         """Build a validated core manifest from trainer component specs.
 
@@ -428,15 +429,20 @@ class TrainingManifest(BaseModel):
         :type mutation: MutationSpec | None
         :param replay_buffer: Optional replay-buffer spec.
         :type replay_buffer: ReplayBufferSpec | None
-        :param tournament_selection: Optional tournament-selection spec.
-        :type tournament_selection: TournamentSelectionSpec | None
-        :param multi_frequency_selection: Optional MF-PBT spec (mutually exclusive with
-            tournament_selection; both collapse into the single selection_strategy
-            manifest field, discriminated by strategy).
-        :type multi_frequency_selection: MultiFrequencySelectionSpec | None
+        :param selection_strategy: Selection-strategy spec: tournament or
+            multi-frequency selection.
+        :type selection_strategy: SelectionStrategySpec | None
+        :param kwargs: Accepts the deprecated tournament_selection alias for
+            selection_strategy.
         :returns: A validated :class:`TrainingManifest`.
         :rtype: TrainingManifest
         """
+        selection_strategy = resolve_deprecated_selection_kwargs(
+            selection_strategy,
+            kwargs,
+            deprecated_key="tournament_selection",
+            caller="TrainingManifest.from_trainer_specs",
+        )
 
         def _coerce(value: Any, core_cls: type) -> Any:
             """Dump foreign BaseModel inputs (e.g. arena specs) to plain dicts."""
@@ -446,15 +452,12 @@ class TrainingManifest(BaseModel):
                 return value.model_dump(mode="json", exclude_none=True)
             return value
 
-        # Tournament and MF-PBT are mutually exclusive
-        selection = (
-            multi_frequency_selection
-            if multi_frequency_selection is not None
-            else tournament_selection
-        )
+        # A foreign (e.g. arena) spec is dumped to a dict and re-validated against the
+        # matching core class; a core MF spec must pass through untouched, since the
+        # trainer resolves its bracket sizes onto that same object.
         selection_cls = (
             MultiFrequencySelectionSpec
-            if isinstance(selection, MultiFrequencySelectionSpec)
+            if isinstance(selection_strategy, MultiFrequencySelectionSpec)
             else TournamentSelectionSpec
         )
 
@@ -465,7 +468,7 @@ class TrainingManifest(BaseModel):
             network=cls._network_from_algorithm(algorithm),
             mutation=_coerce(mutation, MutationSpec),
             replay_buffer=_coerce(replay_buffer, ReplayBufferSpec),
-            selection_strategy=_coerce(selection, selection_cls),
+            selection_strategy=_coerce(selection_strategy, selection_cls),
         )
 
     @classmethod

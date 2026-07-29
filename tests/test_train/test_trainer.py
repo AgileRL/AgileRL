@@ -4,7 +4,6 @@ Covers:
 - Trainer base class (algo resolution from string / spec)
 - LocalTrainer (construction, train delegation)
 - ArenaTrainer (construction, manifest building, train delegation)
-- trainer_utils pure functions
 - LLM algorithm integration (DPO, GRPO) with mocked dependencies
 - Multi-frequency selection wiring (construction, manifest round trip, evolution)
 """
@@ -14,6 +13,7 @@ from __future__ import annotations
 import contextlib
 import importlib
 import types
+import warnings
 from collections import Counter
 from typing import ClassVar
 from unittest.mock import MagicMock, patch
@@ -24,9 +24,8 @@ from gymnasium.spaces import Box, Discrete
 from agilerl import HAS_ARENA_DEPENDENCIES, HAS_LLM_DEPENDENCIES, AgentType
 from agilerl.algorithms import DQN
 from agilerl.algorithms.core.base import EvolvableAlgorithm
-from agilerl.components.replay_buffer import MultiStepReplayBuffer, ReplayBuffer
+from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.hpo.multi_frequency import MultiFrequencySelection
-from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.models import (
     ALGO_REGISTRY,
@@ -47,12 +46,7 @@ from agilerl.models.hpo import (
 from agilerl.models.networks import MlpSpec, QNetworkSpec, StochasticActorSpec
 from agilerl.models.training import ReplayBufferSpec, TrainingSpec
 from agilerl.training.trainer import ArenaTrainer, LocalTrainer, Trainer
-from agilerl.utils.trainer_utils import (
-    build_mutations_from_spec,
-    build_replay_buffer_from_spec,
-    build_tournament_from_spec,
-    create_population_from_spec,
-)
+from agilerl.utils.trainer_utils import create_population_from_spec
 from agilerl.utils.utils import run_selection_and_mutation
 from tests.helper_functions import (
     rank_population_by_subpopulation,
@@ -168,55 +162,6 @@ def mock_client():
         "status": "PENDING",
     }
     return client
-
-
-class TestBuildMutations:
-    def test_none_returns_none(self):
-        assert build_mutations_from_spec(None, "cpu") is None
-
-    def test_from_spec(self, mutation_spec):
-        result = build_mutations_from_spec(mutation_spec, "cpu")
-        assert isinstance(result, Mutations)
-        assert result.no_mut == 0.5
-        assert result.parameters_mut == 0.3
-        assert result.mutation_sd == 0.05
-
-
-class TestBuildTournament:
-    def test_none_returns_none(self, training_spec):
-        assert build_tournament_from_spec(None, training_spec) is None
-
-    def test_from_spec(self, tournament_spec, training_spec):
-        result = build_tournament_from_spec(tournament_spec, training_spec)
-        assert isinstance(result, TournamentSelection)
-        assert result.tournament_size == 3
-        assert result.elitism is True
-
-
-class TestBuildReplayBuffer:
-    def test_none_with_on_policy_returns_none(self, ppo_spec):
-        assert build_replay_buffer_from_spec(ppo_spec, None, "cpu") is None
-
-    def test_none_with_off_policy_creates_default(self):
-        dqn_spec = DQNSpec()
-        result = build_replay_buffer_from_spec(dqn_spec, None, "cpu")
-        assert isinstance(result, ReplayBuffer)
-        assert result.max_size == 100_000
-
-    def test_from_spec_standard(self, buffer_spec):
-        dqn_spec = DQNSpec()
-        result = build_replay_buffer_from_spec(dqn_spec, buffer_spec, "cpu")
-        assert isinstance(result, ReplayBuffer)
-        assert result.max_size == 5_000
-
-    def test_from_spec_n_step(self):
-        spec = ReplayBufferSpec(memory_size=10_000, n_step_buffer=True)
-        from agilerl.models import RainbowDQNSpec
-
-        rainbow_spec = RainbowDQNSpec()
-        result = build_replay_buffer_from_spec(rainbow_spec, spec, "cpu")
-        assert isinstance(result, MultiStepReplayBuffer)
-        assert result.max_size == 10_000
 
 
 class TestGetTrainingKwargs:
@@ -365,11 +310,11 @@ class TestLocalTrainerHpo:
             environment=env,
             training=training_spec,
             mutation=None,
-            tournament=None,
+            selection_strategy=None,
             hpo=True,
         )
         assert trainer.mutation_spec is not None
-        assert trainer.tournament_selection_spec is not None
+        assert trainer.selection_strategy_spec is not None
 
     @patch("agilerl.training.trainer.create_population_from_spec")
     def test_hpo_does_not_override_explicit_specs(
@@ -381,11 +326,29 @@ class TestLocalTrainerHpo:
             environment=env,
             training=training_spec,
             mutation=mutation_spec,
-            tournament=tournament_spec,
+            selection_strategy=tournament_spec,
             hpo=True,
         )
         assert trainer.mutation_spec is mutation_spec
-        assert trainer.tournament_selection_spec is tournament_spec
+        assert trainer.selection_strategy_spec is tournament_spec
+
+    @patch("agilerl.training.trainer.create_population_from_spec")
+    def test_hpo_does_not_override_a_multi_frequency_spec(
+        self, mock_create_pop, env, mutation_spec
+    ):
+        """hpo=True must not inject tournament selection over a configured regime."""
+        mock_create_pop.return_value = [MagicMock()]
+        mf_spec = MultiFrequencySelectionSpec(n_subpopulations=2)
+        trainer = LocalTrainer(
+            algorithm="DQN",
+            environment=env,
+            training=TrainingSpec(pop_size=8),
+            mutation=mutation_spec,
+            selection_strategy=mf_spec,
+            hpo=True,
+        )
+        assert trainer.selection_strategy_spec is mf_spec
+        assert isinstance(trainer.selection_strategy, MultiFrequencySelection)
 
 
 class TestArenaTrainerMissingDependencies:
@@ -437,12 +400,12 @@ class TestLocalTrainerConstruction:
             environment=env,
             training=TrainingSpec(max_steps=200, evo_steps=50, pop_size=2),
             mutation=mutation_spec,
-            tournament=tournament_spec,
+            selection_strategy=tournament_spec,
             replay_buffer=buffer_spec,
             device="cpu",
         )
         assert trainer.mutation_spec is mutation_spec
-        assert trainer.tournament_selection_spec is tournament_spec
+        assert trainer.selection_strategy_spec is tournament_spec
         assert trainer.replay_buffer_spec is buffer_spec
 
 
@@ -554,12 +517,12 @@ class TestArenaTrainerConstruction:
             environment=env_spec,
             training=TrainingSpec(max_steps=200, evo_steps=50, pop_size=3),
             mutation=mutation_spec,
-            tournament=tournament_spec,
+            selection_strategy=tournament_spec,
             replay_buffer=buffer_spec,
             client=mock_client,
         )
         assert trainer.mutation_spec is mutation_spec
-        assert trainer.tournament_selection_spec is tournament_spec
+        assert trainer.selection_strategy_spec is tournament_spec
         assert trainer.replay_buffer_spec is buffer_spec
         assert trainer.training_spec.pop_size == 3
 
@@ -651,7 +614,7 @@ class TestArenaTrainerManifest:
             environment=env_spec,
             training=training_spec,
             mutation=mutation_spec,
-            tournament=tournament_spec,
+            selection_strategy=tournament_spec,
             client=mock_client,
         )
         manifest = trainer.to_manifest()
@@ -719,7 +682,7 @@ class TestArenaTrainerManifest:
         trainer.env_spec = 42  # not an EnvironmentSpec or str
         trainer.training_spec = training_spec
         trainer.mutation_spec = None
-        trainer.tournament_selection_spec = None
+        trainer.selection_strategy_spec = None
         trainer.replay_buffer_spec = None
         trainer._client = mock_client
 
@@ -2857,19 +2820,16 @@ def test_from_manifest_multi_agent_homogeneous(tmp_path):
 def _make_multi_frequency_ppo_trainer(
     training: TrainingSpec | None = None,
     accelerator: object | None = None,
-    multi_frequency_selection: MultiFrequencySelectionSpec | None = None,
+    selection_strategy: MultiFrequencySelectionSpec | None = None,
 ) -> LocalTrainer:
     """Build an eight-slot PPO LocalTrainer driven by multi-frequency selection."""
-    multi_frequency_selection = (
-        multi_frequency_selection
-        or MultiFrequencySelectionSpec(
-            n_subpopulations=2,
-            evolution_frequency_ratios=[1, 2],
-            n_winners=1,
-            n_survivors=1,
-            n_open_for_migration=1,
-            n_losers=1,
-        )
+    selection_strategy = selection_strategy or MultiFrequencySelectionSpec(
+        n_subpopulations=2,
+        evolution_frequency_ratios=[1, 2],
+        n_winners=1,
+        n_survivors=1,
+        n_open_for_migration=1,
+        n_losers=1,
     )
     mutation = MutationSpec(
         probabilities=MutationProbabilities(no_mut=0.5, params_mut=0.3, rl_hp_mut=0.2),
@@ -2892,7 +2852,7 @@ def _make_multi_frequency_ppo_trainer(
             environment=GymEnvSpec(name="CartPole-v1", num_envs=1),
             training=training or TrainingSpec(max_steps=200, evo_steps=50, pop_size=8),
             mutation=mutation,
-            multi_frequency_selection=multi_frequency_selection,
+            selection_strategy=selection_strategy,
             accelerator=accelerator,
         )
 
@@ -2903,9 +2863,7 @@ class TestLocalTrainerMultiFrequency:
     def test_builds_multi_frequency_and_tags_subpopulations(self):
         trainer = _make_multi_frequency_ppo_trainer()
 
-        assert isinstance(trainer.multi_frequency_selection, MultiFrequencySelection)
-        assert trainer.tournament_selection is None
-        assert trainer.selection_strategy is trainer.multi_frequency_selection
+        assert isinstance(trainer.selection_strategy, MultiFrequencySelection)
         subpops = sorted(a.subpopulation_id for a in trainer.population)
         assert subpops == [0, 0, 0, 0, 1, 1, 1, 1]
         assert len({a.index for a in trainer.population}) == 8
@@ -2920,36 +2878,7 @@ class TestLocalTrainerMultiFrequency:
             trainer = _make_multi_frequency_ppo_trainer(accelerator=accelerator)
 
         assert trainer.accelerator is accelerator
-        assert isinstance(trainer.multi_frequency_selection, MultiFrequencySelection)
-        assert trainer.selection_strategy is trainer.multi_frequency_selection
-
-    def test_rejects_both_multi_frequency_and_tournament(self):
-        multi_frequency_selection = MultiFrequencySelectionSpec(
-            n_subpopulations=2,
-            evolution_frequency_ratios=[1, 2],
-            n_winners=1,
-            n_survivors=1,
-            n_open_for_migration=1,
-            n_losers=1,
-        )
-        ppo = PPOSpec(
-            learn_step=128,
-            net_config=StochasticActorSpec(
-                encoder_config=MlpSpec(hidden_size=[16]),
-                head_config=MlpSpec(hidden_size=[16]),
-            ),
-        )
-        with (
-            patch.object(LocalTrainer, "_make_env", return_value=VectorizedDummyEnv()),
-            pytest.raises(ValueError, match="Cannot set both 'tournament'"),
-        ):
-            LocalTrainer(
-                algorithm=ppo,
-                environment=GymEnvSpec(name="CartPole-v1", num_envs=1),
-                training=TrainingSpec(max_steps=200, evo_steps=50, pop_size=8),
-                multi_frequency_selection=multi_frequency_selection,
-                tournament=TournamentSelectionSpec(tournament_size=2, elitism=True),
-            )
+        assert isinstance(trainer.selection_strategy, MultiFrequencySelection)
 
     def test_requires_explicit_pop_size_without_manifest(self):
         # pop_size is mandatory under MF-PBT
@@ -2966,10 +2895,10 @@ class TestLocalTrainerMultiFrequency:
 
     def test_resolves_bracket_defaults_onto_the_spec(self):
         trainer = _make_multi_frequency_ppo_trainer(
-            multi_frequency_selection=MultiFrequencySelectionSpec(n_subpopulations=2)
+            selection_strategy=MultiFrequencySelectionSpec(n_subpopulations=2)
         )
 
-        spec = trainer.multi_frequency_selection_spec
+        spec = trainer.selection_strategy_spec
         assert (spec.n_winners, spec.n_survivors, spec.n_open_for_migration) == (
             1,
             0,
@@ -2998,9 +2927,7 @@ class TestLocalTrainerMultiFrequencyManifest:
         with patch.object(LocalTrainer, "_make_env", return_value=VectorizedDummyEnv()):
             rebuilt = LocalTrainer.from_manifest(manifest)
 
-        assert isinstance(rebuilt.multi_frequency_selection, MultiFrequencySelection)
-        assert rebuilt.tournament_selection is None
-        assert rebuilt.selection_strategy is rebuilt.multi_frequency_selection
+        assert isinstance(rebuilt.selection_strategy, MultiFrequencySelection)
         assert rebuilt.training_spec.pop_size == 8
 
 
@@ -3024,7 +2951,7 @@ class TestCreatePopulationFromSpecMultiFrequency:
             mutation_spec=None,
             replay_buffer_spec=None,
             resume_from_checkpoint=str(checkpoint),
-            multi_frequency_selection_spec=mf_spec,
+            selection_strategy_spec=mf_spec,
         )
 
         assert [agent.index for agent in population] == [0, 1, 2, 3, 4, 5]
@@ -3054,7 +2981,7 @@ class TestMultiFrequencyRealPopulationEvolution:
             doomed = weakest_agent_index(agents, subpop=0)
 
             agents = run_selection_and_mutation(
-                trainer.multi_frequency_selection,
+                trainer.selection_strategy,
                 population=agents,
                 mutation=trainer.mutations,
                 env_name="CartPole-v1",
@@ -3082,11 +3009,170 @@ class TestMultiFrequencyRealPopulationEvolution:
         elite.learn_step = 512
         elite.mutation_hook()  # buffer sized to 512
 
-        trainer.multi_frequency_selection._sync_index(agents)
-        migrant = trainer.multi_frequency_selection._migrate_weights(
-            external, elite, subpop=1
-        )
+        trainer.selection_strategy._sync_index(agents)
+        migrant = trainer.selection_strategy._migrate_weights(external, elite, subpop=1)
 
         assert migrant.learn_step == 512  # took the elite's learn_step
         # Buffer capacity must follow the new learn_step (ceil(learn_step / num_envs))
         assert migrant.rollout_buffer.capacity == -(512 // -migrant.num_envs)
+
+
+class TestLocalTrainerSelectionStrategyDeprecation:
+    """The superseded ``tournament`` keyword still routes, loudly and unambiguously."""
+
+    @staticmethod
+    def _build(env, **kwargs):
+        with patch(
+            "agilerl.training.trainer.create_population_from_spec",
+            return_value=[MagicMock()],
+        ):
+            return LocalTrainer(
+                algorithm="PPO",
+                environment=env,
+                training=TrainingSpec(max_steps=500, pop_size=2, evo_steps=100),
+                **kwargs,
+            )
+
+    def test_deprecated_tournament_kwarg_warns_and_routes(self, env, tournament_spec):
+        with pytest.warns(DeprecationWarning, match="'tournament' argument"):
+            trainer = self._build(env, tournament=tournament_spec)
+
+        assert trainer.selection_strategy_spec is tournament_spec
+        assert isinstance(trainer.selection_strategy, TournamentSelection)
+
+    def test_equal_specs_from_both_spellings_route(self, env):
+        """Equality, not identity: two equal specs are not a conflict."""
+        current = TournamentSelectionSpec(tournament_size=3)
+        deprecated = TournamentSelectionSpec(tournament_size=3)
+        assert current is not deprecated
+
+        with pytest.warns(DeprecationWarning, match="'tournament' argument"):
+            trainer = self._build(
+                env, selection_strategy=current, tournament=deprecated
+            )
+
+        assert trainer.selection_strategy_spec is current
+
+    def test_conflicting_specs_raise(self, env):
+        with (
+            pytest.warns(DeprecationWarning, match="'tournament' argument"),
+            pytest.raises(ValueError, match="conflicting selection strategies"),
+        ):
+            self._build(
+                env,
+                selection_strategy=TournamentSelectionSpec(tournament_size=2),
+                tournament=TournamentSelectionSpec(tournament_size=3),
+            )
+
+    def test_conflicting_regimes_raise(self, env):
+        """Two different regimes can never be configured together."""
+        with (
+            pytest.warns(DeprecationWarning, match="'tournament' argument"),
+            pytest.raises(ValueError, match="conflicting selection strategies"),
+        ):
+            self._build(
+                env,
+                selection_strategy=MultiFrequencySelectionSpec(n_subpopulations=2),
+                tournament=TournamentSelectionSpec(),
+            )
+
+    def test_explicit_tournament_none_warns_but_supplies_no_strategy(
+        self, env, tournament_spec
+    ):
+        """The keyword's presence is deprecated, but a None value cannot conflict."""
+        with pytest.warns(DeprecationWarning, match="'tournament' argument"):
+            trainer = self._build(
+                env, selection_strategy=tournament_spec, tournament=None
+            )
+
+        assert trainer.selection_strategy_spec is tournament_spec
+
+    def test_unknown_kwarg_raises_type_error(self, env, tournament_spec):
+        with pytest.raises(TypeError, match="tournment"):
+            self._build(env, tournment=tournament_spec)
+
+    def test_warning_points_at_the_caller(self, env, tournament_spec):
+        """stacklevel must blame the user's call site, not the library."""
+        with pytest.warns(DeprecationWarning, match="'tournament' argument") as record:
+            self._build(env, tournament=tournament_spec)
+
+        deprecations = [w for w in record if issubclass(w.category, DeprecationWarning)]
+        assert deprecations[0].filename == __file__
+
+    @requires_arena
+    def test_arena_trainer_deprecated_tournament_kwarg_warns(
+        self, mock_client, tournament_spec, training_spec
+    ):
+        with pytest.warns(DeprecationWarning, match="'tournament' argument"):
+            trainer = ArenaTrainer(
+                algorithm="PPO",
+                environment="CartPole-v1",
+                training=training_spec,
+                client=mock_client,
+                tournament=tournament_spec,
+            )
+
+        assert trainer.selection_strategy_spec is tournament_spec
+
+    @requires_arena
+    def test_arena_trainer_rejects_multi_frequency(self, mock_client, training_spec):
+        with pytest.raises(ValueError, match="only supports tournament selection"):
+            ArenaTrainer(
+                algorithm="PPO",
+                environment="CartPole-v1",
+                training=training_spec,
+                client=mock_client,
+                selection_strategy=MultiFrequencySelectionSpec(n_subpopulations=2),
+            )
+
+
+class TestTrainerDeprecatedSelectionAttributes:
+    @staticmethod
+    def _build(selection_strategy):
+        # A real env spec, so to_manifest() can serialize the environment section
+        with (
+            patch.object(LocalTrainer, "_make_env", return_value=VectorizedDummyEnv()),
+            patch(
+                "agilerl.training.trainer.create_population_from_spec",
+                return_value=[MagicMock()],
+            ),
+        ):
+            return LocalTrainer(
+                algorithm="PPO",
+                environment=GymEnvSpec(name="CartPole-v1", num_envs=1),
+                training=TrainingSpec(max_steps=500, pop_size=8, evo_steps=100),
+                selection_strategy=selection_strategy,
+            )
+
+    def test_tournament_selection_spec_warns_and_returns_the_spec(
+        self, tournament_spec
+    ):
+        trainer = self._build(tournament_spec)
+
+        with pytest.warns(DeprecationWarning, match="tournament_selection_spec"):
+            assert trainer.tournament_selection_spec is tournament_spec
+
+    def test_tournament_selection_warns_and_returns_the_operator(self, tournament_spec):
+        trainer = self._build(tournament_spec)
+
+        with pytest.warns(DeprecationWarning, match="tournament_selection"):
+            assert isinstance(trainer.tournament_selection, TournamentSelection)
+
+    def test_deprecated_attributes_are_none_under_multi_frequency(self):
+        """Under MF-PBT there is no tournament spec or operator to return."""
+        trainer = self._build(MultiFrequencySelectionSpec(n_subpopulations=2))
+
+        with pytest.warns(DeprecationWarning, match="tournament_selection_spec"):
+            assert trainer.tournament_selection_spec is None
+        with pytest.warns(DeprecationWarning, match="tournament_selection"):
+            assert trainer.tournament_selection is None
+
+    def test_to_manifest_does_not_warn(self, tournament_spec):
+        """to_manifest() runs on every train(), so it must read the attribute."""
+        trainer = self._build(tournament_spec)
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            trainer.to_manifest()
+
+        assert not [w for w in caught if issubclass(w.category, DeprecationWarning)]

@@ -31,7 +31,6 @@ from agilerl.models.hpo import (  # noqa: F401
     MutationSpec,
     SelectionStrategySpec,
     TournamentSelectionSpec,
-    split_selection_spec,
 )
 from agilerl.models.manifest import TrainingManifest  # noqa: F401
 from agilerl.models.networks import (  # noqa: F401

@@ -267,7 +267,7 @@ can use our off-the-shelf training function, which returns a population of train
         eval_loop=1,  # Number of evaluation episodes
         learning_delay=1000,  # Steps before starting learning
         target=200.,  # Target score for early stopping
-        tournament=tournament,  # Tournament selection object
+        selection_strategy=tournament,  # Selection strategy object
         mutation=mutations,  # Mutations object
         wb=False,  # Weights and Biases tracking
     )

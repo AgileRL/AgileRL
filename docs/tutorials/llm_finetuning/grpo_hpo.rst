@@ -340,7 +340,7 @@ The simplest way to train an AgileRL agent is to use the :meth:`finetune_llm_rea
         max_reward=2.0,
         evo_steps=10,
         mutation=mutations,
-        tournament=tournament,
+        selection_strategy=tournament,
         accelerator=accelerator,
         verbose=True,
         num_epochs=1

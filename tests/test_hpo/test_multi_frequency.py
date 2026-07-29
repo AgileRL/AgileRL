@@ -7,137 +7,14 @@ import pytest
 
 import agilerl.hpo.multi_frequency as mf_module
 from agilerl.hpo.multi_frequency import MultiFrequencyOp, MultiFrequencySelection
-
-
-class _FakeParam:
-    """RLParameter-like stand-in carrying a mutable value."""
-
-    def __init__(self, value=None):
-        self.value = value
-
-
-class FakeHPConfig:
-    """Mimics HyperparameterConfig."""
-
-    def __init__(self, names):
-        self._params = {name: _FakeParam() for name in names}
-
-    def __iter__(self):
-        return iter(self._params)
-
-    def __bool__(self):
-        return bool(self._params)
-
-    def names(self):
-        return list(self._params)
-
-    def __getitem__(self, key):
-        return self._params[key]
-
-
-class FakeTorchOptimizer:
-    """Mimics a torch.optim.Optimizer."""
-
-    def __init__(self, lr):
-        self.param_groups = [{"lr": lr}]
-
-
-class FakeOptimizerWrapper:
-    """Mimics a OptimizerWrapper."""
-
-    def __init__(self, lr):
-        self.lr = lr
-        self.optimizer = FakeTorchOptimizer(lr)
-
-
-class FakeOptConfig:
-    """Mimics OptimizerConfig."""
-
-    def __init__(self, lr="lr", name="optimizer"):
-        self.lr = lr
-        self.name = name
-
-
-class FakeRegistry:
-    def __init__(self, hp_names):
-        self.hp_config = FakeHPConfig(hp_names)
-        self.optimizers = [FakeOptConfig(lr="lr", name="optimizer")]
-
-
-class FakeAgent:
-    """Stand-in for an EvolvableAlgorithm."""
-
-    def __init__(
-        self, index, subpopulation_id, fitness, weights="w", lr=1e-3, batch_size=64
-    ):
-        self.index = index
-        self.subpopulation_id = subpopulation_id
-        self.fitness = [fitness]
-        self.weights = weights
-        self.lr = lr
-        self.batch_size = batch_size
-        self.registry = FakeRegistry(["lr", "batch_size"])
-        self.optimizer = FakeOptimizerWrapper(lr)
-        self.reinit_called = False
-
-    def clone(self, index=None, wrap=False):
-        # type(self) so subclasses adding their own bookkeeping survive cloning
-        new = type(self)(
-            self.index if index is None else index,
-            self.subpopulation_id,
-            self.fitness[-1],
-            weights=self.weights,
-            lr=self.lr,
-            batch_size=self.batch_size,
-        )
-        for name in self.registry.hp_config.names():
-            new.registry.hp_config[name].value = self.registry.hp_config[name].value
-        return new
-
-    def mutation_hook(self):
-        self.mutation_hook_called = True
-
-    def reinit_optimizers(self, optimizer=None):
-        # Mirror the real reinit_optimizers
-        self.reinit_called = True
-        self.optimizer = FakeOptimizerWrapper(self.lr)
-
-    def save_checkpoint(self, path):
-        with open(path, "w") as fh:
-            fh.write("checkpoint")
-
-
-def make_population(subpop_fitnesses, weights=None):
-    """Build a population with unique indices."""
-    population = []
-    idx = 0
-    for subpop, fitnesses in subpop_fitnesses.items():
-        for j, fit in enumerate(fitnesses):
-            w = weights[subpop][j] if weights is not None else f"w{idx}"
-            population.append(FakeAgent(idx, subpop, fit, weights=w))
-            idx += 1
-    return population
-
-
-def make_strategy(
-    n_subpop=2, population_size=8, ratios=None, w=1, s=1, o=1, ln=1, seed=42
-):
-    return MultiFrequencySelection(
-        population_size=population_size,
-        n_subpopulations=n_subpop,
-        evolution_frequency_ratios=ratios or list(range(1, n_subpop + 1)),
-        n_winners=w,
-        n_survivors=s,
-        n_open_for_migration=o,
-        n_losers=ln,
-        seed=seed,
-    )
-
-
-def new_agents(before, after):
-    """Agents in after that are not one of the objects in before."""
-    before_ids = {id(a) for a in before}
-    return [a for a in after if id(a) not in before_ids]
+from tests.helper_functions import (
+    FakeOptimizerWrapper,
+    FakeRegistry,
+    FakeSelectionAgent,
+    make_fake_selection_population,
+    make_multi_frequency_selection,
+    new_agents,
+)
 
 
 def run_migration(strategy, population, subpop, external_pool):
@@ -152,7 +29,9 @@ def run_migration(strategy, population, subpop, external_pool):
 
 class TestMultiFrequencySelectionInit:
     def test_valid_construction_sets_derived_attributes(self):
-        strategy = make_strategy(n_subpop=2, population_size=8, ratios=[1, 3])
+        strategy = make_multi_frequency_selection(
+            n_subpop=2, population_size=8, ratios=[1, 3]
+        )
         assert strategy.population_size == 8
         assert strategy.subpopulation_size == 4
         assert strategy.deltas == [1, 3]
@@ -279,12 +158,14 @@ class TestMultiFrequencySelectionInit:
     )
     def test_init_rejects_invalid_brackets(self, kwargs, match):
         with pytest.raises(ValueError, match=match):
-            make_strategy(n_subpop=2, population_size=8, ratios=[1, 2], **kwargs)
+            make_multi_frequency_selection(
+                n_subpop=2, population_size=8, ratios=[1, 2], **kwargs
+            )
 
     def test_open_for_migration_may_exceed_winners_plus_survivors(self):
         # Migration sources migrants from the frozen pre-evolution snapshot, so a
-        # subpopulation may open more slots for migration than 00it preserves natively
-        strategy = make_strategy(
+        # subpopulation may open more slots for migration than it preserves natively
+        strategy = make_multi_frequency_selection(
             n_subpop=2, population_size=8, ratios=[1, 2], w=1, s=0, o=2, ln=1
         )
         assert strategy.bracket_sizes == (1, 0, 2, 1)
@@ -299,7 +180,7 @@ class TestMultiFrequencySelectionInit:
     )
     def test_init_rejects_invalid_ratios(self, ratios, match):
         with pytest.raises(ValueError, match=match):
-            make_strategy(n_subpop=2, population_size=8, ratios=ratios)
+            make_multi_frequency_selection(n_subpop=2, population_size=8, ratios=ratios)
 
     def test_init_rejects_negative_bracket(self):
         with pytest.raises(ValueError, match="n_losers must be >= 1, got -1"):
@@ -316,7 +197,7 @@ class TestMultiFrequencySelectionInit:
     def test_frozen_subpopulation_rejected(self):
         # A "frozen" subpopulation should raise an error
         with pytest.raises(ValueError, match="n_winners must be >= 1"):
-            make_strategy(
+            make_multi_frequency_selection(
                 n_subpop=2, population_size=8, ratios=[1, 2], w=0, s=4, o=0, ln=0
             )
 
@@ -355,19 +236,19 @@ class TestSubpopulationAssignment:
         assert [fn(i, 4) for i in range(12)] == [0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2]
 
     def test_assign_initial_subpopulations_tags_by_position_not_index(self):
-        strategy = make_strategy(n_subpop=2, population_size=8)
+        strategy = make_multi_frequency_selection(n_subpop=2, population_size=8)
         indices = [10, 11, 12, 13, 20, 21, 22, 23]
-        pop = [FakeAgent(idx, None, fitness=0.0) for idx in indices]
+        pop = [FakeSelectionAgent(idx, None, fitness=0.0) for idx in indices]
 
         strategy._assign_initial_subpopulations(pop)
 
         assert [a.subpopulation_id for a in pop] == [0, 0, 0, 0, 1, 1, 1, 1]
 
     def test_assign_initial_subpopulations_tags_only_untagged_agents(self):
-        strategy = make_strategy(n_subpop=2, population_size=8)
-        pop = [FakeAgent(i, None, fitness=0.0) for i in range(8)]
-        pop[0] = FakeAgent(0, 1, fitness=0.0)
-        pop[5] = FakeAgent(5, 0, fitness=0.0)
+        strategy = make_multi_frequency_selection(n_subpop=2, population_size=8)
+        pop = [FakeSelectionAgent(i, None, fitness=0.0) for i in range(8)]
+        pop[0] = FakeSelectionAgent(0, 1, fitness=0.0)
+        pop[5] = FakeSelectionAgent(5, 0, fitness=0.0)
 
         strategy._assign_initial_subpopulations(pop)
 
@@ -375,15 +256,19 @@ class TestSubpopulationAssignment:
 
     @pytest.mark.parametrize("size", [6, 10])
     def test_assign_initial_subpopulations_rejects_wrong_population_size(self, size):
-        strategy = make_strategy(n_subpop=2, population_size=8)  # pop_size == 8
-        pop = [FakeAgent(i, None, fitness=0.0) for i in range(size)]
+        strategy = make_multi_frequency_selection(
+            n_subpop=2, population_size=8
+        )  # pop_size == 8
+        pop = [FakeSelectionAgent(i, None, fitness=0.0) for i in range(size)]
 
         with pytest.raises(ValueError, match=f"{size} agents, expected 8"):
             strategy._assign_initial_subpopulations(pop)
 
     def test_assign_initial_subpopulations_accepts_correct_population_size(self):
-        strategy = make_strategy(n_subpop=2, population_size=8)  # pop_size == 8
-        pop = [FakeAgent(i, None, fitness=0.0) for i in range(8)]
+        strategy = make_multi_frequency_selection(
+            n_subpop=2, population_size=8
+        )  # pop_size == 8
+        pop = [FakeSelectionAgent(i, None, fitness=0.0) for i in range(8)]
 
         strategy._assign_initial_subpopulations(pop)
 
@@ -395,8 +280,11 @@ class TestSubpopulationAssignment:
         ids=["resumed-from-one-checkpoint", "single-duplicated-pair"],
     )
     def test_assign_initial_subpopulations_rejects_duplicate_indices(self, indices):
-        strategy = make_strategy(n_subpop=2, population_size=8)
-        pop = [FakeAgent(idx, i // 4, fitness=0.0) for i, idx in enumerate(indices)]
+        strategy = make_multi_frequency_selection(n_subpop=2, population_size=8)
+        pop = [
+            FakeSelectionAgent(idx, i // 4, fitness=0.0)
+            for i, idx in enumerate(indices)
+        ]
 
         with pytest.raises(ValueError, match="globally-unique agent indices"):
             strategy._assign_initial_subpopulations(pop)
@@ -414,8 +302,12 @@ class TestBrackets:
     def test_brackets_partition_subpop_by_descending_fitness(
         self, w, s, o, ln, expected
     ):
-        strategy = make_strategy(n_subpop=2, population_size=8, w=w, s=s, o=o, ln=ln)
-        pop = make_population({0: [2.0, 4.0, 1.0, 3.0], 1: [8.0, 7.0, 6.0, 5.0]})
+        strategy = make_multi_frequency_selection(
+            n_subpop=2, population_size=8, w=w, s=s, o=o, ln=ln
+        )
+        pop = make_fake_selection_population(
+            {0: [2.0, 4.0, 1.0, 3.0], 1: [8.0, 7.0, 6.0, 5.0]}
+        )
 
         winners, survivors, open_, losers = strategy._bracket_subpopulation(
             pop, subpop=0
@@ -430,8 +322,10 @@ class TestBrackets:
             assert all(a.subpopulation_id == 0 for a in bracket)
 
     def test_brackets_select_the_requested_subpopulation(self):
-        strategy = make_strategy(n_subpop=2, population_size=8)
-        pop = make_population({0: [4.0, 3.0, 2.0, 1.0], 1: [8.0, 7.0, 6.0, 5.0]})
+        strategy = make_multi_frequency_selection(n_subpop=2, population_size=8)
+        pop = make_fake_selection_population(
+            {0: [4.0, 3.0, 2.0, 1.0], 1: [8.0, 7.0, 6.0, 5.0]}
+        )
 
         winners, survivors, open_, losers = strategy._bracket_subpopulation(
             pop, subpop=1
@@ -446,8 +340,8 @@ class TestBrackets:
 
     def test_brackets_reject_wrong_member_count(self):
         # A mis-tagged subpop is rejected up front rather than silently mis-sliced
-        strategy = make_strategy(n_subpop=2, population_size=8)
-        pop = [FakeAgent(i, 0, fitness=float(i)) for i in range(3)]
+        strategy = make_multi_frequency_selection(n_subpop=2, population_size=8)
+        pop = [FakeSelectionAgent(i, 0, fitness=float(i)) for i in range(3)]
 
         with pytest.raises(
             ValueError, match="Subpopulation 0 has 3 members, expected 4"
@@ -457,8 +351,10 @@ class TestBrackets:
 
 class TestCloneWinnersOverLosers:
     def test_clone_winners_over_losers_replaces_losers_with_fresh_winner_clones(self):
-        strategy = make_strategy(n_subpop=2, population_size=8)
-        pop = make_population({0: [4.0, 3.0, 2.0, 1.0], 1: [8.0, 7.0, 6.0, 5.0]})
+        strategy = make_multi_frequency_selection(n_subpop=2, population_size=8)
+        pop = make_fake_selection_population(
+            {0: [4.0, 3.0, 2.0, 1.0], 1: [8.0, 7.0, 6.0, 5.0]}
+        )
         max_index_before = max(a.index for a in pop)
         winners, _s, _o, losers = strategy._bracket_subpopulation(pop, subpop=0)
 
@@ -481,8 +377,10 @@ class TestCloneWinnersOverLosers:
 
     def test_clone_winners_over_losers_returns_new_list(self):
         # Cloning must return a new population rather than mutating the one it's handed
-        strategy = make_strategy()
-        pop = make_population({0: [4.0, 3.0, 2.0, 1.0], 1: [8.0, 7.0, 6.0, 5.0]})
+        strategy = make_multi_frequency_selection()
+        pop = make_fake_selection_population(
+            {0: [4.0, 3.0, 2.0, 1.0], 1: [8.0, 7.0, 6.0, 5.0]}
+        )
         pop_copy = list(pop)
         winners, _s, _o, losers = strategy._bracket_subpopulation(pop, subpop=0)
 
@@ -491,8 +389,12 @@ class TestCloneWinnersOverLosers:
         assert pop == pop_copy
 
     def test_clone_winners_over_losers_clones_are_independent_of_parents(self):
-        strategy = make_strategy(n_subpop=2, population_size=8, w=1, s=0, o=1, ln=2)
-        pop = make_population({0: [4.0, 3.0, 2.0, 1.0], 1: [8.0, 7.0, 6.0, 5.0]})
+        strategy = make_multi_frequency_selection(
+            n_subpop=2, population_size=8, w=1, s=0, o=1, ln=2
+        )
+        pop = make_fake_selection_population(
+            {0: [4.0, 3.0, 2.0, 1.0], 1: [8.0, 7.0, 6.0, 5.0]}
+        )
         winner = next(
             a for a in pop if a.subpopulation_id == 0 and a.fitness[-1] == 4.0
         )
@@ -509,8 +411,12 @@ class TestCloneWinnersOverLosers:
 
     def test_clone_winners_over_losers_with_zero_survivors_replaces_every_loser(self):
         # Brackets 1/0/1/2: one winner, no survivors, one open, two losers.
-        strategy = make_strategy(n_subpop=2, population_size=8, w=1, s=0, o=1, ln=2)
-        pop = make_population({0: [4.0, 3.0, 2.0, 1.0], 1: [8.0, 7.0, 6.0, 5.0]})
+        strategy = make_multi_frequency_selection(
+            n_subpop=2, population_size=8, w=1, s=0, o=1, ln=2
+        )
+        pop = make_fake_selection_population(
+            {0: [4.0, 3.0, 2.0, 1.0], 1: [8.0, 7.0, 6.0, 5.0]}
+        )
         winners, _s, _o, losers = strategy._bracket_subpopulation(pop, subpop=0)
 
         new_pop, new_indices = strategy._clone_winners_over_losers(
@@ -530,8 +436,10 @@ class TestCloneWinnersOverLosers:
         }
 
         def run():
-            pop = make_population(**pop_kwargs)
-            strategy = make_strategy(population_size=10, w=2, s=0, o=1, ln=2, seed=7)
+            pop = make_fake_selection_population(**pop_kwargs)
+            strategy = make_multi_frequency_selection(
+                population_size=10, w=2, s=0, o=1, ln=2, seed=7
+            )
             winners, _s, _o, losers = strategy._bracket_subpopulation(pop, subpop=0)
             new_pop, _ = strategy._clone_winners_over_losers(
                 pop, winners, losers, subpop=0
@@ -551,8 +459,8 @@ class TestCloneWinnersOverLosers:
             picks = []
             # Several cloning rounds so the seeded stream can diverge
             for _ in range(6):
-                pop = make_population(**pop_kwargs)
-                strategy = make_strategy(
+                pop = make_fake_selection_population(**pop_kwargs)
+                strategy = make_multi_frequency_selection(
                     population_size=10, w=2, s=0, o=1, ln=2, seed=seed
                 )
                 winners, _s, _o, losers = strategy._bracket_subpopulation(pop, subpop=0)
@@ -567,8 +475,12 @@ class TestCloneWinnersOverLosers:
 
 class TestSelect:
     def test_select_evolves_each_subpopulation_at_its_frequency(self):
-        strategy = make_strategy(n_subpop=3, population_size=12, ratios=[1, 2, 3])
-        pop = make_population({0: [4, 3, 2, 1], 1: [8, 7, 6, 5], 2: [12, 11, 10, 9]})
+        strategy = make_multi_frequency_selection(
+            n_subpop=3, population_size=12, ratios=[1, 2, 3]
+        )
+        pop = make_fake_selection_population(
+            {0: [4, 3, 2, 1], 1: [8, 7, 6, 5], 2: [12, 11, 10, 9]}
+        )
         fired = []  # (cycle, subpop)
 
         for cycle in range(1, 7):
@@ -587,8 +499,12 @@ class TestSelect:
 
     def test_select_returns_new_population_and_only_clone_indices(self):
         # Subpop 0 (delta 1) is due on cycle 1; subpop 1 (delta 2) is not.
-        strategy = make_strategy(n_subpop=2, population_size=8, ratios=[1, 2])
-        pop = make_population({0: [4.0, 3.0, 2.0, 1.0], 1: [8.0, 7.0, 6.0, 5.0]})
+        strategy = make_multi_frequency_selection(
+            n_subpop=2, population_size=8, ratios=[1, 2]
+        )
+        pop = make_fake_selection_population(
+            {0: [4.0, 3.0, 2.0, 1.0], 1: [8.0, 7.0, 6.0, 5.0]}
+        )
 
         elite, new_pop, indices = strategy.select(pop)
 
@@ -609,15 +525,21 @@ class TestSelect:
         assert all(a in new_pop for a in original_subpop1)
 
     def test_select_rejects_duplicate_indices(self):
-        strategy = make_strategy(n_subpop=2, population_size=8, ratios=[1, 2])
-        pop = [FakeAgent(3, i // 4, fitness=float(8 - i)) for i in range(8)]
+        strategy = make_multi_frequency_selection(
+            n_subpop=2, population_size=8, ratios=[1, 2]
+        )
+        pop = [FakeSelectionAgent(3, i // 4, fitness=float(8 - i)) for i in range(8)]
 
         with pytest.raises(ValueError, match="globally-unique agent indices"):
             strategy.select(pop)
 
     def test_select_keeps_indices_unique_across_cycles(self):
-        strategy = make_strategy(n_subpop=2, population_size=8, ratios=[1, 2])
-        pop = make_population({0: [4.0, 3.0, 2.0, 1.0], 1: [8.0, 7.0, 6.0, 5.0]})
+        strategy = make_multi_frequency_selection(
+            n_subpop=2, population_size=8, ratios=[1, 2]
+        )
+        pop = make_fake_selection_population(
+            {0: [4.0, 3.0, 2.0, 1.0], 1: [8.0, 7.0, 6.0, 5.0]}
+        )
 
         for _ in range(4):
             _elite, pop, _indices = strategy.select(pop)
@@ -627,8 +549,12 @@ class TestSelect:
 class TestMigration:
     def test_migration_slow_to_fast_keeps_external_weights_but_elite_hps(self):
         # Studied subpop 1 (delta=2); external subpop 0 (delta=1) -> delta_ext < delta_studied.
-        strategy = make_strategy(n_subpop=2, population_size=8, ratios=[1, 2])
-        pop = make_population({0: [9.0, 8.0, 7.0, 6.0], 1: [5.0, 4.0, 3.0, 2.0]})
+        strategy = make_multi_frequency_selection(
+            n_subpop=2, population_size=8, ratios=[1, 2]
+        )
+        pop = make_fake_selection_population(
+            {0: [9.0, 8.0, 7.0, 6.0], 1: [5.0, 4.0, 3.0, 2.0]}
+        )
         for a in pop:
             if a.subpopulation_id == 0:
                 a.weights = "EXT"
@@ -654,8 +580,12 @@ class TestMigration:
 
     def test_migration_full_clone_when_external_not_faster(self):
         # Studied subpop 0 (delta=1); external subpop 1 (delta=2) -> delta_ext > delta_studied.
-        strategy = make_strategy(n_subpop=2, population_size=8, ratios=[1, 2])
-        pop = make_population({0: [5.0, 4.0, 3.0, 2.0], 1: [9.0, 8.0, 7.0, 6.0]})
+        strategy = make_multi_frequency_selection(
+            n_subpop=2, population_size=8, ratios=[1, 2]
+        )
+        pop = make_fake_selection_population(
+            {0: [5.0, 4.0, 3.0, 2.0], 1: [9.0, 8.0, 7.0, 6.0]}
+        )
         for a in pop:
             if a.subpopulation_id == 1:
                 a.weights = "EXT"
@@ -669,8 +599,12 @@ class TestMigration:
         assert movers[0].lr == 0.5
 
     def test_migration_migrant_is_independent_of_external_parent(self):
-        strategy = make_strategy(n_subpop=2, population_size=8, ratios=[1, 2])
-        pop = make_population({0: [5.0, 4.0, 3.0, 2.0], 1: [9.0, 8.0, 7.0, 6.0]})
+        strategy = make_multi_frequency_selection(
+            n_subpop=2, population_size=8, ratios=[1, 2]
+        )
+        pop = make_fake_selection_population(
+            {0: [5.0, 4.0, 3.0, 2.0], 1: [9.0, 8.0, 7.0, 6.0]}
+        )
         external = next(
             a for a in pop if a.subpopulation_id == 1 and a.fitness[-1] == 9.0
         )
@@ -683,8 +617,12 @@ class TestMigration:
 
     def test_migration_skips_when_open_agent_already_better(self):
         # The open agent of subpop 0 beats every external agent -> no migration
-        strategy = make_strategy(n_subpop=2, population_size=8, ratios=[1, 2])
-        pop = make_population({0: [100.0, 99.0, 98.0, 1.0], 1: [9.0, 8.0, 7.0, 6.0]})
+        strategy = make_multi_frequency_selection(
+            n_subpop=2, population_size=8, ratios=[1, 2]
+        )
+        pop = make_fake_selection_population(
+            {0: [100.0, 99.0, 98.0, 1.0], 1: [9.0, 8.0, 7.0, 6.0]}
+        )
         open_agent = next(
             a for a in pop if a.subpopulation_id == 0 and a.fitness[-1] == 98.0
         )
@@ -695,14 +633,18 @@ class TestMigration:
         assert not new_agents(pop, migrated)
 
     def test_migration_sources_migrants_from_external_pool_not_live_population(self):
-        strategy = make_strategy(
+        strategy = make_multi_frequency_selection(
             n_subpop=2, population_size=8, ratios=[1, 2], w=1, s=1, o=1, ln=1
         )
-        pop = make_population({0: [4.0, 3.0, 2.0, 1.0], 1: [5.0, 4.0, 3.0, 2.0]})
+        pop = make_fake_selection_population(
+            {0: [4.0, 3.0, 2.0, 1.0], 1: [5.0, 4.0, 3.0, 2.0]}
+        )
         for a in pop:  # subpop 0 already evolved this cycle -> its members are spent
             if a.subpopulation_id == 0:
                 a.weights = "SPENT"
-        frozen = make_population({0: [9.0, 8.0, 7.0, 6.0], 1: [5.0, 4.0, 3.0, 2.0]})
+        frozen = make_fake_selection_population(
+            {0: [9.0, 8.0, 7.0, 6.0], 1: [5.0, 4.0, 3.0, 2.0]}
+        )
         for a in frozen:
             if a.subpopulation_id == 0:
                 a.weights = "FROZEN"
@@ -727,10 +669,12 @@ class TestMigration:
         #
         # So exactly one migrant results. Had the pointer not advanced past e0, open1
         # would be re-offered e0 (40) and migrate a second copy of it.
-        strategy = make_strategy(
+        strategy = make_multi_frequency_selection(
             n_subpop=2, population_size=8, ratios=[1, 2], w=1, s=0, o=2, ln=1
         )
-        pop = make_population({0: [50.0, 30.0, 20.0, 5.0], 1: [40.0, 15.0, 10.0, 8.0]})
+        pop = make_fake_selection_population(
+            {0: [50.0, 30.0, 20.0, 5.0], 1: [40.0, 15.0, 10.0, 8.0]}
+        )
         e0 = next(a for a in pop if a.subpopulation_id == 1 and a.fitness[-1] == 40.0)
         e0.weights = "E0"
         open1 = next(
@@ -747,11 +691,13 @@ class TestMigration:
     def test_migration_decisions_stop_when_external_pool_is_exhausted(self):
         # Two open slots but a single external candidate: the first slot consumes it,
         # then the second finds the pool exhausted and there is no migration
-        strategy = make_strategy(n_subpop=2, population_size=8, ratios=[1, 2])
-        elite = FakeAgent(100, 0, fitness=10.0)
-        open0 = FakeAgent(101, 0, fitness=1.0)
-        open1 = FakeAgent(102, 0, fitness=1.0)
-        external = FakeAgent(200, 1, fitness=5.0)
+        strategy = make_multi_frequency_selection(
+            n_subpop=2, population_size=8, ratios=[1, 2]
+        )
+        elite = FakeSelectionAgent(100, 0, fitness=10.0)
+        open0 = FakeSelectionAgent(101, 0, fitness=1.0)
+        open1 = FakeSelectionAgent(102, 0, fitness=1.0)
+        external = FakeSelectionAgent(200, 1, fitness=5.0)
 
         decisions = strategy._migration_decisions(
             subpop=0,
@@ -774,10 +720,12 @@ class TestMigration:
         #
         # So exactly one migrant results. Had the skip advanced the pointer, open1 would
         # face e1 (12), beat it, and skip -> zero migrants.
-        strategy = make_strategy(
+        strategy = make_multi_frequency_selection(
             n_subpop=2, population_size=8, ratios=[1, 2], w=1, s=0, o=2, ln=1
         )
-        pop = make_population({0: [50.0, 30.0, 20.0, 5.0], 1: [25.0, 12.0, 10.0, 8.0]})
+        pop = make_fake_selection_population(
+            {0: [50.0, 30.0, 20.0, 5.0], 1: [25.0, 12.0, 10.0, 8.0]}
+        )
         e0 = next(a for a in pop if a.subpopulation_id == 1 and a.fitness[-1] == 25.0)
         e0.weights = "E0"
         open0 = next(
@@ -874,7 +822,7 @@ def llm_dispatch(monkeypatch):
 
 class TestApplyHpReset:
     def test_apply_hp_reset_sets_hps_syncs_config_and_rebuilds_lr_optimizer(self):
-        strategy = make_strategy(n_subpop=2, population_size=8)
+        strategy = make_multi_frequency_selection(n_subpop=2, population_size=8)
         agent = FakeLLMAgent(0, 0, 1.0, lr=0.5)
 
         strategy._apply_hp_reset(agent, {"lr": 0.001, "batch_size": 32})
@@ -888,7 +836,7 @@ class TestApplyHpReset:
         assert agent.optimizer.lr == 0.001
 
     def test_apply_hp_reset_skips_optimizer_rebuild_when_lr_unchanged(self):
-        strategy = make_strategy(n_subpop=2, population_size=8)
+        strategy = make_multi_frequency_selection(n_subpop=2, population_size=8)
         agent = FakeLLMAgent(0, 0, 1.0, lr=0.5)
 
         strategy._apply_hp_reset(agent, {"batch_size": 32})
@@ -902,7 +850,9 @@ class TestSelectLLM:
     def test_select_dispatches_to_llm_path_for_llm_populations(self):
         # The LLM path returns the live elite (not a fresh clone) and scrubs mut on
         # every returned agent. Neither is true of the standard path
-        strategy = make_strategy(n_subpop=2, population_size=8, ratios=[1, 2])
+        strategy = make_multi_frequency_selection(
+            n_subpop=2, population_size=8, ratios=[1, 2]
+        )
         pop = make_llm_population({0: [4.0, 3.0, 2.0, 1.0], 1: [8.0, 7.0, 6.0, 5.0]})
 
         elite, new_pop, _indices = strategy.select(pop)
@@ -911,7 +861,9 @@ class TestSelectLLM:
         assert all(a.mut == "None" for a in new_pop)
 
     def test_select_returns_live_global_elite(self):
-        strategy = make_strategy(n_subpop=2, population_size=8, ratios=[1, 2])
+        strategy = make_multi_frequency_selection(
+            n_subpop=2, population_size=8, ratios=[1, 2]
+        )
         pop = make_llm_population({0: [4.0, 3.0, 2.0, 1.0], 1: [8.0, 7.0, 6.0, 5.0]})
         best = next(a for a in pop if a.fitness[-1] == 8.0)
 
@@ -921,7 +873,9 @@ class TestSelectLLM:
         assert elite in new_pop
 
     def test_select_marks_only_winner_clones_for_mutation(self):
-        strategy = make_strategy(n_subpop=2, population_size=8, ratios=[1, 2])
+        strategy = make_multi_frequency_selection(
+            n_subpop=2, population_size=8, ratios=[1, 2]
+        )
         pop = make_llm_population({0: [4.0, 3.0, 2.0, 1.0], 1: [8.0, 7.0, 6.0, 5.0]})
 
         _elite, new_pop, indices = strategy.select(pop)
@@ -933,7 +887,9 @@ class TestSelectLLM:
     def test_select_frees_replaced_non_source_agents(self):
         # Subpop 0 is due: its loser (1.0) is cloned over and its open slot
         # (2.0) is migrated over. Both are freed; neither is a clone/migration source
-        strategy = make_strategy(n_subpop=2, population_size=8, ratios=[1, 2])
+        strategy = make_multi_frequency_selection(
+            n_subpop=2, population_size=8, ratios=[1, 2]
+        )
         pop = make_llm_population({0: [4.0, 3.0, 2.0, 1.0], 1: [8.0, 7.0, 6.0, 5.0]})
         loser = next(a for a in pop if a.subpopulation_id == 0 and a.fitness[-1] == 1.0)
         open_agent = next(
@@ -948,7 +904,7 @@ class TestSelectLLM:
     def test_select_frees_a_replaced_agent_only_after_its_last_use_as_a_source(self):
         # Subpop 0's weaker open slot (30.0) is migrated over, yet it is also the agent subpop
         # 1 imports. It therefore cannot be freed until the migration that reads it has run.
-        strategy = make_strategy(
+        strategy = make_multi_frequency_selection(
             n_subpop=2, population_size=8, ratios=[1, 2], w=1, s=0, o=2, ln=1
         )
         strategy.counters = [0, 1]  # a single cycle then fires both subpopulations
@@ -965,7 +921,9 @@ class TestSelectLLM:
         assert source.clean_up_calls == 1  # and it was freed exactly once, afterwards
 
     def test_select_does_not_free_surviving_agents(self):
-        strategy = make_strategy(n_subpop=2, population_size=8, ratios=[1, 2])
+        strategy = make_multi_frequency_selection(
+            n_subpop=2, population_size=8, ratios=[1, 2]
+        )
         pop = make_llm_population({0: [4.0, 3.0, 2.0, 1.0], 1: [8.0, 7.0, 6.0, 5.0]})
         winner = next(
             a for a in pop if a.subpopulation_id == 0 and a.fitness[-1] == 4.0
@@ -984,7 +942,9 @@ class TestSelectLLM:
                 assert a.clean_up_calls == 0
 
     def test_select_schedules_subpopulations_at_their_frequency(self):
-        strategy = make_strategy(n_subpop=3, population_size=12, ratios=[1, 2, 3])
+        strategy = make_multi_frequency_selection(
+            n_subpop=3, population_size=12, ratios=[1, 2, 3]
+        )
         counters_seen = []
 
         for _ in range(6):
@@ -1007,7 +967,9 @@ class TestSelectLLM:
 
     def test_select_migrate_full_imports_external_agent_wholesale(self):
         # Subpop 0 due; its open slot is offered subpop 1's best (full clone)
-        strategy = make_strategy(n_subpop=2, population_size=8, ratios=[1, 2])
+        strategy = make_multi_frequency_selection(
+            n_subpop=2, population_size=8, ratios=[1, 2]
+        )
         pop = make_llm_population({0: [4.0, 3.0, 2.0, 1.0], 1: [8.0, 7.0, 6.0, 5.0]})
         ext = next(a for a in pop if a.fitness[-1] == 8.0)
         ext.weights = "EXT8"
@@ -1023,7 +985,9 @@ class TestSelectLLM:
 
     def test_select_migrate_weights_keeps_external_weights_but_elite_hps(self):
         # Both subpops due. Subpop 1 draws from subpop 0 (weights-only)
-        strategy = make_strategy(n_subpop=2, population_size=8, ratios=[1, 2])
+        strategy = make_multi_frequency_selection(
+            n_subpop=2, population_size=8, ratios=[1, 2]
+        )
         strategy.counters = [0, 1]
         pop = make_llm_population({0: [9.0, 8.0, 7.0, 6.0], 1: [5.0, 4.0, 3.0, 2.0]})
         for a in pop:
@@ -1068,7 +1032,9 @@ class TestSelectLLMAccelerator:
 
         monkeypatch.setattr(mf_module, "broadcast_object_list", fake_broadcast)
         accelerator = _MultiProcAccelerator(is_main_process=True, num_processes=2)
-        strategy = make_strategy(n_subpop=2, population_size=8, ratios=[1, 2])
+        strategy = make_multi_frequency_selection(
+            n_subpop=2, population_size=8, ratios=[1, 2]
+        )
         pop = make_llm_population(
             {0: [4.0, 3.0, 2.0, 1.0], 1: [8.0, 7.0, 6.0, 5.0]},
             accelerator=accelerator,
@@ -1090,7 +1056,9 @@ class TestSelectLLMAccelerator:
         # A worker must not advance its own counters/RNG; it consumes the plan the main
         # process broadcast and materialises exactly that generation
         monkeypatch.setattr(mf_module, "LLMAlgorithm", FakeLLMAgent)
-        strategy = make_strategy(n_subpop=2, population_size=8, ratios=[1, 2])
+        strategy = make_multi_frequency_selection(
+            n_subpop=2, population_size=8, ratios=[1, 2]
+        )
         accelerator = _MultiProcAccelerator(is_main_process=False, num_processes=2)
         pop = make_llm_population(
             {0: [4.0, 3.0, 2.0, 1.0], 1: [8.0, 7.0, 6.0, 5.0]},

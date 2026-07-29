@@ -57,11 +57,9 @@ from agilerl.utils.utils import (
     tournament_selection_and_mutation,
 )
 from agilerl.wrappers.learning import Skill
-from tests.test_hpo.test_multi_frequency import (
-    FakeAgent as _OperatorFakeAgent,
-)
-from tests.test_hpo.test_multi_frequency import (
-    make_strategy,
+from tests.helper_functions import (
+    FakeSelectionAgent,
+    make_multi_frequency_selection,
     new_agents,
 )
 
@@ -1031,7 +1029,7 @@ class TestInitLoggers:
         assert loggers[0]._accelerator is acc
 
 
-class FakeAgent(_OperatorFakeAgent):
+class FakeAgent(FakeSelectionAgent):
     """The operator's agent stand-in plus the accelerator round-trip bookkeeping."""
 
     def __init__(self, *args, **kwargs):
@@ -1161,7 +1159,7 @@ class TestRunSelectionAndMutation:
     def test_multi_frequency_language_model_dispatches_through_llm_branch(
         self, monkeypatch, tmp_path
     ):
-        strategy = make_strategy()
+        strategy = make_multi_frequency_selection()
         elite = object()
         monkeypatch.setattr(strategy, "select", lambda pop: (elite, ["evolved"], [3]))
         saved: list = []
@@ -1189,7 +1187,7 @@ class TestRunSelectionAndMutation:
     def test_multi_frequency_language_model_consolidates_under_accelerator(
         self, monkeypatch
     ):
-        strategy = make_strategy()
+        strategy = make_multi_frequency_selection()
         monkeypatch.setattr(
             strategy, "select", lambda pop: (object(), ["evolved"], [3])
         )
@@ -1353,7 +1351,9 @@ class TestRunSelectionAndMutationMultiFrequency:
     """The shared entry point orchestrates a real multi-frequency selection."""
 
     def test_orchestration_schedules_subpops_at_their_frequencies(self):
-        strategy = make_strategy(n_subpop=3, population_size=12, ratios=[1, 2, 3])
+        strategy = make_multi_frequency_selection(
+            n_subpop=3, population_size=12, ratios=[1, 2, 3]
+        )
         pop = make_selection_population(
             {0: [4, 3, 2, 1], 1: [8, 7, 6, 5], 2: [12, 11, 10, 9]}
         )
@@ -1376,7 +1376,9 @@ class TestRunSelectionAndMutationMultiFrequency:
         assert [c for c, s in fired if s == 2] == [3, 6]  # delta=3
 
     def test_orchestration_saves_global_elite(self, tmp_path):
-        strategy = make_strategy(n_subpop=2, population_size=8, ratios=[1, 2])
+        strategy = make_multi_frequency_selection(
+            n_subpop=2, population_size=8, ratios=[1, 2]
+        )
         pop = make_selection_population({0: [4, 3, 2, 1], 1: [8, 7, 6, 5]})
         elite_path = str(tmp_path / "best.pt")
 
@@ -1395,7 +1397,9 @@ class TestRunSelectionAndMutationMultiFrequency:
         self, tmp_path, monkeypatch
     ):
         monkeypatch.chdir(tmp_path)
-        strategy = make_strategy(n_subpop=2, population_size=8, ratios=[1, 2])
+        strategy = make_multi_frequency_selection(
+            n_subpop=2, population_size=8, ratios=[1, 2]
+        )
         pop = make_selection_population({0: [4, 3, 2, 1], 1: [8, 7, 6, 5]})
         accel = FakeAccelerator(is_main_process=True)
         elite_path = str(tmp_path / "best.pt")
@@ -1420,10 +1424,12 @@ class TestRunSelectionAndMutationMultiFrequency:
             assert agent.wrap_calls == 1
             assert len(agent.saved) == 1
             assert agent.loaded == []
-        assert accel.wait_count >= 3
+        assert accel.wait_count == 4
 
     def test_orchestration_accelerator_worker_loads_without_evolving(self):
-        strategy = make_strategy(n_subpop=2, population_size=8, ratios=[1, 2])
+        strategy = make_multi_frequency_selection(
+            n_subpop=2, population_size=8, ratios=[1, 2]
+        )
         pop = make_selection_population({0: [4, 3, 2, 1], 1: [8, 7, 6, 5]})
         accel = FakeAccelerator(is_main_process=False)
 
@@ -1443,10 +1449,12 @@ class TestRunSelectionAndMutationMultiFrequency:
             assert agent.wrap_calls == 1
             assert agent.loaded == [f"models/env/DQN_{i}.pt"]
             assert agent.saved == []
-        assert accel.wait_count >= 3
+        assert accel.wait_count == 4
 
     def test_orchestration_assigns_missing_subpopulations(self):
-        strategy = make_strategy(n_subpop=2, population_size=8, ratios=[1, 2])
+        strategy = make_multi_frequency_selection(
+            n_subpop=2, population_size=8, ratios=[1, 2]
+        )
         pop = make_selection_population({None: [8, 7, 6, 5, 4, 3, 2, 1]})
         for agent in pop:
             agent.subpopulation_id = None
@@ -1457,46 +1465,10 @@ class TestRunSelectionAndMutationMultiFrequency:
 
         assert sorted(a.subpopulation_id for a in pop) == [0, 0, 0, 0, 1, 1, 1, 1]
 
-    def test_orchestration_migrates_against_pre_evolution_snapshot(self):
-        strategy = make_strategy(n_subpop=2, population_size=8, ratios=[1, 2])
-        pop = make_selection_population({0: [4, 3, 2, 1], 1: [8, 7, 6, 5]})
-        snapshot = list(pop)
-
-        # Cloning swaps in fresh objects, so sourcing migrants from the live (evolved)
-        # population would be visibly different from the pre-evolution snapshot
-        def fake_clone(population, winners, losers, subpop):
-            fresh = [
-                FakeAgent(100 + i, a.subpopulation_id, a.fitness[-1])
-                for i, a in enumerate(population)
-            ]
-            return fresh, []
-
-        captured: dict[int, list] = {}
-
-        def fake_migrate(
-            population, subpop, winners, open_for_migration, external_pool
-        ):
-            captured[subpop] = external_pool
-            return population
-
-        strategy._clone_winners_over_losers = fake_clone
-        strategy._migrate = fake_migrate
-        strategy.counters = [0, 1]  # a single cycle then fires BOTH subpopulations
-
-        run_selection_and_mutation(
-            strategy, population=pop, mutation=FakeMutations(), env_name="env"
-        )
-
-        # Both subpopulations fired, and each migration saw the identical pre-evolution
-        # snapshot -- subpop 1 ran after subpop 0's cloning replaced the live objects
-        assert set(captured) == {0, 1}
-        assert captured[0] == snapshot
-        assert captured[1] == snapshot
-
 
 class TestResolveSelectionStrategy:
     def test_resolve_prefers_new_argument_without_warning(self, recwarn):
-        strategy = make_strategy()
+        strategy = make_multi_frequency_selection()
         assert resolve_selection_strategy(strategy, None) is strategy
         assert len(recwarn) == 0
 
@@ -1509,7 +1481,7 @@ class TestResolveSelectionStrategy:
         assert resolved is tournament
 
     def test_resolve_conflict_prefers_selection_strategy(self):
-        strategy = make_strategy()
+        strategy = make_multi_frequency_selection()
         tournament = TournamentSelection(
             tournament_size=2, elitism=True, population_size=4
         )

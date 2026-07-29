@@ -13,6 +13,12 @@ accepted as an alias, so manifests written against earlier versions keep validat
 
 Both regimes take their population size from the mandatory ``training.pop_size`` field.
 
+In Python, the trainers and
+:meth:`TrainingManifest.from_trainer_specs <agilerl.models.manifest.TrainingManifest.from_trainer_specs>`
+take this block through a single ``selection_strategy`` argument. The former
+spellings (``tournament`` on the trainers and ``tournament_selection`` on
+``from_trainer_specs``) are still accepted with a ``DeprecationWarning``.
+
 .. autoclass:: agilerl.models.hpo.MutationProbabilities
    :members:
 

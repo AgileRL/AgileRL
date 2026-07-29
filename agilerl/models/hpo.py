@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import warnings
 from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -195,33 +196,65 @@ SelectionStrategySpec = Annotated[
 """Discriminated union for the manifest's selection_strategy block."""
 
 
-def split_selection_spec(
-    selection: TournamentSelectionSpec | MultiFrequencySelectionSpec | None,
-) -> tuple[TournamentSelectionSpec | None, MultiFrequencySelectionSpec | None]:
-    """Split a unified selection_strategy value into the two trainer kwargs.
+def resolve_deprecated_selection_kwargs(
+    selection_strategy: SelectionStrategySpec | None,
+    kwargs: dict[str, Any],
+    *,
+    deprecated_key: str = "tournament",
+    caller: str,
+) -> SelectionStrategySpec | None:
+    """Fold a deprecated selection keyword argument into selection_strategy.
 
-    :param selection: The resolved selection_strategy spec, or None when unset.
-    :type selection: TournamentSelectionSpec | MultiFrequencySelectionSpec | None
-    :returns: (tournament_spec, multi_frequency_selection_spec) with at most one set.
-    :rtype: tuple[TournamentSelectionSpec | None, MultiFrequencySelectionSpec | None]
+    :param selection_strategy: The spec passed via the current argument, or None
+        when unset.
+    :type selection_strategy: SelectionStrategySpec | None
+    :param kwargs: The catch-all keyword arguments of the calling API.
+    :type kwargs: dict[str, Any]
+    :param deprecated_key: The superseded keyword the caller still accepts,
+        defaults to "tournament".
+    :type deprecated_key: str
+    :param caller: Name of the calling API, used in the warning and error messages.
+    :type caller: str
+    :returns: The resolved selection-strategy spec, or None when neither spelling
+        supplied one.
+    :rtype: SelectionStrategySpec | None
+    :raises TypeError: If kwargs holds any key other than deprecated_key.
+    :raises ValueError: If both spellings were used and carry different specs.
     """
-    if isinstance(selection, MultiFrequencySelectionSpec):
-        return None, selection
-    return selection, None
+    unexpected = sorted(key for key in kwargs if key != deprecated_key)
+    if unexpected:
+        msg = (
+            f"{caller} got unexpected keyword argument(s): "
+            f"{', '.join(repr(key) for key in unexpected)}."
+        )
+        raise TypeError(msg)
 
+    if deprecated_key not in kwargs:
+        return selection_strategy
 
-def check_selection_strategy_exclusive(
-    tournament_selection: TournamentSelectionSpec | None,
-    multi_frequency_selection_spec: MultiFrequencySelectionSpec | None,
-) -> None:
-    """Reject configuring MF-PBT and tournament selection together in the trainer.
+    warnings.warn(
+        f"The {deprecated_key!r} argument to {caller} is deprecated and will be "
+        "removed in a future release; pass the selection strategy via "
+        "selection_strategy instead.",
+        DeprecationWarning,
+        stacklevel=3,
+    )
 
-    :param tournament_selection: Tournament-selection spec, or None when unset.
-    :type tournament_selection: TournamentSelectionSpec | None
-    :param multi_frequency_selection_spec: MF-PBT spec, or None when unset.
-    :type multi_frequency_selection_spec: MultiFrequencySelectionSpec | None
-    :raises ValueError: If both strategies are configured simultaneously.
-    """
-    if multi_frequency_selection_spec is not None and tournament_selection is not None:
-        msg = "Cannot set both 'tournament' and 'multi_frequency_selection'."
+    deprecated_spec = kwargs[deprecated_key]
+    if deprecated_spec is None:
+        return selection_strategy
+
+    if selection_strategy is None:
+        return deprecated_spec
+
+    # Pydantic equality compares class and field values, so equal-but-distinct
+    # specs route cleanly while a tournament spec and an MF-PBT spec never match
+    if selection_strategy != deprecated_spec:
+        msg = (
+            f"{caller} received conflicting selection strategies: "
+            f"'selection_strategy'={selection_strategy!r} and the deprecated "
+            f"{deprecated_key!r}={deprecated_spec!r}. Pass only 'selection_strategy'."
+        )
         raise ValueError(msg)
+
+    return selection_strategy

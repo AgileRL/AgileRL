@@ -340,3 +340,23 @@ class TestSelectionStrategyBackwardsCompatibility:
         legacy = TrainingManifest(**common, tournament_selection={"tournament_size": 3})
         current = TrainingManifest(**common, selection_strategy={"tournament_size": 3})
         assert legacy.selection_strategy == current.selection_strategy
+
+    def test_from_trainer_specs_accepts_either_spelling(self):
+        from agilerl.models.algorithms.dqn import DQNSpec
+        from agilerl.models.env import GymEnvSpec
+        from agilerl.models.training import TrainingSpec
+
+        common = {
+            "algorithm": DQNSpec(),
+            "environment": GymEnvSpec(name="CartPole-v1"),
+            "training": TrainingSpec(max_steps=1000, pop_size=2),
+        }
+        current = TrainingManifest.from_trainer_specs(
+            **common, selection_strategy=TournamentSelectionSpec(tournament_size=3)
+        )
+        with pytest.warns(DeprecationWarning, match="'tournament_selection' argument"):
+            legacy = TrainingManifest.from_trainer_specs(
+                **common,
+                tournament_selection=TournamentSelectionSpec(tournament_size=3),
+            )
+        assert legacy.selection_strategy == current.selection_strategy

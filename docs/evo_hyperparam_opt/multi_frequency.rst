@@ -80,6 +80,10 @@ configuration is the one shown above: **16 agents in 2 subpopulations of 8**, sp
 **2 winners / 0 survivors / 2 open-for-migration / 4 losers** with frequency ratios
 **[1, 5]**.
 
+Constructing a trainer directly, the same block is passed as the single
+``selection_strategy`` argument (``LocalTrainer(selection_strategy=MultiFrequencySelectionSpec(...))``)
+which is the one argument that selects between the two regimes.
+
 Multi-frequency selection is implemented by :class:`MultiFrequencySelection <agilerl.hpo.multi_frequency.MultiFrequencySelection>`
 and dispatched from the trainers via
 :func:`run_selection_and_mutation <agilerl.utils.utils.run_selection_and_mutation>`,

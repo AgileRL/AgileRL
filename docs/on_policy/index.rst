@@ -247,7 +247,7 @@ You can use our off-the-shelf on-policy training function to train a population 
         eval_steps=None,  # Number of steps in evaluation episode
         eval_loop=1,  # Number of evaluation episodes
         target=200.,  # Target score for early stopping
-        tournament=tournament,  # Tournament selection object
+        selection_strategy=tournament,  # Selection strategy object
         mutation=mutations,  # Mutations object
         wb=True,  # Weights and Biases tracking
     )

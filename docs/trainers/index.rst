@@ -378,7 +378,7 @@ applying evolutionary HPO with custom mutation probabilities.
         rl_hp_mut=0.2
        ),
    )
-   tournament_spec = TournamentSelectionSpec(tournament_size=2, elitism=True)
+   selection_spec = TournamentSelectionSpec(tournament_size=2, elitism=True)
 
    # Instantiate the trainer from the custom training configuration.
    device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -387,7 +387,7 @@ applying evolutionary HPO with custom mutation probabilities.
        environment="LunarLander-v3",
        training=training_spec,
        mutation=mutation_spec,
-       tournament=tournament_spec,
+       selection_strategy=selection_spec,
        device=device,
    )
 

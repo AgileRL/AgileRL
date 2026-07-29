@@ -319,7 +319,7 @@ trained_pop, pop_fitnesses = train_off_policy(
     max_steps=1_000_000,
     evo_steps=10_000,
     target=200.0,
-    tournament=tournament,
+    selection_strategy=tournament,
     mutation=mutations,
 )
 ```

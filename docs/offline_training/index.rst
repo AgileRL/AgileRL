@@ -270,7 +270,7 @@ easiest to use our training function, which returns a population of trained agen
         eval_steps=None,  # Evaluation steps
         eval_loop=1,  # Number of evaluation episodes per agent
         target=200.,  # Target score for early stopping
-        tournament=tournament,  # Tournament selection object
+        selection_strategy=tournament,  # Selection strategy object
         mutation=mutations,  # Mutations object
         wb=True,  # Weights and Biases tracking
     )
