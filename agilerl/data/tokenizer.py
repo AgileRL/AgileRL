@@ -33,8 +33,7 @@ class Tokenizer(ABC):
         self,
         str_: str | list[str],
         **kwargs: Any,
-    ) -> tuple[list[int] | list[list[int]], list[int] | list[list[int]]]:
-        pass
+    ) -> tuple[list[int] | list[list[int]], list[int] | list[list[int]]]: ...
 
     @overload
     def decode(self, tokens: list[int], **kwargs: Any) -> str: ...
@@ -43,21 +42,16 @@ class Tokenizer(ABC):
     @abstractmethod
     def decode(
         self, tokens: list[int] | list[list[int]], **kwargs: Any
-    ) -> str | list[str]:
-        pass
+    ) -> str | list[str]: ...
 
     @abstractmethod
-    def num_tokens(self) -> int:
-        pass
+    def num_tokens(self) -> int: ...
 
     @abstractmethod
-    def id_to_token(self, id_: int) -> str:
-        pass
+    def id_to_token(self, id_: int) -> str: ...
 
     @abstractmethod
-    def token_to_id(self, token: str) -> int:
-        pass
+    def token_to_id(self, token: str) -> int: ...
 
     @abstractmethod
-    def get_vocab(self) -> dict[str, int] | list[str]:
-        pass
+    def get_vocab(self) -> dict[str, int] | list[str]: ...
