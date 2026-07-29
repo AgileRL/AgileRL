@@ -280,14 +280,15 @@ class SFT(LLMAlgorithm[SFTPrompts]):
             for start in range(0, num_samples, micro_bs):
                 end = min(start + micro_bs, num_samples)
                 idxs = batch_idxs[start:end]
-                loss = self._sft_loss(
-                    input_ids[idxs].to(self.device),
-                    attention_mask[idxs].to(self.device),
-                    labels[idxs].to(self.device),
-                    training=training,
-                )
-                if training:
-                    self._backward_pass(loss)
+                with self._gathered_lm_head():
+                    loss = self._sft_loss(
+                        input_ids[idxs].to(self.device),
+                        attention_mask[idxs].to(self.device),
+                        labels[idxs].to(self.device),
+                        training=training,
+                    )
+                    if training:
+                        self._backward_pass(loss)
                 loss_val = loss.item()
                 learn_metrics["loss"] += loss_val
                 learn_metrics["perplexity"] += float(np.exp(min(loss_val, 100)))
@@ -346,6 +347,7 @@ class SFT(LLMAlgorithm[SFTPrompts]):
 
         if self.use_liger_loss:
             # Liger fused-linear CE: loss computed in bounded ``(chunk, V)`` tiles.
+            # Caller holds ``_gathered_lm_head`` open through backward under ZeRO-3.
             flat_hidden = shift_hidden.view(-1, shift_hidden.size(-1))
             lm_head = self._get_lm_head()
             loss = LigerFusedLinearCrossEntropyLoss(ignore_index=-100)(
@@ -355,19 +357,25 @@ class SFT(LLMAlgorithm[SFTPrompts]):
         else:
             # Standard path, also token-chunked: per-token target logprobs via the
             # fused-linear-logprob kernel (bounded to ``(chunk_rows, V)``)
-            fused_fn, lm_head_weight, lm_head_bias = self._fused_logprob_fn_and_head()
-            ignore = labels == -100
-            logps = fused_fn(
-                shift_hidden,
+            with self._fused_logprob_fn_and_head() as (
+                fused_fn,
                 lm_head_weight,
                 lm_head_bias,
-                labels.masked_fill(ignore, 0),  # safe gather index; masked out below
-                temperature=1.0,
-                cast_to_fp32=self.cast_logprobs_to_fp32,
-                chunk_rows=self.chunk_rows,
-            )  # [B, L-1]
-            token_mask = (~ignore).to(logps.dtype)
-            loss = -(logps * token_mask).sum() / token_mask.sum().clamp_min(1.0)
+            ):
+                ignore = labels == -100
+                logps = fused_fn(
+                    shift_hidden,
+                    lm_head_weight,
+                    lm_head_bias,
+                    labels.masked_fill(
+                        ignore, 0
+                    ),  # safe gather index; masked out below
+                    temperature=1.0,
+                    cast_to_fp32=self.cast_logprobs_to_fp32,
+                    chunk_rows=self.chunk_rows,
+                )  # [B, L-1]
+                token_mask = (~ignore).to(logps.dtype)
+                loss = -(logps * token_mask).sum() / token_mask.sum().clamp_min(1.0)
         return loss
 
     def test(

@@ -314,21 +314,22 @@ class DPO(LLMAlgorithm[PreferencePrompts]):
                 minibatch_idxs = batch_idxs[
                     start : min((start + batch_size), num_samples)
                 ]
-                loss, chosen_reward, rejected_reward = self._dpo_loss(
-                    batch_size,
-                    minibatch_idxs,
-                    chosen_input_ids,
-                    chosen_attention_mask,
-                    rejected_input_ids,
-                    rejected_attention_mask,
-                    chosen_mask,
-                    rejected_mask,
-                    ref_rejected_log_probs,
-                    ref_chosen_log_probs,
-                    training,
-                )
-                if training:
-                    self._backward_pass(loss)
+                with self._gathered_lm_head():
+                    loss, chosen_reward, rejected_reward = self._dpo_loss(
+                        batch_size,
+                        minibatch_idxs,
+                        chosen_input_ids,
+                        chosen_attention_mask,
+                        rejected_input_ids,
+                        rejected_attention_mask,
+                        chosen_mask,
+                        rejected_mask,
+                        ref_rejected_log_probs,
+                        ref_chosen_log_probs,
+                        training,
+                    )
+                    if training:
+                        self._backward_pass(loss)
 
                 learn_metrics["loss"] += loss.item()
                 learn_metrics["chosen_reward"] += chosen_reward.mean().item()

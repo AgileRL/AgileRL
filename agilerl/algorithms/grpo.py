@@ -631,22 +631,23 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
                     ]
                     if len(minibatch_idxs) == 0:
                         continue
-                    loss, kl = self._loss(
-                        batch_size,
-                        minibatch_idxs,
-                        completion_ids,
-                        action_masks,
-                        advantages,
-                        old_log_probs,
-                        reference_log_probs,
-                        turn_ids=is_turn_ids,
-                        sampling_log_probs=sampling_log_probs,
-                    )
-                    if not loss.isfinite():
-                        msg = f"Loss is not finite: {loss}"
-                        raise ValueError(msg)
+                    with self._gathered_lm_head():
+                        loss, kl = self._loss(
+                            batch_size,
+                            minibatch_idxs,
+                            completion_ids,
+                            action_masks,
+                            advantages,
+                            old_log_probs,
+                            reference_log_probs,
+                            turn_ids=is_turn_ids,
+                            sampling_log_probs=sampling_log_probs,
+                        )
+                        if not loss.isfinite():
+                            msg = f"Loss is not finite: {loss}"
+                            raise ValueError(msg)
 
-                    self._backward_pass(loss)
+                        self._backward_pass(loss)
                     learn_metrics["loss"] += loss.item()
                     learn_metrics["kl"] += kl.item()
                     updates += 1
