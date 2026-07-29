@@ -2593,18 +2593,25 @@ def clone_llm(
             )
         # AgileRL standardizes on adapter name "actor" for the primary adapter.
         first_adapter = adapter_names[0]
+        keep_adapter_base_dtype = zero_stage == 3
         model = get_peft_model(
             model,
             peft_configs[first_adapter],
             adapter_name="actor",
-            autocast_adapter_dtype=zero_stage != 3,
+            autocast_adapter_dtype=not keep_adapter_base_dtype,
         )
 
         # Add remaining adapters using add_adapter
         for adapter_name in adapter_names[1:]:
             model.add_adapter(
-                peft_config=peft_configs[adapter_name], adapter_name=adapter_name
+                peft_config=peft_configs[adapter_name],
+                adapter_name=adapter_name,
+                autocast_adapter_dtype=not keep_adapter_base_dtype,
             )
+        if keep_adapter_base_dtype:
+            for name, param in model.named_parameters():
+                if "lora" in name and param.dtype != torch.bfloat16:
+                    param.data = param.data.to(torch.bfloat16)
         model.disable_adapter()
 
     if state_dict is not None:

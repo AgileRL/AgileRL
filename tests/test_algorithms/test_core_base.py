@@ -5608,6 +5608,9 @@ class TestLLMInitializeActors:
         agent.lora_config = MagicMock()
         agent.zero_stage = 3
         peft_actor = _make_mock_peft_actor()
+        peft_actor.register_parameter(
+            "lora_A", torch.nn.Parameter(torch.ones(2, 2, dtype=torch.float32))
+        )
         base_model = MagicMock(spec=[])
 
         with (
@@ -5626,6 +5629,7 @@ class TestLLMInitializeActors:
             LLMAlgorithm._initialize_actors(agent, base_model, add_adapters=True)
         mock_get_peft.assert_called_once()
         assert mock_get_peft.call_args.kwargs["autocast_adapter_dtype"] is False
+        assert peft_actor.lora_A.dtype == torch.bfloat16
 
     def test_initialize_actors_with_none_creates_from_path(self):
         agent = _make_llm_agent()
@@ -5672,6 +5676,7 @@ class TestLLMInitializeActors:
     def test_initialize_actors_with_separate_reference_adapter(self):
         agent = _make_llm_agent()
         agent.lora_config = MagicMock()
+        agent.zero_stage = 3
         agent.selected_adapters = ("actor", "reference")
         peft_actor = _make_mock_peft_actor()
 
@@ -5691,7 +5696,9 @@ class TestLLMInitializeActors:
                 agent, MagicMock(spec=[]), add_adapters=True
             )
         peft_actor.add_adapter.assert_called_once_with(
-            adapter_name="reference", peft_config=agent.lora_config
+            adapter_name="reference",
+            peft_config=agent.lora_config,
+            autocast_adapter_dtype=False,
         )
 
     def test_initialize_actors_no_add_adapters(self):
@@ -5748,7 +5755,9 @@ class TestLLMInitializeActors:
             autocast_adapter_dtype=True,
         )
         peft_actor.add_adapter.assert_called_once_with(
-            adapter_name="critic", peft_config=agent.lora_config
+            adapter_name="critic",
+            peft_config=agent.lora_config,
+            autocast_adapter_dtype=True,
         )
         assert base_model.pretrained_model is peft_actor
         assert base_model.is_peft_model is True
