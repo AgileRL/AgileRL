@@ -11,8 +11,8 @@ from torch import nn
 from agilerl.algorithms.core.llm_ops.fused_lora import (
     _LORA_LAYER_CACHE,
     _ROUTING_STATE,
-    _get_cached_lora_layers,
     _is_routed_layer,
+    get_cached_lora_layers,
     patch_lora_for_fused_forward,
     set_fused_adapter_routing,
     unpatch_lora_for_fused_forward,
@@ -377,10 +377,10 @@ class TestPatchLifecycle:
 class TestLayerCache:
     def test_cache_is_stored_and_reused(self):
         model = _build_model()
-        layers = _get_cached_lora_layers(model)
+        layers = get_cached_lora_layers(model)
         assert layers == [model.proj]
         assert _LORA_LAYER_CACHE[model] is layers
-        assert _get_cached_lora_layers(model) is layers
+        assert get_cached_lora_layers(model) is layers
 
 
 class TestFusedLoraInputCast:
@@ -401,7 +401,7 @@ class TestFusedLoraInputCast:
 
     def test_routed_forward_honours_disabled_cast(self):
         model = self._bf16_base_fp32_adapters()
-        for layer in _get_cached_lora_layers(model):
+        for layer in get_cached_lora_layers(model):
             layer.cast_input_dtype_enabled = False
 
         with pytest.raises(RuntimeError):

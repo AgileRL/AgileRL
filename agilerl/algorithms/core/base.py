@@ -145,10 +145,10 @@ if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
         prepare_model_for_kbit_training,
         set_peft_model_state_dict,
     )
-    from peft.tuners.tuners_utils import BaseTunerLayer
     from safetensors.torch import load_file
 
     from agilerl.algorithms.core.llm_ops.fused_lora import (
+        get_cached_lora_layers,
         patch_lora_for_fused_forward,
         set_fused_adapter_routing,
         unset_fused_adapter_routing,
@@ -4462,7 +4462,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             yield
             return
 
-        layers = [m for m in self.actor.modules() if isinstance(m, BaseTunerLayer)]
+        layers = get_cached_lora_layers(self.actor)
         previous = [layer.cast_input_dtype_enabled for layer in layers]
         for layer in layers:
             layer.cast_input_dtype_enabled = False
