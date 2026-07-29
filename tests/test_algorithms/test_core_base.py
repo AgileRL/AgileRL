@@ -2005,6 +2005,7 @@ class TestLLMWrapModels:
         agent = _make_llm_agent(accelerator=acc)
         agent.optimizer.optimizer = MagicMock()
         agent.gradient_checkpointing = True
+        agent.zero_stage = 2
         wrapped_actor = MagicMock()
         wrapped_actor.module = MagicMock()
         wrapped_actor.optimizer = MagicMock()
@@ -2014,7 +2015,27 @@ class TestLLMWrapModels:
         acc.unwrap_model = MagicMock(return_value=wrapped_actor.module)
         LLMAlgorithm.wrap_models(agent)
         acc.prepare.assert_called_once()
-        wrapped_actor.module.gradient_checkpointing_enable.assert_called_once()
+        wrapped_actor.module.gradient_checkpointing_enable.assert_called_once_with(
+            gradient_checkpointing_kwargs={"use_reentrant": False},
+        )
+
+    def test_wrap_models_zero3_forces_reentrant_checkpointing(self):
+        acc = _make_mock_accelerator()
+        agent = _make_llm_agent(accelerator=acc)
+        agent.optimizer.optimizer = MagicMock()
+        agent.gradient_checkpointing = True
+        agent.zero_stage = 3
+        wrapped_actor = MagicMock()
+        wrapped_actor.module = MagicMock()
+        wrapped_actor.optimizer = MagicMock()
+        acc.prepare = MagicMock(
+            return_value=(wrapped_actor, agent.optimizer.optimizer, None)
+        )
+        acc.unwrap_model = MagicMock(return_value=wrapped_actor.module)
+        LLMAlgorithm.wrap_models(agent)
+        wrapped_actor.module.gradient_checkpointing_enable.assert_called_once_with(
+            gradient_checkpointing_kwargs={"use_reentrant": True},
+        )
 
     def test_wrap_models_without_accelerator(self):
         agent = _make_llm_agent(accelerator=None)
@@ -2027,9 +2048,21 @@ class TestLLMWrapModels:
         agent = _make_llm_agent(accelerator=None)
         agent.accelerator = None
         agent.gradient_checkpointing = True
+        agent.zero_stage = None
         original_actor = agent.actor
         LLMAlgorithm.wrap_models(agent)
-        original_actor.gradient_checkpointing_enable.assert_called_once()
+        original_actor.gradient_checkpointing_enable.assert_called_once_with(
+            gradient_checkpointing_kwargs={"use_reentrant": False},
+        )
+
+    def test_gradient_checkpointing_kwargs_by_zero_stage(self):
+        agent = _make_llm_agent(accelerator=None)
+        agent.zero_stage = None
+        assert agent._gradient_checkpointing_kwargs() == {"use_reentrant": False}
+        agent.zero_stage = 2
+        assert agent._gradient_checkpointing_kwargs() == {"use_reentrant": False}
+        agent.zero_stage = 3
+        assert agent._gradient_checkpointing_kwargs() == {"use_reentrant": True}
 
 
 class TestLLMCleanUp:

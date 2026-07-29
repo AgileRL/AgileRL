@@ -3282,6 +3282,15 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
 
         return population
 
+    def _gradient_checkpointing_kwargs(self) -> dict[str, bool]:
+        """Kwargs for HF/PEFT ``gradient_checkpointing_enable``.
+
+        ZeRO-3 re-partitions frozen params in place during activation
+        recompute; reentrant checkpointing skips the metadata check that
+        rejects those empty shards under LoRA.
+        """
+        return {"use_reentrant": self.zero_stage == 3}
+
     def wrap_models(self) -> None:
         """Wrap the models in the accelerator, DeepSpeed objects must be wrapped at the same time,
         not individually.
@@ -3316,7 +3325,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             )
             if self.gradient_checkpointing:
                 self._get_unwrapped_actor().gradient_checkpointing_enable(
-                    gradient_checkpointing_kwargs={"use_reentrant": False},
+                    gradient_checkpointing_kwargs=self._gradient_checkpointing_kwargs(),
                 )
         else:
             assert self.actor is not None, (
@@ -3325,7 +3334,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             self.actor = self.actor.to(self.device)
             if self.gradient_checkpointing:
                 self.actor.gradient_checkpointing_enable(
-                    gradient_checkpointing_kwargs={"use_reentrant": False},
+                    gradient_checkpointing_kwargs=self._gradient_checkpointing_kwargs(),
                 )
 
     def clean_up(self) -> None:
@@ -4322,7 +4331,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
                 peft_target = prepare_model_for_kbit_training(
                     peft_target,
                     use_gradient_checkpointing=self.gradient_checkpointing,
-                    gradient_checkpointing_kwargs={"use_reentrant": False},
+                    gradient_checkpointing_kwargs=self._gradient_checkpointing_kwargs(),
                 )
             # Gemma 4 etc.: LoRA must target inner ``.linear`` inside *ClippableLinear.
             lora_config = adapt_lora_config_for_model(
