@@ -12,9 +12,34 @@ no-grad old/reference passes and the gradient forward.
 
 from __future__ import annotations
 
+from collections.abc import Generator
+from contextlib import contextmanager
 from typing import Any
 
 import torch
+
+from agilerl.utils.llm_utils import gather_if_zero3
+
+
+@contextmanager
+def _gather_if_ds_param(
+    *tensors: torch.Tensor | None,
+) -> Generator[None, None, None]:
+    """Allgather ZeRO-3 params for the duration of the block.
+
+    No-op when none of ``tensors`` carry a DeepSpeed ``ds_id``. The gather
+    must wrap only the matmul that reads the weight — not a module
+    ``forward`` — because ZeRO-3's post-forward hooks re-partition the
+    param and free the gathered buffer.
+    """
+    params: list[torch.Tensor] = [
+        t for t in tensors if t is not None and hasattr(t, "ds_id")
+    ]
+    if not params:
+        yield
+        return
+    with gather_if_zero3(3, params):
+        yield
 
 
 def _fused_logprob_chunk(
@@ -143,18 +168,19 @@ def fused_linear_logprobs_chunked(
     N = flat_h.shape[0]
     out = torch.empty(N, dtype=orig_dtype, device=hidden.device)
 
-    for s in range(0, N, chunk_rows):
-        e = min(s + chunk_rows, N)
-        result = _fused_logprob_chunk_dispatch(
-            hidden.device,
-            flat_h[s:e],
-            lm_head_weight,
-            lm_head_bias,
-            flat_targets[s:e],
-            temperature,
-            cast_to_fp32,
-        )
-        out[s:e].copy_(result.to(orig_dtype) if cast_to_fp32 else result)
+    with _gather_if_ds_param(lm_head_weight, lm_head_bias):
+        for s in range(0, N, chunk_rows):
+            e = min(s + chunk_rows, N)
+            result = _fused_logprob_chunk_dispatch(
+                hidden.device,
+                flat_h[s:e],
+                lm_head_weight,
+                lm_head_bias,
+                flat_targets[s:e],
+                temperature,
+                cast_to_fp32,
+            )
+            out[s:e].copy_(result.to(orig_dtype) if cast_to_fp32 else result)
 
     return out.reshape(B, T)
 
@@ -223,60 +249,71 @@ class FusedLinearLogProbsFunction(torch.autograd.Function):
         temperature = ctx.temperature
         cast_to_fp32 = ctx.cast_to_fp32
 
-        grad_hidden = torch.zeros_like(flat_h) if ctx.needs_hidden_grad else None
-        grad_weight = (
-            torch.zeros_like(lm_head_weight) if ctx.needs_weight_grad else None
-        )
-        grad_bias = torch.zeros_like(lm_head_bias) if ctx.needs_bias_grad else None
-
-        for s in range(0, N, chunk_rows):
-            e = min(s + chunk_rows, N)
-            h_chunk = flat_h[s:e].detach()
-            if ctx.needs_hidden_grad:
-                h_chunk.requires_grad_(True)
-            weight = lm_head_weight
-            if ctx.needs_weight_grad:
-                weight = weight.detach().requires_grad_(True)
-            bias = lm_head_bias
-            if ctx.needs_bias_grad and bias is not None:
-                bias = bias.detach().requires_grad_(True)
-
-            with torch.enable_grad():
-                logps_chunk = _fused_logprob_chunk_dispatch(
-                    hidden.device,
-                    h_chunk,
-                    weight,
-                    bias,
-                    flat_targets[s:e],
-                    temperature,
-                    cast_to_fp32,
-                )
-
-            inputs: list[torch.Tensor] = []
-            if ctx.needs_hidden_grad:
-                inputs.append(h_chunk)
-            if ctx.needs_weight_grad:
-                inputs.append(weight)
-            if ctx.needs_bias_grad and bias is not None:
-                inputs.append(bias)
-            if not inputs:
-                continue
-
-            grads = torch.autograd.grad(
-                logps_chunk,
-                inputs,
-                grad_outputs=flat_grad[s:e].to(logps_chunk.dtype),
+        # Re-gather for the recompute: the forward gather has already exited
+        # and ZeRO-3 has re-partitioned ``lm_head_weight`` to a zero-sized
+        # shard. The Parameter object is the same; only ``.data`` was swapped.
+        if ctx.needs_weight_grad and hasattr(lm_head_weight, "ds_id"):
+            msg = (
+                "ZeRO-3 full-finetune of lm_head through the fused-linear "
+                "logprob path is not supported; use LoRA (lm_head frozen) "
+                "or disable ZeRO-3."
             )
-            idx = 0
-            if ctx.needs_hidden_grad and grad_hidden is not None:
-                grad_hidden[s:e] = grads[idx].to(grad_hidden.dtype)
-                idx += 1
-            if ctx.needs_weight_grad and grad_weight is not None:
-                grad_weight += grads[idx].to(grad_weight.dtype)
-                idx += 1
-            if ctx.needs_bias_grad and grad_bias is not None:
-                grad_bias += grads[idx].to(grad_bias.dtype)
-                idx += 1
+            raise RuntimeError(msg)
+        with _gather_if_ds_param(lm_head_weight, lm_head_bias):
+            grad_hidden = torch.zeros_like(flat_h) if ctx.needs_hidden_grad else None
+            grad_weight = (
+                torch.zeros_like(lm_head_weight) if ctx.needs_weight_grad else None
+            )
+            grad_bias = torch.zeros_like(lm_head_bias) if ctx.needs_bias_grad else None
+
+            for s in range(0, N, chunk_rows):
+                e = min(s + chunk_rows, N)
+                h_chunk = flat_h[s:e].detach()
+                if ctx.needs_hidden_grad:
+                    h_chunk.requires_grad_(True)
+                weight = lm_head_weight
+                if ctx.needs_weight_grad:
+                    weight = weight.detach().requires_grad_(True)
+                bias = lm_head_bias
+                if ctx.needs_bias_grad and bias is not None:
+                    bias = bias.detach().requires_grad_(True)
+
+                with torch.enable_grad():
+                    logps_chunk = _fused_logprob_chunk_dispatch(
+                        hidden.device,
+                        h_chunk,
+                        weight,
+                        bias,
+                        flat_targets[s:e],
+                        temperature,
+                        cast_to_fp32,
+                    )
+
+                inputs: list[torch.Tensor] = []
+                if ctx.needs_hidden_grad:
+                    inputs.append(h_chunk)
+                if ctx.needs_weight_grad:
+                    inputs.append(weight)
+                if ctx.needs_bias_grad and bias is not None:
+                    inputs.append(bias)
+                if not inputs:
+                    continue
+
+                grads = torch.autograd.grad(
+                    logps_chunk,
+                    inputs,
+                    grad_outputs=flat_grad[s:e].to(logps_chunk.dtype),
+                )
+                idx = 0
+                if ctx.needs_hidden_grad and grad_hidden is not None:
+                    grad_hidden[s:e] = grads[idx].to(grad_hidden.dtype)
+                    idx += 1
+                if ctx.needs_weight_grad and grad_weight is not None:
+                    grad_weight += grads[idx].to(grad_weight.dtype)
+                    idx += 1
+                if ctx.needs_bias_grad and grad_bias is not None:
+                    grad_bias += grads[idx].to(grad_bias.dtype)
+                    idx += 1
 
         grad_hidden_out = (
             grad_hidden.reshape(B, T, H) if grad_hidden is not None else None
