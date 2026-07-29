@@ -2428,7 +2428,7 @@ class TestCloneLlm:
             def parameters(self):
                 return [torch.nn.Parameter(torch.tensor([1.0]))]
 
-        def fake_get_peft_model(model, first_config, adapter_name="actor"):
+        def fake_get_peft_model(model, first_config, adapter_name="actor", **kwargs):
             assert adapter_name == "actor"
             return model
 
@@ -2533,7 +2533,7 @@ class TestCloneLlm:
             def parameters(self):
                 return [torch.nn.Parameter(torch.tensor([1.0]))]
 
-        def fake_get_peft_model(model, first_config, adapter_name="actor"):
+        def fake_get_peft_model(model, first_config, adapter_name="actor", **kwargs):
             return model
 
         monkeypatch.setattr(algo_utils, "PeftModel", FakePeftModel)

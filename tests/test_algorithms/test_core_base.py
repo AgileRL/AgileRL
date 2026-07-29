@@ -5578,6 +5578,7 @@ class TestLLMInitializeActors:
     def test_initialize_actors_with_base_model_no_peft(self):
         agent = _make_llm_agent()
         agent.lora_config = MagicMock()
+        agent.zero_stage = 2
         peft_actor = _make_mock_peft_actor()
 
         base_model = MagicMock(spec=[])  # spec=[] prevents PeftModelProtocol match
@@ -5589,7 +5590,7 @@ class TestLLMInitializeActors:
             ),
             patch(
                 "agilerl.algorithms.core.base.get_peft_model", return_value=peft_actor
-            ),
+            ) as mock_get_peft,
             patch(
                 "agilerl.algorithms.core.base.DummyEvolvable", return_value=peft_actor
             ),
@@ -5599,6 +5600,32 @@ class TestLLMInitializeActors:
         ):
             LLMAlgorithm._initialize_actors(agent, base_model, add_adapters=True)
         mock_use_adapter.assert_called_once_with("actor")
+        mock_get_peft.assert_called_once()
+        assert mock_get_peft.call_args.kwargs["autocast_adapter_dtype"] is True
+
+    def test_initialize_actors_zero3_disables_adapter_dtype_autocast(self):
+        agent = _make_llm_agent()
+        agent.lora_config = MagicMock()
+        agent.zero_stage = 3
+        peft_actor = _make_mock_peft_actor()
+        base_model = MagicMock(spec=[])
+
+        with (
+            patch(
+                "agilerl.algorithms.core.base.adapt_lora_config_for_model",
+                side_effect=lambda model, cfg, **kw: cfg,
+            ),
+            patch(
+                "agilerl.algorithms.core.base.get_peft_model", return_value=peft_actor
+            ) as mock_get_peft,
+            patch(
+                "agilerl.algorithms.core.base.DummyEvolvable", return_value=peft_actor
+            ),
+            patch.object(agent, "use_adapter"),
+        ):
+            LLMAlgorithm._initialize_actors(agent, base_model, add_adapters=True)
+        mock_get_peft.assert_called_once()
+        assert mock_get_peft.call_args.kwargs["autocast_adapter_dtype"] is False
 
     def test_initialize_actors_with_none_creates_from_path(self):
         agent = _make_llm_agent()
@@ -5715,7 +5742,10 @@ class TestLLMInitializeActors:
             LLMAlgorithm._initialize_actors(agent, base_model, add_adapters=True)
 
         mock_gpm.assert_called_once_with(
-            dense_inner, agent.lora_config, adapter_name="actor"
+            dense_inner,
+            agent.lora_config,
+            adapter_name="actor",
+            autocast_adapter_dtype=True,
         )
         peft_actor.add_adapter.assert_called_once_with(
             adapter_name="critic", peft_config=agent.lora_config

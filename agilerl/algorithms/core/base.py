@@ -4340,10 +4340,15 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
                 lora_target_scope=self.lora_target_scope,
             )
             self.lora_config = lora_config
+            # Under ZeRO-3, LoRA adapters must share the base dtype so
+            # persistent-param allgather buffers stay homogeneous.
             peft_target = get_peft_model(
                 peft_target,
                 lora_config,
                 adapter_name="actor",
+                autocast_adapter_dtype=not (
+                    self.zero_stage == 3 and not quantized_base
+                ),
             )
 
             # Add every adapter listed in ``selected_adapters`` beyond ``actor`` as a fresh
