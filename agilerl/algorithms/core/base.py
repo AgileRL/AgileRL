@@ -2708,6 +2708,16 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
                 stacklevel=2,
             )
             use_memory_efficient_params = False
+        # Liger kernels matmul ``lm_head.weight`` inside their own autograd
+        # backward, which ZeRO-3 cannot keep gathered; use the fused-linear
+        # logprob path instead (also memory-bounded).
+        if self.zero_stage == 3 and self.use_liger_loss:
+            warnings.warn(
+                "Liger fused losses are not compatible with DeepSpeed ZeRO-3; "
+                "falling back to the fused-linear-logprob path.",
+                stacklevel=2,
+            )
+            self.use_liger_loss = False
         self.use_memory_efficient_params = use_memory_efficient_params
         self.memory_efficient_params_context = (
             self._memory_efficient_params
@@ -3906,33 +3916,10 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         position_ids.masked_fill_(mask=(mask == 0), value=1)
         return position_ids
 
-    @contextmanager
-    def _gathered_lm_head(
-        self,
-    ) -> Generator[tuple[torch.Tensor, torch.Tensor | None], None, None]:
-        """Yield live ``lm_head`` weight/bias under a ZeRO-3 gather.
-
-        The fused / Liger paths matmul ``lm_head.weight`` outside module
-        forward, so stage 3 must allgather for the duration of use (including
-        backward when grads are active). No clone — the gathered param is the
-        only full-sized copy.
-        """
-        lm_head = self._get_lm_head()
-        params: list[torch.Tensor] = [lm_head.weight]
-        if lm_head.bias is not None:
-            params.append(lm_head.bias)
-        with gather_if_zero3(self.zero_stage, params):
-            yield lm_head.weight, lm_head.bias
-
-    @contextmanager
     def _fused_logprob_fn_and_head(
         self,
-    ) -> Generator[
-        tuple[Callable, torch.Tensor, torch.Tensor | None],
-        None,
-        None,
-    ]:
-        """Resolve the fused per-token-logprob fn and gathered lm_head tensors.
+    ) -> tuple[Callable, torch.Tensor, torch.Tensor | None]:
+        """Resolve the fused per-token-logprob fn and live lm_head tensors.
 
         Fused-linear-logprob path (the only path): the lm_head is identity-
         patched for the forward (which returns the last hidden state), then
@@ -3941,18 +3928,16 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         routed through a gradient-checkpointed autograd Function so the backward
         stays bounded too; under no_grad the lighter static method is used.
 
-        Yields ``(fused_fn, lm_head_weight, lm_head_bias)`` with the head
-        gathered for the duration of the ``with`` block (no-op unless
-        ``zero_stage == 3``). Callers that run backward on the result must keep
-        this (or an outer ``_gathered_lm_head``) open through ``backward``.
+        Under ZeRO-3 the fused kernel gathers ``lm_head`` for the matmul only
+        (not across ``actor.forward``); see ``_gather_if_ds_param``.
         """
         fused_fn = (
             LLMAlgorithm._logprobs_from_hidden_fused_grad
             if torch.is_grad_enabled()
             else LLMAlgorithm._logprobs_from_hidden_fused
         )
-        with self._gathered_lm_head() as (lm_head_weight, lm_head_bias):
-            yield fused_fn, lm_head_weight, lm_head_bias
+        lm_head = self._get_lm_head()
+        return fused_fn, lm_head.weight, lm_head.bias
 
     def _warn_liger_non_token_is(
         self,
@@ -4577,97 +4562,91 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             else [(s, min(s + batch_size, total)) for s in range(0, total, batch_size)]
         )
 
-        with self._fused_logprob_fn_and_head() as (
-            fused_fn,
-            lm_head_weight,
-            lm_head_bias,
-        ):
+        fused_fn, lm_head_weight, lm_head_bias = self._fused_logprob_fn_and_head()
 
-            def _process_chunk(
-                start: int, end: int
-            ) -> tuple[torch.Tensor, torch.Tensor | None]:
-                set_fused_adapter_routing(unwrapped, routing[start:end])
-                model_kwargs: dict = {
-                    "input_ids": fused_ids[start:end],
-                    "attention_mask": fused_mask[start:end],
-                    "use_cache": False,
-                }
-                if position_ids is not None:
-                    model_kwargs["position_ids"] = position_ids[start:end]
+        def _process_chunk(
+            start: int, end: int
+        ) -> tuple[torch.Tensor, torch.Tensor | None]:
+            set_fused_adapter_routing(unwrapped, routing[start:end])
+            model_kwargs: dict = {
+                "input_ids": fused_ids[start:end],
+                "attention_mask": fused_mask[start:end],
+                "use_cache": False,
+            }
+            if position_ids is not None:
+                model_kwargs["position_ids"] = position_ids[start:end]
 
-                with (
-                    self._patch_lm_head_to_identity(),
-                    self._amp_ctx(),
-                    self._activation_offload_ctx(),
-                ):
-                    output = self.actor.forward(**model_kwargs)
+            with (
+                self._patch_lm_head_to_identity(),
+                self._amp_ctx(),
+                self._activation_offload_ctx(),
+            ):
+                output = self.actor.forward(**model_kwargs)
 
-                if isinstance(output, tuple):
-                    # Value-head models may return (loss, logits, value, ...); Peft/causal
-                    # paths may return shorter tuples — only index when present. With
-                    # lm_head identity-patched, output[0] is the last hidden state.
-                    first = output[0]
-                    value = output[2] if len(output) > 2 else None
-                else:
-                    first = output.logits
-                    value = None
-                del output
+            if isinstance(output, tuple):
+                # Value-head models may return (loss, logits, value, ...); Peft/causal
+                # paths may return shorter tuples — only index when present. With
+                # lm_head identity-patched, output[0] is the last hidden state.
+                first = output[0]
+                value = output[2] if len(output) > 2 else None
+            else:
+                first = output.logits
+                value = None
+            del output
 
-                chunk_lp = fused_fn(
-                    first[:, :-1],
-                    lm_head_weight,
-                    lm_head_bias,
-                    fused_ids[start:end, 1:],
-                    temperature=self.temperature,
-                    cast_to_fp32=self.cast_logprobs_to_fp32,
-                    chunk_rows=self.chunk_rows,
+            chunk_lp = fused_fn(
+                first[:, :-1],
+                lm_head_weight,
+                lm_head_bias,
+                fused_ids[start:end, 1:],
+                temperature=self.temperature,
+                cast_to_fp32=self.cast_logprobs_to_fp32,
+                chunk_rows=self.chunk_rows,
+            )
+            del first
+
+            chunk_v = (
+                value[:, :-1] if (self.use_value_head and value is not None) else None
+            )
+            return chunk_lp, chunk_v
+
+        # Single-chunk fast path: skip the buffer + copy entirely.
+        if len(chunks) == 1:
+            return _process_chunk(0, total)
+
+        # Multi-chunk path: pre-allocate output buffers once and write each
+        # chunk in place via copy_(). Avoids holding the full list of chunk
+        # tensors plus the concatenated buffer in memory at the same time
+        # (which doubles peak memory in the torch.cat path).
+        logprobs_out: torch.Tensor | None = None
+        values_out: torch.Tensor | None = None
+
+        for start, end in chunks:
+            chunk_lp, chunk_v = _process_chunk(start, end)
+
+            # Lazy-allocate on the first chunk so we inherit dtype/device
+            # from the model output rather than guessing up front.
+            if logprobs_out is None:
+                logprobs_out = torch.empty(
+                    (total, seq_len_out),
+                    dtype=chunk_lp.dtype,
+                    device=chunk_lp.device,
                 )
-                del first
+            logprobs_out[start:end].copy_(chunk_lp)
+            del chunk_lp
 
-                chunk_v = (
-                    value[:, :-1]
-                    if (self.use_value_head and value is not None)
-                    else None
-                )
-                return chunk_lp, chunk_v
-
-            # Single-chunk fast path: skip the buffer + copy entirely.
-            if len(chunks) == 1:
-                return _process_chunk(0, total)
-
-            # Multi-chunk path: pre-allocate output buffers once and write each
-            # chunk in place via copy_(). Avoids holding the full list of chunk
-            # tensors plus the concatenated buffer in memory at the same time
-            # (which doubles peak memory in the torch.cat path).
-            logprobs_out: torch.Tensor | None = None
-            values_out: torch.Tensor | None = None
-
-            for start, end in chunks:
-                chunk_lp, chunk_v = _process_chunk(start, end)
-
-                # Lazy-allocate on the first chunk so we inherit dtype/device
-                # from the model output rather than guessing up front.
-                if logprobs_out is None:
-                    logprobs_out = torch.empty(
+            if chunk_v is not None:
+                if values_out is None:
+                    values_out = torch.empty(
                         (total, seq_len_out),
-                        dtype=chunk_lp.dtype,
-                        device=chunk_lp.device,
+                        dtype=chunk_v.dtype,
+                        device=chunk_v.device,
                     )
-                logprobs_out[start:end].copy_(chunk_lp)
-                del chunk_lp
+                values_out[start:end].copy_(chunk_v)
+                del chunk_v
 
-                if chunk_v is not None:
-                    if values_out is None:
-                        values_out = torch.empty(
-                            (total, seq_len_out),
-                            dtype=chunk_v.dtype,
-                            device=chunk_v.device,
-                        )
-                    values_out[start:end].copy_(chunk_v)
-                    del chunk_v
-
-            assert logprobs_out is not None  # chunks is never empty
-            return logprobs_out, values_out
+        assert logprobs_out is not None  # chunks is never empty
+        return logprobs_out, values_out
 
     def _fused_forward(
         self,
@@ -4769,52 +4748,48 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         fused_position_ids = packed.position_ids.repeat(n_adapters, 1)
         set_fused_adapter_routing(unwrapped, adapters)
 
-        with self._fused_logprob_fn_and_head() as (
-            fused_fn,
+        fused_fn, lm_head_weight, lm_head_bias = self._fused_logprob_fn_and_head()
+        with (
+            self._patch_lm_head_to_identity(),
+            self._amp_ctx(),
+            self._activation_offload_ctx(),
+        ):
+            output = self.actor.forward(
+                input_ids=fused_ids,
+                position_ids=fused_position_ids,
+                use_cache=False,
+            )
+
+        if isinstance(output, tuple):
+            hidden = output[0]
+            value = output[2] if len(output) > 2 else None
+        else:
+            hidden = output.logits
+            value = None
+
+        # Actor log-probs from row 0 (actor adapter): the fused matmul
+        # consumes the (1, N, H) hidden + (1, N-1) next-token targets exactly as
+        # the padded path does; unpack scatters back to the (B, T-1) frame and
+        # drops the cross-segment boundary prediction.
+        packed_lp = fused_fn(
+            hidden[:1][:, :-1],
             lm_head_weight,
             lm_head_bias,
-        ):
-            with (
-                self._patch_lm_head_to_identity(),
-                self._amp_ctx(),
-                self._activation_offload_ctx(),
-            ):
-                output = self.actor.forward(
-                    input_ids=fused_ids,
-                    position_ids=fused_position_ids,
-                    use_cache=False,
-                )
+            packed.input_ids[:, 1:],
+            temperature=self.temperature,
+            cast_to_fp32=self.cast_logprobs_to_fp32,
+            chunk_rows=self.chunk_rows,
+        )
+        log_probs = unpack_logprobs(packed_lp, packed)
 
-            if isinstance(output, tuple):
-                hidden = output[0]
-                value = output[2] if len(output) > 2 else None
-            else:
-                hidden = output.logits
-                value = None
+        values = None
+        if self.use_value_head and value is not None:
+            # Critic values from the last row (critic adapter): per-token scalars
+            # mapped back to the (B, T-1) frame (no boundary drop, see
+            # unpack_values). Pad positions are zero and masked downstream.
+            values = unpack_values(value[-1], packed)
 
-            # Actor log-probs from row 0 (actor adapter): the fused matmul
-            # consumes the (1, N, H) hidden + (1, N-1) next-token targets exactly as
-            # the padded path does; unpack scatters back to the (B, T-1) frame and
-            # drops the cross-segment boundary prediction.
-            packed_lp = fused_fn(
-                hidden[:1][:, :-1],
-                lm_head_weight,
-                lm_head_bias,
-                packed.input_ids[:, 1:],
-                temperature=self.temperature,
-                cast_to_fp32=self.cast_logprobs_to_fp32,
-                chunk_rows=self.chunk_rows,
-            )
-            log_probs = unpack_logprobs(packed_lp, packed)
-
-            values = None
-            if self.use_value_head and value is not None:
-                # Critic values from the last row (critic adapter): per-token scalars
-                # mapped back to the (B, T-1) frame (no boundary drop, see
-                # unpack_values). Pad positions are zero and masked downstream.
-                values = unpack_values(value[-1], packed)
-
-            return log_probs, values
+        return log_probs, values
 
     def _fused_forward_no_grad(
         self,
@@ -4978,85 +4953,81 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             if self.calc_position_embeddings:
                 position_ids = self._position_ids_from_mask(attention_mask)
 
-            with self._fused_logprob_fn_and_head() as (
-                fused_fn,
-                lm_head_weight,
-                lm_head_bias,
-            ):
-                # Pack only the gradient forward (the per-epoch hot path). The
-                # no-grad old/reference passes stay padded so they are mutually
-                # consistent; the packed-vs-padded gap for the current policy is the
-                # tiny varlen/dense-vs-padded numerical difference.
-                packing_mode = self._packing_mode() if grad_enabled else None
+            fused_fn, lm_head_weight, lm_head_bias = self._fused_logprob_fn_and_head()
+            # Pack only the gradient forward (the per-epoch hot path). The
+            # no-grad old/reference passes stay padded so they are mutually
+            # consistent; the packed-vs-padded gap for the current policy is the
+            # tiny varlen/dense-vs-padded numerical difference.
+            packing_mode = self._packing_mode() if grad_enabled else None
 
-                # Split the sample into batches
-                log_probs = []
-                for batch in range(0, num_samples, batch_size):
-                    end_idx = min((batch + batch_size), num_samples)
-                    batch_ids = ids[batch:end_idx, :]
-                    batch_attention_mask = attention_mask[batch:end_idx, :]
+            # Split the sample into batches
+            log_probs = []
+            for batch in range(0, num_samples, batch_size):
+                end_idx = min((batch + batch_size), num_samples)
+                batch_ids = ids[batch:end_idx, :]
+                batch_attention_mask = attention_mask[batch:end_idx, :]
 
-                    packed = None
-                    if packing_mode is not None:
-                        packed = pack_padded_batch(batch_ids, batch_attention_mask)
+                packed = None
+                if packing_mode is not None:
+                    packed = pack_padded_batch(batch_ids, batch_attention_mask)
 
-                    if packed is not None:
-                        # Per-sequence position_ids (no mask): transformers detects
-                        # the packed format and keeps sequences attention-isolated
-                        # per layer (sliding-window safe).
-                        batch_model_kwargs = {
-                            "input_ids": packed.input_ids,
-                            "position_ids": packed.position_ids,
-                            "use_cache": False,
-                        }
-                    else:
-                        batch_model_kwargs = {
-                            "input_ids": batch_ids,
-                            "attention_mask": batch_attention_mask,
-                            "use_cache": False,
-                        }
-                        if self.calc_position_embeddings:
-                            batch_model_kwargs["position_ids"] = position_ids[
-                                batch:end_idx, :
-                            ]
+                if packed is not None:
+                    # Per-sequence position_ids (no mask): transformers detects
+                    # the packed format and keeps sequences attention-isolated
+                    # per layer (sliding-window safe).
+                    batch_model_kwargs = {
+                        "input_ids": packed.input_ids,
+                        "position_ids": packed.position_ids,
+                        "use_cache": False,
+                    }
+                else:
+                    batch_model_kwargs = {
+                        "input_ids": batch_ids,
+                        "attention_mask": batch_attention_mask,
+                        "use_cache": False,
+                    }
+                    if self.calc_position_embeddings:
+                        batch_model_kwargs["position_ids"] = position_ids[
+                            batch:end_idx, :
+                        ]
 
-                    with (
-                        self._patch_lm_head_to_identity(),
-                        self._amp_ctx(),
-                        self._activation_offload_ctx(),
-                    ):
-                        output = self.actor.forward(**batch_model_kwargs)
-                    first = output[0] if isinstance(output, tuple) else output.logits
+                with (
+                    self._patch_lm_head_to_identity(),
+                    self._amp_ctx(),
+                    self._activation_offload_ctx(),
+                ):
+                    output = self.actor.forward(**batch_model_kwargs)
+                first = output[0] if isinstance(output, tuple) else output.logits
 
-                    if packed is not None:
-                        packed_lp = fused_fn(
-                            first[:, :-1],
-                            lm_head_weight,
-                            lm_head_bias,
-                            packed.input_ids[:, 1:],
-                            temperature=self.temperature,
-                            cast_to_fp32=self.cast_logprobs_to_fp32,
-                            chunk_rows=self.chunk_rows,
-                        )
-                        # Map back to the dense (mb, T-1) frame so the loss path is
-                        # unchanged; cross-segment boundary predictions are dropped.
-                        # unpack_logprobs reshapes the packed logprobs internally.
-                        log_prob = unpack_logprobs(packed_lp, packed)
-                    else:
-                        log_prob = fused_fn(
-                            first[:, :-1],
-                            lm_head_weight,
-                            lm_head_bias,
-                            batch_ids[:, 1:],
-                            temperature=self.temperature,
-                            cast_to_fp32=self.cast_logprobs_to_fp32,
-                            chunk_rows=self.chunk_rows,
-                        )
+                if packed is not None:
+                    packed_lp = fused_fn(
+                        first[:, :-1],
+                        lm_head_weight,
+                        lm_head_bias,
+                        packed.input_ids[:, 1:],
+                        temperature=self.temperature,
+                        cast_to_fp32=self.cast_logprobs_to_fp32,
+                        chunk_rows=self.chunk_rows,
+                    )
+                    # Map back to the dense (mb, T-1) frame so the loss path is
+                    # unchanged; cross-segment boundary predictions are dropped.
+                    # unpack_logprobs reshapes the packed logprobs internally.
+                    log_prob = unpack_logprobs(packed_lp, packed)
+                else:
+                    log_prob = fused_fn(
+                        first[:, :-1],
+                        lm_head_weight,
+                        lm_head_bias,
+                        batch_ids[:, 1:],
+                        temperature=self.temperature,
+                        cast_to_fp32=self.cast_logprobs_to_fp32,
+                        chunk_rows=self.chunk_rows,
+                    )
 
-                    first = None
-                    batch_model_kwargs = None
-                    log_probs.append(log_prob)
-                return torch.cat(log_probs, dim=0)
+                first = None
+                batch_model_kwargs = None
+                log_probs.append(log_prob)
+            return torch.cat(log_probs, dim=0)
 
     def _backward_pass(self, loss: torch.Tensor) -> None:
         """Perform a backward pass and optimizer step.
@@ -5638,7 +5609,8 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         :rtype: torch.Tensor
         """
         chunk_rows = LLMAlgorithm._resolve_fused_chunk_rows(
-            lm_head_weight.shape[0], chunk_rows
+            getattr(lm_head_weight, "ds_shape", lm_head_weight.shape)[0],
+            chunk_rows,
         )
         return fused_linear_logprobs_chunked(
             hidden,
@@ -5692,7 +5664,8 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         :rtype: torch.Tensor
         """
         chunk_rows = LLMAlgorithm._resolve_fused_chunk_rows(
-            lm_head_weight.shape[0], chunk_rows
+            getattr(lm_head_weight, "ds_shape", lm_head_weight.shape)[0],
+            chunk_rows,
         )
         return FusedLinearLogProbsFunction.apply(
             hidden,

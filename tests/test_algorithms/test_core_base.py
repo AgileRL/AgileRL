@@ -2983,45 +2983,28 @@ class TestLLMGetLmHead:
         with pytest.raises(AttributeError, match="Cannot find lm_head"):
             agent._get_lm_head()
 
-    def test_gathered_lm_head_enters_gather_if_zero3(self):
-        agent = _make_llm_agent()
-        agent.zero_stage = 3
-        weight = torch.randn(4, 2)
-        bias = torch.randn(4)
-        lm_head = MagicMock()
-        lm_head.weight = weight
-        lm_head.bias = bias
-        agent._get_lm_head = MagicMock(return_value=lm_head)
-        gather_calls: list[tuple] = []
-
-        @contextmanager
-        def capture_gather(zero_stage, params, modifier_rank=None):
-            gather_calls.append((zero_stage, params, modifier_rank))
-            yield
-
-        with patch(
-            "agilerl.algorithms.core.base.gather_if_zero3",
-            side_effect=capture_gather,
-        ):
-            with agent._gathered_lm_head() as (got_w, got_b):
-                assert got_w is weight
-                assert got_b is bias
-
-        assert len(gather_calls) == 1
-        assert gather_calls[0][0] == 3
-        assert gather_calls[0][1] == [weight, bias]
-
-    def test_fused_logprob_fn_and_head_is_context_manager(self):
+    def test_fused_logprob_fn_and_head_returns_tensors(self):
         agent = _make_llm_agent()
         weight = torch.randn(4, 2)
         lm_head = MagicMock()
         lm_head.weight = weight
         lm_head.bias = None
         agent._get_lm_head = MagicMock(return_value=lm_head)
-        with agent._fused_logprob_fn_and_head() as (fused_fn, got_w, got_b):
-            assert callable(fused_fn)
-            assert got_w is weight
-            assert got_b is None
+        fused_fn, got_w, got_b = agent._fused_logprob_fn_and_head()
+        assert callable(fused_fn)
+        assert got_w is weight
+        assert got_b is None
+
+    def test_gather_if_ds_param_noops_without_ds_id(self):
+        from agilerl.algorithms.core.llm_ops.fused_logprobs import (
+            _gather_if_ds_param,
+        )
+
+        weight = torch.randn(4, 2)
+        entered = False
+        with _gather_if_ds_param(weight, None):
+            entered = True
+        assert entered
 
 
 @pytest.mark.skipif(
@@ -6806,12 +6789,10 @@ class TestLLMFusedForwardPaths:
         agent._get_unwrapped_actor = MagicMock(return_value=actor)
         mock_fused_fn = MagicMock(return_value=torch.zeros(1, T - 1))
         agent._fused_logprob_fn_and_head = MagicMock(
-            return_value=nullcontext(
-                (
-                    mock_fused_fn,
-                    torch.randn(V, H),
-                    None,
-                )
+            return_value=(
+                mock_fused_fn,
+                torch.randn(V, H),
+                None,
             )
         )
         agent._patch_lm_head_to_identity = MagicMock(return_value=nullcontext())
