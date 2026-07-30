@@ -40,6 +40,7 @@ def make_sft_gym(
     data_batch_size_per_gpu: int = 8,
     response_column: str = "response",
 ):
+    del accelerator  # DatasetEnv shards via rank/world_size, not accelerator
     train_dataset = Dataset.from_dict(
         {
             "prompt": [f"Prompt {i}" for i in range(num_samples)],
@@ -59,7 +60,6 @@ def make_sft_gym(
         objective="sft",
         data_batch_size_per_gpu=data_batch_size_per_gpu,
         response_column=response_column,
-        accelerator=accelerator,
     )
 
 
@@ -372,7 +372,6 @@ class TestSFTLearn:
             tokenizer=tokenizer,
             objective="sft",
             data_batch_size_per_gpu=data_batch_size,
-            accelerator=sft.accelerator,
         )
         for name, param in sft.actor.named_parameters():
             if ("lora_A" in name or "lora_B" in name) and param is not None:
@@ -510,7 +509,6 @@ class TestSFTTest:
             tokenizer=tokenizer,
             objective="sft",
             data_batch_size_per_gpu=data_batch_size,
-            accelerator=sft.accelerator,
         )
         fitness = sft.test(env, loop=loop)
         assert isinstance(fitness, np.ndarray)

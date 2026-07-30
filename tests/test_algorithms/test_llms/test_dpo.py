@@ -43,6 +43,7 @@ def make_preference_gym(
     tokenizer: AutoTokenizer,
     data_batch_size_per_gpu: int = 8,
 ):
+    del accelerator  # DatasetEnv shards via rank/world_size, not accelerator
     train_dataset = Dataset.from_dict(
         {
             "prompt": [f"Prompt {i}" for i in range(num_samples)],
@@ -63,7 +64,6 @@ def make_preference_gym(
         tokenizer=tokenizer,
         objective="preference",
         data_batch_size_per_gpu=data_batch_size_per_gpu,
-        accelerator=accelerator,
     )
 
 
@@ -415,7 +415,6 @@ class TestDPOLearn:
             tokenizer=tokenizer,
             objective="preference",
             data_batch_size_per_gpu=data_batch_size,
-            accelerator=dpo.accelerator,
         )
         for name, param in dpo.actor.named_parameters():
             if ("lora_A" in name or "lora_B" in name) and param is not None:
@@ -530,7 +529,6 @@ class TestDPOTest:
             tokenizer=tokenizer,
             objective="preference",
             data_batch_size_per_gpu=data_batch_size,
-            accelerator=dpo.accelerator,
         )
         fitness = dpo.test(env, loop=loop)
         assert isinstance(fitness, np.ndarray)
