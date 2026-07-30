@@ -485,7 +485,6 @@ class TestTaskAssigner:
             TaskAssigner(4, seed=0, rank=4, world_size=4)
 
 
-
 # --- /state strictness + MCP tools/list fallback ----------------------------
 class _StubSync:
     """Stand-in for OpenEnv's ``SyncEnvClient`` — records reset/step, scripts errors."""
