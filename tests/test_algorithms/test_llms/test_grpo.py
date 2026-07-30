@@ -4285,6 +4285,33 @@ class TestGRPOSaveLoadCheckpoint:
         new_grpo.clean_up()
 
 
+class TestLLMRestoreCheckpointAttributes:
+    def test_live_device_and_lora_config_survive_restore(self):
+        """A checkpoint written on another device must not relocate the loader.
+
+        Population members share a checkpoint but occupy different GPUs, so the
+        device recorded in the payload belongs to whichever member saved it.
+        """
+        agent = SimpleNamespace(
+            device=torch.device("cuda", 2),
+            lora_config="live",
+            selected_adapters=("actor",),
+        )
+        checkpoint = {
+            "device": torch.device("cuda", 0),
+            "lora_config": "stale",
+            "selected_adapters": ("actor", "reference"),
+            "steps": 6,
+        }
+
+        LLMAlgorithm._restore_checkpoint_attributes(agent, checkpoint)
+
+        assert agent.device == torch.device("cuda", 2)
+        assert agent.lora_config == "live"
+        assert agent.selected_adapters == ("actor",)
+        assert agent.steps == 6
+
+
 class TestGRPOSaveLoadDistributedActor:
     @pytest.mark.parametrize("config", [None])
     @pytest.mark.parametrize("use_deepspeed_optimizer", [False])

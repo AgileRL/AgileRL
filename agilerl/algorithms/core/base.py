@@ -192,6 +192,11 @@ __all__ = ["ActionResult", "EvolvableAlgorithm", "MultiAgentRLAlgorithm", "RLAlg
 
 logger = logging.getLogger(__name__)
 
+# Attributes owned by the live agent rather than by its learned state. A
+# checkpoint carries the hardware placement of the agent that wrote it, which does
+# not apply to an agent loading it onto a different device.
+LOCAL_AGENT_ATTRIBUTES = frozenset({"device"})
+
 SelfAgentWrapper = TypeVar("SelfAgentWrapper", bound=AgentWrapperProtocol)
 
 
@@ -1208,6 +1213,8 @@ class EvolvableAlgorithm(ABC, Generic[ExperiencesT], metaclass=RegistryMeta):
             legacy_steps = checkpoint["steps"]
             checkpoint["steps"] = int(legacy_steps[-1]) if len(legacy_steps) else 0
         for attribute, value in checkpoint.items():
+            if attribute in LOCAL_AGENT_ATTRIBUTES:
+                continue
             if isinstance(value, torch.Tensor) and isinstance(
                 getattr(self, attribute, None), torch.Tensor
             ):
@@ -3167,14 +3174,20 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
 
         ``lora_config`` and ``selected_adapters`` are intentionally skipped \u2014 the current
         algorithm's values are authoritative, and any LoRA-shape reconciliation is done
-        inside :meth:`_load_model_checkpoint`.
+        inside :meth:`_load_model_checkpoint`. :data:`LOCAL_AGENT_ATTRIBUTES` is skipped
+        for the same reason: the live agent owns the device its models sit on.
 
         :param checkpoint: Loaded attribute payload.
         :type checkpoint: dict[str, Any]
         :param checkpoint_type: The checkpoint type.
         :type checkpoint_type: Literal["peft", "deepspeed", "torch"]
         """
-        skip_attrs = {"lr_scheduler", "lora_config", "selected_adapters"}
+        skip_attrs = {
+            "lr_scheduler",
+            "lora_config",
+            "selected_adapters",
+            *LOCAL_AGENT_ATTRIBUTES,
+        }
         for attr, value in checkpoint.items():
             if attr in skip_attrs:
                 continue
