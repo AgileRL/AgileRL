@@ -573,7 +573,6 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
         if torch.backends.mps.is_available():
             torch.mps.empty_cache()
 
-        self._log_adapter_fingerprint("entering learn")
         self._prepare_vllm_for_training()
         with self.memory_efficient_params_context():
             completion_ids, action_masks, rewards, turn_ids = (
