@@ -144,3 +144,23 @@ def test_fused_logprob_backward_skips_when_no_inputs_require_grad():
     grads = FusedLinearLogProbsFunction.backward(Ctx(), grad_output)
     assert grads[0] is None
     assert grads[1] is None
+
+
+def test_fused_logprob_backward_rejects_zero3_trainable_lm_head():
+    """ZeRO-3 partitioned lm_head cannot be trained through the fused path."""
+    hidden = torch.randn(1, 4, 8)
+    weight = torch.randn(16, 8)
+    weight.ds_id = 0
+    targets = torch.randint(0, 16, (1, 4))
+
+    class Ctx:
+        needs_hidden_grad = False
+        needs_weight_grad = True
+        needs_bias_grad = False
+        chunk_rows = 2
+        temperature = 1.0
+        cast_to_fp32 = True
+        saved_tensors = (hidden, weight, None, targets)
+
+    with pytest.raises(RuntimeError, match="ZeRO-3 full-finetune of lm_head"):
+        FusedLinearLogProbsFunction.backward(Ctx(), torch.ones(1, 4))
