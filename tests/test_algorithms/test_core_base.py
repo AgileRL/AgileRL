@@ -1614,6 +1614,8 @@ def _make_llm_agent(
     use_separate_reference_adapter=False,
     *,
     reduce_memory_peak: bool = False,
+    use_vllm: bool = False,
+    use_memory_efficient_params: bool = True,
 ):
     """Helper to create a _StubLLMAlgorithm with heavily mocked internals."""
     if not HAS_LLM_DEPENDENCIES:
@@ -1654,6 +1656,8 @@ def _make_llm_agent(
             device="cpu",
             use_separate_reference_adapter=use_separate_reference_adapter,
             reduce_memory_peak=reduce_memory_peak,
+            use_vllm=use_vllm,
+            use_memory_efficient_params=use_memory_efficient_params,
         )
     agent.actor = actor_network
     agent.optimizer = MagicMock()
@@ -2949,6 +2953,24 @@ class TestLLMInitWarnings:
         )
         with pytest.warns(UserWarning, match="ZeRO Stage 3"):
             _make_llm_agent(accelerator=acc)
+
+    def test_zero_stage_3_disables_memory_efficient_params(self):
+        """Colocated CPU offload is incompatible with ZeRO-3 param sharding."""
+        acc = _make_mock_accelerator(
+            ds_config={
+                "zero_optimization": {"stage": 3},
+                "train_micro_batch_size_per_gpu": "auto",
+            }
+        )
+        with pytest.warns(
+            UserWarning, match="Memory efficient params is not compatible"
+        ):
+            agent = _make_llm_agent(
+                accelerator=acc,
+                use_vllm=True,
+                use_memory_efficient_params=True,
+            )
+        assert agent.use_memory_efficient_params is False
 
     def test_mutation_hook_registered_with_accelerator(self):
         acc = _make_mock_accelerator()
