@@ -399,6 +399,42 @@ def lora_input_cast_bytes(
     return int(rows * seq_len * width * layers * DTYPE_BYTES["fp32"])
 
 
+def moe_dispatch_bytes(
+    arch: ModelArch, rows: int, seq_len: int, act_bytes: float, backward: bool = False
+) -> int:
+    """Gather/scatter buffers the fused-expert forward builds per layer.
+
+    ``OlmoeExperts.forward`` (and its siblings) routes by *materialising*
+    copies, not by indexing in place::
+
+        final_hidden_states = torch.zeros_like(hidden_states)   # accumulator
+        expert_mask = F.one_hot(top_k_index, num_classes=...)   # int64
+        current_state = hidden_states[token_idx]                # gather
+
+    The gather copies each token once per expert it was routed to, so the
+    total is ``tokens x top_k x hidden`` — eight times the residual stream on
+    OLMoE, and nothing to do with the expert *weights* the rest of the model
+    already accounts for.
+
+    Measured on OLMoE-1B-7B at rows=4, seq=2048: gather 256 MiB, accumulator
+    34, mask 34, against a 334 MiB unexplained activation gap.
+
+    The one-hot mask is built under ``no_grad`` and is int64 regardless of
+    the model dtype, which makes it scale with the *total* expert count while
+    everything else here scales with the active count.
+    """
+    if not arch.is_moe:
+        return 0
+    tokens = rows * seq_len
+    top_k = (arch.n_experts_per_tok or 1) + arch.n_shared_experts
+    gather = tokens * top_k * arch.hidden_size * act_bytes
+    if backward:
+        gather *= 2
+    accumulator = tokens * arch.hidden_size * act_bytes
+    mask = tokens * top_k * (arch.n_experts or 0) * 8
+    return int(gather + accumulator + mask)
+
+
 def block_recompute_bytes(
     arch: ModelArch,
     rows: int,
@@ -445,6 +481,7 @@ def block_recompute_bytes(
         ple *= 2
     per_token = 4 * h + qkv_dim + mlp + ple
     peak = rows * seq_len * per_token * act_bytes
+    peak += moe_dispatch_bytes(arch, rows, seq_len, act_bytes, backward)
     if not flash_attention:
         peak += rows * arch.n_heads * seq_len * seq_len * act_bytes
     return int(peak)
