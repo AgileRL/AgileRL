@@ -33,8 +33,12 @@ from agilerl.typing import (
     SupportedObservationSpace,
 )
 from agilerl.utils.algo_utils import (
+    adam_kwargs,
+    eval_mode,
+    is_train_eval_invariant,
     make_safe_deepcopies,
     multi_dim_clamp,
+    polyak_update,
     share_encoder_parameters,
 )
 from agilerl.utils.evolvable_networks import (
@@ -343,23 +347,28 @@ class TD3(RLAlgorithm[TensorDict]):
         self.critic_target_1.load_state_dict(self.critic_1.state_dict())
         self.critic_target_2.load_state_dict(self.critic_2.state_dict())
 
+        self._actor_mode_invariant = is_train_eval_invariant(self.actor)
+
         # Optimizers
         self.actor_optimizer = OptimizerWrapper(
             optim.Adam,
             networks=self.actor,
             lr=self.lr_actor,
+            optimizer_kwargs=adam_kwargs(self.device, self.accelerator),
         )
 
         self.critic_1_optimizer = OptimizerWrapper(
             optim.Adam,
             networks=self.critic_1,
             lr=self.lr_critic,
+            optimizer_kwargs=adam_kwargs(self.device, self.accelerator),
         )
 
         self.critic_2_optimizer = OptimizerWrapper(
             optim.Adam,
             networks=self.critic_2,
             lr=self.lr_critic,
+            optimizer_kwargs=adam_kwargs(self.device, self.accelerator),
         )
 
         if self.accelerator is not None and wrap:
@@ -439,11 +448,9 @@ class TD3(RLAlgorithm[TensorDict]):
         :rtype: numpy.ndarray[float]
         """
         obs = self.preprocess_observation(obs)
-        self.actor.eval()
-        with torch.no_grad():
-            action: torch.Tensor = self.actor(obs)
-
-        self.actor.train()
+        with eval_mode(self.actor, mode_invariant=self._actor_mode_invariant):
+            with torch.no_grad():
+                action: torch.Tensor = self.actor(obs)
 
         # Add noise for exploration
         if training:
@@ -596,12 +603,7 @@ class TD3(RLAlgorithm[TensorDict]):
         :param target: Target network
         :type target: EvolvableModule
         """
-        for eval_param, target_param in zip(
-            net.parameters(), target.parameters(), strict=False
-        ):
-            target_param.data.copy_(
-                self.tau * eval_param.data + (1.0 - self.tau) * target_param.data,
-            )
+        polyak_update(net, target, self.tau)
 
     def test(
         self,

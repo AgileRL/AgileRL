@@ -39,15 +39,19 @@ from agilerl.typing import (
     TorchObsType,
 )
 from agilerl.utils.algo_utils import (
+    adam_kwargs,
     apply_env_defined_actions,
     concatenate_spaces,
     configure_tf32_precision,
+    eval_mode,
     format_shared_critic_encoder,
     get_deepest_head_config,
     get_num_envs,
     get_vect_dim,
+    is_train_eval_invariant,
     key_in_nested_dict,
     make_safe_deepcopies,
+    polyak_update,
     to_agent_tensors,
 )
 from agilerl.vector.pz_vec_env import PettingZooVecEnv
@@ -466,18 +470,21 @@ class MATD3(MultiAgentRLAlgorithm[TensorDict]):
             optim.Adam,
             networks=self.actors,
             lr=lr_actor,
+            optimizer_kwargs=adam_kwargs(self.device, self.accelerator),
         )
 
         self.critic_1_optimizers = OptimizerWrapper(
             optim.Adam,
             networks=self.critics_1,
             lr=lr_critic,
+            optimizer_kwargs=adam_kwargs(self.device, self.accelerator),
         )
 
         self.critic_2_optimizers = OptimizerWrapper(
             optim.Adam,
             networks=self.critics_2,
             lr=lr_critic,
+            optimizer_kwargs=adam_kwargs(self.device, self.accelerator),
         )
 
         if self.accelerator is not None and wrap:
@@ -500,6 +507,10 @@ class MATD3(MultiAgentRLAlgorithm[TensorDict]):
             self.recompile()
 
         self.criterion = nn.MSELoss()
+
+        self._actors_mode_invariant = all(
+            is_train_eval_invariant(actor) for actor in self.actors.values()
+        )
 
         # Register network groups for mutations
         self.register_network_group(
@@ -589,17 +600,19 @@ class MATD3(MultiAgentRLAlgorithm[TensorDict]):
         )
 
         grouped_actions: dict[str, npt.NDArray] = {}
-        for group_id in grouped_agents:
-            actor = self.actors[group_id]
-            actor.eval()
-            grouped_obs = preprocessed_states[group_id]
-            if self.accelerator is not None:
-                with self.accelerator.no_sync(actor), torch.no_grad():
-                    actions = actor(grouped_obs)
-            else:
-                with torch.no_grad():
-                    actions = actor(grouped_obs)
-            grouped_actions[group_id] = actions.cpu().numpy()
+        with eval_mode(
+            *self.actors.values(), mode_invariant=self._actors_mode_invariant
+        ):
+            for group_id in grouped_agents:
+                actor = self.actors[group_id]
+                grouped_obs = preprocessed_states[group_id]
+                if self.accelerator is not None:
+                    with self.accelerator.no_sync(actor), torch.no_grad():
+                        actions = actor(grouped_obs)
+                else:
+                    with torch.no_grad():
+                        actions = actor(grouped_obs)
+                grouped_actions[group_id] = actions.cpu().numpy()
 
         tensor_actions: dict[str, torch.Tensor] = {}
         for group_id, group_actions in grouped_actions.items():
@@ -614,8 +627,6 @@ class MATD3(MultiAgentRLAlgorithm[TensorDict]):
                 start = end
 
         for agent_id, actions in tensor_actions.items():
-            actor = self.actors[self.get_network_id(agent_id)]
-            actor.train()
             if self.training:
                 if isinstance(self.possible_action_spaces[agent_id], spaces.Discrete):
                     min_output, max_output = 0, 1
@@ -964,12 +975,7 @@ class MATD3(MultiAgentRLAlgorithm[TensorDict]):
         :param target: Target network
         :type target: nn.Module
         """
-        for eval_param, target_param in zip(
-            net.parameters(), target.parameters(), strict=False
-        ):
-            target_param.data.copy_(
-                self.tau * eval_param.data + (1.0 - self.tau) * target_param.data,
-            )
+        polyak_update(net, target, self.tau)
 
     def test(
         self,

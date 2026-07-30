@@ -24,6 +24,7 @@ from agilerl.data.tokenizer import Tokenizer
 from agilerl.modules.gpt import EvolvableGPT
 from agilerl.modules.mlp import EvolvableMLP
 from agilerl.typing import DeviceType, NetConfigType, PastKeyValues
+from agilerl.utils.algo_utils import polyak_update
 from agilerl.utils.sampling_utils import (
     always_terminate,
     map_all_kvs,
@@ -1115,52 +1116,30 @@ class ILQL(nn.Module):
             action_mask,
         )
 
+    @torch.no_grad()
     def soft_update(self) -> None:
         """Soft updates target networks."""
-        for target_param, local_param in zip(
-            self.target_q.parameters(),
-            self.q.parameters(),
-            strict=False,
-        ):
-            target_param.data.copy_(
-                self.alpha * local_param.data + (1.0 - self.alpha) * target_param.data,
-            )
+        pairs = [(self.q, self.target_q)]
         if self.double_q:
-            for target_param, local_param in zip(
-                self.target_q2.parameters(),
-                self.q2.parameters(),
-                strict=False,
-            ):
-                target_param.data.copy_(
-                    self.alpha * local_param.data
-                    + (1.0 - self.alpha) * target_param.data,
-                )
+            pairs.append((self.q2, self.target_q2))
         if self.actor_target is not None:
-            for target_param, local_param in zip(
-                self.actor_target.parameters(),
-                self.model.parameters(),
-                strict=False,
-            ):
-                target_param.data.copy_(
-                    self.alpha * local_param.data
-                    + (1.0 - self.alpha) * target_param.data,
-                )
+            pairs.append((self.model, self.actor_target))
 
+        for source, target in pairs:
+            polyak_update(source, target, self.alpha)
+
+    @torch.no_grad()
     def hard_update(self) -> None:
         """Hard update target networks."""
-        for target_param, local_param in zip(
-            self.target_q.parameters(),
-            self.q.parameters(),
-            strict=False,
-        ):
-            target_param.data.copy_(local_param.data)
+        torch._foreach_copy_(
+            list(self.target_q.parameters()),
+            list(self.q.parameters()),
+        )
         if self.double_q:
-            for target_param, local_param in zip(
-                self.target_q2.parameters(),
-                self.q2.parameters(),
-                strict=False,
-            ):
-                target_param.data.copy_(local_param.data)
+            torch._foreach_copy_(
+                list(self.target_q2.parameters()),
+                list(self.q2.parameters()),
+            )
         if self.actor_target is not None:
             del self.actor_target
             self.actor_target = copy.deepcopy(self.model)
@@ -2275,10 +2254,3 @@ def to_decorator(
         return to(f(*args, **kwargs), device)
 
     return new_f
-
-
-def parameter_norm(model: nn.Module) -> float:
-    norm = 0.0
-    for param in model.parameters():
-        norm += (param.norm() ** 2).item()
-    return math.sqrt(norm)

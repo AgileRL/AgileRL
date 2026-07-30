@@ -31,7 +31,13 @@ from agilerl.typing import (
     TorchObsType,
     numpy_action_mask,
 )
-from agilerl.utils.algo_utils import make_safe_deepcopies
+from agilerl.utils.algo_utils import (
+    adam_kwargs,
+    eval_mode,
+    is_train_eval_invariant,
+    make_safe_deepcopies,
+    polyak_update,
+)
 
 
 class DQN(RLAlgorithm[TensorDict]):
@@ -85,7 +91,7 @@ class DQN(RLAlgorithm[TensorDict]):
 
     # Hot-path callables: bound methods by default, CudaGraph wrappers when enabled.
     _get_action_impl: Callable[
-        [TorchObsType, torch.Tensor, torch.Tensor],
+        [TorchObsType, torch.Tensor | float, torch.Tensor],
         torch.Tensor,
     ]
     _update_impl: Callable[
@@ -190,12 +196,16 @@ class DQN(RLAlgorithm[TensorDict]):
         # Initialize target network (same pattern as DDPG; post-mutation sync via reinit_shared_networks)
         self.actor_target.load_state_dict(self.actor.state_dict())
 
+        self._actor_mode_invariant = is_train_eval_invariant(self.actor)
+
         # Initialize optimizer with OptimizerWrapper
         self.optimizer = OptimizerWrapper(
             optim.Adam,
             networks=self.actor,
             lr=self.lr,
-            optimizer_kwargs={"capturable": self.capturable},
+            optimizer_kwargs=adam_kwargs(
+                self.device, self.accelerator, capturable=self.capturable
+            ),
         )
 
         if self.accelerator is not None and wrap:
@@ -254,7 +264,8 @@ class DQN(RLAlgorithm[TensorDict]):
         """
         # Preprocess observations and convert inputs to torch tensors
         torch_obs = self.preprocess_observation(obs)
-        eps = torch.tensor(epsilon, device=self.device)
+        # Graph capture needs epsilon as a device tensor; eager compares the float.
+        eps = torch.tensor(epsilon, device=self.device) if self.cudagraphs else epsilon
         if action_mask is not None:
             mask = torch.as_tensor(
                 numpy_action_mask(action_mask),
@@ -283,7 +294,7 @@ class DQN(RLAlgorithm[TensorDict]):
     def _get_action(
         self,
         obs: TorchObsType,
-        epsilon: torch.Tensor,
+        epsilon: torch.Tensor | float,
         action_mask: torch.Tensor,
     ) -> torch.Tensor:
         """Return the next action to take in the environment.
@@ -299,11 +310,9 @@ class DQN(RLAlgorithm[TensorDict]):
         :return: Selected action(s) as tensor
         :rtype: torch.Tensor
         """
-        self.actor.eval()
-        with torch.no_grad():
-            q_values = self.actor(obs)
-
-        self.actor.train()
+        with eval_mode(self.actor, mode_invariant=self._actor_mode_invariant):
+            with torch.no_grad():
+                q_values = self.actor(obs)
 
         # Masked random actions
         masked_random_values = torch.rand_like(q_values) * action_mask
@@ -346,23 +355,41 @@ class DQN(RLAlgorithm[TensorDict]):
         :return: Loss value from the update step
         :rtype: torch.Tensor
         """
-        with torch.no_grad():
-            if self.double:  # Double Q-learning
-                q_idx = self.actor(next_obs).argmax(dim=1).unsqueeze(1)
-                q_target = (
-                    self.actor_target(next_obs).gather(dim=1, index=q_idx).detach()
-                )
-            else:
-                q_target = self.actor_target(next_obs).max(dim=1)[0].unsqueeze(1)
-
-            # target, if terminal then y_j = rewards
-            y_j = rewards + self.gamma * q_target * (1 - dones)
-
         if actions.ndim == 1:
             actions = actions.unsqueeze(-1)
+        actions = actions.long()
 
-        # Compute Q-values for actions taken and loss
-        q_eval = self.actor(obs).gather(1, actions.long())
+        # One online forward over cat(obs, next_obs); the next_obs half is detached
+        # for greedy action selection, so gradients match two separate forwards.
+        if (
+            self.double
+            and self._actor_mode_invariant
+            and isinstance(obs, torch.Tensor)
+            and isinstance(next_obs, torch.Tensor)
+        ):
+            batch_size = obs.shape[0]
+            q_online = self.actor(torch.cat((obs, next_obs), dim=0))
+            q_eval = q_online[:batch_size].gather(1, actions)
+            with torch.no_grad():
+                q_idx = q_online[batch_size:].detach().argmax(dim=1, keepdim=True)
+                q_target = self.actor_target(next_obs).gather(dim=1, index=q_idx)
+                y_j = rewards + self.gamma * q_target * (1 - dones)
+        else:
+            with torch.no_grad():
+                if self.double:  # Double Q-learning
+                    q_idx = self.actor(next_obs).argmax(dim=1).unsqueeze(1)
+                    q_target = (
+                        self.actor_target(next_obs).gather(dim=1, index=q_idx).detach()
+                    )
+                else:
+                    q_target = self.actor_target(next_obs).max(dim=1)[0].unsqueeze(1)
+
+                # target, if terminal then y_j = rewards
+                y_j = rewards + self.gamma * q_target * (1 - dones)
+
+            # Compute Q-values for actions taken
+            q_eval = self.actor(obs).gather(1, actions)
+
         loss: torch.Tensor = self.criterion(q_eval, y_j)
 
         # zero gradients, perform a backward pass, and update the weights
@@ -403,14 +430,7 @@ class DQN(RLAlgorithm[TensorDict]):
 
     def soft_update(self) -> None:
         """Soft updates target network."""
-        for eval_param, target_param in zip(
-            self.actor.parameters(),
-            self.actor_target.parameters(),
-            strict=False,
-        ):
-            target_param.data.copy_(
-                self.tau * eval_param.data + (1.0 - self.tau) * target_param.data,
-            )
+        polyak_update(self.actor, self.actor_target, self.tau)
 
     def test(
         self,

@@ -28,7 +28,13 @@ from agilerl.typing import (
     ReplayBatch,
     numpy_action_mask,
 )
-from agilerl.utils.algo_utils import make_safe_deepcopies
+from agilerl.utils.algo_utils import (
+    adam_kwargs,
+    eval_mode,
+    is_train_eval_invariant,
+    make_safe_deepcopies,
+    polyak_update,
+)
 
 
 class CQN(RLAlgorithm[TensorDict]):
@@ -172,11 +178,14 @@ class CQN(RLAlgorithm[TensorDict]):
 
         self.actor_target.load_state_dict(self.actor.state_dict())
 
+        self._actor_mode_invariant = is_train_eval_invariant(self.actor)
+
         # Initialize optimizer
         self.optimizer = OptimizerWrapper(
             optim.Adam,
             networks=self.actor,
             lr=self.lr,
+            optimizer_kwargs=adam_kwargs(self.device, self.accelerator),
         )
 
         if self.accelerator is not None and wrap:
@@ -231,10 +240,9 @@ class CQN(RLAlgorithm[TensorDict]):
                     axis=1,
                 )
         else:
-            self.actor.eval()
-            with torch.no_grad():
-                action_values = self.actor(obs).cpu().data.numpy()
-            self.actor.train()
+            with eval_mode(self.actor, mode_invariant=self._actor_mode_invariant):
+                with torch.no_grad():
+                    action_values = self.actor(obs).cpu().data.numpy()
 
             if action_mask is None:
                 action = np.argmax(action_values, axis=-1)
@@ -307,14 +315,7 @@ class CQN(RLAlgorithm[TensorDict]):
 
     def soft_update(self) -> None:
         """Soft updates target network."""
-        for eval_param, target_param in zip(
-            self.actor.parameters(),
-            self.actor_target.parameters(),
-            strict=False,
-        ):
-            target_param.data.copy_(
-                self.tau * eval_param.data + (1.0 - self.tau) * target_param.data,
-            )
+        polyak_update(self.actor, self.actor_target, self.tau)
 
     def test(
         self,
