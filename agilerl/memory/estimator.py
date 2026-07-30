@@ -168,6 +168,26 @@ def estimate_training(
             "which bitsandbytes cannot reach, so they stay at the base dtype. "
             "Only the attention and router matrices shrink."
         )
+    if kbit and not arch.is_moe:
+        # Measured on Qwen2.5-0.5B, A100, paired bf16/nf4 runs at an identical
+        # corner: the quantized path costs activation memory, and the trade
+        # against the weight saving inverts with token count.
+        #
+        #     512 tokens    nf4 is 100 MiB *cheaper*
+        #   8,192 tokens    nf4 is 332 MiB dearer
+        #  32,768 tokens    nf4 is 2276 MiB dearer
+        #
+        # bitsandbytes' MatMul4Bit.backward workspace is directly visible in
+        # the allocator trace. The estimator does not yet carry the term (see
+        # fixtures/pending/README.md), so it under-predicts quantized training
+        # at long context -- warn rather than mislead.
+        warnings.append(
+            "Quantized training is under-predicted at long context. nf4 saves "
+            "weight bytes but costs activation bytes, and the two cross over: "
+            "measured on Qwen2.5-0.5B, nf4 was 100 MiB cheaper at 512 tokens "
+            "per micro-batch and 2.2 GiB dearer at 32k. Treat this bar as a "
+            "lower bound."
+        )
     base = formulas.weight_bytes(
         counts, knobs.weight_dtype, variant, kbit_prepared=kbit
     )

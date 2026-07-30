@@ -13,38 +13,44 @@ Qwen2.5-0.5B on an A100, 42 points, nf4 on both trainer and engine.
 Generation is fine (0.71% mean). Training refits to **20.8% mean**, against
 ~5% for the same model unquantized.
 
-### What the gap is — characterised 2026-07-30
+### What the gap is — measured 2026-07-30
 
-**It is not a dequantized weight copy.** Regressing the gap against tokens over
-all 21 points:
+**It is not a dequantized weight copy.** It scales with tokens, so it is
+activation memory. Paired bf16/nf4 runs at identical corners on an A100
+(Qwen2.5-0.5B, group 8, rank 32, all-linear), reading the device delta:
 
-    gap = 361 MiB  +  43,200 bytes/token        (R^2 = 0.78)
+| tokens (mb x seq) | bf16 | nf4 | penalty |
+|---|---|---|---|
+| 512 | 1820 MiB | 1720 MiB | **-100 MiB** (nf4 cheaper) |
+| 8,192 | 2536 MiB | 2868 MiB | +332 MiB |
+| 32,768 | 6190 MiB | 8466 MiB | **+2276 MiB** |
 
-A whole-model bf16 dequant copy would be 682 MiB and *flat*; one layer's worth
-would be 28 MiB and flat. Neither matches — the term is dominated by a
-per-token component, i.e. it is activation memory.
+**The trade inverts.** nf4 buys back ~512 MiB of weights on this model, so
+below roughly 2,700 tokens per micro-batch it is a net win and above it a net
+loss. "Quantize to make it fit" can make long-context training *stop* fitting.
 
-**The mechanism is in `prepare_model_for_kbit_training`**, which does two
-things beyond quantizing:
+`bitsandbytes`' `MatMul4Bit.backward` workspace is directly visible in the
+allocator trace — 76 MiB at the 8k corner, under
+`_functions.py:backward <- function.py:apply`. The rest shows up as activations
+(+309 MiB) and pre-window allocations (+381 MiB).
 
-1. Upcasts every non-`Params4bit` parameter to fp32 — layernorms and the
-   lm_head. *Already modelled*, via `weight_bytes(..., kbit_prepared=True)`.
-2. Calls `enable_input_require_grads()`, putting the **embedding output** into
-   the autograd graph. This is the unmodelled one. Under LoRA-only training
-   nothing upstream of an adapter needs a gradient, so those activations are
-   freed as the forward proceeds; once the embedding requires grad the whole
-   chain is retained instead. That is a per-token cost, which is what the
-   regression sees.
+**A hypothesis recorded here earlier was wrong and is retracted.**
+`prepare_model_for_kbit_training` calls `enable_input_require_grads()` only when
+`use_reentrant` is absent or true — and the framework passes
+`gradient_checkpointing_kwargs={"use_reentrant": False}` on *both* the quantized
+and unquantized paths (`base.py:4290`, `:3301`, `:3310`). So it is never called
+here, and checkpointing is identical either way. That was not the mechanism.
 
-**Why it is not modelled yet.** Pinning the coefficient means knowing which
-tensors flip from freed to retained, and the data here cannot settle it: these
-21 points were measured *before* `wait_for_idle` landed, so they carry the
-contaminated-floor noise (hence R^2 = 0.78, and a gap ranging 190–2278 MiB).
+**Why the term is still not modelled.** Three paired points give
+`-201 MiB + 78,630 B/token`, but that fit misses its own middle point by 82 MiB,
+and it is one model. Shipping it would be fitting noise. The estimator instead
+*warns* that quantized training is a lower bound at long context.
 
-**The experiment to run** (needs a GPU; both zones were stocked out when this
-was written): sweep Qwen2.5-0.5B at nf4 with the drain-wait in place, and take
-an allocator snapshot at one corner with and without `enable_input_require_grads`.
-The difference between those two snapshots is the term.
+**What would settle it:** paired bf16/nf4 runs across a second and third model
+(different hidden/intermediate ratio, e.g. SmolLM2-1.7B and Qwen2.5-3B) at four
+or more token counts each. If the per-token coefficient tracks a geometric width
+across models, it is real and modellable; if it does not, it is a bnb workspace
+constant that needs its own lookup.
 
 ### `...@NVIDIA-A100-SXM4-40GB.longctx.json`
 
