@@ -292,6 +292,19 @@ def measure_point(
         candidate_kwargs.update(
             {
                 "max_output_tokens": point.seq_len - prompt_len,
+                # Pin every completion to the full budget. Without this the
+                # rollout samples at temperature/top_p, realised lengths vary
+                # run to run, and since those lengths set the training
+                # activation peak the measurement is stochastic: two identical
+                # gemma-4-E2B runs differed by 30% (14212 vs 10930 MiB), the
+                # gap almost entirely activations.
+                #
+                # It also aligns the measurement with what is predicted. The
+                # estimator computes a *bound* -- every row at max_model_len --
+                # so measuring a shorter, variable draw was comparing two
+                # different quantities. min_tokens suppresses EOS until the
+                # budget is reached, so length becomes exactly max_output_tokens.
+                "min_output_tokens": point.seq_len - prompt_len,
                 "use_memory_efficient_params": point.memory_efficient_params,
                 "use_vllm": True,
                 "vllm_config": VLLMConfig(
