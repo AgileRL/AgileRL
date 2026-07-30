@@ -437,8 +437,7 @@ class SelectionStrategyProtocol(Protocol):
     def select(
         self,
         population: list[Any],
-    ) -> tuple[Any, list[Any], list[int] | None]:
-        pass
+    ) -> tuple[Any, list[Any], list[int] | None]: ...
 
 
 # Define a TypeVar for EvolvableAlgorithm that can be used for generic typing

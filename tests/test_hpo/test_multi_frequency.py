@@ -293,6 +293,36 @@ class TestSubpopulationAssignment:
             strategy._assign_initial_subpopulations(pop)
 
 
+class TestIndexAllocation:
+    def test_next_index_issues_fresh_indices_above_the_populations_maximum(self):
+        strategy = make_multi_frequency_selection(n_subpop=2, population_size=8)
+        pop = make_fake_selection_population(
+            {0: [4.0, 3.0, 2.0, 1.0], 1: [8.0, 7.0, 6.0, 5.0]}
+        )  # indices 0 to 7
+
+        strategy._sync_index(pop)
+
+        assert [strategy._next_index() for _ in range(3)] == [8, 9, 10]
+
+    def test_sync_index_never_lowers_the_allocator(self):
+        strategy = make_multi_frequency_selection(n_subpop=2, population_size=8)
+        pop = make_fake_selection_population(
+            {0: [4.0, 3.0, 2.0, 1.0], 1: [8.0, 7.0, 6.0, 5.0]}
+        )
+        strategy._sync_index(pop)
+        assert strategy._next_index() == 8
+
+        strategy._sync_index(pop[:4])  # a lower-indexed subset
+
+        assert strategy._next_index() == 9  # not 5, the subset's max index + 1
+
+    def test_next_index_before_sync_index_raises(self):
+        strategy = make_multi_frequency_selection(n_subpop=2, population_size=8)
+
+        with pytest.raises(RuntimeError, match="must seed the allocator"):
+            strategy._next_index()
+
+
 class TestBrackets:
     @pytest.mark.parametrize(
         ("w", "s", "o", "ln", "expected"),
@@ -547,6 +577,35 @@ class TestSelect:
         for _ in range(4):
             _elite, pop, _indices = strategy.select(pop)
             assert len({a.index for a in pop}) == len(pop)
+
+
+class TestDeltaOf:
+    def test_delta_of_returns_the_frequency_of_the_agents_subpopulation(self):
+        strategy = make_multi_frequency_selection(
+            n_subpop=3, population_size=12, ratios=[1, 4, 7]
+        )
+        agents = [FakeSelectionAgent(i, i, fitness=0.0) for i in range(3)]
+
+        assert [strategy._delta_of(a) for a in agents] == [1, 4, 7]
+
+    def test_delta_of_rejects_an_untagged_agent(self):
+        strategy = make_multi_frequency_selection(n_subpop=2, population_size=8)
+        agent = FakeSelectionAgent(0, None, fitness=0.0)
+
+        with pytest.raises(ValueError, match="missing its subpopulation tag"):
+            strategy._delta_of(agent)
+
+    def test_migration_rejects_an_untagged_external_candidate(self):
+        # An untagged agent in the external pool has no delta to compare against
+        strategy = make_multi_frequency_selection(
+            n_subpop=2, population_size=8, ratios=[1, 2]
+        )
+        pop = make_fake_selection_population(
+            {0: [4.0, 3.0, 2.0, 1.0], None: [9.0, 8.0, 7.0, 6.0]}
+        )
+
+        with pytest.raises(ValueError, match="missing its subpopulation tag"):
+            run_migration(strategy, pop, subpop=0, external_pool=pop)
 
 
 class TestMigration:
@@ -821,6 +880,49 @@ def make_llm_population(subpop_fitnesses, accelerator=None):
 def llm_dispatch(monkeypatch):
     """Route ``select`` through the LLM path by making FakeLLMAgent the LLM type."""
     monkeypatch.setattr(mf_module, "LLMAlgorithm", FakeLLMAgent)
+
+
+class TestEliteHpValues:
+    def test_elite_hp_values_snapshots_every_mutable_hp_by_value(self):
+        strategy = make_multi_frequency_selection(n_subpop=2, population_size=8)
+        elite = FakeSelectionAgent(0, 0, fitness=1.0, lr=0.5)
+        elite.batch_size = [32, 64]  # a mutable value, to prove the snapshot is a copy
+
+        values = strategy._elite_hp_values(elite)
+        values["batch_size"].append(128)
+
+        assert values == {"lr": 0.5, "batch_size": [32, 64, 128]}
+        assert elite.batch_size == [32, 64]
+
+    def test_elite_hp_values_is_empty_without_mutable_hps(self):
+        strategy = make_multi_frequency_selection(n_subpop=2, population_size=8)
+        elite = FakeSelectionAgent(0, 0, fitness=1.0)
+        elite.registry = FakeRegistry([])  # an algorithm registering no mutable HPs
+
+        assert strategy._elite_hp_values(elite) == {}
+
+    def test_weights_only_migration_leaves_hps_alone_without_mutable_hps(self):
+        # With nothing to reset, the weights-only migrant keeps the external agent's
+        # hyperparameters and its optimizer is never rebuilt
+        strategy = make_multi_frequency_selection(
+            n_subpop=2, population_size=8, ratios=[1, 2]
+        )
+        pop = make_fake_selection_population(
+            {0: [9.0, 8.0, 7.0, 6.0], 1: [5.0, 4.0, 3.0, 2.0]}
+        )
+        for a in pop:
+            a.registry = FakeRegistry([])
+            if a.subpopulation_id == 0:  # the faster subpopulation migrants come from
+                a.weights = "EXT"
+                a.lr = 0.5
+
+        migrated = run_migration(strategy, pop, subpop=1, external_pool=pop)
+
+        movers = new_agents(pop, migrated)
+        assert len(movers) == 1
+        assert movers[0].weights == "EXT"
+        assert movers[0].lr == 0.5
+        assert movers[0].reinit_called is False
 
 
 class TestApplyHpReset:
