@@ -3150,6 +3150,21 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         if self.use_value_head:
             self._restore_value_head(path)
 
+        self._refresh_deepspeed_master_weights()
+
+    def _refresh_deepspeed_master_weights(self) -> None:
+        """Point the optimizer's fp32 master weights at the parameters on the model.
+
+        DeepSpeed snapshots fp32 master copies of the parameters when the engine is
+        built and writes those copies back over the model's shards on every
+        optimizer step. Weights written into a live engine therefore survive only
+        until the first step unless the master copies are refreshed to match.
+        """
+        optimizer = getattr(self.actor, "optimizer", None)
+        refresh = getattr(optimizer, "refresh_fp32_params", None)
+        if callable(refresh):
+            refresh()
+
     def _restore_value_head(self, path: str) -> None:
         """Restore the ``v_head`` weights saved next to the LoRA adapters.
 
