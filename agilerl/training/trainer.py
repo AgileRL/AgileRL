@@ -888,17 +888,17 @@ class ArenaTrainer(Trainer):
         **kwargs: Any,
     ) -> None:
 
-        selection_strategy = resolve_deprecated_selection_kwargs(
+        resolved_selection = resolve_deprecated_selection_kwargs(
             selection_strategy, kwargs, caller=type(self).__name__
         )
-        # Arena runs tournament selection only
-        if isinstance(selection_strategy, MultiFrequencySelectionSpec):
+        if isinstance(resolved_selection, MultiFrequencySelectionSpec):
             msg = (
                 "ArenaTrainer only supports tournament selection: multi-frequency "
                 "selection (MF-PBT) is not available on the Arena platform. Use "
                 "LocalTrainer to run MF-PBT."
             )
             raise ValueError(msg)
+        selection_strategy = resolved_selection
 
         if isinstance(environment, str):
             if ArenaEnvSpec is None:

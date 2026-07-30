@@ -264,7 +264,7 @@ def _collect_unknown_fields(
         dumped_section = dumped.get(section)
         if isinstance(dumped_section, dict):
             known |= {str(key) for key in dumped_section}
-        unknown.extend(f"{section}.{key}" for key in raw_section if key not in known)
+        unknown.extend(f"{raw_key}.{key}" for key in raw_section if key not in known)
 
     return unknown
 
@@ -488,24 +488,6 @@ class TrainingManifest(BaseModel):
             replay_buffer=_coerce(replay_buffer, ReplayBufferSpec),
             selection_strategy=_coerce(selection_strategy, selection_cls),
         )
-
-    @overload
-    @classmethod
-    def to_arena_manifest(
-        cls,
-        manifest: str | Path | dict[str, Any] | TrainingManifest,
-        *,
-        mode: Literal["json"] = ...,
-    ) -> dict[str, Any]: ...
-
-    @overload
-    @classmethod
-    def to_arena_manifest(
-        cls,
-        manifest: str | Path | dict[str, Any] | TrainingManifest,
-        *,
-        mode: Literal["python"],
-    ) -> ArenaTrainingManifest: ...
 
     @overload
     @classmethod

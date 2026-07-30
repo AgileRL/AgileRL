@@ -1176,7 +1176,7 @@ class TestRunSelectionAndMutation:
         self, monkeypatch, tmp_path
     ):
         strategy = make_multi_frequency_selection()
-        elite = object()
+        elite = MagicMock(spec=LLMAlgorithm)
         monkeypatch.setattr(strategy, "select", lambda pop: (elite, ["evolved"], [3]))
         saved: list = []
         monkeypatch.setattr(
@@ -1205,7 +1205,9 @@ class TestRunSelectionAndMutation:
     ):
         strategy = make_multi_frequency_selection()
         monkeypatch.setattr(
-            strategy, "select", lambda pop: (object(), ["evolved"], [3])
+            strategy,
+            "select",
+            lambda pop: (MagicMock(spec=LLMAlgorithm), ["evolved"], [3]),
         )
         consolidated: list = []
         monkeypatch.setattr(
@@ -1213,7 +1215,9 @@ class TestRunSelectionAndMutation:
             lambda pop: consolidated.append(pop),
         )
         accelerator = FakeAccelerator(is_main_process=True)
-        mutation = RecordingMutations(result=["mutated"])
+        # consolidate_mutations only receives the LLMAlgorithm members
+        mutated = MagicMock(spec=LLMAlgorithm)
+        mutation = RecordingMutations(result=[mutated])
 
         run_selection_and_mutation(
             strategy,
@@ -1225,7 +1229,7 @@ class TestRunSelectionAndMutation:
         )
 
         assert mutation.indices_seen == [[3]]
-        assert consolidated == [["mutated"]]  # mutation decisions broadcast to workers
+        assert consolidated == [[mutated]]  # mutation decisions broadcast to workers
 
     def test_no_accelerator(self):
         population = [MagicMock(spec=EvolvableAlgorithm) for _ in range(3)]

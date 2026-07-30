@@ -197,7 +197,7 @@ def _collect_unknown_fields(
         dumped_section = dumped.get(section)
         if isinstance(dumped_section, dict):
             known.update(dumped_section)
-        unknown.extend(f"{section}.{key}" for key in raw_section if key not in known)
+        unknown.extend(f"{raw_key}.{key}" for key in raw_section if key not in known)
 
     return unknown
 

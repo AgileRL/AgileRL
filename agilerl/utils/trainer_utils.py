@@ -18,12 +18,7 @@ from agilerl.algorithms.core.base import (
     RLAlgorithm,
 )
 from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
-from agilerl.components.replay_buffer import (
-    BufferType,
-    MultiStepReplayBuffer,
-    PrioritizedReplayBuffer,
-    ReplayBuffer,
-)
+from agilerl.components.replay_buffer import BufferType
 from agilerl.hpo.multi_frequency import MultiFrequencySelection
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
@@ -313,13 +308,13 @@ def create_population_from_spec(
 
 
 def _assign_subpopulations(
-    population: PopulationT,
+    population: PopulationType,
     selection_strategy_spec: SelectionStrategySpec | None,
 ) -> None:
     """Tag each agent with its MF-PBT subpopulation from its population slot.
 
     :param population: The freshly-built or resumed population, in slot order.
-    :type population: PopulationT
+    :type population: PopulationType
     :param selection_strategy_spec: The resolved selection-strategy spec, or None.
     :type selection_strategy_spec: SelectionStrategySpec | None
     """

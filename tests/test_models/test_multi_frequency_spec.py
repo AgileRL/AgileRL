@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for the multi-frequency selection Pydantic spec and its manifest integration."""
 
 from __future__ import annotations

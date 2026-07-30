@@ -227,4 +227,6 @@ class TournamentSelection:
                     wrap=False,
                 )
             new_population.append(actor_parent)
+
+        elite = new_population[0]
         return elite, new_population, None

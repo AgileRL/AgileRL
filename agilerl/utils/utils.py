@@ -1219,7 +1219,7 @@ def save_population_checkpoint(
 
 
 def _save_standard_elite(
-    elite: Any,
+    elite: EvolvableAlgorithmProtocol,
     *,
     env_name: str,
     algo: str,
@@ -1228,7 +1228,7 @@ def _save_standard_elite(
     """Checkpoint a non-LLM elite agent to disk.
 
     :param elite: The elite agent to save.
-    :type elite: EvolvableAlgorithm
+    :type elite: EvolvableAlgorithmProtocol
     :param env_name: Environment name, used to build the default filename.
     :type env_name: str
     :param algo: Algorithm name, used to build the default filename.
@@ -1247,7 +1247,7 @@ def _save_standard_elite(
 
 def run_selection_and_mutation(
     selection_strategy: SelectionStrategyProtocol | None,
-    population: : list[AgentT],
+    population: list[AgentT],
     mutation: Mutations,
     env_name: str,
     algo: str | None = None,

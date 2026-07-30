@@ -54,6 +54,7 @@ from agilerl.training.train_off_policy import train_off_policy
 from agilerl.training.train_offline import train_offline
 from agilerl.training.train_on_policy import train_on_policy
 from agilerl.utils.utils import make_multi_agent_vect_envs, run_selection_and_mutation
+from agilerl.vector.pz_vec_env import PettingZooVecEnv
 from tests.helper_functions import (
     generate_discrete_space,
     generate_multi_agent_box_spaces,
@@ -62,7 +63,6 @@ from tests.helper_functions import (
     rank_population_by_subpopulation,
     weakest_agent_index,
 )
-from agilerl.vector.pz_vec_env import PettingZooVecEnv
 
 # Common parametrize constants
 _FLAT_VECT = [((6,), 2, True)]
@@ -89,26 +89,6 @@ def _assert_wandb_summary_log(mock_wandb_log: MagicMock) -> None:
     logged = mock_wandb_log.call_args[0][0]
     for key in _WANDB_SUMMARY_KEYS:
         assert key in logged
-
-
-def _make_multi_frequency_selection(seed: int = 0) -> MultiFrequencySelection:
-    """Build a six-slot multi-frequency selection (2 subpops x 3) for trainer-routing tests.
-
-    :param seed: Seed for the selection's RNG, defaults to 0.
-    :type seed: int, optional
-    :return: A six-slot multi-frequency selection with fast/slow subpopulation frequencies.
-    :rtype: MultiFrequencySelection
-    """
-    return MultiFrequencySelection(
-        population_size=6,
-        n_subpopulations=2,
-        evolution_frequency_ratios=[1, 2],
-        n_winners=1,
-        n_survivors=0,
-        n_open_for_migration=1,
-        n_losers=1,
-        seed=seed,
-    )
 
 
 def _make_multi_frequency_selection(seed: int = 0) -> MultiFrequencySelection:

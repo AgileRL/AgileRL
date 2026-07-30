@@ -2450,6 +2450,7 @@ class TestMultiFrequencyLLMEvolution:
         monkeypatch.setattr(
             "agilerl.hpo.multi_frequency.LLMAlgorithm", _LLMFinetuneAgent
         )
+        monkeypatch.setattr("agilerl.utils.utils.LLMAlgorithm", _LLMFinetuneAgent)
         saved: list = []
         monkeypatch.setattr(
             "agilerl.utils.utils.save_llm_checkpoint",

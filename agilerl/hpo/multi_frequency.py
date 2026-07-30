@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 """Multiple-Frequencies Population-Based Training (MF-PBT).
 
 Implements the MF-PBT evolution regime of Doulazmi et al.,
@@ -287,7 +290,12 @@ class MultiFrequencySelection:
 
         :return: The next unused agent index.
         :rtype: int
+        :raises RuntimeError: If called before :meth:`_sync_index` seeded the allocator.
         """
+        if self._max_index is None:
+            msg = "_sync_index() must seed the allocator before indices are issued."
+            raise RuntimeError(msg)
+
         self._max_index += 1
         return self._max_index
 
@@ -339,6 +347,24 @@ class MultiFrequencySelection:
                 agent.subpopulation_id = self._subpopulation_for_position(
                     position, self.subpopulation_size
                 )
+
+    def _delta_of(self, agent: EvolvableAlgorithm) -> int:
+        """Return the evolution frequency delta_i of the agent's subpopulation.
+
+        :param agent: A tagged population member.
+        :type agent: ~agilerl.algorithms.core.base.EvolvableAlgorithm
+        :return: The delta_i of the subpopulation the agent belongs to.
+        :rtype: int
+        :raises ValueError: If the agent carries no subpopulation tag.
+        """
+        if agent.subpopulation_id is None:
+            msg = (
+                "Agent is missing its subpopulation tag; agents must be tagged at "
+                "build time or by _assign_initial_subpopulations before evolving."
+            )
+            raise ValueError(msg)
+
+        return self.deltas[agent.subpopulation_id]
 
     def _bracket_subpopulation(
         self, population: PopulationT, subpop: int
@@ -451,6 +477,8 @@ class MultiFrequencySelection:
             if accelerator.num_processes > 1:
                 plan = broadcast_object_list([plan], from_process=0)[0]
 
+        assert plan is not None, "LLM evolution plan was neither planned nor received."
+
         new_population = self._execute_llm_plan(population, plan)
 
         # Clones inherit their parent's stale mut, so without this reset a
@@ -509,16 +537,12 @@ class MultiFrequencySelection:
             ):
                 new_index = self._next_index()
                 if kind is MultiFrequencyOp.MIGRATE_WEIGHTS:
-                    hp_values = {
-                        name: copy.deepcopy(getattr(elite, name))
-                        for name in elite.registry.hp_config
-                    }
                     ops[open_agent.index] = (
                         kind,
                         ext.index,
                         new_index,
                         subpop,
-                        hp_values,
+                        self._elite_hp_values(elite),
                     )
                 else:
                     ops[open_agent.index] = (
@@ -748,7 +772,7 @@ class MultiFrequencySelection:
                 continue
             kind = (
                 MultiFrequencyOp.MIGRATE_WEIGHTS
-                if self.deltas[ext.subpopulation_id] < self.deltas[subpop]
+                if self._delta_of(ext) < self.deltas[subpop]
                 else MultiFrequencyOp.MIGRATE_FULL
             )
             decisions.append((open_agent, ext, kind, elite))
@@ -787,13 +811,25 @@ class MultiFrequencySelection:
         :rtype: ~agilerl.algorithms.core.base.EvolvableAlgorithm
         """
         migrant = external.clone(index=self._next_index(), wrap=False)
-        hp_values = {
-            name: copy.deepcopy(getattr(elite, name))
-            for name in elite.registry.hp_config
-        }
-        self._apply_hp_reset(migrant, hp_values)
+        self._apply_hp_reset(migrant, self._elite_hp_values(elite))
         migrant.subpopulation_id = subpop
         return migrant
+
+    @staticmethod
+    def _elite_hp_values(elite: EvolvableAlgorithm) -> dict[str, Any]:
+        """Snapshot an elite's mutable hyperparameter values, keyed by name.
+
+        :param elite: The agent whose mutable hyperparameters are read.
+        :type elite: ~agilerl.algorithms.core.base.EvolvableAlgorithm
+        :return: Deep copies of the elite's mutable HP values; empty when the
+            algorithm registers no mutable hyperparameters.
+        :rtype: dict[str, Any]
+        """
+        hp_config = elite.registry.hp_config
+        if not hp_config:
+            return {}
+
+        return {name: copy.deepcopy(getattr(elite, name)) for name in hp_config}
 
     def _apply_hp_reset(
         self, migrant: EvolvableAlgorithm, hp_values: dict[str, Any]

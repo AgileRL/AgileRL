@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 """Unit tests for the multi-frequency selection evolution loop."""
 
 from __future__ import annotations

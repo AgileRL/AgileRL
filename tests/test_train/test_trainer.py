@@ -16,9 +16,9 @@ from __future__ import annotations
 import contextlib
 import importlib
 import types
-from pathlib import Path
 import warnings
 from collections import Counter
+from pathlib import Path
 from typing import ClassVar
 from unittest.mock import MagicMock, patch
 
@@ -28,8 +28,9 @@ from gymnasium.spaces import Box, Discrete
 from agilerl import HAS_ARENA_DEPENDENCIES, HAS_LLM_DEPENDENCIES, AgentType
 from agilerl.algorithms import DQN
 from agilerl.algorithms.core.base import EvolvableAlgorithm
-from agilerl.components.replay_buffer import ReplayBuffer
+from agilerl.components.replay_buffer import MultiStepReplayBuffer, ReplayBuffer
 from agilerl.hpo.multi_frequency import MultiFrequencySelection
+from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.models import (
     ALGO_REGISTRY,
@@ -50,7 +51,12 @@ from agilerl.models.hpo import (
 from agilerl.models.networks import MlpSpec, QNetworkSpec, StochasticActorSpec
 from agilerl.models.training import ReplayBufferSpec, TrainingSpec
 from agilerl.training.trainer import ArenaTrainer, LocalTrainer, Trainer
-from agilerl.utils.trainer_utils import create_population_from_spec
+from agilerl.utils.trainer_utils import (
+    build_mutations_from_spec,
+    build_replay_buffer_from_spec,
+    build_tournament_from_spec,
+    create_population_from_spec,
+)
 from agilerl.utils.utils import run_selection_and_mutation
 from tests.helper_functions import (
     rank_population_by_subpopulation,

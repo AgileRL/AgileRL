@@ -178,14 +178,17 @@ class MultiFrequencySelectionSpec(BaseModel):
         return self
 
 
-def default_selection_strategy(value: Any) -> Any:
+def default_selection_strategy(
+    value: dict[str, Any] | BaseModel | None,
+) -> dict[str, Any] | BaseModel | None:
     """Inject the default strategy discriminator for config dicts that omit it.
 
-    :param value: Raw selection_strategy value from the manifest.
-    :type value: Any
+    :param value: Raw selection_strategy value from the manifest: a config dict, an
+        already-built selection spec, or None.
+    :type value: dict[str, Any] | BaseModel | None
     :returns: The value with strategy defaulted to "tournament" when it was a
         discriminator-less dict; otherwise the value unchanged.
-    :rtype: Any
+    :rtype: dict[str, Any] | BaseModel | None
     """
     if isinstance(value, dict) and "strategy" not in value:
         return {**value, "strategy": "tournament"}

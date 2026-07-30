@@ -403,17 +403,17 @@ class Mutations:
 
     def _mutate_selected(
         self,
-        population: PopulationType,
-        mutation_options: list[MutationMethod],
+        population: list[AgentT],
+        mutation_options: list[MutationFunc[Any]],
         mutation_proba: list[float],
         indices: list[int],
-    ) -> PopulationType:
+    ) -> list[AgentT]:
         """Mutate only the agents whose globally-unique index is in indices.
 
         :param population: The whole population.
         :type population: list[EvolvableAlgorithm]
         :param mutation_options: Candidate mutation methods.
-        :type mutation_options: list[MutationMethod]
+        :type mutation_options: list[MutationFunc]
         :param mutation_proba: Relative probabilities of ``mutation_options``.
         :type mutation_proba: list[float]
         :param indices: Indices of the agents to mutate.
@@ -423,18 +423,16 @@ class Mutations:
         """
         target_ids = set(indices)
         targets = [
-            individual
-            for individual in population
-            if (
-                individual.agent if isinstance(individual, AgentWrapper) else individual
-            ).index
-            in target_ids
+            individual for individual in population if individual.index in target_ids
         ]
-        mutation_choice: list[MutationMethod] = self.rng.choice(
-            mutation_options,
+        sampled_indices = self.rng.choice(
+            len(mutation_options),
             len(targets),
             p=mutation_proba,
         )
+        mutation_choice: list[MutationFunc[Any]] = [
+            mutation_options[int(index)] for index in sampled_indices
+        ]
         chosen = {
             id(individual): mutation
             for individual, mutation in zip(targets, mutation_choice, strict=False)
@@ -452,15 +450,15 @@ class Mutations:
 
     def _apply_mutation(
         self,
-        individual: IndividualType,
-        mutation: MutationMethod,
-    ) -> IndividualType:
+        individual: AgentT,
+        mutation: MutationFunc[Any],
+    ) -> AgentT:
         """Apply a single sampled mutation to one individual.
 
         :param individual: Individual to mutate, optionally wrapped.
         :type individual: EvolvableAlgorithm
         :param mutation: Sampled mutation method to apply to the underlying agent.
-        :type mutation: MutationMethod
+        :type mutation: MutationFunc
 
         :return: The mutated individual, wrapped exactly as it came in.
         :rtype: EvolvableAlgorithm

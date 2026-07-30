@@ -1,3 +1,6 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
 """Multi-Frequency PBT (MF-PBT) with PPO on LunarLander-v3.
 
 Runnable companion to the documentation tutorial
