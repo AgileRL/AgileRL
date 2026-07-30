@@ -322,6 +322,20 @@ def measure_point(
 
     try:
         if rollout_based:
+            # NOTE: this samples real completions at temperature/top_p, so the
+            # realised lengths differ every run — and those lengths drive the
+            # training activation peak. The estimator predicts a *bound* (all
+            # rows at max_model_len) while this measures one draw, so the two
+            # are not the same quantity and the gap is not model error.
+            #
+            # Measured on gemma-4-E2B, identical config, two runs: trainer
+            # delta 14212 vs 10930 MiB (30% apart), the difference almost
+            # entirely activations (2321 vs 601 MiB). It is also why that
+            # fixture carries the widest per-point spread of any (sd 9.5%).
+            #
+            # Pinning the completion length (ignore_eos with min == max tokens)
+            # would make the measurement match what is predicted and take this
+            # noise out of every fixture.
             with NvmlPeakSampler(device_index) as generation_sampler:
                 completion_ids, action_masks, sampling_logps = agent.get_action(
                     prompts, training=True
