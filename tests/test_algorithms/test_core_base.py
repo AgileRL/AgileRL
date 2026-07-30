@@ -7084,3 +7084,139 @@ class TestLLMAlgorithmSyncDeepspeedGradientClipping:
             state=SimpleNamespace(deepspeed_plugin=None)
         )
         assert agent._sync_deepspeed_gradient_clipping() is None
+
+
+def _lora_wrapped_actor(dtype=torch.float32, lora_dtype=None):
+    """Tiny model with real PEFT tuner layers injected."""
+    from peft import LoraConfig, inject_adapter_in_model
+
+    model = torch.nn.Sequential()
+    model.add_module("proj", torch.nn.Linear(8, 8, bias=False))
+    model.add_module("out", torch.nn.Linear(8, 4, bias=False))
+    model = model.to(dtype)
+    model = inject_adapter_in_model(
+        LoraConfig(
+            r=2,
+            lora_alpha=4,
+            lora_dropout=0.0,
+            target_modules=["proj", "out"],
+            # Random lora_B (not zeros) so the adapter contributes a real delta.
+            init_lora_weights=False,
+        ),
+        model,
+    )
+    if lora_dtype is not None:
+        for name, param in model.named_parameters():
+            if "lora_" in name:
+                param.data = param.data.to(lora_dtype)
+    return model
+
+
+def _tuner_layers(model):
+    from peft.tuners.tuners_utils import BaseTunerLayer
+
+    return [m for m in model.modules() if isinstance(m, BaseTunerLayer)]
+
+
+@_LLM_DEPS_SKIP
+class TestLoraInputCastCtx:
+    @staticmethod
+    def _agent(actor):
+        return SimpleNamespace(actor=actor)
+
+    def test_disables_cast_inside_and_restores_after(self):
+        actor = _lora_wrapped_actor()
+        layers = _tuner_layers(actor)
+        assert layers
+
+        agent = self._agent(actor)
+        with LLMAlgorithm._lora_input_cast_ctx(agent):
+            assert all(not layer.cast_input_dtype_enabled for layer in layers)
+        assert all(layer.cast_input_dtype_enabled for layer in layers)
+
+    def test_restores_cast_when_body_raises(self):
+        actor = _lora_wrapped_actor()
+        layers = _tuner_layers(actor)
+
+        agent = self._agent(actor)
+        boom = RuntimeError("boom")
+        with pytest.raises(RuntimeError, match="boom"):
+            with LLMAlgorithm._lora_input_cast_ctx(agent):
+                raise boom
+        assert all(layer.cast_input_dtype_enabled for layer in layers)
+
+    def test_no_adapters_is_a_noop(self):
+        agent = self._agent(torch.nn.Linear(4, 4))
+        with LLMAlgorithm._lora_input_cast_ctx(agent):
+            pass
+
+    def test_actor_none_is_a_noop(self):
+        agent = self._agent(None)
+        with LLMAlgorithm._lora_input_cast_ctx(agent):
+            pass
+
+    def test_cast_is_load_bearing_without_autocast(self):
+        """The suppressed cast is what lets a bf16 input meet an fp32 adapter."""
+        actor = _lora_wrapped_actor(dtype=torch.bfloat16, lora_dtype=torch.float32)
+        x = torch.randn(2, 8, dtype=torch.bfloat16)
+
+        actor(x)
+        agent = self._agent(actor)
+        with LLMAlgorithm._lora_input_cast_ctx(agent):
+            with pytest.raises(RuntimeError):
+                actor(x)
+
+
+@pytest.mark.gpu
+@_LLM_DEPS_SKIP
+class TestLoraInputCastUnderAutocast:
+    pytestmark = pytest.mark.skipif(
+        not torch.cuda.is_available(), reason="CUDA not available"
+    )
+
+    @staticmethod
+    def _agent(actor):
+        agent = SimpleNamespace(actor=actor, accelerator=None, device="cuda")
+        agent._lora_input_cast_ctx = lambda: LLMAlgorithm._lora_input_cast_ctx(agent)
+        return agent
+
+    def test_amp_ctx_suppresses_the_cast(self):
+        actor = _lora_wrapped_actor().cuda()
+        layers = _tuner_layers(actor)
+
+        agent = self._agent(actor)
+        with LLMAlgorithm._amp_ctx(agent):
+            assert all(not layer.cast_input_dtype_enabled for layer in layers)
+        assert all(layer.cast_input_dtype_enabled for layer in layers)
+
+    def test_gradients_are_bitwise_identical_without_the_cast(self):
+        def lora_grads(cast_inputs):
+            torch.manual_seed(0)
+            actor = _lora_wrapped_actor(
+                dtype=torch.bfloat16, lora_dtype=torch.float32
+            ).cuda()
+            for name, param in actor.named_parameters():
+                param.requires_grad_("lora_" in name)
+
+            torch.manual_seed(1)
+            x = torch.randn(4, 8, device="cuda", dtype=torch.bfloat16)
+            agent = self._agent(actor)
+            ctx = (
+                nullcontext()
+                if cast_inputs
+                else LLMAlgorithm._lora_input_cast_ctx(agent)
+            )
+            with torch.amp.autocast("cuda", dtype=torch.bfloat16), ctx:
+                actor(x).float().pow(2).sum().backward()
+            return {
+                name: param.grad.clone()
+                for name, param in actor.named_parameters()
+                if param.grad is not None
+            }
+
+        with_cast = lora_grads(True)
+        without_cast = lora_grads(False)
+
+        assert with_cast
+        assert with_cast.keys() == without_cast.keys()
+        assert all(torch.equal(with_cast[k], without_cast[k]) for k in with_cast)

@@ -148,6 +148,7 @@ if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
     from safetensors.torch import load_file
 
     from agilerl.algorithms.core.llm_ops.fused_lora import (
+        get_cached_lora_layers,
         patch_lora_for_fused_forward,
         set_fused_adapter_routing,
         unset_fused_adapter_routing,
@@ -4446,10 +4447,30 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         else:
             device_type = torch.device(self.device).type
             if device_type == "cuda" and torch.cuda.is_bf16_supported():
-                with torch.amp.autocast(device_type, dtype=torch.bfloat16):
+                with (
+                    torch.amp.autocast(device_type, dtype=torch.bfloat16),
+                    self._lora_input_cast_ctx(),
+                ):
                     yield
             else:
                 yield
+
+    @contextmanager
+    def _lora_input_cast_ctx(self) -> Generator[None, None, None]:
+        """Skip PEFT's fp32 cast of every LoRA input while autocast is active."""
+        if self.actor is None:
+            yield
+            return
+
+        layers = get_cached_lora_layers(self.actor)
+        previous = [layer.cast_input_dtype_enabled for layer in layers]
+        for layer in layers:
+            layer.cast_input_dtype_enabled = False
+        try:
+            yield
+        finally:
+            for layer, was_enabled in zip(layers, previous, strict=True):
+                layer.cast_input_dtype_enabled = was_enabled
 
     @contextmanager
     def _activation_offload_ctx(self) -> Generator[None, None, None]:
