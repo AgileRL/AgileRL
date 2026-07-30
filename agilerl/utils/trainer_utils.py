@@ -21,7 +21,7 @@ from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
 from agilerl.components.replay_buffer import BufferType
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
-from agilerl.llm_envs import PreferenceGym, ReasoningGym, SFTGym
+from agilerl.llm_envs import DatasetEnv, RolloutEnv
 from agilerl.models.algo import (
     AlgoSpec,
     MultiAgentRLAlgorithmSpec,
@@ -37,9 +37,9 @@ if TYPE_CHECKING:
     from transformers import PreTrainedTokenizerBase
 
 
-LLMEnvType = ReasoningGym | PreferenceGym | SFTGym
+LLMEnvType = RolloutEnv | DatasetEnv
 # Union of every env type an ``EnvSpec.make_env`` builds: vectorized gym/pettingzoo
-# envs, a bandit env satisfying ``BanditEnvProtocol``, or an LLM gym.
+# envs, a bandit env satisfying ``BanditEnvProtocol``, or an LLM env.
 EnvironmentType = GymEnvType | PzEnvType | BanditEnvProtocol | LLMEnvType
 PopulationType = list[RLAlgorithm | MultiAgentRLAlgorithm | LLMAlgorithm]
 
@@ -144,6 +144,7 @@ def create_population_from_spec(
     replay_buffer_spec: ReplayBufferSpec | None,
     device: str | torch.device = "cpu",
     resume_from_checkpoint: str | None = None,
+    load_weights_from: str | None = None,
     accelerator: Accelerator | None = None,
     tokenizer: PreTrainedTokenizerBase | None = None,
 ) -> PopulationType:
@@ -163,8 +164,13 @@ def create_population_from_spec(
     :type replay_buffer_spec: ReplayBufferSpec | None
     :param device: Torch device string.
     :type device: str | torch.device
-    :param resume_from_checkpoint: Path to resume from checkpoint.
+    :param resume_from_checkpoint: Checkpoint to continue an interrupted run from,
+        restoring optimizer state and the hyperparameters it belongs to. Mutually
+        exclusive with ``load_weights_from``.
     :type resume_from_checkpoint: str | None
+    :param load_weights_from: Checkpoint to warm-start a new run from, taking only
+        the weights. Mutually exclusive with ``resume_from_checkpoint``.
+    :type load_weights_from: str | None
     :param accelerator: Accelerator instance.
     :type accelerator: Accelerator | None
     :param tokenizer: Pre-loaded HuggingFace tokenizer for LLM algorithms.
@@ -247,6 +253,7 @@ def create_population_from_spec(
                 action_space,
                 index=i,
                 resume_from_checkpoint=resume_from_checkpoint,
+                load_weights_from=load_weights_from,
                 device=device,
                 accelerator=accelerator,
             )
@@ -264,6 +271,7 @@ def create_population_from_spec(
         tokenizer=tokenizer,
         index=0,
         resume_from_checkpoint=resume_from_checkpoint,
+        load_weights_from=load_weights_from,
         accelerator=accelerator,
         device=device,
     )
@@ -286,6 +294,7 @@ def create_population_from_spec(
                 tokenizer=tokenizer,
                 index=i,
                 resume_from_checkpoint=resume_from_checkpoint,
+                load_weights_from=load_weights_from,
                 accelerator=agent_accelerator,
                 device=device,
                 actor_network=cloned_actor,

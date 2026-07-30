@@ -22,17 +22,12 @@ class CISPOSpec(GRPOSpec):
     clip_coef: float | list[float] = Field(default=0.2)
 
     @staticmethod
-    def get_training_fn(*, multiturn: bool = False) -> Callable[..., Any]:
+    def get_training_fn() -> Callable[..., Any]:
         """Get the training function for CISPO.
 
-        :param multiturn: If ``True``, return the multi-turn training function.
-        :type multiturn: bool
         :return: Training function
         :rtype: Callable[..., Any]
         """
-        from agilerl.training.llm import (
-            finetune_llm_multiturn,
-            finetune_llm_reasoning,
-        )
+        from agilerl.training.llm import train_llm_rollout
 
-        return finetune_llm_multiturn if multiturn else finetune_llm_reasoning
+        return train_llm_rollout

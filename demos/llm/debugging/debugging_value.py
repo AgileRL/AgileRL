@@ -15,10 +15,108 @@ from config_load import load_debug_config
 from datasets import Dataset
 from llm_debug_utils import lora_config_from_dict
 from tiny_model import TinyDigitTokenizer, build_tiny_actor_network
+from torch.utils.data import DataLoader
 
 from agilerl.algorithms import LLMPPO
+from agilerl.llm_envs import apply_chat_template
 from agilerl.utils.algo_utils import stack_and_pad_experiences
-from agilerl.llm_envs import ReasoningGym
+
+
+class ReasoningProbeEnv:
+    """Single-turn reasoning probe that scores decoded completions via ``reward_fn``.
+
+    Standalone (owns its own dataloader) because the value-head smoke test drives
+    the batched tokenized-prompt surface directly at the token level: ``reset``
+    returns a list of prompt dicts and ``step`` decodes the generated completions
+    and returns ``(next_prompts, rewards)``. It only ever walks the train split.
+    """
+
+    def __init__(
+        self,
+        train_dataset,
+        tokenizer,
+        reward_fn,
+        conversation_template,
+        data_batch_size_per_gpu=8,
+        seed=42,
+    ) -> None:
+        self.conversation_template = conversation_template
+        self.reward_fn = reward_fn
+        self.tokenizer = tokenizer
+        generator = torch.Generator().manual_seed(seed)
+        self.dataloader = DataLoader(
+            train_dataset,
+            batch_size=data_batch_size_per_gpu,
+            shuffle=True,
+            collate_fn=self._collate_fn,
+            generator=generator,
+        )
+        self._iter = iter(self.dataloader)
+        self.num_epochs = 0
+        self.reset_called = False
+
+    def _collate_fn(self, batch):
+        """Collate ``(question, answer)`` rows into chat-templated token prompts."""
+        questions = [item["question"] for item in batch]
+        answers = [item["answer"] for item in batch]
+        tokenized_prompts = [
+            apply_chat_template(self.conversation_template, q, a, self.tokenizer)
+            for q, a in zip(questions, answers, strict=False)
+        ]
+        return {
+            "question": questions,
+            "answer": answers,
+            "tokenized_prompts": tokenized_prompts,
+        }
+
+    def reset(self, reset_dataloaders: bool = False):
+        if reset_dataloaders:
+            self._iter = iter(self.dataloader)
+        self.reset_called = True
+        prompts = self._next_prompts()
+        self.last_tokenized_prompts = prompts
+        return prompts
+
+    def step(self, completions):
+        self.reset_called = False
+        rewards = self._decode_and_evaluate(completions)
+        new_prompts = self._next_prompts()
+        self.last_tokenized_prompts = new_prompts
+        return new_prompts, rewards
+
+    def _next_prompts(self):
+        try:
+            batch = next(self._iter)
+        except StopIteration:
+            self.num_epochs += 1
+            self._iter = iter(self.dataloader)
+            batch = next(self._iter)
+        self.questions = batch["question"]
+        self.answers = batch["answer"]
+        return [
+            {
+                "input_ids": prompt["input_ids"],
+                "attention_mask": prompt["attention_mask"],
+                "text": None,
+            }
+            for prompt in batch["tokenized_prompts"]
+        ]
+
+    def _decode_and_evaluate(self, completions):
+        total_rewards = []
+        for idx, (group_completion, answer, question) in enumerate(
+            zip(completions, self.answers, self.questions, strict=False),
+        ):
+            completion_to_decode = group_completion[
+                :,
+                self.last_tokenized_prompts[idx]["input_ids"].shape[1] :,
+            ]
+            decoded = self.tokenizer.batch_decode(
+                completion_to_decode,
+                skip_special_tokens=True,
+            )
+            total_rewards.append([self.reward_fn(c, answer, question) for c in decoded])
+        return torch.tensor(total_rewards)
 
 
 def constant_reward_factory(value: float):
@@ -28,9 +126,8 @@ def constant_reward_factory(value: float):
     return _fn
 
 
-def make_dataset(size: int) -> tuple[Dataset, Dataset]:
-    data = Dataset.from_dict({"question": ["11"] * size, "answer": ["1"] * size})
-    return data, data
+def make_dataset(size: int) -> Dataset:
+    return Dataset.from_dict({"question": ["11"] * size, "answer": ["1"] * size})
 
 
 def get_terminal_values(
@@ -75,16 +172,12 @@ def main(cfg: dict) -> None:
         {"role": "assistant", "content": ""},
     ]
 
-    env = ReasoningGym(
+    env = ReasoningProbeEnv(
         train_dataset=train_dataset,
-        test_dataset=test_dataset,
         tokenizer=tokenizer,
         reward_fn=constant_reward_factory(reward),
         conversation_template=conversation_template,
         data_batch_size_per_gpu=int(dbg["data_batch_size_per_gpu"]),
-        accelerator=None,
-        max_context_length=max_ctx,
-        return_raw_completions=False,
         seed=0,
     )
 
@@ -158,7 +251,7 @@ def main(cfg: dict) -> None:
                 snap_values = get_terminal_values(agent, snap_ids, snap_masks)
             print(
                 f"[value-debug] step {step + 1:4d} | "
-                f"vf_loss={vf_loss:.4f} | "
+                f"vf_loss={learn_metrics['vf_loss']:.4f} | "
                 f"V(terminal) mean={snap_values.mean():.4f}, "
                 f"std={snap_values.std():.4f}"
             )

@@ -20,7 +20,8 @@ class SFTSpec(LLMAlgorithmSpec):
 
     lr: float = Field(default=0.00005)
 
-    env_type: ClassVar[LLMEnvType] = LLMEnvType.SFT
+    env_type: ClassVar[LLMEnvType] = LLMEnvType.DATASET
+    objective: ClassVar[str] = "sft"
 
     @staticmethod
     def get_training_fn(*, multiturn: bool = False) -> Callable[..., Any]:
@@ -31,9 +32,6 @@ class SFTSpec(LLMAlgorithmSpec):
         :rtype: Callable[..., Any]
         :raises ValueError: If *multiturn* is ``True``.
         """
-        if multiturn:
-            msg = "SFT does not support multi-turn training."
-            raise ValueError(msg)
-        from agilerl.training.llm import finetune_llm_sft
+        from agilerl.training.llm import train_llm_dataset
 
-        return finetune_llm_sft
+        return train_llm_dataset

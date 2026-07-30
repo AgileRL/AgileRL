@@ -168,5 +168,8 @@ AGENTS.md
 # Symlink for type-checking (repo root only)
 /agilerl/arena/
 
+# Checkpoints written by the training loops (and by the test suite).
+/models/
+
 # Local Arena client backend switcher (dev tooling)
 /set-local-client.sh

@@ -12,8 +12,8 @@ from agilerl.algorithms.core import ActionResult
 from agilerl.algorithms.grpo import GRPO
 from agilerl.algorithms.ppo import PPO
 from agilerl.llm_envs import (
-    SyncMultiTurnVecEnv,
-    TokenObservationWrapper,
+    BatchRolloutEnv,
+    RolloutEnv,
 )
 from agilerl.rollouts.on_policy import (
     _collect_rollouts,
@@ -22,6 +22,7 @@ from agilerl.rollouts.on_policy import (
     collect_rollouts_recurrent,
 )
 from tests.assets.tiny_tokenizer import TinyTokenizer
+from tests.helpers.rollout_doubles import RolloutEnvDoubleMixin
 
 if importlib.util.find_spec("deepspeed") and importlib.util.find_spec("vllm"):
     from tests.test_algorithms.test_llms.test_ppo_llm import _cpu_llmppo
@@ -64,7 +65,7 @@ class TestCollectRolloutsLlm:
         tokenizer = TinyTokenizer()
 
         def env_fn():
-            return TokenObservationWrapper(
+            return RolloutEnv.local(
                 _SingleTurnTextEnv(),
                 tokenizer=tokenizer,
                 max_turns=1,
@@ -74,7 +75,7 @@ class TestCollectRolloutsLlm:
                 max_output_tokens=8,
             )
 
-        env = SyncMultiTurnVecEnv(env_factory=env_fn, batch_size=2, group_size=1)
+        env = BatchRolloutEnv(env_factory=env_fn, batch_size=2, group_size=1)
         if algo_name == "ppo":
             agent = _cpu_llmppo(
                 use_vllm=False,
@@ -116,8 +117,10 @@ class TestCollectRolloutsLlm:
         prompt_tokens_by_env_index = [42, 7, 99, 13, 55, 21, 88, 3]
         creation_idx = {"value": 0}
 
-        class _OrderingEnv:
+        class _OrderingEnv(RolloutEnvDoubleMixin):
             """Minimal env that records which completion token it receives."""
+
+            dataset_size = 0
 
             def __init__(self, prompt_token: int) -> None:
                 self.prompt_token = prompt_token
@@ -130,30 +133,42 @@ class TestCollectRolloutsLlm:
             ) -> tuple[dict[str, torch.Tensor], dict[str, object]]:
                 """Return a one-token prompt that uniquely marks this trajectory."""
                 del seed
-                return {
+                self.done = False
+                self.current_prompt = {
                     "input_ids": torch.tensor([[self.prompt_token]], dtype=torch.long),
                     "attention_mask": torch.ones(1, 1, dtype=torch.long),
-                }, {}
+                }
+                return self.current_prompt, {}
 
             def step(
                 self,
                 full_completion: torch.Tensor,
+                sampling_logps: torch.Tensor | None = None,
             ) -> tuple[dict[str, torch.Tensor], float, bool, bool, dict[str, object]]:
                 """Record completion identity and terminate after one turn."""
+                del sampling_logps
                 self._seen_token = int(full_completion[0, 0].item())
                 self.turn_boundaries = [(0, 1, 0)]
+                self.done = True
+                self.current_prompt = {}
                 return {}, 1.0, True, False, {}
 
             def get_episode_data(
                 self,
-            ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+            ) -> tuple[
+                torch.Tensor,
+                torch.Tensor,
+                torch.Tensor,
+                torch.Tensor,
+                torch.Tensor | None,
+            ]:
                 """Expose marker token via episode ids and rewards for ordering checks."""
                 token = self._seen_token if self._seen_token is not None else -1
                 ep_ids = torch.tensor([[token, token + 1]], dtype=torch.long)
                 action_mask = torch.tensor([[True]], dtype=torch.bool)
                 turn_ids = torch.tensor([[0]], dtype=torch.long)
                 rewards = torch.tensor([float(token)], dtype=torch.float32)
-                return ep_ids, action_mask, turn_ids, rewards
+                return ep_ids, action_mask, turn_ids, rewards, None
 
             def close(self) -> None:
                 """Provide a close method compatible with vector env cleanup."""
@@ -188,7 +203,7 @@ class TestCollectRolloutsLlm:
             creation_idx["value"] += 1
             return _OrderingEnv(prompt_tokens_by_env_index[idx])
 
-        env = SyncMultiTurnVecEnv(env_factory=env_fn, batch_size=4, group_size=2)
+        env = BatchRolloutEnv(env_factory=env_fn, batch_size=4, group_size=2)
         agent = _EchoAgent()
 
         completion_ids_list, _masks, _turns, rewards, steps, next_group_seed, _logps = (
@@ -220,7 +235,7 @@ class TestCollectRolloutsLlmGrpo:
         tokenizer = TinyTokenizer()
 
         def env_fn():
-            return TokenObservationWrapper(
+            return RolloutEnv.local(
                 _SingleTurnTextEnv(),
                 tokenizer=tokenizer,
                 max_turns=1,
@@ -230,7 +245,7 @@ class TestCollectRolloutsLlmGrpo:
                 max_output_tokens=8,
             )
 
-        env = SyncMultiTurnVecEnv(env_factory=env_fn, batch_size=1, group_size=1)
+        env = BatchRolloutEnv(env_factory=env_fn, batch_size=1, group_size=1)
         agent = MagicMock()
         agent.__class__ = GRPO
         agent.accelerator = None

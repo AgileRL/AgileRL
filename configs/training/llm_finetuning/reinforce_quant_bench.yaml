@@ -32,7 +32,7 @@ algorithm:
         sleep_mode: true
 
 environment:
-    env_type: multiturn
+    env_type: rollout
     env_name: game:Sudoku-v0-hard
     max_turns: 50
     max_reward: 1.0

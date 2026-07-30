@@ -1292,25 +1292,26 @@ class TestLLMSpecConstruction:
 
     def test_dpo_spec_fields(self, dpo_spec):
         assert dpo_spec.name == "DPO"
-        assert dpo_spec.env_type == "preference"
+        assert dpo_spec.env_type == "dataset"
+        assert dpo_spec.objective == "preference"
         assert isinstance(dpo_spec, LLMAlgorithmSpec)
         assert dpo_spec.pretrained_model_name_or_path == "gpt2"
 
     def test_grpo_spec_fields(self, grpo_spec):
         assert grpo_spec.name == "GRPO"
-        assert grpo_spec.env_type == "reasoning"
+        assert grpo_spec.env_type == "rollout"
         assert isinstance(grpo_spec, LLMAlgorithmSpec)
         assert grpo_spec.group_size == 4
 
     def test_dpo_training_fn(self, dpo_spec):
-        from agilerl.training.llm import finetune_llm_preference
+        from agilerl.training.llm import train_llm_dataset
 
-        assert dpo_spec.get_training_fn() is finetune_llm_preference
+        assert dpo_spec.get_training_fn() is train_llm_dataset
 
     def test_grpo_training_fn(self, grpo_spec):
-        from agilerl.training.llm import finetune_llm_reasoning
+        from agilerl.training.llm import train_llm_rollout
 
-        assert grpo_spec.get_training_fn() is finetune_llm_reasoning
+        assert grpo_spec.get_training_fn() is train_llm_rollout
 
     def test_dpo_model_dump_contains_expected_fields(self, dpo_spec):
         dumped = dpo_spec.model_dump(mode="python", exclude={"hp_config"})
@@ -1338,9 +1339,14 @@ class TestLLMGetTrainingKwargs:
         assert "num_epochs" not in kwargs
 
     def test_llm_kwargs_include_max_reward(self, grpo_spec):
-        from agilerl.models.env import LLMEnvSpec
+        from agilerl.models.env import LLMEnvSpec, LLMEnvType
 
-        env_spec = LLMEnvSpec(env_type="preference", dataset="dummy", max_reward=5.0)
+        env_spec = LLMEnvSpec(
+            env_type=LLMEnvType.DATASET,
+            objective="preference",
+            dataset="dummy",
+            max_reward=5.0,
+        )
         training = TrainingSpec(max_steps=100, evo_steps=10, pop_size=2)
         kwargs = grpo_spec.get_training_kwargs(training=training, env_spec=env_spec)
         assert kwargs["max_reward"] == 5.0
@@ -1455,7 +1461,7 @@ class TestLLMLocalTrainer:
             from agilerl.models.env import LLMEnvSpec, LLMEnvType
 
             env_spec = MagicMock(spec=LLMEnvSpec)
-            env_spec.env_type = LLMEnvType.PREFERENCE
+            env_spec.env_type = LLMEnvType.DATASET
             trainer = LocalTrainer(
                 algorithm=dpo_spec,
                 environment=env_spec,
@@ -1509,7 +1515,7 @@ class TestLLMLocalTrainer:
 
         mock_env = MagicMock()
         mock_llm_env_spec = MagicMock(spec=LLMEnvSpec)
-        mock_llm_env_spec.env_type = LLMEnvType.PREFERENCE
+        mock_llm_env_spec.env_type = LLMEnvType.DATASET
         mock_llm_env_spec.make_env.return_value = mock_env
         mock_tokenizer = MagicMock()
 
@@ -1533,7 +1539,6 @@ class TestLLMLocalTrainer:
                 training=self._training(),
             )
 
-        assert mock_llm_env_spec.return_raw_completions is False
         assert mock_llm_env_spec.max_context_length == dpo_spec.max_model_len
         assert mock_llm_env_spec.seed == dpo_spec.seed
         mock_llm_env_spec.make_env.assert_called_once_with(
@@ -1937,11 +1942,11 @@ class TestLocalTrainerIntegration:
     # -- LLM: GRPO (reasoning) via LocalTrainer ------------------------------
 
     @pytest.mark.llm
-    def test_grpo_reasoning_train(self, tmp_path):
-        """GRPO reasoning: real LLMEnvSpec.make_env() with temp dataset files.
+    def test_grpo_rollout_train(self, tmp_path):
+        """GRPO rollout: real LLMEnvSpec factory with temp dataset files.
 
         Tests the full LocalTrainer wiring: spec → env construction → kwargs
-        assembly → dispatch to finetune_llm_reasoning.  The finetune function
+        assembly → dispatch to train_llm_rollout.  The finetune function
         itself is patched since running it requires CUDA agents.
         """
         try:
@@ -1976,7 +1981,7 @@ class TestLocalTrainerIntegration:
             task_type="CAUSAL_LM",
         )
         env_spec = LLMEnvSpec(
-            env_type=LLMEnvType.REASONING,
+            env_type=LLMEnvType.ROLLOUT,
             dataset=str(dataset_path),
             reward_file_path=str(reward_file),
             reward_fn_name="simple_reward",
@@ -1989,6 +1994,8 @@ class TestLocalTrainerIntegration:
             update_epochs=1,
             lora_config=lora_config,
             max_model_len=128,
+            # Must stay under max_model_len or the rollout prompt budget is 0.
+            max_output_tokens=32,
         )
 
         mock_pop = [MagicMock()]
@@ -2000,11 +2007,20 @@ class TestLocalTrainerIntegration:
                 training=self._training(pop_size=1, max_steps=8, evo_steps=4),
             )
 
-        from agilerl.utils.llm_utils import ReasoningGym
+        from agilerl.llm_envs import RolloutEnv
 
-        assert isinstance(trainer.env, ReasoningGym)
+        # A rollout env is built per trajectory, so the trainer holds a factory.
+        assert trainer.env is None
+        assert callable(trainer.env_factory)
         assert trainer.tokenizer is not None
         assert trainer.tokenizer.pad_token is not None
+
+        rollout_env = trainer.env_factory()
+        try:
+            assert isinstance(rollout_env, RolloutEnv)
+            assert rollout_env.max_turns == 1
+        finally:
+            rollout_env.close()
 
         mock_fn = MagicMock(return_value=None)
         with patch.object(trainer, "train_fn", mock_fn):
@@ -2012,7 +2028,8 @@ class TestLocalTrainerIntegration:
             mock_fn.assert_called_once()
             call_kwargs = mock_fn.call_args[1]
             assert call_kwargs["pop"] is mock_pop
-            assert isinstance(call_kwargs["env"], ReasoningGym)
+            assert call_kwargs["env_factory"] is trainer.env_factory
+            assert call_kwargs["max_turns"] == 1
             assert call_kwargs["max_steps"] == 8
             assert call_kwargs["evo_steps"] == 4
             assert "evaluation_interval" in call_kwargs
@@ -2024,7 +2041,7 @@ class TestLocalTrainerIntegration:
         """DPO preference: real LLMEnvSpec.make_env() with temp dataset files.
 
         Tests the full LocalTrainer wiring: spec → env construction → kwargs
-        assembly → dispatch to finetune_llm_preference.  The finetune function
+        assembly → dispatch to train_llm_dataset.  The finetune function
         itself is patched since running it requires CUDA agents.
         """
         try:
@@ -2055,7 +2072,8 @@ class TestLocalTrainerIntegration:
             task_type="CAUSAL_LM",
         )
         env_spec = LLMEnvSpec(
-            env_type=LLMEnvType.PREFERENCE,
+            env_type=LLMEnvType.DATASET,
+            objective="preference",
             dataset=str(dataset_path),
             data_batch_size_per_gpu=4,
         )
@@ -2075,9 +2093,9 @@ class TestLocalTrainerIntegration:
                 training=self._training(pop_size=1, max_steps=8, evo_steps=4),
             )
 
-        from agilerl.utils.llm_utils import PreferenceGym
+        from agilerl.llm_envs import DatasetEnv
 
-        assert isinstance(trainer.env, PreferenceGym)
+        assert isinstance(trainer.env, DatasetEnv)
         assert trainer.tokenizer is not None
 
         mock_fn = MagicMock(return_value=None)
@@ -2086,7 +2104,7 @@ class TestLocalTrainerIntegration:
             mock_fn.assert_called_once()
             call_kwargs = mock_fn.call_args[1]
             assert call_kwargs["pop"] is mock_pop
-            assert isinstance(call_kwargs["env"], PreferenceGym)
+            assert isinstance(call_kwargs["env"], DatasetEnv)
             assert call_kwargs["max_steps"] == 8
             assert "evaluation_interval" in call_kwargs
 
@@ -2298,7 +2316,8 @@ class TestLocalTrainerToManifestLLM:
             lora_config=lora,
         )
         env_spec = LLMEnvSpec(
-            env_type="preference",
+            env_type="dataset",
+            objective="preference",
             dataset="data.parquet",
             columns={"prompt": "q", "chosen": "ok"},
         )
@@ -2388,31 +2407,31 @@ class TestLocalTrainerTrainKwargs:
         assert trainer.training_spec.overwrite_checkpoints is True
 
 
-class TestGRPOSpecMultiturn:
+class TestGRPOSpecRollout:
     """Verify GRPOSpec returns the correct training function."""
 
     def test_single_turn_training_fn(self):
-        from agilerl.training.llm import finetune_llm_reasoning
+        from agilerl.training.llm import train_llm_rollout
 
         fn = _GRPOSpec.get_training_fn()
-        assert fn is finetune_llm_reasoning
+        assert fn is train_llm_rollout
 
-    def test_multiturn_training_fn(self):
-        from agilerl.training.llm import finetune_llm_multiturn
+    def test_rollout_training_fn(self):
+        from agilerl.training.llm import train_llm_rollout
 
-        fn = _GRPOSpec.get_training_fn(multiturn=True)
-        assert fn is finetune_llm_multiturn
+        fn = _GRPOSpec.get_training_fn()
+        assert fn is train_llm_rollout
 
 
-class TestLocalTrainerMultiturn:
-    """Verify LocalTrainer wires multiturn LLM training correctly."""
+class TestLocalTrainerRollout:
+    """Verify LocalTrainer wires rollout LLM training correctly."""
 
     POP_SIZE = 1
 
     def _training(self):
         return TrainingSpec(max_steps=100, evo_steps=10, pop_size=self.POP_SIZE)
 
-    def test_construction_multiturn(self, grpo_spec):
+    def test_construction_rollout(self, grpo_spec):
         from agilerl.models.env import LLMEnvSpec, LLMEnvType
 
         mock_pop = [MagicMock()]
@@ -2422,7 +2441,7 @@ class TestLocalTrainerMultiturn:
         mock_tokenizer.pad_token_id = 50256
 
         env_spec = LLMEnvSpec(
-            env_type=LLMEnvType.MULTITURN,
+            env_type=LLMEnvType.ROLLOUT,
             env_name="game:GuessTheNumber-v0-easy",
             max_turns=5,
         )
@@ -2437,7 +2456,7 @@ class TestLocalTrainerMultiturn:
             ),
             patch.object(
                 LLMEnvSpec,
-                "make_multiturn_env_factory",
+                "make_rollout_env_factory",
                 return_value=MagicMock(),
             ) as mock_factory_method,
             patch(
@@ -2452,15 +2471,15 @@ class TestLocalTrainerMultiturn:
                 training=self._training(),
             )
 
-        assert trainer._multiturn is True
+        assert trainer._rollout is True
         assert trainer.env is None
         assert trainer.env_factory is not None
         mock_factory_method.assert_called_once()
-        from agilerl.training.llm import finetune_llm_multiturn
+        from agilerl.training.llm import train_llm_rollout
 
-        assert trainer.train_fn is finetune_llm_multiturn
+        assert trainer.train_fn is train_llm_rollout
 
-    def test_train_delegates_multiturn_kwargs(self, grpo_spec):
+    def test_train_delegates_rollout_kwargs(self, grpo_spec):
         from agilerl.models.env import LLMEnvSpec, LLMEnvType
 
         mock_pop = [MagicMock()]
@@ -2469,7 +2488,7 @@ class TestLocalTrainerMultiturn:
         mock_env_factory = MagicMock()
 
         env_spec = LLMEnvSpec(
-            env_type=LLMEnvType.MULTITURN,
+            env_type=LLMEnvType.ROLLOUT,
             env_name="game:Test-v0",
             max_turns=8,
             max_reward=1.0,
@@ -2485,7 +2504,7 @@ class TestLocalTrainerMultiturn:
             ),
             patch.object(
                 LLMEnvSpec,
-                "make_multiturn_env_factory",
+                "make_rollout_env_factory",
                 return_value=mock_env_factory,
             ),
             patch.object(
@@ -2550,13 +2569,13 @@ class TestImportGuardReload:
 class TestMakeEnvBranches:
     """Unit tests for LocalTrainer._make_env individual branches."""
 
-    def test_llm_multiturn_returns_none(self):
-        """LLMEnvSpec with MULTITURN returns None."""
+    def test_llm_rollout_returns_none(self):
+        """LLMEnvSpec with ROLLOUT returns None."""
         from agilerl.models.env import LLMEnvSpec, LLMEnvType
 
         trainer = LocalTrainer.__new__(LocalTrainer)
         trainer.env_spec = MagicMock(spec=LLMEnvSpec)
-        trainer.env_spec.env_type = LLMEnvType.MULTITURN
+        trainer.env_spec.env_type = LLMEnvType.ROLLOUT
         trainer.algorithm_spec = MagicMock()
         trainer.tokenizer = MagicMock()
         trainer.accelerator = MagicMock()
@@ -2574,15 +2593,14 @@ class TestMakeEnvBranches:
             result = trainer._make_env()
         assert result is None
 
-    def test_llm_non_multiturn_calls_make_env(self):
-        """LLMEnvSpec non-multiturn sets fields and calls make_env."""
-        from agilerl.models import LLMAlgorithmSpec
+    def test_llm_dataset_calls_make_env(self):
+        """A dataset LLMEnvSpec sets fields and calls make_env."""
         from agilerl.models.env import LLMEnvSpec, LLMEnvType
 
         mock_env = MagicMock()
         trainer = LocalTrainer.__new__(LocalTrainer)
         trainer.env_spec = MagicMock(spec=LLMEnvSpec)
-        trainer.env_spec.env_type = LLMEnvType.REASONING
+        trainer.env_spec.env_type = LLMEnvType.DATASET
         trainer.env_spec.make_env = MagicMock(return_value=mock_env)
         trainer.algorithm_spec = MagicMock()
         trainer.algorithm_spec.use_vllm = True
@@ -2606,7 +2624,6 @@ class TestMakeEnvBranches:
             result = trainer._make_env()
 
         assert result is mock_env
-        assert trainer.env_spec.return_raw_completions is True
         assert trainer.env_spec.max_context_length == 1024
         assert trainer.env_spec.seed == 42
         assert trainer.env_spec.data_batch_size_per_gpu == 8
@@ -2639,6 +2656,7 @@ class TestLocalTrainerResolveEnvSpecBranches:
             # double must satisfy `isinstance(..., algo_cls)`.
             manifest.algorithm.__class__ = algo_cls
         manifest.algorithm.agent_type = agent_type
+        manifest.algorithm.objective = None
         for k, v in algo_attrs.items():
             setattr(manifest.algorithm, k, v)
         return manifest
@@ -2684,6 +2702,7 @@ class TestLocalTrainerResolveEnvSpecBranches:
         assert isinstance(result, BanditEnvSpec)
 
     def test_llm_agent_returns_llm_env_spec(self):
+        from agilerl.models.algo import LLMAlgorithmSpec
         from agilerl.models.env import LLMEnvSpec, LLMEnvType
 
         manifest = self._make_manifest(
@@ -2695,11 +2714,11 @@ class TestLocalTrainerResolveEnvSpecBranches:
                 "prompt_template": {"system": "You are helpful"},
             },
             algo_cls=LLMAlgorithmSpec,
-            env_type=LLMEnvType.REASONING,
+            env_type=LLMEnvType.ROLLOUT,
         )
         result = LocalTrainer._resolve_env_spec(manifest)
         assert isinstance(result, LLMEnvSpec)
-        assert result.env_type == LLMEnvType.REASONING
+        assert result.env_type == LLMEnvType.ROLLOUT
 
 
 def test_from_manifest_infers_multiinput_when_arch_absent(tmp_path):

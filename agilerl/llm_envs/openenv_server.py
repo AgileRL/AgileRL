@@ -1,0 +1,414 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
+"""Server half of the OpenEnv glue: host any text env behind a ``/ws`` URL.
+
+Deliberately outside the ``llm`` extra: an env image or ``env_packages`` install only
+needs ``openenv``, ``pydantic`` and ``uvicorn`` to serve ``reset``/``step`` — never
+vllm, transformers or the rest of the trainer's closure. The clients live in
+:mod:`agilerl.llm_envs.openenv`.
+"""
+
+from __future__ import annotations
+
+import contextlib
+import inspect
+import logging
+import threading
+import time
+from collections.abc import Callable
+from functools import partial
+from typing import TYPE_CHECKING, Any, TypeGuard
+
+try:
+    from openenv.core.env_server.http_server import create_app
+    from openenv.core.env_server.interfaces import Environment, EnvironmentMetadata
+    from openenv.core.env_server.types import Action, Observation, State
+    from pydantic import Field
+except ImportError as _exc:  # pragma: no cover - only reachable without openenv
+    msg = (
+        "agilerl.llm_envs.openenv_server requires the openenv, pydantic and "
+        "uvicorn packages; install them directly or via: pip install agilerl[llm]."
+    )
+    raise ImportError(msg) from _exc
+
+if TYPE_CHECKING:
+    from typing import Self
+
+    from agilerl.protocols import TextEnvProtocol
+
+
+logger = logging.getLogger(__name__)
+
+
+def _is_str_keyed_dict(obj: object) -> TypeGuard[dict[str, object]]:
+    """Narrow a value to a ``str``-keyed dict.
+
+    Local twin of :func:`agilerl.utils.algo_utils.is_str_keyed_dict`, redeclared here
+    so this module never imports the torch/tensordict closure.
+    """
+    return isinstance(obj, dict)
+
+
+class TextAction(Action):
+    """OpenEnv action carrying the policy's generated text."""
+
+    message: str = ""
+
+
+class TextObservation(Observation):
+    """OpenEnv observation carrying the next prompt text.
+
+    ``truncated`` is declared because the wire has only ``done`` (no
+    terminated/truncated split), so it can travel and reconstruct the 5-tuple.
+    """
+
+    prompt: str = ""
+    truncated: bool = False
+
+
+class TextState(State):
+    """OpenEnv state carrying the inner env's dataset size and tool schemas."""
+
+    dataset_size: int = 0
+    tools: list[Any] = Field(default_factory=list)
+
+
+class OpenEnvWrapper(Environment):
+    """Adapt a plain-text env to OpenEnv's typed ``Environment`` ABC.
+
+    Translates between the env's string ``reset``/``step`` and OpenEnv's typed
+    ``Action``/``Observation``/``State``, surfacing ``dataset_size``/``tools`` on
+    the state. Env ``info`` is not sent on the wire.
+
+    :param inner: The local env to host.
+    :param env_name: Name in the OpenEnv metadata; defaults to ``inner``'s class name.
+    :param owns_inner: If ``True``, ``close`` closes ``inner`` (the per-session path).
+    """
+
+    # Lets OpenEnv allow max_concurrent_envs > 1: each session gets its own
+    # fresh inner env, so sessions never share state.
+    SUPPORTS_CONCURRENT_SESSIONS = True
+
+    def __init__(
+        self,
+        inner: TextEnvProtocol,
+        *,
+        env_name: str | None = None,
+        owns_inner: bool = False,
+    ) -> None:
+        """Wrap ``inner`` as an OpenEnv environment."""
+        super().__init__()
+        self._inner = inner
+        self._env_name = env_name
+        self._owns_inner = owns_inner
+        params = inspect.signature(inner.reset).parameters
+        # A **kwargs reset accepts any forwardable name (don't drop seed/row).
+        if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()):
+            self._reset_params = {"seed", "row_index", "evaluation"}
+        else:
+            self._reset_params = set(params)
+        self._state = State()
+
+    def get_metadata(self) -> EnvironmentMetadata:
+        """Report the wrapped env's name in OpenEnv metadata, not ``OpenEnvWrapper``."""
+        name = self._env_name or type(self._inner).__name__
+        return EnvironmentMetadata(
+            name=name, description=f"{name} environment", version="1.0.0"
+        )
+
+    def reset(
+        self,
+        seed: int | None = None,
+        episode_id: str | None = None,
+        **kwargs: Any,
+    ) -> TextObservation:
+        """Reset the inner env, returning the initial prompt as a ``TextObservation``."""
+        call: dict[str, Any] = {}
+        if seed is not None and "seed" in self._reset_params:
+            call["seed"] = seed
+        for name in ("row_index", "evaluation"):
+            if name in self._reset_params and kwargs.get(name) is not None:
+                call[name] = kwargs[name]
+        prompt, _info = _normalize_reset(self._inner.reset(**call))
+        self._state = State(episode_id=episode_id, step_count=0)
+        return TextObservation(prompt=prompt, reward=None, done=False)
+
+    def step(
+        self,
+        action: TextAction,
+        timeout_s: float | None = None,
+        **kwargs: Any,
+    ) -> TextObservation:
+        """Step the inner env with the action's text, returning a ``TextObservation``."""
+        del timeout_s, kwargs
+        prompt, reward, terminated, truncated, _info = _normalize_step(
+            self._inner.step(action.message)
+        )
+        self._state.step_count += 1
+        return TextObservation(
+            prompt=prompt,
+            reward=reward,
+            done=bool(terminated or truncated),
+            truncated=bool(truncated),
+        )
+
+    @property
+    def state(self) -> TextState:
+        """OpenEnv state, carrying the inner env's ``dataset_size`` / ``tools``."""
+        return TextState(
+            episode_id=self._state.episode_id,
+            step_count=self._state.step_count,
+            dataset_size=int(getattr(self._inner, "dataset_size", 0) or 0),
+            tools=list(getattr(self._inner, "tools", None) or []),
+        )
+
+    def close(self) -> None:
+        """Close ``inner`` when this wrapper owns it (per-session path), else no-op."""
+        if not self._owns_inner:
+            return
+        closer = getattr(self._inner, "close", None)
+        if callable(closer):
+            with contextlib.suppress(Exception):
+                closer()
+
+
+def _normalize_reset(result: object) -> tuple[str, dict[str, Any]]:
+    """Normalise an env ``reset`` return into ``(prompt, info)``."""
+    if isinstance(result, tuple):
+        if len(result) >= 2:
+            info = result[1]
+            return str(result[0]), info if _is_str_keyed_dict(info) else {}
+        if len(result) == 1:
+            return str(result[0]), {}
+    return str(result), {}
+
+
+def _normalize_step(result: object) -> tuple[str, Any, bool, bool, dict[str, Any]]:
+    """Normalise an env ``step`` return into the Gym 5-tuple (accepts the legacy 4)."""
+    if not isinstance(result, tuple):
+        msg = "env.step must return a tuple"
+        raise TypeError(msg)
+    if len(result) == 5:
+        obs, reward, terminated, truncated, info = result
+    elif len(result) == 4:
+        obs, reward, terminated, info = result
+        truncated = False
+    else:
+        msg = f"env.step returned a {len(result)}-tuple; expected 4 or 5"
+        raise ValueError(msg)
+    return (
+        str(obs),
+        reward,
+        bool(terminated),
+        bool(truncated),
+        info if _is_str_keyed_dict(info) else {},
+    )
+
+
+class OpenEnvServer:
+    """Serve OpenEnv's ``create_app`` on uvicorn in a background daemon thread.
+
+    Binds an ephemeral port (read from :attr:`base_url`) so any OpenEnv client can
+    reach it by URL — the building block for hosting an env in a Ray actor or container.
+    Pass ``env`` to share one env (one session at a time), or ``make_env`` with
+    ``max_concurrent_envs`` for a fresh env per ``/ws`` session (concurrent, isolated
+    episodes — enough to back a whole :class:`BatchRolloutEnv` group).
+
+    :param env: A single shared local env. Exactly one of ``env``/``make_env``.
+    :param make_env: Zero-arg factory building a fresh env per session.
+    :param host: Interface to bind (default loopback).
+    :param port: TCP port; ``0`` lets the OS pick one.
+    :param env_name: Name in the env's OpenEnv metadata; defaults to its class name.
+    :param max_concurrent_envs: Max live sessions; set to the group size with ``make_env``.
+    :param advertise_host: Host clients should dial, when it differs from the bound
+        interface — a server binding ``0.0.0.0`` advertises its routable address
+        (a pod IP, say), since ``0.0.0.0`` is not reachable from anywhere.
+    """
+
+    def __init__(
+        self,
+        env: TextEnvProtocol | None = None,
+        *,
+        make_env: Callable[[], TextEnvProtocol] | None = None,
+        host: str = "127.0.0.1",
+        port: int = 0,
+        env_name: str | None = None,
+        max_concurrent_envs: int | None = None,
+        advertise_host: str | None = None,
+    ) -> None:
+        """Build (but do not start) a server hosting ``env`` or ``make_env``."""
+        if (env is None) == (make_env is None):
+            msg = "OpenEnvServer requires exactly one of env or make_env"
+            raise ValueError(msg)
+        self._env = env
+        self._make_env = make_env
+        self._host = host
+        self._port = port
+        self._env_name = env_name
+        self._max_concurrent_envs = max_concurrent_envs
+        self._advertise_host = advertise_host or host
+        self._server: Any = None
+        self._thread: threading.Thread | None = None
+        self._bound_port: int | None = None
+        self._env_closed = False
+
+    @property
+    def port(self) -> int:
+        """The TCP port the server bound (after :meth:`start`)."""
+        if self._bound_port is None:
+            msg = "OpenEnvServer is not running; call start() first"
+            raise RuntimeError(msg)
+        return self._bound_port
+
+    @property
+    def base_url(self) -> str:
+        """The ``http://host:port`` clients should dial (after :meth:`start`)."""
+        return f"http://{self._advertise_host}:{self.port}"
+
+    def start(self) -> Self:
+        """Serve in a background daemon thread (waits for bind); returns ``self``."""
+        import uvicorn
+
+        env = self._env
+        make_env = self._make_env
+        env_name = self._env_name
+
+        def app_factory() -> OpenEnvWrapper:
+            # ``make_env`` -> a fresh owned env per session; ``env`` -> one shared.
+            if make_env is not None:
+                return OpenEnvWrapper(make_env(), env_name=env_name, owns_inner=True)
+            assert env is not None, "one of env / make_env is always provided"
+            return OpenEnvWrapper(env, env_name=env_name)
+
+        display_name = env_name or (
+            type(env).__name__ if env is not None else "OpenEnvServer"
+        )
+        app = create_app(
+            app_factory,
+            TextAction,
+            TextObservation,
+            env_name=display_name,
+            max_concurrent_envs=self._max_concurrent_envs,
+        )
+        config = uvicorn.Config(
+            app, host=self._host, port=self._port, log_level="warning"
+        )
+        self._server = uvicorn.Server(config)
+        self._thread = threading.Thread(
+            target=self._server.run, name="openenv-server", daemon=True
+        )
+        self._thread.start()
+        deadline = time.monotonic() + 30.0
+        failure: str | None = None
+        while not getattr(self._server, "started", False):
+            if not self._thread.is_alive():
+                failure = (
+                    "OpenEnvServer thread exited during startup — the port may "
+                    f"be in use or the app failed to start "
+                    f"(host={self._host!r}, port={self._port})"
+                )
+                break
+            if time.monotonic() > deadline:
+                failure = "OpenEnvServer failed to start within 30s"
+                break
+            time.sleep(0.02)
+        if failure is not None:
+            self.stop()  # don't leak the thread or hosted env on a failed start
+            raise RuntimeError(failure)
+        self._bound_port = self._server.servers[0].sockets[0].getsockname()[1]
+        return self
+
+    def stop(self) -> None:
+        """Stop serving, release the socket, and close the hosted env once (idempotent)."""
+        if self._server is not None:
+            self._server.should_exit = True
+        if self._thread is not None:
+            self._thread.join(timeout=5.0)
+            self._thread = None
+        self._server = None
+        self._bound_port = None
+        if not self._env_closed:
+            self._env_closed = True
+            closer = getattr(self._env, "close", None)
+            if callable(closer):
+                with contextlib.suppress(Exception):
+                    closer()
+
+    def __enter__(self) -> Self:
+        return self.start()
+
+    def __exit__(self, *exc: object) -> None:
+        self.stop()
+
+
+def resolve_env(
+    spec: str,
+    env_config: dict[str, Any] | None = None,
+    *,
+    host: str = "127.0.0.1",
+    port: int = 0,
+    max_concurrent_envs: int | None = None,
+    advertise_host: str | None = None,
+) -> tuple[str, OpenEnvServer | None]:
+    """Resolve an env spec to a ``(url, server)`` a ``RolloutEnv`` can hit.
+
+    A **URL** is already hosted -> ``(url, None)``. Otherwise ``spec`` is a
+    ``module:Class`` / ``path.py:Class`` entrypoint: built with ``env_config``,
+    hosted on a local :class:`OpenEnvServer`, returned as ``(server.base_url, server)``.
+
+    ``max_concurrent_envs`` hosts a **fresh env per** ``/ws`` **session** rather than one
+    shared env, which is what lets a single server back a whole rollout group; leaving it
+    unset serves one session at a time.
+    """
+    from agilerl.llm_envs.spec_resolvers import resolve_spec_factory
+
+    if is_url(spec):
+        return spec, None
+    target = resolve_spec_factory(spec)
+    if target is None:
+        if ":" not in spec:
+            msg = (
+                f"env spec {spec!r} is neither a URL, a resolver-claimed id, nor a "
+                "'module:Class' / 'path.py:Class' entrypoint"
+            )
+            raise ValueError(msg)
+        # Lazy: entrypoint loading drags the gym/pettingzoo closure, which a
+        # slim host serving a resolver-claimed id never needs.
+        from agilerl.utils.env_utils import resolve_entrypoint_target
+
+        target = resolve_entrypoint_target(spec)
+    config = env_config or {}
+    shared_env = target(**config) if max_concurrent_envs is None else None
+    server = OpenEnvServer(
+        shared_env,
+        make_env=None if shared_env is not None else partial(target, **config),
+        host=host,
+        port=port,
+        env_name=_name_from_spec(spec),
+        max_concurrent_envs=max_concurrent_envs,
+        advertise_host=advertise_host,
+    ).start()
+    return server.base_url, server
+
+
+def load_env(spec: str, env_config: dict[str, Any] | None = None) -> TextEnvProtocol:
+    """Build the env from a ``module:Class`` / ``path.py:Class`` entrypoint (no hosting).
+
+    The in-process counterpart to :func:`resolve_env`: returns the env object for
+    :meth:`RolloutEnv.local` / :meth:`RolloutEnv.from_spec` to wrap in a ``LocalEnvClient``.
+    """
+    from agilerl.utils.env_utils import resolve_entrypoint_target
+
+    return resolve_entrypoint_target(spec)(**(env_config or {}))
+
+
+def is_url(spec: str) -> bool:
+    """Whether ``spec`` is an HTTP(S) URL (already hosted) rather than an env to load."""
+    return isinstance(spec, str) and spec.startswith(("http://", "https://"))
+
+
+def _name_from_spec(spec: str) -> str:
+    """Trailing identifier of an entrypoint / path (``"pkg:Env-v0"`` -> ``"Env-v0"``)."""
+    tail = spec.rsplit(":", 1)[-1]
+    return tail.rsplit("/", 1)[-1].rsplit("\\", 1)[-1] or spec

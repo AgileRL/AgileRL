@@ -17,7 +17,7 @@ algorithm:
         sleep_mode: false
 
 environment:
-    env_type: reasoning
+    env_type: rollout
     dataset: Jiayi-Pan/Countdown-Tasks-3to4
     columns:
         nums: question
