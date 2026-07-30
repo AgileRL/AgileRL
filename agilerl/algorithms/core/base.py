@@ -2899,7 +2899,6 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
                 omit_optimizer_info = False
 
         if lora_only:
-            self._log_adapter_fingerprint(f"saving to {path}")
             model_ref = self._get_unwrapped_actor()
             with gather_if_zero3(self.zero_stage, get_lora_params(model_ref)):
                 model_ref.save_pretrained(
@@ -5114,42 +5113,6 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             return self.actor.pretrained_model
         return self.actor
 
-    def _log_adapter_fingerprint(self, stage: str) -> None:
-        """Log per-adapter LoRA norms so weights changing between stages is visible.
-
-        ``lora_A`` moves very little during training, so it identifies which
-        initialisation an adapter came from; ``lora_B`` starts at zero and grows,
-        so it tracks how much training an adapter carries.
-
-        Runs an allgather under ZeRO-3, so every rank must call it at the same
-        point.
-
-        :param stage: Label for the point in the run this reading was taken at.
-        :type stage: str
-        """
-        unwrapped = self._get_unwrapped_actor()
-        named = [(n, p) for n, p in unwrapped.named_parameters() if "lora" in n]
-        squares: dict[str, float] = {}
-        with gather_if_zero3(self.zero_stage, [p for _, p in named]):
-            for name, param in named:
-                adapter = next(
-                    (a for a in self.selected_adapters if f".{a}." in name), "?"
-                )
-                kind = "lora_A" if "lora_A" in name else "lora_B"
-                key = f"{adapter}/{kind}"
-                squares[key] = squares.get(key, 0.0) + float(
-                    param.detach().float().pow(2).sum()
-                )
-        readings = " ".join(
-            f"{key}={value**0.5:.5f}" for key, value in sorted(squares.items())
-        )
-        logger.info(
-            "Adapter fingerprint [%s]: %s | active=%s",
-            stage,
-            readings,
-            getattr(self._peft_model, "active_adapter", "?"),
-        )
-
     def _restore_adapter_trainability(self, selected_adapters: list[str]) -> None:
         """Restore requires_grad=True for all trainable parameters of specified adapters.
 
@@ -6061,18 +6024,13 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         adapter_path = f"{checkpoint_dir}/{adapter_name}/adapter_model.safetensors"
         adapter_state = load_file(adapter_path, device=str(self.device))
 
-        live_named = {n: p for n, p in unwrapped.named_parameters() if "lora" in n}
-        live_params = list(live_named.values())
-
         with gather_if_zero3(
             self.zero_stage,
-            live_params,
+            get_lora_params(unwrapped),
             modifier_rank=0,
         ):
-            before = {n: p.detach().clone() for n, p in live_named.items()}
-
             with torch.no_grad():
-                load_result = set_peft_model_state_dict(
+                set_peft_model_state_dict(
                     peft_model, adapter_state, adapter_name=adapter_name
                 )
             peft_model.set_adapter(adapter_name)
@@ -6083,58 +6041,6 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
 
         if self.accelerator is not None:
             self.accelerator.wait_for_everyone()
-
-        # Only the modifier rank's copy survives the scatter back to the shards, so
-        # compare against the file once that has happened: this is the state that
-        # training and any later save actually see.
-        with gather_if_zero3(self.zero_stage, live_params, modifier_rank=None):
-            changed = [
-                name
-                for name, param in live_named.items()
-                if not torch.equal(before[name], param.detach())
-            ]
-            compared: list[str] = []
-            identical: list[str] = []
-            worst_diff = 0.0
-            worst_name = ""
-            for name, param in live_named.items():
-                disk = adapter_state.get(name.replace(f".{adapter_name}.", "."))
-                if disk is None or disk.shape != param.shape:
-                    continue
-                compared.append(name)
-                diff = (param.detach().float() - disk.float()).abs().max().item()
-                if diff == 0.0:
-                    identical.append(name)
-                elif diff > worst_diff:
-                    worst_diff, worst_name = diff, name
-
-        # Names on disk carry no adapter segment, so a miss here means the mapping
-        # above is wrong rather than the weights being absent.
-        if not compared:
-            sample = (
-                f" | no name matches, live e.g. {next(iter(live_named), 'none')} "
-                f"vs disk e.g. {next(iter(adapter_state), 'none')}"
-            )
-        else:
-            sample = ""
-
-        logger.info(
-            "Adapter '%s' load from %s: %d disk tensors, %d live LoRA params | "
-            "%d params changed | %d/%d matched params identical to disk "
-            "(worst diff %.3e at %s) | unexpected_keys=%d%s",
-            adapter_name,
-            adapter_path,
-            len(adapter_state),
-            len(live_named),
-            len(changed),
-            len(identical),
-            len(compared),
-            worst_diff,
-            worst_name or "n/a",
-            len(getattr(load_result, "unexpected_keys", [])),
-            sample,
-        )
-        self._log_adapter_fingerprint(f"after loading '{adapter_name}'")
 
     @staticmethod
     def _create_prompt_masks(
