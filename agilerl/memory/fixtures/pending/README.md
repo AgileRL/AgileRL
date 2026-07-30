@@ -66,3 +66,36 @@ re-based onto the median floor; generation points are measured with the engine
 awake, so they have no baseline to subtract and cannot be repaired offline.
 The re-run that would have replaced them was killed at point 12 of 21 — which
 is what motivated sweep checkpointing.
+
+### `google__gemma-4-E2B-it@...pinned.json`
+
+Re-swept 2026-07-30 with completion length pinned, so the measurement is now
+reproducible and comparable to what the estimator predicts. It is held back
+because that made the error *visible*, not because the measurement is bad —
+this is the honest number.
+
+    training bias +14.5%, mean 14.5%, worst 47.0%   (was +7.8% / 8.4% / 18.6%
+                                                     when completions varied)
+
+The error scales sharply with tokens, which is the useful part:
+
+    seq 4096, mb 8   +41% to +47%
+    seq 4096, mb 1   +17%
+    seq  512, mb 8   +11%
+
+At the worst corner (seq 4096, mb 8, group 16, rank 64) the card peaked at
+**40170 MiB of 40960** — essentially an OOM — against a 21140 MiB prediction.
+Qwen2.5-1.5B at *identical* knobs used 13380 MiB, so Gemma costs **2.9x** for
+the same workload.
+
+The unexplained 18.8 GiB is roughly five blocks' worth of activations where the
+model charges one, which points at gradient checkpointing not applying at the
+granularity assumed — plausibly Gemma 4's per-layer structure (altup/laurel,
+the PLE path) not being wrapped as one checkpoint segment per decoder layer.
+
+**Next step:** allocator snapshot at seq 4096 / mb 8 with the 2M trace cap, and
+count how many distinct `decoder_layer` frames hold live tensors at the peak.
+One means checkpointing works as modelled; five means it does not.
+
+Note the other three models re-swept at the same time went *in*, and improved:
+Qwen2.5-0.5B +0.9% bias, Qwen2.5-1.5B +2.4%, OLMoE +4.9% (worst 13.5% -> 7.8%).
