@@ -13,10 +13,38 @@ Qwen2.5-0.5B on an A100, 42 points, nf4 on both trainer and engine.
 Generation is fine (0.71% mean). Training refits to **20.8% mean**, against
 ~5% for the same model unquantized.
 
-Quantized training carries a term the formulas do not: most likely the
-per-layer dequantization workspace, which is transient and so never appears in
-a weight measurement. Merging this into the unquantized fixture drags that one
-from ~5% to 14.5%, so the two stay separate until the term is modelled.
+### What the gap is — characterised 2026-07-30
+
+**It is not a dequantized weight copy.** Regressing the gap against tokens over
+all 21 points:
+
+    gap = 361 MiB  +  43,200 bytes/token        (R^2 = 0.78)
+
+A whole-model bf16 dequant copy would be 682 MiB and *flat*; one layer's worth
+would be 28 MiB and flat. Neither matches — the term is dominated by a
+per-token component, i.e. it is activation memory.
+
+**The mechanism is in `prepare_model_for_kbit_training`**, which does two
+things beyond quantizing:
+
+1. Upcasts every non-`Params4bit` parameter to fp32 — layernorms and the
+   lm_head. *Already modelled*, via `weight_bytes(..., kbit_prepared=True)`.
+2. Calls `enable_input_require_grads()`, putting the **embedding output** into
+   the autograd graph. This is the unmodelled one. Under LoRA-only training
+   nothing upstream of an adapter needs a gradient, so those activations are
+   freed as the forward proceeds; once the embedding requires grad the whole
+   chain is retained instead. That is a per-token cost, which is what the
+   regression sees.
+
+**Why it is not modelled yet.** Pinning the coefficient means knowing which
+tensors flip from freed to retained, and the data here cannot settle it: these
+21 points were measured *before* `wait_for_idle` landed, so they carry the
+contaminated-floor noise (hence R^2 = 0.78, and a gap ranging 190–2278 MiB).
+
+**The experiment to run** (needs a GPU; both zones were stocked out when this
+was written): sweep Qwen2.5-0.5B at nf4 with the drain-wait in place, and take
+an allocator snapshot at one corner with and without `enable_input_require_grads`.
+The difference between those two snapshots is the term.
 
 ### `...@NVIDIA-A100-SXM4-40GB.longctx.json`
 
