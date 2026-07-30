@@ -26,7 +26,7 @@ from agilerl.modules import (
 from agilerl.modules.custom_components import GumbelSoftmax
 from agilerl.networks.actors import DeterministicActor
 from agilerl.networks.q_networks import ContinuousQNetwork
-from agilerl.utils.algo_utils import concatenate_spaces
+from agilerl.utils.algo_utils import concatenate_spaces, is_train_eval_invariant
 from agilerl.utils.evolvable_networks import get_default_encoder_config
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 from tests.helper_functions import (
@@ -993,6 +993,28 @@ class TestMADDPGInit:
 
 
 class TestMADDPGGetAction:
+    # Mode-sensitive actors take the eval()/train() toggle path in get_action.
+    def test_mode_sensitive_actors_restore_train_mode(
+        self, ma_vector_space, ma_discrete_space
+    ):
+        agent_ids = ["agent_0", "agent_1", "other_agent_0"]
+        maddpg = MADDPG(ma_vector_space, ma_discrete_space, agent_ids=agent_ids)
+        for actor in maddpg.actors.values():
+            actor.add_module("dropout", nn.Dropout(0.5))
+        maddpg._actors_mode_invariant = all(
+            is_train_eval_invariant(actor) for actor in maddpg.actors.values()
+        )
+        assert not maddpg._actors_mode_invariant
+
+        state = {
+            agent: np.random.randn(*ma_vector_space[idx].shape)
+            for idx, agent in enumerate(agent_ids)
+        }
+        maddpg.get_action(state)
+
+        assert all(actor.training for actor in maddpg.actors.values())
+        maddpg.clean_up()
+
     @pytest.mark.gpu
     @pytest.mark.parametrize(
         "observation_spaces",

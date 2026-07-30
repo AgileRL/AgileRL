@@ -245,11 +245,11 @@ class NeuralTS(RLAlgorithm[TensorDict]):
             mu_raw[0].backward(retain_graph=True)
             grad_vec = torch.cat(
                 [
-                    w.grad.detach().flatten() / np.sqrt(self.exp_layer.weight.size(0))
+                    w.grad.detach().flatten()
                     for w in self.exp_layer.parameters()
                     if w.requires_grad and w.grad is not None
                 ],
-            )
+            ) / np.sqrt(self.exp_layer.weight.size(0))
             g[:] = grad_vec
         else:
             for k, fx in enumerate(mu):
@@ -258,11 +258,10 @@ class NeuralTS(RLAlgorithm[TensorDict]):
                 g[k] = torch.cat(
                     [
                         w.grad.detach().flatten()
-                        / np.sqrt(self.exp_layer.weight.size(0))
                         for w in self.exp_layer.parameters()
                         if w.requires_grad and w.grad is not None
                     ],
-                )
+                ) / np.sqrt(self.exp_layer.weight.size(0))
 
         with torch.no_grad():
             std = self.gamma * torch.sqrt(

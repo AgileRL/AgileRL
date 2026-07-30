@@ -33,8 +33,12 @@ from agilerl.typing import (
     SupportedObservationSpace,
 )
 from agilerl.utils.algo_utils import (
+    adam_kwargs,
+    eval_mode,
+    is_train_eval_invariant,
     make_safe_deepcopies,
     multi_dim_clamp,
+    polyak_update,
     share_encoder_parameters,
 )
 from agilerl.utils.evolvable_networks import (
@@ -320,16 +324,20 @@ class DDPG(RLAlgorithm[TensorDict]):
         self.actor_target.load_state_dict(self.actor.state_dict())
         self.critic_target.load_state_dict(self.critic.state_dict())
 
+        self._actor_mode_invariant = is_train_eval_invariant(self.actor)
+
         # Optimizers
         self.actor_optimizer = OptimizerWrapper(
             optim.Adam,
             networks=self.actor,
             lr=lr_actor,
+            optimizer_kwargs=adam_kwargs(self.device, self.accelerator),
         )
         self.critic_optimizer = OptimizerWrapper(
             optim.Adam,
             networks=self.critic,
             lr=lr_critic,
+            optimizer_kwargs=adam_kwargs(self.device, self.accelerator),
         )
 
         if self.accelerator is not None and wrap:
@@ -397,11 +405,9 @@ class DDPG(RLAlgorithm[TensorDict]):
         :rtype: numpy.ndarray[float]
         """
         obs = self.preprocess_observation(obs)
-        self.actor.eval()
-        with torch.no_grad():
-            action: torch.Tensor = self.actor(obs)
-
-        self.actor.train()
+        with eval_mode(self.actor, mode_invariant=self._actor_mode_invariant):
+            with torch.no_grad():
+                action: torch.Tensor = self.actor(obs)
 
         # Add noise for exploration
         if training:
@@ -537,12 +543,7 @@ class DDPG(RLAlgorithm[TensorDict]):
         :param target: Target network with parameters to be updated
         :type target: nn.Module
         """
-        for eval_param, target_param in zip(
-            net.parameters(), target.parameters(), strict=False
-        ):
-            target_param.data.copy_(
-                self.tau * eval_param.data + (1.0 - self.tau) * target_param.data,
-            )
+        polyak_update(net, target, self.tau)
 
     def test(
         self,

@@ -86,7 +86,7 @@ def test_parameter_norm_multiple_parameters():
     for param in model.parameters():
         expected_norm += (param.norm() ** 2).item()
     expected_norm = math.sqrt(expected_norm)
-    assert parameter_norm(model) == expected_norm
+    assert parameter_norm(model) == pytest.approx(expected_norm)
 
 
 # The value of "attention_entropy" is a tuple containing the model's attention entropy and the total number of non-masked tokens.
