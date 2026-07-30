@@ -915,6 +915,19 @@ class TestBatchRolloutEnvHelpers:
             vec.envs.append(_SyncStubEnv())
         assert vec._is_initialized is True
 
+    def test_get_rubric_score_means_averages_and_nans(self) -> None:
+        vec = BatchRolloutEnv(env_factory=_SyncStubEnv, batch_size=1, group_size=2)
+        e0 = _SyncStubEnv()
+        e1 = _SyncStubEnv()
+        e0.rubric_score_sums = {"fmt": 1.0, "correct": 2.0}
+        e1.rubric_score_sums = {"fmt": 3.0}
+        vec.envs = [e0, e1]
+        vec.rubric_component_names = ("fmt", "correct", "missing")
+        means = vec.get_rubric_score_means()
+        assert means["fmt"] == 2.0
+        assert means["correct"] == 2.0
+        assert means["missing"] != means["missing"]  # NaN
+
 
 class TestBatchRolloutEnvActiveEnvs:
     def test_active_envs_excludes_done_and_preserves_list_order(self) -> None:

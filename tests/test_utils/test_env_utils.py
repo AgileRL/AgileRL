@@ -93,6 +93,26 @@ class TestGetRubric:
 
         assert isinstance(rubric, Rubric)
 
+    def test_loads_rubric_subclass(self, tmp_path):
+        rubric_file = tmp_path / "rubric_cls.py"
+        rubric_file.write_text(
+            "from openenv.core.rubrics.base import Rubric\n"
+            "class MyRubric(Rubric):\n"
+            "    def forward(self, action, observation):\n"
+            "        return 1.0\n",
+            encoding="utf-8",
+        )
+        rubric = env_utils.get_rubric("MyRubric", str(rubric_file))
+        from openenv.core.rubrics.base import Rubric
+
+        assert isinstance(rubric, Rubric)
+
+    def test_non_rubric_export_raises(self, tmp_path):
+        rubric_file = tmp_path / "not_rubric.py"
+        rubric_file.write_text("NOT_A_RUBRIC = 42\n", encoding="utf-8")
+        with pytest.raises(TypeError, match="must be a Rubric"):
+            env_utils.get_rubric("NOT_A_RUBRIC", str(rubric_file))
+
 
 class TestResolveWrapper:
     def test_invalid_string_wrapper_raises(self):

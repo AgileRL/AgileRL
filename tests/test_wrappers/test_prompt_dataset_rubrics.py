@@ -5,13 +5,16 @@
 
 from __future__ import annotations
 
+from unittest.mock import patch
+
+import numpy as np
 import pytest
 from openenv.core.rubrics.base import Rubric
 from openenv.core.rubrics.containers import Sequential
 
 from agilerl.llm_envs.openenv import LocalEnvClient, TextAction
-from agilerl.llm_envs.prompt_dataset import PromptDatasetEnv
-from agilerl.llm_envs.rubrics import reward_fn_to_rubric
+from agilerl.llm_envs.prompt_dataset import PromptDatasetEnv, _json_safe
+from agilerl.llm_envs.rubrics import register_component_hooks, reward_fn_to_rubric
 
 
 class _Leaf(Rubric):
@@ -163,3 +166,53 @@ def test_local_env_client_does_not_double_wrap_prompt_dataset() -> None:
     )
     client = LocalEnvClient(world)
     assert client._env is world
+
+
+def test_json_safe_coerces_numpy_and_nested_containers() -> None:
+    assert _json_safe(np.int64(3)) == 3
+    assert _json_safe(np.array([1, 2])) == [1, 2]
+    coerced = _json_safe({"k": np.float32(1.5)})
+    assert isinstance(coerced, dict)
+    assert coerced["k"] == pytest.approx(1.5)
+    assert _json_safe((np.int64(1), "x")) == [1, "x"]
+
+
+def test_json_safe_warns_on_unrecognised_type() -> None:
+    with pytest.warns(UserWarning, match="not coerced"):
+        assert _json_safe(object()) is not None
+
+
+def test_prompt_dataset_empty_rows_raises() -> None:
+    env = PromptDatasetEnv([], rubric=reward_fn_to_rubric(lambda c, a, q: 0.0))
+    with pytest.raises(RuntimeError, match="no rows"):
+        env.reset()
+
+
+def test_async_rubric_score_raises_type_error() -> None:
+    env = PromptDatasetEnv(
+        [{"question": "q", "answer": "a"}],
+        rubric=reward_fn_to_rubric(lambda c, a, q: 1.0),
+    )
+    env.reset(row_index=0)
+
+    async def _coro() -> float:
+        return 1.0
+
+    with (
+        patch.object(env, "_apply_rubric", return_value=_coro()),
+        pytest.raises(TypeError, match="async rubrics"),
+    ):
+        env.step(TextAction(message="x"))
+
+
+def test_register_component_hooks_none_and_empty_name() -> None:
+    assert register_component_hooks(None) == ()
+
+    class _OddName(Rubric):
+        component_name = 123  # non-str forces the snake_case fallback
+
+        def forward(self, action, observation) -> float:
+            del action, observation
+            return 1.0
+
+    assert register_component_hooks(_OddName()) == ("odd_name",)
