@@ -44,7 +44,9 @@ def _lora_delta(layer: LoraLayer, adapter: str, rows: torch.Tensor) -> torch.Ten
     # nn.Module.__getattr__ as the loose Tensor | Module; narrow it to Tensor.
     lora_a_weight = lora_a.weight
     assert isinstance(lora_a_weight, torch.Tensor)
-    rows = layer.lora_dropout[adapter](rows.to(lora_a_weight.dtype))
+    rows = layer.lora_dropout[adapter](
+        layer._cast_input_dtype(rows, lora_a_weight.dtype)
+    )
     return layer.lora_B[adapter](lora_a(rows)) * layer.scaling[adapter]
 
 
@@ -123,7 +125,7 @@ def _store_layer_cache(model: nn.Module, layers: list[LoraLayer]) -> None:
     _LORA_LAYER_CACHE[model] = layers
 
 
-def _get_cached_lora_layers(model: nn.Module) -> list[LoraLayer]:
+def get_cached_lora_layers(model: nn.Module) -> list[LoraLayer]:
     """All ``LoraLayer`` modules under *model*, cached after the first traversal.
 
     :param model: A ``PeftModel`` or any module containing ``LoraLayer`` s.
@@ -208,7 +210,7 @@ def unpatch_lora_for_fused_forward(model: nn.Module) -> None:
 
     :param model: The model to release from fused-routing control.
     """
-    for module in _get_cached_lora_layers(model):
+    for module in get_cached_lora_layers(model):
         if _is_routed_layer(module):
             # Drop the monkeypatched instance forward, restoring the class one.
             module.__dict__.pop("forward", None)
@@ -231,7 +233,7 @@ def set_fused_adapter_routing(model: nn.Module, routing: Sequence[str]) -> None:
     :raises ValueError: If *routing* is empty, names an unknown adapter, or
         names a DoRA adapter (unsupported, as in PEFT's mixed-batch forward).
     """
-    layers = _get_cached_lora_layers(model)
+    layers = get_cached_lora_layers(model)
     if not layers:
         # Plain base model (no adapters) or PEFT not installed: nothing to
         # route, and the unfused forward is already correct.
@@ -259,6 +261,6 @@ def unset_fused_adapter_routing(model: nn.Module) -> None:
 
     :param model: The model whose LoRA layers should clear fused routing.
     """
-    for module in _get_cached_lora_layers(model):
+    for module in get_cached_lora_layers(model):
         if _is_routed_layer(module):
             _ROUTING_STATE[module] = None
