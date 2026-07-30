@@ -198,24 +198,6 @@ logger = logging.getLogger(__name__)
 LOCAL_AGENT_ATTRIBUTES = frozenset({"device"})
 
 
-def tensor_collection_norm(tensors: Iterable[torch.Tensor]) -> float:
-    """Frobenius norm across a collection of tensors.
-
-    Zero-element tensors contribute nothing, so a ZeRO-3 parameter that is still
-    partitioned rather than gathered reads as norm 0.
-
-    :param tensors: Tensors to measure.
-    :type tensors: Iterable[torch.Tensor]
-    :return: Norm across every element of every tensor.
-    :rtype: float
-    """
-    total = 0.0
-    for tensor in tensors:
-        if tensor.numel():
-            total += float(tensor.detach().float().pow(2).sum())
-    return total**0.5
-
-
 SelfAgentWrapper = TypeVar("SelfAgentWrapper", bound=AgentWrapperProtocol)
 
 
@@ -6027,23 +6009,21 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         adapter_path = f"{checkpoint_dir}/{adapter_name}/adapter_model.safetensors"
         adapter_state = load_file(adapter_path, device=str(self.device))
 
-        live_params = get_lora_params(unwrapped)
+        live_named = {n: p for n, p in unwrapped.named_parameters() if "lora" in n}
+        live_params = list(live_named.values())
+
         with gather_if_zero3(
             self.zero_stage,
             live_params,
             modifier_rank=0,
         ):
-            # ``set_peft_model_state_dict`` loads non-strictly, so a key mismatch
-            # leaves the live adapter untouched without raising.
-            norm_before = tensor_collection_norm(live_params)
+            before = {n: p.detach().clone() for n, p in live_named.items()}
 
             with torch.no_grad():
                 load_result = set_peft_model_state_dict(
                     peft_model, adapter_state, adapter_name=adapter_name
                 )
             peft_model.set_adapter(adapter_name)
-
-            norm_written = tensor_collection_norm(live_params)
 
             for name, param in unwrapped.named_parameters():
                 if "reference" in name:
@@ -6052,26 +6032,55 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         if self.accelerator is not None:
             self.accelerator.wait_for_everyone()
 
-        # Only the modifier rank's copy is scattered back to the shards, so read the
-        # parameters again once that has happened: this is what training and any
-        # later save actually see.
+        # Only the modifier rank's copy survives the scatter back to the shards, so
+        # compare against the file once that has happened: this is the state that
+        # training and any later save actually see.
         with gather_if_zero3(self.zero_stage, live_params, modifier_rank=None):
-            norm_persisted = tensor_collection_norm(live_params)
+            changed = [
+                name
+                for name, param in live_named.items()
+                if not torch.equal(before[name], param.detach())
+            ]
+            compared: list[str] = []
+            identical: list[str] = []
+            worst_diff = 0.0
+            worst_name = ""
+            for name, param in live_named.items():
+                disk = adapter_state.get(name.replace(f".{adapter_name}.", "."))
+                if disk is None or disk.shape != param.shape:
+                    continue
+                compared.append(name)
+                diff = (param.detach().float() - disk.float()).abs().max().item()
+                if diff == 0.0:
+                    identical.append(name)
+                elif diff > worst_diff:
+                    worst_diff, worst_name = diff, name
 
-        unexpected_keys = list(getattr(load_result, "unexpected_keys", []))
+        # Names on disk carry no adapter segment, so a miss here means the mapping
+        # above is wrong rather than the weights being absent.
+        if not compared:
+            sample = (
+                f" | no name matches, live e.g. {next(iter(live_named), 'none')} "
+                f"vs disk e.g. {next(iter(adapter_state), 'none')}"
+            )
+        else:
+            sample = ""
+
         logger.info(
-            "Adapter '%s' load from %s: disk %d tensors norm=%.6f | live %d params "
-            "norm before=%.6f written=%.6f persisted=%.6f | unexpected_keys=%d%s",
+            "Adapter '%s' load from %s: %d disk tensors, %d live LoRA params | "
+            "%d params changed | %d/%d matched params identical to disk "
+            "(worst diff %.3e at %s) | unexpected_keys=%d%s",
             adapter_name,
             adapter_path,
             len(adapter_state),
-            tensor_collection_norm(adapter_state.values()),
-            len(live_params),
-            norm_before,
-            norm_written,
-            norm_persisted,
-            len(unexpected_keys),
-            f" e.g. {unexpected_keys[:3]}" if unexpected_keys else "",
+            len(live_named),
+            len(changed),
+            len(identical),
+            len(compared),
+            worst_diff,
+            worst_name or "n/a",
+            len(getattr(load_result, "unexpected_keys", [])),
+            sample,
         )
 
     @staticmethod
