@@ -300,20 +300,17 @@ class TestLLMEnvSpec:
         with pytest.raises(ValueError, match="rubric_file_path is required"):
             LLMEnvSpec(env_type=LLMEnvType.ROLLOUT, dataset="ds", rubric_file_path=None)
 
-    def test_rejects_legacy_reward_keys(self):
-        with pytest.raises(ValueError, match="renamed to rubric_file_path"):
-            LLMEnvSpec(
-                env_type=LLMEnvType.ROLLOUT,
-                dataset="ds",
-                reward_file_path="reward.py",
-            )
-        with pytest.raises(ValueError, match="renamed to rubric_file_path"):
-            LLMEnvSpec(
-                env_type=LLMEnvType.ROLLOUT,
-                dataset="ds",
-                rubric_file_path="reward.py",
-                reward_fn_name="reward_fn",
-            )
+    def test_accepts_legacy_reward_keys(self):
+        """Arena manifests may still send reward_file_path / reward_fn_name."""
+        spec = LLMEnvSpec(
+            env_type=LLMEnvType.ROLLOUT,
+            dataset="ds",
+            reward_file_path="reward.py",
+            reward_fn_name="combined_rewards",
+            prompt_template={"user_0": "{question}"},
+        )
+        assert spec.rubric_file_path == "reward.py"
+        assert spec.rubric_name == "combined_rewards"
 
     def test_dataset_does_not_require_rubric_file_path(self):
         spec = LLMEnvSpec(

@@ -217,9 +217,6 @@ class OpenEnvSessionClient:
             # None -> unbounded; OpenEnv's annotation omits it but forwards
             # straight to asyncio.wait_for, where None means no timeout.
             message_timeout_s=self._timeout_s,  # ty: ignore[invalid-argument-type]
-            # No keepalive, so ``timeout_s`` is the sole liveness bound: a slow
-            # step must not trip the ping deadline before its message timeout.
-            websocket_ping_interval_s=None,
         ).sync()
 
     def _transport(self, call: Callable[[], _TransportT]) -> _TransportT:

@@ -56,14 +56,20 @@ def get_reward_fn(reward_fn_name: str, file_path: str) -> Callable[..., float]:
 
 
 def get_rubric(rubric_name: str, file_path: str) -> Any:  # noqa: ANN401
-    """Load a Rubric instance (or instantiate a Rubric subclass) from a file.
+    """Load a Rubric from a file, wrapping legacy reward callables.
+
+    Accepts a ``Rubric`` instance, a ``Rubric`` subclass (instantiated here), or a
+    ``(completion, answer, question) -> float`` callable (Arena / older manifests),
+    which is wrapped with :func:`~agilerl.llm_envs.rubrics.reward_fn_to_rubric`.
 
     :param rubric_name: Name of the symbol in ``file_path``.
-    :param file_path: Path to the Python module defining the rubric.
+    :param file_path: Path to the Python module defining the rubric or reward fn.
     :returns: An OpenEnv ``Rubric`` instance.
-    :raises TypeError: If the symbol is not a Rubric instance or subclass.
+    :raises TypeError: If the symbol is not a Rubric, Rubric subclass, or callable.
     """
     from openenv.core.rubrics.base import Rubric
+
+    from agilerl.llm_envs.rubrics import reward_fn_to_rubric
 
     file_path_obj = Path(file_path)
     if not file_path_obj.exists():
@@ -90,10 +96,12 @@ def get_rubric(rubric_name: str, file_path: str) -> Any:  # noqa: ANN401
         return obj
     if isinstance(obj, type) and issubclass(obj, Rubric):
         return obj()
+    if callable(obj):
+        return reward_fn_to_rubric(obj)
     msg = (
-        f"{rubric_name!r} in {file_path} must be a Rubric instance or subclass, "
-        f"got {type(obj).__name__}. Export e.g. "
-        f"RUBRIC = reward_fn_to_rubric(combined_rewards)."
+        f"{rubric_name!r} in {file_path} must be a Rubric instance, Rubric "
+        f"subclass, or (completion, answer, question) -> float callable, "
+        f"got {type(obj).__name__}."
     )
     raise TypeError(msg)
 

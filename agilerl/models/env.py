@@ -328,10 +328,13 @@ class LLMEnvSpec(BaseModel):
     :param train_test_split: Fraction of the dataset used for training.
     :type train_test_split: float
     :param rubric_file_path: Path to a Python file containing the rubric
-        (a ``Rubric`` instance or subclass). Required for a dataset-backed
-        rollout env.
+        (a ``Rubric`` instance or subclass, or a legacy reward callable wrapped
+        by :func:`~agilerl.llm_envs.rubrics.reward_fn_to_rubric`). Required for
+        a dataset-backed rollout env. Accepts the Arena alias
+        ``reward_file_path``.
     :type rubric_file_path: str | None
-    :param rubric_name: Name of the rubric symbol in ``rubric_file_path``.
+    :param rubric_name: Name of the rubric (or legacy reward) symbol in
+        ``rubric_file_path``. Accepts the Arena alias ``reward_fn_name``.
     :type rubric_name: str | None
     :param dataset: Path to a Parquet dataset file or a HuggingFace dataset.
     :type dataset: str | None
@@ -369,8 +372,14 @@ class LLMEnvSpec(BaseModel):
     prompt_template: dict[str, Any] | None = Field(default=None)
     max_reward: float | None = Field(default=None)
     train_test_split: float = Field(default=0.9, ge=0.0, le=1.0)
-    rubric_file_path: str | None = Field(default=None)
-    rubric_name: str | None = Field(default=None)
+    rubric_file_path: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("rubric_file_path", "reward_file_path"),
+    )
+    rubric_name: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("rubric_name", "reward_fn_name"),
+    )
     response_column: str = Field(default="response")
 
     # Env-backed rollout fields
@@ -414,20 +423,6 @@ class LLMEnvSpec(BaseModel):
     def _seed_kwargs(self) -> dict[str, int]:
         """Seed kwarg for gym construction; omitted when unset so the gym default applies."""
         return {} if self.seed is None else {"seed": self.seed}
-
-    @model_validator(mode="before")
-    @classmethod
-    def _reject_legacy_reward_keys(cls, data: object) -> object:
-        if isinstance(data, dict):
-            legacy = [k for k in ("reward_file_path", "reward_fn_name") if data.get(k)]
-            if legacy:
-                msg = (
-                    f"{', '.join(legacy)} renamed to rubric_file_path / rubric_name; "
-                    "export a Rubric (or wrap a callable with reward_fn_to_rubric) "
-                    "and point rubric_name at it."
-                )
-                raise ValueError(msg)
-        return data
 
     @model_validator(mode="after")
     def _validate_rollout_fields(self) -> Self:

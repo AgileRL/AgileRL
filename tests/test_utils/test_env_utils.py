@@ -107,6 +107,53 @@ class TestGetRubric:
 
         assert isinstance(rubric, Rubric)
 
+    def test_loads_legacy_reward_callable(self, tmp_path):
+        """Arena reward modules export a callable; wrap with RewardFnRubric."""
+        reward_file = tmp_path / "reward.py"
+        reward_file.write_text(
+            "def combined_rewards(completion, answer, question):\n"
+            "    del answer, question\n"
+            "    return 1.0 if completion else 0.0\n",
+            encoding="utf-8",
+        )
+        rubric = env_utils.get_rubric("combined_rewards", str(reward_file))
+        from openenv.core.rubrics.base import Rubric
+
+        from agilerl.llm_envs.rubrics import RewardFnRubric
+
+        assert isinstance(rubric, Rubric)
+        assert isinstance(rubric, RewardFnRubric)
+
+    def test_loads_weighted_sum_rubric_instance(self, tmp_path):
+        """OpenEnv composition exports (e.g. WeightedSum) must not be re-wrapped."""
+        reward_file = tmp_path / "reward.py"
+        reward_file.write_text(
+            "from openenv.core.rubrics.base import Rubric\n"
+            "from openenv.core.rubrics import WeightedSum\n"
+            "\n"
+            "class TestsPassRubric(Rubric):\n"
+            "    def forward(self, action, observation) -> float:\n"
+            "        return 1.0\n"
+            "\n"
+            "class StyleRubric(Rubric):\n"
+            "    def forward(self, action, observation) -> float:\n"
+            "        return 0.6\n"
+            "\n"
+            "reward = WeightedSum(\n"
+            "    [TestsPassRubric(), StyleRubric()],\n"
+            "    weights=[0.7, 0.3],\n"
+            ")\n",
+            encoding="utf-8",
+        )
+        rubric = env_utils.get_rubric("reward", str(reward_file))
+        from openenv.core.rubrics import WeightedSum
+
+        from agilerl.llm_envs.rubrics import RewardFnRubric
+
+        assert isinstance(rubric, WeightedSum)
+        assert not isinstance(rubric, RewardFnRubric)
+        assert list(rubric.named_children())  # leaves registered for metrics
+
     def test_non_rubric_export_raises(self, tmp_path):
         rubric_file = tmp_path / "not_rubric.py"
         rubric_file.write_text("NOT_A_RUBRIC = 42\n", encoding="utf-8")

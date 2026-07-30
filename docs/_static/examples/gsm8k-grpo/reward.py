@@ -48,8 +48,6 @@ def _combined(completion: str, answer, question) -> float:
     return correctness_reward(answer, completion) + format_reward(completion)
 
 
-# Nightly-compatible: one scorer. For per-criterion metrics, split into Rubric
-# subclasses and register them as children on a parent Rubric.
 RUBRIC = reward_fn_to_rubric(_combined, name="gsm8k")
 
 
