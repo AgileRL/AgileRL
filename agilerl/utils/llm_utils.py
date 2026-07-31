@@ -55,6 +55,11 @@ else:
     AutoModelForCausalLMWithValueHead: Any = None
     BitsAndBytesConfig: Any = None
 
+if HAS_DEEPSPEED:
+    from deepspeed.runtime.zero.partition_parameters import ZeroParamStatus
+else:
+    ZeroParamStatus = None
+
 _DEPRECATED_LLM_ENV_NAMES = frozenset(
     ("apply_chat_template", "ReasoningGym", "PreferenceGym", "SFTGym"),
 )
@@ -462,21 +467,43 @@ def gather_if_zero3(
 @contextmanager
 def gather_if_ds_param(
     *tensors: torch.Tensor | None,
+    modifier_rank: int | None = 0,
 ) -> Generator[None, None, None]:
     """Allgather ZeRO-3 params for the duration of the block.
 
-    No-op when none of ``tensors`` carry a DeepSpeed ``ds_id``. The gather
-    must wrap only the matmul / fused loss that reads the weight — not a
-    module ``forward`` — because ZeRO-3's post-forward hooks re-partition
-    the param and free the gathered buffer.
+    No-op when none of ``tensors`` carry a DeepSpeed ``ds_id``, or when every
+    such param is already ``AVAILABLE`` (tied embeddings owned by
+    ``embed_tokens``). Duplicate references are gathered once (by identity).
+    Defaults to ``modifier_rank=0`` so DeepSpeed releases the gathered buffer
+    after the block.
+
+    The gather must wrap only the matmul / fused loss that reads the weight —
+    not a module ``forward`` — because ZeRO-3's post-forward hooks
+    re-partition the param and free the gathered buffer.
+
+    :param tensors: Candidate weight tensors; only those with ``ds_id`` gather.
+    :param modifier_rank: Passed to DeepSpeed ``GatheredParameters``.
     """
-    params: list[torch.Tensor] = [
-        t for t in tensors if t is not None and hasattr(t, "ds_id")
-    ]
+    seen: set[int] = set()
+    params: list[torch.Tensor] = []
+    for t in tensors:
+        if t is None or not hasattr(t, "ds_id"):
+            continue
+        tid = id(t)
+        if tid in seen:
+            continue
+        seen.add(tid)
+        if (
+            ZeroParamStatus is not None
+            and hasattr(t, "ds_status")
+            and t.ds_status == ZeroParamStatus.AVAILABLE
+        ):
+            continue
+        params.append(t)
     if not params:
         yield
         return
-    with gather_if_zero3(3, params):
+    with gather_if_zero3(3, params, modifier_rank=modifier_rank):
         yield
 
 

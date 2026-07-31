@@ -3,6 +3,7 @@
 
 """Unit tests for the chunked fused-logprob compile dispatch."""
 
+from contextlib import contextmanager
 from unittest.mock import patch
 
 import pytest
@@ -13,6 +14,7 @@ from agilerl.algorithms.core.llm_ops.fused_logprobs import (
     FusedLinearLogProbsFunction,
     _fused_logprob_chunk,
     _fused_logprob_chunk_dispatch,
+    fused_linear_logprobs_chunked,
 )
 
 
@@ -164,3 +166,50 @@ def test_fused_logprob_backward_rejects_zero3_trainable_lm_head():
 
     with pytest.raises(RuntimeError, match="ZeRO-3 full-finetune of lm_head"):
         FusedLinearLogProbsFunction.backward(Ctx(), torch.ones(1, 4))
+
+
+def test_fused_linear_logprobs_chunked_gathers_empty_zero3_shard():
+    """ZeRO-3 empty local shard must be materialized before the fused matmul."""
+    pytest.importorskip("deepspeed", reason="ZeRO-3 gather mock requires deepspeed.")
+    torch.manual_seed(0)
+    V, H = 16, 8
+    B, T = 2, 4
+    dtype = torch.float32
+    device = torch.device("cpu")
+
+    # Local placeholder matches a non-owner ZeRO-3 partition (numel == 0).
+    weight = torch.nn.Parameter(torch.empty(0, dtype=dtype, device=device))
+    weight.ds_id = 0
+    weight.ds_shape = (V, H)
+    full_weight = torch.randn(V, H, dtype=dtype, device=device)
+
+    gather_entered = 0
+    shapes_inside: list[tuple[int, ...]] = []
+
+    @contextmanager
+    def materialize_gather(params=None, modifier_rank=None):
+        nonlocal gather_entered
+        gather_entered += 1
+        p = next(iter(params))
+        saved = p.data
+        p.data = full_weight.clone()
+        shapes_inside.append(tuple(p.shape))
+        try:
+            yield
+        finally:
+            p.data = saved
+
+    hidden = torch.randn(B, T, H, dtype=dtype, device=device)
+    targets = torch.randint(0, V, (B, T), device=device)
+
+    with patch(
+        "deepspeed.zero.GatheredParameters",
+        side_effect=materialize_gather,
+    ):
+        out = fused_linear_logprobs_chunked(hidden, weight, None, targets, chunk_rows=4)
+
+    assert gather_entered == 1
+    assert shapes_inside[0][0] != 0
+    assert shapes_inside[0] == (V, H)
+    assert out.shape == (B, T)
+    assert torch.isfinite(out).all()

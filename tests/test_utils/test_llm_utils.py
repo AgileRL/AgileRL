@@ -838,6 +838,104 @@ class TestGatherIfZero3:
         assert len(calls) == 1
         assert calls[0] == [weight]
 
+    def test_gather_if_ds_param_uses_modifier_rank_zero(self):
+        """ZeRO-3 gather must pass modifier_rank=0 for reliable release."""
+        pytest.importorskip(
+            "deepspeed", reason="gather_if_ds_param requires deepspeed."
+        )
+        weight = torch.randn(4, 2)
+        weight.ds_id = 0
+        captured: list[int | None] = []
+
+        @contextmanager
+        def capture_gather(params=None, modifier_rank=None):
+            captured.append(modifier_rank)
+            yield
+
+        with patch(
+            "deepspeed.zero.GatheredParameters",
+            side_effect=capture_gather,
+        ):
+            with gather_if_ds_param(weight):
+                pass
+        assert captured == [0]
+
+    def test_gather_if_ds_param_skips_available_tied_weight(self):
+        """Tied embeddings already AVAILABLE must not be re-gathered."""
+        pytest.importorskip(
+            "deepspeed", reason="gather_if_ds_param requires deepspeed."
+        )
+        from deepspeed.runtime.zero.partition_parameters import ZeroParamStatus
+
+        weight = torch.randn(4, 2)
+        weight.ds_id = 0
+        weight.ds_status = ZeroParamStatus.AVAILABLE
+        calls = 0
+
+        @contextmanager
+        def capture_gather(params=None, modifier_rank=None):
+            nonlocal calls
+            calls += 1
+            yield
+
+        with patch(
+            "deepspeed.zero.GatheredParameters",
+            side_effect=capture_gather,
+        ):
+            with gather_if_ds_param(weight):
+                pass
+        assert calls == 0
+
+    def test_gather_if_ds_param_gathers_not_available(self):
+        """NOT_AVAILABLE ZeRO-3 shards still need GatheredParameters."""
+        pytest.importorskip(
+            "deepspeed", reason="gather_if_ds_param requires deepspeed."
+        )
+        from deepspeed.runtime.zero.partition_parameters import ZeroParamStatus
+
+        weight = torch.randn(4, 2)
+        weight.ds_id = 0
+        weight.ds_status = ZeroParamStatus.NOT_AVAILABLE
+        calls: list[list] = []
+
+        @contextmanager
+        def capture_gather(params=None, modifier_rank=None):
+            calls.append(list(params))
+            yield
+
+        with patch(
+            "deepspeed.zero.GatheredParameters",
+            side_effect=capture_gather,
+        ):
+            with gather_if_ds_param(weight):
+                pass
+        assert len(calls) == 1
+        assert calls[0][0] is weight
+
+    def test_gather_if_ds_param_dedupes_by_identity(self):
+        """Duplicate tensor references must gather once (id-based dedupe)."""
+        pytest.importorskip(
+            "deepspeed", reason="gather_if_ds_param requires deepspeed."
+        )
+        weight = torch.randn(4, 2)
+        weight.ds_id = 0
+        calls: list[list] = []
+
+        @contextmanager
+        def capture_gather(params=None, modifier_rank=None):
+            calls.append(list(params))
+            yield
+
+        with patch(
+            "deepspeed.zero.GatheredParameters",
+            side_effect=capture_gather,
+        ):
+            with gather_if_ds_param(weight, weight):
+                pass
+        assert len(calls) == 1
+        assert len(calls[0]) == 1
+        assert calls[0][0] is weight
+
 
 def test_get_state_dict():
     # ``get_state_dict`` unconditionally wraps ``model.state_dict()`` in
