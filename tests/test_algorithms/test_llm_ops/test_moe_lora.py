@@ -596,3 +596,45 @@ def test_grouped_mm_fast_path_matches_loop_on_cuda():
     ref_out.square().mean().backward()
     fast_out.square().mean().backward()
     _assert_grad_parity(reference, fast, atol=1e-4)
+
+
+class _FakeDsStatus:
+    def __init__(self, name: str) -> None:
+        self.name = name
+
+
+def _mark_ds(param, status=None):
+    param.ds_id = 1
+    if status is not None:
+        param.ds_status = _FakeDsStatus(status)
+
+
+def test_zero3_gathered_base_weights_run_split_forward():
+    reference, upgraded = _routed_pair()
+    experts = _wrappers(upgraded)[0].get_base_layer()
+    # Leaf-gathered ZeRO-3 params report AVAILABLE; raw reads see full data.
+    _mark_ds(experts.gate_up_proj, "AVAILABLE")
+    _mark_ds(experts.down_proj, "AVAILABLE")
+    x = torch.randn(10, HIDDEN)
+    assert torch.allclose(reference(x), upgraded(x), atol=1e-5)
+
+
+def test_zero3_gathered_adapters_use_fast_path():
+    reference, upgraded = _sorted_pair()
+    for module in _wrappers(upgraded):
+        for adapter in module.lora_A:
+            _mark_ds(module.lora_A[adapter].weight, "AVAILABLE")
+            _mark_ds(module.lora_B[adapter].weight, "AVAILABLE")
+    x = torch.randn(10, HIDDEN)
+    assert torch.allclose(reference(x), upgraded(x), atol=1e-5)
+
+
+def test_mark_expert_wrappers_as_zero3_leaves():
+    pytest.importorskip("deepspeed")
+    from agilerl.algorithms.core.llm_ops.moe_lora import (
+        mark_expert_wrappers_as_zero3_leaves,
+    )
+
+    _, upgraded = _routed_pair()
+    assert mark_expert_wrappers_as_zero3_leaves(upgraded) == 1
+    assert mark_expert_wrappers_as_zero3_leaves(nn.Linear(2, 2)) == 0
