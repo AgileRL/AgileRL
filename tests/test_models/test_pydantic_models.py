@@ -239,6 +239,29 @@ class TestFinetuningNetworkSpec:
         assert spec.lora_config.r == 8
 
     @pytest.mark.skipif(not HAS_LLM_DEPENDENCIES, reason="LLM deps not installed")
+    def test_target_parameters_round_trip(self):
+        """Manifest target_parameters resolves to and from PEFT LoraConfig."""
+        experts = [
+            "block_sparse_moe.experts.down_proj",
+            "block_sparse_moe.experts.gate_up_proj",
+        ]
+        spec = FinetuningNetworkSpec(
+            pretrained_model_name_or_path="gpt2",
+            max_context_length=512,
+            lora_config={
+                "lora_r": 8,
+                "target_modules": ["q_proj", "v_proj"],
+                "target_parameters": experts,
+                "lora_dropout": 0.0,
+            },
+        )
+        assert spec.lora_config is not None
+        assert list(spec.lora_config.target_parameters) == experts
+
+        dumped = spec.model_dump(mode="json")
+        assert dumped["lora_config"]["target_parameters"] == experts
+
+    @pytest.mark.skipif(not HAS_LLM_DEPENDENCIES, reason="LLM deps not installed")
     def test_coerce_peft_lora_none_target_modules(self):
         """PEFT LoraConfig with target_modules=None maps to all-linear."""
         from peft import LoraConfig, TaskType
