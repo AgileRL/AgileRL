@@ -485,7 +485,24 @@ def block_recompute_bytes(
     peak = rows * seq_len * per_token * act_bytes
     peak += moe_dispatch_bytes(arch, rows, seq_len, act_bytes, backward)
     if not flash_attention:
-        peak += rows * arch.n_heads * seq_len * seq_len * act_bytes
+        # The math path does not hold one score matrix but three: the
+        # pre-softmax scores, the softmax output saved for backward, and that
+        # output's gradient during it.
+        #
+        # Measured by A/B-ing the backend at Gemma 4 E2B, seq 4096,
+        # micro-batch 8, with completion length pinned:
+        #
+        #     sdpa (windowed, math path)   25662 MiB
+        #     flex_attention (tiled)       18838 MiB
+        #     difference                    6824 MiB
+        #
+        # against a single S^2 of 8 x 8 x 4096^2 x 2 = 2048 MiB, i.e. 3.33
+        # copies. Charging one was worth only a third of the real cost.
+        #
+        # Fitting this against the Gemma fixture alone would prefer 4 copies
+        # (5.9% error vs 8.3%), but that is the fit absorbing an unrelated
+        # residual -- the controlled A/B isolates the backend and says 3.33.
+        peak += 3 * rows * arch.n_heads * seq_len * seq_len * act_bytes
     return int(peak)
 
 

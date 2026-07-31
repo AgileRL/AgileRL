@@ -127,7 +127,8 @@ def test_block_recompute_sdpa_path_adds_score_matrix():
     without = formulas.block_recompute_bytes(
         QWEN_05B, 2, 512, 2.0, flash_attention=False
     )
-    assert without - with_flash == 2 * QWEN_05B.n_heads * 512 * 512 * 2
+    # Three copies: scores, saved softmax output, and its gradient.
+    assert without - with_flash == 3 * 2 * QWEN_05B.n_heads * 512 * 512 * 2
 
 
 def test_hybrid_attention_layer_fraction_from_layer_types():
