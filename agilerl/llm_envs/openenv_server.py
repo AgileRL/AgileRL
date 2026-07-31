@@ -361,23 +361,11 @@ def resolve_env(
     on a local :class:`OpenEnvServer`. ``max_concurrent_envs`` serves a fresh env
     per ``/ws`` session (one server backs a whole group); unset is one at a time.
     """
-    from agilerl.llm_envs.spec_resolvers import resolve_spec_factory
+    from agilerl.llm_envs.spec_resolvers import is_url, spec_to_factory
 
     if is_url(spec):
         return spec, None
-    target = resolve_spec_factory(spec)
-    if target is None:
-        if ":" not in spec:
-            msg = (
-                f"env spec {spec!r} is neither a URL, a resolver-claimed id, nor a "
-                "'module:Class' / 'path.py:Class' entrypoint"
-            )
-            raise ValueError(msg)
-        # Lazy: entrypoint loading drags the gym/pettingzoo closure, which a
-        # slim host serving a resolver-claimed id never needs.
-        from agilerl.utils.env_utils import resolve_entrypoint_target
-
-        target = resolve_entrypoint_target(spec)
+    target = spec_to_factory(spec)
     config = env_config or {}
     shared_env = target(**config) if max_concurrent_envs is None else None
     server = OpenEnvServer(
@@ -390,22 +378,6 @@ def resolve_env(
         advertise_host=advertise_host,
     ).start()
     return server.base_url, server
-
-
-def load_env(spec: str, env_config: dict[str, Any] | None = None) -> TextEnvProtocol:
-    """Build the env from a ``module:Class`` / ``path.py:Class`` entrypoint (no hosting).
-
-    The in-process counterpart to :func:`resolve_env`: returns the env object for
-    :meth:`RolloutEnv.local` / :meth:`RolloutEnv.from_spec` to wrap in a ``LocalEnvClient``.
-    """
-    from agilerl.utils.env_utils import resolve_entrypoint_target
-
-    return resolve_entrypoint_target(spec)(**(env_config or {}))
-
-
-def is_url(spec: str) -> bool:
-    """Whether ``spec`` is an HTTP(S) URL (already hosted) rather than an env to load."""
-    return isinstance(spec, str) and spec.startswith(("http://", "https://"))
 
 
 def _name_from_spec(spec: str) -> str:

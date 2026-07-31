@@ -14,8 +14,8 @@ from agilerl.llm_envs.rollout_env import (
     BatchRolloutEnv,
     RolloutEnv,
     TaskAssigner,
-    register_env_spec_resolver,
 )
+from agilerl.llm_envs.spec_resolvers import register_env_spec_resolver
 from agilerl.utils.llm_utils import apply_chat_template
 
 __all__ = [

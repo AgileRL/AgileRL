@@ -1173,7 +1173,7 @@ class TestREINFORCETest:
         from transformers import AutoTokenizer
 
         from agilerl.llm_envs import RolloutEnv
-        from agilerl.llm_envs.openenv import OpenEnvServer
+        from agilerl.llm_envs.openenv_server import OpenEnvServer
         from agilerl.utils.probe_envs_llm import ConstantTargetEnv
 
         tok = AutoTokenizer.from_pretrained(TINY_LLM_FIXTURE_PATH)

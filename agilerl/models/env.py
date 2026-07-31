@@ -728,7 +728,7 @@ class LLMEnvSpec(BaseModel):
             if self.entrypoint is None:
                 msg = (
                     "Exactly one of env_name or entrypoint is required "
-                    "for multiturn environments."
+                    "for rollout environments."
                 )
                 raise ValueError(msg)
             constructor = resolve_entrypoint_target(self.entrypoint)

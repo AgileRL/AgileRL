@@ -24,13 +24,11 @@ class SFTSpec(LLMAlgorithmSpec):
     objective: ClassVar[str] = "sft"
 
     @staticmethod
-    def get_training_fn(*, multiturn: bool = False) -> Callable[..., Any]:
+    def get_training_fn() -> Callable[..., Any]:
         """Get the training function for SFT.
 
-        :param multiturn: Multi-turn training is not supported for SFT.
         :return: Training function
         :rtype: Callable[..., Any]
-        :raises ValueError: If *multiturn* is ``True``.
         """
         from agilerl.training.llm import train_llm_dataset
 

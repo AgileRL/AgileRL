@@ -583,7 +583,7 @@ def serve_env():
     the same test) is shut down
     when the test finishes, so individual tests stay free of start/stop boilerplate.
     """
-    from agilerl.llm_envs.openenv import OpenEnvServer
+    from agilerl.llm_envs.openenv_server import OpenEnvServer
 
     servers = []
 

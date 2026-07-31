@@ -13,6 +13,7 @@ import warnings
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
+import torch
 from accelerate import Accelerator
 
 from agilerl import HAS_LLM_DEPENDENCIES
@@ -21,7 +22,11 @@ from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.population import Population
 from agilerl.training.llm.common import _validate_finetune_args
-from agilerl.utils.llm_utils import safe_aggregate_metrics
+from agilerl.utils.llm_utils import (
+    align_completion_batch_shapes_across_ranks,
+    needs_cross_rank_seq_padding,
+    safe_aggregate_metrics,
+)
 from agilerl.utils.utils import (
     _distributed_rank,
     _distributed_world_size,
@@ -151,7 +156,6 @@ def train_llm_rollout(
             f"finetuning. Got {type(pop[0])} instead."
         ),
         checkpoint_steps=checkpoint_steps,
-        algo="rollout",
     )
 
     if init_hp is None:
@@ -210,7 +214,7 @@ def train_llm_rollout(
         group_size,
         io_timeout_s=io_timeout_s,
         rank=_distributed_rank(accelerator),
-        world_size=_distributed_world_size(accelerator),
+        world_size=data_increment,
     )
     test_env: RolloutEnv | None = None
     try:
@@ -247,33 +251,53 @@ def train_llm_rollout(
                     env=rollout_env,
                     n_steps=max_turns,
                     batch_size=batch_size,
-                    group_size=group_size,
                     group_seed=group_seed,
                 )
 
-                # Admitted and drained a prompt group at a time, so the
-                # group-divisibility the algorithms rely on holds by construction,
-                # and a misaligned rollout fails here rather than inside a loss.
+                # Collated a prompt group at a time, so the group-divisibility the
+                # algorithms rely on holds by construction, and a misaligned
+                # rollout fails here rather than inside a loss.
                 batch = buffer_llm_rollouts(
                     completion_ids_list,
                     action_masks_list,
                     all_turn_ids,
                     all_rewards,
+                    all_sampling_logps,
                     group_size=group_size,
                 )
-                turn_ids_padded = batch.turn_ids
-                rewards_2d = batch.rewards.float()
-                episode_scores = (
-                    rewards_2d.sum(dim=1) if rewards_2d.dim() > 1 else rewards_2d
-                )
+                episode_scores = batch.rewards.sum(dim=1)
                 mean_score = episode_scores.mean().to(agent.device)
 
                 experiences = batch.experiences()
+                turn_ids = batch.turn_ids
+                if accelerator is not None and needs_cross_rank_seq_padding(
+                    agent, world_size=data_increment
+                ):
+                    # Multi-rank Liger token-level losses allreduce per chunk, so
+                    # every rank must pad to one global sequence length.
+                    completion_ids, action_masks, rewards = (
+                        align_completion_batch_shapes_across_ranks(
+                            batch.completion_ids,
+                            batch.action_masks,
+                            batch.rewards,
+                            pad_token_id=agent.pad_token_id,
+                            accelerator=accelerator,
+                        )
+                    )
+                    experiences = (completion_ids, action_masks, rewards)
+                    assert turn_ids is not None, "aligned batches are non-empty"
+                    target_mask_len = int(action_masks.shape[1])
+                    if int(turn_ids.shape[1]) < target_mask_len:
+                        turn_ids = torch.nn.functional.pad(
+                            turn_ids,
+                            (0, target_mask_len - int(turn_ids.shape[1])),
+                            value=-1,
+                        )
 
                 agent.learn(
                     experiences,
-                    turn_ids=turn_ids_padded,
-                    sampling_logps=all_sampling_logps,
+                    turn_ids=turn_ids,
+                    sampling_logps=batch.sampling_logps,
                 )
 
                 agg_score = safe_aggregate_metrics(accelerator, mean_score)
@@ -346,6 +370,10 @@ def train_llm_rollout(
             if accelerator is None or accelerator.is_main_process:
                 pbar.update(iteration_steps // len(population.agents))
                 population.report_metrics(clear=True)
+            else:
+                # Metrics accumulate on every rank; only main reports, so the
+                # others must still clear or their stores grow for the whole run.
+                population.clear_agent_metrics()
 
             if accelerator is not None:
                 accelerator.wait_for_everyone()
@@ -383,7 +411,15 @@ def train_llm_rollout(
                     ):
                         checkpoint_due = True
                         next_checkpoint_step += checkpoint_steps
-                if total_steps >= max_steps and not max_steps_checkpoint_saved:
+                if (
+                    total_steps >= max_steps
+                    and not max_steps_checkpoint_saved
+                    and (
+                        checkpoint_steps is not None
+                        or checkpoint_path is not None
+                        or elite_path is not None
+                    )
+                ):
                     checkpoint_due = True
                     max_steps_checkpoint_saved = True
                 if checkpoint_due:
@@ -403,9 +439,11 @@ def train_llm_rollout(
     finally:
         # Release the rollout envs (and any per-rollout OpenEnv servers they own)
         # plus the test env, including on error.
-        rollout_env.close()
-        if test_env is not None:
-            test_env.close()
+        try:
+            rollout_env.close()
+        finally:
+            if test_env is not None:
+                test_env.close()
 
     population.finish()
     pbar.close()

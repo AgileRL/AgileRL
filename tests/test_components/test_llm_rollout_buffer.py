@@ -11,9 +11,9 @@ import torch
 
 from agilerl.components.llm_rollout_buffer import (
     LLMExperienceBatch,
-    LLMRolloutBuffer,
     RolloutGroup,
     Trajectory,
+    collate_rollout_groups,
 )
 
 
@@ -87,133 +87,63 @@ class TestRolloutGroup:
             RolloutGroup(group_size=0, trajectories=[])
 
 
-class TestBuffer:
-    def test_invalid_memory_size_raises(self):
-        with pytest.raises(ValueError, match="memory_size"):
-            LLMRolloutBuffer(memory_size=0)
-
-    def test_empty_buffer_pops_empty_batch(self):
-        buf = LLMRolloutBuffer(memory_size=2)
-        assert len(buf) == 0
-        assert buf.memory_size == 2
-        batch = buf.pop_all()
+class TestCollate:
+    def test_empty_groups_collate_to_empty_batch(self):
+        batch = collate_rollout_groups([])
         assert isinstance(batch, LLMExperienceBatch)
         assert batch.is_empty
         assert batch.turn_ids is None
         assert len(batch) == 0
 
-    def test_add_and_drain(self):
-        buf = LLMRolloutBuffer(memory_size=4)
-        assert buf.add_group(make_group(2)) == 0
-        assert buf.add_group(make_group(2)) == 0
-        assert len(buf) == 2
-        batch = buf.pop_all()
-        assert len(batch) == 4
-        assert len(buf) == 0
-
-    def test_oldest_group_evicted_at_capacity(self):
-        buf = LLMRolloutBuffer(memory_size=2)
-        for length in (6, 8, 10):
-            buf.add_group(make_group(1, lengths=[length]))
-        assert len(buf) == 2
-        batch = buf.pop_all()
-        assert batch.completion_lengths.tolist() == [8, 10]
-
-    def test_group_size_change_clears_buffer(self):
-        buf = LLMRolloutBuffer(memory_size=8)
-        buf.add_group(make_group(2))
-        buf.add_group(make_group(2))
-        assert buf.add_group(make_group(3)) == 2
-        assert len(buf) == 1
-        assert len(buf.pop_all()) == 3
-
-    def test_pop_groups_consumes_oldest(self):
-        buf = LLMRolloutBuffer(memory_size=4)
-        for length in (6, 8, 10):
-            buf.add_group(make_group(1, lengths=[length]))
-        batch = buf.pop_groups(2)
-        assert batch is not None
-        assert batch.completion_lengths.tolist() == [6, 8]
-        assert len(buf) == 1
-
-    def test_pop_groups_returns_none_when_short(self):
-        buf = LLMRolloutBuffer(memory_size=4)
-        buf.add_group(make_group(1))
-        assert buf.pop_groups(2) is None
-        assert len(buf) == 1
-
-    def test_clear(self):
-        buf = LLMRolloutBuffer(memory_size=4)
-        buf.add_group(make_group(2))
-        buf.clear()
-        assert len(buf) == 0
-        assert buf.add_group(make_group(3)) == 0
-
-
-class TestCollate:
     def test_ragged_tensors_passed_through_by_reference(self):
         group = make_group(2, lengths=[6, 9])
-        buf = LLMRolloutBuffer(memory_size=1)
-        buf.add_group(group)
-        batch = buf.pop_all()
+        batch = collate_rollout_groups([group])
         for i, traj in enumerate(group.trajectories):
             assert batch.completion_ids[i] is traj.completion_ids
             assert batch.action_masks[i] is traj.action_masks
 
     def test_turn_ids_padded_with_minus_one(self):
-        buf = LLMRolloutBuffer(memory_size=1)
-        buf.add_group(make_group(2, lengths=[6, 9]))
-        batch = buf.pop_all()
+        batch = collate_rollout_groups([make_group(2, lengths=[6, 9])])
         assert batch.turn_ids.shape == (2, 8)
         assert torch.all(batch.turn_ids[0, 5:] == -1)
 
     def test_rewards_stacked_and_float(self):
-        buf = LLMRolloutBuffer(memory_size=2)
-        buf.add_group(make_group(2, max_turns=3))
-        batch = buf.pop_all()
+        batch = collate_rollout_groups([make_group(2, max_turns=3)])
         assert batch.rewards.shape == (2, 3)
         assert batch.rewards.dtype == torch.float32
         assert torch.equal(batch.rewards[:, 0], torch.ones(2))
 
     def test_rewards_padded_across_differing_widths(self):
-        buf = LLMRolloutBuffer(memory_size=2)
-        buf.add_group(make_group(1, max_turns=2))
-        buf.add_group(make_group(1, max_turns=4))
-        batch = buf.pop_all()
+        batch = collate_rollout_groups(
+            [make_group(1, max_turns=2), make_group(1, max_turns=4)]
+        )
         assert batch.rewards.shape == (2, 4)
         assert torch.all(batch.rewards[0, 2:] == 0.0)
 
     def test_completion_lengths(self):
-        buf = LLMRolloutBuffer(memory_size=1)
-        buf.add_group(make_group(3, lengths=[5, 7, 11]))
-        assert buf.pop_all().completion_lengths.tolist() == [5, 7, 11]
+        batch = collate_rollout_groups([make_group(3, lengths=[5, 7, 11])])
+        assert batch.completion_lengths.tolist() == [5, 7, 11]
 
     def test_sampling_logps_none_when_absent(self):
-        buf = LLMRolloutBuffer(memory_size=1)
-        buf.add_group(make_group(2))
-        assert buf.pop_all().sampling_logps is None
+        assert collate_rollout_groups([make_group(2)]).sampling_logps is None
 
     def test_sampling_logps_kept_when_present(self):
-        buf = LLMRolloutBuffer(memory_size=1)
-        buf.add_group(make_group(2, with_logps=True))
-        logps = buf.pop_all().sampling_logps
+        logps = collate_rollout_groups([make_group(2, with_logps=True)]).sampling_logps
         assert logps is not None
         assert all(lp is not None for lp in logps)
 
     def test_experiences_tuple(self):
-        buf = LLMRolloutBuffer(memory_size=1)
-        buf.add_group(make_group(2))
-        batch = buf.pop_all()
+        batch = collate_rollout_groups([make_group(2)])
         completion_ids, action_masks, rewards = batch.experiences()
         assert completion_ids is batch.completion_ids
         assert action_masks is batch.action_masks
         assert rewards is batch.rewards
 
     def test_groups_stay_contiguous_and_ordered(self):
-        buf = LLMRolloutBuffer(memory_size=2)
-        buf.add_group(make_group(2, lengths=[4, 5]))
-        buf.add_group(make_group(2, lengths=[6, 7]))
-        assert buf.pop_all().completion_lengths.tolist() == [4, 5, 6, 7]
+        batch = collate_rollout_groups(
+            [make_group(2, lengths=[4, 5]), make_group(2, lengths=[6, 7])]
+        )
+        assert batch.completion_lengths.tolist() == [4, 5, 6, 7]
 
 
 class TestSyncTrainerWiring:
@@ -263,6 +193,16 @@ class TestSyncTrainerWiring:
         batch = buffer_llm_rollouts(cids, masks, turns, rewards, group_size=2)
         assert all(a is b for a, b in zip(batch.completion_ids, cids, strict=True))
         assert all(a is b for a, b in zip(batch.action_masks, masks, strict=True))
+
+    def test_sampling_logps_threaded_through_batch(self):
+        from agilerl.rollouts.on_policy import buffer_llm_rollouts
+
+        cids, masks, turns, rewards = self._make_rollout(2, 1, 2, random.Random(5))
+        logps = [torch.zeros(3), None]
+        batch = buffer_llm_rollouts(cids, masks, turns, rewards, logps, group_size=1)
+        assert batch.sampling_logps is not None
+        assert batch.sampling_logps[0] is logps[0]
+        assert batch.sampling_logps[1] is None
 
     def test_non_divisible_raises(self):
         from agilerl.rollouts.on_policy import buffer_llm_rollouts

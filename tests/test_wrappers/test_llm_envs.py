@@ -9,7 +9,7 @@ import torch
 pytest.importorskip("datasets", reason="LLM dependencies not installed")
 
 from datasets import Dataset as HFDataset
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader
 from transformers import AutoTokenizer
 from transformers.tokenization_utils_base import BatchEncoding
 
@@ -21,54 +21,29 @@ from tests import TINY_LLM_FIXTURE_PATH
 from tests.helpers.rollout_doubles import RolloutEnvDoubleMixin
 
 
-class Info:
-    def __init__(self, name: str) -> None:
-        self.dataset_name = name
-
-
-class DummyPreferenceDataset(Dataset):
-    def __init__(self, num_samples: int) -> None:
-        self.prompt = [f"This is prompt {i}." for i in range(num_samples)]
-        self.chosen = [f"This is chosen {i}." for i in range(num_samples)]
-        self.rejected = [f"This is rejected {i}." for i in range(num_samples)]
-        self.features = {
-            "prompt": self.prompt,
-            "chosen": self.chosen,
-            "rejected": self.rejected,
+def DummyPreferenceDataset(num_samples: int) -> HFDataset:
+    """Real HF preference dataset, so tests exercise the production code paths."""
+    dataset = HFDataset.from_dict(
+        {
+            "prompt": [f"This is prompt {i}." for i in range(num_samples)],
+            "chosen": [f"This is chosen {i}." for i in range(num_samples)],
+            "rejected": [f"This is rejected {i}." for i in range(num_samples)],
         }
-        self.info = Info("dummy_dataset")
+    )
+    dataset.info.dataset_name = "dummy_dataset"
+    return dataset
 
-    def __len__(self) -> int:
-        return len(self.prompt)
 
-    def __getitem__(self, index: int) -> dict[str, str]:
-        return {
-            "prompt": self.prompt[index],
-            "chosen": self.chosen[index],
-            "rejected": self.rejected[index],
+def DummySFTDataset(num_samples: int) -> HFDataset:
+    """Real HF SFT dataset keyed by the default ``response_column`` ("target")."""
+    dataset = HFDataset.from_dict(
+        {
+            "prompt": [f"This is prompt {i}." for i in range(num_samples)],
+            "target": [f"This is response {i}." for i in range(num_samples)],
         }
-
-
-class DummySFTDataset(Dataset):
-    def __init__(self, num_samples: int) -> None:
-        self.prompt = [f"This is prompt {i}." for i in range(num_samples)]
-        self.target = [f"This is response {i}." for i in range(num_samples)]
-        # ``DatasetEnv(objective="sft")``'s default ``response_column`` is "target";
-        # the output batch is still keyed under "response" regardless of input name.
-        self.features = {
-            "prompt": self.prompt,
-            "target": self.target,
-        }
-        self.info = Info("dummy_sft_dataset")
-
-    def __len__(self) -> int:
-        return len(self.prompt)
-
-    def __getitem__(self, index: int) -> dict[str, str]:
-        return {
-            "prompt": self.prompt[index],
-            "target": self.target[index],
-        }
+    )
+    dataset.info.dataset_name = "dummy_sft_dataset"
+    return dataset
 
 
 @pytest.fixture
@@ -192,21 +167,21 @@ class TestDatasetEnvPreferenceInit:
         assert len(env.test_dataloader) == 1
 
     def test_preference_init_missing_features(self):
-        """A preference ``DatasetEnv`` raises AssertionError when the dataset lacks required features."""
+        """A preference ``DatasetEnv`` raises when the dataset lacks required features."""
         tokenizer = AutoTokenizer.from_pretrained(TINY_LLM_FIXTURE_PATH)
         good_dataset = HFDataset.from_dict(
             {"prompt": ["p"], "chosen": ["c"], "rejected": ["r"]},
         )
         # Has "prompt" (so the column filter in __init__ works) but missing "chosen"/"rejected"
         bad_dataset = HFDataset.from_dict({"prompt": ["p"], "other": ["o"]})
-        with pytest.raises(AssertionError, match="must contain columns"):
+        with pytest.raises(ValueError, match="must contain columns"):
             DatasetEnv(
                 train_dataset=bad_dataset,
                 test_dataset=good_dataset,
                 tokenizer=tokenizer,
                 objective="preference",
             )
-        with pytest.raises(AssertionError, match="must contain columns"):
+        with pytest.raises(ValueError, match="must contain columns"):
             DatasetEnv(
                 train_dataset=good_dataset,
                 test_dataset=bad_dataset,
@@ -477,19 +452,19 @@ class TestDatasetEnvSFTInit:
         assert len(env.train_dataloader) == 1
 
     def test_sft_init_missing_features(self):
-        """An SFT ``DatasetEnv`` raises AssertionError when the dataset lacks required features."""
+        """An SFT ``DatasetEnv`` raises when the dataset lacks required features."""
         tokenizer = AutoTokenizer.from_pretrained(TINY_LLM_FIXTURE_PATH)
         good_dataset = HFDataset.from_dict({"prompt": ["p"], "target": ["r"]})
         # Has "prompt" (so the column filter in __init__ works) but missing "target"
         bad_dataset = HFDataset.from_dict({"prompt": ["p"], "other": ["o"]})
-        with pytest.raises(AssertionError, match="must contain"):
+        with pytest.raises(ValueError, match="must contain"):
             DatasetEnv(
                 train_dataset=bad_dataset,
                 test_dataset=good_dataset,
                 tokenizer=tokenizer,
                 objective="sft",
             )
-        with pytest.raises(AssertionError, match="must contain"):
+        with pytest.raises(ValueError, match="must contain"):
             DatasetEnv(
                 train_dataset=good_dataset,
                 test_dataset=bad_dataset,
@@ -778,7 +753,7 @@ class TestDatasetEnvSharding:
                 prompts.update(batch["prompt"])
             prompt_sets.append(prompts)
         assert prompt_sets[0].isdisjoint(prompt_sets[1])
-        assert prompt_sets[0] | prompt_sets[1] == set(train_dataset.prompt)
+        assert prompt_sets[0] | prompt_sets[1] == set(train_dataset["prompt"])
 
     @pytest.mark.parametrize("num_samples", [20])
     def test_world_size_beyond_rows_is_rejected(self, sft_dataset, num_samples):

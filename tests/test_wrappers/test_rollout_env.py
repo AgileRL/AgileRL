@@ -605,7 +605,6 @@ class TestBatchRolloutEnvIoTimeout:
         try:
             assert vec._map_env_io([]) == []  # no active envs -> nothing to run
             assert vec._map_env_io([lambda: 7]) == [7]
-            assert vec._io_pool is None  # single thunk ran directly, no pool
         finally:
             vec.close()
 
@@ -743,16 +742,10 @@ class TestBatchRolloutEnvClose:
             group_size=2,
         )
         _ = vec_env.reset(seed=0)
+        envs = list(vec_env.envs)
         vec_env.close()
-        close_counts = [env.close_calls for env in vec_env.envs]
-        assert close_counts == [1, 1, 1, 1]
-
-    def test_batch_rollout_env_close_dedupes_same_env_instance(self) -> None:
-        shared = _SyncStubEnv()
-        vec = BatchRolloutEnv(env_factory=lambda: shared, batch_size=2, group_size=2)
-        _ = vec.reset(seed=0)
-        vec.close()
-        assert shared.close_calls == 1
+        assert [env.close_calls for env in envs] == [1, 1, 1, 1]
+        assert vec_env.envs == []
 
 
 class TestBatchRolloutEnvInit:
@@ -882,29 +875,6 @@ class TestRolloutEnvGetEpisodeData:
         w.full_ids = None
         with pytest.raises(RuntimeError, match="No episode data"):
             w.get_episode_data()
-
-
-class TestRolloutEnvGetDebugInfo:
-    def test_get_debug_info_paths(self) -> None:
-        w = bare_rollout_env()
-        w.full_ids = None
-        assert w.get_debug_info() == {"error": "No episode data"}
-
-        w = bare_rollout_env()
-        w.tokenizer = _ChrTokenizer()
-        w.pad_id = None
-        w.max_turns = 2
-        w.full_ids = torch.tensor([[65, 66, 67, 68]], dtype=torch.long)
-        w.turn_boundaries = [(2, 4, 0)]
-        w.turn_rewards = [0.5]
-        w._gen_texts = ["AB"]
-        w._feedback_texts = ["fb"]
-        w._prompt_text = "prompt"
-        info = w.get_debug_info()
-        assert info["n_turns"] == 1
-        assert info["turn_rewards_padded"] == [0.5, 0.0]
-        assert info["feedback_texts"] == ["fb"]
-        assert info["turn_details"][0]["gen_len"] == 2
 
 
 class TestBatchRolloutEnvHelpers:
@@ -1260,7 +1230,7 @@ class TestBatchRolloutEnvPerEpisode:
             vec_env.update_rollout_geometry(rollout_batch_size=1, group_size=2)
         vec_env.finalize_episode("ep0")
         vec_env.update_rollout_geometry(rollout_batch_size=1, group_size=2)
-        assert vec_env.logical_num_envs == 2
+        assert vec_env.batch_size * vec_env.group_size == 2
         with pytest.raises(ValueError, match="exceeds the slot pool"):
             vec_env.update_rollout_geometry(rollout_batch_size=5, group_size=1)
 

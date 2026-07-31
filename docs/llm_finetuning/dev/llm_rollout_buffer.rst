@@ -1,5 +1,5 @@
-LLM rollout buffer
-==================
+LLM rollout records
+===================
 
 .. note::
 
@@ -7,16 +7,17 @@ LLM rollout buffer
    ``agilerl/components/llm_rollout_buffer.py``. Synchronous LLM training uses it
    automatically; there is nothing for users to configure.
 
-``LLMRolloutBuffer`` is a bounded FIFO of rollout groups. It holds trajectory
-tensors **by reference** — nothing is copied on the way in or on the way out —
-and pads into rectangular batches once, at collate time.
+The module holds the record types for collected rollouts and the collation that
+turns them into a learn-ready batch. Trajectory tensors are held **by
+reference** — nothing is copied on the way in or on the way out — and padding
+into rectangular batches happens once, in ``collate_rollout_groups``.
 
 Layout
 ------
 
-The unit of storage and eviction is the **prompt group** (all ``group_size``
-completions of one prompt). Groups are added and evicted whole, so the
-group-divisibility the algorithms rely on holds by construction.
+The unit of collation is the **prompt group** (all ``group_size`` completions of
+one prompt). Groups are collated whole, so the group-divisibility the algorithms
+rely on holds by construction.
 
 Three types make up the module:
 
@@ -28,25 +29,16 @@ Three types make up the module:
 - ``RolloutGroup`` — exactly ``group_size`` trajectories.
 - ``LLMExperienceBatch`` — the collated result: ragged ``completion_ids`` and
   ``action_masks`` that ``learn()`` pads itself, plus pre-stacked ``rewards``
-  and ``turn_ids`` rectangles and ``completion_lengths``.
-
-Once ``memory_size`` groups are held, admitting another evicts the oldest. If an
-incoming group has a different ``group_size`` than the last one admitted — which
-evolutionary HPO can cause mid-run — the buffer is cleared first, so a batch is
-never assembled from two different group layouts.
+  and ``turn_ids`` rectangles, ``completion_lengths``, and the per-row
+  ``sampling_logps``.
 
 API
 ---
 
-Synchronous training uses two methods:
-
-- ``add_group(group)`` — returns the number of stale groups dropped
-- ``pop_all()`` — drain everything into one ``LLMExperienceBatch``
-
-``pop_groups(n)`` consumes the oldest ``n`` groups instead, returning ``None``
-when fewer are held. ``agilerl/rollouts/on_policy.py::buffer_llm_rollouts``
-stages a collected rollout through a buffer sized to the batch and drains it;
-the multi-turn trainer calls it and feeds ``batch.experiences()`` to ``learn()``.
+``collate_rollout_groups(groups)`` flattens a list of groups into one
+``LLMExperienceBatch``. ``agilerl/rollouts/on_policy.py::buffer_llm_rollouts``
+wraps a collected rollout's parallel tensor lists into groups and collates them;
+the rollout trainer calls it and feeds ``batch.experiences()`` to ``learn()``.
 
 Why the tensors are not packed
 ------------------------------
@@ -54,15 +46,16 @@ Why the tensors are not packed
 Packing rollouts into pre-allocated flat lanes addressed by per-row
 ``(offset, length)`` suits a buffer that holds many batches across many steps,
 where the allocation is amortised over the buffer's lifetime. The synchronous
-trainer fills and drains within a single step, so there is nothing to amortise:
-copying each tensor into a lane on admission and rebuilding an equivalent torch
-tensor on drain measures ~5x the cost of passing the tensors through, and
-allocates more transient memory rather than less.
+trainer collates and learns within a single step, so there is nothing to
+amortise: copying each tensor into a lane on admission and rebuilding an
+equivalent torch tensor on drain measures ~5x the cost of passing the tensors
+through, and allocates more transient memory rather than less.
 
 Holding references costs nothing and still gives the group-atomic guarantees and
 the shape validation. The tensors ``collect_rollouts_llm`` produces are already
 CPU tensors of exactly the dtype and shape ``learn()`` wants.
 
 One consequence worth knowing: the batch aliases the environment's own tensors,
-so it is valid only until that environment is reset. The synchronous loop drains
-and learns before the next reset; a consumer that outlives a reset must copy.
+so it is valid only until that environment is reset. The synchronous loop
+collates and learns before the next reset; a consumer that outlives a reset must
+copy.

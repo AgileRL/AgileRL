@@ -12,19 +12,16 @@ from __future__ import annotations
 
 import queue
 import threading
+import time
 import uuid
 from collections.abc import Callable, Iterator, Mapping, Sequence
-from concurrent.futures import ThreadPoolExecutor, wait
 from contextlib import contextmanager
 from functools import partial
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import torch
 
-from agilerl.llm_envs.spec_resolvers import (
-    register_env_spec_resolver,
-    resolve_spec_factory,
-)
+from agilerl.llm_envs.spec_resolvers import is_url, spec_to_factory
 from agilerl.protocols import EnvClientProtocol, TextEnvProtocol
 from agilerl.utils.llm_utils import (
     is_rollout_prompts,
@@ -35,7 +32,6 @@ __all__ = [
     "BatchRolloutEnv",
     "RolloutEnv",
     "TaskAssigner",
-    "register_env_spec_resolver",
 ]
 
 if TYPE_CHECKING:
@@ -55,7 +51,7 @@ class RolloutEnv:
 
     def __init__(
         self,
-        env_client: str | EnvClientProtocol,
+        env_client: str | Callable[[], str] | EnvClientProtocol,
         tokenizer: PreTrainedTokenizerBase,
         max_turns: int = 1,
         *,
@@ -68,7 +64,9 @@ class RolloutEnv:
     ) -> None:
         """Drive a text env at the token level over ``env_client`` (a URL or a client object).
 
-        :param env_client: URL string (opens a WebSocket session) or an ``EnvClientProtocol``.
+        :param env_client: URL string or zero-arg URL provider (either opens a
+            WebSocket session, the provider re-resolved per dial) or an
+            ``EnvClientProtocol``.
         :param tokenizer: Encodes prompts/feedback and applies the chat template.
         :param max_turns: Max generation turns per episode.
         :param timeout_s: Per-request OpenEnv timeout; ``None`` leaves requests unbounded.
@@ -85,16 +83,23 @@ class RolloutEnv:
         :ivar sampling_logps: Per-turn vLLM sampling logprobs (empty on the HF path).
         """
         self.max_turns = max_turns
-        if isinstance(env_client, str):
+        if isinstance(env_client, str) or callable(env_client):
             # Lazy: OpenEnv backend needs the optional ``openenv`` package.
             from agilerl.llm_envs.openenv import OpenEnvSessionClient
 
-            self._env_client = OpenEnvSessionClient(
-                env_client,
+            self._env_client: EnvClientProtocol = OpenEnvSessionClient(
+                cast("str | Callable[[], str]", env_client),
                 timeout_s=timeout_s,
                 mcp_tool=mcp_tool,
             )
         else:
+            if timeout_s is not None or mcp_tool is not None:
+                msg = (
+                    "timeout_s / mcp_tool configure the URL transport and have no "
+                    "effect on an already-built env client; set them on the "
+                    "client instead."
+                )
+                raise ValueError(msg)
             self._env_client = env_client
         self.tokenizer = tokenizer
         self.pad_id = pad_id
@@ -170,17 +175,10 @@ class RolloutEnv:
         :param kwargs: Forwarded to :class:`RolloutEnv`.
         :rtype: RolloutEnv
         """
-        from agilerl.llm_envs.openenv_server import is_url, load_env
-
         if isinstance(spec, str):
             if is_url(spec):
                 return cls(spec, tokenizer, max_turns=max_turns, **kwargs)
-            factory = resolve_spec_factory(spec)
-            env = (
-                factory(**(env_config or {}))
-                if factory is not None
-                else load_env(spec, env_config)
-            )
+            env = spec_to_factory(spec)(**(env_config or {}))
         else:
             env = spec(**(env_config or {}))
         return cls.local(env, tokenizer, max_turns=max_turns, **kwargs)
@@ -460,8 +458,13 @@ class RolloutEnv:
             raise RuntimeError(msg)
         prompt_len = self._last_full_prompt_token_len
         full_ids = self.full_ids
+        completion = (
+            full_completion_ids
+            if full_completion_ids.dim() > 1
+            else full_completion_ids.unsqueeze(0)
+        )
         # Only the new suffix crosses devices; the prefix is byte-identical to ``full_ids``.
-        gen_ids = full_completion_ids[0, prompt_len:].detach().to(full_ids.device)
+        gen_ids = completion[0, prompt_len:].detach().to(full_ids.device)
         gen_text = self.tokenizer.decode(
             gen_ids.tolist(),
             skip_special_tokens=True,
@@ -574,63 +577,16 @@ class RolloutEnv:
         """Close the env client, releasing whatever backend it owns."""
         self._env_client.close()
 
-    def get_debug_info(self) -> dict[str, Any]:
-        """Return a dict of human-readable debug information for the episode."""
-        if self.full_ids is None:
-            return {"error": "No episode data"}
-
-        full_ids, action_mask, _turn_ids, turn_rewards, _logps = self.get_episode_data()
-        full_text = self.tokenizer.decode(
-            full_ids[0].tolist(), skip_special_tokens=False
-        )
-
-        turn_details = []
-        for gen_start, gen_end, tidx in self.turn_boundaries:
-            gen_token_ids = full_ids[0, gen_start:gen_end].tolist()
-            gen_text_decoded = self.tokenizer.decode(
-                gen_token_ids, skip_special_tokens=True
-            )
-            turn_details.append(
-                {
-                    "turn": tidx,
-                    "gen_start": gen_start,
-                    "gen_end": gen_end,
-                    "gen_len": gen_end - gen_start,
-                    "gen_text_sent_to_env": self._gen_texts[tidx]
-                    if tidx < len(self._gen_texts)
-                    else None,
-                    "gen_text_decoded_from_ids": gen_text_decoded,
-                    "gen_token_ids": gen_token_ids[:50],
-                    "reward": self.turn_rewards[tidx]
-                    if tidx < len(self.turn_rewards)
-                    else None,
-                }
-            )
-
-        n_action_tokens = action_mask.sum().item()
-        n_total_tokens = full_ids.shape[1]
-
-        return {
-            "n_turns": len(self.turn_boundaries),
-            "n_total_tokens": n_total_tokens,
-            "n_action_tokens": n_action_tokens,
-            "action_fraction": n_action_tokens / max(n_total_tokens - 1, 1),
-            "turn_rewards_raw": list(self.turn_rewards),
-            "turn_rewards_padded": turn_rewards.tolist(),
-            "prompt_text": self._prompt_text[:200],
-            "full_text_preview": full_text[:500],
-            "turn_details": turn_details,
-            "feedback_texts": self._feedback_texts,
-        }
-
 
 class TaskAssigner:
     """Assign each episode a ``(seed, row_index)`` task; a GRPO group shares one.
 
     Dataset envs pin tasks by row (epoch-reshuffled like a sampler; procedural
     envs use the seed and get ``row_index=None``). Rank ``r`` of ``world_size``
-    owns the contiguous row block ``[r * n // W, (r+1) * n // W)``, so ranks
-    never draw the same row.
+    owns the contiguous row block ``[r * (n // W), (r + 1) * (n // W))`` — equal
+    shards (up to ``W - 1`` trailing rows unserved per epoch, matching
+    :class:`DatasetEnv`), so ranks never draw the same row and every rank
+    crosses epoch boundaries on the same iteration.
 
     :param dataset_size: Rows in the env's dataset; ``0`` for a procedural env.
     :param seed: Seed for the per-epoch shuffle (``None`` -> a fixed default).
@@ -656,9 +612,8 @@ class TaskAssigner:
         self.dataset_size = int(dataset_size)
         self.rank = int(rank)
         self.world_size = int(world_size)
-        self._shard_start = self.rank * self.dataset_size // self.world_size
-        shard_end = (self.rank + 1) * self.dataset_size // self.world_size
-        self._shard_size = shard_end - self._shard_start
+        self._shard_size = self.dataset_size // self.world_size
+        self._shard_start = self.rank * self._shard_size
         if self.dataset_size > 0 and self._shard_size == 0:
             msg = (
                 f"rank {rank} of {world_size} gets an empty shard of a "
@@ -715,10 +670,11 @@ class TaskAssigner:
 class BatchRolloutEnv:
     """Batched in-process collector over ``batch_size * group_size`` :class:`RolloutEnv` slots.
 
-    Driven lock-step (``reset``/``step``/``get_trajectories``, the colocated path)
-    or per-episode (``reset_episode``/``step_episode``/``finalize_episode``, the
-    async path — a slot is held from reset to finalize). All methods are
-    synchronous and thread-safe; asyncio callers offload via ``asyncio.to_thread``.
+    Driven lock-step (``reset``/``step``/``get_trajectories``, the colocated path,
+    single-caller) or per-episode (``reset_episode``/``step_episode``/
+    ``finalize_episode``, the async path — a slot is held from reset to finalize).
+    The per-episode methods are synchronous and thread-safe; asyncio callers
+    offload them via ``asyncio.to_thread``.
     """
 
     def __init__(
@@ -768,8 +724,6 @@ class BatchRolloutEnv:
         self.envs: list[RolloutEnv] = []
         # Hands each group its task (dataset row / seed); built on first reset.
         self._task_assigner: TaskAssigner | None = None
-        # Thread pool for overlapping env round-trips; built lazily, closed in ``close``.
-        self._io_pool: ThreadPoolExecutor | None = None
         # Component key set for ``reward_*`` metrics, frozen when the envs are built.
         self.rubric_component_names: tuple[str, ...] = ()
         self._rank = int(rank)
@@ -887,13 +841,11 @@ class BatchRolloutEnv:
                 f"envs: {len(sampling_logps)} != {len(active)}"
             )
             raise RuntimeError(msg)
-        # Normalize each completion to 2D.
-        completions = [c if c.dim() > 1 else c.unsqueeze(0) for c in completion_ids]
         slps = sampling_logps if sampling_logps is not None else [None] * len(active)
         # Phase 1 (sequential — tokenizer): decode + record each generation.
         gen_texts = [
             env._step_prepare(full, sampling_logps=slp)
-            for env, full, slp in zip(active, completions, slps, strict=False)
+            for env, full, slp in zip(active, completion_ids, slps, strict=False)
         ]
         # Phase 2 (concurrent — pure I/O): round-trip each env backend at once.
         results = self._map_env_io(
@@ -908,51 +860,64 @@ class BatchRolloutEnv:
         return self._get_prompts()
 
     def _map_env_io(self, thunks: list[Callable[[], Any]]) -> list[Any]:
-        """Run each zero-arg thunk concurrently, returning results in order.
+        """Run each zero-arg thunk on its own daemon thread, returning results in order.
 
-        Bounded by ``io_timeout_s``: on completion the first thunk exception (in order)
-        propagates; past the deadline ``TimeoutError`` is raised and the straggler
-        abandoned. A single thunk runs inline only when unbounded.
+        Bounded by ``io_timeout_s``: on completion the first thunk exception (in
+        order) propagates; past the deadline ``TimeoutError`` is raised and the
+        stragglers abandoned (daemon threads, so a hung env never occupies a shared
+        pool or blocks interpreter exit). A single thunk runs inline only when
+        unbounded.
         """
         if not thunks:
             return []
         if self._io_timeout_s is None and len(thunks) == 1:
             return [thunks[0]()]
-        if self._io_pool is None:
-            self._io_pool = ThreadPoolExecutor(
-                max_workers=self.num_envs, thread_name_prefix="rollout-env-io"
-            )
-        futures = [self._io_pool.submit(thunk) for thunk in thunks]
-        _done, not_done = wait(futures, timeout=self._io_timeout_s)
-        if not_done:
-            for future in not_done:
-                future.cancel()
-            msg = (
-                f"{len(not_done)}/{len(futures)} env round-trips did not finish "
-                f"within io_timeout_s={self._io_timeout_s}s; a hung env or a "
-                "stalled transport blocked the batch."
-            )
-            raise TimeoutError(msg)
-        return [future.result() for future in futures]
+        results: list[Any] = [None] * len(thunks)
+        errors: list[BaseException | None] = [None] * len(thunks)
+        finished = threading.Semaphore(0)
+
+        def run(index: int, thunk: Callable[[], Any]) -> None:
+            try:
+                results[index] = thunk()
+            except BaseException as exc:  # repropagated on the caller thread
+                errors[index] = exc
+            finally:
+                finished.release()
+
+        for index, thunk in enumerate(thunks):
+            threading.Thread(
+                target=run,
+                args=(index, thunk),
+                name=f"rollout-env-io-{index}",
+                daemon=True,
+            ).start()
+        deadline = (
+            None
+            if self._io_timeout_s is None
+            else time.monotonic() + self._io_timeout_s
+        )
+        for done_count in range(len(thunks)):
+            remaining = None if deadline is None else deadline - time.monotonic()
+            if not finished.acquire(timeout=remaining):
+                msg = (
+                    f"{len(thunks) - done_count}/{len(thunks)} env round-trips did "
+                    f"not finish within io_timeout_s={self._io_timeout_s}s; a hung "
+                    "env or a stalled transport blocked the batch."
+                )
+                raise TimeoutError(msg)
+        for error in errors:
+            if error is not None:
+                raise error
+        return results
 
     def close(self) -> None:
-        """Close all env wrappers and the env-I/O thread pool.
-
-        The pool is shut down without waiting, since a timed-out straggler would hang teardown.
-        """
-        if self._io_pool is not None:
-            self._io_pool.shutdown(wait=False)
-            self._io_pool = None
+        """Close every env wrapper and clear the slot state; a later reset rebuilds."""
         with self._slot_lock:
             self._episode_to_slot.clear()
             self._free_slots = None
-        seen: set[int] = set()
         for env in self.envs:
-            env_id = id(env)
-            if env_id in seen:
-                continue
-            seen.add(env_id)
             env.close()
+        self.envs = []
 
     def get_trajectories(
         self,
@@ -1007,11 +972,6 @@ class BatchRolloutEnv:
         )
 
     # --- per-episode API (the async path) ------------------------------------
-
-    @property
-    def logical_num_envs(self) -> int:
-        """Episodes per rollout window (``batch_size * group_size``) after any geometry update."""
-        return self.batch_size * self.group_size
 
     def set_group_seed(self, group_seed: int) -> None:
         """Start a rollout window: set the grouped seed offset and invalidate the assignment.
@@ -1072,7 +1032,6 @@ class BatchRolloutEnv:
                     self.envs.append(self.env_factory(**self.env_config))
             except Exception:
                 self.close()
-                self.envs = []
                 raise
         if self._task_assigner is None:
             self._task_assigner = TaskAssigner(
@@ -1110,7 +1069,13 @@ class BatchRolloutEnv:
                     base_seed=self._base_seed,
                     seed_offset=self._seed_offset,
                 )
-            return self._assignment[int(logical_slot) % len(self._assignment)]
+            if not 0 <= int(logical_slot) < len(self._assignment):
+                msg = (
+                    f"logical_slot {logical_slot} is outside the current rollout "
+                    f"window of {len(self._assignment)} episodes."
+                )
+                raise IndexError(msg)
+            return self._assignment[int(logical_slot)]
 
     def _slot_for(self, episode_id: str) -> int:
         """The slot ``episode_id`` holds; ``KeyError`` when it is not active."""
@@ -1140,10 +1105,6 @@ class BatchRolloutEnv:
         """
         self._ensure_slots()
         assert self._free_slots is not None
-        with self._slot_lock:
-            if episode_id in self._episode_to_slot:
-                msg = f"Episode {episode_id!r} is already active."
-                raise RuntimeError(msg)
         seed, row_index = self._episode_assignment(logical_slot)
         try:
             slot = self._free_slots.get(timeout=self._slot_acquire_timeout_s)
@@ -1161,6 +1122,11 @@ class BatchRolloutEnv:
             with self._tokenizer_lock:
                 prompts, info = env._reset_apply(obs_text, info)
             with self._slot_lock:
+                # Checked under the same lock as the insert, so racing duplicate
+                # ids cannot both claim a slot.
+                if episode_id in self._episode_to_slot:
+                    msg = f"Episode {episode_id!r} is already active."
+                    raise RuntimeError(msg)
                 self._episode_to_slot[episode_id] = slot
             acquired = True
             return prompts, info
@@ -1186,11 +1152,8 @@ class BatchRolloutEnv:
         :return: The :meth:`RolloutEnv.step` 5-tuple.
         """
         env = self.envs[self._slot_for(episode_id)]
-        completion = (
-            completion_ids if completion_ids.dim() > 1 else completion_ids.unsqueeze(0)
-        )
         with self._tokenizer_lock:
-            gen_text = env._step_prepare(completion, sampling_logps=sampling_logps)
+            gen_text = env._step_prepare(completion_ids, sampling_logps=sampling_logps)
         env_result = env._step_env(gen_text)
         with self._tokenizer_lock:
             return env._step_apply(env_result)

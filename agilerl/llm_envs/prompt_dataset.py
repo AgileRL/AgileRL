@@ -14,7 +14,7 @@ import numpy as np
 from openenv.core.env_server.interfaces import Environment
 from openenv.core.rubrics.base import Rubric
 
-from agilerl.llm_envs.openenv import TextObservation, TextState
+from agilerl.llm_envs.openenv_server import TextObservation, TextState
 from agilerl.llm_envs.rubrics import _require_rubric, register_component_hooks
 
 

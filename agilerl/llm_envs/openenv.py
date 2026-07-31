@@ -4,7 +4,7 @@
 """Client half of the OpenEnv glue: drive any text env over a ``/ws`` session or in-process.
 
 The server half lives in :mod:`agilerl.llm_envs.openenv_server` (outside the
-``llm`` extra); its names are re-exported here for compatibility.
+``llm`` extra).
 """
 
 from __future__ import annotations
@@ -28,30 +28,13 @@ except ImportError as _exc:  # pragma: no cover - only reachable without the llm
     )
     raise ImportError(msg) from _exc
 
-from agilerl.llm_envs.openenv_server import (
-    OpenEnvServer,
-    OpenEnvWrapper,
-    TextAction,
-    TextObservation,
-    TextState,
-    is_url,
-    load_env,
-    resolve_env,
-)
+from agilerl.llm_envs.openenv_server import OpenEnvWrapper, TextAction
 from agilerl.protocols import TextEnvProtocol
 from agilerl.utils.algo_utils import is_str_keyed_dict
 
 __all__ = [
     "LocalEnvClient",
-    "OpenEnvServer",
     "OpenEnvSessionClient",
-    "OpenEnvWrapper",
-    "TextAction",
-    "TextObservation",
-    "TextState",
-    "is_url",
-    "load_env",
-    "resolve_env",
 ]
 
 
@@ -80,12 +63,11 @@ class LocalEnvClient:
         *,
         instruction: str = "",
     ) -> None:
-        """Wrap a local ``env`` as an in-process backend."""
+        """Wrap a local ``env`` as an in-process backend that owns it."""
         if isinstance(env, Environment):
             self._backend: Environment = env
         else:
-            self._backend = OpenEnvWrapper(env)
-        self._env = env
+            self._backend = OpenEnvWrapper(env, owns_inner=True)
         self._instruction = instruction
         self._evaluation_mode = False
 
@@ -135,10 +117,8 @@ class LocalEnvClient:
 
     def close(self) -> None:
         """Close the wrapped env when it supports it (best-effort)."""
-        closer = getattr(self._env, "close", None)
-        if callable(closer):
-            with contextlib.suppress(Exception):
-                closer()
+        with contextlib.suppress(Exception):
+            self._backend.close()
 
     @property
     def dataset_size(self) -> int:

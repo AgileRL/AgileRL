@@ -3,9 +3,9 @@
 
 from .llm_rollout_buffer import (
     LLMExperienceBatch,
-    LLMRolloutBuffer,
     RolloutGroup,
     Trajectory,
+    collate_rollout_groups,
 )
 from .replay_buffer import (
     MultiStepReplayBuffer,
@@ -15,10 +15,10 @@ from .replay_buffer import (
 
 __all__ = [
     "LLMExperienceBatch",
-    "LLMRolloutBuffer",
     "MultiStepReplayBuffer",
     "PrioritizedReplayBuffer",
     "ReplayBuffer",
     "RolloutGroup",
     "Trajectory",
+    "collate_rollout_groups",
 ]

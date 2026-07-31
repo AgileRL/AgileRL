@@ -17,9 +17,9 @@ from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.algorithms import PPO
 from agilerl.components.llm_rollout_buffer import (
     LLMExperienceBatch,
-    LLMRolloutBuffer,
     RolloutGroup,
     Trajectory,
+    collate_rollout_groups,
 )
 from agilerl.networks import StochasticActor
 from agilerl.typing import RolloutReturn
@@ -274,7 +274,6 @@ def collect_rollouts_llm(
     n_steps: int,
     batch_size: int,
     group_seed: int,
-    **kwargs: Any,
 ) -> tuple[
     list[torch.Tensor],
     list[torch.Tensor],
@@ -306,9 +305,9 @@ def collect_rollouts_llm(
         seed=group_seed,
     )
 
-    # Colocated vLLM requires tensor_parallel_size==1, and the per-generate DP
-    # barrier was removed, so ranks may early-exit independently. Rejoin once
-    # at the end before train_llm's cross-rank T align / learn.
+    # Colocated vLLM requires tensor_parallel_size==1, and there is no per-generate
+    # DP barrier, so ranks may early-exit independently. Rejoin once at the end
+    # before the trainer's cross-rank sequence alignment and learn().
     for _turn_idx in range(n_steps):
         if prompts is None:
             break
@@ -352,10 +351,11 @@ def buffer_llm_rollouts(
     action_masks_list: list[torch.Tensor],
     all_turn_ids: list[torch.Tensor],
     all_rewards: list[torch.Tensor],
+    all_sampling_logps: list[torch.Tensor | None] | None = None,
     *,
     group_size: int,
 ) -> LLMExperienceBatch:
-    """Stage a collected LLM rollout through a :class:`LLMRolloutBuffer` and drain it.
+    """Collate a collected LLM rollout into one grouped experience batch.
 
     Trajectories from :func:`collect_rollouts_llm` are group-contiguous, so each
     ``group_size`` consecutive trajectories form one prompt group. ``group_size``
@@ -371,43 +371,42 @@ def buffer_llm_rollouts(
     :type all_turn_ids: list[torch.Tensor]
     :param all_rewards: Per-trajectory ``(max_turns,)`` reward tensors.
     :type all_rewards: list[torch.Tensor]
+    :param all_sampling_logps: Per-trajectory vLLM sampling logprobs parallel to
+        ``completion_ids_list``, or ``None`` when none were captured.
+    :type all_sampling_logps: list[torch.Tensor | None] | None
     :param group_size: Number of trajectories per group.
     :type group_size: int
-    :return: The drained, collated batch.
+    :return: The collated batch.
     :rtype: LLMExperienceBatch
     """
     n = len(completion_ids_list)
-    if n == 0:
-        return LLMRolloutBuffer.collate([])
     if n % group_size != 0:
         msg = f"Number of trajectories ({n}) must be divisible by group_size ({group_size})."
         raise ValueError(msg)
-
-    n_groups = n // group_size
-    buffer = LLMRolloutBuffer(memory_size=n_groups)
-    for g in range(n_groups):
-        sl = slice(g * group_size, (g + 1) * group_size)
-        buffer.add_group(
-            RolloutGroup(
-                group_size=group_size,
-                trajectories=[
-                    Trajectory(
-                        completion_ids=completion_ids,
-                        action_masks=action_masks,
-                        turn_ids=turn_ids,
-                        rewards=rewards,
-                    )
-                    for completion_ids, action_masks, turn_ids, rewards in zip(
-                        completion_ids_list[sl],
-                        action_masks_list[sl],
-                        all_turn_ids[sl],
-                        all_rewards[sl],
-                        strict=True,
-                    )
-                ],
-            )
+    logps = all_sampling_logps if all_sampling_logps is not None else [None] * n
+    groups = [
+        RolloutGroup(
+            group_size=group_size,
+            trajectories=[
+                Trajectory(
+                    completion_ids=completion_ids,
+                    action_masks=action_masks,
+                    turn_ids=turn_ids,
+                    rewards=rewards,
+                    sampling_logps=sampling_logps,
+                )
+                for completion_ids, action_masks, turn_ids, rewards, sampling_logps in zip(
+                    completion_ids_list[sl],
+                    action_masks_list[sl],
+                    all_turn_ids[sl],
+                    all_rewards[sl],
+                    logps[sl],
+                    strict=True,
+                )
+            ],
         )
-    if len(buffer) != n_groups:
-        msg = f"Expected {n_groups} buffered groups, got {len(buffer)}."
-        raise ValueError(msg)
-    return buffer.pop_all()
+        for sl in (
+            slice(g * group_size, (g + 1) * group_size) for g in range(n // group_size)
+        )
+    ]
+    return collate_rollout_groups(groups)

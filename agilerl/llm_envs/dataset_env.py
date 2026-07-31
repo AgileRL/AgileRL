@@ -15,7 +15,7 @@ from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any, Literal
 
 import torch
-from torch.utils.data import DataLoader, Subset
+from torch.utils.data import DataLoader
 
 if TYPE_CHECKING:
     from collections.abc import Generator
@@ -97,9 +97,12 @@ class DatasetEnv:
             if len(dataset) == 0:
                 msg = f"{label} dataset is empty; each split needs at least one row."
                 raise ValueError(msg)
-            assert self.required_columns.issubset(set(dataset.features.keys())), (
-                f"{label} dataset must contain columns {sorted(self.required_columns)}."
-            )
+            if not self.required_columns.issubset(set(dataset.features.keys())):
+                msg = (
+                    f"{label} dataset must contain columns "
+                    f"{sorted(self.required_columns)}."
+                )
+                raise ValueError(msg)
 
         self.name = train_dataset.info.dataset_name
         self.tokenizer = tokenizer
@@ -138,7 +141,6 @@ class DatasetEnv:
             batch_size=data_batch_size_per_gpu,
             shuffle=False,
             collate_fn=custom_collate_fn,
-            generator=generator,
         )
         self.dataset_size = {
             "train": len(train_dataset),
@@ -239,12 +241,7 @@ class DatasetEnv:
             )
             raise ValueError(msg)
         start = self.rank * shard_size
-        rows = range(start, start + shard_size)
-        if hasattr(dataset, "select"):
-            return dataset.select(rows)
-        # A plain map-style torch dataset has no .select; a Subset serves the same rows.
-        sharded: Any = Subset(dataset, list(rows))
-        return sharded
+        return dataset.select(range(start, start + shard_size))
 
     def _filter_dataset_by_max_context_length(
         self,

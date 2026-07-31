@@ -165,7 +165,7 @@ def test_local_env_client_does_not_double_wrap_prompt_dataset() -> None:
         rubric=reward_fn_to_rubric(lambda c, a, q: 1.0),
     )
     client = LocalEnvClient(world)
-    assert client._env is world
+    assert client._backend is world
 
 
 def test_json_safe_coerces_numpy_and_nested_containers() -> None:

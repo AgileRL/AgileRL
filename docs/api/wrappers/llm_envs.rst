@@ -33,11 +33,11 @@ ways, so there are no per-env codecs. See :ref:`llm_environments` for a guide.
 * :class:`~agilerl.llm_envs.openenv.LocalEnvClient` (in-process) and
   :class:`~agilerl.llm_envs.openenv.OpenEnvSessionClient` (one WebSocket session against a hosted
   server) are the backends a ``RolloutEnv`` drives;
-  :class:`~agilerl.llm_envs.openenv.OpenEnvServer` hosts a local env over HTTP — one shared env,
-  or a fresh env per session via ``make_env`` / ``max_concurrent_envs``;
-  :func:`~agilerl.llm_envs.openenv.resolve_env` resolves a spec to a ``(url, server)`` (hosting an
-  entrypoint), and :func:`~agilerl.llm_envs.openenv.load_env` just builds an entrypoint env (no
-  hosting) for the in-process path.
+  :class:`~agilerl.llm_envs.openenv_server.OpenEnvServer` hosts a local env over HTTP — one shared
+  env, or a fresh env per session via ``make_env`` / ``max_concurrent_envs``;
+  :func:`~agilerl.llm_envs.openenv_server.resolve_env` resolves a spec to a ``(url, server)``
+  (hosting an entrypoint), and :func:`~agilerl.llm_envs.spec_resolvers.spec_to_factory` resolves a
+  non-URL spec to an env factory for the in-process path.
 
 :func:`~agilerl.utils.llm_utils.apply_chat_template` lives in
 :mod:`agilerl.utils.llm_utils` and is re-exported here for convenience.
@@ -58,8 +58,9 @@ created once and reused for the whole run. For batched training,
 group_size`` times — once per slot — so the count is determined by the batch, at the
 training layer. A local env factory (``lambda: RolloutEnv.local(make_env(), tok)``) runs
 each in-process. To run against a hosted service instead, stand up an
-:class:`~agilerl.llm_envs.openenv.OpenEnvServer` (with ``make_env`` / ``max_concurrent_envs`` so
-it backs each session with a fresh env instance) and point a factory at its URL
+:class:`~agilerl.llm_envs.openenv_server.OpenEnvServer` (with ``make_env`` /
+``max_concurrent_envs`` so it backs each session with a fresh env instance) and point a factory
+at its URL
 (``lambda: RolloutEnv(server.base_url, tok, max_turns=...)``); the server's
 ``max_concurrent_envs`` must cover ``batch_size * group_size`` sessions plus one for the
 lazily built eval env.
@@ -68,11 +69,11 @@ lazily built eval env.
 .. autoclass:: agilerl.llm_envs.BatchRolloutEnv
 .. autoclass:: agilerl.llm_envs.TaskAssigner
 .. autoclass:: agilerl.llm_envs.DatasetEnv
-.. autoclass:: agilerl.llm_envs.openenv.OpenEnvWrapper
-.. autoclass:: agilerl.llm_envs.openenv.TextAction
-.. autoclass:: agilerl.llm_envs.openenv.TextObservation
-.. autoclass:: agilerl.llm_envs.openenv.OpenEnvServer
+.. autoclass:: agilerl.llm_envs.openenv_server.OpenEnvWrapper
+.. autoclass:: agilerl.llm_envs.openenv_server.TextAction
+.. autoclass:: agilerl.llm_envs.openenv_server.TextObservation
+.. autoclass:: agilerl.llm_envs.openenv_server.OpenEnvServer
 .. autoclass:: agilerl.llm_envs.openenv.OpenEnvSessionClient
 .. autoclass:: agilerl.llm_envs.openenv.LocalEnvClient
-.. autofunction:: agilerl.llm_envs.openenv.resolve_env
-.. autofunction:: agilerl.llm_envs.openenv.load_env
+.. autofunction:: agilerl.llm_envs.openenv_server.resolve_env
+.. autofunction:: agilerl.llm_envs.spec_resolvers.spec_to_factory

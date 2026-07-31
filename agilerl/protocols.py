@@ -651,8 +651,8 @@ class TextEnvProtocol(Protocol):
 
     Implementations must expose ``reset`` and ``step(action_text)``. Accepted
     return shapes are normalized at runtime by
-    :func:`~agilerl.llm_envs.openenv._normalize_reset` and
-    :func:`~agilerl.llm_envs.openenv._normalize_step`.
+    :func:`~agilerl.llm_envs.openenv_server._normalize_reset` and
+    :func:`~agilerl.llm_envs.openenv_server._normalize_step`.
     """
 
     def reset(self, *args: Any, **kwargs: Any) -> object:

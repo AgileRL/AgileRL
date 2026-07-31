@@ -10,7 +10,7 @@ training).
 
 import warnings
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any
 
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
@@ -30,7 +30,6 @@ def _validate_finetune_args(
     algorithm_type_error: str,
     *,
     checkpoint_steps: int | None = None,
-    algo: Literal["grpo", "dpo", "sft", "rollout"],
 ) -> None:
     if evo_steps is not None and (tournament is None or mutation is None):
         warnings.warn(

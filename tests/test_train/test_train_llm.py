@@ -282,6 +282,7 @@ class TestTrainLlmDatasetPreference:
         mock_env.reset.return_value = example
         mock_env.step.return_value = example
         mock_env.data_batch_size_per_gpu = 1
+        mock_env.world_size = 1
         return mock_env
 
     def test_train_llm_dataset_preference_saves_elite_at_end(self):
@@ -474,6 +475,7 @@ class TestTrainLlmDatasetPreference:
         env_a.__len__.return_value = 1
         env_a.name = "env_a"
         env_a.data_batch_size_per_gpu = 1
+        env_a.world_size = 1
         env_a.num_epochs = 0
         env_a.reset.return_value = {"prompt": ["a"]}
         env_a.step.return_value = {"prompt": ["a_next"]}
@@ -482,6 +484,7 @@ class TestTrainLlmDatasetPreference:
         env_b.__len__.return_value = 1
         env_b.name = "env_b"
         env_b.data_batch_size_per_gpu = 1
+        env_b.world_size = 1
         env_b.num_epochs = 0
         env_b.reset.return_value = {"prompt": ["b"]}
         env_b.step.return_value = {"prompt": ["b_next"]}
@@ -529,6 +532,7 @@ class TestTrainLlmDatasetSft:
         mock_env.reset.return_value = "initial_prompts"
         mock_env.step.return_value = "next_prompts"
         mock_env.data_batch_size_per_gpu = 1
+        mock_env.world_size = 1
         mock_env.num_epochs = 1
 
         with (
@@ -557,6 +561,7 @@ class TestTrainLlmDatasetSft:
         mock_env.reset.return_value = "initial_prompts"
         mock_env.step.return_value = "next_prompts"
         mock_env.data_batch_size_per_gpu = 1
+        mock_env.world_size = 1
 
         with (
             patch("agilerl.training.llm.dataset.default_progress_bar") as mock_pbar_fn,
@@ -584,6 +589,7 @@ class TestTrainLlmDatasetSft:
         mock_env.reset.return_value = "initial_prompts"
         mock_env.step.return_value = "next_prompts"
         mock_env.data_batch_size_per_gpu = 1
+        mock_env.world_size = 1
 
         with (
             patch("agilerl.training.llm.dataset.default_progress_bar") as mock_pbar_fn,
@@ -618,6 +624,7 @@ class TestTrainLlmDatasetSft:
         mock_env.reset.return_value = "initial_prompts"
         mock_env.step.return_value = "next_prompts"
         mock_env.data_batch_size_per_gpu = 1
+        mock_env.world_size = 1
 
         mutation = MagicMock()
         mutation.architecture_mut = 0
@@ -664,6 +671,7 @@ class TestTrainLlmDatasetSft:
         mock_env.reset.return_value = "initial_prompts"
         mock_env.step.return_value = "next_prompts"
         mock_env.data_batch_size_per_gpu = 1
+        mock_env.world_size = 1
 
         with (
             patch("agilerl.training.llm.dataset.default_progress_bar") as mock_pbar_fn,
@@ -689,6 +697,7 @@ class TestTrainLlmDatasetSft:
         mock_env.reset.return_value = "initial_prompts"
         mock_env.step.return_value = "next_prompts"
         mock_env.data_batch_size_per_gpu = 1
+        mock_env.world_size = 1
 
         with (
             patch("agilerl.training.llm.dataset.default_progress_bar") as mock_pbar_fn,
@@ -776,7 +785,41 @@ class TestTrainLlmRollout:
         # The rollout loop passes turn_ids and sampling_logps unconditionally;
         # every rollout algorithm's learn() accepts both.
         mock_agent.learn.assert_called_with(ANY, turn_ids=ANY, sampling_logps=ANY)
-        assert mock_save.call_count == 1
+        # No checkpoint/elite path was configured, so nothing may be written.
+        assert mock_save.call_count == 0
+
+    def test_train_llm_rollout_final_checkpoint_needs_a_configured_path(self):
+        """The end-of-run checkpoint fires only when a save target is configured."""
+        mock_agent = _make_rollout_mock_agent(spec=GRPO)
+        with (
+            patch(
+                "agilerl.training.llm.rollout.default_progress_bar",
+                return_value=MagicMock(),
+            ),
+            patch("agilerl.training.llm.rollout.init_loggers", return_value=[]),
+            patch(
+                "agilerl.training.llm.rollout.safe_aggregate_metrics",
+                return_value=0.5,
+            ),
+            patch("agilerl.training.llm.rollout.save_llm_checkpoint") as mock_save,
+            patch("agilerl.training.llm.rollout.BatchRolloutEnv"),
+            patch(
+                "agilerl.training.llm.rollout.collect_rollouts_llm",
+                return_value=_rollout_collect_return(batch_steps=3),
+            ),
+        ):
+            train_llm_rollout(
+                pop=[mock_agent],
+                env_factory=MagicMock(),
+                max_turns=2,
+                init_hp={"BATCH_SIZE": 1, "ALGO": mock_agent.algo},
+                max_steps=3,
+                checkpoint_path="ckpts",
+                evaluation_interval=100,
+                verbose=False,
+                accelerator=None,
+            )
+        mock_save.assert_called_once_with(mock_agent, "ckpts")
 
     def test_train_llm_rollout_aborts_when_no_progress(self):
         """A rollout that never yields turns (``batch_steps == 0``) leaves
@@ -865,7 +908,9 @@ class TestTrainLlmRollout:
             )
 
         _, learn_kwargs = mock_agent.learn.call_args
-        assert learn_kwargs.get("sampling_logps") is sampling_logps
+        forwarded = learn_kwargs.get("sampling_logps")
+        assert forwarded is not None
+        assert forwarded[0] is sampling_logps[0]
 
     def test_train_llm_rollout_derives_group_seed_from_agent_seed(self):
         """The first rollout seeds from the agent's configured seed (rank 0)."""
@@ -1352,6 +1397,7 @@ def test_train_llm_dataset_env_and_env_fn_mutually_exclusive():
     env.__len__.return_value = 1
     env.name = "mock_env"
     env.data_batch_size_per_gpu = 1
+    env.world_size = 1
     env.num_epochs = 0
     env.reset.return_value = "prompts"
     env.step.return_value = "prompts"
@@ -1389,6 +1435,7 @@ def test_train_llm_dataset_warns_on_shared_env_with_population():
     env.__len__.return_value = 1
     env.name = "mock_env"
     env.data_batch_size_per_gpu = 1
+    env.world_size = 1
     env.num_epochs = 0
     env.reset.return_value = "prompts"
     env.step.return_value = "prompts"
@@ -1414,6 +1461,7 @@ def test_train_llm_checkpoint_triggering_non_divisible_steps():
     env.__len__.return_value = 10
     env.name = "mock_env"
     env.data_batch_size_per_gpu = 1
+    env.world_size = 1
     env.num_epochs = 0
 
     with (
@@ -1464,6 +1512,7 @@ def test_inner_loop_breaks_after_max_steps_first_agent(agent_spec):
     env.name = "mock_env"
     env.num_epochs = 0
     env.data_batch_size_per_gpu = 1
+    env.world_size = 1
 
     with (
         _population_init_skip_per_mock_class(),
@@ -1521,7 +1570,6 @@ def test_collect_rollouts_llm_breaks_when_vector_env_has_no_active_prompts():
         n_steps=5,
         batch_size=1,
         group_seed=123,
-        group_size=1,
     )
 
     assert mock_agent.get_action.call_count == 1
@@ -1585,7 +1633,6 @@ def test_validate_finetune_args_warns_when_checkpoint_steps_ignored():
             DPO,
             "unused",
             checkpoint_steps=10,
-            algo="dpo",
         )
 
 

@@ -244,7 +244,8 @@ class DPO(LLMAlgorithm[PreferencePrompts]):
         """Update agent network parameters to learn from preference data.
 
         :param experiences: Batched chosen/rejected input ids and attention masks
-            with prompt lengths, as produced by :class:`~agilerl.llm_envs.PreferenceGym`.
+            with prompt lengths, as produced by a preference
+            :class:`~agilerl.llm_envs.DatasetEnv`.
         :type experiences: PreferencePrompts
         :param training: Whether the agent is training or not
         :type training: bool

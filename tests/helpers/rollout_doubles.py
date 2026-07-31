@@ -112,6 +112,9 @@ class RolloutEnvDoubleMixin:
         return self._pending_reset
 
     def _step_prepare(self, full_completion: Any, sampling_logps: Any = None) -> str:
+        # Mirror the real phase contract: completions are normalized to 2-D here.
+        if full_completion.dim() == 1:
+            full_completion = full_completion.unsqueeze(0)
         self._pending_step = (full_completion, sampling_logps)
         return ""
 

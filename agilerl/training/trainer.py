@@ -405,18 +405,17 @@ class LocalTrainer(Trainer):
         if self._rollout:
             assert isinstance(self.env_spec, LLMEnvSpec)
             assert isinstance(self.algorithm_spec, LLMAlgorithmSpec)
-            max_model_len = getattr(self.algorithm_spec, "max_model_len", None)
-            max_output_tokens = getattr(self.algorithm_spec, "max_output_tokens", None)
             assert self.tokenizer is not None
             self.env_factory = self.env_spec.make_rollout_env_factory(
                 self.tokenizer,
-                max_model_len=max_model_len,
-                max_output_tokens=max_output_tokens,
+                max_model_len=self.algorithm_spec.max_model_len,
+                max_output_tokens=getattr(
+                    self.algorithm_spec, "max_output_tokens", None
+                ),
             )
-            self.train_fn = self.algorithm_spec.get_training_fn()
         else:
             self.env_factory = None
-            self.train_fn = self.algorithm_spec.get_training_fn()
+        self.train_fn = self.algorithm_spec.get_training_fn()
 
     def _resolve_deferred_net_config(self) -> None:
         """Resolve a manifest network section whose ``arch`` was omitted.

@@ -62,3 +62,30 @@ def resolve_spec_factory(spec: str) -> Callable[..., TextEnvProtocol] | None:
         if factory is not None:
             return factory
     return None
+
+
+def is_url(spec: str) -> bool:
+    """Whether ``spec`` is an HTTP(S) URL (already hosted) rather than an env to load."""
+    return isinstance(spec, str) and spec.startswith(("http://", "https://"))
+
+
+def spec_to_factory(spec: str) -> Callable[..., TextEnvProtocol]:
+    """Resolve a non-URL env spec string to an env factory.
+
+    Registered resolvers are consulted first; the fallback loads a
+    ``module:Class`` / ``path.py:Class`` entrypoint.
+    """
+    factory = resolve_spec_factory(spec)
+    if factory is not None:
+        return factory
+    if ":" not in spec:
+        msg = (
+            f"env spec {spec!r} is neither a URL, a resolver-claimed id, nor a "
+            "'module:Class' / 'path.py:Class' entrypoint"
+        )
+        raise ValueError(msg)
+    # Lazy: entrypoint loading drags the gym/pettingzoo closure, which a
+    # slim host serving a resolver-claimed id never needs.
+    from agilerl.utils.env_utils import resolve_entrypoint_target
+
+    return resolve_entrypoint_target(spec)

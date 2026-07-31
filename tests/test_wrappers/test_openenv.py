@@ -26,23 +26,23 @@ from agilerl.llm_envs import (
     RolloutEnv,
     TaskAssigner,
 )
-from agilerl.llm_envs import openenv as openenv_module
 from agilerl.llm_envs import openenv_server as openenv_server_module
 from agilerl.llm_envs.openenv import (
     LocalEnvClient,
-    OpenEnvServer,
     OpenEnvSessionClient,
-    OpenEnvWrapper,
     _observation_text,
-    resolve_env,
 )
 from agilerl.llm_envs.openenv_server import (
+    OpenEnvServer,
+    OpenEnvWrapper,
     _name_from_spec,
     _normalize_reset,
     _normalize_step,
+    resolve_env,
 )
 from agilerl.llm_envs.prompt_dataset import PromptDatasetEnv
 from agilerl.llm_envs.rubrics import reward_fn_to_rubric
+from agilerl.llm_envs.spec_resolvers import spec_to_factory
 from tests.helpers.rollout_doubles import MiniTokenizer
 
 
@@ -459,15 +459,23 @@ class TestTaskAssigner:
         rank0.next_row()
         assert rank0.num_epochs == 1  # epochs count passes over the rank's shard
 
-    def test_uneven_shards_split_without_overlap(self) -> None:
-        """A remainder row lands in exactly one rank's block."""
+    def test_uneven_shards_are_equal_and_disjoint(self) -> None:
+        """Every rank gets the same shard size; the remainder rows go unserved.
+
+        Equal shards keep every rank's epoch counter advancing on the same
+        iteration (matching ``DatasetEnv``), which epoch-gated collectives such
+        as the KL-reference refresh rely on.
+        """
         shards = [TaskAssigner(7, seed=0, rank=r, world_size=3) for r in range(3)]
         seen: list[int] = []
-        for assigner, size in zip(shards, (2, 2, 3), strict=True):
-            rows = [assigner.next_row() for _ in range(size)]
+        for assigner in shards:
+            rows = [assigner.next_row() for _ in range(2)]
             assert sorted(rows) == sorted(set(rows))
             seen.extend(rows)
-        assert sorted(seen) == list(range(7))
+            assert assigner.num_epochs == 0
+            assigner.next_row()  # third draw crosses into epoch 1 on every rank
+            assert assigner.num_epochs == 1
+        assert sorted(seen) == list(range(6))
 
     def test_empty_shard_is_rejected(self) -> None:
         """A rank with no rows fails at construction, not in an infinite draw loop."""
@@ -1049,12 +1057,12 @@ def test_observation_text_renders_all_shapes() -> None:
 
 
 # --- entrypoint resolution: malformed specs ---------------------------------
-def test_load_env_requires_module_and_class() -> None:
+def test_spec_to_factory_requires_module_and_class() -> None:
     """An entrypoint missing the ``:`` or the class name is rejected."""
-    with pytest.raises(ValueError, match="Invalid entrypoint format"):
-        openenv_module.load_env("no_colon_here")
+    with pytest.raises(ValueError, match="neither a URL"):
+        spec_to_factory("no_colon_here")
     with pytest.raises(ValueError, match="must include both module and target"):
-        openenv_module.load_env("module:")
+        spec_to_factory("module:")
 
 
 class TestBatchRolloutEnvConcurrentStep:
@@ -1184,8 +1192,8 @@ class TestBatchRolloutEnvConcurrentStep:
         finally:
             batch.close()
 
-    def test_close_shuts_down_io_pool(self):
-        """The I/O pool is lazily built by concurrent reset/step and released."""
+    def test_close_releases_envs_for_a_clean_rebuild(self):
+        """``close`` clears the env slots so reuse rebuilds instead of driving closed clients."""
         batch = BatchRolloutEnv(
             lambda **_: RolloutEnv.local(
                 _CountingEnv(), MiniTokenizer(), max_turns=1, apply_chat_template=False
@@ -1193,12 +1201,12 @@ class TestBatchRolloutEnvConcurrentStep:
             batch_size=2,
             group_size=1,
         )
-        assert batch._io_pool is None  # not built at construction
-        batch.reset(seed=0)  # concurrent lead fetches build the pool
+        batch.reset(seed=0)
         batch.step(self._completions(2))
-        assert batch._io_pool is not None
+        assert len(batch.envs) == 2
         batch.close()
-        assert batch._io_pool is None
+        assert batch.envs == []
+        assert batch.reset(seed=1)  # a closed collector rebuilds fresh envs
 
 
 def test_wrapper_owns_inner_closes_it_on_close() -> None:
@@ -1257,7 +1265,7 @@ def test_from_spec_accepts_env_factory_callable() -> None:
         apply_chat_template=False,
     )
     assert isinstance(env._env_client, LocalEnvClient)
-    assert env._env_client._env.target == 3
+    assert env._env_client._backend._inner.target == 3
 
 
 def test_from_spec_consults_registered_resolvers() -> None:
@@ -1279,7 +1287,7 @@ def test_from_spec_consults_registered_resolvers() -> None:
             apply_chat_template=False,
         )
         assert isinstance(env._env_client, LocalEnvClient)
-        assert env._env_client._env.target == 2
+        assert env._env_client._backend._inner.target == 2
     finally:
         _ENV_SPEC_RESOLVERS.pop("fake", None)
 
@@ -1293,7 +1301,7 @@ def test_from_spec_unclaimed_spec_still_loads_entrypoints() -> None:
         apply_chat_template=False,
     )
     assert isinstance(env._env_client, LocalEnvClient)
-    assert env._env_client._env.target == 4
+    assert env._env_client._backend._inner.target == 4
 
 
 def test_reset_retries_once_when_the_server_closed_an_idle_session() -> None:

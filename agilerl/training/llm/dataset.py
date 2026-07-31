@@ -138,7 +138,6 @@ def train_llm_dataset(
             f"dataset finetuning. Got {type(pop[0])} instead."
         ),
         checkpoint_steps=checkpoint_steps,
-        algo="dpo" if is_preference else "sft",
     )
 
     init_hp = (
@@ -152,6 +151,13 @@ def train_llm_dataset(
 
     data_increment = _distributed_world_size(accelerator)
     effective_data_batch_size = data_increment * envs[0].data_batch_size_per_gpu
+    if envs[0].world_size != data_increment:
+        msg = (
+            f"DatasetEnv was built with world_size={envs[0].world_size} but the "
+            f"run has {data_increment} data-parallel ranks; every rank would "
+            "draw the same batches. Build the env with the runtime rank/world_size."
+        )
+        raise ValueError(msg)
 
     if wb:
         init_hp["effective_data_batch_size"] = effective_data_batch_size
@@ -159,8 +165,14 @@ def train_llm_dataset(
         init_hp["distributed_training"] = accelerator is not None
         init_hp["model_name"] = pop[0].pretrained_model_name_or_path
 
+    # ``len(envs[0])`` is this rank's shard; scale back to the global row count
+    # so epoch accounting matches the whole dataset.
     max_steps, training_steps = _compute_training_steps(
-        max_steps, num_epochs, len(envs[0]), effective_data_batch_size, len(pop)
+        max_steps,
+        num_epochs,
+        len(envs[0]) * data_increment,
+        effective_data_batch_size,
+        len(pop),
     )
 
     pbar = default_progress_bar(max_steps, accelerator)
@@ -231,8 +243,12 @@ def train_llm_dataset(
                 displayed_steps += increment
 
             population.report_metrics(clear=True)
+        else:
+            # Metrics accumulate on every rank; only main reports, so the
+            # others must still clear or their stores grow for the whole run.
+            population.clear_agent_metrics()
 
-        if tournament and mutation is not None:
+        if tournament is not None and mutation is not None:
             # evo_steps is guaranteed set here: it is validated as set on entry
             # when tournament and mutation are enabled.
             assert evo_steps is not None
@@ -264,7 +280,15 @@ def train_llm_dataset(
                 ):
                     checkpoint_due = True
                     next_checkpoint_step += checkpoint_steps
-            if total_steps >= max_steps and not max_steps_checkpoint_saved:
+            if (
+                total_steps >= max_steps
+                and not max_steps_checkpoint_saved
+                and (
+                    checkpoint_steps is not None
+                    or checkpoint_path is not None
+                    or elite_path is not None
+                )
+            ):
                 checkpoint_due = True
                 max_steps_checkpoint_saved = True
             if checkpoint_due:
