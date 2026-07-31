@@ -28,6 +28,7 @@ from agilerl.utils.algo_utils import (
     CosineLRScheduleConfig,
     DummyOptimizer,
     VLLMConfig,
+    _match_action_ndims,
     _reconcile_shapes,
     apply_env_defined_actions,
     apply_image_normalization,
@@ -1791,6 +1792,32 @@ def test_algo_utils_fallback_pretrained_model_type_when_no_llm_dependencies():
         import agilerl.utils as _utils_pkg
 
         _utils_pkg.algo_utils = original_module
+
+
+class TestMatchActionNdims:
+    """Direct coverage for continuous-action rank alignment."""
+
+    def test_expands_other_when_lower_rank(self):
+        ref = np.array([[1, 2, 3]])
+        other = np.array([4, 5, 6])
+        r, o = _match_action_ndims(ref, other)
+        assert r.shape == (1, 3)
+        assert o.shape == (1, 3)
+        np.testing.assert_array_equal(o, np.array([[4, 5, 6]]))
+
+    def test_expands_reference_when_lower_rank(self):
+        ref = np.array([1, 2, 3])
+        other = np.array([[4, 5, 6]])
+        r, o = _match_action_ndims(ref, other)
+        assert r.shape == (1, 3)
+        assert o.shape == (1, 3)
+        np.testing.assert_array_equal(r, np.array([[1, 2, 3]]))
+
+    def test_noop_when_ranks_match(self):
+        ref = np.ones((2, 3))
+        other = np.zeros((2, 3))
+        r, o = _match_action_ndims(ref, other)
+        assert r.shape == o.shape == (2, 3)
 
 
 class TestReconcileShapes:
