@@ -26,7 +26,7 @@ from weakref import WeakKeyDictionary
 
 import torch
 import torch.nn as nn
-from peft.tuners.lora.layer import LoraLayer
+from peft.tuners.lora.layer import LoraLayer, ParamWrapper
 
 # Remembers each model's LoRA layers so we don't rescan on every call.
 # Weak keys: caching a model here never stops it being garbage-collected.
@@ -35,6 +35,38 @@ _LORA_LAYER_CACHE: WeakKeyDictionary[nn.Module, list[LoraLayer]] = WeakKeyDictio
 # Which adapter each layer currently routes to (kept off the layer so it stays typed).
 # Weak keys: tracking a layer here never stops it being garbage-collected.
 _ROUTING_STATE: WeakKeyDictionary[LoraLayer, list[str] | None] = WeakKeyDictionary()
+
+
+def uniform_routed_adapter(layer: LoraLayer) -> str | None:
+    """The single adapter the active routing assigns *layer*, or ``None`` when routing is inactive.
+
+    Parameter-level LoRA applies its delta to whole parameters (and packed
+    experts see rows grouped by expert, not by sample), so only uniform
+    routings are computable there; mixed routings raise.
+    """
+    routing = _ROUTING_STATE.get(layer)
+    if routing is None:
+        return None
+    names = set(routing)
+    if len(names) > 1:
+        msg = (
+            "Fused multi-adapter routing is not supported on parameter-level "
+            "LoRA layers (LoraConfig.target_parameters). Use a single-adapter "
+            "configuration (e.g. use_separate_reference_adapter=False, no "
+            "value head)."
+        )
+        raise RuntimeError(msg)
+    return next(iter(names))
+
+
+def _handles_own_routing(module: LoraLayer) -> bool:
+    """Whether *module*'s class forward consults the routing state itself."""
+    return getattr(module, "_self_routed_lora", False)
+
+
+def _is_routing_managed(module: LoraLayer) -> bool:
+    """Whether *module* will honor fused routing (patched or self-routing)."""
+    return _is_routed_layer(module) or _handles_own_routing(module)
 
 
 def _lora_delta(layer: LoraLayer, adapter: str, rows: torch.Tensor) -> torch.Tensor:
@@ -115,10 +147,63 @@ def _routed_forward(
     return pieces[0] if len(pieces) == 1 else torch.cat(pieces)
 
 
+def _param_wrapper_routed_forward(
+    layer: LoraLayer,
+    original_forward: Callable[..., torch.Tensor],
+    x: torch.Tensor,
+    *forward_args: Any,
+    **forward_kwargs: Any,
+) -> torch.Tensor:
+    """Replacement ``forward`` for parameter-level LoRA wrappers under fused routing.
+
+    The routed adapter runs the ordinary forward; ``"__base__"`` (or a
+    foreign adapter) runs with adapters disabled.
+    """
+    name = uniform_routed_adapter(layer)
+    if name is None:
+        return original_forward(layer, x, *forward_args, **forward_kwargs)
+    if name in layer.lora_A:
+        if list(layer.active_adapters) != [name]:
+            msg = (
+                f"Fused routing requested adapter {name!r} on a "
+                "parameter-level LoRA wrapper whose active adapters are "
+                f"{list(layer.active_adapters)}; set the adapter before "
+                "routing."
+            )
+            raise RuntimeError(msg)
+        return original_forward(layer, x, *forward_args, **forward_kwargs)
+    previously_disabled = layer.disable_adapters
+    layer.enable_adapters(False)
+    try:
+        return original_forward(layer, x, *forward_args, **forward_kwargs)
+    finally:
+        if not previously_disabled:
+            layer.enable_adapters(True)
+
+
 def _is_routed_layer(module: LoraLayer) -> bool:
     """Whether *module* has the fused-routing ``forward`` installed."""
     fwd = module.__dict__.get("forward")
-    return isinstance(fwd, partial) and fwd.func is _routed_forward
+    return isinstance(fwd, partial) and fwd.func in (
+        _routed_forward,
+        _param_wrapper_routed_forward,
+    )
+
+
+def adapter_aligned_chunks(
+    routing: Sequence[str], batch_size: int
+) -> list[tuple[int, int]]:
+    """Micro-batch ``(start, end)`` spans of at most *batch_size* rows that never straddle an adapter run."""
+    chunks: list[tuple[int, int]] = []
+    run_start = 0
+    for _, run in itertools.groupby(routing):
+        run_len = sum(1 for _ in run)
+        chunks.extend(
+            (start, min(start + batch_size, run_start + run_len))
+            for start in range(run_start, run_start + run_len, batch_size)
+        )
+        run_start += run_len
+    return chunks
 
 
 def _store_layer_cache(model: nn.Module, layers: list[LoraLayer]) -> None:
@@ -197,8 +282,13 @@ def patch_lora_for_fused_forward(model: nn.Module) -> None:
         if not isinstance(module, LoraLayer):
             continue
         layers.append(module)
-        if not _is_routed_layer(module):
-            module.forward = partial(_routed_forward, module, type(module).forward)
+        if not _is_routing_managed(module):
+            routed = (
+                _param_wrapper_routed_forward
+                if isinstance(module, ParamWrapper)
+                else _routed_forward
+            )
+            module.forward = partial(routed, module, type(module).forward)
     _store_layer_cache(model, layers)
 
 
@@ -214,7 +304,7 @@ def unpatch_lora_for_fused_forward(model: nn.Module) -> None:
         if _is_routed_layer(module):
             # Drop the monkeypatched instance forward, restoring the class one.
             module.__dict__.pop("forward", None)
-            _ROUTING_STATE.pop(module, None)
+        _ROUTING_STATE.pop(module, None)
     _LORA_LAYER_CACHE.pop(model, None)
 
 
@@ -238,7 +328,7 @@ def set_fused_adapter_routing(model: nn.Module, routing: Sequence[str]) -> None:
         # Plain base model (no adapters) or PEFT not installed: nothing to
         # route, and the unfused forward is already correct.
         return
-    if any(not _is_routed_layer(m) for m in layers):
+    if any(not _is_routing_managed(m) for m in layers):
         msg = (
             "set_fused_adapter_routing called on a model with LoRA layers that "
             "have no fused-routing forward; the routing would be silently "
@@ -262,5 +352,5 @@ def unset_fused_adapter_routing(model: nn.Module) -> None:
     :param model: The model whose LoRA layers should clear fused routing.
     """
     for module in get_cached_lora_layers(model):
-        if _is_routed_layer(module):
+        if _is_routing_managed(module):
             _ROUTING_STATE[module] = None

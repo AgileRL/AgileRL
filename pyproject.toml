@@ -189,6 +189,7 @@ include = ["agilerl", "agilerl/arena"]
 include = [
     "agilerl/algorithms/core/base.py",
     "agilerl/algorithms/core/llm_ops/fused_loss.py",
+    "agilerl/algorithms/core/llm_ops/vllm_colocate.py",
     "agilerl/algorithms/grpo.py",
     "agilerl/algorithms/sft.py",
     "agilerl/utils/llm_utils.py",
