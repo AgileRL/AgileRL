@@ -3,17 +3,14 @@
 
 """Server half of the OpenEnv glue: host any text env behind a ``/ws`` URL.
 
-Deliberately outside the ``llm`` extra: an env image or ``env_packages`` install only
-needs ``openenv``, ``pydantic`` and ``uvicorn`` to serve ``reset``/``step`` — never
-vllm, transformers or the rest of the trainer's closure. The clients live in
-:mod:`agilerl.llm_envs.openenv`.
+Deliberately outside the ``llm`` extra: serving needs only openenv, pydantic and
+uvicorn — never the trainer's closure. Clients live in :mod:`agilerl.llm_envs.openenv`.
 """
 
 from __future__ import annotations
 
 import contextlib
 import inspect
-import logging
 import threading
 import time
 from collections.abc import Callable
@@ -38,15 +35,8 @@ if TYPE_CHECKING:
     from agilerl.protocols import TextEnvProtocol
 
 
-logger = logging.getLogger(__name__)
-
-
-def _is_str_keyed_dict(obj: object) -> TypeGuard[dict[str, object]]:
-    """Narrow a value to a ``str``-keyed dict.
-
-    Local twin of :func:`agilerl.utils.algo_utils.is_str_keyed_dict`, redeclared here
-    so this module never imports the torch/tensordict closure.
-    """
+def _is_str_keyed_dict(obj: object) -> TypeGuard[dict[str, Any]]:
+    """Torch-free twin of ``algo_utils.is_str_keyed_dict`` (this module shuns that closure)."""
     return isinstance(obj, dict)
 
 
@@ -86,8 +76,7 @@ class OpenEnvWrapper(Environment):
     :param owns_inner: If ``True``, ``close`` closes ``inner`` (the per-session path).
     """
 
-    # Lets OpenEnv allow max_concurrent_envs > 1: each session gets its own
-    # fresh inner env, so sessions never share state.
+    # Each /ws session gets its own fresh inner env, so sessions never share state.
     SUPPORTS_CONCURRENT_SESSIONS = True
 
     def __init__(
@@ -209,11 +198,8 @@ def _normalize_step(result: object) -> tuple[str, Any, bool, bool, dict[str, Any
 class OpenEnvServer:
     """Serve OpenEnv's ``create_app`` on uvicorn in a background daemon thread.
 
-    Binds an ephemeral port (read from :attr:`base_url`) so any OpenEnv client can
-    reach it by URL — the building block for hosting an env in a Ray actor or container.
-    Pass ``env`` to share one env (one session at a time), or ``make_env`` with
-    ``max_concurrent_envs`` for a fresh env per ``/ws`` session (concurrent, isolated
-    episodes — enough to back a whole :class:`BatchRolloutEnv` group).
+    Pass ``env`` to share one env (one session at a time), or ``make_env`` +
+    ``max_concurrent_envs`` for a fresh env per ``/ws`` session.
 
     :param env: A single shared local env. Exactly one of ``env``/``make_env``.
     :param make_env: Zero-arg factory building a fresh env per session.
@@ -353,13 +339,9 @@ def resolve_env(
 ) -> tuple[str, OpenEnvServer | None]:
     """Resolve an env spec to a ``(url, server)`` a ``RolloutEnv`` can hit.
 
-    A **URL** is already hosted -> ``(url, None)``. Otherwise ``spec`` is a
-    ``module:Class`` / ``path.py:Class`` entrypoint: built with ``env_config``,
-    hosted on a local :class:`OpenEnvServer`, returned as ``(server.base_url, server)``.
-
-    ``max_concurrent_envs`` hosts a **fresh env per** ``/ws`` **session** rather than one
-    shared env, which is what lets a single server back a whole rollout group; leaving it
-    unset serves one session at a time.
+    A URL is already hosted -> ``(url, None)``; anything else is built and hosted
+    on a local :class:`OpenEnvServer`. ``max_concurrent_envs`` serves a fresh env
+    per ``/ws`` session (one server backs a whole group); unset is one at a time.
     """
     from agilerl.llm_envs.spec_resolvers import resolve_spec_factory
 

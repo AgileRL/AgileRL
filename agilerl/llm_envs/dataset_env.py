@@ -59,11 +59,8 @@ class DatasetEnv:
     ) -> None:
         """Build a dataset env for the selected ``objective``.
 
-        Data parallelism is one contiguous shard per rank, taken after context-length
-        filtering (which runs on the full dataset so every rank agrees on the rows).
-        Shards are truncated to equal size so ranks hit epoch boundaries together;
-        ``rank`` / ``world_size`` come from the runtime's process group, never from
-        manifest config.
+        One contiguous equal-size shard per rank, taken after context-length
+        filtering so every rank agrees on the rows and epoch boundaries.
 
         :param train_dataset: Training split of prompt/label rows.
         :param test_dataset: Held-out split used under :meth:`eval_mode`.
@@ -126,9 +123,7 @@ class DatasetEnv:
         )
         train_dataset = self._shard_for_rank(train_dataset, "train dataset")
         test_dataset = self._shard_for_rank(test_dataset, "test dataset")
-        # A HuggingFace Dataset is map-style (__getitem__/__len__) but does not
-        # inherit torch's Dataset, which is what DataLoader declares; bridge the
-        # cross-library datasets through Any.
+        # HF Dataset is map-style but not a torch Dataset; bridge through Any.
         train_data: Any = train_dataset
         test_data: Any = test_dataset
         self.train_dataloader = DataLoader(
@@ -278,6 +273,14 @@ class DatasetEnv:
         return filtered_dataset
 
 
+def _prompt_lengths(
+    tokenizer: PreTrainedTokenizerBase, prompts: list[str]
+) -> list[int]:
+    """Unpadded prompt token lengths, for masking the prompt span of a pair encoding."""
+    enc = tokenizer(prompts, truncation=True, padding=False, add_special_tokens=True)
+    return [len(ids) for ids in enc["input_ids"]]
+
+
 def preference_collate_builder(
     env: DatasetEnv,
     tokenizer: PreTrainedTokenizerBase,
@@ -290,13 +293,7 @@ def preference_collate_builder(
         chosen = [item["chosen"] for item in batch]
         rejected = [item["rejected"] for item in batch]
 
-        prompt_encodings = tokenizer(
-            prompts,
-            truncation=True,
-            padding=False,
-            add_special_tokens=True,
-        )
-        prompt_lengths = [len(ids) for ids in prompt_encodings["input_ids"]]
+        prompt_lengths = _prompt_lengths(tokenizer, prompts)
 
         if env.max_context_length is not None:
             chosen_enc = tokenizer(
@@ -361,13 +358,7 @@ def sft_collate_builder(
         prompts = [item["prompt"] for item in batch]
         responses = [item[response_column] for item in batch]
 
-        prompt_encodings = tokenizer(
-            prompts,
-            truncation=True,
-            padding=False,
-            add_special_tokens=True,
-        )
-        prompt_lengths = [len(ids) for ids in prompt_encodings["input_ids"]]
+        prompt_lengths = _prompt_lengths(tokenizer, prompts)
 
         pair_enc = tokenizer(
             prompts,

@@ -41,7 +41,6 @@ __all__ = [
 if TYPE_CHECKING:
     from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 
-    from agilerl.protocols import TextEnvProtocol
     from agilerl.typing import RolloutPrompts
 
 
@@ -151,14 +150,7 @@ class RolloutEnv:
         max_turns: int = 1,
         **kwargs: Any,
     ) -> RolloutEnv:
-        """Build a ``RolloutEnv`` from an env ``spec``.
-
-        A **URL** is driven remotely; anything else is built with ``env_config`` and
-        driven in-process: an **env factory callable** directly, a spec claimed by a
-        :func:`registered resolver <register_env_spec_resolver>` (GEM registry ids,
-        say) through the factory it returns, and otherwise a ``module:Class`` /
-        ``path.py:Class`` entrypoint. For rows + a reward fn instead of an env, see
-        :meth:`from_dataset`.
+        """Build a ``RolloutEnv`` from an env ``spec``: a URL is driven remotely, the rest in-process.
 
         :param spec: A URL, an env factory callable, a resolver-claimed id, or a
             ``module:Class`` / ``path.py:Class`` entrypoint.
@@ -170,18 +162,17 @@ class RolloutEnv:
         """
         from agilerl.llm_envs.openenv_server import is_url, load_env
 
-        if not isinstance(spec, str):
-            return cls.local(
-                spec(**(env_config or {})), tokenizer, max_turns=max_turns, **kwargs
+        if isinstance(spec, str):
+            if is_url(spec):
+                return cls(spec, tokenizer, max_turns=max_turns, **kwargs)
+            factory = resolve_spec_factory(spec)
+            env = (
+                factory(**(env_config or {}))
+                if factory is not None
+                else load_env(spec, env_config)
             )
-        if is_url(spec):
-            return cls(spec, tokenizer, max_turns=max_turns, **kwargs)
-        factory = resolve_spec_factory(spec)
-        if factory is not None:
-            return cls.local(
-                factory(**(env_config or {})), tokenizer, max_turns=max_turns, **kwargs
-            )
-        env = load_env(spec, env_config)
+        else:
+            env = spec(**(env_config or {}))
         return cls.local(env, tokenizer, max_turns=max_turns, **kwargs)
 
     @classmethod
@@ -232,16 +223,13 @@ class RolloutEnv:
             chat_template_kwargs: dict[str, Any] = {}
             if self.tools is not None:
                 chat_template_kwargs["tools"] = self.tools
-            # ``apply_chat_template`` spans several return shapes across
-            # transformers versions, so the result is narrowed at runtime.
             result: Any = self.tokenizer.apply_chat_template(
                 [{"role": "user", "content": obs_text}],
                 tokenize=True,
                 add_generation_prompt=True,
                 **chat_template_kwargs,
             )
-            # Transformers v5 returns a BatchEncoding (a UserDict, not a dict);
-            # older versions return the ids directly.
+            # transformers v5 returns a BatchEncoding — a UserDict, hence Mapping.
             token_ids = result["input_ids"] if isinstance(result, Mapping) else result
             if (
                 isinstance(token_ids, list)
@@ -284,12 +272,10 @@ class RolloutEnv:
         )
 
     def _feedback_boundary_parts(self) -> tuple[str, str] | None:
-        """The ``(prefix, suffix)`` strings the chat template wraps a feedback turn in.
+        """Cached ``(prefix, suffix)`` the chat template wraps a feedback turn in.
 
-        Rendered once and cached. Two ``uuid4`` placeholders render verbatim and can't
-        collide with template text, so slicing at them yields the boundary bytes; the
-        dummy leading user message keeps strict-alternation templates happy. ``None``
-        when the placeholders can't be located (caller falls back to ChatML).
+        Sliced at two uuid4 placeholders (render verbatim, can't collide); the dummy
+        user message satisfies strict-alternation templates. ``None`` -> ChatML fallback.
         """
         if self._boundary_parts_known:
             return self._boundary_parts
@@ -676,34 +662,12 @@ class _PromptDatasetEnv:
 
 
 class TaskAssigner:
-    """Hands every rollout episode its task, giving each GRPO group the same one.
+    """Assign each episode a ``(seed, row_index)`` task; a GRPO group shares one.
 
-    Group-relative algorithms compare the ``group_size`` completions of one batch
-    item against each other, which only makes sense if they all attempt the **same
-    task**. How a task is pinned depends on the env:
-
-    * A **dataset-backed** env serves one prompt per dataset row, so a task is a
-      *row index* — a position in the env's dataset of prompts. Rows are drawn
-      like a dataloader sampler: a fresh seeded permutation of the whole dataset
-      every epoch, with :attr:`num_epochs` counting completed passes (used e.g.
-      to refresh the reference policy once per pass).
-    * A **procedural** env (a game or task generator; ``dataset_size == 0``)
-      derives its task from the reset *seed* instead; ``row_index`` is ``None``.
-
-    :meth:`assign` emits one ``(seed, row_index)`` pair per episode; both travel
-    to ``reset`` and the env uses whichever pins its tasks.
-
-    Standalone rather than private to :class:`BatchRolloutEnv` so the in-process
-    and distributed collectors share one implementation and draw identical task
-    streams from identical seeds.
-
-    **Data parallelism** is one shard per rank: rank ``r`` of ``world_size`` owns the
-    contiguous row block ``[r * n // W, (r+1) * n // W)`` (friendly to a dataset
-    already sharded on disk — a pre-sharded dataset is the same idea one level down,
-    handed to a ``world_size=1`` assigner that divides no further). Blocks are
-    disjoint by construction, so ranks never draw the same row regardless of seed.
-    ``rank`` / ``world_size`` come from the runtime's process group, never from
-    manifest config.
+    Dataset envs pin tasks by row (epoch-reshuffled like a sampler; procedural
+    envs use the seed and get ``row_index=None``). Rank ``r`` of ``world_size``
+    owns the contiguous row block ``[r * n // W, (r+1) * n // W)``, so ranks
+    never draw the same row.
 
     :param dataset_size: Rows in the env's dataset; ``0`` for a procedural env.
     :param seed: Seed for the per-epoch shuffle (``None`` -> a fixed default).
@@ -747,11 +711,7 @@ class TaskAssigner:
         self._pos = 0
 
     def next_row(self) -> int:
-        """Next dataset row index from the infinite epoch-reshuffled shard stream.
-
-        Every shard row appears exactly once per epoch; drawing past the end of an
-        epoch reshuffles and increments :attr:`num_epochs`.
-        """
+        """Next row from the epoch-reshuffled shard stream (bumps :attr:`num_epochs`)."""
         if self._pos >= len(self._epoch_order):  # epoch boundary (and first call)
             if self._epoch_order:
                 self.num_epochs += 1
@@ -774,12 +734,10 @@ class TaskAssigner:
     ) -> list[tuple[int | None, int | None]]:
         """Tasks for one batch: ``batch_size * group_size`` ``(seed, row_index)`` pairs.
 
-        Batch item ``i`` gets seed ``base_seed + seed_offset + i`` (``None`` without a
-        ``base_seed``) and the next dataset row (``None`` for a procedural env); the
-        pair repeats ``group_size`` times, group-contiguous, so the whole group
-        attempts the same task. Group seeds must stay unique across batches: the
-        in-process collector advances ``base_seed`` between batches, the distributed
-        one keeps it fixed and advances ``seed_offset``.
+        Item ``i`` gets seed ``base_seed + seed_offset + i`` and the next row, the
+        pair repeated ``group_size`` times so the whole group shares one task.
+        Callers must keep group seeds unique across batches (advance ``base_seed``
+        or ``seed_offset``).
         """
         out: list[tuple[int | None, int | None]] = []
         for item in range(batch_size):
@@ -792,21 +750,12 @@ class TaskAssigner:
 
 
 class BatchRolloutEnv:
-    """Batched in-process collector of LLM rollout episodes.
+    """Batched in-process collector over ``batch_size * group_size`` :class:`RolloutEnv` slots.
 
-    Holds ``batch_size * group_size`` independent :class:`RolloutEnv` instances (group-
-    contiguous), driven in one of two modes:
-
-    * **Lock-step** (``reset``/``step``/``get_trajectories``) — the colocated path.
-      Backend round-trips run concurrently on a thread pool while tokenizer work and
-      state mutation stay sequential, so per-turn latency is the slowest env;
-      in-process envs are stepped on pool threads (must be thread-safe).
-    * **Per-episode** (``reset_episode``/``step_episode``/``get_episode_data``) — the
-      async path. Each env is a *slot*: ``reset_episode`` acquires one, ``get_episode_data``
-      / ``finalize_episode`` releases it, and interleaved episodes each hold theirs in
-      between. The methods are synchronous and thread-safe: an asyncio caller offloads
-      them (``asyncio.to_thread``) and the internal tokenizer lock keeps tokenizer work
-      serial across threads while env I/O overlaps freely.
+    Driven lock-step (``reset``/``step``/``get_trajectories``, the colocated path)
+    or per-episode (``reset_episode``/``step_episode``/``finalize_episode``, the
+    async path — a slot is held from reset to finalize). All methods are
+    synchronous and thread-safe; asyncio callers offload via ``asyncio.to_thread``.
     """
 
     def __init__(
@@ -897,8 +846,6 @@ class BatchRolloutEnv:
         prompts: list[RolloutPrompts] = []
         for env in active:
             obs = env.current_prompt
-            # ``current_prompt`` is only empty once an env is done, which
-            # ``_active_envs`` has already filtered out.
             assert is_rollout_prompts(obs), "an active env always holds a prompt"
             prompts.append(obs)
         return prompts
@@ -916,20 +863,7 @@ class BatchRolloutEnv:
         :param seed: Optional base seed for deterministic rollouts.
         :return: Active prompt dictionaries after reset.
         """
-        if not self._is_initialized:
-            try:
-                while len(self.envs) < self.num_envs:
-                    self.envs.append(self.env_factory(**self.env_config))
-            except Exception:
-                self.close()
-                self.envs = []
-                raise
-            self._task_assigner = TaskAssigner(
-                self.envs[0].dataset_size,
-                seed=seed,
-                rank=self._rank,
-                world_size=self._world_size,
-            )
+        self._build_envs_and_assigner(seed)
         assert self._task_assigner is not None
         assignments = self._task_assigner.assign(
             self.batch_size, self.group_size, base_seed=seed
@@ -1149,26 +1083,30 @@ class BatchRolloutEnv:
                 str(episode_id) for episode_id in list(self._episode_to_slot)[:max_ids]
             ]
 
+    def _build_envs_and_assigner(self, seed: int | None) -> None:
+        """Build the env pool once and, with it, the task assigner seeded by ``seed``."""
+        if not self._is_initialized:
+            try:
+                while len(self.envs) < self.num_envs:
+                    self.envs.append(self.env_factory(**self.env_config))
+            except Exception:
+                self.close()
+                self.envs = []
+                raise
+        if self._task_assigner is None:
+            self._task_assigner = TaskAssigner(
+                self.envs[0].dataset_size,
+                seed=seed,
+                rank=self._rank,
+                world_size=self._world_size,
+            )
+
     def _ensure_slots(self) -> None:
         """Build the envs, the task assigner and the free-slot queue once (thread-safe)."""
         with self._slot_lock:
             if self._free_slots is not None:
                 return
-            if not self._is_initialized:
-                try:
-                    while len(self.envs) < self.num_envs:
-                        self.envs.append(self.env_factory(**self.env_config))
-                except Exception:
-                    self.close()
-                    self.envs = []
-                    raise
-            if self._task_assigner is None:
-                self._task_assigner = TaskAssigner(
-                    self.envs[0].dataset_size,
-                    seed=self._base_seed,
-                    rank=self._rank,
-                    world_size=self._world_size,
-                )
+            self._build_envs_and_assigner(self._base_seed)
             free_slots: queue.Queue[int] = queue.Queue()
             for slot in range(self.num_envs):
                 free_slots.put_nowait(slot)

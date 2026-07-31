@@ -25,14 +25,11 @@ def register_env_spec_resolver(
 ) -> None:
     """Register a resolver mapping an env spec string to an env factory.
 
-    :meth:`RolloutEnv.from_spec` and :func:`resolve_env` consult resolvers for any
-    spec that is not a URL, before falling back to ``module:Class`` entrypoint
-    loading. A resolver returns a factory (called with the spec's ``env_config``)
-    for specs it claims, ``None`` otherwise. Re-registering a ``name`` replaces
-    its resolver.
+    Consulted for non-URL specs before entrypoint loading; re-registering a
+    ``name`` replaces its resolver.
 
     :param name: Registry key naming the resolver (for replacement/removal).
-    :param resolver: ``spec -> factory | None``.
+    :param resolver: ``spec -> factory | None`` (``None`` = unclaimed).
     """
     _ENV_SPEC_RESOLVERS[name] = resolver
 

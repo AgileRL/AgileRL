@@ -1,15 +1,10 @@
 # Copyright 2026 AgileRL
 # SPDX-License-Identifier: Apache-2.0
 
-"""Client half of the OpenEnv glue: drive any text env over a URL or in-process.
+"""Client half of the OpenEnv glue: drive any text env over a ``/ws`` session or in-process.
 
-A :class:`~agilerl.llm_envs.rollout_env.RolloutEnv` reaches its env through an
-:class:`OpenEnvSessionClient` (env hosted at a URL, over an OpenEnv ``/ws`` session)
-or a :class:`LocalEnvClient` (same process, no HTTP). ``/ws`` rather than REST because
-only it carries per-session env state and reaches a production deployment. The server
-half (:class:`OpenEnvWrapper`, :class:`OpenEnvServer`, :func:`resolve_env`) lives in
-:mod:`agilerl.llm_envs.openenv_server`, outside the ``llm`` extra; its names are
-re-exported here for compatibility.
+The server half lives in :mod:`agilerl.llm_envs.openenv_server` (outside the
+``llm`` extra); its names are re-exported here for compatibility.
 """
 
 from __future__ import annotations
@@ -140,22 +135,13 @@ class LocalEnvClient:
 class OpenEnvSessionClient:
     """``EnvClientProtocol`` over one OpenEnv ``/ws`` session at a time.
 
-    Wraps OpenEnv's :class:`~openenv.core.GenericEnvClient`. Each instance opens its
-    own session against a fresh server-side env, so one URL backs a whole
-    :class:`BatchRolloutEnv` group up to ``max_concurrent_envs``. It is the only
-    backend that reaches a production OpenEnv server (``/ws``, no REST routes).
+    A session has no resume and *is* the server-side env instance, so a mid-episode
+    transport error marks the session broken and fails fast; the client re-dials
+    only at the next ``reset`` (an episode boundary), re-resolving ``base_url``
+    when it is a callable so a restarted host is found again.
 
-    A ``/ws`` session has no resume and *is* the server-side env instance, so a
-    transport error mid-episode cannot be papered over — the episode's server state
-    is gone. The first failure therefore marks the session broken and later ``step``
-    calls fail fast, surfacing the failed episode. The client re-dials **only at the
-    next** ``reset`` — an episode boundary, where a fresh server-side env is correct —
-    re-resolving the URL through ``base_url`` when it is a callable, so a host that
-    restarted at a new address is found again.
-
-    :param base_url: Root URL (``http(s)://`` or ``ws(s)://``) of the env server, or
-        a zero-arg callable returning it — resolved per dial, so a re-dial can follow
-        a restarted host.
+    :param base_url: Root URL of the env server, or a zero-arg callable returning
+        it — resolved per dial.
     :param timeout_s: Per-message timeout; ``None`` (default) is unbounded.
     :param connect_timeout_s: Timeout for establishing the session.
     :param mcp_tool: If set, send text as ``call_tool(mcp_tool, {arg: text})`` for MCP servers.
@@ -248,6 +234,12 @@ class OpenEnvSessionClient:
         self._connected = False
         self._broken = False
 
+    def _retry_on_fresh_session(self, call: Callable[[], _TransportT]) -> _TransportT:
+        """Re-dial once and re-run ``call`` — boundary-only recovery."""
+        self._redial()
+        self._connect()
+        return self._transport(call)
+
     @contextlib.contextmanager
     def eval_mode(self) -> Iterator[None]:
         """Route resets to the env's held-out split within the block."""
@@ -266,11 +258,9 @@ class OpenEnvSessionClient:
     ) -> tuple[str, dict[str, Any]]:
         """Reset the session's env and return ``(prompt, info)``.
 
-        ``seed`` / ``row_index`` travel to the server so a group resets to the same prompt.
-        A session broken by a transport error is replaced here — the episode boundary —
-        by re-dialling the URL provider. That includes a session the server closed
-        while idle (a Space reaping ``/ws`` between windows), which only surfaces on
-        this first round-trip: one re-dial retry, then errors propagate.
+        ``seed`` / ``row_index`` travel to the server so a group resets to the same
+        prompt. A broken or server-reaped session is re-dialled here, the episode
+        boundary: one retry, then errors propagate.
         """
         if self._broken:
             self._redial()
@@ -287,9 +277,7 @@ class OpenEnvSessionClient:
         except Exception as exc:
             if not _is_transport_error(exc):
                 raise
-            self._redial()
-            self._connect()
-            result = self._transport(lambda: self._sync.reset(**kwargs))
+            result = self._retry_on_fresh_session(lambda: self._sync.reset(**kwargs))
         return (_observation_text(result.observation) or self._instruction), {}
 
     def step(self, action: object) -> tuple[str, float, bool, bool, dict[str, Any]]:
@@ -297,8 +285,7 @@ class OpenEnvSessionClient:
         self._connect()
         text = action if isinstance(action, str) else str(action)
         if self._mcp_tool:
-            # OpenEnv's typed MCP action pins the wire shape; the session
-            # client transports plain dicts, so serialize it here.
+            # The session client transports plain dicts, so serialize the MCP action.
             act: dict[str, Any] = CallToolAction(
                 tool_name=self._mcp_tool,
                 arguments={self._arg: text},
@@ -308,8 +295,7 @@ class OpenEnvSessionClient:
         result = self._transport(lambda: self._sync.step(act))
         obs = result.observation
         reward = result.reward
-        # Our servers carry ``truncated`` in the obs; a server that omits it
-        # reports every end as a plain termination.
+        # A server that omits ``truncated`` reports every end as a termination.
         truncated = (
             bool(obs.get("truncated", False)) if isinstance(obs, dict) else False
         )
@@ -357,11 +343,8 @@ class OpenEnvSessionClient:
                     )
                     state = {}
                 else:
-                    # State is only read before any episode is in flight, so a
-                    # server-reaped session is re-dialled here like a boundary reset.
-                    self._redial()
-                    self._connect()
-                    state = self._transport(self._sync.state)
+                    # State is only read between episodes, so this is a boundary.
+                    state = self._retry_on_fresh_session(lambda: self._sync.state())
             self._state = state if isinstance(state, dict) else {}
         return self._state
 

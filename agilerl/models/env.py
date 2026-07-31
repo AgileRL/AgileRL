@@ -288,28 +288,11 @@ class PzEnvSpec(EnvSpec):
 class LLMEnvSpec(BaseModel):
     """Environment specification for LLM training.
 
-    Declaratively captures what is needed to build either a
-    :class:`~agilerl.llm_envs.RolloutEnv` (generative) or a
-    :class:`~agilerl.llm_envs.DatasetEnv` (teacher-forced). Fields are aligned
-    with what Arena expects for LLM training jobs.
-
-    A ``rollout`` env comes from exactly one source:
-
-    * ``dataset`` + ``reward_file_path`` / ``reward_fn_name`` / ``prompt_template``
-      -- labelled ``(question, answer)`` rows scored by a reward function
-      (single-turn; ``max_turns`` is 1).
-    * ``env_name`` -- a GEM environment id (e.g. ``"game:Sudoku-v0-easy"``).
-    * ``entrypoint`` -- a dotted path to a callable returning a text env.
-    * ``env_url`` -- a URL to an already-hosted OpenEnv service (driven over
-      HTTP); ``max_turns`` must be set since it can't be probed remotely.
-
-    ``env_name`` / ``entrypoint`` run **in-process**; to run an env elsewhere,
-    host it as an OpenEnv service (a container, a Space, or a server a Ray actor
-    stands up) and point ``env_url`` at it. Transport is thus a deployment
-    concern, not a code change: the same env trains in-process for dev and
-    against a hosted URL in production.
-
-    A ``dataset`` env always comes from ``dataset`` and an ``objective``.
+    Builds a :class:`~agilerl.llm_envs.RolloutEnv` (generative) or a
+    :class:`~agilerl.llm_envs.DatasetEnv` (teacher-forced). A rollout env comes
+    from exactly one source — ``dataset`` + reward, ``env_name`` (GEM id),
+    ``entrypoint``, or ``env_url`` (already hosted; ``max_turns`` required);
+    a dataset env always from ``dataset`` + ``objective``.
 
     :param env_type: ``"rollout"`` (generative) or ``"dataset"`` (teacher-forced).
     :type env_type: LLMEnvType
@@ -376,10 +359,7 @@ class LLMEnvSpec(BaseModel):
     env_config: dict[str, Any] | None = Field(default=None)
     max_turns: int | None = Field(default=None, ge=1)
 
-    # Remote rollout fields: point at an already-hosted OpenEnv service
-    # (a container, a Space, or a server a Ray actor stands up) and drive it
-    # over a WebSocket session. ``mcp_tool`` / ``request_timeout_s`` tune the
-    # client.
+    # Remote rollout fields: an already-hosted OpenEnv service driven over /ws.
     env_url: str | None = Field(default=None)
     mcp_tool: str | None = Field(default=None)
     request_timeout_s: float | None = Field(default=None, ge=0.0)
@@ -406,19 +386,10 @@ class LLMEnvSpec(BaseModel):
         return self.env_type == LLMEnvType.ROLLOUT and self.dataset is not None
 
     def _http_timeout_s(self) -> float | None:
-        """Per-message client timeout for an ``env_url``.
-
-        The manifest value when set, otherwise a 300 s default (a message that
-        outlives it means a hung env, and bounding it stops one stuck rollout
-        stalling the whole batch); ``0`` disables the bound entirely.
-        """
+        """Per-message ``env_url`` timeout: manifest value, 300 s default, ``0`` unbounds."""
         if self.request_timeout_s is None:
             return 300.0
         return self.request_timeout_s or None
-
-    def _seed_kwargs(self) -> dict[str, int]:
-        """Seed kwarg for gym construction; omitted when unset so the gym default applies."""
-        return {} if self.seed is None else {"seed": self.seed}
 
     @model_validator(mode="after")
     def _validate_rollout_fields(self) -> Self:
@@ -620,12 +591,8 @@ class LLMEnvSpec(BaseModel):
             )
             raise TypeError(msg)
 
-        # A context config that leaves no prompt room (``max_output_tokens >=
-        # max_model_len``) gives every env a prompt budget of 0, so each rollout
-        # episode is truncated at reset and ``batch_steps`` stays 0 — training
-        # then never advances (a silent, non-terminating loop). Validate here,
-        # with the same values the envs will use, so a bad config stops the run
-        # at setup with a clear message instead of hanging.
+        # max_output_tokens >= max_model_len zeroes the prompt budget: every episode
+        # truncates at reset and training silently never advances. Fail at setup.
         if max_model_len is not None:
             from agilerl.utils.llm_utils import validate_llm_context_lengths
 
@@ -634,8 +601,7 @@ class LLMEnvSpec(BaseModel):
         pad_id = tokenizer.pad_token_id
 
         if self.dataset_backed_rollout:
-            # The reward file and the dataset are read once, on the first env
-            # build, so constructing the factory stays free of I/O.
+            # Reward file + dataset load on the first env build, not factory construction.
             resolved: dict[str, Any] = {}
 
             def _resolve() -> dict[str, Any]:
@@ -692,17 +658,13 @@ class LLMEnvSpec(BaseModel):
 
         if self.env_url is not None:
             url = self.env_url
-            # A remote env's turn budget can't be probed; validation requires
-            # max_turns to be set explicitly for env_url.
+            # A remote env's turn budget can't be probed; validation requires max_turns.
             url_max_turns = self.max_turns or 1
             mcp_tool = self.mcp_tool
             timeout_s = self._http_timeout_s()
 
             def _url_factory() -> RolloutEnv:
-                # One WebSocket session per rollout, so a single hosted URL serves
-                # the whole group as concurrent, isolated episodes. The server's
-                # max_concurrent_envs must cover batch_size * group_size, plus
-                # one more session for the lazily built eval env.
+                # The server's max_concurrent_envs must cover batch*group + the eval env.
                 return RolloutEnv(
                     OpenEnvSessionClient(url, mcp_tool=mcp_tool, timeout_s=timeout_s),
                     tokenizer,
