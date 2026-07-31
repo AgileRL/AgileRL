@@ -1834,6 +1834,13 @@ class TestReconcileShapes:
         assert o.shape == (1, 3)
         np.testing.assert_array_equal(o, np.array([[4, 5, 6]]))
 
+    def test_continuous_other_lower_ndim_expands_other_float_actions(self):
+        ref = np.array([[1.0, 2.0]], dtype=np.float32)
+        other = np.array([3.0, 4.0], dtype=np.float32)
+        _r, o = _reconcile_shapes(ref, other, discrete_actions=False)
+        assert o.shape == (1, 2)
+        np.testing.assert_array_equal(o, np.array([[3.0, 4.0]], dtype=np.float32))
+
     def test_continuous_other_higher_ndim_expands_reference(self):
         ref = np.array([1, 2, 3])  # (3,)
         other = np.array([[4, 5, 6]])  # (1, 3)

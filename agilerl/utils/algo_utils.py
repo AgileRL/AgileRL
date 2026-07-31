@@ -2696,11 +2696,10 @@ def _reconcile_shapes(
                 reference = reference.squeeze()
             else:
                 other = other.squeeze()
+        elif other.ndim < reference.ndim:
+            other = np.expand_dims(other, 0)
         else:
-            if other.ndim < reference.ndim:
-                other = np.expand_dims(other, 0)
-            else:
-                reference = np.expand_dims(reference, 0)
+            reference = np.expand_dims(reference, 0)
 
     return reference, np.broadcast_to(other, reference.shape)
 
