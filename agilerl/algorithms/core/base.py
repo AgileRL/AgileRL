@@ -148,12 +148,15 @@ if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
     from safetensors.torch import load_file
 
     from agilerl.algorithms.core.llm_ops.fused_lora import (
+        adapter_aligned_chunks,
         get_cached_lora_layers,
         patch_lora_for_fused_forward,
         set_fused_adapter_routing,
         unset_fused_adapter_routing,
     )
+    from agilerl.algorithms.core.llm_ops.moe_lora import upgrade_moe_param_wrappers
     from agilerl.algorithms.core.llm_ops.vllm_colocate import (
+        patch_vllm_3d_moe_lora_flag,
         patch_vllm_lora_keep_resident,
         patch_vllm_strip_multimodal_towers,
     )
@@ -165,6 +168,7 @@ if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
         build_vllm_llm_init_kwargs,
         build_vllm_rollout_lora_request,
         create_model_from_name_or_path,
+        expert_lora_vllm_key_map,
         gather_if_ds_param,
         gather_if_zero3,
         get_lora_params,
@@ -4369,6 +4373,27 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
                 lora_target_scope=self.lora_target_scope,
             )
             self.lora_config = lora_config
+            expert_target_parameters = getattr(lora_config, "target_parameters", None)
+            if expert_target_parameters:
+                if lora_config.lora_dropout:
+                    msg = (
+                        "lora_config.target_parameters (packed-experts LoRA) "
+                        "requires lora_dropout=0.0: PEFT's parameter-level "
+                        "LoRA cannot factor dropout out of the low-rank "
+                        "product."
+                    )
+                    raise ValueError(msg)
+                extra_adapters = [a for a in self.selected_adapters if a != "actor"]
+                if extra_adapters:
+                    msg = (
+                        "lora_config.target_parameters (packed-experts LoRA) "
+                        "supports only the 'actor' adapter — PEFT allows one "
+                        "adapter per model with target_parameters, but "
+                        f"selected_adapters also lists {extra_adapters}. Use "
+                        "use_separate_reference_adapter=False and no value "
+                        "head with expert LoRA."
+                    )
+                    raise ValueError(msg)
             keep_adapter_base_dtype = self.zero_stage == 3 and not quantized_base
             peft_target = get_peft_model(
                 peft_target,
@@ -4405,6 +4430,13 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
                 for name, param in peft_target.named_parameters():
                     if "lora" in name and param.dtype != torch.bfloat16:
                         param.data = param.data.to(torch.bfloat16)
+
+            if expert_target_parameters:
+                n_expert_lora = upgrade_moe_param_wrappers(peft_target)
+                logger.info(
+                    "Split expert-LoRA execution enabled on %d packed-experts modules.",
+                    n_expert_lora,
+                )
 
             # Apply Liger Kernel optimizations (fused RMSNorm, RoPE, SwiGLU,
             # CrossEntropy) to the inner causal-LM *after* PEFT wrapping.
@@ -4604,10 +4636,13 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         if self.calc_position_embeddings:
             position_ids = self._position_ids_from_mask(fused_mask)
 
+        # Micro-batches never straddle an adapter run: packed-experts LoRA
+        # layers see expert-sorted rows and can only apply one adapter per
+        # forward call.
         chunks = (
             [(0, total)]
             if batch_size is None
-            else [(s, min(s + batch_size, total)) for s in range(0, total, batch_size)]
+            else adapter_aligned_chunks(routing, batch_size)
         )
 
         fused_fn, lm_head_weight, lm_head_bias = self._fused_logprob_fn_and_head()
@@ -5203,14 +5238,20 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
                 msg = "lora_config is required for vLLM LoRA adapter export."
                 raise ValueError(msg)
             target_modules = self.lora_config.target_modules
-            assert target_modules is not None, (
-                "lora_config.target_modules is required for vLLM LoRA adapter export."
+            target_parameters = getattr(self.lora_config, "target_parameters", None)
+            assert target_modules is not None or target_parameters, (
+                "lora_config.target_modules or target_parameters is required "
+                "for vLLM LoRA adapter export."
+            )
+            expert_key_map = (
+                expert_lora_vllm_key_map(peft_ref) if target_parameters else None
             )
             adapter_path = save_peft_adapter_for_vllm_rollout(
                 peft_ref,
                 staging_dir,
                 self._vllm_rollout_adapter,
                 target_modules=target_modules,
+                expert_key_map=expert_key_map,
             )
         if self.accelerator is not None:
             self.accelerator.wait_for_everyone()
@@ -6125,6 +6166,14 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
                 f"(max_num_seqs={self.vllm_config.max_num_seqs} "
                 f"max_model_len={self.max_model_len})",
                 stacklevel=2,
+            )
+
+        if getattr(self.lora_config, "target_parameters", None) and (
+            patch_vllm_3d_moe_lora_flag(llm_kwargs["model"])
+        ):
+            logger.info(
+                "Marked vLLM %s as taking stacked-3D MoE LoRA adapters.",
+                llm_kwargs["model"],
             )
 
         try:

@@ -2241,15 +2241,58 @@ def remap_peft_lora_key_for_vllm(key: str) -> str:
     return key.replace(".base_layer.", ".")
 
 
+def expert_lora_vllm_key_map(peft_model: nn.Module) -> dict[str, str]:
+    """Map packed-experts LoRA module keys to the paths vLLM's fused-MoE loader reads (down on ``<experts>``, gate/up on ``<experts>.base_layer``)."""
+    from peft.tuners.lora.layer import ParamWrapper
+
+    key_map: dict[str, str] = {}
+    unmapped: list[str] = []
+    for name, module in peft_model.named_modules():
+        if not isinstance(module, ParamWrapper):
+            continue
+        experts_path = name
+        while experts_path.endswith(".base_layer"):
+            experts_path = experts_path.removesuffix(".base_layer")
+        parameter_name = module.parameter_name
+        parent, _, leaf = experts_path.rpartition(".")
+        sibling_prefix = f"{parent}." if parent else ""
+        if parameter_name in ("gate_up_proj", "up_proj"):
+            key_map[name] = f"{experts_path}.base_layer"
+        elif parameter_name == "down_proj":
+            key_map[name] = experts_path
+        elif parameter_name == "weight" and leaf == "input_linear":
+            key_map[name] = f"{sibling_prefix}experts.base_layer"
+        elif parameter_name == "weight" and leaf == "output_linear":
+            key_map[name] = f"{sibling_prefix}experts"
+        else:
+            unmapped.append(f"{name} ({parameter_name})")
+    if unmapped:
+        msg = (
+            "No vLLM fused-MoE LoRA mapping for wrapped parameters "
+            f"{unmapped}; rollout would silently diverge from the trainer "
+            "policy. Restrict target_parameters to supported experts modules."
+        )
+        raise ValueError(msg)
+    return key_map
+
+
 def filter_peft_state_dict_for_vllm_lora(
     state_dict: dict[str, torch.Tensor],
-    target_modules: str | list[str],
+    target_modules: str | list[str] | None,
+    *,
+    expert_key_map: dict[str, str] | None = None,
 ) -> dict[str, torch.Tensor]:
-    """Keep LoRA tensors whose modules match the trainer ``target_modules`` spec."""
+    """Keep LoRA tensors whose modules match the trainer ``target_modules`` spec or expert map."""
     filtered: dict[str, torch.Tensor] = {}
     for key, tensor in state_dict.items():
         module_key = peft_lora_state_dict_key_to_module_key(key)
-        if not peft_target_key_matches(module_key, target_modules):
+        if expert_key_map is not None and module_key in expert_key_map:
+            suffix = key.removeprefix(module_key)
+            filtered[f"{expert_key_map[module_key]}{suffix}"] = tensor
+            continue
+        if target_modules is None or not peft_target_key_matches(
+            module_key, target_modules
+        ):
             continue
         filtered[remap_peft_lora_key_for_vllm(key)] = tensor
     return filtered
@@ -2273,14 +2316,16 @@ def save_peft_adapter_for_vllm_rollout(
     staging_dir: Path | str,
     adapter_name: str,
     *,
-    target_modules: str | list[str],
+    target_modules: str | list[str] | None,
+    expert_key_map: dict[str, str] | None = None,
 ) -> Path:
     """Export a PEFT adapter checkpoint that vLLM can load for colocated rollout.
 
     Keeps only tensors that match the same ``target_modules`` spec used for PEFT
-    training (from :func:`adapt_lora_config_for_model`). Rewrites ClippableLinear
-    ``.linear`` suffixes in keys for vLLM. ``staging_dir`` must be
-    process-private (AgileRL stages per-rank when distributed): every caller
+    training (from :func:`adapt_lora_config_for_model`) or the packed-experts
+    ``expert_key_map`` (from :func:`expert_lora_vllm_key_map`). Rewrites
+    ClippableLinear ``.linear`` suffixes in keys for vLLM. ``staging_dir`` must
+    be process-private (AgileRL stages per-rank when distributed): every caller
     writes the adapter files.
     """
     if not HAS_LLM_DEPENDENCIES:
@@ -2293,7 +2338,9 @@ def save_peft_adapter_for_vllm_rollout(
     adapter_path = Path(staging_dir) / adapter_name
     state = get_peft_model_state_dict(peft_model, adapter_name=adapter_name)
     n_before = len(state)
-    state = filter_peft_state_dict_for_vllm_lora(state, target_modules)
+    state = filter_peft_state_dict_for_vllm_lora(
+        state, target_modules, expert_key_map=expert_key_map
+    )
     if not state:
         msg = (
             f"No LoRA tensors left for vLLM export after filtering with "
@@ -2317,7 +2364,7 @@ def save_peft_adapter_for_vllm_rollout(
     cfg_dict: dict[str, JSONValue] = {
         str(key): _json_safe_value(value) for key, value in peft_cfg.to_dict().items()
     }
-    cfg_dict["target_modules"] = _json_safe_value(target_modules)
+    cfg_dict["target_modules"] = _json_safe_value(target_modules or [])
 
     import json
 

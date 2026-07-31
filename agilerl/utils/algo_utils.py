@@ -71,6 +71,8 @@ if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
     from peft import PeftConfig, PeftModel, get_peft_model
     from transformers import PreTrainedModel
 
+    from agilerl.algorithms.core.llm_ops.moe_lora import upgrade_moe_param_wrappers
+
     PreTrainedModelType = PeftModel | PreTrainedModel
 else:
     # Annotations referencing PreTrainedModelType are evaluated at function
@@ -2612,6 +2614,8 @@ def clone_llm(
             for name, param in model.named_parameters():
                 if "lora" in name and param.dtype != torch.bfloat16:
                     param.data = param.data.to(torch.bfloat16)
+        if getattr(peft_configs[first_adapter], "target_parameters", None):
+            upgrade_moe_param_wrappers(model)
         model.disable_adapter()
 
     if state_dict is not None:

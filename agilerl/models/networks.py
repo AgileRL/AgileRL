@@ -443,6 +443,9 @@ class LoraConfigDict(BaseModel):
     lora_r: int = Field(default=16, ge=1)
     lora_alpha: int = Field(default=32, ge=1)
     target_modules: list[str] | str | set[str] = Field(default="all-linear")
+    # Packed MoE expert parameter paths (PEFT ``target_parameters``), e.g.
+    # ["block_sparse_moe.experts.gate_up_proj", ...]; requires lora_dropout=0.
+    target_parameters: list[str] | None = Field(default=None)
     task_type: str = Field(default="CAUSAL_LM", min_length=1)
     lora_dropout: float = Field(default=0.05, ge=0.0, le=1.0)
 
@@ -475,10 +478,12 @@ def _peft_lora_config_to_manifest_dict(cfg: LoraConfig) -> dict[str, Any]:
     else:
         tm_out = tm
 
+    target_parameters = getattr(cfg, "target_parameters", None)
     return {
         "lora_r": cfg.r,
         "lora_alpha": cfg.lora_alpha,
         "target_modules": tm_out,
+        "target_parameters": (sorted(target_parameters) if target_parameters else None),
         "task_type": task_type,
         "lora_dropout": cfg.lora_dropout,
     }
