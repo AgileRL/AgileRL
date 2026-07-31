@@ -31,7 +31,6 @@ from agilerl.memory.calibration import (
 )
 from agilerl.memory.profiling.harness import SweepPoint
 from agilerl.memory.profiling.sweep import HOLDOUT_POINTS, calibrate_phase
-from agilerl.memory.specs import DeviceSpec
 
 #: The headline accuracy claim: error on held-out knob combinations, which
 #: is what "will my run fit" actually depends on.
@@ -45,17 +44,14 @@ MEAN_ACCURACY_BAND = 0.10
 WORST_POINT_BAND = 0.20
 
 
-def _holdout_keys() -> set[tuple[int, int, int, int, float]]:
-    return {
-        (
-            p.seq_len,
-            p.micro_batch,
-            p.group_size,
-            p.lora_rank,
-            p.gpu_memory_utilization,
-        )
-        for p in HOLDOUT_POINTS
-    }
+def _holdout_key(point: SweepPoint) -> tuple[int, int, int, int, float]:
+    return (
+        point.seq_len,
+        point.micro_batch,
+        point.group_size,
+        point.lora_rank,
+        point.gpu_memory_utilization,
+    )
 
 
 def refit(profile: ModelProfile) -> ModelProfile:
@@ -73,15 +69,9 @@ def refit(profile: ModelProfile) -> ModelProfile:
         raise ValueError(msg)
 
     model = profile.apply_realised_weights(profile.model_spec)
-    major, _, minor = (profile.device.compute_capability or "8.0").partition(".")
-    device = DeviceSpec.from_compute_capability(
-        profile.device.total_bytes,
-        int(major),
-        int(minor or 0),
-        name=profile.device.name,
-    )
+    device = profile.device.to_device_spec()
 
-    holdout = _holdout_keys()
+    holdout = {_holdout_key(p) for p in HOLDOUT_POINTS}
     fit_pairs: dict[str, list[tuple[SweepPoint, MeasuredPoint]]] = {
         "training": [],
         "generation": [],
@@ -92,14 +82,7 @@ def refit(profile: ModelProfile) -> ModelProfile:
     }
     for measured in profile.measured:
         point = SweepPoint.from_dict(measured.knobs)
-        key = (
-            point.seq_len,
-            point.micro_batch,
-            point.group_size,
-            point.lora_rank,
-            point.gpu_memory_utilization,
-        )
-        target = holdout_pairs if key in holdout else fit_pairs
+        target = holdout_pairs if _holdout_key(point) in holdout else fit_pairs
         target[measured.phase].append((point, measured))
 
     return profile.model_copy(
@@ -132,26 +115,14 @@ def prediction_errors(
     the analytic core on its own — i.e. the accuracy a model that has never
     been profiled would get.
     """
-    from agilerl.memory import formulas
     from agilerl.memory.estimator import estimate_generation, estimate_training
 
     if profile.model_spec is None or profile.device is None:
         return {}
     model = profile.apply_realised_weights(profile.model_spec)
-    major, _, minor = (profile.device.compute_capability or "8.0").partition(".")
-    device = DeviceSpec.from_compute_capability(
-        profile.device.total_bytes,
-        int(major),
-        int(minor or 0),
-        name=profile.device.name,
-    )
+    device = profile.device.to_device_spec()
     applied = profile if calibrated else None
-    measured_residual = profile.sleeping_engine_residual_bytes
-    residual = (
-        measured_residual
-        if calibrated and measured_residual is not None
-        else formulas.SLEEPING_ENGINE_RESIDUAL_BYTES
-    )
+    canonical_baseline = profile.canonical_sleeping_baseline_bytes
 
     errors: dict[str, list[float]] = {"training": [], "generation": []}
     for measured in profile.measured:
@@ -163,7 +134,6 @@ def prediction_errors(
                 point.training_knobs(),
                 colocated=True,
                 profile=applied,
-                colocated_engine_reservation_bytes=residual,
             )
         else:
             breakdown = estimate_generation(
@@ -173,9 +143,7 @@ def prediction_errors(
                 colocated=True,
                 profile=applied,
             )
-        target = calibration_target_bytes(
-            measured, profile.canonical_sleeping_baseline_bytes
-        )
+        target = calibration_target_bytes(measured, canonical_baseline)
         errors[measured.phase].append(abs(breakdown.total_bytes - target) / target)
     return errors
 

@@ -5501,10 +5501,9 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         :return: Rows per chunk.
         :rtype: int
         """
-        if explicit is not None:
-            return explicit
-        workspace_bytes = 256 * 1024 * 1024
-        return min(max(workspace_bytes // max(1, vocab_size * 4), 128), 4096)
+        from agilerl.memory.formulas import resolve_chunk_rows
+
+        return resolve_chunk_rows(vocab_size, explicit)
 
     @staticmethod
     def _logprobs_from_hidden_fused(

@@ -17,18 +17,20 @@ it ports to the widget runtime unchanged.
 from __future__ import annotations
 
 import json
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Literal
+from typing import Literal, get_args
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from agilerl.memory.formulas import resolve_max_num_batched_tokens
 from agilerl.memory.specs import (
     CUDA_CONTEXT_BYTES_DEFAULT,
-    MEASURED_CUDA_CONTEXT_BYTES,
+    Algorithm,
     DeviceSpec,
     GenerationKnobs,
     ModelSpec,
+    QuantizationMethod,
     TrainingKnobs,
 )
 
@@ -103,7 +105,22 @@ class MeasuredPoint(BaseModel):
     sleeping_baseline_bytes: int | None = None
     torch_max_allocated_bytes: int | None = None
     torch_max_reserved_bytes: int | None = None
-    analytic_bytes: int | None = None
+
+
+def median_sleeping_baseline(points: Iterable[MeasuredPoint]) -> int:
+    """Median device floor under a sleeping engine, across training points.
+
+    Individual points sometimes sample this floor before the *previous*
+    point's subprocess has released its CUDA memory; the median rejects those
+    outliers without discarding the point. Returns 0 when no training point
+    carries a baseline.
+    """
+    baselines = sorted(
+        point.sleeping_baseline_bytes
+        for point in points
+        if point.phase == "training" and point.sleeping_baseline_bytes
+    )
+    return baselines[len(baselines) // 2] if baselines else 0
 
 
 def calibration_target_bytes(
@@ -111,18 +128,12 @@ def calibration_target_bytes(
 ) -> int:
     """The peak to fit against, with engine-teardown noise normalised out.
 
-    Fitting raw ``device_peak_bytes`` makes the fit hostage to whatever the
-    device floor happened to be when the point started. Two points in the
-    32k sweep sampled a floor of 4.33 and 8.03 GiB against a typical 1.2,
-    and the estimator was charged for the difference — reading as a 27-29%
-    under-prediction on points whose trainer cost was in fact normal, and
-    dragging the training holdout to 17.4% on a sweep whose 32k corners were
-    otherwise within 10%.
-
     Re-basing each training point onto the sweep's median floor keeps the
     quantity being fitted the one the formulas actually model: what the
-    trainer adds on top of a sleeping engine. Generation points are measured
-    with the engine awake and pass through unchanged.
+    trainer adds on top of a sleeping engine. Fitting the raw peak instead
+    charges the estimator for whatever the device floor happened to be when
+    the point started. Generation points are measured with the engine awake
+    and pass through unchanged.
     """
     if measured.phase != "training" or not measured.sleeping_baseline_bytes:
         return measured.device_peak_bytes
@@ -138,7 +149,6 @@ class PhaseCalibration(BaseModel):
     fit: ResidualFit = Field(default_factory=ResidualFit)
     #: Relative error on held-out knob combinations, e.g. 0.08 for 8%.
     holdout_max_rel_error: float | None = None
-    holdout_mean_rel_error: float | None = None
     n_points: int = 0
 
 
@@ -153,6 +163,12 @@ class DeviceFingerprint(BaseModel):
     name: str
     total_bytes: int
     compute_capability: str | None = None
+
+    def to_device_spec(self) -> DeviceSpec:
+        major, _, minor = (self.compute_capability or "8.0").partition(".")
+        return DeviceSpec.from_compute_capability(
+            self.total_bytes, int(major), int(minor or 0), name=self.name
+        )
 
 
 class ModelProfile(BaseModel):
@@ -188,12 +204,9 @@ class ModelProfile(BaseModel):
     def measured_on(self, device: DeviceSpec) -> bool:
         """Whether this profile was measured on the given device.
 
-        Cross-device transfer was measured on two L4/A100 model pairs and is
-        unreliable in both directions: on Qwen2.5-1.5B the foreign training
-        fit roughly halved the error (5.4% vs 10.4% unfitted), while on
-        Qwen2.5-0.5B it was slightly worse than none (11.6% vs 10.7%).
-        Applying it is a net win on average, so the estimator does — but
-        reports it as ``other_device`` rather than as a calibrated number.
+        Cross-device transfer is unreliable in both directions but a net win
+        on average, so the estimator applies a foreign fit — reported as
+        ``other_device`` rather than as a calibrated number.
         """
         if self.device is None or device.name is None:
             return True
@@ -201,45 +214,21 @@ class ModelProfile(BaseModel):
 
     @property
     def canonical_sleeping_baseline_bytes(self) -> int:
-        """Median device floor under a sleeping engine, across training points.
-
-        Individual points sometimes sample this floor before the *previous*
-        point's subprocess has released its CUDA memory, reading 4-8 GiB where
-        the true floor is ~1.2. Taking the median across the sweep rejects
-        those without discarding the point.
-        """
-        baselines = sorted(
-            point.sleeping_baseline_bytes
-            for point in self.measured
-            if point.phase == "training" and point.sleeping_baseline_bytes
-        )
-        return baselines[len(baselines) // 2] if baselines else 0
+        """Median sleeping-engine device floor across this profile's points."""
+        return median_sleeping_baseline(self.measured)
 
     @property
     def sleeping_engine_residual_bytes(self) -> int | None:
         """Measured device memory the sleeping engine leaves behind, net of
-        the CUDA context the estimator already counts under overhead.
-
-        Subtracts *this device's* context. Using a flat one made the residual
-        absorb the difference between devices — the A100's context is 501 MiB
-        against the L4's 226 — and that error then travelled into every
-        prediction on the device.
-
-        ``None`` when the profile predates the measurement, in which case the
-        estimator falls back to its analytic constant.
+        *this device's* CUDA context (which the estimator already counts
+        under overhead). ``None`` when the profile predates the measurement,
+        in which case the estimator falls back to its analytic constant.
         """
-        baselines = sorted(
-            point.sleeping_baseline_bytes
-            for point in self.measured
-            if point.phase == "training" and point.sleeping_baseline_bytes
-        )
-        if not baselines:
+        median = self.canonical_sleeping_baseline_bytes
+        if not median:
             return None
-        median = baselines[len(baselines) // 2]
         context = (
-            MEASURED_CUDA_CONTEXT_BYTES.get(
-                self.device.name or "", CUDA_CONTEXT_BYTES_DEFAULT
-            )
+            self.device.to_device_spec().context_bytes
             if self.device
             else CUDA_CONTEXT_BYTES_DEFAULT
         )
@@ -295,7 +284,9 @@ def profile_path(
 #: Suffix tokens ``profile_path`` may append. Matched explicitly rather than
 #: by splitting on ".", because model names contain dots of their own
 #: ("Qwen2.5-0.5B-Instruct") and a naive split truncates them to "Qwen2".
-_STEM_SUFFIXES = frozenset({"grpo", "ppo", "sft", "dpo", "nf4", "int8", "awq", "gptq"})
+_STEM_SUFFIXES = frozenset(get_args(Algorithm) + get_args(QuantizationMethod)) - {
+    "none"
+}
 
 
 def _parse_stem(stem: str) -> tuple[str, str | None]:
@@ -325,17 +316,16 @@ def load_profile(
     directory = fixtures_dir or FIXTURES_DIR
     if not directory.exists():
         return None
-    candidates = [
-        path
-        for path in sorted(directory.glob("*.json"))
-        if _parse_stem(path.stem)[0] == model_id
-    ]
+    candidates = []
+    for path in sorted(directory.glob("*.json")):
+        model, device = _parse_stem(path.stem)
+        if model != model_id:
+            continue
+        if device_name and device == device_name:
+            return ModelProfile.model_validate_json(path.read_text())
+        candidates.append(path)
     if not candidates:
         return None
-    if device_name:
-        for path in candidates:
-            if _parse_stem(path.stem)[1] == device_name:
-                return ModelProfile.model_validate_json(path.read_text())
     return ModelProfile.model_validate_json(candidates[0].read_text())
 
 
@@ -343,10 +333,7 @@ def curated_models(fixtures_dir: Path | None = None) -> list[str]:
     """Model ids with a checked-in profile — the curated list is exactly the
     set of profiled models.
     """
-    directory = fixtures_dir or FIXTURES_DIR
-    if not directory.exists():
-        return []
-    return sorted({_parse_stem(p.stem)[0] for p in directory.glob("*.json")})
+    return sorted({model for model, _ in curated_profiles(fixtures_dir)})
 
 
 def curated_profiles(fixtures_dir: Path | None = None) -> list[tuple[str, str | None]]:

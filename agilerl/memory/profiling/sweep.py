@@ -27,11 +27,11 @@ import json
 import subprocess
 import sys
 import tempfile
+from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 from typing import cast
 
-from agilerl.memory import formulas
 from agilerl.memory.calibration import (
     FIXTURES_DIR,
     DeviceFingerprint,
@@ -39,13 +39,15 @@ from agilerl.memory.calibration import (
     ModelProfile,
     PhaseCalibration,
     ResidualFit,
+    _slug,
     calibration_target_bytes,
     generation_basis,
+    median_sleeping_baseline,
     save_profile,
     training_basis,
 )
 from agilerl.memory.estimator import estimate_generation, estimate_training
-from agilerl.memory.profiling.harness import SweepPoint
+from agilerl.memory.profiling.harness import SweepPoint, variant_name
 from agilerl.memory.profiling.nvml import wait_for_idle
 from agilerl.memory.specs import DeviceSpec, ModelSpec, QuantizationMethod
 
@@ -162,9 +164,10 @@ def _analytic_bytes(
 ) -> tuple[int, dict[str, float]]:
     """Uncalibrated prediction and basis terms for one point.
 
-    The colocated engine reservation is passed analytically so the residual
-    being fitted is genuine unmodelled overhead, not the reservation — which
-    would otherwise pin the fit to one ``gpu_memory_utilization``.
+    Passing ``profile=None`` keeps the colocated engine reservation at its
+    analytic constant, so the residual being fitted is genuine unmodelled
+    overhead rather than the reservation — which would otherwise pin the fit
+    to one ``gpu_memory_utilization``.
     """
     if phase == "training":
         knobs = point.training_knobs()
@@ -172,14 +175,9 @@ def _analytic_bytes(
             model,
             device,
             knobs,
-            trainer_variant=(
-                "base" if point.quantization == "none" else point.quantization
-            ),
+            trainer_variant=variant_name(point.quantization),
             colocated=True,
             profile=None,
-            colocated_engine_reservation_bytes=(
-                formulas.SLEEPING_ENGINE_RESIDUAL_BYTES
-            ),
         )
         return breakdown.total_bytes, training_basis(model, knobs)
     gen_knobs = point.generation_knobs()
@@ -202,7 +200,7 @@ def _model_spec_for(model_name: str, quantizations: set[str]) -> ModelSpec:
     arch = ModelArch.from_hf_config(AutoConfig.from_pretrained(model_name).to_dict())
     variants = tuple(
         WeightVariant(
-            name="base" if q == "none" else q,
+            name=variant_name(q),
             quantization=cast("QuantizationMethod", q),
         )
         for q in sorted(quantizations)
@@ -241,19 +239,10 @@ def profile_from_checkpoint(
         raise ValueError(msg)
 
     total_bytes, capability = _device_identity(device_index)
-    device = DeviceSpec.from_compute_capability(
-        total_bytes, *capability, name=device_name
-    )
     model = _model_spec_for(
         model_name, {str(p.knobs.get("quantization", "none")) for p in measured}
     )
 
-    baselines = sorted(
-        p.sleeping_baseline_bytes
-        for p in measured
-        if p.phase == "training" and p.sleeping_baseline_bytes
-    )
-    canonical = baselines[len(baselines) // 2] if baselines else 0
     pairs: dict[str, list[tuple[SweepPoint, MeasuredPoint]]] = {
         "training": [],
         "generation": [],
@@ -261,31 +250,17 @@ def profile_from_checkpoint(
     for point in measured:
         pairs[point.phase].append((SweepPoint.from_dict(point.knobs), point))
 
-    return ModelProfile(
-        model_id=model_name,
-        model_spec=model,
+    return _build_profile(
+        model_name,
+        model,
+        device_name,
+        total_bytes,
+        capability,
         algorithm=str(measured[0].knobs.get("algorithm", "grpo")),
         quantization=str(measured[0].knobs.get("quantization", "none")),
-        device=DeviceFingerprint(
-            name=device_name,
-            total_bytes=total_bytes,
-            compute_capability=f"{capability[0]}.{capability[1]}",
-        ),
-        framework_versions=_framework_versions(),
-        training=calibrate_phase(
-            model,
-            device,
-            pairs["training"],
-            [],
-            "training",
-            canonical_baseline_bytes=canonical,
-        ),
-        generation=(
-            calibrate_phase(model, device, pairs["generation"], [], "generation")
-            if pairs["generation"]
-            else PhaseCalibration()
-        ),
-        measured=tuple(measured),
+        fit_pairs=pairs,
+        holdout_pairs={"training": [], "generation": []},
+        measured=measured,
     )
 
 
@@ -308,7 +283,6 @@ def calibrate_phase(
     fit = fit_residuals(basis_rows, residuals)
 
     max_rel_error = None
-    mean_rel_error = None
     if holdout_points:
         errors = []
         for point, measured in holdout_points:
@@ -317,21 +291,82 @@ def calibrate_phase(
             target = calibration_target_bytes(measured, canonical_baseline_bytes)
             errors.append(abs(predicted - target) / target)
         max_rel_error = max(errors)
-        mean_rel_error = sum(errors) / len(errors)
     return PhaseCalibration(
         fit=fit,
         holdout_max_rel_error=max_rel_error,
-        holdout_mean_rel_error=mean_rel_error,
         n_points=len(fit_points),
     )
+
+
+def _build_profile(
+    model_name: str,
+    model: ModelSpec,
+    device_name: str,
+    total_bytes: int,
+    capability: tuple[int, int],
+    algorithm: str,
+    quantization: str,
+    fit_pairs: dict[str, list[tuple[SweepPoint, MeasuredPoint]]],
+    holdout_pairs: dict[str, list[tuple[SweepPoint, MeasuredPoint]]],
+    measured: list[MeasuredPoint],
+    realised: dict[str, int] | None = None,
+) -> ModelProfile:
+    """Fit both phases and assemble the fixture from a sweep's measurements."""
+    device = DeviceSpec.from_compute_capability(
+        total_bytes, *capability, name=device_name
+    )
+    canonical = median_sleeping_baseline(measured)
+    return ModelProfile(
+        model_id=model_name,
+        model_spec=model,
+        algorithm=algorithm,
+        quantization=quantization,
+        device=DeviceFingerprint(
+            name=device_name,
+            total_bytes=total_bytes,
+            compute_capability=f"{capability[0]}.{capability[1]}",
+        ),
+        framework_versions=_framework_versions(),
+        training=calibrate_phase(
+            model,
+            device,
+            fit_pairs["training"],
+            holdout_pairs["training"],
+            "training",
+            canonical_baseline_bytes=canonical,
+        ),
+        generation=(
+            calibrate_phase(
+                model,
+                device,
+                fit_pairs["generation"],
+                holdout_pairs["generation"],
+                "generation",
+            )
+            # SFT and DPO never generate, so there is no engine phase to fit.
+            if fit_pairs["generation"]
+            else PhaseCalibration()
+        ),
+        realised_weight_bytes=realised or {},
+        measured=tuple(measured),
+    )
+
+
+def _json_from_subprocess(make_cmd: Callable[[str], list[str]]) -> dict:
+    """Run a subprocess that writes JSON to a temp path and return the parse."""
+    with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as handle:
+        out_path = handle.name
+    try:
+        subprocess.run(make_cmd(out_path), check=True)
+        return json.loads(Path(out_path).read_text())
+    finally:
+        Path(out_path).unlink(missing_ok=True)
 
 
 def _device_identity(device_index: int) -> tuple[int, tuple[int, int]]:
     """Total bytes and compute capability of the device, read in a
     subprocess so the sweep parent never initialises CUDA.
     """
-    with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as handle:
-        out_path = handle.name
     script = (
         "import json,sys,torch;"
         "i=int(sys.argv[2]);"
@@ -340,11 +375,9 @@ def _device_identity(device_index: int) -> tuple[int, tuple[int, int]]:
         "open(sys.argv[1],'w').write("
         "json.dumps({'total':p.total_memory,'cc':list(c)}))"
     )
-    subprocess.run(
-        [sys.executable, "-c", script, out_path, str(device_index)], check=True
+    data = _json_from_subprocess(
+        lambda out: [sys.executable, "-c", script, out, str(device_index)]
     )
-    data = json.loads(Path(out_path).read_text())
-    Path(out_path).unlink(missing_ok=True)
     return int(data["total"]), (int(data["cc"][0]), int(data["cc"][1]))
 
 
@@ -369,44 +402,21 @@ def _measure_point_subprocess(
     vLLM's CuMem allocator is process-global and allows one engine per
     process, so each sleep-mode point needs its own process.
     """
-    with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as handle:
-        out_path = handle.name
-    cmd = [
-        sys.executable,
-        "-m",
-        "agilerl.memory.profiling.harness",
-        "--model",
-        model_name,
-        "--out",
-        out_path,
-        "--seq-len",
-        str(point.seq_len),
-        "--micro-batch",
-        str(point.micro_batch),
-        "--group-size",
-        str(point.group_size),
-        "--lora-rank",
-        str(point.lora_rank),
-        "--quantization",
-        point.quantization,
-        *(
-            ["--lora-target-scope", point.lora_target_scope]
-            if point.lora_target_scope
-            else []
-        ),
-        "--algorithm",
-        point.algorithm,
-        "--lora-target-modules",
-        point.lora_target_modules,
-        *([] if point.memory_efficient_params else ["--no-memory-efficient-params"]),
-        "--device-index",
-        str(device_index),
-        "--gpu-memory-utilization",
-        str(point.gpu_memory_utilization),
-    ]
-    subprocess.run(cmd, check=True)
-    data = json.loads(Path(out_path).read_text())
-    Path(out_path).unlink(missing_ok=True)
+    data = _json_from_subprocess(
+        lambda out: [
+            sys.executable,
+            "-m",
+            "agilerl.memory.profiling.harness",
+            "--model",
+            model_name,
+            "--out",
+            out,
+            "--point-json",
+            json.dumps(point.as_dict()),
+            "--device-index",
+            str(device_index),
+        ]
+    )
     return (
         MeasuredPoint.model_validate(data["generation"])
         if data.get("generation")
@@ -418,34 +428,22 @@ def _measure_point_subprocess(
 def _measure_weights_subprocess(
     model_name: str, quantization: str, device_index: int
 ) -> dict[str, int]:
-    with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as handle:
-        out_path = handle.name
-    cmd = [
-        sys.executable,
-        "-m",
-        "agilerl.memory.profiling.harness",
-        "--model",
-        model_name,
-        "--out",
-        out_path,
-        "--weights-only",
-        "--quantization",
-        quantization,
-        "--device-index",
-        str(device_index),
-        # Unused by --weights-only but required by the parser.
-        "--seq-len",
-        "0",
-        "--micro-batch",
-        "0",
-        "--group-size",
-        "0",
-        "--lora-rank",
-        "0",
-    ]
-    subprocess.run(cmd, check=True)
-    data = json.loads(Path(out_path).read_text())
-    Path(out_path).unlink(missing_ok=True)
+    data = _json_from_subprocess(
+        lambda out: [
+            sys.executable,
+            "-m",
+            "agilerl.memory.profiling.harness",
+            "--model",
+            model_name,
+            "--out",
+            out,
+            "--weights-only",
+            "--quantization",
+            quantization,
+            "--device-index",
+            str(device_index),
+        ]
+    )
     sizes = data["realised_weight_bytes"]
     if isinstance(sizes, int):  # profiles written before variant measurement
         return {"full": sizes}
@@ -492,7 +490,7 @@ def run_sweep(
     realised: dict[str, int] = {}
     variants = []
     for quantization in quantizations:
-        name = "base" if quantization == "none" else quantization
+        name = variant_name(quantization)
         sizes = _measure_weights_subprocess(model_name, quantization, device_index)
         realised[name] = sizes["full"]
         variants.append(
@@ -610,46 +608,18 @@ def run_sweep(
         for entry in skipped:
             print(f"  - {entry}", flush=True)
 
-    baselines = sorted(
-        p.sleeping_baseline_bytes
-        for p in measured
-        if p.phase == "training" and p.sleeping_baseline_bytes
-    )
-    canonical_baseline = baselines[len(baselines) // 2] if baselines else 0
-
-    return ModelProfile(
-        model_id=model_name,
-        model_spec=model,
+    return _build_profile(
+        model_name,
+        model,
+        device_name,
+        total_bytes,
+        capability,
         algorithm=algorithm,
         quantization=point_quantization,
-        device=DeviceFingerprint(
-            name=device_name,
-            total_bytes=total_bytes,
-            compute_capability=f"{capability[0]}.{capability[1]}",
-        ),
-        framework_versions=_framework_versions(),
-        training=calibrate_phase(
-            model,
-            device,
-            fit_pairs["training"],
-            holdout_pairs["training"],
-            "training",
-            canonical_baseline_bytes=canonical_baseline,
-        ),
-        generation=(
-            calibrate_phase(
-                model,
-                device,
-                fit_pairs["generation"],
-                holdout_pairs["generation"],
-                "generation",
-            )
-            # SFT and DPO never generate, so there is no engine phase to fit.
-            if fit_pairs["generation"]
-            else PhaseCalibration()
-        ),
-        realised_weight_bytes=realised,
-        measured=tuple(measured),
+        fit_pairs=fit_pairs,
+        holdout_pairs=holdout_pairs,
+        measured=measured,
+        realised=realised,
     )
 
 
@@ -733,8 +703,7 @@ def main(argv: list[str] | None = None) -> int:
     checkpoint = (
         Path(args.checkpoint)
         if args.checkpoint
-        else (output_dir or FIXTURES_DIR)
-        / f"{args.model.replace('/', '__')}.partial.jsonl"
+        else (output_dir or FIXTURES_DIR) / f"{_slug(args.model)}.partial.jsonl"
     )
 
     if args.from_checkpoint:

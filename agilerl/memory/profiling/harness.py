@@ -25,10 +25,9 @@ import argparse
 import inspect
 import json
 import sys
-from collections.abc import Iterable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Protocol, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from agilerl.memory.calibration import MeasuredPoint
 from agilerl.memory.specs import (
@@ -40,13 +39,14 @@ from agilerl.memory.specs import (
     TrainingKnobs,
 )
 
+if TYPE_CHECKING:
+    import torch.nn as nn
+    from transformers import BitsAndBytesConfig
 
-class TensorContainer(Protocol):
-    """The slice of ``nn.Module`` the weight measurement touches."""
 
-    def parameters(self) -> Iterable[Any]: ...
-
-    def buffers(self) -> Iterable[Any]: ...
+def variant_name(quantization: str) -> str:
+    """Weight-variant name a quantization level maps to."""
+    return "base" if quantization == "none" else quantization
 
 
 @dataclass(frozen=True)
@@ -127,9 +127,6 @@ class SweepPoint:
             gpu_memory_utilization=float(knobs.get("gpu_memory_utilization", 0.45)),
         )
 
-    def with_utilization(self, gpu_memory_utilization: float) -> SweepPoint:
-        return replace(self, gpu_memory_utilization=gpu_memory_utilization)
-
     @property
     def scope(self) -> str:
         """Estimator-side LoRA scope implied by the targeted modules.
@@ -183,7 +180,7 @@ class SweepPoint:
             # The engine loads the same checkpoint the point names. Leaving
             # this at the default asks for a "base" variant that a sweep
             # restricted to quantized variants never builds.
-            weight_variant="base" if self.quantization == "none" else self.quantization,
+            weight_variant=variant_name(self.quantization),
         )
 
 
@@ -191,13 +188,9 @@ def measure_point(
     model_name: str,
     point: SweepPoint,
     device_index: int = 0,
-    prompt_len: int | None = None,
     snapshot_path: str | None = None,
 ) -> tuple[MeasuredPoint | None, MeasuredPoint]:
     """Run one sweep point and return (generation, training) measurements.
-
-    The prompt length defaults to a quarter of ``seq_len`` so completions can
-    exercise the remaining context budget.
 
     ``snapshot_path`` additionally records a torch allocator history over the
     training phase and dumps it for https://pytorch.org/memory_viz. The sweep
@@ -239,19 +232,12 @@ def measure_point(
             enabled="all", context="all", stacks="python", max_entries=2_000_000
         )
 
-    prompt_len = prompt_len or point.prompt_len
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    prompt_len = point.prompt_len
+    tokenizer = cast("Any", AutoTokenizer.from_pretrained(model_name))
 
-    quantization_config = None
-    if point.quantization == "nf4":
-        from transformers import BitsAndBytesConfig
-
-        quantization_config = BitsAndBytesConfig(
-            load_in_4bit=True,
-            bnb_4bit_quant_type="nf4",
-            bnb_4bit_use_double_quant=True,
-            bnb_4bit_compute_dtype=torch.bfloat16,
-        )
+    quantization_config = (
+        _nf4_quantization_config() if point.quantization == "nf4" else None
+    )
 
     targets = (
         "all-linear"
@@ -265,7 +251,6 @@ def measure_point(
     # arguments — SFT and DPO have no max_model_len, PPO has no group_size —
     # so build the superset and keep only what this one accepts rather than
     # maintaining a list per algorithm.
-    rollout_based = point.algorithm in ("grpo", "ppo")
     candidate_kwargs: dict[str, Any] = {
         "pad_token_id": tokenizer.pad_token_id or tokenizer.eos_token_id,
         "pad_token": tokenizer.pad_token or tokenizer.eos_token,
@@ -335,20 +320,6 @@ def measure_point(
 
     try:
         if rollout_based:
-            # NOTE: this samples real completions at temperature/top_p, so the
-            # realised lengths differ every run — and those lengths drive the
-            # training activation peak. The estimator predicts a *bound* (all
-            # rows at max_model_len) while this measures one draw, so the two
-            # are not the same quantity and the gap is not model error.
-            #
-            # Measured on gemma-4-E2B, identical config, two runs: trainer
-            # delta 14212 vs 10930 MiB (30% apart), the difference almost
-            # entirely activations (2321 vs 601 MiB). It is also why that
-            # fixture carries the widest per-point spread of any (sd 9.5%).
-            #
-            # Pinning the completion length (ignore_eos with min == max tokens)
-            # would make the measurement match what is predicted and take this
-            # noise out of every fixture.
             with NvmlPeakSampler(device_index) as generation_sampler:
                 completion_ids, action_masks, sampling_logps = agent.get_action(
                     prompts, training=True
@@ -413,11 +384,6 @@ def measure_point(
                 enabled="all",
                 context="all",
                 stacks="python",
-                # A ring buffer: too small and it evicts the *earliest* events
-                # in the window, which is where ``learn`` moves the base
-                # weights onto the device. At 100k both a 24-layer Qwen and a
-                # 35-layer Gemma overflowed inside a single training step and
-                # attributed 0 MiB to base weights against a 1-9 GiB reality.
                 max_entries=2_000_000,
                 clear_history=True,
             )
@@ -467,18 +433,20 @@ def measure_point(
     return generation, training
 
 
-#: Attribute names the framework strips for text-only RL on a multimodal
-#: base, matching ``VLLMConfig.strip_multimodal_towers``.
-MULTIMODAL_TOWER_ATTRS = (
-    "vision_tower",
-    "audio_tower",
-    "multi_modal_projector",
-    "embed_vision",
-    "embed_audio",
-)
+def _nf4_quantization_config() -> BitsAndBytesConfig:
+    """The nf4 config the framework trains under, shared by every measurement."""
+    import torch
+    from transformers import BitsAndBytesConfig
+
+    return BitsAndBytesConfig(
+        load_in_4bit=True,
+        bnb_4bit_quant_type="nf4",
+        bnb_4bit_use_double_quant=True,
+        bnb_4bit_compute_dtype=torch.bfloat16,
+    )
 
 
-def _storage_bytes(module: TensorContainer) -> int:
+def _storage_bytes(module: nn.Module) -> int:
     """Realised bytes of a module's parameters and buffers.
 
     Sums distinct storages rather than trusting nominal dtypes: quantized
@@ -512,20 +480,12 @@ def measure_realised_weight_bytes(
     """
     import torch
 
+    from agilerl.algorithms.core.llm_ops.vllm_colocate import MULTIMODAL_TOWER_ATTRS
     from agilerl.utils.llm_utils import create_model_from_name_or_path
 
     model_config: dict[str, Any] | None = None
     if quantization == "nf4":
-        from transformers import BitsAndBytesConfig
-
-        model_config = {
-            "quantization_config": BitsAndBytesConfig(
-                load_in_4bit=True,
-                bnb_4bit_quant_type="nf4",
-                bnb_4bit_use_double_quant=True,
-                bnb_4bit_compute_dtype=torch.bfloat16,
-            )
-        }
+        model_config = {"quantization_config": _nf4_quantization_config()}
     model = create_model_from_name_or_path(model_name, model_config=model_config)
 
     sizes = {"full": _storage_bytes(model)}
@@ -554,10 +514,15 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="agilerl.memory.profiling.harness")
     parser.add_argument("--model", required=True)
     parser.add_argument("--out", required=True)
-    parser.add_argument("--seq-len", type=int, required=True)
-    parser.add_argument("--micro-batch", type=int, required=True)
-    parser.add_argument("--group-size", type=int, required=True)
-    parser.add_argument("--lora-rank", type=int, required=True)
+    parser.add_argument(
+        "--point-json",
+        default=None,
+        help="Full SweepPoint as JSON (how the sweep invokes this module)",
+    )
+    parser.add_argument("--seq-len", type=int, default=None)
+    parser.add_argument("--micro-batch", type=int, default=None)
+    parser.add_argument("--group-size", type=int, default=None)
+    parser.add_argument("--lora-rank", type=int, default=None)
     parser.add_argument("--quantization", default="none")
     parser.add_argument(
         "--algorithm", default="grpo", choices=["grpo", "ppo", "sft", "dpo"]
@@ -603,19 +568,29 @@ def main(argv: list[str] | None = None) -> int:
             )
         }
     else:
-        point = SweepPoint(
-            seq_len=args.seq_len,
-            micro_batch=args.micro_batch,
-            group_size=args.group_size,
-            lora_rank=args.lora_rank,
-            quantization=args.quantization,
-            lora_target_scope=args.lora_target_scope,
-            attn_implementation=args.attn_implementation,
-            algorithm=args.algorithm,
-            lora_target_modules=args.lora_target_modules,
-            memory_efficient_params=not args.no_memory_efficient_params,
-            gpu_memory_utilization=args.gpu_memory_utilization,
-        )
+        if args.point_json:
+            point = SweepPoint.from_dict(json.loads(args.point_json))
+        else:
+            required = ("seq_len", "micro_batch", "group_size", "lora_rank")
+            missing = [name for name in required if getattr(args, name) is None]
+            if missing:
+                parser.error(
+                    "the following arguments are required: "
+                    + ", ".join("--" + name.replace("_", "-") for name in missing)
+                )
+            point = SweepPoint(
+                seq_len=args.seq_len,
+                micro_batch=args.micro_batch,
+                group_size=args.group_size,
+                lora_rank=args.lora_rank,
+                quantization=args.quantization,
+                lora_target_scope=args.lora_target_scope,
+                attn_implementation=args.attn_implementation,
+                algorithm=args.algorithm,
+                lora_target_modules=args.lora_target_modules,
+                memory_efficient_params=not args.no_memory_efficient_params,
+                gpu_memory_utilization=args.gpu_memory_utilization,
+            )
         generation, training = measure_point(
             args.model,
             point,

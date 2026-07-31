@@ -36,46 +36,20 @@ QUANTIZED_BYTES_PER_PARAM: dict[str, float] = {
     "gptq": 0.56,
 }
 
-#: Fused-logprob workspace budget used by the chunk auto-tune: chunk_rows is
-#: sized so the transient fp32 logit tile stays under 256 MiB.
-FUSED_LOGIT_WORKSPACE_BYTES = 256 * MiB
-FUSED_CHUNK_ROWS_MIN = 128
-FUSED_CHUNK_ROWS_MAX = 4096
-
 #: Default CUDA-graph pool the vLLM engine captures unless enforce_eager.
 CUDA_GRAPH_POOL_BYTES = 2 * 1024**3
-#: CUDA context + driver reserve per process that owns the device.
-#: Deprecated as a modelling constant: the context is device-dependent by a
-#: factor of two (A100 501 MiB vs L4 226 MiB, both measured). Use
-#: ``DeviceSpec.context_bytes``. Retained only so older fixtures, whose
-#: residuals were derived against it, still replay.
-CUDA_CONTEXT_BYTES = int(0.75 * 1024**3)
 #: Bytes per LoRA parameter as actually stored. PEFT's ``get_peft_model``
 #: defaults to ``autocast_adapter_dtype=True``, keeping adapter weights fp32
 #: even when the base is bf16/fp16 — so gradients and AdamW moments are fp32
-#: too. Measured on an L4: raising rank 8 -> 64 on Qwen2.5-0.5B costs ~20
-#: bytes per added parameter, which only resolves as 4 (actor) + 4
-#: (reference) + 4 (grad) + 8 (two moments) with fp32 adapters.
+#: too (confirmed by rank-sweep measurement on an L4).
 ADAPTER_BYTES_PER_PARAM = 4.0
 
 #: What a vLLM process holds on the device *outside* its
 #: ``gpu_memory_utilization`` budget, beyond the bare CUDA context: CUDA
 #: library workspaces (cuBLAS/NCCL/flashinfer handles) plus engine
-#: structures. Present whether the engine is asleep or awake.
-#:
-#: Two independent derivations agree, which is why they are one constant
-#: rather than two. From the sleeping floors of all ten fixtures, net of each
-#: device's own context: A100 1224 - 501 = 723 MiB, L4 913 - 226 = 687. And
-#: from the median shortfall of the 198 *generation* points, where the engine
-#: is awake: A100 713 MiB, L4 596. Near enough device-independent, unlike the
-#: context itself.
-#:
-#: Charging it to the sleeping trainer but not to generation was worth a
-#: uniform +5.0% under-prediction on the generation phase.
+#: structures. Present whether the engine is asleep or awake, and near enough
+#: device-independent (measured A100 ~723 MiB / L4 ~687 net of context).
 ENGINE_PROCESS_OVERHEAD_BYTES = 700 * 1024**2
-
-#: Deprecated alias: this was only ever the sleeping case of the above.
-SLEEPING_ENGINE_RESIDUAL_BYTES = ENGINE_PROCESS_OVERHEAD_BYTES
 
 
 @dataclass(frozen=True)
@@ -83,25 +57,10 @@ class ParamCounts:
     """Parameter counts split by matrix group.
 
     The split matters because quantization, LoRA targeting, and k-bit
-    upcasting all act on different groups.
-
-    ``moe_experts`` is separate from ``mlp`` because transformers 5.x stores
-    expert weights as one fused 3D parameter per layer
-    (``layers.N.experts.gate_up_proj``) rather than per-expert ``nn.Linear``.
-    Both bitsandbytes and PEFT dispatch on ``nn.Linear``, so neither reaches
-    them: an MoE cannot be bnb-quantized and ``all-linear`` LoRA wraps only
-    its attention. Measured on transformers 5.14 by counting parameters
-    inside ``nn.Linear`` on a meta-device instantiation:
-
-    ==========================  ======  ==============  ============
-    model                       total   in ``nn.Linear``  quantizable
-    ==========================  ======  ==============  ============
-    google/gemma-4-26B-A4B-it   25.81B  2.94B           11.4%
-    allenai/OLMoE-1B-7B-0924    6.92B   0.37B           5.4%
-    ==========================  ======  ==============  ============
-
-    So "26B at nf4" is 22.9B still in bf16 (45.7 GB) and will not load on a
-    40 GB A100 — which is exactly what it did, mid-load, at 38.8 GB resident.
+    upcasting all act on different groups. ``moe_experts`` is separate from
+    ``mlp`` because transformers 5.x stores expert weights as one fused 3D
+    parameter per layer, not per-expert ``nn.Linear`` — and both bitsandbytes
+    and PEFT dispatch on ``nn.Linear``, so neither reaches them.
     """
 
     embedding: int
@@ -220,18 +179,7 @@ def weight_bytes(
     towers = 0 if variant.stripped_multimodal else counts.multimodal_towers
     base_bytes = DTYPE_BYTES[dtype]
     if variant.quantization == "none":
-        return int(
-            (
-                counts.embedding
-                + counts.lm_head
-                + counts.attention
-                + counts.mlp
-                + counts.norms
-                + counts.moe_experts
-                + towers
-            )
-            * base_bytes
-        )
+        return int((counts.total - counts.multimodal_towers + towers) * base_bytes)
 
     q_bytes = QUANTIZED_BYTES_PER_PARAM[variant.quantization]
     held_out_bytes = 4.0 if kbit_prepared else base_bytes
@@ -279,13 +227,13 @@ def kv_cache_demand_bytes(
 
 
 def resolve_chunk_rows(vocab_size: int, explicit: int | None = None) -> int:
-    """Mirror of the framework's fused-logprob chunk auto-tune: rows sized to
-    a 256 MiB fp32 logit workspace, clamped to [128, 4096].
+    """The framework's fused-logprob chunk auto-tune: rows sized to a
+    256 MiB fp32 logit workspace, clamped to [128, 4096].
     """
     if explicit is not None:
         return explicit
-    rows = FUSED_LOGIT_WORKSPACE_BYTES // (vocab_size * 4)
-    return max(FUSED_CHUNK_ROWS_MIN, min(FUSED_CHUNK_ROWS_MAX, rows))
+    rows = 256 * MiB // max(1, vocab_size * 4)
+    return max(128, min(4096, rows))
 
 
 def logit_workspace_bytes(vocab_size: int, chunk_rows: int | None = None) -> int:
@@ -299,9 +247,9 @@ def logit_workspace_bytes(vocab_size: int, chunk_rows: int | None = None) -> int
 def resolve_max_num_batched_tokens(
     max_num_seqs: int, max_model_len: int, explicit: int | None = None
 ) -> int:
-    """Mirror of the framework's resolution rule for vLLM's scheduler-step
-    token cap (deliberately below ``max_num_seqs * max_model_len``, which
-    drives multi-GiB compile/profile tensors at long context).
+    """The framework's resolution rule for vLLM's scheduler-step token cap
+    (deliberately below ``max_num_seqs * max_model_len``, which drives
+    multi-GiB compile/profile tensors at long context).
     """
     if explicit is not None:
         return explicit
@@ -314,7 +262,7 @@ def resolve_max_num_batched_tokens(
 def resolve_attn_implementation(
     requested: str = "auto", flash_attn_installed: bool = False
 ) -> str:
-    """Mirror of the framework's backend resolution.
+    """The framework's backend resolution.
 
     ``auto`` picks FlashAttention-2 only when the ``flash_attn`` package is
     importable. It is not part of the ``llm`` extra, so a stock install
@@ -331,20 +279,8 @@ def materializes_attention_scores(attn_implementation: str, arch: ModelArch) -> 
 
     ``eager`` always does. SDPA does too whenever the model passes an explicit
     mask, which windowed models do — the flash kernel cannot take one, so the
-    dispatch falls back to the math backend.
-
-    Measured on Gemma 4 E2B (28 of 35 layers windowed, 8 heads) at seq 4096,
-    micro-batch 8: the allocator snapshot holds **2560 MiB** under
-    ``sdpa_attention_forward``, directly beneath a
-    ``create_sliding_window_causal_mask`` frame, against a quadratic term of
-    ``8 x 8 x 4096^2 x 2 = 2048 MiB``.
-
-    An earlier A/B concluded the opposite (sdpa 14.78 GiB vs flex_attention
-    15.03) and this function returned ``eager``-only on the strength of it.
-    That comparison was run before completion length was pinned, so its
-    sequences were far shorter than the 4096 budget and the quadratic term it
-    was looking for had barely formed. Pinning is what made the term visible;
-    the earlier reading was measuring a workload it did not intend to.
+    dispatch falls back to the math backend (verified by allocator snapshot on
+    Gemma 4 E2B at seq 4096).
     """
     if attn_implementation == "eager":
         return True
@@ -372,20 +308,11 @@ def lora_input_cast_bytes(
     """fp32 copies PEFT makes of every wrapped linear's input.
 
     ``get_peft_model`` defaults to ``autocast_adapter_dtype=True``, so the
-    adapters are fp32 while the base is bf16. Each wrapped linear then runs
-    ``x.to(fp32)`` on its input (``BaseTunerLayer._cast_input_dtype``),
-    allocating a fresh tensor twice the size of the bf16 original — and these
-    stay live for the backward pass.
-
-    It is not a rounding error. Measured on Qwen2.5-0.5B at seq 4096 /
-    micro-batch 8 / rank 64, A/B-ing the cast off via the same switch PEFT's
-    own context manager flips: trainer peak 6826 -> 5530 MiB, a **19%**
-    saving. That is memory spent for nothing, since the adapters could
-    simply be bf16.
-
-    Under gradient checkpointing only the block being recomputed holds its
-    casts, so this is one layer's worth; without it, every layer's survive.
-    The one-layer form predicts 1280 MiB against 1296 measured, 1.2% out.
+    adapters are fp32 while the base is bf16, and each wrapped linear casts
+    its input to fp32 (``BaseTunerLayer._cast_input_dtype``) — copies that
+    stay live for the backward pass. Worth 19% of the trainer peak at one
+    measured corner. Under gradient checkpointing only the block being
+    recomputed holds its casts; without it, every layer's survive.
     """
     h = arch.hidden_size
     # Sum of in_features over the linears PEFT wraps: q/k/v read the residual
@@ -406,24 +333,10 @@ def moe_dispatch_bytes(
 ) -> int:
     """Gather/scatter buffers the fused-expert forward builds per layer.
 
-    ``OlmoeExperts.forward`` (and its siblings) routes by *materialising*
-    copies, not by indexing in place::
-
-        final_hidden_states = torch.zeros_like(hidden_states)   # accumulator
-        expert_mask = F.one_hot(top_k_index, num_classes=...)   # int64
-        current_state = hidden_states[token_idx]                # gather
-
-    The gather copies each token once per expert it was routed to, so the
-    total is ``tokens x top_k x hidden`` — eight times the residual stream on
-    OLMoE, and nothing to do with the expert *weights* the rest of the model
-    already accounts for.
-
-    Measured on OLMoE-1B-7B at rows=4, seq=2048: gather 256 MiB, accumulator
-    34, mask 34, against a 334 MiB unexplained activation gap.
-
-    The one-hot mask is built under ``no_grad`` and is int64 regardless of
-    the model dtype, which makes it scale with the *total* expert count while
-    everything else here scales with the active count.
+    ``OlmoeExperts.forward`` (and its siblings) routes by materialising
+    copies: a gather of ``tokens x top_k x hidden``, a zeros accumulator, and
+    an int64 one-hot mask over the *total* expert count while everything else
+    scales with the active count.
     """
     if not arch.is_moe:
         return 0
@@ -453,17 +366,9 @@ def block_recompute_bytes(
     matrix.
 
     ``backward=True`` is the checkpointed-recompute case, where the block is
-    replayed and then differentiated. Each gated-MLP intermediate then has a
-    gradient live alongside it, while the residual-stream and qkv tensors do
-    not — they are consumed in place or shared with the checkpoint boundary.
-    So the MLP term doubles and the rest does not.
-
-    That is a derivation, not a fitted constant, and the two agree. Sweeping
-    a *flat* whole-block multiplier over all 198 stored training points
-    minimised at 1.75; the MLP share of a Qwen2.5 block is 75.0-75.5%, which
-    implies 1.750-1.755 by this rule. Qwen is five of the ten fixtures, so
-    the flat optimum was fitting a Qwen-weighted average of what is really a
-    per-model quantity — Gemma 4 E2B and OLMoE imply 1.61 and 1.63.
+    replayed and then differentiated: each gated-MLP intermediate then has a
+    gradient live alongside it while the residual-stream and qkv tensors do
+    not, so the MLP term doubles and the rest does not.
     """
     h = arch.hidden_size
     inter = (
@@ -485,23 +390,9 @@ def block_recompute_bytes(
     peak = rows * seq_len * per_token * act_bytes
     peak += moe_dispatch_bytes(arch, rows, seq_len, act_bytes, backward)
     if not flash_attention:
-        # The math path does not hold one score matrix but three: the
-        # pre-softmax scores, the softmax output saved for backward, and that
-        # output's gradient during it.
-        #
-        # Measured by A/B-ing the backend at Gemma 4 E2B, seq 4096,
-        # micro-batch 8, with completion length pinned:
-        #
-        #     sdpa (windowed, math path)   25662 MiB
-        #     flex_attention (tiled)       18838 MiB
-        #     difference                    6824 MiB
-        #
-        # against a single S^2 of 8 x 8 x 4096^2 x 2 = 2048 MiB, i.e. 3.33
-        # copies. Charging one was worth only a third of the real cost.
-        #
-        # Fitting this against the Gemma fixture alone would prefer 4 copies
-        # (5.9% error vs 8.3%), but that is the fit absorbing an unrelated
-        # residual -- the controlled A/B isolates the backend and says 3.33.
+        # The math path holds three score matrices, not one: the pre-softmax
+        # scores, the softmax output saved for backward, and that output's
+        # gradient during it (backend A/B on Gemma 4 E2B measured 3.33x S^2).
         peak += 3 * rows * arch.n_heads * seq_len * seq_len * act_bytes
     return int(peak)
 
@@ -525,9 +416,7 @@ def nograd_forward_bytes(
     return int(block + hidden_out)
 
 
-def optimizer_bytes_per_trainable_param(
-    weight_dtype: WeightDtype, distributed: str
-) -> float:
+def optimizer_bytes_per_trainable_param(distributed: str) -> float:
     """AdamW state per trainable (LoRA) parameter.
 
     Both moments live in the parameter dtype, and LoRA parameters are fp32
@@ -538,12 +427,3 @@ def optimizer_bytes_per_trainable_param(
     if distributed == "deepspeed":
         return moments + 4.0
     return moments
-
-
-def grad_bytes_per_trainable_param(
-    weight_dtype: WeightDtype, distributed: str
-) -> float:
-    """Gradient buffer per trainable parameter — fp32, mirroring the fp32
-    adapter parameters it accumulates into.
-    """
-    return ADAPTER_BYTES_PER_PARAM

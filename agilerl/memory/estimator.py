@@ -112,6 +112,85 @@ def _component(
     )
 
 
+def _apply_calibration(
+    profile: ModelProfile | None,
+    phase: PhaseName,
+    basis: dict[str, float],
+    device: DeviceSpec,
+    warnings: list[str],
+) -> tuple[float, CalibrationSource]:
+    """Fitted correction and its provenance, appending the matching warning."""
+    if profile is None or getattr(profile, phase).n_points == 0:
+        warnings.append(
+            "Uncalibrated estimate: no profiled constants for this "
+            "(model, device); expect a wider error band."
+        )
+        return 0.0, "none"
+    correction = getattr(profile, phase).fit.correction_bytes(basis)
+    if profile.measured_on(device):
+        return correction, "same_device"
+    warnings.append(
+        f"Constants were measured on "
+        f"{profile.device.name if profile.device else 'another device'}, "
+        f"not {device.name or 'this device'}: expect a wider band than a "
+        "same-device profile."
+    )
+    return correction, "other_device"
+
+
+def _engine_reservation_bytes(colocated: bool, profile: ModelProfile | None) -> float:
+    """What the sleeping engine keeps resident during colocated training:
+    the profile's measured residual when available, else the analytic
+    constant.
+    """
+    if not colocated:
+        return 0.0
+    measured = profile.sleeping_engine_residual_bytes if profile else None
+    return float(
+        measured if measured is not None else formulas.ENGINE_PROCESS_OVERHEAD_BYTES
+    )
+
+
+def _engine_terms(
+    model: ModelSpec, device: DeviceSpec, knobs: GenerationKnobs
+) -> tuple[dict[str, int], int, int]:
+    """Engine-budget terms shared by :func:`estimate_generation` and its
+    inversion :func:`recommend_engine_budget`, plus the resolved scheduler-step
+    token cap and the sampler buffer bytes.
+    """
+    arch = model.arch
+    act_bytes = DTYPE_BYTES[knobs.weight_dtype]
+    counts = formulas.param_counts(arch)
+    variant = model.variant(knobs.weight_variant)
+    batched_tokens = formulas.resolve_max_num_batched_tokens(
+        knobs.max_num_seqs, knobs.max_model_len, knobs.max_num_batched_tokens
+    )
+    # Prefill transients for one scheduler step plus sampler buffers
+    # (max_num_seqs x vocab logits and probs).
+    sampler = 2 * knobs.max_num_seqs * arch.vocab_size * 4
+    terms = {
+        "weights": formulas.weight_bytes(counts, knobs.weight_dtype, variant),
+        "startup_profiling_peak": formulas.block_recompute_bytes(
+            arch, 1, batched_tokens, act_bytes, device.has_flash_attention
+        )
+        + sampler,
+        "cuda_graphs": 0 if knobs.enforce_eager else formulas.CUDA_GRAPH_POOL_BYTES,
+        "lora_slots": int(
+            knobs.max_loras
+            * formulas.lora_param_count(arch, knobs.max_lora_rank)
+            * act_bytes
+        ),
+        "kv_demand": formulas.kv_cache_demand_bytes(
+            arch,
+            knobs.kv_cache_dtype,
+            knobs.weight_dtype,
+            knobs.concurrency,
+            knobs.max_model_len,
+        ),
+    }
+    return terms, batched_tokens, sampler
+
+
 def estimate_training(
     model: ModelSpec,
     device: DeviceSpec,
@@ -119,17 +198,15 @@ def estimate_training(
     trainer_variant: str = "base",
     colocated: bool = False,
     profile: ModelProfile | None = None,
-    colocated_engine_reservation_bytes: int = 0,
 ) -> PhaseBreakdown:
     """Peak training-phase memory breakdown on the training device.
 
-    ``colocated_engine_reservation_bytes`` is what the *sleeping* vLLM engine
-    leaves resident on the device while the trainer runs. Measured on vLLM
-    0.23, sleep level 1 releases essentially everything — the engine drops
-    from its full ``gpu_memory_utilization`` footprint to a few hundred MiB of
-    context and engine structures — so this is a small constant, not a
-    utilization-scaled reservation. It is a parameter rather than a fitted
-    term so a profile is not pinned to one utilization.
+    When ``colocated``, the bar includes what the *sleeping* vLLM engine
+    leaves resident while the trainer runs. Measured on vLLM 0.23, sleep
+    level 1 releases essentially everything — the engine drops from its full
+    ``gpu_memory_utilization`` footprint to a few hundred MiB of context and
+    engine structures — so this is a small constant, not a
+    utilization-scaled reservation.
     """
     arch = model.arch
     counts = formulas.param_counts(arch)
@@ -169,18 +246,10 @@ def estimate_training(
             "Only the attention and router matrices shrink."
         )
     if kbit and not arch.is_moe:
-        # Measured on Qwen2.5-0.5B, A100, paired bf16/nf4 runs at an identical
-        # corner: the quantized path costs activation memory, and the trade
-        # against the weight saving inverts with token count.
-        #
-        #     512 tokens    nf4 is 100 MiB *cheaper*
-        #   8,192 tokens    nf4 is 332 MiB dearer
-        #  32,768 tokens    nf4 is 2276 MiB dearer
-        #
-        # bitsandbytes' MatMul4Bit.backward workspace is directly visible in
-        # the allocator trace. The estimator does not yet carry the term (see
-        # fixtures/pending/README.md), so it under-predicts quantized training
-        # at long context -- warn rather than mislead.
+        # bitsandbytes' MatMul4Bit.backward workspace is not yet a modelled
+        # term (see fixtures/pending/README.md), so the estimator
+        # under-predicts quantized training at long context — warn rather
+        # than mislead.
         warnings.append(
             "Quantized training is under-predicted at long context. nf4 saves "
             "weight bytes but costs activation bytes, and the two cross over: "
@@ -204,26 +273,23 @@ def estimate_training(
     ) * adapter_bytes_per_param
 
     trained_params = lora_params * knobs.n_trained_adapters + value_head_params
-    grads = trained_params * formulas.grad_bytes_per_trainable_param(
-        knobs.weight_dtype, knobs.distributed
-    )
+    # Gradients are fp32, mirroring the fp32 adapter parameters they
+    # accumulate into.
+    grads = trained_params * formulas.ADAPTER_BYTES_PER_PARAM
     opt_state = trained_params * formulas.optimizer_bytes_per_trainable_param(
-        knobs.weight_dtype, knobs.distributed
+        knobs.distributed
     )
 
     # Gradient pass: checkpoint boundaries + one block's recompute peak +
     # the (rows, S, H) hidden state the fused logprob function saves.
     grad_rows = knobs.grad_rows
+    recompute = formulas.block_recompute_bytes(
+        arch, grad_rows, s, act_bytes, flash_like, backward=True
+    )
     if knobs.gradient_checkpointing:
         saved = formulas.activation_hidden_bytes(arch, grad_rows, s, act_bytes)
-        recompute = formulas.block_recompute_bytes(
-            arch, grad_rows, s, act_bytes, flash_like, backward=True
-        )
     else:
         # Without checkpointing every block's intermediates are saved.
-        recompute = formulas.block_recompute_bytes(
-            arch, grad_rows, s, act_bytes, flash_like, backward=True
-        )
         saved = recompute * arch.n_layers
         warnings.append(
             "gradient_checkpointing=False saves every block's activations; "
@@ -279,24 +345,10 @@ def estimate_training(
     # advantages — (rows, S) fp32-ish, megabytes at most.
     rollout = 6 * knobs.batch_size * knobs.group_size * s * 4
 
-    correction = 0.0
-    source: CalibrationSource = "none"
-    if profile is not None and profile.training.n_points > 0:
-        basis = training_basis(model, knobs)
-        correction = profile.training.fit.correction_bytes(basis)
-        same_device = profile.measured_on(device)
-        source = "same_device" if same_device else "other_device"
-        if not same_device:
-            warnings.append(
-                f"Constants were measured on "
-                f"{profile.device.name if profile.device else 'another device'}, "
-                f"not {device.name or 'this device'}. Cross-device transfer is "
-                "unreliable in both directions — measured on two models it "
-                "roughly halved the error on one and slightly worsened it on "
-                "the other — so treat this as an estimate with a wider band."
-            )
-
-    engine_residual = float(colocated_engine_reservation_bytes) if colocated else 0.0
+    correction, source = _apply_calibration(
+        profile, "training", training_basis(model, knobs), device, warnings
+    )
+    engine_residual = _engine_reservation_bytes(colocated, profile)
 
     components = (
         _component(
@@ -386,12 +438,6 @@ def estimate_training(
         ),
     )
 
-    if source == "none":
-        warnings.append(
-            "Uncalibrated estimate: no profiled constants for this "
-            "(model, device); expect a wider error band."
-        )
-
     return PhaseBreakdown(
         phase="training",
         components=components,
@@ -419,34 +465,19 @@ def estimate_generation(
     that stays resident while the base is offloaded.
     """
     arch = model.arch
-    counts = formulas.param_counts(arch)
     act_bytes = DTYPE_BYTES[knobs.weight_dtype]
     warnings: list[str] = []
 
     budget = int(knobs.gpu_memory_utilization * device.total_bytes)
-    variant = model.variant(knobs.weight_variant)
-    weights = formulas.weight_bytes(counts, knobs.weight_dtype, variant)
-
-    batched_tokens = formulas.resolve_max_num_batched_tokens(
-        knobs.max_num_seqs, knobs.max_model_len, knobs.max_num_batched_tokens
-    )
-    # Prefill transients for one scheduler step plus sampler buffers
-    # (max_num_seqs x vocab logits and probs).
-    prefill = formulas.block_recompute_bytes(
-        arch, 1, batched_tokens, act_bytes, device.has_flash_attention
-    )
-    sampler = 2 * knobs.max_num_seqs * arch.vocab_size * 4
+    terms, batched_tokens, sampler = _engine_terms(model, device, knobs)
+    weights = terms["weights"]
     # What vLLM's start-up profiling run measures: a full scheduler step of
     # max_num_batched_tokens. This sizes the KV pool but is *transient* — it
     # is not resident while the engine serves.
-    profiling_peak = prefill + sampler
-
-    graphs = 0 if knobs.enforce_eager else formulas.CUDA_GRAPH_POOL_BYTES
-    lora_slots = (
-        knobs.max_loras
-        * formulas.lora_param_count(arch, knobs.max_lora_rank)
-        * act_bytes
-    )
+    profiling_peak = terms["startup_profiling_peak"]
+    graphs = terms["cuda_graphs"]
+    lora_slots = terms["lora_slots"]
+    kv_demand = terms["kv_demand"]
 
     if knobs.kv_cache_dtype == "fp8" and not device.supports_fp8:
         warnings.append(
@@ -467,13 +498,6 @@ def estimate_generation(
         )
         kv_pool = 0
 
-    kv_demand = formulas.kv_cache_demand_bytes(
-        arch,
-        knobs.kv_cache_dtype,
-        knobs.weight_dtype,
-        knobs.concurrency,
-        knobs.max_model_len,
-    )
     if kv_pool and kv_demand > kv_pool:
         warnings.append(
             f"Worst-case KV demand ({kv_demand / GiB:.1f} GiB for "
@@ -507,25 +531,12 @@ def estimate_generation(
         trainer_residual = (
             lora_params
             * train_knobs.n_trained_adapters
-            * formulas.optimizer_bytes_per_trainable_param(
-                train_knobs.weight_dtype, train_knobs.distributed
-            )
+            * formulas.optimizer_bytes_per_trainable_param(train_knobs.distributed)
         )
 
-    correction = 0.0
-    source: CalibrationSource = "none"
-    if profile is not None and profile.generation.n_points > 0:
-        basis = generation_basis(model, knobs)
-        correction = profile.generation.fit.correction_bytes(basis)
-        same_device = profile.measured_on(device)
-        source = "same_device" if same_device else "other_device"
-        if not same_device:
-            warnings.append(
-                f"Constants were measured on "
-                f"{profile.device.name if profile.device else 'another device'}, "
-                f"not {device.name or 'this device'}: expect a wider band "
-                "than a same-device profile."
-            )
+    correction, source = _apply_calibration(
+        profile, "generation", generation_basis(model, knobs), device, warnings
+    )
 
     components = (
         _component(
@@ -593,12 +604,6 @@ def estimate_generation(
         ),
     )
 
-    if source == "none":
-        warnings.append(
-            "Uncalibrated estimate: no profiled constants for this "
-            "(model, device); expect a wider error band."
-        )
-
     return PhaseBreakdown(
         phase="generation",
         components=components,
@@ -629,44 +634,8 @@ def recommend_engine_budget(
     built from; a fraction above 1.0 means the workload cannot be served on
     this device at this context and concurrency.
     """
-    arch = model.arch
-    act_bytes = DTYPE_BYTES[knobs.weight_dtype]
-    counts = formulas.param_counts(arch)
-    variant = model.variant(knobs.weight_variant)
-    weights = formulas.weight_bytes(counts, knobs.weight_dtype, variant)
-
-    batched_tokens = formulas.resolve_max_num_batched_tokens(
-        knobs.max_num_seqs, knobs.max_model_len, knobs.max_num_batched_tokens
-    )
-    profiling_peak = (
-        formulas.block_recompute_bytes(
-            arch, 1, batched_tokens, act_bytes, device.has_flash_attention
-        )
-        + 2 * knobs.max_num_seqs * arch.vocab_size * 4
-    )
-    graphs = 0 if knobs.enforce_eager else formulas.CUDA_GRAPH_POOL_BYTES
-    lora_slots = int(
-        knobs.max_loras
-        * formulas.lora_param_count(arch, knobs.max_lora_rank)
-        * act_bytes
-    )
-    kv_demand = formulas.kv_cache_demand_bytes(
-        arch,
-        knobs.kv_cache_dtype,
-        knobs.weight_dtype,
-        knobs.concurrency,
-        knobs.max_model_len,
-    )
-
-    terms = {
-        "weights": weights,
-        "startup_profiling_peak": profiling_peak,
-        "cuda_graphs": graphs,
-        "lora_slots": lora_slots,
-        "kv_demand": kv_demand,
-    }
-    required = sum(terms.values())
-    return required / device.total_bytes, terms
+    terms, _, _ = _engine_terms(model, device, knobs)
+    return sum(terms.values()) / device.total_bytes, terms
 
 
 def estimate_run(config: RunConfig, profile: ModelProfile | None = None) -> RunEstimate:
@@ -674,14 +643,6 @@ def estimate_run(config: RunConfig, profile: ModelProfile | None = None) -> RunE
     model = config.model
     if profile is not None:
         model = profile.apply_realised_weights(model)
-    engine_reservation = 0
-    if config.colocated:
-        measured = profile.sleeping_engine_residual_bytes if profile else None
-        engine_reservation = (
-            measured
-            if measured is not None
-            else formulas.SLEEPING_ENGINE_RESIDUAL_BYTES
-        )
     training = estimate_training(
         model,
         config.train_device,
@@ -689,7 +650,6 @@ def estimate_run(config: RunConfig, profile: ModelProfile | None = None) -> RunE
         trainer_variant=config.trainer_weight_variant,
         colocated=config.colocated,
         profile=profile,
-        colocated_engine_reservation_bytes=engine_reservation,
     )
     generation = estimate_generation(
         model,

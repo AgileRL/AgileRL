@@ -19,11 +19,6 @@ from typing_extensions import Self
 GiB = 1024**3
 MiB = 1024**2
 
-#: Fraction of device memory held back from the fit check. Allocator
-#: fragmentation makes runs fail somewhat below nominal capacity, so a
-#: prediction at 100% of total is not a run that fits.
-FRAGMENTATION_HEADROOM_FRACTION = 0.05
-
 #: Fallback CUDA context for a device whose own has not been measured. Set
 #: between the two devices measured so far (A100 501 MiB, L4 226 MiB) rather
 #: than at either, so an unknown device is wrong by less in both directions.
@@ -83,15 +78,9 @@ def _encoder_params(cfg: dict[str, Any]) -> int:
 def multimodal_tower_params(config: dict[str, Any]) -> int:
     """Approximate parameters in vision and audio towers.
 
-    A lower bound, and knowingly so: the formula assumes plain transformer
-    encoders, while real towers are convolutional. On Gemma 4 it returns
-    519 MiB of bf16 weights against a measured 951 (E2B) and 965 (E4B) —
-    45% short, because the vision tower is MobileNet-style and the audio
-    tower a conformer, neither of which is a stack of attention blocks.
-
-    Still far better than the 0 it replaces, which made a multimodal
-    checkpoint look 68% smaller than it is. A profiled ``realised_bytes``
-    supersedes this whenever one exists.
+    A known lower bound: the formula assumes plain transformer encoders,
+    while real towers are convolutional (~45% short on Gemma 4). A profiled
+    ``realised_bytes`` supersedes this whenever one exists.
     """
     return sum(
         _encoder_params(config[key])
@@ -136,7 +125,6 @@ class ModelArch(BaseModel):
     head_dim: int
     vocab_size: int
     tied_embeddings: bool = False
-    max_position_embeddings: int | None = None
     #: Sliding-window size when the model uses windowed attention. Caps KV
     #: growth per sequence on the windowed layers.
     sliding_window: int | None = None
@@ -233,7 +221,6 @@ class ModelArch(BaseModel):
             head_dim=int(text_cfg.get("head_dim") or hidden // n_heads),
             vocab_size=int(text_cfg["vocab_size"]),
             tied_embeddings=bool(text_cfg.get("tie_word_embeddings", False)),
-            max_position_embeddings=text_cfg.get("max_position_embeddings"),
             sliding_window=(
                 text_cfg.get("sliding_window")
                 if text_cfg.get("use_sliding_window", True)
@@ -321,7 +308,6 @@ class DeviceSpec(BaseModel):
     name: str | None = None
     #: fp8 KV cache / fp8 weights need compute capability >= 8.9 (Ada/Hopper).
     supports_fp8: bool = True
-    supports_bf16: bool = True
     #: Whether the device can run flash-style attention kernels at all
     #: (Ampere and later). Necessary but not sufficient — which backend is
     #: actually used also depends on the installed packages and the model's
@@ -333,14 +319,10 @@ class DeviceSpec(BaseModel):
     #: than FlashAttention-2.
     flash_attn_installed: bool = False
     #: Bytes a bare CUDA context costs, before the process allocates anything.
-    #: Device-dependent by a factor of two, so a single constant biases whole
-    #: fleets in opposite directions. Measured under torch 2.11 / cu130 by
-    #: reading NVML either side of a one-element allocation:
-    #:
-    #:     A100-SXM4-40GB (sm_80)   501 MiB
-    #:     L4             (sm_89)   226 MiB
-    #:
-    #: ``None`` falls back to :data:`CUDA_CONTEXT_BYTES_DEFAULT`.
+    #: Device-dependent by a factor of two (see
+    #: :data:`MEASURED_CUDA_CONTEXT_BYTES`), so a single constant biases whole
+    #: fleets in opposite directions. ``None`` falls back to
+    #: :data:`CUDA_CONTEXT_BYTES_DEFAULT`.
     cuda_context_bytes: int | None = None
 
     @property
@@ -363,7 +345,7 @@ class DeviceSpec(BaseModel):
         """
         if self.available_bytes is not None:
             return self.available_bytes
-        return int(self.total_bytes * (1.0 - FRAGMENTATION_HEADROOM_FRACTION))
+        return int(self.total_bytes * 0.95)
 
     @classmethod
     def from_compute_capability(
@@ -374,7 +356,6 @@ class DeviceSpec(BaseModel):
             total_bytes=total_bytes,
             name=name,
             supports_fp8=cc >= 8.9,
-            supports_bf16=cc >= 8.0,
             has_flash_attention=cc >= 8.0,
             cuda_context_bytes=MEASURED_CUDA_CONTEXT_BYTES.get(name),
         )

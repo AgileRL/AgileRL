@@ -28,17 +28,10 @@ def wait_for_idle(
 
     A sweep runs each point in its own subprocess, and the driver reclaims a
     dead process's memory asynchronously — so the next point can sample its
-    baseline while its predecessor is still resident. That contaminated floor
-    is then carried into ``device_peak_bytes`` for the whole point.
-
-    It is not a small effect: two points in a 32k sweep opened on floors of
-    4.33 and 8.03 GiB against a typical 1.2, which read as 27-29%
-    under-predictions and dragged that sweep's training holdout to 17.4%.
-
-    Polling until the reading has not dropped for ``settle_s`` costs a few
-    seconds per point against multi-minute measurements. Returns the floor
-    even on timeout: a device genuinely busy with someone else's work should
-    slow the sweep down, not fail it.
+    baseline while its predecessor is still resident, contaminating
+    ``device_peak_bytes`` for the whole point. Returns the floor even on
+    timeout: a device genuinely busy with someone else's work should slow the
+    sweep down, not fail it.
 
     :param device_index: CUDA device index to watch.
     :param timeout_s: Give up waiting after this long and return what is read.
@@ -50,7 +43,10 @@ def wait_for_idle(
     pynvml.nvmlInit()
     try:
         handle = pynvml.nvmlDeviceGetHandleByIndex(device_index)
-        used = lambda: int(pynvml.nvmlDeviceGetMemoryInfo(handle).used)  # noqa: E731
+
+        def used() -> int:
+            return int(pynvml.nvmlDeviceGetMemoryInfo(handle).used)
+
         deadline = time.monotonic() + timeout_s
         floor = used()
         quiet_since = time.monotonic()

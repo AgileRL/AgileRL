@@ -33,18 +33,22 @@ class Advice(BaseModel):
         return f"{self.action} (saves ~{self.saves_bytes / GiB:.1f} GiB)"
 
 
+def _update(field: str, **updates: object) -> Callable[[RunConfig], RunConfig]:
+    def apply(c: RunConfig) -> RunConfig:
+        return c.model_copy(
+            update={field: getattr(c, field).model_copy(update=updates)}
+        )
+
+    return apply
+
+
 def _training_candidates(
     config: RunConfig,
 ) -> list[tuple[str, Callable[[RunConfig], RunConfig]]]:
     t = config.training
 
     def with_training(**updates: object) -> Callable[[RunConfig], RunConfig]:
-        def apply(c: RunConfig) -> RunConfig:
-            return c.model_copy(
-                update={"training": c.training.model_copy(update=updates)}
-            )
-
-        return apply
+        return _update("training", **updates)
 
     candidates: list[tuple[str, Callable[[RunConfig], RunConfig]]] = []
     if t.grad_rows > 1:
@@ -120,12 +124,7 @@ def _generation_candidates(
     device = config.generation_device
 
     def with_generation(**updates: object) -> Callable[[RunConfig], RunConfig]:
-        def apply(c: RunConfig) -> RunConfig:
-            return c.model_copy(
-                update={"generation": c.generation.model_copy(update=updates)}
-            )
-
-        return apply
+        return _update("generation", **updates)
 
     candidates: list[tuple[str, Callable[[RunConfig], RunConfig]]] = []
     if not g.enforce_eager:

@@ -33,7 +33,7 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
-GIB = 1024**3
+from agilerl.memory.specs import GiB
 
 #: Frame markers mapped to estimator component keys, most specific first.
 #: A frame matches if the marker appears in its filename or function name.
@@ -93,16 +93,7 @@ def classify(frames: list[dict]) -> str:
     return "unattributed"
 
 
-def summarise_final(path: Path) -> dict[str, int]:
-    """Bytes per component still live when the snapshot was taken.
-
-    Rarely what you want: by the time ``learn`` returns, activations are
-    freed and the trainer's parameters are back on the host, so the
-    interesting components read as zero.
-    """
-    with path.open("rb") as handle:
-        snapshot = pickle.load(handle)
-
+def _final_totals(snapshot: dict) -> dict[str, int]:
     totals: dict[str, int] = defaultdict(int)
     for segment in snapshot.get("segments", []):
         for block in segment.get("blocks", []):
@@ -111,6 +102,17 @@ def summarise_final(path: Path) -> dict[str, int]:
             frames = block.get("frames") or []
             totals[classify(frames)] += int(block.get("size", 0))
     return dict(totals)
+
+
+def summarise_final(path: Path) -> dict[str, int]:
+    """Bytes per component still live when the snapshot was taken.
+
+    Rarely what you want: by the time ``learn`` returns, activations are
+    freed and the trainer's parameters are back on the host, so the
+    interesting components read as zero.
+    """
+    with path.open("rb") as handle:
+        return _final_totals(pickle.load(handle))
 
 
 def summarise(path: Path) -> dict[str, int]:
@@ -134,7 +136,7 @@ def summarise(path: Path) -> dict[str, int]:
     traces = snapshot.get("device_traces") or []
     events = max(traces, key=len) if traces else []
     if not events:
-        return summarise_final(path)
+        return _final_totals(snapshot)
 
     # Block level only. ``segment_alloc`` is the cudaMalloc of a segment and
     # ``alloc`` is a block carved from one, so counting both double-counts
@@ -191,8 +193,8 @@ def main(argv: list[str] | None = None) -> int:
     grand = sum(totals.values())
     print(f"{'component':<22}{'GiB':>8}{'share':>9}")
     for component, size in sorted(totals.items(), key=lambda kv: -kv[1]):
-        print(f"{component:<22}{size / GIB:>8.2f}{size / grand:>8.1%}")
-    print(f"{'TOTAL (torch only)':<22}{grand / GIB:>8.2f}")
+        print(f"{component:<22}{size / GiB:>8.2f}{size / grand:>8.1%}")
+    print(f"{'TOTAL (torch only)':<22}{grand / GiB:>8.2f}")
     print("\nvLLM's CuMem allocations are not represented here.")
     return 0
 

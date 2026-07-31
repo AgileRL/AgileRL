@@ -33,8 +33,6 @@ from agilerl.memory.specs import (
     TrainingKnobs,
 )
 
-BAR_WIDTH = 40
-
 
 def _load_model(
     args: argparse.Namespace,
@@ -79,7 +77,7 @@ def _render_phase(breakdown: PhaseBreakdown) -> str:
     for component in breakdown.components:
         if component.bytes_ == 0:
             continue
-        width = round(BAR_WIDTH * component.bytes_ / scale) if scale else 0
+        width = round(40 * component.bytes_ / scale) if scale else 0
         bar = "#" * max(width, 1)
         lines.append(
             f"  {component.label:<34} {component.bytes_ / GiB:>7.2f} GiB  {bar}"

@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import argparse
 import sys
-from typing import cast
+from dataclasses import replace
 
 from agilerl.memory import formulas
 from agilerl.memory.calibration import (
@@ -31,45 +31,8 @@ from agilerl.memory.estimator import (
     estimate_training,
     recommend_engine_budget,
 )
-from agilerl.memory.profiling.harness import SweepPoint
-from agilerl.memory.specs import (
-    Algorithm,
-    DeviceSpec,
-    GenerationKnobs,
-    GiB,
-    LoraTargetScope,
-    TrainingKnobs,
-)
-
-TRAINING_KEYS = (
-    "base_weights",
-    "adapters",
-    "grads_optimizer",
-    "activations",
-    "logits_workspace",
-    "vllm_residual",
-    "overhead",
-)
-GENERATION_KEYS = (
-    "weights",
-    "kv_cache",
-    "activation_peak",
-    "cuda_graphs",
-    "lora_slots",
-    "trainer_residual",
-    "overhead",
-)
-
-
-def _device_of(profile: ModelProfile) -> DeviceSpec:
-    assert profile.device is not None
-    major, _, minor = (profile.device.compute_capability or "8.0").partition(".")
-    return DeviceSpec.from_compute_capability(
-        profile.device.total_bytes,
-        int(major),
-        int(minor or 0),
-        name=profile.device.name,
-    )
+from agilerl.memory.profiling.harness import SweepPoint, variant_name
+from agilerl.memory.specs import GiB
 
 
 def _measured_total(
@@ -115,40 +78,27 @@ def main(argv: list[str] | None = None) -> int:
         if profile is None or profile.model_spec is None or profile.device is None:
             continue
         model = profile.apply_realised_weights(profile.model_spec)
-        device = _device_of(profile)
-        # Inherit how the sweep actually configured LoRA. Defaulting to
-        # all-linear would size adapters across every expert of an MoE
-        # profiled with attention-only targets, over-predicting by GiBs.
-        measured_point = SweepPoint.from_dict(profile.measured[0].knobs)
-        train_knobs = TrainingKnobs(
-            micro_batch_size_per_gpu=args.micro_batch,
-            batch_size=args.micro_batch,
+        device = profile.device.to_device_spec()
+        # Inherit how the sweep actually configured the run (LoRA targeting,
+        # algorithm, quantization). Defaulting to all-linear would size
+        # adapters across every expert of an MoE profiled with attention-only
+        # targets, over-predicting by GiBs.
+        point = replace(
+            SweepPoint.from_dict(profile.measured[0].knobs),
+            seq_len=args.seq_len,
+            micro_batch=args.micro_batch,
             group_size=args.group_size,
-            trajectories_per_update=args.group_size,
-            max_model_len=args.seq_len,
             lora_rank=args.lora_rank,
-            lora_target_scope=cast("LoraTargetScope", measured_point.scope),
-            algorithm=cast("Algorithm", measured_point.algorithm),
-        )
-        gen_knobs = GenerationKnobs(
             gpu_memory_utilization=args.gpu_memory_utilization,
-            max_num_seqs=args.group_size,
-            max_model_len=args.seq_len,
-            max_prompt_len=max(args.seq_len // 4, 8),
-            max_lora_rank=args.lora_rank,
-            concurrent_requests=args.group_size,
         )
+        gen_knobs = point.generation_knobs()
         training = estimate_training(
             model,
             device,
-            train_knobs,
+            point.training_knobs(),
+            trainer_variant=variant_name(point.quantization),
             colocated=True,
             profile=profile,
-            colocated_engine_reservation_bytes=(
-                profile.sleeping_engine_residual_bytes
-                if profile.sleeping_engine_residual_bytes is not None
-                else formulas.SLEEPING_ENGINE_RESIDUAL_BYTES
-            ),
         )
         generation = estimate_generation(
             model, device, gen_knobs, colocated=True, profile=profile
@@ -168,15 +118,11 @@ def main(argv: list[str] | None = None) -> int:
             f"{arch.n_layers} layers, {arch.n_kv_heads} kv-heads"
             + (f", window {arch.sliding_window}" if arch.sliding_window else "")
         )
-        for phase, breakdown, keys in (
-            ("TRAIN", training, TRAINING_KEYS),
-            ("INFER", generation, GENERATION_KEYS),
-        ):
-            components = {c.key: c.bytes_ / GiB for c in breakdown.components}
+        for phase, breakdown in (("TRAIN", training), ("INFER", generation)):
             line = "  ".join(
-                f"{k.split('_')[0]}={components.get(k, 0):.2f}"
-                for k in keys
-                if components.get(k, 0) > 0.005
+                f"{c.key.split('_')[0]}={c.bytes_ / GiB:.2f}"
+                for c in breakdown.components
+                if c.bytes_ / GiB > 0.005
             )
             measured = _measured_total(
                 profile, "training" if phase == "TRAIN" else "generation", knob_match
