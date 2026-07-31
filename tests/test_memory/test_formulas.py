@@ -176,11 +176,18 @@ def test_sliding_window_pattern_integer_form():
     assert arch.sliding_window_layer_fraction == pytest.approx(5 / 6)
 
 
-def test_only_eager_materializes_attention_scores():
-    # Measured, not assumed: an A/B on Gemma 4 E2B (windowed, 8 heads) at
-    # seq 4096 / micro-batch 8 put sdpa 0.25 GiB BELOW flex_attention, where
-    # a materialised score matrix would have put it 2.15 GiB above. So SDPA
-    # stays O(S) for a windowed mask on this stack.
+def test_windowed_sdpa_materializes_attention_scores():
+    # A windowed model passes an explicit mask, which the flash kernel cannot
+    # take, so SDPA falls back to the math backend and builds the score
+    # matrix. Measured on Gemma 4 E2B at seq 4096 / micro-batch 8: the
+    # allocator snapshot holds 2560 MiB under sdpa_attention_forward, beneath
+    # a create_sliding_window_causal_mask frame, against a 2048 MiB quadratic
+    # term.
+    #
+    # An earlier A/B concluded the opposite and this test asserted it. That
+    # comparison ran before completion length was pinned, so its sequences
+    # were far shorter than the 4096 budget and the quadratic term had barely
+    # formed.
     dense = QWEN_05B
     windowed = QWEN_05B.model_copy(update={"sliding_window": 1024})
 
@@ -192,6 +199,10 @@ def test_only_eager_materializes_attention_scores():
 
     assert formulas.materializes_attention_scores("eager", dense)
     assert formulas.materializes_attention_scores("eager", windowed)
-    for impl in ("sdpa", "flash_attention_2", "flex_attention"):
+    # The one that changed: windowed + sdpa.
+    assert formulas.materializes_attention_scores("sdpa", windowed)
+    assert not formulas.materializes_attention_scores("sdpa", dense)
+    # Tiled kernels never build it, windowed or not.
+    for impl in ("flash_attention_2", "flex_attention"):
         assert not formulas.materializes_attention_scores(impl, dense)
         assert not formulas.materializes_attention_scores(impl, windowed)

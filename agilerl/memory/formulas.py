@@ -329,26 +329,28 @@ def resolve_attn_implementation(
 def materializes_attention_scores(attn_implementation: str, arch: ModelArch) -> bool:
     """Whether the backend builds a ``rows x heads x S x S`` score matrix.
 
-    Only ``eager`` does, on the stack this was measured against. SDPA was
-    expected to as well — its flash kernel is documented as requiring no
-    explicit attention mask, and sliding-window models pass one — but a
-    controlled A/B says otherwise. Gemma 4 E2B (28 of 35 layers windowed,
-    8 heads) at seq 4096, micro-batch 8, where the quadratic term would be
-    2.15 GiB:
+    ``eager`` always does. SDPA does too whenever the model passes an explicit
+    mask, which windowed models do — the flash kernel cannot take one, so the
+    dispatch falls back to the math backend.
 
-        sdpa            training peak 14.78 GiB
-        flex_attention  training peak 15.03 GiB
+    Measured on Gemma 4 E2B (28 of 35 layers windowed, 8 heads) at seq 4096,
+    micro-batch 8: the allocator snapshot holds **2560 MiB** under
+    ``sdpa_attention_forward``, directly beneath a
+    ``create_sliding_window_causal_mask`` frame, against a quadratic term of
+    ``8 x 8 x 4096^2 x 2 = 2048 MiB``.
 
-    SDPA came out 0.25 GiB *lower*, not 2.15 GiB higher, so torch 2.11 /
-    transformers 5.11 is keeping it O(S) for a windowed mask. Charging the
-    quadratic term here would invent memory the run never allocates.
-
-    The caveat that remains unmeasured: SDPA can still fall back to the math
-    backend on older stacks or at much longer context than 4096, which is
-    what the framework's own warning is about. If that is ever observed,
-    this is the function to change — and the A/B above is how to check.
+    An earlier A/B concluded the opposite (sdpa 14.78 GiB vs flex_attention
+    15.03) and this function returned ``eager``-only on the strength of it.
+    That comparison was run before completion length was pinned, so its
+    sequences were far shorter than the 4096 budget and the quadratic term it
+    was looking for had barely formed. Pinning is what made the term visible;
+    the earlier reading was measuring a workload it did not intend to.
     """
-    return attn_implementation == "eager"
+    if attn_implementation == "eager":
+        return True
+    # flex_attention and flash_attention_2 tile the score matrix and never
+    # build it; SDPA only avoids it when no explicit mask forces the math path.
+    return attn_implementation == "sdpa" and arch.sliding_window is not None
 
 
 def activation_hidden_bytes(
