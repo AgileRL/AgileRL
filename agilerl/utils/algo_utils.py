@@ -2673,6 +2673,17 @@ class DummyOptimizer:
         )
 
 
+def _match_action_ndims(
+    reference: npt.NDArray, other: npt.NDArray
+) -> tuple[npt.NDArray, npt.NDArray]:
+    """Prepend singleton axes until continuous action arrays share the same ndim."""
+    while other.ndim < reference.ndim:
+        other = np.expand_dims(other, 0)
+    while reference.ndim < other.ndim:
+        reference = np.expand_dims(reference, 0)
+    return reference, other
+
+
 def _reconcile_shapes(
     reference: npt.NDArray, other: npt.NDArray, discrete_actions: bool
 ) -> tuple[npt.NDArray, npt.NDArray]:
@@ -2696,10 +2707,8 @@ def _reconcile_shapes(
                 reference = reference.squeeze()
             else:
                 other = other.squeeze()
-        elif other.ndim < reference.ndim:
-            other = np.expand_dims(other, 0)
         else:
-            reference = np.expand_dims(reference, 0)
+            reference, other = _match_action_ndims(reference, other)
 
     return reference, np.broadcast_to(other, reference.shape)
 
