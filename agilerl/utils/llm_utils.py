@@ -55,10 +55,10 @@ else:
     AutoModelForCausalLMWithValueHead: Any = None
     BitsAndBytesConfig: Any = None
 
+# Sentinel when DeepSpeed is absent; overwritten by the real enum otherwise.
+ZeroParamStatus = None
 if HAS_DEEPSPEED:
     from deepspeed.runtime.zero.partition_parameters import ZeroParamStatus
-else:
-    ZeroParamStatus = None
 
 _DEPRECATED_LLM_ENV_NAMES = frozenset(
     ("apply_chat_template", "ReasoningGym", "PreferenceGym", "SFTGym"),
