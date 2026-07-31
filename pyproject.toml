@@ -24,7 +24,7 @@ dependencies = [
     "pandas>=2.2.3",
     # <1.25: the MPE envs (used by the multi-agent test fixtures) were moved out
     # of pettingzoo into the separate mpe2 package as of 1.25.
-    "pettingzoo>=1.23.1,<1.25",
+    "pettingzoo>=1.23.1,<1.27",
     "jax[cpu]>=0.4.31",
     "lazy-loader>=0.4",
     "packaging>=20.0",
