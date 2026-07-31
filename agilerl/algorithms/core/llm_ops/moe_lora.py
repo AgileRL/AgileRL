@@ -95,8 +95,19 @@ def _dims_aligned(itemsize: int, *dims: int) -> bool:
 
 
 def _is_partitioned(*tensors: torch.Tensor) -> bool:
-    """Whether any tensor is a DeepSpeed ZeRO-3 partitioned parameter."""
-    return any(hasattr(t, "ds_id") for t in tensors)
+    """Whether any tensor is a ZeRO-3 shard that is not currently gathered.
+
+    Inside a ZeRO-3 leaf module's forward (see
+    :func:`mark_expert_wrappers_as_zero3_leaves`) partitioned parameters are
+    gathered and report ``ds_status`` AVAILABLE, so raw reads see full data.
+    """
+    for tensor in tensors:
+        if not hasattr(tensor, "ds_id"):
+            continue
+        status = getattr(tensor, "ds_status", None)
+        if getattr(status, "name", None) != "AVAILABLE":
+            return True
+    return False
 
 
 def _grouped_linear(
@@ -328,9 +339,11 @@ class RoutedExpertsLoraWrapper(ParamWrapper):
         assert not isinstance(act_fn, torch.Tensor)
         if _is_partitioned(up_weight, down_weight):
             msg = (
-                "Split expert LoRA cannot read ZeRO-3 partitioned expert "
-                "weights outside their owning module's forward. Use ZeRO "
-                "stage <= 2 with expert LoRA on this architecture."
+                "Split expert LoRA found ZeRO-3 partitioned expert weights "
+                "that are not gathered. The expert wrappers must be ZeRO-3 "
+                "leaf modules (mark_expert_wrappers_as_zero3_leaves; applied "
+                "automatically at algorithm init) so the subtree gathers "
+                "before this forward reads the packed weights."
             )
             raise RuntimeError(msg)
 
@@ -363,6 +376,24 @@ class RoutedExpertsLoraWrapper(ParamWrapper):
         result = torch.zeros_like(hidden_states)
         result.index_add_(0, token_idx, (down * routed_weights).to(result.dtype))
         return result
+
+
+def mark_expert_wrappers_as_zero3_leaves(model: nn.Module) -> int:
+    """Mark upgraded expert wrappers as DeepSpeed ZeRO-3 leaf modules, returning how many.
+
+    A leaf module's whole parameter subtree — adapter Linears and the packed
+    expert weights beneath the wrapper — is gathered at its pre-forward, so
+    the split forward's raw weight reads see full tensors (and MoE avoids
+    per-parameter gather storms). Call before ``deepspeed.initialize``.
+    """
+    wrapper_classes = (SortedExpertsLoraWrapper, RoutedExpertsLoraWrapper)
+    count = sum(isinstance(m, wrapper_classes) for m in model.modules())
+    if not count:
+        return 0
+    from deepspeed.utils import set_z3_leaf_modules
+
+    set_z3_leaf_modules(model, list(wrapper_classes))
+    return count
 
 
 def upgrade_moe_param_wrappers(model: nn.Module) -> int:

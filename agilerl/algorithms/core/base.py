@@ -154,7 +154,10 @@ if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
         set_fused_adapter_routing,
         unset_fused_adapter_routing,
     )
-    from agilerl.algorithms.core.llm_ops.moe_lora import upgrade_moe_param_wrappers
+    from agilerl.algorithms.core.llm_ops.moe_lora import (
+        mark_expert_wrappers_as_zero3_leaves,
+        upgrade_moe_param_wrappers,
+    )
     from agilerl.algorithms.core.llm_ops.vllm_colocate import (
         patch_vllm_3d_moe_lora_flag,
         patch_vllm_lora_keep_resident,
@@ -4395,12 +4398,25 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
                     )
                     raise ValueError(msg)
             keep_adapter_base_dtype = self.zero_stage == 3 and not quantized_base
-            peft_target = get_peft_model(
-                peft_target,
-                lora_config,
-                adapter_name="actor",
-                autocast_adapter_dtype=not keep_adapter_base_dtype,
-            )
+            # PEFT reads the targeted parameters' shapes when attaching expert
+            # wrappers; under zero.Init they are partitioned placeholders, so
+            # gather them for the duration of the attach.
+            expert_params: list[torch.Tensor] = []
+            attach_ctx: AbstractContextManager[Any] = nullcontext()
+            if expert_target_parameters and self.zero_stage == 3:
+                expert_params = [
+                    param
+                    for name, param in peft_target.named_parameters()
+                    if any(name.endswith(target) for target in expert_target_parameters)
+                ]
+                attach_ctx = gather_if_zero3(self.zero_stage, expert_params)
+            with attach_ctx:
+                peft_target = get_peft_model(
+                    peft_target,
+                    lora_config,
+                    adapter_name="actor",
+                    autocast_adapter_dtype=not keep_adapter_base_dtype,
+                )
 
             # Add every adapter listed in ``selected_adapters`` beyond ``actor`` as a fresh
             # LoRA initialised from ``self.lora_config``. Downstream loads can overwrite
@@ -4432,11 +4448,16 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
                         param.data = param.data.to(torch.bfloat16)
 
             if expert_target_parameters:
-                n_expert_lora = upgrade_moe_param_wrappers(peft_target)
+                # The upgrade's convention checks read the packed weights'
+                # shapes, so gather the shards again under ZeRO-3.
+                with gather_if_zero3(self.zero_stage, expert_params):
+                    n_expert_lora = upgrade_moe_param_wrappers(peft_target)
                 logger.info(
                     "Split expert-LoRA execution enabled on %d packed-experts modules.",
                     n_expert_lora,
                 )
+                if n_expert_lora and self.zero_stage == 3:
+                    mark_expert_wrappers_as_zero3_leaves(peft_target)
 
             # Apply Liger Kernel optimizations (fused RMSNorm, RoPE, SwiGLU,
             # CrossEntropy) to the inner causal-LM *after* PEFT wrapping.

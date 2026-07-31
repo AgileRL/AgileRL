@@ -143,17 +143,14 @@ def patch_vllm_3d_moe_lora_flag(model_name_or_path: str) -> bool:
         from vllm.model_executor.models.registry import ModelRegistry
 
         architecture = AutoConfig.from_pretrained(model_name_or_path).architectures[0]
-        entry = getattr(ModelRegistry, "models", {}).get(architecture)
-        if entry is not None:
-            model_cls = entry.load_model_cls()
-        else:
-            # Older vLLM without the lazy-entry mapping.
-            model_cls, _ = ModelRegistry.resolve_model_cls(architecture)
+        model_cls = ModelRegistry.models[architecture].load_model_cls()
     except Exception:
         return False
     if getattr(model_cls, "is_3d_moe_weight", False):
         return False
-    model_cls.is_3d_moe_weight = True
+    # setattr: the attribute is undeclared on model classes predating the
+    # flag, so plain assignment is a type error.
+    setattr(model_cls, "is_3d_moe_weight", True)  # noqa: B010
     return True
 
 
