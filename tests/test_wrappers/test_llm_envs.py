@@ -715,6 +715,28 @@ def test_dataset_env_eval_mode_restores_prior_mode_when_nested():
     assert env.dataloader is env.train_dataloader_iter
 
 
+def test_dataset_env_stores_chat_template_kwargs():
+    """``chat_template_kwargs`` are kept on the env (empty dict by default)."""
+    tokenizer = AutoTokenizer.from_pretrained(TINY_LLM_FIXTURE_PATH)
+    dataset = DummyPreferenceDataset(4)
+    env = DatasetEnv(
+        train_dataset=dataset,
+        test_dataset=dataset,
+        tokenizer=tokenizer,
+        objective="preference",
+        chat_template_kwargs={"enable_thinking": False},
+    )
+    assert env.chat_template_kwargs == {"enable_thinking": False}
+
+    default_env = DatasetEnv(
+        train_dataset=dataset,
+        test_dataset=dataset,
+        tokenizer=tokenizer,
+        objective="preference",
+    )
+    assert default_env.chat_template_kwargs == {}
+
+
 def test_dataset_env_rejects_unknown_kind():
     """``objective`` must be ``"preference"`` or ``"sft"``; anything else raises."""
     tokenizer = AutoTokenizer.from_pretrained(TINY_LLM_FIXTURE_PATH)

@@ -204,6 +204,7 @@ def bare_rollout_env() -> RolloutEnv:
     """A ``RolloutEnv`` shell carrying only the fields the tokenize paths read."""
     w = RolloutEnv.__new__(RolloutEnv)
     w.tools = None  # optional config; __init__ default, read by the tokenize paths
+    w.chat_template_kwargs = {}  # __init__ default, read by the tokenize paths
     w.sampling_logps = []  # read by get_episode_data
     # boundary-frame cache; __init__ defaults, read by the feedback tokenize path
     w._boundary_parts = None

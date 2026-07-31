@@ -393,6 +393,71 @@ class _ChrTokenizerWithChatTemplateBroken(_ChrTokenizer):
     """Has no apply_chat_template at all, so the boundary diff path errors."""
 
 
+class _KwargsRecordingChatTokenizer(_ChatTemplateRecordingTokenizer):
+    """Records the extra kwargs each ``apply_chat_template`` call receives."""
+
+    def __init__(self, renderer):
+        super().__init__(renderer)
+        self.calls: list[dict] = []
+
+    def apply_chat_template(
+        self,
+        messages,
+        tokenize: bool = True,
+        add_generation_prompt: bool = True,
+        **kwargs,
+    ):
+        self.calls.append(dict(kwargs))
+        return super().apply_chat_template(
+            messages,
+            tokenize=tokenize,
+            add_generation_prompt=add_generation_prompt,
+        )
+
+
+class TestRolloutEnvChatTemplateKwargs:
+    """Configured ``chat_template_kwargs`` reach every chat-template render."""
+
+    def test_kwargs_forwarded_on_initial_prompt(self) -> None:
+        w = bare_rollout_env()
+        w.apply_chat_template = True
+        w.chat_template_kwargs = {"enable_thinking": False}
+        w.tokenizer = _KwargsRecordingChatTokenizer(_render_chatml)
+        w._tokenize_initial_prompt("hi")
+        assert w.tokenizer.calls == [{"enable_thinking": False}]
+
+    def test_kwargs_forwarded_on_boundary_frame_render(self) -> None:
+        w = bare_rollout_env()
+        w.apply_chat_template = True
+        w.chat_template_kwargs = {"enable_thinking": False}
+        w.tokenizer = _KwargsRecordingChatTokenizer(_render_chatml)
+        out = w._chat_template_boundary_ids("FEEDBACK")
+        assert out is not None
+        assert w.tokenizer.calls == [{"enable_thinking": False}]
+
+    def test_env_tools_win_over_configured_tools_entry(self) -> None:
+        w = bare_rollout_env()
+        w.apply_chat_template = True
+        w.chat_template_kwargs = {"enable_thinking": False, "tools": ["stale"]}
+        w.tools = [{"type": "function"}]
+        w.tokenizer = _KwargsRecordingChatTokenizer(_render_chatml)
+        w._tokenize_initial_prompt("hi")
+        assert w.tokenizer.calls == [
+            {"enable_thinking": False, "tools": [{"type": "function"}]}
+        ]
+
+    def test_constructor_kwargs_reach_reset_render(self) -> None:
+        tokenizer = _KwargsRecordingChatTokenizer(_render_chatml)
+        w = RolloutEnv(
+            FakeEnvClient(),
+            tokenizer,
+            max_turns=1,
+            chat_template_kwargs={"enable_thinking": False},
+        )
+        w.reset()
+        assert tokenizer.calls == [{"enable_thinking": False}]
+
+
 class TestRolloutEnvPolicyObservationFromState:
     def test_policy_observation_returns_current_prompt_fields(self) -> None:
         """The policy observation carries the current ``input_ids`` directly."""

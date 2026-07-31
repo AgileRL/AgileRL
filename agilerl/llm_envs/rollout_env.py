@@ -59,6 +59,7 @@ class RolloutEnv:
         mcp_tool: str | None = None,
         pad_id: int | None = None,
         apply_chat_template: bool = True,
+        chat_template_kwargs: dict[str, Any] | None = None,
         max_model_len: int | None = None,
         max_output_tokens: int | None = None,
     ) -> None:
@@ -73,6 +74,9 @@ class RolloutEnv:
         :param mcp_tool: MCP tool the text is sent to as ``call_tool``; ``None`` sends plain text.
         :param pad_id: Padding token id for assembled tensors.
         :param apply_chat_template: Render prompts through the chat template vs raw encoding.
+        :param chat_template_kwargs: Extra kwargs for every ``apply_chat_template``
+            render (e.g. ``{"enable_thinking": False}``); the env's tool schemas
+            are set on top under ``tools``.
         :param max_model_len: Engine context length; enables stop-on-overflow when set.
         :param max_output_tokens: Generation budget reserved under ``max_model_len``.
         :ivar full_ids: Running episode token sequence (prompt + generations + feedback).
@@ -104,6 +108,7 @@ class RolloutEnv:
         self.tokenizer = tokenizer
         self.pad_id = pad_id
         self.apply_chat_template = apply_chat_template
+        self.chat_template_kwargs: dict[str, Any] = dict(chat_template_kwargs or {})
         # Tool schemas fetched lazily on first use (see :attr:`tools`).
         self._tools: list[Any] | None = None
         self._tools_known = False
@@ -234,7 +239,7 @@ class RolloutEnv:
     def _tokenize_initial_prompt(self, obs_text: str) -> torch.Tensor:
         """Tokenize the initial observation, optionally with chat template."""
         if self.apply_chat_template:
-            chat_template_kwargs: dict[str, Any] = {}
+            chat_template_kwargs = dict(self.chat_template_kwargs)
             if self.tools is not None:
                 chat_template_kwargs["tools"] = self.tools
             result: Any = self.tokenizer.apply_chat_template(
@@ -301,7 +306,7 @@ class RolloutEnv:
             {"role": "assistant", "content": assistant_ph},
             {"role": "user", "content": feedback_ph},
         ]
-        chat_template_kwargs: dict[str, Any] = {}
+        chat_template_kwargs = dict(self.chat_template_kwargs)
         if self.tools is not None:
             chat_template_kwargs["tools"] = self.tools
         try:

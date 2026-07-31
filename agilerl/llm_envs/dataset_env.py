@@ -50,6 +50,7 @@ class DatasetEnv:
         *,
         objective: Literal["preference", "sft"],
         response_column: str = "target",
+        chat_template_kwargs: dict[str, Any] | None = None,
         data_batch_size_per_gpu: int = 8,
         max_context_length: int | None = None,
         min_completion_length: int | None = None,
@@ -67,6 +68,8 @@ class DatasetEnv:
         :param tokenizer: Tokenizer used by the collate function.
         :param objective: ``"preference"`` (DPO) or ``"sft"``.
         :param response_column: Target column for SFT rows.
+        :param chat_template_kwargs: Extra kwargs for any chat-template render of
+            the dataset's prompts (e.g. ``{"enable_thinking": False}``).
         :param data_batch_size_per_gpu: Batch size for the train/test dataloaders.
         :param max_context_length: Optional max prompt+completion token budget.
         :param min_completion_length: Minimum reserved completion token budget.
@@ -106,6 +109,7 @@ class DatasetEnv:
 
         self.name = train_dataset.info.dataset_name
         self.tokenizer = tokenizer
+        self.chat_template_kwargs: dict[str, Any] = dict(chat_template_kwargs or {})
         self.data_batch_size_per_gpu = data_batch_size_per_gpu
         self.rank = int(rank)
         self.world_size = int(world_size)
