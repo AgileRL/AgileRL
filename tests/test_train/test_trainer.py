@@ -1728,6 +1728,14 @@ class TestLocalTrainerIntegration:
         return mock_tokenizer
 
     @staticmethod
+    def _mock_llm_accelerator() -> MagicMock:
+        """Accelerator stand-in with real DP shard ints for DatasetEnv."""
+        mock_accel = MagicMock()
+        mock_accel.process_index = 0
+        mock_accel.num_processes = 1
+        return mock_accel
+
+    @staticmethod
     @contextlib.contextmanager
     def _llm_trainer_patches(mock_pop: list[MagicMock]):
         """Patches population, accelerator, and tokenizer loading for LLM tests."""
@@ -1739,7 +1747,7 @@ class TestLocalTrainerIntegration:
             ),
             patch(
                 "agilerl.training.trainer.create_llm_accelerator",
-                return_value=MagicMock(),
+                return_value=TestLocalTrainerIntegration._mock_llm_accelerator(),
             ),
             patch(
                 "agilerl.training.trainer.AutoTokenizer.from_pretrained",
@@ -2615,6 +2623,8 @@ class TestMakeEnvBranches:
         trainer.algorithm_spec.batch_size = 8
         trainer.tokenizer = MagicMock()
         trainer.accelerator = MagicMock()
+        trainer.accelerator.process_index = 0
+        trainer.accelerator.num_processes = 1
 
         with patch(
             "agilerl.training.trainer.isinstance",
@@ -2633,6 +2643,9 @@ class TestMakeEnvBranches:
         assert trainer.env_spec.max_context_length == 1024
         assert trainer.env_spec.seed == 42
         assert trainer.env_spec.data_batch_size_per_gpu == 8
+        trainer.env_spec.make_env.assert_called_once_with(
+            tokenizer=trainer.tokenizer, rank=0, world_size=1
+        )
 
     def test_standard_env_calls_make_env(self):
         """Non-LLM env spec calls make_env() with no args."""
