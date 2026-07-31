@@ -1541,8 +1541,11 @@ class TestLLMLocalTrainer:
 
         assert mock_llm_env_spec.max_context_length == dpo_spec.max_model_len
         assert mock_llm_env_spec.seed == dpo_spec.seed
+        mock_accel = mock_create_accel.return_value
         mock_llm_env_spec.make_env.assert_called_once_with(
-            tokenizer=mock_tokenizer, accelerator=mock_create_accel.return_value
+            tokenizer=mock_tokenizer,
+            rank=mock_accel.process_index,
+            world_size=mock_accel.num_processes,
         )
         assert trainer.env is mock_env
 
