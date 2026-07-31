@@ -14,6 +14,7 @@ from agilerl.algorithms.core.llm_ops.fused_logprobs import (
     FusedLinearLogProbsFunction,
     _fused_logprob_chunk,
     _fused_logprob_chunk_dispatch,
+    fp32_lm_head_operands,
     fused_linear_logprobs_chunked,
 )
 
@@ -97,28 +98,27 @@ class TestFp32CastBeforeMatmul:
 
     def test_overflowing_fp16_logits_stay_finite(self):
         # 8 * 300 * 300 = 720_000, well past the fp16 max of 65_504.
-        h = torch.full((2, 8), 300.0, dtype=torch.float16)
+        h = torch.full((1, 2, 8), 300.0, dtype=torch.float16)
         w = torch.full((16, 8), 300.0, dtype=torch.float16)
-        targets = torch.zeros(2, dtype=torch.long)
-        assert not torch.isfinite(h @ w.t()).any()
+        targets = torch.zeros(1, 2, dtype=torch.long)
+        assert not torch.isfinite(h.reshape(2, 8) @ w.t()).any()
 
-        out = _fused_logprob_chunk(h, w, None, targets, 1.0, True)
+        out = fused_linear_logprobs_chunked(h, w, None, targets, chunk_rows=1)
 
-        assert out.dtype == torch.float32
         assert torch.isfinite(out).all()
         # Uniform logits: every token's logprob is -log(V), to the fp32
         # resolution available at a logit magnitude of 720_000.
-        expected = torch.full((2,), -torch.tensor(16.0).log().item())
-        assert torch.allclose(out, expected, atol=0.1)
+        expected = torch.full((1, 2), -torch.tensor(16.0).log().item())
+        assert torch.allclose(out.float(), expected, atol=0.1)
 
     def test_overflowing_fp16_bias_stays_finite(self):
-        h = torch.full((1, 4), 100.0, dtype=torch.float16)
+        h = torch.full((1, 1, 4), 100.0, dtype=torch.float16)
         w = torch.full((3, 4), 75.0, dtype=torch.float16)
         bias = torch.full((3,), 60000.0, dtype=torch.float16)
-        targets = torch.zeros(1, dtype=torch.long)
-        assert not torch.isfinite(h @ w.t() + bias).any()
+        targets = torch.zeros(1, 1, dtype=torch.long)
+        assert not torch.isfinite(h.reshape(1, 4) @ w.t() + bias).any()
 
-        out = _fused_logprob_chunk(h, w, bias, targets, 1.0, True)
+        out = fused_linear_logprobs_chunked(h, w, bias, targets, chunk_rows=1)
 
         assert torch.isfinite(out).all()
 
@@ -131,6 +131,91 @@ class TestFp32CastBeforeMatmul:
         out = _fused_logprob_chunk(h, w, None, targets, 1.0, False)
 
         assert out.dtype == torch.float16
+
+
+class TestFp32LmHeadOperands:
+    """A ``(V, H)`` fp32 copy is gigabytes at production vocab sizes, so a chunk
+    loop takes at most one, shared by every chunk.
+    """
+
+    def test_returns_the_same_objects_when_no_cast_is_needed(self):
+        w = torch.randn(16, 8, dtype=torch.bfloat16)
+        bias = torch.randn(16, dtype=torch.bfloat16)
+
+        assert fp32_lm_head_operands(w, bias, False) == (w, bias)
+
+        w32 = w.float()
+        bias32 = bias.float()
+        assert fp32_lm_head_operands(w32, bias32, True) == (w32, bias32)
+
+    def test_upcasts_weight_and_bias_together(self):
+        w = torch.randn(16, 8, dtype=torch.bfloat16)
+        bias = torch.randn(16, dtype=torch.bfloat16)
+
+        head_weight, head_bias = fp32_lm_head_operands(w, bias, True)
+
+        assert head_weight.dtype == torch.float32
+        assert head_bias.dtype == torch.float32
+        assert torch.equal(head_weight, w.float())
+
+    def test_missing_bias_stays_none(self):
+        w = torch.randn(16, 8, dtype=torch.bfloat16)
+
+        assert fp32_lm_head_operands(w, None, True)[1] is None
+
+
+class TestLmHeadUpcastIsHoistedOutOfTheChunkLoop:
+    """Every chunk of a loop must receive one and the same fp32 head."""
+
+    @staticmethod
+    def _recording_chunk(seen):
+        def chunk(h_chunk, lm_head_weight, lm_head_bias, target_chunk, temp, cast):
+            seen.append((lm_head_weight.data_ptr(), lm_head_weight.dtype))
+            return _fused_logprob_chunk(
+                h_chunk, lm_head_weight, lm_head_bias, target_chunk, temp, cast
+            )
+
+        return chunk
+
+    def test_forward_upcasts_the_head_once(self):
+        torch.manual_seed(0)
+        hidden = torch.randn(2, 6, 8, dtype=torch.bfloat16)
+        weight = (torch.randn(16, 8) * 0.02).to(torch.bfloat16)
+        targets = torch.randint(0, 16, (2, 6))
+        seen = []
+
+        with patch(
+            "agilerl.algorithms.core.llm_ops.fused_logprobs._fused_logprob_chunk",
+            new=self._recording_chunk(seen),
+        ):
+            fused_linear_logprobs_chunked(hidden, weight, None, targets, chunk_rows=3)
+
+        assert len(seen) == 4  # 12 rows / chunk_rows=3
+        assert {dtype for _ptr, dtype in seen} == {torch.float32}
+        assert len({ptr for ptr, _dtype in seen}) == 1
+        assert seen[0][0] != weight.data_ptr()
+
+    def test_backward_recompute_upcasts_the_head_once(self):
+        torch.manual_seed(0)
+        hidden = torch.randn(2, 6, 8, dtype=torch.bfloat16, requires_grad=True)
+        weight = (torch.randn(16, 8) * 0.02).to(torch.bfloat16)
+        targets = torch.randint(0, 16, (2, 6))
+        logps = FusedLinearLogProbsFunction.apply(
+            hidden, weight, None, targets, 1.0, True, 3
+        )
+        seen = []
+
+        with patch(
+            "agilerl.algorithms.core.llm_ops.fused_logprobs._fused_logprob_chunk",
+            new=self._recording_chunk(seen),
+        ):
+            logps.sum().backward()
+
+        assert len(seen) == 4
+        assert {dtype for _ptr, dtype in seen} == {torch.float32}
+        assert len({ptr for ptr, _dtype in seen}) == 1
+        assert hidden.grad is not None
+        assert torch.isfinite(hidden.grad).all()
 
 
 class TestMixedDtypeOperands:

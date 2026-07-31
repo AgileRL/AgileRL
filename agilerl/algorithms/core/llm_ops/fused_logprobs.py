@@ -19,6 +19,32 @@ import torch
 from agilerl.utils.llm_utils import gather_if_ds_param as _gather_if_ds_param
 
 
+def fp32_lm_head_operands(
+    lm_head_weight: torch.Tensor,
+    lm_head_bias: torch.Tensor | None,
+    cast_to_fp32: bool,
+) -> tuple[torch.Tensor, torch.Tensor | None]:
+    """Upcast the lm_head for one chunk loop, hoisted out of the loop body.
+
+    A ``(V, H)`` fp32 copy is gigabytes at production vocab sizes, so a loop
+    takes at most one, shared by every chunk. Call inside the ZeRO-3 gather, or
+    the copy is taken from an unmaterialized shard.
+
+    :param lm_head_weight: ``(V, H)``.
+    :type lm_head_weight: torch.Tensor
+    :param lm_head_bias: ``(V,)`` or ``None``.
+    :type lm_head_bias: torch.Tensor | None
+    :param cast_to_fp32: whether the loop runs its matmul in fp32.
+    :type cast_to_fp32: bool
+    :return: The head operands to pass to every chunk.
+    :rtype: tuple[torch.Tensor, torch.Tensor | None]
+    """
+    if not cast_to_fp32 or lm_head_weight.dtype == torch.float32:
+        return lm_head_weight, lm_head_bias
+    bias = lm_head_bias.float() if lm_head_bias is not None else None
+    return lm_head_weight.float(), bias
+
+
 def _fused_logprob_chunk(
     h_chunk: torch.Tensor,
     lm_head_weight: torch.Tensor,
@@ -44,18 +70,19 @@ def _fused_logprob_chunk(
     :type target_chunk: torch.Tensor
     :param temperature: logits divided by this before log_softmax (skip at 1.0).
     :type temperature: float
-    :param cast_to_fp32: run the matmul and the reduction in fp32.
+    :param cast_to_fp32: upcast ``h_chunk`` so the matmul and the reduction run
+        in fp32; the head is expected to arrive fp32 already
+        (:func:`fp32_lm_head_operands`).
     :type cast_to_fp32: bool
     :return: ``(chunk_rows,)`` per-token logprobs.
     :rtype: torch.Tensor
     """
     if cast_to_fp32:
         h_chunk = h_chunk.float()
-        lm_head_weight = lm_head_weight.float()
-        if lm_head_bias is not None:
-            lm_head_bias = lm_head_bias.float()
-    elif h_chunk.dtype != lm_head_weight.dtype:
-        # fp16 checkpoint under bf16 autocast: fp32 hidden, fp16 head; promote to match.
+    if h_chunk.dtype != lm_head_weight.dtype:
+        # Chunk-tiling callers upcast the head once ahead of their loop, so this
+        # only fires for a direct call or an fp16 checkpoint under bf16 autocast
+        # (fp32 hidden, fp16 head). It copies the whole ``(V, H)`` head.
         compute_dtype = torch.promote_types(h_chunk.dtype, lm_head_weight.dtype)
         h_chunk = h_chunk.to(compute_dtype)
         lm_head_weight = lm_head_weight.to(compute_dtype)
@@ -150,13 +177,18 @@ def fused_linear_logprobs_chunked(
     out = torch.empty(N, dtype=orig_dtype, device=hidden.device)
 
     with _gather_if_ds_param(lm_head_weight, lm_head_bias):
+        head_weight, head_bias = fp32_lm_head_operands(
+            lm_head_weight,
+            lm_head_bias,
+            cast_to_fp32,
+        )
         for s in range(0, N, chunk_rows):
             e = min(s + chunk_rows, N)
             result = _fused_logprob_chunk_dispatch(
                 hidden.device,
                 flat_h[s:e],
-                lm_head_weight,
-                lm_head_bias,
+                head_weight,
+                head_bias,
                 flat_targets[s:e],
                 temperature,
                 cast_to_fp32,
@@ -246,16 +278,23 @@ class FusedLinearLogProbsFunction(torch.autograd.Function):
                 torch.zeros_like(lm_head_weight) if ctx.needs_weight_grad else None
             )
             grad_bias = torch.zeros_like(lm_head_bias) if ctx.needs_bias_grad else None
+            # Grad buffers above stay in the head's own dtype; the recompute
+            # below runs against one hoisted fp32 copy of it.
+            head_weight, head_bias = fp32_lm_head_operands(
+                lm_head_weight,
+                lm_head_bias,
+                cast_to_fp32,
+            )
 
             for s in range(0, N, chunk_rows):
                 e = min(s + chunk_rows, N)
                 h_chunk = flat_h[s:e].detach()
                 if ctx.needs_hidden_grad:
                     h_chunk.requires_grad_(True)
-                weight = lm_head_weight
+                weight = head_weight
                 if ctx.needs_weight_grad:
                     weight = weight.detach().requires_grad_(True)
-                bias = lm_head_bias
+                bias = head_bias
                 if ctx.needs_bias_grad and bias is not None:
                     bias = bias.detach().requires_grad_(True)
 
