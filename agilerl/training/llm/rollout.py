@@ -201,11 +201,16 @@ def train_llm_rollout(
     # guard after the per-agent loop).
     consecutive_stalls = 0
     group_size = getattr(pop[0], "group_size", 1)
-    # Seed from the agent's seed, offset by rank, so data-parallel ranks draw
-    # decorrelated dataset rows and env tasks.
+    # Rank-offset seed for procedural env reset(seed=...) uniqueness only. Dataset
+    # rows are split by the TaskAssigner's contiguous per-rank shard instead.
     group_seed = int(pop[0].seed) + _distributed_rank(accelerator) * (1 << 31)
     rollout_env = BatchRolloutEnv(
-        env_factory, batch_size, group_size, io_timeout_s=io_timeout_s
+        env_factory,
+        batch_size,
+        group_size,
+        io_timeout_s=io_timeout_s,
+        rank=_distributed_rank(accelerator),
+        world_size=_distributed_world_size(accelerator),
     )
     test_env: RolloutEnv | None = None
     try:
@@ -282,6 +287,16 @@ def train_llm_rollout(
                     agg_accuracy = safe_aggregate_metrics(accelerator, accuracy)
                     if accelerator is None or accelerator.is_main_process:
                         agent.metrics.log("accuracy", agg_accuracy)
+
+                for name, mean_value in rollout_env.get_rubric_score_means().items():
+                    metric = f"reward_{name}"
+                    if metric not in agent.metrics.additional_metrics:
+                        agent.metrics.register(metric)
+                    agg = safe_aggregate_metrics(
+                        accelerator, mean_score.new_tensor(mean_value)
+                    )
+                    if accelerator is None or accelerator.is_main_process:
+                        agent.metrics.log(metric, agg)
 
                 effective_batch_steps = batch_steps * data_increment
                 agent.finalize_training_step(batch_steps)

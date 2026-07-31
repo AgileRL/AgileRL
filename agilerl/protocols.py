@@ -697,5 +697,9 @@ class EnvClientProtocol(Protocol):
     def tools(self) -> list[Any]:
         """Tool schemas advertised by the env (empty when none)."""
 
+    @property
+    def rubric_components(self) -> tuple[str, ...]:
+        """Leaf rubric names for component metrics (empty when none)."""
+
     def eval_mode(self) -> AbstractContextManager[None]:
         """Serve the held-out split for the duration of the context."""

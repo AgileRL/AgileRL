@@ -41,6 +41,8 @@ from agilerl.llm_envs.openenv_server import (
     _normalize_reset,
     _normalize_step,
 )
+from agilerl.llm_envs.prompt_dataset import PromptDatasetEnv
+from agilerl.llm_envs.rubrics import reward_fn_to_rubric
 from tests.helpers.rollout_doubles import MiniTokenizer
 
 
@@ -476,6 +478,12 @@ class TestTaskAssigner:
         """``dataset_size=0`` never draws rows, so any rank/world_size is fine."""
         assert TaskAssigner(0, rank=3, world_size=8).assign(1, 2) == [(None, None)] * 2
 
+    def test_invalid_rank_or_world_size_raises(self) -> None:
+        with pytest.raises(ValueError, match="world_size"):
+            TaskAssigner(4, seed=0, rank=0, world_size=0)
+        with pytest.raises(ValueError, match="rank"):
+            TaskAssigner(4, seed=0, rank=4, world_size=4)
+
 
 # --- /state strictness + MCP tools/list fallback ----------------------------
 class _StubSync:
@@ -548,6 +556,35 @@ def test_session_state_reports_dataset_size_and_tools() -> None:
     client = _session_client(state={"dataset_size": 5, "tools": [{"name": "t"}]})
     assert client.dataset_size == 5
     assert client.tools == [{"name": "t"}]
+
+
+def test_session_state_reports_rubric_components() -> None:
+    client = _session_client(state={"rubric_components": ["fmt", "correct"]})
+    assert client.rubric_components == ("fmt", "correct")
+
+
+def test_session_step_forwards_metadata_and_obs_rubric_scores() -> None:
+    """Result metadata merges into info; obs-level rubric_scores fill gaps."""
+    client = _session_client()
+
+    def _step(action: Any) -> Any:
+        del action
+        return SimpleNamespace(
+            observation={
+                "prompt": "hi",
+                "rubric_scores": {"fmt": 1.0},
+                "metadata": {"extra": 2},
+            },
+            reward=1.0,
+            done=True,
+            metadata={"from_result": True},
+        )
+
+    client._sync.step = _step  # type: ignore[method-assign]
+    _obs, _reward, _term, _trunc, info = client.step("go")
+    assert info["from_result"] is True
+    assert info["extra"] == 2
+    assert info["rubric_scores"] == {"fmt": 1.0}
 
 
 # --- broken mid-episode, re-dialled at the next reset ------------------------
@@ -1270,3 +1307,18 @@ def test_reset_retries_once_when_the_server_closed_an_idle_session() -> None:
     assert prompt == "prompt"
     assert client._sync is fresh
     assert client._redials == 1
+
+
+def test_server_hosts_prompt_dataset_environment_as_is() -> None:
+    """OpenEnv ``Environment`` subclasses are hosted without ``OpenEnvWrapper``."""
+    world = PromptDatasetEnv(
+        [{"question": "q", "answer": "a"}],
+        rubric=reward_fn_to_rubric(lambda c, a, q: 1.0),
+    )
+    with OpenEnvServer(world) as server:
+        client = OpenEnvSessionClient(server.base_url)
+        assert client.reset(row_index=0)[0] == "q"
+        _obs, reward, terminated, _truncated, _info = client.step("done")
+        assert reward == 1.0
+        assert terminated is True
+        assert client.rubric_components == ("fn",)

@@ -15,6 +15,7 @@ from agilerl.llm_envs import (
     BatchRolloutEnv,
     RolloutEnv,
 )
+from agilerl.llm_envs.rubrics import reward_fn_to_rubric
 from tests.helpers.rollout_doubles import (
     FakeEnvClient,
     RolloutEnvDoubleMixin,
@@ -411,7 +412,7 @@ class TestRolloutEnvPolicyObservationFromState:
 
 
 class TestRolloutEnvFromDataset:
-    """from_dataset bundles (question, answer) rows + a reward fn into a single-turn env."""
+    """from_dataset bundles (question, answer) rows + a rubric into a single-turn env."""
 
     _ROWS: ClassVar[list[dict]] = [
         {"question": "q0", "answer": "a0"},
@@ -429,7 +430,7 @@ class TestRolloutEnvFromDataset:
 
         env = RolloutEnv.from_dataset(
             self._ROWS,
-            reward_fn,
+            reward_fn_to_rubric(reward_fn),
             _ChrTokenizer(),
             test_dataset=self._TEST_ROWS,
             prompt_builder=lambda row: f"P:{row['question']}",
@@ -471,7 +472,7 @@ class TestRolloutEnvFromDataset:
         """With no ``prompt_builder`` the prompt is ``str(question)`` verbatim."""
         env = RolloutEnv.from_dataset(
             self._ROWS,
-            lambda c, a, q: 0.0,
+            reward_fn_to_rubric(lambda c, a, q: 0.0),
             _ChrTokenizer(),
             pad_id=None,
             apply_chat_template=False,
@@ -482,7 +483,7 @@ class TestRolloutEnvFromDataset:
         with pytest.raises(TypeError, match="single-turn"):
             RolloutEnv.from_dataset(
                 self._ROWS,
-                lambda c, a, q: 0.0,
+                reward_fn_to_rubric(lambda c, a, q: 0.0),
                 _ChrTokenizer(),
                 max_turns=2,
             )
@@ -913,6 +914,19 @@ class TestBatchRolloutEnvHelpers:
         for _ in range(2):
             vec.envs.append(_SyncStubEnv())
         assert vec._is_initialized is True
+
+    def test_get_rubric_score_means_averages_and_nans(self) -> None:
+        vec = BatchRolloutEnv(env_factory=_SyncStubEnv, batch_size=1, group_size=2)
+        e0 = _SyncStubEnv()
+        e1 = _SyncStubEnv()
+        e0.rubric_score_sums = {"fmt": 1.0, "correct": 2.0}
+        e1.rubric_score_sums = {"fmt": 3.0}
+        vec.envs = [e0, e1]
+        vec.rubric_component_names = ("fmt", "correct", "missing")
+        means = vec.get_rubric_score_means()
+        assert means["fmt"] == 2.0
+        assert means["correct"] == 2.0
+        assert means["missing"] != means["missing"]  # NaN
 
 
 class TestBatchRolloutEnvActiveEnvs:

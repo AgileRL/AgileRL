@@ -1122,6 +1122,49 @@ class TestTrainLlmRollout:
 
         mock_agent.metrics.register.assert_called_with("accuracy")
 
+    def test_train_llm_rollout_logs_rubric_component_metrics(self):
+        mock_agent = _make_rollout_mock_agent()
+        mock_agent.metrics.additional_metrics = ["loss", "mean_reward"]
+
+        mock_rollout_env = MagicMock()
+        mock_rollout_env.num_epochs = 0
+        mock_rollout_env.get_rubric_score_means.return_value = {"fmt": 0.75}
+
+        def _agg(_accelerator, value):
+            return (
+                value if isinstance(value, torch.Tensor) else torch.tensor(float(value))
+            )
+
+        with (
+            patch("agilerl.training.llm.rollout.default_progress_bar") as mock_pbar_fn,
+            patch("agilerl.training.llm.rollout.init_loggers", return_value=[]),
+            patch(
+                "agilerl.training.llm.rollout.safe_aggregate_metrics",
+                side_effect=_agg,
+            ),
+            patch("agilerl.training.llm.rollout.save_llm_checkpoint"),
+            patch(
+                "agilerl.training.llm.rollout.BatchRolloutEnv",
+                return_value=mock_rollout_env,
+            ),
+            patch("agilerl.training.llm.rollout.collect_rollouts_llm") as mock_collect,
+        ):
+            mock_pbar_fn.return_value = MagicMock()
+            mock_collect.return_value = _rollout_collect_return(batch_steps=3)
+            train_llm_rollout(
+                pop=[mock_agent],
+                env_factory=MagicMock(),
+                max_turns=2,
+                init_hp={"BATCH_SIZE": 1, "ALGO": "LLMPPO"},
+                max_steps=3,
+                evaluation_interval=100,
+                verbose=False,
+                accelerator=None,
+            )
+
+        mock_agent.metrics.register.assert_any_call("reward_fmt")
+        mock_agent.metrics.log.assert_any_call("reward_fmt", ANY)
+
     def test_train_llm_rollout_stops_at_wall_clock_limit(self, capsys):
         mock_agent = _make_rollout_mock_agent()
 

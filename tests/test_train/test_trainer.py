@@ -1541,8 +1541,11 @@ class TestLLMLocalTrainer:
 
         assert mock_llm_env_spec.max_context_length == dpo_spec.max_model_len
         assert mock_llm_env_spec.seed == dpo_spec.seed
+        mock_accel = mock_create_accel.return_value
         mock_llm_env_spec.make_env.assert_called_once_with(
-            tokenizer=mock_tokenizer, accelerator=mock_create_accel.return_value
+            tokenizer=mock_tokenizer,
+            rank=mock_accel.process_index,
+            world_size=mock_accel.num_processes,
         )
         assert trainer.env is mock_env
 
@@ -1725,6 +1728,14 @@ class TestLocalTrainerIntegration:
         return mock_tokenizer
 
     @staticmethod
+    def _mock_llm_accelerator() -> MagicMock:
+        """Accelerator stand-in with real DP shard ints for DatasetEnv."""
+        mock_accel = MagicMock()
+        mock_accel.process_index = 0
+        mock_accel.num_processes = 1
+        return mock_accel
+
+    @staticmethod
     @contextlib.contextmanager
     def _llm_trainer_patches(mock_pop: list[MagicMock]):
         """Patches population, accelerator, and tokenizer loading for LLM tests."""
@@ -1736,7 +1747,7 @@ class TestLocalTrainerIntegration:
             ),
             patch(
                 "agilerl.training.trainer.create_llm_accelerator",
-                return_value=MagicMock(),
+                return_value=TestLocalTrainerIntegration._mock_llm_accelerator(),
             ),
             patch(
                 "agilerl.training.trainer.AutoTokenizer.from_pretrained",
@@ -1958,7 +1969,10 @@ class TestLocalTrainerIntegration:
 
         reward_file = tmp_path / "reward.py"
         reward_file.write_text(
-            "def simple_reward(completion, answer, prompt, **kwargs):\n    return 1.0\n"
+            "from agilerl.llm_envs.rubrics import reward_fn_to_rubric\n"
+            "def simple_reward(completion, answer, prompt, **kwargs):\n"
+            "    return 1.0\n"
+            "RUBRIC = reward_fn_to_rubric(simple_reward)\n"
         )
 
         import pandas as pd
@@ -1983,8 +1997,8 @@ class TestLocalTrainerIntegration:
         env_spec = LLMEnvSpec(
             env_type=LLMEnvType.ROLLOUT,
             dataset=str(dataset_path),
-            reward_file_path=str(reward_file),
-            reward_fn_name="simple_reward",
+            rubric_file_path=str(reward_file),
+            rubric_name="RUBRIC",
             prompt_template={"user_0": "Solve: {question}"},
             data_batch_size_per_gpu=4,
         )
@@ -2609,6 +2623,8 @@ class TestMakeEnvBranches:
         trainer.algorithm_spec.batch_size = 8
         trainer.tokenizer = MagicMock()
         trainer.accelerator = MagicMock()
+        trainer.accelerator.process_index = 0
+        trainer.accelerator.num_processes = 1
 
         with patch(
             "agilerl.training.trainer.isinstance",
@@ -2627,6 +2643,9 @@ class TestMakeEnvBranches:
         assert trainer.env_spec.max_context_length == 1024
         assert trainer.env_spec.seed == 42
         assert trainer.env_spec.data_batch_size_per_gpu == 8
+        trainer.env_spec.make_env.assert_called_once_with(
+            tokenizer=trainer.tokenizer, rank=0, world_size=1
+        )
 
     def test_standard_env_calls_make_env(self):
         """Non-LLM env spec calls make_env() with no args."""
@@ -2709,8 +2728,8 @@ class TestLocalTrainerResolveEnvSpecBranches:
             AgentType.LLMAgent,
             env_data={
                 "dataset": "gsm8k",
-                "reward_file_path": "/tmp/reward.py",
-                "reward_fn_name": "reward_fn",
+                "rubric_file_path": "/tmp/reward.py",
+                "rubric_name": "reward_fn",
                 "prompt_template": {"system": "You are helpful"},
             },
             algo_cls=LLMAlgorithmSpec,

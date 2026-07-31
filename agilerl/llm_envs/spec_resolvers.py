@@ -40,9 +40,9 @@ def _gem_spec_resolver(spec: str) -> Callable[..., TextEnvProtocol] | None:
     .. _GEM registry ids: https://github.com/axon-rl/gem
     """
     try:
-        import gem  # ty: ignore[unresolved-import]
-        import gem.envs  # ty: ignore[unresolved-import]  -- populates the registry
-        from gem.envs.registration import (  # ty: ignore[unresolved-import]
+        import gem
+        import gem.envs  # populates the registry
+        from gem.envs.registration import (
             ENV_REGISTRY,
         )
     except ImportError:

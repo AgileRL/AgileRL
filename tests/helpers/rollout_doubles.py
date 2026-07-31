@@ -78,6 +78,10 @@ class FakeEnvClient:
     def tools(self) -> list[Any]:
         return self._tools
 
+    @property
+    def rubric_components(self) -> tuple[str, ...]:
+        return ()
+
     @contextmanager
     def eval_mode(self):
         self.eval_mode_entries += 1
@@ -90,6 +94,10 @@ class FakeEnvClient:
 
 class RolloutEnvDoubleMixin:
     """Map ``BatchRolloutEnv``'s phased reset/step onto a double's reset()/step()."""
+
+    @property
+    def rubric_components(self) -> tuple[str, ...]:
+        return ()
 
     def _reset_fetch(
         self, seed: int | None = None, *, row_index: int | None = None

@@ -296,29 +296,41 @@ def mark_wrapped(env):
 
 
 class TestLLMEnvSpec:
-    def test_reasoning_requires_reward_file_path(self):
-        with pytest.raises(ValueError, match="reward_file_path is required"):
-            LLMEnvSpec(env_type=LLMEnvType.ROLLOUT, dataset="ds", reward_file_path=None)
+    def test_reasoning_requires_rubric_file_path(self):
+        with pytest.raises(ValueError, match="rubric_file_path is required"):
+            LLMEnvSpec(env_type=LLMEnvType.ROLLOUT, dataset="ds", rubric_file_path=None)
 
-    def test_dataset_does_not_require_reward_file_path(self):
+    def test_accepts_legacy_reward_keys(self):
+        """Arena manifests may still send reward_file_path / reward_fn_name."""
+        spec = LLMEnvSpec(
+            env_type=LLMEnvType.ROLLOUT,
+            dataset="ds",
+            reward_file_path="reward.py",
+            reward_fn_name="combined_rewards",
+            prompt_template={"user_0": "{question}"},
+        )
+        assert spec.rubric_file_path == "reward.py"
+        assert spec.rubric_name == "combined_rewards"
+
+    def test_dataset_does_not_require_rubric_file_path(self):
         spec = LLMEnvSpec(
             env_type=LLMEnvType.DATASET,
             objective="preference",
             dataset="ds",
-            reward_file_path=None,
+            rubric_file_path=None,
         )
-        assert spec.reward_file_path is None
+        assert spec.rubric_file_path is None
 
     def test_default_fields(self):
         spec = LLMEnvSpec(
             env_type=LLMEnvType.ROLLOUT,
             dataset="dataset.parquet",
-            reward_file_path="reward.py",
-            reward_fn_name="reward_fn",
+            rubric_file_path="reward.py",
+            rubric_name="reward_fn",
             prompt_template={"role": "user", "content": "{q}"},
         )
         assert spec.train_test_split == 0.9
-        assert spec.reward_file_path == "reward.py"
+        assert spec.rubric_file_path == "reward.py"
         assert spec.dataset == "dataset.parquet"
         assert spec.columns is None
         assert spec.max_reward is None
@@ -327,8 +339,8 @@ class TestLLMEnvSpec:
         spec = LLMEnvSpec(
             env_type=LLMEnvType.ROLLOUT,
             dataset="dataset.parquet",
-            reward_file_path="reward.py",
-            reward_fn_name="reward_fn",
+            rubric_file_path="reward.py",
+            rubric_name="reward_fn",
             prompt_template={"role": "user", "content": "{q}"},
         )
         assert not hasattr(spec, "num_envs")
@@ -340,15 +352,15 @@ class TestLLMEnvSpec:
             prompt_template={"role": "user", "content": "{question}"},
             max_reward=5.0,
             train_test_split=0.8,
-            reward_file_path="my_reward.py",
-            reward_fn_name="my_reward",
+            rubric_file_path="my_reward.py",
+            rubric_name="my_reward",
             dataset="data/train.parquet",
         )
         assert spec.columns == {"question": "input", "answer": "output"}
         assert spec.prompt_template == {"role": "user", "content": "{question}"}
         assert spec.max_reward == 5.0
         assert spec.train_test_split == 0.8
-        assert spec.reward_file_path == "my_reward.py"
+        assert spec.rubric_file_path == "my_reward.py"
         assert spec.dataset == "data/train.parquet"
 
     def test_train_test_split_bounds(self):
@@ -358,15 +370,15 @@ class TestLLMEnvSpec:
             LLMEnvSpec(env_type=LLMEnvType.ROLLOUT, dataset="ds", train_test_split=-0.1)
 
     @patch("agilerl.models.env.make_conversation_template")
-    @patch("agilerl.models.env.get_reward_fn")
+    @patch("agilerl.models.env.get_rubric")
     @patch.object(LLMEnvSpec, "_load_dataset")
     def test_dataset_backed_rollout_factory(
-        self, mock_load, mock_reward_fn, mock_conv_tmpl
+        self, mock_load, mock_get_rubric, mock_conv_tmpl
     ):
         mock_train_ds = MagicMock()
         mock_test_ds = MagicMock()
         mock_load.return_value = (mock_train_ds, mock_test_ds)
-        reward_fn = mock_reward_fn.return_value
+        rubric = mock_get_rubric.return_value
         mock_conv_tmpl.return_value = [{"role": "user", "content": "{question}"}]
         mock_tokenizer = MagicMock()
         mock_tokenizer.pad_token_id = 0
@@ -374,8 +386,8 @@ class TestLLMEnvSpec:
         spec = LLMEnvSpec(
             env_type=LLMEnvType.ROLLOUT,
             dataset="dataset.parquet",
-            reward_file_path="reward.py",
-            reward_fn_name="reward_fn",
+            rubric_file_path="reward.py",
+            rubric_name="reward_fn",
             prompt_template={"user_0": "{question}"},
         )
         # A dataset-backed rollout is single-turn by construction.
@@ -386,17 +398,17 @@ class TestLLMEnvSpec:
             factory = spec.make_rollout_env_factory(mock_tokenizer)
             # Building the factory reads nothing.
             mock_load.assert_not_called()
-            mock_reward_fn.assert_not_called()
+            mock_get_rubric.assert_not_called()
             factory()
 
-        mock_reward_fn.assert_called_once_with(
-            reward_fn_name="reward_fn", file_path="reward.py"
+        mock_get_rubric.assert_called_once_with(
+            rubric_name="reward_fn", file_path="reward.py"
         )
         mock_conv_tmpl.assert_called_once()
         mock_rollout_cls.from_dataset.assert_called_once()
         args, kwargs = mock_rollout_cls.from_dataset.call_args
         assert args[0] is mock_train_ds
-        assert args[1] is reward_fn
+        assert args[1] is rubric
         assert kwargs["test_dataset"] is mock_test_ds
         assert kwargs["apply_chat_template"] is False
 
@@ -420,7 +432,7 @@ class TestLLMEnvSpec:
             env_type=LLMEnvType.DATASET,
             objective="preference",
             dataset="dataset.parquet",
-            reward_file_path=None,
+            rubric_file_path=None,
         )
 
         with patch("agilerl.llm_envs.DatasetEnv") as MockEnv:
@@ -437,8 +449,8 @@ class TestLLMEnvSpec:
             columns={"q": "question"},
             max_reward=10.0,
             dataset="data.parquet",
-            reward_file_path="reward.py",
-            reward_fn_name="reward_fn",
+            rubric_file_path="reward.py",
+            rubric_name="reward_fn",
             prompt_template={"role": "user", "content": "{q}"},
         )
         data = spec.model_dump()
@@ -578,7 +590,7 @@ class TestLLMEnvSpecSFT:
         assert spec.env_type == LLMEnvType.DATASET
         assert spec.dataset == "my_dataset.parquet"
         assert spec.response_column == "answer"
-        assert spec.reward_file_path is None
+        assert spec.rubric_file_path is None
 
     def test_sft_default_response_column(self):
         spec = LLMEnvSpec(env_type=LLMEnvType.DATASET, objective="sft", dataset="ds")
@@ -610,22 +622,22 @@ class TestLLMEnvSpecSFT:
         assert call_kwargs["objective"] == "sft"
         assert call_kwargs["response_column"] == "completion"
 
-    def test_sft_rejects_reward_file_path(self):
+    def test_sft_rejects_rubric_file_path(self):
         with pytest.raises(ValueError, match="not supported for dataset"):
             LLMEnvSpec(
                 env_type=LLMEnvType.DATASET,
                 objective="sft",
                 dataset="ds",
-                reward_file_path="reward.py",
+                rubric_file_path="reward.py",
             )
 
-    def test_preference_rejects_reward_file_path(self):
+    def test_preference_rejects_rubric_file_path(self):
         with pytest.raises(ValueError, match="not supported for dataset"):
             LLMEnvSpec(
                 env_type=LLMEnvType.DATASET,
                 objective="preference",
                 dataset="ds",
-                reward_file_path="reward.py",
+                rubric_file_path="reward.py",
             )
 
     def test_dataset_alias_name(self):
@@ -633,8 +645,8 @@ class TestLLMEnvSpecSFT:
             {
                 "name": "my_dataset",
                 "env_type": "rollout",
-                "reward_file_path": "r.py",
-                "reward_fn_name": "fn",
+                "rubric_file_path": "r.py",
+                "rubric_name": "fn",
                 "prompt_template": {"role": "user", "content": "{q}"},
             }
         )
@@ -872,18 +884,18 @@ class TestLLMEnvSpecRollout:
             LLMEnvSpec(
                 env_type=LLMEnvType.ROLLOUT,
                 dataset="ds",
-                reward_file_path="r.py",
-                reward_fn_name="fn",
+                rubric_file_path="r.py",
+                rubric_name="fn",
                 prompt_template={"user_0": "Q: {question}"},
                 max_turns=4,
             )
 
-    def test_env_backed_rollout_rejects_reward_file_path(self):
+    def test_env_backed_rollout_rejects_rubric_file_path(self):
         with pytest.raises(ValueError, match="not supported for env-backed"):
             LLMEnvSpec(
                 env_type=LLMEnvType.ROLLOUT,
                 env_name="game:Test-v0",
-                reward_file_path="r.py",
+                rubric_file_path="r.py",
                 max_turns=5,
             )
 
@@ -1155,8 +1167,8 @@ class TestLLMEnvSpecRollout:
         with pytest.raises(ValueError, match="Exactly one of dataset, env_name"):
             LLMEnvSpec(
                 env_type=LLMEnvType.ROLLOUT,
-                reward_file_path="r.py",
-                reward_fn_name="fn",
+                rubric_file_path="r.py",
+                rubric_name="fn",
                 prompt_template={"user_0": "Q: {question}"},
             )
 
@@ -1196,8 +1208,8 @@ class TestDatasetBackedRolloutRewardFields:
     """Defensive guard for a dataset-backed rollout missing its reward fields."""
 
     def test_missing_reward_fields_raises(self):
-        # A validated dataset-backed rollout always carries reward_fn_name /
-        # reward_file_path / prompt_template; model_construct bypasses that
+        # A validated dataset-backed rollout always carries rubric_name /
+        # rubric_file_path / prompt_template; model_construct bypasses that
         # validator so we can reach the factory's own defensive guard, which
         # fires on first resolve — before any dataset or tokenizer is touched.
         mock_tokenizer = MagicMock()
@@ -1205,12 +1217,12 @@ class TestDatasetBackedRolloutRewardFields:
         spec = LLMEnvSpec.model_construct(
             env_type=LLMEnvType.ROLLOUT, dataset="dummy/dataset"
         )
-        assert spec.reward_fn_name is None
+        assert spec.rubric_name is None
 
         factory = spec.make_rollout_env_factory(mock_tokenizer)
         with pytest.raises(
             ValueError,
-            match="reward_fn_name, reward_file_path, and prompt_template",
+            match="rubric_name, rubric_file_path, and prompt_template",
         ):
             factory()
 

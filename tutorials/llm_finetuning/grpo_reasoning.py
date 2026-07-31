@@ -13,6 +13,7 @@ from agilerl.algorithms import GRPO
 from agilerl.training.llm import train_llm_rollout
 from agilerl.utils.algo_utils import VLLMConfig
 from agilerl.llm_envs import RolloutEnv
+from agilerl.llm_envs.rubrics import reward_fn_to_rubric
 
 MODEL_PATH = "Qwen/Qwen2.5-0.5B"
 DATASET = "Jiayi-Pan/Countdown-Tasks-3to4"
@@ -66,7 +67,7 @@ def equation_reward_func(completions, target, nums, **kwargs):
             equation = answer_tags[0].strip()
             used_numbers = [int(n) for n in re.findall(r"\d+", equation)]
 
-            if sorted(used_numbers) != sorted(numbers.flatten().tolist()):
+            if sorted(used_numbers) != sorted(list(numbers)):
                 rewards.append(0.0)
                 continue
 
@@ -135,9 +136,10 @@ def main():
     # BatchRolloutEnv owns the dataset cursor, giving each GRPO group a
     # deterministic, group-consistent dataset order.
     def env_factory(evaluation_mode: bool = False):
-        env = RolloutEnv.from_dataset(
+        del evaluation_mode
+        return RolloutEnv.from_dataset(
             train_dataset,
-            combined_rewards,
+            reward_fn_to_rubric(combined_rewards),
             tokenizer,
             test_dataset=test_dataset,
             prompt_builder=prompt_builder,
@@ -145,8 +147,6 @@ def main():
             apply_chat_template=True,
             max_model_len=MAX_CONTEXT_LENGTH,
         )
-        env.evaluation_mode = evaluation_mode
-        return env
 
     # Define the LoRA configuration
     lora_config = LoraConfig(
