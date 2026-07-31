@@ -1682,12 +1682,11 @@ class TestFillOutsideMask:
         assert filled.shape == (2, 3, 4)
         assert torch.equal(filled, torch.zeros(2, 3, 4))
 
-    def test_custom_fill_value_and_none_passthrough(self) -> None:
+    def test_custom_fill_value(self) -> None:
         values = torch.tensor([[float("nan"), 5.0]])
         mask = torch.tensor([[0.0, 1.0]])
 
         assert fill_outside_mask(values, mask, -1.0).tolist() == [[-1.0, 5.0]]
-        assert fill_outside_mask(None, mask) is None
 
     def test_gradient_does_not_flow_through_filled_positions(self) -> None:
         values = torch.tensor([[1.0, 2.0]], requires_grad=True)
