@@ -4298,6 +4298,7 @@ def _fake_save_peft_adapter_for_vllm_rollout(
     adapter_name,
     *,
     target_modules,
+    expert_key_map=None,
 ):
     from pathlib import Path
 

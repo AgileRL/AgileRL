@@ -2614,7 +2614,8 @@ def clone_llm(
             for name, param in model.named_parameters():
                 if "lora" in name and param.dtype != torch.bfloat16:
                     param.data = param.data.to(torch.bfloat16)
-        if getattr(peft_configs[first_adapter], "target_parameters", None):
+        expert_targets = getattr(peft_configs[first_adapter], "target_parameters", None)
+        if isinstance(expert_targets, (list, tuple)) and expert_targets:
             upgrade_moe_param_wrappers(model)
         model.disable_adapter()
 

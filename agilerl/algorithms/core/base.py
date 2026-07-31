@@ -4377,6 +4377,8 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             )
             self.lora_config = lora_config
             expert_target_parameters = getattr(lora_config, "target_parameters", None)
+            if not isinstance(expert_target_parameters, (list, tuple)):
+                expert_target_parameters = None
             if expert_target_parameters:
                 if lora_config.lora_dropout:
                     msg = (
@@ -5260,6 +5262,8 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
                 raise ValueError(msg)
             target_modules = self.lora_config.target_modules
             target_parameters = getattr(self.lora_config, "target_parameters", None)
+            if not isinstance(target_parameters, (list, tuple)):
+                target_parameters = None
             assert target_modules is not None or target_parameters, (
                 "lora_config.target_modules or target_parameters is required "
                 "for vLLM LoRA adapter export."
