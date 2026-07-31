@@ -679,7 +679,9 @@ class BatchRolloutEnv:
     single-caller) or per-episode (``reset_episode``/``step_episode``/
     ``finalize_episode``, the async path — a slot is held from reset to finalize).
     The per-episode methods are synchronous and thread-safe; asyncio callers
-    offload them via ``asyncio.to_thread``.
+    offload them via ``asyncio.to_thread``. A ``step_episode`` whose episode is
+    finalized while its env round-trip is in flight raises rather than applying
+    the stale result to the slot's next episode.
     """
 
     def __init__(
@@ -741,6 +743,9 @@ class BatchRolloutEnv:
         self._assignment: list[tuple[int | None, int | None]] | None = None
         self._free_slots: queue.Queue[int] | None = None
         self._episode_to_slot: dict[str, int] = {}
+        # Monotonic per-slot activation tokens: bumped each time a slot is
+        # (re)assigned, so a step that outlives its episode is detectable.
+        self._slot_activations: list[int] = [0] * self.num_envs
         # Guards the slot queue + episode map (mutated from many caller threads);
         # re-entrant because a failed _ensure_slots calls close() while holding it.
         self._slot_lock = threading.RLock()
@@ -1082,14 +1087,27 @@ class BatchRolloutEnv:
                 raise IndexError(msg)
             return self._assignment[int(logical_slot)]
 
-    def _slot_for(self, episode_id: str) -> int:
-        """The slot ``episode_id`` holds; ``KeyError`` when it is not active."""
+    def _slot_and_activation(self, episode_id: str) -> tuple[int, int]:
+        """The ``(slot, activation)`` ``episode_id`` holds; ``KeyError`` when it is not active."""
         with self._slot_lock:
             slot = self._episode_to_slot.get(episode_id)
-        if slot is None:
-            msg = f"Episode {episode_id!r} is not active."
-            raise KeyError(msg)
-        return slot
+            if slot is None:
+                msg = f"Episode {episode_id!r} is not active."
+                raise KeyError(msg)
+            return slot, self._slot_activations[slot]
+
+    def _require_current(self, episode_id: str, slot: int, activation: int) -> None:
+        """Raise unless ``episode_id`` still holds ``slot`` on the same activation."""
+        with self._slot_lock:
+            current_slot = self._episode_to_slot.get(episode_id)
+            current_activation = self._slot_activations[slot]
+        if current_slot != slot or current_activation != activation:
+            msg = (
+                f"Episode {episode_id!r} no longer owns its env slot: it was "
+                "finalized (and the slot possibly reused) while this step was "
+                "in flight."
+            )
+            raise RuntimeError(msg)
 
     def reset_episode(
         self,
@@ -1133,6 +1151,7 @@ class BatchRolloutEnv:
                     msg = f"Episode {episode_id!r} is already active."
                     raise RuntimeError(msg)
                 self._episode_to_slot[episode_id] = slot
+                self._slot_activations[slot] += 1
             acquired = True
             return prompts, info
         finally:
@@ -1155,12 +1174,18 @@ class BatchRolloutEnv:
         :param completion_ids: This turn's full completion tensor.
         :param sampling_logps: This turn's vLLM sampling logprobs, or ``None``.
         :return: The :meth:`RolloutEnv.step` 5-tuple.
+        :raises RuntimeError: If the episode was finalized (and its slot possibly
+            reused) while the step was in flight — the stale result is never
+            applied to the slot's successor episode.
         """
-        env = self.envs[self._slot_for(episode_id)]
+        slot, activation = self._slot_and_activation(episode_id)
+        env = self.envs[slot]
         with self._tokenizer_lock:
+            self._require_current(episode_id, slot, activation)
             gen_text = env._step_prepare(completion_ids, sampling_logps=sampling_logps)
         env_result = env._step_env(gen_text)
         with self._tokenizer_lock:
+            self._require_current(episode_id, slot, activation)
             return env._step_apply(env_result)
 
     def get_episode_data(

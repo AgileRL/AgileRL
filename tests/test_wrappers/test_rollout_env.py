@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import re
+import threading
 from typing import ClassVar
 
 import pytest
@@ -1197,6 +1198,16 @@ class _FailingFirstResetEnv(_SyncStubEnv):
         return super().reset(seed=seed)
 
 
+class _BlockingStepEnv(_SyncStubEnv):
+    step_entered: ClassVar[threading.Event]
+    release_step: ClassVar[threading.Event]
+
+    def _step_env(self, gen_text: str):
+        type(self).step_entered.set()
+        assert type(self).release_step.wait(timeout=10.0), "step was never released"
+        return super()._step_env(gen_text)
+
+
 class TestBatchRolloutEnvPerEpisode:
     def _collector(self, **kwargs) -> BatchRolloutEnv:
         defaults: dict = {
@@ -1315,3 +1326,69 @@ class TestBatchRolloutEnvPerEpisode:
         assert len(results) == 4
         assert vec_env.active_episode_count() == 0
         assert all(r[0].shape == (1, 4) for r in results)
+
+    def _blocked_step_thread(
+        self, vec_env: BatchRolloutEnv, episode_id: str
+    ) -> tuple[threading.Thread, list[Exception]]:
+        caught: list[Exception] = []
+
+        def drive() -> None:
+            try:
+                vec_env.step_episode(episode_id, torch.ones(1, 5, dtype=torch.long))
+            except Exception as exc:
+                caught.append(exc)
+
+        thread = threading.Thread(target=drive, daemon=True)
+        thread.start()
+        assert _BlockingStepEnv.step_entered.wait(timeout=10.0)
+        return thread, caught
+
+    def test_stale_step_never_lands_on_a_reused_slot(self) -> None:
+        _BlockingStepEnv.step_entered = threading.Event()
+        _BlockingStepEnv.release_step = threading.Event()
+        vec_env = self._collector(
+            env_factory=_BlockingStepEnv, batch_size=1, group_size=1
+        )
+        vec_env.reset_episode("ep-old", logical_slot=0)
+        thread, caught = self._blocked_step_thread(vec_env, "ep-old")
+
+        assert vec_env.finalize_episode("ep-old") is not None
+        vec_env.reset_episode("ep-new", logical_slot=0)
+        _BlockingStepEnv.release_step.set()
+        thread.join(timeout=10.0)
+        assert not thread.is_alive()
+
+        assert len(caught) == 1
+        assert isinstance(caught[0], RuntimeError)
+        assert "no longer owns its env slot" in str(caught[0])
+        # The successor episode saw no phantom turn and still steps normally.
+        env = vec_env.envs[0]
+        assert env.turn_boundaries == []
+        _prompt, reward, terminated, _trunc, _info = vec_env.step_episode(
+            "ep-new", torch.ones(1, 5, dtype=torch.long)
+        )
+        assert reward == 1.0
+        assert terminated
+        assert env.turn_boundaries == [1]
+
+    def test_stale_step_is_rejected_when_the_episode_id_is_reused(self) -> None:
+        _BlockingStepEnv.step_entered = threading.Event()
+        _BlockingStepEnv.release_step = threading.Event()
+        vec_env = self._collector(
+            env_factory=_BlockingStepEnv, batch_size=1, group_size=1
+        )
+        vec_env.reset_episode("ep", logical_slot=0)
+        thread, caught = self._blocked_step_thread(vec_env, "ep")
+
+        vec_env.finalize_episode("ep")
+        vec_env.reset_episode("ep", logical_slot=0)
+        _BlockingStepEnv.release_step.set()
+        thread.join(timeout=10.0)
+        assert not thread.is_alive()
+
+        # Identity alone cannot catch this: the reused id maps to the same slot,
+        # so only the bumped activation token distinguishes the new episode.
+        assert len(caught) == 1
+        assert isinstance(caught[0], RuntimeError)
+        assert "no longer owns its env slot" in str(caught[0])
+        assert vec_env.envs[0].turn_boundaries == []
