@@ -2219,8 +2219,8 @@ class TestLogprobsFromHiddenFused:
     """
 
     def test_matches_log_softmax_reference_fp32(self) -> None:
-        """fp32 reduction matches a stock ``log_softmax + gather`` over
-        the materialized logits within bf16 quantisation noise.
+        """``cast_to_fp32=True`` matches a stock ``log_softmax + gather`` over
+        logits materialized from the same fp32-upcast operands.
         """
         torch.manual_seed(0)
         B, T, H, V = 4, 11, 64, 8192
@@ -2238,11 +2238,12 @@ class TestLogprobsFromHiddenFused:
             temperature=temperature,
             cast_to_fp32=True,
         )
-        # Reference: stock log_softmax + gather over the materialized logits,
-        # promoted to fp32 to match the fused kernel's reduction precision.
-        logits = (hidden @ weight.t() + bias) / temperature
+        # Reference: stock log_softmax + gather over the materialized logits.
+        # ``cast_to_fp32`` upcasts the matmul *operands*, so the reference must
+        # too — a bf16 product rounds every logit before the reduction sees it.
+        logits = (hidden.float() @ weight.float().t() + bias.float()) / temperature
         ref = (
-            F.log_softmax(logits.float(), dim=-1)
+            F.log_softmax(logits, dim=-1)
             .gather(dim=-1, index=targets.unsqueeze(-1))
             .squeeze(-1)
             .to(torch.bfloat16)

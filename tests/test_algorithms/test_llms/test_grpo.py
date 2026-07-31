@@ -6163,6 +6163,161 @@ class TestGRPOVLLMSamplingCorrection:
         grpo.clean_up()
 
 
+class TestGRPONonFinitePaddingIsIsolated:
+    """A non-finite logprob at a non-action position must not reach the update.
+
+    Long fused forwards can emit NaN/Inf at padding slots; every masked
+    reduction weights by the mask, and ``nan * 0`` is ``nan``, so without an
+    explicit fill one pad slot NaNs the whole minibatch loss and the IS metrics.
+    """
+
+    def _stub(self, **kwargs):
+        defaults = {
+            "clip_coef_min": 0.8,
+            "clip_coef_max": 1.2,
+            "beta": 0.04,
+            "use_kl_advantage_shaping": False,
+            "importance_sampling_level": "token",
+            "group_size": 2,
+            "adv_norm": "mean_std",
+        }
+        defaults.update(kwargs)
+        return _GrpoLossStub(**defaults)
+
+    @staticmethod
+    def _inputs(pad_value: float):
+        mask = torch.tensor([[1.0, 1.0, 0.0], [1.0, 0.0, 0.0]])
+        pad = ~mask.bool()
+        log_probs = torch.full((2, 3), -0.5).masked_fill(pad, pad_value)
+        old = torch.full((2, 3), -0.7).masked_fill(pad, pad_value)
+        ref = torch.full((2, 3), -0.6).masked_fill(pad, pad_value)
+        sampling = torch.full((2, 3), -0.9).masked_fill(pad, pad_value)
+        adv = torch.tensor([[0.7], [-0.4]])
+        return mask, log_probs, old, ref, sampling, adv
+
+    @pytest.mark.parametrize("objective", ["grpo", "cispo"])
+    @pytest.mark.parametrize("pad_value", [float("nan"), float("inf")])
+    def test_standard_path_loss_and_kl_stay_finite(self, objective, pad_value):
+        stub = self._stub()
+        mask, log_probs, old, ref, sampling, adv = self._inputs(pad_value)
+
+        loss, kl = stub._compute_policy_loss(
+            mask,
+            log_probs,
+            old,
+            ref,
+            adv,
+            None,
+            level="token",
+            objective=objective,
+            sampling_log_probs=sampling,
+        )
+
+        assert torch.isfinite(loss)
+        assert torch.isfinite(kl)
+
+    def test_padding_value_does_not_change_the_loss(self):
+        stub = self._stub()
+        nan_args = self._inputs(float("nan"))
+        finite_args = self._inputs(-123.0)
+
+        def run(args):
+            mask, log_probs, old, ref, sampling, adv = args
+            return stub._compute_policy_loss(
+                mask,
+                log_probs,
+                old,
+                ref,
+                adv,
+                None,
+                level="token",
+                objective="cispo",
+                sampling_log_probs=sampling,
+            )
+
+        nan_loss, nan_kl = run(nan_args)
+        finite_loss, finite_kl = run(finite_args)
+
+        assert torch.allclose(nan_loss, finite_loss, atol=1e-7)
+        assert torch.allclose(nan_kl, finite_kl, atol=1e-7)
+
+    def test_reduce_masked_loss_ignores_non_finite_padding(self):
+        stub = self._stub()
+        mask = torch.tensor([[1.0, 1.0, 0.0]])
+        loss = torch.tensor([[2.0, 4.0, float("nan")]])
+
+        reduced = stub._reduce_masked_loss(loss, mask)
+
+        assert reduced.tolist() == pytest.approx([3.0])
+
+    def test_sampling_mismatch_metrics_stay_finite(self):
+        stub = self._stub(vllm_importance_sampling_cap=2.0)
+        mask, _, old, _, sampling, _ = self._inputs(float("nan"))
+
+        metrics = stub._sampling_mismatch_metrics(old, sampling, mask.bool())
+
+        assert all(np.isfinite(v) for v in metrics.values())
+        assert metrics["vllm_is_delta_mean"] == pytest.approx(0.2, rel=1e-5)
+
+    def test_liger_kernel_receives_only_finite_inputs(self):
+        grpo = _make_cpu_grpo_for_branch_tests(loss_type="cispo", beta=0.04)
+        fake_lm_head = nn.Linear(8, 16, bias=True)
+        nan = float("nan")
+        # Action mask marks token 0 only; token 1 is padding and carries NaN in
+        # every per-token tensor, including the hidden state feeding the kernel.
+        action_mask = torch.tensor([[True, False]])
+        hidden = torch.randn(1, 3, 8, requires_grad=True)
+        hidden = hidden.masked_fill(
+            torch.tensor([[[False], [True], [True]]]),
+            nan,
+        )
+
+        with (
+            patch("agilerl.algorithms.grpo.HAS_LIGER_KERNEL", True),
+            patch.object(grpo, "_get_lm_head", return_value=fake_lm_head),
+            patch.object(grpo, "_patch_lm_head_to_identity", nullcontext),
+            patch.object(grpo, "actor", new=MagicMock(wraps=grpo.actor)),
+            patch("agilerl.algorithms.grpo.LigerFusedLinearGRPOFunction") as mock_fn,
+            patch.object(
+                LLMAlgorithm, "select_adapter", lambda self, name: nullcontext()
+            ),
+        ):
+            mock_fn.apply.return_value = (
+                torch.tensor(0.5, requires_grad=True),
+                (torch.tensor(0.1), torch.tensor(0.0)),
+            )
+            fake_output = MagicMock()
+            fake_output.logits = hidden
+            grpo.actor.side_effect = lambda **kwargs: fake_output
+            grpo._liger_loss(
+                batch_ids=torch.ones((1, 3), dtype=torch.long),
+                action_mask=action_mask,
+                advantages=torch.ones((1,), dtype=torch.float32),
+                old_log_probs=torch.tensor([[-0.7, nan]]),
+                reference_log_probs=torch.tensor([[-0.6, nan]]),
+                sampling_log_probs=torch.tensor([[-0.9, nan]]),
+            )
+
+        positional = mock_fn.apply.call_args.args
+        policy_arg, ref_arg, old_arg, ratio_arg = (
+            positional[0],
+            positional[6],
+            positional[7],
+            positional[23],
+        )
+        for name, tensor in (
+            ("policy_hidden", policy_arg),
+            ("reference_log_probs", ref_arg),
+            ("old_log_probs", old_arg),
+            ("vllm_is_ratio", ratio_arg),
+        ):
+            assert torch.isfinite(tensor).all(), name
+        # The in-mask token keeps its own values; only padding was filled.
+        assert old_arg[0].item() == pytest.approx(-0.7)
+        assert ratio_arg[1].item() == pytest.approx(1.0)
+        grpo.clean_up()
+
+
 class TestGRPORealLigerVllmCorrection:
     """Validate the *real* fused GRPO kernel's ``vllm_is_ratio`` semantics on
     GPU, exercising the exact positional, token-flattened ``(n_tokens, 1)`` call

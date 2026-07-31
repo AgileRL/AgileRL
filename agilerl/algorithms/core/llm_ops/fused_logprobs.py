@@ -44,12 +44,17 @@ def _fused_logprob_chunk(
     :type target_chunk: torch.Tensor
     :param temperature: logits divided by this before log_softmax (skip at 1.0).
     :type temperature: float
-    :param cast_to_fp32: run the reduction in fp32.
+    :param cast_to_fp32: run the matmul and the reduction in fp32.
     :type cast_to_fp32: bool
     :return: ``(chunk_rows,)`` per-token logprobs.
     :rtype: torch.Tensor
     """
-    if h_chunk.dtype != lm_head_weight.dtype:
+    if cast_to_fp32:
+        h_chunk = h_chunk.float()
+        lm_head_weight = lm_head_weight.float()
+        if lm_head_bias is not None:
+            lm_head_bias = lm_head_bias.float()
+    elif h_chunk.dtype != lm_head_weight.dtype:
         # fp16 checkpoint under bf16 autocast: fp32 hidden, fp16 head; promote to match.
         compute_dtype = torch.promote_types(h_chunk.dtype, lm_head_weight.dtype)
         h_chunk = h_chunk.to(compute_dtype)
@@ -59,8 +64,6 @@ def _fused_logprob_chunk(
         logits = logits + lm_head_bias
     if temperature != 1.0:
         logits = logits / temperature
-    if cast_to_fp32:
-        logits = logits.float()
     selected = logits.gather(dim=-1, index=target_chunk.unsqueeze(-1)).squeeze(-1)
     log_z = torch.logsumexp(logits, dim=-1)
     return selected - log_z
@@ -131,7 +134,8 @@ def fused_linear_logprobs_chunked(
     :type target_ids: torch.Tensor
     :param temperature: logits divided by this before log_softmax (skipped at 1.0).
     :type temperature: float, optional
-    :param cast_to_fp32: run the per-chunk reduction in fp32 then cast back.
+    :param cast_to_fp32: run the per-chunk matmul and reduction in fp32, then
+        cast back.
     :type cast_to_fp32: bool, optional
     :param chunk_rows: rows of the flattened ``(B*T)`` workspace per iteration.
     :type chunk_rows: int

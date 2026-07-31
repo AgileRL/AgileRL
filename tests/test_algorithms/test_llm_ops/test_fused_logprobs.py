@@ -89,6 +89,50 @@ class TestFusedLogprobChunkDispatch:
         assert torch.allclose(again, expected)
 
 
+class TestFp32CastBeforeMatmul:
+    """``cast_to_fp32`` must upcast the matmul operands, not its product: a
+    reduced-precision product that saturated to ``inf`` makes ``selected -
+    log_z`` an ``inf - inf`` NaN no matter what it is cast to afterwards.
+    """
+
+    def test_overflowing_fp16_logits_stay_finite(self):
+        # 8 * 300 * 300 = 720_000, well past the fp16 max of 65_504.
+        h = torch.full((2, 8), 300.0, dtype=torch.float16)
+        w = torch.full((16, 8), 300.0, dtype=torch.float16)
+        targets = torch.zeros(2, dtype=torch.long)
+        assert not torch.isfinite(h @ w.t()).any()
+
+        out = _fused_logprob_chunk(h, w, None, targets, 1.0, True)
+
+        assert out.dtype == torch.float32
+        assert torch.isfinite(out).all()
+        # Uniform logits: every token's logprob is -log(V), to the fp32
+        # resolution available at a logit magnitude of 720_000.
+        expected = torch.full((2,), -torch.tensor(16.0).log().item())
+        assert torch.allclose(out, expected, atol=0.1)
+
+    def test_overflowing_fp16_bias_stays_finite(self):
+        h = torch.full((1, 4), 100.0, dtype=torch.float16)
+        w = torch.full((3, 4), 75.0, dtype=torch.float16)
+        bias = torch.full((3,), 60000.0, dtype=torch.float16)
+        targets = torch.zeros(1, dtype=torch.long)
+        assert not torch.isfinite(h @ w.t() + bias).any()
+
+        out = _fused_logprob_chunk(h, w, bias, targets, 1.0, True)
+
+        assert torch.isfinite(out).all()
+
+    def test_cast_disabled_keeps_operand_dtype(self):
+        torch.manual_seed(0)
+        h = (torch.randn(4, 8) * 0.02).to(torch.float16)
+        w = (torch.randn(16, 8) * 0.02).to(torch.float16)
+        targets = torch.randint(0, 16, (4,))
+
+        out = _fused_logprob_chunk(h, w, None, targets, 1.0, False)
+
+        assert out.dtype == torch.float16
+
+
 class TestMixedDtypeOperands:
     """An fp16 checkpoint under the bf16 autocast reaches the fused matmul
     with fp32 hidden states and an fp16 lm_head weight; the kernel

@@ -47,6 +47,7 @@ from agilerl.utils.llm_utils import (
     cuda_tensor_bytes_in_module,
     discover_clippable_inner_linear_module_keys,
     discover_clippable_projection_leaf_names,
+    fill_outside_mask,
     filter_peft_state_dict_for_vllm_lora,
     format_colocated_vllm_oom_hint,
     gather_if_ds_param,
@@ -1647,6 +1648,54 @@ def test_k3_helper_matches_torch() -> None:
     # Reference: torch implementation of the same formula.
     ref = torch.exp(log_p - log_q) - (log_p - log_q) - 1.0
     assert torch.allclose(calculate_k3_kl(log_p, log_q), ref)
+
+
+class TestFillOutsideMask:
+    """:func:`fill_outside_mask` keeps masked reductions finite when padding
+    slots hold NaN/Inf, which ``values * mask`` cannot do (``nan * 0 == nan``).
+    """
+
+    def test_non_finite_padding_no_longer_poisons_masked_sum(self) -> None:
+        values = torch.tensor([[1.0, float("nan")], [2.0, float("inf")]])
+        mask = torch.tensor([[1.0, 0.0], [1.0, 0.0]])
+        assert torch.isnan(values * mask).any()
+
+        filled = fill_outside_mask(values, mask)
+
+        assert filled.tolist() == [[1.0, 0.0], [2.0, 0.0]]
+        assert torch.isfinite((filled * mask).sum())
+
+    def test_in_mask_non_finite_values_are_preserved(self) -> None:
+        values = torch.tensor([[float("nan"), 1.0]])
+        mask = torch.tensor([[True, True]])
+
+        filled = fill_outside_mask(values, mask)
+
+        assert torch.isnan(filled[0, 0])
+
+    def test_broadcasts_a_narrower_mask(self) -> None:
+        values = torch.full((2, 3, 4), float("nan"))
+        mask = torch.zeros(2, 3, 1, dtype=torch.bool)
+
+        filled = fill_outside_mask(values, mask)
+
+        assert filled.shape == (2, 3, 4)
+        assert torch.equal(filled, torch.zeros(2, 3, 4))
+
+    def test_custom_fill_value_and_none_passthrough(self) -> None:
+        values = torch.tensor([[float("nan"), 5.0]])
+        mask = torch.tensor([[0.0, 1.0]])
+
+        assert fill_outside_mask(values, mask, -1.0).tolist() == [[-1.0, 5.0]]
+        assert fill_outside_mask(None, mask) is None
+
+    def test_gradient_does_not_flow_through_filled_positions(self) -> None:
+        values = torch.tensor([[1.0, 2.0]], requires_grad=True)
+        mask = torch.tensor([[1.0, 0.0]])
+
+        fill_outside_mask(values, mask).sum().backward()
+
+        assert values.grad.tolist() == [[1.0, 0.0]]
 
 
 class TestMaskedMeanAxis:

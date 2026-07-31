@@ -1144,6 +1144,31 @@ def create_model_from_name_or_path(
     )
 
 
+def fill_outside_mask(
+    values: torch.Tensor,
+    mask: torch.Tensor,
+    fill_value: float = 0.0,
+) -> torch.Tensor:
+    """Replace the entries of ``values`` outside ``mask`` with a finite constant.
+
+    Masked reductions weight by the mask, and IEEE ``nan * 0`` is ``nan``, so one
+    non-finite entry at a padding position would otherwise poison the reduction.
+
+    :param values: Tensor to fill, broadcastable with ``mask``.
+    :type values: torch.Tensor
+    :param mask: Mask whose ``True``/non-zero entries are kept.
+    :type mask: torch.Tensor
+    :param fill_value: Value written outside the mask, defaults to ``0.0``.
+    :type fill_value: float, optional
+    :return: ``values`` with the out-of-mask entries replaced.
+    :rtype: torch.Tensor
+    """
+    keep = mask.to(device=values.device, dtype=torch.bool)
+    if keep.shape != values.shape:
+        keep = keep.expand_as(values)
+    return values.masked_fill(~keep, fill_value)
+
+
 def masked_mean(
     values: torch.Tensor, mask: torch.Tensor, axis: int | None = None
 ) -> torch.Tensor:

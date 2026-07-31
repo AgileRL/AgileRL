@@ -52,6 +52,7 @@ from agilerl.utils.llm_packing import (
 from agilerl.utils.llm_utils import (
     aggregate_metrics_dict,
     build_completion_mask,
+    fill_outside_mask,
     is_reasoning_prompts,
     masked_mean,
     masked_whiten,
@@ -1276,6 +1277,7 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
             denominator,
             torch.ones_like(denominator),
         )
+        loss = fill_outside_mask(loss, mask)
         return (loss * mask).sum(dim=-1) / denominator
 
     def _loss(
@@ -1501,6 +1503,11 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
         :return: Mean loss and mean KL divergence.
         :rtype: tuple[torch.Tensor, torch.Tensor]
         """
+        log_probs = fill_outside_mask(log_probs, mask)
+        old_log_probs = fill_outside_mask(old_log_probs, mask)
+        reference_log_probs = fill_outside_mask(reference_log_probs, mask)
+        if sampling_log_probs is not None:
+            sampling_log_probs = fill_outside_mask(sampling_log_probs, mask)
         kl = calculate_k3_kl(log_probs, reference_log_probs)
         advantages = self._apply_kl_advantage_shaping(advantages, kl, mask)
         token_log_ratio = log_probs - old_log_probs
@@ -1710,9 +1717,12 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
         adv = advantages.to(self.device).contiguous()
         if adv.dim() > 1 and adv.shape[-1] == 1:
             adv = adv.squeeze(-1)  # (B, 1) -> (B,)
-        old_log_probs = old_log_probs.to(self.device).contiguous()
+        old_log_probs = fill_outside_mask(
+            old_log_probs.to(self.device).contiguous(),
+            mask,
+        )
         ref_log_probs: torch.Tensor | None = (
-            reference_log_probs.to(self.device).contiguous()
+            fill_outside_mask(reference_log_probs.to(self.device).contiguous(), mask)
             if self.beta != 0.0
             else None
         )
@@ -1764,6 +1774,17 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
             # so the kernel call below is identical to the padded path. Pad rows
             # are zeroed and masked out by ``action_mask`` downstream.
             policy_hidden = unpack_hidden_states(policy_hidden, packed)
+        # The kernel weights its own per-token logprobs by ``mask``, so a
+        # non-finite hidden row at an out-of-mask position would poison the fused
+        # reduction (``nan * 0``). Zeroing those rows makes their logits the bias
+        # alone; per-token independence leaves in-mask logprobs untouched.
+        hidden_keep = torch.zeros(
+            policy_hidden.shape[:2],
+            dtype=torch.bool,
+            device=policy_hidden.device,
+        )
+        hidden_keep[:, : mask.shape[1]] = mask.to(torch.bool)
+        policy_hidden = fill_outside_mask(policy_hidden, hidden_keep.unsqueeze(-1))
         target_ids = batch_ids[:, 1:].contiguous()  # (B, seq_len-1)
 
         # vLLM sampling-mismatch correction (token-level IS only): the detached,
@@ -1809,12 +1830,12 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
             )
             if sampling_log_probs is not None:
                 with torch.no_grad():
-                    mask_f = mask.to(old_log_probs.dtype)
+                    log_diff = fill_outside_mask(
+                        old_log_probs - sampling_log_probs.to(self.device),
+                        mask,
+                    )
                     vllm_is_ratio_arg = (
-                        torch.exp(
-                            (old_log_probs - sampling_log_probs.to(self.device))
-                            * mask_f
-                        )
+                        torch.exp(log_diff)
                         .clamp(max=self.vllm_importance_sampling_cap)
                         .reshape(n_tokens, 1)
                     )

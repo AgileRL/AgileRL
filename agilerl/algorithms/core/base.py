@@ -172,6 +172,7 @@ if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
         build_vllm_rollout_lora_request,
         create_model_from_name_or_path,
         expert_lora_vllm_key_map,
+        fill_outside_mask,
         gather_if_ds_param,
         gather_if_zero3,
         get_lora_params,
@@ -4081,9 +4082,11 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         """
         with torch.no_grad():
             mask = action_masks.to(torch.bool)
-            mask_f = mask.to(torch.float32)
-            denom = mask_f.sum().clamp(min=1.0)
-            log_diff = (old_log_probs - sampling_log_probs) * mask_f
+            denom = mask.sum().clamp(min=1.0).to(torch.float32)
+            log_diff = fill_outside_mask(
+                (old_log_probs - sampling_log_probs).to(torch.float32),
+                mask,
+            )
             delta_mean = (log_diff.abs().sum() / denom).item()
             ratio = torch.exp(log_diff).clamp(max=self.vllm_importance_sampling_cap)
             sel = ratio[mask]
