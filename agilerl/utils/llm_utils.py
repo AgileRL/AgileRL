@@ -69,6 +69,8 @@ _CLIPPABLE_LINEAR_WRAPPER_SUFFIX = "ClippableLinear"
 def render_chat_template(
     conversation_template: list[dict[str, str]],
     tokenizer: PreTrainedTokenizerBase,
+    *,
+    chat_template_kwargs: dict[str, Any] | None = None,
     **format_kwargs: Any,
 ) -> str:
     """Format each template message and render it through the chat template.
@@ -78,6 +80,9 @@ def render_chat_template(
     :type conversation_template: list[dict[str, str]]
     :param tokenizer: Tokenizer providing the chat template.
     :type tokenizer: PreTrainedTokenizerBase
+    :param chat_template_kwargs: Extra kwargs for the ``apply_chat_template``
+        render (e.g. ``{"enable_thinking": False}``).
+    :type chat_template_kwargs: dict[str, Any] | None
     :param format_kwargs: Values interpolated into each message's content.
     :return: The rendered (untokenized) prompt text.
     :rtype: str
@@ -93,6 +98,7 @@ def render_chat_template(
         formatted_conversation,
         tokenize=False,
         continue_final_message=True,
+        **(chat_template_kwargs or {}),
     )
     assert isinstance(rendered, str), "tokenize=False renders to a single string"
     return rendered

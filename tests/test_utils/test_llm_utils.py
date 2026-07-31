@@ -732,6 +732,39 @@ def test_masked_var_unbiased_requires_at_least_two_unmasked_values():
         masked_var(values, mask, unbiased=True)
 
 
+class TestRenderChatTemplate:
+    def test_forwards_chat_template_kwargs_to_render(self):
+        from agilerl.utils.llm_utils import render_chat_template
+
+        tokenizer = MagicMock()
+        tokenizer.apply_chat_template.return_value = "<rendered>"
+        out = render_chat_template(
+            [{"role": "user", "content": "{question}"}],
+            tokenizer,
+            chat_template_kwargs={"enable_thinking": False},
+            question="2+2",
+        )
+        assert out == "<rendered>"
+        kwargs = tokenizer.apply_chat_template.call_args.kwargs
+        assert kwargs["enable_thinking"] is False
+        (messages,) = tokenizer.apply_chat_template.call_args.args
+        assert messages == [{"role": "user", "content": "2+2"}]
+
+    def test_defaults_render_without_extra_kwargs(self):
+        from agilerl.utils.llm_utils import render_chat_template
+
+        tokenizer = MagicMock()
+        tokenizer.apply_chat_template.return_value = "<rendered>"
+        render_chat_template(
+            [{"role": "user", "content": "hi"}],
+            tokenizer,
+        )
+        assert tokenizer.apply_chat_template.call_args.kwargs == {
+            "tokenize": False,
+            "continue_final_message": True,
+        }
+
+
 class TestMaxPromptTokensForModelLen:
     def test_reserves_one_token_when_max_output_tokens_none(self):
         from agilerl.utils.llm_utils import max_prompt_tokens_for_model_len

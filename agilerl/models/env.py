@@ -322,6 +322,9 @@ class LLMEnvSpec(BaseModel):
     :param prompt_template: Chat-template configuration rendered into the prompt
         served on reset for a dataset-backed rollout env.
     :type prompt_template: dict[str, Any] | None
+    :param chat_template_kwargs: Extra kwargs for every ``apply_chat_template``
+        render (e.g. ``{"enable_thinking": False}``).
+    :type chat_template_kwargs: dict[str, Any]
     :param max_reward: Maximum achievable reward, forwarded to the LLM
         training loop for accuracy logging.
     :type max_reward: float | None
@@ -370,6 +373,7 @@ class LLMEnvSpec(BaseModel):
     )
     columns: dict[str, str] | None = Field(default=None)
     prompt_template: dict[str, Any] | None = Field(default=None)
+    chat_template_kwargs: dict[str, Any] = Field(default_factory=dict)
     max_reward: float | None = Field(default=None)
     train_test_split: float = Field(default=0.9, ge=0.0, le=1.0)
     rubric_file_path: str | None = Field(
@@ -580,6 +584,7 @@ class LLMEnvSpec(BaseModel):
             tokenizer=tokenizer,
             objective=self.objective,
             response_column=self.response_column,
+            chat_template_kwargs=self.chat_template_kwargs,
             data_batch_size_per_gpu=self.data_batch_size_per_gpu,
             max_context_length=self.max_context_length,
             seed=self.seed if self.seed is not None else 42,
@@ -630,6 +635,7 @@ class LLMEnvSpec(BaseModel):
             validate_llm_context_lengths(max_model_len, max_output_tokens)
 
         pad_id = tokenizer.pad_token_id
+        chat_template_kwargs = dict(self.chat_template_kwargs)
 
         if self.dataset_backed_rollout:
             # The rubric file and the dataset are read once, on the first env
@@ -657,7 +663,12 @@ class LLMEnvSpec(BaseModel):
 
                     def _prompt_builder(row: Mapping[str, Any]) -> str:
                         """Render the manifest's chat template for one dataset row."""
-                        return render_chat_template(conversation, tokenizer, **row)
+                        return render_chat_template(
+                            conversation,
+                            tokenizer,
+                            chat_template_kwargs=chat_template_kwargs,
+                            **row,
+                        )
 
                     train_ds, test_ds = self._load_dataset()
                     resolved.update(
@@ -682,6 +693,7 @@ class LLMEnvSpec(BaseModel):
                     pad_id=pad_id,
                     # ``prompt_builder`` already rendered the chat template.
                     apply_chat_template=False,
+                    chat_template_kwargs=chat_template_kwargs,
                     max_model_len=max_model_len,
                     max_output_tokens=max_output_tokens,
                 )
@@ -703,6 +715,7 @@ class LLMEnvSpec(BaseModel):
                     max_turns=url_max_turns,
                     pad_id=pad_id,
                     apply_chat_template=True,
+                    chat_template_kwargs=chat_template_kwargs,
                     max_model_len=max_model_len,
                     max_output_tokens=max_output_tokens,
                 )
@@ -756,6 +769,7 @@ class LLMEnvSpec(BaseModel):
                 max_turns=max_turns,
                 pad_id=pad_id,
                 apply_chat_template=True,
+                chat_template_kwargs=chat_template_kwargs,
                 max_model_len=max_model_len,
                 max_output_tokens=max_output_tokens,
             )

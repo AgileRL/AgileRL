@@ -29,6 +29,18 @@ def _write_module(tmp_path, name: str, contents: str) -> None:
     module_path.write_text(contents)
 
 
+class _StubTextEnv:
+    """Minimal text env, resolvable as an entrypoint target."""
+
+    max_turns = 2
+
+    def reset(self, seed=None):
+        return "hi", {}
+
+    def step(self, action):
+        return "", 0.0, True, False, {}
+
+
 class TestGymEnvSpec:
     def test_custom_env_with_config_and_wrappers(self, tmp_path):
         _write_module(
@@ -334,6 +346,7 @@ class TestLLMEnvSpec:
         assert spec.dataset == "dataset.parquet"
         assert spec.columns is None
         assert spec.max_reward is None
+        assert spec.chat_template_kwargs == {}
 
     def test_is_standalone_model(self):
         spec = LLMEnvSpec(
@@ -421,6 +434,71 @@ class TestLLMEnvSpec:
         (messages,) = mock_tokenizer.apply_chat_template.call_args.args
         assert messages == [{"role": "user", "content": "2+2"}]
 
+    @patch("agilerl.models.env.make_conversation_template")
+    @patch("agilerl.models.env.get_rubric")
+    @patch.object(LLMEnvSpec, "_load_dataset")
+    def test_chat_template_kwargs_reach_dataset_factory_and_prompt_builder(
+        self, mock_load, mock_get_rubric, mock_conv_tmpl
+    ):
+        mock_load.return_value = (MagicMock(), MagicMock())
+        mock_conv_tmpl.return_value = [{"role": "user", "content": "{question}"}]
+        mock_tokenizer = MagicMock()
+        mock_tokenizer.pad_token_id = 0
+
+        spec = LLMEnvSpec(
+            env_type=LLMEnvType.ROLLOUT,
+            dataset="dataset.parquet",
+            rubric_file_path="reward.py",
+            rubric_name="reward_fn",
+            prompt_template={"user_0": "{question}"},
+            chat_template_kwargs={"enable_thinking": False},
+        )
+        mock_rollout_cls = MagicMock()
+        with patch("agilerl.llm_envs.RolloutEnv", mock_rollout_cls):
+            spec.make_rollout_env_factory(mock_tokenizer)()
+
+        kwargs = mock_rollout_cls.from_dataset.call_args.kwargs
+        assert kwargs["chat_template_kwargs"] == {"enable_thinking": False}
+
+        # The prompt_builder renders with apply_chat_template=False on the env,
+        # so the kwargs must reach its own render call.
+        mock_tokenizer.apply_chat_template.return_value = "<rendered>"
+        kwargs["prompt_builder"]({"question": "2+2"})
+        render_kwargs = mock_tokenizer.apply_chat_template.call_args.kwargs
+        assert render_kwargs["enable_thinking"] is False
+
+    def test_chat_template_kwargs_reach_url_factory(self):
+        mock_tokenizer = MagicMock()
+        mock_tokenizer.pad_token_id = 0
+        spec = LLMEnvSpec(
+            env_type=LLMEnvType.ROLLOUT,
+            env_url="ws://envs.internal:8000",
+            max_turns=3,
+            chat_template_kwargs={"enable_thinking": False},
+        )
+        mock_rollout_cls = MagicMock()
+        with patch("agilerl.llm_envs.RolloutEnv", mock_rollout_cls):
+            spec.make_rollout_env_factory(mock_tokenizer)()
+        assert mock_rollout_cls.call_args.kwargs["chat_template_kwargs"] == {
+            "enable_thinking": False
+        }
+
+    def test_chat_template_kwargs_reach_entrypoint_factory(self):
+        mock_tokenizer = MagicMock()
+        mock_tokenizer.pad_token_id = 0
+        spec = LLMEnvSpec(
+            env_type=LLMEnvType.ROLLOUT,
+            entrypoint="tests.test_models.test_env:_StubTextEnv",
+            max_turns=2,
+            chat_template_kwargs={"enable_thinking": False},
+        )
+        mock_rollout_cls = MagicMock()
+        with patch("agilerl.llm_envs.RolloutEnv", mock_rollout_cls):
+            spec.make_rollout_env_factory(mock_tokenizer)()
+        assert mock_rollout_cls.local.call_args.kwargs["chat_template_kwargs"] == {
+            "enable_thinking": False
+        }
+
     @patch.object(LLMEnvSpec, "_load_dataset")
     def test_make_env_preference(self, mock_load):
         mock_train_ds = MagicMock()
@@ -433,6 +511,7 @@ class TestLLMEnvSpec:
             objective="preference",
             dataset="dataset.parquet",
             rubric_file_path=None,
+            chat_template_kwargs={"enable_thinking": False},
         )
 
         with patch("agilerl.llm_envs.DatasetEnv") as MockEnv:
@@ -442,6 +521,9 @@ class TestLLMEnvSpec:
         assert result == "dataset_env"
         MockEnv.assert_called_once()
         assert MockEnv.call_args.kwargs["objective"] == "preference"
+        assert MockEnv.call_args.kwargs["chat_template_kwargs"] == {
+            "enable_thinking": False
+        }
 
     def test_serialization_roundtrip(self):
         spec = LLMEnvSpec(
@@ -995,6 +1077,7 @@ class TestLLMEnvSpecRollout:
             max_turns=4,
             pad_id=0,
             apply_chat_template=True,
+            chat_template_kwargs={},
             max_model_len=512,
             max_output_tokens=128,
         )
@@ -1060,6 +1143,7 @@ class TestLLMEnvSpecRollout:
             max_turns=5,
             pad_id=0,
             apply_chat_template=True,
+            chat_template_kwargs={},
             max_model_len=512,
             max_output_tokens=128,
         )
@@ -1099,6 +1183,7 @@ class TestLLMEnvSpecRollout:
             max_turns=5,
             pad_id=0,
             apply_chat_template=True,
+            chat_template_kwargs={},
             max_model_len=512,
             max_output_tokens=128,
         )
