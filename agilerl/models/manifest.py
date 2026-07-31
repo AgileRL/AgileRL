@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import copy
 import logging
+import warnings
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any, Literal, get_args, overload
 
@@ -32,8 +33,6 @@ from agilerl.models.hpo import (
     MutationSpec,
     SelectionStrategySpec,
     TournamentSelectionSpec,
-    default_selection_strategy,
-    resolve_deprecated_selection_kwargs,
 )
 from agilerl.models.networks import (
     FinetuningNetworkSpec,
@@ -224,10 +223,6 @@ def _known_field_names(model: BaseModel) -> set[str]:
     return names
 
 
-_LEGACY_SECTION_KEYS: dict[str, str] = {"selection_strategy": "tournament_selection"}
-"""Manifest section field names mapped to the legacy key they still accept."""
-
-
 def _collect_unknown_fields(
     raw: dict[str, Any], validated: TrainingManifest
 ) -> list[str]:
@@ -254,8 +249,12 @@ def _collect_unknown_fields(
         "selection_strategy": validated.selection_strategy,
     }
     for section, model in sections.items():
+        # selection_strategy still accepts its legacy tournament_selection
+        # spelling, so report unknown keys under whichever one was written.
         raw_key = (
-            section if section in raw else _LEGACY_SECTION_KEYS.get(section, section)
+            "tournament_selection"
+            if section == "selection_strategy" and section not in raw
+            else section
         )
         raw_section = raw.get(raw_key)
         if not isinstance(raw_section, dict) or not isinstance(model, BaseModel):
@@ -267,6 +266,23 @@ def _collect_unknown_fields(
         unknown.extend(f"{raw_key}.{key}" for key in raw_section if key not in known)
 
     return unknown
+
+
+def _default_selection_strategy(
+    value: dict[str, Any] | BaseModel | None,
+) -> dict[str, Any] | BaseModel | None:
+    """Inject the default strategy discriminator for config dicts that omit it.
+
+    :param value: Raw selection_strategy value from the manifest: a config dict, an
+        already-built selection spec, or None.
+    :type value: dict[str, Any] | BaseModel | None
+    :returns: The value with strategy defaulted to "tournament" when it was a
+        discriminator-less dict; otherwise the value unchanged.
+    :rtype: dict[str, Any] | BaseModel | None
+    """
+    if isinstance(value, dict) and "strategy" not in value:
+        return {**value, "strategy": "tournament"}
+    return value
 
 
 class TrainingManifest(BaseModel):
@@ -290,12 +306,34 @@ class TrainingManifest(BaseModel):
     replay_buffer: ReplayBufferSpec | None = Field(default=None)
     selection_strategy: Annotated[
         SelectionStrategySpec | None,
-        BeforeValidator(default_selection_strategy),
+        BeforeValidator(_default_selection_strategy),
     ] = Field(
         default=None,
         validation_alias=AliasChoices("selection_strategy", "tournament_selection"),
         serialization_alias="tournament_selection",
     )
+
+    @property
+    def tournament_selection(self) -> TournamentSelectionSpec | None:
+        """The configured tournament-selection spec.
+
+        .. deprecated::
+            Superseded by :attr:`selection_strategy`, the field this section is now
+            declared under. Manifests may still be written with either key, and the
+            serialized output is unaffected.
+
+        :returns: The tournament-selection spec, or None when MF-PBT or no strategy
+            is configured.
+        :rtype: TournamentSelectionSpec | None
+        """
+        warnings.warn(
+            "TrainingManifest.tournament_selection is deprecated and will be removed "
+            "in a future release; use TrainingManifest.selection_strategy instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        spec = self.selection_strategy
+        return spec if isinstance(spec, TournamentSelectionSpec) else None
 
     @model_validator(mode="after")
     def _resolve_and_validate_compatibility_with_multi_frequency(self) -> Self:
@@ -455,6 +493,8 @@ class TrainingManifest(BaseModel):
         :returns: A validated :class:`TrainingManifest`.
         :rtype: TrainingManifest
         """
+        from agilerl.utils.trainer_utils import resolve_deprecated_selection_kwargs
+
         selection_strategy = resolve_deprecated_selection_kwargs(
             selection_strategy,
             kwargs,

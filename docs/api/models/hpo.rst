@@ -10,6 +10,9 @@ is treated as tournament selection so existing configs are unchanged.
 
 The block was previously named ``tournament_selection``; that spelling is still
 accepted as an alias, so manifests written against earlier versions keep validating.
+Reading it back as ``TrainingManifest.tournament_selection`` (core or Arena) also still
+works, with a ``DeprecationWarning``; it returns ``None`` when the configured strategy
+is not tournament selection.
 
 Both regimes take their population size from the mandatory ``training.pop_size`` field.
 

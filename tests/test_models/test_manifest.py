@@ -12,6 +12,7 @@ Test manifests live under ``tests/manifests/`` as YAML files.
 
 from __future__ import annotations
 
+import warnings
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -207,6 +208,62 @@ def test_get_validated_json_writes_the_current_selection_key() -> None:
     )
     assert out["selection_strategy"]["tournament_size"] == 3
     assert "tournament_selection" not in out
+
+
+@pytest.mark.parametrize("key", ["selection_strategy", "tournament_selection"])
+def test_deprecated_tournament_selection_property_returns_the_spec(key: str) -> None:
+    manifest = TrainingManifest.get_validated(
+        _make_manifest(
+            {"name": "DQN"},
+            env={"name": "CartPole-v1"},
+            **{key: {"tournament_size": 3}},
+        ),
+        mode="python",
+    )
+    with pytest.warns(DeprecationWarning, match="tournament_selection is deprecated"):
+        assert manifest.tournament_selection is manifest.selection_strategy
+
+
+def test_deprecated_tournament_selection_property_is_none_when_unset() -> None:
+    manifest = TrainingManifest.get_validated(
+        _make_manifest({"name": "DQN"}, env={"name": "CartPole-v1"}), mode="python"
+    )
+    with pytest.warns(DeprecationWarning, match="tournament_selection is deprecated"):
+        assert manifest.tournament_selection is None
+
+
+def test_deprecated_tournament_selection_property_is_none_under_multi_frequency() -> (
+    None
+):
+    """The legacy name only ever denoted tournament selection, so MF-PBT reads None."""
+    manifest = TrainingManifest.get_validated(
+        _make_manifest(
+            {"name": "DQN"},
+            env={"name": "CartPole-v1"},
+            training={"max_steps": 1000, "evo_steps": 100, "pop_size": 6},
+            selection_strategy={"strategy": "multi_frequency"},
+        ),
+        mode="python",
+    )
+    assert isinstance(manifest.selection_strategy, MultiFrequencySelectionSpec)
+    with pytest.warns(DeprecationWarning, match="tournament_selection is deprecated"):
+        assert manifest.tournament_selection is None
+
+
+def test_deprecated_tournament_selection_property_is_not_serialized() -> None:
+    manifest = TrainingManifest.get_validated(
+        _make_manifest(
+            {"name": "DQN"},
+            env={"name": "CartPole-v1"},
+            selection_strategy={"tournament_size": 3},
+        ),
+        mode="python",
+    )
+    assert "tournament_selection" not in TrainingManifest.model_computed_fields
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", DeprecationWarning)
+        dumped = manifest.model_dump(exclude_none=True, by_alias=True)
+    assert dumped["tournament_selection"]["tournament_size"] == 3
 
 
 def test_collect_unknown_fields_ignores_non_dict_raw() -> None:

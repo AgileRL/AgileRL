@@ -286,6 +286,108 @@ class TestBuildSelectionFromSpec:
             build_selection_from_spec(object(), TrainingSpec(pop_size=8))
 
 
+class TestResolveDeprecatedSelectionKwargs:
+    """Spec-level backward compatibility for the superseded selection keywords."""
+
+    def test_returns_the_spec_unchanged_when_no_deprecated_kwarg(self):
+        from agilerl.models.hpo import TournamentSelectionSpec
+        from agilerl.utils.trainer_utils import resolve_deprecated_selection_kwargs
+
+        spec = TournamentSelectionSpec(tournament_size=3)
+
+        resolved = resolve_deprecated_selection_kwargs(spec, {}, caller="Trainer")
+
+        assert resolved is spec
+
+    def test_returns_none_when_neither_spelling_supplies_a_spec(self):
+        from agilerl.utils.trainer_utils import resolve_deprecated_selection_kwargs
+
+        assert resolve_deprecated_selection_kwargs(None, {}, caller="Trainer") is None
+
+    def test_folds_the_deprecated_kwarg_and_warns(self):
+        from agilerl.models.hpo import TournamentSelectionSpec
+        from agilerl.utils.trainer_utils import resolve_deprecated_selection_kwargs
+
+        spec = TournamentSelectionSpec(tournament_size=4)
+
+        with pytest.warns(DeprecationWarning, match="'tournament' argument to Trainer"):
+            resolved = resolve_deprecated_selection_kwargs(
+                None, {"tournament": spec}, caller="Trainer"
+            )
+
+        assert resolved is spec
+
+    def test_honours_a_custom_deprecated_key(self):
+        from agilerl.models.hpo import MultiFrequencySelectionSpec
+        from agilerl.utils.trainer_utils import resolve_deprecated_selection_kwargs
+
+        spec = MultiFrequencySelectionSpec(n_subpopulations=2)
+
+        with pytest.warns(DeprecationWarning, match="'tournament_selection' argument"):
+            resolved = resolve_deprecated_selection_kwargs(
+                None,
+                {"tournament_selection": spec},
+                deprecated_key="tournament_selection",
+                caller="TrainingManifest.from_trainer_specs",
+            )
+
+        assert resolved is spec
+
+    def test_deprecated_kwarg_set_to_none_falls_back_to_the_new_spelling(self):
+        from agilerl.models.hpo import TournamentSelectionSpec
+        from agilerl.utils.trainer_utils import resolve_deprecated_selection_kwargs
+
+        spec = TournamentSelectionSpec(tournament_size=5)
+
+        with pytest.warns(DeprecationWarning, match="'tournament' argument to Trainer"):
+            resolved = resolve_deprecated_selection_kwargs(
+                spec, {"tournament": None}, caller="Trainer"
+            )
+
+        assert resolved is spec
+
+    def test_equal_but_distinct_specs_route_cleanly(self):
+        # Pydantic equality compares field values, so passing the same configuration
+        # under both spellings is not a conflict
+        from agilerl.models.hpo import TournamentSelectionSpec
+        from agilerl.utils.trainer_utils import resolve_deprecated_selection_kwargs
+
+        spec = TournamentSelectionSpec(tournament_size=3)
+        twin = TournamentSelectionSpec(tournament_size=3)
+
+        with pytest.warns(DeprecationWarning, match="'tournament' argument to Trainer"):
+            resolved = resolve_deprecated_selection_kwargs(
+                spec, {"tournament": twin}, caller="Trainer"
+            )
+
+        assert resolved is spec
+
+    def test_rejects_a_stray_keyword_argument(self):
+        from agilerl.utils.trainer_utils import resolve_deprecated_selection_kwargs
+
+        with pytest.raises(
+            TypeError, match=r"unexpected keyword argument\(s\): 'typo'"
+        ):
+            resolve_deprecated_selection_kwargs(None, {"typo": 1}, caller="Trainer")
+
+    def test_rejects_conflicting_specs_from_the_two_spellings(self):
+        from agilerl.models.hpo import (
+            MultiFrequencySelectionSpec,
+            TournamentSelectionSpec,
+        )
+        from agilerl.utils.trainer_utils import resolve_deprecated_selection_kwargs
+
+        with (
+            pytest.warns(DeprecationWarning, match="'tournament' argument to Trainer"),
+            pytest.raises(ValueError, match="conflicting selection strategies"),
+        ):
+            resolve_deprecated_selection_kwargs(
+                MultiFrequencySelectionSpec(n_subpopulations=2),
+                {"tournament": TournamentSelectionSpec(tournament_size=3)},
+                caller="Trainer",
+            )
+
+
 class TestBuildReplayBuffer:
     def test_none_with_on_policy_returns_none(self):
         from agilerl.models import PPOSpec

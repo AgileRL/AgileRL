@@ -62,14 +62,13 @@ class TestMultiFrequencySelectionSpec:
         spec = MultiFrequencySelectionSpec()
 
         assert spec.n_subpopulations == 2
-        assert spec.n_survivors == 0
         assert spec.evolution_frequency_ratios == [1, 5]
-        # Bracket defaults need the population size, so they are not resolved here
-        assert (spec.n_winners, spec.n_open_for_migration, spec.n_losers) == (
-            None,
-            None,
-            None,
-        )
+        assert (
+            spec.n_winners,
+            spec.n_survivors,
+            spec.n_open_for_migration,
+            spec.n_losers,
+        ) == (None, None, None, None)
 
     def test_ratios_default_scales_with_subpopulations(self):
         spec = MultiFrequencySelectionSpec(n_subpopulations=4)

@@ -42,10 +42,7 @@ from agilerl.models.env import (
     OfflineEnvSpec,
     PzEnvSpec,
 )
-from agilerl.models.hpo import (
-    SelectionStrategySpec,
-    resolve_deprecated_selection_kwargs,
-)
+from agilerl.models.hpo import SelectionStrategySpec
 from agilerl.models.networks import (
     NetworkSpec,
     encoder_spec_for_arch,
@@ -59,6 +56,7 @@ from agilerl.utils.trainer_utils import (
     build_selection_from_spec,
     create_population_from_spec,
     get_spaces_from_env,
+    resolve_deprecated_selection_kwargs,
 )
 
 logger = logging.getLogger(__name__)
@@ -982,7 +980,7 @@ class ArenaTrainer(Trainer):
         algorithm: Any = validated_manifest.algorithm
         training: Any = validated_manifest.training
         mutation: Any = validated_manifest.mutation
-        tournament: Any = validated_manifest.tournament_selection
+        selection_strategy: Any = validated_manifest.selection_strategy
         replay_buffer: Any = validated_manifest.replay_buffer
 
         # Deferred network (``arch`` omitted): the arena manifest leaves
@@ -1002,8 +1000,7 @@ class ArenaTrainer(Trainer):
             api_key=api_key,
             training=training,
             mutation=mutation,
-            # ArenaManifest keeps the tournament_selection field name
-            selection_strategy=tournament,
+            selection_strategy=selection_strategy,
             replay_buffer=replay_buffer,
         )
 

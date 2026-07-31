@@ -12,6 +12,7 @@ from accelerate.utils import broadcast_object_list
 
 from agilerl.algorithms.core.base import LLMAlgorithm
 from agilerl.protocols import EvolvableAlgorithmProtocol
+from agilerl.utils.population_utils import scalar_fitness
 
 AgentT = TypeVar("AgentT", bound=EvolvableAlgorithmProtocol)
 
@@ -43,20 +44,6 @@ class TournamentSelection:
         self.population_size = population_size
         self.language_model = None
 
-    @staticmethod
-    def _scalar_fitness(fitness: float | npt.NDArray | dict[str, float]) -> float:
-        """Reduce a possibly vector-valued fitness to a single scalar for ranking.
-
-        When ``sum_scores=False``, multi-agent algorithms store per-sub-agent
-        fitness values.  Tournament selection needs a total ordering, so we
-        collapse to the mean across sub-agents.
-        """
-        if isinstance(fitness, dict):
-            return float(np.mean(list(fitness.values())))
-        if isinstance(fitness, (list, tuple, np.ndarray)):
-            return float(np.mean(fitness))
-        return float(fitness)
-
     def _tournament(self, fitness_values: Sequence[float] | npt.NDArray) -> int:
         """Perform tournament selection given a list of fitness values.
 
@@ -80,7 +67,7 @@ class TournamentSelection:
         :return: Best performing member of the population, rank array, and max id
         :rtype: tuple[AgentT, npt.NDArray, int]
         """
-        last_fitness = [self._scalar_fitness(indi.fitness[-1]) for indi in population]
+        last_fitness = [scalar_fitness(indi.fitness[-1]) for indi in population]
         rank = np.argsort(last_fitness).argsort()
         max_id = max([ind.index for ind in population])
         return population[int(np.argsort(rank)[-1])], rank, max_id

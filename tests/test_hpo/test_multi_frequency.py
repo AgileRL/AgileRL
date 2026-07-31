@@ -9,7 +9,11 @@ import numpy as np
 import pytest
 
 import agilerl.hpo.multi_frequency as mf_module
-from agilerl.hpo.multi_frequency import MultiFrequencyOp, MultiFrequencySelection
+from agilerl.hpo.multi_frequency import (
+    MultiFrequencyOp,
+    MultiFrequencySelection,
+    resolve_and_validate_frequency_ratios,
+)
 from tests.helper_functions import (
     FakeOptimizerWrapper,
     FakeRegistry,
@@ -28,6 +32,71 @@ def run_migration(strategy, population, subpop, external_pool):
     return strategy._migrate(
         population, subpop, winners, open_for_migration, external_pool
     )
+
+
+class TestResolveAndValidateFrequencyRatios:
+    """The frequency-ratio invariant shared by the operator and its Pydantic spec."""
+
+    def test_none_resolves_to_the_default_ladder(self):
+        assert resolve_and_validate_frequency_ratios(None, 3) == [1, 5, 10]
+
+    def test_empty_list_resolves_to_the_default_ladder(self):
+        assert resolve_and_validate_frequency_ratios([], 2) == [1, 5]
+
+    def test_explicit_ratios_are_returned_as_a_detached_copy(self):
+        configured = [1, 3]
+
+        resolved = resolve_and_validate_frequency_ratios(configured, 2)
+
+        assert resolved == [1, 3]
+        assert resolved is not configured
+
+    @pytest.mark.parametrize(
+        ("ratios", "match"),
+        [
+            ([1], "length n_subpopulations"),
+            ([1, 2, 3], "length n_subpopulations"),
+            ([1, 1], "strictly increasing"),
+            ([2, 1], "strictly increasing"),
+            ([0, 2], ">= 1"),
+        ],
+    )
+    def test_rejects_invalid_ratios(self, ratios, match):
+        with pytest.raises(ValueError, match=match):
+            resolve_and_validate_frequency_ratios(ratios, 2)
+
+    @pytest.mark.parametrize(
+        ("ratios", "match"),
+        [
+            ([1], "length n_subpopulations"),
+            ([1, 1], "strictly increasing"),
+            ([0, 2], ">= 1"),
+        ],
+    )
+    def test_operator_and_spec_reject_the_same_ratios(self, ratios, match):
+        from pydantic import ValidationError
+
+        from agilerl.models.hpo import MultiFrequencySelectionSpec
+
+        with pytest.raises(ValueError, match=match):
+            MultiFrequencySelection(
+                population_size=8,
+                n_subpopulations=2,
+                evolution_frequency_ratios=ratios,
+            )
+
+        with pytest.raises(ValidationError, match=match):
+            MultiFrequencySelectionSpec(
+                n_subpopulations=2, evolution_frequency_ratios=ratios
+            )
+
+    def test_operator_and_spec_resolve_the_same_defaults(self):
+        from agilerl.models.hpo import MultiFrequencySelectionSpec
+
+        spec = MultiFrequencySelectionSpec(n_subpopulations=3)
+        operator = MultiFrequencySelection(population_size=9, n_subpopulations=3)
+
+        assert operator.deltas == spec.evolution_frequency_ratios
 
 
 class TestMultiFrequencySelectionInit:
@@ -217,20 +286,31 @@ class TestMultiFrequencySelectionInit:
             )
 
 
-class TestScalarFitness:
+class TestRanking:
     @pytest.mark.parametrize(
-        ("fitness", "expected"),
+        "fitness",
         [
-            ({"a": 1.0, "b": 3.0}, 2.0),
-            ([1.0, 3.0], 2.0),
-            ((1.0, 3.0), 2.0),
-            (np.array([2.0, 4.0]), 3.0),
-            (5.0, 5.0),
+            [{"a": 9.0, "b": 0.0}, {"a": 5.0, "b": 5.0}, {"a": 1.0, "b": 3.0}],
+            [np.array([9.0, 0.0]), np.array([5.0, 5.0]), np.array([1.0, 3.0])],
         ],
-        ids=["dict", "list", "tuple", "array", "scalar"],
+        ids=["dict", "array"],
     )
-    def test_scalar_fitness_reduces_to_the_mean(self, fitness, expected):
-        assert MultiFrequencySelection._scalar_fitness(fitness) == expected
+    def test_rank_orders_vector_fitness_by_its_mean(self, fitness):
+        strategy = make_multi_frequency_selection()
+        pop = [
+            FakeSelectionAgent(index, 0, value) for index, value in enumerate(fitness)
+        ]
+
+        assert [a.index for a in strategy._rank(pop)] == [1, 0, 2]
+
+    def test_rank_orders_scalar_fitness_highest_first(self):
+        strategy = make_multi_frequency_selection()
+        pop = [
+            FakeSelectionAgent(index, 0, value)
+            for index, value in enumerate([1.0, 5.0, 3.0])
+        ]
+
+        assert [a.index for a in strategy._rank(pop)] == [1, 2, 0]
 
 
 class TestSubpopulationAssignment:

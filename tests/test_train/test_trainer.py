@@ -968,6 +968,24 @@ class TestArenaTrainerFromManifest:
         assert trainer.env_spec.name == "CartPole-v1"
         assert trainer._client is mock_client
 
+    @pytest.mark.parametrize("key", ["selection_strategy", "tournament_selection"])
+    def test_from_manifest_carries_the_selection_section(self, mock_client, key):
+        """Either spelling of the selection block reaches the trainer's spec."""
+        data = {
+            "algorithm": {"name": "DQN", "learn_step": 1},
+            "environment": {"name": "CartPole-v1", "num_envs": 4},
+            "training": {"max_steps": 100, "evo_steps": 50, "pop_size": 2},
+            key: {"tournament_size": 3, "elitism": False},
+        }
+        trainer = ArenaTrainer.from_manifest(data, client=mock_client)
+        assert trainer.selection_strategy_spec.tournament_size == 3
+        assert trainer.selection_strategy_spec.elitism is False
+
+        # The platform run spec keys the section on its original name
+        manifest = trainer.to_manifest()
+        assert manifest["tournament_selection"]["tournament_size"] == 3
+        assert "selection_strategy" not in manifest
+
     def test_from_manifest_train_round_trip(self, mock_client):
         """``from_manifest(...).train()`` validates and submits an Arena manifest."""
         from agilerl.arena.models import PPOSpec as ArenaPPOSpec

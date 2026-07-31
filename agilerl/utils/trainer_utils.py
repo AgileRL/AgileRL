@@ -456,6 +456,70 @@ def build_selection_from_spec(
     raise TypeError(msg)
 
 
+def resolve_deprecated_selection_kwargs(
+    selection_strategy: SelectionStrategySpec | None,
+    kwargs: dict[str, Any],
+    *,
+    deprecated_key: str = "tournament",
+    caller: str,
+) -> SelectionStrategySpec | None:
+    """Fold a deprecated selection keyword argument into selection_strategy.
+
+    :param selection_strategy: The spec passed via the current argument, or None
+        when unset.
+    :type selection_strategy: SelectionStrategySpec | None
+    :param kwargs: The catch-all keyword arguments of the calling API.
+    :type kwargs: dict[str, Any]
+    :param deprecated_key: The superseded keyword the caller still accepts,
+        defaults to "tournament".
+    :type deprecated_key: str
+    :param caller: Name of the calling API, used in the warning and error messages.
+    :type caller: str
+    :returns: The resolved selection-strategy spec, or None when neither spelling
+        supplied one.
+    :rtype: SelectionStrategySpec | None
+    :raises TypeError: If kwargs holds any key other than deprecated_key.
+    :raises ValueError: If both spellings were used and carry different specs.
+    """
+    unexpected = sorted(key for key in kwargs if key != deprecated_key)
+    if unexpected:
+        msg = (
+            f"{caller} got unexpected keyword argument(s): "
+            f"{', '.join(repr(key) for key in unexpected)}."
+        )
+        raise TypeError(msg)
+
+    if deprecated_key not in kwargs:
+        return selection_strategy
+
+    warnings.warn(
+        f"The {deprecated_key!r} argument to {caller} is deprecated and will be "
+        "removed in a future release; pass the selection strategy via "
+        "selection_strategy instead.",
+        DeprecationWarning,
+        stacklevel=3,
+    )
+
+    deprecated_spec = kwargs[deprecated_key]
+    if deprecated_spec is None:
+        return selection_strategy
+
+    if selection_strategy is None:
+        return deprecated_spec
+
+    # Pydantic equality compares class and field values, so equal-but-distinct
+    # specs route cleanly while a tournament spec and an MF-PBT spec never match
+    if selection_strategy != deprecated_spec:
+        msg = (
+            f"{caller} received conflicting selection strategies: "
+            f"'selection_strategy'={selection_strategy!r} and the deprecated "
+            f"{deprecated_key!r}={deprecated_spec!r}. Pass only 'selection_strategy'."
+        )
+        raise ValueError(msg)
+
+    return selection_strategy
+
+
 def build_replay_buffer_from_spec(
     algo_spec: AlgoSpec,
     buffer_spec: ReplayBufferSpec | None,

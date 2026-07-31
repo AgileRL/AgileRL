@@ -31,29 +31,71 @@ from typing import Any
 import numpy as np
 from accelerate.utils import broadcast_object_list
 
-from agilerl.algorithms.core.base import EvolvableAlgorithm, LLMAlgorithm
-from agilerl.models.hpo import resolve_and_validate_frequency_ratios
-
-PopulationT = list[EvolvableAlgorithm]
+from agilerl.algorithms.core.base import LLMAlgorithm
+from agilerl.protocols import EvolvableAlgorithmProtocol
+from agilerl.typing import PopulationType
+from agilerl.utils.population_utils import scalar_fitness
 
 
 class MultiFrequencyOp(str, Enum):
-    """Operation code tagging a single slot of an MF-PBT generation plan."""
+    """Operation code tagging a single slot of an MF-PBT generation plan.
 
-    # The slot is left untouched this cycle
+    :cvar KEEP: The slot is left untouched this cycle
+    :cvar CLONE: A loser slot is overwritten by a clone of one of its
+        subpopulation's winners
+    :cvar MIGRATE_FULL: An open slot imports a full clone of an external migrant
+    :cvar MIGRATE_WEIGHTS: An open slot imports an external migrant's networks but
+        resets its mutable hyperparameters to the destination subpopulation's elite
+    """
+
     KEEP = "keep"
-    # A loser slot is overwritten by a clone of one of its subpopulation's winners
     CLONE = "clone"
-    # An open slot imports a full clone of an external migrant
     MIGRATE_FULL = "migrate_full"
-    # An open slot imports an external migrant's networks but resets its mutable
-    # hyperparameters to the destination subpopulation's elite
     MIGRATE_WEIGHTS = "migrate_weights"
 
 
 MigrationDecision = tuple[
-    EvolvableAlgorithm, EvolvableAlgorithm, MultiFrequencyOp, EvolvableAlgorithm
+    EvolvableAlgorithmProtocol,
+    EvolvableAlgorithmProtocol,
+    MultiFrequencyOp,
+    EvolvableAlgorithmProtocol,
 ]
+
+
+def resolve_and_validate_frequency_ratios(
+    evolution_frequency_ratios: list[int] | None,
+    n_subpopulations: int,
+) -> list[int]:
+    """Default and validate the MF-PBT per-subpopulation evolution-frequency ratios.
+
+    :param evolution_frequency_ratios: The configured ratios, or None/[]
+        to default to [1, 5, 10, ...].
+    :type evolution_frequency_ratios: list[int] | None
+    :param n_subpopulations: Number of subpopulations the ratios must cover.
+    :type n_subpopulations: int
+    :return: A new list of n_subpopulations strictly-increasing ratios >= 1.
+    :rtype: list[int]
+    :raises ValueError: If the ratios are not n_subpopulations strictly-increasing
+        integers >= 1.
+    """
+    ratios = (
+        list(evolution_frequency_ratios)
+        if evolution_frequency_ratios
+        else [1] + [5 * i for i in range(1, n_subpopulations)]
+    )
+    if len(ratios) != n_subpopulations:
+        msg = (
+            f"evolution_frequency_ratios must have length n_subpopulations "
+            f"({n_subpopulations}), got {len(ratios)}."
+        )
+        raise ValueError(msg)
+    if any(r < 1 for r in ratios):
+        msg = "Each evolution_frequency_ratio must be >= 1."
+        raise ValueError(msg)
+    if any(ratios[i] >= ratios[i + 1] for i in range(len(ratios) - 1)):
+        msg = "evolution_frequency_ratios must be strictly increasing."
+        raise ValueError(msg)
+    return ratios
 
 
 class MultiFrequencySelection:
@@ -245,40 +287,25 @@ class MultiFrequencySelection:
             n_losers,
         )
 
-    @staticmethod
-    def _scalar_fitness(fitness: float | np.ndarray | dict[str, float]) -> float:
-        """Reduce a vector-valued fitness to a single scalar for ranking.
-
-        :param fitness: The agent's latest fitness value.
-        :type fitness: float | numpy.ndarray | dict[str, float]
-        :return: The scalar fitness used for ranking.
-        :rtype: float
-        """
-        if isinstance(fitness, dict):
-            return float(np.mean(list(fitness.values())))
-        if isinstance(fitness, (list, tuple, np.ndarray)):
-            return float(np.mean(fitness))
-        return float(fitness)
-
-    def _rank(self, agents: PopulationT) -> PopulationT:
+    def _rank(self, agents: PopulationType) -> PopulationType:
         """Return agents sorted by scalar fitness, highest first.
 
         :param agents: The agents to rank.
-        :type agents: list
+        :type agents: PopulationType
         :return: A new list ordered by descending scalar fitness.
-        :rtype: list
+        :rtype: PopulationType
         """
         return sorted(
             agents,
-            key=lambda a: self._scalar_fitness(a.fitness[-1]),
+            key=lambda a: scalar_fitness(a.fitness[-1]),
             reverse=True,
         )
 
-    def _sync_index(self, population: PopulationT) -> None:
+    def _sync_index(self, population: PopulationType) -> None:
         """Seed the index allocator from the current population's max index.
 
         :param population: The whole population.
-        :type population: list
+        :type population: PopulationType
         """
         current = max(a.index for a in population)
         self._max_index = (
@@ -316,14 +343,14 @@ class MultiFrequencySelection:
         """
         return position // subpopulation_size
 
-    def _assign_initial_subpopulations(self, population: PopulationT) -> None:
+    def _assign_initial_subpopulations(self, population: PopulationType) -> None:
         """Tag any agent lacking a subpopulation.
 
         Makes the operator robust when driven through the functional trainers with
         a population that was not tagged at build time.
 
         :param population: The whole population.
-        :type population: list
+        :type population: PopulationType
         :raises ValueError: If len(population) does not equal population_size, or the
             agent indices are not globally unique.
         """
@@ -348,11 +375,11 @@ class MultiFrequencySelection:
                     position, self.subpopulation_size
                 )
 
-    def _delta_of(self, agent: EvolvableAlgorithm) -> int:
+    def _delta_of(self, agent: EvolvableAlgorithmProtocol) -> int:
         """Return the evolution frequency delta_i of the agent's subpopulation.
 
         :param agent: A tagged population member.
-        :type agent: ~agilerl.algorithms.core.base.EvolvableAlgorithm
+        :type agent: ~agilerl.protocols.EvolvableAlgorithmProtocol
         :return: The delta_i of the subpopulation the agent belongs to.
         :rtype: int
         :raises ValueError: If the agent carries no subpopulation tag.
@@ -367,19 +394,19 @@ class MultiFrequencySelection:
         return self.deltas[agent.subpopulation_id]
 
     def _bracket_subpopulation(
-        self, population: PopulationT, subpop: int
-    ) -> tuple[PopulationT, PopulationT, PopulationT, PopulationT]:
+        self, population: PopulationType, subpop: int
+    ) -> tuple[PopulationType, PopulationType, PopulationType, PopulationType]:
         """Partition a subpopulation's members into the four ranked brackets.
 
         Members are ranked by descending fitness and sliced into
         (winners, survivors, open, losers).
 
         :param population: The whole population.
-        :type population: list
+        :type population: PopulationType
         :param subpop: The subpopulation id to bracket.
         :type subpop: int
         :return: (winners, survivors, open_for_migration, losers).
-        :rtype: tuple[list, list, list, list]
+        :rtype: tuple[PopulationType, PopulationType, PopulationType, PopulationType]
         """
         members = self._rank([a for a in population if a.subpopulation_id == subpop])
         if len(members) != self.subpopulation_size:
@@ -396,16 +423,16 @@ class MultiFrequencySelection:
         return winners, survivors, open_for_migration, losers
 
     def select(
-        self, population: PopulationT
-    ) -> tuple[EvolvableAlgorithm, PopulationT, list[int]]:
+        self, population: PopulationType
+    ) -> tuple[EvolvableAlgorithmProtocol, PopulationType, list[int]]:
         """Select the agents to be migrated and mutated during an MF-PBT evolution cycle.
 
         :param population: The whole population.
-        :type population: list
+        :type population: PopulationType
         :return: (elite, population, indices_to_mutate). The pre-evolution global
             elite, the evolved population with migrants and clones, and the indices
             of the winner clones to be perturbed.
-        :rtype: tuple[EvolvableAlgorithm, list, list[int]]
+        :rtype: tuple[EvolvableAlgorithmProtocol, PopulationType, list[int]]
         """
         self._assign_initial_subpopulations(population)
         self._sync_index(population)
@@ -415,18 +442,18 @@ class MultiFrequencySelection:
         return self._select_standard_agents(population)
 
     def _select_standard_agents(
-        self, population: PopulationT
-    ) -> tuple[EvolvableAlgorithm, PopulationT, list[int]]:
+        self, population: PopulationType
+    ) -> tuple[EvolvableAlgorithmProtocol, PopulationType, list[int]]:
         """Evolve a classic-RL population with in-memory cloning.
 
         :param population: The whole population.
-        :type population: list
+        :type population: PopulationType
         :return: (elite, population, indices_to_mutate).
-        :rtype: tuple[EvolvableAlgorithm, list, list[int]]
+        :rtype: tuple[EvolvableAlgorithmProtocol, PopulationType, list[int]]
         """
-        elite = max(
-            population, key=lambda a: self._scalar_fitness(a.fitness[-1])
-        ).clone(wrap=False)
+        elite = max(population, key=lambda a: scalar_fitness(a.fitness[-1])).clone(
+            wrap=False
+        )
 
         # The frozen snapshot makes migrations independent of the order in which
         # subpopulations are processed
@@ -454,14 +481,14 @@ class MultiFrequencySelection:
         return elite, updated, indices_to_mutate
 
     def _select_llm_agents(
-        self, population: PopulationT
-    ) -> tuple[EvolvableAlgorithm, PopulationT, list[int]]:
+        self, population: PopulationType
+    ) -> tuple[EvolvableAlgorithmProtocol, PopulationType, list[int]]:
         """Evolve a population of LLM agents.
 
         :param population: The whole population.
-        :type population: list
+        :type population: PopulationType
         :return: (elite, population, indices_to_mutate).
-        :rtype: tuple[EvolvableAlgorithm, list, list[int]]
+        :rtype: tuple[EvolvableAlgorithmProtocol, PopulationType, list[int]]
         """
         accelerator = getattr(population[0], "accelerator", None)
 
@@ -489,11 +516,11 @@ class MultiFrequencySelection:
         elite = next(a for a in new_population if a.index == plan["elite_index"])
         return elite, new_population, plan["indices_to_mutate"]
 
-    def _plan_llm_evolution(self, population: PopulationT) -> dict[str, Any]:
+    def _plan_llm_evolution(self, population: PopulationType) -> dict[str, Any]:
         """Decide a whole MF-PBT generation as a serializable, index-based plan.
 
         :param population: The whole population.
-        :type population: list
+        :type population: PopulationType
         :return: A plan {"ops", "elite_index", "indices_to_mutate"}. ops is one
             tuple per population slot (aligned to population order), tagged by a
             leading :class:`MultiFrequencyOp`: (KEEP,),
@@ -505,9 +532,7 @@ class MultiFrequencySelection:
         :rtype: dict
         """
         self._sync_index(population)
-        elite_index = max(
-            population, key=lambda a: self._scalar_fitness(a.fitness[-1])
-        ).index
+        elite_index = max(population, key=lambda a: scalar_fitness(a.fitness[-1])).index
 
         ops: dict[int, tuple] = {a.index: (MultiFrequencyOp.KEEP,) for a in population}
         indices_to_mutate: list[int] = []
@@ -559,22 +584,22 @@ class MultiFrequencySelection:
         }
 
     def _execute_llm_plan(
-        self, population: PopulationT, plan: dict[str, Any]
-    ) -> PopulationT:
+        self, population: PopulationType, plan: dict[str, Any]
+    ) -> PopulationType:
         """Materialise the broadcast plan, cloning collectively and freeing dropped agents.
 
         To bound GPU memory (LLM agents are multi-GB) it frees an overwritten agent
         as soon as it is no longer needed.
 
         :param population: The pre-evolution population.
-        :type population: list
+        :type population: PopulationType
         :param plan: The plan produced by :meth:`_plan_llm_evolution`.
         :type plan: dict
         :return: The evolved population, aligned to population's slot order.
-        :rtype: list
+        :rtype: PopulationType
         """
         ops = plan["ops"]
-        by_index: dict[int, EvolvableAlgorithm | None] = {
+        by_index: dict[int, EvolvableAlgorithmProtocol | None] = {
             a.index: a for a in population
         }
 
@@ -596,7 +621,7 @@ class MultiFrequencySelection:
                 self._clean_up(agent)
                 by_index[agent.index] = None
 
-        new_population: PopulationT = []
+        new_population: PopulationType = []
         for i, (agent, op) in enumerate(zip(population, ops, strict=True)):
             if op[0] is MultiFrequencyOp.KEEP:
                 new_population.append(agent)
@@ -617,11 +642,11 @@ class MultiFrequencySelection:
         return new_population
 
     @staticmethod
-    def _clean_up(agent: EvolvableAlgorithm) -> None:
+    def _clean_up(agent: EvolvableAlgorithmProtocol) -> None:
         """Free an agent, bracketed by its accelerator barriers.
 
         :param agent: The agent to free.
-        :type agent: ~agilerl.algorithms.core.base.EvolvableAlgorithm
+        :type agent: ~agilerl.protocols.EvolvableAlgorithmProtocol
         """
         accelerator = getattr(agent, "accelerator", None)
         if accelerator is not None:
@@ -632,16 +657,16 @@ class MultiFrequencySelection:
 
     @staticmethod
     def _collective_clone(
-        source: EvolvableAlgorithm, new_index: int
-    ) -> EvolvableAlgorithm:
+        source: EvolvableAlgorithmProtocol, new_index: int
+    ) -> EvolvableAlgorithmProtocol:
         """Clone an agent, bracketed by its accelerator barriers.
 
         :param source: The agent to clone.
-        :type source: ~agilerl.algorithms.core.base.EvolvableAlgorithm
+        :type source: ~agilerl.protocols.EvolvableAlgorithmProtocol
         :param new_index: The clone's globally-unique index.
         :type new_index: int
         :return: The unwrapped clone.
-        :rtype: ~agilerl.algorithms.core.base.EvolvableAlgorithm
+        :rtype: ~agilerl.protocols.EvolvableAlgorithmProtocol
         """
         accelerator = getattr(source, "accelerator", None)
         if accelerator is not None:
@@ -653,27 +678,27 @@ class MultiFrequencySelection:
 
     def _clone_winners_over_losers(
         self,
-        population: PopulationT,
-        winners: PopulationT,
-        losers: PopulationT,
+        population: PopulationType,
+        winners: PopulationType,
+        losers: PopulationType,
         subpop: int,
-    ) -> tuple[PopulationT, list[int]]:
+    ) -> tuple[PopulationType, list[int]]:
         """Replace each loser with a clone of a uniformly-random winner.
 
         :param population: The whole population (not mutated in place).
-        :type population: list
+        :type population: PopulationType
         :param winners: The subpopulation's winners bracket to clone from.
-        :type winners: list
+        :type winners: PopulationType
         :param losers: The subpopulation's losers bracket to replace.
-        :type losers: list
+        :type losers: PopulationType
         :param subpop: The subpopulation id the clones belong to.
         :type subpop: int
         :return: (new_population, clone_indices). A new population list with the
             losers replaced, and the clones' indices to be perturbed.
-        :rtype: tuple[list, list[int]]
+        :rtype: tuple[PopulationType, list[int]]
         """
         self._sync_index(population)
-        clone_for_loser: dict[int, EvolvableAlgorithm] = {}
+        clone_for_loser: dict[int, EvolvableAlgorithmProtocol] = {}
         clone_indices: list[int] = []
         for loser in losers:
             winner = winners[int(self.rng.integers(len(winners)))]
@@ -686,12 +711,12 @@ class MultiFrequencySelection:
 
     def _migrate(
         self,
-        population: PopulationT,
+        population: PopulationType,
         subpop: int,
-        winners: PopulationT,
-        open_for_migration: PopulationT,
-        external_pool: PopulationT,
-    ) -> PopulationT:
+        winners: PopulationType,
+        open_for_migration: PopulationType,
+        external_pool: PopulationType,
+    ) -> PopulationType:
         """Asymmetrically migrate stronger agents into the open-for-migration slots.
 
         Implements Algorithm 2 of the paper. For each open-for-migration agent (best
@@ -704,23 +729,23 @@ class MultiFrequencySelection:
         cloned in full.
 
         :param population: The live population, used for substitution.
-        :type population: list
+        :type population: PopulationType
         :param subpop: The subpopulation id to migrate into.
         :type subpop: int
         :param winners: The subpopulation's winners bracket; winners[0] is the
             elite whose hyperparameters a weights-only migrant adopts.
-        :type winners: list
+        :type winners: PopulationType
         :param open_for_migration: The subpopulation's open-for-migration bracket
             (best first) whose slots migrants may fill.
-        :type open_for_migration: list
+        :type open_for_migration: PopulationType
         :param external_pool: The pre-evolution population snapshot that migrant
             sources are drawn from.
-        :type external_pool: list
+        :type external_pool: PopulationType
         :return: A new population list with migrants substituted in place.
-        :rtype: list
+        :rtype: PopulationType
         """
         self._sync_index(population)
-        replacements: dict[int, EvolvableAlgorithm] = {}
+        replacements: dict[int, EvolvableAlgorithmProtocol] = {}
         for open_agent, ext, kind, elite in self._migration_decisions(
             subpop, winners, open_for_migration, external_pool
         ):
@@ -736,20 +761,20 @@ class MultiFrequencySelection:
     def _migration_decisions(
         self,
         subpop: int,
-        winners: PopulationT,
-        open_for_migration: PopulationT,
-        external_pool: PopulationT,
+        winners: PopulationType,
+        open_for_migration: PopulationType,
+        external_pool: PopulationType,
     ) -> list[MigrationDecision]:
         """Decide the asymmetric migrations without cloning.
 
         :param subpop: The subpopulation id to migrate into.
         :type subpop: int
         :param winners: The destination subpopulation's winners.
-        :type winners: list
+        :type winners: PopulationType
         :param open_for_migration: The destination's open-for-migration bracket.
-        :type open_for_migration: list
+        :type open_for_migration: PopulationType
         :param external_pool: The pre-evolution snapshot migrant sources are drawn from.
-        :type external_pool: list
+        :type external_pool: PopulationType
         :return: A list of (open_agent, external, kind, elite) tuples, one per migration.
         :rtype: list[tuple]
         """
@@ -766,7 +791,7 @@ class MultiFrequencySelection:
             if external_counter >= len(external):
                 break
             ext = external[external_counter]
-            if self._scalar_fitness(open_agent.fitness[-1]) >= self._scalar_fitness(
+            if scalar_fitness(open_agent.fitness[-1]) >= scalar_fitness(
                 ext.fitness[-1]
             ):
                 continue
@@ -781,34 +806,37 @@ class MultiFrequencySelection:
         return decisions
 
     def _migrate_full_clone(
-        self, external: EvolvableAlgorithm, subpop: int
-    ) -> EvolvableAlgorithm:
+        self, external: EvolvableAlgorithmProtocol, subpop: int
+    ) -> EvolvableAlgorithmProtocol:
         """Full clone of an external agent.
 
         :param external: The external agent migrating in.
-        :type external: ~agilerl.algorithms.core.base.EvolvableAlgorithm
+        :type external: ~agilerl.protocols.EvolvableAlgorithmProtocol
         :param subpop: The destination subpopulation id.
         :type subpop: int
         :return: The migrant agent (independent of external).
-        :rtype: ~agilerl.algorithms.core.base.EvolvableAlgorithm
+        :rtype: ~agilerl.protocols.EvolvableAlgorithmProtocol
         """
         migrant = external.clone(index=self._next_index(), wrap=False)
         migrant.subpopulation_id = subpop
         return migrant
 
     def _migrate_weights(
-        self, external: EvolvableAlgorithm, elite: EvolvableAlgorithm, subpop: int
-    ) -> EvolvableAlgorithm:
+        self,
+        external: EvolvableAlgorithmProtocol,
+        elite: EvolvableAlgorithmProtocol,
+        subpop: int,
+    ) -> EvolvableAlgorithmProtocol:
         """Clone the external agent's networks but reset mutable HPs to the elite's.
 
         :param external: The external agent whose networks are imported.
-        :type external: ~agilerl.algorithms.core.base.EvolvableAlgorithm
+        :type external: ~agilerl.protocols.EvolvableAlgorithmProtocol
         :param elite: The studied subpopulation's elite, whose HPs are adopted.
-        :type elite: ~agilerl.algorithms.core.base.EvolvableAlgorithm
+        :type elite: ~agilerl.protocols.EvolvableAlgorithmProtocol
         :param subpop: The destination subpopulation id.
         :type subpop: int
         :return: The migrant agent (independent of both parents).
-        :rtype: ~agilerl.algorithms.core.base.EvolvableAlgorithm
+        :rtype: ~agilerl.protocols.EvolvableAlgorithmProtocol
         """
         migrant = external.clone(index=self._next_index(), wrap=False)
         self._apply_hp_reset(migrant, self._elite_hp_values(elite))
@@ -816,11 +844,11 @@ class MultiFrequencySelection:
         return migrant
 
     @staticmethod
-    def _elite_hp_values(elite: EvolvableAlgorithm) -> dict[str, Any]:
+    def _elite_hp_values(elite: EvolvableAlgorithmProtocol) -> dict[str, Any]:
         """Snapshot an elite's mutable hyperparameter values, keyed by name.
 
         :param elite: The agent whose mutable hyperparameters are read.
-        :type elite: ~agilerl.algorithms.core.base.EvolvableAlgorithm
+        :type elite: ~agilerl.protocols.EvolvableAlgorithmProtocol
         :return: Deep copies of the elite's mutable HP values; empty when the
             algorithm registers no mutable hyperparameters.
         :rtype: dict[str, Any]
@@ -832,12 +860,12 @@ class MultiFrequencySelection:
         return {name: copy.deepcopy(getattr(elite, name)) for name in hp_config}
 
     def _apply_hp_reset(
-        self, migrant: EvolvableAlgorithm, hp_values: dict[str, Any]
+        self, migrant: EvolvableAlgorithmProtocol, hp_values: dict[str, Any]
     ) -> None:
         """Reset a migrant's mutable hyperparameters, rebuilding any LR optimizer.
 
         :param migrant: The freshly-cloned migrant to reset in place.
-        :type migrant: ~agilerl.algorithms.core.base.EvolvableAlgorithm
+        :type migrant: ~agilerl.protocols.EvolvableAlgorithmProtocol
         :param hp_values: The destination elite's mutable HP values, keyed by name.
         :type hp_values: dict[str, Any]
         """
