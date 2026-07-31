@@ -2579,6 +2579,43 @@ class TestCloneLlm:
         assert isinstance(cloned, FakeBaseModel)
         assert cloned.disabled is True
 
+    def test_clone_llm_zero3_casts_lora_params_to_bfloat16(self, monkeypatch):
+        """Under ZeRO-3, non-bf16 LoRA weights are cast to bf16 after get_peft_model."""
+        from peft import LoraConfig
+
+        default_config = LoraConfig(r=1)
+
+        class FakeBaseModel(torch.nn.Module):
+            def __init__(self, config):
+                super().__init__()
+                self.config = config
+                self.disabled = False
+                self.lora_A = torch.nn.Parameter(torch.ones(2, 2, dtype=torch.float32))
+
+            def disable_adapter(self):
+                self.disabled = True
+
+        class FakePeftModel:
+            def __init__(self):
+                self.config = SimpleNamespace()
+                self.model = FakeBaseModel(SimpleNamespace())
+                self.peft_config = {"default": default_config}
+
+        def fake_get_peft_model(model, first_config, adapter_name="actor", **kwargs):
+            assert kwargs.get("autocast_adapter_dtype") is False
+            return model
+
+        monkeypatch.setattr(algo_utils, "PeftModel", FakePeftModel)
+        monkeypatch.setattr(algo_utils, "get_peft_model", fake_get_peft_model)
+
+        cloned = clone_llm(
+            original_model=FakePeftModel(), zero_stage=3, state_dict=None
+        )
+
+        assert isinstance(cloned, FakeBaseModel)
+        assert cloned.lora_A.dtype == torch.bfloat16
+        assert cloned.disabled is True
+
 
 class TestDummyOptimizer:
     def test_zero_grad_raises_runtime_error(self):
