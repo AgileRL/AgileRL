@@ -3478,18 +3478,22 @@ class TestResolvePadTokenId:
     @staticmethod
     def _tokenizer(
         *,
-        eos_id: int = 2,
+        eos_id: int | list[int] = 2,
         pad_id: int | None = 11,
         unk_id: int | None = 0,
         eos_token: str = "</s>",
         pad_token: str | None = "<|im_end|>",
         unk_token: str | None = "<unk>",
     ) -> SimpleNamespace:
-        id_to_token = {
-            eos_id: eos_token,
-            **({pad_id: pad_token} if pad_id is not None and pad_token else {}),
+        eos_ids = eos_id if isinstance(eos_id, list) else [eos_id]
+        id_to_token: dict[int, str] = {
             **({unk_id: unk_token} if unk_id is not None and unk_token else {}),
+            **({pad_id: pad_token} if pad_id is not None and pad_token else {}),
         }
+        for eid in eos_ids:
+            id_to_token.setdefault(
+                eid, eos_token if eid == eos_ids[0] else f"<eos_{eid}>"
+            )
 
         def convert_ids_to_tokens(token_id: int) -> str:
             return id_to_token[int(token_id)]
@@ -3552,6 +3556,31 @@ class TestResolvePadTokenId:
 
         assert pad_id == 0
         assert source == "generation_config"
+
+    def test_list_eos_rejects_pad_alias_without_model_config(self):
+        tokenizer = self._tokenizer(eos_id=[2, 11], pad_id=11, unk_id=0)
+
+        pad_id, source = resolve_pad_token_id(tokenizer)
+
+        assert pad_id == 0
+        assert source == "tokenizer.unk_token_id"
+
+    def test_list_eos_model_config_pad_wins(self):
+        tokenizer = self._tokenizer(eos_id=[2, 11], pad_id=11, unk_id=0)
+        model_config = SimpleNamespace(pad_token_id=0)
+
+        pad_id, source = resolve_pad_token_id(tokenizer, model_config=model_config)
+
+        assert pad_id == 0
+        assert source == "model.config"
+
+    def test_scalar_eos_pad_alias_falls_back_to_unk(self):
+        tokenizer = self._tokenizer(eos_id=11, pad_id=11, unk_id=0)
+
+        pad_id, source = resolve_pad_token_id(tokenizer)
+
+        assert pad_id == 0
+        assert source == "tokenizer.unk_token_id"
 
     def test_apply_pad_token_id_sets_unk_string(self):
         tokenizer = self._tokenizer(pad_id=11, unk_id=0)

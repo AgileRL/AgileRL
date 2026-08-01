@@ -75,17 +75,6 @@ _BNB_QUANT_PRESETS = frozenset({"none", "int8", "nf4"})
 _CLIPPABLE_LINEAR_WRAPPER_SUFFIX = "ClippableLinear"
 
 
-def _coerce_distinct_pad_id(pad_id: object | None, eos_id: object | None) -> int | None:
-    """Return ``pad_id`` as int when set and distinct from ``eos_id``."""
-    pad_int = _as_optional_int(pad_id)
-    if pad_int is None:
-        return None
-    eos_int = _as_optional_int(eos_id)
-    if eos_int is not None and pad_int == eos_int:
-        return None
-    return pad_int
-
-
 def _as_optional_int(value: object | None) -> int | None:
     """Parse HF token ids that arrive as ``int`` or numeric ``str``."""
     if value is None or isinstance(value, bool):
@@ -98,6 +87,33 @@ def _as_optional_int(value: object | None) -> int | None:
         except ValueError:
             return None
     return None
+
+
+def _eos_id_set(eos_id: object | None) -> frozenset[int]:
+    """Parse HF ``eos_token_id`` as a set of ints (scalar or sequence)."""
+    if eos_id is None or isinstance(eos_id, bool):
+        return frozenset()
+    if isinstance(eos_id, (int, str)):
+        parsed = _as_optional_int(eos_id)
+        return frozenset({parsed}) if parsed is not None else frozenset()
+    if isinstance(eos_id, (list, tuple)):
+        ids: set[int] = set()
+        for item in eos_id:
+            parsed = _as_optional_int(item)
+            if parsed is not None:
+                ids.add(parsed)
+        return frozenset(ids)
+    return frozenset()
+
+
+def _coerce_distinct_pad_id(pad_id: object | None, eos_id: object | None) -> int | None:
+    """Return ``pad_id`` as int when set and distinct from every ``eos_id``."""
+    pad_int = _as_optional_int(pad_id)
+    if pad_int is None:
+        return None
+    if pad_int in _eos_id_set(eos_id):
+        return None
+    return pad_int
 
 
 def resolve_pad_token_id(
@@ -142,8 +158,8 @@ def resolve_pad_token_id(
         if resolved is not None:
             return resolved, source
 
-    eos_int = _as_optional_int(eos_id)
-    if eos_int is None:
+    eos_ids = _eos_id_set(eos_id)
+    if not eos_ids:
         msg = "Tokenizer has no eos_token_id; cannot resolve a pad token id."
         raise ValueError(msg)
 
@@ -154,7 +170,7 @@ def resolve_pad_token_id(
         UserWarning,
         stacklevel=2,
     )
-    return eos_int, "tokenizer.eos_token_id"
+    return min(eos_ids), "tokenizer.eos_token_id"
 
 
 def apply_pad_token_id(tokenizer: PreTrainedTokenizerBase, pad_token_id: int) -> None:
@@ -168,9 +184,9 @@ def apply_pad_token_id(tokenizer: PreTrainedTokenizerBase, pad_token_id: int) ->
     pad_token_id = int(pad_token_id)
     token_str: str | None = None
 
-    eos_id = _as_optional_int(tokenizer.eos_token_id)
+    eos_ids = _eos_id_set(tokenizer.eos_token_id)
     unk_id = _as_optional_int(tokenizer.unk_token_id)
-    if eos_id is not None and pad_token_id == eos_id:
+    if pad_token_id in eos_ids:
         eos_tok = tokenizer.eos_token
         if isinstance(eos_tok, str):
             token_str = eos_tok
