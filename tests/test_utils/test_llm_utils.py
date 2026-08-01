@@ -3159,6 +3159,28 @@ class TestCrossRankLigerAlign:
             world_size=2,
         )
 
+    def test_needs_cross_rank_seq_padding_gates_on_zero_stage_3(self):
+        assert llm_utils_module.needs_cross_rank_seq_padding(
+            SimpleNamespace(zero_stage=3, use_liger_loss=False),
+            world_size=2,
+        )
+        assert llm_utils_module.needs_cross_rank_seq_padding(
+            SimpleNamespace(zero_stage="3", use_liger_loss=False),
+            world_size=2,
+        )
+        assert not llm_utils_module.needs_cross_rank_seq_padding(
+            SimpleNamespace(zero_stage=3, use_liger_loss=False),
+            world_size=1,
+        )
+        assert not llm_utils_module.needs_cross_rank_seq_padding(
+            SimpleNamespace(zero_stage=2, use_liger_loss=False),
+            world_size=2,
+        )
+        assert not llm_utils_module.needs_cross_rank_seq_padding(
+            SimpleNamespace(use_liger_loss=False),
+            world_size=2,
+        )
+
     def test_allreduce_minmax_int_uses_accelerator_gather(self):
         acc = MagicMock()
         acc.device = torch.device("cpu")

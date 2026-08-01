@@ -13,10 +13,6 @@ import numpy.typing as npt
 import torch
 
 from agilerl import HAS_LIGER_KERNEL, HAS_LLM_DEPENDENCIES
-from agilerl.utils.llm_utils import (
-    calculate_k3_kl,
-    resolve_llm_device,
-)
 
 if TYPE_CHECKING:
     from accelerate import Accelerator
@@ -51,14 +47,18 @@ from agilerl.utils.llm_packing import (
 )
 from agilerl.utils.llm_utils import (
     aggregate_metrics_dict,
+    allreduce_minmax_int,
     build_completion_mask,
+    calculate_k3_kl,
     fill_outside_mask,
     is_reasoning_prompts,
     masked_mean,
     masked_whiten,
+    needs_cross_rank_seq_padding,
     normalize_reasoning_prompt_batch,
     pool_log_ratio_by_level,
     prepare_prompt_hf_generate,
+    resolve_llm_device,
     stitch_completion_after_windowed_hf_generate,
     validate_importance_sampling_level,
     validate_llm_context_lengths,
@@ -580,6 +580,23 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
                 self._prepare_experience_batch(experiences, turn_ids)
             )
             num_samples = completion_ids.shape[0]
+            world_size = (
+                self.accelerator.num_processes if self.accelerator is not None else 1
+            )
+            if (
+                needs_cross_rank_seq_padding(self, world_size=world_size)
+                and self.accelerator is not None
+                and self.accelerator.num_processes > 1
+            ):
+                seq_len = completion_ids.shape[1]
+                min_t, max_t = allreduce_minmax_int(seq_len, self.accelerator)
+                if min_t != max_t:
+                    msg = (
+                        "Cross-rank completion sequence length mismatch before "
+                        f"GRPO learn: min_t={min_t}, max_t={max_t}. Ranks must "
+                        "pad completions to the same T before learn()."
+                    )
+                    raise RuntimeError(msg)
 
             advantages, batch_idxs = self._calculate_advantages(
                 rewards, completion_ids, action_masks, turn_ids
@@ -589,6 +606,8 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
                     "All samples were filtered by advantage threshold; skipping GRPO update.",
                     stacklevel=2,
                 )
+                if self.accelerator is not None and self.accelerator.num_processes > 1:
+                    self.accelerator.wait_for_everyone()
                 return {"loss": 0.0, "kl": 0.0}
 
             learn_metrics = {
@@ -620,6 +639,8 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
                     "No active samples after filtering; skipping GRPO update.",
                     stacklevel=2,
                 )
+                if self.accelerator is not None and self.accelerator.num_processes > 1:
+                    self.accelerator.wait_for_everyone()
                 return {"loss": 0.0, "kl": 0.0}
 
             # Ensure batch_size is not larger than the number of active samples

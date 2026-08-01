@@ -395,12 +395,16 @@ def needs_cross_rank_seq_padding(algo: object, *, world_size: int) -> bool:
     """Return whether ranks must sync completion seq lengths before ``learn()``.
 
     Multi-rank Liger token-level losses chunk over ``B * (T - 1)`` and issue one
-    NCCL allreduce per chunk (DAPO/CISPO normaliser). Divergent per-rank ``T``
-    after local ``stack_and_pad`` therefore deadlocks. Gate on that mechanism,
-    not on a specific algorithm name.
+    NCCL allreduce per chunk (DAPO/CISPO normaliser). ZeRO-3 parameter gathers
+    also require identical per-rank ``T`` so every rank issues the same NCCL
+    collectives. Divergent per-rank ``T`` after local ``stack_and_pad`` therefore
+    deadlocks.
     """
     if world_size <= 1:
         return False
+    zero_stage = getattr(algo, "zero_stage", 0)
+    if zero_stage == 3 or zero_stage == "3":
+        return True
     if not getattr(algo, "use_liger_loss", False):
         return False
     return getattr(algo, "importance_sampling_level", "token") == "token"

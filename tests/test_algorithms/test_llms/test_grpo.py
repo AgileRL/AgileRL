@@ -3706,6 +3706,80 @@ class TestGRPOLearn:
         assert metrics == {"loss": 0.0, "kl": 0.0}
         grpo.clean_up()
 
+    def test_learn_early_return_waits_for_everyone_when_all_filtered(self):
+        grpo = _make_cpu_grpo_for_branch_tests(
+            group_size=2,
+            filter_zero_adv=True,
+            adv_filter_eps=0.5,
+            whiten_advantages=True,
+        )
+        acc = MagicMock()
+        acc.num_processes = 2
+        grpo.accelerator = acc
+        completion_ids, action_masks = _build_branch_experiences(batch_size=4)
+        rewards = torch.tensor([1.0, 0.0, -1.0, 2.0], dtype=torch.float32)
+        with (
+            pytest.warns(
+                UserWarning,
+                match="All samples were filtered by advantage threshold; skipping GRPO update.",
+            ),
+            patch.object(
+                grpo,
+                "_calculate_advantage",
+                return_value=torch.zeros(4, 1, dtype=torch.float32),
+            ),
+        ):
+            metrics = grpo.learn((completion_ids, action_masks, rewards))
+        assert metrics == {"loss": 0.0, "kl": 0.0}
+        acc.wait_for_everyone.assert_called_once()
+        grpo.clean_up()
+
+    def test_learn_early_return_waits_for_everyone_when_no_active_samples(self):
+        grpo = _make_cpu_grpo_for_branch_tests(group_size=2)
+        acc = MagicMock()
+        acc.num_processes = 2
+        grpo.accelerator = acc
+        completion_ids, action_masks = _build_branch_experiences(batch_size=4)
+        rewards = torch.tensor([1.0, 0.0, -1.0, 2.0], dtype=torch.float32)
+
+        def fake_fused_forward(ids, batch_size):
+            shape = (ids.shape[0], ids.shape[1] - 1)
+            zeros = torch.zeros(shape, dtype=torch.float32, device=ids.device)
+            return zeros, zeros, None
+
+        with (
+            patch(
+                "agilerl.algorithms.grpo.np.arange",
+                return_value=np.array([], dtype=int),
+            ),
+            patch.object(
+                grpo, "_fused_forward_no_grad", side_effect=fake_fused_forward
+            ),
+            pytest.warns(
+                UserWarning,
+                match="No active samples after filtering; skipping GRPO update.",
+            ),
+        ):
+            metrics = grpo.learn((completion_ids, action_masks, rewards))
+        assert metrics == {"loss": 0.0, "kl": 0.0}
+        acc.wait_for_everyone.assert_called_once()
+        grpo.clean_up()
+
+    def test_learn_raises_on_cross_rank_seq_len_mismatch(self):
+        grpo = _make_cpu_grpo_for_branch_tests(zero_stage=3)
+        acc = MagicMock()
+        acc.num_processes = 2
+        acc.device = torch.device("cpu")
+        acc.gather.side_effect = lambda t: torch.tensor([3, 5], dtype=t.dtype)
+        grpo.accelerator = acc
+        completion_ids, action_masks = _build_branch_experiences(batch_size=2)
+        rewards = torch.tensor([1.0, -1.0], dtype=torch.float32)
+        with pytest.raises(
+            RuntimeError, match="Cross-rank completion sequence length mismatch"
+        ):
+            grpo.learn((completion_ids, action_masks, rewards))
+        grpo.clean_up()
+
     def test_learn_warns_and_returns_zeros_when_no_active_samples_after_filtering(self):
         grpo = _make_cpu_grpo_for_branch_tests(group_size=2)
         completion_ids, action_masks = _build_branch_experiences(batch_size=4)
