@@ -34,9 +34,12 @@ if TYPE_CHECKING:
     from accelerate.utils import DeepSpeedPlugin
     from peft import LoraConfig, PeftModel
     from torch.nn.attention.flex_attention import BlockMask
+    from transformers import PreTrainedTokenizerBase
 
     from agilerl.algorithms.core.base import LLMAlgorithm
     from agilerl.utils.algo_utils import VLLMConfig
+else:
+    PreTrainedTokenizerBase = object
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +73,152 @@ _BNB_QUANT_PRESETS = frozenset({"none", "int8", "nf4"})
 # Gemma 4 wraps projections in *ClippableLinear; PEFT must target the inner ``.linear``
 # submodule via regex (see https://github.com/huggingface/peft/issues/3129).
 _CLIPPABLE_LINEAR_WRAPPER_SUFFIX = "ClippableLinear"
+
+
+def _coerce_distinct_pad_id(pad_id: object | None, eos_id: object | None) -> int | None:
+    """Return ``pad_id`` as int when set and distinct from ``eos_id``."""
+    pad_int = _as_optional_int(pad_id)
+    if pad_int is None:
+        return None
+    eos_int = _as_optional_int(eos_id)
+    if eos_int is not None and pad_int == eos_int:
+        return None
+    return pad_int
+
+
+def _as_optional_int(value: object | None) -> int | None:
+    """Parse HF token ids that arrive as ``int`` or numeric ``str``."""
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        try:
+            return int(value)
+        except ValueError:
+            return None
+    return None
+
+
+def resolve_pad_token_id(
+    tokenizer: PreTrainedTokenizerBase,
+    *,
+    model_config: object | None = None,
+    generation_config: object | None = None,
+) -> tuple[int, str]:
+    """Resolve a pad token id that prefers not to alias ``tokenizer.eos_token_id``.
+
+    Priority when each candidate is set and ``!= eos_token_id``:
+
+    1. ``model_config.pad_token_id``
+    2. ``generation_config.pad_token_id``
+    3. ``tokenizer.pad_token_id``
+    4. ``tokenizer.unk_token_id``
+    5. ``tokenizer.eos_token_id`` (last resort; warns)
+
+    :param tokenizer: Hugging Face tokenizer.
+    :type tokenizer: PreTrainedTokenizerBase
+    :param model_config: Optional model config with ``pad_token_id``.
+    :type model_config: object | None
+    :param generation_config: Optional generation config with ``pad_token_id``.
+    :type generation_config: object | None
+    :return: ``(pad_token_id, source_label)``.
+    :rtype: tuple[int, str]
+    """
+    eos_id = tokenizer.eos_token_id
+
+    candidates: list[tuple[object | None, str]] = []
+    if model_config is not None:
+        candidates.append((getattr(model_config, "pad_token_id", None), "model.config"))
+    if generation_config is not None:
+        candidates.append(
+            (getattr(generation_config, "pad_token_id", None), "generation_config")
+        )
+    candidates.append((tokenizer.pad_token_id, "tokenizer.pad_token_id"))
+    candidates.append((tokenizer.unk_token_id, "tokenizer.unk_token_id"))
+
+    for pad_id, source in candidates:
+        resolved = _coerce_distinct_pad_id(pad_id, eos_id)
+        if resolved is not None:
+            return resolved, source
+
+    eos_int = _as_optional_int(eos_id)
+    if eos_int is None:
+        msg = "Tokenizer has no eos_token_id; cannot resolve a pad token id."
+        raise ValueError(msg)
+
+    warnings.warn(
+        "No pad token id distinct from eos_token_id; using eos_token_id as pad. "
+        "Mid-sequence EOS tokens (e.g. ChatML turn boundaries) will be masked "
+        "as padding when attention uses ids != pad_token_id.",
+        UserWarning,
+        stacklevel=2,
+    )
+    return eos_int, "tokenizer.eos_token_id"
+
+
+def apply_pad_token_id(tokenizer: PreTrainedTokenizerBase, pad_token_id: int) -> None:
+    """Set ``tokenizer.pad_token`` / ``pad_token_id`` from the resolved id.
+
+    :param tokenizer: Hugging Face tokenizer to update.
+    :type tokenizer: PreTrainedTokenizerBase
+    :param pad_token_id: Resolved pad token id.
+    :type pad_token_id: int
+    """
+    pad_token_id = int(pad_token_id)
+    token_str: str | None = None
+
+    eos_id = _as_optional_int(tokenizer.eos_token_id)
+    unk_id = _as_optional_int(tokenizer.unk_token_id)
+    if eos_id is not None and pad_token_id == eos_id:
+        eos_tok = tokenizer.eos_token
+        if isinstance(eos_tok, str):
+            token_str = eos_tok
+    if token_str is None and unk_id is not None and pad_token_id == unk_id:
+        unk_tok = tokenizer.unk_token
+        if isinstance(unk_tok, str):
+            token_str = unk_tok
+    if token_str is None:
+        try:
+            converted = tokenizer.convert_ids_to_tokens(pad_token_id)
+        except Exception:
+            converted = None
+        if isinstance(converted, str):
+            token_str = converted
+
+    if token_str is not None:
+        tokenizer.pad_token = token_str
+    tokenizer.pad_token_id = pad_token_id
+
+
+def load_pad_token_configs(
+    model_name_or_path: str | None,
+) -> tuple[object | None, object | None]:
+    """Load model and generation configs for pad-token resolution.
+
+    :param model_name_or_path: Hugging Face model id or local path.
+    :type model_name_or_path: str | None
+    :return: ``(model_config, generation_config)``; either may be ``None``.
+    :rtype: tuple[object | None, object | None]
+    """
+    if not HAS_LLM_DEPENDENCIES or not model_name_or_path:
+        return None, None
+
+    model_config: object | None = None
+    generation_config: object | None = None
+    try:
+        from transformers import AutoConfig
+
+        model_config = AutoConfig.from_pretrained(model_name_or_path)
+    except Exception:
+        model_config = None
+    try:
+        from transformers import GenerationConfig
+
+        generation_config = GenerationConfig.from_pretrained(model_name_or_path)
+    except Exception:
+        generation_config = None
+    return model_config, generation_config
 
 
 def __getattr__(name: str) -> Any:  # noqa: ANN401 -- lazy module re-export resolves attributes dynamically

@@ -13,6 +13,11 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from agilerl import HAS_LLM_DEPENDENCIES, AgentType
 from agilerl.models.networks import NetworkSpec
+from agilerl.utils.llm_utils import (
+    apply_pad_token_id,
+    load_pad_token_configs,
+    resolve_pad_token_id,
+)
 
 if TYPE_CHECKING:
     import torch
@@ -630,11 +635,34 @@ class LLMAlgorithmSpec(AlgorithmSpec):
             model_config.setdefault("attn_implementation", attn_implementation)
             kwargs["model_config"] = model_config
 
+        model_config = None
+        generation_config = None
+        if actor_network is not None:
+            model_config = getattr(actor_network, "config", None)
+            generation_config = getattr(actor_network, "generation_config", None)
+        if model_config is None:
+            model_config, generation_config = load_pad_token_configs(
+                self.pretrained_model_name_or_path
+            )
+
+        pad_token_id, pad_source = resolve_pad_token_id(
+            tokenizer,
+            model_config=model_config,
+            generation_config=generation_config,
+        )
+        apply_pad_token_id(tokenizer, pad_token_id)
+        logger.info(
+            "Resolved algorithm pad_token_id=%s from %s (eos_token_id=%s)",
+            pad_token_id,
+            pad_source,
+            getattr(tokenizer, "eos_token_id", None),
+        )
+
         algo_cls = self.algo_class()
         algo = algo_cls(
             model_name=self.pretrained_model_name_or_path,
-            pad_token_id=tokenizer.eos_token_id,
-            pad_token=tokenizer.eos_token,
+            pad_token_id=pad_token_id,
+            pad_token=tokenizer.pad_token,
             accelerator=accelerator,
             index=index,
             device=device,

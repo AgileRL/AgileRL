@@ -31,6 +31,7 @@ from agilerl.utils.llm_utils import (
     ReasoningGym,
     adapt_lora_config_for_model,
     align_deepspeed_lr,
+    apply_pad_token_id,
     build_bnb_quantization_config,
     build_clippable_linear_lora_target_regex,
     build_clippable_linear_lora_target_suffixes,
@@ -73,6 +74,7 @@ from agilerl.utils.llm_utils import (
     remap_peft_lora_key_for_vllm,
     resolve_attn_implementation,
     resolve_llm_device,
+    resolve_pad_token_id,
     resolve_vllm_max_lora_rank,
     resolve_vllm_max_num_batched_tokens,
     sample_eval_prompts,
@@ -3468,3 +3470,111 @@ class TestCrossRankLigerAlign:
         assert mock_minmax.call_count == 2  # B then T
         assert mock_minmax.call_args_list[0].args[1] is acc
         acc.wait_for_everyone.assert_called_once()
+
+
+class TestResolvePadTokenId:
+    """Canonical pad-token resolution prefers a pad id distinct from eos."""
+
+    @staticmethod
+    def _tokenizer(
+        *,
+        eos_id: int = 2,
+        pad_id: int | None = 11,
+        unk_id: int | None = 0,
+        eos_token: str = "</s>",
+        pad_token: str | None = "<|im_end|>",
+        unk_token: str | None = "<unk>",
+    ) -> SimpleNamespace:
+        id_to_token = {
+            eos_id: eos_token,
+            **({pad_id: pad_token} if pad_id is not None and pad_token else {}),
+            **({unk_id: unk_token} if unk_id is not None and unk_token else {}),
+        }
+
+        def convert_ids_to_tokens(token_id: int) -> str:
+            return id_to_token[int(token_id)]
+
+        return SimpleNamespace(
+            eos_token_id=eos_id,
+            eos_token=eos_token,
+            pad_token_id=pad_id,
+            pad_token=pad_token,
+            unk_token_id=unk_id,
+            unk_token=unk_token,
+            convert_ids_to_tokens=convert_ids_to_tokens,
+        )
+
+    def test_model_config_pad_wins_over_tokenizer_im_end(self):
+        tokenizer = self._tokenizer(pad_id=11, unk_id=0)
+        model_config = SimpleNamespace(pad_token_id=0)
+
+        pad_id, source = resolve_pad_token_id(tokenizer, model_config=model_config)
+
+        assert pad_id == 0
+        assert source == "model.config"
+
+    def test_distinct_tokenizer_pad_kept(self):
+        tokenizer = self._tokenizer(eos_id=2, pad_id=0, unk_id=None, pad_token="<pad>")
+
+        pad_id, source = resolve_pad_token_id(tokenizer)
+
+        assert pad_id == 0
+        assert source == "tokenizer.pad_token_id"
+
+    def test_unk_fallback_when_pad_aliases_eos(self):
+        tokenizer = self._tokenizer(
+            eos_id=2, pad_id=2, unk_id=0, pad_token="</s>", unk_token="<unk>"
+        )
+
+        pad_id, source = resolve_pad_token_id(tokenizer)
+
+        assert pad_id == 0
+        assert source == "tokenizer.unk_token_id"
+
+    def test_eos_last_resort_warns(self):
+        tokenizer = self._tokenizer(
+            eos_id=2, pad_id=2, unk_id=2, pad_token="</s>", unk_token="</s>"
+        )
+
+        with pytest.warns(UserWarning, match="eos_token_id"):
+            pad_id, source = resolve_pad_token_id(tokenizer)
+
+        assert pad_id == 2
+        assert source == "tokenizer.eos_token_id"
+
+    def test_generation_config_before_tokenizer_pad(self):
+        tokenizer = self._tokenizer(pad_id=11, unk_id=0)
+        generation_config = SimpleNamespace(pad_token_id=0)
+
+        pad_id, source = resolve_pad_token_id(
+            tokenizer, generation_config=generation_config
+        )
+
+        assert pad_id == 0
+        assert source == "generation_config"
+
+    def test_apply_pad_token_id_sets_unk_string(self):
+        tokenizer = self._tokenizer(pad_id=11, unk_id=0)
+        apply_pad_token_id(tokenizer, 0)
+        assert tokenizer.pad_token_id == 0
+        assert tokenizer.pad_token == "<unk>"
+
+    def test_multiturn_mask_keeps_im_end_when_pad_is_unk(self):
+        """Trailing pad id 0 is masked; mid-sequence ``<|im_end|>`` (11) stays on."""
+        tokenizer = self._tokenizer(eos_id=2, pad_id=11, unk_id=0)
+        model_config = SimpleNamespace(pad_token_id=0)
+        pad_id, _ = resolve_pad_token_id(tokenizer, model_config=model_config)
+        apply_pad_token_id(tokenizer, pad_id)
+        assert tokenizer.pad_token_id == 0
+
+        # content, <|im_end|>, content, <|im_end|>, trailing pads
+        ids = torch.tensor([[5, 6, 11, 7, 11, 0, 0, 0]], dtype=torch.long)
+        mask = (ids != tokenizer.pad_token_id).long()
+
+        assert mask[0, 2].item() == 1
+        assert mask[0, 4].item() == 1
+        assert mask[0, 5].item() == 0
+        assert mask[0, 7].item() == 0
+        # Old force-eos/im_end-as-pad behavior would zero the mid-sequence 11s.
+        assert (ids == 11).any()
+        assert not ((ids == 11) & (mask == 0)).any()

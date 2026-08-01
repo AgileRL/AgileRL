@@ -9,6 +9,7 @@ algorithm-specific training function resolution.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -818,8 +819,16 @@ class TestBuildAlgorithmForwardsOnlySetFields:
         mock_tokenizer = MagicMock()
         mock_tokenizer.eos_token_id = 0
         mock_tokenizer.eos_token = "<|endoftext|>"
+        mock_tokenizer.pad_token_id = None
+        mock_tokenizer.unk_token_id = None
         mock_algo_cls = MagicMock()
-        with patch.object(type(spec), "algo_class", return_value=mock_algo_cls):
+        with (
+            patch.object(type(spec), "algo_class", return_value=mock_algo_cls),
+            patch(
+                "agilerl.utils.llm_utils.load_pad_token_configs",
+                return_value=(None, None),
+            ),
+        ):
             spec.build_algorithm(tokenizer=mock_tokenizer, index=0)
         kwargs = mock_algo_cls.call_args.kwargs
         assert kwargs["beta"] == 0.05
@@ -904,6 +913,39 @@ class TestLLMAlgorithmSpecBuild:
         with patch.object(type(spec), "algo_class", return_value=mock_algo_cls):
             spec.build_algorithm(tokenizer=mock_tokenizer, index=0)
         assert mock_algo_cls.call_args.kwargs["chunk_rows"] == 128
+
+    def test_build_algorithm_uses_model_config_pad(self):
+        """Actor network config.pad_token_id wins over tokenizer pad=im_end."""
+        from agilerl.models.algorithms.grpo import GRPOSpec
+
+        mock_tokenizer = MagicMock()
+        mock_tokenizer.eos_token_id = 2
+        mock_tokenizer.eos_token = "</s>"
+        mock_tokenizer.pad_token_id = 11
+        mock_tokenizer.pad_token = "<|im_end|>"
+        mock_tokenizer.unk_token_id = 0
+        mock_tokenizer.unk_token = "<unk>"
+        mock_tokenizer.convert_ids_to_tokens = MagicMock(return_value="<unk>")
+
+        actor = MagicMock()
+        actor.config = SimpleNamespace(pad_token_id=0)
+        actor.generation_config = None
+
+        spec = GRPOSpec(pretrained_model_name_or_path="gpt2", group_size=4)
+        mock_algo_cls = MagicMock()
+        with (
+            patch.object(type(spec), "algo_class", return_value=mock_algo_cls),
+            patch(
+                "agilerl.utils.llm_utils.load_pad_token_configs",
+                return_value=(None, None),
+            ),
+        ):
+            spec.build_algorithm(tokenizer=mock_tokenizer, index=0, actor_network=actor)
+
+        kwargs = mock_algo_cls.call_args.kwargs
+        assert kwargs["pad_token_id"] == 0
+        assert kwargs["pad_token"] == "<unk>"
+        assert mock_tokenizer.pad_token_id == 0
 
     def test_vllm_config_dict_coerced(self):
         """build_algorithm coerces dict vllm_config."""

@@ -1450,8 +1450,16 @@ class TestLLMBuildAlgorithm:
         mock_tokenizer = MagicMock()
         mock_tokenizer.eos_token_id = 50256
         mock_tokenizer.eos_token = "<|endoftext|>"
+        mock_tokenizer.pad_token_id = None
+        mock_tokenizer.unk_token_id = None
 
-        with patch.object(type(dpo_spec), "algo_class", return_value=mock_algo):
+        with (
+            patch.object(type(dpo_spec), "algo_class", return_value=mock_algo),
+            patch(
+                "agilerl.utils.llm_utils.load_pad_token_configs",
+                return_value=(None, None),
+            ),
+        ):
             dpo_spec.build_algorithm(tokenizer=mock_tokenizer, index=0)
 
         mock_algo.assert_called_once()
@@ -1466,8 +1474,16 @@ class TestLLMBuildAlgorithm:
         mock_tokenizer = MagicMock()
         mock_tokenizer.eos_token_id = 50256
         mock_tokenizer.eos_token = "<|endoftext|>"
+        mock_tokenizer.pad_token_id = None
+        mock_tokenizer.unk_token_id = None
 
-        with patch.object(type(grpo_spec), "algo_class", return_value=mock_algo):
+        with (
+            patch.object(type(grpo_spec), "algo_class", return_value=mock_algo),
+            patch(
+                "agilerl.utils.llm_utils.load_pad_token_configs",
+                return_value=(None, None),
+            ),
+        ):
             grpo_spec.build_algorithm(tokenizer=mock_tokenizer, index=1)
 
         mock_algo.assert_called_once()
@@ -1480,10 +1496,18 @@ class TestLLMBuildAlgorithm:
         mock_tokenizer = MagicMock()
         mock_tokenizer.eos_token_id = 50256
         mock_tokenizer.eos_token = "<|endoftext|>"
+        mock_tokenizer.pad_token_id = None
+        mock_tokenizer.unk_token_id = None
         mock_accel = MagicMock()
         mock_accel.num_processes = 2
 
-        with patch.object(type(dpo_spec), "algo_class", return_value=mock_algo):
+        with (
+            patch.object(type(dpo_spec), "algo_class", return_value=mock_algo),
+            patch(
+                "agilerl.utils.llm_utils.load_pad_token_configs",
+                return_value=(None, None),
+            ),
+        ):
             dpo_spec.build_algorithm(
                 tokenizer=mock_tokenizer, index=0, accelerator=mock_accel
             )

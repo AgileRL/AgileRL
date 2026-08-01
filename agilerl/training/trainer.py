@@ -49,6 +49,11 @@ from agilerl.models.networks import (
     infer_encoder_arch,
     network_arch_is_resolvable,
 )
+from agilerl.utils.llm_utils import (
+    apply_pad_token_id,
+    load_pad_token_configs,
+    resolve_pad_token_id,
+)
 from agilerl.utils.trainer_utils import (
     EnvironmentType,
     build_mutations_from_spec,
@@ -655,7 +660,22 @@ class LocalTrainer(Trainer):
                 "{{ 'Assistant: ' }}"
                 "{% endif %}"
             )
-        tokenizer.pad_token = tokenizer.eos_token
+
+        model_config, generation_config = load_pad_token_configs(
+            self.algorithm_spec.pretrained_model_name_or_path
+        )
+        pad_token_id, pad_source = resolve_pad_token_id(
+            tokenizer,
+            model_config=model_config,
+            generation_config=generation_config,
+        )
+        apply_pad_token_id(tokenizer, pad_token_id)
+        logger.info(
+            "Resolved tokenizer pad_token_id=%s from %s (eos_token_id=%s)",
+            pad_token_id,
+            pad_source,
+            tokenizer.eos_token_id,
+        )
 
         return tokenizer
 
