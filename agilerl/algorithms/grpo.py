@@ -537,6 +537,19 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
 
         return ActionResult(completion_ids, completion_masks, sampling_logps)
 
+    def _raise_if_loss_not_finite_on_any_rank(self, loss: torch.Tensor) -> None:
+        """Raise when ``loss`` is non-finite on this rank or any DP peer."""
+        if self.accelerator is not None and self.accelerator.num_processes > 1:
+            nonfinite_flag = 0 if loss.isfinite().item() else 1
+            _, max_flag = allreduce_minmax_int(nonfinite_flag, self.accelerator)
+            if max_flag > 0:
+                msg = f"Loss is not finite: {loss}"
+                raise ValueError(msg)
+            return
+        if not loss.isfinite():
+            msg = f"Loss is not finite: {loss}"
+            raise ValueError(msg)
+
     def learn(
         self,
         experiences: LLMRolloutExperiences,
@@ -664,9 +677,7 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
                         turn_ids=is_turn_ids,
                         sampling_log_probs=sampling_log_probs,
                     )
-                    if not loss.isfinite():
-                        msg = f"Loss is not finite: {loss}"
-                        raise ValueError(msg)
+                    self._raise_if_loss_not_finite_on_any_rank(loss)
 
                     self._backward_pass(loss)
                     learn_metrics["loss"] += loss.item()

@@ -3921,6 +3921,45 @@ class TestGRPOLearn:
             grpo.learn((completions, action_masks, rewards))
         grpo.clean_up()
 
+    def test_grpo_learn_raises_when_peer_rank_has_nonfinite_loss(self):
+        grpo = _make_cpu_grpo_for_branch_tests(group_size=2, update_epochs=1)
+        mock_acc = MagicMock()
+        mock_acc.num_processes = 2
+        mock_acc.device = torch.device("cpu")
+        grpo.accelerator = mock_acc
+        completion_ids, action_masks = _build_branch_experiences(batch_size=2)
+        rewards = torch.tensor([1.0, -1.0], dtype=torch.float32)
+
+        def fake_fused_forward(ids, batch_size):
+            shape = (ids.shape[0], ids.shape[1] - 1)
+            zeros = torch.zeros(shape, dtype=torch.float32, device=ids.device)
+            return zeros, zeros, None
+
+        with (
+            patch.object(
+                grpo, "_fused_forward_no_grad", side_effect=fake_fused_forward
+            ),
+            patch.object(
+                grpo,
+                "_loss",
+                return_value=(
+                    torch.tensor(0.5, dtype=torch.float32),
+                    torch.tensor(0.0, dtype=torch.float32),
+                ),
+            ),
+            patch(
+                "agilerl.algorithms.grpo.allreduce_minmax_int",
+                return_value=(0, 1),
+            ) as mock_reduce,
+            patch.object(grpo, "_backward_pass") as mock_backward,
+            pytest.raises(ValueError, match="Loss is not finite"),
+        ):
+            grpo.learn((completion_ids, action_masks, rewards))
+
+        mock_reduce.assert_called_once_with(0, mock_acc)
+        mock_backward.assert_not_called()
+        grpo.clean_up()
+
     def test_grpo_learn_raises_when_loss_not_finite(
         self,
         deepspeed_env,
