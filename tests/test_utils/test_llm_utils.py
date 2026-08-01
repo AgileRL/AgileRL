@@ -3252,6 +3252,81 @@ class TestCrossRankLigerAlign:
                     ids, masks, target_seq_len=5, pad_token_id=0
                 )
 
+    def test_local_batch_and_seq_len_from_list(self):
+        rows = [
+            torch.ones(1, 3, dtype=torch.long),
+            torch.ones(1, 7, dtype=torch.long),
+        ]
+        assert llm_utils_module._local_batch_and_seq_len(rows) == (2, 7)
+
+    def test_local_batch_and_seq_len_from_tensor(self):
+        batch = torch.ones(4, 5, dtype=torch.long)
+        assert llm_utils_module._local_batch_and_seq_len(batch) == (4, 5)
+
+    def test_local_batch_and_seq_len_empty_list(self):
+        assert llm_utils_module._local_batch_and_seq_len([]) == (0, 0)
+
+    def test_local_batch_and_seq_len_rejects_bad_input(self):
+        with pytest.raises(TypeError, match="tensor or list"):
+            llm_utils_module._local_batch_and_seq_len("nope")  # type: ignore[arg-type]
+        with pytest.raises(ValueError, match=r"\(B, T\)"):
+            llm_utils_module._local_batch_and_seq_len(torch.ones(3, dtype=torch.long))
+
+    def test_align_runs_minmax_before_stack_and_pad(self, monkeypatch):
+        events: list[str] = []
+
+        def fake_stack_and_pad(*args, **kwargs):
+            events.append("stack")
+            completions = torch.tensor([[1, 2, 3], [4, 5, 0]], dtype=torch.long)
+            masks = torch.tensor([[True, True], [True, False]])
+            rewards = torch.tensor([[1.0], [0.0]])
+            return completions, masks, rewards
+
+        def fake_minmax(value):
+            events.append(f"minmax:{value}")
+            return value, value
+
+        accelerator = MagicMock()
+
+        def wait_for_everyone():
+            events.append("barrier")
+
+        accelerator.wait_for_everyone.side_effect = wait_for_everyone
+
+        monkeypatch.setattr(
+            "agilerl.utils.algo_utils.stack_and_pad_experiences",
+            fake_stack_and_pad,
+        )
+
+        completion_ids = [
+            torch.tensor([[1, 2, 3]], dtype=torch.long),
+            torch.tensor([[4, 5]], dtype=torch.long),
+        ]
+        action_masks = [
+            torch.tensor([[True, True]]),
+            torch.tensor([[True]]),
+        ]
+        rewards = torch.tensor([[1.0], [0.0]])
+
+        out_ids, out_masks, out_rewards = (
+            llm_utils_module.align_completion_batch_shapes_across_ranks(
+                completion_ids,
+                action_masks,
+                rewards,
+                pad_token_id=0,
+                accelerator=accelerator,
+                minmax_fn=fake_minmax,
+            )
+        )
+
+        assert events[0:2] == ["minmax:2", "minmax:3"]
+        assert events[2] == "stack"
+        assert events[-1] == "barrier"
+        assert accelerator.wait_for_everyone.call_count == 1
+        assert out_ids.shape == (2, 3)
+        assert out_masks.shape == (2, 2)
+        assert out_rewards.shape == (2, 1)
+
     def test_align_completion_batch_shapes_pads_short_rank(self):
         short_ids = [
             torch.ones(1, 4, dtype=torch.long),
@@ -3262,9 +3337,10 @@ class TestCrossRankLigerAlign:
             torch.ones(1, 2, dtype=torch.bool),
         ]
         rewards = torch.zeros(2, dtype=torch.float32)
+        accelerator = MagicMock()
 
         def fake_minmax(value):
-            # After local stack/pad, T=4; pretend peer has T=6.
+            # Local max T=4 before stack; pretend peer has T=6.
             return (4, 6) if value == 4 else (value, value)
 
         out_ids, out_mask, out_rewards = (
@@ -3273,7 +3349,7 @@ class TestCrossRankLigerAlign:
                 short_mask,
                 rewards,
                 pad_token_id=0,
-                accelerator=MagicMock(),
+                accelerator=accelerator,
                 minmax_fn=fake_minmax,
             )
         )
@@ -3282,11 +3358,13 @@ class TestCrossRankLigerAlign:
         assert out_rewards.shape == (2,)
         assert torch.all(out_ids[:, 4:] == 0)
         assert torch.all(~out_mask[:, 3:])
+        accelerator.wait_for_everyone.assert_called_once()
 
     def test_align_completion_batch_shapes_noop_when_t_already_global_max(self):
         ids = [torch.ones(1, 4, dtype=torch.long)]
         masks = [torch.ones(1, 3, dtype=torch.bool)]
         rewards = torch.zeros(1, dtype=torch.float32)
+        accelerator = MagicMock()
 
         def fake_minmax(value):
             return (value, value)
@@ -3297,12 +3375,13 @@ class TestCrossRankLigerAlign:
                 masks,
                 rewards,
                 pad_token_id=0,
-                accelerator=MagicMock(),
+                accelerator=accelerator,
                 minmax_fn=fake_minmax,
             )
         )
         assert out_ids.shape == (1, 4)
         assert out_mask.shape == (1, 3)
+        accelerator.wait_for_everyone.assert_called_once()
 
     def test_align_completion_batch_shapes_raises_on_b_diverge(self):
         ids = [torch.ones(1, 3, dtype=torch.long)]
@@ -3310,7 +3389,7 @@ class TestCrossRankLigerAlign:
         rewards = torch.zeros(1, dtype=torch.float32)
 
         def fake_minmax(value):
-            # Local B=1 after stack; pretend peer has B=2.
+            # Local B=1 from row count; pretend peer has B=2.
             return (1, 2) if value == 1 else (value, value)
 
         with pytest.raises(RuntimeError, match="row counts diverge"):
@@ -3329,11 +3408,11 @@ class TestCrossRankLigerAlign:
         rewards = torch.zeros(1, dtype=torch.float32)
 
         def fake_minmax(value):
-            # B agrees; global max T claims 6 while local is 4 and min==max so
-            # we skip padding → assert fires.
+            # B agrees; claimed global max T is shorter than local stacked T,
+            # so no pad runs and the post-align guard fires.
             if value == 1:
                 return (1, 1)
-            return (6, 6)
+            return (2, 2)
 
         with pytest.raises(RuntimeError, match="Cross-rank seq align failed"):
             llm_utils_module.align_completion_batch_shapes_across_ranks(
@@ -3344,6 +3423,28 @@ class TestCrossRankLigerAlign:
                 accelerator=MagicMock(),
                 minmax_fn=fake_minmax,
             )
+
+    def test_align_invokes_wait_for_everyone_after_pad(self, monkeypatch):
+        def fake_stack_and_pad(*args, **kwargs):
+            completions = torch.tensor([[1, 2, 3]], dtype=torch.long)
+            masks = torch.tensor([[True, True]])
+            rewards = torch.tensor([[1.0]])
+            return completions, masks, rewards
+
+        monkeypatch.setattr(
+            "agilerl.utils.algo_utils.stack_and_pad_experiences",
+            fake_stack_and_pad,
+        )
+        accelerator = MagicMock()
+        llm_utils_module.align_completion_batch_shapes_across_ranks(
+            [torch.tensor([[1, 2, 3]], dtype=torch.long)],
+            [torch.tensor([[True, True]])],
+            torch.tensor([[1.0]]),
+            pad_token_id=0,
+            accelerator=accelerator,
+            minmax_fn=lambda value: (value, value),
+        )
+        assert accelerator.wait_for_everyone.call_count == 1
 
     def test_align_uses_allreduce_minmax_when_minmax_fn_omitted(self):
         ids = [torch.ones(1, 3, dtype=torch.long)]
@@ -3366,3 +3467,4 @@ class TestCrossRankLigerAlign:
         assert out_ids.shape == (1, 3)
         assert mock_minmax.call_count == 2  # B then T
         assert mock_minmax.call_args_list[0].args[1] is acc
+        acc.wait_for_everyone.assert_called_once()

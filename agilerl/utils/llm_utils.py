@@ -314,6 +314,23 @@ def pad_completion_batch_to_seq_len(
     return completion_ids, action_masks
 
 
+def _local_batch_and_seq_len(
+    completion_ids: list[torch.Tensor] | torch.Tensor,
+) -> tuple[int, int]:
+    """Return ``(B, T)`` from a stacked batch or a list of variable-length rows."""
+    if isinstance(completion_ids, list):
+        if not completion_ids:
+            return 0, 0
+        return len(completion_ids), max(int(t.shape[-1]) for t in completion_ids)
+    if not isinstance(completion_ids, torch.Tensor):
+        msg = f"completion_ids must be a tensor or list, got {type(completion_ids)}"
+        raise TypeError(msg)
+    if completion_ids.dim() != 2:
+        msg = f"completion_ids must be (B, T), got shape {tuple(completion_ids.shape)}"
+        raise ValueError(msg)
+    return int(completion_ids.shape[0]), int(completion_ids.shape[1])
+
+
 def align_completion_batch_shapes_across_ranks(
     completion_ids: Any,  # noqa: ANN401 -- cross-rank batch of variable-length sequences; element type varies by paradigm
     action_masks: Any,  # noqa: ANN401 -- see completion_ids
@@ -323,9 +340,11 @@ def align_completion_batch_shapes_across_ranks(
     accelerator: Accelerator,
     minmax_fn: Callable[[int], tuple[int, int]] | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Locally stack/pad, then sync ``T`` across ranks. Raise if ``B`` diverges.
+    """Sync ``B``/``T`` across ranks before heavy local pad/stack work.
 
-    Call immediately before ``learn()`` when
+    Collective metadata sync happens first; pad/stack follows. A DP barrier runs
+    after pad so no rank enters ZeRO ``learn`` collectives while peers are still
+    padding. Call immediately before ``learn()`` when
     :func:`needs_cross_rank_seq_padding` is true. Shorter ranks are right-padded
     to the global max ``T`` so Liger token-level chunk collectives stay in
     lockstep.
@@ -333,14 +352,7 @@ def align_completion_batch_shapes_across_ranks(
     # Lazy import avoids a circular dependency with algo_utils -> llm_utils.
     from agilerl.utils.algo_utils import stack_and_pad_experiences
 
-    completion_ids, action_masks, rewards = stack_and_pad_experiences(
-        completion_ids,
-        action_masks,
-        rewards,
-        padding_values=[pad_token_id, False, 0.0],
-    )
-    local_b = int(completion_ids.shape[0])
-    local_t = int(completion_ids.shape[1])
+    local_b, local_t = _local_batch_and_seq_len(completion_ids)
     reduce_fn = minmax_fn or (lambda value: allreduce_minmax_int(value, accelerator))
 
     min_b, max_b = reduce_fn(local_b)
@@ -352,8 +364,15 @@ def align_completion_batch_shapes_across_ranks(
         )
         raise RuntimeError(msg)
 
-    min_t, max_t = reduce_fn(local_t)
-    if min_t != max_t and local_t < max_t:
+    _min_t, max_t = reduce_fn(local_t)
+
+    completion_ids, action_masks, rewards = stack_and_pad_experiences(
+        completion_ids,
+        action_masks,
+        rewards,
+        padding_values=[pad_token_id, False, 0.0],
+    )
+    if int(completion_ids.shape[1]) < max_t:
         completion_ids, action_masks = pad_completion_batch_to_seq_len(
             completion_ids,
             action_masks,
@@ -366,6 +385,8 @@ def align_completion_batch_shapes_across_ranks(
             f"!= global max T={max_t}"
         )
         raise RuntimeError(msg)
+
+    accelerator.wait_for_everyone()
     return completion_ids, action_masks, rewards
 
 
