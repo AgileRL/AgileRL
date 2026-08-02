@@ -110,6 +110,10 @@ class TestCollectRolloutsLlm:
         agent.clean_up()
         env.close()
 
+
+class TestCollectRolloutsLlmOrdering:
+    """Pure-double ordering checks; needs neither deepspeed nor vllm."""
+
     def test_collect_rollouts_llm_preserves_batch_group_ordering_batch_size_4(
         self,
     ) -> None:
@@ -212,7 +216,6 @@ class TestCollectRolloutsLlm:
                 env=env,
                 n_steps=1,
                 batch_size=4,
-                group_size=2,
                 group_seed=123,
             )
         )
