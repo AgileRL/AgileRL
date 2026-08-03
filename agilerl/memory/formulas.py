@@ -227,12 +227,20 @@ def kv_cache_demand_bytes(
 
 
 #: Bounds the fused-logprob chunk auto-tune clamps to, and which an explicit
-#: ``chunk_rows`` is validated against at construction. Both ends are
-#: pathological rather than merely suboptimal: below the floor, ``lm_head`` is
-#: re-read from HBM once per chunk so weight traffic scales as
-#: ``1/chunk_rows`` (Qwen2.5-0.5B at 32k tokens reads 8.1 TiB at
-#: ``chunk_rows=1`` against 32 GiB at 256); above the ceiling the fp32 tile
-#: grows linearly while the traffic it saves has already gone to zero.
+#: ``chunk_rows`` is validated against at construction.
+#:
+#: The floor guards a real cliff: ``lm_head`` is re-read from HBM once per
+#: chunk, so weight traffic scales as ``1/chunk_rows`` (Qwen2.5-0.5B at 32k
+#: tokens reads 8.1 TiB at ``chunk_rows=1`` against 32 GiB at 256). Measured
+#: on an L4 at 32k tokens, dropping to 128 costs 1.45x the step time on
+#: Qwen2.5-0.5B and 1.46x on Qwen2.5-7B.
+#:
+#: The ceiling is a *memory* guard, not a speed one. Step time is monotone
+#: decreasing in ``chunk_rows`` right up to 4096 -- the same measurement puts
+#: 4096 at 0.85x (0.5B) and 0.78x (7B) against the auto-tuned default -- but
+#: the fp32 tile grows linearly with it, and at vocab 152k a 4096-row tile is
+#: 2.4 GiB held twice. The cap stops a throughput knob from silently becoming
+#: the largest allocation in the step.
 FUSED_CHUNK_ROWS_MIN = 128
 FUSED_CHUNK_ROWS_MAX = 4096
 
@@ -241,6 +249,15 @@ def resolve_chunk_rows(vocab_size: int, explicit: int | None = None) -> int:
     """The framework's fused-logprob chunk auto-tune: rows sized to a
     256 MiB fp32 logit workspace, clamped to
     ``[FUSED_CHUNK_ROWS_MIN, FUSED_CHUNK_ROWS_MAX]``.
+
+    Deliberately a fixed *memory* budget, and so a function of vocabulary
+    alone. The speed gain from a larger chunk instead scales with hidden
+    size, because what a chunk amortises is one ``lm_head`` re-read of
+    ``vocab x hidden``: on an L4 at 32k tokens, raising the default to 4096
+    is worth 15% of step time on Qwen2.5-0.5B and 22% on Qwen2.5-7B, for a
+    workspace 9x larger. Sizing the default off that gain would make the
+    footprint scale with the model twice over, so the trade is left to the
+    caller and surfaced by the advice engine, which knows the headroom.
 
     An explicit value passes through unchanged — it is range-checked at
     construction instead, so a bad setting is rejected rather than silently
