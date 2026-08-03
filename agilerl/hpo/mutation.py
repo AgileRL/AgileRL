@@ -352,6 +352,7 @@ class Mutations:
         self,
         population: list[AgentT],
         pre_training_mut: bool = False,
+        indices: list[int] | None = None,
     ) -> list[AgentT]:
         """Return a mutated population of agents. See :ref:`evo_hyperparam_opt` for more details.
 
@@ -359,6 +360,9 @@ class Mutations:
         :type population: list[EvolvableAlgorithm]
         :param pre_training_mut: Boolean flag indicating if the mutation is before the training loop
         :type pre_training_mut: bool, optional
+        :param indices: When given, mutate only the agents whose index appears in this list.
+            Defaults to None
+        :type indices: list[int], optional
 
         :return: Mutated population
         :rtype: list[EvolvableAlgorithm]
@@ -370,6 +374,11 @@ class Mutations:
         mutation_proba = (
             self.pretraining_mut_proba if pre_training_mut else self.mut_proba
         )
+
+        if indices is not None:
+            return self._mutate_selected(
+                population, mutation_options, mutation_proba, indices
+            )
 
         # Randomly choose mutation for each agent in population from options with
         # relative probabilities
@@ -387,22 +396,84 @@ class Mutations:
         if not self.mutate_elite:
             mutation_choice[0] = self.no_mutation
 
+        return [
+            self._apply_mutation(individual, mutation)
+            for mutation, individual in zip(mutation_choice, population, strict=False)
+        ]
+
+    def _mutate_selected(
+        self,
+        population: list[AgentT],
+        mutation_options: list[MutationFunc[Any]],
+        mutation_proba: list[float],
+        indices: list[int],
+    ) -> list[AgentT]:
+        """Mutate only the agents whose globally-unique index is in indices.
+
+        :param population: The whole population.
+        :type population: list[EvolvableAlgorithm]
+        :param mutation_options: Candidate mutation methods.
+        :type mutation_options: list[MutationFunc]
+        :param mutation_proba: Relative probabilities of ``mutation_options``.
+        :type mutation_proba: list[float]
+        :param indices: Indices of the agents to mutate.
+        :type indices: list[int]
+        :return: The population with the selected agents mutated.
+        :rtype: list[EvolvableAlgorithm]
+        """
+        target_ids = set(indices)
+        targets = [
+            individual for individual in population if individual.index in target_ids
+        ]
+        sampled_indices = self.rng.choice(
+            len(mutation_options),
+            len(targets),
+            p=mutation_proba,
+        )
+        mutation_choice: list[MutationFunc[Any]] = [
+            mutation_options[int(index)] for index in sampled_indices
+        ]
+        chosen = {
+            id(individual): mutation
+            for individual, mutation in zip(targets, mutation_choice, strict=False)
+        }
+
         mutated_population: list[AgentT] = []
-        for mutation, individual in zip(mutation_choice, population, strict=False):
-            wrapped_ind = isinstance(individual, AgentWrapper)
-            agent = individual.agent if wrapped_ind else individual
-
-            agent = mutation(agent)  # Call sampled mutation for individual
-            agent.mutation_hook()  # Call hooks specified by user
-
-            if wrapped_ind:
-                individual.agent = agent
-            else:
-                individual = agent
-
-            mutated_population.append(individual)
+        for individual in population:
+            mutation = chosen.get(id(individual))
+            if mutation is None:  # a non-selected agent passes through untouched
+                mutated_population.append(individual)
+                continue
+            mutated_population.append(self._apply_mutation(individual, mutation))
 
         return mutated_population
+
+    def _apply_mutation(
+        self,
+        individual: AgentT,
+        mutation: MutationFunc[Any],
+    ) -> AgentT:
+        """Apply a single sampled mutation to one individual.
+
+        :param individual: Individual to mutate, optionally wrapped.
+        :type individual: EvolvableAlgorithm
+        :param mutation: Sampled mutation method to apply to the underlying agent.
+        :type mutation: MutationFunc
+
+        :return: The mutated individual, wrapped exactly as it came in.
+        :rtype: EvolvableAlgorithm
+        """
+        wrapped_ind = isinstance(individual, AgentWrapper)
+        agent = individual.agent if wrapped_ind else individual
+
+        agent = mutation(agent)
+        agent.mutation_hook()
+
+        if wrapped_ind:
+            individual.agent = agent
+            return individual
+
+        return agent
 
     def no_mutation(self, individual: IndividualT) -> IndividualT:
         """Return individual from population without mutation.

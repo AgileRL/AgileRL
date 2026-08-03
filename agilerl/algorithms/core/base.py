@@ -404,6 +404,7 @@ class EvolvableAlgorithm(ABC, Generic[ExperiencesT], metaclass=RegistryMeta):
         self._index = index
         self.registry = MutationRegistry(hp_config)
         self.training = True
+        self.subpopulation_id: int | None = None
 
     @property
     def index(self) -> int:
