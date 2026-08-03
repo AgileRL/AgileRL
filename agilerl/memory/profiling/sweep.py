@@ -396,11 +396,14 @@ def _measure_point_subprocess(
     model_name: str,
     point: SweepPoint,
     device_index: int,
+    warmup_steps: int = 1,
 ) -> tuple[MeasuredPoint | None, MeasuredPoint]:
     """Measure one point in a fresh subprocess.
 
     vLLM's CuMem allocator is process-global and allows one engine per
-    process, so each sleep-mode point needs its own process.
+    process, so each sleep-mode point needs its own process. That freshness
+    is also why ``warmup_steps`` matters: every point starts from an agent
+    that has never stepped its optimizer.
     """
     data = _json_from_subprocess(
         lambda out: [
@@ -415,6 +418,8 @@ def _measure_point_subprocess(
             json.dumps(point.as_dict()),
             "--device-index",
             str(device_index),
+            "--warmup-steps",
+            str(warmup_steps),
         ]
     )
     return (
@@ -464,6 +469,7 @@ def run_sweep(
     seq_lens: tuple[int, ...] | None = None,
     auto_budget: bool = False,
     checkpoint_path: Path | None = None,
+    warmup_steps: int = 1,
 ) -> ModelProfile:
     """Measure every plan point on the local GPU and build the profile.
 
@@ -477,6 +483,16 @@ def run_sweep(
     without this a sweep interrupted at point 12 of 21 loses all twelve --
     which is exactly what happened when a long-context re-run was cut short.
     Rebuild a profile from a partial run with :func:`profile_from_checkpoint`.
+
+    ``warmup_steps`` updates precede the measured one, and the default of 1
+    is load-bearing rather than cosmetic. Measuring a fresh agent's *first*
+    update captures a transient: ``torch.optim`` allocates the Adam moments
+    inside the first ``step()``, so they are absent from the no-grad and
+    backward passes where the peak falls, and present in every subsequent
+    update. On Qwen2.5-0.5B at rank 64 the first update peaked 186 MiB below
+    the second, and the second and third agreed exactly. Calibrating against
+    first-update peaks therefore fits the estimator to a configuration that
+    occurs once per run, and biases it low -- the direction that OOMs.
     """
     from transformers import AutoConfig
 
@@ -578,7 +594,10 @@ def run_sweep(
         print(f"    device floor {floor / 1024**3:.2f} GiB", flush=True)
         try:
             generation, training = _measure_point_subprocess(
-                model_name, point, device_index=device_index
+                model_name,
+                point,
+                device_index=device_index,
+                warmup_steps=warmup_steps,
             )
         except subprocess.CalledProcessError as exc:
             # Usually a corner too large for this device, which is
@@ -697,6 +716,16 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Print the sweep plan and exit (no GPU needed)",
     )
+    parser.add_argument(
+        "--warmup-steps",
+        type=int,
+        default=1,
+        help=(
+            "Updates to run before the measured one (default 1). The first "
+            "update of a fresh agent peaks below every later one, because "
+            "the optimizer moments are allocated inside its step()."
+        ),
+    )
     args = parser.parse_args(argv)
 
     output_dir = Path(args.output_dir) if args.output_dir else None
@@ -737,6 +766,7 @@ def main(argv: list[str] | None = None) -> int:
         ),
         auto_budget=args.auto_budget,
         checkpoint_path=checkpoint,
+        warmup_steps=args.warmup_steps,
     )
     path = save_profile(profile, output_dir)
     print(f"Wrote {path}")

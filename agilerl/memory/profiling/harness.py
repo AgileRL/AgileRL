@@ -27,7 +27,7 @@ import json
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, TypeAlias, cast
 
 from agilerl.memory.calibration import MeasuredPoint
 from agilerl.memory.specs import (
@@ -40,8 +40,13 @@ from agilerl.memory.specs import (
 )
 
 if TYPE_CHECKING:
+    import torch
     import torch.nn as nn
     from transformers import BitsAndBytesConfig
+
+#: An experience batch as the algorithms take it: tensors, nested in the
+#: lists and tuples each one expects.
+Experiences: TypeAlias = "torch.Tensor | list[Experiences] | tuple[Experiences, ...]"
 
 
 def variant_name(quantization: str) -> str:
@@ -189,8 +194,17 @@ def measure_point(
     point: SweepPoint,
     device_index: int = 0,
     snapshot_path: str | None = None,
+    warmup_steps: int = 1,
 ) -> tuple[MeasuredPoint | None, MeasuredPoint]:
     """Run one sweep point and return (generation, training) measurements.
+
+    ``warmup_steps`` updates run before the measured one. At least one is
+    required for the training peak to represent training: ``torch.optim``
+    allocates ``exp_avg``/``exp_avg_sq`` lazily inside the first ``step()``,
+    so on a fresh agent the moments do not exist during the first update's
+    no-grad and backward passes -- exactly where the peak falls. Measuring
+    that update understates every later one by two fp32 moments per trainable
+    parameter, and the shortfall grows with LoRA rank.
 
     ``snapshot_path`` additionally records a torch allocator history over the
     training phase and dumps it for https://pytorch.org/memory_viz. The sweep
@@ -372,6 +386,15 @@ def measure_point(
             learn_kwargs = {}
             generation_peak = None
 
+        learn = cast("Any", agent).learn
+        for _ in range(max(0, warmup_steps)):
+            learn(_clone_experiences(experiences), **learn_kwargs)
+            if rollout_based:
+                # ``learn`` wakes the engine on the way out; put it back to
+                # sleep so the measured window opens from the same state the
+                # first update saw.
+                agent._prepare_vllm_for_training()
+
         torch.cuda.reset_peak_memory_stats(device_index)
         reserved_at_entry = int(torch.cuda.memory_reserved(device_index))
         if snapshot_path:
@@ -388,7 +411,6 @@ def measure_point(
                 clear_history=True,
             )
         with NvmlPeakSampler(device_index) as training_sampler:
-            learn = cast("Any", agent).learn
             learn(experiences, **learn_kwargs)
         if snapshot_path:
             torch.cuda.memory._dump_snapshot(snapshot_path)
@@ -431,6 +453,16 @@ def measure_point(
         torch_max_reserved_bytes=torch_reserved,
     )
     return generation, training
+
+
+def _clone_experiences(experiences: Experiences) -> Experiences:
+    """Deep-copy an experience batch so a warmup update cannot consume it."""
+    import torch
+
+    if isinstance(experiences, torch.Tensor):
+        return experiences.clone()
+    cloned = [_clone_experiences(item) for item in experiences]
+    return tuple(cloned) if isinstance(experiences, tuple) else cloned
 
 
 def _nf4_quantization_config() -> BitsAndBytesConfig:
@@ -559,6 +591,17 @@ def main(argv: list[str] | None = None) -> int:
             "call site; blind to vLLM's CuMem allocations."
         ),
     )
+    parser.add_argument(
+        "--warmup-steps",
+        type=int,
+        default=1,
+        help=(
+            "Updates to run before the measured one. Defaults to 1 so the "
+            "training peak includes the optimizer moments, which torch "
+            "allocates lazily in the first step(). 0 reproduces the "
+            "first-update transient."
+        ),
+    )
     args = parser.parse_args(argv)
 
     if args.weights_only:
@@ -596,6 +639,7 @@ def main(argv: list[str] | None = None) -> int:
             point,
             device_index=args.device_index,
             snapshot_path=args.snapshot,
+            warmup_steps=args.warmup_steps,
         )
         result = {
             "generation": (generation.model_dump(mode="json") if generation else None),
