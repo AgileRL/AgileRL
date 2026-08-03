@@ -1902,6 +1902,32 @@ def move_params_to_cpu(unwrapped_model: torch.nn.Module) -> bool:
     return False
 
 
+def attention_mask_from_padded_ids(
+    ids: torch.Tensor,
+    pad_token_id: int | None,
+) -> torch.Tensor:
+    """Boolean attention mask covering everything but the trailing padding run.
+
+    ``ids != pad`` would also hole out pad-id tokens that are real transcript
+    content — with pad == eos (every pad-less model family) that is each turn
+    terminator the sampler attended to, shifting positions and attention at
+    learn time. Only the right-side padding added when stacking rows to a
+    rectangle is non-content, so only the trailing run is masked.
+
+    :param ids: Token tensor of shape ``(B, T)``, right-padded per row.
+    :type ids: torch.Tensor
+    :param pad_token_id: Pad token id; ``None`` means nothing is padding.
+    :type pad_token_id: int | None
+    :return: Boolean mask of shape ``(B, T)``.
+    :rtype: torch.Tensor
+    """
+    if pad_token_id is None:
+        return torch.ones_like(ids, dtype=torch.bool)
+    is_pad = (ids == pad_token_id).to(torch.int64)
+    trailing = is_pad.flip(-1).cumprod(-1).flip(-1)
+    return trailing == 0
+
+
 def stitch_completion_after_windowed_hf_generate(
     completion_id: torch.Tensor,
     stitch: torch.Tensor | None,
@@ -2252,7 +2278,11 @@ def compare_responses(
             max_new_tokens=max_new_tokens,
             temperature=temperature,
             do_sample=do_sample,
-            pad_token_id=tokenizer.pad_token_id or tokenizer.eos_token_id,
+            pad_token_id=(
+                tokenizer.pad_token_id
+                if tokenizer.pad_token_id is not None
+                else tokenizer.eos_token_id
+            ),
         )
         model.eval()
         with torch.no_grad():

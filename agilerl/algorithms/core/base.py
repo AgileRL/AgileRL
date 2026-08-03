@@ -167,6 +167,7 @@ if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
     from agilerl.utils.llm_utils import (
         adapt_lora_config_for_model,
         align_deepspeed_lr,
+        attention_mask_from_padded_ids,
         build_completion_mask,
         build_vllm_llm_init_kwargs,
         build_vllm_rollout_lora_request,
@@ -4795,7 +4796,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         """
         B = ids.shape[0]
         if attention_mask is None:
-            attention_mask = ids != self.pad_token_id
+            attention_mask = attention_mask_from_padded_ids(ids, self.pad_token_id)
 
         # Packed path for the gradient forward only; no-grad passes stay padded.
         if torch.is_grad_enabled() and self._packing_mode() is not None:
@@ -4931,7 +4932,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         """
         B = ids.shape[0]
         if attention_mask is None:
-            attention_mask = ids != self.pad_token_id
+            attention_mask = attention_mask_from_padded_ids(ids, self.pad_token_id)
 
         self.actor.eval()
 
@@ -5058,7 +5059,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             num_samples = ids.shape[0]
             if attention_mask is None:
                 # TODO this calc is avoided when using PreferenceGym, need to make ReasoningGym do the same
-                attention_mask = ids != self.pad_token_id
+                attention_mask = attention_mask_from_padded_ids(ids, self.pad_token_id)
             if self.calc_position_embeddings:
                 position_ids = self._position_ids_from_mask(attention_mask)
 
@@ -6126,7 +6127,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         """
         prompt_lengths_tensor = torch.tensor(prompt_lengths, dtype=torch.long)
         positions = torch.arange(max_length, dtype=torch.long).unsqueeze(0)
-        return positions > prompt_lengths_tensor.unsqueeze(1)
+        return positions >= prompt_lengths_tensor.unsqueeze(1)
 
     def _configure_vllm(self) -> None:
         """Configure vLLM for efficient inference during generation in 'get_action'."""

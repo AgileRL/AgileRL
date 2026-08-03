@@ -26,6 +26,21 @@ class TestEscapeNonFormatBraces:
         assert "{foo}" in result
         assert "{{bar}}" in result
 
+    def test_empty_braces_survive_format(self):
+        template = "reply with {} when done, {question}?"
+        result = env_utils.escape_non_format_braces(template)
+        assert result.format(question="q") == "reply with {} when done, q?"
+
+    def test_lone_braces_survive_format(self):
+        template = "open { and close } alone, {question}"
+        result = env_utils.escape_non_format_braces(template)
+        assert result.format(question="q") == "open { and close } alone, q"
+
+    def test_nested_json_survives_format(self):
+        template = 'return {"result": {"answer": 1}} for {question}'
+        result = env_utils.escape_non_format_braces(template)
+        assert result.format(question="q") == 'return {"result": {"answer": 1}} for q'
+
 
 class TestParseEntrypoint:
     def test_rejects_missing_colon(self):

@@ -32,6 +32,7 @@ from agilerl.utils.llm_utils import (
     adapt_lora_config_for_model,
     align_deepspeed_lr,
     apply_pad_token_id,
+    attention_mask_from_padded_ids,
     build_bnb_quantization_config,
     build_clippable_linear_lora_target_regex,
     build_clippable_linear_lora_target_suffixes,
@@ -1054,6 +1055,16 @@ class TestCompareResponses:
         assert "FINE-TUNED MODEL" not in captured
         # generate called exactly once (no base model pass)
         assert agent.actor.generate.call_count == 1
+
+    def test_compare_responses_keeps_zero_pad_token_id(self, capsys):
+        """A legitimate pad id of 0 is passed to generate, not swapped for eos."""
+        agent = _make_agent(has_adapter=False)
+        tokenizer = _make_tokenizer()
+        samples = [("What is 2+2?", None, None)]
+
+        compare_responses(agent, tokenizer, samples)
+
+        assert agent.actor.generate.call_args.kwargs["pad_token_id"] == 0
 
     def test_compare_responses_no_adapter_no_reference(self, capsys):
         """When reference is None the DATASET RESPONSE section is skipped."""
@@ -2712,6 +2723,25 @@ class TestPoolLogRatioByLevel:
         assert unit_mask.tolist() == [[1.0], [0.0]]
         assert weights[0, 0].item() == pytest.approx(1.5)
         assert weights[1, 0].item() == pytest.approx(0.0)
+
+
+class TestAttentionMaskFromPaddedIds:
+    def test_masks_only_the_trailing_padding_run(self):
+        ids = torch.tensor([[5, 0, 7, 0, 0], [1, 2, 3, 4, 0]])
+        mask = attention_mask_from_padded_ids(ids, 0)
+        assert mask.tolist() == [
+            [True, True, True, False, False],
+            [True, True, True, True, False],
+        ]
+
+    def test_none_pad_id_masks_nothing(self):
+        ids = torch.tensor([[1, 2, 3]])
+        assert attention_mask_from_padded_ids(ids, None).all()
+
+    def test_unpadded_rows_stay_fully_attended(self):
+        ids = torch.tensor([[1, 2, 0, 3]])
+        mask = attention_mask_from_padded_ids(ids, 0)
+        assert mask.tolist() == [[True, True, True, True]]
 
 
 class TestBuildCompletionMask:

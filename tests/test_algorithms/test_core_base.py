@@ -2747,6 +2747,13 @@ class TestLLMCreatePromptMasks:
         assert not mask[1, 4].item()
         assert mask[1, 6].item()
 
+    def test_first_response_token_is_included(self):
+        mask = LLMAlgorithm._create_prompt_masks([3, 5], 10)
+        assert mask[0, 3].item()
+        assert mask[1, 5].item()
+        assert not mask[0, 2].item()
+        assert not mask[1, 4].item()
+
 
 @_LLM_DEPS_SKIP
 class TestLLMConfigureBatchSize:

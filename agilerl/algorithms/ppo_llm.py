@@ -46,6 +46,7 @@ from agilerl.utils.algo_utils import (
 from agilerl.utils.llm_utils import (
     BitsAndBytesConfig,
     aggregate_metrics_dict,
+    attention_mask_from_padded_ids,
     build_completion_mask,
     calculate_k3_kl,
     clipped_is_surrogate,
@@ -1294,7 +1295,9 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
         turn_ids = batch_turn_ids.to(self.device).contiguous()
         mask_bool = mask.bool()
 
-        attention_mask = (batch_ids != self.pad_token_id).long()
+        attention_mask = attention_mask_from_padded_ids(
+            batch_ids, self.pad_token_id
+        ).long()
         kwargs: dict[str, Any] = {
             "input_ids": batch_ids,
             "attention_mask": attention_mask,
