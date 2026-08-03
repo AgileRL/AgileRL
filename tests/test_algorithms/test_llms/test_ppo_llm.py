@@ -10,6 +10,11 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 
+from agilerl.memory.formulas import (
+    FUSED_CHUNK_ROWS_MAX,
+    FUSED_CHUNK_ROWS_MIN,
+)
+
 pytest.importorskip("deepspeed", reason="LLM tests require deepspeed.")
 pytest.importorskip("vllm", reason="LLM tests require vllm.")
 
@@ -488,7 +493,7 @@ class TestPPOInit:
                 gradient_checkpointing=False,
             )
 
-    def test_init_chunk_rows_must_be_positive(self):
+    def test_init_chunk_rows_must_be_in_the_auto_tune_range(self):
         actor = create_module(10, 8, 100, "cpu")
         lora = LoraConfig(
             r=4,
@@ -497,7 +502,7 @@ class TestPPOInit:
             task_type="CAUSAL_LM",
             modules_to_save=["summary"],
         )
-        with pytest.raises(ValueError, match="chunk_rows must be a positive int"):
+        with pytest.raises(ValueError, match=r"chunk_rows must be None"):
             LLMPPO(
                 actor_network=actor,
                 pad_token_id=99,
@@ -511,6 +516,19 @@ class TestPPOInit:
     def test_init_stores_chunk_rows(self):
         ppo = _cpu_llmppo(chunk_rows=256)
         assert ppo.chunk_rows == 256
+
+    @pytest.mark.parametrize("rows", [0, 1, 127, 4097])
+    def test_init_rejects_chunk_rows_outside_the_auto_tune_range(self, rows):
+        # Both ends are pathological, not merely suboptimal. Below the floor
+        # lm_head is re-read once per chunk, so weight traffic scales as
+        # 1/chunk_rows; above the ceiling the fp32 tile grows linearly while
+        # the traffic it saves has already gone to zero.
+        with pytest.raises(ValueError, match=r"chunk_rows must be None"):
+            _cpu_llmppo(chunk_rows=rows)
+
+    @pytest.mark.parametrize("rows", [FUSED_CHUNK_ROWS_MIN, 441, FUSED_CHUNK_ROWS_MAX])
+    def test_init_accepts_chunk_rows_inside_the_range(self, rows):
+        assert _cpu_llmppo(chunk_rows=rows).chunk_rows == rows
 
     def test_init_action_granularity_deprecated_warns_and_overrides(self):
         """The legacy ``action_granularity`` kwarg warns and is carried over

@@ -517,7 +517,7 @@ class TestREINFORCEInit:
                 gradient_checkpointing=False,
             )
 
-    def test_init_chunk_rows_must_be_positive(self):
+    def test_init_chunk_rows_must_be_in_the_auto_tune_range(self):
         actor = create_dummy_actor(10, 8, 100, "cpu")
         lora = LoraConfig(
             r=4,
@@ -525,7 +525,7 @@ class TestREINFORCEInit:
             target_modules=["lin"],
             task_type="CAUSAL_LM",
         )
-        with pytest.raises(ValueError, match="chunk_rows must be a positive int"):
+        with pytest.raises(ValueError, match=r"chunk_rows must be None"):
             REINFORCE(
                 actor_network=actor,
                 pad_token_id=99,

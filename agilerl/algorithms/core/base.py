@@ -60,6 +60,10 @@ from agilerl.algorithms.core.registry import (
     OptimizerConfig,
     OptimizerFactory,
 )
+from agilerl.memory.formulas import (
+    FUSED_CHUNK_ROWS_MAX,
+    FUSED_CHUNK_ROWS_MIN,
+)
 from agilerl.metrics import AgentMetrics, MultiAgentMetrics
 from agilerl.modules.configs import MlpNetConfig, NetConfig
 from agilerl.modules.dummy import DummyEvolvable
@@ -2709,8 +2713,30 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         self.wrap = wrap
         self.use_separate_reference_adapter = use_separate_reference_adapter
         self.cast_logprobs_to_fp32 = cast_logprobs_to_fp32
-        if chunk_rows is not None and chunk_rows <= 0:
-            msg = f"chunk_rows must be a positive int or None, got {chunk_rows}."
+        if chunk_rows is not None and not (
+            FUSED_CHUNK_ROWS_MIN <= chunk_rows <= FUSED_CHUNK_ROWS_MAX
+        ):
+            # The auto-tune clamps to this range; an explicit value did not,
+            # so a hand-set chunk_rows could sit far outside it. Both ends are
+            # pathological rather than merely suboptimal.
+            #
+            # Too small: lm_head is re-read from HBM once per chunk, so the
+            # weight traffic scales as 1/chunk_rows. On Qwen2.5-0.5B at 32k
+            # tokens, chunk_rows=1 reads 8.1 TiB against 32 GiB at 256 -- 256x
+            # the traffic to save 148 MiB, in 32,768 kernel launches.
+            #
+            # Too large: the fp32 tile is chunk_rows x vocab x 4 in both
+            # directions, and past ~hidden/2 the lm_head re-reads are already
+            # smaller than the logit writes, so further growth buys almost no
+            # traffic for linear memory.
+            #
+            # Rejected rather than clamped: silently rewriting an explicit
+            # setting hides the mistake.
+            msg = (
+                f"chunk_rows must be None (auto-tune) or in "
+                f"[{FUSED_CHUNK_ROWS_MIN}, {FUSED_CHUNK_ROWS_MAX}], got "
+                f"{chunk_rows}."
+            )
             raise ValueError(msg)
         self.chunk_rows = chunk_rows
         # vLLM sampling-mismatch correction (truncated importance sampling).

@@ -226,14 +226,30 @@ def kv_cache_demand_bytes(
     return int(concurrency * effective * per_token)
 
 
+#: Bounds the fused-logprob chunk auto-tune clamps to, and which an explicit
+#: ``chunk_rows`` is validated against at construction. Both ends are
+#: pathological rather than merely suboptimal: below the floor, ``lm_head`` is
+#: re-read from HBM once per chunk so weight traffic scales as
+#: ``1/chunk_rows`` (Qwen2.5-0.5B at 32k tokens reads 8.1 TiB at
+#: ``chunk_rows=1`` against 32 GiB at 256); above the ceiling the fp32 tile
+#: grows linearly while the traffic it saves has already gone to zero.
+FUSED_CHUNK_ROWS_MIN = 128
+FUSED_CHUNK_ROWS_MAX = 4096
+
+
 def resolve_chunk_rows(vocab_size: int, explicit: int | None = None) -> int:
     """The framework's fused-logprob chunk auto-tune: rows sized to a
-    256 MiB fp32 logit workspace, clamped to [128, 4096].
+    256 MiB fp32 logit workspace, clamped to
+    ``[FUSED_CHUNK_ROWS_MIN, FUSED_CHUNK_ROWS_MAX]``.
+
+    An explicit value passes through unchanged — it is range-checked at
+    construction instead, so a bad setting is rejected rather than silently
+    rewritten.
     """
     if explicit is not None:
         return explicit
     rows = 256 * MiB // max(1, vocab_size * 4)
-    return max(128, min(4096, rows))
+    return max(FUSED_CHUNK_ROWS_MIN, min(FUSED_CHUNK_ROWS_MAX, rows))
 
 
 def logit_workspace_bytes(vocab_size: int, chunk_rows: int | None = None) -> int:
