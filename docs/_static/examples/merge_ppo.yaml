@@ -71,6 +71,6 @@ network:
         min_mlp_nodes: 64
         max_mlp_nodes: 256
 
-tournament_selection:
+selection_strategy:
     tournament_size: 2
     elitism: true

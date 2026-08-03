@@ -207,7 +207,7 @@ fitnesses (fitness is each agents test scores on the environment).
         evo_steps=evo_steps,
         eval_steps=eval_steps,
         eval_loop=eval_loop,
-        tournament=tournament,
+        selection_strategy=tournament,
         mutation=mutations,
         wb=False,  # Boolean flag to record run with Weights & Biases
         save_elite=True,  # Boolean flag to save the elite agent in the population
@@ -276,7 +276,7 @@ function and is an example of how we might choose to make use of a population of
             )
 
             # Tournament selection and population mutation
-            elite, pop = tournament.select(pop)
+            elite, pop, _ = tournament.select(pop)
             pop = mutations.mutation(pop)
 
         # Save the trained algorithm

@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, ConfigDict, Field
 
 
@@ -74,11 +76,18 @@ class MutationSpec(BaseModel):
 class TournamentSelectionSpec(BaseModel):
     """Pydantic model for TournamentSelection object.
 
+    :param strategy: Discriminator carried by core manifests, whose
+        ``selection_strategy`` block is a union over selection strategies. Declared
+        so it is accepted rather than reported as an unknown field, and excluded so
+        the platform payload is unaffected. Arena runs tournament selection only, so
+        a non-tournament block fails validation here instead of silently degrading.
+    :type strategy: Literal["tournament"]
     :param tournament_size: Size of the tournament.
     :type tournament_size: int
     :param elitism: Whether elitism is enabled.
     :type elitism: bool
     """
 
+    strategy: Literal["tournament"] = Field(default="tournament", exclude=True)
     tournament_size: int = Field(default=2, ge=2)
     elitism: bool = True

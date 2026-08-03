@@ -393,6 +393,20 @@ class TestMetricsReport:
         text = report.render()
         assert "lr" not in text
 
+    def test_render_shows_subpopulation_row_when_tagged(self):
+        """MF-PBT subpopulation row rendered."""
+        m = _make_scalar_metrics(subpopulations=[0, None])
+        report = MetricsReport(m)
+        text = report.render()
+        assert "subpopulation" in text
+
+    def test_render_omits_subpopulation_row_when_all_untagged(self):
+        """No subpopulation row under tournament/no-HPO."""
+        m = _make_scalar_metrics(subpopulations=[None, None])
+        report = MetricsReport(m)
+        text = report.render()
+        assert "subpopulation" not in text
+
 
 # ===========================================================================
 # Population class

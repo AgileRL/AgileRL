@@ -19,6 +19,7 @@ from agilerl.algorithms.core.base import (
 )
 from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
 from agilerl.components.replay_buffer import BufferType
+from agilerl.hpo.multi_frequency import MultiFrequencySelection
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.llm_envs import PreferenceGym, ReasoningGym, SFTGym
@@ -27,9 +28,14 @@ from agilerl.models.algo import (
     MultiAgentRLAlgorithmSpec,
     RLAlgorithmSpec,
 )
-from agilerl.models.hpo import MutationSpec, TournamentSelectionSpec
+from agilerl.models.hpo import (
+    MultiFrequencySelectionSpec,
+    MutationSpec,
+    SelectionStrategySpec,
+    TournamentSelectionSpec,
+)
 from agilerl.models.training import ReplayBufferSpec, TrainingSpec
-from agilerl.protocols import BanditEnvProtocol
+from agilerl.protocols import BanditEnvProtocol, SelectionStrategyProtocol
 from agilerl.utils.env_utils import GymEnvType, PzEnvType
 
 if TYPE_CHECKING:
@@ -146,6 +152,7 @@ def create_population_from_spec(
     resume_from_checkpoint: str | None = None,
     accelerator: Accelerator | None = None,
     tokenizer: PreTrainedTokenizerBase | None = None,
+    selection_strategy_spec: SelectionStrategySpec | None = None,
 ) -> PopulationType:
     """Instantiate a population of agents from an algorithm spec.
 
@@ -169,6 +176,9 @@ def create_population_from_spec(
     :type accelerator: Accelerator | None
     :param tokenizer: Pre-loaded HuggingFace tokenizer for LLM algorithms.
     :type tokenizer: PreTrainedTokenizerBase | None
+    :param selection_strategy_spec: Selection-strategy spec. Only MF-PBT
+        consumes it here, to tag each agent with its subpopulation.
+    :type selection_strategy_spec: SelectionStrategySpec | None
     :returns: A list of algorithm instances.
     :rtype: PopulationType
     """
@@ -236,6 +246,7 @@ def create_population_from_spec(
                 )
                 for i in range(population_size)
             ]
+            _assign_subpopulations(multi_agent_population, selection_strategy_spec)
             return multi_agent_population
 
         sa_error = "Single-agent specs require plain observation/action spaces."
@@ -252,6 +263,7 @@ def create_population_from_spec(
             )
             for i in range(population_size)
         ]
+        _assign_subpopulations(single_agent_population, selection_strategy_spec)
         return single_agent_population
 
     # LLM algorithms — build agent 0 fully, then clone the actor for agents 1..N.
@@ -291,7 +303,28 @@ def create_population_from_spec(
                 actor_network=cloned_actor,
             )
         )
+    _assign_subpopulations(population, selection_strategy_spec)
     return population
+
+
+def _assign_subpopulations(
+    population: PopulationType,
+    selection_strategy_spec: SelectionStrategySpec | None,
+) -> None:
+    """Tag each agent with its MF-PBT subpopulation from its population slot.
+
+    :param population: The freshly-built or resumed population, in slot order.
+    :type population: PopulationType
+    :param selection_strategy_spec: The resolved selection-strategy spec, or None.
+    :type selection_strategy_spec: SelectionStrategySpec | None
+    """
+    if not isinstance(selection_strategy_spec, MultiFrequencySelectionSpec):
+        return
+    subpopulation_size = len(population) // selection_strategy_spec.n_subpopulations
+    for slot, agent in enumerate(population):
+        agent.subpopulation_id = MultiFrequencySelection._subpopulation_for_position(
+            slot, subpopulation_size
+        )
 
 
 def build_mutations_from_spec(
@@ -329,26 +362,162 @@ def build_mutations_from_spec(
 
 
 def build_tournament_from_spec(
-    tournament_spec: TournamentSelectionSpec | None,
+    selection_spec: SelectionStrategySpec | None,
     training_spec: TrainingSpec,
 ) -> TournamentSelection | None:
     """Convert a :class:`TournamentSelectionSpec` into a :class:`TournamentSelection`.
 
-    :param tournament_spec: Tournament selection specification.
-    :type tournament_spec: TournamentSelectionSpec | None
+    :param selection_spec: The resolved selection-strategy spec, or ``None`` when unset.
+    :type selection_spec: SelectionStrategySpec | None
     :param training_spec: Training specification.
     :type training_spec: TrainingSpec
-    :returns: A :class:`TournamentSelection` instance, or ``None`` if *tournament_spec* is ``None``.
+    :returns: A :class:`TournamentSelection` instance, or None when tournament
+        selection is not the configured strategy.
     :rtype: TournamentSelection | None
     """
-    if tournament_spec is None:
+    if not isinstance(selection_spec, TournamentSelectionSpec):
         return None
 
     return TournamentSelection(
-        tournament_size=tournament_spec.tournament_size,
-        elitism=tournament_spec.elitism,
+        tournament_size=selection_spec.tournament_size,
+        elitism=selection_spec.elitism,
         population_size=training_spec.pop_size,
     )
+
+
+def build_multi_frequency_selection_from_spec(
+    selection_spec: SelectionStrategySpec | None,
+    training_spec: TrainingSpec,
+    seed: int | None = None,
+) -> MultiFrequencySelection | None:
+    """Convert a spec into a :class:`MultiFrequencySelection` instance.
+
+    :param selection_spec: The resolved selection-strategy spec, or ``None`` when unset.
+    :type selection_spec: SelectionStrategySpec | None
+    :param training_spec: Training specification supplying the population size.
+    :type training_spec: TrainingSpec
+    :param seed: The run's global seed, forwarded to the operator's RNG so the
+        winner-clone selection varies (reproducibly) with the run seed, defaults to
+        None.
+    :type seed: int | None
+    :returns: A :class:`MultiFrequencySelection` instance, or None when MF-PBT
+        is not the configured strategy.
+    :rtype: MultiFrequencySelection | None
+    """
+    if not isinstance(selection_spec, MultiFrequencySelectionSpec):
+        return None
+
+    return MultiFrequencySelection(
+        population_size=training_spec.pop_size,
+        n_subpopulations=selection_spec.n_subpopulations,
+        evolution_frequency_ratios=selection_spec.evolution_frequency_ratios,
+        n_winners=selection_spec.n_winners,
+        n_survivors=selection_spec.n_survivors,
+        n_open_for_migration=selection_spec.n_open_for_migration,
+        n_losers=selection_spec.n_losers,
+        seed=seed,
+    )
+
+
+def build_selection_from_spec(
+    selection_spec: SelectionStrategySpec | None,
+    training_spec: TrainingSpec,
+    seed: int | None = None,
+) -> SelectionStrategyProtocol | None:
+    """Build the selection operator named by the manifest's selection_strategy block.
+
+    :param selection_spec: The resolved selection-strategy spec, or ``None`` when no
+        selection strategy is configured.
+    :type selection_spec: SelectionStrategySpec | None
+    :param training_spec: Training specification supplying the population size.
+    :type training_spec: TrainingSpec
+    :param seed: The run's global seed, forwarded to MF-PBT's RNG. Defaults to None.
+    :type seed: int | None
+    :returns: The selection operator, or ``None`` when *selection_spec* is ``None``.
+    :rtype: SelectionStrategyProtocol | None
+    :raises TypeError: If *selection_spec* is neither ``None`` nor a known
+        selection-strategy spec.
+    """
+    if selection_spec is None:
+        return None
+
+    if isinstance(selection_spec, MultiFrequencySelectionSpec):
+        return build_multi_frequency_selection_from_spec(
+            selection_spec, training_spec, seed=seed
+        )
+
+    if isinstance(selection_spec, TournamentSelectionSpec):
+        return build_tournament_from_spec(selection_spec, training_spec)
+
+    msg = (
+        "selection_spec must be a TournamentSelectionSpec or a "
+        f"MultiFrequencySelectionSpec, got {type(selection_spec).__name__}."
+    )
+    raise TypeError(msg)
+
+
+def resolve_deprecated_selection_kwargs(
+    selection_strategy: SelectionStrategySpec | None,
+    kwargs: dict[str, Any],
+    *,
+    deprecated_key: str = "tournament",
+    caller: str,
+) -> SelectionStrategySpec | None:
+    """Fold a deprecated selection keyword argument into selection_strategy.
+
+    :param selection_strategy: The spec passed via the current argument, or None
+        when unset.
+    :type selection_strategy: SelectionStrategySpec | None
+    :param kwargs: The catch-all keyword arguments of the calling API.
+    :type kwargs: dict[str, Any]
+    :param deprecated_key: The superseded keyword the caller still accepts,
+        defaults to "tournament".
+    :type deprecated_key: str
+    :param caller: Name of the calling API, used in the warning and error messages.
+    :type caller: str
+    :returns: The resolved selection-strategy spec, or None when neither spelling
+        supplied one.
+    :rtype: SelectionStrategySpec | None
+    :raises TypeError: If kwargs holds any key other than deprecated_key.
+    :raises ValueError: If both spellings were used and carry different specs.
+    """
+    unexpected = sorted(key for key in kwargs if key != deprecated_key)
+    if unexpected:
+        msg = (
+            f"{caller} got unexpected keyword argument(s): "
+            f"{', '.join(repr(key) for key in unexpected)}."
+        )
+        raise TypeError(msg)
+
+    if deprecated_key not in kwargs:
+        return selection_strategy
+
+    warnings.warn(
+        f"The {deprecated_key!r} argument to {caller} is deprecated and will be "
+        "removed in a future release; pass the selection strategy via "
+        "selection_strategy instead.",
+        DeprecationWarning,
+        stacklevel=3,
+    )
+
+    deprecated_spec = kwargs[deprecated_key]
+    if deprecated_spec is None:
+        return selection_strategy
+
+    if selection_strategy is None:
+        return deprecated_spec
+
+    # Pydantic equality compares class and field values, so equal-but-distinct
+    # specs route cleanly while a tournament spec and an MF-PBT spec never match
+    if selection_strategy != deprecated_spec:
+        msg = (
+            f"{caller} received conflicting selection strategies: "
+            f"'selection_strategy'={selection_strategy!r} and the deprecated "
+            f"{deprecated_key!r}={deprecated_spec!r}. Pass only 'selection_strategy'."
+        )
+        raise ValueError(msg)
+
+    return selection_strategy
 
 
 def build_replay_buffer_from_spec(

@@ -208,7 +208,7 @@ if __name__ == "__main__":
             model.unwrap_models()
         accelerator.wait_for_everyone()
         if accelerator.is_main_process:
-            _, pop = tournament.select(pop)
+            _, pop, _ = tournament.select(pop)
             pop = mutations.mutation(pop)
             for pop_i, model in enumerate(pop):
                 model.save_checkpoint(f"{accel_temp_models_path}/DQN_{pop_i}.pt")

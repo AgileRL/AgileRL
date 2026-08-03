@@ -101,7 +101,7 @@ Here is an example manifest to train PPO on LunarLander-v3:
       mutation_sd: 0.1
       rand_seed: 42
 
-    tournament_selection:
+    selection_strategy:
       tournament_size: 2
       elitism: true
 
@@ -247,7 +247,7 @@ You can use our off-the-shelf on-policy training function to train a population 
         eval_steps=None,  # Number of steps in evaluation episode
         eval_loop=1,  # Number of evaluation episodes
         target=200.,  # Target score for early stopping
-        tournament=tournament,  # Tournament selection object
+        selection_strategy=tournament,  # Selection strategy object
         mutation=mutations,  # Mutations object
         wb=True,  # Weights and Biases tracking
     )
@@ -401,7 +401,7 @@ Alternatively, use a custom on-policy training loop:
             )
 
             # Tournament selection and population mutation
-            elite, pop = tournament.select(pop)
+            elite, pop, _ = tournament.select(pop)
             pop = mutations.mutation(pop)
 
         pbar.close()
@@ -557,11 +557,11 @@ users must set ``recurrent=True`` when creating the algorithm.
                 print(
                     f"\nAgent achieved required score {required_score}. Stopping training."
                 )
-                elite, _ = tournament.select(pop)
+                elite, _, _ = tournament.select(pop)
                 break
 
             # Tournament selection and population mutation
-            elite, pop = tournament.select(pop)
+            elite, pop, _ = tournament.select(pop)
             pop = mutations.mutation(pop)
 
         pbar.close()
