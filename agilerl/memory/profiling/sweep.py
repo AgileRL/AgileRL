@@ -396,7 +396,7 @@ def _measure_point_subprocess(
     model_name: str,
     point: SweepPoint,
     device_index: int,
-    warmup_steps: int = 1,
+    warmup_steps: int = 0,
 ) -> tuple[MeasuredPoint | None, MeasuredPoint]:
     """Measure one point in a fresh subprocess.
 
@@ -469,7 +469,7 @@ def run_sweep(
     seq_lens: tuple[int, ...] | None = None,
     auto_budget: bool = False,
     checkpoint_path: Path | None = None,
-    warmup_steps: int = 1,
+    warmup_steps: int = 0,
 ) -> ModelProfile:
     """Measure every plan point on the local GPU and build the profile.
 
@@ -484,15 +484,17 @@ def run_sweep(
     which is exactly what happened when a long-context re-run was cut short.
     Rebuild a profile from a partial run with :func:`profile_from_checkpoint`.
 
-    ``warmup_steps`` updates precede the measured one, and the default of 1
-    is load-bearing rather than cosmetic. Measuring a fresh agent's *first*
-    update captures a transient: ``torch.optim`` allocates the Adam moments
-    inside the first ``step()``, so they are absent from the no-grad and
-    backward passes where the peak falls, and present in every subsequent
-    update. On Qwen2.5-0.5B at rank 64 the first update peaked 186 MiB below
-    the second, and the second and third agreed exactly. Calibrating against
-    first-update peaks therefore fits the estimator to a configuration that
-    occurs once per run, and biases it low -- the direction that OOMs.
+    ``warmup_steps`` complete iterations precede the measured one; 0, the
+    default, is what every checked-in fixture used. Treat a non-zero value as
+    an experiment: a paired 21-point control on Qwen2.5-0.5B differing only
+    in this knob left generation byte-identical but moved training peaks by
+    -236 to +186 MiB with no consistent sign, and made calibrated training
+    error worse (3.5% -> 12.9% mean). That control ran before
+    :func:`~agilerl.memory.profiling.harness._warm_rollout_update` replayed
+    the rollout, so it indicts the old warmup rather than the idea; the
+    corrected version has not been measured. Whatever the outcome, a mixed
+    corpus is worse than either choice, so change this for every profile at
+    once or not at all.
     """
     from transformers import AutoConfig
 
@@ -719,11 +721,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--warmup-steps",
         type=int,
-        default=1,
+        default=0,
         help=(
-            "Updates to run before the measured one (default 1). The first "
-            "update of a fresh agent peaks below every later one, because "
-            "the optimizer moments are allocated inside its step()."
+            "Complete iterations to run before the measured one (default 0, "
+            "matching every checked-in fixture). Change it for the whole "
+            "corpus or not at all."
         ),
     )
     args = parser.parse_args(argv)

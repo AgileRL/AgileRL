@@ -99,3 +99,49 @@ One means checkpointing works as modelled; five means it does not.
 
 Note the other three models re-swept at the same time went *in*, and improved:
 Qwen2.5-0.5B +0.9% bias, Qwen2.5-1.5B +2.4%, OLMoE +4.9% (worst 13.5% -> 7.8%).
+
+## The worst training points: five explanations ruled out — 2026-08-03
+
+Across the ten curated profiles the estimator sits at **2.66% mean / 12.80%
+worst** on 203 training points (generation is far better, ~0.3–1%). The worst
+points cluster at `seq_len=512`, high LoRA rank, on the small Qwen models, and
+are all over-predictions. None of the obvious causes survives contact with the
+full dataset. Regressing the post-calibration residual on each candidate:
+
+| candidate basis | R² |
+|---|---|
+| optimizer moments (per trainable param) | 0.001 |
+| logit tile (`chunk_rows x vocab x 4`) | 0.060 |
+| no-grad instant binding x logit tile | 0.002 |
+| activations | 0.017 |
+| base weights | 0.147 |
+| **all six together** | **0.166** |
+
+All six leave residual scatter at 316 MiB against 346 MiB unexplained, so
+there is no single missing term. Also ruled out:
+
+- **Fixture vintage.** The corpus mixes formats, but old-format profiles are
+  marginally *better* (2.46% vs 2.79% mean, 9.09% vs 12.80% worst), so
+  methodology drift is not the driver.
+- **A constant absolute floor.** Mean absolute residual spans 108→647 MiB
+  across profiles whose totals span 3478→23380 MiB — a 6.0x spread against
+  6.7x, correlation +0.756. The error is proportional, not a floor, and
+  relative error is uniform at 1.5–3.6% over a 6.7x size range.
+
+The optimizer-moment story is worth spelling out because it is seductive and
+wrong. `torch.optim` really does allocate `exp_avg`/`exp_avg_sq` inside the
+first `step()`, so a fresh agent's first update — which is what the harness
+measures — genuinely lacks them. On one profile the overshoot at r=8 and r=64
+implies a slope of exactly 8 bytes per trainable parameter, which is exactly
+two fp32 moments. But that slope was fitted through **two points on one
+model**, and two points always define a line: across all 203 it explains
+R²=0.001, and subtracting the moment charge makes the corpus *worse*
+(2.66% -> 3.85% mean) because it helps high-rank points and hurts the rest.
+
+**Next step, and it needs a GPU.** The remaining error is either outlier noise
+or a bias too small to separate from it at n=1 per point. Distinguish them by
+re-measuring one worst point (Qwen2.5-0.5B, seq 512, mb 8, group 4, rank 64 —
++12.8% on the A100, +11.5% on the L4) five or more times: if the spread covers
+the error, it is noise and the honest fix is to widen the stated band rather
+than add terms. If the point is tightly reproducible, it is a real bias and an
+allocator snapshot there will name it.

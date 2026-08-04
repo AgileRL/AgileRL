@@ -194,17 +194,25 @@ def measure_point(
     point: SweepPoint,
     device_index: int = 0,
     snapshot_path: str | None = None,
-    warmup_steps: int = 1,
+    warmup_steps: int = 0,
 ) -> tuple[MeasuredPoint | None, MeasuredPoint]:
     """Run one sweep point and return (generation, training) measurements.
 
-    ``warmup_steps`` updates run before the measured one. At least one is
-    required for the training peak to represent training: ``torch.optim``
-    allocates ``exp_avg``/``exp_avg_sq`` lazily inside the first ``step()``,
-    so on a fresh agent the moments do not exist during the first update's
-    no-grad and backward passes -- exactly where the peak falls. Measuring
-    that update understates every later one by two fp32 moments per trainable
-    parameter, and the shortfall grows with LoRA rank.
+    ``warmup_steps`` complete iterations run before the measured one, and on
+    a rollout algorithm an iteration means generation *and* an update -- see
+    :func:`_warm_rollout_update`. They run ahead of both measurement windows.
+
+    It defaults to 0, which is what every checked-in fixture was measured
+    with, and raising it is an experiment rather than a fix. The motivation
+    was that a fresh agent is unrepresentative: ``torch.optim`` allocates
+    ``exp_avg``/``exp_avg_sq`` inside the first ``step()``, so the moments are
+    absent from the first update's no-grad and backward passes -- where the
+    peak falls -- and present in every update after it. That is true, but it
+    does not appear to be what the fixtures' residual error is made of:
+    regressed across all 203 measured training points, a per-trainable-
+    parameter moment term explains R^2=0.001 of it. Warming up is therefore
+    unproven, and a non-zero default would also make any newly swept model
+    inconsistent with the nine measured at 0.
 
     ``snapshot_path`` additionally records a torch allocator history over the
     training phase and dumps it for https://pytorch.org/memory_viz. The sweep
@@ -334,6 +342,9 @@ def measure_point(
 
     try:
         if rollout_based:
+            for _ in range(max(0, warmup_steps)):
+                _warm_rollout_update(agent, prompts)
+
             with NvmlPeakSampler(device_index) as generation_sampler:
                 completion_ids, action_masks, sampling_logps = agent.get_action(
                     prompts, training=True
@@ -385,16 +396,13 @@ def measure_point(
                 )
             learn_kwargs = {}
             generation_peak = None
+            # No rollout to replay, so a warmup update is just an update.
+            for _ in range(max(0, warmup_steps)):
+                cast("Any", agent).learn(
+                    _clone_experiences(experiences), **learn_kwargs
+                )
 
         learn = cast("Any", agent).learn
-        for _ in range(max(0, warmup_steps)):
-            learn(_clone_experiences(experiences), **learn_kwargs)
-            if rollout_based:
-                # ``learn`` wakes the engine on the way out; put it back to
-                # sleep so the measured window opens from the same state the
-                # first update saw.
-                agent._prepare_vllm_for_training()
-
         torch.cuda.reset_peak_memory_stats(device_index)
         reserved_at_entry = int(torch.cuda.memory_reserved(device_index))
         if snapshot_path:
@@ -453,6 +461,35 @@ def measure_point(
         torch_max_reserved_bytes=torch_reserved,
     )
     return generation, training
+
+
+def _warm_rollout_update(agent: object, prompts: list[Any]) -> None:
+    """Run one complete rollout-then-update so the next starts from steady state.
+
+    The rollout is not optional padding. ``use_memory_efficient_params``
+    offloads the trainer's base weights to host RAM *during generation*, and
+    ``learn`` moves them back, so an update is only representative when a
+    rollout preceded it. A warmup that ran ``learn`` twice instead left the
+    weights resident and the measured update never paid the reload -- a state
+    training never occupies. Measured against a no-warmup arm over 21 points,
+    that shifted individual peaks by -236 to +186 MiB with no consistent
+    sign, and pushed calibrated training error from 3.5% to 12.9% mean.
+
+    Locals hold the completions, so they are freed when this returns rather
+    than staying live through the measured window.
+    """
+    import torch
+
+    hot = cast("Any", agent)
+    completion_ids, action_masks, sampling_logps = hot.get_action(
+        prompts, training=True
+    )
+    hot._prepare_vllm_for_training()
+    rows = sum(ids.shape[0] for ids in completion_ids)
+    hot.learn(
+        (completion_ids, action_masks, torch.randn(rows)),
+        sampling_logps=sampling_logps,
+    )
 
 
 def _clone_experiences(experiences: Experiences) -> Experiences:
@@ -594,12 +631,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--warmup-steps",
         type=int,
-        default=1,
+        default=0,
         help=(
-            "Updates to run before the measured one. Defaults to 1 so the "
-            "training peak includes the optimizer moments, which torch "
-            "allocates lazily in the first step(). 0 reproduces the "
-            "first-update transient."
+            "Complete iterations (rollout and update) to run before the "
+            "measured one. Defaults to 0, matching every checked-in "
+            "fixture; non-zero is an unvalidated experiment."
         ),
     )
     args = parser.parse_args(argv)
