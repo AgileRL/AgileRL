@@ -221,3 +221,51 @@ a curvature term (interaction or quadratic in tokens), and put interior points
 in the fit set while keeping a genuine held-out set. Judge any change by
 leave-one-model-out, not by the fitted residual — pooled coefficients already
 score worse than the raw analytic core.
+
+### Timeline: which instant actually binds — measured 2026-08-04
+
+`python -m agilerl.memory.profiling.snapshot <pickle> --timeline` reports every
+prominent peak and each component's largest excursion, rather than only what is
+live at the global maximum. At the worst point (Qwen2.5-0.5B / L4 / seq 512,
+mb 8, group 4, rank 64) the step reads as four phases, torch side:
+
+| phase | total MiB | composition |
+|---|---|---|
+| no-grad logprob pass | 1308 | base 1211, activations 57–72, adapters 26–38 |
+| gradient forward | 1452 | base 1211, activations ramping to 234 |
+| backward | 1510 | base 1211, activations ~200 falling, unattributed rising |
+| **optimizer step** | **1756** | base 1211, **grads_optimizer 403**, unattributed 138, activations 5 |
+
+Largest excursion per component over the whole trace:
+
+    base_weights     1211      unattributed      191
+    grads_optimizer   403      adapters           42
+    activations       234      logits_workspace    7
+
+Two things follow, and they explain why adding a fourth instant on its own did
+nothing (that attempt is in `fourth-instant.patch`, reverted).
+
+**`grads_optimizer` does not exist until the optimizer step.** It is absent
+from all 217 earlier peaks and appears at 403 MiB at peak 218. Gradients are
+created by backward and freed by `zero_grad(set_to_none=True)`; the Adam
+moments are allocated inside the first `step()`. The estimator adds
+`grads + opt_state` to *every* instant unconditionally, so the optimizer
+instant can never win its maximum — its transient is the smallest by
+construction. Making it bind requires moving gradients and moments into the
+instant model, not just adding a fourth candidate.
+
+**The logit tile is nowhere near its modelled size.** `logits_workspace` never
+exceeds 7 MiB against a 511 MiB charge (`2 x 441 rows x 151936 vocab x 4`).
+Some of it is likely mis-attributed — `unattributed` peaks at 191 MiB during
+the backward, and a `torch.compile`d chunk kernel would carry frames matching
+no rule — but even 191 MiB is well under 511, and no instant's *total* comes
+close to what a 511 MiB tile would imply. Confirm by widening
+`ATTRIBUTION_RULES` to catch inductor-generated filenames before re-deriving
+the term.
+
+Note the measured regime matters here: with `warmup_steps=0` the moments are
+allocated at the first `step()`, which is what makes that instant the peak. In
+steady state they are resident throughout and a different instant may bind —
+consistent with the +186 MiB the warmup A/B measured at this exact point. The
+estimator should predict steady state, so settling this and the warmup
+question is one piece of work, not two.

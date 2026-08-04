@@ -33,7 +33,7 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
-from agilerl.memory.specs import GiB
+from agilerl.memory.specs import GiB, MiB
 
 #: Frame markers mapped to estimator component keys, most specific first.
 #: A frame matches if the marker appears in its filename or function name.
@@ -179,12 +179,103 @@ def summarise(path: Path) -> dict[str, int]:
     return dict(totals)
 
 
+def timeline(
+    path: Path, min_drop_bytes: int = 64 * 1024 * 1024
+) -> tuple[dict[str, int], list[tuple[int, int, dict[str, int]]]]:
+    """Every prominent peak in the trace, not just the global one.
+
+    ``summarise`` answers "what is live at the maximum", which cannot say
+    whether a *different* instant was nearly as large, or how big a component
+    got at a moment it did not bind. A training step passes through several
+    instants and the estimator maximises over models of each, so validating it
+    needs all of them measured, not one.
+
+    Returns ``(component_maxima, peaks)``. ``component_maxima`` is the largest
+    each component ever gets, whenever that happens -- which is how to measure
+    a transient like the logit tile that is freed before the global peak.
+    ``peaks`` is ``(event_index, total_bytes, composition)`` for each local
+    maximum followed by a drop of at least ``min_drop_bytes``, in order, so
+    the step reads as a sequence.
+    """
+    with path.open("rb") as handle:
+        snapshot = pickle.load(handle)
+    traces = snapshot.get("device_traces") or []
+    events = max(traces, key=len) if traces else []
+
+    live: dict[int, tuple[int, str]] = {}
+    comp_live: dict[str, int] = defaultdict(int)
+    comp_max: dict[str, int] = defaultdict(int)
+    peaks: list[tuple[int, int, dict[str, int]]] = []
+    total = 0
+    run_max = 0
+    run_max_index = 0
+    run_max_comp: dict[str, int] = {}
+
+    for index, event in enumerate(events):
+        action = event.get("action")
+        if action == "alloc":
+            component = classify(event.get("frames") or [])
+            if component == "vllm_engine":
+                continue
+            size = int(event.get("size", 0))
+            live[event.get("addr")] = (size, component)
+            total += size
+            comp_live[component] += size
+            comp_max[component] = max(comp_max[component], comp_live[component])
+            if total > run_max:
+                run_max, run_max_index = total, index
+                run_max_comp = dict(comp_live)
+        elif action == "free_completed" and event.get("addr") in live:
+            size, component = live.pop(event.get("addr"))
+            total -= size
+            comp_live[component] -= size
+            if run_max - total >= min_drop_bytes:
+                peaks.append((run_max_index, run_max, run_max_comp))
+                run_max, run_max_index = total, index
+                run_max_comp = dict(comp_live)
+    if run_max:
+        peaks.append((run_max_index, run_max, run_max_comp))
+    return dict(comp_max), peaks
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="agilerl.memory.profiling.snapshot", description=__doc__
     )
     parser.add_argument("snapshot", help="Pickle written by --snapshot")
+    parser.add_argument(
+        "--timeline",
+        action="store_true",
+        help=(
+            "Report every prominent peak and each component's largest "
+            "excursion, instead of only what is live at the global maximum"
+        ),
+    )
+    parser.add_argument(
+        "--min-drop-mib",
+        type=int,
+        default=64,
+        help="Drop that separates two peaks in --timeline (default 64 MiB)",
+    )
     args = parser.parse_args(argv)
+
+    if args.timeline:
+        maxima, peaks = timeline(
+            Path(args.snapshot), min_drop_bytes=args.min_drop_mib * 1024 * 1024
+        )
+        print(f"{'component':<22}{'largest excursion MiB':>24}")
+        for component, size in sorted(maxima.items(), key=lambda kv: -kv[1]):
+            print(f"{component:<22}{size / MiB:>24.0f}")
+        print(f"\n{len(peaks)} prominent peaks (drop >= {args.min_drop_mib} MiB):")
+        print(f"{'#':>3}{'event':>10}{'total MiB':>11}   composition")
+        for i, (index, total, comp) in enumerate(peaks, 1):
+            parts = ", ".join(
+                f"{k}={v / MiB:.0f}"
+                for k, v in sorted(comp.items(), key=lambda kv: -kv[1])
+                if v / MiB >= 1
+            )
+            print(f"{i:>3}{index:>10}{total / MiB:>11.0f}   {parts}")
+        return 0
 
     totals = summarise(Path(args.snapshot))
     if not totals:
