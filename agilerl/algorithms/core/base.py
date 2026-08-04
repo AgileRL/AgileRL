@@ -45,8 +45,6 @@ from typing_extensions import Self
 
 from agilerl import HAS_DEEPSPEED, HAS_LIGER_KERNEL, HAS_LLM_DEPENDENCIES, HAS_VLLM
 
-if HAS_LIGER_KERNEL:
-    from liger_kernel.transformers import _apply_liger_kernel_to_instance
 from agilerl.algorithms.core.llm_ops.fused_logprobs import (
     FusedLinearLogProbsFunction,
     fused_linear_logprobs_chunked,
@@ -176,15 +174,11 @@ if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
         stitch_completion_after_windowed_vllm_generate,
     )
 
-if TYPE_CHECKING or HAS_DEEPSPEED:
+if TYPE_CHECKING:
     from deepspeed.checkpoint.utils import clone_tensors_for_torch_save
 
 if TYPE_CHECKING:
     from vllm import LLM, CompletionOutput, SamplingParams
-elif HAS_VLLM:
-    from vllm import LLM, CompletionOutput, SamplingParams
-else:
-    LLM = CompletionOutput = SamplingParams = None
 
 __all__ = ["ActionResult", "EvolvableAlgorithm", "MultiAgentRLAlgorithm", "RLAlgorithm"]
 
@@ -3504,6 +3498,8 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         """
         actor = self._get_unwrapped_actor()
 
+        from deepspeed.checkpoint.utils import clone_tensors_for_torch_save
+
         if self.use_value_head:
             value_head_model = actor
             inner_peft = value_head_model.pretrained_model
@@ -4348,6 +4344,10 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
                     )
                 try:
                     if not already_patched:
+                        from liger_kernel.transformers import (
+                            _apply_liger_kernel_to_instance,
+                        )
+
                         _apply_liger_kernel_to_instance(model=inner_model)
                         inner_model._agilerl_liger_patched = True
                         logger.info(
@@ -5213,7 +5213,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         :return: Per-prompt completion token tensors and matching action masks.
         :rtype: tuple[list[torch.Tensor], list[torch.Tensor]]
         """
-        if SamplingParams is None:
+        if not HAS_VLLM:
             msg = "vLLM is required when use_vllm=True. Install AgileRL with vLLM support for this platform: `pip install agilerl[llm]`."
             raise ImportError(msg)
         vllm_config = self.vllm_config
@@ -5339,8 +5339,10 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             generation_kwargs["logprobs"] = 0
         if vllm_config.stop_sequences:
             generation_kwargs["stop"] = vllm_config.stop_sequences
+        from vllm import SamplingParams as _SamplingParams
+
         sampling_params = [
-            SamplingParams(**generation_kwargs, max_tokens=max_output_token)
+            _SamplingParams(**generation_kwargs, max_tokens=max_output_token)
             for max_output_token in all_max_output_tokens
         ]
 
@@ -5973,7 +5975,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
 
     def _configure_vllm(self) -> None:
         """Configure vLLM for efficient inference during generation in 'get_action'."""
-        if LLM is None:
+        if not HAS_VLLM:
             msg = "vLLM is required when use_vllm=True. Install AgileRL with vLLM support for this platform: `pip install agilerl[llm]`."
             raise ImportError(msg)
         if self.vllm_config is None:
@@ -6039,8 +6041,10 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
                 stacklevel=2,
             )
 
+        from vllm import LLM as _LLM
+
         try:
-            self.llm = LLM(**llm_kwargs)
+            self.llm = _LLM(**llm_kwargs)
         except ValueError as err:
             backend_env = os.environ.get("VLLM_ATTENTION_BACKEND")
             if backend_env is not None and "backend" in str(err).lower():
