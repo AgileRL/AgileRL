@@ -138,10 +138,42 @@ model**, and two points always define a line: across all 203 it explains
 R²=0.001, and subtracting the moment charge makes the corpus *worse*
 (2.66% -> 3.85% mean) because it helps high-rank points and hurts the rest.
 
-**Next step, and it needs a GPU.** The remaining error is either outlier noise
-or a bias too small to separate from it at n=1 per point. Distinguish them by
-re-measuring one worst point (Qwen2.5-0.5B, seq 512, mb 8, group 4, rank 64 —
-+12.8% on the A100, +11.5% on the L4) five or more times: if the spread covers
-the error, it is noise and the honest fix is to widen the stated band rather
-than add terms. If the point is tightly reproducible, it is a real bias and an
-allocator snapshot there will name it.
+### It is bias, not noise — measured 2026-08-04
+
+Every training point at or above 6% error was re-measured **five times** at its
+exact recorded knobs (including `gpu_memory_utilization`) with `warmup_steps=0`
+— 11 points, 55 runs, all succeeded.
+
+    run-to-run spread   max 44 MiB, median 0 MiB
+    error magnitude     175 .. 865 MiB
+
+Nine of the eleven repeated **byte-identically**, and the worst spread is 5% of
+the smallest error being explained. So there is no noise to hide behind: these
+are real, reproducible, attributable errors. (It also confirms the pinned
+completion work end to end — these configurations are deterministic.)
+
+**The sign splits on where the point sits in the fit design.** Across all 203
+training points, not just the extreme ones:
+
+| phase | corner (n=155) | holdout (n=48) |
+|---|---|---|
+| training | **+1.54%** signed, 108/155 positive | **−1.21%** signed, 19/48 positive |
+| generation | +0.14%, 70/155 | +0.25%, 31/48 |
+
+Training over-predicts at the corners and under-predicts in the interior, a
+2.75-point gap with the positive fraction flipping 70% -> 40%. Generation shows
+no such split, which rules out the point labelling itself being the artifact.
+
+That is the signature of a residual model that is **linear in knobs whose truth
+is not linear**, fitted only at the extremes: `corner_plan()` is every corner of
+the knob box and the interior points are held out, so nothing in the fit set
+constrains curvature. It compounds a basis defect already known — `nograd_tokens`
+is exactly `2 x grad_tokens` (collinear, so individual slopes are meaningless)
+and the `seq_len` slope sign-flips between models.
+
+**Next step needs no GPU.** All of this is re-derivable offline from the stored
+measurements via `python -m agilerl.memory.profiling.refit`: drop the collinear
+basis term, add a curvature term (interaction or quadratic in tokens), and put
+interior points in the fit set while keeping a genuine held-out set for
+validation. Judge any change by leave-one-model-out, not by the fitted residual
+— pooled coefficients already score worse than the raw analytic core.
