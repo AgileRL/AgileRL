@@ -308,9 +308,21 @@ def estimate_training(
         knobs.lora_target_scope,
         knobs.gradient_checkpointing,
     )
-    # The fused chunked path holds at most two vocab-width tiles (logits and
-    # their gradient) regardless of batch or sequence length.
-    logits = 2 * formulas.logit_workspace_bytes(arch.vocab_size, knobs.chunk_rows)
+    # The fused chunked path holds vocab-width tiles bounded by ``chunk_rows``,
+    # never a (B, S, V) slab. Two are live together under autograd: the matmul
+    # emits one in the activation dtype and the log-softmax reduction casts a
+    # second to fp32, and the graph holds both for the recompute. The no-grad
+    # logprob pass builds no graph, so the cast frees its input and only the
+    # fp32 tile stands.
+    #
+    # Measured at Qwen2.5-0.5B / L4 / seq 512, mb 8, group 4, rank 64, where
+    # chunk_rows auto-tunes to 441 against a 151936 vocab: the trace holds
+    # tiles of exactly 255.6 MiB (441 x 151936 x 4) and 127.8 MiB
+    # (441 x 151936 x 2), and logits_workspace peaks at 399 MiB against the
+    # 383 MiB this predicts.
+    logit_rows = formulas.resolve_chunk_rows(arch.vocab_size, knobs.chunk_rows)
+    logit_tile = logit_rows * arch.vocab_size * 4
+    logits = logit_rows * arch.vocab_size * (act_bytes + 4)
 
     # No-grad logprob pass: actor + reference (+ value) rows fused into one
     # forward — a wider batch, but nothing saved for backward. Micro-batched
@@ -327,19 +339,30 @@ def estimate_training(
     # profiled (Qwen2.5-0.5B, Gemma 4 E2B, OLMoE), against a ~512 MiB
     # prediction. By then the loss backward has freed them and the block
     # recompute is at its widest.
-    backward_peak = saved + recompute + loss_hidden + lora_casts
-    loss_peak = saved + loss_hidden + lora_casts + logits
-    nograd_peak = nograd_pass + logits
-    peak = max(backward_peak, loss_peak, nograd_peak)
+    # Gradients belong to the instant, not to every instant. The no-grad
+    # logprob pass runs after ``zero_grad(set_to_none=True)`` has freed them
+    # and before backward re-creates them, so nothing gradient-shaped is
+    # resident there; the optimizer step is the mirror image, every transient
+    # freed and only the persistent tensors left. Timeline of the allocator
+    # trace at the corner above, trainer side: no-grad 1308 MiB, gradient
+    # forward 1452, backward 1510, optimizer step 1756 -- the step binds, and
+    # it cannot win a maximum that adds gradients to all four alike.
+    backward_peak = grads + saved + recompute + loss_hidden + lora_casts
+    loss_peak = grads + saved + loss_hidden + lora_casts + logits
+    nograd_peak = nograd_pass + logit_tile
+    optimizer_peak = grads
+    peak = max(backward_peak, loss_peak, nograd_peak, optimizer_peak)
 
     # Report the split that belongs to whichever instant binds, so the bar
     # shows what is actually resident at the peak rather than a union.
     if peak == backward_peak:
-        activations, logits = backward_peak, 0
+        activations, logits, live_grads = backward_peak - grads, 0, grads
     elif peak == loss_peak:
-        activations, logits = loss_peak - logits, logits
+        activations, logits, live_grads = loss_peak - logits - grads, logits, grads
+    elif peak == nograd_peak:
+        activations, logits, live_grads = nograd_pass, logit_tile, 0
     else:
-        activations, logits = nograd_pass, logits
+        activations, logits, live_grads = 0, 0, grads
 
     # Held per-update tensors: completions, masks, old/ref/sampling logprobs,
     # advantages — (rows, S) fp32-ish, megabytes at most.
@@ -382,8 +405,8 @@ def estimate_training(
         _component(
             "grads_optimizer",
             "Gradients + optimizer state",
-            grads + opt_state,
-            detail={"gradients": grads, "adamw_state": opt_state},
+            live_grads + opt_state,
+            detail={"gradients": live_grads, "adamw_state": opt_state},
             note="LoRA-only training: scales with adapter params, not the base.",
         ),
         _component(
@@ -394,6 +417,7 @@ def estimate_training(
                 "backward_peak": backward_peak,
                 "loss_peak": loss_peak,
                 "nograd_peak": nograd_peak,
+                "optimizer_peak": optimizer_peak,
                 "checkpoint_boundaries": saved,
                 "block_recompute": recompute,
                 "loss_hidden_state": loss_hidden,

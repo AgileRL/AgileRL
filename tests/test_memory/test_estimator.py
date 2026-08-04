@@ -138,7 +138,11 @@ def test_beta_zero_skips_the_reference_forward_but_keeps_the_adapter(model, devi
     # knowing before promising users that beta=0 frees memory.
     detail = component(hot, "activations").detail
     assert detail["backward_peak"] >= detail["nograd_peak"]
-    assert component(hot, "activations").bytes_ == detail["backward_peak"]
+    # The instant totals carry the gradients that are resident at each, but the
+    # bar reports those under grads_optimizer, so activations is the binding
+    # instant net of them.
+    gradients = component(hot, "grads_optimizer").detail["gradients"]
+    assert component(hot, "activations").bytes_ == detail["backward_peak"] - gradients
 
     # And the saving is only real once the framework short-circuits that row.
     assert any("beta=0" in w for w in cold.warnings)

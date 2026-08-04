@@ -83,10 +83,48 @@ ATTRIBUTION_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
 )
 
 
+#: Frames that carry no attribution meaning and must be stepped over rather
+#: than matched. ``torch.compile`` emits generated modules under an inductor
+#: cache directory, and vLLM points that cache inside its own tree — so a
+#: compiled kernel's innermost frame is a hashed filename under ``.../vllm/``
+#: and matched the engine rule, whatever Python actually made the call.
+#:
+#: It was not a near miss. Every logit tile the fused logprob path allocates
+#: is compiled, so all of them were booked to the engine and then dropped from
+#: the trainer total (which excludes engine memory by design): the measured
+#: ``logits_workspace`` maximum read 7 MiB against tiles of 255.6, 162.3,
+#: 127.8 and 81.1 MiB sitting in the trace with
+#: ``fused_logprobs.py:_fused_logprob_chunk`` one frame below.
+TRANSPARENT_FRAME_MARKERS: tuple[str, ...] = (
+    "torchinductor",
+    "torch_compile_cache",
+    "/inductor/",
+    "eval_frame.py",
+    "runtime_wrappers.py",
+    "_dynamo/",
+    "_functorch/",
+)
+
+
+def _is_transparent(filename: str, name: str) -> bool:
+    """True for codegen and dispatch frames that should not decide attribution."""
+    haystack = f"{filename}::{name}".lower()
+    if any(marker in haystack for marker in TRANSPARENT_FRAME_MARKERS):
+        return True
+    # Inductor names generated modules with a long hash and no path hint that
+    # survives ``basename``; the cache directory is the only reliable tell, so
+    # fall back to shape: a bare hashed stem invoked as ``call``.
+    stem = filename.rsplit("/", 1)[-1].removesuffix(".py")
+    return name == "call" and len(stem) > 24 and stem.isalnum()
+
+
 def classify(frames: list[dict]) -> str:
-    """Assign one allocation to a component by its deepest matching frame."""
+    """Assign one allocation to a component by its deepest meaningful frame."""
     for frame in frames:
-        haystack = f"{frame.get('filename', '')}::{frame.get('name', '')}".lower()
+        filename, name = frame.get("filename", ""), frame.get("name", "")
+        if _is_transparent(filename, name):
+            continue
+        haystack = f"{filename}::{name}".lower()
         for component, markers in ATTRIBUTION_RULES:
             if any(marker in haystack for marker in markers):
                 return component
