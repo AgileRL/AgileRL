@@ -171,9 +171,53 @@ constrains curvature. It compounds a basis defect already known — `nograd_toke
 is exactly `2 x grad_tokens` (collinear, so individual slopes are meaningless)
 and the `seq_len` slope sign-flips between models.
 
-**Next step needs no GPU.** All of this is re-derivable offline from the stored
-measurements via `python -m agilerl.memory.profiling.refit`: drop the collinear
-basis term, add a curvature term (interaction or quadratic in tokens), and put
-interior points in the fit set while keeping a genuine held-out set for
-validation. Judge any change by leave-one-model-out, not by the fitted residual
-— pooled coefficients already score worse than the raw analytic core.
+### Allocator snapshot at the worst point — 2026-08-04
+
+Snapshot at Qwen2.5-0.5B / L4 / seq 512, mb 8, group 4, rank 64 (+11.5%,
+predicted 3204 MiB against a 2873 MiB target). Torch-side attribution against
+what the estimator charges:
+
+| term | predicted | observed | error |
+|---|---|---|---|
+| base + adapters | 1211 | 1208 | **+3** |
+| grads + optimizer | 403 | 399 | **+4** |
+| activations | 170 | 3 | **+166** |
+| logits_workspace | 511 | **0** | **+511** |
+
+The weight-side terms are right to within 0.3%. The whole error is on the
+activation side, and it is **the same compensating-error pattern as the
+structural bug fixed in `0572e982`, one level deeper**: 677 MiB of activations
+and logit tile are charged at an instant where the allocator says they are not
+live, offset by ~345 MiB under-counted on the floor side (torch-observed 1753 +
+non-torch predicted 910 = 2663 against 2859 measured). The two cancel to the
++332 MiB seen. Totals look reasonable while components are badly wrong — which
+is exactly why this only surfaced from a snapshot.
+
+**What it implies.** The estimator maximises over three instants — backward,
+loss, no-grad — and *all three* include activations. At short sequence lengths
+activations are small and the real peak is a **fourth instant: the optimizer
+step**, where activations and logit tiles have been freed and only weights,
+gradients and moments are resident. That instant is not modelled. It also
+explains the corner/holdout sign split: `seq_len=512` is a corner level, so the
+points where this instant binds are concentrated in the fit set.
+
+Note this is *not* the same as the retracted moment finding above. The moments
+are correctly charged and correctly measured (403 predicted, 399 observed);
+what is wrong is the set of instants competing for the maximum.
+
+**Before implementing it:** a fourth instant of `weights + grads + optimizer`
+alone predicts 2524 MiB against a 2873 MiB target — 349 MiB short. So adding it
+naively trades an over-prediction for an under-prediction, which is the worse
+direction. The floor under-count has to be found in the same change: 133 MiB of
+the snapshot is "unattributed" (pre-window allocations carry no stack because
+the recorder clears history at the window boundary — record from process start
+to attribute them) and ~196 MiB is non-torch. Fix both together, exactly as
+`0572e982` had to.
+
+**Also worth doing, and it needs no GPU.** The residual fit's shape is
+re-derivable offline from stored measurements via
+`python -m agilerl.memory.profiling.refit`: drop the collinear basis term, add
+a curvature term (interaction or quadratic in tokens), and put interior points
+in the fit set while keeping a genuine held-out set. Judge any change by
+leave-one-model-out, not by the fitted residual — pooled coefficients already
+score worse than the raw analytic core.
