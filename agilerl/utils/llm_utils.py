@@ -1612,18 +1612,14 @@ def move_params_to_gpu(unwrapped_model: torch.nn.Module, device: torch.device) -
         torch.cuda.synchronize()
 
 
-def move_params_to_cpu(unwrapped_model: torch.nn.Module) -> None:
-    """Move params to CPU.
-
-    :param agent: Distributed agent
-    :type agent: DistributedLLMAgent
-    :return: None
-    :rtype: None
-    """
+def move_params_to_cpu(unwrapped_model: torch.nn.Module) -> bool:
+    """Move params to CPU, returning True when a device transfer was needed."""
     if next(unwrapped_model.parameters()).device.type != "cpu":
         unwrapped_model.to("cpu", non_blocking=True)
         torch.cuda.synchronize()
         torch.cuda.empty_cache()
+        return True
+    return False
 
 
 def stitch_completion_after_windowed_hf_generate(

@@ -6249,9 +6249,9 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
 
     def _prepare_vllm_for_generation(self) -> None:
         assert self.vllm_config is not None  # _configure_vllm guarantees a config
-        if self.use_memory_efficient_params and not self._vllm_awake:
-            move_params_to_cpu(self._get_unwrapped_actor())
-            if self.accelerator is None or self.accelerator.is_main_process:
+        if self.use_memory_efficient_params:
+            moved = move_params_to_cpu(self._get_unwrapped_actor())
+            if moved and (self.accelerator is None or self.accelerator.is_main_process):
                 log_cuda_memory_snapshot(
                     "trainer base offloaded to CPU (before vLLM wake)"
                 )
