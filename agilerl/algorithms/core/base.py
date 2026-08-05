@@ -6250,12 +6250,6 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
     def _prepare_vllm_for_generation(self) -> None:
         assert self.vllm_config is not None  # _configure_vllm guarantees a config
         if self.use_memory_efficient_params and not self._vllm_awake:
-            # Colocated: park the trainer's own base on CPU *before* waking vLLM
-            # so the rollout engine owns the GPU and the two bases never coexist
-            # on-device. The training step brings it back via
-            # ``memory_efficient_params_context``. While the engine is already
-            # awake (mid-rollout turns) the base is still parked, so the offload
-            # and its log are skipped alongside the wake below.
             move_params_to_cpu(self._get_unwrapped_actor())
             if self.accelerator is None or self.accelerator.is_main_process:
                 log_cuda_memory_snapshot(
