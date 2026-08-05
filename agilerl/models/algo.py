@@ -435,7 +435,6 @@ class RLAlgorithmSpec(AlgorithmSpec):
 
         if resume_from_checkpoint is not None:
             algo.load_checkpoint(resume_from_checkpoint)
-            algo.index = index
 
         return algo
 
@@ -508,7 +507,6 @@ class MultiAgentRLAlgorithmSpec(AlgorithmSpec):
 
         if resume_from_checkpoint is not None:
             algo.load_checkpoint(resume_from_checkpoint)
-            algo.index = index
 
         return algo
 
@@ -651,7 +649,6 @@ class LLMAlgorithmSpec(AlgorithmSpec):
 
         if resume_from_checkpoint is not None:
             algo.load_checkpoint(resume_from_checkpoint)
-            algo.index = index
 
         return algo
 

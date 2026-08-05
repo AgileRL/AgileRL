@@ -212,10 +212,10 @@ def run_demo(recurrent: bool = True) -> None:
             print(
                 f"\nAgent achieved required score {required_score}. Stopping training.",
             )
-            elite, _, _ = tournament.select(pop)
+            elite, _ = tournament.select(pop)
             training_complete = True
         else:
-            elite, pop, _ = tournament.select(pop)
+            elite, pop = tournament.select(pop)
             pop = mutations.mutation(pop)
     pbar.close()
     env.close()
@@ -231,7 +231,7 @@ def run_demo(recurrent: bool = True) -> None:
                 loop=eval_loop,
                 vectorized=True,
             )
-        elite, _, _ = tournament.select(pop)
+        elite, _ = tournament.select(pop)
 
     # --- Run a few episodes and print results ---
     print("Running a few episodes with the best agent:")

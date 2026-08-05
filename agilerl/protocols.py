@@ -41,9 +41,6 @@ from typing_extensions import Self
 
 if TYPE_CHECKING:
     from agilerl.algorithms.core.registry import MutationRegistry
-    from agilerl.algorithms.core.registry import (
-        OptimizerConfig as RegistryOptimizerConfig,
-    )
     from agilerl.typing import MutationApplyDict, ReasoningPrompts, TokenObsStepReturn
 
 NumpyObsType = npt.NDArray | dict[str, npt.NDArray] | tuple[npt.NDArray, ...]
@@ -369,8 +366,6 @@ class EvolvableAlgorithmProtocol(Protocol):
     fitness: list[float | npt.NDArray]
     steps: int
     torch_compiler: str | None
-    # Multi-frequency selection's subpopulation tag; None under any other strategy.
-    subpopulation_id: int | None
 
     @property
     def scores(self) -> list[float | list[float]]:
@@ -427,27 +422,6 @@ class EvolvableAlgorithmProtocol(Protocol):
     def recompile(self) -> None: ...
 
     def mutation_hook(self) -> None: ...
-
-    def reinit_optimizers(
-        self,
-        optimizer: "RegistryOptimizerConfig | None" = None,
-    ) -> None: ...
-
-
-@runtime_checkable
-class SelectionStrategyProtocol(Protocol):
-    """Protocol for population selection strategies that drive evolutionary HPO.
-
-    :ivar population_size: Total number of agents in the population.
-    :vartype population_size: int
-    """
-
-    population_size: int
-
-    def select(
-        self,
-        population: list[Any],
-    ) -> tuple[Any, list[Any], list[int] | None]: ...
 
 
 # Define a TypeVar for EvolvableAlgorithm that can be used for generic typing

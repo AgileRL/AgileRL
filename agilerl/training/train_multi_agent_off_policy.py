@@ -23,15 +23,13 @@ from agilerl.components.sampler import Sampler
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.population import Population
-from agilerl.protocols import SelectionStrategyProtocol
 from agilerl.typing import InitHyperparams
 from agilerl.utils.algo_utils import get_num_envs
 from agilerl.utils.utils import (
     default_progress_bar,
     init_loggers,
-    resolve_selection_strategy,
-    run_selection_and_mutation,
     save_population_checkpoint,
+    tournament_selection_and_mutation,
 )
 from agilerl.vector import PzDummyVecEnv
 from agilerl.vector.pz_async_vec_env import AsyncPettingZooVecEnv
@@ -57,7 +55,6 @@ def train_multi_agent_off_policy(
     eval_loop: int = 1,
     learning_delay: int = 0,
     target: float | None = None,
-    selection_strategy: SelectionStrategyProtocol | None = None,
     tournament: TournamentSelection | None = None,
     mutation: Mutations | None = None,
     checkpoint: int | None = None,
@@ -106,13 +103,7 @@ def train_multi_agent_off_policy(
     :type learning_delay: int, optional
     :param target: Target score for early stopping, defaults to None
     :type target: float, optional
-    :param selection_strategy: selection strategy driving population evolution. A
-        :class:`~agilerl.hpo.tournament.TournamentSelection` or
-        :class:`~agilerl.hpo.multi_frequency.MultiFrequencySelection` (MF-PBT) object,
-        defaults to None
-    :type selection_strategy: object, optional
-    :param tournament: Deprecated alias for selection_strategy (a
-        :class:`~agilerl.hpo.tournament.TournamentSelection` object), defaults to None
+    :param tournament: Tournament selection object, defaults to None
     :type tournament: object, optional
     :param mutation: Mutation object, defaults to None
     :type mutation: object, optional
@@ -147,7 +138,6 @@ def train_multi_agent_off_policy(
         dictionaries when ``sum_scores`` is False.
     :rtype: tuple[list[MADDPG | MATD3], list[float] | list[dict[str, float]]]
     """
-    selection_strategy = resolve_selection_strategy(selection_strategy, tournament)
     assert isinstance(
         algo,
         str,
@@ -372,12 +362,12 @@ def train_multi_agent_off_policy(
             pbar.close()
             return population.agents, population.last_fitnesses
 
-        # Perform HPO
-        if selection_strategy is not None and mutation is not None:
+        # Tournament selection and population mutation
+        if tournament and mutation is not None:
             population.update(
-                run_selection_and_mutation(
-                    selection_strategy,
+                tournament_selection_and_mutation(
                     population=population.agents,
+                    tournament=tournament,
                     mutation=mutation,
                     env_name=env_name,
                     algo=algo,

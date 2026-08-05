@@ -286,7 +286,7 @@ Once the skills have been defined, training agents to solve them is very straigh
                evo_steps=EVO_STEPS,  # Evolution frequency
                evo_loop=3,  # Number of evaluation episodes per agent
                target=TARGET_SCORE,  # Target score for early stopping
-               selection_strategy=None,  # Selection strategy object
+               tournament=None,  # Tournament selection object
                mutation=None,  # Mutations object
                wb=WANDB,  # Weights and Biases tracking
          )

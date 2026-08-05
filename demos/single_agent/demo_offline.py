@@ -138,7 +138,7 @@ if __name__ == "__main__":
         )
 
         # Tournament selection and population mutation
-        _, pop, _ = tournament.select(pop)
+        _, pop = tournament.select(pop)
         pop = mutations.mutation(pop)
 
     pbar.close()

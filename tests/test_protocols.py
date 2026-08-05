@@ -21,8 +21,6 @@ from agilerl.algorithms import (
     RainbowDQN,
 )
 from agilerl.algorithms.core import MultiAgentRLAlgorithm
-from agilerl.hpo.multi_frequency import MultiFrequencySelection
-from agilerl.hpo.tournament import TournamentSelection
 from agilerl.modules import (
     EvolvableCNN,
     EvolvableLSTM,
@@ -51,7 +49,6 @@ from agilerl.protocols import (
     MutationType,
     PeftModelProtocol,
     PreTrainedModelProtocol,
-    SelectionStrategyProtocol,
 )
 from agilerl.wrappers.agent import RSNorm
 from agilerl.wrappers.learning import BanditEnv
@@ -356,57 +353,3 @@ class TestBanditEnvProtocol:
         next_state, reward = env.step(0)
         assert isinstance(next_state, np.ndarray)
         assert isinstance(reward, float)
-
-
-_SELECTION_STRATEGIES = {
-    "tournament": lambda: TournamentSelection(
-        tournament_size=2, elitism=True, population_size=6
-    ),
-    "multi_frequency": lambda: MultiFrequencySelection(
-        population_size=6,
-        n_subpopulations=2,
-        evolution_frequency_ratios=[1, 2],
-        seed=42,
-    ),
-}
-
-
-class TestSelectionStrategyProtocol:
-    """Test that the selection strategy classes satisfy SelectionStrategyProtocol."""
-
-    @staticmethod
-    def _population():
-        population = DQN.population(
-            size=6,
-            observation_space=generate_random_box_space((4,)),
-            action_space=generate_discrete_space(2),
-            device="cpu",
-        )
-
-        for position, agent in enumerate(population):
-            agent.fitness = [float(10 - position)]
-        return population
-
-    @pytest.mark.parametrize(
-        "strategy_name", list(_SELECTION_STRATEGIES), ids=list(_SELECTION_STRATEGIES)
-    )
-    def test_selection_strategy_instances_implement_protocol(self, strategy_name):
-        """Every concrete strategy satisfies the runtime-checkable protocol."""
-        strategy = _SELECTION_STRATEGIES[strategy_name]()
-
-        assert isinstance(strategy, SelectionStrategyProtocol)
-
-    @pytest.mark.parametrize(
-        "strategy_name", list(_SELECTION_STRATEGIES), ids=list(_SELECTION_STRATEGIES)
-    )
-    def test_select_returns_the_shared_three_tuple_contract(self, strategy_name):
-        strategy = _SELECTION_STRATEGIES[strategy_name]()
-        population = self._population()
-        best = max(population, key=lambda agent: agent.fitness[-1])
-
-        elite, new_population, indices = strategy.select(population)
-
-        assert elite.index == best.index
-        assert len(new_population) == strategy.population_size
-        assert indices is None or all(isinstance(index, int) for index in indices)
-        assert indices is None or set(indices) <= {a.index for a in new_population}

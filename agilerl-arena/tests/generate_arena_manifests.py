@@ -101,7 +101,7 @@ def _build_manifest_dict(algorithm, algo_name: str) -> dict[str, Any]:
         "environment": ArenaEnvSpec(name=_DEFAULT_ENV[algorithm.agent_type]),
         "training": TrainingSpec(),
         "mutation": MutationSpec(),
-        "selection_strategy": TournamentSelectionSpec(),
+        "tournament_selection": TournamentSelectionSpec(),
     }
     if algo_name in _OFF_POLICY_ALGOS:
         data["replay_buffer"] = ReplayBufferSpec()

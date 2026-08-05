@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import copy
 import logging
-import warnings
 from pathlib import Path
 from typing import Annotated, Any, Literal, overload
 
@@ -38,9 +37,7 @@ def _ensure_platform_run_spec_keys(data: dict[str, Any]) -> None:
     """Mutate *data* for Arena run-spec JSON.
 
     Optional manifest sections use ``model_dump(..., exclude_none=True)``, so keys
-    for unset models are omitted. The keys below are the payload names, which the
-    dump produces via ``by_alias=True``: the selection section is declared as
-    ``selection_strategy`` but reaches the platform as ``tournament_selection``.
+    for unset models are omitted.
     """
     for key in ("mutation", "tournament_selection", "network"):
         data.setdefault(key, {})
@@ -182,25 +179,17 @@ def _collect_unknown_fields(
         "training": validated.training,
         "mutation": validated.mutation,
         "replay_buffer": validated.replay_buffer,
-        "selection_strategy": validated.selection_strategy,
+        "tournament_selection": validated.tournament_selection,
     }
     for section, model in sections.items():
-        # selection_strategy still accepts its legacy tournament_selection
-        # spelling, so report unknown keys under whichever one was written.
-        raw_key = (
-            "tournament_selection"
-            if section == "selection_strategy" and section not in raw
-            else section
-        )
-        raw_section = raw.get(raw_key)
+        raw_section = raw.get(section)
         if not isinstance(raw_section, dict) or not isinstance(model, BaseModel):
             continue
         known = _known_field_names(model)
-        # `dumped` is serialized without by_alias, so it is keyed on field names.
         dumped_section = dumped.get(section)
         if isinstance(dumped_section, dict):
             known.update(dumped_section)
-        unknown.extend(f"{raw_key}.{key}" for key in raw_section if key not in known)
+        unknown.extend(f"{section}.{key}" for key in raw_section if key not in known)
 
     return unknown
 
@@ -224,31 +213,7 @@ class TrainingManifest(BaseModel):
     network: NetworkFromManifest | None = Field(default=None)
     mutation: MutationSpec | None = Field(default=None)
     replay_buffer: ReplayBufferSpec | None = Field(default=None)
-    selection_strategy: TournamentSelectionSpec | None = Field(
-        default=None,
-        validation_alias=AliasChoices("selection_strategy", "tournament_selection"),
-        serialization_alias="tournament_selection",
-    )
-
-    @property
-    def tournament_selection(self) -> TournamentSelectionSpec | None:
-        """The configured selection strategy.
-
-        .. deprecated::
-            Superseded by :attr:`selection_strategy`, the field this section is now
-            declared under. Manifests may still be written with either key, and the
-            platform payload is unaffected.
-
-        :returns: The selection spec, or None when the section is omitted.
-        :rtype: TournamentSelectionSpec | None
-        """
-        warnings.warn(
-            "TrainingManifest.tournament_selection is deprecated and will be removed "
-            "in a future release; use TrainingManifest.selection_strategy instead.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        return self.selection_strategy
+    tournament_selection: TournamentSelectionSpec | None = Field(default=None)
 
     @model_validator(mode="after")
     def _process_manifest(self) -> Self:
@@ -343,6 +308,6 @@ class TrainingManifest(BaseModel):
         if mode == "python":
             return validated
 
-        payload = validated.model_dump(mode="json", exclude_none=True, by_alias=True)
+        payload = validated.model_dump(mode="json", exclude_none=True)
         _ensure_platform_run_spec_keys(payload)
         return payload

@@ -199,7 +199,7 @@ if __name__ == "__main__":
             max_steps=max_steps,  # Max number of training episodes
             evo_steps=evo_steps,  # Evolution frequency
             target=target_score,  # Target score for early stopping
-            selection_strategy=None,  # Selection strategy object
+            tournament=None,  # Tournament selection object
             mutation=None,  # Mutations object
             wb=True,  # Weights and Biases tracking
         )

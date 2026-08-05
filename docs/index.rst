@@ -145,7 +145,6 @@ If you use AgileRL in your work, please cite the repository:
 
    tutorials/gymnasium/index
    tutorials/pettingzoo/index
-   tutorials/mf_pbt/index
    tutorials/skills/index
    tutorials/llm_finetuning/index
    tutorials/bandits/index

@@ -62,7 +62,7 @@ network:
         max_mlp_nodes: 256
         layer_norm: true
 
-selection_strategy:
+tournament_selection:
     tournament_size: 2
     elitism: true
 

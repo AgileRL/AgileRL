@@ -92,7 +92,7 @@ Here is an example manifest to train DQN on LunarLander-v3:
       mutation_sd: 0.1
       rand_seed: 42
 
-    selection_strategy:
+    tournament_selection:
       tournament_size: 2
       elitism: true
 
@@ -267,7 +267,7 @@ can use our off-the-shelf training function, which returns a population of train
         eval_loop=1,  # Number of evaluation episodes
         learning_delay=1000,  # Steps before starting learning
         target=200.,  # Target score for early stopping
-        selection_strategy=tournament,  # Selection strategy object
+        tournament=tournament,  # Tournament selection object
         mutation=mutations,  # Mutations object
         wb=False,  # Weights and Biases tracking
     )
@@ -455,7 +455,7 @@ Alternatively, use a custom training loop. Combining all of the above:
             )
 
             # Tournament selection and population mutation
-            elite, pop, _ = tournament.select(pop)
+            elite, pop = tournament.select(pop)
             pop = mutations.mutation(pop)
 
         pbar.close()

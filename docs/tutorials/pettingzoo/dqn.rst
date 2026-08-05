@@ -1255,7 +1255,7 @@ to optimize hyperparameters and maximise the performance of our agents in a sing
                pbar.update(0)
 
                # Tournament selection and population mutation
-               elite, pop, _ = tournament.select(pop)
+               elite, pop = tournament.select(pop)
                pop = mutations.mutation(pop)
 
       # Save the trained agent

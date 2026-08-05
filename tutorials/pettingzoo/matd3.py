@@ -24,7 +24,7 @@ from agilerl.utils.utils import (
     default_progress_bar,
     init_loggers,
     make_multi_agent_vect_envs,
-    run_selection_and_mutation,
+    tournament_selection_and_mutation,
 )
 
 if __name__ == "__main__":
@@ -240,9 +240,9 @@ if __name__ == "__main__":
 
         # Tournament selection and population mutation
         population.update(
-            run_selection_and_mutation(
-                tournament,
+            tournament_selection_and_mutation(
                 population=population.agents,
+                tournament=tournament,
                 mutation=mutations,
                 env_name="simple_speaker_listener_v4",
                 algo="MATD3",

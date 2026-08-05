@@ -18,7 +18,7 @@ from agilerl.typing import (
     TokenObsStepReturn,
     TokenObsType,
 )
-from agilerl.utils.llm_utils import max_prompt_tokens_for_sliding_window
+from agilerl.utils.llm_obs import max_prompt_tokens_for_sliding_window
 
 if TYPE_CHECKING:
     from transformers.tokenization_utils_base import PreTrainedTokenizerBase

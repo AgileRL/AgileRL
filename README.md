@@ -199,7 +199,7 @@ network:
 replay_buffer:
     max_size: 100_000
 
-selection_strategy:
+tournament_selection:
     tournament_size: 2
     elitism: true
 
@@ -319,7 +319,7 @@ trained_pop, pop_fitnesses = train_off_policy(
     max_steps=1_000_000,
     evo_steps=10_000,
     target=200.0,
-    selection_strategy=tournament,
+    tournament=tournament,
     mutation=mutations,
 )
 ```

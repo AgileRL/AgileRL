@@ -22,7 +22,7 @@ from transformers.modeling_outputs import CausalLMOutputWithPast
 from transformers.modeling_utils import PreTrainedModel
 
 from agilerl.algorithms.core import ActionResult
-from agilerl.algorithms.ppo_llm import PPO as LLMPPO
+from agilerl.algorithms.ppo_llm import LLMPPO
 from agilerl.utils.algo_utils import CosineLRScheduleConfig, VLLMConfig
 from agilerl.utils.llm_utils import ReasoningGym, masked_whiten
 from agilerl.utils.ppo_value_head import AutoModelForCausalLMWithValueHead

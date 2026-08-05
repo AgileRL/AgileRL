@@ -48,7 +48,7 @@ training:
     eval_loop: 1
     evaluation_interval: 5
 
-selection_strategy:
+tournament_selection:
     tournament_size: 2
     elitism: true
 

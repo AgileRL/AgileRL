@@ -221,7 +221,7 @@ Below is an example of a distributed training loop.
                 model.unwrap_models()
             accelerator.wait_for_everyone()
             if accelerator.is_main_process:
-                elite, pop, _ = tournament.select(pop)
+                elite, pop = tournament.select(pop)
                 pop = mutations.mutation(pop)
                 for pop_i, model in enumerate(pop):
                     model.save_checkpoint(f"{accel_temp_models_path}/DQN_{pop_i}.pt")

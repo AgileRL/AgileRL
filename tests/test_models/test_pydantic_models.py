@@ -692,19 +692,14 @@ class TestAlgoSpecClassVars:
         mock_algo_cls = MagicMock()
         mock_algo = MagicMock()
         mock_algo_cls.return_value = mock_algo
-        mock_algo.load_checkpoint.side_effect = lambda _p: setattr(
-            mock_algo, "index", 3
-        )
         with patch.object(type(spec), "algo_class", return_value=mock_algo_cls):
             spec.build_algorithm(
                 observation_space=MagicMock(),
                 action_space=MagicMock(),
-                index=2,
+                index=0,
                 resume_from_checkpoint="/some/path",
             )
         mock_algo.load_checkpoint.assert_called_once_with("/some/path")
-        # The caller's slot assignment must survive the restore
-        assert mock_algo.index == 2
 
     def test_multi_agent_resume_from_checkpoint(self):
         """MultiAgentRLAlgorithmSpec.build_algorithm with resume."""
@@ -714,18 +709,14 @@ class TestAlgoSpecClassVars:
         mock_algo_cls = MagicMock()
         mock_algo = MagicMock()
         mock_algo_cls.return_value = mock_algo
-        mock_algo.load_checkpoint.side_effect = lambda _p: setattr(
-            mock_algo, "index", 3
-        )
         with patch.object(type(spec), "algo_class", return_value=mock_algo_cls):
             spec.build_algorithm(
                 observation_spaces={"a": MagicMock()},
                 action_spaces={"a": MagicMock()},
-                index=2,
+                index=0,
                 resume_from_checkpoint="/some/path",
             )
         mock_algo.load_checkpoint.assert_called_once_with("/some/path")
-        assert mock_algo.index == 2
 
 
 class TestBuildAlgorithmMissingArgsRaise:
@@ -947,19 +938,15 @@ class TestLLMAlgorithmSpecBuild:
         mock_algo_cls = MagicMock()
         mock_algo = MagicMock()
         mock_algo_cls.return_value = mock_algo
-        mock_algo.load_checkpoint.side_effect = lambda _p: setattr(
-            mock_algo, "index", 3
-        )
 
         with patch.object(type(spec), "algo_class", return_value=mock_algo_cls):
             spec.build_algorithm(
                 tokenizer=mock_tokenizer,
-                index=2,
+                index=0,
                 resume_from_checkpoint="/ckpt",
             )
 
         mock_algo.load_checkpoint.assert_called_once_with("/ckpt")
-        assert mock_algo.index == 2
 
 
 class TestManifestResolveAlgorithm:

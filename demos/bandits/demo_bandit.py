@@ -177,7 +177,7 @@ if __name__ == "__main__":
 
         if pop[0].steps // evo_steps > evo_count:
             # Tournament selection and population mutation
-            _, pop, _ = tournament.select(pop)
+            _, pop = tournament.select(pop)
             pop = mutations.mutation(pop)
             evo_count += 1
 

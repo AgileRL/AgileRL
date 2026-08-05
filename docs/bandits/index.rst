@@ -90,7 +90,7 @@ Below is an example manifest for training NeuralUCB on the Iris dataset.
         mutation_sd: 0.1
         rand_seed: 42
 
-      selection_strategy:
+      tournament_selection:
         tournament_size: 2
         elitism: true
 
@@ -252,7 +252,7 @@ The easiest way to train a population of bandits is to use our training function
         eval_steps=500,  # Number of steps in evaluation episode,
         eval_loop=1,  # Number of evaluation episodes
         target=96.0,  # Target score for early stopping
-        selection_strategy=tournament,  # Selection strategy object
+        tournament=tournament,  # Tournament selection object
         mutation=mutations,  # Mutations object
         wb=True,  # Weights and Biases tracking
     )
@@ -426,7 +426,7 @@ Alternatively, use a custom bandit training loop:
 
                 if pop[0].steps // evo_steps > evo_count:
                     # Tournament selection and population mutation
-                    elite, pop, _ = tournament.select(pop)
+                    elite, pop = tournament.select(pop)
                     pop = mutations.mutation(pop)
                     evo_count += 1
 

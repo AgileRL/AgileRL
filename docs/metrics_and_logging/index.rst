@@ -226,7 +226,7 @@ with a :class:`~agilerl.population.Population`:
        if population.should_stop(target=200.0):
            break
 
-       elite, new_pop, _ = tournament.select(population.agents)
+       elite, new_pop = tournament.select(population.agents)
        population.update(mutation.mutation(new_pop))
 
    population.finish()

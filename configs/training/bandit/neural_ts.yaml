@@ -45,7 +45,7 @@ network:
 replay_buffer:
     max_size: 10_000
 
-selection_strategy:
+tournament_selection:
     tournament_size: 2
     elitism: true
 

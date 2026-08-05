@@ -15,8 +15,6 @@ General Utils
 
 .. autofunction:: agilerl.utils.utils.save_llm_checkpoint
 
-.. autofunction:: agilerl.utils.utils.run_selection_and_mutation
-
 .. autofunction:: agilerl.utils.utils.tournament_selection_and_mutation
 
 .. autofunction:: agilerl.utils.utils.init_wandb

@@ -62,7 +62,7 @@ if HAS_LLM_DEPENDENCIES:
     from transformers import GenerationConfig
 
 
-class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
+class LLMREINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
     """Turn-level REINFORCE with Return Batch Normalization (ReBN) for LLM
     finetuning.
 
@@ -868,7 +868,7 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
         }:
             self._warn_liger_non_token_is(
                 self.importance_sampling_level,
-                "REINFORCE",
+                "LLMREINFORCE",
                 once_attr="_reinforce_liger_mem_warned",
             )
 
@@ -954,7 +954,7 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
         is_level = self.importance_sampling_level
         if is_level != "token":
             self._warn_liger_non_token_is(
-                is_level, "REINFORCE", once_attr="_reinforce_liger_mem_warned"
+                is_level, "LLMREINFORCE", once_attr="_reinforce_liger_mem_warned"
             )
 
         batch_ids = batch_ids.to(self.device)

@@ -9,7 +9,6 @@ from collections import defaultdict
 from dataclasses import dataclass
 
 import numpy as np
-import numpy.typing as npt
 from typing_extensions import TypeIs
 
 
@@ -59,31 +58,6 @@ def get_values_for_key(snapshots: list[dict[str, float]], key: str) -> list[floa
         [1.0, 3.0]
     """
     return [snapshot.get(key, float("nan")) for snapshot in snapshots]
-
-
-def scalar_fitness(fitness: float | npt.NDArray | dict[str, float]) -> float:
-    """Reduce a possibly vector-valued fitness to a single scalar for ranking.
-
-    When ``sum_scores=False``, multi-agent algorithms record one fitness value per
-    sub-agent. Selection strategies need a total ordering over the population, so
-    such rows are collapsed to their mean across sub-agents.
-
-    :param fitness: A recorded fitness: a scalar, a per-sub-agent sequence, or a
-        per-sub-agent mapping.
-    :type fitness: float | numpy.typing.NDArray | dict[str, float]
-    :returns: The scalar fitness used for ranking.
-    :rtype: float
-
-    Example::
-
-        >>> scalar_fitness({"agent_0": 2.0, "agent_1": 4.0})
-        3.0
-    """
-    if isinstance(fitness, dict):
-        return float(np.mean(list(fitness.values())))
-    if isinstance(fitness, (list, tuple, np.ndarray)):
-        return float(np.mean(fitness))
-    return float(fitness)
 
 
 def fmt_value(value: float) -> str:

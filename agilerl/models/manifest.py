@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import copy
 import logging
-import warnings
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any, Literal, get_args, overload
 
@@ -28,12 +27,7 @@ from agilerl.models.algo import (
     AlgoSpec,
     LLMAlgorithmSpec,
 )
-from agilerl.models.hpo import (
-    MultiFrequencySelectionSpec,
-    MutationSpec,
-    SelectionStrategySpec,
-    TournamentSelectionSpec,
-)
+from agilerl.models.hpo import MutationSpec, TournamentSelectionSpec
 from agilerl.models.networks import (
     FinetuningNetworkSpec,
     LoraConfigDict,
@@ -246,43 +240,19 @@ def _collect_unknown_fields(
         "training": validated.training,
         "mutation": validated.mutation,
         "replay_buffer": validated.replay_buffer,
-        "selection_strategy": validated.selection_strategy,
+        "tournament_selection": validated.tournament_selection,
     }
     for section, model in sections.items():
-        # selection_strategy still accepts its legacy tournament_selection
-        # spelling, so report unknown keys under whichever one was written.
-        raw_key = (
-            "tournament_selection"
-            if section == "selection_strategy" and section not in raw
-            else section
-        )
-        raw_section = raw.get(raw_key)
+        raw_section = raw.get(section)
         if not isinstance(raw_section, dict) or not isinstance(model, BaseModel):
             continue
         known = _known_field_names(model)
         dumped_section = dumped.get(section)
         if isinstance(dumped_section, dict):
             known |= {str(key) for key in dumped_section}
-        unknown.extend(f"{raw_key}.{key}" for key in raw_section if key not in known)
+        unknown.extend(f"{section}.{key}" for key in raw_section if key not in known)
 
     return unknown
-
-
-def _default_selection_strategy(
-    value: dict[str, Any] | BaseModel | None,
-) -> dict[str, Any] | BaseModel | None:
-    """Inject the default strategy discriminator for config dicts that omit it.
-
-    :param value: Raw selection_strategy value from the manifest: a config dict, an
-        already-built selection spec, or None.
-    :type value: dict[str, Any] | BaseModel | None
-    :returns: The value with strategy defaulted to "tournament" when it was a
-        discriminator-less dict; otherwise the value unchanged.
-    :rtype: dict[str, Any] | BaseModel | None
-    """
-    if isinstance(value, dict) and "strategy" not in value:
-        return {**value, "strategy": "tournament"}
-    return value
 
 
 class TrainingManifest(BaseModel):
@@ -304,75 +274,7 @@ class TrainingManifest(BaseModel):
     network: NetworkFromManifest | None = Field(default=None)
     mutation: MutationSpec | None = Field(default=None)
     replay_buffer: ReplayBufferSpec | None = Field(default=None)
-    selection_strategy: Annotated[
-        SelectionStrategySpec | None,
-        BeforeValidator(_default_selection_strategy),
-    ] = Field(
-        default=None,
-        validation_alias=AliasChoices("selection_strategy", "tournament_selection"),
-        serialization_alias="tournament_selection",
-    )
-
-    @property
-    def tournament_selection(self) -> TournamentSelectionSpec | None:
-        """The configured tournament-selection spec.
-
-        .. deprecated::
-            Superseded by :attr:`selection_strategy`, the field this section is now
-            declared under. Manifests may still be written with either key, and the
-            serialized output is unaffected.
-
-        :returns: The tournament-selection spec, or None when MF-PBT or no strategy
-            is configured.
-        :rtype: TournamentSelectionSpec | None
-        """
-        warnings.warn(
-            "TrainingManifest.tournament_selection is deprecated and will be removed "
-            "in a future release; use TrainingManifest.selection_strategy instead.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        spec = self.selection_strategy
-        return spec if isinstance(spec, TournamentSelectionSpec) else None
-
-    @model_validator(mode="after")
-    def _resolve_and_validate_compatibility_with_multi_frequency(self) -> Self:
-        """Check the training block is compatible with multi-frequency selection.
-
-        :raises ValueError: If pop_size is unset or the MF-PBT layout is invalid.
-        :return: The validated manifest.
-        :rtype: Self
-        """
-        spec = self.selection_strategy
-        if not isinstance(spec, MultiFrequencySelectionSpec):
-            return self
-
-        from agilerl.hpo.multi_frequency import MultiFrequencySelection
-
-        if "pop_size" not in self.training.model_fields_set:
-            msg = "pop_size is required in the training block."
-            raise ValueError(msg)
-
-        # Only the bracket sizes are written back: the spec's own validator already
-        # resolved the rest
-        (
-            _,
-            _,
-            _,
-            spec.n_winners,
-            spec.n_survivors,
-            spec.n_open_for_migration,
-            spec.n_losers,
-        ) = MultiFrequencySelection._resolve_and_validate(
-            self.training.pop_size,
-            spec.n_subpopulations,
-            spec.evolution_frequency_ratios,
-            spec.n_winners,
-            spec.n_survivors,
-            spec.n_open_for_migration,
-            spec.n_losers,
-        )
-        return self
+    tournament_selection: TournamentSelectionSpec | None = Field(default=None)
 
     @model_validator(mode="after")
     def _process_manifest(self) -> Self:
@@ -470,8 +372,7 @@ class TrainingManifest(BaseModel):
         training: TrainingSpec,
         mutation: MutationSpec | None = None,
         replay_buffer: ReplayBufferSpec | None = None,
-        selection_strategy: SelectionStrategySpec | None = None,
-        **kwargs: Any,
+        tournament_selection: TournamentSelectionSpec | None = None,
     ) -> TrainingManifest:
         """Build a validated core manifest from trainer component specs.
 
@@ -485,22 +386,11 @@ class TrainingManifest(BaseModel):
         :type mutation: MutationSpec | None
         :param replay_buffer: Optional replay-buffer spec.
         :type replay_buffer: ReplayBufferSpec | None
-        :param selection_strategy: Selection-strategy spec: tournament or
-            multi-frequency selection.
-        :type selection_strategy: SelectionStrategySpec | None
-        :param kwargs: Accepts the deprecated tournament_selection alias for
-            selection_strategy.
+        :param tournament_selection: Optional tournament-selection spec.
+        :type tournament_selection: TournamentSelectionSpec | None
         :returns: A validated :class:`TrainingManifest`.
         :rtype: TrainingManifest
         """
-        from agilerl.utils.trainer_utils import resolve_deprecated_selection_kwargs
-
-        selection_strategy = resolve_deprecated_selection_kwargs(
-            selection_strategy,
-            kwargs,
-            deprecated_key="tournament_selection",
-            caller="TrainingManifest.from_trainer_specs",
-        )
 
         def _coerce(value: BaseModel | None, core_cls: type) -> Any:  # noqa: ANN401 -- returns a dict or spec for a field whose BeforeValidator accepts foreign specs
             """Dump foreign BaseModel inputs (e.g. arena specs) to plain dicts."""
@@ -510,15 +400,6 @@ class TrainingManifest(BaseModel):
                 return value.model_dump(mode="json", exclude_none=True)
             return value
 
-        # A foreign (e.g. arena) spec is dumped to a dict and re-validated against the
-        # matching core class; a core MF spec must pass through untouched, since the
-        # trainer resolves its bracket sizes onto that same object.
-        selection_cls = (
-            MultiFrequencySelectionSpec
-            if isinstance(selection_strategy, MultiFrequencySelectionSpec)
-            else TournamentSelectionSpec
-        )
-
         return cls(
             algorithm=algorithm,
             environment=_coerce_environment(environment),
@@ -526,7 +407,7 @@ class TrainingManifest(BaseModel):
             network=cls._network_from_algorithm(algorithm),
             mutation=_coerce(mutation, MutationSpec),
             replay_buffer=_coerce(replay_buffer, ReplayBufferSpec),
-            selection_strategy=_coerce(selection_strategy, selection_cls),
+            tournament_selection=_coerce(tournament_selection, TournamentSelectionSpec),
         )
 
     @overload
@@ -578,7 +459,7 @@ class TrainingManifest(BaseModel):
         from agilerl.arena.models import TrainingManifest as ArenaManifest
 
         if isinstance(manifest, TrainingManifest):
-            data = manifest.model_dump(mode="json", exclude_none=True, by_alias=True)
+            data = manifest.model_dump(mode="json", exclude_none=True)
         elif isinstance(manifest, dict):
             data = manifest
         else:

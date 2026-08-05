@@ -203,7 +203,7 @@ def main(init_hp, mut_p):
         max_reward=2.0,
         evo_steps=10,
         mutation=mutations,
-        selection_strategy=tournament,
+        tournament=tournament,
         accelerator=accelerator,
         verbose=True,
         num_epochs=1,

@@ -61,7 +61,7 @@ mutation:
             min: 0.0001
             max: 0.01
 
-selection_strategy:
+tournament_selection:
     tournament_size: 2
     elitism: true
 

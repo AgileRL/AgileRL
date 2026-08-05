@@ -266,7 +266,7 @@ Below is an example manifest for training MADDPG on the simple-speaker-listener-
       mutation_sd: 0.1
       rand_seed: 42
 
-    selection_strategy:
+    tournament_selection:
       tournament_size: 2
       elitism: true
 
@@ -441,7 +441,7 @@ which returns a population of trained agents and logged training metrics.
         eval_loop=1,  # Number of evaluation episodes
         learning_delay=1000,  # Steps before starting learning
         target=-30.0,  # Target score for early stopping
-        selection_strategy=tournament,  # Selection strategy object
+        tournament=tournament,  # Tournament selection object
         mutation=mutations,  # Mutations object
         wb=False,  # Weights and Biases tracking
     )
@@ -468,7 +468,7 @@ Alternatively, use a custom training loop. Combining all of the above:
         from agilerl.utils.utils import (
             default_progress_bar,
             init_loggers,
-            run_selection_and_mutation,
+            tournament_selection_and_mutation,
         )
         from agilerl.vector.pz_async_vec_env import AsyncPettingZooVecEnv
 
@@ -635,9 +635,9 @@ Alternatively, use a custom training loop. Combining all of the above:
             population.report_metrics(clear=True)
 
             population.update(
-                run_selection_and_mutation(
-                    tournament,
+                tournament_selection_and_mutation(
                     population=population.agents,
+                    tournament=tournament,
                     mutation=mutations,
                     env_name="simple_speaker_listener_v4",
                     algo="MADDPG",
@@ -736,7 +736,7 @@ You can use our off-the-shelf training function
             eval_steps=None,  # Number of steps in evaluation episode
             eval_loop=1,  # Number of evaluation episodes
             target=-30.0,  # Target score for early stopping
-            selection_strategy=tournament,  # Selection strategy object
+            tournament=tournament,  # Tournament selection object
             mutation=mutations,  # Mutations object
             wb=False,  # Weights and Biases tracking
             accelerator=accelerator,

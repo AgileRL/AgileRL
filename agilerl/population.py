@@ -87,8 +87,6 @@ class PopulationMetrics:
     nonscalar_additional_metrics: list[dict[str, npt.NDArray | None]] = field(
         default_factory=list
     )
-    # Per-agent MF-PBT subpopulation id. None entries under tournament/no-HPO
-    subpopulations: list[int | None] = field(default_factory=list)
 
     @property
     def pop_size(self) -> int:
@@ -447,17 +445,6 @@ class MetricsReport:
 
         table.add_row(*mutation_cells)
 
-        # Per-agent MF-PBT subpopulation
-        subpopulations = self.metrics.subpopulations
-        if any(s is not None for s in subpopulations):
-            subpop_cells = [
-                "subpopulation",
-                *[("-" if s is None else str(s)) for s in subpopulations],
-            ]
-            if self.show_mean_column:
-                subpop_cells.append("")
-            table.add_row(*subpop_cells)
-
         fps_cells = ["steps/s", *[fmt_value(s) for s in self.metrics.steps_per_second]]
         if self.show_mean_column:
             fps_cells.append(fmt_value(self.metrics.mean_fps))
@@ -666,7 +653,6 @@ class Population(Generic[AgentT]):
             additional_metrics=self._collect_additional_metrics(),
             hyperparameters=self._collect_hyperparameters(),
             nonscalar_additional_metrics=self._collect_nonscalar_metrics(),
-            subpopulations=[getattr(a, "subpopulation_id", None) for a in self.agents],
         )
 
     def _collect_fitnesses(self) -> ScalarOrNestedRow:

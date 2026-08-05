@@ -43,10 +43,7 @@ from torch.nn.utils import clip_grad_norm_
 from torch.optim import AdamW
 from typing_extensions import Self
 
-from agilerl import HAS_DEEPSPEED, HAS_LIGER_KERNEL, HAS_LLM_DEPENDENCIES, HAS_VLLM
-
-if HAS_LIGER_KERNEL:
-    from liger_kernel.transformers import _apply_liger_kernel_to_instance
+from agilerl import HAS_LIGER_KERNEL, HAS_LLM_DEPENDENCIES, HAS_VLLM
 from agilerl.algorithms.core.llm_ops.fused_logprobs import (
     FusedLinearLogProbsFunction,
     fused_linear_logprobs_chunked,
@@ -176,15 +173,15 @@ if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
         stitch_completion_after_windowed_vllm_generate,
     )
 
-if TYPE_CHECKING or HAS_DEEPSPEED:
-    from deepspeed.checkpoint.utils import clone_tensors_for_torch_save
 
 if TYPE_CHECKING:
-    from vllm import LLM, CompletionOutput, SamplingParams
-elif HAS_VLLM:
+    from deepspeed.checkpoint.utils import clone_tensors_for_torch_save
+    from liger_kernel.transformers import _apply_liger_kernel_to_instance
     from vllm import LLM, CompletionOutput, SamplingParams
 else:
-    LLM = CompletionOutput = SamplingParams = None
+    LLM = SamplingParams = CompletionOutput = None
+    clone_tensors_for_torch_save = None
+    _apply_liger_kernel_to_instance = None
 
 __all__ = ["ActionResult", "EvolvableAlgorithm", "MultiAgentRLAlgorithm", "RLAlgorithm"]
 
@@ -404,7 +401,6 @@ class EvolvableAlgorithm(ABC, Generic[ExperiencesT], metaclass=RegistryMeta):
         self._index = index
         self.registry = MutationRegistry(hp_config)
         self.training = True
-        self.subpopulation_id: int | None = None
 
     @property
     def index(self) -> int:
@@ -3505,12 +3501,20 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         """
         actor = self._get_unwrapped_actor()
 
+        def _clone_tensors(state_dict: dict) -> dict:
+            fn = clone_tensors_for_torch_save
+            if fn is None:
+                from deepspeed.checkpoint.utils import (
+                    clone_tensors_for_torch_save as fn,
+                )
+            return fn(state_dict)
+
         if self.use_value_head:
             value_head_model = actor
             inner_peft = value_head_model.pretrained_model
             inner_sd = None
             if self.zero_stage is None or self.zero_stage < 2:
-                inner_sd = clone_tensors_for_torch_save(inner_peft.state_dict())
+                inner_sd = _clone_tensors(inner_peft.state_dict())
             cloned_inner = clone_llm(inner_peft, self.zero_stage, state_dict=inner_sd)
             cloned_model = type(value_head_model)(cloned_inner)
             cloned_model.v_head.load_state_dict(value_head_model.v_head.state_dict())
@@ -3519,7 +3523,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
 
         actor_state_dict = None
         if self.zero_stage is None or self.zero_stage < 2:
-            actor_state_dict = clone_tensors_for_torch_save(actor.state_dict())
+            actor_state_dict = _clone_tensors(actor.state_dict())
         return clone_llm(actor, self.zero_stage, state_dict=actor_state_dict)
 
     def _copy_clone_attributes(self, clone: Self) -> Self:
@@ -4349,7 +4353,13 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
                     )
                 try:
                     if not already_patched:
-                        _apply_liger_kernel_to_instance(model=inner_model)
+                        apply_liger = _apply_liger_kernel_to_instance
+                        if apply_liger is None:
+                            from liger_kernel.transformers import (
+                                _apply_liger_kernel_to_instance as apply_liger,
+                            )
+
+                        apply_liger(model=inner_model)
                         inner_model._agilerl_liger_patched = True
                         logger.info(
                             "Liger Kernel instance-level patches applied to %s.",
@@ -5214,7 +5224,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         :return: Per-prompt completion token tensors and matching action masks.
         :rtype: tuple[list[torch.Tensor], list[torch.Tensor]]
         """
-        if SamplingParams is None:
+        if not HAS_VLLM and SamplingParams is None:
             msg = "vLLM is required when use_vllm=True. Install AgileRL with vLLM support for this platform: `pip install agilerl[llm]`."
             raise ImportError(msg)
         vllm_config = self.vllm_config
@@ -5340,8 +5350,12 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             generation_kwargs["logprobs"] = 0
         if vllm_config.stop_sequences:
             generation_kwargs["stop"] = vllm_config.stop_sequences
+        sampling_cls = SamplingParams
+        if sampling_cls is None:
+            from vllm import SamplingParams as sampling_cls
+
         sampling_params = [
-            SamplingParams(**generation_kwargs, max_tokens=max_output_token)
+            sampling_cls(**generation_kwargs, max_tokens=max_output_token)
             for max_output_token in all_max_output_tokens
         ]
 
@@ -5974,7 +5988,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
 
     def _configure_vllm(self) -> None:
         """Configure vLLM for efficient inference during generation in 'get_action'."""
-        if LLM is None:
+        if not HAS_VLLM and LLM is None:
             msg = "vLLM is required when use_vllm=True. Install AgileRL with vLLM support for this platform: `pip install agilerl[llm]`."
             raise ImportError(msg)
         if self.vllm_config is None:
@@ -6040,8 +6054,12 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
                 stacklevel=2,
             )
 
+        llm_cls = LLM
+        if llm_cls is None:
+            from vllm import LLM as llm_cls
+
         try:
-            self.llm = LLM(**llm_kwargs)
+            self.llm = llm_cls(**llm_kwargs)
         except ValueError as err:
             backend_env = os.environ.get("VLLM_ATTENTION_BACKEND")
             if backend_env is not None and "backend" in str(err).lower():

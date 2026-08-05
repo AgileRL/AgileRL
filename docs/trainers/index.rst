@@ -37,7 +37,7 @@ fast with field-level errors rather than failing mid-training.
 **Required top-level fields:** ``algorithm`` and ``environment``.
 
 **Optional top-level fields:** ``training``, ``network``, ``mutation``,
-``selection_strategy``, and ``replay_buffer``. When omitted, each section falls back
+``tournament_selection``, and ``replay_buffer``. When omitted, each section falls back
 to the defaults of its Pydantic spec (e.g. :class:`~agilerl.models.training.TrainingSpec`
 uses ``max_steps=1_000_000``, ``pop_size=1``).
 
@@ -57,8 +57,8 @@ uses ``max_steps=1_000_000``, ``pop_size=1``).
      - Evolvable network architecture for RL algorithms, or pretrained model / LoRA settings for LLM finetuning. Becomes the algorithm's ``net_config`` when supported.
    * - ``mutation``
      - Evolutionary HPO: mutation probabilities, RL hyperparameter ranges, noise scale, random seed.
-   * - ``selection_strategy``
-     - Selection strategy to be used during HPO: tournament selection or multi-frequency selection. Also accepted as ``tournament_selection``.
+   * - ``tournament_selection``
+     - Tournament size and elitism for population selection between evolution steps.
    * - ``replay_buffer``
      - Off-policy experience storage (size, n-step, prioritized replay). Not used for pure on-policy runs.
 
@@ -206,12 +206,12 @@ to mutate during training.
    ``lr_critic`` for MADDPG). Each entry is an :class:`~agilerl.models.hpo.RLHyperparameter`
    range (``min``, ``max``, optional ``grow_factor`` / ``shrink_factor``).
 
-6. ``selection_strategy``
-^^^^^^^^^^^^^^^^^^^^^^^^^
+6. ``tournament_selection``
+^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 .. code-block:: yaml
 
-   selection_strategy:
+   tournament_selection:
      tournament_size: 2   # Must be >= 2
      elitism: true
 
@@ -307,7 +307,7 @@ Below is a minimal off-policy manifest to train DQN on LunarLander-v3.
       mutation_sd: 0.1
       rand_seed: 42
 
-    selection_strategy:
+    tournament_selection:
       tournament_size: 2
       elitism: true
 
@@ -378,7 +378,7 @@ applying evolutionary HPO with custom mutation probabilities.
         rl_hp_mut=0.2
        ),
    )
-   selection_spec = TournamentSelectionSpec(tournament_size=2, elitism=True)
+   tournament_spec = TournamentSelectionSpec(tournament_size=2, elitism=True)
 
    # Instantiate the trainer from the custom training configuration.
    device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -387,7 +387,7 @@ applying evolutionary HPO with custom mutation probabilities.
        environment="LunarLander-v3",
        training=training_spec,
        mutation=mutation_spec,
-       selection_strategy=selection_spec,
+       tournament=tournament_spec,
        device=device,
    )
 

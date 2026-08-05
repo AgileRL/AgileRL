@@ -65,7 +65,7 @@ if HAS_LLM_DEPENDENCIES:
     from transformers import GenerationConfig
 
 
-class PPO(LLMAlgorithm[LLMRolloutExperiences]):
+class LLMPPO(LLMAlgorithm[LLMRolloutExperiences]):
     """Turn-level PPO for LLM finetuning with actor/reference adapters.
 
     Each generation sequence (turn) is treated as a single RL action.
@@ -1001,7 +1001,7 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
         }:
             self._warn_liger_non_token_is(
                 self.importance_sampling_level,
-                "PPO",
+                "LLMPPO",
                 once_attr="_ppo_liger_mem_warned",
             )
 
@@ -1307,7 +1307,7 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
         is_level = self._resolve_is_level(ppo_granularity)
         if is_level != "token":
             self._warn_liger_non_token_is(
-                is_level, "PPO", once_attr="_ppo_liger_mem_warned"
+                is_level, "LLMPPO", once_attr="_ppo_liger_mem_warned"
             )
         # ``max_turns`` / ``full_turn_mask`` are derived from the global
         # ``turn_ids`` so chunks see consistent denominators; needed by both

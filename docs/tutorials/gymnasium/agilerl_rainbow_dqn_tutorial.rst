@@ -189,7 +189,7 @@ for both the tournament and mutation arguments.
         eval_loop=INIT_HP["EVAL_LOOP"],
         learning_delay=INIT_HP["LEARNING_DELAY"],
         target=INIT_HP["TARGET_SCORE"],
-        selection_strategy=None,
+        tournament=None,
         mutation=None,
         wb=False,
         checkpoint=INIT_HP["MAX_STEPS"],
