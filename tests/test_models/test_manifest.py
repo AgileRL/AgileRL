@@ -115,64 +115,54 @@ def test_get_validated_json_omits_unset_optional_sections() -> None:
     assert "network" not in out
 
 
-def test_get_validated_warns_on_unknown_algorithm_field() -> None:
-    with patch("agilerl.models.manifest.logger") as mock_logger:
+def test_get_validated_raises_on_unknown_algorithm_field() -> None:
+    with pytest.raises(ValueError, match=r"algorithm\.bogus_algo_field"):
         TrainingManifest.get_validated(
             _make_manifest(
                 {"name": "DQN", "lr": 3e-4, "bogus_algo_field": 1},
                 env={"name": "CartPole-v1"},
             )
         )
-    mock_logger.warning.assert_called_once()
-    template, formatted = mock_logger.warning.call_args.args
-    assert "unrecognized manifest field" in template
-    assert "algorithm.bogus_algo_field" in formatted
 
 
-def test_get_validated_warns_on_unknown_top_level_field() -> None:
-    with patch("agilerl.models.manifest.logger") as mock_logger:
+def test_get_validated_raises_on_unknown_top_level_field() -> None:
+    with pytest.raises(ValueError, match="bogus_top_level"):
         TrainingManifest.get_validated(
             _make_manifest(
                 {"name": "DQN"}, env={"name": "CartPole-v1"}, bogus_top_level=123
             )
         )
-    mock_logger.warning.assert_called_once()
-    assert "bogus_top_level" in mock_logger.warning.call_args.args[1]
 
 
-def test_get_validated_no_warning_for_known_aliased_or_excluded_fields() -> None:
+def test_get_validated_accepts_known_aliased_or_excluded_fields() -> None:
     # `cudagraphs` is declared-but-excluded, and population_size / metrics_interval
     # / memory_size are validation aliases: none are unknown.
-    with patch("agilerl.models.manifest.logger") as mock_logger:
-        TrainingManifest.get_validated(
-            _make_manifest(
-                {"name": "DQN", "lr": 3e-4, "cudagraphs": True},
-                env={"name": "CartPole-v1"},
-                training={
-                    "population_size": 4,
-                    "metrics_interval": 123,
-                    "max_steps": 1000,
-                },
-                replay_buffer={"memory_size": 4096},
-            )
+    TrainingManifest.get_validated(
+        _make_manifest(
+            {"name": "DQN", "lr": 3e-4, "cudagraphs": True},
+            env={"name": "CartPole-v1"},
+            training={
+                "population_size": 4,
+                "metrics_interval": 123,
+                "max_steps": 1000,
+            },
+            replay_buffer={"memory_size": 4096},
         )
-    mock_logger.warning.assert_not_called()
+    )
 
 
-def test_get_validated_no_warning_for_legacy_selection_key() -> None:
-    with patch("agilerl.models.manifest.logger") as mock_logger:
-        TrainingManifest.get_validated(
-            _make_manifest(
-                {"name": "DQN"},
-                env={"name": "CartPole-v1"},
-                tournament_selection={"tournament_size": 3},
-            )
+def test_get_validated_accepts_the_legacy_selection_key() -> None:
+    TrainingManifest.get_validated(
+        _make_manifest(
+            {"name": "DQN"},
+            env={"name": "CartPole-v1"},
+            tournament_selection={"tournament_size": 3},
         )
-    mock_logger.warning.assert_not_called()
+    )
 
 
 def test_get_validated_reports_unknown_keys_under_the_legacy_selection_key() -> None:
-    with patch("agilerl.models.manifest.logger") as mock_logger:
+    with pytest.raises(ValueError, match=r"tournament_selection\.bogus_key"):
         TrainingManifest.get_validated(
             _make_manifest(
                 {"name": "DQN"},
@@ -180,12 +170,10 @@ def test_get_validated_reports_unknown_keys_under_the_legacy_selection_key() -> 
                 tournament_selection={"tournament_size": 3, "bogus_key": 1},
             )
         )
-    mock_logger.warning.assert_called_once()
-    assert "tournament_selection.bogus_key" in mock_logger.warning.call_args.args[1]
 
 
 def test_get_validated_reports_unknown_keys_under_the_current_selection_key() -> None:
-    with patch("agilerl.models.manifest.logger") as mock_logger:
+    with pytest.raises(ValueError, match=r"selection_strategy\.bogus_key"):
         TrainingManifest.get_validated(
             _make_manifest(
                 {"name": "DQN"},
@@ -193,8 +181,6 @@ def test_get_validated_reports_unknown_keys_under_the_current_selection_key() ->
                 selection_strategy={"tournament_size": 3, "bogus_key": 1},
             )
         )
-    mock_logger.warning.assert_called_once()
-    assert "selection_strategy.bogus_key" in mock_logger.warning.call_args.args[1]
 
 
 def test_get_validated_json_writes_the_current_selection_key() -> None:
@@ -1497,6 +1483,28 @@ class TestFromConfigFiles:
 
         assert isinstance(trainer.algorithm_spec, expected_algo_cls)
         assert isinstance(trainer.env_spec, PzEnvSpec)
+
+    @pytest.mark.skipif(not HAS_LLM_DEPENDENCIES, reason="LLM deps not installed")
+    @pytest.mark.parametrize(
+        ("rel_path", "expected_chunk_rows"),
+        [
+            ("llm_finetuning/cispo_quant_bench.yaml", 128),
+            ("llm_finetuning/cispo_quant_bench_qwen.yaml", 64),
+        ],
+        ids=["cispo-gemma", "cispo-qwen"],
+    )
+    def test_llm_quant_bench_configs_validate_strictly(
+        self, rel_path, expected_chunk_rows
+    ):
+        """Shipped configs pass strict manifest validation, and their
+        ``chunk_rows`` knob is a real spec field that survives the round trip.
+        """
+        config_path = CONFIGS_DIR / rel_path
+        if not config_path.exists():
+            pytest.skip(f"Config not found: {config_path}")
+
+        out = TrainingManifest.get_validated(config_path)
+        assert out["algorithm"]["chunk_rows"] == expected_chunk_rows
 
     @pytest.mark.skipif(not HAS_LLM_DEPENDENCIES, reason="LLM deps not installed")
     @pytest.mark.parametrize(

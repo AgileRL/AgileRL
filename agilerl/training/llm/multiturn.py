@@ -164,7 +164,7 @@ def finetune_llm_multiturn(
     pbar = default_progress_bar(max_steps, accelerator)
 
     loggers = init_loggers(
-        algo=init_hp.get("ALGO", "LLMPPO"),
+        algo=init_hp.get("ALGO", pop[0].algo),
         env_name=env_name,
         pbar=pbar,
         verbose=verbose,

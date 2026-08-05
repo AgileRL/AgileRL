@@ -831,8 +831,8 @@ class TestBuildAlgorithmForwardsOnlySetFields:
 class TestLLMAlgorithmSpecBuild:
     """Lines 531-533, 554 in algo.py."""
 
-    def test_micro_batch_size_per_gpu_integer_split(self):
-        """Per-GPU micro batch is the integer per-process share, floored at 1."""
+    def test_micro_batch_size_per_gpu_forwarded_only_when_set(self):
+        """Explicit micro batch reaches the constructor; unset leaves the algorithm's default."""
         from agilerl.models.algorithms.grpo import GRPOSpec
 
         mock_tokenizer = MagicMock()
@@ -842,25 +842,45 @@ class TestLLMAlgorithmSpecBuild:
         accelerator.num_processes = 2
 
         spec = GRPOSpec(
-            pretrained_model_name_or_path="gpt2", group_size=4, batch_size=8
+            pretrained_model_name_or_path="gpt2",
+            group_size=4,
+            batch_size=8,
+            micro_batch_size_per_gpu=1,
         )
         mock_algo_cls = MagicMock()
         with patch.object(type(spec), "algo_class", return_value=mock_algo_cls):
             spec.build_algorithm(
                 tokenizer=mock_tokenizer, index=0, accelerator=accelerator
             )
-        assert mock_algo_cls.call_args.kwargs["micro_batch_size_per_gpu"] == 4
+        assert mock_algo_cls.call_args.kwargs["micro_batch_size_per_gpu"] == 1
 
-        # Never fractional or zero when batch_size < num_processes
-        small = GRPOSpec(
-            pretrained_model_name_or_path="gpt2", group_size=4, batch_size=1
+        # Unset: the algorithm derives it (e.g. from gradient accumulation),
+        # matching direct construction.
+        derived = GRPOSpec(
+            pretrained_model_name_or_path="gpt2", group_size=4, batch_size=8
         )
         mock_algo_cls.reset_mock()
-        with patch.object(type(small), "algo_class", return_value=mock_algo_cls):
-            small.build_algorithm(
+        with patch.object(type(derived), "algo_class", return_value=mock_algo_cls):
+            derived.build_algorithm(
                 tokenizer=mock_tokenizer, index=0, accelerator=accelerator
             )
-        assert mock_algo_cls.call_args.kwargs["micro_batch_size_per_gpu"] == 1
+        assert "micro_batch_size_per_gpu" not in mock_algo_cls.call_args.kwargs
+
+    def test_chunk_rows_forwarded_to_constructor(self):
+        """The manifest chunk_rows knob reaches the algorithm constructor."""
+        from agilerl.models.algorithms.grpo import GRPOSpec
+
+        mock_tokenizer = MagicMock()
+        mock_tokenizer.eos_token_id = 0
+        mock_tokenizer.eos_token = "<|endoftext|>"
+
+        spec = GRPOSpec(
+            pretrained_model_name_or_path="gpt2", group_size=4, chunk_rows=128
+        )
+        mock_algo_cls = MagicMock()
+        with patch.object(type(spec), "algo_class", return_value=mock_algo_cls):
+            spec.build_algorithm(tokenizer=mock_tokenizer, index=0)
+        assert mock_algo_cls.call_args.kwargs["chunk_rows"] == 128
 
     def test_vllm_config_dict_coerced(self):
         """build_algorithm coerces dict vllm_config."""
@@ -1058,6 +1078,21 @@ class TestTrainingSpec:
             ValueError, match="eval_steps must be greater than evaluation_interval"
         ):
             TrainingSpec(eval_steps=5, evaluation_interval=10)
+
+    def test_max_wall_seconds_accepted(self):
+        assert TrainingSpec(max_wall_seconds=3600).max_wall_seconds == 3600
+        assert TrainingSpec().max_wall_seconds is None
+        with pytest.raises(ValueError, match="greater than"):
+            TrainingSpec(max_wall_seconds=0)
+
+
+class TestTournamentSelectionSpec:
+    def test_tournament_size_of_one_is_valid(self):
+        from agilerl.models.hpo import TournamentSelectionSpec
+
+        assert TournamentSelectionSpec(tournament_size=1).tournament_size == 1
+        with pytest.raises(ValueError, match="greater than"):
+            TournamentSelectionSpec(tournament_size=0)
 
 
 class TestReplayBufferSpecNStep:

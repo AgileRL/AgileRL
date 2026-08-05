@@ -87,7 +87,7 @@ class TournamentSelectionSpec(BaseModel):
     """
 
     strategy: Literal["tournament"] = "tournament"
-    tournament_size: int = Field(default=2, ge=2)
+    tournament_size: int = Field(default=2, ge=1)
     elitism: bool = True
 
 

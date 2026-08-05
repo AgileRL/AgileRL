@@ -827,8 +827,18 @@ class LocalTrainer(Trainer):
             assert isinstance(self.env_spec, LLMEnvSpec)
             kwargs["env_factory"] = self.env_factory
             kwargs["max_turns"] = self.env_spec.max_turns
+            manifest["env_name"] = self.env_spec.name
+            if self.training_spec.max_wall_seconds is not None:
+                kwargs["max_wall_seconds"] = self.training_spec.max_wall_seconds
         else:
             kwargs["env"] = self.env
+            if self.training_spec.max_wall_seconds is not None:
+                warnings.warn(
+                    "max_wall_seconds is only supported by multi-turn LLM "
+                    "fine-tuning and will be ignored.",
+                    UserWarning,
+                    stacklevel=2,
+                )
 
         # Add checkpointing arguments to the training spec
         self.training_spec.checkpoint_steps = checkpoint_steps

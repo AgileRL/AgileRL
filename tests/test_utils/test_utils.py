@@ -950,6 +950,21 @@ class TestInitWandb:
             mock_wandb.init.assert_called_once()
             assert mock_wandb.init.call_args[1].get("tags") == ["test"]
 
+    def test_default_name_generated_when_wandb_name_unset(self, monkeypatch):
+        monkeypatch.delenv("WANDB_NAME", raising=False)
+        with patch("agilerl.utils.utils.wandb") as mock_wandb:
+            mock_wandb.api = MagicMock()
+            init_wandb(algo="DQN", env_name="CartPole-v1")
+            name = mock_wandb.init.call_args.kwargs["name"]
+            assert name.startswith("CartPole-v1-EvoHPO-DQN-")
+
+    def test_wandb_name_env_var_wins(self, monkeypatch):
+        monkeypatch.setenv("WANDB_NAME", "my-run")
+        with patch("agilerl.utils.utils.wandb") as mock_wandb:
+            mock_wandb.api = MagicMock()
+            init_wandb(algo="DQN", env_name="CartPole-v1")
+            assert "name" not in mock_wandb.init.call_args.kwargs
+
     def test_no_api_warns(self, monkeypatch):
         monkeypatch.delenv("WANDB_API_KEY", raising=False)
 

@@ -1474,12 +1474,15 @@ def init_wandb(
     kwargs: dict[str, Any] = {
         "config": config_dict,
         "project": project,  # wandb project where this run will be logged
-        "name": "{}-EvoHPO-{}-{}".format(
+    }
+    # A WANDB_NAME environment override wins; only generate a default run name
+    # when it is unset, since passing name explicitly would silently ignore it.
+    if not os.environ.get("WANDB_NAME"):
+        kwargs["name"] = "{}-EvoHPO-{}-{}".format(
             env_name,
             algo,
             datetime.now().strftime("%m%d%Y%H%M%S"),
-        ),
-    }
+        )
 
     if addl_args is not None:
         kwargs.update(addl_args)
