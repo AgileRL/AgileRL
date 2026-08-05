@@ -584,6 +584,34 @@ class TestLocalTrainerTrain:
         mock_train_fn.assert_called_once()
         assert result == (mock_pop, [[1.0]])
 
+    @patch("agilerl.training.trainer.create_population_from_spec")
+    def test_train_warns_max_wall_seconds_ignored_for_non_multiturn(
+        self,
+        mock_create_pop,
+    ):
+        from agilerl.models.env import GymEnvSpec
+
+        env_spec = GymEnvSpec(name="CartPole-v1")
+        mock_pop = [MagicMock()]
+        mock_create_pop.return_value = mock_pop
+        mock_train_fn = MagicMock(return_value=(mock_pop, [[1.0]]))
+
+        with (
+            patch.object(PPOSpec, "get_training_fn", return_value=mock_train_fn),
+            patch.object(LocalTrainer, "_make_env", return_value=MagicMock()),
+        ):
+            trainer = LocalTrainer(
+                algorithm="PPO",
+                environment=env_spec,
+                training=TrainingSpec(
+                    max_steps=500, evo_steps=100, pop_size=2, max_wall_seconds=60
+                ),
+            )
+            with pytest.warns(UserWarning, match="max_wall_seconds"):
+                trainer.train()
+
+        assert "max_wall_seconds" not in mock_train_fn.call_args[1]
+
 
 @requires_arena
 class TestArenaTrainerConstruction:
