@@ -647,6 +647,44 @@ class TestColocatedInitOrdering:
         offload.assert_not_called()
 
 
+class TestPrepareVllmForGenerationOffloadGuard:
+    """The trainer-base offload (and its log) fire once per wake, not per turn."""
+
+    @staticmethod
+    def _stub_agent() -> LLMAlgorithm:
+        agent = TestColocatedInitOrdering._stub_agent()
+        agent.use_memory_efficient_params = True
+        agent._vllm_awake = False
+        agent._vllm_moved = False
+        agent.llm = mock.MagicMock()
+        return agent
+
+    def test_offload_and_log_skipped_while_engine_is_awake(self):
+        agent = self._stub_agent()
+        with (
+            mock.patch(
+                "agilerl.algorithms.core.base.move_params_to_cpu"
+            ) as move_to_cpu,
+            mock.patch(
+                "agilerl.algorithms.core.base.log_cuda_memory_snapshot"
+            ) as log_snapshot,
+            mock.patch("torch.cuda.empty_cache"),
+            mock.patch.object(agent, "_get_unwrapped_actor"),
+            mock.patch.object(agent, "_sync_actor_to_vllm"),
+        ):
+            agent._prepare_vllm_for_generation()
+            assert move_to_cpu.call_count == 1
+            assert log_snapshot.call_count == 2  # offload + wake snapshots
+            assert agent._vllm_awake is True
+
+            # Mid-rollout turns: engine already awake, nothing to offload/log.
+            agent._prepare_vllm_for_generation()
+            agent._prepare_vllm_for_generation()
+            assert move_to_cpu.call_count == 1
+            assert log_snapshot.call_count == 2
+            agent.llm.wake_up.assert_called_once()
+
+
 class TestAdaptLoraConfigForClippableLinear:
     @staticmethod
     def _gemma4_style_block():

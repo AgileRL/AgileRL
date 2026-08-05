@@ -1620,7 +1620,7 @@ def move_params_to_cpu(unwrapped_model: torch.nn.Module) -> None:
     :return: None
     :rtype: None
     """
-    if next(unwrapped_model.parameters()).device != "cpu":
+    if next(unwrapped_model.parameters()).device.type != "cpu":
         unwrapped_model.to("cpu", non_blocking=True)
         torch.cuda.synchronize()
         torch.cuda.empty_cache()

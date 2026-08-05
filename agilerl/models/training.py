@@ -182,6 +182,8 @@ class TrainingSpec(BaseModel):
     :type evaluation_interval: int
     :param num_epochs: Number of epochs to train for.
     :type num_epochs: int | None
+    :param max_wall_seconds: Wall-clock limit for multi-turn LLM fine-tuning runs.
+    :type max_wall_seconds: float | None
     :param episode_steps: Number of steps to train for each episode (only applicable for bandits).
     :type episode_steps: int
     :param sum_scores: Whether to sum sub-agent scores (only applicable for multi-agent).
@@ -222,6 +224,7 @@ class TrainingSpec(BaseModel):
     # LLM-specific training parameters
     evaluation_interval: int = Field(default=10, ge=1)
     num_epochs: int | None = Field(default=None, ge=1)
+    max_wall_seconds: float | None = Field(default=None, gt=0)
 
     # Bandit-specific training parameters
     episode_steps: int = Field(default=500, ge=1)

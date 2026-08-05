@@ -161,7 +161,7 @@ def finetune_llm_reasoning(
 
     # Initialize loggers and Population wrapper
     loggers = init_loggers(
-        algo=init_hp.get("ALGO", "GRPO"),
+        algo=init_hp.get("ALGO", pop[0].algo),
         env_name=envs[0].name,
         pbar=pbar,
         verbose=verbose,

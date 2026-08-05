@@ -1422,6 +1422,22 @@ def test_move_params_helpers_call_model_move_and_cuda_sync():
     empty_cache.assert_called_once()
 
 
+def test_move_params_to_cpu_skips_when_already_on_cpu():
+    """No move, sync, or empty_cache when the model already lives on CPU."""
+    model = MagicMock()
+    param = MagicMock()
+    param.device = torch.device("cpu")
+    model.parameters.return_value = iter([param])
+    with (
+        patch("torch.cuda.synchronize") as sync,
+        patch("torch.cuda.empty_cache") as empty_cache,
+    ):
+        move_params_to_cpu(model)
+    model.to.assert_not_called()
+    sync.assert_not_called()
+    empty_cache.assert_not_called()
+
+
 def test_get_model_name_or_path_and_align_deepspeed_lr_helpers():
     class _DirectModel:
         name_or_path = "direct_name"
