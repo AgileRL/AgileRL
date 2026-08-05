@@ -46,6 +46,7 @@ from peft import LoraConfig
 from transformers import BitsAndBytesConfig
 
 from agilerl.algorithms.core.base import LLMAlgorithm
+from agilerl.algorithms.reinforce_llm import LLMREINFORCE
 from agilerl.utils.algo_utils import VLLMConfig
 from agilerl.utils.llm_utils import (
     _json_safe_value,
@@ -988,7 +989,7 @@ class TestReinforceQuantizedInit:
 
     def test_nf4_base_with_lora_adapters_and_dense_lm_head(self):
         _require_bf16_cuda()
-        agent = REINFORCE(
+        agent = LLMREINFORCE(
             model_name=TINY_LLM_FIXTURE_PATH,
             pad_token_id=151643,
             pad_token="<|endoftext|>",

@@ -2991,7 +2991,10 @@ class TestLLMGetLmHead:
 class TestLLMConfigureVllm:
     def test_raises_when_vllm_not_installed(self):
         agent = _make_llm_agent()
-        with patch("agilerl.algorithms.core.base.LLM", None, create=True):
+        with (
+            patch("agilerl.algorithms.core.base.HAS_VLLM", False),
+            patch("agilerl.algorithms.core.base.LLM", None, create=True),
+        ):
             with pytest.raises(ImportError, match="vLLM is required"):
                 agent._configure_vllm()
 
@@ -4172,7 +4175,10 @@ class TestLLMInitMiscPaths:
 class TestLLMGenerateWithVllmColocate:
     def test_raises_when_sampling_params_none(self):
         agent = _make_llm_agent()
-        with patch("agilerl.algorithms.core.base.SamplingParams", None, create=True):
+        with (
+            patch("agilerl.algorithms.core.base.HAS_VLLM", False),
+            patch("agilerl.algorithms.core.base.SamplingParams", None, create=True),
+        ):
             with pytest.raises(
                 ImportError,
                 match=re.escape(

@@ -22,6 +22,7 @@ from transformers.modeling_outputs import CausalLMOutputWithPast
 from transformers.modeling_utils import PreTrainedModel
 
 from agilerl.algorithms.core import ActionResult
+from agilerl.algorithms.reinforce_llm import LLMREINFORCE
 from agilerl.utils.algo_utils import CosineLRScheduleConfig, VLLMConfig
 from agilerl.utils.llm_utils import ReasoningGym
 from tests import TINY_LLM_FIXTURE_PATH
@@ -153,7 +154,7 @@ class DummyVLLM:
 
 
 def create_dummy_actor(input_size, max_tokens, vocab_size, device):
-    """Return a bare causal LM; :class:`REINFORCE` applies PEFT via ``lora_config``."""
+    """Return a bare causal LM; :class:`LLMREINFORCE` applies PEFT via ``lora_config``."""
     cfg = DummyConfig(
         input_size=input_size,
         max_tokens=max_tokens,
@@ -198,7 +199,7 @@ def _cpu_llmreinforce(**kwargs):
         "use_liger_loss": False,
     }
     defaults.update(kwargs)
-    return REINFORCE(**defaults)
+    return LLMREINFORCE(**defaults)
 
 
 def generate_reinforce(
@@ -317,7 +318,7 @@ def generate_reinforce(
         # regardless of liger-kernel availability.
         "use_liger_loss": False,
     }
-    return REINFORCE(**reinforce_kwargs)
+    return LLMREINFORCE(**reinforce_kwargs)
 
 
 @pytest.fixture
@@ -326,7 +327,7 @@ def reinforce_factory():
 
 
 class _ReinforceStub:
-    _compute_token_rewards = REINFORCE._compute_token_rewards
+    _compute_token_rewards = LLMREINFORCE._compute_token_rewards
 
 
 class _RebnStub:
@@ -334,9 +335,9 @@ class _RebnStub:
         self.gamma = gamma
         self.advantage_granularity = advantage_granularity
 
-    _compute_rebn_advantages = REINFORCE._compute_rebn_advantages
-    _compute_rebn_advantages_token = REINFORCE._compute_rebn_advantages_token
-    _resolve_advantage_granularity = REINFORCE._resolve_advantage_granularity
+    _compute_rebn_advantages = LLMREINFORCE._compute_rebn_advantages
+    _compute_rebn_advantages_token = LLMREINFORCE._compute_rebn_advantages_token
+    _resolve_advantage_granularity = LLMREINFORCE._resolve_advantage_granularity
 
 
 def _minimal_reasoning_gym(device: str, vocab_size: int, input_size: int, bs: int):
@@ -381,7 +382,7 @@ class TestREINFORCEInit:
         # Colocated vLLM and the trainer each hold their own base. The vLLM
         # engine is mocked here; the dummy actor is passed as the trainer base
         # (``_initialize_actors`` uses it directly when ``base_model`` is given).
-        rf = REINFORCE(
+        rf = LLMREINFORCE(
             actor_network=actor,
             pad_token_id=99,
             pad_token="<pad>",
@@ -419,7 +420,7 @@ class TestREINFORCEInit:
         with pytest.warns(
             UserWarning, match="hf_generate_chunk_size.*ignored.*use_vllm=True"
         ):
-            rf = REINFORCE(
+            rf = LLMREINFORCE(
                 actor_network=actor,
                 pad_token_id=99,
                 pad_token="<pad>",
@@ -448,7 +449,7 @@ class TestREINFORCEInit:
             task_type="CAUSAL_LM",
         )
         with pytest.raises(ValueError, match="must be less than"):
-            REINFORCE(
+            LLMREINFORCE(
                 actor_network=actor,
                 pad_token_id=99,
                 pad_token="<pad>",
@@ -468,7 +469,7 @@ class TestREINFORCEInit:
             task_type="CAUSAL_LM",
         )
         with pytest.raises(AssertionError):
-            REINFORCE(
+            LLMREINFORCE(
                 actor_network=actor,
                 pad_token_id=99,
                 pad_token="<pad>",
@@ -487,7 +488,7 @@ class TestREINFORCEInit:
             task_type="CAUSAL_LM",
         )
         with pytest.raises(AssertionError):
-            REINFORCE(
+            LLMREINFORCE(
                 actor_network=actor,
                 pad_token_id=99,
                 pad_token="<pad>",
@@ -506,7 +507,7 @@ class TestREINFORCEInit:
             task_type="CAUSAL_LM",
         )
         with pytest.raises(ValueError, match="advantage_granularity"):
-            REINFORCE(
+            LLMREINFORCE(
                 actor_network=actor,
                 pad_token_id=99,
                 pad_token="<pad>",
@@ -525,7 +526,7 @@ class TestREINFORCEInit:
             task_type="CAUSAL_LM",
         )
         with pytest.raises(ValueError, match="chunk_rows must be a positive int"):
-            REINFORCE(
+            LLMREINFORCE(
                 actor_network=actor,
                 pad_token_id=99,
                 pad_token="<pad>",
@@ -548,7 +549,7 @@ class TestREINFORCEInit:
             task_type="CAUSAL_LM",
         )
         with pytest.raises(ValueError, match="turn_ratio_pooling"):
-            REINFORCE(
+            LLMREINFORCE(
                 actor_network=actor,
                 pad_token_id=99,
                 pad_token="<pad>",
@@ -587,7 +588,7 @@ class TestREINFORCEInit:
 
     def test_init_clone_requires_pretrained_like_actor(self):
         with pytest.raises(AssertionError, match="PeftModelProtocol"):
-            REINFORCE(
+            LLMREINFORCE(
                 model_name=TINY_LLM_FIXTURE_PATH,
                 actor_network=object(),
                 pad_token_id=99,
@@ -954,7 +955,7 @@ class TestREINFORCELearn:
             task_type="CAUSAL_LM",
             lora_dropout=0.05,
         )
-        rf = REINFORCE(
+        rf = LLMREINFORCE(
             actor_network=actor,
             pad_token_id=99,
             pad_token="<pad>",
