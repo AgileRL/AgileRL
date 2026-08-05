@@ -538,8 +538,8 @@ class LLMAlgorithmSpec(AlgorithmSpec):
     activation_offload: bool = Field(default=False)
     use_sequence_packing: bool = Field(default=False)
     lora_target_scope: str | None = Field(default=None)
-    fused_logprobs_chunk_rows: int | None = Field(default=None)
-    fused_loss_chunk_rows: int | None = Field(default=None)
+    chunk_rows: int | None = Field(default=None, ge=1)
+    micro_batch_size_per_gpu: int | None = Field(default=None, ge=1)
     vllm_importance_sampling_correction: bool = Field(default=True)
     vllm_importance_sampling_cap: float = Field(default=2.0, ge=0.0)
     attn_implementation: str | None = Field(default=None)
@@ -595,12 +595,6 @@ class LLMAlgorithmSpec(AlgorithmSpec):
             msg = "LLMAlgorithmSpec.build_algorithm requires a tokenizer."
             raise ValueError(msg)
 
-        micro_batch_size_per_gpu = None
-        if accelerator is not None:
-            micro_batch_size_per_gpu = max(
-                self.batch_size // accelerator.num_processes, 1
-            )
-
         use_vllm = getattr(self, "use_vllm", False)
         if not use_vllm and hasattr(self, "vllm_config"):
             self.vllm_config = None
@@ -643,7 +637,6 @@ class LLMAlgorithmSpec(AlgorithmSpec):
             pad_token=tokenizer.eos_token,
             accelerator=accelerator,
             index=index,
-            micro_batch_size_per_gpu=micro_batch_size_per_gpu,
             device=device,
             actor_network=actor_network,
             **kwargs,

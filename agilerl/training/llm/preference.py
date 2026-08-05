@@ -149,7 +149,7 @@ def finetune_llm_preference(
     pbar = default_progress_bar(max_steps, accelerator)
 
     loggers = init_loggers(
-        algo=init_hp.get("ALGO", "DPO"),
+        algo=init_hp.get("ALGO", pop[0].algo),
         env_name=envs[0].name,
         pbar=pbar,
         verbose=verbose,

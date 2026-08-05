@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import copy
-import logging
 import warnings
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any, Literal, get_args, overload
@@ -42,8 +41,6 @@ from agilerl.models.networks import (
     normalize_manifest_network,
 )
 from agilerl.models.training import ReplayBufferSpec, TrainingSpec
-
-logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from agilerl.arena.models import TrainingManifest as ArenaTrainingManifest
@@ -617,7 +614,11 @@ class TrainingManifest(BaseModel):
         unknown = _collect_unknown_fields(raw_snapshot, validated)
         if unknown:
             formatted = "[" + ", ".join(f'"{name}"' for name in unknown) + "]"
-            logger.warning("Ignoring unrecognized manifest field(s): %s", formatted)
+            msg = (
+                f"Unrecognized manifest field(s): {formatted}. Manifest keys "
+                "must match spec fields exactly; remove or rename them."
+            )
+            raise ValueError(msg)
 
         if mode == "json":
             return validated.model_dump(mode="json", exclude_none=True)

@@ -141,7 +141,7 @@ def finetune_llm_sft(
 
     # Initialize loggers and Population wrapper
     loggers = init_loggers(
-        algo=init_hp.get("ALGO", "SFT"),
+        algo=init_hp.get("ALGO", pop[0].algo),
         env_name=env.name,
         pbar=pbar,
         verbose=verbose,

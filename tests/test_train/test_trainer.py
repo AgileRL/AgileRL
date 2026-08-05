@@ -584,6 +584,34 @@ class TestLocalTrainerTrain:
         mock_train_fn.assert_called_once()
         assert result == (mock_pop, [[1.0]])
 
+    @patch("agilerl.training.trainer.create_population_from_spec")
+    def test_train_warns_max_wall_seconds_ignored_for_non_multiturn(
+        self,
+        mock_create_pop,
+    ):
+        from agilerl.models.env import GymEnvSpec
+
+        env_spec = GymEnvSpec(name="CartPole-v1")
+        mock_pop = [MagicMock()]
+        mock_create_pop.return_value = mock_pop
+        mock_train_fn = MagicMock(return_value=(mock_pop, [[1.0]]))
+
+        with (
+            patch.object(PPOSpec, "get_training_fn", return_value=mock_train_fn),
+            patch.object(LocalTrainer, "_make_env", return_value=MagicMock()),
+        ):
+            trainer = LocalTrainer(
+                algorithm="PPO",
+                environment=env_spec,
+                training=TrainingSpec(
+                    max_steps=500, evo_steps=100, pop_size=2, max_wall_seconds=60
+                ),
+            )
+            with pytest.warns(UserWarning, match="max_wall_seconds"):
+                trainer.train()
+
+        assert "max_wall_seconds" not in mock_train_fn.call_args[1]
+
 
 @requires_arena
 class TestArenaTrainerConstruction:
@@ -1462,7 +1490,9 @@ class TestLLMBuildAlgorithm:
 
         call_kwargs = mock_algo.call_args[1]
         assert call_kwargs["accelerator"] is mock_accel
-        assert call_kwargs["micro_batch_size_per_gpu"] is not None
+        # Unset on the spec: the algorithm derives its own micro batch size,
+        # matching direct construction.
+        assert "micro_batch_size_per_gpu" not in call_kwargs
 
 
 class TestLLMLocalTrainer:
@@ -2566,6 +2596,58 @@ class TestLocalTrainerMultiturn:
         assert call_kwargs["pop"] is mock_pop
         assert call_kwargs["max_steps"] == 100
         assert "env" not in call_kwargs
+        # The wandb run name reads the flat env_name key from init_hp.
+        assert call_kwargs["init_hp"]["env_name"] == "game:Test-v0"
+        assert "max_wall_seconds" not in call_kwargs
+
+    def test_train_forwards_max_wall_seconds(self, grpo_spec):
+        from agilerl.models.env import LLMEnvSpec, LLMEnvType
+
+        mock_pop = [MagicMock()]
+        mock_tokenizer = MagicMock(eos_token_id=0, eos_token="<eos>", pad_token_id=0)
+        mock_train_fn = MagicMock(return_value=mock_pop)
+
+        env_spec = LLMEnvSpec(
+            env_type=LLMEnvType.MULTITURN,
+            env_name="game:Test-v0",
+            max_turns=8,
+        )
+
+        with (
+            patch(
+                "agilerl.training.trainer.AutoTokenizer", create=True
+            ) as mock_auto_tok,
+            patch(
+                "agilerl.training.trainer.create_population_from_spec",
+                return_value=mock_pop,
+            ),
+            patch.object(
+                LLMEnvSpec,
+                "make_multiturn_env_factory",
+                return_value=MagicMock(),
+            ),
+            patch.object(
+                type(grpo_spec),
+                "get_training_fn",
+                return_value=mock_train_fn,
+            ),
+            patch.object(LocalTrainer, "to_manifest", return_value={}),
+            patch(
+                "agilerl.training.trainer.create_llm_accelerator",
+                return_value=MagicMock(),
+            ),
+        ):
+            mock_auto_tok.from_pretrained.return_value = mock_tokenizer
+            trainer = LocalTrainer(
+                algorithm=grpo_spec,
+                environment=env_spec,
+                training=TrainingSpec(
+                    max_steps=100, evo_steps=10, pop_size=1, max_wall_seconds=1800
+                ),
+            )
+            trainer.train()
+
+        assert mock_train_fn.call_args[1]["max_wall_seconds"] == 1800
 
 
 class TestImportGuardReload:

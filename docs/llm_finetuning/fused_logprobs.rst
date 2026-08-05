@@ -91,7 +91,7 @@ How many positions go in each chunk (``chunk_rows``) is chosen automatically fro
 the vocabulary size, so that one ``(chunk_rows, V)`` slab stays near a fixed
 memory budget (about 256 MB by default): models with bigger vocabularies get
 fewer rows per chunk, smaller ones more. Override it with the
-``fused_logprobs_chunk_rows`` constructor argument if you want manual control.
+``chunk_rows`` constructor argument if you want manual control.
 
 Optional: the fused Liger loss
 ------------------------------

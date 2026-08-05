@@ -1356,6 +1356,44 @@ class TestFinetuneLlmMultiturn:
         mock_agent.learn.assert_called_with(ANY, turn_ids=ANY)
         assert mock_save.call_count == 0
 
+    def test_finetune_llm_multiturn_labels_run_from_population(self):
+        """A manifest-style init_hp (no flat ALGO key) still names the run after
+        the actual algorithm and env, not the LLMPPO/multiturn defaults.
+        """
+        mock_agent = _make_multiturn_mock_agent(spec=GRPO)
+
+        with (
+            patch("agilerl.training.llm.multiturn.default_progress_bar"),
+            patch(
+                "agilerl.training.llm.multiturn.init_loggers", return_value=[]
+            ) as mock_init_loggers,
+            patch("agilerl.training.llm.multiturn.safe_aggregate_metrics"),
+            patch("agilerl.training.llm.multiturn.save_llm_checkpoint"),
+            patch("agilerl.training.llm.multiturn.SyncMultiTurnVecEnv"),
+            patch(
+                "agilerl.training.llm.multiturn.collect_rollouts_llm"
+            ) as mock_collect,
+            patch(
+                "agilerl.training.llm.multiturn.stack_and_pad_experiences"
+            ) as mock_stack,
+        ):
+            mock_collect.return_value = _multiturn_collect_return(batch_steps=3)
+            mock_stack.return_value = (torch.zeros(1, 8, dtype=torch.long),)
+
+            finetune_llm_multiturn(
+                pop=[mock_agent],
+                env_factory=MagicMock(),
+                max_turns=2,
+                init_hp={"env_name": "game:Sudoku-v0-hard"},
+                max_steps=3,
+                evaluation_interval=100,
+                verbose=False,
+                accelerator=None,
+            )
+
+        assert mock_init_loggers.call_args.kwargs["algo"] == "GRPO"
+        assert mock_init_loggers.call_args.kwargs["env_name"] == "game:Sudoku-v0-hard"
+
     def test_finetune_llm_multiturn_forwards_sampling_logps_to_learn(self):
         """When the rollout captures sampling logps, they're forwarded to
         ``learn(..., sampling_logps=...)`` for GRPO/PPO/REINFORCE agents.
