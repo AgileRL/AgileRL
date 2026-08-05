@@ -318,7 +318,7 @@ class TestCollectRolloutsLlmGrpo:
 
     def test_non_grpo_get_action_signature(self):
         """Non-GRPO agents use get_action(prompts, training=True)."""
-        from agilerl.algorithms.ppo_llm import PPO as LLMPPO
+        from agilerl.algorithms.ppo_llm import LLMPPO
 
         env = MagicMock()
         prompt = {"input_ids": torch.tensor([[1, 2]])}

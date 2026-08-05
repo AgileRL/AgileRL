@@ -72,7 +72,7 @@ def test_no_liger_fallback_sets_symbol_to_none(module_path: str, symbol: str) ->
 
     Using ``reload`` (not ``pop`` + ``import_module``) preserves module
     identity, so other test files' captured class references — e.g.
-    ``test_ppo_llm.py``'s ``from agilerl.algorithms.ppo_llm import PPO``
+    ``test_ppo_llm.py``'s ``from agilerl.algorithms.ppo_llm import LLMPPO``
     — continue to point at the same module after this test finishes.
     Restore is handled in the ``finally`` block, not by ``monkeypatch``,
     so the original module state is rebuilt with the original

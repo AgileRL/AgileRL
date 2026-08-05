@@ -46,7 +46,7 @@ from peft import LoraConfig
 from transformers import BitsAndBytesConfig
 
 from agilerl.algorithms.core.base import LLMAlgorithm
-from agilerl.algorithms.reinforce_llm import REINFORCE
+from agilerl.algorithms.reinforce_llm import LLMREINFORCE
 from agilerl.utils.algo_utils import VLLMConfig
 from agilerl.utils.llm_utils import (
     _json_safe_value,

@@ -11,10 +11,10 @@ import re
 import shutil
 import textwrap
 import warnings
-from collections.abc import Callable, Generator, Iterable, Mapping, Sequence
+from collections.abc import Callable, Generator, Iterable, Sequence
 from contextlib import contextmanager
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, TypeGuard
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import numpy.typing as npt
@@ -28,6 +28,10 @@ from agilerl.typing import (
     JSONValue,
     PopulationType,
     ReasoningPrompts,
+)
+from agilerl.utils.llm_obs import (
+    is_reasoning_prompts,  # noqa: F401
+    max_prompt_tokens_for_sliding_window,
 )
 
 if TYPE_CHECKING:
@@ -91,33 +95,6 @@ def __dir__() -> list[str]:
     return sorted(set(globals()) | set(_DEPRECATED_LLM_ENV_NAMES))
 
 
-def max_prompt_tokens_for_sliding_window(
-    max_model_len: int,
-    max_output_tokens: int | None,
-) -> int:
-    """Upper bound on prompt tokens so at least one completion token can be generated.
-
-    Reserve generation headroom while keeping prompt budget as large as possible.
-    When ``max_output_tokens`` is provided, reserve up to that many tokens
-    (capped by ``max_model_len``). When it is ``None``, reserve exactly one
-    token so generation remains possible without collapsing prompt budget.
-
-    :param max_model_len: Engine context length (prompt + completion ceiling).
-    :type max_model_len: int
-    :param max_output_tokens: Configured completion cap; if ``None``, reserve
-        one token of generation headroom.
-    :type max_output_tokens: int | None
-    :return: Largest allowed prompt length under that headroom (may be 0).
-    :rtype: int
-    """
-    gen_reserve = (
-        max(1, min(max_output_tokens, max_model_len))
-        if max_output_tokens is not None
-        else 1
-    )
-    return max(0, max_model_len - gen_reserve)
-
-
 def validate_llm_context_lengths(
     max_model_len: int,
     max_output_tokens: int | None,
@@ -140,19 +117,6 @@ def validate_llm_context_lengths(
             f"(max_prompt_tokens={max_prompt_tokens_for_sliding_window(max_model_len, max_output_tokens)})."
         )
         raise ValueError(msg)
-
-
-def is_reasoning_prompts(obs: Mapping[str, object]) -> TypeGuard[ReasoningPrompts]:
-    """Check whether a mapping is a tokenized ``ReasoningPrompts`` observation.
-
-    :param obs: An observation mapping returned by a tokenized multi-turn env.
-    :type obs: Mapping[str, object]
-    :return: ``True`` when the mapping carries prompt tensors.
-    :rtype: TypeGuard[ReasoningPrompts]
-    """
-    return isinstance(obs.get("input_ids"), torch.Tensor) and isinstance(
-        obs.get("attention_mask"), torch.Tensor
-    )
 
 
 def normalize_reasoning_prompt_batch(

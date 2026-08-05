@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Any
 import torch
 
 from agilerl.typing import ReasoningPrompts
-from agilerl.utils.llm_utils import is_reasoning_prompts
+from agilerl.utils.llm_obs import is_reasoning_prompts
 
 if TYPE_CHECKING:
     from agilerl.protocols import TokenizedMultiTurnEnv
