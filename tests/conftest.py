@@ -62,7 +62,7 @@ os.environ.setdefault("HF_HUB_OFFLINE", "1")
 os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
 
 # Tests that construct ``Accelerator()`` directly (instead of via the
-# ``deepspeed_env`` fixture) inherit torch's default MASTER_PORT. Parallel
+# ``distributed_env`` fixture) inherit torch's default MASTER_PORT. Parallel
 # xdist workers then race to bind the same port and one fails with
 # ``EADDRINUSE``. Give each worker a deterministic, unique MASTER_PORT here
 # so any later distributed init lands on a non-colliding port.
@@ -487,7 +487,6 @@ def dummy_rng():
 
 
 dist_env = {
-    "ACCELERATE_USE_DEEPSPEED": "true",
     "MASTER_ADDR": "localhost",
     "MASTER_PORT": "10999",
     "RANK": "0",
@@ -531,8 +530,8 @@ def get_free_port():
 
 
 @pytest.fixture
-def deepspeed_env():
-
+def distributed_env():
+    """Single-process torch.distributed environment for distributed LLM tests."""
     dynamic_dist_env = dist_env.copy()
     dynamic_dist_env["MASTER_PORT"] = str(get_free_port())
     # On a CPU-only / hidden-GPU runner the GPU is masked via

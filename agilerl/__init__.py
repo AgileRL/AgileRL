@@ -57,7 +57,6 @@ HAS_LLM_DEPENDENCIES = all(_is_distribution_installed(pkg) for pkg in LLM_PACKAG
 HAS_ARENA_DEPENDENCIES = all(_is_distribution_installed(pkg) for pkg in ARENA_PACKAGES)
 HAS_LIGER_KERNEL = _is_distribution_installed("liger-kernel")
 HAS_VLLM = _is_distribution_installed("vllm")
-HAS_DEEPSPEED = _is_distribution_installed("deepspeed")
 
 
 class AgentType(Enum):

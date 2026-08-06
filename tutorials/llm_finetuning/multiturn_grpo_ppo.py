@@ -5,6 +5,14 @@
 
 This script is used by the multi-turn GRPO vs LLMPPO tutorial and keeps the
 setup identical between runs so only the optimization algorithm changes.
+
+Single process::
+
+    python tutorials/llm_finetuning/multiturn_grpo_ppo.py --algo LLMPPO
+
+Multi-GPU distributed training::
+
+    torchrun --nproc_per_node=2 tutorials/llm_finetuning/multiturn_grpo_ppo.py --algo LLMPPO
 """
 
 from __future__ import annotations
@@ -18,10 +26,9 @@ import yaml
 from transformers import AutoTokenizer
 
 from agilerl import HAS_LLM_DEPENDENCIES
-from agilerl.algorithms import GRPO, LLMPPO, LLMREINFORCE
 from agilerl.training.llm import finetune_llm_multiturn
 from agilerl.utils.algo_utils import VLLMConfig
-from agilerl.utils.llm_utils import create_llm_accelerator
+from agilerl.utils.utils import create_population, _normalize_algo_name
 from agilerl.llm_envs import TokenObservationWrapper
 
 if not HAS_LLM_DEPENDENCIES:
@@ -56,20 +63,14 @@ def _load_init_hp(config_path: str) -> dict[str, Any]:
     return dict(init_hp)
 
 
-ALGO_MAP: dict[str, type] = {
-    "LLMPPO": LLMPPO,
-    "GRPO": GRPO,
-    "LLMREINFORCE": LLMREINFORCE,
-}
-
-
 def _default_config_for_algo(algo: str) -> str:
     """Return tutorial default config path for the selected algorithm."""
-    if algo == "LLMPPO":
+    algo_name = _normalize_algo_name(algo)
+    if algo_name == "LLMPPO":
         return DEFAULT_PPO_CONFIG
-    if algo == "GRPO":
+    if algo_name == "GRPO":
         return DEFAULT_GRPO_CONFIG
-    if algo == "LLMREINFORCE":
+    if algo_name == "LLMREINFORCE":
         return DEFAULT_REINFORCE_CONFIG
     msg = f"Unsupported algorithm '{algo}'. Use LLMPPO, LLMREINFORCE, or GRPO."
     raise ValueError(msg)
@@ -160,7 +161,6 @@ def main() -> None:
             max_output_tokens=init_hp.get("MAX_OUTPUT_TOKENS"),
         )
 
-    accelerator = create_llm_accelerator()
     use_vllm = bool(init_hp.get("USE_VLLM", True))
     vllm_config = (
         VLLMConfig(
@@ -173,64 +173,33 @@ def main() -> None:
         else None
     )
 
-    algo_cls = ALGO_MAP[args.algo]
-
-    # Map INIT_HP uppercase keys to constructor kwargs
-    algo_kwargs: dict[str, Any] = {
-        "model_name": args.model_path,
-        "pad_token_id": tokenizer.pad_token_id,
-        "pad_token": tokenizer.pad_token,
-        "accelerator": accelerator,
-    }
-    if use_vllm:
-        algo_kwargs["use_vllm"] = True
-        algo_kwargs["vllm_config"] = vllm_config
-
-    # Forward numeric/string hyperparams from the YAML config
-    _hp_key_map = {
-        "BATCH_SIZE": "batch_size",
-        "LR": "lr",
-        "BETA": "beta",
-        "CLIP_COEF": "clip_coef",
-        "MAX_GRAD_NORM": "max_grad_norm",
-        "UPDATE_EPOCHS": "update_epochs",
-        "GROUP_SIZE": "group_size",
-        "TEMPERATURE": "temperature",
-        "MAX_MODEL_LEN": "max_model_len",
-        "MAX_OUTPUT_TOKENS": "max_output_tokens",
-        "GAE_LAMBDA": "gae_lambda",
-        "GAMMA": "gamma",
-        "VF_COEF": "vf_coef",
-        "ENT_COEF": "ent_coef",
-    }
-    for hp_key, kwarg_name in _hp_key_map.items():
-        if hp_key in init_hp:
-            algo_kwargs[kwarg_name] = init_hp[hp_key]
-
-    pop = algo_cls.population(size=1, **algo_kwargs)
+    pop = create_population(
+        algo=args.algo,
+        net_config=None,
+        INIT_HP=init_hp,
+        population_size=1,
+        tokenizer=tokenizer,
+        model_name=args.model_path,
+        vllm_config=vllm_config,
+    )
     agent = pop[0]
 
-    try:
-        finetune_llm_multiturn(
-            pop=[agent],
-            max_turns=max_turns,
-            env_factory=env_factory,
-            init_hp=init_hp,
-            max_steps=args.max_steps,
-            save_elite=True,
-            elite_path=args.output_dir,
-            wb=args.wandb,
-            evo_steps=None,
-            selection_strategy=None,
-            mutation=None,
-            evaluation_interval=args.evaluation_interval,
-            max_reward=1.0,
-            verbose=True,
-            accelerator=accelerator,
-        )
-    finally:
-        if accelerator is not None:
-            accelerator.end_training()
+    finetune_llm_multiturn(
+        pop=[agent],
+        max_turns=max_turns,
+        env_factory=env_factory,
+        init_hp=init_hp,
+        max_steps=args.max_steps,
+        save_elite=True,
+        elite_path=args.output_dir,
+        wb=args.wandb,
+        evo_steps=None,
+        selection_strategy=None,
+        mutation=None,
+        evaluation_interval=args.evaluation_interval,
+        max_reward=1.0,
+        verbose=True,
+    )
 
 
 if __name__ == "__main__":

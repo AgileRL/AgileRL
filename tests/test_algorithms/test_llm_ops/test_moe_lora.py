@@ -627,14 +627,3 @@ def test_zero3_gathered_adapters_use_fast_path():
             _mark_ds(module.lora_B[adapter].weight, "AVAILABLE")
     x = torch.randn(10, HIDDEN)
     assert torch.allclose(reference(x), upgraded(x), atol=1e-5)
-
-
-def test_mark_expert_wrappers_as_zero3_leaves():
-    pytest.importorskip("deepspeed")
-    from agilerl.algorithms.core.llm_ops.moe_lora import (
-        mark_expert_wrappers_as_zero3_leaves,
-    )
-
-    _, upgraded = _routed_pair()
-    assert mark_expert_wrappers_as_zero3_leaves(upgraded) == 1
-    assert mark_expert_wrappers_as_zero3_leaves(nn.Linear(2, 2)) == 0

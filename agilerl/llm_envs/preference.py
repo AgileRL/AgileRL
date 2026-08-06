@@ -13,7 +13,6 @@ from agilerl.typing import PreferencePrompts
 
 if TYPE_CHECKING:
     import torch
-    from accelerate import Accelerator
     from datasets import Dataset
     from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 
@@ -29,8 +28,6 @@ class PreferenceGym(IterablePromptBatchGym[PreferencePrompts]):
     :type tokenizer: PreTrainedTokenizerBase
     :param data_batch_size_per_gpu: The batch size per GPU.
     :type data_batch_size_per_gpu: int
-    :param accelerator: The accelerator.
-    :type accelerator: Accelerator | None
     :param max_context_length: The maximum context length for the LLM model.
     :type max_context_length: int | None
     :param min_completion_length: The minimum completion length for the LLM model.
@@ -45,7 +42,6 @@ class PreferenceGym(IterablePromptBatchGym[PreferencePrompts]):
         test_dataset: Dataset,
         tokenizer: PreTrainedTokenizerBase,
         data_batch_size_per_gpu: int = 8,
-        accelerator: Accelerator | None = None,
         max_context_length: int | None = None,
         min_completion_length: int | None = None,
         seed: int = 42,
@@ -58,7 +54,6 @@ class PreferenceGym(IterablePromptBatchGym[PreferencePrompts]):
             data_batch_size_per_gpu=data_batch_size_per_gpu,
             max_context_length=max_context_length,
             min_completion_length=min_completion_length,
-            accelerator=accelerator,
             seed=seed,
         )
         assert {"prompt", "chosen", "rejected"}.issubset(

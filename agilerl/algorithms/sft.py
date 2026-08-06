@@ -19,10 +19,10 @@ from agilerl.typing import (
     ObservationType,
     SFTPrompts,
 )
-from agilerl.utils.llm_utils import aggregate_metrics_dict, resolve_llm_device
+from agilerl.utils.distributed import FSDPConfig, barrier, resolve_device
+from agilerl.utils.llm_utils import aggregate_metrics_dict
 
 if TYPE_CHECKING:
-    from accelerate import Accelerator
     from peft import LoraConfig
     from transformers import BitsAndBytesConfig
 
@@ -79,14 +79,15 @@ class SFT(LLMAlgorithm[SFTPrompts]):
     :param micro_batch_size_per_gpu: Micro-batch size for gradient accumulation.
         When None the full batch is used in a single forward pass.
     :type micro_batch_size_per_gpu: int, optional
-    :param device: Device to train on. Ignored when an accelerator is given (each rank
-        owns its own GPU); ``None`` auto-detects CUDA/MPS/CPU.
+    :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str, optional
     :param lora_config: LoRA config; when supplied the base model is wrapped with
         PEFT adapters, defaults to None
     :type lora_config: LoraConfig, optional
-    :param accelerator: Accelerate distributed-training handle, defaults to None
-    :type accelerator: accelerate.Accelerator, optional
+    :param gradient_accumulation_steps: Micro-batches to accumulate per optimizer step, defaults to 1
+    :type gradient_accumulation_steps: int, optional
+    :param fsdp_config: FSDP2 sharding settings for distributed runs, defaults to None
+    :type fsdp_config: FSDPConfig | None, optional
     :param wrap: Wrap models for distributed training on construction, defaults to
         True
     :type wrap: bool, optional
@@ -150,7 +151,8 @@ class SFT(LLMAlgorithm[SFTPrompts]):
         micro_batch_size_per_gpu: int | None = None,
         device: str | torch.device | None = None,
         lora_config: LoraConfig | None = None,
-        accelerator: Accelerator | None = None,
+        gradient_accumulation_steps: int = 1,
+        fsdp_config: FSDPConfig | None = None,
         wrap: bool = True,
         clone: bool = False,
         seed: int = 42,
@@ -163,7 +165,7 @@ class SFT(LLMAlgorithm[SFTPrompts]):
         activation_offload: bool = False,
         lora_target_scope: str | None = None,
     ) -> None:
-        resolved_device = resolve_llm_device(accelerator, device)
+        resolved_device = resolve_device(device)
         super().__init__(
             index=index,
             batch_size=batch_size,
@@ -186,7 +188,8 @@ class SFT(LLMAlgorithm[SFTPrompts]):
             hp_config=hp_config,
             wrap=wrap,
             device=resolved_device,
-            accelerator=accelerator,
+            gradient_accumulation_steps=gradient_accumulation_steps,
+            fsdp_config=fsdp_config,
             name="SFT",
             gradient_checkpointing=gradient_checkpointing,
             reduce_memory_peak=reduce_memory_peak,
@@ -299,7 +302,7 @@ class SFT(LLMAlgorithm[SFTPrompts]):
             key: value / max(num_updates, 1) for key, value in learn_metrics.items()
         }
 
-        learn_metrics = aggregate_metrics_dict(self.accelerator, averaged_metrics)
+        learn_metrics = aggregate_metrics_dict(averaged_metrics)
 
         if training:
             self.metrics.log("loss", learn_metrics["loss"])
@@ -341,7 +344,8 @@ class SFT(LLMAlgorithm[SFTPrompts]):
         # ``.logits`` is the final hidden state, then compute the loss from the
         # hidden states + lm_head weight without ever materializing the full logits tensor.
         with self._patch_lm_head_to_identity():
-            hidden = self.actor.forward(**model_kwargs).logits  # [B, L, H]
+            # FSDP2 all-gather hooks run on ``Module.__call__``.
+            hidden = self.actor(**model_kwargs).logits  # [B, L, H]
         shift_hidden = hidden[:, :-1, :].contiguous()  # [B, L-1, H]
 
         if self.use_liger_loss:
@@ -396,6 +400,6 @@ class SFT(LLMAlgorithm[SFTPrompts]):
                 prompts = env.step()
             mean_fit = -float(np.mean(losses))
         self.metrics.add_fitness(mean_fit)
-        if self.accelerator is not None:
-            self.accelerator.wait_for_everyone()
+        if self.distributed:
+            barrier()
         return np.array(mean_fit)

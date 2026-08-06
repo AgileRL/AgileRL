@@ -15,7 +15,6 @@ import torch
 from agilerl import HAS_LIGER_KERNEL, HAS_LLM_DEPENDENCIES
 
 if TYPE_CHECKING:
-    from accelerate import Accelerator
     from peft import LoraConfig
     from transformers import BitsAndBytesConfig
 
@@ -41,6 +40,13 @@ from agilerl.utils.algo_utils import (
     get_experiences_samples,
     stack_and_pad_experiences,
 )
+from agilerl.utils.distributed import (
+    FSDPConfig,
+    barrier,
+    get_rank,
+    get_world_size,
+    resolve_device,
+)
 from agilerl.utils.llm_packing import (
     pack_padded_batch,
     unpack_hidden_states,
@@ -59,7 +65,6 @@ from agilerl.utils.llm_utils import (
     normalize_reasoning_prompt_batch,
     pool_log_ratio_by_level,
     prepare_prompt_hf_generate,
-    resolve_llm_device,
     stitch_completion_after_windowed_hf_generate,
     validate_importance_sampling_level,
     validate_llm_context_lengths,
@@ -152,12 +157,13 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
         own base to CPU during rollout (and bring it back for the training step)
         so the rollout engine and the trainer never both hold a base on the GPU.
         Defaults to True; inert without colocated vLLM, and disabled under
-        DeepSpeed ZeRO-3.
+        FSDP2 sharding.
     :type use_memory_efficient_params: bool
-    :param accelerator: Accelerator for distributed computing, defaults to None
-    :type accelerator: accelerate.Accelerator(), optional
-    :param device: Device to train on. Ignored when an accelerator is given (each rank
-        owns its own GPU); ``None`` auto-detects CUDA/MPS/CPU.
+    :param gradient_accumulation_steps: Micro-batches to accumulate per optimizer step, defaults to 1
+    :type gradient_accumulation_steps: int, optional
+    :param fsdp_config: FSDP2 sharding settings for distributed runs, defaults to None
+    :type fsdp_config: FSDPConfig | None, optional
+    :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str, optional
     :param wrap: Wrap models for distributed training upon creation, defaults to True
     :type wrap: bool, optional
@@ -323,7 +329,8 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
         hf_generate_chunk_size: int | None = None,
         lora_config: LoraConfig | None = None,
         cosine_lr_schedule_config: CosineLRScheduleConfig | None = None,
-        accelerator: Accelerator | None = None,
+        gradient_accumulation_steps: int = 1,
+        fsdp_config: FSDPConfig | None = None,
         device: str | torch.device | None = None,
         wrap: bool = True,
         clone: bool = False,
@@ -354,7 +361,7 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
         vllm_importance_sampling_cap: float = 2.0,
         use_sequence_packing: bool = False,
     ) -> None:
-        resolved_device = resolve_llm_device(accelerator, device)
+        resolved_device = resolve_device(device)
         super().__init__(
             index=index,
             batch_size=batch_size,
@@ -379,7 +386,8 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
             wrap=wrap,
             hp_config=hp_config,
             device=resolved_device,
-            accelerator=accelerator,
+            gradient_accumulation_steps=gradient_accumulation_steps,
+            fsdp_config=fsdp_config,
             name="GRPO",
             gradient_checkpointing=gradient_checkpointing,
             torch_compiler=torch_compiler,
@@ -471,7 +479,7 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
                     actor_device = next(actor_module.parameters()).device
                 except StopIteration:
                     actor_device = torch.device(self.device)
-                with torch.inference_mode(), self._amp_ctx():
+                with torch.no_grad(), self._amp_ctx():
                     completion_ids = []
                     completion_masks = []
 
@@ -540,14 +548,20 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
 
     def _raise_if_loss_not_finite_on_any_rank(self, loss: torch.Tensor) -> None:
         """Raise when ``loss`` is non-finite on this rank or any DP peer."""
-        if self.accelerator is not None and self.accelerator.num_processes > 1:
-            nonfinite_flag = 0 if loss.isfinite().item() else 1
-            _, max_flag = allreduce_minmax_int(nonfinite_flag, self.accelerator)
+        local_finite = bool(loss.isfinite().item())
+        if get_world_size() > 1:
+            nonfinite_flag = 0 if local_finite else 1
+            _, max_flag = allreduce_minmax_int(nonfinite_flag)
             if max_flag > 0:
-                msg = f"Loss is not finite: {loss}"
+                local_val = float(loss.detach().float().item()) if local_finite else loss
+                msg = (
+                    f"Loss is not finite on at least one rank "
+                    f"(rank={get_rank()} local_finite={local_finite} "
+                    f"local_loss={local_val})"
+                )
                 raise ValueError(msg)
             return
-        if not loss.isfinite():
+        if not local_finite:
             msg = f"Loss is not finite: {loss}"
             raise ValueError(msg)
 
@@ -594,16 +608,10 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
                 self._prepare_experience_batch(experiences, turn_ids)
             )
             num_samples = completion_ids.shape[0]
-            world_size = (
-                self.accelerator.num_processes if self.accelerator is not None else 1
-            )
-            if (
-                needs_cross_rank_seq_padding(self, world_size=world_size)
-                and self.accelerator is not None
-                and self.accelerator.num_processes > 1
-            ):
+            world_size = get_world_size()
+            if needs_cross_rank_seq_padding(self, world_size=world_size) and world_size > 1:
                 seq_len = completion_ids.shape[1]
-                min_t, max_t = allreduce_minmax_int(seq_len, self.accelerator)
+                min_t, max_t = allreduce_minmax_int(seq_len)
                 if min_t != max_t:
                     msg = (
                         "Cross-rank completion sequence length mismatch before "
@@ -620,8 +628,8 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
                     "All samples were filtered by advantage threshold; skipping GRPO update.",
                     stacklevel=2,
                 )
-                if self.accelerator is not None and self.accelerator.num_processes > 1:
-                    self.accelerator.wait_for_everyone()
+                if get_world_size() > 1:
+                    barrier()
                 return {"loss": 0.0, "kl": 0.0}
 
             learn_metrics = {
@@ -653,8 +661,8 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
                     "No active samples after filtering; skipping GRPO update.",
                     stacklevel=2,
                 )
-                if self.accelerator is not None and self.accelerator.num_processes > 1:
-                    self.accelerator.wait_for_everyone()
+                if get_world_size() > 1:
+                    barrier()
                 return {"loss": 0.0, "kl": 0.0}
 
             # Ensure batch_size is not larger than the number of active samples
@@ -695,7 +703,7 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
         # Aggregate across GPUs and report to the metrics tracker (new API).
         # (Fresh dict display so ty checks the values against the parameter's
         # wider, invariant dict value union.)
-        agg = aggregate_metrics_dict(self.accelerator, {**result})
+        agg = aggregate_metrics_dict({**result})
         agg["completion_length"] = int(agg["completion_length"])
         for key, value in agg.items():
             self.metrics.log(key, value)
@@ -766,8 +774,8 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
                 raise TypeError(msg)
         mean_fit = torch.mean(reward_tensor).item()
         self.metrics.add_fitness(mean_fit)
-        if self.accelerator is not None:
-            self.accelerator.wait_for_everyone()
+        if self.distributed:
+            barrier()
         return np.array(mean_fit)
 
     def _validate_core_args(

@@ -30,7 +30,6 @@ from agilerl.utils.llm_utils import (
     PreferenceGym,
     ReasoningGym,
     adapt_lora_config_for_model,
-    align_deepspeed_lr,
     apply_pad_token_id,
     attention_mask_from_padded_ids,
     build_bnb_quantization_config,
@@ -44,7 +43,6 @@ from agilerl.utils.llm_utils import (
     clipped_is_surrogate,
     collect_trainable_param_stats,
     compare_responses,
-    create_llm_accelerator,
     create_model_from_name_or_path,
     cuda_tensor_bytes_in_module,
     discover_clippable_inner_linear_module_keys,
@@ -52,12 +50,15 @@ from agilerl.utils.llm_utils import (
     fill_outside_mask,
     filter_peft_state_dict_for_vllm_lora,
     format_colocated_vllm_oom_hint,
+    gather_full_params,
     gather_if_ds_param,
     gather_if_zero3,
-    get_llm_accelerator,
+    gather_params,
     get_lora_params,
     get_model_name_or_path,
     get_state_dict,
+    load_full_state_dict,
+    materialize_dtensors,
     list_peft_matched_module_keys,
     log_cuda_memory_snapshot,
     masked_mean,
@@ -774,228 +775,292 @@ class TestDummyOptimizerLoadStateDict:
         assert str(exc_info.value) == expected_message
 
 
-class TestGatherIfZero3:
-    @pytest.mark.parametrize("zero_stage", [0, 1, 2, 3])
-    def test_gather_if_zero3(self, zero_stage):
-        """Test gather_if_zero3 context manager."""
-        # ``patch("deepspeed.zero.GatheredParameters", ...)`` resolves its
-        # target on ``__enter__`` (not at collection), so the patch blows up
-        # for *every* zero_stage on platforms without deepspeed (Windows: see
-        # ``deepspeed~=0.17.1; sys_platform != 'win32'`` in pyproject.toml),
-        # not just stage 3. Skip the whole parametrized test in that case;
-        # ``test_gather_if_zero3_stage_not_three_noop`` below covers the
-        # deepspeed-free stages without the patch.
-        pytest.importorskip("deepspeed", reason="gather_if_zero3 requires deepspeed.")
-        params = [torch.tensor([1.0, 2.0, 3.0])]
+class TestGatherParams:
+    def test_leaves_plain_tensors_unchanged(self):
+        # Arrange
+        linear = nn.Linear(2, 2)
+        weight_before = linear.weight.data.clone()
 
-        @contextmanager
-        def dummy_gather_parameters(*args, **kwargs):
-            yield
+        # Act
+        with gather_params([linear.weight, linear.bias, None]):
+            # Assert — plain params need no gather
+            assert torch.equal(linear.weight.data, weight_before)
+
+        assert torch.equal(linear.weight.data, weight_before)
+
+    def test_installs_dense_dtensor_then_restores_shard(self):
+        # Arrange
+        linear = nn.Linear(2, 3, bias=False)
+        full = torch.arange(6, dtype=torch.float32).reshape(3, 2)
+        fake_dtensor = MagicMock()
+        fake_dtensor.requires_grad = False
+        fake_dtensor.full_tensor.return_value = full
+
+        # Act
+        with (
+            patch.object(
+                llm_utils_module,
+                "_is_dtensor",
+                side_effect=lambda t: t is fake_dtensor,
+            ),
+            patch.object(
+                llm_utils_module,
+                "_parameter_owner",
+                return_value=(linear, "weight"),
+            ),
+        ):
+            linear._parameters["weight"] = fake_dtensor
+            with gather_params([fake_dtensor]) as gathered:
+                # Assert — in-module reads see the dense gather
+                assert torch.equal(linear.weight.data, full)
+                assert gathered[0] is full
+
+            # Assert — original shard is restored on exit
+            assert linear._parameters["weight"] is fake_dtensor
+
+
+class TestGatherFullParams:
+    def test_unshards_for_body_then_reshards(self):
+        class FakeFSDPModule(nn.Module):
+            def __init__(self, log, name):
+                super().__init__()
+                self.log = log
+                self.name = name
+
+            def unshard(self):
+                self.log.append(("unshard", self.name))
+
+            def reshard(self):
+                self.log.append(("reshard", self.name))
+
+        # Arrange
+        log: list[tuple[str, str]] = []
+        root = FakeFSDPModule(log, "root")
+        root.child = FakeFSDPModule(log, "child")
+
+        # Act
+        with patch.object(llm_utils_module, "FSDPModule", FakeFSDPModule):
+            with gather_full_params(root):
+                # Assert — every FSDP unit is unsharded for the body
+                assert ("unshard", "root") in log
+                assert ("unshard", "child") in log
+
+        # Assert — reshard on exit (LIFO)
+        assert log[-2:] == [("reshard", "child"), ("reshard", "root")]
+
+    def test_raises_on_fsdp1_modules(self):
+        class FakeFSDP1(nn.Module):
+            pass
+
+        # Arrange
+        model = FakeFSDP1()
+
+        # Act / Assert
+        with (
+            patch.object(llm_utils_module, "FullyShardedDataParallel", FakeFSDP1),
+            pytest.raises(NotImplementedError, match="only supports FSDP2"),
+        ):
+            with gather_full_params(model):
+                pass
+
+
+class TestGatherIfZero3:
+    def test_leaves_plain_tensors_unchanged(self):
+        # Arrange
+        tensor = torch.tensor([1.0, 3.0])
+        before = tensor.clone()
+
+        # Act
+        with gather_if_zero3(3, [tensor]):
+            # Assert
+            assert torch.equal(tensor, before)
+
+        assert torch.equal(tensor, before)
+
+
+class TestMaterializeDtensors:
+    def test_full_tensors_without_installing_on_module(self):
+        # Arrange
+        linear = nn.Linear(2, 3, bias=False)
+        full = torch.arange(6, dtype=torch.float32).reshape(3, 2)
+        fake_dtensor = MagicMock()
+        fake_dtensor.full_tensor.return_value = full
 
         with (
+            patch.object(
+                llm_utils_module,
+                "_is_dtensor",
+                side_effect=lambda t: t is fake_dtensor,
+            ),
+            patch.object(
+                llm_utils_module,
+                "_parameter_owner",
+                return_value=(linear, "weight"),
+            ),
+        ):
+            linear._parameters["weight"] = fake_dtensor
+
+            # Act
+            with materialize_dtensors(fake_dtensor, None) as gathered:
+                # Assert — math gets dense local; module stays on the shard
+                assert gathered[0] is full
+                assert gathered[1] is None
+                assert linear._parameters["weight"] is fake_dtensor
+
+            assert linear._parameters["weight"] is fake_dtensor
+
+
+class TestGatherIfDsParam:
+    def test_leaves_plain_tensors_unchanged(self):
+        # Arrange
+        weight = torch.randn(4, 2)
+        before = weight.clone()
+
+        # Act
+        with gather_if_ds_param(weight, None) as gathered:
+            # Assert
+            assert gathered[0] is weight
+            assert gathered[1] is None
+            assert torch.equal(weight, before)
+
+        assert torch.equal(weight, before)
+
+    def test_materializes_without_module_install(self):
+        # Arrange
+        linear = nn.Linear(2, 3, bias=False)
+        full = torch.arange(6, dtype=torch.float32).reshape(3, 2)
+        fake_dtensor = MagicMock()
+        fake_dtensor.full_tensor.return_value = full
+
+        with (
+            patch.object(
+                llm_utils_module,
+                "_is_dtensor",
+                side_effect=lambda t: t is fake_dtensor,
+            ),
+            patch.object(
+                llm_utils_module,
+                "_parameter_owner",
+                return_value=(linear, "weight"),
+            ),
+        ):
+            linear._parameters["weight"] = fake_dtensor
+
+            # Act
+            with gather_if_ds_param(fake_dtensor) as gathered:
+                # Assert — matmul gather does not install dense Parameter
+                assert gathered[0] is full
+                assert linear._parameters["weight"] is fake_dtensor
+
+
+class TestLoadFullStateDict:
+    def test_loads_into_plain_module(self):
+        # Arrange
+        model = nn.Linear(2, 2)
+        state = {
+            "weight": torch.full((2, 2), 3.0),
+            "bias": torch.full((2,), 4.0),
+        }
+
+        # Act
+        load_full_state_dict(model, state, strict=True)
+
+        # Assert
+        assert torch.equal(model.weight.data, state["weight"])
+        assert torch.equal(model.bias.data, state["bias"])
+
+    def test_uses_distributed_checkpoint_when_fsdp_sharded(self):
+        # Arrange
+        model = nn.Linear(2, 2)
+        state = model.state_dict()
+        applied: dict = {}
+
+        def _fake_set_model_state_dict(module, state_dict, options=None):
+            applied["module"] = module
+            applied["state_dict"] = state_dict
+            applied["options"] = options
+
+        # Act
+        with (
+            patch.object(llm_utils_module, "is_fsdp_sharded", return_value=True),
             patch(
-                "deepspeed.zero.GatheredParameters",
-                side_effect=dummy_gather_parameters,
-            ) as mock_gathered_parameters,
-            gather_if_zero3(zero_stage, params),
+                "torch.distributed.checkpoint.state_dict.set_model_state_dict",
+                _fake_set_model_state_dict,
+            ),
         ):
-            assert mock_gathered_parameters.call_count == (zero_stage == 3)
+            load_full_state_dict(model, state, strict=True)
 
-    def test_gather_if_zero3_stage_not_three_noop(self):
-        """ZeRO stages other than 3 should be a no-op context manager."""
-        with gather_if_zero3(1, []):
-            assert True
+        # Assert — DCP path receives the model and full state
+        assert applied["module"] is model
+        assert applied["state_dict"] is state
 
-    def test_gather_if_zero3_stage_three_without_deepspeed_raises(self):
-        """ZeRO-3 gathering requires deepspeed; raise a clear error when absent."""
-        with patch("agilerl.utils.llm_utils.HAS_DEEPSPEED", False):
-            with pytest.raises(ImportError, match="DeepSpeed is required for ZeRO"):
-                with gather_if_zero3(3, []):
-                    pass
 
-    def test_gather_if_ds_param_noops_without_ds_id(self):
-        weight = torch.randn(4, 2)
-        entered = False
-        with gather_if_ds_param(weight, None):
-            entered = True
-        assert entered
+class TestGetStateDict:
+    def test_returns_plain_state_dict_for_unsharded_module(self):
+        # Arrange
+        model = nn.Linear(2, 2)
 
-    def test_gather_if_ds_param_gathers_when_ds_id_present(self):
-        pytest.importorskip(
-            "deepspeed", reason="gather_if_ds_param requires deepspeed."
+        # Act
+        out = get_state_dict(model)
+
+        # Assert
+        assert set(out) == {"weight", "bias"}
+        assert torch.equal(out["weight"], model.weight.data)
+        assert torch.equal(out["bias"], model.bias.data)
+
+    def test_returns_distributed_checkpoint_state_when_fsdp_sharded(self):
+        # Arrange
+        model = nn.Linear(2, 2)
+        expected = {"weight": torch.zeros(2, 2), "bias": torch.zeros(2)}
+
+        # Act
+        with (
+            patch.object(llm_utils_module, "is_fsdp_sharded", return_value=True),
+            patch(
+                "torch.distributed.checkpoint.state_dict.get_model_state_dict",
+                return_value=expected,
+            ),
+        ):
+            out = get_state_dict(model)
+
+        # Assert
+        assert out is expected
+
+
+class TestGetLoraParams:
+    def test_returns_only_adapter_params(self):
+        # Arrange
+        model = nn.Sequential(
+            nn.Linear(10, 10),
+            nn.Linear(10, 10),
         )
-        weight = torch.randn(4, 2)
-        weight.ds_id = 0
-        calls: list[list] = []
 
-        @contextmanager
-        def capture_gather(params=None, modifier_rank=None):
-            calls.append(list(params))
-            yield
+        class FakeLora(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.lora_A = nn.Linear(10, 10, bias=False)
+                self.lora_B = nn.Linear(10, 10, bias=False)
 
-        with patch(
-            "deepspeed.zero.GatheredParameters",
-            side_effect=capture_gather,
-        ):
-            with gather_if_ds_param(weight, None):
-                pass
-        assert len(calls) == 1
-        assert calls[0] == [weight]
+        wrapper = nn.ModuleDict({"base": model, "lora_adapter": FakeLora()})
 
-    def test_gather_if_ds_param_uses_modifier_rank_zero(self):
-        """ZeRO-3 gather must pass modifier_rank=0 for reliable release."""
-        pytest.importorskip(
-            "deepspeed", reason="gather_if_ds_param requires deepspeed."
-        )
-        weight = torch.randn(4, 2)
-        weight.ds_id = 0
-        captured: list[int | None] = []
+        # Act
+        lora_params = get_lora_params(wrapper)
 
-        @contextmanager
-        def capture_gather(params=None, modifier_rank=None):
-            captured.append(modifier_rank)
-            yield
+        # Assert
+        expected_count = sum(1 for n, _ in wrapper.named_parameters() if "lora" in n)
+        assert len(lora_params) == expected_count
+        assert all(p is not None for p in lora_params)
+        base_params = {p for n, p in wrapper.named_parameters() if "lora" not in n}
+        for lp in lora_params:
+            assert not any(lp is bp for bp in base_params)
+        assert expected_count > 0
 
-        with patch(
-            "deepspeed.zero.GatheredParameters",
-            side_effect=capture_gather,
-        ):
-            with gather_if_ds_param(weight):
-                pass
-        assert captured == [0]
+    def test_returns_empty_list_without_adapters(self):
+        # Arrange
+        model = nn.Linear(10, 10)
 
-    def test_gather_if_ds_param_skips_available_tied_weight(self):
-        """Tied embeddings already AVAILABLE must not be re-gathered."""
-        pytest.importorskip(
-            "deepspeed", reason="gather_if_ds_param requires deepspeed."
-        )
-        from deepspeed.runtime.zero.partition_parameters import ZeroParamStatus
-
-        weight = torch.randn(4, 2)
-        weight.ds_id = 0
-        weight.ds_status = ZeroParamStatus.AVAILABLE
-        calls = 0
-
-        @contextmanager
-        def capture_gather(params=None, modifier_rank=None):
-            nonlocal calls
-            calls += 1
-            yield
-
-        with patch(
-            "deepspeed.zero.GatheredParameters",
-            side_effect=capture_gather,
-        ):
-            with gather_if_ds_param(weight):
-                pass
-        assert calls == 0
-
-    def test_gather_if_ds_param_gathers_not_available(self):
-        """NOT_AVAILABLE ZeRO-3 shards still need GatheredParameters."""
-        pytest.importorskip(
-            "deepspeed", reason="gather_if_ds_param requires deepspeed."
-        )
-        from deepspeed.runtime.zero.partition_parameters import ZeroParamStatus
-
-        weight = torch.randn(4, 2)
-        weight.ds_id = 0
-        weight.ds_status = ZeroParamStatus.NOT_AVAILABLE
-        calls: list[list] = []
-
-        @contextmanager
-        def capture_gather(params=None, modifier_rank=None):
-            calls.append(list(params))
-            yield
-
-        with patch(
-            "deepspeed.zero.GatheredParameters",
-            side_effect=capture_gather,
-        ):
-            with gather_if_ds_param(weight):
-                pass
-        assert len(calls) == 1
-        assert calls[0][0] is weight
-
-    def test_gather_if_ds_param_dedupes_by_identity(self):
-        """Duplicate tensor references must gather once (id-based dedupe)."""
-        pytest.importorskip(
-            "deepspeed", reason="gather_if_ds_param requires deepspeed."
-        )
-        weight = torch.randn(4, 2)
-        weight.ds_id = 0
-        calls: list[list] = []
-
-        @contextmanager
-        def capture_gather(params=None, modifier_rank=None):
-            calls.append(list(params))
-            yield
-
-        with patch(
-            "deepspeed.zero.GatheredParameters",
-            side_effect=capture_gather,
-        ):
-            with gather_if_ds_param(weight, weight):
-                pass
-        assert len(calls) == 1
-        assert len(calls[0]) == 1
-        assert calls[0][0] is weight
-
-
-def test_get_state_dict():
-    # ``get_state_dict`` unconditionally wraps ``model.state_dict()`` in
-    # ``gather_if_zero3(3, ...)`` (see agilerl/utils/llm_utils.py:166), which
-    # requires deepspeed at runtime regardless of whether the model is actually
-    # ZeRO-3-wrapped. On Windows deepspeed isn't installed (pyproject.toml:
-    # ``deepspeed~=0.17.1; sys_platform != 'win32'``) and the call raises
-    # ``ImportError: DeepSpeed is required for ZeRO stage 3 parameter
-    # gathering``. In production the function is gated behind
-    # ``HAS_LLM_DEPENDENCIES`` (only imported in agilerl/utils/utils.py when
-    # the LLM extras are installed), so this codepath is never reached on
-    # Windows in real usage either.
-    pytest.importorskip("deepspeed", reason="get_state_dict requires deepspeed.")
-    model = nn.Linear(10, 10)
-    state_dict = get_state_dict(model)
-    assert isinstance(state_dict, dict)
-    for key, value in state_dict.items():
-        assert isinstance(key, str)
-        assert isinstance(value, torch.Tensor)
-
-
-def test_get_lora_params_filters_adapter_params_only():
-    """get_lora_params must return only adapter params, never base params."""
-    model = nn.Sequential(
-        nn.Linear(10, 10),
-        nn.Linear(10, 10),
-    )
-
-    # Manually register LoRA-style named params by wrapping in a module
-    # that uses the "lora" naming convention.
-    class FakeLora(nn.Module):
-        def __init__(self) -> None:
-            super().__init__()
-            self.lora_A = nn.Linear(10, 10, bias=False)
-            self.lora_B = nn.Linear(10, 10, bias=False)
-
-    wrapper = nn.ModuleDict({"base": model, "lora_adapter": FakeLora()})
-
-    lora_params = get_lora_params(wrapper)
-    lora_names = {n for n, p in wrapper.named_parameters() if "lora" in n}
-    expected_count = sum(1 for n, _ in wrapper.named_parameters() if "lora" in n)
-
-    assert len(lora_params) == expected_count
-    assert all(p is not None for p in lora_params)
-    # Base params must NOT appear in the filtered set
-    base_params = {p for n, p in wrapper.named_parameters() if "lora" not in n}
-    for lp in lora_params:
-        assert not any(lp is bp for bp in base_params)
-    # Sanity: lora_names are non-empty (the test setup is valid)
-    assert len(lora_names) > 0
-
-
-def test_get_lora_params_empty_model():
-    """get_lora_params on a model with no adapter params returns []."""
-    model = nn.Linear(10, 10)
-    assert get_lora_params(model) == []
+        # Act / Assert
+        assert get_lora_params(model) == []
 
 
 def _make_tokenizer(vocab_size: int = 100, prompt_len: int = 3) -> MagicMock:
@@ -1302,93 +1367,6 @@ def test_llm_utils_fallback_types_when_no_llm_dependencies():
             sys.modules.pop("agilerl.utils.llm_utils", None)
 
 
-class TestCreateLlmAccelerator:
-    def test_create_llm_accelerator_no_gpus_returns_none(self):
-        with patch("torch.cuda.device_count", return_value=0):
-            result = create_llm_accelerator()
-        assert result is None
-
-    def test_create_llm_accelerator_uses_explicit_plugin_when_provided(self):
-        AcceleratorState._reset_state(True)
-        explicit_plugin = MagicMock(name="explicit_plugin")
-        expected_accelerator = MagicMock(spec=Accelerator)
-        mock_ctor = MagicMock(return_value=expected_accelerator)
-        with (
-            patch("torch.cuda.device_count", return_value=1),
-            patch.dict(create_llm_accelerator.__globals__, {"Accelerator": mock_ctor}),
-        ):
-            result = create_llm_accelerator(deepspeed_plugin=explicit_plugin)
-        assert result is expected_accelerator
-        mock_ctor.assert_called_once_with(deepspeed_plugin=explicit_plugin)
-
-    def test_create_llm_accelerator_uses_launch_configured_plugin_when_available(self):
-        AcceleratorState._reset_state(True)
-        launch_plugin = object()
-        launch_accelerator = MagicMock(spec=Accelerator)
-        launch_accelerator.state = MagicMock()
-        launch_accelerator.state.deepspeed_plugin = launch_plugin
-        mock_ctor = MagicMock(return_value=launch_accelerator)
-        with (
-            patch("torch.cuda.device_count", return_value=1),
-            patch.dict(create_llm_accelerator.__globals__, {"Accelerator": mock_ctor}),
-        ):
-            result = create_llm_accelerator()
-        assert result is launch_accelerator
-        mock_ctor.assert_called_once_with()
-
-    def test_create_llm_accelerator_raises_without_explicit_or_launch_plugin(self):
-        AcceleratorState._reset_state(True)
-        launch_accelerator = MagicMock(spec=Accelerator)
-        launch_accelerator.state = MagicMock()
-        launch_accelerator.state.deepspeed_plugin = None
-        mock_ctor = MagicMock(return_value=launch_accelerator)
-        with (
-            patch("torch.cuda.device_count", return_value=1),
-            patch.dict(create_llm_accelerator.__globals__, {"Accelerator": mock_ctor}),
-            pytest.raises(RuntimeError, match="DeepSpeed is required"),
-        ):
-            create_llm_accelerator()
-
-
-class TestGetLlmAccelerator:
-    def test_get_llm_accelerator_none_base_returns_none(self):
-        assert get_llm_accelerator(None, idx=0) is None
-        assert get_llm_accelerator(None, idx=3) is None
-
-    def test_get_llm_accelerator_returns_base_for_first_index(self):
-        base = MagicMock(spec=Accelerator)
-        assert get_llm_accelerator(base, idx=0) is base
-
-    def test_get_llm_accelerator_creates_new_plain_accelerator_for_nonzero_index(self):
-        base = MagicMock(spec=Accelerator)
-        base.state = MagicMock()
-        base.state.deepspeed_plugin = None
-        fresh = MagicMock(spec=Accelerator)
-        mock_ctor = MagicMock(return_value=fresh)
-        with patch.dict(get_llm_accelerator.__globals__, {"Accelerator": mock_ctor}):
-            out = get_llm_accelerator(base, idx=1)
-        assert out is fresh
-        mock_ctor.assert_called_once_with()
-
-    def test_get_llm_accelerator_creates_new_plain_accelerator_with_plugin_for_nonzero_index(
-        self,
-    ):
-        base = MagicMock(spec=Accelerator)
-        plugin = object()
-        base.state = MagicMock()
-        base.state.deepspeed_plugin = plugin
-        fresh = MagicMock(spec=Accelerator)
-        mock_ctor = MagicMock(return_value=fresh)
-        with patch.dict(get_llm_accelerator.__globals__, {"Accelerator": mock_ctor}):
-            out = get_llm_accelerator(base, idx=2)
-        assert out is fresh
-        mock_ctor.assert_called_once_with()
-
-    def test_get_llm_accelerator_negative_index_raises(self):
-        with pytest.raises(ValueError, match="must be non-negative"):
-            get_llm_accelerator(None, idx=-1)
-
-
 def test_normalize_reasoning_prompt_batch_stacked_dict_to_per_sample_list():
     prompts = {
         "input_ids": torch.tensor([[1, 2], [3, 4]], dtype=torch.long),
@@ -1538,44 +1516,32 @@ class TestLlmUtilsDeprecatedReexports:
 
 
 class TestResolveLlmDevice:
-    """Accelerator outranks an explicit device, which outranks auto-detection."""
+    """Explicit device outranks auto-detection."""
 
-    def test_accelerator_gives_the_ranks_device(self):
-        accelerator = MagicMock()
-        accelerator.process_index = 3
-        assert resolve_llm_device(accelerator) == "cuda:3"
-
-    def test_accelerator_outranks_an_explicit_device(self):
-        # A bare "cuda" from the caller would otherwise collapse every rank
-        # onto device 0.
-        accelerator = MagicMock()
-        accelerator.process_index = 2
-        assert resolve_llm_device(accelerator, "cuda") == "cuda:2"
-
-    def test_explicit_device_used_without_accelerator(self):
+    def test_explicit_device_used(self):
         with patch("torch.cuda.is_available", return_value=True):
-            assert resolve_llm_device(None, "cpu") == "cpu"
+            assert resolve_llm_device("cpu") == "cpu"
 
     def test_torch_device_is_stringified(self):
-        assert resolve_llm_device(None, torch.device("cuda", 1)) == "cuda:1"
+        assert resolve_llm_device(torch.device("cuda", 1)) == "cuda:1"
 
     def test_cuda_preferred_when_nothing_requested(self):
         with patch("torch.cuda.is_available", return_value=True):
-            assert resolve_llm_device(None) == "cuda"
+            assert resolve_llm_device() == "cuda"
 
     def test_mps_used_when_cuda_unavailable(self):
         with (
             patch("torch.cuda.is_available", return_value=False),
             patch("torch.backends.mps.is_available", return_value=True),
         ):
-            assert resolve_llm_device(None) == "mps"
+            assert resolve_llm_device() == "mps"
 
     def test_cpu_when_no_accelerator_available(self):
         with (
             patch("torch.cuda.is_available", return_value=False),
             patch("torch.backends.mps.is_available", return_value=False),
         ):
-            assert resolve_llm_device(None) == "cpu"
+            assert resolve_llm_device() == "cpu"
 
 
 def test_move_params_helpers_call_model_move_and_cuda_sync():
@@ -1618,7 +1584,7 @@ def test_move_params_to_cpu_skips_when_already_on_cpu():
     empty_cache.assert_not_called()
 
 
-def test_get_model_name_or_path_and_align_deepspeed_lr_helpers():
+def test_get_model_name_or_path_helpers():
     class _DirectModel:
         name_or_path = "direct_name"
 
@@ -1640,17 +1606,6 @@ def test_get_model_name_or_path_and_align_deepspeed_lr_helpers():
     missing = _Missing()
     with pytest.raises(ValueError, match="Model name or path not found"):
         get_model_name_or_path(missing)
-
-    accelerator = MagicMock()
-    accelerator.state.deepspeed_plugin.deepspeed_config = {
-        "optimizer": {"params": {"lr": 1e-3}}
-    }
-    with pytest.warns(UserWarning, match="DeepSpeed learning rate is set to"):
-        out = align_deepspeed_lr(2e-3, accelerator)
-    assert out == pytest.approx(2e-3)
-    assert accelerator.state.deepspeed_plugin.deepspeed_config["optimizer"]["params"][
-        "lr"
-    ] == pytest.approx(2e-3)
 
 
 def test_k3_helper_matches_torch() -> None:
@@ -1905,7 +1860,7 @@ class TestCreateModelFromNameOrPathValueHead:
             out = llm_utils_module.create_model_from_name_or_path(
                 "some/model",
                 add_value_head=True,
-                use_accelerator=False,
+                use_distributed=False,
             )
         assert out is sentinel_model
         # Default model_config is built when not supplied; verify the loader saw
@@ -2628,7 +2583,7 @@ class TestCreateModelFromNameOrPathDefaults:
             llm_utils_module, "AutoModelForCausalLM", self._fake_loader(captured)
         )
         monkeypatch.setattr("importlib.util.find_spec", lambda name: None)
-        create_model_from_name_or_path("org/tiny", use_accelerator=True)
+        create_model_from_name_or_path("org/tiny", use_distributed=True)
         assert captured["kwargs"]["torch_dtype"] is torch.float16
 
     def test_caller_dtype_stays_authoritative(self, monkeypatch):
@@ -3189,39 +3144,23 @@ class TestCrossRankLigerAlign:
             world_size=2,
         )
 
-    def test_needs_cross_rank_seq_padding_gates_on_zero_stage_3(self):
+    def test_needs_cross_rank_seq_padding_gates_on_fsdp_or_distributed(self):
         assert llm_utils_module.needs_cross_rank_seq_padding(
-            SimpleNamespace(zero_stage=3, use_liger_loss=False),
+            SimpleNamespace(fsdp_config=object(), use_liger_loss=False),
             world_size=2,
         )
         assert llm_utils_module.needs_cross_rank_seq_padding(
-            SimpleNamespace(zero_stage="3", use_liger_loss=False),
+            SimpleNamespace(distributed=True, use_liger_loss=False),
             world_size=2,
         )
         assert not llm_utils_module.needs_cross_rank_seq_padding(
-            SimpleNamespace(zero_stage=3, use_liger_loss=False),
+            SimpleNamespace(distributed=True, use_liger_loss=False),
             world_size=1,
         )
-        assert not llm_utils_module.needs_cross_rank_seq_padding(
-            SimpleNamespace(zero_stage=2, use_liger_loss=False),
-            world_size=2,
-        )
-        assert not llm_utils_module.needs_cross_rank_seq_padding(
-            SimpleNamespace(use_liger_loss=False),
-            world_size=2,
-        )
 
-    def test_allreduce_minmax_int_uses_accelerator_gather(self):
-        acc = MagicMock()
-        acc.device = torch.device("cpu")
-        acc.gather.side_effect = lambda t: torch.tensor([2, 5], dtype=t.dtype)
-
-        min_v, max_v = llm_utils_module.allreduce_minmax_int(3, acc)
-        assert (min_v, max_v) == (2, 5)
-        acc.gather.assert_called_once()
-        gathered_arg = acc.gather.call_args.args[0]
-        assert gathered_arg.tolist() == [3]
-        assert gathered_arg.dtype == torch.long
+    def test_allreduce_minmax_int_identity_without_process_group(self):
+        min_v, max_v = llm_utils_module.allreduce_minmax_int(3)
+        assert (min_v, max_v) == (3, 3)
 
     def test_pad_completion_batch_to_seq_len_happy_and_noop(self):
         ids = torch.ones(2, 3, dtype=torch.long)
@@ -3340,16 +3279,13 @@ class TestCrossRankLigerAlign:
             events.append(f"minmax:{value}")
             return value, value
 
-        accelerator = MagicMock()
-
-        def wait_for_everyone():
-            events.append("barrier")
-
-        accelerator.wait_for_everyone.side_effect = wait_for_everyone
-
         monkeypatch.setattr(
             "agilerl.utils.algo_utils.stack_and_pad_experiences",
             fake_stack_and_pad,
+        )
+        monkeypatch.setattr(
+            "agilerl.utils.llm_utils.barrier",
+            lambda: events.append("barrier"),
         )
 
         completion_ids = [
@@ -3368,7 +3304,6 @@ class TestCrossRankLigerAlign:
                 action_masks,
                 rewards,
                 pad_token_id=0,
-                accelerator=accelerator,
                 minmax_fn=fake_minmax,
             )
         )
@@ -3376,7 +3311,6 @@ class TestCrossRankLigerAlign:
         assert events[0:2] == ["minmax:2", "minmax:3"]
         assert events[2] == "stack"
         assert events[-1] == "barrier"
-        assert accelerator.wait_for_everyone.call_count == 1
         assert out_ids.shape == (2, 3)
         assert out_masks.shape == (2, 2)
         assert out_rewards.shape == (2, 1)
@@ -3403,7 +3337,6 @@ class TestCrossRankLigerAlign:
                 short_mask,
                 rewards,
                 pad_token_id=0,
-                accelerator=accelerator,
                 minmax_fn=fake_minmax,
             )
         )
@@ -3412,7 +3345,6 @@ class TestCrossRankLigerAlign:
         assert out_rewards.shape == (2,)
         assert torch.all(out_ids[:, 4:] == 0)
         assert torch.all(~out_mask[:, 3:])
-        accelerator.wait_for_everyone.assert_called_once()
 
     def test_align_completion_batch_shapes_noop_when_t_already_global_max(self):
         ids = [torch.ones(1, 4, dtype=torch.long)]
@@ -3429,13 +3361,11 @@ class TestCrossRankLigerAlign:
                 masks,
                 rewards,
                 pad_token_id=0,
-                accelerator=accelerator,
                 minmax_fn=fake_minmax,
             )
         )
         assert out_ids.shape == (1, 4)
         assert out_mask.shape == (1, 3)
-        accelerator.wait_for_everyone.assert_called_once()
 
     def test_align_completion_batch_shapes_raises_on_b_diverge(self):
         ids = [torch.ones(1, 3, dtype=torch.long)]
@@ -3452,7 +3382,6 @@ class TestCrossRankLigerAlign:
                 masks,
                 rewards,
                 pad_token_id=0,
-                accelerator=MagicMock(),
                 minmax_fn=fake_minmax,
             )
 
@@ -3474,31 +3403,34 @@ class TestCrossRankLigerAlign:
                 masks,
                 rewards,
                 pad_token_id=0,
-                accelerator=MagicMock(),
                 minmax_fn=fake_minmax,
             )
 
-    def test_align_invokes_wait_for_everyone_after_pad(self, monkeypatch):
+    def test_align_invokes_barrier_after_pad(self, monkeypatch):
         def fake_stack_and_pad(*args, **kwargs):
             completions = torch.tensor([[1, 2, 3]], dtype=torch.long)
             masks = torch.tensor([[True, True]])
             rewards = torch.tensor([[1.0]])
             return completions, masks, rewards
 
+        calls = {"barrier": 0}
+
         monkeypatch.setattr(
             "agilerl.utils.algo_utils.stack_and_pad_experiences",
             fake_stack_and_pad,
         )
-        accelerator = MagicMock()
+        monkeypatch.setattr(
+            "agilerl.utils.llm_utils.barrier",
+            lambda: calls.__setitem__("barrier", calls["barrier"] + 1),
+        )
         llm_utils_module.align_completion_batch_shapes_across_ranks(
             [torch.tensor([[1, 2, 3]], dtype=torch.long)],
             [torch.tensor([[True, True]])],
             torch.tensor([[1.0]]),
             pad_token_id=0,
-            accelerator=accelerator,
             minmax_fn=lambda value: (value, value),
         )
-        assert accelerator.wait_for_everyone.call_count == 1
+        assert calls["barrier"] == 1
 
     def test_align_uses_allreduce_minmax_when_minmax_fn_omitted(self):
         ids = [torch.ones(1, 3, dtype=torch.long)]
@@ -3509,19 +3441,16 @@ class TestCrossRankLigerAlign:
         with patch.object(
             llm_utils_module,
             "allreduce_minmax_int",
-            side_effect=lambda value, _acc: (value, value),
+            side_effect=lambda value: (value, value),
         ) as mock_minmax:
             out_ids, _, _ = llm_utils_module.align_completion_batch_shapes_across_ranks(
                 ids,
                 masks,
                 rewards,
                 pad_token_id=0,
-                accelerator=acc,
             )
         assert out_ids.shape == (1, 3)
         assert mock_minmax.call_count == 2  # B then T
-        assert mock_minmax.call_args_list[0].args[1] is acc
-        acc.wait_for_everyone.assert_called_once()
 
 
 class TestResolvePadTokenId:

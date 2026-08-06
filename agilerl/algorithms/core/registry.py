@@ -16,7 +16,7 @@ from agilerl.typing import LrNameType, NetworkType
 from agilerl.utils.algo_utils import DummyOptimizer
 
 # An optimizer "class": a torch ``Optimizer`` subclass or an optimizer-like
-# constructor such as ``DummyOptimizer`` or a DeepSpeed/accelerate wrapper type.
+# constructor such as ``DummyOptimizer`` or an Accelerate wrapper type.
 OptimizerFactory = NamedCallable
 
 # A mutation hook: a zero-argument function or bound method registered by name

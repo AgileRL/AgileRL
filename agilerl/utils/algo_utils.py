@@ -18,6 +18,7 @@ from typing import (
     Protocol,
     TypeGuard,
     TypeVar,
+    cast,
     overload,
     runtime_checkable,
 )
@@ -70,6 +71,8 @@ if TYPE_CHECKING:
 if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
     from peft import PeftConfig, PeftModel, get_peft_model
     from transformers import PreTrainedModel
+
+    from agilerl.utils.llm_utils import gather_full_params
 
     from agilerl.algorithms.core.llm_ops.moe_lora import upgrade_moe_param_wrappers
 
@@ -2544,15 +2547,12 @@ def _rename_peft_primary_adapter_keys_in_state_dict(
 
 def clone_llm(
     original_model: PreTrainedModelType | DummyEvolvable,
-    zero_stage: int | None,
     state_dict: dict[str, torch.Tensor] | None = None,
 ) -> PreTrainedModelType:
     """Clone the actor.
 
     :param original_model: Model to clone
     :type original_model: PreTrainedModelType
-    :param zero_stage: Zero stage to use, defaults to 0
-    :type zero_stage: int | None, optional
     :param state_dict: State dict to load, defaults to None
     :type state_dict: dict[str, torch.Tensor] | None, optional
     :return: Cloned model
@@ -2561,81 +2561,70 @@ def clone_llm(
         case PeftModel() | PreTrainedModel():
             source_model = original_model
         case DummyEvolvable():
-            # DummyEvolvable wraps an arbitrary module; the RL-clone path is only
-            # reached with a pretrained model inside it.
             inner_model = original_model.module
             assert isinstance(inner_model, (PeftModel, PreTrainedModel))
             source_model = inner_model
         case _:
             msg = f"Invalid 'original_model' type: {type(original_model)}"
             raise ValueError(msg)
-    model_config = source_model.config
-    base_model = source_model.model
-    assert isinstance(base_model, nn.Module)
-    model: nn.Module = type(base_model)(model_config)
-    adapter_names: list[str] = []
+    with gather_full_params(cast(nn.Module, source_model)):
+        model_config = source_model.config
+        base_model = source_model.model
+        assert isinstance(base_model, nn.Module)
+        model: nn.Module = type(base_model)(model_config)
+        adapter_names: list[str] = []
 
-    # Any model carrying peft_config has adapters to copy, including
-    # wrappers that are not PeftModel subclasses. The attribute is dynamic,
-    # so pin the adapter-name/config pairs to their concrete peft types.
-    if hasattr(source_model, "peft_config"):
-        raw_peft_config = source_model.peft_config
-        assert is_str_keyed_dict(raw_peft_config)
-        peft_configs: dict[str, PeftConfig] = {
-            name: config
-            for name, config in raw_peft_config.items()
-            if isinstance(config, PeftConfig)
-        }
-        adapter_names = list(peft_configs.keys())
+        if hasattr(source_model, "peft_config"):
+            raw_peft_config = source_model.peft_config
+            assert is_str_keyed_dict(raw_peft_config)
+            peft_configs: dict[str, PeftConfig] = {
+                name: config
+                for name, config in raw_peft_config.items()
+                if isinstance(config, PeftConfig)
+            }
+            adapter_names = list(peft_configs.keys())
 
-        if len(adapter_names) > 1:
-            warnings.warn(
-                "Multiple adapters detected. Only the first adapter will be used for RL finetuning.",
-                stacklevel=2,
+            if len(adapter_names) > 1:
+                warnings.warn(
+                    "Multiple adapters detected. Only the first adapter will be used for RL finetuning.",
+                    stacklevel=2,
+                )
+            first_adapter = adapter_names[0]
+            model = get_peft_model(
+                model,
+                peft_configs[first_adapter],
+                adapter_name="actor",
             )
-        # AgileRL standardizes on adapter name "actor" for the primary adapter.
-        first_adapter = adapter_names[0]
-        keep_adapter_base_dtype = zero_stage == 3
-        model = get_peft_model(
-            model,
-            peft_configs[first_adapter],
-            adapter_name="actor",
-            autocast_adapter_dtype=not keep_adapter_base_dtype,
-        )
 
-        # Add remaining adapters using add_adapter
-        for adapter_name in adapter_names[1:]:
-            model.add_adapter(
-                peft_config=peft_configs[adapter_name],
-                adapter_name=adapter_name,
-                autocast_adapter_dtype=not keep_adapter_base_dtype,
+            for adapter_name in adapter_names[1:]:
+                model.add_adapter(
+                    peft_config=peft_configs[adapter_name],
+                    adapter_name=adapter_name,
+                )
+            expert_targets = getattr(
+                peft_configs[first_adapter], "target_parameters", None
             )
-        if keep_adapter_base_dtype:
-            for name, param in model.named_parameters():
-                if "lora" in name and param.dtype != torch.bfloat16:
-                    param.data = param.data.to(torch.bfloat16)
-        expert_targets = getattr(peft_configs[first_adapter], "target_parameters", None)
-        if isinstance(expert_targets, (list, tuple)) and expert_targets:
-            upgrade_moe_param_wrappers(model)
-        model.disable_adapter()
+            if isinstance(expert_targets, (list, tuple)) and expert_targets:
+                upgrade_moe_param_wrappers(model)
+            model.disable_adapter()
 
-    if state_dict is not None:
-        sd = state_dict
-        if adapter_names and adapter_names[0] != "actor":
-            sd = _rename_peft_primary_adapter_keys_in_state_dict(
-                sd,
-                old_adapter=adapter_names[0],
-                new_adapter="actor",
-            )
-        model.load_state_dict(sd, strict=False)
+        if state_dict is not None:
+            sd = state_dict
+            if adapter_names and adapter_names[0] != "actor":
+                sd = _rename_peft_primary_adapter_keys_in_state_dict(
+                    sd,
+                    old_adapter=adapter_names[0],
+                    new_adapter="actor",
+                )
+            model.load_state_dict(sd, strict=False)
     return model
 
 
 class DummyOptimizer:
-    """Placeholder optimizer class to pass to the OptimizerWrapper when the optimizer is defined in the deepspeed config."""
+    """Placeholder optimizer for OptimizerWrapper when the real optimizer is external."""
 
     def __init__(self, params: list[torch.Tensor], **kwargs: Any) -> None:
-        """Sentinel class to use for the optimizer when the optimizer is defined in the deepspeed config.
+        """Sentinel passed to OptimizerWrapper before ``accelerator.prepare``.
 
         :param params: Parameters to optimize.
         :type params: list[torch.Tensor]

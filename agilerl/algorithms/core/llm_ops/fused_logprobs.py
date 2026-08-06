@@ -27,8 +27,8 @@ def fp32_lm_head_operands(
     """Upcast the lm_head for one chunk loop, hoisted out of the loop body.
 
     A ``(V, H)`` fp32 copy is gigabytes at production vocab sizes, so a loop
-    takes at most one, shared by every chunk. Call inside the ZeRO-3 gather, or
-    the copy is taken from an unmaterialized shard.
+    takes at most one, shared by every chunk. Call inside an FSDP/DTensor
+    gather (or with already-dense weights), or the copy is taken from a shard.
 
     :param lm_head_weight: ``(V, H)``.
     :type lm_head_weight: torch.Tensor
@@ -176,10 +176,12 @@ def fused_linear_logprobs_chunked(
     N = flat_h.shape[0]
     out = torch.empty(N, dtype=orig_dtype, device=hidden.device)
 
-    with _gather_if_ds_param(lm_head_weight, lm_head_bias):
+    with _gather_if_ds_param(lm_head_weight, lm_head_bias) as gathered:
+        head_w, head_b = gathered[0], gathered[1]
+        assert head_w is not None
         head_weight, head_bias = fp32_lm_head_operands(
-            lm_head_weight,
-            lm_head_bias,
+            head_w,
+            head_b,
             cast_to_fp32,
         )
         for s in range(0, N, chunk_rows):
@@ -262,27 +264,21 @@ class FusedLinearLogProbsFunction(torch.autograd.Function):
         temperature = ctx.temperature
         cast_to_fp32 = ctx.cast_to_fp32
 
-        # Re-gather for the recompute: the forward gather has already exited
-        # and ZeRO-3 has re-partitioned ``lm_head_weight`` to a zero-sized
-        # shard. The Parameter object is the same; only ``.data`` was swapped.
-        if ctx.needs_weight_grad and hasattr(lm_head_weight, "ds_id"):
-            msg = (
-                "ZeRO-3 full-finetune of lm_head through the fused-linear "
-                "logprob path is not supported; use LoRA (lm_head frozen) "
-                "or disable ZeRO-3."
-            )
-            raise RuntimeError(msg)
-        with _gather_if_ds_param(lm_head_weight, lm_head_bias):
+        with _gather_if_ds_param(lm_head_weight, lm_head_bias) as gathered:
+            head_w, head_b = gathered[0], gathered[1]
+            assert head_w is not None
             grad_hidden = torch.zeros_like(flat_h) if ctx.needs_hidden_grad else None
             grad_weight = (
-                torch.zeros_like(lm_head_weight) if ctx.needs_weight_grad else None
+                torch.zeros_like(head_w) if ctx.needs_weight_grad else None
             )
-            grad_bias = torch.zeros_like(lm_head_bias) if ctx.needs_bias_grad else None
+            grad_bias = (
+                torch.zeros_like(head_b) if ctx.needs_bias_grad else None
+            )
             # Grad buffers above stay in the head's own dtype; the recompute
             # below runs against one hoisted fp32 copy of it.
             head_weight, head_bias = fp32_lm_head_operands(
-                lm_head_weight,
-                lm_head_bias,
+                head_w,
+                head_b,
                 cast_to_fp32,
             )
 

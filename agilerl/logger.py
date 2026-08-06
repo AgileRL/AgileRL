@@ -21,6 +21,8 @@ from typing import TYPE_CHECKING
 
 import wandb
 
+from agilerl.utils.distributed import barrier, is_distributed, is_main_process
+
 if TYPE_CHECKING:
     from accelerate import Accelerator
     from torch.utils.tensorboard import SummaryWriter
@@ -55,10 +57,15 @@ class Logger(ABC):
         if accelerator is not None:
             accelerator.wait_for_everyone()
         try:
-            yield accelerator is None or accelerator.is_main_process
+            if accelerator is not None:
+                yield accelerator.is_main_process
+            else:
+                yield is_main_process()
         finally:
             if accelerator is not None:
                 accelerator.wait_for_everyone()
+            elif is_distributed():
+                barrier()
 
     @abstractmethod
     def write(self, report: MetricsReport) -> None:
@@ -110,6 +117,8 @@ class StdOutLogger(Logger):
         :type report: MetricsReport
         """
         if self._accelerator is not None and not self._accelerator.is_main_process:
+            return
+        if self._accelerator is None and not is_main_process():
             return
         text = str(report)
         if self._pbar is not None and not self._notebook:

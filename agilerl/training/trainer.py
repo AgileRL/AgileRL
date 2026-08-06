@@ -82,11 +82,8 @@ else:
 
 if HAS_LLM_DEPENDENCIES:
     from transformers import AutoTokenizer
-
-    from agilerl.utils.llm_utils import create_llm_accelerator
 else:
     AutoTokenizer = None
-    create_llm_accelerator = None
 
 if TYPE_CHECKING:
     import torch
@@ -389,20 +386,6 @@ class LocalTrainer(Trainer):
             if self.selection_strategy_spec is None:
                 self.selection_strategy_spec = TournamentSelectionSpec()
 
-        # LLM algorithms require a DeepSpeed-aware accelerator
-        if (
-            isinstance(self.algorithm_spec, LLMAlgorithmSpec)
-            and self.accelerator is None
-        ):
-            if create_llm_accelerator is None:
-                msg = "LLM dependencies are not installed. Please install them using: pip install agilerl[llm]"
-                raise ImportError(msg)
-
-            logger.info(
-                "User did not provide an accelerator, creating one with DeepSpeed..."
-            )
-            self.accelerator = create_llm_accelerator()
-
         # For LLM algorithms, load the tokenizer once and share it.
         self.tokenizer = (
             self._make_tokenizer()
@@ -420,14 +403,24 @@ class LocalTrainer(Trainer):
             mutation_spec=self.mutation_spec,
             replay_buffer_spec=self.replay_buffer_spec,
             device=self.device,
-            accelerator=self.accelerator,
+            accelerator=(
+                self.accelerator
+                if not isinstance(self.algorithm_spec, LLMAlgorithmSpec)
+                else None
+            ),
             tokenizer=self.tokenizer,
             resume_from_checkpoint=self._resume_checkpoint,
             selection_strategy_spec=self.selection_strategy_spec,
         )
-        self.mutations = build_mutations_from_spec(
-            self.mutation_spec, self.device, accelerator=self.accelerator
-        )
+        # Classic RL algorithms keep Accelerate; LLM training uses torch.distributed.
+        if not isinstance(self.algorithm_spec, LLMAlgorithmSpec):
+            self.mutations = build_mutations_from_spec(
+                self.mutation_spec, self.device, accelerator=self.accelerator
+            )
+        else:
+            self.mutations = build_mutations_from_spec(
+                self.mutation_spec, self.device, accelerator=None
+            )
 
         self.selection_strategy = build_selection_from_spec(
             self.selection_strategy_spec,
@@ -699,9 +692,7 @@ class LocalTrainer(Trainer):
             self.env_spec.data_batch_size_per_gpu = self.algorithm_spec.batch_size
 
             assert self.tokenizer is not None
-            return self.env_spec.make_env(
-                tokenizer=self.tokenizer, accelerator=self.accelerator
-            )
+            return self.env_spec.make_env(tokenizer=self.tokenizer)
 
         return self.env_spec.make_env()
 
@@ -838,7 +829,6 @@ class LocalTrainer(Trainer):
             "tensorboard": tensorboard,
             "tensorboard_log_dir": tensorboard_log_dir,
             "verbose": verbose,
-            "accelerator": self.accelerator,
             "wandb_api_key": wandb_api_key,
             "wandb_kwargs": wandb_kwargs,
         }

@@ -2472,7 +2472,6 @@ class TestCloneLlm:
         original = FakePeftModel()
         cloned = algo_utils.clone_llm(
             original_model=original,
-            zero_stage=0,
             state_dict={
                 "base.default.weight": torch.tensor([1.0]),
                 "lora_default.bias": torch.tensor([2.0]),
@@ -2502,7 +2501,7 @@ class TestCloneLlm:
 
         monkeypatch.setattr(algo_utils, "PreTrainedModel", FakePreTrainedModel)
         original = FakePreTrainedModel()
-        cloned = algo_utils.clone_llm(original_model=original, zero_stage=0)
+        cloned = algo_utils.clone_llm(original_model=original)
         assert isinstance(cloned, FakeBaseModel)
 
     @pytest.mark.skipif(
@@ -2522,11 +2521,11 @@ class TestCloneLlm:
         dummy = DummyEvolvable(device="cpu", module=peft_model)
 
         with patch(
-            "agilerl.utils.algo_utils.gather_if_zero3", create=True
+            "agilerl.utils.algo_utils.gather_full_params", create=True
         ) as mock_gather:
             mock_gather.return_value.__enter__ = MagicMock(return_value=None)
             mock_gather.return_value.__exit__ = MagicMock(return_value=False)
-            result = clone_llm(dummy, 0)
+            result = clone_llm(dummy)
         assert result is not None
         mock_gather.assert_not_called()
 
@@ -2536,12 +2535,10 @@ class TestCloneLlm:
     def test_clone_llm_invalid_type_raises(self):
         """clone_llm raises ValueError for invalid type."""
         with pytest.raises(ValueError, match="Invalid 'original_model' type"):
-            clone_llm("invalid_model", 0)
+            clone_llm("invalid_model")
 
-    def test_clone_llm_does_not_call_gather_if_zero3(self, monkeypatch):
-        """clone_llm with zero_stage=3 must not gather source params — it reads
-        config and peft_config only, never source param data.
-        """
+    def test_clone_llm_without_state_dict_disables_adapter(self, monkeypatch):
+        """clone_llm without state_dict reads config and peft_config only."""
         from peft import LoraConfig
 
         default_config = LoraConfig(r=1)
@@ -2574,13 +2571,13 @@ class TestCloneLlm:
         monkeypatch.setattr(algo_utils, "get_peft_model", fake_get_peft_model)
 
         original = FakePeftModel()
-        cloned = clone_llm(original_model=original, zero_stage=3, state_dict=None)
+        cloned = clone_llm(original_model=original, state_dict=None)
 
         assert isinstance(cloned, FakeBaseModel)
         assert cloned.disabled is True
 
-    def test_clone_llm_zero3_casts_lora_params_to_bfloat16(self, monkeypatch):
-        """Under ZeRO-3, non-bf16 LoRA weights are cast to bf16 after get_peft_model."""
+    def test_clone_llm_casts_lora_params_to_bfloat16(self, monkeypatch):
+        """Non-bf16 LoRA weights are cast to bf16 after get_peft_model."""
         from peft import LoraConfig
 
         default_config = LoraConfig(r=1)
@@ -2609,7 +2606,7 @@ class TestCloneLlm:
         monkeypatch.setattr(algo_utils, "get_peft_model", fake_get_peft_model)
 
         cloned = clone_llm(
-            original_model=FakePeftModel(), zero_stage=3, state_dict=None
+            original_model=FakePeftModel(), state_dict=None
         )
 
         assert isinstance(cloned, FakeBaseModel)

@@ -14,7 +14,6 @@ import torch.nn.functional as F
 from agilerl import HAS_LIGER_KERNEL
 
 if TYPE_CHECKING:
-    from accelerate import Accelerator
     from peft import LoraConfig
     from transformers import BitsAndBytesConfig
 
@@ -29,7 +28,8 @@ from agilerl.typing import (
     PreferencePrompts,
 )
 from agilerl.utils.algo_utils import get_experiences_samples
-from agilerl.utils.llm_utils import aggregate_metrics_dict, resolve_llm_device
+from agilerl.utils.distributed import FSDPConfig, barrier, resolve_device
+from agilerl.utils.llm_utils import aggregate_metrics_dict
 
 if HAS_LIGER_KERNEL:
     from agilerl.algorithms.core.llm_ops.fused_loss import LigerDPOWithAlpha
@@ -71,13 +71,14 @@ class DPO(LLMAlgorithm[PreferencePrompts]):
     :type calc_position_embeddings: bool, optional
     :param micro_batch_size_per_gpu: Micro batch size per GPU, defaults to None
     :type micro_batch_size_per_gpu: int, optional
-    :param device: Device to train on. Ignored when an accelerator is given (each rank
-        owns its own GPU); ``None`` auto-detects CUDA/MPS/CPU.
+    :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str, optional
     :param lora_config: Config for LoRA, defaults to None
     :type lora_config: LoraConfig, optional
-    :param accelerator: Accelerator for distributed computing, defaults to None
-    :type accelerator: accelerate.Accelerator(), optional
+    :param gradient_accumulation_steps: Micro-batches to accumulate per optimizer step, defaults to 1
+    :type gradient_accumulation_steps: int, optional
+    :param fsdp_config: FSDP2 sharding settings for distributed runs, defaults to None
+    :type fsdp_config: FSDPConfig | None, optional
     :param wrap: Wrap models for distributed training upon creation, defaults to True
     :type wrap: bool, optional
     :param clone: Flag to indicate if the instantiation is a cloning, defaults to False
@@ -147,7 +148,8 @@ class DPO(LLMAlgorithm[PreferencePrompts]):
         micro_batch_size_per_gpu: int | None = None,
         device: str | torch.device | None = None,
         lora_config: LoraConfig | None = None,
-        accelerator: Accelerator | None = None,
+        gradient_accumulation_steps: int = 1,
+        fsdp_config: FSDPConfig | None = None,
         wrap: bool = True,
         clone: bool = False,
         seed: int = 42,
@@ -162,7 +164,7 @@ class DPO(LLMAlgorithm[PreferencePrompts]):
         activation_offload: bool = False,
         lora_target_scope: str | None = None,
     ) -> None:
-        resolved_device = resolve_llm_device(accelerator, device)
+        resolved_device = resolve_device(device)
         super().__init__(
             index=index,
             batch_size=batch_size,
@@ -184,7 +186,8 @@ class DPO(LLMAlgorithm[PreferencePrompts]):
             hp_config=hp_config,
             wrap=wrap,
             device=resolved_device,
-            accelerator=accelerator,
+            gradient_accumulation_steps=gradient_accumulation_steps,
+            fsdp_config=fsdp_config,
             name="DPO",
             gradient_checkpointing=gradient_checkpointing,
             torch_compiler=torch_compiler,
@@ -341,7 +344,7 @@ class DPO(LLMAlgorithm[PreferencePrompts]):
         # Aggregate metrics across GPUs for both train/test paths. (Fresh dict
         # display so ty checks the values against the parameter's wider,
         # invariant dict value union.)
-        agg = aggregate_metrics_dict(self.accelerator, {**learn_metrics})
+        agg = aggregate_metrics_dict({**learn_metrics})
 
         if training:
             self.metrics.log("loss", agg["loss"])
@@ -681,6 +684,6 @@ class DPO(LLMAlgorithm[PreferencePrompts]):
                 prompts = env.step()
             mean_fit = float(np.mean(rewards))
         self.metrics.add_fitness(mean_fit)
-        if self.accelerator is not None:
-            self.accelerator.wait_for_everyone()
+        if self.distributed:
+            barrier()
         return np.array(mean_fit)

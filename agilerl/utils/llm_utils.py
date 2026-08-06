@@ -19,19 +19,46 @@ from typing import TYPE_CHECKING, Any, TypeGuard
 import numpy as np
 import numpy.typing as npt
 import torch
-from accelerate import Accelerator
+import torch.distributed as dist
 from torch import nn
 
-from agilerl import HAS_DEEPSPEED, HAS_LLM_DEPENDENCIES
+from agilerl import HAS_LLM_DEPENDENCIES
+from agilerl.protocols import DTensorLike
 from agilerl.typing import (
     HFGeneratePrompts,
     JSONValue,
     PopulationType,
     ReasoningPrompts,
 )
+from agilerl.utils.distributed import (
+    all_reduce_mean,
+    barrier,
+    get_world_size,
+    is_distributed,
+    resolve_device,
+)
+
+FSDPModule: Any
+FullyShardedDataParallel: Any
+try:
+    from torch.distributed.fsdp import FSDPModule, FullyShardedDataParallel
+
+    HAS_FSDP = True
+except ImportError:  # pragma: no cover -- torch built without distributed support
+    FSDPModule = None
+    FullyShardedDataParallel = None
+    HAS_FSDP = False
+
+DTensor: Any
+try:
+    from torch.distributed.tensor import DTensor
+
+    HAS_DTENSOR = True
+except ImportError:  # pragma: no cover -- torch built without distributed support
+    DTensor = None
+    HAS_DTENSOR = False
 
 if TYPE_CHECKING:
-    from accelerate.utils import DeepSpeedPlugin
     from peft import LoraConfig, PeftModel
     from torch.nn.attention.flex_attention import BlockMask
     from transformers import PreTrainedTokenizerBase
@@ -57,11 +84,6 @@ else:
     AutoModelForCausalLM: Any = None
     AutoModelForCausalLMWithValueHead: Any = None
     BitsAndBytesConfig: Any = None
-
-# Sentinel when DeepSpeed is absent; overwritten by the real enum otherwise.
-ZeroParamStatus = None
-if HAS_DEEPSPEED:
-    from deepspeed.runtime.zero.partition_parameters import ZeroParamStatus
 
 _DEPRECATED_LLM_ENV_NAMES = frozenset(
     ("apply_chat_template", "ReasoningGym", "PreferenceGym", "SFTGym"),
@@ -374,52 +396,50 @@ def normalize_reasoning_prompt_batch(
 
 def gather_tensor(
     tensor: torch.Tensor | npt.NDArray | float,
-    accelerator: Accelerator,
 ) -> torch.Tensor:
-    """Gather tensors from gpus.
+    """Gather a tensor from every rank (identity on a single device).
 
-    :param tensor: Tensor (or array/scalar convertible to one) to gather
-    :type tensor: torch.Tensor | npt.NDArray | float
-    :param accelerator: Accelerator object
-    :type accelerator: accelerate.Accelerator
-    :return: Stacked tensors
-    :rtype: torch.Tensor
+    Prefer ``torch.distributed`` when a process group is initialised.
+
+    :param tensor: Tensor (or array/scalar convertible to one) to gather.
+    :return: Stacked / concatenated tensors from all ranks.
     """
     if not isinstance(tensor, torch.Tensor):
-        tensor = torch.tensor(tensor, device=accelerator.device)
-    tensor = tensor.to(accelerator.device)
-    return accelerator.gather(tensor)
+        tensor = torch.as_tensor(tensor)
+    if not is_distributed():
+        return tensor
+    tensor = tensor.detach().to(torch.device(resolve_device()))
+    gathered = [torch.empty_like(tensor) for _ in range(get_world_size())]
+    dist.all_gather(gathered, tensor)
+    return torch.stack(gathered) if tensor.dim() == 0 else torch.cat(gathered)
 
 
 def needs_cross_rank_seq_padding(algo: object, *, world_size: int) -> bool:
     """Return whether ranks must sync completion seq lengths before ``learn()``.
 
     Multi-rank Liger token-level losses chunk over ``B * (T - 1)`` and issue one
-    NCCL allreduce per chunk (DAPO/CISPO normaliser). ZeRO-3 parameter gathers
-    also require identical per-rank ``T`` so every rank issues the same NCCL
-    collectives. Divergent per-rank ``T`` after local ``stack_and_pad`` therefore
-    deadlocks.
+    NCCL allreduce per chunk (DAPO/CISPO normaliser). FSDP2 full-shard (and any
+    collective-heavy DP path) also requires identical per-rank ``T`` so every
+    rank issues the same NCCL collectives.
     """
     if world_size <= 1:
         return False
-    zero_stage = getattr(algo, "zero_stage", 0)
-    if zero_stage == 3 or zero_stage == "3":
+    if getattr(algo, "fsdp_config", None) is not None:
+        return True
+    if getattr(algo, "distributed", False):
         return True
     if not getattr(algo, "use_liger_loss", False):
         return False
     return getattr(algo, "importance_sampling_level", "token") == "token"
 
 
-def allreduce_minmax_int(value: int, accelerator: Accelerator) -> tuple[int, int]:
-    """Return ``(min, max)`` of ``value`` across Accelerate ranks.
-
-    Uses :meth:`Accelerator.gather` so the reduction participates in the same
-    process-group bookkeeping as the rest of the Accelerate/DeepSpeed run
-    (plain ``torch.distributed.all_reduce`` on the default group is easy to
-    desync from DeepSpeed's communicator set).
-    """
-    t = torch.tensor([int(value)], device=accelerator.device, dtype=torch.long)
-    gathered = accelerator.gather(t)
+def allreduce_minmax_int(value: int) -> tuple[int, int]:
+    """Return ``(min, max)`` of ``value`` across ranks via torch.distributed."""
+    if not is_distributed():
+        v = int(value)
+        return v, v
+    t = torch.tensor([int(value)], device=torch.device(resolve_device()), dtype=torch.long)
+    gathered = gather_tensor(t)
     return int(gathered.min().item()), int(gathered.max().item())
 
 
@@ -506,14 +526,13 @@ def align_completion_batch_shapes_across_ranks(
     rewards: Any,  # noqa: ANN401 -- see completion_ids
     *,
     pad_token_id: int,
-    accelerator: Accelerator,
     minmax_fn: Callable[[int], tuple[int, int]] | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Sync ``B``/``T`` across ranks before heavy local pad/stack work.
 
     Collective metadata sync happens first; pad/stack follows. A DP barrier runs
-    after pad so no rank enters ZeRO ``learn`` collectives while peers are still
-    padding. Call immediately before ``learn()`` when
+    after pad so no rank enters sharded ``learn`` collectives while peers are
+    still padding. Call immediately before ``learn()`` when
     :func:`needs_cross_rank_seq_padding` is true. Shorter ranks are right-padded
     to the global max ``T`` so Liger token-level chunk collectives stay in
     lockstep.
@@ -522,7 +541,7 @@ def align_completion_batch_shapes_across_ranks(
     from agilerl.utils.algo_utils import stack_and_pad_experiences
 
     local_b, local_t = _local_batch_and_seq_len(completion_ids)
-    reduce_fn = minmax_fn or (lambda value: allreduce_minmax_int(value, accelerator))
+    reduce_fn = minmax_fn or allreduce_minmax_int
 
     min_b, max_b = reduce_fn(local_b)
     if min_b != max_b:
@@ -555,69 +574,206 @@ def align_completion_batch_shapes_across_ranks(
         )
         raise RuntimeError(msg)
 
-    accelerator.wait_for_everyone()
+    barrier()
     return completion_ids, action_masks, rewards
 
 
 def aggregate_metrics_across_gpus(
-    accelerator: Accelerator | None,
     metric_tensor: torch.Tensor | npt.NDArray | float,
 ) -> float:
-    """Aggregate gathered tensors.
-
-    :param accelerator: Accelerator object
-    :type accelerator: accelerate.Accelerator | None
-    :param metric_tensor: Metrics
-    :type metric_tensor: torch.Tensor | npt.NDArray | float
-    :return: Mean metric
-    :rtype: float
-    """
-    if accelerator is None:
+    """Average a metric across ranks (local mean on a single device)."""
+    if not is_distributed():
         if isinstance(metric_tensor, torch.Tensor):
             return metric_tensor.float().mean().item()
+        if isinstance(metric_tensor, np.ndarray):
+            return float(np.mean(metric_tensor))
         return float(metric_tensor)
-    all_metrics = gather_tensor(metric_tensor, accelerator)
-    return all_metrics.mean().item()
-
-
-def safe_aggregate_metrics(
-    accelerator: Accelerator | None,
-    metrics: torch.Tensor | npt.NDArray | float,
-) -> float:
-    """Aggregate metrics generically, handling both when an accelerator is being used and when it isn't.
-
-    :param accelerator: Accelerator object
-    :type accelerator: Accelerator | None
-    :param metrics: Metrics
-    :type metrics: torch.Tensor | npt.NDArray | float
-    :return: Mean metric
-    :rtype: float
-    """
-    if accelerator is None:
-        if isinstance(metrics, (torch.Tensor, np.ndarray)):
-            return float(
-                np.mean(metrics)
-                if isinstance(metrics, np.ndarray)
-                else metrics.float().mean().item()
-            )
-        return float(metrics)
-    return aggregate_metrics_across_gpus(accelerator, metrics)
+    if not isinstance(metric_tensor, torch.Tensor):
+        metric_tensor = torch.as_tensor(metric_tensor)
+    local_mean = metric_tensor.detach().float().mean()
+    return all_reduce_mean(local_mean.to(torch.device(resolve_device()))).item()
 
 
 def aggregate_metrics_dict(
-    accelerator: Accelerator | None,
     metrics: dict[str, torch.Tensor | npt.NDArray | float],
 ) -> dict[str, float]:
-    """Aggregate all values in a metrics dict across GPUs (or locally if no accelerator).
+    """Aggregate all values in a metrics dict across GPUs (or locally)."""
+    return {k: aggregate_metrics_across_gpus(v) for k, v in metrics.items()}
 
-    :param accelerator: Accelerator object (or None for single-device).
-    :type accelerator: Accelerator | None
-    :param metrics: Dictionary mapping metric names to raw values.
-    :type metrics: dict[str, torch.Tensor | npt.NDArray | float]
-    :return: Dictionary with all values aggregated to floats.
-    :rtype: dict[str, float]
+
+def is_fsdp_sharded(model: nn.Module) -> bool:
+    """Return ``True`` when ``model`` contains FSDP-sharded submodules.
+
+    Detects both FSDP2 (``fully_shard``) and legacy FSDP1 wrappers; only FSDP2
+    is supported by AgileRL (see :func:`gather_full_params`).
     """
-    return {k: safe_aggregate_metrics(accelerator, v) for k, v in metrics.items()}
+    if not HAS_FSDP:
+        return False
+    return any(
+        isinstance(module, (FSDPModule, FullyShardedDataParallel))
+        for module in model.modules()
+    )
+
+
+def _parameter_owner(param: torch.Tensor) -> tuple[nn.Module, str] | None:
+    """Return ``(module, attr_name)`` for a parameter registered on a module."""
+    for referrer in gc.get_referrers(param):
+        if not isinstance(referrer, dict):
+            continue
+        attr_names = [
+            key
+            for key, value in referrer.items()
+            if value is param and isinstance(key, str)
+        ]
+        if not attr_names:
+            continue
+        for obj in gc.get_referrers(referrer):
+            if isinstance(obj, nn.Module) and getattr(obj, "_parameters", None) is referrer:
+                return obj, attr_names[0]
+    return None
+
+
+def _is_dtensor(tensor: torch.Tensor) -> TypeGuard[DTensorLike]:
+    return HAS_DTENSOR and isinstance(tensor, DTensor)
+
+
+@contextmanager
+def materialize_dtensors(
+    *tensors: torch.Tensor | None,
+) -> Generator[list[torch.Tensor | None], None, None]:
+    """All-gather ``DTensor`` shards to dense locals without swapping module params.
+
+    Prefer this for ephemeral matmuls (fused lm_head logprobs). Use
+    :func:`gather_params` when in-module reads must see dense weights
+    (``state_dict`` / PEFT ``save_pretrained`` / Liger). All ranks must enter
+    and exit together. Yields a list parallel to ``tensors``.
+    """
+    locals_: list[torch.Tensor | None] = []
+    for tensor in tensors:
+        if tensor is None or not _is_dtensor(tensor):
+            locals_.append(tensor)
+        else:
+            locals_.append(tensor.full_tensor())
+    yield locals_
+
+
+@contextmanager
+def gather_params(
+    params: Sequence[torch.Tensor | None],
+) -> Generator[list[torch.Tensor | None], None, None]:
+    """Materialize full (unsharded) views of ``params`` for the duration of the context.
+
+    Plain tensors are left unchanged. For FSDP2 ``DTensor`` parameters, each
+    tensor is all-gathered with :meth:`~torch.distributed.tensor.DTensor.full_tensor`
+    and temporarily installed on its owning module so in-module reads (e.g.
+    ``state_dict`` / PEFT ``save_pretrained``) see dense weights. Original
+    shards are restored on exit.
+
+    Yields a list parallel to ``params``: dense locals for any gathered
+    ``DTensor``, and the original handles otherwise. Callers that hold
+    pre-gather tensor references must use the yielded list for math — those
+    references still point at the shard. For matmul-only gathers prefer
+    :func:`materialize_dtensors` (no module Parameter install).
+
+    Only the tensors in ``params`` are gathered — pass
+    :func:`get_lora_params` for adapter-only save/export/copy. All ranks must
+    enter and exit together.
+
+    .. warning::
+        Gathered parameters are **read-only**: writes are discarded when the
+        sharded ``DTensor`` is restored. Use :func:`load_full_state_dict` to
+        write weights into a sharded model.
+    """
+    restores: list[tuple[nn.Module, str, DTensorLike]] = []
+    locals_: list[torch.Tensor | None] = []
+    try:
+        for param in params:
+            if param is None or not _is_dtensor(param):
+                locals_.append(param)
+                continue
+            full = param.full_tensor()
+            locals_.append(full)
+            owner = _parameter_owner(param)
+            if owner is None:
+                continue
+            module, name = owner
+            restores.append((module, name, param))
+            owned: dict[str, Any] = module._parameters
+            owned[name] = nn.Parameter(
+                full, requires_grad=bool(param.requires_grad)
+            )
+        yield locals_
+    finally:
+        for module, name, original in reversed(restores):
+            owned: dict[str, Any] = module._parameters
+            owned[name] = original
+
+
+@contextmanager
+def gather_full_params(model: nn.Module) -> Generator[None, None, None]:
+    """Materialize all parameters of ``model`` for the duration of the context.
+
+    For FSDP2 (``fully_shard``) models this unshards every FSDP unit, then
+    reshards on exit. Prefer :func:`gather_params` with
+    :func:`get_lora_params` when only adapter weights are needed.
+
+    .. warning::
+        Under FSDP2 the gathered parameters are **read-only**: writes target
+        the all-gather buffer, which is discarded on reshard. Use
+        :func:`load_full_state_dict` to write weights into a sharded model.
+    """
+    fsdp2_modules = (
+        [module for module in model.modules() if isinstance(module, FSDPModule)]
+        if HAS_FSDP
+        else []
+    )
+    if not fsdp2_modules:
+        if HAS_FSDP and any(
+            isinstance(module, FullyShardedDataParallel) for module in model.modules()
+        ):
+            msg = (
+                "Legacy FSDP1 wrapping detected. AgileRL only supports FSDP2 "
+                "(torch.distributed.fsdp.fully_shard); shard the model with "
+                "agilerl.utils.distributed.apply_fsdp2 instead."
+            )
+            raise NotImplementedError(msg)
+        yield
+        return
+
+    for module in fsdp2_modules:
+        module.unshard()
+    try:
+        yield
+    finally:
+        for module in reversed(fsdp2_modules):
+            module.reshard()
+
+
+def load_full_state_dict(
+    model: nn.Module,
+    state_dict: dict[str, torch.Tensor],
+    strict: bool = False,
+) -> None:
+    """Load a full (unsharded) state dict into a model that may be FSDP-sharded.
+
+    For non-sharded models this is a plain ``load_state_dict``. For FSDP2
+    models, the full state dict is distributed onto the sharded parameters via
+    ``torch.distributed.checkpoint``.
+    """
+    if is_fsdp_sharded(model):
+        from torch.distributed.checkpoint.state_dict import (
+            StateDictOptions,
+            set_model_state_dict,
+        )
+
+        model_state_dict: Any = state_dict
+        set_model_state_dict(
+            model,
+            model_state_dict,
+            options=StateDictOptions(full_state_dict=True, strict=strict),
+        )
+    else:
+        model.load_state_dict(state_dict, strict=strict)
 
 
 @contextmanager
@@ -625,105 +781,62 @@ def gather_if_zero3(
     zero_stage: int | None,
     params: list[torch.Tensor],
     modifier_rank: int | None = None,
-) -> Generator[None, None, None]:
-    """Conditional context manager for setting the zero stage for the model.
+) -> Generator[list[torch.Tensor | None], None, None]:
+    """Gather ``params`` for the duration of the context.
 
-    :param zero_stage: The zero stage
-    :type zero_stage: int | None
-    :param params: The parameters to gather
-    :type params: list[torch.Tensor]
-    :param modifier_rank: The modifier rank
-    :type modifier_rank: int | None
+    Delegates to :func:`gather_params`. ``zero_stage`` and ``modifier_rank``
+    are accepted for call-site compatibility and ignored.
     """
-    if zero_stage == 3:
-        if not HAS_DEEPSPEED:
-            msg = (
-                "DeepSpeed is required for ZeRO stage 3 parameter gathering, but it "
-                "is not installed."
-            )
-            raise ImportError(msg)
-        # Lazy: deepspeed is an optional dependency and only ZeRO-3 needs it.
-        import deepspeed
-
-        with deepspeed.zero.GatheredParameters(
-            params=params,
-            modifier_rank=modifier_rank,
-        ):
-            yield
-    else:
-        yield
+    del zero_stage, modifier_rank
+    with gather_params(params) as gathered:
+        yield gathered
 
 
 @contextmanager
 def gather_if_ds_param(
     *tensors: torch.Tensor | None,
     modifier_rank: int | None = 0,
-) -> Generator[None, None, None]:
-    """Allgather ZeRO-3 params for the duration of the block.
+) -> Generator[list[torch.Tensor | None], None, None]:
+    """Gather the given tensors for ephemeral matmuls (no module Parameter swap).
 
-    No-op when none of ``tensors`` carry a DeepSpeed ``ds_id``, or when every
-    such param is already ``AVAILABLE`` (tied embeddings owned by
-    ``embed_tokens``). Duplicate references are gathered once (by identity).
-    Defaults to ``modifier_rank=0`` so DeepSpeed releases the gathered buffer
-    after the block.
-
-    The gather must wrap only the matmul / fused loss that reads the weight —
-    not a module ``forward`` — because ZeRO-3's post-forward hooks
-    re-partition the param and free the gathered buffer.
-
-    :param tensors: Candidate weight tensors; only those with ``ds_id`` gather.
-    :param modifier_rank: Passed to DeepSpeed ``GatheredParameters``.
+    Delegates to :func:`materialize_dtensors`. ``modifier_rank`` is accepted for
+    call-site compatibility and ignored. Yields dense locals; pre-gather
+    handles stay sharded. Use :func:`gather_params` when in-module reads need
+    dense weights installed.
     """
-    seen: set[int] = set()
-    params: list[torch.Tensor] = []
-    for t in tensors:
-        if t is None or not hasattr(t, "ds_id"):
-            continue
-        tid = id(t)
-        if tid in seen:
-            continue
-        seen.add(tid)
-        if (
-            ZeroParamStatus is not None
-            and hasattr(t, "ds_status")
-            and t.ds_status == ZeroParamStatus.AVAILABLE
-        ):
-            continue
-        params.append(t)
-    if not params:
-        yield
-        return
-    with gather_if_zero3(3, params, modifier_rank=modifier_rank):
-        yield
+    del modifier_rank
+    with materialize_dtensors(*tensors) as gathered:
+        yield gathered
 
 
 def get_lora_params(model: nn.Module) -> list[torch.Tensor]:
-    """Return adapter parameters for scoped ZeRO-3 gathers.
+    """Return adapter parameters for scoped gathers / export.
 
-    Under ZeRO-3, save/export/copy operations only touch adapter parameters.
-    Base parameters remain sharded and are filtered out by PEFT's name-based
-    key matching inside ``save_pretrained`` / ``get_peft_model_state_dict``.
-    Gathering only adapter parameters avoids materialising the full base
-    model on every rank.
-
-    :param model: The model to extract adapter parameters from.
-    :type model: nn.Module
-    :return: List of adapter parameters (LoRA A/B, DoRA magnitude, optional bias).
-    :rtype: list[torch.Tensor]
+    Pass the result to :func:`gather_params` for adapter-only save, export, or
+    copy so base-model shards stay unmaterialised.
     """
     return [p for n, p in model.named_parameters() if "lora" in n]
 
 
 def get_state_dict(model: nn.Module) -> dict[str, torch.Tensor]:
-    """Get the state dict of the model for zero3.
+    """Get the full state dict of a model, gathering FSDP-sharded parameters.
 
-    :param model: The model to get the state dict of.
-    :type model: nn.Module
-    :return: The state dict of the model.
-    :rtype: dict[str, torch.Tensor]
+    For FSDP2 models the state dict is materialized via
+    ``torch.distributed.checkpoint`` so the returned tensors own their storage
+    (plain unshard views would be freed on reshard).
     """
-    with gather_if_zero3(3, list(model.parameters()), modifier_rank=0):
-        return model.state_dict()
+    if is_fsdp_sharded(model):
+        from torch.distributed.checkpoint.state_dict import (
+            StateDictOptions,
+            get_model_state_dict,
+        )
+
+        full_state: Any = get_model_state_dict(
+            model,
+            options=StateDictOptions(full_state_dict=True, cpu_offload=True),
+        )
+        return full_state
+    return model.state_dict()
 
 
 def build_bnb_quantization_config(
@@ -1290,7 +1403,7 @@ def create_model_from_name_or_path(
     model_name_or_path: str,
     model_config: dict[str, Any] | None = None,
     add_value_head: bool = False,
-    use_accelerator: bool = False,
+    use_distributed: bool = False,
 ) -> PreTrainedModel:
     """Create a model from a name or path.
 
@@ -1303,8 +1416,9 @@ def create_model_from_name_or_path(
     :type model_config: dict[str, Any ] | None
     :param use_value_head: Flag to indicate if a value head should be added to the model, defaults to False
     :type use_value_head: bool, optional
-    :param use_accelerator: Flag to indicate if the model should be created with the accelerator, defaults to False
-    :type use_accelerator: bool, optional
+    :param use_distributed: Whether the model is created for a distributed
+        run, defaults to False
+    :type use_distributed: bool, optional
     :return: The created model.
     :rtype: PreTrainedModel
     """
@@ -1312,9 +1426,7 @@ def create_model_from_name_or_path(
     # defaults with ``setdefault``, so any explicit caller value stays
     # authoritative.
     model_config = dict(model_config) if model_config else {}
-    model_config.setdefault(
-        "torch_dtype", torch.bfloat16 if not use_accelerator else torch.float16
-    )
+    model_config.setdefault("torch_dtype", torch.bfloat16)
     # Auto-select the best available attention backend (flash_attention_2 when
     # the flash_attn package is installed, else sdpa). ``resolve_*`` treats an
     # explicit caller value (incl. "flex_attention") as authoritative.
@@ -1708,83 +1820,6 @@ def clipped_is_surrogate(
     )
 
 
-def create_llm_accelerator(
-    *,
-    deepspeed_plugin: DeepSpeedPlugin | None = None,
-) -> Accelerator | None:
-    """Create an :class:`Accelerator` for LLM training with DeepSpeed.
-
-    This helper enforces a strict DeepSpeed contract for LLM workloads:
-
-    * **0 GPUs** — returns ``None`` (the ``accelerator=None`` code-path
-      in :class:`~agilerl.algorithms.core.base.LLMAlgorithm` handles
-      CPU-only training).
-    * When ``deepspeed_plugin`` is provided, returns an
-      ``Accelerator(deepspeed_plugin=...)``.
-    * Otherwise, instantiates ``Accelerator()`` and requires that a
-      DeepSpeed plugin is already present (for example via
-      ``accelerate config`` + ``accelerate launch``).
-      If no plugin is detected, raises ``RuntimeError`` with setup
-      instructions.
-
-    :param deepspeed_plugin: Explicit DeepSpeed plugin instance. If
-        omitted, this function expects a launch-configured plugin to be
-        present in ``Accelerator.state``.
-    :type deepspeed_plugin: DeepSpeedPlugin | None
-    :return: A configured ``Accelerator``, or ``None`` when no GPU is
-        available.
-    """
-    num_gpus = torch.cuda.device_count()
-
-    if num_gpus == 0:
-        logger.info("No GPUs detected — returning None (CPU-only path).")
-        return None
-
-    if deepspeed_plugin is not None:
-        return Accelerator(deepspeed_plugin=deepspeed_plugin)
-
-    accelerator = Accelerator()
-    if accelerator.state.deepspeed_plugin is None:
-        msg = (
-            "DeepSpeed is required for create_llm_accelerator(), but no "
-            "DeepSpeed plugin was detected. Use one of: "
-            "(1) run `accelerate config` and launch with `accelerate launch ...`; "
-            "(2) pass `deepspeed_plugin=` explicitly to create_llm_accelerator()."
-        )
-        raise RuntimeError(msg)
-    return accelerator
-
-
-def get_llm_accelerator(
-    base_accelerator: Accelerator | None,
-    idx: int,
-) -> Accelerator | None:
-    """Return a per-agent accelerator from a base accelerator.
-
-    ``idx == 0`` reuses ``base_accelerator``. For additional agents this helper
-    creates a fresh ``Accelerator`` instance so each LLM algorithm owns an
-    independent accelerator/engine reference.
-
-    :param base_accelerator: Accelerator passed into population creation.
-    :type base_accelerator: Accelerator | None
-    :param idx: Agent index in the population.
-    :type idx: int
-    :return: Accelerator for the specific agent, or ``None``.
-    :rtype: Accelerator | None
-    """
-    if idx < 0:
-        msg = f"Population index must be non-negative, got {idx}."
-        raise ValueError(msg)
-
-    if base_accelerator is None:
-        return None
-
-    if idx == 0:
-        return base_accelerator
-
-    return Accelerator()
-
-
 def cuda_tensor_bytes_in_module(module: torch.nn.Module) -> int:
     """Sum nbytes of parameters and buffers still on a CUDA device."""
     total = 0
@@ -1836,32 +1871,14 @@ def collect_trainable_param_stats(pop: PopulationType) -> dict[str, Any]:
 
 
 def resolve_llm_device(
-    accelerator: Accelerator | None,
     device: str | torch.device | None = None,
 ) -> str:
     """Resolve the training device for an LLM algorithm.
 
-    The accelerator outranks *device*: under ``accelerate``/DeepSpeed each rank
-    must own its own GPU, so a caller passing a bare ``"cuda"`` cannot be allowed
-    to collapse every rank onto device 0.
-
-    :param accelerator: Accelerator object, or ``None`` for single-process runs.
-    :type accelerator: accelerate.Accelerator | None
-    :param device: Caller-requested device, or ``None`` to auto-detect.
-    :type device: str | torch.device | None
-    :return: The rank's device under an accelerator, else *device*, else the best
-        locally available device.
-    :rtype: str
+    Pins to ``cuda:<local_rank>`` under distributed training via
+    :func:`agilerl.utils.distributed.resolve_device`.
     """
-    if accelerator is not None:
-        return f"cuda:{accelerator.process_index}"
-    if device is not None:
-        return str(device)
-    if torch.cuda.is_available():
-        return "cuda"
-    if torch.backends.mps.is_available():
-        return "mps"
-    return "cpu"
+    return resolve_device(device)
 
 
 def offload_colocated_trainer_from_gpu(unwrapped_model: torch.nn.Module) -> int:
@@ -2140,34 +2157,6 @@ def get_model_name_or_path(model: PreTrainedModel) -> str:
 
     msg = "Model name or path not found."
     raise ValueError(msg)
-
-
-def align_deepspeed_lr(lr: float, accelerator: Accelerator | None) -> float:
-    """Align the learning rate for DeepSpeed.
-
-    :param lr: The learning rate to align.
-    :type lr: float
-    :param accelerator: The accelerator to align the learning rate for.
-    :type accelerator: Accelerator | None
-    :return: The aligned learning rate.
-    :rtype: float
-    """
-    if accelerator is not None:
-        optim_lr = (
-            accelerator.state.deepspeed_plugin.deepspeed_config.get("optimizer", {})
-            .get("params", {})
-            .get("lr", None)
-        )
-        if optim_lr is not None and optim_lr != lr:
-            warnings.warn(
-                f"DeepSpeed learning rate is set to {optim_lr} but the argument 'lr' is set to {lr}. "
-                "Overwriting deepspeed learning rate with the argument 'lr'.",
-                stacklevel=2,
-            )
-            accelerator.state.deepspeed_plugin.deepspeed_config["optimizer"]["params"][
-                "lr"
-            ] = lr
-    return lr
 
 
 def sample_eval_prompts(

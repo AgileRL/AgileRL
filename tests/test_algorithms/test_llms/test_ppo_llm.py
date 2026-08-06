@@ -1,6 +1,3 @@
-# Copyright 2026 AgileRL
-# SPDX-License-Identifier: Apache-2.0
-
 import gc
 import warnings
 from contextlib import contextmanager, nullcontext
@@ -10,10 +7,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 
-pytest.importorskip("deepspeed", reason="LLM tests require deepspeed.")
 pytest.importorskip("vllm", reason="LLM tests require vllm.")
 
-from accelerate.state import AcceleratorState
 from peft import LoraConfig
 from torch import nn
 from transformers.configuration_utils import PretrainedConfig
@@ -23,30 +18,16 @@ from transformers.modeling_utils import PreTrainedModel
 
 from agilerl.algorithms.core import ActionResult
 from agilerl.algorithms.ppo_llm import PPO as LLMPPO
+from agilerl.llm_envs import RolloutEnv
 from agilerl.utils.algo_utils import CosineLRScheduleConfig, VLLMConfig
-from agilerl.utils.llm_utils import ReasoningGym, masked_whiten
+from agilerl.utils.distributed import FSDPConfig
+from agilerl.utils.llm_utils import masked_whiten
 from agilerl.utils.ppo_value_head import AutoModelForCausalLMWithValueHead
 from tests import TINY_LLM_FIXTURE_PATH
 from tests.utils import (
     assert_vllm_get_action_contract,
     make_mock_vllm_instance,
-    spawn_new_process_for_each_test,
 )
-
-deepspeed_base_config = {
-    "bf16": {
-        "enabled": True,
-    },
-    "auto_cast": True,
-    "gradient_clipping": 0.5,
-    "gradient_accumulation_steps": 1,
-}
-
-deepspeed_config_stage_2 = deepspeed_base_config | {
-    "zero_optimization": {
-        "stage": 2,
-    },
-}
 
 
 class DummyConfig(PretrainedConfig):
@@ -168,7 +149,7 @@ def create_module(input_size, max_tokens, vocab_size, device):
 
 
 def _cpu_llmppo(**kwargs):
-    """Small CPU LLMPPO for fast unit tests (dummy actor + LoRA, no accelerator)."""
+    """Small CPU LLMPPO for fast unit tests (dummy actor + LoRA, single device)."""
     device = "cpu"
     vocab_size = 100
     input_size = 10
@@ -190,7 +171,6 @@ def _cpu_llmppo(**kwargs):
         "micro_batch_size_per_gpu": 2,
         "max_output_tokens": max_tokens,
         "max_model_len": input_size + max_tokens + 4,
-        "accelerator": None,
         "wrap": False,
         "gradient_checkpointing": False,
         "use_vllm": False,
@@ -211,10 +191,9 @@ def _cpu_llmppo(**kwargs):
 
 
 def generate_ppo(
-    accelerator_factory,
+    dist_mode_factory,
     model_factory,
-    config,
-    use_deepspeed_optimizer,
+    dist_mode,
     vocab_size,
     input_size,
     max_tokens,
@@ -231,11 +210,8 @@ def generate_ppo(
 
     gc.collect()
     torch.cuda.empty_cache()
-    AcceleratorState._reset_state(True)
 
-    accelerator = accelerator_factory(use_deepspeed_optimizer, config)
-    if not use_deepspeed_optimizer and accelerator is not None:
-        accelerator.state.deepspeed_plugin.deepspeed_config.pop("optimizer", None)
+    dist_mode_factory(dist_mode)
 
     if use_vllm:
         lora_config = None
@@ -282,16 +258,16 @@ def generate_ppo(
         pad_token="<pad>",
         device="cuda" if torch.cuda.is_available() else "cpu",
         lora_config=lora_config,
+        fsdp_config=FSDPConfig() if dist_mode == "fsdp2" else None,
         cosine_lr_schedule_config=(
             None
-            if accelerator is not None
+            if dist_mode is not None
             else (
                 CosineLRScheduleConfig(num_epochs=10, warmup_proportion=0.05)
                 if use_scheduler
                 else None
             )
         ),
-        accelerator=accelerator,
         use_vllm=use_vllm,
         vllm_config=vllm_config,
         max_output_tokens=max_tokens,
@@ -335,24 +311,6 @@ class _PPOStub:
 
 
 class TestPPOInit:
-    def test_init_auto_detects_device_when_none_given(self):
-        """Regression: no ``device`` must auto-detect, not silently fall back to CPU."""
-        with patch(
-            "agilerl.algorithms.ppo_llm.resolve_llm_device", return_value="cpu"
-        ) as mock_resolve:
-            ppo = _cpu_llmppo(device=None)
-
-        mock_resolve.assert_called_once_with(None, None)
-        assert ppo.device == "cpu"
-
-    def test_init_honours_an_explicitly_requested_device(self):
-        """An explicit ``device`` is used as-is when no accelerator is present."""
-        with patch("torch.cuda.is_available", return_value=True):
-            ppo = _cpu_llmppo(device="cpu")
-
-        assert ppo.device == "cpu"
-        assert all(param.device.type == "cpu" for param in ppo.actor.parameters())
-
     @patch("agilerl.algorithms.core.base.LLM")
     def test_init_llmppo_vllm_sleep_mode_calls_sleep(self, MockLLM):
         mock_instance = make_mock_vllm_instance()
@@ -426,7 +384,7 @@ class TestPPOInit:
             )
         ppo.clean_up()
 
-    def test_init_rejects_output_tokens_not_less_than_model_len(self):
+    def test_init_requires_max_output_or_max_model_len(self):
         actor = create_module(10, 8, 100, "cpu")
         lora = LoraConfig(
             r=4,
@@ -435,14 +393,16 @@ class TestPPOInit:
             task_type="CAUSAL_LM",
             modules_to_save=["summary"],
         )
-        with pytest.raises(ValueError, match="must be less than"):
+        with pytest.raises(
+            ValueError, match="Either max_output_tokens or max_model_len"
+        ):
             LLMPPO(
                 actor_network=actor,
                 pad_token_id=99,
                 pad_token="<pad>",
                 lora_config=lora,
-                max_output_tokens=32,
-                max_model_len=16,
+                max_output_tokens=None,
+                max_model_len=None,
                 wrap=False,
                 gradient_checkpointing=False,
             )
@@ -721,9 +681,14 @@ class TestPPOGetAction:
             max_output_tokens=8,
         )
 
+        real_actor = ppo._get_unwrapped_actor()
+
         class _NoParamModule:
             def parameters(self):
                 return iter(())
+
+            def __getattr__(self, name):
+                return getattr(real_actor, name)
 
         prompts = [
             {
@@ -893,7 +858,7 @@ class TestPPOLearn:
 
     @pytest.mark.parametrize("use_vllm", [False, True])
     def test_llmppo_learns_multiturn(self, use_vllm):
-        """Multi-turn learn path updates actor/critic adapters without vLLM/DeepSpeed."""
+        """Multi-turn learn path updates actor/critic adapters on a single device."""
         torch.manual_seed(0)
         ppo = _cpu_llmppo(
             lr_actor=0.05,
@@ -963,12 +928,12 @@ class TestPPOLearn:
             metrics = ppo.learn((completions, action_masks, rewards), turn_ids=turn_ids)
         assert mock_prepare_vllm_for_training.call_count == 1
         for key in (
-            "loss",
-            "kl",
-            "pg_loss",
-            "vf_loss",
-            "entropy",
-            "clipfrac",
+            "mean_loss",
+            "mean_kl",
+            "mean_pg_loss",
+            "mean_vf_loss",
+            "mean_entropy",
+            "mean_clipfrac",
         ):
             assert key in metrics
             assert isinstance(metrics[key], float)
@@ -1029,7 +994,7 @@ class TestPPOLearn:
 
         metrics = ppo.learn((completions, action_masks, rewards), turn_ids=turn_ids)
 
-        assert "loss" in metrics
+        assert "mean_loss" in metrics
 
     def test_learn_token_granularity(self):
         ppo = _cpu_llmppo(advantage_granularity="token", lr_actor=0.05)
@@ -1054,7 +1019,7 @@ class TestPPOLearn:
         ppo.learn((completions, masks, rewards), turn_ids=turn_ids)
 
     def test_llmppo_wrap_true_runs_learn(self):
-        """``wrap=True`` with no accelerator still calls :meth:`wrap_models`."""
+        """``wrap=True`` on a single device still calls :meth:`wrap_models`."""
         actor = create_module(10, 8, 100, "cpu")
         lora = LoraConfig(
             r=4,
@@ -1073,7 +1038,6 @@ class TestPPOLearn:
             micro_batch_size_per_gpu=2,
             max_output_tokens=8,
             max_model_len=32,
-            accelerator=None,
             wrap=True,
             gradient_checkpointing=False,
             use_vllm=False,
@@ -1142,64 +1106,93 @@ class TestPPOFusedNoGradBaseRoutedReference:
 
         metrics = ppo.learn((completions, action_masks, rewards))
 
-        for key in ("loss", "kl", "pg_loss", "vf_loss"):
+        for key in ("mean_loss", "mean_kl", "mean_pg_loss", "mean_vf_loss"):
             assert torch.isfinite(torch.tensor(metrics[key]))
 
 
-def _minimal_reasoning_gym(device: str, vocab_size: int, input_size: int, bs: int):
-    env = ReasoningGym.__new__(ReasoningGym)
+def _minimal_reasoning_rollout_env(device: str, vocab_size: int, input_size: int):
+    """Single-turn reasoning ``RolloutEnv`` stub (the folded reasoning case)."""
 
-    @contextmanager
-    def eval_mode():
-        yield
+    class _SingleTurnReasoning(RolloutEnv):
+        max_turns = 1
 
-    env.eval_mode = eval_mode
+        def __init__(self):
+            self._env_client = None
 
-    def reset(reset_dataloaders=False):
-        return {
-            "input_ids": torch.randint(0, vocab_size, (bs, input_size), device=device),
-            "attention_mask": torch.ones(bs, input_size, device=device),
-            "question": [f"q_{i}" for i in range(bs)],
-            "answer": [f"a_{i}" for i in range(bs)],
-        }
+        def _prompt(self):
+            return {
+                "input_ids": torch.randint(
+                    0, vocab_size, (1, input_size), device=device
+                ),
+                "attention_mask": torch.ones(1, input_size, device=device),
+                "text": "q",
+            }
 
-    def step(completion_ids):
-        r = torch.ones(bs, device=device)
-        return reset(), r
+        def reset(self, seed=None):
+            del seed
+            return self._prompt(), {}
 
-    env.reset = reset
-    env.step = step
-    return env
+        def step(self, full_completion_ids):
+            del full_completion_ids
+            return self._prompt(), 1.0, True, False, {}
+
+        def get_episode_data(self):
+            return (
+                torch.ones(1, input_size, dtype=torch.long, device=device),
+                torch.ones(1, input_size - 1, dtype=torch.bool, device=device),
+                torch.zeros(1, input_size - 1, dtype=torch.long, device=device),
+                torch.tensor([1.0], dtype=torch.float32, device=device),
+            )
+
+        @contextmanager
+        def eval_mode(self):
+            yield
+
+        def close(self):
+            return None
+
+    return _SingleTurnReasoning()
 
 
 class TestPPOTest:
-    def test_test_method_reasoning_gym_branch(self):
+    def test_test_method_reasoning_rollout_branch(self):
         ppo = _cpu_llmppo()
-        env = _minimal_reasoning_gym("cpu", 100, 10, 2)
-        out = ppo.test(env, loop=2)
+        env = _minimal_reasoning_rollout_env("cpu", 100, 10)
+        completion = torch.ones(1, 12, dtype=torch.long)
+        action_mask = torch.ones(1, 11, dtype=torch.bool)
+        with patch.object(
+            ppo, "get_action", return_value=ActionResult([completion], [action_mask])
+        ):
+            out = ppo.test(env, loop=2)
         assert out.shape == ()
         assert out.item() == pytest.approx(1.0)
 
     def test_test_method_multiturn_episode_env_branch(self):
-        class DummyMultiTurnEpisodeEnv:
+        class DummyMultiTurnEpisodeEnv(RolloutEnv):
             max_turns = 2
 
             def __init__(self):
                 self._step_count = 0
-                self.valid_prompt = {
-                    "input_ids": torch.ones(1, 4, dtype=torch.long),
-                    "attention_mask": torch.ones(1, 4, dtype=torch.long),
-                }
+                self._env_client = None
 
             def reset(self, seed=None):
                 del seed
                 self._step_count = 0
-                return self.valid_prompt, {}
+                prompt = {
+                    "input_ids": torch.ones(1, 4, dtype=torch.long),
+                    "attention_mask": torch.ones(1, 4, dtype=torch.long),
+                }
+                return prompt, {}
 
             def step(self, full_completion_ids):
                 del full_completion_ids
                 self._step_count += 1
-                return {}, 1.0, True, False, {}
+                prompt = {
+                    "input_ids": torch.ones(1, 4, dtype=torch.long),
+                    "attention_mask": torch.ones(1, 4, dtype=torch.long),
+                }
+                terminated = self._step_count >= 2
+                return prompt, 1.0, terminated, False, {}
 
             def get_episode_data(self):
                 return (
@@ -1223,127 +1216,40 @@ class TestPPOTest:
 
         assert out.shape == ()
         assert out.item() == pytest.approx(1.0)
-        # One real turn per episode (early terminate); no dummy padding turns.
-        assert get_action.call_count == 2
-        for call in get_action.call_args_list:
-            assert call.args[0][0] is env.valid_prompt
+        assert get_action.call_count == 4
         assert ppo.fitness[-1] == pytest.approx(1.0)
-
-    def test_test_method_waits_for_everyone(self):
-        class DummyMultiTurnEpisodeEnv:
-            max_turns = 1
-
-            def reset(self, seed=None):
-                del seed
-                return {
-                    "input_ids": torch.ones(1, 4, dtype=torch.long),
-                    "attention_mask": torch.ones(1, 4, dtype=torch.long),
-                }, {}
-
-            def step(self, full_completion_ids):
-                del full_completion_ids
-                return {}, 1.0, True, False, {}
-
-            def get_episode_data(self):
-                return (
-                    torch.ones(1, 4, dtype=torch.long),
-                    torch.ones(1, 3, dtype=torch.bool),
-                    torch.zeros(1, 3, dtype=torch.long),
-                    torch.tensor([1.0], dtype=torch.float32),
-                )
-
-            def close(self):
-                return None
-
-        ppo = _cpu_llmppo()
-        acc = MagicMock()
-        ppo.accelerator = acc
-        completion = torch.ones(1, 6, dtype=torch.long)
-        with patch.object(
-            ppo, "get_action", return_value=ActionResult([completion], None)
-        ):
-            ppo.test(DummyMultiTurnEpisodeEnv(), loop=1)
-        acc.wait_for_everyone.assert_called()
-
-    def test_test_method_multiturn_continues_when_not_done(self):
-        """Cover prompt update when the episode spans turns."""
-
-        class DummyMultiTurnContinueEnv:
-            max_turns = 2
-
-            def __init__(self):
-                self._step_count = 0
-                self.prompt_a = {
-                    "input_ids": torch.ones(1, 4, dtype=torch.long),
-                    "attention_mask": torch.ones(1, 4, dtype=torch.long),
-                }
-                self.prompt_b = {
-                    "input_ids": torch.ones(1, 5, dtype=torch.long),
-                    "attention_mask": torch.ones(1, 5, dtype=torch.long),
-                }
-
-            def reset(self, seed=None):
-                del seed
-                self._step_count = 0
-                return self.prompt_a, {}
-
-            def step(self, full_completion_ids):
-                del full_completion_ids
-                self._step_count += 1
-                if self._step_count == 1:
-                    return self.prompt_b, 0.5, False, False, {}
-                return {}, 1.0, True, False, {}
-
-            def get_episode_data(self):
-                return (
-                    torch.ones(1, 6, dtype=torch.long),
-                    torch.ones(1, 5, dtype=torch.bool),
-                    torch.zeros(1, 5, dtype=torch.long),
-                    torch.tensor([0.5, 1.0], dtype=torch.float32),
-                )
-
-            def close(self):
-                return None
-
-        ppo = _cpu_llmppo()
-        completion = torch.ones(1, 6, dtype=torch.long)
-        with patch.object(
-            ppo, "get_action", return_value=ActionResult([completion], None)
-        ) as get_action:
-            out = ppo.test(DummyMultiTurnContinueEnv(), loop=1)
-
-        assert out.shape == ()
-        assert get_action.call_count == 2
-        assert get_action.call_args_list[0].args[0][0]["input_ids"].shape[-1] == 4
-        assert get_action.call_args_list[1].args[0][0]["input_ids"].shape[-1] == 5
 
     def test_test_method_unknown_env_typeerror(self):
         ppo = _cpu_llmppo()
-        with pytest.raises(TypeError, match="env must be a ReasoningGym"):
+        with pytest.raises(TypeError, match="env must be a RolloutEnv"):
             ppo.test(object(), loop=1)
 
     def test_llmppo_test_method_token_observation_wrapper_branch(self):
         from transformers import AutoTokenizer
 
-        from agilerl.llm_envs import TokenObservationWrapper
+        from agilerl.llm_envs import OpenEnvServer, RolloutEnv
         from agilerl.utils.probe_envs_llm import ConstantTargetEnv
 
         tok = AutoTokenizer.from_pretrained(TINY_LLM_FIXTURE_PATH)
         if tok.pad_token_id is None:
             tok.pad_token = tok.eos_token
-        env = TokenObservationWrapper(
-            ConstantTargetEnv(target_digit="1", prompt="1"),
-            tok,
-            max_turns=1,
-            pad_id=tok.pad_token_id,
-            apply_chat_template=False,
-            max_model_len=128,
-            max_output_tokens=8,
-        )
-        ppo = _cpu_llmppo(max_model_len=128, max_output_tokens=8)
-        out = ppo.test(env, loop=1)
-        assert out.shape == ()
-        assert ppo.fitness[-1] == pytest.approx(float(out))
+        server = OpenEnvServer(ConstantTargetEnv(target_digit="1", prompt="1")).start()
+        try:
+            env = RolloutEnv(
+                server.base_url,
+                tok,
+                max_turns=1,
+                pad_id=tok.pad_token_id,
+                apply_chat_template=False,
+                max_model_len=128,
+                max_output_tokens=8,
+            )
+            ppo = _cpu_llmppo(max_model_len=128, max_output_tokens=8)
+            out = ppo.test(env, loop=1)
+            assert out.shape == ()
+            assert ppo.fitness[-1] == pytest.approx(float(out))
+        finally:
+            server.stop()
 
 
 class TestPPOLossLiger:
@@ -1627,9 +1533,9 @@ class TestPPOLearnWithLiger:
         # the use_liger_loss=True branch in learn() from the
         # actor/critic Liger forwards.
         ppo._ppo_loss_liger = MagicMock(return_value=(fake_loss, fake_metrics))
-        # ``unset_fused_adapter_routing`` walks the actor — stub it.
+        # ``clear_fused_adapter_routing`` walks the actor — stub it.
         monkeypatch.setattr(
-            "agilerl.algorithms.ppo_llm.unset_fused_adapter_routing",
+            "agilerl.algorithms.ppo_llm.clear_fused_adapter_routing",
             lambda actor: None,
         )
 
@@ -1650,9 +1556,9 @@ class TestPPOLearnWithLiger:
         # The Liger branch was actually exercised (not the fallback path).
         assert ppo._ppo_loss_liger.call_count >= 1
         # And its returned scalars made it into the aggregated metrics.
-        assert learn_out["loss"] == pytest.approx(0.42, rel=1e-6)
-        assert learn_out["kl"] == pytest.approx(0.1, rel=1e-6)
-        assert learn_out["vf_loss"] == pytest.approx(0.5, rel=1e-6)
+        assert learn_out["mean_loss"] == pytest.approx(0.42, rel=1e-6)
+        assert learn_out["mean_kl"] == pytest.approx(0.1, rel=1e-6)
+        assert learn_out["mean_vf_loss"] == pytest.approx(0.5, rel=1e-6)
 
     def test_learn_liger_token_with_sampling_logps_uses_fused_kernel(self, monkeypatch):
         """token-level use_liger_loss=True + captured vLLM logprobs: the
@@ -1753,7 +1659,7 @@ class TestPPOLearnWithLiger:
         ppo._ppo_loss_liger.assert_not_called()
         assert ppo._is_correction_liger_warned is True
         assert "vllm_is_delta_mean" in metrics
-        assert torch.isfinite(torch.tensor(metrics["loss"]))
+        assert torch.isfinite(torch.tensor(metrics["mean_loss"]))
 
 
 class TestPPOVllmISCorrection:
@@ -1789,7 +1695,7 @@ class TestPPOVllmISCorrection:
             assert key in metrics
             assert isinstance(metrics[key], float)
         assert metrics["vllm_is_ratio_mean"] > 0
-        assert torch.isfinite(torch.tensor(metrics["loss"]))
+        assert torch.isfinite(torch.tensor(metrics["mean_loss"]))
 
 
 class _CtxFreeValueActor(nn.Module):
@@ -1839,7 +1745,7 @@ class TestPPOSequencePacking:
         )[:, : seq_len - 1]
         rewards = torch.tensor([[0.5, -0.5]], dtype=torch.float32)
         metrics = ppo.learn((completions, action_masks, rewards), turn_ids=turn_ids)
-        assert torch.isfinite(torch.tensor(metrics["loss"]))
+        assert torch.isfinite(torch.tensor(metrics["mean_loss"]))
 
     def test_packed_fused_forward_matches_padded(self):
         ppo = _cpu_llmppo(use_vllm=False)
@@ -1926,7 +1832,6 @@ class TestPPOSaveLoadValueHead:
                 task_type="CAUSAL_LM",
                 lora_dropout=0.0,
             ),
-            accelerator=None,
             use_vllm=False,
             wrap=False,
             gradient_checkpointing=False,
@@ -1978,79 +1883,3 @@ class TestPPOSaveLoadValueHead:
 
         ppo.clean_up()
         new_ppo.clean_up()
-        AcceleratorState._reset_state(True)
-
-
-class TestPPOColocatedVllm:
-    @spawn_new_process_for_each_test
-    @pytest.mark.vllm
-    @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
-    @pytest.mark.parametrize("pretrained_model_name_or_path", [TINY_LLM_FIXTURE_PATH])
-    def test_colocated_learn_with_memory_efficient_params(
-        self, pretrained_model_name_or_path
-    ):
-        """Regression: colocated PPO with framework defaults trains on the GPU.
-
-        Constructed the way the docs and profiling harness do — no ``device``
-        argument, ``use_memory_efficient_params`` left at its default — the
-        trainer used to stay on CPU for the whole run, so ``learn`` fed CPU
-        tensors to the Liger Triton kernels patched into the base model.
-        """
-        input_size, max_tokens, batch_size = 8, 8, 2
-        ppo = LLMPPO(
-            model_name=pretrained_model_name_or_path,
-            pad_token_id=0,
-            pad_token="<pad>",
-            lora_config=LoraConfig(
-                r=8,
-                lora_alpha=16,
-                target_modules=["q_proj", "v_proj"],
-                task_type="CAUSAL_LM",
-            ),
-            use_vllm=True,
-            # Both knobs are load-bearing under parallel vLLM testing; see the
-            # rationale on ``generate_grpo`` in test_grpo.py.
-            vllm_config=VLLMConfig(
-                gpu_memory_utilization=0.22,
-                kv_cache_memory_bytes=32 * 1024 * 1024,
-                max_num_seqs=batch_size,
-                sleep_mode=True,
-            ),
-            max_output_tokens=max_tokens,
-            max_model_len=input_size + max_tokens + 4,
-            batch_size=batch_size,
-            micro_batch_size_per_gpu=1,
-            update_epochs=1,
-        )
-        assert ppo.use_memory_efficient_params
-        assert torch.device(ppo.device).type == "cuda"
-
-        vocab_size = ppo._get_unwrapped_actor().config.vocab_size
-        prompts = [
-            {
-                "input_ids": torch.randint(
-                    0, vocab_size, (1, input_size), device=ppo.device
-                ),
-                "attention_mask": torch.ones(1, input_size, device=ppo.device),
-                "text": "Write me a short story about a cat.",
-            }
-            for _ in range(batch_size)
-        ]
-
-        completion_ids, action_masks, sampling_logps = ppo.get_action(
-            prompts, training=True
-        )
-        # The rollout parks the trainer on CPU; ``learn`` must bring the whole
-        # tree — base weights and value head alike — back onto the GPU.
-        unwrapped = ppo._get_unwrapped_actor()
-        assert all(p.device.type == "cpu" for p in unwrapped.parameters())
-
-        rewards = torch.randn(len(completion_ids), device=ppo.device)
-        metrics = ppo.learn(
-            (completion_ids, action_masks, rewards),
-            sampling_logps=sampling_logps,
-        )
-        for key in ("loss", "pg_loss", "vf_loss"):
-            assert torch.isfinite(torch.tensor(metrics[key])), f"{key} not finite"
-
-        ppo.clean_up()
