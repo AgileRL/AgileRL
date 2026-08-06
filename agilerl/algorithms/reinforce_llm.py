@@ -10,7 +10,6 @@ from typing import TYPE_CHECKING, Any, Literal
 import numpy as np
 import numpy.typing as npt
 import torch
-from accelerate import Accelerator
 
 from agilerl import HAS_LIGER_KERNEL, HAS_LLM_DEPENDENCIES
 from agilerl.algorithms.core import ActionResult, LLMAlgorithm
@@ -42,18 +41,18 @@ from agilerl.utils.algo_utils import (
     get_experiences_samples,
     stack_and_pad_experiences,
 )
+from agilerl.utils.distributed import FSDPConfig, barrier, resolve_device
 from agilerl.utils.llm_utils import (
     BitsAndBytesConfig,
     aggregate_metrics_dict,
-    build_completion_mask,
+    attention_mask_from_padded_ids,
+    build_hf_completion_mask,
     clipped_is_surrogate,
     is_reasoning_prompts,
     masked_mean,
     normalize_reasoning_prompt_batch,
     pool_by_turns,
     prepare_prompt_hf_generate,
-    resolve_llm_device,
-    stitch_completion_after_windowed_hf_generate,
     validate_importance_sampling_level,
     validate_llm_context_lengths,
 )
@@ -131,16 +130,17 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
         own base to CPU during rollout (and bring it back for the training step)
         so the rollout engine and the trainer never both hold a base on the GPU.
         Defaults to True; inert without colocated vLLM, and disabled under
-        DeepSpeed ZeRO-3.
+        FSDP2 sharding.
     :type use_memory_efficient_params: bool
     :param lora_config: LoRA adapter configuration.
     :type lora_config: LoraConfig | None
     :param cosine_lr_schedule_config: Cosine LR schedule configuration.
     :type cosine_lr_schedule_config: CosineLRScheduleConfig | None
-    :param accelerator: HuggingFace Accelerator for distributed training.
-    :type accelerator: Accelerator | None
-    :param device: Device to train on. Ignored when an accelerator is given (each rank
-        owns its own GPU); ``None`` auto-detects CUDA/MPS/CPU.
+    :param gradient_accumulation_steps: Micro-batches to accumulate per optimizer step, defaults to 1
+    :type gradient_accumulation_steps: int, optional
+    :param fsdp_config: FSDP2 sharding settings for distributed runs, defaults to None
+    :type fsdp_config: FSDPConfig | None, optional
+    :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str
     :param wrap: Wrap models for distributed training upon creation.
     :type wrap: bool
@@ -265,7 +265,8 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
         hf_generate_chunk_size: int | None = None,
         lora_config: LoraConfig | None = None,
         cosine_lr_schedule_config: CosineLRScheduleConfig | None = None,
-        accelerator: Accelerator | None = None,
+        gradient_accumulation_steps: int = 1,
+        fsdp_config: FSDPConfig | None = None,
         device: str | torch.device | None = None,
         wrap: bool = True,
         clone: bool = False,
@@ -290,7 +291,7 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
         vllm_importance_sampling_cap: float = 2.0,
     ) -> None:
 
-        resolved_device = resolve_llm_device(accelerator, device)
+        resolved_device = resolve_device(device)
         super().__init__(
             index=index,
             batch_size=batch_size,
@@ -316,7 +317,8 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
             hp_config=hp_config,
             wrap=wrap,
             device=resolved_device,
-            accelerator=accelerator,
+            gradient_accumulation_steps=gradient_accumulation_steps,
+            fsdp_config=fsdp_config,
             name="LLMREINFORCE",
             gradient_checkpointing=gradient_checkpointing,
             torch_compiler=torch_compiler,
@@ -388,11 +390,14 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
             self.actor.eval()
             if not self.use_vllm:
                 actor_module = self._get_unwrapped_actor()
-                try:
-                    actor_device = next(actor_module.parameters()).device
-                except StopIteration:
+                if self.distributed and self.fsdp_config is not None:
                     actor_device = torch.device(self.device)
-                with torch.inference_mode(), self._amp_ctx():
+                else:
+                    try:
+                        actor_device = next(actor_module.parameters()).device
+                    except StopIteration:
+                        actor_device = torch.device(self.device)
+                with torch.no_grad(), self._amp_ctx():
                     completion_ids = []
                     completion_masks = []
 
@@ -417,21 +422,15 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
                                 attention_mask=attention_mask,
                                 generation_config=self.generation_config,
                             )
-                            completion_id, full_prompt_len = (
-                                stitch_completion_after_windowed_hf_generate(
-                                    completion_id,
-                                    stitch_ids,
-                                    initial_prompt_len,
-                                )
+                            completion_id, completion_mask = build_hf_completion_mask(
+                                completion_id,
+                                input_ids.shape[1],
+                                initial_prompt_len,
+                                stitch_ids,
+                                self.pad_token_id,
                             )
                             completion_ids.append(completion_id)
-                            completion_masks.append(
-                                build_completion_mask(
-                                    completion_id,
-                                    full_prompt_len,
-                                    self.pad_token_id,
-                                )
-                            )
+                            completion_masks.append(completion_mask)
             else:
                 self._prepare_vllm_for_generation()
                 (
@@ -697,7 +696,6 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
         completion_list = experiences[0]
         completion_length = float(np.mean([c.shape[-1] for c in completion_list]))
         agg = aggregate_metrics_dict(
-            self.accelerator,
             {
                 "loss": averaged["loss"],
                 "kl": averaged["kl"],
@@ -778,8 +776,8 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
                 raise TypeError(msg)
         mean_fit = torch.mean(reward_tensor.float()).item()
         self.metrics.add_fitness(mean_fit)
-        if self.accelerator is not None:
-            self.accelerator.wait_for_everyone()
+        if self.distributed:
+            barrier()
         return np.array(mean_fit)
 
     def _validate_core_args(
@@ -1007,7 +1005,9 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
         lm_head_weight = lm_head.weight
         lm_head_bias = lm_head.bias
 
-        attention_mask = (batch_ids != self.pad_token_id).long()
+        attention_mask = attention_mask_from_padded_ids(
+            batch_ids, self.pad_token_id
+        ).long()
         kwargs: dict[str, Any] = {
             "input_ids": batch_ids,
             "attention_mask": attention_mask,
@@ -1031,29 +1031,31 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
         # hidden[:, :-1]. Token level token-flattens the hidden states so the
         # fused kernel chunks tokens (bounded); turn/sequence keep the batch
         # path. beta=0: KL handled upstream via the ReBN advantage.
-        loss, aux = apply_fused_policy_loss(
-            policy_hidden[:, :-1],
-            lm_head_weight,
-            lm_head_bias,
-            target_ids,
-            mask,
-            advantages,
-            ref_log_probs,
-            old_log_probs,
-            0.0,  # beta
-            self.clip_coef,  # epsilon_low
-            self.clip_coef,  # epsilon_high
-            self.temperature,
-            is_level,
-            turn_ids=turn_ids_arg,
-            full_turn_mask=full_turn_mask,
-            max_turns=max_turns,
-            token_chunk_size=self._resolve_fused_chunk_rows(
-                lm_head_weight.shape[0], self.chunk_rows
-            ),
-            turn_log_ratio_reduction=self.turn_ratio_pooling,
-            vllm_is_ratio=vllm_is_ratio,
-        )
+        with self._liger_head_gather():
+            loss, aux = apply_fused_policy_loss(
+                policy_hidden[:, :-1],
+                lm_head_weight,
+                lm_head_bias,
+                target_ids,
+                mask,
+                advantages,
+                ref_log_probs,
+                old_log_probs,
+                0.0,  # beta
+                self.clip_coef,  # epsilon_low
+                self.clip_coef,  # epsilon_high
+                self.temperature,
+                is_level,
+                turn_ids=turn_ids_arg,
+                full_turn_mask=full_turn_mask,
+                max_turns=max_turns,
+                token_chunk_size=self._resolve_fused_chunk_rows(
+                    getattr(lm_head_weight, "ds_shape", lm_head_weight.shape)[0],
+                    self.chunk_rows,
+                ),
+                turn_log_ratio_reduction=self.turn_ratio_pooling,
+                vllm_is_ratio=vllm_is_ratio,
+            )
         # aux = [kl, clipfrac, pg_loss, entropy] scalars in fp32.
         metrics = {
             "kl": float(aux[0].item()),

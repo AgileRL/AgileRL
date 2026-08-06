@@ -51,7 +51,6 @@ box2d = [
 llm = [
     "bitsandbytes==0.49.2; sys_platform == 'linux'",
     "datasets==5.0.1",
-    "deepspeed>=0.19.1; sys_platform == 'linux'",
     "liger-kernel==0.8.1; sys_platform == 'linux'",
     "peft==0.19.1",
     "transformers==5.14.1",
@@ -115,7 +114,7 @@ filterwarnings = [
 ]
 markers = [
     "vllm: tests that actually instantiate vllm.LLM (exclude with -m 'not vllm'). Pinned to a single xdist worker because vLLM's GPU memory profiling fails when peer workers free memory mid-init.",
-    "gpu: tests that use a GPU (CUDA, DeepSpeed, etc.) but do NOT initialise real vLLM (exclude with -m 'not gpu'). Safe to fan out across multiple xdist workers.",
+    "gpu: tests that use a GPU (CUDA, etc.) but do NOT initialise real vLLM (exclude with -m 'not gpu'). Safe to fan out across multiple xdist workers.",
 ]
 
 [tool.coverage.run]
@@ -140,12 +139,8 @@ build-backend = "hatchling.build"
 # (not an isolated one), where it can see system PATH and find swig, which is already installed as a dependency
 # (no-build-isolation packages are built after the others).
 #
-# DeepSpeed can be built with env vars to specify compiler flags
-# e.g. DS_BUILD_FUSED_ADAM=1 is essential on L4 GPU
-# to pre-build the fused Adam kernel and prevent timeout during tests.
 no-build-isolation-package = [
     "box2d-py",
-    "deepspeed"
 ]
 
 # Overrides replace upstream transitive pins.
@@ -182,13 +177,15 @@ python-version = "3.13"
 [tool.ty.src]
 include = ["agilerl", "agilerl/arena"]
 
-# Imports that only resolve on some platforms/extras: vllm, deepspeed and
-# liger_kernel are Linux-only; Box2D needs the box2d extra. CI (Linux,
+# Imports that only resolve on some platforms/extras: vllm and liger_kernel are
+# Linux-only; Box2D needs the box2d extra. CI (Linux,
 # --extra all) resolves them; macOS/Windows checkouts cannot.
 [[tool.ty.overrides]]
 include = [
     "agilerl/algorithms/core/base.py",
     "agilerl/algorithms/core/llm_ops/fused_loss.py",
+    "agilerl/algorithms/core/llm_ops/moe_lora.py",
+    "agilerl/algorithms/core/llm_ops/vllm_colocate.py",
     "agilerl/algorithms/grpo.py",
     "agilerl/algorithms/sft.py",
     "agilerl/utils/llm_utils.py",
@@ -197,7 +194,7 @@ include = [
 
 [tool.ty.overrides.rules]
 unresolved-import = "ignore"
-# Suppressions these files need on Linux (where vllm/liger/deepspeed resolve
+# Suppressions these files need on Linux (where vllm/liger resolve
 # and their base classes become checkable) are necessarily unused elsewhere.
 unused-ignore-comment = "ignore"
 

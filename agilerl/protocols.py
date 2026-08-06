@@ -635,6 +635,18 @@ class PeftModelProtocol(Protocol):
     ) -> "PeftModelProtocol": ...
 
 
+class DTensorLike(Protocol):
+    """Tensor that can materialize a full (unsharded) copy via ``full_tensor``.
+
+    Structural stand-in for :class:`~torch.distributed.tensor.DTensor` used by
+    FSDP2 gather helpers when the concrete type may be unavailable at import.
+    """
+
+    requires_grad: bool
+
+    def full_tensor(self) -> torch.Tensor: ...
+
+
 @runtime_checkable
 class BanditEnvProtocol(Protocol):
     """Protocol for contextual bandit environments.

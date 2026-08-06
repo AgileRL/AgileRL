@@ -13,6 +13,12 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from agilerl import HAS_LLM_DEPENDENCIES, AgentType
 from agilerl.models.networks import NetworkSpec
+from agilerl.utils.distributed import get_world_size, is_distributed
+from agilerl.utils.llm_utils import (
+    apply_pad_token_id,
+    load_pad_token_configs,
+    resolve_pad_token_id,
+)
 
 if TYPE_CHECKING:
     import torch
@@ -567,7 +573,6 @@ class LLMAlgorithmSpec(AlgorithmSpec):
         tokenizer: PreTrainedTokenizerBase | None = None,
         index: int = 0,
         resume_from_checkpoint: str | None = None,
-        accelerator: Accelerator | None = None,
         device: str | torch.device = "cpu",
         actor_network: Any | None = None,  # noqa: ANN401 -- concrete HF/PEFT models (PreTrainedModelType) forwarded here do not structurally satisfy PreTrainedModelProtocol under ty (device attr variance)
     ) -> LLMAlgorithm:
@@ -579,8 +584,6 @@ class LLMAlgorithmSpec(AlgorithmSpec):
         :type index: int
         :param resume_from_checkpoint: Path to resume from checkpoint.
         :type resume_from_checkpoint: str | None
-        :param accelerator: HuggingFace ``Accelerator`` instance.
-        :type accelerator: Accelerator | None
         :param device: Torch device. Defaults to "cpu".
         :type device: str | torch.device
         :param actor_network: Pre-built or cloned actor network. When provided,
@@ -594,6 +597,10 @@ class LLMAlgorithmSpec(AlgorithmSpec):
         if tokenizer is None:
             msg = "LLMAlgorithmSpec.build_algorithm requires a tokenizer."
             raise ValueError(msg)
+
+        micro_batch_size_per_gpu = None
+        if is_distributed():
+            micro_batch_size_per_gpu = max(self.batch_size // get_world_size(), 1)
 
         use_vllm = getattr(self, "use_vllm", False)
         if not use_vllm and hasattr(self, "vllm_config"):
@@ -630,13 +637,37 @@ class LLMAlgorithmSpec(AlgorithmSpec):
             model_config.setdefault("attn_implementation", attn_implementation)
             kwargs["model_config"] = model_config
 
+        model_config = None
+        generation_config = None
+        if actor_network is not None:
+            model_config = getattr(actor_network, "config", None)
+            generation_config = getattr(actor_network, "generation_config", None)
+        if model_config is None:
+            model_config, generation_config = load_pad_token_configs(
+                self.pretrained_model_name_or_path
+            )
+
+        pad_token_id, pad_source = resolve_pad_token_id(
+            tokenizer,
+            model_config=model_config,
+            generation_config=generation_config,
+        )
+        apply_pad_token_id(tokenizer, pad_token_id)
+        logger.info(
+            "Resolved algorithm pad_token_id=%s from %s (eos_token_id=%s)",
+            pad_token_id,
+            pad_source,
+            getattr(tokenizer, "eos_token_id", None),
+        )
+
+        kwargs.pop("micro_batch_size_per_gpu", None)
         algo_cls = self.algo_class()
         algo = algo_cls(
             model_name=self.pretrained_model_name_or_path,
-            pad_token_id=tokenizer.eos_token_id,
-            pad_token=tokenizer.eos_token,
-            accelerator=accelerator,
+            pad_token_id=pad_token_id,
+            pad_token=tokenizer.pad_token,
             index=index,
+            micro_batch_size_per_gpu=micro_batch_size_per_gpu,
             device=device,
             actor_network=actor_network,
             **kwargs,

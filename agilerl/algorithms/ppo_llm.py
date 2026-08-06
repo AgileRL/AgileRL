@@ -10,7 +10,6 @@ from typing import TYPE_CHECKING, Any, Literal
 import numpy as np
 import numpy.typing as npt
 import torch
-from accelerate import Accelerator
 
 from agilerl import HAS_LIGER_KERNEL, HAS_LLM_DEPENDENCIES
 from agilerl.algorithms.core import ActionResult, LLMAlgorithm
@@ -43,10 +42,12 @@ from agilerl.utils.algo_utils import (
     get_experiences_samples,
     stack_and_pad_experiences,
 )
+from agilerl.utils.distributed import FSDPConfig, barrier, resolve_device
 from agilerl.utils.llm_utils import (
     BitsAndBytesConfig,
     aggregate_metrics_dict,
-    build_completion_mask,
+    attention_mask_from_padded_ids,
+    build_hf_completion_mask,
     calculate_k3_kl,
     clipped_is_surrogate,
     is_reasoning_prompts,
@@ -55,8 +56,6 @@ from agilerl.utils.llm_utils import (
     normalize_reasoning_prompt_batch,
     pool_by_turns,
     prepare_prompt_hf_generate,
-    resolve_llm_device,
-    stitch_completion_after_windowed_hf_generate,
     validate_importance_sampling_level,
     validate_llm_context_lengths,
 )
@@ -135,10 +134,11 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
     :type lora_config: LoraConfig | None, optional
     :param cosine_lr_schedule_config: Cosine LR scheduler configuration.
     :type cosine_lr_schedule_config: CosineLRScheduleConfig | None, optional
-    :param accelerator: Optional HuggingFace ``Accelerator`` instance.
-    :type accelerator: Accelerator | None, optional
-    :param device: Device to train on. Ignored when an accelerator is given (each rank
-        owns its own GPU); ``None`` auto-detects CUDA/MPS/CPU.
+    :param gradient_accumulation_steps: Micro-batches to accumulate per optimizer step, defaults to 1
+    :type gradient_accumulation_steps: int, optional
+    :param fsdp_config: FSDP2 sharding settings for distributed runs, defaults to None
+    :type fsdp_config: FSDPConfig | None, optional
+    :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str, optional
     :param wrap: Whether to wrap models for distributed execution.
     :type wrap: bool, optional
@@ -150,7 +150,7 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
         own base to CPU during rollout (and bring it back for the training step)
         so the rollout engine and the trainer never both hold a base on the GPU.
         Defaults to True; inert without colocated vLLM, and disabled under
-        DeepSpeed ZeRO-3.
+        FSDP2 sharding.
     :type use_memory_efficient_params: bool, optional
     :param vllm_config: vLLM runtime configuration.
     :type vllm_config: VLLMConfig | None, optional
@@ -285,7 +285,8 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
         hf_generate_chunk_size: int | None = None,
         lora_config: LoraConfig | None = None,
         cosine_lr_schedule_config: CosineLRScheduleConfig | None = None,
-        accelerator: Accelerator | None = None,
+        gradient_accumulation_steps: int = 1,
+        fsdp_config: FSDPConfig | None = None,
         device: str | torch.device | None = None,
         wrap: bool = True,
         clone: bool = False,
@@ -316,7 +317,7 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
         vllm_importance_sampling_cap: float = 2.0,
     ) -> None:
 
-        resolved_device = resolve_llm_device(accelerator, device)
+        resolved_device = resolve_device(device)
         super().__init__(
             index=index,
             batch_size=batch_size,
@@ -343,7 +344,8 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
             use_memory_efficient_params=use_memory_efficient_params,
             wrap=wrap,
             device=resolved_device,
-            accelerator=accelerator,
+            gradient_accumulation_steps=gradient_accumulation_steps,
+            fsdp_config=fsdp_config,
             name="LLMPPO",
             gradient_checkpointing=gradient_checkpointing,
             torch_compiler=torch_compiler,
@@ -439,11 +441,14 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
             self.actor.eval()
             if not self.use_vllm:
                 actor_module = self._get_unwrapped_actor()
-                try:
-                    actor_device = next(actor_module.parameters()).device
-                except StopIteration:
+                if self.distributed and self.fsdp_config is not None:
                     actor_device = torch.device(self.device)
-                with torch.inference_mode(), self._amp_ctx():
+                else:
+                    try:
+                        actor_device = next(actor_module.parameters()).device
+                    except StopIteration:
+                        actor_device = torch.device(self.device)
+                with torch.no_grad(), self._amp_ctx():
                     completion_ids = []
                     completion_masks = []
 
@@ -468,21 +473,15 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
                                 attention_mask=attention_mask,
                                 generation_config=self.generation_config,
                             )
-                            completion_id, full_prompt_len = (
-                                stitch_completion_after_windowed_hf_generate(
-                                    completion_id,
-                                    stitch_ids,
-                                    initial_prompt_len,
-                                )
+                            completion_id, completion_mask = build_hf_completion_mask(
+                                completion_id,
+                                input_ids.shape[1],
+                                initial_prompt_len,
+                                stitch_ids,
+                                self.pad_token_id,
                             )
                             completion_ids.append(completion_id)
-                            completion_masks.append(
-                                build_completion_mask(
-                                    completion_id,
-                                    full_prompt_len,
-                                    self.pad_token_id,
-                                )
-                            )
+                            completion_masks.append(completion_mask)
             else:
                 self._prepare_vllm_for_generation()
                 (
@@ -812,7 +811,6 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
         completion_list = experiences[0]
         completion_length = np.mean([c.shape[-1] for c in completion_list])
         agg = aggregate_metrics_dict(
-            self.accelerator,
             {
                 "loss": averaged["loss"],
                 "pg_loss": averaged["pg_loss"],
@@ -896,8 +894,8 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
                 raise TypeError(msg)
         mean_fit = torch.mean(reward_tensor.float()).item()
         self.metrics.add_fitness(mean_fit)
-        if self.accelerator is not None:
-            self.accelerator.wait_for_everyone()
+        if self.distributed:
+            barrier()
         return np.array(mean_fit)
 
     def _validate_core_args(
@@ -1294,7 +1292,9 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
         turn_ids = batch_turn_ids.to(self.device).contiguous()
         mask_bool = mask.bool()
 
-        attention_mask = (batch_ids != self.pad_token_id).long()
+        attention_mask = attention_mask_from_padded_ids(
+            batch_ids, self.pad_token_id
+        ).long()
         kwargs: dict[str, Any] = {
             "input_ids": batch_ids,
             "attention_mask": attention_mask,
@@ -1342,7 +1342,6 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
                     (old_log_probs - sampling_log_probs.to(self.device)) * mask_f
                 ).clamp(max=self.vllm_importance_sampling_cap)
 
-        # ---- Actor pass (Liger fused policy + KL) ----
         # Identity-patch lm_head so the actor forward outputs the last hidden
         # state (B, T, H) directly instead of computing the full (B, T, V)
         # logits only to discard them. lm_head_weight is passed separately to
@@ -1366,29 +1365,31 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
         # Token level token-flattens the hidden states so the fused kernel
         # chunks tokens (bounded); turn/sequence keep the batch path. See
         # :func:`apply_fused_policy_loss`.
-        loss_pg_kl, aux = apply_fused_policy_loss(
-            policy_hidden[:, :-1],
-            lm_head_weight,
-            lm_head_bias,
-            target_ids,
-            mask,
-            adv_for_liger,
-            ref_log_probs,
-            old_log_probs,
-            self.beta,
-            self.clip_coef,  # epsilon_low
-            self.clip_coef,  # epsilon_high
-            self.temperature,
-            is_level,
-            turn_ids=turn_ids_arg,
-            full_turn_mask=full_turn_mask,
-            max_turns=max_turns,
-            token_chunk_size=self._resolve_fused_chunk_rows(
-                lm_head_weight.shape[0], self.chunk_rows
-            ),
-            turn_log_ratio_reduction=self.turn_ratio_pooling,
-            vllm_is_ratio=vllm_is_ratio,
-        )
+        with self._liger_head_gather():
+            loss_pg_kl, aux = apply_fused_policy_loss(
+                policy_hidden[:, :-1],
+                lm_head_weight,
+                lm_head_bias,
+                target_ids,
+                mask,
+                adv_for_liger,
+                ref_log_probs,
+                old_log_probs,
+                self.beta,
+                self.clip_coef,  # epsilon_low
+                self.clip_coef,  # epsilon_high
+                self.temperature,
+                is_level,
+                turn_ids=turn_ids_arg,
+                full_turn_mask=full_turn_mask,
+                max_turns=max_turns,
+                token_chunk_size=self._resolve_fused_chunk_rows(
+                    getattr(lm_head_weight, "ds_shape", lm_head_weight.shape)[0],
+                    self.chunk_rows,
+                ),
+                turn_log_ratio_reduction=self.turn_ratio_pooling,
+                vllm_is_ratio=vllm_is_ratio,
+            )
         kl_metric = float(aux[0].item())
         clipfrac_metric = float(aux[1].item())
         pg_loss_metric = float(aux[2].item())

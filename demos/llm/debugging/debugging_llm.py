@@ -1,7 +1,16 @@
 # Copyright 2026 AgileRL
 # SPDX-License-Identifier: Apache-2.0
 
-"""Constant-target single-turn PPO probe (``ConstantTargetEnv``)."""
+"""Constant-target single-turn PPO probe (``ConstantTargetEnv``).
+
+Single process::
+
+    python demos/llm/debugging/debugging_llm.py
+
+Multi-GPU distributed training::
+
+    torchrun --nproc_per_node=2 demos/llm/debugging/debugging_llm.py
+"""
 
 from __future__ import annotations
 
@@ -20,7 +29,6 @@ from tiny_model import TinyDigitTokenizer, build_tiny_actor_network
 from agilerl.algorithms import GRPO, LLMPPO, LLMREINFORCE
 from agilerl.llm_envs import TokenObservationWrapper
 from agilerl.training.llm import finetune_llm_multiturn
-from agilerl.utils.llm_utils import create_llm_accelerator
 from agilerl.utils.probe_envs_llm import ConstantTargetEnv
 from agilerl.utils.utils import create_population
 
@@ -58,7 +66,7 @@ def evaluate_hit_rate(
                     "attention_mask": prompt_encoded["attention_mask"],
                 }
                 prompt_len = prompt_dict["input_ids"].shape[1]
-                completion_ids, _ = agent.get_action([prompt_dict], training=False)
+                completion_ids, _, _ = agent.get_action([prompt_dict], training=False)
                 full_ids = completion_ids[0]
                 gen_tokens = full_ids[0, prompt_len:]
                 gen_text = tokenizer.decode(
@@ -83,7 +91,6 @@ def run_single_seed(cfg: dict, seed: int) -> tuple[float, float]:
     max_ctx = int(dbg["max_context_length"])
     max_new = int(dbg["max_output_tokens"])
 
-    accelerator = create_llm_accelerator()
     torch.manual_seed(seed)
     tokenizer = TinyDigitTokenizer()
     if target_id in (tokenizer.pad_token_id, tokenizer.eos_token_id):
@@ -108,7 +115,6 @@ def run_single_seed(cfg: dict, seed: int) -> tuple[float, float]:
         net_config=None,
         INIT_HP=init_hp,
         population_size=1,
-        accelerator=accelerator,
         tokenizer=tokenizer,
         model_name=None,
         actor_network=actor_network,
@@ -143,7 +149,6 @@ def run_single_seed(cfg: dict, seed: int) -> tuple[float, float]:
         wb=False,
         save_elite=False,
         verbose=True,
-        accelerator=accelerator,
         env_factory=env_factory,
     )
 

@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+from typing import ClassVar
+
 import pytest
 import torch
 
@@ -138,7 +140,8 @@ class _ChrTokenizer:
         t = torch.tensor(ids, dtype=torch.long)
         return {"input_ids": t, "attention_mask": torch.ones_like(t)}
 
-    def encode(self, s: str) -> list[int]:
+    def encode(self, s: str, add_special_tokens: bool = True) -> list[int]:
+        del add_special_tokens
         return [ord(c) for c in s]
 
     def decode(self, ids: list[int], skip_special_tokens: bool = True) -> str:
@@ -1332,3 +1335,172 @@ class TestSyncMultiTurnVecEnvGetTrajectories:
         # batch_steps is second-to-last.
         *_parts, batch_steps, _sampling_logps = vec.get_trajectories()
         assert batch_steps == 1
+
+
+class _TerminatorTokenizer:
+    """Char tokenizer whose id 7 is a declared special (a turn terminator)."""
+
+    all_special_ids: ClassVar[list[int]] = [7]
+
+    def encode(self, s: str, add_special_tokens: bool = True) -> list[int]:
+        del add_special_tokens
+        return [ord(c) for c in s]
+
+    def decode(self, ids, skip_special_tokens: bool = True) -> str:
+        del skip_special_tokens
+        return "".join(chr(int(x)) for x in ids)
+
+    def apply_chat_template(
+        self,
+        messages,
+        tokenize: bool = False,
+        add_generation_prompt: bool = False,
+        **kwargs,
+    ):
+        rendered = ""
+        for m in messages:
+            rendered += m["content"]
+            rendered += "\x07" if m["role"] == "assistant" else "|"
+        if add_generation_prompt:
+            rendered += "A:"
+        return rendered
+
+
+class _FeedbackEnv:
+    def reset(self, seed=None):
+        return "obs", {}
+
+    def step(self, action):
+        return "fb", 0.5, False, False, {}
+
+
+class TestFeedbackTerminatorDedupe:
+    def _wrapper(self, tokenizer) -> TokenObservationWrapper:
+        w = TokenObservationWrapper(
+            env=_FeedbackEnv(),
+            tokenizer=tokenizer,
+            max_turns=3,
+        )
+        w.full_ids = torch.tensor([[65, 66]], dtype=torch.long)
+        return w
+
+    def test_sampled_terminator_is_not_doubled(self) -> None:
+        w = self._wrapper(_TerminatorTokenizer())
+        w._step(torch.tensor([[65, 66, 67, 7]], dtype=torch.long), "C")
+        assert w.full_ids[0].tolist().count(7) == 1
+
+    def test_truncated_turn_still_gets_the_frame_terminator(self) -> None:
+        w = self._wrapper(_TerminatorTokenizer())
+        w._step(torch.tensor([[65, 66, 67]], dtype=torch.long), "C")
+        assert w.full_ids[0].tolist().count(7) == 1
+
+    def test_non_special_equal_token_is_kept(self) -> None:
+        tokenizer = _TerminatorTokenizer()
+        tokenizer.all_special_ids = []
+        w = self._wrapper(tokenizer)
+        w._step(torch.tensor([[65, 66, 67, 7]], dtype=torch.long), "C")
+        assert w.full_ids[0].tolist().count(7) == 2
+
+
+class TestTokenObservationSpecialTokenGuards:
+    def test_raw_encode_adds_no_specials(self) -> None:
+        class _BosAddingTokenizer:
+            def __call__(self, texts, add_special_tokens=True, **kwargs):
+                ids = [ord(c) for c in texts[0]]
+                if add_special_tokens:
+                    ids = [1, *ids]
+                t = torch.tensor([ids], dtype=torch.long)
+                return {"input_ids": t, "attention_mask": torch.ones_like(t)}
+
+        w = TokenObservationWrapper(
+            env=_FeedbackEnv(),
+            tokenizer=_BosAddingTokenizer(),
+            max_turns=1,
+            apply_chat_template=False,
+        )
+        out = w._tokenize_initial_prompt("hi")
+        assert out["input_ids"][0].tolist() == [ord("h"), ord("i")]
+
+    def test_raw_feedback_encode_adds_no_specials(self) -> None:
+        class _BosAddingEncoder:
+            def encode(self, s: str, add_special_tokens: bool = True) -> list[int]:
+                ids = [ord(c) for c in s]
+                return [1, *ids] if add_special_tokens else ids
+
+        w = TokenObservationWrapper(
+            env=_FeedbackEnv(),
+            tokenizer=_BosAddingEncoder(),
+            max_turns=1,
+            apply_chat_template=False,
+        )
+        assert w._tokenize_feedback("fb")[0].tolist() == [ord("f"), ord("b")]
+
+    def test_chatml_fallback_warns(self) -> None:
+        class _TemplatelessTokenizer:
+            def encode(self, s: str, add_special_tokens: bool = True) -> list[int]:
+                del add_special_tokens
+                return [ord(c) for c in s]
+
+        w = TokenObservationWrapper(
+            env=_FeedbackEnv(),
+            tokenizer=_TemplatelessTokenizer(),
+            max_turns=1,
+        )
+        with pytest.warns(UserWarning, match="ChatML markers"):
+            w._tokenize_feedback("fb")
+
+
+class _ScriptedEnv:
+    def __init__(self, results):
+        self._results = list(results)
+
+    def reset(self, seed=None):
+        return "obs", {}
+
+    def step(self, action):
+        return self._results.pop(0)
+
+
+class TestSamplingLogprobAlignmentWithEosPad:
+    """With pad == eos, captured vLLM logprob counts match the action mask."""
+
+    def _wrapper(self, results) -> TokenObservationWrapper:
+        w = TokenObservationWrapper(
+            env=_ScriptedEnv(results),
+            tokenizer=_TerminatorTokenizer(),
+            max_turns=3,
+            pad_id=7,
+        )
+        w.full_ids = torch.tensor([[65, 66]], dtype=torch.long)
+        return w
+
+    def test_eos_terminated_turn_aligns_with_captured_logprobs(self) -> None:
+        from types import SimpleNamespace
+
+        from agilerl.algorithms.core.base import LLMAlgorithm
+
+        w = self._wrapper([("done", 1.0, True, False, {})])
+        w._step(torch.tensor([[65, 66, 67, 7]], dtype=torch.long), "C")
+        _ids, action_mask, _turn_ids, _rewards = w.get_episode_data()
+        assert int(action_mask.sum()) == 2
+
+        aligned, n_skipped = LLMAlgorithm._align_sampling_logprobs(
+            SimpleNamespace(),
+            [torch.tensor([-0.1, -0.2])],
+            action_mask,
+            torch.zeros(1, action_mask.shape[1]),
+        )
+        assert n_skipped == 0
+        assert aligned is not None
+
+    def test_multi_turn_mid_sequence_eos_stays_trainable(self) -> None:
+        w = self._wrapper(
+            [("fb", 0.5, False, False, {}), ("done", 1.0, True, False, {})]
+        )
+        w._step(torch.tensor([[65, 66, 67, 7]], dtype=torch.long), "C")
+        completion = torch.cat(
+            [w.full_ids, torch.tensor([[68, 7]], dtype=torch.long)], dim=1
+        )
+        w._step(completion, "D")
+        _ids, action_mask, _turn_ids, _rewards = w.get_episode_data()
+        assert int(action_mask.sum()) == 4

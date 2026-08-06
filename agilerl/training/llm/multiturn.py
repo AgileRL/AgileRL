@@ -7,7 +7,6 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import torch
-from accelerate import Accelerator
 
 from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.algorithms import GRPO
@@ -16,10 +15,16 @@ from agilerl.hpo.tournament import TournamentSelection
 from agilerl.population import Population
 from agilerl.protocols import SelectionStrategyProtocol
 from agilerl.training.llm.common import _validate_finetune_args
+from agilerl.utils.distributed import (
+    barrier,
+    get_world_size,
+    is_distributed,
+    is_main_process,
+)
 from agilerl.utils.llm_utils import (
+    aggregate_metrics_across_gpus,
     align_completion_batch_shapes_across_ranks,
     needs_cross_rank_seq_padding,
-    safe_aggregate_metrics,
 )
 from agilerl.utils.utils import (
     default_progress_bar,
@@ -64,7 +69,6 @@ def finetune_llm_multiturn(
     max_wall_seconds: float | None = None,
     max_reward: float | None = None,
     verbose: bool = True,
-    accelerator: Accelerator | None = None,
 ) -> "tuple[list[SupportedMultiturn], list[float]]":
     """Finetune a population of agents on a multi-turn environment.
 
@@ -119,8 +123,6 @@ def finetune_llm_multiturn(
     :type max_reward: float, optional
     :param verbose: Progress bar and periodic train summaries, defaults to True.
     :type verbose: bool
-    :param accelerator: Hugging Face Accelerate instance, defaults to None.
-    :type accelerator: Accelerator, optional
     :return: The finetuned population (same list object, possibly mutated in place).
     :rtype: PopulationType
     """
@@ -150,18 +152,18 @@ def finetune_llm_multiturn(
 
     batch_size = init_hp.get("BATCH_SIZE", pop[0].batch_size)
 
-    data_increment = accelerator.num_processes if accelerator is not None else 1
+    data_increment = get_world_size()
     effective_data_batch_size = data_increment * batch_size
     env_name = init_hp.get("env_name", "multiturn")
 
     if wb:
         init_hp["effective_data_batch_size"] = effective_data_batch_size
         init_hp["batch_size"] = batch_size
-        init_hp["distributed_training"] = accelerator is not None
+        init_hp["distributed_training"] = is_distributed()
         init_hp["model_name"] = pop[0].pretrained_model_name_or_path
         init_hp["max_turns"] = max_turns
 
-    pbar = default_progress_bar(max_steps, accelerator)
+    pbar = default_progress_bar(max_steps)
 
     loggers = init_loggers(
         algo=init_hp.get("ALGO", pop[0].algo),
@@ -171,7 +173,6 @@ def finetune_llm_multiturn(
         wb=wb,
         tensorboard=tensorboard,
         tensorboard_log_dir=tensorboard_log_dir,
-        accelerator=accelerator,
         wandb_api_key=wandb_api_key,
         wandb_kwargs=wandb_kwargs,
         init_hyperparams=init_hp,
@@ -179,7 +180,6 @@ def finetune_llm_multiturn(
 
     population = Population(
         agents=pop,
-        accelerator=accelerator,
         loggers=loggers,
     )
 
@@ -206,7 +206,7 @@ def finetune_llm_multiturn(
     )
     while total_steps < max_steps:
         if wall_deadline is not None and time.monotonic() >= wall_deadline:
-            if accelerator is None or accelerator.is_main_process:
+            if is_main_process():
                 print(
                     f"\nStopping multiturn training: wall time limit ({max_wall_seconds}s) reached.",
                 )
@@ -272,9 +272,9 @@ def finetune_llm_multiturn(
                 agent, (GRPO, LLMPPO, LLMREINFORCE)
             ):
                 learn_kwargs["sampling_logps"] = all_sampling_logps
-            if accelerator is not None and needs_cross_rank_seq_padding(
+            if needs_cross_rank_seq_padding(
                 agent,
-                world_size=accelerator.num_processes,
+                world_size=get_world_size(),
             ):
                 completion_ids, action_masks, rewards_2d = (
                     align_completion_batch_shapes_across_ranks(
@@ -282,7 +282,6 @@ def finetune_llm_multiturn(
                         action_masks_list,
                         rewards_2d,
                         pad_token_id=agent.pad_token_id,
-                        accelerator=accelerator,
                     )
                 )
                 experiences = (completion_ids, action_masks, rewards_2d)
@@ -299,7 +298,7 @@ def finetune_llm_multiturn(
                     )
             agent.learn(experiences, **learn_kwargs)
 
-            agg_score = safe_aggregate_metrics(accelerator, mean_score)
+            agg_score = aggregate_metrics_across_gpus(mean_score)
 
             if max_reward is not None:
                 if "accuracy" not in agent.metrics.additional_metrics:
@@ -308,9 +307,9 @@ def finetune_llm_multiturn(
                 accuracy = (
                     (episode_scores >= max_reward).float().mean().to(agent.device)
                 )
-                agg_accuracy = safe_aggregate_metrics(accelerator, accuracy)
+                agg_accuracy = aggregate_metrics_across_gpus(accuracy)
 
-                if accelerator is None or accelerator.is_main_process:
+                if is_main_process():
                     agent.metrics.log("accuracy", agg_accuracy)
 
             effective_batch_steps = batch_steps * data_increment
@@ -318,7 +317,7 @@ def finetune_llm_multiturn(
             total_steps += effective_batch_steps
             iteration_steps += effective_batch_steps
 
-            if accelerator is None or accelerator.is_main_process:
+            if is_main_process():
                 agent.add_scores([float(agg_score)])
 
             # Evaluate performance
@@ -326,34 +325,30 @@ def finetune_llm_multiturn(
                 agent.test(test_env)
 
         # Report training metrics
-        if accelerator is None or accelerator.is_main_process:
+        if is_main_process():
             pbar.update(iteration_steps // len(population.agents))
         population.report_metrics(clear=True)
 
-        if accelerator is not None:
-            accelerator.wait_for_everyone()
+        barrier()
 
         # Selection and mutation
         if selection_strategy is not None and mutation is not None:
             # `_validate_finetune_args` rejects an unset `evo_steps` here.
             assert evo_steps is not None
             if (i + 1) % evo_steps == 0:
-                if accelerator is not None:
-                    accelerator.wait_for_everyone()
+                barrier()
                 population.update(
                     run_selection_and_mutation(
                         selection_strategy,
                         population=population.agents,
                         mutation=mutation,
                         env_name=env_name,
-                        accelerator=accelerator,
                         language_model=True,
                         elite_path=elite_path,
                         save_elite=bool(save_elite),
                     ),
                 )
-                if accelerator is not None:
-                    accelerator.wait_for_everyone()
+                barrier()
 
                 population.increment_evo_step()
         else:

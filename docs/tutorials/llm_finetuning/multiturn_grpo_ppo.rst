@@ -114,10 +114,9 @@ Dependencies
     import gem
     import yaml
     from transformers import AutoTokenizer
-    from agilerl.algorithms import GRPO, LLMPPO, LLMREINFORCE
     from agilerl.training.llm import finetune_llm_multiturn
     from agilerl.utils.algo_utils import VLLMConfig
-    from agilerl.utils.llm_utils import create_llm_accelerator
+    from agilerl.utils.utils import create_population
     from agilerl.llm_envs import TokenObservationWrapper
 
 Shared setup
@@ -163,13 +162,23 @@ All runs use:
                 max_output_tokens=max_output_tokens,
             )
 
-        accelerator = create_llm_accelerator()
         vllm_config = VLLMConfig(
             tensor_parallel_size=1,
             gpu_memory_utilization=0.85,
             max_num_seqs=16,
             sleep_mode=True,
         )
+
+Multi-GPU training
+------------------
+
+Launch with ``torchrun`` from the repository root (``N`` is the number of GPUs):
+
+.. code-block:: bash
+
+    torchrun --nproc_per_node=N tutorials/llm_finetuning/multiturn_grpo_ppo.py \
+      --algo LLMPPO \
+      --config configs/training/llm_finetuning/ppo_llm.yaml
 
 Run a Baseline
 --------------
@@ -226,88 +235,88 @@ These values are intentionally conservative and align with the shipped configs:
 
     .. code-block:: python
 
-      # Algorithm hyperparameters
-      init_hp = {
-          "batch_size": 32,
-          "lr": 5e-6,
-          "lr_critic": 5e-5,
-          "beta": 0.01,
-          "gamma": 0.99,
-          "gae_lambda": 0.95,
-          "vf_coef": 0.5,
-          "update_epochs": 2,
-          "max_model_len": 1024,
-          "max_output_tokens": 64,
-          "use_vllm": True,
-          "vllm_config": vllm_config,
-          "micro_batch_size_per_gpu": 32,
+      INIT_HP_PPO = {
+          "ALGO": "LLMPPO",
+          "BATCH_SIZE": 32,
+          "LR_ACTOR": 5e-6,
+          "LR_CRITIC": 5e-5,
+          "BETA": 0.01,
+          "GAMMA": 0.99,
+          "GAE_LAMBDA": 0.95,
+          "VF_COEF": 0.5,
+          "UPDATE_EPOCHS": 2,
+          "MAX_MODEL_LEN": 1024,
+          "MAX_OUTPUT_TOKENS": 64,
+          "USE_VLLM": True,
+          "MICRO_BATCH_SIZE_PER_GPU": 32,
       }
 
-      pop = LLMPPO.population(
-          size=1,
+      pop = create_population(
+          algo="LLMPPO",
+          net_config=None,
+          INIT_HP=INIT_HP_PPO,
+          population_size=1,
+          tokenizer=tokenizer,
           model_name=MODEL_PATH,
-          pad_token_id=tokenizer.pad_token_id,
-          pad_token=tokenizer.pad_token,
-          accelerator=accelerator,
-          **init_hp,
+          vllm_config=vllm_config,
       )
 
   .. tab-item:: LLMREINFORCE
 
     .. code-block:: python
 
-      # Algorithm hyperparameters
-      init_hp = {
-          "batch_size": 32,
-          "lr": 5e-6,
-          "beta": 0.01,
-          "gamma": 0.9,
-          "update_epochs": 2,
-          "max_model_len": 1024,
-          "max_output_tokens": 64,
-          "use_vllm": True,
-          "vllm_config": vllm_config,
-          "micro_batch_size_per_gpu": 32,
+      INIT_HP_REINFORCE = {
+          "ALGO": "LLMREINFORCE",
+          "BATCH_SIZE": 32,
+          "LR": 5e-6,
+          "BETA": 0.01,
+          "GAMMA": 0.9,
+          "UPDATE_EPOCHS": 2,
+          "MAX_MODEL_LEN": 1024,
+          "MAX_OUTPUT_TOKENS": 64,
+          "USE_VLLM": True,
+          "MICRO_BATCH_SIZE_PER_GPU": 32,
       }
 
-      pop = LLMREINFORCE.population(
-          size=1,
+      pop = create_population(
+          algo="LLMREINFORCE",
+          net_config=None,
+          INIT_HP=INIT_HP_REINFORCE,
+          population_size=1,
+          tokenizer=tokenizer,
           model_name=MODEL_PATH,
-          pad_token_id=tokenizer.pad_token_id,
-          pad_token=tokenizer.pad_token,
-          accelerator=accelerator,
-          **init_hp,
+          vllm_config=vllm_config,
       )
 
   .. tab-item:: GRPO
 
     .. code-block:: python
 
-      # Algorithm hyperparameters
-      init_hp = {
-          "batch_size": 16,
-          "group_size": 4,
-          "lr": 3e-4,
-          "beta": 5e-4,
-          "update_epochs": 2,
-          "temperature": 0.85,
-          "max_model_len": 2048,
-          "use_vllm": True,
-          "vllm_config": vllm_config,
+      INIT_HP_GRPO = {
+          "ALGO": "GRPO",
+          "BATCH_SIZE": 16,
+          "GROUP_SIZE": 4,
+          "LR": 3e-4,
+          "BETA": 5e-4,
+          "UPDATE_EPOCHS": 2,
+          "TEMPERATURE": 0.85,
+          "MAX_MODEL_LEN": 2048,
+          "USE_VLLM": True,
       }
 
-      pop = GRPO.population(
-          size=1,
+      pop = create_population(
+          algo="GRPO",
+          net_config=None,
+          INIT_HP=INIT_HP_GRPO,
+          population_size=1,
+          tokenizer=tokenizer,
           model_name=MODEL_PATH,
-          pad_token_id=tokenizer.pad_token_id,
-          pad_token=tokenizer.pad_token,
-          accelerator=accelerator,
-          **init_hp,
+          vllm_config=vllm_config,
       )
 
 .. note::
 
-   For GRPO, ``batch_size`` and ``group_size`` must satisfy divisibility constraints in
+   For GRPO, ``BATCH_SIZE`` and ``GROUP_SIZE`` must satisfy divisibility constraints in
    :meth:`finetune_llm_multiturn() <agilerl.training.llm.multiturn.finetune_llm_multiturn>`.
 
 Train call (no evo/HPO)
@@ -332,7 +341,6 @@ The key training call is the same for all algorithms. Evolutionary fields are ex
         evaluation_interval=10,
         max_reward=1.0,
         verbose=True,
-        accelerator=accelerator,
     )
 
 Full training code

@@ -1,41 +1,30 @@
-# Copyright 2026 AgileRL
-# SPDX-License-Identifier: Apache-2.0
-
 import copy
 import gc
 import tempfile
 from unittest import mock
-from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
 import torch
 
-pytest.importorskip("deepspeed", reason="LLM tests require deepspeed.")
-from accelerate import Accelerator
-from accelerate.state import AcceleratorState
-from accelerate.utils.deepspeed import DeepSpeedOptimizerWrapper
+pytest.importorskip("transformers", reason="LLM tests require transformers.")
 from datasets import Dataset
-from deepspeed.runtime.engine import DeepSpeedEngine
-from deepspeed.runtime.zero.stage_1_and_2 import DeepSpeedZeroOptimizer
 from peft import LoraConfig
 from transformers import AutoTokenizer
 
 from agilerl.algorithms.core.base import EvolvableAlgorithm, OptimizerWrapper
 from agilerl.algorithms.sft import SFT
-from agilerl.llm_envs import SFTGym
+from agilerl.llm_envs import DatasetEnv
+from agilerl.utils.distributed import FSDPConfig, resolve_device
 from tests import TINY_LLM_FIXTURE_PATH
 from tests.test_algorithms.test_llms.test_grpo import (
     _patch_mps_learn_hooks,
     create_module,
-    deepspeed_config_stage_1,
-    deepspeed_config_stage_2,
 )
 
 
 def make_sft_gym(
     num_samples: int,
-    accelerator: Accelerator | None,
     tokenizer: AutoTokenizer,
     data_batch_size_per_gpu: int = 8,
     response_column: str = "response",
@@ -52,13 +41,13 @@ def make_sft_gym(
             response_column: [f"Response {i}" for i in range(num_samples)],
         }
     )
-    return SFTGym(
+    return DatasetEnv(
         train_dataset=train_dataset,
         test_dataset=test_dataset,
         tokenizer=tokenizer,
+        objective="sft",
         data_batch_size_per_gpu=data_batch_size_per_gpu,
         response_column=response_column,
-        accelerator=accelerator,
     )
 
 
@@ -68,10 +57,9 @@ def sft_dataset_factory():
 
 
 def generate_sft(
-    accelerator_factory,
+    dist_mode_factory,
     model_factory,
-    config,
-    use_deepspeed_optimizer,
+    dist_mode,
     vocab_size,
     input_size,
     max_tokens,
@@ -81,16 +69,10 @@ def generate_sft(
     use_liger_loss=False,
     update_epochs=1,
 ):
-    if config is not None and not torch.cuda.is_available():
-        pytest.skip("DeepSpeed-configured LLM tests require CUDA support.")
-
     gc.collect()
     torch.cuda.empty_cache()
-    AcceleratorState._reset_state(True)
 
-    accelerator = accelerator_factory(use_deepspeed_optimizer, config)
-    if not use_deepspeed_optimizer and accelerator is not None:
-        accelerator.state.deepspeed_plugin.deepspeed_config.pop("optimizer", None)
+    dist_mode_factory(dist_mode)
     if pretrained_model_name_or_path is not None:
         actor = model_factory(pretrained_model_name_or_path)
         target_modules = [
@@ -123,7 +105,7 @@ def generate_sft(
         pad_token_id=vocab_size - 1,
         pad_token="<pad>",
         lora_config=lora_config,
-        accelerator=accelerator,
+        fsdp_config=FSDPConfig() if dist_mode == "fsdp2" else None,
         device="cuda" if torch.cuda.is_available() else "cpu",
         micro_batch_size_per_gpu=micro_batch_size_per_gpu,
         use_liger_loss=use_liger_loss,
@@ -137,16 +119,7 @@ def sft_factory():
 
 
 class TestSFTInit:
-    @pytest.mark.parametrize(
-        ("config", "use_deepspeed_optimizer"),
-        [
-            (None, False),
-            (deepspeed_config_stage_1, True),
-            (deepspeed_config_stage_1, False),
-            (deepspeed_config_stage_2, True),
-            (deepspeed_config_stage_2, False),
-        ],
-    )
+    @pytest.mark.parametrize("dist_mode", [None, "dist"])
     @pytest.mark.parametrize("vocab_size", [100])
     @pytest.mark.parametrize("input_size", [10])
     @pytest.mark.parametrize("max_tokens", [20])
@@ -162,12 +135,10 @@ class TestSFTInit:
     @pytest.mark.parametrize("from_name", [True, False])
     def test_init_sft(
         self,
-        deepspeed_env,
         sft_factory,
-        accelerator_factory,
+        dist_mode_factory,
         model_factory,
-        config,
-        use_deepspeed_optimizer,
+        dist_mode,
         pretrained_model_name_or_path,
         vocab_size,
         input_size,
@@ -177,10 +148,9 @@ class TestSFTInit:
         from_name,
     ):
         sft = sft_factory(
-            accelerator_factory,
+            dist_mode_factory,
             model_factory,
-            config,
-            use_deepspeed_optimizer,
+            dist_mode,
             vocab_size,
             input_size,
             max_tokens,
@@ -194,32 +164,19 @@ class TestSFTInit:
         assert sft.update_epochs == 1
         assert sft.temperature == 0
         assert sft.calc_position_embeddings
-        assert sft.device == (
-            sft.accelerator.device
-            if torch.cuda.is_available() and sft.accelerator is not None
-            else "cuda"
-            if torch.cuda.is_available()
-            else "mps"
-            if torch.backends.mps.is_available()
-            else "cpu"
+        assert sft.distributed == (dist_mode is not None)
+        assert sft.device == resolve_device(
+            "cuda" if torch.cuda.is_available() else "cpu"
         )
         assert sft.index == 0
         assert sft.scores == []
         assert sft.fitness == []
-        assert sft.steps == 0
-        if config is not None:
-            assert isinstance(sft.actor, DeepSpeedEngine)
-            if not use_deepspeed_optimizer:
-                assert isinstance(sft.optimizer, OptimizerWrapper)
-                assert isinstance(sft.optimizer.optimizer, DeepSpeedOptimizerWrapper)
-            else:
-                assert isinstance(sft.optimizer, OptimizerWrapper)
-                assert isinstance(sft.optimizer.optimizer, DeepSpeedZeroOptimizer)
-                assert isinstance(sft.actor.optimizer, DeepSpeedZeroOptimizer)
-        else:
-            assert isinstance(sft.actor, torch.nn.Module)
+        assert sft.steps == [0]
+        assert isinstance(sft.actor, torch.nn.Module)
+        assert isinstance(sft.optimizer, OptimizerWrapper)
+        assert sft.optimizer.optimizer_cls is torch.optim.AdamW
+        assert isinstance(sft.optimizer.optimizer, torch.optim.AdamW)
         sft.clean_up()
-        AcceleratorState._reset_state(True)
 
     @pytest.mark.parametrize("vocab_size", [100])
     @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
@@ -237,23 +194,13 @@ class TestSFTInit:
                 model_name=None,
                 pad_token_id=vocab_size - 1,
                 pad_token="<pad>",
-                accelerator=None,
                 device="cuda" if torch.cuda.is_available() else "cpu",
                 micro_batch_size_per_gpu=micro_batch_size_per_gpu,
             )
 
-        AcceleratorState._reset_state(True)
-
 
 class TestSFTGetAction:
-    @pytest.mark.parametrize(
-        ("config", "use_deepspeed_optimizer"),
-        [
-            (None, False),
-            (deepspeed_config_stage_2, True),
-            (deepspeed_config_stage_2, False),
-        ],
-    )
+    @pytest.mark.parametrize("dist_mode", [None, "dist"])
     @pytest.mark.parametrize("vocab_size", [100])
     @pytest.mark.parametrize("input_size", [10])
     @pytest.mark.parametrize("max_tokens", [20])
@@ -268,12 +215,10 @@ class TestSFTGetAction:
     @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
     def test_sft_get_action(
         self,
-        deepspeed_env,
         sft_factory,
-        accelerator_factory,
+        dist_mode_factory,
         model_factory,
-        config,
-        use_deepspeed_optimizer,
+        dist_mode,
         pretrained_model_name_or_path,
         vocab_size,
         input_size,
@@ -282,10 +227,9 @@ class TestSFTGetAction:
         micro_batch_size_per_gpu,
     ):
         sft = sft_factory(
-            accelerator_factory,
+            dist_mode_factory,
             model_factory,
-            config,
-            use_deepspeed_optimizer,
+            dist_mode,
             vocab_size,
             input_size,
             max_tokens,
@@ -295,17 +239,10 @@ class TestSFTGetAction:
         with pytest.raises(NotImplementedError):
             sft.get_action(obs=None)
         sft.clean_up()
-        AcceleratorState._reset_state(True)
 
 
 class TestSFTLearn:
-    @pytest.mark.parametrize(
-        ("config", "use_deepspeed_optimizer"),
-        [
-            (deepspeed_config_stage_2, True),
-            (deepspeed_config_stage_2, False),
-        ],
-    )
+    @pytest.mark.parametrize("dist_mode", ["dist"])
     @pytest.mark.parametrize("vocab_size", [100])
     @pytest.mark.parametrize("input_size", [10])
     @pytest.mark.parametrize("max_tokens", [20])
@@ -321,12 +258,10 @@ class TestSFTLearn:
     @pytest.mark.parametrize("use_liger_loss", [False, True])
     def test_sft_learn(
         self,
-        deepspeed_env,
         sft_factory,
-        accelerator_factory,
+        dist_mode_factory,
         model_factory,
-        config,
-        use_deepspeed_optimizer,
+        dist_mode,
         pretrained_model_name_or_path,
         vocab_size,
         input_size,
@@ -336,10 +271,9 @@ class TestSFTLearn:
         use_liger_loss,
     ):
         sft = sft_factory(
-            accelerator_factory,
+            dist_mode_factory,
             model_factory,
-            config,
-            use_deepspeed_optimizer,
+            dist_mode,
             vocab_size,
             input_size,
             max_tokens,
@@ -365,12 +299,12 @@ class TestSFTLearn:
             },
         )
         tokenizer = AutoTokenizer.from_pretrained(pretrained_model_name_or_path)
-        env = SFTGym(
+        env = DatasetEnv(
             train_dataset=train_dataset,
             test_dataset=test_dataset,
             tokenizer=tokenizer,
+            objective="sft",
             data_batch_size_per_gpu=data_batch_size,
-            accelerator=sft.accelerator,
         )
         for name, param in sft.actor.named_parameters():
             if ("lora_A" in name or "lora_B" in name) and param is not None:
@@ -378,8 +312,8 @@ class TestSFTLearn:
         prompts = env.reset()
         pre_learn_actor_state_dict = copy.deepcopy(sft.actor.state_dict())
         metrics = sft.learn(prompts)
-        loss = metrics["loss"]
-        perplexity = metrics["perplexity"]
+        loss = metrics["mean_loss"]
+        perplexity = metrics["mean_perplexity"]
         assert isinstance(loss, float)
         assert isinstance(perplexity, float)
         assert perplexity >= 1.0  # perplexity is exp(loss), always >= 1
@@ -399,20 +333,18 @@ class TestSFTLearn:
         )
 
         sft.clean_up()
-        AcceleratorState._reset_state(True)
 
     def test_sft_learn_calls_mps_empty_cache(
         self,
         monkeypatch: pytest.MonkeyPatch,
-        accelerator_factory,
+        dist_mode_factory,
         model_factory,
     ) -> None:
         """Patch MPS on CI so ``torch.mps.empty_cache()`` in ``learn()`` is exercised."""
         sft = generate_sft(
-            accelerator_factory,
+            dist_mode_factory,
             model_factory,
-            config=None,
-            use_deepspeed_optimizer=False,
+            dist_mode=None,
             vocab_size=30,
             input_size=5,
             max_tokens=10,
@@ -434,17 +366,10 @@ class TestSFTLearn:
         sft.learn(experiences, training=True)
         empty.assert_called()
         sft.clean_up()
-        AcceleratorState._reset_state(True)
 
 
 class TestSFTTest:
-    @pytest.mark.parametrize(
-        ("config", "use_deepspeed_optimizer"),
-        [
-            (deepspeed_config_stage_2, True),
-            (deepspeed_config_stage_2, False),
-        ],
-    )
+    @pytest.mark.parametrize("dist_mode", ["dist"])
     @pytest.mark.parametrize("vocab_size", [100])
     @pytest.mark.parametrize("input_size", [10])
     @pytest.mark.parametrize("max_tokens", [20])
@@ -460,12 +385,10 @@ class TestSFTTest:
     @pytest.mark.parametrize("loop", [1, 2])
     def test_sft_test(
         self,
-        deepspeed_env,
         sft_factory,
-        accelerator_factory,
+        dist_mode_factory,
         model_factory,
-        config,
-        use_deepspeed_optimizer,
+        dist_mode,
         pretrained_model_name_or_path,
         vocab_size,
         input_size,
@@ -475,10 +398,9 @@ class TestSFTTest:
         loop,
     ):
         sft = sft_factory(
-            accelerator_factory,
+            dist_mode_factory,
             model_factory,
-            config,
-            use_deepspeed_optimizer,
+            dist_mode,
             vocab_size,
             input_size,
             max_tokens,
@@ -502,56 +424,18 @@ class TestSFTTest:
             },
         )
         tokenizer = AutoTokenizer.from_pretrained(pretrained_model_name_or_path)
-        env = SFTGym(
+        env = DatasetEnv(
             train_dataset=train_dataset,
             test_dataset=test_dataset,
             tokenizer=tokenizer,
+            objective="sft",
             data_batch_size_per_gpu=data_batch_size,
-            accelerator=sft.accelerator,
         )
         fitness = sft.test(env, loop=loop)
         assert isinstance(fitness, np.ndarray)
         assert fitness <= 0.0  # fitness is negative mean loss
         assert len(sft.fitness) == 1
         sft.clean_up()
-        AcceleratorState._reset_state(True)
-
-    def test_sft_test_method_waits_for_everyone(self):
-        import contextlib
-
-        class DummySFTEnv:
-            def eval_mode(self):
-                return contextlib.nullcontext()
-
-            def reset(self):
-                return {"prompts": []}
-
-            def step(self):
-                return {"prompts": []}
-
-        sft = SFT(
-            actor_network=create_module(
-                input_size=10, max_tokens=20, vocab_size=100, device="cpu"
-            ),
-            pad_token_id=99,
-            pad_token="<pad>",
-            lora_config=LoraConfig(
-                r=4,
-                lora_alpha=16,
-                target_modules=["linear_1"],
-                task_type="CAUSAL_LM",
-                lora_dropout=0.05,
-            ),
-            accelerator=None,
-            device="cpu",
-            micro_batch_size_per_gpu=1,
-            use_liger_loss=False,
-        )
-        acc = MagicMock()
-        sft.accelerator = acc
-        with patch.object(sft, "learn", return_value={"loss": 1.0}):
-            sft.test(DummySFTEnv(), loop=1)
-        acc.wait_for_everyone.assert_called()
 
 
 class TestSFTLigerUnavailableBehaviour:
@@ -560,7 +444,7 @@ class TestSFTLigerUnavailableBehaviour:
         self,
         monkeypatch,
         sft_factory,
-        accelerator_factory,
+        dist_mode_factory,
         model_factory,
         assertion_mode,
     ):
@@ -572,10 +456,9 @@ class TestSFTLigerUnavailableBehaviour:
                 match=r"use_liger_loss=True requested.*Falling back to standard loss\.",
             ):
                 sft = sft_factory(
-                    accelerator_factory=accelerator_factory,
+                    dist_mode_factory=dist_mode_factory,
                     model_factory=model_factory,
-                    config=None,
-                    use_deepspeed_optimizer=False,
+                    dist_mode=None,
                     vocab_size=30,
                     input_size=5,
                     max_tokens=10,
@@ -589,10 +472,9 @@ class TestSFTLigerUnavailableBehaviour:
             # When liger is unavailable and use_liger_loss=False, training should
             # proceed normally using the standard PyTorch cross-entropy loss path.
             sft = sft_factory(
-                accelerator_factory=accelerator_factory,
+                dist_mode_factory=dist_mode_factory,
                 model_factory=model_factory,
-                config=None,
-                use_deepspeed_optimizer=False,
+                dist_mode=None,
                 vocab_size=30,
                 input_size=5,
                 max_tokens=10,
@@ -604,7 +486,6 @@ class TestSFTLigerUnavailableBehaviour:
             assert sft.use_liger_loss is False
 
         sft.clean_up()
-        AcceleratorState._reset_state(True)
 
 
 class TestSFTLoad:
@@ -614,10 +495,7 @@ class TestSFTLoad:
 
 
 class TestSFTCleanUp:
-    @pytest.mark.parametrize(
-        ("config", "use_deepspeed_optimizer"),
-        [(None, False)],
-    )
+    @pytest.mark.parametrize("dist_mode", [None])
     @pytest.mark.parametrize("vocab_size", [100])
     @pytest.mark.parametrize("input_size", [10])
     @pytest.mark.parametrize("max_tokens", [20])
@@ -628,12 +506,10 @@ class TestSFTCleanUp:
     @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
     def test_sft_clean_up(
         self,
-        deepspeed_env,
         sft_factory,
-        accelerator_factory,
+        dist_mode_factory,
         model_factory,
-        config,
-        use_deepspeed_optimizer,
+        dist_mode,
         pretrained_model_name_or_path,
         vocab_size,
         input_size,
@@ -641,10 +517,9 @@ class TestSFTCleanUp:
         micro_batch_size_per_gpu,
     ):
         sft = sft_factory(
-            accelerator_factory,
+            dist_mode_factory,
             model_factory,
-            config,
-            use_deepspeed_optimizer,
+            dist_mode,
             vocab_size,
             input_size,
             max_tokens,
@@ -658,10 +533,7 @@ class TestSFTCleanUp:
 
 
 class TestSFTSaveLoadCheckpoint:
-    @pytest.mark.parametrize(
-        ("config", "use_deepspeed_optimizer"),
-        [(None, False)],
-    )
+    @pytest.mark.parametrize("dist_mode", [None])
     @pytest.mark.parametrize("vocab_size", [100])
     @pytest.mark.parametrize("input_size", [10])
     @pytest.mark.parametrize("max_tokens", [20])
@@ -673,12 +545,10 @@ class TestSFTSaveLoadCheckpoint:
     @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
     def test_sft_save_load_checkpoint(
         self,
-        deepspeed_env,
         sft_factory,
-        accelerator_factory,
+        dist_mode_factory,
         model_factory,
-        config,
-        use_deepspeed_optimizer,
+        dist_mode,
         vocab_size,
         input_size,
         max_tokens,
@@ -686,17 +556,15 @@ class TestSFTSaveLoadCheckpoint:
         micro_batch_size_per_gpu,
     ):
         sft = sft_factory(
-            accelerator_factory,
+            dist_mode_factory,
             model_factory,
-            config,
-            use_deepspeed_optimizer,
+            dist_mode,
             vocab_size,
             input_size,
             max_tokens,
             pretrained_model_name_or_path,
             micro_batch_size_per_gpu,
         )
-        accelerator = accelerator_factory(use_deepspeed_optimizer, config)
         with tempfile.TemporaryDirectory() as tmpdir:
             sft.save_checkpoint(tmpdir)
             new_sft = SFT(
@@ -705,7 +573,6 @@ class TestSFTSaveLoadCheckpoint:
                 pad_token="<pad>",
                 device="cuda" if torch.cuda.is_available() else "cpu",
                 lora_config=copy.deepcopy(sft.lora_config),
-                accelerator=accelerator,
                 # Match the saved agent's setting so the constructor doesn't
                 # mutate ``lora_config`` differently (``use_liger_loss=True``
                 # adds ``exclude_modules=["lm_head"]``).
@@ -734,7 +601,7 @@ class TestSFTSaveLoadCheckpoint:
                         strict=False,
                     ):
                         assert torch.equal(param, new_param)
-                elif attr in ("accelerator", "lr_scheduler"):
+                elif attr == "lr_scheduler":
                     assert (
                         getattr(new_sft, attr).__class__.__name__
                         == getattr(sft, attr).__class__.__name__
@@ -765,10 +632,7 @@ class TestSFTSaveLoadCheckpoint:
 
 
 class TestSFTRecompile:
-    @pytest.mark.parametrize(
-        ("config", "use_deepspeed_optimizer"),
-        [(None, False)],
-    )
+    @pytest.mark.parametrize("dist_mode", [None])
     @pytest.mark.parametrize("vocab_size", [100])
     @pytest.mark.parametrize("input_size", [10])
     @pytest.mark.parametrize("max_tokens", [20])
@@ -779,12 +643,10 @@ class TestSFTRecompile:
     @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
     def test_sft_exception_on_recompile(
         self,
-        deepspeed_env,
         sft_factory,
-        accelerator_factory,
+        dist_mode_factory,
         model_factory,
-        config,
-        use_deepspeed_optimizer,
+        dist_mode,
         pretrained_model_name_or_path,
         vocab_size,
         input_size,
@@ -792,10 +654,9 @@ class TestSFTRecompile:
         micro_batch_size_per_gpu,
     ):
         sft = sft_factory(
-            accelerator_factory,
+            dist_mode_factory,
             model_factory,
-            config,
-            use_deepspeed_optimizer,
+            dist_mode,
             vocab_size,
             input_size,
             max_tokens,
@@ -809,7 +670,7 @@ class TestSFTRecompile:
 
 class TestSFTNoLLMDependencies:
     def test_sft_no_llm_dependencies(
-        self, sft_factory, model_factory, accelerator_factory
+        self, sft_factory, model_factory, dist_mode_factory
     ):
         with (
             mock.patch("agilerl.algorithms.core.base.HAS_LLM_DEPENDENCIES", False),
@@ -819,10 +680,9 @@ class TestSFTNoLLMDependencies:
             ),
         ):
             sft_factory(
-                accelerator_factory=accelerator_factory,
+                dist_mode_factory=dist_mode_factory,
                 model_factory=model_factory,
-                config=None,
-                use_deepspeed_optimizer=False,
+                dist_mode=None,
                 vocab_size=30,
                 input_size=5,
                 max_tokens=10,
@@ -830,14 +690,10 @@ class TestSFTNoLLMDependencies:
                 micro_batch_size_per_gpu=None,
                 from_name=False,
             )
-        AcceleratorState._reset_state(True)
 
 
 class TestSFTGetLogprobs:
-    @pytest.mark.parametrize(
-        ("config", "use_deepspeed_optimizer"),
-        [(None, False)],
-    )
+    @pytest.mark.parametrize("dist_mode", [None])
     @pytest.mark.parametrize("vocab_size", [100])
     @pytest.mark.parametrize("input_size", [10])
     @pytest.mark.parametrize("max_tokens", [20])
@@ -850,12 +706,10 @@ class TestSFTGetLogprobs:
     @pytest.mark.gpu  # real Qwen2 forward is Liger/Triton-fused → needs CUDA
     def test_sft_get_logprobs(
         self,
-        deepspeed_env,
         sft_factory,
-        accelerator_factory,
+        dist_mode_factory,
         model_factory,
-        config,
-        use_deepspeed_optimizer,
+        dist_mode,
         vocab_size,
         input_size,
         max_tokens,
@@ -864,10 +718,9 @@ class TestSFTGetLogprobs:
         micro_batch_size_per_gpu,
     ):
         sft = sft_factory(
-            accelerator_factory,
+            dist_mode_factory,
             model_factory,
-            config,
-            use_deepspeed_optimizer,
+            dist_mode,
             vocab_size,
             input_size,
             max_tokens,
@@ -883,10 +736,7 @@ class TestSFTGetLogprobs:
 
 
 class TestSFTBackwardPass:
-    @pytest.mark.parametrize(
-        ("config", "use_deepspeed_optimizer"),
-        [(None, False)],
-    )
+    @pytest.mark.parametrize("dist_mode", [None])
     @pytest.mark.parametrize("vocab_size", [100])
     @pytest.mark.parametrize("input_size", [10])
     @pytest.mark.parametrize("max_tokens", [20])
@@ -899,12 +749,10 @@ class TestSFTBackwardPass:
     @pytest.mark.gpu  # real Qwen2 forward is Liger/Triton-fused → needs CUDA
     def test_sft_backward_pass(
         self,
-        deepspeed_env,
         sft_factory,
-        accelerator_factory,
+        dist_mode_factory,
         model_factory,
-        config,
-        use_deepspeed_optimizer,
+        dist_mode,
         vocab_size,
         input_size,
         max_tokens,
@@ -913,10 +761,9 @@ class TestSFTBackwardPass:
         micro_batch_size_per_gpu,
     ):
         sft = sft_factory(
-            accelerator_factory,
+            dist_mode_factory,
             model_factory,
-            config,
-            use_deepspeed_optimizer,
+            dist_mode,
             vocab_size,
             input_size,
             max_tokens,
@@ -932,10 +779,7 @@ class TestSFTBackwardPass:
 
 
 class TestSFTPreprocessObservation:
-    @pytest.mark.parametrize(
-        ("config", "use_deepspeed_optimizer"),
-        [(None, False)],
-    )
+    @pytest.mark.parametrize("dist_mode", [None])
     @pytest.mark.parametrize("vocab_size", [100])
     @pytest.mark.parametrize("input_size", [10])
     @pytest.mark.parametrize("max_tokens", [20])
@@ -946,12 +790,10 @@ class TestSFTPreprocessObservation:
     @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
     def test_sft_preprocess_observation(
         self,
-        deepspeed_env,
         sft_factory,
-        accelerator_factory,
+        dist_mode_factory,
         model_factory,
-        config,
-        use_deepspeed_optimizer,
+        dist_mode,
         pretrained_model_name_or_path,
         vocab_size,
         input_size,
@@ -959,10 +801,9 @@ class TestSFTPreprocessObservation:
         micro_batch_size_per_gpu,
     ):
         sft = sft_factory(
-            accelerator_factory,
+            dist_mode_factory,
             model_factory,
-            config,
-            use_deepspeed_optimizer,
+            dist_mode,
             vocab_size,
             input_size,
             max_tokens,

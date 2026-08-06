@@ -1,7 +1,16 @@
 # Copyright 2026 AgileRL
 # SPDX-License-Identifier: Apache-2.0
 
-"""Conditional single-digit target probe (``ConditionalTargetEnv``)."""
+"""Conditional single-digit target probe (``ConditionalTargetEnv``).
+
+Single process::
+
+    python demos/llm/debugging/debugging_llm_stage_1.py
+
+Multi-GPU distributed training::
+
+    torchrun --nproc_per_node=2 demos/llm/debugging/debugging_llm_stage_1.py
+"""
 
 from __future__ import annotations
 
@@ -21,7 +30,7 @@ from tiny_model import TinyDigitTokenizer, build_tiny_actor_network
 from agilerl.algorithms import GRPO, LLMPPO, LLMREINFORCE
 from agilerl.llm_envs import TokenObservationWrapper
 from agilerl.training.llm import finetune_llm_multiturn
-from agilerl.utils.llm_utils import create_llm_accelerator, masked_whiten
+from agilerl.utils.llm_utils import masked_whiten
 from agilerl.utils.probe_envs_llm import ConditionalTargetEnv
 from agilerl.utils.utils import create_population
 
@@ -67,7 +76,7 @@ def evaluate_accuracy(
                     "attention_mask": prompt_encoded["attention_mask"],
                 }
                 prompt_len = prompt_dict["input_ids"].shape[1]
-                completion_ids, _ = agent.get_action([prompt_dict], training=False)
+                completion_ids, _, _ = agent.get_action([prompt_dict], training=False)
                 full_ids = completion_ids[0]
                 gen_tokens = full_ids[0, prompt_len:]
                 gen_text = tokenizer.decode(
@@ -123,7 +132,6 @@ def run_single_seed(cfg: dict, seed: int) -> tuple[float, float]:
     if agent_dbg.get("torch_compiler") is not None:
         agent_kw["torch_compiler"] = agent_dbg["torch_compiler"]
 
-    accelerator = create_llm_accelerator()
     torch.manual_seed(seed)
     tokenizer = TinyDigitTokenizer()
 
@@ -140,7 +148,6 @@ def run_single_seed(cfg: dict, seed: int) -> tuple[float, float]:
         net_config=None,
         INIT_HP=init_hp,
         population_size=1,
-        accelerator=accelerator,
         tokenizer=tokenizer,
         model_name=None,
         actor_network=build_tiny_actor_network(

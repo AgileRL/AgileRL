@@ -1,7 +1,16 @@
 # Copyright 2026 AgileRL
 # SPDX-License-Identifier: Apache-2.0
 
-"""Multi-turn grid navigation probe (``GridNavigationEnv`` + ``TokenObservationWrapper``)."""
+"""Multi-turn grid navigation probe (``GridNavigationEnv`` + ``TokenObservationWrapper``).
+
+Single process::
+
+    python demos/llm/debugging/debugging_llm_stage_3.py
+
+Multi-GPU distributed training::
+
+    torchrun --nproc_per_node=2 demos/llm/debugging/debugging_llm_stage_3.py
+"""
 
 from __future__ import annotations
 
@@ -24,7 +33,6 @@ from transformers import AutoTokenizer
 from agilerl.algorithms import GRPO, LLMPPO, LLMREINFORCE
 from agilerl.training.llm import finetune_llm_multiturn
 from agilerl.utils.algo_utils import VLLMConfig
-from agilerl.utils.llm_utils import create_llm_accelerator
 from agilerl.utils.probe_envs_llm import GridNavigationEnv
 from agilerl.utils.utils import create_population
 
@@ -232,7 +240,6 @@ def run_single_seed(cfg: dict, seed: int) -> tuple[float, float]:
     max_ctx = int(dbg["max_context_length"])
     max_new = int(dbg["max_output_tokens"])
 
-    accelerator = create_llm_accelerator()
     torch.manual_seed(seed)
     model_name = init_hp.get("MODEL_NAME")
     if model_name:
@@ -282,7 +289,6 @@ def run_single_seed(cfg: dict, seed: int) -> tuple[float, float]:
         net_config=None,
         INIT_HP=init_hp,
         population_size=1,
-        accelerator=accelerator,
         tokenizer=tokenizer,
         model_name=model_name,
         actor_network=actor_network,
@@ -331,7 +337,6 @@ def run_single_seed(cfg: dict, seed: int) -> tuple[float, float]:
         wb=False,
         save_elite=False,
         verbose=True,
-        accelerator=accelerator,
         env_factory=env_factory,
     )
 

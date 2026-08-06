@@ -4,8 +4,6 @@
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
-from accelerate import Accelerator
-
 from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.algorithms import GRPO
 from agilerl.hpo.mutation import Mutations
@@ -18,10 +16,16 @@ from agilerl.training.llm.common import (
     _resolve_training_envs,
     _validate_finetune_args,
 )
+from agilerl.utils.distributed import (
+    barrier,
+    get_world_size,
+    is_distributed,
+    is_main_process,
+)
 from agilerl.utils.llm_utils import (
+    aggregate_metrics_across_gpus,
     align_completion_batch_shapes_across_ranks,
     needs_cross_rank_seq_padding,
-    safe_aggregate_metrics,
 )
 from agilerl.utils.utils import (
     default_progress_bar,
@@ -60,7 +64,6 @@ def finetune_llm_reasoning(
     evaluation_interval: int = 10,
     max_reward: int | None = None,
     verbose: bool = True,
-    accelerator: Accelerator | None = None,
     max_steps: int | None = None,
     num_epochs: int | None = None,
 ) -> "tuple[list[SupportedReasoning], list[float]]":
@@ -107,8 +110,6 @@ def finetune_llm_reasoning(
     :type max_reward: int, optional
     :param verbose: Whether to print verbose output, defaults to True
     :type verbose: bool, optional
-    :param accelerator: Accelerator object, defaults to None
-    :type accelerator: Accelerator, optional
     :param max_steps: Maximum number of steps to run, defaults to None
     :type max_steps: int, optional
     :param num_epochs: Number of epochs to run, if set, takes precedence over max_steps,
@@ -144,20 +145,20 @@ def finetune_llm_reasoning(
         if init_hp is None
         else init_hp
     )
-    data_increment = accelerator.num_processes if accelerator is not None else 1
+    data_increment = get_world_size()
     effective_data_batch_size = data_increment * envs[0].data_batch_size_per_gpu
 
     if wb:
         init_hp["effective_data_batch_size"] = effective_data_batch_size
         init_hp["batch_size"] = init_hp.get("BATCH_SIZE", 1)
-        init_hp["distributed_training"] = accelerator is not None
+        init_hp["distributed_training"] = is_distributed()
         init_hp["model_name"] = pop[0].pretrained_model_name_or_path
 
     max_steps, training_steps = _compute_training_steps(
         max_steps, num_epochs, len(envs[0]), effective_data_batch_size, len(pop)
     )
 
-    pbar = default_progress_bar(max_steps, accelerator)
+    pbar = default_progress_bar(max_steps)
 
     # Initialize loggers and Population wrapper
     loggers = init_loggers(
@@ -168,14 +169,12 @@ def finetune_llm_reasoning(
         wb=wb,
         tensorboard=tensorboard,
         tensorboard_log_dir=tensorboard_log_dir,
-        accelerator=accelerator,
         wandb_api_key=wandb_api_key,
         wandb_kwargs=wandb_kwargs,
         init_hyperparams=init_hp,
     )
     population = Population(
         agents=pop,
-        accelerator=accelerator,
         loggers=loggers,
     )
 
@@ -191,8 +190,7 @@ def finetune_llm_reasoning(
         prompts = envs[0].reset(reset_dataloaders=True)
 
     for i in range(training_steps):
-        if accelerator is not None:
-            accelerator.wait_for_everyone()
+        barrier()
 
         for agent_idx, agent in enumerate(population.agents):
             training_env = envs[agent_idx] if uses_env_fn else envs[0]
@@ -211,9 +209,9 @@ def finetune_llm_reasoning(
             next_prompts_i, rewards = training_env.step(completion_ids)
 
             experiences = (completion_ids, action_masks, rewards)
-            if accelerator is not None and needs_cross_rank_seq_padding(
+            if needs_cross_rank_seq_padding(
                 agent,
-                world_size=accelerator.num_processes,
+                world_size=get_world_size(),
             ):
                 completion_ids, action_masks, rewards = (
                     align_completion_batch_shapes_across_ranks(
@@ -221,7 +219,6 @@ def finetune_llm_reasoning(
                         action_masks,
                         rewards,
                         pad_token_id=agent.pad_token_id,
-                        accelerator=accelerator,
                     )
                 )
                 experiences = (completion_ids, action_masks, rewards)
@@ -238,11 +235,11 @@ def finetune_llm_reasoning(
                     agent.metrics.register("accuracy")
 
                 accuracy = (rewards == max_reward).sum() / len(rewards.flatten())
-                agg_accuracy = safe_aggregate_metrics(accelerator, accuracy)
-                if accelerator is None or accelerator.is_main_process:
+                agg_accuracy = aggregate_metrics_across_gpus(accuracy)
+                if is_main_process():
                     agent.metrics.log("accuracy", agg_accuracy)
 
-            agg_rewards = safe_aggregate_metrics(accelerator, rewards)
+            agg_rewards = aggregate_metrics_across_gpus(rewards)
             agent.add_scores([agg_rewards])
             agent.finalize_training_step(training_env.data_batch_size_per_gpu)
             total_steps += effective_data_batch_size
@@ -258,7 +255,7 @@ def finetune_llm_reasoning(
                 agent.test(envs[idx] if uses_env_fn else envs[0])
 
         # Report progress
-        if accelerator is None or accelerator.is_main_process:
+        if is_main_process():
             increment = min(effective_data_batch_size, max_steps - displayed_steps)
             if increment > 0:
                 pbar.update(increment)
@@ -272,22 +269,19 @@ def finetune_llm_reasoning(
             # when tournament and mutation are enabled.
             assert evo_steps is not None
             if (i + 1) % evo_steps == 0:
-                if accelerator is not None:
-                    accelerator.wait_for_everyone()
+                barrier()
                 population.update(
                     run_selection_and_mutation(
                         selection_strategy,
                         population=population.agents,
                         mutation=mutation,
                         env_name=envs[0].name,
-                        accelerator=accelerator,
                         language_model=True,
                         elite_path=elite_path,
                         save_elite=bool(save_elite),
                     ),
                 )
-                if accelerator is not None:
-                    accelerator.wait_for_everyone()
+                barrier()
 
                 population.increment_evo_step()
         else:

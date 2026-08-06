@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import os
-import re
 from collections.abc import Callable
 from importlib import import_module
 from importlib import util as importlib_util
@@ -103,13 +102,10 @@ def escape_non_format_braces(
     if format_keys is None:
         format_keys = ["question", "answer"]
 
-    def replace_brace(match: re.Match[str]) -> str:
-        content = match.group(1)
-        if content in format_keys:
-            return match.group(0)  # Keep as-is for format keys
-        return f"{{{{{content}}}}}"  # Double the braces
-
-    return re.sub(r"\{([^}]+)\}", replace_brace, template)
+    escaped = template.replace("{", "{{").replace("}", "}}")
+    for key in format_keys:
+        escaped = escaped.replace(f"{{{{{key}}}}}", f"{{{key}}}")
+    return escaped
 
 
 def _parse_entrypoint(entrypoint: str) -> tuple[str, str]:

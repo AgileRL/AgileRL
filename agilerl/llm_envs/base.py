@@ -15,8 +15,9 @@ from typing import TYPE_CHECKING, Any, Generic, TypeVar
 import torch
 from torch.utils.data import DataLoader
 
+from agilerl.utils.distributed import shard_dataloader_kwargs
+
 if TYPE_CHECKING:
-    from accelerate import Accelerator
     from datasets import Dataset
     from transformers.tokenization_utils_base import (
         BatchEncoding,
@@ -59,17 +60,34 @@ def apply_chat_template(
         }
         for msg in conversation_template
     ]
+    render_kwargs: dict[str, Any] = {}
+    # ``continue_final_message`` is only meaningful for an assistant prefill; a
+    # template ending on a user/system message would otherwise render with the
+    # final turn left open and no assistant header at all.
+    if formatted_conversation[-1]["role"] == "assistant":
+        if formatted_conversation[-1]["content"]:
+            render_kwargs["continue_final_message"] = True
+        else:
+            # An empty prefill makes continue_final_message's trim ill-defined;
+            # opening a fresh assistant turn renders the same intent.
+            formatted_conversation = formatted_conversation[:-1]
+            render_kwargs["add_generation_prompt"] = True
+    else:
+        render_kwargs["add_generation_prompt"] = True
     updated_prompt = tokenizer.apply_chat_template(
         formatted_conversation,
         tokenize=False,
-        continue_final_message=True,
+        **render_kwargs,
     )
+    # The rendered template already carries its own special tokens (BOS where
+    # the template emits one); adding them again would double the BOS.
     return tokenizer(
         [updated_prompt],
         return_tensors="pt",
         padding=True,
         padding_side="left",
         return_attention_mask=True,
+        add_special_tokens=False,
     )
 
 
@@ -87,13 +105,11 @@ class HuggingFaceGym(ABC, Generic[PromptT, CompletionT]):
         data_batch_size_per_gpu: int = 8,
         max_context_length: int | None = None,
         min_completion_length: int | None = None,
-        accelerator: Accelerator | None = None,
         seed: int = 42,
     ) -> None:
         self.name = train_dataset.info.dataset_name
         self.tokenizer = tokenizer
         self.data_batch_size_per_gpu = data_batch_size_per_gpu
-        self.accelerator = accelerator
         self.min_completion_length = (
             0 if min_completion_length is None else min_completion_length
         )
@@ -119,14 +135,14 @@ class HuggingFaceGym(ABC, Generic[PromptT, CompletionT]):
         self.train_dataloader = DataLoader(
             train_data,
             batch_size=data_batch_size_per_gpu,
-            shuffle=True,
+            **shard_dataloader_kwargs(train_data, shuffle=True),
             **dataloader_kwargs,
             generator=generator,
         )
         self.test_dataloader = DataLoader(
             test_data,
             batch_size=data_batch_size_per_gpu,
-            shuffle=False,
+            **shard_dataloader_kwargs(test_data, shuffle=False),
             **dataloader_kwargs,
             generator=generator,
         )
@@ -134,9 +150,6 @@ class HuggingFaceGym(ABC, Generic[PromptT, CompletionT]):
             "train": len(train_dataset),
             "test": len(test_dataset),
         }
-        if self.accelerator is not None:
-            self.train_dataloader = self.accelerator.prepare(self.train_dataloader)
-            self.test_dataloader = self.accelerator.prepare(self.test_dataloader)
         self.train_dataloader_iter = iter(self.train_dataloader)
         self.test_dataloader_iter = iter(self.test_dataloader)
         self.dataloader = self.train_dataloader_iter

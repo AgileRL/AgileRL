@@ -331,7 +331,7 @@ class TestVLLMConfigDefaults:
 
 
 # These tests touch the LLMAlgorithm constructor with quantization paths.
-# Real instantiation requires deepspeed/vllm import-time wiring; we exercise
+# Real instantiation requires vllm import-time wiring; we exercise
 # only the bnb-skip-list logic via a stripped-down helper that mirrors the
 # production block in base.py. Keeping the algo constructor out of scope lets
 # these tests run quickly without GPU.
@@ -909,7 +909,7 @@ def _require_bf16_cuda() -> None:
 def _assert_finite_logits_forward(model: torch.nn.Module, vocab_size: int) -> None:
     device = next(model.parameters()).device
     input_ids = torch.randint(0, vocab_size, (2, 8), device=device)
-    with torch.inference_mode():
+    with torch.no_grad():
         logits = model(input_ids=input_ids).logits
     assert logits.shape == (2, 8, vocab_size)
     assert torch.isfinite(logits.float()).all()

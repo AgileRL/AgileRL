@@ -1149,6 +1149,22 @@ class TestRLAlgorithmLoadCheckpoint:
         assert new_agent.fitness == agent.fitness
         assert new_agent.steps == agent.steps
 
+    def test_load_checkpoint_keeps_live_device(
+        self, tmpdir, vector_space, discrete_space
+    ):
+        """The loading agent's device wins over the one recorded in the checkpoint."""
+        agent = DummyRLAlgorithm(vector_space, discrete_space, index=0)
+        checkpoint_path = Path(tmpdir) / "checkpoint.pth"
+        agent.save_checkpoint(checkpoint_path)
+
+        checkpoint = torch.load(checkpoint_path, weights_only=False)
+        checkpoint["device"] = torch.device("cuda", 7)
+        torch.save(checkpoint, checkpoint_path, pickle_module=dill)
+
+        new_agent = DummyRLAlgorithm(vector_space, discrete_space, index=0)
+        new_agent.load_checkpoint(checkpoint_path)
+        assert new_agent.device == "cpu"
+
     def test_load_pre_v2_8_checkpoint_with_list_steps(
         self, tmpdir, vector_space, discrete_space
     ):

@@ -9,7 +9,6 @@ from unittest.mock import ANY, MagicMock, Mock, call, patch
 
 import pytest
 import torch
-from accelerate import Accelerator
 
 from agilerl import HAS_LLM_DEPENDENCIES
 
@@ -290,8 +289,7 @@ def _multiturn_collect_return(*, batch_steps=3):
 
 
 class TestFinetuneLlmReasoning:
-    @pytest.mark.parametrize("use_accelerator", [True, False])
-    def test_finetune_llm_reasoning_basic_training_loop(self, use_accelerator):
+    def test_finetune_llm_reasoning_basic_training_loop(self):
         mock_agent = _mock_grpo_agent()
 
         mock_env = MagicMock()
@@ -304,7 +302,9 @@ class TestFinetuneLlmReasoning:
             patch(
                 "agilerl.training.llm.reasoning.default_progress_bar"
             ) as mock_pbar_fn,
-            patch("agilerl.training.llm.reasoning.safe_aggregate_metrics") as mock_agg,
+            patch(
+                "agilerl.training.llm.reasoning.aggregate_metrics_across_gpus"
+            ) as mock_agg,
             patch("agilerl.training.llm.reasoning.save_llm_checkpoint"),
             patch("agilerl.training.llm.reasoning.init_loggers", return_value=[]),
         ):
@@ -315,7 +315,6 @@ class TestFinetuneLlmReasoning:
                 env=mock_env,
                 evaluation_interval=2,
                 max_reward=2.0,
-                accelerator=None if use_accelerator else Accelerator(),
             )
             # finetune_llm_* must return (population, fitnesses) — same contract
             # as the non-LLM train fns — so the `agilerl train` CLI can unpack
@@ -332,8 +331,7 @@ class TestFinetuneLlmReasoning:
             assert mock_agent.learn.call_count == 6
             assert mock_agent.test.call_count == 3
 
-    @pytest.mark.parametrize("use_accelerator", [True, False])
-    def test_finetune_llm_reasoning_with_wandb_and_checkpoints(self, use_accelerator):
+    def test_finetune_llm_reasoning_with_wandb_and_checkpoints(self):
         mock_agent = _mock_grpo_agent()
 
         mock_env = MagicMock()
@@ -347,7 +345,9 @@ class TestFinetuneLlmReasoning:
                 "agilerl.training.llm.reasoning.default_progress_bar"
             ) as mock_pbar_fn,
             patch("agilerl.training.llm.reasoning.init_loggers") as mock_init_loggers,
-            patch("agilerl.training.llm.reasoning.safe_aggregate_metrics") as mock_agg,
+            patch(
+                "agilerl.training.llm.reasoning.aggregate_metrics_across_gpus"
+            ) as mock_agg,
             patch("agilerl.training.llm.reasoning.save_llm_checkpoint") as mock_save,
         ):
             mock_pbar_fn.return_value = MagicMock()
@@ -361,7 +361,6 @@ class TestFinetuneLlmReasoning:
                 wb=True,
                 wandb_api_key="fake_key",
                 evaluation_interval=3,
-                accelerator=None if use_accelerator else Accelerator(),
                 max_reward=2.0,
                 checkpoint_steps=6,
             )
@@ -383,7 +382,9 @@ class TestFinetuneLlmReasoning:
         with (
             patch("agilerl.training.llm.reasoning.default_progress_bar"),
             patch("agilerl.training.llm.reasoning.init_loggers") as mock_init_loggers,
-            patch("agilerl.training.llm.reasoning.safe_aggregate_metrics") as mock_agg,
+            patch(
+                "agilerl.training.llm.reasoning.aggregate_metrics_across_gpus"
+            ) as mock_agg,
             patch("agilerl.training.llm.reasoning.save_llm_checkpoint") as mock_save,
         ):
             mock_init_loggers.return_value = []
@@ -394,7 +395,6 @@ class TestFinetuneLlmReasoning:
                 env=mock_env,
                 save_elite=False,
                 evaluation_interval=3,
-                accelerator=None,
                 checkpoint_steps=6,
                 checkpoint_path="/tmp/llm_ckpts",
             )
@@ -402,8 +402,7 @@ class TestFinetuneLlmReasoning:
             assert mock_save.call_count == 1
             assert mock_save.call_args.args == (mock_agent, "/tmp/llm_ckpts")
 
-    @pytest.mark.parametrize("use_accelerator", [True, False])
-    def test_finetune_llm_reasoning_evolvable_training_loop(self, use_accelerator):
+    def test_finetune_llm_reasoning_evolvable_training_loop(self):
         mock_agent = _mock_grpo_agent()
 
         mock_env = MagicMock()
@@ -427,7 +426,9 @@ class TestFinetuneLlmReasoning:
             patch(
                 "agilerl.training.llm.reasoning.default_progress_bar"
             ) as mock_pbar_fn,
-            patch("agilerl.training.llm.reasoning.safe_aggregate_metrics") as mock_agg,
+            patch(
+                "agilerl.training.llm.reasoning.aggregate_metrics_across_gpus"
+            ) as mock_agg,
             patch("agilerl.training.llm.reasoning.save_llm_checkpoint"),
             patch("agilerl.training.llm.reasoning.init_loggers", return_value=[]),
             patch(
@@ -444,7 +445,6 @@ class TestFinetuneLlmReasoning:
                 evaluation_interval=2,
                 max_reward=2.0,
                 evo_steps=1,
-                accelerator=None if use_accelerator else Accelerator(),
                 selection_strategy=Mock(),
                 mutation=mutation,
             )
@@ -477,7 +477,9 @@ class TestFinetuneLlmReasoning:
             patch(
                 "agilerl.training.llm.reasoning.default_progress_bar"
             ) as mock_pbar_fn,
-            patch("agilerl.training.llm.reasoning.safe_aggregate_metrics") as mock_agg,
+            patch(
+                "agilerl.training.llm.reasoning.aggregate_metrics_across_gpus"
+            ) as mock_agg,
             patch("agilerl.training.llm.reasoning.save_llm_checkpoint"),
             patch("agilerl.training.llm.reasoning.init_loggers", return_value=[]),
             patch(
@@ -495,7 +497,6 @@ class TestFinetuneLlmReasoning:
                     evaluation_interval=2,
                     max_reward=2.0,
                     evo_steps=1,
-                    accelerator=None,
                     tournament=strategy,
                     mutation=mutation,
                 )
@@ -521,7 +522,9 @@ class TestFinetuneLlmReasoning:
             patch(
                 "agilerl.training.llm.reasoning.default_progress_bar"
             ) as mock_pbar_fn,
-            patch("agilerl.training.llm.reasoning.safe_aggregate_metrics") as mock_agg,
+            patch(
+                "agilerl.training.llm.reasoning.aggregate_metrics_across_gpus"
+            ) as mock_agg,
             patch("agilerl.training.llm.reasoning.save_llm_checkpoint"),
             patch("agilerl.training.llm.reasoning.init_loggers", return_value=[]),
             patch(
@@ -561,7 +564,9 @@ class TestFinetuneLlmReasoning:
             patch(
                 "agilerl.training.llm.reasoning.default_progress_bar"
             ) as mock_pbar_fn,
-            patch("agilerl.training.llm.reasoning.safe_aggregate_metrics") as mock_agg,
+            patch(
+                "agilerl.training.llm.reasoning.aggregate_metrics_across_gpus"
+            ) as mock_agg,
             patch("agilerl.training.llm.reasoning.save_llm_checkpoint") as mock_save,
             patch("agilerl.training.llm.reasoning.init_loggers", return_value=[]),
             _population_init_skip_per_mock_class(),
@@ -592,7 +597,6 @@ class TestFinetuneLlmReasoning:
                 ],
                 env=MagicMock(),
                 evo_steps=None,
-                accelerator=None,
                 selection_strategy=MagicMock(),
                 mutation=MagicMock(),
             )
@@ -610,7 +614,9 @@ class TestFinetuneLlmReasoning:
             patch(
                 "agilerl.training.llm.reasoning.default_progress_bar"
             ) as mock_pbar_fn,
-            patch("agilerl.training.llm.reasoning.safe_aggregate_metrics") as mock_agg,
+            patch(
+                "agilerl.training.llm.reasoning.aggregate_metrics_across_gpus"
+            ) as mock_agg,
             patch("agilerl.training.llm.reasoning.save_llm_checkpoint"),
             patch("agilerl.training.llm.reasoning.init_loggers", return_value=[]),
             patch(
@@ -646,7 +652,9 @@ class TestFinetuneLlmReasoning:
                 "agilerl.training.llm.reasoning.default_progress_bar"
             ) as mock_pbar_fn,
             patch("agilerl.training.llm.reasoning.init_loggers", return_value=[]),
-            patch("agilerl.training.llm.reasoning.safe_aggregate_metrics") as mock_agg,
+            patch(
+                "agilerl.training.llm.reasoning.aggregate_metrics_across_gpus"
+            ) as mock_agg,
             patch("agilerl.training.llm.reasoning.save_llm_checkpoint") as mock_save,
         ):
             mock_pbar_fn.return_value = MagicMock()
@@ -657,7 +665,6 @@ class TestFinetuneLlmReasoning:
                 evaluation_interval=2,
                 max_reward=2.0,
                 evo_steps=1,
-                accelerator=None,
                 num_epochs=2,
                 checkpoint_steps=3,
             )
@@ -677,7 +684,9 @@ class TestFinetuneLlmReasoning:
                 "agilerl.training.llm.reasoning.default_progress_bar"
             ) as mock_pbar_fn,
             patch("agilerl.training.llm.reasoning.init_loggers", return_value=[]),
-            patch("agilerl.training.llm.reasoning.safe_aggregate_metrics") as mock_agg,
+            patch(
+                "agilerl.training.llm.reasoning.aggregate_metrics_across_gpus"
+            ) as mock_agg,
             patch("agilerl.training.llm.reasoning.save_llm_checkpoint"),
         ):
             mock_pbar_fn.return_value = MagicMock()
@@ -689,7 +698,6 @@ class TestFinetuneLlmReasoning:
                 evaluation_interval=2,
                 max_reward=2.0,
                 evo_steps=1,
-                accelerator=None,
                 num_epochs=2,
                 checkpoint_steps=3,
             )
@@ -705,7 +713,6 @@ class TestFinetuneLlmReasoning:
                 pop=[mock_agent],
                 env=MagicMock(),
                 evaluation_interval=2,
-                accelerator=None,
             )
 
     def test_finetune_llm_reasoning_env_fn_uses_distinct_env_instances(self):
@@ -736,7 +743,7 @@ class TestFinetuneLlmReasoning:
                 "agilerl.training.llm.reasoning.default_progress_bar"
             ) as mock_pbar_fn,
             patch(
-                "agilerl.training.llm.reasoning.safe_aggregate_metrics",
+                "agilerl.training.llm.reasoning.aggregate_metrics_across_gpus",
                 return_value=0.5,
             ),
             patch("agilerl.training.llm.reasoning.save_llm_checkpoint"),
@@ -749,7 +756,6 @@ class TestFinetuneLlmReasoning:
                 max_steps=2,
                 evaluation_interval=100,
                 verbose=False,
-                accelerator=None,
             )
 
         assert env_fn.call_count == 2
@@ -769,7 +775,9 @@ class TestFinetuneLlmReasoning:
             patch(
                 "agilerl.training.llm.reasoning.default_progress_bar"
             ) as mock_pbar_fn,
-            patch("agilerl.training.llm.reasoning.safe_aggregate_metrics") as mock_agg,
+            patch(
+                "agilerl.training.llm.reasoning.aggregate_metrics_across_gpus"
+            ) as mock_agg,
             patch("agilerl.training.llm.reasoning.save_llm_checkpoint"),
             patch("agilerl.training.llm.reasoning.init_loggers", return_value=[]),
         ):
@@ -781,7 +789,6 @@ class TestFinetuneLlmReasoning:
                 evaluation_interval=2,
                 max_reward=None,
                 verbose=False,
-                accelerator=None,
             )
 
     def test_finetune_llm_reasoning_registers_accuracy_metric(self):
@@ -813,7 +820,6 @@ class TestFinetuneLlmReasoning:
                 evaluation_interval=100,
                 max_reward=2.0,
                 verbose=False,
-                accelerator=None,
             )
 
         mock_agent.metrics.register.assert_called_with("accuracy")
@@ -871,8 +877,7 @@ class TestFinetuneLlmPreference:
 
             assert mock_save.call_args_list[-1] == call(stronger, "/tmp/dpo-elite")
 
-    @pytest.mark.parametrize("use_accelerator", [True, False])
-    def test_finetune_llm_preference_basic_training_loop(self, use_accelerator):
+    def test_finetune_llm_preference_basic_training_loop(self):
         mock_agent = _mock_dpo_agent()
         mock_env = self._pref_env()
 
@@ -888,7 +893,6 @@ class TestFinetuneLlmPreference:
                 pop=[mock_agent],
                 env=mock_env,
                 evaluation_interval=2,
-                accelerator=None if use_accelerator else Accelerator(),
             )
             assert mock_env.reset.call_count == 1
             assert mock_env.reset.call_args == call(reset_dataloaders=True)
@@ -897,8 +901,7 @@ class TestFinetuneLlmPreference:
             assert mock_agent.learn.call_count == 6
             assert mock_agent.test.call_count == 3
 
-    @pytest.mark.parametrize("use_accelerator", [True, False])
-    def test_finetune_llm_preference_with_wandb_and_checkpoints(self, use_accelerator):
+    def test_finetune_llm_preference_with_wandb_and_checkpoints(self):
         mock_agent = _mock_dpo_agent()
         mock_env = self._pref_env()
 
@@ -919,7 +922,6 @@ class TestFinetuneLlmPreference:
                 wb=True,
                 wandb_api_key="fake_key",
                 evaluation_interval=3,
-                accelerator=None if use_accelerator else Accelerator(),
                 checkpoint_steps=6,
             )
 
@@ -928,8 +930,7 @@ class TestFinetuneLlmPreference:
             assert mock_save.call_count == 1
             assert mock_agent.test.call_count == 2
 
-    @pytest.mark.parametrize("use_accelerator", [True, False])
-    def test_finetune_llm_preference_evolvable_training_loop(self, use_accelerator):
+    def test_finetune_llm_preference_evolvable_training_loop(self):
         mock_agent = _mock_dpo_agent()
         mock_env = self._pref_env()
 
@@ -962,7 +963,6 @@ class TestFinetuneLlmPreference:
                 env=mock_env,
                 evaluation_interval=2,
                 evo_steps=1,
-                accelerator=None if use_accelerator else Accelerator(),
                 selection_strategy=Mock(),
                 mutation=mutation,
             )
@@ -1017,7 +1017,6 @@ class TestFinetuneLlmPreference:
                 env=mock_env,
                 evaluation_interval=2,
                 evo_steps=1,
-                accelerator=None,
                 num_epochs=2,
                 checkpoint_steps=3,
             )
@@ -1033,7 +1032,6 @@ class TestFinetuneLlmPreference:
                 pop=[mock_agent],
                 env=MagicMock(),
                 evaluation_interval=2,
-                accelerator=None,
             )
 
     def test_finetune_llm_preference_env_fn_uses_distinct_env_instances(self):
@@ -1073,7 +1071,6 @@ class TestFinetuneLlmPreference:
                 max_steps=2,
                 evaluation_interval=100,
                 verbose=False,
-                accelerator=None,
             )
 
         assert env_fn.call_count == 2
@@ -1117,8 +1114,7 @@ class TestFinetuneLlmSft:
 
             assert mock_save.call_args_list[-1] == call(stronger, "/tmp/sft-elite")
 
-    @pytest.mark.parametrize("use_accelerator", [True, False])
-    def test_finetune_llm_sft_basic_training_loop(self, use_accelerator):
+    def test_finetune_llm_sft_basic_training_loop(self):
         mock_agent = _mock_sft_agent()
 
         mock_env = MagicMock()
@@ -1137,7 +1133,6 @@ class TestFinetuneLlmSft:
                 pop=[mock_agent],
                 env=mock_env,
                 evaluation_interval=2,
-                accelerator=None if use_accelerator else Accelerator(),
             )
             assert mock_env.reset.call_count == 1
             assert mock_env.reset.call_args == call(reset_dataloaders=True)
@@ -1145,8 +1140,7 @@ class TestFinetuneLlmSft:
             assert mock_agent.learn.call_count == 6
             assert mock_agent.test.call_count == 3
 
-    @pytest.mark.parametrize("use_accelerator", [True, False])
-    def test_finetune_llm_sft_with_wandb_and_checkpoints(self, use_accelerator):
+    def test_finetune_llm_sft_with_wandb_and_checkpoints(self):
         mock_agent = _mock_sft_agent()
 
         mock_env = MagicMock()
@@ -1170,7 +1164,6 @@ class TestFinetuneLlmSft:
                 wb=True,
                 wandb_api_key="fake_key",
                 evaluation_interval=3,
-                accelerator=None if use_accelerator else Accelerator(),
                 checkpoint_steps=6,
             )
 
@@ -1179,8 +1172,7 @@ class TestFinetuneLlmSft:
             assert mock_save.call_count == 1
             assert mock_agent.test.call_count == 2
 
-    @pytest.mark.parametrize("use_accelerator", [True, False])
-    def test_finetune_llm_sft_evolvable_training_loop(self, use_accelerator):
+    def test_finetune_llm_sft_evolvable_training_loop(self):
         mock_agent = _mock_sft_agent()
 
         mock_env = MagicMock()
@@ -1214,7 +1206,6 @@ class TestFinetuneLlmSft:
                 env=mock_env,
                 evaluation_interval=2,
                 evo_steps=1,
-                accelerator=None if use_accelerator else Accelerator(),
                 selection_strategy=Mock(),
                 mutation=mutation,
             )
@@ -1270,7 +1261,6 @@ class TestFinetuneLlmSft:
                 env=mock_env,
                 evaluation_interval=2,
                 evo_steps=1,
-                accelerator=None,
                 num_epochs=2,
                 checkpoint_steps=3,
             )
@@ -1286,7 +1276,6 @@ class TestFinetuneLlmSft:
                 pop=[mock_agent],
                 env=MagicMock(),
                 evaluation_interval=2,
-                accelerator=None,
             )
 
     def test_finetune_llm_sft_evo_steps_not_set(self):
@@ -1295,7 +1284,6 @@ class TestFinetuneLlmSft:
                 pop=[MagicMock(spec=SFT)],
                 env=MagicMock(),
                 evo_steps=None,
-                accelerator=None,
                 selection_strategy=MagicMock(),
                 mutation=MagicMock(),
             )
@@ -1308,10 +1296,7 @@ class TestFinetuneLlmSft:
 
 class TestFinetuneLlmMultiturn:
     @pytest.mark.parametrize("agent_spec", [LLMPPO, LLMREINFORCE, GRPO])
-    @pytest.mark.parametrize("use_accelerator", [True, False])
-    def test_finetune_llm_multiturn_basic_training_loop(
-        self, agent_spec, use_accelerator
-    ):
+    def test_finetune_llm_multiturn_basic_training_loop(self, agent_spec):
         mock_agent = _make_multiturn_mock_agent(spec=agent_spec)
         batch_steps = 3
         max_steps = 9
@@ -1321,7 +1306,9 @@ class TestFinetuneLlmMultiturn:
                 "agilerl.training.llm.multiturn.default_progress_bar"
             ) as mock_pbar_fn,
             patch("agilerl.training.llm.multiturn.init_loggers", return_value=[]),
-            patch("agilerl.training.llm.multiturn.safe_aggregate_metrics") as mock_agg,
+            patch(
+                "agilerl.training.llm.multiturn.aggregate_metrics_across_gpus"
+            ) as mock_agg,
             patch("agilerl.training.llm.multiturn.save_llm_checkpoint") as mock_save,
             patch("agilerl.training.llm.multiturn.SyncMultiTurnVecEnv"),
             patch(
@@ -1346,7 +1333,6 @@ class TestFinetuneLlmMultiturn:
                 max_steps=max_steps,
                 evaluation_interval=100,
                 verbose=False,
-                accelerator=None if use_accelerator else Accelerator(),
             )
 
         num_outer = max_steps // batch_steps
@@ -1367,7 +1353,7 @@ class TestFinetuneLlmMultiturn:
             patch(
                 "agilerl.training.llm.multiturn.init_loggers", return_value=[]
             ) as mock_init_loggers,
-            patch("agilerl.training.llm.multiturn.safe_aggregate_metrics"),
+            patch("agilerl.training.llm.multiturn.aggregate_metrics_across_gpus"),
             patch("agilerl.training.llm.multiturn.save_llm_checkpoint"),
             patch("agilerl.training.llm.multiturn.SyncMultiTurnVecEnv"),
             patch(
@@ -1388,7 +1374,6 @@ class TestFinetuneLlmMultiturn:
                 max_steps=3,
                 evaluation_interval=100,
                 verbose=False,
-                accelerator=None,
             )
 
         assert mock_init_loggers.call_args.kwargs["algo"] == "GRPO"
@@ -1416,7 +1401,7 @@ class TestFinetuneLlmMultiturn:
             ),
             patch("agilerl.training.llm.multiturn.init_loggers", return_value=[]),
             patch(
-                "agilerl.training.llm.multiturn.safe_aggregate_metrics",
+                "agilerl.training.llm.multiturn.aggregate_metrics_across_gpus",
                 return_value=0.5,
             ),
             patch("agilerl.training.llm.multiturn.save_llm_checkpoint"),
@@ -1438,7 +1423,6 @@ class TestFinetuneLlmMultiturn:
                 max_steps=3,  # one outer iteration (batch_steps=3)
                 evaluation_interval=100,
                 verbose=False,
-                accelerator=None,
             )
 
         _, learn_kwargs = mock_agent.learn.call_args
@@ -1473,12 +1457,10 @@ class TestFinetuneLlmMultiturn:
                 env_factory=MagicMock(),
                 init_hp={"BATCH_SIZE": 3, "ALGO": "GRPO"},
                 max_steps=100,
-                accelerator=None,
                 verbose=False,
             )
 
-    @pytest.mark.parametrize("use_accelerator", [True, False])
-    def test_finetune_llm_multiturn_with_wandb_and_checkpoints(self, use_accelerator):
+    def test_finetune_llm_multiturn_with_wandb_and_checkpoints(self):
         mock_agent = _make_multiturn_mock_agent()
 
         with (
@@ -1486,7 +1468,9 @@ class TestFinetuneLlmMultiturn:
                 "agilerl.training.llm.multiturn.default_progress_bar"
             ) as mock_pbar_fn,
             patch("agilerl.training.llm.multiturn.init_loggers") as mock_init_loggers,
-            patch("agilerl.training.llm.multiturn.safe_aggregate_metrics") as mock_agg,
+            patch(
+                "agilerl.training.llm.multiturn.aggregate_metrics_across_gpus"
+            ) as mock_agg,
             patch("agilerl.training.llm.multiturn.save_llm_checkpoint") as mock_save,
             patch("agilerl.training.llm.multiturn.SyncMultiTurnVecEnv"),
             patch(
@@ -1513,15 +1497,13 @@ class TestFinetuneLlmMultiturn:
                 wb=True,
                 wandb_api_key="fake_key",
                 checkpoint_steps=2,
-                accelerator=None if use_accelerator else Accelerator(),
             )
 
         mock_init_loggers.assert_called_once()
         assert mock_init_loggers.call_args.kwargs["wb"] is True
         assert mock_save.call_count >= 1
 
-    @pytest.mark.parametrize("use_accelerator", [True, False])
-    def test_finetune_llm_multiturn_evolvable_training_loop(self, use_accelerator):
+    def test_finetune_llm_multiturn_evolvable_training_loop(self):
         mock_agent = _make_multiturn_mock_agent()
         mutation = MagicMock()
         mutation.architecture_mut = 0
@@ -1534,7 +1516,9 @@ class TestFinetuneLlmMultiturn:
                 "agilerl.training.llm.multiturn.default_progress_bar"
             ) as mock_pbar_fn,
             patch("agilerl.training.llm.multiturn.init_loggers", return_value=[]),
-            patch("agilerl.training.llm.multiturn.safe_aggregate_metrics") as mock_agg,
+            patch(
+                "agilerl.training.llm.multiturn.aggregate_metrics_across_gpus"
+            ) as mock_agg,
             patch("agilerl.training.llm.multiturn.save_llm_checkpoint") as mock_save,
             patch("agilerl.training.llm.multiturn.SyncMultiTurnVecEnv"),
             patch(
@@ -1564,7 +1548,6 @@ class TestFinetuneLlmMultiturn:
                 evo_steps=1,
                 selection_strategy=Mock(),
                 mutation=mutation,
-                accelerator=None if use_accelerator else Accelerator(),
             )
 
         assert mock_tourn.call_count == 3
@@ -1589,7 +1572,6 @@ class TestFinetuneLlmMultiturn:
                 evo_steps=None,
                 selection_strategy=MagicMock(),
                 mutation=mutation,
-                accelerator=None,
             )
 
     def test_finetune_llm_multiturn_warns_when_evo_steps_without_selection_strategy(
@@ -1606,7 +1588,6 @@ class TestFinetuneLlmMultiturn:
                 evo_steps=3,
                 selection_strategy=None,
                 mutation=None,
-                accelerator=None,
                 verbose=False,
             )
 
@@ -1622,7 +1603,6 @@ class TestFinetuneLlmMultiturn:
                 max_turns=1,
                 init_hp={"BATCH_SIZE": 1, "ALGO": "DPO"},
                 max_steps=0,
-                accelerator=None,
                 verbose=False,
             )
 
@@ -1634,7 +1614,9 @@ class TestFinetuneLlmMultiturn:
                 "agilerl.training.llm.multiturn.default_progress_bar"
             ) as mock_pbar_fn,
             patch("agilerl.training.llm.multiturn.init_loggers", return_value=[]),
-            patch("agilerl.training.llm.multiturn.safe_aggregate_metrics") as mock_agg,
+            patch(
+                "agilerl.training.llm.multiturn.aggregate_metrics_across_gpus"
+            ) as mock_agg,
             patch("agilerl.training.llm.multiturn.save_llm_checkpoint"),
             patch("agilerl.training.llm.multiturn.SyncMultiTurnVecEnv"),
             patch(
@@ -1657,7 +1639,6 @@ class TestFinetuneLlmMultiturn:
                 evaluation_interval=100,
                 max_reward=1.0,
                 verbose=False,
-                accelerator=None,
             )
 
         num_outer = 3
@@ -1673,7 +1654,9 @@ class TestFinetuneLlmMultiturn:
                 "agilerl.training.llm.multiturn.default_progress_bar"
             ) as mock_pbar_fn,
             patch("agilerl.training.llm.multiturn.init_loggers", return_value=[]),
-            patch("agilerl.training.llm.multiturn.safe_aggregate_metrics") as mock_agg,
+            patch(
+                "agilerl.training.llm.multiturn.aggregate_metrics_across_gpus"
+            ) as mock_agg,
             patch("agilerl.training.llm.multiturn.save_llm_checkpoint"),
             patch("agilerl.training.llm.multiturn.SyncMultiTurnVecEnv"),
             patch(
@@ -1696,7 +1679,6 @@ class TestFinetuneLlmMultiturn:
                 evaluation_interval=100,
                 max_reward=1.0,
                 verbose=False,
-                accelerator=None,
             )
 
         mock_agent.metrics.register.assert_called_with("accuracy")
@@ -1709,7 +1691,9 @@ class TestFinetuneLlmMultiturn:
                 "agilerl.training.llm.multiturn.default_progress_bar"
             ) as mock_pbar_fn,
             patch("agilerl.training.llm.multiturn.init_loggers", return_value=[]),
-            patch("agilerl.training.llm.multiturn.safe_aggregate_metrics") as mock_agg,
+            patch(
+                "agilerl.training.llm.multiturn.aggregate_metrics_across_gpus"
+            ) as mock_agg,
             patch("agilerl.training.llm.multiturn.save_llm_checkpoint"),
             patch("agilerl.training.llm.multiturn.SyncMultiTurnVecEnv"),
             patch(
@@ -1736,7 +1720,6 @@ class TestFinetuneLlmMultiturn:
                 max_wall_seconds=50,
                 evaluation_interval=100,
                 verbose=False,
-                accelerator=None,
             )
 
         assert "wall time limit (50s) reached" in capsys.readouterr().out
@@ -1752,7 +1735,9 @@ class TestFinetuneLlmMultiturn:
                 "agilerl.training.llm.multiturn.default_progress_bar"
             ) as mock_pbar_fn,
             patch("agilerl.training.llm.multiturn.init_loggers", return_value=[]),
-            patch("agilerl.training.llm.multiturn.safe_aggregate_metrics") as mock_agg,
+            patch(
+                "agilerl.training.llm.multiturn.aggregate_metrics_across_gpus"
+            ) as mock_agg,
             patch("agilerl.training.llm.multiturn.save_llm_checkpoint"),
             patch("agilerl.training.llm.multiturn.SyncMultiTurnVecEnv"),
             patch(
@@ -1776,7 +1761,6 @@ class TestFinetuneLlmMultiturn:
                 max_steps=max_steps,
                 evaluation_interval=1,
                 verbose=False,
-                accelerator=None,
             )
 
         num_outer = max_steps // batch_steps
@@ -1793,7 +1777,9 @@ class TestFinetuneLlmMultiturn:
                 "agilerl.training.llm.multiturn.default_progress_bar"
             ) as mock_pbar_fn,
             patch("agilerl.training.llm.multiturn.init_loggers", return_value=[]),
-            patch("agilerl.training.llm.multiturn.safe_aggregate_metrics") as mock_agg,
+            patch(
+                "agilerl.training.llm.multiturn.aggregate_metrics_across_gpus"
+            ) as mock_agg,
             patch("agilerl.training.llm.multiturn.save_llm_checkpoint") as mock_save,
             patch("agilerl.training.llm.multiturn.SyncMultiTurnVecEnv"),
             patch(
@@ -1818,7 +1804,6 @@ class TestFinetuneLlmMultiturn:
                 save_elite=True,
                 elite_path="/tmp/multiturn-elite",
                 verbose=False,
-                accelerator=None,
             )
 
         assert mock_save.call_args_list[-1] == call(stronger, "/tmp/multiturn-elite")
@@ -1833,7 +1818,9 @@ class TestFinetuneLlmMultiturn:
                 "agilerl.training.llm.multiturn.default_progress_bar"
             ) as mock_pbar_fn,
             patch("agilerl.training.llm.multiturn.init_loggers") as mock_init_loggers,
-            patch("agilerl.training.llm.multiturn.safe_aggregate_metrics") as mock_agg,
+            patch(
+                "agilerl.training.llm.multiturn.aggregate_metrics_across_gpus"
+            ) as mock_agg,
             patch("agilerl.training.llm.multiturn.save_llm_checkpoint"),
             patch("agilerl.training.llm.multiturn.SyncMultiTurnVecEnv"),
             patch(
@@ -1857,7 +1844,6 @@ class TestFinetuneLlmMultiturn:
                 wb=True,
                 wandb_api_key="fake",
                 verbose=False,
-                accelerator=None,
             )
 
         init_hp_passed = mock_init_loggers.call_args.kwargs["init_hyperparams"]
@@ -1899,7 +1885,6 @@ class TestFinetuneLlmMultiturn:
                 env_factory=MagicMock(),
                 init_hp={"BATCH_SIZE": 2, "BATCH_SIZE_PER_GPU": 2, "ALGO": "GRPO"},
                 max_steps=8,
-                accelerator=None,
                 wb=False,
                 verbose=False,
             )
@@ -1938,7 +1923,7 @@ def test_report_metrics_called_on_non_main_process(loop):
                 ),
                 patch("agilerl.training.llm.reasoning.init_loggers", return_value=[]),
                 patch(
-                    "agilerl.training.llm.reasoning.safe_aggregate_metrics",
+                    "agilerl.training.llm.reasoning.aggregate_metrics_across_gpus",
                     return_value=0.5,
                 ),
                 patch("agilerl.training.llm.reasoning.save_llm_checkpoint"),
@@ -1949,7 +1934,6 @@ def test_report_metrics_called_on_non_main_process(loop):
                     max_steps=2,
                     evaluation_interval=100,
                     verbose=False,
-                    accelerator=acc,
                 )
         elif loop == "preference":
             mock_agent = _mock_dpo_agent()
@@ -1972,7 +1956,6 @@ def test_report_metrics_called_on_non_main_process(loop):
                     max_steps=2,
                     evaluation_interval=100,
                     verbose=False,
-                    accelerator=acc,
                 )
         elif loop == "sft":
             mock_agent = _mock_sft_agent()
@@ -1995,7 +1978,6 @@ def test_report_metrics_called_on_non_main_process(loop):
                     max_steps=2,
                     evaluation_interval=100,
                     verbose=False,
-                    accelerator=acc,
                 )
         else:
             mock_agent = _make_multiturn_mock_agent(spec=GRPO)
@@ -2006,7 +1988,7 @@ def test_report_metrics_called_on_non_main_process(loop):
                 ),
                 patch("agilerl.training.llm.multiturn.init_loggers", return_value=[]),
                 patch(
-                    "agilerl.training.llm.multiturn.safe_aggregate_metrics",
+                    "agilerl.training.llm.multiturn.aggregate_metrics_across_gpus",
                     return_value=0.5,
                 ),
                 patch("agilerl.training.llm.multiturn.save_llm_checkpoint"),
@@ -2028,7 +2010,6 @@ def test_report_metrics_called_on_non_main_process(loop):
                     max_steps=2,
                     evaluation_interval=100,
                     verbose=False,
-                    accelerator=acc,
                 )
 
         assert mock_report.call_count >= 1, (
@@ -2072,7 +2053,8 @@ def test_finetune_llm_reasoning_aligns_completion_shapes_before_learn():
         ),
         patch("agilerl.training.llm.reasoning.init_loggers", return_value=[]),
         patch(
-            "agilerl.training.llm.reasoning.safe_aggregate_metrics", return_value=0.5
+            "agilerl.training.llm.reasoning.aggregate_metrics_across_gpus",
+            return_value=0.5,
         ),
         patch("agilerl.training.llm.reasoning.save_llm_checkpoint"),
         patch(
@@ -2091,7 +2073,6 @@ def test_finetune_llm_reasoning_aligns_completion_shapes_before_learn():
             max_steps=1,
             evaluation_interval=100,
             verbose=False,
-            accelerator=acc,
         )
 
     mock_needs.assert_called()
@@ -2125,7 +2106,8 @@ def test_finetune_llm_multiturn_aligns_and_pads_turn_ids():
         ),
         patch("agilerl.training.llm.multiturn.init_loggers", return_value=[]),
         patch(
-            "agilerl.training.llm.multiturn.safe_aggregate_metrics", return_value=0.5
+            "agilerl.training.llm.multiturn.aggregate_metrics_across_gpus",
+            return_value=0.5,
         ),
         patch("agilerl.training.llm.multiturn.save_llm_checkpoint"),
         patch("agilerl.training.llm.multiturn.SyncMultiTurnVecEnv"),
@@ -2158,7 +2140,6 @@ def test_finetune_llm_multiturn_aligns_and_pads_turn_ids():
             max_steps=2,
             evaluation_interval=100,
             verbose=False,
-            accelerator=acc,
         )
 
     assert mock_agent.learn.call_count >= 1
@@ -2202,7 +2183,6 @@ def test_finetune_llm_env_and_env_fn_mutually_exclusive(finetune_fn, agent_spec)
             env_fn=lambda: env,
             max_steps=0,
             verbose=False,
-            accelerator=None,
         )
 
 
@@ -2218,7 +2198,6 @@ def test_finetune_llm_requires_env_or_env_fn(finetune_fn):
             env_fn=None,
             max_steps=0,
             verbose=False,
-            accelerator=None,
         )
 
 
@@ -2258,7 +2237,6 @@ def test_finetune_llm_warns_on_shared_env_with_population(finetune_fn, agent_spe
             env=env,
             max_steps=0,
             verbose=False,
-            accelerator=None,
         )
 
 
@@ -2288,7 +2266,7 @@ def test_finetune_llm_checkpoint_triggering_non_divisible_steps(finetune_fn):
         patch(f"{mod}.save_llm_checkpoint") as mock_save,
         patch(f"{mod}.init_loggers", return_value=[]),
         (
-            patch(f"{mod}.safe_aggregate_metrics", return_value=0.5)
+            patch(f"{mod}.aggregate_metrics_across_gpus", return_value=0.5)
             if mod == "agilerl.training.llm.reasoning"
             else nullcontext()
         ),
@@ -2301,7 +2279,6 @@ def test_finetune_llm_checkpoint_triggering_non_divisible_steps(finetune_fn):
             checkpoint_steps=2,
             evaluation_interval=100,
             verbose=False,
-            accelerator=None,
         )
 
     assert mock_save.call_count == 3
@@ -2357,7 +2334,7 @@ def test_inner_loop_breaks_after_max_steps_first_agent(finetune_fn, agent_spec):
         patch(f"{mod}.save_llm_checkpoint"),
         patch(f"{mod}.init_loggers", return_value=[]),
         (
-            patch(f"{mod}.safe_aggregate_metrics", return_value=0.5)
+            patch(f"{mod}.aggregate_metrics_across_gpus", return_value=0.5)
             if mod == "agilerl.training.llm.reasoning"
             else nullcontext()
         ),
@@ -2366,7 +2343,6 @@ def test_inner_loop_breaks_after_max_steps_first_agent(finetune_fn, agent_spec):
         finetune_fn(
             pop=[agent0, agent1],
             env=env,
-            accelerator=None,
             max_steps=1,
             evaluation_interval=100,
             verbose=False,

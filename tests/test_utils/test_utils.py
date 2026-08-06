@@ -4,7 +4,7 @@
 import copy
 import os
 from typing import TYPE_CHECKING
-from unittest.mock import MagicMock, Mock, call, patch
+from unittest.mock import MagicMock, Mock, patch
 
 import gymnasium as gym
 import numpy as np
@@ -585,7 +585,7 @@ class TestCreatePopulation:
         not HAS_LLM_DEPENDENCIES,
         reason="agilerl[llm] not installed",
     )
-    def test_llmppo_uses_unique_per_agent_accelerators(self, vector_space):
+    def test_llmppo_population_omits_accelerator(self, vector_space):
         init_hp = {
             "BATCH_SIZE": 2,
             "LR": 7e-5,
@@ -602,9 +602,6 @@ class TestCreatePopulation:
         cloned_actor = MagicMock(name="cloned_actor")
         a0 = MagicMock(name="ppo_agent_0")
         a1 = MagicMock(name="ppo_agent_1")
-        base_accelerator = MagicMock(name="base_accelerator")
-        acc0 = MagicMock(name="agent_accel_0")
-        acc1 = MagicMock(name="agent_accel_1")
 
         with (
             patch("agilerl.utils.utils.clone_llm", return_value=cloned_actor),
@@ -612,9 +609,6 @@ class TestCreatePopulation:
                 "agilerl.utils.utils.get_state_dict",
                 return_value={"w": torch.tensor([1.0])},
             ),
-            patch(
-                "agilerl.utils.utils.get_llm_accelerator", side_effect=[acc0, acc1]
-            ) as mock_get_accel,
             patch("agilerl.utils.utils.LLMPPO", side_effect=[a0, a1]) as mock_llmppo,
         ):
             population = create_population(
@@ -626,7 +620,6 @@ class TestCreatePopulation:
                 hp_config=None,
                 population_size=2,
                 device="cpu",
-                accelerator=base_accelerator,
                 actor_network=actor,
                 algo_kwargs={
                     "pad_token_id": 999,
@@ -636,14 +629,10 @@ class TestCreatePopulation:
             )
 
         assert population == [a0, a1]
-        assert mock_get_accel.call_args_list == [
-            call(base_accelerator, 0),
-            call(base_accelerator, 1),
-        ]
         first_kw = mock_llmppo.call_args_list[0].kwargs
         second_kw = mock_llmppo.call_args_list[1].kwargs
-        assert first_kw["accelerator"] is acc0
-        assert second_kw["accelerator"] is acc1
+        assert "accelerator" not in first_kw
+        assert "accelerator" not in second_kw
 
     @pytest.mark.skipif(
         not HAS_LLM_DEPENDENCIES,
@@ -1215,7 +1204,7 @@ class TestRunSelectionAndMutation:
         assert mutation.indices_seen == [[3]]  # only the winner clones are perturbed
         assert saved == [(elite, elite_path)]
 
-    def test_multi_frequency_language_model_consolidates_under_accelerator(
+    def test_multi_frequency_language_model_consolidates_when_distributed(
         self, monkeypatch
     ):
         strategy = make_multi_frequency_selection()
@@ -1229,19 +1218,22 @@ class TestRunSelectionAndMutation:
             "agilerl.utils.utils.consolidate_mutations",
             lambda pop: consolidated.append(pop),
         )
-        accelerator = FakeAccelerator(is_main_process=True)
         # consolidate_mutations only receives the LLMAlgorithm members
         mutated = MagicMock(spec=LLMAlgorithm)
         mutation = RecordingMutations(result=[mutated])
 
-        run_selection_and_mutation(
-            strategy,
-            population=[1],
-            mutation=mutation,
-            env_name="env",
-            language_model=True,
-            accelerator=accelerator,
-        )
+        with (
+            patch("agilerl.utils.utils.is_distributed", return_value=True),
+            patch("agilerl.utils.utils.is_main_process", return_value=True),
+            patch("agilerl.utils.utils.barrier"),
+        ):
+            run_selection_and_mutation(
+                strategy,
+                population=[1],
+                mutation=mutation,
+                env_name="env",
+                language_model=True,
+            )
 
         assert mutation.indices_seen == [[3]]
         assert consolidated == [[mutated]]  # mutation decisions broadcast to workers
@@ -1323,18 +1315,14 @@ class TestRunSelectionAndMutation:
             agent.lr = 0.01
             agent.optimizer = Mock()
             agent.optimizer.param_groups = [{"lr": 0.01}]
-            agent.accelerator = MagicMock(spec=Accelerator)
             agent.actor = MagicMock()
             agent.actor.save_checkpoint = Mock()
-        tournament = MagicMock(spec=TournamentSelection)
+        selection_strategy = MagicMock(spec=TournamentSelection)
         mutation = MagicMock(spec=Mutations)
         mutation.mutation = Mock(return_value=population)
-        tournament.select = Mock(return_value=(population[0], population, None))
+        selection_strategy.select = Mock(return_value=(population[0], population, None))
         env_name = "CartPole-v1"
         elite_path = None
-        accelerator = MagicMock(spec=Accelerator)
-        accelerator.is_main_process = True
-        accelerator.wait_for_everyone = Mock()
 
         with (
             patch(
@@ -1343,23 +1331,25 @@ class TestRunSelectionAndMutation:
             patch(
                 "agilerl.utils.utils.consolidate_mutations"
             ) as mock_consolidate_mutations,
+            patch("agilerl.utils.utils.is_distributed", return_value=True),
+            patch("agilerl.utils.utils.is_main_process", return_value=True),
+            patch("agilerl.utils.utils.barrier") as mock_barrier,
         ):
             output_pop = run_selection_and_mutation(
-                tournament,
+                selection_strategy,
                 population=population,
                 mutation=mutation,
                 env_name=env_name,
                 elite_path=elite_path,
                 save_elite=True,
-                accelerator=accelerator,
                 language_model=True,
             )
             mock_save_llm_checkpoint.assert_called_once_with(population[0], elite_path)
             mock_consolidate_mutations.assert_called_once_with(output_pop)
 
-        tournament.select.assert_called_once_with(population)
+        selection_strategy.select.assert_called_once_with(population)
         mutation.mutation.assert_called_once_with(population, indices=None)
-        accelerator.wait_for_everyone.assert_called()
+        assert mock_barrier.call_count >= 1
 
 
 class TestTournamentSelectionAndMutationDeprecatedShim:

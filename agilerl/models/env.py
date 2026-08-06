@@ -34,7 +34,6 @@ from agilerl.utils.env_utils import (
 from agilerl.vector import AsyncPettingZooVecEnv
 
 if TYPE_CHECKING:
-    from accelerate import Accelerator
     from datasets import Dataset
     from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 
@@ -477,7 +476,7 @@ class LLMEnvSpec(BaseModel):
         return self._load_dataset_hf()
 
     def make_env(
-        self, tokenizer: PreTrainedTokenizerBase, accelerator: Accelerator | None = None
+        self, tokenizer: PreTrainedTokenizerBase
     ) -> ReasoningGym | PreferenceGym | SFTGym:
         """Make the environment for the LLM agent.
 
@@ -486,8 +485,6 @@ class LLMEnvSpec(BaseModel):
 
         :param tokenizer: The tokenizer.
         :type tokenizer: PreTrainedTokenizerBase
-        :param accelerator: The accelerator.
-        :type accelerator: Accelerator | None
         :return: The reasoning or preference gym environment.
         :rtype: ReasoningGym | PreferenceGym | SFTGym
         """
@@ -501,11 +498,11 @@ class LLMEnvSpec(BaseModel):
         train_ds, test_ds = self._load_dataset()
 
         if self.env_type == LLMEnvType.REASONING:
-            return self._make_reasoning_env(train_ds, test_ds, tokenizer, accelerator)
+            return self._make_reasoning_env(train_ds, test_ds, tokenizer)
         if self.env_type == LLMEnvType.PREFERENCE:
-            return self._make_preference_env(train_ds, test_ds, tokenizer, accelerator)
+            return self._make_preference_env(train_ds, test_ds, tokenizer)
         if self.env_type == LLMEnvType.SFT:
-            return self._make_sft_env(train_ds, test_ds, tokenizer, accelerator)
+            return self._make_sft_env(train_ds, test_ds, tokenizer)
         msg = f"Invalid environment type: {self.env_type}"
         raise ValueError(msg)
 
@@ -598,7 +595,6 @@ class LLMEnvSpec(BaseModel):
         train_dataset: Dataset,
         test_dataset: Dataset,
         tokenizer: PreTrainedTokenizerBase,
-        accelerator: Accelerator | None = None,
     ) -> ReasoningGym:
         """Make the reasoning gym environment.
 
@@ -608,8 +604,6 @@ class LLMEnvSpec(BaseModel):
         :type test_dataset: Dataset
         :param tokenizer: The tokenizer.
         :type tokenizer: PreTrainedTokenizerBase
-        :param accelerator: The accelerator.
-        :type accelerator: Accelerator | None
         :return: The reasoning gym environment.
         :rtype: ReasoningGym
         """
@@ -639,7 +633,6 @@ class LLMEnvSpec(BaseModel):
             reward_fn=reward_fn,
             conversation_template=conversation_template,
             data_batch_size_per_gpu=self.data_batch_size_per_gpu,
-            accelerator=accelerator,
             max_context_length=self.max_context_length,
             return_raw_completions=self.return_raw_completions,
             **self._seed_kwargs(),
@@ -650,7 +643,6 @@ class LLMEnvSpec(BaseModel):
         train_dataset: Dataset,
         test_dataset: Dataset,
         tokenizer: PreTrainedTokenizerBase,
-        accelerator: Accelerator | None = None,
     ) -> PreferenceGym:
         """Make the environment for the LLM agent.
 
@@ -660,8 +652,6 @@ class LLMEnvSpec(BaseModel):
         :type test_dataset: Dataset
         :param tokenizer: The tokenizer.
         :type tokenizer: PreTrainedTokenizerBase
-        :param accelerator: The accelerator.
-        :type accelerator: Accelerator | None
         :return: The preference gym environment.
         :rtype: PreferenceGym
         """
@@ -672,7 +662,6 @@ class LLMEnvSpec(BaseModel):
             test_dataset=test_dataset,
             tokenizer=tokenizer,
             data_batch_size_per_gpu=self.data_batch_size_per_gpu,
-            accelerator=accelerator,
             max_context_length=self.max_context_length,
             **self._seed_kwargs(),
         )
@@ -682,7 +671,6 @@ class LLMEnvSpec(BaseModel):
         train_dataset: Dataset,
         test_dataset: Dataset,
         tokenizer: PreTrainedTokenizerBase,
-        accelerator: Accelerator | None = None,
     ) -> SFTGym:
         """Make the SFT gym environment.
 
@@ -692,8 +680,6 @@ class LLMEnvSpec(BaseModel):
         :type test_dataset: Dataset
         :param tokenizer: The tokenizer.
         :type tokenizer: PreTrainedTokenizerBase
-        :param accelerator: The accelerator.
-        :type accelerator: Accelerator | None
         :return: The SFT gym environment.
         :rtype: SFTGym
         """
@@ -705,7 +691,6 @@ class LLMEnvSpec(BaseModel):
             tokenizer=tokenizer,
             data_batch_size_per_gpu=self.data_batch_size_per_gpu,
             response_column=self.response_column,
-            accelerator=accelerator,
             max_context_length=self.max_context_length,
             **self._seed_kwargs(),
         )

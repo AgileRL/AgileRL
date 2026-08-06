@@ -255,6 +255,16 @@ class TestPopulationMetrics:
         assert "train/agent_0/score" not in d
         assert "train/agent_0/local_steps" in d
 
+    def test_to_dict_empty_fitnesses(self):
+        """eval fitness keys omitted until an evaluation has produced values."""
+        m = _make_scalar_metrics(fitnesses=[])
+        d = m.to_dict()
+        assert "eval/mean_fitness" not in d
+        assert "eval/best_fitness" not in d
+        assert "eval/agent_0/fitness" not in d
+        assert "train/mean_score" in d
+        assert "train/agent_0/local_steps" in d
+
 
 # ===========================================================================
 # MetricsReport
@@ -320,6 +330,11 @@ class TestMetricsReport:
         m = _make_scalar_metrics()
         rows = MetricsReport(m).eval_rows()
         assert len(rows) == 1
+
+    def test_eval_rows_empty_fitnesses(self):
+        """no fitness row before the first evaluation."""
+        m = _make_scalar_metrics(fitnesses=[])
+        assert MetricsReport(m).eval_rows() == []
 
     def test_train_rows_with_scores_and_metrics(self):
         """score + additional metric rows."""
@@ -652,12 +667,11 @@ class TestCollectFitnesses:
         assert result == [5.0]
 
     def test_empty_fitness(self):
-        """nan for empty fitness."""
+        """no fitness yet -> empty list (omit from logs/tables)."""
         a = _make_mock_agent(fitness=[])
         pop = _make_population([a])
         result = pop._collect_fitnesses()
-        assert len(result) == 1
-        assert np.isnan(result[0])
+        assert result == []
 
     def test_dict_fitness(self):
         """multi-agent dict fitness."""
