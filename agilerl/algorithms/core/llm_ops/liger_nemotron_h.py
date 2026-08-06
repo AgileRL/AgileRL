@@ -151,13 +151,13 @@ def lce_forward(
         return output
 
     return LigerCausalLMOutputWithPast(
-        loss=loss,
+        loss=loss,  # ty: ignore[invalid-argument-type]  # unpack/loss_function widen to Tensor|Any; Liger output expects FloatTensor|None
         logits=logits,
         past_key_values=outputs.past_key_values,
         hidden_states=outputs.hidden_states,
         attentions=outputs.attentions,
-        token_accuracy=token_accuracy,
-        predicted_tokens=predicted_tokens,
+        token_accuracy=token_accuracy,  # ty: ignore[invalid-argument-type]  # unpack widens to Tensor|None; Liger output expects FloatTensor|None
+        predicted_tokens=predicted_tokens,  # ty: ignore[invalid-argument-type]  # unpack widens to Tensor|None; Liger output expects LongTensor|None
     )
 
 
@@ -216,7 +216,7 @@ def apply_liger_kernel_to_nemotron_h(
     if rope:
         modeling_nemotron_h.apply_rotary_pos_emb = liger_rotary_pos_emb
     if rms_norm:
-        modeling_nemotron_h.NemotronHRMSNorm = LigerRMSNorm
+        modeling_nemotron_h.NemotronHRMSNorm = LigerRMSNorm  # ty: ignore[invalid-assignment]  # intentional Liger drop-in for HF NemotronHRMSNorm
     if relu_squared:
         modeling_nemotron_h.ACT2FN["relu2"] = LigerReLUSquared
     if cross_entropy:
@@ -253,6 +253,6 @@ def register_nemotron_h_liger() -> bool:
         return False
     if _REGISTERED["value"]:
         return True
-    MODEL_TYPE_TO_APPLY_LIGER_FN["nemotron_h"] = apply_liger_kernel_to_nemotron_h
+    MODEL_TYPE_TO_APPLY_LIGER_FN["nemotron_h"] = apply_liger_kernel_to_nemotron_h  # ty: ignore[invalid-assignment]  # extend Liger's closed apply-fn union with nemotron_h
     _REGISTERED["value"] = True
     return True

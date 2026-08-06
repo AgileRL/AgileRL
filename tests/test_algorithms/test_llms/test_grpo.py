@@ -389,9 +389,15 @@ class _GrpoLossStub:
         self.vllm_importance_sampling_cap = vllm_importance_sampling_cap
         self.turn_advantage_trajectory_fallback = turn_advantage_trajectory_fallback
         self.device = device
+        self.accelerator = None
+        self._uses_deepspeed = False
+        self._window_action_tokens = None
 
     _apply_kl_advantage_shaping = GRPO._apply_kl_advantage_shaping
     _reduce_masked_loss = GRPO._reduce_masked_loss
+    _resolve_loss_window = GRPO._resolve_loss_window
+    _accumulation_steps = GRPO._accumulation_steps
+    _accumulation_steps_without_deepspeed = GRPO._accumulation_steps_without_deepspeed
     _log_importance_weights = GRPO._log_importance_weights
     _compute_policy_loss = GRPO._compute_policy_loss
     _grpo_loss_standard = GRPO._grpo_loss_standard
