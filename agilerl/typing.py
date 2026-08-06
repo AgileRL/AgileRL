@@ -61,12 +61,17 @@ class IsDataclass(Protocol):
 
 # ── TypedDicts: LLM prompts, checkpoint & mutation payloads ──────────────────
 class RolloutPrompts(TypedDict):
-    """Tokenized rollout observation prompts."""
+    """What the policy is shown for one generation turn: the transcript so far, tokenized.
+
+    :param input_ids: ``(1, T)`` initial prompt plus every generation and env
+        observation since — so it grows turn by turn. The only key a
+        ``RolloutHarness`` sets.
+    :param attention_mask: Set only by a caller passing an already-padded batch;
+        a single unpadded row implies an all-ones mask.
+    """
 
     input_ids: torch.Tensor
     attention_mask: NotRequired[torch.Tensor]
-    question: NotRequired[str | list[str] | None]
-    answer: NotRequired[str | list[str] | None]
 
 
 class PreferencePrompts(TypedDict):
