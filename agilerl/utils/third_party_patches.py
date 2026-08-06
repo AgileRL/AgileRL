@@ -5,16 +5,19 @@
 
 * :func:`patch_zero3_fetch_trace` keeps deepspeed's parameter-fetch trace from
   replaying a submodule order the current step never produced.
+* :func:`patch_zero3_param_persistence` keeps small ZeRO-3 parameters
+  replicated on every rank by setting ``zero.Init`` persistence thresholds.
 * :func:`patch_nemotron_mamba_fused_path` keeps the Nemotron-H Mamba2 mixer on
   the forward path that runs ``conv1d``, ``norm`` and ``out_proj`` as modules.
 * :func:`patch_nemotron_mamba_stream_ordering` orders that mixer's
   default-stream kernels against the stream its caller is running on.
 
 Every patch installs once at the class level, is idempotent, and takes
-``enabled`` so a caller can turn it off. Third-party symbols are resolved when
-a patch runs, not when this module is imported. An absent target is a no-op with
-a warning; a present class with the wrong shape raises. Install them before the
-model is built.
+``enabled`` so a caller can turn it off (or an env kill-switch for
+persistence). Third-party symbols are resolved when a patch runs, not when
+this module is imported. An absent target is a no-op with a warning; a present
+class with the wrong shape raises for wrap-style patches and fails soft for
+attribute patches. Install them before the model is built.
 """
 
 from __future__ import annotations
@@ -22,6 +25,7 @@ from __future__ import annotations
 import functools
 import importlib
 import logging
+import os
 from collections.abc import Mapping
 from types import ModuleType
 from typing import TYPE_CHECKING, Any
@@ -37,9 +41,11 @@ __all__ = [
     "patch_nemotron_mamba_fused_path",
     "patch_nemotron_mamba_stream_ordering",
     "patch_zero3_fetch_trace",
+    "patch_zero3_param_persistence",
 ]
 
 _ZERO3_COORDINATOR_MODULE = "deepspeed.runtime.zero.partitioned_param_coordinator"
+_ZERO3_PARTITION_MODULE = "deepspeed.runtime.zero.partition_parameters"
 _NEMOTRON_H_MODULE = "transformers.models.nemotron_h.modeling_nemotron_h"
 
 _MANGLE_PREFIX = "_PartitionedParameterCoordinator"
@@ -122,6 +128,18 @@ def _resolve_mixer_class() -> type | None:
         )
         raise RuntimeError(message)
     return mixer
+
+
+def _resolve_zero3_init() -> type | None:
+    """Resolve deepspeed ``zero.Init``, or None when it cannot be loaded.
+
+    :return: The ``Init`` class, or None.
+    :rtype: type | None
+    """
+    module = _try_import(_ZERO3_PARTITION_MODULE)
+    if module is None:
+        return None
+    return getattr(module, "Init", None)
 
 
 def _class_is_patched(cls: type, flag: str) -> bool:
@@ -341,6 +359,85 @@ def patch_zero3_fetch_trace(
         "[zero3-trace] reset_step patched; no-grad forwards preserve %d trace "
         "identity attributes",
         len(_TRACE_ATTRS),
+    )
+
+
+def patch_zero3_param_persistence(
+    param_persistence_threshold: int,
+    *,
+    model_persistence_threshold: int | None = None,
+    num_partitions: int = 1,
+) -> None:
+    """Keep small ZeRO-3 parameters replicated on every rank.
+
+    ``zero.Init`` marks a parameter persistent, and so exempt from partitioning
+    and from per-forward all-gathers, only when its class-level
+    ``apply_param_persistence`` flag is set and the parameter fits under both
+    thresholds. Setting the flag and the thresholds here decides persistence for
+    every parameter created afterwards, so this must run before the model is
+    constructed. The model threshold is a per-rank budget, hence the floor
+    division by *num_partitions*. Disabled by
+    ``AGILERL_ZERO3_PERSISTENCE_PATCH=0``; a no-op when ``zero.Init`` is
+    unavailable or lacks the attributes involved.
+
+    :param param_persistence_threshold: Largest parameter element count kept persistent.
+    :type param_persistence_threshold: int
+    :param model_persistence_threshold: Total persistent element budget across the model.
+    :type model_persistence_threshold: int | None
+    :param num_partitions: Number of ZeRO-3 parameter partitions (trainer world size).
+    :type num_partitions: int
+    :return: None
+    :rtype: None
+    """
+    if os.environ.get("AGILERL_ZERO3_PERSISTENCE_PATCH", "1") == "0":
+        logger.warning(
+            "[zero3-persist] disabled by AGILERL_ZERO3_PERSISTENCE_PATCH=0",
+        )
+        return
+
+    init_cls = _resolve_zero3_init()
+    if init_cls is None:
+        logger.warning(
+            "[zero3-persist] deepspeed zero.Init unavailable; "
+            "parameter persistence left untouched",
+        )
+        return
+
+    partitions = int(num_partitions)
+    if partitions < 1:
+        logger.warning(
+            "[zero3-persist] num_partitions=%s is not positive; treating it as 1",
+            num_partitions,
+        )
+        partitions = 1
+
+    targets: dict[str, Any] = {
+        "apply_param_persistence": True,
+        "param_persistence_threshold": int(param_persistence_threshold),
+    }
+    if model_persistence_threshold is not None:
+        targets["model_persistence_threshold"] = (
+            int(model_persistence_threshold) // partitions
+        )
+
+    missing = [name for name in targets if not hasattr(init_cls, name)]
+    if missing:
+        logger.warning(
+            "[zero3-persist] zero.Init does not define %s; "
+            "parameter persistence left untouched",
+            ", ".join(missing),
+        )
+        return
+
+    for name, value in targets.items():
+        setattr(init_cls, name, value)
+
+    logger.info(
+        "[zero3-persist] persistence enabled: param_threshold=%d "
+        "model_threshold=%s num_partitions=%d",
+        targets["param_persistence_threshold"],
+        getattr(init_cls, "model_persistence_threshold", None),
+        partitions,
     )
 
 

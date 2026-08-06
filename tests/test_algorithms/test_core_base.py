@@ -84,6 +84,7 @@ from agilerl.algorithms.core.base import (
     EvolvableAlgorithm,
     LLMAlgorithm,
     RegistryMeta,
+    _is_readonly_property,
     get_checkpoint_dict,
     get_optimizer_cls,
 )
@@ -186,6 +187,57 @@ class TestGetCheckpointDict:
         dummy_agent.rollout_buffer = MagicMock()
         chkpt = get_checkpoint_dict(dummy_agent)
         assert "rollout_buffer" not in chkpt
+
+    def test_checkpoint_dict_excludes_readonly_properties(self, vector_space):
+        class _WithDerived(DummyRLAlgorithm):
+            @property
+            def aux_metric_name(self) -> str:
+                return "kl"
+
+        agent = _WithDerived(vector_space, spaces.Discrete(2), index=0)
+        assert agent.aux_metric_name == "kl"
+        chkpt = get_checkpoint_dict(agent)
+        assert "aux_metric_name" not in chkpt
+
+
+class TestReadonlyCheckpointAttributes:
+    def test_is_readonly_property_detects_setterless_property(self):
+        class Stub:
+            @property
+            def derived(self) -> int:
+                return 1
+
+            @property
+            def mutable(self) -> int:
+                return self._m
+
+            @mutable.setter
+            def mutable(self, value: int) -> None:
+                self._m = value
+
+        stub = Stub()
+        stub._m = 0
+        assert _is_readonly_property(stub, "derived")
+        assert not _is_readonly_property(stub, "mutable")
+        assert not _is_readonly_property(stub, "_m")
+
+    def test_restore_checkpoint_attributes_skips_readonly_properties(self):
+        class Stub:
+            def __init__(self) -> None:
+                self.beta = 0.1
+
+            @property
+            def aux_metric_name(self) -> str:
+                return "liger_clip_fraction" if self.beta == 0.0 else "kl"
+
+        stub = Stub()
+        LLMAlgorithm._restore_checkpoint_attributes(
+            stub,
+            {"aux_metric_name": "kl", "beta": 0.0, "lora_config": "skip-me"},
+        )
+        assert stub.beta == 0.0
+        assert stub.aux_metric_name == "liger_clip_fraction"
+        assert not hasattr(stub, "lora_config")
 
 
 class TestGetOptimizerCls:

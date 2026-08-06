@@ -20,7 +20,11 @@ from agilerl.utils.third_party_patches import (
     patch_nemotron_mamba_fused_path,
     patch_nemotron_mamba_stream_ordering,
     patch_zero3_fetch_trace,
+    patch_zero3_param_persistence,
 )
+
+_DEFAULT_PARAM_THRESHOLD = 100_000
+_DEFAULT_MODEL_THRESHOLD = 1_000_000_000
 
 _DROPPED_ATTRS = (
     "__param_queue",
@@ -120,9 +124,15 @@ class TestImportDoesNotPullThirdParty:
     """Symbols are resolved inside patch_*; nothing is cached at import time."""
 
     def test_module_has_no_eager_third_party_bindings(self):
-        for name in ("_COORDINATOR_CLASS", "_TRACE_MODE", "_MIXER_CLASS"):
+        for name in (
+            "_COORDINATOR_CLASS",
+            "_TRACE_MODE",
+            "_MIXER_CLASS",
+            "_INIT_CLASS",
+        ):
             assert not hasattr(third_party_patches, name)
         assert callable(third_party_patches._resolve_zero3_targets)
+        assert callable(third_party_patches._resolve_zero3_init)
         assert callable(third_party_patches._resolve_mixer_class)
 
 
@@ -442,6 +452,147 @@ class TestZero3TraceInstallation:
 
         assert any(
             "coordinator unavailable" in record.message for record in caplog.records
+        )
+
+
+class _FakeZero3Init:
+    """Fake ``zero.Init`` exposing only the persistence class attributes."""
+
+    param_persistence_threshold = _DEFAULT_PARAM_THRESHOLD
+    model_persistence_threshold = _DEFAULT_MODEL_THRESHOLD
+    num_persisted_parameters = 0
+    num_persisted_elements = 0
+    apply_param_persistence = False
+
+
+@pytest.fixture
+def zero3_init_cls(monkeypatch):
+    monkeypatch.delenv("AGILERL_ZERO3_PERSISTENCE_PATCH", raising=False)
+    monkeypatch.setattr(
+        third_party_patches,
+        "_resolve_zero3_init",
+        lambda: _FakeZero3Init,
+    )
+    yield _FakeZero3Init
+    _FakeZero3Init.apply_param_persistence = False
+    _FakeZero3Init.param_persistence_threshold = _DEFAULT_PARAM_THRESHOLD
+    _FakeZero3Init.model_persistence_threshold = _DEFAULT_MODEL_THRESHOLD
+
+
+class TestZero3ParamPersistence:
+    def test_sets_flag_and_param_threshold(self, zero3_init_cls, caplog):
+        with caplog.at_level(logging.INFO):
+            patch_zero3_param_persistence(50_000)
+
+        assert zero3_init_cls.apply_param_persistence is True
+        assert zero3_init_cls.param_persistence_threshold == 50_000
+        assert any(
+            "param_threshold=50000" in record.message for record in caplog.records
+        )
+
+    def test_model_threshold_is_divided_by_num_partitions(self, zero3_init_cls):
+        patch_zero3_param_persistence(
+            100_000,
+            model_persistence_threshold=1_000_000_001,
+            num_partitions=4,
+        )
+
+        assert zero3_init_cls.model_persistence_threshold == 250_000_000
+
+    def test_model_threshold_untouched_when_not_supplied(self, zero3_init_cls):
+        patch_zero3_param_persistence(100_000, num_partitions=8)
+
+        assert zero3_init_cls.model_persistence_threshold == _DEFAULT_MODEL_THRESHOLD
+        assert zero3_init_cls.apply_param_persistence is True
+
+    def test_apply_is_idempotent(self, zero3_init_cls):
+        for _ in range(3):
+            patch_zero3_param_persistence(
+                100_000,
+                model_persistence_threshold=_DEFAULT_MODEL_THRESHOLD,
+                num_partitions=2,
+            )
+
+        assert zero3_init_cls.apply_param_persistence is True
+        assert zero3_init_cls.param_persistence_threshold == 100_000
+        assert (
+            zero3_init_cls.model_persistence_threshold == _DEFAULT_MODEL_THRESHOLD // 2
+        )
+
+    def test_missing_attribute_leaves_init_untouched(self, monkeypatch, caplog):
+        class Init:
+            param_persistence_threshold = _DEFAULT_PARAM_THRESHOLD
+            model_persistence_threshold = _DEFAULT_MODEL_THRESHOLD
+
+        monkeypatch.delenv("AGILERL_ZERO3_PERSISTENCE_PATCH", raising=False)
+        monkeypatch.setattr(
+            third_party_patches,
+            "_resolve_zero3_init",
+            lambda: Init,
+        )
+
+        with caplog.at_level(logging.WARNING):
+            patch_zero3_param_persistence(
+                50_000,
+                model_persistence_threshold=800,
+                num_partitions=2,
+            )
+
+        assert not hasattr(Init, "apply_param_persistence")
+        assert Init.param_persistence_threshold == _DEFAULT_PARAM_THRESHOLD
+        assert Init.model_persistence_threshold == _DEFAULT_MODEL_THRESHOLD
+        warnings = [
+            record.message
+            for record in caplog.records
+            if "does not define" in record.message
+        ]
+        assert warnings
+        assert "apply_param_persistence" in warnings[0]
+
+    def test_missing_init_class_is_a_no_op(self, monkeypatch, caplog):
+        monkeypatch.delenv("AGILERL_ZERO3_PERSISTENCE_PATCH", raising=False)
+        monkeypatch.setattr(
+            third_party_patches,
+            "_resolve_zero3_init",
+            lambda: None,
+        )
+
+        with caplog.at_level(logging.WARNING):
+            patch_zero3_param_persistence(50_000)
+
+        assert any(
+            "zero.Init unavailable" in record.message for record in caplog.records
+        )
+
+    def test_non_positive_num_partitions_falls_back_to_one(
+        self, zero3_init_cls, caplog
+    ):
+        with caplog.at_level(logging.WARNING):
+            patch_zero3_param_persistence(
+                100_000,
+                model_persistence_threshold=900,
+                num_partitions=0,
+            )
+
+        assert zero3_init_cls.model_persistence_threshold == 900
+        assert any("not positive" in record.message for record in caplog.records)
+
+    def test_env_var_opt_out(self, zero3_init_cls, monkeypatch, caplog):
+        monkeypatch.setenv("AGILERL_ZERO3_PERSISTENCE_PATCH", "0")
+
+        with caplog.at_level(logging.WARNING):
+            patch_zero3_param_persistence(
+                50_000,
+                model_persistence_threshold=800,
+                num_partitions=2,
+            )
+
+        assert zero3_init_cls.apply_param_persistence is False
+        assert zero3_init_cls.param_persistence_threshold == _DEFAULT_PARAM_THRESHOLD
+        assert zero3_init_cls.model_persistence_threshold == _DEFAULT_MODEL_THRESHOLD
+        assert any(
+            "AGILERL_ZERO3_PERSISTENCE_PATCH=0" in record.message
+            for record in caplog.records
         )
 
 

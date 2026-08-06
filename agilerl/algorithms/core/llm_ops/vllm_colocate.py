@@ -189,8 +189,8 @@ def patch_vllm_lora_keep_resident(llm: Any) -> int:  # noqa: ANN401 -- opaque vL
             and not getattr(module, "_agilerl_lora_resident", False)
         ):
             # Deliberate monkeypatch of a live vLLM module.
-            module.reset_lora = lambda *args, **kwargs: None  # ty: ignore[unresolved-attribute]
-            module._agilerl_lora_resident = True  # ty: ignore[unresolved-attribute]
+            object.__setattr__(module, "reset_lora", lambda *args, **kwargs: None)
+            object.__setattr__(module, "_agilerl_lora_resident", True)
             count += 1
     return count
 

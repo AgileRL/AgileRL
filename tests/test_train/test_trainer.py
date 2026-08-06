@@ -1616,6 +1616,8 @@ class TestLLMLocalTrainer:
         mock_llm_env_spec.env_type = LLMEnvType.PREFERENCE
         mock_llm_env_spec.make_env.return_value = mock_env
         mock_tokenizer = MagicMock()
+        mock_tokenizer.eos_token_id = 50256
+        mock_tokenizer.eos_token = "<|endoftext|>"
 
         with (
             patch(

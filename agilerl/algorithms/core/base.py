@@ -207,6 +207,29 @@ logger = logging.getLogger(__name__)
 LOCAL_AGENT_ATTRIBUTES = frozenset({"device"})
 
 
+def _is_readonly_property(obj: object, name: str) -> bool:
+    """Return True when ``name`` is a property without a setter on ``obj``'s type.
+
+    Derived attributes (e.g. GRPO's ``aux_metric_name``) must not be persisted or
+    restored via ``setattr`` — checkpoint restore would raise
+    ``AttributeError: can't set attribute``.
+
+    :param obj: Instance whose class MRO is inspected.
+    :type obj: object
+    :param name: Attribute name.
+    :type name: str
+    :return: Whether ``name`` is a read-only property.
+    :rtype: bool
+    """
+    for cls in type(obj).__mro__:
+        attr = vars(cls).get(name)
+        if isinstance(attr, property):
+            return attr.fset is None
+        if attr is not None:
+            return False
+    return False
+
+
 SelfAgentWrapper = TypeVar("SelfAgentWrapper", bound=AgentWrapperProtocol)
 
 
@@ -619,6 +642,10 @@ class EvolvableAlgorithm(ABC, Generic[ExperiencesT], metaclass=RegistryMeta):
         attributes = [
             a for a in attributes if not (a[0].startswith("_") or a[0].endswith("_"))
         ]
+
+        # Exclude read-only properties — derived values cannot be restored
+        # via setattr and must not be persisted in checkpoints.
+        attributes = [a for a in attributes if not _is_readonly_property(agent, a[0])]
 
         # If input_args_only is True, only include attributes that are
         # input arguments to the constructor
@@ -1225,6 +1252,8 @@ class EvolvableAlgorithm(ABC, Generic[ExperiencesT], metaclass=RegistryMeta):
         for attribute, value in checkpoint.items():
             if attribute in LOCAL_AGENT_ATTRIBUTES:
                 continue
+            if _is_readonly_property(self, attribute):
+                continue
             if isinstance(value, torch.Tensor) and isinstance(
                 getattr(self, attribute, None), torch.Tensor
             ):
@@ -1393,6 +1422,8 @@ class EvolvableAlgorithm(ABC, Generic[ExperiencesT], metaclass=RegistryMeta):
                 continue
 
             value = checkpoint.get(attribute)
+            if _is_readonly_property(self, attribute):
+                continue
             if isinstance(value, torch.Tensor) and isinstance(
                 getattr(self, attribute, None), torch.Tensor
             ):
@@ -3201,6 +3232,8 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         algorithm's values are authoritative, and any LoRA-shape reconciliation is done
         inside :meth:`_load_model_checkpoint`. :data:`LOCAL_AGENT_ATTRIBUTES` is skipped
         for the same reason: the live agent owns the device its models sit on.
+        Read-only properties are skipped because they are derived (e.g. GRPO's
+        ``aux_metric_name``) and cannot be assigned via ``setattr``.
 
         :param checkpoint: Loaded attribute payload.
         :type checkpoint: dict[str, Any]
@@ -3215,6 +3248,8 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         }
         for attr, value in checkpoint.items():
             if attr in skip_attrs:
+                continue
+            if _is_readonly_property(self, attr):
                 continue
             setattr(self, attr, value)
 
