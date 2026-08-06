@@ -22,15 +22,15 @@ dependencies = [
     "numpy>=2.0.0,<3.0",
     "omegaconf>=2.3.0",
     "pandas>=2.2.3",
-    # <1.25: the MPE envs (used by the multi-agent test fixtures) were moved out
-    # of pettingzoo into the separate mpe2 package as of 1.25.
     "pettingzoo>=1.23.1,<1.27",
+    # MPE envs, moved out of pettingzoo into their own package as of 1.25.
+    "mpe2>=1.1.0",
     "jax[cpu]>=0.4.31",
     "lazy-loader>=0.4",
     "packaging>=20.0",
     "pre-commit>=3.8.0",
     "pydantic>=2.0,<3",
-    "pygame>=2.6.0",
+    "pygame-ce>=2.5.0",
     "pymunk>=6.2,<7.3",
     "redis>=4.4.4,<8.1.0",
     "rich>=13.0,<16",
