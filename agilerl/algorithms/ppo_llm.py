@@ -1511,3 +1511,24 @@ class LLMPPO(LLMAlgorithm[LLMRolloutExperiences]):
             mask_t = (turn_ids == t).float()
             token_rewards += mask_t * rewards[:, t : t + 1]
         return token_rewards
+
+
+def __getattr__(name: str) -> object:
+    """Resolve the pre-rename ``PPO`` alias for :class:`LLMPPO`.
+
+    :param name: Attribute name being looked up.
+    :type name: str
+    :return: :class:`LLMPPO` when the legacy name is requested.
+    :rtype: object
+    :raises AttributeError: If ``name`` is not a known attribute.
+    """
+    if name == "PPO":
+        warnings.warn(
+            "agilerl.algorithms.ppo_llm.PPO was renamed to LLMPPO and the alias "
+            "will be removed in a future release; import LLMPPO instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return LLMPPO
+    msg = f"module {__name__!r} has no attribute {name!r}"
+    raise AttributeError(msg)

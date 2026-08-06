@@ -57,11 +57,11 @@ right branch was taken with the right kwargs.
 
 from __future__ import annotations
 
-import importlib
 import inspect
 import logging
 import re
 import shutil
+import subprocess
 import sys
 import warnings
 from contextlib import nullcontext
@@ -117,21 +117,26 @@ _LLM_DEPS_SKIP = pytest.mark.skipif(
 _VLLM_SKIP = pytest.mark.skipif(not HAS_VLLM, reason="vLLM not installed")
 
 
-def test_core_base_vllm_types_none_when_vllm_not_installed():
-    """vLLM symbols are None when HAS_VLLM is false at import time."""
-    original_module = sys.modules.pop("agilerl.algorithms.core.base", None)
+def test_core_base_defers_vllm_import():
+    """Importing core.base leaves the vLLM symbols unresolved and vLLM unloaded."""
+    probe = (
+        "import sys, importlib.util;"
+        "import agilerl.algorithms.core.base as base;"
+        "print(base.LLM is None, base.CompletionOutput is None,"
+        " base.SamplingParams is None, 'vllm' in sys.modules,"
+        " importlib.util.find_spec('vllm') is not None)"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", probe],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    llm, completion, sampling, vllm_loaded, vllm_installed = result.stdout.split()[-5:]
 
-    try:
-        with patch("agilerl.HAS_VLLM", False):
-            reloaded = importlib.import_module("agilerl.algorithms.core.base")
-            assert reloaded.LLM is None
-            assert reloaded.CompletionOutput is None
-            assert reloaded.SamplingParams is None
-    finally:
-        sys.modules["agilerl.algorithms.core.base"] = original_module
-        import agilerl.algorithms.core as _core_pkg
-
-        _core_pkg.base = original_module
+    assert [llm, completion, sampling] == ["True", "True", "True"]
+    if vllm_installed == "True":
+        assert vllm_loaded == "False", "core.base must not import vLLM eagerly"
 
 
 @pytest.fixture
