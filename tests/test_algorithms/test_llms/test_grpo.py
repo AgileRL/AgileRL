@@ -3622,6 +3622,7 @@ class TestGRPOLearn:
         )
         acc = MagicMock()
         acc.num_processes = 2
+        acc.free_memory.side_effect = lambda *objs: objs
         grpo.accelerator = acc
         completion_ids, action_masks = _build_branch_experiences(batch_size=4)
         rewards = torch.tensor([1.0, 0.0, -1.0, 2.0], dtype=torch.float32)
@@ -3645,6 +3646,7 @@ class TestGRPOLearn:
         grpo = _make_cpu_grpo_for_branch_tests(group_size=2)
         acc = MagicMock()
         acc.num_processes = 2
+        acc.free_memory.side_effect = lambda *objs: objs
         grpo.accelerator = acc
         completion_ids, action_masks = _build_branch_experiences(batch_size=4)
         rewards = torch.tensor([1.0, 0.0, -1.0, 2.0], dtype=torch.float32)
@@ -3673,11 +3675,13 @@ class TestGRPOLearn:
         grpo.clean_up()
 
     def test_learn_raises_on_cross_rank_seq_len_mismatch(self):
-        grpo = _make_cpu_grpo_for_branch_tests(zero_stage=3)
+        grpo = _make_cpu_grpo_for_branch_tests()
+        grpo.zero_stage = 3
         acc = MagicMock()
         acc.num_processes = 2
         acc.device = torch.device("cpu")
         acc.gather.side_effect = lambda t: torch.tensor([3, 5], dtype=t.dtype)
+        acc.free_memory.side_effect = lambda *objs: objs
         grpo.accelerator = acc
         completion_ids, action_masks = _build_branch_experiences(batch_size=2)
         rewards = torch.tensor([1.0, -1.0], dtype=torch.float32)
