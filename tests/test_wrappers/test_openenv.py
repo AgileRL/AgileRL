@@ -1296,6 +1296,34 @@ def test_server_make_env_serves_a_fresh_env_per_session() -> None:
         server.stop()
 
 
+def test_server_closes_the_env_it_builds_to_read_the_schema() -> None:
+    """The probe env belongs to no session, so it must not stay open for the run."""
+    built: list[_CountingEnv] = []
+
+    def make_env() -> _CountingEnv:
+        env = _CountingEnv()
+        built.append(env)
+        return env
+
+    server = OpenEnvServer(make_env=make_env, max_concurrent_envs=2).start()
+    try:
+        assert built, "the server builds one env up front to read its wire types"
+        assert built[0].closed
+    finally:
+        server.stop()
+
+
+def test_server_keeps_a_shared_env_open_after_reading_the_schema() -> None:
+    """With a shared env the probe *is* that env, so closing it would kill the server."""
+    env = _CountingEnv()
+    server = OpenEnvServer(env).start()
+    try:
+        assert not env.closed
+    finally:
+        server.stop()
+    assert env.closed
+
+
 # --- from_spec: factory callables and registered resolvers -------------------
 def test_from_spec_accepts_env_factory_callable() -> None:
     """A callable spec is an env factory: built with env_config, driven in-process."""

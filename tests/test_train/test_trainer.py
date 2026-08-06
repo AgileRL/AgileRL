@@ -1639,6 +1639,39 @@ class TestLLMLocalTrainer:
         )
         assert trainer.env is mock_env
 
+    def test_rollout_env_spec_still_gets_the_run_seed(self, grpo_spec):
+        """A rollout env builds no env here, but its dataset split needs the seed."""
+        from agilerl.models.env import LLMEnvSpec, LLMEnvType
+
+        mock_llm_env_spec = MagicMock(spec=LLMEnvSpec)
+        mock_llm_env_spec.env_type = LLMEnvType.ROLLOUT
+
+        with (
+            patch(
+                "agilerl.training.trainer.AutoTokenizer", create=True
+            ) as mock_auto_tok,
+            patch(
+                "agilerl.training.trainer.create_population_from_spec",
+                return_value=[MagicMock()],
+            ),
+            patch(
+                "agilerl.training.trainer.create_llm_accelerator",
+                return_value=MagicMock(),
+            ),
+        ):
+            mock_auto_tok.from_pretrained.return_value = MagicMock()
+            trainer = LocalTrainer(
+                algorithm=grpo_spec,
+                environment=mock_llm_env_spec,
+                training=self._training(),
+            )
+
+        assert mock_llm_env_spec.seed == grpo_spec.seed
+        assert mock_llm_env_spec.max_context_length == grpo_spec.max_model_len
+        # The env itself is built per-trajectory by the factory, not here.
+        mock_llm_env_spec.make_env.assert_not_called()
+        assert trainer.env is None
+
     # -- No replay buffer for LLM algorithms --------------------------------
 
     def test_no_replay_buffer_for_llm(self, dpo_spec):
@@ -2731,14 +2764,17 @@ class TestImportGuardReload:
 class TestMakeEnvBranches:
     """Unit tests for LocalTrainer._make_env individual branches."""
 
-    def test_llm_rollout_returns_none(self):
-        """LLMEnvSpec with ROLLOUT returns None."""
+    def test_llm_rollout_returns_none_but_still_configures_the_spec(self):
+        """ROLLOUT builds no env here, yet its dataset split reads the run seed."""
         from agilerl.models.env import LLMEnvSpec, LLMEnvType
 
         trainer = LocalTrainer.__new__(LocalTrainer)
         trainer.env_spec = MagicMock(spec=LLMEnvSpec)
         trainer.env_spec.env_type = LLMEnvType.ROLLOUT
         trainer.algorithm_spec = MagicMock()
+        trainer.algorithm_spec.max_model_len = 1024
+        trainer.algorithm_spec.seed = 42
+        trainer.algorithm_spec.batch_size = 8
         trainer.tokenizer = MagicMock()
         trainer.accelerator = MagicMock()
 
@@ -2746,14 +2782,19 @@ class TestMakeEnvBranches:
             "agilerl.training.trainer.isinstance",
             side_effect=lambda o, c: (
                 True
-                if c is LLMEnvSpec and o is trainer.env_spec
+                if (c is LLMEnvSpec and o is trainer.env_spec)
+                or (c is LLMAlgorithmSpec and o is trainer.algorithm_spec)
                 else type.__instancecheck__(c, o)
                 if isinstance(c, type)
                 else False
             ),
         ):
             result = trainer._make_env()
+
         assert result is None
+        assert trainer.env_spec.seed == 42
+        assert trainer.env_spec.max_context_length == 1024
+        trainer.env_spec.make_env.assert_not_called()
 
     def test_llm_dataset_calls_make_env(self):
         """A dataset LLMEnvSpec sets fields and calls make_env."""

@@ -35,11 +35,11 @@ def DummyPreferenceDataset(num_samples: int) -> HFDataset:
 
 
 def DummySFTDataset(num_samples: int) -> HFDataset:
-    """Real HF SFT dataset keyed by the default ``response_column`` ("target")."""
+    """Real HF SFT dataset keyed by the default ``response_column`` ("response")."""
     dataset = HFDataset.from_dict(
         {
             "prompt": [f"This is prompt {i}." for i in range(num_samples)],
-            "target": [f"This is response {i}." for i in range(num_samples)],
+            "response": [f"This is response {i}." for i in range(num_samples)],
         }
     )
     dataset.info.dataset_name = "dummy_sft_dataset"
@@ -482,13 +482,13 @@ class TestDatasetEnvSFTInit:
                     "This is a prompt that is longer than the max context length. This prompt really is a lot longer than the other one.",
                     "short",
                 ],
-                "target": ["a", "b"],
+                "response": ["a", "b"],
             },
         )
         test_dataset = HFDataset.from_dict(
             {
                 "prompt": ["ok"],
-                "target": ["a"],
+                "response": ["a"],
             },
         )
         tokenizer = AutoTokenizer.from_pretrained(TINY_LLM_FIXTURE_PATH)
@@ -509,8 +509,8 @@ class TestDatasetEnvSFTInit:
     def test_sft_init_missing_features(self):
         """An SFT ``DatasetEnv`` raises when the dataset lacks required features."""
         tokenizer = AutoTokenizer.from_pretrained(TINY_LLM_FIXTURE_PATH)
-        good_dataset = HFDataset.from_dict({"prompt": ["p"], "target": ["r"]})
-        # Has "prompt" (so the column filter in __init__ works) but missing "target"
+        good_dataset = HFDataset.from_dict({"prompt": ["p"], "response": ["r"]})
+        # Has "prompt" (so the column filter in __init__ works) but missing "response"
         bad_dataset = HFDataset.from_dict({"prompt": ["p"], "other": ["o"]})
         with pytest.raises(ValueError, match="must contain"):
             DatasetEnv(

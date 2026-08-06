@@ -43,7 +43,7 @@ class DatasetEnv:
         tokenizer: PreTrainedTokenizerBase,
         *,
         objective: Literal["preference", "sft"],
-        response_column: str = "target",
+        response_column: str = "response",
         chat_template_kwargs: dict[str, Any] | None = None,
         data_batch_size_per_gpu: int = 8,
         max_context_length: int | None = None,

@@ -43,27 +43,19 @@ def make_conversation_template(prompt_template: dict[str, str]) -> list[dict[str
     ]
 
 
-def get_reward_fn(reward_fn_name: str, file_path: str) -> Callable[..., float]:
-    """Removed — use :func:`get_rubric`."""
-    msg = (
-        "get_reward_fn is removed; use get_rubric(rubric_name, file_path) and "
-        "export a Rubric instance (or subclass) from the file. Wrap a legacy "
-        "(completion, answer, question) -> float callable with "
-        "agilerl.llm_envs.rubrics.reward_fn_to_rubric(...)."
-    )
-    raise ValueError(msg)
+def get_rubric_factory(rubric_name: str, file_path: str) -> Callable[[], Any]:
+    """Load a rubric symbol once and return a factory building rubrics from it.
 
-
-def get_rubric(rubric_name: str, file_path: str) -> Any:  # noqa: ANN401
-    """Load a Rubric from a file, wrapping legacy reward callables.
-
-    Accepts a ``Rubric`` instance, a ``Rubric`` subclass (instantiated here), or a
-    ``(completion, answer, question) -> float`` callable (Arena / older manifests),
-    which is wrapped with :func:`~agilerl.llm_envs.rubrics.reward_fn_to_rubric`.
+    The module is executed once, here, so its import-time cost and side effects
+    are paid once however many rubrics the caller goes on to build. A ``Rubric``
+    subclass or a reward callable yields a fresh rubric per call, which is what
+    lets concurrently-stepped envs each own their scorer; a module-level
+    ``Rubric`` instance is the author's own single object and is returned as-is.
 
     :param rubric_name: Name of the symbol in ``file_path``.
     :param file_path: Path to the Python module defining the rubric or reward fn.
-    :returns: An OpenEnv ``Rubric`` instance.
+    :returns: A zero-argument callable returning an OpenEnv ``Rubric``.
+    :rtype: Callable[[], Any]
     :raises TypeError: If the symbol is not a Rubric, Rubric subclass, or callable.
     """
     from openenv.core.rubrics.base import Rubric
@@ -92,17 +84,32 @@ def get_rubric(rubric_name: str, file_path: str) -> Any:  # noqa: ANN401
         raise ValueError(msg) from e
 
     if isinstance(obj, Rubric):
-        return obj
+        return lambda: obj
     if isinstance(obj, type) and issubclass(obj, Rubric):
-        return obj()
+        return obj
     if callable(obj):
-        return reward_fn_to_rubric(obj)
+        return lambda: reward_fn_to_rubric(obj)
     msg = (
         f"{rubric_name!r} in {file_path} must be a Rubric instance, Rubric "
         f"subclass, or (completion, answer, question) -> float callable, "
         f"got {type(obj).__name__}."
     )
     raise TypeError(msg)
+
+
+def get_rubric(rubric_name: str, file_path: str) -> Any:  # noqa: ANN401
+    """Load one Rubric from a file, wrapping legacy reward callables.
+
+    Accepts a ``Rubric`` instance, a ``Rubric`` subclass (instantiated here), or a
+    ``(completion, answer, question) -> float`` callable (Arena / older manifests),
+    which is wrapped with :func:`~agilerl.llm_envs.rubrics.reward_fn_to_rubric`.
+
+    :param rubric_name: Name of the symbol in ``file_path``.
+    :param file_path: Path to the Python module defining the rubric or reward fn.
+    :returns: An OpenEnv ``Rubric`` instance.
+    :raises TypeError: If the symbol is not a Rubric, Rubric subclass, or callable.
+    """
+    return get_rubric_factory(rubric_name, file_path)()
 
 
 def escape_non_format_braces(

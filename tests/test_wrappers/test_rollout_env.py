@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import itertools
 import re
 import threading
 from typing import ClassVar
@@ -1518,3 +1519,22 @@ class TestBatchRolloutEnvPerEpisode:
         assert isinstance(caught[0], RuntimeError)
         assert "no longer owns its env slot" in str(caught[0])
         assert vec_env.envs[0].turn_boundaries == []
+
+
+class TestMixSeed:
+    def test_seeds_stay_within_the_numpy_seed_range(self) -> None:
+        """An env seeding through numpy rejects anything at or above 2**32."""
+        seeds = [_mix_seed(base) for base in range(0, 100_000, 7)]
+
+        assert all(0 <= seed < 2**31 for seed in seeds)
+
+    def test_consecutive_windows_land_far_apart(self) -> None:
+        """The point of mixing: neighbouring inputs must not give neighbouring seeds."""
+        consecutive = [_mix_seed(base) for base in range(64)]
+
+        assert len(set(consecutive)) == 64
+        gaps = [abs(b - a) for a, b in itertools.pairwise(consecutive)]
+        assert min(gaps) > 1_000_000
+
+    def test_is_deterministic(self) -> None:
+        assert [_mix_seed(i) for i in range(16)] == [_mix_seed(i) for i in range(16)]

@@ -313,8 +313,15 @@ class OpenEnvServer:
         )
         # The app declares one action type and validates every message against it,
         # so it has to be the type this env actually speaks -- an MCP env is sent
-        # tool calls, not text, and would reject every message otherwise.
-        action_cls, observation_cls = wire_types(app_factory())
+        # tool calls, not text, and would reject every message otherwise. Reading
+        # that off an env means building one up front; under ``make_env`` that is
+        # a whole extra env, belonging to no session, so close it again rather
+        # than leave whatever it holds (a subprocess, a socket) open for the run.
+        probe = app_factory()
+        action_cls, observation_cls = wire_types(probe)
+        if make_env is not None:
+            with contextlib.suppress(Exception):
+                probe.close()
         app = create_app(
             app_factory,
             action_cls,

@@ -352,7 +352,7 @@ class TestSFTLearn:
         train_dataset = Dataset.from_dict(
             {
                 "prompt": [f"Prompt {i}" for i in range(100)],
-                "target": [
+                "response": [
                     f"This is a good response for prompt {i}" for i in range(100)
                 ],
             },
@@ -360,7 +360,7 @@ class TestSFTLearn:
         test_dataset = Dataset.from_dict(
             {
                 "prompt": [f"Prompt {i}" for i in range(100)],
-                "target": [
+                "response": [
                     f"This is a good response for prompt {i}" for i in range(100)
                 ],
             },
@@ -489,7 +489,7 @@ class TestSFTTest:
         train_dataset = Dataset.from_dict(
             {
                 "prompt": [f"Prompt {i}" for i in range(100)],
-                "target": [
+                "response": [
                     f"This is a good response for prompt {i}" for i in range(100)
                 ],
             },
@@ -497,7 +497,7 @@ class TestSFTTest:
         test_dataset = Dataset.from_dict(
             {
                 "prompt": [f"Prompt {i}" for i in range(100)],
-                "target": [
+                "response": [
                     f"This is a good response for prompt {i}" for i in range(100)
                 ],
             },

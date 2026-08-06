@@ -18,6 +18,9 @@ from openenv.core.rubrics.base import Rubric
 
 _COMPONENT_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_.]*")
 
+# Component names a rubric node already carries a metadata hook for.
+_HOOKED_COMPONENTS = "_agilerl_hooked_components"
+
 
 def _snake_case(name: str) -> str:
     """Convert ``PascalCase`` / ``camelCase`` to ``snake_case``."""
@@ -81,8 +84,9 @@ def register_component_hooks(rubric: Rubric | None) -> tuple[str, ...]:
 
     OpenEnv's observability pattern: each leaf's post-``forward`` hook stamps
     ``observation.metadata["rubric_scores"][name]`` for that call. Returns the
-    ordered leaf names (empty when ``rubric`` is ``None``). Give each env its
-    own rubric tree — sharing registers duplicate hooks on the same nodes.
+    ordered leaf names (empty when ``rubric`` is ``None``). Registration is
+    idempotent per node: the hook writes into whichever observation it is handed
+    and holds no per-env state, so one is all a shared rubric tree ever needs.
     """
     if rubric is None:
         return ()
@@ -116,7 +120,13 @@ def register_component_hooks(rubric: Rubric | None) -> tuple[str, ...]:
             if metadata is not None:
                 metadata.setdefault("rubric_scores", {})[_name] = float(result)
 
-        node.register_forward_hook(hook)
+        hooked = getattr(node, _HOOKED_COMPONENTS, None)
+        if hooked is None:
+            hooked = set()
+            setattr(node, _HOOKED_COMPONENTS, hooked)
+        if name not in hooked:
+            node.register_forward_hook(hook)
+            hooked.add(name)
         names.append(name)
 
     walk(rubric, "")

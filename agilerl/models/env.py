@@ -27,7 +27,7 @@ from agilerl.typing import EnvFactory, WrapperSpec
 from agilerl.utils.env_utils import (
     GymEnvType,
     apply_wrappers,
-    get_rubric,
+    get_rubric_factory,
     make_conversation_template,
     resolve_entrypoint_target,
 )
@@ -441,6 +441,17 @@ class LLMEnvSpec(BaseModel):
         """Whether this rollout env serves labelled rows scored by a reward fn."""
         return self.env_type == LLMEnvType.ROLLOUT and self.dataset is not None
 
+    @property
+    def _split_seed(self) -> int:
+        """Seed for the shuffle and train/test split, defaulting when unset.
+
+        Every rank loads the dataset for itself and the rollout task assigner
+        hands out rows *by index*, so an unseeded split would leave ranks
+        disagreeing about which row is row ``n`` — their shards would overlap
+        instead of partitioning, and each would hold out a different test set.
+        """
+        return self.seed if self.seed is not None else 42
+
     def _http_timeout_s(self) -> float | None:
         """Per-message ``env_url`` timeout: manifest value, 300 s default, ``0`` unbounds."""
         if self.request_timeout_s is None:
@@ -556,11 +567,13 @@ class LLMEnvSpec(BaseModel):
             msg = "dataset is required to load reasoning/preference/sft data"
             raise ValueError(msg)
         _, load_dataset = _require_datasets()
-        ds = load_dataset(dataset, split="train").shuffle(seed=self.seed)
+        ds = load_dataset(dataset, split="train").shuffle(seed=self._split_seed)
         if self.columns:
             ds = ds.rename_columns(self.columns)
 
-        split = ds.train_test_split(test_size=1.0 - self.train_test_split)
+        split = ds.train_test_split(
+            test_size=1.0 - self.train_test_split, seed=self._split_seed
+        )
         return split["train"], split["test"]
 
     def _load_dataset_file(self) -> tuple[Dataset, Dataset]:
@@ -579,7 +592,9 @@ class LLMEnvSpec(BaseModel):
             df = df.rename(columns=self.columns)
 
         ds = Dataset.from_pandas(df)
-        split = ds.train_test_split(test_size=1.0 - self.train_test_split)
+        split = ds.train_test_split(
+            test_size=1.0 - self.train_test_split, seed=self._split_seed
+        )
         return split["train"], split["test"]
 
     def _load_dataset(self) -> tuple[Dataset, Dataset]:
@@ -727,7 +742,7 @@ class LLMEnvSpec(BaseModel):
                         train_ds=train_ds,
                         test_ds=test_ds,
                         prompt_builder=_prompt_builder,
-                        rubric=get_rubric(
+                        rubric_factory=get_rubric_factory(
                             rubric_name=self.rubric_name,
                             file_path=self.rubric_file_path,
                         ),
@@ -738,13 +753,14 @@ class LLMEnvSpec(BaseModel):
                 parts = _resolve()
                 return RolloutHarness.from_dataset(
                     parts["train_ds"],
-                    parts["rubric"],
+                    # One rubric per env: the collector steps its slots on
+                    # concurrent threads, and a rubric carries scoring state.
+                    parts["rubric_factory"](),
                     tokenizer,
                     test_dataset=parts["test_ds"],
                     prompt_builder=parts["prompt_builder"],
                     # ``prompt_builder`` already rendered the chat template.
                     apply_chat_template=False,
-                    chat_template_kwargs=chat_template_kwargs,
                     max_model_len=max_model_len,
                     max_output_tokens=max_output_tokens,
                 )

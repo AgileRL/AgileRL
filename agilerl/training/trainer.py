@@ -697,16 +697,17 @@ class LocalTrainer(Trainer):
         :rtype: GymEnvType | PzEnvType | LLMEnvType | BanditEnv | None
         """
         if isinstance(self.env_spec, LLMEnvSpec):
-            # Rollout envs are built per-trajectory by ``make_rollout_env_factory``.
-            if self.env_spec.env_type == LLMEnvType.ROLLOUT:
-                return None
-
             assert isinstance(self.algorithm_spec, LLMAlgorithmSpec)
 
             # Some LLMEnvSpec fields are dependent on the algo configuration
             self.env_spec.max_context_length = self.algorithm_spec.max_model_len
             self.env_spec.seed = self.algorithm_spec.seed
             self.env_spec.data_batch_size_per_gpu = self.algorithm_spec.batch_size
+
+            # Rollout envs are built per-trajectory by ``make_rollout_env_factory``,
+            # but a dataset-backed one still splits its rows off this seed.
+            if self.env_spec.env_type == LLMEnvType.ROLLOUT:
+                return None
 
             assert self.tokenizer is not None
             return self.env_spec.make_env(

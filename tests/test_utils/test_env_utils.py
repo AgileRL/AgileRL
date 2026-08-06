@@ -48,12 +48,46 @@ class TestParseEntrypoint:
         assert target == "DiskEnv"
 
 
-class TestGetRewardFn:
-    def test_removed_raises_with_migration_hint(self, tmp_path):
+class TestGetRubricFactory:
+    def test_module_executes_once_across_builds(self, tmp_path):
+        """The factory pays the module's import cost once, however many it builds."""
+        rubric_file = tmp_path / "counting_rubric.py"
+        rubric_file.write_text(
+            "from openenv.core.rubrics.base import Rubric\n"
+            "EXECUTIONS = []\n"
+            "EXECUTIONS.append(1)\n"
+            "class Counting(Rubric):\n"
+            "    def forward(self, action, observation):\n"
+            "        return 1.0\n",
+            encoding="utf-8",
+        )
+        factory = env_utils.get_rubric_factory("Counting", str(rubric_file))
+        built = [factory() for _ in range(3)]
+        assert len({id(rubric) for rubric in built}) == 3
+        assert type(built[0]).forward.__globals__["EXECUTIONS"] == [1]
+
+    def test_reward_callable_builds_fresh_instances(self, tmp_path):
         rubric_file = tmp_path / "reward.py"
-        rubric_file.write_text("def reward(): return 1.0\n", encoding="utf-8")
-        with pytest.raises(ValueError, match="get_reward_fn is removed"):
-            env_utils.get_reward_fn("reward", str(rubric_file))
+        rubric_file.write_text(
+            "def reward(completion, answer, question):\n    return 1.0\n",
+            encoding="utf-8",
+        )
+        factory = env_utils.get_rubric_factory("reward", str(rubric_file))
+        assert factory() is not factory()
+
+    def test_module_level_instance_is_shared(self, tmp_path):
+        """An author's own singleton rubric is handed back as-is, not copied."""
+        rubric_file = tmp_path / "singleton.py"
+        rubric_file.write_text(
+            "from openenv.core.rubrics.base import Rubric\n"
+            "class Single(Rubric):\n"
+            "    def forward(self, action, observation):\n"
+            "        return 1.0\n"
+            "RUBRIC = Single()\n",
+            encoding="utf-8",
+        )
+        factory = env_utils.get_rubric_factory("RUBRIC", str(rubric_file))
+        assert factory() is factory()
 
 
 class TestGetRubric:

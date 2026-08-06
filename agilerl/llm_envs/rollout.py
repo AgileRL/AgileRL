@@ -763,11 +763,17 @@ class RolloutHarness:
 
 
 def _mix_seed(value: int) -> int:
-    """Spread a task seed via splitmix64: deterministic, and injective over 64-bit inputs."""
+    """Spread a task seed via splitmix64, truncated to a seed every env accepts.
+
+    The result is masked to 31 bits because an env seeding through numpy rejects
+    anything at or above ``2**32``, and that is where a seed most often ends up.
+    Truncation costs nothing here: the seeds only have to land far apart, and
+    2**31 of them is far more than any run draws.
+    """
     z = (value + 0x9E3779B97F4A7C15) & ((1 << 64) - 1)
     z = ((z ^ (z >> 30)) * 0xBF58476D1CE4E5B9) & ((1 << 64) - 1)
     z = ((z ^ (z >> 27)) * 0x94D049BB133111EB) & ((1 << 64) - 1)
-    return (z ^ (z >> 31)) & ((1 << 63) - 1)
+    return (z ^ (z >> 31)) & ((1 << 31) - 1)
 
 
 class TaskAssigner:

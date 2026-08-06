@@ -6,6 +6,7 @@ from __future__ import annotations
 from unittest.mock import MagicMock, patch
 
 import numpy as np
+import pandas as pd
 import pytest
 from pydantic import ValidationError
 
@@ -379,15 +380,15 @@ class TestLLMEnvSpec:
             LLMEnvSpec(env_type=LLMEnvType.ROLLOUT, dataset="ds", train_test_split=-0.1)
 
     @patch("agilerl.models.env.make_conversation_template")
-    @patch("agilerl.models.env.get_rubric")
+    @patch("agilerl.models.env.get_rubric_factory")
     @patch.object(LLMEnvSpec, "_load_dataset")
     def test_dataset_backed_rollout_factory(
-        self, mock_load, mock_get_rubric, mock_conv_tmpl
+        self, mock_load, mock_get_rubric_factory, mock_conv_tmpl
     ):
         mock_train_ds = MagicMock()
         mock_test_ds = MagicMock()
         mock_load.return_value = (mock_train_ds, mock_test_ds)
-        rubric = mock_get_rubric.return_value
+        rubric = mock_get_rubric_factory.return_value.return_value
         mock_conv_tmpl.return_value = [{"role": "user", "content": "{question}"}]
         mock_tokenizer = MagicMock()
         mock_tokenizer.pad_token_id = 0
@@ -407,10 +408,10 @@ class TestLLMEnvSpec:
             factory = spec.make_rollout_env_factory(mock_tokenizer)
             # Building the factory reads nothing.
             mock_load.assert_not_called()
-            mock_get_rubric.assert_not_called()
+            mock_get_rubric_factory.assert_not_called()
             factory()
 
-        mock_get_rubric.assert_called_once_with(
+        mock_get_rubric_factory.assert_called_once_with(
             rubric_name="reward_fn", file_path="reward.py"
         )
         mock_conv_tmpl.assert_called_once()
@@ -431,10 +432,10 @@ class TestLLMEnvSpec:
         assert messages == [{"role": "user", "content": "2+2"}]
 
     @patch("agilerl.models.env.make_conversation_template")
-    @patch("agilerl.models.env.get_rubric")
+    @patch("agilerl.models.env.get_rubric_factory")
     @patch.object(LLMEnvSpec, "_load_dataset")
     def test_chat_template_kwargs_reach_dataset_factory_and_prompt_builder(
-        self, mock_load, mock_get_rubric, mock_conv_tmpl
+        self, mock_load, mock_get_rubric_factory, mock_conv_tmpl
     ):
         mock_load.return_value = (MagicMock(), MagicMock())
         mock_conv_tmpl.return_value = [{"role": "user", "content": "{question}"}]
@@ -454,10 +455,9 @@ class TestLLMEnvSpec:
             spec.make_rollout_env_factory(mock_tokenizer)()
 
         kwargs = mock_rollout_cls.from_dataset.call_args.kwargs
-        assert kwargs["chat_template_kwargs"] == {"enable_thinking": False}
-
-        # The prompt_builder renders with apply_chat_template=False on the env,
-        # so the kwargs must reach its own render call.
+        # apply_chat_template is False on this env, so the kwargs would be dead
+        # there; the prompt_builder is what renders, so they must reach its call.
+        assert "chat_template_kwargs" not in kwargs
         mock_tokenizer.apply_chat_template.return_value = "<rendered>"
         kwargs["prompt_builder"]({"question": "2+2"})
         render_kwargs = mock_tokenizer.apply_chat_template.call_args.kwargs
@@ -652,6 +652,60 @@ class FakeBandit:
         assert restored.entrypoint == "my_module:MyBandit"
         assert restored.config == {"n_arms": 5}
         assert restored.features is None
+
+
+class TestLLMEnvSpecDatasetSplit:
+    """Every rank splits the dataset for itself, so the split must not be random."""
+
+    @staticmethod
+    def _write_rows(tmp_path, n=40):
+        path = tmp_path / "rows.parquet"
+        pd.DataFrame(
+            {
+                "question": [f"q{i}" for i in range(n)],
+                "answer": [f"a{i}" for i in range(n)],
+            }
+        ).to_parquet(path)
+        return path
+
+    @staticmethod
+    def _spec(path, seed):
+        spec = LLMEnvSpec(
+            env_type=LLMEnvType.ROLLOUT,
+            dataset=str(path),
+            rubric_file_path="reward.py",
+            rubric_name="reward_fn",
+            prompt_template={"user_0": "{question}"},
+        )
+        spec.seed = seed
+        return spec
+
+    def test_same_seed_gives_every_rank_the_same_rows(self, tmp_path):
+        """Row ``n`` must be the same row on every rank, or index shards overlap."""
+        path = self._write_rows(tmp_path)
+
+        train_a, test_a = self._spec(path, 7)._load_dataset()
+        train_b, test_b = self._spec(path, 7)._load_dataset()
+
+        assert train_a["question"] == train_b["question"]
+        assert test_a["question"] == test_b["question"]
+
+    def test_unset_seed_still_splits_deterministically(self, tmp_path):
+        """A manifest that names no seed must not fall back to a random split."""
+        path = self._write_rows(tmp_path)
+
+        train_a, _ = self._spec(path, None)._load_dataset()
+        train_b, _ = self._spec(path, None)._load_dataset()
+
+        assert train_a["question"] == train_b["question"]
+
+    def test_different_seeds_give_different_splits(self, tmp_path):
+        path = self._write_rows(tmp_path)
+
+        train_a, _ = self._spec(path, 7)._load_dataset()
+        train_c, _ = self._spec(path, 8)._load_dataset()
+
+        assert train_a["question"] != train_c["question"]
 
 
 # ---------------------------------------------------------------------------
