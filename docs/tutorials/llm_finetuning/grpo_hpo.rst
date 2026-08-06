@@ -36,8 +36,9 @@ Dependencies
     from agilerl.utils.algo_utils import VLLMConfig
     from agilerl.hpo.mutation import Mutations
     from agilerl.hpo.tournament import TournamentSelection
-    from agilerl.training.llm import finetune_llm_reasoning
-    from agilerl.llm_envs import ReasoningGym
+    from agilerl.training.llm import train_llm_rollout
+    from agilerl.llm_envs import RolloutHarness
+    from agilerl.utils.utils import create_population
 
 Defining Hyperparameters
 ------------------------
@@ -137,8 +138,9 @@ become very good at taking actions to solve tasks - to develop *agency*. Since w
 with reinforcement learning, it becomes an agent through this process.
 
 We must create a reinforcement learning environment in which our agent can explore possible
-solutions and learn to optimise rewards. AgileRL provides a :class:`ReasoningGym <agilerl.llm_envs.ReasoningGym>`
-class that wraps a Hugging Face dataset and converts it into a reinforcement learning, gymnasium-style environment.
+solutions and learn to optimise rewards. AgileRL provides a :class:`RolloutHarness <agilerl.llm_envs.RolloutHarness>`
+class that turns lists of questions and answers into a reinforcement learning, gymnasium-style environment.
+Reasoning is the single-turn case, so we build the environment with ``max_turns=1``.
 
 So, how does the environment know how to reward an agent for its outputs? Well, we must define a *reward_function*
 that the agent learns to optimise. Following the techniques used in the DeepSeek reasoning `paper <https://arxiv.org/pdf/2501.12948>`_,
@@ -221,13 +223,16 @@ Now we have defined our reward functions, we must also design our prompt. This f
 to the agent and provides the context necessary to complete the task. This is a task-specific feature,
 and different reasoning problems will require different conversation templates, although they can follow a similar
 format. We define the conversation template as follows (using ``question`` and ``answer`` as placeholders for the question and answer data)
-and then instantiate the ``ReasoningGym`` object which converts a Hugging Face dataset into a Gymnasium-style environment.
+and then drive a single-turn rollout env over the question and answer
+columns of our dataset with an in-process ``env_factory`` (a prompt dataset is just an
+environment: each rollout runs its own env instance in-process via
+:meth:`RolloutHarness.local <agilerl.llm_envs.RolloutHarness.local>`).
 
-.. collapse:: Convert HuggingFace Dataset to Gymnasium Environment
+.. collapse:: Build the Single-Turn Rollout Environment
 
     .. code-block:: python
 
-        conversation = [
+        conversation_template = [
             {
                 "role": "system",
                 "content": "You are a helpful assistant. You first think about the reasoning process in your mind and then provide the user with the answer.",
@@ -242,16 +247,58 @@ and then instantiate the ``ReasoningGym`` object which converts a Hugging Face d
         # Define accelerators for distributed training
         accelerator = Accelerator()
 
-        # Convert the HuggingFace dataset into a Gymnasium environment
-        env = ReasoningGym(
-            train_dataset=train_dataset,
-            test_dataset=test_dataset,
-            tokenizer=tokenizer,
-            reward_fn=combined_rewards,
-            conversation_template=conversation_template,
-            data_batch_size_per_gpu=10,
-            accelerator=accelerator,
-            return_raw_completions=True, # This is necessary for vLLM to work
+        def prompt_builder(question: str) -> str:
+            parts = [
+                m["content"].format(question=question, answer="")
+                for m in conversation_template
+            ]
+            return "\n".join(p for p in parts if p)
+
+        # A single-turn rollout environment from the dataset — a prompt dataset is
+        # just an env, driven in-process by RolloutHarness.local.
+        class PromptDataset:
+            """Single-turn dataset env: a question on reset, a score on step."""
+
+            def __init__(self, questions, answers, reward_fn, prompt_builder,
+                         test_questions=None, test_answers=None):
+                self.questions, self.answers = questions, answers
+                self.test_questions, self.test_answers = test_questions, test_answers
+                self.reward_fn, self.prompt_builder = reward_fn, prompt_builder
+                self._cursor, self._split = 0, ""
+
+            @property
+            def dataset_size(self) -> int:
+                return len(self.questions)
+
+            def reset(self, seed=None, *, row_index=None, evaluation=None):
+                if evaluation and self.test_questions is not None:
+                    qs, ans, split = self.test_questions, self.test_answers, "eval"
+                else:
+                    qs, ans, split = self.questions, self.answers, "train"
+                if row_index is None:
+                    if split != self._split:
+                        self._cursor, self._split = 0, split
+                    row_index, self._cursor = self._cursor, self._cursor + 1
+                self._q, self._a = qs[row_index % len(qs)], ans[row_index % len(ans)]
+                return self.prompt_builder(self._q), {}
+
+            def step(self, action):
+                return "", float(self.reward_fn(action, self._a, self._q)), True, False, {}
+
+        env_factory = lambda: RolloutHarness.local(
+            PromptDataset(
+                questions=list(train_dataset["question"]),
+                answers=list(train_dataset["answer"]),
+                reward_fn=combined_rewards,
+                prompt_builder=prompt_builder,
+                test_questions=list(test_dataset["question"]),
+                test_answers=list(test_dataset["answer"]),
+            ),
+            tokenizer,
+            max_turns=1,
+            pad_id=tokenizer.pad_token_id,
+            apply_chat_template=True,
+            max_model_len=1024,
         )
 
 
@@ -325,13 +372,15 @@ The ``Mutations()`` class is used to mutate agents with pre-set probabilities. T
 
 Training and Saving an Agent
 ----------------------------
-The simplest way to train an AgileRL agent is to use the :meth:`finetune_llm_reasoning() <agilerl.training.llm.reasoning.finetune_llm_reasoning>` function.
+The simplest way to train an AgileRL agent is to use the :meth:`train_llm_rollout() <agilerl.training.llm.train_llm_rollout>` function
+with ``max_turns=1`` for single-turn reasoning.
 
 .. code-block:: python
 
-    finetune_llm_reasoning(
+    train_llm_rollout(
         pop=pop,
-        env=env,
+        max_turns=1,
+        env_factory=env_factory,
         init_hp=init_hp,
         evaluation_interval=10,
         wb=True,
@@ -398,132 +447,70 @@ Example config file:
 
 Using a Custom Training Loop
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-If we wanted to have more control over the training process, it is also possible to write our own custom
-training loops to train our agents. The training loop below can be used alternatively to the above ``finetune_llm_reasoning``
-function and is an example of how we might choose to make use of a population of AgileRL agents in our own training loop.
+If you need lower-level control than :meth:`train_llm_rollout() <agilerl.training.llm.train_llm_rollout>`,
+build a :class:`~agilerl.llm_envs.RolloutCollector` and collect trajectories with
+:func:`~agilerl.rollouts.on_policy.collect_rollouts_llm`. This is the same rollout API the trainer uses internally.
+Do **not** use dataset-env calls like ``env.reset(reset_dataloaders=True)`` / ``env.step(completion_ids)``
+for rollout training.
 
 .. collapse:: Custom Training Loop
 
     .. code-block:: python
 
+        import numpy as np
+        from agilerl.llm_envs import RolloutCollector
+        from agilerl.rollouts.on_policy import collect_rollouts_llm
         from agilerl.utils.llm_utils import aggregate_metrics_across_gpus
         from agilerl.utils.utils import run_selection_and_mutation
-        from tqdm import trange
-        import numpy as np
-        import torch
-        from accelerate import Accelerator
 
-        accelerator = Accelerator()
-        if accelerator is None or accelerator.is_main_process:
-            print("\nTraining...")
+        batch_size = init_hp["BATCH_SIZE"]
+        group_size = getattr(pop[0], "group_size", 1)
+        accelerator = pop[0].accelerator
+        rollout_env = RolloutCollector(env_factory, batch_size, group_size)
+        group_seed = int(np.random.randint(0, 1_000_000))
 
-        bar_format = "{l_bar}{bar:10}| {n:4}/{total_fmt} [{elapsed:>7}<{remaining:>7}, {rate_fmt}{postfix}]"
-        max_steps = len(env) // effective_data_batch_size
-        pbar = trange(
-            max_steps,
-            unit="step",
-            bar_format=bar_format,
-            ascii=True,
-            dynamic_ncols=True,
-        )
+        try:
+            for i in range(max_steps):
+                for agent_idx, agent in enumerate(pop):
+                    (
+                        completion_ids_list,
+                        action_masks_list,
+                        all_turn_ids,
+                        all_rewards,
+                        batch_steps,
+                        group_seed,
+                        all_sampling_logps,
+                    ) = collect_rollouts_llm(
+                        agent=agent,
+                        env=rollout_env,
+                        n_steps=1,  # single-turn reasoning
+                        batch_size=batch_size,
+                        group_size=group_size,
+                        group_seed=group_seed,
+                    )
 
-        total_steps = 0
-        # calling env.reset() supplies the first batch of training data
-        prompts = env.reset(reset_dataloaders=True)
-        for i in range(max_steps):
-            agent_metrics_dict = {}
-            for agent_idx, agent in enumerate(pop):
-                completion_ids, action_masks = agent.get_action(prompts)
-                completion_lengths = np.mean([x.shape[1] for x in completion_ids])
+                    experiences = (completion_ids_list, action_masks_list, all_rewards)
+                    learn_kwargs = {"turn_ids": all_turn_ids}
+                    if all_sampling_logps is not None:
+                        learn_kwargs["sampling_logps"] = all_sampling_logps
+                    metrics = agent.learn(experiences, **learn_kwargs)
 
-                # Use the reward function stored in env.step to calculate reward of the each answer from the group
-                next_prompts, rewards = env.step(completion_ids)
-                experiences = (
-                    completion_ids,
-                    action_masks,
-                    rewards,
-                )
-                loss, kl = agent.learn(experiences)
-                metrics = [loss, kl, rewards, completion_lengths]
-                if max_reward is not None:
-                    accuracy = (rewards == max_reward).sum() / len(rewards.flatten())
-                    metrics.append(accuracy)
-                agg_metrics = [
-                    aggregate_metrics_across_gpus(accelerator, metric) for metric in metrics
-                ]
-                prompts = next_prompts
-                agg_test_metrics = None
-                if (i + 1) % evaluation_interval == 0:
-                    test_reward = agent.test(env)
-                    test_metrics = [test_reward]
-                    if max_reward is not None:
-                        test_accuracy = (test_reward == max_reward).sum() / len(
-                            rewards.flatten()
-                        )
-                        test_metrics.append(test_accuracy)
-                    agg_test_metrics = [
-                        aggregate_metrics_across_gpus(accelerator, metric)
-                        for metric in test_metrics
-                    ]
-                    if verbose and (accelerator is None or accelerator.is_main_process):
-                        fitness = [str(round(agent.fitness[-1], 2)) for agent in pop]
-                        avg_fitness = [
-                            "%.2f" % np.mean(agent.fitness[-5:]) for agent in pop
-                        ]
-                        avg_score = ["%.2f" % np.mean(agent.scores[-10:]) for agent in pop]
-                        agents = [agent.index for agent in pop]
-                        num_steps = [agent.steps for agent in pop]
-                        muts = [agent.mut for agent in pop]
-                        print(
-                            f"""
-                            --- Global Steps {total_steps} ---
-                            Fitness:\t\t{fitness}
-                            Score:\t\t{mean_scores}
-                            5 fitness avgs:\t{avg_fitness}
-                            10 score avgs:\t{avg_score}
-                            Agents:\t\t{agents}
-                            Steps:\t\t{num_steps}
-                            Mutations:\t\t{muts}
-                            """,
-                            end="\r",
-                        )
-                if accelerator is None or accelerator.is_main_process:
-                    metrics_dict = {
-                        "Train/Loss": agg_metrics[0],
-                        "Train/KL-divergence": agg_metrics[1],
-                        "Train/Mean reward": (mean_scores := agg_metrics[2]),
-                        "Train/Average completion length": int(agg_metrics[3]),
-                    }
-                    if max_reward is not None:
-                        metrics_dict |= {"Train/Accuracy": agg_metrics[4]}
-                    agent_metrics_dict[f"agent_{agent_idx}/train_metrics"] = metrics_dict
-                    if agg_test_metrics is not None:
-                        test_metrics_dict = {"Eval/Mean reward": agg_test_metrics[0]}
-                        if max_reward is not None:
-                            test_metrics_dict |= {"Eval/Accuracy": agg_test_metrics[1]}
-                        agent_metrics_dict[f"agent_{agent_idx}/test_metrics"] = (
-                            test_metrics_dict
-                        )
-                    pbar.update(effective_data_batch_size)
-                    agent.steps += effective_data_batch_size
-                    agent.scores.append(mean_scores)
-                    total_steps += effective_data_batch_size
+                    # Example distributed-safe metric aggregation.
+                    mean_loss = aggregate_metrics_across_gpus(accelerator, metrics["mean_loss"])
 
-            if accelerator is not None:
-                accelerator.wait_for_everyone()
-            if tournament and mutation is not None:
-                if (i + 1) % evo_steps == 0:
+                if tournament and mutation is not None and (i + 1) % evo_steps == 0:
                     pop = run_selection_and_mutation(
                         tournament,
                         population=pop,
                         mutation=mutations,
-                        env_name=env.name,
-                        accelerator=None,  # Set as None for LLM finetuning as it does not require the same accelerator handling as standard RL models
+                        env_name="reasoning_env",
+                        accelerator=None,
                         language_model=True,
                         elite_path=elite_path,
-                        save_elite=save_elite
+                        save_elite=save_elite,
                     )
-        pbar.close()
+        finally:
+            rollout_env.close()
 
 
 Loading a Trained Agent for Inference
@@ -561,7 +548,7 @@ Load fine-tuned LLM into vLLM Engine for inference
         seed=42,
     )
 
-    prompts = "Using each number in this list only once 33, 19, 27, 5, create an equation that equals 82. You can use basic arithmetic operations (+, -, *, /) and each number can only be used once.""
+    prompts = "Using each number in this list only once 33, 19, 27, 5, create an equation that equals 82. You can use basic arithmetic operations (+, -, *, /) and each number can only be used once."
     outputs = llm.generate(
         prompts,
         sampling_params=sampling_params,

@@ -35,9 +35,11 @@ algorithm:
         sleep_mode: true
 
 environment:
-    env_type: multiturn
-    env_name: game:GuessTheNumber-v0-easy
-    max_turns: 5
+    env_type: rollout
+    entrypoint: gem:make
+    env_config:
+        env_id: game:Sudoku-v0-easy
+    max_turns: 8
     max_reward: 1.0
 
 training:

@@ -124,15 +124,17 @@ def pytest_collection_modifyitems(config, items):
          keeps simultaneous inits rare.
 
       ``vllm`` tests run in ``subprocess_runner.py``-spawned subprocesses, so
-      worker-process state is reset between them. ``gpu`` tests run
-      in-process and can leak DeepSpeed groups / accelerator state to the
-      next test sharing the same group; the per-fixture cleanup
-      (``AcceleratorState._reset_state(True)`` etc.) handles this in
-      practice for the test sets in this repo, but **don't add many more
-      ``gpu``-marked tests without re-checking** — DeepSpeed has no clean
-      ``destroy_process_group`` path so sharing a worker between two
-      DeepSpeed-init tests can surface ``Group <ProcessGroup ...> is not
-      registered`` or ``EADDRINUSE``-on-MASTER_PORT.
+      worker-process state is reset between them. ``gpu`` tests run in-process
+      and share accelerator / DeepSpeed distributed state across the worker:
+      accelerator state is reset per fixture (``AcceleratorState._reset_state``),
+      and ``generate_accelerator`` clears DeepSpeed's cached comm backend +
+      cloned process groups *only* when the world group has been torn down
+      (``not dist.is_initialized()``), so an interleaved ``destroy_process_group``
+      (e.g. test_mutation) cannot dangle DeepSpeed's group handles into
+      ``Group <ProcessGroup ...> is not registered`` — while leaving the cache
+      intact otherwise (re-cloning every build leaks NCCL communicators and OOMs
+      concurrent workers). MASTER_PORT is still per-test (``get_free_port``) to
+      avoid ``EADDRINUSE`` on concurrent inits.
     - ``test_minari_utils``: tests create/delete shared Minari datasets on disk.
 
     Uses ``tryfirst=True`` so the ``xdist_group`` markers below are attached
@@ -560,3 +562,26 @@ def deepspeed_env():
                 os.environ[key] = existing_vars[key]
             else:
                 os.environ.pop(key, None)
+
+
+@pytest.fixture
+def serve_env():
+    """Host local envs over OpenEnv HTTP for a test, stopping them all at teardown.
+
+    ``url = serve_env(MyEnv())`` returns a base URL to hand to
+    ``RemoteEnvClient`` / ``RolloutHarness``; the server (and any others hosted in
+    the same test) is shut down
+    when the test finishes, so individual tests stay free of start/stop boilerplate.
+    """
+    from agilerl.llm_envs.openenv_server import OpenEnvServer
+
+    servers = []
+
+    def _serve(env):
+        server = OpenEnvServer(env).start()
+        servers.append(server)
+        return server.base_url
+
+    yield _serve
+    for server in servers:
+        server.stop()

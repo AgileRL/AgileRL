@@ -10,9 +10,10 @@ from torch.utils.data import Dataset
 from transformers import AutoTokenizer
 
 from agilerl.algorithms import GRPO
-from agilerl.training.llm import finetune_llm_reasoning
+from agilerl.training.llm import train_llm_rollout
 from agilerl.utils.algo_utils import VLLMConfig
-from agilerl.llm_envs import ReasoningGym
+from agilerl.llm_envs import RolloutEnv
+from agilerl.llm_envs.rubrics import reward_fn_to_rubric
 
 MODEL_PATH = "Qwen/Qwen2.5-0.5B"
 DATASET = "Jiayi-Pan/Countdown-Tasks-3to4"
@@ -66,7 +67,7 @@ def equation_reward_func(completions, target, nums, **kwargs):
             equation = answer_tags[0].strip()
             used_numbers = [int(n) for n in re.findall(r"\d+", equation)]
 
-            if sorted(used_numbers) != sorted(numbers.flatten().tolist()):
+            if sorted(used_numbers) != sorted(list(numbers)):
                 rewards.append(0.0)
                 continue
 
@@ -104,7 +105,8 @@ def combined_rewards(completion, solution, prompt):
 def main():
     # Instantiate the model and the associated tokenizer
     tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
-    tokenizer.pad_token = tokenizer.eos_token
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
     train_dataset, test_dataset = make_dataset(DATASET)
 
     # Convert the HuggingFace dataset into a Gymnasium environment
@@ -123,18 +125,28 @@ def main():
         {"role": "assistant", "content": "Let me solve this step by step.\n<think>"},
     ]
 
-    # Convert the HuggingFace dataset into a Gymnasium environment
-    env = ReasoningGym(
-        train_dataset=train_dataset,
-        test_dataset=test_dataset,
-        tokenizer=tokenizer,
-        reward_fn=combined_rewards,
-        conversation_template=conversation_template,
-        data_batch_size_per_gpu=10,
-        accelerator=accelerator,
-        return_raw_completions=USE_VLLM,  # This is necessary for vLLM to work
-        max_context_length=MAX_CONTEXT_LENGTH,
-    )
+    def prompt_builder(row: dict) -> str:
+        parts = [
+            m["content"].format(question=row["question"], answer=row["answer"])
+            for m in conversation_template
+        ]
+        return "\n".join(p for p in parts if p)
+
+    # Reasoning is a single-turn rollout env: (question, answer) rows + a reward fn,
+    # no pre-packaged env needed — ``from_dataset`` bundles them into one. The
+    # BatchRolloutEnv owns the dataset cursor, giving each GRPO group a
+    # deterministic, group-consistent dataset order.
+    def env_factory(evaluation_mode: bool = False):
+        del evaluation_mode
+        return RolloutEnv.from_dataset(
+            train_dataset,
+            reward_fn_to_rubric(combined_rewards),
+            tokenizer,
+            test_dataset=test_dataset,
+            prompt_builder=prompt_builder,
+            apply_chat_template=True,
+            max_model_len=MAX_CONTEXT_LENGTH,
+        )
 
     # Define the LoRA configuration
     lora_config = LoraConfig(
@@ -156,8 +168,8 @@ def main():
     # Instantiate the grpo agent
     agent = GRPO(
         model_name=MODEL_PATH,
-        pad_token_id=tokenizer.eos_token_id,
-        pad_token=tokenizer.eos_token,
+        pad_token_id=tokenizer.pad_token_id,
+        pad_token=tokenizer.pad_token,
         lora_config=lora_config,
         batch_size=16,
         max_model_len=MAX_CONTEXT_LENGTH,
@@ -166,16 +178,16 @@ def main():
         use_vllm=USE_VLLM,
         vllm_config=VLLMConfig(sleep_mode=True, max_num_seqs=4),
     )
-    finetune_llm_reasoning(
+    train_llm_rollout(
         pop=[agent],
-        env=env,
+        max_turns=1,
+        env_factory=env_factory,
         evaluation_interval=10,
         wb=True,
         save_elite=True,
         elite_path="checkpoints",
         max_reward=2.0,
         accelerator=accelerator,
-        num_epochs=1,
     )
 
 

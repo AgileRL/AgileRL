@@ -18,11 +18,11 @@ import yaml
 from transformers import AutoTokenizer
 
 from agilerl import HAS_LLM_DEPENDENCIES
-from agilerl.algorithms import GRPO, LLMPPO, LLMREINFORCE
-from agilerl.training.llm import finetune_llm_multiturn
+from agilerl.training.llm import train_llm_rollout
 from agilerl.utils.algo_utils import VLLMConfig
 from agilerl.utils.llm_utils import create_llm_accelerator
-from agilerl.llm_envs import TokenObservationWrapper
+from agilerl.utils.utils import create_population, _normalize_algo_name
+from agilerl.llm_envs import RolloutEnv
 
 if not HAS_LLM_DEPENDENCIES:
     msg = (
@@ -35,7 +35,7 @@ if not HAS_LLM_DEPENDENCIES:
 DEFAULT_MODEL_PATH = "Qwen/Qwen2.5-0.5B-Instruct"
 DEFAULT_ENV_NAME = "game:GuessTheNumber-v0-easy"
 DEFAULT_PPO_CONFIG = "configs/training/llm_finetuning/ppo_llm.yaml"
-DEFAULT_GRPO_CONFIG = "configs/training/llm_finetuning/grpo_multiturn.yaml"
+DEFAULT_GRPO_CONFIG = "configs/training/llm_finetuning/grpo_env.yaml"
 DEFAULT_REINFORCE_CONFIG = "configs/training/llm_finetuning/reinforce_llm.yaml"
 
 
@@ -120,7 +120,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--output-dir",
         type=str,
-        default="saved_llms/multiturn_tutorial",
+        default="saved_llms/rollout_tutorial",
         help="Directory to save checkpoints.",
     )
     parser.add_argument(
@@ -147,14 +147,12 @@ def main() -> None:
     if hasattr(env_probe, "close"):
         env_probe.close()
 
-    def env_factory() -> TokenObservationWrapper:
-        """Create one wrapped multi-turn environment instance."""
-        env = gem.make(args.env_name)
-        return TokenObservationWrapper(
-            env=env,
-            tokenizer=tokenizer,
+    def env_factory() -> RolloutEnv:
+        """Create one multi-turn environment instance, driven in-process."""
+        return RolloutEnv.local(
+            gem.make(args.env_name),
+            tokenizer,
             max_turns=max_turns,
-            pad_id=tokenizer.pad_token_id,
             apply_chat_template=True,
             max_model_len=init_hp.get("MAX_MODEL_LEN"),
             max_output_tokens=init_hp.get("MAX_OUTPUT_TOKENS"),
@@ -211,7 +209,7 @@ def main() -> None:
     agent = pop[0]
 
     try:
-        finetune_llm_multiturn(
+        train_llm_rollout(
             pop=[agent],
             max_turns=max_turns,
             env_factory=env_factory,

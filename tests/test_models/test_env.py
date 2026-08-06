@@ -9,6 +9,7 @@ import numpy as np
 import pytest
 from pydantic import ValidationError
 
+import agilerl.llm_envs  # noqa: F401
 from agilerl.models.env import (
     BanditEnvSpec,
     GymEnvSpec,
@@ -22,6 +23,18 @@ from agilerl.models.env import (
 def _write_module(tmp_path, name: str, contents: str) -> None:
     module_path = tmp_path / f"{name}.py"
     module_path.write_text(contents)
+
+
+class _StubTextEnv:
+    """Minimal text env, resolvable as an entrypoint target."""
+
+    max_turns = 2
+
+    def reset(self, seed=None):
+        return "hi", {}
+
+    def step(self, action):
+        return "", 0.0, True, False, {}
 
 
 class TestGymEnvSpec:
@@ -291,99 +304,196 @@ def mark_wrapped(env):
 
 
 class TestLLMEnvSpec:
-    def test_reasoning_requires_reward_file_path(self):
-        with pytest.raises(ValueError, match="reward_file_path is required"):
-            LLMEnvSpec(
-                env_type=LLMEnvType.REASONING, dataset="ds", reward_file_path=None
-            )
+    def test_reasoning_requires_rubric_file_path(self):
+        with pytest.raises(ValueError, match="rubric_file_path is required"):
+            LLMEnvSpec(env_type=LLMEnvType.ROLLOUT, dataset="ds", rubric_file_path=None)
 
-    def test_preference_does_not_require_reward_file_path(self):
+    def test_accepts_legacy_reward_keys(self):
+        """Arena manifests may still send reward_file_path / reward_fn_name."""
         spec = LLMEnvSpec(
-            env_type=LLMEnvType.PREFERENCE, dataset="ds", reward_file_path=None
+            env_type=LLMEnvType.ROLLOUT,
+            dataset="ds",
+            reward_file_path="reward.py",
+            reward_fn_name="combined_rewards",
+            prompt_template={"user_0": "{question}"},
         )
-        assert spec.reward_file_path is None
+        assert spec.rubric_file_path == "reward.py"
+        assert spec.rubric_name == "combined_rewards"
+
+    def test_dataset_does_not_require_rubric_file_path(self):
+        spec = LLMEnvSpec(
+            env_type=LLMEnvType.DATASET,
+            objective="preference",
+            dataset="ds",
+            rubric_file_path=None,
+        )
+        assert spec.rubric_file_path is None
 
     def test_default_fields(self):
         spec = LLMEnvSpec(
-            env_type=LLMEnvType.REASONING,
+            env_type=LLMEnvType.ROLLOUT,
             dataset="dataset.parquet",
-            reward_file_path="reward.py",
-            reward_fn_name="reward_fn",
+            rubric_file_path="reward.py",
+            rubric_name="reward_fn",
             prompt_template={"role": "user", "content": "{q}"},
         )
         assert spec.train_test_split == 0.9
-        assert spec.reward_file_path == "reward.py"
+        assert spec.rubric_file_path == "reward.py"
         assert spec.dataset == "dataset.parquet"
         assert spec.columns is None
         assert spec.max_reward is None
+        assert spec.chat_template_kwargs == {}
 
     def test_is_standalone_model(self):
         spec = LLMEnvSpec(
-            env_type=LLMEnvType.REASONING,
+            env_type=LLMEnvType.ROLLOUT,
             dataset="dataset.parquet",
-            reward_file_path="reward.py",
-            reward_fn_name="reward_fn",
+            rubric_file_path="reward.py",
+            rubric_name="reward_fn",
             prompt_template={"role": "user", "content": "{q}"},
         )
         assert not hasattr(spec, "num_envs")
 
     def test_custom_fields(self):
         spec = LLMEnvSpec(
-            env_type=LLMEnvType.REASONING,
+            env_type=LLMEnvType.ROLLOUT,
             columns={"question": "input", "answer": "output"},
             prompt_template={"role": "user", "content": "{question}"},
             max_reward=5.0,
             train_test_split=0.8,
-            reward_file_path="my_reward.py",
-            reward_fn_name="my_reward",
+            rubric_file_path="my_reward.py",
+            rubric_name="my_reward",
             dataset="data/train.parquet",
         )
         assert spec.columns == {"question": "input", "answer": "output"}
         assert spec.prompt_template == {"role": "user", "content": "{question}"}
         assert spec.max_reward == 5.0
         assert spec.train_test_split == 0.8
-        assert spec.reward_file_path == "my_reward.py"
+        assert spec.rubric_file_path == "my_reward.py"
         assert spec.dataset == "data/train.parquet"
 
     def test_train_test_split_bounds(self):
         with pytest.raises(ValidationError):
-            LLMEnvSpec(
-                env_type=LLMEnvType.REASONING, dataset="ds", train_test_split=1.5
-            )
+            LLMEnvSpec(env_type=LLMEnvType.ROLLOUT, dataset="ds", train_test_split=1.5)
         with pytest.raises(ValidationError):
-            LLMEnvSpec(
-                env_type=LLMEnvType.REASONING, dataset="ds", train_test_split=-0.1
-            )
+            LLMEnvSpec(env_type=LLMEnvType.ROLLOUT, dataset="ds", train_test_split=-0.1)
 
     @patch("agilerl.models.env.make_conversation_template")
-    @patch("agilerl.models.env.get_reward_fn")
+    @patch("agilerl.models.env.get_rubric")
     @patch.object(LLMEnvSpec, "_load_dataset")
-    def test_make_env_reasoning(self, mock_load, mock_reward_fn, mock_conv_tmpl):
+    def test_dataset_backed_rollout_factory(
+        self, mock_load, mock_get_rubric, mock_conv_tmpl
+    ):
         mock_train_ds = MagicMock()
         mock_test_ds = MagicMock()
         mock_load.return_value = (mock_train_ds, mock_test_ds)
-        mock_reward_fn.return_value = lambda *a, **kw: 1.0
-        mock_conv_tmpl.return_value = [{"role": "user", "content": "{q}"}]
+        rubric = mock_get_rubric.return_value
+        mock_conv_tmpl.return_value = [{"role": "user", "content": "{question}"}]
         mock_tokenizer = MagicMock()
+        mock_tokenizer.pad_token_id = 0
 
         spec = LLMEnvSpec(
-            env_type=LLMEnvType.REASONING,
+            env_type=LLMEnvType.ROLLOUT,
             dataset="dataset.parquet",
-            reward_file_path="reward.py",
-            reward_fn_name="reward_fn",
-            prompt_template={"role": "user", "content": "{q}"},
+            rubric_file_path="reward.py",
+            rubric_name="reward_fn",
+            prompt_template={"user_0": "{question}"},
         )
+        # A dataset-backed rollout is single-turn by construction.
+        assert spec.max_turns == 1
 
-        with patch("agilerl.wrappers.llm_envs.ReasoningGym") as MockGym:
-            MockGym.return_value = "reasoning_gym"
-            result = spec.make_env(tokenizer=mock_tokenizer)
+        mock_rollout_cls = MagicMock()
+        with patch("agilerl.llm_envs.RolloutHarness", mock_rollout_cls):
+            factory = spec.make_rollout_env_factory(mock_tokenizer)
+            # Building the factory reads nothing.
+            mock_load.assert_not_called()
+            mock_get_rubric.assert_not_called()
+            factory()
 
-        assert result == "reasoning_gym"
-        mock_reward_fn.assert_called_once_with(
-            reward_fn_name="reward_fn", file_path="reward.py"
+        mock_get_rubric.assert_called_once_with(
+            rubric_name="reward_fn", file_path="reward.py"
         )
         mock_conv_tmpl.assert_called_once()
-        MockGym.assert_called_once()
+        mock_rollout_cls.from_dataset.assert_called_once()
+        args, kwargs = mock_rollout_cls.from_dataset.call_args
+        assert args[0] is mock_train_ds
+        assert args[1] is rubric
+        assert kwargs["test_dataset"] is mock_test_ds
+        assert kwargs["apply_chat_template"] is False
+
+        # The builder renders the template for a row, so it can interpolate any
+        # column -- not just the question.
+        mock_tokenizer.apply_chat_template.return_value = "<rendered>"
+        assert kwargs["prompt_builder"]({"question": "2+2", "answer": "4"}) == (
+            "<rendered>"
+        )
+        (messages,) = mock_tokenizer.apply_chat_template.call_args.args
+        assert messages == [{"role": "user", "content": "2+2"}]
+
+    @patch("agilerl.models.env.make_conversation_template")
+    @patch("agilerl.models.env.get_rubric")
+    @patch.object(LLMEnvSpec, "_load_dataset")
+    def test_chat_template_kwargs_reach_dataset_factory_and_prompt_builder(
+        self, mock_load, mock_get_rubric, mock_conv_tmpl
+    ):
+        mock_load.return_value = (MagicMock(), MagicMock())
+        mock_conv_tmpl.return_value = [{"role": "user", "content": "{question}"}]
+        mock_tokenizer = MagicMock()
+        mock_tokenizer.pad_token_id = 0
+
+        spec = LLMEnvSpec(
+            env_type=LLMEnvType.ROLLOUT,
+            dataset="dataset.parquet",
+            rubric_file_path="reward.py",
+            rubric_name="reward_fn",
+            prompt_template={"user_0": "{question}"},
+            chat_template_kwargs={"enable_thinking": False},
+        )
+        mock_rollout_cls = MagicMock()
+        with patch("agilerl.llm_envs.RolloutHarness", mock_rollout_cls):
+            spec.make_rollout_env_factory(mock_tokenizer)()
+
+        kwargs = mock_rollout_cls.from_dataset.call_args.kwargs
+        assert kwargs["chat_template_kwargs"] == {"enable_thinking": False}
+
+        # The prompt_builder renders with apply_chat_template=False on the env,
+        # so the kwargs must reach its own render call.
+        mock_tokenizer.apply_chat_template.return_value = "<rendered>"
+        kwargs["prompt_builder"]({"question": "2+2"})
+        render_kwargs = mock_tokenizer.apply_chat_template.call_args.kwargs
+        assert render_kwargs["enable_thinking"] is False
+
+    def test_chat_template_kwargs_reach_url_factory(self):
+        mock_tokenizer = MagicMock()
+        mock_tokenizer.pad_token_id = 0
+        spec = LLMEnvSpec(
+            env_type=LLMEnvType.ROLLOUT,
+            env_url="ws://envs.internal:8000",
+            max_turns=3,
+            chat_template_kwargs={"enable_thinking": False},
+        )
+        mock_rollout_cls = MagicMock()
+        with patch("agilerl.llm_envs.RolloutHarness", mock_rollout_cls):
+            spec.make_rollout_env_factory(mock_tokenizer)()
+        assert mock_rollout_cls.call_args.kwargs["chat_template_kwargs"] == {
+            "enable_thinking": False
+        }
+
+    def test_chat_template_kwargs_reach_entrypoint_factory(self):
+        mock_tokenizer = MagicMock()
+        mock_tokenizer.pad_token_id = 0
+        spec = LLMEnvSpec(
+            env_type=LLMEnvType.ROLLOUT,
+            entrypoint="tests.test_models.test_env:_StubTextEnv",
+            max_turns=2,
+            chat_template_kwargs={"enable_thinking": False},
+        )
+        mock_rollout_cls = MagicMock()
+        with patch("agilerl.llm_envs.RolloutHarness", mock_rollout_cls):
+            spec.make_rollout_env_factory(mock_tokenizer)()
+        assert mock_rollout_cls.local.call_args.kwargs["chat_template_kwargs"] == {
+            "enable_thinking": False
+        }
 
     @patch.object(LLMEnvSpec, "_load_dataset")
     def test_make_env_preference(self, mock_load):
@@ -393,31 +503,37 @@ class TestLLMEnvSpec:
         mock_tokenizer = MagicMock()
 
         spec = LLMEnvSpec(
-            env_type=LLMEnvType.PREFERENCE,
+            env_type=LLMEnvType.DATASET,
+            objective="preference",
             dataset="dataset.parquet",
-            reward_file_path=None,
+            rubric_file_path=None,
+            chat_template_kwargs={"enable_thinking": False},
         )
 
-        with patch("agilerl.wrappers.llm_envs.PreferenceGym") as MockGym:
-            MockGym.return_value = "preference_gym"
+        with patch("agilerl.llm_envs.DatasetEnv") as MockEnv:
+            MockEnv.return_value = "dataset_env"
             result = spec.make_env(tokenizer=mock_tokenizer)
 
-        assert result == "preference_gym"
-        MockGym.assert_called_once()
+        assert result == "dataset_env"
+        MockEnv.assert_called_once()
+        assert MockEnv.call_args.kwargs["objective"] == "preference"
+        assert MockEnv.call_args.kwargs["chat_template_kwargs"] == {
+            "enable_thinking": False
+        }
 
     def test_serialization_roundtrip(self):
         spec = LLMEnvSpec(
-            env_type=LLMEnvType.REASONING,
+            env_type=LLMEnvType.ROLLOUT,
             columns={"q": "question"},
             max_reward=10.0,
             dataset="data.parquet",
-            reward_file_path="reward.py",
-            reward_fn_name="reward_fn",
+            rubric_file_path="reward.py",
+            rubric_name="reward_fn",
             prompt_template={"role": "user", "content": "{q}"},
         )
         data = spec.model_dump()
         restored = LLMEnvSpec.model_validate(data)
-        assert restored.env_type == LLMEnvType.REASONING
+        assert restored.env_type == LLMEnvType.ROLLOUT
         assert restored.columns == {"q": "question"}
         assert restored.max_reward == 10.0
         assert restored.dataset == "data.parquet"
@@ -544,17 +660,18 @@ class FakeBandit:
 class TestLLMEnvSpecSFT:
     def test_sft_spec_valid_construction(self):
         spec = LLMEnvSpec(
-            env_type=LLMEnvType.SFT,
+            env_type=LLMEnvType.DATASET,
+            objective="sft",
             dataset="my_dataset.parquet",
             response_column="answer",
         )
-        assert spec.env_type == LLMEnvType.SFT
+        assert spec.env_type == LLMEnvType.DATASET
         assert spec.dataset == "my_dataset.parquet"
         assert spec.response_column == "answer"
-        assert spec.reward_file_path is None
+        assert spec.rubric_file_path is None
 
     def test_sft_default_response_column(self):
-        spec = LLMEnvSpec(env_type=LLMEnvType.SFT, dataset="ds")
+        spec = LLMEnvSpec(env_type=LLMEnvType.DATASET, objective="sft", dataset="ds")
         assert spec.response_column == "response"
 
     @patch.object(LLMEnvSpec, "_load_dataset")
@@ -565,45 +682,49 @@ class TestLLMEnvSpecSFT:
         mock_tokenizer = MagicMock()
 
         spec = LLMEnvSpec(
-            env_type=LLMEnvType.SFT,
+            env_type=LLMEnvType.DATASET,
+            objective="sft",
             dataset="sft_data.parquet",
             response_column="completion",
         )
 
-        with patch("agilerl.wrappers.llm_envs.SFTGym") as MockGym:
-            MockGym.return_value = "sft_gym"
+        with patch("agilerl.llm_envs.DatasetEnv") as MockEnv:
+            MockEnv.return_value = "dataset_env"
             result = spec.make_env(tokenizer=mock_tokenizer)
 
-        assert result == "sft_gym"
-        MockGym.assert_called_once()
-        call_kwargs = MockGym.call_args.kwargs
+        assert result == "dataset_env"
+        MockEnv.assert_called_once()
+        call_kwargs = MockEnv.call_args.kwargs
         assert call_kwargs["train_dataset"] is mock_train_ds
         assert call_kwargs["test_dataset"] is mock_test_ds
+        assert call_kwargs["objective"] == "sft"
         assert call_kwargs["response_column"] == "completion"
 
-    def test_sft_rejects_reward_file_path(self):
-        with pytest.raises(ValueError, match="not supported for SFT"):
+    def test_sft_rejects_rubric_file_path(self):
+        with pytest.raises(ValueError, match="not supported for dataset"):
             LLMEnvSpec(
-                env_type=LLMEnvType.SFT,
+                env_type=LLMEnvType.DATASET,
+                objective="sft",
                 dataset="ds",
-                reward_file_path="reward.py",
+                rubric_file_path="reward.py",
             )
 
-    def test_preference_rejects_reward_file_path(self):
-        with pytest.raises(ValueError, match="not supported for preference"):
+    def test_preference_rejects_rubric_file_path(self):
+        with pytest.raises(ValueError, match="not supported for dataset"):
             LLMEnvSpec(
-                env_type=LLMEnvType.PREFERENCE,
+                env_type=LLMEnvType.DATASET,
+                objective="preference",
                 dataset="ds",
-                reward_file_path="reward.py",
+                rubric_file_path="reward.py",
             )
 
     def test_dataset_alias_name(self):
         spec = LLMEnvSpec.model_validate(
             {
                 "name": "my_dataset",
-                "env_type": "reasoning",
-                "reward_file_path": "r.py",
-                "reward_fn_name": "fn",
+                "env_type": "rollout",
+                "rubric_file_path": "r.py",
+                "rubric_name": "fn",
                 "prompt_template": {"role": "user", "content": "{q}"},
             }
         )
@@ -818,120 +939,218 @@ class TestBanditEnvSpecExtended:
 
 
 # ---------------------------------------------------------------------------
-# LLM Multiturn
+# LLM Rollout
 # ---------------------------------------------------------------------------
-class TestLLMEnvSpecMultiturn:
-    """Verify LLMEnvSpec validation and factory creation for multiturn."""
+class TestLLMEnvSpecRollout:
+    """Verify LLMEnvSpec validation and factory creation for rollout."""
 
-    def test_multiturn_requires_env_name_or_entrypoint(self):
-        with pytest.raises(ValueError, match="Exactly one of env_name or entrypoint"):
-            LLMEnvSpec(env_type=LLMEnvType.MULTITURN, max_turns=5)
+    def test_rollout_requires_a_source(self):
+        with pytest.raises(ValueError, match="Exactly one of dataset, entrypoint"):
+            LLMEnvSpec(env_type=LLMEnvType.ROLLOUT, max_turns=5)
 
-    def test_multiturn_rejects_both_env_name_and_entrypoint(self):
-        with pytest.raises(ValueError, match="Exactly one of env_name or entrypoint"):
+    def test_rollout_rejects_two_sources(self):
+        with pytest.raises(ValueError, match="Exactly one of dataset, entrypoint"):
             LLMEnvSpec(
-                env_type=LLMEnvType.MULTITURN,
-                env_name="game:Test-v0",
+                env_type=LLMEnvType.ROLLOUT,
                 entrypoint="my_mod:make",
+                env_url="http://envs:8000",
                 max_turns=5,
             )
 
-    def test_env_config_rejected_with_env_name(self):
+    def test_dataset_backed_rollout_rejects_multi_turn(self):
+        with pytest.raises(ValueError, match="single-turn; max_turns must be 1"):
+            LLMEnvSpec(
+                env_type=LLMEnvType.ROLLOUT,
+                dataset="ds",
+                rubric_file_path="r.py",
+                rubric_name="fn",
+                prompt_template={"user_0": "Q: {question}"},
+                max_turns=4,
+            )
+
+    def test_env_backed_rollout_rejects_rubric_file_path(self):
+        with pytest.raises(ValueError, match="not supported for env-backed"):
+            LLMEnvSpec(
+                env_type=LLMEnvType.ROLLOUT,
+                entrypoint="my_mod:make",
+                rubric_file_path="r.py",
+                max_turns=5,
+            )
+
+    def test_env_config_rejected_without_entrypoint(self):
         with pytest.raises(ValueError, match="env_config is only used with entrypoint"):
             LLMEnvSpec(
-                env_type=LLMEnvType.MULTITURN,
-                env_name="game:Test-v0",
+                env_type=LLMEnvType.ROLLOUT,
+                env_url="http://envs:8000",
                 env_config={"difficulty": "easy"},
                 max_turns=5,
             )
 
-    def test_multiturn_valid_spec_gem(self):
+    def test_rollout_valid_spec_library_factory(self):
+        # A library's own factory is just an entrypoint; its env id rides in
+        # env_config like any other constructor argument.
         spec = LLMEnvSpec(
-            env_type=LLMEnvType.MULTITURN,
-            env_name="game:GuessTheNumber-v0-easy",
+            env_type=LLMEnvType.ROLLOUT,
+            entrypoint="gem:make",
+            env_config={"env_id": "game:GuessTheNumber-v0-easy"},
             max_turns=10,
         )
-        assert spec.env_type == LLMEnvType.MULTITURN
+        assert spec.env_type == LLMEnvType.ROLLOUT
         assert spec.max_turns == 10
-        assert spec.env_name == "game:GuessTheNumber-v0-easy"
-        assert spec.name == "game:GuessTheNumber-v0-easy"
+        assert spec.entrypoint == "gem:make"
+        assert spec.name == "gem:make"
 
-    def test_multiturn_valid_spec_entrypoint(self):
+    def test_rollout_valid_spec_entrypoint(self):
         spec = LLMEnvSpec(
-            env_type=LLMEnvType.MULTITURN,
+            env_type=LLMEnvType.ROLLOUT,
             entrypoint="my_mod:MyEnv",
             env_config={"difficulty": "easy"},
             max_turns=10,
         )
-        assert spec.env_type == LLMEnvType.MULTITURN
+        assert spec.env_type == LLMEnvType.ROLLOUT
         assert spec.entrypoint == "my_mod:MyEnv"
         assert spec.env_config == {"difficulty": "easy"}
         assert spec.name == "my_mod:MyEnv"
 
-    def test_multiturn_max_turns_optional(self):
+    def test_rollout_valid_spec_env_url(self):
         spec = LLMEnvSpec(
-            env_type=LLMEnvType.MULTITURN,
-            env_name="game:GuessTheNumber-v0-easy",
+            env_type=LLMEnvType.ROLLOUT,
+            env_url="http://env-host:8000",
+            max_turns=4,
         )
-        assert spec.max_turns is None
+        assert spec.env_url == "http://env-host:8000"
+        assert spec.name == "http://env-host:8000"
+        assert spec.max_turns == 4
 
-    def test_multiturn_make_env_raises(self):
-        spec = LLMEnvSpec(
-            env_type=LLMEnvType.MULTITURN,
-            env_name="game:GuessTheNumber-v0-easy",
-            max_turns=5,
-        )
-        with pytest.raises(TypeError, match="make_multiturn_env_factory"):
-            spec.make_env(tokenizer=MagicMock())
+    def test_env_url_requires_max_turns(self):
+        with pytest.raises(ValueError, match="max_turns is required with env_url"):
+            LLMEnvSpec(env_type=LLMEnvType.ROLLOUT, env_url="http://h:8000")
 
-    def test_gem_missing_gives_helpful_error(self):
-        spec = LLMEnvSpec(
-            env_type=LLMEnvType.MULTITURN,
-            env_name="game:Test-v0",
-            max_turns=5,
-        )
-        with (
-            patch.dict("sys.modules", {"gem": None}),
-            pytest.raises(ImportError, match="pip install gem-llm"),
+    def test_env_url_is_mutually_exclusive_with_other_sources(self):
+        with pytest.raises(ValueError, match="Exactly one of dataset, entrypoint"):
+            LLMEnvSpec(
+                env_type=LLMEnvType.ROLLOUT,
+                env_url="http://h:8000",
+                entrypoint="my_mod:make",
+                max_turns=1,
+            )
+
+    def test_mcp_tool_requires_env_url(self):
+        with pytest.raises(
+            ValueError,
+            match="mcp_tool / request_timeout_s",
         ):
-            spec.make_multiturn_env_factory(MagicMock())
+            LLMEnvSpec(
+                env_type=LLMEnvType.ROLLOUT,
+                entrypoint="my_mod:make",
+                max_turns=1,
+                mcp_tool="run_code",
+            )
 
-    def test_gem_factory_creates_wrapper(self):
-        mock_env = MagicMock()
-        mock_gem = MagicMock()
-        mock_gem.make = MagicMock(return_value=mock_env)
+    def test_action_field_applies_to_entrypoint_envs(self):
+        spec = LLMEnvSpec(
+            env_type=LLMEnvType.ROLLOUT,
+            entrypoint="my_mod:make",
+            max_turns=1,
+            action_field="code",
+        )
+        assert spec.action_field == "code"
+
+    def test_action_field_rejected_for_dataset_backed_rollout(self):
+        with pytest.raises(ValueError, match="no such env"):
+            LLMEnvSpec(
+                env_type=LLMEnvType.ROLLOUT,
+                dataset="my_dataset",
+                rubric_file_path="rubric.py",
+                rubric_name="rubric",
+                prompt_template={"user_prompt": "{question}"},
+                action_field="code",
+            )
+
+    def test_observation_field_applies_to_entrypoint_envs(self):
+        spec = LLMEnvSpec(
+            env_type=LLMEnvType.ROLLOUT,
+            entrypoint="my_mod:make",
+            max_turns=1,
+            observation_field="board",
+        )
+        assert spec.observation_field == "board"
+
+    def test_observation_field_and_processor_are_mutually_exclusive(self):
+        with pytest.raises(ValueError, match="mutually"):
+            LLMEnvSpec(
+                env_type=LLMEnvType.ROLLOUT,
+                entrypoint="my_mod:make",
+                max_turns=1,
+                observation_field="board",
+                observation_processor="proc.py:render",
+            )
+
+    def test_observation_processor_rejected_for_dataset_backed_rollout(self):
+        with pytest.raises(ValueError, match="builds its own prompts"):
+            LLMEnvSpec(
+                env_type=LLMEnvType.ROLLOUT,
+                dataset="my_dataset",
+                rubric_file_path="rubric.py",
+                rubric_name="rubric",
+                prompt_template={"user_prompt": "{question}"},
+                observation_processor="proc.py:render",
+            )
+
+    def test_env_url_factory_builds_session_client(self):
         mock_tokenizer = MagicMock()
         mock_tokenizer.pad_token_id = 0
-
         spec = LLMEnvSpec(
-            env_type=LLMEnvType.MULTITURN,
-            env_name="game:Test-v0",
-            max_turns=5,
+            env_type=LLMEnvType.ROLLOUT,
+            env_url="http://env-host:8000",
+            max_turns=4,
+            mcp_tool="run_code",
+            request_timeout_s=30.0,
         )
-
-        mock_wrapper_cls = MagicMock()
-        mock_wrapper_cls.return_value = MagicMock()
-
+        mock_rollout_cls = MagicMock()
+        mock_session_cls = MagicMock()
         with (
-            patch.dict("sys.modules", {"gem": mock_gem}),
-            patch("agilerl.llm_envs.TokenObservationWrapper", mock_wrapper_cls),
+            patch("agilerl.llm_envs.RolloutHarness", mock_rollout_cls),
+            patch("agilerl.llm_envs.openenv.RemoteEnvClient", mock_session_cls),
         ):
-            factory = spec.make_multiturn_env_factory(
+            spec.make_rollout_env_factory(
                 mock_tokenizer, max_model_len=512, max_output_tokens=128
-            )
-            assert callable(factory)
-            factory()
-
-        mock_gem.make.assert_called_with("game:Test-v0")
-        mock_wrapper_cls.assert_called_once_with(
-            env=mock_env,
-            tokenizer=mock_tokenizer,
-            max_turns=5,
-            pad_id=0,
+            )()
+        # env_url opens a WebSocket session; the transport params bake into the client.
+        mock_session_cls.assert_called_once_with(
+            "http://env-host:8000",
+            mcp_tool="run_code",
+            action_field="message",
+            timeout_s=30.0,
+        )
+        mock_rollout_cls.assert_called_once_with(
+            mock_session_cls.return_value,
+            mock_tokenizer,
+            max_turns=4,
+            observation_field=None,
+            observation_processor=None,
             apply_chat_template=True,
+            chat_template_kwargs={},
             max_model_len=512,
             max_output_tokens=128,
         )
+        mock_rollout_cls.local.assert_not_called()
+
+    def test_rollout_max_turns_optional(self):
+        spec = LLMEnvSpec(
+            env_type=LLMEnvType.ROLLOUT,
+            entrypoint="my_mod:make",
+        )
+        assert spec.max_turns is None
+
+    def test_rollout_make_env_raises(self):
+        spec = LLMEnvSpec(
+            env_type=LLMEnvType.ROLLOUT,
+            entrypoint="my_mod:make",
+            max_turns=5,
+        )
+        with pytest.raises(TypeError, match="make_rollout_env_factory"):
+            spec.make_env(tokenizer=MagicMock())
 
     def test_entrypoint_factory_creates_wrapper(self):
         mock_env = MagicMock()
@@ -940,57 +1159,74 @@ class TestLLMEnvSpecMultiturn:
         mock_tokenizer.pad_token_id = 0
 
         spec = LLMEnvSpec(
-            env_type=LLMEnvType.MULTITURN,
+            env_type=LLMEnvType.ROLLOUT,
             entrypoint="my_mod:MyEnv",
             env_config={"difficulty": "easy"},
             max_turns=5,
         )
 
-        mock_wrapper_cls = MagicMock()
-        mock_wrapper_cls.return_value = MagicMock()
+        mock_rollout_cls = MagicMock()
 
         with (
             patch(
                 "agilerl.models.env.resolve_entrypoint_target",
                 return_value=mock_constructor,
             ),
-            patch("agilerl.llm_envs.TokenObservationWrapper", mock_wrapper_cls),
+            patch("agilerl.llm_envs.RolloutHarness", mock_rollout_cls),
         ):
-            factory = spec.make_multiturn_env_factory(
+            factory = spec.make_rollout_env_factory(
                 mock_tokenizer, max_model_len=512, max_output_tokens=128
             )
             assert callable(factory)
             factory()
 
         mock_constructor.assert_called_with(difficulty="easy")
-        mock_wrapper_cls.assert_called_once_with(
-            env=mock_env,
-            tokenizer=mock_tokenizer,
+        mock_rollout_cls.local.assert_called_once_with(
+            mock_env,
+            mock_tokenizer,
             max_turns=5,
-            pad_id=0,
+            action_field="message",
+            observation_field=None,
+            observation_processor=None,
             apply_chat_template=True,
+            chat_template_kwargs={},
             max_model_len=512,
             max_output_tokens=128,
         )
 
-    def test_gem_factory_probes_max_turns(self):
-        mock_env = MagicMock()
-        mock_env.max_turns = 7
-        mock_gem = MagicMock()
-        mock_gem.make = MagicMock(return_value=mock_env)
+    def test_observation_processor_resolves_and_reaches_the_harness(self, tmp_path):
+        proc_file = tmp_path / "proc.py"
+        proc_file.write_text(
+            "def render(payload):\n    return 'obs:' + str(payload['info_state'])\n"
+        )
         mock_tokenizer = MagicMock()
         mock_tokenizer.pad_token_id = 0
-
         spec = LLMEnvSpec(
-            env_type=LLMEnvType.MULTITURN,
-            env_name="game:Test-v0",
+            env_type=LLMEnvType.ROLLOUT,
+            entrypoint="tests.test_models.test_env:_StubTextEnv",
+            max_turns=2,
+            observation_processor=f"{proc_file}:render",
         )
-        assert spec.max_turns is None
+        mock_rollout_cls = MagicMock()
+        with patch("agilerl.llm_envs.RolloutHarness", mock_rollout_cls):
+            spec.make_rollout_env_factory(mock_tokenizer)()
+        kwargs = mock_rollout_cls.local.call_args.kwargs
+        assert kwargs["observation_field"] is None
+        assert kwargs["observation_processor"]({"info_state": [1, 2]}) == "obs:[1, 2]"
 
-        with patch.dict("sys.modules", {"gem": mock_gem}):
-            spec.make_multiturn_env_factory(mock_tokenizer)
-
-        assert spec.max_turns == 7
+    def test_observation_processor_must_resolve_to_a_callable(self, tmp_path):
+        proc_file = tmp_path / "proc.py"
+        proc_file.write_text("render = 3\n")
+        mock_tokenizer = MagicMock()
+        mock_tokenizer.pad_token_id = 0
+        spec = LLMEnvSpec(
+            env_type=LLMEnvType.ROLLOUT,
+            entrypoint="tests.test_models.test_env:_StubTextEnv",
+            max_turns=1,
+            observation_processor=f"{proc_file}:render",
+        )
+        with pytest.raises(TypeError, match="non-callable"):
+            spec.make_rollout_env_factory(mock_tokenizer)
 
     def test_entrypoint_factory_probes_max_turns(self):
         mock_env = MagicMock()
@@ -1000,7 +1236,7 @@ class TestLLMEnvSpecMultiturn:
         mock_tokenizer.pad_token_id = 0
 
         spec = LLMEnvSpec(
-            env_type=LLMEnvType.MULTITURN,
+            env_type=LLMEnvType.ROLLOUT,
             entrypoint="my_mod:MyEnv",
         )
         assert spec.max_turns is None
@@ -1009,42 +1245,82 @@ class TestLLMEnvSpecMultiturn:
             "agilerl.models.env.resolve_entrypoint_target",
             return_value=mock_constructor,
         ):
-            spec.make_multiturn_env_factory(mock_tokenizer)
+            spec.make_rollout_env_factory(mock_tokenizer)
 
         assert spec.max_turns == 12
 
-    def test_factory_requires_env_name_or_entrypoint(self):
-        # A validated multiturn spec always has exactly one of env_name /
-        # entrypoint; model_construct bypasses that validator so we can reach
-        # the factory's own defensive guard for the missing-both state.
-        spec = LLMEnvSpec.model_construct(env_type=LLMEnvType.MULTITURN)
-        assert spec.env_name is None
-        assert spec.entrypoint is None
-        with pytest.raises(ValueError, match="Exactly one of env_name or entrypoint"):
-            spec.make_multiturn_env_factory(MagicMock())
+    def test_factory_rejects_zero_prompt_budget(self):
+        """``max_output_tokens >= max_model_len`` leaves no prompt room (budget
+        0), so every rollout episode is truncated at reset and training can never
+        advance. The factory must reject it at setup rather than build envs that
+        silently produce a non-terminating loop.
+        """
+        mock_tokenizer = MagicMock()
+        mock_tokenizer.pad_token_id = 0
 
-    def test_dataset_still_required_for_reasoning(self):
-        with pytest.raises(ValueError, match="dataset is required"):
+        spec = LLMEnvSpec(
+            env_type=LLMEnvType.ROLLOUT,
+            entrypoint="my_mod:MyEnv",
+            max_turns=3,
+        )
+
+        with pytest.raises(ValueError, match="must be less than"):
+            spec.make_rollout_env_factory(
+                mock_tokenizer, max_model_len=512, max_output_tokens=512
+            )
+
+    def test_rubric_fields_alone_are_not_a_source(self):
+        with pytest.raises(ValueError, match="Exactly one of dataset, entrypoint"):
             LLMEnvSpec(
-                env_type=LLMEnvType.REASONING,
-                reward_file_path="r.py",
-                reward_fn_name="fn",
+                env_type=LLMEnvType.ROLLOUT,
+                rubric_file_path="r.py",
+                rubric_name="fn",
                 prompt_template={"user_0": "Q: {question}"},
             )
 
-    def test_dataset_not_required_for_multiturn(self):
+    def test_dataset_not_required_for_rollout(self):
         spec = LLMEnvSpec(
-            env_type=LLMEnvType.MULTITURN,
-            env_name="game:Test-v0",
+            env_type=LLMEnvType.ROLLOUT,
+            entrypoint="my_mod:make",
         )
         assert spec.dataset is None
+
+    def test_env_packages_rides_along_with_an_entrypoint(self):
+        spec = LLMEnvSpec(
+            env_type=LLMEnvType.ROLLOUT,
+            entrypoint="gem:make",
+            env_config={"env_id": "game:Sudoku-v0-easy"},
+            env_packages={"uv": ["gem-llm"]},
+        )
+        assert spec.env_packages == {"uv": ["gem-llm"]}
+
+    @pytest.mark.parametrize(
+        "source",
+        [{"env_url": "http://env:8000"}, {"dataset": "rows.parquet"}],
+    )
+    def test_env_packages_needs_an_entrypoint_to_install_for(self, source):
+        with pytest.raises(ValueError, match="nothing to install for"):
+            LLMEnvSpec(
+                env_type=LLMEnvType.ROLLOUT,
+                max_turns=1,
+                env_packages={"uv": ["gem-llm"]},
+                **source,
+            )
+
+    def test_env_packages_naming_nothing_is_rejected_at_validation(self):
+        with pytest.raises(ValueError, match="named no packages"):
+            LLMEnvSpec(
+                env_type=LLMEnvType.ROLLOUT,
+                entrypoint="gem:make",
+                env_packages={"uv": []},
+            )
 
 
 class TestLLMEnvSpecLoadDataset:
     """Defensive ``dataset is None`` guards in the private dataset loaders."""
 
     def _spec_without_dataset(self) -> LLMEnvSpec:
-        spec = LLMEnvSpec(env_type=LLMEnvType.MULTITURN, env_name="game:Test-v0")
+        spec = LLMEnvSpec(env_type=LLMEnvType.ROLLOUT, entrypoint="my_mod:make")
         assert spec.dataset is None
         return spec
 
@@ -1064,19 +1340,27 @@ class TestLLMEnvSpecLoadDataset:
             spec._load_dataset_file()
 
 
-class TestLLMEnvSpecMakeReasoningEnv:
-    """Defensive guard in ``_make_reasoning_env`` for missing reward fields."""
+class TestDatasetBackedRolloutRewardFields:
+    """Defensive guard for a dataset-backed rollout missing its reward fields."""
 
     def test_missing_reward_fields_raises(self):
-        # A multiturn spec has reward_fn_name / reward_file_path /
-        # prompt_template all None; the reasoning builder's guard rejects it
-        # before the (mocked) datasets/tokenizer are ever used.
-        spec = LLMEnvSpec(env_type=LLMEnvType.MULTITURN, env_name="game:Test-v0")
+        # A validated dataset-backed rollout always carries rubric_name /
+        # rubric_file_path / prompt_template; model_construct bypasses that
+        # validator so we can reach the factory's own defensive guard, which
+        # fires on first resolve — before any dataset or tokenizer is touched.
+        mock_tokenizer = MagicMock()
+        mock_tokenizer.pad_token_id = 0
+        spec = LLMEnvSpec.model_construct(
+            env_type=LLMEnvType.ROLLOUT, dataset="dummy/dataset"
+        )
+        assert spec.rubric_name is None
+
+        factory = spec.make_rollout_env_factory(mock_tokenizer)
         with pytest.raises(
             ValueError,
-            match="reward_fn_name, reward_file_path, and prompt_template",
+            match="rubric_name, rubric_file_path, and prompt_template",
         ):
-            spec._make_reasoning_env(MagicMock(), MagicMock(), MagicMock())
+            factory()
 
 
 class TestRequireDatasets:
@@ -1099,3 +1383,35 @@ class TestRequireDatasets:
 
         with pytest.raises(ImportError, match="pip install 'agilerl\\[llm\\]'"):
             _require_datasets()
+
+
+class TestLLMEnvSpecFactoryGuards:
+    def test_make_env_requires_objective_even_when_mutated_away(self):
+        spec = LLMEnvSpec(
+            env_type=LLMEnvType.DATASET,
+            dataset="d.parquet",
+            objective="sft",
+        )
+        spec.objective = None
+        with pytest.raises(ValueError, match="objective is required"):
+            spec.make_env(MagicMock())
+
+    def test_factory_requires_a_source_even_when_mutated_away(self):
+        spec = LLMEnvSpec(
+            env_type=LLMEnvType.ROLLOUT,
+            entrypoint="pkg.mod:Env",
+            max_turns=2,
+        )
+        spec.entrypoint = None
+        with pytest.raises(ValueError, match="An entrypoint is required"):
+            spec.make_rollout_env_factory(MagicMock())
+
+    def test_non_callable_entrypoint_target_is_rejected(self):
+        # json.__version__ resolves fine but is a string, not an env factory.
+        spec = LLMEnvSpec(
+            env_type=LLMEnvType.ROLLOUT,
+            entrypoint="json:__version__",
+            max_turns=2,
+        )
+        with pytest.raises(TypeError, match="non-callable"):
+            spec.make_rollout_env_factory(MagicMock())

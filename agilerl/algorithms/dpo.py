@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import gc
-from typing import TYPE_CHECKING, Any, NoReturn
+from typing import TYPE_CHECKING, Any, NoReturn, cast
 
 import numpy as np
 import numpy.typing as npt
@@ -18,7 +18,7 @@ if TYPE_CHECKING:
     from peft import LoraConfig
     from transformers import BitsAndBytesConfig
 
-    from agilerl.llm_envs import PreferenceGym
+    from agilerl.llm_envs import DatasetEnv
 
 from agilerl.algorithms.core.base import LLMAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
@@ -244,7 +244,8 @@ class DPO(LLMAlgorithm[PreferencePrompts]):
         """Update agent network parameters to learn from preference data.
 
         :param experiences: Batched chosen/rejected input ids and attention masks
-            with prompt lengths, as produced by :class:`~agilerl.llm_envs.PreferenceGym`.
+            with prompt lengths, as produced by a preference
+            :class:`~agilerl.llm_envs.DatasetEnv`.
         :type experiences: PreferencePrompts
         :param training: Whether the agent is training or not
         :type training: bool
@@ -341,14 +342,15 @@ class DPO(LLMAlgorithm[PreferencePrompts]):
         # Aggregate metrics across GPUs for both train/test paths. (Fresh dict
         # display so ty checks the values against the parameter's wider,
         # invariant dict value union.)
-        agg = aggregate_metrics_dict(self.accelerator, {**learn_metrics})
+        learn_metrics = aggregate_metrics_dict(self.accelerator, {**learn_metrics})
 
         if training:
-            self.metrics.log("loss", agg["loss"])
-            self.metrics.log("chosen_reward", agg["chosen_reward"])
-            self.metrics.log("rejected_reward", agg["rejected_reward"])
+            self.metrics.log("loss", learn_metrics["loss"])
+            self.metrics.log("chosen_reward", learn_metrics["chosen_reward"])
+            self.metrics.log("rejected_reward", learn_metrics["rejected_reward"])
             self.metrics.log(
-                "reward_margin", agg["chosen_reward"] - agg["rejected_reward"]
+                "reward_margin",
+                learn_metrics["chosen_reward"] - learn_metrics["rejected_reward"],
             )
 
         return learn_metrics
@@ -654,30 +656,31 @@ class DPO(LLMAlgorithm[PreferencePrompts]):
 
     def test(
         self,
-        env: PreferenceGym,
+        env: DatasetEnv,
         loop: int = 1,
         *args: Any,
         **kwargs: Any,
     ) -> npt.NDArray:
         """Return the fitness (test) score of the agent.
 
-        :param env: The environment to be tested in
-        :type env: PreferenceGym environment
+        :param env: The environment to be tested in (``objective="preference"``)
+        :type env: DatasetEnv
         :param loop: Number of testing loops/episodes to complete. The returned score is the mean. Defaults to 1
         :type loop: int, optional
         :return: Mean test score (numpy array)
         :rtype: npt.NDArray
         """
         with env.eval_mode(), torch.no_grad():
-            prompts = env.reset()
             rewards = []
             for _ in range(loop):
+                # A DPO agent is always paired with an ``objective="preference"``
+                # env, so the collated batch is a ``PreferencePrompts``.
+                prompts = cast("PreferencePrompts", env.reset())
                 learn_result = self.learn(prompts, training=False)
                 chosen_reward = learn_result["chosen_reward"]
                 rejected_reward = learn_result["rejected_reward"]
                 reward_margin = chosen_reward - rejected_reward
                 rewards.append(np.asarray(reward_margin).item())
-                prompts = env.step()
             mean_fit = float(np.mean(rewards))
         self.metrics.add_fitness(mean_fit)
         if self.accelerator is not None:

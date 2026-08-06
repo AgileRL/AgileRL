@@ -42,7 +42,7 @@ class GRPOSpec(LLMAlgorithmSpec):
     adv_clip_range: float | None = Field(default=None)
     filter_zero_adv: bool = Field(default=False)
 
-    env_type: ClassVar[LLMEnvType] = LLMEnvType.REASONING
+    env_type: ClassVar[LLMEnvType] = LLMEnvType.ROLLOUT
 
     @model_validator(mode="after")
     def _validate_vllm_config(self) -> GRPOSpec:
@@ -52,18 +52,12 @@ class GRPOSpec(LLMAlgorithmSpec):
         return self
 
     @staticmethod
-    def get_training_fn(*, multiturn: bool = False) -> Callable[..., Any]:
+    def get_training_fn() -> Callable[..., Any]:
         """Get the training function for GRPO.
 
-        :param multiturn: If ``True``, return the multi-turn training
-            function instead of the single-turn reasoning function.
-        :type multiturn: bool
         :return: Training function
         :rtype: Callable[..., Any]
         """
-        from agilerl.training.llm import (
-            finetune_llm_multiturn,
-            finetune_llm_reasoning,
-        )
+        from agilerl.training.llm import train_llm_rollout
 
-        return finetune_llm_multiturn if multiturn else finetune_llm_reasoning
+        return train_llm_rollout

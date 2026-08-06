@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import os
-import re
 from collections.abc import Callable
 from importlib import import_module
 from importlib import util as importlib_util
@@ -45,46 +44,65 @@ def make_conversation_template(prompt_template: dict[str, str]) -> list[dict[str
 
 
 def get_reward_fn(reward_fn_name: str, file_path: str) -> Callable[..., float]:
-    """Get the reward function for the environment.
+    """Removed — use :func:`get_rubric`."""
+    msg = (
+        "get_reward_fn is removed; use get_rubric(rubric_name, file_path) and "
+        "export a Rubric instance (or subclass) from the file. Wrap a legacy "
+        "(completion, answer, question) -> float callable with "
+        "agilerl.llm_envs.rubrics.reward_fn_to_rubric(...)."
+    )
+    raise ValueError(msg)
 
-    :param reward_fn_name: The name of the reward function to get
-    :type reward_fn_name: str
-    :param file_path: The absolute path to the reward function file
-    :type file_path: str
-    :return: The reward function
-    :rtype: Callable
+
+def get_rubric(rubric_name: str, file_path: str) -> Any:  # noqa: ANN401
+    """Load a Rubric from a file, wrapping legacy reward callables.
+
+    Accepts a ``Rubric`` instance, a ``Rubric`` subclass (instantiated here), or a
+    ``(completion, answer, question) -> float`` callable (Arena / older manifests),
+    which is wrapped with :func:`~agilerl.llm_envs.rubrics.reward_fn_to_rubric`.
+
+    :param rubric_name: Name of the symbol in ``file_path``.
+    :param file_path: Path to the Python module defining the rubric or reward fn.
+    :returns: An OpenEnv ``Rubric`` instance.
+    :raises TypeError: If the symbol is not a Rubric, Rubric subclass, or callable.
     """
+    from openenv.core.rubrics.base import Rubric
+
+    from agilerl.llm_envs.rubrics import reward_fn_to_rubric
+
     file_path_obj = Path(file_path)
-    if file_path_obj.exists():
-        try:
-            # Get the absolute path to ensure proper module loading
-            abs_file_path = file_path_obj.resolve()
-
-            # Extract module name from the file path
-            # Remove .py extension and convert path separators to dots for module name
-            module_name = file_path_obj.stem
-
-            # Use spec_from_file_location to load from the specific file path
-            spec = importlib_util.spec_from_file_location(
-                module_name,
-                str(abs_file_path),
-            )
-
-            if spec is None or spec.loader is None:
-                msg = f"Could not create spec for {abs_file_path}"
-                raise ValueError(msg)
-
-            reward_module = importlib_util.module_from_spec(spec)
-            spec.loader.exec_module(reward_module)
-            return getattr(reward_module, reward_fn_name)
-        except Exception as e:
-            msg = f"Error importing reward function {reward_fn_name} from {file_path}: {e}"
-            raise ValueError(
-                msg,
-            ) from e
-    else:
+    if not file_path_obj.exists():
         msg = f"{file_path} not found"
         raise ValueError(msg)
+    try:
+        abs_file_path = file_path_obj.resolve()
+        module_name = file_path_obj.stem
+        spec = importlib_util.spec_from_file_location(
+            module_name,
+            str(abs_file_path),
+        )
+        if spec is None or spec.loader is None:
+            msg = f"Could not create spec for {abs_file_path}"
+            raise ValueError(msg)
+        rubric_module = importlib_util.module_from_spec(spec)
+        spec.loader.exec_module(rubric_module)
+        obj = getattr(rubric_module, rubric_name)
+    except Exception as e:
+        msg = f"Error importing rubric {rubric_name} from {file_path}: {e}"
+        raise ValueError(msg) from e
+
+    if isinstance(obj, Rubric):
+        return obj
+    if isinstance(obj, type) and issubclass(obj, Rubric):
+        return obj()
+    if callable(obj):
+        return reward_fn_to_rubric(obj)
+    msg = (
+        f"{rubric_name!r} in {file_path} must be a Rubric instance, Rubric "
+        f"subclass, or (completion, answer, question) -> float callable, "
+        f"got {type(obj).__name__}."
+    )
+    raise TypeError(msg)
 
 
 def escape_non_format_braces(
@@ -103,13 +121,13 @@ def escape_non_format_braces(
     if format_keys is None:
         format_keys = ["question", "answer"]
 
-    def replace_brace(match: re.Match[str]) -> str:
-        content = match.group(1)
-        if content in format_keys:
-            return match.group(0)  # Keep as-is for format keys
-        return f"{{{{{content}}}}}"  # Double the braces
-
-    return re.sub(r"\{([^}]+)\}", replace_brace, template)
+    # Escape every brace, then restore the known placeholders. Escaping via
+    # regex instead would miss ``{}``, lone braces, and nested-brace JSON —
+    # all of which make ``str.format`` raise on real system prompts.
+    escaped = template.replace("{", "{{").replace("}", "}}")
+    for key in format_keys:
+        escaped = escaped.replace(f"{{{{{key}}}}}", f"{{{key}}}")
+    return escaped
 
 
 def _parse_entrypoint(entrypoint: str) -> tuple[str, str]:

@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any, TypeVar
 import gymnasium as gym
 import numpy as np
 import numpy.typing as npt
+import torch
 import tqdm
 import wandb
 from accelerate import Accelerator
@@ -1776,4 +1777,50 @@ def _distributed_world_size(accelerator: Accelerator | None) -> int:
     """World size for batch accounting: prefer Accelerate, else torch.distributed."""
     if accelerator is not None:
         return accelerator.num_processes
+    if torch.distributed.is_available() and torch.distributed.is_initialized():
+        return torch.distributed.get_world_size()
     return 1
+
+
+def _distributed_rank(accelerator: Accelerator | None) -> int:
+    """Process rank (e.g. for seed decorrelation): prefer Accelerate, else torch.distributed."""
+    if accelerator is not None:
+        return accelerator.process_index
+    if torch.distributed.is_available() and torch.distributed.is_initialized():
+        return torch.distributed.get_rank()
+    return 0
+
+
+def data_parallel_topology(
+    accelerator: Accelerator | None,
+    tensor_parallel_size: int = 1,
+) -> tuple[int, int]:
+    """Return this process's ``(rank, world_size)`` among data-parallel replicas.
+
+    Tensor-parallel ranks are contiguous blocks of the process group, so a replica
+    is ``tensor_parallel_size`` consecutive processes holding shards of one model.
+    They must be handed the same data: anything that splits work across replicas —
+    dataset shards, reset seeds, effective batch size — counts replicas, not
+    processes, and only agrees with the process rank when there is no tensor
+    parallelism.
+
+    :param accelerator: Accelerator whose process group defines the topology.
+    :type accelerator: Accelerator | None
+    :param tensor_parallel_size: Processes per model replica.
+    :type tensor_parallel_size: int
+    :returns: This replica's index, and the number of replicas.
+    :rtype: tuple[int, int]
+    """
+    world_size = _distributed_world_size(accelerator)
+    rank = _distributed_rank(accelerator)
+    shards = max(1, int(tensor_parallel_size))
+    if shards == 1:
+        return rank, world_size
+    if world_size % shards:
+        msg = (
+            f"tensor_parallel_size={shards} does not divide the {world_size}-process "
+            "group, so replicas would straddle it; every replica must be a whole "
+            "number of processes."
+        )
+        raise ValueError(msg)
+    return rank // shards, world_size // shards

@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import gc
 import warnings
-from contextlib import nullcontext
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 import numpy as np
@@ -32,11 +31,9 @@ else:
 
 from agilerl.algorithms.core import ActionResult, LLMAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
-from agilerl.llm_envs import ReasoningGym
 from agilerl.protocols import (
     PeftModelProtocol,
     PreTrainedModelProtocol,
-    TokenizedMultiTurnEnv,
 )
 from agilerl.typing import LLMObsType, LLMRolloutExperiences
 from agilerl.utils.algo_utils import (
@@ -51,14 +48,13 @@ from agilerl.utils.llm_packing import (
 )
 from agilerl.utils.llm_utils import (
     aggregate_metrics_dict,
+    attention_mask_from_padded_ids,
     build_completion_mask,
-    is_reasoning_prompts,
     masked_mean,
     masked_whiten,
     normalize_reasoning_prompt_batch,
     pool_log_ratio_by_level,
     prepare_prompt_hf_generate,
-    stitch_completion_after_windowed_hf_generate,
     validate_importance_sampling_level,
     validate_llm_context_lengths,
 )
@@ -487,35 +483,19 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
                             )
                             input_ids = prompt["input_ids"]
                             attention_mask = prompt["attention_mask"]
-                            stitch_ids = prompt["stitch_prefix_ids"]
-                            initial_prompt_len = prompt["initial_prompt_len"]
                             if training and group_size > 1:
                                 input_ids = input_ids.repeat(group_size, 1)
                                 attention_mask = attention_mask.repeat(group_size, 1)
-                            if (
-                                stitch_ids is not None
-                                and training
-                                and group_size > 1
-                                and stitch_ids.shape[0] == 1
-                            ):
-                                stitch_ids = stitch_ids.repeat(group_size, 1)
                             completion_id = self.actor.generate(
                                 input_ids=input_ids,
                                 attention_mask=attention_mask,
                                 generation_config=self.generation_config,
                             )
-                            completion_id, full_prompt_len = (
-                                stitch_completion_after_windowed_hf_generate(
-                                    completion_id,
-                                    stitch_ids,
-                                    initial_prompt_len,
-                                )
-                            )
                             completion_ids.append(completion_id)
                             completion_masks.append(
                                 build_completion_mask(
                                     completion_id,
-                                    full_prompt_len,
+                                    None,
                                     self.pad_token_id,
                                 )
                             )
@@ -669,72 +649,6 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
         # Batch-level sampling-mismatch metrics bypass the per-update averaging.
         result.update(is_metrics)
         return result
-
-    def test(
-        self,
-        env: ReasoningGym | TokenizedMultiTurnEnv,
-        loop: int = 1,
-        *args: Any,
-        **kwargs: Any,
-    ) -> npt.NDArray:
-        """Return fitness (test) score of llm on test sub-set.
-
-        :param env: Dataset-style ``ReasoningGym`` environment or tokenized
-            multi-turn episode environment.
-        :type env: ReasoningGym | TokenizedMultiTurnEnv
-        :param loop: Number of outer test iterations over ``reset`` / ``step``.
-        :type loop: int
-        :return: Concatenated reward tensor from the test loop.
-        :rtype: torch.Tensor
-        """
-        eval_context = getattr(env, "eval_mode", nullcontext)
-        with eval_context():
-            if isinstance(env, ReasoningGym):
-                prompts = env.reset()
-                rewards = []
-                for _ in range(loop):
-                    completion_ids = self.get_action(
-                        prompts, training=False
-                    ).completion_ids
-                    next_prompts, reward = env.step(completion_ids)
-                    prompts = next_prompts
-                    rewards.append(reward)
-                reward_tensor = torch.cat(rewards)
-            elif isinstance(env, TokenizedMultiTurnEnv):
-                all_rewards: list[torch.Tensor] = []
-                for _ in range(loop):
-                    prompt_dict, _info = env.reset()
-                    terminated, truncated = False, False
-                    while not terminated and not truncated:
-                        completion_ids = self.get_action(
-                            [prompt_dict],
-                            training=False,
-                        ).completion_ids
-                        full = completion_ids[0]
-                        obs, reward, terminated, truncated, _info = env.step(full)
-                        # ``obs`` is the empty sentinel once the episode ends;
-                        # only live prompts feed the next turn.
-                        if is_reasoning_prompts(obs):
-                            prompt_dict = obs
-                        all_rewards.append(
-                            torch.tensor(
-                                [float(reward)],
-                                dtype=torch.float32,
-                                device=full.device,
-                            )
-                        )
-                reward_tensor = torch.cat(all_rewards)
-            else:
-                msg = (
-                    "env must be a ReasoningGym (or subclass) or "
-                    f"TokenizedMultiTurnEnv; got {type(env).__name__}"
-                )
-                raise TypeError(msg)
-        mean_fit = torch.mean(reward_tensor).item()
-        self.metrics.add_fitness(mean_fit)
-        if self.accelerator is not None:
-            self.accelerator.wait_for_everyone()
-        return np.array(mean_fit)
 
     def _validate_core_args(
         self,
@@ -1720,7 +1634,9 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
         lm_head_weight = lm_head.weight
         lm_head_bias = lm_head.bias
 
-        attention_mask = (batch_ids != self.pad_token_id).long()
+        attention_mask = attention_mask_from_padded_ids(
+            batch_ids, self.pad_token_id
+        ).long()
         # Sequence packing (same gate as the standard path): on a varlen/block-
         # sparse backend, flatten real tokens into a padding-free forward and
         # scatter hidden states back onto the padded ``(B, T, H)`` frame so the

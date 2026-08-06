@@ -3,9 +3,14 @@
 
 """Run a tiny LLM loop matrix for quick compatibility checks.
 
-Checks that LLM loops execute with:
+This script checks that LLM loops execute with:
 1) population size 1 and no tournaments, and
 2) population size >1 with tournament + mutation.
+
+Default behavior:
+- runs real tournament/mutation logic
+- runs real checkpoint writes
+
 """
 
 from __future__ import annotations
@@ -14,8 +19,10 @@ import argparse
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 from random import Random
 from typing import Any
+from unittest.mock import patch
 
 import torch
 
@@ -24,16 +31,16 @@ from agilerl import HAS_LLM_DEPENDENCIES
 if not HAS_LLM_DEPENDENCIES:
     raise ImportError("LLM dependencies are not installed.")
 
-from agilerl.llm_envs import TokenObservationWrapper
+from agilerl.llm_envs import RolloutEnv
 from llm_debug_utils import lora_config_from_dict
 from tiny_model import TinyDigitTokenizer, build_tiny_actor_network
 
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
+from agilerl.training.llm import rollout as train_llm
 from agilerl.training.llm import (
-    finetune_llm_multiturn,
-    finetune_llm_preference,
-    finetune_llm_reasoning,
+    train_llm_dataset,
+    train_llm_rollout,
 )
 from agilerl.utils.probe_envs_llm import ConditionalTargetEnv
 from agilerl.utils.utils import create_population
@@ -55,101 +62,8 @@ class MatrixCase:
         return f"{self.loop_name}:{self.algo}:pop{self.population_size}:{evo}"
 
 
-class TinyReasoningEnv:
-    """Tiny env compatible with `finetune_llm_reasoning`."""
-
-    def __init__(
-        self,
-        tokenizer: TinyDigitTokenizer,
-        data_batch_size_per_gpu: int,
-        dataset_size: int,
-    ) -> None:
-        self.tokenizer = tokenizer
-        self.data_batch_size_per_gpu = data_batch_size_per_gpu
-        self.name = "tiny_reasoning_debug"
-        self.num_epochs = 0
-
-        self._cursor = 0
-        self._questions = [f"{idx % 5}{(idx + 1) % 5}" for idx in range(dataset_size)]
-        self._answers = [
-            str((idx % 5 + (idx + 1) % 5) % 5) for idx in range(dataset_size)
-        ]
-        self._last_prompts: dict[str, Any] | None = None
-
-    def __len__(self) -> int:
-        """Return dataset size."""
-        return len(self._questions)
-
-    def reset(self, reset_dataloaders: bool = False) -> dict[str, Any]:
-        """Reset cursor (optional) and return the next prompt batch."""
-        if reset_dataloaders:
-            self._cursor = 0
-            self.num_epochs = 0
-        self._last_prompts = self._next_batch()
-        return self._last_prompts
-
-    def step(
-        self, completions: list[torch.Tensor]
-    ) -> tuple[dict[str, Any], torch.Tensor]:
-        """Score completions and return the next prompt batch."""
-        if self._last_prompts is None:
-            msg = "reset() must be called before step()."
-            raise RuntimeError(msg)
-
-        prompt_len = int(self._last_prompts["input_ids"].shape[1])
-        answers: list[str] = self._last_prompts["answer"]
-        rewards: list[list[float]] = []
-
-        for completion_group, answer in zip(completions, answers, strict=False):
-            if completion_group.dim() == 1:
-                completion_group = completion_group.unsqueeze(0)
-            decoded = self.tokenizer.batch_decode(
-                completion_group[:, prompt_len:],
-                skip_special_tokens=True,
-            )
-            rewards.append([1.0 if answer in text else 0.0 for text in decoded])
-
-        self._last_prompts = self._next_batch()
-        return self._last_prompts, torch.tensor(rewards, dtype=torch.float32)
-
-    def _next_batch(self) -> dict[str, Any]:
-        """Return the next tokenized mini-batch."""
-        start = self._cursor
-        end = start + self.data_batch_size_per_gpu
-        total = len(self._questions)
-
-        if end <= total:
-            idxs = list(range(start, end))
-            self._cursor = end
-            if self._cursor == total:
-                self._cursor = 0
-                self.num_epochs += 1
-        else:
-            idxs = list(range(start, total))
-            remaining = end - total
-            idxs.extend(range(remaining))
-            self._cursor = remaining
-            self.num_epochs += 1
-
-        questions = [self._questions[i] for i in idxs]
-        answers = [self._answers[i] for i in idxs]
-        tokenized = self.tokenizer(
-            questions,
-            return_tensors="pt",
-            padding=True,
-            padding_side="left",
-            return_attention_mask=True,
-        )
-        return {
-            "input_ids": tokenized["input_ids"],
-            "attention_mask": tokenized["attention_mask"],
-            "question": questions,
-            "answer": answers,
-        }
-
-
 class TinyPreferenceEnv:
-    """Tiny env compatible with `finetune_llm_preference`."""
+    """Tiny env compatible with `train_llm_dataset`."""
 
     def __init__(
         self,
@@ -359,22 +273,11 @@ def build_evolution_components(
     return tournament, mutation
 
 
-def _evolution_kwargs(case: MatrixCase, args: argparse.Namespace) -> dict[str, Any]:
-    if not case.with_tournament:
-        return {
-            "evo_steps": None,
-            "tournament": None,
-            "mutation": None,
-        }
-    tournament, mutation = build_evolution_components(case.population_size)
-    return {
-        "evo_steps": args.evo_steps,
-        "tournament": tournament,
-        "mutation": mutation,
-    }
-
-
-def run_reasoning_case(case: MatrixCase, args: argparse.Namespace) -> None:
+def run_preference_case(
+    case: MatrixCase,
+    args: argparse.Namespace,
+) -> None:
+    """Run one preference case."""
     pop, tokenizer, _ = build_population(
         algo=case.algo,
         population_size=case.population_size,
@@ -383,52 +286,39 @@ def run_reasoning_case(case: MatrixCase, args: argparse.Namespace) -> None:
         max_model_len=args.max_model_len,
         max_output_tokens=args.max_output_tokens,
     )
-    finetune_llm_reasoning(
-        pop=pop,
-        env=TinyReasoningEnv(
-            tokenizer=tokenizer,
-            data_batch_size_per_gpu=args.batch_size,
-            dataset_size=args.reasoning_dataset_size,
-        ),
-        wb=False,
-        save_elite=False,
-        verbose=False,
-        max_steps=args.reasoning_steps,
-        evaluation_interval=args.evaluation_interval,
-        accelerator=None,
-        checkpoint_steps=args.checkpoint_steps,
-        **_evolution_kwargs(case, args),
+    env = TinyPreferenceEnv(
+        tokenizer=tokenizer,
+        data_batch_size_per_gpu=args.batch_size,
+        dataset_size=args.preference_dataset_size,
     )
 
+    tournament = mutation = None
+    evo_steps = None
+    if case.with_tournament:
+        tournament, mutation = build_evolution_components(case.population_size)
+        evo_steps = args.evo_steps
 
-def run_preference_case(case: MatrixCase, args: argparse.Namespace) -> None:
-    pop, tokenizer, _ = build_population(
-        algo=case.algo,
-        population_size=case.population_size,
-        seed=args.seed,
-        batch_size=args.batch_size,
-        max_model_len=args.max_model_len,
-        max_output_tokens=args.max_output_tokens,
-    )
-    finetune_llm_preference(
+    train_llm_dataset(
         pop=pop,
-        env=TinyPreferenceEnv(
-            tokenizer=tokenizer,
-            data_batch_size_per_gpu=args.batch_size,
-            dataset_size=args.preference_dataset_size,
-        ),
+        env=env,
         wb=False,
         save_elite=False,
         verbose=False,
         max_steps=args.preference_steps,
         evaluation_interval=args.evaluation_interval,
+        evo_steps=evo_steps,
+        tournament=tournament,
+        mutation=mutation,
         accelerator=None,
         checkpoint_steps=args.checkpoint_steps,
-        **_evolution_kwargs(case, args),
     )
 
 
-def run_multiturn_case(case: MatrixCase, args: argparse.Namespace) -> None:
+def run_rollout_case(
+    case: MatrixCase,
+    args: argparse.Namespace,
+) -> None:
+    """Run one rollout case."""
     pop, tokenizer, init_hp = build_population(
         algo=case.algo,
         population_size=case.population_size,
@@ -439,58 +329,122 @@ def run_multiturn_case(case: MatrixCase, args: argparse.Namespace) -> None:
     )
     rng = Random(args.seed)
 
-    def env_factory() -> TokenObservationWrapper:
-        return TokenObservationWrapper(
+    def env_factory() -> RolloutEnv:
+        """Create one in-process rollout env over a tiny probe env."""
+        return RolloutEnv.local(
             ConditionalTargetEnv(seed=rng.randint(0, 2**31)),
             tokenizer,
-            1,
-            tokenizer.pad_token_id,
+            max_turns=1,
             apply_chat_template=False,
             max_model_len=args.max_model_len,
             max_output_tokens=args.max_output_tokens,
         )
 
-    finetune_llm_multiturn(
+    tournament = mutation = None
+    evo_steps = None
+    if case.with_tournament:
+        tournament, mutation = build_evolution_components(case.population_size)
+        evo_steps = args.evo_steps
+
+    train_llm_rollout(
         pop=pop,
         max_turns=1,
         env_factory=env_factory,
         init_hp=init_hp,
-        max_steps=args.multiturn_steps,
+        max_steps=args.rollout_steps,
         wb=False,
         save_elite=False,
         verbose=False,
         evaluation_interval=args.evaluation_interval,
+        evo_steps=evo_steps,
+        tournament=tournament,
+        mutation=mutation,
         checkpoint_steps=args.checkpoint_steps,
         accelerator=None,
-        **_evolution_kwargs(case, args),
     )
 
 
-_CASE_RUNNERS = {
-    "reasoning": run_reasoning_case,
-    "preference": run_preference_case,
-    "multiturn": run_multiturn_case,
-}
+def should_validate_checkpoint(case: MatrixCase, args: argparse.Namespace) -> bool:
+    """Return whether checkpoint calls should be validated."""
+    if args.skip_checkpoint_validation:
+        return False
+    return not case.with_tournament
+
+
+def should_validate_tournament(case: MatrixCase, args: argparse.Namespace) -> bool:
+    """Return whether tournament calls should be validated."""
+    return case.with_tournament
 
 
 def case_runner(case: MatrixCase) -> Callable[[argparse.Namespace], None]:
-    try:
-        runner = _CASE_RUNNERS[case.loop_name]
-    except KeyError as exc:
-        msg = f"Unsupported loop: {case.loop_name}"
-        raise ValueError(msg) from exc
-    return lambda args: runner(case, args)
+    """Map a matrix case to its runner."""
+    if case.loop_name == "preference":
+        return lambda args: run_preference_case(case, args)
+    if case.loop_name == "rollout":
+        return lambda args: run_rollout_case(case, args)
+    msg = f"Unsupported loop: {case.loop_name}"
+    raise ValueError(msg)
 
 
 def run_case(case: MatrixCase, args: argparse.Namespace) -> tuple[bool, str]:
     """Execute one case and return pass/fail with message."""
+    checkpoint_calls = 0
+    tournament_calls = 0
+    run_impl = case_runner(case)
+    original_save_checkpoint = train_llm.save_llm_checkpoint
     start = time.time()
+
+    def checkpoint_wrapper(agent: Any, checkpoint_path: str | None) -> None:
+        """Count checkpoint calls and optionally write a real checkpoint."""
+        nonlocal checkpoint_calls
+        checkpoint_calls += 1
+        if args.mock_checkpoints:
+            return
+        target_root = Path(args.checkpoint_dir)
+        target_path = str(target_root / case.case_id)
+        original_save_checkpoint(agent, target_path)
+
+    def tournament_wrapper(*call_args: Any, **kwargs: Any) -> list[Any]:
+        """Count tournament calls and run real or stubbed logic."""
+        nonlocal tournament_calls
+        tournament_calls += 1
+        if args.stub_tournament_selection:
+            if "population" in kwargs:
+                return kwargs["population"]
+            return call_args[0]
+        return original_tournament(*call_args, **kwargs)
+
     try:
-        case_runner(case)(args)
+        if not args.mock_checkpoints:
+            Path(args.checkpoint_dir).mkdir(parents=True, exist_ok=True)
+        original_tournament = train_llm.tournament_selection_and_mutation
+        with (
+            patch(
+                "agilerl.training.llm.save_llm_checkpoint",
+                side_effect=checkpoint_wrapper,
+                autospec=True,
+            ),
+            patch(
+                "agilerl.training.llm.tournament_selection_and_mutation",
+                side_effect=tournament_wrapper,
+                autospec=True,
+            ),
+        ):
+            run_impl(args)
     except Exception as exc:  # noqa: BLE001
         elapsed = time.time() - start
         return False, f"{type(exc).__name__}: {exc} ({elapsed:.2f}s)"
-    return True, f"ok ({time.time() - start:.2f}s)"
+
+    if should_validate_checkpoint(case, args) and checkpoint_calls == 0:
+        return False, "Expected checkpoint invocation but observed 0 calls."
+    if should_validate_tournament(case, args) and tournament_calls == 0:
+        return False, "Expected tournament invocation but observed 0 calls."
+
+    elapsed = time.time() - start
+    return (
+        True,
+        f"ok ({elapsed:.2f}s, ckpt_calls={checkpoint_calls}, tourn_calls={tournament_calls})",
+    )
 
 
 def build_cases() -> list[MatrixCase]:
@@ -501,16 +455,12 @@ def build_cases() -> list[MatrixCase]:
     ]
     cases: list[MatrixCase] = []
 
-    for algo in ("GRPO", "LLMPPO", "LLMREINFORCE"):
-        for scenario in scenarios:
-            cases.append(MatrixCase(loop_name="reasoning", algo=algo, **scenario))
-
     for scenario in scenarios:
         cases.append(MatrixCase(loop_name="preference", algo="DPO", **scenario))
 
     for algo in ("GRPO", "LLMPPO", "LLMREINFORCE"):
         for scenario in scenarios:
-            cases.append(MatrixCase(loop_name="multiturn", algo=algo, **scenario))
+            cases.append(MatrixCase(loop_name="rollout", algo=algo, **scenario))
 
     return cases
 
@@ -539,16 +489,36 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-model-len", type=int, default=32)
     parser.add_argument("--max-output-tokens", type=int, default=2)
 
-    parser.add_argument("--reasoning-steps", type=int, default=2)
     parser.add_argument("--preference-steps", type=int, default=2)
-    parser.add_argument("--multiturn-steps", type=int, default=3)
+    parser.add_argument("--rollout-steps", type=int, default=3)
 
-    parser.add_argument("--reasoning-dataset-size", type=int, default=12)
     parser.add_argument("--preference-dataset-size", type=int, default=12)
 
     parser.add_argument("--evaluation-interval", type=int, default=10_000)
-    parser.add_argument("--checkpoint-steps", type=int, default=None)
+    parser.add_argument("--checkpoint-steps", type=int, default=1)
     parser.add_argument("--evo-steps", type=int, default=1)
+
+    parser.add_argument(
+        "--skip-checkpoint-validation",
+        action="store_true",
+        help="Disable default checkpoint invocation assertions.",
+    )
+    parser.add_argument(
+        "--mock-checkpoints",
+        action="store_true",
+        help="Do not write real checkpoints; only count checkpoint invocations.",
+    )
+    parser.add_argument(
+        "--checkpoint-dir",
+        type=str,
+        default="./saved_checkpoints/debug_matrix",
+        help="Directory used when --real-checkpoints is enabled.",
+    )
+    parser.add_argument(
+        "--stub-tournament-selection",
+        action="store_true",
+        help=("Use a lightweight tournament stub (counts calls only)."),
+    )
     return parser.parse_args()
 
 

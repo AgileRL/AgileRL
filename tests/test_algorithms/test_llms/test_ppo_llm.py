@@ -23,10 +23,12 @@ from transformers.modeling_utils import PreTrainedModel
 
 from agilerl.algorithms.core import ActionResult
 from agilerl.algorithms.ppo_llm import PPO as LLMPPO
+from agilerl.llm_envs import RolloutHarness
 from agilerl.utils.algo_utils import CosineLRScheduleConfig, VLLMConfig
-from agilerl.utils.llm_utils import ReasoningGym, masked_whiten
+from agilerl.utils.llm_utils import masked_whiten
 from agilerl.utils.ppo_value_head import AutoModelForCausalLMWithValueHead
 from tests import TINY_LLM_FIXTURE_PATH
+from tests.helpers.rollout_doubles import FakeEnvClient
 from tests.utils import (
     assert_vllm_get_action_contract,
     make_mock_vllm_instance,
@@ -892,7 +894,7 @@ class TestPPOLearn:
         ppo.learn((completions, action_masks, rewards), turn_ids=turn_ids)
 
     @pytest.mark.parametrize("use_vllm", [False, True])
-    def test_llmppo_learns_multiturn(self, use_vllm):
+    def test_llmppo_learns_rollout(self, use_vllm):
         """Multi-turn learn path updates actor/critic adapters without vLLM/DeepSpeed."""
         torch.manual_seed(0)
         ppo = _cpu_llmppo(
@@ -1146,46 +1148,73 @@ class TestPPOFusedNoGradBaseRoutedReference:
             assert torch.isfinite(torch.tensor(metrics[key]))
 
 
-def _minimal_reasoning_gym(device: str, vocab_size: int, input_size: int, bs: int):
-    env = ReasoningGym.__new__(ReasoningGym)
+def _minimal_reasoning_rollout_env(device: str, vocab_size: int, input_size: int):
+    """Single-turn reasoning ``RolloutHarness`` stub (the folded reasoning case)."""
 
-    @contextmanager
-    def eval_mode():
-        yield
+    class _SingleTurnReasoning(RolloutHarness):
+        max_turns = 1
 
-    env.eval_mode = eval_mode
+        def __init__(self):
+            self._env_client = None
+            self.done = False
 
-    def reset(reset_dataloaders=False):
-        return {
-            "input_ids": torch.randint(0, vocab_size, (bs, input_size), device=device),
-            "attention_mask": torch.ones(bs, input_size, device=device),
-            "question": [f"q_{i}" for i in range(bs)],
-            "answer": [f"a_{i}" for i in range(bs)],
-        }
+        def _prompt(self):
+            return {
+                "input_ids": torch.randint(
+                    0, vocab_size, (1, input_size), device=device
+                ),
+                "attention_mask": torch.ones(1, input_size, device=device),
+                "text": "q",
+            }
 
-    def step(completion_ids):
-        r = torch.ones(bs, device=device)
-        return reset(), r
+        def reset(self, seed=None):
+            del seed
+            self.done = False
+            return self._prompt(), {}
 
-    env.reset = reset
-    env.step = step
-    return env
+        def step(self, full_completion_ids):
+            del full_completion_ids
+            self.done = True
+            return self._prompt(), 1.0, True, False, {}
+
+        def get_episode_data(self):
+            return (
+                torch.ones(1, input_size, dtype=torch.long, device=device),
+                torch.ones(1, input_size - 1, dtype=torch.bool, device=device),
+                torch.zeros(1, input_size - 1, dtype=torch.long, device=device),
+                torch.tensor([1.0], dtype=torch.float32, device=device),
+            )
+
+        @contextmanager
+        def eval_mode(self):
+            yield
+
+        def close(self):
+            return None
+
+    return _SingleTurnReasoning()
 
 
 class TestPPOTest:
-    def test_test_method_reasoning_gym_branch(self):
+    def test_test_method_reasoning_rollout_branch(self):
         ppo = _cpu_llmppo()
-        env = _minimal_reasoning_gym("cpu", 100, 10, 2)
-        out = ppo.test(env, loop=2)
+        env = _minimal_reasoning_rollout_env("cpu", 100, 10)
+        completion = torch.ones(1, 12, dtype=torch.long)
+        action_mask = torch.ones(1, 11, dtype=torch.bool)
+        with patch.object(
+            ppo, "get_action", return_value=ActionResult([completion], [action_mask])
+        ):
+            out = ppo.test(env, loop=2)
         assert out.shape == ()
         assert out.item() == pytest.approx(1.0)
 
-    def test_test_method_multiturn_episode_env_branch(self):
-        class DummyMultiTurnEpisodeEnv:
+    def test_test_method_rollout_episode_env_branch(self):
+        class DummyRolloutEpisodeEnv(RolloutHarness):
             max_turns = 2
 
             def __init__(self):
-                self._step_count = 0
+                self._env_client = FakeEnvClient()
+                self.done = False
                 self.valid_prompt = {
                     "input_ids": torch.ones(1, 4, dtype=torch.long),
                     "attention_mask": torch.ones(1, 4, dtype=torch.long),
@@ -1193,12 +1222,12 @@ class TestPPOTest:
 
             def reset(self, seed=None):
                 del seed
-                self._step_count = 0
+                self.done = False
                 return self.valid_prompt, {}
 
             def step(self, full_completion_ids):
                 del full_completion_ids
-                self._step_count += 1
+                self.done = True
                 return {}, 1.0, True, False, {}
 
             def get_episode_data(self):
@@ -1213,7 +1242,7 @@ class TestPPOTest:
                 return None
 
         ppo = _cpu_llmppo()
-        env = DummyMultiTurnEpisodeEnv()
+        env = DummyRolloutEpisodeEnv()
         completion = torch.ones(1, 6, dtype=torch.long)
         action_mask = torch.ones(1, 5, dtype=torch.bool)
         with patch.object(
@@ -1230,11 +1259,16 @@ class TestPPOTest:
         assert ppo.fitness[-1] == pytest.approx(1.0)
 
     def test_test_method_waits_for_everyone(self):
-        class DummyMultiTurnEpisodeEnv:
+        class DummyRolloutEpisodeEnv(RolloutHarness):
             max_turns = 1
+
+            def __init__(self):
+                self._env_client = FakeEnvClient()
+                self.done = False
 
             def reset(self, seed=None):
                 del seed
+                self.done = False
                 return {
                     "input_ids": torch.ones(1, 4, dtype=torch.long),
                     "attention_mask": torch.ones(1, 4, dtype=torch.long),
@@ -1242,6 +1276,7 @@ class TestPPOTest:
 
             def step(self, full_completion_ids):
                 del full_completion_ids
+                self.done = True
                 return {}, 1.0, True, False, {}
 
             def get_episode_data(self):
@@ -1262,17 +1297,19 @@ class TestPPOTest:
         with patch.object(
             ppo, "get_action", return_value=ActionResult([completion], None)
         ):
-            ppo.test(DummyMultiTurnEpisodeEnv(), loop=1)
+            ppo.test(DummyRolloutEpisodeEnv(), loop=1)
         acc.wait_for_everyone.assert_called()
 
-    def test_test_method_multiturn_continues_when_not_done(self):
+    def test_test_method_rollout_continues_when_not_done(self):
         """Cover prompt update when the episode spans turns."""
 
-        class DummyMultiTurnContinueEnv:
+        class DummyRolloutContinueEnv(RolloutHarness):
             max_turns = 2
 
             def __init__(self):
                 self._step_count = 0
+                self._env_client = FakeEnvClient()
+                self.done = False
                 self.prompt_a = {
                     "input_ids": torch.ones(1, 4, dtype=torch.long),
                     "attention_mask": torch.ones(1, 4, dtype=torch.long),
@@ -1285,6 +1322,7 @@ class TestPPOTest:
             def reset(self, seed=None):
                 del seed
                 self._step_count = 0
+                self.done = False
                 return self.prompt_a, {}
 
             def step(self, full_completion_ids):
@@ -1292,6 +1330,7 @@ class TestPPOTest:
                 self._step_count += 1
                 if self._step_count == 1:
                     return self.prompt_b, 0.5, False, False, {}
+                self.done = True
                 return {}, 1.0, True, False, {}
 
             def get_episode_data(self):
@@ -1310,7 +1349,7 @@ class TestPPOTest:
         with patch.object(
             ppo, "get_action", return_value=ActionResult([completion], None)
         ) as get_action:
-            out = ppo.test(DummyMultiTurnContinueEnv(), loop=1)
+            out = ppo.test(DummyRolloutContinueEnv(), loop=1)
 
         assert out.shape == ()
         assert get_action.call_count == 2
@@ -1319,31 +1358,35 @@ class TestPPOTest:
 
     def test_test_method_unknown_env_typeerror(self):
         ppo = _cpu_llmppo()
-        with pytest.raises(TypeError, match="env must be a ReasoningGym"):
+        with pytest.raises(TypeError, match="env must be a RolloutHarness"):
             ppo.test(object(), loop=1)
 
     def test_llmppo_test_method_token_observation_wrapper_branch(self):
         from transformers import AutoTokenizer
 
-        from agilerl.llm_envs import TokenObservationWrapper
+        from agilerl.llm_envs import RolloutHarness
+        from agilerl.llm_envs.openenv_server import OpenEnvServer
         from agilerl.utils.probe_envs_llm import ConstantTargetEnv
 
         tok = AutoTokenizer.from_pretrained(TINY_LLM_FIXTURE_PATH)
         if tok.pad_token_id is None:
             tok.pad_token = tok.eos_token
-        env = TokenObservationWrapper(
-            ConstantTargetEnv(target_digit="1", prompt="1"),
-            tok,
-            max_turns=1,
-            pad_id=tok.pad_token_id,
-            apply_chat_template=False,
-            max_model_len=128,
-            max_output_tokens=8,
-        )
-        ppo = _cpu_llmppo(max_model_len=128, max_output_tokens=8)
-        out = ppo.test(env, loop=1)
-        assert out.shape == ()
-        assert ppo.fitness[-1] == pytest.approx(float(out))
+        server = OpenEnvServer(ConstantTargetEnv(target_digit="1", prompt="1")).start()
+        try:
+            env = RolloutHarness(
+                server.base_url,
+                tok,
+                max_turns=1,
+                apply_chat_template=False,
+                max_model_len=128,
+                max_output_tokens=8,
+            )
+            ppo = _cpu_llmppo(max_model_len=128, max_output_tokens=8)
+            out = ppo.test(env, loop=1)
+            assert out.shape == ()
+            assert ppo.fitness[-1] == pytest.approx(float(out))
+        finally:
+            server.stop()
 
 
 class TestPPOLossLiger:

@@ -82,6 +82,7 @@ from agilerl.typing import (
     FitnessValue,
     GymSpaceType,
     InfosDict,
+    LLMObsType,
     LrNameType,
     MaybeActionMask,
     ModuleType,
@@ -92,7 +93,7 @@ from agilerl.typing import (
     NetConfigType,
     ObservationType,
     OptimizerType,
-    ReasoningPrompts,
+    RolloutPrompts,
     TorchObsType,
     coerce_action_mask,
 )
@@ -137,6 +138,8 @@ if TYPE_CHECKING:
     from torch.optim.lr_scheduler import SequentialLR
     from transformers import BitsAndBytesConfig
 
+    from agilerl.llm_envs import RolloutHarness
+
 # Make imports visible to typechecker and import when required
 if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
     from peft import (
@@ -161,6 +164,7 @@ if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
     from agilerl.utils.llm_utils import (
         adapt_lora_config_for_model,
         align_deepspeed_lr,
+        attention_mask_from_padded_ids,
         build_completion_mask,
         build_vllm_llm_init_kwargs,
         build_vllm_rollout_lora_request,
@@ -168,12 +172,12 @@ if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
         gather_if_zero3,
         get_model_name_or_path,
         get_state_dict,
+        is_rollout_prompts,
         log_cuda_memory_snapshot,
         move_params_to_cpu,
         move_params_to_gpu,
         offload_colocated_trainer_from_gpu,
         save_peft_adapter_for_vllm_rollout,
-        stitch_completion_after_windowed_vllm_generate,
     )
 
 if TYPE_CHECKING or HAS_DEEPSPEED:
@@ -1092,8 +1096,11 @@ class EvolvableAlgorithm(ABC, Generic[ExperiencesT], metaclass=RegistryMeta):
             pickle_module=dill,
         )
 
-    def load_checkpoint(self, path: str) -> None:
-        """Load saved agent properties and network weights from checkpoint.
+    def load_weights(self, path: str) -> None:
+        """Load only the network weights from a checkpoint.
+
+        Warm-starts a new run from prior weights; optimizer, LR schedule,
+        training progress and hyperparameters are not loaded.
 
         :param path: Location to load checkpoint from
         :type path: string
@@ -1104,11 +1111,22 @@ class EvolvableAlgorithm(ABC, Generic[ExperiencesT], metaclass=RegistryMeta):
             pickle_module=dill,
             weights_only=False,
         )
+        self._load_module_weights(checkpoint)
 
-        # Recreate evolvable modules
+        if self.accelerator is not None:
+            self.wrap_models()
+        elif self.torch_compiler:
+            configure_tf32_precision()
+            self.recompile()
+
+    def _load_module_weights(self, checkpoint: dict[str, Any]) -> None:
+        """Recreate the evolvable modules and load their state dicts.
+
+        :param checkpoint: Deserialized checkpoint dictionary.
+        :type checkpoint: dict[str, Any]
+        """
         network_info: CheckpointInfo = checkpoint["network_info"]
         modules = network_info["modules"]
-        optimizers = network_info["optimizers"]
         network_names = network_info["network_names"]
         for name in network_names:
             net_dict = {k: v for k, v in modules.items() if k.startswith(name)}
@@ -1156,6 +1174,26 @@ class EvolvableAlgorithm(ABC, Generic[ExperiencesT], metaclass=RegistryMeta):
             elif state_dict:
                 loaded_module.load_state_dict(state_dict)
 
+    def load_checkpoint(self, path: str) -> None:
+        """Load saved agent properties and network weights from checkpoint.
+
+        Restores full training state (weights, optimizer, LR schedule,
+        hyperparameters) to resume a run; :meth:`load_weights` takes weights only.
+
+        :param path: Location to load checkpoint from
+        :type path: string
+        """
+        checkpoint: dict[str, Any] = torch.load(
+            path,
+            map_location=self.device,
+            pickle_module=dill,
+            weights_only=False,
+        )
+
+        self._load_module_weights(checkpoint)
+
+        network_info: CheckpointInfo = checkpoint["network_info"]
+        optimizers = network_info["optimizers"]
         optimizer_names = network_info["optimizer_names"]
         for name in optimizer_names:
             opt_dict = {k: v for k, v in optimizers.items() if k.startswith(name)}
@@ -2654,6 +2692,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         self.batch_size = batch_size
         self.lr = align_deepspeed_lr(float(lr), self.accelerator)
         self.lr_critic = lr_critic
+        self.seed = seed
 
         if self.accelerator is not None:
             ds_plugin = getattr(self.accelerator.state, "deepspeed_plugin", None)
@@ -2787,6 +2826,79 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         """
         # Dummy pass-through: LLM observations are already batched tensors.
         return observation
+
+    @abstractmethod
+    def get_action(
+        self,
+        obs: LLMObsType,
+        training: bool = True,
+        *args: Any,
+        **kwargs: Any,
+    ) -> ActionResult:
+        """Generate completions for each prompt in ``obs``.
+
+        :param obs: A single prompt dict or a list of HF-style prompt dicts.
+        :type obs: LLMObsType
+        :param training: Whether the rollout is a training rollout.
+        :type training: bool
+        :return: The generated completions and their masks.
+        :rtype: ActionResult
+        """
+
+    def test(
+        self,
+        env: RolloutHarness,
+        loop: int = 1,
+        *args: Any,
+        **kwargs: Any,
+    ) -> np.ndarray:
+        """Return fitness (test) score of the llm on the test sub-set.
+
+        :param env: Tokenized rollout episode environment (single- or multi-turn).
+        :type env: RolloutHarness
+        :param loop: Number of outer test iterations (episodes).
+        :type loop: int
+        :return: Zero-dimensional array holding the mean per-step reward,
+            which is also recorded in the agent's fitness history.
+        :rtype: np.ndarray
+        """
+        from agilerl.llm_envs import RolloutHarness
+
+        if not isinstance(env, RolloutHarness):
+            msg = f"env must be a RolloutHarness; got {type(env).__name__}"
+            raise TypeError(msg)
+        rewards: list[float] = []
+        with env.eval_mode():
+            for _ in range(loop):
+                prompt_dict, _info = env.reset()
+                while not env.done:
+                    # ``current_prompt`` is only empty once the env is done, so
+                    # inside this loop the observation always carries token ids.
+                    assert is_rollout_prompts(prompt_dict)
+                    completion_ids = self.get_action(
+                        [prompt_dict],
+                        training=False,
+                    ).completion_ids
+                    prompt_dict, reward, _terminated, _truncated, _info = env.step(
+                        completion_ids[0],
+                    )
+                    rewards.append(float(reward))
+        if rewards:
+            mean_fit = float(np.mean(rewards))
+        else:
+            warnings.warn(
+                "test() collected no turns (every reset was already done, e.g. "
+                "over-budget prompts); recording fitness 0.0.",
+                UserWarning,
+                stacklevel=2,
+            )
+            mean_fit = 0.0
+        self.metrics.add_fitness(mean_fit)
+        if self.accelerator is not None:
+            # Episodes early-exit at their own turn counts, so ranks reach here
+            # out of step; sync once before training resumes.
+            self.accelerator.wait_for_everyone()
+        return np.array(mean_fit)
 
     def save_checkpoint(
         self,
@@ -2931,25 +3043,93 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         if self.accelerator is not None:
             self.accelerator.wait_for_everyone()
 
+    def load_weights(
+        self,
+        path: str,
+        overwrite_reference_adapter: bool | None = None,
+        overwrite_critic_adapter: bool = False,
+    ) -> None:
+        """Load only the LoRA adapters (and value head) from a checkpoint directory.
+
+        :param path: Directory containing a checkpoint written by
+            :meth:`save_checkpoint`.
+        :type path: str
+        :param overwrite_reference_adapter: See :meth:`load_checkpoint`.
+        :type overwrite_reference_adapter: bool | None
+        :param overwrite_critic_adapter: See :meth:`load_checkpoint`.
+        :type overwrite_critic_adapter: bool
+        """
+        checkpoint: dict[str, Any] = torch.load(
+            str(Path(path) / "attributes.pt"),
+            weights_only=False,
+            pickle_module=dill if self.accelerator is None else pickle,
+        )
+        lora_only = checkpoint.get("_lora_only", False) or checkpoint.get(
+            "_weights_only", False
+        )
+        if lora_only:
+            self._load_model_checkpoint(
+                path,
+                overwrite_reference_adapter,
+                overwrite_critic_adapter,
+            )
+        elif self._uses_deepspeed:
+            self._load_full_model_actor(path, checkpoint)
+        else:
+            # A full-model checkpoint keeps the actor's weights in ``attributes.pt``.
+            self._load_module_weights(checkpoint)
+
+    def _load_full_model_actor(self, path: str, checkpoint: dict[str, Any]) -> None:
+        """Load only the actor weights of a DeepSpeed full-model checkpoint.
+
+        :param path: Checkpoint directory written by :meth:`save_checkpoint`.
+        :type path: str
+        :param checkpoint: Deserialized ``attributes.pt`` payload.
+        :type checkpoint: dict[str, Any]
+        """
+        actor_state_dict = (
+            checkpoint.get("network_info", {})
+            .get("modules", {})
+            .get("actor_state_dict")
+        )
+        if actor_state_dict is None:
+            self._load_distributed_actor(
+                path,
+                tag="save_checkpoint",
+                load_optimizer_states=False,
+                load_lr_scheduler_states=False,
+            )
+        else:
+            model_ref = self._get_unwrapped_actor()
+            with gather_if_zero3(self.zero_stage, list(model_ref.parameters())):
+                model_ref.load_state_dict(actor_state_dict)
+
     def load_checkpoint(
         self,
         path: str,
         load_optimizer: bool = False,
-        overwrite_reference_adapter: bool = False,
-        overwrite_critic_adapter: bool = True,
+        overwrite_reference_adapter: bool | None = None,
+        overwrite_critic_adapter: bool = False,
     ) -> None:
         """Load adapter weights and algorithm state from a checkpoint directory.
+
+        Restores full training state (adapters, optimizer, LR schedule,
+        hyperparameters) to resume a run; :meth:`load_weights` takes adapters only.
 
         Adapter roles restored on load:
 
           * ``actor``     — the trained policy. Always loaded.
-          * ``reference`` — the fixed policy used for KL / comparison. The
-            checkpoint's ``actor`` adapter is copied onto ``reference`` so
-            that SFT -> DPO -> GRPO chains work out of the box: the stage-N
-            actor becomes the stage-N+1 reference.
-          * ``critic``    — optional value head. Loaded from disk if a
-            ``critic/`` adapter is present, else copied from ``actor``, else
-            left as the live fresh LoRA init.
+          * ``reference`` — the fixed policy used for KL / comparison. Loaded from
+            the checkpoint's ``reference/`` adapter when it has one, so a resumed
+            run keeps the anchor it was training against. When it has none, the
+            checkpoint's ``actor`` is copied onto ``reference`` instead, so
+            SFT -> DPO -> GRPO chains work out of the box: the stage-N actor
+            becomes the stage-N+1 reference.
+          * ``critic``    — optional value head. Loaded from the checkpoint's
+            ``critic/`` adapter when it has one, otherwise left at its fresh LoRA
+            init (all-zero ``lora_B``), i.e. a critic that starts from the base
+            model. Set ``overwrite_critic_adapter`` to seed it from the actor
+            instead.
 
         The checkpoint's LoRA config must match the live algorithm's config;
         a mismatch raises ``ValueError`` (re-create the agent with the
@@ -3018,25 +3198,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
                     overwrite_critic_adapter,
                 )
             else:
-                actor_state_dict = (
-                    checkpoint.get("network_info", {})
-                    .get("modules", {})
-                    .get("actor_state_dict")
-                )
-                if actor_state_dict is None:
-                    # DeepSpeed full-model checkpoints saved with
-                    # save_optimizer=True persist module weights in the
-                    # save_checkpoint tag directory (not attributes.pt).
-                    self._load_distributed_actor(
-                        path,
-                        tag="save_checkpoint",
-                        load_optimizer_states=False,
-                        load_lr_scheduler_states=False,
-                    )
-                else:
-                    model_ref = self._get_unwrapped_actor()
-                    with gather_if_zero3(self.zero_stage, list(model_ref.parameters())):
-                        model_ref.load_state_dict(actor_state_dict)
+                self._load_full_model_actor(path, checkpoint)
 
             self._restore_checkpoint_attributes(checkpoint)
 
@@ -3074,22 +3236,29 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
     def _load_model_checkpoint(
         self,
         path: str,
-        overwrite_reference_adapter: bool = False,
-        overwrite_critic_adapter: bool = True,
+        overwrite_reference_adapter: bool | None = None,
+        overwrite_critic_adapter: bool = False,
     ) -> None:
         """Restore LoRA adapter weights from a checkpoint directory.
 
-        The checkpoint's LoRA config must match the live algorithm's; a mismatch
-        (e.g. a different rank) raises ``ValueError``. Reference and Critic
-        LoRA adapters in the checkpoint can be overwritten by the Actor using the
-        ``overwrite_reference_adapter`` and ``overwrite_critic_adapter`` flags.
+        Each selected adapter is loaded from its own subdirectory; a LoRA-config
+        mismatch raises ``ValueError``.
 
         :param path: Checkpoint directory path.
         :type path: str
-        :param overwrite_reference_adapter: If ``True`` do not overwrite the live reference
-            adapter. Defaults to ``False``.
-        :type overwrite_reference_adapter: bool
+        :param overwrite_reference_adapter: Seed the reference adapter from the
+            actor. ``None`` (the default) decides from the checkpoint: seed when it
+            carries no ``reference/`` adapter of its own, otherwise keep the one
+            just loaded from disk.
+        :type overwrite_reference_adapter: bool | None
+        :param overwrite_critic_adapter: Seed the critic adapter from the actor.
+            Defaults to ``False``: a critic absent from the checkpoint keeps its
+            fresh LoRA init and so starts from the base model.
+        :type overwrite_critic_adapter: bool
         """
+        if overwrite_reference_adapter is None:
+            overwrite_reference_adapter = not (Path(path) / "reference").exists()
+
         ckpt_lora_config = self._load_checkpoint_lora_config(path)
         if ckpt_lora_config is not None:
             if self.lora_config is None or self._lora_configs_equivalent(
@@ -3113,7 +3282,6 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             )
 
         if "critic" in self.selected_adapters and overwrite_critic_adapter:
-            # Always overwrite the critic
             self._copy_adapter_weights(source_adapter="actor", target_adapter="critic")
 
         # The value head (PPO's ``v_head`` Linear) is a non-LoRA module saved
@@ -4651,7 +4819,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         """
         B = ids.shape[0]
         if attention_mask is None:
-            attention_mask = ids != self.pad_token_id
+            attention_mask = attention_mask_from_padded_ids(ids, self.pad_token_id)
 
         # Packed path for the gradient forward only; no-grad passes stay padded.
         if torch.is_grad_enabled() and self._packing_mode() is not None:
@@ -4787,7 +4955,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         """
         B = ids.shape[0]
         if attention_mask is None:
-            attention_mask = ids != self.pad_token_id
+            attention_mask = attention_mask_from_padded_ids(ids, self.pad_token_id)
 
         self.actor.eval()
 
@@ -4913,8 +5081,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             self.actor.train(mode=not eval_mode)
             num_samples = ids.shape[0]
             if attention_mask is None:
-                # TODO this calc is avoided when using PreferenceGym, need to make ReasoningGym do the same
-                attention_mask = ids != self.pad_token_id
+                attention_mask = attention_mask_from_padded_ids(ids, self.pad_token_id)
             if self.calc_position_embeddings:
                 position_ids = self._position_ids_from_mask(attention_mask)
 
@@ -5186,7 +5353,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
 
     def _generate_with_vllm_colocate(
         self,
-        prompts: Sequence[ReasoningPrompts],
+        prompts: Sequence[RolloutPrompts],
         group_size: int,
         temperature: float | None,
         capture_sampling_logps: bool = False,
@@ -5199,14 +5366,10 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         a flat list of length ``len(prompts) * group_size`` (e.g. GRPO groups).
 
         **Prompt dict fields:** ``input_ids`` and usually ``text`` for decoding.
-        For sliding-window multi-turn prompts, optionally set ``trajectory_input_ids``,
-        ``trajectory_text`` (decoded string passed to vLLM), ``stitch_prefix_ids``, and
-        ``initial_prompt_len`` (required when ``stitch_prefix_ids`` is
-        non-empty). Action masks use the full logical prompt length from
-        ``input_ids``, not only ``trajectory_input_ids``.
+        Action masks use the full prompt length from ``input_ids``.
 
         :param prompts: Length-``N`` sequence of observation mappings for this rank.
-        :type prompts: Sequence[ReasoningPrompts]
+        :type prompts: Sequence[RolloutPrompts]
         :param group_size: Repeat factor per prompt (1 for plain PPO).
         :type group_size: int
         :param temperature: Temperature for sampling.
@@ -5228,20 +5391,8 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             else self.max_model_len
         )
 
-        def _trajectory_input_ids(prompt: ReasoningPrompts) -> torch.Tensor:
-            traj = prompt.get("trajectory_input_ids")
-            if traj is None:
-                return prompt["input_ids"]
-            return traj
-
         def _token_prompt_for_vllm(ids: torch.Tensor) -> dict[str, list[int]]:
             return {"prompt_token_ids": ids.squeeze(0).tolist()}
-
-        def _stitch_prefix(prompt: ReasoningPrompts, ref: torch.Tensor) -> torch.Tensor:
-            st = prompt.get("stitch_prefix_ids")
-            if st is None:
-                return ref.new_zeros((ref.shape[0], 0))
-            return st
 
         def _vllm_max_new_tokens(model_prompt_len: int) -> int:
             room = self.max_model_len - model_prompt_len
@@ -5255,22 +5406,17 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
 
         # Compute the per-prompt work once per *unique* prompt (N items),
         # then alias by reference across each group (N·G items)
-        unique_ids = [_trajectory_input_ids(p) for p in prompts]
+        unique_ids = [p["input_ids"] for p in prompts]
         unique_tokens = [_token_prompt_for_vllm(ids) for ids in unique_ids]
         unique_max = [_vllm_max_new_tokens(int(ids.shape[1])) for ids in unique_ids]
-        unique_stitch = [
-            _stitch_prefix(p, ids) for p, ids in zip(prompts, unique_ids, strict=True)
-        ]
 
         # Replicate by reference for the flat vLLM batch. Entries within a
         # group of `group_size` are aliased references to the same tensor / dict
-        # — safe because downstream use is read-only is read-only w.r.t. these objects.
+        # — safe because downstream use is read-only w.r.t. these objects.
         # Do not introduce in-place ops on these aliases.
-        group_prompts = [p for p in prompts for _ in range(group_size)]
         prompts_ids = [ids for ids in unique_ids for _ in range(group_size)]
         token_prompts = [tp for tp in unique_tokens for _ in range(group_size)]
         max_output_tokens = [m for m in unique_max for _ in range(group_size)]
-        stitch_prefixes = [sp for sp in unique_stitch for _ in range(group_size)]
 
         if vllm_config.tensor_parallel_size > 1:
             orig_size = len(token_prompts)
@@ -5281,9 +5427,6 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             gathered_token_prompts: list[Any] = [
                 None
             ] * vllm_config.tensor_parallel_size
-            gathered_stitch_prefixes: list[Any] = [
-                None
-            ] * vllm_config.tensor_parallel_size
             gathered_max_output_tokens: list[Any] = [
                 None
             ] * vllm_config.tensor_parallel_size
@@ -5292,10 +5435,9 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
                 (
                     gathered_prompts_ids,
                     gathered_token_prompts,
-                    gathered_stitch_prefixes,
                     gathered_max_output_tokens,
                 ),
-                (prompts_ids, token_prompts, stitch_prefixes, max_output_tokens),
+                (prompts_ids, token_prompts, max_output_tokens),
                 strict=True,
             ):
                 torch.distributed.all_gather_object(gathered, obj, group=self.tp_group)
@@ -5306,22 +5448,14 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             all_token_prompts = [
                 prompt for sublist in gathered_token_prompts for prompt in sublist
             ]
-            all_stitch_prefixes = [
-                sp for sublist in gathered_stitch_prefixes for sp in sublist
-            ]
             all_max_output_tokens = [
                 max_out for sublist in gathered_max_output_tokens for max_out in sublist
             ]
         else:
             all_token_prompts = token_prompts
             all_prompts_ids = prompts_ids
-            all_stitch_prefixes = stitch_prefixes
             all_max_output_tokens = max_output_tokens
 
-        # The windowed stitch path reorders tokens, so sampling-logprob capture
-        # (for the vLLM mismatch correction) is excluded there.
-        stitch_active = any(int(sp.shape[1]) > 0 for sp in stitch_prefixes)
-        capture_sampling_logps = capture_sampling_logps and not stitch_active
         generation_kwargs: dict[str, Any] = {
             "n": 1,  # vLLM on each GPU generates only 1 in colocate mode
             "repetition_penalty": self.repetition_penalty,
@@ -5379,7 +5513,6 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             )
             completion_ids = completion_ids[tp_slice]
             prompts_ids = all_prompts_ids[tp_slice]
-            stitch_prefixes = all_stitch_prefixes[tp_slice]
             if capture_sampling_logps:
                 sampling_logps_flat = sampling_logps_flat[tp_slice]
 
@@ -5388,12 +5521,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             prompts_ids[group_size * i].to(self.device, non_blocking=True)
             for i in range(len(prompts))
         ]
-        unique_stitch_dev = [
-            stitch_prefixes[group_size * i].to(self.device, non_blocking=True)
-            for i in range(len(prompts))
-        ]
         prompts_ids = [ids for ids in unique_prompts_ids_dev for _ in range(group_size)]
-        stitch_prefixes = [sp for sp in unique_stitch_dev for _ in range(group_size)]
 
         completion_ids = [
             torch.cat(
@@ -5422,17 +5550,6 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             else None
         )
 
-        if any(int(sp.shape[1]) > 0 for sp in stitch_prefixes):
-            completion_ids = stitch_completion_after_windowed_vllm_generate(
-                completion_ids,
-                stitch_prefixes,
-                group_prompts,
-                group_size,
-                prompts,
-            )
-
-        # Prompt mappings type their values as `Any`, so `input_ids` reads back
-        # as `Any`; pin it to `torch.Tensor` to read the sequence-length dimension.
         num_input_tokens = [
             int(prompts[i]["input_ids"].shape[1]) for i in range(len(prompts))
         ]
@@ -5970,7 +6087,9 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         """
         prompt_lengths_tensor = torch.tensor(prompt_lengths, dtype=torch.long)
         positions = torch.arange(max_length, dtype=torch.long).unsqueeze(0)
-        return positions > prompt_lengths_tensor.unsqueeze(1)
+        # The first response token sits AT index prompt_length, so the mask must
+        # include it — a strict ``>`` silently drops it from every loss.
+        return positions >= prompt_lengths_tensor.unsqueeze(1)
 
     def _configure_vllm(self) -> None:
         """Configure vLLM for efficient inference during generation in 'get_action'."""

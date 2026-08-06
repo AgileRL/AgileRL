@@ -15,20 +15,26 @@ from gymnasium import spaces
 
 from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.algorithms import PPO
+from agilerl.components.llm_rollout_buffer import (
+    LLMExperienceBatch,
+    RolloutGroup,
+    Trajectory,
+    collate_rollout_groups,
+)
 from agilerl.networks import StochasticActor
 from agilerl.typing import RolloutReturn
 
 if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
     from agilerl.algorithms import GRPO, LLMPPO, LLMREINFORCE
-    from agilerl.llm_envs import SyncMultiTurnVecEnv
+    from agilerl.llm_envs import RolloutCollector
 
 SupportedOnPolicy = PPO
-RolloutEnv = gym.Env | gym.vector.VectorEnv
+RolloutHarness = gym.Env | gym.vector.VectorEnv
 
 
 def _collect_rollouts(
     agent: SupportedOnPolicy,
-    env: RolloutEnv,
+    env: RolloutHarness,
     n_steps: int | None = None,
     last_obs: npt.NDArray | None = None,
     last_done: npt.NDArray | None = None,
@@ -220,7 +226,7 @@ def _collect_rollouts(
 
 def collect_rollouts(
     agent: SupportedOnPolicy,
-    env: RolloutEnv,
+    env: RolloutHarness,
     n_steps: int | None = None,
     **kwargs: Any,
 ) -> RolloutReturn:
@@ -242,7 +248,7 @@ def collect_rollouts(
 
 def collect_rollouts_recurrent(
     agent: SupportedOnPolicy,
-    env: RolloutEnv,
+    env: RolloutHarness,
     n_steps: int | None = None,
     **kwargs: Any,
 ) -> RolloutReturn:
@@ -264,11 +270,10 @@ def collect_rollouts_recurrent(
 
 def collect_rollouts_llm(
     agent: LLMPPO | LLMREINFORCE | GRPO,
-    env: SyncMultiTurnVecEnv,
+    env: RolloutCollector,
     n_steps: int,
     batch_size: int,
     group_seed: int,
-    **kwargs: Any,
 ) -> tuple[
     list[torch.Tensor],
     list[torch.Tensor],
@@ -282,8 +287,8 @@ def collect_rollouts_llm(
 
     :param agent: The agent to collect rollouts for.
     :type agent: SupportedOnPolicyLLM
-    :param env: Synchronous vectorized multi-turn environment.
-    :type env: SyncGemVecEnv
+    :param env: Batched rollout environment.
+    :type env: RolloutCollector
     :param n_steps: Number of steps (max turns) for the agent to take.
     :type n_steps: int
     :param batch_size: Number of environments to collect rollouts from.
@@ -300,9 +305,9 @@ def collect_rollouts_llm(
         seed=group_seed,
     )
 
-    # Colocated vLLM requires tensor_parallel_size==1, and the per-generate DP
-    # barrier was removed, so ranks may early-exit independently. Rejoin once
-    # at the end before train_llm's cross-rank T align / learn.
+    # Colocated vLLM requires tensor_parallel_size==1, and there is no per-generate
+    # DP barrier, so ranks may early-exit independently. Rejoin once at the end
+    # before the trainer's cross-rank sequence alignment and learn().
     for _turn_idx in range(n_steps):
         if prompts is None:
             break
@@ -339,3 +344,69 @@ def collect_rollouts_llm(
         group_seed,
         all_sampling_logps,
     )
+
+
+def buffer_llm_rollouts(
+    completion_ids_list: list[torch.Tensor],
+    action_masks_list: list[torch.Tensor],
+    all_turn_ids: list[torch.Tensor],
+    all_rewards: list[torch.Tensor],
+    all_sampling_logps: list[torch.Tensor | None] | None = None,
+    *,
+    group_size: int,
+) -> LLMExperienceBatch:
+    """Collate a collected LLM rollout into one grouped experience batch.
+
+    Trajectories from :func:`collect_rollouts_llm` are group-contiguous, so each
+    ``group_size`` consecutive trajectories form one prompt group. ``group_size``
+    is the number of completions sampled per prompt (e.g. for GRPO);
+    ``group_size=1`` (PPO/REINFORCE) makes each group a single trajectory, i.e. a
+    plain batch.
+
+    :param completion_ids_list: Per-trajectory ``(1, T)`` token-id tensors.
+    :type completion_ids_list: list[torch.Tensor]
+    :param action_masks_list: Per-trajectory ``(1, T - 1)`` boolean masks.
+    :type action_masks_list: list[torch.Tensor]
+    :param all_turn_ids: Per-trajectory ``(1, T - 1)`` turn-index tensors.
+    :type all_turn_ids: list[torch.Tensor]
+    :param all_rewards: Per-trajectory ``(max_turns,)`` reward tensors.
+    :type all_rewards: list[torch.Tensor]
+    :param all_sampling_logps: Per-trajectory vLLM sampling logprobs parallel to
+        ``completion_ids_list``, or ``None`` when none were captured.
+    :type all_sampling_logps: list[torch.Tensor | None] | None
+    :param group_size: Number of trajectories per group.
+    :type group_size: int
+    :return: The collated batch.
+    :rtype: LLMExperienceBatch
+    """
+    n = len(completion_ids_list)
+    if n % group_size != 0:
+        msg = f"Number of trajectories ({n}) must be divisible by group_size ({group_size})."
+        raise ValueError(msg)
+    logps = all_sampling_logps if all_sampling_logps is not None else [None] * n
+    groups = [
+        RolloutGroup(
+            group_size=group_size,
+            trajectories=[
+                Trajectory(
+                    completion_ids=completion_ids,
+                    action_masks=action_masks,
+                    turn_ids=turn_ids,
+                    rewards=rewards,
+                    sampling_logps=sampling_logps,
+                )
+                for completion_ids, action_masks, turn_ids, rewards, sampling_logps in zip(
+                    completion_ids_list[sl],
+                    action_masks_list[sl],
+                    all_turn_ids[sl],
+                    all_rewards[sl],
+                    logps[sl],
+                    strict=True,
+                )
+            ],
+        )
+        for sl in (
+            slice(g * group_size, (g + 1) * group_size) for g in range(n // group_size)
+        )
+    ]
+    return collate_rollout_groups(groups)

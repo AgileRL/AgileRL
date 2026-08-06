@@ -43,10 +43,11 @@ from agilerl.algorithms.core.base import (
     OptimizerWrapper,
 )
 from agilerl.algorithms.grpo import HAS_LIGER_KERNEL
+from agilerl.llm_envs import RolloutHarness
 from agilerl.modules.dummy import DummyEvolvable
 from agilerl.utils.algo_utils import CosineLRScheduleConfig, VLLMConfig, clone_llm
-from agilerl.utils.llm_utils import ReasoningGym
 from tests import TINY_LLM_FIXTURE_PATH
+from tests.helpers.rollout_doubles import FakeEnvClient
 from tests.utils import (
     assert_vllm_get_action_contract,
     make_mock_vllm_instance,
@@ -192,50 +193,47 @@ class DummyMLPPreTrainedModel(PreTrainedModel, GenerationMixin):
         return
 
 
-class DummyReasoningEnv(ReasoningGym):
+class DummyReasoningEnv(RolloutHarness):
+    """Single-turn reasoning ``RolloutHarness`` stub for ``test()`` coverage."""
+
+    max_turns = 1
+
     def __init__(self, vocab_size, input_size, data_batch_size, device):
         self.vocab_size = vocab_size
         self.input_size = input_size
         self.data_batch_size = data_batch_size
         self.device = device
+        self._env_client = None
+        self.done = False
 
-    def reset(self, reset_dataloaders=False):
-        return [
-            {
-                "input_ids": torch.randint(
-                    0,
-                    self.vocab_size,
-                    (1, self.input_size),
-                    device=self.device,
-                ),
-                "attention_mask": torch.ones(*(1, self.input_size), device=self.device),
-                "text": "Write me a short story about a cat.",
-            }
-            for _ in range(self.data_batch_size)
-        ]
-
-    def step(self, completion_ids):
-        states = [
-            {
-                "input_ids": torch.randint(
-                    0,
-                    self.vocab_size,
-                    (1, self.input_size),
-                    device=self.device,
-                ),
-                "attention_mask": torch.ones(*(1, self.input_size), device=self.device),
-                "text": "Write me a short story about a cat.",
-            }
-            for _ in range(self.data_batch_size)
-        ]
-        return (
-            states,
-            torch.cat(
-                [
-                    torch.tensor([1.0], device=self.device)
-                    for _ in range(self.data_batch_size)
-                ],
+    def _prompt(self):
+        return {
+            "input_ids": torch.randint(
+                0,
+                self.vocab_size,
+                (1, self.input_size),
+                device=self.device,
             ),
+            "attention_mask": torch.ones(*(1, self.input_size), device=self.device),
+            "text": "Write me a short story about a cat.",
+        }
+
+    def reset(self, seed=None):
+        del seed
+        self.done = False
+        return self._prompt(), {}
+
+    def step(self, full_completion_ids):
+        del full_completion_ids
+        self.done = True
+        return self._prompt(), 1.0, True, False, {}
+
+    def get_episode_data(self):
+        return (
+            torch.ones(1, self.input_size, dtype=torch.long, device=self.device),
+            torch.ones(1, self.input_size - 1, dtype=torch.bool, device=self.device),
+            torch.zeros(1, self.input_size - 1, dtype=torch.long, device=self.device),
+            torch.tensor([1.0], dtype=torch.float32, device=self.device),
         )
 
     @contextmanager
@@ -2388,55 +2386,6 @@ class TestGRPOGetAction:
         assert len(action_masks) == 1
         grpo.clean_up()
 
-    def test_get_action_grpo_hf_repeats_single_row_stitch_ids_when_grouping(self):
-        """When training with ``group_size > 1`` and a prompt carries a single-row
-        ``stitch_prefix_ids`` tensor, the HF generate path must repeat the stitch
-        prefix to match the grouped batch dimension. Otherwise downstream
-        ``stitch_completion_after_windowed_hf_generate`` would receive a [1, N]
-        prefix against a [group_size, T] completion.
-        """
-        grpo = _make_cpu_grpo_for_branch_tests(group_size=3)
-        seq_len = 4
-        prompts = [
-            {
-                "input_ids": torch.randint(0, 60, (1, seq_len), device=grpo.device),
-                "attention_mask": torch.ones(1, seq_len, device=grpo.device),
-                "stitch_prefix_ids": torch.tensor(
-                    [[7, 8]], dtype=torch.long, device=grpo.device
-                ),
-                "initial_prompt_len": 2,
-            },
-        ]
-        observed_stitch = {}
-
-        def fake_actor_generate(input_ids, attention_mask, generation_config=None):
-            # After repeat, the grouped input_ids should already have the group
-            # dim baked in.
-            return torch.cat(
-                [input_ids, torch.full_like(input_ids[:, :2], 1)],
-                dim=1,
-            )
-
-        def fake_stitch(completion_id, stitch, initial_len):
-            observed_stitch["stitch_shape"] = (
-                None if stitch is None else tuple(stitch.shape)
-            )
-            return completion_id, initial_len
-
-        with (
-            patch.object(grpo.actor, "generate", side_effect=fake_actor_generate),
-            patch(
-                "agilerl.algorithms.grpo.stitch_completion_after_windowed_hf_generate",
-                side_effect=fake_stitch,
-            ),
-        ):
-            completion_ids, _, _ = grpo.get_action(prompts, training=True)
-
-        # The single-row stitch prefix should have been broadcast to group_size.
-        assert observed_stitch["stitch_shape"] == (3, 2)
-        assert completion_ids[0].shape[0] == 3
-        grpo.clean_up()
-
     @pytest.mark.parametrize("config", [deepspeed_config_stage_2])
     @pytest.mark.parametrize("use_deepspeed_optimizer", [False])
     @pytest.mark.parametrize("use_separate_reference_adapter", [False])
@@ -2739,50 +2688,6 @@ class TestGRPOGenerateWithVllmColocate:
         assert completion_ids[0].shape[0] == 1
         assert completion_ids[0][0, -1].item() == 8
         assert action_masks[0].shape[1] == completion_ids[0].shape[1] - 1
-        grpo.clean_up()
-
-    def test_generate_with_vllm_colocate_stitch_path(
-        self,
-        grpo_factory,
-        accelerator_factory,
-        model_factory,
-    ):
-        grpo = _build_grpo_for_colocate_tests(
-            grpo_factory, accelerator_factory, model_factory
-        )
-        prompts = [
-            {
-                "input_ids": torch.tensor([[1, 2, 3]], dtype=torch.long),
-                "attention_mask": torch.ones(1, 3, dtype=torch.long),
-                "stitch_prefix_ids": torch.tensor([[9]], dtype=torch.long),
-                "initial_prompt_len": 2,
-            }
-        ]
-        grpo.llm.generate.return_value = [
-            SimpleNamespace(outputs=[SimpleNamespace(token_ids=[4, 5])]),
-        ]
-        with patch(
-            "agilerl.algorithms.core.base.stitch_completion_after_windowed_vllm_generate",
-            side_effect=lambda completion_ids, *_args, **_kwargs: completion_ids,
-        ) as mock_stitch:
-            grpo._generate_with_vllm_colocate(
-                prompts=prompts,
-                group_size=1,
-                temperature=0.7,
-            )
-        mock_stitch.assert_called_once()
-        args, _kwargs = mock_stitch.call_args
-        (
-            completion_ids_arg,
-            stitch_prefixes_arg,
-            group_prompts_arg,
-            group_size_arg,
-            prompts_arg,
-        ) = args
-        assert len(completion_ids_arg) == len(prompts)
-        assert len(stitch_prefixes_arg) == len(group_prompts_arg)
-        assert group_size_arg == 1
-        assert len(prompts_arg) == len(prompts)
         grpo.clean_up()
 
 
@@ -4847,17 +4752,18 @@ class TestGRPOTest:
         assert isinstance(fitnesses, np.ndarray)
         grpo.clean_up()
 
-    def test_grpo_test_method_multiturn_episode_env_branch(
+    def test_grpo_test_method_rollout_episode_env_branch(
         self,
         grpo_factory,
         accelerator_factory,
         model_factory,
     ):
-        class DummyMultiTurnEpisodeEnv:
+        class DummyRolloutEpisodeEnv(RolloutHarness):
             max_turns = 2
 
             def __init__(self):
-                self._step_count = 0
+                self._env_client = FakeEnvClient()
+                self.done = False
                 self.valid_prompt = {
                     "input_ids": torch.ones(1, 4, dtype=torch.long),
                     "attention_mask": torch.ones(1, 4, dtype=torch.long),
@@ -4865,12 +4771,12 @@ class TestGRPOTest:
 
             def reset(self, seed=None):
                 del seed
-                self._step_count = 0
+                self.done = False
                 return self.valid_prompt, {}
 
             def step(self, full_completion_ids):
                 del full_completion_ids
-                self._step_count += 1
+                self.done = True
                 return {}, 1.0, True, False, {}
 
             def get_episode_data(self):
@@ -4898,7 +4804,7 @@ class TestGRPOTest:
             None,
             None,
         )
-        env = DummyMultiTurnEpisodeEnv()
+        env = DummyRolloutEpisodeEnv()
         completion = torch.ones(1, 6, dtype=torch.long)
         action_mask = torch.ones(1, 5, dtype=torch.bool)
         with patch.object(
@@ -4915,11 +4821,16 @@ class TestGRPOTest:
         grpo.clean_up()
 
     def test_grpo_test_method_waits_for_everyone(self):
-        class DummyMultiTurnEpisodeEnv:
+        class DummyRolloutEpisodeEnv(RolloutHarness):
             max_turns = 1
+
+            def __init__(self):
+                self._env_client = FakeEnvClient()
+                self.done = False
 
             def reset(self, seed=None):
                 del seed
+                self.done = False
                 return {
                     "input_ids": torch.ones(1, 4, dtype=torch.long),
                     "attention_mask": torch.ones(1, 4, dtype=torch.long),
@@ -4927,6 +4838,7 @@ class TestGRPOTest:
 
             def step(self, full_completion_ids):
                 del full_completion_ids
+                self.done = True
                 return {}, 1.0, True, False, {}
 
             def get_episode_data(self):
@@ -4947,17 +4859,19 @@ class TestGRPOTest:
         with patch.object(
             grpo, "get_action", return_value=ActionResult([completion], None)
         ):
-            grpo.test(DummyMultiTurnEpisodeEnv(), loop=1)
+            grpo.test(DummyRolloutEpisodeEnv(), loop=1)
         acc.wait_for_everyone.assert_called()
 
-    def test_grpo_test_method_multiturn_continues_when_not_done(self):
+    def test_grpo_test_method_rollout_continues_when_not_done(self):
         """Cover prompt update when the episode spans turns."""
 
-        class DummyMultiTurnContinueEnv:
+        class DummyRolloutContinueEnv(RolloutHarness):
             max_turns = 2
 
             def __init__(self):
                 self._step_count = 0
+                self._env_client = FakeEnvClient()
+                self.done = False
                 self.prompt_a = {
                     "input_ids": torch.ones(1, 4, dtype=torch.long),
                     "attention_mask": torch.ones(1, 4, dtype=torch.long),
@@ -4970,6 +4884,7 @@ class TestGRPOTest:
             def reset(self, seed=None):
                 del seed
                 self._step_count = 0
+                self.done = False
                 return self.prompt_a, {}
 
             def step(self, full_completion_ids):
@@ -4977,6 +4892,7 @@ class TestGRPOTest:
                 self._step_count += 1
                 if self._step_count == 1:
                     return self.prompt_b, 0.5, False, False, {}
+                self.done = True
                 return {}, 1.0, True, False, {}
 
             def get_episode_data(self):
@@ -4995,7 +4911,7 @@ class TestGRPOTest:
         with patch.object(
             grpo, "get_action", return_value=ActionResult([completion], None)
         ) as get_action:
-            out = grpo.test(DummyMultiTurnContinueEnv(), loop=1)
+            out = grpo.test(DummyRolloutContinueEnv(), loop=1)
 
         assert out.shape == ()
         assert get_action.call_count == 2
@@ -5007,9 +4923,7 @@ class TestGRPOTest:
         grpo = _make_cpu_grpo_for_branch_tests()
         with pytest.raises(
             TypeError,
-            match=re.escape(
-                "env must be a ReasoningGym (or subclass) or TokenizedMultiTurnEnv"
-            ),
+            match=re.escape("env must be a RolloutHarness"),
         ):
             grpo.test(object(), loop=1)
         grpo.clean_up()

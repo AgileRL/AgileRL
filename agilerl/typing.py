@@ -41,7 +41,7 @@ from tensordict import TensorClass, TensorDict
 from torch._dynamo import OptimizedModule
 from torch.nn import Module
 from torch.optim import Optimizer
-from typing_extensions import Never, NotRequired, Self
+from typing_extensions import NotRequired, Self
 
 from agilerl.net_configs import NetConfigType as NetConfigType
 from agilerl.protocols import (
@@ -60,29 +60,13 @@ class IsDataclass(Protocol):
 
 
 # ── TypedDicts: LLM prompts, checkpoint & mutation payloads ──────────────────
-class ReasoningPrompts(TypedDict):
-    """Tokenized reasoning / multi-turn observation prompts."""
+class RolloutPrompts(TypedDict):
+    """Tokenized rollout observation prompts."""
 
     input_ids: torch.Tensor
-    attention_mask: torch.Tensor
+    attention_mask: NotRequired[torch.Tensor]
     question: NotRequired[str | list[str] | None]
     answer: NotRequired[str | list[str] | None]
-    trajectory_input_ids: NotRequired[torch.Tensor | None]
-    trajectory_attention_mask: NotRequired[torch.Tensor | None]
-    initial_prompt_len: NotRequired[int | list[int] | torch.Tensor | None]
-    stitch_prefix_ids: NotRequired[torch.Tensor | None]
-    text: NotRequired[str | None]
-    trajectory_text: NotRequired[str | None]
-
-
-class ModelPromptFields(TypedDict, total=False):
-    """Windowed trajectory / stitch fields merged into a policy observation."""
-
-    trajectory_input_ids: torch.Tensor
-    trajectory_attention_mask: torch.Tensor
-    trajectory_text: str
-    stitch_prefix_ids: torch.Tensor
-    initial_prompt_len: int
 
 
 class PreferencePrompts(TypedDict):
@@ -176,7 +160,7 @@ ArrayDict = dict[str, npt.NDArray]
 ArrayTuple = tuple[npt.NDArray, ...]
 KernelSizeType = int | tuple[int, ...]
 GymSpaceType = SupportedObservationSpace | list[SupportedObservationSpace]
-LLMObsType = list[ReasoningPrompts] | ReasoningPrompts
+LLMObsType = list[RolloutPrompts] | RolloutPrompts
 
 # ── Observation & action aliases ─────────────────────────────────────────────
 NumpyObsType = npt.NDArray | ArrayDict | ArrayTuple
@@ -419,10 +403,6 @@ PzStepReturn = tuple[
     ArrayDict,
     InfosDict,
 ]
-# TokenObservationWrapper obs: ReasoningPrompts mid-episode, empty mapping at done.
-TokenObsType = ReasoningPrompts | dict[str, Never]
-TokenObsStepReturn = tuple[TokenObsType, float, bool, bool, dict[str, Any]]
-
 # ── Network / module / optimizer aliases ─────────────────────────────────────
 SingleAgentModule = (
     T | EvolvableModuleProtocol | OptimizedModule | EvolvableNetworkProtocol

@@ -1,40 +1,28 @@
 # Copyright 2026 AgileRL
 # SPDX-License-Identifier: Apache-2.0
 
-"""Gymnasium-style environments for LLM training."""
+"""Environments for LLM training.
 
-from agilerl.llm_envs import search as _search
-from agilerl.llm_envs.base import (
-    HuggingFaceGym,
-    IterablePromptBatchGym,
-    apply_chat_template,
-)
-from agilerl.llm_envs.preference import PreferenceGym
-from agilerl.llm_envs.reasoning import ReasoningGym
-from agilerl.llm_envs.search import TIMEOUT, FormatRewardWrapper, SearchTool
-from agilerl.llm_envs.sft import SFTGym
-from agilerl.llm_envs.sync_vec_env import (
-    SyncMultiTurnVecEnv,
-    Trajectory,
-    TrajectoryBuffer,
-)
-from agilerl.llm_envs.token_observation import TokenObservationWrapper
+The OpenEnv-backed transports (``OpenEnvServer``, ``RemoteEnvClient``,
+``InProcessEnvClient``, ...) live in :mod:`agilerl.llm_envs.openenv`, which requires
+the ``llm`` extra; import them from there. Only the base-safe names are re-exported
+here so ``import agilerl.llm_envs`` works without that extra.
+"""
 
-requests = _search.requests
+from agilerl.llm_envs.dataset_env import DatasetEnv
+from agilerl.llm_envs.rollout import (
+    RolloutCollector,
+    RolloutHarness,
+    TaskAssigner,
+    process_observation,
+)
+from agilerl.utils.llm_utils import apply_chat_template
 
 __all__ = [
-    "TIMEOUT",
-    "FormatRewardWrapper",
-    "HuggingFaceGym",
-    "IterablePromptBatchGym",
-    "PreferenceGym",
-    "ReasoningGym",
-    "SFTGym",
-    "SearchTool",
-    "SyncMultiTurnVecEnv",
-    "TokenObservationWrapper",
-    "Trajectory",
-    "TrajectoryBuffer",
+    "DatasetEnv",
+    "RolloutCollector",
+    "RolloutHarness",
+    "TaskAssigner",
     "apply_chat_template",
-    "requests",
+    "process_observation",
 ]

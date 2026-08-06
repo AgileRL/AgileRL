@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import gc
-from typing import TYPE_CHECKING, Any, NoReturn
+from typing import TYPE_CHECKING, Any, NoReturn, cast
 
 import numpy as np
 import numpy.typing as npt
@@ -26,7 +26,7 @@ if TYPE_CHECKING:
     from peft import LoraConfig
     from transformers import BitsAndBytesConfig
 
-    from agilerl.llm_envs import SFTGym
+    from agilerl.llm_envs import DatasetEnv
 
 if HAS_LIGER_KERNEL or TYPE_CHECKING:
     from liger_kernel.transformers.fused_linear_cross_entropy import (
@@ -231,13 +231,14 @@ class SFT(LLMAlgorithm[SFTPrompts]):
 
         :param experiences: Dict with keys ``input_ids`` (prompt + response token
             IDs), ``attention_mask``, and ``prompt_lengths`` (number of prompt
-            tokens per sample) as produced by :class:`~agilerl.llm_envs.SFTGym`.
-        :type experiences: SFTPrompts
+            tokens per sample) as produced by a ``objective="sft"``
+            :class:`~agilerl.llm_envs.DatasetEnv`.
+        :type experiences: ExperiencesType
         :param training: When ``False`` the backward pass is skipped (eval mode).
         :type training: bool
         :return: ``(loss, perplexity)`` averaged over all samples in
             the batch.
-        :rtype: tuple[float, float]
+        :rtype: dict[str, float]
         """
         gc.collect()
         torch.cuda.empty_cache()
@@ -372,27 +373,28 @@ class SFT(LLMAlgorithm[SFTPrompts]):
 
     def test(
         self,
-        env: SFTGym,
+        env: DatasetEnv,
         loop: int = 1,
         *args: Any,
         **kwargs: Any,
     ) -> npt.NDArray:
         """Return the negative mean loss as a fitness score (higher is better).
 
-        :param env: SFT environment providing evaluation batches
-        :type env: SFTGym
+        :param env: SFT environment providing evaluation batches (``objective="sft"``)
+        :type env: DatasetEnv
         :param loop: Number of evaluation batches, defaults to 1
         :type loop: int, optional
         :return: Mean negative loss (scalar numpy array)
         :rtype: npt.NDArray
         """
         with env.eval_mode(), torch.no_grad():
-            prompts = env.reset()
             losses = []
             for _ in range(loop):
+                # An SFT agent is always paired with an ``objective="sft"`` env,
+                # so the collated batch is an ``SFTPrompts``.
+                prompts = cast("SFTPrompts", env.reset())
                 metrics = self.learn(prompts, training=False)
                 losses.append(metrics["loss"])
-                prompts = env.step()
             mean_fit = -float(np.mean(losses))
         self.metrics.add_fitness(mean_fit)
         if self.accelerator is not None:

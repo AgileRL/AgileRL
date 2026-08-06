@@ -9,7 +9,7 @@ import torch
 pytest.importorskip("deepspeed", reason="LLM tests require deepspeed.")
 pytest.importorskip("vllm", reason="LLM tests require vllm.")
 
-from agilerl.utils.llm_utils import ReasoningGym
+from agilerl.llm_envs import RolloutHarness
 from tests import TINY_LLM_FIXTURE_PATH
 from tests.test_algorithms.test_llms.test_reinforce_llm import (
     generate_reinforce,
@@ -30,7 +30,10 @@ def reinforce_factory():
 def _minimal_reasoning_gym(
     device: str, vocab_size: int, input_size: int, batch_size: int
 ):
-    env = ReasoningGym.__new__(ReasoningGym)
+    del batch_size  # single-turn rollout env: test() steps one prompt at a time
+    env = RolloutHarness.__new__(RolloutHarness)
+    env.max_turns = 1
+    env.done = False
 
     @contextmanager
     def eval_mode():
@@ -38,22 +41,22 @@ def _minimal_reasoning_gym(
 
     env.eval_mode = eval_mode
 
-    def reset(reset_dataloaders=False):
-        del reset_dataloaders
+    def _prompt():
         return {
-            "input_ids": torch.randint(
-                0, vocab_size, (batch_size, input_size), device=device
-            ),
-            "attention_mask": torch.ones(batch_size, input_size, device=device),
-            "question": [f"q_{i}" for i in range(batch_size)],
-            "answer": [f"a_{i}" for i in range(batch_size)],
-            "text": ["Solve the task briefly."] * batch_size,
+            "input_ids": torch.randint(0, vocab_size, (1, input_size), device=device),
+            "attention_mask": torch.ones(1, input_size, device=device),
+            "text": "Solve the task briefly.",
         }
+
+    def reset(seed=None, *, row_index=None):
+        del seed, row_index
+        env.done = False
+        return _prompt(), {}
 
     def step(completion_ids):
         del completion_ids
-        rewards = torch.ones(batch_size, device=device)
-        return reset(), rewards
+        env.done = True
+        return _prompt(), 1.0, True, False, {}
 
     env.reset = reset
     env.step = step
@@ -118,10 +121,6 @@ class TestREINFORCETest:
                 ),
                 "attention_mask": torch.ones(1, input_size, device=rf.device),
                 "text": "Continue the answer.",
-                "stitch_prefix_ids": torch.randint(
-                    0, vocab_size, (1, 2), device=rf.device
-                ),
-                "initial_prompt_len": max(1, input_size // 2),
             }
         )
 

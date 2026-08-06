@@ -21,14 +21,12 @@ from accelerate import Accelerator
 from accelerate.state import AcceleratorState
 from datasets import Dataset as Datasets
 from torch import nn
-from torch.utils.data import DataLoader
 from transformers import AutoTokenizer
 
+from agilerl.llm_envs import DatasetEnv
 from agilerl.utils import llm_utils as llm_utils_module
 from agilerl.utils.algo_utils import DummyOptimizer
 from agilerl.utils.llm_utils import (
-    PreferenceGym,
-    ReasoningGym,
     adapt_lora_config_for_model,
     align_deepspeed_lr,
     build_bnb_quantization_config,
@@ -74,171 +72,9 @@ from agilerl.utils.llm_utils import (
     resolve_vllm_max_num_batched_tokens,
     sample_eval_prompts,
     save_peft_adapter_for_vllm_rollout,
-    stitch_completion_after_windowed_hf_generate,
-    stitch_completion_after_windowed_vllm_generate,
     validate_importance_sampling_level,
 )
 from tests import TINY_LLM_FIXTURE_PATH
-
-DUMMY_CONVERSATION_TEMPLATE = [
-    {
-        "role": "system",
-        "content": "question: {question}\nanswer: {answer}",
-    },
-]
-
-
-class TestStitchCompletionAfterWindowedHfGenerate:
-    def test_no_stitch_passthrough(self):
-        completion_id = torch.tensor([[11, 12, 13, 14]], dtype=torch.long)
-        out, full_prompt_len = stitch_completion_after_windowed_hf_generate(
-            completion_id=completion_id,
-            stitch=None,
-            initial_len=2,
-        )
-        assert torch.equal(out, completion_id)
-        assert full_prompt_len == 2
-
-    def test_basic_stitch_insertion(self):
-        completion_id = torch.tensor([[1, 2, 7, 8]], dtype=torch.long)
-        stitch = torch.tensor([[3, 4, 5, 6]], dtype=torch.long)
-        out, full_prompt_len = stitch_completion_after_windowed_hf_generate(
-            completion_id=completion_id,
-            stitch=stitch,
-            initial_len=2,
-        )
-        expected = torch.tensor([[1, 2, 3, 4, 5, 6, 7, 8]], dtype=torch.long)
-        assert torch.equal(out, expected)
-        assert full_prompt_len == 6
-
-    def test_output_stays_on_completion_device(self):
-        completion_id = torch.tensor([[1, 2, 3, 4]], dtype=torch.long)
-        stitch = torch.tensor([[9, 10]], dtype=torch.long)
-        out, _ = stitch_completion_after_windowed_hf_generate(
-            completion_id=completion_id,
-            stitch=stitch,
-            initial_len=2,
-        )
-        assert out.device == completion_id.device
-
-    def test_empty_stitch_tensor_keeps_sequence(self):
-        completion_id = torch.tensor([[1, 2, 3, 4]], dtype=torch.long)
-        stitch = torch.empty((1, 0), dtype=torch.long)
-        out, full_prompt_len = stitch_completion_after_windowed_hf_generate(
-            completion_id=completion_id,
-            stitch=stitch,
-            initial_len=2,
-        )
-        assert torch.equal(out, completion_id)
-        assert full_prompt_len == 2
-
-
-class TestStitchCompletionAfterWindowedVllmGenerate:
-    def test_rejects_group_size_not_one(self):
-        with pytest.raises(ValueError, match="only implemented for group_size=1"):
-            stitch_completion_after_windowed_vllm_generate(
-                completion_ids=[torch.tensor([[1, 2, 3]], dtype=torch.long)],
-                stitch_prefixes=[torch.tensor([[9]], dtype=torch.long)],
-                group_prompts=[{"initial_prompt_len": 1}],
-                group_size=2,
-                prompts=[{"input_ids": torch.tensor([[1, 2]], dtype=torch.long)}],
-            )
-
-    def test_selective_stitching_per_prompt(self):
-        completion_ids = [
-            torch.tensor([[1, 2, 7]], dtype=torch.long),
-            torch.tensor([[4, 5, 6]], dtype=torch.long),
-        ]
-        stitch_prefixes = [
-            torch.tensor([[9, 10]], dtype=torch.long),
-            torch.empty((1, 0), dtype=torch.long),
-        ]
-        group_prompts = [{"initial_prompt_len": 2}, {"initial_prompt_len": 1}]
-        prompts = [{}, {}]
-        out = stitch_completion_after_windowed_vllm_generate(
-            completion_ids=completion_ids,
-            stitch_prefixes=stitch_prefixes,
-            group_prompts=group_prompts,
-            group_size=1,
-            prompts=prompts,
-        )
-        assert torch.equal(out[0], torch.tensor([[1, 2, 9, 10, 7]], dtype=torch.long))
-        assert torch.equal(out[1], completion_ids[1])
-
-    def test_inserts_at_initial_prompt_len(self):
-        completion_ids = [torch.tensor([[10, 11, 12, 13]], dtype=torch.long)]
-        stitch_prefixes = [torch.tensor([[99, 98]], dtype=torch.long)]
-        group_prompts = [{"initial_prompt_len": 1}]
-        out = stitch_completion_after_windowed_vllm_generate(
-            completion_ids=completion_ids,
-            stitch_prefixes=stitch_prefixes,
-            group_prompts=group_prompts,
-            group_size=1,
-            prompts=[{}],
-        )
-        assert torch.equal(out[0], torch.tensor([[10, 99, 98, 11, 12, 13]]))
-
-    @pytest.mark.parametrize(
-        "initial_prompt_len",
-        [1, torch.tensor(1), [1]],
-        ids=["int", "tensor", "list"],
-    )
-    def test_accepts_scalar_tensor_or_list_initial_prompt_len(self, initial_prompt_len):
-        out = stitch_completion_after_windowed_vllm_generate(
-            completion_ids=[torch.tensor([[10, 11, 12, 13]], dtype=torch.long)],
-            stitch_prefixes=[torch.tensor([[99, 98]], dtype=torch.long)],
-            group_prompts=[{"initial_prompt_len": initial_prompt_len}],
-            group_size=1,
-            prompts=[{}],
-        )
-        assert torch.equal(out[0], torch.tensor([[10, 99, 98, 11, 12, 13]]))
-
-    def test_rejects_empty_initial_prompt_len_list(self):
-        with pytest.raises(ValueError, match="initial_prompt_len list is empty"):
-            stitch_completion_after_windowed_vllm_generate(
-                completion_ids=[torch.tensor([[10, 11]], dtype=torch.long)],
-                stitch_prefixes=[torch.tensor([[99]], dtype=torch.long)],
-                group_prompts=[{"initial_prompt_len": []}],
-                group_size=1,
-                prompts=[{}],
-            )
-
-    def test_requires_initial_prompt_len_when_stitching(self):
-        with pytest.raises(ValueError, match="initial_prompt_len required"):
-            stitch_completion_after_windowed_vllm_generate(
-                completion_ids=[torch.tensor([[10, 11]], dtype=torch.long)],
-                stitch_prefixes=[torch.tensor([[99]], dtype=torch.long)],
-                group_prompts=[{}],
-                group_size=1,
-                prompts=[{}],
-            )
-
-    def test_broadcasts_single_stitch_row_across_group_rows(self):
-        completion_ids = [torch.tensor([[1, 2, 7], [3, 4, 8]], dtype=torch.long)]
-        stitch_prefixes = [torch.tensor([[9, 10]], dtype=torch.long)]
-        group_prompts = [{"initial_prompt_len": 2}]
-        out = stitch_completion_after_windowed_vllm_generate(
-            completion_ids=completion_ids,
-            stitch_prefixes=stitch_prefixes,
-            group_prompts=group_prompts,
-            group_size=1,
-            prompts=[{}],
-        )
-        expected = torch.tensor([[1, 2, 9, 10, 7], [3, 4, 9, 10, 8]], dtype=torch.long)
-        assert torch.equal(out[0], expected)
-
-    def test_raises_when_initial_prompt_len_missing_with_non_empty_stitch(self):
-        with pytest.raises(
-            ValueError,
-            match="initial_prompt_len required when stitch_prefix_ids is non-empty",
-        ):
-            stitch_completion_after_windowed_vllm_generate(
-                completion_ids=[torch.tensor([[1, 2, 3]], dtype=torch.long)],
-                stitch_prefixes=[torch.tensor([[9]], dtype=torch.long)],
-                group_prompts=[{}],
-                group_size=1,
-                prompts=[{}],
-            )
 
 
 class DummyTokenizer:
@@ -258,34 +94,6 @@ class DummyTokenizer:
 class Info:
     def __init__(self, name):
         self.dataset_name = name
-
-
-class DummyReasoningDataset:
-    def __init__(self, num_samples):
-        # Create dummy questions and answers
-        self.questions = [f"This is question {i}?" for i in range(num_samples)]
-        self.answers = [f"This is answer {i}." for i in range(num_samples)]
-        self.features = {"question": self.questions, "answer": self.answers}
-        self.info = Info("dummy_dataset")
-
-    def __len__(self):
-        return len(self.questions)
-
-    def __getitem__(self, index):
-        return {"question": self.questions[index], "answer": self.answers[index]}
-
-    def filter(self, fn):
-        keep_indices = [
-            i
-            for i in range(len(self))
-            if fn({"question": self.questions[i], "answer": self.answers[i]})
-        ]
-        filtered = DummyReasoningDataset(0)
-        filtered.questions = [self.questions[i] for i in keep_indices]
-        filtered.answers = [self.answers[i] for i in keep_indices]
-        filtered.features = {"question": filtered.questions, "answer": filtered.answers}
-        filtered.info = self.info
-        return filtered
 
 
 class DummyPreferenceDataset:
@@ -335,28 +143,6 @@ class DummyPreferenceDataset:
         return filtered
 
 
-def dummy_reward_fn(*args, **kwargs):
-    return 1.0
-
-
-def dummy_chat_template_fn_custom(q, a, tokenizer):
-    """Chat template function for test_reasoning_gym_reset_dataloaders, gives unique input_ids for each question so
-    we can test equality.
-    """
-    index = int(q.split(" ")[-1][0])
-    return {
-        "input_ids": torch.tensor([index]),
-        "attention_mask": torch.ones(1),
-    }
-
-
-def dummy_chat_template_fn(q, a, tokenizer):
-    return {
-        "input_ids": torch.randint(0, 1000, (1, 356)),
-        "attention_mask": torch.ones(1, 356),
-    }
-
-
 @pytest.fixture
 def accelerator_factory():
     def generate_accelerator(use_accelerator):
@@ -367,328 +153,10 @@ def accelerator_factory():
 
 
 @pytest.fixture
-def reasoning_dataset(num_samples):
-    train_dataset = DummyReasoningDataset(int(num_samples * 0.8))
-    test_dataset = DummyReasoningDataset(int(num_samples * 0.2))
-    return train_dataset, test_dataset
-
-
-@pytest.fixture
 def preference_dataset(num_samples):
     train_dataset = DummyPreferenceDataset(int(num_samples * 0.8))
     test_dataset = DummyPreferenceDataset(int(num_samples * 0.2))
     return train_dataset, test_dataset
-
-
-class TestReasoningGymInit:
-    @pytest.mark.parametrize("num_samples", [200])
-    @pytest.mark.parametrize("use_accelerator", [True, False])
-    def test_reasoning_gym_init(
-        self,
-        reasoning_dataset,
-        accelerator_factory,
-        num_samples,
-        use_accelerator,
-    ):
-        train_dataset, test_dataset = reasoning_dataset
-        tokenizer = AutoTokenizer.from_pretrained(TINY_LLM_FIXTURE_PATH)
-        data_batch_size = 8
-        env = ReasoningGym(
-            train_dataset=train_dataset,
-            test_dataset=test_dataset,
-            tokenizer=tokenizer,
-            reward_fn=dummy_reward_fn,
-            conversation_template=DUMMY_CONVERSATION_TEMPLATE,
-            data_batch_size_per_gpu=data_batch_size,
-            accelerator=accelerator_factory(use_accelerator),
-        )
-        assert env.name == "dummy_dataset"
-        assert callable(env.reward_fn)
-        assert hasattr(env, "tokenizer")
-        assert env.tokenizer is not None
-        assert isinstance(env.train_dataloader, DataLoader)
-        assert isinstance(env.test_dataloader, DataLoader)
-        assert list(next(env.train_dataloader_iter).keys()) == [
-            "question",
-            "answer",
-            "tokenized_prompts",
-        ]
-        assert env.dataloader == env.train_dataloader_iter
-        assert not env.reset_called
-        assert not env.evaluation_mode
-        assert env.data_batch_size_per_gpu == data_batch_size
-
-    def test_reasoning_gym_max_context_length_warning(self):
-        train_dataset = Datasets.from_dict(
-            {
-                "question": [
-                    "This is a prompt that is longer than the max context length. This prompt really is a lot longer than the other one.",
-                    "This is a prompt that is shorter.",
-                ],
-                "answer": ["This is an answer.", "This is an answer."],
-            },
-        )
-        test_dataset = Datasets.from_dict(
-            {
-                "question": ["This is a normal length prompt"],
-                "answer": ["This is an answer."],
-            },
-        )
-        tokenizer = AutoTokenizer.from_pretrained(TINY_LLM_FIXTURE_PATH)
-        data_batch_size = 8
-        with pytest.warns(
-            UserWarning,
-            match=r"1 samples were filtered out of the train dataset due to the max context length constraint.",
-        ):
-            env = ReasoningGym(
-                train_dataset=train_dataset,
-                test_dataset=test_dataset,
-                tokenizer=tokenizer,
-                reward_fn=dummy_reward_fn,
-                conversation_template=DUMMY_CONVERSATION_TEMPLATE,
-                data_batch_size_per_gpu=data_batch_size,
-                max_context_length=10,
-            )
-        assert len(env.train_dataloader) == 1
-        assert len(env.test_dataloader) == 1
-
-
-class TestReasoningGymStep:
-    @pytest.mark.parametrize("num_samples", [200])
-    @pytest.mark.parametrize("eval_mode", [True, False])
-    def test_reasoning_gym_step(
-        self,
-        reasoning_dataset,
-        num_samples,
-        eval_mode,
-    ):
-        train_dataset, test_dataset = reasoning_dataset
-        tokenizer = AutoTokenizer.from_pretrained(TINY_LLM_FIXTURE_PATH)
-        data_batch_size = 8
-        env = ReasoningGym(
-            train_dataset=train_dataset,
-            test_dataset=test_dataset,
-            tokenizer=tokenizer,
-            reward_fn=dummy_reward_fn,
-            conversation_template=DUMMY_CONVERSATION_TEMPLATE,
-            data_batch_size_per_gpu=data_batch_size,
-        )
-        env.evaluation_mode = eval_mode
-        env.reset()
-        completions = [
-            torch.randint(0, 1000, (10, 356)) for _ in range(data_batch_size)
-        ]
-        tokenized_prompts, rewards = env.step(completions)
-        assert isinstance(tokenized_prompts, list)
-        assert isinstance(rewards, torch.Tensor)
-        assert len(tokenized_prompts) > 0
-        assert isinstance(tokenized_prompts[0]["input_ids"], torch.Tensor)
-        assert isinstance(tokenized_prompts[0]["attention_mask"], torch.Tensor)
-
-
-class TestReasoningGymReset:
-    @pytest.mark.parametrize("num_samples", [200])
-    @pytest.mark.parametrize("reset_dataloaders", [True, False])
-    def test_reasoning_gym_reset(
-        self,
-        reasoning_dataset,
-        num_samples,
-        reset_dataloaders,
-    ):
-        train_dataset, test_dataset = reasoning_dataset
-        tokenizer = AutoTokenizer.from_pretrained(TINY_LLM_FIXTURE_PATH)
-        data_batch_size = 8
-        env = ReasoningGym(
-            train_dataset=train_dataset,
-            test_dataset=test_dataset,
-            tokenizer=tokenizer,
-            reward_fn=dummy_reward_fn,
-            conversation_template=DUMMY_CONVERSATION_TEMPLATE,
-            data_batch_size_per_gpu=data_batch_size,
-        )
-        tokenized_prompts = env.reset(reset_dataloaders)
-        assert isinstance(tokenized_prompts, list)
-        assert len(tokenized_prompts) > 0
-        assert isinstance(tokenized_prompts[0]["input_ids"], torch.Tensor)
-        assert isinstance(tokenized_prompts[0]["attention_mask"], torch.Tensor)
-
-    @pytest.mark.parametrize("num_samples", [200])
-    def test_reset_warning(self, reasoning_dataset, num_samples):
-        train_dataset, test_dataset = reasoning_dataset
-        tokenizer = AutoTokenizer.from_pretrained(TINY_LLM_FIXTURE_PATH)
-        data_batch_size = 8
-        env = ReasoningGym(
-            train_dataset=train_dataset,
-            test_dataset=test_dataset,
-            tokenizer=tokenizer,
-            reward_fn=dummy_reward_fn,
-            conversation_template=DUMMY_CONVERSATION_TEMPLATE,
-            data_batch_size_per_gpu=data_batch_size,
-        )
-        env.reset()
-        with pytest.warns(
-            UserWarning,
-            match=r"env\.reset\(\) called more than once sequentially",
-        ):
-            env.reset()
-
-
-class TestReasoningGymResetDataloaders:
-    @pytest.mark.parametrize("num_samples", [200])
-    @pytest.mark.parametrize("reset_dataloaders", [True, False])
-    def test_reasoning_gym_reset_dataloaders(
-        self,
-        reasoning_dataset,
-        num_samples,
-        reset_dataloaders,
-    ):
-        train_dataset, test_dataset = reasoning_dataset
-        tokenizer = AutoTokenizer.from_pretrained(TINY_LLM_FIXTURE_PATH)
-        data_batch_size = 8
-        env = ReasoningGym(
-            train_dataset=train_dataset,
-            test_dataset=test_dataset,
-            tokenizer=tokenizer,
-            reward_fn=dummy_reward_fn,
-            conversation_template=DUMMY_CONVERSATION_TEMPLATE,
-            data_batch_size_per_gpu=data_batch_size,
-        )
-        first_data_point = next(
-            env.test_dataloader_iter,
-        )  # use test_dataloader_iter as it is not shuffled
-        env._reset_dataloaders()
-        first_data_point_reset = next(env.test_dataloader_iter)
-        assert first_data_point["question"] == first_data_point_reset["question"]
-        assert first_data_point["answer"] == first_data_point_reset["answer"]
-        for prompt_a, prompt_b in zip(
-            first_data_point["tokenized_prompts"],
-            first_data_point_reset["tokenized_prompts"],
-            strict=False,
-        ):
-            assert torch.equal(prompt_a["input_ids"], prompt_b["input_ids"])
-            assert torch.equal(prompt_a["attention_mask"], prompt_b["attention_mask"])
-
-
-class TestReasoningGymLen:
-    @pytest.mark.parametrize("num_samples", [200])
-    def test_reasoning_gym_len(self, reasoning_dataset, num_samples):
-        train_dataset, test_dataset = reasoning_dataset
-        tokenizer = AutoTokenizer.from_pretrained(TINY_LLM_FIXTURE_PATH)
-        data_batch_size = 8
-        env = ReasoningGym(
-            train_dataset=train_dataset,
-            test_dataset=test_dataset,
-            tokenizer=tokenizer,
-            reward_fn=dummy_reward_fn,
-            conversation_template=DUMMY_CONVERSATION_TEMPLATE,
-            data_batch_size_per_gpu=data_batch_size,
-        )
-        env.reset()
-        assert len(env) == 200 * 0.8  # Length returns the training length
-        with env.eval_mode():
-            assert len(env) == 200 * 0.2
-
-
-class TestReasoningGymCreateCollateFn:
-    @pytest.mark.parametrize("num_samples", [20])
-    def test_create_chat_collate_fn(self, reasoning_dataset, num_samples):
-        """Test the create_chat_collate_fn method."""
-        # Create a mock tokenizer
-        tokenizer = AutoTokenizer.from_pretrained(TINY_LLM_FIXTURE_PATH)
-
-        train_dataset, test_dataset = reasoning_dataset
-        tokenizer = AutoTokenizer.from_pretrained(TINY_LLM_FIXTURE_PATH)
-        data_batch_size = 8
-
-        env = ReasoningGym(
-            train_dataset=train_dataset,
-            test_dataset=test_dataset,
-            tokenizer=tokenizer,
-            reward_fn=dummy_reward_fn,
-            conversation_template=DUMMY_CONVERSATION_TEMPLATE,
-            data_batch_size_per_gpu=data_batch_size,
-        )
-
-        # Create the collate function
-        collate_fn = env.create_collate_fn(tokenizer)
-
-        # Create a sample batch
-        batch = [
-            {"question": "What is 2+2?", "answer": "4"},
-            {"question": "What is 3+3?", "answer": "6"},
-        ]
-
-        # Apply the collate function
-        result = collate_fn(batch)
-
-        # Verify the result structure
-        assert isinstance(result, dict)
-        assert "question" in result
-        assert "answer" in result
-        assert "tokenized_prompts" in result
-
-        # Verify the content
-        assert result["question"] == ["What is 2+2?", "What is 3+3?"]
-        assert result["answer"] == ["4", "6"]
-        assert len(result["tokenized_prompts"]) == 2
-        assert isinstance(result["tokenized_prompts"][0]["input_ids"], torch.Tensor)
-        assert isinstance(
-            result["tokenized_prompts"][0]["attention_mask"], torch.Tensor
-        )
-
-
-class TestReasoningGymGetNextBatch:
-    @pytest.mark.parametrize("num_samples", [20])
-    @pytest.mark.parametrize("data_batch_size", [8, 10])
-    def test_reset_dataloaders_when_train_dataloader_exhausted(
-        self,
-        reasoning_dataset,
-        num_samples,
-        data_batch_size,
-    ):
-        train_dataset, test_dataset = reasoning_dataset
-        tokenizer = AutoTokenizer.from_pretrained(TINY_LLM_FIXTURE_PATH)
-        env = ReasoningGym(
-            train_dataset=train_dataset,
-            test_dataset=test_dataset,
-            tokenizer=tokenizer,
-            reward_fn=dummy_reward_fn,
-            conversation_template=DUMMY_CONVERSATION_TEMPLATE,
-            data_batch_size_per_gpu=data_batch_size,
-        )
-        total_sampled = 0
-        for _ in range(3):
-            env._get_next_batch()
-            total_sampled += data_batch_size
-
-        assert env.num_epochs == 1
-
-    @pytest.mark.parametrize("num_samples", [20])
-    @pytest.mark.parametrize("data_batch_size", [8, 10])
-    def test_not_reset_dataloaders_when_test_dataloader_exhausted(
-        self,
-        reasoning_dataset,
-        num_samples,
-        data_batch_size,
-    ):
-        train_dataset, test_dataset = reasoning_dataset
-        tokenizer = AutoTokenizer.from_pretrained(TINY_LLM_FIXTURE_PATH)
-        env = ReasoningGym(
-            train_dataset=train_dataset,
-            test_dataset=test_dataset,
-            tokenizer=tokenizer,
-            reward_fn=dummy_reward_fn,
-            conversation_template=DUMMY_CONVERSATION_TEMPLATE,
-            data_batch_size_per_gpu=data_batch_size,
-        )
-        total_sampled = 0
-        env.reset()
-        for _ in range(10):
-            with env.eval_mode():
-                env._get_next_batch()
-                total_sampled += data_batch_size
-
-        assert env.num_epochs == 0
 
 
 class TestDummyOptimizerInit:
@@ -1014,23 +482,27 @@ class TestCompareResponses:
 
 class TestSampleEvalPrompts:
     def test_sample_eval_prompts_sft_style_response_column(self):
-        """Covers SFTGym-style envs that expose ``response_column``."""
+        """A ``objective="sft"`` env resolves ``chosen`` from ``response_column``."""
         from types import SimpleNamespace
 
         ds = Datasets.from_dict(
             {"prompt": ["p0", "p1"], "response": ["r0", "r1"]},
         )
         env = SimpleNamespace(
+            objective="sft",
             response_column="response",
             test_dataloader=SimpleNamespace(dataset=ds),
         )
         rows = sample_eval_prompts(env, n=2, seed=0)
         assert len(rows) == 2
-        assert {rows[0][0], rows[1][0]} == {"p0", "p1"}
-        assert all(r[2] is None for r in rows)
+        assert {r[0] for r in rows} == {"p0", "p1"}
+        # chosen comes from response_column; rejected is None for SFT.
+        for p, c, r in rows:
+            assert c == ("r0" if p == "p0" else "r1")
+            assert r is None
 
     def test_sample_eval_prompts_preference_style_chosen_rejected(self):
-        """Covers PreferenceGym-style datasets with ``chosen`` / ``rejected`` columns."""
+        """A ``objective="preference"`` env resolves ``chosen`` / ``rejected`` columns."""
         from types import SimpleNamespace
 
         ds = Datasets.from_dict(
@@ -1040,7 +512,9 @@ class TestSampleEvalPrompts:
                 "rejected": ["x0", "x1"],
             },
         )
-        env = SimpleNamespace(test_dataloader=SimpleNamespace(dataset=ds))
+        env = SimpleNamespace(
+            objective="preference", test_dataloader=SimpleNamespace(dataset=ds)
+        )
         rows = sample_eval_prompts(env, n=2, seed=0)
         assert len(rows) == 2
         prompts = {r[0] for r in rows}
@@ -1052,8 +526,8 @@ class TestSampleEvalPrompts:
                 assert (c, r) == ("c1", "x1")
 
 
-class TestPreferenceGymInit:
-    def test_preference_gym_max_context_length_warning(self):
+class TestDatasetEnvPreferenceInit:
+    def test_preference_max_context_length_warning(self):
         train_dataset = Datasets.from_dict(
             {
                 "prompt": [
@@ -1077,10 +551,11 @@ class TestPreferenceGymInit:
             UserWarning,
             match=r"1 samples were filtered out of the train dataset due to the max context length constraint.",
         ):
-            env = PreferenceGym(
+            env = DatasetEnv(
                 train_dataset=train_dataset,
                 test_dataset=test_dataset,
                 tokenizer=tokenizer,
+                objective="preference",
                 data_batch_size_per_gpu=data_batch_size,
                 max_context_length=10,
                 min_completion_length=1,
@@ -1257,27 +732,119 @@ def test_masked_var_unbiased_requires_at_least_two_unmasked_values():
         masked_var(values, mask, unbiased=True)
 
 
-class TestMaxPromptTokensForSlidingWindow:
-    def test_reserves_one_token_when_max_output_tokens_none(self):
-        from agilerl.utils.llm_utils import max_prompt_tokens_for_sliding_window
+class TestRenderChatTemplate:
+    def test_forwards_chat_template_kwargs_to_render(self):
+        from agilerl.utils.llm_utils import render_chat_template
 
-        assert max_prompt_tokens_for_sliding_window(128, None) == 127
+        tokenizer = MagicMock()
+        tokenizer.apply_chat_template.return_value = "<rendered>"
+        out = render_chat_template(
+            [{"role": "user", "content": "{question}"}],
+            tokenizer,
+            chat_template_kwargs={"enable_thinking": False},
+            question="2+2",
+        )
+        assert out == "<rendered>"
+        kwargs = tokenizer.apply_chat_template.call_args.kwargs
+        assert kwargs["enable_thinking"] is False
+        (messages,) = tokenizer.apply_chat_template.call_args.args
+        assert messages == [{"role": "user", "content": "2+2"}]
+
+    def test_defaults_render_without_extra_kwargs(self):
+        from agilerl.utils.llm_utils import render_chat_template
+
+        tokenizer = MagicMock()
+        tokenizer.apply_chat_template.return_value = "<rendered>"
+        render_chat_template(
+            [{"role": "user", "content": "hi"}],
+            tokenizer,
+        )
+        assert tokenizer.apply_chat_template.call_args.kwargs == {
+            "tokenize": False,
+            "add_generation_prompt": True,
+        }
+
+    def test_assistant_prefill_continues_the_final_message(self):
+        from agilerl.utils.llm_utils import render_chat_template
+
+        tokenizer = MagicMock()
+        tokenizer.apply_chat_template.return_value = "<rendered>"
+        render_chat_template(
+            [
+                {"role": "user", "content": "q"},
+                {"role": "assistant", "content": "Let me think:"},
+            ],
+            tokenizer,
+        )
+        assert tokenizer.apply_chat_template.call_args.kwargs == {
+            "tokenize": False,
+            "continue_final_message": True,
+        }
+
+    def test_empty_assistant_prefill_opens_a_fresh_turn(self):
+        # continue_final_message on an empty prefill is ill-defined; the empty
+        # message is dropped and a generation prompt opens the turn instead.
+        from agilerl.utils.llm_utils import render_chat_template
+
+        tokenizer = MagicMock()
+        tokenizer.apply_chat_template.return_value = "<rendered>"
+        render_chat_template(
+            [
+                {"role": "user", "content": "q"},
+                {"role": "assistant", "content": ""},
+            ],
+            tokenizer,
+        )
+        assert tokenizer.apply_chat_template.call_args.kwargs == {
+            "tokenize": False,
+            "add_generation_prompt": True,
+        }
+        (messages,) = tokenizer.apply_chat_template.call_args.args
+        assert messages == [{"role": "user", "content": "q"}]
+
+
+class TestAttentionMaskFromPaddedIds:
+    def test_masks_only_the_trailing_padding_run(self):
+        # A pad-id token inside the transcript (pad == eos on pad-less model
+        # families: every turn terminator) is content the sampler attended to
+        # and must stay attended at learn time.
+        from agilerl.utils.llm_utils import attention_mask_from_padded_ids
+
+        ids = torch.tensor([[5, 0, 7, 0, 0], [1, 2, 3, 4, 0]])
+        mask = attention_mask_from_padded_ids(ids, 0)
+        assert mask.tolist() == [
+            [True, True, True, False, False],
+            [True, True, True, True, False],
+        ]
+
+    def test_none_pad_id_masks_nothing(self):
+        from agilerl.utils.llm_utils import attention_mask_from_padded_ids
+
+        ids = torch.tensor([[1, 2, 3]])
+        assert attention_mask_from_padded_ids(ids, None).all()
+
+
+class TestMaxPromptTokensForModelLen:
+    def test_reserves_one_token_when_max_output_tokens_none(self):
+        from agilerl.utils.llm_utils import max_prompt_tokens_for_model_len
+
+        assert max_prompt_tokens_for_model_len(128, None) == 127
 
     def test_reserves_max_output_tokens_when_set(self):
-        from agilerl.utils.llm_utils import max_prompt_tokens_for_sliding_window
+        from agilerl.utils.llm_utils import max_prompt_tokens_for_model_len
 
-        assert max_prompt_tokens_for_sliding_window(128, 32) == 96
+        assert max_prompt_tokens_for_model_len(128, 32) == 96
 
     def test_caps_reservation_at_max_model_len(self):
-        from agilerl.utils.llm_utils import max_prompt_tokens_for_sliding_window
+        from agilerl.utils.llm_utils import max_prompt_tokens_for_model_len
 
         # max_output_tokens > max_model_len → reserve max_model_len, return 0
-        assert max_prompt_tokens_for_sliding_window(64, 256) == 0
+        assert max_prompt_tokens_for_model_len(64, 256) == 0
 
     def test_clamps_at_zero_when_no_room(self):
-        from agilerl.utils.llm_utils import max_prompt_tokens_for_sliding_window
+        from agilerl.utils.llm_utils import max_prompt_tokens_for_model_len
 
-        assert max_prompt_tokens_for_sliding_window(0, None) == 0
+        assert max_prompt_tokens_for_model_len(0, None) == 0
 
 
 class TestValidateLlmContextLengths:
@@ -1333,15 +900,13 @@ class TestNormalizeReasoningPromptBatch:
         assert out == [prompts]
 
 
-class TestLlmUtilsDeprecatedReexports:
-    def test_deprecated_name_warns_and_resolves(self):
+class TestApplyChatTemplateReexport:
+    def test_apply_chat_template_is_reexported_from_llm_envs(self):
         import agilerl.utils.llm_utils as llm_utils_module
+        from agilerl.llm_envs import apply_chat_template as reexport
 
-        with pytest.warns(FutureWarning, match="moved to agilerl.llm_envs"):
-            cls = llm_utils_module.ReasoningGym
-        from agilerl.llm_envs import ReasoningGym as expected
-
-        assert cls is expected
+        # Canonical home is llm_utils; llm_envs re-exports the same object.
+        assert llm_utils_module.apply_chat_template is reexport
 
     def test_unknown_name_raises_attribute_error(self):
         import agilerl.utils.llm_utils as llm_utils_module
@@ -1349,12 +914,10 @@ class TestLlmUtilsDeprecatedReexports:
         with pytest.raises(AttributeError, match="has no attribute"):
             _ = llm_utils_module._nope_definitely_not_here
 
-    def test_dir_includes_deprecated_names(self):
+    def test_dir_includes_apply_chat_template(self):
         import agilerl.utils.llm_utils as llm_utils_module
 
-        d = dir(llm_utils_module)
-        assert "ReasoningGym" in d
-        assert "PreferenceGym" in d
+        assert "apply_chat_template" in dir(llm_utils_module)
 
 
 class TestResolveLlmDevice:
@@ -1686,35 +1249,6 @@ class TestCreateModelFromNameOrPathValueHead:
         call_kwargs = mock_loader.call_args.kwargs
         assert call_kwargs["pretrained_model_name_or_path"] == "some/model"
         assert call_kwargs["attn_implementation"] == "sdpa"
-
-
-class TestPreparePromptHfGenerateTensorInitialLen:
-    """Multi-turn rollouts may pass ``initial_prompt_len`` as a scalar tensor;
-    the helper must coerce it to a plain Python int so downstream slicing works.
-    """
-
-    def test_tensor_scalar_initial_prompt_len_coerced_to_int(self) -> None:
-        from agilerl.utils.llm_utils import prepare_prompt_hf_generate
-
-        prompt = {
-            "input_ids": torch.tensor([[1, 2, 3, 4]], dtype=torch.long),
-            "attention_mask": torch.tensor([[1, 1, 1, 1]], dtype=torch.long),
-            "initial_prompt_len": torch.tensor([2], dtype=torch.long),
-        }
-        out = prepare_prompt_hf_generate(prompt, torch.device("cpu"))
-        assert out["initial_prompt_len"] == 2
-        assert isinstance(out["initial_prompt_len"], int)
-
-    def test_list_initial_prompt_len_takes_first(self) -> None:
-        from agilerl.utils.llm_utils import prepare_prompt_hf_generate
-
-        prompt = {
-            "input_ids": torch.tensor([[1, 2, 3, 4]], dtype=torch.long),
-            "attention_mask": torch.tensor([[1, 1, 1, 1]], dtype=torch.long),
-            "initial_prompt_len": [3, 7],
-        }
-        out = prepare_prompt_hf_generate(prompt, torch.device("cpu"))
-        assert out["initial_prompt_len"] == 3
 
 
 class TestGetModelNameOrPathBaseModelBranches:
