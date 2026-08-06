@@ -5,6 +5,7 @@
 
 import importlib
 import sys
+from unittest.mock import MagicMock
 
 import pytest
 import torch
@@ -47,6 +48,54 @@ def test_wrappers_llm_envs_compat_module_warns_and_reexports():
 
 def dummy_reward_fn(*args, **kwargs):
     return 1.0
+
+
+class TestApplyChatTemplate:
+    def _tokenizer(self):
+        tokenizer = MagicMock()
+        tokenizer.apply_chat_template.return_value = "<rendered>"
+        return tokenizer
+
+    def test_final_user_message_opens_a_generation_prompt(self):
+        tokenizer = self._tokenizer()
+        template = [{"role": "user", "content": "{question}"}]
+        apply_chat_template(template, "q", "a", tokenizer)
+        assert tokenizer.apply_chat_template.call_args.kwargs == {
+            "tokenize": False,
+            "add_generation_prompt": True,
+        }
+
+    def test_assistant_prefill_continues_the_final_message(self):
+        tokenizer = self._tokenizer()
+        template = [
+            {"role": "user", "content": "{question}"},
+            {"role": "assistant", "content": "Let me think:"},
+        ]
+        apply_chat_template(template, "q", "a", tokenizer)
+        assert tokenizer.apply_chat_template.call_args.kwargs == {
+            "tokenize": False,
+            "continue_final_message": True,
+        }
+
+    def test_empty_assistant_prefill_opens_a_fresh_turn(self):
+        tokenizer = self._tokenizer()
+        template = [
+            {"role": "user", "content": "{question}"},
+            {"role": "assistant", "content": ""},
+        ]
+        apply_chat_template(template, "q", "a", tokenizer)
+        assert tokenizer.apply_chat_template.call_args.kwargs == {
+            "tokenize": False,
+            "add_generation_prompt": True,
+        }
+        (messages,) = tokenizer.apply_chat_template.call_args.args
+        assert messages == [{"role": "user", "content": "q"}]
+
+    def test_rendered_text_is_encoded_without_special_tokens(self):
+        tokenizer = self._tokenizer()
+        template = [{"role": "user", "content": "{question}"}]
+        apply_chat_template(template, "q", "a", tokenizer)
+        assert tokenizer.call_args.kwargs["add_special_tokens"] is False
 
 
 class Info:
@@ -1053,6 +1102,31 @@ class TestPreferenceGymCreateCollateFn:
         assert "chosen_input_ids" in out
         assert out["chosen_input_ids"].shape[1] == 64
 
+    def test_preference_completions_end_with_eos(self):
+        tokenizer = AutoTokenizer.from_pretrained(TINY_LLM_FIXTURE_PATH)
+        ds = HFDataset.from_dict(
+            {
+                "prompt": ["hello", "hi"],
+                "chosen": ["yes please", "sure"],
+                "rejected": ["no thanks", "never"],
+            },
+        )
+        env = PreferenceGym(
+            train_dataset=ds,
+            test_dataset=ds,
+            tokenizer=tokenizer,
+            data_batch_size_per_gpu=2,
+        )
+        batch = next(env.train_dataloader_iter)
+        for key in ("chosen", "rejected"):
+            ids = batch[f"{key}_input_ids"]
+            masks = batch[f"{key}_attention_mask"]
+            for row_ids, row_mask in zip(ids, masks, strict=True):
+                last_real = row_ids[row_mask.bool()][-1]
+                assert int(last_real) == tokenizer.eos_token_id
+        assert all(not c.endswith(tokenizer.eos_token) for c in batch["chosen"])
+        assert all(not r.endswith(tokenizer.eos_token) for r in batch["rejected"])
+
 
 class TestSFTGymInit:
     @pytest.mark.parametrize("use_accelerator", [True, False])
@@ -1135,6 +1209,28 @@ class TestSFTGymInit:
                 test_dataset=bad_dataset,
                 tokenizer=tokenizer,
             )
+
+    def test_sft_targets_end_with_eos(self):
+        tokenizer = AutoTokenizer.from_pretrained(TINY_LLM_FIXTURE_PATH)
+        ds = HFDataset.from_dict(
+            {
+                "prompt": ["hello", "hi"],
+                "target": ["yes please", "sure"],
+            },
+        )
+        env = SFTGym(
+            train_dataset=ds,
+            test_dataset=ds,
+            tokenizer=tokenizer,
+            data_batch_size_per_gpu=2,
+        )
+        batch = next(env.train_dataloader_iter)
+        for row_ids, row_mask in zip(
+            batch["input_ids"], batch["attention_mask"], strict=True
+        ):
+            last_real = row_ids[row_mask.bool()][-1]
+            assert int(last_real) == tokenizer.eos_token_id
+        assert all(not r.endswith(tokenizer.eos_token) for r in batch["response"])
 
 
 class TestSFTGymStep:

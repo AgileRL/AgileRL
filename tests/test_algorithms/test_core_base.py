@@ -64,7 +64,7 @@ import re
 import shutil
 import sys
 import warnings
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, PropertyMock, call, patch
@@ -1614,6 +1614,8 @@ def _make_llm_agent(
     use_separate_reference_adapter=False,
     *,
     reduce_memory_peak: bool = False,
+    use_vllm: bool = False,
+    use_memory_efficient_params: bool = True,
 ):
     """Helper to create a _StubLLMAlgorithm with heavily mocked internals."""
     if not HAS_LLM_DEPENDENCIES:
@@ -1654,6 +1656,8 @@ def _make_llm_agent(
             device="cpu",
             use_separate_reference_adapter=use_separate_reference_adapter,
             reduce_memory_peak=reduce_memory_peak,
+            use_vllm=use_vllm,
+            use_memory_efficient_params=use_memory_efficient_params,
         )
     agent.actor = actor_network
     agent.optimizer = MagicMock()
@@ -2005,6 +2009,7 @@ class TestLLMWrapModels:
         agent = _make_llm_agent(accelerator=acc)
         agent.optimizer.optimizer = MagicMock()
         agent.gradient_checkpointing = True
+        agent.zero_stage = 2
         wrapped_actor = MagicMock()
         wrapped_actor.module = MagicMock()
         wrapped_actor.optimizer = MagicMock()
@@ -2014,7 +2019,27 @@ class TestLLMWrapModels:
         acc.unwrap_model = MagicMock(return_value=wrapped_actor.module)
         LLMAlgorithm.wrap_models(agent)
         acc.prepare.assert_called_once()
-        wrapped_actor.module.gradient_checkpointing_enable.assert_called_once()
+        wrapped_actor.module.gradient_checkpointing_enable.assert_called_once_with(
+            gradient_checkpointing_kwargs={"use_reentrant": False},
+        )
+
+    def test_wrap_models_zero3_forces_reentrant_checkpointing(self):
+        acc = _make_mock_accelerator()
+        agent = _make_llm_agent(accelerator=acc)
+        agent.optimizer.optimizer = MagicMock()
+        agent.gradient_checkpointing = True
+        agent.zero_stage = 3
+        wrapped_actor = MagicMock()
+        wrapped_actor.module = MagicMock()
+        wrapped_actor.optimizer = MagicMock()
+        acc.prepare = MagicMock(
+            return_value=(wrapped_actor, agent.optimizer.optimizer, None)
+        )
+        acc.unwrap_model = MagicMock(return_value=wrapped_actor.module)
+        LLMAlgorithm.wrap_models(agent)
+        wrapped_actor.module.gradient_checkpointing_enable.assert_called_once_with(
+            gradient_checkpointing_kwargs={"use_reentrant": True},
+        )
 
     def test_wrap_models_without_accelerator(self):
         agent = _make_llm_agent(accelerator=None)
@@ -2027,9 +2052,21 @@ class TestLLMWrapModels:
         agent = _make_llm_agent(accelerator=None)
         agent.accelerator = None
         agent.gradient_checkpointing = True
+        agent.zero_stage = None
         original_actor = agent.actor
         LLMAlgorithm.wrap_models(agent)
-        original_actor.gradient_checkpointing_enable.assert_called_once()
+        original_actor.gradient_checkpointing_enable.assert_called_once_with(
+            gradient_checkpointing_kwargs={"use_reentrant": False},
+        )
+
+    def test_gradient_checkpointing_kwargs_by_zero_stage(self):
+        agent = _make_llm_agent(accelerator=None)
+        agent.zero_stage = None
+        assert agent._gradient_checkpointing_kwargs() == {"use_reentrant": False}
+        agent.zero_stage = 2
+        assert agent._gradient_checkpointing_kwargs() == {"use_reentrant": False}
+        agent.zero_stage = 3
+        assert agent._gradient_checkpointing_kwargs() == {"use_reentrant": True}
 
 
 class TestLLMCleanUp:
@@ -2182,8 +2219,8 @@ class TestLogprobsFromHiddenFused:
     """
 
     def test_matches_log_softmax_reference_fp32(self) -> None:
-        """fp32 reduction matches a stock ``log_softmax + gather`` over
-        the materialized logits within bf16 quantisation noise.
+        """``cast_to_fp32=True`` matches a stock ``log_softmax + gather`` over
+        logits materialized from the same fp32-upcast operands.
         """
         torch.manual_seed(0)
         B, T, H, V = 4, 11, 64, 8192
@@ -2201,11 +2238,12 @@ class TestLogprobsFromHiddenFused:
             temperature=temperature,
             cast_to_fp32=True,
         )
-        # Reference: stock log_softmax + gather over the materialized logits,
-        # promoted to fp32 to match the fused kernel's reduction precision.
-        logits = (hidden @ weight.t() + bias) / temperature
+        # Reference: stock log_softmax + gather over the materialized logits.
+        # ``cast_to_fp32`` upcasts the matmul *operands*, so the reference must
+        # too — a bf16 product rounds every logit before the reduction sees it.
+        logits = (hidden.float() @ weight.float().t() + bias.float()) / temperature
         ref = (
-            F.log_softmax(logits.float(), dim=-1)
+            F.log_softmax(logits, dim=-1)
             .gather(dim=-1, index=targets.unsqueeze(-1))
             .squeeze(-1)
             .to(torch.bfloat16)
@@ -2709,6 +2747,13 @@ class TestLLMCreatePromptMasks:
         assert not mask[1, 4].item()
         assert mask[1, 6].item()
 
+    def test_first_response_token_is_included(self):
+        mask = LLMAlgorithm._create_prompt_masks([3, 5], 10)
+        assert mask[0, 3].item()
+        assert mask[1, 5].item()
+        assert not mask[0, 2].item()
+        assert not mask[1, 4].item()
+
 
 @_LLM_DEPS_SKIP
 class TestLLMConfigureBatchSize:
@@ -2917,6 +2962,24 @@ class TestLLMInitWarnings:
         with pytest.warns(UserWarning, match="ZeRO Stage 3"):
             _make_llm_agent(accelerator=acc)
 
+    def test_zero_stage_3_disables_memory_efficient_params(self):
+        """Colocated CPU offload is incompatible with ZeRO-3 param sharding."""
+        acc = _make_mock_accelerator(
+            ds_config={
+                "zero_optimization": {"stage": 3},
+                "train_micro_batch_size_per_gpu": "auto",
+            }
+        )
+        with pytest.warns(
+            UserWarning, match="Memory efficient params is not compatible"
+        ):
+            agent = _make_llm_agent(
+                accelerator=acc,
+                use_vllm=True,
+                use_memory_efficient_params=True,
+            )
+        assert agent.use_memory_efficient_params is False
+
     def test_mutation_hook_registered_with_accelerator(self):
         acc = _make_mock_accelerator()
         agent = _make_llm_agent(accelerator=acc, max_grad_norm=1.0)
@@ -2982,6 +3045,45 @@ class TestLLMGetLmHead:
         del agent.actor.base_model.model.embed_out
         with pytest.raises(AttributeError, match="Cannot find lm_head"):
             agent._get_lm_head()
+
+    def test_fused_logprob_fn_and_head_returns_tensors(self):
+        agent = _make_llm_agent()
+        weight = torch.randn(4, 2)
+        lm_head = MagicMock()
+        lm_head.weight = weight
+        lm_head.bias = None
+        agent._get_lm_head = MagicMock(return_value=lm_head)
+        fused_fn, got_w, got_b = agent._fused_logprob_fn_and_head()
+        assert callable(fused_fn)
+        assert got_w is weight
+        assert got_b is None
+
+    def test_liger_head_gather_calls_gather_if_ds_param(self):
+        agent = _make_llm_agent()
+        weight = torch.randn(4, 2)
+        bias = torch.randn(4)
+        lm_head = MagicMock()
+        lm_head.weight = weight
+        lm_head.bias = bias
+        agent._get_lm_head = MagicMock(return_value=lm_head)
+        sentinel = object()
+
+        with patch(
+            "agilerl.algorithms.core.base.gather_if_ds_param",
+            return_value=sentinel,
+        ) as mock_gather:
+            result = agent._liger_head_gather()
+
+        mock_gather.assert_called_once_with(weight, bias)
+        assert result is sentinel
+
+    def test_resolve_fused_chunk_rows_uses_ds_shape(self):
+        weight = torch.empty(0)
+        weight.ds_shape = (49152, 2048)
+        vocab = getattr(weight, "ds_shape", weight.shape)[0]
+        rows = LLMAlgorithm._resolve_fused_chunk_rows(vocab, None)
+        assert rows > 0
+        assert vocab == 49152
 
 
 @pytest.mark.skipif(
@@ -4155,6 +4257,22 @@ class TestLLMInitMiscPaths:
                 _make_llm_agent(accelerator=acc, use_liger_loss=True, lora_config=lora)
         assert lora.exclude_modules == ["lm_head"]
 
+    def test_use_liger_loss_survives_zero_stage_three(self):
+        lora = MagicMock()
+        acc = _make_mock_accelerator(
+            ds_config={
+                "zero_optimization": {"stage": 3},
+                "train_micro_batch_size_per_gpu": "auto",
+            }
+        )
+        with patch("agilerl.algorithms.core.base.HAS_LIGER_KERNEL", True):
+            with pytest.warns(UserWarning, match="ZeRO Stage 3|Liger Loss"):
+                agent = _make_llm_agent(
+                    accelerator=acc, use_liger_loss=True, lora_config=lora
+                )
+        assert agent.zero_stage == 3
+        assert agent.use_liger_loss is True
+
     def test_seed_broadcast_with_multi_process(self):
         acc = _make_mock_accelerator(num_processes=2)
         with patch(
@@ -4188,6 +4306,7 @@ def _fake_save_peft_adapter_for_vllm_rollout(
     adapter_name,
     *,
     target_modules,
+    expert_key_map=None,
 ):
     from pathlib import Path
 
@@ -5232,6 +5351,80 @@ class TestLLMQuantizedClone:
         clone_actor.v_head.load_state_dict.assert_called_once_with(parent_v_head_state)
         acc.wait_for_everyone.assert_called()
 
+    def test_save_clone_adapter_weights_gathers_lora_params_only(self):
+        """Under ZeRO-3, _save_clone_adapter_weights must gather adapter params only."""
+        acc = _make_mock_accelerator(num_processes=1)
+        agent = _make_llm_agent(accelerator=acc)
+        agent.zero_stage = 3
+        agent.selected_adapters = ("actor",)
+
+        lora_param = torch.nn.Parameter(torch.zeros(2))
+        base_param = torch.nn.Parameter(torch.zeros(10, 10))
+        model_ref = MagicMock(name="actor")
+        model_ref.named_parameters.return_value = [
+            ("base_model.model.layer.0.weight", base_param),
+            ("base_model.model.lora_A.actor.weight", lora_param),
+        ]
+
+        gather_calls = []
+
+        @contextmanager
+        def capture_gather(zero_stage, params, modifier_rank=None):
+            gather_calls.append((zero_stage, list(params), modifier_rank))
+            yield
+
+        with (
+            patch.object(LLMAlgorithm, "_get_unwrapped_actor", return_value=model_ref),
+            patch(
+                "agilerl.algorithms.core.base.gather_if_zero3",
+                side_effect=capture_gather,
+            ),
+        ):
+            agent._save_clone_adapter_weights("/tmp/work")
+
+        assert len(gather_calls) == 1
+        stage, params, modifier_rank = gather_calls[0]
+        assert stage == 3
+        assert any(p is lora_param for p in params)
+        assert not any(p is base_param for p in params)
+        assert modifier_rank is None
+
+    def test_copy_adapter_weights_gathers_lora_params_with_modifier_rank_zero(self):
+        """_copy_adapter_weights must gather lora params with modifier_rank=0 under ZeRO-3."""
+        agent = _make_llm_agent(accelerator=None)
+        agent.zero_stage = 3
+
+        src_lora = torch.nn.Parameter(torch.ones(4))
+        tgt_lora = torch.nn.Parameter(torch.zeros(4))
+        base_param = torch.nn.Parameter(torch.zeros(10, 10))
+        model_ref = MagicMock(name="actor")
+        model_ref.named_parameters.return_value = [
+            ("base_model.model.layer.0.weight", base_param),
+            ("base_model.model.lora_A.source.weight", src_lora),
+            ("base_model.model.lora_A.target.weight", tgt_lora),
+        ]
+        agent.actor = model_ref
+
+        gather_calls = []
+
+        @contextmanager
+        def capture_gather(zero_stage, params, modifier_rank=None):
+            gather_calls.append((zero_stage, list(params), modifier_rank))
+            yield
+
+        with patch(
+            "agilerl.algorithms.core.base.gather_if_zero3", side_effect=capture_gather
+        ):
+            agent._copy_adapter_weights("source", "target")
+
+        assert len(gather_calls) == 1
+        stage, params, modifier_rank = gather_calls[0]
+        assert stage == 3
+        assert any(p is src_lora for p in params)
+        assert any(p is tgt_lora for p in params)
+        assert not any(p is base_param for p in params)
+        assert modifier_rank == 0
+
     def test_setup_actors_attaches_adapters_when_rebuild_from_pretrained(self):
         agent = _make_llm_agent(accelerator=None, clone=True)
         agent.use_vllm = False
@@ -5416,6 +5609,7 @@ class TestLLMInitializeActors:
     def test_initialize_actors_with_base_model_no_peft(self):
         agent = _make_llm_agent()
         agent.lora_config = MagicMock()
+        agent.zero_stage = 2
         peft_actor = _make_mock_peft_actor()
 
         base_model = MagicMock(spec=[])  # spec=[] prevents PeftModelProtocol match
@@ -5427,7 +5621,7 @@ class TestLLMInitializeActors:
             ),
             patch(
                 "agilerl.algorithms.core.base.get_peft_model", return_value=peft_actor
-            ),
+            ) as mock_get_peft,
             patch(
                 "agilerl.algorithms.core.base.DummyEvolvable", return_value=peft_actor
             ),
@@ -5437,6 +5631,36 @@ class TestLLMInitializeActors:
         ):
             LLMAlgorithm._initialize_actors(agent, base_model, add_adapters=True)
         mock_use_adapter.assert_called_once_with("actor")
+        mock_get_peft.assert_called_once()
+        assert mock_get_peft.call_args.kwargs["autocast_adapter_dtype"] is True
+
+    def test_initialize_actors_zero3_disables_adapter_dtype_autocast(self):
+        agent = _make_llm_agent()
+        agent.lora_config = MagicMock()
+        agent.zero_stage = 3
+        peft_actor = _make_mock_peft_actor()
+        peft_actor.register_parameter(
+            "lora_A", torch.nn.Parameter(torch.ones(2, 2, dtype=torch.float32))
+        )
+        base_model = MagicMock(spec=[])
+
+        with (
+            patch(
+                "agilerl.algorithms.core.base.adapt_lora_config_for_model",
+                side_effect=lambda model, cfg, **kw: cfg,
+            ),
+            patch(
+                "agilerl.algorithms.core.base.get_peft_model", return_value=peft_actor
+            ) as mock_get_peft,
+            patch(
+                "agilerl.algorithms.core.base.DummyEvolvable", return_value=peft_actor
+            ),
+            patch.object(agent, "use_adapter"),
+        ):
+            LLMAlgorithm._initialize_actors(agent, base_model, add_adapters=True)
+        mock_get_peft.assert_called_once()
+        assert mock_get_peft.call_args.kwargs["autocast_adapter_dtype"] is False
+        assert peft_actor.lora_A.dtype == torch.bfloat16
 
     def test_initialize_actors_with_none_creates_from_path(self):
         agent = _make_llm_agent()
@@ -5483,6 +5707,7 @@ class TestLLMInitializeActors:
     def test_initialize_actors_with_separate_reference_adapter(self):
         agent = _make_llm_agent()
         agent.lora_config = MagicMock()
+        agent.zero_stage = 3
         agent.selected_adapters = ("actor", "reference")
         peft_actor = _make_mock_peft_actor()
 
@@ -5502,7 +5727,9 @@ class TestLLMInitializeActors:
                 agent, MagicMock(spec=[]), add_adapters=True
             )
         peft_actor.add_adapter.assert_called_once_with(
-            adapter_name="reference", peft_config=agent.lora_config
+            adapter_name="reference",
+            peft_config=agent.lora_config,
+            autocast_adapter_dtype=False,
         )
 
     def test_initialize_actors_no_add_adapters(self):
@@ -5553,10 +5780,15 @@ class TestLLMInitializeActors:
             LLMAlgorithm._initialize_actors(agent, base_model, add_adapters=True)
 
         mock_gpm.assert_called_once_with(
-            dense_inner, agent.lora_config, adapter_name="actor"
+            dense_inner,
+            agent.lora_config,
+            adapter_name="actor",
+            autocast_adapter_dtype=True,
         )
         peft_actor.add_adapter.assert_called_once_with(
-            adapter_name="critic", peft_config=agent.lora_config
+            adapter_name="critic",
+            peft_config=agent.lora_config,
+            autocast_adapter_dtype=True,
         )
         assert base_model.pretrained_model is peft_actor
         assert base_model.is_peft_model is True
@@ -5709,6 +5941,10 @@ class TestLLMCloneActorNetwork:
             patch(
                 "agilerl.algorithms.core.base.clone_llm", return_value=cloned_inner
             ) as mock_clone_llm,
+            patch(
+                "agilerl.algorithms.core.base.gather_if_zero3",
+                return_value=nullcontext(),
+            ),
         ):
             agent._clone_actor_network()
 

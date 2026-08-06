@@ -34,9 +34,12 @@ if TYPE_CHECKING:
     from accelerate.utils import DeepSpeedPlugin
     from peft import LoraConfig, PeftModel
     from torch.nn.attention.flex_attention import BlockMask
+    from transformers import PreTrainedTokenizerBase
 
     from agilerl.algorithms.core.base import LLMAlgorithm
     from agilerl.utils.algo_utils import VLLMConfig
+else:
+    PreTrainedTokenizerBase = object
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +58,11 @@ else:
     AutoModelForCausalLMWithValueHead: Any = None
     BitsAndBytesConfig: Any = None
 
+# Sentinel when DeepSpeed is absent; overwritten by the real enum otherwise.
+ZeroParamStatus = None
+if HAS_DEEPSPEED:
+    from deepspeed.runtime.zero.partition_parameters import ZeroParamStatus
+
 _DEPRECATED_LLM_ENV_NAMES = frozenset(
     ("apply_chat_template", "ReasoningGym", "PreferenceGym", "SFTGym"),
 )
@@ -65,6 +73,168 @@ _BNB_QUANT_PRESETS = frozenset({"none", "int8", "nf4"})
 # Gemma 4 wraps projections in *ClippableLinear; PEFT must target the inner ``.linear``
 # submodule via regex (see https://github.com/huggingface/peft/issues/3129).
 _CLIPPABLE_LINEAR_WRAPPER_SUFFIX = "ClippableLinear"
+
+
+def _as_optional_int(value: object | None) -> int | None:
+    """Parse HF token ids that arrive as ``int`` or numeric ``str``."""
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        try:
+            return int(value)
+        except ValueError:
+            return None
+    return None
+
+
+def _eos_id_set(eos_id: object | None) -> frozenset[int]:
+    """Parse HF ``eos_token_id`` as a set of ints (scalar or sequence)."""
+    if eos_id is None or isinstance(eos_id, bool):
+        return frozenset()
+    if isinstance(eos_id, (int, str)):
+        parsed = _as_optional_int(eos_id)
+        return frozenset({parsed}) if parsed is not None else frozenset()
+    if isinstance(eos_id, (list, tuple)):
+        ids: set[int] = set()
+        for item in eos_id:
+            parsed = _as_optional_int(item)
+            if parsed is not None:
+                ids.add(parsed)
+        return frozenset(ids)
+    return frozenset()
+
+
+def _coerce_distinct_pad_id(pad_id: object | None, eos_id: object | None) -> int | None:
+    """Return ``pad_id`` as int when set and distinct from every ``eos_id``."""
+    pad_int = _as_optional_int(pad_id)
+    if pad_int is None:
+        return None
+    if pad_int in _eos_id_set(eos_id):
+        return None
+    return pad_int
+
+
+def resolve_pad_token_id(
+    tokenizer: PreTrainedTokenizerBase,
+    *,
+    model_config: object | None = None,
+    generation_config: object | None = None,
+) -> tuple[int, str]:
+    """Resolve a pad token id that prefers not to alias ``tokenizer.eos_token_id``.
+
+    Priority when each candidate is set and ``!= eos_token_id``:
+
+    1. ``model_config.pad_token_id``
+    2. ``generation_config.pad_token_id``
+    3. ``tokenizer.pad_token_id``
+    4. ``tokenizer.unk_token_id``
+    5. ``tokenizer.eos_token_id`` (last resort; warns)
+
+    :param tokenizer: Hugging Face tokenizer.
+    :type tokenizer: PreTrainedTokenizerBase
+    :param model_config: Optional model config with ``pad_token_id``.
+    :type model_config: object | None
+    :param generation_config: Optional generation config with ``pad_token_id``.
+    :type generation_config: object | None
+    :return: ``(pad_token_id, source_label)``.
+    :rtype: tuple[int, str]
+    """
+    eos_id = tokenizer.eos_token_id
+
+    candidates: list[tuple[object | None, str]] = []
+    if model_config is not None:
+        candidates.append((getattr(model_config, "pad_token_id", None), "model.config"))
+    if generation_config is not None:
+        candidates.append(
+            (getattr(generation_config, "pad_token_id", None), "generation_config")
+        )
+    candidates.append((tokenizer.pad_token_id, "tokenizer.pad_token_id"))
+    candidates.append((tokenizer.unk_token_id, "tokenizer.unk_token_id"))
+
+    for pad_id, source in candidates:
+        resolved = _coerce_distinct_pad_id(pad_id, eos_id)
+        if resolved is not None:
+            return resolved, source
+
+    eos_ids = _eos_id_set(eos_id)
+    if not eos_ids:
+        msg = "Tokenizer has no eos_token_id; cannot resolve a pad token id."
+        raise ValueError(msg)
+
+    warnings.warn(
+        "No pad token id distinct from eos_token_id; using eos_token_id as pad. "
+        "Mid-sequence EOS tokens (e.g. ChatML turn boundaries) will be masked "
+        "as padding when attention uses ids != pad_token_id.",
+        UserWarning,
+        stacklevel=2,
+    )
+    return min(eos_ids), "tokenizer.eos_token_id"
+
+
+def apply_pad_token_id(tokenizer: PreTrainedTokenizerBase, pad_token_id: int) -> None:
+    """Set ``tokenizer.pad_token`` / ``pad_token_id`` from the resolved id.
+
+    :param tokenizer: Hugging Face tokenizer to update.
+    :type tokenizer: PreTrainedTokenizerBase
+    :param pad_token_id: Resolved pad token id.
+    :type pad_token_id: int
+    """
+    pad_token_id = int(pad_token_id)
+    token_str: str | None = None
+
+    eos_ids = _eos_id_set(tokenizer.eos_token_id)
+    unk_id = _as_optional_int(tokenizer.unk_token_id)
+    if pad_token_id in eos_ids:
+        eos_tok = tokenizer.eos_token
+        if isinstance(eos_tok, str):
+            token_str = eos_tok
+    if token_str is None and unk_id is not None and pad_token_id == unk_id:
+        unk_tok = tokenizer.unk_token
+        if isinstance(unk_tok, str):
+            token_str = unk_tok
+    if token_str is None:
+        try:
+            converted = tokenizer.convert_ids_to_tokens(pad_token_id)
+        except Exception:
+            converted = None
+        if isinstance(converted, str):
+            token_str = converted
+
+    if token_str is not None:
+        tokenizer.pad_token = token_str
+    tokenizer.pad_token_id = pad_token_id
+
+
+def load_pad_token_configs(
+    model_name_or_path: str | None,
+) -> tuple[object | None, object | None]:
+    """Load model and generation configs for pad-token resolution.
+
+    :param model_name_or_path: Hugging Face model id or local path.
+    :type model_name_or_path: str | None
+    :return: ``(model_config, generation_config)``; either may be ``None``.
+    :rtype: tuple[object | None, object | None]
+    """
+    if not HAS_LLM_DEPENDENCIES or not model_name_or_path:
+        return None, None
+
+    model_config: object | None = None
+    generation_config: object | None = None
+    try:
+        from transformers import AutoConfig
+
+        model_config = AutoConfig.from_pretrained(model_name_or_path)
+    except Exception:
+        model_config = None
+    try:
+        from transformers import GenerationConfig
+
+        generation_config = GenerationConfig.from_pretrained(model_name_or_path)
+    except Exception:
+        generation_config = None
+    return model_config, generation_config
 
 
 def __getattr__(name: str) -> Any:  # noqa: ANN401 -- lazy module re-export resolves attributes dynamically
@@ -225,12 +395,16 @@ def needs_cross_rank_seq_padding(algo: object, *, world_size: int) -> bool:
     """Return whether ranks must sync completion seq lengths before ``learn()``.
 
     Multi-rank Liger token-level losses chunk over ``B * (T - 1)`` and issue one
-    NCCL allreduce per chunk (DAPO/CISPO normaliser). Divergent per-rank ``T``
-    after local ``stack_and_pad`` therefore deadlocks. Gate on that mechanism,
-    not on a specific algorithm name.
+    NCCL allreduce per chunk (DAPO/CISPO normaliser). ZeRO-3 parameter gathers
+    also require identical per-rank ``T`` so every rank issues the same NCCL
+    collectives. Divergent per-rank ``T`` after local ``stack_and_pad`` therefore
+    deadlocks.
     """
     if world_size <= 1:
         return False
+    zero_stage = getattr(algo, "zero_stage", 0)
+    if zero_stage == 3 or zero_stage == "3":
+        return True
     if not getattr(algo, "use_liger_loss", False):
         return False
     return getattr(algo, "importance_sampling_level", "token") == "token"
@@ -309,6 +483,23 @@ def pad_completion_batch_to_seq_len(
     return completion_ids, action_masks
 
 
+def _local_batch_and_seq_len(
+    completion_ids: list[torch.Tensor] | torch.Tensor,
+) -> tuple[int, int]:
+    """Return ``(B, T)`` from a stacked batch or a list of variable-length rows."""
+    if isinstance(completion_ids, list):
+        if not completion_ids:
+            return 0, 0
+        return len(completion_ids), max(int(t.shape[-1]) for t in completion_ids)
+    if not isinstance(completion_ids, torch.Tensor):
+        msg = f"completion_ids must be a tensor or list, got {type(completion_ids)}"
+        raise TypeError(msg)
+    if completion_ids.dim() != 2:
+        msg = f"completion_ids must be (B, T), got shape {tuple(completion_ids.shape)}"
+        raise ValueError(msg)
+    return int(completion_ids.shape[0]), int(completion_ids.shape[1])
+
+
 def align_completion_batch_shapes_across_ranks(
     completion_ids: Any,  # noqa: ANN401 -- cross-rank batch of variable-length sequences; element type varies by paradigm
     action_masks: Any,  # noqa: ANN401 -- see completion_ids
@@ -318,9 +509,11 @@ def align_completion_batch_shapes_across_ranks(
     accelerator: Accelerator,
     minmax_fn: Callable[[int], tuple[int, int]] | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Locally stack/pad, then sync ``T`` across ranks. Raise if ``B`` diverges.
+    """Sync ``B``/``T`` across ranks before heavy local pad/stack work.
 
-    Call immediately before ``learn()`` when
+    Collective metadata sync happens first; pad/stack follows. A DP barrier runs
+    after pad so no rank enters ZeRO ``learn`` collectives while peers are still
+    padding. Call immediately before ``learn()`` when
     :func:`needs_cross_rank_seq_padding` is true. Shorter ranks are right-padded
     to the global max ``T`` so Liger token-level chunk collectives stay in
     lockstep.
@@ -328,14 +521,7 @@ def align_completion_batch_shapes_across_ranks(
     # Lazy import avoids a circular dependency with algo_utils -> llm_utils.
     from agilerl.utils.algo_utils import stack_and_pad_experiences
 
-    completion_ids, action_masks, rewards = stack_and_pad_experiences(
-        completion_ids,
-        action_masks,
-        rewards,
-        padding_values=[pad_token_id, False, 0.0],
-    )
-    local_b = int(completion_ids.shape[0])
-    local_t = int(completion_ids.shape[1])
+    local_b, local_t = _local_batch_and_seq_len(completion_ids)
     reduce_fn = minmax_fn or (lambda value: allreduce_minmax_int(value, accelerator))
 
     min_b, max_b = reduce_fn(local_b)
@@ -347,8 +533,15 @@ def align_completion_batch_shapes_across_ranks(
         )
         raise RuntimeError(msg)
 
-    min_t, max_t = reduce_fn(local_t)
-    if min_t != max_t and local_t < max_t:
+    _min_t, max_t = reduce_fn(local_t)
+
+    completion_ids, action_masks, rewards = stack_and_pad_experiences(
+        completion_ids,
+        action_masks,
+        rewards,
+        padding_values=[pad_token_id, False, 0.0],
+    )
+    if int(completion_ids.shape[1]) < max_t:
         completion_ids, action_masks = pad_completion_batch_to_seq_len(
             completion_ids,
             action_masks,
@@ -361,6 +554,8 @@ def align_completion_batch_shapes_across_ranks(
             f"!= global max T={max_t}"
         )
         raise RuntimeError(msg)
+
+    accelerator.wait_for_everyone()
     return completion_ids, action_masks, rewards
 
 
@@ -457,6 +652,66 @@ def gather_if_zero3(
             yield
     else:
         yield
+
+
+@contextmanager
+def gather_if_ds_param(
+    *tensors: torch.Tensor | None,
+    modifier_rank: int | None = 0,
+) -> Generator[None, None, None]:
+    """Allgather ZeRO-3 params for the duration of the block.
+
+    No-op when none of ``tensors`` carry a DeepSpeed ``ds_id``, or when every
+    such param is already ``AVAILABLE`` (tied embeddings owned by
+    ``embed_tokens``). Duplicate references are gathered once (by identity).
+    Defaults to ``modifier_rank=0`` so DeepSpeed releases the gathered buffer
+    after the block.
+
+    The gather must wrap only the matmul / fused loss that reads the weight —
+    not a module ``forward`` — because ZeRO-3's post-forward hooks
+    re-partition the param and free the gathered buffer.
+
+    :param tensors: Candidate weight tensors; only those with ``ds_id`` gather.
+    :param modifier_rank: Passed to DeepSpeed ``GatheredParameters``.
+    """
+    seen: set[int] = set()
+    params: list[torch.Tensor] = []
+    for t in tensors:
+        if t is None or not hasattr(t, "ds_id"):
+            continue
+        tid = id(t)
+        if tid in seen:
+            continue
+        seen.add(tid)
+        if (
+            ZeroParamStatus is not None
+            and hasattr(t, "ds_status")
+            and t.ds_status == ZeroParamStatus.AVAILABLE
+        ):
+            continue
+        params.append(t)
+    if not params:
+        yield
+        return
+    with gather_if_zero3(3, params, modifier_rank=modifier_rank):
+        yield
+
+
+def get_lora_params(model: nn.Module) -> list[torch.Tensor]:
+    """Return adapter parameters for scoped ZeRO-3 gathers.
+
+    Under ZeRO-3, save/export/copy operations only touch adapter parameters.
+    Base parameters remain sharded and are filtered out by PEFT's name-based
+    key matching inside ``save_pretrained`` / ``get_peft_model_state_dict``.
+    Gathering only adapter parameters avoids materialising the full base
+    model on every rank.
+
+    :param model: The model to extract adapter parameters from.
+    :type model: nn.Module
+    :return: List of adapter parameters (LoRA A/B, DoRA magnitude, optional bias).
+    :rtype: list[torch.Tensor]
+    """
+    return [p for n, p in model.named_parameters() if "lora" in n]
 
 
 def get_state_dict(model: nn.Module) -> dict[str, torch.Tensor]:
@@ -1079,6 +1334,31 @@ def create_model_from_name_or_path(
     )
 
 
+def fill_outside_mask(
+    values: torch.Tensor,
+    mask: torch.Tensor,
+    fill_value: float = 0.0,
+) -> torch.Tensor:
+    """Replace the entries of ``values`` outside ``mask`` with a finite constant.
+
+    Masked reductions weight by the mask, and IEEE ``nan * 0`` is ``nan``, so one
+    non-finite entry at a padding position would otherwise poison the reduction.
+
+    :param values: Tensor to fill, broadcastable with ``mask``.
+    :type values: torch.Tensor
+    :param mask: Mask whose ``True``/non-zero entries are kept.
+    :type mask: torch.Tensor
+    :param fill_value: Value written outside the mask, defaults to ``0.0``.
+    :type fill_value: float, optional
+    :return: ``values`` with the out-of-mask entries replaced.
+    :rtype: torch.Tensor
+    """
+    keep = mask.to(device=values.device, dtype=torch.bool)
+    if keep.shape != values.shape:
+        keep = keep.expand_as(values)
+    return values.masked_fill(~keep, fill_value)
+
+
 def masked_mean(
     values: torch.Tensor, mask: torch.Tensor, axis: int | None = None
 ) -> torch.Tensor:
@@ -1622,6 +1902,32 @@ def move_params_to_cpu(unwrapped_model: torch.nn.Module) -> bool:
     return False
 
 
+def attention_mask_from_padded_ids(
+    ids: torch.Tensor,
+    pad_token_id: int | None,
+) -> torch.Tensor:
+    """Boolean attention mask covering everything but the trailing padding run.
+
+    ``ids != pad`` would also hole out pad-id tokens that are real transcript
+    content — with pad == eos (every pad-less model family) that is each turn
+    terminator the sampler attended to, shifting positions and attention at
+    learn time. Only the right-side padding added when stacking rows to a
+    rectangle is non-content, so only the trailing run is masked.
+
+    :param ids: Token tensor of shape ``(B, T)``, right-padded per row.
+    :type ids: torch.Tensor
+    :param pad_token_id: Pad token id; ``None`` means nothing is padding.
+    :type pad_token_id: int | None
+    :return: Boolean mask of shape ``(B, T)``.
+    :rtype: torch.Tensor
+    """
+    if pad_token_id is None:
+        return torch.ones_like(ids, dtype=torch.bool)
+    is_pad = (ids == pad_token_id).to(torch.int64)
+    trailing = is_pad.flip(-1).cumprod(-1).flip(-1)
+    return trailing == 0
+
+
 def stitch_completion_after_windowed_hf_generate(
     completion_id: torch.Tensor,
     stitch: torch.Tensor | None,
@@ -1972,7 +2278,11 @@ def compare_responses(
             max_new_tokens=max_new_tokens,
             temperature=temperature,
             do_sample=do_sample,
-            pad_token_id=tokenizer.pad_token_id or tokenizer.eos_token_id,
+            pad_token_id=(
+                tokenizer.pad_token_id
+                if tokenizer.pad_token_id is not None
+                else tokenizer.eos_token_id
+            ),
         )
         model.eval()
         with torch.no_grad():
@@ -2176,15 +2486,58 @@ def remap_peft_lora_key_for_vllm(key: str) -> str:
     return key.replace(".base_layer.", ".")
 
 
+def expert_lora_vllm_key_map(peft_model: nn.Module) -> dict[str, str]:
+    """Map packed-experts LoRA module keys to the paths vLLM's fused-MoE loader reads (down on ``<experts>``, gate/up on ``<experts>.base_layer``)."""
+    from peft.tuners.lora.layer import ParamWrapper
+
+    key_map: dict[str, str] = {}
+    unmapped: list[str] = []
+    for name, module in peft_model.named_modules():
+        if not isinstance(module, ParamWrapper):
+            continue
+        experts_path = name
+        while experts_path.endswith(".base_layer"):
+            experts_path = experts_path.removesuffix(".base_layer")
+        parameter_name = module.parameter_name
+        parent, _, leaf = experts_path.rpartition(".")
+        sibling_prefix = f"{parent}." if parent else ""
+        if parameter_name in ("gate_up_proj", "up_proj"):
+            key_map[name] = f"{experts_path}.base_layer"
+        elif parameter_name == "down_proj":
+            key_map[name] = experts_path
+        elif parameter_name == "weight" and leaf == "input_linear":
+            key_map[name] = f"{sibling_prefix}experts.base_layer"
+        elif parameter_name == "weight" and leaf == "output_linear":
+            key_map[name] = f"{sibling_prefix}experts"
+        else:
+            unmapped.append(f"{name} ({parameter_name})")
+    if unmapped:
+        msg = (
+            "No vLLM fused-MoE LoRA mapping for wrapped parameters "
+            f"{unmapped}; rollout would silently diverge from the trainer "
+            "policy. Restrict target_parameters to supported experts modules."
+        )
+        raise ValueError(msg)
+    return key_map
+
+
 def filter_peft_state_dict_for_vllm_lora(
     state_dict: dict[str, torch.Tensor],
-    target_modules: str | list[str],
+    target_modules: str | list[str] | None,
+    *,
+    expert_key_map: dict[str, str] | None = None,
 ) -> dict[str, torch.Tensor]:
-    """Keep LoRA tensors whose modules match the trainer ``target_modules`` spec."""
+    """Keep LoRA tensors whose modules match the trainer ``target_modules`` spec or expert map."""
     filtered: dict[str, torch.Tensor] = {}
     for key, tensor in state_dict.items():
         module_key = peft_lora_state_dict_key_to_module_key(key)
-        if not peft_target_key_matches(module_key, target_modules):
+        if expert_key_map is not None and module_key in expert_key_map:
+            suffix = key.removeprefix(module_key)
+            filtered[f"{expert_key_map[module_key]}{suffix}"] = tensor
+            continue
+        if target_modules is None or not peft_target_key_matches(
+            module_key, target_modules
+        ):
             continue
         filtered[remap_peft_lora_key_for_vllm(key)] = tensor
     return filtered
@@ -2208,14 +2561,16 @@ def save_peft_adapter_for_vllm_rollout(
     staging_dir: Path | str,
     adapter_name: str,
     *,
-    target_modules: str | list[str],
+    target_modules: str | list[str] | None,
+    expert_key_map: dict[str, str] | None = None,
 ) -> Path:
     """Export a PEFT adapter checkpoint that vLLM can load for colocated rollout.
 
     Keeps only tensors that match the same ``target_modules`` spec used for PEFT
-    training (from :func:`adapt_lora_config_for_model`). Rewrites ClippableLinear
-    ``.linear`` suffixes in keys for vLLM. ``staging_dir`` must be
-    process-private (AgileRL stages per-rank when distributed): every caller
+    training (from :func:`adapt_lora_config_for_model`) or the packed-experts
+    ``expert_key_map`` (from :func:`expert_lora_vllm_key_map`). Rewrites
+    ClippableLinear ``.linear`` suffixes in keys for vLLM. ``staging_dir`` must
+    be process-private (AgileRL stages per-rank when distributed): every caller
     writes the adapter files.
     """
     if not HAS_LLM_DEPENDENCIES:
@@ -2228,7 +2583,9 @@ def save_peft_adapter_for_vllm_rollout(
     adapter_path = Path(staging_dir) / adapter_name
     state = get_peft_model_state_dict(peft_model, adapter_name=adapter_name)
     n_before = len(state)
-    state = filter_peft_state_dict_for_vllm_lora(state, target_modules)
+    state = filter_peft_state_dict_for_vllm_lora(
+        state, target_modules, expert_key_map=expert_key_map
+    )
     if not state:
         msg = (
             f"No LoRA tensors left for vLLM export after filtering with "
@@ -2252,7 +2609,7 @@ def save_peft_adapter_for_vllm_rollout(
     cfg_dict: dict[str, JSONValue] = {
         str(key): _json_safe_value(value) for key, value in peft_cfg.to_dict().items()
     }
-    cfg_dict["target_modules"] = _json_safe_value(target_modules)
+    cfg_dict["target_modules"] = _json_safe_value(target_modules or [])
 
     import json
 

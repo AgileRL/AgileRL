@@ -29,6 +29,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "get_vllm_internal_model",
+    "patch_vllm_3d_moe_lora_flag",
     "patch_vllm_lora_keep_resident",
     "patch_vllm_strip_multimodal_towers",
 ]
@@ -129,6 +130,30 @@ def patch_vllm_strip_multimodal_towers(
     return freed
 
 
+def patch_vllm_3d_moe_lora_flag(model_name_or_path: str) -> bool:
+    """Mark the model's vLLM class as taking stacked-3D MoE LoRA adapters.
+
+    vLLM only parses the stacked-experts (PEFT ``target_parameters``) adapter
+    format when the model class declares ``is_3d_moe_weight``; classes
+    predating the flag reject the adapter in ``add_lora``. Call before engine
+    construction — the colocated in-process worker then sees the class patch.
+    """
+    try:
+        from transformers import AutoConfig
+        from vllm.model_executor.models.registry import ModelRegistry
+
+        architecture = AutoConfig.from_pretrained(model_name_or_path).architectures[0]
+        model_cls = ModelRegistry.models[architecture].load_model_cls()
+    except Exception:
+        return False
+    if getattr(model_cls, "is_3d_moe_weight", False):
+        return False
+    # setattr: the attribute is undeclared on model classes predating the
+    # flag, so plain assignment is a type error.
+    setattr(model_cls, "is_3d_moe_weight", True)  # noqa: B010
+    return True
+
+
 def patch_vllm_lora_keep_resident(llm: Any) -> int:  # noqa: ANN401 -- opaque vLLM engine handle walked via getattr
     """Keep vLLM's LoRA slot weights resident by neutralizing ``reset_lora``.
 
@@ -153,10 +178,14 @@ def patch_vllm_lora_keep_resident(llm: Any) -> int:  # noqa: ANN401 -- opaque vL
 
     count = 0
     for module in model.modules():
-        # A LoRA-wrapped layer exposes both reset_lora and the stacked GPU slot.
+        # A LoRA-wrapped layer exposes reset_lora and a stacked GPU slot
+        # (lora_b_stacked on linears, w13/w2_lora_b_stacked on fused MoE).
         if (
             hasattr(module, "reset_lora")
-            and hasattr(module, "lora_b_stacked")
+            and (
+                hasattr(module, "lora_b_stacked")
+                or hasattr(module, "w13_lora_b_stacked")
+            )
             and not getattr(module, "_agilerl_lora_resident", False)
         ):
             # Deliberate monkeypatch of a live vLLM module.

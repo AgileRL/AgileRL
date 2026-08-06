@@ -46,6 +46,7 @@ from agilerl.utils.algo_utils import (
 from agilerl.utils.llm_utils import (
     BitsAndBytesConfig,
     aggregate_metrics_dict,
+    attention_mask_from_padded_ids,
     build_completion_mask,
     calculate_k3_kl,
     clipped_is_surrogate,
@@ -1294,7 +1295,9 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
         turn_ids = batch_turn_ids.to(self.device).contiguous()
         mask_bool = mask.bool()
 
-        attention_mask = (batch_ids != self.pad_token_id).long()
+        attention_mask = attention_mask_from_padded_ids(
+            batch_ids, self.pad_token_id
+        ).long()
         kwargs: dict[str, Any] = {
             "input_ids": batch_ids,
             "attention_mask": attention_mask,
@@ -1342,7 +1345,6 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
                     (old_log_probs - sampling_log_probs.to(self.device)) * mask_f
                 ).clamp(max=self.vllm_importance_sampling_cap)
 
-        # ---- Actor pass (Liger fused policy + KL) ----
         # Identity-patch lm_head so the actor forward outputs the last hidden
         # state (B, T, H) directly instead of computing the full (B, T, V)
         # logits only to discard them. lm_head_weight is passed separately to
@@ -1366,29 +1368,31 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
         # Token level token-flattens the hidden states so the fused kernel
         # chunks tokens (bounded); turn/sequence keep the batch path. See
         # :func:`apply_fused_policy_loss`.
-        loss_pg_kl, aux = apply_fused_policy_loss(
-            policy_hidden[:, :-1],
-            lm_head_weight,
-            lm_head_bias,
-            target_ids,
-            mask,
-            adv_for_liger,
-            ref_log_probs,
-            old_log_probs,
-            self.beta,
-            self.clip_coef,  # epsilon_low
-            self.clip_coef,  # epsilon_high
-            self.temperature,
-            is_level,
-            turn_ids=turn_ids_arg,
-            full_turn_mask=full_turn_mask,
-            max_turns=max_turns,
-            token_chunk_size=self._resolve_fused_chunk_rows(
-                lm_head_weight.shape[0], self.chunk_rows
-            ),
-            turn_log_ratio_reduction=self.turn_ratio_pooling,
-            vllm_is_ratio=vllm_is_ratio,
-        )
+        with self._liger_head_gather():
+            loss_pg_kl, aux = apply_fused_policy_loss(
+                policy_hidden[:, :-1],
+                lm_head_weight,
+                lm_head_bias,
+                target_ids,
+                mask,
+                adv_for_liger,
+                ref_log_probs,
+                old_log_probs,
+                self.beta,
+                self.clip_coef,  # epsilon_low
+                self.clip_coef,  # epsilon_high
+                self.temperature,
+                is_level,
+                turn_ids=turn_ids_arg,
+                full_turn_mask=full_turn_mask,
+                max_turns=max_turns,
+                token_chunk_size=self._resolve_fused_chunk_rows(
+                    getattr(lm_head_weight, "ds_shape", lm_head_weight.shape)[0],
+                    self.chunk_rows,
+                ),
+                turn_log_ratio_reduction=self.turn_ratio_pooling,
+                vllm_is_ratio=vllm_is_ratio,
+            )
         kl_metric = float(aux[0].item())
         clipfrac_metric = float(aux[1].item())
         pg_loss_metric = float(aux[2].item())

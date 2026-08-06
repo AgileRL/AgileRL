@@ -7,7 +7,6 @@ import importlib
 import inspect
 import sys
 from collections import OrderedDict
-from contextlib import contextmanager
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, Mock, patch
@@ -29,6 +28,7 @@ from agilerl.utils.algo_utils import (
     CosineLRScheduleConfig,
     DummyOptimizer,
     VLLMConfig,
+    _match_action_ndims,
     _reconcile_shapes,
     apply_env_defined_actions,
     apply_image_normalization,
@@ -1794,6 +1794,32 @@ def test_algo_utils_fallback_pretrained_model_type_when_no_llm_dependencies():
         _utils_pkg.algo_utils = original_module
 
 
+class TestMatchActionNdims:
+    """Direct coverage for continuous-action rank alignment."""
+
+    def test_expands_other_when_lower_rank(self):
+        ref = np.array([[1, 2, 3]])
+        other = np.array([4, 5, 6])
+        r, o = _match_action_ndims(ref, other)
+        assert r.shape == (1, 3)
+        assert o.shape == (1, 3)
+        np.testing.assert_array_equal(o, np.array([[4, 5, 6]]))
+
+    def test_expands_reference_when_lower_rank(self):
+        ref = np.array([1, 2, 3])
+        other = np.array([[4, 5, 6]])
+        r, o = _match_action_ndims(ref, other)
+        assert r.shape == (1, 3)
+        assert o.shape == (1, 3)
+        np.testing.assert_array_equal(r, np.array([[1, 2, 3]]))
+
+    def test_noop_when_ranks_match(self):
+        ref = np.ones((2, 3))
+        other = np.zeros((2, 3))
+        r, o = _match_action_ndims(ref, other)
+        assert r.shape == o.shape == (2, 3)
+
+
 class TestReconcileShapes:
     """Tests for _reconcile_shapes."""
 
@@ -1834,6 +1860,13 @@ class TestReconcileShapes:
         assert r.shape == (1, 3)
         assert o.shape == (1, 3)
         np.testing.assert_array_equal(o, np.array([[4, 5, 6]]))
+
+    def test_continuous_other_lower_ndim_expands_other_float_actions(self):
+        ref = np.array([[1.0, 2.0]], dtype=np.float32)
+        other = np.array([3.0, 4.0], dtype=np.float32)
+        _r, o = _reconcile_shapes(ref, other, discrete_actions=False)
+        assert o.shape == (1, 2)
+        np.testing.assert_array_equal(o, np.array([[3.0, 4.0]], dtype=np.float32))
 
     def test_continuous_other_higher_ndim_expands_reference(self):
         ref = np.array([1, 2, 3])  # (3,)
@@ -2411,7 +2444,7 @@ class TestCloneLlm:
                 self.disabled = False
                 self.loaded = None
 
-            def add_adapter(self, peft_config, adapter_name):
+            def add_adapter(self, peft_config, adapter_name, **kwargs):
                 self.added.append((adapter_name, peft_config))
 
             def disable_adapter(self):
@@ -2429,17 +2462,12 @@ class TestCloneLlm:
             def parameters(self):
                 return [torch.nn.Parameter(torch.tensor([1.0]))]
 
-        @contextmanager
-        def fake_gather_if_zero3(zero_stage, params):
-            yield
-
-        def fake_get_peft_model(model, first_config, adapter_name="actor"):
+        def fake_get_peft_model(model, first_config, adapter_name="actor", **kwargs):
             assert adapter_name == "actor"
             return model
 
         monkeypatch.setattr(algo_utils, "PeftModel", FakePeftModel)
         monkeypatch.setattr(algo_utils, "get_peft_model", fake_get_peft_model)
-        monkeypatch.setattr(algo_utils, "gather_if_zero3", fake_gather_if_zero3)
 
         original = FakePeftModel()
         cloned = algo_utils.clone_llm(
@@ -2472,12 +2500,7 @@ class TestCloneLlm:
             def parameters(self):
                 return [torch.nn.Parameter(torch.tensor([1.0]))]
 
-        @contextmanager
-        def fake_gather_if_zero3(zero_stage, params):
-            yield
-
         monkeypatch.setattr(algo_utils, "PreTrainedModel", FakePreTrainedModel)
-        monkeypatch.setattr(algo_utils, "gather_if_zero3", fake_gather_if_zero3)
         original = FakePreTrainedModel()
         cloned = algo_utils.clone_llm(original_model=original, zero_stage=0)
         assert isinstance(cloned, FakeBaseModel)
@@ -2498,12 +2521,14 @@ class TestCloneLlm:
         peft_model = get_peft_model(base, lora_config)
         dummy = DummyEvolvable(device="cpu", module=peft_model)
 
-        with patch("agilerl.utils.algo_utils.gather_if_zero3") as mock_gather:
+        with patch(
+            "agilerl.utils.algo_utils.gather_if_zero3", create=True
+        ) as mock_gather:
             mock_gather.return_value.__enter__ = MagicMock(return_value=None)
             mock_gather.return_value.__exit__ = MagicMock(return_value=False)
             result = clone_llm(dummy, 0)
         assert result is not None
-        mock_gather.assert_called_once()
+        mock_gather.assert_not_called()
 
     @pytest.mark.skipif(
         not HAS_LLM_DEPENDENCIES, reason="LLM deps required for clone_llm"
@@ -2512,6 +2537,84 @@ class TestCloneLlm:
         """clone_llm raises ValueError for invalid type."""
         with pytest.raises(ValueError, match="Invalid 'original_model' type"):
             clone_llm("invalid_model", 0)
+
+    def test_clone_llm_does_not_call_gather_if_zero3(self, monkeypatch):
+        """clone_llm with zero_stage=3 must not gather source params — it reads
+        config and peft_config only, never source param data.
+        """
+        from peft import LoraConfig
+
+        default_config = LoraConfig(r=1)
+
+        class FakeBaseModel(torch.nn.Module):
+            def __init__(self, config):
+                super().__init__()
+                self.config = config
+                self.disabled = False
+
+            def disable_adapter(self):
+                self.disabled = True
+
+            def load_state_dict(self, state_dict, strict=False):
+                pass
+
+        class FakePeftModel:
+            def __init__(self):
+                self.config = SimpleNamespace()
+                self.model = FakeBaseModel(SimpleNamespace())
+                self.peft_config = {"default": default_config}
+
+            def parameters(self):
+                return [torch.nn.Parameter(torch.tensor([1.0]))]
+
+        def fake_get_peft_model(model, first_config, adapter_name="actor", **kwargs):
+            return model
+
+        monkeypatch.setattr(algo_utils, "PeftModel", FakePeftModel)
+        monkeypatch.setattr(algo_utils, "get_peft_model", fake_get_peft_model)
+
+        original = FakePeftModel()
+        cloned = clone_llm(original_model=original, zero_stage=3, state_dict=None)
+
+        assert isinstance(cloned, FakeBaseModel)
+        assert cloned.disabled is True
+
+    def test_clone_llm_zero3_casts_lora_params_to_bfloat16(self, monkeypatch):
+        """Under ZeRO-3, non-bf16 LoRA weights are cast to bf16 after get_peft_model."""
+        from peft import LoraConfig
+
+        default_config = LoraConfig(r=1)
+
+        class FakeBaseModel(torch.nn.Module):
+            def __init__(self, config):
+                super().__init__()
+                self.config = config
+                self.disabled = False
+                self.lora_A = torch.nn.Parameter(torch.ones(2, 2, dtype=torch.float32))
+
+            def disable_adapter(self):
+                self.disabled = True
+
+        class FakePeftModel:
+            def __init__(self):
+                self.config = SimpleNamespace()
+                self.model = FakeBaseModel(SimpleNamespace())
+                self.peft_config = {"default": default_config}
+
+        def fake_get_peft_model(model, first_config, adapter_name="actor", **kwargs):
+            assert kwargs.get("autocast_adapter_dtype") is False
+            return model
+
+        monkeypatch.setattr(algo_utils, "PeftModel", FakePeftModel)
+        monkeypatch.setattr(algo_utils, "get_peft_model", fake_get_peft_model)
+
+        cloned = clone_llm(
+            original_model=FakePeftModel(), zero_stage=3, state_dict=None
+        )
+
+        assert isinstance(cloned, FakeBaseModel)
+        assert cloned.lora_A.dtype == torch.bfloat16
+        assert cloned.disabled is True
 
 
 class TestDummyOptimizer:

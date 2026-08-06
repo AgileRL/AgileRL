@@ -86,6 +86,7 @@ class TokenObservationWrapper:
         self._gen_texts: list[str] = []
         self._feedback_texts: list[str] = []
         self._last_full_prompt_token_len: int | None = None
+        self._special_ids_cache: frozenset[int] | None = None
 
     @staticmethod
     def _format_obs(obs: str | dict[str, Any], info: dict[str, Any] | None) -> str:
@@ -126,12 +127,16 @@ class TokenObservationWrapper:
                 "attention_mask": torch.ones_like(input_ids),
             }
 
+        # ``apply_chat_template=False`` means the text is already fully rendered
+        # (specials included, e.g. a template-baked BOS); adding them again would
+        # double the BOS on Llama/Gemma/Mistral-family tokenizers.
         encoded = self.tokenizer(
             [obs_text],
             return_tensors="pt",
             padding=True,
             padding_side="left",
             return_attention_mask=True,
+            add_special_tokens=False,
         )
         return {
             "input_ids": encoded["input_ids"],
@@ -151,7 +156,7 @@ class TokenObservationWrapper:
         """
         if not self.apply_chat_template:
             return torch.tensor(
-                [self.tokenizer.encode(feedback_text)],
+                [self.tokenizer.encode(feedback_text, add_special_tokens=False)],
                 dtype=torch.long,
             )
 
@@ -159,6 +164,13 @@ class TokenObservationWrapper:
         if boundary_ids is not None:
             return boundary_ids
 
+        warnings.warn(
+            "The tokenizer's chat template could not render a feedback turn "
+            "boundary; falling back to ChatML markers (<|im_end|>/<|im_start|>). "
+            "For a non-ChatML tokenizer the multi-turn transcript will be "
+            "malformed.",
+            stacklevel=2,
+        )
         # Fallback: ChatML-style markers (works for Qwen and derivatives).
         turn_boundary = (
             "<|im_end|>\n<|im_start|>user\n"
@@ -166,9 +178,17 @@ class TokenObservationWrapper:
             + "<|im_end|>\n<|im_start|>assistant\n"
         )
         return torch.tensor(
-            [self.tokenizer.encode(turn_boundary)],
+            [self.tokenizer.encode(turn_boundary, add_special_tokens=False)],
             dtype=torch.long,
         )
+
+    def _special_ids(self) -> frozenset[int]:
+        """The tokenizer's special-token id set (cached; empty when undeclared)."""
+        if self._special_ids_cache is None:
+            self._special_ids_cache = frozenset(
+                int(i) for i in (getattr(self.tokenizer, "all_special_ids", None) or [])
+            )
+        return self._special_ids_cache
 
     def _chat_template_boundary_ids(
         self,
@@ -314,6 +334,15 @@ class TokenObservationWrapper:
             feedback_ids = self._tokenize_feedback(feedback_text).to(
                 self.full_ids.device
             )
+            # The transcript keeps the sampled end-of-turn token (it is trained),
+            # so drop the boundary frame's duplicate terminator when both are
+            # present; a turn truncated at max_tokens still gets the frame's one.
+            if (
+                feedback_ids.shape[1] > 1
+                and int(self.full_ids[0, -1]) == int(feedback_ids[0, 0])
+                and int(feedback_ids[0, 0]) in self._special_ids()
+            ):
+                feedback_ids = feedback_ids[:, 1:]
             self.full_ids = torch.cat([self.full_ids, feedback_ids], dim=1)
 
             # Strict-mode overflow check: if the cumulative prompt would no

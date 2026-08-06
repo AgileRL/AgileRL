@@ -13,10 +13,6 @@ import numpy.typing as npt
 import torch
 
 from agilerl import HAS_LIGER_KERNEL, HAS_LLM_DEPENDENCIES
-from agilerl.utils.llm_utils import (
-    calculate_k3_kl,
-    resolve_llm_device,
-)
 
 if TYPE_CHECKING:
     from accelerate import Accelerator
@@ -51,13 +47,19 @@ from agilerl.utils.llm_packing import (
 )
 from agilerl.utils.llm_utils import (
     aggregate_metrics_dict,
+    allreduce_minmax_int,
+    attention_mask_from_padded_ids,
     build_completion_mask,
+    calculate_k3_kl,
+    fill_outside_mask,
     is_reasoning_prompts,
     masked_mean,
     masked_whiten,
+    needs_cross_rank_seq_padding,
     normalize_reasoning_prompt_batch,
     pool_log_ratio_by_level,
     prepare_prompt_hf_generate,
+    resolve_llm_device,
     stitch_completion_after_windowed_hf_generate,
     validate_importance_sampling_level,
     validate_llm_context_lengths,
@@ -536,6 +538,19 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
 
         return ActionResult(completion_ids, completion_masks, sampling_logps)
 
+    def _raise_if_loss_not_finite_on_any_rank(self, loss: torch.Tensor) -> None:
+        """Raise when ``loss`` is non-finite on this rank or any DP peer."""
+        if self.accelerator is not None and self.accelerator.num_processes > 1:
+            nonfinite_flag = 0 if loss.isfinite().item() else 1
+            _, max_flag = allreduce_minmax_int(nonfinite_flag, self.accelerator)
+            if max_flag > 0:
+                msg = f"Loss is not finite: {loss}"
+                raise ValueError(msg)
+            return
+        if not loss.isfinite():
+            msg = f"Loss is not finite: {loss}"
+            raise ValueError(msg)
+
     def learn(
         self,
         experiences: LLMRolloutExperiences,
@@ -579,6 +594,23 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
                 self._prepare_experience_batch(experiences, turn_ids)
             )
             num_samples = completion_ids.shape[0]
+            world_size = (
+                self.accelerator.num_processes if self.accelerator is not None else 1
+            )
+            if (
+                needs_cross_rank_seq_padding(self, world_size=world_size)
+                and self.accelerator is not None
+                and self.accelerator.num_processes > 1
+            ):
+                seq_len = completion_ids.shape[1]
+                min_t, max_t = allreduce_minmax_int(seq_len, self.accelerator)
+                if min_t != max_t:
+                    msg = (
+                        "Cross-rank completion sequence length mismatch before "
+                        f"GRPO learn: min_t={min_t}, max_t={max_t}. Ranks must "
+                        "pad completions to the same T before learn()."
+                    )
+                    raise RuntimeError(msg)
 
             advantages, batch_idxs = self._calculate_advantages(
                 rewards, completion_ids, action_masks, turn_ids
@@ -588,6 +620,8 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
                     "All samples were filtered by advantage threshold; skipping GRPO update.",
                     stacklevel=2,
                 )
+                if self.accelerator is not None and self.accelerator.num_processes > 1:
+                    self.accelerator.wait_for_everyone()
                 return {"loss": 0.0, "kl": 0.0}
 
             learn_metrics = {
@@ -619,6 +653,8 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
                     "No active samples after filtering; skipping GRPO update.",
                     stacklevel=2,
                 )
+                if self.accelerator is not None and self.accelerator.num_processes > 1:
+                    self.accelerator.wait_for_everyone()
                 return {"loss": 0.0, "kl": 0.0}
 
             # Ensure batch_size is not larger than the number of active samples
@@ -642,9 +678,7 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
                         turn_ids=is_turn_ids,
                         sampling_log_probs=sampling_log_probs,
                     )
-                    if not loss.isfinite():
-                        msg = f"Loss is not finite: {loss}"
-                        raise ValueError(msg)
+                    self._raise_if_loss_not_finite_on_any_rank(loss)
 
                     self._backward_pass(loss)
                     learn_metrics["loss"] += loss.item()
@@ -1276,6 +1310,7 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
             denominator,
             torch.ones_like(denominator),
         )
+        loss = fill_outside_mask(loss, mask)
         return (loss * mask).sum(dim=-1) / denominator
 
     def _loss(
@@ -1501,6 +1536,11 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
         :return: Mean loss and mean KL divergence.
         :rtype: tuple[torch.Tensor, torch.Tensor]
         """
+        log_probs = fill_outside_mask(log_probs, mask)
+        old_log_probs = fill_outside_mask(old_log_probs, mask)
+        reference_log_probs = fill_outside_mask(reference_log_probs, mask)
+        if sampling_log_probs is not None:
+            sampling_log_probs = fill_outside_mask(sampling_log_probs, mask)
         kl = calculate_k3_kl(log_probs, reference_log_probs)
         advantages = self._apply_kl_advantage_shaping(advantages, kl, mask)
         token_log_ratio = log_probs - old_log_probs
@@ -1710,9 +1750,12 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
         adv = advantages.to(self.device).contiguous()
         if adv.dim() > 1 and adv.shape[-1] == 1:
             adv = adv.squeeze(-1)  # (B, 1) -> (B,)
-        old_log_probs = old_log_probs.to(self.device).contiguous()
+        old_log_probs = fill_outside_mask(
+            old_log_probs.to(self.device).contiguous(),
+            mask,
+        )
         ref_log_probs: torch.Tensor | None = (
-            reference_log_probs.to(self.device).contiguous()
+            fill_outside_mask(reference_log_probs.to(self.device).contiguous(), mask)
             if self.beta != 0.0
             else None
         )
@@ -1720,7 +1763,9 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
         lm_head_weight = lm_head.weight
         lm_head_bias = lm_head.bias
 
-        attention_mask = (batch_ids != self.pad_token_id).long()
+        attention_mask = attention_mask_from_padded_ids(
+            batch_ids, self.pad_token_id
+        ).long()
         # Sequence packing (same gate as the standard path): on a varlen/block-
         # sparse backend, flatten real tokens into a padding-free forward and
         # scatter hidden states back onto the padded ``(B, T, H)`` frame so the
@@ -1764,6 +1809,17 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
             # so the kernel call below is identical to the padded path. Pad rows
             # are zeroed and masked out by ``action_mask`` downstream.
             policy_hidden = unpack_hidden_states(policy_hidden, packed)
+        # The kernel weights its own per-token logprobs by ``mask``, so a
+        # non-finite hidden row at an out-of-mask position would poison the fused
+        # reduction (``nan * 0``). Zeroing those rows makes their logits the bias
+        # alone; per-token independence leaves in-mask logprobs untouched.
+        hidden_keep = torch.zeros(
+            policy_hidden.shape[:2],
+            dtype=torch.bool,
+            device=policy_hidden.device,
+        )
+        hidden_keep[:, : mask.shape[1]] = mask.to(torch.bool)
+        policy_hidden = fill_outside_mask(policy_hidden, hidden_keep.unsqueeze(-1))
         target_ids = batch_ids[:, 1:].contiguous()  # (B, seq_len-1)
 
         # vLLM sampling-mismatch correction (token-level IS only): the detached,
@@ -1809,17 +1865,18 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
             )
             if sampling_log_probs is not None:
                 with torch.no_grad():
-                    mask_f = mask.to(old_log_probs.dtype)
+                    log_diff = fill_outside_mask(
+                        old_log_probs - sampling_log_probs.to(self.device),
+                        mask,
+                    )
                     vllm_is_ratio_arg = (
-                        torch.exp(
-                            (old_log_probs - sampling_log_probs.to(self.device))
-                            * mask_f
-                        )
+                        torch.exp(log_diff)
                         .clamp(max=self.vllm_importance_sampling_cap)
                         .reshape(n_tokens, 1)
                     )
             chunk_size = self._resolve_fused_chunk_rows(
-                lm_head_weight.shape[0], self.chunk_rows
+                getattr(lm_head_weight, "ds_shape", lm_head_weight.shape)[0],
+                self.chunk_rows,
             )
         else:
             # Trajectory-level (GSPO): keep the padded layout and one-sequence-per-
@@ -1832,32 +1889,33 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
             adv_arg = adv
             chunk_size = 1
 
-        loss, aux = LigerFusedLinearGRPOFunction.apply(
-            policy_arg,
-            lm_head_weight,
-            target_ids_arg,
-            mask_arg,
-            adv_arg,
-            lm_head_bias,
-            ref_lp_arg,
-            old_lp_arg,
-            None,
-            None,
-            None,
-            self.beta,
-            epsilon_low,
-            epsilon_high,
-            liger_loss_type,
-            self.max_output_tokens,
-            importance_sampling_level,
-            None,
-            None,
-            self.temperature,
-            None,
-            ref_log_probs is not None,  # use_ref_model
-            chunk_size,
-            vllm_is_ratio_arg,
-        )
+        with self._liger_head_gather():
+            loss, aux = LigerFusedLinearGRPOFunction.apply(
+                policy_arg,
+                lm_head_weight,
+                target_ids_arg,
+                mask_arg,
+                adv_arg,
+                lm_head_bias,
+                ref_lp_arg,
+                old_lp_arg,
+                None,
+                None,
+                None,
+                self.beta,
+                epsilon_low,
+                epsilon_high,
+                liger_loss_type,
+                self.max_output_tokens,
+                importance_sampling_level,
+                None,
+                None,
+                self.temperature,
+                None,
+                ref_log_probs is not None,  # use_ref_model
+                chunk_size,
+                vllm_is_ratio_arg,
+            )
 
         kl = aux[0]
         return loss.mean(), kl
