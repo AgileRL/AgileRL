@@ -240,7 +240,7 @@ def train_bandits(
                     },
                 )
                 transition = transition.unsqueeze(0)
-                transition.batch_size = [1]
+                transition.batch_size = torch.Size([1])
                 memory.add(transition)
 
                 # Learn according to learning frequency
