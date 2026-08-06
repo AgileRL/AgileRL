@@ -159,7 +159,7 @@ class TestRolloutEnvStep:
     def test_strict_mode_terminates_on_context_overflow(self, serve_env) -> None:
         """When the cumulative prompt would exceed
         ``max_model_len - max_output_tokens``, the trajectory ends with
-        ``truncated=True`` and no next observation.
+        ``truncated=True`` and no next prompt.
         """
         env = _NonTerminalEnv()
         # Tiny budget: 20 - 4 = 16 prompt tokens. Initial prompt "P:hello\nS"
@@ -457,13 +457,13 @@ class TestRolloutEnvChatTemplateKwargs:
 
 
 class TestRolloutEnvPolicyObservationFromState:
-    def test_policy_observation_returns_current_observation_fields(self) -> None:
-        """The policy observation carries the current ``input_ids`` directly."""
+    def test_policy_prompt_returns_current_prompt_fields(self) -> None:
+        """The policy prompt carries the current ``input_ids`` directly."""
         w = bare_rollout_env()
         w.tokenizer = _StubTokenizer()
         w.full_ids = torch.tensor([[0, 1, 2, 3]], dtype=torch.long)
         w.turn_boundaries = []
-        obs = w._policy_observation_from_state()
+        obs = w._policy_prompt_from_state()
         assert set(obs.keys()) == {"input_ids"}
         assert obs["input_ids"].shape[1] == 4
 
@@ -471,7 +471,7 @@ class TestRolloutEnvPolicyObservationFromState:
         w = bare_rollout_env()
         w.full_ids = None
         with pytest.raises(RuntimeError, match="No prompt"):
-            w._policy_observation_from_state()
+            w._policy_prompt_from_state()
 
 
 class TestRolloutEnvFromDataset:
@@ -558,18 +558,18 @@ class _SyncStubEnv(RolloutEnvDoubleMixin):
         self.reset_calls: list[int | None] = []
         self.close_calls = 0
         self.done = False
-        self.current_observation: dict = {}
+        self.current_prompt: dict = {}
         self.sampling_logps: list[torch.Tensor] = []
 
     def reset(self, seed: int | None = None):
         self.reset_calls.append(seed)
         self.done = False
         self.sampling_logps = []
-        self.current_observation = {
+        self.current_prompt = {
             "input_ids": torch.ones(1, 3, dtype=torch.long),
             "attention_mask": torch.ones(1, 3, dtype=torch.long),
         }
-        return (self.current_observation, {})
+        return (self.current_prompt, {})
 
     def step(self, full_completion: torch.Tensor, sampling_logps=None):
         del full_completion
@@ -577,7 +577,7 @@ class _SyncStubEnv(RolloutEnvDoubleMixin):
         if sampling_logps is not None:
             self.sampling_logps.append(sampling_logps)
         self.done = True
-        self.current_observation = {}
+        self.current_prompt = {}
         return ({}, 1.0, True, False, {})
 
     def close(self) -> None:
@@ -826,10 +826,10 @@ class TestBatchRolloutEnvInit:
 
 
 def _stub_env(*, done: bool = False, prompt: dict | None = None) -> _SyncStubEnv:
-    """A stub env preset to a given pool state (``done`` / ``current_observation``)."""
+    """A stub env preset to a given pool state (``done`` / ``current_prompt``)."""
     env = _SyncStubEnv()
     env.done = done
-    env.current_observation = {} if prompt is None else prompt
+    env.current_prompt = {} if prompt is None else prompt
     return env
 
 
@@ -1105,7 +1105,7 @@ class TestBatchRolloutEnvActiveEnvs:
 
 
 class TestBatchRolloutEnvGetPrompts:
-    def test_get_observations_returns_none_when_no_active(self) -> None:
+    def test_get_prompts_returns_none_when_no_active(self) -> None:
         vec = RolloutCollector(env_factory=_SyncStubEnv, batch_size=1, group_size=2)
         done_env = _stub_env(
             done=True,
@@ -1123,7 +1123,7 @@ class TestBatchRolloutEnvGetPrompts:
         )
         vec.envs = [done_env, active_env]
 
-        prompts = vec._get_observations()
+        prompts = vec._get_prompts()
         assert prompts is not None
         assert isinstance(prompts, list)
         assert len(prompts) == 1
@@ -1131,9 +1131,9 @@ class TestBatchRolloutEnvGetPrompts:
         assert prompts[0]["attention_mask"].shape == (1, 3)
 
         active_env.done = True
-        assert vec._get_observations() is None
+        assert vec._get_prompts() is None
 
-    def test_get_observations_returns_active_in_index_order(self) -> None:
+    def test_get_prompts_returns_active_in_index_order(self) -> None:
         vec = RolloutCollector(env_factory=_SyncStubEnv, batch_size=1, group_size=2)
         a = _stub_env(
             done=False,
@@ -1150,7 +1150,7 @@ class TestBatchRolloutEnvGetPrompts:
             },
         )
         vec.envs = [a, b]
-        prompts = vec._get_observations()
+        prompts = vec._get_prompts()
         assert prompts is not None
         assert len(prompts) == 2
         assert [int(p["input_ids"].shape[1]) for p in prompts] == [2, 3]
@@ -1166,7 +1166,7 @@ class _StepVariantEnv(RolloutEnvDoubleMixin):
         self.include_turn_boundaries = include_turn_boundaries
         self.step_shapes: list[tuple[int, ...]] = []
         self.done = False
-        self.current_observation: dict = {}
+        self.current_prompt: dict = {}
         self.sampling_logps: list[torch.Tensor] = []
         self.turn_boundaries: list[int] = []
 
@@ -1174,11 +1174,11 @@ class _StepVariantEnv(RolloutEnvDoubleMixin):
         del seed
         self.done = False
         self.sampling_logps = []
-        self.current_observation = {
+        self.current_prompt = {
             "input_ids": torch.ones(1, 3, dtype=torch.long),
             "attention_mask": torch.ones(1, 3, dtype=torch.long),
         }
-        return (self.current_observation, {})
+        return (self.current_prompt, {})
 
     def step(self, full_completion: torch.Tensor, sampling_logps=None):
         self.step_shapes.append(tuple(full_completion.shape))
@@ -1188,13 +1188,13 @@ class _StepVariantEnv(RolloutEnvDoubleMixin):
             self.sampling_logps.append(sampling_logps)
         if self.done_after_step:
             self.done = True
-            self.current_observation = {}
+            self.current_prompt = {}
             return ({}, 1.0, True, False, {})
-        self.current_observation = {
+        self.current_prompt = {
             "input_ids": torch.ones(1, 4, dtype=torch.long),
             "attention_mask": torch.ones(1, 4, dtype=torch.long),
         }
-        return (self.current_observation, 0.5, False, False, {})
+        return (self.current_prompt, 0.5, False, False, {})
 
     def close(self) -> None:
         pass

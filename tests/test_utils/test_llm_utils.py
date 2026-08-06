@@ -58,7 +58,7 @@ from agilerl.utils.llm_utils import (
     model_has_clippable_linear_wrappers,
     move_params_to_cpu,
     move_params_to_gpu,
-    normalize_observation_batch,
+    normalize_prompt_batch,
     offload_colocated_trainer_from_gpu,
     patch_flex_attention_kernel_options,
     peft_lora_state_dict_key_to_module_key,
@@ -684,14 +684,14 @@ class TestGetLlmAccelerator:
             get_llm_accelerator(None, idx=-1)
 
 
-def test_normalize_observation_batch_stacked_dict_to_per_sample_list():
+def test_normalize_prompt_batch_stacked_dict_to_per_sample_list():
     prompts = {
         "input_ids": torch.tensor([[1, 2], [3, 4]], dtype=torch.long),
         "attention_mask": torch.ones(2, 2, dtype=torch.long),
         "question": ["q0", "q1"],
         "meta": {"constant": True},
     }
-    out = normalize_observation_batch(prompts)
+    out = normalize_prompt_batch(prompts)
     assert isinstance(out, list)
     assert len(out) == 2
     assert torch.equal(out[0]["input_ids"], torch.tensor([[1, 2]], dtype=torch.long))
@@ -873,30 +873,30 @@ class TestValidateLlmContextLengths:
 
 class TestNormalizeReasoningPromptBatch:
     def test_passes_list_through(self):
-        from agilerl.utils.llm_utils import normalize_observation_batch
+        from agilerl.utils.llm_utils import normalize_prompt_batch
 
         original = [{"input_ids": torch.tensor([1, 2])}]
-        assert normalize_observation_batch(original) is original
+        assert normalize_prompt_batch(original) is original
 
     def test_one_d_input_ids_treated_as_single_sample(self):
-        from agilerl.utils.llm_utils import normalize_observation_batch
+        from agilerl.utils.llm_utils import normalize_prompt_batch
 
         prompts = {"input_ids": torch.tensor([1, 2, 3])}
-        out = normalize_observation_batch(prompts)
+        out = normalize_prompt_batch(prompts)
         assert len(out) == 1
         assert out[0] is prompts
 
     def test_empty_batch_returns_empty_list(self):
-        from agilerl.utils.llm_utils import normalize_observation_batch
+        from agilerl.utils.llm_utils import normalize_prompt_batch
 
         prompts = {"input_ids": torch.zeros((0, 4), dtype=torch.long)}
-        assert normalize_observation_batch(prompts) == []
+        assert normalize_prompt_batch(prompts) == []
 
     def test_non_tensor_input_ids_returns_single_sample(self):
-        from agilerl.utils.llm_utils import normalize_observation_batch
+        from agilerl.utils.llm_utils import normalize_prompt_batch
 
         prompts = {"input_ids": "not a tensor"}
-        out = normalize_observation_batch(prompts)
+        out = normalize_prompt_batch(prompts)
         assert out == [prompts]
 
 

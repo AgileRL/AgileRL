@@ -27,7 +27,7 @@ from agilerl.typing import (
     JSONValue,
     PopulationType,
     PreferencePrompts,
-    RolloutObservation,
+    RolloutPrompt,
     SFTPrompts,
 )
 
@@ -207,13 +207,13 @@ def validate_llm_context_lengths(
         raise ValueError(msg)
 
 
-def is_rollout_observation(obs: Mapping[str, object]) -> TypeGuard[RolloutObservation]:
-    """Check whether a mapping is a tokenized rollout observation.
+def is_rollout_prompt(obs: Mapping[str, object]) -> TypeGuard[RolloutPrompt]:
+    """Check whether a mapping is a tokenized rollout prompt.
 
-    :param obs: An observation mapping returned by a rollout env.
+    :param obs: A prompt mapping returned by a rollout env.
     :type obs: Mapping[str, object]
     :return: ``True`` when the mapping carries prompt tokens.
-    :rtype: TypeGuard[RolloutObservation]
+    :rtype: TypeGuard[RolloutPrompt]
     """
     return isinstance(obs.get("input_ids"), torch.Tensor)
 
@@ -244,35 +244,35 @@ def is_sft_prompts(batch: Mapping[str, object]) -> TypeGuard[SFTPrompts]:
     )
 
 
-def normalize_observation_batch(
-    observations: RolloutObservation | list[RolloutObservation],
-) -> list[RolloutObservation]:
-    """Normalize rollout observations into a list-of-dicts per sample.
+def normalize_prompt_batch(
+    prompts: RolloutPrompt | list[RolloutPrompt],
+) -> list[RolloutPrompt]:
+    """Normalize rollout prompts into a list-of-dicts per sample.
 
     Supports both a list of per-sample dicts and a single stacked dict whose
     tensor/list values are batched on dimension 0.
 
-    :param observations: The observations to normalize.
-    :type observations: RolloutObservation | list[RolloutObservation]
-    :return: One observation dict per sample.
-    :rtype: list[RolloutObservation]
+    :param prompts: The prompts to normalize.
+    :type prompts: RolloutPrompt | list[RolloutPrompt]
+    :return: One prompt dict per sample.
+    :rtype: list[RolloutPrompt]
     """
-    if isinstance(observations, list):
-        return observations
+    if isinstance(prompts, list):
+        return prompts
 
-    input_ids = observations["input_ids"]
+    input_ids = prompts["input_ids"]
     if not isinstance(input_ids, torch.Tensor) or input_ids.dim() == 1:
-        return [observations]
+        return [prompts]
 
     batch_size = int(input_ids.shape[0])
     if batch_size == 0:
         return []
 
     # Inspect each key once and write it into every output dict in one pass.
-    # Keys not declared on ``RolloutObservation`` (caller-supplied metadata) are
+    # Keys not declared on ``RolloutPrompt`` (caller-supplied metadata) are
     # copied through unchanged, which a key-by-key typed construction can't do.
     samples: list[dict[str, object]] = [{} for _ in range(batch_size)]
-    for key, value in observations.items():
+    for key, value in prompts.items():
         if (
             isinstance(value, torch.Tensor)
             and value.dim() > 0
@@ -1771,23 +1771,23 @@ def build_completion_mask(
 
 
 def prepare_prompt_hf_generate(
-    observation: RolloutObservation, device: torch.device
+    prompt: RolloutPrompt, device: torch.device
 ) -> dict[str, torch.Tensor]:
-    """Turn one rollout observation into HuggingFace ``generate`` inputs.
+    """Turn one rollout prompt into HuggingFace ``generate`` inputs.
 
-    ``attention_mask`` is taken from the observation when present (e.g. a padded
+    ``attention_mask`` is taken from the prompt when present (e.g. a padded
     batch) and derived as all-ones otherwise (a single unpadded row, the
-    ``RolloutHarness`` observation shape).
+    ``RolloutHarness`` prompt shape).
 
-    :param observation: The observation to prepare.
-    :type observation: RolloutObservation
+    :param prompt: The prompt to prepare.
+    :type prompt: RolloutPrompt
     :param device: The device to move the tensors to.
     :type device: torch.device
     :return: ``input_ids`` / ``attention_mask`` moved to ``device``.
     :rtype: dict[str, torch.Tensor]
     """
-    input_ids = observation["input_ids"].to(device)
-    attention_mask = observation.get("attention_mask")
+    input_ids = prompt["input_ids"].to(device)
+    attention_mask = prompt.get("attention_mask")
     return {
         "input_ids": input_ids,
         "attention_mask": (

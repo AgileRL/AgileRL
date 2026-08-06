@@ -137,11 +137,11 @@ class TestCollectRolloutsLlmOrdering:
                 """Return a one-token prompt that uniquely marks this trajectory."""
                 del seed
                 self.done = False
-                self.current_observation = {
+                self.current_prompt = {
                     "input_ids": torch.tensor([[self.prompt_token]], dtype=torch.long),
                     "attention_mask": torch.ones(1, 1, dtype=torch.long),
                 }
-                return self.current_observation, {}
+                return self.current_prompt, {}
 
             def step(
                 self,
@@ -153,7 +153,7 @@ class TestCollectRolloutsLlmOrdering:
                 self._seen_token = int(full_completion[0, 0].item())
                 self.turn_boundaries = [(0, 1, 0)]
                 self.done = True
-                self.current_observation = {}
+                self.current_prompt = {}
                 return {}, 1.0, True, False, {}
 
             def get_episode_data(

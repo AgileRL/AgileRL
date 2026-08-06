@@ -48,7 +48,7 @@ from agilerl.utils.llm_utils import (
     clipped_is_surrogate,
     masked_mean,
     masked_whiten,
-    normalize_observation_batch,
+    normalize_prompt_batch,
     pool_by_turns,
     prepare_prompt_hf_generate,
     resolve_llm_device,
@@ -422,7 +422,7 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
             the captured per-row sampling logprobs; otherwise it is ``None``.
         :rtype: ActionResult
         """
-        observations = normalize_observation_batch(obs)
+        prompts = normalize_prompt_batch(obs)
         # Capture vLLM sampling logprobs only for training rollouts when the
         # mismatch correction is enabled; ``None`` on the HF path / eval.
         sampling_logps: list[torch.Tensor | None] | None = None
@@ -444,16 +444,12 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
 
                     for start in range(
                         0,
-                        len(observations),
+                        len(prompts),
                         self.hf_generate_chunk_size,
                     ):
-                        chunk = observations[
-                            start : start + self.hf_generate_chunk_size
-                        ]
-                        for observation in chunk:
-                            prompt = prepare_prompt_hf_generate(
-                                observation, actor_device
-                            )
+                        chunk = prompts[start : start + self.hf_generate_chunk_size]
+                        for prompt in chunk:
+                            prompt = prepare_prompt_hf_generate(prompt, actor_device)
                             input_ids = prompt["input_ids"]
                             attention_mask = prompt["attention_mask"]
                             token_ids = self.actor.generate(
@@ -478,7 +474,7 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
                 ) = self._generate_with_vllm_colocate(
                     # ReasoningPrompts is a TypedDict, i.e. a plain dict at
                     # runtime; the base helper takes untyped prompt dicts.
-                    observations,
+                    prompts,
                     1,
                     temperature=self.temperature
                     if training

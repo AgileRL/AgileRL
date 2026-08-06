@@ -60,7 +60,7 @@ class IsDataclass(Protocol):
 
 
 # ── TypedDicts: LLM prompts, checkpoint & mutation payloads ──────────────────
-class RolloutObservation(TypedDict):
+class RolloutPrompt(TypedDict):
     """What the policy is shown for one generation turn: the transcript so far, tokenized.
 
     :param input_ids: ``(1, T)`` initial prompt plus every generation and env
@@ -165,7 +165,7 @@ ArrayDict = dict[str, npt.NDArray]
 ArrayTuple = tuple[npt.NDArray, ...]
 KernelSizeType = int | tuple[int, ...]
 GymSpaceType = SupportedObservationSpace | list[SupportedObservationSpace]
-LLMObsType = list[RolloutObservation] | RolloutObservation
+LLMObsType = list[RolloutPrompt] | RolloutPrompt
 
 # ── Observation & action aliases ─────────────────────────────────────────────
 NumpyObsType = npt.NDArray | ArrayDict | ArrayTuple

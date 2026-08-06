@@ -52,7 +52,7 @@ from agilerl.utils.llm_utils import (
     build_completion_mask,
     masked_mean,
     masked_whiten,
-    normalize_observation_batch,
+    normalize_prompt_batch,
     pool_log_ratio_by_level,
     prepare_prompt_hf_generate,
     validate_importance_sampling_level,
@@ -449,7 +449,7 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
             logprobs for the mismatch correction.
         :rtype: ActionResult
         """
-        observations = normalize_observation_batch(obs)
+        prompts = normalize_prompt_batch(obs)
         group_size = self.group_size if training and repeat_prompts else 1
         # Capture vLLM sampling logprobs only for training rollouts when the
         # mismatch correction is enabled; ``None`` on the HF path / eval.
@@ -471,16 +471,12 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
 
                     for start in range(
                         0,
-                        len(observations),
+                        len(prompts),
                         self.hf_generate_chunk_size,
                     ):
-                        chunk = observations[
-                            start : start + self.hf_generate_chunk_size
-                        ]
-                        for observation in chunk:
-                            prompt = prepare_prompt_hf_generate(
-                                observation, actor_device
-                            )
+                        chunk = prompts[start : start + self.hf_generate_chunk_size]
+                        for prompt in chunk:
+                            prompt = prepare_prompt_hf_generate(prompt, actor_device)
                             input_ids = prompt["input_ids"]
                             attention_mask = prompt["attention_mask"]
                             if training and group_size > 1:
@@ -506,7 +502,7 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
                     completion_masks,
                     sampling_logps,
                 ) = self._generate_with_vllm_colocate(
-                    observations,
+                    prompts,
                     group_size,
                     temperature=self.temperature
                     if training
