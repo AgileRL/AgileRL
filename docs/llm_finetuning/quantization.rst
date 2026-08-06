@@ -80,10 +80,9 @@ When you train with QLoRA and a colocated vLLM rollout, the trainer and the
 rollout engine each hold their own copy of the (quantized) base on the same
 GPU and take turns using it (see :ref:`colocated_native_sleep` below). Every
 training step only the small LoRA adapter weights are exported from the trainer
-and loaded into vLLM (see :class:`~agilerl.utils.algo_utils.VLLMConfig` with
-``enable_lora=True``, the default). The quantized base weights stay frozen in
-4-bit; they are never dequantized, merged, or re-uploaded. This keeps the
-per-step sync cheap.
+and loaded into vLLM; a colocated engine always serves LoRA, so there is
+nothing to enable. The quantized base weights stay frozen in 4-bit; they are
+never dequantized, merged, or re-uploaded. This keeps the per-step sync cheap.
 
 .. _colocated_native_sleep:
 
@@ -247,7 +246,6 @@ for colocated QLoRA rollouts:
         gpu_memory_utilization=0.3,
         quantization="bitsandbytes",   # AgileRL-validated path
         dtype="bfloat16",
-        enable_lora=True,              # sync adapters only (default)
         max_lora_rank=16,              # >= trainer lora_config.r
     )
 
@@ -265,7 +263,6 @@ paths typically need a pre-quantized checkpoint, set separately via
     vllm_config = VLLMConfig(
         quantization="awq",
         vllm_model_name_or_path="my-org/Qwen2.5-7B-AWQ",
-        enable_lora=True,
     )
 
 ``vllm_model_name_or_path`` lets the rollout load a different checkpoint from
@@ -329,7 +326,6 @@ A typical memory-constrained QLoRA + colocated-vLLM setup on A100:
         gpu_memory_utilization=0.3,
         quantization="bitsandbytes",
         dtype="bfloat16",
-        enable_lora=True,
         max_lora_rank=16,
     )
 
