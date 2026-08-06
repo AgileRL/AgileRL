@@ -97,8 +97,8 @@ from agilerl.typing import (
     coerce_action_mask,
 )
 from agilerl.utils.distributed import (
+    CPUOffloadOptimizer,
     FSDPConfig,
-    apply_fsdp2,
     barrier,
     broadcast_object_list,
     get_local_rank,
@@ -106,6 +106,7 @@ from agilerl.utils.distributed import (
     get_world_size,
     init_distributed,
     is_main_process,
+    materialize_fsdp2_from_cpu_state,
     resolve_device,
     set_seed,
     sync_grads,
@@ -193,9 +194,12 @@ if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
         is_fsdp_sharded,
         load_full_state_dict,
         log_cuda_memory_snapshot,
+        materialize_dtensors,
         move_params_to_cpu,
         move_params_to_gpu,
         offload_colocated_trainer_from_gpu,
+        save_lora_adapters,
+        load_lora_adapters,
         save_peft_adapter_for_vllm_rollout,
         stitch_completion_after_windowed_vllm_generate,
     )
@@ -2856,18 +2860,13 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         model_ref = self._get_unwrapped_actor()
         state_dict = {}
         if lora_only:
-            # Adapter-only gather: avoid materialising the full base under FSDP2.
-            adapter_params = get_lora_params(model_ref)
-            if self.use_value_head:
-                adapter_params = adapter_params + [
-                    p for n, p in model_ref.named_parameters() if "v_head" in n
-                ]
-            with gather_params(adapter_params):
-                model_ref.save_pretrained(
-                    save_directory=path,
-                    selected_adapters=self.selected_adapters,
-                    is_main_process=is_main_process(),
-                )
+            save_lora_adapters(
+                model=model_ref,
+                path=path,
+                selected_adapters=self.selected_adapters,
+                use_value_head=self.use_value_head,
+                is_main=is_main_process(),
+            )
         else:
             # Full-model checkpoint: gather (FSDP2-aware) and inject the
             # state_dict into attributes.pt. The actor is not an
@@ -2876,7 +2875,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             state_dict = {
                 "actor_cls": model_ref.__class__,
                 "actor_init_dict": None,
-                "actor_state_dict": get_state_dict(model_ref),
+                "actor_state_dict": get_state_dict(model_ref, cpu_offload=True),
                 "actor_module_dict_cls": None,
             }
 
@@ -2995,6 +2994,11 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
                 )
                 raise ValueError(msg)
             model_ref = self._get_unwrapped_actor()
+            # Keep consolidated checkpoint tensors on CPU; FSDP scatters shards.
+            actor_state_dict = {
+                key: value.detach().cpu() if isinstance(value, torch.Tensor) else value
+                for key, value in actor_state_dict.items()
+            }
             load_full_state_dict(model_ref, actor_state_dict, strict=True)
 
         if load_optimizer:
@@ -3054,6 +3058,14 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         for adapter in self.selected_adapters:
             if (Path(path) / adapter).exists():
                 self._load_adapter_weights(path, adapter)
+
+        if "actor" in self.selected_adapters:
+            unwrapped = self._get_unwrapped_actor()
+            peft_model = unwrapped.pretrained_model if self.use_value_head else unwrapped
+            peft_model.set_adapter("actor")
+            for name, param in unwrapped.named_parameters():
+                if "reference" in name:
+                    param.requires_grad = False
 
         if "reference" in self.selected_adapters and overwrite_reference_adapter:
             self._copy_adapter_weights(
@@ -3131,16 +3143,29 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             lr_name="lr" if self.lr_critic is None else ("lr_actor", "lr_critic"),
         )
 
-    def _gathered_optimizer_state_dict(self) -> dict[str, Any]:
+    def _gathered_optimizer_state_dict(self, cpu_offload: bool = True) -> dict[str, Any]:
         """Return the optimizer state dict, gathering FSDP2-sharded state to
         full tensors so checkpoints are rank-count independent.
 
+        Under FSDP2, ``cpu_offload`` must be ``True`` so the consolidated
+        state lands on rank-0 CPU only (never a full GPU gather on all ranks).
+
+        :param cpu_offload: If True, materialise on CPU (rank 0 only).
+        :type cpu_offload: bool
         :return: Full optimizer state dict.
         :rtype: dict[str, Any]
         """
         model_ref = self._get_unwrapped_actor()
         if not is_fsdp_sharded(model_ref):
             return self.optimizer.state_dict()
+        if not cpu_offload:
+            msg = (
+                "_gathered_optimizer_state_dict(cpu_offload=False) is not "
+                "supported for FSDP2 models: consolidating optimizer state on "
+                "GPU on every rank undermines sharded training. Use "
+                "cpu_offload=True."
+            )
+            raise ValueError(msg)
 
         from torch.distributed.checkpoint.state_dict import (
             StateDictOptions,
@@ -3162,28 +3187,73 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         """Load a full optimizer state dict, distributing it onto FSDP2 shards
         when the actor is sharded.
 
+        For FSDP2 models the state is scattered into DTensor local shards
+        manually rather than via ``set_optimizer_state_dict``, which fails with
+        "Expected device to be set" when the optimizer has not been
+        pre-initialised via ``set_model_state_dict``.
+
         :param optimizer_state: Full optimizer state dict.
         :type optimizer_state: dict[str, Any]
         """
+        from torch.distributed.tensor import distribute_tensor
+
         model_ref = self._get_unwrapped_actor()
         if not is_fsdp_sharded(model_ref):
             self.optimizer.load_state_dict(optimizer_state)
             return
 
-        from torch.distributed.checkpoint.state_dict import (
-            StateDictOptions,
-            set_optimizer_state_dict,
-        )
-
         inner_optimizer = getattr(
             self.optimizer.optimizer, "optimizer", self.optimizer.optimizer
         )
-        set_optimizer_state_dict(
-            model_ref,
-            inner_optimizer,
-            optimizer_state,
-            options=StateDictOptions(full_state_dict=True),
-        )
+
+        # Build FQN → parameter mapping for the live model.
+        fqn_to_param = {}
+        for name, param in model_ref.named_parameters():
+            fqn_to_param[name] = param
+
+        saved_state = optimizer_state.get("state", {})
+        param_groups = optimizer_state.get("param_groups", inner_optimizer.param_groups)
+
+        # Clear any stale optimizer state so the load starts from a clean slate.
+        inner_optimizer.state.clear()
+
+        with torch.no_grad():
+            for group in inner_optimizer.param_groups:
+                for param in group["params"]:
+                    if not param.requires_grad:
+                        continue
+                    # Find the FQN for this parameter object.
+                    fqn = None
+                    for name, p in fqn_to_param.items():
+                        if p is param:
+                            fqn = name
+                            break
+                    if fqn is None or fqn not in saved_state:
+                        continue
+
+                    saved_entry = saved_state[fqn]
+                    inner_optimizer.state[param] = {}
+
+                    for sk in ("step", "exp_avg", "exp_avg_sq"):
+                        if sk not in saved_entry:
+                            continue
+                        saved_val = saved_entry[sk]
+                        if hasattr(param, "device_mesh") and saved_val.dim() > 0:
+                            # DTensor with a non-scalar state: scatter onto mesh.
+                            target_device = param.device_mesh.device_type
+                            saved_val = saved_val.to(target_device)
+                            sharded = distribute_tensor(
+                                saved_val, param.device_mesh, param.placements
+                            )
+                            inner_optimizer.state[param][sk] = sharded
+                        else:
+                            # Scalar state (step) or plain tensor: copy directly.
+                            inner_optimizer.state[param][sk] = saved_val.to(param.device)
+
+        offload_wrapper = getattr(self.optimizer.optimizer, "_move_states", None)
+        if callable(offload_wrapper):
+            offload_wrapper("cpu")
+            self.optimizer.optimizer._initialized = True
 
 
     @classmethod
@@ -3223,9 +3293,30 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             "Actor is set to None, please check that the actor is defined."
         )
         if self.distributed and self.fsdp_config is not None:
+            if self.fsdp_config.cpu_offload and self.fsdp_config.optim_cpu_offload:
+                raise ValueError(
+                    "FSDPConfig.cpu_offload and optim_cpu_offload are mutually "
+                    "exclusive: cpu_offload already moves optimizer states to "
+                    "CPU. Set only one of them."
+                )
+            if self.fsdp_config.cpu_offload and not self.use_vllm:
+                raise ValueError(
+                    "FSDP2 full cpu_offload requires vLLM for generation "
+                    "(use_vllm=True). HuggingFace generate is not supported "
+                    "with CPUOffloadPolicy because it assumes model params live "
+                    "on the compute device. Either enable vLLM or use "
+                    "optim_cpu_offload instead (params stay on GPU)."
+                )
             self._restore_adapter_trainability(["actor", "critic"])
-            self.actor = apply_fsdp2(self.actor, self.fsdp_config)
+            # CPU (or meta) → shard → empty local shards on device → scatter.
+            # Never densifies the full actor on CUDA.
+            self.actor = materialize_fsdp2_from_cpu_state(
+                self.actor, self.device, self.fsdp_config
+            )
             self._rebuild_optimizer_after_load()
+            if self.fsdp_config.optim_cpu_offload:
+                inner = self.optimizer._single_optimizer()
+                self.optimizer.optimizer = CPUOffloadOptimizer(inner)
             self.lr_scheduler = (
                 create_warmup_cosine_scheduler(
                     self.optimizer._single_optimizer(),
@@ -3279,10 +3370,10 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
     def clone(self, index: int | None = None, wrap: bool = True) -> Self:
         """Create a clone of the algorithm.
 
-        QLoRA / bitsandbytes bases cannot round-trip through a dense
-        ``clone_llm`` state dict (packed ``Params4bit``). Those clones rebuild
-        the base via ``from_pretrained`` and transfer only adapter (+ value
-        head) weights from a temporary directory.
+        QLoRA clones rebuild the base via ``from_pretrained`` and transfer
+        only adapter (+ value head) weights. FSDP2 clones copy a rank-0 CPU
+        full state dict onto a fresh CPU actor, then shard — the full model
+        never lands on GPU.
 
         :param index: The index of the clone, defaults to None
         :type index: int | None, optional
@@ -3293,7 +3384,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         :return: A clone of the algorithm
         :rtype: EvolvableAlgorithm
         """
-        if self._uses_quantized_clone_rebuild():
+        if self._uses_adapter_clone_rebuild():
             with tempfile.TemporaryDirectory() as temp_dir:
                 work_dir = self._resolve_clone_work_dir(temp_dir)
                 self._save_clone_adapter_weights(work_dir)
@@ -3308,9 +3399,11 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
                     clone_actor = clone._get_unwrapped_actor()
                     parent_actor = self._get_unwrapped_actor()
                     with gather_params(list(parent_actor.v_head.parameters())):
-                        clone_actor.v_head.load_state_dict(
-                            parent_actor.v_head.state_dict()
-                        )
+                        v_head_state = {
+                            key: value.detach().cpu()
+                            for key, value in parent_actor.v_head.state_dict().items()
+                        }
+                    clone_actor.v_head.load_state_dict(v_head_state)
                 clone.wrap_models()
                 self._restore_clone_optimizer_and_scheduler(clone)
                 barrier()
@@ -3340,34 +3433,34 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         paths = [temp_dir]
         return broadcast_object_list(paths, src=0)[0]
 
-    def _uses_quantized_clone_rebuild(self) -> bool:
-        """Whether clone should rebuild the actor from pretrained + BitsAndBytes.
+    def _uses_adapter_clone_rebuild(self) -> bool:
+        """Whether clone rebuilds from pretrained and copies adapters only.
 
-        QLoRA / bitsandbytes bases store packed ``Params4bit`` tensors. A dense
-        ``clone_llm`` shell cannot load those shapes, so quantized clones reload
-        the base via ``from_pretrained`` and transfer only adapter state.
+        Used for QLoRA / bitsandbytes bases (packed ``Params4bit`` cannot
+        round-trip a dense ``clone_llm`` state dict). FSDP2 clones use a
+        CPU full-state broadcast instead — see :meth:`_clone_actor_network`.
         """
         return self.quantization_config is not None
 
+    def _uses_quantized_clone_rebuild(self) -> bool:
+        """Whether clone rebuilds because of a bitsandbytes-quantized base."""
+        return self.quantization_config is not None
+
     def _save_clone_adapter_weights(self, work_dir: str) -> None:
-        """Persist PEFT adapters for a quantized rebuild-from-pretrained clone.
+        """Persist PEFT adapters for an adapter-only rebuild-from-pretrained clone.
 
         :param work_dir: Shared clone workspace directory.
         :type work_dir: str
         """
         adapter_dir = f"{work_dir}/adapters"
         model_ref = self._get_unwrapped_actor()
-        adapter_params = get_lora_params(model_ref)
-        if self.use_value_head:
-            adapter_params = adapter_params + [
-                p for n, p in model_ref.named_parameters() if "v_head" in n
-            ]
-        with gather_params(adapter_params):
-            model_ref.save_pretrained(
-                save_directory=adapter_dir,
-                selected_adapters=self.selected_adapters,
-                is_main_process=is_main_process(),
-            )
+        save_lora_adapters(
+            model=model_ref,
+            path=adapter_dir,
+            selected_adapters=self.selected_adapters,
+            use_value_head=False,
+            is_main=is_main_process(),
+        )
         barrier()
 
     def _load_clone_adapter_weights(self, work_dir: str) -> None:
@@ -3383,9 +3476,9 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
     def _create_clone_instance(self) -> Self:
         """Instantiate a clone with cloned actor weights and runtime args.
 
-        Quantized clones pass ``actor_network=None`` so init reloads the base
-        with ``BitsAndBytesConfig`` and re-attaches fresh adapters; adapter
-        weights are restored from disk before ``wrap_models``.
+        Adapter-rebuild clones (QLoRA / FSDP2) pass ``actor_network=None`` so
+        init reloads the base and re-attaches fresh adapters; adapter weights
+        are restored from disk before ``wrap_models``.
 
         :return: Newly constructed clone instance.
         :rtype: Self
@@ -3396,18 +3489,26 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         )
         input_args["wrap"] = False
         input_args["clone"] = True
-        if self._uses_quantized_clone_rebuild():
+        if self._uses_adapter_clone_rebuild():
             input_args["actor_network"] = None
             input_args["model_name"] = self.pretrained_model_name_or_path
         else:
             input_args["actor_network"] = self._clone_actor_network()
         return type(self)(**input_args)
 
+    def _broadcast_cpu_state_dict(
+        self, state_dict: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Share a rank-0 CPU state dict with every rank (host memory only)."""
+        payload: list[Any] = [state_dict]
+        return broadcast_object_list(payload, src=0)[0]
+
     def _clone_actor_network(self) -> Any:  # noqa: ANN401 -- returns a heterogeneous HF/PEFT/value-head actor wrapper
         """Clone actor network while preserving value-head state when enabled.
 
-        Parameters are captured as a full state dict (FSDP2-sharded weights
-        are gathered) and loaded into a freshly-constructed model.
+        Under FSDP2 the full state dict is gathered to rank-0 CPU, broadcast
+        to all ranks in host memory, and loaded into a fresh CPU actor. No
+        dense full-model replica is placed on GPU.
 
         :return: Cloned actor network suitable for clone instantiation.
         :rtype: Any
@@ -3417,13 +3518,22 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         if self.use_value_head:
             value_head_model = actor
             inner_peft = value_head_model.pretrained_model
-            cloned_inner = clone_llm(inner_peft, state_dict=get_state_dict(inner_peft))
+            inner_state = self._broadcast_cpu_state_dict(
+                get_state_dict(inner_peft, cpu_offload=True)
+            )
+            cloned_inner = clone_llm(inner_peft, state_dict=inner_state)
             cloned_model = type(value_head_model)(cloned_inner)
-            cloned_model.v_head.load_state_dict(get_state_dict(value_head_model.v_head))
+            v_head_state = self._broadcast_cpu_state_dict(
+                get_state_dict(value_head_model.v_head, cpu_offload=True)
+            )
+            cloned_model.v_head.load_state_dict(v_head_state)
             cloned_model.is_peft_model = True
             return cloned_model
 
-        return clone_llm(actor, state_dict=get_state_dict(actor))
+        full_state = self._broadcast_cpu_state_dict(
+            get_state_dict(actor, cpu_offload=True)
+        )
+        return clone_llm(actor, state_dict=full_state)
 
     def _copy_clone_attributes(self, clone: Self) -> Self:
         """Copy non-network attributes while preserving clone runtime members.
@@ -3494,7 +3604,12 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         :param clone: Clone instance receiving optimizer/scheduler states.
         :type clone: Self
         """
-        clone._load_gathered_optimizer_state_dict(self._gathered_optimizer_state_dict())
+        # cpu_offload gather returns state on rank 0 only; broadcast so every
+        # rank can participate in distribute_tensor during load.
+        opt_state = self._broadcast_cpu_state_dict(
+            self._gathered_optimizer_state_dict(cpu_offload=True)
+        )
+        clone._load_gathered_optimizer_state_dict(opt_state)
         if self.lr_scheduler is not None and clone.lr_scheduler is not None:
             clone.lr_scheduler.load_state_dict(self.lr_scheduler.state_dict())
 
@@ -3508,8 +3623,9 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
     ) -> list[Self]:
         """Create a population of LLM algorithms.
 
-        Builds agent 0 fully (loading the model from disk), then clones the actor
-        network for agents 1..N using :func:`clone_llm`.
+        Builds agent 0 fully (loading the model from disk), then clones for
+        agents 1..N. Under FSDP2 / QLoRA this uses adapter-only
+        :meth:`clone`; otherwise the actor is copied via :func:`clone_llm`.
 
         :param size: The size of the population.
         :type size: int
@@ -3529,10 +3645,15 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
 
         population: list[Self] = [agent_0]
         for i in range(1, size):
-            cloned_actor = clone_llm(
-                agent_0.actor,
-                state_dict=get_state_dict(agent_0.actor),
-            )
+            if agent_0._uses_adapter_clone_rebuild():
+                agent = agent_0.clone(index=i, wrap=bool(kwargs.get("wrap", True)))
+                if resume_from_checkpoint is not None:
+                    agent.load_checkpoint(resume_from_checkpoint)
+                    agent.index = i
+                population.append(agent)
+                continue
+            # FSDP-safe: CPU full state on rank 0 → broadcast → dense CPU clone.
+            cloned_actor = agent_0._clone_actor_network()
             clone_kwargs = dict(kwargs)
             clone_kwargs.pop("actor_network", None)
             agent = cls(
@@ -3739,6 +3860,48 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         )
         lm_head = self._get_lm_head()
         return fused_fn, lm_head.weight, lm_head.bias
+
+    def _lm_head_matmul_ctx(
+        self, hidden: torch.Tensor
+    ) -> AbstractContextManager[tuple[torch.Tensor, torch.Tensor | None]]:
+        """Context yielding ``(weight, bias)`` on ``hidden.device`` for the fused matmul.
+
+        FSDP2 ``CPUOffloadPolicy`` parks the sharded lm_head weight on CPU; the
+        fused logprob matmul reads the weight directly (bypassing the FSDP2
+        forward hook that all-gathers it), so the weight must be materialised
+        to a dense local and moved to the compute device. ``DTensor.full_tensor``
+        lands on the local shard's device (CPU under offload), hence the move.
+        No-op for plain tensors and for FSDP2 without offload.
+        """
+        _, lm_head_weight, lm_head_bias = self._fused_logprob_fn_and_head()
+        if (
+            self.distributed
+            and self.fsdp_config is not None
+            and self.fsdp_config.cpu_offload
+        ):
+            outer = self
+            head_ctx = materialize_dtensors(lm_head_weight, lm_head_bias)
+
+            @contextmanager
+            def _moved() -> Generator[tuple[torch.Tensor, torch.Tensor | None], None, None]:
+                with head_ctx as head_locals:
+                    w = head_locals[0] if len(head_locals) == 2 else lm_head_weight
+                    b = head_locals[1] if len(head_locals) == 2 else lm_head_bias
+                    if w is not None and w.device != hidden.device:
+                        w = w.to(hidden.device, non_blocking=True)
+                    if b is not None and b.device != hidden.device:
+                        b = b.to(hidden.device, non_blocking=True)
+                    yield w, b
+
+            return _moved()
+        else:
+            head_w, head_b = lm_head_weight, lm_head_bias
+
+            @contextmanager
+            def _passthrough() -> Generator[tuple[torch.Tensor, torch.Tensor | None], None, None]:
+                yield head_w, head_b
+
+            return _passthrough()
 
     def _warn_liger_non_token_is(
         self,
@@ -4054,9 +4217,9 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             model_config = (
                 dict(self.model_config) if isinstance(self.model_config, dict) else None
             )
-            # When trainer bnb quant is enabled, _initialize_colocated_vllm_and_actors
-            # loads the trainer before vLLM so bnb kernels do not run after vLLM sleep.
-            if (
+            # FSDP2 materializes shards in wrap_models; keep the dense load on CPU.
+            # Sleep-mode vLLM also needs the trainer on CPU until after engine init.
+            if self.fsdp_config is not None or (
                 self.use_vllm
                 and self.vllm_config is not None
                 and self.vllm_config.sleep_mode
@@ -4291,12 +4454,24 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
                         stacklevel=2,
                     )
                     self.gradient_checkpointing = False
+                if self.activation_offload:
+                    warnings.warn(
+                        "torch_compiler is incompatible with gradient_checkpointing; "
+                        "disabling activation offload for this run.",
+                        stacklevel=2,
+                    )
+                    self.activation_offload = False
                 actor = compile_model(actor, self.torch_compiler)
                 self.actor = actor
 
-        # FSDP2 shards in wrap_models after this; data-parallel and plain
-        # runs train the on-device model directly.
-        self.actor = actor.to(self.device)
+        # FSDP2 keeps the dense actor on CPU until wrap_models shards and
+        # materializes local shards only. DP / single-device move to compute now.
+        if self.fsdp_config is not None:
+            if any(param.device.type == "cuda" for param in actor.parameters()):
+                actor = actor.to("cpu")
+            self.actor = actor
+        else:
+            self.actor = actor.to(self.device)
 
         self.optimizer = OptimizerWrapper(
             AdamW,
@@ -4457,15 +4632,21 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
                 value = None
             del output
 
-            chunk_lp = fused_fn(
-                first[:, :-1],
-                lm_head_weight,
-                lm_head_bias,
-                fused_ids[start:end, 1:],
-                temperature=self.temperature,
-                cast_to_fp32=self.cast_logprobs_to_fp32,
-                chunk_rows=self.chunk_rows,
-            )
+            # FSDP2 with CPUOffloadPolicy parks the sharded lm_head weight on
+            # CPU; the fused matmul reads the weight directly (bypassing the
+            # FSDP2 forward hook that all-gathers it), so materialise a dense
+            # GPU local for the matmul. No-op for plain tensors and for FSDP2
+            # without offload (DTensor matmul already runs on GPU).
+            with self._lm_head_matmul_ctx(first) as (head_w, head_b):
+                chunk_lp = fused_fn(
+                    first[:, :-1],
+                    head_w,
+                    head_b,
+                    fused_ids[start:end, 1:],
+                    temperature=self.temperature,
+                    cast_to_fp32=self.cast_logprobs_to_fp32,
+                    chunk_rows=self.chunk_rows,
+                )
             del first
 
             chunk_v = (
@@ -4820,7 +5001,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             if self.calc_position_embeddings:
                 position_ids = self._position_ids_from_mask(attention_mask)
 
-            fused_fn, lm_head_weight, lm_head_bias = self._fused_logprob_fn_and_head()
+            fused_fn, _lm_head_weight, _lm_head_bias = self._fused_logprob_fn_and_head()
             # Pack only the gradient forward (the per-epoch hot path). The
             # no-grad old/reference passes stay padded so they are mutually
             # consistent; the packed-vs-padded gap for the current policy is the
@@ -4868,29 +5049,31 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
                 first = output[0] if isinstance(output, tuple) else output.logits
 
                 if packed is not None:
-                    packed_lp = fused_fn(
-                        first[:, :-1],
-                        lm_head_weight,
-                        lm_head_bias,
-                        packed.input_ids[:, 1:],
-                        temperature=self.temperature,
-                        cast_to_fp32=self.cast_logprobs_to_fp32,
-                        chunk_rows=self.chunk_rows,
-                    )
+                    with self._lm_head_matmul_ctx(first) as (head_w, head_b):
+                        packed_lp = fused_fn(
+                            first[:, :-1],
+                            head_w,
+                            head_b,
+                            packed.input_ids[:, 1:],
+                            temperature=self.temperature,
+                            cast_to_fp32=self.cast_logprobs_to_fp32,
+                            chunk_rows=self.chunk_rows,
+                        )
                     # Map back to the dense (mb, T-1) frame so the loss path is
                     # unchanged; cross-segment boundary predictions are dropped.
                     # unpack_logprobs reshapes the packed logprobs internally.
                     log_prob = unpack_logprobs(packed_lp, packed)
                 else:
-                    log_prob = fused_fn(
-                        first[:, :-1],
-                        lm_head_weight,
-                        lm_head_bias,
-                        batch_ids[:, 1:],
-                        temperature=self.temperature,
-                        cast_to_fp32=self.cast_logprobs_to_fp32,
-                        chunk_rows=self.chunk_rows,
-                    )
+                    with self._lm_head_matmul_ctx(first) as (head_w, head_b):
+                        log_prob = fused_fn(
+                            first[:, :-1],
+                            head_w,
+                            head_b,
+                            batch_ids[:, 1:],
+                            temperature=self.temperature,
+                            cast_to_fp32=self.cast_logprobs_to_fp32,
+                            chunk_rows=self.chunk_rows,
+                        )
 
                 first = None
                 batch_model_kwargs = None
@@ -5320,6 +5503,11 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             if capture_sampling_logps:
                 sampling_logps_flat = sampling_logps_flat[tp_slice]
 
+        # Per-row generated-token counts, parallel to the flat completion_ids
+        # list. Used to mark the completion span by position so the mask is
+        # correct when pad_token_id aliases eos_token_id.
+        gen_lens_flat: list[int] = [len(c) for c in completion_ids]
+
         # Transfer fromn host-to-device once per unique prompt, then re-alias across the group.
         unique_prompts_ids_dev = [
             prompts_ids[group_size * i].to(self.device, non_blocking=True)
@@ -5373,8 +5561,21 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         num_input_tokens = [
             int(prompts[i]["input_ids"].shape[1]) for i in range(len(prompts))
         ]
+        stitch_active = any(int(sp.shape[1]) > 0 for sp in stitch_prefixes)
         completion_masks = [
-            build_completion_mask(completion_id, num_input_tokens[i], self.pad_token_id)
+            build_completion_mask(
+                completion_id,
+                num_input_tokens[i],
+                self.pad_token_id,
+                completion_len=(
+                    None
+                    if stitch_active
+                    else torch.tensor(
+                        gen_lens_flat[group_size * i : group_size * (i + 1)],
+                        device=completion_id.device,
+                    )
+                ),
+            )
             for i, completion_id in enumerate(completion_ids)
         ]
 
@@ -5852,6 +6053,10 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         mismatch is rejected up-front by :meth:`_load_model_checkpoint`), so the
         adapter weights are loaded into the live adapter as-is.
 
+        For FSDP2-sharded models the loaded full tensors are scattered into
+        DTensor local shards via :func:`load_lora_adapters`. For non-sharded
+        models the PEFT ``set_peft_model_state_dict`` path is used.
+
         :param checkpoint_dir: Directory written by :meth:`save_checkpoint`; must contain
             ``<adapter_name>/adapter_model.safetensors``.
         :type checkpoint_dir: str
@@ -5864,14 +6069,23 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         unwrapped = self._get_unwrapped_actor()
         peft_model = unwrapped.pretrained_model if self.use_value_head else unwrapped
 
-        adapter_path = f"{checkpoint_dir}/{adapter_name}/adapter_model.safetensors"
-        adapter_state = load_file(adapter_path, device=str(self.device))
-
-        self._assert_not_sharded("Loading adapter weights")
-        with torch.no_grad():
-            set_peft_model_state_dict(
-                peft_model, adapter_state, adapter_name=adapter_name
+        if is_fsdp_sharded(unwrapped):
+            load_lora_adapters(
+                model=unwrapped,
+                path=checkpoint_dir,
+                adapter_name=adapter_name,
+                device=self.device,
             )
+        else:
+            # Pre-wrap FSDP actors stay on CPU; load adapters there too.
+            load_device = "cpu" if self.fsdp_config is not None else str(self.device)
+            adapter_path = f"{checkpoint_dir}/{adapter_name}/adapter_model.safetensors"
+            adapter_state = load_file(adapter_path, device=load_device)
+            with torch.no_grad():
+                set_peft_model_state_dict(
+                    peft_model, adapter_state, adapter_name=adapter_name
+                )
+
         peft_model.set_adapter(adapter_name)
 
         for name, param in unwrapped.named_parameters():

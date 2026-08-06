@@ -20,6 +20,7 @@ from torch import nn
 
 from agilerl.utils import distributed as dmod
 from agilerl.utils.distributed import (
+    CPUOffloadOptimizer,
     FSDPConfig,
     all_reduce_mean,
     apply_fsdp2,
@@ -37,6 +38,24 @@ from agilerl.utils.distributed import (
     shard_dataloader_kwargs,
     sync_grads,
 )
+
+cuda_required = pytest.mark.skipif(
+    not torch.cuda.is_available(), reason="requires CUDA for state round-trip"
+)
+
+
+class _FakeDTensor:
+    """Lightweight DTensor stand-in: carries a ``_local_tensor`` and records
+    ``full_tensor()`` calls so tests can assert DTensor-aware state movement
+    without a real distributed tensor."""
+
+    def __init__(self, local_tensor: torch.Tensor):
+        self._local_tensor = local_tensor
+        self.full_tensor_calls = 0
+
+    def full_tensor(self) -> torch.Tensor:
+        self.full_tensor_calls += 1
+        return self._local_tensor
 
 _DIST_ENV = ("RANK", "LOCAL_RANK", "WORLD_SIZE", "MASTER_ADDR", "MASTER_PORT")
 
@@ -475,3 +494,183 @@ class TestApplyFsdp2:
             pytest.raises(RuntimeError, match="distributed support"),
         ):
             apply_fsdp2(nn.Linear(2, 2))
+
+
+class TestCPUOffloadOptimizer:
+    """Behavior of the optimizer-state CPU offload wrapper.
+
+    Uses a real ``nn.Linear`` + ``torch.optim.AdamW`` so state tensors are real;
+    ``fully_shard`` is never involved. CUDA-only round-trips are skipped on
+    CPU-only hosts.
+    """
+
+    def _make_optimizer(self, device: str) -> tuple[nn.Module, torch.optim.AdamW]:
+        model = nn.Linear(4, 4).to(device)
+        opt = torch.optim.AdamW(model.parameters(), lr=1e-3)
+        return model, opt
+
+    def _step_once(self, model: nn.Module, opt: torch.optim.Optimizer, device: str):
+        x = torch.randn(2, 4, device=device)
+        y = model(x).sum()
+        y.backward()
+        opt.step()
+        opt.zero_grad()
+
+    def test_step_first_call_runs_underlying_and_moves_states_to_cpu(self):
+        # Arrange — CPU model; first step creates states, then moves to CPU
+        model, opt = self._make_optimizer("cpu")
+        offload = CPUOffloadOptimizer(opt, pin_memory=False)
+
+        # Act
+        self._step_once(model, offload, "cpu")
+
+        # Assert — AdamW states exist and live on CPU
+        assert offload._initialized is True
+        for state in offload.state.values():
+            for v in state.values():
+                assert isinstance(v, torch.Tensor)
+                assert v.device.type == "cpu"
+
+    @cuda_required
+    def test_step_subsequent_calls_round_trip_via_cuda(self):
+        # Arrange — params on CUDA; first step parks states on CPU
+        model, opt = self._make_optimizer("cuda")
+        offload = CPUOffloadOptimizer(opt, pin_memory=True)
+        self._step_once(model, offload, "cuda")
+        # states now on CPU (pinned)
+        first_state = next(iter(offload.state.values()))
+        assert first_state["exp_avg"].device.type == "cpu"
+
+        # Act — second step moves states to CUDA, runs, moves back to CPU
+        self._step_once(model, offload, "cuda")
+
+        # Assert — states back on CPU after the round-trip
+        for state in offload.state.values():
+            for v in state.values():
+                assert v.device.type == "cpu"
+
+    def test_step_with_pin_memory_false_does_not_pin(self):
+        # Arrange
+        model, opt = self._make_optimizer("cpu")
+        offload = CPUOffloadOptimizer(opt, pin_memory=False)
+
+        # Act
+        self._step_once(model, offload, "cpu")
+
+        # Assert — states on CPU but not pinned
+        for state in offload.state.values():
+            for v in state.values():
+                assert v.is_pinned() is False
+
+    @cuda_required
+    def test_state_dict_returns_snapshot_and_round_trips_back_to_cpu(self):
+        # Arrange
+        model, opt = self._make_optimizer("cuda")
+        offload = CPUOffloadOptimizer(opt, pin_memory=True)
+        self._step_once(model, offload, "cuda")
+
+        # Act
+        sd = offload.state_dict()
+
+        # Assert — snapshot captured; live states back on CPU after the call
+        assert "state" in sd
+        assert sd["state"], "state dict should contain optimizer states"
+        for state in offload.state.values():
+            for v in state.values():
+                assert v.device.type == "cpu"
+
+    def test_state_dict_before_init_returns_inner_state_without_move(self):
+        # Arrange — no step yet; _initialized is False
+        model, opt = self._make_optimizer("cpu")
+        offload = CPUOffloadOptimizer(opt, pin_memory=False)
+
+        # Act
+        sd = offload.state_dict()
+
+        # Assert — returns inner state dict; state is empty (no step yet)
+        assert offload._initialized is False
+        assert sd["state"] == {}
+        assert len(sd["param_groups"]) == len(opt.param_groups)
+        assert sd["param_groups"][0]["lr"] == opt.param_groups[0]["lr"]
+
+    @cuda_required
+    def test_load_state_dict_marks_initialized_and_moves_to_cpu(self):
+        # Arrange — capture a state dict from a stepped optimizer
+        model_a, opt_a = self._make_optimizer("cuda")
+        offload_a = CPUOffloadOptimizer(opt_a, pin_memory=True)
+        self._step_once(model_a, offload_a, "cuda")
+        sd = offload_a.state_dict()
+
+        # Act — load into a fresh optimizer, then step (skips init branch)
+        model_b, opt_b = self._make_optimizer("cuda")
+        offload_b = CPUOffloadOptimizer(opt_b, pin_memory=True)
+        offload_b.load_state_dict(sd)
+        assert offload_b._initialized is True
+        # states loaded then moved to CPU
+        for state in offload_b.state.values():
+            for v in state.values():
+                assert v.device.type == "cpu"
+
+        # subsequent step round-trips via CUDA (init branch skipped)
+        self._step_once(model_b, offload_b, "cuda")
+        for state in offload_b.state.values():
+            for v in state.values():
+                assert v.device.type == "cpu"
+
+    def test_move_states_handles_dtensor_local_tensor(self, monkeypatch):
+        # Arrange — point dmod.DTensor at our stub so isinstance() passes
+        monkeypatch.setattr(dmod, "DTensor", _FakeDTensor)
+        model, opt = self._make_optimizer("cpu")
+        offload = CPUOffloadOptimizer(opt, pin_memory=False)
+
+        # Act — run a real step so AdamW creates states, then inject a
+        # FakeDTensor for one state entry and move to CPU
+        self._step_once(model, offload, "cpu")
+        p = next(iter(offload.state))
+        original_local = offload.state[p]["exp_avg"].clone()
+        original_dt = _FakeDTensor(original_local)
+        offload.state[p]["exp_avg"] = original_dt
+
+        offload._move_states("cpu")
+
+        # Assert — new wrapper instance, local moved, original untouched
+        new_dt = offload.state[p]["exp_avg"]
+        assert isinstance(new_dt, _FakeDTensor)
+        assert new_dt is not original_dt
+        assert new_dt._local_tensor.device.type == "cpu"
+        assert torch.equal(original_dt._local_tensor, original_local)
+
+    def test_zero_grad_delegates_to_inner(self):
+        # Arrange
+        model, opt = self._make_optimizer("cpu")
+        offload = CPUOffloadOptimizer(opt, pin_memory=False)
+        x = torch.randn(2, 4)
+        model(x).sum().backward()
+        assert any(p.grad is not None for p in model.parameters())
+
+        # Act
+        offload.zero_grad()
+
+        # Assert — inner optimizer grads cleared
+        assert all(p.grad is None for p in model.parameters())
+
+    def test_base_optimizer_property_returns_inner(self):
+        # Arrange
+        _, opt = self._make_optimizer("cpu")
+        offload = CPUOffloadOptimizer(opt, pin_memory=False)
+
+        # Act / Assert
+        assert offload.base_optimizer is opt
+
+    def test_param_groups_property_reads_and_writes_inner(self):
+        # Arrange
+        _, opt = self._make_optimizer("cpu")
+        offload = CPUOffloadOptimizer(opt, pin_memory=False)
+
+        # Act / Assert — read reflects inner groups
+        assert offload.param_groups is opt.param_groups
+
+        # Act / Assert — setter writes through to inner
+        sentinel = [{"lr": 9e-1}]
+        offload.param_groups = sentinel
+        assert opt.param_groups is sentinel

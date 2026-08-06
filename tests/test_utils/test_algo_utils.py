@@ -2520,14 +2520,8 @@ class TestCloneLlm:
         peft_model = get_peft_model(base, lora_config)
         dummy = DummyEvolvable(device="cpu", module=peft_model)
 
-        with patch(
-            "agilerl.utils.algo_utils.gather_full_params", create=True
-        ) as mock_gather:
-            mock_gather.return_value.__enter__ = MagicMock(return_value=None)
-            mock_gather.return_value.__exit__ = MagicMock(return_value=False)
-            result = clone_llm(dummy)
+        result = clone_llm(dummy)
         assert result is not None
-        mock_gather.assert_not_called()
 
     @pytest.mark.skipif(
         not HAS_LLM_DEPENDENCIES, reason="LLM deps required for clone_llm"
@@ -2575,44 +2569,6 @@ class TestCloneLlm:
 
         assert isinstance(cloned, FakeBaseModel)
         assert cloned.disabled is True
-
-    def test_clone_llm_casts_lora_params_to_bfloat16(self, monkeypatch):
-        """Non-bf16 LoRA weights are cast to bf16 after get_peft_model."""
-        from peft import LoraConfig
-
-        default_config = LoraConfig(r=1)
-
-        class FakeBaseModel(torch.nn.Module):
-            def __init__(self, config):
-                super().__init__()
-                self.config = config
-                self.disabled = False
-                self.lora_A = torch.nn.Parameter(torch.ones(2, 2, dtype=torch.float32))
-
-            def disable_adapter(self):
-                self.disabled = True
-
-        class FakePeftModel:
-            def __init__(self):
-                self.config = SimpleNamespace()
-                self.model = FakeBaseModel(SimpleNamespace())
-                self.peft_config = {"default": default_config}
-
-        def fake_get_peft_model(model, first_config, adapter_name="actor", **kwargs):
-            assert kwargs.get("autocast_adapter_dtype") is False
-            return model
-
-        monkeypatch.setattr(algo_utils, "PeftModel", FakePeftModel)
-        monkeypatch.setattr(algo_utils, "get_peft_model", fake_get_peft_model)
-
-        cloned = clone_llm(
-            original_model=FakePeftModel(), state_dict=None
-        )
-
-        assert isinstance(cloned, FakeBaseModel)
-        assert cloned.lora_A.dtype == torch.bfloat16
-        assert cloned.disabled is True
-
 
 class TestDummyOptimizer:
     def test_zero_grad_raises_runtime_error(self):

@@ -66,7 +66,7 @@ def evaluate_hit_rate(
                     "attention_mask": prompt_encoded["attention_mask"],
                 }
                 prompt_len = prompt_dict["input_ids"].shape[1]
-                completion_ids, _ = agent.get_action([prompt_dict], training=False)
+                completion_ids, _, _ = agent.get_action([prompt_dict], training=False)
                 full_ids = completion_ids[0]
                 gen_tokens = full_ids[0, prompt_len:]
                 gen_text = tokenizer.decode(

@@ -81,6 +81,123 @@ def find_summaries(job_dir: Path) -> tuple[Path | None, Path | None]:
     return (ds[0] if ds else None, fs[0] if fs else None)
 
 
+def _load_jsonl(path: Path) -> list[dict[str, Any]]:
+    """Load a JSONL file into a list of dicts; empty list if missing."""
+    if not path.exists():
+        return []
+    rows: list[dict[str, Any]] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if line:
+            rows.append(json.loads(line))
+    return rows
+
+
+def _extract_curve(
+    rows: list[dict[str, Any]],
+    step_key: str = "train/global_step",
+    loss_keys: tuple[str, ...] = ("train/loss", "loss", "train/mean_loss"),
+) -> list[tuple[int, float]]:
+    """Pull (step, loss) pairs from JSONL rows, trying multiple key names."""
+    curve: list[tuple[int, float]] = []
+    for row in rows:
+        step = row.get(step_key)
+        if step is None:
+            for k in ("step", "global_step"):
+                if k in row:
+                    step = row[k]
+                    break
+        if step is None:
+            continue
+        loss = None
+        for k in loss_keys:
+            if k in row and row[k] is not None:
+                loss = row[k]
+                break
+        if loss is None:
+            continue
+        try:
+            curve.append((int(step), float(loss)))
+        except (ValueError, TypeError):
+            continue
+    return curve
+
+
+def compare_curves(
+    ds_rows: list[dict[str, Any]],
+    fsdp_rows: list[dict[str, Any]],
+    *,
+    max_rel_mae: float = 0.05,
+    min_overlap: int = 5,
+) -> dict[str, Any]:
+    """Compare per-step loss curves between DeepSpeed and FSDP2 runs.
+
+    Aligns the two curves by step index, computes per-step relative
+    absolute error, and reports MAE, max rel err, and a pass/fail flag.
+
+    :returns: Dict with keys ``pass``, ``mae``, ``max_rel_err``,
+        ``overlap``, ``ds_points``, ``fsdp_points``.
+    """
+    ds_curve = _extract_curve(ds_rows)
+    fs_curve = _extract_curve(fsdp_rows)
+
+    result: dict[str, Any] = {
+        "ds_points": len(ds_curve),
+        "fsdp_points": len(fs_curve),
+        "overlap": 0,
+        "mae": None,
+        "max_rel_err": None,
+        "pass": True,
+        "failures": [],
+    }
+
+    if not ds_curve or not fs_curve:
+        result["pass"] = False
+        result["failures"].append("missing curve data")
+        return result
+
+    ds_map = {s: v for s, v in ds_curve}
+    fs_map = {s: v for s, v in fs_curve}
+    common = sorted(set(ds_map) & set(fs_map))
+    result["overlap"] = len(common)
+
+    if len(common) < min_overlap:
+        result["pass"] = False
+        result["failures"].append(
+            f"overlap {len(common)} < min {min_overlap}"
+        )
+        return result
+
+    rel_errs: list[float] = []
+    for s in common:
+        ds_v = ds_map[s]
+        fs_v = fs_map[s]
+        rel_errs.append(_rel_err(fs_v, ds_v))
+
+    mae = sum(rel_errs) / len(rel_errs)
+    max_rel = max(rel_errs)
+    result["mae"] = mae
+    result["max_rel_err"] = max_rel
+
+    if mae > max_rel_mae:
+        result["pass"] = False
+        result["failures"].append(f"curve MAE {mae:.4f} > {max_rel_mae}")
+    if max_rel > max_rel_mae * 3:
+        result["pass"] = False
+        result["failures"].append(
+            f"curve max rel err {max_rel:.4f} > {max_rel_mae * 3:.4f}"
+        )
+
+    return result
+
+
+def find_metrics_jsonl(job_dir: Path) -> tuple[Path | None, Path | None]:
+    """Locate deepspeed and fsdp2 train_metrics.jsonl under a job directory."""
+    ds = list(job_dir.glob("deepspeed/**/train_metrics.jsonl"))
+    fs = list(job_dir.glob("fsdp2/**/train_metrics.jsonl"))
+    return (ds[0] if ds else None, fs[0] if fs else None)
+
+
 def main(argv: list[str] | None = None) -> int:
     """CLI entry."""
     parser = argparse.ArgumentParser(description=__doc__)
@@ -107,13 +224,32 @@ def main(argv: list[str] | None = None) -> int:
         speed_floor=args.speed_floor,
         vram_ceil=args.vram_ceil,
     )
-    report = {
+
+    report: dict[str, Any] = {
         "job_dir": str(args.job_dir),
         "deepspeed_summary": str(ds_path),
         "fsdp2_summary": str(fs_path),
         "pass": not failures,
         "failures": failures,
     }
+
+    ds_metrics_path, fs_metrics_path = find_metrics_jsonl(args.job_dir)
+    if ds_metrics_path and fs_metrics_path:
+        ds_rows = _load_jsonl(ds_metrics_path)
+        fs_rows = _load_jsonl(fs_metrics_path)
+        curve_result = compare_curves(
+            ds_rows, fs_rows, max_rel_mae=args.loss_rel_mae
+        )
+        report["curve_comparison"] = curve_result
+        report["deepspeed_metrics"] = str(ds_metrics_path)
+        report["fsdp2_metrics"] = str(fs_metrics_path)
+        if not curve_result["pass"]:
+            report["pass"] = False
+            report["failures"].extend(
+                f"curve: {f}" for f in curve_result["failures"]
+            )
+    else:
+        report["curve_comparison"] = {"skipped": True}
     out = args.job_dir / "compare.json"
     out.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     print(json.dumps(report, indent=2))

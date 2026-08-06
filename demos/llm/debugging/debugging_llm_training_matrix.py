@@ -395,7 +395,6 @@ def run_reasoning_case(case: MatrixCase, args: argparse.Namespace) -> None:
         verbose=False,
         max_steps=args.reasoning_steps,
         evaluation_interval=args.evaluation_interval,
-        accelerator=None,
         checkpoint_steps=args.checkpoint_steps,
         **_evolution_kwargs(case, args),
     )
@@ -422,7 +421,6 @@ def run_preference_case(case: MatrixCase, args: argparse.Namespace) -> None:
         verbose=False,
         max_steps=args.preference_steps,
         evaluation_interval=args.evaluation_interval,
-        accelerator=None,
         checkpoint_steps=args.checkpoint_steps,
         **_evolution_kwargs(case, args),
     )
@@ -461,7 +459,6 @@ def run_multiturn_case(case: MatrixCase, args: argparse.Namespace) -> None:
         verbose=False,
         evaluation_interval=args.evaluation_interval,
         checkpoint_steps=args.checkpoint_steps,
-        accelerator=None,
         **_evolution_kwargs(case, args),
     )
 

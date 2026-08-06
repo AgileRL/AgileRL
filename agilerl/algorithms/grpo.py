@@ -55,7 +55,7 @@ from agilerl.utils.llm_utils import (
     aggregate_metrics_dict,
     allreduce_minmax_int,
     attention_mask_from_padded_ids,
-    build_completion_mask,
+    build_hf_completion_mask,
     calculate_k3_kl,
     fill_outside_mask,
     is_reasoning_prompts,
@@ -65,7 +65,6 @@ from agilerl.utils.llm_utils import (
     normalize_reasoning_prompt_batch,
     pool_log_ratio_by_level,
     prepare_prompt_hf_generate,
-    stitch_completion_after_windowed_hf_generate,
     validate_importance_sampling_level,
     validate_llm_context_lengths,
 )
@@ -475,10 +474,17 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
             self.actor.eval()
             if not self.use_vllm:
                 actor_module = self._get_unwrapped_actor()
-                try:
-                    actor_device = next(actor_module.parameters()).device
-                except StopIteration:
+                # FSDP2 with CPUOffloadPolicy parks the sharded params on CPU
+                # but compute runs on the CUDA device set at init; probe the
+                # param device there would place generate inputs on CPU and
+                # break the embedding lookup, so use the configured device.
+                if self.distributed and self.fsdp_config is not None:
                     actor_device = torch.device(self.device)
+                else:
+                    try:
+                        actor_device = next(actor_module.parameters()).device
+                    except StopIteration:
+                        actor_device = torch.device(self.device)
                 with torch.no_grad(), self._amp_ctx():
                     completion_ids = []
                     completion_masks = []
@@ -514,21 +520,15 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
                                 attention_mask=attention_mask,
                                 generation_config=self.generation_config,
                             )
-                            completion_id, full_prompt_len = (
-                                stitch_completion_after_windowed_hf_generate(
-                                    completion_id,
-                                    stitch_ids,
-                                    initial_prompt_len,
-                                )
+                            completion_id, completion_mask = build_hf_completion_mask(
+                                completion_id,
+                                input_ids.shape[1],
+                                initial_prompt_len,
+                                stitch_ids,
+                                self.pad_token_id,
                             )
                             completion_ids.append(completion_id)
-                            completion_masks.append(
-                                build_completion_mask(
-                                    completion_id,
-                                    full_prompt_len,
-                                    self.pad_token_id,
-                                )
-                            )
+                            completion_masks.append(completion_mask)
             else:
                 self._prepare_vllm_for_generation()
                 (

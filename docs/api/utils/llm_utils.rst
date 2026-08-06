@@ -6,7 +6,6 @@ Gymnasium-style LLM datasets, see :mod:`agilerl.llm_envs` (also
 re-exported here for backwards compatibility).
 
 .. autofunction:: agilerl.utils.llm_utils.gather_params
-.. autofunction:: agilerl.utils.llm_utils.gather_full_params
 .. autofunction:: agilerl.utils.llm_utils.get_lora_params
 .. autofunction:: agilerl.utils.llm_utils.gather_if_zero3
 .. autofunction:: agilerl.utils.llm_utils.get_state_dict

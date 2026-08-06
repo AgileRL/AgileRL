@@ -32,10 +32,12 @@ from agilerl.utils.llm_utils import (
     adapt_lora_config_for_model,
     apply_pad_token_id,
     attention_mask_from_padded_ids,
+    hf_completion_lengths,
     build_bnb_quantization_config,
     build_clippable_linear_lora_target_regex,
     build_clippable_linear_lora_target_suffixes,
     build_completion_mask,
+    build_hf_completion_mask,
     build_scoped_lora_target_regex,
     build_vllm_llm_init_kwargs,
     build_vllm_rollout_lora_request,
@@ -50,7 +52,6 @@ from agilerl.utils.llm_utils import (
     fill_outside_mask,
     filter_peft_state_dict_for_vllm_lora,
     format_colocated_vllm_oom_hint,
-    gather_full_params,
     gather_if_ds_param,
     gather_if_zero3,
     gather_params,
@@ -817,51 +818,6 @@ class TestGatherParams:
 
             # Assert — original shard is restored on exit
             assert linear._parameters["weight"] is fake_dtensor
-
-
-class TestGatherFullParams:
-    def test_unshards_for_body_then_reshards(self):
-        class FakeFSDPModule(nn.Module):
-            def __init__(self, log, name):
-                super().__init__()
-                self.log = log
-                self.name = name
-
-            def unshard(self):
-                self.log.append(("unshard", self.name))
-
-            def reshard(self):
-                self.log.append(("reshard", self.name))
-
-        # Arrange
-        log: list[tuple[str, str]] = []
-        root = FakeFSDPModule(log, "root")
-        root.child = FakeFSDPModule(log, "child")
-
-        # Act
-        with patch.object(llm_utils_module, "FSDPModule", FakeFSDPModule):
-            with gather_full_params(root):
-                # Assert — every FSDP unit is unsharded for the body
-                assert ("unshard", "root") in log
-                assert ("unshard", "child") in log
-
-        # Assert — reshard on exit (LIFO)
-        assert log[-2:] == [("reshard", "child"), ("reshard", "root")]
-
-    def test_raises_on_fsdp1_modules(self):
-        class FakeFSDP1(nn.Module):
-            pass
-
-        # Arrange
-        model = FakeFSDP1()
-
-        # Act / Assert
-        with (
-            patch.object(llm_utils_module, "FullyShardedDataParallel", FakeFSDP1),
-            pytest.raises(NotImplementedError, match="only supports FSDP2"),
-        ):
-            with gather_full_params(model):
-                pass
 
 
 class TestGatherIfZero3:
@@ -2713,6 +2669,74 @@ class TestBuildCompletionMask:
         mask = build_completion_mask(completion, prompt_len=prompt_len, pad_token_id=0)
         assert mask.tolist() == [[True, True, False, False]]
 
+    def test_completion_len_marks_span_by_position_including_eos(self):
+        # pad_token_id == eos_token_id == 0; a real generated EOS at the end
+        # must be kept (legacy non-pad would drop it).
+        completion = torch.tensor(
+            [[10, 11, 12, 21, 22, 23, 0], [10, 11, 12, 31, 0, 0, 0]]
+        )
+        gen_lens = torch.tensor([4, 2])
+        mask = build_completion_mask(
+            completion, prompt_len=3, pad_token_id=0, completion_len=gen_lens
+        )
+        assert mask.shape == (2, 6)
+        assert mask[0].sum().item() == 4
+        assert mask[1].sum().item() == 2
+        # Mask count matches the per-row generation length (IS-correction contract).
+        assert mask.sum(dim=1).tolist() == gen_lens.tolist()
+
+    def test_completion_len_requires_nonzero_prompt_len(self):
+        completion = torch.tensor([[5, 6, 7]])
+        gen_lens = torch.tensor([2])
+        with pytest.raises(ValueError):
+            build_completion_mask(completion, prompt_len=0, pad_token_id=0, completion_len=gen_lens)
+
+
+class TestHfCompletionLengths:
+    def test_recovers_gen_len_including_stopping_eos_when_pad_aliases_eos(self):
+        # pad == eos == 0. Row0 stops on EOS after 3 gen tokens; row1 after 1.
+        out = torch.tensor(
+            [[10, 11, 12, 21, 22, 23, 0], [10, 11, 12, 31, 0, 0, 0]]
+        )
+        lens = hf_completion_lengths(out, prompt_len=3, pad_token_id=0)
+        assert lens.tolist() == [4, 2]
+
+    def test_row_that_hits_cap_has_no_pad_in_gen_region(self):
+        out = torch.tensor(
+            [[10, 11, 12, 41, 42, 43, 44], [10, 11, 12, 31, 0, 0, 0]]
+        )
+        lens = hf_completion_lengths(out, prompt_len=3, pad_token_id=0)
+        assert lens.tolist() == [4, 2]
+
+
+class TestBuildHfCompletionMask:
+    def test_stitched_mask_keeps_turn_boundary_eos_under_pad_eq_eos(self):
+        # windowed prompt = [initial(3) | recent_suffix(2)]; recent_suffix ends in EOS.
+        windowed = torch.tensor(
+            [[10, 11, 12, 21, 0, 61, 62, 0], [10, 11, 12, 21, 0, 61, 0, 0]]
+        )
+        stitch = torch.tensor([[99, 100], [99, 100]])
+        cid, mask = build_hf_completion_mask(
+            windowed, input_ids_len=5, initial_prompt_len=3,
+            stitch_ids=stitch, pad_token_id=0,
+        )
+        # full_prompt_len = 5; recent_suffix_len = 2; gen_len = [3, 2].
+        # Row0 span [5,10) -> 5 trues; row1 span [5,9) -> 4 trues.
+        assert mask[0].sum().item() == 5
+        assert mask[1].sum().item() == 4
+        # Legacy non-pad would drop both EOS tokens (recent_suffix EOS + gen EOS).
+        legacy = build_completion_mask(cid, prompt_len=5, pad_token_id=0)
+        assert legacy[0].sum().item() == 3
+        assert legacy[1].sum().item() == 2
+
+    def test_non_stitched_falls_back_to_simple_position_span(self):
+        out = torch.tensor([[10, 11, 12, 21, 22, 23, 0]])
+        cid, mask = build_hf_completion_mask(
+            out, input_ids_len=3, initial_prompt_len=3,
+            stitch_ids=None, pad_token_id=0,
+        )
+        assert mask[0].sum().item() == 4
+
 
 class TestCudaTensorBytesInModule:
     def test_cpu_module_reports_zero(self):
@@ -3112,6 +3136,72 @@ class TestSavePeftAdapterForVllmRollout:
                 "actor",
                 target_modules=["q_proj"],
             )
+
+    class _FakeDTensor:
+        """Stand-in for ``torch.distributed.tensor.DTensor``: records
+        ``full_tensor()`` calls so tests can assert materialisation."""
+
+        def __init__(self, tensor: torch.Tensor):
+            self._tensor = tensor
+            self.full_tensor_calls = 0
+
+        def full_tensor(self) -> torch.Tensor:
+            self.full_tensor_calls += 1
+            return self._tensor
+
+    def test_state_with_dtensor_entries_calls_full_tensor_before_save(
+        self, monkeypatch, tmp_path
+    ):
+        # Arrange — one DTensor entry + one plain tensor
+        materialized = torch.ones(2)
+        dt = self._FakeDTensor(materialized)
+        plain = torch.zeros(3)
+        state = {
+            "model.layers.0.q_proj.linear.lora_A.weight": dt,
+            "model.layers.0.q_proj.linear.lora_B.weight": plain,
+        }
+        calls = self._install_fakes(monkeypatch, state)
+        # Make _is_dtensor recognise _FakeDTensor via isinstance
+        monkeypatch.setattr(llm_utils_module, "HAS_DTENSOR", True)
+        monkeypatch.setattr(llm_utils_module, "DTensor", self._FakeDTensor)
+
+        # Act
+        save_peft_adapter_for_vllm_rollout(
+            self._peft_model(),
+            tmp_path,
+            "actor",
+            target_modules=["q_proj.linear"],
+        )
+
+        # Assert — DTensor was materialised via full_tensor()
+        assert dt.full_tensor_calls == 1
+        # Assert — plain tensor passed through untouched
+        assert calls["saved_tensors"]["model.layers.0.q_proj.lora_A.weight"] is materialized
+        assert calls["saved_tensors"]["model.layers.0.q_proj.lora_B.weight"] is plain
+
+    def test_state_with_only_plain_tensors_passes_through(self, monkeypatch, tmp_path):
+        # Arrange — no DTensors at all
+        plain_a = torch.ones(2)
+        plain_b = torch.zeros(3)
+        state = {
+            "model.layers.0.q_proj.linear.lora_A.weight": plain_a,
+            "model.layers.0.q_proj.linear.lora_B.weight": plain_b,
+        }
+        calls = self._install_fakes(monkeypatch, state)
+        monkeypatch.setattr(llm_utils_module, "HAS_DTENSOR", True)
+        monkeypatch.setattr(llm_utils_module, "DTensor", self._FakeDTensor)
+
+        # Act
+        save_peft_adapter_for_vllm_rollout(
+            self._peft_model(),
+            tmp_path,
+            "actor",
+            target_modules=["q_proj.linear"],
+        )
+
+        # Assert — both plain tensors saved as-is
+        assert calls["saved_tensors"]["model.layers.0.q_proj.lora_A.weight"] is plain_a
+        assert calls["saved_tensors"]["model.layers.0.q_proj.lora_B.weight"] is plain_b
 
 
 class TestCrossRankLigerAlign:

@@ -57,8 +57,19 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--config", type=Path, required=True)
     p.add_argument("--max-steps", type=int, default=None)
     p.add_argument("--algo", type=str, default=None)
+    p.add_argument(
+        "--model-name",
+        type=str,
+        default=None,
+        help="HuggingFace model id or path (e.g. Qwen/Qwen2.5-0.5B). "
+        "When set, the real HF model is loaded via create_population; "
+        "when omitted, the tiny custom model is used.",
+    )
     p.add_argument("--init-hp", action="append", default=[])
     p.add_argument("--zero3-root", type=Path, required=True)
+    p.add_argument("--offload", choices=["none", "optim", "full"], default="none",
+                   help="DeepSpeed CPU offload: none, optim (optimizer states), full (params+optim)")
+    p.add_argument("--zero-stage", type=int, choices=[2, 3], default=3)
     p.add_argument("--warmup-steps", type=int, default=5)
     return p.parse_args()
 
@@ -99,7 +110,6 @@ def main() -> int:
     accelerator = Accelerator()
     torch.manual_seed(args.seed + accelerator.process_index)
 
-    tokenizer = TinyDigitTokenizer()
     target_id = int(dbg.get("target_token_id", 3))
     target_token = str(target_id)
     max_ctx = int(dbg.get("max_context_length", 64))
@@ -109,16 +119,35 @@ def main() -> int:
     if "LR" not in init_hp and "LR_ACTOR" in init_hp:
         init_hp["LR"] = init_hp["LR_ACTOR"]
 
-    actor = build_tiny_actor_network(use_value_head=(init_hp["ALGO"] == "LLMPPO"))
+    if args.model_name:
+        from transformers import AutoTokenizer
+
+        tokenizer = AutoTokenizer.from_pretrained(args.model_name)
+        if tokenizer.pad_token is None:
+            tokenizer.pad_token = tokenizer.eos_token
+        init_hp["PAD_TOKEN_ID"] = tokenizer.pad_token_id
+        init_hp["PAD_TOKEN"] = tokenizer.pad_token
+        actor = None
+        model_name = args.model_name
+        lora_dict = dict(dbg.get("lora") or {})
+        # The debug config ships GPT2-style target_modules (c_attn/c_proj/c_fc)
+        # which do not exist in Qwen2.5; target the attention+MLP projections
+        # that every Qwen2 dense model exposes instead.
+        lora_dict["target_modules"] = ["q_proj", "k_proj", "v_proj", "o_proj"]
+    else:
+        tokenizer = TinyDigitTokenizer()
+        actor = build_tiny_actor_network(use_value_head=(init_hp["ALGO"] == "LLMPPO"))
+        model_name = None
+        lora_dict = dbg.get("lora") or {}
     pop = create_population(
         algo=str(init_hp["ALGO"]),
         net_config=None,
         INIT_HP=init_hp,
         population_size=1,
         tokenizer=tokenizer,
-        model_name=None,
+        model_name=model_name,
         actor_network=actor,
-        lora_config=lora_config_from_dict(dbg.get("lora") or {}),
+        lora_config=lora_config_from_dict(lora_dict),
         accelerator=accelerator,
         device=accelerator.device,
     )

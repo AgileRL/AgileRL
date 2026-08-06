@@ -604,10 +604,10 @@ def aggregate_metrics_dict(
 def is_fsdp_sharded(model: nn.Module) -> bool:
     """Return ``True`` when ``model`` contains FSDP-sharded submodules.
 
-    Detects both FSDP2 (``fully_shard``) and legacy FSDP1 wrappers; only FSDP2
-    is supported by AgileRL (see :func:`gather_full_params`).
+    Detects both FSDP2 (``fully_shard``) and legacy FSDP1 wrappers; AgileRL
+    only supports FSDP2 for training.
     """
-    if not HAS_FSDP:
+    if not HAS_FSDP or not isinstance(model, nn.Module):
         return False
     return any(
         isinstance(module, (FSDPModule, FullyShardedDataParallel))
@@ -709,46 +709,6 @@ def gather_params(
             owned[name] = original
 
 
-@contextmanager
-def gather_full_params(model: nn.Module) -> Generator[None, None, None]:
-    """Materialize all parameters of ``model`` for the duration of the context.
-
-    For FSDP2 (``fully_shard``) models this unshards every FSDP unit, then
-    reshards on exit. Prefer :func:`gather_params` with
-    :func:`get_lora_params` when only adapter weights are needed.
-
-    .. warning::
-        Under FSDP2 the gathered parameters are **read-only**: writes target
-        the all-gather buffer, which is discarded on reshard. Use
-        :func:`load_full_state_dict` to write weights into a sharded model.
-    """
-    fsdp2_modules = (
-        [module for module in model.modules() if isinstance(module, FSDPModule)]
-        if HAS_FSDP
-        else []
-    )
-    if not fsdp2_modules:
-        if HAS_FSDP and any(
-            isinstance(module, FullyShardedDataParallel) for module in model.modules()
-        ):
-            msg = (
-                "Legacy FSDP1 wrapping detected. AgileRL only supports FSDP2 "
-                "(torch.distributed.fsdp.fully_shard); shard the model with "
-                "agilerl.utils.distributed.apply_fsdp2 instead."
-            )
-            raise NotImplementedError(msg)
-        yield
-        return
-
-    for module in fsdp2_modules:
-        module.unshard()
-    try:
-        yield
-    finally:
-        for module in reversed(fsdp2_modules):
-            module.reshard()
-
-
 def load_full_state_dict(
     model: nn.Module,
     state_dict: dict[str, torch.Tensor],
@@ -818,14 +778,144 @@ def get_lora_params(model: nn.Module) -> list[torch.Tensor]:
     return [p for n, p in model.named_parameters() if "lora" in n]
 
 
-def get_state_dict(model: nn.Module) -> dict[str, torch.Tensor]:
+def save_lora_adapters(
+    model: nn.Module,
+    path: str | Path,
+    selected_adapters: Sequence[str],
+    use_value_head: bool = False,
+    is_main: bool = True,
+) -> None:
+    r"""Save LoRA adapter weights and configs in PEFT-compatible format.
+
+    Gathers FSDP2-sharded adapter parameters to CPU *before* handing them to
+    safetensors, avoiding the invalid-storage error that occurs when
+    ``full_tensor()`` results are installed as live GPU ``nn.Parameter``\ s
+    and then serialised via PEFT's ``save_pretrained``.
+
+    All ranks must call this together (``full_tensor()`` is a collective),
+    but only ``is_main`` writes to disk.
+    """
+    from peft.utils import get_peft_model_state_dict
+    from safetensors.torch import save_file
+
+    base_path = Path(path)
+
+    is_dist = dist.is_available() and dist.is_initialized()
+
+    for adapter_name in selected_adapters:
+        adapter_dir = base_path / adapter_name
+        if is_main:
+            adapter_dir.mkdir(parents=True, exist_ok=True)
+
+        # get_peft_model_state_dict filters by adapter and strips the
+        # adapter-name segment from the keys, producing the exact format
+        # that set_peft_model_state_dict expects on load.
+        raw_state = get_peft_model_state_dict(model, adapter_name=adapter_name)
+        cpu_state: dict[str, torch.Tensor] = {}
+        for key, value in raw_state.items():
+            if hasattr(value, "full_tensor"):
+                value = value.full_tensor()
+            cpu_state[key] = value.to("cpu").contiguous()
+
+        if is_main:
+            save_file(
+                cpu_state,
+                str(adapter_dir / "adapter_model.safetensors"),
+                metadata={"format": "pt"},
+            )
+            if hasattr(model, "peft_config") and adapter_name in model.peft_config:
+                model.peft_config[adapter_name].save_pretrained(str(adapter_dir))
+
+        del cpu_state
+        if is_dist:
+            dist.barrier()
+
+    # Save the value head (PPO's v_head Linear) as pytorch_model.bin so
+    # _restore_value_head can find it on load.
+    if use_value_head:
+        v_head_state: dict[str, torch.Tensor] = {}
+        for name, param in model.named_parameters():
+            if "v_head" in name:
+                full = param.full_tensor() if hasattr(param, "full_tensor") else param
+                v_head_state[name] = full.to("cpu").contiguous()
+        if is_main and v_head_state:
+            torch.save(v_head_state, str(base_path / "pytorch_model.bin"))
+        if is_dist:
+            dist.barrier()
+
+
+def load_lora_adapters(
+    model: nn.Module,
+    path: str | Path,
+    adapter_name: str,
+    device: torch.device | str = "cpu",
+) -> None:
+    """Load LoRA adapter weights from a PEFT-compatible checkpoint directory.
+
+    Handles FSDP2-sharded models by scattering loaded full tensors into DTensor
+    local shards via ``distribute_tensor``. For non-sharded models, falls
+    back to a plain ``copy_``.
+
+    All ranks must call this together (``distribute_tensor`` is a collective).
+    """
+    from safetensors.torch import load_file as safe_load_file
+
+    adapter_path = Path(path) / adapter_name / "adapter_model.safetensors"
+    adapter_state = safe_load_file(str(adapter_path), device=str(device))
+
+    is_dist = dist.is_available() and dist.is_initialized()
+
+    with torch.no_grad():
+        for name, param in model.named_parameters():
+            # Only touch parameters belonging to this adapter.
+            if f".{adapter_name}." not in name:
+                continue
+            # Map model param name → loaded state dict key by removing the
+            # adapter-name segment: ...lora_A.actor.weight → ...lora_A.weight
+            loaded_key = name.replace(f".{adapter_name}.", ".")
+            if loaded_key not in adapter_state:
+                continue
+
+            full_tensor = adapter_state[loaded_key].to(device)
+
+            if hasattr(param, "device_mesh"):
+                # FSDP2 DTensor: scatter the full tensor onto the mesh
+                # and copy the local shard into the parameter's local shard.
+                from torch.distributed.tensor import distribute_tensor
+
+                sharded = distribute_tensor(
+                    full_tensor, param.device_mesh, param.placements
+                )
+                param.data._local_tensor.copy_(sharded._local_tensor)
+            else:
+                param.data.copy_(full_tensor)
+
+    if is_dist:
+        dist.barrier()
+
+
+def get_state_dict(
+    model: nn.Module, cpu_offload: bool = True
+) -> dict[str, torch.Tensor]:
     """Get the full state dict of a model, gathering FSDP-sharded parameters.
 
     For FSDP2 models the state dict is materialized via
     ``torch.distributed.checkpoint`` so the returned tensors own their storage
     (plain unshard views would be freed on reshard).
+
+    Under FSDP2, ``cpu_offload`` must be ``True``: only rank 0 receives the
+    full state dict on CPU; other ranks get an empty dict. A GPU full state
+    dict would place the entire model on every rank and is rejected.
     """
     if is_fsdp_sharded(model):
+        if not cpu_offload:
+            msg = (
+                "get_state_dict(cpu_offload=False) is not supported for FSDP2 "
+                "models: a full GPU state dict would place the entire model on "
+                "every rank. Use cpu_offload=True for checkpoints, or "
+                "adapter-scoped helpers for clones."
+            )
+            raise ValueError(msg)
         from torch.distributed.checkpoint.state_dict import (
             StateDictOptions,
             get_model_state_dict,
@@ -1991,12 +2081,20 @@ def build_completion_mask(
     completion_id: torch.Tensor,
     prompt_len: int | None,
     pad_token_id: int,
+    completion_len: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Build the boolean action mask for a completion tensor.
 
-    Returns ``True`` at positions that are (a) past the prompt and (b) not
-    pad tokens, dropping the leading position to align with the
+    Returns ``True`` at positions that are part of the generated completion
+    (i.e. past the prompt), dropping the leading position to align with the
     next-token-prediction shift used downstream.
+
+    When ``completion_len`` is provided (per-row generated-token counts) the
+    completion span is marked by position — ``positions in
+    [prompt_len, prompt_len + completion_len)`` — so the mask is correct even
+    when ``pad_token_id == eos_token_id`` (a real generated EOS is included, only
+    the trailing padding is excluded). When ``None`` the span is inferred from
+    non-pad tokens, which miscounts a generated EOS when pad aliases eos.
 
     :param completion_id: Token tensor of shape ``(B, seq_len)`` containing
         the prompt followed by generated tokens.
@@ -2010,9 +2108,26 @@ def build_completion_mask(
     :type prompt_len: int | None
     :param pad_token_id: Pad token id used to suppress padding positions.
     :type pad_token_id: int
+    :param completion_len: Per-row count of generated tokens. When provided,
+        the completion span is marked by position (robust to
+        ``pad_token_id == eos_token_id``); otherwise it is inferred from
+        non-pad tokens. Shape ``(B,)``, same device as ``completion_id``.
+    :type completion_len: torch.Tensor | None
     :return: Boolean mask of shape ``(B, seq_len - 1)``.
     :rtype: torch.Tensor
     """
+    if completion_len is not None and (prompt_len is None or prompt_len == 0):
+        msg = "completion_len requires a non-zero prompt_len to locate the span."
+        raise ValueError(msg)
+    if completion_len is not None:
+        positions = torch.arange(
+            completion_id.shape[1], device=completion_id.device
+        )
+        end = prompt_len + completion_len.to(device=completion_id.device)
+        mask = (positions.unsqueeze(0) >= prompt_len) & (
+            positions.unsqueeze(0) < end.unsqueeze(-1)
+        )
+        return mask[:, 1:]
     non_pad = completion_id != pad_token_id
     if prompt_len is None or prompt_len == 0:
         mask = non_pad
@@ -2020,6 +2135,108 @@ def build_completion_mask(
         positions = torch.arange(completion_id.shape[1], device=completion_id.device)
         mask = (positions.unsqueeze(0) >= prompt_len) & non_pad
     return mask[:, 1:]
+
+
+def hf_completion_lengths(
+    completion_id: torch.Tensor,
+    prompt_len: int,
+    pad_token_id: int,
+) -> torch.Tensor:
+    """Recover the true per-row generated-token count from an HF ``generate`` output.
+
+    HF ``generate`` pads finished rows with ``pad_token_id`` up to the batch's
+    longest generation. When ``pad_token_id == eos_token_id`` the padded
+    positions and a real stopping EOS share an id, so a token-id scan can't
+    tell them apart. This helper disambiguates by position: a row's generated
+    region is ``[prompt_len, prompt_len + G)`` where ``G`` is the batch max. The
+    first token equal to ``pad_token_id`` within that region is the stopping
+    EOS (so the row generated ``first_pad - prompt_len + 1`` tokens, EOS
+    included); if no such token exists the row ran to ``G`` (no EOS, hit the
+    cap). At most one EOS can appear because ``generate`` stops a row at its
+    first EOS.
+
+    :param completion_id: ``generate`` output, shape ``(B, prompt_len + G)``.
+    :type completion_id: torch.Tensor
+    :param prompt_len: Number of leading prompt tokens.
+    :type prompt_len: int
+    :param pad_token_id: Pad token id (may equal the eos id).
+    :type pad_token_id: int
+    :return: Per-row generated-token counts, shape ``(B,)``, on
+        ``completion_id``'s device.
+    :rtype: torch.Tensor
+    """
+    B, L = completion_id.shape
+    device = completion_id.device
+    G = L - prompt_len
+    if G <= 0:
+        return torch.zeros(B, dtype=torch.long, device=device)
+    gen_region = completion_id[:, prompt_len:]
+    is_pad = gen_region == pad_token_id
+    has_pad = is_pad.any(dim=1)
+    first_pad = is_pad.int().argmax(dim=1)
+    first_pad = torch.where(has_pad, first_pad, torch.full_like(first_pad, G))
+    gen_len = torch.where(first_pad < G, first_pad + 1, first_pad)
+    return gen_len.to(torch.long)
+
+
+def build_hf_completion_mask(
+    completion_id: torch.Tensor,
+    input_ids_len: int,
+    initial_prompt_len: int | None,
+    stitch_ids: torch.Tensor | None,
+    pad_token_id: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Stitch a windowed HF ``generate`` output and build its action mask.
+
+    Wraps :func:`stitch_completion_after_windowed_hf_generate` and
+    :func:`build_completion_mask` so the mask is correct when
+    ``pad_token_id == eos_token_id``. The generated span is marked by position
+    using the true per-row generation length recovered from the raw output,
+    so a real stopping EOS (which aliases the pad id) is included and only the
+    trailing padding is excluded — for both the current turn and any prior
+    turns retained in the windowed prompt suffix.
+
+    The windowed prompt is ``[initial_segment | recent_suffix]`` of length
+    ``input_ids_len``; ``generate`` appends ``new_tokens``; stitching
+    reinserts the dropped middle to give
+    ``[initial_segment | stitch | recent_suffix | new_tokens | pad]``. The
+    action span is ``[full_prompt_len, full_prompt_len + recent_suffix_len +
+    new_token_len)`` where ``recent_suffix_len = input_ids_len -
+    initial_prompt_len``.
+
+    :param completion_id: Raw ``generate`` output, shape ``(B, input_ids_len
+        + G)``.
+    :type completion_id: torch.Tensor
+    :param input_ids_len: Length of the prompt fed to ``generate`` (the
+        windowed prompt length).
+    :type input_ids_len: int
+    :param initial_prompt_len: Length of the initial segment within the
+        windowed prompt (``None`` when no windowing).
+    :type initial_prompt_len: int | None
+    :param stitch_ids: Dropped middle segment to reinsert (``None`` when no
+        windowing).
+    :type stitch_ids: torch.Tensor | None
+    :param pad_token_id: Pad token id (may equal the eos id).
+    :type pad_token_id: int
+    :return: ``(stitched_completion_id, action_mask)`` where the mask has
+        shape ``(B, seq_len - 1)``.
+    :rtype: tuple[torch.Tensor, torch.Tensor]
+    """
+    new_token_len = hf_completion_lengths(
+        completion_id, input_ids_len, pad_token_id
+    )
+    completion_id, full_prompt_len = stitch_completion_after_windowed_hf_generate(
+        completion_id, stitch_ids, initial_prompt_len
+    )
+    if stitch_ids is None:
+        completion_len = new_token_len
+    else:
+        recent_suffix_len = input_ids_len - initial_prompt_len
+        completion_len = new_token_len + recent_suffix_len
+    mask = build_completion_mask(
+        completion_id, full_prompt_len, pad_token_id, completion_len=completion_len
+    )
+    return completion_id, mask
 
 
 def stitch_completion_after_windowed_vllm_generate(
@@ -2592,6 +2809,13 @@ def save_peft_adapter_for_vllm_rollout(
         )
 
     adapter_path.mkdir(parents=True, exist_ok=True)
+    # FSDP2 keeps adapter params as sharded ``DTensor``s; ``gather_params``
+    # may not install dense locals on the module for every param, so
+    # materialise any remaining ``DTensor`` entries here before safetensors
+    # serialisation (which cannot read a DTensor storage pointer).
+    state = {
+        k: (v.full_tensor() if _is_dtensor(v) else v) for k, v in state.items()
+    }
     save_file(state, adapter_path / "adapter_model.safetensors")
 
     peft_cfg = peft_model.peft_config[adapter_name]

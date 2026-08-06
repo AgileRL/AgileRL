@@ -47,7 +47,7 @@ from agilerl.utils.llm_utils import (
     BitsAndBytesConfig,
     aggregate_metrics_dict,
     attention_mask_from_padded_ids,
-    build_completion_mask,
+    build_hf_completion_mask,
     calculate_k3_kl,
     clipped_is_surrogate,
     is_reasoning_prompts,
@@ -56,7 +56,6 @@ from agilerl.utils.llm_utils import (
     normalize_reasoning_prompt_batch,
     pool_by_turns,
     prepare_prompt_hf_generate,
-    stitch_completion_after_windowed_hf_generate,
     validate_importance_sampling_level,
     validate_llm_context_lengths,
 )
@@ -442,10 +441,13 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
             self.actor.eval()
             if not self.use_vllm:
                 actor_module = self._get_unwrapped_actor()
-                try:
-                    actor_device = next(actor_module.parameters()).device
-                except StopIteration:
+                if self.distributed and self.fsdp_config is not None:
                     actor_device = torch.device(self.device)
+                else:
+                    try:
+                        actor_device = next(actor_module.parameters()).device
+                    except StopIteration:
+                        actor_device = torch.device(self.device)
                 with torch.no_grad(), self._amp_ctx():
                     completion_ids = []
                     completion_masks = []
@@ -471,21 +473,15 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
                                 attention_mask=attention_mask,
                                 generation_config=self.generation_config,
                             )
-                            completion_id, full_prompt_len = (
-                                stitch_completion_after_windowed_hf_generate(
-                                    completion_id,
-                                    stitch_ids,
-                                    initial_prompt_len,
-                                )
+                            completion_id, completion_mask = build_hf_completion_mask(
+                                completion_id,
+                                input_ids.shape[1],
+                                initial_prompt_len,
+                                stitch_ids,
+                                self.pad_token_id,
                             )
                             completion_ids.append(completion_id)
-                            completion_masks.append(
-                                build_completion_mask(
-                                    completion_id,
-                                    full_prompt_len,
-                                    self.pad_token_id,
-                                )
-                            )
+                            completion_masks.append(completion_mask)
             else:
                 self._prepare_vllm_for_generation()
                 (

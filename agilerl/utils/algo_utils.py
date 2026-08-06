@@ -72,7 +72,7 @@ if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
     from peft import PeftConfig, PeftModel, get_peft_model
     from transformers import PreTrainedModel
 
-    from agilerl.utils.llm_utils import gather_full_params
+    from agilerl.utils.llm_utils import is_fsdp_sharded
 
     from agilerl.algorithms.core.llm_ops.moe_lora import upgrade_moe_param_wrappers
 
@@ -2549,7 +2549,12 @@ def clone_llm(
     original_model: PreTrainedModelType | DummyEvolvable,
     state_dict: dict[str, torch.Tensor] | None = None,
 ) -> PreTrainedModelType:
-    """Clone the actor.
+    """Clone the actor from config (+ optional CPU state dict).
+
+    FSDP2-sharded sources require a CPU ``state_dict`` (from
+    ``get_state_dict(..., cpu_offload=True)``, broadcast to all ranks). Use
+    :meth:`~agilerl.algorithms.core.base.LLMAlgorithm.clone` for the full
+    algorithm clone path.
 
     :param original_model: Model to clone
     :type original_model: PreTrainedModelType
@@ -2567,56 +2572,63 @@ def clone_llm(
         case _:
             msg = f"Invalid 'original_model' type: {type(original_model)}"
             raise ValueError(msg)
-    with gather_full_params(cast(nn.Module, source_model)):
-        model_config = source_model.config
-        base_model = source_model.model
-        assert isinstance(base_model, nn.Module)
-        model: nn.Module = type(base_model)(model_config)
-        adapter_names: list[str] = []
+    if is_fsdp_sharded(cast(nn.Module, source_model)) and state_dict is None:
+        msg = (
+            "clone_llm cannot read weights from an FSDP2-sharded model without "
+            "a CPU state_dict. Pass get_state_dict(..., cpu_offload=True) "
+            "(broadcast to all ranks), or use LLMAlgorithm.clone()."
+        )
+        raise RuntimeError(msg)
 
-        if hasattr(source_model, "peft_config"):
-            raw_peft_config = source_model.peft_config
-            assert is_str_keyed_dict(raw_peft_config)
-            peft_configs: dict[str, PeftConfig] = {
-                name: config
-                for name, config in raw_peft_config.items()
-                if isinstance(config, PeftConfig)
-            }
-            adapter_names = list(peft_configs.keys())
+    model_config = source_model.config
+    base_model = source_model.model
+    assert isinstance(base_model, nn.Module)
+    model: nn.Module = type(base_model)(model_config)
+    adapter_names: list[str] = []
 
-            if len(adapter_names) > 1:
-                warnings.warn(
-                    "Multiple adapters detected. Only the first adapter will be used for RL finetuning.",
-                    stacklevel=2,
-                )
-            first_adapter = adapter_names[0]
-            model = get_peft_model(
-                model,
-                peft_configs[first_adapter],
-                adapter_name="actor",
+    if hasattr(source_model, "peft_config"):
+        raw_peft_config = source_model.peft_config
+        assert is_str_keyed_dict(raw_peft_config)
+        peft_configs: dict[str, PeftConfig] = {
+            name: config
+            for name, config in raw_peft_config.items()
+            if isinstance(config, PeftConfig)
+        }
+        adapter_names = list(peft_configs.keys())
+
+        if len(adapter_names) > 1:
+            warnings.warn(
+                "Multiple adapters detected. Only the first adapter will be used for RL finetuning.",
+                stacklevel=2,
             )
+        first_adapter = adapter_names[0]
+        model = get_peft_model(
+            model,
+            peft_configs[first_adapter],
+            adapter_name="actor",
+        )
 
-            for adapter_name in adapter_names[1:]:
-                model.add_adapter(
-                    peft_config=peft_configs[adapter_name],
-                    adapter_name=adapter_name,
-                )
-            expert_targets = getattr(
-                peft_configs[first_adapter], "target_parameters", None
+        for adapter_name in adapter_names[1:]:
+            model.add_adapter(
+                peft_config=peft_configs[adapter_name],
+                adapter_name=adapter_name,
             )
-            if isinstance(expert_targets, (list, tuple)) and expert_targets:
-                upgrade_moe_param_wrappers(model)
-            model.disable_adapter()
+        expert_targets = getattr(
+            peft_configs[first_adapter], "target_parameters", None
+        )
+        if isinstance(expert_targets, (list, tuple)) and expert_targets:
+            upgrade_moe_param_wrappers(model)
+        model.disable_adapter()
 
-        if state_dict is not None:
-            sd = state_dict
-            if adapter_names and adapter_names[0] != "actor":
-                sd = _rename_peft_primary_adapter_keys_in_state_dict(
-                    sd,
-                    old_adapter=adapter_names[0],
-                    new_adapter="actor",
-                )
-            model.load_state_dict(sd, strict=False)
+    if state_dict is not None:
+        sd = state_dict
+        if adapter_names and adapter_names[0] != "actor":
+            sd = _rename_peft_primary_adapter_keys_in_state_dict(
+                sd,
+                old_adapter=adapter_names[0],
+                new_adapter="actor",
+            )
+        model.load_state_dict(sd, strict=False)
     return model
 
 

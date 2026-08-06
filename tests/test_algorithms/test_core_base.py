@@ -1617,22 +1617,22 @@ class TestLLMUpdateLr:
 
 class TestLLMWrapModels:
     def test_wrap_models_applies_fsdp2_when_configured(self):
-        """FSDP2 sharding swaps params in place, so the optimizer (and LR
-        scheduler) are rebuilt after ``apply_fsdp2``.
-        """
+        """FSDP2 materializes shards from CPU state, then rebuilds the optimizer."""
         with patch("agilerl.algorithms.core.base.init_distributed", return_value=True):
             agent = _make_llm_agent(fsdp_config=FSDPConfig())
         agent.gradient_checkpointing = True
         original_actor = agent.actor
         with (
             patch(
-                "agilerl.algorithms.core.base.apply_fsdp2",
-                side_effect=lambda model, config: model,
+                "agilerl.algorithms.core.base.materialize_fsdp2_from_cpu_state",
+                side_effect=lambda model, device, config: model,
             ) as mock_fsdp,
             patch.object(agent, "_rebuild_optimizer_after_load") as mock_rebuild,
         ):
             LLMAlgorithm.wrap_models(agent)
-        mock_fsdp.assert_called_once_with(original_actor, agent.fsdp_config)
+        mock_fsdp.assert_called_once_with(
+            original_actor, agent.device, agent.fsdp_config
+        )
         mock_rebuild.assert_called_once()
         original_actor.gradient_checkpointing_enable.assert_called_once()
 
@@ -3223,7 +3223,6 @@ class TestLLMSyncActorToVllm:
         peft_ref.set_adapter = MagicMock()
         _setup_agent_for_vllm_lora_sync(agent, peft_ref)
         with (
-            patch("agilerl.algorithms.core.base.gather_full_params"),
             patch("agilerl.algorithms.core.base.is_main_process", return_value=True),
             patch("agilerl.algorithms.core.base.barrier"),
             patch(
@@ -3265,7 +3264,6 @@ class TestLLMSyncActorToVllm:
             (adapter_dir / "adapter_model.safetensors").write_bytes(b"")
 
         with (
-            patch("agilerl.algorithms.core.base.gather_full_params"),
             patch("agilerl.algorithms.core.base.is_main_process", return_value=False),
             patch(
                 "agilerl.algorithms.core.base.barrier",
@@ -3701,7 +3699,6 @@ class TestLLMMoveModelToVllmAdapterReload:
         peft_ref.named_parameters.return_value = []
         _setup_agent_for_vllm_lora_sync(agent, peft_ref)
         with (
-            patch("agilerl.algorithms.core.base.gather_full_params"),
             patch("agilerl.algorithms.core.base.is_main_process", return_value=True),
             patch("agilerl.algorithms.core.base.barrier"),
             patch(
@@ -3737,7 +3734,6 @@ class TestLLMMoveModelToVllmAdapterReload:
         peft_ref.named_parameters.return_value = []
         _setup_agent_for_vllm_lora_sync(agent, peft_ref)
         with (
-            patch("agilerl.algorithms.core.base.gather_full_params"),
             patch("agilerl.algorithms.core.base.is_main_process", return_value=True),
             patch("agilerl.algorithms.core.base.barrier"),
             patch(
@@ -4167,13 +4163,21 @@ class TestLLMCloneActorNetwork:
     def test_value_head_branch_clones_inner_peft_and_copies_v_head(self):
         agent = _make_llm_agent()
         agent.use_value_head = True
+        agent.fsdp_config = None
         agent.actor = self._make_value_head_actor()
         original_v_head_weight = agent.actor.v_head.weight.detach().clone()
         cloned_inner = MagicMock()
+        state = {"w": torch.tensor([1.0, 2.0])}
 
-        with patch(
-            "agilerl.algorithms.core.base.clone_llm", return_value=cloned_inner
-        ) as mock_clone_llm:
+        with (
+            patch(
+                "agilerl.algorithms.core.base.clone_llm", return_value=cloned_inner
+            ) as mock_clone_llm,
+            patch(
+                "agilerl.algorithms.core.base.get_state_dict",
+                side_effect=lambda _m, cpu_offload=True: state,
+            ),
+        ):
             cloned = agent._clone_actor_network()
 
         mock_clone_llm.assert_called_once()
@@ -4183,6 +4187,30 @@ class TestLLMCloneActorNetwork:
         assert cloned.is_peft_model is True
         # v_head was reloaded from the original (load_state_dict copies values).
         assert torch.equal(cloned.v_head.weight, original_v_head_weight)
+
+    def test_clone_actor_network_fsdp_uses_cpu_broadcast(self):
+        agent = _make_llm_agent()
+        agent.fsdp_config = FSDPConfig()
+        agent.use_value_head = False
+        agent.actor = MagicMock()
+        state = {"w": torch.tensor([1.0])}
+        cloned = MagicMock()
+        with (
+            patch(
+                "agilerl.algorithms.core.base.get_state_dict",
+                return_value=state,
+            ),
+            patch.object(
+                agent, "_broadcast_cpu_state_dict", return_value=state
+            ) as mock_bcast,
+            patch(
+                "agilerl.algorithms.core.base.clone_llm", return_value=cloned
+            ) as mock_clone,
+        ):
+            out = agent._clone_actor_network()
+        mock_bcast.assert_called_once_with(state)
+        mock_clone.assert_called_once()
+        assert out is cloned
 
 
 class TestLLMMemoryEfficientParams:
@@ -5164,7 +5192,6 @@ class TestLLMMoveLoraToVllmErrors:
         agent.lora_config = None
 
         with (
-            patch("agilerl.algorithms.core.base.gather_full_params"),
             patch("agilerl.algorithms.core.base.is_main_process", return_value=True),
             patch("agilerl.algorithms.core.base.barrier"),
             pytest.raises(ValueError, match="lora_config is required"),
@@ -5181,7 +5208,6 @@ class TestLLMMoveLoraToVllmErrors:
         agent._vllm_lora_staging_dir = tmp_path
 
         with (
-            patch("agilerl.algorithms.core.base.gather_full_params"),
             patch("agilerl.algorithms.core.base.is_main_process", return_value=True),
             patch("agilerl.algorithms.core.base.barrier"),
             patch(
@@ -5204,7 +5230,6 @@ class TestLLMMoveLoraToVllmErrors:
         _setup_agent_for_vllm_lora_sync(agent, peft_ref)
 
         with (
-            patch("agilerl.algorithms.core.base.gather_full_params"),
             patch("agilerl.algorithms.core.base.is_main_process", return_value=True),
             patch("agilerl.algorithms.core.base.barrier"),
             patch(
@@ -5235,7 +5260,6 @@ class TestLLMMoveLoraToVllmErrors:
         agent._vllm_lora_staging_dir = tmp_path / "rank_1"
 
         with (
-            patch("agilerl.algorithms.core.base.gather_full_params"),
             patch("agilerl.algorithms.core.base.is_main_process", return_value=False),
             patch("agilerl.algorithms.core.base.barrier"),
             patch(
@@ -5270,7 +5294,6 @@ class TestLLMMoveLoraToVllmErrors:
         device_guard.__exit__ = MagicMock(return_value=False)
 
         with (
-            patch("agilerl.algorithms.core.base.gather_full_params"),
             patch("agilerl.algorithms.core.base.is_main_process", return_value=True),
             patch("agilerl.algorithms.core.base.barrier"),
             patch(
@@ -5300,7 +5323,6 @@ class TestLLMMoveLoraToVllmErrors:
         agent.llm.llm_engine.add_lora = MagicMock(return_value=False)
 
         with (
-            patch("agilerl.algorithms.core.base.gather_full_params"),
             patch("agilerl.algorithms.core.base.is_main_process", return_value=True),
             patch("agilerl.algorithms.core.base.barrier"),
             patch(

@@ -11,6 +11,7 @@ a single device.
 
 from __future__ import annotations
 
+import copy
 import datetime
 import os
 import random
@@ -21,6 +22,12 @@ import numpy as np
 import torch
 import torch.distributed as dist
 from torch import nn
+
+DTensor: Any
+try:
+    from torch.distributed.tensor import DTensor
+except ImportError:  # pragma: no cover
+    DTensor = None
 
 CPUOffloadPolicy: Any
 MixedPrecisionPolicy: Any
@@ -197,6 +204,11 @@ class FSDPConfig:
     :type reshard_after_forward: bool
     :param cpu_offload: Offload sharded parameters/gradients to CPU.
     :type cpu_offload: bool
+    :param optim_cpu_offload: Offload optimizer states (AdamW m+v) to CPU,
+        moving them to GPU only during ``step()``.  Parameters and gradients
+        stay on GPU.  Mutually exclusive with ``cpu_offload``.  Defaults to
+        ``True`` — benchmarked as memory-neutral and faster with colocated vLLM.
+    :type optim_cpu_offload: bool
     :param param_dtype: Parameter dtype for the mixed-precision policy.
         Defaults to ``bfloat16`` when ``None`` (Prime-RL style).
     :type param_dtype: torch.dtype | None
@@ -207,6 +219,7 @@ class FSDPConfig:
 
     reshard_after_forward: bool = True
     cpu_offload: bool = False
+    optim_cpu_offload: bool = True
     param_dtype: torch.dtype | None = None
     reduce_dtype: torch.dtype | None = None
 
@@ -297,11 +310,12 @@ def _shard_embed_and_lm_head(model: nn.Module, shard_kwargs: dict) -> None:
 def apply_fsdp2(model: nn.Module, config: FSDPConfig | None = None) -> nn.Module:
     """Shard ``model`` with FSDP2: blocks, embed/(untied) lm_head, then root.
 
-    The model should already be on the target CUDA device. Parameters are
-    swapped to DTensors in place, so any optimizer must be (re)built after
-    this call.
+    Parameters become DTensors in place, so any optimizer must be (re)built
+    after this call. Callers must not pass a dense full-model replica on
+    CUDA — use :func:`materialize_fsdp2_from_cpu_state` so weights stay on
+    CPU/meta until only local shards are allocated on the compute device.
 
-    :param model: Model to shard.
+    :param model: Model to shard (CPU or meta parameters).
     :type model: nn.Module
     :param config: Sharding settings; defaults to :class:`FSDPConfig`'s
         defaults.
@@ -354,6 +368,60 @@ def apply_fsdp2(model: nn.Module, config: FSDPConfig | None = None) -> nn.Module
     return model
 
 
+def _restore_after_to_empty(model: nn.Module) -> None:
+    """Restore tying and modules that ``to_empty`` leaves unbound."""
+    seen: set[int] = set()
+    for module in model.modules():
+        tie = getattr(module, "tie_weights", None)
+        if not callable(tie):
+            continue
+        module_id = id(module)
+        if module_id in seen:
+            continue
+        seen.add(module_id)
+        try:
+            tie()
+        except Exception:  # pragma: no cover -- model-specific tie edge cases
+            pass
+
+
+def materialize_fsdp2_from_cpu_state(
+    model: nn.Module,
+    device: str | torch.device,
+    config: FSDPConfig | None = None,
+) -> nn.Module:
+    """Shard a CPU-resident model without placing a dense full replica on GPU.
+
+    Captures a CPU state dict, moves parameters to meta, applies FSDP2,
+    allocates empty sharded storages on ``device`` (or CPU when
+    ``config.cpu_offload``), then scatters the CPU state into DTensor shards.
+
+    :param model: Dense actor on CPU (base + LoRA already attached).
+    :type model: nn.Module
+    :param device: Compute device for sharded parameter storage.
+    :type device: str | torch.device
+    :param config: FSDP2 settings.
+    :type config: FSDPConfig | None
+    :return: The sharded model (same object).
+    :rtype: nn.Module
+    """
+    from agilerl.utils.llm_utils import load_full_state_dict
+
+    config = config or FSDPConfig()
+    cpu_state = {
+        key: value.detach().to("cpu").contiguous()
+        for key, value in model.state_dict().items()
+    }
+    model.to_empty(device="meta")
+    apply_fsdp2(model, config)
+    target = torch.device("cpu") if config.cpu_offload else torch.device(device)
+    model.to_empty(device=target)
+    _restore_after_to_empty(model)
+    load_full_state_dict(model, cpu_state, strict=False)
+    del cpu_state
+    return model
+
+
 def shard_dataloader_kwargs(dataset, shuffle: bool = True) -> dict[str, Any]:
     """DataLoader kwargs that shard ``dataset`` across ranks.
 
@@ -379,3 +447,91 @@ def shard_dataloader_kwargs(dataset, shuffle: bool = True) -> dict[str, Any]:
             )
         }
     return {"shuffle": shuffle}
+
+
+class CPUOffloadOptimizer:
+    """Wrap an optimizer so optimizer states (AdamW m+v) stay on CPU.
+
+    States are moved to GPU only for ``step()``, then back to CPU.  Parameters
+    and gradients remain on GPU throughout, so compute is unaffected.  With
+    activation checkpointing, activations and optimizer states are never on
+    GPU at the same time: peak memory becomes ``max(activations, opt_states)``
+    instead of ``sum``.
+
+    Handles FSDP2 ``DTensor`` optimizer states by swapping ``_local_tensor``
+    between CPU and GPU while preserving the DTensor wrapper.
+    """
+
+    def __init__(self, optimizer: torch.optim.Optimizer, pin_memory: bool = True):
+        self.optimizer = optimizer
+        self.pin_memory = pin_memory
+        self._initialized = False
+
+    def _move_states(self, device: str) -> None:
+        for p in self.optimizer.state:
+            state = self.optimizer.state[p]
+            for k, v in state.items():
+                if isinstance(v, DTensor):
+                    local = v._local_tensor
+                    if device == "cpu":
+                        new_local = local.to("cpu")
+                        if self.pin_memory and not new_local.is_pinned():
+                            new_local = new_local.pin_memory()
+                    else:
+                        new_local = local.to(device, non_blocking=True)
+                    new_dt = copy.copy(v)
+                    new_dt._local_tensor = new_local
+                    state[k] = new_dt
+                elif isinstance(v, torch.Tensor):
+                    if device == "cpu":
+                        new_v = v.to("cpu")
+                        if self.pin_memory and not new_v.is_pinned():
+                            new_v = new_v.pin_memory()
+                        state[k] = new_v
+                    else:
+                        state[k] = v.to(device, non_blocking=True)
+
+    def step(self, closure=None):
+        if not self._initialized:
+            result = self.optimizer.step(closure)
+            self._move_states("cpu")
+            self._initialized = True
+            return result
+        self._move_states("cuda")
+        torch.cuda.synchronize()
+        result = self.optimizer.step(closure)
+        self._move_states("cpu")
+        return result
+
+    def zero_grad(self, set_to_none: bool = True):
+        self.optimizer.zero_grad(set_to_none=set_to_none)
+
+    def state_dict(self):
+        if self._initialized:
+            self._move_states("cuda")
+            torch.cuda.synchronize()
+        sd = self.optimizer.state_dict()
+        if self._initialized:
+            self._move_states("cpu")
+        return sd
+
+    def load_state_dict(self, state_dict):
+        self.optimizer.load_state_dict(state_dict)
+        self._move_states("cpu")
+        self._initialized = True
+
+    @property
+    def param_groups(self):
+        return self.optimizer.param_groups
+
+    @param_groups.setter
+    def param_groups(self, value):
+        self.optimizer.param_groups = value
+
+    @property
+    def state(self):
+        return self.optimizer.state
+
+    @property
+    def base_optimizer(self) -> torch.optim.Optimizer:
+        return self.optimizer
