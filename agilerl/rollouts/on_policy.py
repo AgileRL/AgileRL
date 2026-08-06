@@ -15,7 +15,7 @@ from gymnasium import spaces
 
 from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.algorithms import PPO
-from agilerl.components.llm_rollout_buffer import (
+from agilerl.components.llm_rollout_data import (
     LLMExperienceBatch,
     RolloutGroup,
     Trajectory,
@@ -346,7 +346,7 @@ def collect_rollouts_llm(
     )
 
 
-def buffer_llm_rollouts(
+def collate_llm_rollouts(
     completion_ids_list: list[torch.Tensor],
     action_masks_list: list[torch.Tensor],
     all_turn_ids: list[torch.Tensor],

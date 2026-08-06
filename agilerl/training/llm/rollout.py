@@ -40,7 +40,7 @@ from agilerl.utils.utils import (
 if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
     from agilerl.algorithms import LLMPPO, LLMREINFORCE
     from agilerl.llm_envs import RolloutCollector, RolloutHarness
-    from agilerl.rollouts.on_policy import buffer_llm_rollouts, collect_rollouts_llm
+    from agilerl.rollouts.on_policy import collate_llm_rollouts, collect_rollouts_llm
 
 if TYPE_CHECKING:
     SupportedRollout = GRPO | LLMPPO | LLMREINFORCE
@@ -268,7 +268,7 @@ def train_llm_rollout(
                 # Collated a prompt group at a time, so the group-divisibility the
                 # algorithms rely on holds by construction, and a misaligned
                 # rollout fails here rather than inside a loss.
-                batch = buffer_llm_rollouts(
+                batch = collate_llm_rollouts(
                     completion_ids_list,
                     action_masks_list,
                     all_turn_ids,

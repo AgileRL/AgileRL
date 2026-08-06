@@ -4,7 +4,7 @@ LLM rollout records
 .. note::
 
    **Developer / implementation note.** Internal detail of
-   ``agilerl/components/llm_rollout_buffer.py``. Synchronous LLM training uses it
+   ``agilerl/components/llm_rollout_data.py``. Synchronous LLM training uses it
    automatically; there is nothing for users to configure.
 
 The module holds the record types for collected rollouts and the collation that
@@ -36,7 +36,7 @@ API
 ---
 
 ``collate_rollout_groups(groups)`` flattens a list of groups into one
-``LLMExperienceBatch``. ``agilerl/rollouts/on_policy.py::buffer_llm_rollouts``
+``LLMExperienceBatch``. ``agilerl/rollouts/on_policy.py::collate_llm_rollouts``
 wraps a collected rollout's parallel tensor lists into groups and collates them;
 the rollout trainer calls it and feeds ``batch.experiences()`` to ``learn()``.
 

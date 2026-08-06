@@ -98,7 +98,7 @@ This example demonstrates how to use the GRPO algorithm to fine-tune a LLM on a 
    :caption: Developer notes
 
    dev/vllm_sleep_handoff
-   dev/llm_rollout_buffer
+   dev/llm_rollout_data
 
 .. note::
 

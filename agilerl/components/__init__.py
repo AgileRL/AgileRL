@@ -1,7 +1,7 @@
 # Copyright 2026 AgileRL
 # SPDX-License-Identifier: Apache-2.0
 
-from .llm_rollout_buffer import (
+from .llm_rollout_data import (
     LLMExperienceBatch,
     RolloutGroup,
     Trajectory,

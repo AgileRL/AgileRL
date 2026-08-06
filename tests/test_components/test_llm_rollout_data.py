@@ -1,7 +1,7 @@
 # Copyright 2026 AgileRL
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tests for :mod:`agilerl.components.llm_rollout_buffer`."""
+"""Tests for :mod:`agilerl.components.llm_rollout_data`."""
 
 import random
 
@@ -9,7 +9,7 @@ import numpy as np
 import pytest
 import torch
 
-from agilerl.components.llm_rollout_buffer import (
+from agilerl.components.llm_rollout_data import (
     LLMExperienceBatch,
     RolloutGroup,
     Trajectory,
@@ -159,7 +159,7 @@ class TestSyncTrainerWiring:
         return cids, masks, turns, rewards
 
     def test_matches_hand_rolled_assembly(self):
-        from agilerl.rollouts.on_policy import buffer_llm_rollouts
+        from agilerl.rollouts.on_policy import collate_llm_rollouts
         from agilerl.utils.algo_utils import stack_and_pad_experiences
 
         rng = random.Random(0)
@@ -173,7 +173,7 @@ class TestSyncTrainerWiring:
         (rewards_2d,) = stack_and_pad_experiences(normalized, padding_values=[0.0])
         old_c, old_m = stack_and_pad_experiences(cids, masks, padding_values=[0, False])
 
-        batch = buffer_llm_rollouts(cids, masks, turns, rewards, group_size=group_size)
+        batch = collate_llm_rollouts(cids, masks, turns, rewards, group_size=group_size)
         new_c, new_m = stack_and_pad_experiences(
             batch.completion_ids, batch.action_masks, padding_values=[0, False]
         )
@@ -187,41 +187,41 @@ class TestSyncTrainerWiring:
         )
 
     def test_rollout_tensors_are_not_copied(self):
-        from agilerl.rollouts.on_policy import buffer_llm_rollouts
+        from agilerl.rollouts.on_policy import collate_llm_rollouts
 
         cids, masks, turns, rewards = self._make_rollout(2, 2, 2, random.Random(3))
-        batch = buffer_llm_rollouts(cids, masks, turns, rewards, group_size=2)
+        batch = collate_llm_rollouts(cids, masks, turns, rewards, group_size=2)
         assert all(a is b for a, b in zip(batch.completion_ids, cids, strict=True))
         assert all(a is b for a, b in zip(batch.action_masks, masks, strict=True))
 
     def test_sampling_logps_threaded_through_batch(self):
-        from agilerl.rollouts.on_policy import buffer_llm_rollouts
+        from agilerl.rollouts.on_policy import collate_llm_rollouts
 
         cids, masks, turns, rewards = self._make_rollout(2, 1, 2, random.Random(5))
         logps = [torch.zeros(3), None]
-        batch = buffer_llm_rollouts(cids, masks, turns, rewards, logps, group_size=1)
+        batch = collate_llm_rollouts(cids, masks, turns, rewards, logps, group_size=1)
         assert batch.sampling_logps is not None
         assert batch.sampling_logps[0] is logps[0]
         assert batch.sampling_logps[1] is None
 
     def test_non_divisible_raises(self):
-        from agilerl.rollouts.on_policy import buffer_llm_rollouts
+        from agilerl.rollouts.on_policy import collate_llm_rollouts
 
         cids, masks, turns, rewards = self._make_rollout(1, 3, 2, random.Random(1))
         with pytest.raises(ValueError, match="divisible"):
-            buffer_llm_rollouts(cids, masks, turns, rewards, group_size=2)
+            collate_llm_rollouts(cids, masks, turns, rewards, group_size=2)
 
     def test_empty_rollout(self):
-        from agilerl.rollouts.on_policy import buffer_llm_rollouts
+        from agilerl.rollouts.on_policy import collate_llm_rollouts
 
-        assert buffer_llm_rollouts([], [], [], [], group_size=4).is_empty
+        assert collate_llm_rollouts([], [], [], [], group_size=4).is_empty
 
     def test_mismatched_mask_length_fails_loudly(self):
-        from agilerl.rollouts.on_policy import buffer_llm_rollouts
+        from agilerl.rollouts.on_policy import collate_llm_rollouts
 
         cids = [torch.ones(1, 8, dtype=torch.long)]
         masks = [torch.ones(1, 8, dtype=torch.bool)]
         turns = [torch.zeros(1, 8, dtype=torch.long)]
         rewards = [torch.ones(2)]
         with pytest.raises(ValueError, match="completion_ids - 1"):
-            buffer_llm_rollouts(cids, masks, turns, rewards, group_size=1)
+            collate_llm_rollouts(cids, masks, turns, rewards, group_size=1)
