@@ -30,9 +30,11 @@ from agilerl.utils.llm_utils import (
     PreferenceGym,
     ReasoningGym,
     adapt_lora_config_for_model,
+    adapter_checkpoint_params,
     align_deepspeed_lr,
     apply_pad_token_id,
     attention_mask_from_padded_ids,
+    baseline_free_turn_cells,
     build_bnb_quantization_config,
     build_clippable_linear_lora_target_regex,
     build_clippable_linear_lora_target_suffixes,
@@ -55,7 +57,6 @@ from agilerl.utils.llm_utils import (
     gather_if_ds_param,
     gather_if_zero3,
     get_llm_accelerator,
-    get_lora_params,
     get_model_name_or_path,
     get_state_dict,
     list_peft_matched_module_keys,
@@ -961,8 +962,8 @@ def test_get_state_dict():
         assert isinstance(value, torch.Tensor)
 
 
-def test_get_lora_params_filters_adapter_params_only():
-    """get_lora_params must return only adapter params, never base params."""
+def test_adapter_checkpoint_params_filters_adapter_params_only():
+    """adapter_checkpoint_params returns only adapter params, never base params."""
     model = nn.Sequential(
         nn.Linear(10, 10),
         nn.Linear(10, 10),
@@ -978,7 +979,7 @@ def test_get_lora_params_filters_adapter_params_only():
 
     wrapper = nn.ModuleDict({"base": model, "lora_adapter": FakeLora()})
 
-    lora_params = get_lora_params(wrapper)
+    lora_params = adapter_checkpoint_params(wrapper)
     lora_names = {n for n, p in wrapper.named_parameters() if "lora" in n}
     expected_count = sum(1 for n, _ in wrapper.named_parameters() if "lora" in n)
 
@@ -992,10 +993,77 @@ def test_get_lora_params_filters_adapter_params_only():
     assert len(lora_names) > 0
 
 
-def test_get_lora_params_empty_model():
-    """get_lora_params on a model with no adapter params returns []."""
+def test_adapter_checkpoint_params_empty_model():
+    """adapter_checkpoint_params on a model with no adapter params returns []."""
     model = nn.Linear(10, 10)
-    assert get_lora_params(model) == []
+    assert adapter_checkpoint_params(model) == []
+
+
+def test_adapter_checkpoint_params_includes_dora_magnitude():
+    """DoRA magnitude vectors are written to the adapter checkpoint."""
+    model = nn.ModuleDict(
+        {
+            "base": nn.Linear(10, 10),
+            "lora_magnitude_vector": nn.ParameterDict(
+                {"default": nn.Parameter(torch.ones(10))}
+            ),
+        }
+    )
+
+    gathered = adapter_checkpoint_params(model)
+
+    assert len(gathered) == 1
+    assert gathered[0] is model["lora_magnitude_vector"]["default"]
+
+
+def test_adapter_checkpoint_params_includes_modules_to_save():
+    """PEFT saves ``modules_to_save`` copies, so ZeRO-3 must gather them too."""
+    value_head = nn.Linear(10, 1, bias=False)
+    model = nn.ModuleDict(
+        {
+            "base": nn.Linear(10, 10),
+            "summary": nn.ModuleDict(
+                {"modules_to_save": nn.ModuleDict({"default": value_head})}
+            ),
+        }
+    )
+
+    gathered = adapter_checkpoint_params(model)
+
+    assert any(p is value_head.weight for p in gathered)
+    assert not any(p is model["base"].weight for p in gathered)
+
+
+def test_adapter_checkpoint_params_covers_every_peft_adapter_checkpoint_key():
+    """Every parameter PEFT writes to an adapter checkpoint must be gathered."""
+    pytest.importorskip(
+        "peft", reason="adapter_checkpoint_params covers PEFT adapter keys."
+    )
+    from peft import LoraConfig, get_peft_model
+    from peft.utils.save_and_load import get_peft_model_state_dict
+
+    class _ValueHeadModel(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.linear_1 = nn.Linear(8, 8)
+            self.summary = nn.Linear(8, 1)
+
+        def forward(self, x):
+            return self.summary(self.linear_1(x))
+
+    peft_model = get_peft_model(
+        _ValueHeadModel(),
+        LoraConfig(r=2, target_modules=["linear_1"], modules_to_save=["summary"]),
+    )
+
+    gathered = adapter_checkpoint_params(peft_model)
+    saved = get_peft_model_state_dict(peft_model)
+
+    assert any("modules_to_save" in n for n, _ in peft_model.named_parameters())
+    gathered_storage = {p.data_ptr() for p in gathered}
+    assert len(gathered) == len(saved)
+    for key, tensor in saved.items():
+        assert tensor.data_ptr() in gathered_storage, key
 
 
 def _make_tokenizer(vocab_size: int = 100, prompt_len: int = 3) -> MagicMock:
@@ -1736,6 +1804,49 @@ class TestMaskedWhitenShiftMean:
         assert torch.allclose(diff, torch.full_like(diff, 4.0), atol=1e-5)
 
 
+class TestBaselineFreeTurnCells:
+    """``baseline_free_turn_cells`` finds played cells with no group baseline."""
+
+    def test_group_counts_expand_back_to_every_member(self) -> None:
+        turn_mask = torch.tensor(
+            [
+                [True, False, False],
+                [True, False, False],
+                [True, False, False],
+                [True, True, True],
+                [True, True, False],
+                [True, True, False],
+                [True, True, False],
+                [True, False, False],
+            ],
+        )
+
+        sparse = baseline_free_turn_cells(turn_mask, 4)
+
+        expected = torch.tensor(
+            [
+                [False, False, False],
+                [False, False, False],
+                [False, False, False],
+                [False, True, True],
+                [False, False, False],
+                [False, False, False],
+                [False, False, False],
+                [False, False, False],
+            ],
+        )
+        assert torch.equal(sparse, expected)
+
+    def test_unplayed_cells_are_never_marked(self) -> None:
+        turn_mask = torch.zeros(4, 6, dtype=torch.bool)
+        turn_mask[3, :4] = True
+
+        sparse = baseline_free_turn_cells(turn_mask, 4)
+
+        assert not sparse[~turn_mask].any()
+        assert torch.equal(sparse, turn_mask)
+
+
 class TestPoolByTurnsBadReduction:
     """``pool_by_turns`` should raise a clear ValueError for unknown reductions."""
 
@@ -2091,9 +2202,14 @@ class TestBuildBnbQuantizationConfig:
     def test_none_spec_returns_none(self):
         assert build_bnb_quantization_config(None) is None
 
-    @pytest.mark.parametrize("spec", ["none", "", "  NONE  "])
+    @pytest.mark.parametrize("spec", ["none", "  NONE  "])
     def test_none_preset_strings_return_none(self, spec):
         assert build_bnb_quantization_config(spec) is None
+
+    @pytest.mark.parametrize("spec", ["", "null", "false", "0", "bitsandbytes"])
+    def test_dropped_aliases_raise_value_error(self, spec):
+        with pytest.raises(ValueError, match=r"Unknown quantization preset"):
+            build_bnb_quantization_config(spec)
 
     def test_int8_preset(self):
         out = build_bnb_quantization_config("int8")
@@ -2109,6 +2225,29 @@ class TestBuildBnbQuantizationConfig:
             "bnb_4bit_use_double_quant": True,
         }
 
+    @pytest.mark.parametrize(
+        "alias",
+        [
+            "nf4",
+            "4bit",
+            "4-bit",
+            "4 bit",
+            "bnb-4bit",
+            "bnb_4bit",
+            "BNB_4BIT",
+        ],
+    )
+    def test_every_4bit_alias_builds_the_same_config(self, alias):
+        assert (
+            build_bnb_quantization_config(alias).kwargs
+            == build_bnb_quantization_config("nf4").kwargs
+        )
+
+    @pytest.mark.parametrize("alias", ["nf4", "4bit", "bnb_4bit", "bnb-4bit"])
+    def test_every_4bit_alias_sets_bf16_quant_storage(self, alias):
+        kwargs = build_bnb_quantization_config(alias).kwargs
+        assert kwargs["bnb_4bit_quant_storage"] is torch.bfloat16
+
     def test_dict_spec_forwarded_verbatim(self):
         spec = {"load_in_8bit": True, "llm_int8_threshold": 5.0}
         out = build_bnb_quantization_config(spec)
@@ -2123,7 +2262,9 @@ class TestBuildBnbQuantizationConfig:
             ValueError, match=r"Unknown quantization preset 'fp4'"
         ) as exc_info:
             build_bnb_quantization_config("fp4")
-        assert "['int8', 'nf4', 'none']" in str(exc_info.value)
+        message = str(exc_info.value)
+        for alias in ("int8", "nf4", "4bit", "bnb_4bit", "none"):
+            assert repr(alias) in message
 
     def test_invalid_type_raises_type_error(self):
         with pytest.raises(TypeError, match="got int"):

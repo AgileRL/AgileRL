@@ -166,6 +166,7 @@ if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
     from agilerl.utils.algo_utils import clone_llm
     from agilerl.utils.llm_utils import (
         adapt_lora_config_for_model,
+        adapter_checkpoint_params,
         align_deepspeed_lr,
         attention_mask_from_padded_ids,
         build_completion_mask,
@@ -176,7 +177,6 @@ if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
         fill_outside_mask,
         gather_if_ds_param,
         gather_if_zero3,
-        get_lora_params,
         get_model_name_or_path,
         get_state_dict,
         log_cuda_memory_snapshot,
@@ -2909,7 +2909,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
 
         if lora_only:
             model_ref = self._get_unwrapped_actor()
-            with gather_if_zero3(self.zero_stage, get_lora_params(model_ref)):
+            with gather_if_zero3(self.zero_stage, adapter_checkpoint_params(model_ref)):
                 model_ref.save_pretrained(
                     save_directory=path,
                     selected_adapters=self.selected_adapters,
@@ -3487,7 +3487,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         """
         adapter_dir = f"{work_dir}/adapters"
         model_ref = self._get_unwrapped_actor()
-        with gather_if_zero3(self.zero_stage, get_lora_params(model_ref)):
+        with gather_if_zero3(self.zero_stage, adapter_checkpoint_params(model_ref)):
             model_ref.save_pretrained(
                 save_directory=adapter_dir,
                 selected_adapters=self.selected_adapters,
@@ -5260,7 +5260,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         peft_ref.set_adapter(self._vllm_rollout_adapter)
 
         staging_dir = self._ensure_vllm_lora_staging_dir()
-        with gather_if_zero3(self.zero_stage, get_lora_params(peft_ref)):
+        with gather_if_zero3(self.zero_stage, adapter_checkpoint_params(peft_ref)):
             if self.lora_config is None:
                 msg = "lora_config is required for vLLM LoRA adapter export."
                 raise ValueError(msg)
@@ -5926,7 +5926,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
 
         with gather_if_zero3(
             self.zero_stage,
-            get_lora_params(unwrapped),
+            adapter_checkpoint_params(unwrapped),
             modifier_rank=0,
         ):
             with torch.no_grad():
@@ -6096,7 +6096,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
 
         with gather_if_zero3(
             self.zero_stage,
-            get_lora_params(unwrapped),
+            adapter_checkpoint_params(unwrapped),
             modifier_rank=0,
         ):
             with torch.no_grad():

@@ -560,42 +560,96 @@ def test_transformers_integration_parity(build, expected_targets):
         assert vllm_key.endswith((".experts", ".experts.base_layer"))
 
 
-@pytest.mark.skipif(
-    not torch.cuda.is_available(), reason="grouped-GEMM path is CUDA-only"
-)
-def test_grouped_mm_fast_path_matches_loop_on_cuda():
+def _delta_wrapper():
+    """A ``SortedExpertsLoraWrapper`` over an ``[experts, out, HIDDEN]`` weight."""
+    _, upgraded = _sorted_pair()
+    wrapper = upgraded.input_linear
+    assert isinstance(wrapper, SortedExpertsLoraWrapper)
+    return wrapper
+
+
+def _reference_delta(wrapper, x, counts, adapter="actor"):
+    """The low-rank delta written out longhand, one expert at a time, in float64.
+
+    ``lora_A`` rows are expert-major (expert ``e`` owns rows ``e * r`` to
+    ``(e + 1) * r``) and ``lora_B`` columns are rank-major over experts.
+    """
+    weight_a = wrapper.lora_A[adapter].weight.detach().double()
+    weight_b = wrapper.lora_B[adapter].weight.detach().double()
+    rank = wrapper.r[adapter]
+    scaling = wrapper.scaling[adapter]
+    b3 = weight_b.view(weight_b.shape[0], rank, wrapper.num_experts)
+    rows = x.double().split(counts)
+    pieces = []
+    for expert in range(wrapper.num_experts):
+        a_e = weight_a[expert * rank : (expert + 1) * rank]
+        b_e = b3[..., expert]
+        pieces.append(rows[expert] @ a_e.T @ b_e.T * scaling)
+    return torch.cat(pieces)
+
+
+def test_split_lora_delta_matches_per_expert_reference():
+    from agilerl.algorithms.core.llm_ops.moe_lora import _split_lora_delta
+
+    wrapper = _delta_wrapper()
+    # An unrouted expert (zero rows) is normal under top-k routing.
+    counts = [5, 0, 4, 3]
+    x = torch.randn(sum(counts), HIDDEN)
+
+    delta = _split_lora_delta(wrapper, x, counts, "actor")
+
+    expected = _reference_delta(wrapper, x, counts)
+    assert delta.shape == expected.shape
+    assert torch.allclose(delta.double(), expected, atol=1e-6)
+
+
+def test_split_lora_delta_runs_the_per_expert_loop():
     from agilerl.algorithms.core.llm_ops import moe_lora
 
-    torch.manual_seed(0)
-    reference = inject_adapter_in_model(
-        _lora_config(["experts.gate_up_proj", "experts.down_proj"]),
-        _RoutedMoeBlock(),
-        adapter_name="actor",
-    )
-    torch.manual_seed(0)
-    fast = inject_adapter_in_model(
-        _lora_config(["experts.gate_up_proj", "experts.down_proj"]),
-        _RoutedMoeBlock(),
-        adapter_name="actor",
-    )
-    upgrade_moe_param_wrappers(reference)
-    upgrade_moe_param_wrappers(fast)
-    reference.cuda()
-    fast.cuda()
+    wrapper = _delta_wrapper()
+    counts = [4, 4, 2, 2]
+    rank = wrapper.r["actor"]
+    out_features = wrapper.lora_B["actor"].weight.shape[0]
+    real_loop = moe_lora._expert_linear_loop
+    shapes = []
 
-    x = torch.randn(64, HIDDEN, device="cuda")
-    fast_out = fast(x)
-    if not moe_lora._use_grouped_mm(x):
-        pytest.skip("torch._grouped_mm unsupported on this GPU")
+    def _recording_loop(x, weight, loop_counts):
+        shapes.append(tuple(weight.shape))
+        return real_loop(x, weight, loop_counts)
+
     with pytest.MonkeyPatch.context() as mp:
-        # Force the loop path on the reference copy.
-        mp.setattr(moe_lora, "_use_grouped_mm", lambda _x: False)
-        ref_out = reference(x)
-    assert torch.allclose(ref_out, fast_out, atol=1e-5)
+        mp.setattr(moe_lora, "_expert_linear_loop", _recording_loop)
+        delta = moe_lora._split_lora_delta(
+            wrapper, torch.randn(sum(counts), HIDDEN), counts, "actor"
+        )
 
-    ref_out.square().mean().backward()
-    fast_out.square().mean().backward()
-    _assert_grad_parity(reference, fast, atol=1e-4)
+    # Down-projection to rank, then up-projection to the output width, both
+    # per expert: the delta never materializes a full-rank per-expert weight.
+    assert shapes == [
+        (NUM_EXPERTS, rank, HIDDEN),
+        (NUM_EXPERTS, out_features, rank),
+    ]
+    assert delta.shape == (sum(counts), out_features)
+
+
+def test_split_lora_delta_computes_in_fp32_for_low_precision_activations():
+    from agilerl.algorithms.core.llm_ops.moe_lora import _split_lora_delta
+
+    wrapper = _delta_wrapper()
+    counts = [4, 3, 3, 2]
+    x = torch.randn(sum(counts), HIDDEN).bfloat16()
+
+    delta = _split_lora_delta(wrapper, x, counts, "actor")
+    fp32_delta = _split_lora_delta(wrapper, x.float(), counts, "actor")
+
+    # bf16 activations are widened to fp32 for the low-rank GEMMs and only the
+    # result is narrowed back, so the two agree bit for bit after rounding.
+    assert delta.dtype is torch.bfloat16
+    assert fp32_delta.dtype is torch.float32
+    assert torch.equal(delta, fp32_delta.bfloat16())
+    assert torch.allclose(
+        delta.double(), _reference_delta(wrapper, x, counts), atol=5e-3
+    )
 
 
 class _FakeDsStatus:

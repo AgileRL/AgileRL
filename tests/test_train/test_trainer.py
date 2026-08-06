@@ -1737,6 +1737,56 @@ class TestLLMLocalTrainer:
             with pytest.raises(ImportError, match="LLM dependencies"):
                 trainer._make_tokenizer()
 
+    def test_make_tokenizer_falls_back_to_the_default_chat_template(self, dpo_spec):
+        from agilerl.utils.chat_template import DEFAULT_CHAT_TEMPLATE
+
+        trainer = LocalTrainer.__new__(LocalTrainer)
+        trainer.algorithm_spec = dpo_spec
+        mock_tokenizer = MagicMock(
+            chat_template=None,
+            eos_token_id=0,
+            eos_token="<eos>",
+            pad_token_id=None,
+            unk_token_id=None,
+        )
+        with (
+            patch(
+                "agilerl.training.trainer.AutoTokenizer", create=True
+            ) as mock_auto_tok,
+            patch(
+                "agilerl.training.trainer.load_pad_token_configs",
+                return_value=(None, None),
+            ),
+        ):
+            mock_auto_tok.from_pretrained.return_value = mock_tokenizer
+            tokenizer = trainer._make_tokenizer()
+
+        assert tokenizer.chat_template == DEFAULT_CHAT_TEMPLATE
+
+    def test_make_tokenizer_keeps_an_existing_chat_template(self, dpo_spec):
+        trainer = LocalTrainer.__new__(LocalTrainer)
+        trainer.algorithm_spec = dpo_spec
+        mock_tokenizer = MagicMock(
+            chat_template="{{ 'preset' }}",
+            eos_token_id=0,
+            eos_token="<eos>",
+            pad_token_id=None,
+            unk_token_id=None,
+        )
+        with (
+            patch(
+                "agilerl.training.trainer.AutoTokenizer", create=True
+            ) as mock_auto_tok,
+            patch(
+                "agilerl.training.trainer.load_pad_token_configs",
+                return_value=(None, None),
+            ),
+        ):
+            mock_auto_tok.from_pretrained.return_value = mock_tokenizer
+            tokenizer = trainer._make_tokenizer()
+
+        assert tokenizer.chat_template == "{{ 'preset' }}"
+
 
 class TestTrainerBaseNotImplemented:
     def test_resolve_env_spec_raises(self):

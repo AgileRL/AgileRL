@@ -19,7 +19,6 @@ import inspect
 import logging
 import warnings
 from collections.abc import Sequence
-from functools import cache
 from typing import Any
 
 import torch
@@ -29,41 +28,6 @@ from peft.tuners.lora.layer import ParamWrapper
 from agilerl.algorithms.core.llm_ops.fused_lora import uniform_routed_adapter
 
 logger = logging.getLogger(__name__)
-
-
-@cache
-def _grouped_mm_supported(device_index: int, dtype: torch.dtype) -> bool:
-    """Whether ``torch._grouped_mm`` computes correct results (fwd and bwd, transposed views) here."""
-    if not hasattr(torch, "_grouped_mm"):
-        return False
-    try:
-        device = torch.device("cuda", device_index)
-        generator = torch.Generator(device=device).manual_seed(0)
-        x = torch.randn(8, 16, device=device, dtype=dtype, generator=generator)
-        w = torch.randn(2, 4, 16, device=device, dtype=dtype, generator=generator)
-        x = x.requires_grad_(True)
-        w = w.requires_grad_(True)
-        offs = torch.tensor([5, 8], device=device, dtype=torch.int32)
-        out = torch._grouped_mm(x, w.transpose(-2, -1), offs=offs)
-        reference = torch.cat([x[:5] @ w[0].mT, x[5:] @ w[1].mT])
-        if not torch.allclose(out.float(), reference.float(), atol=1e-2):
-            return False
-        # square() materializes the incoming gradient; the op's backward
-        # rejects the zero-stride expanded grad a bare sum() would feed it.
-        out.square().sum().backward()
-    except Exception:
-        return False
-    return x.grad is not None and w.grad is not None
-
-
-def _use_grouped_mm(x: torch.Tensor) -> bool:
-    """Whether the grouped-GEMM fast path applies to *x*'s device and dtype."""
-    if not x.is_cuda:
-        return False
-    index = x.device.index
-    if index is None:
-        index = torch.cuda.current_device()
-    return _grouped_mm_supported(index, x.dtype)
 
 
 def _counts_list(counts: Sequence[int] | torch.Tensor) -> list[int]:
@@ -82,18 +46,6 @@ def _counts_tensor(
     return torch.as_tensor(counts, device=device)
 
 
-def _group_offsets(
-    counts: Sequence[int] | torch.Tensor, device: torch.device
-) -> torch.Tensor:
-    """Cumulative per-expert row offsets in the layout ``torch._grouped_mm`` takes."""
-    return torch.cumsum(_counts_tensor(counts, device), dim=0).to(torch.int32)
-
-
-def _dims_aligned(itemsize: int, *dims: int) -> bool:
-    """Whether row strides over these inner dims meet the op's 16-byte alignment."""
-    return all(dim * itemsize % 16 == 0 for dim in dims)
-
-
 def _is_partitioned(*tensors: torch.Tensor) -> bool:
     """Whether any tensor is a ZeRO-3 shard that is not currently gathered.
 
@@ -110,28 +62,12 @@ def _is_partitioned(*tensors: torch.Tensor) -> bool:
     return False
 
 
-def _grouped_linear(
+def _expert_linear_loop(
     x: torch.Tensor,
     weight: torch.Tensor,
     counts: Sequence[int] | torch.Tensor,
-    offs: torch.Tensor | None = None,
-    *,
-    copy_for_gmm: bool = False,
 ) -> torch.Tensor:
-    """Per-expert linear over expert-sorted rows with a stacked ``[experts, out, in]`` weight."""
-    if (
-        x.dtype == weight.dtype
-        and _dims_aligned(x.element_size(), weight.shape[1], weight.shape[2])
-        and _use_grouped_mm(x)
-    ):
-        operand = weight.transpose(-2, -1)
-        if copy_for_gmm:
-            # grouped_mm is only validated for a plain last-two-dims transpose;
-            # weights on other stride patterns are copied (rank-sized here).
-            operand = operand.contiguous()
-        if offs is None:
-            offs = _group_offsets(counts, x.device)
-        return torch._grouped_mm(x, operand, offs=offs)
+    """Per-expert ``F.linear`` over expert-sorted rows with a stacked ``[experts, out, in]`` weight."""
     outputs = [
         nn.functional.linear(rows, weight[expert])
         for expert, rows in enumerate(x.split(_counts_list(counts)))
@@ -227,12 +163,18 @@ def _resolve_adapters(wrapper: ParamWrapper) -> list[str]:
     ]
 
 
+def _lora_compute_dtype(dtype: torch.dtype) -> torch.dtype:
+    """fp32 for low-rank GEMMs when activations are fp16/bf16."""
+    if dtype in (torch.float16, torch.bfloat16):
+        return torch.float32
+    return dtype
+
+
 def _split_lora_delta(
     wrapper: ParamWrapper,
     x: torch.Tensor,
     counts: Sequence[int] | torch.Tensor,
     adapter: str,
-    offs: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Low-rank delta for expert-sorted rows without materializing per-expert full-rank weights."""
     lora_a = wrapper.lora_A[adapter]
@@ -244,7 +186,9 @@ def _split_lora_delta(
     scaling = wrapper.scaling[adapter]
     num_experts = wrapper.num_experts
     rank = wrapper.r[adapter]
-    x = x.to(weight_a.dtype)
+    out_dtype = x.dtype
+    compute_dtype = _lora_compute_dtype(out_dtype)
+    x = x.to(compute_dtype)
 
     if _is_partitioned(weight_a, weight_b):
         # ZeRO-3 shards are only gathered by module pre-forward hooks, so the
@@ -256,18 +200,91 @@ def _split_lora_delta(
             _counts_tensor(counts, x.device),
         )
         rows = torch.arange(total, device=x.device)
-        a_full = lora_a(x).view(total, num_experts, rank)
+        a_full = lora_a(x.to(weight_a.dtype)).view(total, num_experts, rank)
         gated = torch.zeros(
             total, rank, num_experts, dtype=a_full.dtype, device=x.device
         )
         gated[rows, :, expert_ids] = a_full[rows, expert_ids]
-        return lora_b(gated.reshape(total, rank * num_experts)) * scaling
+        delta = lora_b(gated.reshape(total, rank * num_experts)) * scaling
+        return delta.to(out_dtype)
 
-    a3 = weight_a.view(num_experts, rank, weight_a.shape[1])
-    b3 = weight_b.view(weight_b.shape[0], rank, num_experts)
-    down = _grouped_linear(x, a3, counts, offs)
-    up = _grouped_linear(down, b3.permute(2, 0, 1), counts, offs, copy_for_gmm=True)
-    return up * scaling
+    a3 = weight_a.view(num_experts, rank, weight_a.shape[1]).to(compute_dtype)
+    b3 = weight_b.view(weight_b.shape[0], rank, num_experts).to(compute_dtype)
+    down = _expert_linear_loop(x, a3, counts)
+    up = _expert_linear_loop(down, b3.permute(2, 0, 1), counts)
+    return (up * scaling).to(out_dtype)
+
+
+def _routed_lora_residual(
+    hidden_states: torch.Tensor,
+    top_k_index: torch.Tensor,
+    top_k_weights: torch.Tensor,
+    chain: dict[str, ParamWrapper],
+    experts: nn.Module,
+    adapters: dict[str, list[str]],
+) -> torch.Tensor:
+    """LoRA-only residual for a routed experts block (``full_lora - native_base``)."""
+    projections = _routed_projection_names(experts)
+    if projections is None:
+        msg = "Routed expert LoRA residual requires a recognized projection layout."
+        raise RuntimeError(msg)
+    up_name, gated = projections
+    up_weight = getattr(experts, up_name)
+    down_weight = experts.down_proj
+    act_fn = experts.act_fn
+    assert isinstance(up_weight, torch.Tensor)
+    assert isinstance(down_weight, torch.Tensor)
+    assert not isinstance(act_fn, torch.Tensor)
+    if _is_partitioned(up_weight, down_weight):
+        msg = (
+            "Split expert LoRA found ZeRO-3 partitioned expert weights "
+            "that are not gathered. The expert wrappers must be ZeRO-3 "
+            "leaf modules (mark_expert_wrappers_as_zero3_leaves; applied "
+            "automatically at algorithm init) so the subtree gathers "
+            "before this forward reads the packed weights."
+        )
+        raise RuntimeError(msg)
+
+    num_experts = up_weight.shape[0]
+    top_k = top_k_index.shape[-1]
+    flat_experts = top_k_index.reshape(-1)
+    order = torch.argsort(flat_experts, stable=True)
+    counts = torch.bincount(flat_experts, minlength=num_experts)
+    token_idx = torch.div(order, top_k, rounding_mode="floor")
+    x = hidden_states[token_idx]
+
+    projected_base = _expert_linear_loop(x, up_weight, counts)
+    projected = projected_base.to(_lora_compute_dtype(projected_base.dtype))
+    for name in adapters.get(up_name, []):
+        delta = _split_lora_delta(chain[up_name], x, counts, name)
+        projected = projected + delta.to(projected.dtype)
+    projected = projected.to(projected_base.dtype)
+
+    if gated:
+        gate_b, up_b = projected_base.chunk(2, dim=-1)
+        intermediate_base = act_fn(gate_b) * up_b
+        gate, up = projected.chunk(2, dim=-1)
+        intermediate = act_fn(gate) * up
+    else:
+        intermediate_base = act_fn(projected_base)
+        intermediate = act_fn(projected)
+
+    residual = _expert_linear_loop(
+        intermediate - intermediate_base, down_weight, counts
+    )
+    residual = residual.to(_lora_compute_dtype(residual.dtype))
+    for name in adapters.get("down_proj", []):
+        delta = _split_lora_delta(chain["down_proj"], intermediate, counts, name)
+        residual = residual + delta.to(residual.dtype)
+
+    routed_weights = top_k_weights.reshape(-1)[order].unsqueeze(-1)
+    result = torch.zeros_like(hidden_states)
+    result.index_add_(
+        0,
+        token_idx,
+        (residual.to(hidden_states.dtype) * routed_weights).to(result.dtype),
+    )
+    return result
 
 
 def _wrapper_chain(wrapper: ParamWrapper) -> dict[str, ParamWrapper]:
@@ -297,9 +314,8 @@ class SortedExpertsLoraWrapper(ParamWrapper):
         if not adapters:
             return result
         counts = _expert_counts(expert_size, self.num_experts)
-        offs = _group_offsets(counts, x.device) if x.is_cuda else None
         for name in adapters:
-            delta = _split_lora_delta(self, x, counts, name, offs)
+            delta = _split_lora_delta(self, x, counts, name)
             result = result + delta.to(result.dtype)
         return result
 
@@ -324,58 +340,15 @@ class RoutedExpertsLoraWrapper(ParamWrapper):
         chain = _wrapper_chain(self)
         experts = self.get_base_layer()
         adapters = {name: _resolve_adapters(w) for name, w in chain.items()}
+        base = experts(hidden_states, top_k_index, top_k_weights)
         if not any(adapters.values()):
-            return experts(hidden_states, top_k_index, top_k_weights)
-
-        projections = _routed_projection_names(experts)
-        if projections is None:
+            return base
+        if _routed_projection_names(experts) is None:
             return ParamWrapper.forward(self, hidden_states, top_k_index, top_k_weights)
-        up_name, gated = projections
-        up_weight = getattr(experts, up_name)
-        down_weight = experts.down_proj
-        act_fn = experts.act_fn
-        assert isinstance(up_weight, torch.Tensor)
-        assert isinstance(down_weight, torch.Tensor)
-        assert not isinstance(act_fn, torch.Tensor)
-        if _is_partitioned(up_weight, down_weight):
-            msg = (
-                "Split expert LoRA found ZeRO-3 partitioned expert weights "
-                "that are not gathered. The expert wrappers must be ZeRO-3 "
-                "leaf modules (mark_expert_wrappers_as_zero3_leaves; applied "
-                "automatically at algorithm init) so the subtree gathers "
-                "before this forward reads the packed weights."
-            )
-            raise RuntimeError(msg)
-
-        num_experts = up_weight.shape[0]
-        top_k = top_k_index.shape[-1]
-        flat_experts = top_k_index.reshape(-1)
-        order = torch.argsort(flat_experts, stable=True)
-        counts = torch.bincount(flat_experts, minlength=num_experts)
-        offs = torch.cumsum(counts, dim=0).to(torch.int32)
-        token_idx = torch.div(order, top_k, rounding_mode="floor")
-        x = hidden_states[token_idx]
-
-        projected = _grouped_linear(x, up_weight, counts, offs)
-        for name in adapters.get(up_name, []):
-            delta = _split_lora_delta(chain[up_name], x, counts, name, offs)
-            projected = projected + delta.to(projected.dtype)
-        if gated:
-            gate, up = projected.chunk(2, dim=-1)
-            intermediate = act_fn(gate) * up
-        else:
-            intermediate = act_fn(projected)
-        down = _grouped_linear(intermediate, down_weight, counts, offs)
-        for name in adapters.get("down_proj", []):
-            delta = _split_lora_delta(
-                chain["down_proj"], intermediate, counts, name, offs
-            )
-            down = down + delta.to(down.dtype)
-
-        routed_weights = top_k_weights.reshape(-1)[order].unsqueeze(-1)
-        result = torch.zeros_like(hidden_states)
-        result.index_add_(0, token_idx, (down * routed_weights).to(result.dtype))
-        return result
+        delta = _routed_lora_residual(
+            hidden_states, top_k_index, top_k_weights, chain, experts, adapters
+        )
+        return base + delta.to(base.dtype)
 
 
 def mark_expert_wrappers_as_zero3_leaves(model: nn.Module) -> int:

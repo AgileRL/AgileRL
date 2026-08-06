@@ -49,6 +49,7 @@ from agilerl.models.networks import (
     infer_encoder_arch,
     network_arch_is_resolvable,
 )
+from agilerl.utils.chat_template import DEFAULT_CHAT_TEMPLATE
 from agilerl.utils.llm_utils import (
     apply_pad_token_id,
     load_pad_token_configs,
@@ -649,17 +650,8 @@ class LocalTrainer(Trainer):
         )
         assert tokenizer is not None
 
-        # NOTE: For now we provide a simple chat template but could always
-        # give options to the user in the future.
         if tokenizer.chat_template is None:
-            tokenizer.chat_template = (
-                "{% for message in messages %}"
-                "{{ message['role'].capitalize() + ': ' + message['content'] + '\\n\\n' }}"
-                "{% endfor %}"
-                "{% if add_generation_prompt %}"
-                "{{ 'Assistant: ' }}"
-                "{% endif %}"
-            )
+            tokenizer.chat_template = DEFAULT_CHAT_TEMPLATE
 
         model_config, generation_config = load_pad_token_configs(
             self.algorithm_spec.pretrained_model_name_or_path

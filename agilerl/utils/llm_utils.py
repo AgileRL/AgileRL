@@ -67,8 +67,15 @@ _DEPRECATED_LLM_ENV_NAMES = frozenset(
     ("apply_chat_template", "ReasoningGym", "PreferenceGym", "SFTGym"),
 )
 
-# Named bitsandbytes quantization presets
-_BNB_QUANT_PRESETS = frozenset({"none", "int8", "nf4"})
+# Accepted spellings per bitsandbytes quantization preset
+_BNB_QUANT_NONE_ALIASES = frozenset({"none"})
+_BNB_QUANT_INT8_ALIASES = frozenset({"int8"})
+_BNB_QUANT_NF4_ALIASES = frozenset(
+    {"nf4", "4bit", "4-bit", "bnb-4bit", "bnb_4bit"},
+)
+_BNB_QUANT_PRESETS = (
+    _BNB_QUANT_NONE_ALIASES | _BNB_QUANT_INT8_ALIASES | _BNB_QUANT_NF4_ALIASES
+)
 
 # Gemma 4 wraps projections in *ClippableLinear; PEFT must target the inner ``.linear``
 # submodule via regex (see https://github.com/huggingface/peft/issues/3129).
@@ -697,21 +704,23 @@ def gather_if_ds_param(
         yield
 
 
-def get_lora_params(model: nn.Module) -> list[torch.Tensor]:
-    """Return adapter parameters for scoped ZeRO-3 gathers.
+def adapter_checkpoint_params(model: nn.Module) -> list[torch.Tensor]:
+    """Return the parameters PEFT's adapter checkpoint I/O reads and writes.
 
-    Under ZeRO-3, save/export/copy operations only touch adapter parameters.
-    Base parameters remain sharded and are filtered out by PEFT's name-based
-    key matching inside ``save_pretrained`` / ``get_peft_model_state_dict``.
-    Gathering only adapter parameters avoids materialising the full base
-    model on every rank.
+    Scopes ZeRO-3 gathers around ``save_pretrained`` /
+    ``get_peft_model_state_dict`` / ``set_peft_model_state_dict`` so base
+    parameters stay sharded instead of being materialised on every rank.
 
-    :param model: The model to extract adapter parameters from.
+    :param model: The model to collect adapter checkpoint parameters from.
     :type model: nn.Module
-    :return: List of adapter parameters (LoRA A/B, DoRA magnitude, optional bias).
+    :return: LoRA A/B and DoRA magnitude parameters, plus the
+        ``modules_to_save`` copies PEFT writes into the same checkpoint (an LLM
+        PPO value head).
     :rtype: list[torch.Tensor]
     """
-    return [p for n, p in model.named_parameters() if "lora" in n]
+    return [
+        p for n, p in model.named_parameters() if "lora" in n or "modules_to_save" in n
+    ]
 
 
 def get_state_dict(model: nn.Module) -> dict[str, torch.Tensor]:
@@ -737,11 +746,14 @@ def build_bnb_quantization_config(
 
     * ``None`` or ``"none"`` -- no quantization (BF16 baseline); returns ``None``.
     * ``"int8"`` -- LLM.int8() 8-bit weights.
-    * ``"nf4"`` -- 4-bit NF4 with bf16 compute, bf16 quant storage and double
-      quantisation (the QLoRA recipe, ZeRO-3 compatible).
+    * ``"nf4"``, ``"4bit"``, ``"4-bit"``, ``"bnb-4bit"`` or ``"bnb_4bit"`` --
+      4-bit NF4 with bf16 compute, bf16 quant storage and double quantisation
+      (the QLoRA recipe, ZeRO-3 / FSDP compatible).
     * ``dict`` -- forwarded verbatim as ``BitsAndBytesConfig(**spec)`` for full
       control; ``bnb_4bit_compute_dtype`` / ``bnb_4bit_quant_storage`` may be
       given as dtype strings (e.g. ``"bfloat16"``), which transformers resolves.
+
+    Preset names are matched case-insensitively with whitespace removed.
 
     :param spec: Quantization preset name, ``BitsAndBytesConfig`` kwargs dict,
         or ``None``.
@@ -759,12 +771,12 @@ def build_bnb_quantization_config(
     if isinstance(spec, dict):
         return BitsAndBytesConfig(**spec)
     if isinstance(spec, str):
-        mode = spec.strip().lower()
-        if mode in ("none", ""):
+        mode = "".join(spec.split()).lower()
+        if mode in _BNB_QUANT_NONE_ALIASES:
             return None
-        if mode == "int8":
+        if mode in _BNB_QUANT_INT8_ALIASES:
             return BitsAndBytesConfig(load_in_8bit=True)
-        if mode == "nf4":
+        if mode in _BNB_QUANT_NF4_ALIASES:
             return BitsAndBytesConfig(
                 load_in_4bit=True,
                 bnb_4bit_quant_type="nf4",
@@ -1459,6 +1471,22 @@ def pool_by_turns(
             )
             raise ValueError(msg)
     return turn_values
+
+
+def baseline_free_turn_cells(turn_mask: torch.Tensor, group_size: int) -> torch.Tensor:
+    """Mark played ``(sample, turn)`` cells whose group holds fewer than two members.
+
+    :param turn_mask: Boolean ``[batch, num_turns]`` mask of played turns.
+    :type turn_mask: torch.Tensor
+    :param group_size: Members per group, in contiguous blocks along the batch.
+    :type group_size: int
+    :return: Boolean ``[batch, num_turns]`` mask of cells lacking a baseline.
+    :rtype: torch.Tensor
+    """
+    batch, num_turns = turn_mask.shape
+    count = turn_mask.reshape(-1, group_size, num_turns).sum(dim=1, keepdim=True)
+    lone = (count <= 1).expand(-1, group_size, -1).reshape(batch, num_turns)
+    return turn_mask & lone
 
 
 def validate_importance_sampling_level(level: str, *, allow_auto: bool) -> None:

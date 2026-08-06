@@ -42,7 +42,11 @@ from agilerl.algorithms.core.base import (
     LLMAlgorithm,
     OptimizerWrapper,
 )
-from agilerl.algorithms.grpo import HAS_LIGER_KERNEL
+from agilerl.algorithms.grpo import (
+    HAS_LIGER_KERNEL,
+    LIGER_CLIP_FRACTION_METRIC,
+    REFERENCE_KL_METRIC,
+)
 from agilerl.modules.dummy import DummyEvolvable
 from agilerl.utils.algo_utils import CosineLRScheduleConfig, VLLMConfig, clone_llm
 from agilerl.utils.llm_utils import ReasoningGym
@@ -519,8 +523,11 @@ class _GrpoLossStub:
         adv_norm: str = "mean_std",
         advantage_granularity: str = "auto",
         vllm_importance_sampling_cap: float = 2.0,
+        turn_advantage_trajectory_fallback: bool = True,
         device: str = "cpu",
+        loss_norm: str = "micro_batch",
     ) -> None:
+        self.loss_norm = loss_norm
         self.clip_coef_min = clip_coef_min
         self.clip_coef_max = clip_coef_max
         self.beta = beta
@@ -530,6 +537,7 @@ class _GrpoLossStub:
         self.adv_norm = adv_norm
         self.advantage_granularity = advantage_granularity
         self.vllm_importance_sampling_cap = vllm_importance_sampling_cap
+        self.turn_advantage_trajectory_fallback = turn_advantage_trajectory_fallback
         self.device = device
 
     _apply_kl_advantage_shaping = GRPO._apply_kl_advantage_shaping
@@ -3176,7 +3184,11 @@ class TestGRPOAdvantageGranularityDecoupling:
             _make_cpu_grpo_for_branch_tests(advantage_granularity="token")
 
 
-def _adv_stub(group_size: int = 2, adv_norm: str = "mean_only"):
+def _adv_stub(
+    group_size: int = 2,
+    adv_norm: str = "mean_only",
+    turn_advantage_trajectory_fallback: bool = True,
+):
     """Loss stub configured for the advantage-branch helpers extracted from
     ``learn`` (``_turn_broadcast_advantages`` / ``_trajectory_advantages``).
     ``mean_only`` keeps the hand-traced expectations integer-clean.
@@ -3188,6 +3200,7 @@ def _adv_stub(group_size: int = 2, adv_norm: str = "mean_only"):
         use_kl_advantage_shaping=False,
         group_size=group_size,
         adv_norm=adv_norm,
+        turn_advantage_trajectory_fallback=turn_advantage_trajectory_fallback,
     )
 
 
@@ -3680,6 +3693,44 @@ class TestGRPOLearn:
         assert processed_advantages.abs().max().item() <= 0.100001
         assert metrics["loss"] == pytest.approx(1.0)
         assert metrics["kl"] == pytest.approx(0.1)
+        grpo.clean_up()
+
+    def test_learn_records_the_window_action_tokens_of_active_samples(self):
+        grpo = _make_cpu_grpo_for_branch_tests(
+            group_size=2,
+            filter_zero_adv=True,
+            adv_filter_eps=0.05,
+            loss_norm="accumulation_window",
+        )
+        completion_ids, action_masks = _build_branch_experiences(batch_size=4)
+        rewards = torch.tensor([1.0, 0.0, -1.0, 2.0], dtype=torch.float32)
+
+        def fake_fused_forward(ids, batch_size):
+            shape = (ids.shape[0], ids.shape[1] - 1)
+            zeros = torch.zeros(shape, dtype=torch.float32, device=ids.device)
+            return zeros, zeros, None
+
+        fake_advantages = torch.tensor(
+            [[0.0], [2.0], [-2.0], [0.0]], dtype=torch.float32
+        )
+        with (
+            patch.object(grpo, "_calculate_advantage", return_value=fake_advantages),
+            patch.object(
+                grpo, "_fused_forward_no_grad", side_effect=fake_fused_forward
+            ),
+            patch.object(
+                grpo,
+                "_loss",
+                return_value=(
+                    torch.tensor(1.0, dtype=torch.float32),
+                    torch.tensor(0.1, dtype=torch.float32),
+                ),
+            ),
+            patch.object(grpo, "_backward_pass", return_value=None),
+        ):
+            grpo.learn((completion_ids, action_masks, rewards))
+        # Two of the four samples survive the filter, each with 9 action tokens.
+        assert grpo._window_action_tokens == 18
         grpo.clean_up()
 
     def test_learn_warns_and_returns_zeros_when_all_filtered(self):
@@ -6613,4 +6664,36 @@ class TestGRPOTurnAdvantageLearnPath:
             )
         mock_liger.assert_not_called()
         assert np.isfinite(metrics["loss"])
+        grpo.clean_up()
+
+
+@contextmanager
+def _liger_available():
+    """Make both liger gates report the kernel as installed."""
+    with (
+        patch("agilerl.algorithms.core.base.HAS_LIGER_KERNEL", True),
+        patch("agilerl.algorithms.grpo.HAS_LIGER_KERNEL", True),
+    ):
+        yield
+
+
+class TestGRPOAuxMetricNaming:
+    """Live-tracker registration of the auxiliary scalar beside ``loss``.
+
+    Naming and ``learn`` key routing are pinned in
+    ``test_grpo_metric_naming.py``; this class only checks what a real
+    ``GRPO`` metrics tracker registers at init.
+    """
+
+    def test_the_clip_fraction_metric_is_registered_alongside_kl(self):
+        with _liger_available():
+            grpo = _make_cpu_grpo_for_branch_tests(use_liger_loss=True, beta=0.0)
+        assert np.isnan(grpo.metrics.get_mean(REFERENCE_KL_METRIC))
+        assert np.isnan(grpo.metrics.get_mean(LIGER_CLIP_FRACTION_METRIC))
+        grpo.clean_up()
+
+    def test_the_standard_path_registers_only_kl(self):
+        grpo = _make_cpu_grpo_for_branch_tests(beta=0.0)
+        with pytest.raises(KeyError):
+            grpo.metrics.get_mean(LIGER_CLIP_FRACTION_METRIC)
         grpo.clean_up()
