@@ -51,6 +51,7 @@ from agilerl.algorithms.core.llm_ops.fused_logprobs import (
     FusedLinearLogProbsFunction,
     fused_linear_logprobs_chunked,
 )
+from agilerl.algorithms.core.llm_ops.liger_nemotron_h import register_nemotron_h_liger
 from agilerl.algorithms.core.optimizer_wrapper import OptimizerWrapper
 from agilerl.algorithms.core.registry import (
     HyperparameterConfig,
@@ -168,6 +169,7 @@ if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
         adapt_lora_config_for_model,
         adapter_checkpoint_params,
         align_deepspeed_lr,
+        assert_no_activation_checkpointing_config,
         attention_mask_from_padded_ids,
         build_completion_mask,
         build_vllm_llm_init_kwargs,
@@ -186,6 +188,7 @@ if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
         save_peft_adapter_for_vllm_rollout,
         stitch_completion_after_windowed_vllm_generate,
     )
+    from agilerl.utils.third_party_patches import patch_zero3_param_persistence
 
 if TYPE_CHECKING or HAS_DEEPSPEED:
     from deepspeed.checkpoint.utils import clone_tensors_for_torch_save
@@ -2709,6 +2712,10 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             ds_plugin = getattr(self.accelerator.state, "deepspeed_plugin", None)
             if ds_plugin is not None:
                 ds_config = ds_plugin.deepspeed_config
+                assert_no_activation_checkpointing_config(
+                    ds_config,
+                    source="the DeepSpeed plugin config",
+                )
                 if max_grad_norm is not None:
                     if self.accelerator.is_main_process:
                         warnings.warn(
@@ -2738,6 +2745,19 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
                         "DeepSpeed ZeRO Stage 3 is nascent and may not work as expected, proceed with caution when using this feature.",
                         stacklevel=2,
                     )
+                zero_config = ds_config.get("zero_optimization", {})
+                if self.zero_stage == 3:
+                    param_threshold = zero_config.get(
+                        "stage3_param_persistence_threshold"
+                    )
+                    if param_threshold is not None:
+                        patch_zero3_param_persistence(
+                            int(param_threshold),
+                            model_persistence_threshold=zero_config.get(
+                                "stage3_model_persistence_threshold",
+                            ),
+                            num_partitions=int(self.accelerator.num_processes),
+                        )
             if self.accelerator.num_processes > 1:
                 seed = broadcast_object_list([seed], from_process=0)[0]
             seed += self.accelerator.process_index
@@ -4526,6 +4546,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
                     )
                 try:
                     if not already_patched:
+                        register_nemotron_h_liger()
                         _apply_liger_kernel_to_instance(model=inner_model)
                         inner_model._agilerl_liger_patched = True
                         logger.info(

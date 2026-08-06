@@ -3040,6 +3040,79 @@ class TestLLMInitWarnings:
         agent.mutation_hook()
         agent._sync_deepspeed_gradient_clipping.assert_called_once()
 
+    def test_rejects_activation_checkpointing_config(self):
+        acc = _make_mock_accelerator(
+            ds_config={
+                "zero_optimization": {"stage": 2},
+                "activation_checkpointing": {"partition_activations": True},
+                "train_micro_batch_size_per_gpu": "auto",
+            }
+        )
+        with pytest.raises(RuntimeError, match="activation_checkpointing"):
+            _make_llm_agent(accelerator=acc)
+
+
+class TestLLMZero3ParamPersistenceWireUp:
+    def test_patches_when_stage3_and_threshold_set(self):
+        acc = _make_mock_accelerator(
+            ds_config={
+                "zero_optimization": {
+                    "stage": 3,
+                    "stage3_param_persistence_threshold": 50_000,
+                    "stage3_model_persistence_threshold": 1_000_000,
+                },
+                "train_micro_batch_size_per_gpu": "auto",
+            },
+            num_processes=4,
+        )
+        with (
+            patch(
+                "agilerl.algorithms.core.base.patch_zero3_param_persistence"
+            ) as mock_patch,
+            pytest.warns(UserWarning, match="ZeRO Stage 3"),
+        ):
+            _make_llm_agent(accelerator=acc)
+
+        mock_patch.assert_called_once_with(
+            50_000,
+            model_persistence_threshold=1_000_000,
+            num_partitions=4,
+        )
+
+    def test_skips_when_stage_is_not_3(self):
+        acc = _make_mock_accelerator(
+            ds_config={
+                "zero_optimization": {
+                    "stage": 2,
+                    "stage3_param_persistence_threshold": 50_000,
+                },
+                "train_micro_batch_size_per_gpu": "auto",
+            }
+        )
+        with patch(
+            "agilerl.algorithms.core.base.patch_zero3_param_persistence"
+        ) as mock_patch:
+            _make_llm_agent(accelerator=acc)
+
+        mock_patch.assert_not_called()
+
+    def test_skips_when_threshold_unset(self):
+        acc = _make_mock_accelerator(
+            ds_config={
+                "zero_optimization": {"stage": 3},
+                "train_micro_batch_size_per_gpu": "auto",
+            }
+        )
+        with (
+            patch(
+                "agilerl.algorithms.core.base.patch_zero3_param_persistence"
+            ) as mock_patch,
+            pytest.warns(UserWarning, match="ZeRO Stage 3"),
+        ):
+            _make_llm_agent(accelerator=acc)
+
+        mock_patch.assert_not_called()
+
 
 class TestLLMSyncDeepSpeedGradientClipping:
     def test_sync_updates_ds_config_and_optimizer(self):

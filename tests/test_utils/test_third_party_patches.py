@@ -770,7 +770,6 @@ def _make_stream_mixer_class(events, output):
 @pytest.fixture
 def cuda_env(monkeypatch):
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
-    monkeypatch.setattr(third_party_patches, "_STREAM_RELATION_LOGGED", False)
 
 
 def _install_streams(monkeypatch, streams):
@@ -969,34 +968,6 @@ class TestNemotronMambaStreamOrdering:
 
         assert mixer_cls().forward(FakeTensor()) is output
         assert events == ["forward"]
-
-    def test_stream_relation_is_reported_once(self, cuda_env, monkeypatch, caplog):
-        events = []
-        mixer_cls = _make_stream_mixer_class(events, FakeTensor())
-        monkeypatch.setattr(
-            third_party_patches,
-            "_resolve_mixer_class",
-            lambda: mixer_cls,
-        )
-        patch_nemotron_mamba_stream_ordering()
-        mixer = mixer_cls()
-
-        with caplog.at_level(logging.INFO):
-            _install_streams(monkeypatch, Streams(events, same=True))
-            mixer.forward(FakeTensor())
-            mixer.forward(FakeTensor())
-            _install_streams(monkeypatch, Streams(events))
-            mixer.forward(FakeTensor())
-            mixer.forward(FakeTensor())
-
-        relations = [
-            record.message
-            for record in caplog.records
-            if "caller stream is" in record.message
-        ]
-        assert len(relations) == 1
-        assert "caller stream is the default stream" in relations[0]
-        assert "ordering" not in relations[0]
 
 
 class TestBothMixerPatchesCoexist:

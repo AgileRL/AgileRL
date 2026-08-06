@@ -62,8 +62,6 @@ _TRACE_ATTRS = (
     "__param_order",
 )
 
-_STREAM_RELATION_LOGGED = False
-
 
 def _try_import(module_path: str) -> ModuleType | None:
     """Import *module_path*, or None when the package cannot be loaded.
@@ -270,11 +268,6 @@ def _make_patched_reset_step(
         if not torch.is_grad_enabled():
             if getattr(self, _SNAPSHOT_ATTR, None) is None:
                 setattr(self, _SNAPSHOT_ATTR, _snapshot_trace_state(self))
-                logger.info(
-                    "[zero3-trace] no-grad forward: trace held at %s, "
-                    "fetching on demand",
-                    getattr(self, trace_mode_attr, None),
-                )
             original_reset_step(self)
             setattr(self, trace_mode_attr, invalid_mode)
             return
@@ -283,10 +276,6 @@ def _make_patched_reset_step(
         if snapshot is not None:
             _restore_trace_state(self, snapshot)
             setattr(self, _SNAPSHOT_ATTR, None)
-            logger.info(
-                "[zero3-trace] grad forward: trace restored to %s",
-                getattr(self, trace_mode_attr, None),
-            )
         original_reset_step(self)
 
     return patched_reset_step
@@ -524,24 +513,6 @@ def patch_nemotron_mamba_fused_path(*, enabled: bool = True) -> None:
     )
 
 
-def _log_stream_relation(same_stream: bool) -> None:
-    """Log the caller/default stream relation once for GPU A/B grepping.
-
-    :param same_stream: Whether the calling stream is the default stream.
-    :type same_stream: bool
-    :return: None
-    :rtype: None
-    """
-    global _STREAM_RELATION_LOGGED
-    if _STREAM_RELATION_LOGGED:
-        return
-    _STREAM_RELATION_LOGGED = True
-    logger.info(
-        "[mamba-stream] caller stream is%s the default stream",
-        "" if same_stream else " not",
-    )
-
-
 def _is_cuda_tensor(value: object) -> bool:
     """Whether *value* is a CUDA tensor the caching allocator can track.
 
@@ -608,7 +579,6 @@ def _make_patched_forward(
         device = hidden_states.device
         current = torch.cuda.current_stream(device)
         default = torch.cuda.default_stream(device)
-        _log_stream_relation(current == default)
         if current == default:
             return original_forward(self, hidden_states, *args, **kwargs)
 

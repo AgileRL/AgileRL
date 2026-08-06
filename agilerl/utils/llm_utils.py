@@ -2170,6 +2170,71 @@ def get_model_name_or_path(model: PreTrainedModel) -> str:
     raise ValueError(msg)
 
 
+ACTIVATION_CHECKPOINTING_KEY = "activation_checkpointing"
+
+
+def _named_activation_checkpointing_keys(block: Any) -> str:  # noqa: ANN401 -- DeepSpeed config values are untyped
+    """Describe the settings a rejected activation-checkpointing section carries.
+
+    :param block: Value found under the activation-checkpointing key.
+    :type block: Any
+    :return: Human-readable list of the keys, or a description of the value.
+    :rtype: str
+    """
+    if isinstance(block, Mapping):
+        if not block:
+            return "no keys"
+        return ", ".join(sorted(str(key) for key in block))
+    return repr(block)
+
+
+def assert_no_activation_checkpointing_config(
+    deepspeed_config: Any,  # noqa: ANN401 -- DeepSpeed configs arrive as opaque mappings
+    *,
+    source: str,
+) -> None:
+    """Reject a DeepSpeed config carrying an activation-checkpointing section.
+
+    :param deepspeed_config: DeepSpeed config mapping to inspect.
+    :type deepspeed_config: Any
+    :param source: Where the config came from, quoted back in the message.
+    :type source: str
+    :return: None
+    :rtype: None
+    :raises TypeError: If the config is not a mapping and so cannot be checked.
+    :raises RuntimeError: If the activation-checkpointing section is present.
+    """
+    if deepspeed_config is None:
+        return
+    if not isinstance(deepspeed_config, Mapping):
+        msg = (
+            f"DeepSpeed config from {source} is {type(deepspeed_config).__name__}, "
+            f"not a mapping, so its {ACTIVATION_CHECKPOINTING_KEY} section cannot "
+            "be checked."
+        )
+        raise TypeError(msg)
+    if ACTIVATION_CHECKPOINTING_KEY not in deepspeed_config:
+        return
+    block = deepspeed_config[ACTIVATION_CHECKPOINTING_KEY]
+    msg = (
+        f"DeepSpeed config from {source} sets {ACTIVATION_CHECKPOINTING_KEY} "
+        f"({_named_activation_checkpointing_keys(block)}), which is not honoured "
+        "on this training path. DeepSpeed only reads that section for checkpoints "
+        "routed through deepspeed.checkpointing.checkpoint. Gradient checkpointing "
+        "here is enabled through HuggingFace's gradient_checkpointing_enable, which "
+        "binds torch.utils.checkpoint.checkpoint, and that never consults the "
+        "DeepSpeed config. Routing it through DeepSpeed instead is not available "
+        "on this stack: partition_activations shards along the model-parallel "
+        "group, which is size 1 here, so it saves nothing; "
+        "contiguous_memory_optimization requires partition_activations plus a "
+        "fixed layer count; and deepspeed.checkpointing.checkpoint is a reentrant "
+        "autograd Function with no use_reentrant argument, which the LoRA plus "
+        "ZeRO-3 recompute path needs to control. Remove the section rather than "
+        "carry settings that do nothing."
+    )
+    raise RuntimeError(msg)
+
+
 def align_deepspeed_lr(lr: float, accelerator: Accelerator | None) -> float:
     """Align the learning rate for DeepSpeed.
 
