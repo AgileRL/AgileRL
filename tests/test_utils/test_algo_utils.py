@@ -2570,6 +2570,7 @@ class TestCloneLlm:
         assert isinstance(cloned, FakeBaseModel)
         assert cloned.disabled is True
 
+
 class TestDummyOptimizer:
     def test_zero_grad_raises_runtime_error(self):
         opt = algo_utils.DummyOptimizer([torch.nn.Parameter(torch.tensor([1.0]))])

@@ -540,4 +540,3 @@ Under tensor parallelism, all ranks inside a TP group must receive the **identic
 - Do not use `dist.get_world_size()` / `dist.get_rank()` / `WORLD_SIZE` / `RANK` for sampler construction.
 
 Until that exists, `shard_dataloader_kwargs` is flat-world-only and is unsafe to lift unchanged into a multi-dim mesh.
-

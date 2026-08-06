@@ -695,7 +695,8 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
         # per-trajectory completion-id batch.
         completion_list = experiences[0]
         completion_length = float(np.mean([c.shape[-1] for c in completion_list]))
-        agg = aggregate_metrics_dict({
+        agg = aggregate_metrics_dict(
+            {
                 "loss": averaged["loss"],
                 "kl": averaged["kl"],
                 "entropy": averaged["entropy"],

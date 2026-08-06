@@ -67,8 +67,12 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument("--init-hp", action="append", default=[])
     p.add_argument("--zero3-root", type=Path, required=True)
-    p.add_argument("--offload", choices=["none", "optim", "full"], default="none",
-                   help="DeepSpeed CPU offload: none, optim (optimizer states), full (params+optim)")
+    p.add_argument(
+        "--offload",
+        choices=["none", "optim", "full"],
+        default="none",
+        help="DeepSpeed CPU offload: none, optim (optimizer states), full (params+optim)",
+    )
     p.add_argument("--zero-stage", type=int, choices=[2, 3], default=3)
     p.add_argument("--warmup-steps", type=int, default=5)
     return p.parse_args()
@@ -84,14 +88,13 @@ def main() -> int:
 
     import torch
     from accelerate import Accelerator
-
-    from agilerl.training.llm import finetune_llm_multiturn
-    from agilerl.utils.utils import create_population
     from llm_debug_utils import lora_config_from_dict  # type: ignore
     from tiny_model import TinyDigitTokenizer, build_tiny_actor_network  # type: ignore
 
     from agilerl.llm_envs import TokenObservationWrapper
+    from agilerl.training.llm import finetune_llm_multiturn
     from agilerl.utils.probe_envs_llm import ConstantTargetEnv
+    from agilerl.utils.utils import create_population
 
     cfg = _load_yaml(args.config)
     dbg = dict(cfg.get("DEBUG") or {})
@@ -220,10 +223,12 @@ def main() -> int:
                     step_ms=elapsed_ms / max(max_steps, 1),
                 )
             )
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         status = "failed"
         if accelerator.is_main_process:
-            (out_dir / "error.txt").write_text(f"{type(exc).__name__}: {exc}\n", encoding="utf-8")
+            (out_dir / "error.txt").write_text(
+                f"{type(exc).__name__}: {exc}\n", encoding="utf-8"
+            )
         raise
     finally:
         if writer is not None:

@@ -600,9 +600,7 @@ class LLMAlgorithmSpec(AlgorithmSpec):
 
         micro_batch_size_per_gpu = None
         if is_distributed():
-            micro_batch_size_per_gpu = max(
-                self.batch_size // get_world_size(), 1
-            )
+            micro_batch_size_per_gpu = max(self.batch_size // get_world_size(), 1)
 
         use_vllm = getattr(self, "use_vllm", False)
         if not use_vllm and hasattr(self, "vllm_config"):

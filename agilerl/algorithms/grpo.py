@@ -553,7 +553,9 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
             nonfinite_flag = 0 if local_finite else 1
             _, max_flag = allreduce_minmax_int(nonfinite_flag)
             if max_flag > 0:
-                local_val = float(loss.detach().float().item()) if local_finite else loss
+                local_val = (
+                    float(loss.detach().float().item()) if local_finite else loss
+                )
                 msg = (
                     f"Loss is not finite on at least one rank "
                     f"(rank={get_rank()} local_finite={local_finite} "
@@ -609,7 +611,10 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
             )
             num_samples = completion_ids.shape[0]
             world_size = get_world_size()
-            if needs_cross_rank_seq_padding(self, world_size=world_size) and world_size > 1:
+            if (
+                needs_cross_rank_seq_padding(self, world_size=world_size)
+                and world_size > 1
+            ):
                 seq_len = completion_ids.shape[1]
                 min_t, max_t = allreduce_minmax_int(seq_len)
                 if min_t != max_t:

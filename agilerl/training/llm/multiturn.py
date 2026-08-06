@@ -15,11 +15,16 @@ from agilerl.hpo.tournament import TournamentSelection
 from agilerl.population import Population
 from agilerl.protocols import SelectionStrategyProtocol
 from agilerl.training.llm.common import _validate_finetune_args
-from agilerl.utils.distributed import barrier, get_world_size, is_distributed, is_main_process
+from agilerl.utils.distributed import (
+    barrier,
+    get_world_size,
+    is_distributed,
+    is_main_process,
+)
 from agilerl.utils.llm_utils import (
+    aggregate_metrics_across_gpus,
     align_completion_batch_shapes_across_ranks,
     needs_cross_rank_seq_padding,
-    aggregate_metrics_across_gpus,
 )
 from agilerl.utils.utils import (
     default_progress_bar,

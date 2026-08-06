@@ -125,7 +125,7 @@ def ppo_spec() -> PPOSpec:
         learn_step=128,
         net_config=StochasticActorSpec(
             encoder_config=MlpSpec(hidden_size=[64]),
-            head_config=MlpSpec(hidden_size=[64])
+            head_config=MlpSpec(hidden_size=[64]),
         ),
     )
 
@@ -432,7 +432,7 @@ class TestArenaTrainerMissingDependencies:
         env_spec = ArenaEnvSpec(name="CartPole-v1")
         with (
             patch("agilerl.training.trainer.ArenaClient", None),
-            pytest.raises(ImportError, match="Arena dependencies are not installed")
+            pytest.raises(ImportError, match="Arena dependencies are not installed"),
         ):
             ArenaTrainer(
                 algorithm="PPO",
@@ -445,7 +445,7 @@ class TestArenaTrainerMissingDependencies:
     ):
         with (
             patch("agilerl.training.trainer.ArenaEnvSpec", None),
-            pytest.raises(ImportError, match="Arena dependencies are not installed")
+            pytest.raises(ImportError, match="Arena dependencies are not installed"),
         ):
             ArenaTrainer(
                 algorithm="PPO",
@@ -461,14 +461,14 @@ class TestArenaTrainerMissingDependencies:
         }
         with (
             patch("agilerl.training.trainer.ArenaManifest", None),
-            pytest.raises(ImportError, match="Arena dependencies are not installed")
+            pytest.raises(ImportError, match="Arena dependencies are not installed"),
         ):
             ArenaTrainer.from_manifest(manifest)
 
     def test_resolve_env_spec_raises_import_error_without_env_spec(self):
         with (
             patch("agilerl.training.trainer.ArenaEnvSpec", None),
-            pytest.raises(ImportError, match="Arena dependencies are not installed")
+            pytest.raises(ImportError, match="Arena dependencies are not installed"),
         ):
             ArenaTrainer._resolve_env_spec(MagicMock())
 
@@ -557,11 +557,7 @@ class TestLocalTrainerFromManifest:
 
 class TestLocalTrainerTrain:
     @patch("agilerl.training.trainer.create_population_from_spec")
-    def test_train_delegates_to_fn(
-        self,
-        mock_create_pop,
-        training_spec
-    ):
+    def test_train_delegates_to_fn(self, mock_create_pop, training_spec):
         from agilerl.models.env import GymEnvSpec
 
         env_spec = GymEnvSpec(name="CartPole-v1")
@@ -572,7 +568,7 @@ class TestLocalTrainerTrain:
 
         with (
             patch.object(PPOSpec, "get_training_fn", return_value=mock_train_fn),
-            patch.object(LocalTrainer, "_make_env", return_value=mock_env)
+            patch.object(LocalTrainer, "_make_env", return_value=mock_env),
         ):
             trainer = LocalTrainer(
                 algorithm="PPO",
@@ -1458,7 +1454,7 @@ class TestLLMBuildAlgorithm:
             patch(
                 "agilerl.utils.llm_utils.load_pad_token_configs",
                 return_value=(None, None),
-            )
+            ),
         ):
             dpo_spec.build_algorithm(tokenizer=mock_tokenizer, index=0)
 
@@ -1482,7 +1478,7 @@ class TestLLMBuildAlgorithm:
             patch(
                 "agilerl.utils.llm_utils.load_pad_token_configs",
                 return_value=(None, None),
-            )
+            ),
         ):
             grpo_spec.build_algorithm(tokenizer=mock_tokenizer, index=1)
 
@@ -1506,7 +1502,7 @@ class TestLLMBuildAlgorithm:
             patch(
                 "agilerl.utils.llm_utils.load_pad_token_configs",
                 return_value=(None, None),
-            )
+            ),
         ):
             dpo_spec.build_algorithm(
                 tokenizer=mock_tokenizer, index=0, accelerator=mock_accel
@@ -1549,7 +1545,7 @@ class TestLLMLocalTrainer:
             patch(
                 "agilerl.training.trainer.create_population_from_spec",
                 return_value=mock_pop,
-            ) as mock_create_pop
+            ) as mock_create_pop,
         ):
             mock_auto_tok.from_pretrained.return_value = mock_tokenizer
             from agilerl.models.env import LLMEnvSpec, LLMEnvType
@@ -1585,7 +1581,7 @@ class TestLLMLocalTrainer:
             patch(
                 "agilerl.training.trainer.create_population_from_spec",
                 return_value=mock_pop,
-            )
+            ),
         ):
             mock_auto_tok.from_pretrained.return_value = mock_tokenizer
             env_spec = MagicMock()
@@ -1616,7 +1612,7 @@ class TestLLMLocalTrainer:
             patch(
                 "agilerl.training.trainer.create_population_from_spec",
                 return_value=[MagicMock()],
-            )
+            ),
         ):
             mock_auto_tok.from_pretrained.return_value = mock_tokenizer
             trainer = LocalTrainer(
@@ -1628,9 +1624,7 @@ class TestLLMLocalTrainer:
         assert mock_llm_env_spec.return_raw_completions is False
         assert mock_llm_env_spec.max_context_length == dpo_spec.max_model_len
         assert mock_llm_env_spec.seed == dpo_spec.seed
-        mock_llm_env_spec.make_env.assert_called_once_with(
-            tokenizer=mock_tokenizer
-        )
+        mock_llm_env_spec.make_env.assert_called_once_with(tokenizer=mock_tokenizer)
         assert trainer.env is mock_env
 
     # -- No replay buffer for LLM algorithms --------------------------------
@@ -1644,7 +1638,7 @@ class TestLLMLocalTrainer:
             patch(
                 "agilerl.training.trainer.create_population_from_spec",
                 return_value=[MagicMock()],
-            )
+            ),
         ):
             mock_auto_tok.from_pretrained.return_value = MagicMock(
                 eos_token_id=0, eos_token="<eos>"
@@ -1673,10 +1667,10 @@ class TestLLMLocalTrainer:
             patch.object(LocalTrainer, "_make_env", return_value=mock_env),
             patch(
                 "agilerl.training.trainer.create_population_from_spec",
-                return_value=mock_pop
+                return_value=mock_pop,
             ),
             patch.object(type(dpo_spec), "get_training_fn", return_value=mock_train_fn),
-            patch.object(LocalTrainer, "to_manifest", return_value={})
+            patch.object(LocalTrainer, "to_manifest", return_value={}),
         ):
             mock_auto_tok.from_pretrained.return_value = mock_tokenizer
             trainer = LocalTrainer(
@@ -1699,9 +1693,7 @@ class TestLLMLocalTrainer:
     # -- Missing LLM dependencies raises ImportError -----------------------
 
     def test_missing_llm_deps_raises(self, dpo_spec):
-        with (
-            patch("agilerl.training.trainer.AutoTokenizer", None)
-        ):
+        with patch("agilerl.training.trainer.AutoTokenizer", None):
             with pytest.raises(ImportError, match="LLM dependencies"):
                 LocalTrainer(
                     algorithm=dpo_spec,
@@ -1812,12 +1804,12 @@ class TestLocalTrainerIntegration:
         with (
             patch(
                 "agilerl.training.trainer.create_population_from_spec",
-                return_value=mock_pop
+                return_value=mock_pop,
             ),
             patch(
                 "agilerl.training.trainer.AutoTokenizer.from_pretrained",
                 return_value=mock_tokenizer,
-            )
+            ),
         ):
             yield
 
@@ -1855,7 +1847,7 @@ class TestLocalTrainerIntegration:
                 probabilities=MutationProbabilities(
                     no_mut=0.5, params_mut=0.3, rl_hp_mut=0.2
                 ),
-                mutation_sd=0.05
+                mutation_sd=0.05,
             ),
         )
         try:
@@ -1919,8 +1911,7 @@ class TestLocalTrainerIntegration:
         trainer = LocalTrainer(
             algorithm=MADDPGSpec(learn_step=2),
             environment=PzEnvSpec(
-                name="pettingzoo.mpe.simple_speaker_listener_v4",
-                num_envs=2
+                name="pettingzoo.mpe.simple_speaker_listener_v4", num_envs=2
             ),
             training=self._training(max_steps=32, evo_steps=16),
             replay_buffer=ReplayBufferSpec(max_size=1_000),
@@ -1928,7 +1919,7 @@ class TestLocalTrainerIntegration:
                 probabilities=MutationProbabilities(
                     no_mut=0.5, params_mut=0.3, rl_hp_mut=0.2
                 ),
-                mutation_sd=0.05
+                mutation_sd=0.05,
             ),
         )
         try:
@@ -2001,9 +1992,7 @@ class TestLocalTrainerIntegration:
         trainer = LocalTrainer(
             algorithm=CQNSpec(learn_step=1),
             environment=OfflineEnvSpec(
-                name="CartPole-v1",
-                num_envs=1,
-                dataset_path=str(h5_path)
+                name="CartPole-v1", num_envs=1, dataset_path=str(h5_path)
             ),
             training=self._training(max_steps=64, evo_steps=32, eval_steps=32),
             replay_buffer=ReplayBufferSpec(max_size=500),
@@ -2387,9 +2376,9 @@ class TestLocalTrainerToManifestLLM:
         with (
             patch(
                 "agilerl.training.trainer.AutoTokenizer.from_pretrained",
-                return_value=mock_tokenizer
+                return_value=mock_tokenizer,
             ),
-            patch.object(LocalTrainer, "_make_env", return_value=mock_env)
+            patch.object(LocalTrainer, "_make_env", return_value=mock_env),
         ):
             trainer = LocalTrainer(
                 algorithm=spec,
@@ -2430,7 +2419,7 @@ class TestLocalTrainerTrainKwargs:
 
         with (
             patch.object(PPOSpec, "get_training_fn", return_value=mock_train_fn),
-            patch.object(LocalTrainer, "_make_env", return_value=mock_env)
+            patch.object(LocalTrainer, "_make_env", return_value=mock_env),
         ):
             trainer = LocalTrainer(
                 algorithm="PPO",
@@ -2510,13 +2499,13 @@ class TestLocalTrainerMultiturn:
             ) as mock_auto_tok,
             patch(
                 "agilerl.training.trainer.create_population_from_spec",
-                return_value=mock_pop
+                return_value=mock_pop,
             ),
             patch.object(
                 LLMEnvSpec,
                 "make_multiturn_env_factory",
                 return_value=MagicMock(),
-            ) as mock_factory_method
+            ) as mock_factory_method,
         ):
             mock_auto_tok.from_pretrained.return_value = mock_tokenizer
             trainer = LocalTrainer(
@@ -2554,19 +2543,15 @@ class TestLocalTrainerMultiturn:
             ) as mock_auto_tok,
             patch(
                 "agilerl.training.trainer.create_population_from_spec",
-                return_value=mock_pop
+                return_value=mock_pop,
             ),
             patch.object(
-                LLMEnvSpec,
-                "make_multiturn_env_factory",
-                return_value=mock_env_factory
+                LLMEnvSpec, "make_multiturn_env_factory", return_value=mock_env_factory
             ),
             patch.object(
-                type(grpo_spec),
-                "get_training_fn",
-                return_value=mock_train_fn
+                type(grpo_spec), "get_training_fn", return_value=mock_train_fn
             ),
-            patch.object(LocalTrainer, "to_manifest", return_value={})
+            patch.object(LocalTrainer, "to_manifest", return_value={}),
         ):
             mock_auto_tok.from_pretrained.return_value = mock_tokenizer
             trainer = LocalTrainer(
@@ -2646,7 +2631,7 @@ class TestImportGuardReload:
 
         with (
             patch("agilerl.HAS_ARENA_DEPENDENCIES", False),
-            patch("agilerl.training.trainer.HAS_ARENA_DEPENDENCIES", False)
+            patch("agilerl.training.trainer.HAS_ARENA_DEPENDENCIES", False),
         ):
             importlib.reload(mod)
             assert mod.ArenaClient is None
@@ -2659,7 +2644,7 @@ class TestImportGuardReload:
 
         with (
             patch("agilerl.HAS_LLM_DEPENDENCIES", False),
-            patch("agilerl.training.trainer.HAS_LLM_DEPENDENCIES", False)
+            patch("agilerl.training.trainer.HAS_LLM_DEPENDENCIES", False),
         ):
             importlib.reload(mod)
             assert mod.AutoTokenizer is None
@@ -2690,7 +2675,7 @@ class TestMakeEnvBranches:
                 else type.__instancecheck__(c, o)
                 if isinstance(c, type)
                 else False
-            )
+            ),
         ):
             result = trainer._make_env()
         assert result is None
@@ -2722,7 +2707,7 @@ class TestMakeEnvBranches:
                 else type.__instancecheck__(c, o)
                 if isinstance(c, type)
                 else False
-            )
+            ),
         ):
             result = trainer._make_env()
 
@@ -2789,7 +2774,7 @@ class TestLocalTrainerResolveEnvSpecBranches:
         )
         with patch(
             "agilerl.models.env.OfflineEnvSpec._validate_and_load_dataset",
-            return_value=None
+            return_value=None,
         ):
             result = LocalTrainer._resolve_env_spec(manifest)
         assert isinstance(result, OfflineEnvSpec)
@@ -2877,7 +2862,7 @@ def test_from_manifest_wrong_arch_is_overridden_when_omitted(tmp_path):
             {},
             # MlpSpec defaults (dataclass MlpNetConfig would be 500 / 3)
             {"max_mlp_nodes": 256, "max_hidden_layers": 6},
-            id="mlp"
+            id="mlp",
         ),
         pytest.param(
             "multiinput",
@@ -2890,7 +2875,7 @@ def test_from_manifest_wrong_arch_is_overridden_when_omitted(tmp_path):
             {},
             # MultiInputSpec default (dataclass MultiInputNetConfig would be 16)
             {"latent_dim": 32},
-            id="multiinput"
+            id="multiinput",
         ),
         pytest.param(
             "cnn",
@@ -2903,7 +2888,7 @@ def test_from_manifest_wrong_arch_is_overridden_when_omitted(tmp_path):
             {},
             # CnnSpec default (dataclass CnnNetConfig would be 16)
             {"min_channel_size": 8},
-            id="cnn"
+            id="cnn",
         ),
         pytest.param(
             "lstm",
@@ -2912,7 +2897,7 @@ def test_from_manifest_wrong_arch_is_overridden_when_omitted(tmp_path):
             {},
             # LstmSpec defaults (dataclass LstmNetConfig would be 500 / 4)
             {"max_hidden_state_size": 256, "max_layers": 6},
-            id="lstm"
+            id="lstm",
         ),
         pytest.param(
             "simba",
@@ -2921,7 +2906,7 @@ def test_from_manifest_wrong_arch_is_overridden_when_omitted(tmp_path):
             {"simba": True},
             # SimbaSpec default (dataclass SimBaNetConfig would be 500)
             {"max_mlp_nodes": 256},
-            id="simba"
+            id="simba",
         ),
     ],
 )

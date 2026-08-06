@@ -17,14 +17,11 @@ if str(_SCRIPTS) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS))
 
 from metrics import (  # noqa: E402
-    RunSummary,
-    StepMetricsWriter,
     StepRecord,
     git_sha,
     reset_cuda_peak_stats,
 )
 from run_logger import (  # noqa: E402
-    ParamChecksum,
     RunArtifactCollector,
     patched_init_loggers,
 )
@@ -72,14 +69,27 @@ def parse_args() -> argparse.Namespace:
         "when omitted, the tiny custom model is used.",
     )
     p.add_argument("--fsdp", action="store_true")
-    p.add_argument("--optim-cpu-offload", action="store_true",
-                   help="Enable FSDPConfig.optim_cpu_offload (optimizer states on CPU)")
-    p.add_argument("--cpu-offload", action="store_true",
-                   help="Enable FSDPConfig.cpu_offload (full params+grads+states on CPU)")
-    p.add_argument("--use-vllm", action="store_true",
-                   help="Enable colocated vLLM with sleep_mode for rollout generation")
-    p.add_argument("--vllm-gpu-mem-util", type=float, default=0.15,
-                   help="vLLM gpu_memory_utilization fraction (colocated)")
+    p.add_argument(
+        "--optim-cpu-offload",
+        action="store_true",
+        help="Enable FSDPConfig.optim_cpu_offload (optimizer states on CPU)",
+    )
+    p.add_argument(
+        "--cpu-offload",
+        action="store_true",
+        help="Enable FSDPConfig.cpu_offload (full params+grads+states on CPU)",
+    )
+    p.add_argument(
+        "--use-vllm",
+        action="store_true",
+        help="Enable colocated vLLM with sleep_mode for rollout generation",
+    )
+    p.add_argument(
+        "--vllm-gpu-mem-util",
+        type=float,
+        default=0.15,
+        help="vLLM gpu_memory_utilization fraction (colocated)",
+    )
     p.add_argument("--init-hp", action="append", default=[])
     p.add_argument("--save-load-roundtrip", action="store_true")
     p.add_argument("--export-pretrained", action="store_true")
@@ -107,8 +117,11 @@ def main() -> int:
 
     repo = Path(__file__).resolve().parents[2]
     sys.path.insert(0, str(repo / "demos/llm/debugging"))
-    from llm_debug_utils import lora_config_from_dict  # type: ignore  # noqa: E402
-    from tiny_model import TinyDigitTokenizer, build_tiny_actor_network  # type: ignore  # noqa: E402
+    from llm_debug_utils import lora_config_from_dict  # type: ignore
+    from tiny_model import (  # type: ignore
+        TinyDigitTokenizer,
+        build_tiny_actor_network,
+    )
 
     from agilerl.llm_envs import TokenObservationWrapper
     from agilerl.utils.probe_envs_llm import ConstantTargetEnv
@@ -149,6 +162,7 @@ def main() -> int:
     vllm_config = None
     if args.use_vllm:
         from agilerl.utils.algo_utils import VLLMConfig
+
         vllm_config = VLLMConfig(
             sleep_mode=True,
             gpu_memory_utilization=args.vllm_gpu_mem_util,
@@ -172,9 +186,7 @@ def main() -> int:
         lora_dict["target_modules"] = ["q_proj", "k_proj", "v_proj", "o_proj"]
     else:
         tokenizer = TinyDigitTokenizer()
-        actor = build_tiny_actor_network(
-            use_value_head=(init_hp["ALGO"] == "LLMPPO")
-        )
+        actor = build_tiny_actor_network(use_value_head=(init_hp["ALGO"] == "LLMPPO"))
         model_name = None
         lora_dict = dbg.get("lora") or {}
 
@@ -201,7 +213,9 @@ def main() -> int:
             optim_cpu_offload=args.optim_cpu_offload,
             cpu_offload=args.cpu_offload,
         )
-        fsdp_cfg = asdict(cfg_obj) if hasattr(FSDPConfig, "__dataclass_fields__") else None
+        fsdp_cfg = (
+            asdict(cfg_obj) if hasattr(FSDPConfig, "__dataclass_fields__") else None
+        )
 
     collector = RunArtifactCollector(
         out_dir=out_dir,
@@ -323,10 +337,12 @@ def main() -> int:
                     verbose=False,
                     env_factory=env_factory,
                 )
-    except Exception as exc:  # noqa: BLE001 — gate probe must record failure
+    except Exception as exc:
         status = "failed"
         if is_main_process():
-            (out_dir / "error.txt").write_text(f"{type(exc).__name__}: {exc}\n", encoding="utf-8")
+            (out_dir / "error.txt").write_text(
+                f"{type(exc).__name__}: {exc}\n", encoding="utf-8"
+            )
         raise
     finally:
         if args.log_stdout and is_main_process():

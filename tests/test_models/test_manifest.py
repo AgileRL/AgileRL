@@ -411,10 +411,7 @@ class TestTrainingManifest:
             "name": name,
             "update_epochs": 1,
             "lora_config": LoraConfig(
-                r=16,
-                lora_alpha=16,
-                lora_dropout=0.05,
-                task_type="CAUSAL_LM"
+                r=16, lora_alpha=16, lora_dropout=0.05, task_type="CAUSAL_LM"
             ),
             "max_model_len": 512,
             "use_separate_reference_adapter": True,
@@ -461,18 +458,14 @@ class TestTrainingManifest:
             (
                 "cnn",
                 {"channel_size": [32], "kernel_size": [3], "stride_size": [1]},
-                CnnSpec
+                CnnSpec,
             ),
             ("lstm", {"hidden_state_size": 64, "num_layers": 1}, LstmSpec),
-            (
-                "simba",
-                {"hidden_size": 128, "num_blocks": 2},
-                SimbaSpec
-            ),
+            ("simba", {"hidden_size": 128, "num_blocks": 2}, SimbaSpec),
             (
                 "multiinput",
                 {"latent_dim": 32, "mlp_config": {"hidden_size": [32]}},
-                MultiInputSpec
+                MultiInputSpec,
             ),
         ],
     )
@@ -599,7 +592,7 @@ class TestLocalTrainerSingleAgent:
             patch(
                 "agilerl.training.trainer.create_population_from_spec",
                 return_value=[MagicMock()],
-            )
+            ),
         ):
             yield
 
@@ -829,7 +822,7 @@ class TestLocalTrainerMultiAgent:
             patch(
                 "agilerl.training.trainer.create_population_from_spec",
                 return_value=[MagicMock()],
-            )
+            ),
         ):
             yield
 
@@ -912,7 +905,7 @@ class TestTrainingManifestArenaBridge:
             learn_step=128,
             net_config=StochasticActorSpec(
                 encoder_config=MlpSpec(hidden_size=[64]),
-                head_config=MlpSpec(hidden_size=[64])
+                head_config=MlpSpec(hidden_size=[64]),
             ),
         )
         manifest = TrainingManifest.from_trainer_specs(
@@ -1112,10 +1105,7 @@ class TestTrainerGetValidatedManifestLLMNetwork:
                 "pretrained_model_name_or_path": "algo-model",
                 "max_model_len": 128,
                 "lora_config": LoraConfig(
-                    r=2,
-                    lora_alpha=4,
-                    target_modules=["k_proj"],
-                    task_type="CAUSAL_LM"
+                    r=2, lora_alpha=4, target_modules=["k_proj"], task_type="CAUSAL_LM"
                 ),
             },
             env={
@@ -1169,10 +1159,7 @@ class TestLocalTrainerLLM:
         return {
             "update_epochs": 1,
             "lora_config": LoraConfig(
-                r=16,
-                lora_alpha=16,
-                lora_dropout=0.05,
-                task_type="CAUSAL_LM"
+                r=16, lora_alpha=16, lora_dropout=0.05, task_type="CAUSAL_LM"
             ),
             "max_model_len": 512,
             "use_separate_reference_adapter": True,
@@ -1244,13 +1231,13 @@ class TestLocalTrainerLLM:
         with (
             patch(
                 "transformers.AutoTokenizer.from_pretrained",
-                return_value=mock_tokenizer
+                return_value=mock_tokenizer,
             ),
             patch.object(LocalTrainer, "_make_env", return_value=MagicMock()),
             patch(
                 "agilerl.training.trainer.create_population_from_spec",
                 return_value=[MagicMock()],
-            )
+            ),
         ):
             yield
 
@@ -1396,7 +1383,7 @@ class TestFromConfigFiles:
             patch(
                 "agilerl.training.trainer.create_population_from_spec",
                 return_value=[MagicMock()],
-            )
+            ),
         ):
             yield
 
@@ -1525,10 +1512,7 @@ class TestFromConfigFiles:
         data["algorithm"].update(
             {
                 "lora_config": LoraConfig(
-                    r=16,
-                    lora_alpha=16,
-                    lora_dropout=0.05,
-                    task_type="CAUSAL_LM"
+                    r=16, lora_alpha=16, lora_dropout=0.05, task_type="CAUSAL_LM"
                 ),
                 "max_model_len": 512,
                 "use_separate_reference_adapter": True,

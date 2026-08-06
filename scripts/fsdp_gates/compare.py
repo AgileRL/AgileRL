@@ -163,9 +163,7 @@ def compare_curves(
 
     if len(common) < min_overlap:
         result["pass"] = False
-        result["failures"].append(
-            f"overlap {len(common)} < min {min_overlap}"
-        )
+        result["failures"].append(f"overlap {len(common)} < min {min_overlap}")
         return result
 
     rel_errs: list[float] = []
@@ -237,21 +235,19 @@ def main(argv: list[str] | None = None) -> int:
     if ds_metrics_path and fs_metrics_path:
         ds_rows = _load_jsonl(ds_metrics_path)
         fs_rows = _load_jsonl(fs_metrics_path)
-        curve_result = compare_curves(
-            ds_rows, fs_rows, max_rel_mae=args.loss_rel_mae
-        )
+        curve_result = compare_curves(ds_rows, fs_rows, max_rel_mae=args.loss_rel_mae)
         report["curve_comparison"] = curve_result
         report["deepspeed_metrics"] = str(ds_metrics_path)
         report["fsdp2_metrics"] = str(fs_metrics_path)
         if not curve_result["pass"]:
             report["pass"] = False
-            report["failures"].extend(
-                f"curve: {f}" for f in curve_result["failures"]
-            )
+            report["failures"].extend(f"curve: {f}" for f in curve_result["failures"])
     else:
         report["curve_comparison"] = {"skipped": True}
     out = args.job_dir / "compare.json"
-    out.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    out.write_text(
+        json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
     print(json.dumps(report, indent=2))
     return 0 if not failures else 1
 

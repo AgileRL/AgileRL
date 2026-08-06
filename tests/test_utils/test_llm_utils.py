@@ -6,7 +6,6 @@ import logging
 import re
 import sys
 import types
-from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -32,7 +31,6 @@ from agilerl.utils.llm_utils import (
     adapt_lora_config_for_model,
     apply_pad_token_id,
     attention_mask_from_padded_ids,
-    hf_completion_lengths,
     build_bnb_quantization_config,
     build_clippable_linear_lora_target_regex,
     build_clippable_linear_lora_target_suffixes,
@@ -58,12 +56,13 @@ from agilerl.utils.llm_utils import (
     get_lora_params,
     get_model_name_or_path,
     get_state_dict,
-    load_full_state_dict,
-    materialize_dtensors,
+    hf_completion_lengths,
     list_peft_matched_module_keys,
+    load_full_state_dict,
     log_cuda_memory_snapshot,
     masked_mean,
     masked_var,
+    materialize_dtensors,
     model_has_clippable_linear_wrappers,
     move_params_to_cpu,
     move_params_to_gpu,
@@ -2689,22 +2688,20 @@ class TestBuildCompletionMask:
         completion = torch.tensor([[5, 6, 7]])
         gen_lens = torch.tensor([2])
         with pytest.raises(ValueError):
-            build_completion_mask(completion, prompt_len=0, pad_token_id=0, completion_len=gen_lens)
+            build_completion_mask(
+                completion, prompt_len=0, pad_token_id=0, completion_len=gen_lens
+            )
 
 
 class TestHfCompletionLengths:
     def test_recovers_gen_len_including_stopping_eos_when_pad_aliases_eos(self):
         # pad == eos == 0. Row0 stops on EOS after 3 gen tokens; row1 after 1.
-        out = torch.tensor(
-            [[10, 11, 12, 21, 22, 23, 0], [10, 11, 12, 31, 0, 0, 0]]
-        )
+        out = torch.tensor([[10, 11, 12, 21, 22, 23, 0], [10, 11, 12, 31, 0, 0, 0]])
         lens = hf_completion_lengths(out, prompt_len=3, pad_token_id=0)
         assert lens.tolist() == [4, 2]
 
     def test_row_that_hits_cap_has_no_pad_in_gen_region(self):
-        out = torch.tensor(
-            [[10, 11, 12, 41, 42, 43, 44], [10, 11, 12, 31, 0, 0, 0]]
-        )
+        out = torch.tensor([[10, 11, 12, 41, 42, 43, 44], [10, 11, 12, 31, 0, 0, 0]])
         lens = hf_completion_lengths(out, prompt_len=3, pad_token_id=0)
         assert lens.tolist() == [4, 2]
 
@@ -2717,8 +2714,11 @@ class TestBuildHfCompletionMask:
         )
         stitch = torch.tensor([[99, 100], [99, 100]])
         cid, mask = build_hf_completion_mask(
-            windowed, input_ids_len=5, initial_prompt_len=3,
-            stitch_ids=stitch, pad_token_id=0,
+            windowed,
+            input_ids_len=5,
+            initial_prompt_len=3,
+            stitch_ids=stitch,
+            pad_token_id=0,
         )
         # full_prompt_len = 5; recent_suffix_len = 2; gen_len = [3, 2].
         # Row0 span [5,10) -> 5 trues; row1 span [5,9) -> 4 trues.
@@ -2732,8 +2732,11 @@ class TestBuildHfCompletionMask:
     def test_non_stitched_falls_back_to_simple_position_span(self):
         out = torch.tensor([[10, 11, 12, 21, 22, 23, 0]])
         cid, mask = build_hf_completion_mask(
-            out, input_ids_len=3, initial_prompt_len=3,
-            stitch_ids=None, pad_token_id=0,
+            out,
+            input_ids_len=3,
+            initial_prompt_len=3,
+            stitch_ids=None,
+            pad_token_id=0,
         )
         assert mask[0].sum().item() == 4
 
@@ -3139,7 +3142,8 @@ class TestSavePeftAdapterForVllmRollout:
 
     class _FakeDTensor:
         """Stand-in for ``torch.distributed.tensor.DTensor``: records
-        ``full_tensor()`` calls so tests can assert materialisation."""
+        ``full_tensor()`` calls so tests can assert materialisation.
+        """
 
         def __init__(self, tensor: torch.Tensor):
             self._tensor = tensor
@@ -3176,7 +3180,10 @@ class TestSavePeftAdapterForVllmRollout:
         # Assert — DTensor was materialised via full_tensor()
         assert dt.full_tensor_calls == 1
         # Assert — plain tensor passed through untouched
-        assert calls["saved_tensors"]["model.layers.0.q_proj.lora_A.weight"] is materialized
+        assert (
+            calls["saved_tensors"]["model.layers.0.q_proj.lora_A.weight"]
+            is materialized
+        )
         assert calls["saved_tensors"]["model.layers.0.q_proj.lora_B.weight"] is plain
 
     def test_state_with_only_plain_tensors_passes_through(self, monkeypatch, tmp_path):

@@ -1,351 +1,352 @@
+---
 # FSDP2 success-criteria job suite.
 # Artifacts: $AGILERL_GATE_ARTIFACT_ROOT/<id>/<backend>/
 # launch.py --dry-run prints commands; --execute runs them.
 
 artifact_root: /tmp/agilerl-fsdp-gates
 worktrees:
-  fsdp: /home/mike/wt-fsdp
-  zero3: /home/mike/wt-zero3
+    fsdp: /home/mike/wt-fsdp
+    zero3: /home/mike/wt-zero3
 
 defaults:
-  nproc: 2
-  seeds: [0]
-  sample_interval_s: 1.0
+    nproc: 2
+    seeds: [0]
+    sample_interval_s: 1.0
   # Hardware class for this VM; larger boxes override via launch --profile
-  profile: t4_2x16
+    profile: t4_2x16
 
 profiles:
-  t4_2x16:
-    max_model: tiny   # tiny actor or ≤0.5B LoRA only
-    allow_vllm_colocate: false
-    allow_moe: false
-    allow_prod_soak: false
-  l4_2x24:
-    max_model: "1b"
-    allow_vllm_colocate: true
-    allow_moe: false
-    allow_prod_soak: false
-  prod_multi:
-    max_model: prod
-    allow_vllm_colocate: true
-    allow_moe: true
-    allow_prod_soak: true
+    t4_2x16:
+        max_model: tiny # tiny actor or ≤0.5B LoRA only
+        allow_vllm_colocate: false
+        allow_moe: false
+        allow_prod_soak: false
+    l4_2x24:
+        max_model: 1b
+        allow_vllm_colocate: true
+        allow_moe: false
+        allow_prod_soak: false
+    prod_multi:
+        max_model: prod
+        allow_vllm_colocate: true
+        allow_moe: true
+        allow_prod_soak: true
 
 jobs:
   # --- Gate 0 ---------------------------------------------------------------
-  - id: G0
-    gate: 0
-    kind: static
-    backends: [fsdp]
-    command: |
-      rg "from deepspeed|import deepspeed" agilerl demos configs pyproject.toml
-      rg "from accelerate|import accelerate|from deepspeed|import deepspeed" \
-        agilerl/algorithms/grpo.py agilerl/algorithms/dpo.py agilerl/algorithms/sft.py \
-        agilerl/algorithms/ppo_llm.py agilerl/algorithms/reinforce_llm.py \
-        agilerl/utils/llm_utils.py agilerl/utils/distributed.py demos/llm
+    - id: G0
+      gate: 0
+      kind: static
+      backends: [fsdp]
+      command: |
+          rg "from deepspeed|import deepspeed" agilerl demos configs pyproject.toml
+          rg "from accelerate|import accelerate|from deepspeed|import deepspeed" \
+            agilerl/algorithms/grpo.py agilerl/algorithms/dpo.py agilerl/algorithms/sft.py \
+            agilerl/algorithms/ppo_llm.py agilerl/algorithms/reinforce_llm.py \
+            agilerl/utils/llm_utils.py agilerl/utils/distributed.py demos/llm
 
   # --- Gate 1 smoke ---------------------------------------------------------
-  - id: S1
-    gate: 1
-    kind: smoke
-    backends: [fsdp]
-    entry: demos/llm/debugging/debugging_llm.py
-    launch: torchrun
-    nproc: 2
-    fsdp: false
+    - id: S1
+      gate: 1
+      kind: smoke
+      backends: [fsdp]
+      entry: demos/llm/debugging/debugging_llm.py
+      launch: torchrun
+      nproc: 2
+      fsdp: false
 
-  - id: S2
-    gate: 1
-    kind: smoke
-    backends: [fsdp]
-    entry: scripts/fsdp_gates/run_probe.py
-    launch: torchrun
-    nproc: 2
-    fsdp: true
-    probe_config: demos/llm/debugging/configs/grpo_constant_target.yaml
-    max_steps: 40
+    - id: S2
+      gate: 1
+      kind: smoke
+      backends: [fsdp]
+      entry: scripts/fsdp_gates/run_probe.py
+      launch: torchrun
+      nproc: 2
+      fsdp: true
+      probe_config: demos/llm/debugging/configs/grpo_constant_target.yaml
+      max_steps: 40
 
-  - id: S3
-    gate: 1
-    kind: smoke
-    backends: [fsdp]
-    entry: demos/llm/debugging/debugging_llm_training_matrix.py
-    launch: python
-    nproc: 1
-    args: ["--reasoning-steps", "2", "--preference-steps", "2", "--multiturn-steps", "3"]
+    - id: S3
+      gate: 1
+      kind: smoke
+      backends: [fsdp]
+      entry: demos/llm/debugging/debugging_llm_training_matrix.py
+      launch: python
+      nproc: 1
+      args: [--reasoning-steps, '2', --preference-steps, '2', --multiturn-steps, '3']
 
-  - id: S4
-    gate: 1
-    kind: smoke
-    backends: [fsdp]
-    entry: demos/llm/debugging/debugging_llm_stage_1.py
-    launch: torchrun
-    nproc: 2
+    - id: S4
+      gate: 1
+      kind: smoke
+      backends: [fsdp]
+      entry: demos/llm/debugging/debugging_llm_stage_1.py
+      launch: torchrun
+      nproc: 2
 
-  - id: S5
-    gate: 1
-    kind: smoke
-    backends: [fsdp]
-    note: "Classic RL Accelerate smoke"
-    entry: demos/single_agent/demo_off_policy_distributed.py
-    launch: python
-    nproc: 1
-    optional: true
+    - id: S5
+      gate: 1
+      kind: smoke
+      backends: [fsdp]
+      note: Classic RL Accelerate smoke
+      entry: demos/single_agent/demo_off_policy_distributed.py
+      launch: python
+      nproc: 1
+      optional: true
 
   # --- Gate 2 learning (paired) ---------------------------------------------
-  - id: L1
-    gate: 2
-    kind: learning
-    algo: GRPO
-    backends: [deepspeed, fsdp2]
-    probe_config: demos/llm/debugging/configs/grpo_constant_target.yaml
-    nproc: 2
-    seeds: [0, 1]
-    max_steps: 200
-    compare: {loss_rel_mae: 0.05, eval_rel: 0.05, speed_floor: 0.90, vram_ceil: 1.10}
+    - id: L1
+      gate: 2
+      kind: learning
+      algo: GRPO
+      backends: [deepspeed, fsdp2]
+      probe_config: demos/llm/debugging/configs/grpo_constant_target.yaml
+      nproc: 2
+      seeds: [0, 1]
+      max_steps: 200
+      compare: {loss_rel_mae: 0.05, eval_rel: 0.05, speed_floor: 0.90, vram_ceil: 1.10}
 
-  - id: L2
-    gate: 2
-    kind: learning
-    algo: LLMPPO
-    backends: [deepspeed, fsdp2]
-    probe_config: demos/llm/debugging/configs/ppo_constant_target.yaml
-    nproc: 2
-    seeds: [0, 1]
-    max_steps: 200
-    compare: {loss_rel_mae: 0.05, eval_rel: 0.05, speed_floor: 0.90, vram_ceil: 1.10}
+    - id: L2
+      gate: 2
+      kind: learning
+      algo: LLMPPO
+      backends: [deepspeed, fsdp2]
+      probe_config: demos/llm/debugging/configs/ppo_constant_target.yaml
+      nproc: 2
+      seeds: [0, 1]
+      max_steps: 200
+      compare: {loss_rel_mae: 0.05, eval_rel: 0.05, speed_floor: 0.90, vram_ceil: 1.10}
 
-  - id: L3
-    gate: 2
-    kind: learning
-    algo: LLMREINFORCE
-    backends: [deepspeed, fsdp2]
-    probe_config: demos/llm/debugging/configs/ppo_constant_target.yaml
-    init_hp_overrides: {ALGO: LLMREINFORCE}
-    nproc: 2
-    seeds: [0]
-    max_steps: 200
-    compare: {loss_rel_mae: 0.05, eval_rel: 0.05, speed_floor: 0.90, vram_ceil: 1.10}
+    - id: L3
+      gate: 2
+      kind: learning
+      algo: LLMREINFORCE
+      backends: [deepspeed, fsdp2]
+      probe_config: demos/llm/debugging/configs/ppo_constant_target.yaml
+      init_hp_overrides: {ALGO: LLMREINFORCE}
+      nproc: 2
+      seeds: [0]
+      max_steps: 200
+      compare: {loss_rel_mae: 0.05, eval_rel: 0.05, speed_floor: 0.90, vram_ceil: 1.10}
 
-  - id: L4
-    gate: 2
-    kind: learning
-    algo: DPO
-    backends: [deepspeed, fsdp2]
-    entry_fsdp2: demos/llm/demo_llm_finetuning.py
-    entry_args: ["dpo"]
-    note: "Shorten via config / max_steps when executing; uses HF 0.5B"
-    nproc: 2
-    seeds: [0]
-    requires_profile_at_least: t4_2x16
-    compare: {loss_rel_mae: 0.05, eval_rel: 0.05, speed_floor: 0.90, vram_ceil: 1.10}
+    - id: L4
+      gate: 2
+      kind: learning
+      algo: DPO
+      backends: [deepspeed, fsdp2]
+      entry_fsdp2: demos/llm/demo_llm_finetuning.py
+      entry_args: [dpo]
+      note: Shorten via config / max_steps when executing; uses HF 0.5B
+      nproc: 2
+      seeds: [0]
+      requires_profile_at_least: t4_2x16
+      compare: {loss_rel_mae: 0.05, eval_rel: 0.05, speed_floor: 0.90, vram_ceil: 1.10}
 
-  - id: L5
-    gate: 2
-    kind: learning
-    algo: SFT
-    backends: [deepspeed, fsdp2]
-    entry_fsdp2: demos/llm/demo_llm_finetuning.py
-    entry_args: ["sft"]
-    nproc: 2
-    seeds: [0]
-    compare: {loss_rel_mae: 0.05, eval_rel: 0.05, speed_floor: 0.90, vram_ceil: 1.10}
+    - id: L5
+      gate: 2
+      kind: learning
+      algo: SFT
+      backends: [deepspeed, fsdp2]
+      entry_fsdp2: demos/llm/demo_llm_finetuning.py
+      entry_args: [sft]
+      nproc: 2
+      seeds: [0]
+      compare: {loss_rel_mae: 0.05, eval_rel: 0.05, speed_floor: 0.90, vram_ceil: 1.10}
 
   # --- Gate 3 perf (paired; reuse L* artifacts when possible) ----------------
-  - id: P1
-    gate: 3
-    kind: perf
-    algo: GRPO
-    backends: [deepspeed, fsdp2]
-    reuse_learning_id: L1
-    nproc: 2
-    compare: {speed_floor: 0.90, vram_ceil: 1.10}
+    - id: P1
+      gate: 3
+      kind: perf
+      algo: GRPO
+      backends: [deepspeed, fsdp2]
+      reuse_learning_id: L1
+      nproc: 2
+      compare: {speed_floor: 0.90, vram_ceil: 1.10}
 
-  - id: P2
-    gate: 3
-    kind: perf
-    backends: [deepspeed, fsdp2]
-    nproc: 8
-    requires_profile_at_least: prod_multi
-    waiver_on: t4_2x16
-    note: "Needs ≥4–8 GPUs; skip on this VM"
+    - id: P2
+      gate: 3
+      kind: perf
+      backends: [deepspeed, fsdp2]
+      nproc: 8
+      requires_profile_at_least: prod_multi
+      waiver_on: t4_2x16
+      note: Needs ≥4–8 GPUs; skip on this VM
 
-  - id: P3
-    gate: 3
-    kind: perf
-    algo: SFT
-    backends: [deepspeed, fsdp2]
-    reuse_learning_id: L5
-    nproc: 2
-    compare: {speed_floor: 0.90, vram_ceil: 1.10}
+    - id: P3
+      gate: 3
+      kind: perf
+      algo: SFT
+      backends: [deepspeed, fsdp2]
+      reuse_learning_id: L5
+      nproc: 2
+      compare: {speed_floor: 0.90, vram_ceil: 1.10}
 
-  - id: P4
-    gate: 3
-    kind: perf
-    algo: LLMPPO
-    backends: [deepspeed, fsdp2]
-    probe_config: demos/llm/debugging/configs/ppo_value_head.yaml
-    nproc: 2
-    max_steps: 100
-    compare: {speed_floor: 0.90, vram_ceil: 1.10}
+    - id: P4
+      gate: 3
+      kind: perf
+      algo: LLMPPO
+      backends: [deepspeed, fsdp2]
+      probe_config: demos/llm/debugging/configs/ppo_value_head.yaml
+      nproc: 2
+      max_steps: 100
+      compare: {speed_floor: 0.90, vram_ceil: 1.10}
 
-  - id: P5
-    gate: 3
-    kind: perf
-    backends: [deepspeed, fsdp2]
-    requires_profile_at_least: l4_2x24
-    waiver_on: t4_2x16
-    note: "vLLM colocate — waive on 2×T4"
+    - id: P5
+      gate: 3
+      kind: perf
+      backends: [deepspeed, fsdp2]
+      requires_profile_at_least: l4_2x24
+      waiver_on: t4_2x16
+      note: vLLM colocate — waive on 2×T4
 
   # --- Gate 4 checkpoint / export -------------------------------------------
-  - id: C1
-    gate: 4
-    kind: checkpoint
-    backends: [fsdp2]
-    entry: scripts/fsdp_gates/run_probe.py
-    launch: torchrun
-    nproc: 2
-    fsdp: true
-    probe_config: demos/llm/debugging/configs/grpo_constant_target.yaml
-    max_steps: 30
-    args: ["--save-load-roundtrip"]
+    - id: C1
+      gate: 4
+      kind: checkpoint
+      backends: [fsdp2]
+      entry: scripts/fsdp_gates/run_probe.py
+      launch: torchrun
+      nproc: 2
+      fsdp: true
+      probe_config: demos/llm/debugging/configs/grpo_constant_target.yaml
+      max_steps: 30
+      args: [--save-load-roundtrip]
 
-  - id: C2
-    gate: 4
-    kind: checkpoint
-    backends: [fsdp2]
-    entry: scripts/fsdp_gates/run_probe.py
-    launch: torchrun
-    nproc: 2
-    fsdp: true
-    args: ["--export-pretrained"]
-    probe_config: demos/llm/debugging/configs/grpo_constant_target.yaml
-    max_steps: 20
+    - id: C2
+      gate: 4
+      kind: checkpoint
+      backends: [fsdp2]
+      entry: scripts/fsdp_gates/run_probe.py
+      launch: torchrun
+      nproc: 2
+      fsdp: true
+      args: [--export-pretrained]
+      probe_config: demos/llm/debugging/configs/grpo_constant_target.yaml
+      max_steps: 20
 
-  - id: C3
-    gate: 4
-    kind: checkpoint
-    backends: [fsdp]
-    note: "Document DeepSpeed ckpt compatibility break or converter; no silent load"
-    manual: true
+    - id: C3
+      gate: 4
+      kind: checkpoint
+      backends: [fsdp]
+      note: Document DeepSpeed ckpt compatibility break or converter; no silent load
+      manual: true
 
-  - id: C4
-    gate: 4
-    kind: checkpoint
-    backends: [fsdp2]
-    entry: scripts/fsdp_gates/run_probe.py
-    args: ["--clone-check"]
-    launch: torchrun
-    nproc: 2
-    fsdp: true
-    probe_config: demos/llm/debugging/configs/grpo_constant_target.yaml
-    max_steps: 20
+    - id: C4
+      gate: 4
+      kind: checkpoint
+      backends: [fsdp2]
+      entry: scripts/fsdp_gates/run_probe.py
+      args: [--clone-check]
+      launch: torchrun
+      nproc: 2
+      fsdp: true
+      probe_config: demos/llm/debugging/configs/grpo_constant_target.yaml
+      max_steps: 20
 
-  - id: C5
-    gate: 4
-    kind: smoke
-    backends: [fsdp]
-    entry: demos/llm/debugging/debugging_llm_training_matrix.py
-    args: ["--algo", "GRPO"]
-    launch: python
-    nproc: 1
+    - id: C5
+      gate: 4
+      kind: smoke
+      backends: [fsdp]
+      entry: demos/llm/debugging/debugging_llm_training_matrix.py
+      args: [--algo, GRPO]
+      launch: python
+      nproc: 1
 
-  - id: C6
-    gate: 4
-    kind: checkpoint
-    backends: [fsdp2]
-    requires_profile_at_least: l4_2x24
-    waiver_on: t4_2x16
-    note: "vLLM adapter sync"
+    - id: C6
+      gate: 4
+      kind: checkpoint
+      backends: [fsdp2]
+      requires_profile_at_least: l4_2x24
+      waiver_on: t4_2x16
+      note: vLLM adapter sync
 
-  - id: C7
-    gate: 4
-    kind: checkpoint
-    backends: [fsdp2]
-    entry: scripts/fsdp_gates/run_probe.py
-    args: ["--resume-roundtrip"]
-    launch: torchrun
-    nproc: 2
-    fsdp: true
-    probe_config: demos/llm/debugging/configs/grpo_constant_target.yaml
-    max_steps: 40
+    - id: C7
+      gate: 4
+      kind: checkpoint
+      backends: [fsdp2]
+      entry: scripts/fsdp_gates/run_probe.py
+      args: [--resume-roundtrip]
+      launch: torchrun
+      nproc: 2
+      fsdp: true
+      probe_config: demos/llm/debugging/configs/grpo_constant_target.yaml
+      max_steps: 40
 
   # --- Gate 5 risks ---------------------------------------------------------
-  - id: R1
-    gate: 5
-    kind: risk
-    backends: [fsdp2]
-    entry: scripts/fsdp_gates/run_probe.py
-    args: ["--adapter-load-step-check"]
-    launch: torchrun
-    nproc: 2
-    fsdp: true
-    probe_config: demos/llm/debugging/configs/grpo_constant_target.yaml
-    max_steps: 5
+    - id: R1
+      gate: 5
+      kind: risk
+      backends: [fsdp2]
+      entry: scripts/fsdp_gates/run_probe.py
+      args: [--adapter-load-step-check]
+      launch: torchrun
+      nproc: 2
+      fsdp: true
+      probe_config: demos/llm/debugging/configs/grpo_constant_target.yaml
+      max_steps: 5
 
-  - id: R2
-    gate: 5
-    kind: risk
-    backends: [fsdp2]
-    note: "Fused logprob frozen vs trainable lm_head — extend probe when ready"
-    manual: true
+    - id: R2
+      gate: 5
+      kind: risk
+      backends: [fsdp2]
+      note: Fused logprob frozen vs trainable lm_head — extend probe when ready
+      manual: true
 
-  - id: R3
-    gate: 5
-    kind: risk
-    backends: [fsdp2]
-    requires_profile_at_least: prod_multi
-    waiver_on: t4_2x16
-    note: "MoE packed expert LoRA — blockers.md #3"
+    - id: R3
+      gate: 5
+      kind: risk
+      backends: [fsdp2]
+      requires_profile_at_least: prod_multi
+      waiver_on: t4_2x16
+      note: 'MoE packed expert LoRA — blockers.md #3'
 
-  - id: R4
-    gate: 5
-    kind: risk
-    backends: [deepspeed, fsdp2]
-    probe_config: demos/llm/debugging/configs/grpo_constant_target.yaml
-    init_hp_overrides: {GRADIENT_CHECKPOINTING: true}
-    nproc: 2
-    max_steps: 50
-    compare: {loss_rel_mae: 0.05}
+    - id: R4
+      gate: 5
+      kind: risk
+      backends: [deepspeed, fsdp2]
+      probe_config: demos/llm/debugging/configs/grpo_constant_target.yaml
+      init_hp_overrides: {GRADIENT_CHECKPOINTING: true}
+      nproc: 2
+      max_steps: 50
+      compare: {loss_rel_mae: 0.05}
 
   # --- Gate 6 soak ----------------------------------------------------------
-  - id: Prod1
-    gate: 6
-    kind: soak
-    backends: [deepspeed, fsdp2]
-    note: "On this VM use 0.5B LoRA proxy; true prod shape needs larger GPUs"
-    entry_fsdp2: demos/llm/demo_llm_finetuning.py
-    entry_args: ["sft"]
-    nproc: 2
-    proxy_on: t4_2x16
+    - id: Prod1
+      gate: 6
+      kind: soak
+      backends: [deepspeed, fsdp2]
+      note: On this VM use 0.5B LoRA proxy; true prod shape needs larger GPUs
+      entry_fsdp2: demos/llm/demo_llm_finetuning.py
+      entry_args: [sft]
+      nproc: 2
+      proxy_on: t4_2x16
 
-  - id: Prod2
-    gate: 6
-    kind: soak
-    backends: [fsdp2]
-    requires_profile_at_least: prod_multi
-    waiver_on: t4_2x16
+    - id: Prod2
+      gate: 6
+      kind: soak
+      backends: [fsdp2]
+      requires_profile_at_least: prod_multi
+      waiver_on: t4_2x16
 
-  - id: Prod3
-    gate: 6
-    kind: soak
-    backends: [fsdp2]
-    manual: true
-    note: "Kill one rank; confirm clean abort"
+    - id: Prod3
+      gate: 6
+      kind: soak
+      backends: [fsdp2]
+      manual: true
+      note: Kill one rank; confirm clean abort
 
-  - id: Prod4
-    gate: 6
-    kind: review
-    backends: [fsdp]
-    manual: true
-    note: "Docs/torchrun review sign-off"
+    - id: Prod4
+      gate: 6
+      kind: review
+      backends: [fsdp]
+      manual: true
+      note: Docs/torchrun review sign-off
 
-  - id: Prod5
-    gate: 6
-    kind: smoke
-    backends: [fsdp]
-    optional: true
-    note: "Classic RL Accelerate regression"
-    entry: demos/single_agent/demo_off_policy_distributed.py
-    launch: python
-    nproc: 1
+    - id: Prod5
+      gate: 6
+      kind: smoke
+      backends: [fsdp]
+      optional: true
+      note: Classic RL Accelerate regression
+      entry: demos/single_agent/demo_off_policy_distributed.py
+      launch: python
+      nproc: 1

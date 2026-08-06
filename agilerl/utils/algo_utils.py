@@ -72,9 +72,8 @@ if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
     from peft import PeftConfig, PeftModel, get_peft_model
     from transformers import PreTrainedModel
 
-    from agilerl.utils.llm_utils import is_fsdp_sharded
-
     from agilerl.algorithms.core.llm_ops.moe_lora import upgrade_moe_param_wrappers
+    from agilerl.utils.llm_utils import is_fsdp_sharded
 
     PreTrainedModelType = PeftModel | PreTrainedModel
 else:
@@ -2572,7 +2571,7 @@ def clone_llm(
         case _:
             msg = f"Invalid 'original_model' type: {type(original_model)}"
             raise ValueError(msg)
-    if is_fsdp_sharded(cast(nn.Module, source_model)) and state_dict is None:
+    if is_fsdp_sharded(cast("nn.Module", source_model)) and state_dict is None:
         msg = (
             "clone_llm cannot read weights from an FSDP2-sharded model without "
             "a CPU state_dict. Pass get_state_dict(..., cpu_offload=True) "
@@ -2613,9 +2612,7 @@ def clone_llm(
                 peft_config=peft_configs[adapter_name],
                 adapter_name=adapter_name,
             )
-        expert_targets = getattr(
-            peft_configs[first_adapter], "target_parameters", None
-        )
+        expert_targets = getattr(peft_configs[first_adapter], "target_parameters", None)
         if isinstance(expert_targets, (list, tuple)) and expert_targets:
             upgrade_moe_param_wrappers(model)
         model.disable_adapter()

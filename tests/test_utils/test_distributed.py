@@ -47,7 +47,8 @@ cuda_required = pytest.mark.skipif(
 class _FakeDTensor:
     """Lightweight DTensor stand-in: carries a ``_local_tensor`` and records
     ``full_tensor()`` calls so tests can assert DTensor-aware state movement
-    without a real distributed tensor."""
+    without a real distributed tensor.
+    """
 
     def __init__(self, local_tensor: torch.Tensor):
         self._local_tensor = local_tensor
@@ -56,6 +57,7 @@ class _FakeDTensor:
     def full_tensor(self) -> torch.Tensor:
         self.full_tensor_calls += 1
         return self._local_tensor
+
 
 _DIST_ENV = ("RANK", "LOCAL_RANK", "WORLD_SIZE", "MASTER_ADDR", "MASTER_PORT")
 

@@ -4,7 +4,7 @@
 import copy
 import os
 from typing import TYPE_CHECKING
-from unittest.mock import MagicMock, Mock, call, patch
+from unittest.mock import MagicMock, Mock, patch
 
 import gymnasium as gym
 import numpy as np
@@ -1320,9 +1320,7 @@ class TestRunSelectionAndMutation:
         selection_strategy = MagicMock(spec=TournamentSelection)
         mutation = MagicMock(spec=Mutations)
         mutation.mutation = Mock(return_value=population)
-        selection_strategy.select = Mock(
-            return_value=(population[0], population, None)
-        )
+        selection_strategy.select = Mock(return_value=(population[0], population, None))
         env_name = "CartPole-v1"
         elite_path = None
 

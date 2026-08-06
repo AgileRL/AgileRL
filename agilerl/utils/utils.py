@@ -43,7 +43,6 @@ from agilerl.typing import BPTTSequenceType, InfosDict, PopulationType
 from agilerl.utils.algo_utils import CosineLRScheduleConfig, DummyOptimizer, clone_llm
 from agilerl.utils.distributed import (
     barrier,
-    get_rank,
     get_world_size,
     is_distributed,
     is_main_process,

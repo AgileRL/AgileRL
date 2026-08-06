@@ -438,7 +438,9 @@ def allreduce_minmax_int(value: int) -> tuple[int, int]:
     if not is_distributed():
         v = int(value)
         return v, v
-    t = torch.tensor([int(value)], device=torch.device(resolve_device()), dtype=torch.long)
+    t = torch.tensor(
+        [int(value)], device=torch.device(resolve_device()), dtype=torch.long
+    )
     gathered = gather_tensor(t)
     return int(gathered.min().item()), int(gathered.max().item())
 
@@ -628,7 +630,10 @@ def _parameter_owner(param: torch.Tensor) -> tuple[nn.Module, str] | None:
         if not attr_names:
             continue
         for obj in gc.get_referrers(referrer):
-            if isinstance(obj, nn.Module) and getattr(obj, "_parameters", None) is referrer:
+            if (
+                isinstance(obj, nn.Module)
+                and getattr(obj, "_parameters", None) is referrer
+            ):
                 return obj, attr_names[0]
     return None
 
@@ -699,9 +704,7 @@ def gather_params(
             module, name = owner
             restores.append((module, name, param))
             owned: dict[str, Any] = module._parameters
-            owned[name] = nn.Parameter(
-                full, requires_grad=bool(param.requires_grad)
-            )
+            owned[name] = nn.Parameter(full, requires_grad=bool(param.requires_grad))
         yield locals_
     finally:
         for module, name, original in reversed(restores):
@@ -2120,9 +2123,7 @@ def build_completion_mask(
         msg = "completion_len requires a non-zero prompt_len to locate the span."
         raise ValueError(msg)
     if completion_len is not None:
-        positions = torch.arange(
-            completion_id.shape[1], device=completion_id.device
-        )
+        positions = torch.arange(completion_id.shape[1], device=completion_id.device)
         end = prompt_len + completion_len.to(device=completion_id.device)
         mask = (positions.unsqueeze(0) >= prompt_len) & (
             positions.unsqueeze(0) < end.unsqueeze(-1)
@@ -2222,9 +2223,7 @@ def build_hf_completion_mask(
         shape ``(B, seq_len - 1)``.
     :rtype: tuple[torch.Tensor, torch.Tensor]
     """
-    new_token_len = hf_completion_lengths(
-        completion_id, input_ids_len, pad_token_id
-    )
+    new_token_len = hf_completion_lengths(completion_id, input_ids_len, pad_token_id)
     completion_id, full_prompt_len = stitch_completion_after_windowed_hf_generate(
         completion_id, stitch_ids, initial_prompt_len
     )
@@ -2813,9 +2812,7 @@ def save_peft_adapter_for_vllm_rollout(
     # may not install dense locals on the module for every param, so
     # materialise any remaining ``DTensor`` entries here before safetensors
     # serialisation (which cannot read a DTensor storage pointer).
-    state = {
-        k: (v.full_tensor() if _is_dtensor(v) else v) for k, v in state.items()
-    }
+    state = {k: (v.full_tensor() if _is_dtensor(v) else v) for k, v in state.items()}
     save_file(state, adapter_path / "adapter_model.safetensors")
 
     peft_cfg = peft_model.peft_config[adapter_name]

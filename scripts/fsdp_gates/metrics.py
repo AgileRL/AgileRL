@@ -75,7 +75,9 @@ def artifact_dir(root: Path, job_id: str, backend: str, seed: int = 0) -> Path:
 
 def write_json(path: Path, payload: dict[str, Any]) -> None:
     """Write pretty JSON."""
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    path.write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
 
 
 def append_jsonl(path: Path, row: dict[str, Any]) -> None:
@@ -141,7 +143,11 @@ def query_nvidia_smi() -> list[SmiSample]:
         parts = [p.strip() for p in line.split(",")]
         if len(parts) < 3:
             continue
-        util = float(parts[3]) if len(parts) > 3 and parts[3] not in {"", "[N/A]"} else None
+        util = (
+            float(parts[3])
+            if len(parts) > 3 and parts[3] not in {"", "[N/A]"}
+            else None
+        )
         samples.append(
             SmiSample(
                 t_s=now,
@@ -171,7 +177,9 @@ class NvidiaSmiSampler:
         if self.out_path.exists():
             self.out_path.unlink()
         self._t0 = time.time()
-        self._thread = threading.Thread(target=self._loop, name="nvidia-smi-sampler", daemon=True)
+        self._thread = threading.Thread(
+            target=self._loop, name="nvidia-smi-sampler", daemon=True
+        )
         self._thread.start()
 
     def stop(self) -> float:
@@ -238,7 +246,9 @@ class StepMetricsWriter:
         if self._step_ms:
             ordered = sorted(self._step_ms)
             self.summary.mean_step_ms = sum(ordered) / len(ordered)
-            self.summary.p95_step_ms = ordered[min(len(ordered) - 1, int(0.95 * len(ordered)))]
+            self.summary.p95_step_ms = ordered[
+                min(len(ordered) - 1, int(0.95 * len(ordered)))
+            ]
         if self._tps:
             self.summary.mean_tokens_per_sec = sum(self._tps) / len(self._tps)
         write_json(self.out_dir / "summary.json", asdict(self.summary))

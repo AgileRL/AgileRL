@@ -810,7 +810,8 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
         # Wire averaged metrics into the metrics tracker.
         completion_list = experiences[0]
         completion_length = np.mean([c.shape[-1] for c in completion_list])
-        agg = aggregate_metrics_dict({
+        agg = aggregate_metrics_dict(
+            {
                 "loss": averaged["loss"],
                 "pg_loss": averaged["pg_loss"],
                 "vf_loss": averaged["vf_loss"],

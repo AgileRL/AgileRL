@@ -280,7 +280,8 @@ class TestLLMLmHeadMatmulCtx:
 
 def _fake_materialize(tensors):
     """Context manager simulating ``materialize_dtensors``: yields the
-    input tensors as-is (already plain CPU tensors in tests)."""
+    input tensors as-is (already plain CPU tensors in tests).
+    """
     from contextlib import contextmanager
 
     @contextmanager
@@ -293,6 +294,7 @@ def _fake_materialize(tensors):
 # ---------------------------------------------------------------------------
 # 3. actor_device guard in get_action (GRPO / PPO / REINFORCE)
 # ---------------------------------------------------------------------------
+
 
 def _make_actor_agent(*, distributed=True, fsdp_config=None, device="cuda:0"):
     """MagicMock agent for ``get_action`` HF-generate path tests.
@@ -328,7 +330,9 @@ def _dummy_prompts():
 
 def _patch_hf_generate_path(module_path, captured_devices):
     """Patch the HF-generate helper functions to capture ``actor_device``
-    and return dummy data without moving tensors."""
+    and return dummy data without moving tensors.
+    """
+
     def capture_prepare(prompt_dict, device):
         captured_devices.append(device)
         return {
@@ -529,7 +533,8 @@ class TestLoadLoraAdapters:
 
 class TestLoadGatheredOptimizerStateDict:
     """``_load_gathered_optimizer_state_dict`` manually scatters optimizer
-    state into DTensor shards instead of calling ``set_optimizer_state_dict``."""
+    state into DTensor shards instead of calling ``set_optimizer_state_dict``.
+    """
 
     def test_non_sharded_uses_load_state_dict(self):
         agent = _make_llm_agent_for_ckpt()
@@ -575,7 +580,9 @@ class TestLoadGatheredOptimizerStateDict:
         param.device = torch.device("cpu")
 
         inner_opt = MagicMock()
-        inner_opt.optimizer = inner_opt  # so getattr(opt, "optimizer", opt) returns self
+        inner_opt.optimizer = (
+            inner_opt  # so getattr(opt, "optimizer", opt) returns self
+        )
         inner_opt.state = {param: {"step": torch.tensor(999.0)}}
         inner_opt.param_groups = [{"params": [param], "lr": 0.001}]
         agent.optimizer = MagicMock()
@@ -616,7 +623,8 @@ class TestLoadGatheredOptimizerStateDict:
 
 class TestGetStateDictCpuOffload:
     """``get_state_dict`` passes ``cpu_offload`` through to
-    ``get_model_state_dict`` for FSDP2-sharded models."""
+    ``get_model_state_dict`` for FSDP2-sharded models.
+    """
 
     def test_default_cpu_offload_true(self):
         from agilerl.utils.llm_utils import get_state_dict
@@ -624,7 +632,9 @@ class TestGetStateDictCpuOffload:
         model = MagicMock()
         with (
             patch("agilerl.utils.llm_utils.is_fsdp_sharded", return_value=True),
-            patch("torch.distributed.checkpoint.state_dict.get_model_state_dict") as mock_get,
+            patch(
+                "torch.distributed.checkpoint.state_dict.get_model_state_dict"
+            ) as mock_get,
         ):
             get_state_dict(model)
 
@@ -666,7 +676,9 @@ class TestGatheredOptimizerStateDictCpuOffload:
 
         with (
             patch("agilerl.algorithms.core.base.is_fsdp_sharded", return_value=True),
-            patch("torch.distributed.checkpoint.state_dict.get_optimizer_state_dict") as mock_get,
+            patch(
+                "torch.distributed.checkpoint.state_dict.get_optimizer_state_dict"
+            ) as mock_get,
         ):
             LLMAlgorithm._gathered_optimizer_state_dict(agent)
 
@@ -747,7 +759,9 @@ class TestCloneLlmRejectsFsdp:
 
         from agilerl.utils.algo_utils import clone_llm
 
-        model = GPT2LMHeadModel(GPT2Config(n_layer=1, n_embd=16, n_head=2, vocab_size=32))
+        model = GPT2LMHeadModel(
+            GPT2Config(n_layer=1, n_embd=16, n_head=2, vocab_size=32)
+        )
         with (
             patch("agilerl.utils.algo_utils.is_fsdp_sharded", return_value=True),
             pytest.raises(RuntimeError, match="CPU state_dict"),

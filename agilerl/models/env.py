@@ -34,7 +34,6 @@ from agilerl.utils.env_utils import (
 from agilerl.vector import AsyncPettingZooVecEnv
 
 if TYPE_CHECKING:
-    from accelerate import Accelerator
     from datasets import Dataset
     from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 

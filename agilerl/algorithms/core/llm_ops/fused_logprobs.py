@@ -268,12 +268,8 @@ class FusedLinearLogProbsFunction(torch.autograd.Function):
             head_w, head_b = gathered[0], gathered[1]
             assert head_w is not None
             grad_hidden = torch.zeros_like(flat_h) if ctx.needs_hidden_grad else None
-            grad_weight = (
-                torch.zeros_like(head_w) if ctx.needs_weight_grad else None
-            )
-            grad_bias = (
-                torch.zeros_like(head_b) if ctx.needs_bias_grad else None
-            )
+            grad_weight = torch.zeros_like(head_w) if ctx.needs_weight_grad else None
+            grad_bias = torch.zeros_like(head_b) if ctx.needs_bias_grad else None
             # Grad buffers above stay in the head's own dtype; the recompute
             # below runs against one hoisted fp32 copy of it.
             head_weight, head_bias = fp32_lm_head_operands(

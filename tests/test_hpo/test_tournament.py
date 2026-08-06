@@ -1,4 +1,4 @@
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -526,4 +526,3 @@ class TestTournamentSelectionElitism:
         assert elite is population[1]
         assert rank.tolist() == [0, 1]
         assert max_id == 1
-

@@ -8,7 +8,6 @@ import gc
 import inspect
 import logging
 import os
-import pickle
 import shutil
 import tempfile
 import warnings
@@ -62,7 +61,6 @@ from agilerl.algorithms.core.registry import (
 )
 from agilerl.metrics import AgentMetrics, MultiAgentMetrics
 from agilerl.modules.configs import MlpNetConfig, NetConfig
-from agilerl.modules.dummy import DummyEvolvable
 from agilerl.protocols import (
     AgentWrapperProtocol,
     EvolvableAlgorithmProtocol,
@@ -91,25 +89,9 @@ from agilerl.typing import (
     MultiAgentSpacesType,
     NetConfigType,
     ObservationType,
-    OptimizerType,
     ReasoningPrompts,
     TorchObsType,
     coerce_action_mask,
-)
-from agilerl.utils.distributed import (
-    CPUOffloadOptimizer,
-    FSDPConfig,
-    barrier,
-    broadcast_object_list,
-    get_local_rank,
-    get_rank,
-    get_world_size,
-    init_distributed,
-    is_main_process,
-    materialize_fsdp2_from_cpu_state,
-    resolve_device,
-    set_seed,
-    sync_grads,
 )
 from agilerl.utils.algo_utils import (
     CosineLRScheduleConfig,
@@ -133,6 +115,21 @@ from agilerl.utils.algo_utils import (
     stack_and_pad_experiences,
     stack_experiences,
     transpose_image_space,
+)
+from agilerl.utils.distributed import (
+    CPUOffloadOptimizer,
+    FSDPConfig,
+    barrier,
+    broadcast_object_list,
+    get_local_rank,
+    get_rank,
+    get_world_size,
+    init_distributed,
+    is_main_process,
+    materialize_fsdp2_from_cpu_state,
+    resolve_device,
+    set_seed,
+    sync_grads,
 )
 from agilerl.utils.evolvable_networks import (
     compile_model,
@@ -193,13 +190,13 @@ if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
         get_state_dict,
         is_fsdp_sharded,
         load_full_state_dict,
+        load_lora_adapters,
         log_cuda_memory_snapshot,
         materialize_dtensors,
         move_params_to_cpu,
         move_params_to_gpu,
         offload_colocated_trainer_from_gpu,
         save_lora_adapters,
-        load_lora_adapters,
         save_peft_adapter_for_vllm_rollout,
         stitch_completion_after_windowed_vllm_generate,
     )
@@ -3061,7 +3058,9 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
 
         if "actor" in self.selected_adapters:
             unwrapped = self._get_unwrapped_actor()
-            peft_model = unwrapped.pretrained_model if self.use_value_head else unwrapped
+            peft_model = (
+                unwrapped.pretrained_model if self.use_value_head else unwrapped
+            )
             peft_model.set_adapter("actor")
             for name, param in unwrapped.named_parameters():
                 if "reference" in name:
@@ -3143,7 +3142,9 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             lr_name="lr" if self.lr_critic is None else ("lr_actor", "lr_critic"),
         )
 
-    def _gathered_optimizer_state_dict(self, cpu_offload: bool = True) -> dict[str, Any]:
+    def _gathered_optimizer_state_dict(
+        self, cpu_offload: bool = True
+    ) -> dict[str, Any]:
         """Return the optimizer state dict, gathering FSDP2-sharded state to
         full tensors so checkpoints are rank-count independent.
 
@@ -3248,13 +3249,14 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
                             inner_optimizer.state[param][sk] = sharded
                         else:
                             # Scalar state (step) or plain tensor: copy directly.
-                            inner_optimizer.state[param][sk] = saved_val.to(param.device)
+                            inner_optimizer.state[param][sk] = saved_val.to(
+                                param.device
+                            )
 
         offload_wrapper = getattr(self.optimizer.optimizer, "_move_states", None)
         if callable(offload_wrapper):
             offload_wrapper("cpu")
             self.optimizer.optimizer._initialized = True
-
 
     @classmethod
     def load(
@@ -3328,7 +3330,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
                 else None
             )
         if self.gradient_checkpointing:
-            cast(Any, self.actor).gradient_checkpointing_enable(
+            cast("Any", self.actor).gradient_checkpointing_enable(
                 gradient_checkpointing_kwargs={"use_reentrant": False},
             )
 
@@ -3496,9 +3498,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             input_args["actor_network"] = self._clone_actor_network()
         return type(self)(**input_args)
 
-    def _broadcast_cpu_state_dict(
-        self, state_dict: dict[str, Any]
-    ) -> dict[str, Any]:
+    def _broadcast_cpu_state_dict(self, state_dict: dict[str, Any]) -> dict[str, Any]:
         """Share a rank-0 CPU state dict with every rank (host memory only)."""
         payload: list[Any] = [state_dict]
         return broadcast_object_list(payload, src=0)[0]
@@ -3669,7 +3669,6 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
 
         return population
 
-
     @staticmethod
     def update_lr(
         optimizer: torch.optim.Optimizer,
@@ -3787,7 +3786,6 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
                 peft_model.base_model.enable_adapter_layers()
         self._restore_adapter_trainability(["actor", "critic"])
 
-
     @contextmanager
     def select_adapter(self, adapter_name: str) -> Generator[None, None, None]:
         """Temporarily switch adapter; restores the actor adapter on exit.
@@ -3820,7 +3818,6 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
                 "reference updates."
             )
             raise NotImplementedError(msg)
-
 
     @staticmethod
     def _position_ids_from_mask(mask: torch.Tensor) -> torch.Tensor:
@@ -3883,7 +3880,9 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             head_ctx = materialize_dtensors(lm_head_weight, lm_head_bias)
 
             @contextmanager
-            def _moved() -> Generator[tuple[torch.Tensor, torch.Tensor | None], None, None]:
+            def _moved() -> Generator[
+                tuple[torch.Tensor, torch.Tensor | None], None, None
+            ]:
                 with head_ctx as head_locals:
                     w = head_locals[0] if len(head_locals) == 2 else lm_head_weight
                     b = head_locals[1] if len(head_locals) == 2 else lm_head_bias
@@ -3894,14 +3893,15 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
                     yield w, b
 
             return _moved()
-        else:
-            head_w, head_b = lm_head_weight, lm_head_bias
+        head_w, head_b = lm_head_weight, lm_head_bias
 
-            @contextmanager
-            def _passthrough() -> Generator[tuple[torch.Tensor, torch.Tensor | None], None, None]:
-                yield head_w, head_b
+        @contextmanager
+        def _passthrough() -> Generator[
+            tuple[torch.Tensor, torch.Tensor | None], None, None
+        ]:
+            yield head_w, head_b
 
-            return _passthrough()
+        return _passthrough()
 
     def _warn_liger_non_token_is(
         self,
@@ -4494,7 +4494,6 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             else None
         )
 
-
     @contextmanager
     def _amp_ctx(self) -> Generator[None, None, None]:
         """Yield a ``torch.amp.autocast`` context on single-device CUDA runs.
@@ -4599,7 +4598,6 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         )
 
         fused_fn, lm_head_weight, lm_head_bias = self._fused_logprob_fn_and_head()
-
 
         def _process_chunk(
             start: int, end: int
@@ -4995,9 +4993,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             if attention_mask is None:
                 # TODO this calc is avoided for preference (DatasetEnv) batches;
                 # generation (RolloutEnv) rollouts should supply an attention mask too
-                attention_mask = attention_mask_from_padded_ids(
-                    ids, self.pad_token_id
-                )
+                attention_mask = attention_mask_from_padded_ids(ids, self.pad_token_id)
             if self.calc_position_embeddings:
                 position_ids = self._position_ids_from_mask(attention_mask)
 
@@ -5119,7 +5115,6 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         if self.lr_scheduler is not None:
             self.lr_scheduler.step()
             self.lr = self.lr_scheduler.get_last_lr()[0]
-
 
     @property
     def _peft_model(self) -> Any:  # noqa: ANN401 -- PeftModel lives at a wrapper-specific attribute; concrete type varies
@@ -5346,7 +5341,6 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             if self.max_output_tokens is not None
             else self.max_model_len
         )
-
 
         def _trajectory_input_ids(prompt: ReasoningPrompts) -> torch.Tensor:
             traj = prompt.get("trajectory_input_ids")
@@ -5619,7 +5613,6 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         orig_dtype = logits.dtype
         B = logits.shape[0]
 
-
         def _logprobs_chunk(lg: torch.Tensor, idx: torch.Tensor) -> torch.Tensor:
             if cast_to_fp32:
                 lg = lg.float()
@@ -5662,7 +5655,6 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             return explicit
         workspace_bytes = 256 * 1024 * 1024
         return min(max(workspace_bytes // max(1, vocab_size * 4), 128), 4096)
-
 
     @staticmethod
     def _logprobs_from_hidden_fused(
@@ -5725,7 +5717,6 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             cast_to_fp32=cast_to_fp32,
             chunk_rows=chunk_rows,
         )
-
 
     @staticmethod
     def _logprobs_from_hidden_fused_grad(
@@ -5953,7 +5944,6 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             for key, src_param in source_params.items():
                 target_params[key].data.copy_(src_param.data)
 
-
     @staticmethod
     def _load_checkpoint_lora_config(path: str) -> LoraConfig | None:
         """Load the ``actor`` adapter's LoRA config from a checkpoint directory, if present.
@@ -5969,7 +5959,6 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             return None
         return LoraConfig.from_pretrained(str(config_path.parent))
 
-
     @staticmethod
     def _format_lora_config_mismatch_error(
         current: LoraConfig,
@@ -5984,7 +5973,6 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         :return: Error string with mismatch context and remediation.
         :rtype: str
         """
-
 
         def summarize(cfg: LoraConfig) -> dict[str, Any]:
             """Summarize key LoRA config fields for mismatch messages."""
@@ -6093,7 +6081,6 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
                 param.requires_grad = False
 
         barrier()
-
 
     @staticmethod
     def _create_prompt_masks(
@@ -6413,4 +6400,3 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             if is_main_process():
                 log_cuda_memory_snapshot("vLLM base restored on GPU (after wake)")
         self._sync_actor_to_vllm()
-

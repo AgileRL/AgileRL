@@ -176,7 +176,9 @@ def build_commands(
             "run_probe.py"
         )
         if backend in {"fsdp", "fsdp2"} and use_probe and backend != "deepspeed":
-            probe_backend = "fsdp2" if (job.get("fsdp") or backend == "fsdp2") else backend
+            probe_backend = (
+                "fsdp2" if (job.get("fsdp") or backend == "fsdp2") else backend
+            )
             cmd = _fsdp_probe_cmd(
                 fsdp_root=fsdp_root,
                 job=job,
@@ -247,7 +249,9 @@ def run_one(
             os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else ""
         )
 
-    sampler = NvidiaSmiSampler(out_dir / "smi_timeseries.jsonl", interval_s=sample_interval_s)
+    sampler = NvidiaSmiSampler(
+        out_dir / "smi_timeseries.jsonl", interval_s=sample_interval_s
+    )
     sampler.start()
     t0 = time.time()
     try:
@@ -330,7 +334,10 @@ def main(argv: list[str] | None = None) -> int:
     suite = _load_suite(suite_path)
     profile = args.profile or suite.get("defaults", {}).get("profile", "t4_2x16")
     artifact_root = Path(
-        os.environ.get("AGILERL_GATE_ARTIFACT_ROOT", suite.get("artifact_root", default_artifact_root()))
+        os.environ.get(
+            "AGILERL_GATE_ARTIFACT_ROOT",
+            suite.get("artifact_root", default_artifact_root()),
+        )
     )
     sample_interval = float(suite.get("defaults", {}).get("sample_interval_s", 1.0))
     fsdp_root = Path(os.environ.get("AGILERL_GATE_FSDP", suite["worktrees"]["fsdp"]))
@@ -351,7 +358,8 @@ def main(argv: list[str] | None = None) -> int:
         if not ok:
             print(f"[{job['id']}] SKIP: {reason}")
             write_json(
-                artifact_dir(artifact_root, str(job["id"]), "skipped", 0) / "summary.json",
+                artifact_dir(artifact_root, str(job["id"]), "skipped", 0)
+                / "summary.json",
                 {
                     "job_id": job["id"],
                     "status": "skipped",
@@ -362,7 +370,10 @@ def main(argv: list[str] | None = None) -> int:
             continue
         if job.get("optional") and not args.execute:
             print(f"[{job['id']}] optional (listed in dry-run)")
-        seeds = [int(s) for s in job.get("seeds", suite.get("defaults", {}).get("seeds", [0]))]
+        seeds = [
+            int(s)
+            for s in job.get("seeds", suite.get("defaults", {}).get("seeds", [0]))
+        ]
         for seed in seeds:
             for backend, cmd, out_dir in build_commands(
                 suite, job, seed=seed, artifact_root=artifact_root
