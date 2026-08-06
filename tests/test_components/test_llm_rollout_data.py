@@ -27,7 +27,7 @@ def make_trajectory(seq_len, n_action=None, max_turns=2, with_logps=False):
     rewards = torch.zeros(max_turns)
     rewards[0] = 1.0
     return Trajectory(
-        completion_ids=tokens,
+        token_ids=tokens,
         action_masks=turn_ids >= 0,
         turn_ids=turn_ids,
         rewards=rewards,
@@ -50,13 +50,13 @@ class TestTrajectory:
     @pytest.mark.parametrize("field", ["action_masks", "turn_ids"])
     def test_wrong_length_raises(self, field):
         kwargs = {
-            "completion_ids": torch.ones(1, 8, dtype=torch.long),
+            "token_ids": torch.ones(1, 8, dtype=torch.long),
             "action_masks": torch.ones(1, 7, dtype=torch.bool),
             "turn_ids": torch.zeros(1, 7, dtype=torch.long),
             "rewards": torch.ones(2),
         }
         kwargs[field] = kwargs[field][:, :-1]
-        with pytest.raises(ValueError, match="completion_ids - 1"):
+        with pytest.raises(ValueError, match="token_ids - 1"):
             Trajectory(**kwargs)
 
     def test_is_frozen(self):
@@ -68,12 +68,12 @@ class TestTrajectory:
         tokens = torch.arange(1, 9, dtype=torch.long).reshape(1, 8)
         turn_ids = torch.zeros(1, 7, dtype=torch.long)
         traj = Trajectory(
-            completion_ids=tokens,
+            token_ids=tokens,
             action_masks=turn_ids >= 0,
             turn_ids=turn_ids,
             rewards=torch.ones(2),
         )
-        assert traj.completion_ids is tokens
+        assert traj.token_ids is tokens
         assert traj.turn_ids is turn_ids
 
 
@@ -99,7 +99,7 @@ class TestCollate:
         group = make_group(2, lengths=[6, 9])
         batch = collate_rollout_groups([group])
         for i, traj in enumerate(group.trajectories):
-            assert batch.completion_ids[i] is traj.completion_ids
+            assert batch.token_ids[i] is traj.token_ids
             assert batch.action_masks[i] is traj.action_masks
 
     def test_turn_ids_padded_with_minus_one(self):
@@ -120,9 +120,9 @@ class TestCollate:
         assert batch.rewards.shape == (2, 4)
         assert torch.all(batch.rewards[0, 2:] == 0.0)
 
-    def test_completion_lengths(self):
+    def test_token_lengths(self):
         batch = collate_rollout_groups([make_group(3, lengths=[5, 7, 11])])
-        assert batch.completion_lengths.tolist() == [5, 7, 11]
+        assert batch.token_lengths.tolist() == [5, 7, 11]
 
     def test_sampling_logps_none_when_absent(self):
         assert collate_rollout_groups([make_group(2)]).sampling_logps is None
@@ -134,8 +134,8 @@ class TestCollate:
 
     def test_experiences_tuple(self):
         batch = collate_rollout_groups([make_group(2)])
-        completion_ids, action_masks, rewards = batch.experiences()
-        assert completion_ids is batch.completion_ids
+        token_ids, action_masks, rewards = batch.experiences()
+        assert token_ids is batch.token_ids
         assert action_masks is batch.action_masks
         assert rewards is batch.rewards
 
@@ -143,7 +143,7 @@ class TestCollate:
         batch = collate_rollout_groups(
             [make_group(2, lengths=[4, 5]), make_group(2, lengths=[6, 7])]
         )
-        assert batch.completion_lengths.tolist() == [4, 5, 6, 7]
+        assert batch.token_lengths.tolist() == [4, 5, 6, 7]
 
 
 class TestSyncTrainerWiring:
@@ -152,7 +152,7 @@ class TestSyncTrainerWiring:
         cids, masks, turns, rewards = [], [], [], []
         for _ in range(batch_size * group_size):
             traj = make_trajectory(rng.randint(3, 20), max_turns=max_turns)
-            cids.append(traj.completion_ids)
+            cids.append(traj.token_ids)
             masks.append(traj.action_masks)
             turns.append(traj.turn_ids)
             rewards.append(traj.rewards)
@@ -175,14 +175,14 @@ class TestSyncTrainerWiring:
 
         batch = collate_llm_rollouts(cids, masks, turns, rewards, group_size=group_size)
         new_c, new_m = stack_and_pad_experiences(
-            batch.completion_ids, batch.action_masks, padding_values=[0, False]
+            batch.token_ids, batch.action_masks, padding_values=[0, False]
         )
 
         assert torch.equal(new_c, old_c)
         assert torch.equal(new_m, old_m)
         assert torch.equal(batch.rewards, rewards_2d.float())
         assert torch.equal(batch.turn_ids, turn_ids_padded)
-        assert batch.completion_lengths.float().mean().item() == pytest.approx(
+        assert batch.token_lengths.float().mean().item() == pytest.approx(
             np.mean([c.shape[1] for c in cids])
         )
 
@@ -191,7 +191,7 @@ class TestSyncTrainerWiring:
 
         cids, masks, turns, rewards = self._make_rollout(2, 2, 2, random.Random(3))
         batch = collate_llm_rollouts(cids, masks, turns, rewards, group_size=2)
-        assert all(a is b for a, b in zip(batch.completion_ids, cids, strict=True))
+        assert all(a is b for a, b in zip(batch.token_ids, cids, strict=True))
         assert all(a is b for a, b in zip(batch.action_masks, masks, strict=True))
 
     def test_sampling_logps_threaded_through_batch(self):
@@ -223,5 +223,5 @@ class TestSyncTrainerWiring:
         masks = [torch.ones(1, 8, dtype=torch.bool)]
         turns = [torch.zeros(1, 8, dtype=torch.long)]
         rewards = [torch.ones(2)]
-        with pytest.raises(ValueError, match="completion_ids - 1"):
+        with pytest.raises(ValueError, match="token_ids - 1"):
             collate_llm_rollouts(cids, masks, turns, rewards, group_size=1)

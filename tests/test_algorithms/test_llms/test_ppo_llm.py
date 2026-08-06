@@ -674,7 +674,7 @@ class TestPPOGetAction:
                 return_value=(mocked_ids, mocked_masks, None),
             ) as mock_generate,
         ):
-            completion_ids, action_masks, _ = ppo.get_action(prompts, training=False)
+            token_ids, action_masks, _ = ppo.get_action(prompts, training=False)
 
         mock_prepare.assert_called_once()
         mock_move.assert_called_once()
@@ -684,7 +684,7 @@ class TestPPOGetAction:
         ppo.llm.wake_up.assert_called_once()
         ppo._prepare_vllm_for_training()
         ppo.llm.sleep.assert_called_once()
-        assert completion_ids == mocked_ids
+        assert token_ids == mocked_ids
         assert action_masks == mocked_masks
         ppo.clean_up()
 
@@ -705,9 +705,9 @@ class TestPPOGetAction:
             for _ in range(batch_size)
         ]
         for training in (True, False):
-            completion_ids, action_masks, _ = ppo.get_action(prompts, training=training)
+            token_ids, action_masks, _ = ppo.get_action(prompts, training=training)
             assert_vllm_get_action_contract(
-                completion_ids=completion_ids,
+                token_ids=token_ids,
                 action_masks=action_masks,
                 batch_size=batch_size,
                 prompt_len=prompt_len,
@@ -735,10 +735,10 @@ class TestPPOGetAction:
         ]
 
         with patch.object(ppo, "_get_unwrapped_actor", return_value=_NoParamModule()):
-            completion_ids, action_masks, _ = ppo.get_action(prompts, training=True)
+            token_ids, action_masks, _ = ppo.get_action(prompts, training=True)
 
         assert_vllm_get_action_contract(
-            completion_ids=completion_ids,
+            token_ids=token_ids,
             action_masks=action_masks,
             batch_size=1,
             prompt_len=10,
@@ -1172,8 +1172,8 @@ def _minimal_reasoning_rollout_env(device: str, vocab_size: int, input_size: int
             self.done = False
             return self._prompt(), {}
 
-        def step(self, full_completion_ids):
-            del full_completion_ids
+        def step(self, token_ids):
+            del token_ids
             self.done = True
             return self._prompt(), 1.0, True, False, {}
 
@@ -1225,8 +1225,8 @@ class TestPPOTest:
                 self.done = False
                 return self.valid_prompt, {}
 
-            def step(self, full_completion_ids):
-                del full_completion_ids
+            def step(self, token_ids):
+                del token_ids
                 self.done = True
                 return {}, 1.0, True, False, {}
 
@@ -1274,8 +1274,8 @@ class TestPPOTest:
                     "attention_mask": torch.ones(1, 4, dtype=torch.long),
                 }, {}
 
-            def step(self, full_completion_ids):
-                del full_completion_ids
+            def step(self, token_ids):
+                del token_ids
                 self.done = True
                 return {}, 1.0, True, False, {}
 
@@ -1325,8 +1325,8 @@ class TestPPOTest:
                 self.done = False
                 return self.prompt_a, {}
 
-            def step(self, full_completion_ids):
-                del full_completion_ids
+            def step(self, token_ids):
+                del token_ids
                 self._step_count += 1
                 if self._step_count == 1:
                     return self.prompt_b, 0.5, False, False, {}
@@ -2080,17 +2080,15 @@ class TestPPOColocatedVllm:
             for _ in range(batch_size)
         ]
 
-        completion_ids, action_masks, sampling_logps = ppo.get_action(
-            prompts, training=True
-        )
+        token_ids, action_masks, sampling_logps = ppo.get_action(prompts, training=True)
         # The rollout parks the trainer on CPU; ``learn`` must bring the whole
         # tree — base weights and value head alike — back onto the GPU.
         unwrapped = ppo._get_unwrapped_actor()
         assert all(p.device.type == "cpu" for p in unwrapped.parameters())
 
-        rewards = torch.randn(len(completion_ids), device=ppo.device)
+        rewards = torch.randn(len(token_ids), device=ppo.device)
         metrics = ppo.learn(
-            (completion_ids, action_masks, rewards),
+            (token_ids, action_masks, rewards),
             sampling_logps=sampling_logps,
         )
         for key in ("loss", "pg_loss", "vf_loss"):

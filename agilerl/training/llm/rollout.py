@@ -250,7 +250,7 @@ def train_llm_rollout(
                 agent.set_reference_policy(rollout_collector.num_epochs)
                 agent.init_training_step()
                 (
-                    completion_ids_list,
+                    token_ids_list,
                     action_masks_list,
                     all_turn_ids,
                     all_rewards,
@@ -269,7 +269,7 @@ def train_llm_rollout(
                 # algorithms rely on holds by construction, and a misaligned
                 # rollout fails here rather than inside a loss.
                 batch = collate_llm_rollouts(
-                    completion_ids_list,
+                    token_ids_list,
                     action_masks_list,
                     all_turn_ids,
                     all_rewards,
@@ -286,16 +286,16 @@ def train_llm_rollout(
                 ):
                     # Multi-rank Liger token-level losses allreduce per chunk, so
                     # every rank must pad to one global sequence length.
-                    completion_ids, action_masks, rewards = (
+                    token_ids, action_masks, rewards = (
                         align_completion_batch_shapes_across_ranks(
-                            batch.completion_ids,
+                            batch.token_ids,
                             batch.action_masks,
                             batch.rewards,
                             pad_token_id=agent.pad_token_id,
                             accelerator=accelerator,
                         )
                     )
-                    experiences = (completion_ids, action_masks, rewards)
+                    experiences = (token_ids, action_masks, rewards)
                     assert turn_ids is not None, "aligned batches are non-empty"
                     target_mask_len = int(action_masks.shape[1])
                     if int(turn_ids.shape[1]) < target_mask_len:

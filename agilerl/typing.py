@@ -60,7 +60,7 @@ class IsDataclass(Protocol):
 
 
 # ── TypedDicts: LLM prompts, checkpoint & mutation payloads ──────────────────
-class RolloutPrompts(TypedDict):
+class RolloutObservation(TypedDict):
     """What the policy is shown for one generation turn: the transcript so far, tokenized.
 
     :param input_ids: ``(1, T)`` initial prompt plus every generation and env
@@ -165,7 +165,7 @@ ArrayDict = dict[str, npt.NDArray]
 ArrayTuple = tuple[npt.NDArray, ...]
 KernelSizeType = int | tuple[int, ...]
 GymSpaceType = SupportedObservationSpace | list[SupportedObservationSpace]
-LLMObsType = list[RolloutPrompts] | RolloutPrompts
+LLMObsType = list[RolloutObservation] | RolloutObservation
 
 # ── Observation & action aliases ─────────────────────────────────────────────
 NumpyObsType = npt.NDArray | ArrayDict | ArrayTuple
@@ -375,7 +375,7 @@ class MultiAgentReplayBatch(TensorClass):
 
 
 # One LLM RL rollout consumed by GRPO/LLMPPO/LLMREINFORCE's ``learn``:
-# ``(completion_ids, action_masks, rewards)``. ``completion_ids`` and
+# ``(token_ids, action_masks, rewards)``. ``token_ids`` and
 # ``action_masks`` are per-trajectory tensor lists, or already-stacked tensors
 # after cross-rank sequence-padding alignment; ``rewards`` is a ``(batch,)`` (or
 # ``(batch, max_turns)`` for per-turn) tensor.
@@ -477,12 +477,14 @@ class ActionResult(NamedTuple):
     """Structured return of an LLM algorithm's :meth:`get_action`.
 
     A tuple subclass, so callers may unpack positionally *or* (preferred, and
-    forward-compatible if fields are added) read by attribute. ``sampling_logps``
-    holds the per-completion vLLM sampling logprobs captured for the
-    sampling-mismatch correction, or ``None`` when not captured (HF generation,
-    evaluation, or correction disabled).
+    forward-compatible if fields are added) read by attribute. ``token_ids``
+    holds ``prompt + generation`` per row, not the generation alone;
+    ``action_masks`` is what marks the generated span within it.
+    ``sampling_logps`` holds the per-completion vLLM sampling logprobs captured
+    for the sampling-mismatch correction, or ``None`` when not captured (HF
+    generation, evaluation, or correction disabled).
     """
 
-    completion_ids: list[torch.Tensor]
+    token_ids: list[torch.Tensor]
     action_masks: list[torch.Tensor]
     sampling_logps: list[torch.Tensor | None] | None = None

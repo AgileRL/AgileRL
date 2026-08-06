@@ -195,7 +195,7 @@ class TestCollectRolloutsLlmOrdering:
                     for tok in row_tokens
                 ]
                 return ActionResult(
-                    completion_ids=completions,
+                    token_ids=completions,
                     action_masks=None,
                     sampling_logps=None,
                 )
@@ -209,7 +209,7 @@ class TestCollectRolloutsLlmOrdering:
         env = RolloutCollector(env_factory=env_fn, batch_size=4, group_size=2)
         agent = _EchoAgent()
 
-        completion_ids_list, _masks, _turns, rewards, steps, next_group_seed, _logps = (
+        token_ids_list, _masks, _turns, rewards, steps, next_group_seed, _logps = (
             collect_rollouts_llm(
                 agent=agent,
                 env=env,
@@ -219,7 +219,7 @@ class TestCollectRolloutsLlmOrdering:
             )
         )
 
-        returned_first_tokens = [int(ids[0, 0].item()) for ids in completion_ids_list]
+        returned_first_tokens = [int(ids[0, 0].item()) for ids in token_ids_list]
         assert returned_first_tokens == prompt_tokens_by_env_index
 
         returned_reward_markers = [int(r[0].item()) for r in rewards]
@@ -251,7 +251,7 @@ class TestCollectRolloutsLlmGrpo:
         agent.__class__ = GRPO
         agent.accelerator = None
         agent.get_action.return_value = ActionResult(
-            completion_ids=[torch.tensor([[1, 2]], dtype=torch.long)],
+            token_ids=[torch.tensor([[1, 2]], dtype=torch.long)],
             action_masks=None,
             sampling_logps=None,
         )
@@ -289,7 +289,7 @@ class TestCollectRolloutsLlmGrpo:
         agent.__class__ = GRPO
         agent.accelerator = None
         agent.get_action.return_value = ActionResult(
-            completion_ids=[torch.tensor([[1, 2]], dtype=torch.long)],
+            token_ids=[torch.tensor([[1, 2]], dtype=torch.long)],
             action_masks=None,
             sampling_logps=None,
         )
@@ -353,7 +353,7 @@ class TestCollectRolloutsLlmGrpo:
         agent.__class__ = LLMPPO
         agent.accelerator = None
         agent.get_action.return_value = ActionResult(
-            completion_ids=[torch.tensor([[1, 2]], dtype=torch.long)],
+            token_ids=[torch.tensor([[1, 2]], dtype=torch.long)],
             action_masks=None,
             sampling_logps=None,
         )

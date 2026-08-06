@@ -319,14 +319,14 @@ def collect_rollouts_llm(
             )
         else:
             action_result = agent.get_action(prompts, training=True)
-        prompts = env.step(action_result.completion_ids, action_result.sampling_logps)
+        prompts = env.step(action_result.token_ids, action_result.sampling_logps)
 
     accelerator = getattr(agent, "accelerator", None)
     if accelerator is not None:
         accelerator.wait_for_everyone()
 
     (
-        completion_ids_list,
+        token_ids_list,
         action_masks_list,
         all_turn_ids,
         all_rewards,
@@ -336,7 +336,7 @@ def collect_rollouts_llm(
     group_seed = group_seed + batch_size
 
     return (
-        completion_ids_list,
+        token_ids_list,
         action_masks_list,
         all_turn_ids,
         all_rewards,
@@ -347,7 +347,7 @@ def collect_rollouts_llm(
 
 
 def collate_llm_rollouts(
-    completion_ids_list: list[torch.Tensor],
+    token_ids_list: list[torch.Tensor],
     action_masks_list: list[torch.Tensor],
     all_turn_ids: list[torch.Tensor],
     all_rewards: list[torch.Tensor],
@@ -363,8 +363,8 @@ def collate_llm_rollouts(
     ``group_size=1`` (PPO/REINFORCE) makes each group a single trajectory, i.e. a
     plain batch.
 
-    :param completion_ids_list: Per-trajectory ``(1, T)`` token-id tensors.
-    :type completion_ids_list: list[torch.Tensor]
+    :param token_ids_list: Per-trajectory ``(1, T)`` token-id tensors.
+    :type token_ids_list: list[torch.Tensor]
     :param action_masks_list: Per-trajectory ``(1, T - 1)`` boolean masks.
     :type action_masks_list: list[torch.Tensor]
     :param all_turn_ids: Per-trajectory ``(1, T - 1)`` turn-index tensors.
@@ -372,14 +372,14 @@ def collate_llm_rollouts(
     :param all_rewards: Per-trajectory ``(max_turns,)`` reward tensors.
     :type all_rewards: list[torch.Tensor]
     :param all_sampling_logps: Per-trajectory vLLM sampling logprobs parallel to
-        ``completion_ids_list``, or ``None`` when none were captured.
+        ``token_ids_list``, or ``None`` when none were captured.
     :type all_sampling_logps: list[torch.Tensor | None] | None
     :param group_size: Number of trajectories per group.
     :type group_size: int
     :return: The collated batch.
     :rtype: LLMExperienceBatch
     """
-    n = len(completion_ids_list)
+    n = len(token_ids_list)
     if n % group_size != 0:
         msg = f"Number of trajectories ({n}) must be divisible by group_size ({group_size})."
         raise ValueError(msg)
@@ -389,14 +389,14 @@ def collate_llm_rollouts(
             group_size=group_size,
             trajectories=[
                 Trajectory(
-                    completion_ids=completion_ids,
+                    token_ids=token_ids,
                     action_masks=action_masks,
                     turn_ids=turn_ids,
                     rewards=rewards,
                     sampling_logps=sampling_logps,
                 )
-                for completion_ids, action_masks, turn_ids, rewards, sampling_logps in zip(
-                    completion_ids_list[sl],
+                for token_ids, action_masks, turn_ids, rewards, sampling_logps in zip(
+                    token_ids_list[sl],
                     action_masks_list[sl],
                     all_turn_ids[sl],
                     all_rewards[sl],

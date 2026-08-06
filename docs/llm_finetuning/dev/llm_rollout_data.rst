@@ -21,15 +21,15 @@ rely on holds by construction.
 
 Three types make up the module:
 
-- ``Trajectory`` — one episode: ``completion_ids`` ``(1, T)``, ``action_masks``
+- ``Trajectory`` — one episode: ``token_ids`` ``(1, T)``, ``action_masks``
   and ``turn_ids`` ``(1, T - 1)``, per-turn ``rewards``, and optional
   ``sampling_logps``. Validated on construction, so a mask or turn-id tensor
   that is not exactly one shorter than the token ids fails immediately rather
   than misaligning a loss much later.
 - ``RolloutGroup`` — exactly ``group_size`` trajectories.
-- ``LLMExperienceBatch`` — the collated result: ragged ``completion_ids`` and
+- ``LLMExperienceBatch`` — the collated result: ragged ``token_ids`` and
   ``action_masks`` that ``learn()`` pads itself, plus pre-stacked ``rewards``
-  and ``turn_ids`` rectangles, ``completion_lengths``, and the per-row
+  and ``turn_ids`` rectangles, ``token_lengths``, and the per-row
   ``sampling_logps``.
 
 API

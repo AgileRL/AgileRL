@@ -85,10 +85,10 @@ def evaluate_accuracy(
                     prompt_dict = _prompt_dict_from_encoded(tokenizer, prompt_encoded)
                     prompt_len = prompt_dict["input_ids"].shape[1]
 
-                    completion_ids = agent.get_action(
+                    token_ids = agent.get_action(
                         [prompt_dict], training=False
-                    ).completion_ids
-                    full_ids = completion_ids[0]
+                    ).token_ids
+                    full_ids = token_ids[0]
                     gen_tokens = full_ids[0, prompt_len:]
                     gen_text = tokenizer.decode(
                         gen_tokens.tolist(), skip_special_tokens=True
@@ -172,11 +172,11 @@ def detailed_eval(
                             tokenizer, prompt_encoded
                         )
                         prompt_len = prompt_dict["input_ids"].shape[1]
-                        completion_ids = agent.get_action(
+                        token_ids = agent.get_action(
                             [prompt_dict],
                             training=False,
-                        ).completion_ids
-                        full_ids = completion_ids[0]
+                        ).token_ids
+                        full_ids = token_ids[0]
                         gen_tokens = full_ids[0, prompt_len:]
                         gen_text = tokenizer.decode(
                             gen_tokens.tolist(),

@@ -359,7 +359,7 @@ Using a custom training loop
 If you need lower-level control than :meth:`train_llm_rollout() <agilerl.training.llm.train_llm_rollout>`,
 build a :class:`~agilerl.llm_envs.RolloutCollector` and collect trajectories with
 :func:`~agilerl.rollouts.on_policy.collect_rollouts_llm`. This is the same rollout API the trainer uses internally.
-Do **not** use dataset-env calls like ``env.reset(reset_dataloaders=True)`` / ``env.step(completion_ids)``
+Do **not** use dataset-env calls like ``env.reset(reset_dataloaders=True)`` / ``env.step(token_ids)``
 for rollout training.
 
 .. collapse:: Custom Training Loop
@@ -378,7 +378,7 @@ for rollout training.
         try:
             for i in range(max_steps):
                 (
-                    completion_ids_list,
+                    token_ids_list,
                     action_masks_list,
                     all_turn_ids,
                     all_rewards,
@@ -395,7 +395,7 @@ for rollout training.
                 )
 
                 # Build the experience tuple your algorithm expects.
-                experiences = (completion_ids_list, action_masks_list, all_rewards)
+                experiences = (token_ids_list, action_masks_list, all_rewards)
                 learn_kwargs = {"turn_ids": all_turn_ids}
                 if all_sampling_logps is not None:
                     learn_kwargs["sampling_logps"] = all_sampling_logps

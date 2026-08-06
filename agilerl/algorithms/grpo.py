@@ -52,7 +52,7 @@ from agilerl.utils.llm_utils import (
     build_completion_mask,
     masked_mean,
     masked_whiten,
-    normalize_reasoning_prompt_batch,
+    normalize_observation_batch,
     pool_log_ratio_by_level,
     prepare_prompt_hf_generate,
     validate_importance_sampling_level,
@@ -449,7 +449,7 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
             logprobs for the mismatch correction.
         :rtype: ActionResult
         """
-        prompt_batch = normalize_reasoning_prompt_batch(obs)
+        prompt_batch = normalize_observation_batch(obs)
         group_size = self.group_size if training and repeat_prompts else 1
         # Capture vLLM sampling logprobs only for training rollouts when the
         # mismatch correction is enabled; ``None`` on the HF path / eval.
@@ -466,7 +466,7 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
                 except StopIteration:
                     actor_device = torch.device(self.device)
                 with torch.inference_mode(), self._amp_ctx():
-                    completion_ids = []
+                    token_ids_list = []
                     completion_masks = []
 
                     for start in range(
@@ -486,15 +486,15 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
                             if training and group_size > 1:
                                 input_ids = input_ids.repeat(group_size, 1)
                                 attention_mask = attention_mask.repeat(group_size, 1)
-                            completion_id = self.actor.generate(
+                            token_ids = self.actor.generate(
                                 input_ids=input_ids,
                                 attention_mask=attention_mask,
                                 generation_config=self.generation_config,
                             )
-                            completion_ids.append(completion_id)
+                            token_ids_list.append(token_ids)
                             completion_masks.append(
                                 build_completion_mask(
-                                    completion_id,
+                                    token_ids,
                                     None,
                                     self.pad_token_id,
                                 )
@@ -502,7 +502,7 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
             else:
                 self._prepare_vllm_for_generation()
                 (
-                    completion_ids,
+                    token_ids_list,
                     completion_masks,
                     sampling_logps,
                 ) = self._generate_with_vllm_colocate(
@@ -514,7 +514,7 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
                     capture_sampling_logps=capture_sampling_logps,
                 )
 
-        return ActionResult(completion_ids, completion_masks, sampling_logps)
+        return ActionResult(token_ids_list, completion_masks, sampling_logps)
 
     def learn(
         self,
@@ -524,7 +524,7 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
     ) -> dict[str, float]:
         """Update agent network parameters to learn from experiences.
 
-        :param experiences: ``(completion_ids, action_masks, rewards)`` stacked
+        :param experiences: ``(token_ids, action_masks, rewards)`` stacked
             batch. For ``importance_sampling_level="turn"`` with per-turn
             rewards, ``rewards`` is ``(batch, max_turns)``; otherwise it is one
             scalar per trajectory (per-turn rewards are summed to the episode
@@ -533,7 +533,7 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
         :param sampling_logps: Optional per-row flat vLLM sampling logprobs (one
             1-D tensor per trajectory, generated tokens only; concatenated
             across turns for multi-turn) for the sampling-mismatch correction.
-            Parallel to the stacked ``completion_ids`` rows. ``None`` disables
+            Parallel to the stacked ``token_ids`` rows. ``None`` disables
             the correction for this update.
         :type sampling_logps: list[torch.Tensor | None] | None
         :param turn_ids: Optional ``(batch, seq_len-1)`` turn index per action
@@ -555,13 +555,13 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
 
         self._prepare_vllm_for_training()
         with self.memory_efficient_params_context():
-            completion_ids, action_masks, rewards, turn_ids = (
-                self._prepare_experience_batch(experiences, turn_ids)
+            token_ids, action_masks, rewards, turn_ids = self._prepare_experience_batch(
+                experiences, turn_ids
             )
-            num_samples = completion_ids.shape[0]
+            num_samples = token_ids.shape[0]
 
             advantages, batch_idxs = self._calculate_advantages(
-                rewards, completion_ids, action_masks, turn_ids
+                rewards, token_ids, action_masks, turn_ids
             )
             if self.filter_zero_adv and batch_idxs.size == 0:
                 warnings.warn(
@@ -582,7 +582,7 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
             )
             with torch.no_grad():
                 reference_log_probs, old_log_probs, _ = self._fused_forward_no_grad(
-                    completion_ids,
+                    token_ids,
                     batch_size,
                 )
 
@@ -614,7 +614,7 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
                     loss, kl = self._loss(
                         batch_size,
                         minibatch_idxs,
-                        completion_ids,
+                        token_ids,
                         action_masks,
                         advantages,
                         old_log_probs,
@@ -633,9 +633,9 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
         result = {
             metric: value / max(updates, 1) for metric, value in learn_metrics.items()
         }
-        completion_list = experiences[0]
+        token_ids_list = experiences[0]
         result["completion_length"] = float(
-            np.mean([x.shape[-1] for x in completion_list])
+            np.mean([x.shape[-1] for x in token_ids_list])
         )
 
         # Aggregate across GPUs and report to the metrics tracker (new API).
@@ -865,27 +865,27 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
         turn_ids: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
         """Stack and pad the experience batch and move it to the device."""
-        completion_ids, action_masks, rewards = stack_and_pad_experiences(
+        token_ids, action_masks, rewards = stack_and_pad_experiences(
             *experiences,
             padding_values=[self.pad_token_id, False, None],
         )
         action_masks = action_masks.to(self.device)
         rewards = rewards.to(self.device).float()
-        completion_ids = completion_ids.to(self.device)
+        token_ids = token_ids.to(self.device)
         if turn_ids is not None:
             turn_ids = turn_ids.to(self.device)
-            if turn_ids.shape[0] != completion_ids.shape[0]:
+            if turn_ids.shape[0] != token_ids.shape[0]:
                 msg = (
                     f"turn_ids batch ({turn_ids.shape[0]}) must match "
-                    f"completion batch ({completion_ids.shape[0]})."
+                    f"completion batch ({token_ids.shape[0]})."
                 )
                 raise ValueError(msg)
-        return completion_ids, action_masks, rewards, turn_ids
+        return token_ids, action_masks, rewards, turn_ids
 
     def _calculate_advantages(
         self,
         rewards: torch.Tensor,
-        completion_ids: torch.Tensor,
+        token_ids: torch.Tensor,
         action_masks: torch.Tensor,
         turn_ids: torch.Tensor | None,
     ) -> tuple[torch.Tensor, npt.NDArray]:
@@ -896,15 +896,13 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
         advantages. Returns the advantages and the indices of samples that
         survive the zero-advantage filter (all samples when it is disabled).
         """
-        num_samples = completion_ids.shape[0]
+        num_samples = token_ids.shape[0]
         if self._resolve_advantage_granularity() == "turn" and turn_ids is not None:
             advantages = self._turn_broadcast_advantages(
                 rewards, turn_ids, action_masks, num_samples
             )
         else:
-            advantages = self._trajectory_advantages(
-                rewards, num_samples, completion_ids
-            )
+            advantages = self._trajectory_advantages(rewards, num_samples, token_ids)
 
         active_adv_mask = None
         if self.filter_zero_adv:
@@ -1057,7 +1055,7 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
         self,
         rewards: torch.Tensor,
         num_samples: int,
-        completion_ids: torch.Tensor,
+        token_ids: torch.Tensor,
     ) -> torch.Tensor:
         """Per-trajectory group-relative advantage ``(B, 1)``.
 
@@ -1069,8 +1067,8 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
         :type rewards: torch.Tensor
         :param num_samples: Trajectory count in the batch.
         :type num_samples: int
-        :param completion_ids: Completion ids, used only for error reporting.
-        :type completion_ids: torch.Tensor
+        :param token_ids: Completion ids, used only for error reporting.
+        :type token_ids: torch.Tensor
         :return: ``(B, 1)`` per-trajectory advantages.
         :rtype: torch.Tensor
         :raises ValueError: If rewards don't collapse to one scalar per
@@ -1083,7 +1081,7 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
             msg = (
                 "Rewards must provide one scalar per trajectory after "
                 f"collapse: got rewards={tuple(rewards.shape)} and "
-                f"completion_ids={tuple(completion_ids.shape)}."
+                f"token_ids={tuple(token_ids.shape)}."
             )
             raise ValueError(msg)
         self._assert_batch_divisible_by_group(num_samples)
@@ -1196,7 +1194,7 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
         self,
         batch_size: int,
         minibatch_idxs: npt.NDArray,
-        completion_ids: torch.Tensor,
+        token_ids: torch.Tensor,
         action_mask: torch.Tensor,
         advantages: torch.Tensor,
         old_log_probs: torch.Tensor,
@@ -1210,7 +1208,7 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
         :rtype: tuple[torch.Tensor, torch.Tensor]
         """
         tensors = [
-            completion_ids,
+            token_ids,
             action_mask,
             advantages,
             old_log_probs,

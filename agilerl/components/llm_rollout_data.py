@@ -22,14 +22,14 @@ from agilerl.utils.algo_utils import stack_and_pad_experiences
 class Trajectory(BaseModel):
     """One completed LLM trajectory.
 
-    :param completion_ids: ``(1, T)`` token ids for the whole episode.
+    :param token_ids: ``(1, T)`` prompt and generated token ids for the whole episode.
     :param action_masks: ``(1, T - 1)`` mask marking action (model-generated) positions.
     :param turn_ids: ``(1, T - 1)`` turn index per action token, ``-1`` elsewhere.
     :param rewards: ``(max_turns,)`` or ``(1, max_turns)`` per-turn rewards.
     :param sampling_logps: Optional 1-D generated-token sampling logprobs.
     """
 
-    completion_ids: torch.Tensor
+    token_ids: torch.Tensor
     action_masks: torch.Tensor
     turn_ids: torch.Tensor
     rewards: torch.Tensor
@@ -40,14 +40,14 @@ class Trajectory(BaseModel):
     @model_validator(mode="after")
     def _validate_shapes(self) -> Trajectory:
         """Require the per-action-token fields to be one shorter than the token ids."""
-        expected = int(self.completion_ids.shape[-1]) - 1
+        expected = int(self.token_ids.shape[-1]) - 1
         for name, tensor in (
             ("action_masks", self.action_masks),
             ("turn_ids", self.turn_ids),
         ):
             if int(tensor.shape[-1]) != expected:
                 msg = (
-                    f"{name} must have length completion_ids - 1 ({expected}), "
+                    f"{name} must have length token_ids - 1 ({expected}), "
                     f"got {int(tensor.shape[-1])}."
                 )
                 raise ValueError(msg)
@@ -82,37 +82,37 @@ class RolloutGroup(BaseModel):
 class LLMExperienceBatch:
     """Collated batch built by :func:`collate_rollout_groups`.
 
-    ``completion_ids`` and ``action_masks`` are the ragged per-row tensors that
+    ``token_ids`` and ``action_masks`` are the ragged per-row tensors that
     ``learn()`` pads itself; ``rewards`` and ``turn_ids`` are pre-stacked rectangles.
 
-    :param completion_ids: One ``(1, T)`` tensor per trajectory.
+    :param token_ids: One ``(1, T)`` prompt-plus-generation tensor per trajectory.
     :param action_masks: One ``(1, T - 1)`` tensor per trajectory.
     :param rewards: ``(B, max_turns)`` float tensor of per-turn rewards.
     :param turn_ids: ``(B, T_max - 1)`` tensor padded with ``-1``, or ``None`` when empty.
-    :param completion_lengths: ``(B,)`` long tensor of per-row token counts.
+    :param token_lengths: ``(B,)`` long tensor of per-row sequence lengths.
     :param sampling_logps: Per-row logprob tensors, or ``None`` when none were captured.
     """
 
-    completion_ids: list[torch.Tensor]
+    token_ids: list[torch.Tensor]
     action_masks: list[torch.Tensor]
     rewards: torch.Tensor
     turn_ids: torch.Tensor | None
-    completion_lengths: torch.Tensor
+    token_lengths: torch.Tensor
     sampling_logps: list[torch.Tensor | None] | None = None
 
     def __len__(self) -> int:
-        return len(self.completion_ids)
+        return len(self.token_ids)
 
     @property
     def is_empty(self) -> bool:
         """Whether the batch holds no trajectories."""
-        return len(self.completion_ids) == 0
+        return len(self.token_ids) == 0
 
     def experiences(
         self,
     ) -> tuple[list[torch.Tensor], list[torch.Tensor], torch.Tensor]:
-        """Return the ``(completion_ids, action_masks, rewards)`` learn tuple."""
-        return (self.completion_ids, self.action_masks, self.rewards)
+        """Return the ``(token_ids, action_masks, rewards)`` learn tuple."""
+        return (self.token_ids, self.action_masks, self.rewards)
 
 
 def collate_rollout_groups(groups: Sequence[RolloutGroup]) -> LLMExperienceBatch:
@@ -126,11 +126,11 @@ def collate_rollout_groups(groups: Sequence[RolloutGroup]) -> LLMExperienceBatch
     trajectories = [traj for group in groups for traj in group.trajectories]
     if not trajectories:
         return LLMExperienceBatch(
-            completion_ids=[],
+            token_ids=[],
             action_masks=[],
             rewards=torch.zeros(0, 0),
             turn_ids=None,
-            completion_lengths=torch.zeros(0, dtype=torch.long),
+            token_lengths=torch.zeros(0, dtype=torch.long),
         )
 
     (turn_ids,) = stack_and_pad_experiences(
@@ -145,12 +145,12 @@ def collate_rollout_groups(groups: Sequence[RolloutGroup]) -> LLMExperienceBatch
     )
     logps = [traj.sampling_logps for traj in trajectories]
     return LLMExperienceBatch(
-        completion_ids=[traj.completion_ids for traj in trajectories],
+        token_ids=[traj.token_ids for traj in trajectories],
         action_masks=[traj.action_masks for traj in trajectories],
         rewards=rewards.float(),
         turn_ids=turn_ids,
-        completion_lengths=torch.tensor(
-            [int(traj.completion_ids.shape[-1]) for traj in trajectories],
+        token_lengths=torch.tensor(
+            [int(traj.token_ids.shape[-1]) for traj in trajectories],
             dtype=torch.long,
         ),
         sampling_logps=logps if any(lp is not None for lp in logps) else None,

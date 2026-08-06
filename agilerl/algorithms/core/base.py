@@ -93,7 +93,7 @@ from agilerl.typing import (
     NetConfigType,
     ObservationType,
     OptimizerType,
-    RolloutPrompts,
+    RolloutObservation,
     TorchObsType,
     coerce_action_mask,
 )
@@ -172,7 +172,7 @@ if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
         gather_if_zero3,
         get_model_name_or_path,
         get_state_dict,
-        is_rollout_prompts,
+        is_rollout_observation,
         log_cuda_memory_snapshot,
         move_params_to_cpu,
         move_params_to_gpu,
@@ -2874,13 +2874,13 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
                 while not env.done:
                     # ``current_prompt`` is only empty once the env is done, so
                     # inside this loop the observation always carries token ids.
-                    assert is_rollout_prompts(prompt_dict)
-                    completion_ids = self.get_action(
+                    assert is_rollout_observation(prompt_dict)
+                    token_ids = self.get_action(
                         [prompt_dict],
                         training=False,
-                    ).completion_ids
+                    ).token_ids
                     prompt_dict, reward, _terminated, _truncated, _info = env.step(
-                        completion_ids[0],
+                        token_ids[0],
                     )
                     rewards.append(float(reward))
         if rewards:
@@ -4118,7 +4118,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
 
         ``sampling_logps`` is one 1-D tensor per row (the generated-token
         logprobs in order; single-turn = one rollout, multi-turn = concatenated
-        across turns), parallel to the stacked ``completion_ids`` rows. Each is
+        across turns), parallel to the stacked ``token_ids`` rows. Each is
         scattered onto the ``True`` positions of that row's action mask. Rows
         whose token count doesn't match the mask (e.g. env truncation) keep the
         ``old_log_probs`` value there, so their importance ratio is 1 (no
@@ -5353,7 +5353,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
 
     def _generate_with_vllm_colocate(
         self,
-        prompts: Sequence[RolloutPrompts],
+        prompts: Sequence[RolloutObservation],
         group_size: int,
         temperature: float | None,
         capture_sampling_logps: bool = False,
@@ -5369,7 +5369,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         Action masks use the full prompt length from ``input_ids``.
 
         :param prompts: Length-``N`` sequence of observation mappings for this rank.
-        :type prompts: Sequence[RolloutPrompts]
+        :type prompts: Sequence[RolloutObservation]
         :param group_size: Repeat factor per prompt (1 for plain PPO).
         :type group_size: int
         :param temperature: Temperature for sampling.
@@ -5488,11 +5488,11 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
 
         all_outputs = self.llm.generate(all_token_prompts, **generate_kwargs)
 
-        completion_ids = [
+        generated_ids = [
             output.token_ids for outputs in all_outputs for output in outputs.outputs
         ]
         # Flat per-completion lists of the sampled tokens' logprobs (one float
-        # per generated token), parallel to ``completion_ids``. Empty when not
+        # per generated token), parallel to ``generated_ids``. Empty when not
         # capturing.
         sampling_logps_flat: list[list[float]] = (
             [
@@ -5511,7 +5511,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
                 local_rank_in_group * orig_size,
                 (local_rank_in_group + 1) * orig_size,
             )
-            completion_ids = completion_ids[tp_slice]
+            generated_ids = generated_ids[tp_slice]
             prompts_ids = all_prompts_ids[tp_slice]
             if capture_sampling_logps:
                 sampling_logps_flat = sampling_logps_flat[tp_slice]
@@ -5523,7 +5523,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         ]
         prompts_ids = [ids for ids in unique_prompts_ids_dev for _ in range(group_size)]
 
-        completion_ids = [
+        token_ids_list = [
             torch.cat(
                 [
                     torch.cat(
@@ -5531,7 +5531,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
                         dim=0,
                     ),
                     stack_and_pad_experiences(
-                        completion_ids[group_size * i : group_size * (i + 1)],
+                        generated_ids[group_size * i : group_size * (i + 1)],
                         padding_values=[self.pad_token_id],
                         device=self.device,
                     )[0],
@@ -5554,11 +5554,11 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             int(prompts[i]["input_ids"].shape[1]) for i in range(len(prompts))
         ]
         completion_masks = [
-            build_completion_mask(completion_id, num_input_tokens[i], self.pad_token_id)
-            for i, completion_id in enumerate(completion_ids)
+            build_completion_mask(token_ids, num_input_tokens[i], self.pad_token_id)
+            for i, token_ids in enumerate(token_ids_list)
         ]
 
-        return completion_ids, completion_masks, sampling_logps
+        return token_ids_list, completion_masks, sampling_logps
 
     @staticmethod
     def _logprobs_from_logits(

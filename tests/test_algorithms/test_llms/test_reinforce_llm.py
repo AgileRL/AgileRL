@@ -365,8 +365,8 @@ def _minimal_reasoning_rollout_env(device: str, vocab_size: int, input_size: int
             self.done = False
             return self._prompt(), {}
 
-        def step(self, full_completion_ids):
-            del full_completion_ids
+        def step(self, token_ids):
+            del token_ids
             self.done = True
             return self._prompt(), 1.0, True, False, {}
 
@@ -663,7 +663,7 @@ class TestREINFORCEGetAction:
                 return_value=(mocked_ids, mocked_masks, None),
             ) as mock_generate,
         ):
-            completion_ids, action_masks, _ = rf.get_action(prompts, training=False)
+            token_ids, action_masks, _ = rf.get_action(prompts, training=False)
 
         mock_prepare.assert_called_once()
         mock_move.assert_called_once()
@@ -673,7 +673,7 @@ class TestREINFORCEGetAction:
         rf.llm.wake_up.assert_called_once()
         rf._prepare_vllm_for_training()
         rf.llm.sleep.assert_called_once()
-        assert completion_ids == mocked_ids
+        assert token_ids == mocked_ids
         assert action_masks == mocked_masks
         rf.clean_up()
 
@@ -688,9 +688,9 @@ class TestREINFORCEGetAction:
             for _ in range(3)
         ]
         for training in (True, False):
-            completion_ids, action_masks, _ = rf.get_action(prompts, training=training)
+            token_ids, action_masks, _ = rf.get_action(prompts, training=training)
             assert_vllm_get_action_contract(
-                completion_ids=completion_ids,
+                token_ids=token_ids,
                 action_masks=action_masks,
                 batch_size=len(prompts),
                 prompt_len=prompt_len,
@@ -713,10 +713,10 @@ class TestREINFORCEGetAction:
         ]
 
         with patch.object(rf, "_get_unwrapped_actor", return_value=_NoParamModule()):
-            completion_ids, action_masks, _ = rf.get_action(prompts, training=True)
+            token_ids, action_masks, _ = rf.get_action(prompts, training=True)
 
         assert_vllm_get_action_contract(
-            completion_ids=completion_ids,
+            token_ids=token_ids,
             action_masks=action_masks,
             batch_size=1,
             prompt_len=10,
@@ -1033,8 +1033,8 @@ class TestREINFORCETest:
                 self.done = False
                 return self.valid_prompt, {}
 
-            def step(self, full_completion_ids):
-                del full_completion_ids
+            def step(self, token_ids):
+                del token_ids
                 self.done = True
                 return {}, 1.0, True, False, {}
 
@@ -1082,8 +1082,8 @@ class TestREINFORCETest:
                     "attention_mask": torch.ones(1, 4, dtype=torch.long),
                 }, {}
 
-            def step(self, full_completion_ids):
-                del full_completion_ids
+            def step(self, token_ids):
+                del token_ids
                 self.done = True
                 return {}, 1.0, True, False, {}
 
@@ -1133,8 +1133,8 @@ class TestREINFORCETest:
                 self.done = False
                 return self.prompt_a, {}
 
-            def step(self, full_completion_ids):
-                del full_completion_ids
+            def step(self, token_ids):
+                del token_ids
                 self._step_count += 1
                 if self._step_count == 1:
                     return self.prompt_b, 0.5, False, False, {}

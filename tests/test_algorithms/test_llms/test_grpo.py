@@ -223,8 +223,8 @@ class DummyReasoningEnv(RolloutHarness):
         self.done = False
         return self._prompt(), {}
 
-    def step(self, full_completion_ids):
-        del full_completion_ids
+    def step(self, token_ids):
+        del token_ids
         self.done = True
         return self._prompt(), 1.0, True, False, {}
 
@@ -260,7 +260,7 @@ class DummyVLLM:
             use_tqdm=True,
         )  # Change this to False.
 
-        completion_ids = [
+        token_ids = [
             output.token_ids for outputs in all_outputs for output in outputs.outputs
         ]
         """
@@ -554,14 +554,14 @@ def _build_branch_experiences(
     seq_len: int = 10,
     vocab_size: int = 64,
 ):
-    completion_ids = [
+    token_ids = [
         torch.randint(0, vocab_size, (1, seq_len), dtype=torch.long)
         for _ in range(batch_size)
     ]
     action_masks = [
         torch.ones(1, seq_len - 1, dtype=torch.bool) for _ in range(batch_size)
     ]
-    return completion_ids, action_masks
+    return token_ids, action_masks
 
 
 def check_ref_adapater_is_same_as_actor_after_learning(grpo):
@@ -1871,7 +1871,7 @@ class TestGRPOLearnRewardsShape:
 
     def test_multi_turn_rewards_are_summed_along_last_dim(self) -> None:
         grpo = _make_cpu_grpo_for_branch_tests(group_size=2)
-        completion_ids, action_masks = _build_branch_experiences(batch_size=4)
+        token_ids, action_masks = _build_branch_experiences(batch_size=4)
         # Shape [batch, max_turns]; sums to [3, 7, 11, 15] post-collapse.
         rewards = torch.tensor(
             [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0], [7.0, 8.0]],
@@ -1909,7 +1909,7 @@ class TestGRPOLearnRewardsShape:
             ),
             patch.object(grpo, "_backward_pass", return_value=None),
         ):
-            grpo.learn((completion_ids, action_masks, rewards))
+            grpo.learn((token_ids, action_masks, rewards))
 
         collapsed = captured["rewards_passed_to_adv"]
         # After collapse, rewards should be 1-D with summed per-trajectory values.
@@ -2356,13 +2356,11 @@ class TestGRPOGetAction:
             for _ in range(3)
         ]
         for training in (True, False):
-            completion_ids, action_masks, _ = grpo.get_action(
-                prompts, training=training
-            )
+            token_ids, action_masks, _ = grpo.get_action(prompts, training=training)
             expected_group_size = grpo.group_size if training else 1
-            assert all(ids.shape[0] == expected_group_size for ids in completion_ids)
+            assert all(ids.shape[0] == expected_group_size for ids in token_ids)
             assert_vllm_get_action_contract(
-                completion_ids=completion_ids,
+                token_ids=token_ids,
                 action_masks=action_masks,
                 batch_size=len(prompts),
                 prompt_len=input_size,
@@ -2381,8 +2379,8 @@ class TestGRPOGetAction:
         ]
         no_param_actor = SimpleNamespace(parameters=lambda: iter(()))
         with patch.object(grpo, "_get_unwrapped_actor", return_value=no_param_actor):
-            completion_ids, action_masks, _ = grpo.get_action(prompts, training=False)
-        assert len(completion_ids) == 1
+            token_ids, action_masks, _ = grpo.get_action(prompts, training=False)
+        assert len(token_ids) == 1
         assert len(action_masks) == 1
         grpo.clean_up()
 
@@ -2635,13 +2633,13 @@ class TestGRPOGenerateWithVllmColocate:
             SimpleNamespace(outputs=[SimpleNamespace(token_ids=[10])]),
             SimpleNamespace(outputs=[SimpleNamespace(token_ids=[11, 12])]),
         ]
-        completion_ids, action_masks, _ = grpo._generate_with_vllm_colocate(
+        token_ids, action_masks, _ = grpo._generate_with_vllm_colocate(
             prompts=prompts,
             group_size=2,
             temperature=0.7,
         )
         assert_vllm_get_action_contract(
-            completion_ids=completion_ids,
+            token_ids=token_ids,
             action_masks=action_masks,
             batch_size=2,
             prompt_len=3,
@@ -2680,14 +2678,14 @@ class TestGRPOGenerateWithVllmColocate:
             ),
             patch.object(torch.distributed, "get_rank", return_value=1),
         ):
-            completion_ids, action_masks, _ = grpo._generate_with_vllm_colocate(
+            token_ids, action_masks, _ = grpo._generate_with_vllm_colocate(
                 prompts=prompts,
                 group_size=1,
                 temperature=0.7,
             )
-        assert completion_ids[0].shape[0] == 1
-        assert completion_ids[0][0, -1].item() == 8
-        assert action_masks[0].shape[1] == completion_ids[0].shape[1] - 1
+        assert token_ids[0].shape[0] == 1
+        assert token_ids[0][0, -1].item() == 8
+        assert action_masks[0].shape[1] == token_ids[0].shape[1] - 1
         grpo.clean_up()
 
 
@@ -3152,37 +3150,33 @@ class TestGRPOTrajectoryAdvantages:
 
     def test_collapses_per_turn_rewards_to_episode_returns(self):
         stub = _adv_stub()
-        completion_ids = torch.zeros(2, 5, dtype=torch.long)
+        token_ids = torch.zeros(2, 5, dtype=torch.long)
         # Per-turn rewards sum to [3, 6]; mean_only centering -> [-1.5, 1.5].
         rewards = torch.tensor([[1.0, 2.0], [2.0, 4.0]])
-        out = stub._trajectory_advantages(rewards, 2, completion_ids)
+        out = stub._trajectory_advantages(rewards, 2, token_ids)
         assert torch.allclose(out, torch.tensor([[-1.5], [1.5]]), atol=1e-6)
 
     def test_accepts_flat_per_trajectory_rewards(self):
         stub = _adv_stub()
-        completion_ids = torch.zeros(2, 5, dtype=torch.long)
-        out = stub._trajectory_advantages(torch.tensor([1.0, 5.0]), 2, completion_ids)
+        token_ids = torch.zeros(2, 5, dtype=torch.long)
+        out = stub._trajectory_advantages(torch.tensor([1.0, 5.0]), 2, token_ids)
         assert torch.allclose(out, torch.tensor([[-2.0], [2.0]]), atol=1e-6)
 
     def test_raises_when_rewards_do_not_collapse_to_one_per_trajectory(self):
         stub = _adv_stub()
-        completion_ids = torch.zeros(2, 5, dtype=torch.long)
+        token_ids = torch.zeros(2, 5, dtype=torch.long)
         with pytest.raises(
             ValueError, match="Rewards must provide one scalar per trajectory"
         ):
-            stub._trajectory_advantages(
-                torch.tensor([1.0, 2.0, 3.0]), 2, completion_ids
-            )
+            stub._trajectory_advantages(torch.tensor([1.0, 2.0, 3.0]), 2, token_ids)
 
     def test_raises_when_batch_not_divisible_by_group_size(self):
         stub = _adv_stub(group_size=2)
-        completion_ids = torch.zeros(3, 5, dtype=torch.long)
+        token_ids = torch.zeros(3, 5, dtype=torch.long)
         with pytest.raises(
             ValueError, match=r"Batch size \(3\) must be divisible by group_size \(2\)"
         ):
-            stub._trajectory_advantages(
-                torch.tensor([1.0, 2.0, 3.0]), 3, completion_ids
-            )
+            stub._trajectory_advantages(torch.tensor([1.0, 2.0, 3.0]), 3, token_ids)
 
 
 class TestGRPOWhitenAdvantages:
@@ -3383,7 +3377,7 @@ class TestGRPOLoss:
         loss, kl = grpo._loss(
             batch_size=10,
             minibatch_idxs=torch.arange(10, device=grpo.device),
-            completion_ids=torch.randint(
+            token_ids=torch.randint(
                 0, vocab_size, (10, max_tokens + 1), device=grpo.device
             ),
             action_mask=mask,
@@ -3530,20 +3524,20 @@ class TestGRPOLearn:
 
     def test_learn_raises_when_rewards_count_mismatch(self):
         grpo = _make_cpu_grpo_for_branch_tests(group_size=2)
-        completion_ids, action_masks = _build_branch_experiences(batch_size=3)
+        token_ids, action_masks = _build_branch_experiences(batch_size=3)
         rewards = torch.tensor([1.0, -1.0], dtype=torch.float32)
         with pytest.raises(
             ValueError, match="Rewards must provide one scalar per trajectory"
         ):
-            grpo.learn((completion_ids, action_masks, rewards))
+            grpo.learn((token_ids, action_masks, rewards))
         grpo.clean_up()
 
     def test_learn_raises_when_batch_not_divisible_by_group_size(self):
         grpo = _make_cpu_grpo_for_branch_tests(group_size=2)
-        completion_ids, action_masks = _build_branch_experiences(batch_size=3)
+        token_ids, action_masks = _build_branch_experiences(batch_size=3)
         rewards = torch.tensor([1.0, 0.0, -1.0], dtype=torch.float32)
         with pytest.raises(ValueError, match="must be divisible by group_size"):
-            grpo.learn((completion_ids, action_masks, rewards))
+            grpo.learn((token_ids, action_masks, rewards))
         grpo.clean_up()
 
     def test_learn_filter_whiten_clip_branch_path_with_active_subset(self):
@@ -3554,7 +3548,7 @@ class TestGRPOLearn:
             adv_clip_range=0.1,
             adv_filter_eps=0.05,
         )
-        completion_ids, action_masks = _build_branch_experiences(batch_size=4)
+        token_ids, action_masks = _build_branch_experiences(batch_size=4)
         rewards = torch.tensor([1.0, 0.0, -1.0, 2.0], dtype=torch.float32)
 
         def fake_fused_forward(ids, batch_size):
@@ -3580,7 +3574,7 @@ class TestGRPOLearn:
             ) as mock_grpo_loss,
             patch.object(grpo, "_backward_pass", return_value=None),
         ):
-            metrics = grpo.learn((completion_ids, action_masks, rewards))
+            metrics = grpo.learn((token_ids, action_masks, rewards))
         processed_advantages = mock_grpo_loss.call_args.args[5]
         assert processed_advantages.abs().max().item() <= 0.100001
         assert metrics["loss"] == pytest.approx(1.0)
@@ -3594,7 +3588,7 @@ class TestGRPOLearn:
             adv_filter_eps=0.5,
             whiten_advantages=True,
         )
-        completion_ids, action_masks = _build_branch_experiences(batch_size=4)
+        token_ids, action_masks = _build_branch_experiences(batch_size=4)
         rewards = torch.tensor([1.0, 0.0, -1.0, 2.0], dtype=torch.float32)
         with (
             pytest.warns(
@@ -3607,13 +3601,13 @@ class TestGRPOLearn:
                 return_value=torch.zeros(4, 1, dtype=torch.float32),
             ),
         ):
-            metrics = grpo.learn((completion_ids, action_masks, rewards))
+            metrics = grpo.learn((token_ids, action_masks, rewards))
         assert metrics == {"loss": 0.0, "kl": 0.0}
         grpo.clean_up()
 
     def test_learn_warns_and_returns_zeros_when_no_active_samples_after_filtering(self):
         grpo = _make_cpu_grpo_for_branch_tests(group_size=2)
-        completion_ids, action_masks = _build_branch_experiences(batch_size=4)
+        token_ids, action_masks = _build_branch_experiences(batch_size=4)
         rewards = torch.tensor([1.0, 0.0, -1.0, 2.0], dtype=torch.float32)
 
         def fake_fused_forward(ids, batch_size):
@@ -3634,14 +3628,14 @@ class TestGRPOLearn:
                 match="No active samples after filtering; skipping GRPO update.",
             ),
         ):
-            metrics = grpo.learn((completion_ids, action_masks, rewards))
+            metrics = grpo.learn((token_ids, action_masks, rewards))
         assert metrics == {"loss": 0.0, "kl": 0.0}
         grpo.clean_up()
 
     def test_learn_empty_minibatch_branch_continues_without_grpo_step(self):
         grpo = _make_cpu_grpo_for_branch_tests(group_size=2, update_epochs=1)
         grpo.rng = SimpleNamespace(shuffle=lambda _x: None)
-        completion_ids, action_masks = _build_branch_experiences(batch_size=2)
+        token_ids, action_masks = _build_branch_experiences(batch_size=2)
         rewards = torch.tensor([1.0, -1.0], dtype=torch.float32)
 
         class EmptySlicingBatchIndices:
@@ -3669,7 +3663,7 @@ class TestGRPOLearn:
                 grpo, "_loss", side_effect=AssertionError("should not be called")
             ),
         ):
-            metrics = grpo.learn((completion_ids, action_masks, rewards))
+            metrics = grpo.learn((token_ids, action_masks, rewards))
         assert metrics["loss"] == 0.0
         assert metrics["kl"] == 0.0
         grpo.clean_up()
@@ -4774,8 +4768,8 @@ class TestGRPOTest:
                 self.done = False
                 return self.valid_prompt, {}
 
-            def step(self, full_completion_ids):
-                del full_completion_ids
+            def step(self, token_ids):
+                del token_ids
                 self.done = True
                 return {}, 1.0, True, False, {}
 
@@ -4836,8 +4830,8 @@ class TestGRPOTest:
                     "attention_mask": torch.ones(1, 4, dtype=torch.long),
                 }, {}
 
-            def step(self, full_completion_ids):
-                del full_completion_ids
+            def step(self, token_ids):
+                del token_ids
                 self.done = True
                 return {}, 1.0, True, False, {}
 
@@ -4887,8 +4881,8 @@ class TestGRPOTest:
                 self.done = False
                 return self.prompt_a, {}
 
-            def step(self, full_completion_ids):
-                del full_completion_ids
+            def step(self, token_ids):
+                del token_ids
                 self._step_count += 1
                 if self._step_count == 1:
                     return self.prompt_b, 0.5, False, False, {}
@@ -5949,7 +5943,7 @@ class TestGRPOVLLMSamplingCorrection:
             group_size=2, update_epochs=1, use_liger_loss=True
         )
         assert grpo.importance_sampling_level == "token"
-        completion_ids, action_masks = _build_branch_experiences(batch_size=2)
+        token_ids, action_masks = _build_branch_experiences(batch_size=2)
         rewards = torch.tensor([1.0, -1.0], dtype=torch.float32)
         n_act = int(action_masks[0].sum())
         sampling_logps = [
@@ -5978,7 +5972,7 @@ class TestGRPOVLLMSamplingCorrection:
         ):
             warnings.simplefilter("always")
             grpo.learn(
-                (completion_ids, action_masks, rewards),
+                (token_ids, action_masks, rewards),
                 sampling_logps=sampling_logps,
             )
         # Liger path taken, with the correction threaded into it.
@@ -6006,7 +6000,7 @@ class TestGRPOVLLMSamplingCorrection:
             use_liger_loss=True,
             importance_sampling_level="trajectory",
         )
-        completion_ids, action_masks = _build_branch_experiences(batch_size=2)
+        token_ids, action_masks = _build_branch_experiences(batch_size=2)
         rewards = torch.tensor([1.0, -1.0], dtype=torch.float32)
         n_act = int(action_masks[0].sum())
         sampling_logps = [
@@ -6039,7 +6033,7 @@ class TestGRPOVLLMSamplingCorrection:
             ),
         ):
             metrics = grpo.learn(
-                (completion_ids, action_masks, rewards),
+                (token_ids, action_masks, rewards),
                 sampling_logps=sampling_logps,
             )
         # The fused kernel was bypassed in favour of the standard path.
@@ -6178,12 +6172,12 @@ class TestGRPOTurnAdvantageLearnPath:
 
     def test_learn_turn_ids_batch_mismatch_raises(self):
         grpo = _make_cpu_grpo_for_branch_tests(group_size=2, update_epochs=1)
-        completion_ids, action_masks = _build_branch_experiences(batch_size=2)
+        token_ids, action_masks = _build_branch_experiences(batch_size=2)
         rewards = torch.tensor([1.0, -1.0])
         bad_turn_ids = torch.zeros(3, 9, dtype=torch.long)  # batch 3 != 2
         p1, p2, p3 = self._stubbed_forwards(grpo)
         with p1, p2, p3, pytest.raises(ValueError, match="must match"):
-            grpo.learn((completion_ids, action_masks, rewards), turn_ids=bad_turn_ids)
+            grpo.learn((token_ids, action_masks, rewards), turn_ids=bad_turn_ids)
         grpo.clean_up()
 
     def test_learn_turn_advantage_path_end_to_end(self):
@@ -6193,14 +6187,14 @@ class TestGRPOTurnAdvantageLearnPath:
         grpo = _make_cpu_grpo_for_branch_tests(
             group_size=2, update_epochs=1, advantage_granularity="turn"
         )
-        completion_ids, action_masks = _build_branch_experiences(batch_size=2)
+        token_ids, action_masks = _build_branch_experiences(batch_size=2)
         turn_rewards = torch.tensor([[1.0, 0.0], [0.0, 1.0]])  # (B, max_turns)
         turn_ids = torch.zeros(2, 9, dtype=torch.long)
         turn_ids[:, 5:] = 1
         p1, p2, p3 = self._stubbed_forwards(grpo)
         with p1, p2, p3:
             metrics = grpo.learn(
-                (completion_ids, action_masks, turn_rewards), turn_ids=turn_ids
+                (token_ids, action_masks, turn_rewards), turn_ids=turn_ids
             )
         assert np.isfinite(metrics["loss"])
         grpo.clean_up()
@@ -6221,14 +6215,14 @@ class TestGRPOTurnAdvantageLearnPath:
                 importance_sampling_level="turn",
                 advantage_granularity="turn",
             )
-        completion_ids, action_masks = _build_branch_experiences(batch_size=2)
+        token_ids, action_masks = _build_branch_experiences(batch_size=2)
         turn_rewards = torch.tensor([[1.0, 0.0], [0.0, 1.0]])
         turn_ids = torch.zeros(2, 9, dtype=torch.long)
         turn_ids[:, 5:] = 1
         p1, p2, p3 = self._stubbed_forwards(grpo)
         with p1, p2, p3, patch.object(grpo, "_liger_loss") as mock_liger:
             metrics = grpo.learn(
-                (completion_ids, action_masks, turn_rewards), turn_ids=turn_ids
+                (token_ids, action_masks, turn_rewards), turn_ids=turn_ids
             )
         mock_liger.assert_not_called()
         assert np.isfinite(metrics["loss"])

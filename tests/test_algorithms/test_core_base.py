@@ -6363,10 +6363,10 @@ class TestLLMGenerateWithVllmColocateFullPaths:
                 return_value=(torch.zeros(2, 5), None),
             ),
         ):
-            completion_ids, action_masks, _ = agent._generate_with_vllm_colocate(
+            token_ids, action_masks, _ = agent._generate_with_vllm_colocate(
                 prompts, group_size=2, temperature=0.9
             )
-        assert len(completion_ids) == 2
+        assert len(token_ids) == 2
         assert len(action_masks) == 2
 
     def test_generate_with_vllm_colocate_uses_input_ids(self):
@@ -6412,13 +6412,13 @@ class TestLLMGenerateWithVllmColocateFullPaths:
                 return_value=(torch.zeros(2, 5), None),
             ),
         ):
-            completion_ids, _action_masks, _ = agent._generate_with_vllm_colocate(
+            token_ids, _action_masks, _ = agent._generate_with_vllm_colocate(
                 prompts, group_size=2, temperature=0.9
             )
 
         sent = agent.llm.generate.call_args[0][0]
         assert sent[0]["prompt_token_ids"] == [1, 2, 3, 9, 9]
-        assert len(completion_ids) == 1
+        assert len(token_ids) == 1
 
 
 class TestLLMGenerateWithVllmColocateAccelerator:
@@ -6464,11 +6464,11 @@ class TestLLMGenerateWithVllmColocateAccelerator:
                 return_value=(torch.zeros(2, 5), None),
             ),
         ):
-            completion_ids, _action_masks, _ = agent._generate_with_vllm_colocate(
+            token_ids, _action_masks, _ = agent._generate_with_vllm_colocate(
                 prompts, group_size=2, temperature=0.9
             )
         acc.wait_for_everyone.assert_not_called()
-        assert len(completion_ids) == 1
+        assert len(token_ids) == 1
 
 
 class TestLLMGenerateWithVllmColocateTP:
@@ -6522,10 +6522,10 @@ class TestLLMGenerateWithVllmColocateTP:
             patch("torch.distributed.all_gather_object", side_effect=fake_all_gather),
             patch("torch.distributed.get_rank", return_value=0),
         ):
-            completion_ids, _action_masks, _ = agent._generate_with_vllm_colocate(
+            token_ids, _action_masks, _ = agent._generate_with_vllm_colocate(
                 prompts, group_size=2, temperature=0.9
             )
-        assert len(completion_ids) == 1
+        assert len(token_ids) == 1
 
 
 class TestLLMCloneBroadcastMultiProcess:

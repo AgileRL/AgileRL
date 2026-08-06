@@ -53,8 +53,8 @@ def _minimal_reasoning_gym(
         env.done = False
         return _prompt(), {}
 
-    def step(completion_ids):
-        del completion_ids
+    def step(token_ids):
+        del token_ids
         env.done = True
         return _prompt(), 1.0, True, False, {}
 
@@ -125,9 +125,9 @@ class TestREINFORCETest:
         )
 
         for training in (True, False):
-            completion_ids, action_masks, _ = rf.get_action(prompts, training=training)
+            token_ids, action_masks, _ = rf.get_action(prompts, training=training)
             assert_vllm_get_action_contract(
-                completion_ids=completion_ids,
+                token_ids=token_ids,
                 action_masks=action_masks,
                 batch_size=batch_size,
                 prompt_len=input_size,
@@ -231,7 +231,7 @@ class TestREINFORCETest:
         first_ids, first_masks, _ = rf.get_action(prompts, training=True)
         assert rf._vllm_awake
         assert_vllm_get_action_contract(
-            completion_ids=first_ids,
+            token_ids=first_ids,
             action_masks=first_masks,
             batch_size=batch_size,
             prompt_len=input_size,
@@ -311,7 +311,7 @@ class TestREINFORCETest:
         first_ids, first_masks, _ = rf.get_action(prompts, training=True)
         assert rf._vllm_awake
         assert_vllm_get_action_contract(
-            completion_ids=first_ids,
+            token_ids=first_ids,
             action_masks=first_masks,
             batch_size=batch_size,
             prompt_len=input_size,

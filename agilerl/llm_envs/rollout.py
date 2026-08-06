@@ -26,7 +26,7 @@ from agilerl.llm_envs.env_specs import is_url, spec_to_factory
 from agilerl.protocols import EnvClientProtocol, TextEnvProtocol
 from agilerl.utils.algo_utils import is_str_keyed_dict
 from agilerl.utils.llm_utils import (
-    is_rollout_prompts,
+    is_rollout_observation,
     max_prompt_tokens_for_model_len,
 )
 
@@ -42,7 +42,7 @@ if TYPE_CHECKING:
     from openenv.core.rubrics.base import Rubric
     from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 
-    from agilerl.typing import RolloutPrompts
+    from agilerl.typing import RolloutObservation
 
 
 def process_observation(obs: object, observation_field: str | None = None) -> str:
@@ -625,7 +625,7 @@ class RolloutHarness:
 
     def _step_prepare(
         self,
-        full_completion_ids: torch.Tensor,
+        token_ids: torch.Tensor,
         sampling_logps: torch.Tensor | None = None,
     ) -> str:
         """Decode and record this turn's generation; return its text (tokenizer phase)."""
@@ -637,13 +637,9 @@ class RolloutHarness:
             raise RuntimeError(msg)
         prompt_len = self._last_full_prompt_token_len
         full_ids = self.full_ids
-        completion = (
-            full_completion_ids
-            if full_completion_ids.dim() > 1
-            else full_completion_ids.unsqueeze(0)
-        )
+        sequence = token_ids if token_ids.dim() > 1 else token_ids.unsqueeze(0)
         # Only the new suffix crosses devices; the prefix is byte-identical to ``full_ids``.
-        gen_ids = completion[0, prompt_len:].detach().to(full_ids.device)
+        gen_ids = sequence[0, prompt_len:].detach().to(full_ids.device)
         gen_text = self.tokenizer.decode(
             gen_ids.tolist(),
             skip_special_tokens=True,
@@ -710,7 +706,7 @@ class RolloutHarness:
 
     def step(
         self,
-        full_completion_ids: torch.Tensor,
+        token_ids: torch.Tensor,
         sampling_logps: torch.Tensor | None = None,
     ) -> tuple[dict[str, Any], float, bool, bool, dict[str, Any]]:
         """Decode the generation, round-trip the env, and apply the result.
@@ -718,7 +714,7 @@ class RolloutHarness:
         Single-env convenience over the ``_step_*`` phases; ``sampling_logps`` is this
         turn's vLLM logprobs (or ``None``).
         """
-        gen_text = self._step_prepare(full_completion_ids, sampling_logps)
+        gen_text = self._step_prepare(token_ids, sampling_logps)
         return self._step_apply(self._step_env(gen_text))
 
     def get_episode_data(
@@ -961,22 +957,22 @@ class RolloutCollector:
         """Non-terminal envs, in their stable batch/group (list) order."""
         return [env for env in self.envs if not env.done]
 
-    def _get_prompts(self) -> list[RolloutPrompts] | None:
+    def _get_prompts(self) -> list[RolloutObservation] | None:
         """Prompts for active envs, or ``None`` when all are terminal."""
         active = self._active_envs()
         if not active:
             return None
-        prompts: list[RolloutPrompts] = []
+        prompts: list[RolloutObservation] = []
         for env in active:
             obs = env.current_prompt
-            assert is_rollout_prompts(obs), "an active env always holds a prompt"
+            assert is_rollout_observation(obs), "an active env always holds a prompt"
             prompts.append(obs)
         return prompts
 
     def reset(
         self,
         seed: int | None = None,
-    ) -> list[RolloutPrompts] | None:
+    ) -> list[RolloutObservation] | None:
         """Reset all env wrappers, building them on the first call.
 
         :meth:`TaskAssigner.assign` picks each group's task; prompts return
@@ -1022,21 +1018,21 @@ class RolloutCollector:
 
     def step(
         self,
-        completion_ids: list[torch.Tensor],
+        token_ids: list[torch.Tensor],
         sampling_logps: list[torch.Tensor | None] | None = None,
-    ) -> list[RolloutPrompts] | None:
-        """Step each active env with its corresponding completion.
+    ) -> list[RolloutObservation] | None:
+        """Step each active env with its turn's token sequence.
 
-        :param completion_ids: One completion tensor per active env.
-        :param sampling_logps: vLLM logprobs parallel to ``completion_ids``; entries or
+        :param token_ids: One ``prompt + generation`` tensor per active env.
+        :param sampling_logps: vLLM logprobs parallel to ``token_ids``; entries or
             the whole list may be ``None``.
         :return: Next active prompt dictionaries after stepping.
         """
         active = self._active_envs()
-        if len(completion_ids) != len(active):
+        if len(token_ids) != len(active):
             msg = (
-                "Number of completions does not match number of active envs: "
-                f"{len(completion_ids)} != {len(active)}"
+                "Number of token sequences does not match number of active envs: "
+                f"{len(token_ids)} != {len(active)}"
             )
             raise RuntimeError(msg)
         if sampling_logps is not None and len(sampling_logps) != len(active):
@@ -1049,7 +1045,7 @@ class RolloutCollector:
         # Phase 1 (sequential — tokenizer): decode + record each generation.
         gen_texts = [
             env._step_prepare(full, sampling_logps=slp)
-            for env, full, slp in zip(active, completion_ids, slps, strict=False)
+            for env, full, slp in zip(active, token_ids, slps, strict=False)
         ]
         # Phase 2 (concurrent — pure I/O): round-trip each env backend at once.
         results = self._map_env_io(
@@ -1135,12 +1131,12 @@ class RolloutCollector:
     ]:
         """Collect complete episode tensors from all envs, in list order.
 
-        :return: ``(completion_ids_list, action_masks_list, all_turn_ids, all_rewards,
+        :return: ``(token_ids_list, action_masks_list, all_turn_ids, all_rewards,
             batch_steps, all_sampling_logps)`` where ``batch_steps`` is the summed turn
             count. ``all_sampling_logps`` is ``None`` when no vLLM logprobs were captured,
             else one 1-D tensor per env (``None`` for envs that captured none).
         """
-        completion_ids_list: list[torch.Tensor] = []
+        token_ids_list: list[torch.Tensor] = []
         action_masks_list: list[torch.Tensor] = []
         all_turn_ids: list[torch.Tensor] = []
         all_rewards: list[torch.Tensor] = []
@@ -1154,7 +1150,7 @@ class RolloutCollector:
                 turn_rewards_t,
                 sampling_logps,
             ) = env.get_episode_data()
-            completion_ids_list.append(ep_ids)
+            token_ids_list.append(ep_ids)
             action_masks_list.append(action_mask)
             all_turn_ids.append(turn_ids)
             all_rewards.append(turn_rewards_t)
@@ -1162,7 +1158,7 @@ class RolloutCollector:
             all_sampling_logps.append(sampling_logps)
 
         return (
-            completion_ids_list,
+            token_ids_list,
             action_masks_list,
             all_turn_ids,
             all_rewards,
@@ -1356,7 +1352,7 @@ class RolloutCollector:
     def step_episode(
         self,
         episode_id: str,
-        completion_ids: torch.Tensor,
+        token_ids: torch.Tensor,
         sampling_logps: torch.Tensor | None = None,
     ) -> tuple[dict[str, Any], float, bool, bool, dict[str, Any]]:
         """Advance one episode a turn: decode, round-trip its env, apply the result.
@@ -1365,7 +1361,7 @@ class RolloutCollector:
         interleaved episodes overlap on I/O and stay serial on tokenizer work.
 
         :param episode_id: The episode to step (from a prior :meth:`reset_episode`).
-        :param completion_ids: This turn's full completion tensor.
+        :param token_ids: This turn's ``prompt + generation`` tensor.
         :param sampling_logps: This turn's vLLM sampling logprobs, or ``None``.
         :return: The :meth:`RolloutHarness.step` 5-tuple.
         :raises RuntimeError: If the episode was finalized (and its slot possibly
@@ -1376,7 +1372,7 @@ class RolloutCollector:
         env = self.envs[slot]
         with self._tokenizer_lock:
             self._require_current(episode_id, slot, activation)
-            gen_text = env._step_prepare(completion_ids, sampling_logps=sampling_logps)
+            gen_text = env._step_prepare(token_ids, sampling_logps=sampling_logps)
         env_result = env._step_env(gen_text)
         with self._tokenizer_lock:
             self._require_current(episode_id, slot, activation)

@@ -904,7 +904,7 @@ class TestTrainLlmRollout:
         mock_agent = _make_rollout_mock_agent(spec=GRPO)
         sampling_logps = [torch.zeros(1, 7)]
         rollout_return = (
-            [torch.ones(1, 8, dtype=torch.long)],  # completion_ids_list
+            [torch.ones(1, 8, dtype=torch.long)],  # token_ids_list
             [torch.ones(1, 7, dtype=torch.bool)],  # action_masks_list
             [torch.zeros(1, 7, dtype=torch.long)],  # all_turn_ids
             [torch.ones(2, dtype=torch.float32)],  # all_rewards

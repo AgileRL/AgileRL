@@ -45,7 +45,7 @@ from agilerl.utils.llm_utils import (
     build_completion_mask,
     clipped_is_surrogate,
     masked_mean,
-    normalize_reasoning_prompt_batch,
+    normalize_observation_batch,
     pool_by_turns,
     prepare_prompt_hf_generate,
     resolve_llm_device,
@@ -371,7 +371,7 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
             the captured per-row sampling logprobs; otherwise it is ``None``.
         :rtype: ActionResult
         """
-        prompt_batch = normalize_reasoning_prompt_batch(obs)
+        prompt_batch = normalize_observation_batch(obs)
         # Capture vLLM sampling logprobs only for training rollouts when the
         # mismatch correction is enabled; ``None`` on the HF path / eval.
         sampling_logps: list[torch.Tensor | None] | None = None
@@ -388,7 +388,7 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
                 except StopIteration:
                     actor_device = torch.device(self.device)
                 with torch.inference_mode(), self._amp_ctx():
-                    completion_ids = []
+                    token_ids_list = []
                     completion_masks = []
 
                     for start in range(
@@ -405,15 +405,15 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
                             )
                             input_ids = prompt["input_ids"]
                             attention_mask = prompt["attention_mask"]
-                            completion_id = self.actor.generate(
+                            token_ids = self.actor.generate(
                                 input_ids=input_ids,
                                 attention_mask=attention_mask,
                                 generation_config=self.generation_config,
                             )
-                            completion_ids.append(completion_id)
+                            token_ids_list.append(token_ids)
                             completion_masks.append(
                                 build_completion_mask(
-                                    completion_id,
+                                    token_ids,
                                     None,
                                     self.pad_token_id,
                                 )
@@ -421,7 +421,7 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
             else:
                 self._prepare_vllm_for_generation()
                 (
-                    completion_ids,
+                    token_ids_list,
                     completion_masks,
                     sampling_logps,
                 ) = self._generate_with_vllm_colocate(
@@ -435,7 +435,7 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
                     capture_sampling_logps=capture_sampling_logps,
                 )
 
-        return ActionResult(completion_ids, completion_masks, sampling_logps)
+        return ActionResult(token_ids_list, completion_masks, sampling_logps)
 
     def learn(
         self,
@@ -445,7 +445,7 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
     ) -> dict[str, float]:
         """Update actor using REINFORCE with Return Batch Normalization.
 
-        :param experiences: ``(completion_ids, action_masks, rewards)``. For
+        :param experiences: ``(token_ids, action_masks, rewards)``. For
             single-turn, ``rewards`` is a flat tensor of scalars; for multi-turn,
             shape ``[batch, max_turns]`` per-turn rewards.
         :type experiences: LLMRolloutExperiences
@@ -456,7 +456,7 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
         :param sampling_logps: Optional per-row flat vLLM sampling logprobs (one
             1-D tensor per trajectory, generated tokens only; concatenated across
             turns for multi-turn) for the vLLM sampling-mismatch correction.
-            Parallel to the stacked ``completion_ids`` rows. ``None`` disables
+            Parallel to the stacked ``token_ids`` rows. ``None`` disables
             the correction for this update.
         :type sampling_logps: list[torch.Tensor | None] | None
         :return: Dict with keys ``loss``, ``kl``, ``pg_loss``,
@@ -466,14 +466,14 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
         self._prepare_vllm_for_training()
 
         with self.memory_efficient_params_context():
-            completion_ids, action_masks, rewards = stack_and_pad_experiences(
+            token_ids, action_masks, rewards = stack_and_pad_experiences(
                 *experiences,
                 padding_values=[self.pad_token_id, False, None],
             )
-            completion_ids = completion_ids.to(self.device)
+            token_ids = token_ids.to(self.device)
             action_masks = action_masks.to(self.device)
             action_mask_bool = action_masks.bool()
-            num_samples = completion_ids.shape[0]
+            num_samples = token_ids.shape[0]
 
             if turn_ids is None:
                 turn_ids = torch.where(
@@ -506,7 +506,7 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
             updates = 0
 
             reference_log_probs, old_log_probs, _ = self._fused_forward_no_grad(
-                completion_ids,
+                token_ids,
                 batch_size,
             )
             token_rewards = self._compute_token_rewards(
@@ -556,7 +556,7 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
                         batch_turn_ids,
                     ) = get_experiences_samples(
                         minibatch_idxs,
-                        completion_ids,
+                        token_ids,
                         action_masks,
                         old_log_probs,
                         reference_log_probs,
@@ -680,8 +680,8 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
 
         # Wire averaged metrics into the metrics tracker; position 0 is the
         # per-trajectory completion-id batch.
-        completion_list = experiences[0]
-        completion_length = float(np.mean([c.shape[-1] for c in completion_list]))
+        token_ids_list = experiences[0]
+        completion_length = float(np.mean([c.shape[-1] for c in token_ids_list]))
         agg = aggregate_metrics_dict(
             self.accelerator,
             {

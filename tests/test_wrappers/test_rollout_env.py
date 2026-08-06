@@ -671,7 +671,7 @@ class TestBatchRolloutEnvIoTimeout:
 
 
 class TestBatchRolloutEnvStep:
-    def test_sync_gem_vec_env_step_raises_when_completion_count_mismatches_active(
+    def test_sync_gem_vec_env_step_raises_when_sequence_count_mismatches_active(
         self,
     ) -> None:
         vec_env = RolloutCollector(
@@ -682,7 +682,7 @@ class TestBatchRolloutEnvStep:
         _ = vec_env.reset(seed=0)
         with pytest.raises(
             RuntimeError,
-            match="Number of completions does not match number of active envs",
+            match="Number of token sequences does not match number of active envs",
         ):
             vec_env.step([torch.ones(1, 5, dtype=torch.long)])
 

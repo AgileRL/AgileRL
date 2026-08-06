@@ -27,7 +27,7 @@ from agilerl.typing import (
     JSONValue,
     PopulationType,
     PreferencePrompts,
-    RolloutPrompts,
+    RolloutObservation,
     SFTPrompts,
 )
 
@@ -207,13 +207,13 @@ def validate_llm_context_lengths(
         raise ValueError(msg)
 
 
-def is_rollout_prompts(obs: Mapping[str, object]) -> TypeGuard[RolloutPrompts]:
+def is_rollout_observation(obs: Mapping[str, object]) -> TypeGuard[RolloutObservation]:
     """Check whether a mapping is a tokenized rollout observation.
 
     :param obs: An observation mapping returned by a rollout env.
     :type obs: Mapping[str, object]
     :return: ``True`` when the mapping carries prompt tokens.
-    :rtype: TypeGuard[RolloutPrompts]
+    :rtype: TypeGuard[RolloutObservation]
     """
     return isinstance(obs.get("input_ids"), torch.Tensor)
 
@@ -244,17 +244,18 @@ def is_sft_prompts(batch: Mapping[str, object]) -> TypeGuard[SFTPrompts]:
     )
 
 
-def normalize_reasoning_prompt_batch(
-    prompts: RolloutPrompts | list[RolloutPrompts],
-) -> list[RolloutPrompts]:
-    """Normalize reasoning prompts into a list-of-dicts per sample.
+def normalize_observation_batch(
+    prompts: RolloutObservation | list[RolloutObservation],
+) -> list[RolloutObservation]:
+    """Normalize rollout observations into a list-of-dicts per sample.
 
-    Supports both legacy list-of-dicts and stacked dict formats where tensor/list
-    values are batched on dimension 0.
-    :param prompts: The prompts to normalize.
-    :type prompts: RolloutPrompts | list[RolloutPrompts]
+    Supports both a list of per-sample dicts and a single stacked dict whose
+    tensor/list values are batched on dimension 0.
+
+    :param prompts: The observations to normalize.
+    :type prompts: RolloutObservation | list[RolloutObservation]
     :return: The normalized prompts.
-    :rtype: list[RolloutPrompts]
+    :rtype: list[RolloutObservation]
     """
     if isinstance(prompts, list):
         return prompts
@@ -268,7 +269,7 @@ def normalize_reasoning_prompt_batch(
         return []
 
     # Inspect each key once and write it into every output dict in one pass.
-    # Keys not declared on ``RolloutPrompts`` (caller-supplied metadata) are
+    # Keys not declared on ``RolloutObservation`` (caller-supplied metadata) are
     # copied through unchanged, which a key-by-key typed construction can't do.
     samples: list[dict[str, object]] = [{} for _ in range(batch_size)]
     for key, value in prompts.items():
@@ -339,7 +340,7 @@ def allreduce_minmax_int(value: int, accelerator: Accelerator) -> tuple[int, int
 
 
 def pad_completion_batch_to_seq_len(
-    completion_ids: torch.Tensor,
+    token_ids: torch.Tensor,
     action_masks: torch.Tensor,
     *,
     target_seq_len: int,
@@ -351,30 +352,29 @@ def pad_completion_batch_to_seq_len(
     to the masked CISPO/Liger objective.
     """
     required_dims = 2
-    if completion_ids.dim() != required_dims:
-        msg = f"completion_ids must be (B, T), got shape {tuple(completion_ids.shape)}"
+    if token_ids.dim() != required_dims:
+        msg = f"token_ids must be (B, T), got shape {tuple(token_ids.shape)}"
         raise ValueError(msg)
     if action_masks.dim() != required_dims:
         msg = f"action_masks must be (B, T-1), got shape {tuple(action_masks.shape)}"
         raise ValueError(msg)
 
-    batch, seq_len = completion_ids.shape
+    batch, seq_len = token_ids.shape
     mask_len = action_masks.shape[1]
     if mask_len != seq_len - 1:
         msg = (
-            f"action_masks length ({mask_len}) must be completion_ids length "
-            f"({seq_len}) - 1"
+            f"action_masks length ({mask_len}) must be token_ids length ({seq_len}) - 1"
         )
         raise ValueError(msg)
     if target_seq_len < seq_len:
         msg = f"target_seq_len ({target_seq_len}) must be >= local seq_len ({seq_len})"
         raise ValueError(msg)
     if target_seq_len == seq_len:
-        return completion_ids, action_masks
+        return token_ids, action_masks
 
     pad_t = target_seq_len - seq_len
-    completion_ids = torch.nn.functional.pad(
-        completion_ids,
+    token_ids = torch.nn.functional.pad(
+        token_ids,
         (0, pad_t),
         value=pad_token_id,
     )
@@ -383,9 +383,9 @@ def pad_completion_batch_to_seq_len(
         (0, pad_t),
         value=False,
     )
-    if completion_ids.shape != (batch, target_seq_len):
+    if token_ids.shape != (batch, target_seq_len):
         msg = (
-            f"padded completions shape {tuple(completion_ids.shape)} != "
+            f"padded completions shape {tuple(token_ids.shape)} != "
             f"({batch}, {target_seq_len})"
         )
         raise RuntimeError(msg)
@@ -395,13 +395,13 @@ def pad_completion_batch_to_seq_len(
             f"({batch}, {target_seq_len - 1})"
         )
         raise RuntimeError(msg)
-    return completion_ids, action_masks
+    return token_ids, action_masks
 
 
 def align_completion_batch_shapes_across_ranks(
-    completion_ids: Any,  # noqa: ANN401 -- cross-rank batch of variable-length sequences; element type varies by paradigm
-    action_masks: Any,  # noqa: ANN401 -- see completion_ids
-    rewards: Any,  # noqa: ANN401 -- see completion_ids
+    token_ids: Any,  # noqa: ANN401 -- cross-rank batch of variable-length sequences; element type varies by paradigm
+    action_masks: Any,  # noqa: ANN401 -- see token_ids
+    rewards: Any,  # noqa: ANN401 -- see token_ids
     *,
     pad_token_id: int,
     accelerator: Accelerator,
@@ -417,14 +417,14 @@ def align_completion_batch_shapes_across_ranks(
     # Lazy import avoids a circular dependency with algo_utils -> llm_utils.
     from agilerl.utils.algo_utils import stack_and_pad_experiences
 
-    completion_ids, action_masks, rewards = stack_and_pad_experiences(
-        completion_ids,
+    token_ids, action_masks, rewards = stack_and_pad_experiences(
+        token_ids,
         action_masks,
         rewards,
         padding_values=[pad_token_id, False, 0.0],
     )
-    local_b = int(completion_ids.shape[0])
-    local_t = int(completion_ids.shape[1])
+    local_b = int(token_ids.shape[0])
+    local_t = int(token_ids.shape[1])
     reduce_fn = minmax_fn or (lambda value: allreduce_minmax_int(value, accelerator))
 
     min_b, max_b = reduce_fn(local_b)
@@ -438,19 +438,19 @@ def align_completion_batch_shapes_across_ranks(
 
     min_t, max_t = reduce_fn(local_t)
     if min_t != max_t and local_t < max_t:
-        completion_ids, action_masks = pad_completion_batch_to_seq_len(
-            completion_ids,
+        token_ids, action_masks = pad_completion_batch_to_seq_len(
+            token_ids,
             action_masks,
             target_seq_len=max_t,
             pad_token_id=pad_token_id,
         )
-    if int(completion_ids.shape[1]) != max_t:
+    if int(token_ids.shape[1]) != max_t:
         msg = (
-            f"Cross-rank seq align failed: local T={completion_ids.shape[1]} "
+            f"Cross-rank seq align failed: local T={token_ids.shape[1]} "
             f"!= global max T={max_t}"
         )
         raise RuntimeError(msg)
-    return completion_ids, action_masks, rewards
+    return token_ids, action_masks, rewards
 
 
 def aggregate_metrics_across_gpus(
@@ -1738,19 +1738,19 @@ def attention_mask_from_padded_ids(
 
 
 def build_completion_mask(
-    completion_id: torch.Tensor,
+    token_ids: torch.Tensor,
     prompt_len: int | None,
     pad_token_id: int,
 ) -> torch.Tensor:
-    """Build the boolean action mask for a completion tensor.
+    """Build the boolean action mask marking the completion within a token sequence.
 
     Returns ``True`` at positions that are (a) past the prompt and (b) not
     pad tokens, dropping the leading position to align with the
     next-token-prediction shift used downstream.
 
-    :param completion_id: Token tensor of shape ``(B, seq_len)`` containing
+    :param token_ids: Token tensor of shape ``(B, seq_len)`` containing
         the prompt followed by generated tokens.
-    :type completion_id: torch.Tensor
+    :type token_ids: torch.Tensor
     :param prompt_len: Number of leading tokens to mask out (the full
         prompt length). ``None`` means "no prompt prefix" — every non-pad
         token is part of the completion, so the entire dim is set before
@@ -1761,17 +1761,17 @@ def build_completion_mask(
     :return: Boolean mask of shape ``(B, seq_len - 1)``.
     :rtype: torch.Tensor
     """
-    non_pad = completion_id != pad_token_id
+    non_pad = token_ids != pad_token_id
     if prompt_len is None or prompt_len == 0:
         mask = non_pad
     else:
-        positions = torch.arange(completion_id.shape[1], device=completion_id.device)
+        positions = torch.arange(token_ids.shape[1], device=token_ids.device)
         mask = (positions.unsqueeze(0) >= prompt_len) & non_pad
     return mask[:, 1:]
 
 
 def prepare_prompt_hf_generate(
-    prompt_dict: RolloutPrompts, device: torch.device
+    prompt_dict: RolloutObservation, device: torch.device
 ) -> dict[str, torch.Tensor]:
     """Prepare a prompt dictionary for HuggingFace generate.
 
@@ -1780,7 +1780,7 @@ def prepare_prompt_hf_generate(
     ``RolloutHarness`` observation shape).
 
     :param prompt_dict: The prompt dictionary to prepare.
-    :type prompt_dict: RolloutPrompts
+    :type prompt_dict: RolloutObservation
     :param device: The device to move the prompt dictionary to.
     :type device: torch.device
     :return: ``input_ids`` / ``attention_mask`` moved to ``device``.

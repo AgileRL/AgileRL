@@ -132,11 +132,11 @@ def make_dataset(size: int) -> Dataset:
 
 def get_terminal_values(
     agent: LLMPPO,
-    completion_ids: list[torch.Tensor],
+    token_ids: list[torch.Tensor],
     action_masks: list[torch.Tensor],
 ) -> torch.Tensor:
     stacked_ids, stacked_masks = stack_and_pad_experiences(
-        completion_ids,
+        token_ids,
         action_masks,
         padding_values=[agent.pad_token_id, False],
     )
@@ -220,7 +220,7 @@ def main(cfg: dict) -> None:
     prompts = env.reset(reset_dataloaders=True)
     with torch.no_grad():
         init_result = agent.get_action(prompts, training=False)
-        init_ids, init_masks = init_result.completion_ids, init_result.action_masks
+        init_ids, init_masks = init_result.token_ids, init_result.action_masks
         init_values = get_terminal_values(agent, init_ids, init_masks)
 
     init_mean = float(init_values.mean().item())
@@ -234,11 +234,11 @@ def main(cfg: dict) -> None:
     for step in range(num_steps):
         agent.set_reference_policy(env.num_epochs)
         rollout = agent.get_action(prompts)
-        completion_ids, action_masks = rollout.completion_ids, rollout.action_masks
-        next_prompts, rewards = env.step(completion_ids)
+        token_ids, action_masks = rollout.token_ids, rollout.action_masks
+        next_prompts, rewards = env.step(token_ids)
 
         metrics = agent.learn(
-            (completion_ids, action_masks, rewards),
+            (token_ids, action_masks, rewards),
             sampling_logps=rollout.sampling_logps,
         )
         vf_loss = metrics["vf_loss"]
@@ -247,7 +247,7 @@ def main(cfg: dict) -> None:
         if (step + 1) % log_interval == 0:
             with torch.no_grad():
                 snap = agent.get_action(prompts, training=False)
-                snap_ids, snap_masks = snap.completion_ids, snap.action_masks
+                snap_ids, snap_masks = snap.token_ids, snap.action_masks
                 snap_values = get_terminal_values(agent, snap_ids, snap_masks)
             print(
                 f"[value-debug] step {step + 1:4d} | "
@@ -259,7 +259,7 @@ def main(cfg: dict) -> None:
     with torch.no_grad():
         final_result = agent.get_action(prompts, training=False)
         final_ids, final_masks = (
-            final_result.completion_ids,
+            final_result.token_ids,
             final_result.action_masks,
         )
         final_values = get_terminal_values(agent, final_ids, final_masks)
