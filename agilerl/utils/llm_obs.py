@@ -22,11 +22,6 @@ def max_prompt_tokens_for_sliding_window(
 ) -> int:
     """Upper bound on prompt tokens so at least one completion token can be generated.
 
-    Reserve generation headroom while keeping prompt budget as large as possible.
-    When ``max_output_tokens`` is provided, reserve up to that many tokens
-    (capped by ``max_model_len``). When it is ``None``, reserve exactly one
-    token so generation remains possible without collapsing prompt budget.
-
     :param max_model_len: Engine context length (prompt + completion ceiling).
     :type max_model_len: int
     :param max_output_tokens: Configured completion cap; if ``None``, reserve

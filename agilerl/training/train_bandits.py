@@ -240,7 +240,6 @@ def train_bandits(
                     },
                 )
                 transition = transition.unsqueeze(0)
-                transition.batch_size = [1]  # ty: ignore[invalid-assignment]
                 memory.add(transition)
 
                 # Learn according to learning frequency
