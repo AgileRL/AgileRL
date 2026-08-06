@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import gc
-from typing import TYPE_CHECKING, Any, NoReturn, cast
+from typing import TYPE_CHECKING, Any, NoReturn
 
 import numpy as np
 import numpy.typing as npt
@@ -19,7 +19,11 @@ from agilerl.typing import (
     ObservationType,
     SFTPrompts,
 )
-from agilerl.utils.llm_utils import aggregate_metrics_dict, resolve_llm_device
+from agilerl.utils.llm_utils import (
+    aggregate_metrics_dict,
+    is_sft_prompts,
+    resolve_llm_device,
+)
 
 if TYPE_CHECKING:
     from accelerate import Accelerator
@@ -390,9 +394,13 @@ class SFT(LLMAlgorithm[SFTPrompts]):
         with env.eval_mode(), torch.no_grad():
             losses = []
             for _ in range(loop):
-                # An SFT agent is always paired with an ``objective="sft"`` env,
-                # so the collated batch is an ``SFTPrompts``.
-                prompts = cast("SFTPrompts", env.reset())
+                prompts = env.reset()
+                if not is_sft_prompts(prompts):
+                    msg = (
+                        f"SFT.test needs an objective='sft' DatasetEnv; got a "
+                        f"batch with keys {sorted(prompts)}."
+                    )
+                    raise TypeError(msg)
                 metrics = self.learn(prompts, training=False)
                 losses.append(metrics["loss"])
             mean_fit = -float(np.mean(losses))

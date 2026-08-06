@@ -26,7 +26,9 @@ from agilerl import HAS_DEEPSPEED, HAS_LLM_DEPENDENCIES
 from agilerl.typing import (
     JSONValue,
     PopulationType,
+    PreferencePrompts,
     RolloutPrompts,
+    SFTPrompts,
 )
 
 if TYPE_CHECKING:
@@ -214,6 +216,32 @@ def is_rollout_prompts(obs: Mapping[str, object]) -> TypeGuard[RolloutPrompts]:
     :rtype: TypeGuard[RolloutPrompts]
     """
     return isinstance(obs.get("input_ids"), torch.Tensor)
+
+
+def is_preference_prompts(batch: Mapping[str, object]) -> TypeGuard[PreferencePrompts]:
+    """Check whether a collated batch carries the chosen/rejected pair DPO needs.
+
+    :param batch: A batch collated by an ``objective="preference"`` ``DatasetEnv``.
+    :type batch: Mapping[str, object]
+    :return: ``True`` when the batch carries both preference encodings.
+    :rtype: TypeGuard[PreferencePrompts]
+    """
+    return isinstance(batch.get("chosen_input_ids"), torch.Tensor) and isinstance(
+        batch.get("rejected_input_ids"), torch.Tensor
+    )
+
+
+def is_sft_prompts(batch: Mapping[str, object]) -> TypeGuard[SFTPrompts]:
+    """Check whether a collated batch carries the prompt/response pair SFT needs.
+
+    :param batch: A batch collated by an ``objective="sft"`` ``DatasetEnv``.
+    :type batch: Mapping[str, object]
+    :return: ``True`` when the batch carries the teacher-forced encoding.
+    :rtype: TypeGuard[SFTPrompts]
+    """
+    return isinstance(batch.get("input_ids"), torch.Tensor) and isinstance(
+        batch.get("response"), list
+    )
 
 
 def normalize_reasoning_prompt_batch(

@@ -32,12 +32,6 @@ if TYPE_CHECKING:
 class DatasetEnv:
     """Dataset-backed LLM env for SFT and DPO (no generation).
 
-    Objectives differ only by required columns and collate function, via ``objective``;
-    ``reset`` advances the seeded ``DataLoader`` and there is no ``step``.
-
-    * ``"preference"`` (DPO) — requires ``prompt`` / ``chosen`` / ``rejected``.
-    * ``"sft"`` — requires ``prompt`` and ``response_column`` (default ``"target"``).
-
     :ivar dataset_size: ``{"train": N, "test": M}`` row counts after filtering.
     :ivar num_epochs: Full passes completed over the train split.
     """

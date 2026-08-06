@@ -1,13 +1,11 @@
 # Copyright 2026 AgileRL
 # SPDX-License-Identifier: Apache-2.0
 
-"""Data structures and utilities for collation of LLM rollout data.
+"""Pack finished LLM rollouts into a training batch.
 
-The unit of collation is the **prompt group**: all ``group_size`` completions of one
-prompt (one group per prompt for GRPO, ``group_size=1`` for PPO and REINFORCE, where
-each group is a single trajectory). Trajectory tensors are held by reference and are
-never copied on the way in or out; padding into rectangular batches happens once, in
-:func:`collate_rollout_groups`.
+Trajectories arrive grouped by prompt -- all ``group_size`` completions of one
+prompt together -- and are padded into rectangles once, on the way into
+:class:`LLMExperienceBatch`.
 """
 
 from __future__ import annotations

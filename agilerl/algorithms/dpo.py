@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import gc
-from typing import TYPE_CHECKING, Any, NoReturn, cast
+from typing import TYPE_CHECKING, Any, NoReturn
 
 import numpy as np
 import numpy.typing as npt
@@ -29,7 +29,11 @@ from agilerl.typing import (
     PreferencePrompts,
 )
 from agilerl.utils.algo_utils import get_experiences_samples
-from agilerl.utils.llm_utils import aggregate_metrics_dict, resolve_llm_device
+from agilerl.utils.llm_utils import (
+    aggregate_metrics_dict,
+    is_preference_prompts,
+    resolve_llm_device,
+)
 
 if HAS_LIGER_KERNEL:
     from agilerl.algorithms.core.llm_ops.fused_loss import LigerDPOWithAlpha
@@ -673,9 +677,13 @@ class DPO(LLMAlgorithm[PreferencePrompts]):
         with env.eval_mode(), torch.no_grad():
             rewards = []
             for _ in range(loop):
-                # A DPO agent is always paired with an ``objective="preference"``
-                # env, so the collated batch is a ``PreferencePrompts``.
-                prompts = cast("PreferencePrompts", env.reset())
+                prompts = env.reset()
+                if not is_preference_prompts(prompts):
+                    msg = (
+                        f"DPO.test needs an objective='preference' DatasetEnv; "
+                        f"got a batch with keys {sorted(prompts)}."
+                    )
+                    raise TypeError(msg)
                 learn_result = self.learn(prompts, training=False)
                 chosen_reward = learn_result["chosen_reward"]
                 rejected_reward = learn_result["rejected_reward"]
