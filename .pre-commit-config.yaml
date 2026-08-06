@@ -65,12 +65,13 @@ repos:
             language: system
             pass_filenames: false
             always_run: true
-          - id: check-arena-dep-pin
-            name: Check agilerl-arena dep pin matches package version
-            entry: python scripts/check-arena-dep-pin.py
-            language: system
+          - id: check-extras
+            name: Check the arena pin and that the all extra unions every extra
+            entry: python scripts/check-extras.py
+            language: python
+            additional_dependencies: [tomli; python_version < '3.11']
             pass_filenames: false
-            files: ^(pyproject\.toml|agilerl-arena/pyproject\.toml|scripts/check-arena-dep-pin\.py)$
+            files: ^(pyproject\.toml|agilerl-arena/pyproject\.toml|scripts/check-extras\.py)$
 
     - repo: https://github.com/astral-sh/ty-pre-commit
       rev: v0.0.65
