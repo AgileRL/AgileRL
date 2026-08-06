@@ -371,7 +371,7 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
             the captured per-row sampling logprobs; otherwise it is ``None``.
         :rtype: ActionResult
         """
-        prompt_batch = normalize_observation_batch(obs)
+        observations = normalize_observation_batch(obs)
         # Capture vLLM sampling logprobs only for training rollouts when the
         # mismatch correction is enabled; ``None`` on the HF path / eval.
         sampling_logps: list[torch.Tensor | None] | None = None
@@ -393,15 +393,15 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
 
                     for start in range(
                         0,
-                        len(prompt_batch),
+                        len(observations),
                         self.hf_generate_chunk_size,
                     ):
-                        chunk = prompt_batch[
+                        chunk = observations[
                             start : start + self.hf_generate_chunk_size
                         ]
-                        for prompt_dict in chunk:
+                        for observation in chunk:
                             prompt = prepare_prompt_hf_generate(
-                                prompt_dict, actor_device
+                                observation, actor_device
                             )
                             input_ids = prompt["input_ids"]
                             attention_mask = prompt["attention_mask"]
@@ -427,7 +427,7 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
                 ) = self._generate_with_vllm_colocate(
                     # ReasoningPrompts is a TypedDict, i.e. a plain dict at
                     # runtime; the base helper takes untyped prompt dicts.
-                    prompt_batch,
+                    observations,
                     1,
                     temperature=self.temperature
                     if training

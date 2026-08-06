@@ -684,7 +684,7 @@ class TestGetLlmAccelerator:
             get_llm_accelerator(None, idx=-1)
 
 
-def test_normalize_reasoning_prompt_batch_stacked_dict_to_per_sample_list():
+def test_normalize_observation_batch_stacked_dict_to_per_sample_list():
     prompts = {
         "input_ids": torch.tensor([[1, 2], [3, 4]], dtype=torch.long),
         "attention_mask": torch.ones(2, 2, dtype=torch.long),

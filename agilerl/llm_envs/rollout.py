@@ -193,7 +193,7 @@ class RolloutHarness:
         :ivar turn_boundaries: ``(start, end, turn_idx)`` spans of policy-generated tokens.
         :ivar turn_rewards: Per-turn rewards from the env.
         :ivar done: Whether the episode has terminated.
-        :ivar current_prompt: Latest policy-ready observation; ``{}`` once done.
+        :ivar current_observation: Latest policy-ready observation; ``{}`` once done.
         :ivar sampling_logps: Per-turn vLLM sampling logprobs (empty on the HF path).
         """
         self.max_turns = max_turns
@@ -253,7 +253,7 @@ class RolloutHarness:
         self._boundary_parts: tuple[str, str] | None = None
         self._boundary_parts_known = False
         self.done: bool = False
-        self.current_prompt: dict[str, Any] = {}
+        self.current_observation: dict[str, Any] = {}
         self.sampling_logps: list[torch.Tensor] = []
         self._special_ids_cache: frozenset[int] | None = None
 
@@ -567,7 +567,7 @@ class RolloutHarness:
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         """Create a fresh episode and return the policy-ready observation plus info.
 
-        A prompt over the context budget ends truncated at turn 0 (empty ``current_prompt``).
+        A prompt over the context budget ends truncated at turn 0 (empty ``current_observation``).
 
         :param seed: Reset seed forwarded to the env client.
         :param row_index: Dataset row index to serve (dataset-backed envs only).
@@ -616,12 +616,12 @@ class RolloutHarness:
         max_pt = self._prompt_budget()
         if max_pt is not None and int(self.full_ids.shape[1]) > max_pt:
             self.done = True
-            self.current_prompt = {}
-            return self.current_prompt, info
+            self.current_observation = {}
+            return self.current_observation, info
 
         self.done = False
-        self.current_prompt = self._policy_observation_from_state()
-        return self.current_prompt, info
+        self.current_observation = self._policy_observation_from_state()
+        return self.current_observation, info
 
     def _step_prepare(
         self,
@@ -674,7 +674,7 @@ class RolloutHarness:
         if not (terminated or truncated) and self._turn_idx >= self.max_turns:
             truncated = True
 
-        prompt_dict: dict[str, Any] = {}
+        observation: dict[str, Any] = {}
         if not (terminated or truncated):
             full_ids = self.full_ids
             assert full_ids is not None, "reset() must run before step()"
@@ -698,11 +698,11 @@ class RolloutHarness:
                     truncated = True
 
             if not truncated:
-                prompt_dict = self._policy_observation_from_state()
+                observation = self._policy_observation_from_state()
 
         self.done = bool(terminated or truncated)
-        self.current_prompt = prompt_dict
-        return prompt_dict, reward, terminated, truncated, info
+        self.current_observation = observation
+        return observation, reward, terminated, truncated, info
 
     def step(
         self,
@@ -957,17 +957,19 @@ class RolloutCollector:
         """Non-terminal envs, in their stable batch/group (list) order."""
         return [env for env in self.envs if not env.done]
 
-    def _get_prompts(self) -> list[RolloutObservation] | None:
-        """Prompts for active envs, or ``None`` when all are terminal."""
+    def _get_observations(self) -> list[RolloutObservation] | None:
+        """Observations for active envs, or ``None`` when all are terminal."""
         active = self._active_envs()
         if not active:
             return None
-        prompts: list[RolloutObservation] = []
+        observations: list[RolloutObservation] = []
         for env in active:
-            obs = env.current_prompt
-            assert is_rollout_observation(obs), "an active env always holds a prompt"
-            prompts.append(obs)
-        return prompts
+            obs = env.current_observation
+            assert is_rollout_observation(obs), (
+                "an active env always holds an observation"
+            )
+            observations.append(obs)
+        return observations
 
     def reset(
         self,
@@ -975,12 +977,12 @@ class RolloutCollector:
     ) -> list[RolloutObservation] | None:
         """Reset all env wrappers, building them on the first call.
 
-        :meth:`TaskAssigner.assign` picks each group's task; prompts return
+        :meth:`TaskAssigner.assign` picks each group's task; observations return
         in stable list order. If building envs fails partway, the built ones are closed
         and the batch left empty so a retried ``reset`` starts clean.
 
         :param seed: Optional base seed for deterministic rollouts.
-        :return: Active prompt dictionaries after reset.
+        :return: Active observations after reset.
         """
         self._build_envs_and_assigner(seed)
         assert self._task_assigner is not None
@@ -998,7 +1000,7 @@ class RolloutCollector:
         for env, (obs_text, info) in zip(self.envs, fetches, strict=False):
             env._reset_apply(obs_text, info)
 
-        return self._get_prompts()
+        return self._get_observations()
 
     def get_rubric_score_means(self) -> dict[str, float]:
         """Mean per-episode component sums over the frozen component key set.
@@ -1026,7 +1028,7 @@ class RolloutCollector:
         :param token_ids: One ``prompt + generation`` tensor per active env.
         :param sampling_logps: vLLM logprobs parallel to ``token_ids``; entries or
             the whole list may be ``None``.
-        :return: Next active prompt dictionaries after stepping.
+        :return: Next active observations after stepping.
         """
         active = self._active_envs()
         if len(token_ids) != len(active):
@@ -1057,7 +1059,7 @@ class RolloutCollector:
         # Phase 3 (sequential — tokenizer): apply each result to its own env.
         for env, result in zip(active, results, strict=False):
             env._step_apply(result)
-        return self._get_prompts()
+        return self._get_observations()
 
     def _map_env_io(self, thunks: list[Callable[[], Any]]) -> list[Any]:
         """Run each zero-arg thunk on its own daemon thread, returning results in order.
@@ -1313,7 +1315,7 @@ class RolloutCollector:
 
         :param episode_id: Caller-unique id naming this episode in later calls.
         :param logical_slot: Position in the rollout window, pinning the group task.
-        :return: ``(prompt, info)`` — the policy-ready observation (empty when the
+        :return: ``(observation, info)`` — the policy-ready observation (empty when the
             episode truncated at turn 0).
         """
         self._ensure_slots()
@@ -1333,7 +1335,7 @@ class RolloutCollector:
             env = self.envs[slot]
             obs_text, info = env._reset_fetch(seed, row_index=row_index)
             with self._tokenizer_lock:
-                prompts, info = env._reset_apply(obs_text, info)
+                observation, info = env._reset_apply(obs_text, info)
             with self._slot_lock:
                 # Checked under the same lock as the insert, so racing duplicate
                 # ids cannot both claim a slot.
@@ -1343,7 +1345,7 @@ class RolloutCollector:
                 self._episode_to_slot[episode_id] = slot
                 self._slot_activations[slot] += 1
             acquired = True
-            return prompts, info
+            return observation, info
         finally:
             # A failed reset must release the slot it took so the pool is not starved.
             if not acquired:

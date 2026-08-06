@@ -30,7 +30,7 @@ from agilerl.utils.probe_envs_llm import GridNavigationEnv
 from agilerl.utils.utils import create_population
 
 
-def _prompt_dict_from_encoded(
+def _observation_from_encoded(
     tokenizer: Any, prompt_encoded: dict[str, torch.Tensor]
 ) -> dict[str, Any]:
     del tokenizer
@@ -82,11 +82,11 @@ def evaluate_accuracy(
                 )
 
                 for _turn_idx in range(max_turns):
-                    prompt_dict = _prompt_dict_from_encoded(tokenizer, prompt_encoded)
-                    prompt_len = prompt_dict["input_ids"].shape[1]
+                    observation = _observation_from_encoded(tokenizer, prompt_encoded)
+                    prompt_len = observation["input_ids"].shape[1]
 
                     token_ids = agent.get_action(
-                        [prompt_dict], training=False
+                        [observation], training=False
                     ).token_ids
                     full_ids = token_ids[0]
                     gen_tokens = full_ids[0, prompt_len:]
@@ -168,12 +168,12 @@ def detailed_eval(
                     actions: list[str] = []
                     success = False
                     for _ in range(max_turns):
-                        prompt_dict = _prompt_dict_from_encoded(
+                        observation = _observation_from_encoded(
                             tokenizer, prompt_encoded
                         )
-                        prompt_len = prompt_dict["input_ids"].shape[1]
+                        prompt_len = observation["input_ids"].shape[1]
                         token_ids = agent.get_action(
-                            [prompt_dict],
+                            [observation],
                             training=False,
                         ).token_ids
                         full_ids = token_ids[0]

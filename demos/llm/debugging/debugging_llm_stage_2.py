@@ -65,12 +65,12 @@ def evaluate_accuracy(
                     padding_side="left",
                     return_attention_mask=True,
                 )
-                prompt_dict = {
+                observation = {
                     "input_ids": prompt_encoded["input_ids"],
                     "attention_mask": prompt_encoded["attention_mask"],
                 }
-                prompt_len = prompt_dict["input_ids"].shape[1]
-                token_ids = agent.get_action([prompt_dict], training=False).token_ids
+                prompt_len = observation["input_ids"].shape[1]
+                token_ids = agent.get_action([observation], training=False).token_ids
                 full_ids = token_ids[0]
                 gen_tokens = full_ids[0, prompt_len:]
                 gen_text = tokenizer.decode(

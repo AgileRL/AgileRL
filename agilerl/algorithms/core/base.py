@@ -2870,16 +2870,16 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         rewards: list[float] = []
         with env.eval_mode():
             for _ in range(loop):
-                prompt_dict, _info = env.reset()
+                observation, _info = env.reset()
                 while not env.done:
-                    # ``current_prompt`` is only empty once the env is done, so
-                    # inside this loop the observation always carries token ids.
-                    assert is_rollout_observation(prompt_dict)
+                    # ``current_observation`` is only empty once the env is done,
+                    # so inside this loop it always carries token ids.
+                    assert is_rollout_observation(observation)
                     token_ids = self.get_action(
-                        [prompt_dict],
+                        [observation],
                         training=False,
                     ).token_ids
-                    prompt_dict, reward, _terminated, _truncated, _info = env.step(
+                    observation, reward, _terminated, _truncated, _info = env.step(
                         token_ids[0],
                     )
                     rewards.append(float(reward))
@@ -5353,7 +5353,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
 
     def _generate_with_vllm_colocate(
         self,
-        prompts: Sequence[RolloutObservation],
+        observations: Sequence[RolloutObservation],
         group_size: int,
         temperature: float | None,
         capture_sampling_logps: bool = False,
@@ -5362,14 +5362,13 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
     ]:
         """Generate completions with colocated vLLM for GRPO/LLMPPO-style batches.
 
-        Each entry in ``prompts`` is repeated ``group_size`` times so vLLM receives
-        a flat list of length ``len(prompts) * group_size`` (e.g. GRPO groups).
+        Each entry in ``observations`` is repeated ``group_size`` times so vLLM
+        receives a flat list of length ``len(observations) * group_size``
+        (e.g. GRPO groups). Action masks use the full prompt length from
+        ``input_ids``.
 
-        **Prompt dict fields:** ``input_ids`` and usually ``text`` for decoding.
-        Action masks use the full prompt length from ``input_ids``.
-
-        :param prompts: Length-``N`` sequence of observation mappings for this rank.
-        :type prompts: Sequence[RolloutObservation]
+        :param observations: Length-``N`` sequence of observation mappings for this rank.
+        :type observations: Sequence[RolloutObservation]
         :param group_size: Repeat factor per prompt (1 for plain PPO).
         :type group_size: int
         :param temperature: Temperature for sampling.
@@ -5406,7 +5405,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
 
         # Compute the per-prompt work once per *unique* prompt (N items),
         # then alias by reference across each group (N·G items)
-        unique_ids = [p["input_ids"] for p in prompts]
+        unique_ids = [obs["input_ids"] for obs in observations]
         unique_tokens = [_token_prompt_for_vllm(ids) for ids in unique_ids]
         unique_max = [_vllm_max_new_tokens(int(ids.shape[1])) for ids in unique_ids]
 
@@ -5519,7 +5518,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         # Transfer fromn host-to-device once per unique prompt, then re-alias across the group.
         unique_prompts_ids_dev = [
             prompts_ids[group_size * i].to(self.device, non_blocking=True)
-            for i in range(len(prompts))
+            for i in range(len(observations))
         ]
         prompts_ids = [ids for ids in unique_prompts_ids_dev for _ in range(group_size)]
 
@@ -5538,7 +5537,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
                 ],
                 dim=1,
             )
-            for i in range(len(prompts))
+            for i in range(len(observations))
         ]
 
         sampling_logps: list[torch.Tensor | None] | None = (
@@ -5551,7 +5550,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         )
 
         num_input_tokens = [
-            int(prompts[i]["input_ids"].shape[1]) for i in range(len(prompts))
+            int(observations[i]["input_ids"].shape[1]) for i in range(len(observations))
         ]
         completion_masks = [
             build_completion_mask(token_ids, num_input_tokens[i], self.pad_token_id)

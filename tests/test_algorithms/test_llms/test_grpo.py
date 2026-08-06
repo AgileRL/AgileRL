@@ -2461,12 +2461,12 @@ class TestGRPOGetAction:
                 ),
             ) as mock_generate_with_vllm_colocate,
         ):
-            prompt_dict = {
+            observation = {
                 "input_ids": torch.randint(0, vocab_size, (1, 10)),
                 "attention_mask": torch.randint(0, 2, (1, 10)),
                 "text": "Write me a short story about a cat.",
             }
-            grpo.get_action([prompt_dict] * data_batch_size, training)
+            grpo.get_action([observation] * data_batch_size, training)
             mock_prepare_vllm_for_generation.assert_called()
             mock_generate_with_vllm_colocate.assert_called()
         mock_instance.sleep.assert_called()

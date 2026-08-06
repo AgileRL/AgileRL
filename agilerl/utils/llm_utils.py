@@ -245,24 +245,24 @@ def is_sft_prompts(batch: Mapping[str, object]) -> TypeGuard[SFTPrompts]:
 
 
 def normalize_observation_batch(
-    prompts: RolloutObservation | list[RolloutObservation],
+    observations: RolloutObservation | list[RolloutObservation],
 ) -> list[RolloutObservation]:
     """Normalize rollout observations into a list-of-dicts per sample.
 
     Supports both a list of per-sample dicts and a single stacked dict whose
     tensor/list values are batched on dimension 0.
 
-    :param prompts: The observations to normalize.
-    :type prompts: RolloutObservation | list[RolloutObservation]
-    :return: The normalized prompts.
+    :param observations: The observations to normalize.
+    :type observations: RolloutObservation | list[RolloutObservation]
+    :return: One observation dict per sample.
     :rtype: list[RolloutObservation]
     """
-    if isinstance(prompts, list):
-        return prompts
+    if isinstance(observations, list):
+        return observations
 
-    input_ids = prompts["input_ids"]
+    input_ids = observations["input_ids"]
     if not isinstance(input_ids, torch.Tensor) or input_ids.dim() == 1:
-        return [prompts]
+        return [observations]
 
     batch_size = int(input_ids.shape[0])
     if batch_size == 0:
@@ -272,7 +272,7 @@ def normalize_observation_batch(
     # Keys not declared on ``RolloutObservation`` (caller-supplied metadata) are
     # copied through unchanged, which a key-by-key typed construction can't do.
     samples: list[dict[str, object]] = [{} for _ in range(batch_size)]
-    for key, value in prompts.items():
+    for key, value in observations.items():
         if (
             isinstance(value, torch.Tensor)
             and value.dim() > 0
@@ -1771,23 +1771,23 @@ def build_completion_mask(
 
 
 def prepare_prompt_hf_generate(
-    prompt_dict: RolloutObservation, device: torch.device
+    observation: RolloutObservation, device: torch.device
 ) -> dict[str, torch.Tensor]:
-    """Prepare a prompt dictionary for HuggingFace generate.
+    """Turn one rollout observation into HuggingFace ``generate`` inputs.
 
-    ``attention_mask`` is taken from the dict when present (e.g. a padded
+    ``attention_mask`` is taken from the observation when present (e.g. a padded
     batch) and derived as all-ones otherwise (a single unpadded row, the
     ``RolloutHarness`` observation shape).
 
-    :param prompt_dict: The prompt dictionary to prepare.
-    :type prompt_dict: RolloutObservation
-    :param device: The device to move the prompt dictionary to.
+    :param observation: The observation to prepare.
+    :type observation: RolloutObservation
+    :param device: The device to move the tensors to.
     :type device: torch.device
     :return: ``input_ids`` / ``attention_mask`` moved to ``device``.
     :rtype: dict[str, torch.Tensor]
     """
-    input_ids = prompt_dict["input_ids"].to(device)
-    attention_mask = prompt_dict.get("attention_mask")
+    input_ids = observation["input_ids"].to(device)
+    attention_mask = observation.get("attention_mask")
     return {
         "input_ids": input_ids,
         "attention_mask": (

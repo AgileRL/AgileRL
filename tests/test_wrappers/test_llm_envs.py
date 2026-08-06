@@ -685,14 +685,14 @@ def test_batch_rollout_env_shuffle_is_group_consistent_full_permutation():
             self.done = False
             # A live (not-done) env always holds a token prompt; an empty
             # observation is the terminal sentinel.
-            self.current_prompt = {"input_ids": torch.ones(1, 2, dtype=torch.long)}
+            self.current_observation = {"input_ids": torch.ones(1, 2, dtype=torch.long)}
 
         def reset(self, seed=None, *, row_index=None):
             del seed
             self._last_row = row_index
             self.done = False
-            self.current_prompt = {"input_ids": torch.ones(1, 2, dtype=torch.long)}
-            return self.current_prompt, {}
+            self.current_observation = {"input_ids": torch.ones(1, 2, dtype=torch.long)}
+            return self.current_observation, {}
 
     def _factory():
         return _RowRecordingEnv()
