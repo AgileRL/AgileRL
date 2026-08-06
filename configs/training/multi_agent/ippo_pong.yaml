@@ -63,7 +63,7 @@ network:
             - 128
         activation: ReLU
 
-tournament_selection:
+selection_strategy:
     tournament_size: 2
     elitism: true
 

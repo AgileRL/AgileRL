@@ -10,6 +10,7 @@ from agilerl.algorithms.sft import SFT
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.population import Population
+from agilerl.protocols import SelectionStrategyProtocol
 from agilerl.training.llm.common import (
     _compute_training_steps,
     _validate_finetune_args,
@@ -17,8 +18,9 @@ from agilerl.training.llm.common import (
 from agilerl.utils.utils import (
     default_progress_bar,
     init_loggers,
+    resolve_selection_strategy,
+    run_selection_and_mutation,
     save_llm_checkpoint,
-    tournament_selection_and_mutation,
 )
 
 if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
@@ -37,6 +39,7 @@ def finetune_llm_sft(
     evo_steps: int | None = None,
     checkpoint_steps: int | None = None,
     checkpoint_path: str | None = None,
+    selection_strategy: SelectionStrategyProtocol | None = None,
     tournament: TournamentSelection | None = None,
     mutation: Mutations | None = None,
     wandb_api_key: str | None = None,
@@ -75,7 +78,9 @@ def finetune_llm_sft(
     :type checkpoint_steps: int, optional
     :param checkpoint_path: Directory for periodic checkpoints; falls back to elite_path, defaults to None
     :type checkpoint_path: str | None, optional
-    :param tournament: Tournament selection object, defaults to None
+    :param selection_strategy: Selection strategy driving evolution, defaults to None
+    :type selection_strategy: SelectionStrategyProtocol | None, optional
+    :param tournament: Deprecated alias for selection_strategy, defaults to None
     :type tournament: TournamentSelection, optional
     :param mutation: Mutation object, defaults to None
     :type mutation: Mutations, optional
@@ -96,9 +101,11 @@ def finetune_llm_sft(
     :return: The finetuned population.
     :rtype: PopulationType
     """
+    selection_strategy = resolve_selection_strategy(selection_strategy, tournament)
+
     _validate_finetune_args(
         evo_steps,
-        tournament,
+        selection_strategy,
         mutation,
         num_epochs,
         max_steps,
@@ -134,7 +141,7 @@ def finetune_llm_sft(
 
     # Initialize loggers and Population wrapper
     loggers = init_loggers(
-        algo=init_hp.get("ALGO", "SFT"),
+        algo=init_hp.get("ALGO", pop[0].algo),
         env_name=env.name,
         pbar=pbar,
         verbose=verbose,
@@ -190,8 +197,8 @@ def finetune_llm_sft(
 
         population.report_metrics(clear=True)
 
-        # Tournament selection and mutation
-        if tournament and mutation is not None:
+        # Selection and mutation
+        if selection_strategy is not None and mutation is not None:
             # evo_steps is guaranteed set here: it is validated as set on entry
             # when tournament and mutation are enabled.
             assert evo_steps is not None
@@ -199,9 +206,9 @@ def finetune_llm_sft(
                 if accelerator is not None:
                     accelerator.wait_for_everyone()
                 population.update(
-                    tournament_selection_and_mutation(
+                    run_selection_and_mutation(
+                        selection_strategy,
                         population=population.agents,
-                        tournament=tournament,
                         mutation=mutation,
                         env_name=env.name,
                         accelerator=accelerator,

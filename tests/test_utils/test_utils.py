@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import copy
+import os
 from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, Mock, call, patch
 
@@ -51,12 +52,19 @@ from agilerl.utils.utils import (
     make_skill_vect_envs,
     make_vect_envs,
     print_hyperparams,
+    resolve_selection_strategy,
+    run_selection_and_mutation,
     save_llm_checkpoint,
     save_population_checkpoint,
     suppress_verbose_logging,
     tournament_selection_and_mutation,
 )
 from agilerl.wrappers.learning import Skill
+from tests.helper_functions import (
+    FakeSelectionAgent,
+    make_multi_frequency_selection,
+    new_agents,
+)
 
 create_module = None
 if HAS_DEEPSPEED and HAS_VLLM:
@@ -942,6 +950,21 @@ class TestInitWandb:
             mock_wandb.init.assert_called_once()
             assert mock_wandb.init.call_args[1].get("tags") == ["test"]
 
+    def test_default_name_generated_when_wandb_name_unset(self, monkeypatch):
+        monkeypatch.delenv("WANDB_NAME", raising=False)
+        with patch("agilerl.utils.utils.wandb") as mock_wandb:
+            mock_wandb.api = MagicMock()
+            init_wandb(algo="DQN", env_name="CartPole-v1")
+            name = mock_wandb.init.call_args.kwargs["name"]
+            assert name.startswith("CartPole-v1-EvoHPO-DQN-")
+
+    def test_wandb_name_env_var_wins(self, monkeypatch):
+        monkeypatch.setenv("WANDB_NAME", "my-run")
+        with patch("agilerl.utils.utils.wandb") as mock_wandb:
+            mock_wandb.api = MagicMock()
+            init_wandb(algo="DQN", env_name="CartPole-v1")
+            assert "name" not in mock_wandb.init.call_args.kwargs
+
     def test_no_api_warns(self, monkeypatch):
         monkeypatch.delenv("WANDB_API_KEY", raising=False)
 
@@ -1037,20 +1060,210 @@ class TestInitLoggers:
         assert loggers[0]._accelerator is acc
 
 
-class TestTournamentSelectionAndMutation:
+class FakeAgent(FakeSelectionAgent):
+    """The operator's agent stand-in plus the accelerator round-trip bookkeeping."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.unwrap_calls = 0
+        self.wrap_calls = 0
+        self.saved: list[str] = []
+        self.loaded: list[str] = []
+
+    def save_checkpoint(self, path):
+        self.saved.append(path)
+        super().save_checkpoint(path)
+
+    def load_checkpoint(self, path):
+        self.loaded.append(path)
+
+    def unwrap_models(self):
+        self.unwrap_calls += 1
+
+    def wrap_models(self):
+        self.wrap_calls += 1
+
+
+class FakeAccelerator:
+    """Minimal stand-in for a HuggingFace accelerator."""
+
+    def __init__(self, is_main_process):
+        self.is_main_process = is_main_process
+        self.wait_count = 0
+
+    def wait_for_everyone(self):
+        self.wait_count += 1
+
+
+class FakeMutations:
+    mutate_elite = False
+
+    def mutation(self, population, pre_training_mut=False, indices=None):
+        return population
+
+
+class FakeStrategy:
+    """Minimal selection strategy exposing the unified select contract."""
+
+    def __init__(self, elite, new_population, indices):
+        self._result = (elite, new_population, indices)
+        self.select_calls: list = []
+
+    def select(self, population):
+        self.select_calls.append(population)
+        return self._result
+
+
+class RecordingMutations:
+    """Mutation stub that records the indices argument of every call."""
+
+    mutate_elite = False
+
+    def __init__(self, result=None):
+        self._result = result
+        self.indices_seen: list = []
+
+    def mutation(self, population, pre_training_mut=False, indices=None):
+        self.indices_seen.append(indices)
+        return self._result if self._result is not None else population
+
+
+def make_selection_population(subpop_fitnesses):
+    """Build a population of the accelerator-aware FakeAgent with unique indices."""
+    population = []
+    idx = 0
+    for subpop, fitnesses in subpop_fitnesses.items():
+        for fit in fitnesses:
+            population.append(FakeAgent(idx, subpop, fit))
+            idx += 1
+    return population
+
+
+class TestRunSelectionAndMutation:
+    def test_none_returns_population_unchanged(self):
+        pop = [1, 2, 3]
+        out = run_selection_and_mutation(
+            None, population=pop, mutation=RecordingMutations(), env_name="env"
+        )
+        assert out is pop
+
+    def test_selects_then_mutates_with_reported_indices(self):
+        pop = [object()]
+        evolved = [object(), object()]
+        strategy = FakeStrategy(elite=None, new_population=evolved, indices=[7])
+        mutation = RecordingMutations(result=["mutated"])
+
+        out = run_selection_and_mutation(
+            strategy, population=pop, mutation=mutation, env_name="env"
+        )
+
+        assert strategy.select_calls == [pop]
+        assert mutation.indices_seen == [[7]]
+        assert out == ["mutated"]
+
+    def test_tournament_style_indices_none_mutates_whole_population(self):
+        strategy = FakeStrategy(elite=None, new_population=[1], indices=None)
+        mutation = RecordingMutations()
+
+        run_selection_and_mutation(
+            strategy, population=[1], mutation=mutation, env_name="env"
+        )
+
+        assert mutation.indices_seen == [None]
+
+    def test_saves_elite_from_select_result(self, tmp_path):
+        elite = FakeAgent(0, 0, 5.0)
+        strategy = FakeStrategy(elite=elite, new_population=[elite], indices=None)
+        elite_path = str(tmp_path / "elite.pt")
+
+        run_selection_and_mutation(
+            strategy,
+            population=[elite],
+            mutation=RecordingMutations(),
+            env_name="env",
+            save_elite=True,
+            elite_path=elite_path,
+        )
+
+        assert elite.saved == [elite_path]
+
+    def test_multi_frequency_language_model_dispatches_through_llm_branch(
+        self, monkeypatch, tmp_path
+    ):
+        strategy = make_multi_frequency_selection()
+        elite = MagicMock(spec=LLMAlgorithm)
+        monkeypatch.setattr(strategy, "select", lambda pop: (elite, ["evolved"], [3]))
+        saved: list = []
+        monkeypatch.setattr(
+            "agilerl.utils.utils.save_llm_checkpoint",
+            lambda agent, path: saved.append((agent, path)),
+        )
+        mutation = RecordingMutations(result=["mutated"])
+        elite_path = str(tmp_path / "elite")
+
+        out = run_selection_and_mutation(
+            strategy,
+            population=[1],
+            mutation=mutation,
+            env_name="env",
+            language_model=True,
+            save_elite=True,
+            elite_path=elite_path,
+        )
+
+        assert out == ["mutated"]
+        assert mutation.indices_seen == [[3]]  # only the winner clones are perturbed
+        assert saved == [(elite, elite_path)]
+
+    def test_multi_frequency_language_model_consolidates_under_accelerator(
+        self, monkeypatch
+    ):
+        strategy = make_multi_frequency_selection()
+        monkeypatch.setattr(
+            strategy,
+            "select",
+            lambda pop: (MagicMock(spec=LLMAlgorithm), ["evolved"], [3]),
+        )
+        consolidated: list = []
+        monkeypatch.setattr(
+            "agilerl.utils.utils.consolidate_mutations",
+            lambda pop: consolidated.append(pop),
+        )
+        accelerator = FakeAccelerator(is_main_process=True)
+        # consolidate_mutations only receives the LLMAlgorithm members
+        mutated = MagicMock(spec=LLMAlgorithm)
+        mutation = RecordingMutations(result=[mutated])
+
+        run_selection_and_mutation(
+            strategy,
+            population=[1],
+            mutation=mutation,
+            env_name="env",
+            language_model=True,
+            accelerator=accelerator,
+        )
+
+        assert mutation.indices_seen == [[3]]
+        assert consolidated == [[mutated]]  # mutation decisions broadcast to workers
+
     def test_no_accelerator(self):
         population = [MagicMock(spec=EvolvableAlgorithm) for _ in range(3)]
         for agent in population:
             agent.steps = 100
         tournament = MagicMock(spec=TournamentSelection)
-        tournament.select = Mock(return_value=(population[0], population))
+        tournament.select = Mock(return_value=(population[0], population, None))
         mutation = MagicMock(spec=Mutations)
         mutation.mutation = Mock(return_value=population)
-        result = tournament_selection_and_mutation(
-            population, tournament, mutation, "CartPole-v1", algo="DQN"
+        result = run_selection_and_mutation(
+            tournament,
+            population=population,
+            mutation=mutation,
+            env_name="CartPole-v1",
+            algo="DQN",
         )
         tournament.select.assert_called_once()
-        mutation.mutation.assert_called_once()
+        # A tournament reports indices=None
+        mutation.mutation.assert_called_once_with(population, indices=None)
         assert len(result) == 3
 
     def test_worker_loads_checkpoint(self):
@@ -1062,7 +1275,7 @@ class TestTournamentSelectionAndMutation:
             agent.unwrap_models = Mock()
             agent.wrap_models = Mock()
         tournament = MagicMock(spec=TournamentSelection)
-        tournament.select = Mock(return_value=(population[0], population))
+        tournament.select = Mock(return_value=(population[0], population, None))
         mutation = MagicMock(spec=Mutations)
         mutation.mutation = Mock(return_value=population)
         accel = MagicMock(spec=Accelerator)
@@ -1071,11 +1284,11 @@ class TestTournamentSelectionAndMutation:
 
         with patch("agilerl.utils.utils.Path") as mock_path:
             mock_path.return_value.mkdir = Mock()
-            tournament_selection_and_mutation(
-                population,
+            run_selection_and_mutation(
                 tournament,
-                mutation,
-                "CartPole-v1",
+                population=population,
+                mutation=mutation,
+                env_name="CartPole-v1",
                 algo="DQN",
                 accelerator=accel,
             )
@@ -1088,14 +1301,14 @@ class TestTournamentSelectionAndMutation:
         elite.steps = 100
         elite.save_checkpoint = Mock()
         tournament = MagicMock(spec=TournamentSelection)
-        tournament.select = Mock(return_value=(elite, population))
+        tournament.select = Mock(return_value=(elite, population, None))
         mutation = MagicMock(spec=Mutations)
         mutation.mutation = Mock(return_value=population)
-        tournament_selection_and_mutation(
-            population,
+        run_selection_and_mutation(
             tournament,
-            mutation,
-            "CartPole-v1",
+            population=population,
+            mutation=mutation,
+            env_name="CartPole-v1",
             algo="DQN",
             elite_path="/tmp/elite",
             save_elite=True,
@@ -1103,7 +1316,7 @@ class TestTournamentSelectionAndMutation:
         elite.save_checkpoint.assert_called_once_with("/tmp/elite.pt")
 
     def test_language_model(self):
-        """Test tournament_selection_and_mutation with language model"""
+        """Test run_selection_and_mutation with a language model population."""
         population = [MagicMock(spec=LLMAlgorithm) for _ in range(3)]
         for agent in population:
             agent.mut = "lr"
@@ -1116,12 +1329,9 @@ class TestTournamentSelectionAndMutation:
         tournament = MagicMock(spec=TournamentSelection)
         mutation = MagicMock(spec=Mutations)
         mutation.mutation = Mock(return_value=population)
-        tournament.select = Mock(return_value=(population[0], population))
+        tournament.select = Mock(return_value=(population[0], population, None))
         env_name = "CartPole-v1"
-        algo = None
         elite_path = None
-        save_elite = True
-        language_model = True
         accelerator = MagicMock(spec=Accelerator)
         accelerator.is_main_process = True
         accelerator.wait_for_everyone = Mock()
@@ -1134,23 +1344,185 @@ class TestTournamentSelectionAndMutation:
                 "agilerl.utils.utils.consolidate_mutations"
             ) as mock_consolidate_mutations,
         ):
-            output_pop = tournament_selection_and_mutation(
-                population,
+            output_pop = run_selection_and_mutation(
                 tournament,
-                mutation,
-                env_name,
-                algo,
-                elite_path,
-                save_elite,
-                accelerator,
-                language_model,
+                population=population,
+                mutation=mutation,
+                env_name=env_name,
+                elite_path=elite_path,
+                save_elite=True,
+                accelerator=accelerator,
+                language_model=True,
             )
             mock_save_llm_checkpoint.assert_called_once_with(population[0], elite_path)
             mock_consolidate_mutations.assert_called_once_with(output_pop)
 
         tournament.select.assert_called_once_with(population)
-        mutation.mutation.assert_called_once_with(population)
+        mutation.mutation.assert_called_once_with(population, indices=None)
         accelerator.wait_for_everyone.assert_called()
+
+
+class TestTournamentSelectionAndMutationDeprecatedShim:
+    def test_forwards_to_run_selection_and_mutation_with_warning(self):
+        population = [MagicMock(spec=EvolvableAlgorithm) for _ in range(3)]
+        for agent in population:
+            agent.steps = 100
+        tournament = MagicMock(spec=TournamentSelection)
+        tournament.select = Mock(return_value=(population[0], population, None))
+        mutation = MagicMock(spec=Mutations)
+        mutation.mutation = Mock(return_value=population)
+
+        with pytest.warns(DeprecationWarning, match="deprecated"):
+            result = tournament_selection_and_mutation(
+                population, tournament, mutation, "CartPole-v1", algo="DQN"
+            )
+
+        tournament.select.assert_called_once()
+        mutation.mutation.assert_called_once_with(population, indices=None)
+        assert len(result) == 3
+
+
+class TestRunSelectionAndMutationMultiFrequency:
+    """The shared entry point orchestrates a real multi-frequency selection."""
+
+    def test_orchestration_schedules_subpops_at_their_frequencies(self):
+        strategy = make_multi_frequency_selection(
+            n_subpop=3, population_size=12, ratios=[1, 2, 3]
+        )
+        pop = make_selection_population(
+            {0: [4, 3, 2, 1], 1: [8, 7, 6, 5], 2: [12, 11, 10, 9]}
+        )
+        fired = []  # (cycle, subpop)
+
+        for cycle in range(1, 7):
+            new_pop = run_selection_and_mutation(
+                strategy, population=pop, mutation=FakeMutations(), env_name="env"
+            )
+            fired.extend(
+                (cycle, subpop)
+                for subpop in sorted(
+                    {a.subpopulation_id for a in new_agents(pop, new_pop)}
+                )
+            )
+            pop = new_pop
+
+        assert [c for c, s in fired if s == 0] == [1, 2, 3, 4, 5, 6]  # delta=1
+        assert [c for c, s in fired if s == 1] == [2, 4, 6]  # delta=2
+        assert [c for c, s in fired if s == 2] == [3, 6]  # delta=3
+
+    def test_orchestration_saves_global_elite(self, tmp_path):
+        strategy = make_multi_frequency_selection(
+            n_subpop=2, population_size=8, ratios=[1, 2]
+        )
+        pop = make_selection_population({0: [4, 3, 2, 1], 1: [8, 7, 6, 5]})
+        elite_path = str(tmp_path / "best.pt")
+
+        run_selection_and_mutation(
+            strategy,
+            population=pop,
+            mutation=FakeMutations(),
+            env_name="env",
+            save_elite=True,
+            elite_path=elite_path,
+        )
+
+        assert os.path.exists(elite_path)
+
+    def test_orchestration_accelerator_main_process_evolves_and_saves(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.chdir(tmp_path)
+        strategy = make_multi_frequency_selection(
+            n_subpop=2, population_size=8, ratios=[1, 2]
+        )
+        pop = make_selection_population({0: [4, 3, 2, 1], 1: [8, 7, 6, 5]})
+        accel = FakeAccelerator(is_main_process=True)
+        elite_path = str(tmp_path / "best.pt")
+
+        out = run_selection_and_mutation(
+            strategy,
+            population=pop,
+            mutation=FakeMutations(),
+            env_name="env",
+            accelerator=accel,
+            save_elite=True,
+            elite_path=elite_path,
+        )
+
+        # select() ran on the main process: subpop 0 (delta 1) fired and reset its counter,
+        # subpop 1 (delta 2) has not fired yet
+        assert strategy.counters == [0, 1]
+        assert os.path.exists(elite_path)
+        for agent in pop:
+            assert agent.unwrap_calls == 1
+        for agent in out:
+            assert agent.wrap_calls == 1
+            assert len(agent.saved) == 1
+            assert agent.loaded == []
+        assert accel.wait_count == 4
+
+    def test_orchestration_accelerator_worker_loads_without_evolving(self):
+        strategy = make_multi_frequency_selection(
+            n_subpop=2, population_size=8, ratios=[1, 2]
+        )
+        pop = make_selection_population({0: [4, 3, 2, 1], 1: [8, 7, 6, 5]})
+        accel = FakeAccelerator(is_main_process=False)
+
+        out = run_selection_and_mutation(
+            strategy,
+            population=pop,
+            mutation=FakeMutations(),
+            env_name="env",
+            accelerator=accel,
+            algo="DQN",
+        )
+
+        assert out is pop
+        assert strategy.counters == [0, 0]  # counters untouched -> select() did not run
+        for i, agent in enumerate(out):
+            assert agent.unwrap_calls == 1
+            assert agent.wrap_calls == 1
+            assert agent.loaded == [f"models/env/DQN_{i}.pt"]
+            assert agent.saved == []
+        assert accel.wait_count == 4
+
+    def test_orchestration_assigns_missing_subpopulations(self):
+        strategy = make_multi_frequency_selection(
+            n_subpop=2, population_size=8, ratios=[1, 2]
+        )
+        pop = make_selection_population({None: [8, 7, 6, 5, 4, 3, 2, 1]})
+        for agent in pop:
+            agent.subpopulation_id = None
+
+        run_selection_and_mutation(
+            strategy, population=pop, mutation=FakeMutations(), env_name="env"
+        )
+
+        assert sorted(a.subpopulation_id for a in pop) == [0, 0, 0, 0, 1, 1, 1, 1]
+
+
+class TestResolveSelectionStrategy:
+    def test_resolve_prefers_new_argument_without_warning(self, recwarn):
+        strategy = make_multi_frequency_selection()
+        assert resolve_selection_strategy(strategy, None) is strategy
+        assert len(recwarn) == 0
+
+    def test_resolve_folds_deprecated_tournament_with_warning(self):
+        tournament = TournamentSelection(
+            tournament_size=2, elitism=True, population_size=4
+        )
+        with pytest.warns(DeprecationWarning, match="deprecated"):
+            resolved = resolve_selection_strategy(None, tournament)
+        assert resolved is tournament
+
+    def test_resolve_conflict_prefers_selection_strategy(self):
+        strategy = make_multi_frequency_selection()
+        tournament = TournamentSelection(
+            tournament_size=2, elitism=True, population_size=4
+        )
+        with pytest.warns(DeprecationWarning, match="deprecated"):
+            resolved = resolve_selection_strategy(strategy, tournament)
+        assert resolved is strategy
 
 
 class TestGatherTensor:

@@ -38,7 +38,7 @@ from agilerl.algorithms.core.registry import HyperparameterConfig
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.logger import CSVLogger, StdOutLogger, TensorboardLogger, WandbLogger
-from agilerl.protocols import EvolvableAlgorithmProtocol
+from agilerl.protocols import EvolvableAlgorithmProtocol, SelectionStrategyProtocol
 from agilerl.typing import BPTTSequenceType, InfosDict, PopulationType
 from agilerl.utils.algo_utils import CosineLRScheduleConfig, DummyOptimizer, clone_llm
 from agilerl.vector.pz_async_vec_env import AsyncPettingZooVecEnv
@@ -1218,9 +1218,36 @@ def save_population_checkpoint(
             agent.save_checkpoint(current_checkpoint_path)
 
 
-def tournament_selection_and_mutation(
+def _save_standard_elite(
+    elite: EvolvableAlgorithmProtocol,
+    *,
+    env_name: str,
+    algo: str,
+    elite_path: str | None,
+) -> None:
+    """Checkpoint a non-LLM elite agent to disk.
+
+    :param elite: The elite agent to save.
+    :type elite: EvolvableAlgorithmProtocol
+    :param env_name: Environment name, used to build the default filename.
+    :type env_name: str
+    :param algo: Algorithm name, used to build the default filename.
+    :type algo: str
+    :param elite_path: Explicit .pt path to save to; when None a
+        {env_name}-elite_{algo}.pt name is used.
+    :type elite_path: str | None
+    """
+    elite_save_path = (
+        elite_path.split(".pt")[0]
+        if elite_path is not None
+        else f"{env_name}-elite_{algo}"
+    )
+    elite.save_checkpoint(f"{elite_save_path}.pt")
+
+
+def run_selection_and_mutation(
+    selection_strategy: SelectionStrategyProtocol | None,
     population: list[AgentT],
-    tournament: TournamentSelection,
     mutation: Mutations,
     env_name: str,
     algo: str | None = None,
@@ -1229,34 +1256,39 @@ def tournament_selection_and_mutation(
     accelerator: Accelerator | None = None,
     language_model: bool | None = False,
 ) -> list[AgentT]:
-    """Perform tournament selection and mutation on a population of agents.
+    """Perform a hyperparameter optimisation step on a population of agents.
 
-    :param population: Population of agents
+    :param selection_strategy: The selection strategy driving evolution; None
+        returns the population unchanged.
+    :type selection_strategy: SelectionStrategyProtocol | None
+    :param population: Population of agents.
     :type population: list[AgentT]
-    :param tournament: Tournament selection object
-    :type tournament: TournamentSelection
-    :param mutation: Mutation object
+    :param mutation: Mutation object.
     :type mutation: Mutations
-    :param env_name: Environment name
+    :param env_name: Environment name.
     :type env_name: str
-    :param elite_path: Path to save elite agent, defaults to None
+    :param algo: Algorithm name; inferred from the population when None. Defaults to None.
+    :type algo: str, optional
+    :param elite_path: Path to save the elite agent, defaults to None.
     :type elite_path: str, optional
-    :param save_elite: Flag to save elite agent, defaults to False
+    :param save_elite: Flag to save the elite agent, defaults to False.
     :type save_elite: bool, optional
-    :param accelerator: Accelerator for distributed computing, defaults to None
+    :param accelerator: Accelerator for distributed computing, defaults to None.
     :type accelerator: accelerate.Accelerator(), optional
-    :param language_model: Flag to indicate if the environment is a language model, defaults to False
+    :param language_model: Flag indicating an LLM environment, defaults to False.
     :type language_model: bool, optional
-    :return: Population of agents after tournament selection and mutation
+    :return: Population of agents after evolution.
     :rtype: list[AgentT]
     """
-    if algo is None:
-        algo = population[0].__class__.__name__
+    if selection_strategy is None:
+        return population
+
+    algo = algo or population[0].__class__.__name__
 
     if language_model:
-        elite, population = tournament.select(population)
+        elite, population, indices = selection_strategy.select(population)
         if accelerator is None or accelerator.is_main_process:
-            population = mutation.mutation(population)
+            population = mutation.mutation(population, indices=indices)
         if accelerator is not None:
             accelerator.wait_for_everyone()
             # This branch only runs for LLM populations.
@@ -1273,46 +1305,124 @@ def tournament_selection_and_mutation(
 
     elite = None
     if accelerator is not None:
-        # Save temporary models for accelerator processes
+        # Unwrap every model from the accelerator before selecting and mutating.
         accel_temp_models_path = f"models/{env_name}"
         if accelerator.is_main_process:
             Path(accel_temp_models_path).mkdir(parents=True, exist_ok=True)
-        # Need to unwrap models from acccelerator before selecting and mutating
         accelerator.wait_for_everyone()
         for model in population:
             model.unwrap_models()
         accelerator.wait_for_everyone()
-        # Perform tournament selection and mutation on main process
         if accelerator.is_main_process:
-            elite, population = tournament.select(population)
-            population = mutation.mutation(population)
+            elite, population, indices = selection_strategy.select(population)
+            population = mutation.mutation(population, indices=indices)
             for pop_i, model in enumerate(population):
                 model.save_checkpoint(f"{accel_temp_models_path}/{algo}_{pop_i}.pt")
         accelerator.wait_for_everyone()
 
-        # Load models back to accelerator processes
+        # Load the evolved models back onto the worker processes.
         if not accelerator.is_main_process:
             for pop_i, model in enumerate(population):
                 model.load_checkpoint(f"{accel_temp_models_path}/{algo}_{pop_i}.pt")
         accelerator.wait_for_everyone()
 
-        # Wrap models back to accelerator
+        # Wrap the models back onto the accelerator.
         for model in population:
             model.wrap_models()
     else:
-        # Perform tournament selection and mutation
-        elite, population = tournament.select(population)
-        population = mutation.mutation(population)
+        elite, population, indices = selection_strategy.select(population)
+        population = mutation.mutation(population, indices=indices)
 
     if save_elite and elite is not None:
-        elite_save_path = (
-            elite_path.split(".pt")[0]
-            if elite_path is not None
-            else f"{env_name}-elite_{algo}"
-        )
-        elite.save_checkpoint(f"{elite_save_path}.pt")
+        _save_standard_elite(elite, env_name=env_name, algo=algo, elite_path=elite_path)
 
     return population
+
+
+def tournament_selection_and_mutation(
+    population: PopulationType,
+    tournament: TournamentSelection,
+    mutation: Mutations,
+    env_name: str,
+    algo: str | None = None,
+    elite_path: str | None = None,
+    save_elite: bool = False,
+    accelerator: Accelerator | None = None,
+    language_model: bool | None = False,
+) -> PopulationType:
+    """Deprecated. Use :func:`run_selection_and_mutation` instead.
+
+
+    :param population: Population of agents.
+    :type population: list[PopulationType]
+    :param tournament: Tournament selection object.
+    :type tournament: TournamentSelection
+    :param mutation: Mutation object.
+    :type mutation: Mutations
+    :param env_name: Environment name.
+    :type env_name: str
+    :param algo: Algorithm name, defaults to None.
+    :type algo: str, optional
+    :param elite_path: Path to save the elite agent, defaults to None.
+    :type elite_path: str, optional
+    :param save_elite: Flag to save the elite agent, defaults to False.
+    :type save_elite: bool, optional
+    :param accelerator: Accelerator for distributed computing, defaults to None.
+    :type accelerator: accelerate.Accelerator(), optional
+    :param language_model: Flag to indicate a language model environment, defaults to False.
+    :type language_model: bool, optional
+    :return: Population of agents after tournament selection and mutation.
+    :rtype: list[PopulationType]
+    """
+    warnings.warn(
+        "tournament_selection_and_mutation is deprecated; use "
+        "run_selection_and_mutation instead.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    return run_selection_and_mutation(
+        tournament,
+        population=population,
+        mutation=mutation,
+        env_name=env_name,
+        algo=algo,
+        elite_path=elite_path,
+        save_elite=save_elite,
+        accelerator=accelerator,
+        language_model=bool(language_model),
+    )
+
+
+def resolve_selection_strategy(
+    selection_strategy: SelectionStrategyProtocol | None,
+    tournament: TournamentSelection | None,
+) -> SelectionStrategyProtocol | None:
+    """Fold the deprecated tournament trainer argument into selection_strategy.
+
+    :param selection_strategy: The selection strategy passed via the new argument.
+    :type selection_strategy: SelectionStrategyProtocol | None
+    :param tournament: The strategy passed via the deprecated tournament argument.
+    :type tournament: TournamentSelection | None
+    :return: The resolved selection strategy.
+    :rtype: SelectionStrategyProtocol | None
+    """
+    if tournament is None:
+        return selection_strategy
+    warnings.warn(
+        "The 'tournament' argument to the AgileRL trainers is deprecated; pass the "
+        "selection strategy via 'selection_strategy' instead.",
+        DeprecationWarning,
+        stacklevel=3,
+    )
+    if selection_strategy is None:
+        return tournament
+    if selection_strategy is not tournament:
+        warnings.warn(
+            "Both 'selection_strategy' and the deprecated 'tournament' argument were "
+            "provided; ignoring 'tournament'.",
+            stacklevel=3,
+        )
+    return selection_strategy
 
 
 def init_wandb(
@@ -1364,12 +1474,15 @@ def init_wandb(
     kwargs: dict[str, Any] = {
         "config": config_dict,
         "project": project,  # wandb project where this run will be logged
-        "name": "{}-EvoHPO-{}-{}".format(
+    }
+    # A WANDB_NAME environment override wins; only generate a default run name
+    # when it is unset, since passing name explicitly would silently ignore it.
+    if not os.environ.get("WANDB_NAME"):
+        kwargs["name"] = "{}-EvoHPO-{}-{}".format(
             env_name,
             algo,
             datetime.now().strftime("%m%d%Y%H%M%S"),
-        ),
-    }
+        )
 
     if addl_args is not None:
         kwargs.update(addl_args)

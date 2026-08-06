@@ -7,6 +7,7 @@ Utils
    arena_utils
    utils
    algo_utils
+   population_utils
    cache
    evolvable_networks
    ilql_utils

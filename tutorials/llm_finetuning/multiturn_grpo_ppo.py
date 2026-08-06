@@ -221,7 +221,7 @@ def main() -> None:
             elite_path=args.output_dir,
             wb=args.wandb,
             evo_steps=None,
-            tournament=None,
+            selection_strategy=None,
             mutation=None,
             evaluation_interval=args.evaluation_interval,
             max_reward=1.0,

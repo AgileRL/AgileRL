@@ -226,10 +226,10 @@ def run_demo(recurrent: bool = True) -> None:
             print(
                 f"\nAgent achieved required score {required_score}. Stopping training.",
             )
-            elite, _ = tournament.select(pop)
+            elite, _, _ = tournament.select(pop)
             training_complete = True
         else:
-            elite, pop = tournament.select(pop)
+            elite, pop, _ = tournament.select(pop)
             pop = mutations.mutation(pop)
     pbar.close()
     env.close()
@@ -249,7 +249,7 @@ def run_demo(recurrent: bool = True) -> None:
                 loop=eval_loop,
                 vectorized=False,
             )
-        elite, _ = tournament.select(pop)
+        elite, _, _ = tournament.select(pop)
 
     render_env = gym.wrappers.RecordVideo(
         env_to_wrap,

@@ -404,6 +404,7 @@ class EvolvableAlgorithm(ABC, Generic[ExperiencesT], metaclass=RegistryMeta):
         self._index = index
         self.registry = MutationRegistry(hp_config)
         self.training = True
+        self.subpopulation_id: int | None = None
 
     @property
     def index(self) -> int:
@@ -6249,12 +6250,8 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
     def _prepare_vllm_for_generation(self) -> None:
         assert self.vllm_config is not None  # _configure_vllm guarantees a config
         if self.use_memory_efficient_params:
-            # Colocated: park the trainer's own base on CPU *before* waking vLLM
-            # so the rollout engine owns the GPU and the two bases never coexist
-            # on-device. The training step brings it back via
-            # ``memory_efficient_params_context``.
-            move_params_to_cpu(self._get_unwrapped_actor())
-            if self.accelerator is None or self.accelerator.is_main_process:
+            moved = move_params_to_cpu(self._get_unwrapped_actor())
+            if moved and (self.accelerator is None or self.accelerator.is_main_process):
                 log_cuda_memory_snapshot(
                     "trainer base offloaded to CPU (before vLLM wake)"
                 )
