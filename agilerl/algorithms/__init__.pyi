@@ -1,5 +1,10 @@
 # Copyright 2026 AgileRL
 # SPDX-License-Identifier: Apache-2.0
+#
+# Public surface of agilerl.algorithms. This stub is not documentation: it is
+# read at runtime by lazy_loader.attach_stub in __init__.py, which turns each
+# line below into a deferred import. Add new algorithms here — an entry that is
+# missing from this file is not importable from the package root.
 
 from .bc_lm import BC_LM as BC_LM
 from .bc_lm import BC_Evaluator as BC_Evaluator

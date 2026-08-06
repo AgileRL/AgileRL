@@ -3,8 +3,17 @@
 
 """Algorithm implementations.
 
-Re-exports are lazy; the public surface is declared in ``__init__.pyi``. LLM
-algorithms are withheld unless the ``llm`` extra is installed.
+Importing an algorithm here does not import its module: ``lazy_loader`` defers
+each one until first access, so ``from agilerl.algorithms import DQN`` no longer
+pays for torch/transformers/vLLM pulled in by the LLM algorithms.
+
+**Adding an algorithm:** declare it in ``__init__.pyi``, not here. That stub is
+the single source of truth for the public surface — it is what ``lazy_loader``
+reads at runtime and what type checkers and IDEs resolve against. This module
+holds no import list of its own.
+
+Algorithms needing the ``llm`` extra are listed in ``_LLM_ALGORITHMS`` and are
+withheld from ``__all__``/``dir()`` when that extra is absent.
 """
 
 from collections.abc import Callable
