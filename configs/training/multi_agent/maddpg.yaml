@@ -14,7 +14,7 @@ algorithm:
     dt: 0.01
 
 environment:
-    name: pettingzoo.mpe.simple_speaker_listener_v4
+    name: mpe2.simple_speaker_listener_v4
     num_envs: 16
 mutation:
     probabilities:

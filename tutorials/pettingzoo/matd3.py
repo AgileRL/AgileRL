@@ -10,7 +10,7 @@ import os
 
 import numpy as np
 import torch
-from pettingzoo.mpe import simple_speaker_listener_v4
+from mpe2 import simple_speaker_listener_v4
 from tensordict import TensorDictBase
 
 from agilerl.algorithms import MATD3

@@ -41,7 +41,7 @@ function.
 
 .. code-block:: python
 
-    from pettingzoo.mpe import simple_speaker_listener_v4
+    from mpe2 import simple_speaker_listener_v4
 
     from agilerl.utils.utils import make_multi_agent_vect_envs
 
@@ -228,7 +228,7 @@ Below is an example manifest for training MADDPG on the simple-speaker-listener-
       dt: 0.01
 
     environment:
-      name: pettingzoo.mpe.simple_speaker_listener_v4
+      name: mpe2.simple_speaker_listener_v4
       num_envs: 16
 
     training:
@@ -304,7 +304,7 @@ In the snippet below, we show an example of how to create a population of MADDPG
     .. code-block:: python
 
         import torch
-        from pettingzoo.mpe import simple_speaker_listener_v4
+        from mpe2 import simple_speaker_listener_v4
 
         from agilerl.algorithms import MADDPG
         from agilerl.vector.pz_async_vec_env import AsyncPettingZooVecEnv
@@ -455,7 +455,7 @@ Alternatively, use a custom training loop. Combining all of the above:
 
         import numpy as np
         import torch
-        from pettingzoo.mpe import simple_speaker_listener_v4
+        from mpe2 import simple_speaker_listener_v4
 
         from tensordict import TensorDictBase
 
@@ -667,7 +667,7 @@ In the snippet below, we show an example of how to create a population of IPPO a
     .. code-block:: python
 
         import torch
-        from pettingzoo.mpe import simple_speaker_listener_v4
+        from mpe2 import simple_speaker_listener_v4
 
         from agilerl.algorithms import IPPO
         from agilerl.vector.pz_async_vec_env import AsyncPettingZooVecEnv
