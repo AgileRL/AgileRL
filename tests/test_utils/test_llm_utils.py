@@ -61,6 +61,7 @@ from agilerl.utils.llm_utils import (
     get_model_name_or_path,
     get_state_dict,
     list_peft_matched_module_keys,
+    load_pad_token_configs,
     log_cuda_memory_snapshot,
     masked_mean,
     masked_var,
@@ -3892,6 +3893,19 @@ class TestResolvePadTokenId:
 
         assert tokenizer.pad_token_id == 2
         assert tokenizer.pad_token == "</s>"
+
+    def test_apply_pad_converts_the_id_when_pad_is_neither_eos_nor_unk(self) -> None:
+        tokenizer = self._tokenizer(eos_id=2, pad_id=None, unk_id=None)
+        tokenizer.convert_ids_to_tokens = lambda token_id: f"<tok_{int(token_id)}>"
+
+        apply_pad_token_id(tokenizer, 7)
+
+        assert tokenizer.pad_token_id == 7
+        assert tokenizer.pad_token == "<tok_7>"
+
+    def test_load_pad_token_configs_short_circuits_without_a_model_path(self) -> None:
+        assert load_pad_token_configs(None) == (None, None)
+        assert load_pad_token_configs("") == (None, None)
 
 
 class TestAsOptionalIntAndEosIdSet:

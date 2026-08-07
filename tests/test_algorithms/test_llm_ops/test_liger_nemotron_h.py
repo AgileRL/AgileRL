@@ -3,6 +3,7 @@
 
 """Unit tests for Nemotron-H Liger registration and apply helpers."""
 
+import importlib
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -408,3 +409,32 @@ class TestLceForward:
 
         assert seen
         assert seen[0].shape[1] == 2
+
+
+class TestImportFallbacks:
+    def test_reload_without_llm_or_liger_keeps_names_resolvable(
+        self, monkeypatch
+    ) -> None:
+        import agilerl
+
+        monkeypatch.setattr(agilerl, "HAS_LLM_DEPENDENCIES", False)
+        monkeypatch.setattr(agilerl, "HAS_LIGER_KERNEL", False)
+        try:
+            module = importlib.reload(liger_nemotron_h)
+            assert module.HAS_LIGER is False
+            assert module.modeling_nemotron_h is None
+            assert module.MODEL_TYPE_TO_APPLY_LIGER_FN == {}
+            for name in (
+                "_patch_rms_norm_module",
+                "LigerRMSNorm",
+                "LigerReLUSquared",
+                "liger_rotary_pos_emb",
+                "LigerCrossEntropyLoss",
+                "lce_maybe_trainable_lm_head",
+                "unpack_cross_entropy_result",
+                "LigerCausalLMOutputWithPast",
+            ):
+                assert getattr(module, name) is None
+        finally:
+            monkeypatch.undo()
+            importlib.reload(liger_nemotron_h)

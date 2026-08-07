@@ -221,6 +221,24 @@ class TestReadonlyCheckpointAttributes:
         assert not _is_readonly_property(stub, "mutable")
         assert not _is_readonly_property(stub, "_m")
 
+    def test_load_checkpoint_skips_readonly_property_keys(self, vector_space, tmp_path):
+        class _WithDerived(DummyRLAlgorithm):
+            @property
+            def aux_metric_name(self) -> str:
+                return "kl"
+
+        writer = DummyRLAlgorithm(vector_space, spaces.Discrete(2), index=0)
+        path = str(tmp_path / "readonly_key.pt")
+        writer.save_checkpoint(path)
+        checkpoint = torch.load(path, weights_only=False)
+        checkpoint["aux_metric_name"] = "stale"
+        torch.save(checkpoint, path)
+
+        agent = _WithDerived(vector_space, spaces.Discrete(2), index=0)
+        agent.load_checkpoint(path)
+
+        assert agent.aux_metric_name == "kl"
+
     def test_restore_checkpoint_attributes_skips_readonly_properties(self):
         class Stub:
             def __init__(self) -> None:
@@ -238,6 +256,20 @@ class TestReadonlyCheckpointAttributes:
         assert stub.beta == 0.0
         assert stub.aux_metric_name == "liger_clip_fraction"
         assert not hasattr(stub, "lora_config")
+
+
+class TestRaiseIfLossNotFiniteOnAnyRank:
+    def test_all_ranks_finite_returns_without_raising(self):
+        stub = SimpleNamespace(accelerator=SimpleNamespace(num_processes=2))
+        with patch(
+            "agilerl.algorithms.core.base.allreduce_minmax_int",
+            return_value=(0, 0),
+        ) as reduce_call:
+            result = LLMAlgorithm._raise_if_loss_not_finite_on_any_rank(
+                stub, torch.tensor(1.0)
+            )
+        assert result is None
+        reduce_call.assert_called_once()
 
 
 class TestGetOptimizerCls:
@@ -6124,6 +6156,36 @@ class TestLLMConfigureVllmAcceleratorPaths:
         assert agent.llm is mock_llm_instance
         mock_llm_cls.assert_called_once()
         acc.wait_for_everyone.assert_called()
+
+    def test_configure_vllm_marks_3d_moe_lora_capable_models(self, caplog):
+        acc = _make_mock_accelerator(num_processes=1)
+        agent = _make_llm_agent(accelerator=acc)
+        vllm_config = MagicMock()
+        vllm_config.tensor_parallel_size = 1
+        vllm_config.gpu_memory_utilization = 0.9
+        vllm_config.max_num_seqs = 256
+        vllm_config.sleep_mode = False
+        agent.vllm_config = vllm_config
+        agent.max_model_len = 512
+        agent.pretrained_model_name_or_path = "mock-model"
+        agent.lora_config = MagicMock(target_parameters=["experts.gate_up_proj"])
+
+        with (
+            patch(
+                "agilerl.algorithms.core.base.LLM",
+                return_value=MagicMock(),
+                create=True,
+            ),
+            patch(
+                "agilerl.algorithms.core.base.patch_vllm_3d_moe_lora_flag",
+                return_value=True,
+            ) as flag,
+            caplog.at_level(logging.INFO, logger="agilerl.algorithms.core.base"),
+        ):
+            agent._configure_vllm()
+
+        flag.assert_called_once()
+        assert "stacked-3D MoE LoRA" in caplog.text
 
     @pytest.mark.parametrize(
         "kv_cache_memory_bytes",

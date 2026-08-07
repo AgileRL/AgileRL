@@ -10,6 +10,7 @@ deepspeed, transformers or a GPU.
 import collections
 import enum
 import logging
+from types import SimpleNamespace
 from typing import ClassVar
 
 import pytest
@@ -353,6 +354,26 @@ class TestTryImportAndResolvers:
         monkeypatch.setattr(third_party_patches, "_try_import", lambda _path: None)
 
         assert third_party_patches._resolve_mixer_class() is None
+
+    def test_resolve_mixer_class_returns_the_mixer(self, monkeypatch) -> None:
+        mixer = type("NemotronHMamba2Mixer", (), {})
+        monkeypatch.setattr(
+            third_party_patches,
+            "_try_import",
+            lambda _path: SimpleNamespace(NemotronHMamba2Mixer=mixer),
+        )
+
+        assert third_party_patches._resolve_mixer_class() is mixer
+
+    def test_resolve_zero3_init_returns_none_when_module_missing(
+        self, monkeypatch
+    ) -> None:
+        monkeypatch.setattr(third_party_patches, "_try_import", lambda _path: None)
+
+        assert third_party_patches._resolve_zero3_init() is None
+
+    def test_snapshot_skips_attributes_the_coordinator_lacks(self) -> None:
+        assert third_party_patches._snapshot_trace_state(object()) == {}
 
     def test_resolve_zero3_init_returns_none_when_attribute_missing(
         self, monkeypatch

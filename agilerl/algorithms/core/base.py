@@ -1422,8 +1422,6 @@ class EvolvableAlgorithm(ABC, Generic[ExperiencesT], metaclass=RegistryMeta):
                 continue
 
             value = checkpoint.get(attribute)
-            if _is_readonly_property(self, attribute):
-                continue
             if isinstance(value, torch.Tensor) and isinstance(
                 getattr(self, attribute, None), torch.Tensor
             ):

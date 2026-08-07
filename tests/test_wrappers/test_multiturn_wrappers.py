@@ -383,6 +383,20 @@ class TestTokenObservationWrapperChatTemplateBoundary:
         assert "FEEDBACK" in decoded
         assert decoded.endswith("<|start_header_id|>assistant<|end_header_id|>\n\n")
 
+    def test_non_strict_feedback_tokenization_returns_the_template_boundary(
+        self,
+    ) -> None:
+        w = _bare_wrapper()
+        w.apply_chat_template = True
+        w.strict_chat_template_boundary = False
+        w.tokenizer = _ChatTemplateRecordingTokenizer(_render_gemma_chat)
+
+        out = w._tokenize_feedback("FEEDBACK")
+        expected = w._chat_template_boundary_ids("FEEDBACK")
+
+        assert expected is not None
+        assert torch.equal(out, expected)
+
     def test_returns_none_when_template_renderer_raises(self) -> None:
         w = _bare_wrapper()
         w.apply_chat_template = True

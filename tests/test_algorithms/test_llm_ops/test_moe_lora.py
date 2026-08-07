@@ -3,6 +3,7 @@
 
 import copy
 from types import SimpleNamespace
+from unittest import mock
 
 import pytest
 import torch
@@ -11,6 +12,7 @@ from peft import LoraConfig, inject_adapter_in_model
 from peft.tuners.lora.layer import ParamWrapper
 from torch import nn
 
+from agilerl.algorithms.core.llm_ops import moe_lora as moe_lora_module
 from agilerl.algorithms.core.llm_ops.fused_lora import (
     adapter_aligned_chunks,
     patch_lora_for_fused_forward,
@@ -735,3 +737,110 @@ class TestMoeLoraHelpers:
             forward = 123  # not a callable signature
 
         assert _forward_param_names(_Bad()) == []
+
+
+class TestMoeLoraFallbackBranches:
+    def test_counts_tensor_returns_tensor_input_unchanged(self) -> None:
+        counts = torch.tensor([3, 1])
+        assert moe_lora_module._counts_tensor(counts, torch.device("cpu")) is counts
+
+    def test_routed_projection_names_rejects_wrong_forward_params(self) -> None:
+        class _WrongForwardNames(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.down_proj = nn.Parameter(torch.zeros(2, 4, 3))
+                self.act_fn = F.silu
+
+            def forward(self, hidden, ids):
+                return hidden
+
+        assert moe_lora_module._routed_projection_names(_WrongForwardNames()) is None
+
+    def test_routed_projection_names_rejects_biased_and_odd_up_projections(
+        self,
+    ) -> None:
+        class _Base(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.down_proj = nn.Parameter(torch.zeros(2, 4, 3))
+                self.act_fn = F.silu
+
+            def forward(self, hidden_states, top_k_index, top_k_weights):
+                return hidden_states
+
+        biased = _Base()
+        biased.gate_up_proj = nn.Parameter(torch.zeros(2, 6, 4))
+        biased.gate_up_proj_bias = nn.Parameter(torch.zeros(2, 6))
+        assert moe_lora_module._routed_projection_names(biased) is None
+
+        odd = _Base()
+        odd.gate_up_proj = nn.Parameter(torch.zeros(2, 5, 4))
+        assert moe_lora_module._routed_projection_names(odd) is None
+
+    def test_is_routed_experts_module_discriminates(self) -> None:
+        assert moe_lora_module._is_routed_experts_module(_RoutedExperts()) is True
+        assert moe_lora_module._is_routed_experts_module(nn.Linear(2, 2)) is False
+
+    def test_resolve_adapters_unmerges_a_disabled_merged_wrapper(self) -> None:
+        _, upgraded = _routed_pair()
+        wrapper = next(
+            m for m in _wrappers(upgraded) if isinstance(m, RoutedExpertsLoraWrapper)
+        )
+        wrapper.merge()
+        assert wrapper.merged
+        wrapper.enable_adapters(False)
+
+        assert moe_lora_module._resolve_adapters(wrapper) == []
+        assert not wrapper.merged
+
+    def test_routed_lora_residual_requires_a_recognized_layout(self) -> None:
+        with pytest.raises(RuntimeError, match="recognized projection layout"):
+            moe_lora_module._routed_lora_residual(
+                torch.zeros(1, 4),
+                torch.zeros(1, 2, dtype=torch.long),
+                torch.zeros(1, 2),
+                {},
+                nn.Linear(4, 4),
+                {},
+            )
+
+    def test_routed_forward_delegates_nonstandard_calls_to_param_wrapper(self) -> None:
+        _, upgraded = _routed_pair()
+        wrapper = next(
+            m for m in _wrappers(upgraded) if isinstance(m, RoutedExpertsLoraWrapper)
+        )
+        hidden_3d = torch.randn(1, 2, HIDDEN)
+        top_k_index = torch.zeros(2, TOP_K, dtype=torch.long)
+        top_k_weights = torch.full((2, TOP_K), 0.5)
+        sentinel = torch.zeros(1)
+
+        with mock.patch.object(
+            ParamWrapper, "forward", return_value=sentinel
+        ) as base_forward:
+            out = wrapper.forward(hidden_3d, top_k_index, top_k_weights)
+
+        assert out is sentinel
+        base_forward.assert_called_once()
+
+    def test_routed_forward_delegates_when_layout_becomes_unrecognized(
+        self, monkeypatch
+    ) -> None:
+        _, upgraded = _routed_pair()
+        wrapper = next(
+            m for m in _wrappers(upgraded) if isinstance(m, RoutedExpertsLoraWrapper)
+        )
+        hidden = torch.randn(3, HIDDEN)
+        top_k_index = torch.zeros(3, TOP_K, dtype=torch.long)
+        top_k_weights = torch.full((3, TOP_K), 0.5)
+        sentinel = torch.zeros(1)
+        monkeypatch.setattr(
+            moe_lora_module, "_routed_projection_names", lambda _module: None
+        )
+
+        with mock.patch.object(
+            ParamWrapper, "forward", return_value=sentinel
+        ) as base_forward:
+            out = wrapper.forward(hidden, top_k_index, top_k_weights)
+
+        assert out is sentinel
+        base_forward.assert_called_once()

@@ -3,9 +3,11 @@
 
 from __future__ import annotations
 
+import functools
 import gc
 import inspect
 import warnings
+from collections.abc import Callable
 from contextlib import nullcontext
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 
@@ -99,27 +101,18 @@ def _liger_normalizer_world_size() -> int:
     return 1
 
 
-def _liger_args_with_normalizer(
-    args: tuple[Any, ...],
-    normalizer: float,
-) -> tuple[Any, ...]:
-    """Fused-kernel arguments extended to carry an explicit token-count normalizer.
+class _FusedKernelClass(Protocol):
+    """Class-level surface of a fused-kernel ``autograd.Function``."""
 
-    ``torch.autograd.Function.apply`` takes no keyword arguments, so every
-    parameter between the caller's last argument and the token count is filled
-    from the kernel signature's own defaults.
+    __name__: str
+    forward: Callable[..., Any]
 
-    :param args: Positional arguments the caller built for the fused kernel.
-    :type args: tuple[Any, ...]
-    :param normalizer: Value to pass as ``num_items_in_batch``.
-    :type normalizer: float
-    :return: Positional arguments ending at ``num_items_in_batch``.
-    :rtype: tuple[Any, ...]
-    :raises RuntimeError: If the kernel signature does not start with the
-        autograd context, does not accept ``num_items_in_batch``, or has a
-        parameter before it that the caller left unset and that has no default.
-    """
-    kernel = LigerFusedLinearGRPOFunction
+
+@functools.cache
+def _liger_normalizer_slot(
+    kernel: _FusedKernelClass,
+) -> tuple[tuple[inspect.Parameter, ...], int]:
+    """Post-``ctx`` parameters of ``kernel.forward`` and the token-count index, validated once per kernel class."""
     parameters = list(inspect.signature(kernel.forward).parameters.values())
     names = [parameter.name for parameter in parameters]
     if not parameters or names[0] != "ctx":
@@ -137,7 +130,15 @@ def _liger_args_with_normalizer(
             f"normalizer. Signature: {names}."
         )
         raise RuntimeError(msg)
-    index = names.index(NUM_ITEMS_PARAM)
+    return tuple(parameters), names.index(NUM_ITEMS_PARAM)
+
+
+def _liger_args_with_normalizer(
+    args: tuple[Any, ...],
+    normalizer: float,
+) -> tuple[Any, ...]:
+    """Fused-kernel arguments extended positionally (``apply`` takes no keywords) to carry ``num_items_in_batch``."""
+    parameters, index = _liger_normalizer_slot(LigerFusedLinearGRPOFunction)
     values = list(args)
     for parameter in parameters[len(values) : index + 1]:
         if parameter.default is inspect.Parameter.empty:
@@ -724,9 +725,11 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
             advantages, batch_idxs = self._calculate_advantages(
                 rewards, completion_ids, action_masks, turn_ids
             )
-            self._record_window_action_tokens(action_masks, batch_idxs)
+            if self.loss_norm == "accumulation_window":
+                self._record_window_action_tokens(action_masks, batch_idxs)
             aux_metric = self.aux_metric_name
-            if self.filter_zero_adv and batch_idxs.size == 0:
+            effective_num_samples = len(batch_idxs)
+            if effective_num_samples == 0:
                 warnings.warn(
                     "All samples were filtered by advantage threshold; skipping GRPO update.",
                     stacklevel=2,
@@ -757,16 +760,6 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
                 "loss": 0.0,
                 aux_metric: 0.0,
             }
-
-            effective_num_samples = len(batch_idxs)
-            if effective_num_samples == 0:
-                warnings.warn(
-                    "No active samples after filtering; skipping GRPO update.",
-                    stacklevel=2,
-                )
-                if self.accelerator is not None and self.accelerator.num_processes > 1:
-                    self.accelerator.wait_for_everyone()
-                return {"loss": 0.0, aux_metric: 0.0}
 
             # Ensure batch_size is not larger than the number of active samples
             batch_size = min(batch_size, effective_num_samples)
