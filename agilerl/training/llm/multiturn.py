@@ -152,7 +152,8 @@ def finetune_llm_multiturn(
 
     batch_size = init_hp.get("BATCH_SIZE", pop[0].batch_size)
 
-    data_increment = get_world_size()
+    # CP peers share a microbatch; only DP ranks count toward data volume.
+    data_increment = getattr(pop[0], "_dp_world_size", get_world_size)()
     effective_data_batch_size = data_increment * batch_size
     env_name = init_hp.get("env_name", "multiturn")
 

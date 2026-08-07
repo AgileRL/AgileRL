@@ -116,6 +116,19 @@ from agilerl.utils.algo_utils import (
     stack_experiences,
     transpose_image_space,
 )
+from agilerl.utils.cp import (
+    ParallelDims,
+    disable_cp_attention_params,
+    gather_for_cp,
+    gather_for_cp_wo_grad,
+    pad_seq_to_cp_multiple,
+    setup_cp_attention_params,
+    shard_for_cp,
+    shard_position_ids_for_cp,
+    shift_labels_for_cp,
+    substitute_cp_attention,
+    validate_cp_config,
+)
 from agilerl.utils.distributed import (
     CPUOffloadOptimizer,
     FSDPConfig,
@@ -2452,6 +2465,13 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
     :type gradient_accumulation_steps: int, optional
     :param fsdp_config: Optional FSDP2 configuration.
     :type fsdp_config: FSDPConfig | None, optional
+    :param cp: Context-parallel degree. ``1`` keeps today's full-sequence
+        local forward. ``cp > 1`` shards the sequence across a CP group and
+        requires ``fsdp_config``.
+    :type cp: int, optional
+    :param cp_style: Attention CP style when ``cp > 1``: ``"ulysses"``
+        (default) or ``"ring"`` (stage 2).
+    :type cp_style: Literal["ulysses", "ring"], optional
     :param name: The name of the algorithm.
     :type name: str | None
     :param model_config: Keyword arguments for ``from_pretrained`` (not the HF
@@ -2563,6 +2583,8 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         device: str | torch.device = "cpu",
         gradient_accumulation_steps: int = 1,
         fsdp_config: FSDPConfig | None = None,
+        cp: int = 1,
+        cp_style: Literal["ulysses", "ring"] = "ulysses",
         name: str | None = None,
         model_config: dict[str, Any] | PretrainedConfigProtocol | None = None,
         gradient_checkpointing: bool = True,
@@ -2657,6 +2679,36 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
                 "rendezvous env vars) so the process group can initialise."
             )
             raise ValueError(msg)
+        self.cp = int(cp)
+        self.cp_style = cp_style
+        self.parallel_dims: ParallelDims | None = None
+        self._cp_attention_substituted = False
+        attn_impl = None
+        if isinstance(model_config, dict):
+            attn_impl = model_config.get("attn_implementation")
+        packing_mode_hint = None
+        if bool(use_sequence_packing) and attn_impl == "flex_attention":
+            packing_mode_hint = "flex"
+        self.cp_style = validate_cp_config(
+            cp=self.cp,
+            cp_style=cp_style,
+            fsdp_config=fsdp_config,
+            world_size=get_world_size(),
+            use_liger_loss=use_liger_loss,
+            packing_mode=packing_mode_hint,
+            attn_implementation=attn_impl,
+            check_flash_attn=self.cp > 1,
+        )
+        if self.cp > 1:
+            self.parallel_dims = ParallelDims.from_world(get_world_size(), cp=self.cp)
+            # Stock HF+FA2 only under CP.
+            if isinstance(model_config, dict):
+                model_config = {
+                    **model_config,
+                    "attn_implementation": "flash_attention_2",
+                }
+            elif model_config is None:
+                model_config = {"attn_implementation": "flash_attention_2"}
         self._requested_gradient_accumulation_steps = int(gradient_accumulation_steps)
         self.gradient_checkpointing = gradient_checkpointing
         self.use_liger_loss = use_liger_loss
@@ -2708,7 +2760,10 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         if self.distributed:
             if get_world_size() > 1:
                 seed = broadcast_object_list([seed])[0]
-            seed += get_rank()
+            # CP peers share one microbatch and must share RNG (generate + shuffle).
+            # Mesh layout is (dp_shard, cp) with cp contiguous, so DP index is
+            # global_rank // cp.
+            seed += get_rank() // max(self.cp, 1)
             set_seed(seed)
 
         self.lora_config = lora_config
@@ -3312,8 +3367,26 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             self._restore_adapter_trainability(["actor", "critic"])
             # CPU (or meta) → shard → empty local shards on device → scatter.
             # Never densifies the full actor on CUDA.
+            fsdp_mesh = None
+            if self.cp > 1:
+                assert self.parallel_dims is not None
+                if self.parallel_dims.world_mesh is None:
+                    self.parallel_dims.build_mesh(
+                        device_type=str(
+                            torch.device(self.device).type
+                            if not isinstance(self.device, torch.device)
+                            else self.device.type
+                        )
+                    )
+                fsdp_mesh = self.parallel_dims.get_mesh("dp_shard_cp")
+                self._validate_cp_model_heads()
+                if not self._cp_attention_substituted:
+                    substitute_cp_attention(
+                        self.cp_style, self.parallel_dims.cp_group()
+                    )
+                    self._cp_attention_substituted = True
             self.actor = materialize_fsdp2_from_cpu_state(
-                self.actor, self.device, self.fsdp_config
+                self.actor, self.device, self.fsdp_config, mesh=fsdp_mesh
             )
             self._rebuild_optimizer_after_load()
             if self.fsdp_config.optim_cpu_offload:
@@ -4584,8 +4657,22 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         total = fused_ids.shape[0]
         seq_len_out = fused_ids.shape[1] - 1
 
+        if self._cp_enabled():
+            if total != 1:
+                raise ValueError(
+                    f"cp > 1 requires fused forward B==1, got B={total}"
+                )
+            if len(set(routing)) != 1:
+                raise ValueError(
+                    "cp > 1 disables fused multi-adapter batching; run "
+                    "ref/old/actor forwards sequentially."
+                )
+
+        # CP shards the sequence: every rank must pass global position_ids.
+        # Deriving positions from the local attention_mask alone resets RoPE
+        # on later shards and breaks logprob parity with cp=1.
         position_ids = None
-        if self.calc_position_embeddings:
+        if self.calc_position_embeddings or self._cp_enabled():
             position_ids = self._position_ids_from_mask(fused_mask)
 
         # Micro-batches never straddle an adapter run: packed-experts LoRA
@@ -4603,54 +4690,124 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             start: int, end: int
         ) -> tuple[torch.Tensor, torch.Tensor | None]:
             set_fused_adapter_routing(unwrapped, routing[start:end])
-            model_kwargs: dict = {
-                "input_ids": fused_ids[start:end],
-                "attention_mask": fused_mask[start:end],
-                "use_cache": False,
-            }
-            if position_ids is not None:
-                model_kwargs["position_ids"] = position_ids[start:end]
+            chunk_ids = fused_ids[start:end]
+            chunk_mask = fused_mask[start:end]
+            chunk_pos = position_ids[start:end] if position_ids is not None else None
 
-            with (
-                self._patch_lm_head_to_identity(),
-                self._amp_ctx(),
-                self._activation_offload_ctx(),
-            ):
-                # FSDP2 all-gather hooks run on ``Module.__call__``.
-                output = self.actor(**model_kwargs)
-
-            if isinstance(output, tuple):
-                # Value-head models may return (loss, logits, value, ...); Peft/causal
-                # paths may return shorter tuples — only index when present. With
-                # lm_head identity-patched, output[0] is the last hidden state.
-                first = output[0]
-                value = output[2] if len(output) > 2 else None
-            else:
-                first = output.logits
-                value = None
-            del output
-
-            # FSDP2 with CPUOffloadPolicy parks the sharded lm_head weight on
-            # CPU; the fused matmul reads the weight directly (bypassing the
-            # FSDP2 forward hook that all-gathers it), so materialise a dense
-            # GPU local for the matmul. No-op for plain tensors and for FSDP2
-            # without offload (DTensor matmul already runs on GPU).
-            with self._lm_head_matmul_ctx(first) as (head_w, head_b):
-                chunk_lp = fused_fn(
-                    first[:, :-1],
-                    head_w,
-                    head_b,
-                    fused_ids[start:end, 1:],
-                    temperature=self.temperature,
-                    cast_to_fp32=self.cast_logprobs_to_fp32,
-                    chunk_rows=self.chunk_rows,
+            # Shift-then-shard: next-token targets on the full sequence, then
+            # shard ids/mask/pos/labels together so boundary tokens are kept.
+            target_ids = chunk_ids
+            orig_seq_len = int(chunk_ids.shape[1])
+            if self._cp_enabled():
+                assert self.parallel_dims is not None
+                ring_zigzag = self.cp_style == "ring"
+                chunk_ids = pad_seq_to_cp_multiple(
+                    chunk_ids,
+                    self.cp,
+                    seq_dim=1,
+                    pad_value=self.pad_token_id,
+                    ring_zigzag=ring_zigzag,
                 )
-            del first
+                if chunk_mask is not None:
+                    chunk_mask = pad_seq_to_cp_multiple(
+                        chunk_mask,
+                        self.cp,
+                        seq_dim=1,
+                        pad_value=0,
+                        ring_zigzag=ring_zigzag,
+                    )
+                # Recompute global positions on the padded row (right-pad safe).
+                chunk_pos = self._position_ids_from_mask(chunk_mask)
+                full_len = int(chunk_ids.shape[1])
+                self._publish_cp_attention_params(
+                    seq_len=full_len, device=chunk_ids.device
+                )
+                labels_full = shift_labels_for_cp(
+                    chunk_ids, pad_token_id=self.pad_token_id
+                )
+                cp_rank = self.parallel_dims.cp_rank()
+                chunk_ids, chunk_mask, chunk_pos = self._shard_batch_for_cp(
+                    chunk_ids, chunk_mask, chunk_pos
+                )
+                target_ids = shard_for_cp(
+                    labels_full, cp_rank=cp_rank, cp_world_size=self.cp
+                )
 
-            chunk_v = (
-                value[:, :-1] if (self.use_value_head and value is not None) else None
-            )
-            return chunk_lp, chunk_v
+            try:
+                # Prime-RL CP train forwards pass position_ids (global) and omit
+                # attention_mask so FA2 does not locally unpad against a shard mask.
+                model_kwargs: dict = {
+                    "input_ids": chunk_ids,
+                    "use_cache": False,
+                }
+                if chunk_pos is not None:
+                    model_kwargs["position_ids"] = chunk_pos
+                elif chunk_mask is not None:
+                    model_kwargs["attention_mask"] = chunk_mask
+
+                with (
+                    self._patch_lm_head_to_identity(),
+                    self._amp_ctx(),
+                    self._activation_offload_ctx(),
+                ):
+                    # FSDP2 all-gather hooks run on ``Module.__call__``.
+                    output = self.actor(**model_kwargs)
+
+                if isinstance(output, tuple):
+                    # Value-head models may return (loss, logits, value, ...); Peft/causal
+                    # paths may return shorter tuples — only index when present. With
+                    # lm_head identity-patched, output[0] is the last hidden state.
+                    first = output[0]
+                    value = output[2] if len(output) > 2 else None
+                else:
+                    first = output.logits
+                    value = None
+                del output
+
+                # FSDP2 with CPUOffloadPolicy parks the sharded lm_head weight on
+                # CPU; the fused matmul reads the weight directly (bypassing the
+                # FSDP2 forward hook that all-gathers it), so materialise a dense
+                # GPU local for the matmul. No-op for plain tensors and for FSDP2
+                # without offload (DTensor matmul already runs on GPU).
+                with self._lm_head_matmul_ctx(first) as (head_w, head_b):
+                    if self._cp_enabled():
+                        # Local shard already carries shift-then-shard targets;
+                        # score every local position, gather, then drop pad /
+                        # final label to match the original (B, S-1) contract.
+                        local_lp = fused_fn(
+                            first,
+                            head_w,
+                            head_b,
+                            target_ids,
+                            temperature=self.temperature,
+                            cast_to_fp32=self.cast_logprobs_to_fp32,
+                            chunk_rows=self.chunk_rows,
+                        )
+                        gathered = self._gather_cp_logprobs(local_lp)
+                        chunk_lp = gathered[:, : orig_seq_len - 1]
+                    else:
+                        chunk_lp = fused_fn(
+                            first[:, :-1],
+                            head_w,
+                            head_b,
+                            target_ids[:, 1:],
+                            temperature=self.temperature,
+                            cast_to_fp32=self.cast_logprobs_to_fp32,
+                            chunk_rows=self.chunk_rows,
+                        )
+                del first
+
+                chunk_v = (
+                    value[:, : orig_seq_len - 1]
+                    if (self.use_value_head and value is not None)
+                    else None
+                )
+                return chunk_lp, chunk_v
+            finally:
+                # Keep params through grad checkpoint recompute + backward;
+                # no-grad forwards can drop them immediately (rollouts use stock FA2).
+                if self._cp_enabled() and not torch.is_grad_enabled():
+                    disable_cp_attention_params(self.cp_style)
 
         # Single-chunk fast path: skip the buffer + copy entirely.
         if len(chunks) == 1:
@@ -4729,6 +4886,20 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         B = ids.shape[0]
         if attention_mask is None:
             attention_mask = attention_mask_from_padded_ids(ids, self.pad_token_id)
+
+        if self._cp_enabled():
+            if self.use_value_head:
+                raise ValueError(
+                    "cp > 1 disables fused value-head batch stacking; run actor "
+                    "and critic forwards sequentially."
+                )
+            # Packing+CP is Phase 5; keep the padded B=1 CP path for stage 1.
+            if torch.is_grad_enabled() and self._packing_mode() is not None:
+                raise ValueError(
+                    "Sequence packing with cp > 1 is not enabled yet; disable "
+                    "use_sequence_packing or set cp=1."
+                )
+            return self._cp_batched_fused_model_pass(ids, attention_mask, ["actor"])
 
         # Packed path for the gradient forward only; no-grad passes stay padded.
         if torch.is_grad_enabled() and self._packing_mode() is not None:
@@ -4873,6 +5044,24 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             reference_adapter = (
                 "reference" if self.use_separate_reference_adapter else "__base__"
             )
+            # CP peers share one microbatch; fused multi-adapter stacking
+            # would break the sequence-shard contract — run adapters sequentially
+            # and (when B>1) one sequence at a time.
+            if self._cp_enabled():
+                ref_logprobs, _ = self._cp_batched_fused_model_pass(
+                    ids, attention_mask, [reference_adapter]
+                )
+                actor_logprobs, _ = self._cp_batched_fused_model_pass(
+                    ids, attention_mask, ["actor"]
+                )
+                critic_values = None
+                if self.use_value_head:
+                    _, critic_values = self._cp_batched_fused_model_pass(
+                        ids, attention_mask, ["critic"]
+                    )
+                unset_fused_adapter_routing(self._get_unwrapped_actor())
+                return ref_logprobs, actor_logprobs, critic_values
+
             adapters = [reference_adapter, "actor"]
             if self.use_value_head:
                 adapters.append("critic")
@@ -4994,6 +5183,15 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
                 # TODO this calc is avoided for preference (DatasetEnv) batches;
                 # generation (RolloutEnv) rollouts should supply an attention mask too
                 attention_mask = attention_mask_from_padded_ids(ids, self.pad_token_id)
+
+            # CP: one sequence per forward, shift-then-shard + gather.
+            if self._cp_enabled():
+                adapter = "reference" if use_reference else "actor"
+                log_probs, _ = self._cp_batched_fused_model_pass(
+                    ids, attention_mask, [adapter]
+                )
+                return log_probs
+
             if self.calc_position_embeddings:
                 position_ids = self._position_ids_from_mask(attention_mask)
 
@@ -5090,8 +5288,16 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         accumulation_steps = self.gradient_accumulation_steps
         if accumulation_steps > 1:
             loss = loss / accumulation_steps
+        # Full-seq loss is identical on every CP rank. FSDP AVG over
+        # ``dp_shard_cp`` already matches mean-loss semantics when CP peers
+        # compute the same scalar (no extra ``/cp``); dividing again under-scales
+        # grads and stalls ConstantTarget learning.
 
         loss.backward()
+        # Checkpoint recompute finished; drop CP attn params so HF generate
+        # cannot reuse stale cu_seqlens / ring DATA_PARAMS.
+        if self._cp_enabled():
+            disable_cp_attention_params(self.cp_style)
 
         self._micro_batch_count += 1
         if self._micro_batch_count % accumulation_steps != 0:
@@ -5772,6 +5978,178 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             chunk_rows,
         )
 
+    def _dp_world_size(self) -> int:
+        """Data-parallel size for batch / sampler sizing (excludes CP)."""
+        if self.parallel_dims is not None and self.cp > 1:
+            return self.parallel_dims.dp_size
+        return get_world_size()
+
+    def _cp_enabled(self) -> bool:
+        return self.cp > 1
+
+    def _validate_cp_model_heads(self) -> None:
+        """Validate Ulysses head / GQA rules against the loaded actor config."""
+        if self.cp <= 1 or self.cp_style != "ulysses":
+            return
+        from agilerl.utils.cp import assert_ulysses_head_divisibility
+
+        cfg = getattr(self._get_unwrapped_actor(), "config", None)
+        if cfg is None:
+            return
+        n_heads = getattr(cfg, "num_attention_heads", None)
+        if n_heads is None:
+            return
+        assert_ulysses_head_divisibility(
+            num_attention_heads=int(n_heads),
+            num_key_value_heads=getattr(cfg, "num_key_value_heads", None),
+            cp=self.cp,
+        )
+
+    def _cp_batched_fused_model_pass(
+        self,
+        ids: torch.Tensor,
+        attention_mask: torch.Tensor,
+        routing: list[str],
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """Run CP fused forwards one sequence at a time (B==1 shard contract)."""
+        if ids.shape[0] == 1:
+            return self._fused_model_pass(ids, attention_mask, routing)
+
+        logprobs: list[torch.Tensor] = []
+        values: list[torch.Tensor] = []
+        for i in range(ids.shape[0]):
+            row_routing = (
+                routing
+                if len(routing) == 1
+                else [routing[i]]
+            )
+            lp, val = self._fused_model_pass(
+                ids[i : i + 1],
+                attention_mask[i : i + 1],
+                row_routing,
+            )
+            logprobs.append(lp)
+            if val is not None:
+                values.append(val)
+        stacked_lp = torch.cat(logprobs, dim=0)
+        stacked_v = torch.cat(values, dim=0) if values else None
+        return stacked_lp, stacked_v
+
+    def _sync_rollouts_across_cp(
+        self,
+        completion_ids: list[torch.Tensor],
+        completion_masks: list[torch.Tensor],
+        sampling_logps: list[torch.Tensor | None] | None = None,
+    ) -> tuple[
+        list[torch.Tensor],
+        list[torch.Tensor],
+        list[torch.Tensor | None] | None,
+    ]:
+        """Broadcast HF/vLLM rollouts from CP rank 0 so peers share tokens.
+
+        CUDA sampling is not bit-identical across devices even with a shared
+        seed; CP train steps require identical microbatches on every CP rank.
+        """
+        if not self._cp_enabled():
+            return completion_ids, completion_masks, sampling_logps
+        assert self.parallel_dims is not None
+        import torch.distributed as dist
+
+        group = self.parallel_dims.cp_group()
+        if dist.get_world_size(group) <= 1:
+            return completion_ids, completion_masks, sampling_logps
+
+        device = torch.device(self.device)
+
+        def _to_cpu(rows: list) -> list:
+            out = []
+            for item in rows:
+                if item is None:
+                    out.append(None)
+                elif isinstance(item, torch.Tensor):
+                    out.append(item.detach().cpu())
+                else:
+                    out.append(item)
+            return out
+
+        payload = [
+            _to_cpu(completion_ids),
+            _to_cpu(completion_masks),
+            None if sampling_logps is None else _to_cpu(sampling_logps),
+        ]
+        src = dist.get_global_rank(group, group_rank=0)
+        dist.broadcast_object_list(payload, src=src, group=group)
+
+        def _to_device(rows: list | None) -> list | None:
+            if rows is None:
+                return None
+            out = []
+            for item in rows:
+                if item is None:
+                    out.append(None)
+                elif isinstance(item, torch.Tensor):
+                    out.append(item.to(device))
+                else:
+                    out.append(item)
+            return out
+
+        return (
+            _to_device(payload[0]),  # type: ignore[return-value]
+            _to_device(payload[1]),  # type: ignore[return-value]
+            _to_device(payload[2]),
+        )
+
+    def _publish_cp_attention_params(
+        self,
+        *,
+        seq_len: int,
+        device: torch.device,
+        seq_lens: torch.Tensor | None = None,
+    ) -> None:
+        """Publish full-sequence FA params for the active CP attention patch."""
+        assert self.parallel_dims is not None
+        if seq_lens is None:
+            seq_lens = torch.tensor([seq_len], device=device, dtype=torch.int32)
+        setup_cp_attention_params(
+            seq_lens=seq_lens,
+            total_tokens=seq_len,
+            cp_group=self.parallel_dims.cp_group(),
+            cp_style=self.cp_style,
+            device=device,
+        )
+
+    def _shard_batch_for_cp(
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor | None = None,
+        position_ids: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
+        """Shard a B=1 batch along the sequence for the local CP rank."""
+        assert self.parallel_dims is not None
+        cp_rank = self.parallel_dims.cp_rank()
+        ids = shard_for_cp(input_ids, cp_rank=cp_rank, cp_world_size=self.cp)
+        mask = (
+            shard_for_cp(attention_mask, cp_rank=cp_rank, cp_world_size=self.cp)
+            if attention_mask is not None
+            else None
+        )
+        pos = (
+            shard_position_ids_for_cp(
+                position_ids, cp_rank=cp_rank, cp_world_size=self.cp
+            )
+            if position_ids is not None
+            else None
+        )
+        return ids, mask, pos
+
+    def _gather_cp_logprobs(self, local_logprobs: torch.Tensor) -> torch.Tensor:
+        """Gather per-token logprobs across the CP group along seq dim 1."""
+        assert self.parallel_dims is not None
+        cp_group = self.parallel_dims.cp_group()
+        if torch.is_grad_enabled():
+            return gather_for_cp(local_logprobs, cp_group)
+        return gather_for_cp_wo_grad(local_logprobs, self.cp, cp_group)
+
     def _configure_batch_size_per_process(
         self,
         batch_size: int,
@@ -5780,7 +6158,8 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         """Derive per-process batch sizes and gradient accumulation steps.
 
         ``batch_size`` is the global batch size per optimizer step. Each
-        process consumes ``batch_size / world_size`` samples, split into
+        data-parallel rank consumes ``batch_size / dp_size`` samples (CP ranks
+        that share a microbatch are excluded from this divisor), split into
         micro-batches of ``micro_batch_size_per_gpu`` with gradients
         accumulated across them (see :meth:`_backward_pass`).
 
@@ -5788,14 +6167,18 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         the ``gradient_accumulation_steps`` constructor argument; when it is
         given, the accumulation steps are derived from it instead.
         """
-        world_size = get_world_size()
-        if batch_size % world_size != 0:
-            msg = f"Batch size ({batch_size}) must be divisible by the number of processes ({world_size})."
-            raise ValueError(
-                msg,
+        dp_size = self._dp_world_size()
+        if batch_size % dp_size != 0:
+            msg = (
+                f"Batch size ({batch_size}) must be divisible by the data-parallel "
+                f"size ({dp_size})"
+                + (f" (world_size={get_world_size()}, cp={self.cp})" if self.cp > 1 else ".")
             )
+            if not msg.endswith("."):
+                msg += "."
+            raise ValueError(msg)
 
-        self.batch_size_per_process = int(batch_size / world_size)
+        self.batch_size_per_process = int(batch_size / dp_size)
 
         if micro_batch_size_per_gpu is None:
             gradient_accumulation_steps = max(
@@ -5803,8 +6186,11 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             )
             if self.batch_size_per_process % gradient_accumulation_steps != 0:
                 msg = (
-                    f"Batch size ({batch_size}) must be divisible by the product of the number of processes ({world_size}) and gradient accumulation steps ({gradient_accumulation_steps})."
-                    " Gradient accumulation steps can be configured via the gradient_accumulation_steps constructor argument."
+                    f"Batch size ({batch_size}) must be divisible by the product of the "
+                    f"data-parallel size ({dp_size}) and gradient accumulation steps "
+                    f"({gradient_accumulation_steps})."
+                    " Gradient accumulation steps can be configured via the "
+                    "gradient_accumulation_steps constructor argument."
                 )
                 raise ValueError(
                     msg,
@@ -5824,8 +6210,12 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             raise ValueError(msg)
 
         self.micro_batch_size_per_gpu = int(micro_batch_size_per_gpu)
-        if batch_size % (self.micro_batch_size_per_gpu * world_size) != 0:
-            msg = f"When specifying micro_batch_size_per_gpu, batch_size ({batch_size}) must be divisible by the product of the number of processes ({world_size}) and micro_batch_size_per_gpu ({self.micro_batch_size_per_gpu})."
+        if batch_size % (self.micro_batch_size_per_gpu * dp_size) != 0:
+            msg = (
+                f"When specifying micro_batch_size_per_gpu, batch_size ({batch_size}) "
+                f"must be divisible by the product of the data-parallel size ({dp_size}) "
+                f"and micro_batch_size_per_gpu ({self.micro_batch_size_per_gpu})."
+            )
             raise ValueError(
                 msg,
             )

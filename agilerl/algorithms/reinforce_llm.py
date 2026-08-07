@@ -140,6 +140,10 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
     :type gradient_accumulation_steps: int, optional
     :param fsdp_config: FSDP2 sharding settings for distributed runs, defaults to None
     :type fsdp_config: FSDPConfig | None, optional
+    :param cp: Context-parallel degree (``1`` disables CP), defaults to 1
+    :type cp: int, optional
+    :param cp_style: CP attention style (``ulysses`` or ``ring``), defaults to ``ulysses``
+    :type cp_style: Literal["ulysses", "ring"], optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str
     :param wrap: Wrap models for distributed training upon creation.
@@ -267,6 +271,8 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
         cosine_lr_schedule_config: CosineLRScheduleConfig | None = None,
         gradient_accumulation_steps: int = 1,
         fsdp_config: FSDPConfig | None = None,
+        cp: int = 1,
+        cp_style: Literal["ulysses", "ring"] = "ulysses",
         device: str | torch.device | None = None,
         wrap: bool = True,
         clone: bool = False,
@@ -319,6 +325,8 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
             device=resolved_device,
             gradient_accumulation_steps=gradient_accumulation_steps,
             fsdp_config=fsdp_config,
+            cp=cp,
+            cp_style=cp_style,
             name="LLMREINFORCE",
             gradient_checkpointing=gradient_checkpointing,
             torch_compiler=torch_compiler,

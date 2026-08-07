@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import gc
-from typing import TYPE_CHECKING, Any, NoReturn
+from typing import TYPE_CHECKING, Any, NoReturn, Literal
 
 import numpy as np
 import numpy.typing as npt
@@ -88,6 +88,10 @@ class SFT(LLMAlgorithm[SFTPrompts]):
     :type gradient_accumulation_steps: int, optional
     :param fsdp_config: FSDP2 sharding settings for distributed runs, defaults to None
     :type fsdp_config: FSDPConfig | None, optional
+    :param cp: Context-parallel degree (``1`` disables CP), defaults to 1
+    :type cp: int, optional
+    :param cp_style: CP attention style (``ulysses`` or ``ring``), defaults to ``ulysses``
+    :type cp_style: Literal["ulysses", "ring"], optional
     :param wrap: Wrap models for distributed training on construction, defaults to
         True
     :type wrap: bool, optional
@@ -153,6 +157,8 @@ class SFT(LLMAlgorithm[SFTPrompts]):
         lora_config: LoraConfig | None = None,
         gradient_accumulation_steps: int = 1,
         fsdp_config: FSDPConfig | None = None,
+        cp: int = 1,
+        cp_style: Literal["ulysses", "ring"] = "ulysses",
         wrap: bool = True,
         clone: bool = False,
         seed: int = 42,
@@ -190,6 +196,8 @@ class SFT(LLMAlgorithm[SFTPrompts]):
             device=resolved_device,
             gradient_accumulation_steps=gradient_accumulation_steps,
             fsdp_config=fsdp_config,
+            cp=cp,
+            cp_style=cp_style,
             name="SFT",
             gradient_checkpointing=gradient_checkpointing,
             reduce_memory_peak=reduce_memory_peak,

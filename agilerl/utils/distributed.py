@@ -307,7 +307,12 @@ def _shard_embed_and_lm_head(model: nn.Module, shard_kwargs: dict) -> None:
         fully_shard(lm_head, **shard_kwargs)
 
 
-def apply_fsdp2(model: nn.Module, config: FSDPConfig | None = None) -> nn.Module:
+def apply_fsdp2(
+    model: nn.Module,
+    config: FSDPConfig | None = None,
+    *,
+    mesh: Any | None = None,
+) -> nn.Module:
     """Shard ``model`` with FSDP2: blocks, embed/(untied) lm_head, then root.
 
     Parameters become DTensors in place, so any optimizer must be (re)built
@@ -315,11 +320,18 @@ def apply_fsdp2(model: nn.Module, config: FSDPConfig | None = None) -> nn.Module
     CUDA — use :func:`materialize_fsdp2_from_cpu_state` so weights stay on
     CPU/meta until only local shards are allocated on the compute device.
 
+    When ``mesh`` is provided (context parallel), ``fully_shard`` shards over
+    that device mesh (typically flattened ``dp_shard × cp``). When ``mesh`` is
+    ``None``, FSDP uses the default process group (today's flat path).
+
     :param model: Model to shard (CPU or meta parameters).
     :type model: nn.Module
     :param config: Sharding settings; defaults to :class:`FSDPConfig`'s
         defaults.
     :type config: FSDPConfig | None
+    :param mesh: Optional FSDP device mesh (e.g. ``ParallelDims``
+        ``dp_shard_cp``). Ignored when ``None``.
+    :type mesh: DeviceMesh | None
     :return: The sharded model (same object).
     :rtype: nn.Module
     """
@@ -353,6 +365,8 @@ def apply_fsdp2(model: nn.Module, config: FSDPConfig | None = None) -> nn.Module
     }
     if config.cpu_offload:
         kwargs["offload_policy"] = CPUOffloadPolicy()
+    if mesh is not None:
+        kwargs["mesh"] = mesh
 
     for block in _transformer_blocks(model):
         fully_shard(block, **kwargs)
@@ -389,6 +403,8 @@ def materialize_fsdp2_from_cpu_state(
     model: nn.Module,
     device: str | torch.device,
     config: FSDPConfig | None = None,
+    *,
+    mesh: Any | None = None,
 ) -> nn.Module:
     """Shard a CPU-resident model without placing a dense full replica on GPU.
 
@@ -402,6 +418,8 @@ def materialize_fsdp2_from_cpu_state(
     :type device: str | torch.device
     :param config: FSDP2 settings.
     :type config: FSDPConfig | None
+    :param mesh: Optional FSDP device mesh when context parallel is enabled.
+    :type mesh: DeviceMesh | None
     :return: The sharded model (same object).
     :rtype: nn.Module
     """
@@ -413,7 +431,7 @@ def materialize_fsdp2_from_cpu_state(
         for key, value in model.state_dict().items()
     }
     model.to_empty(device="meta")
-    apply_fsdp2(model, config)
+    apply_fsdp2(model, config, mesh=mesh)
     target = torch.device("cpu") if config.cpu_offload else torch.device(device)
     model.to_empty(device=target)
     _restore_after_to_empty(model)
