@@ -520,15 +520,25 @@ class TestSFTTest:
     def test_sft_test_method_waits_for_everyone(self):
         import contextlib
 
+        # A realistic collated batch: ``test`` narrows what ``reset`` returns
+        # before handing it to ``learn``, so a placeholder would not get through.
+        batch = {
+            "prompt": ["p"],
+            "prompt_lengths": [1],
+            "response": ["r"],
+            "input_ids": torch.ones(1, 3, dtype=torch.long),
+            "attention_mask": torch.ones(1, 3, dtype=torch.long),
+        }
+
         class DummySFTEnv:
             def eval_mode(self):
                 return contextlib.nullcontext()
 
             def reset(self):
-                return {"prompts": []}
+                return batch
 
             def step(self):
-                return {"prompts": []}
+                return batch
 
         sft = SFT(
             actor_network=create_module(
