@@ -1,0 +1,34 @@
+---
+# GRPO ConstantTarget smoke for hub Qwen3-MoE (e.g. PrimeIntellect/qwen3-moe-tiny).
+# digit_logit_boost raises ASCII digit lm_head rows; LoRA targets attention projs.
+INIT_HP:
+    ALGO: GRPO
+    BATCH_SIZE: 16
+    MICRO_BATCH_SIZE_PER_GPU: 2
+    GROUP_SIZE: 8
+    BETA: 0.04
+    LR: 0.001
+    CLIP_COEF: 0.2
+    MAX_GRAD_NORM: 1.0
+    TEMPERATURE: 1.0
+    UPDATE_EPOCHS: 2
+    USE_SEPARATE_REFERENCE_ADAPTER: false
+    USE_VLLM: false
+    ATTN_IMPLEMENTATION: sdpa
+
+DEBUG:
+    target_token_id: 3
+    # Digit lm_head prior (~0.14–0.25 ConstantTarget hit-rate at T=1.0).
+    digit_logit_boost: 10.0
+    target_logit_boost: 0.0
+    eval_episodes: 32
+    max_context_length: 32
+    max_output_tokens: 1
+    max_sample_steps: 2048
+    evaluation_interval: 20
+    seeds: [0]
+    lora:
+        r: 16
+        lora_alpha: 32
+        lora_dropout: 0.0
+        target_modules: [q_proj, k_proj, v_proj, o_proj]

@@ -50,6 +50,65 @@ def _load_yaml(path: Path) -> dict[str, Any]:
     return yaml.safe_load(path.read_text(encoding="utf-8"))
 
 
+def _digit_prior_snapshot_path(
+    model_name: str,
+    boost: float,
+    target_digit: str,
+    target_extra: float = 0.0,
+) -> Path:
+    import hashlib
+    import os
+
+    key = hashlib.sha1(
+        f"{model_name}|{boost}|{target_digit}|{target_extra}".encode()
+    ).hexdigest()[:10]
+    return Path(os.environ.get("HF_HOME", "/tmp/hf-home")) / f"ctprior-{key}"
+
+
+def _materialize_digit_prior_model(
+    model_name: str,
+    boost: float,
+    target_digit: str,
+    target_extra: float = 0.0,
+) -> str:
+    """Write a /tmp HF snapshot with lm_head digit prior for ConstantTarget.
+
+    Must run before FSDP/PEFT wrap — hub MoEs otherwise have ~0 digit hit-rate.
+    """
+    import torch
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+
+    out = _digit_prior_snapshot_path(model_name, boost, target_digit, target_extra)
+    marker = out / "digit_prior.json"
+    if marker.is_file():
+        return str(out)
+
+    out.mkdir(parents=True, exist_ok=True)
+    tok = AutoTokenizer.from_pretrained(model_name)
+    model = AutoModelForCausalLM.from_pretrained(model_name, dtype=torch.bfloat16)
+    digit_ids: list[int] = []
+    for d in "0123456789":
+        ids = tok.encode(d, add_special_tokens=False)
+        if len(ids) == 1:
+            digit_ids.append(ids[0])
+    target_ids = tok.encode(str(target_digit), add_special_tokens=False)
+    target_id = target_ids[0] if len(target_ids) == 1 else None
+    with torch.no_grad():
+        if digit_ids:
+            model.lm_head.weight.data[digit_ids] += float(boost)
+        if target_id is not None and target_extra:
+            model.lm_head.weight.data[target_id] += float(target_extra)
+    model.save_pretrained(out)
+    tok.save_pretrained(out)
+    marker.write_text(
+        f'{{"base":"{model_name}","digit_logit_boost":{boost},'
+        f'"target_digit":"{target_digit}","target_logit_boost":{target_extra}}}\n',
+        encoding="utf-8",
+    )
+    del model
+    return str(out)
+
+
 def parse_args() -> argparse.Namespace:
     """CLI."""
     p = argparse.ArgumentParser(description=__doc__)
@@ -172,13 +231,44 @@ def main() -> int:
     if args.model_name:
         from transformers import AutoConfig, AutoTokenizer
 
-        tokenizer = AutoTokenizer.from_pretrained(args.model_name)
+        model_name = args.model_name
+        digit_boost = dbg.get("digit_logit_boost")
+        if digit_boost is not None:
+            # Rank 0 writes; others wait on the marker (dist may not be up yet).
+            import time as _time
+
+            from agilerl.utils.distributed import is_main_process
+
+            boost_f = float(digit_boost)
+            extra_f = float(dbg.get("target_logit_boost", 0.0))
+            if is_main_process():
+                model_name = _materialize_digit_prior_model(
+                    args.model_name,
+                    boost_f,
+                    target_digit=target_token,
+                    target_extra=extra_f,
+                )
+            else:
+                snap = _digit_prior_snapshot_path(
+                    args.model_name, boost_f, target_token, extra_f
+                )
+                marker = snap / "digit_prior.json"
+                for _ in range(600):
+                    if marker.is_file():
+                        break
+                    _time.sleep(0.5)
+                else:
+                    raise RuntimeError(f"Timed out waiting for digit-prior at {marker}")
+                model_name = str(snap)
+            if torch.distributed.is_available() and torch.distributed.is_initialized():
+                torch.distributed.barrier()
+
+        tokenizer = AutoTokenizer.from_pretrained(model_name)
         if tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.eos_token
         init_hp["PAD_TOKEN_ID"] = tokenizer.pad_token_id
         init_hp["PAD_TOKEN"] = tokenizer.pad_token
         actor = None
-        model_name = args.model_name
         lora_dict = dict(dbg.get("lora") or {})
         # The debug config ships GPT2-style target_modules (c_attn/c_proj/c_fc)
         # which do not exist in Qwen2/Qwen3; target attention projections instead.
@@ -186,7 +276,7 @@ def main() -> int:
             lora_dict.get("target_modules") or []
         ) <= {"c_attn", "c_proj", "c_fc"}:
             lora_dict["target_modules"] = ["q_proj", "k_proj", "v_proj", "o_proj"]
-        model_cfg = AutoConfig.from_pretrained(args.model_name)
+        model_cfg = AutoConfig.from_pretrained(model_name)
         is_moe = (
             getattr(model_cfg, "num_experts", None)
             or getattr(model_cfg, "num_local_experts", None)
