@@ -3052,8 +3052,8 @@ class TestLLMInitWarnings:
             _make_llm_agent(accelerator=acc)
 
 
-class TestLLMZero3ParamPersistenceWireUp:
-    def test_patches_when_stage3_and_threshold_set(self):
+class TestLLMZero3ThirdPartyHooksWireUp:
+    def test_installs_hooks_when_stage3(self):
         acc = _make_mock_accelerator(
             ds_config={
                 "zero_optimization": {
@@ -3067,15 +3067,15 @@ class TestLLMZero3ParamPersistenceWireUp:
         )
         with (
             patch(
-                "agilerl.algorithms.core.base.patch_zero3_param_persistence"
-            ) as mock_patch,
+                "agilerl.algorithms.core.base.install_zero3_third_party_hooks"
+            ) as mock_hooks,
             pytest.warns(UserWarning, match="ZeRO Stage 3"),
         ):
-            _make_llm_agent(accelerator=acc)
+            agent = _make_llm_agent(accelerator=acc)
 
-        mock_patch.assert_called_once_with(
-            50_000,
-            model_persistence_threshold=1_000_000,
+        mock_hooks.assert_called_once_with(
+            acc.state.deepspeed_plugin.deepspeed_config,
+            model_name_or_path=agent.pretrained_model_name_or_path,
             num_partitions=4,
         )
 
@@ -3090,28 +3090,11 @@ class TestLLMZero3ParamPersistenceWireUp:
             }
         )
         with patch(
-            "agilerl.algorithms.core.base.patch_zero3_param_persistence"
-        ) as mock_patch:
+            "agilerl.algorithms.core.base.install_zero3_third_party_hooks"
+        ) as mock_hooks:
             _make_llm_agent(accelerator=acc)
 
-        mock_patch.assert_not_called()
-
-    def test_skips_when_threshold_unset(self):
-        acc = _make_mock_accelerator(
-            ds_config={
-                "zero_optimization": {"stage": 3},
-                "train_micro_batch_size_per_gpu": "auto",
-            }
-        )
-        with (
-            patch(
-                "agilerl.algorithms.core.base.patch_zero3_param_persistence"
-            ) as mock_patch,
-            pytest.warns(UserWarning, match="ZeRO Stage 3"),
-        ):
-            _make_llm_agent(accelerator=acc)
-
-        mock_patch.assert_not_called()
+        mock_hooks.assert_not_called()
 
 
 class TestLLMSyncDeepSpeedGradientClipping:

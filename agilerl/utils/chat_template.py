@@ -8,8 +8,8 @@ from __future__ import annotations
 from types import MethodType
 from typing import Any
 
-_CHAT_TEMPLATE_DEFAULT_KWARGS_ATTR = "chat_template_default_kwargs"
-_CHAT_TEMPLATE_ORIGINAL_APPLY_ATTR = "chat_template_apply_orig"
+CHAT_TEMPLATE_DEFAULT_KWARGS_ATTR = "chat_template_default_kwargs"
+CHAT_TEMPLATE_ORIGINAL_APPLY_ATTR = "chat_template_apply_orig"
 
 # Jinja template for tokenizers that ship without a chat template.
 DEFAULT_CHAT_TEMPLATE = (
@@ -23,9 +23,9 @@ DEFAULT_CHAT_TEMPLATE = (
 
 
 def _apply_chat_template(self: Any, *args: Any, **kwargs: Any) -> Any:  # noqa: ANN401 -- binds to a tokenizer and forwards its render signature
-    for key, value in getattr(self, _CHAT_TEMPLATE_DEFAULT_KWARGS_ATTR).items():
+    for key, value in getattr(self, CHAT_TEMPLATE_DEFAULT_KWARGS_ATTR).items():
         kwargs.setdefault(key, value)
-    return getattr(self, _CHAT_TEMPLATE_ORIGINAL_APPLY_ATTR)(self, *args, **kwargs)
+    return getattr(self, CHAT_TEMPLATE_ORIGINAL_APPLY_ATTR)(self, *args, **kwargs)
 
 
 def resolve_chat_template_kwargs(tokenizer: Any) -> dict[str, Any]:  # noqa: ANN401 -- tokenizers carry these kwargs as dynamically attached attributes
@@ -36,7 +36,7 @@ def resolve_chat_template_kwargs(tokenizer: Any) -> dict[str, Any]:  # noqa: ANN
     :return: Configured kwargs, empty when none are configured.
     :rtype: dict[str, Any]
     """
-    defaults = getattr(tokenizer, _CHAT_TEMPLATE_DEFAULT_KWARGS_ATTR, None)
+    defaults = getattr(tokenizer, CHAT_TEMPLATE_DEFAULT_KWARGS_ATTR, None)
     return dict(defaults) if defaults else {}
 
 
@@ -68,18 +68,18 @@ def inject_chat_template_kwargs(
     )
     if (
         already_wrapped
-        and getattr(tokenizer, _CHAT_TEMPLATE_DEFAULT_KWARGS_ATTR, None) == defaults
+        and getattr(tokenizer, CHAT_TEMPLATE_DEFAULT_KWARGS_ATTR, None) == defaults
     ):
         return tokenizer
 
     if not already_wrapped:
         setattr(
             tokenizer,
-            _CHAT_TEMPLATE_ORIGINAL_APPLY_ATTR,
+            CHAT_TEMPLATE_ORIGINAL_APPLY_ATTR,
             getattr(method, "__func__", method),
         )
 
-    setattr(tokenizer, _CHAT_TEMPLATE_DEFAULT_KWARGS_ATTR, defaults)
+    setattr(tokenizer, CHAT_TEMPLATE_DEFAULT_KWARGS_ATTR, defaults)
     tokenizer.apply_chat_template = MethodType(_apply_chat_template, tokenizer)
     return tokenizer
 
@@ -92,7 +92,7 @@ def ensure_chat_template_kwargs_injected(tokenizer: Any) -> Any:  # noqa: ANN401
     :return: The tokenizer.
     :rtype: Any
     """
-    defaults = getattr(tokenizer, _CHAT_TEMPLATE_DEFAULT_KWARGS_ATTR, None)
+    defaults = getattr(tokenizer, CHAT_TEMPLATE_DEFAULT_KWARGS_ATTR, None)
     if not defaults:
         return tokenizer
     return inject_chat_template_kwargs(tokenizer, defaults)

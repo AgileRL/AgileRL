@@ -328,6 +328,7 @@ class DPO(LLMAlgorithm[PreferencePrompts]):
                     training,
                 )
                 if training:
+                    self._raise_if_loss_not_finite_on_any_rank(loss)
                     self._backward_pass(loss)
 
                 learn_metrics["loss"] += loss.item()

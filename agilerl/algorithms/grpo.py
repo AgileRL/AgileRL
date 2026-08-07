@@ -76,9 +76,9 @@ REFERENCE_KL_METRIC = "kl"
 LIGER_CLIP_FRACTION_METRIC = "liger_clip_fraction"
 """Metric name for the clipped-token fraction the fused GRPO kernel reports."""
 
-_NUM_ITEMS_PARAM = "num_items_in_batch"
+NUM_ITEMS_PARAM = "num_items_in_batch"
 
-_LIGER_TOKEN_NORMALIZED_LOSS_TYPE = {"grpo": "dapo", "cispo": "cispo"}
+LIGER_TOKEN_NORMALIZED_LOSS_TYPE = {"grpo": "dapo", "cispo": "cispo"}
 """Liger loss type carrying each objective under a token-count normalizer.
 
 Under ``loss_norm="accumulation_window"``, ``grpo`` maps to Liger's ``dapo``
@@ -130,20 +130,20 @@ def _liger_args_with_normalizer(
         raise RuntimeError(msg)
     parameters = parameters[1:]
     names = names[1:]
-    if _NUM_ITEMS_PARAM not in names:
+    if NUM_ITEMS_PARAM not in names:
         msg = (
-            f"{kernel.__name__}.forward does not accept '{_NUM_ITEMS_PARAM}', so "
+            f"{kernel.__name__}.forward does not accept '{NUM_ITEMS_PARAM}', so "
             "the accumulation window's action-token count cannot reach the fused "
             f"normalizer. Signature: {names}."
         )
         raise RuntimeError(msg)
-    index = names.index(_NUM_ITEMS_PARAM)
+    index = names.index(NUM_ITEMS_PARAM)
     values = list(args)
     for parameter in parameters[len(values) : index + 1]:
         if parameter.default is inspect.Parameter.empty:
             msg = (
                 f"Kernel parameter '{parameter.name}' precedes "
-                f"'{_NUM_ITEMS_PARAM}' and has no default, so the token count "
+                f"'{NUM_ITEMS_PARAM}' and has no default, so the token count "
                 "cannot be passed positionally."
             )
             raise RuntimeError(msg)
@@ -641,19 +641,6 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
                 )
 
         return ActionResult(completion_ids, completion_masks, sampling_logps)
-
-    def _raise_if_loss_not_finite_on_any_rank(self, loss: torch.Tensor) -> None:
-        """Raise when ``loss`` is non-finite on this rank or any DP peer."""
-        if self.accelerator is not None and self.accelerator.num_processes > 1:
-            nonfinite_flag = 0 if loss.isfinite().item() else 1
-            _, max_flag = allreduce_minmax_int(nonfinite_flag, self.accelerator)
-            if max_flag > 0:
-                msg = f"Loss is not finite: {loss}"
-                raise ValueError(msg)
-            return
-        if not loss.isfinite():
-            msg = f"Loss is not finite: {loss}"
-            raise ValueError(msg)
 
     @property
     def aux_metric_name(self) -> str:
@@ -2087,7 +2074,7 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
         Under ``loss_norm="accumulation_window"`` the objective keeps its
         per-token form and clip metric but moves to the Liger loss type whose
         reduction divides by ``num_items_in_batch``
-        (:data:`_LIGER_TOKEN_NORMALIZED_LOSS_TYPE`), which is handed the
+        (:data:`LIGER_TOKEN_NORMALIZED_LOSS_TYPE`), which is handed the
         window's action-token count; the returned scalar is then scaled by the
         accumulation steps the engine divides it by.
 
@@ -2153,7 +2140,7 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
         mask = action_mask.to(self.device).contiguous()  # (B, seq_len-1)
         window = self._resolve_loss_window(mask)
         if window is not None:
-            liger_loss_type = _LIGER_TOKEN_NORMALIZED_LOSS_TYPE[liger_loss_type]
+            liger_loss_type = LIGER_TOKEN_NORMALIZED_LOSS_TYPE[liger_loss_type]
         # Drop a trailing singleton dim only — squeezing a 1-D (1,) would
         # collapse it to a scalar.
         adv = advantages.to(self.device).contiguous()

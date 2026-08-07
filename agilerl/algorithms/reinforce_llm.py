@@ -626,6 +626,7 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
                             batch_turn_ids,
                             batch_sampling_log_probs,
                         )
+                        self._raise_if_loss_not_finite_on_any_rank(pg_loss)
                         self._backward_pass(pg_loss)
                         learn_metrics["kl"] += metrics["kl"]
                         learn_metrics["entropy"] += metrics["entropy"]
@@ -677,6 +678,7 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
                         turn_reduction=self.turn_ratio_pooling,
                     )
 
+                    self._raise_if_loss_not_finite_on_any_rank(pg_loss)
                     self._backward_pass(pg_loss)
 
                     learn_metrics["kl"] += masked_mean(kl, batch_action_mask).item()

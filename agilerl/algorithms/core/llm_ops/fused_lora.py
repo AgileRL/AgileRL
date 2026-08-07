@@ -30,11 +30,11 @@ from peft.tuners.lora.layer import LoraLayer, ParamWrapper
 
 # Remembers each model's LoRA layers so we don't rescan on every call.
 # Weak keys: caching a model here never stops it being garbage-collected.
-_LORA_LAYER_CACHE: WeakKeyDictionary[nn.Module, list[LoraLayer]] = WeakKeyDictionary()
+LORA_LAYER_CACHE: WeakKeyDictionary[nn.Module, list[LoraLayer]] = WeakKeyDictionary()
 
 # Which adapter each layer currently routes to (kept off the layer so it stays typed).
 # Weak keys: tracking a layer here never stops it being garbage-collected.
-_ROUTING_STATE: WeakKeyDictionary[LoraLayer, list[str] | None] = WeakKeyDictionary()
+ROUTING_STATE: WeakKeyDictionary[LoraLayer, list[str] | None] = WeakKeyDictionary()
 
 
 def uniform_routed_adapter(layer: LoraLayer) -> str | None:
@@ -44,7 +44,7 @@ def uniform_routed_adapter(layer: LoraLayer) -> str | None:
     experts see rows grouped by expert, not by sample), so only uniform
     routings are computable there; mixed routings raise.
     """
-    routing = _ROUTING_STATE.get(layer)
+    routing = ROUTING_STATE.get(layer)
     if routing is None:
         return None
     names = set(routing)
@@ -111,7 +111,7 @@ def _routed_forward(
     matching PEFT's mixed-batch behaviour. Falls back to the layer's ordinary
     forward while routing is unset.
     """
-    routing = _ROUTING_STATE.get(layer)
+    routing = ROUTING_STATE.get(layer)
     if routing is None:
         return original_forward(layer, x, *forward_args, **forward_kwargs)
 
@@ -207,7 +207,7 @@ def adapter_aligned_chunks(
 
 
 def _store_layer_cache(model: nn.Module, layers: list[LoraLayer]) -> None:
-    _LORA_LAYER_CACHE[model] = layers
+    LORA_LAYER_CACHE[model] = layers
 
 
 def get_cached_lora_layers(model: nn.Module) -> list[LoraLayer]:
@@ -216,7 +216,7 @@ def get_cached_lora_layers(model: nn.Module) -> list[LoraLayer]:
     :param model: A ``PeftModel`` or any module containing ``LoraLayer`` s.
     :return: The LoRA layers under *model*.
     """
-    cached = _LORA_LAYER_CACHE.get(model)
+    cached = LORA_LAYER_CACHE.get(model)
     if cached is not None:
         return cached
     # nn.Module.modules rather than model.modules: EvolvableModule overrides
@@ -304,8 +304,8 @@ def unpatch_lora_for_fused_forward(model: nn.Module) -> None:
         if _is_routed_layer(module):
             # Drop the monkeypatched instance forward, restoring the class one.
             module.__dict__.pop("forward", None)
-        _ROUTING_STATE.pop(module, None)
-    _LORA_LAYER_CACHE.pop(model, None)
+        ROUTING_STATE.pop(module, None)
+    LORA_LAYER_CACHE.pop(model, None)
 
 
 def set_fused_adapter_routing(model: nn.Module, routing: Sequence[str]) -> None:
@@ -343,7 +343,7 @@ def set_fused_adapter_routing(model: nn.Module, routing: Sequence[str]) -> None:
         raise ValueError(msg)
     _validate_routing(layers, routing)
     for module in layers:
-        _ROUTING_STATE[module] = routing
+        ROUTING_STATE[module] = routing
 
 
 def unset_fused_adapter_routing(model: nn.Module) -> None:
@@ -353,4 +353,4 @@ def unset_fused_adapter_routing(model: nn.Module) -> None:
     """
     for module in get_cached_lora_layers(model):
         if _is_routing_managed(module):
-            _ROUTING_STATE[module] = None
+            ROUTING_STATE[module] = None

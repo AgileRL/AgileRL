@@ -169,6 +169,7 @@ if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
         adapt_lora_config_for_model,
         adapter_checkpoint_params,
         align_deepspeed_lr,
+        allreduce_minmax_int,
         assert_no_activation_checkpointing_config,
         attention_mask_from_padded_ids,
         build_completion_mask,
@@ -188,7 +189,7 @@ if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
         save_peft_adapter_for_vllm_rollout,
         stitch_completion_after_windowed_vllm_generate,
     )
-    from agilerl.utils.third_party_patches import patch_zero3_param_persistence
+    from agilerl.utils.third_party_patches import install_zero3_third_party_hooks
 
 if TYPE_CHECKING or HAS_DEEPSPEED:
     from deepspeed.checkpoint.utils import clone_tensors_for_torch_save
@@ -203,11 +204,6 @@ else:
 __all__ = ["ActionResult", "EvolvableAlgorithm", "MultiAgentRLAlgorithm", "RLAlgorithm"]
 
 logger = logging.getLogger(__name__)
-
-# Attributes owned by the live agent rather than by its learned state. A
-# checkpoint carries the hardware placement of the agent that wrote it, which does
-# not apply to an agent loading it onto a different device.
-LOCAL_AGENT_ATTRIBUTES = frozenset({"device"})
 
 
 def _is_readonly_property(obj: object, name: str) -> bool:
@@ -1253,7 +1249,8 @@ class EvolvableAlgorithm(ABC, Generic[ExperiencesT], metaclass=RegistryMeta):
             legacy_steps = checkpoint["steps"]
             checkpoint["steps"] = int(legacy_steps[-1]) if len(legacy_steps) else 0
         for attribute, value in checkpoint.items():
-            if attribute in LOCAL_AGENT_ATTRIBUTES:
+            # Checkpoint carries the writer's device; the live agent owns placement.
+            if attribute == "device":
                 continue
             if _is_readonly_property(self, attribute):
                 continue
@@ -2745,19 +2742,14 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
                         "DeepSpeed ZeRO Stage 3 is nascent and may not work as expected, proceed with caution when using this feature.",
                         stacklevel=2,
                     )
-                zero_config = ds_config.get("zero_optimization", {})
                 if self.zero_stage == 3:
-                    param_threshold = zero_config.get(
-                        "stage3_param_persistence_threshold"
+                    # Class-level DeepSpeed / Nemotron-H workarounds; install
+                    # before any model construction below.
+                    install_zero3_third_party_hooks(
+                        ds_config,
+                        model_name_or_path=self.pretrained_model_name_or_path,
+                        num_partitions=int(self.accelerator.num_processes),
                     )
-                    if param_threshold is not None:
-                        patch_zero3_param_persistence(
-                            int(param_threshold),
-                            model_persistence_threshold=zero_config.get(
-                                "stage3_model_persistence_threshold",
-                            ),
-                            num_partitions=int(self.accelerator.num_processes),
-                        )
             if self.accelerator.num_processes > 1:
                 seed = broadcast_object_list([seed], from_process=0)[0]
             seed += self.accelerator.process_index
@@ -3250,10 +3242,10 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
 
         ``lora_config`` and ``selected_adapters`` are intentionally skipped \u2014 the current
         algorithm's values are authoritative, and any LoRA-shape reconciliation is done
-        inside :meth:`_load_model_checkpoint`. :data:`LOCAL_AGENT_ATTRIBUTES` is skipped
-        for the same reason: the live agent owns the device its models sit on.
-        Read-only properties are skipped because they are derived (e.g. GRPO's
-        ``aux_metric_name``) and cannot be assigned via ``setattr``.
+        inside :meth:`_load_model_checkpoint`. ``device`` is skipped for the same reason:
+        the live agent owns the device its models sit on. Read-only properties are
+        skipped because they are derived (e.g. GRPO's ``aux_metric_name``) and cannot
+        be assigned via ``setattr``.
 
         :param checkpoint: Loaded attribute payload.
         :type checkpoint: dict[str, Any]
@@ -3264,7 +3256,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             "lr_scheduler",
             "lora_config",
             "selected_adapters",
-            *LOCAL_AGENT_ATTRIBUTES,
+            "device",
         }
         for attr, value in checkpoint.items():
             if attr in skip_attrs:
@@ -5194,6 +5186,28 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
                 batch_model_kwargs = None
                 log_probs.append(log_prob)
             return torch.cat(log_probs, dim=0)
+
+    def _raise_if_loss_not_finite_on_any_rank(self, loss: torch.Tensor) -> None:
+        """Raise when ``loss`` is non-finite on this rank or any DP peer.
+
+        Under multi-process training a local-only raise leaves peers waiting in
+        ZeRO-3 / NCCL collectives; the allreduce makes every rank raise together.
+
+        :param loss: Scalar loss about to enter :meth:`_backward_pass`.
+        :type loss: torch.Tensor
+        :return: None
+        :rtype: None
+        """
+        if self.accelerator is not None and self.accelerator.num_processes > 1:
+            nonfinite_flag = 0 if loss.isfinite().item() else 1
+            _, max_flag = allreduce_minmax_int(nonfinite_flag, self.accelerator)
+            if max_flag > 0:
+                msg = f"Loss is not finite: {loss}"
+                raise ValueError(msg)
+            return
+        if not loss.isfinite():
+            msg = f"Loss is not finite: {loss}"
+            raise ValueError(msg)
 
     def _backward_pass(self, loss: torch.Tensor) -> None:
         """Perform a backward pass and optimizer step.

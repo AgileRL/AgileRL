@@ -287,6 +287,7 @@ class SFT(LLMAlgorithm[SFTPrompts]):
                     training=training,
                 )
                 if training:
+                    self._raise_if_loss_not_finite_on_any_rank(loss)
                     self._backward_pass(loss)
                 loss_val = loss.item()
                 learn_metrics["loss"] += loss_val

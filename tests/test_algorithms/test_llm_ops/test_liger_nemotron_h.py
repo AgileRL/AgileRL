@@ -14,14 +14,14 @@ import agilerl.algorithms.core.llm_ops.liger_nemotron_h as liger_nemotron_h
 class TestRegisterNemotronHLiger:
     def test_returns_false_when_liger_unavailable(self, monkeypatch) -> None:
         monkeypatch.setattr(liger_nemotron_h, "HAS_LIGER", False)
-        monkeypatch.setattr(liger_nemotron_h, "_REGISTERED", {"value": False})
+        monkeypatch.setattr(liger_nemotron_h, "REGISTERED", {"value": False})
 
         assert liger_nemotron_h.register_nemotron_h_liger() is False
 
     def test_registers_nemotron_h_key_when_liger_present(self, monkeypatch) -> None:
         registry: dict = {}
         monkeypatch.setattr(liger_nemotron_h, "HAS_LIGER", True)
-        monkeypatch.setattr(liger_nemotron_h, "_REGISTERED", {"value": False})
+        monkeypatch.setattr(liger_nemotron_h, "REGISTERED", {"value": False})
         monkeypatch.setattr(
             liger_nemotron_h,
             "MODEL_TYPE_TO_APPLY_LIGER_FN",
@@ -36,7 +36,7 @@ class TestRegisterNemotronHLiger:
     def test_register_is_idempotent(self, monkeypatch) -> None:
         registry: dict = {}
         monkeypatch.setattr(liger_nemotron_h, "HAS_LIGER", True)
-        monkeypatch.setattr(liger_nemotron_h, "_REGISTERED", {"value": False})
+        monkeypatch.setattr(liger_nemotron_h, "REGISTERED", {"value": False})
         monkeypatch.setattr(
             liger_nemotron_h,
             "MODEL_TYPE_TO_APPLY_LIGER_FN",

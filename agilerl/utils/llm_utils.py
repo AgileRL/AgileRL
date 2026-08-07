@@ -68,13 +68,13 @@ _DEPRECATED_LLM_ENV_NAMES = frozenset(
 )
 
 # Accepted spellings per bitsandbytes quantization preset
-_BNB_QUANT_NONE_ALIASES = frozenset({"none"})
-_BNB_QUANT_INT8_ALIASES = frozenset({"int8"})
-_BNB_QUANT_NF4_ALIASES = frozenset(
+BNB_QUANT_NONE_ALIASES = frozenset({"none"})
+BNB_QUANT_INT8_ALIASES = frozenset({"int8"})
+BNB_QUANT_NF4_ALIASES = frozenset(
     {"nf4", "4bit", "4-bit", "bnb-4bit", "bnb_4bit"},
 )
-_BNB_QUANT_PRESETS = (
-    _BNB_QUANT_NONE_ALIASES | _BNB_QUANT_INT8_ALIASES | _BNB_QUANT_NF4_ALIASES
+BNB_QUANT_PRESETS = (
+    BNB_QUANT_NONE_ALIASES | BNB_QUANT_INT8_ALIASES | BNB_QUANT_NF4_ALIASES
 )
 
 # Gemma 4 wraps projections in *ClippableLinear; PEFT must target the inner ``.linear``
@@ -772,11 +772,11 @@ def build_bnb_quantization_config(
         return BitsAndBytesConfig(**spec)
     if isinstance(spec, str):
         mode = "".join(spec.split()).lower()
-        if mode in _BNB_QUANT_NONE_ALIASES:
+        if mode in BNB_QUANT_NONE_ALIASES:
             return None
-        if mode in _BNB_QUANT_INT8_ALIASES:
+        if mode in BNB_QUANT_INT8_ALIASES:
             return BitsAndBytesConfig(load_in_8bit=True)
-        if mode in _BNB_QUANT_NF4_ALIASES:
+        if mode in BNB_QUANT_NF4_ALIASES:
             return BitsAndBytesConfig(
                 load_in_4bit=True,
                 bnb_4bit_quant_type="nf4",
@@ -786,7 +786,7 @@ def build_bnb_quantization_config(
             )
         msg = (
             f"Unknown quantization preset {spec!r}; expected one of "
-            f"{sorted(_BNB_QUANT_PRESETS)} or a BitsAndBytesConfig kwargs dict."
+            f"{sorted(BNB_QUANT_PRESETS)} or a BitsAndBytesConfig kwargs dict."
         )
         raise ValueError(msg)
     msg = (

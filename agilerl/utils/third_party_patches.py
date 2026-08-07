@@ -3,6 +3,9 @@
 
 """Class-level workarounds for third-party behaviour that ZeRO-3 training cannot use.
 
+Call :func:`install_zero3_third_party_hooks` before the model is built; it
+selects the patches that apply to the DeepSpeed config and model identity.
+
 * :func:`patch_zero3_fetch_trace` keeps deepspeed's parameter-fetch trace from
   replaying a submodule order the current step never produced.
 * :func:`patch_zero3_param_persistence` keeps small ZeRO-3 parameters
@@ -13,11 +16,10 @@
   default-stream kernels against the stream its caller is running on.
 
 Every patch installs once at the class level, is idempotent, and takes
-``enabled`` so a caller can turn it off (or an env kill-switch for
-persistence). Third-party symbols are resolved when a patch runs, not when
-this module is imported. An absent target is a no-op with a warning; a present
-class with the wrong shape raises for wrap-style patches and fails soft for
-attribute patches. Install them before the model is built.
+``enabled`` so a caller can turn it off. Third-party symbols are resolved when
+a patch runs, not when this module is imported. An absent target is a no-op
+with a warning; a present class with the wrong shape raises for wrap-style
+patches and fails soft for attribute patches.
 """
 
 from __future__ import annotations
@@ -25,7 +27,6 @@ from __future__ import annotations
 import functools
 import importlib
 import logging
-import os
 from collections.abc import Mapping
 from types import ModuleType
 from typing import TYPE_CHECKING, Any
@@ -38,29 +39,94 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 __all__ = [
+    "install_zero3_third_party_hooks",
     "patch_nemotron_mamba_fused_path",
     "patch_nemotron_mamba_stream_ordering",
     "patch_zero3_fetch_trace",
     "patch_zero3_param_persistence",
 ]
 
-_ZERO3_COORDINATOR_MODULE = "deepspeed.runtime.zero.partitioned_param_coordinator"
-_ZERO3_PARTITION_MODULE = "deepspeed.runtime.zero.partition_parameters"
-_NEMOTRON_H_MODULE = "transformers.models.nemotron_h.modeling_nemotron_h"
+ZERO3_COORDINATOR_MODULE = "deepspeed.runtime.zero.partitioned_param_coordinator"
+ZERO3_PARTITION_MODULE = "deepspeed.runtime.zero.partition_parameters"
+NEMOTRON_H_MODULE = "transformers.models.nemotron_h.modeling_nemotron_h"
 
-_MANGLE_PREFIX = "_PartitionedParameterCoordinator"
-_SNAPSHOT_ATTR = "_agilerl_zero3_trace_snapshot"
-_MEM_EFF_ATTR = "use_mem_eff_path"
+MANGLE_PREFIX = "_PartitionedParameterCoordinator"
+SNAPSHOT_ATTR = "_agilerl_zero3_trace_snapshot"
+MEM_EFF_ATTR = "use_mem_eff_path"
 
-_TRACE_PATCHED_FLAG = "_agilerl_zero3_trace_patched"
-_STREAM_PATCHED_FLAG = "_agilerl_mamba_stream_patched"
-_FUSED_PATH_PATCHED_FLAG = "_agilerl_mamba_fused_path_patched"
+TRACE_PATCHED_FLAG = "_agilerl_zero3_trace_patched"
+STREAM_PATCHED_FLAG = "_agilerl_mamba_stream_patched"
+FUSED_PATH_PATCHED_FLAG = "_agilerl_mamba_fused_path_patched"
 
-_TRACE_ATTRS = (
+TRACE_ATTRS = (
     "__trace_mode",
     "__submodule_order",
     "__param_order",
 )
+
+
+def _is_nemotron_model(model_name_or_path: str | None) -> bool:
+    """Whether *model_name_or_path* names a Nemotron checkpoint.
+
+    Matches HF ids and local paths containing ``nemotron`` (case-insensitive).
+    Hybrid Nano / Nemotron-H checkpoints often omit ``H`` from the repo name
+    (e.g. ``NVIDIA-Nemotron-3-Nano-30B-A3B-BF16``) even when
+    ``model_type == "nemotron_h"``, so the substring is intentionally broad.
+
+    :param model_name_or_path: Hugging Face id or local path, or None.
+    :type model_name_or_path: str | None
+    :return: True when the id looks like Nemotron.
+    :rtype: bool
+    """
+    if not model_name_or_path:
+        return False
+    return "nemotron" in model_name_or_path.lower()
+
+
+def install_zero3_third_party_hooks(
+    deepspeed_config: Mapping[str, Any] | None,
+    *,
+    model_name_or_path: str | None = None,
+    num_partitions: int = 1,
+) -> None:
+    """Install the ZeRO-3 third-party patches that apply to this run.
+
+    Always installs the fetch-trace workaround. Nemotron Mamba2 mixer patches
+    install only when *model_name_or_path* looks like Nemotron, so other
+    architectures never mutate that class (or fail on its shape skew).
+    Parameter persistence installs when the config declares
+    ``stage3_param_persistence_threshold``. Call before the model is built.
+
+    :param deepspeed_config: Resolved DeepSpeed config, or None.
+    :type deepspeed_config: Mapping[str, Any] | None
+    :param model_name_or_path: Hugging Face id or local path of the actor.
+    :type model_name_or_path: str | None
+    :param num_partitions: ZeRO-3 partition count (trainer world size).
+    :type num_partitions: int
+    :return: None
+    :rtype: None
+    """
+    patch_zero3_fetch_trace(deepspeed_config)
+
+    if _is_nemotron_model(model_name_or_path):
+        patch_nemotron_mamba_fused_path()
+        patch_nemotron_mamba_stream_ordering()
+
+    if not isinstance(deepspeed_config, Mapping):
+        return
+    zero_optimization = deepspeed_config.get("zero_optimization")
+    if not isinstance(zero_optimization, Mapping):
+        return
+    param_threshold = zero_optimization.get("stage3_param_persistence_threshold")
+    if param_threshold is None:
+        return
+    patch_zero3_param_persistence(
+        int(param_threshold),
+        model_persistence_threshold=zero_optimization.get(
+            "stage3_model_persistence_threshold",
+        ),
+        num_partitions=num_partitions,
+    )
 
 
 def _try_import(module_path: str) -> ModuleType | None:
@@ -87,7 +153,7 @@ def _resolve_zero3_targets() -> tuple[type | None, type | None]:
     :return: ``(coordinator_cls, trace_mode)``, or ``(None, None)``.
     :rtype: tuple[type | None, type | None]
     """
-    module = _try_import(_ZERO3_COORDINATOR_MODULE)
+    module = _try_import(ZERO3_COORDINATOR_MODULE)
     if module is None:
         return None, None
     coordinator = getattr(module, "PartitionedParameterCoordinator", None)
@@ -103,7 +169,7 @@ def _resolve_zero3_targets() -> tuple[type | None, type | None]:
     if missing:
         message = (
             "[zero3-trace] "
-            f"{_ZERO3_COORDINATOR_MODULE} is present but missing "
+            f"{ZERO3_COORDINATOR_MODULE} is present but missing "
             f"{', '.join(missing)}"
         )
         raise RuntimeError(message)
@@ -116,13 +182,13 @@ def _resolve_mixer_class() -> type | None:
     :return: The mixer class, or None.
     :rtype: type | None
     """
-    module = _try_import(_NEMOTRON_H_MODULE)
+    module = _try_import(NEMOTRON_H_MODULE)
     if module is None:
         return None
     mixer = getattr(module, "NemotronHMamba2Mixer", None)
     if mixer is None:
         message = (
-            f"[mamba] {_NEMOTRON_H_MODULE} is present but missing NemotronHMamba2Mixer"
+            f"[mamba] {NEMOTRON_H_MODULE} is present but missing NemotronHMamba2Mixer"
         )
         raise RuntimeError(message)
     return mixer
@@ -134,7 +200,7 @@ def _resolve_zero3_init() -> type | None:
     :return: The ``Init`` class, or None.
     :rtype: type | None
     """
-    module = _try_import(_ZERO3_PARTITION_MODULE)
+    module = _try_import(ZERO3_PARTITION_MODULE)
     if module is None:
         return None
     return getattr(module, "Init", None)
@@ -161,7 +227,7 @@ def _mangled(name: str) -> str:
     :return: The mangled attribute name.
     :rtype: str
     """
-    return f"{_MANGLE_PREFIX}{name}"
+    return f"{MANGLE_PREFIX}{name}"
 
 
 def _routes_to_conditional_submodules(deepspeed_config: object) -> bool:
@@ -205,7 +271,7 @@ def _snapshot_trace_state(coordinator: object) -> dict[str, Any]:
     :rtype: dict[str, Any]
     """
     snapshot: dict[str, Any] = {}
-    for name in _TRACE_ATTRS:
+    for name in TRACE_ATTRS:
         attr = _mangled(name)
         if not hasattr(coordinator, attr):
             continue
@@ -237,7 +303,7 @@ def _missing_trace_attrs(coordinator_cls: type) -> list[str]:
     """
     code = getattr(getattr(coordinator_cls, "__init__", None), "__code__", None)
     assigned = set(getattr(code, "co_names", ()))
-    return [name for name in _TRACE_ATTRS if _mangled(name) not in assigned]
+    return [name for name in TRACE_ATTRS if _mangled(name) not in assigned]
 
 
 def _make_patched_reset_step(
@@ -266,16 +332,16 @@ def _make_patched_reset_step(
             return
 
         if not torch.is_grad_enabled():
-            if getattr(self, _SNAPSHOT_ATTR, None) is None:
-                setattr(self, _SNAPSHOT_ATTR, _snapshot_trace_state(self))
+            if getattr(self, SNAPSHOT_ATTR, None) is None:
+                setattr(self, SNAPSHOT_ATTR, _snapshot_trace_state(self))
             original_reset_step(self)
             setattr(self, trace_mode_attr, invalid_mode)
             return
 
-        snapshot = getattr(self, _SNAPSHOT_ATTR, None)
+        snapshot = getattr(self, SNAPSHOT_ATTR, None)
         if snapshot is not None:
             _restore_trace_state(self, snapshot)
-            setattr(self, _SNAPSHOT_ATTR, None)
+            setattr(self, SNAPSHOT_ATTR, None)
         original_reset_step(self)
 
     return patched_reset_step
@@ -318,7 +384,7 @@ def patch_zero3_fetch_trace(
             "reset_step left unpatched",
         )
         return
-    if _class_is_patched(coordinator_cls, _TRACE_PATCHED_FLAG):
+    if _class_is_patched(coordinator_cls, TRACE_PATCHED_FLAG):
         return
 
     original_reset_step = getattr(coordinator_cls, "reset_step", None)
@@ -337,7 +403,7 @@ def patch_zero3_fetch_trace(
     coordinator_target.reset_step = _make_patched_reset_step(
         original_reset_step, invalid_mode, always_invalid
     )
-    setattr(coordinator_cls, _TRACE_PATCHED_FLAG, True)
+    setattr(coordinator_cls, TRACE_PATCHED_FLAG, True)
     if always_invalid:
         logger.info(
             "[zero3-trace] reset_step patched; leaf_module declared, so every "
@@ -347,7 +413,7 @@ def patch_zero3_fetch_trace(
     logger.info(
         "[zero3-trace] reset_step patched; no-grad forwards preserve %d trace "
         "identity attributes",
-        len(_TRACE_ATTRS),
+        len(TRACE_ATTRS),
     )
 
 
@@ -356,6 +422,7 @@ def patch_zero3_param_persistence(
     *,
     model_persistence_threshold: int | None = None,
     num_partitions: int = 1,
+    enabled: bool = True,
 ) -> None:
     """Keep small ZeRO-3 parameters replicated on every rank.
 
@@ -365,9 +432,8 @@ def patch_zero3_param_persistence(
     thresholds. Setting the flag and the thresholds here decides persistence for
     every parameter created afterwards, so this must run before the model is
     constructed. The model threshold is a per-rank budget, hence the floor
-    division by *num_partitions*. Disabled by
-    ``AGILERL_ZERO3_PERSISTENCE_PATCH=0``; a no-op when ``zero.Init`` is
-    unavailable or lacks the attributes involved.
+    division by *num_partitions*. A no-op when ``zero.Init`` is unavailable or
+    lacks the attributes involved.
 
     :param param_persistence_threshold: Largest parameter element count kept persistent.
     :type param_persistence_threshold: int
@@ -375,12 +441,14 @@ def patch_zero3_param_persistence(
     :type model_persistence_threshold: int | None
     :param num_partitions: Number of ZeRO-3 parameter partitions (trainer world size).
     :type num_partitions: int
+    :param enabled: Install the patch, defaults to True.
+    :type enabled: bool, optional
     :return: None
     :rtype: None
     """
-    if os.environ.get("AGILERL_ZERO3_PERSISTENCE_PATCH", "1") == "0":
-        logger.warning(
-            "[zero3-persist] disabled by AGILERL_ZERO3_PERSISTENCE_PATCH=0",
+    if not enabled:
+        logger.info(
+            "[zero3-persist] disabled by caller; parameter persistence left untouched",
         )
         return
 
@@ -439,7 +507,7 @@ def _assigns_mem_eff_attr(original_init: Callable[..., None]) -> bool:
     :rtype: bool
     """
     code = getattr(original_init, "__code__", None)
-    return _MEM_EFF_ATTR in set(getattr(code, "co_names", ()))
+    return MEM_EFF_ATTR in set(getattr(code, "co_names", ()))
 
 
 def _make_patched_init(original_init: Callable[..., None]) -> Callable[..., None]:
@@ -454,7 +522,7 @@ def _make_patched_init(original_init: Callable[..., None]) -> Callable[..., None
     @functools.wraps(original_init)
     def patched_init(self: object, *args: Any, **kwargs: Any) -> None:
         original_init(self, *args, **kwargs)
-        setattr(self, _MEM_EFF_ATTR, False)
+        setattr(self, MEM_EFF_ATTR, False)
 
     return patched_init
 
@@ -492,24 +560,24 @@ def patch_nemotron_mamba_fused_path(*, enabled: bool = True) -> None:
             "__init__ left unpatched",
         )
         return
-    if _class_is_patched(mixer_cls, _FUSED_PATH_PATCHED_FLAG):
+    if _class_is_patched(mixer_cls, FUSED_PATH_PATCHED_FLAG):
         return
 
     original_init = getattr(mixer_cls, "__init__", None)
     if original_init is None or not _assigns_mem_eff_attr(original_init):
         message = (
             f"[mamba-fused-path] NemotronHMamba2Mixer.__init__ does not set "
-            f"{_MEM_EFF_ATTR}"
+            f"{MEM_EFF_ATTR}"
         )
         raise RuntimeError(message)
 
     mixer_target: Any = mixer_cls
     mixer_target.__init__ = _make_patched_init(original_init)
-    setattr(mixer_cls, _FUSED_PATH_PATCHED_FLAG, True)
+    setattr(mixer_cls, FUSED_PATH_PATCHED_FLAG, True)
     logger.info(
         "[mamba-fused-path] NemotronHMamba2Mixer.__init__ patched; %s cleared "
         "on every mixer",
-        _MEM_EFF_ATTR,
+        MEM_EFF_ATTR,
     )
 
 
@@ -624,7 +692,7 @@ def patch_nemotron_mamba_stream_ordering(*, enabled: bool = True) -> None:
             "[mamba-stream] NemotronHMamba2Mixer unavailable; forward left unpatched",
         )
         return
-    if _class_is_patched(mixer_cls, _STREAM_PATCHED_FLAG):
+    if _class_is_patched(mixer_cls, STREAM_PATCHED_FLAG):
         return
 
     original_forward = getattr(mixer_cls, "forward", None)
@@ -634,7 +702,7 @@ def patch_nemotron_mamba_stream_ordering(*, enabled: bool = True) -> None:
 
     mixer_target: Any = mixer_cls
     mixer_target.forward = _make_patched_forward(original_forward)
-    setattr(mixer_cls, _STREAM_PATCHED_FLAG, True)
+    setattr(mixer_cls, STREAM_PATCHED_FLAG, True)
     logger.info(
         "[mamba-stream] NemotronHMamba2Mixer.forward patched; default-stream "
         "kernels ordered against the calling stream",

@@ -15,7 +15,7 @@ if TYPE_CHECKING:
     from transformers.cache_utils import Cache
     from transformers.modeling_utils import PreTrainedModel
 
-_REGISTERED = {"value": False}
+REGISTERED = {"value": False}
 
 if HAS_LLM_DEPENDENCIES or TYPE_CHECKING:
     from transformers.models.nemotron_h import modeling_nemotron_h
@@ -251,8 +251,8 @@ def register_nemotron_h_liger() -> bool:
     """
     if not HAS_LIGER or modeling_nemotron_h is None:
         return False
-    if _REGISTERED["value"]:
+    if REGISTERED["value"]:
         return True
     MODEL_TYPE_TO_APPLY_LIGER_FN["nemotron_h"] = apply_liger_kernel_to_nemotron_h  # ty: ignore[invalid-assignment]  # extend Liger's closed apply-fn union with nemotron_h
-    _REGISTERED["value"] = True
+    REGISTERED["value"] = True
     return True

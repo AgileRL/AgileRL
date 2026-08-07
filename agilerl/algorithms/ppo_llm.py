@@ -692,6 +692,7 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
                             ppo_granularity,
                             batch_sampling_log_probs,
                         )
+                        self._raise_if_loss_not_finite_on_any_rank(total_loss)
                         self._backward_pass(total_loss)
                         unset_fused_adapter_routing(self._get_unwrapped_actor())
                         learn_metrics["kl"] += metrics["kl"]
@@ -790,6 +791,7 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
                     kl_loss = masked_mean(kl, batch_action_mask)
                     total_loss = pg_loss + vf_loss + self.beta * kl_loss
 
+                    self._raise_if_loss_not_finite_on_any_rank(total_loss)
                     self._backward_pass(total_loss)
                     unset_fused_adapter_routing(self._get_unwrapped_actor())
 

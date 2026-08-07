@@ -94,7 +94,9 @@ class _Stub:
     _loss = GRPO._loss
     _objective_loss = GRPO._objective_loss
     _prepare_experience_batch = GRPO._prepare_experience_batch
-    _raise_if_loss_not_finite_on_any_rank = GRPO._raise_if_loss_not_finite_on_any_rank
+    _raise_if_loss_not_finite_on_any_rank = (
+        LLMAlgorithm._raise_if_loss_not_finite_on_any_rank
+    )
     _record_window_action_tokens = GRPO._record_window_action_tokens
     _sampling_mismatch_metrics = GRPO._sampling_mismatch_metrics
     _use_liger_path = GRPO._use_liger_path
