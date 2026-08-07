@@ -2228,7 +2228,9 @@ def build_hf_completion_mask(
         completion_id, stitch_ids, initial_prompt_len
     )
     if stitch_ids is None:
+        # Non-windowed path: prompt length equals the generate input length.
         completion_len = new_token_len
+        full_prompt_len = input_ids_len
     else:
         recent_suffix_len = input_ids_len - initial_prompt_len
         completion_len = new_token_len + recent_suffix_len

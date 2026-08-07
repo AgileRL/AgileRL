@@ -103,6 +103,19 @@ def _is_partitioned(*tensors: torch.Tensor) -> bool:
     return any(isinstance(tensor, DTensor) for tensor in tensors)
 
 
+def _as_local_expert_weight(weight: torch.Tensor) -> torch.Tensor:
+    """``to_local()`` for EP/FSDP ``DTensor`` expert weights; identity otherwise."""
+    from agilerl.utils.expert_parallel import expert_local_tensor
+
+    return expert_local_tensor(weight)
+
+
+def _module_ep_degree(module: nn.Module) -> int:
+    from agilerl.utils.expert_parallel import module_ep_degree
+
+    return module_ep_degree(module)
+
+
 def _grouped_linear(
     x: torch.Tensor,
     weight: torch.Tensor,
@@ -226,8 +239,15 @@ def _split_lora_delta(
     counts: Sequence[int] | torch.Tensor,
     adapter: str,
     offs: torch.Tensor | None = None,
+    *,
+    num_experts: int | None = None,
 ) -> torch.Tensor:
-    """Low-rank delta for expert-sorted rows without materializing per-expert full-rank weights."""
+    """Low-rank delta for expert-sorted rows without materializing per-expert full-rank weights.
+
+    Under Expert Parallel, LoRA ``A`` is ``Shard(0)`` on expert-major ``[E*r, in]``
+    and ``B`` is ``Shard(2)`` on ``[out, r, E]``; this path uses ``to_local()``
+    slices for the local expert block and never gathers the full expert axis.
+    """
     lora_a = wrapper.lora_A[adapter]
     lora_b = wrapper.lora_B[adapter]
     weight_a = lora_a.weight
@@ -235,32 +255,169 @@ def _split_lora_delta(
     assert isinstance(weight_a, torch.Tensor)
     assert isinstance(weight_b, torch.Tensor)
     scaling = wrapper.scaling[adapter]
-    num_experts = wrapper.num_experts
     rank = wrapper.r[adapter]
-    x = x.to(weight_a.dtype)
+    local_a = _as_local_expert_weight(weight_a)
+    local_b = _as_local_expert_weight(weight_b)
+    x = x.to(local_a.dtype)
 
-    if _is_partitioned(weight_a, weight_b):
-        # FSDP2 shards are gathered via :func:`~agilerl.utils.llm_utils.gather_params`
-        # around PEFT attach; if adapter weights are still ``DTensor`` here, route
-        # through the adapter Linears so each token keeps only its expert block.
+    # Prefer local grouped GEMM whenever we have dense local shards (EP or
+    # post-gather). The Linear fallback is only for still-partitioned DTensors
+    # that were not EP-sharded on dim 0 (non-EP FSDP leftover).
+    if _is_partitioned(local_a, local_b):
+        experts = num_experts if num_experts is not None else wrapper.num_experts
         total = x.shape[0]
         expert_ids = torch.repeat_interleave(
-            torch.arange(num_experts, device=x.device),
+            torch.arange(experts, device=x.device),
             _counts_tensor(counts, x.device),
         )
         rows = torch.arange(total, device=x.device)
-        a_full = lora_a(x).view(total, num_experts, rank)
+        a_full = lora_a(x).view(total, experts, rank)
         gated = torch.zeros(
-            total, rank, num_experts, dtype=a_full.dtype, device=x.device
+            total, rank, experts, dtype=a_full.dtype, device=x.device
         )
         gated[rows, :, expert_ids] = a_full[rows, expert_ids]
-        return lora_b(gated.reshape(total, rank * num_experts)) * scaling
+        return lora_b(gated.reshape(total, rank * experts)) * scaling
 
-    a3 = weight_a.view(num_experts, rank, weight_a.shape[1])
-    b3 = weight_b.view(weight_b.shape[0], rank, num_experts)
+    # Stacked PEFT layouts: A is ``[E*r, in]`` or already ``[E, r, in]`` local;
+    # B is ``[out, E*r]`` / ``[out, r, E]``. Infer E from the local shard.
+    if local_a.ndim == 3:
+        a3 = local_a
+        experts = a3.shape[0]
+    else:
+        experts = num_experts if num_experts is not None else wrapper.num_experts
+        a3 = local_a.view(experts, rank, local_a.shape[1])
+        experts = a3.shape[0]
+    if local_b.ndim == 3:
+        b3 = local_b
+        if b3.shape[0] == experts:
+            b_grouped = b3
+        else:
+            # ``[out, r, E]`` local on last dim
+            b_grouped = b3.permute(2, 0, 1)
+    else:
+        b3 = local_b.view(local_b.shape[0], rank, experts)
+        b_grouped = b3.permute(2, 0, 1)
     down = _grouped_linear(x, a3, counts, offs)
-    up = _grouped_linear(down, b3.permute(2, 0, 1), counts, offs, copy_for_gmm=True)
+    up = _grouped_linear(down, b_grouped, counts, offs, copy_for_gmm=True)
     return up * scaling
+
+
+def _routed_experts_local_forward(
+    experts: nn.Module,
+    hidden_states: torch.Tensor,
+    top_k_index: torch.Tensor,
+    top_k_weights: torch.Tensor,
+    *,
+    chain: dict[str, ParamWrapper] | None = None,
+    adapters: dict[str, list[str]] | None = None,
+) -> torch.Tensor:
+    """Packed routed-experts forward on ``to_local()`` weights (EP-safe).
+
+    When ``module_ep_degree(experts) > 1``, tokens are all-to-all dispatched to
+    the ranks that own each expert, local GEMM (+ optional split LoRA) runs on
+    ``E/ep`` experts, then outputs are combined. Never gathers full-E weights.
+    """
+    from agilerl.utils.expert_parallel import (
+        module_ep_degree,
+        module_ep_group,
+        token_combine,
+        token_dispatch,
+    )
+
+    projections = _routed_projection_names(experts)
+    if projections is None:
+        msg = "Routed experts module does not match a supported packed layout."
+        raise RuntimeError(msg)
+    up_name, gated = projections
+    up_weight = _as_local_expert_weight(getattr(experts, up_name))
+    down_weight = _as_local_expert_weight(experts.down_proj)
+    act_fn = experts.act_fn
+    assert isinstance(up_weight, torch.Tensor)
+    assert isinstance(down_weight, torch.Tensor)
+
+    ep_degree = module_ep_degree(experts)
+    # Full expert count is ep * local_E when sharded; PEFT wrappers still know E.
+    local_e = up_weight.shape[0]
+    num_experts = local_e * ep_degree if ep_degree > 1 else local_e
+    if chain is not None and adapters is None:
+        adapters = {name: _resolve_adapters(w) for name, w in chain.items()}
+    adapters = adapters or {}
+    chain = chain or {}
+
+    top_k = top_k_index.shape[-1]
+    flat_experts = top_k_index.reshape(-1)
+    order = torch.argsort(flat_experts, stable=True)
+    counts = torch.bincount(flat_experts, minlength=num_experts)
+    token_idx = torch.div(order, top_k, rounding_mode="floor")
+    x = hidden_states[token_idx]
+    routed_weights = top_k_weights.reshape(-1)[order].unsqueeze(-1)
+
+    if ep_degree > 1:
+        ep_group = module_ep_group(experts)
+        if ep_group is None:
+            msg = "Expert Parallel module is missing _ep_group; call shard_experts_on_ep."
+            raise RuntimeError(msg)
+        x, local_counts, state = token_dispatch(
+            x,
+            counts.to(torch.long),
+            ep_group=ep_group,
+            ep_degree=ep_degree,
+            num_local_experts=local_e,
+        )
+        # Combine needs the pre-dispatch routed weights / token_idx; keep them.
+        counts_for_gemm = local_counts
+    else:
+        if _is_partitioned(getattr(experts, up_name), experts.down_proj):
+            msg = (
+                "Split expert LoRA found FSDP2-sharded expert weights that are "
+                "not gathered. Call :func:`~agilerl.utils.llm_utils.gather_params` "
+                "on packed expert parameters before MoE wrapper upgrade so this "
+                "forward can read dense packed weights, or enable Expert Parallel "
+                "(ep > 1) so forwards use to_local() shards."
+            )
+            raise RuntimeError(msg)
+        counts_for_gemm = counts
+        state = None
+
+    offs = (
+        torch.cumsum(_counts_tensor(counts_for_gemm, x.device), dim=0).to(torch.int32)
+        if x.is_cuda
+        else None
+    )
+    projected = _grouped_linear(x, up_weight, counts_for_gemm, offs)
+    for name in adapters.get(up_name, []):
+        delta = _split_lora_delta(
+            chain[up_name],
+            x,
+            counts_for_gemm,
+            name,
+            offs,
+            num_experts=local_e,
+        )
+        projected = projected + delta.to(projected.dtype)
+    if gated:
+        gate, up = projected.chunk(2, dim=-1)
+        intermediate = act_fn(gate) * up
+    else:
+        intermediate = act_fn(projected)
+    down = _grouped_linear(intermediate, down_weight, counts_for_gemm, offs)
+    for name in adapters.get("down_proj", []):
+        delta = _split_lora_delta(
+            chain["down_proj"],
+            intermediate,
+            counts_for_gemm,
+            name,
+            offs,
+            num_experts=local_e,
+        )
+        down = down + delta.to(down.dtype)
+
+    if state is not None:
+        down = token_combine(down, state)
+
+    result = torch.zeros_like(hidden_states)
+    result.index_add_(0, token_idx, (down * routed_weights).to(result.dtype))
+    return result
 
 
 def _wrapper_chain(wrapper: ParamWrapper) -> dict[str, ParamWrapper]:
@@ -274,7 +431,12 @@ def _wrapper_chain(wrapper: ParamWrapper) -> dict[str, ParamWrapper]:
 
 
 class SortedExpertsLoraWrapper(ParamWrapper):
-    """Split-LoRA ``ParamWrapper`` for grouped linears taking expert-sorted rows."""
+    """Split-LoRA ``ParamWrapper`` for grouped linears taking expert-sorted rows.
+
+    Under Expert Parallel the caller dispatches tokens first so ``expert_size``
+    / ``x`` cover only the local expert shard; base and LoRA weights are read
+    via ``to_local()``.
+    """
 
     _self_routed_lora = True
 
@@ -286,7 +448,23 @@ class SortedExpertsLoraWrapper(ParamWrapper):
         **kwargs: Any,
     ) -> torch.Tensor:
         adapters = _resolve_adapters(self)
-        result = self.base_layer(x, expert_size, *args, **kwargs)
+        base = self.base_layer
+        ep_degree = _module_ep_degree(base)
+        if ep_degree > 1:
+            # Local shard forward: grouped linear on to_local weights.
+            weight = _as_local_expert_weight(base.weight)
+            local_e = weight.shape[0]
+            counts = _expert_counts(expert_size, local_e)
+            offs = _group_offsets(counts, x.device) if x.is_cuda else None
+            result = _grouped_linear(x, weight, counts, offs)
+            for name in adapters:
+                delta = _split_lora_delta(
+                    self, x, counts, name, offs, num_experts=local_e
+                )
+                result = result + delta.to(result.dtype)
+            return result
+
+        result = base(x, expert_size, *args, **kwargs)
         if not adapters:
             return result
         counts = _expert_counts(expert_size, self.num_experts)
@@ -298,7 +476,11 @@ class SortedExpertsLoraWrapper(ParamWrapper):
 
 
 class RoutedExpertsLoraWrapper(ParamWrapper):
-    """Split-LoRA ``ParamWrapper`` for self-routing packed-experts modules."""
+    """Split-LoRA ``ParamWrapper`` for self-routing packed-experts modules.
+
+    Under Expert Parallel (``ep > 1``) uses ``to_local()`` expert / LoRA shards
+    and torch all-to-all dispatch/combine — never gathers full-E weights on CUDA.
+    """
 
     _self_routed_lora = True
 
@@ -317,57 +499,23 @@ class RoutedExpertsLoraWrapper(ParamWrapper):
         chain = _wrapper_chain(self)
         experts = self.get_base_layer()
         adapters = {name: _resolve_adapters(w) for name, w in chain.items()}
-        if not any(adapters.values()):
+        ep_degree = _module_ep_degree(experts)
+
+        if not any(adapters.values()) and ep_degree <= 1:
             return experts(hidden_states, top_k_index, top_k_weights)
 
         projections = _routed_projection_names(experts)
         if projections is None:
             return ParamWrapper.forward(self, hidden_states, top_k_index, top_k_weights)
-        up_name, gated = projections
-        up_weight = getattr(experts, up_name)
-        down_weight = experts.down_proj
-        act_fn = experts.act_fn
-        assert isinstance(up_weight, torch.Tensor)
-        assert isinstance(down_weight, torch.Tensor)
-        assert not isinstance(act_fn, torch.Tensor)
-        if _is_partitioned(up_weight, down_weight):
-            msg = (
-                "Split expert LoRA found FSDP2-sharded expert weights that are "
-                "not gathered. Call :func:`~agilerl.utils.llm_utils.gather_params` "
-                "on packed expert parameters before MoE wrapper upgrade so this "
-                "forward can read dense packed weights."
-            )
-            raise RuntimeError(msg)
 
-        num_experts = up_weight.shape[0]
-        top_k = top_k_index.shape[-1]
-        flat_experts = top_k_index.reshape(-1)
-        order = torch.argsort(flat_experts, stable=True)
-        counts = torch.bincount(flat_experts, minlength=num_experts)
-        offs = torch.cumsum(counts, dim=0).to(torch.int32)
-        token_idx = torch.div(order, top_k, rounding_mode="floor")
-        x = hidden_states[token_idx]
-
-        projected = _grouped_linear(x, up_weight, counts, offs)
-        for name in adapters.get(up_name, []):
-            delta = _split_lora_delta(chain[up_name], x, counts, name, offs)
-            projected = projected + delta.to(projected.dtype)
-        if gated:
-            gate, up = projected.chunk(2, dim=-1)
-            intermediate = act_fn(gate) * up
-        else:
-            intermediate = act_fn(projected)
-        down = _grouped_linear(intermediate, down_weight, counts, offs)
-        for name in adapters.get("down_proj", []):
-            delta = _split_lora_delta(
-                chain["down_proj"], intermediate, counts, name, offs
-            )
-            down = down + delta.to(down.dtype)
-
-        routed_weights = top_k_weights.reshape(-1)[order].unsqueeze(-1)
-        result = torch.zeros_like(hidden_states)
-        result.index_add_(0, token_idx, (down * routed_weights).to(result.dtype))
-        return result
+        return _routed_experts_local_forward(
+            experts,
+            hidden_states,
+            top_k_index,
+            top_k_weights,
+            chain=chain,
+            adapters=adapters,
+        )
 
 
 def upgrade_moe_param_wrappers(model: nn.Module) -> int:

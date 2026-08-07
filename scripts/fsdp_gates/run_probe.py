@@ -170,7 +170,7 @@ def main() -> int:
         )
 
     if args.model_name:
-        from transformers import AutoTokenizer
+        from transformers import AutoConfig, AutoTokenizer
 
         tokenizer = AutoTokenizer.from_pretrained(args.model_name)
         if tokenizer.pad_token is None:
@@ -181,9 +181,32 @@ def main() -> int:
         model_name = args.model_name
         lora_dict = dict(dbg.get("lora") or {})
         # The debug config ships GPT2-style target_modules (c_attn/c_proj/c_fc)
-        # which do not exist in Qwen2.5; target the attention+MLP projections
-        # that every Qwen2 dense model exposes instead.
-        lora_dict["target_modules"] = ["q_proj", "k_proj", "v_proj", "o_proj"]
+        # which do not exist in Qwen2/Qwen3; target attention projections instead.
+        if "target_modules" not in (dbg.get("lora") or {}) or set(
+            lora_dict.get("target_modules") or []
+        ) <= {"c_attn", "c_proj", "c_fc"}:
+            lora_dict["target_modules"] = ["q_proj", "k_proj", "v_proj", "o_proj"]
+        model_cfg = AutoConfig.from_pretrained(args.model_name)
+        is_moe = (
+            getattr(model_cfg, "num_experts", None)
+            or getattr(model_cfg, "num_local_experts", None)
+            or "moe" in type(model_cfg).__name__.lower()
+        )
+        if is_moe:
+            # Packed-expert LoRA needs dropout 0; EP>1 forbids a second adapter.
+            lora_dict.setdefault("lora_dropout", 0.0)
+            if lora_dict.get("target_parameters") is None:
+                # Prefer attention LoRA for ConstantTarget learning; EP still
+                # shards base experts via apply_expert_parallel forward hooks.
+                lora_dict.setdefault(
+                    "target_modules", ["q_proj", "k_proj", "v_proj", "o_proj"]
+                )
+            init_hp.setdefault("USE_SEPARATE_REFERENCE_ADAPTER", False)
+            # Tiny random-init MoE fixtures are unstable under flash-attn.
+            init_hp.setdefault("ATTN_IMPLEMENTATION", "sdpa")
+            init_hp.setdefault("BATCH_SIZE", 8)
+            init_hp.setdefault("MICRO_BATCH_SIZE_PER_GPU", 2)
+            init_hp.setdefault("GROUP_SIZE", 2)
     else:
         tokenizer = TinyDigitTokenizer()
         actor = build_tiny_actor_network(use_value_head=(init_hp["ALGO"] == "LLMPPO"))

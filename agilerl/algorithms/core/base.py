@@ -2452,6 +2452,10 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
     :type gradient_accumulation_steps: int, optional
     :param fsdp_config: Optional FSDP2 configuration.
     :type fsdp_config: FSDPConfig | None, optional
+    :param ep: Expert Parallel degree for packed-expert MoE (``1`` disables).
+        ``ep > 1`` requires ``fsdp_config`` and shards experts across an ``ep``
+        mesh; see ``docs/migration/expert-parallel-plan.md``.
+    :type ep: int, optional
     :param name: The name of the algorithm.
     :type name: str | None
     :param model_config: Keyword arguments for ``from_pretrained`` (not the HF
@@ -2563,6 +2567,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         device: str | torch.device = "cpu",
         gradient_accumulation_steps: int = 1,
         fsdp_config: FSDPConfig | None = None,
+        ep: int = 1,
         name: str | None = None,
         model_config: dict[str, Any] | PretrainedConfigProtocol | None = None,
         gradient_checkpointing: bool = True,
@@ -2650,11 +2655,26 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         )
         self.distributed = init_distributed()
         self.fsdp_config = fsdp_config
+        self.ep = int(ep)
         if fsdp_config is not None and not self.distributed:
             msg = (
                 "fsdp_config requires distributed training. Launch with "
                 "torchrun (or have your orchestration layer set the "
                 "rendezvous env vars) so the process group can initialise."
+            )
+            raise ValueError(msg)
+        from agilerl.utils.distributed import get_world_size
+        from agilerl.utils.expert_parallel import validate_ep_config
+
+        validate_ep_config(
+            self.ep,
+            fsdp_config=fsdp_config,
+            world_size=get_world_size() if self.distributed else 1,
+        )
+        if self.ep > 1 and not self.distributed:
+            msg = (
+                "ep > 1 requires distributed training. Launch with torchrun "
+                "(or set rendezvous env vars) so the process group can initialise."
             )
             raise ValueError(msg)
         self._requested_gradient_accumulation_steps = int(gradient_accumulation_steps)
@@ -3310,10 +3330,51 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
                     "optim_cpu_offload instead (params stay on GPU)."
                 )
             self._restore_adapter_trainability(["actor", "critic"])
+            # EP: validate MoE layout, build mesh views, then materialize. Expert
+            # ``Shard(0)`` is applied inside materialize while the actor is still
+            # dense-on-CPU in the captured state (see
+            # ``materialize_fsdp2_from_cpu_state``). FSDP then uses
+            # ``fully_shard(mesh=dp_mod_ep|hsdp)``; ``ep=1`` keeps flat PG FSDP.
+            self._ep_mesh = None
+            if self.ep > 1:
+                from agilerl.utils.distributed import get_world_size
+                from agilerl.utils.expert_parallel import (
+                    build_expert_parallel_mesh,
+                    iter_packed_expert_modules,
+                    validate_ep_config,
+                )
+
+                packed = iter_packed_expert_modules(self.actor)
+                if not packed:
+                    validate_ep_config(
+                        self.ep, fsdp_config=self.fsdp_config, is_moe=False
+                    )
+                num_experts = None
+                for _name, module in packed:
+                    weight = getattr(module, "weight", None)
+                    if weight is None:
+                        weight = getattr(module, "down_proj", None)
+                    if isinstance(weight, torch.Tensor) and weight.ndim == 3:
+                        num_experts = int(weight.shape[0])
+                        break
+                validate_ep_config(
+                    self.ep,
+                    fsdp_config=self.fsdp_config,
+                    world_size=get_world_size(),
+                    num_experts=num_experts,
+                    is_moe=True,
+                )
+                device_type = "cuda" if str(self.device).startswith("cuda") else "cpu"
+                self._ep_mesh = build_expert_parallel_mesh(
+                    ep=self.ep, device_type=device_type
+                )
             # CPU (or meta) → shard → empty local shards on device → scatter.
             # Never densifies the full actor on CUDA.
             self.actor = materialize_fsdp2_from_cpu_state(
-                self.actor, self.device, self.fsdp_config
+                self.actor,
+                self.device,
+                self.fsdp_config,
+                ep_mesh=self._ep_mesh,
             )
             self._rebuild_optimizer_after_load()
             if self.fsdp_config.optim_cpu_offload:
@@ -4321,7 +4382,13 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
                     for name, param in peft_target.named_parameters()
                     if any(name.endswith(target) for target in expert_target_parameters)
                 ]
-                attach_ctx = gather_params(expert_params)
+                # Under EP, never gather full packed experts onto CUDA for PEFT
+                # bookkeeping — attach stays on the CPU dense actor (see
+                # ``EP_ATTACH_ORDER`` in ``agilerl.utils.expert_parallel``).
+                if self.ep > 1:
+                    attach_ctx = nullcontext()
+                else:
+                    attach_ctx = gather_params(expert_params)
             # FSDP2 requires uniform *original* dtypes in each shard group.
             # PEFT defaults to fp32 adapters on a half-precision base — match
             # adapters to the base dtype instead (same as Prime-RL's LoRA init).
@@ -4375,7 +4442,12 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
                             param.data = param.data.to(base_dtype)
 
             if expert_target_parameters:
-                with gather_params(expert_params):
+                upgrade_ctx: AbstractContextManager[Any] = (
+                    nullcontext()
+                    if self.ep > 1
+                    else gather_params(expert_params)
+                )
+                with upgrade_ctx:
                     n_expert_lora = upgrade_moe_param_wrappers(peft_target)
                 logger.info(
                     "Split expert-LoRA execution enabled on %d packed-experts modules.",

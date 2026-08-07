@@ -79,6 +79,8 @@ class DPO(LLMAlgorithm[PreferencePrompts]):
     :type gradient_accumulation_steps: int, optional
     :param fsdp_config: FSDP2 sharding settings for distributed runs, defaults to None
     :type fsdp_config: FSDPConfig | None, optional
+    :param ep: Expert Parallel degree for packed-expert MoE (1 disables).
+    :type ep: int, optional
     :param wrap: Wrap models for distributed training upon creation, defaults to True
     :type wrap: bool, optional
     :param clone: Flag to indicate if the instantiation is a cloning, defaults to False
@@ -150,6 +152,7 @@ class DPO(LLMAlgorithm[PreferencePrompts]):
         lora_config: LoraConfig | None = None,
         gradient_accumulation_steps: int = 1,
         fsdp_config: FSDPConfig | None = None,
+        ep: int = 1,
         wrap: bool = True,
         clone: bool = False,
         seed: int = 42,
@@ -188,6 +191,7 @@ class DPO(LLMAlgorithm[PreferencePrompts]):
             device=resolved_device,
             gradient_accumulation_steps=gradient_accumulation_steps,
             fsdp_config=fsdp_config,
+            ep=ep,
             name="DPO",
             gradient_checkpointing=gradient_checkpointing,
             torch_compiler=torch_compiler,

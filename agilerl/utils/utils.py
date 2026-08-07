@@ -214,6 +214,9 @@ def _prepare_llm_algo_kwargs(
             merged["fsdp_config"] = FSDPConfig()
         elif isinstance(fsdp_val, dict):
             merged["fsdp_config"] = FSDPConfig(**fsdp_val)
+    # Flat Expert Parallel degree beside FSDP (absent → ctor default 1).
+    if "ep" not in merged and "EP" in INIT_HP:
+        merged["ep"] = int(INIT_HP["EP"])
     return merged
 
 

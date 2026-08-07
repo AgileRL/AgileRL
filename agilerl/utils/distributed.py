@@ -307,7 +307,11 @@ def _shard_embed_and_lm_head(model: nn.Module, shard_kwargs: dict) -> None:
         fully_shard(lm_head, **shard_kwargs)
 
 
-def apply_fsdp2(model: nn.Module, config: FSDPConfig | None = None) -> nn.Module:
+def apply_fsdp2(
+    model: nn.Module,
+    config: FSDPConfig | None = None,
+    ep_mesh: Any | None = None,
+) -> nn.Module:
     """Shard ``model`` with FSDP2: blocks, embed/(untied) lm_head, then root.
 
     Parameters become DTensors in place, so any optimizer must be (re)built
@@ -315,11 +319,18 @@ def apply_fsdp2(model: nn.Module, config: FSDPConfig | None = None) -> nn.Module
     CUDA — use :func:`materialize_fsdp2_from_cpu_state` so weights stay on
     CPU/meta until only local shards are allocated on the compute device.
 
+    When ``ep_mesh`` is set (``ep > 1``), packed-expert modules are
+    ``fully_shard``'d on ``ep_mesh.dp_mod_ep`` first, then transformer blocks /
+    embeddings / root use ``ep_mesh.hsdp`` (Prime-RL EP×FSDP compose). With
+    ``ep_mesh is None`` (``ep == 1``), uses today's flat process-group FSDP.
+
     :param model: Model to shard (CPU or meta parameters).
     :type model: nn.Module
     :param config: Sharding settings; defaults to :class:`FSDPConfig`'s
         defaults.
     :type config: FSDPConfig | None
+    :param ep_mesh: Optional Expert Parallel mesh views for EP×FSDP compose.
+    :type ep_mesh: ExpertParallelMesh | None
     :return: The sharded model (same object).
     :rtype: nn.Module
     """
@@ -353,6 +364,14 @@ def apply_fsdp2(model: nn.Module, config: FSDPConfig | None = None) -> nn.Module
     }
     if config.cpu_offload:
         kwargs["offload_policy"] = CPUOffloadPolicy()
+
+    if ep_mesh is not None:
+        from agilerl.utils.expert_parallel import iter_packed_expert_modules
+
+        expert_kwargs = {**kwargs, "mesh": ep_mesh.dp_mod_ep}
+        for _name, experts in iter_packed_expert_modules(model):
+            fully_shard(experts, **expert_kwargs)
+        kwargs = {**kwargs, "mesh": ep_mesh.hsdp}
 
     for block in _transformer_blocks(model):
         fully_shard(block, **kwargs)
@@ -389,12 +408,14 @@ def materialize_fsdp2_from_cpu_state(
     model: nn.Module,
     device: str | torch.device,
     config: FSDPConfig | None = None,
+    ep_mesh: Any | None = None,
 ) -> nn.Module:
     """Shard a CPU-resident model without placing a dense full replica on GPU.
 
-    Captures a CPU state dict, moves parameters to meta, applies FSDP2,
-    allocates empty sharded storages on ``device`` (or CPU when
-    ``config.cpu_offload``), then scatters the CPU state into DTensor shards.
+    Captures a CPU state dict, moves parameters to meta, optionally applies
+    Expert Parallel ``Shard(0)`` on packed experts, applies FSDP2, allocates
+    empty sharded storages on ``device`` (or CPU when ``config.cpu_offload``),
+    then scatters the CPU state into DTensor shards.
 
     :param model: Dense actor on CPU (base + LoRA already attached).
     :type model: nn.Module
@@ -402,6 +423,11 @@ def materialize_fsdp2_from_cpu_state(
     :type device: str | torch.device
     :param config: FSDP2 settings.
     :type config: FSDPConfig | None
+    :param ep_mesh: Optional :class:`~agilerl.utils.expert_parallel.ExpertParallelMesh`
+        from ``build_expert_parallel_mesh``. When set, packed experts (and
+        stacked expert LoRA) are ``Shard``'d on the EP dim before FSDP2. Flat
+        PG FSDP is used for ``ep=1`` (``ep_mesh is None``).
+    :type ep_mesh: ExpertParallelMesh | None
     :return: The sharded model (same object).
     :rtype: nn.Module
     """
@@ -413,7 +439,14 @@ def materialize_fsdp2_from_cpu_state(
         for key, value in model.state_dict().items()
     }
     model.to_empty(device="meta")
-    apply_fsdp2(model, config)
+    if ep_mesh is not None:
+        from agilerl.utils.expert_parallel import apply_expert_parallel
+
+        # Parallelize on meta modules so EP placements exist before FSDP2;
+        # ``load_full_state_dict`` then scatters dense CPU weights into the
+        # EP (+ FSDP) local shards without a CUDA full-MoE densify.
+        apply_expert_parallel(model, ep_mesh.ep)
+    apply_fsdp2(model, config, ep_mesh=ep_mesh)
     target = torch.device("cpu") if config.cpu_offload else torch.device(device)
     model.to_empty(device=target)
     _restore_after_to_empty(model)

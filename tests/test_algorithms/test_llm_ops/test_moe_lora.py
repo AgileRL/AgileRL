@@ -314,11 +314,13 @@ def test_zero3_partitioned_adapters_use_module_call_path():
     assert torch.allclose(reference(x), upgraded(x), atol=1e-5)
 
 
-def test_zero3_partitioned_base_weights_raise_on_routed_convention():
+def test_fsdp_partitioned_base_weights_raise_on_routed_convention(monkeypatch):
+    """Non-EP FSDP DTensor expert weights must fail loud (gather or enable EP)."""
+    from agilerl.algorithms.core.llm_ops import moe_lora as moe_mod
+
     _, upgraded = _routed_pair()
-    experts = _wrappers(upgraded)[0].get_base_layer()
-    experts.gate_up_proj.ds_id = 1
-    with pytest.raises(RuntimeError, match="ZeRO-3 partitioned expert weights"):
+    monkeypatch.setattr(moe_mod, "_is_partitioned", lambda *tensors: True)
+    with pytest.raises(RuntimeError, match="FSDP2-sharded expert weights"):
         upgraded(torch.randn(10, HIDDEN))
 
 

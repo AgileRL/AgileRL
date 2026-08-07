@@ -140,6 +140,8 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
     :type gradient_accumulation_steps: int, optional
     :param fsdp_config: FSDP2 sharding settings for distributed runs, defaults to None
     :type fsdp_config: FSDPConfig | None, optional
+    :param ep: Expert Parallel degree for packed-expert MoE (1 disables).
+    :type ep: int, optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str
     :param wrap: Wrap models for distributed training upon creation.
@@ -267,6 +269,7 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
         cosine_lr_schedule_config: CosineLRScheduleConfig | None = None,
         gradient_accumulation_steps: int = 1,
         fsdp_config: FSDPConfig | None = None,
+        ep: int = 1,
         device: str | torch.device | None = None,
         wrap: bool = True,
         clone: bool = False,
@@ -319,6 +322,7 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
             device=resolved_device,
             gradient_accumulation_steps=gradient_accumulation_steps,
             fsdp_config=fsdp_config,
+            ep=ep,
             name="LLMREINFORCE",
             gradient_checkpointing=gradient_checkpointing,
             torch_compiler=torch_compiler,
