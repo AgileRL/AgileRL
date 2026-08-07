@@ -53,6 +53,7 @@ from agilerl.utils.llm_utils import (
     discover_clippable_projection_leaf_names,
     fill_outside_mask,
     filter_peft_state_dict_for_vllm_lora,
+    flex_decode_kernel_options,
     format_colocated_vllm_oom_hint,
     gather_if_ds_param,
     gather_if_zero3,
@@ -2678,12 +2679,28 @@ class TestPatchFlexAttentionKernelOptions:
         patch_flex_attention_kernel_options()
         assert registry == {}
 
-    def test_auto_skips_on_hopper_capability(self, monkeypatch):
-        registry, _ = self._install_fake_flex(monkeypatch)
+    @staticmethod
+    def _query(seq_len_q):
+        return torch.zeros(2, 8, seq_len_q, 64)
+
+    def test_hopper_skips_sram_safe_blocks_on_long_queries(self, monkeypatch):
+        registry, calls = self._install_fake_flex(monkeypatch)
         monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
         monkeypatch.setattr(torch.cuda, "get_device_capability", lambda: (9, 0))
         patch_flex_attention_kernel_options()
-        assert registry == {}
+        wrapper = registry["flex_attention"]
+        wrapper(None, self._query(512), "k", "v", None)
+        # Autotuner keeps full control of the training forward/backward blocks.
+        assert "kernel_options" not in calls[0]
+
+    def test_hopper_sets_decode_safe_block_m_on_short_queries(self, monkeypatch):
+        registry, calls = self._install_fake_flex(monkeypatch)
+        monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+        monkeypatch.setattr(torch.cuda, "get_device_capability", lambda: (9, 0))
+        patch_flex_attention_kernel_options()
+        wrapper = registry["flex_attention"]
+        wrapper(None, self._query(111), "k", "v", None)
+        assert calls[0]["kernel_options"] == {"BLOCK_M": 128}
 
     def test_installs_sram_safe_defaults_without_cuda(self, monkeypatch):
         registry, calls = self._install_fake_flex(monkeypatch)
@@ -2737,6 +2754,41 @@ class TestPatchFlexAttentionKernelOptions:
         monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
         patch_flex_attention_kernel_options()
         assert "flex_attention" in registry.registered
+
+    def test_sram_safe_block_m_divides_the_mask_q_block(self, monkeypatch):
+        registry, calls = self._install_fake_flex(monkeypatch)
+        monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+        patch_flex_attention_kernel_options()
+        registry["flex_attention"](None, self._query(111), "k", "v", None)
+        # Pre-Hopper defaults must satisfy the same flex-decoding divisibility
+        # check that the Hopper path gets from flex_decode_kernel_options.
+        assert 128 % calls[0]["kernel_options"]["BLOCK_M"] == 0
+
+
+class TestFlexDecodeKernelOptions:
+    @staticmethod
+    def _query(seq_len_q):
+        return torch.zeros(2, 8, seq_len_q, 64)
+
+    def test_long_query_leaves_block_size_to_inductor(self):
+        assert flex_decode_kernel_options(self._query(128)) is None
+
+    @pytest.mark.parametrize("seq_len_q", [1, 111, 127])
+    def test_short_query_pins_block_m_to_the_default_q_block(self, seq_len_q):
+        assert flex_decode_kernel_options(self._query(seq_len_q)) == {"BLOCK_M": 128}
+
+    def test_narrower_mask_q_block_lowers_block_m(self):
+        mask = types.SimpleNamespace(BLOCK_SIZE=(64, 64))
+        assert flex_decode_kernel_options(self._query(111), mask) == {"BLOCK_M": 64}
+
+    def test_maskless_giant_block_is_capped(self):
+        # torch's empty BlockMask spans the sequence in one 2**30-wide block.
+        mask = types.SimpleNamespace(BLOCK_SIZE=(1 << 30, 1 << 30))
+        assert flex_decode_kernel_options(self._query(111), mask) == {"BLOCK_M": 128}
+
+    @pytest.mark.parametrize("query", ["q", None, torch.zeros(4)])
+    def test_unshaped_query_returns_none(self, query):
+        assert flex_decode_kernel_options(query) is None
 
 
 class TestCreateModelFromNameOrPathDefaults:

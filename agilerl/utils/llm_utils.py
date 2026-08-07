@@ -1214,6 +1214,40 @@ def resolve_attn_implementation(requested: str | None = None) -> str:
     return "sdpa"
 
 
+def flex_decode_kernel_options(
+    query: torch.Tensor, attention_mask: torch.Tensor | BlockMask | None = None
+) -> dict[str, Any] | None:
+    """Return a ``BLOCK_M`` that keeps short-query flex forwards compilable.
+
+    Queries under 128 tokens hit inductor's flex-decoding kernel, whose default
+    ``BLOCK_M`` (``next_power_of_2(seq_len_q * gqa_shared_heads)``) can exceed
+    the mask's Q block size; every candidate config then fails a divisibility
+    filter and compilation raises ``NoValidChoicesError``. Pinning ``BLOCK_M``
+    to the mask's Q block size avoids that on every GPU generation.
+
+    :param query: Query tensor, shaped ``[batch, heads, seq_len_q, head_dim]``.
+    :type query: torch.Tensor
+    :param attention_mask: Mask passed to flex attention; a ``BlockMask``
+        carries the Q block size, anything else uses torch's 128 default.
+    :type attention_mask: torch.Tensor | BlockMask | None
+    :return: ``{"BLOCK_M": ...}`` for short queries, else ``None``.
+    :rtype: dict[str, Any] | None
+    """
+    shape = getattr(query, "shape", None)
+    if shape is None or len(shape) < 2:
+        return None
+    seq_len_q = shape[-2]
+    if not isinstance(seq_len_q, int) or seq_len_q >= 128:
+        return None
+
+    q_block_size = 128
+    block_size = getattr(attention_mask, "BLOCK_SIZE", None)
+    if isinstance(block_size, tuple) and block_size:
+        # Maskless calls get one giant block; cap at torch's 128 default.
+        q_block_size = min(int(block_size[0]), 128)
+    return {"BLOCK_M": q_block_size}
+
+
 def patch_flex_attention_kernel_options(options: dict[str, Any] | None = None) -> None:
     """Inject SRAM-safe Triton ``kernel_options`` into transformers' flex-attn path.
 
@@ -1226,18 +1260,14 @@ def patch_flex_attention_kernel_options(options: dict[str, Any] | None = None) -
     ``"flex_attention"`` entry that supplies safe defaults when the caller
     passes none. Idempotent; no-op if transformers/flex is unavailable.
 
-    **Auto-detect**: when ``options`` is ``None``, the visible GPU's compute
-    capability is checked. Hopper (SM90+ / H100, H200) has ~228 KB usable
-    shared memory per SM — enough for the stock kernel's ~208 KB tiles — so
-    the patch is skipped and FlexAttention's autotuner picks larger blocks
-    for better throughput. On A100 (SM80) and earlier the SRAM-safe small
-    blocks are installed. Pass an explicit ``options`` dict to override the
-    auto-decision either way.
+    **Auto-detect**: when ``options`` is ``None``, A100 (SM80) and earlier get
+    the SRAM-safe small blocks; Hopper (SM90+) fits the stock tiles, so only
+    short-query forwards get a ``BLOCK_M`` there (see
+    :func:`flex_decode_kernel_options`) and the autotuner keeps everything else.
 
     :param options: Override the default kernel options (forward + backward
-        block sizes, ``num_warps``, ``num_stages``). When given, the
-        capability auto-skip is bypassed and the supplied options are
-        installed unconditionally.
+        block sizes, ``num_warps``, ``num_stages``). Installed unconditionally
+        when given.
     :type options: dict[str, Any] | None
     """
     try:
@@ -1248,33 +1278,32 @@ def patch_flex_attention_kernel_options(options: dict[str, Any] | None = None) -
     if getattr(flex_attention_forward, "_agilerl_kernel_opts_patched", False):
         return
 
-    # Auto-skip on Hopper+. The stock kernel's ~208 KB tiles fit in Hopper's
-    # ~228 KB usable shared memory, so leaving the autotuner alone lets it
-    # pick larger, faster blocks. Below SM90 (A100 ~164 KB, Ampere consumer
-    # ~100 KB) the stock config OOMs the kernel launch, so fall through to
-    # install the small-block safe defaults.
+    # Small blocks exist only to fit pre-SM90 SRAM; Hopper keeps the
+    # autotuner's blocks and gets a decode-safe BLOCK_M per call instead.
+    needs_sram_safe_blocks = True
     if options is None and torch.cuda.is_available():
         try:
             capability = torch.cuda.get_device_capability()
         except Exception:
             capability = (0, 0)
-        if capability >= (9, 0):
-            return
+        needs_sram_safe_blocks = capability < (9, 0)
 
     # head_dim=256 makes the Q/K/V tiles (BLOCK x head_dim) the dominant SRAM
     # cost, so use small 32-wide blocks to fit the A100's ~163 KB shared memory.
-    opts = options or {
-        # Forward kernel blocks.
-        "BLOCK_M": 32,
-        "BLOCK_N": 32,
-        # Backward kernel blocks (training).
-        "BLOCK_M1": 16,
-        "BLOCK_N1": 32,
-        "BLOCK_M2": 32,
-        "BLOCK_N2": 16,
-        "num_warps": 4,
-        "num_stages": 2,
-    }
+    opts = options
+    if opts is None and needs_sram_safe_blocks:
+        opts = {
+            # Forward kernel blocks.
+            "BLOCK_M": 32,
+            "BLOCK_N": 32,
+            # Backward kernel blocks (training).
+            "BLOCK_M1": 16,
+            "BLOCK_N1": 32,
+            "BLOCK_M2": 32,
+            "BLOCK_N2": 16,
+            "num_warps": 4,
+            "num_stages": 2,
+        }
 
     def _flex_with_opts(
         module: torch.nn.Module,
@@ -1284,7 +1313,13 @@ def patch_flex_attention_kernel_options(options: dict[str, Any] | None = None) -
         attention_mask: torch.Tensor | BlockMask,
         **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        kwargs.setdefault("kernel_options", opts)
+        resolved = (
+            opts
+            if opts is not None
+            else flex_decode_kernel_options(query, attention_mask)
+        )
+        if resolved is not None:
+            kwargs.setdefault("kernel_options", resolved)
         return flex_attention_forward(
             module, query, key, value, attention_mask, **kwargs
         )
