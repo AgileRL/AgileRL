@@ -36,7 +36,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 _TINY_LLM = str(_REPO_ROOT / "tests" / "assets" / "tiny_llm")
 _DEFAULT_ENV = {
     AgentType.SingleAgent: "CartPole-v1",
-    AgentType.MultiAgent: "pettingzoo.mpe.simple_speaker_listener_v4",
+    AgentType.MultiAgent: "mpe2.simple_speaker_listener_v4",
     AgentType.LLMAgent: "CartPole-v1",
 }
 _GRPO_FAMILY = frozenset({"GRPO", "CISPO", "GSPO"})

@@ -273,7 +273,7 @@ def mark_wrapped(env):
 
     def test_make_env_with_registered_pettingzoo_environment(self):
         spec = PzEnvSpec(
-            name="pettingzoo.mpe.simple_speaker_listener_v4",
+            name="mpe2.simple_speaker_listener_v4",
             num_envs=1,
             env_config={"max_cycles": 5, "continuous_actions": False},
         )

@@ -7,7 +7,7 @@ Class for vectorizing pettingzoo parallel environments, for both custom and defa
 
   # Default pettingzoo environment
   from agilerl.vector.pz_async_vec_env import AsyncPettingZooVecEnv
-  from pettingzoo.mpe import simple_speaker_listener_v4
+  from mpe2 import simple_speaker_listener_v4
 
   num_envs = 4
   env = AsyncPettingZooVecEnv(

@@ -13,15 +13,15 @@ default:
 clean-dist:
     rm -rf dist
 
-# Fail publish if agilerl's arena extra pin drifts from agilerl-arena version.
-check-arena-dep-pin:
-    python scripts/check-arena-dep-pin.py
+# Fail publish if the arena pin drifts, or the all extra misses an extra.
+check-extras:
+    python scripts/check-extras.py
 
 build: clean-dist
     uv build --package agilerl-arena
     uv build --package agilerl
 
-check-dist: check-arena-dep-pin build
+check-dist: check-extras build
     uv publish --dry-run --check-url https://pypi.org/simple dist/*
 
 # Publish order matters: agilerl-arena first, then agilerl.
