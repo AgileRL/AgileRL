@@ -564,6 +564,47 @@ class TestSFTTest:
             sft.test(DummySFTEnv(), loop=1)
         acc.wait_for_everyone.assert_called()
 
+    def test_sft_test_rejects_a_batch_from_the_wrong_objective(self):
+        """An objective='preference' env fails at the boundary, not inside the loss."""
+        import contextlib
+
+        class DummyPreferenceEnv:
+            def eval_mode(self):
+                return contextlib.nullcontext()
+
+            def reset(self):
+                return {
+                    "prompt": ["p"],
+                    "prompt_lengths": [1],
+                    "chosen": ["c"],
+                    "rejected": ["r"],
+                    "chosen_input_ids": torch.ones(1, 3, dtype=torch.long),
+                    "chosen_attention_mask": torch.ones(1, 3, dtype=torch.long),
+                    "rejected_input_ids": torch.ones(1, 3, dtype=torch.long),
+                    "rejected_attention_mask": torch.ones(1, 3, dtype=torch.long),
+                }
+
+        sft = SFT(
+            actor_network=create_module(
+                input_size=10, max_tokens=20, vocab_size=100, device="cpu"
+            ),
+            pad_token_id=99,
+            pad_token="<pad>",
+            lora_config=LoraConfig(
+                r=4,
+                lora_alpha=16,
+                target_modules=["linear_1"],
+                task_type="CAUSAL_LM",
+                lora_dropout=0.05,
+            ),
+            accelerator=None,
+            device="cpu",
+            micro_batch_size_per_gpu=1,
+            use_liger_loss=False,
+        )
+        with pytest.raises(TypeError, match="needs an objective='sft'"):
+            sft.test(DummyPreferenceEnv(), loop=1)
+
 
 class TestSFTLigerUnavailableBehaviour:
     @pytest.mark.parametrize("assertion_mode", ["warns_and_fallback", "private_guard"])

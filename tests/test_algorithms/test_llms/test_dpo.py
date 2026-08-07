@@ -570,6 +570,26 @@ class TestDPOTest:
             dpo.test(DummyPreferenceEnv(), loop=1)
         acc.wait_for_everyone.assert_called()
 
+    def test_dpo_test_rejects_a_batch_from_the_wrong_objective(self):
+        """An objective='sft' env fails at the boundary, not inside the loss."""
+
+        class DummySFTEnv:
+            def eval_mode(self):
+                return contextlib.nullcontext()
+
+            def reset(self):
+                return {
+                    "prompt": ["p"],
+                    "prompt_lengths": [1],
+                    "response": ["r"],
+                    "input_ids": torch.ones(1, 3, dtype=torch.long),
+                    "attention_mask": torch.ones(1, 3, dtype=torch.long),
+                }
+
+        dpo = _make_cpu_dpo_for_branch_tests()
+        with pytest.raises(TypeError, match="needs an objective='preference'"):
+            dpo.test(DummySFTEnv(), loop=1)
+
 
 class TestDPOLigerUnavailableBehaviour:
     @pytest.mark.parametrize("assertion_mode", ["warns_and_fallback", "private_guard"])
