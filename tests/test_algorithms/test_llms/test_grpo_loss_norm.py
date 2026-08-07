@@ -797,3 +797,18 @@ class TestFusedActivationOffload:
             inspect.signature(GRPO.__init__).parameters["activation_offload"].default
             is False
         )
+
+
+class TestLigerNormalizerWorldSize:
+    def test_returns_one_when_distributed_inactive(self, monkeypatch) -> None:
+        monkeypatch.setattr(torch.distributed, "is_available", lambda: True)
+        monkeypatch.setattr(torch.distributed, "is_initialized", lambda: False)
+
+        assert grpo_module._liger_normalizer_world_size() == 1
+
+    def test_uses_process_group_world_size(self, monkeypatch) -> None:
+        monkeypatch.setattr(torch.distributed, "is_available", lambda: True)
+        monkeypatch.setattr(torch.distributed, "is_initialized", lambda: True)
+        monkeypatch.setattr(torch.distributed, "get_world_size", lambda: 4)
+
+        assert grpo_module._liger_normalizer_world_size() == 4

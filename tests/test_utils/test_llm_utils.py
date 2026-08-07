@@ -3852,3 +3852,64 @@ class TestResolvePadTokenId:
         # Old force-eos/im_end-as-pad behavior would zero the mid-sequence 11s.
         assert (ids == 11).any()
         assert not ((ids == 11) & (mask == 0)).any()
+
+    def test_raises_when_tokenizer_has_no_eos(self) -> None:
+        tokenizer = self._tokenizer(pad_id=None, unk_id=None)
+        tokenizer.eos_token_id = None
+
+        with pytest.raises(ValueError, match="no eos_token_id"):
+            resolve_pad_token_id(tokenizer)
+
+    def test_accepts_string_token_ids(self) -> None:
+        tokenizer = self._tokenizer(eos_id=2, pad_id=None, unk_id=None)
+        tokenizer.pad_token_id = "0"
+        tokenizer.eos_token_id = "2"
+
+        pad_id, source = resolve_pad_token_id(tokenizer)
+
+        assert pad_id == 0
+        assert source == "tokenizer.pad_token_id"
+
+    def test_apply_pad_sets_id_only_when_convert_ids_fails(self) -> None:
+        tokenizer = self._tokenizer(pad_id=11, unk_id=0, pad_token=None)
+        tokenizer.pad_token = None
+
+        def _boom(_token_id: int) -> str:
+            msg = "lookup failed"
+            raise RuntimeError(msg)
+
+        tokenizer.convert_ids_to_tokens = _boom
+
+        apply_pad_token_id(tokenizer, 5)
+
+        assert tokenizer.pad_token_id == 5
+        assert tokenizer.pad_token is None
+
+    def test_apply_pad_uses_eos_string_when_pad_aliases_eos(self) -> None:
+        tokenizer = self._tokenizer(eos_id=2, pad_id=11, eos_token="</s>")
+
+        apply_pad_token_id(tokenizer, 2)
+
+        assert tokenizer.pad_token_id == 2
+        assert tokenizer.pad_token == "</s>"
+
+
+class TestAsOptionalIntAndEosIdSet:
+    def test_as_optional_int_rejects_bool_and_bad_strings(self) -> None:
+        from agilerl.utils.llm_utils import _as_optional_int
+
+        assert _as_optional_int(None) is None
+        assert _as_optional_int(True) is None
+        assert _as_optional_int(False) is None
+        assert _as_optional_int("nope") is None
+        assert _as_optional_int(3.5) is None
+        assert _as_optional_int(7) == 7
+        assert _as_optional_int("7") == 7
+
+    def test_eos_id_set_empty_for_bool_and_garbage(self) -> None:
+        from agilerl.utils.llm_utils import _eos_id_set
+
+        assert _eos_id_set(True) == frozenset()
+        assert _eos_id_set("nope") == frozenset()
+        assert _eos_id_set(object()) == frozenset()
+        assert _eos_id_set([1, "x", 2]) == frozenset({1, 2})

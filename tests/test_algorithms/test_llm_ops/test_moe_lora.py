@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import copy
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -20,6 +21,10 @@ from agilerl.algorithms.core.llm_ops.fused_lora import (
 from agilerl.algorithms.core.llm_ops.moe_lora import (
     RoutedExpertsLoraWrapper,
     SortedExpertsLoraWrapper,
+    _expert_counts,
+    _forward_param_names,
+    _is_partitioned,
+    _routed_projection_names,
     moe_expert_target_parameters,
     upgrade_moe_param_wrappers,
 )
@@ -692,3 +697,41 @@ def test_mark_expert_wrappers_as_zero3_leaves():
     _, upgraded = _routed_pair()
     assert mark_expert_wrappers_as_zero3_leaves(upgraded) == 1
     assert mark_expert_wrappers_as_zero3_leaves(nn.Linear(2, 2)) == 0
+
+
+class TestMoeLoraHelpers:
+    def test_expert_counts_wrong_length_raises(self) -> None:
+        with pytest.raises(ValueError, match="Expected 4"):
+            _expert_counts([1, 2], num_experts=4)
+
+    def test_routed_projection_names_rejects_bias(self) -> None:
+        module = _RoutedExperts()
+        module.down_proj_bias = torch.zeros(1)
+
+        assert _routed_projection_names(module) is None
+
+    def test_routed_projection_names_rejects_missing_act_fn(self) -> None:
+        module = _RoutedExperts()
+        delattr(module, "act_fn")
+
+        assert _routed_projection_names(module) is None
+
+    def test_is_partitioned_false_when_available(self) -> None:
+        tensor = torch.randn(2, 2)
+        tensor.ds_id = 1
+        tensor.ds_status = SimpleNamespace(name="AVAILABLE")
+
+        assert _is_partitioned(tensor) is False
+
+    def test_is_partitioned_true_when_not_available(self) -> None:
+        tensor = torch.randn(2, 2)
+        tensor.ds_id = 1
+        tensor.ds_status = SimpleNamespace(name="NOT_AVAILABLE")
+
+        assert _is_partitioned(tensor) is True
+
+    def test_forward_param_names_empty_on_bad_signature(self) -> None:
+        class _Bad(nn.Module):
+            forward = 123  # not a callable signature
+
+        assert _forward_param_names(_Bad()) == []

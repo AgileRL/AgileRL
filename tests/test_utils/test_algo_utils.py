@@ -2616,6 +2616,49 @@ class TestCloneLlm:
         assert cloned.lora_A.dtype == torch.bfloat16
         assert cloned.disabled is True
 
+    def test_clone_llm_upgrades_moe_wrappers_when_target_parameters(
+        self, monkeypatch
+    ) -> None:
+        from peft import LoraConfig
+
+        expert_config = LoraConfig(r=1, target_parameters=["experts.up_proj"])
+
+        class FakeBaseModel(torch.nn.Module):
+            def __init__(self, config):
+                super().__init__()
+                self.config = config
+                self.disabled = False
+
+            def disable_adapter(self):
+                self.disabled = True
+
+        class FakePeftModel:
+            def __init__(self):
+                self.config = SimpleNamespace()
+                self.model = FakeBaseModel(SimpleNamespace())
+                self.peft_config = {"default": expert_config}
+
+        upgraded: list[object] = []
+
+        def fake_get_peft_model(model, first_config, adapter_name="actor", **kwargs):
+            return model
+
+        def fake_upgrade(model):
+            upgraded.append(model)
+            return 1
+
+        monkeypatch.setattr(algo_utils, "PeftModel", FakePeftModel)
+        monkeypatch.setattr(algo_utils, "get_peft_model", fake_get_peft_model)
+        monkeypatch.setattr(
+            "agilerl.algorithms.core.llm_ops.moe_lora.upgrade_moe_param_wrappers",
+            fake_upgrade,
+        )
+
+        cloned = clone_llm(original_model=FakePeftModel(), zero_stage=0)
+
+        assert upgraded == [cloned]
+        assert cloned.disabled is True
+
 
 class TestDummyOptimizer:
     def test_zero_grad_raises_runtime_error(self):

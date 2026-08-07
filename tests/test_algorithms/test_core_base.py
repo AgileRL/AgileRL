@@ -6958,6 +6958,144 @@ class TestLLMInitializeActorsStrayAdapter:
 
 
 @_LLM_DEPS_SKIP
+class TestLLMInitializeActorsExpertLoraGuards:
+    """Packed-experts LoRA attach guards on ``target_parameters``."""
+
+    def test_target_parameters_rejects_nonzero_lora_dropout(self) -> None:
+        lora = MagicMock()
+        lora.target_parameters = ["experts.up_proj"]
+        lora.lora_dropout = 0.05
+        agent = _make_llm_agent(lora_config=lora)
+        agent.selected_adapters = ("actor",)
+        base_model = torch.nn.Linear(4, 4)
+
+        with (
+            patch(
+                "agilerl.algorithms.core.base.adapt_lora_config_for_model",
+                side_effect=lambda _model, cfg, **kw: cfg,
+            ),
+            patch(
+                "agilerl.algorithms.core.base.patch_lora_for_fused_forward",
+                create=True,
+            ),
+            patch("agilerl.algorithms.core.base.HAS_LIGER_KERNEL", False),
+            pytest.raises(ValueError, match=r"lora_dropout=0\.0"),
+        ):
+            LLMAlgorithm._initialize_actors(agent, base_model, add_adapters=True)
+
+    def test_target_parameters_rejects_extra_adapters(self) -> None:
+        lora = MagicMock()
+        lora.target_parameters = ["experts.up_proj"]
+        lora.lora_dropout = 0.0
+        agent = _make_llm_agent(lora_config=lora)
+        agent.selected_adapters = ("actor", "reference")
+        base_model = torch.nn.Linear(4, 4)
+
+        with (
+            patch(
+                "agilerl.algorithms.core.base.adapt_lora_config_for_model",
+                side_effect=lambda _model, cfg, **kw: cfg,
+            ),
+            patch(
+                "agilerl.algorithms.core.base.patch_lora_for_fused_forward",
+                create=True,
+            ),
+            patch("agilerl.algorithms.core.base.HAS_LIGER_KERNEL", False),
+            pytest.raises(ValueError, match="only the 'actor' adapter"),
+        ):
+            LLMAlgorithm._initialize_actors(agent, base_model, add_adapters=True)
+
+    def test_zero3_upgrades_and_marks_expert_wrappers(self) -> None:
+        lora = MagicMock()
+        lora.target_parameters = ["weight"]
+        lora.lora_dropout = 0.0
+        agent = _make_llm_agent(lora_config=lora)
+        agent.selected_adapters = ("actor",)
+        agent.zero_stage = 3
+        peft_actor = _make_mock_peft_actor()
+        peft_actor.peft_config = {"actor": MagicMock()}
+        base_model = torch.nn.Linear(4, 4)
+        mark = MagicMock()
+
+        with (
+            patch(
+                "agilerl.algorithms.core.base.adapt_lora_config_for_model",
+                side_effect=lambda _model, cfg, **kw: cfg,
+            ),
+            patch(
+                "agilerl.algorithms.core.base.get_peft_model",
+                return_value=peft_actor,
+            ),
+            patch(
+                "agilerl.algorithms.core.base.patch_lora_for_fused_forward",
+                create=True,
+            ),
+            patch("agilerl.algorithms.core.base.HAS_LIGER_KERNEL", False),
+            patch(
+                "agilerl.algorithms.core.base.upgrade_moe_param_wrappers",
+                return_value=2,
+            ) as upgrade,
+            patch(
+                "agilerl.algorithms.core.base.mark_expert_wrappers_as_zero3_leaves",
+                mark,
+            ),
+            patch(
+                "agilerl.algorithms.core.base.gather_if_zero3",
+                return_value=nullcontext(),
+            ),
+            patch.object(agent, "use_adapter"),
+        ):
+            LLMAlgorithm._initialize_actors(agent, base_model, add_adapters=True)
+
+        upgrade.assert_called_once_with(peft_actor)
+        mark.assert_called_once_with(peft_actor)
+
+    def test_upgrade_zero_skips_mark_leaves(self) -> None:
+        lora = MagicMock()
+        lora.target_parameters = ["weight"]
+        lora.lora_dropout = 0.0
+        agent = _make_llm_agent(lora_config=lora)
+        agent.selected_adapters = ("actor",)
+        agent.zero_stage = 3
+        peft_actor = _make_mock_peft_actor()
+        peft_actor.peft_config = {"actor": MagicMock()}
+        base_model = torch.nn.Linear(4, 4)
+        mark = MagicMock()
+
+        with (
+            patch(
+                "agilerl.algorithms.core.base.adapt_lora_config_for_model",
+                side_effect=lambda _model, cfg, **kw: cfg,
+            ),
+            patch(
+                "agilerl.algorithms.core.base.get_peft_model",
+                return_value=peft_actor,
+            ),
+            patch(
+                "agilerl.algorithms.core.base.patch_lora_for_fused_forward",
+                create=True,
+            ),
+            patch("agilerl.algorithms.core.base.HAS_LIGER_KERNEL", False),
+            patch(
+                "agilerl.algorithms.core.base.upgrade_moe_param_wrappers",
+                return_value=0,
+            ),
+            patch(
+                "agilerl.algorithms.core.base.mark_expert_wrappers_as_zero3_leaves",
+                mark,
+            ),
+            patch(
+                "agilerl.algorithms.core.base.gather_if_zero3",
+                return_value=nullcontext(),
+            ),
+            patch.object(agent, "use_adapter"),
+        ):
+            LLMAlgorithm._initialize_actors(agent, base_model, add_adapters=True)
+
+        mark.assert_not_called()
+
+
+@_LLM_DEPS_SKIP
 class TestLLMFusedForwardPaths:
     def test_fused_forward_without_value_head(self):
         agent = _make_llm_agent()

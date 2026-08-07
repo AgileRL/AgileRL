@@ -271,6 +271,100 @@ class TestInstallZero3ThirdPartyHooks:
             "num_partitions": 4,
         }
 
+    @pytest.mark.parametrize(
+        "config",
+        [
+            None,
+            "not-a-mapping",
+            {},
+            {"zero_optimization": []},
+            {"zero_optimization": {"stage": 3}},
+        ],
+        ids=[
+            "none",
+            "non_mapping",
+            "empty",
+            "zero_opt_not_mapping",
+            "threshold_absent",
+        ],
+    )
+    def test_skips_persistence_without_threshold(self, monkeypatch, config) -> None:
+        calls: list[str] = []
+        monkeypatch.setattr(
+            third_party_patches,
+            "patch_zero3_fetch_trace",
+            lambda _config: calls.append("fetch"),
+        )
+        monkeypatch.setattr(
+            third_party_patches,
+            "patch_zero3_param_persistence",
+            lambda *args, **kwargs: calls.append("persist"),
+        )
+
+        install_zero3_third_party_hooks(config, model_name_or_path="mock-model")
+
+        assert calls == ["fetch"]
+
+
+class TestTryImportAndResolvers:
+    def test_try_import_returns_none_on_failure(self, monkeypatch) -> None:
+        def _boom(_name: str):
+            msg = "missing"
+            raise ImportError(msg)
+
+        monkeypatch.setattr(third_party_patches.importlib, "import_module", _boom)
+
+        assert third_party_patches._try_import("not.a.real.module") is None
+
+    def test_resolve_zero3_targets_returns_none_pair_when_import_fails(
+        self, monkeypatch
+    ) -> None:
+        monkeypatch.setattr(third_party_patches, "_try_import", lambda _path: None)
+
+        assert third_party_patches._resolve_zero3_targets() == (None, None)
+
+    def test_resolve_zero3_targets_raises_when_symbols_missing(
+        self, monkeypatch
+    ) -> None:
+        monkeypatch.setattr(
+            third_party_patches,
+            "_try_import",
+            lambda _path: type("M", (), {})(),
+        )
+
+        with pytest.raises(RuntimeError, match="missing"):
+            third_party_patches._resolve_zero3_targets()
+
+    def test_resolve_mixer_class_raises_when_attribute_missing(
+        self, monkeypatch
+    ) -> None:
+        monkeypatch.setattr(
+            third_party_patches,
+            "_try_import",
+            lambda _path: type("M", (), {})(),
+        )
+
+        with pytest.raises(RuntimeError, match="NemotronHMamba2Mixer"):
+            third_party_patches._resolve_mixer_class()
+
+    def test_resolve_mixer_class_returns_none_when_module_missing(
+        self, monkeypatch
+    ) -> None:
+        monkeypatch.setattr(third_party_patches, "_try_import", lambda _path: None)
+
+        assert third_party_patches._resolve_mixer_class() is None
+
+    def test_resolve_zero3_init_returns_none_when_attribute_missing(
+        self, monkeypatch
+    ) -> None:
+        monkeypatch.setattr(
+            third_party_patches,
+            "_try_import",
+            lambda _path: type("M", (), {})(),
+        )
+
+        assert third_party_patches._resolve_zero3_init() is None
+
 
 class TestRoutesToConditionalSubmodules:
     """Only a declared ``leaf_module`` marks a model as data-routed."""
