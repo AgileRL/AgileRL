@@ -29,7 +29,7 @@ from agilerl.llm_envs import (
     TaskAssigner,
 )
 from agilerl.llm_envs import openenv_server as openenv_server_module
-from agilerl.llm_envs.env_specs import spec_to_factory
+from agilerl.llm_envs.env_specs import EnvSource, source_of, spec_to_factory
 from agilerl.llm_envs.openenv import (
     InProcessEnvClient,
     RemoteEnvClient,
@@ -1099,6 +1099,22 @@ def test_observation_text_renders_all_shapes() -> None:
 
 
 # --- entrypoint resolution: malformed specs ---------------------------------
+def test_source_of_names_the_single_source_a_manifest_declares() -> None:
+    """One manifest section, one env source -- the rule the orchestrator shares."""
+    assert source_of({"dataset": "rows.parquet"}) is EnvSource.DATASET
+    assert source_of({"entrypoint": "pkg:Env"}) is EnvSource.ENTRYPOINT
+    assert source_of({"env_url": "http://envs:8000"}) is EnvSource.ENV_URL
+    # Keys the manifest does not set are simply absent, not None-valued.
+    assert source_of({"entrypoint": "pkg:Env", "dataset": None}) is EnvSource.ENTRYPOINT
+
+
+def test_source_of_rejects_zero_or_several_sources() -> None:
+    with pytest.raises(ValueError, match="Exactly one of"):
+        source_of({})
+    with pytest.raises(ValueError, match="Exactly one of"):
+        source_of({"dataset": "rows.parquet", "env_url": "http://envs:8000"})
+
+
 def test_spec_to_factory_requires_module_and_class() -> None:
     """An entrypoint missing the ``:`` or the class name is rejected."""
     with pytest.raises(ValueError, match="neither a URL"):

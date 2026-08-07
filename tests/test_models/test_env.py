@@ -479,6 +479,26 @@ class TestLLMEnvSpec:
             "enable_thinking": False
         }
 
+    def test_env_packages_are_installed_before_the_entrypoint_is_resolved(self):
+        """An entrypoint whose deps are declared gets them installed first."""
+        mock_tokenizer = MagicMock()
+        mock_tokenizer.pad_token_id = 0
+        spec = LLMEnvSpec(
+            env_type=LLMEnvType.ROLLOUT,
+            entrypoint="tests.test_models.test_env:_StubTextEnv",
+            env_packages={"uv": ["some-env-lib"]},
+            max_turns=2,
+        )
+        with (
+            patch("agilerl.llm_envs.env_packages.ensure_importable") as mock_ensure,
+            patch("agilerl.llm_envs.RolloutHarness", MagicMock()),
+        ):
+            spec.make_rollout_env_factory(mock_tokenizer)()
+
+        mock_ensure.assert_called_once_with(
+            "tests.test_models.test_env:_StubTextEnv", {"uv": ["some-env-lib"]}
+        )
+
     def test_chat_template_kwargs_reach_entrypoint_factory(self):
         mock_tokenizer = MagicMock()
         mock_tokenizer.pad_token_id = 0
