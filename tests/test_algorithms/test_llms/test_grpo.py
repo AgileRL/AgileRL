@@ -3729,13 +3729,16 @@ class TestGRPOLearn:
         completion_ids, action_masks = _build_branch_experiences(batch_size=2)
         rewards = torch.tensor([1.0, -1.0], dtype=torch.float32)
 
-        class EmptySlicingBatchIndices:
-            def __len__(self):
-                return 1
+        class EmptySlicingBatchIndices(np.ndarray):
+            """One surviving sample whose minibatch slices all come back empty."""
+
+            def __new__(cls):
+                return np.zeros(1, dtype=int).view(cls)
 
             def __getitem__(self, item):
-                del item
-                return np.array([], dtype=int)
+                if isinstance(item, slice):
+                    return np.array([], dtype=int)
+                return super().__getitem__(item)
 
         def fake_fused_forward(ids, batch_size):
             shape = (ids.shape[0], ids.shape[1] - 1)
