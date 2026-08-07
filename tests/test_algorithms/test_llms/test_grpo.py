@@ -3865,7 +3865,7 @@ class TestGRPOLearn:
                 ),
             ),
             patch(
-                "agilerl.algorithms.grpo.allreduce_minmax_int",
+                "agilerl.algorithms.core.base.allreduce_minmax_int",
                 return_value=(0, 1),
             ) as mock_reduce,
             patch.object(grpo, "_backward_pass") as mock_backward,
