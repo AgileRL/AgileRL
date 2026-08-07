@@ -320,6 +320,17 @@ def _make_cpu_grpo_for_branch_tests(**kwargs):
     return GRPO(**defaults)
 
 
+def _patch_surviving_sample_idxs(grpo, batch_idxs):
+    """Patch the surviving-sample indices ``learn`` reads off ``_calculate_advantages``."""
+    original = grpo._calculate_advantages
+
+    def _with_batch_idxs(*args, **kwargs):
+        advantages, _ = original(*args, **kwargs)
+        return advantages, batch_idxs
+
+    return patch.object(grpo, "_calculate_advantages", side_effect=_with_batch_idxs)
+
+
 def _build_grpo_for_colocate_tests(
     grpo_factory,
     accelerator_factory,
@@ -3657,10 +3668,7 @@ class TestGRPOLearn:
             return zeros, zeros, None
 
         with (
-            patch(
-                "agilerl.algorithms.grpo.np.arange",
-                return_value=np.array([], dtype=int),
-            ),
+            _patch_surviving_sample_idxs(grpo, np.array([], dtype=int)),
             patch.object(
                 grpo, "_fused_forward_no_grad", side_effect=fake_fused_forward
             ),
@@ -3702,10 +3710,7 @@ class TestGRPOLearn:
             return zeros, zeros, None
 
         with (
-            patch(
-                "agilerl.algorithms.grpo.np.arange",
-                return_value=np.array([], dtype=int),
-            ),
+            _patch_surviving_sample_idxs(grpo, np.array([], dtype=int)),
             patch.object(
                 grpo, "_fused_forward_no_grad", side_effect=fake_fused_forward
             ),
@@ -3738,10 +3743,7 @@ class TestGRPOLearn:
             return zeros, zeros, None
 
         with (
-            patch(
-                "agilerl.algorithms.grpo.np.arange",
-                return_value=EmptySlicingBatchIndices(),
-            ),
+            _patch_surviving_sample_idxs(grpo, EmptySlicingBatchIndices()),
             patch.object(
                 grpo, "_fused_forward_no_grad", side_effect=fake_fused_forward
             ),
@@ -3837,6 +3839,7 @@ class TestGRPOLearn:
         mock_acc = MagicMock()
         mock_acc.num_processes = 2
         mock_acc.device = torch.device("cpu")
+        mock_acc.free_memory.side_effect = lambda *objs: objs
         grpo.accelerator = mock_acc
         completion_ids, action_masks = _build_branch_experiences(batch_size=2)
         rewards = torch.tensor([1.0, -1.0], dtype=torch.float32)
