@@ -86,7 +86,7 @@ Example Training Loop
 
     import numpy as np
     import torch
-    from pettingzoo.mpe import simple_speaker_listener_v4
+    from mpe2 import simple_speaker_listener_v4
     from gymnasium import spaces
     from tqdm import tqdm
 

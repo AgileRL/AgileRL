@@ -1920,7 +1920,7 @@ class TestLocalTrainerIntegration:
         trainer = LocalTrainer(
             algorithm=MADDPGSpec(learn_step=2),
             environment=PzEnvSpec(
-                name="pettingzoo.mpe.simple_speaker_listener_v4",
+                name="mpe2.simple_speaker_listener_v4",
                 num_envs=2,
             ),
             training=self._training(max_steps=32, evo_steps=16),
@@ -3039,7 +3039,7 @@ def test_from_manifest_multi_agent_homogeneous(tmp_path):
     manifest = {
         "algorithm": {"name": "IPPO", "learn_step": 64},
         "environment": {
-            "name": "pettingzoo.mpe.simple_spread_v3",
+            "name": "mpe2.simple_spread_v3",
             "num_envs": 2,
         },
         "training": {"max_steps": 200, "evo_steps": 100, "pop_size": 1},

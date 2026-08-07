@@ -853,7 +853,7 @@ class TestLocalTrainerMultiAgent:
 
     def test_maddpg_env_name(self):
         trainer = LocalTrainer.from_manifest(MADDPG_MANIFEST)
-        assert trainer.env_spec.name == "pettingzoo.mpe.simple_speaker_listener_v4"
+        assert trainer.env_spec.name == "mpe2.simple_speaker_listener_v4"
         assert trainer.env_spec.num_envs == 16
 
     def test_maddpg_actor_critic_lrs(self):

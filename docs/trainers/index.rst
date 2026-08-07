@@ -115,7 +115,7 @@ training on Arena, we check that the environment has been registered and validat
    * - Single-agent (Gymnasium)
      - ``name`` (e.g. ``LunarLander-v3``), ``num_envs``. Allow custom environments through: ``entrypoint``, ``path``, ``config``, ``wrappers``, ``sync``.
    * - Multi-agent (PettingZoo)
-     - ``name`` as a module path (e.g. ``pettingzoo.mpe.simple_speaker_listener_v4``), ``num_envs``. Allow custom environments as in single-agent training.
+     - ``name`` as a module path (e.g. ``mpe2.simple_speaker_listener_v4``), ``num_envs``. Allow custom environments as in single-agent training.
    * - Offline
      - ``name`` for evaluation env **plus** exactly one of ``minari_dataset_id`` or ``dataset_path`` for the offline dataset.
    * - Bandit

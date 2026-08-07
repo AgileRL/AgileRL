@@ -5,7 +5,7 @@ algorithm:
     learn_step: 2048
 
 environment:
-    name: pettingzoo.butterfly.cooperative_pong_v5
+    name: pettingzoo.butterfly.cooperative_pong_v6
     num_envs: 16
 
 network:
