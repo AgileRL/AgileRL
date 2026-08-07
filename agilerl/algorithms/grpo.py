@@ -533,9 +533,7 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
 
         # Register metrics to keep track of during training
         self.metrics.register("loss")
-        self.metrics.register(REFERENCE_KL_METRIC)
-        if self.aux_metric_name != REFERENCE_KL_METRIC:
-            self.metrics.register(self.aux_metric_name)
+        self.metrics.register(self.aux_metric_name)
         self.metrics.register("completion_length")
 
     def get_action(

@@ -6551,11 +6551,12 @@ class TestGRPOAuxMetricNaming:
     ``GRPO`` metrics tracker registers at init.
     """
 
-    def test_the_clip_fraction_metric_is_registered_alongside_kl(self):
+    def test_the_fused_path_registers_only_the_clip_fraction(self):
         with _liger_available():
             grpo = _make_cpu_grpo_for_branch_tests(use_liger_loss=True, beta=0.0)
-        assert np.isnan(grpo.metrics.get_mean(REFERENCE_KL_METRIC))
         assert np.isnan(grpo.metrics.get_mean(LIGER_CLIP_FRACTION_METRIC))
+        with pytest.raises(KeyError):
+            grpo.metrics.get_mean(REFERENCE_KL_METRIC)
         grpo.clean_up()
 
     def test_the_standard_path_registers_only_kl(self):
