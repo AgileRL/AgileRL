@@ -140,6 +140,10 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
     :type fsdp_config: FSDPConfig | None, optional
     :param ep: Expert Parallel degree for packed-expert MoE (1 disables).
     :type ep: int, optional
+    :param cp: Context-parallel degree (``1`` disables CP), defaults to 1
+    :type cp: int, optional
+    :param cp_style: CP attention style (``ulysses`` or ``ring``), defaults to ``ulysses``
+    :type cp_style: Literal["ulysses", "ring"], optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str, optional
     :param wrap: Whether to wrap models for distributed execution.
@@ -290,6 +294,8 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
         gradient_accumulation_steps: int = 1,
         fsdp_config: FSDPConfig | None = None,
         ep: int = 1,
+        cp: int = 1,
+        cp_style: Literal["ulysses", "ring"] = "ulysses",
         device: str | torch.device | None = None,
         wrap: bool = True,
         clone: bool = False,
@@ -350,6 +356,8 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
             gradient_accumulation_steps=gradient_accumulation_steps,
             fsdp_config=fsdp_config,
             ep=ep,
+            cp=cp,
+            cp_style=cp_style,
             name="LLMPPO",
             gradient_checkpointing=gradient_checkpointing,
             torch_compiler=torch_compiler,

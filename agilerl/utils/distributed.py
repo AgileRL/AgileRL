@@ -310,6 +310,8 @@ def _shard_embed_and_lm_head(model: nn.Module, shard_kwargs: dict) -> None:
 def apply_fsdp2(
     model: nn.Module,
     config: FSDPConfig | None = None,
+    *,
+    mesh: Any | None = None,
     ep_mesh: Any | None = None,
 ) -> nn.Module:
     """Shard ``model`` with FSDP2: blocks, embed/(untied) lm_head, then root.
@@ -321,14 +323,21 @@ def apply_fsdp2(
 
     When ``ep_mesh`` is set (``ep > 1``), packed-expert modules are
     ``fully_shard``'d on ``ep_mesh.dp_mod_ep`` first, then transformer blocks /
-    embeddings / root use ``ep_mesh.hsdp`` (Prime-RL EP×FSDP compose). With
-    ``ep_mesh is None`` (``ep == 1``), uses today's flat process-group FSDP.
+    embeddings / root use ``ep_mesh.hsdp`` (Prime-RL EP×FSDP compose). When
+    ``mesh`` is also provided, non-expert shards still prefer ``ep_mesh.hsdp``
+    when present. When only ``mesh`` is provided (context parallel),
+    ``fully_shard`` shards over that device mesh (typically flattened
+    ``dp_shard × cp``). When both are ``None``, FSDP uses the default process
+    group (flat path).
 
     :param model: Model to shard (CPU or meta parameters).
     :type model: nn.Module
     :param config: Sharding settings; defaults to :class:`FSDPConfig`'s
         defaults.
     :type config: FSDPConfig | None
+    :param mesh: Optional FSDP device mesh (e.g. ``ParallelDims``
+        ``dp_shard_cp``). Ignored when ``None``.
+    :type mesh: DeviceMesh | None
     :param ep_mesh: Optional Expert Parallel mesh views for EP×FSDP compose.
     :type ep_mesh: ExpertParallelMesh | None
     :return: The sharded model (same object).
@@ -364,6 +373,8 @@ def apply_fsdp2(
     }
     if config.cpu_offload:
         kwargs["offload_policy"] = CPUOffloadPolicy()
+    if mesh is not None:
+        kwargs["mesh"] = mesh
 
     if ep_mesh is not None:
         from agilerl.utils.expert_parallel import iter_packed_expert_modules
@@ -408,6 +419,8 @@ def materialize_fsdp2_from_cpu_state(
     model: nn.Module,
     device: str | torch.device,
     config: FSDPConfig | None = None,
+    *,
+    mesh: Any | None = None,
     ep_mesh: Any | None = None,
 ) -> nn.Module:
     """Shard a CPU-resident model without placing a dense full replica on GPU.
@@ -423,6 +436,8 @@ def materialize_fsdp2_from_cpu_state(
     :type device: str | torch.device
     :param config: FSDP2 settings.
     :type config: FSDPConfig | None
+    :param mesh: Optional FSDP device mesh when context parallel is enabled.
+    :type mesh: DeviceMesh | None
     :param ep_mesh: Optional :class:`~agilerl.utils.expert_parallel.ExpertParallelMesh`
         from ``build_expert_parallel_mesh``. When set, packed experts (and
         stacked expert LoRA) are ``Shard``'d on the EP dim before FSDP2. Flat
@@ -446,7 +461,7 @@ def materialize_fsdp2_from_cpu_state(
         # ``load_full_state_dict`` then scatters dense CPU weights into the
         # EP (+ FSDP) local shards without a CUDA full-MoE densify.
         apply_expert_parallel(model, ep_mesh.ep)
-    apply_fsdp2(model, config, ep_mesh=ep_mesh)
+    apply_fsdp2(model, config, ep_mesh=ep_mesh, mesh=mesh)
     target = torch.device("cpu") if config.cpu_offload else torch.device(device)
     model.to_empty(device=target)
     _restore_after_to_empty(model)

@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import gc
-from typing import TYPE_CHECKING, Any, NoReturn
+from typing import TYPE_CHECKING, Any, NoReturn, Literal
 
 import numpy as np
 import numpy.typing as npt
@@ -81,6 +81,10 @@ class DPO(LLMAlgorithm[PreferencePrompts]):
     :type fsdp_config: FSDPConfig | None, optional
     :param ep: Expert Parallel degree for packed-expert MoE (1 disables).
     :type ep: int, optional
+    :param cp: Context-parallel degree (``1`` disables CP), defaults to 1
+    :type cp: int, optional
+    :param cp_style: CP attention style (``ulysses`` or ``ring``), defaults to ``ulysses``
+    :type cp_style: Literal["ulysses", "ring"], optional
     :param wrap: Wrap models for distributed training upon creation, defaults to True
     :type wrap: bool, optional
     :param clone: Flag to indicate if the instantiation is a cloning, defaults to False
@@ -153,6 +157,8 @@ class DPO(LLMAlgorithm[PreferencePrompts]):
         gradient_accumulation_steps: int = 1,
         fsdp_config: FSDPConfig | None = None,
         ep: int = 1,
+        cp: int = 1,
+        cp_style: Literal["ulysses", "ring"] = "ulysses",
         wrap: bool = True,
         clone: bool = False,
         seed: int = 42,
@@ -192,6 +198,8 @@ class DPO(LLMAlgorithm[PreferencePrompts]):
             gradient_accumulation_steps=gradient_accumulation_steps,
             fsdp_config=fsdp_config,
             ep=ep,
+            cp=cp,
+            cp_style=cp_style,
             name="DPO",
             gradient_checkpointing=gradient_checkpointing,
             torch_compiler=torch_compiler,

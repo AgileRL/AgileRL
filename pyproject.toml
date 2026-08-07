@@ -56,6 +56,14 @@ llm = [
     "transformers==5.14.1",
     "vllm>=0.24; sys_platform == 'linux'",
 ]
+# Context parallel (cp>1): FA2 required for both styles; ring-flash-attn for
+# cp_style="ring". Wheels must match torch/CUDA — runtime refuses cp>1 without
+# FA2, and refuses ring without ring-flash-attn.
+context-parallel = [
+    "agilerl[llm]",
+    "flash-attn>=2.5.0; sys_platform == 'linux'",
+    "ring-flash-attn>=0.1.8; sys_platform == 'linux'",
+]
 arena = [
     "agilerl-arena==0.1.2",
 ]

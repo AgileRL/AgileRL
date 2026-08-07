@@ -178,6 +178,8 @@ def _prepare_llm_algo_kwargs(
         ("activation_offload", "ACTIVATION_OFFLOAD", bool, False),
         ("lora_target_scope", "LORA_TARGET_SCOPE", lambda v: v, True),
         ("chunk_rows", "CHUNK_ROWS", int, True),
+        ("cp", "CP", int, True),
+        ("cp_style", "CP_STYLE", str, True),
     )
     for merged_key, init_hp_key, caster, present_when_truthy in _passthroughs:
         present = (
