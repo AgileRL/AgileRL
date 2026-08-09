@@ -12,6 +12,7 @@ kernel is a stand-in mirroring liger's signature and both of its reductions.
 from __future__ import annotations
 
 import inspect
+import warnings
 from contextlib import nullcontext
 from types import SimpleNamespace
 from typing import Any
@@ -217,6 +218,9 @@ class _Stub:
     _record_window_action_tokens = GRPO._record_window_action_tokens
     _reduce_masked_loss = GRPO._reduce_masked_loss
     _resolve_loss_window = GRPO._resolve_loss_window
+    _warn_if_micro_batches_straddle_optimizer_steps = (
+        GRPO._warn_if_micro_batches_straddle_optimizer_steps
+    )
 
     def _get_lm_head(self) -> torch.nn.Linear:
         return self.lm_head
@@ -535,6 +539,40 @@ class TestAccumulationSteps:
         algo.actor = SimpleNamespace(gradient_accumulation_steps=lambda: 0)
         with pytest.raises(RuntimeError, match="returned 0"):
             algo._accumulation_steps()
+
+
+class TestStraddleWarning:
+    """A trailing micro-batch is worth warning about; a full window is not."""
+
+    @staticmethod
+    def _emitted(algo: _Stub, samples: int, micro_batch_size: int) -> list:
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            algo._warn_if_micro_batches_straddle_optimizer_steps(
+                samples, micro_batch_size
+            )
+        return caught
+
+    def test_a_trailing_micro_batch_warns(self) -> None:
+        algo = _Stub(accumulation_steps=2)
+        with pytest.warns(UserWarning, match="whole optimizer steps"):
+            algo._warn_if_micro_batches_straddle_optimizer_steps(3, 1)
+
+    def test_micro_batches_filling_whole_steps_stay_silent(self) -> None:
+        assert self._emitted(_Stub(accumulation_steps=2), 4, 1) == []
+
+    def test_an_engine_without_the_accessor_stays_silent(self) -> None:
+        """A stand-in actor carries no accumulation width to compare against."""
+        algo = _Stub()
+        algo.actor = SimpleNamespace()
+        assert self._emitted(algo, 3, 2) == []
+
+    def test_a_single_step_window_stays_silent(self) -> None:
+        """Every micro-batch takes its own step, so none can straddle one."""
+        assert self._emitted(_Stub(accumulation_steps=1), 3, 2) == []
+
+    def test_without_deepspeed_no_engine_owns_the_window(self) -> None:
+        assert self._emitted(_Stub(uses_deepspeed=False), 3, 2) == []
 
 
 class TestWindowActionTokenRecording:

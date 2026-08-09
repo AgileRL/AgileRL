@@ -789,8 +789,6 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
                         self._record_window_action_tokens(action_masks, window_idxs)
                     for start in range(0, len(window_idxs), batch_size):
                         minibatch_idxs = window_idxs[start : start + batch_size]
-                        if len(minibatch_idxs) == 0:
-                            continue
                         loss, aux = self._loss(
                             batch_size,
                             minibatch_idxs,
