@@ -3600,6 +3600,80 @@ class TestGRPOLearn:
         assert grpo._window_action_tokens == 18
         grpo.clean_up()
 
+    def test_learn_records_window_tokens_per_optimizer_step(self):
+        grpo = _make_cpu_grpo_for_branch_tests(loss_norm="accumulation_window")
+        completion_ids, action_masks = _build_branch_experiences(batch_size=4)
+        rewards = torch.tensor([1.0, 0.0, -1.0, 2.0], dtype=torch.float32)
+
+        def fake_fused_forward(ids, batch_size):
+            shape = (ids.shape[0], ids.shape[1] - 1)
+            zeros = torch.zeros(shape, dtype=torch.float32, device=ids.device)
+            return zeros, zeros, None
+
+        grpo._uses_deepspeed = True
+        grpo.micro_batch_size_per_gpu = 1
+        grpo.actor.gradient_accumulation_steps = lambda: 2
+        original_record = GRPO._record_window_action_tokens
+        window_sizes: list[int] = []
+
+        def record_spy(masks, idxs):
+            window_sizes.append(len(idxs))
+            original_record(grpo, masks, idxs)
+
+        with (
+            patch.object(
+                grpo, "_fused_forward_no_grad", side_effect=fake_fused_forward
+            ),
+            patch.object(
+                grpo,
+                "_loss",
+                return_value=(
+                    torch.tensor(1.0, dtype=torch.float32),
+                    torch.tensor(0.1, dtype=torch.float32),
+                ),
+            ) as mock_loss,
+            patch.object(grpo, "_backward_pass", return_value=None),
+            patch.object(grpo, "_record_window_action_tokens", side_effect=record_spy),
+        ):
+            grpo.learn((completion_ids, action_masks, rewards))
+        # Four micro-batches of one sample fold into two optimizer steps, so
+        # the window normalizer is recorded once per step over two samples.
+        assert window_sizes == [2, 2]
+        assert grpo._window_action_tokens == 18
+        assert mock_loss.call_count == 4
+        grpo.clean_up()
+
+    def test_learn_warns_when_micro_batches_straddle_optimizer_steps(self):
+        grpo = _make_cpu_grpo_for_branch_tests(group_size=3)
+        completion_ids, action_masks = _build_branch_experiences(batch_size=3)
+        rewards = torch.tensor([1.0, 0.0, -1.0], dtype=torch.float32)
+
+        def fake_fused_forward(ids, batch_size):
+            shape = (ids.shape[0], ids.shape[1] - 1)
+            zeros = torch.zeros(shape, dtype=torch.float32, device=ids.device)
+            return zeros, zeros, None
+
+        grpo._uses_deepspeed = True
+        grpo.micro_batch_size_per_gpu = 1
+        grpo.actor.gradient_accumulation_steps = lambda: 2
+        with (
+            patch.object(
+                grpo, "_fused_forward_no_grad", side_effect=fake_fused_forward
+            ),
+            patch.object(
+                grpo,
+                "_loss",
+                return_value=(
+                    torch.tensor(1.0, dtype=torch.float32),
+                    torch.tensor(0.1, dtype=torch.float32),
+                ),
+            ),
+            patch.object(grpo, "_backward_pass", return_value=None),
+            pytest.warns(UserWarning, match="whole optimizer steps"),
+        ):
+            grpo.learn((completion_ids, action_masks, rewards))
+        grpo.clean_up()
+
     def test_learn_warns_and_returns_zeros_when_all_filtered(self):
         grpo = _make_cpu_grpo_for_branch_tests(
             group_size=2,

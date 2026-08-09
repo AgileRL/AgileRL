@@ -119,6 +119,12 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
     :type calc_position_embeddings: bool
     :param micro_batch_size_per_gpu: Micro-batch size for gradient accumulation.
     :type micro_batch_size_per_gpu: int | None
+    :param mini_batch_size: Per-rank trajectories covered by one optimizer
+        step; DeepSpeed's gradient_accumulation_steps is set to
+        ``mini_batch_size / micro_batch_size_per_gpu``. Defaults to None,
+        which resolves to ``micro_batch_size_per_gpu`` (one optimizer step
+        per micro-batch).
+    :type mini_batch_size: int | None, optional
     :param max_output_tokens: Maximum new tokens per generation.
     :type max_output_tokens: int | None
     :param min_output_tokens: Minimum new tokens per generation.
@@ -235,6 +241,8 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
     :type lora_target_scope: str | None, optional
     """
 
+    _mini_batch_size_default = "micro_batch"
+
     def __init__(
         self,
         pad_token_id: int,
@@ -260,6 +268,7 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
         use_separate_reference_adapter: bool = True,
         calc_position_embeddings: bool = True,
         micro_batch_size_per_gpu: int | None = None,
+        mini_batch_size: int | None = None,
         max_output_tokens: int | None = None,
         min_output_tokens: int | None = None,
         max_model_len: int = 1024,
@@ -313,6 +322,7 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
             actor_network=actor_network,
             model_config=model_config,
             micro_batch_size_per_gpu=micro_batch_size_per_gpu,
+            mini_batch_size=mini_batch_size,
             cosine_lr_schedule_config=cosine_lr_schedule_config,
             hp_config=hp_config,
             wrap=wrap,

@@ -1697,6 +1697,8 @@ def _make_llm_agent(
     batch_size=4,
     use_separate_reference_adapter=False,
     *,
+    mini_batch_size=None,
+    algo_cls=None,
     reduce_memory_peak: bool = False,
     use_vllm: bool = False,
     use_memory_efficient_params: bool = True,
@@ -1704,6 +1706,8 @@ def _make_llm_agent(
     """Helper to create a _StubLLMAlgorithm with heavily mocked internals."""
     if not HAS_LLM_DEPENDENCIES:
         pytest.skip("LLM dependencies not installed")
+    if algo_cls is None:
+        algo_cls = _StubLLMAlgorithm
     if actor_network is None:
         actor_network = _make_mock_peft_actor()
 
@@ -1721,7 +1725,7 @@ def _make_llm_agent(
             side_effect=lambda obj_list, from_process=0: list(obj_list),
         ),
     ):
-        agent = _StubLLMAlgorithm(
+        agent = algo_cls(
             index=0,
             batch_size=batch_size,
             lr=1e-4,
@@ -1735,6 +1739,7 @@ def _make_llm_agent(
             lora_config=lora_config if lora_config is not None else MagicMock(),
             actor_network=actor_network,
             micro_batch_size_per_gpu=micro_batch_size_per_gpu,
+            mini_batch_size=mini_batch_size,
             cosine_lr_schedule_config=cosine_lr_schedule_config,
             accelerator=accelerator,
             device="cpu",
@@ -2940,6 +2945,133 @@ class TestLLMConfigureBatchSize:
         )
         with pytest.raises(ValueError, match="gradient accumulation"):
             _make_llm_agent(accelerator=acc, clone=False)
+
+
+class _MicroDefaultStubLLMAlgorithm(_StubLLMAlgorithm):
+    """Stub with the RL-family mini-batch default."""
+
+    _mini_batch_size_default = "micro_batch"
+
+
+@_LLM_DEPS_SKIP
+class TestLLMConfigureMiniBatchSize:
+    @staticmethod
+    def _accelerator(ds_config=None, num_processes=1):
+        return _make_mock_accelerator(
+            ds_config=ds_config
+            or {
+                "zero_optimization": {"stage": 0},
+                "train_micro_batch_size_per_gpu": "auto",
+            },
+            num_processes=num_processes,
+        )
+
+    def test_explicit_mini_batch_sets_accumulation_steps(self):
+        acc = self._accelerator()
+        agent = _make_llm_agent(
+            accelerator=acc,
+            clone=False,
+            micro_batch_size_per_gpu=1,
+            mini_batch_size=2,
+        )
+        ds_config = acc.state.deepspeed_plugin.deepspeed_config
+        assert agent.micro_batch_size_per_gpu == 1
+        assert agent.mini_batch_size == 2
+        assert ds_config["gradient_accumulation_steps"] == 2
+        assert ds_config["train_micro_batch_size_per_gpu"] == 1
+
+    def test_default_mini_batch_micro_policy_steps_every_micro_batch(self):
+        acc = self._accelerator()
+        agent = _make_llm_agent(
+            accelerator=acc,
+            clone=False,
+            micro_batch_size_per_gpu=2,
+            algo_cls=_MicroDefaultStubLLMAlgorithm,
+        )
+        ds_config = acc.state.deepspeed_plugin.deepspeed_config
+        assert agent.mini_batch_size == 2
+        assert ds_config["gradient_accumulation_steps"] == 1
+
+    def test_default_mini_batch_batch_policy_accumulates_whole_batch(self):
+        acc = self._accelerator()
+        agent = _make_llm_agent(
+            accelerator=acc,
+            clone=False,
+            micro_batch_size_per_gpu=2,
+            batch_size=4,
+        )
+        ds_config = acc.state.deepspeed_plugin.deepspeed_config
+        assert agent.mini_batch_size == 4
+        assert ds_config["gradient_accumulation_steps"] == 2
+
+    def test_mini_batch_not_divisible_by_micro_raises(self):
+        acc = self._accelerator()
+        with pytest.raises(ValueError, match="must be divisible by"):
+            _make_llm_agent(
+                accelerator=acc,
+                clone=False,
+                micro_batch_size_per_gpu=2,
+                mini_batch_size=3,
+                batch_size=4,
+            )
+
+    def test_mini_batch_without_micro_batch_takes_one_backward_per_step(self):
+        acc = self._accelerator()
+        agent = _make_llm_agent(
+            accelerator=acc,
+            clone=False,
+            mini_batch_size=2,
+            batch_size=4,
+        )
+        ds_config = acc.state.deepspeed_plugin.deepspeed_config
+        assert agent.micro_batch_size_per_gpu == 2
+        assert agent.mini_batch_size == 2
+        assert ds_config["gradient_accumulation_steps"] == 1
+
+    def test_mini_batch_without_deepspeed_mismatch_raises(self):
+        with pytest.raises(ValueError, match="requires a DeepSpeed engine"):
+            _make_llm_agent(
+                clone=False,
+                micro_batch_size_per_gpu=1,
+                mini_batch_size=2,
+            )
+
+    def test_mini_batch_nonpositive_raises(self):
+        with pytest.raises(ValueError, match="positive integer"):
+            _make_llm_agent(clone=False, mini_batch_size=0)
+
+    def test_legacy_config_accumulation_records_mini_batch(self):
+        acc = self._accelerator(
+            ds_config={
+                "zero_optimization": {"stage": 0},
+                "gradient_accumulation_steps": 2,
+                "train_micro_batch_size_per_gpu": "auto",
+            },
+            num_processes=2,
+        )
+        agent = _make_llm_agent(accelerator=acc, clone=False, batch_size=4)
+        assert agent.micro_batch_size_per_gpu == 1
+        assert agent.mini_batch_size == 2
+
+    def test_overriding_config_accumulation_warns(self):
+        acc = self._accelerator(
+            ds_config={
+                "zero_optimization": {"stage": 0},
+                "gradient_accumulation_steps": 4,
+            },
+        )
+        with pytest.warns(
+            UserWarning, match="Overwriting DeepSpeed config gradient_accumulation"
+        ):
+            agent = _make_llm_agent(
+                accelerator=acc,
+                clone=False,
+                micro_batch_size_per_gpu=1,
+                mini_batch_size=2,
+            )
+        ds_config = acc.state.deepspeed_plugin.deepspeed_config
+        assert ds_config["gradient_accumulation_steps"] == 2
+        assert agent.mini_batch_size == 2
 
 
 @_LLM_DEPS_SKIP
