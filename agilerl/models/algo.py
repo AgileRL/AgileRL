@@ -545,6 +545,7 @@ class LLMAlgorithmSpec(AlgorithmSpec):
     lora_target_scope: str | None = Field(default=None)
     chunk_rows: int | None = Field(default=None, ge=1)
     micro_batch_size_per_gpu: int | None = Field(default=None, ge=1)
+    mini_batch_size: int | None = Field(default=None, ge=1)
     vllm_importance_sampling_correction: bool = Field(default=True)
     vllm_importance_sampling_cap: float = Field(default=2.0, ge=0.0)
     attn_implementation: str | None = Field(default=None)
