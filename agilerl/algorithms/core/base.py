@@ -2459,14 +2459,10 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
     :param micro_batch_size_per_gpu: Samples per backward pass on one rank (the
         memory knob). Optimizer-step cadence comes from ``mini_batch_size``.
     :type micro_batch_size_per_gpu: int | None
-    :param mini_batch_size: Per-rank samples covered by one optimizer step.
-        DeepSpeed's ``gradient_accumulation_steps`` is set to ``mini_batch_size
-        / micro_batch_size_per_gpu`` (validated for divisibility). ``None``
-        resolves per algorithm family: the RL rollout algorithms use
-        ``micro_batch_size_per_gpu`` (one optimizer step per micro-batch), the
-        supervised/preference algorithms use the per-rank batch (one step per
-        batch). Without DeepSpeed every micro-batch steps the optimizer, so a
-        value other than the micro-batch is rejected.
+    :param mini_batch_size: Per-rank samples covered by one optimizer step;
+        DeepSpeed's ``gradient_accumulation_steps`` = ``mini_batch_size /
+        micro_batch_size_per_gpu``. ``None`` uses the micro-batch (RL rollout
+        algorithms) or the per-rank batch (SFT/DPO).
     :type mini_batch_size: int | None, optional
     :param cosine_lr_schedule_config: The cosine LR schedule config.
     :type cosine_lr_schedule_config: CosineLRScheduleConfig | None
