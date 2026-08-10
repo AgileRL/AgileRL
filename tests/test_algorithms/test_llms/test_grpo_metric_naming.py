@@ -74,6 +74,7 @@ class _Stub:
         self.vllm_importance_sampling_cap = 2.0
         self.filter_zero_adv = filter_zero_adv
         self.loss_norm = "micro_batch"
+        self._uses_deepspeed = False
         self.pad_token_id = PAD_TOKEN_ID
         self.update_epochs = 1
         self.micro_batch_size_per_gpu = 2
@@ -100,6 +101,9 @@ class _Stub:
     _record_window_action_tokens = GRPO._record_window_action_tokens
     _sampling_mismatch_metrics = GRPO._sampling_mismatch_metrics
     _use_liger_path = GRPO._use_liger_path
+    _warn_if_micro_batches_straddle_optimizer_steps = (
+        GRPO._warn_if_micro_batches_straddle_optimizer_steps
+    )
     _warn_liger_non_token_is = LLMAlgorithm._warn_liger_non_token_is
     _warn_liger_path_bypassed = GRPO._warn_liger_path_bypassed
 

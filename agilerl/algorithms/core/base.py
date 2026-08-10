@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import (
     TYPE_CHECKING,
     Any,
+    ClassVar,
     Generic,
     Literal,
     NoReturn,
@@ -2455,8 +2456,14 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
     :type model_name: str | None
     :param actor_network: The actor network.
     :type actor_network: PreTrainedModelProtocol | None
-    :param micro_batch_size_per_gpu: The micro batch size per GPU.
+    :param micro_batch_size_per_gpu: Samples per backward pass on one rank (the
+        memory knob). Optimizer-step cadence comes from ``mini_batch_size``.
     :type micro_batch_size_per_gpu: int | None
+    :param mini_batch_size: Per-rank samples covered by one optimizer step;
+        DeepSpeed's ``gradient_accumulation_steps`` = ``mini_batch_size /
+        micro_batch_size_per_gpu``. ``None`` uses the micro-batch (RL rollout
+        algorithms) or the per-rank batch (SFT/DPO).
+    :type mini_batch_size: int | None, optional
     :param cosine_lr_schedule_config: The cosine LR schedule config.
     :type cosine_lr_schedule_config: CosineLRScheduleConfig | None
     :param hp_config: The hyperparameter configuration.
@@ -2535,6 +2542,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
     # Adapter exported to vLLM for rollout — always the actor (also the
     # ``LoRARequest`` name the llm_utils helpers default to).
     _vllm_rollout_adapter = "actor"
+    _mini_batch_size_default: ClassVar[Literal["micro_batch", "batch"]] = "batch"
 
     # Runtime handles that cross HF/PEFT/DeepSpeed/vLLM wrapper boundaries;
     # their concrete types depend on the launch configuration (Accelerate
@@ -2576,6 +2584,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         model_name: str | None = None,
         actor_network: PreTrainedModelProtocol | None = None,
         micro_batch_size_per_gpu: int | None = None,
+        mini_batch_size: int | None = None,
         cosine_lr_schedule_config: CosineLRScheduleConfig | None = None,
         hp_config: HyperparameterConfig | None = None,
         use_memory_efficient_params: bool = True,
@@ -2698,6 +2707,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         self._configure_batch_size_per_process(
             batch_size,
             micro_batch_size_per_gpu,
+            mini_batch_size,
         )
         self.batch_size = batch_size
         self.lr = align_deepspeed_lr(float(lr), self.accelerator)
@@ -5867,13 +5877,30 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         self,
         batch_size: int,
         micro_batch_size_per_gpu: int | None,
+        mini_batch_size: int | None,
     ) -> None:
+        if mini_batch_size is not None and mini_batch_size < 1:
+            msg = f"mini_batch_size must be a positive integer; got {mini_batch_size}."
+            raise ValueError(msg)
         if self.accelerator is None:
             self.batch_size_per_process = batch_size
             if micro_batch_size_per_gpu is not None:
                 self.micro_batch_size_per_gpu = int(micro_batch_size_per_gpu)
             else:
                 self.micro_batch_size_per_gpu = batch_size
+            if (
+                mini_batch_size is not None
+                and int(mini_batch_size) != self.micro_batch_size_per_gpu
+            ):
+                msg = (
+                    f"mini_batch_size ({mini_batch_size}) requires a DeepSpeed "
+                    "engine to accumulate gradients across micro-batches; "
+                    "without one every micro-batch of "
+                    f"{self.micro_batch_size_per_gpu} takes its own optimizer "
+                    "step."
+                )
+                raise ValueError(msg)
+            self.mini_batch_size = self.micro_batch_size_per_gpu
             return
 
         ds_plugin = self.accelerator.state.deepspeed_plugin
@@ -5891,7 +5918,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
 
         self.batch_size_per_process = int(batch_size / self.accelerator.num_processes)
 
-        if micro_batch_size_per_gpu is None:
+        if micro_batch_size_per_gpu is None and mini_batch_size is None:
             if (
                 self.batch_size_per_process
                 % ds_config.get("gradient_accumulation_steps", 1)
@@ -5910,6 +5937,9 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             )
             self.micro_batch_size_per_gpu = (
                 self.batch_size_per_process // gradient_accumulation_steps
+            )
+            self.mini_batch_size = (
+                self.micro_batch_size_per_gpu * gradient_accumulation_steps
             )
 
             prev_micro = ds_config.get("train_micro_batch_size_per_gpu")
@@ -5931,16 +5961,36 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             )
             raise ValueError(msg)
 
-        self.micro_batch_size_per_gpu = int(micro_batch_size_per_gpu)
-        if (
-            batch_size
-            % (self.micro_batch_size_per_gpu * self.accelerator.num_processes)
-            != 0
-        ):
-            msg = f"When specifying micro_batch_size_per_gpu, batch_size ({batch_size}) must be divisible by the product of the number of processes ({self.accelerator.num_processes}) and micro_batch_size_per_gpu ({self.micro_batch_size_per_gpu})."
-            raise ValueError(
-                msg,
+        if micro_batch_size_per_gpu is not None:
+            self.micro_batch_size_per_gpu = int(micro_batch_size_per_gpu)
+            if (
+                batch_size
+                % (self.micro_batch_size_per_gpu * self.accelerator.num_processes)
+                != 0
+            ):
+                msg = f"When specifying micro_batch_size_per_gpu, batch_size ({batch_size}) must be divisible by the product of the number of processes ({self.accelerator.num_processes}) and micro_batch_size_per_gpu ({self.micro_batch_size_per_gpu})."
+                raise ValueError(
+                    msg,
+                )
+        elif mini_batch_size is not None:
+            self.micro_batch_size_per_gpu = int(mini_batch_size)
+
+        if mini_batch_size is not None:
+            self.mini_batch_size = int(mini_batch_size)
+        elif self._mini_batch_size_default == "micro_batch":
+            self.mini_batch_size = self.micro_batch_size_per_gpu
+        else:
+            self.mini_batch_size = self.batch_size_per_process
+        if self.mini_batch_size % self.micro_batch_size_per_gpu != 0:
+            msg = (
+                f"mini_batch_size ({self.mini_batch_size}) must be divisible by "
+                f"micro_batch_size_per_gpu ({self.micro_batch_size_per_gpu}): "
+                "gradient_accumulation_steps = mini_batch_size / "
+                "micro_batch_size_per_gpu must be a whole number of backward "
+                "passes."
             )
+            raise ValueError(msg)
+
         prev_micro = ds_config.get("train_micro_batch_size_per_gpu")
         if prev_micro is not None:
             warnings.warn(
@@ -5950,13 +6000,21 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             )
         ds_config["train_micro_batch_size_per_gpu"] = self.micro_batch_size_per_gpu
         gradient_accumulation_steps = (
-            batch_size / self.accelerator.num_processes / self.micro_batch_size_per_gpu
+            self.mini_batch_size // self.micro_batch_size_per_gpu
         )
-        warnings.warn(
-            f"Overwriting deepspeed config gradient accumulation steps from {ds_config.get('gradient_accumulation_steps', 'auto')} to {gradient_accumulation_steps}",
-            stacklevel=2,
-        )
-        ds_config["gradient_accumulation_steps"] = int(gradient_accumulation_steps)
+        prev_accumulation = ds_config.get("gradient_accumulation_steps")
+        if (
+            prev_accumulation not in (None, "auto")
+            and int(prev_accumulation) != gradient_accumulation_steps
+        ):
+            warnings.warn(
+                "Overwriting DeepSpeed config gradient_accumulation_steps from "
+                f"{prev_accumulation!r} to {gradient_accumulation_steps} "
+                f"(mini_batch_size={self.mini_batch_size} // "
+                f"micro_batch_size_per_gpu={self.micro_batch_size_per_gpu}).",
+                stacklevel=2,
+            )
+        ds_config["gradient_accumulation_steps"] = gradient_accumulation_steps
         return
 
     def recompile(self) -> None:

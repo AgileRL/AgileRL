@@ -215,10 +215,19 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
     :type min_p: float, optional
     :param calc_position_embeddings: Flag indicating whether to calculate position embeddings, defaults to True
     :type calc_position_embeddings: bool, optional
-    :param micro_batch_size_per_gpu: If specified, gradient_accumulation_steps will be
-        calculated to achieve the target batch_size. If None, uses existing
-        gradient_accumulation_steps from DeepSpeed config, defaults to None
+    :param micro_batch_size_per_gpu: Trajectories per backward pass on one rank
+        (the memory knob). Optimizer-step cadence comes from
+        ``mini_batch_size``. If None, derived from the DeepSpeed config's
+        gradient_accumulation_steps, defaults to None
     :type micro_batch_size_per_gpu: int, optional
+    :param mini_batch_size: Per-rank trajectories covered by one optimizer
+        step. DeepSpeed's gradient_accumulation_steps is set to
+        ``mini_batch_size / micro_batch_size_per_gpu`` (validated for
+        divisibility). Defaults to None, which resolves to
+        ``micro_batch_size_per_gpu`` — one optimizer step per micro-batch. Set
+        it to the per-rank rollout batch (``batch_size / num_processes x
+        group_size``) to accumulate the whole batch into a single step.
+    :type mini_batch_size: int, optional
     :param max_output_tokens: Max number of answer tokens, defaults to None
     :type max_output_tokens: int, optional
     :param min_output_tokens: Minimum output tokens, defaults to 0
@@ -394,6 +403,8 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
     _window_action_tokens: int | None = None
     """Action tokens of this rank's samples entering the optimizer step in progress."""
 
+    _mini_batch_size_default = "micro_batch"
+
     def __init__(
         self,
         pad_token_id: int,
@@ -418,6 +429,7 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
         use_memory_efficient_params: bool = True,
         calc_position_embeddings: bool = True,
         micro_batch_size_per_gpu: int | None = None,
+        mini_batch_size: int | None = None,
         max_output_tokens: int | None = None,
         min_output_tokens: int | None = None,
         max_model_len: int | None = 1024,
@@ -478,6 +490,7 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
             actor_network=actor_network,
             model_config=model_config,
             micro_batch_size_per_gpu=micro_batch_size_per_gpu,
+            mini_batch_size=mini_batch_size,
             cosine_lr_schedule_config=cosine_lr_schedule_config,
             wrap=wrap,
             hp_config=hp_config,
@@ -725,8 +738,6 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
             advantages, batch_idxs = self._calculate_advantages(
                 rewards, completion_ids, action_masks, turn_ids
             )
-            if self.loss_norm == "accumulation_window":
-                self._record_window_action_tokens(action_masks, batch_idxs)
             aux_metric = self.aux_metric_name
             effective_num_samples = len(batch_idxs)
             if effective_num_samples == 0:
@@ -763,31 +774,38 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
 
             # Ensure batch_size is not larger than the number of active samples
             batch_size = min(batch_size, effective_num_samples)
+            self._warn_if_micro_batches_straddle_optimizer_steps(
+                effective_num_samples, batch_size
+            )
+            if self.loss_norm == "accumulation_window":
+                window_size = batch_size * self._accumulation_steps()
+            else:
+                window_size = effective_num_samples
             for _ in range(self.update_epochs):
                 self.rng.shuffle(batch_idxs)
-                for start in range(0, effective_num_samples, batch_size):
-                    minibatch_idxs = batch_idxs[
-                        start : min((start + batch_size), effective_num_samples)
-                    ]
-                    if len(minibatch_idxs) == 0:
-                        continue
-                    loss, aux = self._loss(
-                        batch_size,
-                        minibatch_idxs,
-                        completion_ids,
-                        action_masks,
-                        advantages,
-                        old_log_probs,
-                        reference_log_probs,
-                        turn_ids=is_turn_ids,
-                        sampling_log_probs=sampling_log_probs,
-                    )
-                    self._raise_if_loss_not_finite_on_any_rank(loss)
+                for window_start in range(0, effective_num_samples, window_size):
+                    window_idxs = batch_idxs[window_start : window_start + window_size]
+                    if self.loss_norm == "accumulation_window":
+                        self._record_window_action_tokens(action_masks, window_idxs)
+                    for start in range(0, len(window_idxs), batch_size):
+                        minibatch_idxs = window_idxs[start : start + batch_size]
+                        loss, aux = self._loss(
+                            batch_size,
+                            minibatch_idxs,
+                            completion_ids,
+                            action_masks,
+                            advantages,
+                            old_log_probs,
+                            reference_log_probs,
+                            turn_ids=is_turn_ids,
+                            sampling_log_probs=sampling_log_probs,
+                        )
+                        self._raise_if_loss_not_finite_on_any_rank(loss)
 
-                    self._backward_pass(loss)
-                    learn_metrics["loss"] += loss.item()
-                    learn_metrics[aux_metric] += aux.item()
-                    updates += 1
+                        self._backward_pass(loss)
+                        learn_metrics["loss"] += loss.item()
+                        learn_metrics[aux_metric] += aux.item()
+                        updates += 1
         result = {
             metric: value / max(updates, 1) for metric, value in learn_metrics.items()
         }
@@ -1488,6 +1506,44 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
         :rtype: None
         """
         self._window_action_tokens = int(action_masks[batch_idxs].sum().item())
+
+    def _warn_if_micro_batches_straddle_optimizer_steps(
+        self,
+        effective_num_samples: int,
+        micro_batch_size: int,
+    ) -> None:
+        """Warn when an epoch's micro-batches do not fill whole optimizer steps.
+
+        Reads the engine accumulation width leniently so mocked or non-DeepSpeed
+        actors never fail here; the strict accessor guards the loss path.
+
+        :param effective_num_samples: Trajectories entering this update.
+        :type effective_num_samples: int
+        :param micro_batch_size: Trajectories per backward pass.
+        :type micro_batch_size: int
+        :return: None
+        :rtype: None
+        """
+        if not self._uses_deepspeed:
+            return
+        accessor = getattr(self.actor, "gradient_accumulation_steps", None)
+        if not callable(accessor):
+            return
+        steps = accessor()
+        if not isinstance(steps, int) or isinstance(steps, bool) or steps <= 1:
+            return
+        micro_batches = -(-effective_num_samples // micro_batch_size)
+        if micro_batches % steps == 0:
+            return
+        warnings.warn(
+            f"The DeepSpeed engine folds {steps} micro-batches into one "
+            f"optimizer step, but this update runs {micro_batches} "
+            f"micro-batches per epoch, so the trailing {micro_batches % steps} "
+            "micro-batch(es) only reach the optimizer during a later epoch or "
+            "learn call. Choose mini_batch_size and micro_batch_size_per_gpu "
+            "so the per-rank batch splits into whole optimizer steps.",
+            stacklevel=3,
+        )
 
     def _accumulation_steps_without_deepspeed(self) -> int:
         """Micro-batches one optimizer step spans with no DeepSpeed engine.

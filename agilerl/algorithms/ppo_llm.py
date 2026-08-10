@@ -123,6 +123,12 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
     :type calc_position_embeddings: bool, optional
     :param micro_batch_size_per_gpu: Optional target micro-batch size per GPU.
     :type micro_batch_size_per_gpu: int | None, optional
+    :param mini_batch_size: Per-rank trajectories covered by one optimizer
+        step; DeepSpeed's gradient_accumulation_steps is set to
+        ``mini_batch_size / micro_batch_size_per_gpu``. Defaults to None,
+        which resolves to ``micro_batch_size_per_gpu`` (one optimizer step
+        per micro-batch).
+    :type mini_batch_size: int | None, optional
     :param max_output_tokens: Maximum newly generated tokens per completion.
     :type max_output_tokens: int | None, optional
     :param min_output_tokens: Minimum newly generated tokens per completion.
@@ -253,6 +259,8 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
     :type lora_target_scope: str | None, optional
     """
 
+    _mini_batch_size_default = "micro_batch"
+
     def __init__(
         self,
         pad_token_id: int,
@@ -280,6 +288,7 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
         use_separate_reference_adapter: bool = True,
         calc_position_embeddings: bool = True,
         micro_batch_size_per_gpu: int | None = None,
+        mini_batch_size: int | None = None,
         max_output_tokens: int | None = None,
         min_output_tokens: int | None = None,
         max_model_len: int = 1024,
@@ -339,6 +348,7 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
             actor_network=actor_network,
             model_config=model_config,
             micro_batch_size_per_gpu=micro_batch_size_per_gpu,
+            mini_batch_size=mini_batch_size,
             cosine_lr_schedule_config=cosine_lr_schedule_config,
             hp_config=hp_config,
             use_memory_efficient_params=use_memory_efficient_params,
