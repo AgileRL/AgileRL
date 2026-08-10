@@ -52,7 +52,6 @@ from agilerl.algorithms.core.llm_ops.fused_logprobs import (
     FusedLinearLogProbsFunction,
     fused_linear_logprobs_chunked,
 )
-from agilerl.algorithms.core.llm_ops.liger_nemotron_h import register_nemotron_h_liger
 from agilerl.algorithms.core.optimizer_wrapper import OptimizerWrapper
 from agilerl.algorithms.core.registry import (
     HyperparameterConfig,
@@ -2751,11 +2750,10 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
                         stacklevel=2,
                     )
                 if self.zero_stage == 3:
-                    # Class-level DeepSpeed / Nemotron-H workarounds; install
-                    # before any model construction below.
+                    # Class-level DeepSpeed workarounds; install before any
+                    # model construction below.
                     install_zero3_third_party_hooks(
                         ds_config,
-                        model_name_or_path=self.pretrained_model_name_or_path,
                         num_partitions=int(self.accelerator.num_processes),
                     )
             if self.accelerator.num_processes > 1:
@@ -4546,7 +4544,6 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
                     )
                 try:
                     if not already_patched:
-                        register_nemotron_h_liger()
                         _apply_liger_kernel_to_instance(model=inner_model)
                         inner_model._agilerl_liger_patched = True
                         logger.info(
