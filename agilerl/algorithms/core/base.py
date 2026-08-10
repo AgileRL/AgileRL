@@ -2542,10 +2542,6 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
     # Adapter exported to vLLM for rollout — always the actor (also the
     # ``LoRARequest`` name the llm_utils helpers default to).
     _vllm_rollout_adapter = "actor"
-    # Resolution of ``mini_batch_size=None`` when a micro-batch is configured:
-    # ``"micro_batch"`` steps the optimizer once per micro-batch (the RL rollout
-    # algorithms), ``"batch"`` accumulates the whole per-rank batch into one
-    # optimizer step (the supervised/preference algorithms).
     _mini_batch_size_default: ClassVar[Literal["micro_batch", "batch"]] = "batch"
 
     # Runtime handles that cross HF/PEFT/DeepSpeed/vLLM wrapper boundaries;
