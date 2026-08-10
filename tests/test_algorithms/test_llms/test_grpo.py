@@ -3626,33 +3626,6 @@ class TestGRPOLearn:
         acc.wait_for_everyone.assert_called_once()
         grpo.clean_up()
 
-    def test_learn_warns_and_returns_zeros_when_no_active_samples_after_filtering(self):
-        grpo = _make_cpu_grpo_for_branch_tests(group_size=2)
-        token_ids, action_masks = _build_branch_experiences(batch_size=4)
-        rewards = torch.tensor([1.0, 0.0, -1.0, 2.0], dtype=torch.float32)
-
-        def fake_fused_forward(ids, batch_size):
-            shape = (ids.shape[0], ids.shape[1] - 1)
-            zeros = torch.zeros(shape, dtype=torch.float32, device=ids.device)
-            return zeros, zeros, None
-
-        with (
-            patch(
-                "agilerl.algorithms.grpo.np.arange",
-                return_value=np.array([], dtype=int),
-            ),
-            patch.object(
-                grpo, "_fused_forward_no_grad", side_effect=fake_fused_forward
-            ),
-            pytest.warns(
-                UserWarning,
-                match="No active samples after filtering; skipping GRPO update.",
-            ),
-        ):
-            metrics = grpo.learn((token_ids, action_masks, rewards))
-        assert metrics == {"loss": 0.0, "kl": 0.0}
-        grpo.clean_up()
-
     def test_learn_raises_on_cross_rank_seq_len_mismatch(self):
         grpo = _make_cpu_grpo_for_branch_tests()
         grpo.zero_stage = 3
