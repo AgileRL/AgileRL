@@ -52,7 +52,6 @@ from agilerl.algorithms.core.llm_ops.fused_logprobs import (
     FusedLinearLogProbsFunction,
     fused_linear_logprobs_chunked,
 )
-from agilerl.algorithms.core.llm_ops.liger_nemotron_h import register_nemotron_h_liger
 from agilerl.algorithms.core.optimizer_wrapper import OptimizerWrapper
 from agilerl.algorithms.core.registry import (
     HyperparameterConfig,
@@ -62,6 +61,7 @@ from agilerl.algorithms.core.registry import (
     OptimizerConfig,
     OptimizerFactory,
 )
+from agilerl.architectures.nemotron_h import register_nemotron_h_liger
 from agilerl.metrics import AgentMetrics, MultiAgentMetrics
 from agilerl.modules.configs import MlpNetConfig, NetConfig
 from agilerl.modules.dummy import DummyEvolvable
@@ -190,7 +190,7 @@ if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
         save_peft_adapter_for_vllm_rollout,
         stitch_completion_after_windowed_vllm_generate,
     )
-    from agilerl.utils.third_party_patches import install_zero3_third_party_hooks
+    from agilerl.utils.zero3_patches import install_zero3_patches
 
 if TYPE_CHECKING or HAS_DEEPSPEED:
     from deepspeed.checkpoint.utils import clone_tensors_for_torch_save
@@ -2753,7 +2753,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
                 if self.zero_stage == 3:
                     # Class-level DeepSpeed / Nemotron-H workarounds; install
                     # before any model construction below.
-                    install_zero3_third_party_hooks(
+                    install_zero3_patches(
                         ds_config,
                         model_name_or_path=self.pretrained_model_name_or_path,
                         num_partitions=int(self.accelerator.num_processes),

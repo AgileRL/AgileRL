@@ -3230,9 +3230,7 @@ class TestLLMZero3ThirdPartyHooksWireUp:
             num_processes=4,
         )
         with (
-            patch(
-                "agilerl.algorithms.core.base.install_zero3_third_party_hooks"
-            ) as mock_hooks,
+            patch("agilerl.algorithms.core.base.install_zero3_patches") as mock_hooks,
             pytest.warns(UserWarning, match="ZeRO Stage 3"),
         ):
             agent = _make_llm_agent(accelerator=acc)
@@ -3253,9 +3251,7 @@ class TestLLMZero3ThirdPartyHooksWireUp:
                 "train_micro_batch_size_per_gpu": "auto",
             }
         )
-        with patch(
-            "agilerl.algorithms.core.base.install_zero3_third_party_hooks"
-        ) as mock_hooks:
+        with patch("agilerl.algorithms.core.base.install_zero3_patches") as mock_hooks:
             _make_llm_agent(accelerator=acc)
 
         mock_hooks.assert_not_called()
