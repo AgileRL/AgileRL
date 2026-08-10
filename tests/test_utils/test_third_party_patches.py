@@ -10,8 +10,6 @@ deepspeed or a GPU.
 import collections
 import enum
 import logging
-from types import SimpleNamespace
-from typing import ClassVar
 
 import pytest
 import torch
