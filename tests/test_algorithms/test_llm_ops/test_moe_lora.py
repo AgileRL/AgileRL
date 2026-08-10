@@ -844,3 +844,108 @@ class TestMoeLoraFallbackBranches:
 
         assert out is sentinel
         base_forward.assert_called_once()
+
+
+@pytest.mark.gpu
+class TestZero3ExpertAttachMemory:
+    """Expert-LoRA attach on a zero.Init model must not gather the experts."""
+
+    def test_attach_peak_allocation_far_below_summed_expert_size(self) -> None:
+        import math
+        import os
+
+        if not torch.cuda.is_available():
+            pytest.skip("requires CUDA")
+        deepspeed = pytest.importorskip("deepspeed")
+        from peft import LoraConfig, get_peft_model
+
+        from agilerl.utils.llm_utils import zero3_full_shape_views
+
+        os.environ.setdefault("RANK", "0")
+        os.environ.setdefault("LOCAL_RANK", "0")
+        os.environ.setdefault("WORLD_SIZE", "1")
+        os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
+        os.environ.setdefault("MASTER_PORT", "29531")
+        deepspeed.init_distributed(dist_backend="nccl")
+
+        num_layers, num_experts, hidden, intermediate = 4, 8, 1024, 2816
+
+        class BigExperts(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.num_experts = num_experts
+                self.up_proj = nn.Parameter(
+                    torch.empty(num_experts, intermediate, hidden)
+                )
+                self.down_proj = nn.Parameter(
+                    torch.empty(num_experts, hidden, intermediate)
+                )
+                self.act_fn = F.silu
+
+            def forward(self, hidden_states, top_k_index, top_k_weights):
+                return hidden_states
+
+        class BigMoeModel(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.layers = nn.ModuleList()
+                for _ in range(num_layers):
+                    block = nn.Module()
+                    block.experts = BigExperts()
+                    self.layers.append(block)
+
+        # remote_device=cpu keeps the single-rank gather from aliasing the
+        # local shard, so a regression to gathering the packed experts
+        # re-allocates their full summed size on the GPU and trips the bound.
+        with deepspeed.zero.Init(
+            remote_device="cpu",
+            config_dict_or_path={
+                "train_batch_size": 1,
+                "train_micro_batch_size_per_gpu": 1,
+                "zero_optimization": {
+                    "stage": 3,
+                    "offload_param": {"device": "cpu"},
+                },
+            },
+        ):
+            model = BigMoeModel()
+
+        expert_params = [
+            param
+            for name, param in model.named_parameters()
+            if name.endswith(("up_proj", "down_proj"))
+        ]
+        assert len(expert_params) == 2 * num_layers
+        assert all(param.numel() == 0 for param in expert_params)
+        summed_expert_bytes = sum(
+            math.prod(param.ds_shape) * param.element_size() for param in expert_params
+        )
+
+        torch.cuda.synchronize()
+        torch.cuda.empty_cache()
+        torch.cuda.reset_peak_memory_stats()
+        base_allocated = torch.cuda.memory_allocated()
+
+        config = LoraConfig(
+            r=8,
+            lora_alpha=16,
+            lora_dropout=0.0,
+            target_modules=[],
+            target_parameters=["experts.up_proj", "experts.down_proj"],
+        )
+        with zero3_full_shape_views(expert_params):
+            peft_model = get_peft_model(
+                model, config, adapter_name="actor", autocast_adapter_dtype=False
+            )
+        with zero3_full_shape_views(expert_params):
+            upgraded = upgrade_moe_param_wrappers(peft_model)
+
+        torch.cuda.synchronize()
+        peak_delta = torch.cuda.max_memory_allocated() - base_allocated
+
+        assert upgraded == num_layers
+        assert all(param.numel() == 0 for param in expert_params)
+        assert peak_delta < summed_expert_bytes // 10, (
+            f"attach peak delta {peak_delta / 2**20:.0f} MiB vs summed experts "
+            f"{summed_expert_bytes / 2**20:.0f} MiB"
+        )
