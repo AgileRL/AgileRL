@@ -314,9 +314,7 @@ class TestRoutesToConditionalSubmodules:
         assert zero3_patches._routes_to_conditional_submodules(config) is False
 
     def test_declared_leaf_module_is_true(self):
-        assert zero3_patches._routes_to_conditional_submodules(
-            _LEAF_MODULE_CONFIG
-        )
+        assert zero3_patches._routes_to_conditional_submodules(_LEAF_MODULE_CONFIG)
 
     def test_leaf_module_by_classes_is_true(self):
         config = {"zero_optimization": {"leaf_module": {"classes": ["NemotronHMoE"]}}}
@@ -422,8 +420,7 @@ class TestZero3TraceSnapshotBranch:
         mangled_trace_mode = zero3_patches._mangled("__trace_mode")
         assert snapshot[mangled_trace_mode] is _FakeTraceMode.COMPLETE
         assert set(snapshot) == {
-            zero3_patches._mangled(name)
-            for name in zero3_patches.TRACE_ATTRS
+            zero3_patches._mangled(name) for name in zero3_patches.TRACE_ATTRS
         }
 
     def test_snapshot_excludes_per_step_bookkeeping(self, coordinator_cls):
@@ -482,8 +479,7 @@ class TestZero3TraceSnapshotBranch:
         snapshot = getattr(coordinator, zero3_patches.SNAPSHOT_ATTR)
         assert len(snapshot[zero3_patches._mangled("__submodule_order")]) == 2
         assert (
-            snapshot[zero3_patches._mangled("__trace_mode")]
-            is _FakeTraceMode.COMPLETE
+            snapshot[zero3_patches._mangled("__trace_mode")] is _FakeTraceMode.COMPLETE
         )
         assert _attr(coordinator, "__trace_mode") is _FakeTraceMode.INVALID
         assert coordinator.reset_step_calls == 2
