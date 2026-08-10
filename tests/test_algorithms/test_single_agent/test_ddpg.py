@@ -15,6 +15,7 @@ from agilerl.algorithms.ddpg import DDPG
 from agilerl.modules import EvolvableCNN, EvolvableMLP, EvolvableMultiInput
 from agilerl.networks.actors import DeterministicActor
 from agilerl.networks.q_networks import ContinuousQNetwork
+from agilerl.utils.algo_utils import is_train_eval_invariant
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 from tests.helper_functions import (
     assert_not_equal_state_dict,
@@ -330,6 +331,19 @@ class TestDDPGInit:
 
 
 class TestDDPGGetAction:
+    # A mode-sensitive actor takes the eval()/train() toggle path in get_action.
+    def test_mode_sensitive_actor_restores_train_mode(self, vector_space):
+        action_space = spaces.Box(low=-1, high=1, shape=(2,))
+        ddpg = DDPG(vector_space, action_space)
+        ddpg.actor.add_module("dropout", nn.Dropout(0.5))
+        ddpg._actor_mode_invariant = is_train_eval_invariant(ddpg.actor)
+        assert not ddpg._actor_mode_invariant
+
+        action = ddpg.get_action(get_sample_from_space(vector_space), training=False)[0]
+
+        assert len(action) == action_space.shape[0]
+        assert ddpg.actor.training
+
     @pytest.mark.parametrize(
         "observation_space",
         [

@@ -99,10 +99,14 @@ class PreferenceGym(IterablePromptBatchGym[PreferencePrompts]):
             )
             prompt_lengths = [len(ids) for ids in prompt_encodings["input_ids"]]
 
+            eos = tokenizer.eos_token or ""
+            chosen_eos = [completion + eos for completion in chosen]
+            rejected_eos = [completion + eos for completion in rejected]
+
             if self.max_context_length is not None:
                 chosen_enc = tokenizer(
                     prompts,
-                    chosen,
+                    chosen_eos,
                     max_length=self.max_context_length,
                     truncation=True,
                     padding="max_length",
@@ -110,16 +114,18 @@ class PreferenceGym(IterablePromptBatchGym[PreferencePrompts]):
                 )
                 rejected_enc = tokenizer(
                     prompts,
-                    rejected,
+                    rejected_eos,
                     max_length=self.max_context_length,
                     truncation=True,
                     padding="max_length",
                     return_tensors="pt",
                 )
             else:
-                chosen_ids = tokenizer(prompts, chosen, truncation=True, padding=False)
+                chosen_ids = tokenizer(
+                    prompts, chosen_eos, truncation=True, padding=False
+                )
                 rejected_ids = tokenizer(
-                    prompts, rejected, truncation=True, padding=False
+                    prompts, rejected_eos, truncation=True, padding=False
                 )
                 max_len = max(
                     *(len(ids) for ids in chosen_ids["input_ids"]),
@@ -127,7 +133,7 @@ class PreferenceGym(IterablePromptBatchGym[PreferencePrompts]):
                 )
                 chosen_enc = tokenizer(
                     prompts,
-                    chosen,
+                    chosen_eos,
                     truncation=True,
                     padding="max_length",
                     max_length=max_len,
@@ -135,7 +141,7 @@ class PreferenceGym(IterablePromptBatchGym[PreferencePrompts]):
                 )
                 rejected_enc = tokenizer(
                     prompts,
-                    rejected,
+                    rejected_eos,
                     truncation=True,
                     padding="max_length",
                     max_length=max_len,

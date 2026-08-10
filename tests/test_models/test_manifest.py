@@ -12,6 +12,7 @@ Test manifests live under ``tests/manifests/`` as YAML files.
 
 from __future__ import annotations
 
+import warnings
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -39,7 +40,11 @@ from agilerl.models.env import (
     OfflineEnvSpec,
     PzEnvSpec,
 )
-from agilerl.models.hpo import MutationSpec, TournamentSelectionSpec
+from agilerl.models.hpo import (
+    MultiFrequencySelectionSpec,
+    MutationSpec,
+    TournamentSelectionSpec,
+)
 from agilerl.models.manifest import TrainingManifest
 from agilerl.models.networks import (
     CnnSpec,
@@ -106,52 +111,145 @@ def test_get_validated_json_omits_unset_optional_sections() -> None:
     }
     out = TrainingManifest.get_validated(raw, mode="json")
     assert "mutation" not in out
-    assert "tournament_selection" not in out
+    assert "selection_strategy" not in out
     assert "network" not in out
 
 
-def test_get_validated_warns_on_unknown_algorithm_field() -> None:
-    with patch("agilerl.models.manifest.logger") as mock_logger:
+def test_get_validated_raises_on_unknown_algorithm_field() -> None:
+    with pytest.raises(ValueError, match=r"algorithm\.bogus_algo_field"):
         TrainingManifest.get_validated(
             _make_manifest(
                 {"name": "DQN", "lr": 3e-4, "bogus_algo_field": 1},
                 env={"name": "CartPole-v1"},
             )
         )
-    mock_logger.warning.assert_called_once()
-    template, formatted = mock_logger.warning.call_args.args
-    assert "unrecognized manifest field" in template
-    assert "algorithm.bogus_algo_field" in formatted
 
 
-def test_get_validated_warns_on_unknown_top_level_field() -> None:
-    with patch("agilerl.models.manifest.logger") as mock_logger:
+def test_get_validated_raises_on_unknown_top_level_field() -> None:
+    with pytest.raises(ValueError, match="bogus_top_level"):
         TrainingManifest.get_validated(
             _make_manifest(
                 {"name": "DQN"}, env={"name": "CartPole-v1"}, bogus_top_level=123
             )
         )
-    mock_logger.warning.assert_called_once()
-    assert "bogus_top_level" in mock_logger.warning.call_args.args[1]
 
 
-def test_get_validated_no_warning_for_known_aliased_or_excluded_fields() -> None:
+def test_get_validated_accepts_known_aliased_or_excluded_fields() -> None:
     # `cudagraphs` is declared-but-excluded, and population_size / metrics_interval
     # / memory_size are validation aliases: none are unknown.
-    with patch("agilerl.models.manifest.logger") as mock_logger:
+    TrainingManifest.get_validated(
+        _make_manifest(
+            {"name": "DQN", "lr": 3e-4, "cudagraphs": True},
+            env={"name": "CartPole-v1"},
+            training={
+                "population_size": 4,
+                "metrics_interval": 123,
+                "max_steps": 1000,
+            },
+            replay_buffer={"memory_size": 4096},
+        )
+    )
+
+
+def test_get_validated_accepts_the_legacy_selection_key() -> None:
+    TrainingManifest.get_validated(
+        _make_manifest(
+            {"name": "DQN"},
+            env={"name": "CartPole-v1"},
+            tournament_selection={"tournament_size": 3},
+        )
+    )
+
+
+def test_get_validated_reports_unknown_keys_under_the_legacy_selection_key() -> None:
+    with pytest.raises(ValueError, match=r"tournament_selection\.bogus_key"):
         TrainingManifest.get_validated(
             _make_manifest(
-                {"name": "DQN", "lr": 3e-4, "cudagraphs": True},
+                {"name": "DQN"},
                 env={"name": "CartPole-v1"},
-                training={
-                    "population_size": 4,
-                    "metrics_interval": 123,
-                    "max_steps": 1000,
-                },
-                replay_buffer={"memory_size": 4096},
+                tournament_selection={"tournament_size": 3, "bogus_key": 1},
             )
         )
-    mock_logger.warning.assert_not_called()
+
+
+def test_get_validated_reports_unknown_keys_under_the_current_selection_key() -> None:
+    with pytest.raises(ValueError, match=r"selection_strategy\.bogus_key"):
+        TrainingManifest.get_validated(
+            _make_manifest(
+                {"name": "DQN"},
+                env={"name": "CartPole-v1"},
+                selection_strategy={"tournament_size": 3, "bogus_key": 1},
+            )
+        )
+
+
+def test_get_validated_json_writes_the_current_selection_key() -> None:
+    out = TrainingManifest.get_validated(
+        _make_manifest(
+            {"name": "DQN"},
+            env={"name": "CartPole-v1"},
+            tournament_selection={"tournament_size": 3},
+        ),
+        mode="json",
+    )
+    assert out["selection_strategy"]["tournament_size"] == 3
+    assert "tournament_selection" not in out
+
+
+@pytest.mark.parametrize("key", ["selection_strategy", "tournament_selection"])
+def test_deprecated_tournament_selection_property_returns_the_spec(key: str) -> None:
+    manifest = TrainingManifest.get_validated(
+        _make_manifest(
+            {"name": "DQN"},
+            env={"name": "CartPole-v1"},
+            **{key: {"tournament_size": 3}},
+        ),
+        mode="python",
+    )
+    with pytest.warns(DeprecationWarning, match="tournament_selection is deprecated"):
+        assert manifest.tournament_selection is manifest.selection_strategy
+
+
+def test_deprecated_tournament_selection_property_is_none_when_unset() -> None:
+    manifest = TrainingManifest.get_validated(
+        _make_manifest({"name": "DQN"}, env={"name": "CartPole-v1"}), mode="python"
+    )
+    with pytest.warns(DeprecationWarning, match="tournament_selection is deprecated"):
+        assert manifest.tournament_selection is None
+
+
+def test_deprecated_tournament_selection_property_is_none_under_multi_frequency() -> (
+    None
+):
+    """The legacy name only ever denoted tournament selection, so MF-PBT reads None."""
+    manifest = TrainingManifest.get_validated(
+        _make_manifest(
+            {"name": "DQN"},
+            env={"name": "CartPole-v1"},
+            training={"max_steps": 1000, "evo_steps": 100, "pop_size": 6},
+            selection_strategy={"strategy": "multi_frequency"},
+        ),
+        mode="python",
+    )
+    assert isinstance(manifest.selection_strategy, MultiFrequencySelectionSpec)
+    with pytest.warns(DeprecationWarning, match="tournament_selection is deprecated"):
+        assert manifest.tournament_selection is None
+
+
+def test_deprecated_tournament_selection_property_is_not_serialized() -> None:
+    manifest = TrainingManifest.get_validated(
+        _make_manifest(
+            {"name": "DQN"},
+            env={"name": "CartPole-v1"},
+            selection_strategy={"tournament_size": 3},
+        ),
+        mode="python",
+    )
+    assert "tournament_selection" not in TrainingManifest.model_computed_fields
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", DeprecationWarning)
+        dumped = manifest.model_dump(exclude_none=True, by_alias=True)
+    assert dumped["tournament_selection"]["tournament_size"] == 3
 
 
 def test_collect_unknown_fields_ignores_non_dict_raw() -> None:
@@ -432,7 +530,7 @@ class TestTrainingManifest:
         assert manifest.network is None
         assert manifest.mutation is None
         assert manifest.replay_buffer is None
-        assert manifest.tournament_selection is None
+        assert manifest.selection_strategy is None
 
     def test_environment_required(self):
         data = {"algorithm": {"name": "DQN"}, "training": _TRAINING}
@@ -475,7 +573,7 @@ class TestTrainingManifest:
         assert manifest.network["encoder_config"]["arch"] == "mlp"
         assert isinstance(manifest.replay_buffer, ReplayBufferSpec)
         assert manifest.replay_buffer.max_size == 100_000
-        assert isinstance(manifest.tournament_selection, TournamentSelectionSpec)
+        assert isinstance(manifest.selection_strategy, TournamentSelectionSpec)
         assert isinstance(manifest.training, TrainingSpec)
         assert manifest.training.pop_size == 4
         assert manifest.training.eps_start == 1.0
@@ -663,7 +761,7 @@ class TestLocalTrainerSingleAgent:
     def test_mutation_and_tournament_forwarded(self):
         trainer = LocalTrainer.from_manifest(DQN_MANIFEST)
         assert isinstance(trainer.mutation_spec, MutationSpec)
-        assert isinstance(trainer.tournament_selection_spec, TournamentSelectionSpec)
+        assert isinstance(trainer.selection_strategy_spec, TournamentSelectionSpec)
 
     def test_replay_buffer_forwarded(self):
         trainer = LocalTrainer.from_manifest(DQN_MANIFEST)
@@ -677,7 +775,7 @@ class TestLocalTrainerSingleAgent:
         )
         trainer = LocalTrainer.from_manifest(data)
         assert trainer.mutation_spec is None
-        assert trainer.tournament_selection_spec is None
+        assert trainer.selection_strategy_spec is None
         assert trainer.replay_buffer_spec is None
 
     # -- Loading from files -------------------------------------------------
@@ -711,7 +809,7 @@ class TestLocalTrainerSingleAgent:
         assert trainer.algorithm_spec.batch_size == 128  # DQN default
         assert trainer.env_spec.name == "CartPole-v1"
         assert trainer.mutation_spec is None
-        assert trainer.tournament_selection_spec is None
+        assert trainer.selection_strategy_spec is None
         assert trainer.replay_buffer_spec is None
 
 
@@ -755,7 +853,7 @@ class TestLocalTrainerMultiAgent:
 
     def test_maddpg_env_name(self):
         trainer = LocalTrainer.from_manifest(MADDPG_MANIFEST)
-        assert trainer.env_spec.name == "pettingzoo.mpe.simple_speaker_listener_v4"
+        assert trainer.env_spec.name == "mpe2.simple_speaker_listener_v4"
         assert trainer.env_spec.num_envs == 16
 
     def test_maddpg_actor_critic_lrs(self):
@@ -846,6 +944,74 @@ class TestTrainingManifestArenaBridge:
         assert manifest.mutation is not None
         assert manifest.mutation.mutation_sd == 0.05
 
+    def test_from_trainer_specs_accepts_selection_strategy(self):
+        manifest = TrainingManifest.from_trainer_specs(
+            algorithm=PPOSpec(learn_step=64),
+            environment=GymEnvSpec(name="CartPole-v1"),
+            training=TrainingSpec(max_steps=200),
+            selection_strategy=TournamentSelectionSpec(tournament_size=3),
+        )
+        assert isinstance(manifest.selection_strategy, TournamentSelectionSpec)
+        assert manifest.selection_strategy.tournament_size == 3
+
+    def test_from_trainer_specs_accepts_multi_frequency_selection_strategy(self):
+        """Both regimes land in the one discriminated field."""
+        manifest = TrainingManifest.from_trainer_specs(
+            algorithm=PPOSpec(learn_step=64),
+            environment=GymEnvSpec(name="CartPole-v1"),
+            training=TrainingSpec(max_steps=200, pop_size=16),
+            selection_strategy=MultiFrequencySelectionSpec(n_subpopulations=2),
+        )
+        assert isinstance(manifest.selection_strategy, MultiFrequencySelectionSpec)
+        assert manifest.selection_strategy.strategy == "multi_frequency"
+
+    def test_from_trainer_specs_deprecated_tournament_selection_kwarg_warns(self):
+        spec = TournamentSelectionSpec(tournament_size=3)
+        with pytest.warns(DeprecationWarning, match="'tournament_selection' argument"):
+            manifest = TrainingManifest.from_trainer_specs(
+                algorithm=PPOSpec(learn_step=64),
+                environment=GymEnvSpec(name="CartPole-v1"),
+                training=TrainingSpec(max_steps=200),
+                tournament_selection=spec,
+            )
+        assert manifest.selection_strategy == spec
+
+    def test_from_trainer_specs_conflicting_selection_kwargs_raise(self):
+        with (
+            pytest.warns(DeprecationWarning, match="'tournament_selection' argument"),
+            pytest.raises(ValueError, match="conflicting selection strategies"),
+        ):
+            TrainingManifest.from_trainer_specs(
+                algorithm=PPOSpec(learn_step=64),
+                environment=GymEnvSpec(name="CartPole-v1"),
+                training=TrainingSpec(max_steps=200),
+                selection_strategy=TournamentSelectionSpec(tournament_size=2),
+                tournament_selection=TournamentSelectionSpec(tournament_size=3),
+            )
+
+    def test_from_trainer_specs_unknown_kwarg_raises_type_error(self):
+        with pytest.raises(TypeError, match="tournament_seletcion"):
+            TrainingManifest.from_trainer_specs(
+                algorithm=PPOSpec(learn_step=64),
+                environment=GymEnvSpec(name="CartPole-v1"),
+                training=TrainingSpec(max_steps=200),
+                tournament_seletcion=TournamentSelectionSpec(),
+            )
+
+    def test_from_trainer_specs_coerces_a_foreign_tournament_spec(self):
+        from agilerl.arena.models import (
+            TournamentSelectionSpec as ArenaTournamentSelectionSpec,
+        )
+
+        manifest = TrainingManifest.from_trainer_specs(
+            algorithm=PPOSpec(learn_step=64),
+            environment=ArenaEnvSpec(name="CartPole-v1"),
+            training=TrainingSpec(max_steps=200),
+            selection_strategy=ArenaTournamentSelectionSpec(tournament_size=4),
+        )
+        assert isinstance(manifest.selection_strategy, TournamentSelectionSpec)
+        assert manifest.selection_strategy.tournament_size == 4
+
     def test_to_arena_manifest_from_dict_payload(self):
         data = {
             "algorithm": {"name": "PPO", "learn_step": 128},
@@ -904,6 +1070,49 @@ class TestTrainingManifestArenaBridgeWithoutDeps:
 # ============================================================================
 # Trainer.get_validated_manifest - LLM ``network`` section
 # ============================================================================
+
+
+@pytest.mark.skipif(not HAS_LLM_DEPENDENCIES, reason="LLM deps not installed")
+class TestManifestBatchSizing:
+    """Both batch-sizing knobs reach the algorithm from the manifest.
+
+    An unknown algorithm key is rejected outright, so a manifest cannot set an
+    optimizer-step size the spec does not carry.
+    """
+
+    @staticmethod
+    def _manifest(**algo_overrides):
+        return _make_manifest(
+            algo={
+                "name": "GRPO",
+                "batch_size": 8,
+                "group_size": 4,
+                **algo_overrides,
+            },
+            env={"env_type": "reasoning", "dataset": "d.parquet"},
+            network={
+                "pretrained_model_name_or_path": "net-model",
+                "max_context_length": 256,
+                "lora_config": {
+                    "lora_r": 8,
+                    "lora_alpha": 16,
+                    "target_modules": ["q_proj", "v_proj"],
+                },
+            },
+        )
+
+    def test_both_batch_knobs_survive_the_manifest(self):
+        manifest = TrainingManifest.get_validated(
+            self._manifest(micro_batch_size_per_gpu=2, mini_batch_size=4),
+            mode="python",
+        )
+        assert manifest.algorithm.micro_batch_size_per_gpu == 2
+        assert manifest.algorithm.mini_batch_size == 4
+
+    def test_an_unset_mini_batch_size_stays_none(self):
+        """``None`` lets the algorithm apply its own family default."""
+        manifest = TrainingManifest.get_validated(self._manifest(), mode="python")
+        assert manifest.algorithm.mini_batch_size is None
 
 
 @pytest.mark.skipif(not HAS_LLM_DEPENDENCIES, reason="LLM deps not installed")
@@ -1317,6 +1526,28 @@ class TestFromConfigFiles:
 
         assert isinstance(trainer.algorithm_spec, expected_algo_cls)
         assert isinstance(trainer.env_spec, PzEnvSpec)
+
+    @pytest.mark.skipif(not HAS_LLM_DEPENDENCIES, reason="LLM deps not installed")
+    @pytest.mark.parametrize(
+        ("rel_path", "expected_chunk_rows"),
+        [
+            ("llm_finetuning/cispo_quant_bench.yaml", 128),
+            ("llm_finetuning/cispo_quant_bench_qwen.yaml", 64),
+        ],
+        ids=["cispo-gemma", "cispo-qwen"],
+    )
+    def test_llm_quant_bench_configs_validate_strictly(
+        self, rel_path, expected_chunk_rows
+    ):
+        """Shipped configs pass strict manifest validation, and their
+        ``chunk_rows`` knob is a real spec field that survives the round trip.
+        """
+        config_path = CONFIGS_DIR / rel_path
+        if not config_path.exists():
+            pytest.skip(f"Config not found: {config_path}")
+
+        out = TrainingManifest.get_validated(config_path)
+        assert out["algorithm"]["chunk_rows"] == expected_chunk_rows
 
     @pytest.mark.skipif(not HAS_LLM_DEPENDENCIES, reason="LLM deps not installed")
     @pytest.mark.parametrize(

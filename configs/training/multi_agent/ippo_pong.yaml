@@ -15,7 +15,7 @@ algorithm:
     update_epochs: 4
 
 environment:
-    name: pettingzoo.butterfly.cooperative_pong_v5
+    name: pettingzoo.butterfly.cooperative_pong_v6
     num_envs: 16
 mutation:
     probabilities:
@@ -63,7 +63,7 @@ network:
             - 128
         activation: ReLU
 
-tournament_selection:
+selection_strategy:
     tournament_size: 2
     elitism: true
 

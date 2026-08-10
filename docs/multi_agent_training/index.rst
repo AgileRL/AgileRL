@@ -41,7 +41,7 @@ function.
 
 .. code-block:: python
 
-    from pettingzoo.mpe import simple_speaker_listener_v4
+    from mpe2 import simple_speaker_listener_v4
 
     from agilerl.utils.utils import make_multi_agent_vect_envs
 
@@ -228,7 +228,7 @@ Below is an example manifest for training MADDPG on the simple-speaker-listener-
       dt: 0.01
 
     environment:
-      name: pettingzoo.mpe.simple_speaker_listener_v4
+      name: mpe2.simple_speaker_listener_v4
       num_envs: 16
 
     training:
@@ -266,7 +266,7 @@ Below is an example manifest for training MADDPG on the simple-speaker-listener-
       mutation_sd: 0.1
       rand_seed: 42
 
-    tournament_selection:
+    selection_strategy:
       tournament_size: 2
       elitism: true
 
@@ -304,7 +304,7 @@ In the snippet below, we show an example of how to create a population of MADDPG
     .. code-block:: python
 
         import torch
-        from pettingzoo.mpe import simple_speaker_listener_v4
+        from mpe2 import simple_speaker_listener_v4
 
         from agilerl.algorithms import MADDPG
         from agilerl.vector.pz_async_vec_env import AsyncPettingZooVecEnv
@@ -441,7 +441,7 @@ which returns a population of trained agents and logged training metrics.
         eval_loop=1,  # Number of evaluation episodes
         learning_delay=1000,  # Steps before starting learning
         target=-30.0,  # Target score for early stopping
-        tournament=tournament,  # Tournament selection object
+        selection_strategy=tournament,  # Selection strategy object
         mutation=mutations,  # Mutations object
         wb=False,  # Weights and Biases tracking
     )
@@ -455,7 +455,7 @@ Alternatively, use a custom training loop. Combining all of the above:
 
         import numpy as np
         import torch
-        from pettingzoo.mpe import simple_speaker_listener_v4
+        from mpe2 import simple_speaker_listener_v4
 
         from tensordict import TensorDictBase
 
@@ -468,7 +468,7 @@ Alternatively, use a custom training loop. Combining all of the above:
         from agilerl.utils.utils import (
             default_progress_bar,
             init_loggers,
-            tournament_selection_and_mutation,
+            run_selection_and_mutation,
         )
         from agilerl.vector.pz_async_vec_env import AsyncPettingZooVecEnv
 
@@ -635,9 +635,9 @@ Alternatively, use a custom training loop. Combining all of the above:
             population.report_metrics(clear=True)
 
             population.update(
-                tournament_selection_and_mutation(
+                run_selection_and_mutation(
+                    tournament,
                     population=population.agents,
-                    tournament=tournament,
                     mutation=mutations,
                     env_name="simple_speaker_listener_v4",
                     algo="MADDPG",
@@ -667,7 +667,7 @@ In the snippet below, we show an example of how to create a population of IPPO a
     .. code-block:: python
 
         import torch
-        from pettingzoo.mpe import simple_speaker_listener_v4
+        from mpe2 import simple_speaker_listener_v4
 
         from agilerl.algorithms import IPPO
         from agilerl.vector.pz_async_vec_env import AsyncPettingZooVecEnv
@@ -736,7 +736,7 @@ You can use our off-the-shelf training function
             eval_steps=None,  # Number of steps in evaluation episode
             eval_loop=1,  # Number of evaluation episodes
             target=-30.0,  # Target score for early stopping
-            tournament=tournament,  # Tournament selection object
+            selection_strategy=tournament,  # Selection strategy object
             mutation=mutations,  # Mutations object
             wb=False,  # Weights and Biases tracking
             accelerator=accelerator,

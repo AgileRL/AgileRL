@@ -59,17 +59,34 @@ def apply_chat_template(
         }
         for msg in conversation_template
     ]
+    render_kwargs: dict[str, Any] = {}
+    # ``continue_final_message`` is only meaningful for an assistant prefill; a
+    # template ending on a user/system message would otherwise render with the
+    # final turn left open and no assistant header at all.
+    if formatted_conversation[-1]["role"] == "assistant":
+        if formatted_conversation[-1]["content"]:
+            render_kwargs["continue_final_message"] = True
+        else:
+            # An empty prefill makes continue_final_message's trim ill-defined;
+            # opening a fresh assistant turn renders the same intent.
+            formatted_conversation = formatted_conversation[:-1]
+            render_kwargs["add_generation_prompt"] = True
+    else:
+        render_kwargs["add_generation_prompt"] = True
     updated_prompt = tokenizer.apply_chat_template(
         formatted_conversation,
         tokenize=False,
-        continue_final_message=True,
+        **render_kwargs,
     )
+    # The rendered template already carries its own special tokens (BOS where
+    # the template emits one); adding them again would double the BOS.
     return tokenizer(
         [updated_prompt],
         return_tensors="pt",
         padding=True,
         padding_side="left",
         return_attention_mask=True,
+        add_special_tokens=False,
     )
 
 

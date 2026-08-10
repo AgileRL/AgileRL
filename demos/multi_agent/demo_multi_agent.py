@@ -3,7 +3,7 @@
 
 import numpy as np
 import torch
-from pettingzoo.mpe import simple_speaker_listener_v4
+from mpe2 import simple_speaker_listener_v4
 from tensordict import TensorDictBase
 
 from agilerl.algorithms import MADDPG
@@ -16,7 +16,7 @@ from agilerl.utils.utils import (
     create_population,
     default_progress_bar,
     init_loggers,
-    tournament_selection_and_mutation,
+    run_selection_and_mutation,
 )
 from agilerl.vector.pz_async_vec_env import AsyncPettingZooVecEnv
 
@@ -230,9 +230,9 @@ if __name__ == "__main__":
 
         # Tournament selection and population mutation
         population.update(
-            tournament_selection_and_mutation(
+            run_selection_and_mutation(
+                tournament,
                 population=population.agents,
-                tournament=tournament,
                 mutation=mutations,
                 env_name="simple_speaker_listener_v4",
                 algo="MADDPG",

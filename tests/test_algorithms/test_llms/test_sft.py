@@ -25,7 +25,7 @@ from agilerl.algorithms.core.base import EvolvableAlgorithm, OptimizerWrapper
 from agilerl.algorithms.sft import SFT
 from agilerl.llm_envs import SFTGym
 from tests import TINY_LLM_FIXTURE_PATH
-from tests.test_algorithms.test_llms.test_grpo import (
+from tests.test_algorithms.test_llms.llm_helpers import (
     _patch_mps_learn_hooks,
     create_module,
     deepspeed_config_stage_1,

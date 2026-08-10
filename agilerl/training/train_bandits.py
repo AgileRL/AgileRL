@@ -18,13 +18,14 @@ from agilerl.components.sampler import Sampler
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.population import Population
-from agilerl.protocols import BanditEnvProtocol
+from agilerl.protocols import BanditEnvProtocol, SelectionStrategyProtocol
 from agilerl.typing import InitHyperparams
 from agilerl.utils.utils import (
     default_progress_bar,
     init_loggers,
+    resolve_selection_strategy,
+    run_selection_and_mutation,
     save_population_checkpoint,
-    tournament_selection_and_mutation,
 )
 
 PopulationType = list[NeuralTS | NeuralUCB]
@@ -46,6 +47,7 @@ def train_bandits(
     eval_steps: int = 500,
     eval_loop: int = 1,
     target: float | None = None,
+    selection_strategy: SelectionStrategyProtocol | None = None,
     tournament: TournamentSelection | None = None,
     mutation: Mutations | None = None,
     checkpoint: int | None = None,
@@ -90,7 +92,13 @@ def train_bandits(
     :type eval_loop: int, optional
     :param target: Target score for early stopping, defaults to None
     :type target: float, optional
-    :param tournament: Tournament selection object, defaults to None
+    :param selection_strategy: selection strategy driving population evolution. A
+        :class:`~agilerl.hpo.tournament.TournamentSelection` or
+        :class:`~agilerl.hpo.multi_frequency.MultiFrequencySelection` (MF-PBT) object,
+        defaults to None
+    :type selection_strategy: object, optional
+    :param tournament: Deprecated alias for selection_strategy (a
+        :class:`~agilerl.hpo.tournament.TournamentSelection` object), defaults to None
     :type tournament: object, optional
     :param mutation: Mutation object, defaults to None
     :type mutation: object, optional
@@ -123,6 +131,7 @@ def train_bandits(
     :return: Trained population of agents and their fitnesses
     :rtype: tuple[list[RLAlgorithm], list[float]]
     """
+    selection_strategy = resolve_selection_strategy(selection_strategy, tournament)
     assert isinstance(
         algo,
         str,
@@ -231,7 +240,7 @@ def train_bandits(
                     },
                 )
                 transition = transition.unsqueeze(0)
-                transition.batch_size = [1]
+                transition.batch_size = torch.Size([1])
                 memory.add(transition)
 
                 # Learn according to learning frequency
@@ -275,13 +284,13 @@ def train_bandits(
             # wider scalar-or-per-agent-dict row shared with multi-agent training.
             return population.agents, population.last_scalar_fitnesses
 
-        # Tournament selection and population mutation
-        if tournament and mutation is not None:
+        # Perform HPO
+        if selection_strategy is not None and mutation is not None:
             if (population.local_step // evo_steps) > evo_count:
                 population.update(
-                    tournament_selection_and_mutation(
+                    run_selection_and_mutation(
+                        selection_strategy,
                         population=population.agents,
-                        tournament=tournament,
                         mutation=mutation,
                         env_name=env_name,
                         algo=algo,

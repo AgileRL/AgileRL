@@ -175,7 +175,7 @@ class TestBuildBnbQuantizationConfig:
     def test_none_returns_none(self):
         assert build_bnb_quantization_config(None) is None
 
-    @pytest.mark.parametrize("spec", ["none", "NONE", " none ", ""])
+    @pytest.mark.parametrize("spec", ["none", "NONE", " none ", "no ne"])
     def test_none_like_strings_return_none(self, spec):
         assert build_bnb_quantization_config(spec) is None
 
@@ -567,6 +567,7 @@ class TestColocatedInitOrdering:
         agent.vllm_config = kwargs.get("vllm_config", VLLMConfig(sleep_mode=True))
         agent.quantization_config = kwargs.get("quantization_config")
         agent.accelerator = kwargs.get("accelerator")
+        agent.zero_stage = kwargs.get("zero_stage")
         return agent
 
     def test_trainer_first_for_fresh_bnb_trainer_under_sleep_mode(self):
@@ -645,6 +646,70 @@ class TestColocatedInitOrdering:
 
         actors.assert_called_once_with(supplied, False)
         offload.assert_not_called()
+
+
+class TestPrepareVllmForGenerationOffload:
+    """The trainer-base offload runs every call, but its snapshot log (and the
+    synchronize/empty_cache inside ``move_params_to_cpu``) fire only when the
+    base actually moved — once per engine wake in practice, not once per turn.
+    """
+
+    @staticmethod
+    def _stub_agent(sleep_mode: bool = True) -> LLMAlgorithm:
+        agent = TestColocatedInitOrdering._stub_agent(
+            vllm_config=VLLMConfig(sleep_mode=sleep_mode)
+        )
+        agent.use_memory_efficient_params = True
+        agent._vllm_awake = not sleep_mode
+        agent._vllm_moved = False
+        agent.llm = mock.MagicMock()
+        return agent
+
+    def test_log_fires_only_when_base_actually_moves(self):
+        agent = self._stub_agent()
+        with (
+            mock.patch(
+                "agilerl.algorithms.core.base.move_params_to_cpu"
+            ) as move_to_cpu,
+            mock.patch(
+                "agilerl.algorithms.core.base.log_cuda_memory_snapshot"
+            ) as log_snapshot,
+            mock.patch("torch.cuda.empty_cache"),
+            mock.patch.object(agent, "_get_unwrapped_actor"),
+            mock.patch.object(agent, "_sync_actor_to_vllm"),
+        ):
+            move_to_cpu.side_effect = [True, False, False]
+            agent._prepare_vllm_for_generation()
+            assert log_snapshot.call_count == 2  # offload + wake snapshots
+            assert agent._vllm_awake is True
+
+            # Mid-rollout turns: base already parked, so no further logs.
+            agent._prepare_vllm_for_generation()
+            agent._prepare_vllm_for_generation()
+            assert move_to_cpu.call_count == 3
+            assert log_snapshot.call_count == 2
+            agent.llm.wake_up.assert_called_once()
+
+    def test_offload_still_runs_with_sleep_mode_off(self):
+        # sleep_mode off initializes _vllm_awake=True; the trainer base must
+        # still be parked before the first rollout.
+        agent = self._stub_agent(sleep_mode=False)
+        with (
+            mock.patch(
+                "agilerl.algorithms.core.base.move_params_to_cpu",
+                return_value=True,
+            ) as move_to_cpu,
+            mock.patch(
+                "agilerl.algorithms.core.base.log_cuda_memory_snapshot"
+            ) as log_snapshot,
+            mock.patch.object(agent, "_get_unwrapped_actor"),
+            mock.patch.object(agent, "_sync_actor_to_vllm"),
+        ):
+            agent._prepare_vllm_for_generation()
+
+        move_to_cpu.assert_called_once()
+        assert log_snapshot.call_count == 1
+        agent.llm.wake_up.assert_not_called()
 
 
 class TestAdaptLoraConfigForClippableLinear:

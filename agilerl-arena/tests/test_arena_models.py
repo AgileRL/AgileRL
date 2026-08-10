@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import warnings
 from unittest.mock import patch
 
 import pytest
@@ -76,6 +77,98 @@ def test_get_validated_inserts_empty_platform_sections() -> None:
     assert payload["tournament_selection"] == {}
     assert payload["network"] == {}
     assert payload["algorithm"]["name"] == "DQN"
+
+
+def test_get_validated_serializes_the_selection_section_for_the_platform() -> None:
+    payload = TrainingManifest.get_validated(
+        _manifest(selection_strategy={"tournament_size": 3, "elitism": False})
+    )
+    assert payload["tournament_selection"] == {"tournament_size": 3, "elitism": False}
+    assert "selection_strategy" not in payload
+
+
+@pytest.mark.parametrize("key", ["selection_strategy", "tournament_selection"])
+def test_get_validated_python_mode_populates_selection_strategy(key: str) -> None:
+    validated = TrainingManifest.get_validated(
+        _manifest(**{key: {"tournament_size": 3}}), mode="python"
+    )
+    assert validated.selection_strategy.tournament_size == 3
+
+
+@pytest.mark.parametrize("key", ["selection_strategy", "tournament_selection"])
+def test_deprecated_tournament_selection_property_returns_the_spec(key: str) -> None:
+    validated = TrainingManifest.get_validated(
+        _manifest(**{key: {"tournament_size": 3}}), mode="python"
+    )
+    with pytest.warns(DeprecationWarning, match="tournament_selection is deprecated"):
+        assert validated.tournament_selection is validated.selection_strategy
+
+
+def test_deprecated_tournament_selection_property_is_none_when_unset() -> None:
+    validated = TrainingManifest.get_validated(_manifest(), mode="python")
+    with pytest.warns(DeprecationWarning, match="tournament_selection is deprecated"):
+        assert validated.tournament_selection is None
+
+
+def test_deprecated_tournament_selection_property_is_not_serialized() -> None:
+    validated = TrainingManifest.get_validated(
+        _manifest(selection_strategy={"tournament_size": 3}), mode="python"
+    )
+    assert "tournament_selection" not in TrainingManifest.model_computed_fields
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", DeprecationWarning)
+        dumped = validated.model_dump(exclude_none=True, by_alias=True)
+    assert dumped["tournament_selection"] == {"tournament_size": 3, "elitism": True}
+
+
+def test_get_validated_payload_is_unchanged_by_the_selection_key_used() -> None:
+    legacy = TrainingManifest.get_validated(
+        _manifest(tournament_selection={"tournament_size": 3})
+    )
+    current = TrainingManifest.get_validated(
+        _manifest(selection_strategy={"tournament_size": 3})
+    )
+    assert legacy == current
+
+
+def test_get_validated_accepts_the_core_discriminator() -> None:
+    # The (selection) strategy discriminator is accepted but never forwarded to Arena
+    with patch("agilerl.arena.models.manifest.logger") as mock_logger:
+        payload = TrainingManifest.get_validated(
+            _manifest(
+                selection_strategy={"strategy": "tournament", "tournament_size": 3}
+            )
+        )
+    mock_logger.warning.assert_not_called()
+    assert payload["tournament_selection"] == {"tournament_size": 3, "elitism": True}
+
+
+def test_get_validated_rejects_a_non_tournament_strategy() -> None:
+    # Arena runs tournament selection only
+    with pytest.raises(ValidationError):
+        TrainingManifest.get_validated(
+            _manifest(
+                selection_strategy={"strategy": "multi_frequency", "n_winners": 1}
+            )
+        )
+
+
+def test_get_validated_reports_unknown_keys_under_the_current_selection_key() -> None:
+    with patch("agilerl.arena.models.manifest.logger") as mock_logger:
+        TrainingManifest.get_validated(
+            _manifest(selection_strategy={"tournament_size": 3, "bogus_key": 1})
+        )
+    mock_logger.warning.assert_called_once()
+    assert "selection_strategy.bogus_key" in mock_logger.warning.call_args.args[1]
+
+
+def test_get_validated_reports_unknown_keys_under_the_legacy_selection_key() -> None:
+    with patch("agilerl.arena.models.manifest.logger") as mock_logger:
+        TrainingManifest.get_validated(
+            _manifest(tournament_selection={"tournament_size": 3, "bogus_key": 1})
+        )
+    mock_logger.warning.assert_called_once()
+    assert "tournament_selection.bogus_key" in mock_logger.warning.call_args.args[1]
 
 
 def test_get_validated_warns_on_unknown_algorithm_field() -> None:

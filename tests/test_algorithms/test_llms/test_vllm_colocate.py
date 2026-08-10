@@ -28,6 +28,7 @@ from torch import nn
 from agilerl.algorithms.core.llm_ops.vllm_colocate import (
     _StrippedTower,
     get_vllm_internal_model,
+    patch_vllm_3d_moe_lora_flag,
     patch_vllm_lora_keep_resident,
     patch_vllm_strip_multimodal_towers,
 )
@@ -315,3 +316,51 @@ class TestLoraKeepResident:
     def test_returns_zero_when_model_unreachable(self):
         llm = SimpleNamespace(llm_engine=SimpleNamespace())
         assert patch_vllm_lora_keep_resident(llm) == 0
+
+
+class TestPatchVllm3dMoeLoraFlag:
+    def test_returns_false_on_lookup_failure(self) -> None:
+        assert (
+            patch_vllm_3d_moe_lora_flag("/definitely/missing/agilerl-3d-moe-flag-model")
+            is False
+        )
+
+    def test_sets_flag_and_is_idempotent(self, monkeypatch) -> None:
+        import sys
+        from types import ModuleType
+
+        class _ModelCls:
+            pass
+
+        class _Entry:
+            @staticmethod
+            def load_model_cls():
+                return _ModelCls
+
+        transformers_mod = ModuleType("transformers")
+        transformers_mod.AutoConfig = SimpleNamespace(
+            from_pretrained=lambda *_a, **_k: SimpleNamespace(
+                architectures=["FakeArch"]
+            )
+        )
+        registry_mod = ModuleType("vllm.model_executor.models.registry")
+        registry_mod.ModelRegistry = SimpleNamespace(
+            models={"FakeArch": _Entry()},
+        )
+        # Minimal parent packages so ``from vllm... import`` resolves.
+        for name in (
+            "vllm",
+            "vllm.model_executor",
+            "vllm.model_executor.models",
+        ):
+            sys.modules.setdefault(name, ModuleType(name))
+        monkeypatch.setitem(sys.modules, "transformers", transformers_mod)
+        monkeypatch.setitem(
+            sys.modules,
+            "vllm.model_executor.models.registry",
+            registry_mod,
+        )
+
+        assert patch_vllm_3d_moe_lora_flag("fake/model") is True
+        assert _ModelCls.is_3d_moe_weight is True
+        assert patch_vllm_3d_moe_lora_flag("fake/model") is False

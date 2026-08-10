@@ -30,10 +30,7 @@ from deepspeed.runtime.zero.stage_1_and_2 import DeepSpeedZeroOptimizer
 from peft import LoraConfig, get_peft_model
 from torch import nn
 from torch.optim.lr_scheduler import SequentialLR
-from transformers.configuration_utils import PretrainedConfig
 from transformers.generation.configuration_utils import GenerationConfig
-from transformers.generation.utils import GenerationMixin
-from transformers.modeling_utils import PreTrainedModel
 
 from agilerl.algorithms import CISPO, GRPO, GSPO
 from agilerl.algorithms.core import ActionResult
@@ -42,154 +39,30 @@ from agilerl.algorithms.core.base import (
     LLMAlgorithm,
     OptimizerWrapper,
 )
-from agilerl.algorithms.grpo import HAS_LIGER_KERNEL
+from agilerl.algorithms.grpo import (
+    HAS_LIGER_KERNEL,
+    LIGER_CLIP_FRACTION_METRIC,
+    REFERENCE_KL_METRIC,
+)
 from agilerl.modules.dummy import DummyEvolvable
 from agilerl.utils.algo_utils import CosineLRScheduleConfig, VLLMConfig, clone_llm
 from agilerl.utils.llm_utils import ReasoningGym
 from tests import TINY_LLM_FIXTURE_PATH
+from tests.test_algorithms.test_llms.llm_helpers import (
+    DummyConfig,
+    DummyMLPPreTrainedModel,
+    _patch_mps_learn_hooks,
+    create_module,
+    deepspeed_config_stage_1,
+    deepspeed_config_stage_1_with_scheduler,
+    deepspeed_config_stage_2,
+    deepspeed_config_stage_3,
+)
 from tests.utils import (
     assert_vllm_get_action_contract,
     make_mock_vllm_instance,
     spawn_new_process_for_each_test,
 )
-
-deepspeed_base_config = {
-    "bf16": {
-        "enabled": torch.cuda.is_available() and torch.cuda.is_bf16_supported(),
-    },
-    "auto_cast": True,
-    "gradient_clipping": 0.5,
-    "gradient_accumulation_steps": 1,
-}
-
-deepspeed_config_stage_1 = deepspeed_base_config | {
-    "zero_optimization": {
-        "stage": 1,
-    },
-}
-
-deepspeed_config_stage_2 = deepspeed_base_config | {
-    "zero_optimization": {
-        "stage": 2,
-    },
-}
-
-deepspeed_config_stage_3 = deepspeed_base_config | {
-    "zero_optimization": {
-        "stage": 3,
-    },
-}
-
-deepspeed_config_stage_1_with_scheduler = deepspeed_base_config | {
-    "zero_optimization": {
-        "stage": 1,
-    },
-    "scheduler": {
-        "params": {
-            "warmup_max_lr": 0.001,
-            "num_epochs": 10,
-            "warmup_proportion": 0.05,
-        },
-    },
-}
-
-
-class DummyConfig(PretrainedConfig):
-    def __init__(
-        self,
-        input_size=16,
-        max_tokens=8,
-        vocab_size=100,
-        intermediate_size=128,
-        **kwargs,
-    ):
-        super().__init__(**kwargs)
-        self.input_size = input_size
-        self.max_tokens = max_tokens
-        self.vocab_size = vocab_size
-
-
-class DummyForwardOutput:
-    def __init__(self, logits):
-        self.logits = logits
-
-
-class DummyMLPPreTrainedModel(PreTrainedModel, GenerationMixin):
-    config_class = DummyConfig
-    base_model_prefix = "dummy_mlp"
-
-    def __init__(self, config: DummyConfig, device="cpu"):
-        super().__init__(config)
-        self.input_size = config.input_size
-        self.max_tokens = config.max_tokens
-        self.vocab_size = config.vocab_size
-        self.gradient_checkpointing_enabled = False
-        self.datatype = (
-            torch.bfloat16
-            if deepspeed_base_config.get("bf16", {}).get("enabled", False)
-            else (
-                torch.float16
-                if deepspeed_base_config.get("fp16", {}).get("enabled", False)
-                else torch.float32
-            )
-        )
-        hidden_size = 32
-        # Standard causal-LM shape (embed -> body -> lm_head) so the
-        # (now unconditional) fused-linear-logprob path can identity-patch
-        # ``lm_head`` and read the hidden state. ``linear_1`` stays the LoRA
-        # target the fixtures expect.
-        self.embed = nn.Embedding(
-            self.vocab_size, hidden_size, device=device, dtype=self.datatype
-        )
-        self.linear_1 = nn.Linear(
-            hidden_size,
-            hidden_size,
-            device=device,
-            dtype=self.datatype,
-        )
-        self.lm_head = nn.Linear(
-            hidden_size,
-            self.vocab_size,
-            bias=False,
-            device=device,
-            dtype=self.datatype,
-        )
-
-    @property
-    def model(self):
-        return self
-
-    def forward(
-        self,
-        input_ids: torch.Tensor | None = None,
-        *args,
-        **kwargs,
-    ) -> DummyForwardOutput:
-        # ``lm_head`` may be identity-patched by the fused-linear-logprob path,
-        # in which case this returns the hidden state instead of logits.
-        hidden = self.linear_1(self.embed(input_ids.long()))
-        return DummyForwardOutput(logits=self.lm_head(hidden))
-
-    def generate(self, *args, **kwargs):
-        input_ids = kwargs.get("input_ids")
-        if input_ids is None:
-            msg = "`input_ids` must be provided for generation."
-            raise ValueError(msg)
-        input_shape = input_ids.shape
-        group_size = input_shape[0]
-        prompt_size = input_shape[1]
-        # Simple generation: just return random tokens based on vocab size and desired length
-        return torch.randint(
-            0,
-            self.vocab_size,
-            (group_size, prompt_size + self.config.max_tokens),
-        )
-
-    def gradient_checkpointing_enable(self, *args, **kwargs):
-        self.gradient_checkpointing_enabled = True
-
-    def prepare_inputs_for_generation(self, *args, **kwargs):
-        return
 
 
 class DummyReasoningEnv(ReasoningGym):
@@ -294,25 +167,6 @@ class DummyVLLM:
 
     def wake_up(self, *args, **kwargs):
         pass
-
-
-def create_module(input_size, max_tokens, vocab_size, device):
-    return DummyMLPPreTrainedModel(
-        config=DummyConfig(
-            input_size=input_size,
-            max_tokens=max_tokens,
-            vocab_size=vocab_size,
-        ),
-        device=device,
-    )
-
-
-def _patch_mps_learn_hooks(monkeypatch: pytest.MonkeyPatch, module: str) -> MagicMock:
-    """Make ``learn`` think MPS is available and record ``torch.mps.empty_cache`` calls."""
-    mock_empty = MagicMock()
-    monkeypatch.setattr(f"{module}.torch.backends.mps.is_available", lambda: True)
-    monkeypatch.setattr(f"{module}.torch.mps.empty_cache", mock_empty)
-    return mock_empty
 
 
 def generate_grpo(
@@ -466,6 +320,17 @@ def _make_cpu_grpo_for_branch_tests(**kwargs):
     return GRPO(**defaults)
 
 
+def _patch_surviving_sample_idxs(grpo, batch_idxs):
+    """Patch the surviving-sample indices ``learn`` reads off ``_calculate_advantages``."""
+    original = grpo._calculate_advantages
+
+    def _with_batch_idxs(*args, **kwargs):
+        advantages, _ = original(*args, **kwargs)
+        return advantages, batch_idxs
+
+    return patch.object(grpo, "_calculate_advantages", side_effect=_with_batch_idxs)
+
+
 def _build_grpo_for_colocate_tests(
     grpo_factory,
     accelerator_factory,
@@ -519,8 +384,11 @@ class _GrpoLossStub:
         adv_norm: str = "mean_std",
         advantage_granularity: str = "auto",
         vllm_importance_sampling_cap: float = 2.0,
+        turn_advantage_trajectory_fallback: bool = True,
         device: str = "cpu",
+        loss_norm: str = "micro_batch",
     ) -> None:
+        self.loss_norm = loss_norm
         self.clip_coef_min = clip_coef_min
         self.clip_coef_max = clip_coef_max
         self.beta = beta
@@ -530,10 +398,17 @@ class _GrpoLossStub:
         self.adv_norm = adv_norm
         self.advantage_granularity = advantage_granularity
         self.vllm_importance_sampling_cap = vllm_importance_sampling_cap
+        self.turn_advantage_trajectory_fallback = turn_advantage_trajectory_fallback
         self.device = device
+        self.accelerator = None
+        self._uses_deepspeed = False
+        self._window_action_tokens = None
 
     _apply_kl_advantage_shaping = GRPO._apply_kl_advantage_shaping
     _reduce_masked_loss = GRPO._reduce_masked_loss
+    _resolve_loss_window = GRPO._resolve_loss_window
+    _accumulation_steps = GRPO._accumulation_steps
+    _accumulation_steps_without_deepspeed = GRPO._accumulation_steps_without_deepspeed
     _log_importance_weights = GRPO._log_importance_weights
     _compute_policy_loss = GRPO._compute_policy_loss
     _grpo_loss_standard = GRPO._grpo_loss_standard
@@ -3176,7 +3051,11 @@ class TestGRPOAdvantageGranularityDecoupling:
             _make_cpu_grpo_for_branch_tests(advantage_granularity="token")
 
 
-def _adv_stub(group_size: int = 2, adv_norm: str = "mean_only"):
+def _adv_stub(
+    group_size: int = 2,
+    adv_norm: str = "mean_only",
+    turn_advantage_trajectory_fallback: bool = True,
+):
     """Loss stub configured for the advantage-branch helpers extracted from
     ``learn`` (``_turn_broadcast_advantages`` / ``_trajectory_advantages``).
     ``mean_only`` keeps the hand-traced expectations integer-clean.
@@ -3188,6 +3067,7 @@ def _adv_stub(group_size: int = 2, adv_norm: str = "mean_only"):
         use_kl_advantage_shaping=False,
         group_size=group_size,
         adv_norm=adv_norm,
+        turn_advantage_trajectory_fallback=turn_advantage_trajectory_fallback,
     )
 
 
@@ -3682,6 +3562,118 @@ class TestGRPOLearn:
         assert metrics["kl"] == pytest.approx(0.1)
         grpo.clean_up()
 
+    def test_learn_records_the_window_action_tokens_of_active_samples(self):
+        grpo = _make_cpu_grpo_for_branch_tests(
+            group_size=2,
+            filter_zero_adv=True,
+            adv_filter_eps=0.05,
+            loss_norm="accumulation_window",
+        )
+        completion_ids, action_masks = _build_branch_experiences(batch_size=4)
+        rewards = torch.tensor([1.0, 0.0, -1.0, 2.0], dtype=torch.float32)
+
+        def fake_fused_forward(ids, batch_size):
+            shape = (ids.shape[0], ids.shape[1] - 1)
+            zeros = torch.zeros(shape, dtype=torch.float32, device=ids.device)
+            return zeros, zeros, None
+
+        fake_advantages = torch.tensor(
+            [[0.0], [2.0], [-2.0], [0.0]], dtype=torch.float32
+        )
+        with (
+            patch.object(grpo, "_calculate_advantage", return_value=fake_advantages),
+            patch.object(
+                grpo, "_fused_forward_no_grad", side_effect=fake_fused_forward
+            ),
+            patch.object(
+                grpo,
+                "_loss",
+                return_value=(
+                    torch.tensor(1.0, dtype=torch.float32),
+                    torch.tensor(0.1, dtype=torch.float32),
+                ),
+            ),
+            patch.object(grpo, "_backward_pass", return_value=None),
+        ):
+            grpo.learn((completion_ids, action_masks, rewards))
+        # Two of the four samples survive the filter, each with 9 action tokens.
+        assert grpo._window_action_tokens == 18
+        grpo.clean_up()
+
+    def test_learn_records_window_tokens_per_optimizer_step(self):
+        grpo = _make_cpu_grpo_for_branch_tests(loss_norm="accumulation_window")
+        completion_ids, action_masks = _build_branch_experiences(batch_size=4)
+        rewards = torch.tensor([1.0, 0.0, -1.0, 2.0], dtype=torch.float32)
+
+        def fake_fused_forward(ids, batch_size):
+            shape = (ids.shape[0], ids.shape[1] - 1)
+            zeros = torch.zeros(shape, dtype=torch.float32, device=ids.device)
+            return zeros, zeros, None
+
+        grpo._uses_deepspeed = True
+        grpo.micro_batch_size_per_gpu = 1
+        grpo.actor.gradient_accumulation_steps = lambda: 2
+        original_record = GRPO._record_window_action_tokens
+        window_sizes: list[int] = []
+
+        def record_spy(masks, idxs):
+            window_sizes.append(len(idxs))
+            original_record(grpo, masks, idxs)
+
+        with (
+            patch.object(
+                grpo, "_fused_forward_no_grad", side_effect=fake_fused_forward
+            ),
+            patch.object(
+                grpo,
+                "_loss",
+                return_value=(
+                    torch.tensor(1.0, dtype=torch.float32),
+                    torch.tensor(0.1, dtype=torch.float32),
+                ),
+            ) as mock_loss,
+            patch.object(grpo, "_backward_pass", return_value=None),
+            patch.object(grpo, "_record_window_action_tokens", side_effect=record_spy),
+        ):
+            grpo.learn((completion_ids, action_masks, rewards))
+        # Four micro-batches of one sample fold into two optimizer steps, so
+        # the window normalizer is recorded once per step over two samples.
+        assert window_sizes == [2, 2]
+        assert grpo._window_action_tokens == 18
+        assert mock_loss.call_count == 4
+        grpo.clean_up()
+
+    def test_learn_warns_when_micro_batches_straddle_optimizer_steps(self):
+        grpo = _make_cpu_grpo_for_branch_tests(group_size=3)
+        completion_ids, action_masks = _build_branch_experiences(batch_size=3)
+        rewards = torch.tensor([1.0, 0.0, -1.0], dtype=torch.float32)
+
+        def fake_fused_forward(ids, batch_size):
+            shape = (ids.shape[0], ids.shape[1] - 1)
+            zeros = torch.zeros(shape, dtype=torch.float32, device=ids.device)
+            return zeros, zeros, None
+
+        grpo._uses_deepspeed = True
+        grpo.micro_batch_size_per_gpu = 1
+        grpo.actor.gradient_accumulation_steps = lambda: 2
+        with (
+            patch.object(
+                grpo, "_fused_forward_no_grad", side_effect=fake_fused_forward
+            ),
+            patch.object(
+                grpo,
+                "_loss",
+                return_value=(
+                    torch.tensor(1.0, dtype=torch.float32),
+                    torch.tensor(0.1, dtype=torch.float32),
+                ),
+            ),
+            patch.object(grpo, "_backward_pass", return_value=None),
+            pytest.warns(UserWarning, match="whole optimizer steps"),
+        ):
+            grpo.learn((completion_ids, action_masks, rewards))
+        grpo.clean_up()
+
     def test_learn_warns_and_returns_zeros_when_all_filtered(self):
         grpo = _make_cpu_grpo_for_branch_tests(
             group_size=2,
@@ -3706,31 +3698,50 @@ class TestGRPOLearn:
         assert metrics == {"loss": 0.0, "kl": 0.0}
         grpo.clean_up()
 
-    def test_learn_warns_and_returns_zeros_when_no_active_samples_after_filtering(self):
-        grpo = _make_cpu_grpo_for_branch_tests(group_size=2)
+    def test_learn_early_return_waits_for_everyone_when_all_filtered(self):
+        grpo = _make_cpu_grpo_for_branch_tests(
+            group_size=2,
+            filter_zero_adv=True,
+            adv_filter_eps=0.5,
+            whiten_advantages=True,
+        )
+        acc = MagicMock()
+        acc.num_processes = 2
+        acc.free_memory.side_effect = lambda *objs: objs
+        grpo.accelerator = acc
         completion_ids, action_masks = _build_branch_experiences(batch_size=4)
         rewards = torch.tensor([1.0, 0.0, -1.0, 2.0], dtype=torch.float32)
-
-        def fake_fused_forward(ids, batch_size):
-            shape = (ids.shape[0], ids.shape[1] - 1)
-            zeros = torch.zeros(shape, dtype=torch.float32, device=ids.device)
-            return zeros, zeros, None
-
         with (
-            patch(
-                "agilerl.algorithms.grpo.np.arange",
-                return_value=np.array([], dtype=int),
-            ),
-            patch.object(
-                grpo, "_fused_forward_no_grad", side_effect=fake_fused_forward
-            ),
             pytest.warns(
                 UserWarning,
-                match="No active samples after filtering; skipping GRPO update.",
+                match="All samples were filtered by advantage threshold; skipping GRPO update.",
+            ),
+            patch.object(
+                grpo,
+                "_calculate_advantage",
+                return_value=torch.zeros(4, 1, dtype=torch.float32),
             ),
         ):
             metrics = grpo.learn((completion_ids, action_masks, rewards))
         assert metrics == {"loss": 0.0, "kl": 0.0}
+        acc.wait_for_everyone.assert_called_once()
+        grpo.clean_up()
+
+    def test_learn_raises_on_cross_rank_seq_len_mismatch(self):
+        grpo = _make_cpu_grpo_for_branch_tests()
+        grpo.zero_stage = 3
+        acc = MagicMock()
+        acc.num_processes = 2
+        acc.device = torch.device("cpu")
+        acc.gather.side_effect = lambda t: torch.tensor([3, 5], dtype=t.dtype)
+        acc.free_memory.side_effect = lambda *objs: objs
+        grpo.accelerator = acc
+        completion_ids, action_masks = _build_branch_experiences(batch_size=2)
+        rewards = torch.tensor([1.0, -1.0], dtype=torch.float32)
+        with pytest.raises(
+            RuntimeError, match="Cross-rank completion sequence length mismatch"
+        ):
+            grpo.learn((completion_ids, action_masks, rewards))
         grpo.clean_up()
 
     def test_learn_empty_minibatch_branch_continues_without_grpo_step(self):
@@ -3739,13 +3750,16 @@ class TestGRPOLearn:
         completion_ids, action_masks = _build_branch_experiences(batch_size=2)
         rewards = torch.tensor([1.0, -1.0], dtype=torch.float32)
 
-        class EmptySlicingBatchIndices:
-            def __len__(self):
-                return 1
+        class EmptySlicingBatchIndices(np.ndarray):
+            """One surviving sample whose minibatch slices all come back empty."""
+
+            def __new__(cls):
+                return np.zeros(1, dtype=int).view(cls)
 
             def __getitem__(self, item):
-                del item
-                return np.array([], dtype=int)
+                if isinstance(item, slice):
+                    return np.array([], dtype=int)
+                return super().__getitem__(item)
 
         def fake_fused_forward(ids, batch_size):
             shape = (ids.shape[0], ids.shape[1] - 1)
@@ -3753,10 +3767,7 @@ class TestGRPOLearn:
             return zeros, zeros, None
 
         with (
-            patch(
-                "agilerl.algorithms.grpo.np.arange",
-                return_value=EmptySlicingBatchIndices(),
-            ),
+            _patch_surviving_sample_idxs(grpo, EmptySlicingBatchIndices()),
             patch.object(
                 grpo, "_fused_forward_no_grad", side_effect=fake_fused_forward
             ),
@@ -3845,6 +3856,46 @@ class TestGRPOLearn:
             pytest.raises(ValueError, match=r"Loss is not finite"),
         ):
             grpo.learn((completions, action_masks, rewards))
+        grpo.clean_up()
+
+    def test_grpo_learn_raises_when_peer_rank_has_nonfinite_loss(self):
+        grpo = _make_cpu_grpo_for_branch_tests(group_size=2, update_epochs=1)
+        mock_acc = MagicMock()
+        mock_acc.num_processes = 2
+        mock_acc.device = torch.device("cpu")
+        mock_acc.free_memory.side_effect = lambda *objs: objs
+        grpo.accelerator = mock_acc
+        completion_ids, action_masks = _build_branch_experiences(batch_size=2)
+        rewards = torch.tensor([1.0, -1.0], dtype=torch.float32)
+
+        def fake_fused_forward(ids, batch_size):
+            shape = (ids.shape[0], ids.shape[1] - 1)
+            zeros = torch.zeros(shape, dtype=torch.float32, device=ids.device)
+            return zeros, zeros, None
+
+        with (
+            patch.object(
+                grpo, "_fused_forward_no_grad", side_effect=fake_fused_forward
+            ),
+            patch.object(
+                grpo,
+                "_loss",
+                return_value=(
+                    torch.tensor(0.5, dtype=torch.float32),
+                    torch.tensor(0.0, dtype=torch.float32),
+                ),
+            ),
+            patch(
+                "agilerl.algorithms.core.base.allreduce_minmax_int",
+                return_value=(0, 1),
+            ) as mock_reduce,
+            patch.object(grpo, "_backward_pass") as mock_backward,
+            pytest.raises(ValueError, match="Loss is not finite"),
+        ):
+            grpo.learn((completion_ids, action_masks, rewards))
+
+        mock_reduce.assert_called_once_with(0, mock_acc)
+        mock_backward.assert_not_called()
         grpo.clean_up()
 
     def test_grpo_learn_raises_when_loss_not_finite(
@@ -4283,6 +4334,33 @@ class TestGRPOSaveLoadCheckpoint:
                         assert torch.equal(getattr(new_grpo, attr), getattr(grpo, attr))
         grpo.clean_up()
         new_grpo.clean_up()
+
+
+class TestLLMRestoreCheckpointAttributes:
+    def test_live_device_and_lora_config_survive_restore(self):
+        """A checkpoint written on another device must not relocate the loader.
+
+        Population members share a checkpoint but occupy different GPUs, so the
+        device recorded in the payload belongs to whichever member saved it.
+        """
+        agent = SimpleNamespace(
+            device=torch.device("cuda", 2),
+            lora_config="live",
+            selected_adapters=("actor",),
+        )
+        checkpoint = {
+            "device": torch.device("cuda", 0),
+            "lora_config": "stale",
+            "selected_adapters": ("actor", "reference"),
+            "steps": 6,
+        }
+
+        LLMAlgorithm._restore_checkpoint_attributes(agent, checkpoint)
+
+        assert agent.device == torch.device("cuda", 2)
+        assert agent.lora_config == "live"
+        assert agent.selected_adapters == ("actor",)
+        assert agent.steps == 6
 
 
 class TestGRPOSaveLoadDistributedActor:
@@ -6136,6 +6214,161 @@ class TestGRPOVLLMSamplingCorrection:
         grpo.clean_up()
 
 
+class TestGRPONonFinitePaddingIsIsolated:
+    """A non-finite logprob at a non-action position must not reach the update.
+
+    Long fused forwards can emit NaN/Inf at padding slots; every masked
+    reduction weights by the mask, and ``nan * 0`` is ``nan``, so without an
+    explicit fill one pad slot NaNs the whole minibatch loss and the IS metrics.
+    """
+
+    def _stub(self, **kwargs):
+        defaults = {
+            "clip_coef_min": 0.8,
+            "clip_coef_max": 1.2,
+            "beta": 0.04,
+            "use_kl_advantage_shaping": False,
+            "importance_sampling_level": "token",
+            "group_size": 2,
+            "adv_norm": "mean_std",
+        }
+        defaults.update(kwargs)
+        return _GrpoLossStub(**defaults)
+
+    @staticmethod
+    def _inputs(pad_value: float):
+        mask = torch.tensor([[1.0, 1.0, 0.0], [1.0, 0.0, 0.0]])
+        pad = ~mask.bool()
+        log_probs = torch.full((2, 3), -0.5).masked_fill(pad, pad_value)
+        old = torch.full((2, 3), -0.7).masked_fill(pad, pad_value)
+        ref = torch.full((2, 3), -0.6).masked_fill(pad, pad_value)
+        sampling = torch.full((2, 3), -0.9).masked_fill(pad, pad_value)
+        adv = torch.tensor([[0.7], [-0.4]])
+        return mask, log_probs, old, ref, sampling, adv
+
+    @pytest.mark.parametrize("objective", ["grpo", "cispo"])
+    @pytest.mark.parametrize("pad_value", [float("nan"), float("inf")])
+    def test_standard_path_loss_and_kl_stay_finite(self, objective, pad_value):
+        stub = self._stub()
+        mask, log_probs, old, ref, sampling, adv = self._inputs(pad_value)
+
+        loss, kl = stub._compute_policy_loss(
+            mask,
+            log_probs,
+            old,
+            ref,
+            adv,
+            None,
+            level="token",
+            objective=objective,
+            sampling_log_probs=sampling,
+        )
+
+        assert torch.isfinite(loss)
+        assert torch.isfinite(kl)
+
+    def test_padding_value_does_not_change_the_loss(self):
+        stub = self._stub()
+        nan_args = self._inputs(float("nan"))
+        finite_args = self._inputs(-123.0)
+
+        def run(args):
+            mask, log_probs, old, ref, sampling, adv = args
+            return stub._compute_policy_loss(
+                mask,
+                log_probs,
+                old,
+                ref,
+                adv,
+                None,
+                level="token",
+                objective="cispo",
+                sampling_log_probs=sampling,
+            )
+
+        nan_loss, nan_kl = run(nan_args)
+        finite_loss, finite_kl = run(finite_args)
+
+        assert torch.allclose(nan_loss, finite_loss, atol=1e-7)
+        assert torch.allclose(nan_kl, finite_kl, atol=1e-7)
+
+    def test_reduce_masked_loss_ignores_non_finite_padding(self):
+        stub = self._stub()
+        mask = torch.tensor([[1.0, 1.0, 0.0]])
+        loss = torch.tensor([[2.0, 4.0, float("nan")]])
+
+        reduced = stub._reduce_masked_loss(loss, mask)
+
+        assert reduced.tolist() == pytest.approx([3.0])
+
+    def test_sampling_mismatch_metrics_stay_finite(self):
+        stub = self._stub(vllm_importance_sampling_cap=2.0)
+        mask, _, old, _, sampling, _ = self._inputs(float("nan"))
+
+        metrics = stub._sampling_mismatch_metrics(old, sampling, mask.bool())
+
+        assert all(np.isfinite(v) for v in metrics.values())
+        assert metrics["vllm_is_delta_mean"] == pytest.approx(0.2, rel=1e-5)
+
+    def test_liger_kernel_receives_only_finite_inputs(self):
+        grpo = _make_cpu_grpo_for_branch_tests(loss_type="cispo", beta=0.04)
+        fake_lm_head = nn.Linear(8, 16, bias=True)
+        nan = float("nan")
+        # Action mask marks token 0 only; token 1 is padding and carries NaN in
+        # every per-token tensor, including the hidden state feeding the kernel.
+        action_mask = torch.tensor([[True, False]])
+        hidden = torch.randn(1, 3, 8, requires_grad=True)
+        hidden = hidden.masked_fill(
+            torch.tensor([[[False], [True], [True]]]),
+            nan,
+        )
+
+        with (
+            patch("agilerl.algorithms.grpo.HAS_LIGER_KERNEL", True),
+            patch.object(grpo, "_get_lm_head", return_value=fake_lm_head),
+            patch.object(grpo, "_patch_lm_head_to_identity", nullcontext),
+            patch.object(grpo, "actor", new=MagicMock(wraps=grpo.actor)),
+            patch("agilerl.algorithms.grpo.LigerFusedLinearGRPOFunction") as mock_fn,
+            patch.object(
+                LLMAlgorithm, "select_adapter", lambda self, name: nullcontext()
+            ),
+        ):
+            mock_fn.apply.return_value = (
+                torch.tensor(0.5, requires_grad=True),
+                (torch.tensor(0.1), torch.tensor(0.0)),
+            )
+            fake_output = MagicMock()
+            fake_output.logits = hidden
+            grpo.actor.side_effect = lambda **kwargs: fake_output
+            grpo._liger_loss(
+                batch_ids=torch.ones((1, 3), dtype=torch.long),
+                action_mask=action_mask,
+                advantages=torch.ones((1,), dtype=torch.float32),
+                old_log_probs=torch.tensor([[-0.7, nan]]),
+                reference_log_probs=torch.tensor([[-0.6, nan]]),
+                sampling_log_probs=torch.tensor([[-0.9, nan]]),
+            )
+
+        positional = mock_fn.apply.call_args.args
+        policy_arg, ref_arg, old_arg, ratio_arg = (
+            positional[0],
+            positional[6],
+            positional[7],
+            positional[23],
+        )
+        for name, tensor in (
+            ("policy_hidden", policy_arg),
+            ("reference_log_probs", ref_arg),
+            ("old_log_probs", old_arg),
+            ("vllm_is_ratio", ratio_arg),
+        ):
+            assert torch.isfinite(tensor).all(), name
+        # The in-mask token keeps its own values; only padding was filled.
+        assert old_arg[0].item() == pytest.approx(-0.7)
+        assert ratio_arg[1].item() == pytest.approx(1.0)
+        grpo.clean_up()
+
+
 class TestGRPORealLigerVllmCorrection:
     """Validate the *real* fused GRPO kernel's ``vllm_is_ratio`` semantics on
     GPU, exercising the exact positional, token-flattened ``(n_tokens, 1)`` call
@@ -6318,4 +6551,37 @@ class TestGRPOTurnAdvantageLearnPath:
             )
         mock_liger.assert_not_called()
         assert np.isfinite(metrics["loss"])
+        grpo.clean_up()
+
+
+@contextmanager
+def _liger_available():
+    """Make both liger gates report the kernel as installed."""
+    with (
+        patch("agilerl.algorithms.core.base.HAS_LIGER_KERNEL", True),
+        patch("agilerl.algorithms.grpo.HAS_LIGER_KERNEL", True),
+    ):
+        yield
+
+
+class TestGRPOAuxMetricNaming:
+    """Live-tracker registration of the auxiliary scalar beside ``loss``.
+
+    Naming and ``learn`` key routing are pinned in
+    ``test_grpo_metric_naming.py``; this class only checks what a real
+    ``GRPO`` metrics tracker registers at init.
+    """
+
+    def test_the_fused_path_registers_only_the_clip_fraction(self):
+        with _liger_available():
+            grpo = _make_cpu_grpo_for_branch_tests(use_liger_loss=True, beta=0.0)
+        assert np.isnan(grpo.metrics.get_mean(LIGER_CLIP_FRACTION_METRIC))
+        with pytest.raises(KeyError):
+            grpo.metrics.get_mean(REFERENCE_KL_METRIC)
+        grpo.clean_up()
+
+    def test_the_standard_path_registers_only_kl(self):
+        grpo = _make_cpu_grpo_for_branch_tests(beta=0.0)
+        with pytest.raises(KeyError):
+            grpo.metrics.get_mean(LIGER_CLIP_FRACTION_METRIC)
         grpo.clean_up()

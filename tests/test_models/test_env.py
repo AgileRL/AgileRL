@@ -273,7 +273,7 @@ def mark_wrapped(env):
 
     def test_make_env_with_registered_pettingzoo_environment(self):
         spec = PzEnvSpec(
-            name="pettingzoo.mpe.simple_speaker_listener_v4",
+            name="mpe2.simple_speaker_listener_v4",
             num_envs=1,
             env_config={"max_cycles": 5, "continuous_actions": False},
         )
@@ -931,6 +931,7 @@ class TestLLMEnvSpecMultiturn:
             apply_chat_template=True,
             max_model_len=512,
             max_output_tokens=128,
+            strict_chat_template_boundary=True,
         )
 
     def test_entrypoint_factory_creates_wrapper(self):
@@ -971,7 +972,43 @@ class TestLLMEnvSpecMultiturn:
             apply_chat_template=True,
             max_model_len=512,
             max_output_tokens=128,
+            strict_chat_template_boundary=True,
         )
+
+    @pytest.mark.parametrize("strict", [True, False])
+    def test_factory_forwards_strict_chat_template_boundary(self, strict):
+        mock_env = MagicMock()
+        mock_gem = MagicMock()
+        mock_gem.make = MagicMock(return_value=mock_env)
+        mock_tokenizer = MagicMock()
+        mock_tokenizer.pad_token_id = 0
+
+        spec = LLMEnvSpec(
+            env_type=LLMEnvType.MULTITURN,
+            env_name="game:Test-v0",
+            max_turns=5,
+            strict_chat_template_boundary=strict,
+        )
+        assert spec.strict_chat_template_boundary is strict
+
+        mock_wrapper_cls = MagicMock()
+        with (
+            patch.dict("sys.modules", {"gem": mock_gem}),
+            patch("agilerl.llm_envs.TokenObservationWrapper", mock_wrapper_cls),
+        ):
+            spec.make_multiturn_env_factory(mock_tokenizer)()
+
+        assert (
+            mock_wrapper_cls.call_args.kwargs["strict_chat_template_boundary"] is strict
+        )
+
+    def test_strict_chat_template_boundary_defaults_to_true(self):
+        spec = LLMEnvSpec(
+            env_type=LLMEnvType.MULTITURN,
+            env_name="game:Test-v0",
+            max_turns=5,
+        )
+        assert spec.strict_chat_template_boundary is True
 
     def test_gem_factory_probes_max_turns(self):
         mock_env = MagicMock()

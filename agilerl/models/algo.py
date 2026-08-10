@@ -13,6 +13,11 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from agilerl import HAS_LLM_DEPENDENCIES, AgentType
 from agilerl.models.networks import NetworkSpec
+from agilerl.utils.llm_utils import (
+    apply_pad_token_id,
+    load_pad_token_configs,
+    resolve_pad_token_id,
+)
 
 if TYPE_CHECKING:
     import torch
@@ -435,6 +440,7 @@ class RLAlgorithmSpec(AlgorithmSpec):
 
         if resume_from_checkpoint is not None:
             algo.load_checkpoint(resume_from_checkpoint)
+            algo.index = index
 
         return algo
 
@@ -507,6 +513,7 @@ class MultiAgentRLAlgorithmSpec(AlgorithmSpec):
 
         if resume_from_checkpoint is not None:
             algo.load_checkpoint(resume_from_checkpoint)
+            algo.index = index
 
         return algo
 
@@ -536,8 +543,9 @@ class LLMAlgorithmSpec(AlgorithmSpec):
     activation_offload: bool = Field(default=False)
     use_sequence_packing: bool = Field(default=False)
     lora_target_scope: str | None = Field(default=None)
-    fused_logprobs_chunk_rows: int | None = Field(default=None)
-    fused_loss_chunk_rows: int | None = Field(default=None)
+    chunk_rows: int | None = Field(default=None, ge=1)
+    micro_batch_size_per_gpu: int | None = Field(default=None, ge=1)
+    mini_batch_size: int | None = Field(default=None, ge=1)
     vllm_importance_sampling_correction: bool = Field(default=True)
     vllm_importance_sampling_cap: float = Field(default=2.0, ge=0.0)
     attn_implementation: str | None = Field(default=None)
@@ -593,12 +601,6 @@ class LLMAlgorithmSpec(AlgorithmSpec):
             msg = "LLMAlgorithmSpec.build_algorithm requires a tokenizer."
             raise ValueError(msg)
 
-        micro_batch_size_per_gpu = None
-        if accelerator is not None:
-            micro_batch_size_per_gpu = max(
-                self.batch_size // accelerator.num_processes, 1
-            )
-
         use_vllm = getattr(self, "use_vllm", False)
         if not use_vllm and hasattr(self, "vllm_config"):
             self.vllm_config = None
@@ -634,14 +636,36 @@ class LLMAlgorithmSpec(AlgorithmSpec):
             model_config.setdefault("attn_implementation", attn_implementation)
             kwargs["model_config"] = model_config
 
+        model_config = None
+        generation_config = None
+        if actor_network is not None:
+            model_config = getattr(actor_network, "config", None)
+            generation_config = getattr(actor_network, "generation_config", None)
+        if model_config is None:
+            model_config, generation_config = load_pad_token_configs(
+                self.pretrained_model_name_or_path
+            )
+
+        pad_token_id, pad_source = resolve_pad_token_id(
+            tokenizer,
+            model_config=model_config,
+            generation_config=generation_config,
+        )
+        apply_pad_token_id(tokenizer, pad_token_id)
+        logger.info(
+            "Resolved algorithm pad_token_id=%s from %s (eos_token_id=%s)",
+            pad_token_id,
+            pad_source,
+            getattr(tokenizer, "eos_token_id", None),
+        )
+
         algo_cls = self.algo_class()
         algo = algo_cls(
             model_name=self.pretrained_model_name_or_path,
-            pad_token_id=tokenizer.eos_token_id,
-            pad_token=tokenizer.eos_token,
+            pad_token_id=pad_token_id,
+            pad_token=tokenizer.pad_token,
             accelerator=accelerator,
             index=index,
-            micro_batch_size_per_gpu=micro_batch_size_per_gpu,
             device=device,
             actor_network=actor_network,
             **kwargs,
@@ -649,6 +673,7 @@ class LLMAlgorithmSpec(AlgorithmSpec):
 
         if resume_from_checkpoint is not None:
             algo.load_checkpoint(resume_from_checkpoint)
+            algo.index = index
 
         return algo
 

@@ -102,7 +102,8 @@ class TestTournamentSelectionSelect:
             population[4].fitness = [13, 14, 15]
 
             # Call the select method
-            elite, new_population = tournament_selection.select(population)
+            elite, new_population, indices = tournament_selection.select(population)
+            assert indices is None
 
             # Check if the elite agent is the best agent in the population
             assert elite.fitness == [13, 14, 15]
@@ -155,7 +156,8 @@ class TestTournamentSelectionSelect:
             population[4].fitness = [13, 14, 15]
 
             # Call the select method
-            elite, new_population = tournament_selection.select(population)
+            elite, new_population, indices = tournament_selection.select(population)
+            assert indices is None
 
             # Check if the elite agent is the best agent in the population
             assert elite.fitness == [13, 14, 15]
@@ -196,7 +198,8 @@ class TestTournamentSelectionSelect:
             population[4].fitness = [13, 14, 15]
 
             # Call the select method
-            elite, new_population = tournament_selection.select(population)
+            elite, new_population, indices = tournament_selection.select(population)
+            assert indices is None
 
             # Check if the elite agent is the best agent in the population
             assert elite.fitness == [13, 14, 15]
@@ -238,7 +241,8 @@ class TestTournamentSelectionSelect:
             population[4].fitness = [13, 14, 15]
 
             # Call the select method
-            elite, new_population = tournament_selection.select(population)
+            elite, new_population, indices = tournament_selection.select(population)
+            assert indices is None
 
             # Check if the elite agent is the best agent in the population
             assert elite.fitness == [13, 14, 15]
@@ -355,7 +359,8 @@ class TestTournamentSelectionSelect:
         population[3].fitness = [10, 11, 12]
 
         # Call the select method
-        elite, new_population = tournament_selection.select(population)
+        elite, new_population, indices = tournament_selection.select(population)
+        assert indices is None
 
         # Check if the elite agent is the best agent in the population
         assert elite.fitness == [10, 11, 12]
@@ -418,11 +423,11 @@ class TestTournamentSelectionSelect:
 
             def _llm_branch(population):
                 llm_called["value"] = True
-                return (population[0], population)
+                return (population[0], population, None)
 
             def _std_branch(population):
                 std_called["value"] = True
-                return (population[0], population)
+                return (population[0], population, None)
 
             m.setattr(tournament_selection, "_select_llm_agents", _llm_branch)
             m.setattr(tournament_selection, "_select_standard_agents", _std_branch)
@@ -489,28 +494,25 @@ class TestTournamentSelectionElitism:
         assert max_id == 3
         assert elite.index == 3
 
-
-class TestScalarFitness:
-    def test_scalar_fitness_dict(self):
-        # Multi-agent per-sub-agent fitness collapses to the mean across values.
-        result = TournamentSelection._scalar_fitness({"agent_0": 2.0, "agent_1": 4.0})
-        assert result == pytest.approx(3.0)
-        assert isinstance(result, float)
-
     @pytest.mark.parametrize(
-        ("fitness", "expected"),
+        "fitness",
         [
-            ([1.0, 2.0, 3.0], 2.0),
-            ((4.0, 6.0), 5.0),
-            (np.array([0.0, 10.0]), 5.0),
+            [{"agent_0": 9.0, "agent_1": 0.0}, {"agent_0": 5.0, "agent_1": 5.0}],
+            [np.array([9.0, 0.0]), np.array([5.0, 5.0])],
         ],
+        ids=["dict", "array"],
     )
-    def test_scalar_fitness_sequence(self, fitness, expected):
-        result = TournamentSelection._scalar_fitness(fitness)
-        assert result == pytest.approx(expected)
-        assert isinstance(result, float)
+    def test_ranks_vector_fitness_by_its_mean(self, fitness):
+        population = []
+        for index, value in enumerate(fitness):
+            agent = MagicMock()
+            agent.index = index
+            agent.fitness = [value]
+            population.append(agent)
 
-    def test_scalar_fitness_scalar(self):
-        result = TournamentSelection._scalar_fitness(7.5)
-        assert result == pytest.approx(7.5)
-        assert isinstance(result, float)
+        ts = TournamentSelection(2, True, 2)
+        elite, rank, max_id = ts._elitism(population)
+
+        assert elite is population[1]
+        assert rank.tolist() == [0, 1]
+        assert max_id == 1

@@ -7,8 +7,8 @@ Covers:
 - Trainer base class (algo resolution from string / spec)
 - LocalTrainer (construction, train delegation)
 - ArenaTrainer (construction, manifest building, train delegation)
-- trainer_utils pure functions
 - LLM algorithm integration (DPO, GRPO) with mocked dependencies
+- Multi-frequency selection wiring (construction, manifest round trip, evolution)
 """
 
 from __future__ import annotations
@@ -16,6 +16,8 @@ from __future__ import annotations
 import contextlib
 import importlib
 import types
+import warnings
+from collections import Counter
 from pathlib import Path
 from typing import ClassVar
 from unittest.mock import MagicMock, patch
@@ -24,7 +26,10 @@ import pytest
 from gymnasium.spaces import Box, Discrete
 
 from agilerl import HAS_ARENA_DEPENDENCIES, HAS_LLM_DEPENDENCIES, AgentType
+from agilerl.algorithms import DQN
+from agilerl.algorithms.core.base import EvolvableAlgorithm
 from agilerl.components.replay_buffer import MultiStepReplayBuffer, ReplayBuffer
+from agilerl.hpo.multi_frequency import MultiFrequencySelection
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.models import (
@@ -35,9 +40,12 @@ from agilerl.models import (
     TD3Spec,
 )
 from agilerl.models.algo import LLMAlgorithmSpec
+from agilerl.models.env import GymEnvSpec
 from agilerl.models.hpo import (
+    MultiFrequencySelectionSpec,
     MutationProbabilities,
     MutationSpec,
+    RLHyperparameter,
     TournamentSelectionSpec,
 )
 from agilerl.models.networks import MlpSpec, QNetworkSpec, StochasticActorSpec
@@ -47,6 +55,12 @@ from agilerl.utils.trainer_utils import (
     build_mutations_from_spec,
     build_replay_buffer_from_spec,
     build_tournament_from_spec,
+    create_population_from_spec,
+)
+from agilerl.utils.utils import run_selection_and_mutation
+from tests.helper_functions import (
+    rank_population_by_subpopulation,
+    weakest_agent_index,
 )
 
 if HAS_ARENA_DEPENDENCIES:
@@ -372,11 +386,11 @@ class TestLocalTrainerHpo:
             environment=env,
             training=training_spec,
             mutation=None,
-            tournament=None,
+            selection_strategy=None,
             hpo=True,
         )
         assert trainer.mutation_spec is not None
-        assert trainer.tournament_selection_spec is not None
+        assert trainer.selection_strategy_spec is not None
 
     @patch("agilerl.training.trainer.create_population_from_spec")
     def test_hpo_does_not_override_explicit_specs(
@@ -388,11 +402,29 @@ class TestLocalTrainerHpo:
             environment=env,
             training=training_spec,
             mutation=mutation_spec,
-            tournament=tournament_spec,
+            selection_strategy=tournament_spec,
             hpo=True,
         )
         assert trainer.mutation_spec is mutation_spec
-        assert trainer.tournament_selection_spec is tournament_spec
+        assert trainer.selection_strategy_spec is tournament_spec
+
+    @patch("agilerl.training.trainer.create_population_from_spec")
+    def test_hpo_does_not_override_a_multi_frequency_spec(
+        self, mock_create_pop, env, mutation_spec
+    ):
+        """hpo=True must not inject tournament selection over a configured regime."""
+        mock_create_pop.return_value = [MagicMock()]
+        mf_spec = MultiFrequencySelectionSpec(n_subpopulations=2)
+        trainer = LocalTrainer(
+            algorithm="DQN",
+            environment=env,
+            training=TrainingSpec(pop_size=8),
+            mutation=mutation_spec,
+            selection_strategy=mf_spec,
+            hpo=True,
+        )
+        assert trainer.selection_strategy_spec is mf_spec
+        assert isinstance(trainer.selection_strategy, MultiFrequencySelection)
 
 
 class TestArenaTrainerMissingDependencies:
@@ -476,12 +508,12 @@ class TestLocalTrainerConstruction:
             environment=env,
             training=TrainingSpec(max_steps=200, evo_steps=50, pop_size=2),
             mutation=mutation_spec,
-            tournament=tournament_spec,
+            selection_strategy=tournament_spec,
             replay_buffer=buffer_spec,
             device="cpu",
         )
         assert trainer.mutation_spec is mutation_spec
-        assert trainer.tournament_selection_spec is tournament_spec
+        assert trainer.selection_strategy_spec is tournament_spec
         assert trainer.replay_buffer_spec is buffer_spec
 
 
@@ -552,6 +584,34 @@ class TestLocalTrainerTrain:
         mock_train_fn.assert_called_once()
         assert result == (mock_pop, [[1.0]])
 
+    @patch("agilerl.training.trainer.create_population_from_spec")
+    def test_train_warns_max_wall_seconds_ignored_for_non_multiturn(
+        self,
+        mock_create_pop,
+    ):
+        from agilerl.models.env import GymEnvSpec
+
+        env_spec = GymEnvSpec(name="CartPole-v1")
+        mock_pop = [MagicMock()]
+        mock_create_pop.return_value = mock_pop
+        mock_train_fn = MagicMock(return_value=(mock_pop, [[1.0]]))
+
+        with (
+            patch.object(PPOSpec, "get_training_fn", return_value=mock_train_fn),
+            patch.object(LocalTrainer, "_make_env", return_value=MagicMock()),
+        ):
+            trainer = LocalTrainer(
+                algorithm="PPO",
+                environment=env_spec,
+                training=TrainingSpec(
+                    max_steps=500, evo_steps=100, pop_size=2, max_wall_seconds=60
+                ),
+            )
+            with pytest.warns(UserWarning, match="max_wall_seconds"):
+                trainer.train()
+
+        assert "max_wall_seconds" not in mock_train_fn.call_args[1]
+
 
 @requires_arena
 class TestArenaTrainerConstruction:
@@ -593,12 +653,12 @@ class TestArenaTrainerConstruction:
             environment=env_spec,
             training=TrainingSpec(max_steps=200, evo_steps=50, pop_size=3),
             mutation=mutation_spec,
-            tournament=tournament_spec,
+            selection_strategy=tournament_spec,
             replay_buffer=buffer_spec,
             client=mock_client,
         )
         assert trainer.mutation_spec is mutation_spec
-        assert trainer.tournament_selection_spec is tournament_spec
+        assert trainer.selection_strategy_spec is tournament_spec
         assert trainer.replay_buffer_spec is buffer_spec
         assert trainer.training_spec.pop_size == 3
 
@@ -690,7 +750,7 @@ class TestArenaTrainerManifest:
             environment=env_spec,
             training=training_spec,
             mutation=mutation_spec,
-            tournament=tournament_spec,
+            selection_strategy=tournament_spec,
             client=mock_client,
         )
         manifest = trainer.to_manifest()
@@ -758,7 +818,7 @@ class TestArenaTrainerManifest:
         trainer.env_spec = 42  # not an EnvironmentSpec or str
         trainer.training_spec = training_spec
         trainer.mutation_spec = None
-        trainer.tournament_selection_spec = None
+        trainer.selection_strategy_spec = None
         trainer.replay_buffer_spec = None
         trainer._client = mock_client
 
@@ -935,6 +995,24 @@ class TestArenaTrainerFromManifest:
         assert trainer.algorithm_spec.name == "DQN"
         assert trainer.env_spec.name == "CartPole-v1"
         assert trainer._client is mock_client
+
+    @pytest.mark.parametrize("key", ["selection_strategy", "tournament_selection"])
+    def test_from_manifest_carries_the_selection_section(self, mock_client, key):
+        """Either spelling of the selection block reaches the trainer's spec."""
+        data = {
+            "algorithm": {"name": "DQN", "learn_step": 1},
+            "environment": {"name": "CartPole-v1", "num_envs": 4},
+            "training": {"max_steps": 100, "evo_steps": 50, "pop_size": 2},
+            key: {"tournament_size": 3, "elitism": False},
+        }
+        trainer = ArenaTrainer.from_manifest(data, client=mock_client)
+        assert trainer.selection_strategy_spec.tournament_size == 3
+        assert trainer.selection_strategy_spec.elitism is False
+
+        # The platform run spec keys the section on its original name
+        manifest = trainer.to_manifest()
+        assert manifest["tournament_selection"]["tournament_size"] == 3
+        assert "selection_strategy" not in manifest
 
     def test_from_manifest_train_round_trip(self, mock_client):
         """``from_manifest(...).train()`` validates and submits an Arena manifest."""
@@ -1372,8 +1450,16 @@ class TestLLMBuildAlgorithm:
         mock_tokenizer = MagicMock()
         mock_tokenizer.eos_token_id = 50256
         mock_tokenizer.eos_token = "<|endoftext|>"
+        mock_tokenizer.pad_token_id = None
+        mock_tokenizer.unk_token_id = None
 
-        with patch.object(type(dpo_spec), "algo_class", return_value=mock_algo):
+        with (
+            patch.object(type(dpo_spec), "algo_class", return_value=mock_algo),
+            patch(
+                "agilerl.utils.llm_utils.load_pad_token_configs",
+                return_value=(None, None),
+            ),
+        ):
             dpo_spec.build_algorithm(tokenizer=mock_tokenizer, index=0)
 
         mock_algo.assert_called_once()
@@ -1388,8 +1474,16 @@ class TestLLMBuildAlgorithm:
         mock_tokenizer = MagicMock()
         mock_tokenizer.eos_token_id = 50256
         mock_tokenizer.eos_token = "<|endoftext|>"
+        mock_tokenizer.pad_token_id = None
+        mock_tokenizer.unk_token_id = None
 
-        with patch.object(type(grpo_spec), "algo_class", return_value=mock_algo):
+        with (
+            patch.object(type(grpo_spec), "algo_class", return_value=mock_algo),
+            patch(
+                "agilerl.utils.llm_utils.load_pad_token_configs",
+                return_value=(None, None),
+            ),
+        ):
             grpo_spec.build_algorithm(tokenizer=mock_tokenizer, index=1)
 
         mock_algo.assert_called_once()
@@ -1402,17 +1496,27 @@ class TestLLMBuildAlgorithm:
         mock_tokenizer = MagicMock()
         mock_tokenizer.eos_token_id = 50256
         mock_tokenizer.eos_token = "<|endoftext|>"
+        mock_tokenizer.pad_token_id = None
+        mock_tokenizer.unk_token_id = None
         mock_accel = MagicMock()
         mock_accel.num_processes = 2
 
-        with patch.object(type(dpo_spec), "algo_class", return_value=mock_algo):
+        with (
+            patch.object(type(dpo_spec), "algo_class", return_value=mock_algo),
+            patch(
+                "agilerl.utils.llm_utils.load_pad_token_configs",
+                return_value=(None, None),
+            ),
+        ):
             dpo_spec.build_algorithm(
                 tokenizer=mock_tokenizer, index=0, accelerator=mock_accel
             )
 
         call_kwargs = mock_algo.call_args[1]
         assert call_kwargs["accelerator"] is mock_accel
-        assert call_kwargs["micro_batch_size_per_gpu"] is not None
+        # Unset on the spec: the algorithm derives its own micro batch size,
+        # matching direct construction.
+        assert "micro_batch_size_per_gpu" not in call_kwargs
 
 
 class TestLLMLocalTrainer:
@@ -1512,6 +1616,8 @@ class TestLLMLocalTrainer:
         mock_llm_env_spec.env_type = LLMEnvType.PREFERENCE
         mock_llm_env_spec.make_env.return_value = mock_env
         mock_tokenizer = MagicMock()
+        mock_tokenizer.eos_token_id = 50256
+        mock_tokenizer.eos_token = "<|endoftext|>"
 
         with (
             patch(
@@ -1609,6 +1715,8 @@ class TestLLMLocalTrainer:
         assert call_kwargs["max_steps"] == 100
         assert call_kwargs["evo_steps"] == 10
         assert result == (mock_pop, [[1.0]])
+        assert "tournament" not in call_kwargs
+        assert call_kwargs["selection_strategy"] is trainer.selection_strategy
 
     # -- Missing LLM dependencies raises ImportError -----------------------
 
@@ -1630,6 +1738,56 @@ class TestLLMLocalTrainer:
         with patch("agilerl.training.trainer.AutoTokenizer", None):
             with pytest.raises(ImportError, match="LLM dependencies"):
                 trainer._make_tokenizer()
+
+    def test_make_tokenizer_falls_back_to_the_default_chat_template(self, dpo_spec):
+        from agilerl.utils.chat_template import DEFAULT_CHAT_TEMPLATE
+
+        trainer = LocalTrainer.__new__(LocalTrainer)
+        trainer.algorithm_spec = dpo_spec
+        mock_tokenizer = MagicMock(
+            chat_template=None,
+            eos_token_id=0,
+            eos_token="<eos>",
+            pad_token_id=None,
+            unk_token_id=None,
+        )
+        with (
+            patch(
+                "agilerl.training.trainer.AutoTokenizer", create=True
+            ) as mock_auto_tok,
+            patch(
+                "agilerl.training.trainer.load_pad_token_configs",
+                return_value=(None, None),
+            ),
+        ):
+            mock_auto_tok.from_pretrained.return_value = mock_tokenizer
+            tokenizer = trainer._make_tokenizer()
+
+        assert tokenizer.chat_template == DEFAULT_CHAT_TEMPLATE
+
+    def test_make_tokenizer_keeps_an_existing_chat_template(self, dpo_spec):
+        trainer = LocalTrainer.__new__(LocalTrainer)
+        trainer.algorithm_spec = dpo_spec
+        mock_tokenizer = MagicMock(
+            chat_template="{{ 'preset' }}",
+            eos_token_id=0,
+            eos_token="<eos>",
+            pad_token_id=None,
+            unk_token_id=None,
+        )
+        with (
+            patch(
+                "agilerl.training.trainer.AutoTokenizer", create=True
+            ) as mock_auto_tok,
+            patch(
+                "agilerl.training.trainer.load_pad_token_configs",
+                return_value=(None, None),
+            ),
+        ):
+            mock_auto_tok.from_pretrained.return_value = mock_tokenizer
+            tokenizer = trainer._make_tokenizer()
+
+        assert tokenizer.chat_template == "{{ 'preset' }}"
 
 
 class TestTrainerBaseNotImplemented:
@@ -1838,7 +1996,7 @@ class TestLocalTrainerIntegration:
         trainer = LocalTrainer(
             algorithm=MADDPGSpec(learn_step=2),
             environment=PzEnvSpec(
-                name="pettingzoo.mpe.simple_speaker_listener_v4",
+                name="mpe2.simple_speaker_listener_v4",
                 num_envs=2,
             ),
             training=self._training(max_steps=32, evo_steps=16),
@@ -2514,6 +2672,58 @@ class TestLocalTrainerMultiturn:
         assert call_kwargs["pop"] is mock_pop
         assert call_kwargs["max_steps"] == 100
         assert "env" not in call_kwargs
+        # The wandb run name reads the flat env_name key from init_hp.
+        assert call_kwargs["init_hp"]["env_name"] == "game:Test-v0"
+        assert "max_wall_seconds" not in call_kwargs
+
+    def test_train_forwards_max_wall_seconds(self, grpo_spec):
+        from agilerl.models.env import LLMEnvSpec, LLMEnvType
+
+        mock_pop = [MagicMock()]
+        mock_tokenizer = MagicMock(eos_token_id=0, eos_token="<eos>", pad_token_id=0)
+        mock_train_fn = MagicMock(return_value=mock_pop)
+
+        env_spec = LLMEnvSpec(
+            env_type=LLMEnvType.MULTITURN,
+            env_name="game:Test-v0",
+            max_turns=8,
+        )
+
+        with (
+            patch(
+                "agilerl.training.trainer.AutoTokenizer", create=True
+            ) as mock_auto_tok,
+            patch(
+                "agilerl.training.trainer.create_population_from_spec",
+                return_value=mock_pop,
+            ),
+            patch.object(
+                LLMEnvSpec,
+                "make_multiturn_env_factory",
+                return_value=MagicMock(),
+            ),
+            patch.object(
+                type(grpo_spec),
+                "get_training_fn",
+                return_value=mock_train_fn,
+            ),
+            patch.object(LocalTrainer, "to_manifest", return_value={}),
+            patch(
+                "agilerl.training.trainer.create_llm_accelerator",
+                return_value=MagicMock(),
+            ),
+        ):
+            mock_auto_tok.from_pretrained.return_value = mock_tokenizer
+            trainer = LocalTrainer(
+                algorithm=grpo_spec,
+                environment=env_spec,
+                training=TrainingSpec(
+                    max_steps=100, evo_steps=10, pop_size=1, max_wall_seconds=1800
+                ),
+            )
+            trainer.train()
+
+        assert mock_train_fn.call_args[1]["max_wall_seconds"] == 1800
 
 
 class TestImportGuardReload:
@@ -2905,7 +3115,7 @@ def test_from_manifest_multi_agent_homogeneous(tmp_path):
     manifest = {
         "algorithm": {"name": "IPPO", "learn_step": 64},
         "environment": {
-            "name": "pettingzoo.mpe.simple_spread_v3",
+            "name": "mpe2.simple_spread_v3",
             "num_envs": 2,
         },
         "training": {"max_steps": 200, "evo_steps": 100, "pop_size": 1},
@@ -2919,3 +3129,364 @@ def test_from_manifest_multi_agent_homogeneous(tmp_path):
     assert len(agent.actors) >= 1
     for net in agent.actors.values():
         assert isinstance(net.encoder, EvolvableMLP)
+
+
+def _make_multi_frequency_ppo_trainer(
+    training: TrainingSpec | None = None,
+    accelerator: object | None = None,
+    selection_strategy: MultiFrequencySelectionSpec | None = None,
+) -> LocalTrainer:
+    """Build an eight-slot PPO LocalTrainer driven by multi-frequency selection."""
+    selection_strategy = selection_strategy or MultiFrequencySelectionSpec(
+        n_subpopulations=2,
+        evolution_frequency_ratios=[1, 2],
+        n_winners=1,
+        n_survivors=1,
+        n_open_for_migration=1,
+        n_losers=1,
+    )
+    mutation = MutationSpec(
+        probabilities=MutationProbabilities(no_mut=0.5, params_mut=0.3, rl_hp_mut=0.2),
+        rl_hp_selection={
+            "lr": RLHyperparameter(min=1e-5, max=1e-2),
+            # learn_step resizes the rollout buffer
+            "learn_step": RLHyperparameter(min=64, max=2048),
+        },
+    )
+    ppo = PPOSpec(
+        learn_step=128,
+        net_config=StochasticActorSpec(
+            encoder_config=MlpSpec(hidden_size=[16]),
+            head_config=MlpSpec(hidden_size=[16]),
+        ),
+    )
+    with patch.object(LocalTrainer, "_make_env", return_value=VectorizedDummyEnv()):
+        return LocalTrainer(
+            algorithm=ppo,
+            environment=GymEnvSpec(name="CartPole-v1", num_envs=1),
+            training=training or TrainingSpec(max_steps=200, evo_steps=50, pop_size=8),
+            mutation=mutation,
+            selection_strategy=selection_strategy,
+            accelerator=accelerator,
+        )
+
+
+class TestLocalTrainerMultiFrequency:
+    """LocalTrainer builds the operator, tags subpopulations and rejects bad specs."""
+
+    def test_builds_multi_frequency_and_tags_subpopulations(self):
+        trainer = _make_multi_frequency_ppo_trainer()
+
+        assert isinstance(trainer.selection_strategy, MultiFrequencySelection)
+        subpops = sorted(a.subpopulation_id for a in trainer.population)
+        assert subpops == [0, 0, 0, 0, 1, 1, 1, 1]
+        assert len({a.index for a in trainer.population}) == 8
+
+    def test_accepts_multi_frequency_with_accelerator(self):
+        accelerator = MagicMock()
+        fake_population = [MagicMock() for _ in range(8)]
+        with patch(
+            "agilerl.training.trainer.create_population_from_spec",
+            return_value=fake_population,
+        ):
+            trainer = _make_multi_frequency_ppo_trainer(accelerator=accelerator)
+
+        assert trainer.accelerator is accelerator
+        assert isinstance(trainer.selection_strategy, MultiFrequencySelection)
+
+    def test_requires_explicit_pop_size_without_manifest(self):
+        # pop_size is mandatory under MF-PBT
+        with pytest.raises(ValueError, match="pop_size is required"):
+            _make_multi_frequency_ppo_trainer(
+                training=TrainingSpec(max_steps=200, evo_steps=50)
+            )
+
+    def test_rejects_pop_size_below_six_without_manifest(self):
+        with pytest.raises(ValueError, match="population_size must be >= 6"):
+            _make_multi_frequency_ppo_trainer(
+                training=TrainingSpec(max_steps=200, evo_steps=50, pop_size=4)
+            )
+
+    def test_resolves_bracket_defaults_onto_the_spec(self):
+        trainer = _make_multi_frequency_ppo_trainer(
+            selection_strategy=MultiFrequencySelectionSpec(n_subpopulations=2)
+        )
+
+        spec = trainer.selection_strategy_spec
+        assert (spec.n_winners, spec.n_survivors, spec.n_open_for_migration) == (
+            1,
+            0,
+            1,
+        )
+        assert spec.n_losers == 2  # 4 - 1 - 0 - 1
+        assert trainer.to_manifest()["selection_strategy"]["n_losers"] == 2
+
+
+class TestLocalTrainerMultiFrequencyManifest:
+    """Multi-frequency selection round-trips through the ``selection_strategy`` union."""
+
+    def test_trainer_to_manifest_uses_the_unified_block(self):
+        trainer = _make_multi_frequency_ppo_trainer()
+
+        manifest = trainer.to_manifest()
+
+        assert manifest["training"]["pop_size"] == 8
+        assert manifest["selection_strategy"]["strategy"] == "multi_frequency"
+        assert "multi_frequency_selection" not in manifest
+
+    def test_manifest_round_trip_rebuilds_via_unified_block(self):
+        trainer = _make_multi_frequency_ppo_trainer()
+        manifest = trainer.to_manifest()
+
+        with patch.object(LocalTrainer, "_make_env", return_value=VectorizedDummyEnv()):
+            rebuilt = LocalTrainer.from_manifest(manifest)
+
+        assert isinstance(rebuilt.selection_strategy, MultiFrequencySelection)
+        assert rebuilt.training_spec.pop_size == 8
+
+
+class TestCreatePopulationFromSpecMultiFrequency:
+    """A resumed population keeps its slot layout, so subpopulation tags stay valid."""
+
+    def test_resumed_population_keeps_slot_indices_and_evolves(self, tmp_path):
+        env = VectorizedDummyEnv()
+        checkpoint = tmp_path / "resume.pt"
+        DQN(
+            observation_space=env.observation_space,
+            action_space=env.action_space,
+            index=3,
+        ).save_checkpoint(str(checkpoint))
+
+        mf_spec = MultiFrequencySelectionSpec(n_subpopulations=2)
+        population = create_population_from_spec(
+            population_size=6,
+            algo_spec=DQNSpec(),
+            env=env,
+            mutation_spec=None,
+            replay_buffer_spec=None,
+            resume_from_checkpoint=str(checkpoint),
+            selection_strategy_spec=mf_spec,
+        )
+
+        assert [agent.index for agent in population] == [0, 1, 2, 3, 4, 5]
+        assert [agent.subpopulation_id for agent in population] == [0, 0, 0, 1, 1, 1]
+
+        for i, agent in enumerate(population):
+            agent.fitness = [float(6 - i)]
+        strategy = MultiFrequencySelection(
+            population_size=6, n_subpopulations=2, evolution_frequency_ratios=[1, 2]
+        )
+        _elite, evolved, _indices = strategy.select(population)
+
+        assert len({agent.index for agent in evolved}) == len(evolved)
+
+
+class TestMultiFrequencyRealPopulationEvolution:
+    """The operator evolves a real, trainer-built PPO population cycle after cycle."""
+
+    def test_evolves_real_ppo_population_across_cycles(self):
+        trainer = _make_multi_frequency_ppo_trainer()
+        agents = list(trainer.population)
+
+        for _cycle in range(3):
+            rank_population_by_subpopulation(agents)
+            # Subpopulation 0 evolves every cycle (delta 1), so its weakest member is
+            # always cloned over
+            doomed = weakest_agent_index(agents, subpop=0)
+
+            agents = run_selection_and_mutation(
+                trainer.selection_strategy,
+                population=agents,
+                mutation=trainer.mutations,
+                env_name="CartPole-v1",
+                algo="PPO",
+            )
+
+            assert doomed not in {a.index for a in agents}
+            assert len(agents) == 8
+            assert Counter(a.subpopulation_id for a in agents) == Counter({0: 4, 1: 4})
+            assert len({a.index for a in agents}) == 8  # indices stay unique
+            assert all(isinstance(a, EvolvableAlgorithm) for a in agents)
+
+    def test_migration_weights_resizes_rollout_buffer(self):
+        # A fast-to-slow migrant clones the external agent's networks but takes the
+        # studied subpop elite's mutable HPs, including learn_step. PPO sizes its
+        # rollout buffer from learn_step via a mutation hook, so the migrant's buffer
+        # must be rebuilt to match the elite's learn_step, or rollout collection
+        # overflows it.
+        trainer = _make_multi_frequency_ppo_trainer()
+        agents = list(trainer.population)
+        external, elite = agents[4], agents[0]
+
+        external.learn_step = 256
+        external.mutation_hook()  # buffer sized to 256
+        elite.learn_step = 512
+        elite.mutation_hook()  # buffer sized to 512
+
+        trainer.selection_strategy._sync_index(agents)
+        migrant = trainer.selection_strategy._migrate_weights(external, elite, subpop=1)
+
+        assert migrant.learn_step == 512  # took the elite's learn_step
+        # Buffer capacity must follow the new learn_step (ceil(learn_step / num_envs))
+        assert migrant.rollout_buffer.capacity == -(512 // -migrant.num_envs)
+
+
+class TestLocalTrainerSelectionStrategyDeprecation:
+    """The superseded ``tournament`` keyword still routes, loudly and unambiguously."""
+
+    @staticmethod
+    def _build(env, **kwargs):
+        with patch(
+            "agilerl.training.trainer.create_population_from_spec",
+            return_value=[MagicMock()],
+        ):
+            return LocalTrainer(
+                algorithm="PPO",
+                environment=env,
+                training=TrainingSpec(max_steps=500, pop_size=2, evo_steps=100),
+                **kwargs,
+            )
+
+    def test_deprecated_tournament_kwarg_warns_and_routes(self, env, tournament_spec):
+        with pytest.warns(DeprecationWarning, match="'tournament' argument"):
+            trainer = self._build(env, tournament=tournament_spec)
+
+        assert trainer.selection_strategy_spec is tournament_spec
+        assert isinstance(trainer.selection_strategy, TournamentSelection)
+
+    def test_equal_specs_from_both_spellings_route(self, env):
+        """Equality, not identity: two equal specs are not a conflict."""
+        current = TournamentSelectionSpec(tournament_size=3)
+        deprecated = TournamentSelectionSpec(tournament_size=3)
+        assert current is not deprecated
+
+        with pytest.warns(DeprecationWarning, match="'tournament' argument"):
+            trainer = self._build(
+                env, selection_strategy=current, tournament=deprecated
+            )
+
+        assert trainer.selection_strategy_spec is current
+
+    def test_conflicting_specs_raise(self, env):
+        with (
+            pytest.warns(DeprecationWarning, match="'tournament' argument"),
+            pytest.raises(ValueError, match="conflicting selection strategies"),
+        ):
+            self._build(
+                env,
+                selection_strategy=TournamentSelectionSpec(tournament_size=2),
+                tournament=TournamentSelectionSpec(tournament_size=3),
+            )
+
+    def test_conflicting_regimes_raise(self, env):
+        """Two different regimes can never be configured together."""
+        with (
+            pytest.warns(DeprecationWarning, match="'tournament' argument"),
+            pytest.raises(ValueError, match="conflicting selection strategies"),
+        ):
+            self._build(
+                env,
+                selection_strategy=MultiFrequencySelectionSpec(n_subpopulations=2),
+                tournament=TournamentSelectionSpec(),
+            )
+
+    def test_explicit_tournament_none_warns_but_supplies_no_strategy(
+        self, env, tournament_spec
+    ):
+        """The keyword's presence is deprecated, but a None value cannot conflict."""
+        with pytest.warns(DeprecationWarning, match="'tournament' argument"):
+            trainer = self._build(
+                env, selection_strategy=tournament_spec, tournament=None
+            )
+
+        assert trainer.selection_strategy_spec is tournament_spec
+
+    def test_unknown_kwarg_raises_type_error(self, env, tournament_spec):
+        with pytest.raises(TypeError, match="tournment"):
+            self._build(env, tournment=tournament_spec)
+
+    def test_warning_points_at_the_caller(self, env, tournament_spec):
+        """stacklevel must blame the user's call site, not the library."""
+        with pytest.warns(DeprecationWarning, match="'tournament' argument") as record:
+            self._build(env, tournament=tournament_spec)
+
+        deprecations = [w for w in record if issubclass(w.category, DeprecationWarning)]
+        assert deprecations[0].filename == __file__
+
+    @requires_arena
+    def test_arena_trainer_deprecated_tournament_kwarg_warns(
+        self, mock_client, tournament_spec, training_spec
+    ):
+        with pytest.warns(DeprecationWarning, match="'tournament' argument"):
+            trainer = ArenaTrainer(
+                algorithm="PPO",
+                environment="CartPole-v1",
+                training=training_spec,
+                client=mock_client,
+                tournament=tournament_spec,
+            )
+
+        assert trainer.selection_strategy_spec is tournament_spec
+
+    @requires_arena
+    def test_arena_trainer_rejects_multi_frequency(self, mock_client, training_spec):
+        with pytest.raises(ValueError, match="only supports tournament selection"):
+            ArenaTrainer(
+                algorithm="PPO",
+                environment="CartPole-v1",
+                training=training_spec,
+                client=mock_client,
+                selection_strategy=MultiFrequencySelectionSpec(n_subpopulations=2),
+            )
+
+
+class TestTrainerDeprecatedSelectionAttributes:
+    @staticmethod
+    def _build(selection_strategy):
+        # A real env spec, so to_manifest() can serialize the environment section
+        with (
+            patch.object(LocalTrainer, "_make_env", return_value=VectorizedDummyEnv()),
+            patch(
+                "agilerl.training.trainer.create_population_from_spec",
+                return_value=[MagicMock()],
+            ),
+        ):
+            return LocalTrainer(
+                algorithm="PPO",
+                environment=GymEnvSpec(name="CartPole-v1", num_envs=1),
+                training=TrainingSpec(max_steps=500, pop_size=8, evo_steps=100),
+                selection_strategy=selection_strategy,
+            )
+
+    def test_tournament_selection_spec_warns_and_returns_the_spec(
+        self, tournament_spec
+    ):
+        trainer = self._build(tournament_spec)
+
+        with pytest.warns(DeprecationWarning, match="tournament_selection_spec"):
+            assert trainer.tournament_selection_spec is tournament_spec
+
+    def test_tournament_selection_warns_and_returns_the_operator(self, tournament_spec):
+        trainer = self._build(tournament_spec)
+
+        with pytest.warns(DeprecationWarning, match="tournament_selection"):
+            assert isinstance(trainer.tournament_selection, TournamentSelection)
+
+    def test_deprecated_attributes_are_none_under_multi_frequency(self):
+        """Under MF-PBT there is no tournament spec or operator to return."""
+        trainer = self._build(MultiFrequencySelectionSpec(n_subpopulations=2))
+
+        with pytest.warns(DeprecationWarning, match="tournament_selection_spec"):
+            assert trainer.tournament_selection_spec is None
+        with pytest.warns(DeprecationWarning, match="tournament_selection"):
+            assert trainer.tournament_selection is None
+
+    def test_to_manifest_does_not_warn(self, tournament_spec):
+        """to_manifest() runs on every train(), so it must read the attribute."""
+        trainer = self._build(tournament_spec)
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            trainer.to_manifest()
+
+        assert not [w for w in caught if issubclass(w.category, DeprecationWarning)]

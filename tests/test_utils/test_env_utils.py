@@ -26,6 +26,92 @@ class TestEscapeNonFormatBraces:
         assert "{foo}" in result
         assert "{{bar}}" in result
 
+    def test_empty_braces_survive_format(self):
+        template = "reply with {} when done, {question}?"
+        result = env_utils.escape_non_format_braces(template)
+        assert result.format(question="q") == "reply with {} when done, q?"
+
+    def test_lone_braces_survive_format(self):
+        template = "open { and close } alone, {question}"
+        result = env_utils.escape_non_format_braces(template)
+        assert result.format(question="q") == "open { and close } alone, q"
+
+    def test_nested_json_survives_format(self):
+        template = 'return {"result": {"answer": 1}} for {question}'
+        result = env_utils.escape_non_format_braces(template)
+        assert result.format(question="q") == 'return {"result": {"answer": 1}} for q'
+
+    @pytest.mark.parametrize(
+        ("raw", "escaped"),
+        [
+            ("no braces at all", "no braces at all"),
+            ("{question}", "{question}"),
+            ("{answer}", "{answer}"),
+            ("{Order Number}", "{{Order Number}}"),
+            ("{{Order Number}}", "{{{{Order Number}}}}"),
+            (
+                "Already {{escaped}} and {question}",
+                "Already {{{{escaped}}}} and {question}",
+            ),
+            ("Unbalanced { brace", "Unbalanced {{ brace"),
+            (
+                "Nested {outer{inner}} {question}",
+                "Nested {{outer{{inner}}}} {question}",
+            ),
+            ("stray } close", "stray }} close"),
+            ("{}", "{{}}"),
+            ("{{}}", "{{{{}}}}"),
+        ],
+    )
+    def test_escapes(self, raw, escaped):
+        assert env_utils.escape_non_format_braces(raw) == escaped
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            "",
+            "no braces at all",
+            "{question}",
+            "{question} and {answer}",
+            "Already {{escaped}} and {question}",
+            "Unbalanced { brace",
+            "Nested {outer{inner}} {question}",
+            "{Order Number}",
+            "{{Order Number}}",
+            "{{{{Order Number}}}}",
+            "write {{Order Number}} here",
+            "stray } close",
+            "}{",
+            "{{Switch to {{Account Type}}}}",
+            "{}",
+            "{{}}",
+            "{ question }",
+            "{a{b}c}",
+            "100% {sure}",
+        ],
+    )
+    def test_round_trips_through_format(self, raw):
+        rendered = env_utils.escape_non_format_braces(raw).format(
+            question="<Q>",
+            answer="<A>",
+        )
+        assert rendered == raw.replace("{question}", "<Q>").replace("{answer}", "<A>")
+
+    def test_doubled_placeholder_survives_verbatim(self):
+        prompt = "For example {{Order Number}}, {{Website URL}}."
+        escaped = env_utils.escape_non_format_braces(prompt)
+        assert escaped.format(question="q", answer="a") == prompt
+
+    def test_unknown_keys_are_not_substituted(self):
+        escaped = env_utils.escape_non_format_braces(
+            "{answer}", format_keys=["question"]
+        )
+        assert escaped.format(question="<Q>") == "{answer}"
+
+    def test_no_format_keys_escapes_every_brace(self):
+        escaped = env_utils.escape_non_format_braces("{question}", format_keys=[])
+        assert escaped.format() == "{question}"
+
 
 class TestParseEntrypoint:
     def test_rejects_missing_colon(self):
@@ -72,6 +158,16 @@ class TestGetRewardFn:
         fn = env_utils.get_reward_fn("my_reward", str(reward_file))
         assert callable(fn)
         assert fn({}) == 1.0
+
+    def test_spec_without_loader_raises(self, tmp_path):
+        reward_file = tmp_path / "reward.py"
+        reward_file.write_text("def reward(): return 1.0\n", encoding="utf-8")
+        with patch(
+            "agilerl.utils.env_utils.importlib_util.spec_from_file_location",
+            return_value=MagicMock(loader=None),
+        ):
+            with pytest.raises(ValueError, match="Could not create spec"):
+                env_utils.get_reward_fn("reward", str(reward_file))
 
 
 class TestResolveWrapper:

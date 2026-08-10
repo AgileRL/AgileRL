@@ -380,7 +380,7 @@ Or via a YAML manifest:
     replay_buffer:
         max_size: 100_000
 
-    tournament_selection:
+    selection_strategy:
         tournament_size: 2
         elitism: true
 

@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any, Literal, TypeVar
 
 from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.hpo.mutation import Mutations
-from agilerl.hpo.tournament import TournamentSelection
+from agilerl.protocols import SelectionStrategyProtocol
 
 if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
     from agilerl.llm_envs import PreferenceGym, ReasoningGym
@@ -17,7 +17,7 @@ EnvT = TypeVar("EnvT", bound="ReasoningGym | PreferenceGym")
 
 def _validate_finetune_args(
     evo_steps: int | None,
-    tournament: TournamentSelection | None,
+    selection_strategy: SelectionStrategyProtocol | None,
     mutation: Mutations | None,
     num_epochs: int | None,
     max_steps: int | None,
@@ -28,14 +28,17 @@ def _validate_finetune_args(
     checkpoint_steps: int | None = None,
     algo: Literal["grpo", "dpo", "sft", "multiturn"],
 ) -> None:
-    if evo_steps is not None and (tournament is None or mutation is None):
+    if evo_steps is not None and (selection_strategy is None or mutation is None):
         warnings.warn(
-            "'evo_steps' is set but at least one of 'tournament' or 'mutation' "
-            "is set to None. Evolution will not take place.",
+            "'evo_steps' is set but at least one of 'selection_strategy' or "
+            "'mutation' is set to None. Evolution will not take place.",
             stacklevel=2,
         )
-    if (tournament is not None and mutation is not None) and evo_steps is None:
-        msg = "'evo_steps' must be set if 'tournament' and 'mutation' are not None."
+    if (selection_strategy is not None and mutation is not None) and evo_steps is None:
+        msg = (
+            "'evo_steps' must be set if 'selection_strategy' and 'mutation' "
+            "are not None."
+        )
         raise ValueError(msg)
     if num_epochs is not None and max_steps is not None:
         warnings.warn(
@@ -45,12 +48,14 @@ def _validate_finetune_args(
         )
 
     evo_active = (
-        evo_steps is not None and tournament is not None and mutation is not None
+        evo_steps is not None
+        and selection_strategy is not None
+        and mutation is not None
     )
     if checkpoint_steps is not None and evo_active:
         warnings.warn(
             "'checkpoint_steps' is set, but evolution is active ('evo_steps', "
-            "'tournament', and 'mutation'). Periodic step-based checkpoints "
+            "'selection_strategy', and 'mutation'). Periodic step-based checkpoints "
             "are skipped while evolution is enabled.",
             stacklevel=2,
         )

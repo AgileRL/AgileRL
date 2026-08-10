@@ -6,7 +6,6 @@
 Author: Nick (https://github.com/nicku-a)
 """
 
-import copy
 import os
 import random
 from collections import deque
@@ -19,12 +18,11 @@ import wandb
 import yaml
 from pettingzoo import ParallelEnv
 from pettingzoo.classic import connect_four_v3
-from tqdm import tqdm, trange
+from tensordict import TensorDict
+from tqdm import trange
 
 from agilerl.algorithms import DQN
-from agilerl.algorithms.core import OptimizerWrapper
 from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
-from agilerl.components.data import Transition
 from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
@@ -42,183 +40,6 @@ class CurriculumEnv:
     def __init__(self, env: ParallelEnv, lesson: dict):
         self.env = env
         self.lesson = lesson
-
-    def fill_replay_buffer(
-        self,
-        memory: ReplayBuffer,
-        opponent: "Opponent",
-    ) -> ReplayBuffer:
-        """Fill the replay buffer with experiences collected by taking random actions in the environment.
-
-        :param memory: Experience replay buffer
-        :type memory: AgileRL experience replay buffer
-        :param opponent: Opponent to train against
-        :type opponent: Opponent
-        :return: Filled replay buffer
-        :rtype: ReplayBuffer
-        """
-        print("Filling replay buffer ...")
-
-        pbar = tqdm(total=memory.max_size)
-        while len(memory) < memory.max_size:
-            # Randomly decide whether random player will go first or second
-            opponent_first = random.random() > 0.5
-
-            mem_full = len(memory)
-            self.reset()  # Reset environment at start of episode
-            observation, reward, done, truncation, _ = self.last()
-
-            (
-                p1_state,
-                p1_state_flipped,
-                p1_action,
-                p1_next_state,
-                p1_next_state_flipped,
-            ) = (None, None, None, None, None)
-            done, truncation = False, False
-
-            while not (done or truncation):
-                # Player 0's turn
-                p0_action_mask = observation["action_mask"]
-                p0_state, p0_state_flipped = transform_and_flip(observation, player=0)
-                if opponent_first:
-                    p0_action = self.env.action_space("player_0").sample(p0_action_mask)
-                elif self.lesson["warm_up_opponent"] == "random":
-                    p0_action = opponent.get_action(
-                        p0_action_mask,
-                        p1_action,
-                        self.lesson["block_vert_coef"],
-                    )
-                else:
-                    p0_action = opponent.get_action(player=0)
-                self.step(p0_action)  # Act in environment
-                observation, _, done, truncation, _ = self.last()
-                p0_next_state, p0_next_state_flipped = transform_and_flip(
-                    observation,
-                    player=0,
-                )
-
-                if done or truncation:
-                    reward = self.reward(done=True, player=0)
-                    transition = Transition(
-                        obs=np.concatenate(
-                            (p0_state, p1_state, p0_state_flipped, p1_state_flipped),
-                        ),
-                        action=np.array(
-                            [p0_action, p1_action, 6 - p0_action, 6 - p1_action],
-                        ),
-                        reward=np.array(
-                            [
-                                reward,
-                                self.lesson["rewards"]["lose"],
-                                reward,
-                                self.lesson["rewards"]["lose"],
-                            ],
-                        ),
-                        next_obs=np.concatenate(
-                            (
-                                p0_next_state,
-                                p1_next_state,
-                                p0_next_state_flipped,
-                                p1_next_state_flipped,
-                            ),
-                        ),
-                        done=np.array([done, done, done, done]),
-                        batch_size=[4],
-                    )
-                    memory.add(transition.to_tensordict())
-                else:  # Play continues
-                    if p1_state is not None:
-                        reward = self.reward(done=False, player=1)
-                        transition = Transition(
-                            obs=np.concatenate((p1_state, p1_state_flipped)),
-                            action=np.array([p1_action, 6 - p1_action]),
-                            reward=np.array([reward, reward]),
-                            next_obs=np.concatenate(
-                                (p1_next_state, p1_next_state_flipped),
-                            ),
-                            done=np.array([done, done]),
-                            batch_size=[2],
-                        )
-                        memory.add(transition.to_tensordict())
-
-                    # Player 1's turn
-                    p1_action_mask = observation["action_mask"]
-                    p1_state, p1_state_flipped = transform_and_flip(
-                        observation,
-                        player=1,
-                    )
-                    if not opponent_first:
-                        p1_action = self.env.action_space("player_1").sample(
-                            p1_action_mask,
-                        )
-                    elif self.lesson["warm_up_opponent"] == "random":
-                        p1_action = opponent.get_action(
-                            p1_action_mask,
-                            p0_action,
-                            self.lesson["block_vert_coef"],
-                        )
-                    else:
-                        p1_action = opponent.get_action(player=1)
-                    self.step(p1_action)  # Act in environment
-                    observation, _, done, truncation, _ = self.last()
-                    p1_next_state, p1_next_state_flipped = transform_and_flip(
-                        observation,
-                        player=1,
-                    )
-
-                    if done or truncation:
-                        reward = self.reward(done=True, player=1)
-                        transition = Transition(
-                            obs=np.concatenate(
-                                (
-                                    p0_state,
-                                    p1_state,
-                                    p0_state_flipped,
-                                    p1_state_flipped,
-                                ),
-                            ),
-                            action=np.array(
-                                [p0_action, p1_action, 6 - p0_action, 6 - p1_action],
-                            ),
-                            reward=np.array(
-                                [
-                                    self.lesson["rewards"]["lose"],
-                                    reward,
-                                    self.lesson["rewards"]["lose"],
-                                    reward,
-                                ],
-                            ),
-                            next_obs=np.concatenate(
-                                (
-                                    p0_next_state,
-                                    p1_next_state,
-                                    p0_next_state_flipped,
-                                    p1_next_state_flipped,
-                                ),
-                            ),
-                            done=np.array([done, done, done, done]),
-                            batch_size=[4],
-                        )
-                        memory.add(transition.to_tensordict())
-                    else:  # Play continues
-                        reward = self.reward(done=False, player=0)
-                        transition = Transition(
-                            obs=np.concatenate((p0_state, p0_state_flipped)),
-                            action=np.array([p0_action, 6 - p0_action]),
-                            reward=np.array([reward, reward]),
-                            next_obs=np.concatenate(
-                                (p0_next_state, p0_next_state_flipped),
-                            ),
-                            done=np.array([done, done]),
-                            batch_size=[2],
-                        )
-                        memory.add(transition.to_tensordict())
-
-            pbar.update(len(memory) - mem_full)
-        pbar.close()
-        print("Replay buffer warmed up.")
-        return memory
 
     def check_winnable(self, lst: list[int], piece: int) -> bool:
         """Checks if four pieces in a row represent a winnable opportunity, e.g. [1, 1, 1, 0] or [2, 0, 2, 2].
@@ -537,187 +358,282 @@ class Opponent:
         return (True, reward, ended) + ((lengths,) if return_length else ())
 
 
-def transform_and_flip(observation, player):
-    """Transforms and flips observation for input to agent's neural network.
+def agent_state(observation: dict) -> np.ndarray:
+    """Player-perspective CHW float state from a Connect-Four observation.
 
-    :param observation: Observation to preprocess
-    :type observation: dict[str, np.ndarray]
-    :param player: Player, 0 or 1
-    :type player: int
+    PettingZoo returns the observation from the *current* player's point of view,
+    so a plain channel-move is enough for whoever is to move (no plane swap).
+
+    :param observation: Raw PettingZoo observation dict.
+    :type observation: dict
+    :return: (channels, height, width) float32 array.
+    :rtype: numpy.ndarray
     """
-    state = observation["observation"]
-    # Pre-process dimensions for PyTorch (N, C, H, W)
-    state = np.moveaxis(state, -1, -3)
-    if player == 1:
-        # Swap pieces so that the agent always sees the board from the same perspective
-        state[[0, 1], :, :] = state[[1, 0], :, :]
-    state_flipped = np.expand_dims(np.flip(state, 2), 0)
-    state = np.expand_dims(state, 0)
-    return state, state_flipped
+    return np.moveaxis(observation["observation"], -1, -3).astype(np.float32)
+
+
+class ConnectFourVecEnv:
+    """Vectorized self-play Connect Four as a single-agent MDP.
+
+    ``num_envs`` games are stepped in lockstep with the opponent embedded in
+    :meth:`step`, so one batched ``get_action`` drives them all. Buffers are
+    preallocated and written in place, and terminated games auto-reset. A fixed
+    ``num_envs`` keeps the agent's batch shapes static for CUDA graph capture.
+
+    :param num_envs: Number of parallel games.
+    :type num_envs: int
+    :param lesson: Curriculum lesson settings (opponent, rewards, ...).
+    :type lesson: dict
+    :param opponent_policy: Frozen agent used as the opponent for self-play
+        (``lesson['opponent'] == 'self'``); ``None`` for rule-based opponents.
+    :type opponent_policy: DQN | None
+    """
+
+    def __init__(self, num_envs: int, lesson: dict, opponent_policy=None):
+        self.num_envs = num_envs
+        self.lesson = lesson
+        self.opponent_policy = opponent_policy
+        raw = connect_four_v3.env().observation_space("player_0")["observation"]
+        self.single_observation_space = gym.spaces.Box(
+            low=raw.low.transpose(2, 0, 1),
+            high=raw.high.transpose(2, 0, 1),
+            dtype=np.float32,
+        )
+        self.single_action_space = connect_four_v3.env().action_space("player_0")
+        self.observations = np.zeros(
+            (num_envs, *self.single_observation_space.shape), dtype=np.float32
+        )
+        self.masks = np.ones((num_envs, 7), dtype=np.int8)
+        self.rewards = np.zeros(num_envs, dtype=np.float32)
+        self.terminals = np.zeros(num_envs, dtype=bool)
+        self.games = [
+            CurriculumEnv(connect_four_v3.env(), lesson) for _ in range(num_envs)
+        ]
+        self.rule_opponents = (
+            [Opponent(g, difficulty=lesson["opponent"]) for g in self.games]
+            if lesson["opponent"] != "self"
+            else None
+        )
+
+    def transition(
+        self, prev_observations: np.ndarray, actions: np.ndarray
+    ) -> TensorDict:
+        """Build one batched replay transition from the pre-step obs and current buffers."""
+        n = self.num_envs
+        return TensorDict(
+            {
+                "obs": torch.from_numpy(prev_observations.copy()),
+                "action": torch.from_numpy(np.asarray(actions, dtype=np.int64)).reshape(
+                    n, 1
+                ),
+                "reward": torch.from_numpy(self.rewards.copy()).reshape(n, 1),
+                "next_obs": torch.from_numpy(self.observations.copy()),
+                "done": torch.from_numpy(self.terminals.astype(np.float32)).reshape(
+                    n, 1
+                ),
+            },
+            batch_size=[n],
+        )
+
+    def _write_obs(self, i: int) -> None:
+        obs, _, _, _, _ = self.games[i].last()
+        self.observations[i] = agent_state(obs)
+        self.masks[i] = obs["action_mask"]
+
+    def _reset_game(self, i: int) -> None:
+        self.games[i].reset()
+        self._write_obs(i)
+
+    def reset(self, seed: int | None = None) -> None:
+        """Reset every game and fill the observation/mask buffers in place."""
+        for i in range(self.num_envs):
+            self._reset_game(i)
+        self.terminals[:] = False
+
+    def _opponent_actions(self, pending: list[int]) -> list[int]:
+        """Opponent (player_1) moves for the games in ``pending``."""
+        if not pending:
+            return []
+        if self.opponent_policy is not None:
+            # self-play: one batched greedy forward through the frozen opponent net
+            obs = np.stack([agent_state(self.games[i].last()[0]) for i in pending])
+            masks = np.stack([self.games[i].last()[0]["action_mask"] for i in pending])
+            return list(
+                self.opponent_policy.get_action(obs, epsilon=0.0, action_mask=masks)
+            )
+        # 'random' takes the action mask; 'weak'/'strong' introspect the board.
+        if self.lesson["opponent"] == "random":
+            block = self.lesson.get("block_vert_coef", 1)
+            return [
+                self.rule_opponents[i].get_action(
+                    self.games[i].last()[0]["action_mask"], None, block
+                )
+                for i in pending
+            ]
+        return [self.rule_opponents[i].get_action(player=1) for i in pending]
+
+    def step(self, actions: np.ndarray) -> None:
+        """Apply agent actions, play the opponent's reply, write buffers, auto-reset."""
+        pending = []
+        for i, g in enumerate(self.games):
+            g.step(int(actions[i]))
+            _, _, done, trunc, _ = g.last()
+            if done or trunc:
+                self.rewards[i] = g.reward(done=True, player=0)
+                self.terminals[i] = True
+                self._reset_game(i)
+            else:
+                pending.append(i)
+        opp_actions = self._opponent_actions(pending)
+        for j, i in enumerate(pending):
+            g = self.games[i]
+            g.step(int(opp_actions[j]))
+            _, _, done, trunc, _ = g.last()
+            if done or trunc:
+                self.rewards[i] = self.lesson["rewards"]["lose"]
+                self.terminals[i] = True
+                self._reset_game(i)
+            else:
+                self.rewards[i] = g.reward(done=False, player=0)
+                self.terminals[i] = False
+                self._write_obs(i)
+
+
+@torch.no_grad()
+def evaluate(agent, lesson, num_envs: int, n_games: int = 192) -> float:
+    """Greedy win-rate vs the eval opponent, played on ``num_envs`` parallel games.
+
+    Uses the same ``num_envs`` as training so the CUDA-graph-captured
+    ``get_action`` always sees the same static batch shape.
+    """
+    eval_lesson = dict(lesson, opponent=lesson["eval_opponent"])
+    venv = ConnectFourVecEnv(num_envs, eval_lesson)
+    venv.reset()
+    wins = done = 0
+    while done < n_games:
+        actions = agent.get_action(
+            venv.observations, epsilon=0.0, action_mask=venv.masks
+        )
+        venv.step(np.asarray(actions))
+        for i in range(num_envs):
+            if venv.terminals[i]:
+                wins += venv.rewards[i] >= lesson["rewards"]["win"] * 0.9
+                done += 1
+    return wins / max(done, 1)
 
 
 if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print("===== AgileRL Curriculum Learning Demo =====")
+    print("===== AgileRL Curriculum Learning Demo (vectorized + CUDA graphs) =====")
+
+    # Fixed so the agent's batch shapes stay static for CUDA graph capture.
+    NUM_ENVS = 32
+    # Replays a step's kernel launches as one call, removing the CPU dispatch
+    # overhead that dominates small networks. Needs static shapes.
+    USE_CUDAGRAPHS = device.type == "cuda"
 
     for lesson_number in range(1, 5):
-        # Load lesson for curriculum
         with open(f"./curriculums/connect_four/lesson{lesson_number}.yaml") as file:
             LESSON = yaml.safe_load(file)
 
-        # Network configuration
         net_config = {
             "encoder_config": {
                 "channel_size": [128],
                 "kernel_size": [4],
                 "stride_size": [1],
             },
-            "head_config": {
-                "hidden_size": [64, 64],
-            },
+            "head_config": {"hidden_size": [64, 64]},
         }
-
-        # Algorithm hyperparameters
         init_hp = {
             "double": True,
-            "batch_size": 256,
+            "batch_size": 256,  # fixed (not mutated) so the CUDA graph stays valid
             "lr": 1e-4,
             "gamma": 0.99,
             "learn_step": 1,
             "tau": 0.01,
         }
-
         population_size = 6
         memory_size = 10000
 
-        # Define the connect four environment
-        env = connect_four_v3.env()
-        env.reset()
+        probe = ConnectFourVecEnv(NUM_ENVS, LESSON)
+        observation_space = probe.single_observation_space
+        action_space = probe.single_action_space
 
-        # Configure the algo input arguments
-        observation_spaces = [env.observation_space(agent) for agent in env.agents]
-        action_spaces = [env.action_space(agent) for agent in env.agents]
-
-        # Warp the environment in the curriculum learning wrapper
-        env = CurriculumEnv(env, LESSON)
-
-        # Pre-process dimensions for PyTorch layers
-        # We only need to worry about the state dim of a single agent
-        # Transpose observation space from (6, 7, 2) HWC to (2, 6, 7) CHW
-        raw_space = observation_spaces[0]["observation"]
-        observation_space = gym.spaces.Box(
-            low=raw_space.low.transpose(2, 0, 1),
-            high=raw_space.high.transpose(2, 0, 1),
-            dtype=raw_space.dtype,
-        )
-
-        # Mutation config for RL hyperparameters
+        # batch_size is not mutated: it would invalidate the captured CUDA graph.
         hp_config = HyperparameterConfig(
             lr=RLParameter(min=1e-4, max=1e-2),
-            batch_size=RLParameter(min=8, max=64, dtype=int),
             learn_step=RLParameter(
-                min=1,
-                max=120,
-                dtype=int,
-                grow_factor=1.5,
-                shrink_factor=0.75,
+                min=1, max=120, dtype=int, grow_factor=1.5, shrink_factor=0.75
             ),
         )
 
-        # Create a population ready for evolutionary hyper-parameter optimisation
         pop = DQN.population(
             size=population_size,
             observation_space=observation_space,
-            action_space=action_spaces[0],
+            action_space=action_space,
             net_config=net_config,
             hp_config=hp_config,
             device=device,
+            cudagraphs=USE_CUDAGRAPHS,
             **init_hp,
         )
 
-        # Configure the replay buffer
-        memory = ReplayBuffer(
-            max_size=memory_size,
-            device=device,
-        )
-
-        # Instantiate a tournament selection object (used for HPO)
+        memory = ReplayBuffer(max_size=memory_size, device=device)
         tournament = TournamentSelection(
-            tournament_size=2,  # Tournament selection size
-            elitism=True,  # Elitism in tournament selection
-            population_size=population_size,  # Population size
+            tournament_size=2, elitism=True, population_size=population_size
         )
-
-        # Instantiate a mutations object (used for HPO)
         mutations = Mutations(
-            no_mutation=0.2,  # Probability of no mutation
-            architecture=0,  # Probability of architecture mutation
-            new_layer_prob=0.2,  # Probability of new layer mutation
-            parameters=0.2,  # Probability of parameter mutation
-            activation=0,  # Probability of activation function mutation
-            rl_hp=0.2,  # Probability of RL hyperparameter mutation
-            mutation_sd=0.1,  # Mutation strength
+            no_mutation=0.2,
+            architecture=0,
+            new_layer_prob=0.2,
+            parameters=0.2,
+            activation=0,
+            rl_hp=0.2,
+            mutation_sd=0.1,
             rand_seed=1,
             device=device,
         )
 
-        # Define training loop parameters
-        episodes_per_epoch = 10
-        max_episodes = LESSON["max_train_episodes"]  # Total episodes
-        max_steps = 500  # Maximum steps to take in each episode
-        evo_epochs = 20  # Evolution frequency
-        evo_loop = 50  # Number of evaluation episodes
-        elite = pop[0]  # Assign a placeholder "elite" agent
-        epsilon = 1.0  # Starting epsilon value
-        eps_end = 0.1  # Final epsilon value
-        eps_decay = 0.9998  # Epsilon decays
-        opp_update_counter = 0
+        # Training-loop parameters
+        max_episodes = LESSON["max_train_episodes"]
+        evo_epochs = 5  # evolve every N vectorized rollout blocks
+        block_steps = 100  # batched steps per agent per block
+        epsilon, eps_end, eps_decay = 1.0, 0.1, 0.9995
 
         if LESSON["pretrained_path"] is not None:
             for agent in pop:
-                # Load pretrained checkpoint
                 agent.load_checkpoint(LESSON["pretrained_path"])
-                # Reinit optimizer for new task
-                agent.lr = init_hp["lr"]
-                agent.optimizer = OptimizerWrapper(
-                    torch.optim.Adam,
-                    networks=agent.actor,
-                    lr=agent.lr,
-                    network_names=agent.optimizer.network_names,
-                    lr_name=agent.optimizer.lr_name,
-                    optimizer_kwargs={"capturable": agent.capturable},
-                )
 
+        opponent_pool = None
         if LESSON["opponent"] == "self":
-            # Create initial pool of opponents
             opponent_pool = deque(maxlen=LESSON["opponent_pool_size"])
             for _ in range(LESSON["opponent_pool_size"]):
-                opp = copy.deepcopy(pop[0])
-                opp.actor.load_state_dict(pop[0].actor.state_dict())
-                opp.actor.eval()
-                opponent_pool.append(opp)
+                opponent_pool.append(pop[0].clone())
 
-        # Perform buffer and agent warmups if desired
+        # Buffer + agent warm-up (vectorized random rollout)
         if LESSON["buffer_warm_up"]:
-            warm_up_opponent = Opponent(env, difficulty=LESSON["warm_up_opponent"])
-
-            # Fill replay buffer with transitions
-            memory = env.fill_replay_buffer(memory, warm_up_opponent)
+            warm_lesson = dict(LESSON, opponent=LESSON["warm_up_opponent"])
+            warm_env = ConnectFourVecEnv(NUM_ENVS, warm_lesson)
+            warm_env.reset()
+            print("Filling replay buffer ...")
+            while len(memory) < memory.max_size:
+                acts = np.array(
+                    [
+                        random.choices(range(7), warm_env.masks[i])[0]
+                        for i in range(NUM_ENVS)
+                    ]
+                )
+                prev = warm_env.observations.copy()
+                warm_env.step(acts)
+                memory.add(warm_env.transition(prev, acts))
             if LESSON["agent_warm_up"] > 0:
                 print("Warming up agents ...")
-                agent = pop[0]
-                # Train on randomly collected samples
-                for _ in trange(LESSON["agent_warm_up"]):
-                    experiences = memory.sample(agent.batch_size)
-                    agent.learn(experiences)
-
-                pop = [agent.clone() for _ in pop]
-                elite = agent
-                print("Agent population warmed up.")
+                for agent in pop:
+                    for _ in range(LESSON["agent_warm_up"]):
+                        agent.learn(memory.sample(agent.batch_size))
 
         if max_episodes > 0:
             wandb.init(
-                # set the wandb project where this run will be logged
                 project="AgileRL",
                 name="{}-EvoHPO-{}-{}Opposition-CNN-{}".format(
                     "connect_four_v3",
@@ -733,364 +649,51 @@ if __name__ == "__main__":
                 },
             )
 
+        elite = pop[0]
         total_steps = 0
-        total_episodes = 0
-        pbar = trange(int(max_episodes / episodes_per_epoch))
+        # Each step collects NUM_ENVS transitions.
+        n_blocks = 0 if max_episodes == 0 else 25
 
-        # Training loop
-        for idx_epi in pbar:
-            turns_per_episode = []
-            for agent in pop:  # Loop through population
-                for _ in range(episodes_per_epoch):
-                    env.reset()  # Reset environment at start of episode
-                    observation, cumulative_reward, done, truncation, _ = env.last()
-
-                    (
-                        p1_state,
-                        p1_state_flipped,
-                        p1_action,
-                        p1_next_state,
-                        p1_next_state_flipped,
-                    ) = (None, None, None, None, None)
-
-                    if LESSON["opponent"] == "self":
-                        # Randomly choose opponent from opponent pool if using self-play
-                        opponent = random.choice(opponent_pool)
-                    else:
-                        # Create opponent of desired difficulty
-                        opponent = Opponent(env, difficulty=LESSON["opponent"])
-
-                    # Randomly decide whether agent will go first or second
-                    opponent_first = random.random() > 0.5
-
-                    score = 0
-                    turns = 0  # Number of turns counter
-                    for idx_step in range(max_steps):
-                        # Player 0"s turn
-                        p0_action_mask = observation["action_mask"]
-                        p0_state, p0_state_flipped = transform_and_flip(
-                            observation,
-                            player=0,
-                        )
-
-                        if opponent_first:
-                            if LESSON["opponent"] == "self":
-                                p0_action = opponent.get_action(
-                                    p0_state,
-                                    0,
-                                    p0_action_mask,
-                                )[0]
-                            elif LESSON["opponent"] == "random":
-                                p0_action = opponent.get_action(
-                                    p0_action_mask,
-                                    p1_action,
-                                    LESSON["block_vert_coef"],
-                                )
-                            else:
-                                p0_action = opponent.get_action(player=0)
-                        else:
-                            p0_action = agent.get_action(
-                                p0_state,
-                                epsilon,
-                                p0_action_mask,
-                            )[0]  # Get next action from agent
-                        env.step(p0_action)  # Act in environment
-                        observation, cumulative_reward, done, truncation, _ = env.last()
-                        p0_next_state, p0_next_state_flipped = transform_and_flip(
-                            observation,
-                            player=0,
-                        )
-                        if not opponent_first:
-                            score = cumulative_reward
-                        turns += 1
-
-                        # Check if game is over (Player 0 win)
-                        if done or truncation:
-                            reward = env.reward(done=True, player=0)
-                            transition = Transition(
-                                obs=np.concatenate(
-                                    (
-                                        p0_state,
-                                        p1_state,
-                                        p0_state_flipped,
-                                        p1_state_flipped,
-                                    ),
-                                ),
-                                action=np.array(
-                                    [
-                                        p0_action,
-                                        p1_action,
-                                        6 - p0_action,
-                                        6 - p1_action,
-                                    ],
-                                ),
-                                reward=np.array(
-                                    [
-                                        reward,
-                                        LESSON["rewards"]["lose"],
-                                        reward,
-                                        LESSON["rewards"]["lose"],
-                                    ],
-                                ),
-                                next_obs=np.concatenate(
-                                    (
-                                        p0_next_state,
-                                        p1_next_state,
-                                        p0_next_state_flipped,
-                                        p1_next_state_flipped,
-                                    ),
-                                ),
-                                done=np.array([done, done, done, done]),
-                                batch_size=[4],
-                            )
-                            memory.add(transition.to_tensordict())
-                        else:  # Play continues
-                            if p1_state is not None:
-                                reward = env.reward(done=False, player=1)
-                                transition = Transition(
-                                    obs=np.concatenate((p1_state, p1_state_flipped)),
-                                    action=np.array([p1_action, 6 - p1_action]),
-                                    reward=np.array([reward, reward]),
-                                    next_obs=np.concatenate(
-                                        (p1_next_state, p1_next_state_flipped),
-                                    ),
-                                    done=np.array([done, done]),
-                                    batch_size=[2],
-                                )
-                                memory.add(transition.to_tensordict())
-
-                            # Player 1"s turn
-                            p1_action_mask = observation["action_mask"]
-                            p1_state, p1_state_flipped = transform_and_flip(
-                                observation,
-                                player=1,
-                            )
-
-                            if not opponent_first:
-                                if LESSON["opponent"] == "self":
-                                    p1_action = opponent.get_action(
-                                        p1_state,
-                                        0,
-                                        p1_action_mask,
-                                    )[0]
-                                elif LESSON["opponent"] == "random":
-                                    p1_action = opponent.get_action(
-                                        p1_action_mask,
-                                        p0_action,
-                                        LESSON["block_vert_coef"],
-                                    )
-                                else:
-                                    p1_action = opponent.get_action(player=1)
-                            else:
-                                p1_action = agent.get_action(
-                                    p1_state,
-                                    epsilon,
-                                    p1_action_mask,
-                                )[0]  # Get next action from agent
-                            env.step(p1_action)  # Act in environment
-                            observation, cumulative_reward, done, truncation, _ = (
-                                env.last()
-                            )
-                            p1_next_state, p1_next_state_flipped = transform_and_flip(
-                                observation,
-                                player=1,
-                            )
-
-                            if opponent_first:
-                                score = cumulative_reward
-                            turns += 1
-
-                            # Check if game is over (Player 1 win)
-                            if done or truncation:
-                                reward = env.reward(done=True, player=1)
-                                transition = Transition(
-                                    obs=np.concatenate(
-                                        (
-                                            p0_state,
-                                            p1_state,
-                                            p0_state_flipped,
-                                            p1_state_flipped,
-                                        ),
-                                    ),
-                                    action=np.array(
-                                        [
-                                            p0_action,
-                                            p1_action,
-                                            6 - p0_action,
-                                            6 - p1_action,
-                                        ],
-                                    ),
-                                    reward=np.array(
-                                        [
-                                            reward,
-                                            LESSON["rewards"]["lose"],
-                                            reward,
-                                            LESSON["rewards"]["lose"],
-                                        ],
-                                    ),
-                                    next_obs=np.concatenate(
-                                        (
-                                            p0_next_state,
-                                            p1_next_state,
-                                            p0_next_state_flipped,
-                                            p1_next_state_flipped,
-                                        ),
-                                    ),
-                                    done=np.array([done, done, done, done]),
-                                    batch_size=[4],
-                                )
-                                memory.add(transition.to_tensordict())
-                            else:  # Play continues
-                                reward = env.reward(done=False, player=0)
-                                transition = Transition(
-                                    obs=np.concatenate((p0_state, p0_state_flipped)),
-                                    action=np.array([p0_action, 6 - p0_action]),
-                                    reward=np.array([reward, reward]),
-                                    next_obs=np.concatenate(
-                                        (p0_next_state, p0_next_state_flipped),
-                                    ),
-                                    done=np.array([done, done]),
-                                    batch_size=[2],
-                                )
-                                memory.add(transition.to_tensordict())
-
-                        # Learn according to learning frequency
-                        if (memory.counter % agent.learn_step == 0) and (
-                            len(memory) >= agent.batch_size
-                        ):
-                            # Sample replay buffer
-                            # Learn according to agent"s RL algorithm
-                            experiences = memory.sample(agent.batch_size)
-                            agent.learn(experiences)
-
-                        # Stop episode if any agents have terminated
-                        if done or truncation:
-                            break
-
-                    total_steps += idx_step + 1
-                    total_episodes += 1
-                    turns_per_episode.append(turns)
-                    # Save the total episode reward
-                    agent.scores.append(score)
-
+        pbar = trange(n_blocks)
+        for block in pbar:
+            for agent in pop:
+                opp = (
+                    random.choice(opponent_pool) if opponent_pool is not None else None
+                )
+                venv = ConnectFourVecEnv(NUM_ENVS, LESSON, opponent_policy=opp)
+                venv.reset()
+                for agent_step in range(block_steps):
+                    prev = venv.observations.copy()
+                    actions = agent.get_action(venv.observations, epsilon, venv.masks)
+                    venv.step(np.asarray(actions))
+                    memory.add(venv.transition(prev, np.asarray(actions)))
                     if (
-                        LESSON["opponent"] == "self"
-                        and (total_episodes % LESSON["opponent_upgrade"] == 0)
-                        and ((idx_epi + 1) > evo_epochs)
+                        len(memory) >= agent.batch_size
+                        and agent_step % agent.learn_step == 0
                     ):
-                        elite_opp, _, _ = tournament._elitism(pop)
-                        elite_opp.actor.eval()
-                        opponent_pool.append(elite_opp)
-                        opp_update_counter += 1
-
-                # Update epsilon for exploration
+                        agent.learn(memory.sample(agent.batch_size))
+                    total_steps += NUM_ENVS
                 epsilon = max(eps_end, epsilon * eps_decay)
 
-            mean_turns = np.mean(turns_per_episode)
+            # Self-play: refresh the opponent pool with the current elite
+            if opponent_pool is not None and (block + 1) % evo_epochs == 0:
+                elite_opp, _, _ = tournament._elitism(pop)
+                opponent_pool.append(elite_opp.clone())
 
-            # Now evolve population if necessary
-            if (idx_epi + 1) % evo_epochs == 0:
-                # Evaluate population vs random actions
-                fitnesses = []
-                eval_turns = 0  # Eval turns counter
-                for agent in pop:
-                    with torch.no_grad():
-                        rewards = []
-                        for _ in range(evo_loop):
-                            env.reset()  # Reset environment at start of episode
-                            observation, cumulative_reward, done, truncation, _ = (
-                                env.last()
-                            )
-
-                            player = -1  # Tracker for which player"s turn it is
-
-                            # Create opponent of desired difficulty
-                            opponent = Opponent(env, difficulty=LESSON["eval_opponent"])
-
-                            # Randomly decide whether agent will go first or second
-                            opponent_first = not random.random() > 0.5
-
-                            score = 0
-
-                            for _ in range(max_steps):
-                                action_mask = observation["action_mask"]
-                                if player < 0:
-                                    if opponent_first:
-                                        if LESSON["eval_opponent"] == "random":
-                                            action = opponent.get_action(action_mask)
-                                        else:
-                                            action = opponent.get_action(player=0)
-                                    else:
-                                        state = np.moveaxis(
-                                            observation["observation"],
-                                            [-1],
-                                            [-3],
-                                        )
-                                        state = np.expand_dims(state, 0)
-                                        action = agent.get_action(
-                                            state,
-                                            0,
-                                            action_mask,
-                                        )[0]  # Get next action from agent
-                                if player > 0:
-                                    if not opponent_first:
-                                        if LESSON["eval_opponent"] == "random":
-                                            action = opponent.get_action(action_mask)
-                                        else:
-                                            action = opponent.get_action(player=1)
-                                    else:
-                                        state = np.moveaxis(
-                                            observation["observation"],
-                                            [-1],
-                                            [-3],
-                                        )
-                                        state[[0, 1], :, :] = state[[1, 0], :, :]
-                                        state = np.expand_dims(state, 0)
-                                        action = agent.get_action(
-                                            state,
-                                            0,
-                                            action_mask,
-                                        )[0]  # Get next action from agent
-
-                                env.step(action)  # Act in environment
-                                observation, cumulative_reward, done, truncation, _ = (
-                                    env.last()
-                                )
-
-                                if (player > 0 and opponent_first) or (
-                                    player < 0 and not opponent_first
-                                ):
-                                    score = cumulative_reward
-
-                                eval_turns += 1
-
-                                if done or truncation:
-                                    break
-
-                                player *= -1
-
-                            rewards.append(score)
-                    mean_fit = np.mean(rewards)
-                    agent.fitness.append(mean_fit)
-                    fitnesses.append(mean_fit)
-
-                eval_turns = eval_turns / len(pop) / evo_loop
-
-                pbar.set_postfix_str(
-                    f"Train Mean Score: {np.mean(agent.scores[-episodes_per_epoch:])} "
-                    f"Train Mean Turns: {mean_turns} "
-                    f"Eval Mean Fitness: {np.mean(fitnesses)} "
-                    f"Eval Best Fitness: {np.max(fitnesses)} "
-                    f"Eval Mean Turns: {eval_turns} "
-                    f"Total Steps: {total_steps}",
-                )
-                pbar.update(0)
-
-                # Tournament selection and population mutation
-                elite, pop = tournament.select(pop)
+            if (block + 1) % evo_epochs == 0:
+                fitnesses = [evaluate(agent, LESSON, NUM_ENVS) for agent in pop]
+                for agent, fit in zip(pop, fitnesses):
+                    agent.metrics.add_fitness(fit)
+                elite, pop, _ = tournament.select(pop)
                 pop = mutations.mutation(pop)
+                pbar.set_postfix_str(
+                    f"Lesson {lesson_number}  Eval win-rate (best): {max(fitnesses):.2f}  "
+                    f"Total steps: {total_steps}"
+                )
 
-        # Save the trained agent
+        if max_episodes > 0:
+            wandb.finish()
+
         save_path = LESSON["save_path"]
         os.makedirs(os.path.dirname(save_path), exist_ok=True)
         elite.save_checkpoint(save_path)

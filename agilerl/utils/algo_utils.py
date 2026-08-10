@@ -6,7 +6,8 @@ import os
 import shutil
 import warnings
 from collections import OrderedDict, defaultdict
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from functools import singledispatch
 from numbers import Number
@@ -25,6 +26,7 @@ import numpy as np
 import numpy.typing as npt
 import torch
 import torch.nn.functional as F
+from accelerate import Accelerator
 from gymnasium import spaces
 from tensordict import TensorDict, from_module
 from tensordict.nn import CudaGraphModule
@@ -35,6 +37,7 @@ from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
 from typing_extensions import TypeVarTuple, Unpack
 
 from agilerl import HAS_LLM_DEPENDENCIES
+from agilerl.modules.custom_components import NoisyLinear
 from agilerl.modules.dummy import DummyEvolvable
 from agilerl.protocols import (
     EvolvableAttributeType,
@@ -68,14 +71,96 @@ if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
     from peft import PeftConfig, PeftModel, get_peft_model
     from transformers import PreTrainedModel
 
-    from agilerl.utils.llm_utils import gather_if_zero3
-
     PreTrainedModelType = PeftModel | PreTrainedModel
 else:
     # Annotations referencing PreTrainedModelType are evaluated at function
     # definition time, so provide a runtime placeholder when the LLM
     # dependencies are not installed.
     PreTrainedModelType = Any
+
+
+# Layers whose forward output differs between train() and eval() mode.
+MODE_SENSITIVE_MODULES = (
+    nn.modules.batchnorm._BatchNorm,
+    nn.modules.instancenorm._InstanceNorm,
+    nn.modules.dropout._DropoutNd,
+    NoisyLinear,
+)
+
+
+def is_train_eval_invariant(module: nn.Module) -> bool:
+    """Whether ``module`` produces identical outputs in train and eval mode.
+
+    :param module: Network to inspect.
+    :type module: torch.nn.Module
+    :return: True if train/eval modes are equivalent.
+    :rtype: bool
+    """
+    return not any(isinstance(m, MODE_SENSITIVE_MODULES) for m in module.modules())
+
+
+@contextmanager
+def eval_mode(*modules: nn.Module, mode_invariant: bool) -> Iterator[None]:
+    """Put ``modules`` in eval mode for the block, restoring train mode afterwards.
+
+    Does nothing when ``mode_invariant``, since the toggle would be a no-op and
+    each call otherwise walks the whole module tree twice.
+
+    :param modules: Networks to switch into eval mode.
+    :type modules: torch.nn.Module
+    :param mode_invariant: Whether train and eval modes are equivalent.
+    :type mode_invariant: bool
+    """
+    if mode_invariant:
+        yield
+        return
+
+    for module in modules:
+        module.eval()
+    try:
+        yield
+    finally:
+        for module in modules:
+            module.train()
+
+
+@torch.no_grad()
+def polyak_update(source: nn.Module, target: nn.Module, tau: float) -> None:
+    """Update ``target <- tau * source + (1 - tau) * target``, fused across parameters.
+
+    :param source: Network whose parameters are copied from.
+    :type source: torch.nn.Module
+    :param target: Target network updated in place.
+    :type target: torch.nn.Module
+    :param tau: Interpolation weight toward ``source``.
+    :type tau: float
+    """
+    torch._foreach_lerp_(list(target.parameters()), list(source.parameters()), tau)
+
+
+def adam_kwargs(
+    device: str | torch.device,
+    accelerator: Accelerator | None = None,
+    **kwargs: Any,
+) -> dict[str, Any]:
+    """Add ``fused=True`` to Adam kwargs when the fused CUDA kernel is usable.
+
+    :param device: Device the optimizer's parameters live on.
+    :type device: str | torch.device
+    :param accelerator: Accelerator owning the step, if any.
+    :type accelerator: accelerate.Accelerator | None
+    :param kwargs: Base optimizer keyword arguments to augment.
+    :return: ``kwargs``, with ``fused=True`` added when applicable.
+    :rtype: dict[str, Any]
+    """
+    if (
+        "fused" not in kwargs
+        and not kwargs.get("capturable")
+        and accelerator is None
+        and "cuda" in str(device)
+    ):
+        kwargs["fused"] = True
+    return kwargs
 
 
 def configure_tf32_precision() -> None:
@@ -2482,53 +2567,70 @@ def clone_llm(
         case _:
             msg = f"Invalid 'original_model' type: {type(original_model)}"
             raise ValueError(msg)
-    with gather_if_zero3(zero_stage, list(source_model.parameters())):
-        model_config = source_model.config
-        base_model = source_model.model
-        assert isinstance(base_model, nn.Module)
-        model: nn.Module = type(base_model)(model_config)
-        adapter_names: list[str] = []
+    model_config = source_model.config
+    base_model = source_model.model
+    assert isinstance(base_model, nn.Module)
+    model: nn.Module = type(base_model)(model_config)
+    adapter_names: list[str] = []
 
-        # Any model carrying peft_config has adapters to copy, including
-        # wrappers that are not PeftModel subclasses. The attribute is dynamic,
-        # so pin the adapter-name/config pairs to their concrete peft types.
-        if hasattr(source_model, "peft_config"):
-            raw_peft_config = source_model.peft_config
-            assert is_str_keyed_dict(raw_peft_config)
-            peft_configs: dict[str, PeftConfig] = {
-                name: config
-                for name, config in raw_peft_config.items()
-                if isinstance(config, PeftConfig)
-            }
-            adapter_names = list(peft_configs.keys())
+    # Any model carrying peft_config has adapters to copy, including
+    # wrappers that are not PeftModel subclasses. The attribute is dynamic,
+    # so pin the adapter-name/config pairs to their concrete peft types.
+    if hasattr(source_model, "peft_config"):
+        raw_peft_config = source_model.peft_config
+        assert is_str_keyed_dict(raw_peft_config)
+        peft_configs: dict[str, PeftConfig] = {
+            name: config
+            for name, config in raw_peft_config.items()
+            if isinstance(config, PeftConfig)
+        }
+        adapter_names = list(peft_configs.keys())
 
-            if len(adapter_names) > 1:
-                warnings.warn(
-                    "Multiple adapters detected. Only the first adapter will be used for RL finetuning.",
-                    stacklevel=2,
-                )
-            # AgileRL standardizes on adapter name "actor" for the primary adapter.
-            first_adapter = adapter_names[0]
-            model = get_peft_model(
-                model, peft_configs[first_adapter], adapter_name="actor"
+        if len(adapter_names) > 1:
+            warnings.warn(
+                "Multiple adapters detected. Only the first adapter will be used for RL finetuning.",
+                stacklevel=2,
+            )
+        # AgileRL standardizes on adapter name "actor" for the primary adapter.
+        first_adapter = adapter_names[0]
+        keep_adapter_base_dtype = zero_stage == 3
+        model = get_peft_model(
+            model,
+            peft_configs[first_adapter],
+            adapter_name="actor",
+            autocast_adapter_dtype=not keep_adapter_base_dtype,
+        )
+
+        # Add remaining adapters using add_adapter
+        for adapter_name in adapter_names[1:]:
+            model.add_adapter(
+                peft_config=peft_configs[adapter_name],
+                adapter_name=adapter_name,
+                autocast_adapter_dtype=not keep_adapter_base_dtype,
+            )
+        if keep_adapter_base_dtype:
+            for name, param in model.named_parameters():
+                if "lora" in name and param.dtype != torch.bfloat16:
+                    param.data = param.data.to(torch.bfloat16)
+        expert_targets = getattr(peft_configs[first_adapter], "target_parameters", None)
+        if isinstance(expert_targets, (list, tuple)) and expert_targets:
+            # Lazy import avoids a circular dependency with algorithms -> registry -> algo_utils.
+            from agilerl.algorithms.core.llm_ops.moe_lora import (
+                upgrade_moe_param_wrappers,
             )
 
-            # Add remaining adapters using add_adapter
-            for adapter_name in adapter_names[1:]:
-                model.add_adapter(
-                    peft_config=peft_configs[adapter_name], adapter_name=adapter_name
-                )
-            model.disable_adapter()
+            upgrade_moe_param_wrappers(model)
+        model.disable_adapter()
 
-        if state_dict is not None:
-            sd = state_dict
-            if adapter_names and adapter_names[0] != "actor":
-                sd = _rename_peft_primary_adapter_keys_in_state_dict(
-                    sd,
-                    old_adapter=adapter_names[0],
-                    new_adapter="actor",
-                )
-            model.load_state_dict(sd, strict=False)
+    if state_dict is not None:
+        sd = state_dict
+        if adapter_names and adapter_names[0] != "actor":
+            sd = _rename_peft_primary_adapter_keys_in_state_dict(
+                sd,
+                old_adapter=adapter_names[0],
+                new_adapter="actor",
+            )
+        model.load_state_dict(sd, strict=False)
     return model
 
 
@@ -2579,6 +2681,17 @@ class DummyOptimizer:
         )
 
 
+def _match_action_ndims(
+    reference: npt.NDArray, other: npt.NDArray
+) -> tuple[npt.NDArray, npt.NDArray]:
+    """Prepend singleton axes until continuous action arrays share the same ndim."""
+    while other.ndim < reference.ndim:
+        other = np.expand_dims(other, 0)
+    while reference.ndim < other.ndim:
+        reference = np.expand_dims(reference, 0)
+    return reference, other
+
+
 def _reconcile_shapes(
     reference: npt.NDArray, other: npt.NDArray, discrete_actions: bool
 ) -> tuple[npt.NDArray, npt.NDArray]:
@@ -2603,10 +2716,7 @@ def _reconcile_shapes(
             else:
                 other = other.squeeze()
         else:
-            if other.ndim < reference.ndim:
-                other = np.expand_dims(other, 0)
-            else:
-                reference = np.expand_dims(reference, 0)
+            reference, other = _match_action_ndims(reference, other)
 
     return reference, np.broadcast_to(other, reference.shape)
 

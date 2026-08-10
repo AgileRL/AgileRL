@@ -15,7 +15,7 @@ algorithm:
     update_epochs: 4
 
 environment:
-    name: pettingzoo.mpe.simple_speaker_listener_v4
+    name: mpe2.simple_speaker_listener_v4
     num_envs: 16
 mutation:
     probabilities:
@@ -62,7 +62,7 @@ network:
         max_mlp_nodes: 256
         layer_norm: true
 
-tournament_selection:
+selection_strategy:
     tournament_size: 2
     elitism: true
 

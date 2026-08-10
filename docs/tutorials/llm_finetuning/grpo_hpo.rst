@@ -340,7 +340,7 @@ The simplest way to train an AgileRL agent is to use the :meth:`finetune_llm_rea
         max_reward=2.0,
         evo_steps=10,
         mutation=mutations,
-        tournament=tournament,
+        selection_strategy=tournament,
         accelerator=accelerator,
         verbose=True,
         num_epochs=1
@@ -407,7 +407,7 @@ function and is an example of how we might choose to make use of a population of
     .. code-block:: python
 
         from agilerl.utils.llm_utils import aggregate_metrics_across_gpus
-        from agilerl.utils.utils import tournament_selection_and_mutation
+        from agilerl.utils.utils import run_selection_and_mutation
         from tqdm import trange
         import numpy as np
         import torch
@@ -513,9 +513,9 @@ function and is an example of how we might choose to make use of a population of
                 accelerator.wait_for_everyone()
             if tournament and mutation is not None:
                 if (i + 1) % evo_steps == 0:
-                    pop = tournament_selection_and_mutation(
+                    pop = run_selection_and_mutation(
+                        tournament,
                         population=pop,
-                        tournament=tournament,
                         mutation=mutations,
                         env_name=env.name,
                         accelerator=None,  # Set as None for LLM finetuning as it does not require the same accelerator handling as standard RL models
