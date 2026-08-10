@@ -3440,3 +3440,22 @@ class TestAsOptionalIntAndEosIdSet:
         assert _eos_id_set("nope") == frozenset()
         assert _eos_id_set(object()) == frozenset()
         assert _eos_id_set([1, "x", 2]) == frozenset({1, 2})
+
+
+class TestDeprecatedLlmEnvReExports:
+    """``llm_utils`` re-exports names that moved to ``llm_envs``, with a warning."""
+
+    def test_moved_name_warns_and_returns_the_llm_envs_symbol(self):
+        import agilerl.llm_envs as llm_envs
+        import agilerl.utils.llm_utils as llm_utils
+
+        with pytest.warns(FutureWarning, match="has moved to agilerl.llm_envs"):
+            resolved = llm_utils.__getattr__("apply_chat_template")
+
+        assert resolved is llm_envs.apply_chat_template
+
+    def test_unknown_name_still_raises_attribute_error(self):
+        import agilerl.utils.llm_utils as llm_utils
+
+        with pytest.raises(AttributeError, match="has no attribute"):
+            llm_utils.__getattr__("definitely_not_a_symbol")

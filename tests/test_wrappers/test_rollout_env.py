@@ -286,6 +286,17 @@ class TestRolloutEnvChatTemplateBoundary:
         assert decoded.endswith("<start_of_turn>model\n")
         assert "<|im_start|>" not in decoded  # ChatML fallback not used
 
+    def test_strict_boundary_raises_instead_of_falling_back(self) -> None:
+        # Under the default strict setting a template that cannot render the
+        # boundary is an error: emitting ChatML markers for a non-ChatML
+        # tokenizer would malform the transcript silently.
+        w = bare_rollout_env()
+        w.apply_chat_template = True
+        w._strict_chat_template_boundary = True
+        w.tokenizer = _ChrTokenizerWithChatTemplateBroken()
+        with pytest.raises(RuntimeError, match="could not render a feedback turn"):
+            w._tokenize_feedback("F")
+
     def test_full_tokenize_feedback_falls_back_to_chatml(self) -> None:
         # If the chat-template path returns None (no apply_chat_template at
         # all on the tokenizer), _tokenize_feedback falls back to ChatML so
