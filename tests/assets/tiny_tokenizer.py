@@ -40,8 +40,9 @@ class TinyTokenizer:
         padding: bool = True,
         padding_side: str = "left",
         return_attention_mask: bool = True,
+        add_special_tokens: bool = True,
     ) -> dict[str, torch.Tensor]:
-        del return_tensors, return_attention_mask
+        del return_tensors, return_attention_mask, add_special_tokens
         if isinstance(texts, str):
             texts = [texts]
         encoded = [self.encode(text) for text in texts]

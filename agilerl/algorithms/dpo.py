@@ -71,6 +71,12 @@ class DPO(LLMAlgorithm[PreferencePrompts]):
     :type calc_position_embeddings: bool, optional
     :param micro_batch_size_per_gpu: Micro batch size per GPU, defaults to None
     :type micro_batch_size_per_gpu: int, optional
+    :param mini_batch_size: Per-rank rows covered by one optimizer step;
+        DeepSpeed's gradient_accumulation_steps is set to
+        ``mini_batch_size / micro_batch_size_per_gpu``. Defaults to None,
+        which resolves to the per-rank batch (one optimizer step per
+        batch).
+    :type mini_batch_size: int | None, optional
     :param device: Device to train on. Ignored when an accelerator is given (each rank
         owns its own GPU); ``None`` auto-detects CUDA/MPS/CPU.
     :type device: str, optional
@@ -145,6 +151,7 @@ class DPO(LLMAlgorithm[PreferencePrompts]):
         update_epochs: int = 1,
         calc_position_embeddings: bool = True,
         micro_batch_size_per_gpu: int | None = None,
+        mini_batch_size: int | None = None,
         device: str | torch.device | None = None,
         lora_config: LoraConfig | None = None,
         accelerator: Accelerator | None = None,
@@ -180,6 +187,7 @@ class DPO(LLMAlgorithm[PreferencePrompts]):
             actor_network=actor_network,
             model_config=model_config,
             micro_batch_size_per_gpu=micro_batch_size_per_gpu,
+            mini_batch_size=mini_batch_size,
             cosine_lr_schedule_config=None,
             hp_config=hp_config,
             wrap=wrap,
@@ -328,6 +336,7 @@ class DPO(LLMAlgorithm[PreferencePrompts]):
                     training,
                 )
                 if training:
+                    self._raise_if_loss_not_finite_on_any_rank(loss)
                     self._backward_pass(loss)
 
                 learn_metrics["loss"] += loss.item()
@@ -610,24 +619,25 @@ class DPO(LLMAlgorithm[PreferencePrompts]):
         policy_hidden = policy_hidden[:, :-1, :].contiguous()
         ref_hidden = ref_hidden[:, :-1, :].contiguous()
 
-        loss, aux = LigerDPOWithAlpha.apply(
-            policy_hidden,
-            lm_head_weight,
-            stacked_target,
-            lm_head_bias,  # bias (None for most LLMs)
-            ref_hidden,  # ref_input
-            lm_head_weight,  # ref_weight (lm_head is never LoRA-adapted, so is the same as the policy weight)
-            lm_head_bias,  # ref_bias (same weight → same bias)
-            -100,  # ignore_index
-            self.beta,
-            self.nll_alpha,  # alpha — scales NLL in the fused kernel
-            self.nll_alpha > 0,  # compute_nll_loss
-            True,  # compiled
-            True,  # use_ref_model
-            False,  # average_log_prob (sum, matching _dpo_loss)
-            self.chunk_rows or 1,  # chunk_size (sequences per chunk)
-            "sigmoid",  # loss_type
-        )
+        with self._liger_head_gather():
+            loss, aux = LigerDPOWithAlpha.apply(
+                policy_hidden,
+                lm_head_weight,
+                stacked_target,
+                lm_head_bias,  # bias (None for most LLMs)
+                ref_hidden,  # ref_input
+                lm_head_weight,  # ref_weight (lm_head is never LoRA-adapted, so is the same as the policy weight)
+                lm_head_bias,  # ref_bias (same weight → same bias)
+                -100,  # ignore_index
+                self.beta,
+                self.nll_alpha,  # alpha — scales NLL in the fused kernel
+                self.nll_alpha > 0,  # compute_nll_loss
+                True,  # compiled
+                True,  # use_ref_model
+                False,  # average_log_prob (sum, matching _dpo_loss)
+                self.chunk_rows or 1,  # chunk_size (sequences per chunk)
+                "sigmoid",  # loss_type
+            )
         # aux = (chosen_logps, rejected_logps, chosen_logits_mean, rejected_logits_mean,
         #        nll_loss, chosen_rewards, rejected_rewards)
         chosen_reward = aux[5]  # beta * (chosen_logps  - ref_chosen_logps)

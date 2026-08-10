@@ -329,6 +329,10 @@ class LLMEnvSpec(BaseModel):
     :param max_turns: Maximum interaction turns per episode.  If ``None``
         for multiturn environments, the value is probed from the environment.
     :type max_turns: int | None
+    :param strict_chat_template_boundary: When ``True``, a chat template that
+        cannot render a multi-turn boundary raises; when ``False``, it warns
+        and falls back to ChatML markers.
+    :type strict_chat_template_boundary: bool
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -350,6 +354,7 @@ class LLMEnvSpec(BaseModel):
     entrypoint: str | None = Field(default=None)
     env_config: dict[str, Any] | None = Field(default=None)
     max_turns: int | None = Field(default=None, ge=1)
+    strict_chat_template_boundary: bool = Field(default=True)
 
     # These fields are overridden given the rest of the training configuration
     data_batch_size_per_gpu: int = Field(default=8, ge=1, exclude=True)
@@ -578,6 +583,7 @@ class LLMEnvSpec(BaseModel):
             self.max_turns = max_turns
 
         pad_id = tokenizer.pad_token_id
+        strict_boundary = self.strict_chat_template_boundary
 
         def _factory() -> TokenObservationWrapper:
             env = _make_raw_env()
@@ -589,6 +595,7 @@ class LLMEnvSpec(BaseModel):
                 apply_chat_template=True,
                 max_model_len=max_model_len,
                 max_output_tokens=max_output_tokens,
+                strict_chat_template_boundary=strict_boundary,
             )
 
         return _factory

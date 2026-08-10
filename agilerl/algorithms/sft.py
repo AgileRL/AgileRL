@@ -79,6 +79,12 @@ class SFT(LLMAlgorithm[SFTPrompts]):
     :param micro_batch_size_per_gpu: Micro-batch size for gradient accumulation.
         When None the full batch is used in a single forward pass.
     :type micro_batch_size_per_gpu: int, optional
+    :param mini_batch_size: Per-rank rows covered by one optimizer step;
+        DeepSpeed's gradient_accumulation_steps is set to
+        ``mini_batch_size / micro_batch_size_per_gpu``. Defaults to None,
+        which resolves to the per-rank batch (one optimizer step per
+        batch).
+    :type mini_batch_size: int | None, optional
     :param device: Device to train on. Ignored when an accelerator is given (each rank
         owns its own GPU); ``None`` auto-detects CUDA/MPS/CPU.
     :type device: str, optional
@@ -148,6 +154,7 @@ class SFT(LLMAlgorithm[SFTPrompts]):
         update_epochs: int = 1,
         calc_position_embeddings: bool = True,
         micro_batch_size_per_gpu: int | None = None,
+        mini_batch_size: int | None = None,
         device: str | torch.device | None = None,
         lora_config: LoraConfig | None = None,
         accelerator: Accelerator | None = None,
@@ -182,6 +189,7 @@ class SFT(LLMAlgorithm[SFTPrompts]):
             actor_network=actor_network,
             model_config=model_config,
             micro_batch_size_per_gpu=micro_batch_size_per_gpu,
+            mini_batch_size=mini_batch_size,
             cosine_lr_schedule_config=None,
             hp_config=hp_config,
             wrap=wrap,
@@ -287,6 +295,7 @@ class SFT(LLMAlgorithm[SFTPrompts]):
                     training=training,
                 )
                 if training:
+                    self._raise_if_loss_not_finite_on_any_rank(loss)
                     self._backward_pass(loss)
                 loss_val = loss.item()
                 learn_metrics["loss"] += loss_val
@@ -348,9 +357,10 @@ class SFT(LLMAlgorithm[SFTPrompts]):
             # Liger fused-linear CE: loss computed in bounded ``(chunk, V)`` tiles.
             flat_hidden = shift_hidden.view(-1, shift_hidden.size(-1))
             lm_head = self._get_lm_head()
-            loss = LigerFusedLinearCrossEntropyLoss(ignore_index=-100)(
-                lm_head.weight, flat_hidden, labels.view(-1), lm_head.bias
-            )
+            with self._liger_head_gather():
+                loss = LigerFusedLinearCrossEntropyLoss(ignore_index=-100)(
+                    lm_head.weight, flat_hidden, labels.view(-1), lm_head.bias
+                )
 
         else:
             # Standard path, also token-chunked: per-token target logprobs via the
