@@ -1073,6 +1073,49 @@ class TestTrainingManifestArenaBridgeWithoutDeps:
 
 
 @pytest.mark.skipif(not HAS_LLM_DEPENDENCIES, reason="LLM deps not installed")
+class TestManifestBatchSizing:
+    """Both batch-sizing knobs reach the algorithm from the manifest.
+
+    An unknown algorithm key is rejected outright, so a manifest cannot set an
+    optimizer-step size the spec does not carry.
+    """
+
+    @staticmethod
+    def _manifest(**algo_overrides):
+        return _make_manifest(
+            algo={
+                "name": "GRPO",
+                "batch_size": 8,
+                "group_size": 4,
+                **algo_overrides,
+            },
+            env={"env_type": "reasoning", "dataset": "d.parquet"},
+            network={
+                "pretrained_model_name_or_path": "net-model",
+                "max_context_length": 256,
+                "lora_config": {
+                    "lora_r": 8,
+                    "lora_alpha": 16,
+                    "target_modules": ["q_proj", "v_proj"],
+                },
+            },
+        )
+
+    def test_both_batch_knobs_survive_the_manifest(self):
+        manifest = TrainingManifest.get_validated(
+            self._manifest(micro_batch_size_per_gpu=2, mini_batch_size=4),
+            mode="python",
+        )
+        assert manifest.algorithm.micro_batch_size_per_gpu == 2
+        assert manifest.algorithm.mini_batch_size == 4
+
+    def test_an_unset_mini_batch_size_stays_none(self):
+        """``None`` lets the algorithm apply its own family default."""
+        manifest = TrainingManifest.get_validated(self._manifest(), mode="python")
+        assert manifest.algorithm.mini_batch_size is None
+
+
+@pytest.mark.skipif(not HAS_LLM_DEPENDENCIES, reason="LLM deps not installed")
 class TestTrainerGetValidatedManifestLLMNetwork:
     """``network`` fills or overrides LLM algorithm model fields after manifest parse."""
 
@@ -1660,6 +1703,7 @@ class TestSimbaRecurrentConflict:
 # ``objective`` are exercised straight from disk.
 _LLM_CONFIG_ENV_TYPES = {
     "cispo.yaml": ("rollout", None),
+    "cispo_gemma4_group5.yaml": ("rollout", None),
     "cispo_quant_bench.yaml": ("rollout", None),
     "cispo_quant_bench_qwen.yaml": ("rollout", None),
     "dpo.yaml": ("dataset", "preference"),

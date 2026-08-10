@@ -1456,10 +1456,16 @@ class TestLLMBuildAlgorithm:
         mock_tokenizer = MagicMock()
         mock_tokenizer.eos_token_id = 50256
         mock_tokenizer.eos_token = "<|endoftext|>"
-        mock_tokenizer.pad_token_id = 50256
-        mock_tokenizer.pad_token = "<|endoftext|>"
+        mock_tokenizer.pad_token_id = None
+        mock_tokenizer.unk_token_id = None
 
-        with patch.object(type(dpo_spec), "algo_class", return_value=mock_algo):
+        with (
+            patch.object(type(dpo_spec), "algo_class", return_value=mock_algo),
+            patch(
+                "agilerl.utils.llm_utils.load_pad_token_configs",
+                return_value=(None, None),
+            ),
+        ):
             dpo_spec.build_algorithm(tokenizer=mock_tokenizer, index=0)
 
         mock_algo.assert_called_once()
@@ -1474,10 +1480,16 @@ class TestLLMBuildAlgorithm:
         mock_tokenizer = MagicMock()
         mock_tokenizer.eos_token_id = 50256
         mock_tokenizer.eos_token = "<|endoftext|>"
-        mock_tokenizer.pad_token_id = 50256
-        mock_tokenizer.pad_token = "<|endoftext|>"
+        mock_tokenizer.pad_token_id = None
+        mock_tokenizer.unk_token_id = None
 
-        with patch.object(type(grpo_spec), "algo_class", return_value=mock_algo):
+        with (
+            patch.object(type(grpo_spec), "algo_class", return_value=mock_algo),
+            patch(
+                "agilerl.utils.llm_utils.load_pad_token_configs",
+                return_value=(None, None),
+            ),
+        ):
             grpo_spec.build_algorithm(tokenizer=mock_tokenizer, index=1)
 
         mock_algo.assert_called_once()
@@ -1490,12 +1502,18 @@ class TestLLMBuildAlgorithm:
         mock_tokenizer = MagicMock()
         mock_tokenizer.eos_token_id = 50256
         mock_tokenizer.eos_token = "<|endoftext|>"
-        mock_tokenizer.pad_token_id = 50256
-        mock_tokenizer.pad_token = "<|endoftext|>"
+        mock_tokenizer.pad_token_id = None
+        mock_tokenizer.unk_token_id = None
         mock_accel = MagicMock()
         mock_accel.num_processes = 2
 
-        with patch.object(type(dpo_spec), "algo_class", return_value=mock_algo):
+        with (
+            patch.object(type(dpo_spec), "algo_class", return_value=mock_algo),
+            patch(
+                "agilerl.utils.llm_utils.load_pad_token_configs",
+                return_value=(None, None),
+            ),
+        ):
             dpo_spec.build_algorithm(
                 tokenizer=mock_tokenizer, index=0, accelerator=mock_accel
             )
@@ -1608,6 +1626,8 @@ class TestLLMLocalTrainer:
         mock_llm_env_spec.env_type = LLMEnvType.DATASET
         mock_llm_env_spec.make_env.return_value = mock_env
         mock_tokenizer = MagicMock()
+        mock_tokenizer.eos_token_id = 50256
+        mock_tokenizer.eos_token = "<|endoftext|>"
 
         with (
             patch(
@@ -1659,7 +1679,12 @@ class TestLLMLocalTrainer:
                 return_value=MagicMock(),
             ),
         ):
-            mock_auto_tok.from_pretrained.return_value = MagicMock()
+            # The pad resolver reads real token ids off the tokenizer.
+            mock_tokenizer = MagicMock()
+            mock_tokenizer.eos_token_id = 0
+            mock_tokenizer.pad_token_id = 1
+            mock_tokenizer.unk_token_id = None
+            mock_auto_tok.from_pretrained.return_value = mock_tokenizer
             trainer = LocalTrainer(
                 algorithm=grpo_spec,
                 environment=mock_llm_env_spec,
@@ -1763,6 +1788,56 @@ class TestLLMLocalTrainer:
         with patch("agilerl.training.trainer.AutoTokenizer", None):
             with pytest.raises(ImportError, match="LLM dependencies"):
                 trainer._make_tokenizer()
+
+    def test_make_tokenizer_falls_back_to_the_default_chat_template(self, dpo_spec):
+        from agilerl.utils.chat_template import DEFAULT_CHAT_TEMPLATE
+
+        trainer = LocalTrainer.__new__(LocalTrainer)
+        trainer.algorithm_spec = dpo_spec
+        mock_tokenizer = MagicMock(
+            chat_template=None,
+            eos_token_id=0,
+            eos_token="<eos>",
+            pad_token_id=None,
+            unk_token_id=None,
+        )
+        with (
+            patch(
+                "agilerl.training.trainer.AutoTokenizer", create=True
+            ) as mock_auto_tok,
+            patch(
+                "agilerl.training.trainer.load_pad_token_configs",
+                return_value=(None, None),
+            ),
+        ):
+            mock_auto_tok.from_pretrained.return_value = mock_tokenizer
+            tokenizer = trainer._make_tokenizer()
+
+        assert tokenizer.chat_template == DEFAULT_CHAT_TEMPLATE
+
+    def test_make_tokenizer_keeps_an_existing_chat_template(self, dpo_spec):
+        trainer = LocalTrainer.__new__(LocalTrainer)
+        trainer.algorithm_spec = dpo_spec
+        mock_tokenizer = MagicMock(
+            chat_template="{{ 'preset' }}",
+            eos_token_id=0,
+            eos_token="<eos>",
+            pad_token_id=None,
+            unk_token_id=None,
+        )
+        with (
+            patch(
+                "agilerl.training.trainer.AutoTokenizer", create=True
+            ) as mock_auto_tok,
+            patch(
+                "agilerl.training.trainer.load_pad_token_configs",
+                return_value=(None, None),
+            ),
+        ):
+            mock_auto_tok.from_pretrained.return_value = mock_tokenizer
+            tokenizer = trainer._make_tokenizer()
+
+        assert tokenizer.chat_template == "{{ 'preset' }}"
 
 
 class TestTrainerBaseNotImplemented:
@@ -3507,33 +3582,3 @@ class TestTrainerDeprecatedSelectionAttributes:
             trainer.to_manifest()
 
         assert not [w for w in caught if issubclass(w.category, DeprecationWarning)]
-
-
-class TestMakeTokenizerPadDefault:
-    def test_pad_defaults_to_eos_only_when_missing(self):
-        trainer = LocalTrainer.__new__(LocalTrainer)
-        trainer.algorithm_spec = MagicMock(spec=LLMAlgorithmSpec)
-        trainer.algorithm_spec.pretrained_model_name_or_path = "gpt2"
-
-        padless = MagicMock()
-        padless.chat_template = "{{ messages }}"
-        padless.pad_token = None
-        padless.eos_token = "<eos>"
-        with patch(
-            "agilerl.training.trainer.AutoTokenizer.from_pretrained",
-            return_value=padless,
-        ):
-            out = trainer._make_tokenizer()
-        assert out.pad_token == "<eos>"
-
-        with_pad = MagicMock()
-        with_pad.chat_template = "{{ messages }}"
-        with_pad.pad_token = "<pad>"
-        with_pad.eos_token = "<eos>"
-        with patch(
-            "agilerl.training.trainer.AutoTokenizer.from_pretrained",
-            return_value=with_pad,
-        ):
-            out = trainer._make_tokenizer()
-        # A model's own pad token must not be clobbered by eos.
-        assert out.pad_token == "<pad>"

@@ -60,7 +60,7 @@ wheels = [
 
 [[package]]
 name = "agilerl"
-version = "2.9.0.dev1"
+version = "2.9.0"
 source = { editable = "." }
 dependencies = [
     { name = "accelerate" },
@@ -187,8 +187,8 @@ requires-dist = [
     { name = "pre-commit", specifier = ">=3.8.0" },
     { name = "pydantic", specifier = ">=2.0,<3" },
     { name = "pygame-ce", specifier = ">=2.5.0" },
-    { name = "pymunk", specifier = ">=6.2,<7.3" },
-    { name = "redis", specifier = ">=4.4.4,<8.1.0" },
+    { name = "pymunk", specifier = ">=6.2,<7.4" },
+    { name = "redis", specifier = ">=4.4.4,<8.2.0" },
     { name = "rich", specifier = ">=13.0,<16" },
     { name = "supersuit", specifier = ">=3.9.0" },
     { name = "swig", marker = "sys_platform != 'win32' and extra == 'box2d'", specifier = ">=4.4.1" },
@@ -225,7 +225,7 @@ docs = [
 
 [[package]]
 name = "agilerl-arena"
-version = "0.1.2"
+version = "0.1.3"
 source = { editable = "agilerl-arena" }
 dependencies = [
     { name = "click" },
@@ -249,7 +249,7 @@ requires-dist = [
     { name = "numpy", specifier = ">=2.0.0,<3.0" },
     { name = "packaging", specifier = ">=20.0" },
     { name = "pydantic", specifier = ">=2.0,<3" },
-    { name = "python-keycloak", specifier = ">=4.0,<6" },
+    { name = "python-keycloak", specifier = ">=4.0,<8" },
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "rich", specifier = ">=13.0,<16" },
 ]

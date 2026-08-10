@@ -117,6 +117,12 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
     :type calc_position_embeddings: bool, optional
     :param micro_batch_size_per_gpu: Optional target micro-batch size per GPU.
     :type micro_batch_size_per_gpu: int | None, optional
+    :param mini_batch_size: Per-rank trajectories covered by one optimizer
+        step; DeepSpeed's gradient_accumulation_steps is set to
+        ``mini_batch_size / micro_batch_size_per_gpu``. Defaults to None,
+        which resolves to ``micro_batch_size_per_gpu`` (one optimizer step
+        per micro-batch).
+    :type mini_batch_size: int | None, optional
     :param max_output_tokens: Maximum newly generated tokens per completion.
     :type max_output_tokens: int | None, optional
     :param min_output_tokens: Minimum newly generated tokens per completion.
@@ -247,6 +253,8 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
     :type lora_target_scope: str | None, optional
     """
 
+    _mini_batch_size_default = "micro_batch"
+
     def __init__(
         self,
         pad_token_id: int,
@@ -274,6 +282,7 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
         use_separate_reference_adapter: bool = True,
         calc_position_embeddings: bool = True,
         micro_batch_size_per_gpu: int | None = None,
+        mini_batch_size: int | None = None,
         max_output_tokens: int | None = None,
         min_output_tokens: int | None = None,
         max_model_len: int = 1024,
@@ -333,6 +342,7 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
             actor_network=actor_network,
             model_config=model_config,
             micro_batch_size_per_gpu=micro_batch_size_per_gpu,
+            mini_batch_size=mini_batch_size,
             cosine_lr_schedule_config=cosine_lr_schedule_config,
             hp_config=hp_config,
             use_memory_efficient_params=use_memory_efficient_params,
@@ -673,6 +683,7 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
                             ppo_granularity,
                             batch_sampling_log_probs,
                         )
+                        self._raise_if_loss_not_finite_on_any_rank(total_loss)
                         self._backward_pass(total_loss)
                         unset_fused_adapter_routing(self._get_unwrapped_actor())
                         learn_metrics["kl"] += metrics["kl"]
@@ -771,6 +782,7 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
                     kl_loss = masked_mean(kl, batch_action_mask)
                     total_loss = pg_loss + vf_loss + self.beta * kl_loss
 
+                    self._raise_if_loss_not_finite_on_any_rank(total_loss)
                     self._backward_pass(total_loss)
                     unset_fused_adapter_routing(self._get_unwrapped_actor())
 
@@ -1255,7 +1267,6 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
                     (old_log_probs - sampling_log_probs.to(self.device)) * mask_f
                 ).clamp(max=self.vllm_importance_sampling_cap)
 
-        # ---- Actor pass (Liger fused policy + KL) ----
         # Identity-patch lm_head so the actor forward outputs the last hidden
         # state (B, T, H) directly instead of computing the full (B, T, V)
         # logits only to discard them. lm_head_weight is passed separately to
@@ -1279,29 +1290,31 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
         # Token level token-flattens the hidden states so the fused kernel
         # chunks tokens (bounded); turn/sequence keep the batch path. See
         # :func:`apply_fused_policy_loss`.
-        loss_pg_kl, aux = apply_fused_policy_loss(
-            policy_hidden[:, :-1],
-            lm_head_weight,
-            lm_head_bias,
-            target_ids,
-            mask,
-            adv_for_liger,
-            ref_log_probs,
-            old_log_probs,
-            self.beta,
-            self.clip_coef,  # epsilon_low
-            self.clip_coef,  # epsilon_high
-            self.temperature,
-            is_level,
-            turn_ids=turn_ids_arg,
-            full_turn_mask=full_turn_mask,
-            max_turns=max_turns,
-            token_chunk_size=self._resolve_fused_chunk_rows(
-                lm_head_weight.shape[0], self.chunk_rows
-            ),
-            turn_log_ratio_reduction=self.turn_ratio_pooling,
-            vllm_is_ratio=vllm_is_ratio,
-        )
+        with self._liger_head_gather():
+            loss_pg_kl, aux = apply_fused_policy_loss(
+                policy_hidden[:, :-1],
+                lm_head_weight,
+                lm_head_bias,
+                target_ids,
+                mask,
+                adv_for_liger,
+                ref_log_probs,
+                old_log_probs,
+                self.beta,
+                self.clip_coef,  # epsilon_low
+                self.clip_coef,  # epsilon_high
+                self.temperature,
+                is_level,
+                turn_ids=turn_ids_arg,
+                full_turn_mask=full_turn_mask,
+                max_turns=max_turns,
+                token_chunk_size=self._resolve_fused_chunk_rows(
+                    getattr(lm_head_weight, "ds_shape", lm_head_weight.shape)[0],
+                    self.chunk_rows,
+                ),
+                turn_log_ratio_reduction=self.turn_ratio_pooling,
+                vllm_is_ratio=vllm_is_ratio,
+            )
         kl_metric = float(aux[0].item())
         clipfrac_metric = float(aux[1].item())
         pg_loss_metric = float(aux[2].item())

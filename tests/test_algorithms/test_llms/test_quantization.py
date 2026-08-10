@@ -175,7 +175,7 @@ class TestBuildBnbQuantizationConfig:
     def test_none_returns_none(self):
         assert build_bnb_quantization_config(None) is None
 
-    @pytest.mark.parametrize("spec", ["none", "NONE", " none ", ""])
+    @pytest.mark.parametrize("spec", ["none", "NONE", " none ", "no ne"])
     def test_none_like_strings_return_none(self, spec):
         assert build_bnb_quantization_config(spec) is None
 
@@ -567,6 +567,7 @@ class TestColocatedInitOrdering:
         agent.vllm_config = kwargs.get("vllm_config", VLLMConfig(sleep_mode=True))
         agent.quantization_config = kwargs.get("quantization_config")
         agent.accelerator = kwargs.get("accelerator")
+        agent.zero_stage = kwargs.get("zero_stage")
         return agent
 
     def test_trainer_first_for_fresh_bnb_trainer_under_sleep_mode(self):

@@ -382,6 +382,10 @@ class LLMEnvSpec(BaseModel):
         disables the bound (e.g. an env step that legitimately runs a very
         long tool job). Only applies to ``env_url``.
     :type request_timeout_s: float | None
+    :param strict_chat_template_boundary: When ``True``, a chat template that
+        cannot render a multi-turn boundary raises; when ``False``, it warns
+        and falls back to ChatML markers.
+    :type strict_chat_template_boundary: bool
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -411,6 +415,7 @@ class LLMEnvSpec(BaseModel):
     env_config: dict[str, Any] | None = Field(default=None)
     env_packages: dict[str, Any] | None = Field(default=None)
     max_turns: int | None = Field(default=None, ge=1)
+    strict_chat_template_boundary: bool = Field(default=True)
 
     # How an env-backed rollout's observations render to prompt text.
     observation_field: str | None = Field(default=None)
@@ -768,6 +773,7 @@ class LLMEnvSpec(BaseModel):
             return _dataset_factory
 
         observation_field = self.observation_field
+        strict_boundary = self.strict_chat_template_boundary
         observation_processor: Callable[[Any], str] | None = None
         if self.observation_processor is not None:
             resolved_processor = resolve_entrypoint_target(self.observation_processor)
@@ -800,6 +806,7 @@ class LLMEnvSpec(BaseModel):
                     max_turns=url_max_turns,
                     observation_field=observation_field,
                     observation_processor=observation_processor,
+                    strict_chat_template_boundary=strict_boundary,
                     apply_chat_template=True,
                     chat_template_kwargs=chat_template_kwargs,
                     max_model_len=max_model_len,
@@ -847,6 +854,7 @@ class LLMEnvSpec(BaseModel):
                 chat_template_kwargs=chat_template_kwargs,
                 max_model_len=max_model_len,
                 max_output_tokens=max_output_tokens,
+                strict_chat_template_boundary=strict_boundary,
             )
 
         return _env_factory

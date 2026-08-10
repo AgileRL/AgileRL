@@ -41,6 +41,10 @@ class GRPOSpec(LLMAlgorithmSpec):
     whiten_advantages: bool = Field(default=False)
     adv_clip_range: float | None = Field(default=None)
     filter_zero_adv: bool = Field(default=False)
+    turn_advantage_trajectory_fallback: bool = Field(default=True)
+    loss_norm: Literal["micro_batch", "accumulation_window"] = Field(
+        default="micro_batch"
+    )
 
     env_type: ClassVar[LLMEnvType] = LLMEnvType.ROLLOUT
 

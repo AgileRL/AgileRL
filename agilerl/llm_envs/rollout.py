@@ -158,6 +158,7 @@ class RolloutHarness:
         observation_field: str | None = None,
         observation_processor: Callable[[Any], str] | None = None,
         instruction: str = "",
+        strict_chat_template_boundary: bool = True,
         apply_chat_template: bool = True,
         chat_template_kwargs: dict[str, Any] | None = None,
         max_model_len: int | None = None,
@@ -183,6 +184,9 @@ class RolloutHarness:
             whose observations need more than a field lookup. Runs on the
             collector's I/O threads, so it must be thread-safe.
         :param instruction: Prompt used when reset's observation renders empty.
+        :param strict_chat_template_boundary: Raise when the chat template cannot
+            render a multi-turn boundary; ``False`` warns and falls back to
+            ChatML markers, which malform the transcript on a non-ChatML tokenizer.
         :param apply_chat_template: Render prompts through the chat template vs raw encoding.
         :param chat_template_kwargs: Extra kwargs for every ``apply_chat_template``
             render (e.g. ``{"enable_thinking": False}``); the env's tool schemas
@@ -209,6 +213,7 @@ class RolloutHarness:
             or partial(process_observation, observation_field=observation_field)
         )
         self._instruction = instruction
+        self._strict_chat_template_boundary = strict_chat_template_boundary
         if isinstance(env_client, EnvClientProtocol):
             if (
                 timeout_s is not None
@@ -417,13 +422,15 @@ class RolloutHarness:
         if boundary_ids is not None:
             return boundary_ids
 
-        warnings.warn(
+        msg = (
             "The tokenizer's chat template could not render a feedback turn "
             "boundary; falling back to ChatML markers (<|im_end|>/<|im_start|>). "
             "For a non-ChatML tokenizer the multi-turn transcript will be "
-            "malformed.",
-            stacklevel=2,
+            "malformed."
         )
+        if self._strict_chat_template_boundary:
+            raise RuntimeError(msg)
+        warnings.warn(msg, stacklevel=2)
         # Fallback: ChatML-style markers.
         turn_boundary = (
             "<|im_end|>\n<|im_start|>user\n"

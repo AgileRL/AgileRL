@@ -186,7 +186,8 @@ accepts the spec declaratively from YAML / ``INIT_HP``:
    * - ``"nf4"``
      - ~0.56 byte/param
      - 4-bit NF4 with BF16 compute, BF16 quant storage and double
-       quantization. The QLoRA recipe; ZeRO-3 compatible.
+       quantization. The QLoRA recipe; ZeRO-3 compatible. Also accepted as
+       ``"4bit"``, ``"4-bit"``, ``"bnb-4bit"``, or ``"bnb_4bit"``.
    * - ``None`` / ``"none"``
      - 2 bytes/param
      - No quantization (BF16 baseline).

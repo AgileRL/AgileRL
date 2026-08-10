@@ -210,4 +210,6 @@ def bare_rollout_env() -> RolloutHarness:
     w._boundary_parts = None
     w._boundary_parts_known = False
     w._special_ids_cache = None  # __init__ default, read by the feedback dedupe
+    # These tests drive the ChatML fallback deliberately, so they opt out of strict.
+    w._strict_chat_template_boundary = False
     return w

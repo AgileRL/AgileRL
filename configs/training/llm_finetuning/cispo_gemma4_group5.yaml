@@ -1,0 +1,74 @@
+---
+# CISPO quantization benchmark on a multimodal, long-context gemma model over
+# the hard Sudoku env. Colocated bnb-nf4 trainer + vLLM bitsandbytes rollout,
+# single agent with HPO disabled so the run is a clean regression baseline.
+
+algorithm:
+    name: CISPO
+    batch_size: 2
+    beta: 0.0
+    lr: 0.00002
+    clip_coef: [0.8, 2.0]
+    max_grad_norm: 1
+    update_epochs: 1
+    group_size: 5
+    temperature: 1.0
+    advantage_granularity: turn
+    turn_advantage_trajectory_fallback: true
+    importance_sampling_level: token
+    adv_norm: mean_only
+    loss_norm: micro_batch
+    filter_zero_adv: true
+    max_output_tokens: 2768
+    use_liger_loss: true
+    use_sequence_packing: true
+    vllm_importance_sampling_correction: true
+    attn_implementation: flex_attention
+    lora_target_scope: language_model
+    quantization: nf4
+    activation_offload: true
+    chunk_rows: 256
+    micro_batch_size_per_gpu: 1
+    use_vllm: true
+    vllm_config:
+        tensor_parallel_size: 1
+        gpu_memory_utilization: 0.9
+        max_num_seqs: 10
+        sleep_mode: true
+        dtype: bfloat16
+        quantization: bitsandbytes
+        strip_multimodal_towers: true
+
+environment:
+    env_type: rollout
+    entrypoint: gem:make
+    env_config:
+        env_id: game:Sudoku-v0-hard
+    max_turns: 50
+    max_reward: 1.0
+    strict_chat_template_boundary: true
+
+training:
+    max_steps: 100000
+    max_wall_seconds: 200000
+    pop_size: 1
+    eval_loop: 1
+    evaluation_interval: 999999
+    hpo: false
+
+network:
+    pretrained_model_name_or_path: google/gemma-4-E4B-it
+    max_context_length: 32768
+    lora_config:
+        lora_r: 2
+        lora_alpha: 32
+        target_modules:
+            - q_proj.linear
+            - k_proj.linear
+            - v_proj.linear
+            - o_proj.linear
+            - up_proj.linear
+            - down_proj.linear
+            - gate_proj.linear
+        lora_dropout: 0
+        task_type: CAUSAL_LM

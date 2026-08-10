@@ -57,6 +57,8 @@ def _stub_tokenizer():
             "eos_token": "<pad>",
             "pad_token_id": 0,
             "pad_token": "<pad>",
+            # Real HF tokenizers always expose this; the pad resolver reads it.
+            "unk_token_id": None,
         },
     )()
 

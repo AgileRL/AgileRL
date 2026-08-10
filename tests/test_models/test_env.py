@@ -1207,6 +1207,7 @@ class TestLLMEnvSpecRollout:
             chat_template_kwargs={},
             max_model_len=512,
             max_output_tokens=128,
+            strict_chat_template_boundary=True,
         )
         mock_rollout_cls.local.assert_not_called()
 
@@ -1266,6 +1267,7 @@ class TestLLMEnvSpecRollout:
             chat_template_kwargs={},
             max_model_len=512,
             max_output_tokens=128,
+            strict_chat_template_boundary=True,
         )
 
     def test_observation_processor_resolves_and_reaches_the_harness(self, tmp_path):

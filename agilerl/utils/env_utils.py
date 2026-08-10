@@ -116,13 +116,14 @@ def escape_non_format_braces(
     template: str,
     format_keys: list[str] | None = None,
 ) -> str:
-    """Replace {word} with {{word}} except for known format keys.
+    """Double every brace except the ``{key}`` fields named in ``format_keys``.
 
     :param template: The template to escape
     :type template: str
-    :param format_keys: The keys to not escape
-    :type format_keys: list[str]
-    :return: The escaped template
+    :param format_keys: The keys to leave as format fields
+    :type format_keys: list[str] | None
+    :return: The escaped template, which ``str.format`` renders back to
+        ``template`` with the format keys substituted
     :rtype: str
     """
     if format_keys is None:

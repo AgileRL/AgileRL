@@ -122,6 +122,7 @@ class TestRolloutEnvStep:
             _ChatTokenizer(),
             max_turns=2,
             apply_chat_template=True,
+            strict_chat_template_boundary=False,
         )
         obs, _ = w.reset()
         assert obs["input_ids"].dtype == torch.long

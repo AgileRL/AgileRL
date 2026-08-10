@@ -9,12 +9,14 @@ from peft import LoraConfig, inject_adapter_in_model
 from torch import nn
 
 from agilerl.algorithms.core.llm_ops.fused_lora import (
-    _LORA_LAYER_CACHE,
-    _ROUTING_STATE,
+    LORA_LAYER_CACHE,
+    ROUTING_STATE,
     _is_routed_layer,
+    _param_wrapper_routed_forward,
     get_cached_lora_layers,
     patch_lora_for_fused_forward,
     set_fused_adapter_routing,
+    uniform_routed_adapter,
     unpatch_lora_for_fused_forward,
     unset_fused_adapter_routing,
 )
@@ -335,9 +337,9 @@ class TestPatchLifecycle:
         )
         patch_lora_for_fused_forward(model)
 
-        assert len(_LORA_LAYER_CACHE[model]) == 2
+        assert len(LORA_LAYER_CACHE[model]) == 2
         set_fused_adapter_routing(model, ["actor"])
-        assert _ROUTING_STATE[model.late.proj] == ["actor"]
+        assert ROUTING_STATE[model.late.proj] == ["actor"]
 
     def test_unpatch_restores_original_forward_and_state(self):
         model = _build_model()
@@ -351,7 +353,7 @@ class TestPatchLifecycle:
 
         assert "forward" not in model.proj.__dict__
         assert not _is_routed_layer(model.proj)
-        assert model not in _LORA_LAYER_CACHE
+        assert model not in LORA_LAYER_CACHE
         assert torch.allclose(model(x), ref, atol=1e-6)
         with pytest.raises(RuntimeError, match="patch_lora_for_fused_forward"):
             set_fused_adapter_routing(model, ["actor"])
@@ -371,7 +373,7 @@ class TestPatchLifecycle:
         set_fused_adapter_routing(clone, ["actor", "critic"])
         _ = clone(x)
         # The original stays unrouted.
-        assert _ROUTING_STATE.get(model.proj) is None
+        assert ROUTING_STATE.get(model.proj) is None
 
 
 class TestLayerCache:
@@ -379,7 +381,7 @@ class TestLayerCache:
         model = _build_model()
         layers = get_cached_lora_layers(model)
         assert layers == [model.proj]
-        assert _LORA_LAYER_CACHE[model] is layers
+        assert LORA_LAYER_CACHE[model] is layers
         assert get_cached_lora_layers(model) is layers
 
 
@@ -406,3 +408,56 @@ class TestFusedLoraInputCast:
 
         with pytest.raises(RuntimeError):
             model(torch.randn(2, 8, dtype=torch.bfloat16))
+
+
+class TestParamWrapperRoutedForward:
+    """Parameter-level LoRA wrappers under fused routing."""
+
+    def test_uniform_routed_adapter_rejects_mixed_routing(self) -> None:
+        model = _build_model(adapters=("actor",))
+        layer = model.proj
+        ROUTING_STATE[layer] = ["actor", "__base__"]
+
+        with pytest.raises(RuntimeError, match="not supported on parameter-level"):
+            uniform_routed_adapter(layer)
+
+        ROUTING_STATE.pop(layer, None)
+
+    def test_base_routing_disables_adapters_temporarily(self) -> None:
+        model = _build_model(adapters=("actor",))
+        layer = model.proj
+        calls: list[bool] = []
+        original_enable = layer.enable_adapters
+
+        def _track(enabled: bool) -> None:
+            calls.append(bool(enabled))
+            return original_enable(enabled)
+
+        layer.enable_adapters = _track  # type: ignore[method-assign]
+        x = torch.randn(2, 8)
+        layer.enable_adapters(False)
+        expected = type(layer).forward(layer, x)
+        layer.enable_adapters(True)
+        calls.clear()
+        ROUTING_STATE[layer] = ["__base__"]
+
+        out = _param_wrapper_routed_forward(layer, type(layer).forward, x)
+
+        assert torch.allclose(out, expected)
+        assert calls == [False, True]
+        ROUTING_STATE.pop(layer, None)
+
+    def test_active_adapters_mismatch_raises(self) -> None:
+        model = _build_model(adapters=("actor", "critic"))
+        layer = model.proj
+        layer.set_adapter("critic")
+        ROUTING_STATE[layer] = ["actor"]
+
+        with pytest.raises(RuntimeError, match="active adapters"):
+            _param_wrapper_routed_forward(
+                layer,
+                type(layer).forward,
+                torch.randn(2, 8),
+            )
+
+        ROUTING_STATE.pop(layer, None)
