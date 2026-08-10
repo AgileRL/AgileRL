@@ -15,7 +15,7 @@ clean-dist:
 
 # Fail publish if the arena pin drifts, or the all extra misses an extra.
 check-extras:
-    python scripts/check-extras.py
+    uv run python scripts/check-extras.py
 
 build: clean-dist
     uv build --package agilerl-arena
