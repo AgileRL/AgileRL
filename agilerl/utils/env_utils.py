@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import os
-import re
 from collections.abc import Callable
 from importlib import import_module
 from importlib import util as importlib_util
@@ -44,7 +43,10 @@ def make_conversation_template(prompt_template: dict[str, str]) -> list[dict[str
     ]
 
 
-def get_reward_fn(reward_fn_name: str, file_path: str) -> Callable[..., float]:
+def get_reward_fn(
+    reward_fn_name: str,
+    file_path: str,
+) -> Callable[..., float]:
     """Get the reward function for the environment.
 
     :param reward_fn_name: The name of the reward function to get
@@ -91,25 +93,23 @@ def escape_non_format_braces(
     template: str,
     format_keys: list[str] | None = None,
 ) -> str:
-    """Replace {word} with {{word}} except for known format keys.
+    """Double every brace except the ``{key}`` fields named in ``format_keys``.
 
     :param template: The template to escape
     :type template: str
-    :param format_keys: The keys to not escape
-    :type format_keys: list[str]
-    :return: The escaped template
+    :param format_keys: The keys to leave as format fields
+    :type format_keys: list[str] | None
+    :return: The escaped template, which ``str.format`` renders back to
+        ``template`` with the format keys substituted
     :rtype: str
     """
     if format_keys is None:
         format_keys = ["question", "answer"]
 
-    def replace_brace(match: re.Match[str]) -> str:
-        content = match.group(1)
-        if content in format_keys:
-            return match.group(0)  # Keep as-is for format keys
-        return f"{{{{{content}}}}}"  # Double the braces
-
-    return re.sub(r"\{([^}]+)\}", replace_brace, template)
+    escaped = template.replace("{", "{{").replace("}", "}}")
+    for key in format_keys:
+        escaped = escaped.replace(f"{{{{{key}}}}}", f"{{{key}}}")
+    return escaped
 
 
 def _parse_entrypoint(entrypoint: str) -> tuple[str, str]:

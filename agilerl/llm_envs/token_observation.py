@@ -18,6 +18,10 @@ from agilerl.typing import (
     TokenObsStepReturn,
     TokenObsType,
 )
+from agilerl.utils.chat_template import (
+    ensure_chat_template_kwargs_injected,
+    resolve_chat_template_kwargs,
+)
 from agilerl.utils.llm_utils import max_prompt_tokens_for_sliding_window
 
 if TYPE_CHECKING:
@@ -53,9 +57,16 @@ class TokenObservationWrapper:
         max_model_len: int | None = None,
         max_output_tokens: int | None = None,
         enable_sliding_window: bool = False,
+        strict_chat_template_boundary: bool = True,
     ) -> None:
         """Token-level wrapper for multi-turn LLM environments.
 
+        :param strict_chat_template_boundary: When ``True`` (default), a chat
+            template that cannot render or cannot be sliced into a turn
+            boundary raises. When ``False``, it warns and falls back to ChatML
+            markers, which produce a malformed transcript on a non-ChatML
+            tokenizer.
+        :type strict_chat_template_boundary: bool
         :param enable_sliding_window: When ``True`` and ``max_model_len`` is
             set, drop the oldest post-initial turns from the prompt sent to
             the rollout backend so it always fits under
@@ -71,10 +82,11 @@ class TokenObservationWrapper:
         :type enable_sliding_window: bool
         """
         self._env = env
-        self.tokenizer = tokenizer
+        self.tokenizer = ensure_chat_template_kwargs_injected(tokenizer)
         self.max_turns = max_turns
         self.pad_id = pad_id
         self.apply_chat_template = apply_chat_template
+        self.strict_chat_template_boundary = strict_chat_template_boundary
         self._sw_max_model_len = max_model_len
         self._sw_max_output_tokens = max_output_tokens
         self._sw_enabled = enable_sliding_window
@@ -86,6 +98,7 @@ class TokenObservationWrapper:
         self._gen_texts: list[str] = []
         self._feedback_texts: list[str] = []
         self._last_full_prompt_token_len: int | None = None
+        self._special_ids_cache: frozenset[int] | None = None
 
     @staticmethod
     def _format_obs(obs: str | dict[str, Any], info: dict[str, Any] | None) -> str:
@@ -101,6 +114,32 @@ class TokenObservationWrapper:
             text = f"{text}\n{suffix}"
         return text
 
+    def _env_system_prompt(self) -> str | None:
+        """The system prompt the wrapped environment declares, if any.
+
+        :return: The declared system prompt, or ``None`` when there is none.
+        :rtype: str | None
+        """
+        env = getattr(self, "_env", None)
+        prompt = getattr(env, "system_prompt", None)
+        if isinstance(prompt, str) and prompt.strip():
+            return prompt
+        return None
+
+    def _initial_messages(self, obs_text: str) -> list[dict[str, str]]:
+        """Build the conversation the opening generation prompt renders from.
+
+        :param obs_text: First environment observation.
+        :type obs_text: str
+        :return: The messages ``apply_chat_template`` renders.
+        :rtype: list[dict[str, str]]
+        """
+        user_message = {"role": "user", "content": obs_text}
+        system_prompt = self._env_system_prompt()
+        if system_prompt is None:
+            return [user_message]
+        return [{"role": "system", "content": system_prompt}, user_message]
+
     def _tokenize_initial_prompt(self, obs_text: str) -> dict[str, torch.Tensor]:
         """Tokenize the initial observation, optionally with chat template."""
         if self.apply_chat_template:
@@ -109,7 +148,7 @@ class TokenObservationWrapper:
             # packaged stub widens the return to ``str | list``, so treat it as
             # the dynamic mapping transformers actually returns.
             result: Any = self.tokenizer.apply_chat_template(
-                [{"role": "user", "content": obs_text}],
+                self._initial_messages(obs_text),
                 tokenize=True,
                 add_generation_prompt=True,
             )
@@ -126,12 +165,16 @@ class TokenObservationWrapper:
                 "attention_mask": torch.ones_like(input_ids),
             }
 
+        # ``apply_chat_template=False`` means the text is already fully rendered
+        # (specials included, e.g. a template-baked BOS); adding them again would
+        # double the BOS on Llama/Gemma/Mistral-family tokenizers.
         encoded = self.tokenizer(
             [obs_text],
             return_tensors="pt",
             padding=True,
             padding_side="left",
             return_attention_mask=True,
+            add_special_tokens=False,
         )
         return {
             "input_ids": encoded["input_ids"],
@@ -143,22 +186,36 @@ class TokenObservationWrapper:
 
         Uses ``tokenizer.apply_chat_template`` to compute the boundary so this
         works for any chat-templated model (Gemma, Llama, Qwen, Mistral, ...).
-        We render two short conversations — one ending after a placeholder
-        assistant turn, one continuing with the new user feedback turn and a
-        fresh generation prompt — then take the suffix difference. Falling
-        back to ChatML markers preserves prior behaviour for tokenizers whose
-        templates don't preserve the prefix string (rare).
+
+        :param feedback_text: Environment feedback forming the next user turn.
+        :type feedback_text: str
+        :return: Token ids appended to the transcript before the next generation.
+        :rtype: torch.Tensor
+        :raises RuntimeError: Under ``strict_chat_template_boundary``, when the
+            template cannot be rendered or sliced into a turn boundary.
         """
         if not self.apply_chat_template:
             return torch.tensor(
-                [self.tokenizer.encode(feedback_text)],
+                [self.tokenizer.encode(feedback_text, add_special_tokens=False)],
                 dtype=torch.long,
+            )
+
+        if self.strict_chat_template_boundary:
+            return self._encode_boundary_text(
+                self._chat_template_boundary_text(feedback_text),
             )
 
         boundary_ids = self._chat_template_boundary_ids(feedback_text)
         if boundary_ids is not None:
             return boundary_ids
 
+        warnings.warn(
+            "The tokenizer's chat template could not render a feedback turn "
+            "boundary; falling back to ChatML markers (<|im_end|>/<|im_start|>). "
+            "For a non-ChatML tokenizer the multi-turn transcript will be "
+            "malformed.",
+            stacklevel=2,
+        )
         # Fallback: ChatML-style markers (works for Qwen and derivatives).
         turn_boundary = (
             "<|im_end|>\n<|im_start|>user\n"
@@ -166,28 +223,37 @@ class TokenObservationWrapper:
             + "<|im_end|>\n<|im_start|>assistant\n"
         )
         return torch.tensor(
-            [self.tokenizer.encode(turn_boundary)],
+            [self.tokenizer.encode(turn_boundary, add_special_tokens=False)],
             dtype=torch.long,
         )
 
-    def _chat_template_boundary_ids(
-        self,
-        feedback_text: str,
-    ) -> torch.Tensor | None:
-        """Compute boundary token ids via the tokenizer's chat template.
+    def _special_ids(self) -> frozenset[int]:
+        """The tokenizer's special-token id set (cached; empty when undeclared)."""
+        if self._special_ids_cache is None:
+            self._special_ids_cache = frozenset(
+                int(i) for i in (getattr(self.tokenizer, "all_special_ids", None) or [])
+            )
+        return self._special_ids_cache
 
-        Renders ``[user("."), assistant(placeholder), user(feedback)]`` with
-        ``add_generation_prompt=True`` and slices the rendered string from
-        the end of ``placeholder`` to the end. This yields exactly the bytes
-        that close the assistant turn, write a user turn containing
+    def _chat_template_boundary_text(self, feedback_text: str) -> str:
+        """Render the text the chat template writes between two assistant turns.
+
+        Renders ``[user(seed), assistant(placeholder), user(feedback)]`` with
+        ``add_generation_prompt=True`` and the configured render kwargs, then
+        slices the rendered string after ``placeholder``. This yields exactly
+        the bytes that close the assistant turn, write a user turn containing
         ``feedback_text``, and open the next assistant turn — for whatever
         chat template the tokenizer carries. The dummy leading user message
-        keeps strict-alternation templates (e.g. some Mistral variants)
-        happy; the placeholder must be unique enough not to collide with
-        anything the template might already render.
+        keeps strict-alternation templates (e.g. some Mistral variants) happy.
 
-        Returns ``None`` if the placeholder cannot be located in the render
-        (caller should fall back to ChatML markers).
+        :param feedback_text: Environment feedback forming the next user turn.
+        :type feedback_text: str
+        :return: Text closing the assistant turn, writing the user turn and
+            opening the next generation prompt.
+        :rtype: str
+        :raises RuntimeError: When the template cannot be rendered, renders the
+            placeholder other than exactly once, or renders nothing after it.
+        :raises TypeError: When the template renders to something other than text.
         """
         placeholder = self._BOUNDARY_PLACEHOLDER
         messages = [
@@ -201,24 +267,68 @@ class TokenObservationWrapper:
                 tokenize=False,
                 add_generation_prompt=True,
             )
-        except Exception:
-            return None
+        except Exception as exc:
+            template_kwargs = resolve_chat_template_kwargs(self.tokenizer)
+            msg = (
+                "Could not render the chat template to derive a multi-turn "
+                f"generation prompt (chat_template_kwargs={template_kwargs})."
+            )
+            raise RuntimeError(msg) from exc
 
         if not isinstance(rendered, str):
-            return None
+            msg = (
+                "Chat template rendering returned "
+                f"{type(rendered).__name__}, expected str."
+            )
+            raise TypeError(msg)
 
-        idx = rendered.rfind(placeholder)
-        if idx < 0:
-            return None
+        occurrences = rendered.count(placeholder)
+        if occurrences != 1:
+            msg = (
+                f"Chat template rendered the assistant probe {occurrences} times, "
+                "expected exactly once, so the turn boundary cannot be sliced."
+            )
+            raise RuntimeError(msg)
 
-        boundary_text = rendered[idx + len(placeholder) :]
+        boundary_text = rendered.split(placeholder, 1)[1]
         if not boundary_text:
-            return None
+            msg = "Chat template rendered no text after the assistant turn."
+            raise RuntimeError(msg)
+        return boundary_text
 
+    def _encode_boundary_text(self, boundary_text: str) -> torch.Tensor:
+        """Encode a rendered turn boundary to the ids appended to the transcript.
+
+        :param boundary_text: Rendered text between two assistant turns.
+        :type boundary_text: str
+        :return: Boundary token ids.
+        :rtype: torch.Tensor
+        :raises RuntimeError: When the boundary encodes to no tokens.
+        """
         encoded = self.tokenizer.encode(boundary_text, add_special_tokens=False)
         if not encoded:
-            return None
+            msg = f"Turn boundary {boundary_text!r} encoded to no tokens."
+            raise RuntimeError(msg)
         return torch.tensor([encoded], dtype=torch.long)
+
+    def _chat_template_boundary_ids(
+        self,
+        feedback_text: str,
+    ) -> torch.Tensor | None:
+        """Compute boundary token ids via the tokenizer's chat template.
+
+        :param feedback_text: Environment feedback forming the next user turn.
+        :type feedback_text: str
+        :return: Boundary token ids, or ``None`` when the template cannot be
+            rendered or sliced (caller falls back to ChatML markers).
+        :rtype: torch.Tensor | None
+        """
+        try:
+            return self._encode_boundary_text(
+                self._chat_template_boundary_text(feedback_text),
+            )
+        except (RuntimeError, TypeError):
+            return None
 
     def _prompt_budget(self) -> int | None:
         """Sliding-window prompt cap, or ``None`` when no model length is set."""
@@ -314,6 +424,15 @@ class TokenObservationWrapper:
             feedback_ids = self._tokenize_feedback(feedback_text).to(
                 self.full_ids.device
             )
+            # The transcript keeps the sampled end-of-turn token (it is trained),
+            # so drop the boundary frame's duplicate terminator when both are
+            # present; a turn truncated at max_tokens still gets the frame's one.
+            if (
+                feedback_ids.shape[1] > 1
+                and int(self.full_ids[0, -1]) == int(feedback_ids[0, 0])
+                and int(feedback_ids[0, 0]) in self._special_ids()
+            ):
+                feedback_ids = feedback_ids[:, 1:]
             self.full_ids = torch.cat([self.full_ids, feedback_ids], dim=1)
 
             # Strict-mode overflow check: if the cumulative prompt would no
@@ -448,7 +567,8 @@ class TokenObservationWrapper:
         turn_ids = torch.full((1, seq_len - 1), -1, dtype=torch.long)
 
         # Positions covered by model generations (pre-shift). Used below so we
-        # do not strip EOS when ``pad_token_id == eos_token_id`` (common after
+        # do not strip EOS when ``pad_token_id == eos_token_id`` (common when
+        # the tokenizer aliases pad to eos).
         gen_span = torch.zeros(seq_len, dtype=torch.bool)
         for gen_start, gen_end, tidx in self.turn_boundaries:
             mask_start = gen_start - 1

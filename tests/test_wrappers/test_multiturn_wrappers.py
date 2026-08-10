@@ -5,8 +5,13 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+from typing import ClassVar
+
+import cloudpickle
 import pytest
 import torch
+from transformers import AutoTokenizer
 
 from agilerl.llm_envs import (
     FormatRewardWrapper,
@@ -17,6 +22,8 @@ from agilerl.llm_envs import (
     TrajectoryBuffer,
 )
 from agilerl.llm_envs.sync_vec_env import _as_prompt
+from agilerl.utils.chat_template import inject_chat_template_kwargs
+from tests import TINY_LLM_FIXTURE_PATH
 
 
 class TestAsPrompt:
@@ -42,7 +49,9 @@ class _StubTokenizer:
 
 
 def _bare_wrapper() -> TokenObservationWrapper:
-    return TokenObservationWrapper.__new__(TokenObservationWrapper)
+    w = TokenObservationWrapper.__new__(TokenObservationWrapper)
+    w.strict_chat_template_boundary = True
+    return w
 
 
 class TestTokenObservationWrapperBuildModelPromptFields:
@@ -138,7 +147,8 @@ class _ChrTokenizer:
         t = torch.tensor(ids, dtype=torch.long)
         return {"input_ids": t, "attention_mask": torch.ones_like(t)}
 
-    def encode(self, s: str) -> list[int]:
+    def encode(self, s: str, add_special_tokens: bool = True) -> list[int]:
+        del add_special_tokens
         return [ord(c) for c in s]
 
     def decode(self, ids: list[int], skip_special_tokens: bool = True) -> str:
@@ -221,6 +231,7 @@ class TestTokenObservationWrapperStep:
             max_model_len=32,
             max_output_tokens=4,
             enable_sliding_window=True,
+            strict_chat_template_boundary=False,
         )
         obs, _ = w.reset()
         assert obs["input_ids"].dtype == torch.long
@@ -372,6 +383,20 @@ class TestTokenObservationWrapperChatTemplateBoundary:
         assert "FEEDBACK" in decoded
         assert decoded.endswith("<|start_header_id|>assistant<|end_header_id|>\n\n")
 
+    def test_non_strict_feedback_tokenization_returns_the_template_boundary(
+        self,
+    ) -> None:
+        w = _bare_wrapper()
+        w.apply_chat_template = True
+        w.strict_chat_template_boundary = False
+        w.tokenizer = _ChatTemplateRecordingTokenizer(_render_gemma_chat)
+
+        out = w._tokenize_feedback("FEEDBACK")
+        expected = w._chat_template_boundary_ids("FEEDBACK")
+
+        assert expected is not None
+        assert torch.equal(out, expected)
+
     def test_returns_none_when_template_renderer_raises(self) -> None:
         w = _bare_wrapper()
         w.apply_chat_template = True
@@ -425,14 +450,26 @@ class TestTokenObservationWrapperChatTemplateBoundary:
 
     def test_full_tokenize_feedback_falls_back_to_chatml(self) -> None:
         # If the chat-template path returns None (no apply_chat_template at
-        # all on the tokenizer), _tokenize_feedback falls back to ChatML so
+        # all on the tokenizer), a non-strict wrapper falls back to ChatML so
         # we never crash.
         w = _bare_wrapper()
         w.apply_chat_template = True
+        w.strict_chat_template_boundary = False
         w.tokenizer = _ChrTokenizerWithChatTemplateBroken()
         out = w._tokenize_feedback("F")
         assert out.shape[0] == 1
         assert out.shape[1] > 0
+
+    def test_strict_tokenize_feedback_raises_instead_of_guessing(self) -> None:
+        w = _bare_wrapper()
+        w.apply_chat_template = True
+        w.tokenizer = _ChrTokenizerWithChatTemplateBroken()
+        with pytest.raises(RuntimeError, match="Could not render the chat template"):
+            w._tokenize_feedback("F")
+
+    def test_strict_is_the_default(self) -> None:
+        w = TokenObservationWrapper(_FeedbackEnv(), _ChrTokenizer(), max_turns=1)
+        assert w.strict_chat_template_boundary is True
 
 
 def _render_gemma_chat(messages, add_generation_prompt: bool) -> str:
@@ -1332,3 +1369,468 @@ class TestSyncMultiTurnVecEnvGetTrajectories:
         # batch_steps is second-to-last.
         *_parts, batch_steps, _sampling_logps = vec.get_trajectories()
         assert batch_steps == 1
+
+
+class _TerminatorTokenizer:
+    """Char tokenizer whose id 7 is a declared special (a turn terminator)."""
+
+    all_special_ids: ClassVar[list[int]] = [7]
+
+    def encode(self, s: str, add_special_tokens: bool = True) -> list[int]:
+        del add_special_tokens
+        return [ord(c) for c in s]
+
+    def decode(self, ids, skip_special_tokens: bool = True) -> str:
+        del skip_special_tokens
+        return "".join(chr(int(x)) for x in ids)
+
+    def apply_chat_template(
+        self,
+        messages,
+        tokenize: bool = False,
+        add_generation_prompt: bool = False,
+        **kwargs,
+    ):
+        rendered = ""
+        for m in messages:
+            rendered += m["content"]
+            rendered += "\x07" if m["role"] == "assistant" else "|"
+        if add_generation_prompt:
+            rendered += "A:"
+        return rendered
+
+
+class _FeedbackEnv:
+    def reset(self, seed=None):
+        return "obs", {}
+
+    def step(self, action):
+        return "fb", 0.5, False, False, {}
+
+
+class TestFeedbackTerminatorDedupe:
+    def _wrapper(self, tokenizer) -> TokenObservationWrapper:
+        w = TokenObservationWrapper(
+            env=_FeedbackEnv(),
+            tokenizer=tokenizer,
+            max_turns=3,
+        )
+        w.full_ids = torch.tensor([[65, 66]], dtype=torch.long)
+        return w
+
+    def test_sampled_terminator_is_not_doubled(self) -> None:
+        w = self._wrapper(_TerminatorTokenizer())
+        w._step(torch.tensor([[65, 66, 67, 7]], dtype=torch.long), "C")
+        assert w.full_ids[0].tolist().count(7) == 1
+
+    def test_truncated_turn_still_gets_the_frame_terminator(self) -> None:
+        w = self._wrapper(_TerminatorTokenizer())
+        w._step(torch.tensor([[65, 66, 67]], dtype=torch.long), "C")
+        assert w.full_ids[0].tolist().count(7) == 1
+
+    def test_non_special_equal_token_is_kept(self) -> None:
+        tokenizer = _TerminatorTokenizer()
+        tokenizer.all_special_ids = []
+        w = self._wrapper(tokenizer)
+        w._step(torch.tensor([[65, 66, 67, 7]], dtype=torch.long), "C")
+        assert w.full_ids[0].tolist().count(7) == 2
+
+
+class TestTokenObservationSpecialTokenGuards:
+    def test_raw_encode_adds_no_specials(self) -> None:
+        class _BosAddingTokenizer:
+            def __call__(self, texts, add_special_tokens=True, **kwargs):
+                ids = [ord(c) for c in texts[0]]
+                if add_special_tokens:
+                    ids = [1, *ids]
+                t = torch.tensor([ids], dtype=torch.long)
+                return {"input_ids": t, "attention_mask": torch.ones_like(t)}
+
+        w = TokenObservationWrapper(
+            env=_FeedbackEnv(),
+            tokenizer=_BosAddingTokenizer(),
+            max_turns=1,
+            apply_chat_template=False,
+        )
+        out = w._tokenize_initial_prompt("hi")
+        assert out["input_ids"][0].tolist() == [ord("h"), ord("i")]
+
+    def test_raw_feedback_encode_adds_no_specials(self) -> None:
+        class _BosAddingEncoder:
+            def encode(self, s: str, add_special_tokens: bool = True) -> list[int]:
+                ids = [ord(c) for c in s]
+                return [1, *ids] if add_special_tokens else ids
+
+        w = TokenObservationWrapper(
+            env=_FeedbackEnv(),
+            tokenizer=_BosAddingEncoder(),
+            max_turns=1,
+            apply_chat_template=False,
+        )
+        assert w._tokenize_feedback("fb")[0].tolist() == [ord("f"), ord("b")]
+
+    def test_chatml_fallback_warns(self) -> None:
+        class _TemplatelessTokenizer:
+            def encode(self, s: str, add_special_tokens: bool = True) -> list[int]:
+                del add_special_tokens
+                return [ord(c) for c in s]
+
+        w = TokenObservationWrapper(
+            env=_FeedbackEnv(),
+            tokenizer=_TemplatelessTokenizer(),
+            max_turns=1,
+            strict_chat_template_boundary=False,
+        )
+        with pytest.warns(UserWarning, match="ChatML markers"):
+            w._tokenize_feedback("fb")
+
+
+class _ScriptedEnv:
+    def __init__(self, results):
+        self._results = list(results)
+
+    def reset(self, seed=None):
+        return "obs", {}
+
+    def step(self, action):
+        return self._results.pop(0)
+
+
+class TestSamplingLogprobAlignmentWithEosPad:
+    """With pad == eos, captured vLLM logprob counts match the action mask."""
+
+    def _wrapper(self, results) -> TokenObservationWrapper:
+        w = TokenObservationWrapper(
+            env=_ScriptedEnv(results),
+            tokenizer=_TerminatorTokenizer(),
+            max_turns=3,
+            pad_id=7,
+        )
+        w.full_ids = torch.tensor([[65, 66]], dtype=torch.long)
+        return w
+
+    def test_eos_terminated_turn_aligns_with_captured_logprobs(self) -> None:
+        from types import SimpleNamespace
+
+        from agilerl.algorithms.core.base import LLMAlgorithm
+
+        w = self._wrapper([("done", 1.0, True, False, {})])
+        w._step(torch.tensor([[65, 66, 67, 7]], dtype=torch.long), "C")
+        _ids, action_mask, _turn_ids, _rewards = w.get_episode_data()
+        assert int(action_mask.sum()) == 2
+
+        aligned, n_skipped = LLMAlgorithm._align_sampling_logprobs(
+            SimpleNamespace(),
+            [torch.tensor([-0.1, -0.2])],
+            action_mask,
+            torch.zeros(1, action_mask.shape[1]),
+        )
+        assert n_skipped == 0
+        assert aligned is not None
+
+    def test_multi_turn_mid_sequence_eos_stays_trainable(self) -> None:
+        w = self._wrapper(
+            [("fb", 0.5, False, False, {}), ("done", 1.0, True, False, {})]
+        )
+        w._step(torch.tensor([[65, 66, 67, 7]], dtype=torch.long), "C")
+        completion = torch.cat(
+            [w.full_ids, torch.tensor([[68, 7]], dtype=torch.long)], dim=1
+        )
+        w._step(completion, "D")
+        _ids, action_mask, _turn_ids, _rewards = w.get_episode_data()
+        assert int(action_mask.sum()) == 4
+
+
+# A ChatML-style template whose generation prompt and latest user turn are
+# controlled by render kwargs, as the Nemotron and Qwen families do.
+_THINKING_TEMPLATE = (
+    "{%- for message in messages %}"
+    "{{- '<|im_start|>' + message['role'] + '\n' + message['content'] }}"
+    "{%- if mark_effort | default(false) and loop.last "
+    "and message['role'] == 'user' %}"
+    "{{- '\n\n{reasoning effort: efficient}' }}"
+    "{%- endif %}"
+    "{{- '<|im_end|>\n' }}"
+    "{%- endfor %}"
+    "{%- if add_generation_prompt %}"
+    "{{- '<|im_start|>assistant\n' }}"
+    "{%- if enable_thinking | default(false) %}"
+    "{{- '<think>\n' }}"
+    "{%- else %}"
+    "{{- '<think></think>' }}"
+    "{%- endif %}"
+    "{%- endif %}"
+)
+
+_LLAMA_STYLE_TEMPLATE = (
+    "{%- for message in messages %}"
+    "{{- '<|start_header_id|>' + message['role'] + '<|end_header_id|>\n\n' "
+    "+ message['content'] + '<|eot_id|>' }}"
+    "{%- endfor %}"
+    "{%- if add_generation_prompt %}"
+    "{{- '<|start_header_id|>assistant<|end_header_id|>\n\n' }}"
+    "{%- endif %}"
+)
+
+_LAST_MESSAGE_ONLY_TEMPLATE = "{{- messages[-1]['content'] }}"
+
+_INITIAL_OBS = "Solve this sudoku."
+_FEEDBACK = "Wrong, try again."
+_SECOND_FEEDBACK = "Still wrong, try again."
+_EFFORT_MARKER = "{reasoning effort: efficient}"
+_SYSTEM_PROMPT = "Classify the intent, then reply. Valid intents: cancel_order."
+_THINK_OPEN_PROMPT = "<|im_start|>assistant\n<think>\n"
+_THINK_CLOSED_PROMPT = "<|im_start|>assistant\n<think></think>"
+
+
+def _templated_tokenizer(template: str, chat_template_kwargs: dict | None = None):
+    tokenizer = AutoTokenizer.from_pretrained(TINY_LLM_FIXTURE_PATH)
+    tokenizer.chat_template = template
+    if chat_template_kwargs is not None:
+        inject_chat_template_kwargs(tokenizer, chat_template_kwargs)
+    return tokenizer
+
+
+def _attribute_only_tokenizer(template: str, chat_template_kwargs: dict):
+    """Tokenizer carrying render kwargs as a plain attribute, with no bound wrap."""
+    tokenizer = AutoTokenizer.from_pretrained(TINY_LLM_FIXTURE_PATH)
+    tokenizer.chat_template = template
+    tokenizer.chat_template_default_kwargs = dict(chat_template_kwargs)
+    return tokenizer
+
+
+def _templated_wrapper(tokenizer, env=None, **kwargs) -> TokenObservationWrapper:
+    return TokenObservationWrapper(
+        env if env is not None else _FeedbackEnv(),
+        tokenizer,
+        max_turns=3,
+        **kwargs,
+    )
+
+
+def _turn_generation_prompts(wrapper, feedbacks: list[str]) -> list[str]:
+    """Decode the text opening each turn of a rollout driven by *feedbacks*."""
+    tokenizer = wrapper.tokenizer
+    opening = tokenizer.decode(
+        wrapper._tokenize_initial_prompt(_INITIAL_OBS)["input_ids"][0].tolist(),
+    )
+    return [opening] + [
+        tokenizer.decode(wrapper._tokenize_feedback(feedback)[0].tolist())
+        for feedback in feedbacks
+    ]
+
+
+class TestChatTemplateDerivedTurnPrompts:
+    """Every turn's generation prompt comes from the tokenizer's own template."""
+
+    @pytest.mark.parametrize(
+        ("enable_thinking", "expected_generation_prompt"),
+        [(False, _THINK_CLOSED_PROMPT), (True, _THINK_OPEN_PROMPT)],
+        ids=["think-closed", "think-open"],
+    )
+    def test_boundary_carries_thinking_control(
+        self,
+        enable_thinking,
+        expected_generation_prompt,
+    ) -> None:
+        w = _templated_wrapper(
+            _templated_tokenizer(
+                _THINKING_TEMPLATE,
+                {"enable_thinking": enable_thinking},
+            ),
+        )
+
+        boundary = w._chat_template_boundary_text(_FEEDBACK)
+
+        assert boundary == (
+            f"<|im_end|>\n<|im_start|>user\n{_FEEDBACK}<|im_end|>\n"
+            + expected_generation_prompt
+        )
+
+    @pytest.mark.parametrize("enable_thinking", [False, True])
+    def test_append_only_trajectory_matches_a_full_render(
+        self,
+        enable_thinking,
+    ) -> None:
+        tokenizer = _templated_tokenizer(
+            _THINKING_TEMPLATE,
+            {"enable_thinking": enable_thinking},
+        )
+        w = _templated_wrapper(tokenizer)
+
+        opening = tokenizer.decode(
+            w._tokenize_initial_prompt(_INITIAL_OBS)["input_ids"][0].tolist(),
+        )
+        generated = "REASONING</think>ANSWER" if enable_thinking else "ANSWER"
+        boundary = tokenizer.decode(w._tokenize_feedback(_FEEDBACK)[0].tolist())
+        thinking_prefix = "<think>\n" if enable_thinking else "<think></think>"
+
+        assert opening + generated + boundary == tokenizer.apply_chat_template(
+            [
+                {"role": "user", "content": _INITIAL_OBS},
+                {"role": "assistant", "content": thinking_prefix + generated},
+                {"role": "user", "content": _FEEDBACK},
+            ],
+            tokenize=False,
+            add_generation_prompt=True,
+        )
+
+    @pytest.mark.parametrize(
+        ("enable_thinking", "generation_prompt"),
+        [(False, _THINK_CLOSED_PROMPT), (True, _THINK_OPEN_PROMPT)],
+    )
+    def test_every_turn_opens_with_the_same_generation_prompt(
+        self,
+        enable_thinking,
+        generation_prompt,
+    ) -> None:
+        w = _templated_wrapper(
+            _templated_tokenizer(
+                _THINKING_TEMPLATE,
+                {"enable_thinking": enable_thinking},
+            ),
+        )
+
+        prompts = _turn_generation_prompts(w, [_FEEDBACK, _SECOND_FEEDBACK])
+
+        assert len(prompts) == 3
+        for prompt in prompts:
+            assert prompt.endswith(generation_prompt)
+
+    @pytest.mark.parametrize(
+        "build_tokenizer",
+        [_templated_tokenizer, _attribute_only_tokenizer],
+        ids=["bound-wrap", "defaults-attribute-only"],
+    )
+    def test_configured_kwargs_reach_every_turn(self, build_tokenizer) -> None:
+        w = _templated_wrapper(
+            build_tokenizer(
+                _THINKING_TEMPLATE,
+                {"enable_thinking": True, "mark_effort": True},
+            ),
+        )
+
+        turn_one, turn_two, turn_three = _turn_generation_prompts(
+            w,
+            [_FEEDBACK, _SECOND_FEEDBACK],
+        )
+
+        assert f"{_INITIAL_OBS}\n\n{_EFFORT_MARKER}" in turn_one
+        assert f"{_FEEDBACK}\n\n{_EFFORT_MARKER}" in turn_two
+        assert f"{_SECOND_FEEDBACK}\n\n{_EFFORT_MARKER}" in turn_three
+
+    def test_configured_kwargs_survive_a_serialization_round_trip(self) -> None:
+        tokenizer = _templated_tokenizer(
+            _THINKING_TEMPLATE,
+            {"enable_thinking": True, "mark_effort": True},
+        )
+        w = _templated_wrapper(cloudpickle.loads(cloudpickle.dumps(tokenizer)))
+
+        prompts = _turn_generation_prompts(w, [_FEEDBACK, _SECOND_FEEDBACK])
+
+        assert [_EFFORT_MARKER in prompt for prompt in prompts] == [True] * 3
+
+    @pytest.mark.parametrize(
+        "chat_template_kwargs",
+        [{"enable_thinking": True}, {"enable_thinking": True, "mark_effort": False}],
+    )
+    def test_unconfigured_kwargs_leave_no_marker(self, chat_template_kwargs) -> None:
+        w = _templated_wrapper(
+            _templated_tokenizer(_THINKING_TEMPLATE, chat_template_kwargs),
+        )
+
+        prompts = _turn_generation_prompts(w, [_FEEDBACK, _SECOND_FEEDBACK])
+
+        assert len(prompts) == 3
+        for prompt in prompts:
+            assert _EFFORT_MARKER not in prompt
+            assert prompt.endswith(_THINK_OPEN_PROMPT)
+
+    def test_non_chatml_template_derives_its_own_markers(self) -> None:
+        w = _templated_wrapper(_templated_tokenizer(_LLAMA_STYLE_TEMPLATE))
+
+        boundary = w._chat_template_boundary_text(_FEEDBACK)
+
+        assert boundary == (
+            "<|eot_id|><|start_header_id|>user<|end_header_id|>\n\n"
+            f"{_FEEDBACK}<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n"
+        )
+        assert "<|im_start|>" not in boundary
+        assert "<|im_end|>" not in boundary
+
+    def test_unsliceable_template_raises_instead_of_guessing(self) -> None:
+        w = _templated_wrapper(_templated_tokenizer(_LAST_MESSAGE_ONLY_TEMPLATE))
+
+        with pytest.raises(RuntimeError, match="assistant probe"):
+            w._tokenize_feedback(_FEEDBACK)
+
+    def test_unrenderable_template_raises(self) -> None:
+        w = _templated_wrapper(_templated_tokenizer("{%- for %}"))
+
+        with pytest.raises(RuntimeError, match="Could not render the chat template"):
+            w._tokenize_feedback(_FEEDBACK)
+
+    def test_a_non_strict_wrapper_warns_and_falls_back(self) -> None:
+        w = _templated_wrapper(
+            _templated_tokenizer(_LAST_MESSAGE_ONLY_TEMPLATE),
+            strict_chat_template_boundary=False,
+        )
+
+        with pytest.warns(UserWarning, match="ChatML markers"):
+            ids = w._tokenize_feedback(_FEEDBACK)
+
+        assert w.tokenizer.decode(ids[0].tolist()).startswith("<|im_end|>")
+
+
+class TestEnvSystemPrompt:
+    """An env-declared system prompt is rendered in the system role."""
+
+    def _wrapper(self, system_prompt) -> TokenObservationWrapper:
+        return _templated_wrapper(
+            _templated_tokenizer(_THINKING_TEMPLATE, {"enable_thinking": False}),
+            env=SimpleNamespace(system_prompt=system_prompt),
+        )
+
+    def test_initial_prompt_matches_an_offline_rendering(self) -> None:
+        w = self._wrapper(_SYSTEM_PROMPT)
+
+        rendered = w._tokenize_initial_prompt(_INITIAL_OBS)
+        offline = w.tokenizer.apply_chat_template(
+            [
+                {"role": "system", "content": _SYSTEM_PROMPT},
+                {"role": "user", "content": _INITIAL_OBS},
+            ],
+            tokenize=True,
+            add_generation_prompt=True,
+            enable_thinking=False,
+        )
+
+        assert rendered["input_ids"][0].tolist() == list(offline["input_ids"])
+
+    def test_initial_prompt_opens_a_system_turn_carrying_the_prompt(self) -> None:
+        w = self._wrapper(_SYSTEM_PROMPT)
+
+        opening = w.tokenizer.decode(
+            w._tokenize_initial_prompt(_INITIAL_OBS)["input_ids"][0].tolist(),
+        )
+
+        assert opening.startswith(f"<|im_start|>system\n{_SYSTEM_PROMPT}<|im_end|>\n")
+        assert f"<|im_start|>user\n{_INITIAL_OBS}<|im_end|>\n" in opening
+        assert opening.endswith(_THINK_CLOSED_PROMPT)
+        assert opening.count(_SYSTEM_PROMPT) == 1
+
+    def test_an_env_without_a_system_prompt_renders_the_user_turn_alone(self) -> None:
+        assert _templated_wrapper(
+            _templated_tokenizer(_THINKING_TEMPLATE),
+        )._initial_messages(_INITIAL_OBS) == [
+            {"role": "user", "content": _INITIAL_OBS},
+        ]
+
+    @pytest.mark.parametrize("system_prompt", ["", "   \n ", 17, None])
+    def test_a_non_prompt_attribute_is_ignored(self, system_prompt) -> None:
+        w = self._wrapper(system_prompt)
+
+        assert w._env_system_prompt() is None
+        assert w._initial_messages(_INITIAL_OBS) == [
+            {"role": "user", "content": _INITIAL_OBS},
+        ]

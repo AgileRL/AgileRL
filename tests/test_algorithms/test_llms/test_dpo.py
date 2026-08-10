@@ -30,7 +30,7 @@ from agilerl.algorithms.core.base import (
 from agilerl.algorithms.dpo import DPO
 from agilerl.llm_envs import PreferenceGym
 from tests import TINY_LLM_FIXTURE_PATH
-from tests.test_algorithms.test_llms.test_grpo import (
+from tests.test_algorithms.test_llms.llm_helpers import (
     create_module,
     deepspeed_config_stage_1,
     deepspeed_config_stage_2,

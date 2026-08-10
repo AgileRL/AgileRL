@@ -121,9 +121,10 @@ class SFTGym(IterablePromptBatchGym[SFTPrompts]):
             )
             prompt_lengths = [len(ids) for ids in prompt_encodings["input_ids"]]
 
+            eos = tokenizer.eos_token or ""
             pair_enc = tokenizer(
                 prompts,
-                responses,
+                [response + eos for response in responses],
                 max_length=self.max_context_length,
                 truncation=True,
                 padding="longest",
