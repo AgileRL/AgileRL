@@ -10,7 +10,7 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 
-import agilerl.algorithms.core.llm_ops.liger_nemotron_h as liger_nemotron_h
+import agilerl.architectures.nemotron_h.liger as liger_nemotron_h
 
 
 class TestRegisterNemotronHLiger:
@@ -314,7 +314,7 @@ class TestLceForward:
         monkeypatch.setattr(
             liger_nemotron_h,
             "LigerCausalLMOutputWithPast",
-            lambda **kwargs: SimpleNamespace(**kwargs),
+            SimpleNamespace,
         )
         lm_head = MagicMock(side_effect=fake.lm_head)
         fake.lm_head = lm_head
@@ -338,7 +338,7 @@ class TestLceForward:
         monkeypatch.setattr(
             liger_nemotron_h,
             "LigerCausalLMOutputWithPast",
-            lambda **kwargs: SimpleNamespace(**kwargs),
+            SimpleNamespace,
         )
 
         out = liger_nemotron_h.lce_forward(
@@ -396,7 +396,7 @@ class TestLceForward:
         monkeypatch.setattr(
             liger_nemotron_h,
             "LigerCausalLMOutputWithPast",
-            lambda **kwargs: SimpleNamespace(**kwargs),
+            SimpleNamespace,
         )
 
         liger_nemotron_h.lce_forward(
@@ -413,7 +413,8 @@ class TestLceForward:
 
 class TestImportFallbacks:
     def test_reload_without_llm_or_liger_keeps_names_resolvable(
-        self, monkeypatch
+        self,
+        monkeypatch,
     ) -> None:
         import agilerl
 
