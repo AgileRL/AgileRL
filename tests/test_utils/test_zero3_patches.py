@@ -14,9 +14,9 @@ import logging
 import pytest
 import torch
 
-from agilerl.utils import third_party_patches
-from agilerl.utils.third_party_patches import (
-    install_zero3_third_party_hooks,
+from agilerl.utils import zero3_patches
+from agilerl.utils.zero3_patches import (
+    install_zero3_patches,
     patch_zero3_fetch_trace,
     patch_zero3_param_persistence,
 )
@@ -91,11 +91,11 @@ def _make_coordinator_class():
 
 
 def _attr(coordinator, name):
-    return getattr(coordinator, third_party_patches._mangled(name))
+    return getattr(coordinator, zero3_patches._mangled(name))
 
 
 def _set_attr(coordinator, name, value):
-    setattr(coordinator, third_party_patches._mangled(name), value)
+    setattr(coordinator, zero3_patches._mangled(name), value)
 
 
 def _simulate_no_grad_forward(coordinator):
@@ -111,7 +111,7 @@ def _simulate_no_grad_forward(coordinator):
 def coordinator_cls(monkeypatch):
     cls = _make_coordinator_class()
     monkeypatch.setattr(
-        third_party_patches,
+        zero3_patches,
         "_resolve_zero3_targets",
         lambda: (cls, _FakeTraceMode),
     )
@@ -128,48 +128,48 @@ class TestImportDoesNotPullThirdParty:
             "_MIXER_CLASS",
             "_INIT_CLASS",
         ):
-            assert not hasattr(third_party_patches, name)
-        assert callable(third_party_patches._resolve_zero3_targets)
-        assert callable(third_party_patches._resolve_zero3_init)
+            assert not hasattr(zero3_patches, name)
+        assert callable(zero3_patches._resolve_zero3_targets)
+        assert callable(zero3_patches._resolve_zero3_init)
 
 
 class TestInstallZero3ThirdPartyHooks:
     def test_always_installs_fetch_trace(self, monkeypatch):
         calls: list[str] = []
         monkeypatch.setattr(
-            third_party_patches,
+            zero3_patches,
             "patch_zero3_fetch_trace",
             lambda config: calls.append("fetch"),
         )
         monkeypatch.setattr(
-            third_party_patches,
+            zero3_patches,
             "install_family_zero3_patches",
             lambda _name: calls.append("families"),
         )
         monkeypatch.setattr(
-            third_party_patches,
+            zero3_patches,
             "patch_zero3_param_persistence",
             lambda *args, **kwargs: calls.append("persist"),
         )
 
-        install_zero3_third_party_hooks({"zero_optimization": {"stage": 3}})
+        install_zero3_patches({"zero_optimization": {"stage": 3}})
 
         assert calls == ["fetch", "families"]
 
     def test_family_dispatch_receives_the_checkpoint_id(self, monkeypatch):
         seen: list[str | None] = []
         monkeypatch.setattr(
-            third_party_patches,
+            zero3_patches,
             "patch_zero3_fetch_trace",
             lambda config: None,
         )
         monkeypatch.setattr(
-            third_party_patches,
+            zero3_patches,
             "install_family_zero3_patches",
             seen.append,
         )
 
-        install_zero3_third_party_hooks(
+        install_zero3_patches(
             {"zero_optimization": {"stage": 3}},
             model_name_or_path="nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
         )
@@ -179,12 +179,12 @@ class TestInstallZero3ThirdPartyHooks:
     def test_persistence_when_threshold_set(self, monkeypatch):
         persist_kwargs: dict = {}
         monkeypatch.setattr(
-            third_party_patches,
+            zero3_patches,
             "patch_zero3_fetch_trace",
             lambda config: None,
         )
         monkeypatch.setattr(
-            third_party_patches,
+            zero3_patches,
             "install_family_zero3_patches",
             lambda _name: None,
         )
@@ -194,12 +194,12 @@ class TestInstallZero3ThirdPartyHooks:
             persist_kwargs.update(kwargs)
 
         monkeypatch.setattr(
-            third_party_patches,
+            zero3_patches,
             "patch_zero3_param_persistence",
             _persist,
         )
 
-        install_zero3_third_party_hooks(
+        install_zero3_patches(
             {
                 "zero_optimization": {
                     "stage": 3,
@@ -236,17 +236,17 @@ class TestInstallZero3ThirdPartyHooks:
     def test_skips_persistence_without_threshold(self, monkeypatch, config) -> None:
         calls: list[str] = []
         monkeypatch.setattr(
-            third_party_patches,
+            zero3_patches,
             "patch_zero3_fetch_trace",
             lambda _config: calls.append("fetch"),
         )
         monkeypatch.setattr(
-            third_party_patches,
+            zero3_patches,
             "patch_zero3_param_persistence",
             lambda *args, **kwargs: calls.append("persist"),
         )
 
-        install_zero3_third_party_hooks(config)
+        install_zero3_patches(config)
 
         assert calls == ["fetch"]
 
@@ -255,42 +255,42 @@ class TestZero3Resolvers:
     def test_resolve_zero3_targets_returns_none_pair_when_import_fails(
         self, monkeypatch
     ) -> None:
-        monkeypatch.setattr(third_party_patches, "try_import", lambda _path: None)
+        monkeypatch.setattr(zero3_patches, "try_import", lambda _path: None)
 
-        assert third_party_patches._resolve_zero3_targets() == (None, None)
+        assert zero3_patches._resolve_zero3_targets() == (None, None)
 
     def test_resolve_zero3_targets_raises_when_symbols_missing(
         self, monkeypatch
     ) -> None:
         monkeypatch.setattr(
-            third_party_patches,
+            zero3_patches,
             "try_import",
             lambda _path: type("M", (), {})(),
         )
 
         with pytest.raises(RuntimeError, match="missing"):
-            third_party_patches._resolve_zero3_targets()
+            zero3_patches._resolve_zero3_targets()
 
     def test_resolve_zero3_init_returns_none_when_module_missing(
         self, monkeypatch
     ) -> None:
-        monkeypatch.setattr(third_party_patches, "try_import", lambda _path: None)
+        monkeypatch.setattr(zero3_patches, "try_import", lambda _path: None)
 
-        assert third_party_patches._resolve_zero3_init() is None
+        assert zero3_patches._resolve_zero3_init() is None
 
     def test_snapshot_skips_attributes_the_coordinator_lacks(self) -> None:
-        assert third_party_patches._snapshot_trace_state(object()) == {}
+        assert zero3_patches._snapshot_trace_state(object()) == {}
 
     def test_resolve_zero3_init_returns_none_when_attribute_missing(
         self, monkeypatch
     ) -> None:
         monkeypatch.setattr(
-            third_party_patches,
+            zero3_patches,
             "try_import",
             lambda _path: type("M", (), {})(),
         )
 
-        assert third_party_patches._resolve_zero3_init() is None
+        assert zero3_patches._resolve_zero3_init() is None
 
 
 class TestRoutesToConditionalSubmodules:
@@ -311,20 +311,20 @@ class TestRoutesToConditionalSubmodules:
         ],
     )
     def test_absent_or_empty_leaf_module_is_false(self, config):
-        assert third_party_patches._routes_to_conditional_submodules(config) is False
+        assert zero3_patches._routes_to_conditional_submodules(config) is False
 
     def test_declared_leaf_module_is_true(self):
-        assert third_party_patches._routes_to_conditional_submodules(
+        assert zero3_patches._routes_to_conditional_submodules(
             _LEAF_MODULE_CONFIG
         )
 
     def test_leaf_module_by_classes_is_true(self):
         config = {"zero_optimization": {"leaf_module": {"classes": ["NemotronHMoE"]}}}
-        assert third_party_patches._routes_to_conditional_submodules(config)
+        assert zero3_patches._routes_to_conditional_submodules(config)
 
     def test_not_exported_in_all(self):
-        assert "routes_to_conditional_submodules" not in third_party_patches.__all__
-        assert not hasattr(third_party_patches, "routes_to_conditional_submodules")
+        assert "routes_to_conditional_submodules" not in zero3_patches.__all__
+        assert not hasattr(zero3_patches, "routes_to_conditional_submodules")
 
 
 class TestLeafModuleForcesOnDemandFetch:
@@ -356,7 +356,7 @@ class TestLeafModuleForcesOnDemandFetch:
         with torch.no_grad():
             coordinator.reset_step()
 
-        assert getattr(coordinator, third_party_patches.SNAPSHOT_ATTR, None) is None
+        assert getattr(coordinator, zero3_patches.SNAPSHOT_ATTR, None) is None
         assert _attr(coordinator, "__trace_mode") is _FakeTraceMode.INVALID
 
     def test_per_step_bookkeeping_still_resets(self, coordinator_cls):
@@ -417,13 +417,13 @@ class TestZero3TraceSnapshotBranch:
 
         assert _attr(coordinator, "__trace_mode") is _FakeTraceMode.INVALID
         assert coordinator.trace_modes_at_reset == [_FakeTraceMode.COMPLETE]
-        snapshot = getattr(coordinator, third_party_patches.SNAPSHOT_ATTR)
+        snapshot = getattr(coordinator, zero3_patches.SNAPSHOT_ATTR)
         assert snapshot is not None
-        mangled_trace_mode = third_party_patches._mangled("__trace_mode")
+        mangled_trace_mode = zero3_patches._mangled("__trace_mode")
         assert snapshot[mangled_trace_mode] is _FakeTraceMode.COMPLETE
         assert set(snapshot) == {
-            third_party_patches._mangled(name)
-            for name in third_party_patches.TRACE_ATTRS
+            zero3_patches._mangled(name)
+            for name in zero3_patches.TRACE_ATTRS
         }
 
     def test_snapshot_excludes_per_step_bookkeeping(self, coordinator_cls):
@@ -433,10 +433,10 @@ class TestZero3TraceSnapshotBranch:
         with torch.no_grad():
             coordinator.reset_step()
 
-        snapshot = getattr(coordinator, third_party_patches.SNAPSHOT_ATTR)
+        snapshot = getattr(coordinator, zero3_patches.SNAPSHOT_ATTR)
         for name in _DROPPED_ATTRS:
-            assert name not in third_party_patches.TRACE_ATTRS
-            assert third_party_patches._mangled(name) not in snapshot
+            assert name not in zero3_patches.TRACE_ATTRS
+            assert zero3_patches._mangled(name) not in snapshot
 
     def test_snapshot_containers_are_not_aliased(self, coordinator_cls):
         patch_zero3_fetch_trace()
@@ -446,9 +446,9 @@ class TestZero3TraceSnapshotBranch:
             coordinator.reset_step()
         _simulate_no_grad_forward(coordinator)
 
-        snapshot = getattr(coordinator, third_party_patches.SNAPSHOT_ATTR)
-        assert len(snapshot[third_party_patches._mangled("__submodule_order")]) == 2
-        assert len(snapshot[third_party_patches._mangled("__param_order")]) == 2
+        snapshot = getattr(coordinator, zero3_patches.SNAPSHOT_ATTR)
+        assert len(snapshot[zero3_patches._mangled("__submodule_order")]) == 2
+        assert len(snapshot[zero3_patches._mangled("__param_order")]) == 2
 
     def test_frozen_tuple_orders_round_trip(self, coordinator_cls):
         patch_zero3_fetch_trace()
@@ -479,10 +479,10 @@ class TestZero3TraceSnapshotBranch:
             _simulate_no_grad_forward(coordinator)
             coordinator.reset_step()
 
-        snapshot = getattr(coordinator, third_party_patches.SNAPSHOT_ATTR)
-        assert len(snapshot[third_party_patches._mangled("__submodule_order")]) == 2
+        snapshot = getattr(coordinator, zero3_patches.SNAPSHOT_ATTR)
+        assert len(snapshot[zero3_patches._mangled("__submodule_order")]) == 2
         assert (
-            snapshot[third_party_patches._mangled("__trace_mode")]
+            snapshot[zero3_patches._mangled("__trace_mode")]
             is _FakeTraceMode.COMPLETE
         )
         assert _attr(coordinator, "__trace_mode") is _FakeTraceMode.INVALID
@@ -506,7 +506,7 @@ class TestZero3TraceSnapshotBranch:
         assert _attr(coordinator, "__trace_mode") is _FakeTraceMode.COMPLETE
         assert _attr(coordinator, "__step_id") == 0
         assert list(_attr(coordinator, "__param_queue")) == expected_params
-        assert getattr(coordinator, third_party_patches.SNAPSHOT_ATTR) is None
+        assert getattr(coordinator, zero3_patches.SNAPSHOT_ATTR) is None
 
     def test_grad_entry_without_snapshot_calls_through(self, coordinator_cls):
         patch_zero3_fetch_trace()
@@ -518,7 +518,7 @@ class TestZero3TraceSnapshotBranch:
         assert coordinator.reset_step_calls == 1
         assert _attr(coordinator, "__step_id") == 0
         assert _attr(coordinator, "__trace_mode") is _FakeTraceMode.COMPLETE
-        assert getattr(coordinator, third_party_patches.SNAPSHOT_ATTR, None) is None
+        assert getattr(coordinator, zero3_patches.SNAPSHOT_ATTR, None) is None
 
 
 class TestZero3TraceInstallation:
@@ -567,7 +567,7 @@ class TestZero3TraceInstallation:
                 self.reset_step_calls += 1
 
         monkeypatch.setattr(
-            third_party_patches,
+            zero3_patches,
             "_resolve_zero3_targets",
             lambda: (PartitionedParameterCoordinator, _FakeTraceMode),
         )
@@ -577,7 +577,7 @@ class TestZero3TraceInstallation:
 
         assert not getattr(
             PartitionedParameterCoordinator,
-            third_party_patches.TRACE_PATCHED_FLAG,
+            zero3_patches.TRACE_PATCHED_FLAG,
             False,
         )
 
@@ -589,7 +589,7 @@ class TestZero3TraceInstallation:
                 self.__param_order = []
 
         monkeypatch.setattr(
-            third_party_patches,
+            zero3_patches,
             "_resolve_zero3_targets",
             lambda: (PartitionedParameterCoordinator, _FakeTraceMode),
         )
@@ -599,7 +599,7 @@ class TestZero3TraceInstallation:
 
     def test_missing_coordinator_class_is_a_no_op(self, monkeypatch, caplog):
         monkeypatch.setattr(
-            third_party_patches,
+            zero3_patches,
             "_resolve_zero3_targets",
             lambda: (None, None),
         )
@@ -625,7 +625,7 @@ class _FakeZero3Init:
 @pytest.fixture
 def zero3_init_cls(monkeypatch):
     monkeypatch.setattr(
-        third_party_patches,
+        zero3_patches,
         "_resolve_zero3_init",
         lambda: _FakeZero3Init,
     )
@@ -681,7 +681,7 @@ class TestZero3ParamPersistence:
             model_persistence_threshold = _DEFAULT_MODEL_THRESHOLD
 
         monkeypatch.setattr(
-            third_party_patches,
+            zero3_patches,
             "_resolve_zero3_init",
             lambda: Init,
         )
@@ -706,7 +706,7 @@ class TestZero3ParamPersistence:
 
     def test_missing_init_class_is_a_no_op(self, monkeypatch, caplog):
         monkeypatch.setattr(
-            third_party_patches,
+            zero3_patches,
             "_resolve_zero3_init",
             lambda: None,
         )

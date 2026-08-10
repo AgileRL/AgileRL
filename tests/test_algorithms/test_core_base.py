@@ -3231,7 +3231,7 @@ class TestLLMZero3ThirdPartyHooksWireUp:
         )
         with (
             patch(
-                "agilerl.algorithms.core.base.install_zero3_third_party_hooks"
+                "agilerl.algorithms.core.base.install_zero3_patches"
             ) as mock_hooks,
             pytest.warns(UserWarning, match="ZeRO Stage 3"),
         ):
@@ -3254,7 +3254,7 @@ class TestLLMZero3ThirdPartyHooksWireUp:
             }
         )
         with patch(
-            "agilerl.algorithms.core.base.install_zero3_third_party_hooks"
+            "agilerl.algorithms.core.base.install_zero3_patches"
         ) as mock_hooks:
             _make_llm_agent(accelerator=acc)
 

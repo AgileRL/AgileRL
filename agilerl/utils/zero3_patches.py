@@ -1,10 +1,10 @@
 # Copyright 2026 AgileRL
 # SPDX-License-Identifier: Apache-2.0
 
-"""Class-level workarounds for third-party behaviour that ZeRO-3 training cannot use.
+"""Class-level DeepSpeed workarounds that ZeRO-3 training needs.
 
-Call :func:`install_zero3_third_party_hooks` before the model is built; it
-selects the patches that apply to the DeepSpeed config and model identity.
+Call :func:`install_zero3_patches` before the model is built; it selects the
+patches that apply to the DeepSpeed config and model identity.
 Architecture-scoped patches live in :mod:`agilerl.architectures` and are
 dispatched from here by family.
 
@@ -41,7 +41,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 __all__ = [
-    "install_zero3_third_party_hooks",
+    "install_zero3_patches",
     "patch_zero3_fetch_trace",
     "patch_zero3_param_persistence",
 ]
@@ -61,13 +61,13 @@ TRACE_ATTRS = (
 )
 
 
-def install_zero3_third_party_hooks(
+def install_zero3_patches(
     deepspeed_config: Mapping[str, Any] | None,
     *,
     model_name_or_path: str | None = None,
     num_partitions: int = 1,
 ) -> None:
-    """Install the ZeRO-3 third-party patches that apply to this run.
+    """Install the ZeRO-3 patches that apply to this run.
 
     Always installs the fetch-trace workaround, then the patches every family
     detected in *model_name_or_path* needs. Parameter persistence installs
