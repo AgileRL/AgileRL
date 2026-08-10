@@ -66,11 +66,15 @@ This example demonstrates how to use the GRPO algorithm to fine-tune a LLM on a 
 .. toctree::
    :hidden:
 
+   batch_sizing
    fused_logprobs
    quantization
    llm_checkpoints
 
 .. seealso::
+
+   :doc:`batch_sizing`
+      Rollout, mini- and micro-batch sizes, and how often the optimizer steps.
 
    :doc:`fused_logprobs`
       Fused linear log-probability computation for memory-efficient training.
