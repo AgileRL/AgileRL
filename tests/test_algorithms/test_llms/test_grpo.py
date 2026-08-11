@@ -3574,9 +3574,7 @@ class TestGRPOLearn:
             [[0.0], [2.0], [-2.0], [0.0]], dtype=torch.float32
         )
         grpo.accelerator = MagicMock(num_processes=2)
-        with patch.object(
-            grpo, "_trajectory_advantages", return_value=fake_advantages
-        ):
+        with patch.object(grpo, "_trajectory_advantages", return_value=fake_advantages):
             advantages, batch_idxs = grpo._calculate_advantages(
                 rewards, completion_ids, action_masks, None
             )
@@ -3599,9 +3597,7 @@ class TestGRPOLearn:
         fake_advantages = torch.tensor(
             [[0.0], [2.0], [-2.0], [0.0]], dtype=torch.float32
         )
-        with patch.object(
-            grpo, "_trajectory_advantages", return_value=fake_advantages
-        ):
+        with patch.object(grpo, "_trajectory_advantages", return_value=fake_advantages):
             advantages, batch_idxs = grpo._calculate_advantages(
                 rewards, completion_ids, action_masks, None
             )
