@@ -9,6 +9,7 @@ from unittest.mock import MagicMock, patch
 
 import click
 import pytest
+from rich.console import Console
 
 from agilerl.arena.exceptions import (
     ArenaAPIError,
@@ -24,6 +25,7 @@ from agilerl.arena.output import (
     _looks_like_environment_catalog,
     emit_csv_preview,
     emit_result,
+    emit_session_transcript,
     handle_error,
     select_row,
     supports_interactive_selection,
@@ -623,3 +625,146 @@ class TestSupportsInteractiveSelection:
     def test_false_when_stdin_is_detached(self, mock_sys):
         mock_sys.stdin.isatty.side_effect = ValueError("I/O operation on closed file")
         assert supports_interactive_selection() is False
+
+
+# ---------------------------------------------------------------------------
+# Session transcripts
+# ---------------------------------------------------------------------------
+
+
+def _transcript(session) -> str:
+    """Render a transcript to plain text, as a terminal would show it."""
+    console = Console(width=100, force_terminal=False, no_color=True)
+    with patch("agilerl.arena.output.console", console), console.capture() as cap:
+        emit_session_transcript(session)
+    return cap.get()
+
+
+class TestEmitSessionTranscript:
+    def test_shows_roles_and_content(self):
+        out = _transcript(
+            {
+                "session_id": "s1",
+                "messages": [
+                    {"role": "user", "content": "what is my name?"},
+                    {"role": "assistant", "content": "Samuel."},
+                ],
+            }
+        )
+        assert "Session s1" in out
+        assert "2 messages" in out
+        assert "user" in out
+        assert "what is my name?" in out
+        assert "assistant" in out
+        assert "Samuel." in out
+
+    def test_messages_are_not_a_json_blob(self):
+        out = _transcript(
+            {"session_id": "s1", "messages": [{"role": "user", "content": "hi"}]}
+        )
+        assert '"role"' not in out
+        assert "[{" not in out
+
+    def test_content_is_printed_literally(self):
+        """Model output is data: markup and escapes must survive intact."""
+        out = _transcript(
+            {
+                "session_id": "s1",
+                "messages": [
+                    {"role": "assistant", "content": "[bold]not markup[/bold] \\ud83c"}
+                ],
+            }
+        )
+        assert "[bold]not markup[/bold]" in out
+        assert "\\ud83c" in out
+
+    def test_timestamps_are_omitted_when_absent(self):
+        out = _transcript({"session_id": "s1", "messages": []})
+        assert "None" not in out
+        assert "created" not in out
+        assert "updated" not in out
+
+    def test_timestamps_are_shown_when_present(self):
+        out = _transcript(
+            {
+                "session_id": "s1",
+                "created_at": "2026-08-01T00:00:00Z",
+                "last_updated": "2026-08-05T00:00:00Z",
+                "messages": [],
+            }
+        )
+        assert "created 2026-08-01T00:00:00Z" in out
+        assert "updated 2026-08-05T00:00:00Z" in out
+
+    def test_empty_session(self):
+        out = _transcript({"session_id": "s1", "messages": []})
+        assert "No messages in this session." in out
+        assert "0 messages" in out
+
+    def test_missing_messages_key(self):
+        assert "No messages in this session." in _transcript({"session_id": "s1"})
+
+    def test_non_list_messages(self):
+        assert "No messages" in _transcript({"session_id": "s1", "messages": "nope"})
+
+    def test_skips_rows_that_are_not_messages(self):
+        out = _transcript(
+            {
+                "session_id": "s1",
+                "messages": ["junk", {"role": "user", "content": "hi"}],
+            }
+        )
+        assert "1 messages" in out
+        assert "hi" in out
+
+    def test_missing_session_id(self):
+        assert "Session unknown" in _transcript({"messages": []})
+
+    def test_message_without_a_role_or_content(self):
+        out = _transcript({"session_id": "s1", "messages": [{}]})
+        assert "unknown" in out
+
+    def test_layout_is_a_blank_separated_list_of_speaker_blocks(self):
+        out = _transcript(
+            {
+                "session_id": "s1",
+                "messages": [
+                    {"role": "user", "content": "one"},
+                    {"role": "assistant", "content": "two"},
+                ],
+            }
+        )
+        # rstrip: Rich pads rendered lines out to the block width.
+        assert [line.rstrip() for line in out.splitlines()] == [
+            "Session s1  ·  2 messages",
+            "",
+            "user",
+            "  one",
+            "",
+            "assistant",
+            "  two",
+        ]
+
+    def test_indentation_inside_content_is_preserved(self):
+        """Model replies contain code; re-wrapping must not reflow it."""
+        out = _transcript(
+            {
+                "session_id": "s1",
+                "messages": [
+                    {
+                        "role": "assistant",
+                        "content": "code:\n    def f():\n        pass",
+                    }
+                ],
+            }
+        )
+        assert "      def f():" in out
+        assert "          pass" in out
+
+    def test_long_content_wraps_rather_than_truncating(self):
+        content = " ".join(["word"] * 80)
+        out = _transcript(
+            {"session_id": "s1", "messages": [{"role": "user", "content": content}]}
+        )
+        assert "…" not in out
+        assert out.count("word") == 80

@@ -29,6 +29,7 @@ from agilerl.arena.on_prem import ArenaRootGroup, register_on_prem_manifest_grou
 from agilerl.arena.output import (
     emit_csv_preview,
     emit_result,
+    emit_session_transcript,
     select_row,
     supports_interactive_selection,
 )
@@ -1028,6 +1029,9 @@ def agent_sessions_list(
             }
             for session in agent.list_sessions()
         ]
+        if not rows:
+            console.print(f"No chat sessions on {deployment} yet.")
+            return
         emit_result(
             rows,
             columns=["Current", "Session Id", "Created At", "Last Updated"],
@@ -1054,7 +1058,7 @@ def agent_sessions_get(
     with _open_agent(
         config, deployment_name, refresh, experiment_name, project_name
     ) as (_, agent):
-        emit_result(agent.get_session(session_id).model_dump())
+        emit_session_transcript(agent.get_session(session_id).model_dump())
 
 
 SESSION_COLUMNS = ["Session Id", "Created At", "Last Updated"]

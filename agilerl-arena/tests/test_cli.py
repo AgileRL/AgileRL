@@ -1277,13 +1277,45 @@ class TestAgentSessionsCommands:
     def test_sessions_get(self, runner, mock_client, mock_agent):
         mock_agent.get_session.return_value = SessionDetail(
             session_id="s1",
-            messages=[SessionMessage(role="user", content="hi")],
+            messages=[
+                SessionMessage(role="user", content="what is my name?"),
+                SessionMessage(role="assistant", content="Samuel."),
+            ],
         )
         with _patched_arena_client(mock_client):
             result = runner.invoke(main, ["agent", "sessions", "get", "s1", "my-dep"])
         assert result.exit_code == 0
         mock_agent.get_session.assert_called_once_with("s1")
-        assert "s1" in result.output
+        assert "Session s1" in result.output
+        assert "2 messages" in result.output
+        assert "what is my name?" in result.output
+        assert "Samuel." in result.output
+
+    def test_sessions_get_omits_timestamps_the_route_does_not_return(
+        self, runner, mock_client, mock_agent
+    ):
+        mock_agent.get_session.return_value = SessionDetail(session_id="s1")
+        with _patched_arena_client(mock_client):
+            result = runner.invoke(main, ["agent", "sessions", "get", "s1", "my-dep"])
+        assert result.exit_code == 0
+        assert "None" not in result.output
+        assert "created" not in result.output
+
+    def test_sessions_get_shows_timestamps_when_present(
+        self, runner, mock_client, mock_agent
+    ):
+        mock_agent.get_session.return_value = SessionDetail(
+            session_id="s1", created_at="2026-08-01T00:00:00Z"
+        )
+        with _patched_arena_client(mock_client):
+            result = runner.invoke(main, ["agent", "sessions", "get", "s1", "my-dep"])
+        assert "created 2026-08-01T00:00:00Z" in result.output
+
+    def test_sessions_get_on_an_empty_session(self, runner, mock_client, mock_agent):
+        mock_agent.get_session.return_value = SessionDetail(session_id="s1")
+        with _patched_arena_client(mock_client):
+            result = runner.invoke(main, ["agent", "sessions", "get", "s1", "my-dep"])
+        assert "No messages in this session." in result.output
 
     def test_sessions_list_marks_the_resumed_session(
         self, runner, mock_client, mock_agent
@@ -1300,6 +1332,17 @@ class TestAgentSessionsCommands:
         marked = [line for line in result.output.splitlines() if "●" in line]
         assert len(marked) == 1
         assert "s2" in marked[0]
+
+    def test_sessions_list_with_no_sessions_says_so(
+        self, runner, mock_client, mock_agent
+    ):
+        mock_agent.list_sessions.return_value = []
+        with _patched_arena_client(mock_client):
+            result = runner.invoke(main, ["agent", "sessions", "list", "my-dep"])
+        assert result.exit_code == 0
+        assert "No chat sessions on my-dep yet." in result.output
+        assert "Session Id" not in result.output
+        assert "Current" not in result.output
 
     def test_sessions_list_marks_nothing_when_none_is_resumed(
         self, runner, mock_client, mock_agent
@@ -1423,6 +1466,12 @@ class TestRedactAgentRows:
         rows = [{"name": "dep1", "api_key": "secret"}]
         _redact_agent_rows_for_display(rows)
         assert rows[0]["api_key"] == "secret"
+
+    def test_keeps_non_credential_fields(self):
+        rows = [{"name": "dep1", "memory_scope": "organization", "url": "http://x"}]
+        result = _redact_agent_rows_for_display(rows)
+        assert result[0]["memory_scope"] == "organization"
+        assert result[0]["url"] == "http://x"
 
     def test_empty_rows(self):
         assert _redact_agent_rows_for_display([]) == []

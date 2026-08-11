@@ -16,7 +16,9 @@ from typing import Any
 import click
 from rich.live import Live
 from rich.markup import escape
+from rich.padding import Padding
 from rich.table import Table
+from rich.text import Text
 from typing_extensions import Self
 
 from agilerl.arena import console, error_console
@@ -182,6 +184,54 @@ def _format_cell(value: object) -> str:
     if isinstance(value, (dict, list)):
         return json.dumps(value, default=str)
     return str(value)
+
+
+_ROLE_STYLES = {
+    "user": "bold cyan",
+    "assistant": "bold green",
+    "system": "bold yellow",
+    "tool": "bold magenta",
+}
+
+
+def emit_session_transcript(session: dict[str, Any], *, is_error: bool = False) -> None:
+    """Print a chat session as a conversation rather than a table of fields.
+
+    Message text is printed as-is, so markup and escapes in a model's reply are
+    shown rather than interpreted.
+
+    :param session: Session detail with ``session_id`` and ``messages``; keys the
+        deployment leaves out, such as timestamps, are skipped.
+    :type session: dict[str, Any]
+    :param is_error: Whether to print to the error console.
+    :type is_error: bool
+    :returns: None
+    """
+    raw = session.get("messages")
+    messages = [m for m in raw if isinstance(m, dict)] if isinstance(raw, list) else []
+
+    header = Text(f"Session {session.get('session_id') or 'unknown'}", style="bold")
+    header.append(f"  ·  {len(messages)} messages", style="dim")
+    for label, key in (("created", "created_at"), ("updated", "last_updated")):
+        value = session.get(key)
+        if value:
+            header.append(f"  ·  {label} {value}", style="dim")
+    _print_rich(header, is_error=is_error)
+
+    if not messages:
+        _print_rich(
+            Text("No messages in this session.", style="dim"), is_error=is_error
+        )
+        return
+
+    for message in messages:
+        _print_rich("", is_error=is_error)
+        role = str(message.get("role") or "unknown")
+        _print_rich(Text(role, style=_ROLE_STYLES.get(role, "bold")), is_error=is_error)
+        _print_rich(
+            Padding(Text(str(message.get("content") or "")), (0, 0, 0, 2)),
+            is_error=is_error,
+        )
 
 
 # -----------------------------------------------------------------------------
