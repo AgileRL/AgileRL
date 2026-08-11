@@ -16,11 +16,17 @@ from agilerl.arena.exceptions import (
     ArenaValidationError,
 )
 from agilerl.arena.output import (
+    CANCEL,
+    DOWN,
+    ENTER,
+    UP,
     StreamRichRenderer,
     _looks_like_environment_catalog,
     emit_csv_preview,
     emit_result,
     handle_error,
+    select_row,
+    supports_interactive_selection,
 )
 from agilerl.arena.stream import CheckEvent, ErrorEvent, LogEvent, StatusEvent
 
@@ -499,3 +505,121 @@ class TestEmitCsvPreview:
         table = mock_console.print.call_args.args[0]
         assert [col.header for col in table.columns] == ["col1", "col2"]
         assert table.row_count == 3
+
+
+# ---------------------------------------------------------------------------
+# Interactive row selection
+# ---------------------------------------------------------------------------
+
+
+ROWS = [
+    {"session_id": "s1", "created_at": "2026-08-01", "last_updated": "2026-08-05"},
+    {"session_id": "s2", "created_at": "2026-07-11", "last_updated": "2026-08-04"},
+    {"session_id": "s3", "created_at": "2026-06-02", "last_updated": "2026-07-30"},
+]
+
+
+def _pick(keys, rows=None, **kwargs):
+    """Drive select_row with a scripted sequence of keypresses."""
+    presses = iter(keys)
+    with patch("agilerl.arena.output._read_key", side_effect=lambda: next(presses)):
+        return select_row(rows if rows is not None else ROWS, **kwargs)
+
+
+def _last_rendered(keys, **kwargs):
+    """The final table select_row drew before the user committed."""
+    with patch("agilerl.arena.output.Live") as mock_live:
+        _pick(keys, **kwargs)
+    return mock_live.return_value.__enter__.return_value.update.call_args.args[0]
+
+
+class TestSelectRow:
+    def test_enter_takes_the_first_row(self):
+        assert _pick([ENTER])["session_id"] == "s1"
+
+    def test_down_then_enter(self):
+        assert _pick([DOWN, ENTER])["session_id"] == "s2"
+
+    def test_down_and_back_up(self):
+        assert _pick([DOWN, DOWN, UP, ENTER])["session_id"] == "s2"
+
+    def test_up_from_the_top_wraps_to_the_bottom(self):
+        assert _pick([UP, ENTER])["session_id"] == "s3"
+
+    def test_down_from_the_bottom_wraps_to_the_top(self):
+        assert _pick([DOWN, DOWN, DOWN, ENTER])["session_id"] == "s1"
+
+    def test_cancel_returns_none(self):
+        assert _pick([DOWN, CANCEL]) is None
+
+    def test_unrecognised_keys_are_ignored(self):
+        assert _pick([None, None, DOWN, None, ENTER])["session_id"] == "s2"
+
+    def test_selected_sets_the_starting_row(self):
+        assert _pick([ENTER], selected=2)["session_id"] == "s3"
+
+    def test_selected_is_clamped_into_range(self):
+        assert _pick([ENTER], selected=99)["session_id"] == "s3"
+        assert _pick([ENTER], selected=-5)["session_id"] == "s1"
+
+    def test_no_rows_returns_none_without_reading_a_key(self):
+        with patch("agilerl.arena.output._read_key") as mock_read:
+            assert select_row([]) is None
+        mock_read.assert_not_called()
+
+    def test_columns_rename_the_headers(self):
+        table = _last_rendered([ENTER], columns=["Session Id", "Created At", "Last"])
+        # A leading marker column precedes the caller's columns.
+        assert [col.header for col in table.columns] == [
+            "",
+            "Session Id",
+            "Created At",
+            "Last",
+        ]
+
+    def test_headers_fall_back_to_the_row_keys(self):
+        table = _last_rendered([ENTER])
+        assert [col.header for col in table.columns] == [
+            "",
+            "session_id",
+            "created_at",
+            "last_updated",
+        ]
+
+    def test_only_the_selected_row_is_marked(self):
+        table = _last_rendered([DOWN, ENTER])
+        assert list(table.columns[0]._cells) == [" ", "[cyan]▸[/cyan]", " "]
+
+    def test_the_highlight_follows_the_arrow_keys(self):
+        first = _last_rendered([ENTER])
+        assert list(first.columns[0]._cells).index("[cyan]▸[/cyan]") == 0
+        second = _last_rendered([DOWN, DOWN, ENTER])
+        assert list(second.columns[0]._cells).index("[cyan]▸[/cyan]") == 2
+
+
+class TestSupportsInteractiveSelection:
+    @patch("agilerl.arena.output.console")
+    @patch("agilerl.arena.output.sys")
+    def test_true_for_a_terminal(self, mock_sys, mock_console):
+        mock_sys.stdin.isatty.return_value = True
+        mock_console.is_terminal = True
+        assert supports_interactive_selection() is True
+
+    @patch("agilerl.arena.output.console")
+    @patch("agilerl.arena.output.sys")
+    def test_false_when_stdin_is_piped(self, mock_sys, mock_console):
+        mock_sys.stdin.isatty.return_value = False
+        mock_console.is_terminal = True
+        assert supports_interactive_selection() is False
+
+    @patch("agilerl.arena.output.console")
+    @patch("agilerl.arena.output.sys")
+    def test_false_when_output_is_redirected(self, mock_sys, mock_console):
+        mock_sys.stdin.isatty.return_value = True
+        mock_console.is_terminal = False
+        assert supports_interactive_selection() is False
+
+    @patch("agilerl.arena.output.sys")
+    def test_false_when_stdin_is_detached(self, mock_sys):
+        mock_sys.stdin.isatty.side_effect = ValueError("I/O operation on closed file")
+        assert supports_interactive_selection() is False

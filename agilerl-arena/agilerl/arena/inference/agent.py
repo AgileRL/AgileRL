@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from collections.abc import Iterator
 from typing import Any
 
@@ -25,6 +26,7 @@ from agilerl.arena.inference.serde import (
 from agilerl.arena.inference.serde import (
     serialize as _serialize,
 )
+from agilerl.arena.typing import JSONValue
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +49,9 @@ __all__ = [
     "PredictResult",
     "RLData",
     "SerializedRLData",
+    "SessionDetail",
+    "SessionInfo",
+    "SessionMessage",
     "StatusResponse",
     "deserialize",
     "get_batch_size",
@@ -189,6 +194,49 @@ class LLMResults(BaseModel):
 GenerateResult = LLMResults
 
 
+class SessionInfo(BaseModel):
+    """One chat session summary from ``GET /sessions``.
+
+    :param session_id: The ID of the session.
+    :type session_id: str
+    :param created_at: When the session was opened.
+    :type created_at: str | None
+    :param last_updated: When the session was last written to.
+    :type last_updated: str | None
+    """
+
+    model_config = ConfigDict(extra="ignore", frozen=True)
+
+    session_id: str = ""
+    created_at: str | None = None
+    last_updated: str | None = None
+
+
+class SessionMessage(BaseModel):
+    """One message in a chat session.
+
+    :param role: The role of the message author.
+    :type role: str
+    :param content: The message text.
+    :type content: str
+    """
+
+    model_config = ConfigDict(extra="ignore", frozen=True)
+
+    role: str = ""
+    content: str = ""
+
+
+class SessionDetail(SessionInfo):
+    """A :class:`SessionInfo` plus its messages, from ``GET /sessions/{session_id}``.
+
+    :param messages: The messages in the session.
+    :type messages: list[SessionMessage]
+    """
+
+    messages: list[SessionMessage] = Field(default_factory=list)
+
+
 class Agent:
     """HTTP client for a deployed Arena inference endpoint.
 
@@ -196,9 +244,16 @@ class Agent:
     construction and stores :attr:`metadata`. Wrong endpoint for the deployment
     type returns HTTP 400 from the server.
 
+    Every request carries your own Arena credential as ``Authorization: Bearer``.
+    A deployment that keeps memory per user works out who is calling from it, so
+    there is nothing else to pass. The credential is never logged, shown in
+    :func:`repr`, or written to disk.
+
     :param endpoint: Base URL of the Arena inference deployment.
     :type endpoint: str
-    :param api_key: API key for ``Authorization: Bearer``.
+    :param api_key: Profile PAT (``arena_pat_<uuid>_<secret>``) or an access token
+        from :meth:`~agilerl.arena.client.ArenaClient.login`. Falls back to the
+        ``ARENA_API_KEY`` environment variable.
     :type api_key: str | None
     :param timeout: Request timeout in seconds.
     :type timeout: int
@@ -220,9 +275,10 @@ class Agent:
     ) -> None:
         self._base_url = endpoint.rstrip("/")
 
+        credential = api_key or os.environ.get("ARENA_API_KEY")
         headers: dict[str, str] = {}
-        if api_key is not None:
-            headers["Authorization"] = f"Bearer {api_key}"
+        if credential:
+            headers["Authorization"] = f"Bearer {credential}"
 
         self._http = httpx.Client(
             headers=headers,
@@ -246,15 +302,68 @@ class Agent:
         except Exception:
             return resp.text[:500] if resp.text else "No details"
 
-    def _raise_for_status(self, resp: httpx.Response) -> None:
-        if resp.status_code == 401:
-            msg = "Agent endpoint returned 401 Unauthorized. Check your token."
-            raise ArenaAuthError(msg)
-        if resp.status_code != 200:
+    _AUTH_SDK_HINT = (
+        "Call client.login() and build the agent with "
+        "client.open_inference_agent(), or pass a profile PAT as api_key."
+    )
+
+    def _raise_for_status(
+        self,
+        resp: httpx.Response,
+        *,
+        expected: tuple[int, ...] = (200,),
+    ) -> None:
+        if resp.status_code in (401, 403):
+            msg = (
+                "Agent endpoint returned 401 Unauthorized. Your Arena credential "
+                "is missing or expired."
+                if resp.status_code == 401
+                else "Your Arena credential is not allowed to use this deployment."
+            )
+            raise ArenaAuthError(
+                msg,
+                sdk_hint=self._AUTH_SDK_HINT,
+                cli_hint="Run 'arena login'.",
+            )
+        if resp.status_code not in expected:
             raise ArenaInferenceError(
                 status_code=resp.status_code,
                 detail=self._response_detail(resp),
             )
+
+    def _send(
+        self,
+        method: str,
+        path: str,
+        *,
+        json_body: dict[str, Any] | None = None,
+    ) -> httpx.Response:
+        """Send a request, turning transport failures into an Arena error."""
+        try:
+            return self._http.request(method, self._url(path), json=json_body)
+        except httpx.HTTPError as exc:
+            raise ArenaInferenceError(
+                status_code=0,
+                detail=f"Network error reaching agent endpoint: {exc}",
+            ) from exc
+
+    def _request_payload(
+        self,
+        method: str,
+        path: str,
+        *,
+        json_body: dict[str, Any] | None = None,
+    ) -> JSONValue:
+        """Send a request and return the decoded body, object or array."""
+        resp = self._send(method, path, json_body=json_body)
+        self._raise_for_status(resp)
+        body = resp.json()
+        if isinstance(body, dict) and body.get("success") is False:
+            raise ArenaInferenceError(
+                status_code=resp.status_code,
+                detail=self._response_detail(resp),
+            )
+        return body
 
     def _request_json(
         self,
@@ -263,25 +372,10 @@ class Agent:
         *,
         json_body: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        url = self._url(path)
-        try:
-            resp = self._http.request(method, url, json=json_body)
-        except httpx.HTTPError as exc:
-            raise ArenaInferenceError(
-                status_code=0,
-                detail=f"Network error reaching agent endpoint: {exc}",
-            ) from exc
-
-        self._raise_for_status(resp)
-        body = resp.json()
+        body = self._request_payload(method, path, json_body=json_body)
         if not isinstance(body, dict):
             msg = f"Expected JSON object from {path}, got {type(body).__name__}."
-            raise ArenaInferenceError(status_code=resp.status_code, detail=msg)
-        if body.get("success") is False:
-            raise ArenaInferenceError(
-                status_code=resp.status_code,
-                detail=self._response_detail(resp),
-            )
+            raise ArenaInferenceError(status_code=200, detail=msg)
         return body
 
     def _request_stream(self, path: str, *, json_body: dict[str, Any]) -> Iterator[str]:
@@ -356,6 +450,12 @@ class Agent:
                 raise ArenaInferenceError(
                     detail=f"Prompt at index {index} is empty.",
                 )
+
+    @staticmethod
+    def _validate_session_id(session_id: str) -> str:
+        if not isinstance(session_id, str) or not session_id.strip():
+            raise ArenaInferenceError(detail="session_id must be a non-empty string.")
+        return session_id.strip()
 
     @staticmethod
     def _multi_agent_mask(
@@ -566,6 +666,7 @@ class Agent:
         prompts: str | list[str],
         *,
         params: LLMParams | dict[str, Any] | None = None,
+        session_id: str | None = None,
     ) -> LLMResults:
         """Generate LLM completions.
 
@@ -573,20 +674,24 @@ class Agent:
         :type prompts: str | list[str]
         :param params: The parameters to the agent.
         :type params: LLMParams | dict[str, Any] | None
+        :param session_id: Chat session to continue, as listed by
+            :meth:`list_sessions`. When omitted the field is left out of the
+            request and the deployment starts a new conversation; no session id
+            is minted here.
+        :type session_id: str | None
         :return: The LLM results.
         :rtype: LLMResults
         """
         self._ensure(llm=True)
         prompt_list = [prompts] if isinstance(prompts, str) else list(prompts)
         self._validate_prompts(prompt_list)
-        body = self._request_json(
-            "POST",
-            "/generate",
-            json_body={
-                "prompts": prompt_list,
-                "params": self._merge_llm_params(params),
-            },
-        )
+        payload: dict[str, Any] = {
+            "prompts": prompt_list,
+            "params": self._merge_llm_params(params),
+        }
+        if session_id is not None:
+            payload["session_id"] = self._validate_session_id(session_id)
+        body = self._request_json("POST", "/generate", json_body=payload)
         return LLMResults.model_validate(body)
 
     def generate_stream(
@@ -594,6 +699,7 @@ class Agent:
         prompt: str,
         *,
         params: LLMParams | dict[str, Any] | None = None,
+        session_id: str | None = None,
     ) -> Iterator[str]:
         """Stream generated tokens for a single prompt.
 
@@ -601,16 +707,82 @@ class Agent:
         :type prompt: str
         :param params: The parameters to the agent.
         :type params: LLMParams | dict[str, Any] | None
+        :param session_id: Chat session to continue, as listed by
+            :meth:`list_sessions`. When omitted the field is left out of the
+            request and the deployment starts a new conversation; no session id
+            is minted here.
+        :type session_id: str | None
         :return: An iterator of strings.
         :rtype: Iterator[str]
         """
         self._ensure(llm=True)
         self._validate_prompts([prompt])
-        payload = {
+        payload: dict[str, Any] = {
             "prompt": prompt,
             "params": self._merge_llm_params(params),
         }
+        if session_id is not None:
+            payload["session_id"] = self._validate_session_id(session_id)
         yield from self._request_stream("/generate_stream", json_body=payload)
+
+    def list_sessions(self) -> list[SessionInfo]:
+        """List the chat sessions the calling user has with this deployment.
+
+        :return: The sessions, most recently updated first as ordered by the
+            deployment. Empty when the user has no conversations yet.
+        :rtype: list[SessionInfo]
+        """
+        self._ensure(llm=True)
+        body = self._request_payload("GET", "/sessions")
+        rows = body.get("sessions") if isinstance(body, dict) else body
+        if not isinstance(rows, list):
+            return []
+        return [
+            SessionInfo.model_validate(row) for row in rows if isinstance(row, dict)
+        ]
+
+    def get_session(self, session_id: str) -> SessionDetail:
+        """Fetch one chat session and its messages.
+
+        :param session_id: The ID of the session to fetch.
+        :type session_id: str
+        :return: The session and its messages.
+        :rtype: SessionDetail
+        """
+        self._ensure(llm=True)
+        sid = self._validate_session_id(session_id)
+        try:
+            body = self._request_json("GET", f"/sessions/{sid}")
+        except ArenaInferenceError as exc:
+            if exc.status_code == 404:
+                raise ArenaInferenceError(
+                    status_code=404,
+                    detail=f"Session {sid!r} not found.",
+                ) from exc
+            raise
+        return SessionDetail.model_validate(body)
+
+    def delete_session(self, session_id: str) -> bool:
+        """Delete a chat session and every turn the deployment stored for it.
+
+        Deleting is idempotent: a session that is already gone, or that belongs
+        to someone else under the deployment's memory scope, answers the same
+        way, so this reports whether there was anything to delete rather than
+        raising.
+
+        :param session_id: The ID of the session to delete.
+        :type session_id: str
+        :return: ``True`` if the session was deleted, ``False`` if the deployment
+            has no such session visible to you.
+        :rtype: bool
+        """
+        self._ensure(llm=True)
+        sid = self._validate_session_id(session_id)
+        resp = self._send("DELETE", f"/sessions/{sid}")
+        if resp.status_code == 404:
+            return False
+        self._raise_for_status(resp, expected=(200, 204))
+        return True
 
     def close(self) -> None:
         """Close the underlying HTTP connection pool."""

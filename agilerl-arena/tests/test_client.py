@@ -1650,6 +1650,25 @@ class TestInferenceDeployments:
         payload = api_key_client._request.call_args[1]["json"]
         assert payload["checkpoint"] is None
 
+    @pytest.mark.parametrize("scope", ["user", "organization"])
+    def test_deploy_agent_sends_memory_scope(self, api_key_client, scope):
+        api_key_client._request = MagicMock(return_value={"deployed": True})
+        api_key_client.deploy_agent("exp1", memory_scope=scope)
+        assert api_key_client._request.call_args[1]["json"]["memoryScope"] == scope
+
+    def test_deploy_agent_omits_memory_scope_to_keep_the_stored_one(
+        self, api_key_client
+    ):
+        api_key_client._request = MagicMock(return_value={"deployed": True})
+        api_key_client.deploy_agent("exp1")
+        assert "memoryScope" not in api_key_client._request.call_args[1]["json"]
+
+    def test_deploy_agent_rejects_unknown_memory_scope(self, api_key_client):
+        api_key_client._request = MagicMock(return_value={"deployed": True})
+        with pytest.raises(ArenaValidationError, match="Unknown memory scope"):
+            api_key_client.deploy_agent("exp1", memory_scope="team")
+        api_key_client._request.assert_not_called()
+
     def test_list_inference_deployments(self, api_key_client):
         api_key_client._request = MagicMock(
             return_value=[{"name": "dep1"}, {"name": "dep2"}]
@@ -1741,38 +1760,21 @@ class TestInferenceDeployments:
         }
 
 
-class TestDeploymentUrlAndApiKey:
+class TestDeploymentUrl:
     def test_happy_path(self):
-        row = {"url": "http://inference.example.com", "api_key": "key123"}
-        url, key = ArenaClient._deployment_url_and_api_key(row)
-        assert url == "http://inference.example.com"
-        assert key == "key123"
+        row = {"url": "http://inference.example.com"}
+        assert ArenaClient._deployment_url(row) == "http://inference.example.com"
 
     def test_missing_url_raises(self):
-        row = {"api_key": "key123"}
         with pytest.raises(ArenaAPIError, match="no inference URL"):
-            ArenaClient._deployment_url_and_api_key(row)
+            ArenaClient._deployment_url({})
 
     def test_empty_url_raises(self):
-        row = {"url": "  ", "api_key": "key123"}
         with pytest.raises(ArenaAPIError, match="no inference URL"):
-            ArenaClient._deployment_url_and_api_key(row)
-
-    def test_missing_api_key_raises(self):
-        row = {"url": "http://x"}
-        with pytest.raises(ArenaAPIError, match="no api_key"):
-            ArenaClient._deployment_url_and_api_key(row)
-
-    def test_empty_api_key_raises(self):
-        row = {"url": "http://x", "api_key": "  "}
-        with pytest.raises(ArenaAPIError, match="api_key was empty"):
-            ArenaClient._deployment_url_and_api_key(row)
+            ArenaClient._deployment_url({"url": "  "})
 
     def test_strips_whitespace(self):
-        row = {"url": " http://x ", "api_key": " key "}
-        url, key = ArenaClient._deployment_url_and_api_key(row)
-        assert url == "http://x"
-        assert key == "key"
+        assert ArenaClient._deployment_url({"url": " http://x "}) == "http://x"
 
 
 class TestEnsureInferenceBinding:
@@ -1781,40 +1783,50 @@ class TestEnsureInferenceBinding:
     def test_returns_cached_when_not_refresh(
         self, mock_load, mock_save, api_key_client
     ):
-        mock_load.return_value = ("http://cached", "cached_key")
+        mock_load.return_value = "http://cached"
         result = api_key_client._ensure_inference_binding("my-dep")
-        assert result == ("http://cached", "cached_key")
+        assert result == "http://cached"
         mock_save.assert_not_called()
 
     @patch("agilerl.arena.client.save_binding")
     @patch("agilerl.arena.client.load_binding")
     def test_fetches_and_caches_on_refresh(self, mock_load, mock_save, api_key_client):
-        mock_load.return_value = ("http://cached", "cached_key")
+        mock_load.return_value = "http://cached"
         api_key_client._fetch_deployment_for_inference = MagicMock(
-            return_value={"url": "http://new", "api_key": "new_key"}
+            return_value={"url": "http://new"}
         )
         result = api_key_client._ensure_inference_binding("my-dep", refresh=True)
-        assert result == ("http://new", "new_key")
-        mock_save.assert_called_once_with("my-dep", "http://new", "new_key")
+        assert result == "http://new"
+        mock_save.assert_called_once_with("my-dep", "http://new")
 
     @patch("agilerl.arena.client.save_binding")
     @patch("agilerl.arena.client.load_binding")
     def test_fetches_when_no_cache(self, mock_load, mock_save, api_key_client):
         mock_load.return_value = None
         api_key_client._fetch_deployment_for_inference = MagicMock(
-            return_value={"url": "http://new", "api_key": "k"}
+            return_value={"url": "http://new"}
         )
         result = api_key_client._ensure_inference_binding("dep")
-        assert result == ("http://new", "k")
-        mock_save.assert_called_once()
+        assert result == "http://new"
+        mock_save.assert_called_once_with("dep", "http://new")
+
+    @patch("agilerl.arena.client.save_binding")
+    @patch("agilerl.arena.client.load_binding")
+    def test_ignores_any_api_key_the_row_still_carries(
+        self, mock_load, mock_save, api_key_client
+    ):
+        mock_load.return_value = None
+        api_key_client._fetch_deployment_for_inference = MagicMock(
+            return_value={"url": "http://new", "api_key": "legacy-secret"}
+        )
+        api_key_client._ensure_inference_binding("dep")
+        mock_save.assert_called_once_with("dep", "http://new")
 
 
 class TestOpenInferenceAgent:
     @patch("agilerl.arena.client.Agent")
     def test_returns_agent_instance(self, mock_agent_cls, api_key_client):
-        api_key_client._ensure_inference_binding = MagicMock(
-            return_value=("http://url", "api_key")
-        )
+        api_key_client._ensure_inference_binding = MagicMock(return_value="http://url")
         mock_agent = MagicMock()
         mock_agent_cls.return_value = mock_agent
 
@@ -1822,25 +1834,51 @@ class TestOpenInferenceAgent:
 
         mock_agent_cls.assert_called_once_with(
             "http://url",
-            api_key="api_key",
+            api_key="test-key",
             timeout=api_key_client._request_timeout,
         )
         assert result is mock_agent
 
     @patch("agilerl.arena.client.Agent")
+    def test_forwards_the_pat_when_the_client_has_one(
+        self, mock_agent_cls, api_key_client
+    ):
+        api_key_client._ensure_inference_binding = MagicMock(return_value="http://url")
+        api_key_client._api_key = "arena_pat_abc"
+        api_key_client._tokens.access_token = "jwt-123"
+
+        api_key_client.open_inference_agent("dep1")
+
+        assert mock_agent_cls.call_args[1]["api_key"] == "arena_pat_abc"
+
+    @patch("agilerl.arena.client.Agent")
+    def test_falls_back_to_the_oauth_token(self, mock_agent_cls, token_client):
+        token_client._ensure_inference_binding = MagicMock(return_value="http://url")
+
+        token_client.open_inference_agent("dep1")
+
+        assert mock_agent_cls.call_args[1]["api_key"] == "tok_access"
+
+    @patch("agilerl.arena.client.Agent")
+    def test_no_credential_passes_none(self, mock_agent_cls, api_key_client):
+        api_key_client._ensure_inference_binding = MagicMock(return_value="http://url")
+        api_key_client._api_key = None
+        api_key_client._tokens.access_token = None
+
+        api_key_client.open_inference_agent("dep1")
+
+        assert mock_agent_cls.call_args[1]["api_key"] is None
+
+    @patch("agilerl.arena.client.Agent")
     def test_custom_timeout(self, mock_agent_cls, api_key_client):
-        api_key_client._ensure_inference_binding = MagicMock(
-            return_value=("http://url", "key")
-        )
+        api_key_client._ensure_inference_binding = MagicMock(return_value="http://url")
         api_key_client.open_inference_agent("dep", timeout=120)
         call_kwargs = mock_agent_cls.call_args[1]
         assert call_kwargs["timeout"] == 120
 
     @patch("agilerl.arena.client.Agent")
     def test_forwards_refresh_and_filters(self, mock_agent_cls, api_key_client):
-        api_key_client._ensure_inference_binding = MagicMock(
-            return_value=("http://url", "key")
-        )
+        api_key_client._ensure_inference_binding = MagicMock(return_value="http://url")
         api_key_client.open_inference_agent(
             "dep", refresh=True, experiment_name="e", project_name="p"
         )

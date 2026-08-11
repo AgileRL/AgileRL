@@ -7,6 +7,8 @@ import csv
 import io
 import json
 import logging
+import os
+import sys
 from dataclasses import dataclass
 from functools import singledispatch
 from typing import Any
@@ -106,18 +108,23 @@ def _emit_simple_list(
     _print_rich(table, is_error=is_error)
 
 
+def _row_keys(values: list[dict[str, Any]]) -> list[str]:
+    """Union of the keys across *values*, in first-seen order."""
+    keys: list[str] = []
+    for row in values:
+        for key in row:
+            if key not in keys:
+                keys.append(key)
+    return keys
+
+
 def _emit_list_of_dicts(
     values: list[dict[str, Any]],
     *,
     is_error: bool = False,
     columns: list[str] | None = None,
 ) -> None:
-    keys: list[str] = []
-    for row in values:
-        for key in row:
-            if key not in keys:
-                keys.append(key)
-
+    keys = _row_keys(values)
     headers = columns if columns and len(columns) == len(keys) else keys
     table = Table(show_header=True, header_style="bold")
     for header in headers:
@@ -175,6 +182,144 @@ def _format_cell(value: object) -> str:
     if isinstance(value, (dict, list)):
         return json.dumps(value, default=str)
     return str(value)
+
+
+# -----------------------------------------------------------------------------
+### Interactive row selection ###
+# -----------------------------------------------------------------------------
+
+UP, DOWN, ENTER, CANCEL = "up", "down", "enter", "cancel"
+
+_POSIX_SEQUENCES = {"[A": UP, "[B": DOWN, "OA": UP, "OB": DOWN}
+_WINDOWS_SEQUENCES = {"H": UP, "P": DOWN}
+
+
+def supports_interactive_selection() -> bool:
+    """Whether the terminal can drive :func:`select_row`.
+
+    False when stdin is a pipe or the output is redirected, which is what makes
+    the CLI usable from scripts and CI.
+
+    :returns: Whether an interactive picker can run.
+    :rtype: bool
+    """
+    try:
+        return sys.stdin.isatty() and console.is_terminal
+    except (AttributeError, ValueError):
+        return False
+
+
+def _read_key_windows() -> str | None:
+    import msvcrt
+
+    char = msvcrt.getwch()
+    if char in ("\x00", "\xe0"):
+        return _WINDOWS_SEQUENCES.get(msvcrt.getwch())
+    if char in ("\r", "\n"):
+        return ENTER
+    if char in ("\x03", "\x1b", "q"):
+        return CANCEL
+    return None
+
+
+def _read_key_posix() -> str | None:
+    import select
+    import termios
+    import tty
+
+    fd = sys.stdin.fileno()
+    original = termios.tcgetattr(fd)
+    try:
+        tty.setraw(fd)
+        char = os.read(fd, 1).decode(errors="ignore")
+        if char == "\x1b":
+            # An arrow key sends two more bytes immediately; a bare Escape does
+            # not, and waiting on a read that never comes would hang the picker.
+            if not select.select([fd], [], [], 0.05)[0]:
+                return CANCEL
+            return _POSIX_SEQUENCES.get(os.read(fd, 2).decode(errors="ignore"))
+        if char in ("\r", "\n"):
+            return ENTER
+        # Raw mode swallows SIGINT, so Ctrl-C arrives as a plain byte.
+        if char in ("\x03", "q"):
+            return CANCEL
+        return None
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, original)
+
+
+def _read_key() -> str | None:
+    """Block for one keypress, returning a direction, ENTER, CANCEL, or None."""
+    if os.name == "nt":
+        return _read_key_windows()
+    return _read_key_posix()
+
+
+def _selection_table(
+    values: list[dict[str, Any]],
+    keys: list[str],
+    headers: list[str],
+    selected: int,
+) -> Table:
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("")
+    for header in headers:
+        table.add_column(str(header))
+
+    for index, row in enumerate(values):
+        cells = [_format_cell(row.get(key)) for key in keys]
+        if index == selected:
+            table.add_row(
+                "[cyan]▸[/cyan]", *[f"[cyan]{escape(c)}[/cyan]" for c in cells]
+            )
+        else:
+            table.add_row(" ", *[escape(c) for c in cells])
+    return table
+
+
+def select_row(
+    values: list[dict[str, Any]],
+    *,
+    columns: list[str] | None = None,
+    prompt: str = "Use ↑/↓ to choose, Enter to select, Esc to cancel.",
+    selected: int = 0,
+) -> dict[str, Any] | None:
+    """Let the user pick one row with the arrow keys.
+
+    Call :func:`supports_interactive_selection` first; this assumes a terminal.
+
+    :param values: The rows to choose between.
+    :type values: list[dict[str, Any]]
+    :param columns: Display names for the row keys, positionally matched when the
+        counts are equal.
+    :type columns: list[str] | None
+    :param prompt: The hint shown above the table.
+    :type prompt: str
+    :param selected: The row highlighted when the picker opens.
+    :type selected: int
+    :returns: The chosen row, or ``None`` if the user cancelled.
+    :rtype: dict[str, Any] | None
+    """
+    if not values:
+        return None
+
+    keys = _row_keys(values)
+    headers = columns if columns and len(columns) == len(keys) else keys
+    index = min(max(selected, 0), len(values) - 1)
+
+    console.print(prompt, style="dim")
+    with Live(console=console, auto_refresh=False, transient=True) as live:
+        while True:
+            live.update(_selection_table(values, keys, headers, index), refresh=True)
+            key = _read_key()
+            if key == UP:
+                index = (index - 1) % len(values)
+            elif key == DOWN:
+                index = (index + 1) % len(values)
+            elif key == ENTER:
+                return values[index]
+            elif key == CANCEL:
+                return None
 
 
 def handle_error(exc: Exception) -> None:
