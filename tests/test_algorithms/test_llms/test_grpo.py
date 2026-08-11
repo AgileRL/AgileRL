@@ -3562,6 +3562,52 @@ class TestGRPOLearn:
         assert metrics["kl"] == pytest.approx(0.1)
         grpo.clean_up()
 
+    def test_filter_zero_adv_masks_instead_of_dropping_under_dp(self):
+        grpo = _make_cpu_grpo_for_branch_tests(
+            group_size=2,
+            filter_zero_adv=True,
+            adv_filter_eps=0.05,
+        )
+        completion_ids, action_masks = _build_branch_experiences(batch_size=4)
+        rewards = torch.tensor([1.0, 1.0, -1.0, 2.0], dtype=torch.float32)
+        fake_advantages = torch.tensor(
+            [[0.0], [2.0], [-2.0], [0.0]], dtype=torch.float32
+        )
+        grpo.accelerator = MagicMock(num_processes=2)
+        with patch.object(
+            grpo, "_trajectory_advantages", return_value=fake_advantages
+        ):
+            advantages, batch_idxs = grpo._calculate_advantages(
+                rewards, completion_ids, action_masks, None
+            )
+        assert list(batch_idxs) == [0, 1, 2, 3]
+        assert advantages[0].item() == 0.0
+        assert advantages[3].item() == 0.0
+        assert advantages[1].item() == pytest.approx(2.0)
+        assert advantages[2].item() == pytest.approx(-2.0)
+        grpo.accelerator = None
+        grpo.clean_up()
+
+    def test_filter_zero_adv_drops_samples_single_process(self):
+        grpo = _make_cpu_grpo_for_branch_tests(
+            group_size=2,
+            filter_zero_adv=True,
+            adv_filter_eps=0.05,
+        )
+        completion_ids, action_masks = _build_branch_experiences(batch_size=4)
+        rewards = torch.tensor([1.0, 1.0, -1.0, 2.0], dtype=torch.float32)
+        fake_advantages = torch.tensor(
+            [[0.0], [2.0], [-2.0], [0.0]], dtype=torch.float32
+        )
+        with patch.object(
+            grpo, "_trajectory_advantages", return_value=fake_advantages
+        ):
+            advantages, batch_idxs = grpo._calculate_advantages(
+                rewards, completion_ids, action_masks, None
+            )
+        assert list(batch_idxs) == [1, 2]
+        grpo.clean_up()
+
     def test_learn_records_the_window_action_tokens_of_active_samples(self):
         grpo = _make_cpu_grpo_for_branch_tests(
             group_size=2,

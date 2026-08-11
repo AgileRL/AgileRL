@@ -337,7 +337,9 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
         advantages before loss computation, defaults to None.
     :type adv_clip_range: float | None, optional
     :param filter_zero_adv: If ``True``, drop samples whose absolute
-        advantage is below ``adv_filter_eps``, defaults to False.
+        advantage is below ``adv_filter_eps``. Under multi-process training
+        the samples are kept with zeroed advantages instead, so every rank
+        runs the same collective schedule. Defaults to False.
     :type filter_zero_adv: bool, optional
     :param adv_filter_eps: Threshold used with
         ``filter_zero_adv``; samples with ``|advantage| <= eps`` are
@@ -1185,6 +1187,13 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
 
         if active_adv_mask is None:
             return advantages, np.arange(num_samples)
+        if self.accelerator is not None and self.accelerator.num_processes > 1:
+            # Dropping samples desyncs per-rank collective schedules under data
+            # parallelism; zeroed advantages keep the schedule with the same gradient.
+            keep = active_adv_mask.to(advantages.dtype).reshape(
+                num_samples, *([1] * (advantages.dim() - 1))
+            )
+            return advantages * keep, np.arange(num_samples)
         return advantages, np.where(active_adv_mask.detach().cpu().numpy())[0]
 
     def _assert_batch_divisible_by_group(self, num_samples: int) -> None:
