@@ -31,6 +31,13 @@ from agilerl.arena.stream import (
     StreamEvent,
 )
 
+if sys.platform == "win32":
+    import msvcrt
+else:
+    import select
+    import termios
+    import tty
+
 logger = logging.getLogger(__name__)
 
 
@@ -260,8 +267,6 @@ def supports_interactive_selection() -> bool:
 
 
 def _read_key_windows() -> str | None:
-    import msvcrt
-
     char = msvcrt.getwch()
     if char in ("\x00", "\xe0"):
         return _WINDOWS_SEQUENCES.get(msvcrt.getwch())
@@ -273,10 +278,6 @@ def _read_key_windows() -> str | None:
 
 
 def _read_key_posix() -> str | None:
-    import select
-    import termios
-    import tty
-
     fd = sys.stdin.fileno()
     original = termios.tcgetattr(fd)
     try:
@@ -300,7 +301,7 @@ def _read_key_posix() -> str | None:
 
 def _read_key() -> str | None:
     """Block for one keypress, returning a direction, ENTER, CANCEL, or None."""
-    if os.name == "nt":
+    if sys.platform == "win32":
         return _read_key_windows()
     return _read_key_posix()
 
