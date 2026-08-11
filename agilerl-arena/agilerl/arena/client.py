@@ -25,6 +25,7 @@ from agilerl.arena.exceptions import (
     ArenaAPIError,
     ArenaAuthError,
     ArenaConfigError,
+    ArenaInferenceError,
     ArenaTrainingError,
     ArenaValidationError,
 )
@@ -1333,6 +1334,10 @@ class ArenaClient:
         :param project_name: Project name to disambiguate when multiple deployments
             share the same deployment name.
         :type project_name: str | None
+        A redeploy moves the deployment to a new URL, which leaves the cached one
+        answering 404. Rather than make you pass *refresh* to find that out, a
+        404 from the cached URL refetches it once and retries.
+
         :param timeout: HTTP timeout in seconds for the returned agent's inference requests.
         :type timeout: int | None
         :returns: An :class:`~arena.inference.Agent` instance.
@@ -1344,6 +1349,24 @@ class ArenaClient:
             experiment_name=experiment_name,
             project_name=project_name,
         )
+        try:
+            return self._open_agent_at(url, timeout)
+        except ArenaInferenceError as exc:
+            if refresh or exc.status_code != 404:
+                raise
+            fresh_url = self._ensure_inference_binding(
+                deployment_name,
+                refresh=True,
+                experiment_name=experiment_name,
+                project_name=project_name,
+            )
+            if fresh_url == url:
+                raise
+            logger.info("Deployment %s moved to %s.", deployment_name, fresh_url)
+            return self._open_agent_at(fresh_url, timeout)
+
+    def _open_agent_at(self, url: str, timeout: int | None) -> Agent:
+        """Build an agent for *url*, probing it to confirm the URL still serves."""
         return Agent(
             url,
             api_key=self._inference_credential(),

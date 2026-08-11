@@ -561,6 +561,12 @@ not match the deployment:
    can drop the deployment name from later CLI commands. ``arena agent generate --prompt "..."``
    then makes inference requests to the active agent.
 
+Deployment URLs are cached in ``~/.arena/inference.json`` so ordinary commands do
+not have to look them up. Redeploying moves a deployment to a new URL, which the
+client notices on its own: a 404 from the cached URL refetches it once and
+retries, so the stale entry repairs itself. ``--refresh`` forces the lookup up
+front if you would rather not rely on that.
+
 Chat Sessions
 ^^^^^^^^^^^^^
 

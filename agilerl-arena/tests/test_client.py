@@ -22,6 +22,7 @@ from agilerl.arena.exceptions import (
     ArenaAuthError,
     ArenaConfigError,
     ArenaFileNotFoundError,
+    ArenaInferenceError,
     ArenaTrainingError,
     ArenaValidationError,
 )
@@ -1996,3 +1997,145 @@ class TestPartitionManifestArgs:
         )
         assert query == {}
         assert body is None
+
+
+class TestOpenInferenceAgentAfterARedeploy:
+    """A redeploy moves the URL, leaving the cached one answering 404."""
+
+    @staticmethod
+    def _binding(client, *urls):
+        """Return each url in turn, so refresh=True yields the next one."""
+        client._ensure_inference_binding = MagicMock(side_effect=list(urls))
+
+    @patch("agilerl.arena.client.Agent")
+    def test_a_404_refetches_the_binding_and_retries(
+        self, mock_agent_cls, api_key_client
+    ):
+        self._binding(api_key_client, "http://stale", "http://fresh")
+        agent = MagicMock()
+        mock_agent_cls.side_effect = [
+            ArenaInferenceError(status_code=404, detail="No details"),
+            agent,
+        ]
+
+        result = api_key_client.open_inference_agent("dep1")
+
+        assert result is agent
+        assert [c.args[0] for c in mock_agent_cls.call_args_list] == [
+            "http://stale",
+            "http://fresh",
+        ]
+        assert api_key_client._ensure_inference_binding.call_args_list[1].kwargs[
+            "refresh"
+        ]
+
+    @patch("agilerl.arena.client.Agent")
+    def test_the_refetch_carries_the_disambiguating_names(
+        self, mock_agent_cls, api_key_client
+    ):
+        self._binding(api_key_client, "http://stale", "http://fresh")
+        mock_agent_cls.side_effect = [
+            ArenaInferenceError(status_code=404, detail=""),
+            MagicMock(),
+        ]
+
+        api_key_client.open_inference_agent(
+            "dep1", experiment_name="exp1", project_name="proj1"
+        )
+
+        retry = api_key_client._ensure_inference_binding.call_args_list[1].kwargs
+        assert retry["experiment_name"] == "exp1"
+        assert retry["project_name"] == "proj1"
+
+    @patch("agilerl.arena.client.Agent")
+    def test_an_unchanged_url_raises_rather_than_retrying(
+        self, mock_agent_cls, api_key_client
+    ):
+        self._binding(api_key_client, "http://same", "http://same")
+        original = ArenaInferenceError(status_code=404, detail="No details")
+        mock_agent_cls.side_effect = original
+
+        with pytest.raises(ArenaInferenceError) as exc_info:
+            api_key_client.open_inference_agent("dep1")
+
+        assert exc_info.value is original
+        assert mock_agent_cls.call_count == 1
+
+    @patch("agilerl.arena.client.Agent")
+    def test_refresh_already_requested_does_not_retry(
+        self, mock_agent_cls, api_key_client
+    ):
+        self._binding(api_key_client, "http://url")
+        mock_agent_cls.side_effect = ArenaInferenceError(status_code=404, detail="")
+
+        with pytest.raises(ArenaInferenceError):
+            api_key_client.open_inference_agent("dep1", refresh=True)
+
+        assert mock_agent_cls.call_count == 1
+        assert api_key_client._ensure_inference_binding.call_count == 1
+
+    @pytest.mark.parametrize("status", [500, 503, 0])
+    @patch("agilerl.arena.client.Agent")
+    def test_other_failures_are_not_a_moved_deployment(
+        self, mock_agent_cls, api_key_client, status
+    ):
+        """A pod that is down answers on the right URL; refetching would not help."""
+        self._binding(api_key_client, "http://url")
+        mock_agent_cls.side_effect = ArenaInferenceError(
+            status_code=status, detail="no healthy upstream"
+        )
+
+        with pytest.raises(ArenaInferenceError):
+            api_key_client.open_inference_agent("dep1")
+
+        assert mock_agent_cls.call_count == 1
+        assert api_key_client._ensure_inference_binding.call_count == 1
+
+    @patch("agilerl.arena.client.Agent")
+    def test_an_auth_error_is_not_retried(self, mock_agent_cls, api_key_client):
+        self._binding(api_key_client, "http://url")
+        mock_agent_cls.side_effect = ArenaAuthError("nope")
+
+        with pytest.raises(ArenaAuthError):
+            api_key_client.open_inference_agent("dep1")
+
+        assert mock_agent_cls.call_count == 1
+
+    @patch("agilerl.arena.client.Agent")
+    def test_the_move_is_logged(self, mock_agent_cls, api_key_client, caplog):
+        self._binding(api_key_client, "http://stale", "http://fresh")
+        mock_agent_cls.side_effect = [
+            ArenaInferenceError(status_code=404, detail=""),
+            MagicMock(),
+        ]
+
+        with caplog.at_level(logging.INFO, logger="agilerl.arena.client"):
+            api_key_client.open_inference_agent("dep1")
+
+        assert "moved to http://fresh" in caplog.text
+
+    def test_a_real_agent_recovers_from_the_stale_url(self, api_key_client):
+        """End to end through a real Agent: the stale URL 404s, the fresh one serves."""
+        seen: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(request.url.host)
+            if request.url.host == "stale":
+                return httpx.Response(404, text="")
+            return httpx.Response(
+                200, json={"success": True, "agent": {"algo": "GRPO", "llm": True}}
+            )
+
+        real_client = httpx.Client
+
+        def fake_client(**kwargs):
+            return real_client(transport=httpx.MockTransport(handler), **kwargs)
+
+        self._binding(api_key_client, "http://stale", "http://fresh")
+        with patch("agilerl.arena.inference.agent.httpx.Client", fake_client):
+            agent = api_key_client.open_inference_agent("dep1")
+
+        assert seen == ["stale", "fresh"]
+        assert agent.metadata is not None
+        assert agent.metadata.agent.algo == "GRPO"
+        assert repr(agent) == "<Agent endpoint='http://fresh'>"
