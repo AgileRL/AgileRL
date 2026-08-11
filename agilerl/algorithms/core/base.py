@@ -2687,10 +2687,17 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             raise ValueError(msg)
         from agilerl.utils.expert_parallel import validate_ep_config
 
+        self.cp = int(cp)
+        self.cp_style = cp_style
+        self.parallel_dims: ParallelDims | None = None
+        self._cp_attention_substituted = False
+        self._hybrid_mesh = None
+        ws = get_world_size() if self.distributed else 1
         validate_ep_config(
             self.ep,
             fsdp_config=fsdp_config,
-            world_size=get_world_size() if self.distributed else 1,
+            world_size=ws,
+            cp=self.cp,
         )
         if self.ep > 1 and not self.distributed:
             msg = (
@@ -2698,10 +2705,6 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
                 "(or set rendezvous env vars) so the process group can initialise."
             )
             raise ValueError(msg)
-        self.cp = int(cp)
-        self.cp_style = cp_style
-        self.parallel_dims: ParallelDims | None = None
-        self._cp_attention_substituted = False
         attn_impl = None
         if isinstance(model_config, dict):
             attn_impl = model_config.get("attn_implementation")
@@ -2718,6 +2721,10 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             attn_implementation=attn_impl,
             check_flash_attn=self.cp > 1,
         )
+        if self.cp > 1 or self.ep > 1:
+            from agilerl.utils.parallel_dims import validate_hybrid_parallel_config
+
+            validate_hybrid_parallel_config(world_size=ws, cp=self.cp, ep=self.ep)
         if self.cp > 1:
             self.parallel_dims = ParallelDims.from_world(get_world_size(), cp=self.cp)
             # Stock HF+FA2 only under CP.
@@ -3390,6 +3397,8 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             # ``materialize_fsdp2_from_cpu_state``). FSDP then uses
             # ``fully_shard(mesh=dp_mod_ep|hsdp)``; ``ep=1`` keeps flat PG FSDP.
             self._ep_mesh = None
+            self._hybrid_mesh = None
+            device_type = "cuda" if str(self.device).startswith("cuda") else "cpu"
             if self.ep > 1:
                 from agilerl.utils.distributed import get_world_size
                 from agilerl.utils.expert_parallel import (
@@ -3401,7 +3410,10 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
                 packed = iter_packed_expert_modules(self.actor)
                 if not packed:
                     validate_ep_config(
-                        self.ep, fsdp_config=self.fsdp_config, is_moe=False
+                        self.ep,
+                        fsdp_config=self.fsdp_config,
+                        is_moe=False,
+                        cp=self.cp,
                     )
                 num_experts = None
                 for _name, module in packed:
@@ -3417,31 +3429,41 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
                     world_size=get_world_size(),
                     num_experts=num_experts,
                     is_moe=True,
+                    cp=self.cp,
                 )
-                device_type = "cuda" if str(self.device).startswith("cuda") else "cpu"
                 self._ep_mesh = build_expert_parallel_mesh(
-                    ep=self.ep, device_type=device_type
+                    ep=self.ep, cp=self.cp, device_type=device_type
                 )
+                if self.cp > 1:
+                    self._hybrid_mesh = self._ep_mesh
+                    self.parallel_dims = self._ep_mesh
             # CPU (or meta) → shard → empty local shards on device → scatter.
             # Never densifies the full actor on CUDA.
             fsdp_mesh = None
-            if self.cp > 1:
-                assert self.parallel_dims is not None
-                if self.parallel_dims.world_mesh is None:
-                    self.parallel_dims.build_mesh(
-                        device_type=str(
-                            torch.device(self.device).type
-                            if not isinstance(self.device, torch.device)
-                            else self.device.type
-                        )
-                    )
-                fsdp_mesh = self.parallel_dims.get_mesh("dp_shard_cp")
+            if self.cp > 1 and self.ep <= 1:
+                from agilerl.utils.parallel_dims import build_hybrid_parallel_mesh
+
+                hybrid = build_hybrid_parallel_mesh(
+                    cp=self.cp, ep=1, device_type=device_type
+                )
+                assert hybrid is not None
+                self._hybrid_mesh = hybrid
+                self.parallel_dims = hybrid
+                fsdp_mesh = hybrid.dp_shard_cp
+                self._validate_cp_model_heads()
+                if not self._cp_attention_substituted:
+                    substitute_cp_attention(self.cp_style, hybrid.cp_group())
+                    self._cp_attention_substituted = True
+            elif self.cp > 1 and self.ep > 1:
+                assert self._hybrid_mesh is not None
                 self._validate_cp_model_heads()
                 if not self._cp_attention_substituted:
                     substitute_cp_attention(
-                        self.cp_style, self.parallel_dims.cp_group()
+                        self.cp_style, self._hybrid_mesh.cp_group()
                     )
                     self._cp_attention_substituted = True
+                # Non-expert FSDP uses hsdp from the hybrid EP mesh.
+                fsdp_mesh = None
             self.actor = materialize_fsdp2_from_cpu_state(
                 self.actor,
                 self.device,

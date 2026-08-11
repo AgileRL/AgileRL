@@ -108,8 +108,9 @@ def validate_ep_config(
     world_size: int | None = None,
     num_experts: int | None = None,
     is_moe: bool | None = None,
+    cp: int = 1,
 ) -> None:
-    """Fail loud on unsupported EP configurations (stage 1 rules)."""
+    """Fail loud on unsupported EP configurations (including CP×EP compose)."""
     if not isinstance(ep, int) or isinstance(ep, bool):
         msg = f"ep must be an int, got {type(ep).__name__}"
         raise TypeError(msg)
@@ -134,6 +135,10 @@ def validate_ep_config(
     if world_size is not None and world_size % ep != 0:
         msg = f"world_size ({world_size}) must be divisible by ep ({ep})."
         raise ValueError(msg)
+    if cp > 1 and world_size is not None:
+        from agilerl.utils.parallel_dims import compute_hybrid_layout
+
+        compute_hybrid_layout(world_size, cp=cp, ep=ep)
     if num_experts is not None:
         if num_experts < 1:
             msg = f"num_experts must be >= 1, got {num_experts}"
@@ -177,15 +182,26 @@ def build_expert_parallel_mesh(
     world_size: int | None = None,
     ep: int = 1,
     *,
+    cp: int = 1,
     device_type: str | None = None,
-) -> ExpertParallelMesh | None:
+) -> ExpertParallelMesh | Any | None:
     """Build EP DeviceMesh views, or ``None`` when ``ep == 1`` (flat PG path).
+
+    When ``cp > 1``, delegates to
+    :func:`agilerl.utils.parallel_dims.build_hybrid_parallel_mesh` so EP and CP
+    share one Prime-RL-shaped world (``ep % cp == 0``).
 
     Requires an initialised process group whose ``world_size`` matches
     ``world_size`` (default: current process group size).
     """
     if ep <= 1:
         return None
+    if cp > 1:
+        from agilerl.utils.parallel_dims import build_hybrid_parallel_mesh
+
+        return build_hybrid_parallel_mesh(
+            world_size, cp=cp, ep=ep, device_type=device_type
+        )
     if init_device_mesh is None or DeviceMesh is None:
         msg = "Expert Parallel requires torch.distributed DeviceMesh support."
         raise RuntimeError(msg)
