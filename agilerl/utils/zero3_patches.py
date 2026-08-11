@@ -12,6 +12,9 @@ dispatched from here by family.
   replaying a submodule order the current step never produced.
 * :func:`patch_zero3_param_persistence` keeps small ZeRO-3 parameters
   replicated on every rank by setting ``zero.Init`` persistence thresholds.
+* :func:`patch_zero3_persistent_release` keeps parameters already marked
+  persistent resident when a submodule releases under an incomplete fetch
+  trace, so persistence holds on models that fetch on demand every step.
 
 Resolution and idempotence primitives live in :mod:`agilerl.utils.patching`,
 below both this module and the per-family patch modules.
@@ -44,6 +47,7 @@ __all__ = [
     "install_zero3_patches",
     "patch_zero3_fetch_trace",
     "patch_zero3_param_persistence",
+    "patch_zero3_persistent_release",
 ]
 
 ZERO3_COORDINATOR_MODULE = "deepspeed.runtime.zero.partitioned_param_coordinator"
@@ -53,6 +57,7 @@ MANGLE_PREFIX = "_PartitionedParameterCoordinator"
 SNAPSHOT_ATTR = "_agilerl_zero3_trace_snapshot"
 
 TRACE_PATCHED_FLAG = "_agilerl_zero3_trace_patched"
+PERSIST_RELEASE_PATCHED_FLAG = "_agilerl_zero3_persist_release_patched"
 
 TRACE_ATTRS = (
     "__trace_mode",
@@ -69,10 +74,10 @@ def install_zero3_patches(
 ) -> None:
     """Install the ZeRO-3 patches that apply to this run.
 
-    Always installs the fetch-trace workaround, then the patches every family
-    detected in *model_name_or_path* needs. Parameter persistence installs
-    when the config declares ``stage3_param_persistence_threshold``. Call
-    before the model is built.
+    Always installs the fetch-trace workaround and the persistent-release
+    guard, then the patches every family detected in *model_name_or_path*
+    needs. Parameter persistence installs when the config declares
+    ``stage3_param_persistence_threshold``. Call before the model is built.
 
     :param deepspeed_config: Resolved DeepSpeed config, or None.
     :type deepspeed_config: Mapping[str, Any] | None
@@ -84,6 +89,7 @@ def install_zero3_patches(
     :rtype: None
     """
     patch_zero3_fetch_trace(deepspeed_config)
+    patch_zero3_persistent_release()
     install_family_zero3_patches(model_name_or_path)
 
     if not isinstance(deepspeed_config, Mapping):
@@ -133,6 +139,42 @@ def _resolve_zero3_targets() -> tuple[type | None, type | None]:
         )
         raise RuntimeError(message)
     return coordinator, trace_mode
+
+
+def _resolve_zero3_release_targets() -> tuple[
+    type | None, Callable[..., Any] | None, Callable[[Any], bool] | None
+]:
+    """Resolve the ZeRO-3 coordinator class and its param-iteration helpers.
+
+    All None when deepspeed is absent. A loaded module that lacks any symbol
+    is version skew and raises.
+
+    :return: ``(coordinator_cls, iter_params, z3_leaf_module)``, or all None.
+    :rtype: tuple[type | None, Callable | None, Callable | None]
+    """
+    module = try_import(ZERO3_COORDINATOR_MODULE)
+    if module is None:
+        return None, None, None
+    coordinator = getattr(module, "PartitionedParameterCoordinator", None)
+    iter_params = getattr(module, "iter_params", None)
+    z3_leaf_module = getattr(module, "z3_leaf_module", None)
+    missing = [
+        name
+        for name, value in (
+            ("PartitionedParameterCoordinator", coordinator),
+            ("iter_params", iter_params),
+            ("z3_leaf_module", z3_leaf_module),
+        )
+        if value is None
+    ]
+    if missing:
+        message = (
+            "[zero3-persist-release] "
+            f"{ZERO3_COORDINATOR_MODULE} is present but missing "
+            f"{', '.join(missing)}"
+        )
+        raise RuntimeError(message)
+    return coordinator, iter_params, z3_leaf_module
 
 
 def _resolve_zero3_init() -> type | None:
@@ -342,6 +384,96 @@ def patch_zero3_fetch_trace(
         "[zero3-trace] reset_step patched; no-grad forwards preserve %d trace "
         "identity attributes",
         len(TRACE_ATTRS),
+    )
+
+
+def _make_patched_release_sub_module(
+    original_release_sub_module: Callable[..., None],
+    iter_params: Callable[..., Any],
+    z3_leaf_module: Callable[[Any], bool],
+) -> Callable[..., None]:
+    """Build the ``release_sub_module`` wrapper that pins persistent params.
+
+    :param original_release_sub_module: Unbound ``release_sub_module`` to call
+        through to.
+    :type original_release_sub_module: Callable[..., None]
+    :param iter_params: deepspeed's parameter iterator for a submodule.
+    :type iter_params: Callable[..., Any]
+    :param z3_leaf_module: Predicate for deepspeed leaf modules.
+    :type z3_leaf_module: Callable[[Any], bool]
+    :return: Replacement ``release_sub_module``.
+    :rtype: Callable[..., None]
+    """
+
+    @functools.wraps(original_release_sub_module)
+    def patched_release_sub_module(
+        self: object, submodule: object, *args: Any, **kwargs: Any
+    ) -> None:
+        pinned = [
+            (param, getattr(param, "is_external_param", False))
+            for param in iter_params(submodule, recurse=z3_leaf_module(submodule))
+            if getattr(param, "ds_persist", False)
+        ]
+        for param, _ in pinned:
+            param.is_external_param = True
+        try:
+            original_release_sub_module(self, submodule, *args, **kwargs)
+        finally:
+            for param, was_external in pinned:
+                param.is_external_param = was_external
+
+    return patched_release_sub_module
+
+
+def patch_zero3_persistent_release(*, enabled: bool = True) -> None:
+    """Keep persistent ZeRO-3 parameters resident when a submodule releases.
+
+    ``release_sub_module`` excludes persistent parameters from release only
+    when its recorded fetch trace is complete; while the trace is recording or
+    invalid — every step, for a model that picks submodules from the data — it
+    releases them like any other parameter, and each one is re-gathered on its
+    next use. The wrapper flags the submodule's persistent parameters as
+    external for the duration of each call, which every guard in the release
+    loop honours (both the partition call and the leaf-module data swap), then
+    restores the flags. Whole-model releases (``release_and_reset_all``)
+    ignore the external flag, so optimizer-step and teardown partitioning
+    still cover every parameter. A no-op when deepspeed is unavailable.
+
+    :param enabled: Install the patch, defaults to True.
+    :type enabled: bool, optional
+    :return: None
+    :rtype: None
+    """
+    if not enabled:
+        logger.info(
+            "[zero3-persist-release] disabled by caller; "
+            "release_sub_module left unpatched",
+        )
+        return
+
+    coordinator_cls, iter_params, z3_leaf_module = _resolve_zero3_release_targets()
+    if coordinator_cls is None or iter_params is None or z3_leaf_module is None:
+        logger.warning(
+            "[zero3-persist-release] deepspeed ZeRO-3 coordinator unavailable; "
+            "release_sub_module left unpatched",
+        )
+        return
+    if class_is_patched(coordinator_cls, PERSIST_RELEASE_PATCHED_FLAG):
+        return
+
+    original_release_sub_module = getattr(coordinator_cls, "release_sub_module", None)
+    if original_release_sub_module is None:
+        message = "[zero3-persist-release] coordinator lacks release_sub_module"
+        raise RuntimeError(message)
+
+    coordinator_target: Any = coordinator_cls
+    coordinator_target.release_sub_module = _make_patched_release_sub_module(
+        original_release_sub_module, iter_params, z3_leaf_module
+    )
+    setattr(coordinator_cls, PERSIST_RELEASE_PATCHED_FLAG, True)
+    logger.info(
+        "[zero3-persist-release] release_sub_module patched; persistent "
+        "parameters stay resident while the fetch trace is incomplete",
     )
 
 

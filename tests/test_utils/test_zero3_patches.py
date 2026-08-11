@@ -19,6 +19,7 @@ from agilerl.utils.zero3_patches import (
     install_zero3_patches,
     patch_zero3_fetch_trace,
     patch_zero3_param_persistence,
+    patch_zero3_persistent_release,
 )
 
 _DEFAULT_PARAM_THRESHOLD = 100_000
@@ -131,6 +132,7 @@ class TestImportDoesNotPullThirdParty:
             assert not hasattr(zero3_patches, name)
         assert callable(zero3_patches._resolve_zero3_targets)
         assert callable(zero3_patches._resolve_zero3_init)
+        assert callable(zero3_patches._resolve_zero3_release_targets)
 
 
 class TestInstallZero3ThirdPartyHooks:
@@ -140,6 +142,11 @@ class TestInstallZero3ThirdPartyHooks:
             zero3_patches,
             "patch_zero3_fetch_trace",
             lambda config: calls.append("fetch"),
+        )
+        monkeypatch.setattr(
+            zero3_patches,
+            "patch_zero3_persistent_release",
+            lambda **kwargs: calls.append("release"),
         )
         monkeypatch.setattr(
             zero3_patches,
@@ -154,7 +161,7 @@ class TestInstallZero3ThirdPartyHooks:
 
         install_zero3_patches({"zero_optimization": {"stage": 3}})
 
-        assert calls == ["fetch", "families"]
+        assert calls == ["fetch", "release", "families"]
 
     def test_family_dispatch_receives_the_checkpoint_id(self, monkeypatch):
         seen: list[str | None] = []
@@ -162,6 +169,11 @@ class TestInstallZero3ThirdPartyHooks:
             zero3_patches,
             "patch_zero3_fetch_trace",
             lambda config: None,
+        )
+        monkeypatch.setattr(
+            zero3_patches,
+            "patch_zero3_persistent_release",
+            lambda **kwargs: None,
         )
         monkeypatch.setattr(
             zero3_patches,
@@ -182,6 +194,11 @@ class TestInstallZero3ThirdPartyHooks:
             zero3_patches,
             "patch_zero3_fetch_trace",
             lambda config: None,
+        )
+        monkeypatch.setattr(
+            zero3_patches,
+            "patch_zero3_persistent_release",
+            lambda **kwargs: None,
         )
         monkeypatch.setattr(
             zero3_patches,
@@ -242,13 +259,18 @@ class TestInstallZero3ThirdPartyHooks:
         )
         monkeypatch.setattr(
             zero3_patches,
+            "patch_zero3_persistent_release",
+            lambda **kwargs: calls.append("release"),
+        )
+        monkeypatch.setattr(
+            zero3_patches,
             "patch_zero3_param_persistence",
             lambda *args, **kwargs: calls.append("persist"),
         )
 
         install_zero3_patches(config)
 
-        assert calls == ["fetch"]
+        assert calls == ["fetch", "release"]
 
 
 class TestZero3Resolvers:
@@ -277,6 +299,26 @@ class TestZero3Resolvers:
         monkeypatch.setattr(zero3_patches, "try_import", lambda _path: None)
 
         assert zero3_patches._resolve_zero3_init() is None
+
+    def test_resolve_release_targets_returns_none_triple_when_import_fails(
+        self, monkeypatch
+    ) -> None:
+        monkeypatch.setattr(zero3_patches, "try_import", lambda _path: None)
+
+        assert zero3_patches._resolve_zero3_release_targets() == (None, None, None)
+
+    def test_resolve_release_targets_raises_when_symbols_missing(
+        self, monkeypatch
+    ) -> None:
+        module = type(
+            "M",
+            (),
+            {"PartitionedParameterCoordinator": type("C", (), {})},
+        )()
+        monkeypatch.setattr(zero3_patches, "try_import", lambda _path: module)
+
+        with pytest.raises(RuntimeError, match="iter_params, z3_leaf_module"):
+            zero3_patches._resolve_zero3_release_targets()
 
     def test_snapshot_skips_attributes_the_coordinator_lacks(self) -> None:
         assert zero3_patches._snapshot_trace_state(object()) == {}
@@ -609,13 +651,30 @@ class TestZero3TraceInstallation:
 
 
 class _FakeZero3Init:
-    """Fake ``zero.Init`` exposing only the persistence class attributes."""
+    """Fake ``zero.Init`` mirroring the persistence class attributes and the
+    conversion-time persistence decision of deepspeed 0.19.3.
+    """
 
     param_persistence_threshold = _DEFAULT_PARAM_THRESHOLD
     model_persistence_threshold = _DEFAULT_MODEL_THRESHOLD
     num_persisted_parameters = 0
     num_persisted_elements = 0
     apply_param_persistence = False
+
+    def _convert_to_deepspeed_param(self, param):
+        param.ds_numel = param.numel()
+        if (
+            _FakeZero3Init.apply_param_persistence
+            and param.ds_numel <= _FakeZero3Init.param_persistence_threshold
+            and _FakeZero3Init.num_persisted_elements + param.ds_numel
+            <= _FakeZero3Init.model_persistence_threshold
+        ):
+            param.ds_persist = True
+            _FakeZero3Init.num_persisted_parameters += 1
+            _FakeZero3Init.num_persisted_elements += param.ds_numel
+        else:
+            param.ds_persist = False
+        param.is_external_param = False
 
 
 @pytest.fixture
@@ -629,6 +688,8 @@ def zero3_init_cls(monkeypatch):
     _FakeZero3Init.apply_param_persistence = False
     _FakeZero3Init.param_persistence_threshold = _DEFAULT_PARAM_THRESHOLD
     _FakeZero3Init.model_persistence_threshold = _DEFAULT_MODEL_THRESHOLD
+    _FakeZero3Init.num_persisted_parameters = 0
+    _FakeZero3Init.num_persisted_elements = 0
 
 
 class TestZero3ParamPersistence:
@@ -641,6 +702,38 @@ class TestZero3ParamPersistence:
         assert any(
             "param_threshold=50000" in record.message for record in caplog.records
         )
+
+    def test_params_created_under_init_after_patching_are_persistent(
+        self, zero3_init_cls
+    ):
+        patch_zero3_param_persistence(100_000, num_partitions=2)
+
+        model = torch.nn.Sequential(torch.nn.Linear(4, 4), torch.nn.LayerNorm(4))
+        context = zero3_init_cls()
+        for param in model.parameters():
+            context._convert_to_deepspeed_param(param)
+
+        assert all(param.ds_persist for param in model.parameters())
+        assert zero3_init_cls.num_persisted_parameters == 4
+
+    def test_unpatched_init_marks_nothing_persistent(self, zero3_init_cls):
+        model = torch.nn.Linear(4, 4)
+        context = zero3_init_cls()
+        for param in model.parameters():
+            context._convert_to_deepspeed_param(param)
+
+        assert not any(param.ds_persist for param in model.parameters())
+
+    def test_conversion_respects_param_threshold(self, zero3_init_cls):
+        patch_zero3_param_persistence(10, num_partitions=2)
+
+        model = torch.nn.Linear(4, 4)
+        context = zero3_init_cls()
+        for param in model.parameters():
+            context._convert_to_deepspeed_param(param)
+
+        assert model.weight.ds_persist is False
+        assert model.bias.ds_persist is True
 
     def test_model_threshold_is_divided_by_num_partitions(self, zero3_init_cls):
         patch_zero3_param_persistence(
@@ -740,3 +833,207 @@ class TestZero3ParamPersistence:
         assert zero3_init_cls.param_persistence_threshold == _DEFAULT_PARAM_THRESHOLD
         assert zero3_init_cls.model_persistence_threshold == _DEFAULT_MODEL_THRESHOLD
         assert any("disabled by caller" in record.message for record in caplog.records)
+
+
+class _FakeReleaseParam:
+    def __init__(self, ds_id, ds_persist=False, is_external_param=False):
+        self.ds_id = ds_id
+        self.ds_persist = ds_persist
+        self.is_external_param = is_external_param
+        self.release_count = 0
+        self.data_cleared = False
+
+
+class _FakeReleaseSubmodule:
+    def __init__(self, params, leaf=False):
+        self.params = list(params)
+        self.leaf = leaf
+
+
+def _make_release_coordinator_class():
+    """Fresh coordinator double mirroring the release guards of deepspeed
+    0.19.3: an incomplete trace selects every parameter for release, a
+    complete trace pre-filters persistent ones, and both the partition call
+    and the leaf-module data swap skip external parameters.
+    """
+
+    class PartitionedParameterCoordinator:
+        def __init__(self, complete_trace=False):
+            self.complete_trace = complete_trace
+
+        def is_complete_trace(self):
+            return self.complete_trace
+
+        def release_sub_module(self, submodule, forward=False):
+            params = list(submodule.params)
+            if self.is_complete_trace():
+                to_release = {p.ds_id for p in params if not p.ds_persist}
+            else:
+                to_release = {p.ds_id for p in params}
+            free_data = not submodule.leaf
+            for param in params:
+                if param.ds_id in to_release and not param.is_external_param:
+                    param.release_count += 1
+                if not free_data:
+                    if param.ds_id in to_release and not param.is_external_param:
+                        param.data_cleared = True
+
+        def release_and_reset_all(self, module):
+            for param in module.params:
+                param.release_count += 1
+
+    return PartitionedParameterCoordinator
+
+
+@pytest.fixture
+def release_coordinator_cls(monkeypatch):
+    cls = _make_release_coordinator_class()
+    recurse_calls = []
+
+    def fake_iter_params(module, recurse=False):
+        recurse_calls.append(recurse)
+        return list(module.params)
+
+    monkeypatch.setattr(
+        zero3_patches,
+        "_resolve_zero3_release_targets",
+        lambda: (cls, fake_iter_params, lambda module: module.leaf),
+    )
+    cls.recurse_calls = recurse_calls
+    return cls
+
+
+class TestZero3PersistentRelease:
+    """Persistent params stay resident on every release path but teardown."""
+
+    def test_incomplete_trace_keeps_persistent_params_resident(
+        self, release_coordinator_cls
+    ):
+        patch_zero3_persistent_release()
+        persistent = _FakeReleaseParam(1, ds_persist=True)
+        transient = _FakeReleaseParam(2)
+        submodule = _FakeReleaseSubmodule([persistent, transient])
+
+        release_coordinator_cls(complete_trace=False).release_sub_module(submodule)
+
+        assert persistent.release_count == 0
+        assert transient.release_count == 1
+
+    def test_external_flags_are_restored_after_release(self, release_coordinator_cls):
+        patch_zero3_persistent_release()
+        persistent = _FakeReleaseParam(1, ds_persist=True)
+        external = _FakeReleaseParam(2, ds_persist=True, is_external_param=True)
+        submodule = _FakeReleaseSubmodule([persistent, external])
+
+        release_coordinator_cls().release_sub_module(submodule)
+
+        assert persistent.is_external_param is False
+        assert external.is_external_param is True
+
+    def test_leaf_module_data_swap_skips_persistent_params(
+        self, release_coordinator_cls
+    ):
+        patch_zero3_persistent_release()
+        persistent = _FakeReleaseParam(1, ds_persist=True)
+        transient = _FakeReleaseParam(2)
+        submodule = _FakeReleaseSubmodule([persistent, transient], leaf=True)
+
+        release_coordinator_cls().release_sub_module(submodule)
+
+        assert persistent.data_cleared is False
+        assert transient.data_cleared is True
+        assert release_coordinator_cls.recurse_calls[-1] is True
+
+    def test_complete_trace_behaviour_is_unchanged(self, release_coordinator_cls):
+        patch_zero3_persistent_release()
+        persistent = _FakeReleaseParam(1, ds_persist=True)
+        transient = _FakeReleaseParam(2)
+        submodule = _FakeReleaseSubmodule([persistent, transient])
+
+        release_coordinator_cls(complete_trace=True).release_sub_module(submodule)
+
+        assert persistent.release_count == 0
+        assert transient.release_count == 1
+
+    def test_release_and_reset_all_still_releases_persistent_params(
+        self, release_coordinator_cls
+    ):
+        patch_zero3_persistent_release()
+        persistent = _FakeReleaseParam(1, ds_persist=True)
+        submodule = _FakeReleaseSubmodule([persistent])
+
+        release_coordinator_cls().release_and_reset_all(submodule)
+
+        assert persistent.release_count == 1
+
+    def test_flags_are_restored_when_release_raises(self, monkeypatch):
+        class PartitionedParameterCoordinator:
+            def release_sub_module(self, submodule, forward=False):
+                message = "boom"
+                raise RuntimeError(message)
+
+        monkeypatch.setattr(
+            zero3_patches,
+            "_resolve_zero3_release_targets",
+            lambda: (
+                PartitionedParameterCoordinator,
+                lambda module, recurse=False: list(module.params),
+                lambda module: module.leaf,
+            ),
+        )
+        patch_zero3_persistent_release()
+        persistent = _FakeReleaseParam(1, ds_persist=True)
+        submodule = _FakeReleaseSubmodule([persistent])
+
+        with pytest.raises(RuntimeError, match="boom"):
+            PartitionedParameterCoordinator().release_sub_module(submodule)
+
+        assert persistent.is_external_param is False
+
+    def test_apply_is_idempotent(self, release_coordinator_cls):
+        patch_zero3_persistent_release()
+        patched_once = release_coordinator_cls.release_sub_module
+
+        patch_zero3_persistent_release()
+
+        assert release_coordinator_cls.release_sub_module is patched_once
+
+    def test_disabled_leaves_release_unpatched(self, release_coordinator_cls, caplog):
+        original = release_coordinator_cls.release_sub_module
+
+        with caplog.at_level(logging.INFO):
+            patch_zero3_persistent_release(enabled=False)
+
+        assert release_coordinator_cls.release_sub_module is original
+        assert any("disabled by caller" in record.message for record in caplog.records)
+
+    def test_missing_release_sub_module_raises(self, monkeypatch):
+        class PartitionedParameterCoordinator:
+            pass
+
+        monkeypatch.setattr(
+            zero3_patches,
+            "_resolve_zero3_release_targets",
+            lambda: (
+                PartitionedParameterCoordinator,
+                lambda module, recurse=False: [],
+                lambda module: False,
+            ),
+        )
+
+        with pytest.raises(RuntimeError, match="lacks release_sub_module"):
+            patch_zero3_persistent_release()
+
+    def test_missing_coordinator_class_is_a_no_op(self, monkeypatch, caplog):
+        monkeypatch.setattr(
+            zero3_patches,
+            "_resolve_zero3_release_targets",
+            lambda: (None, None, None),
+        )
+
+        with caplog.at_level(logging.WARNING):
+            patch_zero3_persistent_release()
+
+        assert any(
+            "coordinator unavailable" in record.message for record in caplog.records
+        )
