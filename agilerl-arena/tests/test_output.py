@@ -5,12 +5,18 @@
 
 from __future__ import annotations
 
+import contextlib
+import os
+import signal
+import sys
+import time
 from unittest.mock import MagicMock, patch
 
 import click
 import pytest
 from rich.console import Console
 
+from agilerl.arena import output as output_module
 from agilerl.arena.exceptions import (
     ArenaAPIError,
     ArenaTrainingError,
@@ -31,6 +37,11 @@ from agilerl.arena.output import (
     supports_interactive_selection,
 )
 from agilerl.arena.stream import CheckEvent, ErrorEvent, LogEvent, StatusEvent
+
+if sys.platform != "win32":
+    import pty
+    import termios
+    import tty
 
 
 # ---------------------------------------------------------------------------
@@ -768,3 +779,182 @@ class TestEmitSessionTranscript:
         )
         assert "…" not in out
         assert out.count("word") == 80
+
+
+# ---------------------------------------------------------------------------
+# Raw keypress reading
+# ---------------------------------------------------------------------------
+
+
+class _FakeStdin:
+    """Stands in for sys.stdin; _read_key_posix only needs a real fd."""
+
+    def __init__(self, fd: int) -> None:
+        self._fd = fd
+
+    def fileno(self) -> int:
+        return self._fd
+
+
+def _no_blocking(seconds=5.0):
+    """Turn a blocked read into a failure, so a regression cannot stall CI."""
+
+    def _raise(signum, frame):
+        msg = "_read_key_posix blocked; a keystroke was probably discarded"
+        raise TimeoutError(msg)
+
+    previous = signal.signal(signal.SIGALRM, _raise)
+    signal.setitimer(signal.ITIMER_REAL, seconds)
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous)
+
+
+_no_blocking = contextlib.contextmanager(_no_blocking)
+
+
+def _posix_key(written: bytes) -> str | None:
+    """Feed *written* to a real pty and read one key back through it."""
+    master, slave = pty.openpty()
+    try:
+        # Raw first: in cooked mode the line discipline turns \x03 into SIGINT
+        # and rewrites \r, so the bytes under test would never arrive intact.
+        tty.setraw(slave)
+        if written:
+            os.write(master, written)
+            time.sleep(0.05)
+        with (
+            patch.object(output_module.sys, "stdin", _FakeStdin(slave)),
+            _no_blocking(),
+        ):
+            return output_module._read_key_posix()
+    finally:
+        os.close(master)
+        os.close(slave)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX terminal handling")
+class TestReadKeyPosix:
+    @pytest.mark.parametrize(
+        ("keystroke", "expected"),
+        [
+            (b"\x1b[A", UP),
+            (b"\x1b[B", DOWN),
+            (b"\x1bOA", UP),
+            (b"\x1bOB", DOWN),
+            (b"\r", ENTER),
+            (b"\n", ENTER),
+            (b"q", CANCEL),
+            (b"\x03", CANCEL),
+            (b"x", None),
+            (b"\x1b[C", None),
+        ],
+    )
+    def test_decodes_a_keystroke(self, keystroke, expected):
+        assert _posix_key(keystroke) == expected
+
+    def test_a_bare_escape_cancels_without_hanging(self):
+        """Escape sends no follow-up bytes; waiting for them would block forever."""
+        assert _posix_key(b"\x1b") == CANCEL
+
+    def test_a_keystroke_buffered_before_the_read_is_not_discarded(self):
+        """Entering raw mode must not flush input typed while redrawing."""
+        master, slave = pty.openpty()
+        try:
+            tty.setraw(slave)
+            os.write(master, b"\x1b[B\x1b[B")
+            time.sleep(0.05)
+            with (
+                patch.object(output_module.sys, "stdin", _FakeStdin(slave)),
+                _no_blocking(),
+            ):
+                first = output_module._read_key_posix()
+                second = output_module._read_key_posix()
+            assert [first, second] == [DOWN, DOWN]
+        finally:
+            os.close(master)
+            os.close(slave)
+
+    def test_terminal_settings_are_restored(self):
+        master, slave = pty.openpty()
+        try:
+            tty.setraw(slave)
+            before = termios.tcgetattr(slave)
+            os.write(master, b"\r")
+            time.sleep(0.05)
+            with (
+                patch.object(output_module.sys, "stdin", _FakeStdin(slave)),
+                _no_blocking(),
+            ):
+                output_module._read_key_posix()
+            assert termios.tcgetattr(slave) == before
+        finally:
+            os.close(master)
+            os.close(slave)
+
+    def test_settings_are_restored_even_when_reading_raises(self):
+        master, slave = pty.openpty()
+        try:
+            before = termios.tcgetattr(slave)
+            with (
+                patch.object(output_module.sys, "stdin", _FakeStdin(slave)),
+                patch.object(output_module.tty, "setraw", side_effect=OSError("boom")),
+                pytest.raises(OSError, match="boom"),
+            ):
+                output_module._read_key_posix()
+            assert termios.tcgetattr(slave) == before
+        finally:
+            os.close(master)
+            os.close(slave)
+
+
+class _FakeMsvcrt:
+    """The two-call getwch() protocol Windows uses for arrow keys."""
+
+    def __init__(self, *chars: str) -> None:
+        self._chars = list(chars)
+
+    def getwch(self) -> str:
+        return self._chars.pop(0)
+
+
+class TestReadKeyWindows:
+    @pytest.mark.parametrize(
+        ("chars", "expected"),
+        [
+            (("\x00", "H"), UP),
+            (("\x00", "P"), DOWN),
+            (("\xe0", "H"), UP),
+            (("\xe0", "P"), DOWN),
+            (("\x00", "K"), None),
+            (("\r",), ENTER),
+            (("\n",), ENTER),
+            (("q",), CANCEL),
+            (("\x1b",), CANCEL),
+            (("\x03",), CANCEL),
+            (("x",), None),
+        ],
+    )
+    def test_decodes_a_keystroke(self, chars, expected):
+        with patch.object(output_module, "msvcrt", _FakeMsvcrt(*chars), create=True):
+            assert output_module._read_key_windows() == expected
+
+
+class TestReadKeyDispatch:
+    def test_posix_platforms_use_the_termios_reader(self):
+        with (
+            patch.object(output_module.sys, "platform", "linux"),
+            patch.object(output_module, "_read_key_posix", return_value=UP) as posix,
+        ):
+            assert output_module._read_key() == UP
+        posix.assert_called_once_with()
+
+    def test_windows_uses_the_msvcrt_reader(self):
+        with (
+            patch.object(output_module.sys, "platform", "win32"),
+            patch.object(output_module, "_read_key_windows", return_value=DOWN) as win,
+        ):
+            assert output_module._read_key() == DOWN
+        win.assert_called_once_with()

@@ -1411,6 +1411,11 @@ class TestActiveSession:
     def test_clear_reports_nothing_to_remove(self):
         assert clear_active_session("my-dep") is False
 
+    def test_clear_reports_nothing_when_other_deployments_have_sessions(self):
+        save_active_session("other-dep", "sess-b")
+        assert clear_active_session("my-dep") is False
+        assert load_active_session("other-dep") == "sess-b"
+
     def test_clear_leaves_other_deployments_alone(self):
         save_active_session("dep-a", "sess-a")
         save_active_session("dep-b", "sess-b")

@@ -32,7 +32,7 @@ from agilerl.arena.stream import (
 )
 
 if sys.platform == "win32":
-    import msvcrt
+    import msvcrt  # pragma: no cover
 else:
     import select
     import termios
@@ -281,7 +281,9 @@ def _read_key_posix() -> str | None:
     fd = sys.stdin.fileno()
     original = termios.tcgetattr(fd)
     try:
-        tty.setraw(fd)
+        # TCSADRAIN, not tty.setraw's default TCSAFLUSH, which would discard a
+        # keystroke that arrived while the previous one was being handled.
+        tty.setraw(fd, termios.TCSADRAIN)
         char = os.read(fd, 1).decode(errors="ignore")
         if char == "\x1b":
             # An arrow key sends two more bytes immediately; a bare Escape does
