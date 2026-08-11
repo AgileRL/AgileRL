@@ -1440,3 +1440,94 @@ class TestActiveSession:
     )
     def test_load_blank_session_id(self, mock_load_store):
         assert load_active_session("my-dep") is None
+
+
+MINIMAL_STATUS = {"deployment_id": "560"}
+
+
+def _agent_over(status_body, *, route_body=None):
+    """A real Agent whose /status returns *status_body*."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/status":
+            return httpx.Response(200, json=status_body)
+        return httpx.Response(200, json=route_body if route_body is not None else {})
+
+    real = httpx.Client
+    with patch(
+        "agilerl.arena.inference.agent.httpx.Client",
+        lambda **kw: real(transport=httpx.MockTransport(handler), **kw),
+    ):
+        return Agent("http://pod", api_key="k")
+
+
+class TestStatusWithoutAgentInfo:
+    """A public /status may report only the deployment id."""
+
+    def test_metadata_parses_with_no_agent_block(self):
+        agent = _agent_over(MINIMAL_STATUS)
+        assert agent.metadata is not None
+        assert agent.metadata.deployment_id == "560"
+        assert agent.metadata.agent is None
+
+    def test_an_absent_agent_block_is_not_a_reported_shape(self):
+        """Absent must not read as 'every flag is False'."""
+        assert _agent_over(MINIMAL_STATUS).metadata.agent is None
+        reported = _agent_over({"deployment_id": "1", "agent": {}}).metadata.agent
+        assert reported is not None
+        assert reported.llm is False
+
+    @pytest.mark.parametrize(
+        "call",
+        [
+            lambda a: a.generate("hi"),
+            lambda a: list(a.generate_stream("hi")),
+            lambda a: a.list_sessions(),
+            lambda a: a.get_session("s1"),
+            lambda a: a.delete_session("s1"),
+            lambda a: a.predict(np.zeros(4)),
+            lambda a: a.get_action(np.zeros(8)),
+        ],
+    )
+    def test_type_guards_defer_to_the_deployment(self, call):
+        """Unknown type must not be refused locally; the route answers 400."""
+        agent = _agent_over(MINIMAL_STATUS)
+        agent._http = MagicMock()
+        agent._http.request.return_value = _json_response(
+            400, {"error": "wrong endpoint"}
+        )
+        agent._http.stream.return_value = _stream_response([], status_code=400)
+
+        with pytest.raises(ArenaInferenceError) as exc_info:
+            call(agent)
+        assert exc_info.value.status_code == 400
+        assert "Deployment is not" not in str(exc_info.value)
+
+    def test_get_action_falls_back_to_single_agent_non_recurrent(self):
+        """No reported shape means the common case: one agent, no hidden state."""
+        agent = _agent_over(MINIMAL_STATUS)
+        payload = agent._build_payload(np.zeros(4), False, None, None, None)
+
+        assert "obs" in payload
+        assert payload["batch_size"] == 1
+        assert "hidden_state" not in payload
+
+    def test_a_reported_shape_still_drives_the_payload(self):
+        agent = _agent_over(
+            {"deployment_id": "1", "agent": {"multi_agent": False, "recurrent": True}}
+        )
+        payload = agent._build_payload(
+            np.zeros(4), False, {"h": np.zeros(2)}, None, None
+        )
+        assert "hidden_state" in payload
+
+    def test_reported_llm_still_guards(self):
+        agent = _agent_over({"deployment_id": "1", "agent": {"llm": False}})
+        with pytest.raises(ArenaInferenceError, match="not an LLM"):
+            agent.generate("hi")
+
+    def test_metadata_not_loaded_still_raises(self):
+        agent = _agent_over(MINIMAL_STATUS)
+        agent.metadata = None
+        with pytest.raises(ArenaInferenceError, match="Metadata not loaded"):
+            agent.generate("hi")

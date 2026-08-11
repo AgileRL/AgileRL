@@ -110,14 +110,18 @@ class AgentInfo(BaseModel):
 class StatusResponse(BaseModel):
     """Status response model.
 
+    ``GET /status`` is public, so it reports little beyond the deployment id.
+    Fields a deployment leaves out stay at their defaults, and *agent* is
+    ``None`` when it does not describe its shape at all.
+
     :param success: Whether the status request was successful.
     :type success: bool
     :param deployment_id: The deployment ID.
     :type deployment_id: str
     :param instance_id: The instance ID.
     :type instance_id: str
-    :param agent: The agent info.
-    :type agent: AgentInfo
+    :param agent: The agent info, or ``None`` if the deployment did not report it.
+    :type agent: AgentInfo | None
     """
 
     model_config = ConfigDict(frozen=True)
@@ -125,7 +129,7 @@ class StatusResponse(BaseModel):
     success: bool = True
     deployment_id: str = ""
     instance_id: str = ""
-    agent: AgentInfo = Field(default_factory=AgentInfo)
+    agent: AgentInfo | None = None
 
 
 AgentMetadata = StatusResponse
@@ -402,7 +406,8 @@ class Agent:
         body = self._request_json("GET", "/status")
         return StatusResponse.model_validate(body)
 
-    def _agent_info(self) -> AgentInfo:
+    def _agent_info(self) -> AgentInfo | None:
+        """Agent shape from ``GET /status``, or ``None`` if it did not report one."""
         if self.metadata is None:
             msg = "Metadata not loaded. Call status() or construct with probe_on_init=True."
             raise ArenaInferenceError(msg)
@@ -416,6 +421,10 @@ class Agent:
         llm: bool = False,
     ) -> None:
         agent = self._agent_info()
+        if agent is None:
+            # Type unknown, so let the deployment answer 400 for a wrong route
+            # rather than guessing here and refusing a call that would work.
+            return
         if rl and (agent.llm or agent.supervised):
             raise ArenaInferenceError(
                 detail="Deployment is not RL. Use predict() or generate().",
@@ -496,7 +505,7 @@ class Agent:
         env_defined_actions: RLData,
     ) -> dict[str, Any]:
         """Build the payload for the POST /get_action request."""
-        agent = self._agent_info()
+        agent = self._agent_info() or AgentInfo()
         is_multi = agent.multi_agent
         batch_size = get_batch_size(observation) if batched else 1
 
@@ -616,7 +625,7 @@ class Agent:
         :rtype: tuple[RLData, RLData | None]
         """
         self._ensure(rl=True)
-        agent = self._agent_info()
+        agent = self._agent_info() or AgentInfo()
         payload = self._build_payload(
             observation,
             batched,
