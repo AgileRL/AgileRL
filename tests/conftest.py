@@ -104,6 +104,7 @@ def _reset_distributed_env() -> None:
         _worker_num = int("".join(c for c in _xdist_worker_id if c.isdigit()) or "0")
         os.environ["MASTER_PORT"] = str(29500 + _worker_num)
 
+
 from agilerl.algorithms.core.registry import (  # noqa: E402
     HyperparameterConfig,
     RLParameter,
