@@ -8,7 +8,7 @@ sleep/wake plus trainer CPU-offload), so the two phases are independent
 peaks — never summed — even on a single device.
 
 Component keys are stable identifiers consumed by the Arena widget and the
-CLI preflight; change them only with a schema-version bump.
+CLI; change them only with a schema-version bump.
 """
 
 from __future__ import annotations
@@ -399,7 +399,7 @@ def estimate_training(
         ),
         _component(
             "overhead",
-            "Overhead & calibration",
+            "Overhead (context + slack)",
             device.context_bytes + rollout,
             detail={
                 "cuda_context": device.context_bytes,
@@ -558,7 +558,7 @@ def estimate_generation(
         ),
         _component(
             "overhead",
-            "Overhead & calibration",
+            "Overhead (context + slack)",
             device.context_bytes + formulas.ENGINE_PROCESS_OVERHEAD_BYTES,
             detail={
                 "cuda_context": device.context_bytes,

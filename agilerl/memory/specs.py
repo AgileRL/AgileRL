@@ -5,7 +5,7 @@
 Everything in this module is plain data: pydantic models that describe the
 model architecture, the device, and the user-facing knobs. The specs are
 JSON-serializable so the same objects can back the Arena widget, the CLI
-preflight, and the checked-in calibration fixtures. Nothing here imports
+CLI, and the arena pre-submission gate. Nothing here imports
 torch — the calculation core must stay portable to a browser runtime.
 """
 

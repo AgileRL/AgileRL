@@ -23,7 +23,7 @@ in a backend service, and client-side in a browser:
 | `formulas.py` | the arithmetic (parameter counts, KV, activations, tiles) |
 | `estimator.py` | assemble the two phase bars |
 | `advice.py` | rank the cheapest knob changes when a bar is over budget |
-| `preflight.py` | CLI entry point (`python -m agilerl.memory.preflight`) |
+| `cli.py` | pre-submission gate + report (`python -m agilerl.memory`) |
 
 ### Why there is no calibration layer
 
@@ -312,11 +312,28 @@ every activation has been freed).
 
 ## Status
 
-Calculation core, advice, preflight CLI, profiling harness, offline refit
-and snapshot attribution are implemented and tested (58 CPU-only tests,
-including a fixture regression check that replays every stored
-measurement). Seven (model, device) calibrations span 0.5B to 7B across an
-L4 and an A100.
+Calculation core, advice engine and the CLI gate are implemented and tested
+(34 CPU-only tests). Accuracy against 203 training and 203 generation
+measurements over 8 models and 2 devices:
+
+| phase | mean | worst |
+|---|---|---|
+| training | 4.14% | 13.52% |
+| generation | 3.18% | 13.92% |
+
+Open, in rough priority order:
+
+- **Quantized training is ~21% out.** The bitsandbytes backward workspace is
+  not modelled, and the bf16/nf4 trade *inverts* around 2,700 tokens per
+  micro-batch — so quantizing to make a run fit can make long-context
+  training stop fitting. The estimator warns rather than guessing.
+- **Gemma 4 and OLMoE sit ~5% worse than the dense models**, i.e. there are
+  architecture terms still unfound.
+- **Multi-GPU is unmodelled**: no data parallel, ZeRO-3 or Ray overhead. A
+  measured aside: running under Ray costs ~50 MiB of GPU, but an orchestrated
+  agilerl-ray job peaked 3.2 GiB above the same workload run as a plain
+  process on the same card and image — unexplained, and in the orchestration
+  path rather than this model.
 
 Known gaps, in rough priority order:
 
