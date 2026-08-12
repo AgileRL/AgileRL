@@ -2,6 +2,13 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import copy
+import json
+import os
+import socket
+import subprocess
+import sys
+import textwrap
+from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
@@ -844,3 +851,155 @@ class TestMoeLoraFallbackBranches:
 
         assert out is sentinel
         base_forward.assert_called_once()
+
+
+@pytest.mark.gpu
+class TestZero3ExpertAttachMemory:
+    """Expert-LoRA attach on a zero.Init model must not gather the experts."""
+
+    # deepspeed.init_distributed and zero.Init leave process-global state (a
+    # default process group, patched module construction), so the scenario
+    # runs in a subprocess to keep it out of other tests' processes.
+    _SCRIPT = textwrap.dedent(
+        """
+        import json
+        import math
+
+        import deepspeed
+        import torch
+        import torch.nn as nn
+        import torch.nn.functional as F
+        from peft import LoraConfig, get_peft_model
+
+        from agilerl.algorithms.core.llm_ops.moe_lora import (
+            upgrade_moe_param_wrappers,
+        )
+        from agilerl.utils.llm_utils import zero3_full_shape_views
+
+        deepspeed.init_distributed(dist_backend="nccl")
+        num_layers, num_experts, hidden, intermediate = 4, 8, 1024, 2816
+
+
+        class BigExperts(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.num_experts = num_experts
+                self.up_proj = nn.Parameter(
+                    torch.empty(num_experts, intermediate, hidden)
+                )
+                self.down_proj = nn.Parameter(
+                    torch.empty(num_experts, hidden, intermediate)
+                )
+                self.act_fn = F.silu
+
+            def forward(self, hidden_states, top_k_index, top_k_weights):
+                return hidden_states
+
+
+        class BigMoeModel(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.layers = nn.ModuleList()
+                for _ in range(num_layers):
+                    block = nn.Module()
+                    block.experts = BigExperts()
+                    self.layers.append(block)
+
+
+        # remote_device=cpu keeps the single-rank gather from aliasing the
+        # local shard, so a regression to gathering the packed experts
+        # re-allocates their full summed size on the GPU and trips the bound.
+        with deepspeed.zero.Init(
+            remote_device="cpu",
+            config_dict_or_path={
+                "train_batch_size": 1,
+                "train_micro_batch_size_per_gpu": 1,
+                "zero_optimization": {
+                    "stage": 3,
+                    "offload_param": {"device": "cpu"},
+                },
+            },
+        ):
+            model = BigMoeModel()
+
+        expert_params = [
+            param
+            for name, param in model.named_parameters()
+            if name.endswith(("up_proj", "down_proj"))
+        ]
+        assert len(expert_params) == 2 * num_layers
+        assert all(param.numel() == 0 for param in expert_params)
+        summed = sum(
+            math.prod(param.ds_shape) * param.element_size()
+            for param in expert_params
+        )
+
+        torch.cuda.synchronize()
+        torch.cuda.empty_cache()
+        torch.cuda.reset_peak_memory_stats()
+        base = torch.cuda.memory_allocated()
+
+        config = LoraConfig(
+            r=8,
+            lora_alpha=16,
+            lora_dropout=0.0,
+            target_modules=[],
+            target_parameters=["experts.up_proj", "experts.down_proj"],
+        )
+        with zero3_full_shape_views(expert_params):
+            peft_model = get_peft_model(
+                model, config, adapter_name="actor", autocast_adapter_dtype=False
+            )
+        with zero3_full_shape_views(expert_params):
+            upgraded = upgrade_moe_param_wrappers(peft_model)
+
+        torch.cuda.synchronize()
+        result = {
+            "peak_delta": torch.cuda.max_memory_allocated() - base,
+            "summed": summed,
+            "upgraded": upgraded,
+            "placeholders_empty": all(
+                param.numel() == 0 for param in expert_params
+            ),
+        }
+        print("RESULT " + json.dumps(result))
+        """
+    )
+
+    def test_attach_peak_allocation_far_below_summed_expert_size(self) -> None:
+        if not torch.cuda.is_available():
+            pytest.skip("requires CUDA")
+        pytest.importorskip("deepspeed")
+
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            port = sock.getsockname()[1]
+        repo_root = Path(__file__).resolve().parents[3]
+        env = os.environ | {
+            "RANK": "0",
+            "LOCAL_RANK": "0",
+            "WORLD_SIZE": "1",
+            "MASTER_ADDR": "127.0.0.1",
+            "MASTER_PORT": str(port),
+            "PYTHONPATH": os.pathsep.join(
+                [str(repo_root), os.environ.get("PYTHONPATH", "")]
+            ).rstrip(os.pathsep),
+        }
+        proc = subprocess.run(
+            [sys.executable, "-c", self._SCRIPT],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=600,
+            check=False,
+        )
+        assert proc.returncode == 0, (
+            f"attach subprocess failed\nstdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+        )
+        result_line = next(
+            line for line in proc.stdout.splitlines() if line.startswith("RESULT ")
+        )
+        result = json.loads(result_line.removeprefix("RESULT "))
+        assert result["upgraded"] == 4
+        assert result["placeholders_empty"] is True
+        assert result["peak_delta"] < result["summed"] // 10, result

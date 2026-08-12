@@ -331,8 +331,11 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
     :param adv_clip_range: Optional symmetric clamp range applied to
         advantages before loss computation, defaults to None.
     :type adv_clip_range: float | None, optional
-    :param filter_zero_adv: If ``True``, drop samples whose absolute
-        advantage is below ``adv_filter_eps``, defaults to False.
+    :param filter_zero_adv: If ``True``, filter samples whose absolute
+        advantage is below ``adv_filter_eps``. Single-process runs drop the
+        samples from the update; multi-process runs zero their advantages
+        instead, keeping the collective schedule identical on every rank,
+        defaults to False.
     :type filter_zero_adv: bool, optional
     :param adv_filter_eps: Threshold used with
         ``filter_zero_adv``; samples with ``|advantage| <= eps`` are
@@ -716,12 +719,13 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
             aux_metric = self.aux_metric_name
             effective_num_samples = len(batch_idxs)
             if effective_num_samples == 0:
+                # Single-process only: multi-process filtering masks advantages
+                # instead of dropping samples, so every rank always enters the
+                # update loop with the same number of micro-batches.
                 warnings.warn(
                     "All samples were filtered by advantage threshold; skipping GRPO update.",
                     stacklevel=2,
                 )
-                if self.accelerator is not None and self.accelerator.num_processes > 1:
-                    self.accelerator.wait_for_everyone()
                 return {"loss": 0.0, aux_metric: 0.0}
 
             updates = 0
@@ -1068,6 +1072,10 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
         per-trajectory ``(B, 1)`` and per-turn-broadcast ``(B, T-1)``
         advantages. Returns the advantages and the indices of samples that
         survive the zero-advantage filter (all samples when it is disabled).
+        Multi-process runs apply the filter by zeroing the advantages of
+        filtered samples and returning every index: each rank keeps its full
+        batch, so all ranks run the same forward/backward collective schedule
+        regardless of how many samples each one filters.
         """
         num_samples = token_ids.shape[0]
         if self._resolve_advantage_granularity() == "turn" and turn_ids is not None:
@@ -1091,6 +1099,9 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
             advantages = advantages.clamp(-self.adv_clip_range, self.adv_clip_range)
 
         if active_adv_mask is None:
+            return advantages, np.arange(num_samples)
+        if self.accelerator is not None and self.accelerator.num_processes > 1:
+            advantages = advantages * active_adv_mask.unsqueeze(-1).to(advantages.dtype)
             return advantages, np.arange(num_samples)
         return advantages, np.where(active_adv_mask.detach().cpu().numpy())[0]
 

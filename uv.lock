@@ -60,7 +60,7 @@ wheels = [
 
 [[package]]
 name = "agilerl"
-version = "2.9.0"
+version = "2.9.1"
 source = { editable = "." }
 dependencies = [
     { name = "accelerate" },
@@ -225,7 +225,7 @@ docs = [
 
 [[package]]
 name = "agilerl-arena"
-version = "0.1.3"
+version = "0.2.0"
 source = { editable = "agilerl-arena" }
 dependencies = [
     { name = "click" },

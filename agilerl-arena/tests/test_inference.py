@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import httpx
@@ -18,14 +19,19 @@ from agilerl.arena.inference import (
     LLMParams,
     LLMResults,
     PredictResult,
+    SessionDetail,
+    SessionInfo,
     StatusResponse,
 )
 from agilerl.arena.inference.cache import (
     ActiveAgentSelection,
+    clear_active_session,
     load_active_agent,
+    load_active_session,
     load_binding,
     normalized_deployment_name,
     save_active_agent,
+    save_active_session,
     save_binding,
 )
 
@@ -46,6 +52,53 @@ STATUS_BODY = {
 def _default_metadata(**agent_overrides: object) -> StatusResponse:
     body = {**STATUS_BODY, "agent": {**STATUS_BODY["agent"], **agent_overrides}}
     return StatusResponse.model_validate(body)
+
+
+def _json_response(status_code: int = 200, body: Any = None) -> MagicMock:
+    resp = MagicMock()
+    resp.status_code = status_code
+    resp.json.return_value = body if body is not None else {}
+    resp.text = ""
+    return resp
+
+
+def _llm_response() -> MagicMock:
+    return _json_response(
+        200,
+        {
+            "results": [{"prompt": "hi", "completion": "hello"}],
+            "batch_size": 1,
+            "inference_time_ms": 1.0,
+            "tokens_per_second": 10.0,
+            "success": True,
+        },
+    )
+
+
+def _mock_agent(**agent_overrides: object) -> Agent:
+    """An Agent wired to a mock transport, without going through ``__init__``."""
+    agent = Agent.__new__(Agent)
+    agent._base_url = "http://test"
+    agent.metadata = _default_metadata(**agent_overrides)
+    agent.generate_params = LLMParams()
+    agent._http = MagicMock(spec=httpx.Client)
+    return agent
+
+
+def _llm_agent() -> Agent:
+    return _mock_agent(llm=True, algo="GRPO")
+
+
+def _stream_response(chunks: list[str], status_code: int = 200) -> MagicMock:
+    resp = MagicMock()
+    resp.status_code = status_code
+    resp.json.return_value = {}
+    resp.text = ""
+    resp.iter_text.return_value = iter(chunks)
+    ctx = MagicMock()
+    ctx.__enter__.return_value = resp
+    ctx.__exit__.return_value = False
+    return ctx
 
 
 class TestSerializeDeserialize:
@@ -307,20 +360,10 @@ class TestParseGetActionResponse:
 
 class TestGetAction:
     def _make_agent_with_mock_http(self):
-        agent = Agent.__new__(Agent)
-        agent._base_url = "http://test"
-        agent._endpoint = "http://test"
-        agent.metadata = _default_metadata()
-        agent.generate_params = LLMParams()
-        agent._http = MagicMock(spec=httpx.Client)
-        return agent
+        return _mock_agent()
 
     def _mock_json_response(self, status_code: int, body: dict):
-        mock_resp = MagicMock()
-        mock_resp.status_code = status_code
-        mock_resp.json.return_value = body
-        mock_resp.text = ""
-        return mock_resp
+        return _json_response(status_code, body)
 
     def test_successful_get_action(self):
         agent = self._make_agent_with_mock_http()
@@ -442,13 +485,7 @@ class TestAgentInit:
 
 class TestStatus:
     def _make_agent_with_mock_http(self):
-        agent = Agent.__new__(Agent)
-        agent._base_url = "http://test"
-        agent._endpoint = "http://test"
-        agent.metadata = _default_metadata()
-        agent.generate_params = LLMParams()
-        agent._http = MagicMock(spec=httpx.Client)
-        return agent
+        return _mock_agent()
 
     def test_status_without_refresh_returns_cached(self):
         agent = self._make_agent_with_mock_http()
@@ -463,10 +500,7 @@ class TestStatus:
             **STATUS_BODY,
             "agent": {**STATUS_BODY["agent"], "algo": "PPO"},
         }
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_resp.json.return_value = updated
-        agent._http.request.return_value = mock_resp
+        agent._http.request.return_value = _json_response(200, updated)
 
         result = agent.status(refresh=True)
         assert result.agent.algo == "PPO"
@@ -476,13 +510,7 @@ class TestStatus:
 
 class TestPredict:
     def _make_agent_with_mock_http(self):
-        agent = Agent.__new__(Agent)
-        agent._base_url = "http://test"
-        agent._endpoint = "http://test"
-        agent.metadata = _default_metadata(supervised=True, algo="SFT")
-        agent.generate_params = LLMParams()
-        agent._http = MagicMock(spec=httpx.Client)
-        return agent
+        return _mock_agent(supervised=True, algo="SFT")
 
     def test_predict_round_trip(self):
         agent = self._make_agent_with_mock_http()
@@ -494,10 +522,7 @@ class TestPredict:
             "inference_time_ms": 12.3,
             "success": True,
         }
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_resp.json.return_value = body
-        agent._http.request.return_value = mock_resp
+        agent._http.request.return_value = _json_response(200, body)
 
         results, meta = agent.predict(inputs)
         np.testing.assert_array_almost_equal(results, results_arr)
@@ -514,10 +539,7 @@ class TestPredict:
             "inference_time_ms": 1.0,
             "success": True,
         }
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_resp.json.return_value = body
-        agent._http.request.return_value = mock_resp
+        agent._http.request.return_value = _json_response(200, body)
 
         with pytest.raises(ArenaInferenceError, match="no results"):
             agent.predict(np.array([1.0]))
@@ -525,13 +547,7 @@ class TestPredict:
 
 class TestGenerate:
     def _make_agent_with_mock_http(self):
-        agent = Agent.__new__(Agent)
-        agent._base_url = "http://test"
-        agent._endpoint = "http://test"
-        agent.metadata = _default_metadata(llm=True, algo="GRPO")
-        agent.generate_params = LLMParams()
-        agent._http = MagicMock(spec=httpx.Client)
-        return agent
+        return _llm_agent()
 
     def test_generate_string_prompt(self):
         agent = self._make_agent_with_mock_http()
@@ -542,10 +558,7 @@ class TestGenerate:
             "tokens_per_second": 50.0,
             "success": True,
         }
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_resp.json.return_value = body
-        agent._http.request.return_value = mock_resp
+        agent._http.request.return_value = _json_response(200, body)
 
         result = agent.generate("hi", params={"temperature": 0.5})
         assert isinstance(result, LLMResults)
@@ -565,10 +578,7 @@ class TestGenerate:
             "tokens_per_second": 10.0,
             "success": True,
         }
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_resp.json.return_value = body
-        agent._http.request.return_value = mock_resp
+        agent._http.request.return_value = _json_response(200, body)
 
         agent.generate("hi")
         sent = agent._http.request.call_args[1]["json"]
@@ -580,24 +590,32 @@ class TestGenerate:
         with pytest.raises(ArenaInferenceError, match="empty"):
             agent.generate("")
 
+    def test_generate_includes_session_id(self):
+        agent = self._make_agent_with_mock_http()
+        agent._http.request.return_value = _llm_response()
+
+        agent.generate("hi", session_id=" sess-1 ")
+        sent = agent._http.request.call_args[1]["json"]
+        assert sent["session_id"] == "sess-1"
+
+    def test_generate_omits_session_id_when_none(self):
+        agent = self._make_agent_with_mock_http()
+        agent._http.request.return_value = _llm_response()
+
+        agent.generate("hi")
+        sent = agent._http.request.call_args[1]["json"]
+        assert "session_id" not in sent
+
+    def test_generate_rejects_blank_session_id(self):
+        agent = self._make_agent_with_mock_http()
+        with pytest.raises(ArenaInferenceError, match="session_id"):
+            agent.generate("hi", session_id="  ")
+
 
 class TestGenerateStream:
     def test_generate_stream_yields_chunks(self):
-        agent = Agent.__new__(Agent)
-        agent._base_url = "http://test"
-        agent._endpoint = "http://test"
-        agent.metadata = _default_metadata(llm=True, algo="GRPO")
-        agent.generate_params = LLMParams()
-        agent._http = MagicMock(spec=httpx.Client)
-
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_resp.iter_text.return_value = iter(["foo", "bar"])
-
-        mock_ctx = MagicMock()
-        mock_ctx.__enter__.return_value = mock_resp
-        mock_ctx.__exit__.return_value = False
-        agent._http.stream.return_value = mock_ctx
+        agent = _llm_agent()
+        agent._http.stream.return_value = _stream_response(["foo", "bar"])
 
         chunks = list(agent.generate_stream("Say hi"))
         assert chunks == ["foo", "bar"]
@@ -605,29 +623,349 @@ class TestGenerateStream:
         assert sent["prompt"] == "Say hi"
 
     def test_generate_stream_raises_on_in_band_error(self):
-        agent = Agent.__new__(Agent)
-        agent._base_url = "http://test"
-        agent.metadata = _default_metadata(llm=True, algo="GRPO")
-        agent.generate_params = LLMParams()
-        agent._http = MagicMock(spec=httpx.Client)
-
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_resp.iter_text.return_value = iter(["\n[ERROR: model failed]"])
-        mock_ctx = MagicMock()
-        mock_ctx.__enter__.return_value = mock_resp
-        mock_ctx.__exit__.return_value = False
-        agent._http.stream.return_value = mock_ctx
+        agent = _llm_agent()
+        agent._http.stream.return_value = _stream_response(["\n[ERROR: model failed]"])
 
         with pytest.raises(ArenaInferenceError, match="ERROR"):
             list(agent.generate_stream("hi"))
+
+    def test_stream_includes_session_id(self):
+        agent = _llm_agent()
+        agent._http.stream.return_value = _stream_response(["ok"])
+
+        list(agent.generate_stream("hi", session_id="sess-1"))
+        sent = agent._http.stream.call_args[1]["json"]
+        assert sent["session_id"] == "sess-1"
+
+    def test_stream_omits_session_id_when_none(self):
+        agent = _llm_agent()
+        agent._http.stream.return_value = _stream_response(["ok"])
+
+        list(agent.generate_stream("hi"))
+        sent = agent._http.stream.call_args[1]["json"]
+        assert "session_id" not in sent
+
+    def test_stream_rejects_blank_session_id(self):
+        agent = _llm_agent()
+        with pytest.raises(ArenaInferenceError, match="session_id"):
+            list(agent.generate_stream("hi", session_id=""))
+
+
+class TestAgentCredentialResolution:
+    @patch("agilerl.arena.inference.agent.httpx.Client")
+    def test_explicit_api_key_wins(self, mock_http_cls, monkeypatch):
+        monkeypatch.setenv("ARENA_API_KEY", "env-key")
+        Agent("http://endpoint", api_key="explicit-key", probe_on_init=False)
+        headers = mock_http_cls.call_args[1]["headers"]
+        assert headers == {"Authorization": "Bearer explicit-key"}
+
+    @patch("agilerl.arena.inference.agent.httpx.Client")
+    def test_falls_back_to_env_var(self, mock_http_cls, monkeypatch):
+        monkeypatch.setenv("ARENA_API_KEY", "arena_pat_env")
+        Agent("http://endpoint", probe_on_init=False)
+        headers = mock_http_cls.call_args[1]["headers"]
+        assert headers == {"Authorization": "Bearer arena_pat_env"}
+
+    @patch("agilerl.arena.inference.agent.httpx.Client")
+    def test_no_credential_sends_no_auth_header(self, mock_http_cls):
+        Agent("http://endpoint", probe_on_init=False)
+        assert mock_http_cls.call_args[1]["headers"] == {}
+
+
+SECRET = "arena_pat_supersecret"
+
+# Satisfies StatusResponse, LLMResults and the sessions body at once.
+_ANY_ROUTE_BODY = {
+    "success": True,
+    "agent": {"algo": "GRPO", "llm": True},
+    "results": [{"prompt": "hi", "completion": "yo"}],
+    "batch_size": 1,
+    "inference_time_ms": 1.0,
+    "tokens_per_second": 1.0,
+    "sessions": [],
+}
+
+
+def _agent_over_mock_transport(
+    seen: list[tuple[str, str | None]],
+    *,
+    status_code: int = 200,
+) -> Agent:
+    """An LLM agent whose transport records the path and Authorization it saw."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append((request.url.path, request.headers.get("authorization")))
+        return httpx.Response(status_code, json=_ANY_ROUTE_BODY)
+
+    agent = _llm_agent()
+    agent._http = httpx.Client(
+        headers={"Authorization": f"Bearer {SECRET}"},
+        transport=httpx.MockTransport(handler),
+    )
+    return agent
+
+
+class TestSingleCredentialOnEveryRoute:
+    def test_same_header_on_status_generate_and_sessions(self):
+        seen: list[tuple[str, str | None]] = []
+        agent = _agent_over_mock_transport(seen)
+
+        agent.status(refresh=True)
+        agent.generate("hi")
+        agent.list_sessions()
+
+        assert [path for path, _ in seen] == ["/status", "/generate", "/sessions"]
+        assert {auth for _, auth in seen} == {f"Bearer {SECRET}"}
+
+
+class TestCredentialNeverLeaks:
+    @patch("agilerl.arena.inference.agent.httpx.Client")
+    def test_absent_from_repr(self, mock_http_cls):
+        agent = Agent("http://endpoint", api_key=SECRET, probe_on_init=False)
+        assert repr(agent) == "<Agent endpoint='http://endpoint'>"
+
+    @patch("agilerl.arena.inference.agent.httpx.Client")
+    def test_not_stored_as_instance_attribute(self, mock_http_cls):
+        agent = Agent("http://endpoint", api_key=SECRET, probe_on_init=False)
+        assert SECRET not in json.dumps(agent.__dict__, default=str)
+
+    @patch("agilerl.arena.inference.cache._write_store")
+    @patch(
+        "agilerl.arena.inference.cache._load_store",
+        return_value={"deployments": {"other": {"url": "http://o", "api_key": SECRET}}},
+    )
+    def test_save_binding_purges_credentials_left_by_older_releases(
+        self, mock_load, mock_write
+    ):
+        save_binding("dep1", "http://url")
+        assert SECRET not in json.dumps(mock_write.call_args[0][0])
+
+    def test_absent_from_raised_error_detail(self):
+        seen: list[tuple[str, str | None]] = []
+        agent = _agent_over_mock_transport(seen, status_code=500)
+
+        with pytest.raises(ArenaInferenceError) as exc_info:
+            agent.generate("hi")
+        assert seen[0][1] == f"Bearer {SECRET}"
+        assert SECRET not in str(exc_info.value)
+
+
+class TestForbiddenErrors:
+    def test_403_asks_for_login(self):
+        agent = _llm_agent()
+        agent._http.request.return_value = _json_response(403, {"error": "forbidden"})
+
+        with pytest.raises(ArenaAuthError, match="not allowed"):
+            agent.generate("hi")
+
+    def test_403_on_rl_route_also_maps_to_auth_error(self):
+        agent = _llm_agent()
+        agent.metadata = _default_metadata()
+        agent._http.request.return_value = _json_response(403, {"error": "forbidden"})
+
+        with pytest.raises(ArenaAuthError, match="not allowed"):
+            agent.get_action(np.array([1.0]))
+
+    def test_403_on_stream_asks_for_login(self):
+        agent = _llm_agent()
+        agent._http.stream.return_value = _stream_response([], status_code=403)
+
+        with pytest.raises(ArenaAuthError, match="not allowed"):
+            list(agent.generate_stream("hi"))
+
+
+class TestSessions:
+    def test_list_sessions_parses_the_top_level_array(self):
+        agent = _llm_agent()
+        agent._http.request.return_value = _json_response(
+            200,
+            [
+                {
+                    "session_id": "s1",
+                    "created_at": "2026-07-30T00:00:00Z",
+                    "last_updated": "2026-08-01T00:00:00Z",
+                },
+                {"session_id": "s2", "created_at": None, "last_updated": None},
+            ],
+        )
+
+        sessions = agent.list_sessions()
+        assert [s.session_id for s in sessions] == ["s1", "s2"]
+        assert sessions[0].created_at == "2026-07-30T00:00:00Z"
+        assert sessions[0].last_updated == "2026-08-01T00:00:00Z"
+        assert sessions[1].last_updated is None
+        assert isinstance(sessions[0], SessionInfo)
+        assert agent._http.request.call_args[0][1] == "http://test/sessions"
+
+    def test_list_sessions_preserves_deployment_ordering(self):
+        agent = _llm_agent()
+        agent._http.request.return_value = _json_response(
+            200,
+            [
+                {"session_id": "newest", "last_updated": "2026-08-02T00:00:00Z"},
+                {"session_id": "oldest", "last_updated": "2026-07-01T00:00:00Z"},
+            ],
+        )
+        assert [s.session_id for s in agent.list_sessions()] == ["newest", "oldest"]
+
+    def test_list_sessions_accepts_a_wrapped_object(self):
+        agent = _llm_agent()
+        agent._http.request.return_value = _json_response(
+            200, {"success": True, "sessions": [{"session_id": "s1"}]}
+        )
+        assert [s.session_id for s in agent.list_sessions()] == ["s1"]
+
+    def test_list_sessions_ignores_unknown_fields(self):
+        agent = _llm_agent()
+        agent._http.request.return_value = _json_response(
+            200,
+            [{"session_id": "s1", "session_name": "chat", "turns": 4}],
+        )
+
+        sessions = agent.list_sessions()
+        assert sessions[0].session_id == "s1"
+        assert not hasattr(sessions[0], "session_name")
+
+    def test_list_sessions_with_no_conversations(self):
+        agent = _llm_agent()
+        agent._http.request.return_value = _json_response(200, [])
+        assert agent.list_sessions() == []
+
+    def test_list_sessions_without_sessions_key(self):
+        agent = _llm_agent()
+        agent._http.request.return_value = _json_response(200, {})
+        assert agent.list_sessions() == []
+
+    def test_list_sessions_with_non_list_payload(self):
+        agent = _llm_agent()
+        agent._http.request.return_value = _json_response(200, {"sessions": "nope"})
+        assert agent.list_sessions() == []
+
+    def test_a_route_expecting_an_object_still_rejects_an_array(self):
+        agent = _llm_agent()
+        agent._http.request.return_value = _json_response(200, [{"prompt": "hi"}])
+
+        with pytest.raises(ArenaInferenceError, match="Expected JSON object"):
+            agent.generate("hi")
+
+    def test_list_sessions_requires_llm_deployment(self):
+        agent = _llm_agent()
+        agent.metadata = _default_metadata()
+        with pytest.raises(ArenaInferenceError, match="not an LLM"):
+            agent.list_sessions()
+
+    def test_get_session_parses_messages(self):
+        agent = _llm_agent()
+        agent._http.request.return_value = _json_response(
+            200,
+            {
+                "session_id": "s1",
+                "last_updated": "2026-08-01T00:00:00Z",
+                "messages": [
+                    {"role": "user", "content": "hi"},
+                    {"role": "assistant", "content": "hello"},
+                ],
+            },
+        )
+
+        detail = agent.get_session("s1")
+        assert isinstance(detail, SessionDetail)
+        assert detail.session_id == "s1"
+        assert [m.role for m in detail.messages] == ["user", "assistant"]
+        assert agent._http.request.call_args[0][1] == "http://test/sessions/s1"
+
+    def test_delete_session_on_204(self):
+        agent = _llm_agent()
+        agent._http.request.return_value = _json_response(204, None)
+
+        assert agent.delete_session("s1") is True
+        method, url = agent._http.request.call_args[0]
+        assert (method, url) == ("DELETE", "http://test/sessions/s1")
+
+    def test_delete_session_sends_no_body(self):
+        agent = _llm_agent()
+        agent._http.request.return_value = _json_response(204, None)
+        agent.delete_session("s1")
+        assert agent._http.request.call_args.kwargs["json"] is None
+
+    def test_delete_session_never_reads_the_body(self):
+        """A 204 carries no body, so decoding one would raise."""
+        agent = _llm_agent()
+        resp = _json_response(204, None)
+        resp.json.side_effect = ValueError("no body to decode")
+        agent._http.request.return_value = resp
+
+        assert agent.delete_session("s1") is True
+
+    def test_delete_session_accepts_200_as_well(self):
+        agent = _llm_agent()
+        agent._http.request.return_value = _json_response(200, {"success": True})
+        assert agent.delete_session("s1") is True
+
+    def test_delete_session_404_reports_nothing_deleted(self):
+        agent = _llm_agent()
+        agent._http.request.return_value = _json_response(
+            404, {"detail": "unknown session_id"}
+        )
+        assert agent.delete_session("s1") is False
+
+    def test_delete_session_strips_the_id(self):
+        agent = _llm_agent()
+        agent._http.request.return_value = _json_response(204, None)
+        agent.delete_session("  s1  ")
+        assert agent._http.request.call_args[0][1] == "http://test/sessions/s1"
+
+    def test_delete_session_rejects_blank_id(self):
+        agent = _llm_agent()
+        with pytest.raises(ArenaInferenceError, match="session_id"):
+            agent.delete_session("")
+
+    def test_delete_session_requires_llm_deployment(self):
+        agent = _llm_agent()
+        agent.metadata = _default_metadata()
+        with pytest.raises(ArenaInferenceError, match="not an LLM"):
+            agent.delete_session("s1")
+
+    @pytest.mark.parametrize("status", [401, 403])
+    def test_delete_session_auth_failures_still_raise(self, status):
+        agent = _llm_agent()
+        agent._http.request.return_value = _json_response(status, {"error": "nope"})
+        with pytest.raises(ArenaAuthError):
+            agent.delete_session("s1")
+
+    def test_delete_session_server_error_still_raises(self):
+        agent = _llm_agent()
+        agent._http.request.return_value = _json_response(500, {"error": "boom"})
+        with pytest.raises(ArenaInferenceError):
+            agent.delete_session("s1")
+
+    def test_get_session_rejects_blank_id(self):
+        agent = _llm_agent()
+        with pytest.raises(ArenaInferenceError, match="session_id"):
+            agent.get_session("")
+
+    def test_get_session_404_names_the_session(self):
+        agent = _llm_agent()
+        agent._http.request.return_value = _json_response(404, {"error": "missing"})
+
+        with pytest.raises(ArenaInferenceError) as exc_info:
+            agent.get_session("s1")
+        assert exc_info.value.status_code == 404
+        assert "s1" in exc_info.value.detail
+
+    def test_get_session_other_error_passes_through(self):
+        agent = _llm_agent()
+        agent._http.request.return_value = _json_response(500, {"error": "boom"})
+
+        with pytest.raises(ArenaInferenceError) as exc_info:
+            agent.get_session("s1")
+        assert exc_info.value.status_code == 500
 
 
 class TestAgentContextManager:
     def test_enter_exit(self):
         agent = Agent.__new__(Agent)
         agent._http = MagicMock()
-        agent._endpoint = "http://test"
 
         assert agent.__enter__() is agent
         agent.__exit__(None, None, None)
@@ -725,58 +1063,37 @@ class TestLoadBinding:
 
     @patch(
         "agilerl.arena.inference.cache._load_store",
-        return_value={
-            "deployments": {"my-dep": {"url": "https://x.com", "api_key": "key123"}}
-        },
+        return_value={"deployments": {"my-dep": {"url": "https://x.com"}}},
     )
     def test_valid_entry(self, mock_load_store):
-        result = load_binding("my-dep")
-        assert result == ("https://x.com", "key123")
+        assert load_binding("my-dep") == "https://x.com"
 
     @patch(
         "agilerl.arena.inference.cache._load_store",
-        return_value={"deployments": {"my-dep": {"url": 123, "api_key": "key"}}},
+        return_value={"deployments": {"my-dep": {"url": 123}}},
     )
     def test_url_not_string(self, mock_load_store):
         assert load_binding("my-dep") is None
 
     @patch(
         "agilerl.arena.inference.cache._load_store",
-        return_value={"deployments": {"my-dep": {"url": "http://x", "api_key": None}}},
-    )
-    def test_api_key_not_string(self, mock_load_store):
-        assert load_binding("my-dep") is None
-
-    @patch(
-        "agilerl.arena.inference.cache._load_store",
-        return_value={"deployments": {"my-dep": {"url": "", "api_key": "key"}}},
+        return_value={"deployments": {"my-dep": {"url": ""}}},
     )
     def test_empty_url(self, mock_load_store):
         assert load_binding("my-dep") is None
 
     @patch(
         "agilerl.arena.inference.cache._load_store",
-        return_value={"deployments": {"my-dep": {"url": "http://x", "api_key": "  "}}},
-    )
-    def test_whitespace_only_api_key(self, mock_load_store):
-        assert load_binding("my-dep") is None
-
-    @patch(
-        "agilerl.arena.inference.cache._load_store",
-        return_value={
-            "deployments": {"my-dep": {"url": "  http://x  ", "api_key": " key "}}
-        },
+        return_value={"deployments": {"my-dep": {"url": "  http://x  "}}},
     )
     def test_strips_whitespace(self, mock_load_store):
-        result = load_binding("my-dep")
-        assert result == ("http://x", "key")
+        assert load_binding("my-dep") == "http://x"
 
-    @patch(
-        "agilerl.arena.inference.cache._load_store",
-        return_value={"deployments": {"my-dep": {"url": "http://x"}}},
-    )
-    def test_missing_api_key_field(self, mock_load_store):
-        assert load_binding("my-dep") is None
+    @pytest.mark.parametrize("stale_key", ["key123", None, ""])
+    def test_entry_carrying_an_api_key_is_stale(self, stale_key):
+        store = {"deployments": {"my-dep": {"url": "http://x", "api_key": stale_key}}}
+        with patch("agilerl.arena.inference.cache._load_store", return_value=store):
+            assert load_binding("my-dep") is None
 
 
 class TestSaveBinding:
@@ -786,28 +1103,20 @@ class TestSaveBinding:
         return_value={},
     )
     def test_creates_new_section(self, mock_load, mock_write):
-        save_binding("dep1", "http://url", "key1")
+        save_binding("dep1", "http://url")
         written = mock_write.call_args[0][0]
-        assert written["deployments"]["dep1"] == {
-            "url": "http://url",
-            "api_key": "key1",
-        }
+        assert written["deployments"]["dep1"] == {"url": "http://url"}
 
     @patch("agilerl.arena.inference.cache._write_store")
     @patch(
         "agilerl.arena.inference.cache._load_store",
-        return_value={
-            "deployments": {"existing": {"url": "http://old", "api_key": "old_key"}}
-        },
+        return_value={"deployments": {"existing": {"url": "http://old"}}},
     )
     def test_merges_with_existing(self, mock_load, mock_write):
-        save_binding("new-dep", "http://new", "new_key")
+        save_binding("new-dep", "http://new")
         written = mock_write.call_args[0][0]
         assert "existing" in written["deployments"]
-        assert written["deployments"]["new-dep"] == {
-            "url": "http://new",
-            "api_key": "new_key",
-        }
+        assert written["deployments"]["new-dep"] == {"url": "http://new"}
 
     @patch("agilerl.arena.inference.cache._write_store")
     @patch(
@@ -815,7 +1124,7 @@ class TestSaveBinding:
         return_value={"deployments": "corrupt"},
     )
     def test_replaces_non_dict_section(self, mock_load, mock_write):
-        save_binding("dep1", "http://url", "key1")
+        save_binding("dep1", "http://url")
         written = mock_write.call_args[0][0]
         assert isinstance(written["deployments"], dict)
         assert "dep1" in written["deployments"]
@@ -826,12 +1135,25 @@ class TestSaveBinding:
         return_value={},
     )
     def test_strips_whitespace(self, mock_load, mock_write):
-        save_binding("  dep1  ", "  http://url  ", "  key1  ")
+        save_binding("  dep1  ", "  http://url  ")
         written = mock_write.call_args[0][0]
         assert "dep1" in written["deployments"]
-        entry = written["deployments"]["dep1"]
-        assert entry["url"] == "http://url"
-        assert entry["api_key"] == "key1"
+        assert written["deployments"]["dep1"] == {"url": "http://url"}
+
+    @patch("agilerl.arena.inference.cache._write_store")
+    @patch(
+        "agilerl.arena.inference.cache._load_store",
+        return_value={
+            "deployments": {"untouched": {"url": "http://o", "api_key": "stale"}}
+        },
+    )
+    def test_scrubs_credentials_from_entries_it_is_not_writing(
+        self, mock_load, mock_write
+    ):
+        save_binding("dep1", "http://new")
+        written = mock_write.call_args[0][0]
+        assert written["deployments"]["untouched"] == {"url": "http://o"}
+        assert "stale" not in json.dumps(written)
 
 
 class TestAgentHttpHelpers:
@@ -973,8 +1295,34 @@ class TestInferenceCacheOnDisk:
         monkeypatch.setattr(
             "agilerl.arena.inference.cache.INFERENCE_FILE", inference_file
         )
-        save_binding("dep-a", "http://x", "key")
-        assert load_binding("dep-a") == ("http://x", "key")
+        save_binding("dep-a", "http://x")
+        assert load_binding("dep-a") == "http://x"
+        assert "api_key" not in inference_file.read_text(encoding="utf-8")
+
+    def test_stale_entry_is_rewritten_without_the_credential(
+        self, monkeypatch, tmp_path
+    ):
+        inference_file = tmp_path / ".arena" / "inference.json"
+        inference_file.parent.mkdir(parents=True, exist_ok=True)
+        inference_file.write_text(
+            json.dumps(
+                {
+                    "deployments": {
+                        "dep-a": {"url": "http://old", "api_key": "stale-secret"}
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(
+            "agilerl.arena.inference.cache.INFERENCE_FILE", inference_file
+        )
+
+        assert load_binding("dep-a") is None
+
+        save_binding("dep-a", "http://new")
+        assert load_binding("dep-a") == "http://new"
+        assert "stale-secret" not in inference_file.read_text(encoding="utf-8")
 
 
 class TestNormalizedDeploymentName:
@@ -1028,3 +1376,165 @@ class TestActiveAgent:
             experiment_name="exp",
             project_name="proj",
         )
+
+
+class TestActiveSession:
+    """These round-trip through the tmp inference.json from ``conftest``."""
+
+    def test_round_trip(self):
+        save_active_session("my-dep", "sess-1")
+        assert load_active_session("my-dep") == "sess-1"
+
+    def test_missing_returns_none(self):
+        assert load_active_session("my-dep") is None
+
+    def test_sessions_are_per_deployment(self):
+        save_active_session("dep-a", "sess-a")
+        save_active_session("dep-b", "sess-b")
+        assert load_active_session("dep-a") == "sess-a"
+        assert load_active_session("dep-b") == "sess-b"
+
+    def test_resuming_again_replaces_the_previous_session(self):
+        save_active_session("my-dep", "sess-1")
+        save_active_session("my-dep", "sess-2")
+        assert load_active_session("my-dep") == "sess-2"
+
+    def test_names_and_ids_are_stripped(self):
+        save_active_session("  my-dep  ", "  sess-1  ")
+        assert load_active_session("my-dep") == "sess-1"
+
+    def test_clear_reports_that_it_removed_one(self):
+        save_active_session("my-dep", "sess-1")
+        assert clear_active_session("my-dep") is True
+        assert load_active_session("my-dep") is None
+
+    def test_clear_reports_nothing_to_remove(self):
+        assert clear_active_session("my-dep") is False
+
+    def test_clear_reports_nothing_when_other_deployments_have_sessions(self):
+        save_active_session("other-dep", "sess-b")
+        assert clear_active_session("my-dep") is False
+        assert load_active_session("other-dep") == "sess-b"
+
+    def test_clear_leaves_other_deployments_alone(self):
+        save_active_session("dep-a", "sess-a")
+        save_active_session("dep-b", "sess-b")
+        clear_active_session("dep-a")
+        assert load_active_session("dep-b") == "sess-b"
+
+    def test_sessions_survive_a_binding_write(self):
+        save_active_session("my-dep", "sess-1")
+        save_binding("my-dep", "http://pod")
+        assert load_active_session("my-dep") == "sess-1"
+
+    def test_a_binding_survives_resuming_a_session(self):
+        save_binding("my-dep", "http://pod")
+        save_active_session("my-dep", "sess-1")
+        assert load_binding("my-dep") == "http://pod"
+
+    @patch(
+        "agilerl.arena.inference.cache._load_store",
+        return_value={"active_sessions": "not-a-dict"},
+    )
+    def test_load_invalid_section(self, mock_load_store):
+        assert load_active_session("my-dep") is None
+
+    @patch(
+        "agilerl.arena.inference.cache._load_store",
+        return_value={"active_sessions": {"my-dep": "   "}},
+    )
+    def test_load_blank_session_id(self, mock_load_store):
+        assert load_active_session("my-dep") is None
+
+
+MINIMAL_STATUS = {"deployment_id": "560"}
+
+
+def _agent_with_status(status_body: dict) -> Agent:
+    """A real Agent, built through __init__, whose /status returns *status_body*."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/status":
+            return httpx.Response(200, json=status_body)
+        return httpx.Response(200, json={})
+
+    real = httpx.Client
+    with patch(
+        "agilerl.arena.inference.agent.httpx.Client",
+        lambda **kw: real(transport=httpx.MockTransport(handler), **kw),
+    ):
+        return Agent("http://pod", api_key="k")
+
+
+class TestStatusWithoutAgentInfo:
+    """A public /status may report only the deployment id."""
+
+    def test_metadata_parses_with_no_agent_block(self):
+        agent = _agent_with_status(MINIMAL_STATUS)
+        assert agent.metadata is not None
+        assert agent.metadata.deployment_id == "560"
+        assert agent.metadata.agent is None
+
+    def test_an_absent_agent_block_is_not_a_reported_shape(self):
+        """Absent must not read as 'every flag is False'."""
+        assert _agent_with_status(MINIMAL_STATUS).metadata.agent is None
+        reported = _agent_with_status(
+            {"deployment_id": "1", "agent": {}}
+        ).metadata.agent
+        assert reported is not None
+        assert reported.llm is False
+
+    @pytest.mark.parametrize(
+        "call",
+        [
+            lambda a: a.generate("hi"),
+            lambda a: list(a.generate_stream("hi")),
+            lambda a: a.list_sessions(),
+            lambda a: a.get_session("s1"),
+            lambda a: a.delete_session("s1"),
+            lambda a: a.predict(np.zeros(4)),
+            lambda a: a.get_action(np.zeros(8)),
+        ],
+    )
+    def test_type_guards_defer_to_the_deployment(self, call):
+        """Unknown type must not be refused locally; the route answers 400."""
+        agent = _agent_with_status(MINIMAL_STATUS)
+        agent._http = MagicMock()
+        agent._http.request.return_value = _json_response(
+            400, {"error": "wrong endpoint"}
+        )
+        agent._http.stream.return_value = _stream_response([], status_code=400)
+
+        with pytest.raises(ArenaInferenceError) as exc_info:
+            call(agent)
+        assert exc_info.value.status_code == 400
+        assert "Deployment is not" not in str(exc_info.value)
+
+    def test_get_action_falls_back_to_single_agent_non_recurrent(self):
+        """No reported shape means the common case: one agent, no hidden state."""
+        agent = _agent_with_status(MINIMAL_STATUS)
+        payload = agent._build_payload(np.zeros(4), False, None, None, None)
+
+        assert "obs" in payload
+        assert payload["batch_size"] == 1
+        assert "hidden_state" not in payload
+
+    def test_a_reported_shape_still_drives_the_payload(self):
+        agent = _agent_with_status(
+            {"deployment_id": "1", "agent": {"multi_agent": False, "recurrent": True}}
+        )
+        payload = agent._build_payload(
+            np.zeros(4), False, {"h": np.zeros(2)}, None, None
+        )
+        assert "hidden_state" in payload
+
+    def test_reported_llm_still_guards(self):
+        agent = _agent_with_status({"deployment_id": "1", "agent": {"llm": False}})
+        with pytest.raises(ArenaInferenceError, match="not an LLM"):
+            agent.generate("hi")
+
+    def test_metadata_not_loaded_still_raises(self):
+        agent = _agent_with_status(MINIMAL_STATUS)
+        agent.metadata = None
+        with pytest.raises(ArenaInferenceError, match="Metadata not loaded"):
+            agent.generate("hi")
