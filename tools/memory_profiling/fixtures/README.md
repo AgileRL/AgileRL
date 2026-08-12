@@ -1,6 +1,6 @@
 # Calibration fixtures
 
-One JSON per curated model, produced by `python -m agilerl.memory.profiling.sweep`
+One JSON per curated model, produced by `python -m tools.memory_profiling.sweep`
 on a reference device. A model is curated exactly when its profile exists here —
 `agilerl.memory.curated_models()` is just a listing of this directory.
 

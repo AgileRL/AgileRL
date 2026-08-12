@@ -1,18 +1,45 @@
 # GPU memory estimation for LLM RL
 
 A first-principles model of peak GPU memory occupancy for the LLM RL stack,
-built as a closed-form function calibrated per curated model:
+as one closed-form function:
 
 ```
 peak(model_spec, device_spec, knobs) -> {component: bytes}   # per phase
 ```
 
-One calculation core, two surfaces: the Arena sizing widget (two live stacked
-bars) and the CLI preflight (`python -m agilerl.memory.preflight`). The core
-(`specs.py`, `formulas.py`, `estimator.py`, `calibration.py`, `advice.py`) is
-pure python with no torch dependency, so it ports line-for-line to a browser
-runtime; per-model calibration ships as one self-contained JSON under
-`fixtures/`.
+Everything is derived from three inputs: the checkpoint's own `config.json`
+geometry, the run's knobs, and a small table of measured per-device constants
+(`MEASURED_CUDA_CONTEXT_BYTES` in `specs.py`,
+`ENGINE_PROCESS_OVERHEAD_BYTES` in `formulas.py`). **There is no per-model
+profiling step and no fitted correction** — a new model needs nothing but its
+config.
+
+Five modules, no torch dependency, so the same calculation runs in the CLI,
+in a backend service, and client-side in a browser:
+
+| module | role |
+|---|---|
+| `specs.py` | parse `config.json` -> geometry; knob and device schemas |
+| `formulas.py` | the arithmetic (parameter counts, KV, activations, tiles) |
+| `estimator.py` | assemble the two phase bars |
+| `advice.py` | rank the cheapest knob changes when a bar is over budget |
+| `preflight.py` | CLI entry point (`python -m agilerl.memory.preflight`) |
+
+### Why there is no calibration layer
+
+There was one, fitted per (model, device) against 406 measurements, and it was
+removed. It bought about a point of mean training error on models already
+measured (2.66% against 3.69%) and **made things worse on unseen ones**:
+leave-one-model-out put the pooled coefficients at 6.8–9.2% against 4.8% for
+the bare formulas. For a platform that must size arbitrary checkpoints, that
+is a liability, not an asset. Accuracy since then has come from finding
+missing physical terms, not from fitting.
+
+The measurement rig that found those terms lives in `tools/memory_profiling`,
+outside the shipped package. It is how the model was built and how it is
+guarded against drift (`python -m tools.memory_profiling.validate` replays all
+406 stored measurements through the current core, no GPU), but nothing a
+caller imports.
 
 ## Why two independent bars
 
@@ -97,8 +124,8 @@ case for it rests on Hopper-class throughput and nothing measured here.
 | LoRA adapters | `rank`, target scope, x2 with the reference adapter, x3 for PPO | **full FT does not exist** — the framework trains adapters only |
 | Gradients + optimizer state | trainable (adapter) params only | plain `torch.optim.AdamW`; DeepSpeed-config optimizer is the only alternative. LoRA-only makes this a rounding error next to the base — the opposite of the classic 16-bytes/param intuition |
 | Activations | `max(grad pass, no-grad logprob pass)` | grad pass: checkpoint boundaries (`rows x S x H x L`) + one block's recompute + the `(rows, S, H)` hidden the fused-logprob autograd saves. No-grad pass: actor+reference(+critic) rows fused into one wider forward (`_fused_forward_no_grad`), micro-batched by the same per-GPU cap |
-| Logit workspace | `2 x chunk_rows x V x 4` | the fused chunked path (`llm_ops/fused_logprobs.py`) never materialises `B x S x V`; auto-tune caps the tile at 256 MiB |
-| Overhead | intercept | CUDA context, held rollout tensors (MB-scale), allocator slack; absorbed by the calibration intercept |
+| Logit workspace | `chunk_rows x V x (act_bytes + 4)` | the fused chunked path (`llm_ops/fused_logprobs.py`) never materialises `B x S x V`. Two tiles are live under autograd — the matmul output and the fp32 cast the log-softmax makes — measured at 255.6 + 127.8 MiB against a 441-row chunk and a 151936 vocab. The no-grad pass builds no graph, so only the fp32 tile stands |
+| Overhead | measured per-device constant | CUDA context (A100 501 MiB, L4 226 MiB — a 2x spread, so one constant would bias whole fleets), held rollout tensors (MB-scale), allocator slack |
 
 What is *not* a training memory knob, and worth teaching in the UI:
 
@@ -133,59 +160,34 @@ Outside the engine budget the device also carries the CUDA context and, when
 colocated, the trainer residual (optimizer state stays on-device while the
 base sits in host RAM).
 
-## Calibration: function + constants, not a lookup tensor
+## Validation, not calibration
 
-Tabulating is infeasible (six knobs x four levels is 4096 runs per model and
-sequence length is continuous) and unnecessary — the analytic form carries
-the shape, so profiling only pins constants:
+Tabulating memory is infeasible (six knobs x four levels is 4096 runs per
+model, and sequence length is continuous) and unnecessary: the analytic form
+carries the shape. It once also carried fitted per-model constants; see "Why
+there is no calibration layer" above for why they were removed.
 
-```
-predicted = analytic + intercept + sum(slope_i x basis_i(knobs))
-```
+What remains is a validation corpus: 406 measurements over 8 models
+(dense, MoE, multimodal MoE) and 2 devices, each sweeping the same 16 corners
+of `seq_len x micro_batch x group_size x lora_rank` plus 5 interior points,
+with completion length pinned so runs are byte-reproducible.
 
-with named, interpretable basis terms (`grad_tokens`, `nograd_tokens`,
-`batched_tokens`, `kv_tokens`, `seq_len`). ~16 corner points fit the
-residual; 3 interior points are held out to validate *interpolation across
-the knob space* (the generalisation question is not "unseen models" — every
-curated model is profiled — but "unseen knob combinations").
+    python -m tools.memory_profiling.validate
 
-Calibration is per (model, device): kernel selection and workspace sizes
-differ across GPU architectures. A profile measured on one device applied to
-another is possible but should be surfaced as lower confidence.
-
-## Profiling protocol (`profiling/`)
-
-- **NVML polling is mandatory for the generation phase.**
-  `torch.cuda.max_memory_allocated` only sees the torch caching allocator;
-  colocated vLLM allocates weights and KV through CuMem (the sleep/wake
-  mechanism), which bypasses torch entirely. `NvmlPeakSampler` polls
-  device-level used-bytes on a background thread; torch stats are recorded
-  for the training phase as a cross-check.
-- Each sweep point runs the real path — `GRPO.get_action` (colocated vLLM,
-  sleep mode) then `GRPO.learn` — with synthetic fixed-length prompts;
-  content is irrelevant to memory, shape is everything.
-- Realised weight bytes are measured per variant at load by summing
-  parameter/buffer storages (nominal bits-per-weight lies: scales, held-out
-  layers, and fp32 upcasts all cut into the saving).
-- Because the memory optimizations (chunked logprobs, gradient
-  checkpointing, FlashAttention) are always on, the sweep has no
-  optimization on/off axis.
-- Constants drift with framework changes (anything touching the fused
-  kernels, checkpointing, or the vLLM wiring moves them). Two defences:
-  fixtures keep their raw points so `python -m agilerl.memory.profiling.refit`
-  re-derives the constants against the current core with no GPU, and
-  `tests/test_memory/test_fixtures.py` replays every stored point through the
-  estimator in CI, failing if any drifts outside the band.
+replays all of them through the current core on CPU. Constants drift with
+framework changes — anything touching the fused kernels, checkpointing or the
+vLLM wiring moves them — and this is the only thing between a formula edit and
+silent wrongness, since the estimator keeps returning plausible numbers either
+way. `tools/memory_profiling/test_fixtures.py` runs it in CI.
 
 ## Porting notes
 
-- Component `key` strings and the `ModelProfile` JSON schema are the
-  contract with the widget; change them only with a `schema_version` bump.
+- Component `key` strings are the contract with the widget and the
+  platform backend; change them only with a `schema_version` bump.
 - `estimate_run(...).model_dump(by_alias=True)` is exactly the widget
   payload; `advise()` is the "you are N GiB over, cheapest fixes" list,
   computed by re-running the estimator under candidate knob mutations so it
   can never disagree with the bars.
-- Fitting (`profiling/sweep.py`) needs numpy; applying a fit does not.
 
 ## Measuring memory under vLLM is a minefield — read this before touching the harness
 
@@ -285,7 +287,7 @@ claim.
 The sweep compares one predicted peak against one measured peak, so it
 validates sums, not splits — the bars could each be wrong and cancel. An
 allocator snapshot (`--snapshot`, then
-`python -m agilerl.memory.profiling.snapshot`) attributes the *peak instant*
+`python -m tools.memory_profiling.snapshot`) attributes the *peak instant*
 per call site. On Qwen2.5-0.5B at seq=4096, micro-batch 8, group 16:
 
 | component | predicted | observed |

@@ -15,7 +15,6 @@ from collections.abc import Callable
 
 from pydantic import BaseModel, ConfigDict
 
-from agilerl.memory.calibration import ModelProfile
 from agilerl.memory.estimator import PhaseName, estimate_run
 from agilerl.memory.specs import GiB, RunConfig
 
@@ -187,7 +186,6 @@ def _generation_candidates(
 
 def advise(
     config: RunConfig,
-    profile: ModelProfile | None = None,
     phase: PhaseName | None = None,
     top_n: int | None = 5,
 ) -> tuple[Advice, ...]:
@@ -195,7 +193,7 @@ def advise(
     whichever phases are over budget when ``phase`` is None; falls back to
     both phases when everything fits).
     """
-    baseline = estimate_run(config, profile)
+    baseline = estimate_run(config)
     phases: list[PhaseName]
     if phase is not None:
         phases = [phase]
@@ -217,7 +215,7 @@ def advise(
         )
         before = getattr(baseline, target).total_bytes
         for action, apply in candidates:
-            after_estimate = estimate_run(apply(config), profile)
+            after_estimate = estimate_run(apply(config))
             saved = before - getattr(after_estimate, target).total_bytes
             if saved > 0:
                 results.append(Advice(phase=target, action=action, saves_bytes=saved))

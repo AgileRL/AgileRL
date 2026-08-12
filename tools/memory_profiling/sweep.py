@@ -14,7 +14,7 @@ touches CUDA.
 
 Usage::
 
-    python -m agilerl.memory.profiling.sweep --model Qwen/Qwen2.5-0.5B-Instruct \\
+    python -m tools.memory_profiling.sweep --model Qwen/Qwen2.5-0.5B-Instruct \\
         --device-name "NVIDIA L4" --output-dir agilerl/memory/fixtures
 """
 
@@ -32,7 +32,9 @@ from dataclasses import replace
 from pathlib import Path
 from typing import cast
 
-from agilerl.memory.calibration import (
+from agilerl.memory.estimator import estimate_generation, estimate_training
+from agilerl.memory.specs import DeviceSpec, ModelSpec, QuantizationMethod
+from tools.memory_profiling.calibration import (
     FIXTURES_DIR,
     DeviceFingerprint,
     MeasuredPoint,
@@ -46,10 +48,8 @@ from agilerl.memory.calibration import (
     save_profile,
     training_basis,
 )
-from agilerl.memory.estimator import estimate_generation, estimate_training
-from agilerl.memory.profiling.harness import SweepPoint, variant_name
-from agilerl.memory.profiling.nvml import wait_for_idle
-from agilerl.memory.specs import DeviceSpec, ModelSpec, QuantizationMethod
+from tools.memory_profiling.harness import SweepPoint, variant_name
+from tools.memory_profiling.nvml import wait_for_idle
 
 #: Corner levels per knob. Corners pin the fit; centre points validate
 #: interpolation. Sequence length is the only effectively-continuous axis, so
@@ -409,7 +409,7 @@ def _measure_point_subprocess(
         lambda out: [
             sys.executable,
             "-m",
-            "agilerl.memory.profiling.harness",
+            "tools.memory_profiling.harness",
             "--model",
             model_name,
             "--out",
@@ -437,7 +437,7 @@ def _measure_weights_subprocess(
         lambda out: [
             sys.executable,
             "-m",
-            "agilerl.memory.profiling.harness",
+            "tools.memory_profiling.harness",
             "--model",
             model_name,
             "--out",
@@ -490,7 +490,7 @@ def run_sweep(
     in this knob left generation byte-identical but moved training peaks by
     -236 to +186 MiB with no consistent sign, and made calibrated training
     error worse (3.5% -> 12.9% mean). That control ran before
-    :func:`~agilerl.memory.profiling.harness._warm_rollout_update` replayed
+    :func:`~tools.memory_profiling.harness._warm_rollout_update` replayed
     the rollout, so it indicts the old warmup rather than the idea; the
     corrected version has not been measured. Whatever the outcome, a mixed
     corpus is worse than either choice, so change this for every profile at
@@ -646,7 +646,7 @@ def run_sweep(
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        prog="agilerl.memory.profiling.sweep", description=__doc__
+        prog="tools.memory_profiling.sweep", description=__doc__
     )
     parser.add_argument("--model", required=True)
     parser.add_argument("--device-name", required=True)

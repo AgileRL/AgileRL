@@ -9,7 +9,7 @@ constant bundle per curated model that corrects it:
 
 The basis terms are named, interpretable token counts so a fitted slope reads
 as "extra bytes per gradient token on this (model, device)". Fitting happens
-offline in :mod:`agilerl.memory.profiling`; this module only defines the
+offline in :mod:`tools.memory_profiling`; this module only defines the
 schema, evaluates basis terms, and applies a stored fit — all pure python so
 it ports to the widget runtime unchanged.
 """

@@ -3,25 +3,22 @@
 """Fixture regression: checked-in profiles must still predict their own
 measurements.
 
-This is the CPU-side drift check. The calibration constants are fitted
-against a specific analytic core, so any change to the formulas (a component
-added, a term corrected) invalidates them silently — the estimator keeps
-returning numbers, they are just wrong. Replaying every stored sweep point
-through the current core catches that in CI without a GPU.
+This is the CPU-side drift check. The estimator has no fitted correction, so
+a formula edit that breaks accuracy still returns plausible numbers. Replaying
+every stored sweep point through the current core catches that in CI without
+a GPU.
 
-When this fails because the formulas legitimately improved, re-fit rather
-than loosen the band::
+When this fails, fix the formula rather than loosen the band::
 
-    python -m agilerl.memory.profiling.refit
+    python -m tools.memory_profiling.validate
 """
 
 import pytest
 
-from agilerl.memory.calibration import curated_profiles, load_profile
-from agilerl.memory.profiling.refit import (
-    ACCURACY_BAND,
-    MEAN_ACCURACY_BAND,
-    WORST_POINT_BAND,
+from tools.memory_profiling.calibration import curated_profiles, load_profile
+from tools.memory_profiling.validate import (
+    MEAN_BAND,
+    WORST_BAND,
     prediction_errors,
 )
 
@@ -42,13 +39,13 @@ def test_fixture_predicts_its_own_measurements(model_id, device_name):
         mean = sum(phase_errors) / len(phase_errors)
         drifted = (
             f"{model_id} {phase}: the analytic core changed under the fitted "
-            f"constants. Re-fit with `python -m agilerl.memory.profiling.refit`."
+            f"constants. Re-fit with `python -m tools.memory_profiling.refit`."
         )
-        assert mean <= MEAN_ACCURACY_BAND, (
-            f"mean error {mean:.1%} exceeds {MEAN_ACCURACY_BAND:.0%}. {drifted}"
+        assert mean <= MEAN_BAND, (
+            f"mean error {mean:.1%} exceeds {MEAN_BAND:.0%}. {drifted}"
         )
-        assert worst <= WORST_POINT_BAND, (
-            f"worst point {worst:.1%} exceeds {WORST_POINT_BAND:.0%}. {drifted}"
+        assert worst <= WORST_BAND, (
+            f"worst point {worst:.1%} exceeds {WORST_BAND:.0%}. {drifted}"
         )
 
 
@@ -75,7 +72,7 @@ def test_fixture_holdout_within_band(model_id, device_name):
     for phase in ("training", "generation"):
         error = getattr(profile, phase).holdout_max_rel_error
         if error is not None:
-            assert error <= ACCURACY_BAND, (
+            assert error <= MEAN_BAND, (
                 f"{model_id} {phase}: holdout error {error:.1%} exceeds the "
-                f"{ACCURACY_BAND:.0%} band."
+                f"{MEAN_BAND:.0%} band."
             )

@@ -18,11 +18,6 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from agilerl.memory import formulas
-from agilerl.memory.calibration import (
-    ModelProfile,
-    generation_basis,
-    training_basis,
-)
 from agilerl.memory.specs import (
     DTYPE_BYTES,
     DeviceSpec,
@@ -34,7 +29,6 @@ from agilerl.memory.specs import (
 )
 
 PhaseName = Literal["training", "generation"]
-CalibrationSource = Literal["same_device", "other_device", "none"]
 
 
 class MemoryComponent(BaseModel):
@@ -59,16 +53,7 @@ class PhaseBreakdown(BaseModel):
     components: tuple[MemoryComponent, ...]
     device_total_bytes: int
     device_usable_bytes: int
-    #: Where the fitted constants came from. ``same_device`` is the accuracy
-    #: claim; ``other_device`` means they were measured on different hardware
-    #: and carry a wider, less predictable band; ``none`` is the bare
-    #: analytic core.
-    calibration_source: CalibrationSource = "none"
     warnings: tuple[str, ...] = ()
-
-    @property
-    def calibrated(self) -> bool:
-        return self.calibration_source == "same_device"
 
     @property
     def total_bytes(self) -> int:
@@ -112,43 +97,9 @@ def _component(
     )
 
 
-def _apply_calibration(
-    profile: ModelProfile | None,
-    phase: PhaseName,
-    basis: dict[str, float],
-    device: DeviceSpec,
-    warnings: list[str],
-) -> tuple[float, CalibrationSource]:
-    """Fitted correction and its provenance, appending the matching warning."""
-    if profile is None or getattr(profile, phase).n_points == 0:
-        warnings.append(
-            "Uncalibrated estimate: no profiled constants for this "
-            "(model, device); expect a wider error band."
-        )
-        return 0.0, "none"
-    correction = getattr(profile, phase).fit.correction_bytes(basis)
-    if profile.measured_on(device):
-        return correction, "same_device"
-    warnings.append(
-        f"Constants were measured on "
-        f"{profile.device.name if profile.device else 'another device'}, "
-        f"not {device.name or 'this device'}: expect a wider band than a "
-        "same-device profile."
-    )
-    return correction, "other_device"
-
-
-def _engine_reservation_bytes(colocated: bool, profile: ModelProfile | None) -> float:
-    """What the sleeping engine keeps resident during colocated training:
-    the profile's measured residual when available, else the analytic
-    constant.
-    """
-    if not colocated:
-        return 0.0
-    measured = profile.sleeping_engine_residual_bytes if profile else None
-    return float(
-        measured if measured is not None else formulas.ENGINE_PROCESS_OVERHEAD_BYTES
-    )
+def _engine_reservation_bytes(colocated: bool) -> float:
+    """What the sleeping engine keeps resident during colocated training."""
+    return float(formulas.ENGINE_PROCESS_OVERHEAD_BYTES) if colocated else 0.0
 
 
 def _engine_terms(
@@ -197,7 +148,6 @@ def estimate_training(
     knobs: TrainingKnobs,
     trainer_variant: str = "base",
     colocated: bool = False,
-    profile: ModelProfile | None = None,
 ) -> PhaseBreakdown:
     """Peak training-phase memory breakdown on the training device.
 
@@ -368,10 +318,7 @@ def estimate_training(
     # advantages — (rows, S) fp32-ish, megabytes at most.
     rollout = 6 * knobs.batch_size * knobs.group_size * s * 4
 
-    correction, source = _apply_calibration(
-        profile, "training", training_basis(model, knobs), device, warnings
-    )
-    engine_residual = _engine_reservation_bytes(colocated, profile)
+    engine_residual = _engine_reservation_bytes(colocated)
 
     components = (
         _component(
@@ -453,11 +400,10 @@ def estimate_training(
         _component(
             "overhead",
             "Overhead & calibration",
-            device.context_bytes + rollout + correction,
+            device.context_bytes + rollout,
             detail={
                 "cuda_context": device.context_bytes,
                 "rollout_tensors": rollout,
-                "calibration_correction": correction,
             },
         ),
     )
@@ -467,7 +413,6 @@ def estimate_training(
         components=components,
         device_total_bytes=device.total_bytes,
         device_usable_bytes=device.usable_bytes,
-        calibration_source=source,
         warnings=tuple(warnings),
     )
 
@@ -478,7 +423,6 @@ def estimate_generation(
     knobs: GenerationKnobs,
     train_knobs: TrainingKnobs | None = None,
     colocated: bool = False,
-    profile: ModelProfile | None = None,
 ) -> PhaseBreakdown:
     """Peak generation-phase memory breakdown on the inference device.
 
@@ -558,10 +502,6 @@ def estimate_generation(
             * formulas.optimizer_bytes_per_trainable_param(train_knobs.distributed)
         )
 
-    correction, source = _apply_calibration(
-        profile, "generation", generation_basis(model, knobs), device, warnings
-    )
-
     components = (
         _component(
             "weights",
@@ -619,11 +559,10 @@ def estimate_generation(
         _component(
             "overhead",
             "Overhead & calibration",
-            device.context_bytes + formulas.ENGINE_PROCESS_OVERHEAD_BYTES + correction,
+            device.context_bytes + formulas.ENGINE_PROCESS_OVERHEAD_BYTES,
             detail={
                 "cuda_context": device.context_bytes,
                 "engine_process_overhead": formulas.ENGINE_PROCESS_OVERHEAD_BYTES,
-                "calibration_correction": correction,
             },
         ),
     )
@@ -633,7 +572,6 @@ def estimate_generation(
         components=components,
         device_total_bytes=device.total_bytes,
         device_usable_bytes=device.usable_bytes,
-        calibration_source=source,
         warnings=tuple(warnings),
     )
 
@@ -662,18 +600,15 @@ def recommend_engine_budget(
     return sum(terms.values()) / device.total_bytes, terms
 
 
-def estimate_run(config: RunConfig, profile: ModelProfile | None = None) -> RunEstimate:
+def estimate_run(config: RunConfig) -> RunEstimate:
     """Estimate both phases for a run configuration."""
     model = config.model
-    if profile is not None:
-        model = profile.apply_realised_weights(model)
     training = estimate_training(
         model,
         config.train_device,
         config.training,
         trainer_variant=config.trainer_weight_variant,
         colocated=config.colocated,
-        profile=profile,
     )
     generation = estimate_generation(
         model,
@@ -681,6 +616,5 @@ def estimate_run(config: RunConfig, profile: ModelProfile | None = None) -> RunE
         config.generation,
         train_knobs=config.training,
         colocated=config.colocated,
-        profile=profile,
     )
     return RunEstimate(training=training, generation=generation)

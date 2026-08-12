@@ -13,7 +13,7 @@ one rollout and one learn, and records per-phase peaks:
 Requires a CUDA device with the ``llm`` extra installed; import stays lazy so
 the sweep planner and fitter remain importable everywhere.
 
-Runs as a module (``python -m agilerl.memory.profiling.harness``) so the sweep
+Runs as a module (``python -m tools.memory_profiling.harness``) so the sweep
 can spawn one fresh process per point: vLLM's CuMem allocator (which backs
 sleep mode) is process-global and permits only one engine per process, so a
 multi-point sweep must isolate each point in its own process.
@@ -29,7 +29,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeAlias, cast
 
-from agilerl.memory.calibration import MeasuredPoint
 from agilerl.memory.specs import (
     Algorithm,
     AttnImplementation,
@@ -38,6 +37,7 @@ from agilerl.memory.specs import (
     TrainerQuantization,
     TrainingKnobs,
 )
+from tools.memory_profiling.calibration import MeasuredPoint
 
 if TYPE_CHECKING:
     import torch
@@ -226,8 +226,8 @@ def measure_point(
     from peft import LoraConfig
     from transformers import AutoTokenizer
 
-    from agilerl.memory.profiling.nvml import NvmlPeakSampler
     from agilerl.utils.algo_utils import VLLMConfig
+    from tools.memory_profiling.nvml import NvmlPeakSampler
 
     if point.algorithm == "ppo":
         from agilerl.algorithms.ppo_llm import PPO as Algorithm
@@ -578,9 +578,9 @@ def measure_realised_weight_bytes(
 def main(argv: list[str] | None = None) -> int:
     """Measure one point (and optionally its realised weight bytes) in this
     process, writing the result JSON to ``--out``. Invoked one process per
-    point by :func:`agilerl.memory.profiling.sweep.run_sweep`.
+    point by :func:`tools.memory_profiling.sweep.run_sweep`.
     """
-    parser = argparse.ArgumentParser(prog="agilerl.memory.profiling.harness")
+    parser = argparse.ArgumentParser(prog="tools.memory_profiling.harness")
     parser.add_argument("--model", required=True)
     parser.add_argument("--out", required=True)
     parser.add_argument(

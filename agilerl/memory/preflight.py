@@ -4,8 +4,9 @@ r"""CLI preflight: size an LLM RL run before launching it.
 
 Prints the two independent phase bars (training and generation), flags
 anything over budget, and ranks the cheapest fixes. Runs entirely on the
-closed-form core — no GPU, no model download — using either a curated
-model's checked-in profile or a local ``config.json``.
+closed-form core: no GPU, no profiling, no model download. The geometry
+comes from the checkpoint's own ``config.json``, fetched by id or read from
+disk.
 
 Usage::
 
@@ -21,7 +22,6 @@ import sys
 from pathlib import Path
 
 from agilerl.memory.advice import advise
-from agilerl.memory.calibration import ModelProfile, curated_models, load_profile
 from agilerl.memory.estimator import PhaseBreakdown, estimate_run
 from agilerl.memory.specs import (
     DeviceSpec,
@@ -36,31 +36,26 @@ from agilerl.memory.specs import (
 
 def _load_model(
     args: argparse.Namespace,
-) -> tuple[ModelSpec, ModelProfile | None]:
-    """Resolve the model spec and (optionally) its calibration profile."""
+) -> ModelSpec:
+    """Resolve the model spec from a local config.json or a HF model id."""
     if args.config is not None:
         config = json.loads(Path(args.config).read_text())
         arch = ModelArch.from_hf_config(config)
         model_id = args.model or Path(args.config).parent.name or "local-model"
-        return ModelSpec(model_id=model_id, arch=arch), None
-
-    profile = load_profile(args.model)
-    if profile is not None and profile.model_spec is not None:
-        return profile.apply_realised_weights(profile.model_spec), profile
+        return ModelSpec(model_id=model_id, arch=arch)
 
     try:
         from transformers import AutoConfig
     except ImportError:
-        curated = curated_models()
         msg = (
-            f"Model {args.model!r} is not on the curated list "
-            f"({curated or 'empty'}) and transformers is not installed to "
-            "fetch its config. Pass --config path/to/config.json instead."
+            "transformers is not installed, so the config for "
+            f"{args.model!r} cannot be fetched. Pass "
+            "--config path/to/config.json instead."
         )
         raise SystemExit(msg) from None
     hf_config = AutoConfig.from_pretrained(args.model)
     arch = ModelArch.from_hf_config(hf_config.to_dict())
-    return ModelSpec(model_id=args.model, arch=arch), profile
+    return ModelSpec(model_id=args.model, arch=arch)
 
 
 def _render_phase(breakdown: PhaseBreakdown) -> str:
@@ -95,14 +90,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="agilerl.memory.preflight", description=__doc__
     )
-    parser.add_argument("--model", help="HF model id (curated ids need no download)")
+    parser.add_argument("--model", help="HF model id (its config.json is fetched)")
     parser.add_argument(
         "--config", help="Path to a local HF config.json (offline mode)"
-    )
-    parser.add_argument(
-        "--list-models",
-        action="store_true",
-        help="List curated (profiled) models and exit",
     )
     parser.add_argument(
         "--device-gb",
@@ -142,15 +132,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    if args.list_models:
-        for model_id in curated_models():
-            print(model_id)
-        return 0
     if not args.model and not args.config:
         print("Pass --model or --config (see --help).", file=sys.stderr)
         return 2
 
-    model, profile = _load_model(args)
+    model = _load_model(args)
     train_device = DeviceSpec(total_bytes=int(args.device_gb * GiB))
     gen_device = (
         DeviceSpec(total_bytes=int(args.gen_device_gb * GiB))
@@ -184,7 +170,7 @@ def main(argv: list[str] | None = None) -> int:
         trainer_weight_variant="base",
     )
 
-    estimate = estimate_run(config, profile)
+    estimate = estimate_run(config)
     if args.json:
         print(estimate.model_dump_json(by_alias=True, indent=2))
         return 0 if estimate.fits else 1
@@ -196,7 +182,7 @@ def main(argv: list[str] | None = None) -> int:
     print(_render_phase(estimate.generation))
     if not estimate.fits:
         print("\nCheapest fixes:")
-        for suggestion in advise(config, profile):
+        for suggestion in advise(config):
             print(f"  - [{suggestion.phase}] {suggestion}")
     return 0 if estimate.fits else 1
 

@@ -10,8 +10,8 @@ observed can be compared model by model.
 
 Usage::
 
-    python -m agilerl.memory.report
-    python -m agilerl.memory.report --seq-len 4096 --micro-batch 8
+    python -m tools.memory_profiling.report
+    python -m tools.memory_profiling.report --seq-len 4096 --micro-batch 8
 """
 
 from __future__ import annotations
@@ -21,18 +21,18 @@ import sys
 from dataclasses import replace
 
 from agilerl.memory import formulas
-from agilerl.memory.calibration import (
-    ModelProfile,
-    curated_profiles,
-    load_profile,
-)
 from agilerl.memory.estimator import (
     estimate_generation,
     estimate_training,
     recommend_engine_budget,
 )
-from agilerl.memory.profiling.harness import SweepPoint, variant_name
 from agilerl.memory.specs import GiB
+from tools.memory_profiling.calibration import (
+    ModelProfile,
+    curated_profiles,
+    load_profile,
+)
+from tools.memory_profiling.harness import SweepPoint, variant_name
 
 
 def _measured_total(
@@ -48,7 +48,9 @@ def _measured_total(
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="agilerl.memory.report", description=__doc__)
+    parser = argparse.ArgumentParser(
+        prog="tools.memory_profiling.report", description=__doc__
+    )
     parser.add_argument("--seq-len", type=int, default=1024)
     parser.add_argument("--micro-batch", type=int, default=4)
     parser.add_argument("--group-size", type=int, default=8)

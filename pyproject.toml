@@ -266,7 +266,7 @@ ignore = [
 allow-star-arg-any = true
 
 [tool.ruff.lint.per-file-ignores]
-"{agilerl,agilerl-arena/agilerl,tests,agilerl-arena/tests}/**" = [
+"{agilerl,agilerl-arena/agilerl,tests,agilerl-arena/tests,tools}/**" = [
     "D1",            # missing docstrings in public modules/classes/methods/packages
     "D205",          # 1 blank line between summary and description
     "D4",            # first line punctuation/period (conflicts with multi-line)
@@ -286,6 +286,9 @@ allow-star-arg-any = true
     "PD011",         # .values -> .to_numpy()
 ]
 "{tests,agilerl-arena/tests}/**" = [
+    "ANN",           # test signatures don't need annotations
+]
+"tools/**/test_*.py" = [
     "ANN",           # test signatures don't need annotations
 ]
 "{benchmarking,demos,tutorials}/**" = ["ALL"]

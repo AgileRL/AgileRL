@@ -5,7 +5,7 @@ globs `*.json` non-recursively, so nothing here is loaded by the estimator or
 checked by the drift test.
 
 Promote one by fixing the reason it is here, re-running
-`python -m agilerl.memory.profiling.refit`, and moving it up a directory.
+`python -m tools.memory_profiling.refit`, and moving it up a directory.
 
 ### `...@NVIDIA-A100-SXM4-40GB.nf4.json`
 
@@ -216,7 +216,7 @@ to attribute them) and ~196 MiB is non-torch. Fix both together, exactly as
 
 **Also worth doing, and it needs no GPU.** The residual fit's shape is
 re-derivable offline from stored measurements via
-`python -m agilerl.memory.profiling.refit`: drop the collinear basis term, add
+`python -m tools.memory_profiling.refit`: drop the collinear basis term, add
 a curvature term (interaction or quadratic in tokens), and put interior points
 in the fit set while keeping a genuine held-out set. Judge any change by
 leave-one-model-out, not by the fitted residual — pooled coefficients already
@@ -224,7 +224,7 @@ score worse than the raw analytic core.
 
 ### Timeline: which instant actually binds — measured 2026-08-04
 
-`python -m agilerl.memory.profiling.snapshot <pickle> --timeline` reports every
+`python -m tools.memory_profiling.snapshot <pickle> --timeline` reports every
 prominent peak and each component's largest excursion, rather than only what is
 live at the global maximum. At the worst point (Qwen2.5-0.5B / L4 / seq 512,
 mb 8, group 4, rank 64) the step reads as four phases, torch side:

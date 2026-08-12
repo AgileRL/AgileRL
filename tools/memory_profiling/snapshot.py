@@ -21,8 +21,8 @@ Two limits are structural, not incidental:
 
 Usage::
 
-    python -m agilerl.memory.profiling.harness --model <id> --snapshot t.pickle ...
-    python -m agilerl.memory.profiling.snapshot t.pickle
+    python -m tools.memory_profiling.harness --model <id> --snapshot t.pickle ...
+    python -m tools.memory_profiling.snapshot t.pickle
 """
 
 from __future__ import annotations
@@ -278,7 +278,7 @@ def timeline(
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        prog="agilerl.memory.profiling.snapshot", description=__doc__
+        prog="tools.memory_profiling.snapshot", description=__doc__
     )
     parser.add_argument("snapshot", help="Pickle written by --snapshot")
     parser.add_argument(
