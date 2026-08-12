@@ -91,8 +91,8 @@ def create_dataset_return_timesteps(dataset_id: str, env_id: str) -> int:
                     "observation": observation,
                     "action": action,
                     "reward": reward,
-                    "termination": terminated,
-                    "truncation": truncated,
+                    "terminated": terminated,
+                    "truncated": truncated,
                     "info": info,
                 },
             )

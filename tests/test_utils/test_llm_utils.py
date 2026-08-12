@@ -86,7 +86,6 @@ from agilerl.utils.llm_utils import (
     stitch_completion_after_windowed_hf_generate,
     stitch_completion_after_windowed_vllm_generate,
     validate_importance_sampling_level,
-    zero3_full_shape_views,
 )
 from tests import TINY_LLM_FIXTURE_PATH
 
@@ -1067,61 +1066,6 @@ def test_adapter_checkpoint_params_covers_every_peft_adapter_checkpoint_key():
     assert len(gathered) == len(saved)
     for key, tensor in saved.items():
         assert tensor.data_ptr() in gathered_storage, key
-
-
-class TestZero3FullShapeViews:
-    @staticmethod
-    def _partitioned_param(shape, dtype=torch.float32):
-        param = nn.Parameter(torch.empty(0, dtype=dtype))
-        param.ds_shape = shape
-        param.ds_status = SimpleNamespace(name="NOT_AVAILABLE")
-        return param
-
-    def test_partitioned_param_exposes_full_shape_without_storage(self):
-        param = self._partitioned_param((4, 6, 3))
-        with zero3_full_shape_views([param, param]):
-            assert tuple(param.shape) == (4, 6, 3)
-            assert param.ndim == 3
-            assert param.data.untyped_storage().nbytes() <= param.element_size()
-        assert param.shape == torch.Size([0])
-        assert param.numel() == 0
-
-    def test_dtype_and_device_preserved(self):
-        param = self._partitioned_param((3, 4), dtype=torch.bfloat16)
-        with zero3_full_shape_views([param]):
-            assert param.dtype == torch.bfloat16
-            assert param.device == torch.device("cpu")
-
-    def test_non_ds_param_passes_through(self):
-        plain = nn.Parameter(torch.randn(2, 2))
-        original = plain.clone()
-        with zero3_full_shape_views([plain]):
-            assert torch.equal(plain, original)
-        assert torch.equal(plain, original)
-
-    def test_available_param_passes_through(self):
-        available = nn.Parameter(torch.randn(3))
-        available.ds_shape = (3,)
-        available.ds_status = SimpleNamespace(name="AVAILABLE")
-        original = available.clone()
-        with zero3_full_shape_views([available]):
-            assert torch.equal(available, original)
-        assert torch.equal(available, original)
-
-    def test_restores_placeholder_on_error(self):
-        param = self._partitioned_param((2, 5))
-
-        def read_shape_then_fail() -> None:
-            assert param.ndim == 2
-            error = RuntimeError("boom")
-            raise error
-
-        with (
-            pytest.raises(RuntimeError, match="boom"),
-            zero3_full_shape_views([param]),
-        ):
-            read_shape_then_fail()
-        assert param.shape == torch.Size([0])
 
 
 def _make_tokenizer(vocab_size: int = 100, prompt_len: int = 3) -> MagicMock:

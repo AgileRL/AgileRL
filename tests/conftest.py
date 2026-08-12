@@ -73,9 +73,36 @@ if _xdist_worker_id:
 import numpy as np  # noqa: E402
 import pytest  # noqa: E402
 import torch  # noqa: E402
+import torch.distributed as dist  # noqa: E402
 from accelerate.state import AcceleratorState, PartialState  # noqa: E402
 from gymnasium import spaces  # noqa: E402
 from torch import nn  # noqa: E402
+
+# Env vars PartialState / Accelerator inspect when deciding whether to enter
+# a distributed backend. LLM / DeepSpeed tests can leave these set (and leave
+# ``torch.distributed`` initialised); the next bare ``Accelerator()`` then wraps
+# models in DDP even on a single-process CPU worker.
+_DIST_ENV_VARS = (
+    "WORLD_SIZE",
+    "RANK",
+    "LOCAL_RANK",
+    "MASTER_ADDR",
+    "MASTER_PORT",
+    "GROUP_RANK",
+    "LOCAL_WORLD_SIZE",
+)
+
+
+def _reset_distributed_env() -> None:
+    if dist.is_available() and dist.is_initialized():
+        dist.destroy_process_group()
+    for var in _DIST_ENV_VARS:
+        os.environ.pop(var, None)
+    # Re-pin a unique MASTER_PORT per xdist worker after clearing dist env so a
+    # later intentional distributed init does not race on torch's default port.
+    if _xdist_worker_id:
+        _worker_num = int("".join(c for c in _xdist_worker_id if c.isdigit()) or "0")
+        os.environ["MASTER_PORT"] = str(29500 + _worker_num)
 
 from agilerl.algorithms.core.registry import (  # noqa: E402
     HyperparameterConfig,
@@ -196,10 +223,21 @@ def cleanup():
     # teardown — those will continue to work and just be redundant on the next
     # test's setup. ``.clear()`` is a no-op when state is empty, so this is
     # cheap.
+    #
+    # Also tear down any leaked ``torch.distributed`` process group and clear
+    # the env vars PartialState reads. Without that, LLM/DeepSpeed tests on the
+    # same xdist worker cause the next ``Accelerator()`` to wrap models in
+    # DistributedDataParallel (AttributeError on ``.encoder`` /
+    # ``.extract_features``, KeyError ``actor`` during clone).
+    _reset_distributed_env()
     AcceleratorState._reset_state(reset_partial_state=True)
     PartialState._reset_state()
 
     yield
+
+    _reset_distributed_env()
+    AcceleratorState._reset_state(reset_partial_state=True)
+    PartialState._reset_state()
 
     # Only clear CUDA cache if CUDA was actually used
     if torch.cuda.is_available() and torch.cuda.is_initialized():

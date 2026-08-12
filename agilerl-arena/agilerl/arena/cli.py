@@ -3,10 +3,7 @@
 
 from __future__ import annotations
 
-import logging
-import uuid
-from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, TypeVar
 
@@ -14,30 +11,17 @@ import click
 
 from agilerl.arena import console
 from agilerl.arena.cli_manifest import handle_help_option
-from agilerl.arena.client import MEMORY_SCOPES, MemoryScope
 from agilerl.arena.config import CommandConfig, arena_client
 from agilerl.arena.exceptions import ArenaError
-from agilerl.arena.inference import Agent, SessionInfo
-from agilerl.arena.inference.cache import (
-    clear_active_session,
-    load_active_agent,
-    load_active_session,
-    save_active_agent,
-    save_active_session,
-)
+from agilerl.arena.inference.cache import load_active_agent, save_active_agent
 from agilerl.arena.on_prem import ArenaRootGroup, register_on_prem_manifest_group
 from agilerl.arena.output import (
     emit_csv_preview,
     emit_result,
-    emit_session_transcript,
-    select_row,
-    supports_interactive_selection,
 )
 from agilerl.arena.utils import sort_dataset_search_by_downloads
 
 ArenaError.enable_cli_mode()
-
-logger = logging.getLogger(__name__)
 
 ClickDecorated = TypeVar("ClickDecorated", bound=Callable[..., Any] | click.Command)
 
@@ -724,8 +708,12 @@ def experiment_metrics(
 
 def _redact_agent_rows_for_display(
     rows: list[dict[str, Any]],
+    *,
+    show_api_keys: bool,
 ) -> list[dict[str, Any]]:
-    """Drop any credential a deployment row still carries before it is displayed."""
+    """Drop deployment secrets unless *show_api_keys*."""
+    if show_api_keys:
+        return rows
     out: list[dict[str, Any]] = []
     for row in rows:
         copy_row = dict(row)
@@ -775,41 +763,13 @@ def _resolve_agent_target(
     return active.deployment_name, exp, proj
 
 
-@contextmanager
-def _open_agent(
-    config: CommandConfig,
-    deployment_name: str | None,
-    refresh: bool,
-    experiment_name: str | None,
-    project_name: str | None,
-) -> Iterator[tuple[str, Agent]]:
-    """Open the named deployment, or the agent set by ``arena agent run``.
-
-    Yields the resolved deployment name alongside the agent, since it is the key
-    the session cache is stored under.
-    """
-    target, experiment_name, project_name = _resolve_agent_target(
-        deployment_name, experiment_name, project_name
-    )
-    with (
-        arena_client(config) as client,
-        client.open_inference_agent(
-            target,
-            refresh=refresh,
-            experiment_name=experiment_name,
-            project_name=project_name,
-        ) as agent,
-    ):
-        yield target, agent
-
-
 def _agent_deployment_options(func: ClickDecorated) -> ClickDecorated:
     """Shared ``--refresh`` / experiment / project options for agent commands."""
     func = click.option(
         "--refresh",
         is_flag=True,
         default=False,
-        help="Refetch the deployment URL from Arena instead of using the local cache.",
+        help="Refetch deployment URL and API key from Arena instead of using the local cache.",
     )(func)
     func = click.option(
         "--experiment-name",
@@ -844,12 +804,19 @@ def agent_cli() -> None:
     default=None,
     help="Exact project name filter.",
 )
+@click.option(
+    "--show-api-keys",
+    is_flag=True,
+    default=False,
+    help="Include deployment api_key fields (default: redacted).",
+)
 @click.pass_obj
 def agent_list(
     config: CommandConfig,
     name: str | None,
     experiment_name: str | None,
     project_name: str | None,
+    show_api_keys: bool,
 ) -> None:
     """List deployed agents."""
     with arena_client(config) as client:
@@ -858,7 +825,8 @@ def agent_list(
             experiment_name=experiment_name,
             project_name=project_name,
         )
-        emit_result(_redact_agent_rows_for_display(rows))
+        display_rows = _redact_agent_rows_for_display(rows, show_api_keys=show_api_keys)
+        emit_result(display_rows)
 
 
 @agent_cli.command("deploy")
@@ -868,32 +836,15 @@ def agent_list(
     default=None,
     help="Checkpoint to deploy. Omit to deploy the best checkpoint.",
 )
-@click.option(
-    "--memory-scope",
-    "memory_scope",
-    type=click.Choice(MEMORY_SCOPES),
-    default=None,
-    help="Who an LLM deployment keeps chat sessions for. New deployments default "
-    "to 'user'. Redeploying without this flag keeps the stored scope.",
-)
 @click.pass_obj
 def agent_deploy(
     config: CommandConfig,
     experiment_name: str,
     checkpoint: str | None,
-    memory_scope: MemoryScope | None,
 ) -> None:
-    """Deploy an agent from an experiment checkpoint.
-
-    A deployment's memory scope is fixed once it exists, so ``--memory-scope``
-    only takes effect on the first deploy.
-    """
+    """Deploy an agent from an experiment checkpoint."""
     with arena_client(config) as client:
-        client.deploy_agent(
-            experiment_name=experiment_name,
-            checkpoint=checkpoint,
-            memory_scope=memory_scope,
-        )
+        client.deploy_agent(experiment_name=experiment_name, checkpoint=checkpoint)
 
 
 @agent_cli.command("run")
@@ -922,30 +873,6 @@ def agent_run(
         )
 
 
-def _session_for_prompt(
-    deployment: str,
-    session_id: str | None,
-    *,
-    new_session: bool,
-) -> str:
-    """Pick the session a prompt runs in, starting and recording one if needed.
-
-    A new conversation gets its id here rather than from the deployment, which is
-    what lets the next prompt carry on from it: a streamed reply is plain text
-    and has nowhere to hand an id back.
-    """
-    if session_id:
-        return session_id.strip()
-    if not new_session:
-        resumed = load_active_session(deployment)
-        if resumed:
-            return resumed
-    started = str(uuid.uuid4())
-    save_active_session(deployment, started)
-    logger.info("Started session %s.", started)
-    return started
-
-
 @agent_cli.command("generate")
 @click.argument("deployment_name", required=False, default=None)
 @_agent_deployment_options
@@ -953,20 +880,6 @@ def _session_for_prompt(
     "--prompt",
     required=True,
     help="Prompt text for the LLM deployment.",
-)
-@click.option(
-    "--session-id",
-    "session_id",
-    default=None,
-    help="Chat session to continue. Overrides a session set by "
-    "'arena agent sessions resume'.",
-)
-@click.option(
-    "--new-session",
-    "new_session",
-    is_flag=True,
-    default=False,
-    help="Start a new conversation and continue it in later prompts.",
 )
 @click.pass_obj
 def agent_generate(
@@ -976,224 +889,26 @@ def agent_generate(
     experiment_name: str | None,
     project_name: str | None,
     prompt: str,
-    session_id: str | None,
-    new_session: bool,
 ) -> None:
     """Stream a completion from a prompt through a deployed LLM agent.
 
-    Omit *deployment_name* to use the agent set by ``arena agent run``. Prompts
-    continue the current conversation, starting one on the first prompt, so a
-    deployment that keeps chat history remembers what you asked.
-    """
-    if session_id and new_session:
-        msg = "Pass either --session-id or --new-session, not both."
-        raise click.UsageError(msg)
-    with _open_agent(
-        config, deployment_name, refresh, experiment_name, project_name
-    ) as (deployment, agent):
-        resolved = _session_for_prompt(deployment, session_id, new_session=new_session)
-        for chunk in agent.generate_stream(prompt, session_id=resolved):
-            console.print(chunk, end="", markup=False, highlight=False, soft_wrap=True)
-        console.print()
-
-
-SESSION_COLUMNS = ["Session Id", "Created At", "Last Updated"]
-
-
-@agent_cli.group("sessions")
-def agent_sessions() -> None:
-    """Browse chat sessions held by a deployed LLM agent."""
-
-
-@agent_sessions.command("list")
-@click.argument("deployment_name", required=False, default=None)
-@_agent_deployment_options
-@click.pass_obj
-def agent_sessions_list(
-    config: CommandConfig,
-    deployment_name: str | None,
-    refresh: bool,
-    experiment_name: str | None,
-    project_name: str | None,
-) -> None:
-    """List your chat sessions with a deployed LLM agent.
-
-    Omit *deployment_name* to use the agent set by ``arena agent run``. The
-    session being resumed, if any, is marked in the first column.
-    """
-    with _open_agent(
-        config, deployment_name, refresh, experiment_name, project_name
-    ) as (deployment, agent):
-        resumed = load_active_session(deployment)
-        rows = [
-            {
-                "current": "●" if session.session_id == resumed else "",
-                **session.model_dump(),
-            }
-            for session in agent.list_sessions()
-        ]
-        if not rows:
-            console.print(f"No chat sessions on {deployment} yet.")
-            return
-        emit_result(
-            rows,
-            columns=["Current", *SESSION_COLUMNS],
-        )
-
-
-@agent_sessions.command("get")
-@click.argument("session_id")
-@click.argument("deployment_name", required=False, default=None)
-@_agent_deployment_options
-@click.pass_obj
-def agent_sessions_get(
-    config: CommandConfig,
-    session_id: str,
-    deployment_name: str | None,
-    refresh: bool,
-    experiment_name: str | None,
-    project_name: str | None,
-) -> None:
-    """Show one chat session and its messages.
-
     Omit *deployment_name* to use the agent set by ``arena agent run``.
     """
-    with _open_agent(
-        config, deployment_name, refresh, experiment_name, project_name
-    ) as (_, agent):
-        emit_session_transcript(agent.get_session(session_id).model_dump())
-
-
-def _choose_session(
-    sessions: list[SessionInfo],
-    session_id: str | None,
-    resumed: str | None,
-) -> str:
-    """Take the caller's session id, or have them pick one from the list."""
-    known = {session.session_id for session in sessions}
-    if session_id:
-        wanted = session_id.strip()
-        if wanted not in known:
-            msg = f"No session {wanted!r} on this deployment. See: arena agent sessions list"
-            raise click.UsageError(msg)
-        return wanted
-
-    if not supports_interactive_selection():
-        msg = "Choosing from a list needs an interactive terminal. Pass --session-id."
-        raise click.UsageError(msg)
-
-    start = next(
-        (i for i, session in enumerate(sessions) if session.session_id == resumed), 0
+    target, experiment_name, project_name = _resolve_agent_target(
+        deployment_name, experiment_name, project_name
     )
-    chosen = select_row(
-        [session.model_dump() for session in sessions],
-        columns=SESSION_COLUMNS,
-        selected=start,
-    )
-    if chosen is None:
-        raise click.Abort
-    return str(chosen["session_id"])
-
-
-@agent_sessions.command("resume")
-@click.argument("deployment_name", required=False, default=None)
-@_agent_deployment_options
-@click.option(
-    "--session-id",
-    "session_id",
-    default=None,
-    help="Session to resume. Omit to pick one from a list.",
-)
-@click.pass_obj
-def agent_sessions_resume(
-    config: CommandConfig,
-    deployment_name: str | None,
-    refresh: bool,
-    experiment_name: str | None,
-    project_name: str | None,
-    session_id: str | None,
-) -> None:
-    """Continue a chat session in later commands without repeating its id.
-
-    Omit ``--session-id`` to choose one with the arrow keys. The session is
-    remembered per deployment, so ``arena agent generate --prompt '...'`` carries
-    on the conversation until you run ``arena agent sessions clear``.
-    """
-    with _open_agent(
-        config, deployment_name, refresh, experiment_name, project_name
-    ) as (deployment, agent):
-        sessions = agent.list_sessions()
-        if not sessions:
-            msg = (
-                f"No chat sessions on {deployment!r} yet. Start one with: "
-                "arena agent generate --prompt '...'"
-            )
-            raise click.UsageError(msg)
-        chosen = _choose_session(sessions, session_id, load_active_session(deployment))
-
-    save_active_session(deployment, chosen)
-    console.print(f"Resuming session {chosen} on {deployment}.")
-
-
-@agent_sessions.command("delete")
-@click.argument("session_id")
-@click.argument("deployment_name", required=False, default=None)
-@_agent_deployment_options
-@click.option(
-    "--yes",
-    is_flag=True,
-    default=False,
-    help="Confirm deletion without interactive prompt.",
-)
-@click.pass_obj
-def agent_sessions_delete(
-    config: CommandConfig,
-    session_id: str,
-    deployment_name: str | None,
-    refresh: bool,
-    experiment_name: str | None,
-    project_name: str | None,
-    yes: bool,
-) -> None:
-    """Delete a chat session and its history from the deployment.
-
-    Omit *deployment_name* to use the agent set by ``arena agent run``. Unlike
-    ``arena agent sessions clear``, this cannot be undone: the messages are gone
-    from the deployment, not just from this machine.
-    """
-    if not yes and not click.confirm(
-        f"Delete session {session_id!r} and its messages?", default=False
+    with (
+        arena_client(config) as client,
+        client.open_inference_agent(
+            target,
+            refresh=refresh,
+            experiment_name=experiment_name,
+            project_name=project_name,
+        ) as agent,
     ):
-        click.echo("Aborted.")
-        return
-
-    with _open_agent(
-        config, deployment_name, refresh, experiment_name, project_name
-    ) as (deployment, agent):
-        deleted = agent.delete_session(session_id)
-
-    if load_active_session(deployment) == session_id.strip():
-        clear_active_session(deployment)
-    if deleted:
-        console.print(f"Deleted session {session_id} on {deployment}.")
-    else:
-        console.print(f"No session {session_id} on {deployment}.")
-
-
-@agent_sessions.command("clear")
-@click.argument("deployment_name", required=False, default=None)
-def agent_sessions_clear(deployment_name: str | None) -> None:
-    """Clear the current session, so the next prompt starts a new conversation.
-
-    Omit *deployment_name* to use the agent set by ``arena agent run``. Only the
-    local pointer is cleared; the session itself stays on the deployment and
-    ``arena agent sessions resume`` can pick it up again.
-    """
-    target, _, _ = _resolve_agent_target(deployment_name, None, None)
-    if clear_active_session(target):
-        console.print(f"Cleared the session on {target}.")
-    else:
-        console.print(f"No session to clear on {target}.")
+        for chunk in agent.generate_stream(prompt):
+            console.print(chunk, end="", markup=False, highlight=False, soft_wrap=True)
+        console.print()
 
 
 @main.group("projects")

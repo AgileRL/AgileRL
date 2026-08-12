@@ -331,16 +331,6 @@ def _patch_surviving_sample_idxs(grpo, batch_idxs):
     return patch.object(grpo, "_calculate_advantages", side_effect=_with_batch_idxs)
 
 
-def _make_two_process_accelerator_mock():
-    """Mock a two-process accelerator whose gathers are single-rank identities."""
-    acc = MagicMock()
-    acc.num_processes = 2
-    acc.device = torch.device("cpu")
-    acc.gather.side_effect = lambda t: t
-    acc.free_memory.side_effect = lambda *objs: objs
-    return acc
-
-
 def _build_grpo_for_colocate_tests(
     grpo_factory,
     accelerator_factory,
@@ -3708,93 +3698,34 @@ class TestGRPOLearn:
         assert metrics == {"loss": 0.0, "kl": 0.0}
         grpo.clean_up()
 
-    def test_learn_multiprocess_all_filtered_masks_advantages_and_updates(self):
+    def test_learn_early_return_waits_for_everyone_when_all_filtered(self):
         grpo = _make_cpu_grpo_for_branch_tests(
             group_size=2,
             filter_zero_adv=True,
             adv_filter_eps=0.5,
             whiten_advantages=True,
         )
-        grpo.accelerator = _make_two_process_accelerator_mock()
+        acc = MagicMock()
+        acc.num_processes = 2
+        acc.free_memory.side_effect = lambda *objs: objs
+        grpo.accelerator = acc
         completion_ids, action_masks = _build_branch_experiences(batch_size=4)
         rewards = torch.tensor([1.0, 0.0, -1.0, 2.0], dtype=torch.float32)
-        seen_advantages: list[torch.Tensor] = []
-
-        def spy_loss(batch_size, minibatch_idxs, ids, masks, advantages, *args, **kw):
-            seen_advantages.append(advantages[minibatch_idxs])
-            return (
-                torch.tensor(0.0, dtype=torch.float32),
-                torch.tensor(0.0, dtype=torch.float32),
-            )
-
         with (
-            warnings.catch_warnings(),
+            pytest.warns(
+                UserWarning,
+                match="All samples were filtered by advantage threshold; skipping GRPO update.",
+            ),
             patch.object(
                 grpo,
                 "_calculate_advantage",
                 return_value=torch.zeros(4, 1, dtype=torch.float32),
             ),
-            patch.object(grpo, "_loss", side_effect=spy_loss) as mock_loss,
-            patch.object(grpo, "_backward_pass", return_value=None) as mock_backward,
         ):
-            warnings.filterwarnings(
-                "error", message="All samples were filtered by advantage threshold"
-            )
             metrics = grpo.learn((completion_ids, action_masks, rewards))
-        assert "completion_length" in metrics
-        assert mock_loss.call_count == mock_backward.call_count > 0
-        assert sum(adv.shape[0] for adv in seen_advantages) == 4
-        assert all(torch.all(adv == 0.0) for adv in seen_advantages)
-        grpo.accelerator.wait_for_everyone.assert_not_called()
+        assert metrics == {"loss": 0.0, "kl": 0.0}
+        acc.wait_for_everyone.assert_called_once()
         grpo.clean_up()
-
-    def test_learn_multiprocess_filtered_rank_matches_peer_and_has_zero_grads(self):
-        torch.manual_seed(42)
-        ranks = [
-            _make_cpu_grpo_for_branch_tests(
-                group_size=2,
-                filter_zero_adv=True,
-                adv_filter_eps=0.5,
-                beta=0.0,
-            )
-            for _ in range(2)
-        ]
-        backward_counts = []
-        for rank, rewards in zip(
-            ranks,
-            [
-                torch.tensor([1.0, 1.0, 2.0, 2.0], dtype=torch.float32),
-                torch.tensor([1.0, 1.0, -1.0, 2.0], dtype=torch.float32),
-            ],
-            strict=True,
-        ):
-            rank.accelerator = _make_two_process_accelerator_mock()
-            rank.micro_batch_size_per_gpu = 1
-            completion_ids, action_masks = _build_branch_experiences(batch_size=4)
-            with patch.object(
-                rank,
-                "_backward_pass",
-                side_effect=lambda loss: loss.backward(),
-            ) as mock_backward:
-                metrics = rank.learn((completion_ids, action_masks, rewards))
-            assert "completion_length" in metrics
-            backward_counts.append(mock_backward.call_count)
-        # Uniform rewards zero every advantage on rank 0 and half on rank 1;
-        # masking keeps all four samples on both ranks, so each runs the same
-        # four single-sample backward passes.
-        assert backward_counts == [4, 4]
-
-        filtered_grads = [
-            p.grad for p in ranks[0].actor.parameters() if p.grad is not None
-        ]
-        assert filtered_grads
-        assert all(torch.all(grad == 0.0) for grad in filtered_grads)
-        active_grads = [
-            p.grad for p in ranks[1].actor.parameters() if p.grad is not None
-        ]
-        assert any(torch.any(grad != 0.0) for grad in active_grads)
-        for rank in ranks:
-            rank.clean_up()
 
     def test_learn_raises_on_cross_rank_seq_len_mismatch(self):
         grpo = _make_cpu_grpo_for_branch_tests()

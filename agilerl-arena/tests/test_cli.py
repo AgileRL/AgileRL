@@ -5,8 +5,6 @@
 
 from __future__ import annotations
 
-import logging
-import uuid
 from contextlib import contextmanager
 from unittest.mock import MagicMock, patch
 
@@ -21,23 +19,11 @@ from agilerl.arena.cli import (
 )
 from agilerl.arena.config import CommandConfig, build_client
 from agilerl.arena.exceptions import ArenaAPIError
-from agilerl.arena.inference import SessionDetail, SessionInfo, SessionMessage
-from agilerl.arena.inference.cache import load_active_session, save_active_session
 
 
 @pytest.fixture
 def runner() -> CliRunner:
     return CliRunner()
-
-
-@pytest.fixture
-def mock_agent(mock_client) -> MagicMock:
-    """A deployed-agent mock returned by ``client.open_inference_agent()``."""
-    agent = MagicMock()
-    agent.__enter__ = MagicMock(return_value=agent)
-    agent.__exit__ = MagicMock(return_value=False)
-    mock_client.open_inference_agent.return_value = agent
-    return agent
 
 
 @pytest.fixture
@@ -925,23 +911,13 @@ class TestAgentListCommand:
             name="dep1", experiment_name="exp1", project_name="proj1"
         )
 
-    def test_list_never_prints_a_credential(self, runner, mock_client):
+    def test_list_show_api_keys(self, runner, mock_client):
         mock_client.list_inference_deployments.return_value = [
             {"name": "dep1", "api_key": "secret123"}
         ]
         with _patched_arena_client(mock_client):
-            result = runner.invoke(main, ["agent", "list"])
+            result = runner.invoke(main, ["agent", "list", "--show-api-keys"])
         assert result.exit_code == 0
-        assert "secret123" not in result.output
-
-    def test_list_surfaces_memory_scope(self, runner, mock_client):
-        mock_client.list_inference_deployments.return_value = [
-            {"name": "dep1", "memory_scope": "organization"}
-        ]
-        with _patched_arena_client(mock_client):
-            result = runner.invoke(main, ["agent", "list"])
-        assert result.exit_code == 0
-        assert "organization" in result.output
 
 
 class TestAgentDeployCommand:
@@ -950,7 +926,7 @@ class TestAgentDeployCommand:
             result = runner.invoke(main, ["agent", "deploy", "my-exp"])
         assert result.exit_code == 0
         mock_client.deploy_agent.assert_called_once_with(
-            experiment_name="my-exp", checkpoint=None, memory_scope=None
+            experiment_name="my-exp", checkpoint=None
         )
 
     def test_deploy_with_checkpoint(self, runner, mock_client):
@@ -961,29 +937,8 @@ class TestAgentDeployCommand:
             )
         assert result.exit_code == 0
         mock_client.deploy_agent.assert_called_once_with(
-            experiment_name="my-exp", checkpoint="step-500", memory_scope=None
+            experiment_name="my-exp", checkpoint="step-500"
         )
-
-    @pytest.mark.parametrize("scope", ["user", "organization"])
-    def test_deploy_with_memory_scope(self, runner, mock_client, scope):
-        with _patched_arena_client(mock_client):
-            result = runner.invoke(
-                main,
-                ["agent", "deploy", "my-exp", "--memory-scope", scope],
-            )
-        assert result.exit_code == 0
-        mock_client.deploy_agent.assert_called_once_with(
-            experiment_name="my-exp", checkpoint=None, memory_scope=scope
-        )
-
-    def test_deploy_rejects_unknown_memory_scope(self, runner, mock_client):
-        with _patched_arena_client(mock_client):
-            result = runner.invoke(
-                main,
-                ["agent", "deploy", "my-exp", "--memory-scope", "team"],
-            )
-        assert result.exit_code != 0
-        mock_client.deploy_agent.assert_not_called()
 
 
 class TestAgentRunCommand:
@@ -1019,195 +974,28 @@ class TestAgentRunCommand:
         )
 
 
-def _sent_session_id(mock_agent) -> str | None:
-    return mock_agent.generate_stream.call_args.kwargs["session_id"]
-
-
 class TestAgentGenerateCommand:
-    def test_generate_streams(self, runner, mock_client, mock_agent):
+    def test_generate_streams(self, runner, mock_client):
+        mock_agent = MagicMock()
         mock_agent.generate_stream.return_value = iter(["foo", "bar"])
+        mock_agent.__enter__ = MagicMock(return_value=mock_agent)
+        mock_agent.__exit__ = MagicMock(return_value=False)
+        mock_client.open_inference_agent.return_value = mock_agent
         with _patched_arena_client(mock_client):
             result = runner.invoke(
                 main,
                 ["agent", "generate", "my-dep", "--prompt", "hi"],
             )
         assert result.exit_code == 0
-        assert "foobar" in result.output
+        mock_agent.generate_stream.assert_called_once_with("hi")
+        assert result.output.strip() == "foobar"
 
-    def test_first_prompt_starts_and_records_a_session(
-        self, runner, mock_client, mock_agent
-    ):
+    def test_generate_uses_active_agent(self, runner, mock_client):
+        mock_agent = MagicMock()
         mock_agent.generate_stream.return_value = iter(["ok"])
-        with _patched_arena_client(mock_client):
-            result = runner.invoke(
-                main, ["agent", "generate", "my-dep", "--prompt", "hi"]
-            )
-        assert result.exit_code == 0
-        started = _sent_session_id(mock_agent)
-        # A real UUID, so the deployment can key history off it.
-        assert uuid.UUID(started).version == 4
-        assert load_active_session("my-dep") == started
-
-    def test_the_next_prompt_continues_the_session_it_started(
-        self, runner, mock_client, mock_agent
-    ):
-        mock_agent.generate_stream.side_effect = [iter(["one"]), iter(["two"])]
-        with _patched_arena_client(mock_client):
-            runner.invoke(main, ["agent", "generate", "my-dep", "--prompt", "hi"])
-            first = _sent_session_id(mock_agent)
-            runner.invoke(main, ["agent", "generate", "my-dep", "--prompt", "again"])
-            second = _sent_session_id(mock_agent)
-        assert first == second
-
-    def test_each_deployment_starts_its_own_session(
-        self, runner, mock_client, mock_agent
-    ):
-        mock_agent.generate_stream.side_effect = [iter(["a"]), iter(["b"])]
-        with _patched_arena_client(mock_client):
-            runner.invoke(main, ["agent", "generate", "dep-a", "--prompt", "hi"])
-            first = _sent_session_id(mock_agent)
-            runner.invoke(main, ["agent", "generate", "dep-b", "--prompt", "hi"])
-            second = _sent_session_id(mock_agent)
-        assert first != second
-        assert load_active_session("dep-a") == first
-        assert load_active_session("dep-b") == second
-
-    def test_starting_a_session_is_logged_at_info(
-        self, runner, mock_client, mock_agent, caplog
-    ):
-        mock_agent.generate_stream.return_value = iter(["reply"])
-        with _patched_arena_client(mock_client), caplog.at_level(logging.INFO):
-            result = runner.invoke(
-                main, ["agent", "generate", "my-dep", "--prompt", "hi"]
-            )
-        assert result.exit_code == 0
-        records = [r for r in caplog.records if "Started session" in r.getMessage()]
-        assert len(records) == 1
-        assert records[0].levelno == logging.INFO
-        assert (
-            records[0].getMessage()
-            == f"Started session {load_active_session('my-dep')}."
-        )
-
-    def test_continuing_a_session_is_not_logged(
-        self, runner, mock_client, mock_agent, caplog
-    ):
-        save_active_session("my-dep", "s-resumed")
-        mock_agent.generate_stream.return_value = iter(["ok"])
-        with _patched_arena_client(mock_client), caplog.at_level(logging.INFO):
-            runner.invoke(main, ["agent", "generate", "my-dep", "--prompt", "hi"])
-        assert not [r for r in caplog.records if "Started session" in r.getMessage()]
-
-    def test_generate_forwards_session_id(self, runner, mock_client, mock_agent):
-        mock_agent.generate_stream.return_value = iter(["ok"])
-        with _patched_arena_client(mock_client):
-            result = runner.invoke(
-                main,
-                ["agent", "generate", "my-dep", "--prompt", "hi", "--session-id", "s1"],
-            )
-        assert result.exit_code == 0
-        mock_agent.generate_stream.assert_called_once_with("hi", session_id="s1")
-
-    def test_generate_continues_the_resumed_session(
-        self, runner, mock_client, mock_agent
-    ):
-        save_active_session("my-dep", "s-resumed")
-        mock_agent.generate_stream.return_value = iter(["ok"])
-        with _patched_arena_client(mock_client):
-            result = runner.invoke(
-                main, ["agent", "generate", "my-dep", "--prompt", "hi"]
-            )
-        assert result.exit_code == 0
-        mock_agent.generate_stream.assert_called_once_with("hi", session_id="s-resumed")
-
-    def test_generate_only_resumes_its_own_deployment(
-        self, runner, mock_client, mock_agent
-    ):
-        save_active_session("other-dep", "s-resumed")
-        mock_agent.generate_stream.return_value = iter(["ok"])
-        with _patched_arena_client(mock_client):
-            result = runner.invoke(
-                main, ["agent", "generate", "my-dep", "--prompt", "hi"]
-            )
-        assert result.exit_code == 0
-        assert _sent_session_id(mock_agent) != "s-resumed"
-        assert load_active_session("other-dep") == "s-resumed"
-
-    def test_session_id_overrides_the_resumed_session(
-        self, runner, mock_client, mock_agent
-    ):
-        save_active_session("my-dep", "s-resumed")
-        mock_agent.generate_stream.return_value = iter(["ok"])
-        with _patched_arena_client(mock_client):
-            result = runner.invoke(
-                main,
-                ["agent", "generate", "my-dep", "--prompt", "hi", "--session-id", "s1"],
-            )
-        assert result.exit_code == 0
-        mock_agent.generate_stream.assert_called_once_with("hi", session_id="s1")
-
-    def test_new_session_abandons_the_resumed_session(
-        self, runner, mock_client, mock_agent
-    ):
-        save_active_session("my-dep", "s-resumed")
-        mock_agent.generate_stream.return_value = iter(["ok"])
-        with _patched_arena_client(mock_client):
-            result = runner.invoke(
-                main,
-                ["agent", "generate", "my-dep", "--prompt", "hi", "--new-session"],
-            )
-        assert result.exit_code == 0
-        started = _sent_session_id(mock_agent)
-        assert started != "s-resumed"
-        assert uuid.UUID(started).version == 4
-
-    def test_new_session_becomes_the_one_later_prompts_continue(
-        self, runner, mock_client, mock_agent
-    ):
-        save_active_session("my-dep", "s-resumed")
-        mock_agent.generate_stream.return_value = iter(["ok"])
-        with _patched_arena_client(mock_client):
-            runner.invoke(
-                main,
-                ["agent", "generate", "my-dep", "--prompt", "hi", "--new-session"],
-            )
-        assert load_active_session("my-dep") == _sent_session_id(mock_agent)
-
-    def test_session_id_does_not_change_what_is_resumed(
-        self, runner, mock_client, mock_agent
-    ):
-        save_active_session("my-dep", "s-resumed")
-        mock_agent.generate_stream.return_value = iter(["ok"])
-        with _patched_arena_client(mock_client):
-            runner.invoke(
-                main,
-                ["agent", "generate", "my-dep", "--prompt", "hi", "--session-id", "s1"],
-            )
-        assert _sent_session_id(mock_agent) == "s1"
-        assert load_active_session("my-dep") == "s-resumed"
-
-    def test_session_id_and_new_session_conflict(self, runner, mock_client, mock_agent):
-        with _patched_arena_client(mock_client):
-            result = runner.invoke(
-                main,
-                [
-                    "agent",
-                    "generate",
-                    "my-dep",
-                    "--prompt",
-                    "hi",
-                    "--session-id",
-                    "s1",
-                    "--new-session",
-                ],
-            )
-        assert result.exit_code != 0
-        assert "not both" in result.output
-        mock_agent.generate_stream.assert_not_called()
-        assert load_active_session("my-dep") is None
-
-    def test_generate_uses_active_agent(self, runner, mock_client, mock_agent):
-        mock_agent.generate_stream.return_value = iter(["ok"])
+        mock_agent.__enter__ = MagicMock(return_value=mock_agent)
+        mock_agent.__exit__ = MagicMock(return_value=False)
+        mock_client.open_inference_agent.return_value = mock_agent
         active = MagicMock(
             deployment_name="cached-dep",
             experiment_name="exp1",
@@ -1232,133 +1020,6 @@ class TestAgentGenerateCommand:
             patch("agilerl.arena.cli.load_active_agent", return_value=None),
         ):
             result = runner.invoke(main, ["agent", "generate", "--prompt", "hi"])
-        assert result.exit_code != 0
-        assert "No active agent" in result.output
-
-
-class TestAgentSessionsCommands:
-    def test_sessions_list(self, runner, mock_client, mock_agent):
-        mock_agent.list_sessions.return_value = [
-            SessionInfo(
-                session_id="s1",
-                created_at="2026-07-30T00:00:00Z",
-                last_updated="2026-08-01T00:00:00Z",
-            )
-        ]
-        with _patched_arena_client(mock_client):
-            result = runner.invoke(main, ["agent", "sessions", "list", "my-dep"])
-        assert result.exit_code == 0
-        mock_agent.list_sessions.assert_called_once_with()
-        assert "s1" in result.output
-        assert "2026-07-30" in result.output
-        assert "Created At" in result.output
-        assert "Last Updated" in result.output
-
-    def test_sessions_list_uses_active_agent(self, runner, mock_client, mock_agent):
-        mock_agent.list_sessions.return_value = []
-        active = MagicMock(
-            deployment_name="cached-dep",
-            experiment_name=None,
-            project_name=None,
-        )
-        with (
-            _patched_arena_client(mock_client),
-            patch("agilerl.arena.cli.load_active_agent", return_value=active),
-        ):
-            result = runner.invoke(main, ["agent", "sessions", "list"])
-        assert result.exit_code == 0
-        mock_client.open_inference_agent.assert_called_once_with(
-            "cached-dep",
-            refresh=False,
-            experiment_name=None,
-            project_name=None,
-        )
-
-    def test_sessions_get(self, runner, mock_client, mock_agent):
-        mock_agent.get_session.return_value = SessionDetail(
-            session_id="s1",
-            messages=[
-                SessionMessage(role="user", content="what is my name?"),
-                SessionMessage(role="assistant", content="Samuel."),
-            ],
-        )
-        with _patched_arena_client(mock_client):
-            result = runner.invoke(main, ["agent", "sessions", "get", "s1", "my-dep"])
-        assert result.exit_code == 0
-        mock_agent.get_session.assert_called_once_with("s1")
-        assert "Session s1" in result.output
-        assert "2 messages" in result.output
-        assert "what is my name?" in result.output
-        assert "Samuel." in result.output
-
-    def test_sessions_get_omits_timestamps_the_route_does_not_return(
-        self, runner, mock_client, mock_agent
-    ):
-        mock_agent.get_session.return_value = SessionDetail(session_id="s1")
-        with _patched_arena_client(mock_client):
-            result = runner.invoke(main, ["agent", "sessions", "get", "s1", "my-dep"])
-        assert result.exit_code == 0
-        assert "None" not in result.output
-        assert "created" not in result.output
-
-    def test_sessions_get_shows_timestamps_when_present(
-        self, runner, mock_client, mock_agent
-    ):
-        mock_agent.get_session.return_value = SessionDetail(
-            session_id="s1", created_at="2026-08-01T00:00:00Z"
-        )
-        with _patched_arena_client(mock_client):
-            result = runner.invoke(main, ["agent", "sessions", "get", "s1", "my-dep"])
-        assert "created 2026-08-01T00:00:00Z" in result.output
-
-    def test_sessions_get_on_an_empty_session(self, runner, mock_client, mock_agent):
-        mock_agent.get_session.return_value = SessionDetail(session_id="s1")
-        with _patched_arena_client(mock_client):
-            result = runner.invoke(main, ["agent", "sessions", "get", "s1", "my-dep"])
-        assert "No messages in this session." in result.output
-
-    def test_sessions_list_marks_the_resumed_session(
-        self, runner, mock_client, mock_agent
-    ):
-        save_active_session("my-dep", "s2")
-        mock_agent.list_sessions.return_value = [
-            SessionInfo(session_id="s1"),
-            SessionInfo(session_id="s2"),
-        ]
-        with _patched_arena_client(mock_client):
-            result = runner.invoke(main, ["agent", "sessions", "list", "my-dep"])
-        assert result.exit_code == 0
-        assert "Current" in result.output
-        marked = [line for line in result.output.splitlines() if "●" in line]
-        assert len(marked) == 1
-        assert "s2" in marked[0]
-
-    def test_sessions_list_with_no_sessions_says_so(
-        self, runner, mock_client, mock_agent
-    ):
-        mock_agent.list_sessions.return_value = []
-        with _patched_arena_client(mock_client):
-            result = runner.invoke(main, ["agent", "sessions", "list", "my-dep"])
-        assert result.exit_code == 0
-        assert "No chat sessions on my-dep yet." in result.output
-        assert "Session Id" not in result.output
-        assert "Current" not in result.output
-
-    def test_sessions_list_marks_nothing_when_none_is_resumed(
-        self, runner, mock_client, mock_agent
-    ):
-        mock_agent.list_sessions.return_value = [SessionInfo(session_id="s1")]
-        with _patched_arena_client(mock_client):
-            result = runner.invoke(main, ["agent", "sessions", "list", "my-dep"])
-        assert result.exit_code == 0
-        assert "●" not in result.output
-
-    def test_sessions_get_without_active_agent_fails(self, runner, mock_client):
-        with (
-            _patched_arena_client(mock_client),
-            patch("agilerl.arena.cli.load_active_agent", return_value=None),
-        ):
-            result = runner.invoke(main, ["agent", "sessions", "get", "s1"])
         assert result.exit_code != 0
         assert "No active agent" in result.output
 
@@ -1443,9 +1104,14 @@ class TestProjectsDefaultCommand:
 
 
 class TestRedactAgentRows:
+    def test_show_api_keys_true(self):
+        rows = [{"name": "dep1", "api_key": "secret"}]
+        result = _redact_agent_rows_for_display(rows, show_api_keys=True)
+        assert result is rows
+
     def test_redacts_api_key(self):
         rows = [{"name": "dep1", "api_key": "secret", "url": "http://x"}]
-        result = _redact_agent_rows_for_display(rows)
+        result = _redact_agent_rows_for_display(rows, show_api_keys=False)
         assert len(result) == 1
         assert "api_key" not in result[0]
         assert result[0]["name"] == "dep1"
@@ -1458,23 +1124,13 @@ class TestRedactAgentRows:
                 "spec": {"api_key": "nested_secret", "url": "http://y"},
             }
         ]
-        result = _redact_agent_rows_for_display(rows)
+        result = _redact_agent_rows_for_display(rows, show_api_keys=False)
         assert "api_key" not in result[0].get("spec", {})
         assert result[0]["spec"]["url"] == "http://y"
 
-    def test_leaves_the_caller_rows_untouched(self):
-        rows = [{"name": "dep1", "api_key": "secret"}]
-        _redact_agent_rows_for_display(rows)
-        assert rows[0]["api_key"] == "secret"
-
-    def test_keeps_non_credential_fields(self):
-        rows = [{"name": "dep1", "memory_scope": "organization", "url": "http://x"}]
-        result = _redact_agent_rows_for_display(rows)
-        assert result[0]["memory_scope"] == "organization"
-        assert result[0]["url"] == "http://x"
-
     def test_empty_rows(self):
-        assert _redact_agent_rows_for_display([]) == []
+        result = _redact_agent_rows_for_display([], show_api_keys=False)
+        assert result == []
 
 
 class TestCliErrorHandling:
@@ -1536,257 +1192,3 @@ class TestFormatProfileMetrics:
 
         result = _format_profile_metrics({"steps_per_second": 123.456789})
         assert result["Steps per Second"] == "123.457"
-
-
-class TestAgentSessionsResume:
-    @pytest.fixture
-    def sessions(self, mock_agent):
-        mock_agent.list_sessions.return_value = [
-            SessionInfo(session_id="s1", last_updated="2026-08-05"),
-            SessionInfo(session_id="s2", last_updated="2026-08-04"),
-            SessionInfo(session_id="s3", last_updated="2026-07-30"),
-        ]
-        return mock_agent
-
-    def test_explicit_session_id_is_persisted(self, runner, mock_client, sessions):
-        with _patched_arena_client(mock_client):
-            result = runner.invoke(
-                main,
-                ["agent", "sessions", "resume", "my-dep", "--session-id", "s2"],
-            )
-        assert result.exit_code == 0
-        assert load_active_session("my-dep") == "s2"
-        assert "s2" in result.output
-
-    def test_unknown_session_id_is_rejected(self, runner, mock_client, sessions):
-        with _patched_arena_client(mock_client):
-            result = runner.invoke(
-                main,
-                ["agent", "sessions", "resume", "my-dep", "--session-id", "nope"],
-            )
-        assert result.exit_code != 0
-        assert "No session" in result.output
-        assert load_active_session("my-dep") is None
-
-    def test_picker_selection_is_persisted(self, runner, mock_client, sessions):
-        with (
-            _patched_arena_client(mock_client),
-            patch(
-                "agilerl.arena.cli.supports_interactive_selection", return_value=True
-            ),
-            patch(
-                "agilerl.arena.cli.select_row",
-                return_value={"session_id": "s3"},
-            ) as mock_select,
-        ):
-            result = runner.invoke(main, ["agent", "sessions", "resume", "my-dep"])
-        assert result.exit_code == 0
-        assert load_active_session("my-dep") == "s3"
-        assert mock_select.call_args.kwargs["selected"] == 0
-
-    def test_picker_opens_on_the_session_already_resumed(
-        self, runner, mock_client, sessions
-    ):
-        save_active_session("my-dep", "s2")
-        with (
-            _patched_arena_client(mock_client),
-            patch(
-                "agilerl.arena.cli.supports_interactive_selection", return_value=True
-            ),
-            patch(
-                "agilerl.arena.cli.select_row", return_value={"session_id": "s2"}
-            ) as mock_select,
-        ):
-            result = runner.invoke(main, ["agent", "sessions", "resume", "my-dep"])
-        assert result.exit_code == 0
-        assert mock_select.call_args.kwargs["selected"] == 1
-
-    def test_cancelling_the_picker_changes_nothing(self, runner, mock_client, sessions):
-        save_active_session("my-dep", "s1")
-        with (
-            _patched_arena_client(mock_client),
-            patch(
-                "agilerl.arena.cli.supports_interactive_selection", return_value=True
-            ),
-            patch("agilerl.arena.cli.select_row", return_value=None),
-        ):
-            result = runner.invoke(main, ["agent", "sessions", "resume", "my-dep"])
-        assert result.exit_code != 0
-        assert load_active_session("my-dep") == "s1"
-
-    def test_non_interactive_terminal_asks_for_session_id(
-        self, runner, mock_client, sessions
-    ):
-        with (
-            _patched_arena_client(mock_client),
-            patch(
-                "agilerl.arena.cli.supports_interactive_selection", return_value=False
-            ),
-            patch("agilerl.arena.cli.select_row") as mock_select,
-        ):
-            result = runner.invoke(main, ["agent", "sessions", "resume", "my-dep"])
-        assert result.exit_code != 0
-        assert "--session-id" in result.output
-        mock_select.assert_not_called()
-
-    def test_deployment_with_no_sessions_says_so(self, runner, mock_client, mock_agent):
-        mock_agent.list_sessions.return_value = []
-        with _patched_arena_client(mock_client):
-            result = runner.invoke(main, ["agent", "sessions", "resume", "my-dep"])
-        assert result.exit_code != 0
-        assert "No chat sessions" in result.output
-
-    def test_resume_uses_the_active_agent(self, runner, mock_client, sessions):
-        active = MagicMock(
-            deployment_name="cached-dep", experiment_name=None, project_name=None
-        )
-        with (
-            _patched_arena_client(mock_client),
-            patch("agilerl.arena.cli.load_active_agent", return_value=active),
-        ):
-            result = runner.invoke(
-                main, ["agent", "sessions", "resume", "--session-id", "s1"]
-            )
-        assert result.exit_code == 0
-        assert load_active_session("cached-dep") == "s1"
-
-
-class TestAgentSessionsDelete:
-    def test_delete_with_yes_skips_the_prompt(self, runner, mock_client, mock_agent):
-        mock_agent.delete_session.return_value = True
-        with _patched_arena_client(mock_client):
-            result = runner.invoke(
-                main, ["agent", "sessions", "delete", "s1", "my-dep", "--yes"]
-            )
-        assert result.exit_code == 0
-        mock_agent.delete_session.assert_called_once_with("s1")
-        assert "Deleted session s1" in result.output
-
-    def test_delete_confirms_before_deleting(self, runner, mock_client, mock_agent):
-        mock_agent.delete_session.return_value = True
-        with _patched_arena_client(mock_client):
-            result = runner.invoke(
-                main, ["agent", "sessions", "delete", "s1", "my-dep"], input="y\n"
-            )
-        assert result.exit_code == 0
-        assert "Delete session 's1' and its messages?" in result.output
-        mock_agent.delete_session.assert_called_once_with("s1")
-
-    def test_declining_the_prompt_deletes_nothing(
-        self, runner, mock_client, mock_agent
-    ):
-        with _patched_arena_client(mock_client):
-            result = runner.invoke(
-                main, ["agent", "sessions", "delete", "s1", "my-dep"], input="n\n"
-            )
-        assert result.exit_code == 0
-        assert "Aborted." in result.output
-        mock_agent.delete_session.assert_not_called()
-
-    def test_declining_keeps_the_current_session(self, runner, mock_client, mock_agent):
-        save_active_session("my-dep", "s1")
-        with _patched_arena_client(mock_client):
-            runner.invoke(
-                main, ["agent", "sessions", "delete", "s1", "my-dep"], input="n\n"
-            )
-        assert load_active_session("my-dep") == "s1"
-
-    def test_deleting_the_current_session_clears_it(
-        self, runner, mock_client, mock_agent
-    ):
-        save_active_session("my-dep", "s1")
-        mock_agent.delete_session.return_value = True
-        with _patched_arena_client(mock_client):
-            result = runner.invoke(
-                main, ["agent", "sessions", "delete", "s1", "my-dep", "--yes"]
-            )
-        assert result.exit_code == 0
-        assert load_active_session("my-dep") is None
-
-    def test_deleting_another_session_keeps_the_current_one(
-        self, runner, mock_client, mock_agent
-    ):
-        save_active_session("my-dep", "s2")
-        mock_agent.delete_session.return_value = True
-        with _patched_arena_client(mock_client):
-            runner.invoke(
-                main, ["agent", "sessions", "delete", "s1", "my-dep", "--yes"]
-            )
-        assert load_active_session("my-dep") == "s2"
-
-    def test_a_session_already_gone_says_so(self, runner, mock_client, mock_agent):
-        mock_agent.delete_session.return_value = False
-        with _patched_arena_client(mock_client):
-            result = runner.invoke(
-                main, ["agent", "sessions", "delete", "s1", "my-dep", "--yes"]
-            )
-        assert result.exit_code == 0
-        assert "No session s1" in result.output
-
-    def test_a_session_already_gone_is_still_cleared_locally(
-        self, runner, mock_client, mock_agent
-    ):
-        save_active_session("my-dep", "s1")
-        mock_agent.delete_session.return_value = False
-        with _patched_arena_client(mock_client):
-            runner.invoke(
-                main, ["agent", "sessions", "delete", "s1", "my-dep", "--yes"]
-            )
-        assert load_active_session("my-dep") is None
-
-    def test_delete_uses_the_active_agent(self, runner, mock_client, mock_agent):
-        mock_agent.delete_session.return_value = True
-        active = MagicMock(
-            deployment_name="cached-dep", experiment_name=None, project_name=None
-        )
-        with (
-            _patched_arena_client(mock_client),
-            patch("agilerl.arena.cli.load_active_agent", return_value=active),
-        ):
-            result = runner.invoke(main, ["agent", "sessions", "delete", "s1", "--yes"])
-        assert result.exit_code == 0
-        mock_client.open_inference_agent.assert_called_once_with(
-            "cached-dep", refresh=False, experiment_name=None, project_name=None
-        )
-
-    def test_delete_requires_a_session_id(self, runner, mock_client, mock_agent):
-        with _patched_arena_client(mock_client):
-            result = runner.invoke(main, ["agent", "sessions", "delete"])
-        assert result.exit_code != 0
-        mock_agent.delete_session.assert_not_called()
-
-
-class TestAgentSessionsClear:
-    def test_clear_removes_the_current_session(self, runner):
-        save_active_session("my-dep", "s1")
-        result = runner.invoke(main, ["agent", "sessions", "clear", "my-dep"])
-        assert result.exit_code == 0
-        assert load_active_session("my-dep") is None
-        assert "Cleared the session" in result.output
-
-    def test_clear_with_nothing_to_clear_says_so(self, runner):
-        result = runner.invoke(main, ["agent", "sessions", "clear", "my-dep"])
-        assert result.exit_code == 0
-        assert "No session to clear" in result.output
-
-    def test_clear_leaves_other_deployments_alone(self, runner):
-        save_active_session("my-dep", "s1")
-        save_active_session("other-dep", "s2")
-        runner.invoke(main, ["agent", "sessions", "clear", "my-dep"])
-        assert load_active_session("other-dep") == "s2"
-
-    def test_clear_uses_the_active_agent(self, runner):
-        save_active_session("cached-dep", "s1")
-        active = MagicMock(
-            deployment_name="cached-dep", experiment_name=None, project_name=None
-        )
-        with patch("agilerl.arena.cli.load_active_agent", return_value=active):
-            result = runner.invoke(main, ["agent", "sessions", "clear"])
-        assert result.exit_code == 0
-        assert load_active_session("cached-dep") is None
-
-    def test_clear_without_active_agent_fails(self, runner):
-        with patch("agilerl.arena.cli.load_active_agent", return_value=None):
-            result = runner.invoke(main, ["agent", "sessions", "clear"])
-        assert result.exit_code != 0
-        assert "No active agent" in result.output
