@@ -43,6 +43,12 @@ dependencies = [
     "wandb>=0.18.0",
 ]
 
+[project.scripts]
+# Pre-submission memory gate. A stable command name matters because
+# agilerl-arena shells out to it and reads the exit status (0 fits, 3 over
+# budget), so the module path must be free to move without breaking callers.
+agilerl-memory = "agilerl.memory.cli:main"
+
 [project.optional-dependencies]
 box2d = [
     "swig>=4.4.1; sys_platform != 'win32'",

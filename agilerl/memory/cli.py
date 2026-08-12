@@ -26,8 +26,11 @@ corners), so this is a guard rail, not a proof.
 
 Usage::
 
-    python -m agilerl.memory --model Qwen/Qwen2.5-3B-Instruct \\
+    agilerl-memory --model Qwen/Qwen2.5-3B-Instruct \\
         --device-gb 24 --max-model-len 4096 --group-size 8
+
+``python -m agilerl.memory`` is equivalent, for a checkout without the
+console script installed.
 """
 
 from __future__ import annotations
@@ -172,7 +175,7 @@ def _render_phase(breakdown: PhaseBreakdown, colour: bool = False) -> str:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="python -m agilerl.memory",
+        prog="agilerl-memory",
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )

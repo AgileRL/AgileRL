@@ -23,7 +23,7 @@ in a backend service, and client-side in a browser:
 | `formulas.py` | the arithmetic (parameter counts, KV, activations, tiles) |
 | `estimator.py` | assemble the two phase bars |
 | `advice.py` | rank the cheapest knob changes when a bar is over budget |
-| `cli.py` | pre-submission gate + report (`python -m agilerl.memory`) |
+| `cli.py` | pre-submission gate + report (`agilerl-memory`) |
 
 ### Why there is no calibration layer
 
