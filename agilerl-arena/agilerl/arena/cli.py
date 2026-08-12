@@ -997,6 +997,9 @@ def agent_generate(
         console.print()
 
 
+SESSION_COLUMNS = ["Session Id", "Created At", "Last Updated"]
+
+
 @agent_cli.group("sessions")
 def agent_sessions() -> None:
     """Browse chat sessions held by a deployed LLM agent."""
@@ -1034,7 +1037,7 @@ def agent_sessions_list(
             return
         emit_result(
             rows,
-            columns=["Current", "Session Id", "Created At", "Last Updated"],
+            columns=["Current", *SESSION_COLUMNS],
         )
 
 
@@ -1059,9 +1062,6 @@ def agent_sessions_get(
         config, deployment_name, refresh, experiment_name, project_name
     ) as (_, agent):
         emit_session_transcript(agent.get_session(session_id).model_dump())
-
-
-SESSION_COLUMNS = ["Session Id", "Created At", "Last Updated"]
 
 
 def _choose_session(

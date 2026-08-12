@@ -335,6 +335,13 @@ class Agent:
                 detail=self._response_detail(resp),
             )
 
+    @staticmethod
+    def _network_error(exc: httpx.HTTPError) -> ArenaInferenceError:
+        return ArenaInferenceError(
+            status_code=0,
+            detail=f"Network error reaching agent endpoint: {exc}",
+        )
+
     def _send(
         self,
         method: str,
@@ -346,10 +353,7 @@ class Agent:
         try:
             return self._http.request(method, self._url(path), json=json_body)
         except httpx.HTTPError as exc:
-            raise ArenaInferenceError(
-                status_code=0,
-                detail=f"Network error reaching agent endpoint: {exc}",
-            ) from exc
+            raise self._network_error(exc) from exc
 
     def _request_payload(
         self,
@@ -397,10 +401,7 @@ class Agent:
         except ArenaInferenceError:
             raise
         except httpx.HTTPError as exc:
-            raise ArenaInferenceError(
-                status_code=0,
-                detail=f"Network error reaching agent endpoint: {exc}",
-            ) from exc
+            raise self._network_error(exc) from exc
 
     def _fetch_metadata(self) -> StatusResponse:
         body = self._request_json("GET", "/status")

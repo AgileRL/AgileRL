@@ -1450,13 +1450,13 @@ class TestActiveSession:
 MINIMAL_STATUS = {"deployment_id": "560"}
 
 
-def _agent_over(status_body, *, route_body=None):
-    """A real Agent whose /status returns *status_body*."""
+def _agent_with_status(status_body: dict) -> Agent:
+    """A real Agent, built through __init__, whose /status returns *status_body*."""
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/status":
             return httpx.Response(200, json=status_body)
-        return httpx.Response(200, json=route_body if route_body is not None else {})
+        return httpx.Response(200, json={})
 
     real = httpx.Client
     with patch(
@@ -1470,15 +1470,15 @@ class TestStatusWithoutAgentInfo:
     """A public /status may report only the deployment id."""
 
     def test_metadata_parses_with_no_agent_block(self):
-        agent = _agent_over(MINIMAL_STATUS)
+        agent = _agent_with_status(MINIMAL_STATUS)
         assert agent.metadata is not None
         assert agent.metadata.deployment_id == "560"
         assert agent.metadata.agent is None
 
     def test_an_absent_agent_block_is_not_a_reported_shape(self):
         """Absent must not read as 'every flag is False'."""
-        assert _agent_over(MINIMAL_STATUS).metadata.agent is None
-        reported = _agent_over({"deployment_id": "1", "agent": {}}).metadata.agent
+        assert _agent_with_status(MINIMAL_STATUS).metadata.agent is None
+        reported = _agent_with_status({"deployment_id": "1", "agent": {}}).metadata.agent
         assert reported is not None
         assert reported.llm is False
 
@@ -1496,7 +1496,7 @@ class TestStatusWithoutAgentInfo:
     )
     def test_type_guards_defer_to_the_deployment(self, call):
         """Unknown type must not be refused locally; the route answers 400."""
-        agent = _agent_over(MINIMAL_STATUS)
+        agent = _agent_with_status(MINIMAL_STATUS)
         agent._http = MagicMock()
         agent._http.request.return_value = _json_response(
             400, {"error": "wrong endpoint"}
@@ -1510,7 +1510,7 @@ class TestStatusWithoutAgentInfo:
 
     def test_get_action_falls_back_to_single_agent_non_recurrent(self):
         """No reported shape means the common case: one agent, no hidden state."""
-        agent = _agent_over(MINIMAL_STATUS)
+        agent = _agent_with_status(MINIMAL_STATUS)
         payload = agent._build_payload(np.zeros(4), False, None, None, None)
 
         assert "obs" in payload
@@ -1518,7 +1518,7 @@ class TestStatusWithoutAgentInfo:
         assert "hidden_state" not in payload
 
     def test_a_reported_shape_still_drives_the_payload(self):
-        agent = _agent_over(
+        agent = _agent_with_status(
             {"deployment_id": "1", "agent": {"multi_agent": False, "recurrent": True}}
         )
         payload = agent._build_payload(
@@ -1527,12 +1527,12 @@ class TestStatusWithoutAgentInfo:
         assert "hidden_state" in payload
 
     def test_reported_llm_still_guards(self):
-        agent = _agent_over({"deployment_id": "1", "agent": {"llm": False}})
+        agent = _agent_with_status({"deployment_id": "1", "agent": {"llm": False}})
         with pytest.raises(ArenaInferenceError, match="not an LLM"):
             agent.generate("hi")
 
     def test_metadata_not_loaded_still_raises(self):
-        agent = _agent_over(MINIMAL_STATUS)
+        agent = _agent_with_status(MINIMAL_STATUS)
         agent.metadata = None
         with pytest.raises(ArenaInferenceError, match="Metadata not loaded"):
             agent.generate("hi")
