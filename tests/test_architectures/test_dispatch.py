@@ -13,7 +13,7 @@ class TestDetectModelFamilies:
         "name",
         [
             "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
-            "NVIDIA-Nemotron-3.5-Nano-30B-A3B-BF16/",
+            "NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16/",
             "nvidia/Nemotron-H-8B-Base-8K",
             "/ckpt/nemotron_local",
             r"C:\ckpt\Nemotron-H-8B",

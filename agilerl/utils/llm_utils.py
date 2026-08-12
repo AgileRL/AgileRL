@@ -662,6 +662,45 @@ def gather_if_zero3(
 
 
 @contextmanager
+def zero3_full_shape_views(
+    params: list[torch.Tensor],
+) -> Generator[None, None, None]:
+    """Expose full ``ds_shape`` views on partitioned ZeRO-3 params for shape-only reads.
+
+    Each partitioned param temporarily swaps its placeholder ``data`` for a
+    zero-storage view (a scalar expanded to ``ds_shape``), so shape, dtype and
+    device reads inside the block see the full tensor without an all-gather.
+    Values must not be read inside the block; the placeholder is restored on
+    exit. Params without ``ds_shape``, or already ``AVAILABLE``, pass through
+    untouched.
+
+    :param params: Candidate parameters; only partitioned ZeRO-3 params get views.
+    :type params: list[torch.Tensor]
+    """
+    saved: list[tuple[torch.Tensor, torch.Tensor]] = []
+    seen: set[int] = set()
+    try:
+        for param in params:
+            if id(param) in seen:
+                continue
+            ds_shape = getattr(param, "ds_shape", None)
+            if ds_shape is None:
+                continue
+            status = getattr(param, "ds_status", None)
+            if getattr(status, "name", None) == "AVAILABLE":
+                continue
+            seen.add(id(param))
+            saved.append((param, param.data))
+            param.data = torch.empty((), dtype=param.dtype, device=param.device).expand(
+                tuple(ds_shape)
+            )
+        yield
+    finally:
+        for param, data in saved:
+            param.data = data
+
+
+@contextmanager
 def gather_if_ds_param(
     *tensors: torch.Tensor | None,
     modifier_rank: int | None = 0,

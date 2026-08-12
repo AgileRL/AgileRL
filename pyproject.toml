@@ -1,6 +1,6 @@
 [project]
 name = "agilerl"
-version = "2.9.0"
+version = "2.9.1"
 description = "AgileRL is a deep reinforcement learning library focused on improving RL development through RLOps."
 authors = [{ name = "Nick Ustaran-Anderegg", email = "dev@agilerl.com" }]
 license = "Apache-2.0"
@@ -58,7 +58,7 @@ llm = [
     "vllm>=0.24; sys_platform == 'linux'",
 ]
 arena = [
-    "agilerl-arena==0.1.3",
+    "agilerl-arena==0.2.0",
 ]
 all = [
     "agilerl[box2d,llm,arena]",
