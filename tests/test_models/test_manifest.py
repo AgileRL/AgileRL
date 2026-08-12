@@ -1030,11 +1030,20 @@ class TestTrainingManifestArenaBridge:
         core = TrainingManifest.from_trainer_specs(
             algorithm=PPOSpec(learn_step=64),
             environment=ArenaEnvSpec(name="CartPole-v1"),
-            training=TrainingSpec(max_steps=200),
+            training=TrainingSpec(max_steps=200, evo_steps=100),
         )
         submission = TrainingManifest.to_arena_manifest(core)
         assert submission["algorithm"]["name"] == "PPO"
         assert submission["environment"]["name"] == "CartPole-v1"
+
+    def test_to_arena_manifest_requires_evo_steps(self):
+        core = TrainingManifest.from_trainer_specs(
+            algorithm=PPOSpec(learn_step=64),
+            environment=ArenaEnvSpec(name="CartPole-v1"),
+            training=TrainingSpec(max_steps=200),
+        )
+        with pytest.raises(ValidationError, match="evo_steps is required"):
+            TrainingManifest.to_arena_manifest(core)
 
     def test_to_arena_manifest_from_yaml_path(self, tmp_path):
         manifest_path = tmp_path / "manifest.yaml"

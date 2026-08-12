@@ -99,7 +99,7 @@ def _build_manifest_dict(algorithm, algo_name: str) -> dict[str, Any]:
     data: dict[str, Any] = {
         "algorithm": algorithm,
         "environment": ArenaEnvSpec(name=_DEFAULT_ENV[algorithm.agent_type]),
-        "training": TrainingSpec(),
+        "training": TrainingSpec(max_steps=100_000, evo_steps=1_000, pop_size=1),
         "mutation": MutationSpec(),
         "selection_strategy": TournamentSelectionSpec(),
     }

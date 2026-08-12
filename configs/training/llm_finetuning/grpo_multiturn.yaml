@@ -23,6 +23,7 @@ environment:
 
 training:
     max_steps: 4096
+    evo_steps: 4096
     pop_size: 1
     evaluation_interval: 10
 

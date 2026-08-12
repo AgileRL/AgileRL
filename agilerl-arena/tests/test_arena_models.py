@@ -42,6 +42,9 @@ def _manifest(**sections) -> dict:
     data = {
         "algorithm": sections.pop("algorithm", {"name": "DQN"}),
         "environment": sections.pop("environment", {"name": "CartPole-v1"}),
+        "training": sections.pop(
+            "training", {"max_steps": 10_000, "evo_steps": 100, "pop_size": 1}
+        ),
     }
     data.update(sections)
     return data
@@ -60,7 +63,7 @@ def test_env_spec_defaults() -> None:
 
 def test_training_and_replay_buffer_aliases() -> None:
     training = TrainingSpec.model_validate(
-        {"population_size": 4, "metrics_interval": 123}
+        {"max_steps": 1000, "population_size": 4, "metrics_interval": 123}
     )
     assert training.pop_size == 4
     assert training.evo_steps == 123
@@ -196,7 +199,11 @@ def test_get_validated_no_warning_for_aliased_fields() -> None:
         TrainingManifest.get_validated(
             _manifest(
                 algorithm={"name": "DQN", "lr": 3e-4},
-                training={"population_size": 4, "metrics_interval": 123},
+                training={
+                    "max_steps": 1000,
+                    "population_size": 4,
+                    "metrics_interval": 123,
+                },
                 replay_buffer={"memory_size": 4096},
             )
         )
@@ -383,21 +390,82 @@ def test_training_spec_rejects_invalid_eval_steps() -> None:
     with pytest.raises(
         ValueError, match="eval_steps must be greater than evaluation_interval"
     ):
-        TrainingSpec(eval_steps=10, evaluation_interval=10)
+        TrainingSpec(
+            max_steps=1000,
+            evo_steps=10,
+            pop_size=1,
+            eval_steps=10,
+            evaluation_interval=10,
+        )
 
 
 def test_training_spec_rejects_evo_steps_above_max_steps() -> None:
     with pytest.raises(
         ValueError, match=r"evo_steps .* must be less than or equal to max_steps"
     ):
-        TrainingSpec(max_steps=100, evo_steps=200)
+        TrainingSpec(max_steps=100, evo_steps=200, pop_size=1)
 
 
 def test_training_spec_rejects_eps_start_below_eps_end() -> None:
     with pytest.raises(
         ValueError, match=r"eps_start .* must be greater than or equal to eps_end"
     ):
-        TrainingSpec(eps_start=0.1, eps_end=0.9)
+        TrainingSpec(
+            max_steps=1000, evo_steps=10, pop_size=1, eps_start=0.1, eps_end=0.9
+        )
+
+
+class TestRuntimeRequiredTrainingFields:
+    """The runtime ``TrainingSpec`` requires these fields with no defaults."""
+
+    def test_rejects_manifest_missing_training_section(self) -> None:
+        manifest = _manifest()
+        del manifest["training"]
+        with pytest.raises(ValidationError, match="training"):
+            TrainingManifest.get_validated(manifest)
+
+    @pytest.mark.parametrize("missing", ["max_steps", "evo_steps", "pop_size"])
+    def test_rejects_manifest_missing_each_runtime_required_field(
+        self, missing: str
+    ) -> None:
+        training = {"max_steps": 1000, "evo_steps": 10, "pop_size": 1}
+        del training[missing]
+        with pytest.raises(ValidationError, match=missing):
+            TrainingManifest.get_validated(_manifest(training=training))
+
+    def test_rejects_empty_training_section(self) -> None:
+        with pytest.raises(ValidationError):
+            TrainingManifest.get_validated(_manifest(training={}))
+
+    def test_accepts_epoch_based_training(self) -> None:
+        payload = TrainingManifest.get_validated(
+            _manifest(training={"num_epochs": 3, "evo_epochs": 1, "pop_size": 1})
+        )
+        assert payload["training"]["num_epochs"] == 3
+        assert payload["training"]["evo_epochs"] == 1
+        assert "max_steps" not in payload["training"]
+        assert "evo_steps" not in payload["training"]
+
+    def test_rejects_evo_epochs_without_num_epochs(self) -> None:
+        with pytest.raises(ValidationError, match="evo_steps is required"):
+            TrainingManifest.get_validated(
+                _manifest(training={"max_steps": 1000, "evo_epochs": 1, "pop_size": 1})
+            )
+
+    def test_accepts_zero_evo_steps(self) -> None:
+        payload = TrainingManifest.get_validated(
+            _manifest(training={"max_steps": 1000, "evo_steps": 0, "pop_size": 1})
+        )
+        assert payload["training"]["evo_steps"] == 0
+
+    def test_rejects_zero_eval_steps(self) -> None:
+        with pytest.raises(ValidationError, match="eval_steps"):
+            TrainingSpec(max_steps=1000, evo_steps=10, pop_size=1, eval_steps=0)
+
+    def test_payload_carries_the_runtime_required_fields(self) -> None:
+        payload = TrainingManifest.get_validated(_manifest())
+        for key in ("max_steps", "evo_steps", "pop_size"):
+            assert key in payload["training"]
 
 
 def test_registry_override_logs_warning() -> None:
@@ -438,6 +506,7 @@ def test_python_manifest_accepts_network_spec_object() -> None:
         {
             "algorithm": {"name": "DQN"},
             "environment": {"name": "CartPole-v1"},
+            "training": {"max_steps": 10_000, "evo_steps": 100, "pop_size": 1},
             "network": QNetworkSpec(
                 encoder_config=MlpSpec(hidden_size=[64]),
                 head_config=MlpSpec(hidden_size=[64]),

@@ -51,11 +51,13 @@ class ReplayBufferSpec(BaseModel):
 class TrainingSpec(BaseModel):
     """Pydantic model for AgileRL training arguments.
 
-    :param max_steps: Maximum number of steps to train for. Defaults to 1,000,000.
-    :type max_steps: int
-    :param evo_steps: Number of steps to train between evolutions.
+    :param max_steps: Maximum number of steps to train for. Required by the runtime
+        unless ``num_epochs`` is set (epochs are converted to steps server-side).
+    :type max_steps: int | None
+    :param evo_steps: Number of steps to train between evolutions. Required by the
+        runtime unless ``num_epochs`` and ``evo_epochs`` are both set.
     :type evo_steps: int | None
-    :param pop_size: Number of agents in the population. Defaults to 1.
+    :param pop_size: Number of agents in the population.
     :type pop_size: int
     :param eval_steps: Number of steps to train for evaluation. Defaults to None.
     :type eval_steps: int | None
@@ -85,6 +87,9 @@ class TrainingSpec(BaseModel):
     :type evaluation_interval: int
     :param num_epochs: Number of epochs to train for.
     :type num_epochs: int | None
+    :param evo_epochs: Number of epochs between evolutions (converted to
+        ``evo_steps`` server-side alongside ``num_epochs``).
+    :type evo_epochs: int | None
     :param episode_steps: Number of steps to train for each episode (only applicable for bandits).
     :type episode_steps: int
     :param sum_scores: Whether to sum sub-agent scores (only applicable for multi-agent).
@@ -96,16 +101,16 @@ class TrainingSpec(BaseModel):
     :type experience_sharing: bool
     """
 
-    max_steps: int = Field(default=1_000_000, ge=1)
+    max_steps: int | None = Field(default=None, ge=1)
     evo_steps: int | None = Field(
         default=None,
-        ge=1,
+        ge=0,
         validation_alias=AliasChoices("metrics_interval", "evo_steps"),
     )
     pop_size: int = Field(
-        default=1, ge=1, validation_alias=AliasChoices("population_size", "pop_size")
+        ..., ge=1, validation_alias=AliasChoices("pop_size", "population_size")
     )
-    eval_steps: int | None = Field(default=None)
+    eval_steps: int | None = Field(default=None, ge=1)
     eval_loop: int = Field(default=1, ge=1)
     replay_buffer: ReplayBufferSpec | None = Field(default=None)
     hpo: bool = Field(default=True)
@@ -125,6 +130,7 @@ class TrainingSpec(BaseModel):
     # LLM-specific training parameters
     evaluation_interval: int = Field(default=10, ge=1)
     num_epochs: int | None = Field(default=None, ge=1)
+    evo_epochs: int | None = Field(default=None, ge=0)
 
     # Bandit-specific training parameters
     episode_steps: int = Field(default=500, ge=1)
@@ -140,10 +146,28 @@ class TrainingSpec(BaseModel):
 
     @model_validator(mode="after")
     def _validate_training_parameters(self) -> Self:
+        if self.max_steps is None and self.num_epochs is None:
+            msg = (
+                "max_steps is required (dataset-based training may set "
+                "num_epochs instead)."
+            )
+            raise ValueError(msg)
+        if self.evo_steps is None and (
+            self.num_epochs is None or self.evo_epochs is None
+        ):
+            msg = (
+                "evo_steps is required (dataset-based training may set "
+                "evo_epochs alongside num_epochs instead)."
+            )
+            raise ValueError(msg)
         if self.eval_steps is not None and self.eval_steps <= self.evaluation_interval:
             msg = "eval_steps must be greater than evaluation_interval"
             raise ValueError(msg)
-        if self.evo_steps is not None and self.evo_steps > self.max_steps:
+        if (
+            self.evo_steps is not None
+            and self.max_steps is not None
+            and self.evo_steps > self.max_steps
+        ):
             msg = f"evo_steps ({self.evo_steps}) must be less than or equal to max_steps ({self.max_steps})."
             raise ValueError(msg)
         if (

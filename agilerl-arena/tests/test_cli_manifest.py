@@ -574,6 +574,7 @@ class TestArenaArchOptional:
         raw = {
             "algorithm": {"name": "PPO"},
             "environment": {"name": "merge-env", "version": "v1"},
+            "training": {"max_steps": 10_000, "evo_steps": 100, "pop_size": 1},
             "network": {
                 "arch": "mlp",
                 "encoder_config": {"hidden_size": [64]},
@@ -591,6 +592,7 @@ class TestArenaArchOptional:
         raw = {
             "algorithm": {"name": "PPO"},
             "environment": {"name": "merge-env", "version": "v1"},
+            "training": {"max_steps": 10_000, "evo_steps": 100, "pop_size": 1},
             "network": {"latent_dim": 64, "encoder_config": {"hidden_size": [64]}},
         }
         out = TrainingManifest.get_validated(raw, mode="json")
@@ -617,6 +619,7 @@ class TestArenaSimbaRecurrentConflict:
         raw = {
             "algorithm": {"name": "PPO", "recurrent": True},
             "environment": {"name": "merge-env", "version": "v1"},
+            "training": {"max_steps": 10_000, "evo_steps": 100, "pop_size": 1},
             "network": {"simba": True, "head_config": {"hidden_size": [64]}},
         }
         with pytest.raises(ValueError, match="cannot both be set"):
@@ -629,6 +632,7 @@ class TestArenaSimbaRecurrentConflict:
         raw = {
             "algorithm": {"name": "PPO"},
             "environment": {"name": "merge-env", "version": "v1"},
+            "training": {"max_steps": 10_000, "evo_steps": 100, "pop_size": 1},
             "network": {"simba": True, "head_config": {"hidden_size": [64]}},
         }
         manifest = TrainingManifest.model_validate(raw)

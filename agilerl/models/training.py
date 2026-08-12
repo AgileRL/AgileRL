@@ -182,6 +182,9 @@ class TrainingSpec(BaseModel):
     :type evaluation_interval: int
     :param num_epochs: Number of epochs to train for.
     :type num_epochs: int | None
+    :param evo_epochs: Number of epochs between evolutions (Arena converts to
+        ``evo_steps`` server-side alongside ``num_epochs``).
+    :type evo_epochs: int | None
     :param max_wall_seconds: Wall-clock limit for multi-turn LLM fine-tuning runs.
     :type max_wall_seconds: float | None
     :param episode_steps: Number of steps to train for each episode (only applicable for bandits).
@@ -224,6 +227,7 @@ class TrainingSpec(BaseModel):
     # LLM-specific training parameters
     evaluation_interval: int = Field(default=10, ge=1)
     num_epochs: int | None = Field(default=None, ge=1)
+    evo_epochs: int | None = Field(default=None, ge=0)
     max_wall_seconds: float | None = Field(default=None, gt=0)
 
     # Bandit-specific training parameters
