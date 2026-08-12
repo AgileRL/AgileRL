@@ -1478,7 +1478,9 @@ class TestStatusWithoutAgentInfo:
     def test_an_absent_agent_block_is_not_a_reported_shape(self):
         """Absent must not read as 'every flag is False'."""
         assert _agent_with_status(MINIMAL_STATUS).metadata.agent is None
-        reported = _agent_with_status({"deployment_id": "1", "agent": {}}).metadata.agent
+        reported = _agent_with_status(
+            {"deployment_id": "1", "agent": {}}
+        ).metadata.agent
         assert reported is not None
         assert reported.llm is False
 
