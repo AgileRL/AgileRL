@@ -79,44 +79,12 @@ print(result)
 
 ## Inference example
 
-Inference uses the same credential as the rest of the CLI: a personal access token
-from Profile then CLI API key, or the token `arena login` stores. `Agent` picks up
-`ARENA_API_KEY` when you pass no `api_key`.
-
 ```python
 from agilerl.arena import Agent
 
 agent = Agent("https://<deployment-id>.inference.agilerl.com", api_key="arena_pat_...")
 action, _ = agent.get_action(observation)
 ```
-
-### Chat sessions
-
-LLM deployments keep chat history, and the CLI keeps track of which conversation
-you are in. The first prompt starts one and later prompts carry on from it:
-
-```bash
-arena agent run my-chat-model
-arena agent generate --prompt "My name is Sam."
-arena agent generate --prompt "What is my name?"
-```
-
-Start a fresh conversation with `--new-session`, or end the current one with
-`arena agent sessions clear` so the next prompt starts anew.
-
-To move between conversations, `arena agent sessions resume` lists what is
-stored and lets you pick one with the arrow keys:
-
-```bash
-arena agent sessions list                  # what is stored, current one marked
-arena agent sessions resume                # arrow keys, Enter to pick
-arena agent sessions get <session-id>      # read a transcript
-arena agent sessions delete <session-id>   # remove one for good
-```
-
-Who a session belongs to follows the deployment's memory scope, chosen on the
-first deploy with `arena agent deploy <experiment> --memory-scope user|organization`.
-It defaults to `user` and cannot be changed later.
 
 ## Notes on packaging and imports
 

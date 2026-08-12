@@ -1,10 +1,7 @@
 # Copyright 2026 AgileRL
 # SPDX-License-Identifier: Apache-2.0
 
-"""Persist deployment bindings and active agent selection in ``~/.arena/inference.json``.
-
-Bindings hold the deployment URL only. Credentials are never written here.
-"""
+"""Persist deployment bindings and active agent selection in ``~/.arena/inference.json``."""
 
 from __future__ import annotations
 
@@ -18,7 +15,6 @@ from typing import Any
 INFERENCE_FILE = Path.home() / ".arena" / "inference.json"
 DEPLOYMENTS_KEY = "deployments"
 ACTIVE_AGENT_KEY = "active_agent"
-ACTIVE_SESSIONS_KEY = "active_sessions"
 
 
 def normalized_deployment_name(name: str) -> str:
@@ -50,16 +46,15 @@ def _write_store(data: dict[str, Any]) -> None:
     os.chmod(INFERENCE_FILE, stat.S_IRUSR | stat.S_IWUSR)
 
 
-def load_binding(name: str) -> str | None:
-    """Return the deployment URL for *name* if cached, else ``None``.
-
-    Entries that still carry an ``api_key`` are stale and rejected.
+def load_binding(name: str) -> tuple[str, str] | None:
+    """Return ``(url, api_key)`` for *name* if cached, else ``None``.
 
     :param name: The name of the deployment.
     :type name: str
-    :return: The URL of the deployment.
-    :rtype: str | None
+    :return: The URL and API key of the deployment.
+    :rtype: tuple[str, str] | None
     """
+    # Load data from ~/.arena/inference.json
     data = _load_store()
     raw = data.get(DEPLOYMENTS_KEY)
     if not isinstance(raw, dict):
@@ -67,36 +62,32 @@ def load_binding(name: str) -> str | None:
     entry = raw.get(normalized_deployment_name(name))
     if not isinstance(entry, dict):
         return None
-    if "api_key" in entry:
-        return None
     url = entry.get("url")
-    if not isinstance(url, str) or not url.strip():
+    api_key = entry.get("api_key")
+    if not isinstance(url, str) or not isinstance(api_key, str):
         return None
-    return url.strip()
+    if not url.strip() or not api_key.strip():
+        return None
+    return url.strip(), api_key.strip()
 
 
-def save_binding(name: str, url: str) -> None:
+def save_binding(name: str, url: str, api_key: str) -> None:
     """Merge a deployment binding into ``~/.arena/inference.json``.
-
-    Any credential left in the store by an older release is dropped here, so one
-    write purges every stale entry rather than only the one being saved.
 
     :param name: The name of the deployment.
     :type name: str
     :param url: The URL of the deployment.
     :type url: str
+    :param api_key: The API key of the deployment.
+    :type api_key: str
     """
     data = _load_store()
     deployments = data.get(DEPLOYMENTS_KEY)
     if not isinstance(deployments, dict):
         deployments = {}
-    scrubbed = {
-        existing: {k: v for k, v in entry.items() if k != "api_key"}
-        for existing, entry in deployments.items()
-        if isinstance(entry, dict)
-    }
-    scrubbed[normalized_deployment_name(name)] = {"url": url.strip()}
-    data[DEPLOYMENTS_KEY] = scrubbed
+    key = normalized_deployment_name(name)
+    deployments[key] = {"url": url.strip(), "api_key": api_key.strip()}
+    data[DEPLOYMENTS_KEY] = deployments
     _write_store(data)
 
 
@@ -115,64 +106,6 @@ class ActiveAgentSelection:
     deployment_name: str
     experiment_name: str | None = None
     project_name: str | None = None
-
-
-def save_active_session(deployment_name: str, session_id: str) -> None:
-    """Resume *session_id* on later calls to this deployment.
-
-    Sessions are stored per deployment, since an id from one deployment means
-    nothing to another.
-
-    :param deployment_name: The name of the deployment.
-    :type deployment_name: str
-    :param session_id: The chat session to resume.
-    :type session_id: str
-    """
-    data = _load_store()
-    sessions = data.get(ACTIVE_SESSIONS_KEY)
-    if not isinstance(sessions, dict):
-        sessions = {}
-    sessions[normalized_deployment_name(deployment_name)] = session_id.strip()
-    data[ACTIVE_SESSIONS_KEY] = sessions
-    _write_store(data)
-
-
-def load_active_session(deployment_name: str) -> str | None:
-    """Return the session being resumed on *deployment_name*, else ``None``.
-
-    :param deployment_name: The name of the deployment.
-    :type deployment_name: str
-    :return: The chat session to resume.
-    :rtype: str | None
-    """
-    data = _load_store()
-    sessions = data.get(ACTIVE_SESSIONS_KEY)
-    if not isinstance(sessions, dict):
-        return None
-    session_id = sessions.get(normalized_deployment_name(deployment_name))
-    if not isinstance(session_id, str) or not session_id.strip():
-        return None
-    return session_id.strip()
-
-
-def clear_active_session(deployment_name: str) -> bool:
-    """Stop resuming a session on *deployment_name*.
-
-    :param deployment_name: The name of the deployment.
-    :type deployment_name: str
-    :return: ``True`` if a session was being resumed, ``False`` if there was
-        nothing to clear.
-    :rtype: bool
-    """
-    data = _load_store()
-    sessions = data.get(ACTIVE_SESSIONS_KEY)
-    if not isinstance(sessions, dict):
-        return False
-    if sessions.pop(normalized_deployment_name(deployment_name), None) is None:
-        return False
-    data[ACTIVE_SESSIONS_KEY] = sessions
-    _write_store(data)
-    return True
 
 
 def save_active_agent(

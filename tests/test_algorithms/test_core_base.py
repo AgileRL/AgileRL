@@ -7229,6 +7229,10 @@ class TestLLMInitializeActorsExpertLoraGuards:
                 "agilerl.algorithms.core.base.mark_expert_wrappers_as_zero3_leaves",
                 mark,
             ),
+            patch(
+                "agilerl.algorithms.core.base.gather_if_zero3",
+                return_value=nullcontext(),
+            ),
             patch.object(agent, "use_adapter"),
         ):
             LLMAlgorithm._initialize_actors(agent, base_model, add_adapters=True)
@@ -7270,118 +7274,15 @@ class TestLLMInitializeActorsExpertLoraGuards:
                 "agilerl.algorithms.core.base.mark_expert_wrappers_as_zero3_leaves",
                 mark,
             ),
+            patch(
+                "agilerl.algorithms.core.base.gather_if_zero3",
+                return_value=nullcontext(),
+            ),
             patch.object(agent, "use_adapter"),
         ):
             LLMAlgorithm._initialize_actors(agent, base_model, add_adapters=True)
 
         mark.assert_not_called()
-
-
-class _PackedExperts(torch.nn.Module):
-    """NemotronH-style self-routing packed experts with stacked 3D weights."""
-
-    def __init__(self, num_experts: int, hidden: int, intermediate: int) -> None:
-        super().__init__()
-        self.num_experts = num_experts
-        self.up_proj = torch.nn.Parameter(
-            torch.randn(num_experts, intermediate, hidden) * 0.1
-        )
-        self.down_proj = torch.nn.Parameter(
-            torch.randn(num_experts, hidden, intermediate) * 0.1
-        )
-        self.act_fn = F.silu
-
-    def forward(self, hidden_states, top_k_index, top_k_weights):
-        return hidden_states
-
-
-class _PackedMoeModel(torch.nn.Module):
-    """Two-layer stack of packed-experts blocks under a ``mixer`` path."""
-
-    def __init__(self, num_experts: int = 4, hidden: int = 8) -> None:
-        super().__init__()
-        self.layers = torch.nn.ModuleList()
-        for _ in range(2):
-            block = torch.nn.Module()
-            block.mixer = torch.nn.Module()
-            block.mixer.experts = _PackedExperts(num_experts, hidden, 6)
-            self.layers.append(block)
-
-
-@_LLM_DEPS_SKIP
-class TestLLMInitializeActorsExpertLoraZero3Memory:
-    """Expert-LoRA attach under ZeRO-3 must not need the experts resident."""
-
-    def test_zero3_attach_succeeds_on_partitioned_placeholders(self) -> None:
-        """Attach works while every expert param is an empty ZeRO-3 placeholder.
-
-        The fake partitioned params carry only ``ds_shape``/``ds_status``, so
-        no DeepSpeed gather can materialize them: the attach can only succeed
-        by reading shapes without touching data, and any regression to
-        gathering the packed experts fails this test.
-        """
-        from peft.tuners.lora.layer import ParamWrapper
-
-        from agilerl.algorithms.core.llm_ops.moe_lora import (
-            RoutedExpertsLoraWrapper,
-        )
-
-        num_experts, hidden = 4, 8
-        lora = LoraConfig(
-            r=4,
-            lora_alpha=8,
-            lora_dropout=0.0,
-            target_modules=[],
-            target_parameters=["experts.up_proj", "experts.down_proj"],
-        )
-        agent = _make_llm_agent(lora_config=lora)
-        agent.selected_adapters = ("actor",)
-        agent.zero_stage = 3
-        base_model = _PackedMoeModel(num_experts=num_experts, hidden=hidden)
-        expert_params = [
-            param
-            for name, param in base_model.named_parameters()
-            if name.endswith(("up_proj", "down_proj"))
-        ]
-        assert len(expert_params) == 4
-        for param in expert_params:
-            param.ds_shape = tuple(param.shape)
-            param.ds_status = SimpleNamespace(name="NOT_AVAILABLE")
-            param.data = torch.empty(0)
-
-        mark = MagicMock()
-        with (
-            patch(
-                "agilerl.algorithms.core.base.adapt_lora_config_for_model",
-                side_effect=lambda _model, cfg, **kw: cfg,
-            ),
-            patch(
-                "agilerl.algorithms.core.base.patch_lora_for_fused_forward",
-                create=True,
-            ),
-            patch("agilerl.algorithms.core.base.HAS_LIGER_KERNEL", False),
-            patch(
-                "agilerl.algorithms.core.base.mark_expert_wrappers_as_zero3_leaves",
-                mark,
-            ),
-            patch.object(agent, "use_adapter"),
-        ):
-            LLMAlgorithm._initialize_actors(agent, base_model, add_adapters=True)
-
-        assert all(param.numel() == 0 for param in expert_params)
-        wrappers = [
-            module
-            for module in agent.actor.modules()
-            if isinstance(module, ParamWrapper)
-        ]
-        assert len(wrappers) == 4
-        upgraded = [w for w in wrappers if isinstance(w, RoutedExpertsLoraWrapper)]
-        assert len(upgraded) == 2
-        for wrapper in wrappers:
-            assert wrapper.num_experts == num_experts
-            lora_a = wrapper.lora_A["actor"].weight
-            assert lora_a.shape[0] == 4 * num_experts
-        mark.assert_called_once()
 
 
 @_LLM_DEPS_SKIP

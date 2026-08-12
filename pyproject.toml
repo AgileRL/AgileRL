@@ -1,6 +1,6 @@
 [project]
 name = "agilerl"
-version = "2.9.1"
+version = "2.9.0"
 description = "AgileRL is a deep reinforcement learning library focused on improving RL development through RLOps."
 authors = [{ name = "Nick Ustaran-Anderegg", email = "dev@agilerl.com" }]
 license = "Apache-2.0"
@@ -58,7 +58,7 @@ llm = [
     "vllm>=0.24; sys_platform == 'linux'",
 ]
 arena = [
-    "agilerl-arena==0.2.0",
+    "agilerl-arena==0.1.3",
 ]
 all = [
     "agilerl[box2d,llm,arena]",
@@ -69,6 +69,7 @@ dev = [
     "pytest>=9.0.2",
     "pytest-cov>=7.0.0",
     "pytest-env>=1.2.0",
+    "pytest-timeout>=2.3.1",
     "pytest-xdist>=3.5",
     "nvidia-ml-py>=12.0.0",  # For GPU memory monitoring in tests
 ]
@@ -84,9 +85,8 @@ docs = [
     "sphinxcontrib-googleanalytics>=0.5",
 ]
 
-[tool.uv.workspace]
-members = ["agilerl-arena"]
-
+# Hub workspace members are declared in the monorepo root pyproject.toml.
+# agilerl-arena remains a path/workspace sibling under oss/agilerl/.
 [tool.uv.sources]
 agilerl-arena = { workspace = true }
 

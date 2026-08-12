@@ -189,7 +189,6 @@ if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
         offload_colocated_trainer_from_gpu,
         save_peft_adapter_for_vllm_rollout,
         stitch_completion_after_windowed_vllm_generate,
-        zero3_full_shape_views,
     )
     from agilerl.utils.zero3_patches import install_zero3_patches
 
@@ -4460,11 +4459,9 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
                     )
                     raise ValueError(msg)
             keep_adapter_base_dtype = self.zero_stage == 3 and not quantized_base
-            # PEFT reads only the targeted parameters' shapes when attaching
-            # expert wrappers; under zero.Init they are partitioned
-            # placeholders, so expose zero-storage full-shape views rather
-            # than all-gathering the experts, whose full set can exceed
-            # device memory on large MoEs.
+            # PEFT reads the targeted parameters' shapes when attaching expert
+            # wrappers; under zero.Init they are partitioned placeholders, so
+            # gather them for the duration of the attach.
             expert_params: list[torch.Tensor] = []
             attach_ctx: AbstractContextManager[Any] = nullcontext()
             if expert_target_parameters and self.zero_stage == 3:
@@ -4473,7 +4470,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
                     for name, param in peft_target.named_parameters()
                     if any(name.endswith(target) for target in expert_target_parameters)
                 ]
-                attach_ctx = zero3_full_shape_views(expert_params)
+                attach_ctx = gather_if_zero3(self.zero_stage, expert_params)
             with attach_ctx:
                 peft_target = get_peft_model(
                     peft_target,
@@ -4513,8 +4510,8 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
 
             if expert_target_parameters:
                 # The upgrade's convention checks read the packed weights'
-                # shapes; the same zero-storage views serve them under ZeRO-3.
-                with zero3_full_shape_views(expert_params):
+                # shapes, so gather the shards again under ZeRO-3.
+                with gather_if_zero3(self.zero_stage, expert_params):
                     n_expert_lora = upgrade_moe_param_wrappers(peft_target)
                 logger.info(
                     "Split expert-LoRA execution enabled on %d packed-experts modules.",
