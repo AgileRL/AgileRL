@@ -10,7 +10,7 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, BinaryIO, ClassVar, TypedDict
+from typing import Any, BinaryIO, ClassVar, Literal, TypedDict
 
 import httpx
 from typing_extensions import Self
@@ -25,6 +25,7 @@ from agilerl.arena.exceptions import (
     ArenaAPIError,
     ArenaAuthError,
     ArenaConfigError,
+    ArenaInferenceError,
     ArenaTrainingError,
     ArenaValidationError,
 )
@@ -50,6 +51,9 @@ from agilerl.arena.utils import (
 logger = logging.getLogger(__name__)
 
 DATASET_CATEGORIES = frozenset({"sft", "preference", "reasoning"})
+
+MemoryScope = Literal["user", "organization"]
+MEMORY_SCOPES: tuple[MemoryScope, ...] = ("user", "organization")
 
 
 # Functional syntax because ``in`` (a parameter's location) is a Python keyword
@@ -1212,8 +1216,23 @@ class ArenaClient:
             params["projectName"] = pn
         return params
 
+    @staticmethod
+    def _validated_memory_scope(memory_scope: str) -> str:
+        """Reject an unknown memory scope here rather than at the API."""
+        scope = memory_scope.strip().lower()
+        if scope not in MEMORY_SCOPES:
+            msg = (
+                f"Unknown memory scope {memory_scope!r}. "
+                f"Choose one of: {', '.join(MEMORY_SCOPES)}."
+            )
+            raise ArenaValidationError(msg)
+        return scope
+
     def deploy_agent(
-        self, experiment_name: str, checkpoint: str | None = None
+        self,
+        experiment_name: str,
+        checkpoint: str | None = None,
+        memory_scope: MemoryScope | None = None,
     ) -> dict[str, Any]:
         """Create an inference deployment from an experiment checkpoint.
 
@@ -1221,13 +1240,25 @@ class ArenaClient:
         :type experiment_name: str
         :param checkpoint: The checkpoint to deploy. If None, deploy the best checkpoint.
         :type checkpoint: str | None
+        :param memory_scope: Who an LLM deployment keeps chat sessions for. ``"user"``
+            gives every caller their own conversations, ``"organization"`` shares them
+            across the organisation. A new deployment defaults to ``"user"``. Redeploying
+            with ``None`` keeps the scope already stored, it does not reset it, and the
+            scope cannot be changed after the deployment exists.
+        :type memory_scope: MemoryScope | None
         :returns: A dictionary containing the deployment result.
         :rtype: dict[str, Any]
         """
+        body: dict[str, Any] = {
+            "experiment_name": experiment_name,
+            "checkpoint": checkpoint,
+        }
+        if memory_scope is not None:
+            body["memoryScope"] = self._validated_memory_scope(memory_scope)
         result = self._request(
             "POST",
             "/api/cli/v1/inference/deploy",
-            json={"experiment_name": experiment_name, "checkpoint": checkpoint},
+            json=body,
         )
         checkpoint_suffix = (
             f" (checkpoint {checkpoint})" if checkpoint else " (best checkpoint)"
@@ -1272,6 +1303,11 @@ class ArenaClient:
             return []
         return [r for r in rows if isinstance(r, dict)]
 
+    def _inference_credential(self) -> str | None:
+        """Return :meth:`_credential`, refreshing an expiring OAuth token first."""
+        self._proactively_refresh_oauth()
+        return self._credential()
+
     def open_inference_agent(
         self,
         deployment_name: str,
@@ -1285,6 +1321,9 @@ class ArenaClient:
 
         Attempts to load the deployment from the cache, and if not found, fetches it from the API.
 
+        The agent carries this client's own credential, so run :meth:`login` or set
+        ``ARENA_API_KEY`` before using a deployment that keeps memory per user.
+
         :param deployment_name: The name of the deployment to open.
         :type deployment_name: str
         :param refresh: Whether to refresh the deployment metadata.
@@ -1295,20 +1334,42 @@ class ArenaClient:
         :param project_name: Project name to disambiguate when multiple deployments
             share the same deployment name.
         :type project_name: str | None
+        A redeploy moves the deployment to a new URL, which leaves the cached one
+        answering 404. Rather than make you pass *refresh* to find that out, a
+        404 from the cached URL refetches it once and retries.
+
         :param timeout: HTTP timeout in seconds for the returned agent's inference requests.
         :type timeout: int | None
         :returns: An :class:`~arena.inference.Agent` instance.
         :rtype: Agent
         """
-        url, api_key = self._ensure_inference_binding(
+        url = self._ensure_inference_binding(
             deployment_name,
             refresh=refresh,
             experiment_name=experiment_name,
             project_name=project_name,
         )
+        try:
+            return self._open_agent_at(url, timeout)
+        except ArenaInferenceError as exc:
+            if refresh or exc.status_code != 404:
+                raise
+            fresh_url = self._ensure_inference_binding(
+                deployment_name,
+                refresh=True,
+                experiment_name=experiment_name,
+                project_name=project_name,
+            )
+            if fresh_url == url:
+                raise
+            logger.info("Deployment %s moved to %s.", deployment_name, fresh_url)
+            return self._open_agent_at(fresh_url, timeout)
+
+    def _open_agent_at(self, url: str, timeout: int | None) -> Agent:
+        """Build an agent for *url*, probing it to confirm the URL still serves."""
         return Agent(
             url,
-            api_key=api_key,
+            api_key=self._inference_credential(),
             timeout=timeout or self._request_timeout,
         )
 
@@ -1331,8 +1392,8 @@ class ArenaClient:
     # -------------------------------------------------------------------------
 
     @staticmethod
-    def _deployment_url_and_api_key(row: dict[str, Any]) -> tuple[str, str]:
-        """Parse ``url`` and deployment ``api_key`` from an API deployment row."""
+    def _deployment_url(row: dict[str, Any]) -> str:
+        """Parse ``url`` from an API deployment row."""
         url = row.get("url")
         if not isinstance(url, str) or not url.strip():
             msg = "Deployment has no inference URL."
@@ -1340,20 +1401,7 @@ class ArenaClient:
                 msg,
                 cli_hint="Wait until provisioning completes, then retry with --refresh.",
             )
-
-        raw_key = row.get("api_key")
-        if raw_key is None:
-            msg = "Deployment record had no api_key."
-            raise ArenaAPIError(
-                msg,
-                cli_hint="Retry with arena login and --refresh.",
-            )
-        api_key = str(raw_key).strip()
-        if not api_key:
-            msg = "Deployment api_key was empty."
-            raise ArenaAPIError(msg)
-
-        return url.strip(), api_key
+        return url.strip()
 
     def _fetch_deployment_for_inference(
         self,
@@ -1401,27 +1449,23 @@ class ArenaClient:
         refresh: bool = False,
         experiment_name: str | None = None,
         project_name: str | None = None,
-    ) -> tuple[str, str]:
-        """Return cached ``(url, api_key)`` or fetch from the API, persist, and return."""
+    ) -> str:
+        """Return the cached deployment URL, or fetch it from the API and persist it."""
         key = normalized_deployment_name(deployment_name)
 
-        # Try to load the cached binding
         if not refresh:
             cached = load_binding(key)
             if cached is not None:
                 return cached
 
-        # Fetch the deployment from the API
         row = self._fetch_deployment_for_inference(
             deployment_name,
             experiment_name=experiment_name,
             project_name=project_name,
         )
-
-        # Save the deployment to the cache
-        url, api_key = self._deployment_url_and_api_key(row)
-        save_binding(key, url, api_key)
-        return url, api_key
+        url = self._deployment_url(row)
+        save_binding(key, url)
+        return url
 
     def _create_and_validate(
         self,
@@ -1527,15 +1571,15 @@ class ArenaClient:
             "refresh_token", self._tokens.refresh_token
         )
 
+    def _credential(self) -> str | None:
+        """Return the bearer material to authenticate with: PAT, else OAuth token."""
+        return self._api_key or self._tokens.access_token
+
     def _auth_headers(self) -> dict[str, str]:
         """Return the authentication headers for the request."""
-        # If an API key is provided, use it for authentication.
-        if self._api_key:
-            return {"Authorization": f"Bearer {self._api_key}"}
-
-        # If an access token from OAuth2 authentication is available
-        if self._tokens.access_token:
-            return {"Authorization": f"Bearer {self._tokens.access_token}"}
+        credential = self._credential()
+        if credential:
+            return {"Authorization": f"Bearer {credential}"}
 
         msg = "Client has not been authenticated with Arena."
         raise ArenaAuthError(

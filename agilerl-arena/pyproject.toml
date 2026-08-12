@@ -1,6 +1,6 @@
 [project]
 name = "agilerl-arena"
-version = "0.1.3"
+version = "0.2.0"
 description = "Arena Platform Client Library and CLI."
 authors = [{ name = "Nick Ustaran-Anderegg", email = "dev@agilerl.com" }]
 license = "Apache-2.0"

@@ -76,6 +76,19 @@ def credentials_file(credentials_path: Path) -> Path:
 
 
 @pytest.fixture(autouse=True)
+def _isolate_inference_cache(arena_home: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Point the inference cache at the tmp ``~/.arena/inference.json``.
+
+    Deployment bindings and resumed sessions are read by ordinary CLI commands,
+    so without this a test would pick up the developer's real cache, and a test
+    that writes would overwrite it.
+    """
+    path = arena_home / ".arena" / "inference.json"
+    monkeypatch.setattr("agilerl.arena.inference.cache.INFERENCE_FILE", path)
+    return path
+
+
+@pytest.fixture(autouse=True)
 def _isolate_arena_credentials(
     arena_home: Path,
 ) -> None:

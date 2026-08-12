@@ -7,6 +7,8 @@ import csv
 import io
 import json
 import logging
+import os
+import sys
 from dataclasses import dataclass
 from functools import singledispatch
 from typing import Any
@@ -14,7 +16,9 @@ from typing import Any
 import click
 from rich.live import Live
 from rich.markup import escape
+from rich.padding import Padding
 from rich.table import Table
+from rich.text import Text
 from typing_extensions import Self
 
 from agilerl.arena import console, error_console
@@ -26,6 +30,13 @@ from agilerl.arena.stream import (
     StatusEvent,
     StreamEvent,
 )
+
+if sys.platform == "win32":
+    import msvcrt  # pragma: no cover
+else:
+    import select
+    import termios
+    import tty
 
 logger = logging.getLogger(__name__)
 
@@ -106,18 +117,23 @@ def _emit_simple_list(
     _print_rich(table, is_error=is_error)
 
 
+def _row_keys(values: list[dict[str, Any]]) -> list[str]:
+    """Union of the keys across *values*, in first-seen order."""
+    keys: list[str] = []
+    for row in values:
+        for key in row:
+            if key not in keys:
+                keys.append(key)
+    return keys
+
+
 def _emit_list_of_dicts(
     values: list[dict[str, Any]],
     *,
     is_error: bool = False,
     columns: list[str] | None = None,
 ) -> None:
-    keys: list[str] = []
-    for row in values:
-        for key in row:
-            if key not in keys:
-                keys.append(key)
-
+    keys = _row_keys(values)
     headers = columns if columns and len(columns) == len(keys) else keys
     table = Table(show_header=True, header_style="bold")
     for header in headers:
@@ -175,6 +191,188 @@ def _format_cell(value: object) -> str:
     if isinstance(value, (dict, list)):
         return json.dumps(value, default=str)
     return str(value)
+
+
+_ROLE_STYLES = {
+    "user": "bold cyan",
+    "assistant": "bold green",
+    "system": "bold yellow",
+    "tool": "bold magenta",
+}
+
+
+def emit_session_transcript(session: dict[str, Any], *, is_error: bool = False) -> None:
+    """Print a chat session as a conversation rather than a table of fields.
+
+    Message text is printed as-is, so markup and escapes in a model's reply are
+    shown rather than interpreted.
+
+    :param session: Session detail with ``session_id`` and ``messages``; keys the
+        deployment leaves out, such as timestamps, are skipped.
+    :type session: dict[str, Any]
+    :param is_error: Whether to print to the error console.
+    :type is_error: bool
+    :returns: None
+    """
+    raw = session.get("messages")
+    messages = [m for m in raw if isinstance(m, dict)] if isinstance(raw, list) else []
+
+    header = Text(f"Session {session.get('session_id') or 'unknown'}", style="bold")
+    header.append(f"  ·  {len(messages)} messages", style="dim")
+    for label, key in (("created", "created_at"), ("updated", "last_updated")):
+        value = session.get(key)
+        if value:
+            header.append(f"  ·  {label} {value}", style="dim")
+    _print_rich(header, is_error=is_error)
+
+    if not messages:
+        _print_rich(
+            Text("No messages in this session.", style="dim"), is_error=is_error
+        )
+        return
+
+    for message in messages:
+        _print_rich("", is_error=is_error)
+        role = str(message.get("role") or "unknown")
+        _print_rich(Text(role, style=_ROLE_STYLES.get(role, "bold")), is_error=is_error)
+        _print_rich(
+            Padding(Text(str(message.get("content") or "")), (0, 0, 0, 2)),
+            is_error=is_error,
+        )
+
+
+# -----------------------------------------------------------------------------
+### Interactive row selection ###
+# -----------------------------------------------------------------------------
+
+UP, DOWN, ENTER, CANCEL = "up", "down", "enter", "cancel"
+
+_POSIX_SEQUENCES = {"[A": UP, "[B": DOWN, "OA": UP, "OB": DOWN}
+_WINDOWS_SEQUENCES = {"H": UP, "P": DOWN}
+
+
+def supports_interactive_selection() -> bool:
+    """Whether the terminal can drive :func:`select_row`.
+
+    False when stdin is a pipe or the output is redirected, which is what makes
+    the CLI usable from scripts and CI.
+
+    :returns: Whether an interactive picker can run.
+    :rtype: bool
+    """
+    try:
+        return sys.stdin.isatty() and console.is_terminal
+    except (AttributeError, ValueError):
+        return False
+
+
+def _read_key_windows() -> str | None:
+    char = msvcrt.getwch()
+    if char in ("\x00", "\xe0"):
+        return _WINDOWS_SEQUENCES.get(msvcrt.getwch())
+    if char in ("\r", "\n"):
+        return ENTER
+    if char in ("\x03", "\x1b", "q"):
+        return CANCEL
+    return None
+
+
+def _read_key_posix() -> str | None:
+    fd = sys.stdin.fileno()
+    original = termios.tcgetattr(fd)
+    try:
+        # TCSADRAIN, not tty.setraw's default TCSAFLUSH, which would discard a
+        # keystroke that arrived while the previous one was being handled.
+        tty.setraw(fd, termios.TCSADRAIN)
+        char = os.read(fd, 1).decode(errors="ignore")
+        if char == "\x1b":
+            # An arrow key sends two more bytes immediately; a bare Escape does
+            # not, and waiting on a read that never comes would hang the picker.
+            if not select.select([fd], [], [], 0.05)[0]:
+                return CANCEL
+            return _POSIX_SEQUENCES.get(os.read(fd, 2).decode(errors="ignore"))
+        if char in ("\r", "\n"):
+            return ENTER
+        # Raw mode swallows SIGINT, so Ctrl-C arrives as a plain byte.
+        if char in ("\x03", "q"):
+            return CANCEL
+        return None
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, original)
+
+
+def _read_key() -> str | None:
+    """Block for one keypress, returning a direction, ENTER, CANCEL, or None."""
+    if sys.platform == "win32":
+        return _read_key_windows()
+    return _read_key_posix()
+
+
+def _selection_table(
+    values: list[dict[str, Any]],
+    keys: list[str],
+    headers: list[str],
+    selected: int,
+) -> Table:
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("")
+    for header in headers:
+        table.add_column(str(header))
+
+    for index, row in enumerate(values):
+        cells = [_format_cell(row.get(key)) for key in keys]
+        if index == selected:
+            table.add_row(
+                "[cyan]▸[/cyan]", *[f"[cyan]{escape(c)}[/cyan]" for c in cells]
+            )
+        else:
+            table.add_row(" ", *[escape(c) for c in cells])
+    return table
+
+
+def select_row(
+    values: list[dict[str, Any]],
+    *,
+    columns: list[str] | None = None,
+    prompt: str = "Use ↑/↓ to choose, Enter to select, Esc to cancel.",
+    selected: int = 0,
+) -> dict[str, Any] | None:
+    """Let the user pick one row with the arrow keys.
+
+    Call :func:`supports_interactive_selection` first; this assumes a terminal.
+
+    :param values: The rows to choose between.
+    :type values: list[dict[str, Any]]
+    :param columns: Display names for the row keys, positionally matched when the
+        counts are equal.
+    :type columns: list[str] | None
+    :param prompt: The hint shown above the table.
+    :type prompt: str
+    :param selected: The row highlighted when the picker opens.
+    :type selected: int
+    :returns: The chosen row, or ``None`` if the user cancelled.
+    :rtype: dict[str, Any] | None
+    """
+    if not values:
+        return None
+
+    keys = _row_keys(values)
+    headers = columns if columns and len(columns) == len(keys) else keys
+    index = min(max(selected, 0), len(values) - 1)
+
+    console.print(prompt, style="dim")
+    with Live(console=console, auto_refresh=False, transient=True) as live:
+        while True:
+            live.update(_selection_table(values, keys, headers, index), refresh=True)
+            key = _read_key()
+            if key == UP:
+                index = (index - 1) % len(values)
+            elif key == DOWN:
+                index = (index + 1) % len(values)
+            elif key == ENTER:
+                return values[index]
+            elif key == CANCEL:
+                return None
 
 
 def handle_error(exc: Exception) -> None:
