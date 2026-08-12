@@ -35,11 +35,11 @@ the bare formulas. For a platform that must size arbitrary checkpoints, that
 is a liability, not an asset. Accuracy since then has come from finding
 missing physical terms, not from fitting.
 
-The measurement rig that found those terms lives in `tools/memory_profiling`,
-outside the shipped package. It is how the model was built and how it is
-guarded against drift (`python -m tools.memory_profiling.validate` replays all
-406 stored measurements through the current core, no GPU), but nothing a
-caller imports.
+The measurement rig that found those terms is kept out of this tree entirely,
+on the `memory/profiling-rig` branch, together with the 406 measurements it
+collected and a `validate` entry point that replays them through the core on
+CPU. It is how the model was built and how a formula edit gets checked for
+drift, but it is not something a caller imports and it does not need to ship.
 
 ## Why two independent bars
 
@@ -172,13 +172,12 @@ What remains is a validation corpus: 406 measurements over 8 models
 of `seq_len x micro_batch x group_size x lora_rank` plus 5 interior points,
 with completion length pinned so runs are byte-reproducible.
 
-    python -m tools.memory_profiling.validate
-
-replays all of them through the current core on CPU. Constants drift with
-framework changes — anything touching the fused kernels, checkpointing or the
-vLLM wiring moves them — and this is the only thing between a formula edit and
-silent wrongness, since the estimator keeps returning plausible numbers either
-way. `tools/memory_profiling/test_fixtures.py` runs it in CI.
+replays all of them through the current core on CPU, from the
+`memory/profiling-rig` branch. Constants drift with framework changes —
+anything touching the fused kernels, checkpointing or the vLLM wiring moves
+them — and this is the only thing between a formula edit and silent
+wrongness, since the estimator keeps returning plausible numbers either way.
+Check out that branch before changing a formula.
 
 ## Porting notes
 
@@ -287,7 +286,7 @@ claim.
 The sweep compares one predicted peak against one measured peak, so it
 validates sums, not splits — the bars could each be wrong and cancel. An
 allocator snapshot (`--snapshot`, then
-`python -m tools.memory_profiling.snapshot`) attributes the *peak instant*
+the rig's `snapshot` tool) attributes the *peak instant*
 per call site. On Qwen2.5-0.5B at seq=4096, micro-batch 8, group 16:
 
 | component | predicted | observed |

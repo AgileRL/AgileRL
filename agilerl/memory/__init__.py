@@ -9,9 +9,9 @@ per-device constants — there is no per-model profiling step and no fitted
 correction. Pure python with no torch dependency, so the same calculation runs
 in the CLI, in a backend service, and client-side in the Arena widget.
 
-The measurement rig that built and validates this model lives outside the
-package in ``tools/memory_profiling`` — it is how the terms were found, not
-something a caller needs.
+The measurement rig that built this model is not in the package or the tree;
+it lives on the ``memory/profiling-rig`` branch with the 406 measurements it
+collected. It is how the terms were found, not something a caller needs.
 
 See ``agilerl/memory/README.md`` for the component model and its grounding in
 the framework's actual code paths.

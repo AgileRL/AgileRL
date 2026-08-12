@@ -141,9 +141,8 @@ parallel = true
 concurrency = ["multiprocessing", "thread"]
 sigterm = true
 omit = [
-    # GPU memory estimation. The profiling half only runs on a GPU box (it
-    # drives vLLM and NVML), and the calculation half is validated against
-    # measured hardware fixtures rather than by line coverage.
+    # GPU memory estimation: validated against measured hardware fixtures
+    # (see the memory/profiling-rig branch) rather than by line coverage.
     "agilerl/memory/*",
 ]
 
@@ -215,8 +214,6 @@ include = [
     "agilerl/algorithms/grpo.py",
     "agilerl/algorithms/sft.py",
     "agilerl/memory/preflight.py",
-    "agilerl/memory/profiling/harness.py",
-    "agilerl/memory/profiling/sweep.py",
     "agilerl/utils/llm_utils.py",
     "agilerl/utils/utils.py",
 ]
@@ -266,7 +263,7 @@ ignore = [
 allow-star-arg-any = true
 
 [tool.ruff.lint.per-file-ignores]
-"{agilerl,agilerl-arena/agilerl,tests,agilerl-arena/tests,tools}/**" = [
+"{agilerl,agilerl-arena/agilerl,tests,agilerl-arena/tests}/**" = [
     "D1",            # missing docstrings in public modules/classes/methods/packages
     "D205",          # 1 blank line between summary and description
     "D4",            # first line punctuation/period (conflicts with multi-line)
@@ -286,9 +283,6 @@ allow-star-arg-any = true
     "PD011",         # .values -> .to_numpy()
 ]
 "{tests,agilerl-arena/tests}/**" = [
-    "ANN",           # test signatures don't need annotations
-]
-"tools/**/test_*.py" = [
     "ANN",           # test signatures don't need annotations
 ]
 "{benchmarking,demos,tutorials}/**" = ["ALL"]
