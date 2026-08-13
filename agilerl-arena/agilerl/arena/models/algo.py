@@ -107,7 +107,7 @@ class AlgorithmSpec(BaseModel):
 
     """
 
-    batch_size: int = Field(default=128, ge=1)
+    batch_size: int | None = Field(default=None, ge=1)
     hp_config: dict[str, RLHyperparameter] | None = None
 
     default_evo_steps: ClassVar[int] = 10_000
@@ -159,14 +159,14 @@ class LLMAlgorithmSpec(AlgorithmSpec):
     ``"preference"``, ``"sft"``, ``"multiturn"``).
     """
 
-    beta: float = Field(default=0.001, ge=0.0, le=1.0)
+    beta: float | None = Field(default=None, ge=0.0, le=1.0)
     max_grad_norm: float = Field(default=0.1, ge=0.0)
     update_epochs: int = Field(default=1, ge=1)
     reduce_memory_peak: bool = Field(default=False)
-    use_separate_reference_adapter: bool = Field(default=False)
+    use_separate_reference_adapter: bool | None = Field(default=None)
     calc_position_embeddings: bool = Field(default=True)
     gradient_checkpointing: bool = Field(default=True)
-    use_liger_loss: bool = Field(default=False)
+    use_liger_loss: bool | None = Field(default=None)
     seed: int = Field(default=42)
 
     # These fields come from the "network" section of the manifest

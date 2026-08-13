@@ -86,7 +86,10 @@ def _attach_default_network(algorithm) -> None:
 def _default_algorithm_spec(name: str):
     spec_cls = ARENA_REGISTRY.get(name).spec_cls
     if issubclass(spec_cls, LLMAlgorithmSpec):
-        kwargs: dict = {"pretrained_model_name_or_path": _TINY_LLM}
+        kwargs: dict = {
+            "pretrained_model_name_or_path": _TINY_LLM,
+            "lora_config": {"lora_r": 8, "lora_alpha": 16},
+        }
         if name in _GRPO_FAMILY:
             kwargs["group_size"] = 2
         return spec_cls(**kwargs)
@@ -94,11 +97,19 @@ def _default_algorithm_spec(name: str):
     return spec_cls()
 
 
+def _default_environment(algorithm) -> dict[str, Any]:
+    """Environment section with the keys the runtime requires for the agent type."""
+    env = ArenaEnvSpec(name=_DEFAULT_ENV[algorithm.agent_type]).model_dump()
+    if isinstance(algorithm, LLMAlgorithmSpec):
+        env["env_type"] = str(type(algorithm).env_type)
+    return env
+
+
 def _build_manifest_dict(algorithm, algo_name: str) -> dict[str, Any]:
     """Assemble a manifest dict from arena model instances."""
     data: dict[str, Any] = {
         "algorithm": algorithm,
-        "environment": ArenaEnvSpec(name=_DEFAULT_ENV[algorithm.agent_type]),
+        "environment": _default_environment(algorithm),
         "training": TrainingSpec(max_steps=100_000, evo_steps=1_000, pop_size=1),
         "mutation": MutationSpec(),
         "selection_strategy": TournamentSelectionSpec(),

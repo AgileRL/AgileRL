@@ -24,9 +24,9 @@ else:
 class LLMREINFORCESpec(LLMAlgorithmSpec):
     """Specification for LLMREINFORCE algorithm."""
 
-    lr: float = Field(default=5e-6, ge=0.0)
+    lr: float = Field(default=5e-7, ge=0.0)
     clip_coef: float = Field(default=0.2, ge=0.0, le=1.0)
-    gamma: float = Field(default=0.99, ge=0.0, le=1.0)
+    gamma: float = Field(default=1.0, ge=0.0, le=1.0)
     temperature: float = Field(default=0.9)
     max_output_tokens: int | None = Field(default=1024)
     min_output_tokens: int | None = Field(default=None)

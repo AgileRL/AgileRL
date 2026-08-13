@@ -33,7 +33,7 @@ algorithm:
 
 environment:
     env_type: multiturn
-    env_name: game:Sudoku-v0-hard
+    entrypoint: game:Sudoku-v0-hard
     max_turns: 50
     max_reward: 1.0
 

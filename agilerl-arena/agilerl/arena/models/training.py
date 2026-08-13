@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import AliasChoices, BaseModel, Field, model_validator
 from typing_extensions import Self
 
@@ -22,6 +24,12 @@ class PerBufferArgs(BaseModel):
 class ReplayBufferSpec(BaseModel):
     """Pydantic model for AgileRL replay buffers.
 
+    :param name: Buffer name forwarded to the runtime (the platform fills a
+        default when unset).
+    :type name: str | None
+    :param kind: Runtime buffer kind — ``"classic"`` (default) or ``"llm"``
+        (async rollout deque).
+    :type kind: Literal["classic", "llm"] | None
     :param memory_size: The memory size of the replay buffer. Defaults to 100,000.
     :type memory_size: int
     :param standard_buffer: Whether to use the standard replay buffer. Defaults to True.
@@ -38,6 +46,8 @@ class ReplayBufferSpec(BaseModel):
     :type n_step: int | None
     """
 
+    name: str | None = Field(default=None)
+    kind: Literal["classic", "llm"] | None = Field(default=None)
     max_size: int = Field(
         default=100_000, ge=1, validation_alias=AliasChoices("max_size", "memory_size")
     )

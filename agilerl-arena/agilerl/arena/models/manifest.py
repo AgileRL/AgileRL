@@ -27,6 +27,7 @@ from agilerl.arena.models.algo import (
     AlgoSpec,
     LLMAlgorithmSpec,
 )
+from agilerl.arena.models.env import LLMEnvType
 from agilerl.arena.models.hpo import MutationSpec, TournamentSelectionSpec
 from agilerl.arena.models.networks import FinetuningNetworkSpec
 from agilerl.arena.models.training import ReplayBufferSpec, TrainingSpec
@@ -265,16 +266,33 @@ class TrainingManifest(BaseModel):
             )
             self.algorithm.max_model_len = llm_network.max_context_length
 
-        if (
-            isinstance(self.algorithm, LLMAlgorithmSpec)
-            and self.algorithm.pretrained_model_name_or_path is None
-        ):
-            msg = (
-                "Required field 'pretrained_model_name_or_path' wasn't found in the manifest. "
-                "This is required for LLM finetuning algorithms, and can be added under either the "
-                "'algorithm' or 'network' sections."
+        if isinstance(self.algorithm, LLMAlgorithmSpec):
+            if self.algorithm.pretrained_model_name_or_path is None:
+                msg = (
+                    "Required field 'pretrained_model_name_or_path' wasn't found in the manifest. "
+                    "This is required for LLM finetuning algorithms, and can be added under either the "
+                    "'algorithm' or 'network' sections."
+                )
+                raise ValueError(msg)
+            network = dict(self.network or {})
+            lora_config = network.get("lora_config")
+            if lora_config is None and self.algorithm.lora_config is not None:
+                lora_config = self.algorithm.lora_config.model_dump(mode="json")
+            if lora_config is None:
+                msg = (
+                    "Required field 'lora_config' wasn't found in the manifest. "
+                    "LLM finetuning algorithms train a LoRA adapter, and the config can be added "
+                    "under either the 'algorithm' or 'network' sections."
+                )
+                raise ValueError(msg)
+            # The runtime reads both from the network section only.
+            network["lora_config"] = lora_config
+            network["pretrained_model_name_or_path"] = (
+                self.algorithm.pretrained_model_name_or_path
             )
-            raise ValueError(msg)
+            self.network = network
+
+        self._validate_environment()
 
         recurrent = bool(getattr(self.algorithm, "recurrent", False))
         simba = isinstance(self.network, dict) and bool(self.network.get("simba"))
@@ -286,6 +304,41 @@ class TrainingManifest(BaseModel):
             raise ValueError(msg)
 
         return self
+
+    def _validate_environment(self) -> None:
+        """Check the environment keys the runtime hard-requires per env kind."""
+        env_config = self.environment if isinstance(self.environment, dict) else {}
+
+        num_envs = env_config.get("num_envs")
+        if num_envs is not None and (
+            isinstance(num_envs, bool) or not isinstance(num_envs, int) or num_envs < 1
+        ):
+            msg = f"environment.num_envs must be an integer >= 1, got {num_envs!r}."
+            raise ValueError(msg)
+
+        if isinstance(self.algorithm, LLMAlgorithmSpec):
+            valid = ", ".join(t.value for t in LLMEnvType)
+            raw_env_type = env_config.get("env_type")
+            if raw_env_type is None:
+                msg = (
+                    "Required field 'environment.env_type' wasn't found in the manifest. "
+                    f"This is required for LLM finetuning algorithms; valid values: {valid}."
+                )
+                raise ValueError(msg)
+            try:
+                env_type = LLMEnvType(raw_env_type)
+            except ValueError as err:
+                msg = f"Invalid environment.env_type {raw_env_type!r}; valid values: {valid}."
+                raise ValueError(msg) from err
+            if env_type is LLMEnvType.MULTITURN and not env_config.get("entrypoint"):
+                msg = (
+                    "Required field 'environment.entrypoint' wasn't found in the manifest "
+                    "(required when environment.env_type is 'multiturn')."
+                )
+                raise ValueError(msg)
+        elif not env_config.get("name"):
+            msg = "Required field 'environment.name' wasn't found in the manifest."
+            raise ValueError(msg)
 
     @staticmethod
     def _load_yaml(path: str | Path) -> dict[str, Any]:

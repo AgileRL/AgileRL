@@ -18,7 +18,7 @@ algorithm:
 
 environment:
     env_type: multiturn
-    env_name: game:GuessTheNumber-v0-easy
+    entrypoint: game:GuessTheNumber-v0-easy
     max_reward: 1.0
 
 training:

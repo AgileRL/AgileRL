@@ -313,10 +313,11 @@ def test_llm_pretrained_model_can_come_from_network_section() -> None:
     payload = TrainingManifest.get_validated(
         _manifest(
             algorithm={"name": "DPO"},
-            environment={"name": "my-llm-env"},
+            environment={"name": "my-llm-env", "env_type": "preference"},
             network={
                 "pretrained_model_name_or_path": "Qwen/Qwen2.5-0.5B-Instruct",
                 "max_context_length": 2048,
+                "lora_config": {"lora_r": 16},
             },
         )
     )
@@ -324,13 +325,16 @@ def test_llm_pretrained_model_can_come_from_network_section() -> None:
         "Qwen/Qwen2.5-0.5B-Instruct"
     )
     assert payload["algorithm"]["max_model_len"] == 2048
+    assert payload["network"]["pretrained_model_name_or_path"] == (
+        "Qwen/Qwen2.5-0.5B-Instruct"
+    )
 
 
 def test_llm_lora_and_max_output_tokens_excluded_from_algorithm() -> None:
     payload = TrainingManifest.get_validated(
         _manifest(
             algorithm={"name": "GRPO", "group_size": 8},
-            environment={"name": "my-llm-env"},
+            environment={"name": "my-llm-env", "env_type": "reasoning"},
             network={
                 "pretrained_model_name_or_path": "Qwen/Qwen2.5-0.5B-Instruct",
                 "max_context_length": 512,
@@ -466,6 +470,176 @@ class TestRuntimeRequiredTrainingFields:
         payload = TrainingManifest.get_validated(_manifest())
         for key in ("max_steps", "evo_steps", "pop_size"):
             assert key in payload["training"]
+
+
+def _llm_manifest(**sections) -> dict:
+    """Build an LLM (GRPO) manifest dict with runtime-valid defaults."""
+    data = {
+        "algorithm": sections.pop("algorithm", {"name": "GRPO", "group_size": 4}),
+        "environment": sections.pop(
+            "environment", {"env_type": "reasoning", "dataset": "my/dataset"}
+        ),
+        "network": sections.pop(
+            "network",
+            {
+                "pretrained_model_name_or_path": "Qwen/Qwen2.5-0.5B-Instruct",
+                "max_context_length": 512,
+                "lora_config": {"lora_r": 8},
+            },
+        ),
+    }
+    return _manifest(**data, **sections)
+
+
+class TestRuntimeContractDivergences:
+    """Payload shape the runtime hard-requires beyond the training section."""
+
+    def test_llm_manifest_requires_lora_config(self) -> None:
+        with pytest.raises(ValidationError, match="lora_config"):
+            TrainingManifest.get_validated(
+                _llm_manifest(
+                    network={
+                        "pretrained_model_name_or_path": "Qwen/Qwen2.5-0.5B-Instruct",
+                        "max_context_length": 512,
+                    }
+                )
+            )
+
+    def test_lora_config_from_algorithm_lands_in_network_section(self) -> None:
+        payload = TrainingManifest.get_validated(
+            _llm_manifest(
+                algorithm={
+                    "name": "GRPO",
+                    "group_size": 4,
+                    "pretrained_model_name_or_path": "Qwen/Qwen2.5-0.5B-Instruct",
+                    "lora_config": {"lora_r": 32},
+                },
+                network=None,
+            )
+        )
+        assert payload["network"]["lora_config"]["lora_r"] == 32
+        assert payload["network"]["pretrained_model_name_or_path"] == (
+            "Qwen/Qwen2.5-0.5B-Instruct"
+        )
+
+    def test_llm_manifest_requires_env_type(self) -> None:
+        with pytest.raises(ValidationError, match=r"environment\.env_type"):
+            TrainingManifest.get_validated(
+                _llm_manifest(environment={"dataset": "my/dataset"})
+            )
+
+    def test_llm_manifest_rejects_invalid_env_type(self) -> None:
+        with pytest.raises(ValidationError, match=r"Invalid environment\.env_type"):
+            TrainingManifest.get_validated(
+                _llm_manifest(environment={"env_type": "chat", "dataset": "d"})
+            )
+
+    def test_multiturn_requires_entrypoint(self) -> None:
+        with pytest.raises(ValidationError, match=r"environment\.entrypoint"):
+            TrainingManifest.get_validated(
+                _llm_manifest(environment={"env_type": "multiturn"})
+            )
+
+    def test_multiturn_with_entrypoint_validates(self) -> None:
+        payload = TrainingManifest.get_validated(
+            _llm_manifest(
+                environment={
+                    "env_type": "multiturn",
+                    "entrypoint": "game:GuessTheNumber-v0-easy",
+                }
+            )
+        )
+        assert payload["environment"]["entrypoint"] == "game:GuessTheNumber-v0-easy"
+
+    def test_rl_manifest_requires_environment_name(self) -> None:
+        with pytest.raises(ValidationError, match=r"environment\.name"):
+            TrainingManifest.get_validated(_manifest(environment={}))
+
+    def test_rejects_invalid_num_envs(self) -> None:
+        with pytest.raises(ValidationError, match="num_envs"):
+            TrainingManifest.get_validated(
+                _manifest(environment={"name": "CartPole-v1", "num_envs": 0})
+            )
+
+    def test_max_output_tokens_reaches_the_payload(self) -> None:
+        payload = TrainingManifest.get_validated(
+            _llm_manifest(
+                algorithm={"name": "GRPO", "group_size": 4, "max_output_tokens": 512}
+            )
+        )
+        assert payload["algorithm"]["max_output_tokens"] == 512
+
+    def test_max_output_tokens_absent_when_unset(self) -> None:
+        payload = TrainingManifest.get_validated(_llm_manifest())
+        assert "max_output_tokens" not in payload["algorithm"]
+
+    def test_clip_coef_accepts_a_ratio_pair(self) -> None:
+        payload = TrainingManifest.get_validated(
+            _llm_manifest(
+                algorithm={"name": "CISPO", "group_size": 4, "clip_coef": [0.8, 2.0]}
+            )
+        )
+        assert payload["algorithm"]["clip_coef"] == [0.8, 2.0]
+
+    def test_clip_coef_scalar_still_bounded(self) -> None:
+        with pytest.raises(ValidationError, match="clip_coef scalar"):
+            TrainingManifest.get_validated(
+                _llm_manifest(
+                    algorithm={"name": "GRPO", "group_size": 4, "clip_coef": 1.5}
+                )
+            )
+
+    def test_client_no_longer_injects_runtime_defaulted_fields(self) -> None:
+        payload = TrainingManifest.get_validated(_llm_manifest())
+        for key in (
+            "batch_size",
+            "beta",
+            "use_separate_reference_adapter",
+            "use_liger_loss",
+        ):
+            assert key not in payload["algorithm"]
+        rl_payload = TrainingManifest.get_validated(_manifest())
+        assert "batch_size" not in rl_payload["algorithm"]
+
+    def test_explicit_adapter_flags_reach_the_payload(self) -> None:
+        payload = TrainingManifest.get_validated(
+            _llm_manifest(
+                algorithm={
+                    "name": "GRPO",
+                    "group_size": 4,
+                    "use_separate_reference_adapter": False,
+                    "use_liger_loss": False,
+                }
+            )
+        )
+        assert payload["algorithm"]["use_separate_reference_adapter"] is False
+        assert payload["algorithm"]["use_liger_loss"] is False
+
+    def test_llmppo_defaults_match_the_runtime(self) -> None:
+        payload = TrainingManifest.get_validated(
+            _llm_manifest(algorithm={"name": "LLMPPO"})
+        )
+        algo = payload["algorithm"]
+        assert algo["lr_actor"] == 5e-7
+        assert algo["lr_critic"] == 5e-5
+        assert algo["gamma"] == 1.0
+        assert algo["gae_lambda"] == 1.0
+
+    def test_llmreinforce_defaults_match_the_runtime(self) -> None:
+        payload = TrainingManifest.get_validated(
+            _llm_manifest(algorithm={"name": "LLMREINFORCE"})
+        )
+        assert payload["algorithm"]["lr"] == 5e-7
+        assert payload["algorithm"]["gamma"] == 1.0
+
+    def test_replay_buffer_name_and_kind_pass_through(self) -> None:
+        payload = TrainingManifest.get_validated(
+            _manifest(
+                replay_buffer={"name": "buffer", "kind": "classic", "max_size": 1000}
+            )
+        )
+        assert payload["replay_buffer"]["name"] == "buffer"
+        assert payload["replay_buffer"]["kind"] == "classic"
 
 
 def test_registry_override_logs_warning() -> None:

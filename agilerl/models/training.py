@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import AliasChoices, BaseModel, Field, model_validator
 from typing_extensions import Self
@@ -44,8 +44,14 @@ class ReplayBufferSpec(BaseModel):
     :type per_buffer_args: PerBufferArgs
     :param n_step: The number of steps to use for the n-step replay buffer. Defaults to None.
     :type n_step: int | None
+    :param name: Buffer name forwarded to the Arena runtime.
+    :type name: str | None
+    :param kind: Arena runtime buffer kind — ``"classic"`` (default) or ``"llm"``.
+    :type kind: Literal["classic", "llm"] | None
     """
 
+    name: str | None = Field(default=None)
+    kind: Literal["classic", "llm"] | None = Field(default=None)
     max_size: int = Field(
         default=100_000, ge=1, validation_alias=AliasChoices("max_size", "memory_size")
     )

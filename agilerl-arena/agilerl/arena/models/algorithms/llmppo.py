@@ -18,14 +18,14 @@ from agilerl.arena.models.networks import CosineLRScheduleConfig, VLLMConfig
 class LLMPPOSpec(LLMAlgorithmSpec):
     """Specification for LLMPPO algorithm."""
 
-    lr_actor: float = Field(default=5e-6, ge=0.0)
-    lr_critic: float | None = Field(default=5e-6, ge=0.0)
+    lr_actor: float = Field(default=5e-7, ge=0.0)
+    lr_critic: float | None = Field(default=5e-5, ge=0.0)
     vf_coef: float = Field(default=0.5, ge=0.0)
     clip_coef: float = Field(default=0.2, ge=0.0, le=1.0)
-    gamma: float = Field(default=0.99, ge=0.0, le=1.0)
-    gae_lambda: float = Field(default=0.95, ge=0.0, le=1.0)
+    gamma: float = Field(default=1.0, ge=0.0, le=1.0)
+    gae_lambda: float = Field(default=1.0, ge=0.0, le=1.0)
     temperature: float = Field(default=0.9)
-    max_output_tokens: int | None = Field(default=1024, exclude=True)
+    max_output_tokens: int | None = Field(default=None, ge=1)
     min_output_tokens: int | None = Field(default=None)
     action_granularity: Literal["turn", "token", "auto"] = Field(default="auto")
     cosine_lr_schedule_config: CosineLRScheduleConfig | None = Field(default=None)
