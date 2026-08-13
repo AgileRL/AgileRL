@@ -1,87 +1,119 @@
----
 name: Publish release
 
-# Stable PyPI path for spoke tags v* (proposal §4.6.5).
+# Stable PyPI path for spoke tags v* (§4.6.5).
 # Hub never publishes stable agilerl to PyPI (D1) — this workflow lives in the spoke tree only.
-# Trigger: push of tag vX.Y.Z, or workflow_dispatch with an explicit tag.
+#
+# Preferred trigger: workflow_dispatch from an existing v* tag ref (pairs with environment `pypi`
+# required reviewers + tag deployment policy). Tag push remains for §4.6.5; protect refs/tags/v*
+# via a GitHub ruleset.
+#
+# Auth: PyPI Trusted Publishing (OIDC) only — no long-lived UV_PUBLISH_TOKEN.
+# Bind PyPI trusted publisher to owner AgileRL, repo AgileRL, this workflow, environment `pypi`.
 
 on:
-    push:
-        tags:
-            - v*
-    workflow_dispatch:
-        inputs:
-            tag:
-                description: Existing spoke tag to publish (e.g. v2.9.0). Empty = the ref that triggered the run.
-                required: false
-                default: ''
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing spoke tag to publish (e.g. v2.9.0). Empty = the ref that triggered the run."
+        required: false
+        default: ""
+  push:
+    tags:
+      - "v*"
 
 permissions:
-    contents: read
-    id-token: write # Trusted Publishing to PyPI
+  contents: read
 
 jobs:
-    publish:
-        runs-on: ubuntu-latest
-        environment: pypi
-        steps:
-            - name: Resolve tag
-              id: tag
-              run: |
-                  set -euo pipefail
-                  if [[ -n "${{ inputs.tag }}" ]]; then
-                    TAG="${{ inputs.tag }}"
-                  else
-                    TAG="${GITHUB_REF_NAME}"
-                  fi
-                  TAG="${TAG#refs/tags/}"
-                  case "${TAG}" in
-                    v*) VER="${TAG#v}" ;;
-                    *) echo "ref ${TAG} is not a v* release tag"; exit 1 ;;
-                  esac
-                  echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
-                  echo "version=${VER}" >> "$GITHUB_OUTPUT"
+  build:
+    if: github.repository == 'AgileRL/AgileRL'
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+      version: ${{ steps.tag.outputs.version }}
+    steps:
+      - name: Resolve tag
+        id: tag
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          if [[ -n "${INPUT_TAG}" ]]; then
+            TAG="${INPUT_TAG}"
+          else
+            TAG="${GITHUB_REF_NAME}"
+          fi
+          TAG="${TAG#refs/tags/}"
+          case "${TAG}" in
+            v*) VER="${TAG#v}" ;;
+            *) echo "ref ${TAG} is not a v* release tag"; exit 1 ;;
+          esac
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "version=${VER}" >> "$GITHUB_OUTPUT"
 
-            - name: Checkout tag
-              uses: actions/checkout@v4
-              with:
-                  ref: ${{ steps.tag.outputs.tag }}
+      - name: Checkout tag
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ steps.tag.outputs.tag }}
 
-            - name: Install uv
-              uses: astral-sh/setup-uv@v6
+      - name: Install uv
+        uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
 
-            - name: Verify tag matches pyproject versions
-              run: |
-                  set -euo pipefail
-                  VER="${{ steps.tag.outputs.version }}"
-                  PY_VER="$(python3 -c 'import tomllib,pathlib; print(tomllib.loads(pathlib.Path("pyproject.toml").read_text())["project"]["version"])')"
-                  test "${PY_VER}" = "${VER}"
-                  echo "Publishing agilerl==${PY_VER} (and workspace agilerl-arena) from tag ${{ steps.tag.outputs.tag }}"
+      - name: Verify tag matches pyproject versions
+        env:
+          VER: ${{ steps.tag.outputs.version }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          PY_VER="$(python3 -c 'import tomllib,pathlib; print(tomllib.loads(pathlib.Path("pyproject.toml").read_text())["project"]["version"])')"
+          test "${PY_VER}" = "${VER}"
+          echo "Building agilerl==${PY_VER} (and workspace agilerl-arena) from tag ${TAG}"
 
-            - name: Build
-              run: |
-                  set -euo pipefail
-                  rm -rf dist
-                  uv build --package agilerl-arena
-                  uv build --package agilerl
-                  python3 scripts/check-extras.py
+      - name: Build
+        run: |
+          set -euo pipefail
+          rm -rf dist
+          uv build --package agilerl-arena
+          uv build --package agilerl
+          python3 scripts/check-extras.py
 
-            - name: Publish to PyPI
-              env:
-          # Optional emergency bootstrap; prefer Trusted Publishing (OIDC) with empty token.
-                  UV_PUBLISH_TOKEN: ${{ secrets.UV_PUBLISH_TOKEN }}
-              run: |
-                  set -euo pipefail
-                  shopt -s nullglob
-                  arena=(dist/agilerl_arena-*)
-                  core=(dist/agilerl-[0-9]*)
-                  if [[ ${#arena[@]} -eq 0 || ${#core[@]} -eq 0 ]]; then
-                    echo "missing dist artifacts"; ls -la dist; exit 1
-                  fi
-                  if [[ -n "${UV_PUBLISH_TOKEN:-}" ]]; then
-                    uv publish "${arena[@]}"
-                    uv publish "${core[@]}"
-                  else
-                    uv publish --trusted-publishing always "${arena[@]}"
-                    uv publish --trusted-publishing always "${core[@]}"
-                  fi
+      - name: Upload dist
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: pypi-dist
+          path: dist/
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    if: github.repository == 'AgileRL/AgileRL'
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Download dist
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: pypi-dist
+          path: dist
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
+
+      - name: Publish to PyPI (OIDC)
+        env:
+          TAG: ${{ needs.build.outputs.tag }}
+          VER: ${{ needs.build.outputs.version }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          arena=(dist/agilerl_arena-*)
+          core=(dist/agilerl-[0-9]*)
+          if [[ ${#arena[@]} -eq 0 || ${#core[@]} -eq 0 ]]; then
+            echo "missing dist artifacts"; ls -la dist; exit 1
+          fi
+          echo "Publishing agilerl==${VER} (and agilerl-arena) from tag ${TAG} via Trusted Publishing"
+          uv publish --trusted-publishing always "${arena[@]}"
+          uv publish --trusted-publishing always "${core[@]}"
