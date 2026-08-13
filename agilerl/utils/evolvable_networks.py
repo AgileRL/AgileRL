@@ -345,26 +345,36 @@ def get_normalization(
     return normalization_functions[normalization_name](layer_size, device=device)
 
 
+# Activation name -> module class. Exposed at module level because consumers that
+# need to *recognise* an activation sub-module (rather than build one) must share
+# this registry: matching on sub-module names instead would silently miss encoders
+# that follow a different naming convention. See
+# ``agilerl.utils.dormant_neurons._ACTIVATION_TYPES``.
+ACTIVATION_FUNCTIONS: dict[str, type[nn.Module]] = {
+    "Tanh": nn.Tanh,
+    "ReLU": nn.ReLU,
+    "ELU": nn.ELU,
+    "Softsign": nn.Softsign,
+    "Sigmoid": nn.Sigmoid,
+    "GumbelSoftmax": GumbelSoftmax,
+    "Softplus": nn.Softplus,
+    "Softmax": nn.Softmax,
+    "LeakyReLU": nn.LeakyReLU,
+    "PReLU": nn.PReLU,
+    "GELU": nn.GELU,
+    "Identity": nn.Identity,
+}
+
+
 def get_activation(activation_name: str | None, new_gelu: bool = False) -> nn.Module:
     """Return activation function for corresponding activation name.
 
     :param activation_names: Activation function name
     :type activation_names: str
     """
-    activation_functions = {
-        "Tanh": nn.Tanh,
-        "ReLU": nn.ReLU,
-        "ELU": nn.ELU,
-        "Softsign": nn.Softsign,
-        "Sigmoid": nn.Sigmoid,
-        "GumbelSoftmax": GumbelSoftmax,
-        "Softplus": nn.Softplus,
-        "Softmax": nn.Softmax,
-        "LeakyReLU": nn.LeakyReLU,
-        "PReLU": nn.PReLU,
-        "GELU": nn.GELU if not new_gelu else NewGELU,
-        "Identity": nn.Identity,
-    }
+    activation_functions = dict(ACTIVATION_FUNCTIONS)
+    if new_gelu:
+        activation_functions["GELU"] = NewGELU
 
     activation_name = activation_name if activation_name is not None else "Identity"
     return (

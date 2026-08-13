@@ -65,7 +65,8 @@ class MutationSpec(BaseModel):
     :type mutate_elite: bool
     :param param_mut_type: Parameter-mutation strategy: ``"original"`` (Gaussian
         weight noise) or ``"reborn"`` (dormant/over-active neuron recycling, Qin
-        et al.). ``mutation_sd`` is ignored when ``"reborn"`` is selected.
+        et al., followed by the Gaussian pass minus its amplified noise band).
+        ``mutation_sd`` scales the ordinary noise under both strategies.
     :type param_mut_type: Literal["original", "reborn"]
     :param dormant_tau: ReBorn dormancy threshold (a neuron with normalised score
         ``<= dormant_tau`` is dormant). Independent of the diagnostic
@@ -75,6 +76,17 @@ class MutationSpec(BaseModel):
         score ``>= overact_beta`` is over-active). Must be greater than
         ``dormant_tau``. Only used when ``param_mut_type == "reborn"``.
     :type overact_beta: float
+    :param reborn_out_scale: ReBorn revival strength. A Xavier-reset neuron's
+        outgoing weights are re-seeded at this fraction of the consumer layer's
+        live column scale instead of being zeroed, so the revived neuron has a
+        non-zero gradient (both for its own score and for its incoming weights).
+        A scale below ``dormant_tau`` risks the revived neuron being re-flagged as
+        dormant before it learns anything; the default trades that against the size
+        of the perturbation, and was picked from a PPO/Hopper-v4 sweep (one seed) in
+        which 0.02 beat the whole 0.05--0.25 range by a wide margin.
+        ``0.0`` restores the zeroed-outgoing behaviour.
+        Only used when ``param_mut_type == "reborn"``.
+    :type reborn_out_scale: float
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -87,6 +99,7 @@ class MutationSpec(BaseModel):
     param_mut_type: Literal["original", "reborn"] = "original"
     dormant_tau: float = Field(default=0.1, gt=0.0)
     overact_beta: float = Field(default=3.0, ge=0.0)
+    reborn_out_scale: float = Field(default=0.02, ge=0.0)
 
     @model_validator(mode="after")
     def _validate_reborn(self) -> Self:

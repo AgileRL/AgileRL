@@ -4,8 +4,33 @@ import numpy as np
 from accelerate.utils import broadcast_object_list
 
 from agilerl.algorithms.core.base import EvolvableAlgorithm, LLMAlgorithm
+from agilerl.wrappers.agent import AgentWrapper
 
 PopulationT = list[EvolvableAlgorithm]
+
+
+def _record_parent_index(
+    individual: EvolvableAlgorithm | AgentWrapper, parent_index: int
+) -> None:
+    """Tag a freshly cloned agent with the population index it was cloned from.
+
+    The tag is written on the *unwrapped* algorithm, never on the wrapper.
+    :meth:`AgentWrapper.__setattr__ <agilerl.wrappers.agent.AgentWrapper.__setattr__>`
+    forwards an assignment to the agent it wraps only when the agent already carries
+    that attribute, which a fresh clone does not -- so assigning to the wrapper would
+    leave the tag on the wrapper alone. That is invisible to
+    :meth:`Mutations.parameter_mutation <agilerl.hpo.mutation.Mutations.parameter_mutation>`,
+    which reads it off the unwrapped agent, and the ReBorn parameter mutation would
+    then silently degrade to the Gaussian operator for every wrapped agent. Reads
+    through a wrapper still resolve, via ``AgentWrapper.__getattr__``.
+
+    :param individual: The freshly cloned population member, wrapped or not.
+    :type individual: EvolvableAlgorithm | AgentWrapper
+    :param parent_index: ``index`` of the agent *individual* was cloned from.
+    :type parent_index: int
+    """
+    agent = individual.agent if isinstance(individual, AgentWrapper) else individual
+    agent._parent_index = parent_index
 
 
 class TournamentSelection:
@@ -126,7 +151,7 @@ class TournamentSelection:
         if self.elitism:  # keep top agent in population
             elite_clone = elite.clone(wrap=False)
             # The elite is carried over unchanged: its parent is itself.
-            elite_clone._parent_index = elite.index
+            _record_parent_index(elite_clone, elite.index)
             new_population.append(elite_clone)
             selection_size = self.population_size - 1
         else:
@@ -137,7 +162,7 @@ class TournamentSelection:
             max_id += 1
             actor_parent = population[self._tournament(rank)]
             new_individual = actor_parent.clone(max_id, wrap=False)
-            new_individual._parent_index = actor_parent.index
+            _record_parent_index(new_individual, actor_parent.index)
             new_population.append(new_individual)
 
         return elite, new_population

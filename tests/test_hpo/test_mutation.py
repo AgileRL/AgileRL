@@ -28,10 +28,10 @@ from agilerl.utils.utils import create_population
 from agilerl.wrappers.agent import AsyncAgentsWrapper, RSNorm
 from tests.helper_functions import (
     assert_state_dicts_equal,
+    generate_dict_or_tuple_space,
     generate_discrete_space,
     generate_random_box_space,
 )
-from tests.test_algorithms.test_llms.test_grpo import create_module
 
 if TYPE_CHECKING:
     from agilerl.algorithms.core import EvolvableAlgorithm
@@ -1369,6 +1369,11 @@ class TestMutationsMutation:
         grpo_hp_config,
         deepspeed_env,
     ):
+        # Imported here, not at module scope: test_grpo importorskips deepspeed and
+        # vllm, so a top-level import would skip this whole module -- including every
+        # non-LLM mutation test -- on any machine without them.
+        from tests.test_algorithms.test_llms.test_grpo import create_module
+
         if use_accelerator and not torch.cuda.is_available():
             pytest.skip("DeepSpeed accelerator LLM mutation tests require CUDA.")
 
@@ -1534,6 +1539,10 @@ class TestMutationsMutation:
         mutation_type,
         algo,
     ):
+        # See the note in test_applies_rl_hp_mutation_llm_algorithm: this import
+        # must stay function-local or it skips the entire module.
+        from tests.test_algorithms.test_llms.test_grpo import create_module
+
         pre_training_mut = False
         init_hp = {
             "PAD_TOKEN_ID": 1000 - 1,
@@ -2221,7 +2230,7 @@ def test_get_offspring_eval_modules_returns_policy_and_modules(
 # --------------------------------------------------------------------------- #
 # ReBorn parameter mutation (Qin et al.)                                       #
 # --------------------------------------------------------------------------- #
-def _make_reborn_mutations(seed=42, param_mut_type="reborn"):
+def _make_reborn_mutations(seed=42, param_mut_type="reborn", reborn_out_scale=0.25):
     return Mutations(
         no_mutation=0.0,
         architecture=0.0,
@@ -2232,6 +2241,7 @@ def _make_reborn_mutations(seed=42, param_mut_type="reborn"):
         param_mut_type=param_mut_type,
         dormant_tau=0.1,
         overact_beta=3.0,
+        reborn_out_scale=reborn_out_scale,
         rand_seed=seed,
         device="cpu",
     )
@@ -2355,7 +2365,7 @@ class TestRebornLayerSurgery:
         counts = {"reborn": 0, "xavier": 0, "overactive": 0, "dormant": 0}
 
         mut._apply_reborn_to_layer(
-            producer, next_layer, "dense_dense", None, None, per_neuron, counts
+            producer, [next_layer], None, None, per_neuron, counts
         )
 
         assert counts["overactive"] == 1
@@ -2382,30 +2392,78 @@ class TestRebornLayerSurgery:
             torch.tensor([13.0, 14.0, 15.0]),
         )
 
-    def test_unclaimed_dormant_outgoing_zeroed(self):
-        # Force a single over-active neuron and exactly one dormant partner slot
-        # by making 4 dormant neurons but M capped so >=1 stays unclaimed is not
-        # guaranteed; instead check the invariant directly across the pool.
+    def test_unclaimed_dormant_outgoing_reseeded_at_scale(self):
+        # A Xavier-reset neuron is revived with a small *non-zero* outgoing column
+        # -- norm == reborn_out_scale * the median column norm of the neurons this
+        # pass leaves alone. A zero column would make the revived neuron score as
+        # maximally dormant under gradient detection (and freeze its own incoming
+        # weights), which is the pathology reborn_out_scale exists to avoid.
         producer, next_layer, per_neuron = self._setup()
-        mut = _make_reborn_mutations(seed=1)
+        mut = _make_reborn_mutations(seed=1, reborn_out_scale=0.25)
+        # Only neuron 4 is neither dormant nor over-active, so it alone sets the
+        # reference scale: column 4 of next_layer is [5, 10].
+        expected = 0.25 * float(torch.tensor([5.0, 10.0]).norm())
         counts = {"reborn": 0, "xavier": 0, "overactive": 0, "dormant": 0}
         mut._apply_reborn_to_layer(
-            producer, next_layer, "dense_dense", None, None, per_neuron, counts
+            producer, [next_layer], None, None, per_neuron, counts
         )
-        # Any dormant neuron that was Xavier-reset (not a partner) has a zero
-        # outgoing column. Partners have a non-zero outgoing column. So the number
-        # of zero outgoing columns among dormant indices equals the xavier count.
+
+        xavier_cols = [
+            i
+            for i in (1, 2, 3)
+            if pytest.approx(expected, rel=1e-5)
+            == float(next_layer.weight.data[:, i].norm())
+        ]
+        assert len(xavier_cols) == counts["xavier"]
+        # No dormant neuron is left with a zero outgoing column.
+        for i in (1, 2, 3):
+            assert torch.count_nonzero(next_layer.weight.data[:, i]) > 0
+
+    def test_zero_out_scale_restores_zeroed_outgoing(self):
+        # The ablation path: reborn_out_scale=0.0 must reproduce ReDo's original
+        # zero-outgoing revival exactly, so seeded comparisons stay meaningful.
+        producer, next_layer, per_neuron = self._setup()
+        mut = _make_reborn_mutations(seed=1, reborn_out_scale=0.0)
+        counts = {"reborn": 0, "xavier": 0, "overactive": 0, "dormant": 0}
+        mut._apply_reborn_to_layer(
+            producer, [next_layer], None, None, per_neuron, counts
+        )
         zero_cols = sum(
             int(torch.count_nonzero(next_layer.weight.data[:, i]) == 0)
             for i in (1, 2, 3)
         )
         assert zero_cols == counts["xavier"]
 
+    def test_revived_neuron_receives_incoming_gradient(self):
+        # The point of the non-zero outgoing column: with W_out[:, i] == 0 the
+        # chain rule gives dL/dW_in[i, :] = dL/dz_i * x = 0, so a revived neuron's
+        # *incoming* weights are frozen until its outgoing ones bootstrap off zero.
+        # Re-seeding them small unfreezes both, at the cost of exact function
+        # preservation.
+        for scale, expect_gradient in ((0.0, False), (0.25, True)):
+            producer = torch.nn.Linear(3, 5)
+            next_layer = torch.nn.Linear(5, 2)
+            per_neuron = torch.tensor([1.0, 0.0, 0.0, 1.0, 1.0])  # 1, 2 dormant
+            mut = _make_reborn_mutations(seed=5, reborn_out_scale=scale)
+            counts = {"reborn": 0, "xavier": 0, "overactive": 0, "dormant": 0}
+            mut._apply_reborn_to_layer(
+                producer, [next_layer], None, None, per_neuron, counts
+            )
+            assert counts["xavier"] == 2  # no over-active neuron -> none claimed
+
+            producer.zero_grad()
+            X = torch.rand(8, 3)
+            next_layer(torch.relu(producer(X))).square().mean().backward()
+            revived_grad = producer.weight.grad[[1, 2]]
+            assert bool(revived_grad.abs().sum() > 0) is expect_gradient
+
     def test_over_active_split_is_function_preserving_relu(self):
         # net2net invariant: splitting an over-active neuron into dormant slots
-        # must leave the network's output unchanged for a ReLU network. The three
-        # dormant neurons have exactly-zero activation on the batch, so any that
-        # stay unclaimed (Xavier-reset with outgoing zeroed) also contribute zero.
+        # must leave the network's output unchanged for a ReLU network. Pinned to
+        # reborn_out_scale=0.0 to isolate the split: the three dormant neurons have
+        # exactly-zero activation on the batch, so with their outgoing weights
+        # zeroed any that stay unclaimed also contribute zero. At the default scale
+        # a revived neuron deliberately perturbs the output (see the sibling test).
         producer = torch.nn.Linear(2, 4)
         next_layer = torch.nn.Linear(4, 1)
         with torch.no_grad():
@@ -2429,12 +2487,12 @@ class TestRebornLayerSurgery:
 
         before = forward(X).clone()
 
-        mut = _make_reborn_mutations(seed=3)
+        mut = _make_reborn_mutations(seed=3, reborn_out_scale=0.0)
         # norm = [4, 0, 0, 0]: neuron 0 over-active (>=3), neurons 1-3 dormant.
         per_neuron = torch.tensor([4.0, 0.0, 0.0, 0.0])
         counts = {"reborn": 0, "xavier": 0, "overactive": 0, "dormant": 0}
         mut._apply_reborn_to_layer(
-            producer, next_layer, "dense_dense", None, None, per_neuron, counts
+            producer, [next_layer], None, None, per_neuron, counts
         )
         assert counts["overactive"] == 1
         assert counts["dormant"] == 3
@@ -2443,6 +2501,254 @@ class TestRebornLayerSurgery:
         after = forward(X)
         assert torch.isfinite(after).all()
         assert torch.allclose(after, before, atol=1e-5), (before, after)
+
+
+class TestRebornBranchedArchitectures:
+    """Networks whose layers do not lie in one flat ``nn.Sequential``.
+
+    ``EvolvableMultiInput`` keeps its sub-networks in a ``ModuleDict`` with a bare
+    ``final_dense``/``output`` tail, and a duelling Q-network's ``head_net`` holds
+    two sibling streams. Both must still be recycled: a resolver that unwraps to a
+    single sequential silently skips them, leaving measured layers untouched.
+    """
+
+    @staticmethod
+    def _dict_obs_dqn(n_image=0, n_vector=2):
+        """DQN over a ``Dict`` space -- i.e. an ``EvolvableMultiInput`` encoder.
+
+        *n_image* controls how many subspaces get their own nested CNN sub-encoder;
+        vector subspaces are concatenated raw into the fusion layer.
+        """
+        from gymnasium import spaces
+
+        from agilerl.algorithms import DQN
+
+        obs = generate_dict_or_tuple_space(n_image, n_vector, dict_space=True)
+        return DQN(obs, spaces.Discrete(3), device="cpu")
+
+    @staticmethod
+    def _dict_obs(agent, batch_size=8):
+        """A deterministic observation batch matching *agent*'s ``Dict`` space."""
+        batch = {}
+        for key, space in agent.observation_space.spaces.items():
+            space.seed(0)
+            batch[key] = np.stack([space.sample() for _ in range(batch_size)])
+        return batch
+
+    @staticmethod
+    def _duelling_dqn():
+        from gymnasium import spaces
+
+        from agilerl.algorithms import RainbowDQN
+
+        obs = spaces.Box(-np.inf, np.inf, shape=(8,), dtype=np.float32)
+        return RainbowDQN(obs, spaces.Discrete(4), device="cpu")
+
+    @staticmethod
+    def _dormant_per_measured_layer(agent):
+        """Dormant neurons ``_surgery_fill`` injects across all measured layers."""
+        from agilerl.utils.dormant_neurons import _eval_networks, _target_activations
+
+        return 2 * sum(
+            len(_target_activations(net)) for _nid, net in _eval_networks(agent)
+        )
+
+    def test_multi_input_encoder_is_recycled(self):
+        # Arrange
+        agent = self._dict_obs_dqn()
+        obs = self._dict_obs(agent)
+        scores = _grama_snapshot(agent, obs, fill=_surgery_fill)
+        expected = self._dormant_per_measured_layer(agent)
+
+        # Act
+        out = _make_reborn_mutations().reborn_parameter_mutation(agent, scores)
+
+        # Assert
+        assert out.mut_details["dormant_count"] == expected
+        assert all(torch.isfinite(v).all() for v in out.actor.state_dict().values())
+
+    def test_duelling_head_advantage_stream_is_recycled(self):
+        # Arrange
+        agent = self._duelling_dqn()
+        obs = np.random.RandomState(0).uniform(-1, 1, (32, 8)).astype(np.float32)
+        scores = _grama_snapshot(agent, obs, fill=_surgery_fill)
+        expected = self._dormant_per_measured_layer(agent)
+
+        # Act
+        out = _make_reborn_mutations().reborn_parameter_mutation(agent, scores)
+
+        # Assert
+        assert out.mut_details["dormant_count"] == expected
+        assert all(torch.isfinite(v).all() for v in out.actor.state_dict().values())
+
+    @staticmethod
+    def _scores_isolating_nested_sub_encoders(agent, obs):
+        """Snapshot where only the nested sub-encoders' layers are unhealthy.
+
+        Every activation outside ``encoder.feature_net`` -- crucially the encoder's
+        own latent activation, the one that really does feed the head -- is left
+        healthy, so any weight change in the head can only come from a sub-encoder's
+        surgery reaching a layer it does not feed.
+        """
+        from agilerl.utils.dormant_neurons import _eval_networks, _target_activations
+
+        scores = _grama_snapshot(agent, obs, fill=_healthy_fill)
+        for net_idx, (_nid, net) in enumerate(_eval_networks(agent)):
+            # ``named_modules``, not ``modules``: the latter is overridden on
+            # ``EvolvableModule`` to yield mutation-group *names*.
+            nested = {id(m) for _n, m in net.encoder.feature_net.named_modules()}
+            for k, act in enumerate(_target_activations(net)):
+                if id(act) in nested and scores[net_idx][k] is not None:
+                    scores[net_idx][k] = _surgery_fill(scores[net_idx][k].numel())
+        agent._grama_scores = scores
+        return scores
+
+    def test_nested_sub_encoder_never_writes_into_the_head(self):
+        """A sub-encoder's neurons are consumed by ``final_dense``, not by the head.
+
+        With several observation subspaces its features are only a *slice* of the
+        concatenated fusion input, so no whole-column mapping exists and the layer
+        must be skipped -- never rewritten against the head's unrelated columns.
+        """
+        # Arrange -- one image subspace (its own CNN sub-encoder) plus a vector one
+        agent = self._dict_obs_dqn(n_image=1, n_vector=1)
+        obs = self._dict_obs(agent)
+        scores = self._scores_isolating_nested_sub_encoders(agent, obs)
+        head_first = agent.actor.head_net.model[0]
+        before = head_first.weight.detach().clone()
+        counts = {"reborn": 0, "xavier": 0, "overactive": 0, "dormant": 0}
+
+        # Act -- surgery only, so the trailing Gaussian pass cannot mask the result
+        _make_reborn_mutations()._reborn_network_surgery(agent.actor, scores[0], counts)
+
+        # Assert
+        assert torch.equal(before, head_first.weight.detach())
+
+    def test_sole_sub_encoder_recycling_updates_the_fusion_layer(self):
+        """With a single subspace the fusion layer's columns *are* its neurons.
+
+        The whole-column mapping is then unambiguous, so the surgery applies -- to
+        ``final_dense``, still never to the head.
+        """
+        # Arrange
+        agent = self._dict_obs_dqn(n_image=1, n_vector=0)
+        obs = self._dict_obs(agent)
+        scores = self._scores_isolating_nested_sub_encoders(agent, obs)
+        fusion = agent.actor.encoder.final_dense
+        head_first = agent.actor.head_net.model[0]
+        fusion_before = fusion.weight.detach().clone()
+        head_before = head_first.weight.detach().clone()
+        counts = {"reborn": 0, "xavier": 0, "overactive": 0, "dormant": 0}
+
+        # Act
+        _make_reborn_mutations()._reborn_network_surgery(agent.actor, scores[0], counts)
+
+        # Assert
+        assert not torch.equal(fusion_before, fusion.weight.detach())
+        assert torch.equal(head_before, head_first.weight.detach())
+
+    @staticmethod
+    def _scores_isolating_the_conv_to_dense_boundary(agent, obs):
+        """Snapshot where only the conv -> flatten -> dense activation is unhealthy.
+
+        Located structurally rather than by name: it is the measured activation
+        whose producer is a convolution and whose consumer is a dense layer, i.e.
+        the one whose recycling needs the flattened column stride.
+        """
+        from agilerl.utils.dormant_neurons import _eval_networks, _target_activations
+
+        resolver = _make_reborn_mutations()
+        scores = _grama_snapshot(agent, obs, fill=_healthy_fill)
+        for net_idx, (_nid, net) in enumerate(_eval_networks(agent)):
+            for k, act in enumerate(_target_activations(net)):
+                if scores[net_idx][k] is None:
+                    continue
+                producer, consumers, _is_encoder = resolver._resolve_producer_and_next(
+                    act, getattr(net, "encoder", None), getattr(net, "head_net", None)
+                )
+                if producer is None or not consumers:
+                    continue
+                if any(
+                    resolver._boundary_kind(producer, consumer) == "conv_dense"
+                    for consumer in consumers
+                ):
+                    scores[net_idx][k] = _surgery_fill(scores[net_idx][k].numel())
+        agent._grama_scores = scores
+        return scores
+
+    def test_nested_cnn_conv_to_dense_boundary_is_recycled(self):
+        """``cnn_output_size`` lives on the nested CNN, not on the fusion encoder.
+
+        A conv -> flatten -> dense consumer spends ``H*W`` adjacent columns per
+        feature map, and the stride comes from the ``EvolvableCNN`` that owns the
+        conv stack. Under ``EvolvableMultiInput`` that is a ``feature_net`` entry
+        rather than the encoder itself, so resolving the dims from the encoder
+        alone drops the consumer and leaves every nested CNN's last conv layer
+        silently unrecycled.
+        """
+        # Arrange -- only the conv -> dense activation is scored as unhealthy, so
+        # the dense layer can only change through that boundary being handled.
+        agent = self._dict_obs_dqn(n_image=1, n_vector=0)
+        obs = self._dict_obs(agent)
+        scores = self._scores_isolating_the_conv_to_dense_boundary(agent, obs)
+        sub_encoder = next(iter(agent.actor.encoder.feature_net.values()))
+        linear = next(
+            module
+            for _name, module in sub_encoder.named_modules()
+            if isinstance(module, torch.nn.Linear)
+        )
+        before = linear.weight.detach().clone()
+        counts = {"reborn": 0, "xavier": 0, "overactive": 0, "dormant": 0}
+
+        # Act -- surgery only, so the trailing Gaussian pass cannot mask the result
+        _make_reborn_mutations()._reborn_network_surgery(agent.actor, scores[0], counts)
+
+        # Assert
+        assert not torch.equal(before, linear.weight.detach())
+        assert counts["dormant"] > 0
+
+    def test_plain_cnn_conv_to_dense_boundary_is_recycled(self):
+        """The same boundary in a top-level ``EvolvableCNN`` must keep working."""
+        # Arrange
+        from gymnasium import spaces
+
+        from agilerl.algorithms import DQN
+
+        obs_space = spaces.Box(0, 255, shape=(3, 32, 32), dtype=np.uint8)
+        agent = DQN(obs_space, spaces.Discrete(3), device="cpu")
+        obs = np.stack([obs_space.sample() for _ in range(8)])
+        scores = self._scores_isolating_the_conv_to_dense_boundary(agent, obs)
+        linear = agent.actor.encoder.model.encoder_linear_output
+        before = linear.weight.detach().clone()
+        counts = {"reborn": 0, "xavier": 0, "overactive": 0, "dormant": 0}
+
+        # Act
+        _make_reborn_mutations()._reborn_network_surgery(agent.actor, scores[0], counts)
+
+        # Assert
+        assert not torch.equal(before, linear.weight.detach())
+        assert counts["dormant"] > 0
+
+    def test_latent_outgoing_weights_updated_in_every_duelling_stream(self):
+        """The encoder latent feeds both streams, so both hold outgoing weights.
+
+        Rewriting only the stream the resolver happens to find would leave the
+        other one indexing neurons that have been repurposed.
+        """
+        # Arrange
+        agent = self._duelling_dqn()
+        obs = np.random.RandomState(0).uniform(-1, 1, (32, 8)).astype(np.float32)
+        scores = _grama_snapshot(agent, obs, fill=_surgery_fill)
+        advantage_first = agent.actor.head_net.advantage_net[0]
+        before = advantage_first.weight_mu.detach().clone()
+        counts = {"reborn": 0, "xavier": 0, "overactive": 0, "dormant": 0}
+
+        # Act -- surgery only, so the trailing Gaussian pass cannot mask the result
+        _make_reborn_mutations()._reborn_network_surgery(agent.actor, scores[0], counts)
+
+        # Assert -- the dormant latent columns (indices 1, 2) were rewritten
+        after = advantage_first.weight_mu.detach()
+        assert not torch.equal(before[:, 1:3], after[:, 1:3])
 
 
 class TestRebornEndToEnd:
@@ -2697,3 +3003,231 @@ class TestRebornEndToEnd:
         assert not [
             w for w in record if "falling back to the Gaussian" in str(w.message)
         ]
+
+    def test_missing_child_snapshot_warns_and_falls_back(self):
+        # A snapshot table *was* supplied, but this child's parent is not in it, so
+        # only that agent degrades to Gaussian. Silent degradation here is what made
+        # a whole ReBorn benchmark record itself as a plain Gaussian run, so the
+        # per-agent case must be as loud as the call-level one.
+        pop = [self._ppo(), self._ppo()]
+        obs = np.zeros((4, 6), dtype=np.float32)
+        pop[0]._parent_index = 0
+        pop[1]._parent_index = 99  # no snapshot under this key
+        side = {0: _grama_snapshot(pop[0], obs)}
+        mut = self._reborn_dispatch_mut()
+        with pytest.warns(UserWarning, match="no gradient snapshot was found"):
+            out = mut.mutation(pop, grama_scores=side)
+        assert out[0].mut == "param_reborn"
+        assert out[1].mut == "param"
+
+
+class TestRebornWrappedAgents:
+    """ReBorn must survive the :class:`AgentWrapper` indirection.
+
+    The benchmarking harness wraps every PPO agent in :class:`RSNorm` before
+    training, so the population handed to selection and mutation is wrappers rather
+    than bare algorithms. ``_parent_index`` is the only channel by which a child
+    finds its parent's gradient snapshot, and an assignment to a wrapper does not
+    reach the agent it wraps -- so without the unwrap in
+    :func:`~agilerl.hpo.tournament._record_parent_index` every wrapped agent
+    silently falls back to the Gaussian operator.
+    """
+
+    def _population(self, size=2):
+        from agilerl.algorithms import PPO
+
+        obs = spaces.Box(-1.0, 1.0, shape=(6,), dtype=np.float32)
+        act = spaces.Box(-1.0, 1.0, shape=(2,), dtype=np.float32)
+        cfg = {
+            "encoder_config": {
+                "hidden_size": [16],
+                "activation": "ReLU",
+                "output_activation": "Identity",
+            },
+            "head_config": {"hidden_size": [16], "activation": "ReLU"},
+        }
+        pop = []
+        for i in range(size):
+            agent = PPO(obs, act, net_config=cfg, device="cpu")
+            agent.index = i
+            agent.fitness = [float(i)]
+            pop.append(agent)
+        return pop
+
+    @staticmethod
+    def _tournament(size):
+        from agilerl.hpo.tournament import TournamentSelection
+
+        return TournamentSelection(
+            tournament_size=2, elitism=True, population_size=size
+        )
+
+    def test_tournament_tags_the_unwrapped_agent(self):
+        wrapped = [RSNorm(agent) for agent in self._population()]
+        _elite, children = self._tournament(len(wrapped)).select(wrapped)
+        for child in children:
+            # Must be in the *algorithm's* __dict__, not the wrapper's: the mutation
+            # operator reads it after unwrapping.
+            assert "_parent_index" in child.agent.__dict__
+
+    def test_reborn_fires_for_wrapped_children(self):
+        pop = self._population()
+        obs = np.random.RandomState(0).uniform(-1, 1, size=(32, 6)).astype(np.float32)
+        # Side table keyed by pre-tournament index, exactly as the trainers build it.
+        side = {
+            agent.index: _grama_snapshot(agent, obs, fill=_surgery_fill)
+            for agent in pop
+        }
+        wrapped = [RSNorm(agent) for agent in pop]
+        _elite, children = self._tournament(len(wrapped)).select(wrapped)
+        with warnings.catch_warnings(record=True) as record:
+            warnings.simplefilter("always")
+            out = Mutations(
+                no_mutation=0.0,
+                architecture=0.0,
+                new_layer_prob=0.0,
+                parameters=1.0,
+                activation=0.0,
+                rl_hp=0.0,
+                param_mut_type="reborn",
+                dormant_tau=0.1,
+                overact_beta=3.0,
+                mutate_elite=True,
+                rand_seed=0,
+                device="cpu",
+            ).mutation(children, grama_scores=side)
+        assert all(child.mut == "param_reborn" for child in out)
+        assert not [
+            w for w in record if "falling back to the Gaussian" in str(w.message)
+        ]
+
+
+class TestRebornBorrowedEncoderParameters:
+    """A network that does not *own* its encoder weights must be left alone.
+
+    :func:`~agilerl.utils.algo_utils.share_encoder_parameters` pins the critic's
+    encoder to detached clones of the actor's, which ``mutation_hook`` refreshes
+    right after every mutation. Recycling there writes rows that are then thrown
+    away, while the matching column rewrite in the critic's *head* survives --
+    leaving the head compensating a neuron split that no longer exists. A real run
+    never reaches that state (the clones carry no gradient, so those layers are
+    captured as ``None``), which is exactly why the guard has to be explicit.
+    """
+
+    @staticmethod
+    def _shared_encoder_ppo():
+        from gymnasium import spaces
+
+        from agilerl.algorithms import PPO
+
+        obs = spaces.Box(-1.0, 1.0, shape=(6,), dtype=np.float32)
+        act = spaces.Box(-1.0, 1.0, shape=(2,), dtype=np.float32)
+        cfg = {
+            "encoder_config": {
+                "hidden_size": [16],
+                "activation": "ReLU",
+                "output_activation": "Identity",
+            },
+            "head_config": {"hidden_size": [16], "activation": "ReLU"},
+        }
+        return PPO(obs, act, net_config=cfg, share_encoders=True, device="cpu")
+
+    @staticmethod
+    def _scores_isolating_the_encoder(agent, obs):
+        """Snapshot where only the critic's borrowed encoder layers are unhealthy.
+
+        Its head is left healthy, so any weight change there can only come from the
+        encoder's surgery reaching the head's columns -- the half of the rewrite that
+        would survive ``mutation_hook`` re-pinning the encoder.
+        """
+        from agilerl.utils.dormant_neurons import _eval_networks, _target_activations
+
+        scores = _grama_snapshot(agent, obs, fill=_healthy_fill)
+        for net_idx, (_nid, net) in enumerate(_eval_networks(agent)):
+            # ``named_modules``, not ``modules``: the latter is overridden on
+            # ``EvolvableModule`` to yield mutation-group *names*.
+            encoder_modules = {id(m) for _n, m in net.encoder.named_modules()}
+            for k, act in enumerate(_target_activations(net)):
+                if id(act) in encoder_modules and scores[net_idx][k] is not None:
+                    scores[net_idx][k] = _surgery_fill(scores[net_idx][k].numel())
+        agent._grama_scores = scores
+        return scores
+
+    def test_borrowed_encoder_is_not_recycled(self):
+        # Arrange -- a snapshot deliberately scoring the critic's borrowed encoder
+        # copy, which a real run leaves as ``None`` for want of a gradient.
+        agent = self._shared_encoder_ppo()
+        obs = np.random.RandomState(0).uniform(-1, 1, size=(32, 6)).astype(np.float32)
+        scores = self._scores_isolating_the_encoder(agent, obs)
+        critic_encoder = agent.critic.encoder.model.shared_encoder_linear_layer_1
+        critic_head_first = agent.critic.head_net.model.value_linear_layer_1
+        encoder_before = critic_encoder.weight.detach().clone()
+        head_before = critic_head_first.weight.detach().clone()
+        counts = {"reborn": 0, "xavier": 0, "overactive": 0, "dormant": 0}
+
+        # Act -- surgery only, so the trailing Gaussian pass cannot mask the result
+        _make_reborn_mutations()._reborn_network_surgery(
+            agent.critic, scores[1], counts
+        )
+
+        # Assert -- neither the discarded rows nor the surviving columns are touched
+        assert torch.equal(encoder_before, critic_encoder.weight.detach())
+        assert torch.equal(head_before, critic_head_first.weight.detach())
+
+    def test_owned_encoder_is_recycled(self):
+        """The guard keys on ownership, not on being an encoder.
+
+        Without ``share_encoders`` the critic owns its encoder outright, so the very
+        same layers must still be recycled.
+        """
+        # Arrange
+        from gymnasium import spaces
+
+        from agilerl.algorithms import PPO
+
+        obs_space = spaces.Box(-1.0, 1.0, shape=(6,), dtype=np.float32)
+        act_space = spaces.Box(-1.0, 1.0, shape=(2,), dtype=np.float32)
+        cfg = {
+            "encoder_config": {
+                "hidden_size": [16],
+                "activation": "ReLU",
+                "output_activation": "Identity",
+            },
+            "head_config": {"hidden_size": [16], "activation": "ReLU"},
+        }
+        agent = PPO(
+            obs_space, act_space, net_config=cfg, share_encoders=False, device="cpu"
+        )
+        obs = np.random.RandomState(0).uniform(-1, 1, size=(32, 6)).astype(np.float32)
+        scores = self._scores_isolating_the_encoder(agent, obs)
+        critic_encoder = agent.critic.encoder.model.critic_encoder_linear_layer_1
+        before = critic_encoder.weight.detach().clone()
+        counts = {"reborn": 0, "xavier": 0, "overactive": 0, "dormant": 0}
+
+        # Act
+        _make_reborn_mutations()._reborn_network_surgery(
+            agent.critic, scores[1], counts
+        )
+
+        # Assert
+        assert not torch.equal(before, critic_encoder.weight.detach())
+        assert counts["dormant"] > 0
+
+    def test_owned_head_is_still_recycled(self):
+        """Only the *encoder* is borrowed -- the critic's own head must still run."""
+        # Arrange
+        agent = self._shared_encoder_ppo()
+        obs = np.random.RandomState(0).uniform(-1, 1, size=(32, 6)).astype(np.float32)
+        scores = _grama_snapshot(agent, obs, fill=_surgery_fill)
+        head_output = agent.critic.head_net.model.value_linear_layer_output
+        before = head_output.weight.detach().clone()
+        counts = {"reborn": 0, "xavier": 0, "overactive": 0, "dormant": 0}
+
+        # Act
+        _make_reborn_mutations()._reborn_network_surgery(
+            agent.critic, scores[1], counts
+        )
+
+        # Assert -- the head's hidden layer is owned, so its neurons are recycled
+        assert not torch.equal(before, head_output.weight.detach())
+        assert counts["dormant"] > 0

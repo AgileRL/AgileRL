@@ -1,31 +1,39 @@
 ---
-# ReBorn comparison -- DORMANT baseline (derived from dqn_double_tuned_hpo.yaml).
-# Identical HPO regime but with ReLU activations, activation mutation forced
-# OFF, and the ORIGINAL Gaussian parameter mutation (param_mut_type: original).
-# Paired with the matching *_reborn.yaml to isolate ReBorn's effect on the
-# dormant-neuron phenomenon under ReLU networks.
+# Parameter-operator DORMANCY PROBE -- baseline arm (ORIGINAL Gaussian parameter
+# mutation, param_mut_type: original). ReLU activations, activation mutation forced
+# OFF. Paired with the matching *_reborn.yaml / *_regrama.yaml, which differ ONLY in
+# the parameter operator, so the gap in eval/best_dormant_fraction between the arms
+# is attributable to that operator alone.
 #
-# TUNED Double DQN WITH EVOLUTIONARY SELECTION (population of 4, elitism,
-# tournament) on the Atari 2600 suite -- run as a PARAMETER-OPERATOR ISOLATION:
-# the ONLY active mutation is the parameter operator (original Gaussian vs ReBorn
-# -- see the top comment and the `mutation` block); architecture, new-layer,
-# activation and RL-hyperparameter mutations are all OFF. No HP search happens.
+# SINGLE-AGENT PROBE (pop_size = 1): unlike the population runs, this config exists
+# to measure the *dormancy* effect of the parameter operator, not to search. With one
+# agent there is no selection pressure at all -- tournament selection trivially
+# re-clones the same agent every evolution step -- so nothing can filter out a bad
+# mutation, and the dormant-neuron trace reflects the raw operator applied on top of
+# training. The trade-off is that fitness from this run is NOT a fair read on the
+# operator's performance (a population run is); read the dormancy curve, not the
+# score.
 #
-# This is the HPO counterpart of dqn_double_tuned_no_hpo.yaml. The base
-# hyperparameters, the Mnih et al. (2015) -> AgileRL mapping, and the tuned
-# Double DQN deltas from van Hasselt, Guez & Silver (2016) are all unchanged --
-# see dqn_double_tuned_no_hpo.yaml for the full derivation (epsilon decay,
-# tau = 1/30000, reward clipping, replay-buffer sizing, etc.). The `mutation` /
-# `tournament_selection` blocks (and pop_size = 4) turn this into a population
-# run: agents are trained, periodically given a parameter mutation, and
-# re-selected by tournament.
+# TUNED Double DQN on the Atari 2600 suite. The base hyperparameters, the Mnih et al.
+# (2015) -> AgileRL mapping, and the tuned Double DQN deltas from van Hasselt, Guez &
+# Silver (2016) are all unchanged -- see dqn_double_tuned_no_hpo.yaml for the full
+# derivation (epsilon decay, tau = 1/30000, reward clipping, replay-buffer sizing,
+# etc.), EXCEPT that the training budget is cut to a SHORT PROBE: max_steps = 100,000
+# per-agent steps with an evolution event every 5,000, i.e. ~20 parameter mutations,
+# just enough to see the dormancy trace separate between the arms. This is far too
+# short to learn Pong -- treat the run as a dormancy measurement, never as a
+# performance result. See the eps_decay note at the bottom.
 #
 # Isolation ablation vs the full HPO regime:
-#   pop_size = 4, elitism = true, tournament_size = 2
-#   ONLY the parameter mutation is active (params_mut); arch / new_layer / act /
-#     rl_hp mutations are all OFF
+#   pop_size = 1 -- one agent, so tournament_selection below is structurally INERT
+#   ONLY the parameter mutation is active, and at probability 1.0: the agent gets a
+#     parameter mutation at EVERY evolution step (no `no mutation` draws), which is
+#     what makes the dormancy trace a clean read on the operator
+#   arch / new_layer / act / rl_hp mutations are all OFF
 #   rl_hp_selection below is retained for provenance but INERT (rl_hp_mut = 0.0)
 #   network min/max bounds are likewise inert (arch mutations OFF -- shape fixed)
+#   dqn_double_tuned_no_hpo.yaml (one agent, no mutation at all) is the natural
+#     mutation-free control for both arms
 
 algorithm:
     name: DQN
@@ -35,24 +43,32 @@ algorithm:
     gamma: 0.99
     tau: 3.3333333333333334e-05  # target network update freq 30,000 -> Polyak tau = 1/30000
     double: true
-    cudagraphs: true
+    # DELIBERATELY false, matching dqn_double_tuned_reborn.yaml (the other
+    # dqn_double_tuned_*.yaml keep it true). That config must disable CUDA graphs
+    # so ReBorn's GraMa backward hooks fire; this is its isolation baseline, so it
+    # has to run under the same compilation regime or the comparison would confound
+    # the parameter operator with a CUDA-graph difference. See the longer note in
+    # dqn_double_tuned_reborn.yaml.
+    cudagraphs: false
 
 environment:
     name: Pong-v5
     num_envs: 16
 
 mutation:
-    # Typical AgileRL DQN/CNN mutation probabilities, with activation mutation
-    # enabled. no_mut is the relative weight of "leave this agent unchanged"; the
-    # remaining five are the relative weights of each mutation kind (renormalised
-    # internally). ABLATION: all operators except the parameter mutation are OFF so
-    # this isolates the parameter operator (Gaussian vs ReBorn) -- 50% of agents are
-    # passed through untouched (training-only control), 50% get a parameter mutation.
+    # no_mut is the relative weight of "leave this agent unchanged"; the remaining
+    # five are the relative weights of each mutation kind (renormalised internally).
+    # DORMANCY PROBE: every operator except the parameter mutation is OFF, and
+    # no_mut is 0.0 so the single agent receives a parameter mutation at EVERY
+    # evolution step. With only one agent, a non-zero no_mut would just blank out a
+    # random half of the evolution steps and blur the dormancy trace; the
+    # training-only control lives in a separate run (dqn_double_tuned_no_hpo.yaml)
+    # rather than in the same population.
     probabilities:
-        no_mut: 0.5      # leave unchanged: rest/consolidation + training-only control for the efficacy diagnostic
+        no_mut: 0.0      # OFF -- the agent is mutated every evolution step (see above)
         arch_mut: 0.0    # OFF -- isolate the parameter operator (network shape fixed)
         new_layer: 0.0   # OFF -- conditional within arch_mut, now inert
-        params_mut: 0.5  # the ONLY active operator: Gaussian (original) weight noise, strength = mutation_sd
+        params_mut: 1.0  # the ONLY operator: Gaussian (original) weight noise, strength = mutation_sd
         act_mut: 0.0     # OFF -- ReLU kept throughout so the dormant-neuron phenomenon (and ReBorn) stays visible
         rl_hp_mut: 0.0   # OFF -- NB: no hyperparameter search happens under this ablation
     rl_hp_selection:
@@ -103,7 +119,11 @@ mutation:
         # tuned 1/30000 base value; learn_step carries the related search.
     mutation_sd: 0.1  # std of the Gaussian weight perturbation for params_mut (typical)
     rand_seed: 42
-    mutate_elite: false  # keep the elite member unmutated so the best agent survives intact into the next generation
+    # MUST be true here. Mutations.mutation() forces population slot 0 -- the elite
+    # carried over by tournament selection -- to `no_mutation` whenever this is false.
+    # With pop_size = 1 the only agent IS slot 0, so mutate_elite: false would mean no
+    # parameter mutation ever fires and the probe would silently measure plain training.
+    mutate_elite: true
     param_mut_type: original  # original Gaussian parameter mutation (ReLU baseline for the ReBorn comparison)
 
 network:
@@ -151,23 +171,37 @@ replay_buffer:
     # 300,000 (not the paper's 1,000,000): AgileRL keeps the buffer on the
     # training device and stores full 4-frame stacks for obs and next_obs, so 1M
     # would need ~53 GiB of GPU memory. See dqn_double_tuned_no_hpo.yaml for details.
-    # NOTE: this buffer is allocated per agent, so a population of 4 needs ~4x
-    # the replay memory of the single-agent no-HPO run.
+    # NOTE: this buffer is allocated per agent; with pop_size = 1 the run needs the
+    # same replay memory as the single-agent no-HPO run. Kept at 300,000 so the probe
+    # is directly comparable to the pop_size = 4 configs rather than being confounded
+    # by a larger buffer.
     max_size: 300_000
 
 tournament_selection:
+    # Structurally INERT at pop_size = 1: elitism re-clones the sole agent into the
+    # next generation every step and the tournament has nothing to choose between.
+    # Kept so the manifest matches the population configs and the mutation history
+    # keeps recording lineage.
     tournament_size: 2
-    elitism: true  # the single best agent is cloned into the next generation each step (preserved unmutated, since mutate_elite is false above)
+    elitism: true
 
 training:
-    max_steps: 6_250_000
+    max_steps: 100_000  # SHORT PROBE budget (per-agent), not the 6.25M of the full runs
     target_score:
-    pop_size: 4
-    evo_steps: 100_000  # env steps between evolution events (mutate + tournament select)
+    pop_size: 1  # single-agent dormancy probe -- no selection pressure (see header)
+    evo_steps: 5_000  # env steps between evolution events -> ~20 parameter mutations over the run
+                      # NB: the trainer runs evo_steps // num_envs = 312 iterations of 16 envs,
+                      # so a cycle is 4,992 steps and the run ends after 21 cycles (104,832).
     eval_steps:
     eval_loop: 1
     dormant_tau: 0.1  # tau threshold for the dormant-neuron metric (Sokar et al. 2023)
-    learning_delay: 50_000
+    learning_delay: 2_500  # scaled with the probe budget (was 50,000 for the 6.25M runs)
     eps_start: 1.0
     eps_end: 0.01
+    # UNCHANGED from the full-length runs, and deliberately so: this schedule reaches
+    # eps_end after ~1M env steps, so over a 100k probe epsilon only falls 1.0 -> ~0.63.
+    # The probe therefore runs under heavy exploration throughout. That is fine for
+    # comparing the two arms (both arms see the identical schedule) but it is another
+    # reason the fitness of this run is meaningless. To instead finish the decay inside
+    # the probe, use 0.995405 (= 0.01 ** (num_envs / 16_000)).
     eps_decay: 0.9999263199915294  # = 0.01 ** (num_envs / 1_000_000) for num_envs = 16

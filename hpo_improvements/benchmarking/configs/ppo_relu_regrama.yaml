@@ -1,13 +1,21 @@
 ---
-# ReBorn comparison -- DORMANT baseline (derived from ppo_relu_hpo.yaml).
-# Identical HPO regime but with ReLU activations, activation mutation forced
-# OFF, and the ORIGINAL Gaussian parameter mutation (param_mut_type: original).
-# Paired with the matching *_reborn.yaml to isolate ReBorn's effect on the
-# dormant-neuron phenomenon under ReLU networks.
+# ReGraMa parameter mutation -- derived from ppo_relu_reborn.yaml, identical
+# to it except for overact_beta.
+# ReLU activations, activation mutation forced OFF, param_mut_type: reborn with
+# dormant_tau=0.01 but overact_beta=+inf: with an infinite over-activity threshold
+# no neuron ever counts as over-active, so ReBorn's neuron-split half never fires
+# and EVERY dormant neuron (normalised GraMa score <= dormant_tau) is left
+# unclaimed and therefore Xavier-reset with its outgoing weights zeroed. That is
+# the pure dormant-neuron RESET variant (ReGraMa, "Measure gradients, not
+# activations!"), which isolates ReBorn's recycling half from its splitting half.
+# The trailing reset + ordinary Gaussian noise pass (strength = mutation_sd; the
+# amplified "super" noise band is excluded as divergence-prone) is unchanged.
+# Shares the *_hpo_dormant.yaml baseline (same config, original parameter
+# mutation) with the ReBorn config.
 #
 # PPO WITH EVOLUTIONARY SELECTION (population of 4, elitism, tournament) on
 # Gymnasium MuJoCo -- run as a PARAMETER-OPERATOR ISOLATION: the ONLY active
-# mutation is the parameter operator (original Gaussian vs ReBorn -- see the top
+# mutation is the parameter operator (original Gaussian vs ReGraMa -- see the top
 # comment and the `mutation` block); architecture, new-layer, activation and
 # RL-hyperparameter mutations are all OFF. No hyperparameter search happens.
 #
@@ -55,13 +63,13 @@ mutation:
     # no_mut is the relative weight of "leave this agent unchanged"; the remaining
     # weights are the relative weights of each mutation kind (renormalised
     # internally). ABLATION: all operators except the parameter mutation are OFF so
-    # this isolates the parameter operator (Gaussian vs ReBorn) -- 50% of agents are
+    # this isolates the parameter operator (Gaussian vs ReGraMa) -- 50% of agents are
     # passed through untouched (training-only control), 50% get a parameter mutation.
     probabilities:
         no_mut: 0.5      # leave unchanged: rest/consolidation + training-only control for the efficacy diagnostic
         arch_mut: 0.0    # OFF -- isolate the parameter operator (network shape fixed)
         new_layer: 0.0   # OFF -- conditional within arch_mut, now inert
-        params_mut: 0.5  # the ONLY active operator: Gaussian (original) weight noise, strength = mutation_sd
+        params_mut: 0.5  # the ONLY active operator: dormant-neuron Xavier reset (no splits -- overact_beta is +inf), then reset + ordinary Gaussian noise (mutation_sd; no amplified)
         act_mut: 0.0     # OFF -- ReLU kept throughout so the dormant-neuron phenomenon (and ReBorn) stays visible
         rl_hp_mut: 0.0   # OFF -- NB: no hyperparameter search happens under this ablation
     rl_hp_selection:
@@ -143,10 +151,12 @@ mutation:
         #
         # vf_coef / max_grad_norm: low-leverage and robust at their defaults
         # (0.5 / 0.5); left fixed to keep the search budget on the knobs above.
-    mutation_sd: 0.1  # std of the Gaussian weight perturbation for params_mut (typical)
+    mutation_sd: 0.1  # std of the ordinary Gaussian weight perturbation in the trailing pass after the resets (typical)
     rand_seed: 42
     mutate_elite: false  # keep the elite member unmutated so the best agent survives intact into the next generation
-    param_mut_type: original  # original Gaussian parameter mutation (ReLU baseline for the ReBorn comparison)
+    param_mut_type: reborn    # the ReBorn operator, which overact_beta=+inf below degenerates to dormant-neuron Xavier reset only (ReGraMa), then reset + ordinary Gaussian noise (mutation_sd; amplified excluded)
+    dormant_tau: 0.01         # neuron is dormant when its normalised score <= this (the ONLY active threshold here: every such neuron is reset)
+    overact_beta: .inf        # +inf: no neuron is ever over-active, so no neuron split ever fires and every dormant neuron is Xavier-reset instead
 
 network:
     # Paper architecture: width-64 ReLU MLP. NB: under this parameter-operator

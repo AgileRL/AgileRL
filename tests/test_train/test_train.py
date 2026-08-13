@@ -510,7 +510,10 @@ class DummyMutations:
     def __init__(self):
         pass
 
-    def mutation(self, pop, pre_training_mut=False):
+    # Mirrors Mutations.mutation exactly, ``env`` / ``grama_scores`` included: the
+    # trainers pass both by keyword, and a double that silently swallowed them
+    # (via **kwargs) would stop catching signature drift at the call sites.
+    def mutation(self, pop, pre_training_mut=False, env=None, grama_scores=None):
         return pop
 
 
@@ -1303,7 +1306,9 @@ def mocked_multi_env(state_size, action_size):
 def mocked_mutations():
     mock_mutations = MagicMock()
 
-    def mutation(pop, pre_training_mut=False):
+    # Signature mirrors Mutations.mutation (see DummyMutations for why it is spelt
+    # out rather than absorbed by **kwargs).
+    def mutation(pop, pre_training_mut=False, env=None, grama_scores=None):
         return pop
 
     mock_mutations.mutation.side_effect = mutation

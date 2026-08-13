@@ -271,6 +271,7 @@ def build_mutations_from_spec(
         param_mut_type=mutation_spec.param_mut_type,
         dormant_tau=mutation_spec.dormant_tau,
         overact_beta=mutation_spec.overact_beta,
+        reborn_out_scale=mutation_spec.reborn_out_scale,
         device=device,
         accelerator=accelerator,
     )

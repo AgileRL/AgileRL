@@ -28,11 +28,17 @@ class TestBuildMutationsFromSpec:
         from agilerl.models.hpo import MutationSpec
         from agilerl.utils.trainer_utils import build_mutations_from_spec
 
-        spec = MutationSpec(param_mut_type="reborn", dormant_tau=0.2, overact_beta=4.0)
+        spec = MutationSpec(
+            param_mut_type="reborn",
+            dormant_tau=0.2,
+            overact_beta=4.0,
+            reborn_out_scale=0.5,
+        )
         mutations = build_mutations_from_spec(spec, device="cpu")
         assert mutations.param_mut_type == "reborn"
         assert mutations.dormant_tau == 0.2
         assert mutations.overact_beta == 4.0
+        assert mutations.reborn_out_scale == 0.5
 
     def test_defaults_forwarded(self):
         from agilerl.models.hpo import MutationSpec
@@ -42,6 +48,7 @@ class TestBuildMutationsFromSpec:
         assert mutations.param_mut_type == "original"
         assert mutations.dormant_tau == 0.1
         assert mutations.overact_beta == 3.0
+        assert mutations.reborn_out_scale == 0.02
 
     def test_returns_none_when_spec_none(self):
         from agilerl.utils.trainer_utils import build_mutations_from_spec

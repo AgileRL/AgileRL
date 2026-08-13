@@ -828,6 +828,7 @@ class TestMutationSpecReborn:
         assert spec.param_mut_type == "original"
         assert spec.dormant_tau == 0.1
         assert spec.overact_beta == 3.0
+        assert spec.reborn_out_scale == 0.02
 
     def test_valid_reborn(self):
         spec = MutationSpec(param_mut_type="reborn", dormant_tau=0.1, overact_beta=3.0)
@@ -848,6 +849,14 @@ class TestMutationSpecReborn:
     def test_overact_beta_non_negative(self):
         with pytest.raises(ValidationError):
             MutationSpec(overact_beta=-1.0)
+
+    def test_reborn_out_scale_non_negative(self):
+        with pytest.raises(ValidationError):
+            MutationSpec(reborn_out_scale=-0.1)
+
+    def test_reborn_out_scale_zero_allowed(self):
+        # 0.0 is the ablation that restores ReDo's zeroed-outgoing revival.
+        assert MutationSpec(reborn_out_scale=0.0).reborn_out_scale == 0.0
 
 
 class TestNetworkSpecUpperBound:
