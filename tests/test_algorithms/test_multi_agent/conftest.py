@@ -29,6 +29,10 @@ def reset_distributed_state():
     set, which causes subsequent ``Accelerator()`` calls to attempt a
     multi-worker rendezvous (hanging on macOS / Windows, or wrapping models
     in DDP on Linux).
+
+    Scoped to multi-agent tests only. Calling ``destroy_process_group`` between
+    consecutive ``@pytest.mark.gpu`` DeepSpeed SaveLoad cases surfaces
+    ``Group <ProcessGroup ...> is not registered``.
     """
     _cleanup()
     yield
