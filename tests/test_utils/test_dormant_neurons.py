@@ -65,39 +65,49 @@ class _FakeAgent:
         self.registry = _Registry()
 
 
-# --------------------------------------------------------------------------- #
-# _per_neuron_grad
-# --------------------------------------------------------------------------- #
-def test_per_neuron_grad_dense_reduces_over_batch():
-    go = torch.tensor([[-2.0, 1.0], [0.0, -3.0]])
-    out = _per_neuron_grad((go,))
-    assert torch.allclose(out, torch.tensor([1.0, 2.0]))
+class TestPerNeuronGrad:
+    """Reduction of a captured gradient to one magnitude per neuron."""
+
+    def test_dense_reduces_over_batch(self):
+        go = torch.tensor([[-2.0, 1.0], [0.0, -3.0]])
+
+        out = _per_neuron_grad((go,))
+
+        assert torch.allclose(out, torch.tensor([1.0, 2.0]))
+
+    def test_conv_reduces_over_batch_and_spatial(self):
+        go = torch.arange(8, dtype=torch.float32).reshape(2, 2, 2, 1)  # (B, C, H, W)
+
+        out = _per_neuron_grad((go,))
+
+        assert out.shape == (2,)
+        assert torch.allclose(out, go.abs().mean(dim=(0, 2, 3)))
+
+    @pytest.mark.parametrize(
+        "grad",
+        [
+            pytest.param((None,), id="none-entry"),
+            pytest.param(None, id="no-grad-tuple"),
+            pytest.param((), id="empty-tuple"),
+        ],
+    )
+    def test_missing_gradient_is_not_measurable(self, grad):
+        # A measured layer outside the training loss graph receives no gradient;
+        # it must read as unmeasured rather than as a magnitude of zero.
+        assert _per_neuron_grad(grad) is None
 
 
-def test_per_neuron_grad_conv_reduces_over_batch_and_spatial():
-    go = torch.arange(8, dtype=torch.float32).reshape(2, 2, 2, 1)  # (B, C, H, W)
-    out = _per_neuron_grad((go,))
-    assert out.shape == (2,)
-    assert torch.allclose(out, go.abs().mean(dim=(0, 2, 3)))
+class TestCountDormant:
+    """Thresholding neurons on their *normalised* score."""
 
+    def test_all_zero_is_fully_dormant(self):
+        assert _count_dormant(torch.zeros(4), tau=0.1) == (4, 4)
 
-def test_per_neuron_grad_handles_missing_gradient():
-    assert _per_neuron_grad((None,)) is None
-    assert _per_neuron_grad(None) is None
-    assert _per_neuron_grad(()) is None
+    def test_thresholds_on_normalised_score(self):
+        # mean = 0.5 -> norm = [0, 2, 0, 2]; two entries at 0 <= 0.1 are dormant.
+        per_neuron = torch.tensor([0.0, 1.0, 0.0, 1.0])
 
-
-# --------------------------------------------------------------------------- #
-# _count_dormant
-# --------------------------------------------------------------------------- #
-def test_count_dormant_all_zero_is_fully_dormant():
-    assert _count_dormant(torch.zeros(4), tau=0.1) == (4, 4)
-
-
-def test_count_dormant_thresholds_on_normalised_score():
-    # mean = 0.5 -> norm = [0, 2, 0, 2]; two entries at 0 <= 0.1 are dormant.
-    per_neuron = torch.tensor([0.0, 1.0, 0.0, 1.0])
-    assert _count_dormant(per_neuron, tau=0.1) == (2, 4)
+        assert _count_dormant(per_neuron, tau=0.1) == (2, 4)
 
 
 class TestCountDormantNonFinite:
@@ -261,64 +271,119 @@ class TestInactiveUnitDetection:
         assert (encoder_scores[[0, 2]] > 0).all()
 
 
-def test_grama_capture_removes_hooks_on_exit():
-    net = _TinyNet()
-    agent = _FakeAgent(net)
-    with GraMaCapture(agent):
-        net(torch.randn(2, 4)).sum().backward()
-    # No hooks should remain registered on the measured activations.
-    for module in _target_activations(net):
-        assert not module._backward_hooks
+class TestGraMaCaptureHookLifecycle:
+    """Hooks must not outlive the ``with`` block.
 
+    Asserted on ``module._backward_hooks`` -- a torch internal, but registration
+    *is* the contract here and nothing else observes it: the hooks write to the
+    capture's own buffer and only ``__exit__`` publishes ``_grama_scores``, so a
+    leaked hook leaves the snapshot looking perfectly correct while it
+    accumulates one more registration per training cycle for the rest of the run.
+    """
 
-def test_grama_capture_removes_hooks_even_on_exception():
-    net = _TinyNet()
-    agent = _FakeAgent(net)
-    with pytest.raises(RuntimeError):
+    @staticmethod
+    def _registered_hooks(net):
+        return [
+            len(module._backward_hooks or ()) for module in _target_activations(net)
+        ]
+
+    def test_hooks_are_released_on_exit(self):
+        # Arrange
+        net = _TinyNet()
+        agent = _FakeAgent(net)
+
+        # Act
         with GraMaCapture(agent):
-            raise RuntimeError("boom")
-    for module in _target_activations(net):
-        assert not module._backward_hooks
+            assert all(count > 0 for count in self._registered_hooks(net))
+            net(torch.randn(2, 4)).sum().backward()
+
+        # Assert
+        assert self._registered_hooks(net) == [0, 0]
+
+    def test_hooks_are_released_even_when_the_block_raises(self):
+        # A training block that raises must not leave the network instrumented.
+        net = _TinyNet()
+        agent = _FakeAgent(net)
+
+        with pytest.raises(RuntimeError, match="boom"):
+            with GraMaCapture(agent):
+                raise RuntimeError("boom")
+
+        assert self._registered_hooks(net) == [0, 0]
+
+    def test_repeated_captures_do_not_accumulate_hooks(self):
+        """Each cycle re-instruments the same modules; the count must not grow."""
+        net = _TinyNet()
+        agent = _FakeAgent(net)
+
+        for _cycle in range(3):
+            with GraMaCapture(agent):
+                net.zero_grad(set_to_none=True)
+                net(torch.randn(2, 4)).sum().backward()
+
+        assert self._registered_hooks(net) == [0, 0]
 
 
-# --------------------------------------------------------------------------- #
-# capture_per_neuron_scores
-# --------------------------------------------------------------------------- #
-def test_capture_per_neuron_scores_length_guard():
-    net = _TinyNet()  # _target_activations has 2 entries
-    assert capture_per_neuron_scores(net, None) == []
-    assert capture_per_neuron_scores(net, [torch.ones(3)]) == []  # wrong length
+class TestCapturePerNeuronScores:
+    """Pairing a captured snapshot back up with the modules it describes."""
+
+    def test_pairs_each_score_with_its_activation(self):
+        net = _TinyNet()
+
+        pairs = capture_per_neuron_scores(net, [torch.ones(3), torch.ones(2)])
+
+        assert [module for module, _scores in pairs] == _target_activations(net)
+
+    @pytest.mark.parametrize(
+        "per_neuron_list",
+        [
+            pytest.param(None, id="no-snapshot"),
+            pytest.param([torch.ones(3)], id="too-short"),
+            pytest.param([torch.ones(3)] * 3, id="too-long"),
+        ],
+    )
+    def test_length_mismatch_yields_nothing(self, per_neuron_list):
+        # A snapshot that does not line up with the measured layers cannot be
+        # routed safely, so none of it is used -- ``_TinyNet`` measures 2 layers.
+        net = _TinyNet()
+        assert len(_target_activations(net)) == 2
+
+        assert capture_per_neuron_scores(net, per_neuron_list) == []
+
+    def test_skips_layers_with_no_captured_gradient(self):
+        net = _TinyNet()
+
+        pairs = capture_per_neuron_scores(net, [torch.ones(3), None])
+
+        assert len(pairs) == 1
+        module, per_neuron = pairs[0]
+        assert module is _target_activations(net)[0]
+        assert torch.equal(per_neuron, torch.ones(3))
 
 
-def test_capture_per_neuron_scores_skips_none_entries():
-    net = _TinyNet()
-    pairs = capture_per_neuron_scores(net, [torch.ones(3), None])
-    assert len(pairs) == 1
-    module, per_neuron = pairs[0]
-    assert module is _target_activations(net)[0]
-    assert torch.equal(per_neuron, torch.ones(3))
+class TestDormantNeuronFraction:
+    """The fraction reported to the caller, pooled over every measured layer."""
 
+    def test_pools_dormant_counts_across_layers(self):
+        agent = _FakeAgent(_TinyNet())
+        # encoder layer: 1 dormant of 3; head layer: 0 dormant of 2 -> 1/5.
+        agent._grama_scores = [
+            [torch.tensor([1.0, 0.0, 1.0]), torch.tensor([1.0, 1.0])]
+        ]
 
-# --------------------------------------------------------------------------- #
-# dormant_neuron_fraction
-# --------------------------------------------------------------------------- #
-def test_dormant_neuron_fraction_from_snapshot():
-    net = _TinyNet()
-    agent = _FakeAgent(net)
-    # encoder layer: 1 dormant of 3; head layer: 0 dormant of 2 -> 1/5.
-    agent._grama_scores = [[torch.tensor([1.0, 0.0, 1.0]), torch.tensor([1.0, 1.0])]]
-    assert dormant_neuron_fraction(agent, tau=0.1) == pytest.approx(1 / 5)
+        assert dormant_neuron_fraction(agent, tau=0.1) == pytest.approx(1 / 5)
 
+    def test_nan_without_snapshot(self):
+        # An untrained agent has nothing to report; 0.0 would read as "healthy".
+        agent = _FakeAgent(_TinyNet())
 
-def test_dormant_neuron_fraction_nan_without_snapshot():
-    agent = _FakeAgent(_TinyNet())
-    assert math.isnan(dormant_neuron_fraction(agent, tau=0.1))
+        assert math.isnan(dormant_neuron_fraction(agent, tau=0.1))
 
+    def test_nan_when_every_layer_was_skipped(self):
+        agent = _FakeAgent(_TinyNet())
+        agent._grama_scores = [[None, None]]
 
-def test_dormant_neuron_fraction_nan_when_all_layers_skipped():
-    agent = _FakeAgent(_TinyNet())
-    agent._grama_scores = [[None, None]]
-    assert math.isnan(dormant_neuron_fraction(agent, tau=0.1))
+        assert math.isnan(dormant_neuron_fraction(agent, tau=0.1))
 
 
 # --------------------------------------------------------------------------- #
@@ -417,3 +482,47 @@ class TestTargetActivations:
         assert id(head["advantage_net.advantage_activation_1"]) in measured
         assert id(head["model.value_activation_output"]) not in measured
         assert id(head["advantage_net.advantage_activation_output"]) not in measured
+
+
+class TestSimBaEncoderActivations:
+    """SimBa's residual blocks must expose their non-linearity to the capture.
+
+    Each block holds ``hidden_size * scale_factor`` hidden units between its two
+    linear layers -- nearly every parameter in the encoder. A bare functional
+    non-linearity registers no sub-module, so no backward hook can be attached and
+    the whole trunk goes unscored while the network still reports a plausible
+    dormant fraction from its latent alone.
+    """
+
+    # 20 * 4 = 80 hidden units per block, distinct from the network's other
+    # measured widths (the 64-wide latent, the 16-wide head layer) so a block
+    # layer can be identified by width alone.
+    HIDDEN = 20
+    BLOCKS = 2
+    SCALE = 4  # EvolvableSimBa's default scale_factor
+
+    def test_scores_each_residual_block_hidden_layer(self):
+        # Arrange
+        agent = DQN(
+            spaces.Box(-np.inf, np.inf, shape=(8,), dtype=np.float32),
+            spaces.Discrete(4),
+            net_config={
+                "simba": True,
+                "encoder_config": {
+                    "hidden_size": self.HIDDEN,
+                    "num_blocks": self.BLOCKS,
+                },
+                "head_config": {"hidden_size": [16]},
+            },
+            device="cpu",
+        )
+        (_network_id, net), *_ = _eval_networks(agent)
+        obs = torch.randn(4, 8)
+
+        # Act
+        with GraMaCapture(agent):
+            net(obs).sum().backward()
+
+        # Assert
+        widths = [s.numel() for s in agent._grama_scores[0] if s is not None]
+        assert widths.count(self.HIDDEN * self.SCALE) == self.BLOCKS

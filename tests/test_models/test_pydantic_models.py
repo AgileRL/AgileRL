@@ -834,24 +834,34 @@ class TestMutationSpecReborn:
         spec = MutationSpec(param_mut_type="reborn", dormant_tau=0.1, overact_beta=3.0)
         assert spec.param_mut_type == "reborn"
 
+    def test_infinite_overact_beta_allowed(self):
+        # The ReGraMa configuration (*_regrama.yaml): with no neuron ever
+        # over-active the operator degenerates to a dormant-neuron reset, so the
+        # threshold pair must survive validation with beta unbounded.
+        spec = MutationSpec(
+            param_mut_type="reborn", dormant_tau=0.01, overact_beta=float("inf")
+        )
+        assert spec.overact_beta == float("inf")
+        assert spec.dormant_tau == 0.01
+
     def test_invalid_param_mut_type(self):
-        with pytest.raises(ValidationError):
+        with pytest.raises(ValidationError, match="param_mut_type"):
             MutationSpec(param_mut_type="bogus")
 
     def test_dormant_tau_must_be_positive(self):
-        with pytest.raises(ValidationError):
+        with pytest.raises(ValidationError, match="greater than 0"):
             MutationSpec(dormant_tau=0.0)
 
     def test_overact_beta_must_exceed_dormant_tau(self):
-        with pytest.raises(ValidationError):
+        with pytest.raises(ValidationError, match="must be greater than dormant_tau"):
             MutationSpec(dormant_tau=0.5, overact_beta=0.4)
 
     def test_overact_beta_non_negative(self):
-        with pytest.raises(ValidationError):
+        with pytest.raises(ValidationError, match="greater than or equal to 0"):
             MutationSpec(overact_beta=-1.0)
 
     def test_reborn_out_scale_non_negative(self):
-        with pytest.raises(ValidationError):
+        with pytest.raises(ValidationError, match="greater than or equal to 0"):
             MutationSpec(reborn_out_scale=-0.1)
 
     def test_reborn_out_scale_zero_allowed(self):

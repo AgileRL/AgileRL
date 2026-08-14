@@ -1,6 +1,7 @@
 import os
 import random
 import shutil
+import warnings
 from copy import deepcopy
 from pathlib import Path
 from unittest.mock import ANY, MagicMock, patch
@@ -2759,6 +2760,363 @@ class TestTrainOnPolicy:
                 verbose=False,
             )
         mock_wandb_finish.assert_called()
+
+
+def _reborn_mutations(recorder=None, param_mut_type="reborn"):
+    """A ``Mutations`` fixed to the parameter operator, optionally recording.
+
+    Shared by the three ReBorn trainer-wiring classes below, which differ only in
+    the trainer they drive. When *recorder* is given, each non-pre-training
+    evolution step appends ``(grama_scores, [child _parent_index, ...])`` to it, so
+    a test can assert on the table at the moment it is handed over.
+
+    :param recorder: List collecting one entry per evolution step, or ``None``.
+    :param param_mut_type: ``"reborn"`` or ``"original"`` (the control regime).
+    :return: A configured :class:`~agilerl.hpo.mutation.Mutations`.
+    """
+    from agilerl.hpo.mutation import Mutations
+
+    factory = Mutations
+    if recorder is not None:
+
+        class _RecordingMutations(Mutations):
+            """Records the snapshot table each evolution step is handed."""
+
+            def mutation(
+                self,
+                population,
+                pre_training_mut=False,
+                env=None,
+                grama_scores=None,
+            ):
+                if not pre_training_mut:
+                    # ``population`` here is already the post-tournament children,
+                    # so the lookup key is their parent's index.
+                    recorder.append(
+                        (
+                            grama_scores,
+                            [
+                                getattr(child, "_parent_index", None)
+                                for child in population
+                            ],
+                        )
+                    )
+                return super().mutation(
+                    population,
+                    pre_training_mut=pre_training_mut,
+                    env=env,
+                    grama_scores=grama_scores,
+                )
+
+        factory = _RecordingMutations
+
+    return factory(
+        no_mutation=0.0,
+        architecture=0.0,
+        new_layer_prob=0.0,
+        parameters=1.0,  # every agent takes the parameter mutation
+        activation=0.0,
+        rl_hp=0.0,
+        param_mut_type=param_mut_type,
+        dormant_tau=0.1,
+        overact_beta=3.0,
+        mutate_elite=True,
+        rand_seed=0,
+        device="cpu",
+    )
+
+
+def _assert_snapshot_handovers(handovers):
+    """Assert every child's parent is resolvable in the table it was mutated with."""
+    assert handovers, "no evolution step ran"
+    for table, parent_indices in handovers:
+        assert table is not None, "trainer evolved without threading the snapshots"
+        assert None not in parent_indices, "a child was left untagged by selection"
+        assert set(parent_indices) <= set(table), "a parent's snapshot is missing"
+        for index, scores in table.items():
+            assert scores, f"agent {index} was captured with no snapshot"
+            assert any(entry is not None for layers in scores for entry in layers)
+
+
+def _reborn_selection(population_size):
+    from agilerl.hpo.tournament import TournamentSelection
+
+    return TournamentSelection(
+        tournament_size=2, elitism=True, population_size=population_size
+    )
+
+
+class TestTrainOnPolicyRebornWiring:
+    """The ReBorn regime's gradient snapshot must survive the trainer round-trip.
+
+    ReBorn scores neurons from gradients captured during the *parent's* training
+    block, which tournament cloning discards, so the trainer has to capture them
+    (``GraMaCapture``), key them by pre-tournament ``agent.index``, and hand the
+    table to ``mutation.mutation(grama_scores=...)``; the operator then looks each
+    child's up via ``_parent_index``. Every link in that chain degrades *silently*
+    to the Gaussian operator when it breaks -- the run still trains, still logs,
+    and still records its mutations, just under the wrong regime. These tests are
+    the only place the whole chain runs end to end with real agents.
+    """
+
+    @staticmethod
+    def _population(size=3):
+        pop = []
+        for index in range(size):
+            agent = PPO(
+                Box(0.0, 1.0, (6,)),
+                Box(-1.0, 1.0, (2,)),
+                net_config={
+                    "encoder_config": {"hidden_size": [16], "activation": "ReLU"},
+                    "head_config": {"hidden_size": [16], "activation": "ReLU"},
+                },
+                learn_step=8,
+                batch_size=4,
+                num_envs=2,
+                device="cpu",
+            )
+            agent.index = index
+            pop.append(agent)
+        return pop
+
+    def _train(self, env, pop, mutation):
+        return train_on_policy(
+            env,
+            "env_name",
+            "PPO",
+            pop,
+            max_steps=16,
+            evo_steps=8,
+            eval_loop=1,
+            tournament=_reborn_selection(len(pop)),
+            mutation=mutation,
+            wb=False,
+            verbose=False,
+        )
+
+    @pytest.mark.parametrize("state_size, action_size, vect", _FLAT_VECT)
+    def test_evolution_step_receives_a_snapshot_for_every_parent(self, env):
+        """Every child's parent must be resolvable in the table it is mutated with.
+
+        Asserted where the table is handed over rather than on the returned
+        population: the last capture happens *before* the final tournament, so the
+        agents that come back are freshly cloned children that have not trained.
+        """
+        # Arrange
+        handovers = []
+        pop = self._population()
+
+        # Act
+        self._train(env, pop, _reborn_mutations(recorder=handovers))
+
+        # Assert
+        _assert_snapshot_handovers(handovers)
+
+    @pytest.mark.parametrize("state_size, action_size, vect", _FLAT_VECT)
+    def test_population_is_mutated_by_reborn_not_the_gaussian_fallback(self, env):
+        # Arrange
+        pop = self._population()
+
+        # Act
+        with warnings.catch_warnings(record=True) as record:
+            warnings.simplefilter("always")
+            trained, _fitnesses = self._train(env, pop, _reborn_mutations())
+
+        # Assert -- the whole chain held: capture -> side table -> _parent_index
+        assert [agent.mut for agent in trained] == ["param_reborn"] * len(pop)
+        assert not [
+            w for w in record if "falling back to the Gaussian" in str(w.message)
+        ]
+
+    @pytest.mark.parametrize("state_size, action_size, vect", _FLAT_VECT)
+    def test_original_regime_is_unaffected(self, env):
+        """The capture is gated on the regime, so a Gaussian run must not change."""
+        # Arrange
+        mutation = _reborn_mutations(param_mut_type="original")
+
+        # Act
+        trained, _fitnesses = self._train(env, self._population(), mutation)
+
+        # Assert
+        assert [agent.mut for agent in trained] == ["param"] * len(trained)
+
+
+class TestTrainOffPolicyRebornWiring:
+    """The same chain as :class:`TestTrainOnPolicyRebornWiring`, off-policy.
+
+    All three trainers carry their own hand-rolled copy of the capture / side-table
+    / forward block, so covering one says nothing about the others: the off-policy
+    loop interleaves ``learn()`` calls with env steps rather than running them in a
+    block, and the capture has to survive that.
+    """
+
+    @staticmethod
+    def _population(size=3):
+        pop = []
+        for index in range(size):
+            agent = DQN(
+                Box(0.0, 1.0, (6,)),
+                Discrete(2),
+                net_config={
+                    "encoder_config": {"hidden_size": [16], "activation": "ReLU"},
+                    "head_config": {"hidden_size": [16], "activation": "ReLU"},
+                },
+                learn_step=1,
+                batch_size=4,
+                device="cpu",
+            )
+            agent.index = index
+            pop.append(agent)
+        return pop
+
+    def _train(self, env, pop, mutation):
+        return train_off_policy(
+            env,
+            "env_name",
+            "DQN",
+            pop,
+            ReplayBuffer(max_size=64),
+            max_steps=32,
+            evo_steps=16,
+            eval_loop=1,
+            learning_delay=0,
+            tournament=_reborn_selection(len(pop)),
+            mutation=mutation,
+            wb=False,
+            verbose=False,
+        )
+
+    @pytest.mark.parametrize("state_size, action_size, vect", _FLAT_VECT)
+    def test_evolution_step_receives_a_snapshot_for_every_parent(self, env):
+        # Arrange
+        handovers = []
+
+        # Act
+        self._train(env, self._population(), _reborn_mutations(recorder=handovers))
+
+        # Assert
+        _assert_snapshot_handovers(handovers)
+
+    @pytest.mark.parametrize("state_size, action_size, vect", _FLAT_VECT)
+    def test_population_is_mutated_by_reborn_not_the_gaussian_fallback(self, env):
+        # Arrange
+        pop = self._population()
+
+        # Act
+        with warnings.catch_warnings(record=True) as record:
+            warnings.simplefilter("always")
+            trained, _fitnesses = self._train(env, pop, _reborn_mutations())
+
+        # Assert
+        assert [agent.mut for agent in trained] == ["param_reborn"] * len(pop)
+        assert not [
+            w for w in record if "falling back to the Gaussian" in str(w.message)
+        ]
+
+    @pytest.mark.parametrize("state_size, action_size, vect", _FLAT_VECT)
+    def test_original_regime_is_unaffected(self, env):
+        # Arrange
+        mutation = _reborn_mutations(param_mut_type="original")
+
+        # Act
+        trained, _fitnesses = self._train(env, self._population(), mutation)
+
+        # Assert
+        assert [agent.mut for agent in trained] == ["param"] * len(trained)
+
+
+class TestTrainMultiAgentOnPolicyRebornWiring:
+    """The same chain again, multi-agent on-policy.
+
+    The multi-agent path is the one where the snapshot's *shape* differs: each
+    registry group's ``eval_network`` is a ``ModuleDict``, which ``_eval_networks``
+    unrolls into one entry per sub-policy, so the captured table has to stay
+    aligned across the clone for the surgery to land on the right sub-agent.
+    """
+
+    @pytest.fixture
+    def multi_env(self):
+        """``DummyMultiEnv`` without ``env_defined_actions``.
+
+        The shared fixture advertises a 2-element override for a 1-env setup, which
+        only the mock agents tolerate: a real IPPO reconciles that against its own
+        action shape and raises. Nothing here needs the override.
+        """
+
+        class _NoOverrideMultiEnv(DummyMultiEnv):
+            def __init__(self):
+                super().__init__((6,), 2)
+                self.info = {agent: {} for agent in self.agents}
+
+        return _NoOverrideMultiEnv()
+
+    @staticmethod
+    def _population(multi_env, size=3):
+        agent_ids = multi_env.possible_agents
+        pop = []
+        for index in range(size):
+            agent = IPPO(
+                [multi_env.observation_space(a) for a in agent_ids],
+                [multi_env.action_space(a) for a in agent_ids],
+                agent_ids=agent_ids,
+                net_config={
+                    "encoder_config": {"hidden_size": [16], "activation": "ReLU"},
+                    "head_config": {"hidden_size": [16], "activation": "ReLU"},
+                },
+                learn_step=8,
+                batch_size=4,
+                device="cpu",
+            )
+            agent.index = index
+            pop.append(agent)
+        return pop
+
+    def _train(self, multi_env, pop, mutation):
+        return train_multi_agent_on_policy(
+            multi_env,
+            "env_name",
+            "IPPO",
+            pop=pop,
+            max_steps=16,
+            evo_steps=8,
+            eval_loop=1,
+            tournament=_reborn_selection(len(pop)),
+            mutation=mutation,
+            wb=False,
+            verbose=False,
+        )
+
+    def test_evolution_step_receives_a_snapshot_for_every_parent(self, multi_env):
+        # Arrange
+        handovers = []
+        pop = self._population(multi_env)
+
+        # Act
+        self._train(multi_env, pop, _reborn_mutations(recorder=handovers))
+
+        # Assert
+        _assert_snapshot_handovers(handovers)
+        # One snapshot entry per sub-policy network, not per group.
+        assert all(
+            len(scores) > len(pop[0].registry.groups)
+            for table, _parents in handovers
+            for scores in table.values()
+        )
+
+    def test_population_is_mutated_by_reborn_not_the_gaussian_fallback(self, multi_env):
+        # Arrange
+        pop = self._population(multi_env)
+
+        # Act
+        with warnings.catch_warnings(record=True) as record:
+            warnings.simplefilter("always")
+            trained, _fitnesses = self._train(multi_env, pop, _reborn_mutations())
+
+        # Assert
+        assert [agent.mut for agent in trained] == ["param_reborn"] * len(pop)
+        assert not [
+            w for w in record if "falling back to the Gaussian" in str(w.message)
+        ]
 
 
 class TestTrainMultiAgentOffPolicy:

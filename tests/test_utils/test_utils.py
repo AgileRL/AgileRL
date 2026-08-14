@@ -984,6 +984,43 @@ class TestTournamentSelectionAndMutation:
         mutation.mutation.assert_called_once()
         assert len(result) == 3
 
+    def test_grama_snapshots_reach_the_mutation(self):
+        """The ReBorn snapshot table must arrive intact at the mutation operator.
+
+        This is a pure pass-through, and the pass-through *is* the contract: the
+        table is the only channel by which a child can reach its parent's captured
+        gradients, and losing it degrades ReBorn to the Gaussian operator without
+        failing anything.
+        """
+        # Arrange
+        received = {}
+        snapshots = {0: [[torch.ones(3)]], 1: [[torch.zeros(3)]]}
+        population = [MagicMock(spec=EvolvableAlgorithm) for _ in range(2)]
+        for agent in population:
+            agent.steps = 100
+        tournament = MagicMock(spec=TournamentSelection)
+        tournament.select = Mock(return_value=(population[0], population))
+        mutation = MagicMock(spec=Mutations)
+
+        def _record(pop, pre_training_mut=False, env=None, grama_scores=None):
+            received["grama_scores"] = grama_scores
+            return pop
+
+        mutation.mutation = Mock(side_effect=_record)
+
+        # Act
+        tournament_selection_and_mutation(
+            population,
+            tournament,
+            mutation,
+            "CartPole-v1",
+            algo="DQN",
+            grama_scores=snapshots,
+        )
+
+        # Assert
+        assert received["grama_scores"] is snapshots
+
     def test_worker_loads_checkpoint(self):
         """Worker process loads checkpoints saved by main process."""
         population = [MagicMock(spec=EvolvableAlgorithm) for _ in range(2)]

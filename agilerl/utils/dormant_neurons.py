@@ -150,7 +150,7 @@ def _is_output_activation(name: str, ordered: list[tuple[str, nn.Module]]) -> bo
 
 
 def _activation_modules(root: nn.Module, *, include_output: bool) -> list[nn.Module]:
-    """Return the post-activation sub-modules of *root* to hook, in forward order.
+    """Return the activation sub-modules of *root* to hook, in forward order.
 
     Sub-modules are recognised by type (:data:`_ACTIVATION_TYPES`), so this is
     independent of each encoder's naming convention. ``named_modules`` yields
@@ -237,7 +237,7 @@ def _count_dormant(per_neuron: torch.Tensor, tau: float) -> tuple[int, int]:
 
 
 def _target_activations(network: nn.Module) -> list[nn.Module]:
-    """Return the ordered post-activation sub-modules measured for a network.
+    """Return the ordered activation sub-modules measured for a network.
 
     The encoder's output activation *is* included (its latent is a hidden
     representation), while the head network's final output activation is *not*
@@ -394,8 +394,9 @@ def capture_per_neuron_scores(
     """Zip a stored per-neuron gradient snapshot with a network's activations.
 
     *per_neuron_list* is this network's entry of ``agent._grama_scores`` (see
-    :class:`GraMaCapture`): the per-neuron mean ``|∇_{h_i}L|`` captured during
-    training, aligned to :func:`_target_activations` order. Returns
+    :class:`GraMaCapture`): the per-neuron mean *pre-activation* gradient
+    ``|∇_{z_i}L|`` captured during training (see the module docstring for why the
+    metric is taken there), aligned to :func:`_target_activations` order. Returns
     ``(activation_module, per_neuron)`` pairs -- skipping layers whose gradient was
     never captured -- preserving the contract the ReBorn parameter mutation
     consumes. Returns ``[]`` if no scores are available or their count no longer

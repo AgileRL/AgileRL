@@ -43,6 +43,27 @@ torch._logging.set_logs(dynamo=logging.FATAL)
 
 logger = logging.getLogger(__name__)
 
+# Normalisation layers the ReBorn surgery has to account for: they preserve neuron
+# identity but hold per-neuron state of their own, so a recycled neuron's entry has
+# to travel with it. Listed explicitly rather than via ``nn.modules.batchnorm``'s
+# private base class, and filtered so the tuple stays valid on torch versions
+# predating ``RMSNorm``.
+_NORM_LAYER_TYPES: tuple[type[nn.Module], ...] = tuple(
+    layer
+    for layer in (
+        nn.LayerNorm,
+        nn.GroupNorm,
+        nn.BatchNorm1d,
+        nn.BatchNorm2d,
+        nn.BatchNorm3d,
+        nn.InstanceNorm1d,
+        nn.InstanceNorm2d,
+        nn.InstanceNorm3d,
+        getattr(nn, "RMSNorm", None),
+    )
+    if layer is not None
+)
+
 
 def set_global_seed(seed: int | None) -> None:
     """Set the global seed for random number generators.
@@ -344,6 +365,7 @@ class Mutations:
         self.overact_beta = overact_beta
         self.reborn_out_scale = reborn_out_scale
         self._grama_side_table: dict[int, Any] | None = None
+        self._warned_recurrent = False
         self.device = device
         self.accelerator = accelerator
 
@@ -751,8 +773,9 @@ class Mutations:
         gradient snapshot *grama_scores* (no forward/backward pass here).
 
         **The split is not function-preserving in general** -- see
-        :meth:`_apply_reborn_to_layer` for the two conditions it needs and what it
-        does preserve unconditionally. The operator is used as a mutation regardless:
+        :meth:`_apply_reborn_to_layer` for the conditions it needs, how it adapts to
+        a normalisation, and what it preserves unconditionally. It is a mutation
+        regardless of whether those conditions hold:
         a perturbation the tournament can select against, not a guaranteed-safe
         rewrite. Callers should not rely on the child's outputs matching its parent's.
 
@@ -866,6 +889,8 @@ class Mutations:
         counts: dict[str, int],
     ) -> None:
         """Apply ReBorn recycling to every measured layer of a single network."""
+        self._warn_if_recurrent(network)
+
         scores = capture_per_neuron_scores(network, per_neuron_list)
         if not scores:
             return
@@ -875,7 +900,7 @@ class Mutations:
         cnn_dims = self._cnn_dims_by_module(encoder)
 
         for act_module, per_neuron in scores:
-            producer, next_layers, _is_encoder = self._resolve_producer_and_next(
+            producer, norm, next_layers, _is_encoder = self._resolve_producer_and_next(
                 act_module, encoder, head
             )
             if (
@@ -895,6 +920,7 @@ class Mutations:
                 cnn_spatial,
                 per_neuron,
                 counts,
+                norm=norm,
             )
 
     def _apply_reborn_to_layer(
@@ -905,6 +931,7 @@ class Mutations:
         cnn_spatial: int | None,
         per_neuron: torch.Tensor,
         counts: dict[str, int],
+        norm: nn.Module | None = None,
     ) -> None:
         """Perform the ReBorn surgery on the neurons of one producing layer.
 
@@ -917,21 +944,28 @@ class Mutations:
         **What the split does and does not preserve.** The scaling below always
         redistributes the *over-active* neuron's own contribution exactly across its
         copies (the alpha softmax sums to one). Whether the *network's* output is
-        unchanged additionally requires:
-
-        1. a positively homogeneous activation, ``f(beta * z) == beta * f(z)`` --
-           true for ReLU, false for Tanh/ELU/Sigmoid; and
-        2. no normalisation between the producer and the activation -- a LayerNorm
-           divides ``beta`` straight back out.
-
-        Neither is checked, and neither is true in general, so this is a *mutation*
-        rather than a guaranteed-safe rewrite: outside those conditions the child's
-        outputs differ from its parent's, and the tournament is what selects against
-        a bad draw. A third condition is inherent to gradient-based detection: the
+        unchanged additionally requires a positively homogeneous activation,
+        ``f(beta * z) == beta * f(z)`` -- true for ReLU, false for Tanh/ELU/Sigmoid.
+        That is not checked and not true in general, so this is a *mutation* rather
+        than a guaranteed-safe rewrite: outside that condition the child's outputs
+        differ from its parent's, and the tournament is what selects against a bad
+        draw. A second condition is inherent to gradient-based detection: the
         recycled neurons' own prior contributions are discarded, which is free only
         when they were also inactive -- guaranteed under the activation-based
         dormancy the split was designed for (Sokar et al.), not under the GraMa
         gradient scoring used here, where a neuron can be frozen yet highly active.
+
+        **Under a normalisation** (*norm*, applied to these neurons between the
+        producer and the activation -- the default for every evolvable MLP) the
+        incoming ``beta`` is divided straight back out, which would leave the
+        outgoing ``alpha / beta`` over-correcting. So the split instead pins
+        ``beta = 1`` and copies the over-active neuron's per-neuron affine (and any
+        running statistics) onto its partners: the copies then reproduce the
+        parent's activation exactly and ``alpha`` alone carries the split. Exactness
+        is still out of reach for a LayerNorm, whose mean/variance are pooled over
+        the whole feature dimension, so replacing a dormant neuron's pre-activation
+        perturbs every other neuron by ``O(m / H)``; a BatchNorm normalises
+        per-channel and is unaffected.
 
         **Unclaimed dormant neurons are deliberately not function-preserving.**
         They are Xavier-reset and given a fresh outgoing column of norm
@@ -939,10 +973,30 @@ class Mutations:
         zero column ReDo prescribes -- under gradient scoring a zero column leaves
         the neuron both unscorable and unlearnable. See :meth:`_revived_out_block`
         for why, and set ``reborn_out_scale=0.0`` to recover the zeroed behaviour.
+        Their normalisation state is reset to the identity ``(1, 0)`` for the same
+        reason the outgoing column is re-seeded rather than zeroed: a revived neuron
+        that inherits the decayed gain of the unit it replaced is re-suppressed
+        before it can learn anything.
+
+        :param norm: The normalisation layer applied to *producer*'s outputs before
+            the activation, or ``None`` when nothing normalises between them.
+        :type norm: torch.nn.Module | None
         """
         prod_w = self._weight_param(producer).data
         prod_b = self._bias_param(producer)
         prod_b = prod_b.data if prod_b is not None else None
+
+        # A NoisyLinear's realised weight is ``mu + sigma * epsilon``, so its noise
+        # scale is a second, parallel set of per-neuron rows and columns. Every
+        # *scaling* below applies to it identically -- rewriting mu alone would
+        # leave each copy of a split neuron injecting a full-magnitude independent
+        # perturbation instead of sharing the parent's, inflating the noise on that
+        # path by sqrt(m). Only the *reset* of a revived neuron differs, since a
+        # fresh unit wants the layer's initial noise scale rather than the one it
+        # inherited (see below).
+        prod_sigma_w, prod_sigma_b = self._noise_params(producer)
+        prod_rows = [t for t in (prod_w, prod_sigma_w) if t is not None]
+        prod_biases = [t for t in (prod_b, prod_sigma_b) if t is not None]
 
         # Pair each consumer's weight tensor with its column stride: a conv ->
         # flatten -> dense boundary spends ``cnn_spatial`` adjacent columns per
@@ -982,6 +1036,13 @@ class Mutations:
 
             consumers.append((next_w, cnn_spatial if kind == "conv_dense" else None))
 
+            # The consumer's own noise columns ride along under the same stride.
+            next_sigma_w, _next_sigma_b = self._noise_params(next_layer)
+            if next_sigma_w is not None and next_sigma_w.shape == next_w.shape:
+                consumers.append(
+                    (next_sigma_w, cnn_spatial if kind == "conv_dense" else None)
+                )
+
         if not consumers:
             return
 
@@ -993,9 +1054,13 @@ class Mutations:
             dormant_idx = list(range(scores.numel()))
             overactive_idx: list[int] = []
         else:
-            norm = scores / mean
-            dormant_idx = torch.nonzero(norm <= self.dormant_tau).flatten().tolist()
-            overactive_idx = torch.nonzero(norm >= self.overact_beta).flatten().tolist()
+            normalised = scores / mean
+            dormant_idx = (
+                torch.nonzero(normalised <= self.dormant_tau).flatten().tolist()
+            )
+            overactive_idx = (
+                torch.nonzero(normalised >= self.overact_beta).flatten().tolist()
+            )
 
         counts["dormant"] += len(dormant_idx)
         counts["overactive"] += len(overactive_idx)
@@ -1031,11 +1096,18 @@ class Mutations:
             ptr += take
             claimed.update(partners)
 
-            betas = [float(b) for b in self.rng.uniform(0.5, 1.5, size=take + 1)]
+            # A normalisation between the producer and the activation divides the
+            # incoming beta back out, so varying it would only break the outgoing
+            # alpha / beta compensation. Pin it to 1 and let alpha carry the split.
+            betas = (
+                [1.0] * (take + 1)
+                if norm is not None
+                else [float(b) for b in self.rng.uniform(0.5, 1.5, size=take + 1)]
+            )
             alpha = self._softmax(self.rng.standard_normal(take + 1))
 
-            w_in_x = prod_w[x].clone()
-            b_x = prod_b[x].clone() if prod_b is not None else None
+            w_in_x = [t[x].clone() for t in prod_rows]
+            b_x = [t[x].clone() for t in prod_biases]
             w_out_x = get_out(x)
 
             # Neuron split (net2net widening). Each copy j scales its incoming
@@ -1045,19 +1117,25 @@ class Mutations:
             # contribution alpha_j * w_out_x * h_x; since alpha is a softmax
             # (sum_j alpha_j == 1), the copies together reproduce w_out_x * h_x.
             # Over-active neuron x keeps a scaled copy of itself.
-            prod_w[x] = betas[0] * w_in_x
-            if prod_b is not None:
-                prod_b[x] = betas[0] * b_x
+            for t, row in zip(prod_rows, w_in_x, strict=True):
+                t[x] = betas[0] * row
+            for t, bias in zip(prod_biases, b_x, strict=True):
+                t[x] = betas[0] * bias
             set_out(x, [(alpha[0] / betas[0]) * w for w in w_out_x])
 
             # Each claimed dormant neuron is reborn as a scaled copy of x.
             for k, i in enumerate(partners):
                 beta_i = betas[k + 1]
                 alpha_i = alpha[k + 1]
-                prod_w[i] = beta_i * w_in_x
-                if prod_b is not None:
-                    prod_b[i] = beta_i * b_x
+                for t, row in zip(prod_rows, w_in_x, strict=True):
+                    t[i] = beta_i * row
+                for t, bias in zip(prod_biases, b_x, strict=True):
+                    t[i] = beta_i * bias
                 set_out(i, [(alpha_i / beta_i) * w for w in w_out_x])
+                # Under a norm the copy is only equivalent to its parent if it is
+                # normalised identically, so its affine (and running statistics)
+                # come from x rather than from the unit it replaced.
+                self._copy_norm_state(norm, dst=i, src=x, neurons=prod_neurons)
 
             counts["reborn"] += take
 
@@ -1073,12 +1151,23 @@ class Mutations:
             for w, s in consumers
         ]
 
+        # A revived neuron is a fresh unit, so its noise scale is the one the layer
+        # would have been initialised with -- not the collapsed (or inflated) one it
+        # inherits from the unit it replaces.
+        noise_init = self._noise_init_scales(producer)
+
         for i in dormant_idx:
             if i in claimed:
                 continue
             self._xavier_reset_row(prod_w, i)
             if prod_b is not None:
                 prod_b[i] = 0.0
+            if noise_init is not None:
+                weight_fill, bias_fill = noise_init
+                if prod_sigma_w is not None:
+                    prod_sigma_w[i] = weight_fill
+                if prod_sigma_b is not None:
+                    prod_sigma_b[i] = bias_fill
             set_out(
                 i,
                 [
@@ -1086,16 +1175,143 @@ class Mutations:
                     for block, scale in zip(get_out(i), out_scales, strict=True)
                 ],
             )
+            self._reset_norm_state(norm, index=i, neurons=prod_neurons)
             counts["xavier"] += 1
 
         # Defensive clamp + NaN scrub so ReBorn never introduces / propagates NaN.
-        prod_w.clamp_(-mag_limit, mag_limit).nan_to_num_()
-        if prod_b is not None:
-            prod_b.clamp_(-mag_limit, mag_limit).nan_to_num_()
+        for t in (*prod_rows, *prod_biases):
+            t.clamp_(-mag_limit, mag_limit).nan_to_num_()
         for next_w, _stride in consumers:
             next_w.clamp_(-mag_limit, mag_limit).nan_to_num_()
 
     # --------------------------- ReBorn helpers --------------------------- #
+    @staticmethod
+    def _noise_params(
+        module: nn.Module,
+    ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
+        """Return a noisy layer's ``(weight_sigma, bias_sigma)`` data tensors.
+
+        ``(None, None)`` for an ordinary layer, so callers can treat the noise
+        scale as an optional second set of weights rather than branching on type.
+
+        :param module: The layer to inspect.
+        :type module: torch.nn.Module
+        :return: The noise-scale tensors, each ``None`` when absent.
+        :rtype: tuple[torch.Tensor | None, torch.Tensor | None]
+        """
+        weight_sigma = getattr(module, "weight_sigma", None)
+        bias_sigma = getattr(module, "bias_sigma", None)
+        return (
+            weight_sigma.data if weight_sigma is not None else None,
+            bias_sigma.data if bias_sigma is not None else None,
+        )
+
+    @staticmethod
+    def _noise_init_scales(module: nn.Module) -> tuple[float, float] | None:
+        """Return the ``(weight, bias)`` noise scales a fresh unit starts from.
+
+        Mirrors :meth:`NoisyLinear.reset_parameters
+        <agilerl.modules.custom_components.NoisyLinear.reset_parameters>`, which
+        fills each sigma with ``std_init`` divided by the square root of the
+        corresponding fan.
+
+        :param module: The producing layer whose neuron is being revived.
+        :type module: torch.nn.Module
+        :return: The two fill values, or ``None`` for a layer that carries no noise.
+        :rtype: tuple[float, float] | None
+        """
+        weight_sigma = getattr(module, "weight_sigma", None)
+        if weight_sigma is None or weight_sigma.dim() < 2:
+            return None
+        std_init = float(getattr(module, "std_init", 0.5))
+        fan_out, fan_in = weight_sigma.shape[0], weight_sigma.shape[1]
+        return (
+            std_init / float(np.sqrt(fan_in)),
+            std_init / float(np.sqrt(fan_out)),
+        )
+
+    @staticmethod
+    def _norm_state_tensors(
+        norm: nn.Module | None, neurons: int
+    ) -> list[tuple[torch.Tensor, float]]:
+        """Return a normalisation's per-neuron state as ``(tensor, identity)`` pairs.
+
+        Covers the affine gain/shift and, for the batch norms, the running
+        statistics -- every tensor holding one entry per neuron, paired with the
+        value that makes that entry a no-op. Tensors whose length does not match
+        the producing layer are dropped: a norm over a different axis does not
+        index by neuron, and writing into it would corrupt unrelated state.
+
+        :param norm: The normalisation layer, or ``None``.
+        :type norm: torch.nn.Module | None
+        :param neurons: Number of neurons the producing layer emits.
+        :type neurons: int
+        :return: The per-neuron tensors and their neutral values.
+        :rtype: list[tuple[torch.Tensor, float]]
+        """
+        if norm is None:
+            return []
+        candidates = (
+            (getattr(norm, "weight", None), 1.0),
+            (getattr(norm, "bias", None), 0.0),
+            (getattr(norm, "running_mean", None), 0.0),
+            (getattr(norm, "running_var", None), 1.0),
+        )
+        return [
+            (tensor.data, identity)
+            for tensor, identity in candidates
+            if tensor is not None and tensor.dim() == 1 and tensor.shape[0] == neurons
+        ]
+
+    @staticmethod
+    def _copy_norm_state(
+        norm: nn.Module | None, dst: int, src: int, neurons: int
+    ) -> None:
+        """Copy one neuron's normalisation state onto another's."""
+        for tensor, _identity in Mutations._norm_state_tensors(norm, neurons):
+            tensor[dst] = tensor[src]
+
+    @staticmethod
+    def _reset_norm_state(norm: nn.Module | None, index: int, neurons: int) -> None:
+        """Reset one neuron's normalisation state to the identity transform."""
+        for tensor, identity in Mutations._norm_state_tensors(norm, neurons):
+            tensor[index] = identity
+
+    def _warn_if_recurrent(self, network: nn.Module) -> None:
+        """Warn once that a recurrent core lies outside what ReBorn can recycle.
+
+        The surgery needs two things per measured layer: an activation sub-module
+        whose gradient scores its neurons, and a weight matrix whose rows are one
+        neuron's incoming weights. A fused recurrent module offers neither -- its
+        gate non-linearities are internal to the kernel, and one hidden unit owns
+        four interleaved row blocks across ``weight_ih`` *and* ``weight_hh`` plus a
+        column of the recurrent self-connection. So a recurrent network is recycled
+        only from its output projection onward, and the counts the operator reports
+        say nothing about the encoder.
+
+        Warning is not cosmetic: without it the mutation is recorded as an ordinary
+        ``param_reborn`` and is indistinguishable from one that recycled the whole
+        network.
+
+        :param network: The evaluation network about to undergo surgery.
+        :type network: torch.nn.Module
+        """
+        if self._warned_recurrent:
+            return
+        if not any(isinstance(m, nn.RNNBase) for _name, m in network.named_modules()):
+            return
+
+        self._warned_recurrent = True
+        warnings.warn(
+            "ReBorn does not recycle the recurrent core of a recurrent encoder "
+            "(nn.RNN / nn.LSTM / nn.GRU): its gate non-linearities are fused, so "
+            "no per-neuron gradient is captured for them, and its hidden units do "
+            "not own contiguous weight rows. Only the layers after it are "
+            "recycled, so the reported ReBorn counts cover the projection and "
+            "head alone.",
+            stacklevel=2,
+        )
+
     @staticmethod
     def _softmax(x: np.ndarray) -> np.ndarray:
         """Numerically stable softmax over a 1-D numpy array."""
@@ -1106,9 +1322,20 @@ class Mutations:
     def _live_column_scale(weight: torch.Tensor, stride: int, keep: list[int]) -> float:
         """Median outgoing-column norm of a consumer over the neurons in *keep*.
 
-        One "column" is the ``stride`` adjacent columns a single producer neuron
-        owns (``stride > 1`` only at a conv -> flatten -> dense boundary). The
-        median is taken over *keep* -- the neurons this recycling pass leaves
+        One "column" is everything a single producer neuron owns in the consumer,
+        which is a different slice per boundary kind: a whole ``(out_c, *kernel)``
+        filter when the consumer is a convolution, the ``stride`` adjacent columns
+        of a conv -> flatten -> dense boundary, and a single column otherwise. The
+        neuron axis is therefore dimension 1 of a conv weight but a *strided* view
+        of dimension 1 of a dense one -- a single reshape cannot serve both, and
+        reshaping a 4-D weight as if its columns were 1-wide folds the kernel into
+        the neuron axis, so ``keep`` indexes kernel positions of the first few
+        channels rather than channels. That axis is never too short to index, so
+        the miscount is silent: it under-reported by the kernel's linear size (4x
+        at the Nature CNN's 4x4 boundary, 3x at its 3x3 one) *and* measured the
+        wrong neurons.
+
+        The median is taken over *keep* -- the neurons this recycling pass leaves
         alone -- so the reference tracks the layer's trained scale. Measuring the
         whole layer instead would let a repeatedly-recycled layer shrink without
         bound, each generation sizing its revivals against the previous one's.
@@ -1119,12 +1346,20 @@ class Mutations:
         Xavier-initialised block would have, so a revival is never silently
         zero-scaled.
 
-        :param weight: The consumer layer's weight matrix, ``(out, neurons * stride)``.
-        :param stride: Columns per producer neuron.
+        :param weight: The consumer layer's weight tensor: ``(out, neurons * stride)``
+            when dense, ``(out_c, neurons, *kernel)`` when convolutional.
+        :param stride: Columns per producer neuron; ignored for a conv consumer,
+            whose neuron axis is already dimension 1.
         :param keep: Producer-neuron indices to measure.
         :return: A strictly positive column-norm reference.
         """
-        blocks = weight.reshape(weight.shape[0], -1, stride)
+        if weight.dim() > 2:  # conv consumer: one filter per producer neuron
+            blocks = weight.reshape(weight.shape[0], weight.shape[1], -1)
+            # Conv fans count the receptive field on both sides.
+            fan_out = blocks.shape[0] * blocks.shape[2]
+        else:
+            blocks = weight.reshape(weight.shape[0], -1, stride)
+            fan_out = blocks.shape[0]
 
         def median_norm(idx: list[int] | None) -> float:
             selected = blocks if idx is None else blocks[:, idx, :]
@@ -1138,9 +1373,14 @@ class Mutations:
             if candidate > 0.0:
                 return candidate
 
-        bound = float(np.sqrt(6.0 / (weight.shape[0] + weight.shape[1])))
-        # RMS of U(-bound, bound) is bound / sqrt(3); a block holds out * stride entries.
-        return bound / np.sqrt(3.0) * float(np.sqrt(weight.shape[0] * stride))
+        # Xavier bound over the consumer's own fan-in/fan-out, and the number of
+        # entries one producer neuron's block holds -- both read off ``blocks`` so
+        # the conv and dense layouts stay in step with the branch above.
+        fan_in = blocks.shape[1] * blocks.shape[2]
+        block_entries = blocks.shape[0] * blocks.shape[2]
+        bound = float(np.sqrt(6.0 / (fan_in + fan_out)))
+        # RMS of U(-bound, bound) is bound / sqrt(3).
+        return bound / np.sqrt(3.0) * float(np.sqrt(block_entries))
 
     def _revived_out_block(self, template: torch.Tensor, scale: float) -> torch.Tensor:
         """Draw the outgoing weights a Xavier-reset neuron is revived with.
@@ -1273,7 +1513,7 @@ class Mutations:
         act_module: nn.Module,
         encoder: nn.Module | None,
         head: nn.Module | None,
-    ) -> tuple[nn.Module | None, list[nn.Module], bool]:
+    ) -> tuple[nn.Module | None, nn.Module | None, list[nn.Module], bool]:
         """Find the layer that produced *act_module*'s neurons and its consumers.
 
         The producing layer's weight *rows* (and bias) are the neurons' incoming
@@ -1293,11 +1533,20 @@ class Mutations:
         all feed one fusion layer), and only the stream that nothing else in the
         encoder follows is the one the head consumes.
 
+        Any normalisation applied between the producer and the activation is
+        returned alongside them: it holds per-neuron state of its own, so the
+        surgery has to carry it across a split and reset it on a revival. It is
+        tracked as "the last norm seen since the running producer" and cleared
+        whenever a later weight layer takes over as producer, which is what
+        distinguishes an evolvable MLP's ``linear -> layer_norm -> activation`` from
+        a SimBa block's ``layer_norm -> linear -> activation`` -- the latter
+        normalises the block's *input* and leaves these neurons alone.
+
         :param act_module: The measured activation whose neurons are being recycled.
         :param encoder: The network's encoder, if any.
         :param head: The network's head, if any.
-        :return: ``(producer, consumers, is_encoder)``; ``(None, [], False)`` when the
-            activation cannot be located, so the caller skips it.
+        :return: ``(producer, norm, consumers, is_encoder)``; ``(None, None, [],
+            False)`` when the activation cannot be located, so the caller skips it.
         """
         for root, is_encoder in ((encoder, True), (head, False)):
             search_root = self._unwrap_module(root)
@@ -1317,6 +1566,7 @@ class Mutations:
             container = name.split(".")[0]
 
             producer: nn.Module | None = None
+            norm: nn.Module | None = None
             consumers: list[nn.Module] = []
             enclosing: nn.Module | None = None
             passed = False
@@ -1324,12 +1574,16 @@ class Mutations:
                 if other is act_module:
                     passed = True
                     continue
+                in_stream = other_name.startswith(prefix)
+                if not passed and in_stream and self._is_norm_layer(other):
+                    norm = other  # applies to the running producer's outputs
+                    continue
                 if not self._is_weight_layer(other):
                     continue
-                in_stream = other_name.startswith(prefix)
                 if not passed:
                     if in_stream:
                         producer = other  # keep the nearest one behind
+                        norm = None  # anything seen so far normalised its input
                 elif in_stream:
                     if not consumers:
                         consumers = [other]  # the nearest one ahead ends the search
@@ -1350,9 +1604,23 @@ class Mutations:
                     else self._head_entry_layers(head)
                 )
 
-            return producer, consumers, is_encoder
+            return producer, norm, consumers, is_encoder
 
-        return None, [], False
+        return None, None, [], False
+
+    @staticmethod
+    def _is_norm_layer(module: nn.Module) -> bool:
+        """Whether *module* normalises its input without remapping its neurons.
+
+        Recognised by type rather than by the presence of a ``weight``, which would
+        also match every projecting layer.
+
+        :param module: The sub-module to classify.
+        :type module: torch.nn.Module
+        :return: ``True`` for a normalisation layer.
+        :rtype: bool
+        """
+        return isinstance(module, _NORM_LAYER_TYPES)
 
     @staticmethod
     def _boundary_kind(producer: nn.Module, next_layer: nn.Module) -> str | None:

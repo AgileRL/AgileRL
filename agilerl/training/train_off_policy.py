@@ -151,8 +151,10 @@ def train_off_policy(
     :type eps_decay: float, optional
     :param target: Target score for early stopping, defaults to None
     :type target: float, optional
-    :param dormant_tau: Threshold for the τ-dormant neuron metric (Sokar et al.
-        2023) logged for the best agent each evaluation cycle, defaults to 0.1
+    :param dormant_tau: Threshold for the τ-dormant neuron metric (**GraMa**, the
+        gradient analogue of Sokar et al. 2023) logged for the best agent each
+        evaluation cycle. A neuron is dormant when its normalised mean absolute
+        *pre-activation* gradient is at or below this, defaults to 0.1
     :type dormant_tau: float, optional
     :param n_step_memory: Multi-step Experience Replay Buffer to be used alongside Prioritized
         ERB, defaults to None
@@ -290,7 +292,7 @@ def train_off_policy(
     if accelerator is None and mutation is not None:
         population.update(mutation.mutation(population.agents, pre_training_mut=True))
 
-    # Capture per-neuron post-activation gradients (GraMa) during training when the
+    # Capture per-neuron pre-activation gradients (GraMa) during training when the
     # dormant diagnostic is logged (best agent) or the ReBorn parameter mutation is
     # active (every agent, so cloned children can read their parent's snapshot).
     capture_grama = bool(wb) or (

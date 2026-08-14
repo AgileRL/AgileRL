@@ -247,6 +247,12 @@ class SimbaResidualBlock(nn.Module):
 
         self.layer_norm = nn.LayerNorm(hidden_size, device=device)
         self.linear1 = nn.Linear(hidden_size, hidden_size * scale_factor, device=device)
+        # A registered sub-module rather than a functional call: the block's hidden
+        # units are only reachable to anything that inspects the network through
+        # its activations -- per-neuron gradient capture, dormancy diagnostics,
+        # neuron-level mutation operators -- if there is a module to hook. It holds
+        # no parameters, so the state dict is unchanged.
+        self.act = nn.ReLU()
         self.linear2 = nn.Linear(hidden_size * scale_factor, hidden_size, device=device)
 
         # initialize weigts using he initialization
@@ -256,6 +262,6 @@ class SimbaResidualBlock(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         res = x
         x = self.layer_norm(x)
-        x = F.relu(self.linear1(x))
+        x = self.act(self.linear1(x))
         x = self.linear2(x)
         return res + x

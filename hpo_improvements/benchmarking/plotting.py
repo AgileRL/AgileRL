@@ -176,7 +176,7 @@ def plot_dormant_fraction(
     Plots the percentage of gradient-dormant neurons of the best individual (the
     GraMa metric, eq. 2 of "Measure gradients, not activations!") against per-agent
     environment steps, in the same house style as :func:`plot_fitness`. A neuron is
-    gradient-dormant when its normalised mean absolute post-activation gradient is
+    gradient-dormant when its normalised mean absolute pre-activation gradient is
     at or below the threshold. A placeholder figure is emitted when the run logged
     no dormant-neuron values so the artifact always exists.
 
