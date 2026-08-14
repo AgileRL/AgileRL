@@ -1329,7 +1329,7 @@ wheels = [
 
 [[package]]
 name = "deepspeed"
-version = "0.19.3"
+version = "0.19.5"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "einops" },
@@ -1346,7 +1346,7 @@ dependencies = [
     { name = "torch" },
     { name = "tqdm" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/ea/2f/a1579adbdedaad56845e3b14263b8e12920bc3e52ab8ef7a6743fb7df657/deepspeed-0.19.3.tar.gz", hash = "sha256:82b4b92d0cd58f8fc461b80428a5be2838f4adad48ae3aef509495c640c9ed2f", size = 1817754, upload-time = "2026-07-23T01:09:16.523Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/4d/cf/f646df7f6c71aae524992636c2e2c1b4b02c555d696c6827415ec271c34d/deepspeed-0.19.5.tar.gz", hash = "sha256:8dc5d32604a3c7a713b3d14de482533bd328ffebe716cdafcc3511953fc90cdf", size = 1861148, upload-time = "2026-08-10T19:01:49.754Z" }
 
 [[package]]
 name = "deprecation"
