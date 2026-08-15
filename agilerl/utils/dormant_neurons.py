@@ -86,23 +86,46 @@ def _per_neuron_score(activation: torch.Tensor) -> torch.Tensor:
     return act.mean(dim=reduce_dims)
 
 
+def normalised_scores(per_neuron: torch.Tensor) -> torch.Tensor | None:
+    """Normalise per-neuron activations by their layer mean (Definition 3.1).
+
+    Non-finite entries are dropped before the mean is taken -- a diverged agent can
+    carry NaN/inf activations yet a finite fitness that slips past the tournament's
+    guard, and a single ``inf`` would drive the layer mean to infinity and crush
+    every other unit's score to zero.
+
+    Shared with the function-preserving architecture mutation, whose removals are
+    sized by the same τ-dormancy test the diagnostic below counts with.
+
+    :param per_neuron: Mean absolute activation of each neuron in the layer.
+    :type per_neuron: torch.Tensor
+    :return: ``s_i`` for each *finite* neuron, or ``None`` when the layer has no
+        finite entries. A layer whose finite mean is non-positive (every unit is
+        exactly zero) yields an all-zero score tensor, i.e. fully dormant.
+    :rtype: torch.Tensor | None
+    """
+    finite = per_neuron[per_neuron.isfinite()]
+    if finite.numel() == 0:
+        return None
+    layer_mean = finite.mean()
+    if float(layer_mean) <= 0.0:
+        return torch.zeros_like(finite)
+    return finite / layer_mean
+
+
 def _count_dormant(per_neuron: torch.Tensor, tau: float) -> tuple[int, int]:
     """Count τ-dormant neurons in one layer per Definition 3.1.
 
     :param per_neuron: Mean absolute activation of each neuron in the layer.
     :param tau: Dormancy threshold.
-    :return: ``(dormant_count, total_count)`` for the layer.
+    :return: ``(dormant_count, total_count)`` for the layer. Non-finite neurons are
+        excluded from *both* counts rather than coerced, so a diverged agent reads
+        as ``nan`` instead of a fabricated fraction.
     """
-    total = per_neuron.numel()
-    if total == 0:
+    scores = normalised_scores(per_neuron)
+    if scores is None:
         return 0, 0
-    layer_mean = per_neuron.mean()
-    if float(layer_mean) <= 0.0:
-        # Every neuron is exactly zero -> the whole layer is dormant.
-        return total, total
-    scores = per_neuron / layer_mean
-    dormant = int((scores <= tau).sum().item())
-    return dormant, total
+    return int((scores <= tau).sum().item()), scores.numel()
 
 
 def _target_activations(network: nn.Module) -> list[nn.Module]:

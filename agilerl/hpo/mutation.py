@@ -1,4 +1,5 @@
 import copy
+import inspect
 import logging
 import warnings
 from collections import OrderedDict
@@ -208,6 +209,21 @@ class Mutations:
     :type device: str, optional
     :param accelerator: Accelerator for distributed computing, defaults to None
     :type accelerator: accelerate.Accelerator(), optional
+    :param arch_mut_type: Architecture-mutation strategy, ``"original"`` or
+        ``"func_preserving"`` (Net2Net-style), defaults to ``"original"``
+    :type arch_mut_type: str, optional
+    :param arch_fp_noise: Symmetry-breaking noise scale for function-preserving
+        additions, relative to the consuming layer's existing outgoing-weight std;
+        ``0.0`` keeps the exact-zero fan-out, defaults to 0.1
+    :type arch_fp_noise: float, optional
+    :param arch_dormant_tau: Dormancy threshold τ of Definition 3.1 (Sokar et al.
+        2023) used to size a function-preserving removal: the units removed are
+        those whose activation, normalised by their layer mean, is ``<= τ``. ``0.0``
+        admits only exactly-dead units, so the removal is exactly function-preserving
+        (meaningful for ReLU nets; on saturating activations no unit ever reaches
+        zero, making every removal a no-op). Read only when
+        ``arch_mut_type == "func_preserving"``, defaults to 0.1
+    :type arch_dormant_tau: float, optional
     """
 
     def __init__(
@@ -226,6 +242,7 @@ class Mutations:
         accelerator: Accelerator | None = None,
         arch_mut_type: str = "original",
         arch_fp_noise: float = 0.1,
+        arch_dormant_tau: float = 0.1,
     ) -> None:
         if activation_selection is None:
             activation_selection = ["ReLU", "ELU", "GELU"]
@@ -295,6 +312,12 @@ class Mutations:
         assert isinstance(arch_fp_noise, (float, int)), (
             "arch_fp_noise must be a float or integer."
         )
+        assert isinstance(arch_dormant_tau, (float, int)), (
+            "arch_dormant_tau must be a float or integer."
+        )
+        assert arch_dormant_tau >= 0, (
+            "arch_dormant_tau must be greater than or equal to zero."
+        )
         assert arch_fp_noise >= 0, (
             "arch_fp_noise must be greater than or equal to zero."
         )
@@ -318,19 +341,28 @@ class Mutations:
         # Function-preserving architecture-mutation configuration (Net2Net; Chen et
         # al. / Fehring et al.). When ``arch_mut_type == "func_preserving"`` the
         # add/remove node/channel and add-layer operators are modified so a mutated
-        # child stays as close as possible to the parent's function. Removals need a
-        # fresh observation batch to score neuron activations, supplied per-agent
-        # via ``self._fp_env`` (set by :meth:`mutation`) during the main loop.
+        # child stays as close as possible to the parent's function. Removals score
+        # neurons on a fresh observation batch collected at mutation time from
+        # ``self._fp_env`` (set by :meth:`mutation`) during the main loop, and size
+        # themselves by τ-dormancy on that batch.
         self.arch_mut_type = arch_mut_type
         # Symmetry-breaking noise scale (relative to the existing outgoing-weight
         # std) for function-preserving additions; 0.0 keeps the exact-zero fan-out.
         self.arch_fp_noise = arch_fp_noise
+        # τ of Definition 3.1 (Sokar et al. 2023): a removal drops exactly the units
+        # whose layer-mean-normalised activation is <= this.
+        self.arch_dormant_tau = arch_dormant_tau
         self._fp_env: Any | None = None
+        # Dormancy bookkeeping of the removal currently being applied, recorded into
+        # ``mut_details`` so a zero-dormant no-op is distinguishable from a fallback.
+        self._fp_dormant_count: int | None = None
+        self._fp_removed_count: int | None = None
         # One-time warning guards (function preservation caveats / fallbacks).
         self._fp_warned_layernorm = False
         self._fp_warned_activation = False
         self._fp_warned_kernel = False
         self._fp_warned_env = False
+        self._fp_warned_unsupported = False
         self.device = device
         self.accelerator = accelerator
 
@@ -353,10 +385,11 @@ class Mutations:
         :type pre_training_mut: bool, optional
         :param env: Optional (vectorized) environment used by the function-preserving
             architecture mutation to collect a fresh per-agent observation batch for
-            scoring neuron activations (needed by the remove-node/remove-channel
-            operators). When ``None`` (e.g. the pre-training mutation, or the
-            accelerator path), a func-preserving removal falls back to the original
-            positional removal.
+            scoring neuron activations (needed by the remove-node/remove-channel and
+            remove-latent-node operators, which size themselves by τ-dormancy on that
+            batch). When ``None`` (e.g. the pre-training mutation, or the accelerator
+            path), a func-preserving removal falls back to the original positional
+            removal.
         :type env: Any | None, optional
 
         :return: Mutated population
@@ -370,9 +403,9 @@ class Mutations:
         # A func-preserving removal needs an environment to collect the observation
         # batch it scores neurons on. When configured for func_preserving but called
         # without one on a regular (non pre-training) mutation step -- e.g. a trainer
-        # that does not thread env, or the accelerator path -- the removal silently
-        # falls back to positional removal. The pre-training step is expected to run
-        # env-less, so it is exempt.
+        # that does not thread env, or the accelerator path -- the removal falls back
+        # to the original positional removal, which would misattribute results. The
+        # pre-training step is expected to run env-less, so it is exempt.
         if (
             self.arch_mut_type == "func_preserving"
             and env is None
@@ -975,6 +1008,9 @@ class Mutations:
         # Get the offspring evaluation modules
         # We first extract and apply a mutation to the policy and then apply
         # the same mutation to the rest of the evaluation modules e.g. critics
+        # Reset the dormancy bookkeeping of the previously mutated agent.
+        self._fp_dormant_count = self._fp_removed_count = None
+
         policy, offspring_evals = get_offspring_eval_modules(individual)
         policy_name, policy_offspring = next(iter(policy.items()))
 
@@ -1015,7 +1051,10 @@ class Mutations:
         for name, offspring in offspring_evals.items():
             if applied_mutation in offspring.mutation_methods:
                 self._apply_arch_mutation(
-                    offspring, applied_mutation, mut_dict, fp_obs=fp_obs
+                    offspring,
+                    applied_mutation,
+                    mut_dict,
+                    fp_obs=fp_obs,
                 )
                 self._to_device_and_set_individual(individual, name, offspring)
 
@@ -1028,6 +1067,12 @@ class Mutations:
         individual.mut_details["arch_func_preserving"] = (
             self.arch_mut_type == "func_preserving"
         )
+        # Only a func-preserving removal sets these; leaving them unset keeps the
+        # mutation-history columns blank for every other mutation, so a
+        # zero-dormant no-op stays distinguishable from an env-less fallback.
+        if self._fp_dormant_count is not None:
+            individual.mut_details["arch_dormant_count"] = self._fp_dormant_count
+            individual.mut_details["arch_neurons_removed"] = self._fp_removed_count
 
         return individual
 
@@ -1057,6 +1102,9 @@ class Mutations:
         # Get the offspring evaluation modules
         # We first extract and apply a mutation to the policy and then apply
         # the same mutation to the rest of the evaluation modules e.g. critics
+        # Reset the dormancy bookkeeping of the previously mutated agent.
+        self._fp_dormant_count = self._fp_removed_count = None
+
         policy, offspring_evals = get_offspring_eval_modules(individual)
         policy_name, policy_offspring = next(iter(policy.items()))
 
@@ -1116,7 +1164,7 @@ class Mutations:
                     policy,
                     sampled_mutation,
                     mut_dict,
-                    fp_obs=fp_obs.get(agent_id) if isinstance(fp_obs, dict) else None,
+                    fp_obs=self._fp_agent_obs(fp_obs, agent_id),
                 )
 
             if applied_agent is not None:
@@ -1152,11 +1200,7 @@ class Mutations:
                             agent_eval,
                             analogous_method,
                             mut_dict,
-                            fp_obs=(
-                                fp_obs.get(agent_id)
-                                if isinstance(fp_obs, dict)
-                                else None
-                            ),
+                            fp_obs=self._fp_agent_obs(fp_obs, agent_id),
                         )
                     else:
                         msg = (
@@ -1179,6 +1223,12 @@ class Mutations:
         individual.mut_details["arch_func_preserving"] = (
             self.arch_mut_type == "func_preserving"
         )
+        # Only a func-preserving removal sets these; leaving them unset keeps the
+        # mutation-history columns blank for every other mutation, so a
+        # zero-dormant no-op stays distinguishable from an env-less fallback.
+        if self._fp_dormant_count is not None:
+            individual.mut_details["arch_dormant_count"] = self._fp_dormant_count
+            individual.mut_details["arch_neurons_removed"] = self._fp_removed_count
 
         return individual
 
@@ -1296,8 +1346,15 @@ class Mutations:
         :type networks: EvolvableNetworkType
         :param mut_method: The mutation method to apply
         :type mut_method: str | None
-        :param applied_mut_dict: The mutation dictionary, defaults to None
+        :param applied_mut_dict: The mutation dictionary, defaults to None. Empty on
+            the *policy* call and populated on the mirrored calls that replay the
+            policy's mutation onto the agent's other evaluation networks -- which is
+            what marks a call as primary for the function-preserving bookkeeping.
         :type applied_mut_dict: dict[str, Any] | None, optional
+        :param fp_obs: The preprocessed observation batch to score this network's
+            activations on (or a mapping of them keyed by sub-agent for a
+            ``ModuleDict``), defaults to None
+        :type fp_obs: Any | None, optional
 
         :return: The mutation method name and the mutation dictionary
         :rtype: tuple[str | None, MutationReturnType]
@@ -1316,14 +1373,17 @@ class Mutations:
 
         # Function-preserving pre-mutation step: warn where preservation is not
         # guaranteed, snapshot hidden widths so an add fixup can size itself, and
-        # activation-rank the units before a removal so the lowest-activation ones
-        # are dropped. A no-op when arch_mut_type == "original".
+        # activation-rank the units before a removal so the τ-dormant ones are the
+        # ones dropped. A no-op when arch_mut_type == "original".
         func_preserving = (
             self.arch_mut_type == "func_preserving" and mut_method is not None
         )
         fp_before_widths: list[int] = []
+        fp_override: dict[str, Any] = {}
         if func_preserving:
-            fp_before_widths = self._fp_pre_mutation(network, mut_method, fp_obs)
+            fp_before_widths, fp_override = self._fp_pre_mutation(
+                network, mut_method, fp_obs, primary=not applied_mut_dict
+            )
 
         if mut_method is None:
             mut_dict = {}
@@ -1339,7 +1399,10 @@ class Mutations:
                     msg,
                 )
 
-            mut_dict = getattr(network, mut_method)(**applied_mut_dict)
+            # The policy's call carries the dormancy-derived layer and removal count;
+            # the mirrored calls replay the policy's mut_dict instead, so every
+            # evaluation network of the agent keeps a consistent architecture.
+            mut_dict = getattr(network, mut_method)(**(applied_mut_dict or fp_override))
 
         mut_dict = mut_dict or {}
         applied_mut = network.last_mutation_attr
@@ -1361,25 +1424,44 @@ class Mutations:
         network: EvolvableNetworkType,
         mut_method: str,
         fp_obs: Any | None,
-    ) -> list[int]:
+        *,
+        primary: bool,
+    ) -> tuple[list[int], dict[str, Any]]:
         """Warn, snapshot widths, and activation-rank units before a mutation.
 
-        :return: The target sub-module's hidden-layer widths before the mutation
-            (used to size the outgoing-weight zeroing of an addition), or, for a
-            latent-dimension mutation, a single-element list holding the latent dim.
+        :param network: The network being mutated.
+        :param mut_method: The mutation method about to be applied.
+        :param fp_obs: The observation batch to score this network on, or ``None``.
+        :param primary: Whether this is the call that *decides* the mutation (the
+            policy's). Only the primary call chooses the target layer and sizes the
+            removal; the mirrored calls are still activation-ranked, but replay the
+            policy's layer and count so the architectures stay consistent.
+        :return: ``(before_widths, override_kwargs)`` -- the target sub-module's
+            hidden-layer widths before the mutation (used to size the
+            outgoing-weight zeroing of an addition), or, for a latent-dimension
+            mutation, a single-element list holding the latent dim; plus the keyword
+            arguments the mutation method should be called with (empty for anything
+            but a primary removal, and for a removal with no observation batch --
+            which falls back to AgileRL's original random-count positional removal).
         """
         # Latent-dimension mutations cross the encoder->head boundary and are named
         # without an ``encoder``/``head_net`` segment, so handle them separately.
         if fp.is_latent_mutation(mut_method.split(".")[-1]):
-            return self._fp_pre_latent_mutation(network, mut_method, fp_obs)
+            return self._fp_pre_latent_mutation(
+                network, mut_method, fp_obs, primary=primary
+            )
 
         agent_id, submodule_name, base = fp.parse_mut_target(mut_method)
         if submodule_name is None:
-            return []
+            return [], {}
         try:
             fwd_net, submodule = fp.resolve_target(network, agent_id, submodule_name)
-        except (KeyError, AttributeError):
-            return []
+        # TypeError covers a nested sub-encoder method
+        # (``encoder.feature_net.<key>.remove_channel`` on EvolvableMultiInput), whose
+        # name parses to an agent_id that is not a ModuleDict key -- the resolve then
+        # subscripts a plain module. Leave it to the original operator.
+        except (KeyError, AttributeError, TypeError):
+            return [], {}
 
         if base in fp.ADD_NODE_MUTATIONS:
             # add_node/add_channel zero the new units' fan-out, so they stay
@@ -1399,26 +1481,118 @@ class Mutations:
             self._fp_warn_kernel()
 
         before_widths = fp.hidden_widths(submodule)
+        override: dict[str, Any] = {}
 
         if base in fp.REMOVE_MUTATIONS:
             obs = self._fp_resolve_obs(network, agent_id, fp_obs)
-            if obs is not None:
-                try:
-                    fp.permute_submodule_by_activation(fwd_net, submodule_name, obs)
-                except Exception as exc:
-                    # Fail loud: silently reverting to positional removal would
-                    # make the func_preserving regime measure the original
-                    # operator instead, invalidating the ablation without any
-                    # visible failure.
-                    msg = (
-                        "arch_mut_type='func_preserving': the function-preserving "
-                        f"activation ranking for '{mut_method}' failed. Fix the "
-                        "underlying error rather than falling back to positional "
-                        "removal (which would silently invalidate the "
-                        "func_preserving ablation)."
-                    )
-                    raise RuntimeError(msg) from exc
-        return before_widths
+            if obs is None:
+                return before_widths, {}
+            try:
+                layer_scores = fp.permute_submodule_by_activation(
+                    fwd_net, submodule_name, obs
+                )
+            except Exception as exc:
+                # Fail loud: silently reverting to positional removal would
+                # make the func_preserving regime measure the original
+                # operator instead, invalidating the ablation without any
+                # visible failure.
+                msg = (
+                    "arch_mut_type='func_preserving': the function-preserving "
+                    f"activation ranking for '{mut_method}' failed. Fix the "
+                    "underlying error rather than falling back to positional "
+                    "removal (which would silently invalidate the "
+                    "func_preserving ablation)."
+                )
+                raise RuntimeError(msg) from exc
+            if primary:
+                override = self._fp_removal_kwargs(
+                    network, mut_method, submodule, base, layer_scores
+                )
+        return before_widths, override
+
+    def _fp_removal_kwargs(
+        self,
+        network: EvolvableNetworkType,
+        mut_method: str,
+        submodule: EvolvableModule,
+        base: str,
+        layer_scores: list[torch.Tensor | None],
+    ) -> dict[str, Any]:
+        """Pick the target layer and the τ-dormant removal count for a removal.
+
+        The layer is drawn here rather than left to the mutation method because the
+        dormant count is layer-specific -- the method would otherwise pick a layer we
+        have already had to score. The draw uses the sub-module's own generator (see
+        :func:`~agilerl.hpo.function_preserving.module_rng`) so the layer choice stays
+        identically distributed to the stock operator's.
+
+        The surgery only covers sub-modules whose hidden layers are plain conv /
+        linear layers whose activations are individually measurable -- i.e.
+        :class:`~agilerl.modules.mlp.EvolvableMLP` and
+        :class:`~agilerl.modules.cnn.EvolvableCNN`. Anything else (a recurrent core
+        whose gate non-linearities are fused, a residual trunk whose blocks are not
+        weight layers, a multi-input encoder with no flat hidden stack) leaves the
+        chosen layer unscored; that degrades to AgileRL's original random-count
+        positional removal, announced once rather than silently.
+
+        :param network: The network the mutation method is resolved from.
+        :param mut_method: The mutation method about to be applied.
+        :param submodule: The evolvable sub-module being mutated.
+        :param base: The base mutation name (``remove_node`` / ``remove_channel``).
+        :param layer_scores: Per-hidden-layer activation scores, as returned by
+            :func:`~agilerl.hpo.function_preserving.permute_submodule_by_activation`.
+        :return: The keyword arguments for the removal, or ``{}`` to fall back to the
+            original positional removal.
+        """
+        widths = fp.hidden_widths(submodule)
+        if not widths:
+            self._fp_warn_unsupported(submodule)
+            return {}
+
+        rng = fp.module_rng(submodule)
+        hidden_layer = int(
+            (rng if rng is not None else self.rng).integers(0, len(widths))
+        )
+        scores = (
+            layer_scores[hidden_layer] if hidden_layer < len(layer_scores) else None
+        )
+        if scores is None:
+            # The chosen layer could not be scored (its units are not the outputs of
+            # a measurable activation), so there is no dormancy to size the removal
+            # from -- fall back rather than pass a fabricated count of zero.
+            self._fp_warn_unsupported(submodule)
+            return {}
+
+        dormant, removal = fp.dormant_removal_count(
+            scores,
+            self.arch_dormant_tau,
+            fp.layer_removal_budget(submodule, hidden_layer),
+        )
+        self._fp_dormant_count = dormant
+        self._fp_removed_count = removal
+
+        # Build the call against the method's own signature: the modules whose hidden
+        # size is a single scalar (EvolvableSimBa, EvolvableLSTM) take no
+        # ``hidden_layer``, and passing one unconditionally is a TypeError.
+        accepted = self._fp_accepted_kwargs(network, mut_method)
+        count_key = (
+            "numb_new_channels" if base == "remove_channel" else "numb_new_nodes"
+        )
+        kwargs: dict[str, Any] = {count_key: removal}
+        if "hidden_layer" in accepted:
+            kwargs["hidden_layer"] = hidden_layer
+        return kwargs
+
+    @staticmethod
+    def _fp_accepted_kwargs(
+        network: EvolvableNetworkType, mut_method: str
+    ) -> frozenset[str]:
+        """Parameter names the mutation method accepts (empty if uninspectable)."""
+        try:
+            method = getattr(network, mut_method)
+            return frozenset(inspect.signature(method).parameters)
+        except (AttributeError, TypeError, ValueError):
+            return frozenset()
 
     def _fp_post_mutation(
         self,
@@ -1438,7 +1612,7 @@ class Mutations:
             return
         try:
             _fwd_net, submodule = fp.resolve_target(network, agent_id, submodule_name)
-        except (KeyError, AttributeError):
+        except (KeyError, AttributeError, TypeError):
             return
 
         if base in fp.ADD_NODE_MUTATIONS:
@@ -1460,38 +1634,61 @@ class Mutations:
         network: EvolvableNetworkType,
         mut_method: str,
         fp_obs: Any | None,
-    ) -> list[int]:
+        *,
+        primary: bool,
+    ) -> tuple[list[int], dict[str, Any]]:
         """Snapshot the latent dim (and, for a removal, activation-rank the latent
         units across the encoder->head boundary) before a latent-dimension mutation.
 
-        :return: A single-element list holding the latent dim before the mutation
-            (used to size the head-input-column fixup of a latent addition).
+        :return: ``([latent_dim_before], override_kwargs)`` -- the latent dim before
+            the mutation (used to size the head-input-column fixup of a latent
+            addition) and, for a primary removal, the τ-dormant removal count.
         """
         agent_id, base = fp.parse_latent_target(mut_method)
         try:
             fwd_net = fp.resolve_latent_network(network, agent_id)
-        except (KeyError, AttributeError):
-            return []
+        except (KeyError, AttributeError, TypeError):
+            return [], {}
         old_latent = int(getattr(fwd_net, "latent_dim", 0))
+        override: dict[str, Any] = {}
 
         if base in fp.LATENT_REMOVE_MUTATIONS:
             obs = self._fp_resolve_obs(network, agent_id, fp_obs)
-            if obs is not None:
-                try:
-                    fp.permute_latent_by_activation(fwd_net, obs)
-                except Exception as exc:
-                    # Fail loud (see _fp_pre_mutation): silently skipping the latent
-                    # permutation would drop the removal back to positional and
-                    # invalidate the func_preserving ablation.
-                    msg = (
-                        "arch_mut_type='func_preserving': the function-preserving "
-                        f"latent activation ranking for '{mut_method}' failed. Fix "
-                        "the underlying error rather than falling back to positional "
-                        "removal (which would silently invalidate the "
-                        "func_preserving ablation)."
-                    )
-                    raise RuntimeError(msg) from exc
-        return [old_latent]
+            if obs is None:
+                return [old_latent], {}
+            try:
+                latent = fp.permute_latent_by_activation(fwd_net, obs)
+            except Exception as exc:
+                # Fail loud (see _fp_pre_mutation): silently skipping the latent
+                # permutation would drop the removal back to positional and
+                # invalidate the func_preserving ablation.
+                msg = (
+                    "arch_mut_type='func_preserving': the function-preserving "
+                    f"latent activation ranking for '{mut_method}' failed. Fix "
+                    "the underlying error rather than falling back to positional "
+                    "removal (which would silently invalidate the "
+                    "func_preserving ablation)."
+                )
+                raise RuntimeError(msg) from exc
+            if latent is None:
+                # The latent boundary could not be scored or relabelled, so there is
+                # no dormancy to size the removal from. Fall back loudly rather than
+                # emit a count of zero, which would read as "nothing was dormant".
+                self._fp_warn_unsupported(
+                    getattr(fwd_net, "encoder", fwd_net),
+                    "its encoder->head latent boundary could not be resolved (no "
+                    "single weight layer produces the latent, or no latent "
+                    "activation was captured)",
+                )
+                return [old_latent], {}
+            if primary:
+                dormant, removal = fp.dormant_removal_count(
+                    latent, self.arch_dormant_tau, fp.latent_removal_budget(fwd_net)
+                )
+                self._fp_dormant_count = dormant
+                self._fp_removed_count = removal
+                override = {"numb_new_nodes": removal}
+        return [old_latent], override
 
     def _fp_post_latent_mutation(
         self,
@@ -1505,7 +1702,7 @@ class Mutations:
             return  # latent removals are handled entirely pre-mutation
         try:
             fwd_net = fp.resolve_latent_network(network, agent_id)
-        except (KeyError, AttributeError):
+        except (KeyError, AttributeError, TypeError):
             return
         old_latent = before_widths[0] if before_widths else None
         fp.init_new_latent_outgoing(fwd_net, old_latent, self.arch_fp_noise)
@@ -1520,6 +1717,11 @@ class Mutations:
         if isinstance(network, ModuleDict):
             return fp_obs.get(agent_id) if isinstance(fp_obs, dict) else None
         return fp_obs
+
+    @staticmethod
+    def _fp_agent_obs(fp_obs: Any | None, agent_id: str | None) -> Any | None:
+        """Select one sub-agent's observations from a multi-agent batch."""
+        return fp_obs.get(agent_id) if isinstance(fp_obs, dict) else None
 
     def _fp_warn_layernorm(self) -> None:
         if not self._fp_warned_layernorm:
@@ -1544,6 +1746,50 @@ class Mutations:
                 stacklevel=2,
             )
 
+    def _fp_warn_unsupported(
+        self,
+        submodule: EvolvableModule,
+        reason: str = (
+            "its hidden units are not the outputs of measurable activation modules"
+        ),
+    ) -> None:
+        """Warn once that a sub-module's removals cannot be dormancy-driven.
+
+        Two different requirements can fail, and the *reason* distinguishes them:
+
+        * **node/channel removals** need each hidden layer's units to be the output
+          of a measurable activation module, which holds for ``EvolvableMLP`` and
+          ``EvolvableCNN`` only -- ``nn.LSTM`` fuses its gate non-linearities
+          (nothing to hook, and no single matrix whose rows are one unit's incoming
+          weights), ``EvolvableSimBa``/``EvolvableResNet`` hide their trunk inside
+          residual blocks that are not weight layers, and ``EvolvableMultiInput``
+          exposes no flat hidden stack.
+        * **latent removals** need only the encoder->head boundary (one producing
+          weight layer, one consuming one, plus the latent's own scores), so they
+          additionally cover ``EvolvableSimBa``; they fail for ``EvolvableLSTM``
+          (no top-level weight layer produces the latent) and
+          ``EvolvableMultiInput`` (no ``model`` sequential, so no latent module to
+          hook).
+
+        Either way the removal falls back to AgileRL's original random-count
+        positional removal -- which is recorded under the ordinary ``architecture``
+        category and is otherwise indistinguishable from a configured
+        ``arch_mut_type="original"`` run, hence the warning.
+
+        :param submodule: The sub-module whose removal could not be sized.
+        :param reason: Why it could not be sized, spliced into the message.
+        """
+        if self._fp_warned_unsupported:
+            return
+        self._fp_warned_unsupported = True
+        warnings.warn(
+            "arch_mut_type='func_preserving': removals from "
+            f"'{type(fp._inner_module(submodule)).__name__}' cannot be sized by "
+            f"τ-dormancy ({reason}); falling back to the original random-count "
+            "positional removal.",
+            stacklevel=2,
+        )
+
     def _fp_warn_kernel(self) -> None:
         if not self._fp_warned_kernel:
             self._fp_warned_kernel = True
@@ -1563,6 +1809,12 @@ class Mutations:
         network_ids: list[str] | None = None,
     ) -> Any | None:
         """Collect and preprocess an observation batch for a removal mutation.
+
+        The batch is gathered by rolling the agent forward in the environment (see
+        :func:`~agilerl.utils.dormant_neurons.collect_observation_batch`), so it is
+        the *current* on-policy input distribution rather than whatever the learner
+        last trained on -- at the cost of one rollout plus one forward pass per
+        mutated network.
 
         Returns ``None`` (positional-removal fallback) when func-preservation is
         off, no environment is available, or the mutation is not a removal. If

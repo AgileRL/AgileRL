@@ -12,10 +12,18 @@ implements the function-preserving variants selected by
   incoming weights (what ``create_mlp`` / ``create_cnn`` already produce) but their
   *outgoing* weights are set to zero, so they contribute nothing initially and the
   function is preserved (Net2WiderNet with zeroed fan-out).
-* **remove_node / remove_channel** -- before the standard positional removal (which
-  keeps the first ``N`` units), every hidden layer of the mutated sub-network is
-  reordered by a *function-preserving permutation* so its highest-activation units
-  come first; the standard removal then drops the lowest-activation units.
+* **remove_node / remove_channel** -- the units removed are exactly the
+  **τ-dormant** ones of the sampled layer (Sokar et al. 2023, Definition 3.1:
+  normalised mean absolute activation ``s_i <= tau``), which by definition
+  contribute ~nothing to the layer's output. Mechanically, every hidden layer of
+  the mutated sub-network is first reordered by a *function-preserving
+  permutation* so its highest-activation units come first, and the removal count
+  handed to the standard positional removal is the dormant count of the sampled
+  layer -- so the standard removal drops precisely those units. A layer with no
+  dormant unit yields a no-op removal (there is nothing removable without
+  changing the function); a dormant count larger than the module's
+  ``min_mlp_nodes`` / ``min_channel_size`` / ``min_latent_dim`` budget is clamped
+  to the most-dormant units that fit.
 * **add_layer** (head MLP only -- the encoder has LAYER mutations disabled) -- the
   newly inserted layer is initialised to the identity (Net2DeeperNet). Exact when
   the activation is ReLU / Identity; a warning is emitted otherwise.
@@ -28,7 +36,10 @@ handled by treating each channel's flattened features as a contiguous ``H*W`` bl
 (``nn.Flatten`` is channel-outermost).
 
 The functions here are pure tensor operations (given per-neuron activation scores);
-they import no plotting code and are unit-tested standalone.
+they import no plotting code and are unit-tested standalone. The scores are measured
+on a fresh observation batch collected at mutation time (see
+:func:`~agilerl.utils.dormant_neurons.collect_observation_batch`), so a removal costs
+one env rollout plus one forward pass per mutated network.
 """
 
 from __future__ import annotations
@@ -43,6 +54,7 @@ from agilerl.utils.dormant_neurons import (
     _activation_modules,
     _per_neuron_score,
     capture_per_neuron_scores,
+    normalised_scores,
 )
 
 # Base mutation names (with any ``<agent_id>.`` / ``<submodule>.`` prefix stripped).
@@ -126,6 +138,20 @@ def _inner_module(submodule: nn.Module) -> nn.Module:
     if wrapped is not None and getattr(wrapped, "model", None) is not None:
         return wrapped
     return submodule
+
+
+def module_rng(submodule: nn.Module) -> Any | None:
+    """The RNG the evolvable sub-module's own mutation methods draw from.
+
+    A removal's target layer has to be chosen *before* the mutation method runs
+    (the dormant count is layer-specific), so the caller draws it here instead --
+    from the same generator the method would have used, keeping the layer choice
+    identically distributed.
+
+    :param submodule: The evolvable sub-module being mutated.
+    :return: Its ``numpy`` generator, or ``None`` if it exposes none.
+    """
+    return getattr(_inner_module(submodule), "rng", None)
 
 
 def _ordered_weight_layers(submodule: nn.Module) -> list[nn.Module]:
@@ -329,32 +355,134 @@ def identity_new_layer(submodule: nn.Module) -> bool:
     return True
 
 
+def dormant_removal_count(
+    scores: torch.Tensor | None, tau: float, budget: int
+) -> tuple[int, int]:
+    """Number of τ-dormant units of a layer, and how many of them may be removed.
+
+    Implements the removal rule of Definition 3.1 (Sokar et al. 2023): a unit is
+    dormant when its activation, normalised by the layer mean, is ``<= tau``. Only
+    dormant units are removable without changing the layer's function, so a layer
+    with none of them yields ``0`` -- a deliberate no-op removal rather than an
+    arbitrary one.
+
+    :param scores: Mean absolute activation of each unit of the layer, or ``None``
+        when no activation was captured for it.
+    :type scores: torch.Tensor | None
+    :param tau: Dormancy threshold.
+    :type tau: float
+    :param budget: The largest count the module's hard limit will actually apply
+        (see :func:`removal_budget`); the dormant count is clamped to it, which
+        drops the *most* dormant units since the layer has been reordered by
+        descending activation.
+    :type budget: int
+    :return: ``(dormant_count, removal_count)`` -- the raw count of τ-dormant units
+        and that count clamped to *budget*. Both are ``0`` when *scores* is
+        unavailable or holds no finite entry.
+    :rtype: tuple[int, int]
+    """
+    if scores is None:
+        return 0, 0
+    normalised = normalised_scores(scores)
+    if normalised is None:
+        return 0, 0
+    dormant = int((normalised <= tau).sum().item())
+    return dormant, max(0, min(dormant, budget))
+
+
+def removal_budget(current_width: int, min_width: int, *, strict: bool = True) -> int:
+    """Largest removal count a module's hard limit will actually apply.
+
+    The evolvable modules guard their removals with a minimum width and silently
+    skip the shrink when the requested count does not fit, so the count must be
+    clamped here or a large dormant set would remove *nothing*. The guard is
+    ``width - n > min_width`` for :class:`~agilerl.modules.mlp.EvolvableMLP` and
+    the latent dimension (strict) but ``width - n >= min_width`` for
+    :class:`~agilerl.modules.cnn.EvolvableCNN` (inclusive), hence *strict*.
+
+    :param current_width: The layer's current width.
+    :type current_width: int
+    :param min_width: The module's minimum width for that layer.
+    :type min_width: int
+    :param strict: Whether the module's guard is strict (``>``) or inclusive
+        (``>=``), defaults to True.
+    :type strict: bool, optional
+    :return: The maximum number of units that may be removed (``0`` if the layer
+        already sits at its floor).
+    :rtype: int
+    """
+    return max(0, current_width - min_width - (1 if strict else 0))
+
+
+def layer_removal_budget(submodule: nn.Module, hidden_layer: int) -> int:
+    """Removal budget of one hidden layer of an evolvable MLP / CNN sub-module.
+
+    :param submodule: The ``EvolvableMLP`` / ``EvolvableCNN`` being mutated.
+    :param hidden_layer: Index of the hidden layer the removal targets.
+    :return: The maximum number of units removable from that layer, ``0`` when the
+        layer index is out of range or no minimum-width attribute is exposed.
+    """
+    widths = hidden_widths(submodule)
+    if not 0 <= hidden_layer < len(widths):
+        return 0
+    inner = _inner_module(submodule)
+    min_nodes = getattr(inner, "min_mlp_nodes", None)
+    if min_nodes is not None:
+        return removal_budget(widths[hidden_layer], int(min_nodes), strict=True)
+    min_channels = getattr(inner, "min_channel_size", None)
+    if min_channels is not None:
+        # EvolvableCNN's guard is inclusive (``>= min_channel_size``).
+        return removal_budget(widths[hidden_layer], int(min_channels), strict=False)
+    return 0
+
+
+def latent_removal_budget(fwd_net: Any) -> int:
+    """Removal budget of the encoder->head latent dimension.
+
+    :param fwd_net: The ``EvolvableNetwork`` being mutated.
+    :return: The maximum number of latent units removable, ``0`` when the network
+        does not expose the latent bounds.
+    """
+    latent_dim = getattr(fwd_net, "latent_dim", None)
+    min_latent = getattr(fwd_net, "min_latent_dim", None)
+    if latent_dim is None or min_latent is None:
+        return 0
+    return removal_budget(int(latent_dim), int(min_latent), strict=True)
+
+
 def permute_submodule_by_activation(
     fwd_net: nn.Module, submodule_name: str, obs: Any
-) -> None:
+) -> list[torch.Tensor | None]:
     """Function-preservingly reorder every hidden layer by descending activation.
 
     A single forward pass on *obs* scores each measured unit by its mean absolute
     activation. Each hidden layer's units are then permuted so the most active come
-    first, moving the producing layer's output rows/bias *and* the consuming
-    layer's input columns together (a consistent relabelling that leaves the
-    function unchanged). The subsequent standard removal -- which keeps the first
-    ``N`` units -- therefore drops the least-active ones.
+    first, moving the producing layer's output rows/bias *and* the consuming layer's
+    input columns together (a consistent relabelling that leaves the function
+    unchanged). The subsequent standard removal -- which keeps the first ``N`` units
+    -- therefore drops the least-active ones, and with ``N`` set from
+    :func:`dormant_removal_count` those are exactly the τ-dormant units.
 
     :param fwd_net: The (sub-)network that accepts *obs* (encoder + ``head_net``).
     :param submodule_name: ``"encoder"`` or ``"head_net"`` -- the module to reorder.
     :param obs: A preprocessed observation batch accepted by *fwd_net*.
+    :return: The scores used, one entry per hidden layer of the sub-module (in
+        forward order), with ``None`` where no usable activation was measured.
+        Returned so the caller can size the removal without a second forward pass;
+        the values are the *pre*-permutation ones, which the count does not depend on.
+    :rtype: list[torch.Tensor | None]
     """
     submodule = getattr(fwd_net, submodule_name)
     layers = _ordered_weight_layers(submodule)
     num_hidden = len(layers) - 1
     if num_hidden < 1:
-        return
+        return []
 
     acts = _activation_modules(submodule, include_output=(submodule_name == "encoder"))
     captured = dict(capture_per_neuron_scores(fwd_net, obs))
     block = _spatial_size(submodule)
 
+    layer_scores: list[torch.Tensor | None] = [None] * num_hidden
     for i in range(num_hidden):
         if i >= len(acts):
             break
@@ -365,6 +493,7 @@ def permute_submodule_by_activation(
         consumer = layers[i + 1]
         if scores.numel() != _out_dim(producer):
             continue
+        layer_scores[i] = scores
         perm = torch.sort(scores, descending=True, stable=True).indices
         perm = perm.to(_primary_weight(producer).device)
         _permute_out(producer, perm)
@@ -372,6 +501,7 @@ def permute_submodule_by_activation(
             _permute_in(consumer, perm, block=block)
         else:
             _permute_in(consumer, perm, block=1)
+    return layer_scores
 
 
 # --------------------------------------------------------------------------- #
@@ -456,8 +586,13 @@ def latent_scores(fwd_net: Any, obs: Any) -> torch.Tensor | None:
 
     Scores the *latent* the head actually consumes -- i.e. ``encoder(obs)`` -- so it
     works whether or not the encoder exposes a latent output-activation sub-module
-    (an MLP encoder has an ``Identity`` output activation, a CNN encoder has none),
-    unlike :func:`capture_per_neuron_scores` which only measures activation modules.
+    (an MLP encoder has an ``Identity`` output activation, a CNN encoder's is named
+    differently), unlike :func:`capture_per_neuron_scores` which only measures
+    name-matched activation modules.
+
+    Returns ``None`` rather than raising when the encoder cannot be run on *obs*
+    alone (a recurrent encoder needs a hidden state), so the caller degrades to the
+    original positional removal instead of failing the whole mutation.
 
     :param fwd_net: The ``EvolvableNetwork`` being mutated (encoder + ``head_net``).
     :param obs: A preprocessed observation batch accepted by *fwd_net*.
@@ -471,6 +606,8 @@ def latent_scores(fwd_net: Any, obs: Any) -> torch.Tensor | None:
         encoder.eval()
         with torch.no_grad():
             latent = encoder(obs)
+    except Exception:  # e.g. a recurrent encoder demanding a hidden state
+        return None
     finally:
         encoder.train(was_training)
     if not isinstance(latent, torch.Tensor):
@@ -478,29 +615,35 @@ def latent_scores(fwd_net: Any, obs: Any) -> torch.Tensor | None:
     return _per_neuron_score(latent)
 
 
-def permute_latent_by_activation(fwd_net: Any, obs: Any) -> None:
+def permute_latent_by_activation(fwd_net: Any, obs: Any) -> torch.Tensor | None:
     """Function-preservingly reorder the latent units by descending activation.
 
     Scores the encoder's latent output on *obs*, then relabels the latent units so
     the most active come first -- moving the encoder output layer's rows/bias *and*
     the head's first-layer input columns together (a consistent relabelling that
     leaves the function unchanged). The subsequent positional latent removal
-    therefore drops the lowest-activation latent units.
+    therefore drops the lowest-activation latent units, which with a
+    :func:`dormant_removal_count`-sized removal are the τ-dormant ones.
 
     :param fwd_net: The ``EvolvableNetwork`` being mutated (encoder + ``head_net``).
     :param obs: A preprocessed observation batch accepted by *fwd_net*.
+    :return: The scores used, or ``None`` when the latent could not be scored or
+        relabelled (no resolvable encoder-output/head-input pair, an encoder that
+        cannot be run on *obs*, or a width mismatch).
+    :rtype: torch.Tensor | None
     """
     producer = encoder_output_layer(fwd_net)
     consumer = head_first_layer(fwd_net)
     if producer is None or consumer is None:
-        return
-    scores = latent_scores(fwd_net, obs)
-    if scores is None or scores.numel() != _out_dim(producer):
-        return
-    perm = torch.sort(scores, descending=True, stable=True).indices
+        return None
+    latent = latent_scores(fwd_net, obs)
+    if latent is None or latent.numel() != _out_dim(producer):
+        return None
+    perm = torch.sort(latent, descending=True, stable=True).indices
     perm = perm.to(_primary_weight(producer).device)
     _permute_out(producer, perm)
     _permute_in(consumer, perm, block=1)
+    return latent
 
 
 def hidden_widths(submodule: nn.Module) -> list[int]:

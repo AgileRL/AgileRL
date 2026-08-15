@@ -913,3 +913,27 @@ class TestMutationSpecArchFpNoise:
     def test_rejects_negative(self):
         with pytest.raises(ValidationError):
             MutationSpec(arch_fp_noise=-0.1)
+
+
+class TestMutationSpecArchDormantTau:
+    def test_default_is_point_one(self):
+        assert MutationSpec().arch_dormant_tau == 0.1
+
+    def test_accepts_custom_positive(self):
+        assert MutationSpec(arch_dormant_tau=0.05).arch_dormant_tau == 0.05
+
+    def test_accepts_zero_for_exact_preservation(self):
+        # tau=0 counts only exactly-dead units, so every removal it sizes is
+        # exactly function-preserving. Meaningful on ReLU nets (dead units are
+        # exactly off); degenerate on saturating ones, where it makes every
+        # removal a no-op -- a configuration choice, not a validation error.
+        assert MutationSpec(arch_dormant_tau=0.0).arch_dormant_tau == 0.0
+
+    def test_rejects_negative(self):
+        with pytest.raises(ValidationError):
+            MutationSpec(arch_dormant_tau=-0.1)
+
+    def test_rejects_unknown_field(self):
+        # extra="forbid": a typo'd tau must fail loudly rather than be ignored.
+        with pytest.raises(ValidationError):
+            MutationSpec(arch_dormant_taus=0.1)

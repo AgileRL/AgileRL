@@ -130,3 +130,18 @@ class TestBuildMutationsArchMutType:
 
         muts = build_mutations_from_spec(MutationSpec())
         assert muts.arch_fp_noise == 0.1
+
+    def test_forwards_arch_dormant_tau(self):
+        from agilerl.models.hpo import MutationSpec
+        from agilerl.utils.trainer_utils import build_mutations_from_spec
+
+        spec = MutationSpec(arch_dormant_tau=0.05)
+        muts = build_mutations_from_spec(spec)
+        assert muts.arch_dormant_tau == 0.05
+
+    def test_arch_dormant_tau_defaults_to_point_one(self):
+        from agilerl.models.hpo import MutationSpec
+        from agilerl.utils.trainer_utils import build_mutations_from_spec
+
+        muts = build_mutations_from_spec(MutationSpec())
+        assert muts.arch_dormant_tau == 0.1

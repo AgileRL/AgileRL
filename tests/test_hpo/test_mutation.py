@@ -206,6 +206,15 @@ class TestMutationsInit:
         with pytest.raises(AssertionError, match="between zero and one"):
             Mutations(0, 0, 1.5, 0, 0, 0, 0.1, device="cpu")
 
+    def test_accepts_zero_arch_dormant_tau(self):
+        # tau=0 removes only exactly-dead units, i.e. exact preservation.
+        muts = Mutations(0, 0, 0.5, 0, 0, 0, 0.1, device="cpu", arch_dormant_tau=0.0)
+        assert muts.arch_dormant_tau == 0.0
+
+    def test_raises_for_negative_arch_dormant_tau(self):
+        with pytest.raises(AssertionError, match="arch_dormant_tau"):
+            Mutations(0, 0, 0.5, 0, 0, 0, 0.1, device="cpu", arch_dormant_tau=-0.1)
+
 
 class TestMutationsFindAnalogousMutation:
     def test_returns_none_for_empty_sampled(self):
@@ -2222,6 +2231,7 @@ def test_get_offspring_eval_modules_returns_policy_and_modules(
 # Function-preserving architecture mutations (arch_mut_type="func_preserving")
 # --------------------------------------------------------------------------- #
 import agilerl.hpo.function_preserving as fp  # noqa: E402
+from agilerl.utils.dormant_neurons import capture_per_neuron_scores  # noqa: E402
 
 
 def _fp_dqn_pop(device="cpu", head_hidden=(32,)):
@@ -2327,7 +2337,7 @@ def _dqn_q(policy, obs):
         return policy(obs).clone()
 
 
-def _fp_muts(arch="func_preserving", seed=0, arch_fp_noise=0.0):
+def _fp_muts(arch="func_preserving", seed=0, arch_fp_noise=0.0, arch_dormant_tau=0.1):
     return Mutations(
         0.5,
         0.5,
@@ -2338,6 +2348,7 @@ def _fp_muts(arch="func_preserving", seed=0, arch_fp_noise=0.0):
         0.1,
         arch_mut_type=arch,
         arch_fp_noise=arch_fp_noise,
+        arch_dormant_tau=arch_dormant_tau,
         rand_seed=seed,
         device="cpu",
     )
@@ -2422,11 +2433,16 @@ class TestFunctionPreservingMutations:
         with pytest.warns(UserWarning, match="function preservation cannot be"):
             muts._apply_arch_mutation(po, "head_net.add_layer", {})
 
-    def test_remove_node_drops_lowest_activation(self):
-        # Make the FIRST 8 head units dead; positional removal keeps them and
-        # drops live units (changing the output), whereas the func-preserving
-        # removal ranks them last and drops them (preserving the output).
-        obs = np.random.randint(0, 255, size=(8, 4, 32, 32)).astype(np.uint8)
+    def test_remove_node_drops_exactly_the_dormant_units(self):
+        # Make the FIRST 8 head units dead: they are then the only τ-dormant ones,
+        # so the removal drops exactly them and the function is preserved. The
+        # original positional removal keeps the first units and drops live ones.
+        torch.manual_seed(0)
+        obs = (
+            np.random.default_rng(0)
+            .integers(0, 255, size=(8, 4, 32, 32))
+            .astype(np.uint8)
+        )
 
         def build():
             pop = _fp_dqn_pop(head_hidden=(32,))
@@ -2435,21 +2451,25 @@ class TestFunctionPreservingMutations:
             policy, _ = get_offspring_eval_modules(ind)
             _n, po = next(iter(policy.items()))
             head_layers = fp._ordered_weight_layers(po.head_net)
-            with torch.no_grad():  # kill units [0:8]
-                head_layers[0].weight.data[:8] = 0.0
+            with torch.no_grad():
+                # Pin the layer's activations: units [0:8] are dead, the rest are
+                # comfortably above tau. A randomly initialised ReLU layer would
+                # otherwise leave a few live-but-weak units below tau as well,
+                # making the expected count depend on the seed.
+                head_layers[0].weight.data.zero_()
                 head_layers[0].bias.data[:8] = 0.0
+                head_layers[0].bias.data[8:] = torch.linspace(1.0, 2.0, 24)
             return ind, pre, po
 
         ind, pre, po = build()
         q0 = _dqn_q(po, pre)
-        _fp_muts()._apply_arch_mutation(
-            po,
-            "head_net.remove_node",
-            {"hidden_layer": 0, "numb_new_nodes": 8},
-            fp_obs=pre,
+        _applied, mut_dict = _fp_muts()._apply_arch_mutation(
+            po, "head_net.remove_node", fp_obs=pre
         )
-        q_fp = _dqn_q(po, pre)
-        assert torch.allclose(q0, q_fp, atol=1e-4)  # dropped the dead units
+        # The count is the dormant count, not one of AgileRL's random 16/32/64.
+        assert mut_dict["numb_new_nodes"] == 8
+        assert fp.hidden_widths(po.head_net)[0] == 24
+        assert torch.allclose(q0, _dqn_q(po, pre), atol=1e-4)  # dropped the dead units
 
         # The original positional removal drops the *live* trailing units.
         _ind2, pre2, po2 = build()
@@ -2459,24 +2479,100 @@ class TestFunctionPreservingMutations:
         )
         assert not torch.allclose(q0b, _dqn_q(po2, pre2), atol=1e-4)
 
-    def test_remove_channel_drops_lowest_activation(self):
-        obs = np.random.randint(0, 255, size=(8, 4, 32, 32)).astype(np.uint8)
+    def test_zero_dormant_layer_removes_nothing(self):
+        # Nothing is τ-dormant, so nothing can be removed without changing the
+        # function: the removal is a deliberate no-op rather than an arbitrary cut.
+        torch.manual_seed(0)
+        obs = (
+            np.random.default_rng(1)
+            .integers(0, 255, size=(8, 4, 32, 32))
+            .astype(np.uint8)
+        )
+        pop = _fp_dqn_pop(head_hidden=(32,))
+        ind = pop[0]
+        pre = ind.preprocess_observation(obs)
+        policy, _ = get_offspring_eval_modules(ind)
+        _n, po = next(iter(policy.items()))
+        head_layers = fp._ordered_weight_layers(po.head_net)
+        with torch.no_grad():  # every unit comfortably above tau
+            head_layers[0].weight.data.zero_()
+            head_layers[0].bias.data[:] = torch.linspace(1.0, 2.0, 32)
+
+        q0 = _dqn_q(po, pre)
+        _applied, mut_dict = _fp_muts()._apply_arch_mutation(
+            po, "head_net.remove_node", fp_obs=pre
+        )
+        assert mut_dict["numb_new_nodes"] == 0
+        assert fp.hidden_widths(po.head_net)[0] == 32
+        assert torch.allclose(q0, _dqn_q(po, pre), atol=1e-4)
+
+    def test_dormant_count_is_clamped_to_the_min_width_budget(self):
+        # 30 of 32 units dead, but min_mlp_nodes=4 only allows 27 to go: the
+        # removal shrinks to the floor instead of vanishing (AgileRL's guard would
+        # otherwise silently apply no removal at all).
+        torch.manual_seed(0)
+        obs = (
+            np.random.default_rng(2)
+            .integers(0, 255, size=(8, 4, 32, 32))
+            .astype(np.uint8)
+        )
+        pop = _fp_dqn_pop(head_hidden=(32,))
+        ind = pop[0]
+        pre = ind.preprocess_observation(obs)
+        policy, _ = get_offspring_eval_modules(ind)
+        _n, po = next(iter(policy.items()))
+        head_layers = fp._ordered_weight_layers(po.head_net)
+        with torch.no_grad():
+            head_layers[0].weight.data.zero_()
+            head_layers[0].bias.data[:30] = 0.0
+            head_layers[0].bias.data[30:] = torch.linspace(1.0, 2.0, 2)
+
+        muts = _fp_muts()
+        _applied, mut_dict = muts._apply_arch_mutation(
+            po, "head_net.remove_node", fp_obs=pre
+        )
+        assert muts._fp_dormant_count == 30
+        assert mut_dict["numb_new_nodes"] == 27  # 32 - min_mlp_nodes(4) - 1
+        assert fp.hidden_widths(po.head_net)[0] == 5
+
+    def test_obs_less_removal_falls_back_to_positional(self):
+        # No env (pre-training step / accelerator path): degrade to AgileRL's
+        # original random-count positional removal rather than silently no-op.
+        pop = _fp_dqn_pop(head_hidden=(32,))
+        policy, _ = get_offspring_eval_modules(pop[0])
+        _n, po = next(iter(policy.items()))
+
+        muts = _fp_muts()
+        _applied, mut_dict = muts._apply_arch_mutation(
+            po, "head_net.remove_node", fp_obs=None
+        )
+        assert mut_dict["numb_new_nodes"] in (16, 32, 64)
+        assert muts._fp_dormant_count is None
+
+    def test_remove_channel_drops_exactly_the_dormant_channels(self):
+        torch.manual_seed(0)
+        obs = (
+            np.random.default_rng(3)
+            .integers(0, 255, size=(8, 4, 32, 32))
+            .astype(np.uint8)
+        )
         pop = _fp_dqn_pop()
         ind = pop[0]
         pre = ind.preprocess_observation(obs)
         policy, _ = get_offspring_eval_modules(ind)
         _n, po = next(iter(policy.items()))
         conv_layers = fp._ordered_weight_layers(po.encoder)
-        with torch.no_grad():  # kill the first 4 channels of conv layer 0
-            conv_layers[0].weight.data[:4] = 0.0
-            conv_layers[0].bias.data[:4] = 0.0
+        with torch.no_grad():  # pin both conv layers: 4 dead channels, 4 live ones,
+            for conv in conv_layers[:2]:  # so the count holds whichever is sampled
+                conv.weight.data.zero_()
+                conv.bias.data[:4] = 0.0
+                conv.bias.data[4:] = torch.linspace(1.0, 2.0, 4)
         q0 = _dqn_q(po, pre)
-        _fp_muts()._apply_arch_mutation(
-            po,
-            "encoder.remove_channel",
-            {"hidden_layer": 0, "numb_new_channels": 4},
-            fp_obs=pre,
+
+        _applied, mut_dict = _fp_muts()._apply_arch_mutation(
+            po, "encoder.remove_channel", fp_obs=pre
         )
+        assert mut_dict["numb_new_channels"] == 4  # == the min_channel_size budget
         assert torch.allclose(q0, _dqn_q(po, pre), atol=1e-4)
 
     def test_add_latent_node_preserves_function(self):
@@ -2570,16 +2666,18 @@ class TestFunctionPreservingMutations:
             policy, _ = get_offspring_eval_modules(ind)
             _n, po = next(iter(policy.items()))
             enc_out = fp.encoder_output_layer(po)
-            with torch.no_grad():  # kill latent units [0:4]
-                enc_out.weight.data[:4] = 0.0
+            with torch.no_grad():  # latent units [0:4] dead, the other 12 live
+                enc_out.weight.data.zero_()
                 enc_out.bias.data[:4] = 0.0
+                enc_out.bias.data[4:] = torch.linspace(1.0, 2.0, 12)
             return ind, pre, po
 
         ind, pre, po = build()
         q0 = _dqn_q(po, pre)
-        _fp_muts()._apply_arch_mutation(
-            po, "remove_latent_node", {"numb_new_nodes": 4}, fp_obs=pre
+        _applied, mut_dict = _fp_muts()._apply_arch_mutation(
+            po, "remove_latent_node", fp_obs=pre
         )
+        assert mut_dict["numb_new_nodes"] == 4  # the dormant latent units
         assert torch.allclose(q0, _dqn_q(po, pre), atol=1e-4)  # dropped dead latent
 
         _ind2, pre2, po2 = build()
@@ -2611,8 +2709,10 @@ class TestFunctionPreservingMutations:
 
         muts = _fp_muts()
         muts._fp_env = _FakeVecEnv()
-        obs = muts._fp_collect_obs(ind, "remove_latent_node", multi_agent=False)
-        assert obs is not None
+        assert (
+            muts._fp_collect_obs(ind, "remove_latent_node", multi_agent=False)
+            is not None
+        )
 
     def test_change_kernel_falls_back_and_warns_once(self):
         pop = _fp_dqn_pop()
@@ -2702,10 +2802,7 @@ class TestFunctionPreservingMutations:
             policy, _ = get_offspring_eval_modules(ind)
             _n, po = next(iter(policy.items()))
             _fp_muts(seed=0)._apply_arch_mutation(
-                po,
-                "head_net.remove_node",
-                {"hidden_layer": 0, "numb_new_nodes": 8},
-                fp_obs=pre,
+                po, "head_net.remove_node", fp_obs=pre
             )
             return {k: v.clone() for k, v in po.state_dict().items()}
 
@@ -2731,7 +2828,8 @@ class TestFunctionPreservingMutations:
         )
 
     def test_collect_obs_returns_preprocessed_batch_for_remove(self):
-        # The positive glue: a removal + an env yields a preprocessed obs batch.
+        # The positive glue: a removal + an env yields a preprocessed obs batch the
+        # network can consume.
         pop = _fp_dqn_pop()
         ind = pop[0]
 
@@ -2753,7 +2851,6 @@ class TestFunctionPreservingMutations:
         muts._fp_env = _FakeVecEnv()
         obs = muts._fp_collect_obs(ind, "encoder.remove_channel", multi_agent=False)
         assert obs is not None
-        # A preprocessed batch the network can consume.
         policy, _ = get_offspring_eval_modules(ind)
         _n, po = next(iter(policy.items()))
         po.eval()
@@ -2775,6 +2872,24 @@ class TestFunctionPreservingMutations:
         muts._fp_env = _BrokenVecEnv()
         with pytest.raises(RuntimeError, match="func_preserving"):
             muts._fp_collect_obs(ind, "encoder.remove_channel", multi_agent=False)
+
+    def test_ranking_failure_raises_rather_than_falling_back(self, monkeypatch):
+        # Fail loud: a ranking error must surface, not be swallowed into a silent
+        # positional-removal fallback (which would make the func_preserving regime
+        # quietly measure the original operator instead).
+        pop = _fp_dqn_pop()
+        ind = pop[0]
+        obs = np.random.randint(0, 255, size=(8, 4, 32, 32)).astype(np.uint8)
+        pre = ind.preprocess_observation(obs)
+        policy, _ = get_offspring_eval_modules(ind)
+        _n, po = next(iter(policy.items()))
+
+        def _boom(*_args, **_kwargs):
+            raise RuntimeError("ranking is broken")
+
+        monkeypatch.setattr(fp, "permute_submodule_by_activation", _boom)
+        with pytest.raises(RuntimeError, match="func_preserving"):
+            _fp_muts()._apply_arch_mutation(po, "encoder.remove_channel", fp_obs=pre)
 
 
 def _ordered_head_weights(policy):
@@ -2892,8 +3007,6 @@ class TestFunctionPreservingMultiAgent:
 
 class TestCapturePerNeuronScores:
     def test_returns_per_layer_scores_in_order(self):
-        from agilerl.utils.dormant_neurons import capture_per_neuron_scores
-
         pop = _fp_dqn_pop(head_hidden=(32,))
         ind = pop[0]
         obs = np.random.randint(0, 255, size=(8, 4, 32, 32)).astype(np.uint8)
@@ -2905,3 +3018,151 @@ class TestCapturePerNeuronScores:
         for _module, per_neuron in scored:
             assert per_neuron.dim() == 1
             assert torch.isfinite(per_neuron).all()
+
+
+class TestFunctionPreservingUnsupportedArchitectures:
+    """Architectures the dormancy-driven removal cannot cover must degrade loudly.
+
+    The removal needs each hidden layer's units to be the outputs of a measurable
+    activation module, which holds for EvolvableMLP/EvolvableCNN only.
+    """
+
+    @staticmethod
+    def _q_network(**kwargs):
+        from agilerl.networks import QNetwork
+
+        return QNetwork(action_space=generate_discrete_space(4), **kwargs)
+
+    def test_simba_removal_warns_and_falls_back(self):
+        # EvolvableSimBa hides its trunk in residual blocks and takes no
+        # ``hidden_layer`` argument; passing one used to raise TypeError.
+        obs_space = generate_random_box_space((6,))
+        net = self._q_network(observation_space=obs_space, simba=True)
+        obs = torch.randn(8, 6)
+
+        muts = _fp_muts()
+        with pytest.warns(UserWarning, match="cannot be sized"):
+            _applied, mut_dict = muts._apply_arch_mutation(
+                net, "encoder.remove_node", fp_obs=obs
+            )
+        # Fell back to AgileRL's random count, and recorded no dormancy -- so the
+        # mutation-history columns stay blank rather than claiming a τ-dormant cut.
+        assert mut_dict["numb_new_nodes"] in (16, 32, 64)
+        assert muts._fp_dormant_count is None
+
+    def test_simba_latent_removal_is_still_dormancy_driven(self):
+        # The latent removal only needs the encoder->head boundary (one producing
+        # weight layer, one consuming one), so it covers one encoder more than the
+        # node/channel removal does.
+        torch.manual_seed(0)
+        obs_space = generate_random_box_space((6,))
+        net = self._q_network(observation_space=obs_space, simba=True)
+        obs = torch.randn(16, 6)
+
+        net.eval()
+        with torch.no_grad():
+            before = net(obs).clone()
+
+        muts = _fp_muts()
+        fp_net = copy.deepcopy(net)
+        _applied, mut_dict = muts._apply_arch_mutation(
+            fp_net, "remove_latent_node", fp_obs=obs
+        )
+        assert muts._fp_dormant_count == mut_dict["numb_new_nodes"]
+
+        # τ-dormant units are near-silent, not necessarily exactly dead, so the
+        # guarantee is a far smaller perturbation than the stock removal of the
+        # *same* count -- not bit-exactness.
+        orig_net = copy.deepcopy(net)
+        _fp_muts(arch="original")._apply_arch_mutation(
+            orig_net, "remove_latent_node", dict(mut_dict)
+        )
+        fp_net.eval()
+        orig_net.eval()
+        with torch.no_grad():
+            delta_fp = (fp_net(obs) - before).abs().max()
+            delta_orig = (orig_net(obs) - before).abs().max()
+        assert delta_fp < delta_orig / 100
+
+    def test_multi_input_latent_removal_warns_and_falls_back(self):
+        # EvolvableMultiInput exposes no ``model`` sequential, so no single weight
+        # layer produces the latent and the encoder->head boundary cannot be
+        # relabelled: the removal must degrade loudly, not report zero dormant.
+        obs_space = spaces.Dict(
+            {
+                "vec": generate_random_box_space((6,)),
+                "img": spaces.Box(0, 255, shape=(3, 32, 32), dtype=np.uint8),
+            }
+        )
+        net = self._q_network(observation_space=obs_space)
+        obs = {
+            "vec": torch.randn(8, 6),
+            "img": torch.rand(8, 3, 32, 32),
+        }
+
+        muts = _fp_muts()
+        with pytest.warns(UserWarning, match="latent boundary could not be resolved"):
+            _applied, mut_dict = muts._apply_arch_mutation(
+                net, "remove_latent_node", fp_obs=obs
+            )
+        assert mut_dict["numb_new_nodes"] in (8, 16, 32)  # AgileRL's random count
+        assert muts._fp_dormant_count is None
+
+    def test_recurrent_encoder_exposes_no_hidden_layers(self):
+        # nn.LSTM fuses its gate non-linearities: nothing to hook, and no single
+        # matrix whose rows are one unit's incoming weights.
+        net = self._q_network(
+            observation_space=generate_random_box_space((6,)), recurrent=True
+        )
+        assert fp.hidden_widths(net.encoder) == []
+
+    def test_nested_multi_input_removal_does_not_crash(self):
+        # 'encoder.feature_net.<key>.remove_channel' parses to an agent_id that is
+        # not a ModuleDict key, so resolving it subscripts a plain module.
+        obs_space = spaces.Dict(
+            {
+                "vec": generate_random_box_space((6,)),
+                "img": spaces.Box(0, 255, shape=(3, 32, 32), dtype=np.uint8),
+            }
+        )
+        net = self._q_network(observation_space=obs_space)
+        nested = [
+            m
+            for m in net.mutation_methods
+            if m.startswith("encoder.feature_net.") and "remove" in m
+        ]
+        assert nested, "expected a nested sub-encoder removal method"
+        _applied, mut_dict = _fp_muts()._apply_arch_mutation(net, nested[0])
+        assert mut_dict is not None
+
+
+class TestDormantRemovalCount:
+    """Definition 3.1 arithmetic, isolated from any network."""
+
+    def test_counts_units_at_or_below_tau(self):
+        # Mean 1.0 -> normalised scores are the raw values; 2 are <= 0.1.
+        scores = torch.tensor([0.0, 0.05, 1.5, 2.45])
+        assert fp.dormant_removal_count(scores, 0.1, budget=10) == (2, 2)
+
+    def test_clamps_to_the_budget(self):
+        scores = torch.zeros(8)  # everything dormant
+        assert fp.dormant_removal_count(scores, 0.1, budget=3) == (8, 3)
+
+    def test_no_scores_removes_nothing(self):
+        assert fp.dormant_removal_count(None, 0.1, budget=10) == (0, 0)
+        assert fp.dormant_removal_count(torch.tensor([float("nan")]), 0.1, 10) == (0, 0)
+
+    def test_non_finite_units_are_excluded_not_coerced(self):
+        # An inf would otherwise drive the layer mean to infinity and read every
+        # other unit as dormant.
+        scores = torch.tensor([float("inf"), 1.0, 1.0, 0.0])
+        assert fp.dormant_removal_count(scores, 0.1, budget=10) == (1, 1)
+
+    def test_removal_budget_respects_the_guard_strictness(self):
+        assert (
+            fp.removal_budget(32, 4, strict=True) == 27
+        )  # EvolvableMLP: width - n > min
+        assert (
+            fp.removal_budget(8, 4, strict=False) == 4
+        )  # EvolvableCNN: width - n >= min
+        assert fp.removal_budget(4, 4, strict=True) == 0  # already at the floor

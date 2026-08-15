@@ -6,7 +6,8 @@
 # (no_mut / arch_mut; new_layer / params / act / rl_hp = 0).
 # arch_mut_type: func_preserving makes each architecture mutation Net2Net-style
 # function-preserving: added units get zero outgoing weights and removals drop the
-# lowest-activation units. Whole-layer add/remove is disabled here (new_layer = 0), so
+# tau-dormant units (Sokar et al. 2023, Def. 3.1) of the sampled layer -- see
+# arch_dormant_tau below. Whole-layer add/remove is disabled here (new_layer = 0), so
 # the Net2DeeperNet identity-init for new head layers never fires. Its
 # baseline is ppo_relu_arch_original_nolayer.yaml (identical except arch_mut_type).
 # PPO WITH HPO (population of 4, elitism, node/channel architecture mutations only;
@@ -149,6 +150,7 @@ mutation:
     rand_seed: 42
     mutate_elite: false  # keep the elite member unmutated so the best agent survives intact into the next generation
     arch_mut_type: func_preserving  # original | func_preserving architecture mutations
+    arch_dormant_tau: 0.1  # tau of Definition 3.1 (Sokar et al. 2023): a removal drops exactly the units whose layer-mean-normalised activation is <= this (0 dormant units = no-op removal)
 
 network:
     # Paper architecture: width-64 tanh MLP. Under HPO the min/max bounds below

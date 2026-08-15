@@ -510,7 +510,7 @@ class DummyMutations:
     def __init__(self):
         pass
 
-    def mutation(self, pop, pre_training_mut=False):
+    def mutation(self, pop, pre_training_mut=False, env=None):
         return pop
 
 
@@ -1303,7 +1303,7 @@ def mocked_multi_env(state_size, action_size):
 def mocked_mutations():
     mock_mutations = MagicMock()
 
-    def mutation(pop, pre_training_mut=False):
+    def mutation(pop, pre_training_mut=False, env=None):
         return pop
 
     mock_mutations.mutation.side_effect = mutation

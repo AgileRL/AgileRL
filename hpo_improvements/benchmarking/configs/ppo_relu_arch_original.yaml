@@ -198,4 +198,4 @@ training:
     evo_steps: 163840
     eval_steps:
     eval_loop: 1
-    dormant_tau: 0.1  # tau threshold for the dormant-neuron metric (Sokar et al. 2023)
+    dormant_tau: 0.01  # tau threshold for the dormant-neuron metric (Sokar et al. 2023)
