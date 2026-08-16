@@ -300,7 +300,6 @@ def train_on_policy(
                     elite_path=elite_path,
                     save_elite=save_elite,
                     accelerator=accelerator,
-                    env=env,
                 ),
             )
 

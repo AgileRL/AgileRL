@@ -456,7 +456,6 @@ def train_off_policy(
                     elite_path=elite_path,
                     save_elite=save_elite,
                     accelerator=accelerator,
-                    env=env,
                 ),
             )
 

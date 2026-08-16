@@ -3,10 +3,10 @@
 #
 # Derived from dqn_double_tuned_hpo.yaml. Population = 4; only no_mutation and architecture
 # mutations are active (no_mut / arch_mut / new_layer; params / act / rl_hp = 0).
-# arch_mut_type: func_preserving makes each architecture mutation Net2Net-style
-# function-preserving: added units get zero outgoing weights, removals drop the
-# tau-dormant units (Sokar et al. 2023, Def. 3.1) of the sampled layer -- see
-# arch_dormant_tau below -- and new head layers are identity-initialised. Its
+# arch_mut_type: func_preserving makes each architecture *addition* Net2Net-style
+# function-preserving: added units get zero outgoing weights and new head layers are
+# identity-initialised. Removals keep AgileRL's original random-count positional
+# behaviour, so this arm differs from its baseline only in how capacity is added. Its
 # baseline is dqn_double_tuned_arch_original.yaml (identical except arch_mut_type).
 # TUNED Double DQN WITH HPO (population of 4, elitism, architecture mutations
 # only) on the Atari 2600 suite.
@@ -106,7 +106,6 @@ mutation:
     mutate_elite: false  # keep the elite member unmutated so the best agent survives intact into the next generation
     arch_mut_type: func_preserving  # original | func_preserving architecture mutations
     arch_fp_noise: 0.1  # symmetry-breaking noise on new units' fan-out, relative to the layer's weight std (0.0 = exact-zero preservation)
-    arch_dormant_tau: 0.1  # tau of Definition 3.1 (Sokar et al. 2023): a removal drops exactly the units whose layer-mean-normalised activation is <= this (0 dormant units = no-op removal)
 
 network:
     # Nature DQN convolutional architecture (see dqn_double_tuned_no_hpo.yaml).

@@ -270,7 +270,6 @@ def build_mutations_from_spec(
         mutate_elite=mutation_spec.mutate_elite,
         arch_mut_type=mutation_spec.arch_mut_type,
         arch_fp_noise=mutation_spec.arch_fp_noise,
-        arch_dormant_tau=mutation_spec.arch_dormant_tau,
         device=device,
         accelerator=accelerator,
     )

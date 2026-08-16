@@ -64,10 +64,10 @@ class MutationSpec(BaseModel):
     :type mutate_elite: bool
     :param arch_mut_type: Architecture-mutation strategy: ``"original"`` (AgileRL's
         default add/remove node/channel/layer) or ``"func_preserving"``
-        (function-preserving Net2Net-style variants -- new units are added with
-        zero outgoing weights, removals drop the τ-dormant units of the sampled
-        layer -- see ``arch_dormant_tau`` -- and new head layers are
-        identity-initialised).
+        (function-preserving Net2Net-style *additions* -- new units are added with
+        zero outgoing weights and new head layers are identity-initialised).
+        Removals are the original random-count positional operator under both
+        settings, so the two differ only in how capacity is added.
     :type arch_mut_type: Literal["original", "func_preserving"]
     :param arch_fp_noise: Symmetry-breaking noise scale for function-preserving
         additions (read *only* when ``arch_mut_type == "func_preserving"`` and an
@@ -80,22 +80,6 @@ class MutationSpec(BaseModel):
         negligible (~1%) function-preservation cost; set ``0.0`` for exact-zero,
         byte-identical preservation.
     :type arch_fp_noise: float
-    :param arch_dormant_tau: Dormancy threshold τ of Definition 3.1 (Sokar et al.
-        2023, "The Dormant Neuron Phenomenon in Deep Reinforcement Learning") that
-        sizes a function-preserving removal: ``remove_node`` / ``remove_channel`` /
-        ``remove_latent_node`` drop exactly the units of the sampled layer whose
-        mean absolute activation, normalised by the layer mean, is ``<= τ``. A layer
-        with no such unit yields a no-op removal, and a dormant set larger than the
-        layer's minimum-width budget is clamped to the most dormant units that fit.
-        The activations are those of the last training minibatch, captured for free
-        during the training forward pass. ``0.0`` admits only *exactly*-dead units,
-        making every removal exactly function-preserving -- meaningful on ReLU nets,
-        where dead units really are exactly off, but degenerate on saturating
-        activations such as Tanh, where no unit ever reaches zero and every removal
-        becomes a permanent no-op (leaving the arm growth-only). Read *only* when
-        ``arch_mut_type == "func_preserving"`` and a removal fires; completely inert
-        otherwise. Independent of the diagnostic's ``training.dormant_tau``.
-    :type arch_dormant_tau: float
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -107,7 +91,6 @@ class MutationSpec(BaseModel):
     mutate_elite: bool = False
     arch_mut_type: Literal["original", "func_preserving"] = "original"
     arch_fp_noise: float = Field(default=0.1, ge=0.0)
-    arch_dormant_tau: float = Field(default=0.1, ge=0.0)
 
 
 class TournamentSelectionSpec(BaseModel):
