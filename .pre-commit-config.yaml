@@ -38,7 +38,7 @@ repos:
                 - --skip=*.css,*.js,*.map,*.scss,*.svg
                 - --ignore-words-list=magent,pres,roate
     - repo: https://github.com/astral-sh/ruff-pre-commit
-      rev: v0.16.1
+      rev: v0.16.3
       hooks:
           - id: ruff-check
             name: Ruff Linter
@@ -53,7 +53,7 @@ repos:
 
     - repo: https://github.com/astral-sh/uv-pre-commit
       # uv version.
-      rev: 0.12.1
+      rev: 0.12.5
       hooks:
           - id: uv-lock
 
@@ -74,7 +74,7 @@ repos:
             files: ^(pyproject\.toml|agilerl-arena/pyproject\.toml|scripts/check-extras\.py)$
 
     - repo: https://github.com/astral-sh/ty-pre-commit
-      rev: v0.0.65
+      rev: v0.0.72
       hooks:
           - id: ty
 
