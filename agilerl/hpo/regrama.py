@@ -236,6 +236,28 @@ def owns_trainable_weight(module: nn.Module) -> bool:
     return isinstance(weight, nn.Parameter) and weight.requires_grad
 
 
+def encoder_is_pinned(network: nn.Module) -> bool:
+    """Return whether network's encoder is borrowed from another network.
+
+    :func:`~agilerl.utils.algo_utils.share_encoder_parameters` writes the policy
+    encoder's values into the other encoders as plain detached tensors, so a
+    borrowed encoder is exactly one whose weight layers are no longer
+    nn.Parameter.
+
+    :param network: An evaluation network to classify.
+    :type network: torch.nn.Module
+    :return: True if the encoder's weights belong to another network.
+    :rtype: bool
+    """
+    encoder = getattr(network, "encoder", None)
+    if encoder is None:
+        return False
+    layers = [
+        module for _name, module in encoder.named_modules() if is_weight_layer(module)
+    ]
+    return bool(layers) and not any(owns_trainable_weight(layer) for layer in layers)
+
+
 def unwrap_module(module: nn.Module | None) -> nn.Module | None:
     """Strip wrapper layers that hide the real module.
 
@@ -406,6 +428,52 @@ def eval_networks(
         else:
             pairs.append((None, eval_net))
     return pairs
+
+
+def policy_network_ids(agent: EvolvableAlgorithmProtocol) -> set[int]:
+    """Return the id of every evaluation network in the agent's policy group.
+
+    :param agent: An AgileRL algorithm instance.
+    :type agent: EvolvableAlgorithmProtocol
+    :return: Identities of the policy's evaluation networks.
+    :rtype: set[int]
+    """
+    policy_name = agent.registry.policy()
+    if policy_name is None:
+        return set()
+    policy = getattr(agent, policy_name, None)
+    if policy is None:
+        return set()
+    policy = unwrap_parallel(agent, policy)
+    if isinstance(policy, ModuleDict):
+        return {id(module) for _key, module in policy.items()}
+    return {id(policy)}
+
+
+def shared_encoder_heads(
+    agent: EvolvableAlgorithmProtocol,
+    network_id: str | None,
+    policy_network: nn.Module,
+) -> list[nn.Module]:
+    """Return the head entry layers of the networks sharing policy_network's encoder.
+
+    :param agent: The agent being mutated.
+    :type agent: EvolvableAlgorithmProtocol
+    :param network_id: Sub-policy key of policy_network, or None.
+    :type network_id: str | None
+    :param policy_network: The policy evaluation network whose encoder is shared.
+    :type policy_network: torch.nn.Module
+    :return: One entry layer per stream of every sharing network's head.
+    :rtype: list[torch.nn.Module]
+    """
+    entries: list[nn.Module] = []
+    for other_id, other in eval_networks(agent):
+        if other is policy_network or other_id != network_id:
+            continue
+        if not encoder_is_pinned(other):
+            continue
+        entries.extend(head_entry_layers(getattr(other, "head_net", None)))
+    return entries
 
 
 def per_neuron_grad(grad_input: GradInput) -> torch.Tensor | None:
@@ -905,6 +973,35 @@ def resolve_consumers(
     return consumers
 
 
+def shared_latent_blocks(
+    producer: nn.Module,
+    entry_layers: Sequence[nn.Module],
+) -> list[ConsumerTarget]:
+    """Return each sharing head's latent columns as a writable view.
+
+    :param producer: The encoder's latent-producing layer.
+    :type producer: torch.nn.Module
+    :param entry_layers: Head entry layers from :func:`shared_encoder_heads`.
+    :type entry_layers: Sequence[torch.nn.Module]
+    :return: One target per usable block, noise scales included.
+    :rtype: list[ConsumerTarget]
+    """
+    if isinstance(producer, CONV_LAYER_TYPES):
+        return []
+
+    span = weight_param(producer).data.shape[0]
+    blocks: list[ConsumerTarget] = []
+    for entry in entry_layers:
+        weight = weight_param(entry).data
+        if weight.dim() != 2 or weight.shape[1] < span:
+            continue
+        blocks.append(ConsumerTarget(weight[:, :span], 1))
+        sigma, _bias_sigma = noise_params(entry)
+        if sigma is not None and sigma.shape == weight.shape:
+            blocks.append(ConsumerTarget(sigma[:, :span], 1, is_noise_scale=True))
+    return blocks
+
+
 def reset_layer_neurons(
     producer: nn.Module,
     consumers: list[ConsumerTarget],
@@ -980,6 +1077,7 @@ def reset_dormant_neurons(
     per_neuron_list: list[torch.Tensor | None] | None,
     dormant_threshold: float,
     rng: np.random.Generator,
+    shared_latent_heads: Sequence[nn.Module] = (),
 ) -> ResetReport:
     """Reset every dormant neuron of one evaluation network.
 
@@ -998,6 +1096,9 @@ def reset_dormant_neurons(
     :type dormant_threshold: float
     :param rng: Seeded generator owned by the caller.
     :type rng: numpy.random.Generator
+    :param shared_latent_heads: Head entry layers of the networks sharing this
+        network's encoder.
+    :type shared_latent_heads: Sequence[torch.nn.Module]
     :return: How many neurons were reset, and whether a recurrent core was seen.
     :rtype: ResetReport
     """
@@ -1012,6 +1113,7 @@ def reset_dormant_neurons(
     encoder = getattr(network, "encoder", None)
     head = getattr(network, "head_net", None)
     cnn_dims = cnn_dims_by_module(encoder)
+    head_entries = head_entry_layers(head)
 
     neurons_reset = 0
     for act_module, per_neuron in scores:
@@ -1031,6 +1133,13 @@ def reset_dormant_neurons(
         consumers = resolve_consumers(producer, next_layers, cnn_channels, cnn_spatial)
         if not consumers:
             continue
+
+        # At the encoder-head boundary a shared encoder's latent is consumed by
+        # every sharing network's head, so those columns need the same fade.
+        if shared_latent_heads and any(
+            layer is entry for layer in next_layers for entry in head_entries
+        ):
+            consumers = consumers + shared_latent_blocks(producer, shared_latent_heads)
 
         indices = dormant_indices(per_neuron, dormant_threshold)
         if not indices:

@@ -238,7 +238,7 @@ stands at the end of that cycle.
 a small, freshly drawn set of outgoing weights. Its normalisation entry, if it has one, returns to the
 identity so a decayed gain cannot immediately re-suppress it. The outgoing weights are deliberately
 *small but non-zero*: zeroing them would leave the revived neuron with exactly zero gradient, so it would
-be potentially flagged dormant again in the next evolution, especially if ```evo_steps`` is low.
+be potentially flagged dormant again in the next evolution, especially if ``evo_steps`` is low.
 
 Every evaluation network is treated this way (actors, critics, and each sub-policy of a multi-agent
 algorithm) while target and other shared networks are re-synced from them afterwards. Output layers of

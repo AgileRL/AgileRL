@@ -8,7 +8,7 @@ import pytest
 import torch
 from torch import nn
 
-from agilerl.algorithms import DQN, PPO, RainbowDQN
+from agilerl.algorithms import DQN, PPO, TD3, RainbowDQN
 from agilerl.hpo import regrama
 from agilerl.modules.custom_components import NoisyLinear, SimbaResidualBlock
 from agilerl.utils.algo_utils import share_encoder_parameters
@@ -71,6 +71,27 @@ def mlp_net_config() -> dict:
         "encoder_config": {"hidden_size": [8, 8], "min_mlp_nodes": 1},
         "head_config": {"hidden_size": [8, 8], "min_mlp_nodes": 1},
     }
+
+
+def latent_marked_dormant(network, index: int) -> list[torch.Tensor | None]:
+    """Snapshot for *network* in which only latent unit *index* is dormant.
+
+    The latent is the encoder's terminal activation, i.e. the one whose neurons
+    cross into the head -- the only boundary a shared encoder affects.
+    """
+    encoder, head = network.encoder, network.head_net
+    terminal = regrama.activation_modules(encoder, include_output=True)[-1]
+    scores: list[torch.Tensor | None] = []
+    for activation in regrama.target_activations(network):
+        producer = regrama.resolve_producer_and_next(activation, encoder, head).producer
+        if producer is None:
+            scores.append(None)
+            continue
+        per_neuron = torch.ones(regrama.weight_param(producer).shape[0])
+        if activation is terminal:
+            per_neuron[index] = 0.0
+        scores.append(per_neuron)
+    return scores
 
 
 @pytest.fixture
@@ -1498,7 +1519,9 @@ class TestResetDormantNeurons:
         # share_encoder_parameters pins the critic's encoder to detached clones of
         # the actor's, which the mutation hook re-pins moments later -- so writing
         # there is discarded while the matching head rewrite survives, leaving the
-        # head compensating a reset that no longer exists.
+        # head compensating a reset that no longer exists. The complementary half,
+        # fading that head for the reset the critic *does* inherit, is the policy
+        # pass's job (see TestSharedEncoderCompensation).
         agent = PPO(vector_space, discrete_space, device="cpu")
         share_encoder_parameters(agent.actor, agent.critic)
         # Every measured layer of the critic is marked fully dormant.
@@ -1525,6 +1548,166 @@ class TestResetDormantNeurons:
         # Assert
         after = agent.critic.encoder.state_dict()
         assert all(torch.equal(before[name], after[name]) for name in before)
+
+
+class TestSharedEncoderCompensation:
+    """A latent shared by several networks is faded in every one of them."""
+
+    def ppo(self, vector_space, discrete_space, *, share):
+        return PPO(vector_space, discrete_space, share_encoders=share, device="cpu")
+
+    def critic_head(self, network):
+        return regrama.head_entry_layers(network.head_net)[0]
+
+    def reset_actor_latent(self, agent, index=0):
+        """Reset one latent unit of the policy, compensating shared consumers."""
+        return regrama.reset_dormant_neurons(
+            agent.actor,
+            latent_marked_dormant(agent.actor, index),
+            0.01,
+            make_rng(),
+            shared_latent_heads=regrama.shared_encoder_heads(agent, None, agent.actor),
+        )
+
+    def test_a_borrowed_encoder_is_recognised_as_pinned(
+        self,
+        vector_space,
+        discrete_space,
+    ):
+        # Arrange
+        agent = self.ppo(vector_space, discrete_space, share=True)
+
+        # Assert: the policy owns its encoder, the critic borrows it.
+        assert not regrama.encoder_is_pinned(agent.actor)
+        assert regrama.encoder_is_pinned(agent.critic)
+
+    def test_an_owned_encoder_is_not_pinned(self, vector_space, discrete_space):
+        # Arrange
+        agent = self.ppo(vector_space, discrete_space, share=False)
+
+        # Assert
+        assert not regrama.encoder_is_pinned(agent.critic)
+
+    def test_the_critic_head_is_reported_as_a_shared_consumer(
+        self,
+        vector_space,
+        discrete_space,
+    ):
+        # Arrange
+        agent = self.ppo(vector_space, discrete_space, share=True)
+
+        # Act
+        result = regrama.shared_encoder_heads(agent, None, agent.actor)
+
+        # Assert
+        assert result == regrama.head_entry_layers(agent.critic.head_net)
+
+    def test_unshared_encoders_report_no_shared_consumer(
+        self,
+        vector_space,
+        discrete_space,
+    ):
+        # A network that owns its encoder compensates its own head, so pulling it
+        # in here would fade the same column twice.
+        agent = self.ppo(vector_space, discrete_space, share=False)
+
+        # Act / Assert
+        assert regrama.shared_encoder_heads(agent, None, agent.actor) == []
+
+    def test_reset_latent_is_faded_in_the_critic_head_too(
+        self,
+        vector_space,
+        discrete_space,
+    ):
+        # Arrange
+        agent = self.ppo(vector_space, discrete_space, share=True)
+        head = self.critic_head(agent.critic)
+        # The reference is the median column of the neurons this pass leaves
+        # alone, so a repeatedly-reset layer cannot shrink without bound.
+        live = head.weight.data[:, 1:].norm(dim=0).median().item()
+
+        # Act
+        self.reset_actor_latent(agent)
+
+        # Assert: the same 2% fade the policy head receives.
+        assert head.weight.data[:, 0].norm().item() == pytest.approx(
+            regrama.REGRAMA_OUT_SCALE * live,
+            rel=1e-5,
+        )
+
+    def test_latents_left_alone_keep_their_critic_columns(
+        self,
+        vector_space,
+        discrete_space,
+    ):
+        # Arrange
+        agent = self.ppo(vector_space, discrete_space, share=True)
+        head = self.critic_head(agent.critic)
+        before = head.weight.data.clone()
+
+        # Act
+        self.reset_actor_latent(agent)
+
+        # Assert
+        assert torch.equal(head.weight.data[:, 1:], before[:, 1:])
+
+    def test_widening_is_opt_in(self, vector_space, discrete_space):
+        # Without shared heads the call behaves exactly as it always has, which is
+        # what keeps every non-shared caller byte-identical.
+        agent = self.ppo(vector_space, discrete_space, share=True)
+        head = self.critic_head(agent.critic)
+        before = head.weight.data.clone()
+
+        # Act
+        regrama.reset_dormant_neurons(
+            agent.actor,
+            latent_marked_dormant(agent.actor, 0),
+            0.01,
+            make_rng(),
+        )
+
+        # Assert
+        assert torch.equal(head.weight.data, before)
+
+    def test_td3_critics_are_faded_without_touching_their_action_columns(
+        self,
+        vector_space,
+    ):
+        # Arrange: a ContinuousQNetwork head consumes cat([latent, actions]), so
+        # the latent is only the leading block of a wider input.
+        agent = TD3(vector_space, vector_space, share_encoders=True, device="cpu")
+        span = agent.critic_1.latent_dim
+        heads = [self.critic_head(net) for net in (agent.critic_1, agent.critic_2)]
+        before = [head.weight.data.clone() for head in heads]
+
+        # Act
+        self.reset_actor_latent(agent)
+
+        # Assert
+        for head, prior in zip(heads, before, strict=True):
+            assert head.weight.data[:, 0].norm() < prior[:, 0].norm()
+            assert torch.equal(head.weight.data[:, 1:span], prior[:, 1:span])
+            assert torch.equal(head.weight.data[:, span:], prior[:, span:])
+
+    def test_continuous_q_network_consumes_the_latent_first(self, vector_space):
+        # The leading-block rewrite is correct only while ContinuousQNetwork feeds
+        # its head torch.cat([latent, actions]). Pin that order so a future
+        # reordering fails here rather than silently corrupting action columns.
+        agent = TD3(vector_space, vector_space, share_encoders=False, device="cpu")
+        head = self.critic_head(agent.critic_1)
+        span = agent.critic_1.latent_dim
+        with torch.no_grad():
+            head.weight[:, :span] = 0.0
+
+        # Act
+        action = torch.rand(1, 4)
+        with torch.no_grad():
+            same_action = [agent.critic_1(torch.rand(1, 4), action) for _ in range(2)]
+            other_action = agent.critic_1(torch.rand(1, 4), torch.rand(1, 4))
+
+        # Assert: blinding the leading block removes the observation, not the action.
+        assert torch.equal(*same_action)
+        assert not torch.equal(same_action[0], other_action)
 
 
 class TestSetGraMaCapture:

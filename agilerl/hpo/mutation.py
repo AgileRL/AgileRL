@@ -768,16 +768,26 @@ class Mutations:
         if not any(entry is not None for network in grama_scores for entry in network):
             self._warn_missing_grama_snapshot()
 
+        policy_networks = regrama.policy_network_ids(individual)
+
         neurons_reset = 0
         recurrent_seen = False
-        for idx, (_network_id, network) in enumerate(regrama.eval_networks(individual)):
+        for idx, (network_id, network) in enumerate(regrama.eval_networks(individual)):
             per_neuron_list = grama_scores[idx] if idx < len(grama_scores) else None
+            # The latent columns of the heads that share an encoder with other
+            # networks need to be reset properly.
+            shared_heads = (
+                regrama.shared_encoder_heads(individual, network_id, network)
+                if id(network) in policy_networks
+                else ()
+            )
             try:
                 report = regrama.reset_dormant_neurons(
                     network,
                     per_neuron_list,
                     self.dormant_threshold,
                     self.rng,
+                    shared_latent_heads=shared_heads,
                 )
             except Exception as exc:  # leave this network untouched on failure
                 logger.warning("ReGraMa reset skipped for a network: %s", exc)
