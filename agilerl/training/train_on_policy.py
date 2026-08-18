@@ -12,6 +12,7 @@ from accelerate import Accelerator
 
 from agilerl.algorithms import PPO
 from agilerl.hpo.mutation import Mutations
+from agilerl.hpo.regrama import set_grama_capture
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.population import Population
 from agilerl.protocols import SelectionStrategyProtocol
@@ -207,6 +208,9 @@ def train_on_policy(
         accelerator=accelerator,
         loggers=loggers,
     )
+
+    # Enable the per-neuron gradient capture that ReGraMa parameter mutations read.
+    set_grama_capture(population.agents, mutation)
 
     checkpoint_count = 0
 

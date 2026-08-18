@@ -1,12 +1,12 @@
 ---
 algorithm:
-    name: NeuralTS
-    batch_size: 128
-    lr: 0.003
+    name: NeuralUCB
+    batch_size: 64
+    lr: 0.001
     learn_step: 2
     gamma: 1.0
     lamb: 1.0
-    reg: 0.00625
+    reg: 0.000625
 
 environment:
     name: IRIS
@@ -32,14 +32,17 @@ mutation:
             max: 10
     mutation_sd: 0.1
     rand_seed: 42
-    super_param_mut: true      # apply the amplified Gaussian band
-    regrama_param_mut: false   # do not reset dormant neurons
+    super_param_mut: false
+    regrama_param_mut: true
+    dormant_threshold: 0.01
 
 network:
     latent_dim: 128
+
     encoder_config:
         hidden_size:
             - 128
+
     head_config:
         hidden_size:
             - 128
@@ -53,9 +56,8 @@ selection_strategy:
 
 training:
     max_steps: 10_000
-    target_score: 450.0
+    target_score: 96.0
     pop_size: 4
     evo_steps: 500
     eval_steps: 500
-    episode_steps: 500
     eval_loop: 1

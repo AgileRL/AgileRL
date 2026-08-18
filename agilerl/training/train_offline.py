@@ -20,6 +20,7 @@ from agilerl.components.data import (
 from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.components.sampler import Sampler
 from agilerl.hpo.mutation import Mutations
+from agilerl.hpo.regrama import set_grama_capture
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.population import Population
 from agilerl.protocols import SelectionStrategyProtocol
@@ -257,6 +258,9 @@ def train_offline(
         accelerator=accelerator,
         loggers=loggers,
     )
+
+    # Enable the per-neuron gradient capture that ReGraMa parameter mutations read.
+    set_grama_capture(population.agents, mutation)
 
     checkpoint_count = 0
 

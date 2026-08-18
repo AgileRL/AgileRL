@@ -16,6 +16,7 @@ from agilerl.components.data import ReplayDataset
 from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.components.sampler import Sampler
 from agilerl.hpo.mutation import Mutations
+from agilerl.hpo.regrama import set_grama_capture
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.population import Population
 from agilerl.protocols import BanditEnvProtocol, SelectionStrategyProtocol
@@ -206,6 +207,9 @@ def train_bandits(
         accelerator=accelerator,
         loggers=loggers,
     )
+
+    # Enable the per-neuron gradient capture that ReGraMa parameter mutations read.
+    set_grama_capture(population.agents, mutation)
 
     # Pre-training mutation
     if accelerator is None and mutation is not None:

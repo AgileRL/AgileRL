@@ -82,6 +82,7 @@ from agilerl.typing import (
     DeviceType,
     ExperiencesT,
     FitnessValue,
+    GraMaScores,
     GymSpaceType,
     InfosDict,
     LrNameType,
@@ -138,6 +139,8 @@ from agilerl.utils.llm_packing import (
 if TYPE_CHECKING:
     from torch.optim.lr_scheduler import SequentialLR
     from transformers import BitsAndBytesConfig
+
+    from agilerl.hpo.regrama import GraMaCapture
 
 # Make imports visible to typechecker and import when required
 if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
@@ -338,6 +341,7 @@ def get_checkpoint_dict(
     attribute_dict["agilerl_version"] = version("agilerl")
     attribute_dict.pop("accelerator", None)
     attribute_dict.pop("rollout_buffer", None)
+    attribute_dict.pop("grama_scores", None)
 
     # NOTE: this feels messy, refactor this to be more elegant
     if omit_actor_info and "actor" in attribute_dict:
@@ -446,6 +450,9 @@ class EvolvableAlgorithm(ABC, Generic[ExperiencesT], metaclass=RegistryMeta):
         self.registry = MutationRegistry(hp_config)
         self.training = True
         self.subpopulation_id: int | None = None
+        self.capture_grama: bool = False
+        self.grama_scores: GraMaScores | None = None
+        self._grama_capture: GraMaCapture | None = None
 
     @property
     def index(self) -> int:
@@ -516,16 +523,30 @@ class EvolvableAlgorithm(ABC, Generic[ExperiencesT], metaclass=RegistryMeta):
         self.metrics.add_scores(scores)
 
     def init_training_step(self) -> None:
-        """Initialize the training step for metrics tracking."""
+        """Open the agent's training block: metrics tracking, and GraMa capture.
+
+        Every trainer calls this immediately before an agent's per-cycle training
+        block, which is exactly the window the ReGraMa parameter mutation needs to
+        measure. Hooks are registered afresh each cycle, so they follow the agent
+        through architecture mutations, checkpoint reloads and accelerator
+        re-wrapping.
+        """
         self.metrics.init_training_step()
+        if self.capture_grama:
+            from agilerl.hpo.regrama import GraMaCapture
+
+            self._grama_capture = GraMaCapture(self).register()
 
     def finalize_training_step(self, num_steps: int) -> None:
-        """Finalize the training step for metrics tracking.
+        """Close the agent's training block, storing any captured GraMa scores.
 
         :param num_steps: Number of steps taken during the training step.
         :type num_steps: int
         """
         self.metrics.finalize_training_step(num_steps)
+        if self._grama_capture is not None:
+            self._grama_capture.release()
+            self._grama_capture = None
 
     @abstractmethod
     def preprocess_observation(
@@ -1349,6 +1370,8 @@ class EvolvableAlgorithm(ABC, Generic[ExperiencesT], metaclass=RegistryMeta):
         # Reconstruct the algorithm
         checkpoint["accelerator"] = accelerator
         checkpoint["device"] = device
+        checkpoint.setdefault("grama_scores", None)
+        checkpoint.setdefault("capture_grama", False)
         class_init_dict = filter_init_dict(checkpoint, cls)
         self = cls(**class_init_dict)
         registry: MutationRegistry = checkpoint["registry"]

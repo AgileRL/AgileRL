@@ -1661,6 +1661,9 @@ def print_hyperparams(pop: PopulationType) -> None:
             else float("nan")
         )
         attrs = EvolvableAlgorithm.inspect_attributes(agent)
+        # GraMa scores and the switch that captures them are not hyperparameters.
+        attrs.pop("grama_scores", None)
+        attrs.pop("capture_grama", None)
         lines = [
             f"Agent ID: {agent.index}  |  Mean 5 Fitness: {mean_fitness:.2f}",
             "Attributes:",

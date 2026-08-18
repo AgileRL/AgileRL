@@ -1358,6 +1358,45 @@ class TestMutationSpecExtraForbid:
         assert spec.probabilities.no_mut == 0.5
 
 
+class TestMutationSpecRegramaFields:
+    """The three parameter-mutation switches added for ReGraMa."""
+
+    def test_defaults_preserve_existing_manifest_behaviour(self):
+        spec = MutationSpec()
+
+        assert spec.regrama_param_mut is False
+        assert spec.super_param_mut is True
+        assert spec.dormant_threshold == 0.01
+
+    def test_values_round_trip_through_a_dump(self):
+        spec = MutationSpec(
+            regrama_param_mut=True,
+            super_param_mut=False,
+            dormant_threshold=0.05,
+        )
+
+        dumped = spec.model_dump()
+
+        assert MutationSpec(**dumped) == spec
+
+    def test_zero_dormant_threshold_is_accepted(self):
+        # Only exactly-dead neurons are reset, which is a meaningful setting.
+        assert MutationSpec(dormant_threshold=0.0).dormant_threshold == 0.0
+
+    def test_negative_dormant_threshold_is_rejected_informatively(self):
+        with pytest.raises(
+            ValidationError,
+            match=r"dormant_threshold[\s\S]*greater than or equal to 0",
+        ):
+            MutationSpec(dormant_threshold=-0.01)
+
+    def test_misspelled_switch_is_rejected(self):
+        # extra="forbid" is what turns a typo into an error rather than a silent
+        # no-op that looks like ReGraMa is on.
+        with pytest.raises(ValidationError, match="regrama"):
+            MutationSpec(regrama=True)
+
+
 class TestNetworkSpecUpperBound:
     def test_latent_dim_exceeds_max(self):
         with pytest.raises(ValidationError):

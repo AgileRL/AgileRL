@@ -1,34 +1,33 @@
 ---
 algorithm:
-    name: PPO
+    name: IPPO
     batch_size: 128
-    lr: 0.001
+    lr: 0.0001
     learn_step: 2048
     gamma: 0.99
     gae_lambda: 0.95
-    action_std_init: 0.6
+    action_std_init: 0.0
     clip_coef: 0.2
-    ent_coef: 0.01
+    ent_coef: 0.05
     vf_coef: 0.5
     max_grad_norm: 0.5
     target_kl:
     update_epochs: 4
-    share_encoders: true
 
 environment:
-    name: LunarLander-v3
+    name: mpe2.simple_speaker_listener_v4
     num_envs: 16
 mutation:
     probabilities:
         no_mut: 0.4
-        arch_mut: 0.2
+        arch_mut: 0.4
         new_layer: 0.2
         params_mut: 0.2
         act_mut: 0.0
-        rl_hp_mut: 0.2
+        rl_hp_mut: 0.35
     rl_hp_selection:
         lr:
-            min: 0.0001
+            min: 0.000001
             max: 0.01
         batch_size:
             min: 8
@@ -39,22 +38,19 @@ mutation:
         ent_coef:
             min: 0.001
             max: 0.1
-        update_epochs:
-            min: 1
-            max: 10
     mutation_sd: 0.1
     rand_seed: 42
-    super_param_mut: true      # apply the amplified Gaussian band
-    regrama_param_mut: false   # do not reset dormant neurons
+    super_param_mut: false
+    regrama_param_mut: true
+    dormant_threshold: 0.01
 
 network:
     latent_dim: 64
-    arch: mlp
     encoder_config:
         hidden_size:
             - 64
         activation: ReLU
-        min_mlp_nodes: 64
+        min_mlp_nodes: 32
         max_mlp_nodes: 500
         layer_norm: true
 
@@ -62,28 +58,21 @@ network:
         hidden_size:
             - 64
         activation: ReLU
+        output_vanish: false
         min_hidden_layers: 1
         max_hidden_layers: 3
-        min_mlp_nodes: 64
-        max_mlp_nodes: 500
-        output_vanish: true
+        min_mlp_nodes: 32
+        max_mlp_nodes: 256
         layer_norm: true
 
-# MF-PBT replaces tournament selection (both share this block, discriminated by
-# strategy). The recommended MF-PBT configuration is defined
 selection_strategy:
-    strategy: multi_frequency
-    n_subpopulations: 2
-    n_winners: 2
-    n_survivors: 0
-    n_open_for_migration: 2
-    n_losers: 4
-    evolution_frequency_ratios: [1, 5]
+    tournament_size: 2
+    elitism: true
 
 training:
-    max_steps: 6_000_000
-    target_score: 250.0
-    pop_size: 16  # MF-PBT population size (2 subpopulations of 8 agents)
-    evo_steps: 10_240
+    max_steps: 2_000_000
+    target_score:
+    pop_size: 4
+    evo_steps: 10_000
     eval_steps:
     eval_loop: 1

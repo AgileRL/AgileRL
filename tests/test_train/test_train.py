@@ -45,6 +45,7 @@ from agilerl.components.replay_buffer import (
 )
 from agilerl.hpo.multi_frequency import MultiFrequencySelection
 from agilerl.hpo.mutation import Mutations
+from agilerl.hpo.tournament import TournamentSelection
 from agilerl.metrics import AgentMetrics, MultiAgentMetrics
 from agilerl.population import Population
 from agilerl.training.train_bandits import train_bandits
@@ -5764,3 +5765,301 @@ def test_remove_saved_models():
         if _try_remove_models_dir():
             return
     shutil.rmtree("models", ignore_errors=True)
+
+
+def _regrama_mutation() -> Mutations:
+    """A ReGraMa-configured operator with the amplified band switched off."""
+    return Mutations(
+        no_mutation=0.2,
+        architecture=0.0,
+        new_layer_prob=0.0,
+        parameters=0.4,
+        activation=0.0,
+        rl_hp=0.4,
+        mutation_sd=0.1,
+        rand_seed=0,
+        device="cpu",
+        regrama_param_mut=True,
+        super_param_mut=False,
+        dormant_threshold=0.01,
+    )
+
+
+def _give_population_fitness(population) -> None:
+    """Give each agent a distinct fitness so tournament selection can rank."""
+    for position, agent in enumerate(population):
+        agent.fitness = [float(position)]
+
+
+def _mark_population_dormant(population) -> None:
+    """Give every agent a snapshot in which every measured neuron is dormant."""
+    from agilerl.hpo import regrama
+
+    for agent in population:
+        agent.grama_scores = [
+            [
+                torch.zeros(
+                    regrama.weight_param(
+                        regrama.resolve_producer_and_next(
+                            activation,
+                            getattr(network, "encoder", None),
+                            getattr(network, "head_net", None),
+                        ).producer,
+                    ).shape[0],
+                )
+                if regrama.resolve_producer_and_next(
+                    activation,
+                    getattr(network, "encoder", None),
+                    getattr(network, "head_net", None),
+                ).producer
+                is not None
+                else None
+                for activation in regrama.target_activations(network)
+            ]
+            for _network_id, network in regrama.eval_networks(agent)
+        ]
+
+
+class TestRegramaCrossFamilyEvolution:
+    """ReGraMa evolves a real population of every non-LLM algorithm family."""
+
+    @pytest.mark.parametrize(
+        "family", list(_CROSS_FAMILY_CASES), ids=list(_CROSS_FAMILY_CASES)
+    )
+    def test_tournament_selection_evolves_every_family(self, family):
+        # Arrange
+        algo_name, build_population = _CROSS_FAMILY_CASES[family]
+        population = build_population()
+        mutation = _regrama_mutation()
+        strategy = TournamentSelection(
+            tournament_size=2,
+            elitism=True,
+            population_size=8,
+        )
+
+        # Act
+        for _cycle in range(3):
+            _give_population_fitness(population)
+            _mark_population_dormant(population)
+            population = run_selection_and_mutation(
+                strategy,
+                population=population,
+                mutation=mutation,
+                env_name="Env",
+                algo=algo_name,
+            )
+
+            # Assert
+            assert len(population) == 8
+            assert all(isinstance(agent, EvolvableAlgorithm) for agent in population)
+            for agent in population:
+                for _network_id, network in _eval_networks_of(agent):
+                    assert all(
+                        torch.isfinite(value).all()
+                        for value in network.state_dict().values()
+                    )
+
+    @pytest.mark.parametrize(
+        "family", list(_CROSS_FAMILY_CASES), ids=list(_CROSS_FAMILY_CASES)
+    )
+    def test_multi_frequency_selection_evolves_every_family(self, family):
+        # Arrange
+        algo_name, build_population = _CROSS_FAMILY_CASES[family]
+        population = build_population()
+        for agent in population:
+            agent.subpopulation_id = agent.index // 4
+        strategy = MultiFrequencySelection(
+            population_size=8,
+            n_subpopulations=2,
+            evolution_frequency_ratios=[1, 2],
+            n_winners=1,
+            n_survivors=1,
+            n_open_for_migration=1,
+            n_losers=1,
+            seed=0,
+        )
+        mutation = _regrama_mutation()
+
+        # Act
+        for _cycle in range(3):
+            rank_population_by_subpopulation(population)
+            _mark_population_dormant(population)
+            population = run_selection_and_mutation(
+                strategy,
+                population=population,
+                mutation=mutation,
+                env_name="Env",
+                algo=algo_name,
+            )
+
+            # Assert
+            assert len(population) == 8
+            assert len({agent.index for agent in population}) == 8
+            for agent in population:
+                for _network_id, network in _eval_networks_of(agent):
+                    assert all(
+                        torch.isfinite(value).all()
+                        for value in network.state_dict().values()
+                    )
+
+    def test_a_child_reads_the_snapshot_captured_while_its_parent_trained(self):
+        # The whole data-flow contract: capture happens on the parent, the reset
+        # happens on the clone, and nothing in between has to thread it through.
+        population = _build_single_agent_population(DQN)
+        _give_population_fitness(population)
+        _mark_population_dormant(population)
+        strategy = TournamentSelection(
+            tournament_size=2,
+            elitism=True,
+            population_size=8,
+        )
+
+        # Act
+        evolved = run_selection_and_mutation(
+            strategy,
+            population=population,
+            mutation=_regrama_mutation(),
+            env_name="Env",
+            algo="DQN",
+        )
+
+        # Assert
+        assert all(agent.grama_scores is not None for agent in evolved)
+
+
+def _eval_networks_of(agent):
+    from agilerl.hpo import regrama
+
+    return regrama.eval_networks(agent)
+
+
+class TestRegramaTrainerWiring:
+    """Every non-LLM trainer enables the capture ReGraMa depends on."""
+
+    TRAINERS = (
+        "train_on_policy",
+        "train_off_policy",
+        "train_multi_agent_on_policy",
+        "train_multi_agent_off_policy",
+        "train_bandits",
+        "train_offline",
+    )
+
+    @pytest.mark.parametrize("module_name", TRAINERS)
+    def test_trainer_enables_capture(self, module_name):
+        # A trainer that never calls this silently degrades ReGraMa to Gaussian,
+        # so the guarantee is that none of the six is forgotten.
+        import importlib
+
+        from agilerl.hpo.regrama import set_grama_capture
+
+        module = importlib.import_module(f"agilerl.training.{module_name}")
+
+        assert module.set_grama_capture is set_grama_capture
+
+    def test_off_policy_training_captures_a_snapshot(self):
+        # Arrange
+        import gymnasium as gym
+
+        from agilerl.algorithms import DQN
+        from agilerl.components.replay_buffer import ReplayBuffer
+
+        vec_env = gym.vector.SyncVectorEnv([lambda: gym.make("CartPole-v1")])
+        agent = DQN(
+            vec_env.single_observation_space,
+            vec_env.single_action_space,
+            batch_size=4,
+            learn_step=1,
+        )
+
+        # Act
+        population, _fitnesses = train_off_policy(
+            vec_env,
+            "CartPole-v1",
+            "DQN",
+            [agent],
+            ReplayBuffer(max_size=100, device="cpu"),
+            max_steps=12,
+            evo_steps=12,
+            eval_steps=2,
+            eval_loop=1,
+            mutation=_regrama_mutation(),
+            verbose=False,
+        )
+
+        # Assert
+        assert population[0].capture_grama is True
+        assert population[0].grama_scores
+        assert any(entry is not None for entry in population[0].grama_scores[0])
+
+    def test_compiled_agent_still_captures_with_a_warning(self):
+        # Arrange: capture works through torch.compile, it just fragments the
+        # compiled graph, so the run proceeds and the cost is reported once.
+        import gymnasium as gym
+
+        from agilerl.algorithms import DQN
+        from agilerl.components.replay_buffer import ReplayBuffer
+
+        vec_env = gym.vector.SyncVectorEnv([lambda: gym.make("CartPole-v1")])
+        agent = DQN(
+            vec_env.single_observation_space,
+            vec_env.single_action_space,
+            batch_size=4,
+            learn_step=1,
+        )
+        agent.torch_compiler = "default"
+
+        # Act
+        with pytest.warns(UserWarning, match=r"torch\.compile"):
+            population, _fitnesses = train_off_policy(
+                vec_env,
+                "CartPole-v1",
+                "DQN",
+                [agent],
+                ReplayBuffer(max_size=100, device="cpu"),
+                max_steps=12,
+                evo_steps=12,
+                eval_steps=2,
+                eval_loop=1,
+                mutation=_regrama_mutation(),
+                verbose=False,
+            )
+
+        # Assert: ReGraMa is still driven by real gradients, not silently dropped.
+        assert population[0].capture_grama is True
+        assert any(entry is not None for entry in population[0].grama_scores[0])
+
+    def test_capture_stays_off_without_regrama(self):
+        # Arrange
+        import gymnasium as gym
+
+        from agilerl.algorithms import DQN
+        from agilerl.components.replay_buffer import ReplayBuffer
+
+        vec_env = gym.vector.SyncVectorEnv([lambda: gym.make("CartPole-v1")])
+        agent = DQN(
+            vec_env.single_observation_space,
+            vec_env.single_action_space,
+            batch_size=4,
+            learn_step=1,
+        )
+        mutation = Mutations(0.2, 0.0, 0.0, 0.4, 0.0, 0.4, rand_seed=0, device="cpu")
+
+        # Act
+        population, _fitnesses = train_off_policy(
+            vec_env,
+            "CartPole-v1",
+            "DQN",
+            [agent],
+            ReplayBuffer(max_size=100, device="cpu"),
+            max_steps=12,
+            evo_steps=12,
+            eval_steps=2,
+            eval_loop=1,
+            mutation=mutation,
+            verbose=False,
+        )
+
+        # Assert: no hooks are registered, so capture costs nothing when off.
+        assert population[0].capture_grama is False
+        assert population[0].grama_scores is None
