@@ -147,7 +147,7 @@ mutation:
     rand_seed: 42
     mutate_elite: false  # keep the elite member unmutated so the best agent survives intact into the next generation
     arch_mut_type: func_preserving  # original | func_preserving architecture mutations
-    arch_fp_noise: 0.02  # symmetry-breaking noise on new units' fan-out, relative to the layer's weight std (0.0 = exact-zero preservation)
+    arch_fp_noise: 0.005  # symmetry-breaking noise on new units' fan-out, relative to the layer's weight std (0.0 = exact-zero preservation)
 
 network:
     # Paper architecture: width-64 tanh MLP. Under HPO the min/max bounds below
