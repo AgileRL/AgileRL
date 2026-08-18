@@ -53,7 +53,9 @@ def _write_pyproject(
     extras: dict[str, list[str]] | None = None,
 ) -> Path:
     if extras is None:
-        arena = arena_reqs if arena_reqs is not None else ['"agilerl-arena>=0.2.0,<0.3"']
+        arena = (
+            arena_reqs if arena_reqs is not None else ['"agilerl-arena>=0.2.0,<0.3"']
+        )
         extra_toml = textwrap.dedent(
             f"""
             [project.optional-dependencies]
@@ -96,7 +98,9 @@ def _assert_exit_err(
     assert needle in capsys.readouterr().err
 
 
-def test_arena_range_covers_latest_tag(check_extras: ModuleType, tmp_path: Path) -> None:
+def test_arena_range_covers_latest_tag(
+    check_extras: ModuleType, tmp_path: Path
+) -> None:
     pyproject = _write_pyproject(tmp_path)
     _init_git(tmp_path)
     _git(tmp_path, "tag", "agilerl-arena/v0.1.0")
@@ -116,7 +120,9 @@ def test_arena_range_outside_tag_fails(
     _bind_repo(check_extras, tmp_path, pyproject)
 
     extras = check_extras._extras(pyproject)
-    _assert_exit_err(capsys, "outside extra range", check_extras._check_arena_extra, extras)
+    _assert_exit_err(
+        capsys, "outside extra range", check_extras._check_arena_extra, extras
+    )
 
 
 def test_missing_arena_tag_fails_closed(
@@ -208,7 +214,9 @@ def test_committed_exact_pin_fails(
     pyproject = _write_pyproject(tmp_path, arena_reqs=['"agilerl-arena==0.2.0"'])
     _bind_repo(check_extras, tmp_path, pyproject)
     extras = check_extras._extras(pyproject)
-    _assert_exit_err(capsys, "compatible range", check_extras._check_arena_extra, extras)
+    _assert_exit_err(
+        capsys, "compatible range", check_extras._check_arena_extra, extras
+    )
 
 
 def test_missing_range_fails(
@@ -254,7 +262,9 @@ def test_arena_pin_override_requires_exact(
     _bind_repo(check_extras, tmp_path, pyproject)
     monkeypatch.setenv("AGILERL_ARENA_PIN", "0.2.0+build.9")
     extras = check_extras._extras(pyproject)
-    _assert_exit_err(capsys, "AGILERL_ARENA_PIN", check_extras._check_arena_extra, extras)
+    _assert_exit_err(
+        capsys, "AGILERL_ARENA_PIN", check_extras._check_arena_extra, extras
+    )
 
 
 def test_all_extra_unions_parts(check_extras: ModuleType, tmp_path: Path) -> None:
