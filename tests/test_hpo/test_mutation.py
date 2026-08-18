@@ -2949,6 +2949,85 @@ class TestMutationsRegramaParameterMutation:
             _regrama_mutations().parameter_mutation(agent)
 
 
+def _policy_latent_dormant(agent, index: int = 0) -> None:
+    """Mark only the policy's latent unit *index* dormant; everything else healthy."""
+    from agilerl.hpo import regrama
+
+    policy = getattr(agent, agent.registry.policy())
+    agent.grama_scores = [
+        [
+            _healthy_except(network, activation, terminal, index, network is policy)
+            for activation in regrama.target_activations(network)
+        ]
+        for _network_id, network in regrama.eval_networks(agent)
+        for terminal in [
+            regrama.activation_modules(network.encoder, include_output=True)[-1]
+        ]
+    ]
+
+
+def _healthy_except(network, activation, terminal, index, is_policy):
+    """One layer's snapshot entry: all-live unless it is the policy's latent."""
+    from agilerl.hpo import regrama
+
+    producer = regrama.resolve_producer_and_next(
+        activation,
+        network.encoder,
+        network.head_net,
+    ).producer
+    if producer is None:
+        return None
+    per_neuron = torch.ones(regrama.weight_param(producer).shape[0])
+    if is_policy and activation is terminal:
+        per_neuron[index] = 0.0
+    return per_neuron
+
+
+class TestMutationsRegramaSharedEncoders:
+    """Networks borrowing the policy's encoder are faded along with it."""
+
+    def make_agent(self, *, share):
+        return PPO(
+            generate_random_box_space((4,)),
+            generate_discrete_space(2),
+            share_encoders=share,
+            device="cpu",
+        )
+
+    def critic_head(self, agent):
+        from agilerl.hpo import regrama
+
+        return regrama.head_entry_layers(agent.critic.head_net)[0]
+
+    def test_shared_critic_head_is_faded_when_the_policy_latent_is_reset(self):
+        # Arrange: the critic borrows the encoder, so it inherits the reset via
+        # the mutation hook and its head must be faded to match.
+        agent = self.make_agent(share=True)
+        _policy_latent_dormant(agent)
+        before = self.critic_head(agent).weight.data.clone()
+
+        # Act
+        agent = _regrama_mutations().parameter_mutation(agent)
+
+        # Assert
+        after = self.critic_head(agent).weight.data
+        assert after[:, 0].norm() < 0.1 * before[:, 0].norm()
+        assert torch.equal(after[:, 1:], before[:, 1:])
+
+    def test_unshared_critic_head_is_untouched_by_the_policy_pass(self):
+        # A critic that owns its encoder compensates its own resets, so the
+        # policy's pass must not reach across into it at all.
+        agent = self.make_agent(share=False)
+        _policy_latent_dormant(agent)
+        before = self.critic_head(agent).weight.data.clone()
+
+        # Act
+        agent = _regrama_mutations().parameter_mutation(agent)
+
+        # Assert
+        assert torch.equal(self.critic_head(agent).weight.data, before)
+
+
 class TestMutationsRegramaMultiAgent:
     """Route each sub-policy's snapshot to its own network."""
 
