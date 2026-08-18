@@ -80,6 +80,7 @@ from gymnasium import spaces
 from torch import optim
 
 from agilerl import HAS_DEEPSPEED, HAS_LLM_DEPENDENCIES, HAS_VLLM
+from agilerl.algorithms import DQN
 from agilerl.algorithms.core.base import (
     EvolvableAlgorithm,
     LLMAlgorithm,
@@ -94,6 +95,7 @@ from agilerl.algorithms.grpo import GRPO
 from agilerl.modules import EvolvableMLP
 from agilerl.modules.dummy import DummyEvolvable
 from agilerl.utils.algo_utils import VLLMConfig
+from agilerl.wrappers.agent import RSNorm
 from tests.test_algorithms.test_base import DummyMARLAlgorithm, DummyRLAlgorithm
 
 create_module = None
@@ -7997,8 +7999,6 @@ class TestEvolvableAlgorithmGraMaState:
     """The per-agent GraMa state ReGraMa reads at mutation time."""
 
     def agent(self):
-        from agilerl.algorithms import DQN
-
         return DQN(
             spaces.Box(-1.0, 1.0, shape=(4,), dtype=np.float32),
             spaces.Discrete(2),
@@ -8066,10 +8066,8 @@ class TestEvolvableAlgorithmGraMaState:
         # Assert: mutating the parent's snapshot must not reach the child's.
         assert torch.equal(clone.grama_scores[0][0], torch.ones(3))
 
-    def test_snapshot_is_kept_out_of_checkpoints(self, tmp_path):
+    def test_snapshot_is_kept_out_of_checkpoints(self):
         # Transient training state, recaptured every cycle.
-        from agilerl.algorithms.core.base import get_checkpoint_dict
-
         agent = self.agent()
         agent.grama_scores = [[torch.ones(3)]]
 
@@ -8087,8 +8085,6 @@ class TestEvolvableAlgorithmGraMaState:
     ):
         # Arrange: without the re-injection in load(), the attribute-restore loop
         # reports grama_scores missing on every resume, for every agent.
-        from agilerl.algorithms import DQN
-
         agent = self.agent()
         path = str(tmp_path / "agent.pt")
         agent.save_checkpoint(path)
@@ -8110,8 +8106,6 @@ class TestEvolvableAlgorithmGraMaState:
         # Arrange: a checkpoint written before ReGraMa existed carries no
         # capture_grama, and the attribute-restore loop reports every attribute
         # the checkpoint lacks -- once per agent, on every resume.
-        from agilerl.algorithms import DQN
-
         agent = self.agent()
         path = str(tmp_path / "agent.pt")
         agent.save_checkpoint(path)
@@ -8132,8 +8126,6 @@ class TestEvolvableAlgorithmGraMaState:
     def test_wrapped_agent_stores_the_snapshot_on_the_unwrapped_algorithm(self):
         # Trainers call the lifecycle hooks on whatever they hold, which may be a
         # wrapper; the mutation reads the snapshot off the unwrapped agent.
-        from agilerl.wrappers.agent import RSNorm
-
         wrapper = RSNorm(self.agent())
         wrapper.capture_grama = True
 
