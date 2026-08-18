@@ -94,10 +94,10 @@ In development mode, quote the extras:
 pip install -e ".[arena]"
 ```
 
-To install the ``nightly`` version of AgileRL with the latest features, use:
+To install AgileRL from the development tip of ``main`` (not a PyPI release), use:
 
 ```bash
-pip install git+https://github.com/AgileRL/AgileRL.git@nightly
+pip install git+https://github.com/AgileRL/AgileRL.git@main
 ```
 
 ## Training Locally
