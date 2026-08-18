@@ -431,9 +431,14 @@ class TestRevivedOutBlock:
         # Assert
         assert torch.equal(result, torch.zeros(4))
 
-    def test_shape_dtype_and_device_follow_the_template(self):
-        # Arrange
-        template = torch.zeros(2, 3, dtype=torch.float64)
+    @pytest.mark.parametrize(
+        "device",
+        ["cpu", pytest.param("cuda", marks=pytest.mark.gpu)],
+    )
+    def test_shape_dtype_and_device_follow_the_template(self, device):
+        # Arrange: the block is written straight back into the consumer's weight,
+        # so a mismatch on any of the three raises rather than silently copying.
+        template = torch.zeros(2, 3, dtype=torch.float64, device=device)
 
         # Act
         result = regrama.revived_out_block(template, 1.0, make_rng())
@@ -441,6 +446,7 @@ class TestRevivedOutBlock:
         # Assert
         assert result.shape == template.shape
         assert result.dtype == template.dtype
+        assert result.device == template.device
 
 
 class TestRevivedNoiseBlock:
@@ -469,9 +475,13 @@ class TestRevivedNoiseBlock:
         # Assert
         assert torch.equal(result, torch.zeros(4))
 
-    def test_shape_dtype_and_device_follow_the_template(self):
+    @pytest.mark.parametrize(
+        "device",
+        ["cpu", pytest.param("cuda", marks=pytest.mark.gpu)],
+    )
+    def test_shape_dtype_and_device_follow_the_template(self, device):
         # Arrange
-        template = torch.zeros(2, 3, dtype=torch.float64)
+        template = torch.zeros(2, 3, dtype=torch.float64, device=device)
 
         # Act
         result = regrama.revived_noise_block(template, 1.0)
@@ -479,6 +489,7 @@ class TestRevivedNoiseBlock:
         # Assert
         assert result.shape == template.shape
         assert result.dtype == template.dtype
+        assert result.device == template.device
 
 
 class TestModuleTraversalHelpers:
@@ -741,21 +752,6 @@ class TestResetNoisyLayers:
         # Assert
         assert producer.weight_sigma[0].abs().max().item() == pytest.approx(1e-8)
 
-    def test_consumer_noise_columns_are_reseeded_with_the_mean_columns(self):
-        # Leaving the noise columns behind would let a revived neuron inject a
-        # full-magnitude perturbation on a path whose mean weight is tiny.
-        producer = nn.Linear(3, 5)
-        consumer = NoisyLinear(5, 2)
-        with torch.no_grad():
-            consumer.weight_sigma.fill_(3.0)
-        per_neuron = torch.tensor([1.0, 0.0, 1.0, 1.0, 1.0])
-
-        # Act
-        indices = reset_producer(producer, [consumer], per_neuron)
-
-        # Assert
-        assert consumer.weight_sigma[:, indices[0]].abs().max().item() < 3.0
-
     def test_consumer_noise_columns_stay_non_negative(self):
         # Pushing the column through the weight draw would sign it: a negative
         # entry flips that entry's noise, which the mean-weight path wants and a
@@ -784,9 +780,11 @@ class TestResetNoisyLayers:
         assert consumer.weight_sigma[:, indices[0]].unique().numel() == 1
 
     def test_consumer_noise_column_is_damped_against_its_own_scale(self):
-        # The revived unit's exploration is scaled down in the same proportion as
-        # its mean contribution -- REGRAMA_OUT_SCALE of the noise scales' own live
-        # columns, which is not the absolute norm the mean column gets.
+        # Leaving the noise columns behind would let a revived neuron inject a
+        # full-magnitude perturbation on a path whose mean weight is tiny, so the
+        # unit's exploration is scaled down in the same proportion as its mean
+        # contribution -- REGRAMA_OUT_SCALE of the noise scales' own live columns,
+        # which is not the absolute norm the mean column gets.
         producer = nn.Linear(3, 5)
         consumer = NoisyLinear(5, 2)
         initial = consumer.weight_sigma[0, 0].item()

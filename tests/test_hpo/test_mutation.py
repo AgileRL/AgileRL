@@ -15,11 +15,12 @@ from accelerate.utils import DeepSpeedPlugin
 from gymnasium import spaces
 
 from agilerl import HAS_DEEPSPEED, HAS_LLM_DEPENDENCIES, HAS_VLLM
-from agilerl.algorithms import DDPG, DQN, PPO, TD3, NeuralUCB
+from agilerl.algorithms import DDPG, DQN, IPPO, PPO, TD3, NeuralUCB
 from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
 
 if HAS_LLM_DEPENDENCIES:
     from peft import LoraConfig
+from agilerl.hpo import regrama
 from agilerl.hpo.mutation import (
     MutationError,
     Mutations,
@@ -36,6 +37,7 @@ from tests.helper_functions import (
     generate_multi_agent_box_spaces,
     generate_multi_agent_discrete_spaces,
     generate_random_box_space,
+    grama_scores_for,
 )
 
 if HAS_DEEPSPEED and HAS_VLLM:
@@ -2624,24 +2626,7 @@ def _regrama_mutations(**kwargs) -> Mutations:
 
 def _all_dormant(agent) -> None:
     """Mark every measured neuron of every evaluation network as dormant."""
-    from agilerl.hpo import regrama
-
-    agent.grama_scores = [
-        [
-            torch.zeros(regrama.weight_param(context.producer).shape[0])
-            if context.producer is not None
-            else None
-            for context in (
-                regrama.resolve_producer_and_next(
-                    activation,
-                    getattr(network, "encoder", None),
-                    getattr(network, "head_net", None),
-                )
-                for activation in regrama.target_activations(network)
-            )
-        ]
-        for _network_id, network in regrama.eval_networks(agent)
-    ]
+    agent.grama_scores = grama_scores_for(agent, fill=0.0)
 
 
 class TestMutationsRegramaConstructor:
@@ -2677,56 +2662,77 @@ class TestMutationsRegramaConstructor:
 class TestMutationsSuperParameterMutation:
     """Switch the amplified Gaussian band off without touching the others."""
 
-    def make_network(self, seed: int) -> EvolvableModule:
-        torch.manual_seed(seed)
-        return DQN(
+    # Every mutable weight is pinned to this magnitude, which makes each band's
+    # reach exactly computable: the amplified band draws N(0, 10w), the ordinary
+    # one N(0, mutation_sd * w), and the reset band replaces the weight with
+    # N(0, 1). Only the amplified band can move a weight past the ceiling below
+    # -- a reset needs |w - N(0, 1)| > 20 and the ordinary band a 40-sigma draw.
+    PINNED_WEIGHT = 5.0
+    BAND_CEILING = 20.0
+
+    def make_network(self) -> EvolvableModule:
+        torch.manual_seed(0)
+        network = DQN(
             generate_random_box_space((4,)),
             generate_discrete_space(2),
             device="cpu",
         ).actor
+        with torch.no_grad():
+            for key, value in network.state_dict().items():
+                # The operator only ever mutates 2-D non-norm, non-lstm weights.
+                if value.dim() == 2 and "norm" not in key and "lstm" not in key:
+                    value.fill_(self.PINNED_WEIGHT)
+        return network
+
+    def gaussian_pass(self, *, super_param_mut: bool):
+        """Run one Gaussian pass over an identically seeded pinned network."""
+        network = self.make_network()
+        baseline = {k: v.clone() for k, v in network.state_dict().items()}
+        torch.manual_seed(0)
+        Mutations(
+            0,
+            0,
+            0,
+            1,
+            0,
+            0,
+            rand_seed=0,
+            super_param_mut=super_param_mut,
+        )._gaussian_parameter_mutation(network)
+        return baseline, network.state_dict()
+
+    def largest_step(self, baseline, after) -> float:
+        return max((after[k] - baseline[k]).abs().max().item() for k in baseline)
 
     def test_amplified_band_moves_weights_far_beyond_the_ordinary_one(self):
-        # Arrange: the amplified band draws at 10x |w|, the ordinary at 0.1x |w|.
-        network = self.make_network(0)
-        before = {k: v.clone() for k, v in network.state_dict().items()}
-        muts = Mutations(0, 0, 0, 1, 0, 0, rand_seed=0, super_param_mut=True)
+        # Arrange
+        baseline, after = self.gaussian_pass(super_param_mut=True)
 
         # Act
-        torch.manual_seed(0)
-        muts._gaussian_parameter_mutation(network)
+        largest = self.largest_step(baseline, after)
 
-        # Assert
-        deltas = [
-            (before[k] - v).abs().max().item()
-            for k, v in network.state_dict().items()
-            if k in before
-        ]
-        assert max(deltas) > 0.0
+        # Assert: neither of the other two bands can reach this far, so the step
+        # is the amplified band's and nothing else.
+        assert largest > self.BAND_CEILING
 
     def test_switching_it_off_leaves_those_weights_at_their_trained_values(self):
-        # Two runs sharing every seed differ only in the amplified band, so the
-        # off run must move strictly fewer weights.
-        first = self.make_network(0)
-        second = self.make_network(0)
-        baseline = {k: v.clone() for k, v in first.state_dict().items()}
+        # Arrange
+        baseline, after = self.gaussian_pass(super_param_mut=False)
 
-        torch.manual_seed(0)
-        Mutations(
-            0, 0, 0, 1, 0, 0, rand_seed=0, super_param_mut=True
-        )._gaussian_parameter_mutation(first)
-        torch.manual_seed(0)
-        Mutations(
-            0, 0, 0, 1, 0, 0, rand_seed=0, super_param_mut=False
-        )._gaussian_parameter_mutation(second)
+        # Act
+        largest = self.largest_step(baseline, after)
 
-        # Assert: the same weights are selected, but the off run perturbs fewer.
-        changed_on = sum(
-            int((baseline[k] != v).sum()) for k, v in first.state_dict().items()
-        )
-        changed_off = sum(
-            int((baseline[k] != v).sum()) for k, v in second.state_dict().items()
-        )
-        assert changed_off < changed_on
+        # Assert: with the band gone every remaining step is within the reach of
+        # the reset and ordinary bands, i.e. no weight was amplified at all.
+        assert largest < self.BAND_CEILING
+
+    def test_the_other_bands_still_fire_with_the_amplified_one_off(self):
+        # Switching the amplified band off must not quietly disable the reset and
+        # ordinary bands with it -- the operator is still a parameter mutation.
+        baseline, after = self.gaussian_pass(super_param_mut=False)
+
+        # Assert
+        assert any(not torch.equal(baseline[k], after[k]) for k in baseline)
 
 
 class TestMutationsRegramaParameterMutation:
@@ -2832,6 +2838,47 @@ class TestMutationsRegramaParameterMutation:
         after = agent.critic.state_dict()
         assert all(torch.equal(before[k], after[k]) for k in before)
 
+    def test_the_configured_threshold_decides_what_counts_as_dormant(self):
+        # A neuron scoring at half its layer mean is dormant under a permissive
+        # threshold and healthy under a strict one, so the very same snapshot has
+        # to produce different surgery depending only on the configured value.
+        # The critic is the clean witness: the Gaussian pass only ever runs on
+        # the policy, so any change here is the ReGraMa reset.
+        def reset_critic_with(threshold: float):
+            agent = PPO(
+                generate_random_box_space((4,)),
+                generate_discrete_space(2),
+                device="cpu",
+            )
+            agent.grama_scores = grama_scores_for(agent, fill=1.0)
+            networks = [
+                network for _network_id, network in regrama.eval_networks(agent)
+            ]
+            for entry in agent.grama_scores[networks.index(agent.critic)]:
+                if entry is not None:
+                    # One neuron per layer at half the layer mean; leaving the
+                    # rest at 1.0 keeps the normalised score near 0.5, which
+                    # sits between the two thresholds below.
+                    entry[0] = 0.5
+            before = {k: v.clone() for k, v in agent.critic.state_dict().items()}
+            agent = _regrama_mutations(dormant_threshold=threshold).parameter_mutation(
+                agent,
+            )
+            return before, agent.critic.state_dict()
+
+        # Act
+        permissive_before, permissive_after = reset_critic_with(0.6)
+        strict_before, strict_after = reset_critic_with(0.1)
+
+        # Assert
+        assert any(
+            not torch.equal(permissive_before[k], permissive_after[k])
+            for k in permissive_before
+        )
+        assert all(
+            torch.equal(strict_before[k], strict_after[k]) for k in strict_before
+        )
+
     def test_missing_snapshot_falls_back_to_gaussian_and_warns_once(self):
         # A silent fallback is indistinguishable from a run never configured for
         # ReGraMa, so it is worth exactly one warning.
@@ -2853,8 +2900,6 @@ class TestMutationsRegramaParameterMutation:
         # exactly the shape hooks that never fired leave behind. Without this the
         # fallback to Gaussian is completely silent.
         agent = self.make_agent()
-        from agilerl.hpo import regrama
-
         agent.grama_scores = [
             [None] * len(regrama.target_activations(network))
             for _network_id, network in regrama.eval_networks(agent)
@@ -2951,36 +2996,22 @@ class TestMutationsRegramaParameterMutation:
 
 def _policy_latent_dormant(agent, index: int = 0) -> None:
     """Mark only the policy's latent unit *index* dormant; everything else healthy."""
-    from agilerl.hpo import regrama
-
+    agent.grama_scores = grama_scores_for(agent, fill=1.0)
     policy = getattr(agent, agent.registry.policy())
-    agent.grama_scores = [
-        [
-            _healthy_except(network, activation, terminal, index, network is policy)
-            for activation in regrama.target_activations(network)
-        ]
-        for _network_id, network in regrama.eval_networks(agent)
-        for terminal in [
-            regrama.activation_modules(network.encoder, include_output=True)[-1]
-        ]
-    ]
-
-
-def _healthy_except(network, activation, terminal, index, is_policy):
-    """One layer's snapshot entry: all-live unless it is the policy's latent."""
-    from agilerl.hpo import regrama
-
-    producer = regrama.resolve_producer_and_next(
-        activation,
-        network.encoder,
-        network.head_net,
-    ).producer
-    if producer is None:
-        return None
-    per_neuron = torch.ones(regrama.weight_param(producer).shape[0])
-    if is_policy and activation is terminal:
-        per_neuron[index] = 0.0
-    return per_neuron
+    # The latent is the encoder's terminal activation, i.e. the only boundary a
+    # shared encoder carries into another network's head.
+    terminal = regrama.activation_modules(policy.encoder, include_output=True)[-1]
+    position = regrama.target_activations(policy).index(terminal)
+    policy_entry = next(
+        entry
+        for (_network_id, network), entry in zip(
+            regrama.eval_networks(agent),
+            agent.grama_scores,
+            strict=True,
+        )
+        if network is policy
+    )
+    policy_entry[position][index] = 0.0
 
 
 class TestMutationsRegramaSharedEncoders:
@@ -2995,8 +3026,6 @@ class TestMutationsRegramaSharedEncoders:
         )
 
     def critic_head(self, agent):
-        from agilerl.hpo import regrama
-
         return regrama.head_entry_layers(agent.critic.head_net)[0]
 
     def test_shared_critic_head_is_faded_when_the_policy_latent_is_reset(self):
@@ -3033,8 +3062,6 @@ class TestMutationsRegramaMultiAgent:
 
     def test_every_sub_policy_is_reset_from_its_own_entry(self):
         # Arrange
-        from agilerl.algorithms import IPPO
-
         agent = IPPO(
             generate_multi_agent_box_spaces(2, (4,)),
             generate_multi_agent_discrete_spaces(2, 2),

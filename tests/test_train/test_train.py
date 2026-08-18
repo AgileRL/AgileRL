@@ -11,6 +11,7 @@ from typing import ClassVar
 from unittest.mock import ANY, MagicMock, patch
 
 import dill
+import gymnasium as gym
 import numpy as np
 import pytest
 import torch
@@ -43,6 +44,7 @@ from agilerl.components.replay_buffer import (
     PrioritizedReplayBuffer,
     ReplayBuffer,
 )
+from agilerl.hpo import regrama
 from agilerl.hpo.multi_frequency import MultiFrequencySelection
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
@@ -61,6 +63,7 @@ from tests.helper_functions import (
     generate_multi_agent_box_spaces,
     generate_multi_agent_discrete_spaces,
     generate_random_box_space,
+    grama_scores_for,
     rank_population_by_subpopulation,
     weakest_agent_index,
 )
@@ -592,8 +595,10 @@ class DummyTournament:
 
 
 class DummyMutations:
-    def __init__(self):
-        pass
+    def __init__(self, regrama_param_mut=False):
+        # Mirrors the real operator's switch, which is what the trainers read
+        # when deciding whether to enable GraMa capture on the population.
+        self.regrama_param_mut = regrama_param_mut
 
     def mutation(self, pop, pre_training_mut=False, indices=None):
         return pop
@@ -5793,31 +5798,8 @@ def _give_population_fitness(population) -> None:
 
 def _mark_population_dormant(population) -> None:
     """Give every agent a snapshot in which every measured neuron is dormant."""
-    from agilerl.hpo import regrama
-
     for agent in population:
-        agent.grama_scores = [
-            [
-                torch.zeros(
-                    regrama.weight_param(
-                        regrama.resolve_producer_and_next(
-                            activation,
-                            getattr(network, "encoder", None),
-                            getattr(network, "head_net", None),
-                        ).producer,
-                    ).shape[0],
-                )
-                if regrama.resolve_producer_and_next(
-                    activation,
-                    getattr(network, "encoder", None),
-                    getattr(network, "head_net", None),
-                ).producer
-                is not None
-                else None
-                for activation in regrama.target_activations(network)
-            ]
-            for _network_id, network in regrama.eval_networks(agent)
-        ]
+        agent.grama_scores = grama_scores_for(agent, fill=0.0)
 
 
 class TestRegramaCrossFamilyEvolution:
@@ -5853,7 +5835,7 @@ class TestRegramaCrossFamilyEvolution:
             assert len(population) == 8
             assert all(isinstance(agent, EvolvableAlgorithm) for agent in population)
             for agent in population:
-                for _network_id, network in _eval_networks_of(agent):
+                for _network_id, network in regrama.eval_networks(agent):
                     assert all(
                         torch.isfinite(value).all()
                         for value in network.state_dict().values()
@@ -5896,7 +5878,7 @@ class TestRegramaCrossFamilyEvolution:
             assert len(population) == 8
             assert len({agent.index for agent in population}) == 8
             for agent in population:
-                for _network_id, network in _eval_networks_of(agent):
+                for _network_id, network in regrama.eval_networks(agent):
                     assert all(
                         torch.isfinite(value).all()
                         for value in network.state_dict().values()
@@ -5927,43 +5909,149 @@ class TestRegramaCrossFamilyEvolution:
         assert all(agent.grama_scores is not None for agent in evolved)
 
 
-def _eval_networks_of(agent):
-    from agilerl.hpo import regrama
-
-    return regrama.eval_networks(agent)
-
-
 class TestRegramaTrainerWiring:
     """Every non-LLM trainer enables the capture ReGraMa depends on."""
 
-    TRAINERS = (
-        "train_on_policy",
-        "train_off_policy",
-        "train_multi_agent_on_policy",
-        "train_multi_agent_off_policy",
-        "train_bandits",
-        "train_offline",
-    )
+    # A trainer that never enables capture silently degrades ReGraMa to plain
+    # Gaussian noise, so each of the six is driven for a few steps and the
+    # population is inspected afterwards. The dummy agents and envs keep this
+    # to the wiring; test_off_policy_training_captures_a_snapshot below is the
+    # deep end-to-end counterpart on a real agent with real gradients.
 
-    @pytest.mark.parametrize("module_name", TRAINERS)
-    def test_trainer_enables_capture(self, module_name):
-        # A trainer that never calls this silently degrades ReGraMa to Gaussian,
-        # so the guarantee is that none of the six is forgotten.
-        import importlib
+    @staticmethod
+    def assert_capture_enabled(population) -> None:
+        assert population
+        assert all(agent.capture_grama is True for agent in population)
 
-        from agilerl.hpo.regrama import set_grama_capture
+    @pytest.mark.parametrize(("state_size", "action_size", "vect"), _FLAT_VECT)
+    def test_train_off_policy_enables_capture(self, env, population_off_policy):
+        train_off_policy(
+            env,
+            "env_name",
+            "algo",
+            population_off_policy,
+            DummyMemory(),
+            max_steps=4,
+            evo_steps=4,
+            eval_loop=1,
+            mutation=DummyMutations(regrama_param_mut=True),
+            wb=False,
+            verbose=False,
+        )
 
-        module = importlib.import_module(f"agilerl.training.{module_name}")
+        self.assert_capture_enabled(population_off_policy)
 
-        assert module.set_grama_capture is set_grama_capture
+    @pytest.mark.parametrize(("state_size", "action_size", "vect"), _FLAT_VECT)
+    def test_train_on_policy_enables_capture(self, env, population_on_policy):
+        train_on_policy(
+            env,
+            "env_name",
+            "algo",
+            population_on_policy,
+            max_steps=4,
+            evo_steps=4,
+            eval_loop=1,
+            mutation=DummyMutations(regrama_param_mut=True),
+            wb=False,
+            verbose=False,
+        )
+
+        self.assert_capture_enabled(population_on_policy)
+
+    @pytest.mark.parametrize(("state_size", "action_size", "vect"), _FLAT_VECT)
+    def test_train_offline_enables_capture(
+        self,
+        env,
+        population_off_policy,
+        memory,
+        offline_init_hp,
+        dummy_h5py_data,
+    ):
+        train_offline(
+            env,
+            "env_name",
+            "algo",
+            population_off_policy,
+            memory,
+            dataset=dummy_h5py_data,
+            init_hp=offline_init_hp,
+            max_steps=4,
+            evo_steps=4,
+            eval_loop=1,
+            mutation=DummyMutations(regrama_param_mut=True),
+            wb=False,
+        )
+
+        self.assert_capture_enabled(population_off_policy)
+
+    @pytest.mark.parametrize(("state_size", "action_size"), _FLAT)
+    def test_train_bandits_enables_capture(
+        self,
+        bandit_env,
+        population_bandit,
+        bandit_memory,
+    ):
+        train_bandits(
+            bandit_env,
+            "bandit_env_name",
+            "algo",
+            population_bandit,
+            bandit_memory,
+            max_steps=10,
+            episode_steps=5,
+            evo_steps=5,
+            eval_steps=2,
+            eval_loop=1,
+            mutation=DummyMutations(regrama_param_mut=True),
+            wb=False,
+        )
+
+        self.assert_capture_enabled(population_bandit)
+
+    @pytest.mark.parametrize("on_policy", [False])
+    @pytest.mark.parametrize(("state_size", "action_size"), _FLAT)
+    def test_train_multi_agent_off_policy_enables_capture(
+        self,
+        multi_env,
+        population_multi_agent,
+        multi_memory,
+    ):
+        train_multi_agent_off_policy(
+            multi_env,
+            "env_name",
+            "algo",
+            pop=population_multi_agent,
+            memory=multi_memory,
+            max_steps=4,
+            evo_steps=4,
+            eval_loop=1,
+            mutation=DummyMutations(regrama_param_mut=True),
+        )
+
+        self.assert_capture_enabled(population_multi_agent)
+
+    @pytest.mark.parametrize("on_policy", [True])
+    @pytest.mark.parametrize(("state_size", "action_size"), _FLAT)
+    def test_train_multi_agent_on_policy_enables_capture(
+        self,
+        multi_env,
+        population_multi_agent,
+    ):
+        train_multi_agent_on_policy(
+            multi_env,
+            "env_name",
+            "algo",
+            pop=population_multi_agent,
+            max_steps=4,
+            evo_steps=4,
+            eval_loop=1,
+            mutation=DummyMutations(regrama_param_mut=True),
+        )
+
+        self.assert_capture_enabled(population_multi_agent)
 
     def test_off_policy_training_captures_a_snapshot(self):
         # Arrange
-        import gymnasium as gym
-
-        from agilerl.algorithms import DQN
-        from agilerl.components.replay_buffer import ReplayBuffer
-
         vec_env = gym.vector.SyncVectorEnv([lambda: gym.make("CartPole-v1")])
         agent = DQN(
             vec_env.single_observation_space,
@@ -5995,11 +6083,6 @@ class TestRegramaTrainerWiring:
     def test_compiled_agent_still_captures_with_a_warning(self):
         # Arrange: capture works through torch.compile, it just fragments the
         # compiled graph, so the run proceeds and the cost is reported once.
-        import gymnasium as gym
-
-        from agilerl.algorithms import DQN
-        from agilerl.components.replay_buffer import ReplayBuffer
-
         vec_env = gym.vector.SyncVectorEnv([lambda: gym.make("CartPole-v1")])
         agent = DQN(
             vec_env.single_observation_space,
@@ -6031,11 +6114,6 @@ class TestRegramaTrainerWiring:
 
     def test_capture_stays_off_without_regrama(self):
         # Arrange
-        import gymnasium as gym
-
-        from agilerl.algorithms import DQN
-        from agilerl.components.replay_buffer import ReplayBuffer
-
         vec_env = gym.vector.SyncVectorEnv([lambda: gym.make("CartPole-v1")])
         agent = DQN(
             vec_env.single_observation_space,
