@@ -185,6 +185,9 @@ class ResidualBlock(nn.Module):
             device=device,
         )
         self.bn1 = nn.BatchNorm2d(hidden_channels, device=device)
+        # A registered sub-module rather than a functional call, so GraMa capture
+        # can reach the block's hidden channels.
+        self.act = nn.ReLU()
 
         self.conv2 = nn.Conv2d(
             hidden_channels,
@@ -213,7 +216,7 @@ class ResidualBlock(nn.Module):
             x,
             kernel_size=self.conv1.kernel_size[0],
         )  # Apply manual padding
-        x = F.relu(self.bn1(self.conv1(x)))
+        x = self.act(self.bn1(self.conv1(x)))
 
         x = self.asymmetric_padding(
             x,
@@ -221,6 +224,8 @@ class ResidualBlock(nn.Module):
         )  # Apply manual padding
         x = self.bn2(self.conv2(x))
 
+        # Left functional on purpose: this activation's input is the residual sum,
+        # so its units have no single producing layer.
         return F.relu(res + x)  # Apply ReLU after summing the residual
 
 
@@ -250,6 +255,9 @@ class SimbaResidualBlock(nn.Module):
 
         self.layer_norm = nn.LayerNorm(hidden_size, device=device)
         self.linear1 = nn.Linear(hidden_size, hidden_size * scale_factor, device=device)
+        # A registered sub-module rather than a functional call, so GraMa capture
+        # can reach the block's hidden channels.
+        self.act = nn.ReLU()
         self.linear2 = nn.Linear(hidden_size * scale_factor, hidden_size, device=device)
 
         # initialize weigts using he initialization
@@ -259,6 +267,6 @@ class SimbaResidualBlock(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         res = x
         x = self.layer_norm(x)
-        x = F.relu(self.linear1(x))
+        x = self.act(self.linear1(x))
         x = self.linear2(x)
         return res + x

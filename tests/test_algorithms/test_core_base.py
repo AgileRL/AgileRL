@@ -7991,3 +7991,156 @@ class TestLoraInputCastUnderAutocast:
         assert with_cast
         assert with_cast.keys() == without_cast.keys()
         assert all(torch.equal(with_cast[k], without_cast[k]) for k in with_cast)
+
+
+class TestEvolvableAlgorithmGraMaState:
+    """The per-agent GraMa state ReGraMa reads at mutation time."""
+
+    def agent(self):
+        from agilerl.algorithms import DQN
+
+        return DQN(
+            spaces.Box(-1.0, 1.0, shape=(4,), dtype=np.float32),
+            spaces.Discrete(2),
+            device="cpu",
+        )
+
+    def test_capture_is_off_and_unmeasured_by_default(self):
+        agent = self.agent()
+
+        assert agent.capture_grama is False
+        assert agent.grama_scores is None
+
+    def test_training_block_captures_only_when_enabled(self):
+        # Arrange
+        agent = self.agent()
+
+        # Act
+        agent.init_training_step()
+        agent.actor(torch.rand(2, 4)).square().mean().backward()
+        agent.finalize_training_step(1)
+
+        # Assert: no hooks are registered, so capture costs nothing when off.
+        assert agent.grama_scores is None
+
+    def test_training_block_stores_a_snapshot_when_enabled(self):
+        # Arrange
+        agent = self.agent()
+        agent.capture_grama = True
+
+        # Act
+        agent.init_training_step()
+        agent.actor(torch.rand(2, 4)).square().mean().backward()
+        agent.finalize_training_step(1)
+
+        # Assert
+        assert agent.grama_scores
+        assert any(entry is not None for entry in agent.grama_scores[0])
+
+    def test_snapshot_travels_to_a_clone(self):
+        # This is what lets a child read the gradients captured while its parent
+        # trained, under any selection strategy.
+        agent = self.agent()
+        agent.capture_grama = True
+        agent.init_training_step()
+        agent.actor(torch.rand(2, 4)).square().mean().backward()
+        agent.finalize_training_step(1)
+
+        # Act
+        clone = agent.clone(wrap=False)
+
+        # Assert
+        assert clone.capture_grama is True
+        assert clone.grama_scores is not None
+        assert len(clone.grama_scores) == len(agent.grama_scores)
+
+    def test_snapshot_is_deep_copied_onto_the_clone(self):
+        # Arrange
+        agent = self.agent()
+        agent.grama_scores = [[torch.ones(3)]]
+
+        # Act
+        clone = agent.clone(wrap=False)
+        agent.grama_scores[0][0].fill_(9.0)
+
+        # Assert: mutating the parent's snapshot must not reach the child's.
+        assert torch.equal(clone.grama_scores[0][0], torch.ones(3))
+
+    def test_snapshot_is_kept_out_of_checkpoints(self, tmp_path):
+        # Transient training state, recaptured every cycle.
+        from agilerl.algorithms.core.base import get_checkpoint_dict
+
+        agent = self.agent()
+        agent.grama_scores = [[torch.ones(3)]]
+
+        # Act
+        checkpoint = get_checkpoint_dict(agent)
+
+        # Assert
+        assert "grama_scores" not in checkpoint
+        assert "capture_grama" in checkpoint
+
+    def test_resume_restores_without_reporting_a_missing_attribute(
+        self,
+        tmp_path,
+        recwarn,
+    ):
+        # Arrange: without the re-injection in load(), the attribute-restore loop
+        # reports grama_scores missing on every resume, for every agent.
+        from agilerl.algorithms import DQN
+
+        agent = self.agent()
+        path = str(tmp_path / "agent.pt")
+        agent.save_checkpoint(path)
+
+        # Act
+        restored = DQN.load(path, device="cpu")
+
+        # Assert
+        assert restored.grama_scores is None
+        assert not [
+            warning for warning in recwarn if "grama_scores" in str(warning.message)
+        ]
+
+    def test_resume_from_a_pre_regrama_checkpoint_reports_nothing_missing(
+        self,
+        tmp_path,
+        recwarn,
+    ):
+        # Arrange: a checkpoint written before ReGraMa existed carries no
+        # capture_grama, and the attribute-restore loop reports every attribute
+        # the checkpoint lacks -- once per agent, on every resume.
+        from agilerl.algorithms import DQN
+
+        agent = self.agent()
+        path = str(tmp_path / "agent.pt")
+        agent.save_checkpoint(path)
+
+        checkpoint = torch.load(path, weights_only=False)
+        del checkpoint["capture_grama"]
+        torch.save(checkpoint, path)
+
+        # Act
+        restored = DQN.load(path, device="cpu")
+
+        # Assert: the flag falls back to its constructor default, silently.
+        assert restored.capture_grama is False
+        assert not [
+            warning for warning in recwarn if "capture_grama" in str(warning.message)
+        ]
+
+    def test_wrapped_agent_stores_the_snapshot_on_the_unwrapped_algorithm(self):
+        # Trainers call the lifecycle hooks on whatever they hold, which may be a
+        # wrapper; the mutation reads the snapshot off the unwrapped agent.
+        from agilerl.wrappers.agent import RSNorm
+
+        wrapper = RSNorm(self.agent())
+        wrapper.capture_grama = True
+
+        # Act
+        wrapper.init_training_step()
+        wrapper.agent.actor(torch.rand(2, 4)).square().mean().backward()
+        wrapper.finalize_training_step(1)
+
+        # Assert
+        assert wrapper.agent.grama_scores

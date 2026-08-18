@@ -1,17 +1,17 @@
 ---
 algorithm:
-    name: NeuralTS
-    batch_size: 128
-    lr: 0.003
-    learn_step: 2
-    gamma: 1.0
-    lamb: 1.0
-    reg: 0.00625
+    name: CQN
+    batch_size: 256
+    lr: 0.001
+    learn_step: 1
+    gamma: 0.99
+    tau: 0.001
+    double: true
 
 environment:
-    name: IRIS
-    features: tests/data/iris_features.csv
-    targets: tests/data/iris_targets.csv
+    name: CartPole-v1
+    num_envs: 16
+    minari_dataset_id: cartpole/random-v0
 mutation:
     probabilities:
         no_mut: 0.4
@@ -22,40 +22,41 @@ mutation:
         rl_hp_mut: 0.2
     rl_hp_selection:
         lr:
-            min: 0.0000625
+            min: 0.0001
             max: 0.01
         batch_size:
             min: 8
-            max: 512
+            max: 1024
         learn_step:
             min: 1
             max: 10
     mutation_sd: 0.1
     rand_seed: 42
-    super_param_mut: true      # apply the amplified Gaussian band
-    regrama_param_mut: false   # do not reset dormant neurons
+    super_param_mut: false
+    regrama_param_mut: true
+    dormant_threshold: 0.01
 
 network:
-    latent_dim: 128
+    latent_dim: 64
     encoder_config:
         hidden_size:
-            - 128
+            - 64
     head_config:
         hidden_size:
-            - 128
+            - 64
 
 replay_buffer:
-    max_size: 10_000
+    max_size: 100_000
 
 selection_strategy:
     tournament_size: 2
     elitism: true
 
 training:
-    max_steps: 10_000
-    target_score: 450.0
+    max_steps: 50_000
+    target_score: 200.0
     pop_size: 4
-    evo_steps: 500
-    eval_steps: 500
-    episode_steps: 500
+    evo_steps: 5_000
+    eval_steps:
     eval_loop: 1
+    learning_delay: 1000

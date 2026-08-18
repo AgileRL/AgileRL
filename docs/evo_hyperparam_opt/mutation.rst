@@ -11,7 +11,7 @@ The :class:`Mutations <agilerl.hpo.mutation.Mutations>` class is used to mutate 
 
     * **No mutation**: An "identity" mutation, whereby the agent is returned unchanged.
     * **Network architecture mutations**: Involves adding or removing layers or nodes. Trained weights are reused and new weights are initialized randomly.
-    * **Network parameters mutation**: Mutating weights with Gaussian noise.
+    * **Network parameters mutation**: Mutating weights with Gaussian noise, optionally preceded by ReGraMa resets of the neurons that have stopped learning.
     * **Network activation layer mutation**: Change of activation layer.
     * **RL algorithm mutation**: Mutation of a learning hyperparameter (e.g. learning rate or batch size).
 
@@ -197,3 +197,99 @@ in three different ways, clamping mutated values to prevent extreme changes:
     - **Super mutation**: Adds larger noise for more significant changes.
 
     - **Reset mutation**: Completely resets weights to new random values.
+
+Switching off super mutations
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The super ("amplified") band draws its noise with a standard deviation of ten times each weight's own
+magnitude. That is a deliberately large jump, and on a well-trained agent it is sometimes large enough to
+undo the learning that earned the agent its place in the population. Set ``super_param_mut: false`` to
+drop the amplified band entirely. It defaults to ``true``, so existing configurations behave exactly as before.
+
+.. code-block:: yaml
+
+    mutation:
+        mutation_sd: 0.1
+        super_param_mut: false   # keep only the normal and reset bands
+
+.. _regrama:
+
+ReGraMa: resetting dormant neurons
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+**The problem.** As training goes on, deep RL networks steadily lose *plasticity*: a growing fraction of
+their units stop receiving any meaningful gradient. The network keeps its nominal size but its *effective*
+capacity shrinks, and it becomes progressively worse at fitting anything new. Adding Gaussian noise does
+not fix this: noise is applied to randomly chosen weights, with no idea which units have gone quiet.
+
+**How dormancy is measured.** ReGraMa uses the **GraMa** score of Liu et al.,
+`"Measure gradients, not activations!" <https://arxiv.org/abs/2505.24061>`_. A neuron's raw score is the
+mean absolute gradient of the training loss with respect to its pre-activation, and that raw score is
+divided by its own layer's mean. A neuron is *dormant* when its normalised score falls at or below the
+threshold. Because the score is normalised within its layer, one setting works across layers and
+architectures of very different scales.
+
+**What it costs.** Nothing measurable. The gradients are read from the real training backward pass through a
+hook on each activation, so there is no extra forward or backward pass and no extra observation batch to
+collect. Only the final minibatch of each cycle is kept, because the reset acts on the network as it
+stands at the end of that cycle.
+
+**What the reset does.** Each dormant neuron gets fresh Xavier-uniform incoming weights, a zero bias, and
+a small, freshly drawn set of outgoing weights. Its normalisation entry, if it has one, returns to the
+identity so a decayed gain cannot immediately re-suppress it. The outgoing weights are deliberately
+*small but non-zero*: zeroing them would leave the revived neuron with exactly zero gradient, so it would
+be potentially flagged dormant again in the next evolution, especially if ```evo_steps`` is low.
+
+Every evaluation network is treated this way (actors, critics, and each sub-policy of a multi-agent
+algorithm) while target and other shared networks are re-synced from them afterwards. Output layers of
+head networks are **never** reset: those units carry fixed meanings, such as action logits or a state
+value, so re-initialising them would throw away the policy itself. When ReGraMa is enabled its resets run
+**first**, and the Gaussian bands are applied afterwards.
+
+**Configuring it.** Two manifest fields, both on the ``mutation`` block:
+
+.. code-block:: yaml
+
+    mutation:
+        regrama_param_mut: true   # default: false
+        dormant_threshold: 0.01   # default: 0.01
+
+or, equivalently, in Python:
+
+.. code-block:: python
+
+    from agilerl.hpo.mutation import Mutations
+
+    mutations = Mutations(
+        no_mutation=0.4,
+        architecture=0.2,
+        new_layer_prob=0.2,
+        parameters=0.2,
+        activation=0,
+        rl_hp=0.2,
+        regrama_param_mut=True,   # reset dormant neurons before adding noise
+        super_param_mut=False,
+        dormant_threshold=0.01,
+    )
+
+``regrama_param_mut`` defaults to ``false``, so parameter mutations keep their previous behaviour until
+you opt in. ``dormant_threshold`` must be greater than or equal to ``0.0`` and is inert while
+``regrama_param_mut`` is ``false``.
+
+**Choosing a threshold.** Raising ``dormant_threshold`` resets more units per generation: dormancy is
+given more importance, but the forgetting can happen more aggressively, since each reset discards whatever
+the unit had learned. Lowering it towards ``0.0`` resets only units whose gradient is *exactly* zero, which
+is a reasonable conservative setting for ReLU networks but degenerate for smooth activations such as Tanh,
+where gradients get very small without ever reaching zero.
+
+.. note::
+    RNN architectures fall outside what ReGraMa can reset. The hidden units of a recurrent core
+    have fused gate non-linearities and no single weight matrix whose rows are one unit's incoming weights,
+    so only the layers from the output projection onward are reset. A warning is emitted once so this is never
+    silent.
+
+.. note::
+    ReGraMa works on ``torch.compile`` agents, but it costs them the compiled graph. Each measured
+    activation carries a backward hook, and every one of those is a graph break, so the training step
+    fragments into separately launched segments. On the small networks typical of RL that gives back
+    roughly what compiling bought. A warning is emitted once per population.

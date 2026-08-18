@@ -22,6 +22,7 @@ from agilerl.algorithms.core import (
     MultiAgentRLAlgorithm,
     RLAlgorithm,
 )
+from agilerl.hpo import regrama
 from agilerl.modules import EvolvableModule, ModuleDict
 from agilerl.protocols import EvolvableAlgorithmProtocol
 from agilerl.typing import MutationReturn
@@ -38,6 +39,8 @@ BanditAlgorithm = NeuralUCB | NeuralTS
 # A bound mutation method of `Mutations`: maps an individual to a mutated
 # individual of the same type.
 MutationFunc = Callable[[IndividualT], IndividualT]
+
+logger = logging.getLogger(__name__)
 
 torch._dynamo.config.cache_size_limit = 64
 torch._logging.set_logs(dynamo=logging.FATAL)
@@ -212,7 +215,8 @@ class Mutations:
 
     * No mutation
     * Network architecture mutation - adding layers or nodes. Trained weights are reused and new weights are initialized randomly.
-    * Network parameters mutation - mutating weights with Gaussian noise.
+    * Network parameters mutation - mutating weights with Gaussian noise, optionally preceded by
+      ReGraMa resets of the neurons that have gone dormant.
     * Network activation layer mutation - change of activation layer.
     * RL algorithm mutation - mutation of learning hyperparameter, (e.g. learning rate or batch size).
 
@@ -244,6 +248,17 @@ class Mutations:
     :type device: str, optional
     :param accelerator: Accelerator for distributed computing, defaults to None
     :type accelerator: accelerate.Accelerator(), optional
+    :param regrama_param_mut: Reset dormant neurons before adding Gaussian noise during a
+        parameter mutation, defaults to False. Works on a compiled algorithm but costs it
+        much of its speedup, since the gradient hooks break the compiled graph; see
+        :func:`~agilerl.hpo.regrama.set_grama_capture`.
+    :type regrama_param_mut: bool, optional
+    :param super_param_mut: Apply the amplified ("super") band of the Gaussian parameter
+        mutation, defaults to True.
+    :type super_param_mut: bool, optional
+    :param dormant_threshold: Normalised GraMa score at or below which a neuron counts as
+        dormant, defaults to 0.01. Inert unless ``regrama_param_mut`` is True.
+    :type dormant_threshold: float, optional
     """
 
     def __init__(
@@ -260,6 +275,9 @@ class Mutations:
         rand_seed: int | None = None,
         device: str = "cpu",
         accelerator: Accelerator | None = None,
+        regrama_param_mut: bool = False,
+        super_param_mut: bool = True,
+        dormant_threshold: float = 0.01,
     ) -> None:
         if activation_selection is None:
             activation_selection = ["ReLU", "ELU", "GELU"]
@@ -323,6 +341,21 @@ class Mutations:
         )
         if isinstance(rand_seed, int):
             assert rand_seed >= 0, "Random seed must be greater than or equal to zero."
+        assert isinstance(
+            regrama_param_mut,
+            bool,
+        ), "ReGraMa parameter mutation must be boolean value True or False."
+        assert isinstance(
+            super_param_mut,
+            bool,
+        ), "Super parameter mutation must be boolean value True or False."
+        assert isinstance(
+            dormant_threshold,
+            (float, int),
+        ), "Dormant threshold must be a float or integer."
+        assert dormant_threshold >= 0, (
+            "Dormant threshold must be greater than or equal to zero."
+        )
 
         # Random seed for repeatability
         set_global_seed(rand_seed)
@@ -342,6 +375,13 @@ class Mutations:
         self.mutate_elite = mutate_elite
         self.device = device
         self.accelerator = accelerator
+
+        self.regrama_param_mut = regrama_param_mut
+        self.super_param_mut = super_param_mut
+        self.dormant_threshold = dormant_threshold
+        self._warned_recurrent = False
+        self._warned_no_snapshot = False
+        self._pre_training_mut = False
 
         self.pretraining_mut_options, self.pretraining_mut_proba = (
             self._get_mutations_options(pretraining=True)
@@ -367,6 +407,8 @@ class Mutations:
         :return: Mutated population
         :rtype: list[EvolvableAlgorithm]
         """
+        self._pre_training_mut = pre_training_mut
+
         # Create lists of possible mutation functions and their respective relative probabilities
         mutation_options = (
             self.pretraining_mut_options if pre_training_mut else self.mut_options
@@ -632,8 +674,12 @@ class Mutations:
         return individual
 
     def parameter_mutation(self, individual: IndividualT) -> IndividualT:
-        """Perform a random mutation to the weights of the policy network of an agent through
-        the addition of Gaussian noise.
+        """Perform a mutation to the weights of the individual.
+
+        Runs in two stages. When ``regrama_param_mut`` is set, ReGraMa mutations
+        first re-initialise the neurons that have gone dormant, across every
+        evaluation network of the agent. Gaussian noise is then added to the policy
+        network, in the reset, ordinary and amplified bands.
 
         .. note::
             This is currently not supported for :class:`LLMAlgorithm <agilerl.algorithms.core.LLMAlgorithm>` agents.
@@ -651,6 +697,10 @@ class Mutations:
             )
             individual.mut = "None"
             return individual
+
+        regrama_applied = (
+            self._regrama_reset(individual) if self.regrama_param_mut else False
+        )
 
         registry = individual.registry
 
@@ -678,19 +728,93 @@ class Mutations:
             offspring_policy,
         )
 
-        # Load state dicts for shared networks
-        for shared in policy_group.shared_network_names():
-            offspring_shared: EvolvableModule = getattr(individual, shared)
-            offspring_shared.load_state_dict(
-                offspring_policy.state_dict(),
-                strict=False,
+        # Load state dicts for shared networks. ReGraMa rewrites non-policy
+        # evaluation networks too, so every group has to be resynced when it ran.
+        groups = registry.groups if regrama_applied else [policy_group]
+        for group in groups:
+            eval_offspring: EvolvableModule = getattr(
+                individual,
+                group.eval_network_name(),
             )
-            self._to_device_and_set_individual(individual, shared, offspring_shared)
+            for shared in group.shared_network_names():
+                offspring_shared: EvolvableModule = getattr(individual, shared)
+                offspring_shared.load_state_dict(
+                    eval_offspring.state_dict(),
+                    strict=False,
+                )
+                self._to_device_and_set_individual(individual, shared, offspring_shared)
 
         individual.reinit_optimizers()  # Reinitialize optimizer
         individual.mut = "param"
 
         return individual
+
+    def _regrama_reset(self, individual: IndividualT) -> bool:
+        """Reset the dormant neurons of every network of an individual.
+
+        Reads the per-neuron gradient snapshot stored while the agent trained.
+
+        A network whose surgery raises is left untouched rather than aborting the
+        mutation, so a ReGraMa failure degrades to the plain Gaussian pass.
+
+        :param individual: Individual agent from population.
+        :type individual: RLAlgorithm or MultiAgentRLAlgorithm
+
+        :return: Whether any network was modified.
+        :rtype: bool
+        """
+        grama_scores = individual.grama_scores or []
+
+        if not any(entry is not None for network in grama_scores for entry in network):
+            self._warn_missing_grama_snapshot()
+
+        neurons_reset = 0
+        recurrent_seen = False
+        for idx, (_network_id, network) in enumerate(regrama.eval_networks(individual)):
+            per_neuron_list = grama_scores[idx] if idx < len(grama_scores) else None
+            try:
+                report = regrama.reset_dormant_neurons(
+                    network,
+                    per_neuron_list,
+                    self.dormant_threshold,
+                    self.rng,
+                )
+            except Exception as exc:  # leave this network untouched on failure
+                logger.warning("ReGraMa reset skipped for a network: %s", exc)
+                continue
+            neurons_reset += report.neurons_reset
+            recurrent_seen |= report.recurrent_seen
+
+        if recurrent_seen and not self._warned_recurrent:
+            self._warned_recurrent = True
+            warnings.warn(
+                "ReGraMa does not reset the recurrent core of a recurrent encoder: "
+                "its gate non-linearities are fused, so no per-neuron gradient is "
+                "captured for them, and its hidden units do not own contiguous weight "
+                "rows. Only the layers from the output projection onward are reset.",
+                stacklevel=3,
+            )
+
+        return neurons_reset > 0
+
+    def _warn_missing_grama_snapshot(self) -> None:
+        """Warn when ReGraMa is configured but no gradient was captured.
+
+        Covers both a snapshot that is absent and one that holds no measurement,
+        since neither can score a neuron and both would otherwise be silent.
+
+        :return: None.
+        :rtype: None
+        """
+        if self._pre_training_mut or self._warned_no_snapshot:
+            return
+        self._warned_no_snapshot = True
+        warnings.warn(
+            "ReGraMa parameter mutations are configured but no GraMa gradient "
+            "snapshot was captured, so this mutation falls back to Gaussian noise "
+            "alone.",
+            stacklevel=4,
+        )
 
     def _get_mutations_options(
         self,
@@ -914,6 +1038,10 @@ class Mutations:
                 rand_vals_tensor < reset_prob
             )
             mask_normal = rand_vals_tensor >= reset_prob
+
+            # Dropping the amplified band leaves its weights at their trained values.
+            if not self.super_param_mut:
+                mask_super = torch.zeros_like(mask_super)
 
             # Super mutation: add noise with std proportional to the absolute current value times super_mut_strength
             if mask_super.sum() > 0:

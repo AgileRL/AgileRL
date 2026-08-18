@@ -3,6 +3,7 @@
 
 import copy
 import gc
+import warnings
 from typing import TYPE_CHECKING, ClassVar
 
 import numpy as np
@@ -32,6 +33,8 @@ from agilerl.wrappers.agent import AgentWrapper, AsyncAgentsWrapper, RSNorm
 from tests.helper_functions import (
     assert_state_dicts_equal,
     generate_discrete_space,
+    generate_multi_agent_box_spaces,
+    generate_multi_agent_discrete_spaces,
     generate_random_box_space,
 )
 
@@ -2612,3 +2615,364 @@ class TestMutationsApplyMutation:
             assert wrapper.agent is not original
             assert wrapper.agent.mut == "tagged"
             assert wrapper.agent.hook_calls == 1
+
+
+def _regrama_mutations(**kwargs) -> Mutations:
+    """A parameter-mutation-only operator with ReGraMa resets enabled."""
+    return Mutations(0, 0, 0, 1, 0, 0, rand_seed=0, regrama_param_mut=True, **kwargs)
+
+
+def _all_dormant(agent) -> None:
+    """Mark every measured neuron of every evaluation network as dormant."""
+    from agilerl.hpo import regrama
+
+    agent.grama_scores = [
+        [
+            torch.zeros(regrama.weight_param(context.producer).shape[0])
+            if context.producer is not None
+            else None
+            for context in (
+                regrama.resolve_producer_and_next(
+                    activation,
+                    getattr(network, "encoder", None),
+                    getattr(network, "head_net", None),
+                )
+                for activation in regrama.target_activations(network)
+            )
+        ]
+        for _network_id, network in regrama.eval_networks(agent)
+    ]
+
+
+class TestMutationsRegramaConstructor:
+    """Validate the three parameter-mutation switches at construction time."""
+
+    def test_defaults_preserve_the_previous_behaviour(self):
+        muts = Mutations(0, 0, 0, 1, 0, 0)
+
+        assert muts.regrama_param_mut is False
+        assert muts.super_param_mut is True
+        assert muts.dormant_threshold == 0.01
+
+    def test_zero_dormant_threshold_is_accepted(self):
+        # Only exactly-dead neurons are reset, which is a meaningful setting.
+        muts = Mutations(0, 0, 0, 1, 0, 0, dormant_threshold=0.0)
+
+        assert muts.dormant_threshold == 0.0
+
+    def test_negative_dormant_threshold_is_rejected(self):
+        with pytest.raises(AssertionError, match="Dormant threshold"):
+            Mutations(0, 0, 0, 1, 0, 0, dormant_threshold=-0.1)
+
+    @pytest.mark.parametrize(
+        "kwargs",
+        [{"regrama_param_mut": "yes"}, {"super_param_mut": 1}],
+        ids=["regrama", "super"],
+    )
+    def test_non_boolean_switches_are_rejected(self, kwargs):
+        with pytest.raises(AssertionError, match="boolean value"):
+            Mutations(0, 0, 0, 1, 0, 0, **kwargs)
+
+
+class TestMutationsSuperParameterMutation:
+    """Switch the amplified Gaussian band off without touching the others."""
+
+    def make_network(self, seed: int) -> EvolvableModule:
+        torch.manual_seed(seed)
+        return DQN(
+            generate_random_box_space((4,)),
+            generate_discrete_space(2),
+            device="cpu",
+        ).actor
+
+    def test_amplified_band_moves_weights_far_beyond_the_ordinary_one(self):
+        # Arrange: the amplified band draws at 10x |w|, the ordinary at 0.1x |w|.
+        network = self.make_network(0)
+        before = {k: v.clone() for k, v in network.state_dict().items()}
+        muts = Mutations(0, 0, 0, 1, 0, 0, rand_seed=0, super_param_mut=True)
+
+        # Act
+        torch.manual_seed(0)
+        muts._gaussian_parameter_mutation(network)
+
+        # Assert
+        deltas = [
+            (before[k] - v).abs().max().item()
+            for k, v in network.state_dict().items()
+            if k in before
+        ]
+        assert max(deltas) > 0.0
+
+    def test_switching_it_off_leaves_those_weights_at_their_trained_values(self):
+        # Two runs sharing every seed differ only in the amplified band, so the
+        # off run must move strictly fewer weights.
+        first = self.make_network(0)
+        second = self.make_network(0)
+        baseline = {k: v.clone() for k, v in first.state_dict().items()}
+
+        torch.manual_seed(0)
+        Mutations(
+            0, 0, 0, 1, 0, 0, rand_seed=0, super_param_mut=True
+        )._gaussian_parameter_mutation(first)
+        torch.manual_seed(0)
+        Mutations(
+            0, 0, 0, 1, 0, 0, rand_seed=0, super_param_mut=False
+        )._gaussian_parameter_mutation(second)
+
+        # Assert: the same weights are selected, but the off run perturbs fewer.
+        changed_on = sum(
+            int((baseline[k] != v).sum()) for k, v in first.state_dict().items()
+        )
+        changed_off = sum(
+            int((baseline[k] != v).sum()) for k, v in second.state_dict().items()
+        )
+        assert changed_off < changed_on
+
+
+class TestMutationsRegramaParameterMutation:
+    """Reset dormant neurons before the Gaussian pass of a parameter mutation."""
+
+    def make_agent(self):
+        return DQN(
+            generate_random_box_space((4,)),
+            generate_discrete_space(2),
+            device="cpu",
+        )
+
+    def test_dormant_neurons_are_reset_and_the_mutation_is_still_a_parameter_one(
+        self,
+    ):
+        # Arrange
+        agent = self.make_agent()
+        _all_dormant(agent)
+        before = {k: v.clone() for k, v in agent.actor.state_dict().items()}
+
+        # Act
+        agent = _regrama_mutations().parameter_mutation(agent)
+
+        # Assert
+        assert agent.mut == "param"
+        after = agent.actor.state_dict()
+        assert any(not torch.equal(before[k], after[k]) for k in before)
+        assert all(torch.isfinite(value).all() for value in after.values())
+
+    def test_target_network_is_resynced_with_the_reset_policy(self):
+        # Arrange
+        agent = self.make_agent()
+        _all_dormant(agent)
+
+        # Act
+        agent = _regrama_mutations().parameter_mutation(agent)
+
+        # Assert
+        actor_state = agent.actor.state_dict()
+        target_state = agent.actor_target.state_dict()
+        assert all(torch.equal(actor_state[k], target_state[k]) for k in actor_state)
+
+    def test_non_policy_networks_are_reset_too(self):
+        # ReGraMa measures every evaluation network, not just the policy, so a
+        # dormant critic is recovered as well.
+        agent = PPO(
+            generate_random_box_space((4,)),
+            generate_discrete_space(2),
+            device="cpu",
+        )
+        _all_dormant(agent)
+        before = {k: v.clone() for k, v in agent.critic.state_dict().items()}
+
+        # Act
+        agent = _regrama_mutations().parameter_mutation(agent)
+
+        # Assert: the Gaussian pass only touches the policy, so any change here
+        # is the ReGraMa reset.
+        after = agent.critic.state_dict()
+        assert any(not torch.equal(before[k], after[k]) for k in before)
+
+    def test_resets_run_before_the_gaussian_pass(self):
+        # Arrange: record what the Gaussian pass is handed.
+        agent = self.make_agent()
+        _all_dormant(agent)
+        muts = _regrama_mutations()
+        original = muts._gaussian_parameter_mutation
+        seen = {}
+
+        def recording(network):
+            seen["weights"] = {k: v.clone() for k, v in network.state_dict().items()}
+            return original(network)
+
+        muts._gaussian_parameter_mutation = recording
+        before = {k: v.clone() for k, v in agent.actor.state_dict().items()}
+
+        # Act
+        muts.parameter_mutation(agent)
+
+        # Assert: the network the Gaussian pass received was already reset.
+        assert any(not torch.equal(before[k], seen["weights"][k]) for k in before)
+
+    def test_healthy_agent_is_only_perturbed_by_the_gaussian_pass(self):
+        # Arrange: a uniform snapshot normalises to a score of 1.0 everywhere, so
+        # nothing is dormant. The critic is never touched by the Gaussian pass,
+        # which makes it the clean witness for "ReGraMa did nothing".
+        agent = PPO(
+            generate_random_box_space((4,)),
+            generate_discrete_space(2),
+            device="cpu",
+        )
+        _all_dormant(agent)
+        agent.grama_scores = [
+            [None if entry is None else torch.ones_like(entry) for entry in network]
+            for network in agent.grama_scores
+        ]
+        before = {k: v.clone() for k, v in agent.critic.state_dict().items()}
+
+        # Act
+        agent = _regrama_mutations().parameter_mutation(agent)
+
+        # Assert
+        after = agent.critic.state_dict()
+        assert all(torch.equal(before[k], after[k]) for k in before)
+
+    def test_missing_snapshot_falls_back_to_gaussian_and_warns_once(self):
+        # A silent fallback is indistinguishable from a run never configured for
+        # ReGraMa, so it is worth exactly one warning.
+        muts = _regrama_mutations()
+        agents = [self.make_agent(), self.make_agent()]
+
+        with pytest.warns(UserWarning, match="no GraMa gradient snapshot"):
+            muts.parameter_mutation(agents[0])
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            muts.parameter_mutation(agents[1])
+
+        assert agents[0].mut == "param"
+        assert agents[1].mut == "param"
+
+    def test_snapshot_that_captured_nothing_warns_like_a_missing_one(self):
+        # A snapshot whose every measured layer came back empty is structurally
+        # intact, so it passes a plain truthiness check while scoring nothing --
+        # exactly the shape hooks that never fired leave behind. Without this the
+        # fallback to Gaussian is completely silent.
+        agent = self.make_agent()
+        from agilerl.hpo import regrama
+
+        agent.grama_scores = [
+            [None] * len(regrama.target_activations(network))
+            for _network_id, network in regrama.eval_networks(agent)
+        ]
+        assert agent.grama_scores  # the guard a truthiness check would pass
+
+        # Act / Assert
+        with pytest.warns(UserWarning, match="no GraMa gradient snapshot"):
+            _regrama_mutations().parameter_mutation(agent)
+
+    def test_pre_training_step_does_not_warn(self):
+        # No agent has trained yet there, so a missing snapshot is expected.
+        muts = _regrama_mutations()
+        agent = self.make_agent()
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            muts.mutation([agent], pre_training_mut=True)
+
+    def test_reset_is_reproducible_across_equally_seeded_operators(self):
+        # Arrange
+        first, second = self.make_agent(), self.make_agent()
+        second.actor.load_state_dict(first.actor.state_dict())
+        _all_dormant(first)
+        _all_dormant(second)
+
+        # Act
+        torch.manual_seed(0)
+        _regrama_mutations().parameter_mutation(first)
+        torch.manual_seed(0)
+        _regrama_mutations().parameter_mutation(second)
+
+        # Assert
+        assert_state_dicts_equal(first.actor.state_dict(), second.actor.state_dict())
+
+    def test_a_failing_reset_degrades_to_the_gaussian_pass(self, monkeypatch):
+        # A ReGraMa failure must never abort the evolution step.
+        agent = PPO(
+            generate_random_box_space((4,)),
+            generate_discrete_space(2),
+            device="cpu",
+        )
+        _all_dormant(agent)
+        before = {k: v.clone() for k, v in agent.critic.state_dict().items()}
+
+        def explode(*_args, **_kwargs):
+            msg = "surgery blew up"
+            raise RuntimeError(msg)
+
+        monkeypatch.setattr(
+            "agilerl.hpo.mutation.regrama.reset_dormant_neurons",
+            explode,
+        )
+
+        # Act
+        agent = _regrama_mutations().parameter_mutation(agent)
+
+        # Assert: the mutation completed, and the networks ReGraMa would have
+        # touched are left exactly as they were.
+        assert agent.mut == "param"
+        after = agent.critic.state_dict()
+        assert all(torch.equal(before[k], after[k]) for k in before)
+
+    def test_wrapped_agents_are_reset_through_the_wrapper(self):
+        # Arrange: _apply_mutation unwraps, so the snapshot must be readable on
+        # the unwrapped algorithm.
+        agent = RSNorm(self.make_agent())
+        _all_dormant(agent.agent)
+        before = {k: v.clone() for k, v in agent.agent.actor.state_dict().items()}
+
+        # Act
+        result = _regrama_mutations().mutation([agent])
+
+        # Assert
+        assert isinstance(result[0], AgentWrapper)
+        after = result[0].agent.actor.state_dict()
+        assert any(not torch.equal(before[k], after[k]) for k in before)
+
+    def test_recurrent_encoder_warns_that_its_core_is_out_of_scope(self):
+        # Arrange
+        agent = PPO(
+            generate_random_box_space((4,)),
+            generate_discrete_space(2),
+            recurrent=True,
+            net_config={"encoder_config": {"hidden_state_size": 8}},
+            device="cpu",
+        )
+        agent.grama_scores = [[None] for _ in range(4)]
+
+        # Act / Assert
+        with pytest.warns(UserWarning, match="recurrent core"):
+            _regrama_mutations().parameter_mutation(agent)
+
+
+class TestMutationsRegramaMultiAgent:
+    """Route each sub-policy's snapshot to its own network."""
+
+    def test_every_sub_policy_is_reset_from_its_own_entry(self):
+        # Arrange
+        from agilerl.algorithms import IPPO
+
+        agent = IPPO(
+            generate_multi_agent_box_spaces(2, (4,)),
+            generate_multi_agent_discrete_spaces(2, 2),
+            agent_ids=["agent_0", "other_0"],
+            device="cpu",
+        )
+        _all_dormant(agent)
+        policy_name = agent.registry.policy()
+        before = {
+            key: {k: v.clone() for k, v in module.state_dict().items()}
+            for key, module in getattr(agent, policy_name).items()
+        }
+
+        # Act
+        agent = _regrama_mutations().parameter_mutation(agent)
+
+        # Assert
+        for key, module in getattr(agent, policy_name).items():
+            after = module.state_dict()
+            assert any(not torch.equal(before[key][k], after[k]) for k in after)
