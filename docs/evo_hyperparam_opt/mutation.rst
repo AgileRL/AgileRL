@@ -212,6 +212,22 @@ drop the amplified band entirely. It defaults to ``true``, so existing configura
         mutation_sd: 0.1
         super_param_mut: false   # keep only the normal and reset bands
 
+Switching off reset mutations
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The reset band does not perturb a weight, it *replaces* it. The trained value is discarded and a
+fresh one is drawn from a unit normal, ignoring both what the weight had become and the scale its
+layer was initialised at. That is the most aggressive of the three bands, and on an agent that has
+already learned something worth keeping it is sometimes (not always) destructive enough to set
+training back noticeably. Set ``reset_param_mut: false`` to drop it. It defaults to ``true``, so existing
+configurations behave exactly as before.
+
+.. code-block:: yaml
+
+    mutation:
+        mutation_sd: 0.1
+        reset_param_mut: false   # keep only the normal and super bands
+
 .. _regrama:
 
 ReGraMa: resetting dormant neurons
@@ -269,6 +285,7 @@ or, equivalently, in Python:
         rl_hp=0.2,
         regrama_param_mut=True,   # reset dormant neurons before adding noise
         super_param_mut=False,
+        reset_param_mut=False,
         dormant_threshold=0.01,
     )
 

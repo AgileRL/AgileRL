@@ -75,6 +75,10 @@ class MutationSpec(BaseModel):
         Gaussian band. Declared and excluded like regrama_param_mut; disabling it is
         rejected for the same reason.
     :type super_param_mut: bool
+    :param reset_param_mut: Whether a parameter mutation applies its reset Gaussian band.
+        Declared and excluded like regrama_param_mut; disabling it is rejected for the
+        same reason.
+    :type reset_param_mut: bool
     :param dormant_threshold: Normalised GraMa score at or below which a neuron counts as
         dormant. Declared and excluded like regrama_param_mut, and needs no rejection
         of its own since it is inert once ReGraMa is refused.
@@ -89,6 +93,7 @@ class MutationSpec(BaseModel):
     rand_seed: int = Field(default=42, ge=0)
     regrama_param_mut: bool = Field(default=False, exclude=True)
     super_param_mut: bool = Field(default=True, exclude=True)
+    reset_param_mut: bool = Field(default=True, exclude=True)
     dormant_threshold: float = Field(default=0.01, ge=0.0, exclude=True)
 
     @model_validator(mode="after")
@@ -96,18 +101,23 @@ class MutationSpec(BaseModel):
         """Reject parameter-mutation settings the platform does not support.
 
         ReGraMa is not implemented in Arena, so a manifest requesting it or
-        requesting that the amplified Gaussian band be dropped fails here rather
-        than training with the default Gaussian operator without saying so.
+        requesting that either Gaussian band be dropped fails here rather than
+        training with the default Gaussian operator without saying so.
 
         :returns: The validated spec.
         :rtype: MutationSpec
-        :raises ValueError: If ReGraMa is enabled or the amplified band is disabled.
+        :raises ValueError: If ReGraMa is enabled or either the amplified or the
+            reset Gaussian band is disabled.
         """
-        if self.regrama_param_mut or not self.super_param_mut:
+        if (
+            self.regrama_param_mut
+            or not self.super_param_mut
+            or not self.reset_param_mut
+        ):
             msg = (
                 "The Arena platform only supports the default Gaussian parameter "
-                "mutations: enabling ReGraMa or disabling super Gaussian mutations "
-                "is not available."
+                "mutations: enabling ReGraMa or disabling the super or reset "
+                "Gaussian mutations is not available."
             )
             raise ValueError(msg)
         return self

@@ -1359,19 +1359,21 @@ class TestMutationSpecExtraForbid:
 
 
 class TestMutationSpecRegramaFields:
-    """The three parameter-mutation switches added for ReGraMa."""
+    """The four parameter-mutation switches added for ReGraMa."""
 
     def test_defaults_preserve_existing_manifest_behaviour(self):
         spec = MutationSpec()
 
         assert spec.regrama_param_mut is False
         assert spec.super_param_mut is True
+        assert spec.reset_param_mut is True
         assert spec.dormant_threshold == 0.01
 
     def test_values_round_trip_through_a_dump(self):
         spec = MutationSpec(
             regrama_param_mut=True,
             super_param_mut=False,
+            reset_param_mut=False,
             dormant_threshold=0.05,
         )
 
@@ -1392,6 +1394,18 @@ class TestMutationSpecRegramaFields:
     def test_misspelled_switch_is_rejected(self):
         with pytest.raises(ValidationError, match="regrama"):
             MutationSpec(regrama=True)
+
+    def test_misspelled_reset_switch_is_rejected_informatively(self):
+        with pytest.raises(ValidationError, match="reset_param_mutation"):
+            MutationSpec(reset_param_mutation=False)
+
+    @pytest.mark.parametrize("value", ["maybe", 1.5, None])
+    def test_non_boolean_reset_switch_is_rejected_informatively(self, value):
+        with pytest.raises(
+            ValidationError,
+            match=r"reset_param_mut[\s\S]*bool",
+        ):
+            MutationSpec(reset_param_mut=value)
 
 
 class TestNetworkSpecUpperBound:

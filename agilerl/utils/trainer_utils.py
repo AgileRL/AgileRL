@@ -360,6 +360,7 @@ def build_mutations_from_spec(
         accelerator=accelerator,
         regrama_param_mut=mutation_spec.regrama_param_mut,
         super_param_mut=mutation_spec.super_param_mut,
+        reset_param_mut=mutation_spec.reset_param_mut,
         dormant_threshold=mutation_spec.dormant_threshold,
     )
 

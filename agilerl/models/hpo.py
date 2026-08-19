@@ -71,6 +71,10 @@ class MutationSpec(BaseModel):
         Gaussian band, which perturbs weights at ten times their own magnitude. Defaults
         to True; switch it off when that noise destabilises training.
     :type super_param_mut: bool
+    :param reset_param_mut: Whether a parameter mutation applies its reset Gaussian band,
+        which redraws a weight from N(0, 1) and so discards its trained value outright.
+        Defaults to True; switch it off when that proves too aggressive.
+    :type reset_param_mut: bool
     :param dormant_threshold: Normalised GraMa score at or below which a neuron counts as
         dormant. The score is a neuron's mean absolute pre-activation gradient divided by
         its layer's mean. Raising it resets more neurons per mutation. Defaults to 0.01,
@@ -86,6 +90,7 @@ class MutationSpec(BaseModel):
     rand_seed: int = Field(default=42, ge=0)
     regrama_param_mut: bool = False
     super_param_mut: bool = True
+    reset_param_mut: bool = True
     dormant_threshold: float = Field(default=0.01, ge=0.0)
 
 

@@ -77,7 +77,7 @@ Dependencies
 Option 1: From a manifest
 -------------------------
 
-The shipped ``configs/training/ppo/ppo_regrama.yaml`` is the stock PPO manifest with three fields
+The shipped ``configs/training/ppo/ppo_regrama.yaml`` is the stock PPO manifest with four fields
 changed on its ``mutation`` block:
 
 .. code-block:: yaml
@@ -93,12 +93,15 @@ changed on its ``mutation`` block:
         mutation_sd: 0.1
         rand_seed: 42
         super_param_mut: false
+        reset_param_mut: false
         regrama_param_mut: true
         dormant_threshold: 0.01
 
 ``regrama_param_mut`` turns the resets on and defaults to ``false``, so every existing manifest keeps
 its current behaviour until you opt in. ``dormant_threshold`` defaults to ``0.01`` and must be
-``>= 0``. ``super_param_mut`` defaults to ``true``; it is switched off in this tutorial.
+``>= 0``. ``super_param_mut`` and ``reset_param_mut`` both default to ``true``; both are switched off
+here, so the only resets this run performs are ReGraMa's targeted ones. Leave them on if you want the
+stock Gaussian bands alongside ReGraMa.
 
 Then run it:
 
@@ -140,6 +143,7 @@ untouched as ReGraMa lives on the mutation object:
         device=device,
         regrama_param_mut=True,   # reset dormant neurons before the Gaussian pass
         super_param_mut=False,    # drop the amplified band
+        reset_param_mut=False,    # drop the random reset band
         dormant_threshold=0.01,   # normalised score at or below which a neuron is dormant
     )
 

@@ -139,6 +139,7 @@ class TestBuildMutations:
         spec = MutationSpec(
             regrama_param_mut=True,
             super_param_mut=False,
+            reset_param_mut=False,
             dormant_threshold=0.05,
         )
 
@@ -146,6 +147,7 @@ class TestBuildMutations:
 
         assert result.regrama_param_mut is True
         assert result.super_param_mut is False
+        assert result.reset_param_mut is False
         assert result.dormant_threshold == 0.05
 
     def test_regrama_defaults_reach_the_operator(self):
@@ -156,6 +158,7 @@ class TestBuildMutations:
 
         assert result.regrama_param_mut is False
         assert result.super_param_mut is True
+        assert result.reset_param_mut is True
         assert result.dormant_threshold == 0.01
 
 
