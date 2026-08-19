@@ -561,13 +561,15 @@ class DPO(LLMAlgorithm[PreferencePrompts]):
             :return: Hidden states before the LM head ``[batch, seq_len, hidden]``.
             :rtype: torch.Tensor
             """
-            with self._patch_lm_head_to_identity():
-                output = self.actor(
-                    input_ids=ids, attention_mask=attn_mask, use_cache=False
-                )
-            return (
-                output[0] if isinstance(output, tuple) else output.logits
-            )  # (B, seq_len, hidden_size)
+            captured = []
+            hook = lm_head.register_forward_pre_hook(
+                lambda m, inputs: captured.append(inputs[0])
+            )
+            try:
+                self.actor(input_ids=ids, attention_mask=attn_mask, use_cache=False)
+            finally:
+                hook.remove()
+            return captured[0]  # (B, seq_len, hidden_size)
 
         chosen_ids = chosen_ids.to(self.device)
         rejected_ids = rejected_ids.to(self.device)
