@@ -36,13 +36,15 @@ If you've noticed a bug or have a feature request, [make one](https://github.com
 To make a code contribution:
 
 1. Create your own fork of the code.
-2. Create a new branch from the `nightly` branch for your changes.
+2. Create a new branch from the `main` branch for your changes.
 3. Do the changes in your fork.
 4. Run the tests with `pytest tests`
 5. Make the test pass.
 6. Run the type checker with `just typecheck` (or `uv run ty check agilerl agilerl/arena`) and fix any errors it reports.
 7. Commit your changes. Please use an appropriate commit prefix. If your pull request fixes an issue specify it in the commit message.
-8. Push to your fork and submit a pull request **to the `nightly` branch**. Please provide us with some explanation of why you made the changes you made. For new features make sure to explain a standard use case to us.
+8. Push to your fork and submit a pull request **to the `main` branch**. Please provide us with some explanation of why you made the changes you made. For new features make sure to explain a standard use case to us.
+
+Company (AgileRL) engineers: open a GitLab MR on [`agilerl/ml`](https://gitlab.agilerl.rlops.ai/agilerl/ml) instead of a GitHub PR. Public package-code PRs are imported under `oss/agilerl/` and validated on the hub before they become the source of truth.
 
 #### Type checking
 AgileRL is type-checked with [`ty`](https://docs.astral.sh/ty/) and ships `py.typed` markers, so the public API's annotations are part of the released package. The configuration lives in `pyproject.toml` under `[tool.ty]`: the whole `agilerl` package is checked strictly. The `Type checks` GitHub workflow blocks PRs on new type errors, so run `just typecheck` before pushing.

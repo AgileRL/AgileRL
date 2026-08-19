@@ -3,7 +3,7 @@ name: Type checks
 
 on:
     push:
-        branches: [main, nightly]
+        branches: [main]
         paths:
             - agilerl/**
             - agilerl-arena/**
