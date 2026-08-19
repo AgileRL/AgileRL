@@ -1380,7 +1380,6 @@ class TestMutationSpecRegramaFields:
         assert MutationSpec(**dumped) == spec
 
     def test_zero_dormant_threshold_is_accepted(self):
-        # Only exactly-dead neurons are reset, which is a meaningful setting.
         assert MutationSpec(dormant_threshold=0.0).dormant_threshold == 0.0
 
     def test_negative_dormant_threshold_is_rejected_informatively(self):
@@ -1391,8 +1390,6 @@ class TestMutationSpecRegramaFields:
             MutationSpec(dormant_threshold=-0.01)
 
     def test_misspelled_switch_is_rejected(self):
-        # extra="forbid" is what turns a typo into an error rather than a silent
-        # no-op that looks like ReGraMa is on.
         with pytest.raises(ValidationError, match="regrama"):
             MutationSpec(regrama=True)
 

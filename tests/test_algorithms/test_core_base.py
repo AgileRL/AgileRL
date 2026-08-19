@@ -8012,28 +8012,23 @@ class TestEvolvableAlgorithmGraMaState:
         assert agent.grama_scores is None
 
     def test_training_block_captures_only_when_enabled(self):
-        # Arrange
         agent = self.agent()
 
-        # Act
         agent.init_training_step()
         agent.actor(torch.rand(2, 4)).square().mean().backward()
         agent.finalize_training_step(1)
 
-        # Assert: no hooks are registered, so capture costs nothing when off.
+        # No hooks are registered, so capture costs nothing when off.
         assert agent.grama_scores is None
 
     def test_training_block_stores_a_snapshot_when_enabled(self):
-        # Arrange
         agent = self.agent()
         agent.capture_grama = True
 
-        # Act
         agent.init_training_step()
         agent.actor(torch.rand(2, 4)).square().mean().backward()
         agent.finalize_training_step(1)
 
-        # Assert
         assert agent.grama_scores
         assert any(entry is not None for entry in agent.grama_scores[0])
 
@@ -8046,24 +8041,20 @@ class TestEvolvableAlgorithmGraMaState:
         agent.actor(torch.rand(2, 4)).square().mean().backward()
         agent.finalize_training_step(1)
 
-        # Act
         clone = agent.clone(wrap=False)
 
-        # Assert
         assert clone.capture_grama is True
         assert clone.grama_scores is not None
         assert len(clone.grama_scores) == len(agent.grama_scores)
 
     def test_snapshot_is_deep_copied_onto_the_clone(self):
-        # Arrange
+        # Mutating the parent's snapshot must not reach the child's.
         agent = self.agent()
         agent.grama_scores = [[torch.ones(3)]]
 
-        # Act
         clone = agent.clone(wrap=False)
         agent.grama_scores[0][0].fill_(9.0)
 
-        # Assert: mutating the parent's snapshot must not reach the child's.
         assert torch.equal(clone.grama_scores[0][0], torch.ones(3))
 
     def test_snapshot_is_kept_out_of_checkpoints(self):
@@ -8071,10 +8062,8 @@ class TestEvolvableAlgorithmGraMaState:
         agent = self.agent()
         agent.grama_scores = [[torch.ones(3)]]
 
-        # Act
         checkpoint = get_checkpoint_dict(agent)
 
-        # Assert
         assert "grama_scores" not in checkpoint
         assert "capture_grama" in checkpoint
 
@@ -8083,16 +8072,12 @@ class TestEvolvableAlgorithmGraMaState:
         tmp_path,
         recwarn,
     ):
-        # Arrange: without the re-injection in load(), the attribute-restore loop
-        # reports grama_scores missing on every resume, for every agent.
         agent = self.agent()
         path = str(tmp_path / "agent.pt")
         agent.save_checkpoint(path)
 
-        # Act
         restored = DQN.load(path, device="cpu")
 
-        # Assert
         assert restored.grama_scores is None
         assert not [
             warning for warning in recwarn if "grama_scores" in str(warning.message)
@@ -8103,9 +8088,6 @@ class TestEvolvableAlgorithmGraMaState:
         tmp_path,
         recwarn,
     ):
-        # Arrange: a checkpoint written before ReGraMa existed carries no
-        # capture_grama, and the attribute-restore loop reports every attribute
-        # the checkpoint lacks -- once per agent, on every resume.
         agent = self.agent()
         path = str(tmp_path / "agent.pt")
         agent.save_checkpoint(path)
@@ -8114,25 +8096,19 @@ class TestEvolvableAlgorithmGraMaState:
         del checkpoint["capture_grama"]
         torch.save(checkpoint, path)
 
-        # Act
         restored = DQN.load(path, device="cpu")
 
-        # Assert: the flag falls back to its constructor default, silently.
         assert restored.capture_grama is False
         assert not [
             warning for warning in recwarn if "capture_grama" in str(warning.message)
         ]
 
     def test_wrapped_agent_stores_the_snapshot_on_the_unwrapped_algorithm(self):
-        # Trainers call the lifecycle hooks on whatever they hold, which may be a
-        # wrapper; the mutation reads the snapshot off the unwrapped agent.
         wrapper = RSNorm(self.agent())
         wrapper.capture_grama = True
 
-        # Act
         wrapper.init_training_step()
         wrapper.agent.actor(torch.rand(2, 4)).square().mean().backward()
         wrapper.finalize_training_step(1)
 
-        # Assert
         assert wrapper.agent.grama_scores
