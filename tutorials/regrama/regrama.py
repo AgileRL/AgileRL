@@ -105,7 +105,7 @@ if __name__ == "__main__":
 
     # train_on_policy orchestrates the whole evolutionary run
     print("Training...")
-    trained_pop, pop_fitnesses = train_on_policy(
+    _, pop_fitnesses = train_on_policy(
         env=env,
         env_name="LunarLander-v3",
         algo="PPO",
