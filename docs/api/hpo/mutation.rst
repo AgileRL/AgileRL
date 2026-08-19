@@ -36,6 +36,7 @@ A selection strategy and mutation are applied sequentially to fully evolve a pop
     device=device,
     regrama_param_mut=False,              # Reset dormant neurons (ReGraMa)
     super_param_mut=True,                 # Apply the amplified Gaussian band
+    reset_param_mut=True,                 # Apply the reset Gaussian band
     dormant_threshold=0.01                # Normalised score at or below which a neuron is dormant
   )
 

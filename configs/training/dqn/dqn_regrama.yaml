@@ -34,6 +34,7 @@ mutation:
     mutation_sd: 0.1
     rand_seed: 42
     super_param_mut: false
+    reset_param_mut: false
     regrama_param_mut: true
     dormant_threshold: 0.01
 

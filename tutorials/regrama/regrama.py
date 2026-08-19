@@ -83,10 +83,8 @@ if __name__ == "__main__":
         population_size=population_size,
     )
 
-    # The three lines that differ from a stock run. regrama_param_mut turns the
-    # dormant-neuron resets on; dormant_threshold is the normalised gradient score
-    # at or below which a neuron counts as dormant. super_param_mut=False drops the
-    # amplified Gaussian band
+    # The four lines that differ from a stock run: ReGraMa's targeted dormant-neuron
+    # resets, at the given score threshold, replace both the amplified and reset bands
     mutations = Mutations(
         no_mutation=0.4,
         architecture=0.2,
@@ -99,6 +97,7 @@ if __name__ == "__main__":
         device=device,
         regrama_param_mut=True,
         super_param_mut=False,
+        reset_param_mut=False,
         dormant_threshold=0.01,
     )
 

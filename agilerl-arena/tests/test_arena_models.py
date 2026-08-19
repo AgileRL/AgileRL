@@ -162,19 +162,28 @@ def test_get_validated_accepts_the_core_parameter_mutation_fields() -> None:
                     "mutation_sd": 0.2,
                     "regrama_param_mut": False,
                     "super_param_mut": True,
+                    "reset_param_mut": True,
                     "dormant_threshold": 0.05,
                 }
             )
         )
     mock_logger.warning.assert_not_called()
     assert payload["mutation"]["mutation_sd"] == 0.2
-    assert not {"regrama_param_mut", "super_param_mut", "dormant_threshold"} & set(
-        payload["mutation"]
-    )
+    assert not {
+        "regrama_param_mut",
+        "super_param_mut",
+        "reset_param_mut",
+        "dormant_threshold",
+    } & set(payload["mutation"])
 
 
 @pytest.mark.parametrize(
-    "mutation", [{"regrama_param_mut": True}, {"super_param_mut": False}]
+    "mutation",
+    [
+        {"regrama_param_mut": True},
+        {"super_param_mut": False},
+        {"reset_param_mut": False},
+    ],
 )
 def test_get_validated_rejects_unsupported_parameter_mutations(mutation: dict) -> None:
     # Arena runs the default Gaussian parameter operator only, so a request the

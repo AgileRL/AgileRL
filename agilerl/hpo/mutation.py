@@ -256,6 +256,9 @@ class Mutations:
     :param super_param_mut: Apply the amplified ("super") band of the Gaussian parameter
         mutation, defaults to True.
     :type super_param_mut: bool, optional
+    :param reset_param_mut: Apply the reset band of the Gaussian parameter mutation, which
+        redraws a weight from N(0, 1) and so discards its trained value, defaults to True.
+    :type reset_param_mut: bool, optional
     :param dormant_threshold: Normalised GraMa score at or below which a neuron counts as
         dormant, defaults to 0.01. Inert unless ``regrama_param_mut`` is True.
     :type dormant_threshold: float, optional
@@ -277,6 +280,7 @@ class Mutations:
         accelerator: Accelerator | None = None,
         regrama_param_mut: bool = False,
         super_param_mut: bool = True,
+        reset_param_mut: bool = True,
         dormant_threshold: float = 0.01,
     ) -> None:
         if activation_selection is None:
@@ -350,6 +354,10 @@ class Mutations:
             bool,
         ), "Super parameter mutation must be boolean value True or False."
         assert isinstance(
+            reset_param_mut,
+            bool,
+        ), "Reset parameter mutation must be boolean value True or False."
+        assert isinstance(
             dormant_threshold,
             (float, int),
         ), "Dormant threshold must be a float or integer."
@@ -378,6 +386,7 @@ class Mutations:
 
         self.regrama_param_mut = regrama_param_mut
         self.super_param_mut = super_param_mut
+        self.reset_param_mut = reset_param_mut
         self.dormant_threshold = dormant_threshold
         self._warned_recurrent = False
         self._warned_no_snapshot = False
@@ -676,10 +685,11 @@ class Mutations:
     def parameter_mutation(self, individual: IndividualT) -> IndividualT:
         """Perform a mutation to the weights of the individual.
 
-        Runs in two stages. When ``regrama_param_mut`` is set, ReGraMa mutations
+        Runs in two stages. When regrama_param_mut is set, ReGraMa mutations
         first re-initialise the neurons that have gone dormant, across every
         evaluation network of the agent. Gaussian noise is then added to the policy
-        network, in the reset, ordinary and amplified bands.
+        network, in the reset, ordinary and amplified bands. The reset and amplified
+        bands are each dropped when reset_param_mut or super_param_mut is unset.
 
         .. note::
             This is currently not supported for :class:`LLMAlgorithm <agilerl.algorithms.core.LLMAlgorithm>` agents.
@@ -1049,9 +1059,11 @@ class Mutations:
             )
             mask_normal = rand_vals_tensor >= reset_prob
 
-            # Dropping the amplified band leaves its weights at their trained values.
+            # Dropping a band leaves its weights at their trained values.
             if not self.super_param_mut:
                 mask_super = torch.zeros_like(mask_super)
+            if not self.reset_param_mut:
+                mask_reset = torch.zeros_like(mask_reset)
 
             # Super mutation: add noise with std proportional to the absolute current value times super_mut_strength
             if mask_super.sum() > 0:

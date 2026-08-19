@@ -5825,6 +5825,103 @@ def _population_zeroed_biases(population) -> int:
     )
 
 
+_pinned_weight = 5.0
+# A pinned weight can only end up this close to zero if the reset band redrew it:
+# ordinary noise on a 5.0 weight has a standard deviation of 0.5.
+_reset_residual = 2.0
+
+
+def _reset_band_mutation(*, reset_param_mut: bool) -> Mutations:
+    """A parameter-mutation-only operator with the amplified band switched off."""
+    return Mutations(
+        no_mutation=0.0,
+        architecture=0.0,
+        new_layer_prob=0.0,
+        parameters=1.0,
+        activation=0.0,
+        rl_hp=0.0,
+        mutation_sd=0.1,
+        rand_seed=0,
+        device="cpu",
+        super_param_mut=False,
+        reset_param_mut=reset_param_mut,
+    )
+
+
+def _mutable_weights(population):
+    """Yield every tensor the Gaussian pass is allowed to write."""
+    for agent in population:
+        for _network_id, network in regrama.eval_networks(agent):
+            for key, tensor in network.state_dict().items():
+                if tensor.dim() == 2 and "norm" not in key and "lstm" not in key:
+                    yield tensor
+
+
+def _pin_population_weights(population, value: float = _pinned_weight) -> None:
+    """Pin every mutable weight of every evaluation network to a sentinel."""
+    with torch.no_grad():
+        for tensor in _mutable_weights(population):
+            tensor.fill_(value)
+
+
+def _smallest_pinned_magnitude(population) -> float:
+    """Return the smallest weight left across the tensors pinned before mutating."""
+    return min(tensor.abs().min().item() for tensor in _mutable_weights(population))
+
+
+class TestResetParameterMutationCrossFamilyEvolution:
+    """The reset Gaussian band is switchable for every non-LLM algorithm family."""
+
+    def evolve(self, family, *, reset_param_mut, cycles=3):
+        """Run cycles of selection and parameter mutation over a pinned population."""
+        algo_name, build_population = _CROSS_FAMILY_CASES[family]
+        population = build_population()
+        strategy = TournamentSelection(
+            tournament_size=2,
+            elitism=True,
+            population_size=8,
+        )
+        mutation = _reset_band_mutation(reset_param_mut=reset_param_mut)
+
+        smallest = _pinned_weight
+        for _cycle in range(cycles):
+            _give_population_fitness(population)
+            _pin_population_weights(population)
+            population = run_selection_and_mutation(
+                strategy,
+                population=population,
+                mutation=mutation,
+                env_name="Env",
+                algo=algo_name,
+            )
+            smallest = min(smallest, _smallest_pinned_magnitude(population))
+        return population, smallest
+
+    @pytest.mark.parametrize(
+        "family", list(_CROSS_FAMILY_CASES), ids=list(_CROSS_FAMILY_CASES)
+    )
+    def test_the_band_redraws_weights_when_left_on(self, family):
+        population, smallest = self.evolve(family, reset_param_mut=True)
+
+        assert len(population) == 8
+        assert smallest < _reset_residual
+
+    @pytest.mark.parametrize(
+        "family", list(_CROSS_FAMILY_CASES), ids=list(_CROSS_FAMILY_CASES)
+    )
+    def test_switching_it_off_leaves_trained_weights_alone(self, family):
+        population, smallest = self.evolve(family, reset_param_mut=False)
+
+        assert len(population) == 8
+        assert smallest > _reset_residual
+        for agent in population:
+            for _network_id, network in regrama.eval_networks(agent):
+                assert all(
+                    torch.isfinite(value).all()
+                    for value in network.state_dict().values()
+                )
+
+
 class TestRegramaCrossFamilyEvolution:
     """ReGraMa evolves a real population of every non-LLM algorithm family."""
 

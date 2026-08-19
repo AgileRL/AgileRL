@@ -2660,14 +2660,76 @@ def _zeroed_biases(module) -> int:
     )
 
 
+_pinned_weight = 5.0
+# Band separators, each mid-gap between what the neighbouring bands can reach on a
+# pinned weight: ordinary noise is N(0, 0.5) here, while a reset redraws from N(0, 1).
+_band_ceiling = 20.0
+_reset_floor = 3.0
+_reset_residual = 2.0
+
+
+def _pinned_policy() -> EvolvableModule:
+    """Return a DQN policy with every mutable weight pinned to one value.
+
+    Pinning turns each Gaussian band into a known displacement, so a band can be
+    shown to have fired, or not, without reaching into the operator.
+    """
+    torch.manual_seed(0)
+    network = DQN(
+        generate_random_box_space((4,)),
+        generate_discrete_space(2),
+        device="cpu",
+    ).actor
+    with torch.no_grad():
+        for key, value in network.state_dict().items():
+            if value.dim() == 2 and "norm" not in key and "lstm" not in key:
+                value.fill_(_pinned_weight)
+    return network
+
+
+def _pinned_gaussian_pass(
+    *, super_param_mut: bool = True, reset_param_mut: bool = True
+):
+    """Run one Gaussian pass over an identically seeded pinned policy."""
+    network = _pinned_policy()
+    baseline = {key: value.clone() for key, value in network.state_dict().items()}
+    Mutations(
+        0,
+        0,
+        0,
+        1,
+        0,
+        0,
+        rand_seed=0,
+        super_param_mut=super_param_mut,
+        reset_param_mut=reset_param_mut,
+    )._gaussian_parameter_mutation(network)
+    return baseline, network.state_dict()
+
+
+def _largest_step(baseline, after) -> float:
+    """Return the largest absolute weight change the pass made."""
+    return max((after[key] - baseline[key]).abs().max().item() for key in baseline)
+
+
+def _smallest_magnitude(baseline, after) -> float:
+    """Return the smallest weight left in a tensor that was pinned before the pass."""
+    return min(
+        after[key].abs().min().item()
+        for key, value in baseline.items()
+        if bool((value == _pinned_weight).all())
+    )
+
+
 class TestMutationsRegramaConstructor:
-    """Validate the three parameter-mutation switches at construction time."""
+    """Validate the four parameter-mutation switches at construction time."""
 
     def test_defaults_preserve_the_previous_behaviour(self):
         muts = Mutations(0, 0, 0, 1, 0, 0)
 
         assert muts.regrama_param_mut is False
         assert muts.super_param_mut is True
+        assert muts.reset_param_mut is True
         assert muts.dormant_threshold == 0.01
 
     def test_zero_dormant_threshold_is_accepted(self):
@@ -2681,8 +2743,12 @@ class TestMutationsRegramaConstructor:
 
     @pytest.mark.parametrize(
         "kwargs",
-        [{"regrama_param_mut": "yes"}, {"super_param_mut": 1}],
-        ids=["regrama", "super"],
+        [
+            {"regrama_param_mut": "yes"},
+            {"super_param_mut": 1},
+            {"reset_param_mut": 0},
+        ],
+        ids=["regrama", "super", "reset"],
     )
     def test_non_boolean_switches_are_rejected(self, kwargs):
         with pytest.raises(AssertionError, match="boolean value"):
@@ -2692,65 +2758,64 @@ class TestMutationsRegramaConstructor:
 class TestMutationsSuperParameterMutation:
     """Switch the amplified Gaussian band off without touching the others."""
 
-    PINNED_WEIGHT = 5.0
-    BAND_CEILING = 20.0
-
-    def make_network(self) -> EvolvableModule:
-        torch.manual_seed(0)
-        network = DQN(
-            generate_random_box_space((4,)),
-            generate_discrete_space(2),
-            device="cpu",
-        ).actor
-        with torch.no_grad():
-            for key, value in network.state_dict().items():
-                # The operator only ever mutates 2-D non-norm, non-lstm weights.
-                if value.dim() == 2 and "norm" not in key and "lstm" not in key:
-                    value.fill_(self.PINNED_WEIGHT)
-        return network
-
-    def gaussian_pass(self, *, super_param_mut: bool):
-        """Run one Gaussian pass over an identically seeded pinned network."""
-        network = self.make_network()
-        baseline = {k: v.clone() for k, v in network.state_dict().items()}
-        torch.manual_seed(0)
-        Mutations(
-            0,
-            0,
-            0,
-            1,
-            0,
-            0,
-            rand_seed=0,
-            super_param_mut=super_param_mut,
-        )._gaussian_parameter_mutation(network)
-        return baseline, network.state_dict()
-
-    def largest_step(self, baseline, after) -> float:
-        return max((after[k] - baseline[k]).abs().max().item() for k in baseline)
-
     def test_amplified_band_moves_weights_far_beyond_the_ordinary_one(self):
-        baseline, after = self.gaussian_pass(super_param_mut=True)
-
-        largest = self.largest_step(baseline, after)
+        baseline, after = _pinned_gaussian_pass(super_param_mut=True)
 
         # Neither of the other two bands can reach this far, so the step
         # is the amplified band's and nothing else.
-        assert largest > self.BAND_CEILING
+        assert _largest_step(baseline, after) > _band_ceiling
 
     def test_switching_it_off_leaves_those_weights_at_their_trained_values(self):
-        baseline, after = self.gaussian_pass(super_param_mut=False)
-
-        largest = self.largest_step(baseline, after)
+        baseline, after = _pinned_gaussian_pass(super_param_mut=False)
 
         # With the band gone every remaining step is within the reach of
         # the reset and ordinary bands, i.e. no weight was amplified at all.
-        assert largest < self.BAND_CEILING
+        assert _largest_step(baseline, after) < _band_ceiling
 
     def test_the_other_bands_still_fire_with_the_amplified_one_off(self):
-        baseline, after = self.gaussian_pass(super_param_mut=False)
+        baseline, after = _pinned_gaussian_pass(super_param_mut=False)
 
         assert any(not torch.equal(baseline[k], after[k]) for k in baseline)
+
+
+class TestMutationsResetParameterMutation:
+    """Switch the reset Gaussian band off without touching the others."""
+
+    def test_reset_band_redraws_weights_from_a_unit_normal(self):
+        # The amplified band is held off, so only a reset can move a pinned
+        # weight this far, and only a reset can leave one this close to zero.
+        baseline, after = _pinned_gaussian_pass(
+            super_param_mut=False,
+            reset_param_mut=True,
+        )
+
+        assert _largest_step(baseline, after) > _reset_floor
+        assert _smallest_magnitude(baseline, after) < _reset_residual
+
+    def test_switching_it_off_leaves_those_weights_at_their_trained_values(self):
+        baseline, after = _pinned_gaussian_pass(
+            super_param_mut=False,
+            reset_param_mut=False,
+        )
+
+        assert _largest_step(baseline, after) < _reset_floor
+        assert _smallest_magnitude(baseline, after) > _reset_residual
+
+    def test_the_ordinary_band_still_fires_with_both_bands_off(self):
+        baseline, after = _pinned_gaussian_pass(
+            super_param_mut=False,
+            reset_param_mut=False,
+        )
+
+        assert any(not torch.equal(baseline[k], after[k]) for k in baseline)
+
+    def test_the_amplified_band_is_untouched_by_the_reset_switch(self):
+        baseline, after = _pinned_gaussian_pass(
+            super_param_mut=True,
+            reset_param_mut=False,
+        )
+
+        assert _largest_step(baseline, after) > _band_ceiling
 
 
 class TestMutationsRegramaParameterMutation:
