@@ -596,8 +596,6 @@ class DummyTournament:
 
 class DummyMutations:
     def __init__(self, regrama_param_mut=False):
-        # Mirrors the real operator's switch, which is what the trainers read
-        # when deciding whether to enable GraMa capture on the population.
         self.regrama_param_mut = regrama_param_mut
 
     def mutation(self, pop, pre_training_mut=False, indices=None):
@@ -5809,7 +5807,6 @@ class TestRegramaCrossFamilyEvolution:
         "family", list(_CROSS_FAMILY_CASES), ids=list(_CROSS_FAMILY_CASES)
     )
     def test_tournament_selection_evolves_every_family(self, family):
-        # Arrange
         algo_name, build_population = _CROSS_FAMILY_CASES[family]
         population = build_population()
         mutation = _regrama_mutation()
@@ -5819,7 +5816,6 @@ class TestRegramaCrossFamilyEvolution:
             population_size=8,
         )
 
-        # Act
         for _cycle in range(3):
             _give_population_fitness(population)
             _mark_population_dormant(population)
@@ -5831,7 +5827,6 @@ class TestRegramaCrossFamilyEvolution:
                 algo=algo_name,
             )
 
-            # Assert
             assert len(population) == 8
             assert all(isinstance(agent, EvolvableAlgorithm) for agent in population)
             for agent in population:
@@ -5845,7 +5840,6 @@ class TestRegramaCrossFamilyEvolution:
         "family", list(_CROSS_FAMILY_CASES), ids=list(_CROSS_FAMILY_CASES)
     )
     def test_multi_frequency_selection_evolves_every_family(self, family):
-        # Arrange
         algo_name, build_population = _CROSS_FAMILY_CASES[family]
         population = build_population()
         for agent in population:
@@ -5862,7 +5856,6 @@ class TestRegramaCrossFamilyEvolution:
         )
         mutation = _regrama_mutation()
 
-        # Act
         for _cycle in range(3):
             rank_population_by_subpopulation(population)
             _mark_population_dormant(population)
@@ -5874,7 +5867,6 @@ class TestRegramaCrossFamilyEvolution:
                 algo=algo_name,
             )
 
-            # Assert
             assert len(population) == 8
             assert len({agent.index for agent in population}) == 8
             for agent in population:
@@ -5885,8 +5877,7 @@ class TestRegramaCrossFamilyEvolution:
                     )
 
     def test_a_child_reads_the_snapshot_captured_while_its_parent_trained(self):
-        # The whole data-flow contract: capture happens on the parent, the reset
-        # happens on the clone, and nothing in between has to thread it through.
+        # Capture happens on the parent, the reset happens on the clone.
         population = _build_single_agent_population(DQN)
         _give_population_fitness(population)
         _mark_population_dormant(population)
@@ -5896,7 +5887,6 @@ class TestRegramaCrossFamilyEvolution:
             population_size=8,
         )
 
-        # Act
         evolved = run_selection_and_mutation(
             strategy,
             population=population,
@@ -5905,18 +5895,11 @@ class TestRegramaCrossFamilyEvolution:
             algo="DQN",
         )
 
-        # Assert
         assert all(agent.grama_scores is not None for agent in evolved)
 
 
 class TestRegramaTrainerWiring:
     """Every non-LLM trainer enables the capture ReGraMa depends on."""
-
-    # A trainer that never enables capture silently degrades ReGraMa to plain
-    # Gaussian noise, so each of the six is driven for a few steps and the
-    # population is inspected afterwards. The dummy agents and envs keep this
-    # to the wiring; test_off_policy_training_captures_a_snapshot below is the
-    # deep end-to-end counterpart on a real agent with real gradients.
 
     @staticmethod
     def assert_capture_enabled(population) -> None:
@@ -6051,7 +6034,6 @@ class TestRegramaTrainerWiring:
         self.assert_capture_enabled(population_multi_agent)
 
     def test_off_policy_training_captures_a_snapshot(self):
-        # Arrange
         vec_env = gym.vector.SyncVectorEnv([lambda: gym.make("CartPole-v1")])
         agent = DQN(
             vec_env.single_observation_space,
@@ -6060,7 +6042,6 @@ class TestRegramaTrainerWiring:
             learn_step=1,
         )
 
-        # Act
         population, _fitnesses = train_off_policy(
             vec_env,
             "CartPole-v1",
@@ -6075,14 +6056,11 @@ class TestRegramaTrainerWiring:
             verbose=False,
         )
 
-        # Assert
         assert population[0].capture_grama is True
         assert population[0].grama_scores
         assert any(entry is not None for entry in population[0].grama_scores[0])
 
     def test_compiled_agent_still_captures_with_a_warning(self):
-        # Arrange: capture works through torch.compile, it just fragments the
-        # compiled graph, so the run proceeds and the cost is reported once.
         vec_env = gym.vector.SyncVectorEnv([lambda: gym.make("CartPole-v1")])
         agent = DQN(
             vec_env.single_observation_space,
@@ -6092,7 +6070,6 @@ class TestRegramaTrainerWiring:
         )
         agent.torch_compiler = "default"
 
-        # Act
         with pytest.warns(UserWarning, match=r"torch\.compile"):
             population, _fitnesses = train_off_policy(
                 vec_env,
@@ -6108,12 +6085,10 @@ class TestRegramaTrainerWiring:
                 verbose=False,
             )
 
-        # Assert: ReGraMa is still driven by real gradients, not silently dropped.
         assert population[0].capture_grama is True
         assert any(entry is not None for entry in population[0].grama_scores[0])
 
     def test_capture_stays_off_without_regrama(self):
-        # Arrange
         vec_env = gym.vector.SyncVectorEnv([lambda: gym.make("CartPole-v1")])
         agent = DQN(
             vec_env.single_observation_space,
@@ -6123,7 +6098,6 @@ class TestRegramaTrainerWiring:
         )
         mutation = Mutations(0.2, 0.0, 0.0, 0.4, 0.0, 0.4, rand_seed=0, device="cpu")
 
-        # Act
         population, _fitnesses = train_off_policy(
             vec_env,
             "CartPole-v1",
@@ -6138,6 +6112,6 @@ class TestRegramaTrainerWiring:
             verbose=False,
         )
 
-        # Assert: no hooks are registered, so capture costs nothing when off.
+        # No hooks are registered, so capture costs nothing when off.
         assert population[0].capture_grama is False
         assert population[0].grama_scores is None

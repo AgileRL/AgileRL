@@ -866,8 +866,6 @@ class TestPrintHyperparams:
             assert "nan" in call_args.lower() or "nan" in str(call_args)
 
     def test_regrama_operator_state_is_not_listed_as_a_hyperparameter(self):
-        # Arrange: both attributes exist on every agent, but neither is tunable
-        # -- one is a raw per-neuron gradient snapshot, the other its switch.
         pop = create_population(
             algo="DQN",
             observation_space=spaces.Box(0, 1, shape=(4,)),
@@ -879,11 +877,9 @@ class TestPrintHyperparams:
         pop[0].capture_grama = True
         pop[0].grama_scores = [[torch.zeros(8)]]
 
-        # Act
         with patch("builtins.print") as mock_print:
             print_hyperparams(pop)
 
-        # Assert
         printed = mock_print.call_args[0][0]
         assert "grama_scores" not in printed
         assert "capture_grama" not in printed
@@ -918,7 +914,6 @@ class TestPrintHyperparams:
         agent = pop[0]
         mean_fitness = np.mean(agent.fitness[-5:]).item()
         attrs = EvolvableAlgorithm.inspect_attributes(agent)
-        # ReGraMa's operator state is deliberately not printed.
         attrs.pop("grama_scores", None)
         attrs.pop("capture_grama", None)
         expected_lines = [

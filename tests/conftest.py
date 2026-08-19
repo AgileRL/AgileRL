@@ -579,15 +579,12 @@ def get_free_port():
 def gloo_process_group():
     """Initialise a single-rank gloo process group so DDP can be constructed.
 
-    ``DistributedDataParallel`` is what ``accelerator.prepare`` actually returns
+    DistributedDataParallel is what accelerator.prepare actually returns
     on a multi-process launch, and it is the only faithful way to exercise the
     attribute hiding it does. One rank over loopback keeps that hermetic and
-    CPU-only. Lives here rather than beside its test because it needs
-    :func:`get_free_port` to stay xdist-safe.
+    CPU-only.
     """
     if torch.distributed.is_initialized():
-        # Another fixture already owns the default group; tearing it down here
-        # would break whoever set it up.
         yield
         return
 

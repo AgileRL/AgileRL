@@ -633,11 +633,11 @@ def grama_scores_for(agent: Any, fill: float = 0.0) -> GraMaScores:
     """Build a GraMa gradient snapshot for every evaluation network of *agent*.
 
     Each measured layer gets one score per producing neuron, every one set to
-    *fill*; a layer whose producer cannot be resolved is recorded as ``None``,
+    fill; a layer whose producer cannot be resolved is recorded as None,
     which is the shape a real capture leaves behind for a layer that never
     fired. Scores are normalised by their layer mean before being thresholded,
-    so a uniform snapshot reads as a score of 1.0 everywhere -- ``fill=0.0``
-    marks the whole agent dormant and any positive *fill* marks it healthy.
+    so a uniform snapshot reads as a score of 1.0 everywhere: fill=0.0 marks
+    the whole agent dormant and any positive fill marks it healthy.
 
     :param agent: Agent whose evaluation networks are measured.
     :type agent: EvolvableAlgorithm
