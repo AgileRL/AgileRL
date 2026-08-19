@@ -2629,6 +2629,37 @@ def _all_dormant(agent) -> None:
     agent.grama_scores = grama_scores_for(agent, fill=0.0)
 
 
+def _dormant_for(agent, network_ids: set[str]):
+    """Mark only the sub-agents in network_ids as dormant, the rest healthy."""
+    dormant = grama_scores_for(agent, fill=0.0)
+    healthy = grama_scores_for(agent, fill=1.0)
+    return [
+        dormant[idx] if network_id in network_ids else healthy[idx]
+        for idx, (network_id, _network) in enumerate(regrama.eval_networks(agent))
+    ]
+
+
+def _pin_biases(module, value: float = 1.0) -> None:
+    """Set every one-dimensional bias of module to a non-zero sentinel.
+
+    The Gaussian pass only ever writes two-dimensional tensors, so a bias sitting
+    at zero after a parameter mutation can only have been zeroed by a ReGraMa reset.
+    """
+    with torch.no_grad():
+        for name, param in module.named_parameters():
+            if name.endswith("bias") and param.dim() == 1:
+                param.fill_(value)
+
+
+def _zeroed_biases(module) -> int:
+    """Count the pinned biases a ReGraMa reset has zeroed."""
+    return sum(
+        int(bool((value == 0).all()))
+        for key, value in module.state_dict().items()
+        if key.endswith("bias") and value.dim() == 1
+    )
+
+
 class TestMutationsRegramaConstructor:
     """Validate the three parameter-mutation switches at construction time."""
 
@@ -2737,14 +2768,17 @@ class TestMutationsRegramaParameterMutation:
     ):
         agent = self.make_agent()
         _all_dormant(agent)
-        before = {k: v.clone() for k, v in agent.actor.state_dict().items()}
+        _pin_biases(agent.actor)
 
         agent = _regrama_mutations().parameter_mutation(agent)
 
         assert agent.mut == "param"
-        after = agent.actor.state_dict()
-        assert any(not torch.equal(before[k], after[k]) for k in before)
-        assert all(torch.isfinite(value).all() for value in after.values())
+        # The Gaussian pass changes the state dict on its own, so the reset has
+        # to be witnessed by something only ReGraMa writes.
+        assert _zeroed_biases(agent.actor) > 0
+        assert all(
+            torch.isfinite(value).all() for value in agent.actor.state_dict().values()
+        )
 
     def test_target_network_is_resynced_with_the_reset_policy(self):
         agent = self.make_agent()
@@ -2919,13 +2953,12 @@ class TestMutationsRegramaParameterMutation:
     def test_wrapped_agents_are_reset_through_the_wrapper(self):
         agent = RSNorm(self.make_agent())
         _all_dormant(agent.agent)
-        before = {k: v.clone() for k, v in agent.agent.actor.state_dict().items()}
+        _pin_biases(agent.agent.actor)
 
         result = _regrama_mutations().mutation([agent])
 
         assert isinstance(result[0], AgentWrapper)
-        after = result[0].agent.actor.state_dict()
-        assert any(not torch.equal(before[k], after[k]) for k in before)
+        assert _zeroed_biases(result[0].agent.actor) > 0
 
     def test_recurrent_encoder_warns_that_its_core_is_out_of_scope(self):
         agent = PPO(
@@ -3003,22 +3036,38 @@ class TestMutationsRegramaSharedEncoders:
 class TestMutationsRegramaMultiAgent:
     """Route each sub-policy's snapshot to its own network."""
 
-    def test_every_sub_policy_is_reset_from_its_own_entry(self):
-        agent = IPPO(
+    def make_agent(self):
+        return IPPO(
             generate_multi_agent_box_spaces(2, (4,)),
             generate_multi_agent_discrete_spaces(2, 2),
             agent_ids=["agent_0", "other_0"],
             device="cpu",
         )
+
+    def policies(self, agent):
+        return getattr(agent, agent.registry.policy())
+
+    def test_every_sub_policy_is_reset_from_its_own_entry(self):
+        agent = self.make_agent()
         _all_dormant(agent)
-        policy_name = agent.registry.policy()
-        before = {
-            key: {k: v.clone() for k, v in module.state_dict().items()}
-            for key, module in getattr(agent, policy_name).items()
-        }
+        for module in self.policies(agent).values():
+            _pin_biases(module)
 
         agent = _regrama_mutations().parameter_mutation(agent)
 
-        for key, module in getattr(agent, policy_name).items():
-            after = module.state_dict()
-            assert any(not torch.equal(before[key][k], after[k]) for k in after)
+        # A changed state dict would prove nothing here: the Gaussian pass runs
+        # on every sub-policy regardless of whether ReGraMa reset anything.
+        for module in self.policies(agent).values():
+            assert _zeroed_biases(module) > 0
+
+    def test_a_sub_policy_left_healthy_is_not_reset(self):
+        agent = self.make_agent()
+        agent.grama_scores = _dormant_for(agent, {"agent_0"})
+        for module in self.policies(agent).values():
+            _pin_biases(module)
+
+        agent = _regrama_mutations().parameter_mutation(agent)
+
+        policies = self.policies(agent)
+        assert _zeroed_biases(policies["agent_0"]) > 0
+        assert _zeroed_biases(policies["other_0"]) == 0

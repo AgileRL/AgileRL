@@ -5800,6 +5800,31 @@ def _mark_population_dormant(population) -> None:
         agent.grama_scores = grama_scores_for(agent, fill=0.0)
 
 
+def _pin_population_biases(population, value: float = 1.0) -> None:
+    """Pin every one-dimensional bias of every evaluation network to a sentinel.
+
+    The Gaussian pass only writes two-dimensional tensors, so a bias back at zero
+    afterwards is a neuron ReGraMa reset.
+    """
+    with torch.no_grad():
+        for agent in population:
+            for _network_id, network in regrama.eval_networks(agent):
+                for name, param in network.named_parameters():
+                    if name.endswith("bias") and param.dim() == 1:
+                        param.fill_(value)
+
+
+def _population_zeroed_biases(population) -> int:
+    """Count the pinned biases ReGraMa has zeroed across a whole population."""
+    return sum(
+        int(bool((value == 0).all()))
+        for agent in population
+        for _network_id, network in regrama.eval_networks(agent)
+        for key, value in network.state_dict().items()
+        if key.endswith("bias") and value.dim() == 1
+    )
+
+
 class TestRegramaCrossFamilyEvolution:
     """ReGraMa evolves a real population of every non-LLM algorithm family."""
 
@@ -5816,9 +5841,11 @@ class TestRegramaCrossFamilyEvolution:
             population_size=8,
         )
 
+        resets_seen = 0
         for _cycle in range(3):
             _give_population_fitness(population)
             _mark_population_dormant(population)
+            _pin_population_biases(population)
             population = run_selection_and_mutation(
                 strategy,
                 population=population,
@@ -5826,6 +5853,7 @@ class TestRegramaCrossFamilyEvolution:
                 env_name="Env",
                 algo=algo_name,
             )
+            resets_seen += _population_zeroed_biases(population)
 
             assert len(population) == 8
             assert all(isinstance(agent, EvolvableAlgorithm) for agent in population)
@@ -5835,6 +5863,8 @@ class TestRegramaCrossFamilyEvolution:
                         torch.isfinite(value).all()
                         for value in network.state_dict().values()
                     )
+
+        assert resets_seen > 0
 
     @pytest.mark.parametrize(
         "family", list(_CROSS_FAMILY_CASES), ids=list(_CROSS_FAMILY_CASES)
@@ -5856,9 +5886,11 @@ class TestRegramaCrossFamilyEvolution:
         )
         mutation = _regrama_mutation()
 
+        resets_seen = 0
         for _cycle in range(3):
             rank_population_by_subpopulation(population)
             _mark_population_dormant(population)
+            _pin_population_biases(population)
             population = run_selection_and_mutation(
                 strategy,
                 population=population,
@@ -5866,6 +5898,7 @@ class TestRegramaCrossFamilyEvolution:
                 env_name="Env",
                 algo=algo_name,
             )
+            resets_seen += _population_zeroed_biases(population)
 
             assert len(population) == 8
             assert len({agent.index for agent in population}) == 8
@@ -5875,6 +5908,8 @@ class TestRegramaCrossFamilyEvolution:
                         torch.isfinite(value).all()
                         for value in network.state_dict().values()
                     )
+
+        assert resets_seen > 0
 
     def test_a_child_reads_the_snapshot_captured_while_its_parent_trained(self):
         # Capture happens on the parent, the reset happens on the clone.

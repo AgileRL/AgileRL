@@ -92,6 +92,7 @@ from agilerl.algorithms.core.base import (
 from agilerl.algorithms.core.optimizer_wrapper import OptimizerWrapper
 from agilerl.algorithms.core.registry import NetworkGroup
 from agilerl.algorithms.grpo import GRPO
+from agilerl.hpo.regrama import eval_networks, target_activations
 from agilerl.modules import EvolvableMLP
 from agilerl.modules.dummy import DummyEvolvable
 from agilerl.utils.algo_utils import VLLMConfig
@@ -8102,6 +8103,35 @@ class TestEvolvableAlgorithmGraMaState:
         assert not [
             warning for warning in recwarn if "capture_grama" in str(warning.message)
         ]
+
+    def registered_hooks(self, agent):
+        """Backward hooks currently attached to the agent's measured activations."""
+        return sum(
+            len(module._backward_hooks)
+            for _network_id, network in eval_networks(agent)
+            for module in target_activations(network)
+        )
+
+    def test_reopening_a_block_does_not_stack_a_second_set_of_hooks(self):
+        agent = self.agent()
+        agent.capture_grama = True
+
+        agent.init_training_step()
+        after_one = self.registered_hooks(agent)
+        agent.init_training_step()
+
+        assert after_one > 0
+        assert self.registered_hooks(agent) == after_one
+
+    def test_one_finalize_clears_the_hooks_of_a_reopened_block(self):
+        agent = self.agent()
+        agent.capture_grama = True
+
+        agent.init_training_step()
+        agent.init_training_step()
+        agent.finalize_training_step(1)
+
+        assert self.registered_hooks(agent) == 0
 
     def test_wrapped_agent_stores_the_snapshot_on_the_unwrapped_algorithm(self):
         wrapper = RSNorm(self.agent())

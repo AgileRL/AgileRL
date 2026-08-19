@@ -1382,15 +1382,19 @@ _SINGLE_AGENT_CONFIGS = [
     ("ddpg/ddpg_simba.yaml", DDPGSpec, SimbaSpec),
     ("td3.yaml", TD3Spec, MlpSpec),
     ("multi_input.yaml", PPOSpec, MultiInputSpec),
+    ("dqn/dqn_regrama.yaml", DQNSpec, MlpSpec),
+    ("ppo/ppo_regrama.yaml", PPOSpec, MlpSpec),
 ]
 
 _BANDIT_CONFIGS = [
     ("bandit/neural_ts.yaml", NeuralTSSpec, MlpSpec),
     ("bandit/neural_ucb.yaml", NeuralUCBSpec, MlpSpec),
+    ("bandit/neural_ucb_regrama.yaml", NeuralUCBSpec, MlpSpec),
 ]
 
 _OFFLINE_CONFIGS = [
     ("cqn.yaml", CQNSpec, MlpSpec),
+    ("cqn_regrama.yaml", CQNSpec, MlpSpec),
 ]
 
 _MULTI_AGENT_CONFIGS = [
@@ -1398,6 +1402,8 @@ _MULTI_AGENT_CONFIGS = [
     ("multi_agent/matd3.yaml", MATD3Spec),
     ("multi_agent/ippo.yaml", IPPOSpec),
     ("multi_agent/ippo_pong.yaml", IPPOSpec),
+    ("multi_agent/ippo_regrama.yaml", IPPOSpec),
+    ("multi_agent/maddpg_regrama.yaml", MADDPGSpec),
 ]
 
 # Configs omit the network ``arch``, so it is inferred from the observation
