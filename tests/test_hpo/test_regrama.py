@@ -411,6 +411,15 @@ class TestLiveColumnScale:
         # The layer's own median, rather than a fabricated constant.
         assert result == pytest.approx(expected, rel=1e-6)
 
+    def test_a_consumer_with_no_columns_still_yields_a_positive_reference(self):
+        # Neither the kept neurons nor the whole layer can supply a reference
+        # when there is nothing to measure, so the Xavier bound stands in.
+        weight = torch.zeros(2, 0)
+
+        result = regrama.live_column_scale(weight, 1, [])
+
+        assert result > 0.0
+
 
 class TestRevivedOutBlock:
     """Draw the outgoing weights a reset neuron is revived with."""
@@ -437,6 +446,16 @@ class TestRevivedOutBlock:
         assert result.shape == template.shape
         assert result.dtype == template.dtype
         assert result.device == template.device
+
+    def test_an_all_zero_draw_restores_the_zero_column(self):
+        # A direction of zero norm cannot be rescaled onto the requested one.
+        class ZeroDraw:
+            def standard_normal(self, size):
+                return np.zeros(size)
+
+        result = regrama.revived_out_block(torch.ones(4), 1.0, ZeroDraw())
+
+        assert torch.equal(result, torch.zeros(4))
 
 
 class TestRevivedNoiseBlock:
@@ -1119,6 +1138,32 @@ class TestGraMaCapture:
         # Training completed, and the layers are simply unmeasured.
         assert all(entry is None for entry in dqn_agent.grama_scores[0])
 
+    def test_a_layer_whose_gradient_reduces_to_nothing_stays_unmeasured(
+        self,
+        dqn_agent,
+        monkeypatch,
+    ):
+        monkeypatch.setattr(regrama, "per_neuron_grad", lambda _grad_input: None)
+
+        capture_snapshot(dqn_agent, torch.rand(4, 4))
+
+        assert all(entry is None for entry in dqn_agent.grama_scores[0])
+
+    def test_an_uncollectable_snapshot_is_reported_as_missing(self, dqn_agent):
+        class Unreadable:
+            def __iter__(self):
+                msg = "snapshot went away"
+                raise RuntimeError(msg)
+
+        activation = regrama.target_activations(dqn_agent.actor)[0]
+        capture = regrama.GraMaCapture(dqn_agent).register()
+        capture._latest = [Unreadable()]
+
+        capture.release()
+
+        assert dqn_agent.grama_scores is None
+        assert not activation._backward_hooks
+
     def test_an_agent_that_rejects_the_snapshot_still_releases_cleanly(
         self,
         dqn_agent,
@@ -1389,6 +1434,45 @@ class TestResetDormantNeurons:
         assert all(torch.equal(before[name], after[name]) for name in before)
 
 
+class TestSharedLatentBlocks:
+    """Expose a shared latent's columns inside every borrowing head."""
+
+    def test_dense_entry_exposes_its_leading_latent_columns(self):
+        producer = nn.Linear(4, 8)
+
+        result = regrama.shared_latent_blocks(producer, [nn.Linear(10, 5)])
+
+        assert [tuple(target.weight.shape) for target in result] == [(5, 8)]
+
+    def test_noisy_entry_also_exposes_its_noise_columns(self):
+        producer = nn.Linear(4, 8)
+
+        result = regrama.shared_latent_blocks(producer, [NoisyLinear(8, 5)])
+
+        assert [target.is_noise_scale for target in result] == [False, True]
+
+    @pytest.mark.parametrize(
+        "make_entry",
+        [lambda: nn.Linear(4, 5), lambda: nn.Conv2d(8, 4, 3)],
+        ids=["narrower-than-the-latent", "not-a-dense-layer"],
+    )
+    def test_an_entry_that_cannot_hold_the_latent_is_skipped(self, make_entry):
+        producer = nn.Linear(4, 8)
+
+        result = regrama.shared_latent_blocks(producer, [make_entry()])
+
+        assert result == []
+
+    def test_a_convolutional_producer_has_no_latent_columns_to_share(self):
+        # A shared latent crosses the encoder-head boundary as a flat vector,
+        # so a conv producer is never the layer feeding a sharing head.
+        producer = nn.Conv2d(3, 8, 3)
+
+        result = regrama.shared_latent_blocks(producer, [nn.Linear(8, 5)])
+
+        assert result == []
+
+
 class TestSharedEncoderCompensation:
     """A latent shared by several networks is faded in every one of them."""
 
@@ -1422,6 +1506,10 @@ class TestSharedEncoderCompensation:
         agent = self.ppo(vector_space, discrete_space, share=False)
 
         assert not regrama.encoder_is_pinned(agent.critic)
+
+    def test_a_network_without_an_encoder_is_not_pinned(self):
+        # Nothing borrowed, so nothing to compensate either.
+        assert not regrama.encoder_is_pinned(nn.Sequential(nn.Linear(4, 2)))
 
     def test_the_critic_head_is_reported_as_a_shared_consumer(
         self,
@@ -1633,6 +1721,44 @@ class TestEvalNetworks:
                 network_id == key and network is sub_network
                 for network_id, network in result
             )
+
+
+class TestPolicyNetworkIds:
+    """Identify the policy networks whose latent other networks may borrow."""
+
+    def test_the_policy_evaluation_network_is_reported(self, dqn_agent):
+        assert regrama.policy_network_ids(dqn_agent) == {id(dqn_agent.actor)}
+
+    def test_multi_agent_policies_report_every_sub_policy(
+        self,
+        ma_vector_space,
+        ma_discrete_space,
+    ):
+        # Each sub-policy owns an encoder its own critic may borrow, so all of
+        # them count as policy networks.
+        from agilerl.algorithms import IPPO
+
+        agent = IPPO(
+            ma_vector_space,
+            ma_discrete_space,
+            agent_ids=["agent_0", "agent_1", "agent_2"],
+            device="cpu",
+        )
+        policy = getattr(agent, agent.registry.policy())
+
+        result = regrama.policy_network_ids(agent)
+
+        assert result == {id(sub_network) for _key, sub_network in policy.items()}
+
+    def test_an_agent_without_a_policy_group_reports_no_policy(self, dqn_agent):
+        dqn_agent.registry.groups = []
+
+        assert regrama.policy_network_ids(dqn_agent) == set()
+
+    def test_a_policy_the_agent_does_not_carry_reports_no_policy(self, dqn_agent):
+        dqn_agent.actor = None
+
+        assert regrama.policy_network_ids(dqn_agent) == set()
 
 
 class TestGraMaCaptureUnderAccelerator:

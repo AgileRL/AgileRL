@@ -105,7 +105,7 @@ if __name__ == "__main__":
 
     # train_on_policy orchestrates the whole evolutionary run
     print("Training...")
-    _, pop_fitnesses = train_on_policy(
+    trained_pop, pop_fitnesses = train_on_policy(
         env=env,
         env_name="LunarLander-v3",
         algo="PPO",
@@ -123,3 +123,9 @@ if __name__ == "__main__":
     )
 
     env.close()
+
+    # The two returned values line up agent-for-agent: the population that came out of the
+    # final evolution step, and each agent's most recent evaluation score
+    print("\n===== Final population =====")
+    for agent, fitness in zip(trained_pop, pop_fitnesses, strict=True):
+        print(f"  agent {agent.index:>3} | fitness {fitness:>8.1f}")
