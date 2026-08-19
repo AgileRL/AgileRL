@@ -1,6 +1,6 @@
 [project]
 name = "agilerl-arena"
-version = "0.2.0"
+dynamic = ["version"]
 description = "Arena Platform Client Library and CLI."
 authors = [{ name = "Nick Ustaran-Anderegg", email = "dev@agilerl.com" }]
 license = "Apache-2.0"
@@ -22,8 +22,26 @@ dependencies = [
 arena = "agilerl.arena.cli:main"
 
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling", "hatch-vcs"]
 build-backend = "hatchling.build"
+
+[tool.hatch.version]
+source = "vcs"
+fallback-version = "0.0.0"
+
+[tool.hatch.version.raw-options]
+search_parent_directories = true
+version_scheme = "no-guess-dev"
+local_scheme = "no-local-version"
+tag_regex = "^agilerl-arena/v(?P<version>\\d+\\.\\d+\\.\\d+)$"
+git_describe_command = [
+    "git",
+    "describe",
+    "--tags",
+    "--abbrev=0",
+    "--match",
+    "agilerl-arena/v*",
+]
 
 [tool.hatch.build]
 # Root .gitignore lists /agilerl/arena for the dev symlink; hatch's VCS
