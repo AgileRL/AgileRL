@@ -1650,7 +1650,7 @@ class TestGraMaCaptureUnderAccelerator:
             vector_space,
             discrete_space,
             net_config=encoder_mlp_config,
-            accelerator=Accelerator(device_placement=False),
+            accelerator=Accelerator(cpu=True, device_placement=False),
             device="cpu",
         )
         agent.wrap_models()
@@ -1676,7 +1676,7 @@ class TestGraMaCaptureUnderAccelerator:
             vector_space,
             discrete_space,
             net_config=encoder_mlp_config,
-            accelerator=Accelerator(device_placement=False),
+            accelerator=Accelerator(cpu=True, device_placement=False),
             device="cpu",
         )
         agent.actor = nn.parallel.DistributedDataParallel(agent.actor)
@@ -1710,7 +1710,7 @@ class TestGraMaCaptureUnderAccelerator:
             ma_vector_space,
             ma_discrete_space,
             agent_ids=["agent_0", "agent_1", "agent_2"],
-            accelerator=Accelerator(device_placement=False),
+            accelerator=Accelerator(cpu=True, device_placement=False),
             device="cpu",
         )
         policy_name = agent.registry.policy()
