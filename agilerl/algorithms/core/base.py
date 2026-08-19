@@ -529,9 +529,11 @@ class EvolvableAlgorithm(ABC, Generic[ExperiencesT], metaclass=RegistryMeta):
         block, which is exactly the window the ReGraMa parameter mutation needs to
         measure. Hooks are registered afresh each cycle, so they follow the agent
         through architecture mutations, checkpoint reloads and accelerator
-        re-wrapping.
+        re-wrapping. Opening a block implicitly closes one that an earlier call
+        left open.
         """
         self.metrics.init_training_step()
+        self._release_grama_capture()
         if self.capture_grama:
             from agilerl.hpo.regrama import GraMaCapture
 
@@ -544,6 +546,14 @@ class EvolvableAlgorithm(ABC, Generic[ExperiencesT], metaclass=RegistryMeta):
         :type num_steps: int
         """
         self.metrics.finalize_training_step(num_steps)
+        self._release_grama_capture()
+
+    def _release_grama_capture(self) -> None:
+        """Close any open GraMa capture, storing its snapshot and removing its hooks.
+
+        :return: None.
+        :rtype: None
+        """
         if self._grama_capture is not None:
             self._grama_capture.release()
             self._grama_capture = None

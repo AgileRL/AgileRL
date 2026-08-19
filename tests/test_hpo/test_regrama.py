@@ -10,7 +10,11 @@ from torch import nn
 
 from agilerl.algorithms import DQN, PPO, TD3, RainbowDQN
 from agilerl.hpo import regrama
-from agilerl.modules.custom_components import NoisyLinear, SimbaResidualBlock
+from agilerl.modules.custom_components import (
+    NoisyLinear,
+    ResidualBlock,
+    SimbaResidualBlock,
+)
 from agilerl.utils.algo_utils import share_encoder_parameters
 
 
@@ -272,6 +276,78 @@ class TestResetLayerNeurons:
 
         assert torch.isfinite(producer.weight).all()
         assert torch.isfinite(consumer.weight).all()
+
+
+class TestResetLayerNeuronsAcrossTheFlattenBoundary:
+    """Rewrite the right strided block when a conv encoder feeds a dense head."""
+
+    CHANNELS = 4
+    SPATIAL = 9  # a 3x3 feature map, flattened channel-major
+
+    def build(self) -> tuple[nn.Conv2d, nn.Linear, torch.Tensor]:
+        producer = nn.Conv2d(2, self.CHANNELS, kernel_size=3)
+        consumer = nn.Linear(self.CHANNELS * self.SPATIAL, 2)
+        with torch.no_grad():
+            producer.weight.fill_(1.0)
+            producer.bias.fill_(7.0)
+            for channel in range(self.CHANNELS):
+                consumer.weight[:, self.columns(channel)] = float(channel + 1)
+        # Only feature map 1 is dormant.
+        return producer, consumer, torch.tensor([1.0, 0.0, 1.0, 1.0])
+
+    def columns(self, channel: int) -> slice:
+        return slice(channel * self.SPATIAL, (channel + 1) * self.SPATIAL)
+
+    def block(self, consumer: nn.Linear, channel: int) -> torch.Tensor:
+        return consumer.weight.detach()[:, self.columns(channel)]
+
+    def reset(self, producer, consumer, per_neuron) -> list[int]:
+        return reset_producer(
+            producer,
+            [consumer],
+            per_neuron,
+            cnn_channels=self.CHANNELS,
+            cnn_spatial=self.SPATIAL,
+        )
+
+    def test_the_neighbouring_feature_maps_blocks_are_untouched(self):
+        # An off-by-one in the stride arithmetic would corrupt the feature maps
+        # either side of the one being recycled.
+        producer, consumer, per_neuron = self.build()
+
+        indices = self.reset(producer, consumer, per_neuron)
+
+        assert indices == [1]
+        for channel in (0, 2, 3):
+            assert torch.equal(
+                self.block(consumer, channel),
+                torch.full((2, self.SPATIAL), float(channel + 1)),
+            )
+
+    def test_the_dormant_maps_block_is_scaled_to_the_live_block_reference(self):
+        producer, consumer, per_neuron = self.build()
+        live = float(
+            torch.tensor(
+                [self.block(consumer, channel).norm() for channel in (0, 2, 3)],
+            ).median(),
+        )
+
+        self.reset(producer, consumer, per_neuron)
+
+        assert self.block(consumer, 1).norm().item() == pytest.approx(
+            regrama.REGRAMA_OUT_SCALE * live,
+            rel=1e-5,
+        )
+
+    def test_the_dormant_maps_filter_is_reinitialised_and_its_bias_zeroed(self):
+        producer, consumer, per_neuron = self.build()
+
+        self.reset(producer, consumer, per_neuron)
+
+        assert not torch.allclose(producer.weight[1], torch.ones(2, 3, 3))
+        assert producer.bias[1].item() == 0.0
+        for channel in (0, 2, 3):
+            assert torch.equal(producer.weight[channel], torch.ones(2, 3, 3))
 
 
 class TestLiveColumnScale:
@@ -764,6 +840,25 @@ class TestResolveProducerAndNext:
         assert context.producer is block.linear1
         assert context.norm is None
 
+    def test_residual_block_activation_resolves_between_its_two_convs(self):
+        # ResidualBlock is conv1 -> bn1 -> act -> conv2.
+        block = ResidualBlock(in_channels=3, kernel_size=3, scale_factor=2)
+        encoder = nn.Sequential(block)
+
+        context = regrama.resolve_producer_and_next(block.act, encoder, None)
+
+        assert context.producer is block.conv1
+        assert context.norm is block.bn1
+        assert context.consumers == [block.conv2]
+
+    def test_residual_block_hidden_channels_are_measured(self):
+        block = ResidualBlock(in_channels=3, kernel_size=3, scale_factor=2)
+        encoder = nn.Sequential(block)
+
+        measured = regrama.activation_modules(encoder, include_output=False)
+
+        assert block.act in measured
+
     def test_encoder_latent_resolves_to_every_head_stream(
         self,
         vector_space,
@@ -1033,6 +1128,7 @@ class TestGraMaCapture:
             registry = dqn_agent.registry
             actor = dqn_agent.actor
             actor_target = dqn_agent.actor_target
+            accelerator = None
 
             def __setattr__(self, name, value):
                 msg = "read-only agent"
