@@ -3,7 +3,7 @@ name: macOS
 
 on:
     push:
-        branches: [main, nightly]
+        branches: [main]
         paths:
             - agilerl/**
             - agilerl-arena/**
@@ -12,7 +12,7 @@ on:
             - pyproject.toml
             - uv.lock
     pull_request:
-        branches: [main, nightly]
+        branches: [main]
         paths:
             - agilerl/**
             - agilerl-arena/**
