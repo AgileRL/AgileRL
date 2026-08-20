@@ -42,9 +42,9 @@ mutation:
             max: 0.001
     mutation_sd: 0.1
     rand_seed: 42
-    super_param_mut: true      # apply the amplified Gaussian band
-    reset_param_mut: true      # apply the reset Gaussian band
-    regrama_param_mut: false   # do not reset dormant neurons
+    amplified_gauss_param_mut: true   # apply the amplified Gaussian band
+    random_reset_param_mut: true      # apply the random-reset Gaussian band
+    dormant_reset_param_mut: false    # do not reset dormant neurons
 
 network:
     latent_dim: 64

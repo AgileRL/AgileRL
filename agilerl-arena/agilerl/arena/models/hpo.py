@@ -64,24 +64,24 @@ class MutationSpec(BaseModel):
     :type mutation_sd: float
     :param rand_seed: Random seed for repeatability.
     :type rand_seed: int
-    :param regrama_param_mut: Whether a parameter mutation first resets the neurons that
-        have gone dormant (ReGraMa) before adding Gaussian noise. Declared so a core
-        manifest carrying it is accepted rather than rejected as an unknown field, and
-        excluded so the platform payload is unaffected. Arena runs the Gaussian
-        parameter operator only, so requesting ReGraMa fails validation here instead
-        of silently degrading.
-    :type regrama_param_mut: bool
-    :param super_param_mut: Whether a parameter mutation applies its amplified ("super")
-        Gaussian band. Declared and excluded like regrama_param_mut; disabling it is
-        rejected for the same reason.
-    :type super_param_mut: bool
-    :param reset_param_mut: Whether a parameter mutation applies its reset Gaussian band.
-        Declared and excluded like regrama_param_mut; disabling it is rejected for the
-        same reason.
-    :type reset_param_mut: bool
+    :param dormant_reset_param_mut: Whether a parameter mutation first resets the
+        neurons that have gone dormant (ReGraMa) before adding Gaussian noise.
+        Declared so a core manifest carrying it is accepted rather than rejected as
+        an unknown field, and excluded so the platform payload is unaffected. Arena
+        runs the Gaussian parameter operator only, so requesting ReGraMa fails
+        validation here instead of silently degrading.
+    :type dormant_reset_param_mut: bool
+    :param amplified_gauss_param_mut: Whether a parameter mutation applies its
+        amplified ("super") Gaussian band. Declared and excluded like
+        dormant_reset_param_mut; disabling it is rejected for the same reason.
+    :type amplified_gauss_param_mut: bool
+    :param random_reset_param_mut: Whether a parameter mutation applies its
+        random-reset Gaussian band. Declared and excluded like
+        dormant_reset_param_mut; disabling it is rejected for the same reason.
+    :type random_reset_param_mut: bool
     :param dormant_threshold: Normalised GraMa score at or below which a neuron counts as
-        dormant. Declared and excluded like regrama_param_mut, and needs no rejection
-        of its own since it is inert once ReGraMa is refused.
+        dormant. Declared and excluded like dormant_reset_param_mut, and needs no
+        rejection of its own since it is inert once ReGraMa is refused.
     :type dormant_threshold: float
     """
 
@@ -91,9 +91,9 @@ class MutationSpec(BaseModel):
     rl_hp_selection: dict[str, RLHyperparameter] = Field(default_factory=dict)
     mutation_sd: float = Field(default=0.1, ge=0.0)
     rand_seed: int = Field(default=42, ge=0)
-    regrama_param_mut: bool = Field(default=False, exclude=True)
-    super_param_mut: bool = Field(default=True, exclude=True)
-    reset_param_mut: bool = Field(default=True, exclude=True)
+    dormant_reset_param_mut: bool = Field(default=False, exclude=True)
+    amplified_gauss_param_mut: bool = Field(default=True, exclude=True)
+    random_reset_param_mut: bool = Field(default=True, exclude=True)
     dormant_threshold: float = Field(default=0.01, ge=0.0, exclude=True)
 
     @model_validator(mode="after")
@@ -107,17 +107,17 @@ class MutationSpec(BaseModel):
         :returns: The validated spec.
         :rtype: MutationSpec
         :raises ValueError: If ReGraMa is enabled or either the amplified or the
-            reset Gaussian band is disabled.
+            random-reset Gaussian band is disabled.
         """
         if (
-            self.regrama_param_mut
-            or not self.super_param_mut
-            or not self.reset_param_mut
+            self.dormant_reset_param_mut
+            or not self.amplified_gauss_param_mut
+            or not self.random_reset_param_mut
         ):
             msg = (
                 "The Arena platform only supports the default Gaussian parameter "
-                "mutations: enabling ReGraMa or disabling the super or reset "
-                "Gaussian mutations is not available."
+                "mutations: enabling ReGraMa or disabling the amplified or "
+                "random-reset Gaussian mutations is not available."
             )
             raise ValueError(msg)
         return self

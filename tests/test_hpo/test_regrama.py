@@ -1616,8 +1616,8 @@ class TestSetGraMaCapture:
     """Enable capture only when the mutation operator will actually use it."""
 
     class FakeMutation:
-        def __init__(self, regrama_param_mut: bool) -> None:
-            self.regrama_param_mut = regrama_param_mut
+        def __init__(self, dormant_reset_param_mut: bool) -> None:
+            self.dormant_reset_param_mut = dormant_reset_param_mut
 
     def test_capture_is_enabled_for_a_regrama_mutation(self, dqn_agent):
         regrama.set_grama_capture([dqn_agent], self.FakeMutation(True))

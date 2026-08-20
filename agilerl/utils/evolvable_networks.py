@@ -32,6 +32,21 @@ from agilerl.typing import DeviceType, KernelSizeType, NetConfigType
 
 ConvBlockType = Literal["Conv1d", "Conv2d", "Conv3d"]
 
+ACTIVATION_FUNCTIONS: dict[str, type[nn.Module]] = {
+    "Tanh": nn.Tanh,
+    "ReLU": nn.ReLU,
+    "ELU": nn.ELU,
+    "Softsign": nn.Softsign,
+    "Sigmoid": nn.Sigmoid,
+    "GumbelSoftmax": GumbelSoftmax,
+    "Softplus": nn.Softplus,
+    "Softmax": nn.Softmax,
+    "LeakyReLU": nn.LeakyReLU,
+    "PReLU": nn.PReLU,
+    "GELU": nn.GELU,
+    "Identity": nn.Identity,
+}
+
 
 # Arity of the size tuple a torch layer expects (e.g. ``tuple[int, int]`` for
 # 2d layers). Ties a layer constructor to a normalizer that produces it.
@@ -450,22 +465,6 @@ def get_normalization(
     }
 
     return normalization_functions[normalization_name](layer_size, device=device)
-
-
-ACTIVATION_FUNCTIONS: dict[str, type[nn.Module]] = {
-    "Tanh": nn.Tanh,
-    "ReLU": nn.ReLU,
-    "ELU": nn.ELU,
-    "Softsign": nn.Softsign,
-    "Sigmoid": nn.Sigmoid,
-    "GumbelSoftmax": GumbelSoftmax,
-    "Softplus": nn.Softplus,
-    "Softmax": nn.Softmax,
-    "LeakyReLU": nn.LeakyReLU,
-    "PReLU": nn.PReLU,
-    "GELU": nn.GELU,
-    "Identity": nn.Identity,
-}
 
 
 def get_activation(activation_name: str | None, new_gelu: bool = False) -> nn.Module:
