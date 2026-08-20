@@ -2230,11 +2230,12 @@ import agilerl.hpo.function_preserving as fp  # noqa: E402
 from agilerl.utils.dormant_neurons import capture_per_neuron_scores  # noqa: E402
 
 
-def _fp_dqn_pop(device="cpu", head_hidden=(32,)):
+def _fp_dqn_pop(device="cpu", head_hidden=(32,), encoder_layer_mutations=False):
     """A DQN population with a ReLU CNN encoder + MLP head, no norm layers."""
     obs = spaces.Box(0, 255, shape=(4, 32, 32), dtype=np.uint8)
     act = spaces.Discrete(4)
     net_config = {
+        "encoder_layer_mutations": encoder_layer_mutations,
         "latent_dim": 16,
         "min_latent_dim": 8,
         "max_latent_dim": 64,
@@ -2276,7 +2277,13 @@ def _fp_dqn_pop(device="cpu", head_hidden=(32,)):
     )
 
 
-def _fp_ppo_pop(activation="ReLU", device="cpu"):
+def _fp_ppo_pop(
+    activation="ReLU",
+    device="cpu",
+    encoder_layer_mutations=False,
+    encoder_hidden=(16, 16),
+    encoder_max_layers=4,
+):
     """A PPO population with a ReLU/Tanh MLP encoder + head, no norm layers."""
     obs = spaces.Box(-1, 1, shape=(6,), dtype=np.float32)
     act = spaces.Box(-1, 1, shape=(2,), dtype=np.float32)
@@ -2285,13 +2292,16 @@ def _fp_ppo_pop(activation="ReLU", device="cpu"):
         "min_latent_dim": 4,
         "max_latent_dim": 64,
         "encoder_config": {
-            "hidden_size": [16, 16],
+            "hidden_size": list(encoder_hidden),
             "activation": activation,
             "output_activation": "Identity",
+            "min_hidden_layers": 1,
+            "max_hidden_layers": encoder_max_layers,
             "min_mlp_nodes": 4,
             "max_mlp_nodes": 256,
             "layer_norm": False,
         },
+        "encoder_layer_mutations": encoder_layer_mutations,
         "head_config": {
             "hidden_size": [16, 16],
             "activation": activation,
@@ -2839,3 +2849,180 @@ class TestFunctionPreservingUnsupportedArchitectures:
         assert nested, "expected a nested sub-encoder removal method"
         _applied, mut_dict = _fp_muts()._apply_arch_mutation(net, nested[0])
         assert mut_dict is not None
+
+
+# Distinct prefixes so IPPO/MADDPG build one policy per agent rather than
+# parameter-sharing across a common prefix.
+_MA_IDS = ["speaker_0", "listener_0"]
+
+
+class TestFunctionPreservingEncoderLayer:
+    """``encoder.add_layer`` / ``encoder.remove_layer`` under ``func_preserving``.
+
+    AgileRL disables encoder LAYER mutations because restructuring the encoder
+    resets the representation feeding every head. An identity-initialised layer
+    injects no such shock, so ``encoder_layer_mutations`` opts them back in for
+    MLP encoders. The surgery itself needs no new code: ``_fp_post_mutation``
+    already routes ``encoder.add_layer`` exactly as ``head_net.add_layer``.
+    """
+
+    @staticmethod
+    def _forward(policy, obs):
+        """Deterministic forward path (``StochasticActor.forward`` samples)."""
+        policy.eval()
+        with torch.no_grad():
+            return policy.head_net.wrapped(policy.encoder(obs)).clone()
+
+    def test_encoder_add_layer_identity_preserves_function(self):
+        pop = _fp_ppo_pop(encoder_layer_mutations=True)
+        po = pop[0].actor
+        pre = torch.randn(8, 6)
+        y0 = self._forward(po, pre)
+        depth = len(po.encoder.hidden_size)
+
+        applied, _md = _fp_muts()._apply_arch_mutation(po, "encoder.add_layer", {})
+
+        assert applied == "encoder.add_layer"
+        assert len(po.encoder.hidden_size) == depth + 1
+        assert torch.allclose(y0, self._forward(po, pre), atol=1e-5)
+
+    def test_encoder_add_layer_changes_function_under_original(self):
+        """The contrast that makes the ablation meaningful."""
+        pop = _fp_ppo_pop(encoder_layer_mutations=True)
+        po = pop[0].actor
+        pre = torch.randn(8, 6)
+        y0 = self._forward(po, pre)
+
+        applied, _md = _fp_muts(arch="original")._apply_arch_mutation(
+            po, "encoder.add_layer", {}
+        )
+
+        assert applied == "encoder.add_layer"
+        assert not torch.allclose(y0, self._forward(po, pre), atol=1e-5)
+
+    def test_encoder_add_layer_falls_back_to_add_node_at_max_depth(self):
+        pop = _fp_ppo_pop(
+            encoder_layer_mutations=True, encoder_hidden=(16, 16), encoder_max_layers=2
+        )
+        po = pop[0].actor
+        pre = torch.randn(8, 6)
+        y0 = self._forward(po, pre)
+
+        applied, _md = _fp_muts()._apply_arch_mutation(po, "encoder.add_layer", {})
+
+        assert applied == "encoder.add_node"
+        assert torch.allclose(y0, self._forward(po, pre), atol=1e-5)
+
+    def test_encoder_remove_layer_falls_back_to_add_node_at_min_depth(self):
+        pop = _fp_ppo_pop(encoder_layer_mutations=True, encoder_hidden=(16,))
+        po = pop[0].actor
+        pre = torch.randn(8, 6)
+        y0 = self._forward(po, pre)
+
+        applied, _md = _fp_muts()._apply_arch_mutation(po, "encoder.remove_layer", {})
+
+        assert applied == "encoder.add_node"
+        assert torch.allclose(y0, self._forward(po, pre), atol=1e-5)
+
+    def test_encoder_remove_layer_is_identical_to_the_original_operator(self):
+        """Removals stay the stock positional operator under both arms."""
+        results = {}
+        for arch in ("func_preserving", "original"):
+            torch.manual_seed(0)
+            np.random.seed(0)
+            po = _fp_ppo_pop(encoder_layer_mutations=True, encoder_hidden=(16, 16, 16))[
+                0
+            ].actor
+            applied, mut_dict = _fp_muts(arch=arch)._apply_arch_mutation(
+                po, "encoder.remove_layer", {}
+            )
+            results[arch] = (
+                applied,
+                mut_dict,
+                {k: v.clone() for k, v in po.state_dict().items()},
+            )
+
+        fp_applied, fp_dict, fp_state = results["func_preserving"]
+        orig_applied, orig_dict, orig_state = results["original"]
+
+        assert fp_applied == orig_applied == "encoder.remove_layer"
+        assert fp_dict == orig_dict
+        for key in fp_state:
+            assert torch.equal(fp_state[key], orig_state[key]), key
+
+    def test_encoder_layer_mutation_is_mirrored_onto_the_critic(self, monkeypatch):
+        """Regression test for the network-level dotted wrapper.
+
+        If the mutation resolved to the encoder's own bound method instead,
+        ``network.last_mutation_attr`` would stay None -- the fixup would be
+        skipped and the critic would never be mirrored, silently diverging.
+        """
+        monkeypatch.setattr(
+            EvolvableModule,
+            "sample_mutation_method",
+            lambda _self, *_a, **_k: "encoder.add_layer",
+            raising=False,
+        )
+        individual = _fp_ppo_pop(encoder_layer_mutations=True)[0]
+        actor_depth = len(individual.actor.encoder.hidden_size)
+        critic_depth = len(individual.critic.encoder.hidden_size)
+
+        individual = _fp_muts()._architecture_mutate_single(individual)
+
+        assert individual.mut == "encoder.add_layer"
+        assert len(individual.actor.encoder.hidden_size) == actor_depth + 1
+        assert len(individual.critic.encoder.hidden_size) == critic_depth + 1
+
+    def test_cnn_encoder_layer_mutations_stay_disabled(self):
+        with pytest.warns(UserWarning, match="only supported for EvolvableMLP"):
+            po = _fp_dqn_pop(encoder_layer_mutations=True)[0].actor
+
+        assert po.encoder_layer_mutations is False
+        assert "encoder.add_layer" not in po.mutation_methods
+        assert "encoder.remove_layer" not in po.mutation_methods
+
+    @pytest.mark.parametrize("algo", ["MADDPG", "MATD3"])
+    def test_multi_agent_shared_critic_algos_report_the_flag_honestly(self, algo):
+        """MADDPG/MATD3 wipe every encoder mutation right after building the actor
+        (their critics use a different encoder type), so the opted-in flag must not
+        survive as a stale ``True`` -- it would be carried into ``init_dict`` and
+        therefore into checkpoints and clones."""
+        agent = create_population(
+            algo=algo,
+            observation_space={
+                i: spaces.Box(-1, 1, shape=(6,), dtype=np.float32) for i in _MA_IDS
+            },
+            action_space={i: spaces.Discrete(3) for i in _MA_IDS},
+            net_config={
+                "latent_dim": 16,
+                "min_latent_dim": 4,
+                "max_latent_dim": 64,
+                "encoder_config": {
+                    "hidden_size": [16],
+                    "activation": "ReLU",
+                    "layer_norm": False,
+                },
+                "head_config": {
+                    "hidden_size": [16],
+                    "activation": "ReLU",
+                    "layer_norm": False,
+                },
+                "encoder_layer_mutations": True,
+            },
+            INIT_HP={**SHARED_INIT_HP_MA, "AGENT_IDS": _MA_IDS},
+            population_size=1,
+            device="cpu",
+        )[0]
+
+        actors = agent.actors
+        for key in actors.keys():
+            assert actors[key].encoder_layer_mutations is False
+            assert actors[key].init_dict["encoder_layer_mutations"] is False
+        assert not [m for m in actors.mutation_methods if "encoder" in m]
+
+    def test_encoder_layer_mutations_absent_by_default(self):
+        po = _fp_ppo_pop()[0].actor
+
+        assert po.encoder_layer_mutations is False
+        assert "encoder.add_layer" not in po.mutation_methods
+        assert "encoder.remove_layer" not in po.mutation_methods

@@ -12,9 +12,12 @@ implements the function-preserving variants selected by
   incoming weights (what ``create_mlp`` / ``create_cnn`` already produce) but their
   *outgoing* weights are set to zero, so they contribute nothing initially and the
   function is preserved (Net2WiderNet with zeroed fan-out).
-* **add_layer** (head MLP only -- the encoder has LAYER mutations disabled) -- the
-  newly inserted layer is initialised to the identity (Net2DeeperNet). Exact when
-  the activation is ReLU / Identity; a warning is emitted otherwise.
+* **add_layer** -- the newly inserted layer is initialised to the identity
+  (Net2DeeperNet). Exact when the activation is ReLU / Identity; a warning is
+  emitted otherwise. Applies to the head, and to the encoder when it is an
+  ``EvolvableMLP`` and ``arch_encoder_layer_mut`` opted its LAYER mutations back
+  in (they are disabled by default; see
+  :class:`agilerl.networks.base.EvolvableNetwork`).
 
 Only *additions* are modified. ``remove_node`` / ``remove_channel`` /
 ``remove_latent_node`` deliberately keep AgileRL's original random-count positional

@@ -1,23 +1,39 @@
 ---
-# ippo_mpe -- NODE/CHANNEL ARCHITECTURE-MUTATION ABLATION (function-preserving arch mutations; no whole-layer add/remove).
+# ippo_mpe -- ARCHITECTURE-MUTATION ABLATION (BASELINE: original AgileRL arch mutations).
 #
-# Derived from ippo_mpe_func_preserv.yaml, with new_layer disabled (set to 0.0).
-# Population = 4; only no_mutation and node/channel architecture mutations are active
-# (no_mut / arch_mut; new_layer / params / act / rl_hp = 0).
-# arch_mut_type: func_preserving makes each architecture *addition* Net2Net-style
-# function-preserving: added units get zero outgoing weights. Removals keep AgileRL's
-# original random-count positional behaviour, so this arm differs from its baseline
-# only in how capacity is added. Whole-layer add/remove is disabled here
-# (new_layer = 0), so the Net2DeeperNet identity-init never fires. Its
-# baseline is ippo_mpe_arch_original_nolayer.yaml (identical except arch_mut_type).
+# ENCODER-LAYER VARIANT (*_enclayer). Identical to ippo_mpe_arch_original.yaml, except that
+# add_layer / remove_layer are also enabled on the ENCODER, not just the head
+# (mutation.arch_encoder_layer_mut: true). AgileRL disables encoder layer
+# mutations by default because restructuring the encoder resets the
+# representation feeding every head, which adds a lot of variance; an
+# identity-initialised (function-preserving) layer injects no such shock, so
+# this pair tests whether that default can be relaxed.
+#
+# Two things to keep in mind when reading the results:
+#   * The TOTAL layer-mutation probability is unchanged at new_layer = 0.2 --
+#     EvolvableModule.get_mutation_probs splits it evenly across the available
+#     layer methods, so this arm has the SAME rate of layer mutations as its
+#     baseline, half of it now landing on the encoder. It is not "more
+#     mutation", it is the same mutation budget spread over two sites.
+#   * At the depth floor (min_hidden_layers) remove_layer falls back to
+#     add_node, so early on part of the encoder's layer-mutation mass is a
+#     width add rather than a depth change.
+#
+# This is the BASELINE of the pair: ippo_mpe_func_preserv_enclayer.yaml sets the
+# same arch_encoder_layer_mut: true and differs ONLY in arch_mut_type, so the
+# comparison isolates how capacity is added, on a matched search space.
+# Derived from ippo_mpe_hpo.yaml. Population = 4; only no_mutation and architecture
+# mutations are active (no_mut / arch_mut / new_layer; params / act / rl_hp = 0),
+# so this isolates the architecture-mutation operator. arch_mut_type: original
+# uses AgileRL's default add/remove node/channel/layer. Its function-preserving
+# counterpart is ippo_mpe_func_preserv.yaml (identical except arch_mut_type).
 # IPPO on cooperative MPE (MPEv2) WITH evolutionary HPO (a population is mutated
 # and selected each generation). The base hyperparameters match ippo_mpe_no_hpo.yaml
 # (AgileRL's canonical multi-agent IPPO/MPE recipe -- low lr, few PPO epochs, tight
 # gradient clipping, high entropy bonus); see that file for the full mapping and
 # rollout-sizing notes. The `mutation` + `tournament_selection` blocks below are what
-# turn this into an HPO run. In this architecture-mutation ablation only the
-# node/channel arch operator fires (whole-layer new_layer / params / act / rl_hp
-# mutations are off), so the rl_hp_selection
+# turn this into an HPO run. In this architecture-mutation ablation only the arch
+# operators fire (params / act / rl_hp mutations are off), so the rl_hp_selection
 # block below is retained only to define the (unused) HP search space.
 
 algorithm:
@@ -54,7 +70,7 @@ mutation:
     probabilities:
         no_mut: 0.5
         arch_mut: 0.5
-        new_layer: 0.0   # OFF -- no whole-layer add/remove
+        new_layer: 0.2
         params_mut: 0.0
         act_mut: 0.0
         rl_hp_mut: 0.0
@@ -123,11 +139,8 @@ mutation:
     mutation_sd: 0.1  # std of the Gaussian weight perturbation for params_mut
     rand_seed: 42
     mutate_elite: false  # keep the elite member unmutated so the best agent survives intact into the next generation
-    arch_mut_type: func_preserving  # original | func_preserving architecture mutations
-    arch_encoder_layer_mut: false  # encoder add_layer/remove_layer stay OFF here, so this
-                                   # arm's search space is unchanged from the runs already
-                                   # collected. The *_enclayer arms turn them on; compare
-                                   # _enclayer against _enclayer, not against this file.
+    arch_mut_type: original  # original | func_preserving architecture mutations
+    arch_encoder_layer_mut: true  # ALSO mutate encoder depth (MLP encoders only)
 
 network:
     # Same width-64 MLP as the no-HPO config, but with min/max bounds that define the
@@ -144,6 +157,9 @@ network:
             - 64
         activation: ReLU
         output_activation: Identity
+        min_hidden_layers: 1   # encoder depth: 1 .. 3, matched to the head's bounds
+        max_hidden_layers: 3   # (without this the MlpSpec default of 1 .. 6 applies,
+                               #  giving the encoder a deeper search space than the head)
         min_mlp_nodes: 16
         max_mlp_nodes: 256
         layer_norm: false

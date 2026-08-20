@@ -1,13 +1,32 @@
 ---
-# ppo_relu -- ARCHITECTURE-MUTATION ABLATION (function-preserving arch mutations).
+# ppo_relu -- ARCHITECTURE-MUTATION ABLATION (BASELINE: original AgileRL arch mutations).
 #
+# ENCODER-LAYER VARIANT (*_enclayer). Identical to ppo_relu_arch_original.yaml, except that
+# add_layer / remove_layer are also enabled on the ENCODER, not just the head
+# (mutation.arch_encoder_layer_mut: true). AgileRL disables encoder layer
+# mutations by default because restructuring the encoder resets the
+# representation feeding every head, which adds a lot of variance; an
+# identity-initialised (function-preserving) layer injects no such shock, so
+# this pair tests whether that default can be relaxed.
+#
+# Two things to keep in mind when reading the results:
+#   * The TOTAL layer-mutation probability is unchanged at new_layer = 0.2 --
+#     EvolvableModule.get_mutation_probs splits it evenly across the available
+#     layer methods, so this arm has the SAME rate of layer mutations as its
+#     baseline, half of it now landing on the encoder. It is not "more
+#     mutation", it is the same mutation budget spread over two sites.
+#   * At the depth floor (min_hidden_layers) remove_layer falls back to
+#     add_node, so early on part of the encoder's layer-mutation mass is a
+#     width add rather than a depth change.
+#
+# This is the BASELINE of the pair: ppo_relu_func_preserv_enclayer.yaml sets the
+# same arch_encoder_layer_mut: true and differs ONLY in arch_mut_type, so the
+# comparison isolates how capacity is added, on a matched search space.
 # Derived from ppo_relu_hpo.yaml. Population = 4; only no_mutation and architecture
-# mutations are active (no_mut / arch_mut / new_layer; params / act / rl_hp = 0).
-# arch_mut_type: func_preserving makes each architecture *addition* Net2Net-style
-# function-preserving: added units get zero outgoing weights and new head layers are
-# identity-initialised. Removals keep AgileRL's original random-count positional
-# behaviour, so this arm differs from its baseline only in how capacity is added. Its
-# baseline is ppo_relu_arch_original.yaml (identical except arch_mut_type).
+# mutations are active (no_mut / arch_mut / new_layer; params / act / rl_hp = 0),
+# so this isolates the architecture-mutation operator. arch_mut_type: original
+# uses AgileRL's default add/remove node/channel/layer. Its function-preserving
+# counterpart is ppo_relu_func_preserv.yaml (identical except arch_mut_type).
 # PPO WITH HPO (population of 4, elitism, architecture mutations only; activation
 # mutations OFF) on Gymnasium MuJoCo.
 #
@@ -63,7 +82,7 @@ mutation:
     probabilities:
         no_mut: 0.5
         arch_mut: 0.5    # add/remove hidden nodes within the bounds below
-        new_layer: 0.2   # add/remove a whole hidden layer (head) within the bounds below
+        new_layer: 0.4   # add/remove a whole hidden layer (head) within the bounds below
         params_mut: 0.0  # Gaussian noise on weights, strength = mutation_sd
         act_mut: 0.0     # OFF -- fixed ReLU (arch-mutation ablation; act_mut disabled)
         rl_hp_mut: 0.0   # grow/shrink one of the rl_hp_selection hyperparameters below
@@ -146,12 +165,8 @@ mutation:
     mutation_sd: 0.1  # std of the Gaussian weight perturbation for params_mut (typical)
     rand_seed: 42
     mutate_elite: false  # keep the elite member unmutated so the best agent survives intact into the next generation
-    arch_mut_type: func_preserving  # original | func_preserving architecture mutations
-    arch_fp_noise: 0.0075  # symmetry-breaking noise on new units' fan-out, relative to the layer's weight std (0.0 = exact-zero preservation)
-    arch_encoder_layer_mut: false  # encoder add_layer/remove_layer stay OFF here, so this
-                                   # arm's search space is unchanged from the runs already
-                                   # collected. The *_enclayer arms turn them on; compare
-                                   # _enclayer against _enclayer, not against this file.
+    arch_mut_type: original  # original | func_preserving architecture mutations
+    arch_encoder_layer_mut: true  # ALSO mutate encoder depth (MLP encoders only)
 
 network:
     # Paper architecture: width-64 tanh MLP. Under HPO the min/max bounds below
@@ -172,6 +187,9 @@ network:
             - 64
         activation: ReLU
         output_activation: Identity
+        min_hidden_layers: 1   # encoder depth: 1 .. 3, matched to the head's bounds
+        max_hidden_layers: 3   # (without this the MlpSpec default of 1 .. 6 applies,
+                               #  giving the encoder a deeper search space than the head)
         min_mlp_nodes: 16      # encoder width: base 64 centred in 16 .. 256 nodes
         max_mlp_nodes: 256
         layer_norm: false

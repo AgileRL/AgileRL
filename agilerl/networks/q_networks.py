@@ -51,6 +51,9 @@ class QNetwork(EvolvableNetwork):
     :type device: str
     :param random_seed: Random seed to use for the network. Defaults to None.
     :type random_seed: int | None
+    :param encoder_layer_mutations: If True, keep ``add_layer`` / ``remove_layer``
+        enabled on the encoder (MLP encoders only). Defaults to False.
+    :type encoder_layer_mutations: bool | None
     """
 
     supported_spaces = (spaces.Discrete, spaces.MultiDiscrete)
@@ -69,6 +72,7 @@ class QNetwork(EvolvableNetwork):
         recurrent: bool = False,
         device: str = "cpu",
         random_seed: int | None = None,
+        encoder_layer_mutations: bool | None = False,
     ) -> None:
         super().__init__(
             observation_space,
@@ -82,6 +86,7 @@ class QNetwork(EvolvableNetwork):
             recurrent=recurrent,
             device=device,
             random_seed=random_seed,
+            encoder_layer_mutations=encoder_layer_mutations,
         )
 
         if not isinstance(action_space, self.supported_spaces):
@@ -168,6 +173,9 @@ class RainbowQNetwork(EvolvableNetwork):
     :type device: str
     :param random_seed: Random seed to use for the network. Defaults to None.
     :type random_seed: int | None
+    :param encoder_layer_mutations: If True, keep ``add_layer`` / ``remove_layer``
+        enabled on the encoder (MLP encoders only). Defaults to False.
+    :type encoder_layer_mutations: bool | None
     """
 
     def __init__(
@@ -184,6 +192,7 @@ class RainbowQNetwork(EvolvableNetwork):
         latent_dim: int = 64,
         device: str = "cpu",
         random_seed: int | None = None,
+        encoder_layer_mutations: bool | None = False,
     ) -> None:
 
         if isinstance(observation_space, spaces.Box) and not is_image_space(
@@ -214,6 +223,7 @@ class RainbowQNetwork(EvolvableNetwork):
             latent_dim=latent_dim,
             device=device,
             random_seed=random_seed,
+            encoder_layer_mutations=encoder_layer_mutations,
         )
 
         if not isinstance(action_space, (spaces.Discrete, spaces.MultiDiscrete)):
@@ -331,6 +341,9 @@ class ContinuousQNetwork(EvolvableNetwork):
     :type device: str
     :param random_seed: Random seed to use for the network. Defaults to None.
     :type random_seed: int | None
+    :param encoder_layer_mutations: If True, keep ``add_layer`` / ``remove_layer``
+        enabled on the encoder (MLP encoders only). Defaults to False.
+    :type encoder_layer_mutations: bool | None
     """
 
     action_mean: torch.Tensor
@@ -351,6 +364,7 @@ class ContinuousQNetwork(EvolvableNetwork):
         recurrent: bool = False,
         device: str = "cpu",
         random_seed: int | None = None,
+        encoder_layer_mutations: bool | None = False,
     ) -> None:
         # NOTE: Need to disable layer normalization for the encoder since we're
         # concatenating the actions to the latent space and we don't want to do the same
@@ -384,6 +398,7 @@ class ContinuousQNetwork(EvolvableNetwork):
             recurrent=recurrent,
             device=device,
             random_seed=random_seed,
+            encoder_layer_mutations=encoder_layer_mutations,
         )
 
         if head_config is None:

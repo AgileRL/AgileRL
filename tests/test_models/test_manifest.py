@@ -1203,3 +1203,119 @@ class TestFromConfigFiles:
         mock_client = MagicMock()
         trainer = ArenaTrainer.from_manifest(config_path, client=mock_client)
         assert isinstance(trainer.env_spec, ArenaEnvSpec)
+
+
+class TestEncoderLayerMutationsResolution:
+    """``mutation.arch_encoder_layer_mut`` -> ``network.encoder_layer_mutations``.
+
+    The knob is configured beside ``arch_mut_type`` in the ``mutation`` block but
+    consumed by the networks, so ``_process_manifest`` is the one place both are
+    in scope. This pins the full resolution matrix.
+    """
+
+    NETWORK = {
+        "arch": "mlp",
+        "latent_dim": 16,
+        "min_latent_dim": 8,
+        "max_latent_dim": 64,
+        "encoder_config": {"hidden_size": [16], "activation": "ReLU"},
+        "head_config": {"hidden_size": [16], "activation": "ReLU"},
+    }
+
+    def _resolve(self, mutation=None, network_extra=None):
+        network = {**self.NETWORK, **(network_extra or {})}
+        sections = {"network": network}
+        if mutation is not None:
+            sections["mutation"] = mutation
+        data = _make_manifest(
+            algo={"name": "PPO"}, env={"name": "CartPole-v1"}, **sections
+        )
+        manifest = TrainingManifest.model_validate(data)
+        return manifest.algorithm.net_config.encoder_layer_mutations
+
+    def test_unset_without_a_mutation_block_stays_none(self):
+        assert self._resolve() is None
+
+    @pytest.mark.parametrize(
+        ("arch_mut_type", "expected"),
+        [("original", False), ("func_preserving", True)],
+    )
+    def test_derived_from_arch_mut_type(self, arch_mut_type, expected):
+        assert self._resolve({"arch_mut_type": arch_mut_type}) is expected
+
+    @pytest.mark.parametrize("explicit", [True, False])
+    @pytest.mark.parametrize("arch_mut_type", ["original", "func_preserving"])
+    def test_explicit_mutation_field_wins_over_the_derived_default(
+        self, arch_mut_type, explicit
+    ):
+        resolved = self._resolve(
+            {"arch_mut_type": arch_mut_type, "arch_encoder_layer_mut": explicit}
+        )
+
+        assert resolved is explicit
+
+    def test_explicit_network_field_wins_over_the_mutation_block(self):
+        """The network block is the direct-Python-API entry point, so it is the
+        more specific setting and must not be clobbered by the resolution."""
+        resolved = self._resolve(
+            {"arch_mut_type": "original"}, {"encoder_layer_mutations": True}
+        )
+
+        assert resolved is True
+
+
+class TestEncoderLayerMutationsTrainerResolution:
+    """The same resolution must apply when specs are built directly in Python.
+
+    ``TrainingManifest._process_manifest`` only runs on the ``from_manifest``
+    paths, so a caller constructing an algorithm spec by hand would otherwise get
+    ``arch_mut_type="func_preserving"`` with encoder layer mutations silently off.
+    """
+
+    @staticmethod
+    def _algo_spec():
+        from agilerl.models.algorithms.ppo import PPOSpec
+        from agilerl.models.networks import StochasticActorSpec
+
+        return PPOSpec(
+            net_config=StochasticActorSpec.model_validate(
+                {
+                    "encoder_config": {
+                        "arch": "mlp",
+                        "hidden_size": [16],
+                        "activation": "ReLU",
+                    },
+                    "head_config": {"hidden_size": [16], "activation": "ReLU"},
+                }
+            )
+        )
+
+    @pytest.mark.parametrize(
+        ("arch_mut_type", "expected"),
+        [("original", False), ("func_preserving", True)],
+    )
+    def test_trainer_resolves_from_the_mutation_spec(self, arch_mut_type, expected):
+        from agilerl.training.trainer import LocalTrainer
+
+        algo = self._algo_spec()
+        LocalTrainer(
+            algorithm=algo,
+            environment="CartPole-v1",
+            mutation=MutationSpec(arch_mut_type=arch_mut_type),
+        )
+
+        assert algo.net_config.encoder_layer_mutations is expected
+
+    def test_trainer_does_not_overwrite_an_explicit_value(self):
+        from agilerl.training.trainer import LocalTrainer
+
+        algo = self._algo_spec()
+        algo.net_config.encoder_layer_mutations = False
+
+        LocalTrainer(
+            algorithm=algo,
+            environment="CartPole-v1",
+            mutation=MutationSpec(arch_mut_type="func_preserving"),
+        )
+
+        assert algo.net_config.encoder_layer_mutations is False

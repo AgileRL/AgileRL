@@ -358,6 +358,11 @@ class MADDPG(MultiAgentRLAlgorithm):
 
                 # NOTE: Need to disable encoder mutations since we use a different encoder type for the critic
                 actor.encoder.disable_mutations()
+                # Keep the reported flag honest: the disable above wipes every encoder
+                # mutation method, so an opted-in `encoder_layer_mutations` no longer
+                # describes this actor -- and would otherwise be carried into
+                # `init_dict` (and therefore checkpoints and clones) as a stale True.
+                actor.encoder_layer_mutations = False
                 return actor
 
             # Critic uses observations + actions of all agents to predict Q-value

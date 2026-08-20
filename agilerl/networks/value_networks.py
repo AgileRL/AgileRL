@@ -37,6 +37,9 @@ class ValueNetwork(EvolvableNetwork):
     :type device: str
     :param random_seed: Random seed to use for the network. Defaults to None.
     :type random_seed: int | None
+    :param encoder_layer_mutations: If True, keep ``add_layer`` / ``remove_layer``
+        enabled on the encoder (MLP encoders only). Defaults to False.
+    :type encoder_layer_mutations: bool | None
     """
 
     def __init__(
@@ -53,6 +56,7 @@ class ValueNetwork(EvolvableNetwork):
         device: str = "cpu",
         random_seed: int | None = None,
         encoder_name: str = "encoder",
+        encoder_layer_mutations: bool | None = False,
     ) -> None:
 
         super().__init__(
@@ -68,6 +72,7 @@ class ValueNetwork(EvolvableNetwork):
             device=device,
             random_seed=random_seed,
             encoder_name=encoder_name,
+            encoder_layer_mutations=encoder_layer_mutations,
         )
 
         if head_config is None:
