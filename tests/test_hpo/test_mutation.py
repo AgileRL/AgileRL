@@ -2621,7 +2621,9 @@ class TestMutationsApplyMutation:
 
 def _regrama_mutations(**kwargs) -> Mutations:
     """A parameter-mutation-only operator with ReGraMa resets enabled."""
-    return Mutations(0, 0, 0, 1, 0, 0, rand_seed=0, regrama_param_mut=True, **kwargs)
+    return Mutations(
+        0, 0, 0, 1, 0, 0, rand_seed=0, dormant_reset_param_mut=True, **kwargs
+    )
 
 
 def _all_dormant(agent) -> None:
@@ -2688,7 +2690,7 @@ def _pinned_policy() -> EvolvableModule:
 
 
 def _pinned_gaussian_pass(
-    *, super_param_mut: bool = True, reset_param_mut: bool = True
+    *, amplified_gauss_param_mut: bool = True, random_reset_param_mut: bool = True
 ):
     """Run one Gaussian pass over an identically seeded pinned policy."""
     network = _pinned_policy()
@@ -2701,8 +2703,8 @@ def _pinned_gaussian_pass(
         0,
         0,
         rand_seed=0,
-        super_param_mut=super_param_mut,
-        reset_param_mut=reset_param_mut,
+        amplified_gauss_param_mut=amplified_gauss_param_mut,
+        random_reset_param_mut=random_reset_param_mut,
     )._gaussian_parameter_mutation(network)
     return baseline, network.state_dict()
 
@@ -2727,9 +2729,9 @@ class TestMutationsRegramaConstructor:
     def test_defaults_preserve_the_previous_behaviour(self):
         muts = Mutations(0, 0, 0, 1, 0, 0)
 
-        assert muts.regrama_param_mut is False
-        assert muts.super_param_mut is True
-        assert muts.reset_param_mut is True
+        assert muts.dormant_reset_param_mut is False
+        assert muts.amplified_gauss_param_mut is True
+        assert muts.random_reset_param_mut is True
         assert muts.dormant_threshold == 0.01
 
     def test_zero_dormant_threshold_is_accepted(self):
@@ -2744,49 +2746,49 @@ class TestMutationsRegramaConstructor:
     @pytest.mark.parametrize(
         "kwargs",
         [
-            {"regrama_param_mut": "yes"},
-            {"super_param_mut": 1},
-            {"reset_param_mut": 0},
+            {"dormant_reset_param_mut": "yes"},
+            {"amplified_gauss_param_mut": 1},
+            {"random_reset_param_mut": 0},
         ],
-        ids=["regrama", "super", "reset"],
+        ids=["dormant_reset", "amplified_gauss", "random_reset"],
     )
     def test_non_boolean_switches_are_rejected(self, kwargs):
         with pytest.raises(AssertionError, match="boolean value"):
             Mutations(0, 0, 0, 1, 0, 0, **kwargs)
 
 
-class TestMutationsSuperParameterMutation:
+class TestMutationsAmplifiedGaussParameterMutation:
     """Switch the amplified Gaussian band off without touching the others."""
 
     def test_amplified_band_moves_weights_far_beyond_the_ordinary_one(self):
-        baseline, after = _pinned_gaussian_pass(super_param_mut=True)
+        baseline, after = _pinned_gaussian_pass(amplified_gauss_param_mut=True)
 
         # Neither of the other two bands can reach this far, so the step
         # is the amplified band's and nothing else.
         assert _largest_step(baseline, after) > _band_ceiling
 
     def test_switching_it_off_leaves_those_weights_at_their_trained_values(self):
-        baseline, after = _pinned_gaussian_pass(super_param_mut=False)
+        baseline, after = _pinned_gaussian_pass(amplified_gauss_param_mut=False)
 
         # With the band gone every remaining step is within the reach of
         # the reset and ordinary bands, i.e. no weight was amplified at all.
         assert _largest_step(baseline, after) < _band_ceiling
 
     def test_the_other_bands_still_fire_with_the_amplified_one_off(self):
-        baseline, after = _pinned_gaussian_pass(super_param_mut=False)
+        baseline, after = _pinned_gaussian_pass(amplified_gauss_param_mut=False)
 
         assert any(not torch.equal(baseline[k], after[k]) for k in baseline)
 
 
-class TestMutationsResetParameterMutation:
-    """Switch the reset Gaussian band off without touching the others."""
+class TestMutationsRandomResetParameterMutation:
+    """Switch the random-reset Gaussian band off without touching the others."""
 
     def test_reset_band_redraws_weights_from_a_unit_normal(self):
         # The amplified band is held off, so only a reset can move a pinned
         # weight this far, and only a reset can leave one this close to zero.
         baseline, after = _pinned_gaussian_pass(
-            super_param_mut=False,
-            reset_param_mut=True,
+            amplified_gauss_param_mut=False,
+            random_reset_param_mut=True,
         )
 
         assert _largest_step(baseline, after) > _reset_floor
@@ -2794,8 +2796,8 @@ class TestMutationsResetParameterMutation:
 
     def test_switching_it_off_leaves_those_weights_at_their_trained_values(self):
         baseline, after = _pinned_gaussian_pass(
-            super_param_mut=False,
-            reset_param_mut=False,
+            amplified_gauss_param_mut=False,
+            random_reset_param_mut=False,
         )
 
         assert _largest_step(baseline, after) < _reset_floor
@@ -2803,16 +2805,16 @@ class TestMutationsResetParameterMutation:
 
     def test_the_ordinary_band_still_fires_with_both_bands_off(self):
         baseline, after = _pinned_gaussian_pass(
-            super_param_mut=False,
-            reset_param_mut=False,
+            amplified_gauss_param_mut=False,
+            random_reset_param_mut=False,
         )
 
         assert any(not torch.equal(baseline[k], after[k]) for k in baseline)
 
     def test_the_amplified_band_is_untouched_by_the_reset_switch(self):
         baseline, after = _pinned_gaussian_pass(
-            super_param_mut=True,
-            reset_param_mut=False,
+            amplified_gauss_param_mut=True,
+            random_reset_param_mut=False,
         )
 
         assert _largest_step(baseline, after) > _band_ceiling

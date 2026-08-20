@@ -75,20 +75,16 @@ ACTIVATION_TYPES: tuple[type[nn.Module], ...] = (
 
 # Normalisations hold per-neuron state of their own, so a revived neuron's entry
 # has to be reset with it.
-NORM_LAYER_TYPES: tuple[type[nn.Module], ...] = tuple(
-    layer
-    for layer in (
-        nn.LayerNorm,
-        nn.GroupNorm,
-        nn.BatchNorm1d,
-        nn.BatchNorm2d,
-        nn.BatchNorm3d,
-        nn.InstanceNorm1d,
-        nn.InstanceNorm2d,
-        nn.InstanceNorm3d,
-        getattr(nn, "RMSNorm", None),
-    )
-    if layer is not None
+NORM_LAYER_TYPES: tuple[type[nn.Module], ...] = (
+    nn.LayerNorm,
+    nn.GroupNorm,
+    nn.BatchNorm1d,
+    nn.BatchNorm2d,
+    nn.BatchNorm3d,
+    nn.InstanceNorm1d,
+    nn.InstanceNorm2d,
+    nn.InstanceNorm3d,
+    nn.RMSNorm,
 )
 
 
@@ -1269,7 +1265,7 @@ def set_grama_capture(
     :rtype: None
     """
     enabled = bool(
-        mutation is not None and getattr(mutation, "regrama_param_mut", False)
+        mutation is not None and getattr(mutation, "dormant_reset_param_mut", False)
     )
     if enabled and any(
         getattr(agent, "torch_compiler", None) is not None for agent in population

@@ -1372,7 +1372,7 @@ class TestLocalTrainerLLM:
 
 # The manifests that deliberately switch a Gaussian parameter-mutation band off,
 # paired with the ones that spell out the default.
-_RESET_PARAM_MUT_CONFIGS = [
+_RANDOM_RESET_PARAM_MUT_CONFIGS = [
     ("ppo/ppo_regrama.yaml", False),
     ("dqn/dqn_regrama.yaml", False),
     ("cqn_regrama.yaml", False),
@@ -1388,13 +1388,13 @@ _RESET_PARAM_MUT_CONFIGS = [
 ]
 
 
-class TestResetParamMutManifestField:
-    """The mutation.reset_param_mut switch as it is written in a manifest."""
+class TestRandomResetParamMutManifestField:
+    """The mutation.random_reset_param_mut switch as it is written in a manifest."""
 
     @pytest.mark.parametrize(
         ("rel_path", "expected"),
-        _RESET_PARAM_MUT_CONFIGS,
-        ids=[path for path, _ in _RESET_PARAM_MUT_CONFIGS],
+        _RANDOM_RESET_PARAM_MUT_CONFIGS,
+        ids=[path for path, _ in _RANDOM_RESET_PARAM_MUT_CONFIGS],
     )
     def test_shipped_manifests_carry_the_intended_value(self, rel_path, expected):
         config_path = CONFIGS_DIR / rel_path
@@ -1406,7 +1406,7 @@ class TestResetParamMutManifestField:
                 yaml.safe_load(fh), mode="python"
             )
 
-        assert validated.mutation.reset_param_mut is expected
+        assert validated.mutation.random_reset_param_mut is expected
 
     def test_defaults_to_true_when_the_manifest_omits_it(self):
         validated = TrainingManifest.get_validated(
@@ -1414,26 +1414,26 @@ class TestResetParamMutManifestField:
             mode="python",
         )
 
-        assert validated.mutation.reset_param_mut is True
+        assert validated.mutation.random_reset_param_mut is True
 
     def test_unknown_neighbouring_key_is_reported_informatively(self):
-        with pytest.raises(ValueError, match="reset_param_mutation"):
+        with pytest.raises(ValueError, match="random_reset_param_mutation"):
             TrainingManifest.get_validated(
                 _make_manifest(
                     {"name": "DQN"},
                     env={"name": "CartPole-v1"},
-                    mutation={"reset_param_mutation": False},
+                    mutation={"random_reset_param_mutation": False},
                 )
             )
 
     @pytest.mark.parametrize("value", ["maybe", 1.5, None])
     def test_non_boolean_value_is_rejected_informatively(self, value):
-        with pytest.raises(ValueError, match=r"reset_param_mut[\s\S]*bool"):
+        with pytest.raises(ValueError, match=r"random_reset_param_mut[\s\S]*bool"):
             TrainingManifest.get_validated(
                 _make_manifest(
                     {"name": "DQN"},
                     env={"name": "CartPole-v1"},
-                    mutation={"reset_param_mut": value},
+                    mutation={"random_reset_param_mut": value},
                 )
             )
 

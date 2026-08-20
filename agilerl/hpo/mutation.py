@@ -248,19 +248,20 @@ class Mutations:
     :type device: str, optional
     :param accelerator: Accelerator for distributed computing, defaults to None
     :type accelerator: accelerate.Accelerator(), optional
-    :param regrama_param_mut: Reset dormant neurons before adding Gaussian noise during a
-        parameter mutation, defaults to False. Works on a compiled algorithm but costs it
+    :param dormant_reset_param_mut: Reset dormant neurons (ReGraMa) before adding Gaussian
+        noise during a parameter mutation, defaults to False. Works on a compiled algorithm but costs it
         much of its speedup, since the gradient hooks break the compiled graph; see
         :func:`~agilerl.hpo.regrama.set_grama_capture`.
-    :type regrama_param_mut: bool, optional
-    :param super_param_mut: Apply the amplified ("super") band of the Gaussian parameter
-        mutation, defaults to True.
-    :type super_param_mut: bool, optional
-    :param reset_param_mut: Apply the reset band of the Gaussian parameter mutation, which
-        redraws a weight from N(0, 1) and so discards its trained value, defaults to True.
-    :type reset_param_mut: bool, optional
+    :type dormant_reset_param_mut: bool, optional
+    :param amplified_gauss_param_mut: Apply the amplified ("super") band of the Gaussian
+        parameter mutation, defaults to True.
+    :type amplified_gauss_param_mut: bool, optional
+    :param random_reset_param_mut: Apply the random-reset band of the Gaussian parameter
+        mutation, which redraws a weight from N(0, 1) and so discards its trained value,
+        defaults to True.
+    :type random_reset_param_mut: bool, optional
     :param dormant_threshold: Normalised GraMa score at or below which a neuron counts as
-        dormant, defaults to 0.01. Inert unless ``regrama_param_mut`` is True.
+        dormant, defaults to 0.01. Inert unless ``dormant_reset_param_mut`` is True.
     :type dormant_threshold: float, optional
     """
 
@@ -278,9 +279,9 @@ class Mutations:
         rand_seed: int | None = None,
         device: str = "cpu",
         accelerator: Accelerator | None = None,
-        regrama_param_mut: bool = False,
-        super_param_mut: bool = True,
-        reset_param_mut: bool = True,
+        dormant_reset_param_mut: bool = False,
+        amplified_gauss_param_mut: bool = True,
+        random_reset_param_mut: bool = True,
         dormant_threshold: float = 0.01,
     ) -> None:
         if activation_selection is None:
@@ -346,17 +347,17 @@ class Mutations:
         if isinstance(rand_seed, int):
             assert rand_seed >= 0, "Random seed must be greater than or equal to zero."
         assert isinstance(
-            regrama_param_mut,
+            dormant_reset_param_mut,
             bool,
-        ), "ReGraMa parameter mutation must be boolean value True or False."
+        ), "Dormant reset parameter mutation must be boolean value True or False."
         assert isinstance(
-            super_param_mut,
+            amplified_gauss_param_mut,
             bool,
-        ), "Super parameter mutation must be boolean value True or False."
+        ), "Amplified Gaussian parameter mutation must be boolean value True or False."
         assert isinstance(
-            reset_param_mut,
+            random_reset_param_mut,
             bool,
-        ), "Reset parameter mutation must be boolean value True or False."
+        ), "Random reset parameter mutation must be boolean value True or False."
         assert isinstance(
             dormant_threshold,
             (float, int),
@@ -384,9 +385,9 @@ class Mutations:
         self.device = device
         self.accelerator = accelerator
 
-        self.regrama_param_mut = regrama_param_mut
-        self.super_param_mut = super_param_mut
-        self.reset_param_mut = reset_param_mut
+        self.dormant_reset_param_mut = dormant_reset_param_mut
+        self.amplified_gauss_param_mut = amplified_gauss_param_mut
+        self.random_reset_param_mut = random_reset_param_mut
         self.dormant_threshold = dormant_threshold
         self._warned_recurrent = False
         self._warned_no_snapshot = False
@@ -685,11 +686,12 @@ class Mutations:
     def parameter_mutation(self, individual: IndividualT) -> IndividualT:
         """Perform a mutation to the weights of the individual.
 
-        Runs in two stages. When regrama_param_mut is set, ReGraMa mutations
+        Runs in two stages. When dormant_reset_param_mut is set, ReGraMa mutations
         first re-initialise the neurons that have gone dormant, across every
         evaluation network of the agent. Gaussian noise is then added to the policy
-        network, in the reset, ordinary and amplified bands. The reset and amplified
-        bands are each dropped when reset_param_mut or super_param_mut is unset.
+        network, in the random-reset, ordinary and amplified bands. The random-reset
+        and amplified bands are each dropped when random_reset_param_mut or
+        amplified_gauss_param_mut is unset.
 
         .. note::
             This is currently not supported for :class:`LLMAlgorithm <agilerl.algorithms.core.LLMAlgorithm>` agents.
@@ -709,7 +711,7 @@ class Mutations:
             return individual
 
         regrama_applied = (
-            self._regrama_reset(individual) if self.regrama_param_mut else False
+            self._regrama_reset(individual) if self.dormant_reset_param_mut else False
         )
 
         registry = individual.registry
@@ -1060,9 +1062,9 @@ class Mutations:
             mask_normal = rand_vals_tensor >= reset_prob
 
             # Dropping a band leaves its weights at their trained values.
-            if not self.super_param_mut:
+            if not self.amplified_gauss_param_mut:
                 mask_super = torch.zeros_like(mask_super)
-            if not self.reset_param_mut:
+            if not self.random_reset_param_mut:
                 mask_reset = torch.zeros_like(mask_reset)
 
             # Super mutation: add noise with std proportional to the absolute current value times super_mut_strength

@@ -595,8 +595,8 @@ class DummyTournament:
 
 
 class DummyMutations:
-    def __init__(self, regrama_param_mut=False):
-        self.regrama_param_mut = regrama_param_mut
+    def __init__(self, dormant_reset_param_mut=False):
+        self.dormant_reset_param_mut = dormant_reset_param_mut
 
     def mutation(self, pop, pre_training_mut=False, indices=None):
         return pop
@@ -5782,8 +5782,8 @@ def _regrama_mutation() -> Mutations:
         mutation_sd=0.1,
         rand_seed=0,
         device="cpu",
-        regrama_param_mut=True,
-        super_param_mut=False,
+        dormant_reset_param_mut=True,
+        amplified_gauss_param_mut=False,
         dormant_threshold=0.01,
     )
 
@@ -5826,12 +5826,12 @@ def _population_zeroed_biases(population) -> int:
 
 
 _pinned_weight = 5.0
-# A pinned weight can only end up this close to zero if the reset band redrew it:
-# ordinary noise on a 5.0 weight has a standard deviation of 0.5.
+# A pinned weight can only end up this close to zero if the random-reset band
+# redrew it: ordinary noise on a 5.0 weight has a standard deviation of 0.5.
 _reset_residual = 2.0
 
 
-def _reset_band_mutation(*, reset_param_mut: bool) -> Mutations:
+def _random_reset_band_mutation(*, random_reset_param_mut: bool) -> Mutations:
     """A parameter-mutation-only operator with the amplified band switched off."""
     return Mutations(
         no_mutation=0.0,
@@ -5843,8 +5843,8 @@ def _reset_band_mutation(*, reset_param_mut: bool) -> Mutations:
         mutation_sd=0.1,
         rand_seed=0,
         device="cpu",
-        super_param_mut=False,
-        reset_param_mut=reset_param_mut,
+        amplified_gauss_param_mut=False,
+        random_reset_param_mut=random_reset_param_mut,
     )
 
 
@@ -5869,10 +5869,10 @@ def _smallest_pinned_magnitude(population) -> float:
     return min(tensor.abs().min().item() for tensor in _mutable_weights(population))
 
 
-class TestResetParameterMutationCrossFamilyEvolution:
-    """The reset Gaussian band is switchable for every non-LLM algorithm family."""
+class TestRandomResetParameterMutationCrossFamilyEvolution:
+    """The random-reset Gaussian band is switchable for every non-LLM family."""
 
-    def evolve(self, family, *, reset_param_mut, cycles=3):
+    def evolve(self, family, *, random_reset_param_mut, cycles=3):
         """Run cycles of selection and parameter mutation over a pinned population."""
         algo_name, build_population = _CROSS_FAMILY_CASES[family]
         population = build_population()
@@ -5881,7 +5881,9 @@ class TestResetParameterMutationCrossFamilyEvolution:
             elitism=True,
             population_size=8,
         )
-        mutation = _reset_band_mutation(reset_param_mut=reset_param_mut)
+        mutation = _random_reset_band_mutation(
+            random_reset_param_mut=random_reset_param_mut
+        )
 
         smallest = _pinned_weight
         for _cycle in range(cycles):
@@ -5901,7 +5903,7 @@ class TestResetParameterMutationCrossFamilyEvolution:
         "family", list(_CROSS_FAMILY_CASES), ids=list(_CROSS_FAMILY_CASES)
     )
     def test_the_band_redraws_weights_when_left_on(self, family):
-        population, smallest = self.evolve(family, reset_param_mut=True)
+        population, smallest = self.evolve(family, random_reset_param_mut=True)
 
         assert len(population) == 8
         assert smallest < _reset_residual
@@ -5910,7 +5912,7 @@ class TestResetParameterMutationCrossFamilyEvolution:
         "family", list(_CROSS_FAMILY_CASES), ids=list(_CROSS_FAMILY_CASES)
     )
     def test_switching_it_off_leaves_trained_weights_alone(self, family):
-        population, smallest = self.evolve(family, reset_param_mut=False)
+        population, smallest = self.evolve(family, random_reset_param_mut=False)
 
         assert len(population) == 8
         assert smallest > _reset_residual
@@ -6049,7 +6051,7 @@ class TestRegramaTrainerWiring:
             max_steps=4,
             evo_steps=4,
             eval_loop=1,
-            mutation=DummyMutations(regrama_param_mut=True),
+            mutation=DummyMutations(dormant_reset_param_mut=True),
             wb=False,
             verbose=False,
         )
@@ -6066,7 +6068,7 @@ class TestRegramaTrainerWiring:
             max_steps=4,
             evo_steps=4,
             eval_loop=1,
-            mutation=DummyMutations(regrama_param_mut=True),
+            mutation=DummyMutations(dormant_reset_param_mut=True),
             wb=False,
             verbose=False,
         )
@@ -6093,7 +6095,7 @@ class TestRegramaTrainerWiring:
             max_steps=4,
             evo_steps=4,
             eval_loop=1,
-            mutation=DummyMutations(regrama_param_mut=True),
+            mutation=DummyMutations(dormant_reset_param_mut=True),
             wb=False,
         )
 
@@ -6117,7 +6119,7 @@ class TestRegramaTrainerWiring:
             evo_steps=5,
             eval_steps=2,
             eval_loop=1,
-            mutation=DummyMutations(regrama_param_mut=True),
+            mutation=DummyMutations(dormant_reset_param_mut=True),
             wb=False,
         )
 
@@ -6140,7 +6142,7 @@ class TestRegramaTrainerWiring:
             max_steps=4,
             evo_steps=4,
             eval_loop=1,
-            mutation=DummyMutations(regrama_param_mut=True),
+            mutation=DummyMutations(dormant_reset_param_mut=True),
         )
 
         self.assert_capture_enabled(population_multi_agent)
@@ -6160,7 +6162,7 @@ class TestRegramaTrainerWiring:
             max_steps=4,
             evo_steps=4,
             eval_loop=1,
-            mutation=DummyMutations(regrama_param_mut=True),
+            mutation=DummyMutations(dormant_reset_param_mut=True),
         )
 
         self.assert_capture_enabled(population_multi_agent)
