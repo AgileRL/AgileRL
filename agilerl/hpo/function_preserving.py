@@ -125,17 +125,68 @@ def _inner_module(submodule: nn.Module) -> nn.Module:
     return submodule
 
 
+def _stack_signature(layers: list[nn.Module]) -> tuple[int, tuple[int, ...]]:
+    """The ``(input dim, hidden widths)`` that a parallel stream must share.
+
+    Output widths are deliberately excluded: a duelling head's value and advantage
+    streams end in ``num_atoms`` and ``num_actions * num_atoms`` respectively, and
+    are parallel precisely because everything *before* the output layer matches.
+    """
+    return (
+        int(_primary_weight(layers[0]).shape[1]),
+        tuple(_out_dim(layer) for layer in layers[:-1]),
+    )
+
+
+def _weight_stacks(submodule: nn.Module) -> list[list[nn.Module]]:
+    """Return every parallel weight stack of *submodule*, the primary one first.
+
+    Most modules own a single stack, ``self.model``. A *branched* head owns more:
+    :class:`~agilerl.networks.custom_modules.DuelingDistributionalMLP` keeps its
+    value stream in the inherited ``model`` and its advantage stream in a sibling
+    ``nn.Sequential`` (``advantage_net``), and its ``recreate_network`` grows both
+    from the same ``hidden_size``. An addition therefore lands on every stream and
+    the fixup must too -- applying it to ``model`` alone leaves the network neither
+    preserved nor equal to the stock operator's output.
+
+    Siblings are matched structurally rather than by name: a candidate qualifies
+    only if its :func:`_stack_signature` matches the primary stack's, so an
+    unrelated ``nn.Sequential`` is skipped untouched rather than mis-initialised.
+
+    :param submodule: The evolvable module being mutated.
+    :return: One list of conv/(noisy) linear layers per stack, in forward order.
+    """
+    inner = _inner_module(submodule)
+    model = getattr(inner, "model", None)
+    if model is None:
+        return []
+    primary = [m for m in model if _is_weight_layer(m)]
+    if not primary:
+        return []
+
+    stacks = [primary]
+    signature = _stack_signature(primary)
+    # NOTE: ``EvolvableModule`` overrides ``.modules()`` to return group names, so
+    # iterate ``named_children()`` to reach the real sibling modules.
+    for _name, child in inner.named_children():
+        if child is model or not isinstance(child, nn.Sequential):
+            continue
+        candidate = [m for m in child if _is_weight_layer(m)]
+        if candidate and _stack_signature(candidate) == signature:
+            stacks.append(candidate)
+    return stacks
+
+
 def _ordered_weight_layers(submodule: nn.Module) -> list[nn.Module]:
     """Return the conv/linear layers of ``submodule.model`` in forward order.
 
     Norm, activation and flatten layers are skipped, so the returned list is
     ``[hidden_0, ..., hidden_{N-1}, output]`` for both MLP and CNN modules.
-    ``EvolvableDistribution`` heads are unwrapped to their inner MLP first.
+    ``EvolvableDistribution`` heads are unwrapped to their inner MLP first. This is
+    the *primary* stack only -- see :func:`_weight_stacks` for branched heads.
     """
-    model = getattr(_inner_module(submodule), "model", None)
-    if model is None:
-        return []
-    return [m for m in model if _is_weight_layer(m)]
+    stacks = _weight_stacks(submodule)
+    return stacks[0] if stacks else []
 
 
 def _weight_tensors(layer: nn.Module) -> list[torch.Tensor]:
@@ -244,23 +295,30 @@ def init_new_outgoing(
         value ``>= new_width`` means nothing was actually added -- a no-op).
     :param noise_scale: Symmetry-breaking noise factor (``arch_fp_noise``); ``0``
         keeps the exact-zero, function-preserving behaviour.
-    :return: The number of units whose outgoing weights were (re)initialised.
+    :return: The number of units whose outgoing weights were (re)initialised in
+        each stack (every parallel stream of a branched head is fixed up).
     """
-    layers = _ordered_weight_layers(submodule)
-    if old_width is None or not 0 <= hidden_layer < len(layers) - 1:
+    if old_width is None:
         return 0
 
-    producer = layers[hidden_layer]
-    consumer = layers[hidden_layer + 1]
-    new_width = _out_dim(producer)
-    num_added = new_width - old_width
-    if num_added <= 0:
-        return 0
+    num_added = 0
+    for layers in _weight_stacks(submodule):
+        if not 0 <= hidden_layer < len(layers) - 1:
+            continue
 
-    conv_to_linear = _is_conv(producer) and _is_linear(consumer)
-    block = _spatial_size(submodule) if conv_to_linear else 1
-    col_slice = slice(old_width * block, new_width * block)
-    _init_new_input_columns(consumer, col_slice, noise_scale)
+        producer = layers[hidden_layer]
+        consumer = layers[hidden_layer + 1]
+        new_width = _out_dim(producer)
+        added = new_width - old_width
+        if added <= 0:
+            continue
+
+        conv_to_linear = _is_conv(producer) and _is_linear(consumer)
+        block = _spatial_size(submodule) if conv_to_linear else 1
+        col_slice = slice(old_width * block, new_width * block)
+        _init_new_input_columns(consumer, col_slice, noise_scale)
+        num_added = added
+
     return num_added
 
 
@@ -274,28 +332,32 @@ def identity_new_layer(submodule: nn.Module) -> bool:
     the activation is ReLU / Identity.
 
     :param submodule: The mutated head ``EvolvableMLP``.
-    :return: ``True`` if an identity layer was written, ``False`` otherwise.
+    :return: ``True`` if an identity layer was written in at least one stack.
     """
-    layers = _ordered_weight_layers(submodule)
-    if len(layers) < 2:
-        return False
-    new_layer = layers[-2]
-    weight = _primary_weight(new_layer)
-    if weight.dim() != 2 or weight.shape[0] != weight.shape[1]:
-        return False
+    wrote = False
+    for layers in _weight_stacks(submodule):
+        if len(layers) < 2:
+            continue
+        new_layer = layers[-2]
+        weight = _primary_weight(new_layer)
+        if weight.dim() != 2 or weight.shape[0] != weight.shape[1]:
+            continue
 
-    with torch.no_grad():
-        if getattr(new_layer, "weight", None) is not None:
-            new_layer.weight.data.zero_()
-            new_layer.weight.data.fill_diagonal_(1.0)
-        if getattr(new_layer, "weight_mu", None) is not None:
-            new_layer.weight_mu.data.zero_()
-            new_layer.weight_mu.data.fill_diagonal_(1.0)
-        if getattr(new_layer, "weight_sigma", None) is not None:
-            new_layer.weight_sigma.data.zero_()
-        for b in _bias_tensors(new_layer):
-            b.data.zero_()
-    return True
+        with torch.no_grad():
+            if getattr(new_layer, "weight", None) is not None:
+                new_layer.weight.data.zero_()
+                new_layer.weight.data.fill_diagonal_(1.0)
+            if getattr(new_layer, "weight_mu", None) is not None:
+                new_layer.weight_mu.data.zero_()
+                new_layer.weight_mu.data.fill_diagonal_(1.0)
+            # A zeroed sigma makes the *training*-mode forward the identity too;
+            # ``weight_epsilon`` needs no reset since it is multiplied by it.
+            if getattr(new_layer, "weight_sigma", None) is not None:
+                new_layer.weight_sigma.data.zero_()
+            for b in _bias_tensors(new_layer):
+                b.data.zero_()
+        wrote = True
+    return wrote
 
 
 # --------------------------------------------------------------------------- #
@@ -329,13 +391,46 @@ def resolve_latent_network(network: Any, agent_id: str | None) -> Any:
     return network[agent_id] if agent_id is not None else network
 
 
-def head_first_layer(fwd_net: Any) -> nn.Module | None:
-    """The head network's first weight layer (unwraps ``EvolvableDistribution``)."""
+def head_first_layers(fwd_net: Any) -> list[nn.Module]:
+    """The first weight layer of each of the head's parallel streams.
+
+    A branched head consumes the latent once per stream, so a latent widening has
+    to be compensated in every one of them.
+
+    :param fwd_net: The ``EvolvableNetwork`` (encoder + ``head_net``).
+    :return: One layer per stack, primary stream first; empty if there is no head.
+    """
     head = getattr(fwd_net, "head_net", None)
     if head is None:
-        return None
-    layers = _ordered_weight_layers(head)
+        return []
+    return [layers[0] for layers in _weight_stacks(head) if layers]
+
+
+def head_first_layer(fwd_net: Any) -> nn.Module | None:
+    """The head network's first weight layer (unwraps ``EvolvableDistribution``).
+
+    The *primary* stream only -- see :func:`head_first_layers`.
+    """
+    layers = head_first_layers(fwd_net)
     return layers[0] if layers else None
+
+
+def _shift_trailing_head_inputs(
+    consumer: nn.Module, old_latent: int, new_latent: int, extra: int
+) -> None:
+    """Move a head's non-latent trailing input columns to their new offset.
+
+    ``preserve_parameters`` copies the overlapping top-left block, so after a latent
+    widening the trailing block still sits at the *old* offset while the head now
+    reads it from the new one. Sliding it across restores the correspondence; the
+    source is cloned first because the two ranges overlap whenever
+    ``new_latent < old_latent + extra``.
+    """
+    with torch.no_grad():
+        for w in _weight_tensors(consumer):
+            w.data[:, new_latent : new_latent + extra] = w.data[
+                :, old_latent : old_latent + extra
+            ].clone()
 
 
 def init_new_latent_outgoing(
@@ -343,10 +438,20 @@ def init_new_latent_outgoing(
 ) -> int:
     """Zero/noise the head's new input columns after a latent-dim widening.
 
-    New latent units are the trailing input columns of the head's first weight
-    layer (latent is flat, so ``block == 1``); filling them zero (or with small
-    symmetry-breaking noise) makes ``add_latent_node`` / ``add_latent_channel``
-    function-preserving across the encoder->head boundary.
+    New latent units occupy columns ``[old_latent, new_latent)`` of the head's first
+    weight layer (latent is flat, so ``block == 1``); filling them zero (or with
+    small symmetry-breaking noise) makes ``add_latent_node`` /
+    ``add_latent_channel`` function-preserving across the encoder->head boundary.
+
+    The new width is read from the network's own ``latent_dim``, **not** from the
+    consumer's tensor width: a head may take more than the latent.
+    :class:`~agilerl.networks.q_networks.ContinuousQNetwork` (the DDPG/TD3/MADDPG/
+    MATD3 critic) builds its head with ``num_inputs=latent_dim + num_actions`` and
+    forwards ``torch.cat([latent, actions])``, so sizing off the tensor would treat
+    that action block as new latent units and overwrite it -- zeroing ``dQ/da`` and
+    leaving the deterministic actor with no policy gradient. Those trailing inputs
+    are instead slid to the offset the widened head reads them from, which keeps the
+    addition function-preserving for such critics too.
 
     :param fwd_net: The mutated ``EvolvableNetwork`` (encoder + ``head_net``).
     :param old_latent: The latent dim *before* the mutation (``None`` or ``>=`` the
@@ -355,14 +460,29 @@ def init_new_latent_outgoing(
     :param noise_scale: Symmetry-breaking noise factor (``arch_fp_noise``).
     :return: The number of new latent units whose fan-out was (re)initialised.
     """
-    consumer = head_first_layer(fwd_net)
-    if consumer is None or old_latent is None:
+    if old_latent is None:
         return 0
-    new_latent = int(_primary_weight(consumer).shape[1])
+
+    latent_dim = getattr(fwd_net, "latent_dim", None)
+    if latent_dim is None:
+        return 0
+
+    new_latent = int(latent_dim)
     num_added = new_latent - old_latent
     if num_added <= 0:
         return 0
-    _init_new_input_columns(consumer, slice(old_latent, new_latent), noise_scale)
+
+    for consumer in head_first_layers(fwd_net):
+        # Anything past the latent is a non-latent head input (e.g. the critic's
+        # action block). A head narrower than the latent consumes something this
+        # surgery cannot describe, so leave it to the original operator.
+        extra = int(_primary_weight(consumer).shape[1]) - new_latent
+        if extra < 0:
+            continue
+        if extra > 0:
+            _shift_trailing_head_inputs(consumer, old_latent, new_latent, extra)
+        _init_new_input_columns(consumer, slice(old_latent, new_latent), noise_scale)
+
     return num_added
 
 

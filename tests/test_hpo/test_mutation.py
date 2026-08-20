@@ -30,6 +30,7 @@ from agilerl.wrappers.agent import AsyncAgentsWrapper, RSNorm
 from tests.helper_functions import (
     assert_state_dicts_equal,
     generate_discrete_space,
+    generate_multi_agent_box_spaces,
     generate_random_box_space,
 )
 from tests.test_algorithms.test_llms.test_grpo import create_module
@@ -3026,3 +3027,320 @@ class TestFunctionPreservingEncoderLayer:
         assert po.encoder_layer_mutations is False
         assert "encoder.add_layer" not in po.mutation_methods
         assert "encoder.remove_layer" not in po.mutation_methods
+
+
+def _fp_strip_norms(policy):
+    """Replace every ``LayerNorm`` in *policy* with an identity, in place.
+
+    ``RainbowQNetwork`` pops ``layer_norm`` out of ``head_config`` and forces
+    ``layer_norm=True`` on the encoder, so a norm-free duelling network cannot be
+    configured -- and an architecture mutation rebuilds the norms anyway via
+    ``recreate_network``. Calling this both before measuring and after mutating
+    isolates the *branched-stream* surgery from the LayerNorm caveat, which is a
+    separate, already-warned-about limitation of every add mutation.
+    """
+    for _name, parent in policy.named_modules():
+        for child_name, child in list(parent.named_children()):
+            if isinstance(child, torch.nn.LayerNorm):
+                setattr(parent, child_name, torch.nn.Identity())
+    return policy
+
+
+def _fp_rainbow_policy(head_hidden=(16,), latent_dim=8):
+    """A Rainbow DQN policy: duelling, distributional, noisy head."""
+    from agilerl.utils.utils import create_population
+
+    pop = create_population(
+        algo="Rainbow DQN",
+        observation_space=spaces.Box(-1, 1, shape=(6,), dtype=np.float32),
+        action_space=spaces.Discrete(4),
+        net_config={
+            "latent_dim": latent_dim,
+            "min_latent_dim": 4,
+            "max_latent_dim": 32,
+            "encoder_config": {"hidden_size": [16], "activation": "ReLU"},
+            "head_config": {"hidden_size": list(head_hidden), "activation": "ReLU"},
+        },
+        INIT_HP=SHARED_INIT_HP,
+        population_size=1,
+        device="cpu",
+    )
+    return pop[0].actor
+
+
+def _rainbow_q(policy, obs):
+    policy.eval()
+    with torch.no_grad():
+        return policy(obs).clone()
+
+
+class TestFunctionPreservingBranchedHeads:
+    """The duelling Rainbow head owns two parallel weight stacks.
+
+    ``DuelingDistributionalMLP`` keeps its value stream in the inherited
+    ``model`` and its advantage stream in a sibling ``nn.Sequential``
+    (``advantage_net``). ``recreate_network`` grows both from the same
+    ``hidden_size``, so the *mutation* is symmetric -- the surgery must be too,
+    or ``func_preserving`` silently produces a network that is neither preserved
+    nor the stock operator's output.
+    """
+
+    def test_weight_stacks_returns_one_stack_for_an_unbranched_head(self):
+        po = _fp_dqn_pop()[0].actor
+
+        stacks = fp._weight_stacks(po.head_net)
+
+        assert len(stacks) == 1
+        assert stacks[0] == fp._ordered_weight_layers(po.head_net)
+
+    def test_weight_stacks_finds_the_duelling_advantage_stream(self):
+        po = _fp_rainbow_policy()
+
+        stacks = fp._weight_stacks(po.head_net)
+
+        assert len(stacks) == 2
+        assert stacks[0] == fp._ordered_weight_layers(po.head_net)
+        assert stacks[1] == [
+            m for m in po.head_net.advantage_net if fp._is_weight_layer(m)
+        ]
+
+    def test_weight_stacks_skips_a_sibling_with_a_different_shape(self):
+        """The guard is structural: a parallel stream shares input dim and widths."""
+        po = _fp_rainbow_policy()
+        po.head_net.unrelated = torch.nn.Sequential(torch.nn.Linear(3, 7))
+
+        stacks = fp._weight_stacks(po.head_net)
+
+        assert len(stacks) == 2
+
+    def test_add_layer_preserves_function(self):
+        po = _fp_strip_norms(_fp_rainbow_policy(head_hidden=(16,)))
+        obs = torch.randn(8, 6)
+        q0 = _rainbow_q(po, obs)
+
+        applied, _md = _fp_muts()._apply_arch_mutation(po, "head_net.add_layer", {})
+
+        assert applied == "head_net.add_layer"
+        assert torch.allclose(q0, _rainbow_q(_fp_strip_norms(po), obs), atol=1e-5)
+
+    def test_add_node_preserves_function(self):
+        po = _fp_strip_norms(_fp_rainbow_policy(head_hidden=(16,)))
+        obs = torch.randn(8, 6)
+        q0 = _rainbow_q(po, obs)
+
+        applied, _md = _fp_muts()._apply_arch_mutation(
+            po, "head_net.add_node", {"hidden_layer": 0, "numb_new_nodes": 16}
+        )
+
+        assert applied == "head_net.add_node"
+        assert torch.allclose(q0, _rainbow_q(_fp_strip_norms(po), obs), atol=1e-5)
+
+    def test_add_latent_node_preserves_function(self):
+        po = _fp_strip_norms(_fp_rainbow_policy(latent_dim=8))
+        obs = torch.randn(8, 6)
+        q0 = _rainbow_q(po, obs)
+
+        applied, _md = _fp_muts()._apply_arch_mutation(
+            po, "add_latent_node", {"numb_new_nodes": 8}
+        )
+
+        assert applied == "add_latent_node"
+        assert torch.allclose(q0, _rainbow_q(_fp_strip_norms(po), obs), atol=1e-5)
+
+    def test_add_layer_changes_function_under_original(self):
+        """The contrast that makes the ablation meaningful."""
+        po = _fp_strip_norms(_fp_rainbow_policy(head_hidden=(16,)))
+        obs = torch.randn(8, 6)
+        q0 = _rainbow_q(po, obs)
+
+        applied, _md = _fp_muts(arch="original")._apply_arch_mutation(
+            po, "head_net.add_layer", {}
+        )
+
+        assert applied == "head_net.add_layer"
+        assert not torch.allclose(q0, _rainbow_q(_fp_strip_norms(po), obs), atol=1e-5)
+
+
+def _fp_continuous_pop(algo="DDPG", latent_dim=16, device="cpu"):
+    """A DDPG/TD3 population whose critic head consumes ``[latent | action]``."""
+    obs = spaces.Box(-1, 1, shape=(6,), dtype=np.float32)
+    act = spaces.Box(-1, 1, shape=(3,), dtype=np.float32)
+    net_config = {
+        "latent_dim": latent_dim,
+        "min_latent_dim": 4,
+        "max_latent_dim": 64,
+        "encoder_config": {
+            "hidden_size": [16],
+            "activation": "ReLU",
+            "output_activation": "Identity",
+            "min_mlp_nodes": 4,
+            "max_mlp_nodes": 256,
+            "layer_norm": False,
+        },
+        "head_config": {
+            "hidden_size": [16],
+            "activation": "ReLU",
+            "min_hidden_layers": 1,
+            "max_hidden_layers": 4,
+            "min_mlp_nodes": 4,
+            "max_mlp_nodes": 256,
+            "layer_norm": False,
+        },
+    }
+    init_hp = SHARED_INIT_HP.copy()
+    init_hp["POPULATION_SIZE"] = 1
+    return create_population(
+        algo=algo,
+        observation_space=obs,
+        action_space=act,
+        net_config=net_config,
+        INIT_HP=init_hp,
+        population_size=1,
+        device=device,
+    )
+
+
+def _critic_q(critic, obs, actions):
+    critic.eval()
+    with torch.no_grad():
+        return critic(obs, actions).clone()
+
+
+class TestFunctionPreservingLatentExtraHeadInputs:
+    """A ``ContinuousQNetwork`` head consumes ``[latent | action]``, not just latent.
+
+    DDPG/TD3/MADDPG/MATD3 critics build their head with
+    ``num_inputs=latent_dim + num_actions`` and forward
+    ``torch.cat([latent, actions], dim=-1)``, so widening the latent shifts the
+    action block to a new offset. Sizing the fixup off the head's *tensor* width
+    mistakes those action columns for new latent units and overwrites them, which
+    zeroes ``dQ/da`` and leaves the deterministic actor with no policy gradient.
+    """
+
+    def test_add_latent_node_preserves_q_values(self, monkeypatch):
+        # Driven through the full single-agent path: DDPG pins the critic's encoder
+        # to the actor's (``share_encoder_parameters``), so the mutation has to run
+        # on the policy and be mirrored onto the critic for the encoder to survive.
+        pop = _fp_continuous_pop()
+        ind = pop[0]
+        obs = torch.randn(8, 6)
+        actions = torch.randn(8, 3)
+        q0 = _critic_q(ind.critic, obs, actions)
+
+        monkeypatch.setattr(
+            type(ind.actor),
+            "sample_mutation_method",
+            lambda _self, *_a, **_k: "add_latent_node",
+            raising=False,
+        )
+        _fp_muts()._architecture_mutate_single(ind)
+
+        assert ind.mut == "add_latent_node"
+        assert torch.allclose(q0, _critic_q(ind.critic, obs, actions), atol=1e-5)
+
+    def test_add_latent_node_keeps_the_action_gradient_alive(self):
+        # The severe symptom: a critic whose action columns were overwritten makes
+        # Q independent of a, so DDPG's actor loss -Q(s, pi(s)) has no gradient.
+        pop = _fp_continuous_pop()
+        critic = pop[0].critic
+
+        _fp_muts()._apply_arch_mutation(
+            critic, "add_latent_node", {"numb_new_nodes": 8}
+        )
+
+        actions = torch.randn(8, 3, requires_grad=True)
+        grad = torch.autograd.grad(critic(torch.randn(8, 6), actions).sum(), actions)[0]
+        assert float(grad.abs().max()) > 0.0
+
+    def test_add_latent_node_zeroes_only_the_new_latent_columns(self):
+        pop = _fp_continuous_pop()
+        critic = pop[0].critic
+        old_latent = critic.latent_dim
+        old_action_cols = (
+            fp.head_first_layer(critic)
+            .weight.data[:, old_latent : old_latent + critic.num_actions]
+            .clone()
+        )
+
+        _fp_muts()._apply_arch_mutation(
+            critic, "add_latent_node", {"numb_new_nodes": 8}
+        )
+
+        head_first = fp.head_first_layer(critic).weight.data
+        new_latent = critic.latent_dim
+        assert new_latent > old_latent
+        # New latent units contribute nothing yet ...
+        assert torch.count_nonzero(head_first[:, old_latent:new_latent]) == 0
+        # ... while the trained action block rides along to its new offset.
+        assert torch.equal(head_first[:, new_latent:], old_action_cols)
+
+    def test_add_latent_node_noise_leaves_the_action_columns_untouched(self):
+        # arch_fp_noise seeds the *new latent* fan-out only; the action block is
+        # not a new unit and must not be reseeded.
+        pop = _fp_continuous_pop()
+        critic = pop[0].critic
+        old_latent = critic.latent_dim
+        old_action_cols = (
+            fp.head_first_layer(critic)
+            .weight.data[:, old_latent : old_latent + critic.num_actions]
+            .clone()
+        )
+
+        _fp_muts(arch_fp_noise=0.1)._apply_arch_mutation(
+            critic, "add_latent_node", {"numb_new_nodes": 8}
+        )
+
+        head_first = fp.head_first_layer(critic).weight.data
+        new_latent = critic.latent_dim
+        assert torch.count_nonzero(head_first[:, old_latent:new_latent]) > 0
+        assert torch.equal(head_first[:, new_latent:], old_action_cols)
+
+    def test_td3_critic_preserves_q_values(self, monkeypatch):
+        pop = _fp_continuous_pop(algo="TD3")
+        ind = pop[0]
+        obs = torch.randn(8, 6)
+        actions = torch.randn(8, 3)
+        q0 = _critic_q(ind.critic_1, obs, actions)
+
+        monkeypatch.setattr(
+            type(ind.actor),
+            "sample_mutation_method",
+            lambda _self, *_a, **_k: "add_latent_node",
+            raising=False,
+        )
+        _fp_muts()._architecture_mutate_single(ind)
+
+        assert ind.mut == "add_latent_node"
+        assert torch.allclose(q0, _critic_q(ind.critic_1, obs, actions), atol=1e-5)
+
+    def test_maddpg_critic_preserves_q_values_across_moduledict(self):
+        obs_spaces = generate_multi_agent_box_spaces(3, (6,))
+        act_spaces = generate_multi_agent_box_spaces(3, (2,))
+        pop = create_population(
+            algo="MADDPG",
+            observation_space=obs_spaces,
+            action_space=act_spaces,
+            net_config=_ma_relu_config(),
+            INIT_HP=SHARED_INIT_HP_MA,
+            population_size=1,
+            device="cpu",
+        )
+        ind = pop[0]
+        critics = ind.critics
+        agent_id = next(iter(critics.keys()))
+        critic = critics[agent_id]
+        # The MADDPG critic scores every agent's observation and every agent's
+        # action, so its encoder is an ``EvolvableMultiInput`` over the dict space.
+        obs = {
+            aid: torch.randn(8, *space.shape)
+            for aid, space in ind.possible_observation_spaces.items()
+        }
+        actions = torch.randn(8, critic.num_actions)
+        q0 = _critic_q(critic, obs, actions)
+
+        applied, _md = _fp_muts()._apply_arch_mutation(
+            critics, f"{agent_id}.add_latent_node", {"numb_new_nodes": 8}
+        )
+
+        assert applied == f"{agent_id}.add_latent_node"
+        assert torch.allclose(q0, _critic_q(critic, obs, actions), atol=1e-5)
