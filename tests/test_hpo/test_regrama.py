@@ -1375,9 +1375,66 @@ class TestResetDormantNeurons:
 
         report = regrama.reset_dormant_neurons(agent.actor, scores, 0.01, make_rng())
 
-        assert report.neurons_reset > 0
+        # 5 conv channels per sub-encoder, the 8-unit latent, and the head's two
+        # 8-unit layers. The two 32-unit sub-encoder tails are excluded: their
+        # features are one offset slice of the fusion layer's input.
+        assert report.neurons_reset == 5 + 5 + 8 + 8 + 8
         assert all(
             torch.isfinite(value).all() for value in agent.actor.state_dict().values()
+        )
+
+    def test_multi_input_sub_encoder_tails_are_left_unreset(
+        self,
+        dict_space,
+        discrete_space,
+        encoder_multi_input_config,
+    ):
+        # A sub-encoder's features are one offset slice of the fusion layer's
+        # input, so its tail has no consumer the surgery can index and is skipped
+        # rather than rewritten over columns belonging to other sub-encoders.
+        agent = DQN(
+            dict_space,
+            discrete_space,
+            net_config=encoder_multi_input_config,
+            device="cpu",
+        )
+        agent.capture_grama = True
+        agent.init_training_step()
+        observation = {
+            key: torch.rand(2, *space.shape) for key, space in dict_space.items()
+        }
+        agent.actor(observation).square().mean().backward()
+        agent.finalize_training_step(1)
+
+        tails = {
+            id(regrama.activation_modules(sub_encoder, include_output=True)[-1])
+            for sub_encoder in agent.actor.encoder.feature_net.values()
+        }
+        scores = []
+        for activation, entry in zip(
+            regrama.target_activations(agent.actor),
+            agent.grama_scores[0],
+            strict=True,
+        ):
+            if entry is None:
+                scores.append(None)
+            else:
+                # Scores are normalised by their layer mean, so a uniform fill of
+                # zero reads as dormant and any positive fill reads as healthy.
+                dormant = id(activation) in tails
+                scores.append(
+                    torch.zeros_like(entry) if dormant else torch.ones_like(entry)
+                )
+        before = {
+            name: value.clone() for name, value in agent.actor.state_dict().items()
+        }
+
+        report = regrama.reset_dormant_neurons(agent.actor, scores, 0.01, make_rng())
+
+        assert report.neurons_reset == 0
+        assert all(
+            torch.equal(value, before[name])
+            for name, value in agent.actor.state_dict().items()
         )
 
     def test_recurrent_core_is_reported_as_out_of_scope(

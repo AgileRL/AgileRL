@@ -920,8 +920,10 @@ def resolve_consumers(
 ) -> list[ConsumerTarget]:
     """Pair each usable consumer weight tensor with its per-neuron column stride.
 
-    Anything failing that is not this producer's consumer and rewriting its columns
-    would corrupt weights belonging to other neurons, so it is skipped instead.
+    A consumer must spend its columns on exactly these neurons: one block each,
+    none interleaved. Anything failing that is not this producer's consumer and
+    rewriting its columns would corrupt weights belonging to other neurons, so it
+    is skipped instead.
 
     :param producer: The layer emitting the neurons.
     :type producer: torch.nn.Module
@@ -956,6 +958,14 @@ def resolve_consumers(
             stride = 1
 
         if next_weight.shape[1] != producer_neurons * stride:
+            logger.debug(
+                "ReGraMa: %s spends %d columns where %s's neurons need %d; "
+                "leaving the layer unreset.",
+                type(next_layer).__name__,
+                next_weight.shape[1],
+                type(producer).__name__,
+                producer_neurons * stride,
+            )
             continue
 
         consumers.append(ConsumerTarget(next_weight, stride))
