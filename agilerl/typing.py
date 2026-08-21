@@ -189,6 +189,10 @@ ActionType = int | float | npt.NDArray | torch.Tensor
 # A recorded fitness: a scalar, or a per-sub-agent row (multi-agent, sum_scores=False).
 FitnessValue = float | npt.NDArray
 
+# GraMa per-neuron pre-activation gradient magnitudes captured during training:
+# one list per network, one entry per measured layer.
+GraMaScores = list[list[torch.Tensor | None]]
+
 # Raw Gym/PettingZoo ``info["action_mask"]`` before stacking into a tensor
 # (1 = legal, 0 = illegal). ``None`` means the agent provided no mask.
 ActionMask = np.ndarray | Sequence[int | float | bool]

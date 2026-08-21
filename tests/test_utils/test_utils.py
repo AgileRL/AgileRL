@@ -865,6 +865,25 @@ class TestPrintHyperparams:
             call_args = mock_print.call_args[0][0]
             assert "nan" in call_args.lower() or "nan" in str(call_args)
 
+    def test_regrama_operator_state_is_not_listed_as_a_hyperparameter(self):
+        pop = create_population(
+            algo="DQN",
+            observation_space=spaces.Box(0, 1, shape=(4,)),
+            action_space=spaces.Discrete(2),
+            net_config={"encoder_config": {"hidden_size": [8]}},
+            INIT_HP=SHARED_INIT_HP,
+            population_size=1,
+        )
+        pop[0].capture_grama = True
+        pop[0].grama_scores = [[torch.zeros(8)]]
+
+        with patch("builtins.print") as mock_print:
+            print_hyperparams(pop)
+
+        printed = mock_print.call_args[0][0]
+        assert "grama_scores" not in printed
+        assert "capture_grama" not in printed
+
     # The function prints the hyperparameters and fitnesses of all agents in the population.
     def test_prints_hyperparams(self):
         # Arrange
@@ -895,6 +914,8 @@ class TestPrintHyperparams:
         agent = pop[0]
         mean_fitness = np.mean(agent.fitness[-5:]).item()
         attrs = EvolvableAlgorithm.inspect_attributes(agent)
+        attrs.pop("grama_scores", None)
+        attrs.pop("capture_grama", None)
         expected_lines = [
             f"Agent ID: {agent.index}  |  Mean 5 Fitness: {mean_fitness:.2f}",
             "Attributes:",

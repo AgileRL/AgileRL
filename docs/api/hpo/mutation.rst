@@ -9,7 +9,7 @@ The :class:`Mutations <agilerl.hpo.mutation.Mutations>` class is used to mutate 
 
   * **No mutation**: An "identity" mutation, whereby the agent is returned unchanged.
   * **Network architecture mutations**: Currently involves adding layers or nodes. Trained weights are reused and new weights are initialized randomly.
-  * **Network parameters mutation**: Mutating weights with Gaussian noise.
+  * **Network parameters mutation**: Mutating weights with Gaussian noise, optionally preceded by ReGraMa resets of dormant neurons.
   * **Network activation layer mutation**: Change of activation layer.
   * **RL hyperparameter mutation**: Mutation of a learning hyperparameter (e.g. learning rate or batch size).
 
@@ -33,7 +33,11 @@ A selection strategy and mutation are applied sequentially to fully evolve a pop
     rl_hp=0.2,                            # Learning HP mutation
     mutation_sd=0.1,                      # Mutation strength
     rand_seed=1,                          # Random seed
-    device=device
+    device=device,
+    dormant_reset_param_mut=False,        # Reset dormant neurons (ReGraMa)
+    amplified_gauss_param_mut=True,       # Apply the amplified Gaussian band
+    random_reset_param_mut=True,          # Apply the random-reset Gaussian band
+    dormant_threshold=0.01                # Normalised score at or below which a neuron is dormant
   )
 
 

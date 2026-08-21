@@ -1358,6 +1358,56 @@ class TestMutationSpecExtraForbid:
         assert spec.probabilities.no_mut == 0.5
 
 
+class TestMutationSpecRegramaFields:
+    """The four parameter-mutation switches added for ReGraMa."""
+
+    def test_defaults_preserve_existing_manifest_behaviour(self):
+        spec = MutationSpec()
+
+        assert spec.dormant_reset_param_mut is False
+        assert spec.amplified_gauss_param_mut is True
+        assert spec.random_reset_param_mut is True
+        assert spec.dormant_threshold == 0.01
+
+    def test_values_round_trip_through_a_dump(self):
+        spec = MutationSpec(
+            dormant_reset_param_mut=True,
+            amplified_gauss_param_mut=False,
+            random_reset_param_mut=False,
+            dormant_threshold=0.05,
+        )
+
+        dumped = spec.model_dump()
+
+        assert MutationSpec(**dumped) == spec
+
+    def test_zero_dormant_threshold_is_accepted(self):
+        assert MutationSpec(dormant_threshold=0.0).dormant_threshold == 0.0
+
+    def test_negative_dormant_threshold_is_rejected_informatively(self):
+        with pytest.raises(
+            ValidationError,
+            match=r"dormant_threshold[\s\S]*greater than or equal to 0",
+        ):
+            MutationSpec(dormant_threshold=-0.01)
+
+    def test_misspelled_switch_is_rejected(self):
+        with pytest.raises(ValidationError, match="regrama"):
+            MutationSpec(regrama=True)
+
+    def test_misspelled_reset_switch_is_rejected_informatively(self):
+        with pytest.raises(ValidationError, match="random_reset_param_mutation"):
+            MutationSpec(random_reset_param_mutation=False)
+
+    @pytest.mark.parametrize("value", ["maybe", 1.5, None])
+    def test_non_boolean_reset_switch_is_rejected_informatively(self, value):
+        with pytest.raises(
+            ValidationError,
+            match=r"random_reset_param_mut[\s\S]*bool",
+        ):
+            MutationSpec(random_reset_param_mut=value)
+
+
 class TestNetworkSpecUpperBound:
     def test_latent_dim_exceeds_max(self):
         with pytest.raises(ValidationError):

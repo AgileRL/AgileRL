@@ -80,6 +80,7 @@ from gymnasium import spaces
 from torch import optim
 
 from agilerl import HAS_DEEPSPEED, HAS_LLM_DEPENDENCIES, HAS_VLLM
+from agilerl.algorithms import DQN
 from agilerl.algorithms.core.base import (
     EvolvableAlgorithm,
     LLMAlgorithm,
@@ -91,9 +92,11 @@ from agilerl.algorithms.core.base import (
 from agilerl.algorithms.core.optimizer_wrapper import OptimizerWrapper
 from agilerl.algorithms.core.registry import NetworkGroup
 from agilerl.algorithms.grpo import GRPO
+from agilerl.hpo.regrama import _target_activations, eval_networks
 from agilerl.modules import EvolvableMLP
 from agilerl.modules.dummy import DummyEvolvable
 from agilerl.utils.algo_utils import VLLMConfig
+from agilerl.wrappers.agent import RSNorm
 from tests.test_algorithms.test_base import DummyMARLAlgorithm, DummyRLAlgorithm
 
 create_module = None
@@ -7991,3 +7994,151 @@ class TestLoraInputCastUnderAutocast:
         assert with_cast
         assert with_cast.keys() == without_cast.keys()
         assert all(torch.equal(with_cast[k], without_cast[k]) for k in with_cast)
+
+
+class TestEvolvableAlgorithmGraMaState:
+    """The per-agent GraMa state ReGraMa reads at mutation time."""
+
+    def agent(self):
+        return DQN(
+            spaces.Box(-1.0, 1.0, shape=(4,), dtype=np.float32),
+            spaces.Discrete(2),
+            device="cpu",
+        )
+
+    def test_capture_is_off_and_unmeasured_by_default(self):
+        agent = self.agent()
+
+        assert agent.capture_grama is False
+        assert agent.grama_scores is None
+
+    def test_training_block_captures_only_when_enabled(self):
+        agent = self.agent()
+
+        agent.init_training_step()
+        agent.actor(torch.rand(2, 4)).square().mean().backward()
+        agent.finalize_training_step(1)
+
+        # No hooks are registered, so capture costs nothing when off.
+        assert agent.grama_scores is None
+
+    def test_training_block_stores_a_snapshot_when_enabled(self):
+        agent = self.agent()
+        agent.capture_grama = True
+
+        agent.init_training_step()
+        agent.actor(torch.rand(2, 4)).square().mean().backward()
+        agent.finalize_training_step(1)
+
+        assert agent.grama_scores
+        assert any(entry is not None for entry in agent.grama_scores[0])
+
+    def test_snapshot_travels_to_a_clone(self):
+        # This is what lets a child read the gradients captured while its parent
+        # trained, under any selection strategy.
+        agent = self.agent()
+        agent.capture_grama = True
+        agent.init_training_step()
+        agent.actor(torch.rand(2, 4)).square().mean().backward()
+        agent.finalize_training_step(1)
+
+        clone = agent.clone(wrap=False)
+
+        assert clone.capture_grama is True
+        assert clone.grama_scores is not None
+        assert len(clone.grama_scores) == len(agent.grama_scores)
+
+    def test_snapshot_is_deep_copied_onto_the_clone(self):
+        # Mutating the parent's snapshot must not reach the child's.
+        agent = self.agent()
+        agent.grama_scores = [[torch.ones(3)]]
+
+        clone = agent.clone(wrap=False)
+        agent.grama_scores[0][0].fill_(9.0)
+
+        assert torch.equal(clone.grama_scores[0][0], torch.ones(3))
+
+    def test_snapshot_is_kept_out_of_checkpoints(self):
+        # Transient training state, recaptured every cycle.
+        agent = self.agent()
+        agent.grama_scores = [[torch.ones(3)]]
+
+        checkpoint = get_checkpoint_dict(agent)
+
+        assert "grama_scores" not in checkpoint
+        assert "capture_grama" in checkpoint
+
+    def test_resume_restores_without_reporting_a_missing_attribute(
+        self,
+        tmp_path,
+        recwarn,
+    ):
+        agent = self.agent()
+        path = str(tmp_path / "agent.pt")
+        agent.save_checkpoint(path)
+
+        restored = DQN.load(path, device="cpu")
+
+        assert restored.grama_scores is None
+        assert not [
+            warning for warning in recwarn if "grama_scores" in str(warning.message)
+        ]
+
+    def test_resume_from_a_pre_regrama_checkpoint_reports_nothing_missing(
+        self,
+        tmp_path,
+        recwarn,
+    ):
+        agent = self.agent()
+        path = str(tmp_path / "agent.pt")
+        agent.save_checkpoint(path)
+
+        checkpoint = torch.load(path, weights_only=False)
+        del checkpoint["capture_grama"]
+        torch.save(checkpoint, path)
+
+        restored = DQN.load(path, device="cpu")
+
+        assert restored.capture_grama is False
+        assert not [
+            warning for warning in recwarn if "capture_grama" in str(warning.message)
+        ]
+
+    def registered_hooks(self, agent):
+        """Backward hooks currently attached to the agent's measured activations."""
+        return sum(
+            len(module._backward_hooks)
+            for _network_id, network in eval_networks(agent)
+            for module in _target_activations(network)
+        )
+
+    def test_reopening_a_block_does_not_stack_a_second_set_of_hooks(self):
+        agent = self.agent()
+        agent.capture_grama = True
+
+        agent.init_training_step()
+        after_one = self.registered_hooks(agent)
+        agent.init_training_step()
+
+        assert after_one > 0
+        assert self.registered_hooks(agent) == after_one
+
+    def test_one_finalize_clears_the_hooks_of_a_reopened_block(self):
+        agent = self.agent()
+        agent.capture_grama = True
+
+        agent.init_training_step()
+        agent.init_training_step()
+        agent.finalize_training_step(1)
+
+        assert self.registered_hooks(agent) == 0
+
+    def test_wrapped_agent_stores_the_snapshot_on_the_unwrapped_algorithm(self):
+        wrapper = RSNorm(self.agent())
+        wrapper.capture_grama = True
+
+        wrapper.init_training_step()
+        wrapper.agent.actor(torch.rand(2, 4)).square().mean().backward()
+        wrapper.finalize_training_step(1)
+
+        assert wrapper.agent.grama_scores

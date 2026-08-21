@@ -15,7 +15,7 @@ algorithm:
     update_epochs: 4
 
 environment:
-    name: pettingzoo.mpe.simple_speaker_listener_v4
+    name: mpe2.simple_speaker_listener_v4
     num_envs: 16
 mutation:
     probabilities:
@@ -40,13 +40,13 @@ mutation:
             max: 0.1
     mutation_sd: 0.1
     rand_seed: 42
-    amplified_gauss_param_mut: true   # apply the amplified Gaussian band
-    random_reset_param_mut: true      # apply the random-reset Gaussian band
-    dormant_reset_param_mut: false    # do not reset dormant neurons
+    amplified_gauss_param_mut: false
+    random_reset_param_mut: false
+    dormant_reset_param_mut: true
+    dormant_threshold: 0.01
 
 network:
     latent_dim: 64
-    arch: mlp
     encoder_config:
         hidden_size:
             - 64
@@ -66,21 +66,14 @@ network:
         max_mlp_nodes: 256
         layer_norm: true
 
-# MF-PBT replaces tournament selection (both share this block, discriminated by
-# strategy). The recommended MF-PBT configuration is defined
 selection_strategy:
-    strategy: multi_frequency
-    n_subpopulations: 2
-    n_winners: 2
-    n_survivors: 0
-    n_open_for_migration: 2
-    n_losers: 4
-    evolution_frequency_ratios: [1, 5]
+    tournament_size: 2
+    elitism: true
 
 training:
     max_steps: 2_000_000
     target_score:
-    pop_size: 16  # MF-PBT population size (2 subpopulations of 8 agents)
+    pop_size: 4
     evo_steps: 10_000
     eval_steps:
     eval_loop: 1

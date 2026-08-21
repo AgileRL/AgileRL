@@ -1,17 +1,18 @@
 ---
 algorithm:
-    name: NeuralTS
+    name: DQN
     batch_size: 128
-    lr: 0.003
-    learn_step: 2
-    gamma: 1.0
-    lamb: 1.0
-    reg: 0.00625
+    lr: 6.3e-4
+    learn_step: 4
+    gamma: 0.99
+    tau: 0.001
+    double: false
+    cudagraphs: false
 
 environment:
-    name: IRIS
-    features: tests/data/iris_features.csv
-    targets: tests/data/iris_targets.csv
+    name: LunarLander-v3
+    num_envs: 16
+
 mutation:
     probabilities:
         no_mut: 0.4
@@ -32,31 +33,37 @@ mutation:
             max: 10
     mutation_sd: 0.1
     rand_seed: 42
-    amplified_gauss_param_mut: true   # apply the amplified Gaussian band
-    random_reset_param_mut: true      # apply the random-reset Gaussian band
-    dormant_reset_param_mut: false    # do not reset dormant neurons
+    amplified_gauss_param_mut: false
+    random_reset_param_mut: false
+    dormant_reset_param_mut: true
+    dormant_threshold: 0.01
 
 network:
     latent_dim: 128
+
     encoder_config:
         hidden_size:
             - 128
+
     head_config:
         hidden_size:
             - 128
 
 replay_buffer:
-    max_size: 10_000
+    max_size: 100_000
 
 selection_strategy:
     tournament_size: 2
     elitism: true
 
 training:
-    max_steps: 10_000
-    target_score: 450.0
+    max_steps: 1_000_000
+    target_score: 200.0
     pop_size: 4
-    evo_steps: 500
-    eval_steps: 500
-    episode_steps: 500
+    evo_steps: 10_000
+    eval_steps:
     eval_loop: 1
+    learning_delay: 0
+    eps_start: 1.0
+    eps_end: 0.1
+    eps_decay: 0.99

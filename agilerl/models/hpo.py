@@ -64,6 +64,25 @@ class MutationSpec(BaseModel):
     :type mutation_sd: float
     :param rand_seed: Random seed for repeatability.
     :type rand_seed: int
+    :param dormant_reset_param_mut: Whether a parameter mutation first resets the
+        neurons that have gone dormant (ReGraMa) before adding Gaussian noise.
+        Defaults to False.
+    :type dormant_reset_param_mut: bool
+    :param amplified_gauss_param_mut: Whether a parameter mutation applies its
+        amplified ("super") Gaussian band, which perturbs weights at ten times their
+        own magnitude. Defaults to True; switch it off when that noise destabilises
+        training.
+    :type amplified_gauss_param_mut: bool
+    :param random_reset_param_mut: Whether a parameter mutation applies its
+        random-reset Gaussian band, which redraws a weight from N(0, 1) and so discards
+        its trained value outright. Defaults to True; switch it off when that proves
+        too aggressive.
+    :type random_reset_param_mut: bool
+    :param dormant_threshold: Normalised GraMa score at or below which a neuron counts as
+        dormant. The score is a neuron's mean absolute pre-activation gradient divided by
+        its layer's mean. Raising it resets more neurons per mutation. Defaults to 0.01,
+        and is inert unless dormant_reset_param_mut is set.
+    :type dormant_threshold: float
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -72,6 +91,10 @@ class MutationSpec(BaseModel):
     rl_hp_selection: dict[str, RLHyperparameter] = Field(default_factory=dict)
     mutation_sd: float = Field(default=0.1, ge=0.0)
     rand_seed: int = Field(default=42, ge=0)
+    dormant_reset_param_mut: bool = False
+    amplified_gauss_param_mut: bool = True
+    random_reset_param_mut: bool = True
+    dormant_threshold: float = Field(default=0.01, ge=0.0)
 
 
 class TournamentSelectionSpec(BaseModel):

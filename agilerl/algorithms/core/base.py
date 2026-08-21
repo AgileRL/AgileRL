@@ -62,6 +62,7 @@ from agilerl.algorithms.core.registry import (
     OptimizerFactory,
 )
 from agilerl.architectures.nemotron_h import register_nemotron_h_liger
+from agilerl.hpo.regrama import GraMaCapture
 from agilerl.metrics import AgentMetrics, MultiAgentMetrics
 from agilerl.modules.configs import MlpNetConfig, NetConfig
 from agilerl.modules.dummy import DummyEvolvable
@@ -82,6 +83,7 @@ from agilerl.typing import (
     DeviceType,
     ExperiencesT,
     FitnessValue,
+    GraMaScores,
     GymSpaceType,
     InfosDict,
     LrNameType,
@@ -338,6 +340,7 @@ def get_checkpoint_dict(
     attribute_dict["agilerl_version"] = version("agilerl")
     attribute_dict.pop("accelerator", None)
     attribute_dict.pop("rollout_buffer", None)
+    attribute_dict.pop("grama_scores", None)
 
     # NOTE: this feels messy, refactor this to be more elegant
     if omit_actor_info and "actor" in attribute_dict:
@@ -446,6 +449,9 @@ class EvolvableAlgorithm(ABC, Generic[ExperiencesT], metaclass=RegistryMeta):
         self.registry = MutationRegistry(hp_config)
         self.training = True
         self.subpopulation_id: int | None = None
+        self.capture_grama: bool = False
+        self.grama_scores: GraMaScores | None = None
+        self._grama_capture: GraMaCapture | None = None
 
     @property
     def index(self) -> int:
@@ -516,16 +522,38 @@ class EvolvableAlgorithm(ABC, Generic[ExperiencesT], metaclass=RegistryMeta):
         self.metrics.add_scores(scores)
 
     def init_training_step(self) -> None:
-        """Initialize the training step for metrics tracking."""
+        """Open the agent's training block: metrics tracking, and GraMa capture.
+
+        Every trainer calls this immediately before an agent's per-cycle training
+        block, which is exactly the window the ReGraMa parameter mutation needs to
+        measure. Hooks are registered afresh each cycle, so they follow the agent
+        through architecture mutations, checkpoint reloads and accelerator
+        re-wrapping. Opening a block implicitly closes one that an earlier call
+        left open.
+        """
         self.metrics.init_training_step()
+        self._release_grama_capture()
+        if self.capture_grama:
+            self._grama_capture = GraMaCapture(self).register()
 
     def finalize_training_step(self, num_steps: int) -> None:
-        """Finalize the training step for metrics tracking.
+        """Close the agent's training block, storing any captured GraMa scores.
 
         :param num_steps: Number of steps taken during the training step.
         :type num_steps: int
         """
         self.metrics.finalize_training_step(num_steps)
+        self._release_grama_capture()
+
+    def _release_grama_capture(self) -> None:
+        """Close any open GraMa capture, storing its snapshot and removing its hooks.
+
+        :return: None.
+        :rtype: None
+        """
+        if self._grama_capture is not None:
+            self._grama_capture.release()
+            self._grama_capture = None
 
     @abstractmethod
     def preprocess_observation(
@@ -1349,6 +1377,8 @@ class EvolvableAlgorithm(ABC, Generic[ExperiencesT], metaclass=RegistryMeta):
         # Reconstruct the algorithm
         checkpoint["accelerator"] = accelerator
         checkpoint["device"] = device
+        checkpoint.setdefault("grama_scores", None)
+        checkpoint.setdefault("capture_grama", False)
         class_init_dict = filter_init_dict(checkpoint, cls)
         self = cls(**class_init_dict)
         registry: MutationRegistry = checkpoint["registry"]

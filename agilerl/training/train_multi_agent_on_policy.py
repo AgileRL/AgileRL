@@ -13,6 +13,7 @@ from pettingzoo import ParallelEnv
 
 from agilerl.algorithms import IPPO
 from agilerl.hpo.mutation import Mutations
+from agilerl.hpo.regrama import set_grama_capture
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.networks import StochasticActor
 from agilerl.population import Population
@@ -205,6 +206,9 @@ def train_multi_agent_on_policy(
         accelerator=accelerator,
         loggers=loggers,
     )
+
+    # Enable the per-neuron gradient capture that ReGraMa parameter mutations read.
+    set_grama_capture(population.agents, mutation)
 
     checkpoint_count = 0
 

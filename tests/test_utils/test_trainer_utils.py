@@ -132,6 +132,35 @@ class TestBuildMutations:
         assert result.parameters_mut == 0.3
         assert result.mutation_sd == 0.05
 
+    def test_regrama_fields_reach_the_operator(self):
+        from agilerl.models.hpo import MutationSpec
+        from agilerl.utils.trainer_utils import build_mutations_from_spec
+
+        spec = MutationSpec(
+            dormant_reset_param_mut=True,
+            amplified_gauss_param_mut=False,
+            random_reset_param_mut=False,
+            dormant_threshold=0.05,
+        )
+
+        result = build_mutations_from_spec(spec, "cpu")
+
+        assert result.dormant_reset_param_mut is True
+        assert result.amplified_gauss_param_mut is False
+        assert result.random_reset_param_mut is False
+        assert result.dormant_threshold == 0.05
+
+    def test_regrama_defaults_reach_the_operator(self):
+        from agilerl.models.hpo import MutationSpec
+        from agilerl.utils.trainer_utils import build_mutations_from_spec
+
+        result = build_mutations_from_spec(MutationSpec(), "cpu")
+
+        assert result.dormant_reset_param_mut is False
+        assert result.amplified_gauss_param_mut is True
+        assert result.random_reset_param_mut is True
+        assert result.dormant_threshold == 0.01
+
 
 class TestBuildTournament:
     def test_none_returns_none(self):
