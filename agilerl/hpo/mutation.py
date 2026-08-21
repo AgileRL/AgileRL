@@ -22,6 +22,7 @@ from agilerl.algorithms.core import (
     MultiAgentRLAlgorithm,
     RLAlgorithm,
 )
+from agilerl.hpo import function_preserving
 from agilerl.modules import EvolvableModule, ModuleDict
 from agilerl.protocols import EvolvableAlgorithmProtocol
 from agilerl.typing import MutationReturn
@@ -41,6 +42,8 @@ MutationFunc = Callable[[IndividualT], IndividualT]
 
 torch._dynamo.config.cache_size_limit = 64
 torch._logging.set_logs(dynamo=logging.FATAL)
+
+logger = logging.getLogger(__name__)
 
 _UNSUPPORTED_ACTIVATION_MUTATION_ALGOS = frozenset(
     {"PPO", "DDPG", "TD3", "IPPO", "MADDPG", "MATD3"},
@@ -343,6 +346,12 @@ class Mutations:
         self.device = device
         self.accelerator = accelerator
 
+        # Kept apart from self.rng so drawing symmetry-breaking noise never
+        # shifts the stream that samples mutations for later agents.
+        self._fp_rng = np.random.default_rng(rand_seed)
+        self._warned_fp: set[str] = set()
+        self._pre_training_mut = False
+
         self.pretraining_mut_options, self.pretraining_mut_proba = (
             self._get_mutations_options(pretraining=True)
         )
@@ -367,6 +376,8 @@ class Mutations:
         :return: Mutated population
         :rtype: list[EvolvableAlgorithm]
         """
+        self._pre_training_mut = pre_training_mut
+
         # Create lists of possible mutation functions and their respective relative probabilities
         mutation_options = (
             self.pretraining_mut_options if pre_training_mut else self.mut_options
@@ -691,6 +702,180 @@ class Mutations:
         individual.mut = "param"
 
         return individual
+
+    def _fp_snapshot(
+        self,
+        network: EvolvableModule,
+        mut_method: str | None,
+    ) -> list[int] | None:
+        """Record the widths an architecture mutation is about to change.
+
+        Taken before the mutation runs, because
+        :meth:`EvolvableModule.preserve_parameters` appends new units at the
+        tail and the fixup needs to know where the old ones ended.
+
+        :param network: Network about to be mutated.
+        :type network: EvolvableModule
+        :param mut_method: The mutation method about to be applied.
+        :type mut_method: str | None
+
+        :return: The affected widths, or None when there is nothing to record.
+        :rtype: list[int] | None
+        """
+        target = function_preserving.resolve_target(network, mut_method)
+        if target is None:
+            return None
+
+        if function_preserving.is_latent_mutation(
+            function_preserving.base_mutation(mut_method),
+        ):
+            return [int(getattr(target, "latent_dim", 0))]
+
+        return function_preserving.hidden_widths(target)
+
+    def _fp_preserve(
+        self,
+        network: EvolvableModule,
+        applied_mut: str | None,
+        mut_dict: MutationReturn,
+        before: list[int],
+    ) -> None:
+        """Initialise an addition's new capacity so the network is unchanged.
+
+        Keyed on the mutation that was *applied* rather than the one that was
+        sampled, since ``add_layer`` and ``remove_layer`` fall back to widening
+        when they hit their depth limits.
+
+        A fixup that raises leaves the network exactly as the original operator
+        built it, so a failure costs the preservation and nothing else.
+
+        :param network: Network that was mutated.
+        :type network: EvolvableModule
+        :param applied_mut: The mutation that was actually applied.
+        :type applied_mut: str | None
+        :param mut_dict: The mutation's own report of what it changed.
+        :type mut_dict: MutationReturn
+        :param before: The widths recorded before the mutation.
+        :type before: list[int]
+
+        :return: None.
+        :rtype: None
+        """
+        base = function_preserving.base_mutation(applied_mut)
+        if base not in function_preserving.PRESERVED_MUTATIONS:
+            return
+
+        target = function_preserving.resolve_target(network, applied_mut)
+        if target is None:
+            return
+
+        try:
+            reason = self._fp_apply(target, base, mut_dict, before)
+        except Exception as exc:  # leave the original operator's result in place
+            logger.warning("Function-preserving fixup skipped for a network: %s", exc)
+            return
+
+        # Warned outside the guard above: escalating warnings to errors is a
+        # deliberate caller choice, and swallowing that here would report a
+        # declined mutation as a failed fixup.
+        self._fp_warn_declined(reason)
+
+    def _fp_apply(
+        self,
+        target: nn.Module,
+        base: str,
+        mut_dict: MutationReturn,
+        before: list[int],
+    ) -> str | None:
+        """Run the fixup that matches an addition, unless something blocks it.
+
+        A blocker only rules on structure, so a fixup it waves through can still
+        find nothing to write. Reporting that as a decline keeps a silently
+        unpreserved addition from being indistinguishable from a preserved one.
+
+        :param target: The module the mutation acted on.
+        :type target: nn.Module
+        :param base: The applied mutation's trailing method name.
+        :type base: str
+        :param mut_dict: The mutation's own report of what it changed.
+        :type mut_dict: MutationReturn
+        :param before: The widths recorded before the mutation.
+        :type before: list[int]
+
+        :return: The reason preservation was declined, or None when it applied.
+        :rtype: str | None
+        """
+        if base in function_preserving.LATENT_ADDITIONS:
+            reason = function_preserving.latent_addition_blocker(target)
+            if reason is not None:
+                return reason
+
+            written = function_preserving.preserve_added_latent(
+                target,
+                before[0],
+                self._fp_rng,
+                function_preserving.FP_NOISE_SCALE,
+            )
+            return None if written else "not_written"
+
+        if base in function_preserving.LAYER_ADDITIONS:
+            reason = function_preserving.layer_addition_blocker(target)
+            if reason is not None:
+                return reason
+
+            written = function_preserving.preserve_added_layer(target)
+            return None if written else "not_written"
+
+        # A layer mutation reports no index at all, and the declared
+        # ``MutationReturn`` union also admits a per-sub-agent mapping, so
+        # narrow to the plain integer the node mutations document rather than
+        # trusting the key to be present and scalar.
+        reported = mut_dict.get("hidden_layer")
+        hidden_layer = reported if isinstance(reported, int) else None
+
+        # A structural exclusion outranks a missing index, so the blocker runs
+        # first and gets to name the reason.
+        reason = function_preserving.node_addition_blocker(target, hidden_layer)
+        if reason is not None:
+            return reason
+        if hidden_layer is None or not 0 <= hidden_layer < len(before):
+            return "no_consumer"
+
+        written = function_preserving.preserve_added_nodes(
+            target,
+            hidden_layer,
+            before[hidden_layer],
+            self._fp_rng,
+            function_preserving.FP_NOISE_SCALE,
+        )
+        return None if written else "not_written"
+
+    def _fp_warn_declined(self, reason: str | None) -> None:
+        """Report once per instance that an addition could not be preserved.
+
+        Repeating the warning per agent per generation would drown the training
+        log, while staying silent would leave a configuration that never gets
+        preservation indistinguishable from one that always does.
+
+        :param reason: Why preservation was declined, or None.
+        :type reason: str | None
+
+        :return: None.
+        :rtype: None
+        """
+        if reason is None or self._pre_training_mut or reason in self._warned_fp:
+            return
+
+        # Recorded only once the warning has actually been delivered: a caller
+        # running with warnings escalated to errors never sees this one, and
+        # marking it reported would silence the reason for the rest of the run.
+        warnings.warn(
+            "Architecture mutation fell back from function-preserving "
+            f"initialisation: {function_preserving.DECLINE_REASONS[reason]}. The "
+            "new capacity is initialised randomly instead.",
+            stacklevel=4,
+        )
+        self._warned_fp.add(reason)
 
     def _get_mutations_options(
         self,
@@ -1170,6 +1355,7 @@ class Mutations:
             )
 
         applied_mut_dict = applied_mut_dict or {}
+        before = None
         mut_dict = None
         if mut_method is None:
             mut_dict = {}
@@ -1185,10 +1371,13 @@ class Mutations:
                     msg,
                 )
 
+            before = self._fp_snapshot(network, mut_method)
             mut_dict = getattr(network, mut_method)(**applied_mut_dict)
 
         mut_dict = mut_dict or {}
         applied_mut = network.last_mutation_attr
+        if before is not None:
+            self._fp_preserve(network, applied_mut, mut_dict, before)
 
         return applied_mut, mut_dict
 

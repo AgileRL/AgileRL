@@ -1382,15 +1382,19 @@ _SINGLE_AGENT_CONFIGS = [
     ("ddpg/ddpg_simba.yaml", DDPGSpec, SimbaSpec),
     ("td3.yaml", TD3Spec, MlpSpec),
     ("multi_input.yaml", PPOSpec, MultiInputSpec),
+    ("dqn/dqn_func_preserving.yaml", DQNSpec, MlpSpec),
+    ("ppo/ppo_func_preserving.yaml", PPOSpec, MlpSpec),
 ]
 
 _BANDIT_CONFIGS = [
     ("bandit/neural_ts.yaml", NeuralTSSpec, MlpSpec),
     ("bandit/neural_ucb.yaml", NeuralUCBSpec, MlpSpec),
+    ("bandit/neural_ucb_func_preserving.yaml", NeuralUCBSpec, MlpSpec),
 ]
 
 _OFFLINE_CONFIGS = [
     ("cqn.yaml", CQNSpec, MlpSpec),
+    ("cqn_func_preserving.yaml", CQNSpec, MlpSpec),
 ]
 
 _MULTI_AGENT_CONFIGS = [
@@ -1398,6 +1402,8 @@ _MULTI_AGENT_CONFIGS = [
     ("multi_agent/matd3.yaml", MATD3Spec),
     ("multi_agent/ippo.yaml", IPPOSpec),
     ("multi_agent/ippo_pong.yaml", IPPOSpec),
+    ("multi_agent/ippo_func_preserving.yaml", IPPOSpec),
+    ("multi_agent/maddpg_func_preserving.yaml", MADDPGSpec),
 ]
 
 # Configs omit the network ``arch``, so it is inferred from the observation
@@ -1685,3 +1691,56 @@ class TestSimbaRecurrentConflict:
         )
         manifest = TrainingManifest.model_validate(raw)
         assert manifest.algorithm.recurrent is False
+
+
+# Function-preserving additions decline wherever a normalisation layer sits
+# between the widened units and their activation, so these manifests switch it
+# off. They also hold the networks on ReLU, since deepening is only exact for
+# ReLU and Identity and an activation mutation would move them off it.
+_FUNC_PRESERVING_CONFIGS = [
+    "ppo/ppo_func_preserving.yaml",
+    "dqn/dqn_func_preserving.yaml",
+    "cqn_func_preserving.yaml",
+    "bandit/neural_ucb_func_preserving.yaml",
+    "multi_agent/ippo_func_preserving.yaml",
+    "multi_agent/maddpg_func_preserving.yaml",
+]
+
+
+class TestFunctionPreservingManifests:
+    """The shipped manifests that let architecture additions be preserved."""
+
+    @staticmethod
+    def validated(rel_path):
+        """Return the validated manifest at a path under the configs directory."""
+        config_path = CONFIGS_DIR / rel_path
+        if not config_path.exists():
+            pytest.skip(f"Config not found: {config_path}")
+        with open(config_path) as handle:
+            return TrainingManifest.get_validated(yaml.safe_load(handle), mode="python")
+
+    @staticmethod
+    def net_config(validated):
+        """Return the network configuration as a plain dictionary."""
+        net_config = validated.algorithm.net_config
+        return net_config if isinstance(net_config, dict) else net_config.model_dump()
+
+    @pytest.mark.parametrize("rel_path", _FUNC_PRESERVING_CONFIGS)
+    def test_normalisation_is_switched_off(self, rel_path):
+        net_config = self.net_config(self.validated(rel_path))
+
+        for block in ("encoder_config", "head_config"):
+            assert net_config[block]["layer_norm"] is False
+
+    @pytest.mark.parametrize("rel_path", _FUNC_PRESERVING_CONFIGS)
+    def test_activation_mutations_are_disabled(self, rel_path):
+        validated = self.validated(rel_path)
+
+        assert validated.mutation.probabilities.act_mut == 0.0
+
+    @pytest.mark.parametrize("rel_path", _FUNC_PRESERVING_CONFIGS)
+    def test_architecture_mutations_are_enabled(self, rel_path):
+        probabilities = self.validated(rel_path).mutation.probabilities
+
+        assert probabilities.arch_mut > 0.0
+        assert probabilities.new_layer > 0.0
