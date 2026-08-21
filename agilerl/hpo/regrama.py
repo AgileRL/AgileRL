@@ -87,18 +87,16 @@ NORM_LAYER_TYPES: tuple[type[nn.Module], ...] = (
     nn.RMSNorm,
 )
 
+# Attributes identifying a layer that remaps its input onto fresh neurons.
+OUTPUT_WIDTH_ATTRS = ("out_features", "out_channels", "hidden_size")
 
-class ProducerContext(NamedTuple):
+
+class _ProducerContext(NamedTuple):
     """The layers a measured activation's neurons are wired between.
 
-    :param producer: Layer whose weight rows are the neurons' incoming weights.
-    :type producer: torch.nn.Module | None
-    :param norm: Normalisation applied to those neurons between the producer and
-        the activation, or None.
-    :type norm: torch.nn.Module | None
-    :param consumers: Layers whose weight columns are the neurons' outgoing
-        weights.
-    :type consumers: list[torch.nn.Module]
+    producer's weight rows are the neurons' incoming weights and consumers'
+    weight columns their outgoing ones; norm is any normalisation applied to
+    those neurons between the producer and the activation.
     """
 
     producer: nn.Module | None
@@ -106,16 +104,12 @@ class ProducerContext(NamedTuple):
     consumers: list[nn.Module]
 
 
-class ConsumerTarget(NamedTuple):
+class _ConsumerTarget(NamedTuple):
     """One consumer tensor whose columns a reset neuron owns.
 
-    :param weight: The consumer tensor to rewrite, in place.
-    :type weight: torch.Tensor
-    :param stride: Columns of that tensor per producer neuron.
-    :type stride: int
-    :param is_noise_scale: Whether the tensor holds noise scales rather than
-        weights, which are revived differently.
-    :type is_noise_scale: bool
+    weight is rewritten in place, stride columns of it per producer neuron.
+    is_noise_scale marks a tensor holding noise scales rather than weights,
+    which are revived differently.
     """
 
     weight: torch.Tensor
@@ -137,58 +131,19 @@ class ResetReport(NamedTuple):
     recurrent_seen: bool
 
 
-def remaps_neurons(module: nn.Module) -> bool:
-    """Return whether module maps its input onto a fresh set of neurons.
-
-    Identified by an output-width attribute, which every projecting layer carries.
-
-    :param module: Sub-module to classify.
-    :type module: torch.nn.Module
-    :return: True if the module projects onto new neurons.
-    :rtype: bool
-    """
-    return any(
-        hasattr(module, attr)
-        for attr in ("out_features", "out_channels", "hidden_size")
-    )
-
-
-def is_weight_layer(module: nn.Module) -> bool:
-    """Return whether module carries resettable weights (Linear/Conv/Noisy).
-
-    :param module: Sub-module to classify.
-    :type module: torch.nn.Module
-    :return: True for a projecting layer the surgery can rewrite.
-    :rtype: bool
-    """
+def _is_weight_layer(module: nn.Module) -> bool:
+    """Whether module carries resettable weights (Linear/Conv/Noisy)."""
     if isinstance(module, (nn.Linear, *CONV_LAYER_TYPES)):
         return True
     return hasattr(module, "weight_mu") and hasattr(module, "bias_mu")
 
 
-def is_norm_layer(module: nn.Module) -> bool:
-    """Return whether module normalises its input without remapping its neurons.
-
-    :param module: Sub-module to classify.
-    :type module: torch.nn.Module
-    :return: ``True`` for a normalisation layer.
-    :rtype: bool
-    """
-    return isinstance(module, NORM_LAYER_TYPES)
-
-
-def weight_param(module: nn.Module) -> torch.Tensor:
-    """Return the weight tensor of a weight layer.
+def _weight_param(module: nn.Module) -> torch.Tensor:
+    """The weight tensor of a weight layer, or weight_mu for a noisy one.
 
     Typed as a plain tensor rather than a parameter on purpose: a network whose
     encoder is pinned by share_encoder_parameters holds detached, non-leaf
-    clones there.
-
-    :param module: A weight layer.
-    :type module: torch.nn.Module
-    :return: The weight tensor, or weight_mu for a noisy layer.
-    :rtype: torch.Tensor
-    :raises TypeError: If module carries no weight tensor.
+    clones there. Raises TypeError if the module carries no weight tensor.
     """
     weight = getattr(module, "weight_mu", None)
     if weight is None:
@@ -199,22 +154,16 @@ def weight_param(module: nn.Module) -> torch.Tensor:
     return weight
 
 
-def bias_param(module: nn.Module) -> torch.Tensor | None:
-    """Return the bias tensor of a weight layer, if any.
-
-    :param module: A weight layer.
-    :type module: torch.nn.Module
-    :return: The bias tensor, bias_mu for a noisy layer, or None.
-    :rtype: torch.Tensor | None
-    """
+def _bias_data(module: nn.Module) -> torch.Tensor | None:
+    """The bias tensor of a weight layer, bias_mu for a noisy one, or None."""
     bias = getattr(module, "bias_mu", None)
     if bias is None:
         bias = getattr(module, "bias", None)
-    return bias if isinstance(bias, torch.Tensor) else None
+    return bias.data if isinstance(bias, torch.Tensor) else None
 
 
-def owns_trainable_weight(module: nn.Module) -> bool:
-    """Return whether module owns the weights the surgery would rewrite.
+def _owns_trainable_weight(module: nn.Module) -> bool:
+    """Whether module owns the weights the surgery would rewrite.
 
     :func:`~agilerl.utils.algo_utils.share_encoder_parameters` pins a non-policy
     network's encoder to detached, non-leaf clones of the policy encoder's
@@ -222,46 +171,13 @@ def owns_trainable_weight(module: nn.Module) -> bool:
     resetting a neuron's incoming weights there is discarded moments later, while
     the matching outgoing rewrite in that network's head survives, leaving the
     head compensating a reset that no longer exists.
-
-    :param module: The producing layer whose neurons would be reset.
-    :type module: torch.nn.Module
-    :return: True if the layer's weights are its own trainable parameters.
-    :rtype: bool
     """
-    weight = weight_param(module)
+    weight = _weight_param(module)
     return isinstance(weight, nn.Parameter) and weight.requires_grad
 
 
-def encoder_is_pinned(network: nn.Module) -> bool:
-    """Return whether network's encoder is borrowed from another network.
-
-    :func:`~agilerl.utils.algo_utils.share_encoder_parameters` writes the policy
-    encoder's values into the other encoders as plain detached tensors, so a
-    borrowed encoder is exactly one whose weight layers are no longer
-    nn.Parameter.
-
-    :param network: An evaluation network to classify.
-    :type network: torch.nn.Module
-    :return: True if the encoder's weights belong to another network.
-    :rtype: bool
-    """
-    encoder = getattr(network, "encoder", None)
-    if encoder is None:
-        return False
-    layers = [
-        module for _name, module in encoder.named_modules() if is_weight_layer(module)
-    ]
-    return bool(layers) and not any(owns_trainable_weight(layer) for layer in layers)
-
-
-def unwrap_module(module: nn.Module | None) -> nn.Module | None:
-    """Strip wrapper layers that hide the real module.
-
-    :param module: The possibly wrapped module.
-    :type module: torch.nn.Module | None
-    :return: The innermost wrapped module, or None.
-    :rtype: torch.nn.Module | None
-    """
+def _unwrap_module(module: nn.Module | None) -> nn.Module | None:
+    """Strip wrapper layers that hide the real module."""
     seen: set[int] = set()
     while module is not None and id(module) not in seen:
         seen.add(id(module))
@@ -272,81 +188,42 @@ def unwrap_module(module: nn.Module | None) -> nn.Module | None:
     return module
 
 
-def unwrap_parallel(
-    agent: EvolvableAlgorithmProtocol,
-    network: nn.Module,
-) -> nn.Module:
-    """Strip the accelerator's parallel wrapper from network.
-
-    :param agent: The agent the network belongs to.
-    :type agent: EvolvableAlgorithmProtocol
-    :param network: The possibly wrapped network.
-    :type network: torch.nn.Module
-    :return: The underlying network, or *network* unchanged when it is not
-        wrapped or the agent has no accelerator.
-    :rtype: torch.nn.Module
-    """
-    accelerator = agent.accelerator
-    if accelerator is None:
-        return network
-    return accelerator.unwrap_model(network)
-
-
-def first_weight_layer(module: nn.Module | None) -> nn.Module | None:
-    """Return the first weight-bearing layer inside module, in forward order.
-
-    :param module: The module to search.
-    :type module: torch.nn.Module | None
-    :return: The first projecting layer, or None if there is none.
-    :rtype: torch.nn.Module | None
-    """
+def _first_weight_layer(module: nn.Module | None) -> nn.Module | None:
+    """The first weight-bearing layer inside module, in forward order."""
     if module is None:
         return None
     for _name, child in module.named_modules():
-        if is_weight_layer(child):
+        if _is_weight_layer(child):
             return child
     return None
 
 
-def head_entry_layers(head: nn.Module | None) -> list[nn.Module]:
-    """Return the first weight layer of every parallel stream in *head*.
+def _head_entry_layers(head: nn.Module | None) -> list[nn.Module]:
+    """The first weight layer of every parallel stream in head.
 
-    A latent neuron's outgoing weights live in whatever the head feeds it to
+    A latent neuron's outgoing weights live in whatever the head feeds it to:
     one layer for a plain MLP head, but two for a duelling Q-network, whose
     value and advantage streams are sibling sub-networks that both consume the
     full latent.
-
-    :param head: The network's head, if any.
-    :type head: torch.nn.Module | None
-    :return: One entry layer per stream.
-    :rtype: list[torch.nn.Module]
     """
-    head = unwrap_module(head)
+    head = _unwrap_module(head)
     if head is None:
         return []
     children = list(head.children())
     # A head whose own children are layers is a single flat stream.
-    if any(is_weight_layer(child) for child in children):
-        first = first_weight_layer(head)
+    if any(_is_weight_layer(child) for child in children):
+        first = _first_weight_layer(head)
         return [first] if first is not None else []
-    entries = [first_weight_layer(child) for child in children]
+    entries = [_first_weight_layer(child) for child in children]
     return [entry for entry in entries if entry is not None]
 
 
-def is_output_activation(name: str, ordered: list[tuple[str, nn.Module]]) -> bool:
-    """Return whether the activation at name terminates its stream.
+def _is_output_activation(name: str, ordered: list[tuple[str, nn.Module]]) -> bool:
+    """Whether the activation at name terminates its stream.
 
     Deciding this structurally rather than positionally is what keeps parallel
-    streams correct: a duelling Q-network's head holds two independent sub-networks,
-    so "the last activation of head_net" would leave the value stream's output
-    misclassified.
-
-    :param name: Qualified name of the activation within its root module.
-    :type name: str
-    :param ordered: ``named_modules()`` of that root, in registration order.
-    :type ordered: list[tuple[str, torch.nn.Module]]
-    :return: ``True`` if no projecting layer follows it in the same stream.
-    :rtype: bool
+    streams correct: a duelling Q-network's head holds two independent
+    sub-networks.
     """
     parent = name.rpartition(".")[0]
     prefix = f"{parent}." if parent else ""
@@ -357,46 +234,38 @@ def is_output_activation(name: str, ordered: list[tuple[str, nn.Module]]) -> boo
             continue
         # Restrict the lookahead to the activation's own parent container so a
         # sibling stream registered later cannot mask the end of this one.
-        if seen and other_name.startswith(prefix) and remaps_neurons(other):
+        if (
+            seen
+            and other_name.startswith(prefix)
+            and any(hasattr(other, attr) for attr in OUTPUT_WIDTH_ATTRS)
+        ):
             return False
     return True
 
 
-def activation_modules(root: nn.Module, *, include_output: bool) -> list[nn.Module]:
-    """Return the activation sub-modules of root to measure, in forward order.
+def _activation_modules(root: nn.Module, *, include_output: bool) -> list[nn.Module]:
+    """The activation sub-modules of root to measure, in forward order.
 
-    :param root: The module to search (an encoder or a head network).
-    :type root: torch.nn.Module
-    :param include_output: Whether to also include stream-terminating activations.
-    :type include_output: bool
-    :return: The activation sub-modules whose gradients should be measured.
-    :rtype: list[torch.nn.Module]
+    include_output also admits the stream-terminating activations.
     """
     ordered = list(root.named_modules())
     return [
         module
         for name, module in ordered
         if isinstance(module, ACTIVATION_TYPES)
-        and (include_output or not is_output_activation(name, ordered))
+        and (include_output or not _is_output_activation(name, ordered))
     ]
 
 
-def target_activations(network: nn.Module) -> list[nn.Module]:
-    """Return the ordered activation sub-modules measured for one network.
-
-    :param network: An :class:`~agilerl.networks.base.EvolvableNetwork` (an
-        encoder plus a head network).
-    :type network: torch.nn.Module
-    :return: The activation sub-modules to measure, in forward order.
-    :rtype: list[torch.nn.Module]
-    """
+def _target_activations(network: nn.Module) -> list[nn.Module]:
+    """The activation sub-modules measured for one network, in forward order."""
     targets: list[nn.Module] = []
     encoder = getattr(network, "encoder", None)
     if encoder is not None:
-        targets += activation_modules(encoder, include_output=True)
+        targets += _activation_modules(encoder, include_output=True)
     head = getattr(network, "head_net", None)
     if head is not None:
-        targets += activation_modules(head, include_output=False)
+        targets += _activation_modules(head, include_output=False)
     return targets
 
 
@@ -414,10 +283,13 @@ def eval_networks(
     :return: One (network_id, network) pair per measured network.
     :rtype: list[tuple[str | None, torch.nn.Module]]
     """
+    accelerator = agent.accelerator
     pairs: list[tuple[str | None, nn.Module]] = []
     for group in agent.registry.groups:
         # Unwrap first: a wrapped ModuleDict is not a ModuleDict.
-        eval_net = unwrap_parallel(agent, getattr(agent, group.eval_network_name()))
+        eval_net = getattr(agent, group.eval_network_name())
+        if accelerator is not None:
+            eval_net = accelerator.unwrap_model(eval_net)
         if isinstance(eval_net, ModuleDict):
             sub_networks = cast("ModuleDict[nn.Module]", eval_net)
             pairs.extend(sub_networks.items())
@@ -440,7 +312,8 @@ def policy_network_ids(agent: EvolvableAlgorithmProtocol) -> set[int]:
     policy = getattr(agent, policy_name, None)
     if policy is None:
         return set()
-    policy = unwrap_parallel(agent, policy)
+    if agent.accelerator is not None:
+        policy = agent.accelerator.unwrap_model(policy)
     if isinstance(policy, ModuleDict):
         return {id(module) for _key, module in policy.items()}
     return {id(policy)}
@@ -466,26 +339,31 @@ def shared_encoder_heads(
     for other_id, other in eval_networks(agent):
         if other is policy_network or other_id != network_id:
             continue
-        if not encoder_is_pinned(other):
+        encoder = getattr(other, "encoder", None)
+        if encoder is None:
             continue
-        entries.extend(head_entry_layers(getattr(other, "head_net", None)))
+        # share_encoder_parameters writes the policy encoder's values into the
+        # other encoders as plain detached tensors, so a borrowed encoder is
+        # exactly one whose weight layers are no longer nn.Parameter.
+        layers = [
+            module
+            for _name, module in encoder.named_modules()
+            if _is_weight_layer(module)
+        ]
+        if not layers or any(_owns_trainable_weight(layer) for layer in layers):
+            continue
+        entries.extend(_head_entry_layers(getattr(other, "head_net", None)))
     return entries
 
 
-def per_neuron_grad(grad_input: GradInput) -> torch.Tensor | None:
+def _per_neuron_grad(grad_input: GradInput) -> torch.Tensor | None:
     """Reduce an activation's grad_input to one |grad_{z_i}L| per neuron.
 
     The first element of the tuple a full backward hook receives is the gradient
     of the loss w.r.t. the module's input, i.e. the pre-activation gradient.
     Dense gradients have shape (batch, H) and are averaged over the batch;
     convolutional gradients have shape (batch, C, *spatial) and are averaged
-    over the batch and spatial dimensions.
-
-    :param grad_input: The gradient tuple from register_full_backward_hook.
-    :type grad_input: GradInput
-    :return: One mean absolute gradient per neuron, or None if no gradient
-        flowed through the module.
-    :rtype: torch.Tensor | None
+    over the batch and spatial dimensions. None when no gradient flowed.
     """
     if isinstance(grad_input, (tuple, list)):
         grad = grad_input[0] if len(grad_input) > 0 else None
@@ -500,49 +378,13 @@ def per_neuron_grad(grad_input: GradInput) -> torch.Tensor | None:
     return magnitude.mean(dim=reduce_dims)
 
 
-def scored_activations(
-    network: nn.Module,
-    per_neuron_list: list[torch.Tensor | None] | None,
-) -> list[tuple[nn.Module, torch.Tensor]]:
-    """Pair each measured activation of network with its captured gradient.
+def _dormant_indices(per_neuron: torch.Tensor, dormant_threshold: float) -> list[int]:
+    """The indices of the layer's dormant neurons, ascending.
 
-    The length guard is the graceful-degradation path after an architecture
-    mutation rebuilt the network: rather than mis-pairing scores with layers, the
-    whole network is skipped and the next training block recaptures it.
-
-    :param network: The network the snapshot was captured from.
-    :type network: torch.nn.Module
-    :param per_neuron_list: That network's entry of the captured snapshot.
-    :type per_neuron_list: list[torch.Tensor | None] | None
-    :return: (activation, per_neuron_gradient) for every measured layer.
-    :rtype: list[tuple[torch.nn.Module, torch.Tensor]]
-    """
-    targets = target_activations(network)
-    if not per_neuron_list or len(per_neuron_list) != len(targets):
-        return []
-    return [
-        (module, per_neuron)
-        for module, per_neuron in zip(targets, per_neuron_list, strict=False)
-        if per_neuron is not None
-    ]
-
-
-def dormant_indices(per_neuron: torch.Tensor, dormant_threshold: float) -> list[int]:
-    """Return the indices of the layer's dormant neurons.
-
-    Scores are normalised by the layer mean. A layer whose mean is zero has no live
-    unit left and is reported entirely dormant.
-
-    Non-finite scores are coerced to zero, i.e. treated as dormant: a diverged unit
-    is precisely one worth re-initialising.
-
-    :param per_neuron: Mean absolute pre-activation gradient of each neuron.
-    :type per_neuron: torch.Tensor
-    :param dormant_threshold: Normalised score at or below which a neuron is
-        dormant.
-    :type dormant_threshold: float
-    :return: Indices of the dormant neurons, ascending.
-    :rtype: list[int]
+    Scores are normalised by the layer mean. A layer whose mean is zero has no
+    live unit left and is reported entirely dormant. Non-finite scores are
+    coerced to zero, i.e. treated as dormant: a diverged unit is precisely one
+    worth re-initialising.
     """
     scores = torch.nan_to_num(
         per_neuron.detach(),
@@ -559,29 +401,7 @@ def dormant_indices(per_neuron: torch.Tensor, dormant_threshold: float) -> list[
     return torch.nonzero(normalised <= dormant_threshold).flatten().tolist()
 
 
-def boundary_kind(producer: nn.Module, next_layer: nn.Module) -> str | None:
-    """Classify a (producer, next_layer) pair for outgoing-weight indexing.
-
-    :param producer: The layer emitting the neurons.
-    :type producer: torch.nn.Module
-    :param next_layer: A candidate consumer.
-    :type next_layer: torch.nn.Module
-    :return: "conv_conv", "conv_dense", "dense_dense", or None for a pairing
-    the surgery does not index (a dense layer feeding a convolution).
-    :rtype: str | None
-    """
-    producer_is_conv = isinstance(producer, CONV_LAYER_TYPES)
-    next_is_conv = isinstance(next_layer, CONV_LAYER_TYPES)
-    if producer_is_conv and next_is_conv:
-        return "conv_conv"
-    if producer_is_conv:
-        return "conv_dense"
-    if not next_is_conv:
-        return "dense_dense"
-    return None
-
-
-def cnn_dims_by_module(encoder: nn.Module | None) -> dict[int, tuple[int, int]]:
+def _cnn_dims_by_module(encoder: nn.Module | None) -> dict[int, tuple[int, int]]:
     """Map each sub-module to the (channels, spatial) dims of its owning CNN.
 
     A conv -> flatten -> dense consumer spends spatial adjacent columns per
@@ -590,11 +410,6 @@ def cnn_dims_by_module(encoder: nn.Module | None) -> dict[int, tuple[int, int]]:
     entry under EvolvableMultiInput. Indexing by producer keeps both on one
     path; named_modules is outer-first, so a nested CNN's entry correctly
     overwrites the one its parent would have contributed.
-
-    :param encoder: The network's encoder, if any.
-    :type encoder: torch.nn.Module | None
-    :return: {id(sub_module): (channels, spatial)} for every CNN descendant.
-    :rtype: dict[int, tuple[int, int]]
     """
     dims: dict[int, tuple[int, int]] = {}
     if encoder is None:
@@ -613,11 +428,11 @@ def cnn_dims_by_module(encoder: nn.Module | None) -> dict[int, tuple[int, int]]:
     return dims
 
 
-def resolve_producer_and_next(
+def _resolve_producer_and_next(
     act_module: nn.Module,
     encoder: nn.Module | None,
     head: nn.Module | None,
-) -> ProducerContext:
+) -> _ProducerContext:
     """Find the layer that produced act_module's neurons and its consumers.
 
     The search walks named_modules() rather than one flat nn.Sequential
@@ -635,18 +450,11 @@ def resolve_producer_and_next(
     layer_norm -> linear -> activation, where the norm applies to the block's
     input and leaves these neurons alone.
 
-    :param act_module: The measured activation whose neurons are being reset.
-    :type act_module: torch.nn.Module
-    :param encoder: The network's encoder, if any.
-    :type encoder: torch.nn.Module | None
-    :param head: The network's head, if any.
-    :type head: torch.nn.Module | None
-    :return: The producer, any intervening normalisation, and the consumers; all
-        empty when the activation cannot be located, so the caller skips it.
-    :rtype: ProducerContext
+    Every field is empty when the activation cannot be located, so the caller
+    skips it.
     """
     for root, is_encoder in ((encoder, True), (head, False)):
-        search_root = unwrap_module(root)
+        search_root = _unwrap_module(root)
         if search_root is None:
             continue
 
@@ -671,10 +479,10 @@ def resolve_producer_and_next(
                 passed = True
                 continue
             in_stream = other_name.startswith(prefix)
-            if not passed and in_stream and is_norm_layer(other):
+            if not passed and in_stream and isinstance(other, NORM_LAYER_TYPES):
                 norm = other  # applies to the running producer's outputs
                 continue
-            if not is_weight_layer(other):
+            if not _is_weight_layer(other):
                 continue
             if not passed:
                 if in_stream:
@@ -690,32 +498,21 @@ def resolve_producer_and_next(
             # Either the encoder's terminal activation or the tail of a nested
             # sub-encoder, whose neurons the encoder's own fusion layer consumes.
             consumers = (
-                [enclosing] if enclosing is not None else head_entry_layers(head)
+                [enclosing] if enclosing is not None else _head_entry_layers(head)
             )
 
-        return ProducerContext(producer, norm, consumers)
+        return _ProducerContext(producer, norm, consumers)
 
-    return ProducerContext(None, None, [])
+    return _ProducerContext(None, None, [])
 
 
-def live_column_scale(weight: torch.Tensor, stride: int, keep: list[int]) -> float:
-    """Return the median outgoing-column norm of a consumer over keep.
+def _live_column_scale(weight: torch.Tensor, stride: int, keep: list[int]) -> float:
+    """The median outgoing-column norm of a consumer over keep, strictly positive.
 
     One "column" is everything a single producer neuron owns in the consumer,
     which is a different slice per boundary: a whole (out_c, *kernel) filter
     for a convolutional consumer, stride adjacent columns at a
     conv -> flatten -> dense boundary, and a single column otherwise.
-
-    :param weight: The consumer's weight: (out, neurons * stride) when dense,
-        (out_c, neurons, *kernel) when convolutional.
-    :type weight: torch.Tensor
-    :param stride: Columns per producer neuron; ignored for a conv consumer,
-        whose neuron axis is already dimension 1.
-    :type stride: int
-    :param keep: Producer-neuron indices to measure.
-    :type keep: list[int]
-    :return: A strictly positive column-norm reference.
-    :rtype: float
     """
     if weight.dim() > 2:  # conv consumer: one filter per producer neuron
         blocks = weight.reshape(weight.shape[0], weight.shape[1], -1)
@@ -743,18 +540,13 @@ def live_column_scale(weight: torch.Tensor, stride: int, keep: list[int]) -> flo
     return bound / np.sqrt(3.0) * float(np.sqrt(block_entries))
 
 
-def noise_params(
+def _noise_params(
     module: nn.Module,
 ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
-    """Return a noisy layer's ``(weight_sigma, bias_sigma)`` data tensors.
+    """A noisy layer's (weight_sigma, bias_sigma) data tensors.
 
     ``(None, None)`` for an ordinary layer, so callers can treat the noise scale
     as an optional second set of weights rather than branching on type.
-
-    :param module: The layer to inspect.
-    :type module: torch.nn.Module
-    :return: The noise-scale tensors, each ``None`` when absent.
-    :rtype: tuple[torch.Tensor | None, torch.Tensor | None]
     """
     weight_sigma = getattr(module, "weight_sigma", None)
     bias_sigma = getattr(module, "bias_sigma", None)
@@ -764,126 +556,43 @@ def noise_params(
     )
 
 
-def noise_init_scales(module: nn.Module) -> tuple[float, float] | None:
-    """Return the (weight, bias) noise scales a fresh unit starts from.
-
-    Mirrors :meth:`NoisyLinear.reset_parameters
-    <agilerl.modules.custom_components.NoisyLinear.reset_parameters>`. A revived
-    neuron wants the layer's initial noise scale, not the collapsed or inflated
-    one it inherits from the unit it replaces.
-
-    :param module: The producing layer whose neuron is being revived.
-    :type module: torch.nn.Module
-    :return: The two fill values, or None for a layer carrying no noise.
-    :rtype: tuple[float, float] | None
-    """
-    weight_sigma = getattr(module, "weight_sigma", None)
-    if weight_sigma is None or weight_sigma.dim() < 2:
-        return None
-    std_init = float(getattr(module, "std_init", 0.5))
-    fan_out, fan_in = weight_sigma.shape[0], weight_sigma.shape[1]
-    return (std_init / float(np.sqrt(fan_in)), std_init / float(np.sqrt(fan_out)))
-
-
-def norm_state_tensors(
-    norm: nn.Module | None,
-    neurons: int,
-) -> list[tuple[torch.Tensor, float]]:
-    """Return a normalisation's per-neuron state as ``(tensor, identity)`` pairs.
+def _reset_norm_state(norm: nn.Module | None, index: int, neurons: int) -> None:
+    """Reset one neuron's normalisation state to the identity transform.
 
     Covers the affine gain and shift and, for the batch norms, the running
     statistics. Tensors whose length does not match the producing layer are
-    dropped.
-
-    :param norm: The normalisation layer, or ``None``.
-    :type norm: torch.nn.Module | None
-    :param neurons: Number of neurons the producing layer emits.
-    :type neurons: int
-    :return: The per-neuron tensors and the value that makes an entry a no-op.
-    :rtype: list[tuple[torch.Tensor, float]]
+    left alone.
     """
     if norm is None:
-        return []
-    candidates = (
+        return
+    for tensor, identity in (
         (getattr(norm, "weight", None), 1.0),
         (getattr(norm, "bias", None), 0.0),
         (getattr(norm, "running_mean", None), 0.0),
         (getattr(norm, "running_var", None), 1.0),
-    )
-    return [
-        (tensor.data, identity)
-        for tensor, identity in candidates
-        if tensor is not None and tensor.dim() == 1 and tensor.shape[0] == neurons
-    ]
+    ):
+        if tensor is not None and tensor.dim() == 1 and tensor.shape[0] == neurons:
+            tensor.data[index] = identity
 
 
-def reset_norm_state(norm: nn.Module | None, index: int, neurons: int) -> None:
-    """Reset one neuron's normalisation state to the identity transform.
-
-    :param norm: The normalisation layer, or None.
-    :type norm: torch.nn.Module | None
-    :param index: Index of the neuron being revived.
-    :type index: int
-    :param neurons: Number of neurons the producing layer emits.
-    :type neurons: int
-    :return: None.
-    :rtype: None
-    """
-    for tensor, identity in norm_state_tensors(norm, neurons):
-        tensor[index] = identity
-
-
-def xavier_reset_row(
-    weight: torch.Tensor,
-    index: int,
-    rng: np.random.Generator,
-) -> None:
-    """Xavier-uniform reset of one neuron's incoming weights, in place.
-
-    :param weight: The producing layer's weight tensor.
-    :type weight: torch.Tensor
-    :param index: Index of the neuron to reset.
-    :type index: int
-    :param rng: Seeded generator owned by the caller.
-    :type rng: numpy.random.Generator
-    :return: ``None``.
-    :rtype: None
-    """
-    row = weight[index]
-    fan_out = weight.shape[0]
-    if weight.dim() == 2:  # Linear: (out_features, in_features)
-        fan_in = weight.shape[1]
-    else:  # Conv: (out_channels, in_channels, *kernel)
-        receptive = 1
-        for dim in weight.shape[2:]:
-            receptive *= int(dim)
-        fan_in = int(weight.shape[1]) * receptive
-        fan_out = fan_out * receptive
-    bound = float(np.sqrt(6.0 / (fan_in + fan_out)))
-    sampled = rng.uniform(-bound, bound, size=tuple(row.shape))
-    weight[index] = torch.as_tensor(sampled, dtype=weight.dtype, device=weight.device)
-
-
-def revived_out_block(
+def _revived_block(
     template: torch.Tensor,
     scale: float,
     rng: np.random.Generator,
+    *,
+    is_noise_scale: bool = False,
 ) -> torch.Tensor:
-    """Draw the outgoing weights a reset neuron is revived with.
+    """Draw the outgoing block a reset neuron is revived with, of norm scale.
 
-    Returns a random direction rescaled so the block's norm is scale.
-
-    :param template: The neuron's current outgoing block, for shape/dtype/device.
-    :type template: torch.Tensor
-    :param scale: Target L2 norm of the returned block.
-    :type scale: float
-    :param rng: Seeded generator owned by the caller.
-    :type rng: numpy.random.Generator
-    :return: The replacement outgoing block.
-    :rtype: torch.Tensor
+    A weight block is a random direction rescaled to scale. A noise-scale block
+    is instead a single non-negative value, sized the way the weight block is but
+    against the noise scales' own live columns rather than the weights'.
     """
-    if scale <= 0.0:
+    if scale <= 0.0 or template.numel() == 0:
         return torch.zeros_like(template)
+
+    if is_noise_scale:
+        return torch.full_like(template, scale / float(np.sqrt(template.numel())))
 
     sampled = rng.standard_normal(size=tuple(template.shape))
     block = torch.as_tensor(sampled, dtype=template.dtype, device=template.device)
@@ -893,58 +602,32 @@ def revived_out_block(
     return block * (scale / norm)
 
 
-def revived_noise_block(template: torch.Tensor, scale: float) -> torch.Tensor:
-    """Draw the outgoing noise scales a reset neuron is revived with.
-
-    So the block is a single non-negative value, sized the way the weight block is
-    but against the noise scales' own live columns rather than the weights'.
-
-    :param template: The neuron's current noise block.
-    :type template: torch.Tensor
-    :param scale: Target L2 norm of the returned block.
-    :type scale: float
-    :return: The replacement noise block.
-    :rtype: torch.Tensor
-    """
-    entries = template.numel()
-    if scale <= 0.0 or entries == 0:
-        return torch.zeros_like(template)
-    return torch.full_like(template, scale / float(np.sqrt(entries)))
-
-
-def resolve_consumers(
+def _resolve_consumers(
     producer: nn.Module,
     next_layers: list[nn.Module],
     cnn_channels: int | None,
     cnn_spatial: int | None,
-) -> list[ConsumerTarget]:
+) -> list[_ConsumerTarget]:
     """Pair each usable consumer weight tensor with its per-neuron column stride.
 
     A consumer must spend its columns on exactly these neurons: one block each,
     none interleaved. Anything failing that is not this producer's consumer and
     rewriting its columns would corrupt weights belonging to other neurons, so it
-    is skipped instead.
-
-    :param producer: The layer emitting the neurons.
-    :type producer: torch.nn.Module
-    :param next_layers: Candidate consumers from :func:`resolve_producer_and_next`.
-    :type next_layers: list[torch.nn.Module]
-    :param cnn_channels: Channel count of the producer's owning CNN, if any.
-    :type cnn_channels: int | None
-    :param cnn_spatial: Flattened spatial size of that CNN's output, if any.
-    :type cnn_spatial: int | None
-    :return: One target per consumer tensor to rewrite, including each noisy
-        consumer's parallel noise-scale tensor.
-    :rtype: list[ConsumerTarget]
+    is skipped instead. Each noisy consumer's parallel noise-scale tensor is
+    returned as a target of its own.
     """
-    producer_neurons = weight_param(producer).data.shape[0]
-    consumers: list[ConsumerTarget] = []
+    producer_is_conv = isinstance(producer, CONV_LAYER_TYPES)
+    producer_neurons = _weight_param(producer).data.shape[0]
+    consumers: list[_ConsumerTarget] = []
     for next_layer in next_layers:
-        kind = boundary_kind(producer, next_layer)
-        if kind is None:
+        # A dense layer feeding a convolution is a pairing the surgery cannot index.
+        next_is_conv = isinstance(next_layer, CONV_LAYER_TYPES)
+        if next_is_conv and not producer_is_conv:
             continue
-        next_weight = weight_param(next_layer).data
-        if kind == "conv_dense":
+
+        next_weight = _weight_param(next_layer).data
+        stride = 1
+        if producer_is_conv and not next_is_conv:
             if cnn_spatial is None or cnn_channels is None:
                 logger.debug(
                     "ReGraMa: no flattened column layout for %s -> %s; "
@@ -954,8 +637,6 @@ def resolve_consumers(
                 )
                 continue
             stride = cnn_spatial
-        else:
-            stride = 1
 
         if next_weight.shape[1] != producer_neurons * stride:
             logger.debug(
@@ -968,49 +649,41 @@ def resolve_consumers(
             )
             continue
 
-        consumers.append(ConsumerTarget(next_weight, stride))
+        consumers.append(_ConsumerTarget(next_weight, stride))
 
         # The consumer's own noise columns are scales rather than weights and are
         # revived as such.
-        next_sigma, _next_bias_sigma = noise_params(next_layer)
+        next_sigma, _next_bias_sigma = _noise_params(next_layer)
         if next_sigma is not None and next_sigma.shape == next_weight.shape:
-            consumers.append(ConsumerTarget(next_sigma, stride, is_noise_scale=True))
+            consumers.append(_ConsumerTarget(next_sigma, stride, is_noise_scale=True))
 
     return consumers
 
 
-def shared_latent_blocks(
+def _shared_latent_blocks(
     producer: nn.Module,
     entry_layers: Sequence[nn.Module],
-) -> list[ConsumerTarget]:
-    """Return each sharing head's latent columns as a writable view.
-
-    :param producer: The encoder's latent-producing layer.
-    :type producer: torch.nn.Module
-    :param entry_layers: Head entry layers from :func:`shared_encoder_heads`.
-    :type entry_layers: Sequence[torch.nn.Module]
-    :return: One target per usable block, noise scales included.
-    :rtype: list[ConsumerTarget]
-    """
+) -> list[_ConsumerTarget]:
+    """Each sharing head's latent columns as a writable view, noise scales included."""
     if isinstance(producer, CONV_LAYER_TYPES):
         return []
 
-    span = weight_param(producer).data.shape[0]
-    blocks: list[ConsumerTarget] = []
+    span = _weight_param(producer).data.shape[0]
+    blocks: list[_ConsumerTarget] = []
     for entry in entry_layers:
-        weight = weight_param(entry).data
+        weight = _weight_param(entry).data
         if weight.dim() != 2 or weight.shape[1] < span:
             continue
-        blocks.append(ConsumerTarget(weight[:, :span], 1))
-        sigma, _bias_sigma = noise_params(entry)
+        blocks.append(_ConsumerTarget(weight[:, :span], 1))
+        sigma, _bias_sigma = _noise_params(entry)
         if sigma is not None and sigma.shape == weight.shape:
-            blocks.append(ConsumerTarget(sigma[:, :span], 1, is_noise_scale=True))
+            blocks.append(_ConsumerTarget(sigma[:, :span], 1, is_noise_scale=True))
     return blocks
 
 
-def reset_layer_neurons(
+def _reset_layer_neurons(
     producer: nn.Module,
-    consumers: list[ConsumerTarget],
+    consumers: list[_ConsumerTarget],
     norm: nn.Module | None,
     indices: list[int],
     rng: np.random.Generator,
@@ -1022,40 +695,52 @@ def reset_layer_neurons(
     REGRAMA_OUT_SCALE times the consumer's live column scale (a signed random
     direction for a weight, a uniform non-negative fill for a noise scale) and a
     neutral normalisation entry.
-
-    :param producer: The layer emitting the neurons.
-    :type producer: torch.nn.Module
-    :param consumers: The consumer tensors from :func:`resolve_consumers`.
-    :type consumers: list[ConsumerTarget]
-    :param norm: Normalisation applied to these neurons, or None.
-    :type norm: torch.nn.Module | None
-    :param indices: Indices of the dormant neurons to reset.
-    :type indices: list[int]
-    :param rng: Seeded generator owned by the caller.
-    :type rng: numpy.random.Generator
-    :return: None.
-    :rtype: None
     """
-    producer_weight = weight_param(producer).data
-    producer_bias = bias_param(producer)
-    producer_bias = producer_bias.data if producer_bias is not None else None
-    sigma_weight, sigma_bias = noise_params(producer)
+    producer_weight = _weight_param(producer).data
+    producer_bias = _bias_data(producer)
+    sigma_weight, sigma_bias = _noise_params(producer)
     neurons = producer_weight.shape[0]
+
+    # Xavier-uniform bound of the producing layer.
+    fan_out = producer_weight.shape[0]
+    if producer_weight.dim() == 2:  # Linear: (out_features, in_features)
+        fan_in = producer_weight.shape[1]
+    else:  # Conv: (out_channels, in_channels, *kernel)
+        receptive = 1
+        for dim in producer_weight.shape[2:]:
+            receptive *= int(dim)
+        fan_in = int(producer_weight.shape[1]) * receptive
+        fan_out = fan_out * receptive
+    bound = float(np.sqrt(6.0 / (fan_in + fan_out)))
+
+    # A revived unit wants the layer's initial noise scale, not the collapsed or
+    # inflated one it inherits.
+    noise_fills: tuple[float, float] | None = None
+    if sigma_weight is not None and sigma_weight.dim() >= 2:
+        std_init = float(getattr(producer, "std_init", 0.5))
+        noise_fills = (
+            std_init / float(np.sqrt(sigma_weight.shape[1])),
+            std_init / float(np.sqrt(sigma_weight.shape[0])),
+        )
 
     # Measure against the neurons this pass leaves alone.
     keep = [n for n in range(neurons) if n not in set(indices)]
     out_scales = [
-        REGRAMA_OUT_SCALE * live_column_scale(target.weight, target.stride, keep)
+        REGRAMA_OUT_SCALE * _live_column_scale(target.weight, target.stride, keep)
         for target in consumers
     ]
-    init_scales = noise_init_scales(producer)
 
     for index in indices:
-        xavier_reset_row(producer_weight, index, rng)
+        sampled = rng.uniform(-bound, bound, size=tuple(producer_weight[index].shape))
+        producer_weight[index] = torch.as_tensor(
+            sampled,
+            dtype=producer_weight.dtype,
+            device=producer_weight.device,
+        )
         if producer_bias is not None:
             producer_bias[index] = 0.0
-        if init_scales is not None:
-            weight_fill, bias_fill = init_scales
+        if noise_fills is not None:
+            weight_fill, bias_fill = noise_fills
             if sigma_weight is not None:
                 sigma_weight[index] = weight_fill
             if sigma_bias is not None:
@@ -1063,12 +748,13 @@ def reset_layer_neurons(
         for target, scale in zip(consumers, out_scales, strict=True):
             weight, stride = target.weight, target.stride
             block = weight[:, index * stride : (index + 1) * stride]
-            weight[:, index * stride : (index + 1) * stride] = (
-                revived_noise_block(block, scale)
-                if target.is_noise_scale
-                else revived_out_block(block, scale, rng)
+            weight[:, index * stride : (index + 1) * stride] = _revived_block(
+                block,
+                scale,
+                rng,
+                is_noise_scale=target.is_noise_scale,
             )
-        reset_norm_state(norm, index, neurons)
+        _reset_norm_state(norm, index, neurons)
 
     # Defensive clamp and NaN scrub so a reset never propagates a broken value.
     for tensor in (producer_weight, producer_bias, sigma_weight, sigma_bias):
@@ -1112,31 +798,40 @@ def reset_dormant_neurons(
         isinstance(module, nn.RNNBase) for _name, module in network.named_modules()
     )
 
-    scores = scored_activations(network, per_neuron_list)
+    # A network with a length mismatch is skipped so scores are not mis-paired
+    # with layers.
+    targets = _target_activations(network)
+    if not per_neuron_list or len(per_neuron_list) != len(targets):
+        return ResetReport(0, recurrent_seen)
+    scores = [
+        (act_module, per_neuron)
+        for act_module, per_neuron in zip(targets, per_neuron_list, strict=False)
+        if per_neuron is not None
+    ]
     if not scores:
         return ResetReport(0, recurrent_seen)
 
     encoder = getattr(network, "encoder", None)
     head = getattr(network, "head_net", None)
-    cnn_dims = cnn_dims_by_module(encoder)
-    head_entries = head_entry_layers(head)
+    cnn_dims = _cnn_dims_by_module(encoder)
+    head_entries = _head_entry_layers(head)
 
     neurons_reset = 0
     for act_module, per_neuron in scores:
-        producer, norm, next_layers = resolve_producer_and_next(
+        producer, norm, next_layers = _resolve_producer_and_next(
             act_module,
             encoder,
             head,
         )
-        if producer is None or not next_layers or not owns_trainable_weight(producer):
+        if producer is None or not next_layers or not _owns_trainable_weight(producer):
             continue
-        if per_neuron.numel() != weight_param(producer).data.shape[0]:
+        if per_neuron.numel() != _weight_param(producer).data.shape[0]:
             continue
 
         # Keyed on the producer, not the network: a nested sub-encoder's conv
         # stack has its own flattened layout.
         cnn_channels, cnn_spatial = cnn_dims.get(id(producer), (None, None))
-        consumers = resolve_consumers(producer, next_layers, cnn_channels, cnn_spatial)
+        consumers = _resolve_consumers(producer, next_layers, cnn_channels, cnn_spatial)
         if not consumers:
             continue
 
@@ -1145,13 +840,13 @@ def reset_dormant_neurons(
         if shared_latent_heads and any(
             layer is entry for layer in next_layers for entry in head_entries
         ):
-            consumers = consumers + shared_latent_blocks(producer, shared_latent_heads)
+            consumers = consumers + _shared_latent_blocks(producer, shared_latent_heads)
 
-        indices = dormant_indices(per_neuron, dormant_threshold)
+        indices = _dormant_indices(per_neuron, dormant_threshold)
         if not indices:
             continue
 
-        reset_layer_neurons(producer, consumers, norm, indices, rng)
+        _reset_layer_neurons(producer, consumers, norm, indices, rng)
         neurons_reset += len(indices)
 
     return ResetReport(neurons_reset, recurrent_seen)
@@ -1177,7 +872,7 @@ class GraMaCapture:
     def __init__(self, agent: EvolvableAlgorithmProtocol) -> None:
         self.agent = agent
         self._handles: list[RemovableHandle] = []
-        # Per network a list aligned to target_activations order, holding that
+        # Per network a list aligned to _target_activations order, holding that
         # layer's most recent per-neuron gradient.
         self._latest: list[list[torch.Tensor | None]] = []
 
@@ -1192,7 +887,7 @@ class GraMaCapture:
         """
         try:
             for net_idx, (_network_id, network) in enumerate(eval_networks(self.agent)):
-                targets = target_activations(network)
+                targets = _target_activations(network)
                 self._latest.append([None] * len(targets))
                 for mod_idx, module in enumerate(targets):
                     handle = module.register_full_backward_hook(
@@ -1233,7 +928,7 @@ class GraMaCapture:
             _grad_output: GradInput,
         ) -> None:
             try:
-                gradient = per_neuron_grad(grad_input)
+                gradient = _per_neuron_grad(grad_input)
                 if gradient is None:
                     return
                 # Overwrite so that only the last minibatch survives.

@@ -92,7 +92,7 @@ from agilerl.algorithms.core.base import (
 from agilerl.algorithms.core.optimizer_wrapper import OptimizerWrapper
 from agilerl.algorithms.core.registry import NetworkGroup
 from agilerl.algorithms.grpo import GRPO
-from agilerl.hpo.regrama import eval_networks, target_activations
+from agilerl.hpo.regrama import _target_activations, eval_networks
 from agilerl.modules import EvolvableMLP
 from agilerl.modules.dummy import DummyEvolvable
 from agilerl.utils.algo_utils import VLLMConfig
@@ -8109,7 +8109,7 @@ class TestEvolvableAlgorithmGraMaState:
         return sum(
             len(module._backward_hooks)
             for _network_id, network in eval_networks(agent)
-            for module in target_activations(network)
+            for module in _target_activations(network)
         )
 
     def test_reopening_a_block_does_not_stack_a_second_set_of_hooks(self):

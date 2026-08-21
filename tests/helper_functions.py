@@ -650,8 +650,8 @@ def grama_scores_for(agent: Any, fill: float = 0.0) -> GraMaScores:
     scores: GraMaScores = []
     for _network_id, network in regrama.eval_networks(agent):
         entries: list[torch.Tensor | None] = []
-        for activation in regrama.target_activations(network):
-            producer = regrama.resolve_producer_and_next(
+        for activation in regrama._target_activations(network):
+            producer = regrama._resolve_producer_and_next(
                 activation,
                 getattr(network, "encoder", None),
                 getattr(network, "head_net", None),
@@ -660,7 +660,7 @@ def grama_scores_for(agent: Any, fill: float = 0.0) -> GraMaScores:
                 None
                 if producer is None
                 else torch.full(
-                    (regrama.weight_param(producer).shape[0],),
+                    (regrama._weight_param(producer).shape[0],),
                     fill,
                 ),
             )

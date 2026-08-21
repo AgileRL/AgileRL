@@ -62,6 +62,7 @@ from agilerl.algorithms.core.registry import (
     OptimizerFactory,
 )
 from agilerl.architectures.nemotron_h import register_nemotron_h_liger
+from agilerl.hpo.regrama import GraMaCapture
 from agilerl.metrics import AgentMetrics, MultiAgentMetrics
 from agilerl.modules.configs import MlpNetConfig, NetConfig
 from agilerl.modules.dummy import DummyEvolvable
@@ -139,8 +140,6 @@ from agilerl.utils.llm_packing import (
 if TYPE_CHECKING:
     from torch.optim.lr_scheduler import SequentialLR
     from transformers import BitsAndBytesConfig
-
-    from agilerl.hpo.regrama import GraMaCapture
 
 # Make imports visible to typechecker and import when required
 if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
@@ -535,8 +534,6 @@ class EvolvableAlgorithm(ABC, Generic[ExperiencesT], metaclass=RegistryMeta):
         self.metrics.init_training_step()
         self._release_grama_capture()
         if self.capture_grama:
-            from agilerl.hpo.regrama import GraMaCapture
-
             self._grama_capture = GraMaCapture(self).register()
 
     def finalize_training_step(self, num_steps: int) -> None:

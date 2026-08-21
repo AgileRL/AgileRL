@@ -2960,7 +2960,7 @@ class TestMutationsRegramaParameterMutation:
     def test_snapshot_that_captured_nothing_warns_like_a_missing_one(self):
         agent = self.make_agent()
         agent.grama_scores = [
-            [None] * len(regrama.target_activations(network))
+            [None] * len(regrama._target_activations(network))
             for _network_id, network in regrama.eval_networks(agent)
         ]
         assert agent.grama_scores
@@ -3047,8 +3047,8 @@ def _policy_latent_dormant(agent, index: int = 0) -> None:
     policy = getattr(agent, agent.registry.policy())
     # The latent is the encoder's terminal activation, i.e. the only boundary a
     # shared encoder carries into another network's head.
-    terminal = regrama.activation_modules(policy.encoder, include_output=True)[-1]
-    position = regrama.target_activations(policy).index(terminal)
+    terminal = regrama._activation_modules(policy.encoder, include_output=True)[-1]
+    position = regrama._target_activations(policy).index(terminal)
     policy_entry = next(
         entry
         for (_network_id, network), entry in zip(
@@ -3073,7 +3073,7 @@ class TestMutationsRegramaSharedEncoders:
         )
 
     def critic_head(self, agent):
-        return regrama.head_entry_layers(agent.critic.head_net)[0]
+        return regrama._head_entry_layers(agent.critic.head_net)[0]
 
     def test_shared_critic_head_is_faded_when_the_policy_latent_is_reset(self):
         # The critic borrows the encoder, so it inherits the reset via
