@@ -95,6 +95,40 @@ from tests.helper_functions import (  # noqa: E402
 if not torch.cuda.is_available():
     os.environ.setdefault("ACCELERATE_USE_CPU", "true")
 
+# Env vars PartialState / Accelerator inspect when choosing a distributed
+# backend. Leaks from DeepSpeed / LLM tests cause later Accelerator() calls to
+# DDP-wrap models (Linux) or hang on rendezvous (macOS / Windows).
+_DIST_ENV_VARS = (
+    "WORLD_SIZE",
+    "RANK",
+    "LOCAL_RANK",
+    "MASTER_ADDR",
+    "GROUP_RANK",
+    "LOCAL_WORLD_SIZE",
+    "ACCELERATE_USE_DEEPSPEED",
+)
+
+# Per-xdist-worker MASTER_PORT from above; restored after clearing leaked dist env.
+_WORKER_MASTER_PORT = os.environ.get("MASTER_PORT") if _xdist_worker_id else None
+
+
+def _reset_distributed_env() -> None:
+    """Clear distributed launch env vars leaked by DeepSpeed / LLM tests.
+
+    Does not call ``destroy_process_group()``. DeepSpeed has no clean destroy
+    path; tearing down the group between consecutive ``@pytest.mark.gpu``
+    DeepSpeed tests surfaces ``Group <ProcessGroup ...> is not registered``.
+    Suites that need an explicit destroy (multi-agent) do so in
+    ``tests/test_algorithms/test_multi_agent/conftest.py``.
+    """
+    for var in _DIST_ENV_VARS:
+        os.environ.pop(var, None)
+
+    if _WORKER_MASTER_PORT is not None:
+        os.environ["MASTER_PORT"] = _WORKER_MASTER_PORT
+    else:
+        os.environ.pop("MASTER_PORT", None)
+
 
 @pytest.hookimpl(tryfirst=True)
 def pytest_collection_modifyitems(config, items):
@@ -189,6 +223,12 @@ def cleanup():
     # ``ACCELERATE_USE_CPU=true`` above) then hits ``_check_initialized`` and
     # fails with ``AcceleratorState has already been initialized ...``.
     #
+    # Also clear leaked distributed launch env vars (WORLD_SIZE, RANK, …).
+    # Otherwise a later ``Accelerator()`` can DDP-wrap models so attribute
+    # access like ``actor.encoder`` fails, or hang on a multi-worker rendezvous.
+    # Process-group destroy stays out of this global path — see
+    # ``_reset_distributed_env``.
+    #
     # Resetting at setup (vs. teardown) is robust to fixtures that swallow
     # exceptions, tests that create accelerators inside ``with`` blocks that
     # raise, and ordering with subdirectory conftests like
@@ -196,10 +236,15 @@ def cleanup():
     # teardown — those will continue to work and just be redundant on the next
     # test's setup. ``.clear()`` is a no-op when state is empty, so this is
     # cheap.
+    _reset_distributed_env()
     AcceleratorState._reset_state(reset_partial_state=True)
     PartialState._reset_state()
 
     yield
+
+    _reset_distributed_env()
+    AcceleratorState._reset_state(reset_partial_state=True)
+    PartialState._reset_state()
 
     # Only clear CUDA cache if CUDA was actually used
     if torch.cuda.is_available() and torch.cuda.is_initialized():

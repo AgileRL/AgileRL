@@ -1,0 +1,157 @@
+---
+name: Publish release
+
+# Stable PyPI path for spoke tags (proposal §4.6.5 / D1 / D12).
+# Hub never publishes stable agilerl to PyPI.
+#
+#   vX.Y.Z              → agilerl (public framework identity; ≡ hub agilerl/vX.Y.Z)
+#   agilerl-arena/vX.Y.Z → agilerl-arena (independent SDK semver)
+#
+# Preferred trigger: workflow_dispatch from an existing tag ref (pairs with
+# environment `pypi` required reviewers + tag deployment policy). Tag push
+# remains for §4.6.5; protect refs/tags/v* and refs/tags/agilerl-arena/v* via
+# a GitHub ruleset.
+#
+# Auth: PyPI Trusted Publishing (OIDC) only — no long-lived UV_PUBLISH_TOKEN.
+# Bind PyPI trusted publisher to owner AgileRL, repo AgileRL, this workflow, environment `pypi`.
+#
+# Wheel version comes from the triggering tag via SETUPTOOLS_SCM_PRETEND_VERSION_FOR_*
+# (hatch-vcs). pyproject.toml has no committed project.version.
+
+on:
+    workflow_dispatch:
+        inputs:
+            tag:
+                description: Existing spoke tag to publish (e.g. v2.9.0 or agilerl-arena/v0.2.0). Empty = the ref that triggered the run.
+                required: false
+                default: ''
+    push:
+        tags:
+            - v*
+            - agilerl-arena/v*
+
+permissions:
+    contents: read
+
+jobs:
+    build:
+        if: github.repository == 'AgileRL/AgileRL'
+        runs-on: ubuntu-latest
+        outputs:
+            tag: ${{ steps.tag.outputs.tag }}
+            version: ${{ steps.tag.outputs.version }}
+            dist_name: ${{ steps.tag.outputs.dist_name }}
+            package: ${{ steps.tag.outputs.package }}
+        steps:
+            - name: Resolve tag
+              id: tag
+              env:
+                  INPUT_TAG: ${{ inputs.tag }}
+              run: |
+                  set -euo pipefail
+                  if [[ -n "${INPUT_TAG}" ]]; then
+                    TAG="${INPUT_TAG}"
+                  else
+                    TAG="${GITHUB_REF_NAME}"
+                  fi
+                  TAG="${TAG#refs/tags/}"
+                  case "${TAG}" in
+                    agilerl-arena/v*)
+                      VER="${TAG#agilerl-arena/v}"
+                      PKG=agilerl-arena
+                      DIST=agilerl_arena
+                      ;;
+                    v*)
+                      VER="${TAG#v}"
+                      PKG=agilerl
+                      DIST=agilerl
+                      ;;
+                    *)
+                      echo "ref ${TAG} is not a v* or agilerl-arena/v* release tag" >&2
+                      exit 1
+                      ;;
+                  esac
+                  echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+                  echo "version=${VER}" >> "$GITHUB_OUTPUT"
+                  echo "package=${PKG}" >> "$GITHUB_OUTPUT"
+                  echo "dist_name=${DIST}" >> "$GITHUB_OUTPUT"
+
+            - name: Checkout tag
+              uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+              with:
+                  ref: ${{ steps.tag.outputs.tag }}
+                  fetch-depth: 0
+                  fetch-tags: true
+
+            - name: Install uv
+              uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
+
+            - name: Build
+              env:
+                  VER: ${{ steps.tag.outputs.version }}
+                  TAG: ${{ steps.tag.outputs.tag }}
+                  PKG: ${{ steps.tag.outputs.package }}
+                  DIST: ${{ steps.tag.outputs.dist_name }}
+              run: |
+                  set -euo pipefail
+                  case "${TAG}" in
+                    agilerl-arena/v*)
+                      export SETUPTOOLS_SCM_PRETEND_VERSION="${VER}"
+                      export SETUPTOOLS_SCM_PRETEND_VERSION_FOR_AGILERL_ARENA="${VER}"
+                      ;;
+                    v*)
+                      export SETUPTOOLS_SCM_PRETEND_VERSION="${VER}"
+                      export SETUPTOOLS_SCM_PRETEND_VERSION_FOR_AGILERL="${VER}"
+                      python3 scripts/check-extras.py
+                      ;;
+                  esac
+                  rm -rf dist
+                  uv build --package "${PKG}"
+                  shopt -s nullglob
+                  artifacts=(dist/${DIST}-${VER}*)
+                  if [[ ${#artifacts[@]} -eq 0 ]]; then
+                    echo "error: no dist artifacts for ${DIST}==${VER}" >&2
+                    ls -la dist >&2 || true
+                    exit 1
+                  fi
+                  echo "Built ${PKG}==${VER} from tag ${TAG}"
+
+            - name: Upload dist
+              uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+              with:
+                  name: pypi-dist
+                  path: dist/
+                  if-no-files-found: error
+
+    publish:
+        needs: build
+        if: github.repository == 'AgileRL/AgileRL'
+        runs-on: ubuntu-latest
+        environment: pypi
+        permissions:
+            contents: read
+            id-token: write
+        steps:
+            - name: Download dist
+              uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+              with:
+                  name: pypi-dist
+                  path: dist
+
+            - name: Install uv
+              uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
+
+            - name: Publish to PyPI (OIDC)
+              env:
+                  TAG: ${{ needs.build.outputs.tag }}
+                  VER: ${{ needs.build.outputs.version }}
+                  DIST: ${{ needs.build.outputs.dist_name }}
+              run: |
+                  set -euo pipefail
+                  shopt -s nullglob
+                  artifacts=(dist/${DIST}-${VER}*)
+                  if [[ ${#artifacts[@]} -eq 0 ]]; then
+                    echo "missing dist artifacts for ${DIST}==${VER}"; ls -la dist; exit 1
+                  fi
+                  echo "Publishing ${DIST}==${VER} from tag ${TAG} via Trusted Publishing"
+                  uv publish --trusted-publishing always "${artifacts[@]}"
