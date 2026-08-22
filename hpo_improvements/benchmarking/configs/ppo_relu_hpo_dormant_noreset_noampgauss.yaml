@@ -1,10 +1,20 @@
 ---
-# ReGraMa comparison -- DORMANT baseline (derived from ppo_relu_hpo.yaml).
-# Identical HPO regime but with ReLU activations, activation mutation forced
-# OFF, and the Gaussian parameter mutation alone (regrama_param_mut: false, both
-# Gaussian bands live). Paired with the matching *_regrama.yaml to isolate
-# ReGraMa's effect on the dormant-neuron phenomenon under ReLU networks, and with
-# the *_noreset / *_noampgauss variants that ablate one Gaussian band each.
+# ReGraMa comparison -- DORMANT baseline, ORDINARY NOISE ONLY (derived from
+# ppo_relu_hpo_dormant.yaml, identical to it except random_reset_param_mut and
+# amplified_gauss_param_mut). Both the random-reset and the amplified ("super")
+# bands are ablated, leaving the Gaussian parameter mutation as ordinary noise of
+# std mutation_sd x |w| on the 90% of selected weights that band already covered.
+# This is the gentlest Gaussian arm, and the closest non-ReGraMa comparator to
+# ppo_relu_regrama.yaml, whose trailing pass drops the amplified band only.#
+# The three bands of the Gaussian parameter mutation are drawn per selected weight
+# and are mutually exclusive: amplified ("super") noise at 5% of draws, a random
+# reset at the next 5%, ordinary noise at the remaining 90%. Switching a band off
+# SKIPS it -- those weights keep their trained values and the dropped probability
+# mass is NOT redistributed, so the ordinary band still covers 90% either way and
+# the mutation is never a no-op. Band selection is drawn from the operator's own
+# NumPy RNG, so every arm here picks the same weights and assigns them to the same
+# bands; only the surviving bands' magnitudes differ (they draw on the global torch
+# RNG, which a skipped band no longer advances).
 #
 # PPO WITH EVOLUTIONARY SELECTION (population of 4, elitism, tournament) on
 # Gymnasium MuJoCo -- run as a PARAMETER-OPERATOR ISOLATION: the ONLY active
@@ -147,8 +157,8 @@ mutation:
     mutation_sd: 0.1  # std of the Gaussian weight perturbation for params_mut (typical)
     rand_seed: 42
     mutate_elite: false  # keep the elite member unmutated so the best agent survives intact into the next generation
-    random_reset_param_mut: true      # keep the random-reset band of the Gaussian parameter mutation (a selected weight is REPLACED by a fresh N(0, 1) draw)
-    amplified_gauss_param_mut: true   # keep the amplified ("super") Gaussian band, whose std is 10x the weight's own magnitude
+    random_reset_param_mut: false     # ABLATED -- no weight is replaced by a fresh N(0, 1) draw; that band's weights keep their trained values
+    amplified_gauss_param_mut: false  # ABLATED -- no amplified ("super") perturbation; that band's weights keep their trained values
     regrama_param_mut: false          # original Gaussian parameter mutation only -- no dormant-neuron resets
 
 network:

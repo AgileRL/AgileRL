@@ -24,31 +24,46 @@ class TestHpConfigFromMutationSpec:
 
 
 class TestBuildMutationsFromSpec:
-    def test_forwards_reborn_fields(self):
+    def test_forwards_parameter_mutation_fields(self):
         from agilerl.models.hpo import MutationSpec
         from agilerl.utils.trainer_utils import build_mutations_from_spec
 
         spec = MutationSpec(
-            param_mut_type="reborn",
+            random_reset_param_mut=False,
+            amplified_gauss_param_mut=False,
+            regrama_param_mut=True,
             dormant_tau=0.2,
-            overact_beta=4.0,
-            reborn_out_scale=0.5,
+            regrama_out_scale=0.5,
         )
         mutations = build_mutations_from_spec(spec, device="cpu")
-        assert mutations.param_mut_type == "reborn"
+        assert mutations.random_reset_param_mut is False
+        assert mutations.amplified_gauss_param_mut is False
+        assert mutations.regrama_param_mut is True
         assert mutations.dormant_tau == 0.2
-        assert mutations.overact_beta == 4.0
-        assert mutations.reborn_out_scale == 0.5
+        assert mutations.regrama_out_scale == 0.5
 
     def test_defaults_forwarded(self):
         from agilerl.models.hpo import MutationSpec
         from agilerl.utils.trainer_utils import build_mutations_from_spec
 
         mutations = build_mutations_from_spec(MutationSpec(), device="cpu")
-        assert mutations.param_mut_type == "original"
+        assert mutations.random_reset_param_mut is True
+        assert mutations.amplified_gauss_param_mut is True
+        assert mutations.regrama_param_mut is False
         assert mutations.dormant_tau == 0.1
-        assert mutations.overact_beta == 3.0
-        assert mutations.reborn_out_scale == 0.02
+        assert mutations.regrama_out_scale == 0.02
+
+    def test_overact_beta_stays_infinite(self):
+        # The spec has no overact_beta field, so a manifest-built operator can
+        # never enable ReBorn's neuron split -- only a direct Mutations(...) call
+        # can. Guards against the field creeping back in via the spec.
+        from agilerl.models.hpo import MutationSpec
+        from agilerl.utils.trainer_utils import build_mutations_from_spec
+
+        mutations = build_mutations_from_spec(
+            MutationSpec(regrama_param_mut=True), device="cpu"
+        )
+        assert mutations.overact_beta == float("inf")
 
     def test_returns_none_when_spec_none(self):
         from agilerl.utils.trainer_utils import build_mutations_from_spec

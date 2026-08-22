@@ -822,51 +822,51 @@ class TestMutationSpecExtraForbid:
         assert spec.probabilities.no_mut == 0.5
 
 
-class TestMutationSpecReborn:
+class TestMutationSpecParameterMutation:
     def test_defaults(self):
         spec = MutationSpec()
-        assert spec.param_mut_type == "original"
+        assert spec.random_reset_param_mut is True
+        assert spec.amplified_gauss_param_mut is True
+        assert spec.regrama_param_mut is False
         assert spec.dormant_tau == 0.1
-        assert spec.overact_beta == 3.0
-        assert spec.reborn_out_scale == 0.02
+        assert spec.regrama_out_scale == 0.02
 
-    def test_valid_reborn(self):
-        spec = MutationSpec(param_mut_type="reborn", dormant_tau=0.1, overact_beta=3.0)
-        assert spec.param_mut_type == "reborn"
-
-    def test_infinite_overact_beta_allowed(self):
-        # The ReGraMa configuration (*_regrama.yaml): with no neuron ever
-        # over-active the operator degenerates to a dormant-neuron reset, so the
-        # threshold pair must survive validation with beta unbounded.
-        spec = MutationSpec(
-            param_mut_type="reborn", dormant_tau=0.01, overact_beta=float("inf")
-        )
-        assert spec.overact_beta == float("inf")
+    def test_valid_regrama(self):
+        spec = MutationSpec(regrama_param_mut=True, dormant_tau=0.01)
+        assert spec.regrama_param_mut is True
         assert spec.dormant_tau == 0.01
 
-    def test_invalid_param_mut_type(self):
+    def test_gaussian_bands_switch_independently(self):
+        spec = MutationSpec(
+            random_reset_param_mut=False, amplified_gauss_param_mut=False
+        )
+        assert spec.random_reset_param_mut is False
+        assert spec.amplified_gauss_param_mut is False
+
+    def test_overact_beta_is_not_a_manifest_field(self):
+        # Splitting an over-active neuron (ReBorn) is a Python-only escape hatch:
+        # a manifest may not re-enable it, so the key must be rejected outright
+        # rather than silently ignored.
+        with pytest.raises(ValidationError, match="overact_beta"):
+            MutationSpec(overact_beta=3.0)
+
+    def test_param_mut_type_is_rejected(self):
+        # The superseded selector. extra="forbid" turns a stale manifest into a
+        # loud failure instead of a run that silently ignores the setting.
         with pytest.raises(ValidationError, match="param_mut_type"):
-            MutationSpec(param_mut_type="bogus")
+            MutationSpec(param_mut_type="reborn")
 
     def test_dormant_tau_must_be_positive(self):
         with pytest.raises(ValidationError, match="greater than 0"):
             MutationSpec(dormant_tau=0.0)
 
-    def test_overact_beta_must_exceed_dormant_tau(self):
-        with pytest.raises(ValidationError, match="must be greater than dormant_tau"):
-            MutationSpec(dormant_tau=0.5, overact_beta=0.4)
-
-    def test_overact_beta_non_negative(self):
+    def test_regrama_out_scale_non_negative(self):
         with pytest.raises(ValidationError, match="greater than or equal to 0"):
-            MutationSpec(overact_beta=-1.0)
+            MutationSpec(regrama_out_scale=-0.1)
 
-    def test_reborn_out_scale_non_negative(self):
-        with pytest.raises(ValidationError, match="greater than or equal to 0"):
-            MutationSpec(reborn_out_scale=-0.1)
-
-    def test_reborn_out_scale_zero_allowed(self):
+    def test_regrama_out_scale_zero_allowed(self):
         # 0.0 is the ablation that restores ReDo's zeroed-outgoing revival.
-        assert MutationSpec(reborn_out_scale=0.0).reborn_out_scale == 0.0
+        assert MutationSpec(regrama_out_scale=0.0).regrama_out_scale == 0.0
 
 
 class TestNetworkSpecUpperBound:

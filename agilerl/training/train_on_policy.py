@@ -211,10 +211,10 @@ def train_on_policy(
     # RL training loop
     active_collect = collect_rollouts_fn
     # Capture per-neuron pre-activation gradients (GraMa) during training when the
-    # dormant diagnostic is logged (best agent) or the ReBorn parameter mutation is
+    # dormant diagnostic is logged (best agent) or the ReGraMa parameter mutation is
     # active (every agent, so cloned children can read their parent's snapshot).
     capture_grama = bool(wb) or (
-        mutation is not None and getattr(mutation, "param_mut_type", None) == "reborn"
+        mutation is not None and getattr(mutation, "regrama_param_mut", False)
     )
     while population.all_below(max_steps):
         if accelerator is not None:

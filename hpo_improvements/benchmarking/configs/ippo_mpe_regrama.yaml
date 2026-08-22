@@ -1,17 +1,12 @@
 ---
-# ReGraMa parameter mutation -- derived from ippo_mpe_reborn.yaml, identical
-# to it except for overact_beta.
-# ReLU activations, activation mutation forced OFF, param_mut_type: reborn with
-# dormant_tau=0.1 but overact_beta=+inf: with an infinite over-activity threshold
-# no neuron ever counts as over-active, so ReBorn's neuron-split half never fires
-# and EVERY dormant neuron (normalised GraMa score <= dormant_tau) is left
-# unclaimed and therefore Xavier-reset with its outgoing weights zeroed. That is
-# the pure dormant-neuron RESET variant (ReGraMa, "Measure gradients, not
-# activations!"), which isolates ReBorn's recycling half from its splitting half.
-# The trailing reset + ordinary Gaussian noise pass (strength = mutation_sd; the
-# amplified "super" noise band is excluded as divergence-prone) is unchanged.
-# Shares the *_hpo_dormant.yaml baseline (same config, original parameter
-# mutation) with the ReBorn config.
+# ReGraMa parameter mutation -- derived from ippo_mpe_hpo.yaml.
+# ReLU activations, activation mutation forced OFF, regrama_param_mut: true with
+# dormant_tau=0.1: EVERY dormant neuron (normalised GraMa score <= dormant_tau) is
+# Xavier-reset before the trailing Gaussian pass. That is the dormant-neuron RESET
+# variant ("Measure gradients, not activations!"). The trailing ordinary Gaussian
+# noise pass (strength = mutation_sd) keeps its random-reset band but drops the
+# amplified "super" band as divergence-prone. Paired with the matching
+# *_hpo_dormant.yaml baseline (same config, Gaussian parameter mutation only).
 #
 # IPPO on cooperative MPE (MPEv2) WITH evolutionary selection (a population of 4
 # is mutated and selected each generation) -- run as a PARAMETER-OPERATOR
@@ -61,8 +56,8 @@ mutation:
         no_mut: 0.5      # leave unchanged: rest/consolidation + training-only control for the efficacy diagnostic
         arch_mut: 0.0    # OFF -- isolate the parameter operator (network shape fixed)
         new_layer: 0.0   # OFF -- conditional within arch_mut, now inert
-        params_mut: 0.5  # the ONLY active operator: dormant-neuron Xavier reset (no splits -- overact_beta is +inf), then reset + ordinary Gaussian noise (mutation_sd; no amplified)
-        act_mut: 0.0     # OFF -- ReLU kept throughout so the dormant-neuron phenomenon (and ReBorn) stays visible
+        params_mut: 0.5  # the ONLY active operator: ReGraMa dormant-neuron Xavier reset, then reset + ordinary Gaussian noise (mutation_sd; no amplified)
+        act_mut: 0.0     # OFF -- ReLU kept throughout so the dormant-neuron phenomenon (and ReGraMa) stays visible
         rl_hp_mut: 0.0   # OFF -- NB: no hyperparameter search happens under this ablation
     rl_hp_selection:
         # INERT under this ablation (rl_hp_mut = 0.0): nothing here is mutated -- every
@@ -132,9 +127,10 @@ mutation:
     mutation_sd: 0.1  # std of the ordinary Gaussian weight perturbation in the trailing pass after the resets
     rand_seed: 42
     mutate_elite: false  # keep the elite member unmutated so the best agent survives intact into the next generation
-    param_mut_type: reborn    # the ReBorn operator, which overact_beta=+inf below degenerates to dormant-neuron Xavier reset only (ReGraMa), then reset + ordinary Gaussian noise (mutation_sd; amplified excluded)
+    random_reset_param_mut: true      # keep the random-reset band of the trailing Gaussian pass (a selected weight is REPLACED by a fresh N(0, 1) draw)
+    amplified_gauss_param_mut: false  # drop the amplified ("super") Gaussian band, which is divergence-prone; the dropped mass is NOT redistributed
+    regrama_param_mut: true           # ReGraMa: Xavier-reset every dormant neuron (normalised GraMa score <= dormant_tau) before the trailing Gaussian pass
     dormant_tau: 0.1          # neuron is dormant when its normalised score <= this (the ONLY active threshold here: every such neuron is reset)
-    overact_beta: .inf        # +inf: no neuron is ever over-active, so no neuron split ever fires and every dormant neuron is Xavier-reset instead
 
 network:
     # Same width-64 MLP as the no-HPO config. NB: under this parameter-operator

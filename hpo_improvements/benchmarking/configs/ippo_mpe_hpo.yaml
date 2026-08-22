@@ -110,6 +110,9 @@ mutation:
     mutation_sd: 0.1  # std of the Gaussian weight perturbation for params_mut
     rand_seed: 42
     mutate_elite: false  # keep the elite member unmutated so the best agent survives intact into the next generation
+    random_reset_param_mut: true      # keep the random-reset band of the Gaussian parameter mutation (a selected weight is REPLACED by a fresh N(0, 1) draw)
+    amplified_gauss_param_mut: true   # keep the amplified ("super") Gaussian band, whose std is 10x the weight's own magnitude
+    regrama_param_mut: false          # original Gaussian parameter mutation only -- no dormant-neuron resets
 
 network:
     # Same width-64 MLP as the no-HPO config, but with min/max bounds that define the

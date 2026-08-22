@@ -43,7 +43,7 @@ torch._logging.set_logs(dynamo=logging.FATAL)
 
 logger = logging.getLogger(__name__)
 
-# Normalisation layers the ReBorn surgery has to account for: they preserve neuron
+# Normalisation layers the dormant-neuron surgery has to account for: they preserve neuron
 # identity but hold per-neuron state of their own, so a recycled neuron's entry has
 # to travel with it. Listed explicitly rather than via ``nn.modules.batchnorm``'s
 # private base class, and filtered so the tuple stays valid on torch versions
@@ -231,19 +231,30 @@ class Mutations:
     :type device: str, optional
     :param accelerator: Accelerator for distributed computing, defaults to None
     :type accelerator: accelerate.Accelerator(), optional
-    :param param_mut_type: Parameter-mutation strategy, ``"original"`` (Gaussian weight
-        noise) or ``"reborn"`` (dormant/over-active neuron recycling), defaults to "original"
-    :type param_mut_type: str, optional
-    :param dormant_tau: ReBorn dormancy threshold on the normalised per-neuron gradient,
+    :param random_reset_param_mut: Whether the Gaussian parameter mutation keeps its
+        random-reset band (a selected weight is *replaced* by a fresh ``N(0, 1)`` draw
+        rather than perturbed), defaults to True
+    :type random_reset_param_mut: bool, optional
+    :param amplified_gauss_param_mut: Whether the Gaussian parameter mutation keeps its
+        amplified ("super") noise band, defaults to True
+    :type amplified_gauss_param_mut: bool, optional
+    :param regrama_param_mut: Whether the parameter mutation resets dormant neurons
+        (ReGraMa) before the Gaussian pass, defaults to False
+    :type regrama_param_mut: bool, optional
+    :param dormant_tau: ReGraMa dormancy threshold on the normalised per-neuron gradient,
         defaults to 0.1
     :type dormant_tau: float, optional
-    :param overact_beta: ReBorn over-activity threshold on the normalised per-neuron
-        gradient; must exceed ``dormant_tau``, defaults to 3.0
+    :param overact_beta: Over-activity threshold on the normalised per-neuron gradient,
+        above which a neuron is *split* across the dormant neurons it is reborn into
+        (ReBorn, Qin et al.). Not exposed on :class:`~agilerl.models.hpo.MutationSpec`:
+        the default ``inf`` disables splitting outright, leaving the pure dormant-neuron
+        reset (ReGraMa) as the manifest-reachable behaviour. Must exceed ``dormant_tau``,
+        defaults to ``float("inf")``
     :type overact_beta: float, optional
-    :param reborn_out_scale: ReBorn revival strength -- the outgoing weights of a
+    :param regrama_out_scale: ReGraMa revival strength -- the outgoing weights of a
         Xavier-reset neuron are re-seeded at this fraction of the consumer layer's live
         column scale. ``0.0`` restores the original zero-outgoing behaviour, defaults to 0.02
-    :type reborn_out_scale: float, optional
+    :type regrama_out_scale: float, optional
     """
 
     def __init__(
@@ -260,10 +271,12 @@ class Mutations:
         rand_seed: int | None = None,
         device: str = "cpu",
         accelerator: Accelerator | None = None,
-        param_mut_type: str = "original",
+        random_reset_param_mut: bool = True,
+        amplified_gauss_param_mut: bool = True,
+        regrama_param_mut: bool = False,
         dormant_tau: float = 0.1,
-        overact_beta: float = 3.0,
-        reborn_out_scale: float = 0.02,
+        overact_beta: float = float("inf"),
+        regrama_out_scale: float = 0.02,
     ) -> None:
         if activation_selection is None:
             activation_selection = ["ReLU", "ELU", "GELU"]
@@ -327,15 +340,21 @@ class Mutations:
         )
         if isinstance(rand_seed, int):
             assert rand_seed >= 0, "Random seed must be greater than or equal to zero."
-        assert param_mut_type in ("original", "reborn"), (
-            "param_mut_type must be either 'original' or 'reborn'."
+        assert isinstance(random_reset_param_mut, bool), (
+            "random_reset_param_mut must be boolean value True or False."
+        )
+        assert isinstance(amplified_gauss_param_mut, bool), (
+            "amplified_gauss_param_mut must be boolean value True or False."
+        )
+        assert isinstance(regrama_param_mut, bool), (
+            "regrama_param_mut must be boolean value True or False."
         )
         assert dormant_tau > 0, "dormant_tau must be greater than zero."
         assert overact_beta >= 0, "overact_beta must be non-negative."
         assert overact_beta > dormant_tau, (
             "overact_beta must be greater than dormant_tau."
         )
-        assert reborn_out_scale >= 0, "reborn_out_scale must be non-negative."
+        assert regrama_out_scale >= 0, "regrama_out_scale must be non-negative."
 
         # Random seed for repeatability
         set_global_seed(rand_seed)
@@ -353,17 +372,24 @@ class Mutations:
         self.activation_selection = activation_selection  # Activation functions
         self.mutation_sd = mutation_sd  # Mutation strength
         self.mutate_elite = mutate_elite
-        # ReBorn parameter-mutation configuration (Qin et al.). When
-        # ``param_mut_type == "reborn"`` the parameter mutation recycles dormant /
-        # over-active neurons before the Gaussian noise pass, which then runs
-        # without its amplified ("super") band; ``mutation_sd`` still scales that
-        # pass's ordinary noise. Detection reads the per-neuron pre-activation gradient
-        # snapshot captured during training (GraMa), threaded per-parent through
-        # ``self._grama_side_table`` (set by :meth:`mutation`) during the main loop.
-        self.param_mut_type = param_mut_type
+        # Which of the Gaussian parameter mutation's three bands stay live. Each flag
+        # only zeroes its own band's mask, so the dropped mass is *not* redistributed:
+        # those weights simply keep their trained values, and the ordinary band still
+        # covers 90% of the sampled entries, so a parameter mutation is never a no-op.
+        self.random_reset_param_mut = random_reset_param_mut
+        self.amplified_gauss_param_mut = amplified_gauss_param_mut
+        # ReGraMa parameter-mutation configuration ("Measure gradients, not
+        # activations!"). When ``regrama_param_mut`` is set, the parameter mutation
+        # resets dormant neurons before the Gaussian noise pass; ``mutation_sd`` still
+        # scales that pass's ordinary noise. Detection reads the per-neuron
+        # pre-activation gradient snapshot captured during training (GraMa), threaded
+        # per-parent through ``self._grama_side_table`` (set by :meth:`mutation`)
+        # during the main loop. ``overact_beta`` is inf unless a caller overrides it in
+        # Python, so the ReBorn neuron-split half (Qin et al.) never fires by default.
+        self.regrama_param_mut = regrama_param_mut
         self.dormant_tau = dormant_tau
         self.overact_beta = overact_beta
-        self.reborn_out_scale = reborn_out_scale
+        self.regrama_out_scale = regrama_out_scale
         self._grama_side_table: dict[int, Any] | None = None
         self._warned_recurrent = False
         self.device = device
@@ -388,40 +414,36 @@ class Mutations:
         :param pre_training_mut: Boolean flag indicating if the mutation is before the training loop
         :type pre_training_mut: bool, optional
         :param env: Retained for API compatibility; unused by the gradient-based
-            ReBorn parameter mutation (which reads the pre-computed gradient
+            ReGraMa parameter mutation (which reads the pre-computed gradient
             snapshot rather than collecting observations).
         :type env: Any | None, optional
         :param grama_scores: Per-parent map ``{agent.index: _grama_scores}`` of the
             gradient snapshots captured during the last training block (see
-            :class:`agilerl.utils.dormant_neurons.GraMaCapture`). Used by ReBorn to
+            :class:`agilerl.utils.dormant_neurons.GraMaCapture`). Used by ReGraMa to
             score neurons; looked up per child via its ``_parent_index``. When
-            ``None`` (e.g. the pre-training mutation), a ReBorn-configured operator
-            falls back to the original Gaussian parameter mutation.
+            ``None`` (e.g. the pre-training mutation), a ReGraMa-configured operator
+            falls back to the Gaussian parameter mutation alone.
         :type grama_scores: dict[int, Any] | None, optional
 
         :return: Mutated population
         :rtype: list[EvolvableAlgorithm]
         """
-        # Make the gradient snapshot side-table available to the (ReBorn) parameter
+        # Make the gradient snapshot side-table available to the (ReGraMa) parameter
         # mutation for the duration of this call only; reset afterwards so a later
         # snapshot-less call (e.g. pre-training) cannot reuse a stale table.
         self._grama_side_table = grama_scores
 
-        # A ReBorn regime needs the per-parent gradient snapshot to score neurons.
-        # When configured for ReBorn but called without one on a regular (non
+        # A ReGraMa regime needs the per-parent gradient snapshot to score neurons.
+        # When configured for ReGraMa but called without one on a regular (non
         # pre-training) mutation step -- e.g. a trainer that does not thread the
         # snapshots, or the accelerator path -- the parameter mutation silently
         # falls back to the Gaussian operator, which would misattribute results.
         # The pre-training step is expected to run snapshot-less, so it is exempt.
-        if (
-            self.param_mut_type == "reborn"
-            and grama_scores is None
-            and not pre_training_mut
-        ):
+        if self.regrama_param_mut and grama_scores is None and not pre_training_mut:
             warnings.warn(
-                "param_mut_type='reborn' but no gradient snapshot was provided to "
+                "regrama_param_mut is set but no gradient snapshot was provided to "
                 "mutation(); falling back to the Gaussian parameter mutation for "
-                "this step. ReBorn is only wired into the on-policy, off-policy and "
+                "this step. ReGraMa is only wired into the on-policy, off-policy and "
                 "multi-agent on-policy trainers running without an accelerator.",
                 stacklevel=2,
             )
@@ -667,20 +689,20 @@ class Mutations:
             individual.mut_details = {"category": "no mutation", "name": "none"}
             return individual
 
-        # ReBorn parameter mutation (Qin et al.): recycle dormant / over-active
-        # neurons instead of adding Gaussian noise. It scores neurons from the
-        # per-neuron pre-activation gradient snapshot captured during the parent's
-        # last training block (GraMa), looked up via the child's ``_parent_index``.
-        # If no snapshot is available (e.g. the pre-training mutation step, or an
-        # untrained agent), we fall back to the original Gaussian mutation below.
-        if self.param_mut_type == "reborn":
+        # ReGraMa parameter mutation: reset dormant neurons before the Gaussian
+        # noise pass. It scores neurons from the per-neuron pre-activation gradient
+        # snapshot captured during the parent's last training block (GraMa), looked
+        # up via the child's ``_parent_index``. If no snapshot is available (e.g. the
+        # pre-training mutation step, or an untrained agent), we fall back to the
+        # Gaussian mutation below on its own.
+        if self.regrama_param_mut:
             grama_scores = None
             side_table = self._grama_side_table
             parent_index = getattr(individual, "_parent_index", None)
             if side_table is not None and parent_index is not None:
                 grama_scores = side_table.get(parent_index)
             if grama_scores:
-                return self.reborn_parameter_mutation(individual, grama_scores)
+                return self.regrama_parameter_mutation(individual, grama_scores)
             if side_table is not None:
                 # Snapshots *were* supplied for this step, so this is not the
                 # expected env-less fallback the call-level guard in
@@ -690,7 +712,7 @@ class Mutations:
                 # Gaussian run. Name both ways the lookup fails so the cause is
                 # actionable rather than invisible.
                 warnings.warn(
-                    "param_mut_type='reborn' but no gradient snapshot was found "
+                    "regrama_param_mut is set but no gradient snapshot was found "
                     f"for the agent cloned from parent index {parent_index!r}; "
                     "falling back to the Gaussian parameter mutation for this "
                     "agent. Either the agent carries no '_parent_index' (it must "
@@ -710,20 +732,27 @@ class Mutations:
             individual,
             policy_group.eval_network,
         )
-        # Accumulate per-category weight counts across all mutated networks.
-        # Under ReBorn this branch is only reached as the env-less fallback (e.g.
-        # the pre-training mutation step); there we drop the divergence-prone
-        # amplified noise too, keeping ReBorn amplified-noise-free everywhere.
-        include_amplified = self.param_mut_type == "original"
+        # Accumulate per-category weight counts across all mutated networks. The two
+        # band switches are the single authority over which bands run, so a ReGraMa
+        # regime that reaches this branch as the snapshot-less fallback keeps exactly
+        # the bands it is configured with.
+        include_reset = self.random_reset_param_mut
+        include_amplified = self.amplified_gauss_param_mut
         counts = {"reset": 0, "ordinary": 0, "amplified": 0}
         if isinstance(offspring_policy, ModuleDict):
             for agent_id, module in offspring_policy.items():
                 offspring_policy[agent_id] = self._gaussian_parameter_mutation(
-                    module, counts=counts, include_amplified=include_amplified
+                    module,
+                    counts=counts,
+                    include_reset=include_reset,
+                    include_amplified=include_amplified,
                 )
         else:
             offspring_policy = self._gaussian_parameter_mutation(
-                offspring_policy, counts=counts, include_amplified=include_amplified
+                offspring_policy,
+                counts=counts,
+                include_reset=include_reset,
+                include_amplified=include_amplified,
             )
 
         self._to_device_and_set_individual(
@@ -755,37 +784,39 @@ class Mutations:
         return individual
 
     # ------------------------------------------------------------------ #
-    # ReBorn parameter mutation (Qin et al., "The Dormant Neuron          #
-    # Phenomenon in Multi-Agent RL Value Factorization")                 #
+    # ReGraMa parameter mutation ("Measure gradients, not activations!";  #
+    # the neuron-split half is ReBorn, Qin et al., "The Dormant Neuron    #
+    # Phenomenon in Multi-Agent RL Value Factorization")                  #
     # ------------------------------------------------------------------ #
-    def reborn_parameter_mutation(
+    def regrama_parameter_mutation(
         self, individual: IndividualType, grama_scores: list[list[Any]]
     ) -> IndividualType:
-        """Recycle dormant / over-active neurons, then add a gentle Gaussian pass.
+        """Reset dormant neurons, then add a gentle Gaussian pass.
 
         For every measured layer of every evaluation network (actors, critics and
-        each multi-agent sub-policy), each over-active neuron is *reborn* into a
-        set of dormant neurons (a neuron split), and dormant neurons that are not
-        claimed are Xavier-reset with their outgoing weights re-seeded small (at
-        ``reborn_out_scale`` of the consumer's live column scale -- *not* zeroed;
-        see :meth:`_revived_out_block`). Detection uses the same per-neuron gradient
-        scoring as the dormant-neuron diagnostic, read from the parent's captured
-        gradient snapshot *grama_scores* (no forward/backward pass here).
+        each multi-agent sub-policy), dormant neurons are Xavier-reset with their
+        outgoing weights re-seeded small (at ``regrama_out_scale`` of the consumer's
+        live column scale -- *not* zeroed; see :meth:`_revived_out_block`). Detection
+        uses the same per-neuron gradient scoring as the dormant-neuron diagnostic,
+        read from the parent's captured gradient snapshot *grama_scores* (no
+        forward/backward pass here).
 
-        **The split is not function-preserving in general** -- see
-        :meth:`_apply_reborn_to_layer` for the conditions it needs, how it adapts to
-        a normalisation, and what it preserves unconditionally. It is a mutation
-        regardless of whether those conditions hold:
+        ``overact_beta`` defaults to ``inf``, so no neuron is ever over-active and
+        every dormant neuron falls through to that reset. A caller that lowers it in
+        Python re-enables ReBorn's neuron *split*, in which an over-active neuron is
+        reborn into the dormant neurons it claims. **That split is not
+        function-preserving in general** -- see :meth:`_apply_reborn_to_layer` for the
+        conditions it needs, how it adapts to a normalisation, and what it preserves
+        unconditionally. It is a mutation regardless of whether those conditions hold:
         a perturbation the tournament can select against, not a guaranteed-safe
         rewrite. Callers should not rely on the child's outputs matching its parent's.
 
         After that surgery, the policy evaluation network additionally receives the
-        original Gaussian parameter mutation *minus* its amplified ("super") noise
-        band (reset + ordinary noise only), scaled by ``self.mutation_sd``. This
-        breaks the symmetry of the split so the reborn units can specialise; the
-        amplified band is skipped because it tends to cause divergence. It runs
-        before the shared/target sync so those copies stay consistent with the fully
-        mutated policy.
+        Gaussian parameter mutation, restricted to whichever bands
+        ``random_reset_param_mut`` / ``amplified_gauss_param_mut`` leave live and
+        scaled by ``self.mutation_sd``. This breaks the symmetry of the reset units so
+        they can specialise. It runs before the shared/target sync so those copies
+        stay consistent with the fully mutated policy.
 
         :param individual: Individual agent from population.
         :type individual: RLAlgorithm or MultiAgentRLAlgorithm
@@ -794,7 +825,7 @@ class Mutations:
             in :func:`_eval_networks` order, each a per-layer list aligned to
             :func:`_target_activations` order.
         :type grama_scores: list[list[Any]]
-        :return: The individual with ReBorn-recycled parameters.
+        :return: The individual with ReGraMa-reset parameters.
         :rtype: RLAlgorithm or MultiAgentRLAlgorithm
         """
         if isinstance(individual, LLMAlgorithm):
@@ -810,22 +841,20 @@ class Mutations:
 
         # Route each evaluation network's captured per-layer gradient scores
         # positionally (the child's architecture matches its parent's, since an
-        # agent receiving ReBorn did not receive an architecture mutation this
+        # agent receiving ReGraMa did not receive an architecture mutation this
         # cycle). ``capture_per_neuron_scores`` guards any length mismatch.
         for idx, (_network_id, network) in enumerate(_eval_networks(individual)):
             per_neuron_list = grama_scores[idx] if idx < len(grama_scores) else None
             try:
-                self._reborn_network_surgery(network, per_neuron_list, counts)
+                self._regrama_network_surgery(network, per_neuron_list, counts)
             except Exception as exc:  # keep this network untouched on failure
-                logger.warning("ReBorn surgery skipped for a network: %s", exc)
+                logger.warning("ReGraMa surgery skipped for a network: %s", exc)
 
-        # After recycling neurons, apply a gentle exploration pass to the policy
-        # network: the original reset + ordinary Gaussian noise, but *not* the
-        # amplified ("super") noise band, which tends to cause divergence. Running
-        # this after the ReBorn surgery breaks the symmetry of the function-
-        # preserving neuron split so the split units can specialise; running it
-        # before the shared/target sync below keeps those copies consistent with
-        # the fully mutated policy.
+        # After resetting neurons, apply a gentle exploration pass to the policy
+        # network, keeping whichever Gaussian bands are configured live. Running this
+        # after the ReGraMa surgery breaks the symmetry of the freshly reset units so
+        # they can specialise; running it before the shared/target sync below keeps
+        # those copies consistent with the fully mutated policy.
         gauss_counts = {"reset": 0, "ordinary": 0, "amplified": 0}
         policy_group = individual.registry.policy(return_group=True)
         offspring_policy: EvolvableNetworkType = getattr(
@@ -834,11 +863,17 @@ class Mutations:
         if isinstance(offspring_policy, ModuleDict):
             for agent_id, module in offspring_policy.items():
                 offspring_policy[agent_id] = self._gaussian_parameter_mutation(
-                    module, counts=gauss_counts, include_amplified=False
+                    module,
+                    counts=gauss_counts,
+                    include_reset=self.random_reset_param_mut,
+                    include_amplified=self.amplified_gauss_param_mut,
                 )
         else:
             offspring_policy = self._gaussian_parameter_mutation(
-                offspring_policy, counts=gauss_counts, include_amplified=False
+                offspring_policy,
+                counts=gauss_counts,
+                include_reset=self.random_reset_param_mut,
+                include_amplified=self.amplified_gauss_param_mut,
             )
         self._to_device_and_set_individual(
             individual, policy_group.eval_network, offspring_policy
@@ -855,19 +890,24 @@ class Mutations:
 
         individual.reinit_optimizers()
         individual.mut = "param_reborn"
-        individual.mut_details = self._reborn_mut_details(counts, gauss_counts)
+        individual.mut_details = self._regrama_mut_details(counts, gauss_counts)
         return individual
 
     @staticmethod
-    def _reborn_mut_details(
+    def _regrama_mut_details(
         counts: dict[str, int], gauss_counts: dict[str, int] | None = None
     ) -> dict[str, Any]:
-        """Build the ``mut_details`` record for a ReBorn mutation.
+        """Build the ``mut_details`` record for a ReGraMa mutation.
 
         Includes both the neuron-recycling counts and the trailing Gaussian pass's
-        per-category weight counts (the amplified band is always ``0`` under ReBorn).
+        per-category weight counts (a band switched off contributes ``0``).
         ``gauss_counts`` defaults to all-zero for the bad-obs early return, where no
         surgery and no noise pass ran.
+
+        The ``"reborn"`` category and ``reborn_*`` detail keys are the on-disk schema
+        of ``mutation_history.csv`` (see :class:`agilerl.logger.MutationHistoryLogger`)
+        and are deliberately left at their original spelling so runs recorded before
+        the ReGraMa rename stay directly comparable.
         """
         gauss_counts = gauss_counts or {"reset": 0, "ordinary": 0, "amplified": 0}
         return {
@@ -882,13 +922,13 @@ class Mutations:
             "weights_amplified_noise": gauss_counts["amplified"],
         }
 
-    def _reborn_network_surgery(
+    def _regrama_network_surgery(
         self,
         network: nn.Module,
         per_neuron_list: list[Any] | None,
         counts: dict[str, int],
     ) -> None:
-        """Apply ReBorn recycling to every measured layer of a single network."""
+        """Apply the dormant-neuron surgery to every measured layer of a network."""
         self._warn_if_recurrent(network)
 
         scores = capture_per_neuron_scores(network, per_neuron_list)
@@ -933,7 +973,12 @@ class Mutations:
         counts: dict[str, int],
         norm: nn.Module | None = None,
     ) -> None:
-        """Perform the ReBorn surgery on the neurons of one producing layer.
+        """Perform the dormant-neuron surgery on the neurons of one producing layer.
+
+        Keeps the ReBorn name because the *split* it performs when a neuron scores
+        above ``overact_beta`` is Qin et al.'s operator. That half is unreachable
+        from a manifest -- ``overact_beta`` defaults to ``inf``, leaving every
+        dormant neuron to the Xavier reset that is ReGraMa.
 
         *next_layers* holds every layer that consumes the producer's neurons --
         more than one when the neurons feed parallel streams, as a duelling
@@ -969,10 +1014,10 @@ class Mutations:
 
         **Unclaimed dormant neurons are deliberately not function-preserving.**
         They are Xavier-reset and given a fresh outgoing column of norm
-        ``reborn_out_scale * (the consumer's live column scale)`` rather than the
+        ``regrama_out_scale * (the consumer's live column scale)`` rather than the
         zero column ReDo prescribes -- under gradient scoring a zero column leaves
         the neuron both unscorable and unlearnable. See :meth:`_revived_out_block`
-        for why, and set ``reborn_out_scale=0.0`` to recover the zeroed behaviour.
+        for why, and set ``regrama_out_scale=0.0`` to recover the zeroed behaviour.
         Their normalisation state is reset to the identity ``(1, 0)`` for the same
         reason the outgoing column is re-seeded rather than zeroed: a revived neuron
         that inherits the decayed gain of the unit it replaced is re-suppressed
@@ -1015,7 +1060,7 @@ class Mutations:
                     # rather than an expected skip -- log it instead of silently
                     # leaving the layer unrecycled.
                     logger.debug(
-                        "ReBorn: no flattened column layout for %s -> %s; "
+                        "ReGraMa: no flattened column layout for %s -> %s; "
                         "leaving the layer unrecycled.",
                         type(producer).__name__,
                         type(next_layer).__name__,
@@ -1140,14 +1185,14 @@ class Mutations:
             counts["reborn"] += take
 
         # Unclaimed dormant neurons: Xavier-reset incoming, re-seed outgoing at
-        # ``reborn_out_scale`` times each consumer's live column scale. The
+        # ``regrama_out_scale`` times each consumer's live column scale. The
         # reference pool excludes every neuron this pass rewrites, so a layer that
         # has been recycled repeatedly measures itself against units at their
         # trained scale rather than against its own shrinking leftovers.
         rewritten = set(dormant_idx) | set(overactive_idx)
         keep = [n for n in range(prod_neurons) if n not in rewritten]
         out_scales = [
-            self.reborn_out_scale * self._live_column_scale(w, s or 1, keep)
+            self.regrama_out_scale * self._live_column_scale(w, s or 1, keep)
             for w, s in consumers
         ]
 
@@ -1178,13 +1223,13 @@ class Mutations:
             self._reset_norm_state(norm, index=i, neurons=prod_neurons)
             counts["xavier"] += 1
 
-        # Defensive clamp + NaN scrub so ReBorn never introduces / propagates NaN.
+        # Defensive clamp + NaN scrub so the surgery never introduces / propagates NaN.
         for t in (*prod_rows, *prod_biases):
             t.clamp_(-mag_limit, mag_limit).nan_to_num_()
         for next_w, _stride in consumers:
             next_w.clamp_(-mag_limit, mag_limit).nan_to_num_()
 
-    # --------------------------- ReBorn helpers --------------------------- #
+    # ---------------------- Neuron-surgery helpers ------------------------ #
     @staticmethod
     def _noise_params(
         module: nn.Module,
@@ -1278,7 +1323,7 @@ class Mutations:
             tensor[index] = identity
 
     def _warn_if_recurrent(self, network: nn.Module) -> None:
-        """Warn once that a recurrent core lies outside what ReBorn can recycle.
+        """Warn once that a recurrent core lies outside what the surgery can reach.
 
         The surgery needs two things per measured layer: an activation sub-module
         whose gradient scores its neurons, and a weight matrix whose rows are one
@@ -1303,11 +1348,11 @@ class Mutations:
 
         self._warned_recurrent = True
         warnings.warn(
-            "ReBorn does not recycle the recurrent core of a recurrent encoder "
+            "ReGraMa does not recycle the recurrent core of a recurrent encoder "
             "(nn.RNN / nn.LSTM / nn.GRU): its gate non-linearities are fused, so "
             "no per-neuron gradient is captured for them, and its hidden units do "
             "not own contiguous weight rows. Only the layers after it are "
-            "recycled, so the reported ReBorn counts cover the projection and "
+            "recycled, so the reported recycling counts cover the projection and "
             "head alone.",
             stacklevel=2,
         )
@@ -1387,7 +1432,7 @@ class Mutations:
 
         Returns a random direction scaled so the block's norm is *scale*.
 
-        The original recipe (Sokar et al.'s ReDo, which ReBorn inherits) zeroes
+        The original recipe (Sokar et al.'s ReDo, which ReGraMa inherits) zeroes
         these weights: it costs nothing under an *activation*-based dormancy
         metric, and it makes the reset exactly function-preserving. Under the
         GraMa *gradient* scoring used here it is self-defeating, because
@@ -1396,7 +1441,7 @@ class Mutations:
         dormant, and, worse, ``grad(W_in[i,:]) = grad(z_i) * x`` is zero too, which
         freezes its *incoming* weights until the outgoing ones bootstrap
         themselves off zero. A small non-zero column restores both gradients at
-        the cost of exact function preservation; ``reborn_out_scale`` trades the
+        the cost of exact function preservation; ``regrama_out_scale`` trades the
         two off and ``0.0`` recovers the original behaviour exactly (no RNG is
         consumed on that path, so seeded ablations stay comparable).
 
@@ -1860,26 +1905,36 @@ class Mutations:
         self,
         network: EvolvableModule,
         counts: dict[str, int] | None = None,
+        include_reset: bool = True,
         include_amplified: bool = True,
     ) -> EvolvableModule:
         """Return network with mutated weights using a Gaussian distribution.
+
+        Each selected weight falls into one of three bands: an amplified ("super")
+        perturbation, a random reset, or ordinary noise. ``include_reset`` and
+        ``include_amplified`` switch the first two off independently.
+
+        A switched-off band is *skipped*, not reassigned: its weights keep their
+        trained values and the remaining bands do not grow to absorb its probability
+        mass. The *selection* is unaffected either way -- which keys, indices and
+        bands are drawn comes from ``self.rng``, so every setting picks exactly the
+        same weights and assigns them to the same three bands. The surviving bands'
+        **values** do shift, though: they come from :func:`torch.normal`, which draws
+        on the global torch RNG, so skipping a band's draw advances that stream
+        differently for everything after it. Two runs sharing a seed therefore agree
+        on *where* the noise lands but not on its magnitude -- this is a band being
+        dropped, not a strict subset of the same perturbation.
 
         :param network: Neural network to mutate.
         :type network: EvolvableModule
         :param counts: Optional dict accumulating the number of weights mutated by
             category (``"reset"``, ``"ordinary"``, ``"amplified"``). Updated in place.
         :type counts: dict[str, int] | None
+        :param include_reset: When ``False``, the random-reset band is skipped, so no
+            weight is replaced by a fresh ``N(0, 1)`` draw.
+        :type include_reset: bool
         :param include_amplified: When ``False``, the amplified ("super") noise band
-            is skipped and its selected weights are left untouched. The *selection*
-            is unaffected -- which keys, indices and bands are drawn comes from
-            ``self.rng``, so both settings pick exactly the same weights and assign
-            them to the same three bands. The reset and ordinary noise **values**
-            do differ, though: they come from :func:`torch.normal`, which draws on
-            the global torch RNG, so skipping the amplified band's draw shifts that
-            stream for everything after it. Two runs sharing a seed therefore agree
-            on *where* the noise lands but not on its magnitude -- this is a band
-            being dropped, not a strict subset of the same perturbation. ReBorn uses
-            ``False`` to avoid the divergence-prone amplified noise.
+            is skipped.
         :type include_amplified: bool
         :return: Mutated network.
         :rtype: EvolvableModule
@@ -1955,7 +2010,7 @@ class Mutations:
                     counts["amplified"] += int(mask_super.sum().item())
 
             # Reset mutation: completely reset the weight using N(0, 1)
-            if mask_reset.sum() > 0:
+            if include_reset and mask_reset.sum() > 0:
                 noise_reset = torch.normal(
                     mean=torch.zeros(mask_reset.sum(), device=W.device),
                     std=torch.ones(mask_reset.sum(), device=W.device),

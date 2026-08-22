@@ -2762,16 +2762,17 @@ class TestTrainOnPolicy:
         mock_wandb_finish.assert_called()
 
 
-def _reborn_mutations(recorder=None, param_mut_type="reborn"):
+def _regrama_mutations(recorder=None, regrama_param_mut=True):
     """A ``Mutations`` fixed to the parameter operator, optionally recording.
 
-    Shared by the three ReBorn trainer-wiring classes below, which differ only in
+    Shared by the three ReGraMa trainer-wiring classes below, which differ only in
     the trainer they drive. When *recorder* is given, each non-pre-training
     evolution step appends ``(grama_scores, [child _parent_index, ...])`` to it, so
     a test can assert on the table at the moment it is handed over.
 
     :param recorder: List collecting one entry per evolution step, or ``None``.
-    :param param_mut_type: ``"reborn"`` or ``"original"`` (the control regime).
+    :param regrama_param_mut: ``True`` for ReGraMa, ``False`` for the Gaussian
+        control regime.
     :return: A configured :class:`~agilerl.hpo.mutation.Mutations`.
     """
     from agilerl.hpo.mutation import Mutations
@@ -2817,9 +2818,8 @@ def _reborn_mutations(recorder=None, param_mut_type="reborn"):
         parameters=1.0,  # every agent takes the parameter mutation
         activation=0.0,
         rl_hp=0.0,
-        param_mut_type=param_mut_type,
+        regrama_param_mut=regrama_param_mut,
         dormant_tau=0.1,
-        overact_beta=3.0,
         mutate_elite=True,
         rand_seed=0,
         device="cpu",
@@ -2838,7 +2838,7 @@ def _assert_snapshot_handovers(handovers):
             assert any(entry is not None for layers in scores for entry in layers)
 
 
-def _reborn_selection(population_size):
+def _regrama_selection(population_size):
     from agilerl.hpo.tournament import TournamentSelection
 
     return TournamentSelection(
@@ -2846,8 +2846,8 @@ def _reborn_selection(population_size):
     )
 
 
-class TestTrainOnPolicyRebornWiring:
-    """The ReBorn regime's gradient snapshot must survive the trainer round-trip.
+class TestTrainOnPolicyRegramaWiring:
+    """The ReGraMa regime's gradient snapshot must survive the trainer round-trip.
 
     ReBorn scores neurons from gradients captured during the *parent's* training
     block, which tournament cloning discards, so the trainer has to capture them
@@ -2888,7 +2888,7 @@ class TestTrainOnPolicyRebornWiring:
             max_steps=16,
             evo_steps=8,
             eval_loop=1,
-            tournament=_reborn_selection(len(pop)),
+            tournament=_regrama_selection(len(pop)),
             mutation=mutation,
             wb=False,
             verbose=False,
@@ -2907,20 +2907,20 @@ class TestTrainOnPolicyRebornWiring:
         pop = self._population()
 
         # Act
-        self._train(env, pop, _reborn_mutations(recorder=handovers))
+        self._train(env, pop, _regrama_mutations(recorder=handovers))
 
         # Assert
         _assert_snapshot_handovers(handovers)
 
     @pytest.mark.parametrize("state_size, action_size, vect", _FLAT_VECT)
-    def test_population_is_mutated_by_reborn_not_the_gaussian_fallback(self, env):
+    def test_population_is_mutated_by_regrama_not_the_gaussian_fallback(self, env):
         # Arrange
         pop = self._population()
 
         # Act
         with warnings.catch_warnings(record=True) as record:
             warnings.simplefilter("always")
-            trained, _fitnesses = self._train(env, pop, _reborn_mutations())
+            trained, _fitnesses = self._train(env, pop, _regrama_mutations())
 
         # Assert -- the whole chain held: capture -> side table -> _parent_index
         assert [agent.mut for agent in trained] == ["param_reborn"] * len(pop)
@@ -2929,10 +2929,10 @@ class TestTrainOnPolicyRebornWiring:
         ]
 
     @pytest.mark.parametrize("state_size, action_size, vect", _FLAT_VECT)
-    def test_original_regime_is_unaffected(self, env):
+    def test_gaussian_regime_is_unaffected(self, env):
         """The capture is gated on the regime, so a Gaussian run must not change."""
         # Arrange
-        mutation = _reborn_mutations(param_mut_type="original")
+        mutation = _regrama_mutations(regrama_param_mut=False)
 
         # Act
         trained, _fitnesses = self._train(env, self._population(), mutation)
@@ -2941,8 +2941,8 @@ class TestTrainOnPolicyRebornWiring:
         assert [agent.mut for agent in trained] == ["param"] * len(trained)
 
 
-class TestTrainOffPolicyRebornWiring:
-    """The same chain as :class:`TestTrainOnPolicyRebornWiring`, off-policy.
+class TestTrainOffPolicyRegramaWiring:
+    """The same chain as :class:`TestTrainOnPolicyRegramaWiring`, off-policy.
 
     All three trainers carry their own hand-rolled copy of the capture / side-table
     / forward block, so covering one says nothing about the others: the off-policy
@@ -2980,7 +2980,7 @@ class TestTrainOffPolicyRebornWiring:
             evo_steps=16,
             eval_loop=1,
             learning_delay=0,
-            tournament=_reborn_selection(len(pop)),
+            tournament=_regrama_selection(len(pop)),
             mutation=mutation,
             wb=False,
             verbose=False,
@@ -2992,20 +2992,20 @@ class TestTrainOffPolicyRebornWiring:
         handovers = []
 
         # Act
-        self._train(env, self._population(), _reborn_mutations(recorder=handovers))
+        self._train(env, self._population(), _regrama_mutations(recorder=handovers))
 
         # Assert
         _assert_snapshot_handovers(handovers)
 
     @pytest.mark.parametrize("state_size, action_size, vect", _FLAT_VECT)
-    def test_population_is_mutated_by_reborn_not_the_gaussian_fallback(self, env):
+    def test_population_is_mutated_by_regrama_not_the_gaussian_fallback(self, env):
         # Arrange
         pop = self._population()
 
         # Act
         with warnings.catch_warnings(record=True) as record:
             warnings.simplefilter("always")
-            trained, _fitnesses = self._train(env, pop, _reborn_mutations())
+            trained, _fitnesses = self._train(env, pop, _regrama_mutations())
 
         # Assert
         assert [agent.mut for agent in trained] == ["param_reborn"] * len(pop)
@@ -3016,7 +3016,7 @@ class TestTrainOffPolicyRebornWiring:
     @pytest.mark.parametrize("state_size, action_size, vect", _FLAT_VECT)
     def test_original_regime_is_unaffected(self, env):
         # Arrange
-        mutation = _reborn_mutations(param_mut_type="original")
+        mutation = _regrama_mutations(regrama_param_mut=False)
 
         # Act
         trained, _fitnesses = self._train(env, self._population(), mutation)
@@ -3025,7 +3025,7 @@ class TestTrainOffPolicyRebornWiring:
         assert [agent.mut for agent in trained] == ["param"] * len(trained)
 
 
-class TestTrainMultiAgentOnPolicyRebornWiring:
+class TestTrainMultiAgentOnPolicyRegramaWiring:
     """The same chain again, multi-agent on-policy.
 
     The multi-agent path is the one where the snapshot's *shape* differs: each
@@ -3080,7 +3080,7 @@ class TestTrainMultiAgentOnPolicyRebornWiring:
             max_steps=16,
             evo_steps=8,
             eval_loop=1,
-            tournament=_reborn_selection(len(pop)),
+            tournament=_regrama_selection(len(pop)),
             mutation=mutation,
             wb=False,
             verbose=False,
@@ -3092,7 +3092,7 @@ class TestTrainMultiAgentOnPolicyRebornWiring:
         pop = self._population(multi_env)
 
         # Act
-        self._train(multi_env, pop, _reborn_mutations(recorder=handovers))
+        self._train(multi_env, pop, _regrama_mutations(recorder=handovers))
 
         # Assert
         _assert_snapshot_handovers(handovers)
@@ -3103,14 +3103,16 @@ class TestTrainMultiAgentOnPolicyRebornWiring:
             for scores in table.values()
         )
 
-    def test_population_is_mutated_by_reborn_not_the_gaussian_fallback(self, multi_env):
+    def test_population_is_mutated_by_regrama_not_the_gaussian_fallback(
+        self, multi_env
+    ):
         # Arrange
         pop = self._population(multi_env)
 
         # Act
         with warnings.catch_warnings(record=True) as record:
             warnings.simplefilter("always")
-            trained, _fitnesses = self._train(multi_env, pop, _reborn_mutations())
+            trained, _fitnesses = self._train(multi_env, pop, _regrama_mutations())
 
         # Assert
         assert [agent.mut for agent in trained] == ["param_reborn"] * len(pop)

@@ -1,9 +1,6 @@
 from __future__ import annotations
 
-from typing import Literal
-
-from pydantic import BaseModel, ConfigDict, Field, model_validator
-from typing_extensions import Self
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class RLHyperparameter(BaseModel):
@@ -63,20 +60,27 @@ class MutationSpec(BaseModel):
     :type rand_seed: int
     :param mutate_elite: Whether the elite member of the population is itself mutated.
     :type mutate_elite: bool
-    :param param_mut_type: Parameter-mutation strategy: ``"original"`` (Gaussian
-        weight noise) or ``"reborn"`` (dormant/over-active neuron recycling, Qin
-        et al., followed by the Gaussian pass minus its amplified noise band).
-        ``mutation_sd`` scales the ordinary noise under both strategies.
-    :type param_mut_type: Literal["original", "reborn"]
-    :param dormant_tau: ReBorn dormancy threshold (a neuron with normalised score
-        ``<= dormant_tau`` is dormant). Independent of the diagnostic
-        ``training.dormant_tau``; only used when ``param_mut_type == "reborn"``.
+    :param random_reset_param_mut: Whether the Gaussian parameter mutation keeps its
+        random-reset band, which *replaces* a selected weight with a fresh
+        ``N(0, 1)`` draw rather than perturbing it. Disabling it leaves that band's
+        weights at their trained values; the band's probability mass is **not**
+        redistributed to the other bands.
+    :type random_reset_param_mut: bool
+    :param amplified_gauss_param_mut: Whether the Gaussian parameter mutation keeps
+        its amplified ("super") noise band, whose standard deviation is 10x the
+        weight's magnitude. Disabling it leaves that band's weights at their trained
+        values; the band's probability mass is **not** redistributed.
+    :type amplified_gauss_param_mut: bool
+    :param regrama_param_mut: Whether the parameter mutation resets dormant neurons
+        (ReGraMa, "Measure gradients, not activations!") before the Gaussian pass,
+        instead of relying on Gaussian noise alone. ``mutation_sd`` still scales the
+        Gaussian pass's ordinary noise either way.
+    :type regrama_param_mut: bool
+    :param dormant_tau: ReGraMa dormancy threshold (a neuron with normalised score
+        ``<= dormant_tau`` is dormant and is reset). Independent of the diagnostic
+        ``training.dormant_tau``; only used when ``regrama_param_mut`` is set.
     :type dormant_tau: float
-    :param overact_beta: ReBorn over-activity threshold (a neuron with normalised
-        score ``>= overact_beta`` is over-active). Must be greater than
-        ``dormant_tau``. Only used when ``param_mut_type == "reborn"``.
-    :type overact_beta: float
-    :param reborn_out_scale: ReBorn revival strength. A Xavier-reset neuron's
+    :param regrama_out_scale: ReGraMa revival strength. A Xavier-reset neuron's
         outgoing weights are re-seeded at this fraction of the consumer layer's
         live column scale instead of being zeroed, so the revived neuron has a
         non-zero gradient (both for its own score and for its incoming weights).
@@ -85,8 +89,8 @@ class MutationSpec(BaseModel):
         of the perturbation, and was picked from a PPO/Hopper-v4 sweep (one seed) in
         which 0.02 beat the whole 0.05--0.25 range by a wide margin.
         ``0.0`` restores the zeroed-outgoing behaviour.
-        Only used when ``param_mut_type == "reborn"``.
-    :type reborn_out_scale: float
+        Only used when ``regrama_param_mut`` is set.
+    :type regrama_out_scale: float
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -96,21 +100,11 @@ class MutationSpec(BaseModel):
     mutation_sd: float = Field(default=0.1, ge=0.0)
     rand_seed: int = Field(default=42, ge=0)
     mutate_elite: bool = False
-    param_mut_type: Literal["original", "reborn"] = "original"
+    random_reset_param_mut: bool = True
+    amplified_gauss_param_mut: bool = True
+    regrama_param_mut: bool = False
     dormant_tau: float = Field(default=0.1, gt=0.0)
-    overact_beta: float = Field(default=3.0, ge=0.0)
-    reborn_out_scale: float = Field(default=0.02, ge=0.0)
-
-    @model_validator(mode="after")
-    def _validate_reborn(self) -> Self:
-        """Enforce the ReBorn threshold constraint ``overact_beta > dormant_tau``."""
-        if self.overact_beta <= self.dormant_tau:
-            msg = (
-                f"overact_beta ({self.overact_beta}) must be greater than "
-                f"dormant_tau ({self.dormant_tau})."
-            )
-            raise ValueError(msg)
-        return self
+    regrama_out_scale: float = Field(default=0.02, ge=0.0)
 
 
 class TournamentSelectionSpec(BaseModel):

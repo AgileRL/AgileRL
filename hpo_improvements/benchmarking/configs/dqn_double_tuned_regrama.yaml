@@ -1,17 +1,12 @@
 ---
-# ReGraMa parameter mutation -- derived from dqn_double_tuned_reborn.yaml, identical
-# to it except for overact_beta.
-# ReLU activations, activation mutation forced OFF, param_mut_type: reborn with
-# dormant_tau=0.1 but overact_beta=+inf: with an infinite over-activity threshold
-# no neuron ever counts as over-active, so ReBorn's neuron-split half never fires
-# and EVERY dormant neuron (normalised GraMa score <= dormant_tau) is left
-# unclaimed and therefore Xavier-reset with its outgoing weights zeroed. That is
-# the pure dormant-neuron RESET variant (ReGraMa, "Measure gradients, not
-# activations!"), which isolates ReBorn's recycling half from its splitting half.
-# The trailing reset + ordinary Gaussian noise pass (strength = mutation_sd; the
-# amplified "super" noise band is excluded as divergence-prone) is unchanged.
-# Shares the *_hpo_dormant.yaml baseline (same config, original parameter
-# mutation) with the ReBorn config.
+# ReGraMa parameter mutation -- derived from dqn_double_tuned_hpo.yaml.
+# ReLU activations, activation mutation forced OFF, regrama_param_mut: true with
+# dormant_tau=0.1: EVERY dormant neuron (normalised GraMa score <= dormant_tau) is
+# Xavier-reset before the trailing Gaussian pass. That is the dormant-neuron RESET
+# variant ("Measure gradients, not activations!"). The trailing ordinary Gaussian
+# noise pass (strength = mutation_sd) keeps its random-reset band but drops the
+# amplified "super" band as divergence-prone. Paired with the matching
+# *_hpo_dormant.yaml baseline (same config, Gaussian parameter mutation only).
 #
 # SINGLE-AGENT DORMANCY PROBE (pop_size = 1): this config exists to measure how much
 # ReGraMa's dormant-neuron reset actually drives eval/best_dormant_fraction down,
@@ -21,7 +16,7 @@
 # on top of training. The trade-off is that fitness from this run is NOT a fair read
 # on the operator's performance (a population run is); read the dormancy curve, not
 # the score. The baseline arm (*_hpo_dormant.yaml, original Gaussian) is the same
-# config with param_mut_type: original, so the gap between the two dormancy traces is
+# config with regrama_param_mut: false, so the gap between the two dormancy traces is
 # attributable to the parameter operator alone.
 #
 # TUNED Double DQN on the Atari 2600 suite. The base hyperparameters, the Mnih et al.
@@ -54,14 +49,14 @@ algorithm:
     tau: 3.3333333333333334e-05  # target network update freq 30,000 -> Polyak tau = 1/30000
     double: true
     # DELIBERATELY false here (the other dqn_double_tuned_*.yaml keep it true).
-    # ReBorn scores neurons from GraMa, which is captured by full backward hooks
+    # ReGraMa scores neurons from GraMa, which is captured by full backward hooks
     # riding the real training backward pass (GraMaCapture). DQN wraps its whole
     # update() -- backward included -- in torch.compile + CudaGraphModule when
     # cudagraphs is set (agilerl/algorithms/dqn.py), and a replayed CUDA graph does
     # not run Python hooks registered after capture. The hooks would then never
     # fire, `_grama_scores` would stay empty, and every parameter mutation would
     # silently degrade to the Gaussian operator -- i.e. this config would not
-    # measure ReBorn at all. Kept false in the paired *_hpo_dormant.yaml baseline
+    # measure ReGraMa at all. Kept false in the paired *_hpo_dormant.yaml baseline
     # too, so the isolation ablation compares like with like.
     cudagraphs: false
 
@@ -82,8 +77,8 @@ mutation:
         no_mut: 0.0      # OFF -- the agent is mutated every evolution step (see above)
         arch_mut: 0.0    # OFF -- isolate the parameter operator (network shape fixed)
         new_layer: 0.0   # OFF -- conditional within arch_mut, now inert
-        params_mut: 1.0  # the ONLY operator: dormant-neuron Xavier reset (no splits -- overact_beta is +inf), then reset + ordinary Gaussian noise (mutation_sd; no amplified)
-        act_mut: 0.0     # OFF -- ReLU kept throughout so the dormant-neuron phenomenon (and ReBorn) stays visible
+        params_mut: 1.0  # the ONLY operator: ReGraMa dormant-neuron Xavier reset, then reset + ordinary Gaussian noise (mutation_sd; no amplified)
+        act_mut: 0.0     # OFF -- ReLU kept throughout so the dormant-neuron phenomenon (and ReGraMa) stays visible
         rl_hp_mut: 0.0   # OFF -- NB: no hyperparameter search happens under this ablation
     rl_hp_selection:
         # INERT under this ablation (rl_hp_mut = 0.0): nothing here is mutated -- every
@@ -138,9 +133,10 @@ mutation:
     # With pop_size = 1 the only agent IS slot 0, so mutate_elite: false would mean no
     # parameter mutation ever fires and the probe would silently measure plain training.
     mutate_elite: true
-    param_mut_type: reborn    # the ReBorn operator, which overact_beta=+inf below degenerates to dormant-neuron Xavier reset only (ReGraMa), then reset + ordinary Gaussian noise (mutation_sd; amplified excluded)
+    random_reset_param_mut: true      # keep the random-reset band of the trailing Gaussian pass (a selected weight is REPLACED by a fresh N(0, 1) draw)
+    amplified_gauss_param_mut: false  # drop the amplified ("super") Gaussian band, which is divergence-prone; the dropped mass is NOT redistributed
+    regrama_param_mut: true           # ReGraMa: Xavier-reset every dormant neuron (normalised GraMa score <= dormant_tau) before the trailing Gaussian pass
     dormant_tau: 0.1          # neuron is dormant when its normalised score <= this (the ONLY active threshold here: every such neuron is reset)
-    overact_beta: .inf        # +inf: no neuron is ever over-active, so no neuron split ever fires and every dormant neuron is Xavier-reset instead
 
 network:
     # Nature DQN convolutional architecture (see dqn_double_tuned_no_hpo.yaml).

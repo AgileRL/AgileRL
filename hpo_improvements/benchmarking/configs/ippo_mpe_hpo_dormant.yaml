@@ -1,14 +1,14 @@
 ---
-# ReBorn comparison -- DORMANT baseline (derived from ippo_mpe_hpo.yaml).
+# ReGraMa comparison -- DORMANT baseline (derived from ippo_mpe_hpo.yaml).
 # Identical HPO regime but with ReLU activations, activation mutation forced
-# OFF, and the ORIGINAL Gaussian parameter mutation (param_mut_type: original).
-# Paired with the matching *_reborn.yaml to isolate ReBorn's effect on the
+# OFF, and the Gaussian parameter mutation alone (regrama_param_mut: false).
+# Paired with the matching *_regrama.yaml to isolate ReGraMa's effect on the
 # dormant-neuron phenomenon under ReLU networks.
 #
 # IPPO on cooperative MPE (MPEv2) WITH evolutionary selection (a population of 4
 # is mutated and selected each generation) -- run as a PARAMETER-OPERATOR
 # ISOLATION: the ONLY active mutation is the parameter operator (original Gaussian
-# vs ReBorn -- see the top comment and the `mutation` block); architecture,
+# vs ReGraMa -- see the top comment and the `mutation` block); architecture,
 # new-layer, activation and RL-hyperparameter mutations are all OFF, so no
 # hyperparameter search happens. The base hyperparameters match ippo_mpe_no_hpo.yaml
 # (AgileRL's canonical multi-agent IPPO/MPE recipe -- low lr, few PPO epochs, tight
@@ -47,14 +47,14 @@ environment:
 
 mutation:
     # ABLATION: all operators except the parameter mutation are OFF, isolating the
-    # parameter operator (Gaussian vs ReBorn) -- 50% of agents pass through untouched
+    # parameter operator (Gaussian vs ReGraMa) -- 50% of agents pass through untouched
     # (training-only control), 50% get a parameter mutation. No HP search happens.
     probabilities:
         no_mut: 0.5      # leave unchanged: rest/consolidation + training-only control for the efficacy diagnostic
         arch_mut: 0.0    # OFF -- isolate the parameter operator (network shape fixed)
         new_layer: 0.0   # OFF -- conditional within arch_mut, now inert
         params_mut: 0.5  # the ONLY active operator: Gaussian (original) weight noise, strength = mutation_sd
-        act_mut: 0.0     # OFF -- ReLU kept throughout so the dormant-neuron phenomenon (and ReBorn) stays visible
+        act_mut: 0.0     # OFF -- ReLU kept throughout so the dormant-neuron phenomenon (and ReGraMa) stays visible
         rl_hp_mut: 0.0   # OFF -- NB: no hyperparameter search happens under this ablation
     rl_hp_selection:
         # INERT under this ablation (rl_hp_mut = 0.0): nothing here is mutated -- every
@@ -124,7 +124,9 @@ mutation:
     mutation_sd: 0.1  # std of the Gaussian weight perturbation for params_mut
     rand_seed: 42
     mutate_elite: false  # keep the elite member unmutated so the best agent survives intact into the next generation
-    param_mut_type: original  # original Gaussian parameter mutation (ReLU baseline for the ReBorn comparison)
+    random_reset_param_mut: true      # keep the random-reset band of the Gaussian parameter mutation (a selected weight is REPLACED by a fresh N(0, 1) draw)
+    amplified_gauss_param_mut: true   # keep the amplified ("super") Gaussian band, whose std is 10x the weight's own magnitude
+    regrama_param_mut: false          # original Gaussian parameter mutation only -- no dormant-neuron resets
 
 network:
     # Same width-64 MLP as the no-HPO config. NB: under this parameter-operator

@@ -1,7 +1,7 @@
 ---
 # Parameter-operator DORMANCY PROBE -- baseline arm (ORIGINAL Gaussian parameter
-# mutation, param_mut_type: original). ReLU activations, activation mutation forced
-# OFF. Paired with the matching *_reborn.yaml / *_regrama.yaml, which differ ONLY in
+# mutation, regrama_param_mut: false). ReLU activations, activation mutation forced
+# OFF. Paired with the matching *_regrama.yaml, which differs ONLY in
 # the parameter operator, so the gap in eval/best_dormant_fraction between the arms
 # is attributable to that operator alone.
 #
@@ -43,12 +43,12 @@ algorithm:
     gamma: 0.99
     tau: 3.3333333333333334e-05  # target network update freq 30,000 -> Polyak tau = 1/30000
     double: true
-    # DELIBERATELY false, matching dqn_double_tuned_reborn.yaml (the other
+    # DELIBERATELY false, matching dqn_double_tuned_regrama.yaml (the other
     # dqn_double_tuned_*.yaml keep it true). That config must disable CUDA graphs
-    # so ReBorn's GraMa backward hooks fire; this is its isolation baseline, so it
+    # so ReGraMa's GraMa backward hooks fire; this is its isolation baseline, so it
     # has to run under the same compilation regime or the comparison would confound
     # the parameter operator with a CUDA-graph difference. See the longer note in
-    # dqn_double_tuned_reborn.yaml.
+    # dqn_double_tuned_regrama.yaml.
     cudagraphs: false
 
 environment:
@@ -69,7 +69,7 @@ mutation:
         arch_mut: 0.0    # OFF -- isolate the parameter operator (network shape fixed)
         new_layer: 0.0   # OFF -- conditional within arch_mut, now inert
         params_mut: 1.0  # the ONLY operator: Gaussian (original) weight noise, strength = mutation_sd
-        act_mut: 0.0     # OFF -- ReLU kept throughout so the dormant-neuron phenomenon (and ReBorn) stays visible
+        act_mut: 0.0     # OFF -- ReLU kept throughout so the dormant-neuron phenomenon (and ReGraMa) stays visible
         rl_hp_mut: 0.0   # OFF -- NB: no hyperparameter search happens under this ablation
     rl_hp_selection:
         # INERT under this ablation (rl_hp_mut = 0.0): nothing here is mutated -- every
@@ -124,7 +124,9 @@ mutation:
     # With pop_size = 1 the only agent IS slot 0, so mutate_elite: false would mean no
     # parameter mutation ever fires and the probe would silently measure plain training.
     mutate_elite: true
-    param_mut_type: original  # original Gaussian parameter mutation (ReLU baseline for the ReBorn comparison)
+    random_reset_param_mut: true      # keep the random-reset band of the Gaussian parameter mutation (a selected weight is REPLACED by a fresh N(0, 1) draw)
+    amplified_gauss_param_mut: true   # keep the amplified ("super") Gaussian band, whose std is 10x the weight's own magnitude
+    regrama_param_mut: false          # original Gaussian parameter mutation only -- no dormant-neuron resets
 
 network:
     # Nature DQN convolutional architecture (see dqn_double_tuned_no_hpo.yaml).

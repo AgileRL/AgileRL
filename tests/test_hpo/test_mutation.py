@@ -2243,13 +2243,25 @@ def test_get_offspring_eval_modules_returns_policy_and_modules(
 # --------------------------------------------------------------------------- #
 def _make_reborn_mutations(
     seed=42,
-    param_mut_type="reborn",
-    reborn_out_scale=0.25,
+    regrama_param_mut=True,
+    regrama_out_scale=0.25,
     dormant_tau=0.1,
     overact_beta=3.0,
+    amplified_gauss_param_mut=False,
     **kwargs,
 ):
-    """A ``Mutations`` whose only active operator is the parameter mutation."""
+    """A ``Mutations`` whose only active operator is the parameter mutation.
+
+    Two defaults differ from the operator's own and are load-bearing for the
+    ``TestReborn*`` classes below:
+
+    * ``overact_beta`` is *finite*, which enables ReBorn's neuron split. The
+      operator defaults it to ``inf`` and no manifest field can lower it, so the
+      split is a Python-only escape hatch -- exercised here, and unreachable from
+      the shipped configs. :class:`TestRegramaDefaults` covers the default instead.
+    * the amplified Gaussian band is off, mirroring the shipped ``*_regrama.yaml``
+      arms, so the trailing pass stays free of divergence-prone noise.
+    """
     return Mutations(
         no_mutation=0.0,
         architecture=0.0,
@@ -2257,10 +2269,11 @@ def _make_reborn_mutations(
         parameters=1.0,
         activation=0.0,
         rl_hp=0.0,
-        param_mut_type=param_mut_type,
+        regrama_param_mut=regrama_param_mut,
         dormant_tau=dormant_tau,
         overact_beta=overact_beta,
-        reborn_out_scale=reborn_out_scale,
+        regrama_out_scale=regrama_out_scale,
+        amplified_gauss_param_mut=amplified_gauss_param_mut,
         rand_seed=seed,
         device="cpu",
         **kwargs,
@@ -2268,7 +2281,7 @@ def _make_reborn_mutations(
 
 
 # ReLU nets with no LayerNorm: the two conditions the neuron split needs to be
-# function-preserving, and what the *_reborn.yaml benchmark configs run.
+# function-preserving, and what the *_regrama.yaml benchmark configs run.
 _REBORN_NET_CONFIG = {
     "encoder_config": {
         "hidden_size": [16],
@@ -2345,15 +2358,15 @@ def _grama_snapshot(agent, obs, fill=_healthy_fill):
 
 
 class TestRebornConstructorValidation:
-    def test_accepts_a_reborn_configuration(self):
+    def test_accepts_a_split_configuration(self):
         mut = _make_reborn_mutations(dormant_tau=0.2, overact_beta=4.0)
 
-        assert mut.param_mut_type == "reborn"
+        assert mut.regrama_param_mut is True
         assert (mut.dormant_tau, mut.overact_beta) == (0.2, 4.0)
 
-    def test_rejects_bad_param_mut_type(self):
-        with pytest.raises(AssertionError, match="param_mut_type must be either"):
-            _make_reborn_mutations(param_mut_type="bogus")
+    def test_rejects_non_boolean_regrama_flag(self):
+        with pytest.raises(AssertionError, match="regrama_param_mut must be boolean"):
+            _make_reborn_mutations(regrama_param_mut="bogus")
 
     def test_rejects_non_positive_dormant_tau(self):
         with pytest.raises(AssertionError, match="dormant_tau must be greater"):
@@ -2369,11 +2382,130 @@ class TestRebornConstructorValidation:
         ):
             _make_reborn_mutations(dormant_tau=0.5, overact_beta=0.4)
 
-    def test_rejects_negative_reborn_out_scale(self):
+    def test_rejects_negative_regrama_out_scale(self):
         with pytest.raises(
-            AssertionError, match="reborn_out_scale must be non-negative"
+            AssertionError, match="regrama_out_scale must be non-negative"
         ):
-            _make_reborn_mutations(reborn_out_scale=-0.1)
+            _make_reborn_mutations(regrama_out_scale=-0.1)
+
+
+def _make_gaussian_mutations(seed=42, **kwargs):
+    """A ``Mutations`` on the plain Gaussian parameter operator (no ReGraMa)."""
+    return Mutations(
+        no_mutation=0.0,
+        architecture=0.0,
+        new_layer_prob=0.0,
+        parameters=1.0,
+        activation=0.0,
+        rl_hp=0.0,
+        rand_seed=seed,
+        device="cpu",
+        **kwargs,
+    )
+
+
+class TestRegramaDefaults:
+    """The manifest-reachable configuration: dormant resets, never a neuron split."""
+
+    def _mutate(self, **kwargs):
+        agent = _make_ppo()
+        obs = np.random.RandomState(0).uniform(-1, 1, size=(32, 6)).astype(np.float32)
+        scores = _grama_snapshot(agent, obs, fill=_surgery_fill)
+        mut = _make_gaussian_mutations(regrama_param_mut=True, **kwargs)
+        return mut, mut.regrama_parameter_mutation(agent, scores)
+
+    def test_overact_beta_defaults_to_infinity(self):
+        mut, _ = self._mutate()
+
+        assert mut.overact_beta == float("inf")
+
+    def test_no_neuron_is_ever_over_active(self):
+        # _surgery_fill scores neuron 0 at 10.0, which a finite beta would call
+        # over-active. Under the default it cannot be: this is what separates the
+        # shipped operator from the ReBorn split the TestReborn* classes exercise.
+        _, out = self._mutate()
+
+        assert out.mut_details["overactive_count"] == 0
+        assert out.mut_details["neurons_reborn"] == 0
+
+    def test_every_dormant_neuron_is_xavier_reset(self):
+        _, out = self._mutate()
+
+        assert out.mut_details["dormant_count"] > 0
+        assert (
+            out.mut_details["neurons_xavier_reset"] == out.mut_details["dormant_count"]
+        )
+
+    def test_gaussian_bands_are_live_unless_switched_off(self):
+        # The operator no longer forces the amplified band off for ReGraMa the way
+        # the old param_mut_type did -- the flags are the only authority now.
+        _, out = self._mutate()
+
+        assert out.mut_details["weights_amplified_noise"] > 0
+        assert out.mut_details["weights_reset"] > 0
+
+    def test_bands_switched_off_stay_off_through_the_trailing_pass(self):
+        _, out = self._mutate(
+            random_reset_param_mut=False, amplified_gauss_param_mut=False
+        )
+
+        assert out.mut_details["weights_amplified_noise"] == 0
+        assert out.mut_details["weights_reset"] == 0
+        assert out.mut_details["weights_ordinary_noise"] > 0
+
+
+class TestGaussianBandSwitches:
+    """``random_reset_param_mut`` / ``amplified_gauss_param_mut`` gate one band each."""
+
+    def _counts(self, **kwargs):
+        agent = _make_ppo()
+        out = _make_gaussian_mutations(**kwargs).parameter_mutation(agent)
+        assert out.mut == "param"
+        return out.mut_details
+
+    def test_both_bands_live_by_default(self):
+        counts = self._counts()
+
+        assert counts["weights_reset"] > 0
+        assert counts["weights_amplified_noise"] > 0
+        assert counts["weights_ordinary_noise"] > 0
+
+    def test_reset_band_is_dropped(self):
+        counts = self._counts(random_reset_param_mut=False)
+
+        assert counts["weights_reset"] == 0
+        assert counts["weights_amplified_noise"] > 0
+
+    def test_amplified_band_is_dropped(self):
+        counts = self._counts(amplified_gauss_param_mut=False)
+
+        assert counts["weights_amplified_noise"] == 0
+        assert counts["weights_reset"] > 0
+
+    def test_dropping_both_leaves_ordinary_noise(self):
+        # The mutation must never degenerate into a no-op: the ordinary band still
+        # covers the 90% of draws it always did.
+        counts = self._counts(
+            random_reset_param_mut=False, amplified_gauss_param_mut=False
+        )
+
+        assert counts["weights_reset"] == 0
+        assert counts["weights_amplified_noise"] == 0
+        assert counts["weights_ordinary_noise"] > 0
+
+    def test_a_dropped_band_does_not_feed_the_others(self):
+        # Band assignment is drawn from the operator's NumPy RNG before any flag is
+        # consulted, so a seed pins the ordinary band's size no matter which of the
+        # other two run. This is the "mass is not redistributed" contract.
+        ordinary = {
+            (reset, amplified): self._counts(
+                random_reset_param_mut=reset, amplified_gauss_param_mut=amplified
+            )["weights_ordinary_noise"]
+            for reset in (True, False)
+            for amplified in (True, False)
+        }
+
+        assert len(set(ordinary.values())) == 1
 
 
 class TestRebornLayerSurgery:
@@ -2458,10 +2590,11 @@ class TestRebornLayerSurgery:
     def test_infinite_overact_beta_only_resets_dormant_neurons(self):
         """ReGraMa: ``overact_beta=+inf`` degenerates the operator to a reset.
 
-        This is the whole configuration difference between the ``*_reborn.yaml``
-        and ``*_regrama.yaml`` benchmark pairs -- with no neuron ever over-active
-        there is nothing to split, so every dormant neuron takes the Xavier-reset
-        path instead of being claimed as a partner.
+        ``inf`` is the operator's default and the only value a manifest can produce,
+        so this is what every ``*_regrama.yaml`` benchmark arm runs -- with no neuron
+        ever over-active there is nothing to split, so every dormant neuron takes the
+        Xavier-reset path instead of being claimed as a partner. The layer-level twin
+        of :class:`TestRegramaDefaults`.
         """
         producer, _next_layer, counts = self._run(
             mut=_make_reborn_mutations(seed=7, overact_beta=float("inf"))
@@ -2475,12 +2608,12 @@ class TestRebornLayerSurgery:
 
     def test_unclaimed_dormant_outgoing_reseeded_at_scale(self):
         # A Xavier-reset neuron is revived with a small *non-zero* outgoing column
-        # -- norm == reborn_out_scale * the median column norm of the neurons this
+        # -- norm == regrama_out_scale * the median column norm of the neurons this
         # pass leaves alone. A zero column would make the revived neuron score as
         # maximally dormant under gradient detection (and freeze its own incoming
-        # weights), which is the pathology reborn_out_scale exists to avoid.
+        # weights), which is the pathology regrama_out_scale exists to avoid.
         producer, next_layer, per_neuron = self._setup()
-        mut = _make_reborn_mutations(seed=1, reborn_out_scale=0.25)
+        mut = _make_reborn_mutations(seed=1, regrama_out_scale=0.25)
         # Only neuron 4 is neither dormant nor over-active, so it alone sets the
         # reference scale: column 4 of next_layer is [5, 10].
         expected = 0.25 * float(torch.tensor([5.0, 10.0]).norm())
@@ -2501,10 +2634,10 @@ class TestRebornLayerSurgery:
             assert torch.count_nonzero(next_layer.weight.data[:, i]) > 0
 
     def test_zero_out_scale_restores_zeroed_outgoing(self):
-        # The ablation path: reborn_out_scale=0.0 must reproduce ReDo's original
+        # The ablation path: regrama_out_scale=0.0 must reproduce ReDo's original
         # zero-outgoing revival exactly, so seeded comparisons stay meaningful.
         producer, next_layer, per_neuron = self._setup()
-        mut = _make_reborn_mutations(seed=1, reborn_out_scale=0.0)
+        mut = _make_reborn_mutations(seed=1, regrama_out_scale=0.0)
         counts = {"reborn": 0, "xavier": 0, "overactive": 0, "dormant": 0}
         mut._apply_reborn_to_layer(
             producer, [next_layer], None, None, per_neuron, counts
@@ -2525,7 +2658,7 @@ class TestRebornLayerSurgery:
             producer = torch.nn.Linear(3, 5)
             next_layer = torch.nn.Linear(5, 2)
             per_neuron = torch.tensor([1.0, 0.0, 0.0, 1.0, 1.0])  # 1, 2 dormant
-            mut = _make_reborn_mutations(seed=5, reborn_out_scale=scale)
+            mut = _make_reborn_mutations(seed=5, regrama_out_scale=scale)
             counts = {"reborn": 0, "xavier": 0, "overactive": 0, "dormant": 0}
             mut._apply_reborn_to_layer(
                 producer, [next_layer], None, None, per_neuron, counts
@@ -2541,7 +2674,7 @@ class TestRebornLayerSurgery:
     def test_over_active_split_is_function_preserving_relu(self):
         # net2net invariant: splitting an over-active neuron into dormant slots
         # must leave the network's output unchanged for a ReLU network. Pinned to
-        # reborn_out_scale=0.0 to isolate the split: the three dormant neurons have
+        # regrama_out_scale=0.0 to isolate the split: the three dormant neurons have
         # exactly-zero activation on the batch, so with their outgoing weights
         # zeroed any that stay unclaimed also contribute zero. At the default scale
         # a revived neuron deliberately perturbs the output (see the sibling test).
@@ -2568,7 +2701,7 @@ class TestRebornLayerSurgery:
 
         before = forward(X).clone()
 
-        mut = _make_reborn_mutations(seed=3, reborn_out_scale=0.0)
+        mut = _make_reborn_mutations(seed=3, regrama_out_scale=0.0)
         # norm = [4, 0, 0, 0]: neuron 0 over-active (>=3), neurons 1-3 dormant.
         per_neuron = torch.tensor([4.0, 0.0, 0.0, 0.0])
         counts = {"reborn": 0, "xavier": 0, "overactive": 0, "dormant": 0}
@@ -2652,9 +2785,9 @@ class TestRebornConvColumnScale:
 
     def test_revived_conv_filter_lands_at_the_requested_fraction(self):
         # End-to-end consequence: a Xavier-reset feature map's new outgoing filter
-        # must have norm ``reborn_out_scale`` x the live column scale. Under the
+        # must have norm ``regrama_out_scale`` x the live column scale. Under the
         # flattening bug it came out 3-4x smaller, i.e. right back in the
-        # near-zero-outgoing regime ``reborn_out_scale`` exists to escape.
+        # near-zero-outgoing regime ``regrama_out_scale`` exists to escape.
         torch.manual_seed(0)
         producer = torch.nn.Conv2d(3, 4, kernel_size=3)
         consumer = torch.nn.Conv2d(4, 8, kernel_size=3)
@@ -2668,7 +2801,7 @@ class TestRebornConvColumnScale:
         # revival magnitude independently of the helper the sibling tests pin.
         live = self._true_median_norm([consumer.weight.data[:, n] for n in (0, 2, 3)])
         _make_reborn_mutations(
-            seed=3, reborn_out_scale=out_scale
+            seed=3, regrama_out_scale=out_scale
         )._apply_reborn_to_layer(producer, [consumer], None, None, per_neuron, counts)
 
         assert counts["xavier"] == 1
@@ -2725,7 +2858,7 @@ class TestRebornBranchedArchitectures:
         expected = self._dormant_per_measured_layer(agent)
 
         # Act
-        out = _make_reborn_mutations().reborn_parameter_mutation(agent, scores)
+        out = _make_reborn_mutations().regrama_parameter_mutation(agent, scores)
 
         # Assert
         assert out.mut_details["dormant_count"] == expected
@@ -2739,7 +2872,7 @@ class TestRebornBranchedArchitectures:
         expected = self._dormant_per_measured_layer(agent)
 
         # Act
-        out = _make_reborn_mutations().reborn_parameter_mutation(agent, scores)
+        out = _make_reborn_mutations().regrama_parameter_mutation(agent, scores)
 
         # Assert
         assert out.mut_details["dormant_count"] == expected
@@ -2781,7 +2914,9 @@ class TestRebornBranchedArchitectures:
         counts = {"reborn": 0, "xavier": 0, "overactive": 0, "dormant": 0}
 
         # Act -- surgery only, so the trailing Gaussian pass cannot mask the result
-        _make_reborn_mutations()._reborn_network_surgery(agent.actor, scores[0], counts)
+        _make_reborn_mutations()._regrama_network_surgery(
+            agent.actor, scores[0], counts
+        )
 
         # Assert
         assert torch.equal(before, head_first.weight.detach())
@@ -2803,7 +2938,9 @@ class TestRebornBranchedArchitectures:
         counts = {"reborn": 0, "xavier": 0, "overactive": 0, "dormant": 0}
 
         # Act
-        _make_reborn_mutations()._reborn_network_surgery(agent.actor, scores[0], counts)
+        _make_reborn_mutations()._regrama_network_surgery(
+            agent.actor, scores[0], counts
+        )
 
         # Assert
         assert not torch.equal(fusion_before, fusion.weight.detach())
@@ -2865,7 +3002,9 @@ class TestRebornBranchedArchitectures:
         counts = {"reborn": 0, "xavier": 0, "overactive": 0, "dormant": 0}
 
         # Act -- surgery only, so the trailing Gaussian pass cannot mask the result
-        _make_reborn_mutations()._reborn_network_surgery(agent.actor, scores[0], counts)
+        _make_reborn_mutations()._regrama_network_surgery(
+            agent.actor, scores[0], counts
+        )
 
         # Assert
         assert not torch.equal(before, linear.weight.detach())
@@ -2883,7 +3022,9 @@ class TestRebornBranchedArchitectures:
         counts = {"reborn": 0, "xavier": 0, "overactive": 0, "dormant": 0}
 
         # Act
-        _make_reborn_mutations()._reborn_network_surgery(agent.actor, scores[0], counts)
+        _make_reborn_mutations()._regrama_network_surgery(
+            agent.actor, scores[0], counts
+        )
 
         # Assert
         assert not torch.equal(before, linear.weight.detach())
@@ -2904,7 +3045,9 @@ class TestRebornBranchedArchitectures:
         counts = {"reborn": 0, "xavier": 0, "overactive": 0, "dormant": 0}
 
         # Act -- surgery only, so the trailing Gaussian pass cannot mask the result
-        _make_reborn_mutations()._reborn_network_surgery(agent.actor, scores[0], counts)
+        _make_reborn_mutations()._regrama_network_surgery(
+            agent.actor, scores[0], counts
+        )
 
         # Assert -- the dormant latent columns (indices 1, 2) were rewritten
         after = advantage_first.weight_mu.detach()
@@ -2934,11 +3077,11 @@ class TestRebornEndToEnd:
         # no-op, the trailing reset + ordinary Gaussian pass still runs, so the
         # operator records both the neuron-recycling counts and the weight-noise
         # counts. (The surgery math is covered by TestRebornLayerSurgery.) The
-        # amplified ("super") noise band is never applied under ReBorn.
+        # amplified ("super") noise band is off in this fixture.
         agent = self._ppo()
         obs = np.random.RandomState(0).uniform(-1, 1, size=(32, 6)).astype(np.float32)
         scores = _grama_snapshot(agent, obs)
-        out = _make_reborn_mutations().reborn_parameter_mutation(agent, scores)
+        out = _make_reborn_mutations().regrama_parameter_mutation(agent, scores)
         assert out.mut == "param_reborn"
         assert out.mut_details["category"] == "reborn"
         assert set(out.mut_details) >= {
@@ -2950,7 +3093,7 @@ class TestRebornEndToEnd:
             "weights_ordinary_noise",
             "weights_amplified_noise",
         }
-        # ReBorn never fires the divergence-prone amplified noise band.
+        # The fixture holds the amplified band off, as the shipped configs do.
         assert out.mut_details["weights_amplified_noise"] == 0
         assert all(torch.isfinite(v).all() for v in out.actor.state_dict().values())
 
@@ -2960,7 +3103,7 @@ class TestRebornEndToEnd:
         agent = self._ppo()
         obs = np.random.RandomState(0).uniform(-1, 1, size=(32, 6)).astype(np.float32)
         scores = _grama_snapshot(agent, obs, fill=_surgery_fill)
-        out = _make_reborn_mutations().reborn_parameter_mutation(agent, scores)
+        out = _make_reborn_mutations().regrama_parameter_mutation(agent, scores)
         assert out.mut_details["dormant_count"] > 0
         assert out.mut_details["overactive_count"] > 0
         assert (
@@ -2977,7 +3120,7 @@ class TestRebornEndToEnd:
             .astype(np.uint8)
         )
         scores = _grama_snapshot(agent, obs)
-        out = _make_reborn_mutations().reborn_parameter_mutation(agent, scores)
+        out = _make_reborn_mutations().regrama_parameter_mutation(agent, scores)
         assert out.mut == "param_reborn"
         assert all(torch.isfinite(v).all() for v in out.actor.state_dict().values())
         # DQN target network is synced from the mutated online network.
@@ -2997,7 +3140,7 @@ class TestRebornEndToEnd:
             .astype(np.uint8)
         )
         scores = _grama_snapshot(agent, obs)
-        out = _make_reborn_mutations().reborn_parameter_mutation(agent, scores)
+        out = _make_reborn_mutations().regrama_parameter_mutation(agent, scores)
         after = out.actor.state_dict()
         assert any(not torch.equal(before[k], after[k]) for k in before)
         for k, v in after.items():
@@ -3031,15 +3174,15 @@ class TestRebornEndToEnd:
         # sequence replays deterministically; here we isolate the two calls.
         np.random.seed(0)
         torch.manual_seed(0)
-        ra = _make_reborn_mutations(seed=123).reborn_parameter_mutation(a, scores_a)
+        ra = _make_reborn_mutations(seed=123).regrama_parameter_mutation(a, scores_a)
         np.random.seed(0)
         torch.manual_seed(0)
-        rb = _make_reborn_mutations(seed=123).reborn_parameter_mutation(b, scores_b)
+        rb = _make_reborn_mutations(seed=123).regrama_parameter_mutation(b, scores_b)
         for k in ra.actor.state_dict():
             assert torch.equal(ra.actor.state_dict()[k], rb.actor.state_dict()[k])
 
     def test_falls_back_to_gaussian_without_snapshot(self):
-        # param_mut_type='reborn' but no gradient snapshot -> Gaussian mutation.
+        # regrama_param_mut set but no gradient snapshot -> Gaussian mutation.
         agent = self._ppo()
         mut = _make_reborn_mutations()
         assert mut._grama_side_table is None
@@ -3237,7 +3380,7 @@ class TestRebornBorrowedEncoderParameters:
         counts = {"reborn": 0, "xavier": 0, "overactive": 0, "dormant": 0}
 
         # Act -- surgery only, so the trailing Gaussian pass cannot mask the result
-        _make_reborn_mutations()._reborn_network_surgery(
+        _make_reborn_mutations()._regrama_network_surgery(
             agent.critic, scores[1], counts
         )
 
@@ -3260,7 +3403,7 @@ class TestRebornBorrowedEncoderParameters:
         counts = {"reborn": 0, "xavier": 0, "overactive": 0, "dormant": 0}
 
         # Act
-        _make_reborn_mutations()._reborn_network_surgery(
+        _make_reborn_mutations()._regrama_network_surgery(
             agent.critic, scores[1], counts
         )
 
@@ -3279,7 +3422,7 @@ class TestRebornBorrowedEncoderParameters:
         counts = {"reborn": 0, "xavier": 0, "overactive": 0, "dormant": 0}
 
         # Act
-        _make_reborn_mutations()._reborn_network_surgery(
+        _make_reborn_mutations()._regrama_network_surgery(
             agent.critic, scores[1], counts
         )
 
@@ -3347,7 +3490,9 @@ class TestRebornWithCapturedGradients:
         counts = {"reborn": 0, "xavier": 0, "overactive": 0, "dormant": 0}
 
         # Act -- surgery only, so the trailing Gaussian pass cannot mask the result
-        _make_reborn_mutations()._reborn_network_surgery(agent.actor, scores[0], counts)
+        _make_reborn_mutations()._regrama_network_surgery(
+            agent.actor, scores[0], counts
+        )
 
         # Assert
         assert counts["dormant"] >= 1
@@ -3366,7 +3511,7 @@ class TestRebornWithCapturedGradients:
 class TestRebornMultiAgent:
     """Per-sub-policy routing for multi-agent algorithms.
 
-    ``reborn_parameter_mutation`` walks ``_eval_networks`` and indexes the snapshot
+    ``regrama_parameter_mutation`` walks ``_eval_networks`` and indexes the snapshot
     *positionally*, and for a multi-agent algorithm that list is one entry per
     (group, sub-policy) pair flattened out of a ``ModuleDict``. Nothing checks the
     agent id, so a capture and a mutation that disagreed on the ordering would
@@ -3447,7 +3592,7 @@ class TestRebornMultiAgent:
         )
 
         # Act
-        out = _make_reborn_mutations().reborn_parameter_mutation(agent, scores)
+        out = _make_reborn_mutations().regrama_parameter_mutation(agent, scores)
 
         # Assert -- _surgery_fill injects two dormant neurons per measured layer
         assert out.mut == "param_reborn"
@@ -3474,7 +3619,7 @@ class TestRebornMultiAgent:
         }
 
         # Act
-        out = _make_reborn_mutations().reborn_parameter_mutation(agent, scores)
+        out = _make_reborn_mutations().regrama_parameter_mutation(agent, scores)
 
         # Assert
         for network_id, critic in out.critics.items():
@@ -3488,7 +3633,7 @@ class TestRebornMultiAgent:
 class TestRebornSurgeryFailureIsContained:
     """A network whose surgery raises is left alone; the run continues.
 
-    ``reborn_parameter_mutation`` catches per-network failures so one unsupported
+    ``regrama_parameter_mutation`` catches per-network failures so one unsupported
     layout cannot abort a whole evolutionary run. That containment is only correct
     if the failed network is genuinely untouched -- a half-applied split would
     leave a consumer compensating for a producer that was never rewritten.
@@ -3507,11 +3652,11 @@ class TestRebornSurgeryFailureIsContained:
         obs = np.random.RandomState(0).uniform(-1, 1, size=(32, 6)).astype(np.float32)
         scores = _grama_snapshot(agent, obs, fill=_surgery_fill)
         critic_before = {k: v.clone() for k, v in agent.critic.state_dict().items()}
-        monkeypatch.setattr(Mutations, "_reborn_network_surgery", self._always_fails)
+        monkeypatch.setattr(Mutations, "_regrama_network_surgery", self._always_fails)
 
         # Act
         with caplog.at_level("WARNING"):
-            out = _make_reborn_mutations().reborn_parameter_mutation(agent, scores)
+            out = _make_reborn_mutations().regrama_parameter_mutation(agent, scores)
 
         # Assert -- the mutation completes and reports zero recycling ...
         assert out.mut == "param_reborn"
@@ -3522,7 +3667,7 @@ class TestRebornSurgeryFailureIsContained:
             torch.equal(critic_before[k], v) for k, v in out.critic.state_dict().items()
         )
         # ... and the failure is reported rather than swallowed.
-        assert "ReBorn surgery skipped" in caplog.text
+        assert "ReGraMa surgery skipped" in caplog.text
 
     def test_trailing_gaussian_pass_still_runs(self):
         """The exploration pass is independent of the surgery succeeding."""
@@ -3534,8 +3679,8 @@ class TestRebornSurgeryFailureIsContained:
 
         # Act
         with pytest.MonkeyPatch.context() as patch:
-            patch.setattr(Mutations, "_reborn_network_surgery", self._always_fails)
-            out = _make_reborn_mutations().reborn_parameter_mutation(agent, scores)
+            patch.setattr(Mutations, "_regrama_network_surgery", self._always_fails)
+            out = _make_reborn_mutations().regrama_parameter_mutation(agent, scores)
 
         # Assert
         assert any(
@@ -3609,7 +3754,7 @@ class TestRebornSimBaResidualBlocks:
         counts = {"reborn": 0, "xavier": 0, "overactive": 0, "dormant": 0}
 
         # Act
-        _make_reborn_mutations()._reborn_network_surgery(net, scores[0], counts)
+        _make_reborn_mutations()._regrama_network_surgery(net, scores[0], counts)
 
         # Assert
         assert len(blocks) == self.BLOCKS
@@ -3649,7 +3794,7 @@ class TestRebornSimBaResidualBlocks:
         counts = {"reborn": 0, "xavier": 0, "overactive": 0, "dormant": 0}
 
         # Act
-        _make_reborn_mutations()._reborn_network_surgery(net, scores[0], counts)
+        _make_reborn_mutations()._regrama_network_surgery(net, scores[0], counts)
 
         # Assert
         with torch.no_grad():
@@ -3934,7 +4079,7 @@ class TestRebornRecurrentEncoders:
 
         # Act / Assert
         with pytest.warns(UserWarning, match="recurrent"):
-            _make_reborn_mutations()._reborn_network_surgery(net, None, counts)
+            _make_reborn_mutations()._regrama_network_surgery(net, None, counts)
 
     def test_still_recycles_the_output_projection(self):
         # Arrange
@@ -3952,7 +4097,7 @@ class TestRebornRecurrentEncoders:
 
         # Act
         with pytest.warns(UserWarning, match="recurrent"):
-            _make_reborn_mutations()._reborn_network_surgery(net, scores, counts)
+            _make_reborn_mutations()._regrama_network_surgery(net, scores, counts)
 
         # Assert
         assert counts["reborn"] > 0
