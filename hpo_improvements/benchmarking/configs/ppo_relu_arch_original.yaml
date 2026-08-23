@@ -61,7 +61,7 @@ mutation:
     probabilities:
         no_mut: 0.5
         arch_mut: 0.5    # add/remove hidden nodes within the bounds below
-        new_layer: 0.4   # add/remove a whole hidden layer (head) within the bounds below
+        new_layer: 0.2   # add/remove a whole hidden layer (head) within the bounds below
         params_mut: 0.0  # Gaussian noise on weights, strength = mutation_sd
         act_mut: 0.0     # OFF -- fixed ReLU (arch-mutation ablation; act_mut disabled)
         rl_hp_mut: 0.0   # grow/shrink one of the rl_hp_selection hyperparameters below

@@ -147,7 +147,7 @@ mutation:
     rand_seed: 42
     mutate_elite: false  # keep the elite member unmutated so the best agent survives intact into the next generation
     arch_mut_type: func_preserving  # original | func_preserving architecture mutations
-    arch_fp_noise: 0.0075  # symmetry-breaking noise on new units' fan-out, relative to the layer's weight std (0.0 = exact-zero preservation)
+    arch_fp_noise: 0.01  # symmetry-breaking noise on new units' fan-out, relative to the layer's weight std (0.0 = exact-zero preservation)
     arch_encoder_layer_mut: false  # encoder add_layer/remove_layer stay OFF here, so this
                                    # arm's search space is unchanged from the runs already
                                    # collected. The *_enclayer arms turn them on; compare
