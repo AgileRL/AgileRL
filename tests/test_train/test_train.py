@@ -5771,10 +5771,6 @@ def test_remove_saved_models():
     shutil.rmtree("models", ignore_errors=True)
 
 
-# Normalisation between a widened layer and its consumer re-scales every unit
-# together, so the fixup stands down on any network built with the default
-# layer_norm=True. The shared table leaves it on, which would leave the whole
-# function-preserving suite asserting nothing but that mutation still runs.
 def _give_population_fitness(population) -> None:
     """Give each agent a distinct fitness so tournament selection can rank."""
     for position, agent in enumerate(population):
@@ -5797,9 +5793,6 @@ _FP_FAMILY_NET_CONFIG = {
 }
 
 
-# Written out rather than derived from the shared table: that table has no
-# on-policy case, and both adding one to it and giving it the unnormalised
-# config above would silently widen the multi-frequency suite too.
 _ARCH_FAMILY_CASES = {
     "off-policy (DQN)": (
         "DQN",
@@ -5829,12 +5822,7 @@ _ARCH_FAMILY_CASES = {
 
 
 def _fp_declines(recorded) -> set:
-    """Return the reason keys the fixup stood down on, from recorded warnings.
-
-    Anchored on the phrase that introduces the reason, because one reason's
-    prose is a substring of another's ("a residual skip ..." inside "a SimBa
-    block's residual skip ...") and a bare containment check would report both.
-    """
+    """Return the reason keys the fixup stood down on, from recorded warnings."""
     messages = [str(warning.message) for warning in recorded]
     return {
         reason
@@ -5845,12 +5833,7 @@ def _fp_declines(recorded) -> set:
 
 @contextmanager
 def _no_unexpected_fp_fallback(expected=frozenset()):
-    """Assert the fixup stood down only where the architecture forces it.
-
-    A subset rather than an equality, since which mutations get sampled is up to
-    the operator's RNG; the direction that matters is that nothing *else*
-    silently fell back to random initialisation.
-    """
+    """Assert the fixup stood down only where the architecture forces it."""
     with warnings.catch_warnings(record=True) as recorded:
         warnings.simplefilter("always")
         yield
@@ -5917,14 +5900,7 @@ class TestFunctionPreservingCrossFamilyEvolution:
         "family", list(_ARCH_FAMILY_CASES), ids=list(_ARCH_FAMILY_CASES)
     )
     def test_the_fixup_engages_for_every_family(self, family):
-        """Additions reach the fixup rather than falling back to random init.
-
-        Guards the net config as much as the operator: with normalisation left
-        on, every addition declines, and the other assertions of this class hold
-        whether or not the fixup does anything at all. Exact preservation is
-        asserted per architecture in ``tests/test_hpo``; what is family-specific
-        is only whether the surgery can run.
-        """
+        """Additions reach the fixup rather than falling back to random init."""
         _, build_population = _ARCH_FAMILY_CASES[family]
         population = build_population()
 
@@ -6049,15 +6025,7 @@ class _FunctionPreservingBanditEnv:
 
 
 class TestFunctionPreservingTrainerWiring:
-    """Real agents evolve through every non-LLM trainer with the fixup active.
-
-    Function-preserving initialisation lives entirely inside :class:`Mutations`,
-    so no trainer needs wiring of its own; these runs check that each trainer
-    drives the operator end to end without crashing or corrupting a population.
-    They deliberately assert nothing about preservation itself -- that an
-    addition leaves the network's function unchanged is asserted per algorithm
-    family in ``tests/test_hpo/test_mutation.py``.
-    """
+    """Real agents evolve through every non-LLM trainer with the fixup active."""
 
     @staticmethod
     def assert_evolved(population, before) -> None:

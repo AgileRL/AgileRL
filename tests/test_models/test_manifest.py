@@ -1693,10 +1693,6 @@ class TestSimbaRecurrentConflict:
         assert manifest.algorithm.recurrent is False
 
 
-# Function-preserving additions decline wherever a normalisation layer sits
-# between the widened units and their activation, so these manifests switch it
-# off. They also hold the networks on ReLU, since deepening is only exact for
-# ReLU and Identity and an activation mutation would move them off it.
 _FUNC_PRESERVING_CONFIGS = [
     "ppo/ppo_func_preserving.yaml",
     "dqn/dqn_func_preserving.yaml",

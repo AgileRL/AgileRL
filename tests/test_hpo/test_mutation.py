@@ -2620,8 +2620,6 @@ class TestMutationsApplyMutation:
             assert wrapper.agent.hook_calls == 1
 
 
-# Architecture mutations preserve the function only where nothing normalises or
-# mixes the widened units, so these nets switch layer normalisation off.
 _FP_NET_CONFIG = {
     "latent_dim": 8,
     "min_latent_dim": 1,
@@ -2727,11 +2725,7 @@ def _policy_output(agent, observation):
 
 
 def _mutation_shift(agent, observation, seed=0):
-    """Return how far one architecture mutation moves the policy's output.
-
-    The policy's generator is pinned because cloning shares it, so two arms
-    would otherwise widen different layers by different amounts.
-    """
+    """Return how far one architecture mutation moves the policy's output."""
     policy = getattr(agent, agent.registry.policy())
     policy.rng = np.random.default_rng(seed)
     before = _policy_output(agent, observation)
@@ -2896,8 +2890,7 @@ class TestMutationsFunctionPreservingArchMutation:
         assert torch.count_nonzero(torch.autograd.grad(after.sum(), actions)[0]) > 0
 
 
-# DQN covers the off-policy family in ``TestMutationsFunctionPreservingArchMutation``;
-# these are the remaining single-agent families, whose trainers reach the same
+# These are the remaining single-agent families, whose trainers reach the architecture
 # operator and whose preservation is otherwise never asserted.
 _FP_SINGLE_AGENT_FAMILIES = {
     "bandit (NeuralUCB)": _fp_neural_ucb,
@@ -2971,11 +2964,6 @@ class TestMutationsFunctionPreservingWarnings:
         assert not [w for w in caught if "function-preserving" in str(w.message)]
 
     def test_a_decline_reaches_a_caller_that_escalates_warnings(self, monkeypatch):
-        """``-W error`` is a caller's choice, so the decline must propagate.
-
-        Every other warning the operator raises does, and a decline swallowed
-        into a log line would misreport it as a *failed* fixup.
-        """
         _pin_mutation_method(monkeypatch, "head_net.add_node")
         mutations = _fp_mutations()
 
@@ -2985,13 +2973,6 @@ class TestMutationsFunctionPreservingWarnings:
                 mutations.architecture_mutate(_dqn(head_config={"layer_norm": True}))
 
     def test_a_decline_that_never_reached_the_caller_warns_again(self, monkeypatch):
-        """Report-once must count reports made, not reports attempted.
-
-        A warning escalated to an error never reaches the caller, so recording
-        the reason as already-reported would silence that decline for the rest
-        of the run -- the exact indistinguishability the warning exists to
-        prevent.
-        """
         _pin_mutation_method(monkeypatch, "head_net.add_node")
         mutations = _fp_mutations()
 
@@ -3005,15 +2986,7 @@ class TestMutationsFunctionPreservingWarnings:
 
 
 def _latent_output(network, observation):
-    """Return a network's deterministic output, bypassing any sampling head.
-
-    Two layers of sampling have to be pinned. An ``EvolvableDistribution`` head
-    samples an action, so the wrapped module is called instead. MADDPG's
-    ``GumbelSoftmax`` *output activation* then draws fresh noise on every
-    forward whatever the module's mode, so the generator is forked and reseeded
-    around the call -- without it two forwards of the same network disagree and
-    the comparison means nothing.
-    """
+    """Return a network's deterministic output, bypassing any sampling head."""
     network.eval()
     head = getattr(network.head_net, "wrapped", network.head_net)
     with torch.random.fork_rng(devices=[]):
@@ -3072,14 +3045,7 @@ class TestMutationsFunctionPreservingMultiAgent:
             )
 
     def test_every_critic_keeps_its_output(self, monkeypatch):
-        """The critic is preserved too, not just the policy it scores.
-
-        A multi-agent off-policy critic reads the *joint* observation, so
-        AgileRL gives it an ``EvolvableMultiInput`` encoder even when every
-        sub-agent observes a plain ``Box``. Preserving only the actor would
-        leave the policy intact while the Q-function it is about to be trained
-        against jumped.
-        """
+        """The critic is preserved too, not just the policy it scores."""
         _pin_mutation_method(monkeypatch, "agent_0.add_latent_node")
         monkeypatch.setattr(func_preservation, "FP_NOISE_SCALE", 0.0)
         agent = _fp_maddpg()
@@ -3098,11 +3064,7 @@ class TestMutationsFunctionPreservingMultiAgent:
 
 
 def _simba_dqn():
-    """Return a DQN whose encoder is a SimBa residual trunk.
-
-    The encoder config is replaced rather than merged: ``EvolvableSimBa`` takes
-    neither ``layer_norm`` nor ``min_mlp_nodes``.
-    """
+    """Return a DQN whose encoder is a SimBa residual trunk."""
     net_config = _fp_net_config(simba=True)
     net_config["encoder_config"] = {"hidden_size": 8, "num_blocks": 1}
     return DQN(
@@ -3114,11 +3076,7 @@ def _simba_dqn():
 
 
 def _dict_dqn(dict_space):
-    """Return a DQN whose encoder fuses a dict observation.
-
-    A dict space builds an ``EvolvableMultiInput``, which takes none of the MLP
-    encoder keys, so only the head is configured.
-    """
+    """Return a DQN whose encoder fuses a dict observation."""
     net_config = _fp_net_config()
     del net_config["encoder_config"]
     return DQN(
@@ -3133,20 +3091,12 @@ class TestMutationsFunctionPreservingLatentEncoders:
     """Growing the latent is preserved whatever the encoder is built from.
 
     A latent widening only rewrites the head's new input columns, so the
-    encoder's interior -- a recurrent core, a residual trunk, a multi-input
-    fusion -- has no say in whether it can be preserved. Each of these encoders
-    also rules out widening a layer *inside* it, which is a different mutation
-    and is still declined.
+    encoder's interior has no say in whether it can be preserved.
     """
 
     @staticmethod
     def _latent(network, observation):
-        """Return the head's deterministic output for a fixed observation.
-
-        The encoder is called directly and the head unwrapped, so neither a
-        stochastic policy head nor a recurrent encoder's returned state gets in
-        the way of comparing the same function before and after.
-        """
+        """Return the head's deterministic output for a fixed observation."""
         network.eval()
         kwargs = {}
         if getattr(network, "recurrent", False):
@@ -3155,7 +3105,6 @@ class TestMutationsFunctionPreservingLatentEncoders:
                 if isinstance(observation, dict)
                 else observation
             )
-            # The architecture marks the batch axis with a sentinel type.
             kwargs["hidden_state"] = {
                 f"{network.encoder.name}_{key}": torch.zeros(
                     *[dim if isinstance(dim, int) else batch.shape[0] for dim in shape]
@@ -3164,7 +3113,7 @@ class TestMutationsFunctionPreservingLatentEncoders:
             }
         with torch.no_grad():
             latent = network.encoder(observation, **kwargs)
-            if isinstance(latent, tuple):  # a recurrent encoder also returns state
+            if isinstance(latent, tuple):
                 latent = latent[0]
             head = getattr(network.head_net, "wrapped", network.head_net)
             return head(latent).clone()
@@ -3271,20 +3220,11 @@ def _cnn_dqn():
 
 
 class TestMutationsFunctionPreservingConvolutionalEncoder:
-    """A convolutional encoder is preserved through the whole operator.
-
-    The tensor surgery is unit-tested on a bare :class:`EvolvableCNN`; these run
-    it where the two convolutional boundaries actually arise, on the policy of a
-    real agent driven by :meth:`Mutations.architecture_mutate`.
-    """
+    """A convolutional encoder is preserved through the whole operator."""
 
     @staticmethod
     def widen_convolutions(steps=6):
-        """Widen the encoder repeatedly, reporting the shift and layers grown.
-
-        ``add_channel`` picks its layer from the module's own generator, so the
-        boundary under test is whichever one it lands on; repeating covers both.
-        """
+        """Widen the encoder repeatedly, reporting the shift and layers grown."""
         agent = _cnn_dqn()
         observation = torch.rand(4, 3, 16, 16)
         mutations = _fp_mutations()
@@ -3315,12 +3255,7 @@ class TestMutationsFunctionPreservingConvolutionalEncoder:
         assert shift <= 1e-6
 
     def test_widening_reaches_both_convolutional_boundaries(self, monkeypatch):
-        """Both the conv-to-conv and the conv-to-flatten-to-dense fan-outs are hit.
-
-        Without this the preservation test above could pass having only ever
-        widened the first convolution, leaving the flatten boundary — where a
-        unit owns a whole ``H * W`` block of the consumer's columns — untouched.
-        """
+        """Both the conv-to-conv and the conv-to-flatten-to-dense fan-outs are hit."""
         _pin_mutation_method(monkeypatch, "encoder.add_channel")
 
         _shift, grown = self.widen_convolutions()
@@ -3342,13 +3277,7 @@ class TestMutationsFunctionPreservingConvolutionalEncoder:
 
 
 class TestMutationsFunctionPreservingDistributionHead:
-    """A distribution-wrapped head is preserved like a plain one.
-
-    PPO and IPPO hide the real MLP behind an ``EvolvableDistribution``, so every
-    stage of the surgery has to unwrap ``.wrapped`` before it finds any layers.
-    The multi-agent case covers widening; deepening is only reachable here,
-    because the head is the one sub-module that takes LAYER mutations.
-    """
+    """A distribution-wrapped head is preserved like a plain one."""
 
     @staticmethod
     def ppo():
@@ -3422,8 +3351,6 @@ class TestFunctionPreservingRemovalsUnchanged:
             "head_net.remove_node",
             "encoder.remove_node",
             "remove_latent_node",
-            # The one removal with a fallback path, mirroring the add_layer ->
-            # add_node fallback that the additions cover.
             "head_net.remove_layer",
         ],
     )

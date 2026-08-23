@@ -174,12 +174,10 @@ When an architecture mutation widens or deepens a network, the trained weights a
 new capacity is initialised randomly, so the network's output changes the moment it is added. The agent
 is then evaluated as a *different* policy from the one that earned its place in the population, its
 fitness drops, and selection usually discards it before the extra capacity has been trained into
-anything useful. That variance is why architecture mutations are the most disruptive operator in the
-loop, and why layer mutations are disabled on the encoder by default.
+anything useful.
 
-AgileRL initialises additions to be **function-preserving** wherever the architecture allows it,
-following Chen et al., `"Net2Net: Accelerating Learning via Knowledge Transfer"
-<https://arxiv.org/abs/1511.05641>`_. Two mechanisms cover the additive mutations:
+AgileRL initialises additions to be **function-preserving** wherever the architecture allows it.
+Two mechanisms cover the additive mutations:
 
   * **Widening** (``add_node``, ``add_channel``, ``add_latent_node``) keeps the new units' incoming
     weights and fades the *outgoing* weights that carry them into the next layer. The next layer's
@@ -189,66 +187,39 @@ following Chen et al., `"Net2Net: Accelerating Learning via Knowledge Transfer"
     network unchanged for ReLU and Identity activations.
 
 This makes architecture mutations markedly **less aggressive**. A widened or deepened agent keeps the
-fitness it had, so it survives selection on its merits rather than on the accident of its new weights,
-and the population can accumulate depth and width over many generations instead of repeatedly
-discarding it.
+fitness it had, so it survives selection on its merits and can better explore the architecture search
+space during training.
 
 When it applies
 ^^^^^^^^^^^^^^^
 
 There is nothing to configure: preservation is applied automatically, per mutation, whenever the
-architecture supports it. Widening stands down when
+architecture supports it. Widening stands down when:
 
-  * a **normalisation** layer (``LayerNorm``, ``BatchNorm`` or ``GroupNorm``) sits between the widened
-    units and their activation, since it re-scales them using statistics pooled over the whole layer and
-    so moves every existing unit however small the new fan-out is;
+  * a **normalisation** layer sits between the widened units and their activation, since it re-scales
+    them using statistics pooled over the whole layer and so moves every existing unit however small
+    the new fan-out is;
   * the activation **mixes units together** (``Softmax``, ``LogSoftmax``, ``Softmin`` or
     ``GumbelSoftmax``);
   * the widened layer sits **inside** a **recurrent** core, a **multi-input** encoder, a **residual**
-    network or a **SimBa** block, none of which expose a single consuming layer whose columns can be
-    faded.
+    network or a **SimBa** block.
 
-Deepening additionally requires an **MLP** stack whose activation is **ReLU** or **Identity**.
+Deepening additionally requires an **MLP** layer whose activation is **ReLU** or **Identity**.
 
-Growing the **latent** is the exception to that last bullet. It is surgery on the head alone -- the
-encoder's new output rows are appended at the tail, so every existing latent coordinate survives, and
-only the head's new input columns are rewritten. What the encoder is built from therefore does not
-matter, and ``add_latent_node`` is preserved for recurrent, residual, SimBa and multi-input encoders
-alike; only a normalisation or unit-mixing activation on the encoder's *output* stands it down. The one
-case that cannot be preserved is a multi-input encoder asked to widen **its own** latent rather than the
-network's, which resizes every sub-encoder's output and so interleaves the new columns through the
-fusion layer's input instead of appending them.
+Growing the **latent** is the exception to the third point as the function-preserving surgery happens
+on the head alone. Therefore, ``add_latent_node`` is preserved for recurrent, residual, SimBa and
+multi-input encoders; only a normalisation or unit-mixing activation on the encoder's *output* stands
+it down.
 
 Whenever preservation stands down, the mutation simply falls back to AgileRL's original behaviour and the
-new capacity is initialised randomly, exactly as before. A warning is emitted once per reason so a
-configuration that never gets preservation is never silent about it. **Removals are unchanged**: only
-additions are preserved, so the two regimes differ purely in how capacity is added.
+new capacity is initialised randomly. A warning is emitted once per reason so a configuration that never
+gets preservation is not silent.
 
 .. note::
-    The default network configurations set ``layer_norm: true``, which blocks preservation. Set
-    ``layer_norm: false`` on the ``encoder_config`` and ``head_config`` blocks to enable it; the shipped
-    ``*_func_preserving.yaml`` manifests do exactly that. Setting it on an MLP ``encoder_config`` also
-    clears the encoder's output normalisation, which is what ``add_latent_node`` needs.
-
-.. note::
-    ``RainbowDQN`` forces normalisation on its encoder and drops ``layer_norm`` from its head
-    configuration, so its additions are never preserved.
-
-.. note::
-    Widening applies a small symmetry-breaking perturbation to the new outgoing weights, without which
-    the new units would share a single gradient and could never differentiate. Preservation is therefore
-    near-exact rather than bit-exact. For noisy layers the guarantee is an evaluation-mode one: a
-    rebuilt ``NoisyLinear`` resamples its noise buffers, which moves the training-mode output of every
+    Widening applies a small perturbation to the new outgoing weights. This lets gradients flow faster to
+    the new units. Preservation is therefore near-exact. For noisy layers the guarantee is an evaluation-mode
+    one: a rebuilt ``NoisyLinear`` resamples its noise buffers,  which moves the training-mode output of every
     unit, new or not.
-
-.. note::
-    The ReLU-or-Identity requirement is on the activation the network carries **when the layer is
-    inserted**. An activation mutation sampled in a later generation is an ordinary unpreserved mutation,
-    judged by selection like any other, and it never catches the inserted layer as an identity: mutation
-    closes a training cycle, so the layer trains before another mutation can reach it. Running
-    ``act_mut`` alongside ``new_layer`` is therefore supported: it only means that depth accumulated
-    cheaply under ReLU is composed through whatever activation replaces it, and that later deepenings
-    decline while the network sits on a non-ReLU activation.
 
 RL Hyperparameter Mutations
 ---------------------------

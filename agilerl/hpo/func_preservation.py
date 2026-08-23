@@ -37,7 +37,7 @@ from agilerl.modules.custom_components import (
     SimbaResidualBlock,
 )
 
-# Symmetry-breaking noise applied to a new unit's outgoing weights, as a
+# Noise applied to a new unit's outgoing weights, as a
 # fraction of the consumer layer's existing column scale.
 FP_NOISE_SCALE = 0.01
 
@@ -521,7 +521,7 @@ def _fade_new_columns(
 ) -> None:
     """Fade the columns through which new units reach a consuming layer.
 
-    A small positive scale breaks the symmetry between new units and lets
+    A small positive scale lets the new units learn more rapidly since
     gradients flow faster at a small cost in exactness. A noisy layer's
     stochastic scales are always zeroed, so the new units add no exploration
     noise either.
@@ -612,7 +612,7 @@ def preserve_added_nodes(
     :type hidden_layer: int
     :param old_width: The layer's width before the mutation.
     :type old_width: int
-    :param rng: Generator the symmetry-breaking noise is drawn from.
+    :param rng: Generator the fan-out noise is drawn from.
     :type rng: np.random.Generator
     :param noise_scale: Noise size, relative to the existing column scale.
     :type noise_scale: float
@@ -696,7 +696,7 @@ def preserve_added_latent(
     :type network: nn.Module
     :param old_latent: Latent width before the mutation.
     :type old_latent: int
-    :param rng: Generator the symmetry-breaking noise is drawn from.
+    :param rng: Generator the fan-out noise is drawn from.
     :type rng: np.random.Generator
     :param noise_scale: Noise size, relative to the existing column scale.
     :type noise_scale: float

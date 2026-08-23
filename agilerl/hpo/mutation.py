@@ -346,8 +346,6 @@ class Mutations:
         self.device = device
         self.accelerator = accelerator
 
-        # Kept apart from self.rng so drawing symmetry-breaking noise never
-        # shifts the stream that samples mutations for later agents.
         self._fp_rng = np.random.default_rng(rand_seed)
         self._warned_fp: set[str] = set()
         self._pre_training_mut = False
@@ -710,10 +708,6 @@ class Mutations:
     ) -> list[int] | None:
         """Record the widths an architecture mutation is about to change.
 
-        Taken before the mutation runs, because
-        :meth:`EvolvableModule.preserve_parameters` appends new units at the
-        tail and the fixup needs to know where the old ones ended.
-
         :param network: Network about to be mutated.
         :type network: EvolvableModule
         :param mut_method: The mutation method about to be applied.
@@ -742,10 +736,6 @@ class Mutations:
     ) -> None:
         """Initialise an addition's new capacity so the network is unchanged.
 
-        Keyed on the mutation that was *applied* rather than the one that was
-        sampled, since ``add_layer`` and ``remove_layer`` fall back to widening
-        when they hit their depth limits.
-
         A fixup that raises leaves the network exactly as the original operator
         built it, so a failure costs the preservation and nothing else.
 
@@ -771,13 +761,10 @@ class Mutations:
 
         try:
             reason = self._fp_apply(target, base, mut_dict, before)
-        except Exception as exc:  # leave the original operator's result in place
+        except Exception as exc:
             logger.warning("Function-preserving fixup skipped for a network: %s", exc)
             return
 
-        # Warned outside the guard above: escalating warnings to errors is a
-        # deliberate caller choice, and swallowing that here would report a
-        # declined mutation as a failed fixup.
         self._fp_warn_declined(reason)
 
     def _fp_apply(
@@ -787,11 +774,7 @@ class Mutations:
         mut_dict: MutationReturn,
         before: list[int],
     ) -> str | None:
-        """Run the fixup that matches an addition, unless something blocks it.
-
-        A blocker only rules on structure, so a fixup it waves through can still
-        find nothing to write. Reporting that as a decline keeps a silently
-        unpreserved addition from being indistinguishable from a preserved one.
+        """If possible, apply a function-preserving architecture mutation.
 
         :param target: The module the mutation acted on.
         :type target: nn.Module
@@ -826,15 +809,9 @@ class Mutations:
             written = func_preservation.preserve_added_layer(target)
             return None if written else "not_written"
 
-        # A layer mutation reports no index at all, and the declared
-        # ``MutationReturn`` union also admits a per-sub-agent mapping, so
-        # narrow to the plain integer the node mutations document rather than
-        # trusting the key to be present and scalar.
         reported = mut_dict.get("hidden_layer")
         hidden_layer = reported if isinstance(reported, int) else None
 
-        # A structural exclusion outranks a missing index, so the blocker runs
-        # first and gets to name the reason.
         reason = func_preservation.node_addition_blocker(target, hidden_layer)
         if reason is not None:
             return reason
@@ -866,9 +843,6 @@ class Mutations:
         if reason is None or self._pre_training_mut or reason in self._warned_fp:
             return
 
-        # Recorded only once the warning has actually been delivered: a caller
-        # running with warnings escalated to errors never sees this one, and
-        # marking it reported would silence the reason for the rest of the run.
         warnings.warn(
             "Architecture mutation fell back from function-preserving "
             f"initialisation: {func_preservation.DECLINE_REASONS[reason]}. The "
