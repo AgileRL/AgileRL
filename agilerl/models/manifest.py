@@ -22,6 +22,7 @@ from pydantic import (
 from typing_extensions import Self
 
 from agilerl import HAS_ARENA_DEPENDENCIES, HAS_LLM_DEPENDENCIES
+from agilerl.hpo.multi_frequency import MultiFrequencySelection
 from agilerl.models.algo import (
     ALGO_REGISTRY,
     AlgoSpec,
@@ -344,8 +345,6 @@ class TrainingManifest(BaseModel):
         if not isinstance(spec, MultiFrequencySelectionSpec):
             return self
 
-        from agilerl.hpo.multi_frequency import MultiFrequencySelection
-
         if "pop_size" not in self.training.model_fields_set:
             msg = "pop_size is required in the training block."
             raise ValueError(msg)
@@ -490,6 +489,7 @@ class TrainingManifest(BaseModel):
         :returns: A validated :class:`TrainingManifest`.
         :rtype: TrainingManifest
         """
+        # circular import with agilerl.utils.trainer_utils
         from agilerl.utils.trainer_utils import resolve_deprecated_selection_kwargs
 
         selection_strategy = resolve_deprecated_selection_kwargs(
@@ -572,6 +572,7 @@ class TrainingManifest(BaseModel):
             )
             raise ImportError(msg)
 
+        # optional extra: arena
         from agilerl.arena.models import TrainingManifest as ArenaManifest
 
         if isinstance(manifest, TrainingManifest):

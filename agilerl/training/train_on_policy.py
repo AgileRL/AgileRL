@@ -15,6 +15,7 @@ from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.population import Population
 from agilerl.protocols import SelectionStrategyProtocol
+from agilerl.rollouts import collect_rollouts, collect_rollouts_recurrent
 from agilerl.typing import InitHyperparams, RolloutReturn
 from agilerl.utils.algo_utils import get_num_envs
 from agilerl.utils.utils import (
@@ -229,11 +230,9 @@ def train_on_policy(
             n_steps = -(agent.learn_step // -num_envs)
             if active_collect is None:
                 if getattr(agent, "recurrent", False):
-                    from agilerl.rollouts import (
-                        collect_rollouts_recurrent as active_collect,
-                    )
+                    active_collect = collect_rollouts_recurrent
                 else:
-                    from agilerl.rollouts import collect_rollouts as active_collect
+                    active_collect = collect_rollouts
 
             # Collect rollouts and learn until evo_steps is reached
             last_obs, last_done, last_scores, last_info = None, None, None, None

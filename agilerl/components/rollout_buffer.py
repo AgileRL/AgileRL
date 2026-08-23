@@ -615,7 +615,7 @@ class RolloutBuffer:
 
         # Reshape to flatten the num_envs dimension into the first batch dimension
         # New batch_size will be [buffer_size * num_envs]
-        # .view(-1) is crucial for not creating a copy if possible
+        # .view(-1) avoids a copy when the layout is contiguous
         flattened_td: TensorDict = valid_buffer_data_view.view(-1)
 
         if batch_size is not None:

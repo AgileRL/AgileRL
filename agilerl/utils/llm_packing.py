@@ -186,7 +186,7 @@ def unpack_logprobs(
 
     ``packed_logprobs`` is the ``(N - 1,)`` fused next-token sequence over the
     flattened row. For each sequence *b* of real length ``L_b``, its ``L_b - 1``
-    within-sequence predictions land at columns ``0 .. L_b - 2`` of row *b*; the
+    within-sequence predictions are written to columns ``0 .. L_b - 2`` of row *b*; the
     cross-segment boundary prediction is dropped and pad columns stay zero. See
     the module docstring for the shared scatter semantics.
 
@@ -218,7 +218,7 @@ def unpack_values(
     The value-head analogue of :func:`unpack_logprobs`. A critic value is a
     per-position scalar (not a next-token prediction), so unlike logprobs there
     is no cross-segment boundary to drop — every real token carries its own
-    value. Each sequence *b* keeps its first ``min(L_b, T-1)`` values, landing
+    value. Each sequence *b* keeps its first ``min(L_b, T-1)`` values, stored
     left-aligned at columns ``0 .. min(L_b, T-1) - 1`` of row *b*; the clamp
     mirrors the padded path's ``value[:, :-1]`` (which never holds more than
     ``T - 1`` columns and drops the final position's value when a row is

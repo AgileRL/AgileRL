@@ -374,7 +374,7 @@ class EvolvableModule(nn.Module, metaclass=ModuleMeta):
             )
 
     def forward(self, *args: Any, **kwargs: Any) -> Any:  # noqa: ANN401 -- base signature; subclasses accept and return arbitrary tensors
-        msg = "forward method must be implemented in order to use the evolvable module."
+        msg = "forward method must be implemented to use the evolvable module."
         raise NotImplementedError(
             msg,
         )
@@ -407,7 +407,7 @@ class EvolvableModule(nn.Module, metaclass=ModuleMeta):
         :param output: Whether to set the activation function for the output layer.
         :type output: bool
         """
-        msg = "change_activation method must be implemented in order to set the activation function."
+        msg = "change_activation method must be implemented to set the activation function."
         raise NotImplementedError(
             msg,
         )

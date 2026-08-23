@@ -376,7 +376,8 @@ def test_generated_manifest_validates(algo_name: str, tmp_path) -> None:
 
 
 def test_llm_env_type_str() -> None:
-    assert str(LLMEnvType.REASONING) == "reasoning"
+    assert str(LLMEnvType.ROLLOUT) == "rollout"
+    assert str(LLMEnvType.DATASET) == "dataset"
 
 
 def test_training_spec_rejects_invalid_eval_steps() -> None:

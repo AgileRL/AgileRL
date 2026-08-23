@@ -767,14 +767,15 @@ class Population(Generic[AgentT]):
     def _collect_additional_metrics(self) -> list[dict[str, float]]:
         """Collect per-agent mean values for all registered additional metrics.
 
-        :returns: Per-agent mean values for all registered additional metrics.
-        :rtype: list[dict[str, float]]
+        Uses the union of names registered on each agent so metrics registered
+        during training (e.g. ``reward_*``, ``accuracy``) are reported.
         """
         result: list[dict[str, float]] = []
         for agent in self.agents:
             d: dict[str, float] = {}
             metrics = agent.metrics
-            for name in self.additional_metric_names:
+            names = list(metrics.additional_metrics)
+            for name in names:
                 if isinstance(metrics, MultiAgentMetrics):
                     for agent_id in metrics.agent_ids:
                         d[f"{name}/{agent_id}"] = metrics.get_mean(name, agent_id)

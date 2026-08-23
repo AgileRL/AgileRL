@@ -9,7 +9,7 @@ from importlib import import_module
 from importlib import util as importlib_util
 from pathlib import Path
 from types import ModuleType
-from typing import Any, TypeVar
+from typing import TYPE_CHECKING, Any, TypeVar
 
 import gymnasium as gym
 from gymnasium.vector import AsyncVectorEnv, SyncVectorEnv
@@ -17,6 +17,9 @@ from pettingzoo import ParallelEnv
 
 from agilerl.typing import WrapperSpec
 from agilerl.vector import AsyncPettingZooVecEnv
+
+if TYPE_CHECKING:
+    from openenv.core.rubrics.base import Rubric
 
 GymEnvType = AsyncVectorEnv | SyncVectorEnv
 PzEnvType = ParallelEnv | AsyncPettingZooVecEnv
@@ -43,50 +46,73 @@ def make_conversation_template(prompt_template: dict[str, str]) -> list[dict[str
     ]
 
 
-def get_reward_fn(
-    reward_fn_name: str,
-    file_path: str,
-) -> Callable[..., float]:
-    """Get the reward function for the environment.
+def get_rubric_factory(rubric_name: str, file_path: str) -> Callable[[], Rubric]:
+    """Load a rubric symbol once and return a factory building rubrics from it.
 
-    :param reward_fn_name: The name of the reward function to get
-    :type reward_fn_name: str
-    :param file_path: The absolute path to the reward function file
-    :type file_path: str
-    :return: The reward function
-    :rtype: Callable
+    The module is executed once, here, so its import-time cost and side effects
+    are paid once however many rubrics the caller goes on to build. A ``Rubric``
+    subclass or a reward callable yields a fresh rubric per call, which is what
+    lets concurrently-stepped envs each own their scorer; a module-level
+    ``Rubric`` instance is the author's own single object and is returned as-is.
+
+    :param rubric_name: Name of the symbol in ``file_path``.
+    :param file_path: Path to the Python module defining the rubric or reward fn.
+    :returns: A zero-argument callable returning an OpenEnv ``Rubric``.
+    :rtype: Callable[[], Rubric]
+    :raises TypeError: If the symbol is not a Rubric, Rubric subclass, or callable.
     """
     file_path_obj = Path(file_path)
-    if file_path_obj.exists():
-        try:
-            # Get the absolute path to ensure proper module loading
-            abs_file_path = file_path_obj.resolve()
-
-            # Extract module name from the file path
-            # Remove .py extension and convert path separators to dots for module name
-            module_name = file_path_obj.stem
-
-            # Use spec_from_file_location to load from the specific file path
-            spec = importlib_util.spec_from_file_location(
-                module_name,
-                str(abs_file_path),
-            )
-
-            if spec is None or spec.loader is None:
-                msg = f"Could not create spec for {abs_file_path}"
-                raise ValueError(msg)
-
-            reward_module = importlib_util.module_from_spec(spec)
-            spec.loader.exec_module(reward_module)
-            return getattr(reward_module, reward_fn_name)
-        except Exception as e:
-            msg = f"Error importing reward function {reward_fn_name} from {file_path}: {e}"
-            raise ValueError(
-                msg,
-            ) from e
-    else:
+    if not file_path_obj.exists():
         msg = f"{file_path} not found"
         raise ValueError(msg)
+    try:
+        abs_file_path = file_path_obj.resolve()
+        module_name = file_path_obj.stem
+        spec = importlib_util.spec_from_file_location(
+            module_name,
+            str(abs_file_path),
+        )
+        if spec is None or spec.loader is None:
+            msg = f"Could not create spec for {abs_file_path}"
+            raise ValueError(msg)
+        rubric_module = importlib_util.module_from_spec(spec)
+        spec.loader.exec_module(rubric_module)
+        obj = getattr(rubric_module, rubric_name)
+    except Exception as e:
+        msg = f"Error importing rubric {rubric_name} from {file_path}: {e}"
+        raise ValueError(msg) from e
+
+    from openenv.core.rubrics.base import Rubric  # optional extra: llm
+
+    from agilerl.llm_envs.rubrics import reward_fn_to_rubric  # optional extra: llm
+
+    if isinstance(obj, Rubric):
+        return lambda: obj
+    if isinstance(obj, type) and issubclass(obj, Rubric):
+        return obj
+    if callable(obj):
+        return lambda: reward_fn_to_rubric(obj)
+    msg = (
+        f"{rubric_name!r} in {file_path} must be a Rubric instance, Rubric "
+        f"subclass, or (completion, answer, question) -> float callable, "
+        f"got {type(obj).__name__}."
+    )
+    raise TypeError(msg)
+
+
+def get_rubric(rubric_name: str, file_path: str) -> Rubric:
+    """Load one Rubric from a file, wrapping legacy reward callables.
+
+    Accepts a ``Rubric`` instance, a ``Rubric`` subclass (instantiated here), or a
+    ``(completion, answer, question) -> float`` callable (Arena / older manifests),
+    which is wrapped with :func:`~agilerl.llm_envs.rubrics.reward_fn_to_rubric`.
+
+    :param rubric_name: Name of the symbol in ``file_path``.
+    :param file_path: Path to the Python module defining the rubric or reward fn.
+    :returns: An OpenEnv ``Rubric`` instance.
+    :raises TypeError: If the symbol is not a Rubric, Rubric subclass, or callable.
+    """
+    return get_rubric_factory(rubric_name, file_path)()
 
 
 def escape_non_format_braces(
@@ -106,6 +132,9 @@ def escape_non_format_braces(
     if format_keys is None:
         format_keys = ["question", "answer"]
 
+    # Escape every brace, then restore the known placeholders. Escaping via
+    # regex instead would miss ``{}``, lone braces, and nested-brace JSON —
+    # all of which make ``str.format`` raise on real system prompts.
     escaped = template.replace("{", "{{").replace("}", "}}")
     for key in format_keys:
         escaped = escaped.replace(f"{{{{{key}}}}}", f"{{{key}}}")

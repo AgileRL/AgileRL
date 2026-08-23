@@ -363,7 +363,7 @@ def mark_expert_wrappers_as_zero3_leaves(model: nn.Module) -> int:
     count = sum(isinstance(m, wrapper_classes) for m in model.modules())
     if not count:
         return 0
-    from deepspeed.utils import set_z3_leaf_modules
+    from deepspeed.utils import set_z3_leaf_modules  # optional extra: llm
 
     set_z3_leaf_modules(model, list(wrapper_classes))
     return count

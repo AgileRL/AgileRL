@@ -327,7 +327,7 @@ class TestPPOInit:
         # Independent user-supplied networks cannot share an encoder.
         assert ppo.share_encoders is False
 
-        # get_action works (previously crashed with AttributeError).
+        # get_action succeeds.
         obs, _ = get_batch_states(obs_space, 1)
         action, _, _, _ = ppo.get_action(obs)
         assert action.shape[0] == ppo.num_envs

@@ -62,3 +62,7 @@ typecheck:
     uv sync --all-groups --extra all
     uv run pre-commit run arena-symlink --all-files
     uv run pre-commit run ty --all-files
+
+# This tree's .pre-commit-config.yaml (AgileRL/AgileRL git root).
+pre-commit *args:
+    uv run pre-commit run --all-files {{ args }}

@@ -57,6 +57,8 @@ class PPOSpec(RLAlgorithmSpec):
         :return: Training function
         :rtype: Callable[..., Any]
         """
-        from agilerl.training.train_on_policy import train_on_policy
+        from agilerl.training.train_on_policy import (  # circular import with agilerl.training
+            train_on_policy,
+        )
 
         return train_on_policy

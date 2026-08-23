@@ -13,13 +13,14 @@ if not HAS_LLM_DEPENDENCIES:
     raise ImportError("LLM dependencies are not installed.")
 
 import torch
+from agilerl.llm_envs import RolloutEnv
 from config_load import load_debug_config
 from llm_debug_utils import lora_config_from_dict
 from tiny_model import TinyDigitTokenizer, build_tiny_actor_network
 
 from agilerl.algorithms import GRPO, LLMPPO, LLMREINFORCE
-from agilerl.llm_envs import TokenObservationWrapper
-from agilerl.training.llm import finetune_llm_multiturn
+from agilerl.training.llm import rollout as train_llm
+from agilerl.training.llm import train_llm_rollout
 from agilerl.utils.llm_utils import create_llm_accelerator
 from agilerl.utils.probe_envs_llm import ConstantTargetEnv
 from agilerl.utils.utils import create_population
@@ -53,13 +54,13 @@ def evaluate_hit_rate(
                     padding_side="left",
                     return_attention_mask=True,
                 )
-                prompt_dict = {
+                observation = {
                     "input_ids": prompt_encoded["input_ids"],
                     "attention_mask": prompt_encoded["attention_mask"],
                 }
-                prompt_len = prompt_dict["input_ids"].shape[1]
-                completion_ids, _ = agent.get_action([prompt_dict], training=False)
-                full_ids = completion_ids[0]
+                prompt_len = observation["input_ids"].shape[1]
+                token_ids = agent.get_action([observation], training=False).token_ids
+                full_ids = token_ids[0]
                 gen_tokens = full_ids[0, prompt_len:]
                 gen_text = tokenizer.decode(
                     gen_tokens.tolist(), skip_special_tokens=True
@@ -123,29 +124,33 @@ def run_single_seed(cfg: dict, seed: int) -> tuple[float, float]:
         f"(sampled/greedy): {pre_rate:.3f}/{pre_g:.3f}"
     )
 
-    def env_factory() -> TokenObservationWrapper:
-        return TokenObservationWrapper(
+    def env_factory() -> RolloutEnv:
+        return RolloutEnv.local(
             ConstantTargetEnv(target_digit=target_token),
             tokenizer,
-            1,
-            tokenizer.pad_token_id,
+            max_turns=1,
             apply_chat_template=False,
             max_model_len=max_ctx,
             max_output_tokens=max_new,
         )
 
-    finetune_llm_multiturn(
-        pop=[agent],
-        max_turns=1,
-        init_hp=init_hp,
-        max_steps=int(dbg["max_sample_steps"]),
-        evaluation_interval=int(dbg["evaluation_interval"]),
-        wb=False,
-        save_elite=False,
-        verbose=True,
-        accelerator=accelerator,
-        env_factory=env_factory,
-    )
+    original_save = train_llm.save_llm_checkpoint
+    train_llm.save_llm_checkpoint = lambda *args, **kwargs: None
+    try:
+        train_llm_rollout(
+            pop=[agent],
+            max_turns=1,
+            init_hp=init_hp,
+            max_steps=int(dbg["max_sample_steps"]),
+            evaluation_interval=int(dbg["evaluation_interval"]),
+            wb=False,
+            save_elite=False,
+            verbose=True,
+            accelerator=accelerator,
+            env_factory=env_factory,
+        )
+    finally:
+        train_llm.save_llm_checkpoint = original_save
 
     post_rate = evaluate_hit_rate(
         agent, tokenizer, target_token, eval_eps, greedy=False

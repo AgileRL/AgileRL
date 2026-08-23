@@ -182,7 +182,7 @@ class TestStrippedTower:
             r"\(called as a forward path\)",
         ) as exc:
             tower(torch.randn(1, 4))
-        # The error tells the user which knob restores the towers.
+        # The error tells the user which setting restores the towers.
         assert "strip_multimodal_towers=False" in str(exc.value)
 
     def test_getattr_raises_attribute_error_with_name(self):
@@ -297,7 +297,7 @@ class TestLoraKeepResident:
     def test_neutralizes_reset_lora_and_counts_layers(self):
         internal = self._internal()
         assert patch_vllm_lora_keep_resident(_wrap_llm(internal)) == 2
-        # A no-LoRA batch calling reset_lora no longer wipes the adapter slot.
+        # A no-LoRA batch calling reset_lora leaves the adapter slot.
         internal.q_proj.reset_lora(0)
         assert torch.equal(internal.q_proj.lora_b_stacked[0], torch.ones(1, 1, 4, 2))
         assert internal.q_proj._agilerl_lora_resident is True
