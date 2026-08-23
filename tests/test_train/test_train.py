@@ -46,7 +46,7 @@ from agilerl.components.replay_buffer import (
     PrioritizedReplayBuffer,
     ReplayBuffer,
 )
-from agilerl.hpo import function_preserving
+from agilerl.hpo import func_preservation
 from agilerl.hpo.multi_frequency import MultiFrequencySelection
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
@@ -5828,12 +5828,6 @@ _ARCH_FAMILY_CASES = {
 }
 
 
-# No family has anything the fixup declines: every net config below is
-# unnormalised and ReLU, and MADDPG's EvolvableMultiInput critic encoder is no
-# obstacle to a latent widening, which is surgery on the head alone.
-_FP_EXPECTED_DECLINES: dict[str, set[str]] = {}
-
-
 def _fp_declines(recorded) -> set:
     """Return the reason keys the fixup stood down on, from recorded warnings.
 
@@ -5844,7 +5838,7 @@ def _fp_declines(recorded) -> set:
     messages = [str(warning.message) for warning in recorded]
     return {
         reason
-        for reason, prose in function_preserving.DECLINE_REASONS.items()
+        for reason, prose in func_preservation.DECLINE_REASONS.items()
         if any(f"initialisation: {prose}." in message for message in messages)
     }
 
@@ -5934,7 +5928,7 @@ class TestFunctionPreservingCrossFamilyEvolution:
         _, build_population = _ARCH_FAMILY_CASES[family]
         population = build_population()
 
-        with _no_unexpected_fp_fallback(_FP_EXPECTED_DECLINES.get(family, frozenset())):
+        with _no_unexpected_fp_fallback():
             _population, applied = self.evolve(
                 population,
                 TournamentSelection(

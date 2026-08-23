@@ -22,7 +22,7 @@ from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
 
 if HAS_LLM_DEPENDENCIES:
     from peft import LoraConfig
-from agilerl.hpo import function_preserving
+from agilerl.hpo import func_preservation
 from agilerl.hpo.mutation import (
     MutationError,
     Mutations,
@@ -2753,7 +2753,7 @@ class TestMutationsFunctionPreservingArchMutation:
     )
     def test_an_addition_keeps_the_policy_output(self, monkeypatch, method):
         _pin_mutation_method(monkeypatch, method)
-        monkeypatch.setattr(function_preserving, "FP_NOISE_SCALE", 0.0)
+        monkeypatch.setattr(func_preservation, "FP_NOISE_SCALE", 0.0)
         agent = _dqn()
         observation = torch.randn(4, 4)
         before = _policy_output(agent, observation)
@@ -2815,7 +2815,7 @@ class TestMutationsFunctionPreservingArchMutation:
 
     def test_a_wrapped_agent_is_preserved(self, monkeypatch):
         _pin_mutation_method(monkeypatch, "head_net.add_node")
-        monkeypatch.setattr(function_preserving, "FP_NOISE_SCALE", 0.0)
+        monkeypatch.setattr(func_preservation, "FP_NOISE_SCALE", 0.0)
         agent = RSNorm(_dqn())
         observation = torch.randn(4, 4)
         before = _policy_output(agent.agent, observation)
@@ -2830,7 +2830,7 @@ class TestMutationsFunctionPreservingArchMutation:
         self, monkeypatch
     ):
         _pin_mutation_method(monkeypatch, "head_net.add_layer")
-        monkeypatch.setattr(function_preserving, "FP_NOISE_SCALE", 0.0)
+        monkeypatch.setattr(func_preservation, "FP_NOISE_SCALE", 0.0)
         agent = _dqn(
             head_config={
                 "hidden_size": [8, 8],
@@ -2876,7 +2876,7 @@ class TestMutationsFunctionPreservingArchMutation:
 
     def test_a_widened_latent_keeps_a_continuous_critic_intact(self, monkeypatch):
         _pin_mutation_method(monkeypatch, "add_latent_node")
-        monkeypatch.setattr(function_preserving, "FP_NOISE_SCALE", 0.0)
+        monkeypatch.setattr(func_preservation, "FP_NOISE_SCALE", 0.0)
         agent = DDPG(
             generate_random_box_space((4,)),
             generate_random_box_space((2,), low=-1, high=1),
@@ -2922,7 +2922,7 @@ class TestMutationsFunctionPreservingSingleAgentFamilies:
     )
     def test_an_addition_keeps_the_policy_output(self, monkeypatch, family, method):
         _pin_mutation_method(monkeypatch, method)
-        monkeypatch.setattr(function_preserving, "FP_NOISE_SCALE", 0.0)
+        monkeypatch.setattr(func_preservation, "FP_NOISE_SCALE", 0.0)
         agent = _FP_SINGLE_AGENT_FAMILIES[family]()
         observation = torch.randn(4, 4)
         before = _policy_output(agent, observation)
@@ -3056,7 +3056,7 @@ class TestMutationsFunctionPreservingMultiAgent:
     def test_every_sub_policy_keeps_its_output(self, monkeypatch, family, method):
         build_agent, lead_agent = _FP_MULTI_AGENT_FAMILIES[family]
         _pin_mutation_method(monkeypatch, f"{lead_agent}.{method}")
-        monkeypatch.setattr(function_preserving, "FP_NOISE_SCALE", 0.0)
+        monkeypatch.setattr(func_preservation, "FP_NOISE_SCALE", 0.0)
         agent = build_agent()
         observation = torch.randn(4, 4)
         before = {
@@ -3081,7 +3081,7 @@ class TestMutationsFunctionPreservingMultiAgent:
         against jumped.
         """
         _pin_mutation_method(monkeypatch, "agent_0.add_latent_node")
-        monkeypatch.setattr(function_preserving, "FP_NOISE_SCALE", 0.0)
+        monkeypatch.setattr(func_preservation, "FP_NOISE_SCALE", 0.0)
         agent = _fp_maddpg()
         inputs = {key: _critic_inputs(critic) for key, critic in agent.critics.items()}
         before = {
@@ -3172,7 +3172,7 @@ class TestMutationsFunctionPreservingLatentEncoders:
     @pytest.mark.parametrize("encoder", ["simba", "recurrent", "multi_input"])
     def test_the_policy_output_survives(self, monkeypatch, dict_space, encoder):
         _pin_mutation_method(monkeypatch, "add_latent_node")
-        monkeypatch.setattr(function_preserving, "FP_NOISE_SCALE", 0.0)
+        monkeypatch.setattr(func_preservation, "FP_NOISE_SCALE", 0.0)
         agent, observation = {
             "simba": lambda: (_simba_dqn(), torch.randn(4, 4)),
             "recurrent": lambda: (_recurrent_ppo(), torch.randn(4, 2, 4)),
@@ -3225,7 +3225,7 @@ class TestMutationsFunctionPreservingSharedEncoders:
 
     def test_the_borrowing_critic_keeps_its_output(self, monkeypatch):
         _pin_mutation_method(monkeypatch, "add_latent_node")
-        monkeypatch.setattr(function_preserving, "FP_NOISE_SCALE", 0.0)
+        monkeypatch.setattr(func_preservation, "FP_NOISE_SCALE", 0.0)
         agent = self.ppo()
         observation = torch.randn(4, 4)
         agent.critic.eval()
@@ -3308,7 +3308,7 @@ class TestMutationsFunctionPreservingConvolutionalEncoder:
 
     def test_a_widened_convolution_keeps_the_policy_output(self, monkeypatch):
         _pin_mutation_method(monkeypatch, "encoder.add_channel")
-        monkeypatch.setattr(function_preserving, "FP_NOISE_SCALE", 0.0)
+        monkeypatch.setattr(func_preservation, "FP_NOISE_SCALE", 0.0)
 
         shift, _grown = self.widen_convolutions()
 
@@ -3329,7 +3329,7 @@ class TestMutationsFunctionPreservingConvolutionalEncoder:
 
     def test_a_widened_latent_keeps_the_policy_output(self, monkeypatch):
         _pin_mutation_method(monkeypatch, "add_latent_node")
-        monkeypatch.setattr(function_preserving, "FP_NOISE_SCALE", 0.0)
+        monkeypatch.setattr(func_preservation, "FP_NOISE_SCALE", 0.0)
         agent = _cnn_dqn()
         observation = torch.rand(4, 3, 16, 16)
         before = _policy_output(agent, observation)
@@ -3361,7 +3361,7 @@ class TestMutationsFunctionPreservingDistributionHead:
 
     def test_a_deeper_head_keeps_the_policy_output(self, monkeypatch):
         _pin_mutation_method(monkeypatch, "head_net.add_layer")
-        monkeypatch.setattr(function_preserving, "FP_NOISE_SCALE", 0.0)
+        monkeypatch.setattr(func_preservation, "FP_NOISE_SCALE", 0.0)
         agent = self.ppo()
         observation = torch.randn(4, 4)
         before = _latent_output(agent.actor, observation)
@@ -3402,7 +3402,7 @@ class TestMutationsFunctionPreservingDeterminism:
         mutations = _fp_mutations(seed=42)
         agent = _dqn()
         network = agent.actor
-        before = function_preserving.hidden_widths(network.head_net)
+        before = func_preservation.hidden_widths(network.head_net)
         network.head_net.add_node(hidden_layer=0, numb_new_nodes=4)
         state = torch.random.get_rng_state()
 
@@ -3451,7 +3451,7 @@ class TestMutationsFunctionPreservingAccelerator:
 
     def test_an_addition_keeps_the_policy_output(self, monkeypatch):
         _pin_mutation_method(monkeypatch, "head_net.add_node")
-        monkeypatch.setattr(function_preserving, "FP_NOISE_SCALE", 0.0)
+        monkeypatch.setattr(func_preservation, "FP_NOISE_SCALE", 0.0)
         accelerator = Accelerator(cpu=True, device_placement=False)
         agent = DQN(
             generate_random_box_space((4,)),
@@ -3536,7 +3536,7 @@ class TestMutationsFunctionPreservingDegradation:
 
     def test_a_fixup_that_writes_nothing_declines(self, monkeypatch):
         _pin_mutation_method(monkeypatch, "head_net.add_node")
-        monkeypatch.setattr(function_preserving, "preserve_added_nodes", _write_nothing)
+        monkeypatch.setattr(func_preservation, "preserve_added_nodes", _write_nothing)
 
         with pytest.warns(UserWarning, match="function-preserving"):
             _fp_mutations().architecture_mutate(_dqn())
@@ -3555,7 +3555,7 @@ class TestMutationsFunctionPreservingDegradation:
     def test_a_failing_fixup_does_not_abort_the_mutation(self, monkeypatch, caplog):
         _pin_mutation_method(monkeypatch, "head_net.add_node")
         monkeypatch.setattr(
-            function_preserving, "preserve_added_nodes", _raise_fixup_failure
+            func_preservation, "preserve_added_nodes", _raise_fixup_failure
         )
         agent = _dqn()
 

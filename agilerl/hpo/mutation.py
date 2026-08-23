@@ -22,7 +22,7 @@ from agilerl.algorithms.core import (
     MultiAgentRLAlgorithm,
     RLAlgorithm,
 )
-from agilerl.hpo import function_preserving
+from agilerl.hpo import func_preservation
 from agilerl.modules import EvolvableModule, ModuleDict
 from agilerl.protocols import EvolvableAlgorithmProtocol
 from agilerl.typing import MutationReturn
@@ -722,16 +722,16 @@ class Mutations:
         :return: The affected widths, or None when there is nothing to record.
         :rtype: list[int] | None
         """
-        target = function_preserving.resolve_target(network, mut_method)
+        target = func_preservation.resolve_target(network, mut_method)
         if target is None:
             return None
 
-        if function_preserving.is_latent_mutation(
-            function_preserving.base_mutation(mut_method),
+        if func_preservation.is_latent_mutation(
+            func_preservation.base_mutation(mut_method),
         ):
             return [int(getattr(target, "latent_dim", 0))]
 
-        return function_preserving.hidden_widths(target)
+        return func_preservation.hidden_widths(target)
 
     def _fp_preserve(
         self,
@@ -761,11 +761,11 @@ class Mutations:
         :return: None.
         :rtype: None
         """
-        base = function_preserving.base_mutation(applied_mut)
-        if base not in function_preserving.PRESERVED_MUTATIONS:
+        base = func_preservation.base_mutation(applied_mut)
+        if base not in func_preservation.PRESERVED_MUTATIONS:
             return
 
-        target = function_preserving.resolve_target(network, applied_mut)
+        target = func_preservation.resolve_target(network, applied_mut)
         if target is None:
             return
 
@@ -805,25 +805,25 @@ class Mutations:
         :return: The reason preservation was declined, or None when it applied.
         :rtype: str | None
         """
-        if base in function_preserving.LATENT_ADDITIONS:
-            reason = function_preserving.latent_addition_blocker(target)
+        if base in func_preservation.LATENT_ADDITIONS:
+            reason = func_preservation.latent_addition_blocker(target)
             if reason is not None:
                 return reason
 
-            written = function_preserving.preserve_added_latent(
+            written = func_preservation.preserve_added_latent(
                 target,
                 before[0],
                 self._fp_rng,
-                function_preserving.FP_NOISE_SCALE,
+                func_preservation.FP_NOISE_SCALE,
             )
             return None if written else "not_written"
 
-        if base in function_preserving.LAYER_ADDITIONS:
-            reason = function_preserving.layer_addition_blocker(target)
+        if base in func_preservation.LAYER_ADDITIONS:
+            reason = func_preservation.layer_addition_blocker(target)
             if reason is not None:
                 return reason
 
-            written = function_preserving.preserve_added_layer(target)
+            written = func_preservation.preserve_added_layer(target)
             return None if written else "not_written"
 
         # A layer mutation reports no index at all, and the declared
@@ -835,18 +835,18 @@ class Mutations:
 
         # A structural exclusion outranks a missing index, so the blocker runs
         # first and gets to name the reason.
-        reason = function_preserving.node_addition_blocker(target, hidden_layer)
+        reason = func_preservation.node_addition_blocker(target, hidden_layer)
         if reason is not None:
             return reason
         if hidden_layer is None or not 0 <= hidden_layer < len(before):
             return "no_consumer"
 
-        written = function_preserving.preserve_added_nodes(
+        written = func_preservation.preserve_added_nodes(
             target,
             hidden_layer,
             before[hidden_layer],
             self._fp_rng,
-            function_preserving.FP_NOISE_SCALE,
+            func_preservation.FP_NOISE_SCALE,
         )
         return None if written else "not_written"
 
@@ -871,7 +871,7 @@ class Mutations:
         # marking it reported would silence the reason for the rest of the run.
         warnings.warn(
             "Architecture mutation fell back from function-preserving "
-            f"initialisation: {function_preserving.DECLINE_REASONS[reason]}. The "
+            f"initialisation: {func_preservation.DECLINE_REASONS[reason]}. The "
             "new capacity is initialised randomly instead.",
             stacklevel=4,
         )

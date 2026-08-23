@@ -3,10 +3,6 @@
 
 """Function-preserving architecture mutations.
 
-Implements the additive operators of Chen et al., "Net2Net: Accelerating
-Learning via Knowledge Transfer" (https://arxiv.org/abs/1511.05641), so that
-growing a network does not change the function it computes.
-
 AgileRL grows a network by appending units or a layer and initialising the new
 capacity randomly, which changes the network's output immediately. The mutated
 agent is then evaluated as a different policy than the one that earned its place
@@ -15,22 +11,15 @@ be trained into anything useful. Initialising the new capacity so the network is
 unchanged removes that penalty: the agent keeps its fitness and the extra
 capacity is exploited by subsequent training.
 
-Two mechanisms cover the four additive mutations:
+Thus, the capacity addition operations are made, when possible, function-preserving:
 
-* **Net2WiderNet** (``add_node``, ``add_channel``, ``add_latent_node``) -- the
-  new units keep their freshly initialised incoming weights, while the *outgoing*
-  weights that carry them into the consuming layer are faded to near zero. The
-  consumer's output is therefore unchanged whatever the activation does, and the
-  new units still receive gradient.
-* **Net2DeeperNet** (``add_layer``) -- the newly inserted layer is initialised to
-  the identity, which is exact for ReLU and Identity activations.
-
-Only additions are handled. Every ``remove_*`` mutation and ``change_kernel``
-keeps AgileRL's original behaviour, so the two regimes differ purely in how
-capacity is *added*.
-
-The functions here are pure tensor operations: they need no observation batch,
-no forward pass and no training state, and are unit-tested standalone.
+* add_node, add_channel, add_latent_node: the new units keep their freshly
+  initialised incoming weights, while the outgoing weights that carry them into
+  the consuming layer are faded to near zero (to avoid adding dormant neurons).
+  The consumer's output is therefore unchanged whatever the activation does,
+  and the new units still receive meaningful gradients fast.
+* add_layer: the newly inserted layer is initialised to the identity, which is exact
+  for ReLU and Identity activations.
 """
 
 from __future__ import annotations
@@ -52,17 +41,11 @@ from agilerl.modules.custom_components import (
 # fraction of the consumer layer's existing column scale.
 FP_NOISE_SCALE = 0.01
 
-# Every block type EvolvableCNN can build.
 CONV_LAYER_TYPES: tuple[type[nn.Module], ...] = (nn.Conv1d, nn.Conv2d, nn.Conv3d)
 
 # Normalisation between a widened layer and the layer that reads it defeats the
-# fade: LayerNorm, RMSNorm and GroupNorm pool their statistics across units, so
-# adding a unit moves every existing one however small its fan-out. The batch and
-# instance norms pool per channel and would in fact survive a widening, but they
-# are declined too rather than special-cased -- one uniform list, kept in step
-# with :data:`agilerl.hpo.regrama.NORM_LAYER_TYPES`, is easier to keep correct
-# than a curated subset, and declining only costs preservation, never
-# correctness.
+# fade, as most normalisation techniques pool their statistics across units, so
+# adding a unit moves every existing one.
 NORM_LAYER_TYPES: tuple[type[nn.Module], ...] = (
     nn.LayerNorm,
     nn.GroupNorm,
@@ -87,7 +70,6 @@ CROSS_UNIT_ACTIVATION_TYPES: tuple[type[nn.Module], ...] = (
 # Activations under which an identity-initialised layer is itself the identity.
 IDENTITY_SAFE_ACTIVATION_TYPES: tuple[type[nn.Module], ...] = (nn.ReLU, nn.Identity)
 
-# The additive mutations, grouped by the mechanism that preserves them.
 NODE_ADDITIONS = frozenset({"add_node", "add_channel"})
 LAYER_ADDITIONS = frozenset({"add_layer"})
 LATENT_ADDITIONS = frozenset({"add_latent_node"})
@@ -125,10 +107,6 @@ def _is_conv(layer: nn.Module) -> bool:
 def _is_linear(layer: nn.Module) -> bool:
     """Return whether a layer is dense.
 
-    Recognises :class:`~agilerl.modules.custom_components.NoisyLinear` by its
-    two-dimensional ``weight_mu`` rather than by type, so the noisy and plain
-    variants share one code path.
-
     :param layer: Candidate layer.
     :type layer: nn.Module
 
@@ -159,12 +137,10 @@ def _primary_weight(layer: nn.Module) -> torch.Tensor:
     :param layer: Weight layer.
     :type layer: nn.Module
 
-    :return: The layer's ``weight``, or ``weight_mu`` when it is noisy.
+    :return: The layer's weight, or weight_mu when it is noisy.
     :rtype: torch.Tensor
 
-    :raises TypeError: If the layer owns neither tensor. Callers reach this
-        function through :func:`_is_weight_layer`, which admits only layers that
-        own one, so this signals a scan that escaped that guard.
+    :raises TypeError: If the layer owns neither tensor.
     """
     for name in ("weight", "weight_mu"):
         weight = getattr(layer, name, None)
@@ -176,7 +152,7 @@ def _primary_weight(layer: nn.Module) -> torch.Tensor:
 
 
 def _out_dim(layer: nn.Module) -> int:
-    """Return how many units (or channels) a weight layer produces.
+    """Return how many outputs a weight layer produces.
 
     :param layer: Weight layer.
     :type layer: nn.Module
@@ -202,9 +178,6 @@ def _in_dim(layer: nn.Module) -> int:
 def _inner_module(submodule: nn.Module) -> nn.Module:
     """Unwrap an evolvable wrapper down to the module that owns the layers.
 
-    :class:`~agilerl.networks.distributions.EvolvableDistribution` wraps the
-    real MLP, exposing it at ``wrapped``.
-
     :param submodule: Possibly wrapped module.
     :type submodule: nn.Module
 
@@ -220,10 +193,7 @@ def _inner_module(submodule: nn.Module) -> nn.Module:
 
 
 def _ordered_weight_layers(container: nn.Module) -> list[nn.Module]:
-    """Return a container's weight layers in registration (forward) order.
-
-    Uses ``named_modules`` rather than ``modules`` because evolvable modules
-    override the latter.
+    """Return a container's weight layers in forward order.
 
     :param container: Module to scan.
     :type container: nn.Module
@@ -237,10 +207,6 @@ def _ordered_weight_layers(container: nn.Module) -> list[nn.Module]:
 def _stack_signature(layers: list[nn.Module]) -> tuple[int, tuple[int, ...]]:
     """Return a stream's shape fingerprint: input width plus hidden widths.
 
-    The output width is deliberately excluded: a duelling head's value and
-    advantage streams end in different widths but are otherwise identical, and
-    both must be recognised as parallel streams of the same head.
-
     :param layers: A stream's weight layers, in forward order.
     :type layers: list[nn.Module]
 
@@ -253,11 +219,9 @@ def _stack_signature(layers: list[nn.Module]) -> tuple[int, tuple[int, ...]]:
 def weight_stacks(submodule: nn.Module) -> list[list[nn.Module]]:
     """Return the parallel weight-layer streams of a sub-module.
 
-    Most modules have one stream. A duelling head has two -- the inherited value
-    stream and its sibling advantage stream -- and one architecture mutation
-    widens or deepens both, so both need the same fixup. A sibling is treated as
-    a parallel stream only when its input and hidden widths match the primary
-    one, which keeps unrelated containers out.
+    Most modules have one stream. A duelling head has two (the inherited value
+    stream and its sibling advantage stream) and one architecture mutation
+    widens or deepens both, so both need the same fixup.
 
     :param submodule: Module that was mutated.
     :type submodule: nn.Module
@@ -285,11 +249,6 @@ def weight_stacks(submodule: nn.Module) -> list[list[nn.Module]]:
 
 def hidden_widths(submodule: nn.Module) -> list[int]:
     """Snapshot the output width of every non-output weight layer.
-
-    Taken before a mutation, this is what lets the fixup tell which rows and
-    columns are new: :meth:`EvolvableModule.preserve_parameters` copies trained
-    weights into the top-left corner, so new units are always appended at the
-    tail.
 
     :param submodule: Module about to be mutated.
     :type submodule: nn.Module
@@ -322,10 +281,6 @@ def _modules_between(
     consumer: nn.Module,
 ) -> list[nn.Module]:
     """Return the modules registered strictly between two weight layers.
-
-    Registration order is forward order for the containers AgileRL builds, so
-    this is exactly what a value passes through on its way from one layer to the
-    next: the producer's normalisation and its activation.
 
     :param container: Container holding both layers.
     :type container: nn.Module
@@ -385,10 +340,6 @@ def _interposed_blocker(modules: list[nn.Module]) -> str | None:
 def _is_multi_input(module: nn.Module) -> bool:
     """Return whether a module fuses several sub-encoders into one output.
 
-    :class:`~agilerl.modules.multi_input.EvolvableMultiInput` is recognised by
-    its two defining attributes rather than by import, keeping this module free
-    of a dependency it needs for one predicate.
-
     :param module: Candidate module.
     :type module: nn.Module
 
@@ -399,7 +350,7 @@ def _is_multi_input(module: nn.Module) -> bool:
 
 
 def _structural_blocker(module: nn.Module) -> str | None:
-    """Return why widening a layer *inside* a module is out of scope, if it is.
+    """Return why widening a layer inside a module is out of scope, if it is.
 
     Each of these defeats the fade at the point where a hidden layer grows. A
     recurrent core fuses its gate non-linearities, so no single weight matrix
@@ -407,10 +358,6 @@ def _structural_blocker(module: nn.Module) -> str | None:
     coordinate straight past the layer that would fade it. A multi-input
     encoder's fusion layer reads an interleaved concatenation, so widening a
     sub-encoder does not append columns at the tail.
-
-    All three are properties of the module's *interior*, which is why
-    :func:`latent_addition_blocker` does not consult this: growing the latent
-    is surgery on the head, and leaves the encoder's interior untouched.
 
     :param module: Module about to be mutated.
     :type module: nn.Module
@@ -435,10 +382,6 @@ def node_addition_blocker(
     hidden_layer: int | None,
 ) -> str | None:
     """Return why widening a layer cannot preserve the function, if it cannot.
-
-    Only the modules between the widened layer and the layer that reads it can
-    block: the consumer's own downstream normalisation is irrelevant, because a
-    faded fan-out leaves the consumer's output unchanged.
 
     :param submodule: Module that was mutated.
     :type submodule: nn.Module
@@ -472,13 +415,7 @@ def layer_addition_blocker(submodule: nn.Module) -> str | None:
     """Return why an inserted layer cannot be an identity, if it cannot.
 
     Net2DeeperNet is exact only while the activation is positively homogeneous
-    and idempotent on its own output, which holds for ReLU and Identity. The
-    activation in place when the layer is inserted is the one that decides:
-    preservation is a property of the mutation that was just applied, and an
-    activation mutation sampled in a later generation is an ordinary
-    unpreserved mutation that selection judges on its own terms. It cannot
-    catch the layer as an identity either, since mutation closes a cycle and
-    the agent trains before it can be mutated again.
+    and idempotent on its own output, which holds for ReLU and Identity.
 
     :param submodule: Module that was mutated.
     :type submodule: nn.Module
@@ -523,22 +460,6 @@ def layer_addition_blocker(submodule: nn.Module) -> str | None:
 def latent_addition_blocker(network: nn.Module) -> str | None:
     """Return why widening the latent cannot preserve the function, if it cannot.
 
-    The fixup is surgery on the *head*: the encoder's new output rows are
-    appended at the tail by ``preserve_parameters``, leaving every existing
-    latent coordinate untouched, and only the head's new input columns are
-    rewritten. So what the encoder is built from does not matter -- a recurrent
-    core, a residual trunk and a multi-input fusion all widen their own output
-    at the tail -- and :func:`_structural_blocker` is deliberately *not*
-    consulted here. Only what sits between the encoder's final weight layer and
-    the head can block: an MLP encoder carries an output ``LayerNorm`` whenever
-    ``layer_norm`` is set, which pools statistics over the whole latent and
-    therefore moves every existing coordinate when the latent grows.
-
-    The one exception is a multi-input encoder asked to widen *its own* latent
-    rather than the network's: that resizes every sub-encoder's output, so the
-    fusion layer's new columns are interleaved through its input instead of
-    appended, and no head-side fade can compensate.
-
     :param network: Network whose latent was widened.
     :type network: nn.Module
 
@@ -561,11 +482,6 @@ def latent_addition_blocker(network: nn.Module) -> str | None:
 
 def _spatial_block(submodule: nn.Module) -> int:
     """Return how many columns one convolution channel spans after flattening.
-
-    ``nn.Flatten`` is channel-major, so a channel occupies a contiguous block of
-    ``prod(spatial)`` columns in the projection that reads the flattened feature
-    map. Reading the size off ``cnn_output_size`` keeps this dimension-agnostic,
-    so Conv1d, Conv2d and Conv3d all work.
 
     :param submodule: Convolutional module that was widened.
     :type submodule: nn.Module
@@ -605,12 +521,10 @@ def _fade_new_columns(
 ) -> None:
     """Fade the columns through which new units reach a consuming layer.
 
-    At ``noise_scale`` zero the columns become exactly zero and no random number
-    is drawn, so a seeded run is untouched. A small positive scale breaks the
-    symmetry between new units -- without it they share one gradient and can
-    never differentiate -- at a correspondingly small cost in exactness. A noisy
-    layer's stochastic scales are always zeroed, so the new units add no
-    exploration noise either.
+    A small positive scale breaks the symmetry between new units and lets
+    gradients flow faster at a small cost in exactness. A noisy layer's
+    stochastic scales are always zeroed, so the new units add no exploration
+    noise either.
 
     :param consumer: Layer that reads the widened output.
     :type consumer: nn.Module
@@ -656,12 +570,8 @@ def _shift_trailing_columns(
 ) -> None:
     """Slide a head's non-latent input columns to their widened offset.
 
-    A continuous critic's head reads ``cat([latent, actions])``, so its action
-    columns start at the latent width. ``preserve_parameters`` copies the old
-    weights into the top-left corner and therefore leaves those columns at the
-    *old* offset, where the widened head no longer looks for them. The clone is
-    required because the ranges overlap whenever the latent grew by less than
-    the trailing block's width.
+    A continuous critic's head reads cat([latent, actions]), so its action
+    columns start at the latent width.
 
     :param consumer: The head's entry layer.
     :type consumer: nn.Module
@@ -693,15 +603,8 @@ def preserve_added_nodes(
 ) -> bool:
     """Fade a widened layer's new units so the module's output is unchanged.
 
-    Net2WiderNet: the new units keep the incoming weights the stock operator
-    gave them, and only their *outgoing* weights are rewritten. Every parallel
-    stream is treated, since one mutation widens a duelling head's value and
-    advantage streams together.
-
-    The number of new units is derived from the layer's actual growth rather
-    than from the mutation's reported count, because a layer that has reached
-    ``max_mlp_nodes`` or ``max_channel_size`` reports the requested count while
-    growing by nothing.
+    The new units keep the incoming weights the stock operator gave them,
+    and only their *outgoing* weights are rewritten.
 
     :param submodule: Module that was mutated.
     :type submodule: nn.Module
@@ -720,8 +623,6 @@ def preserve_added_nodes(
     """
     covered = True
     for layers in weight_stacks(submodule):
-        # The index is the primary stream's, so a sibling too short to honour it
-        # may have grown without being faded. Report it rather than assume not.
         if not 0 <= hidden_layer < len(layers) - 1:
             covered = False
             continue
@@ -749,10 +650,8 @@ def preserve_added_nodes(
 def preserve_added_layer(submodule: nn.Module) -> bool:
     """Initialise an inserted layer to the identity so the output is unchanged.
 
-    Net2DeeperNet. ``EvolvableMLP.add_layer`` appends a hidden layer whose width
-    equals the previous last hidden width, so the new layer is square and sits
-    second from the end of its stream. A noisy layer's stochastic scale is
-    zeroed as well, so the identity holds while training too.
+    A noisy layer's stochastic scale is zeroed as well, so the identity holds
+    while training.
 
     :param submodule: Module that was mutated.
     :type submodule: nn.Module
@@ -793,11 +692,6 @@ def preserve_added_latent(
 ) -> bool:
     """Fade the head's new latent columns so the network's output is unchanged.
 
-    The widened block is sized from ``latent_dim`` rather than from the head's
-    input width, because a continuous critic's head also reads the action
-    vector; treating that trailing block as new latent units would zero the
-    critic's action sensitivity, and with it the deterministic policy gradient.
-
     :param network: Network whose latent was widened.
     :type network: nn.Module
     :param old_latent: Latent width before the mutation.
@@ -825,7 +719,7 @@ def preserve_added_latent(
         consumer = layers[0]
         extra = _in_dim(consumer) - new_latent
         # A head narrower than the latent it reads cannot be the consumer the
-        # fade was meant for, so leave it alone and report the miss.
+        # fade was meant for, so dismiss it and report the miss.
         if extra < 0:
             covered = False
             continue
@@ -838,9 +732,6 @@ def preserve_added_latent(
 
 def base_mutation(mut_method: str | None) -> str:
     """Reduce a possibly prefixed mutation name to its trailing method.
-
-    Mutation names carry a sub-module segment, and a sub-agent segment as well
-    in multi-agent algorithms, as in ``"agent_0.head_net.add_node"``.
 
     :param mut_method: Mutation method name, or None.
     :type mut_method: str | None
@@ -874,9 +765,6 @@ def _child_module(container: nn.Module, name: str) -> nn.Module | None:
     :return: The child module, or None when the name does not resolve.
     :rtype: nn.Module | None
     """
-    # Both accesses are typed against nn.Module, which declares no __getitem__:
-    # only the mapping containers (ModuleDict and friends) are subscriptable, and
-    # the TypeError from the rest is what routes them to attribute lookup.
     mapping: Any = container
     try:
         return mapping[name]
@@ -887,8 +775,6 @@ def _child_module(container: nn.Module, name: str) -> nn.Module | None:
 def resolve_target(network: nn.Module, mut_method: str | None) -> nn.Module | None:
     """Walk a dotted mutation name to the module it acts on.
 
-    Leading segments are sub-agent keys of a ``ModuleDict`` or sub-module
-    attributes; the trailing segment is the method itself and is not followed.
     A latent mutation names no sub-module, so it resolves to the network that
     owns the latent.
 

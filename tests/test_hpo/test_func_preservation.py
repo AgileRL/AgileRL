@@ -4,12 +4,14 @@
 import numpy as np
 import pytest
 import torch
+from gymnasium.spaces import Discrete
 from torch import nn
 
-from agilerl.hpo import function_preserving as fp
+from agilerl.hpo import func_preservation as fp
 from agilerl.modules.cnn import EvolvableCNN
 from agilerl.modules.mlp import EvolvableMLP
 from agilerl.networks.custom_modules import DuelingDistributionalMLP
+from agilerl.networks.distributions import EvolvableDistribution
 
 
 def make_rng(seed: int = 0) -> np.random.Generator:
@@ -49,6 +51,13 @@ def make_cnn(**kwargs) -> EvolvableCNN:
     return EvolvableCNN(**options)
 
 
+def make_wrapped_head(hidden_size: list[int] | None = None) -> EvolvableDistribution:
+    """Return an MLP behind the distribution wrapper a policy head carries."""
+    return EvolvableDistribution(
+        Discrete(2), make_mlp(hidden_size=hidden_size), device="cpu"
+    )
+
+
 def make_norm(norm_type: type[nn.Module], units: int = 8) -> nn.Module:
     """Instantiate a normalisation of the given type over ``units`` units."""
     if norm_type is nn.GroupNorm:
@@ -57,11 +66,7 @@ def make_norm(norm_type: type[nn.Module], units: int = 8) -> nn.Module:
 
 
 def splice_norm(mlp: EvolvableMLP, norm: nn.Module) -> EvolvableMLP:
-    """Insert a normalisation between the first hidden layer and its consumer.
-
-    The blocker reads registration order out of the container, so a spliced
-    module lands in the forward path exactly where a configured one would.
-    """
+    """Insert a normalisation between the first hidden layer and its consumer."""
     rebuilt: dict[str, nn.Module] = {}
     for name, layer in mlp.model.named_children():
         rebuilt[name] = layer
@@ -102,6 +107,12 @@ class TestHiddenWidths:
 
         assert widths == [4, 6]
 
+    def test_a_distribution_wrapped_head_is_unwrapped(self):
+        """The snapshot is taken on the head a policy actually exposes."""
+        widths = fp.hidden_widths(make_wrapped_head(hidden_size=[8, 16]))
+
+        assert widths == [8, 16]
+
     def test_output_layer_is_excluded(self):
         widths = fp.hidden_widths(make_mlp(hidden_size=[8], num_outputs=5))
 
@@ -119,6 +130,12 @@ class TestWeightStacks:
 
         assert len(stacks) == 1
         assert len(stacks[0]) == 3
+
+    def test_a_distribution_wrapped_head_is_unwrapped(self):
+        stacks = fp.weight_stacks(make_wrapped_head(hidden_size=[8, 16]))
+
+        assert len(stacks) == 1
+        assert [layer.weight.shape[0] for layer in stacks[0]] == [8, 16, 2]
 
     def test_duelling_head_has_two_parallel_streams(self):
         stacks = fp.weight_stacks(make_duelling())
@@ -162,12 +179,6 @@ class TestNodeAdditionBlocker:
         ids=[norm_type.__name__ for norm_type in fp.NORM_LAYER_TYPES],
     )
     def test_every_recognised_normalisation_blocks(self, norm_type):
-        """Parametrized over the tuple itself, so a type added to it is covered.
-
-        Only ``LayerNorm``, ``RMSNorm`` and ``GroupNorm`` pool across units and
-        genuinely defeat the fade; the batch and instance norms are per channel
-        and are declined only to keep one uniform list.
-        """
         mlp = splice_norm(make_mlp(), make_norm(norm_type))
 
         assert fp.node_addition_blocker(mlp, 0) == "norm"
@@ -177,19 +188,13 @@ class TestNodeAdditionBlocker:
         [nn.LayerNorm, nn.RMSNorm, nn.GroupNorm],
         ids=["LayerNorm", "RMSNorm", "GroupNorm"],
     )
-    def test_a_pooling_normalisation_must_block(self, norm_type):
-        """Named rather than read off the tuple, so narrowing it fails here.
+    def test_a_pooling_normalisation_is_recognised(self, norm_type):
+        """Dropping one of these from the registry would silently defeat the fade.
 
-        These three pool their statistics across units, so a widening under one
-        moves every existing unit's output however small the new fan-out is.
-        Dropping any of them from the tuple would silently ship a mutation that
-        claims to be function-preserving and is not.
+        These pool their statistics across units, so a new unit moves every
+        existing one.
         """
         assert norm_type in fp.NORM_LAYER_TYPES
-
-        mlp = splice_norm(make_mlp(), make_norm(norm_type))
-
-        assert fp.node_addition_blocker(mlp, 0) == "norm"
 
     def test_a_cross_unit_activation_blocks(self):
         assert fp.node_addition_blocker(make_mlp(activation="Softmax"), 0) == (
@@ -255,6 +260,22 @@ class TestNodeAdditionBlocker:
     def test_an_out_of_range_layer_index_blocks(self):
         assert fp.node_addition_blocker(make_mlp(hidden_size=[8]), 5) == "no_consumer"
 
+    def test_a_missing_layer_index_blocks(self):
+        assert fp.node_addition_blocker(make_mlp(), None) == "no_consumer"
+
+    def test_a_structural_exclusion_outranks_a_missing_index(self):
+        from agilerl.modules.lstm import EvolvableLSTM
+
+        lstm = EvolvableLSTM(
+            input_size=4,
+            hidden_state_size=8,
+            num_outputs=2,
+            min_hidden_state_size=1,
+            device="cpu",
+        )
+
+        assert fp.node_addition_blocker(lstm, None) == "recurrent"
+
 
 class TestLayerAdditionBlocker:
     """Decide whether an inserted layer can be an identity."""
@@ -289,38 +310,60 @@ class TestLayerAdditionBlocker:
 
         assert blocker == "non_square"
 
+    def test_a_simba_block_blocks(self):
+        from agilerl.modules.simba import EvolvableSimBa
+
+        simba = EvolvableSimBa(
+            num_inputs=4,
+            num_outputs=2,
+            hidden_size=8,
+            num_blocks=1,
+            min_mlp_nodes=1,
+            device="cpu",
+        )
+
+        blocker = fp.layer_addition_blocker(simba)
+
+        assert blocker == "simba"
+
+    def test_a_stack_without_two_layers_blocks(self):
+        module = nn.Sequential(nn.Linear(4, 2))
+
+        blocker = fp.layer_addition_blocker(module)
+
+        assert blocker == "not_mlp"
+
 
 class TestLatentAdditionBlocker:
     """Decide whether widening the latent can preserve the function."""
 
-    def test_unnormalised_mlp_encoder_is_supported(self, vector_space, discrete_space):
+    @staticmethod
+    def q_network(observation_space, action_space, **kwargs):
         from agilerl.networks.q_networks import QNetwork
 
-        network = QNetwork(
-            vector_space,
-            discrete_space,
-            latent_dim=8,
-            min_latent_dim=1,
-            encoder_config={
+        options = {
+            "latent_dim": 8,
+            "min_latent_dim": 1,
+            "encoder_config": {
                 "hidden_size": [8],
                 "min_mlp_nodes": 1,
                 "layer_norm": False,
             },
-            device="cpu",
-        )
+            "device": "cpu",
+        }
+        options.update(kwargs)
+        return QNetwork(observation_space, action_space, **options)
+
+    def test_unnormalised_mlp_encoder_is_supported(self, vector_space, discrete_space):
+        network = self.q_network(vector_space, discrete_space)
 
         assert fp.latent_addition_blocker(network) is None
 
     def test_a_normalised_mlp_encoder_blocks(self, vector_space, discrete_space):
-        from agilerl.networks.q_networks import QNetwork
-
-        network = QNetwork(
+        network = self.q_network(
             vector_space,
             discrete_space,
-            latent_dim=8,
-            min_latent_dim=1,
             encoder_config={"hidden_size": [8], "min_mlp_nodes": 1, "layer_norm": True},
-            device="cpu",
         )
 
         assert fp.latent_addition_blocker(network) == "norm"
@@ -343,20 +386,15 @@ class TestLatentAdditionBlocker:
         """A latent widening is head-side surgery, so the core is irrelevant.
 
         The recurrent core owns no per-unit weight rows, which rules out
-        widening a layer *inside* it -- but ``add_latent_node`` only fades the
+        widening a layer inside it, but add_latent_node only fades the
         head's new input columns, and the encoder's own output rows are
         appended at the tail like any other module's.
         """
-        from agilerl.networks.q_networks import QNetwork
-
-        network = QNetwork(
+        network = self.q_network(
             vector_space,
             discrete_space,
-            latent_dim=8,
-            min_latent_dim=1,
             recurrent=True,
             encoder_config={"hidden_state_size": 8},
-            device="cpu",
         )
 
         assert fp.latent_addition_blocker(network) is None
@@ -372,26 +410,20 @@ class TestLatentAdditionBlocker:
         assert fp.latent_addition_blocker(network) is None
 
     def test_a_simba_encoder_is_supported(self, vector_space, discrete_space):
-        from agilerl.networks.q_networks import QNetwork
-
-        network = QNetwork(
+        network = self.q_network(
             vector_space,
             discrete_space,
-            latent_dim=8,
-            min_latent_dim=1,
             simba=True,
             encoder_config={"hidden_size": 8, "num_blocks": 1},
-            device="cpu",
         )
 
         assert fp.latent_addition_blocker(network) is None
 
     def test_a_multi_input_module_blocks_its_own_latent(self, dict_space):
-        """A multi-input encoder's *own* latent feeds the interleaved fusion.
+        """A multi-input encoder's own latent feeds the interleaved fusion.
 
         Widening it resizes every sub-encoder's output, so the fusion layer's
-        new columns are spread through its input rather than appended at the
-        tail -- the one latent mutation this machinery cannot preserve.
+        new columns are spread through its input rather than appended at the tail.
         """
         from agilerl.modules.multi_input import EvolvableMultiInput
 
@@ -401,8 +433,21 @@ class TestLatentAdditionBlocker:
 
         assert fp.latent_addition_blocker(encoder) == "multi_input"
 
-    def test_a_network_without_a_latent_blocks(self):
+    def test_a_network_without_an_encoder_blocks(self):
         assert fp.latent_addition_blocker(nn.Sequential(nn.ReLU())) == "no_latent"
+
+    def test_a_network_without_a_latent_dimension_blocks(self):
+        network = nn.Module()
+        network.encoder = make_mlp()
+
+        assert fp.latent_addition_blocker(network) == "no_latent"
+
+    def test_an_encoder_without_weight_layers_blocks(self):
+        network = nn.Module()
+        network.latent_dim = 8
+        network.encoder = nn.Sequential(nn.ReLU())
+
+        assert fp.latent_addition_blocker(network) == "no_latent"
 
 
 class TestPreserveAddedNodes:
@@ -452,8 +497,6 @@ class TestPreserveAddedNodes:
 
         self.widen(module, hidden_layer=1, method="add_channel")
 
-        # Zero columns still lengthen the projection's reduction, so the result
-        # differs in the last bits of float32.
         torch.testing.assert_close(
             module.eval()(observation), before, rtol=0, atol=1e-6
         )
@@ -465,8 +508,6 @@ class TestPreserveAddedNodes:
 
         self.widen(module)
 
-        # A rebuilt noisy module returns in train mode, where its resampled
-        # epsilon buffers move the output whatever the surgery did.
         torch.testing.assert_close(module.eval()(observation), before, rtol=0, atol=0)
 
     def test_both_duelling_streams_are_faded(self):
@@ -484,6 +525,28 @@ class TestPreserveAddedNodes:
 
         for stack in fp.weight_stacks(module):
             assert torch.count_nonzero(stack[1].weight_sigma[:, 8:]) == 0
+            assert torch.count_nonzero(stack[1].weight_epsilon[:, 8:]) == 0
+
+    def test_the_new_units_keep_their_incoming_weights(self):
+        """Only the *outgoing* weights are rewritten."""
+        torch.manual_seed(0)
+        module = make_mlp()
+
+        self.widen(module, noise_scale=fp.FP_NOISE_SCALE)
+
+        incoming = fp.weight_stacks(module)[0][0].weight[8:]
+        assert torch.count_nonzero(incoming) == incoming.numel()
+
+    def test_the_new_units_receive_gradient(self):
+        """Fading rather than zeroing is what lets the new capacity train."""
+        torch.manual_seed(0)
+        module = make_mlp()
+        self.widen(module, noise_scale=fp.FP_NOISE_SCALE)
+
+        module(torch.randn(16, 4)).sum().backward()
+
+        incoming = fp.weight_stacks(module)[0][0].weight.grad[8:]
+        assert incoming.abs().max() > 0
 
     def test_it_reports_that_the_fixup_landed(self):
         assert self.widen(make_mlp(), added=4) is True
@@ -509,12 +572,34 @@ class TestPreserveAddedNodes:
         consumer = fp.weight_stacks(module)[0][1].weight
         assert consumer[:, 8:].std() < consumer[:, :8].std()
 
+    def test_a_consumer_with_no_old_columns_still_gets_noise(self):
+        """With every column new there is no neighbourhood to scale against."""
+        module = make_mlp()
+
+        preserved = fp.preserve_added_nodes(module, 0, 0, make_rng(), noise_scale=0.5)
+
+        consumer = fp.weight_stacks(module)[0][1].weight
+        assert preserved is True
+        assert torch.count_nonzero(consumer) == consumer.numel()
+        assert bool(torch.isfinite(consumer).all())
+
+    def test_a_consumer_whose_old_columns_have_no_spread_still_gets_noise(self):
+        """A zero-spread neighbourhood must not collapse the noise to nothing."""
+        module = make_mlp()
+        module.add_node(hidden_layer=0, numb_new_nodes=4)
+        consumer = fp.weight_stacks(module)[0][1]
+        with torch.no_grad():
+            consumer.weight[:, :8] = 1.0
+
+        fp.preserve_added_nodes(module, 0, 8, make_rng(), noise_scale=0.5)
+
+        new_columns = consumer.weight[:, 8:]
+        assert torch.count_nonzero(new_columns) == new_columns.numel()
+
     def test_the_same_seed_gives_the_same_weights(self):
         first, second = make_mlp(), make_mlp()
         second.load_state_dict(first.state_dict())
 
-        # Forked so seeding the stock operator's own initialisation does not
-        # leak a fixed global RNG state into whatever test runs next.
         with torch.random.fork_rng(devices=[]):
             torch.manual_seed(0)
             self.widen(first, noise_scale=0.5, seed=7)
@@ -539,6 +624,11 @@ class TestPreserveAddedNodes:
         )
 
         assert torch.equal(torch.random.get_rng_state(), state)
+
+    def test_an_out_of_range_layer_index_preserves_nothing(self):
+        module = make_mlp()
+
+        assert fp.preserve_added_nodes(module, 9, 8, make_rng()) is False
 
 
 class TestPreserveAddedLayer:
@@ -605,6 +695,13 @@ class TestPreserveAddedLayer:
     def test_a_non_square_layer_is_left_alone(self):
         assert fp.preserve_added_layer(make_mlp(hidden_size=[8, 16])) is False
 
+    def test_a_convolutional_layer_is_left_alone(self):
+        """A convolution's weight has four dimensions, so no diagonal to write."""
+        assert fp.preserve_added_layer(make_cnn()) is False
+
+    def test_a_single_layer_stack_gets_no_identity(self):
+        assert fp.preserve_added_layer(nn.Sequential(nn.Linear(4, 4))) is False
+
 
 class TestPreserveAddedLatent:
     """Fade the head's new latent columns so the network's output is unchanged."""
@@ -662,6 +759,17 @@ class TestPreserveAddedLatent:
         entry = fp.weight_stacks(network.head_net)[0][0]
         assert torch.count_nonzero(entry.weight[:, 8:12]) == 0
 
+    def test_the_new_latent_units_receive_gradient(self, vector_space, discrete_space):
+        """The encoder rows feeding the new latent units must still train."""
+        torch.manual_seed(0)
+        network = self.q_network(vector_space, discrete_space)
+        self.widen(network, noise_scale=fp.FP_NOISE_SCALE)
+
+        network(torch.randn(16, 4)).sum().backward()
+
+        incoming = fp.weight_stacks(network.encoder)[0][-1].weight.grad[8:12]
+        assert incoming.abs().max() > 0
+
     def test_it_reports_that_the_fixup_landed(self, vector_space, discrete_space):
         network = self.q_network(vector_space, discrete_space)
 
@@ -675,12 +783,6 @@ class TestPreserveAddedLatent:
 
         assert self.widen(network, added=4) is True
         assert network.latent_dim == 8
-
-    def test_a_network_without_a_head_reports_a_miss(self):
-        network = nn.Module()
-        network.latent_dim = 12
-
-        assert fp.preserve_added_latent(network, 8, make_rng()) is False
 
     def test_a_multi_input_encoder_output_is_unchanged(
         self, dict_space, discrete_space
@@ -710,9 +812,6 @@ class TestPreserveAddedLatent:
 
         assert self.widen(network) is True
 
-        # Not bit-exact: the faded columns contribute exactly zero, but widening
-        # the fusion layer's input changes the matmul's tiling, so the surviving
-        # terms are summed in a different order. The residual is float32 epsilon.
         torch.testing.assert_close(network(observation), before, rtol=0, atol=1e-6)
 
     def test_a_continuous_critic_keeps_its_action_sensitivity(self, vector_space):
@@ -757,6 +856,82 @@ class TestPreserveAddedLatent:
 
         moved = fp.weight_stacks(network.head_net)[0][0]
         assert torch.equal(moved.weight[:, 12:16], action_block)
+
+    def test_a_network_without_a_head_reports_a_miss(self):
+        network = nn.Module()
+        network.latent_dim = 12
+
+        assert fp.preserve_added_latent(network, 8, make_rng()) is False
+
+    def test_a_head_without_weight_layers_reports_a_miss(self):
+        network = nn.Module()
+        network.latent_dim = 12
+        network.head_net = nn.Sequential(nn.ReLU())
+
+        assert fp.preserve_added_latent(network, 8, make_rng()) is False
+
+    def test_a_head_narrower_than_the_latent_is_left_alone(self):
+        network = nn.Module()
+        network.latent_dim = 12
+        network.head_net = nn.Sequential(nn.Linear(4, 2))
+        entry = network.head_net[0]
+        before = entry.weight.detach().clone()
+
+        preserved = fp.preserve_added_latent(network, 8, make_rng())
+
+        assert preserved is False
+        assert torch.equal(entry.weight, before)
+
+
+class TestPrimaryWeight:
+    """Resolve the weight tensor that defines a layer's shape."""
+
+    def test_a_noisy_layer_resolves_to_its_mean_weight(self):
+        layer = fp.weight_stacks(make_duelling())[0][0]
+
+        assert fp._primary_weight(layer) is layer.weight_mu
+
+    def test_a_layer_owning_no_weight_tensor_is_rejected(self):
+        with pytest.raises(TypeError, match="owns no weight tensor"):
+            fp._primary_weight(nn.ReLU())
+
+
+class TestSpatialBlock:
+    """Count the columns one convolution channel spans after flattening."""
+
+    def test_a_convolutional_module_spans_its_feature_map(self):
+        module = make_cnn()
+
+        expected = int(np.prod(tuple(module.cnn_output_size)[2:]))
+        assert fp._spatial_block(module) == expected
+
+    def test_a_module_without_a_feature_map_spans_one_column(self):
+        assert fp._spatial_block(make_mlp()) == 1
+
+
+class TestModulesBetween:
+    """List the modules registered strictly between two weight layers."""
+
+    def test_an_activation_between_two_layers_is_reported(self):
+        container = make_mlp()
+        layers = fp.weight_stacks(container)[0]
+
+        between = fp._modules_between(container.model, layers[0], layers[1])
+
+        assert any(isinstance(module, nn.ReLU) for module in between)
+
+    def test_an_unregistered_layer_is_empty(self):
+        container = make_mlp()
+        stray = nn.Linear(4, 4)
+
+        assert fp._modules_between(container, stray, stray) == []
+
+
+class TestModulesAfter:
+    """List the modules registered after a weight layer."""
+
+    def test_an_unregistered_layer_is_empty(self):
+        assert fp._modules_after(make_mlp(), nn.Linear(4, 4)) == []
 
 
 class TestBaseMutation:
@@ -841,110 +1016,6 @@ class TestResolveTarget:
 
     def test_an_unresolvable_name_returns_nothing(self):
         assert fp.resolve_target(make_mlp(), "missing.add_node") is None
-
-
-class TestNodeAdditionBlockerWithoutAnIndex:
-    """A mutation that reports no layer index cannot be located."""
-
-    def test_a_missing_layer_index_blocks(self):
-        assert fp.node_addition_blocker(make_mlp(), None) == "no_consumer"
-
-    def test_a_structural_exclusion_outranks_a_missing_index(self):
-        from agilerl.modules.lstm import EvolvableLSTM
-
-        lstm = EvolvableLSTM(
-            input_size=4,
-            hidden_state_size=8,
-            num_outputs=2,
-            min_hidden_state_size=1,
-            device="cpu",
-        )
-
-        assert fp.node_addition_blocker(lstm, None) == "recurrent"
-
-
-class TestModuleScanGuards:
-    """Layer lookups degrade to an empty scan rather than raising."""
-
-    def test_modules_between_an_unregistered_layer_is_empty(self):
-        container = make_mlp()
-        stray = nn.Linear(4, 4)
-
-        assert fp._modules_between(container, stray, stray) == []
-
-    def test_modules_after_an_unregistered_layer_is_empty(self):
-        assert fp._modules_after(make_mlp(), nn.Linear(4, 4)) == []
-
-    def test_a_module_without_a_feature_map_spans_one_column(self):
-        assert fp._spatial_block(make_mlp()) == 1
-
-    def test_a_layer_owning_no_weight_tensor_is_rejected(self):
-        # Unreachable via _is_weight_layer; raising says a scan escaped it
-        # rather than letting an AttributeError surface somewhere further on.
-        with pytest.raises(TypeError, match="owns no weight tensor"):
-            fp._primary_weight(nn.ReLU())
-
-
-class TestLayerAdditionBlockerEdges:
-    """Structural and degenerate stacks decline before anything is written."""
-
-    def test_a_simba_block_blocks(self):
-        from agilerl.modules.simba import EvolvableSimBa
-
-        simba = EvolvableSimBa(
-            num_inputs=4,
-            num_outputs=2,
-            hidden_size=8,
-            num_blocks=1,
-            min_mlp_nodes=1,
-            device="cpu",
-        )
-
-        blocker = fp.layer_addition_blocker(simba)
-
-        assert blocker == "simba"
-
-    def test_a_stack_without_two_layers_blocks(self):
-        module = nn.Sequential(nn.Linear(4, 2))
-
-        blocker = fp.layer_addition_blocker(module)
-
-        assert blocker == "not_mlp"
-
-
-class TestLatentAdditionBlockerEdges:
-    """An encoder with no weight layers exposes no latent to widen."""
-
-    def test_an_encoder_without_weight_layers_blocks(self):
-        network = nn.Module()
-        network.latent_dim = 8
-        network.encoder = nn.Sequential(nn.ReLU())
-
-        assert fp.latent_addition_blocker(network) == "no_latent"
-
-
-class TestPreserveSkipsWhatItCannotWrite:
-    """A fixup that cannot write leaves the module untouched and says so."""
-
-    def test_an_out_of_range_layer_index_preserves_nothing(self):
-        module = make_mlp()
-
-        assert fp.preserve_added_nodes(module, 9, 8, make_rng()) is False
-
-    def test_a_single_layer_stack_gets_no_identity(self):
-        assert fp.preserve_added_layer(nn.Sequential(nn.Linear(4, 4))) is False
-
-    def test_a_head_narrower_than_the_latent_is_left_alone(self):
-        network = nn.Module()
-        network.latent_dim = 12
-        network.head_net = nn.Sequential(nn.Linear(4, 2))
-        entry = network.head_net[0]
-        before = entry.weight.detach().clone()
-
-        preserved = fp.preserve_added_latent(network, 8, make_rng())
-
-        assert preserved is False
-        assert torch.equal(entry.weight, before)
 
     def test_a_missing_mutation_name_resolves_to_nothing(self):
         assert fp.resolve_target(make_mlp(), None) is None
