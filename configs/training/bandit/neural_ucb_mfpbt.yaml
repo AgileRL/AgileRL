@@ -32,8 +32,6 @@ mutation:
             max: 10
     mutation_sd: 0.1
     rand_seed: 42
-    amplified_gauss_param_mut: true   # apply the amplified Gaussian band
-    random_reset_param_mut: true      # apply the random-reset Gaussian band
 
 network:
     latent_dim: 128

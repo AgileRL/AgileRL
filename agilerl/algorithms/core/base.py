@@ -451,16 +451,6 @@ def set_grama_capture(
     :rtype: None
     """
     enabled = mutation is not None
-    if enabled and any(
-        getattr(agent, "torch_compiler", None) is not None for agent in population
-    ):
-        warnings.warn(
-            "ReGraMa is capturing gradients from torch.compile agents. Every "
-            "measured activation becomes a graph break, so the training step gives "
-            "back much of the speedup compiling bought; acting is unaffected.",
-            stacklevel=2,
-        )
-
     for agent in population:
         agent.capture_grama = enabled
 
@@ -704,13 +694,9 @@ class EvolvableAlgorithm(ABC, Generic[ExperiencesT], metaclass=RegistryMeta):
         """
         if self._grama_latest is None:
             return
-        try:
-            self.grama_scores = [list(net_latest) for net_latest in self._grama_latest]
-        except Exception as exc:  # capture must never break training
-            logger.warning("GraMa capture could not store scores: %s", exc)
-        finally:
-            self._remove_grama_handles()
-            self._grama_latest = None
+        self.grama_scores = [list(net_latest) for net_latest in self._grama_latest]
+        self._remove_grama_handles()
+        self._grama_latest = None
 
     def _remove_grama_handles(self) -> None:
         """Detach every backward hook this capture registered.

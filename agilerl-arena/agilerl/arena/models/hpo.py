@@ -5,8 +5,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
-from typing_extensions import Self
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class RLHyperparameter(BaseModel):
@@ -64,20 +63,10 @@ class MutationSpec(BaseModel):
     :type mutation_sd: float
     :param rand_seed: Random seed for repeatability.
     :type rand_seed: int
-    :param amplified_gauss_param_mut: Whether a parameter mutation applies its
-        amplified ("super") Gaussian band. Declared and excluded so a core manifest
-        carrying it is accepted rather than rejected as an unknown field, and so the
-        platform payload is unaffected; disabling it is rejected, since Arena runs
-        the full three-band Gaussian mutation only. Defaults to True here regardless
-        of the core default, since that is the only value Arena accepts.
-    :type amplified_gauss_param_mut: bool
-    :param random_reset_param_mut: Whether a parameter mutation applies its
-        random-reset Gaussian band. Declared and excluded like
-        amplified_gauss_param_mut; disabling it is rejected for the same reason.
-    :type random_reset_param_mut: bool
     :param dormant_threshold: Normalised GraMa score at or below which a neuron counts as
-        dormant. Declared and excluded like amplified_gauss_param_mut; every
-        parameter mutation runs ReGraMa, so this is never inert.
+        dormant. Declared and excluded so a core manifest carrying it is accepted
+        rather than reported as unknown, and so the platform payload is unaffected;
+        every parameter mutation runs ReGraMa, so this is never inert.
     :type dormant_threshold: float
     """
 
@@ -87,31 +76,7 @@ class MutationSpec(BaseModel):
     rl_hp_selection: dict[str, RLHyperparameter] = Field(default_factory=dict)
     mutation_sd: float = Field(default=0.1, ge=0.0)
     rand_seed: int = Field(default=42, ge=0)
-    amplified_gauss_param_mut: bool = Field(default=True, exclude=True)
-    random_reset_param_mut: bool = Field(default=True, exclude=True)
     dormant_threshold: float = Field(default=0.01, ge=0.0, exclude=True)
-
-    @model_validator(mode="after")
-    def _reject_unsupported_param_mutation(self) -> Self:
-        """Reject parameter-mutation settings the platform does not support.
-
-        Every parameter mutation runs ReGraMa unconditionally, so a manifest
-        requesting that either Gaussian band be dropped fails here rather than
-        training with a narrower operator without saying so.
-
-        :returns: The validated spec.
-        :rtype: MutationSpec
-        :raises ValueError: If either the amplified or the random-reset Gaussian
-            band is disabled.
-        """
-        if not self.amplified_gauss_param_mut or not self.random_reset_param_mut:
-            msg = (
-                "The Arena platform only supports the full Gaussian parameter "
-                "mutation bands: disabling the amplified or random-reset Gaussian "
-                "mutations is not available."
-            )
-            raise ValueError(msg)
-        return self
 
 
 class TournamentSelectionSpec(BaseModel):

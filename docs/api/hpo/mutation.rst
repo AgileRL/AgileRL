@@ -34,8 +34,6 @@ A selection strategy and mutation are applied sequentially to fully evolve a pop
     mutation_sd=0.1,                      # Mutation strength
     rand_seed=1,                          # Random seed
     device=device,
-    amplified_gauss_param_mut=False,      # Amplified Gaussian band off (the default)
-    random_reset_param_mut=True,          # Apply the random-reset Gaussian band
     dormant_threshold=0.01                # Normalised score at or below which a neuron is dormant
   )
 

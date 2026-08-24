@@ -1,38 +1,6 @@
 # Copyright 2026 AgileRL
 # SPDX-License-Identifier: Apache-2.0
 
-"""Neuron-level surgery for ReGraMa parameter mutations.
-
-Implements the reset operator of Liu et al., "Measure gradients, not
-activations! Enhancing neuronal activity in deep reinforcement learning", which
-:class:`~agilerl.hpo.mutation.Mutations` runs as the first stage of every
-parameter mutation.
-
-Deep RL networks progressively lose plasticity: a growing fraction of units stop
-receiving gradient, so they stop learning and the network's effective capacity
-shrinks. ReGraMa scores every neuron by the GraMa gradient-magnitude metric and
-re-initialises the ones that have gone quiet. For a neuron i of layer l,
-
-    ``G_i = E_x|grad_{z_i} L(x)| / ( (1 / H_l) * sum_k E_x|grad_{z_k} L(x)| )``
-
-where ``z_i`` is the neuron's pre-activation, and the neuron is dormant
-when ``G_i <= tau``. ``G_i`` measures a unit's relative learning capacity.
-
-Only a hidden unit is a candidate: the encoder's output activation can be reset
-(a latent layer is a hidden representation), while a head network's output layer
-is never reset, since those units have fixed semantics such as action logits or
-a state value.
-
-This module owns the structural half of the operator, which reads and rewrites
-networks alone. The per-neuron gradients it thresholds are captured during the
-real training backward pass by
-:meth:`~agilerl.algorithms.core.base.EvolvableAlgorithm.init_training_step`,
-which hooks the activations that :func:`target_activations` names, and which
-decides by way of
-:meth:`~agilerl.algorithms.core.base.EvolvableAlgorithm.eval_networks` which of
-an agent's networks are measured at all.
-"""
-
 from __future__ import annotations
 
 import logging
@@ -207,10 +175,6 @@ def _activation_modules(root: nn.Module, *, include_output: bool) -> list[nn.Mod
             continue
         parent = name.rpartition(".")[0]
         prefix = f"{parent}." if parent else ""
-        # Restrict the lookahead to the activation's own parent container so a
-        # sibling stream registered later cannot mask the end of this one. A
-        # later same-container weight layer means this activation feeds forward
-        # into more of the network, i.e. it does not terminate its stream.
         has_later_consumer = any(
             other_name.startswith(prefix)
             and any(hasattr(other, attr) for attr in OUTPUT_WIDTH_ATTRS)
@@ -223,11 +187,6 @@ def _activation_modules(root: nn.Module, *, include_output: bool) -> list[nn.Mod
 
 def target_activations(network: nn.Module) -> list[nn.Module]:
     """The activation sub-modules measured for one network, in forward order.
-
-    This ordering is the snapshot's only layer identity:
-    :meth:`~agilerl.algorithms.core.base.EvolvableAlgorithm.init_training_step`
-    hooks these modules in this order, and the reset pairs each captured score
-    back to its layer by position.
 
     :param network: One evaluation network of an agent.
     :type network: torch.nn.Module
@@ -313,14 +272,6 @@ def _resolve_producer_and_next(
 ) -> _ProducerContext:
     """Find the layer that produced act_module's neurons and its consumers.
 
-    The search walks named_modules() rather than one flat nn.Sequential
-    and restricts the look-behind and look-ahead to the activation's own parent
-    container. Both parts are load-bearing: EvolvableMultiInput holds its
-    sub-networks in a ModuleDict with a bare final_dense tail and so has no
-    single sequential to unwrap, while a duelling head's two streams are siblings,
-    so scanning past the parent would pair a value-stream activation with an
-    advantage-stream layer.
-
     Any normalisation applied between the producer and the activation is returned
     alongside them, tracked as "the last norm seen since the running producer" and
     cleared whenever a later weight layer takes over. That is what distinguishes
@@ -343,8 +294,6 @@ def _resolve_producer_and_next(
 
         parent = name.rpartition(".")[0]
         prefix = f"{parent}." if parent else ""
-        # The activation's outermost container: layers inside it are either its
-        # own stream or a sibling stream, never something it feeds into.
         container = name.split(".")[0]
 
         producer: nn.Module | None = None
@@ -358,23 +307,21 @@ def _resolve_producer_and_next(
                 continue
             in_stream = other_name.startswith(prefix)
             if not passed and in_stream and isinstance(other, NORM_LAYER_TYPES):
-                norm = other  # applies to the running producer's outputs
+                norm = other
                 continue
             if not _is_weight_layer(other):
                 continue
             if not passed:
                 if in_stream:
-                    producer = other  # keep the nearest one behind
-                    norm = None  # anything seen so far normalised its input
+                    producer = other
+                    norm = None
             elif in_stream:
                 if not consumers:
-                    consumers = [other]  # the nearest one ahead ends the search
+                    consumers = [other]
             elif enclosing is None and not other_name.startswith(f"{container}."):
                 enclosing = other
 
         if not consumers and is_encoder:
-            # Either the encoder's terminal activation or the tail of a nested
-            # sub-encoder, whose neurons the encoder's own fusion layer consumes.
             consumers = (
                 [enclosing] if enclosing is not None else _head_entry_layers(head)
             )
@@ -385,13 +332,7 @@ def _resolve_producer_and_next(
 
 
 def _live_column_scale(weight: torch.Tensor, stride: int, keep: list[int]) -> float:
-    """The median outgoing-column norm of a consumer over keep, strictly positive.
-
-    One "column" is everything a single producer neuron owns in the consumer,
-    which is a different slice per boundary: a whole (out_c, *kernel) filter
-    for a convolutional consumer, stride adjacent columns at a
-    conv -> flatten -> dense boundary, and a single column otherwise.
-    """
+    """The median outgoing-column norm of a consumer over keep, strictly positive."""
     if weight.dim() > 2:  # conv consumer: one filter per producer neuron
         blocks = weight.reshape(weight.shape[0], weight.shape[1], -1)
         fan_out = blocks.shape[0] * blocks.shape[2]  # conv fans count the kernel
@@ -421,11 +362,7 @@ def _live_column_scale(weight: torch.Tensor, stride: int, keep: list[int]) -> fl
 def _noise_params(
     module: nn.Module,
 ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
-    """A noisy layer's (weight_sigma, bias_sigma) data tensors.
-
-    ``(None, None)`` for an ordinary layer, so callers can treat the noise scale
-    as an optional second set of weights rather than branching on type.
-    """
+    """A noisy layer's (weight_sigma, bias_sigma) data tensors."""
     weight_sigma = getattr(module, "weight_sigma", None)
     bias_sigma = getattr(module, "bias_sigma", None)
     return (
@@ -456,7 +393,7 @@ def _revived_block(
     sampled = rng.standard_normal(size=tuple(template.shape))
     block = torch.as_tensor(sampled, dtype=template.dtype, device=template.device)
     norm = float(block.norm())
-    if norm <= 0.0:  # astronomically unlikely; fall back to the zero column
+    if norm <= 0.0:
         return torch.zeros_like(template)
     return block * (scale / norm)
 
@@ -618,10 +555,6 @@ def _reset_layer_neurons(
                 rng,
                 is_noise_scale=target.is_noise_scale,
             )
-        # A revived neuron's normalisation entry returns to the identity transform:
-        # the affine gain and shift and, for the batch norms, the running
-        # statistics. Tensors whose length does not match the producing layer are
-        # left alone.
         if norm is not None:
             for tensor, identity in (
                 (getattr(norm, "weight", None), 1.0),
@@ -690,12 +623,6 @@ def reset_dormant_neurons(
     encoder = getattr(network, "encoder", None)
     head = getattr(network, "head_net", None)
 
-    # Map each sub-module to the (channels, spatial) dims of its owning CNN, so a
-    # conv -> flatten -> dense consumer's spatial-adjacent columns can be split
-    # per feature map below. Indexing by producer keeps both the encoder's own
-    # conv stack and a nested feature_net's on one path; named_modules is
-    # outer-first, so a nested CNN's entry correctly overwrites the one its
-    # parent would have contributed.
     cnn_dims: dict[int, tuple[int, int]] = {}
     if encoder is not None:
         for _name, sub in encoder.named_modules():
@@ -722,15 +649,11 @@ def reset_dormant_neurons(
         if per_neuron.numel() != _weight_param(producer).data.shape[0]:
             continue
 
-        # Keyed on the producer, not the network: a nested sub-encoder's conv
-        # stack has its own flattened layout.
         cnn_channels, cnn_spatial = cnn_dims.get(id(producer), (None, None))
         consumers = _resolve_consumers(producer, next_layers, cnn_channels, cnn_spatial)
         if not consumers:
             continue
 
-        # At the encoder-head boundary a shared encoder's latent is consumed by
-        # every sharing network's head, so those columns need the same fade.
         if shared_latent_heads and any(
             layer is entry for layer in next_layers for entry in head_entries
         ):

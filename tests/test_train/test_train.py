@@ -5767,7 +5767,7 @@ def test_remove_saved_models():
 
 
 def _regrama_mutation() -> Mutations:
-    """A parameter-mutation operator with the amplified Gaussian band switched off."""
+    """A parameter-mutation operator with ReGraMa's dormant-neuron reset enabled."""
     return Mutations(
         no_mutation=0.2,
         architecture=0.0,
@@ -5778,7 +5778,6 @@ def _regrama_mutation() -> Mutations:
         mutation_sd=0.1,
         rand_seed=0,
         device="cpu",
-        amplified_gauss_param_mut=False,
         dormant_threshold=0.01,
     )
 
@@ -5826,8 +5825,8 @@ _pinned_weight = 5.0
 _reset_residual = 2.0
 
 
-def _random_reset_band_mutation(*, random_reset_param_mut: bool) -> Mutations:
-    """A parameter-mutation-only operator with the amplified band switched off."""
+def _gaussian_band_mutation() -> Mutations:
+    """A parameter-mutation-only operator applying the fixed 95%/5% Gaussian split."""
     return Mutations(
         no_mutation=0.0,
         architecture=0.0,
@@ -5838,8 +5837,6 @@ def _random_reset_band_mutation(*, random_reset_param_mut: bool) -> Mutations:
         mutation_sd=0.1,
         rand_seed=0,
         device="cpu",
-        amplified_gauss_param_mut=False,
-        random_reset_param_mut=random_reset_param_mut,
     )
 
 
@@ -5864,10 +5861,10 @@ def _smallest_pinned_magnitude(population) -> float:
     return min(tensor.abs().min().item() for tensor in _mutable_weights(population))
 
 
-class TestRandomResetParameterMutationCrossFamilyEvolution:
-    """The random-reset Gaussian band is switchable for every non-LLM family."""
+class TestGaussianParameterMutationCrossFamilyEvolution:
+    """The random-reset Gaussian band fires unconditionally for every non-LLM family."""
 
-    def evolve(self, family, *, random_reset_param_mut, cycles=3):
+    def evolve(self, family, *, cycles=3):
         """Run cycles of selection and parameter mutation over a pinned population."""
         algo_name, build_population = _CROSS_FAMILY_CASES[family]
         population = build_population()
@@ -5876,9 +5873,7 @@ class TestRandomResetParameterMutationCrossFamilyEvolution:
             elitism=True,
             population_size=8,
         )
-        mutation = _random_reset_band_mutation(
-            random_reset_param_mut=random_reset_param_mut
-        )
+        mutation = _gaussian_band_mutation()
 
         smallest = _pinned_weight
         for _cycle in range(cycles):
@@ -5897,26 +5892,11 @@ class TestRandomResetParameterMutationCrossFamilyEvolution:
     @pytest.mark.parametrize(
         "family", list(_CROSS_FAMILY_CASES), ids=list(_CROSS_FAMILY_CASES)
     )
-    def test_the_band_redraws_weights_when_left_on(self, family):
-        population, smallest = self.evolve(family, random_reset_param_mut=True)
+    def test_the_reset_band_redraws_weights(self, family):
+        population, smallest = self.evolve(family)
 
         assert len(population) == 8
         assert smallest < _reset_residual
-
-    @pytest.mark.parametrize(
-        "family", list(_CROSS_FAMILY_CASES), ids=list(_CROSS_FAMILY_CASES)
-    )
-    def test_switching_it_off_leaves_trained_weights_alone(self, family):
-        population, smallest = self.evolve(family, random_reset_param_mut=False)
-
-        assert len(population) == 8
-        assert smallest > _reset_residual
-        for agent in population:
-            for _network_id, network in agent.eval_networks():
-                assert all(
-                    torch.isfinite(value).all()
-                    for value in network.state_dict().values()
-                )
 
 
 class TestRegramaCrossFamilyEvolution:

@@ -8259,20 +8259,15 @@ class TestGraMaCapture:
 
         assert not activation._backward_hooks
 
-    def test_hooks_are_released_when_the_block_raises(self, dqn_agent):
+    def test_hooks_left_by_an_aborted_block_are_cleared_by_the_next_one(
+        self,
+        dqn_agent,
+    ):
         activation = target_activations(dqn_agent.actor)[0]
-
-        def blow_up() -> None:
-            msg = "training blew up"
-            raise RuntimeError(msg)
-
         dqn_agent.capture_grama = True
         dqn_agent.init_training_step()
-        with pytest.raises(RuntimeError):
-            blow_up()
+        assert activation._backward_hooks
 
-        # A trainer whose block raises never reaches finalize_training_step, so
-        # reopening a block is what clears the hooks it left behind.
         dqn_agent.capture_grama = False
         dqn_agent.init_training_step()
 
@@ -8330,23 +8325,6 @@ class TestGraMaCapture:
 
         assert all(entry is None for entry in dqn_agent.grama_scores[0])
 
-    def test_an_uncollectable_snapshot_is_reported_as_missing(self, dqn_agent):
-        # Storing the snapshot must never break training either.
-        class Unreadable:
-            def __iter__(self):
-                msg = "snapshot went away"
-                raise RuntimeError(msg)
-
-        activation = target_activations(dqn_agent.actor)[0]
-        dqn_agent.capture_grama = True
-        dqn_agent.init_training_step()
-        dqn_agent._grama_latest = [Unreadable()]
-
-        dqn_agent.finalize_training_step(1)
-
-        assert dqn_agent.grama_scores is None
-        assert not activation._backward_hooks
-
     def test_capture_never_breaks_on_an_agent_without_networks(
         self,
         dqn_agent,
@@ -8381,37 +8359,13 @@ class TestSetGraMaCapture:
 
         assert dqn_agent.capture_grama is False
 
-    def test_compiled_agents_still_capture_but_are_warned(self, dqn_agent):
-        # Capture works through torch.compile; what it costs is the compiled
-        # graph, which fragments around the hooks. That is the user's call to
-        # make, so the operator reports it and carries on.
+    def test_compiled_agents_capture(self, dqn_agent, recwarn):
         dqn_agent.torch_compiler = "default"
 
-        with pytest.warns(UserWarning, match=r"torch\.compile"):
-            set_grama_capture([dqn_agent], self.FakeMutation())
+        set_grama_capture([dqn_agent], self.FakeMutation())
 
         assert dqn_agent.capture_grama is True
-
-    def test_compiled_agents_are_warned_about_once(
-        self,
-        dqn_agent,
-        vector_space,
-        discrete_space,
-    ):
-        # One notice per population, not one per agent.
-        second = DQN(
-            vector_space,
-            discrete_space,
-            net_config=grama_mlp_net_config(),
-            device="cpu",
-        )
-        dqn_agent.torch_compiler = second.torch_compiler = "default"
-
-        with pytest.warns(UserWarning, match=r"torch\.compile") as caught:
-            set_grama_capture([dqn_agent, second], self.FakeMutation())
-
-        assert len(caught) == 1
-        assert all(agent.capture_grama for agent in (dqn_agent, second))
+        assert not any(issubclass(w.category, UserWarning) for w in recwarn.list)
 
 
 class TestEvalNetworks:

@@ -154,39 +154,19 @@ def test_get_validated_rejects_a_non_tournament_strategy() -> None:
 
 
 def test_get_validated_accepts_the_core_parameter_mutation_fields() -> None:
-    # The ReGraMa band fields are accepted at their defaults but never forwarded to Arena
+    # The dormant_threshold field is accepted at its default but never forwarded to Arena
     with patch("agilerl.arena.models.manifest.logger") as mock_logger:
         payload = TrainingManifest.get_validated(
             _manifest(
                 mutation={
                     "mutation_sd": 0.2,
-                    "amplified_gauss_param_mut": True,
-                    "random_reset_param_mut": True,
                     "dormant_threshold": 0.05,
                 }
             )
         )
     mock_logger.warning.assert_not_called()
     assert payload["mutation"]["mutation_sd"] == 0.2
-    assert not {
-        "amplified_gauss_param_mut",
-        "random_reset_param_mut",
-        "dormant_threshold",
-    } & set(payload["mutation"])
-
-
-@pytest.mark.parametrize(
-    "mutation",
-    [
-        {"amplified_gauss_param_mut": False},
-        {"random_reset_param_mut": False},
-    ],
-)
-def test_get_validated_rejects_unsupported_parameter_mutations(mutation: dict) -> None:
-    # Arena runs the default Gaussian parameter mutation bands only, so a request
-    # the platform cannot support must fail
-    with pytest.raises(ValidationError, match="Gaussian parameter mutation bands"):
-        TrainingManifest.get_validated(_manifest(mutation=mutation))
+    assert "dormant_threshold" not in set(payload["mutation"])
 
 
 def test_get_validated_reports_unknown_keys_under_the_current_selection_key() -> None:

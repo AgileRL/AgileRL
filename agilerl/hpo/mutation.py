@@ -248,13 +248,6 @@ class Mutations:
     :type device: str, optional
     :param accelerator: Accelerator for distributed computing, defaults to None
     :type accelerator: accelerate.Accelerator(), optional
-    :param amplified_gauss_param_mut: Apply the amplified ("super") band of the Gaussian
-        parameter mutation, defaults to False.
-    :type amplified_gauss_param_mut: bool, optional
-    :param random_reset_param_mut: Apply the random-reset band of the Gaussian parameter
-        mutation, which redraws a weight from N(0, 1) and so discards its trained value,
-        defaults to True.
-    :type random_reset_param_mut: bool, optional
     :param dormant_threshold: Normalised GraMa score at or below which a neuron counts as
         dormant, defaults to 0.01. Every parameter mutation resets the neurons that fall
         at or below this threshold (ReGraMa) before adding Gaussian noise; this works on a
@@ -278,8 +271,6 @@ class Mutations:
         rand_seed: int | None = None,
         device: str = "cpu",
         accelerator: Accelerator | None = None,
-        amplified_gauss_param_mut: bool = False,
-        random_reset_param_mut: bool = True,
         dormant_threshold: float = 0.01,
     ) -> None:
         if activation_selection is None:
@@ -345,14 +336,6 @@ class Mutations:
         if isinstance(rand_seed, int):
             assert rand_seed >= 0, "Random seed must be greater than or equal to zero."
         assert isinstance(
-            amplified_gauss_param_mut,
-            bool,
-        ), "Amplified Gaussian parameter mutation must be boolean value True or False."
-        assert isinstance(
-            random_reset_param_mut,
-            bool,
-        ), "Random reset parameter mutation must be boolean value True or False."
-        assert isinstance(
             dormant_threshold,
             (float, int),
         ), "Dormant threshold must be a float or integer."
@@ -379,8 +362,6 @@ class Mutations:
         self.device = device
         self.accelerator = accelerator
 
-        self.amplified_gauss_param_mut = amplified_gauss_param_mut
-        self.random_reset_param_mut = random_reset_param_mut
         self.dormant_threshold = dormant_threshold
         self._warned_no_snapshot = False
         self._pre_training_mut = False
@@ -680,9 +661,9 @@ class Mutations:
 
         Runs in two stages. ReGraMa mutations first re-initialise the neurons that
         have gone dormant, across every evaluation network of the agent. Gaussian
-        noise is then added to the policy network, in the random-reset, ordinary and
-        amplified bands. The random-reset and amplified bands are each dropped when
-        random_reset_param_mut or amplified_gauss_param_mut is unset.
+        noise is then added to the policy network: a fixed 5% of the sampled weights
+        are redrawn from N(0, 1) (the random-reset band) and the remaining 95% are
+        perturbed in proportion to their own magnitude (the ordinary band).
 
         .. note::
             This is currently not supported for :class:`LLMAlgorithm <agilerl.algorithms.core.LLMAlgorithm>` agents.
@@ -984,6 +965,12 @@ class Mutations:
     def _gaussian_parameter_mutation(self, network: EvolvableModule) -> EvolvableModule:
         """Return network with mutated weights using a Gaussian distribution.
 
+        Of the weights sampled for mutation, a fixed 5% are redrawn from N(0, 1)
+        (the random-reset band) and the remaining 95% are perturbed with noise
+        proportional to their own magnitude (the ordinary band). The split is
+        unconditional: every parameter mutation applies both bands in this
+        proportion.
+
         :param network: Neural network to mutate.
         :type network: EvolvableModule
         :return: Mutated network.
@@ -992,9 +979,7 @@ class Mutations:
         # Parameters controlling mutation strength and probabilities
         mut_strength = self.mutation_sd
         num_mutation_frac = 0.1
-        super_mut_strength = 10
-        super_mut_prob = 0.05
-        reset_prob = super_mut_prob + 0.05
+        reset_prob = 0.05
         mag_limit = 1000000
 
         model_params: dict[str, torch.Tensor] = network.state_dict()
@@ -1033,27 +1018,9 @@ class Mutations:
             current_vals: torch.Tensor = W[rows_tensor, cols_tensor]
             new_vals = current_vals.clone()
 
-            # Create masks for the different mutation types
-            mask_super = rand_vals_tensor < super_mut_prob
-            mask_reset = (rand_vals_tensor >= super_mut_prob) & (
-                rand_vals_tensor < reset_prob
-            )
+            # Fixed, unconditional split between the two Gaussian bands.
+            mask_reset = rand_vals_tensor < reset_prob
             mask_normal = rand_vals_tensor >= reset_prob
-
-            # Dropping a band leaves its weights at their trained values.
-            if not self.amplified_gauss_param_mut:
-                mask_super = torch.zeros_like(mask_super)
-            if not self.random_reset_param_mut:
-                mask_reset = torch.zeros_like(mask_reset)
-
-            # Super mutation: add noise with std proportional to the absolute current value times super_mut_strength
-            if mask_super.sum() > 0:
-                std_super = (super_mut_strength * current_vals[mask_super]).abs()
-                noise_super = torch.normal(
-                    mean=torch.zeros_like(std_super),
-                    std=std_super,
-                )
-                new_vals[mask_super] = current_vals[mask_super] + noise_super
 
             # Reset mutation: completely reset the weight using N(0, 1)
             num_reset = int(mask_reset.sum())

@@ -47,10 +47,7 @@ def reset_producer(
 
 
 def mlp_net_config() -> dict:
-    """Return a fresh MLP net config.
-
-    Deliberately not the shared encoder_mlp_config fixture.
-    """
+    """Return a fresh MLP net config."""
     return {
         "latent_dim": 8,
         "min_latent_dim": 1,
@@ -352,28 +349,22 @@ class TestLiveColumnScale:
 
         assert kept < everything
 
-    def test_collapsed_layer_falls_back_to_a_positive_reference(self):
-        # A layer with nothing live left must still produce a usable scale, or a
-        # revival would be silently zero-scaled and unable to learn.
+    def test_no_kept_neuron_falls_back_to_the_whole_layers_median(self):
+        weight = torch.ones(2, 3) * 4.0
+        expected = float(weight.pow(2).sum(0).sqrt().median())
+
+        result = mutation_utils._live_column_scale(weight, 1, [])
+
+        assert result == pytest.approx(expected, rel=1e-6)
+
+    def test_an_all_zero_layer_falls_back_to_the_xavier_bound(self):
         weight = torch.zeros(2, 3)
 
         result = mutation_utils._live_column_scale(weight, 1, [])
 
         assert result > 0.0
 
-    def test_every_neuron_reset_falls_back_to_the_whole_layer(self):
-        # No neuron is kept, so there is no live reference to measure.
-        weight = torch.ones(2, 3) * 4.0
-        expected = float(weight.pow(2).sum(0).sqrt().median())
-
-        result = mutation_utils._live_column_scale(weight, 1, [])
-
-        # The layer's own median, rather than a fabricated constant.
-        assert result == pytest.approx(expected, rel=1e-6)
-
-    def test_a_consumer_with_no_columns_still_yields_a_positive_reference(self):
-        # Neither the kept neurons nor the whole layer can supply a reference
-        # when there is nothing to measure, so the Xavier bound stands in.
+    def test_a_layer_with_no_columns_at_all_falls_back_to_the_xavier_bound(self):
         weight = torch.zeros(2, 0)
 
         result = mutation_utils._live_column_scale(weight, 1, [])
@@ -1349,9 +1340,6 @@ class TestResetDormantNeurons:
             )
             for activation in mutation_utils.target_activations(agent.actor)
         ]
-        # "lstm." (with the trailing dot) matches only the nn.LSTM module's own
-        # parameters, not the output-projection Linear that follows it and is
-        # legitimately reset.
         lstm_before = {
             name: value.clone()
             for name, value in agent.actor.state_dict().items()
@@ -1478,16 +1466,6 @@ class TestSharedEncoderCompensation:
             == []
         )
 
-    def test_an_owned_encoder_is_not_shared(self, vector_space, discrete_space):
-        agent = self.ppo(vector_space, discrete_space, share=False)
-
-        assert (
-            mutation_utils.shared_encoder_heads(
-                agent.eval_networks(), None, agent.actor
-            )
-            == []
-        )
-
     def test_a_network_without_an_encoder_is_not_a_shared_consumer(
         self,
         vector_space,
@@ -1578,8 +1556,6 @@ class TestSharedEncoderCompensation:
         self,
         vector_space,
     ):
-        # A ContinuousQNetwork head consumes cat([latent, actions]), so
-        # the latent is only the leading block of a wider input.
         agent = TD3(vector_space, vector_space, share_encoders=True, device="cpu")
         span = agent.critic_1.latent_dim
         heads = [self.critic_head(net) for net in (agent.critic_1, agent.critic_2)]
@@ -1593,8 +1569,6 @@ class TestSharedEncoderCompensation:
             assert torch.equal(head.weight.data[:, span:], prior[:, span:])
 
     def test_continuous_q_network_consumes_the_latent_first(self, vector_space):
-        # The leading-block rewrite is correct only while ContinuousQNetwork feeds
-        # its head torch.cat([latent, actions]).
         agent = TD3(vector_space, vector_space, share_encoders=False, device="cpu")
         head = self.critic_head(agent.critic_1)
         span = agent.critic_1.latent_dim

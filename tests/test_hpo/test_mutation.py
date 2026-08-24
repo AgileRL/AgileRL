@@ -2672,9 +2672,8 @@ def _zeroed_biases(module) -> int:
 
 
 _pinned_weight = 5.0
-# Band separators, each mid-gap between what the neighbouring bands can reach on a
+# Band separators, each mid-gap between what the two bands can reach on a
 # pinned weight: ordinary noise is N(0, 0.5) here, while a reset redraws from N(0, 1).
-_band_ceiling = 20.0
 _reset_floor = 3.0
 _reset_residual = 2.0
 
@@ -2698,9 +2697,7 @@ def _pinned_policy() -> EvolvableModule:
     return network
 
 
-def _pinned_gaussian_pass(
-    *, amplified_gauss_param_mut: bool = False, random_reset_param_mut: bool = True
-):
+def _pinned_gaussian_pass():
     """Run one Gaussian pass over an identically seeded pinned policy."""
     network = _pinned_policy()
     baseline = {key: value.clone() for key, value in network.state_dict().items()}
@@ -2712,8 +2709,6 @@ def _pinned_gaussian_pass(
         0,
         0,
         rand_seed=0,
-        amplified_gauss_param_mut=amplified_gauss_param_mut,
-        random_reset_param_mut=random_reset_param_mut,
     )._gaussian_parameter_mutation(network)
     return baseline, network.state_dict()
 
@@ -2732,14 +2727,32 @@ def _smallest_magnitude(baseline, after) -> float:
     )
 
 
+def _ordinary_band_step_exists(baseline, after) -> bool:
+    """Return whether any pinned entry moved by an ordinary-band-sized step.
+
+    An ordinary step has standard deviation mutation_sd * pinned_weight = 0.5,
+    so a nonzero step under _reset_floor that leaves the weight still far from
+    zero can only be the ordinary band: a reset redraws from N(0, 1) and so
+    almost never lands within reach of the original pinned value.
+    """
+    for key, value in baseline.items():
+        if not bool((value == _pinned_weight).all()):
+            continue
+        after_value = after[key]
+        delta = (after_value - value).abs()
+        small_step = (delta > 0) & (delta < _reset_floor)
+        far_from_zero = after_value.abs() > _reset_residual
+        if bool((small_step & far_from_zero).any()):
+            return True
+    return False
+
+
 class TestMutationsRegramaConstructor:
-    """Validate the three parameter-mutation switches at construction time."""
+    """Validate the parameter-mutation dormancy threshold at construction time."""
 
     def test_defaults(self):
         muts = Mutations(0, 0, 0, 1, 0, 0)
 
-        assert muts.amplified_gauss_param_mut is False
-        assert muts.random_reset_param_mut is True
         assert muts.dormant_threshold == 0.01
 
     def test_zero_dormant_threshold_is_accepted(self):
@@ -2751,80 +2764,22 @@ class TestMutationsRegramaConstructor:
         with pytest.raises(AssertionError, match="Dormant threshold"):
             Mutations(0, 0, 0, 1, 0, 0, dormant_threshold=-0.1)
 
-    @pytest.mark.parametrize(
-        "kwargs",
-        [
-            {"amplified_gauss_param_mut": 1},
-            {"random_reset_param_mut": 0},
-        ],
-        ids=["amplified_gauss", "random_reset"],
-    )
-    def test_non_boolean_switches_are_rejected(self, kwargs):
-        with pytest.raises(AssertionError, match="boolean value"):
-            Mutations(0, 0, 0, 1, 0, 0, **kwargs)
 
+class TestMutationsGaussianParameterMutationFixedSplit:
+    """The Gaussian parameter mutation applies a fixed, unconditional 95%/5% split."""
 
-class TestMutationsAmplifiedGaussParameterMutation:
-    """Switch the amplified Gaussian band off without touching the others."""
-
-    def test_amplified_band_moves_weights_far_beyond_the_ordinary_one(self):
-        baseline, after = _pinned_gaussian_pass(amplified_gauss_param_mut=True)
-
-        # Neither of the other two bands can reach this far, so the step
-        # is the amplified band's and nothing else.
-        assert _largest_step(baseline, after) > _band_ceiling
-
-    def test_switching_it_off_leaves_those_weights_at_their_trained_values(self):
-        baseline, after = _pinned_gaussian_pass(amplified_gauss_param_mut=False)
-
-        # With the band gone every remaining step is within the reach of
-        # the reset and ordinary bands, i.e. no weight was amplified at all.
-        assert _largest_step(baseline, after) < _band_ceiling
-
-    def test_the_other_bands_still_fire_with_the_amplified_one_off(self):
-        baseline, after = _pinned_gaussian_pass(amplified_gauss_param_mut=False)
-
-        assert any(not torch.equal(baseline[k], after[k]) for k in baseline)
-
-
-class TestMutationsRandomResetParameterMutation:
-    """Switch the random-reset Gaussian band off without touching the others."""
-
-    def test_reset_band_redraws_weights_from_a_unit_normal(self):
-        # The amplified band is held off, so only a reset can move a pinned
-        # weight this far, and only a reset can leave one this close to zero.
-        baseline, after = _pinned_gaussian_pass(
-            amplified_gauss_param_mut=False,
-            random_reset_param_mut=True,
-        )
+    def test_the_reset_band_fires(self):
+        # Only a reset can move a pinned weight this far, and only a reset can
+        # leave one this close to zero.
+        baseline, after = _pinned_gaussian_pass()
 
         assert _largest_step(baseline, after) > _reset_floor
         assert _smallest_magnitude(baseline, after) < _reset_residual
 
-    def test_switching_it_off_leaves_those_weights_at_their_trained_values(self):
-        baseline, after = _pinned_gaussian_pass(
-            amplified_gauss_param_mut=False,
-            random_reset_param_mut=False,
-        )
+    def test_the_ordinary_band_also_fires_in_the_same_pass(self):
+        baseline, after = _pinned_gaussian_pass()
 
-        assert _largest_step(baseline, after) < _reset_floor
-        assert _smallest_magnitude(baseline, after) > _reset_residual
-
-    def test_the_ordinary_band_still_fires_with_both_bands_off(self):
-        baseline, after = _pinned_gaussian_pass(
-            amplified_gauss_param_mut=False,
-            random_reset_param_mut=False,
-        )
-
-        assert any(not torch.equal(baseline[k], after[k]) for k in baseline)
-
-    def test_the_amplified_band_is_untouched_by_the_reset_switch(self):
-        baseline, after = _pinned_gaussian_pass(
-            amplified_gauss_param_mut=True,
-            random_reset_param_mut=False,
-        )
-
-        assert _largest_step(baseline, after) > _band_ceiling
+        assert _ordinary_band_step_exists(baseline, after)
 
 
 class TestMutationsRegramaParameterMutation:

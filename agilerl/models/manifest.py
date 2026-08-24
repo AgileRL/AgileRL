@@ -282,14 +282,7 @@ def _default_selection_strategy(
     return value
 
 
-# These MutationSpec fields default differently on the Arena side (Arena only
-# supports the full three-band Gaussian mutation, so it always defaults to True
-# regardless of what core defaults to). A field the user never set must not be
-# forwarded to Arena as an explicit value, or a manifest that never touched
-# ReGraMa would be rejected over a value it never asked for.
-_ARENA_DIVERGENT_MUTATION_FIELDS = frozenset(
-    {"amplified_gauss_param_mut", "random_reset_param_mut", "dormant_threshold"}
-)
+_ARENA_DIVERGENT_MUTATION_FIELDS = frozenset({"dormant_threshold"})
 
 
 def _drop_unset_arena_divergent_mutation_fields(

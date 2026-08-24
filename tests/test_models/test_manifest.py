@@ -1039,11 +1039,6 @@ class TestTrainingManifestArenaBridge:
     def test_to_arena_manifest_untouched_mutation_field_does_not_leak_core_default(
         self,
     ):
-        # amplified_gauss_param_mut defaults to False on the core spec (to keep
-        # local training conservative) but Arena only supports it True. A
-        # manifest that only sets mutation_sd never asked for that default, so
-        # it must reach Arena as if the field were absent rather than as an
-        # explicit False that Arena would then reject.
         core = TrainingManifest.model_validate(
             {
                 "algorithm": {"name": "DQN"},
@@ -1053,29 +1048,7 @@ class TestTrainingManifestArenaBridge:
         )
         submission = TrainingManifest.to_arena_manifest(core)
         assert submission["mutation"]["mutation_sd"] == 0.2
-        assert "amplified_gauss_param_mut" not in submission["mutation"]
-
-    def test_to_arena_manifest_explicit_amplified_gauss_param_mut_is_forwarded(self):
-        core = TrainingManifest.model_validate(
-            {
-                "algorithm": {"name": "DQN"},
-                "environment": {"name": "CartPole-v1"},
-                "mutation": {"amplified_gauss_param_mut": True},
-            }
-        )
-        # Accepted: an explicit True matches what Arena requires.
-        TrainingManifest.to_arena_manifest(core)
-
-    def test_to_arena_manifest_explicit_disabled_band_is_still_rejected(self):
-        core = TrainingManifest.model_validate(
-            {
-                "algorithm": {"name": "DQN"},
-                "environment": {"name": "CartPole-v1"},
-                "mutation": {"amplified_gauss_param_mut": False},
-            }
-        )
-        with pytest.raises(ValidationError, match="Gaussian parameter mutation bands"):
-            TrainingManifest.to_arena_manifest(core)
+        assert "dormant_threshold" not in submission["mutation"]
 
     def test_to_arena_manifest_from_yaml_path(self, tmp_path):
         manifest_path = tmp_path / "manifest.yaml"
@@ -1410,67 +1383,6 @@ class TestLocalTrainerLLM:
 # ============================================================================
 # TestFromConfigFiles - integration tests loading actual YAML configs
 # ============================================================================
-
-# Every shipped manifest spells out the default explicitly.
-_RANDOM_RESET_PARAM_MUT_CONFIGS = [
-    ("ppo/ppo.yaml", True),
-    ("dqn/dqn.yaml", True),
-    ("cqn.yaml", True),
-    ("bandit/neural_ucb.yaml", True),
-    ("multi_agent/ippo.yaml", True),
-    ("multi_agent/maddpg.yaml", True),
-]
-
-
-class TestRandomResetParamMutManifestField:
-    """The mutation.random_reset_param_mut switch as it is written in a manifest."""
-
-    @pytest.mark.parametrize(
-        ("rel_path", "expected"),
-        _RANDOM_RESET_PARAM_MUT_CONFIGS,
-        ids=[path for path, _ in _RANDOM_RESET_PARAM_MUT_CONFIGS],
-    )
-    def test_shipped_manifests_carry_the_intended_value(self, rel_path, expected):
-        config_path = CONFIGS_DIR / rel_path
-        if not config_path.exists():
-            pytest.skip(f"Config not found: {config_path}")
-
-        with open(config_path) as fh:
-            validated = TrainingManifest.get_validated(
-                yaml.safe_load(fh), mode="python"
-            )
-
-        assert validated.mutation.random_reset_param_mut is expected
-
-    def test_defaults_to_true_when_the_manifest_omits_it(self):
-        validated = TrainingManifest.get_validated(
-            _make_manifest({"name": "DQN"}, env={"name": "CartPole-v1"}, mutation={}),
-            mode="python",
-        )
-
-        assert validated.mutation.random_reset_param_mut is True
-
-    def test_unknown_neighbouring_key_is_reported_informatively(self):
-        with pytest.raises(ValueError, match="random_reset_param_mutation"):
-            TrainingManifest.get_validated(
-                _make_manifest(
-                    {"name": "DQN"},
-                    env={"name": "CartPole-v1"},
-                    mutation={"random_reset_param_mutation": False},
-                )
-            )
-
-    @pytest.mark.parametrize("value", ["maybe", 1.5, None])
-    def test_non_boolean_value_is_rejected_informatively(self, value):
-        with pytest.raises(ValueError, match=r"random_reset_param_mut[\s\S]*bool"):
-            TrainingManifest.get_validated(
-                _make_manifest(
-                    {"name": "DQN"},
-                    env={"name": "CartPole-v1"},
-                    mutation={"random_reset_param_mut": value},
-                )
-            )
-
 
 _SINGLE_AGENT_CONFIGS = [
     ("dqn/dqn.yaml", DQNSpec, MlpSpec),

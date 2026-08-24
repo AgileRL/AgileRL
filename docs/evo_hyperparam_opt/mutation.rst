@@ -189,44 +189,14 @@ Network Parameter Mutations
 ---------------------------
 AgileRL allows mutations on the weights of the policy registered through
 :func:`EvolvableAlgorithm.register_network_group() <agilerl.algorithms.core.base.EvolvableAlgorithm.register_network_group>`. Specifically, it selects
-10% of the weights randomly to mutate (ignoring normalization layers) and applies a Gaussian noise with a standard deviation of ``mutation_sd`` to them. It does so
-in three different ways, clamping mutated values to prevent extreme changes:
+10% of the weights randomly to mutate (ignoring normalization layers) and applies a Gaussian noise with a standard deviation of ``mutation_sd`` to them, clamping
+mutated values to prevent extreme changes. Each selected weight lands in one of two fixed bands:
 
-    - **Normal mutation**: Adds noise with standard deviation proportional to current weight values.
+    - **Normal mutation** (95% of the selected weights): Adds noise with standard deviation proportional to the weight's own current value, scaled by ``mutation_sd``.
 
-    - **Super mutation**: Adds larger noise for more significant changes.
+    - **Reset mutation** (5% of the selected weights): Completely replaces the weight with a fresh draw from a unit normal, discarding its trained value.
 
-    - **Reset mutation**: Completely resets weights to new random values.
-
-Enabling super mutations
-~~~~~~~~~~~~~~~~~~~~~~~~
-
-The super ("amplified") band draws its noise with a standard deviation of ten times each weight's own
-magnitude. That is a deliberately large jump, and on a well-trained agent it is sometimes large enough to
-undo the learning that earned the agent its place in the population, so it is off by default. Set
-``amplified_gauss_param_mut: true`` to add it alongside the normal and random-reset bands.
-
-.. code-block:: yaml
-
-    mutation:
-        mutation_sd: 0.1
-        amplified_gauss_param_mut: true   # also apply the amplified band
-
-Switching off reset mutations
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-The random-reset band does not perturb a weight, it *replaces* it. The trained value is discarded and a
-fresh one is drawn from a unit normal, ignoring both what the weight had become and the scale its
-layer was initialised at. That is the most aggressive of the three bands, and on an agent that has
-already learned something worth keeping it is sometimes (not always) destructive enough to set
-training back noticeably. Set ``random_reset_param_mut: false`` to drop it. It defaults to ``true``,
-so existing configurations behave exactly as before.
-
-.. code-block:: yaml
-
-    mutation:
-        mutation_sd: 0.1
-        random_reset_param_mut: false   # keep only the normal band (amplified is off by default too)
+The split is fixed and unconditional — every parameter mutation applies both bands in this proportion.
 
 .. _regrama:
 
