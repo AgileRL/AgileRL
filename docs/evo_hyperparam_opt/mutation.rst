@@ -196,9 +196,9 @@ When it applies
 There is nothing to configure: preservation is applied automatically, per mutation, whenever the
 architecture supports it. Widening stands down when:
 
-  * a **normalisation** layer sits between the widened units and their activation, since it re-scales
-    them using statistics pooled over the whole layer and so moves every existing unit however small
-    the new fan-out is;
+  * a **normalisation** layer sits anywhere between the widened layer and the layer that reads it,
+    since it re-scales the units using statistics pooled over the whole layer and so moves every
+    existing unit however small the new fan-out is;
   * the activation **mixes units together** (``Softmax``, ``LogSoftmax``, ``Softmin`` or
     ``GumbelSoftmax``);
   * the widened layer sits **inside** a **recurrent** core, a **multi-input** encoder, a **residual**
@@ -218,7 +218,7 @@ gets preservation is not silent.
 .. note::
     Widening applies a small perturbation to the new outgoing weights. This lets gradients flow faster to
     the new units. Preservation is therefore near-exact. For noisy layers the guarantee is an evaluation-mode
-    one: a rebuilt ``NoisyLinear`` resamples its noise buffers,  which moves the training-mode output of every
+    one: a rebuilt ``NoisyLinear`` resamples its noise buffers, which moves the training-mode output of every
     unit, new or not.
 
 RL Hyperparameter Mutations

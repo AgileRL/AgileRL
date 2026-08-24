@@ -3231,9 +3231,10 @@ class TestMutationsFunctionPreservingConvolutionalEncoder:
     """A convolutional encoder is preserved through the whole operator."""
 
     @staticmethod
-    def widen_convolutions(steps=6):
+    def widen_convolutions(steps=6, seed=0):
         """Widen the encoder repeatedly, reporting the shift and layers grown."""
         agent = _cnn_dqn()
+        agent.actor.rng = np.random.default_rng(seed)
         observation = torch.rand(4, 3, 16, 16)
         mutations = _fp_mutations()
         shift, grown = 0.0, set()
@@ -3470,10 +3471,13 @@ class TestMutationsFunctionPreservingDegradation:
             )
 
     def test_a_fixup_that_writes_nothing_declines(self, monkeypatch):
+        """A structurally-supported addition can still find no layer to write."""
         _pin_mutation_method(monkeypatch, "head_net.add_node")
         monkeypatch.setattr(func_preservation, "preserve_added_nodes", _write_nothing)
 
-        with pytest.warns(UserWarning, match="function-preserving"):
+        with pytest.warns(
+            UserWarning, match=func_preservation.DECLINE_REASONS["not_written"]
+        ):
             _fp_mutations().architecture_mutate(_dqn())
 
     def test_a_layer_that_cannot_grow_is_silent(self, monkeypatch):

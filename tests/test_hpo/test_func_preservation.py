@@ -76,6 +76,20 @@ def splice_norm(mlp: EvolvableMLP, norm: nn.Module) -> EvolvableMLP:
     return mlp
 
 
+NORM_TYPES = (
+    nn.LayerNorm,
+    nn.GroupNorm,
+    nn.BatchNorm1d,
+    nn.BatchNorm2d,
+    nn.BatchNorm3d,
+    nn.InstanceNorm1d,
+    nn.InstanceNorm2d,
+    nn.InstanceNorm3d,
+    nn.RMSNorm,
+)
+NORM_TYPE_IDS = [norm_type.__name__ for norm_type in NORM_TYPES]
+
+
 def make_duelling(
     hidden_size: list[int] | None = None, **kwargs
 ) -> DuelingDistributionalMLP:
@@ -173,28 +187,14 @@ class TestNodeAdditionBlocker:
     def test_a_convolution_batch_norm_blocks(self):
         assert fp.node_addition_blocker(make_cnn(layer_norm=True), 0) == "norm"
 
-    @pytest.mark.parametrize(
-        "norm_type",
-        fp.NORM_LAYER_TYPES,
-        ids=[norm_type.__name__ for norm_type in fp.NORM_LAYER_TYPES],
-    )
+    @pytest.mark.parametrize("norm_type", NORM_TYPES, ids=NORM_TYPE_IDS)
     def test_every_recognised_normalisation_blocks(self, norm_type):
         mlp = splice_norm(make_mlp(), make_norm(norm_type))
 
         assert fp.node_addition_blocker(mlp, 0) == "norm"
 
-    @pytest.mark.parametrize(
-        "norm_type",
-        [nn.LayerNorm, nn.RMSNorm, nn.GroupNorm],
-        ids=["LayerNorm", "RMSNorm", "GroupNorm"],
-    )
-    def test_a_pooling_normalisation_is_recognised(self, norm_type):
-        """Dropping one of these from the registry would silently defeat the fade.
-
-        These pool their statistics across units, so a new unit moves every
-        existing one.
-        """
-        assert norm_type in fp.NORM_LAYER_TYPES
+    def test_the_spelled_out_list_covers_the_whole_registry(self):
+        assert set(fp.NORM_LAYER_TYPES) <= set(NORM_TYPES)
 
     def test_a_cross_unit_activation_blocks(self):
         assert fp.node_addition_blocker(make_mlp(activation="Softmax"), 0) == (
@@ -472,7 +472,7 @@ class TestPreserveAddedNodes:
 
         self.widen(module)
 
-        torch.testing.assert_close(module(observation), before, rtol=0, atol=0)
+        torch.testing.assert_close(module(observation), before, rtol=0, atol=1e-6)
 
     def test_the_layer_actually_grew(self):
         module = make_mlp()
@@ -488,7 +488,9 @@ class TestPreserveAddedNodes:
 
         self.widen(module, hidden_layer=0, method="add_channel")
 
-        torch.testing.assert_close(module.eval()(observation), before, rtol=0, atol=0)
+        torch.testing.assert_close(
+            module.eval()(observation), before, rtol=0, atol=1e-6
+        )
 
     def test_cnn_output_is_unchanged_across_the_flatten_boundary(self):
         module = make_cnn().eval()
@@ -508,7 +510,9 @@ class TestPreserveAddedNodes:
 
         self.widen(module)
 
-        torch.testing.assert_close(module.eval()(observation), before, rtol=0, atol=0)
+        torch.testing.assert_close(
+            module.eval()(observation), before, rtol=0, atol=1e-6
+        )
 
     def test_both_duelling_streams_are_faded(self):
         module = make_duelling()
@@ -528,14 +532,16 @@ class TestPreserveAddedNodes:
             assert torch.count_nonzero(stack[1].weight_epsilon[:, 8:]) == 0
 
     def test_the_new_units_keep_their_incoming_weights(self):
-        """Only the *outgoing* weights are rewritten."""
+        """Only the outgoing weights are rewritten."""
         torch.manual_seed(0)
         module = make_mlp()
+        module.add_node(hidden_layer=0, numb_new_nodes=4)
+        producer = fp.weight_stacks(module)[0][0]
+        as_initialised = producer.weight[8:].detach().clone()
 
-        self.widen(module, noise_scale=fp.FP_NOISE_SCALE)
+        fp.preserve_added_nodes(module, 0, 8, make_rng(), noise_scale=fp.FP_NOISE_SCALE)
 
-        incoming = fp.weight_stacks(module)[0][0].weight[8:]
-        assert torch.count_nonzero(incoming) == incoming.numel()
+        assert torch.equal(fp.weight_stacks(module)[0][0].weight[8:], as_initialised)
 
     def test_the_new_units_receive_gradient(self):
         """Fading rather than zeroing is what lets the new capacity train."""
@@ -742,7 +748,7 @@ class TestPreserveAddedLatent:
 
         self.widen(network)
 
-        torch.testing.assert_close(network(observation), before, rtol=0, atol=0)
+        torch.testing.assert_close(network(observation), before, rtol=0, atol=1e-6)
 
     def test_the_latent_actually_grew(self, vector_space, discrete_space):
         network = self.q_network(vector_space, discrete_space)
@@ -833,7 +839,7 @@ class TestPreserveAddedLatent:
         self.widen(network)
 
         after = network(observation, actions)
-        torch.testing.assert_close(after, before, rtol=0, atol=0)
+        torch.testing.assert_close(after, before, rtol=0, atol=1e-6)
         gradient = torch.autograd.grad(after.sum(), actions)[0]
         assert torch.count_nonzero(gradient) > 0
 

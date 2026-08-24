@@ -5794,29 +5794,21 @@ _FP_FAMILY_NET_CONFIG = {
 
 
 _ARCH_FAMILY_CASES = {
-    "off-policy (DQN)": (
-        "DQN",
-        lambda: _build_single_agent_population(DQN, _FP_FAMILY_NET_CONFIG),
+    "off-policy (DQN)": lambda: _build_single_agent_population(
+        DQN, _FP_FAMILY_NET_CONFIG
     ),
-    "multi-agent off-policy (MADDPG)": (
-        "MADDPG",
-        lambda: _build_maddpg_population(_FP_FAMILY_NET_CONFIG),
+    "multi-agent off-policy (MADDPG)": lambda: _build_maddpg_population(
+        _FP_FAMILY_NET_CONFIG
     ),
-    "multi-agent on-policy (IPPO)": (
-        "IPPO",
-        lambda: _build_ippo_population(_FP_FAMILY_NET_CONFIG),
+    "multi-agent on-policy (IPPO)": lambda: _build_ippo_population(
+        _FP_FAMILY_NET_CONFIG
     ),
-    "bandit (NeuralUCB)": (
-        "NeuralUCB",
-        lambda: _build_single_agent_population(NeuralUCB, _FP_FAMILY_NET_CONFIG),
+    "bandit (NeuralUCB)": lambda: _build_single_agent_population(
+        NeuralUCB, _FP_FAMILY_NET_CONFIG
     ),
-    "offline (CQN)": (
-        "CQN",
-        lambda: _build_single_agent_population(CQN, _FP_FAMILY_NET_CONFIG),
-    ),
-    "on-policy (PPO)": (
-        "PPO",
-        lambda: _build_single_agent_population(PPO, _FP_FAMILY_NET_CONFIG),
+    "offline (CQN)": lambda: _build_single_agent_population(CQN, _FP_FAMILY_NET_CONFIG),
+    "on-policy (PPO)": lambda: _build_single_agent_population(
+        PPO, _FP_FAMILY_NET_CONFIG
     ),
 }
 
@@ -5831,13 +5823,34 @@ def _fp_declines(recorded) -> set:
     }
 
 
+_FP_FIXUPS = ("preserve_added_nodes", "preserve_added_layer", "preserve_added_latent")
+
+
 @contextmanager
-def _no_unexpected_fp_fallback(expected=frozenset()):
-    """Assert the fixup stood down only where the architecture forces it."""
-    with warnings.catch_warnings(record=True) as recorded:
-        warnings.simplefilter("always")
-        yield
-    assert _fp_declines(recorded) <= set(expected)
+def _fp_fixup_engages(expected_declines=frozenset()):
+    """Assert additions reach the fixup, and it stands down only where forced."""
+    reached = []
+    originals = {name: getattr(func_preservation, name) for name in _FP_FIXUPS}
+
+    def spy(original):
+        def record(*args, **kwargs):
+            reached.append(original.__name__)
+            return original(*args, **kwargs)
+
+        return record
+
+    for name, original in originals.items():
+        setattr(func_preservation, name, spy(original))
+    try:
+        with warnings.catch_warnings(record=True) as recorded:
+            warnings.simplefilter("always")
+            yield
+    finally:
+        for name, original in originals.items():
+            setattr(func_preservation, name, original)
+
+    assert reached, "no architecture addition reached the fixup"
+    assert _fp_declines(recorded) <= set(expected_declines)
 
 
 def _arch_mutation(seed: int = 0) -> Mutations:
@@ -5883,7 +5896,6 @@ class TestFunctionPreservingCrossFamilyEvolution:
     def evolve(population, strategy, cycles: int = 3):
         """Run several evaluate-select-mutate cycles and return the population."""
         mutation = _arch_mutation()
-        applied = []
         for _ in range(cycles):
             _give_population_fitness(population)
             population = run_selection_and_mutation(
@@ -5893,36 +5905,33 @@ class TestFunctionPreservingCrossFamilyEvolution:
                 env_name="Env",
                 algo="algo",
             )
-            applied += [agent.mut for agent in population]
-        return population, applied
+        return population
 
     @pytest.mark.parametrize(
         "family", list(_ARCH_FAMILY_CASES), ids=list(_ARCH_FAMILY_CASES)
     )
     def test_the_fixup_engages_for_every_family(self, family):
         """Additions reach the fixup rather than falling back to random init."""
-        _, build_population = _ARCH_FAMILY_CASES[family]
+        build_population = _ARCH_FAMILY_CASES[family]
         population = build_population()
 
-        with _no_unexpected_fp_fallback():
-            _population, applied = self.evolve(
+        with _fp_fixup_engages():
+            self.evolve(
                 population,
                 TournamentSelection(
                     tournament_size=2, elitism=True, population_size=len(population)
                 ),
             )
 
-        assert any("add" in (mut or "") for mut in applied)
-
     @pytest.mark.parametrize(
         "family", list(_ARCH_FAMILY_CASES), ids=list(_ARCH_FAMILY_CASES)
     )
     def test_tournament_selection_evolves_every_family(self, family):
-        _, build_population = _ARCH_FAMILY_CASES[family]
+        build_population = _ARCH_FAMILY_CASES[family]
         population = build_population()
         before = _architecture_fingerprint(population)
 
-        population, _applied = self.evolve(
+        population = self.evolve(
             population,
             TournamentSelection(
                 tournament_size=2, elitism=True, population_size=len(population)
@@ -5937,7 +5946,7 @@ class TestFunctionPreservingCrossFamilyEvolution:
         "family", list(_ARCH_FAMILY_CASES), ids=list(_ARCH_FAMILY_CASES)
     )
     def test_multi_frequency_selection_evolves_every_family(self, family):
-        _, build_population = _ARCH_FAMILY_CASES[family]
+        build_population = _ARCH_FAMILY_CASES[family]
         population = build_population()
         for agent in population:
             agent.subpopulation_id = agent.index // 4
@@ -6047,7 +6056,7 @@ class TestFunctionPreservingTrainerWiring:
         )
         before = _architecture_fingerprint(population)
 
-        with _no_unexpected_fp_fallback():
+        with _fp_fixup_engages():
             population, _fitnesses = train_off_policy(
                 vec_env,
                 "CartPole-v1",
@@ -6080,7 +6089,7 @@ class TestFunctionPreservingTrainerWiring:
         )
         before = _architecture_fingerprint(population)
 
-        with _no_unexpected_fp_fallback():
+        with _fp_fixup_engages():
             population, _fitnesses = train_on_policy(
                 vec_env,
                 "CartPole-v1",
@@ -6113,7 +6122,7 @@ class TestFunctionPreservingTrainerWiring:
         )
         before = _architecture_fingerprint(population)
 
-        with _no_unexpected_fp_fallback():
+        with _fp_fixup_engages():
             population, _fitnesses = train_multi_agent_on_policy(
                 env,
                 "env_name",
@@ -6148,7 +6157,7 @@ class TestFunctionPreservingTrainerWiring:
         )
         before = _architecture_fingerprint(population)
 
-        with _no_unexpected_fp_fallback({"multi_input"}):
+        with _fp_fixup_engages({"multi_input"}):
             population, _fitnesses = train_multi_agent_off_policy(
                 env,
                 "env_name",
@@ -6182,7 +6191,7 @@ class TestFunctionPreservingTrainerWiring:
         )
         before = _architecture_fingerprint(population)
 
-        with _no_unexpected_fp_fallback():
+        with _fp_fixup_engages():
             population, _fitnesses = train_bandits(
                 env,
                 "bandit_env_name",
@@ -6223,7 +6232,7 @@ class TestFunctionPreservingTrainerWiring:
         }
         before = _architecture_fingerprint(population)
 
-        with _no_unexpected_fp_fallback():
+        with _fp_fixup_engages():
             population, _fitnesses = train_offline(
                 vec_env,
                 "CartPole-v1",

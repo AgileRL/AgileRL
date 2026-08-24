@@ -214,7 +214,8 @@ class Mutations:
     can be applied to an agent are:
 
     * No mutation
-    * Network architecture mutation - adding layers or nodes. Trained weights are reused and new weights are initialized randomly.
+    * Network architecture mutation - adding layers or nodes. Trained weights are reused, and added capacity is initialized to preserve the network's function
+      where the architecture allows it (see :ref:`function_preserving`), and randomly otherwise.
     * Network parameters mutation - mutating weights with Gaussian noise.
     * Network activation layer mutation - change of activation layer.
     * RL algorithm mutation - mutation of learning hyperparameter, (e.g. learning rate or batch size).
