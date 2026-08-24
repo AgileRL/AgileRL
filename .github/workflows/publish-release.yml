@@ -1,22 +1,22 @@
 ---
 name: Publish release
 
-# Stable PyPI path for spoke tags (proposal §4.6.5 / D1 / D12).
-# Hub never publishes stable agilerl to PyPI.
+# Public PyPI path for spoke tags. Uploads the already-published wheel/sdist
+# for that tag. Does not rebuild. Does not publish to any private index.
 #
-#   vX.Y.Z              → agilerl (public framework identity; ≡ hub agilerl/vX.Y.Z)
-#   agilerl-arena/vX.Y.Z → agilerl-arena (independent SDK semver)
+#   vX.Y.Z              → agilerl
+#   agilerl-arena/vX.Y.Z → agilerl-arena
 #
 # Preferred trigger: workflow_dispatch from an existing tag ref (pairs with
 # environment `pypi` required reviewers + tag deployment policy). Tag push
-# remains for §4.6.5; protect refs/tags/v* and refs/tags/agilerl-arena/v* via
+# remains supported; protect refs/tags/v* and refs/tags/agilerl-arena/v* via
 # a GitHub ruleset.
 #
-# Auth: PyPI Trusted Publishing (OIDC) only — no long-lived UV_PUBLISH_TOKEN.
-# Bind PyPI trusted publisher to owner AgileRL, repo AgileRL, this workflow, environment `pypi`.
-#
-# Wheel version comes from the triggering tag via SETUPTOOLS_SCM_PRETEND_VERSION_FOR_*
-# (hatch-vcs). pyproject.toml has no committed project.version.
+# Auth:
+#   fetch   — GitHub OIDC → read-only IAM role (repository variable
+#             AWS_CODEARTIFACT_READ_ROLE_ARN). No long-lived AWS keys.
+#   publish — PyPI Trusted Publishing (OIDC) via environment `pypi`.
+#             No UV_PUBLISH_TOKEN. Fetch credentials do not leak into publish.
 
 on:
     workflow_dispatch:
@@ -34,9 +34,12 @@ permissions:
     contents: read
 
 jobs:
-    build:
+    fetch:
         if: github.repository == 'AgileRL/AgileRL'
         runs-on: ubuntu-latest
+        permissions:
+            contents: read
+            id-token: write
         outputs:
             tag: ${{ steps.tag.outputs.tag }}
             version: ${{ steps.tag.outputs.version }}
@@ -76,45 +79,49 @@ jobs:
                   echo "package=${PKG}" >> "$GITHUB_OUTPUT"
                   echo "dist_name=${DIST}" >> "$GITHUB_OUTPUT"
 
-            - name: Checkout tag
+            - name: Checkout fetch script
               uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
               with:
-                  ref: ${{ steps.tag.outputs.tag }}
-                  fetch-depth: 0
-                  fetch-tags: true
+                  persist-credentials: false
+                  fetch-depth: 1
 
-            - name: Install uv
-              uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
-
-            - name: Build
+            - name: Require read role
               env:
-                  VER: ${{ steps.tag.outputs.version }}
-                  TAG: ${{ steps.tag.outputs.tag }}
-                  PKG: ${{ steps.tag.outputs.package }}
-                  DIST: ${{ steps.tag.outputs.dist_name }}
+                  AWS_CODEARTIFACT_READ_ROLE_ARN: ${{ vars.AWS_CODEARTIFACT_READ_ROLE_ARN }}
               run: |
                   set -euo pipefail
-                  case "${TAG}" in
-                    agilerl-arena/v*)
-                      export SETUPTOOLS_SCM_PRETEND_VERSION="${VER}"
-                      export SETUPTOOLS_SCM_PRETEND_VERSION_FOR_AGILERL_ARENA="${VER}"
-                      ;;
-                    v*)
-                      export SETUPTOOLS_SCM_PRETEND_VERSION="${VER}"
-                      export SETUPTOOLS_SCM_PRETEND_VERSION_FOR_AGILERL="${VER}"
-                      python3 scripts/check-extras.py
-                      ;;
-                  esac
-                  rm -rf dist
-                  uv build --package "${PKG}"
-                  shopt -s nullglob
-                  artifacts=(dist/${DIST}-${VER}*)
-                  if [[ ${#artifacts[@]} -eq 0 ]]; then
-                    echo "error: no dist artifacts for ${DIST}==${VER}" >&2
-                    ls -la dist >&2 || true
+                  if [[ -z "${AWS_CODEARTIFACT_READ_ROLE_ARN:-}" ]]; then
+                    echo "Set repository variable AWS_CODEARTIFACT_READ_ROLE_ARN to the read-only IAM role ARN." >&2
                     exit 1
                   fi
-                  echo "Built ${PKG}==${VER} from tag ${TAG}"
+
+            - name: Configure AWS credentials (OIDC, read-only)
+              uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
+              with:
+                  role-to-assume: ${{ vars.AWS_CODEARTIFACT_READ_ROLE_ARN }}
+                  aws-region: us-east-1
+                  audience: sts.amazonaws.com
+                  role-session-name: agilerl-pypi-fetch
+                  role-duration-seconds: 900
+                  mask-aws-account-id: true
+                  allowed-account-ids: '761296822462'
+
+            - name: Fetch INTERNAL dist
+              env:
+                  VER: ${{ steps.tag.outputs.version }}
+                  PKG: ${{ steps.tag.outputs.package }}
+              run: |
+                  set -euo pipefail
+                  rm -rf dist
+                  mkdir -p dist
+                  python3 scripts/fetch_arena_internal_dist.py \
+                    --package "${PKG}" \
+                    --version "${VER}" \
+                    --out-dir dist \
+                    --domain agilerl-pypi \
+                    --domain-owner 761296822462 \
+                    --repository arena \
+                    --region us-east-1
 
             - name: Upload dist
               uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -124,7 +131,7 @@ jobs:
                   if-no-files-found: error
 
     publish:
-        needs: build
+        needs: fetch
         if: github.repository == 'AgileRL/AgileRL'
         runs-on: ubuntu-latest
         environment: pypi
@@ -143,9 +150,9 @@ jobs:
 
             - name: Publish to PyPI (OIDC)
               env:
-                  TAG: ${{ needs.build.outputs.tag }}
-                  VER: ${{ needs.build.outputs.version }}
-                  DIST: ${{ needs.build.outputs.dist_name }}
+                  TAG: ${{ needs.fetch.outputs.tag }}
+                  VER: ${{ needs.fetch.outputs.version }}
+                  DIST: ${{ needs.fetch.outputs.dist_name }}
               run: |
                   set -euo pipefail
                   shopt -s nullglob
