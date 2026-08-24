@@ -28,7 +28,7 @@ class GRPOSpec(LLMAlgorithmSpec):
     vllm_config: VLLMConfig | None = Field(default=None)
     use_vllm: bool = Field(default=False)
 
-    env_type: ClassVar[LLMEnvType] = LLMEnvType.REASONING
+    env_type: ClassVar[LLMEnvType] = LLMEnvType.ROLLOUT
 
     @model_validator(mode="after")
     def _validate_vllm_config(self) -> GRPOSpec:

@@ -10,6 +10,8 @@ advantage helpers are bound onto a stub; no DeepSpeed or vLLM.
 
 from __future__ import annotations
 
+import warnings
+
 import pytest
 import torch
 
@@ -17,6 +19,7 @@ pytest.importorskip("transformers", reason="LLM tests require transformers.")
 pytest.importorskip("peft", reason="LLM tests require peft.")
 
 from agilerl.algorithms.grpo import GRPO
+from tests.test_algorithms.test_llms.llm_helpers import create_module
 
 
 class _AdvStub:
@@ -34,11 +37,19 @@ class _AdvStub:
         self.adv_norm = adv_norm
         self.turn_advantage_trajectory_fallback = turn_advantage_trajectory_fallback
         self.device = device
+        self.advantage_granularity = "auto"
+        self.importance_sampling_level = "token"
+        self.filter_zero_adv = False
+        self.whiten_advantages = False
+        self.adv_clip_range = None
 
     _assert_batch_divisible_by_group = GRPO._assert_batch_divisible_by_group
     _calculate_advantage = GRPO._calculate_advantage
     _calculate_turn_advantage = GRPO._calculate_turn_advantage
     _turn_broadcast_advantages = GRPO._turn_broadcast_advantages
+    _trajectory_advantages = GRPO._trajectory_advantages
+    _resolve_advantage_granularity = GRPO._resolve_advantage_granularity
+    _calculate_advantages = GRPO._calculate_advantages
 
 
 def _mask_stub(adv_norm: str = "mean_std", group_size: int = 4) -> _AdvStub:
@@ -392,3 +403,146 @@ class TestGRPOTurnBroadcastMasking:
 
         assert torch.equal(advantages[3, 1:], torch.zeros(19))
         assert advantages[3, 0].item() == pytest.approx(-1.5, abs=1e-4)
+
+
+def _cpu_grpo(**kwargs):
+    """Minimal CPU GRPO for constructor-contract tests (no DeepSpeed / vLLM)."""
+    defaults = {
+        "actor_network": create_module(
+            input_size=6, max_tokens=4, vocab_size=64, device="cpu"
+        ),
+        "pad_token_id": 63,
+        "pad_token": "<pad>",
+        "batch_size": 4,
+        "group_size": 2,
+        "max_output_tokens": 4,
+        "max_model_len": 12,
+        "wrap": False,
+        "gradient_checkpointing": False,
+        "accelerator": None,
+        "device": "cpu",
+        "use_liger_loss": False,
+    }
+    defaults.update(kwargs)
+    return GRPO(**defaults)
+
+
+class TestGRPOAdvantageGranularityContract:
+    """Public GRPO advantage granularity is ``auto``, ``trajectory``, or ``turn``."""
+
+    def test_constructor_defaults_to_auto(self):
+        grpo = _cpu_grpo()
+        assert grpo.advantage_granularity == "auto"
+        grpo.clean_up()
+
+    def test_constructor_accepts_auto(self):
+        grpo = _cpu_grpo(advantage_granularity="auto")
+        assert grpo.advantage_granularity == "auto"
+        grpo.clean_up()
+
+    def test_auto_without_turn_ids_is_trajectory(self):
+        stub = _AdvStub()
+        stub.advantage_granularity = "auto"
+        rewards = torch.tensor([1.0, -1.0, 0.5, -0.5])
+        token_ids = torch.zeros(4, 4, dtype=torch.long)
+        action_masks = torch.ones(4, 3, dtype=torch.bool)
+
+        advantages, _ = stub._calculate_advantages(
+            rewards, token_ids, action_masks, None
+        )
+
+        assert advantages.shape == (4, 1)
+
+    def test_auto_multi_turn_with_turn_rewards_is_turn(self):
+        stub = _AdvStub()
+        stub.advantage_granularity = "auto"
+        rewards = torch.tensor([[1.0, 2.0], [-1.0, 0.0], [0.5, 1.5], [-0.5, 0.5]])
+        token_ids = torch.zeros(4, 5, dtype=torch.long)
+        action_masks = torch.ones(4, 4, dtype=torch.bool)
+        turn_ids = torch.tensor(
+            [[0, 0, 1, 1], [0, 0, 1, 1], [0, 0, 1, 1], [0, 0, 1, 1]]
+        )
+
+        advantages, _ = stub._calculate_advantages(
+            rewards, token_ids, action_masks, turn_ids
+        )
+
+        assert advantages.shape == (4, 4)
+
+    def test_auto_multi_turn_ids_with_scalar_rewards_is_trajectory(self):
+        stub = _AdvStub()
+        stub.advantage_granularity = "auto"
+        rewards = torch.tensor([1.0, -1.0, 0.5, -0.5])
+        token_ids = torch.zeros(4, 5, dtype=torch.long)
+        action_masks = torch.ones(4, 4, dtype=torch.bool)
+        turn_ids = torch.tensor(
+            [[0, 0, 1, 1], [0, 0, 1, 1], [0, 0, 1, 1], [0, 0, 1, 1]]
+        )
+
+        advantages, _ = stub._calculate_advantages(
+            rewards, token_ids, action_masks, turn_ids
+        )
+
+        assert advantages.shape == (4, 1)
+
+    def test_turn_without_turn_ids_raises(self):
+        stub = _AdvStub()
+        stub.advantage_granularity = "turn"
+        rewards = torch.tensor([1.0, -1.0])
+        token_ids = torch.zeros(2, 4, dtype=torch.long)
+        action_masks = torch.ones(2, 3, dtype=torch.bool)
+        with pytest.raises(
+            ValueError, match="advantage_granularity='turn' requires turn_ids"
+        ):
+            stub._calculate_advantages(rewards, token_ids, action_masks, None)
+
+    def test_turn_advantage_with_trajectory_is_warns(self):
+        with pytest.warns(UserWarning, match="completion-level ratio"):
+            grpo = _cpu_grpo(
+                advantage_granularity="turn",
+                importance_sampling_level="trajectory",
+            )
+        grpo.clean_up()
+
+    def test_gspo_with_explicit_turn_advantage_warns(self):
+        with pytest.warns(UserWarning, match="completion-level ratio"):
+            grpo = _cpu_grpo(loss_type="gspo", advantage_granularity="turn")
+        grpo.clean_up()
+
+    def test_gspo_with_default_auto_does_not_warn_at_construct(self):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            grpo = _cpu_grpo(loss_type="gspo")
+        grpo.clean_up()
+        assert not any("completion-level ratio" in str(w.message) for w in caught)
+
+    def test_auto_resolves_turn_with_trajectory_is_warns(self):
+        stub = _AdvStub()
+        stub.advantage_granularity = "auto"
+        stub.importance_sampling_level = "trajectory"
+        rewards = torch.tensor([[1.0, 2.0], [-1.0, 0.0], [0.5, 1.5], [-0.5, 0.5]])
+        token_ids = torch.zeros(4, 5, dtype=torch.long)
+        action_masks = torch.ones(4, 4, dtype=torch.bool)
+        turn_ids = torch.tensor(
+            [[0, 0, 1, 1], [0, 0, 1, 1], [0, 0, 1, 1], [0, 0, 1, 1]]
+        )
+
+        with pytest.warns(UserWarning, match="completion-level ratio"):
+            stub._calculate_advantages(rewards, token_ids, action_masks, turn_ids)
+
+    def test_matched_trajectory_grains_do_not_warn(self):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            grpo = _cpu_grpo(
+                advantage_granularity="trajectory",
+                importance_sampling_level="trajectory",
+            )
+        grpo.clean_up()
+        assert not any("completion-level ratio" in str(w.message) for w in caught)
+
+    def test_default_auto_token_is_does_not_warn(self):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            grpo = _cpu_grpo()
+        grpo.clean_up()
+        assert not any("completion-level ratio" in str(w.message) for w in caught)

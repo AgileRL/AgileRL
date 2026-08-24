@@ -18,4 +18,4 @@ class DPOSpec(LLMAlgorithmSpec):
     """Specification for DPO algorithm."""
 
     lr: float = Field(default=0.000005)
-    env_type: ClassVar[LLMEnvType] = LLMEnvType.PREFERENCE
+    env_type: ClassVar[LLMEnvType] = LLMEnvType.DATASET

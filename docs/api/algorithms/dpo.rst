@@ -21,7 +21,7 @@ Example
 .. code-block:: python
 
   from agilerl.algorithms import DPO
-  from agilerl.llm_envs import PreferenceGym
+  from agilerl.llm_envs import DatasetEnv
   from accelerate import Accelerator
   from datasets import load_dataset
   from peft import get_peft_model
@@ -38,15 +38,16 @@ Example
   # Instantiate an accelerator object for distributed training
   accelerator = Accelerator()
 
-  # Load the dataset into a PreferenceGym environment
+  # Load the dataset into a preference DatasetEnv
   raw_dataset = load_dataset("HumanLLMs/Human-Like-DPO-Dataset", split="train").shuffle(seed=42)
   train_test_split = raw_dataset.train_test_split(test_size=0.1)
   train_dataset = train_test_split["train"]
   test_dataset = train_test_split["test"]
-  env = PreferenceGym(
+  env = DatasetEnv(
     train_dataset=train_dataset,
     test_dataset=test_dataset,
     tokenizer=tokenizer,
+    objective="preference",
     data_batch_size_per_gpu=16,
     accelerator=accelerator,
   )
@@ -70,13 +71,13 @@ Example
 Training a DPO agent
 --------------------
 
-To train a DPO agent on a single preference gym environment, use the :ref:`finetune_llm_preference<finetune_llm_preference>` function:
+To train a DPO agent on a single dataset environment, use the :ref:`train_llm_dataset<train_llm_dataset>` function:
 
 .. code-block:: python
 
-  from agilerl.training.llm import finetune_llm_preference
+  from agilerl.training.llm import train_llm_dataset
 
-  finetune_llm_preference(
+  train_llm_dataset(
     [agent],
     env,
     num_epochs=1,

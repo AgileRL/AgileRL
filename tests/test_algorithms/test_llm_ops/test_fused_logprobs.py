@@ -248,7 +248,7 @@ class TestMixedDtypeOperands:
             hidden, weight, None, targets, 1.0, True, 3
         )
         logps.sum().backward()
-        # Gradients land on the leaves in their own dtypes.
+        # Gradients go to the leaves in their own dtypes.
         assert hidden.grad is not None
         assert hidden.grad.dtype == torch.float32
         assert weight.grad is not None

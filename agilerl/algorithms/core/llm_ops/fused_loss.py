@@ -294,9 +294,9 @@ class LigerFusedLinearPolicyLossFunction(LigerFusedLinearPPOBase):
     ``turn_ids`` along dim 0 alongside the other chunked inputs —
     the base class hardcodes its chunked-arg list and doesn't expose
     an injection point. The per-chunk logits + log-softmax are computed
-    inline (Liger >= 0.8.0 replaced the base ``chunk_forward`` with a
-    selective per-token-logp kernel that no longer exposes the full
-    ``(chunk, T, V)`` log_probs this loss consumes).
+    inline: Liger >= 0.8.0's ``chunk_forward`` is a selective
+    per-token-logp kernel, and this loss needs the full
+    ``(chunk, T, V)`` log_probs.
     """
 
     @classmethod
@@ -329,7 +329,7 @@ class LigerFusedLinearPolicyLossFunction(LigerFusedLinearPPOBase):
         Mirrors the structure of
         :meth:`LigerFusedLinearPPOBase.forward` but with two extra
         chunked tensors (``turn_ids`` and the optional ``vllm_is_ratio``)
-        and a leaner static-arg list (Liger's SAPO/CISPO knobs aren't
+        and a leaner static-arg list (Liger's SAPO/CISPO settings aren't
         reachable from this wrapper). When ``turn_ids`` is ``None`` this
         reduces to the existing token-mode behavior; ``vllm_is_ratio`` is the
         detached, upper-clamped per-token vLLM sampling-mismatch ratio applied

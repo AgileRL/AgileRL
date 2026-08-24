@@ -2411,6 +2411,35 @@ def test_set_global_seed(seed):
         assert state is not None
 
 
+def test_set_global_seed_seeds_cuda_when_a_device_is_present():
+    """CPU CI never takes this branch, so the device check is faked.
+
+    An unseeded CUDA generator makes a GPU run unreproducible even though the
+    CPU generators were seeded.
+    """
+    from unittest.mock import patch
+
+    with (
+        patch("agilerl.hpo.mutation.torch.cuda.is_available", return_value=True),
+        patch("agilerl.hpo.mutation.torch.cuda.manual_seed") as cuda_seed,
+    ):
+        set_global_seed(42)
+
+    cuda_seed.assert_called_once_with(42)
+
+
+def test_set_global_seed_skips_cuda_without_a_device():
+    from unittest.mock import patch
+
+    with (
+        patch("agilerl.hpo.mutation.torch.cuda.is_available", return_value=False),
+        patch("agilerl.hpo.mutation.torch.cuda.manual_seed") as cuda_seed,
+    ):
+        set_global_seed(42)
+
+    cuda_seed.assert_not_called()
+
+
 def test_get_offspring_eval_modules_returns_policy_and_modules(
     vector_space, discrete_space, encoder_mlp_config
 ):

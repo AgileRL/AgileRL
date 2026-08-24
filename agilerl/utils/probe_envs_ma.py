@@ -1850,7 +1850,7 @@ def prepare_ma_states(
             processed_states[agent_id] = (
                 nn.functional.one_hot(
                     torch.Tensor(state).long(),
-                    num_classes=agent_space.n,
+                    num_classes=int(agent_space.n),
                 )
                 .float()
                 .squeeze(1)

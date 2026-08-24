@@ -8,6 +8,14 @@ from typing import TYPE_CHECKING, Any
 from pydantic import AliasChoices, BaseModel, Field, model_validator
 from typing_extensions import Self
 
+from agilerl import AgentType
+from agilerl.components.replay_buffer import (
+    MultiStepReplayBuffer,
+    PrioritizedReplayBuffer,
+    ReplayBuffer,
+)
+from agilerl.models.algorithms import RainbowDQNSpec
+
 if TYPE_CHECKING:
     import torch
 
@@ -67,15 +75,6 @@ class ReplayBufferSpec(BaseModel):
         :return: Replay buffer
         :rtype: BufferType
         """
-        # Import lazily to avoid heavy dependencies for Arena manifest validation
-        from agilerl import AgentType
-        from agilerl.components.replay_buffer import (
-            MultiStepReplayBuffer,
-            PrioritizedReplayBuffer,
-            ReplayBuffer,
-        )
-        from agilerl.models.algorithms import RainbowDQNSpec
-
         buffer_args: dict[str, Any] = {}
         is_multi_agent = algo_spec.agent_type == AgentType.MultiAgent
         if not is_multi_agent:
@@ -129,8 +128,6 @@ class ReplayBufferSpec(BaseModel):
         """
         if not (self.per_buffer and self.n_step_buffer):
             return None
-
-        from agilerl.components.replay_buffer import MultiStepReplayBuffer
 
         gamma = getattr(algo_spec, "gamma", None)
         if not isinstance(gamma, (int, float)):

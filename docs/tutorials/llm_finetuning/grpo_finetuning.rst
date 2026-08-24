@@ -45,8 +45,8 @@ Dependencies
     from torch.utils.data import Dataset
     from transformers import AutoTokenizer
     from agilerl.algorithms import GRPO
-    from agilerl.training.llm import finetune_llm_reasoning
-    from agilerl.llm_envs import ReasoningGym
+    from agilerl.training.llm import train_llm_rollout
+    from agilerl.llm_envs import RolloutHarness
 
 
 Defining our base model and dataset
@@ -89,8 +89,9 @@ become very good at taking actions to solve tasks - to develop *agency*. Since w
 with reinforcement learning, it becomes an agent through this process.
 
 We must create a reinforcement learning environment in which our agent can explore possible
-solutions and learn to optimise rewards. AgileRL provides a :class:`ReasoningGym <agilerl.llm_envs.ReasoningGym>`
-class that wraps a Hugging Face dataset and converts it into a reinforcement learning, gymnasium-style environment.
+solutions and learn to optimise rewards. AgileRL provides a :class:`RolloutHarness <agilerl.llm_envs.RolloutHarness>`
+class that turns lists of questions and answers into a reinforcement learning, gymnasium-style environment.
+Reasoning is the single-turn case, so we build the environment with ``max_turns=1``.
 
 So, how does the environment know how to reward an agent for its outputs? Well, we must define a *reward_function*
 that the agent learns to optimise. Following the techniques used in the DeepSeek reasoning `paper <https://arxiv.org/pdf/2501.12948>`_,
@@ -172,9 +173,12 @@ Now we have defined our reward functions, we must also design our prompt. This f
 to the agent and provides the context necessary to complete the task. This is a task-specific feature,
 and different reasoning problems will require different conversation templates, although they can follow a similar
 format. We define the conversation template as follows (using ``question`` and ``answer`` as placeholders for the question and answer data)
-and then instantiate the ``ReasoningGym`` object which converts a Hugging Face dataset into a Gymnasium-style environment.
+and then drive a single-turn rollout env over the question and answer
+columns of our dataset with an in-process ``env_factory`` (a prompt dataset is just an
+environment: each rollout runs its own env instance in-process via
+:meth:`RolloutHarness.local <agilerl.llm_envs.RolloutHarness.local>`).
 
-.. collapse:: Convert HuggingFace Dataset to Gymnasium Environment
+.. collapse:: Build the Single-Turn Rollout Environment
 
     .. code-block:: python
 
@@ -195,16 +199,58 @@ and then instantiate the ``ReasoningGym`` object which converts a Hugging Face d
         ]
 
 
-        # Convert the HuggingFace dataset into a Gymnasium environment
-        env = ReasoningGym(
-            train_dataset=train_dataset,
-            test_dataset=test_dataset,
-            tokenizer=tokenizer,
-            reward_fn=combined_rewards,
-            conversation_template=conversation_template,
-            data_batch_size_per_gpu=16,
-            accelerator=accelerator,
-            return_raw_completions=True, # This is necessary for vLLM to work
+        def prompt_builder(question: str) -> str:
+            parts = [
+                m["content"].format(question=question, answer="")
+                for m in conversation_template
+            ]
+            return "\n".join(p for p in parts if p)
+
+        # A single-turn rollout environment from the dataset — a prompt dataset is
+        # just an env, driven in-process by RolloutHarness.local.
+        class QADataset:
+            """Single-turn dataset env: a question on reset, a score on step."""
+
+            def __init__(self, questions, answers, reward_fn, prompt_builder,
+                         test_questions=None, test_answers=None):
+                self.questions, self.answers = questions, answers
+                self.test_questions, self.test_answers = test_questions, test_answers
+                self.reward_fn, self.prompt_builder = reward_fn, prompt_builder
+                self._cursor, self._split = 0, ""
+
+            @property
+            def dataset_size(self) -> int:
+                return len(self.questions)
+
+            def reset(self, seed=None, *, row_index=None, evaluation=None):
+                if evaluation and self.test_questions is not None:
+                    qs, ans, split = self.test_questions, self.test_answers, "eval"
+                else:
+                    qs, ans, split = self.questions, self.answers, "train"
+                if row_index is None:
+                    if split != self._split:
+                        self._cursor, self._split = 0, split
+                    row_index, self._cursor = self._cursor, self._cursor + 1
+                self._q, self._a = qs[row_index % len(qs)], ans[row_index % len(ans)]
+                return self.prompt_builder(self._q), {}
+
+            def step(self, action):
+                return "", float(self.reward_fn(action, self._a, self._q)), True, False, {}
+
+        env_factory = lambda: RolloutHarness.local(
+            QADataset(
+                questions=list(train_dataset["question"]),
+                answers=list(train_dataset["answer"]),
+                reward_fn=combined_rewards,
+                prompt_builder=prompt_builder,
+                test_questions=list(test_dataset["question"]),
+                test_answers=list(test_dataset["answer"]),
+            ),
+            tokenizer,
+            max_turns=1,
+            pad_id=tokenizer.pad_token_id,
+            apply_chat_template=True,
+            max_model_len=1024,
         )
 
 Create a GRPO Agent
@@ -239,15 +285,16 @@ training in this tutorial, we use deepspeed and accelerate.
 
 Training and Saving an Agent
 ----------------------------
-The simplest way to train an AgileRL agent is to use the :meth:`finetune_llm_reasoning() <agilerl.training.llm.reasoning.finetune_llm_reasoning>` function.
-This training function will orchestrate the training process, removing the the need to implement a training loop, and will save
+The simplest way to train an AgileRL agent is to use the :meth:`train_llm_rollout() <agilerl.training.llm.train_llm_rollout>` function
+with ``max_turns=1`` for single-turn reasoning. This training function will orchestrate the training process, removing the need to implement a training loop, and will save
 checkpoints of the trained agent that can be used later for inference. It also uses Weights and Biases for tracking.
 
 .. code-block:: python
 
-    finetune_llm_reasoning(
+    train_llm_rollout(
         pop=[agent],
-        env=env,
+        max_turns=1,
+        env_factory=env_factory,
         evaluation_interval=10,
         wb=True,
         save_elite=True,
@@ -309,86 +356,54 @@ Example config file:
 
 Using a custom training loop
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-If we wanted to have more control over the training process, it is also possible to write our own custom
-training loop to train our agent. The training loop below can be used alternatively to the above ``finetune_llm_reasoning``
-function and is an example of how we might choose to train our agent to exhibit reasoning.
+If you need lower-level control than :meth:`train_llm_rollout() <agilerl.training.llm.train_llm_rollout>`,
+build a :class:`~agilerl.llm_envs.RolloutCollector` and collect trajectories with
+:func:`~agilerl.rollouts.on_policy.collect_rollouts_llm`. This is the same rollout API the trainer uses internally.
+Do **not** use dataset-env calls like ``env.reset(reset_dataloaders=True)`` / ``env.step(token_ids)``
+for rollout training.
 
 .. collapse:: Custom Training Loop
 
     .. code-block:: python
 
-        from tqdm import trange
-        import torch.distributed as dist
-        from agilerl.utils.llm_utils import gather_tensor, aggregate_metrics_across_gpus
+        import numpy as np
+        from agilerl.llm_envs import RolloutCollector
+        from agilerl.rollouts.on_policy import collect_rollouts_llm
 
-        evaluation_interval = 5
-        max_reward = 2.0
-        checkpoint_path="path/to/model/directory"
+        batch_size = agent.batch_size
+        group_size = getattr(agent, "group_size", 1)
+        rollout_env = RolloutCollector(env_factory, batch_size, group_size)
+        group_seed = int(np.random.randint(0, 1_000_000))
 
-        if agent.accelerator.is_main_process:
-            print("\nTraining...")
-
-        bar_format = "{l_bar}{bar:10}| {n:4}/{total_fmt} [{elapsed:>7}<{remaining:>7}, {rate_fmt}{postfix}]"
-        max_steps = len(env) // env.data_batch_size
-        if agent.accelerator.is_main_process:
-            pbar = trange(
-                max_steps,
-                unit="step",
-                bar_format=bar_format,
-                ascii=True,
-                dynamic_ncols=True,
-            )
-
-        # calling env.reset() supplies the first batch of training data
-        prompts = env.reset(reset_dataloaders=True)
-        for i in range(max_steps):
-            completion_ids, action_masks = agent.get_action(prompts)
-            # Use the reward function stored in env.step to calculate reward of the each answer from the group
-            next_prompts, rewards = env.step(completion_ids)
-            experiences = (
-                completion_ids,
-                action_masks,
-                rewards,
-            )
-            loss, kl = agent.learn(experiences)
-            metrics = [loss, kl, rewards]
-            if max_reward is not None:
-                accuracy = (rewards == max_reward).sum() / len(rewards.squeeze())
-                metrics.append(accuracy)
-            agg_metrics = [aggregate_metrics_across_gpus(agent.accelerator, metric) for metric in metrics]
-            prompts = next_prompts
-            if agent.accelerator.is_main_process:
-                metrics = {
-                            "Loss": (agg_metrics[0]),
-                            "KL-divergence": (agg_metrics[1]),
-                            "Mean training reward": (agg_metrics[2]),
-                        }
-                if max_reward is not None:
-                    metrics |= {"Accuracy": (agg_metrics[3])}
-                print(
-                    metrics
+        try:
+            for i in range(max_steps):
+                (
+                    token_ids_list,
+                    action_masks_list,
+                    all_turn_ids,
+                    all_rewards,
+                    batch_steps,
+                    group_seed,
+                    all_sampling_logps,
+                ) = collect_rollouts_llm(
+                    agent=agent,
+                    env=rollout_env,
+                    n_steps=1,  # single-turn reasoning
+                    batch_size=batch_size,
+                    group_size=group_size,
+                    group_seed=group_seed,
                 )
-                pbar.update(1)
-                if wb:
-                    wandb.log(
-                        metrics
-                    )
-                if (i + 1) % evaluation_interval == 0:
-                    test_reward = agent.test(env)
-                    print(f"Test reward: {test_reward}")
-                    if wb:
-                        wandb.log({"Test reward": test_reward})
-                if (
-                    checkpoint_path is not None
-                    and checkpoint_interval is not None
-                    and (i + 1) % checkpoint_interval == 0
-                ):
-                    if agent.accelerator is not None:
-                        unwrapped_model = agent.accelerator.unwrap_model(agent.actor)
-                        agent.save_checkpoint(checkpoint_path)
-                        print(f"Saved checkpoint {save_path}")
-                    else:
-                        agent.save_checkpoint(checkpoint_path)
+
+                # Build the experience tuple your algorithm expects.
+                experiences = (token_ids_list, action_masks_list, all_rewards)
+                learn_kwargs = {"turn_ids": all_turn_ids}
+                if all_sampling_logps is not None:
+                    learn_kwargs["sampling_logps"] = all_sampling_logps
+
+                metrics = agent.learn(experiences, **learn_kwargs)
+                # Add your logging / eval / checkpointing here.
+        finally:
+            rollout_env.close()
 
 
 Loading a Trained Agent for Inference
@@ -423,7 +438,7 @@ Load fine-tuned LLM into vLLM Engine for inference
         seed=42,
     )
 
-    prompts = "Using each number in this list only once 33, 19, 27, 5, create an equation that equals 82. You can use basic arithmetic operations (+, -, *, /) and each number can only be used once.""
+    prompts = "Using each number in this list only once 33, 19, 27, 5, create an equation that equals 82. You can use basic arithmetic operations (+, -, *, /) and each number can only be used once."
     outputs = llm.generate(
         prompts,
         sampling_params=sampling_params,
