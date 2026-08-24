@@ -896,21 +896,8 @@ class TestPrimaryWeight:
             fp._primary_weight(nn.ReLU())
 
 
-class TestSpatialBlock:
-    """Count the columns one convolution channel spans after flattening."""
-
-    def test_a_convolutional_module_spans_its_feature_map(self):
-        module = make_cnn()
-
-        expected = int(np.prod(tuple(module.cnn_output_size)[2:]))
-        assert fp._spatial_block(module) == expected
-
-    def test_a_module_without_a_feature_map_spans_one_column(self):
-        assert fp._spatial_block(make_mlp()) == 1
-
-
 class TestModulesBetween:
-    """List the modules registered strictly between two weight layers."""
+    """List the modules a widened output passes through after its producer."""
 
     def test_an_activation_between_two_layers_is_reported(self):
         container = make_mlp()
@@ -920,18 +907,21 @@ class TestModulesBetween:
 
         assert any(isinstance(module, nn.ReLU) for module in between)
 
+    def test_an_omitted_consumer_reports_every_trailing_module(self):
+        container = make_mlp()
+        layers = fp.weight_stacks(container)[0]
+
+        trailing = fp._modules_between(container.model, layers[0])
+
+        assert layers[-1] in trailing
+        assert any(isinstance(module, nn.ReLU) for module in trailing)
+
     def test_an_unregistered_layer_is_empty(self):
         container = make_mlp()
         stray = nn.Linear(4, 4)
 
         assert fp._modules_between(container, stray, stray) == []
-
-
-class TestModulesAfter:
-    """List the modules registered after a weight layer."""
-
-    def test_an_unregistered_layer_is_empty(self):
-        assert fp._modules_after(make_mlp(), nn.Linear(4, 4)) == []
+        assert fp._modules_between(container, stray) == []
 
 
 class TestBaseMutation:
@@ -949,22 +939,6 @@ class TestBaseMutation:
     )
     def test_it_returns_the_trailing_method(self, mut_method, expected):
         assert fp.base_mutation(mut_method) == expected
-
-
-class TestIsLatentMutation:
-    """Recognise the mutations that resize a network's latent."""
-
-    @pytest.mark.parametrize(
-        ("base", "expected"),
-        [
-            ("add_latent_node", True),
-            ("remove_latent_node", True),
-            ("add_node", False),
-            ("add_layer", False),
-        ],
-    )
-    def test_it_recognises_latent_methods(self, base, expected):
-        assert fp.is_latent_mutation(base) is expected
 
 
 class TestResolveTarget:

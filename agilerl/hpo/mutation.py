@@ -720,9 +720,7 @@ class Mutations:
         if target is None:
             return None
 
-        if func_preservation.is_latent_mutation(
-            func_preservation.base_mutation(mut_method),
-        ):
+        if func_preservation.base_mutation(mut_method).endswith("latent_node"):
             return [int(getattr(target, "latent_dim", 0))]
 
         return func_preservation.hidden_widths(target)

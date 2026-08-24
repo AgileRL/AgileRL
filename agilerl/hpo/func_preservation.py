@@ -39,7 +39,7 @@ from agilerl.modules.custom_components import (
 
 # Noise applied to a new unit's outgoing weights, as a
 # fraction of the consumer layer's existing column scale.
-FP_NOISE_SCALE = 0.01
+FP_NOISE_SCALE = 0.02
 
 CONV_LAYER_TYPES: tuple[type[nn.Module], ...] = (nn.Conv1d, nn.Conv2d, nn.Conv3d)
 
@@ -92,45 +92,6 @@ DECLINE_REASONS = {
 }
 
 
-def _is_conv(layer: nn.Module) -> bool:
-    """Return whether a layer is a convolution of any dimensionality.
-
-    :param layer: Candidate layer.
-    :type layer: nn.Module
-
-    :return: Whether the layer is a convolution.
-    :rtype: bool
-    """
-    return isinstance(layer, CONV_LAYER_TYPES)
-
-
-def _is_linear(layer: nn.Module) -> bool:
-    """Return whether a layer is dense.
-
-    :param layer: Candidate layer.
-    :type layer: nn.Module
-
-    :return: Whether the layer is dense.
-    :rtype: bool
-    """
-    if isinstance(layer, nn.Linear):
-        return True
-    weight_mu = getattr(layer, "weight_mu", None)
-    return isinstance(weight_mu, torch.Tensor) and weight_mu.dim() == 2
-
-
-def _is_weight_layer(layer: nn.Module) -> bool:
-    """Return whether a layer owns a weight matrix the surgery can rewrite.
-
-    :param layer: Candidate layer.
-    :type layer: nn.Module
-
-    :return: Whether the layer is a convolution or a dense layer.
-    :rtype: bool
-    """
-    return _is_conv(layer) or _is_linear(layer)
-
-
 def _primary_weight(layer: nn.Module) -> torch.Tensor:
     """Return the weight tensor that defines a layer's shape.
 
@@ -151,28 +112,23 @@ def _primary_weight(layer: nn.Module) -> torch.Tensor:
     raise TypeError(msg)
 
 
-def _out_dim(layer: nn.Module) -> int:
-    """Return how many outputs a weight layer produces.
+def _weight_layers(container: nn.Module) -> list[nn.Module]:
+    """Return the weight layers a container holds, in forward order.
 
-    :param layer: Weight layer.
-    :type layer: nn.Module
+    :param container: Module to scan.
+    :type container: nn.Module
 
-    :return: The layer's output width.
-    :rtype: int
+    :return: The weight layers, in registration order.
+    :rtype: list[nn.Module]
     """
-    return int(_primary_weight(layer).shape[0])
-
-
-def _in_dim(layer: nn.Module) -> int:
-    """Return how many inputs a weight layer consumes.
-
-    :param layer: Weight layer.
-    :type layer: nn.Module
-
-    :return: The layer's input width.
-    :rtype: int
-    """
-    return int(_primary_weight(layer).shape[1])
+    layers: list[nn.Module] = []
+    for _, module in container.named_modules():
+        weight_mu = getattr(module, "weight_mu", None)
+        if isinstance(module, (*CONV_LAYER_TYPES, nn.Linear)) or (
+            isinstance(weight_mu, torch.Tensor) and weight_mu.dim() == 2
+        ):
+            layers.append(module)
+    return layers
 
 
 def _inner_module(submodule: nn.Module) -> nn.Module:
@@ -192,16 +148,17 @@ def _inner_module(submodule: nn.Module) -> nn.Module:
     return submodule
 
 
-def _ordered_weight_layers(container: nn.Module) -> list[nn.Module]:
-    """Return a container's weight layers in forward order.
+def _container(submodule: nn.Module) -> nn.Module:
+    """Return the container that holds a sub-module's weight layers.
 
-    :param container: Module to scan.
-    :type container: nn.Module
+    :param submodule: Possibly wrapped module.
+    :type submodule: nn.Module
 
-    :return: The weight layers, in forward order.
-    :rtype: list[nn.Module]
+    :return: The container to scan in registration order.
+    :rtype: nn.Module
     """
-    return [layer for _, layer in container.named_modules() if _is_weight_layer(layer)]
+    inner = _inner_module(submodule)
+    return getattr(inner, "model", inner)
 
 
 def _stack_signature(layers: list[nn.Module]) -> tuple[int, tuple[int, ...]]:
@@ -213,7 +170,9 @@ def _stack_signature(layers: list[nn.Module]) -> tuple[int, tuple[int, ...]]:
     :return: The stream's input width and its hidden widths.
     :rtype: tuple[int, tuple[int, ...]]
     """
-    return _in_dim(layers[0]), tuple(_out_dim(layer) for layer in layers[:-1])
+    return _primary_weight(layers[0]).shape[1], tuple(
+        _primary_weight(layer).shape[0] for layer in layers[:-1]
+    )
 
 
 def weight_stacks(submodule: nn.Module) -> list[list[nn.Module]]:
@@ -231,7 +190,7 @@ def weight_stacks(submodule: nn.Module) -> list[list[nn.Module]]:
     """
     inner = _inner_module(submodule)
     primary_container = getattr(inner, "model", inner)
-    primary = _ordered_weight_layers(primary_container)
+    primary = _weight_layers(primary_container)
     if not primary:
         return []
 
@@ -240,7 +199,7 @@ def weight_stacks(submodule: nn.Module) -> list[list[nn.Module]]:
     for name, child in inner.named_children():
         if child is primary_container or name == "model":
             continue
-        layers = _ordered_weight_layers(child)
+        layers = _weight_layers(child)
         if layers and _stack_signature(layers) == signature:
             stacks.append(layers)
 
@@ -259,35 +218,23 @@ def hidden_widths(submodule: nn.Module) -> list[int]:
     stacks = weight_stacks(submodule)
     if not stacks:
         return []
-    return [_out_dim(layer) for layer in stacks[0][:-1]]
-
-
-def _container(submodule: nn.Module) -> nn.Module:
-    """Return the container that holds a sub-module's weight layers.
-
-    :param submodule: Possibly wrapped module.
-    :type submodule: nn.Module
-
-    :return: The container to scan in registration order.
-    :rtype: nn.Module
-    """
-    inner = _inner_module(submodule)
-    return getattr(inner, "model", inner)
+    return [_primary_weight(layer).shape[0] for layer in stacks[0][:-1]]
 
 
 def _modules_between(
     container: nn.Module,
     producer: nn.Module,
-    consumer: nn.Module,
+    consumer: nn.Module | None = None,
 ) -> list[nn.Module]:
-    """Return the modules registered strictly between two weight layers.
+    """Return the modules a widened output passes through after its producer.
 
-    :param container: Container holding both layers.
+    :param container: Container holding the layers.
     :type container: nn.Module
     :param producer: Layer whose output is being widened.
     :type producer: nn.Module
-    :param consumer: Layer that reads the producer's output.
-    :type consumer: nn.Module
+    :param consumer: Layer that reads the producer's output. When omitted,
+        every module registered after the producer is returned.
+    :type consumer: nn.Module | None
 
     :return: The intervening modules, in forward order.
     :rtype: list[nn.Module]
@@ -295,29 +242,10 @@ def _modules_between(
     ordered = [module for _, module in container.named_modules()]
     try:
         start = ordered.index(producer)
-        stop = ordered.index(consumer)
+        stop = len(ordered) if consumer is None else ordered.index(consumer)
     except ValueError:
         return []
     return ordered[start + 1 : stop]
-
-
-def _modules_after(container: nn.Module, producer: nn.Module) -> list[nn.Module]:
-    """Return the modules registered after a weight layer.
-
-    :param container: Container holding the layer.
-    :type container: nn.Module
-    :param producer: Layer whose output is being widened.
-    :type producer: nn.Module
-
-    :return: The trailing modules, in forward order.
-    :rtype: list[nn.Module]
-    """
-    ordered = [module for _, module in container.named_modules()]
-    try:
-        start = ordered.index(producer)
-    except ValueError:
-        return []
-    return ordered[start + 1 :]
 
 
 def _interposed_blocker(modules: list[nn.Module]) -> str | None:
@@ -335,18 +263,6 @@ def _interposed_blocker(modules: list[nn.Module]) -> str | None:
         if isinstance(module, CROSS_UNIT_ACTIVATION_TYPES):
             return "cross_unit_activation"
     return None
-
-
-def _is_multi_input(module: nn.Module) -> bool:
-    """Return whether a module fuses several sub-encoders into one output.
-
-    :param module: Candidate module.
-    :type module: nn.Module
-
-    :return: Whether the module is a multi-input encoder.
-    :rtype: bool
-    """
-    return hasattr(module, "feature_net") and hasattr(module, "final_dense")
 
 
 def _structural_blocker(module: nn.Module) -> str | None:
@@ -372,7 +288,7 @@ def _structural_blocker(module: nn.Module) -> str | None:
             return "simba"
         if isinstance(child, ResidualBlock):
             return "residual"
-        if _is_multi_input(child):
+        if hasattr(child, "feature_net") and hasattr(child, "final_dense"):
             return "multi_input"
     return None
 
@@ -432,7 +348,7 @@ def layer_addition_blocker(submodule: nn.Module) -> str | None:
         return "not_mlp"
 
     layers = stacks[0]
-    if any(_is_conv(layer) for layer in layers):
+    if any(isinstance(layer, CONV_LAYER_TYPES) for layer in layers):
         return "not_mlp"
 
     new_layer = layers[-2]
@@ -466,7 +382,7 @@ def latent_addition_blocker(network: nn.Module) -> str | None:
     :return: A reason key, or None when preservation applies.
     :rtype: str | None
     """
-    if _is_multi_input(network):
+    if hasattr(network, "feature_net") and hasattr(network, "final_dense"):
         return "multi_input"
 
     encoder = getattr(network, "encoder", None)
@@ -477,40 +393,7 @@ def latent_addition_blocker(network: nn.Module) -> str | None:
     if not stacks:
         return "no_latent"
 
-    return _interposed_blocker(_modules_after(_container(encoder), stacks[0][-1]))
-
-
-def _spatial_block(submodule: nn.Module) -> int:
-    """Return how many columns one convolution channel spans after flattening.
-
-    :param submodule: Convolutional module that was widened.
-    :type submodule: nn.Module
-
-    :return: Columns per channel, or 1 when the module is not convolutional.
-    :rtype: int
-    """
-    output_size = getattr(_inner_module(submodule), "cnn_output_size", None)
-    if output_size is None:
-        return 1
-    return max(int(math.prod(tuple(output_size)[2:])), 1)
-
-
-def _existing_column_scale(weight: torch.Tensor, columns: slice) -> float:
-    """Return the scale of the columns a new block sits beside.
-
-    :param weight: Consumer weight tensor.
-    :type weight: torch.Tensor
-    :param columns: Columns the new units occupy.
-    :type columns: slice
-
-    :return: Standard deviation of the surrounding columns, never zero.
-    :rtype: float
-    """
-    keep = torch.ones(weight.shape[1], dtype=torch.bool, device=weight.device)
-    keep[columns] = False
-    scale = weight.data[:, keep].std() if bool(keep.any()) else weight.data.std()
-    value = float(scale)
-    return value if value > 0.0 else 1e-3
+    return _interposed_blocker(_modules_between(_container(encoder), stacks[0][-1]))
 
 
 def _fade_new_columns(
@@ -546,6 +429,14 @@ def _fade_new_columns(
             if noise_scale <= 0.0:
                 weight.data[:, columns] = 0.0
                 continue
+
+            # Measure the columns the new block sits beside, so the noise stays
+            # small relative to the signal the consumer already carries.
+            keep = torch.ones(weight.shape[1], dtype=torch.bool, device=weight.device)
+            keep[columns] = False
+            surrounding = weight.data[:, keep] if bool(keep.any()) else weight.data
+            scale = float(surrounding.std())
+
             block = weight.data[:, columns]
             noise = torch.as_tensor(
                 rng.standard_normal(tuple(block.shape)),
@@ -553,45 +444,13 @@ def _fade_new_columns(
                 device=weight.device,
             )
             weight.data[:, columns] = noise * (
-                noise_scale * _existing_column_scale(weight, columns)
+                noise_scale * (scale if scale > 0.0 else 1e-3)
             )
 
         for name in ("weight_sigma", "weight_epsilon"):
             noisy = getattr(consumer, name, None)
             if isinstance(noisy, torch.Tensor):
                 noisy.data[:, columns] = 0.0
-
-
-def _shift_trailing_columns(
-    consumer: nn.Module,
-    old_width: int,
-    new_width: int,
-    extra: int,
-) -> None:
-    """Slide a head's non-latent input columns to their widened offset.
-
-    A continuous critic's head reads cat([latent, actions]), so its action
-    columns start at the latent width.
-
-    :param consumer: The head's entry layer.
-    :type consumer: nn.Module
-    :param old_width: Latent width before the mutation.
-    :type old_width: int
-    :param new_width: Latent width after the mutation.
-    :type new_width: int
-    :param extra: Width of the trailing non-latent block.
-    :type extra: int
-
-    :return: None.
-    :rtype: None
-    """
-    with torch.no_grad():
-        for name in ("weight", "weight_mu", "weight_sigma", "weight_epsilon"):
-            weight = getattr(consumer, name, None)
-            if not isinstance(weight, torch.Tensor):
-                continue
-            block = weight.data[:, old_width : old_width + extra].clone()
-            weight.data[:, new_width : new_width + extra] = block
 
 
 def preserve_added_nodes(
@@ -628,15 +487,18 @@ def preserve_added_nodes(
             continue
 
         producer, consumer = layers[hidden_layer], layers[hidden_layer + 1]
-        new_width = _out_dim(producer)
+        new_width = _primary_weight(producer).shape[0]
         if new_width - old_width <= 0:
             continue
 
-        block = (
-            _spatial_block(submodule)
-            if _is_conv(producer) and _is_linear(consumer)
-            else 1
-        )
+        block = 1
+        if isinstance(producer, CONV_LAYER_TYPES) and not isinstance(
+            consumer, CONV_LAYER_TYPES
+        ):
+            output_size = getattr(_inner_module(submodule), "cnn_output_size", None)
+            if output_size is not None:
+                block = max(int(math.prod(tuple(output_size)[2:])), 1)
+
         _fade_new_columns(
             consumer,
             slice(old_width * block, new_width * block),
@@ -717,14 +579,21 @@ def preserve_added_latent(
     covered = bool(stacks)
     for layers in stacks:
         consumer = layers[0]
-        extra = _in_dim(consumer) - new_latent
+        extra = _primary_weight(consumer).shape[1] - new_latent
         # A head narrower than the latent it reads cannot be the consumer the
         # fade was meant for, so dismiss it and report the miss.
         if extra < 0:
             covered = False
             continue
         if extra > 0:
-            _shift_trailing_columns(consumer, old_latent, new_latent, extra)
+            with torch.no_grad():
+                for name in ("weight", "weight_mu", "weight_sigma", "weight_epsilon"):
+                    weight = getattr(consumer, name, None)
+                    if not isinstance(weight, torch.Tensor):
+                        continue
+                    trailing = weight.data[:, old_latent : old_latent + extra]
+                    weight.data[:, new_latent : new_latent + extra] = trailing.clone()
+
         _fade_new_columns(consumer, slice(old_latent, new_latent), rng, noise_scale)
 
     return covered
@@ -740,36 +609,6 @@ def base_mutation(mut_method: str | None) -> str:
     :rtype: str
     """
     return mut_method.split(".")[-1] if mut_method else ""
-
-
-def is_latent_mutation(base: str) -> bool:
-    """Return whether a mutation resizes a network's latent.
-
-    :param base: Trailing method name.
-    :type base: str
-
-    :return: Whether the mutation resizes the latent.
-    :rtype: bool
-    """
-    return base.endswith("latent_node")
-
-
-def _child_module(container: nn.Module, name: str) -> nn.Module | None:
-    """Return a container's child by dictionary key or attribute name.
-
-    :param container: Module or module mapping to look inside.
-    :type container: nn.Module
-    :param name: Key or attribute naming the child.
-    :type name: str
-
-    :return: The child module, or None when the name does not resolve.
-    :rtype: nn.Module | None
-    """
-    mapping: Any = container
-    try:
-        return mapping[name]
-    except (KeyError, IndexError, TypeError):
-        return getattr(container, name, None)
 
 
 def resolve_target(network: nn.Module, mut_method: str | None) -> nn.Module | None:
@@ -791,8 +630,14 @@ def resolve_target(network: nn.Module, mut_method: str | None) -> nn.Module | No
 
     target: nn.Module = network
     for segment in mut_method.split(".")[:-1]:
-        child = _child_module(target, segment)
+        mapping: Any = target
+        try:
+            child = mapping[segment]
+        except (KeyError, IndexError, TypeError):
+            child = getattr(target, segment, None)
+
         if child is None:
             return None
         target = child
+
     return target
