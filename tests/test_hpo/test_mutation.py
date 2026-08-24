@@ -3159,6 +3159,12 @@ class TestMutationsFunctionPreservingLatentEncoders:
         assert not [w for w in caught if "function-preserving" in str(w.message)]
 
 
+def _encoder_is_pinned(network):
+    """Return whether network's encoder is borrowed from the policy network."""
+    encoder = getattr(network, "encoder", None)
+    return encoder is not None and not list(encoder.parameters())
+
+
 class TestMutationsFunctionPreservingSharedEncoders:
     """A borrowed encoder's own head is preserved alongside the policy's."""
 
@@ -3191,7 +3197,8 @@ class TestMutationsFunctionPreservingSharedEncoders:
 
         agent = _fp_mutations().architecture_mutate(agent)
 
-        assert regrama.encoder_is_pinned(agent.critic)
+        assert not _encoder_is_pinned(agent.actor)
+        assert _encoder_is_pinned(agent.critic)
 
 
 _FP_CNN_NET_CONFIG = {
