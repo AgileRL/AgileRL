@@ -11,7 +11,7 @@ The :class:`Mutations <agilerl.hpo.mutation.Mutations>` class is used to mutate 
 
     * **No mutation**: An "identity" mutation, whereby the agent is returned unchanged.
     * **Network architecture mutations**: Involves adding or removing layers or nodes. Trained weights are reused and new weights are initialized randomly.
-    * **Network parameters mutation**: Mutating weights with Gaussian noise, optionally preceded by ReGraMa resets of the neurons that have stopped learning.
+    * **Network parameters mutation**: Mutating weights with Gaussian noise, preceded by ReGraMa resets of the neurons that have stopped learning.
     * **Network activation layer mutation**: Change of activation layer.
     * **RL algorithm mutation**: Mutation of a learning hyperparameter (e.g. learning rate or batch size).
 
@@ -198,20 +198,19 @@ in three different ways, clamping mutated values to prevent extreme changes:
 
     - **Reset mutation**: Completely resets weights to new random values.
 
-Switching off super mutations
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Enabling super mutations
+~~~~~~~~~~~~~~~~~~~~~~~~
 
 The super ("amplified") band draws its noise with a standard deviation of ten times each weight's own
 magnitude. That is a deliberately large jump, and on a well-trained agent it is sometimes large enough to
-undo the learning that earned the agent its place in the population. Set
-``amplified_gauss_param_mut: false`` to drop the amplified band entirely. It defaults to ``true``, so
-existing configurations behave exactly as before.
+undo the learning that earned the agent its place in the population, so it is off by default. Set
+``amplified_gauss_param_mut: true`` to add it alongside the normal and random-reset bands.
 
 .. code-block:: yaml
 
     mutation:
         mutation_sd: 0.1
-        amplified_gauss_param_mut: false   # keep only the normal and random-reset bands
+        amplified_gauss_param_mut: true   # also apply the amplified band
 
 Switching off reset mutations
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -227,7 +226,7 @@ so existing configurations behave exactly as before.
 
     mutation:
         mutation_sd: 0.1
-        random_reset_param_mut: false   # keep only the normal and amplified bands
+        random_reset_param_mut: false   # keep only the normal band (amplified is off by default too)
 
 .. _regrama:
 
@@ -255,15 +254,14 @@ again in the next evolution, especially if ``evo_steps`` is low.
 Every evaluation network is treated this way (actors, critics, and each sub-policy of a multi-agent
 algorithm) while target and other shared networks are re-synced from them afterwards. Output layers of
 head networks are never reset: those units carry fixed meanings, such as action logits or a state
-value, so re-initialising them would throw away the policy itself. When ReGraMa is enabled its resets run
-first, and the Gaussian bands are applied afterwards.
+value, so re-initialising them would throw away the policy itself. Every parameter mutation runs
+ReGraMa's resets first, and the Gaussian bands are applied afterwards.
 
-ReGraMa is configured with two manifest fields, both on the ``mutation`` block:
+ReGraMa's sensitivity is configured with one manifest field, on the ``mutation`` block:
 
 .. code-block:: yaml
 
     mutation:
-        dormant_reset_param_mut: true   # default: false
         dormant_threshold: 0.01         # default: 0.01
 
 or, equivalently, in Python:
@@ -279,15 +277,10 @@ or, equivalently, in Python:
         parameters=0.2,
         activation=0,
         rl_hp=0.2,
-        dormant_reset_param_mut=True,   # reset dormant neurons before adding noise
-        amplified_gauss_param_mut=False,
-        random_reset_param_mut=False,
         dormant_threshold=0.01,
     )
 
-``dormant_reset_param_mut`` defaults to ``false``, so parameter mutations keep their previous
-behaviour until you opt in. ``dormant_threshold`` must be greater than or equal to ``0.0`` and is
-inert while ``dormant_reset_param_mut`` is ``false``.
+``dormant_threshold`` must be greater than or equal to ``0.0``.
 
 Raising ``dormant_threshold`` resets more units per generation: dormancy is given more importance, but
 the forgetting can happen more aggressively, since each reset discards whatever the unit had learned.
@@ -298,8 +291,7 @@ get very small without ever reaching zero.
 .. note::
     RNN architectures fall outside what ReGraMa can reset. The hidden units of a recurrent core
     have fused gate non-linearities and no single weight matrix whose rows are one unit's incoming weights,
-    so only the layers from the output projection onward are reset. A warning is emitted once so this is never
-    silent.
+    so only the layers from the output projection onward are reset.
 
 .. note::
     ReGraMa works on ``torch.compile`` agents, but it costs them the compiled graph. Each measured

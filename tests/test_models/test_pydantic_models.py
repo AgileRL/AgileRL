@@ -1359,19 +1359,17 @@ class TestMutationSpecExtraForbid:
 
 
 class TestMutationSpecRegramaFields:
-    """The four parameter-mutation switches added for ReGraMa."""
+    """The three parameter-mutation fields added for ReGraMa."""
 
-    def test_defaults_preserve_existing_manifest_behaviour(self):
+    def test_defaults(self):
         spec = MutationSpec()
 
-        assert spec.dormant_reset_param_mut is False
-        assert spec.amplified_gauss_param_mut is True
+        assert spec.amplified_gauss_param_mut is False
         assert spec.random_reset_param_mut is True
         assert spec.dormant_threshold == 0.01
 
     def test_values_round_trip_through_a_dump(self):
         spec = MutationSpec(
-            dormant_reset_param_mut=True,
             amplified_gauss_param_mut=False,
             random_reset_param_mut=False,
             dormant_threshold=0.05,

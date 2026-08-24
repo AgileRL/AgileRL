@@ -1,21 +1,20 @@
 # Copyright 2026 AgileRL
 # SPDX-License-Identifier: Apache-2.0
 
-import warnings
-
 import numpy as np
 import pytest
 import torch
 from torch import nn
 
 from agilerl.algorithms import DQN, PPO, TD3, RainbowDQN
-from agilerl.hpo import regrama
 from agilerl.modules.custom_components import (
     NoisyLinear,
     ResidualBlock,
     SimbaResidualBlock,
 )
+from agilerl.utils import mutation_utils
 from agilerl.utils.algo_utils import share_encoder_parameters
+from tests.helper_functions import capture_grama_snapshot
 
 
 def make_rng(seed: int = 0) -> np.random.Generator:
@@ -34,25 +33,17 @@ def reset_producer(
     cnn_spatial: int | None = None,
 ) -> list[int]:
     """Reset one hand-built layer's dormant neurons and return their indices."""
-    consumers = regrama._resolve_consumers(
+    consumers = mutation_utils._resolve_consumers(
         producer,
         next_layers,
         cnn_channels,
         cnn_spatial,
     )
-    indices = regrama._dormant_indices(per_neuron, dormant_threshold)
-    regrama._reset_layer_neurons(producer, consumers, norm, indices, make_rng(seed))
+    indices = mutation_utils._dormant_indices(per_neuron, dormant_threshold)
+    mutation_utils._reset_layer_neurons(
+        producer, consumers, norm, indices, make_rng(seed)
+    )
     return indices
-
-
-def capture_snapshot(agent, observation) -> None:
-    """Run one real backward pass through agent's policy under capture."""
-    agent.capture_grama = True
-    agent.init_training_step()
-    policy = getattr(agent, agent.registry.policy())
-    head = regrama._unwrap_module(policy.head_net)
-    head(policy.encoder(observation)).square().mean().backward()
-    agent.finalize_training_step(1)
 
 
 def mlp_net_config() -> dict:
@@ -71,16 +62,16 @@ def mlp_net_config() -> dict:
 def latent_marked_dormant(network, index: int) -> list[torch.Tensor | None]:
     """Snapshot for network in which only latent unit index is dormant."""
     encoder, head = network.encoder, network.head_net
-    terminal = regrama._activation_modules(encoder, include_output=True)[-1]
+    terminal = mutation_utils._activation_modules(encoder, include_output=True)[-1]
     scores: list[torch.Tensor | None] = []
-    for activation in regrama._target_activations(network):
-        producer = regrama._resolve_producer_and_next(
+    for activation in mutation_utils.target_activations(network):
+        producer = mutation_utils._resolve_producer_and_next(
             activation, encoder, head
         ).producer
         if producer is None:
             scores.append(None)
             continue
-        per_neuron = torch.ones(regrama._weight_param(producer).shape[0])
+        per_neuron = torch.ones(mutation_utils._weight_param(producer).shape[0])
         if activation is terminal:
             per_neuron[index] = 0.0
         scores.append(per_neuron)
@@ -97,50 +88,6 @@ def dqn_agent(vector_space, discrete_space):
     )
 
 
-class TestPerNeuronGrad:
-    """Reduce a backward hook's grad_input to one magnitude per neuron."""
-
-    def test_dense_gradient_averages_over_the_batch(self):
-        gradient = torch.tensor([[1.0, -2.0, 3.0], [1.0, -2.0, 3.0]])
-
-        result = regrama._per_neuron_grad((gradient,))
-
-        assert torch.allclose(result, torch.tensor([1.0, 2.0, 3.0]))
-
-    def test_conv_gradient_averages_over_batch_and_spatial(self):
-        # (batch=2, channels=3, 4, 4), one constant per channel.
-        gradient = torch.ones(2, 3, 4, 4)
-        gradient[:, 1] = -5.0
-        gradient[:, 2] = 2.0
-
-        result = regrama._per_neuron_grad((gradient,))
-
-        assert result.shape == (3,)
-        assert torch.allclose(result, torch.tensor([1.0, 5.0, 2.0]))
-
-    def test_absolute_value_is_taken_before_the_reduction(self):
-        # A neuron whose gradient cancels across the batch.
-        gradient = torch.tensor([[4.0], [-4.0]])
-
-        result = regrama._per_neuron_grad((gradient,))
-
-        # Assert 4.0, not 0.0.
-        assert torch.allclose(result, torch.tensor([4.0]))
-
-    def test_already_per_neuron_gradient_is_returned_unreduced(self):
-        gradient = torch.tensor([1.0, -2.0])
-
-        result = regrama._per_neuron_grad((gradient,))
-
-        assert torch.allclose(result, torch.tensor([1.0, 2.0]))
-
-    @pytest.mark.parametrize("grad_input", [(None,), None, ()])
-    def test_missing_gradient_is_unmeasured_rather_than_zero(self, grad_input):
-        result = regrama._per_neuron_grad(grad_input)
-
-        assert result is None
-
-
 class TestDormantIndices:
     """Select the neurons whose normalised GraMa score is at or below tau."""
 
@@ -148,40 +95,40 @@ class TestDormantIndices:
         # Mean is 1.0, so the scores are the values themselves.
         per_neuron = torch.tensor([2.0, 0.05, 1.0, 0.95])
 
-        result = regrama._dormant_indices(per_neuron, 0.1)
+        result = mutation_utils._dormant_indices(per_neuron, 0.1)
 
         assert result == [1]
 
     def test_threshold_is_scale_invariant(self):
         per_neuron = torch.tensor([2.0, 0.05, 1.0, 0.95])
 
-        scaled = regrama._dormant_indices(per_neuron * 1000.0, 0.1)
+        scaled = mutation_utils._dormant_indices(per_neuron * 1000.0, 0.1)
 
         # Normalising by the layer mean removes the overall scale.
-        assert scaled == regrama._dormant_indices(per_neuron, 0.1)
+        assert scaled == mutation_utils._dormant_indices(per_neuron, 0.1)
 
     def test_layer_with_no_gradient_anywhere_is_entirely_dormant(self):
-        result = regrama._dormant_indices(torch.zeros(4), 0.01)
+        result = mutation_utils._dormant_indices(torch.zeros(4), 0.01)
 
         assert result == [0, 1, 2, 3]
 
     def test_zero_threshold_selects_only_exactly_dead_neurons(self):
         per_neuron = torch.tensor([1.0, 0.0, 1e-9, 2.0])
 
-        result = regrama._dormant_indices(per_neuron, 0.0)
+        result = mutation_utils._dormant_indices(per_neuron, 0.0)
 
         assert result == [1]
 
     def test_non_finite_scores_are_treated_as_dormant(self):
-        # S diverged unit is exactly one worth re-initialising.
+        # A diverged unit is exactly one worth re-initialising.
         per_neuron = torch.tensor([1.0, float("nan"), float("inf"), 2.0])
 
-        result = regrama._dormant_indices(per_neuron, 0.01)
+        result = mutation_utils._dormant_indices(per_neuron, 0.01)
 
         assert result == [1, 2]
 
     def test_empty_layer_selects_nothing(self):
-        assert regrama._dormant_indices(torch.empty(0), 0.01) == []
+        assert mutation_utils._dormant_indices(torch.empty(0), 0.01) == []
 
 
 class TestResetLayerNeurons:
@@ -233,7 +180,7 @@ class TestResetLayerNeurons:
 
         indices = reset_producer(producer, [consumer], per_neuron)
 
-        expected = regrama.REGRAMA_OUT_SCALE * live
+        expected = mutation_utils.REGRAMA_OUT_SCALE * live
         for index in indices:
             assert consumer.weight[:, index].norm().item() == pytest.approx(
                 expected,
@@ -278,6 +225,17 @@ class TestResetLayerNeurons:
 
         assert torch.isfinite(producer.weight).all()
         assert torch.isfinite(consumer.weight).all()
+
+    def test_a_producer_without_a_bias_is_reset_without_error(self):
+        # A bias is genuinely optional, so its absence must be a normal outcome.
+        producer = nn.Linear(3, 5, bias=False)
+        consumer = nn.Linear(5, 2)
+        per_neuron = torch.tensor([1.0, 0.0, 0.0, 1.0, 1.0])
+
+        indices = reset_producer(producer, [consumer], per_neuron)
+
+        assert indices == [1, 2]
+        assert producer.bias is None
 
 
 class TestResetLayerNeuronsAcrossTheFlattenBoundary:
@@ -337,7 +295,7 @@ class TestResetLayerNeuronsAcrossTheFlattenBoundary:
         self.reset(producer, consumer, per_neuron)
 
         assert self.block(consumer, 1).norm().item() == pytest.approx(
-            regrama.REGRAMA_OUT_SCALE * live,
+            mutation_utils.REGRAMA_OUT_SCALE * live,
             rel=1e-5,
         )
 
@@ -359,7 +317,7 @@ class TestLiveColumnScale:
         weight = torch.arange(12, dtype=torch.float32).reshape(2, 6)
         expected = float(weight.pow(2).sum(0).sqrt().median())
 
-        result = regrama._live_column_scale(weight, 1, list(range(6)))
+        result = mutation_utils._live_column_scale(weight, 1, list(range(6)))
 
         assert result == pytest.approx(expected, rel=1e-6)
 
@@ -369,7 +327,7 @@ class TestLiveColumnScale:
         blocks = weight.reshape(2, 3, 4)
         expected = float(blocks.pow(2).sum(dim=(0, 2)).sqrt().median())
 
-        result = regrama._live_column_scale(weight, 4, [0, 1, 2])
+        result = mutation_utils._live_column_scale(weight, 4, [0, 1, 2])
 
         assert result == pytest.approx(expected, rel=1e-6)
 
@@ -379,7 +337,7 @@ class TestLiveColumnScale:
         blocks = weight.reshape(2, 3, -1)
         expected = float(blocks.pow(2).sum(dim=(0, 2)).sqrt().median())
 
-        result = regrama._live_column_scale(weight, 1, [0, 1, 2])
+        result = mutation_utils._live_column_scale(weight, 1, [0, 1, 2])
 
         assert result == pytest.approx(expected, rel=1e-6)
 
@@ -389,8 +347,8 @@ class TestLiveColumnScale:
         weight = torch.ones(2, 5)
         weight[:, :3] = 100.0
 
-        kept = regrama._live_column_scale(weight, 1, [3, 4])
-        everything = regrama._live_column_scale(weight, 1, [0, 1, 2, 3, 4])
+        kept = mutation_utils._live_column_scale(weight, 1, [3, 4])
+        everything = mutation_utils._live_column_scale(weight, 1, [0, 1, 2, 3, 4])
 
         assert kept < everything
 
@@ -399,7 +357,7 @@ class TestLiveColumnScale:
         # revival would be silently zero-scaled and unable to learn.
         weight = torch.zeros(2, 3)
 
-        result = regrama._live_column_scale(weight, 1, [])
+        result = mutation_utils._live_column_scale(weight, 1, [])
 
         assert result > 0.0
 
@@ -408,7 +366,7 @@ class TestLiveColumnScale:
         weight = torch.ones(2, 3) * 4.0
         expected = float(weight.pow(2).sum(0).sqrt().median())
 
-        result = regrama._live_column_scale(weight, 1, [])
+        result = mutation_utils._live_column_scale(weight, 1, [])
 
         # The layer's own median, rather than a fabricated constant.
         assert result == pytest.approx(expected, rel=1e-6)
@@ -418,7 +376,7 @@ class TestLiveColumnScale:
         # when there is nothing to measure, so the Xavier bound stands in.
         weight = torch.zeros(2, 0)
 
-        result = regrama._live_column_scale(weight, 1, [])
+        result = mutation_utils._live_column_scale(weight, 1, [])
 
         assert result > 0.0
 
@@ -428,7 +386,7 @@ class TestRevivedBlock:
 
     @pytest.mark.parametrize("is_noise_scale", [False, True], ids=["weight", "noise"])
     def test_block_is_rescaled_to_the_requested_norm(self, is_noise_scale):
-        result = regrama._revived_block(
+        result = mutation_utils._revived_block(
             torch.zeros(4),
             0.5,
             make_rng(),
@@ -438,7 +396,7 @@ class TestRevivedBlock:
         assert result.norm().item() == pytest.approx(0.5, rel=1e-6)
 
     def test_a_noise_block_is_non_negative_and_uniform(self):
-        result = regrama._revived_block(
+        result = mutation_utils._revived_block(
             torch.zeros(3, 2),
             1.0,
             make_rng(),
@@ -449,14 +407,14 @@ class TestRevivedBlock:
         assert result.unique().numel() == 1
 
     def test_a_weight_block_is_a_signed_direction(self):
-        result = regrama._revived_block(torch.zeros(64), 1.0, make_rng())
+        result = mutation_utils._revived_block(torch.zeros(64), 1.0, make_rng())
 
         assert (result < 0).any()
         assert (result > 0).any()
 
     @pytest.mark.parametrize("is_noise_scale", [False, True], ids=["weight", "noise"])
     def test_non_positive_scale_restores_the_zero_column(self, is_noise_scale):
-        result = regrama._revived_block(
+        result = mutation_utils._revived_block(
             torch.ones(4),
             0.0,
             make_rng(),
@@ -473,7 +431,7 @@ class TestRevivedBlock:
     def test_shape_dtype_and_device_follow_the_template(self, device, is_noise_scale):
         template = torch.zeros(2, 3, dtype=torch.float64, device=device)
 
-        result = regrama._revived_block(
+        result = mutation_utils._revived_block(
             template,
             1.0,
             make_rng(),
@@ -490,7 +448,7 @@ class TestRevivedBlock:
             def standard_normal(self, size):
                 return np.zeros(size)
 
-        result = regrama._revived_block(torch.ones(4), 1.0, ZeroDraw())
+        result = mutation_utils._revived_block(torch.ones(4), 1.0, ZeroDraw())
 
         assert torch.equal(result, torch.zeros(4))
 
@@ -499,28 +457,28 @@ class TestModuleTraversalHelpers:
     """Locate weight layers and strip wrappers across the module tree."""
 
     def test_first_weight_layer_of_an_absent_module_is_none(self):
-        assert regrama._first_weight_layer(None) is None
+        assert mutation_utils._first_weight_layer(None) is None
 
     def test_first_weight_layer_of_a_weightless_module_is_none(self):
-        assert regrama._first_weight_layer(nn.Sequential(nn.ReLU())) is None
+        assert mutation_utils._first_weight_layer(nn.Sequential(nn.ReLU())) is None
 
     def test_unwrap_of_an_absent_module_is_none(self):
-        assert regrama._unwrap_module(None) is None
+        assert mutation_utils._unwrap_module(None) is None
 
     def test_unwrap_stops_on_a_self_referential_wrapper(self):
         # A cycle must terminate rather than hang.
         module = nn.ReLU()
         module.wrapped = module
 
-        assert regrama._unwrap_module(module) is module
+        assert mutation_utils._unwrap_module(module) is module
 
     def test_head_entry_layers_of_an_absent_head_is_empty(self):
-        assert regrama._head_entry_layers(None) == []
+        assert mutation_utils._head_entry_layers(None) == []
 
     def test_flat_head_reports_a_single_entry_layer(self):
         head = nn.Sequential(nn.Linear(4, 3), nn.ReLU(), nn.Linear(3, 2))
 
-        result = regrama._head_entry_layers(head)
+        result = mutation_utils._head_entry_layers(head)
 
         assert result == [head[0]]
 
@@ -532,20 +490,13 @@ class TestModuleTraversalHelpers:
             },
         )
 
-        result = regrama._head_entry_layers(head)
+        result = mutation_utils._head_entry_layers(head)
 
         assert len(result) == 2
 
-    def test_cnn_dims_of_an_absent_encoder_is_empty(self):
-        assert regrama._cnn_dims_by_module(None) == {}
-
     def test_weight_accessor_rejects_a_layer_with_no_weight_tensor(self):
         with pytest.raises(TypeError, match="exposes no weight tensor"):
-            regrama._weight_param(nn.ReLU())
-
-    def test_bias_accessor_reports_no_bias_rather_than_raising(self):
-        # A bias is genuinely optional, so its absence is a normal outcome.
-        assert regrama._bias_data(nn.Linear(3, 2, bias=False)) is None
+            mutation_utils._weight_param(nn.ReLU())
 
 
 class TestResolveConsumers:
@@ -555,7 +506,7 @@ class TestResolveConsumers:
         producer = nn.Linear(3, 5)
         consumer = nn.Linear(5, 2)
 
-        result = regrama._resolve_consumers(producer, [consumer], None, None)
+        result = mutation_utils._resolve_consumers(producer, [consumer], None, None)
 
         assert [target.stride for target in result] == [1]
 
@@ -563,7 +514,7 @@ class TestResolveConsumers:
         producer = nn.Conv2d(3, 4, kernel_size=3)
         consumer = nn.Linear(16, 2)
 
-        result = regrama._resolve_consumers(producer, [consumer], 4, 4)
+        result = mutation_utils._resolve_consumers(producer, [consumer], 4, 4)
 
         assert [target.stride for target in result] == [4]
 
@@ -573,7 +524,7 @@ class TestResolveConsumers:
         producer = nn.Linear(3, 5)
         fusion = nn.Linear(9, 2)
 
-        result = regrama._resolve_consumers(producer, [fusion], None, None)
+        result = mutation_utils._resolve_consumers(producer, [fusion], None, None)
 
         assert result == []
 
@@ -581,7 +532,7 @@ class TestResolveConsumers:
         producer = nn.Conv2d(3, 4, kernel_size=3)
         consumer = nn.Linear(16, 2)
 
-        result = regrama._resolve_consumers(producer, [consumer], None, None)
+        result = mutation_utils._resolve_consumers(producer, [consumer], None, None)
 
         assert result == []
 
@@ -589,7 +540,7 @@ class TestResolveConsumers:
         producer = nn.Linear(3, 5)
         consumer = NoisyLinear(5, 2)
 
-        result = regrama._resolve_consumers(producer, [consumer], None, None)
+        result = mutation_utils._resolve_consumers(producer, [consumer], None, None)
 
         # The mean weight and its parallel noise scale ride together.
         assert len(result) == 2
@@ -599,7 +550,7 @@ class TestResolveConsumers:
         producer = nn.Linear(3, 5)
         consumer = nn.Conv2d(5, 2, kernel_size=3)
 
-        result = regrama._resolve_consumers(producer, [consumer], None, None)
+        result = mutation_utils._resolve_consumers(producer, [consumer], None, None)
 
         assert result == []
 
@@ -613,10 +564,10 @@ class TestConv1dBlocks:
         ids=["Conv1d", "Conv2d", "Conv3d"],
     )
     def test_every_evolvable_cnn_block_type_is_a_weight_layer(self, layer):
-        assert regrama._is_weight_layer(layer)
+        assert mutation_utils._is_weight_layer(layer)
 
     def test_conv1d_pair_is_a_conv_to_conv_boundary(self):
-        targets = regrama._resolve_consumers(
+        targets = mutation_utils._resolve_consumers(
             nn.Conv1d(3, 4, 3),
             [nn.Conv1d(4, 2, 3)],
             None,
@@ -629,7 +580,7 @@ class TestConv1dBlocks:
         producer = nn.Conv1d(3, 4, kernel_size=3)
         consumer = nn.Linear(16, 2)
 
-        result = regrama._resolve_consumers(producer, [consumer], 4, 4)
+        result = mutation_utils._resolve_consumers(producer, [consumer], 4, 4)
 
         assert [target.stride for target in result] == [4]
 
@@ -641,7 +592,7 @@ class TestConv1dBlocks:
             nn.ReLU(),
         )
 
-        result = regrama._resolve_producer_and_next(encoder[1], encoder, None)
+        result = mutation_utils._resolve_producer_and_next(encoder[1], encoder, None)
 
         assert result.producer is encoder[0]
         assert result.consumers == [encoder[2]]
@@ -678,7 +629,7 @@ class TestConv1dBlocks:
         reset_producer(producer, [consumer], torch.tensor([1.0, 0.0, 1.0, 1.0]))
 
         assert consumer.weight[:, 1].norm().item() == pytest.approx(
-            regrama.REGRAMA_OUT_SCALE * live,
+            mutation_utils.REGRAMA_OUT_SCALE * live,
             rel=1e-5,
         )
 
@@ -745,7 +696,7 @@ class TestResetNoisyLayers:
         indices = reset_producer(producer, [consumer], per_neuron)
 
         assert consumer.weight_sigma[:, indices[0]].max().item() == pytest.approx(
-            regrama.REGRAMA_OUT_SCALE * initial,
+            mutation_utils.REGRAMA_OUT_SCALE * initial,
             rel=1e-5,
         )
 
@@ -810,7 +761,7 @@ class TestResetNormalisedLayers:
         assert norm.running_var[indices[0]].item() == pytest.approx(1.0)
 
     def test_normalisation_over_a_different_axis_is_left_alone(self):
-        # S norm whose length does not match the producer does not index
+        # A norm whose length does not match the producer does not index
         # by neuron, so writing into it would corrupt unrelated state.
         producer = nn.Linear(3, 5)
         consumer = nn.Linear(5, 2)
@@ -831,9 +782,9 @@ class TestResolveProducerAndNext:
         dqn_agent,
     ):
         network = dqn_agent.actor
-        activation = regrama._target_activations(network)[0]
+        activation = mutation_utils.target_activations(network)[0]
 
-        context = regrama._resolve_producer_and_next(
+        context = mutation_utils._resolve_producer_and_next(
             activation,
             network.encoder,
             network.head_net,
@@ -847,15 +798,15 @@ class TestResolveProducerAndNext:
     def test_norm_between_producer_and_activation_is_reported(self, dqn_agent):
         # The evolvable MLP emits linear -> layer_norm -> activation by default.
         network = dqn_agent.actor
-        activation = regrama._target_activations(network)[0]
+        activation = mutation_utils.target_activations(network)[0]
 
-        context = regrama._resolve_producer_and_next(
+        context = mutation_utils._resolve_producer_and_next(
             activation,
             network.encoder,
             network.head_net,
         )
 
-        assert isinstance(context.norm, regrama.NORM_LAYER_TYPES)
+        assert isinstance(context.norm, mutation_utils.NORM_LAYER_TYPES)
 
     def test_norm_preceding_the_producer_is_not_reported(self):
         # A SimBa block is layer_norm -> linear -> activation: the norm applies to
@@ -863,7 +814,7 @@ class TestResolveProducerAndNext:
         block = SimbaResidualBlock(hidden_size=8, scale_factor=2)
         encoder = nn.Sequential(block)
 
-        context = regrama._resolve_producer_and_next(block.act, encoder, None)
+        context = mutation_utils._resolve_producer_and_next(block.act, encoder, None)
 
         assert context.producer is block.linear1
         assert context.norm is None
@@ -873,7 +824,7 @@ class TestResolveProducerAndNext:
         block = ResidualBlock(in_channels=3, kernel_size=3, scale_factor=2)
         encoder = nn.Sequential(block)
 
-        context = regrama._resolve_producer_and_next(block.act, encoder, None)
+        context = mutation_utils._resolve_producer_and_next(block.act, encoder, None)
 
         assert context.producer is block.conv1
         assert context.norm is block.bn1
@@ -883,7 +834,7 @@ class TestResolveProducerAndNext:
         block = ResidualBlock(in_channels=3, kernel_size=3, scale_factor=2)
         encoder = nn.Sequential(block)
 
-        measured = regrama._activation_modules(encoder, include_output=False)
+        measured = mutation_utils._activation_modules(encoder, include_output=False)
 
         assert block.act in measured
 
@@ -896,9 +847,11 @@ class TestResolveProducerAndNext:
         # whole latent.
         agent = RainbowDQN(vector_space, discrete_space, device="cpu")
         network = agent.actor
-        latent = regrama._activation_modules(network.encoder, include_output=True)[-1]
+        latent = mutation_utils._activation_modules(
+            network.encoder, include_output=True
+        )[-1]
 
-        context = regrama._resolve_producer_and_next(
+        context = mutation_utils._resolve_producer_and_next(
             latent,
             network.encoder,
             network.head_net,
@@ -922,9 +875,9 @@ class TestResolveProducerAndNext:
         )
         encoder = agent.actor.encoder
         sub_encoder = next(iter(encoder.feature_net.values()))
-        tail = regrama._activation_modules(sub_encoder, include_output=True)[-1]
+        tail = mutation_utils._activation_modules(sub_encoder, include_output=True)[-1]
 
-        context = regrama._resolve_producer_and_next(
+        context = mutation_utils._resolve_producer_and_next(
             tail,
             encoder,
             agent.actor.head_net,
@@ -936,19 +889,19 @@ class TestResolveProducerAndNext:
     def test_unknown_activation_resolves_to_nothing(self, dqn_agent):
         network = dqn_agent.actor
 
-        context = regrama._resolve_producer_and_next(
+        context = mutation_utils._resolve_producer_and_next(
             nn.ReLU(),
             network.encoder,
             network.head_net,
         )
 
         # The caller skips the layer rather than guessing.
-        assert context == regrama._ProducerContext(None, None, [])
+        assert context == mutation_utils._ProducerContext(None, None, [])
 
     def test_activation_is_found_in_the_head_when_the_encoder_is_absent(self):
         head = nn.Sequential(nn.Linear(4, 3), nn.ReLU(), nn.Linear(3, 2))
 
-        context = regrama._resolve_producer_and_next(head[1], None, head)
+        context = mutation_utils._resolve_producer_and_next(head[1], None, head)
 
         assert context.producer is head[0]
         assert context.consumers == [head[2]]
@@ -984,10 +937,12 @@ class TestTargetActivations:
         encoder_activations = {
             id(module)
             for module in encoder.modules()
-            if isinstance(module, regrama.ACTIVATION_TYPES)
+            if isinstance(module, mutation_utils.ACTIVATION_TYPES)
         }
 
-        measured = {id(module) for module in regrama._target_activations(agent.actor)}
+        measured = {
+            id(module) for module in mutation_utils.target_activations(agent.actor)
+        }
 
         assert encoder_activations <= measured
 
@@ -997,7 +952,7 @@ class TestTargetActivations:
         head = dict(dqn_agent.actor.head_net.named_modules())
 
         measured = {
-            id(module) for module in regrama._target_activations(dqn_agent.actor)
+            id(module) for module in mutation_utils.target_activations(dqn_agent.actor)
         }
 
         assert id(head["model.value_activation_1"]) in measured
@@ -1013,7 +968,9 @@ class TestTargetActivations:
         agent = RainbowDQN(vector_space, discrete_space, device="cpu")
         head = dict(agent.actor.head_net.named_modules())
 
-        measured = {id(module) for module in regrama._target_activations(agent.actor)}
+        measured = {
+            id(module) for module in mutation_utils.target_activations(agent.actor)
+        }
 
         assert id(head["model.value_activation_output"]) not in measured
         assert id(head["advantage_net.advantage_activation_output"]) not in measured
@@ -1036,7 +993,9 @@ class TestTargetActivations:
             if isinstance(module, SimbaResidualBlock)
         ]
 
-        measured = {id(module) for module in regrama._target_activations(agent.actor)}
+        measured = {
+            id(module) for module in mutation_utils.target_activations(agent.actor)
+        }
 
         assert blocks
         assert all(id(block.act) in measured for block in blocks)
@@ -1044,169 +1003,9 @@ class TestTargetActivations:
     def test_activations_are_recognised_by_type_not_by_name(self):
         root = nn.Sequential(nn.Linear(3, 4), nn.Tanh(), nn.Linear(4, 2))
 
-        result = regrama._activation_modules(root, include_output=True)
+        result = mutation_utils._activation_modules(root, include_output=True)
 
         assert [type(module) for module in result] == [nn.Tanh]
-
-
-class TestGraMaCapture:
-    """Capture per-neuron pre-activation gradients during a training block."""
-
-    def test_snapshot_layout_matches_the_measured_layers(self, dqn_agent):
-        expected = [
-            len(regrama._target_activations(network))
-            for _network_id, network in regrama.eval_networks(dqn_agent)
-        ]
-
-        capture_snapshot(dqn_agent, torch.rand(4, 4))
-
-        assert [len(entry) for entry in dqn_agent.grama_scores] == expected
-
-    def test_captured_widths_match_the_producing_layers(self, dqn_agent):
-        capture_snapshot(dqn_agent, torch.rand(4, 4))
-
-        for entry in dqn_agent.grama_scores[0]:
-            assert entry is None or entry.dim() == 1
-
-    def test_only_the_last_minibatch_survives(self, dqn_agent):
-        # The metric's expectation is taken at fixed parameters, and the reset acts
-        # on the network as it stands at the end of the cycle.
-        dqn_agent.capture_grama = True
-        dqn_agent.init_training_step()
-        dqn_agent.actor(torch.ones(4, 4) * 100.0).square().mean().backward()
-        small = torch.rand(4, 4) * 1e-3
-        dqn_agent.actor(small).square().mean().backward()
-        dqn_agent.finalize_training_step(1)
-        captured = dqn_agent.grama_scores[0][0]
-
-        # Reproduce the second minibatch alone.
-        dqn_agent.capture_grama = True
-        dqn_agent.init_training_step()
-        dqn_agent.actor(small).square().mean().backward()
-        dqn_agent.finalize_training_step(1)
-
-        assert torch.allclose(captured, dqn_agent.grama_scores[0][0], atol=1e-8)
-
-    def test_hooks_are_released_when_the_block_completes(self, dqn_agent):
-        activation = regrama._target_activations(dqn_agent.actor)[0]
-
-        capture_snapshot(dqn_agent, torch.rand(4, 4))
-
-        assert not activation._backward_hooks
-
-    def test_hooks_are_released_when_the_block_raises(self, dqn_agent):
-        activation = regrama._target_activations(dqn_agent.actor)[0]
-
-        def blow_up() -> None:
-            msg = "training blew up"
-            raise RuntimeError(msg)
-
-        with pytest.raises(RuntimeError), regrama.GraMaCapture(dqn_agent):
-            blow_up()
-
-        assert not activation._backward_hooks
-
-    def test_repeated_captures_do_not_accumulate_hooks(self, dqn_agent):
-        activation = regrama._target_activations(dqn_agent.actor)[0]
-
-        for _ in range(3):
-            capture_snapshot(dqn_agent, torch.rand(4, 4))
-
-        assert not activation._backward_hooks
-
-    def test_layer_outside_the_loss_graph_is_stored_as_unmeasured(
-        self,
-        vector_space,
-        discrete_space,
-    ):
-        # Only PPO's actor is exercised, so the critic never fires.
-        agent = PPO(vector_space, discrete_space, device="cpu")
-        capture_snapshot(agent, torch.rand(4, 4))
-        networks = [network for _network_id, network in regrama.eval_networks(agent)]
-        critic_index = networks.index(agent.critic)
-
-        # Recorded as None, so it is skipped downstream rather than read
-        # as a fully dormant layer and needlessly reset.
-        assert all(entry is None for entry in agent.grama_scores[critic_index])
-        assert any(entry is not None for entry in agent.grama_scores[0])
-
-    def test_a_failing_hook_never_breaks_the_backward_pass(
-        self,
-        dqn_agent,
-        monkeypatch,
-    ):
-        # A raising backward hook would abort real training.
-        def explode(_grad_input):
-            msg = "hook blew up"
-            raise RuntimeError(msg)
-
-        monkeypatch.setattr(regrama, "_per_neuron_grad", explode)
-
-        capture_snapshot(dqn_agent, torch.rand(4, 4))
-
-        # Training completed, and the layers are simply unmeasured.
-        assert all(entry is None for entry in dqn_agent.grama_scores[0])
-
-    def test_a_layer_whose_gradient_reduces_to_nothing_stays_unmeasured(
-        self,
-        dqn_agent,
-        monkeypatch,
-    ):
-        monkeypatch.setattr(regrama, "_per_neuron_grad", lambda _grad_input: None)
-
-        capture_snapshot(dqn_agent, torch.rand(4, 4))
-
-        assert all(entry is None for entry in dqn_agent.grama_scores[0])
-
-    def test_an_uncollectable_snapshot_is_reported_as_missing(self, dqn_agent):
-        class Unreadable:
-            def __iter__(self):
-                msg = "snapshot went away"
-                raise RuntimeError(msg)
-
-        activation = regrama._target_activations(dqn_agent.actor)[0]
-        capture = regrama.GraMaCapture(dqn_agent).register()
-        capture._latest = [Unreadable()]
-
-        capture.release()
-
-        assert dqn_agent.grama_scores is None
-        assert not activation._backward_hooks
-
-    def test_an_agent_that_rejects_the_snapshot_still_releases_cleanly(
-        self,
-        dqn_agent,
-    ):
-        # Storing the snapshot must never break training either.
-        class Rejecting:
-            registry = dqn_agent.registry
-            actor = dqn_agent.actor
-            actor_target = dqn_agent.actor_target
-            accelerator = None
-
-            def __setattr__(self, name, value):
-                msg = "read-only agent"
-                raise AttributeError(msg)
-
-        activation = regrama._target_activations(dqn_agent.actor)[0]
-
-        with regrama.GraMaCapture(Rejecting()):
-            pass
-
-        assert not activation._backward_hooks
-
-    def test_capture_never_breaks_on_an_agent_without_networks(self):
-        # Registration is best-effort so a training run cannot be broken
-        # by an agent that does not expose the expected surface.
-        class Bare:
-            grama_scores = None
-
-        agent = Bare()
-
-        with regrama.GraMaCapture(agent):
-            pass
-
-        assert agent.grama_scores == []
 
 
 class TestSnapshotPairing:
@@ -1220,23 +1019,23 @@ class TestSnapshotPairing:
         # the dormant one must come through untouched.
         network = dqn_agent.actor
         producers = [
-            regrama._resolve_producer_and_next(
+            mutation_utils._resolve_producer_and_next(
                 activation,
                 network.encoder,
                 network.head_net,
             ).producer
-            for activation in regrama._target_activations(network)
+            for activation in mutation_utils.target_activations(network)
         ]
         scores = [
-            torch.ones(regrama._weight_param(producer).shape[0])
+            torch.ones(mutation_utils._weight_param(producer).shape[0])
             for producer in producers
         ]
         scores[dormant_index] = torch.zeros_like(scores[dormant_index])
         before = [producer.weight.detach().clone() for producer in producers]
 
-        report = regrama.reset_dormant_neurons(network, scores, 0.01, make_rng())
+        report = mutation_utils.reset_dormant_neurons(network, scores, 0.01, make_rng())
 
-        assert report.neurons_reset == scores[dormant_index].numel()
+        assert report == scores[dormant_index].numel()
         assert not torch.equal(
             producers[dormant_index].weight.detach(),
             before[dormant_index],
@@ -1264,14 +1063,14 @@ class TestSnapshotPairing:
         # mis-pairing scores with layers would corrupt unrelated neurons.
         before = [p.detach().clone() for p in dqn_agent.actor.parameters()]
 
-        report = regrama.reset_dormant_neurons(
+        report = mutation_utils.reset_dormant_neurons(
             dqn_agent.actor,
             snapshot,
             0.01,
             make_rng(),
         )
 
-        assert report == regrama.ResetReport(0, False)
+        assert report == 0
         assert all(
             torch.equal(current.detach(), original)
             for current, original in zip(
@@ -1284,34 +1083,34 @@ class TestSnapshotPairing:
     def test_layers_with_no_captured_gradient_are_dropped(self, dqn_agent):
         # A layer outside the training loss is stored as None and dropped from the
         # pairing rather than scored against the wrong entry.
-        capture_snapshot(dqn_agent, torch.rand(4, 4))
+        capture_grama_snapshot(dqn_agent, torch.rand(4, 4))
         dormant = [
             None if entry is None else torch.zeros_like(entry)
             for entry in dqn_agent.grama_scores[0]
         ]
 
-        measured = regrama.reset_dormant_neurons(
+        measured = mutation_utils.reset_dormant_neurons(
             dqn_agent.actor,
             dormant,
             0.01,
             make_rng(),
         )
-        unmeasured = regrama.reset_dormant_neurons(
+        unmeasured = mutation_utils.reset_dormant_neurons(
             dqn_agent.actor,
             [None] * len(dormant),
             0.01,
             make_rng(),
         )
 
-        assert measured.neurons_reset > 0
-        assert unmeasured.neurons_reset == 0
+        assert measured > 0
+        assert unmeasured == 0
 
 
 class TestResetDormantNeurons:
     """Reset a whole evaluation network from its captured snapshot."""
 
     def test_a_fully_dormant_network_is_reset(self, dqn_agent):
-        capture_snapshot(dqn_agent, torch.rand(4, 4))
+        capture_grama_snapshot(dqn_agent, torch.rand(4, 4))
         scores = [
             None if entry is None else torch.zeros_like(entry)
             for entry in dqn_agent.grama_scores[0]
@@ -1319,67 +1118,69 @@ class TestResetDormantNeurons:
         measured = sum(entry.numel() for entry in scores if entry is not None)
         before = {k: v.clone() for k, v in dqn_agent.actor.state_dict().items()}
 
-        report = regrama.reset_dormant_neurons(
+        report = mutation_utils.reset_dormant_neurons(
             dqn_agent.actor,
             scores,
             0.01,
             make_rng(),
         )
 
-        assert 0 < report.neurons_reset <= measured
+        assert 0 < report <= measured
         after = dqn_agent.actor.state_dict()
         assert any(not torch.equal(before[k], after[k]) for k in before)
 
     def test_a_healthy_network_is_left_untouched(self, dqn_agent):
         # Arrange: a uniform snapshot normalises to a score of 1.0 everywhere, so
         # no neuron is dormant at any threshold below one.
-        capture_snapshot(dqn_agent, torch.rand(4, 4))
+        capture_grama_snapshot(dqn_agent, torch.rand(4, 4))
         scores = [
             None if entry is None else torch.ones_like(entry)
             for entry in dqn_agent.grama_scores[0]
         ]
         before = {k: v.clone() for k, v in dqn_agent.actor.state_dict().items()}
 
-        report = regrama.reset_dormant_neurons(
+        report = mutation_utils.reset_dormant_neurons(
             dqn_agent.actor,
             scores,
             0.01,
             make_rng(),
         )
 
-        assert report.neurons_reset == 0
+        assert report == 0
         after = dqn_agent.actor.state_dict()
         assert all(torch.equal(before[k], after[k]) for k in before)
 
     def test_missing_snapshot_is_a_no_op(self, dqn_agent):
-        report = regrama.reset_dormant_neurons(dqn_agent.actor, None, 0.01, make_rng())
+        report = mutation_utils.reset_dormant_neurons(
+            dqn_agent.actor, None, 0.01, make_rng()
+        )
 
-        assert report.neurons_reset == 0
+        assert report == 0
 
     def test_snapshot_of_the_wrong_width_skips_that_layer(self, dqn_agent):
-        capture_snapshot(dqn_agent, torch.rand(4, 4))
+        capture_grama_snapshot(dqn_agent, torch.rand(4, 4))
         scores = [torch.zeros(entry.numel() + 1) for entry in dqn_agent.grama_scores[0]]
         before = {k: v.clone() for k, v in dqn_agent.actor.state_dict().items()}
 
-        report = regrama.reset_dormant_neurons(
+        report = mutation_utils.reset_dormant_neurons(
             dqn_agent.actor,
             scores,
             0.01,
             make_rng(),
         )
 
-        assert report.neurons_reset == 0
+        assert report == 0
         after = dqn_agent.actor.state_dict()
         assert all(torch.equal(before[k], after[k]) for k in before)
 
     def test_head_output_layer_is_never_treated_as_a_producer(self, dqn_agent):
-        capture_snapshot(dqn_agent, torch.rand(4, 4))
+        capture_grama_snapshot(dqn_agent, torch.rand(4, 4))
         scores = [torch.zeros_like(entry) for entry in dqn_agent.grama_scores[0]]
         output_layer = dqn_agent.actor.head_net.model.value_linear_layer_output
         with torch.no_grad():
             output_layer.bias.fill_(3.0)
 
-        regrama.reset_dormant_neurons(dqn_agent.actor, scores, 0.01, make_rng())
+        mutation_utils.reset_dormant_neurons(dqn_agent.actor, scores, 0.01, make_rng())
 
         # A producer's dormant neurons have their bias zeroed, so a surviving bias
         # is the observable proof the layer was never treated as one.
@@ -1391,12 +1192,12 @@ class TestResetDormantNeurons:
     def test_head_output_layer_columns_are_still_rewritten(self, dqn_agent):
         # It consumes the last hidden activation, so when those neurons are
         # reset its columns must follow. That half is not excluded.
-        capture_snapshot(dqn_agent, torch.rand(4, 4))
+        capture_grama_snapshot(dqn_agent, torch.rand(4, 4))
         scores = [torch.zeros_like(entry) for entry in dqn_agent.grama_scores[0]]
         output_layer = dqn_agent.actor.head_net.model.value_linear_layer_output
         before = output_layer.weight.detach().clone()
 
-        regrama.reset_dormant_neurons(dqn_agent.actor, scores, 0.01, make_rng())
+        mutation_utils.reset_dormant_neurons(dqn_agent.actor, scores, 0.01, make_rng())
 
         assert not torch.equal(output_layer.weight.detach(), before)
 
@@ -1412,15 +1213,17 @@ class TestResetDormantNeurons:
             net_config=encoder_cnn_config,
             device="cpu",
         )
-        capture_snapshot(agent, torch.rand(2, 3, 32, 32))
+        capture_grama_snapshot(agent, torch.rand(2, 3, 32, 32))
         scores = [
             None if entry is None else torch.zeros_like(entry)
             for entry in agent.grama_scores[0]
         ]
 
-        report = regrama.reset_dormant_neurons(agent.actor, scores, 0.01, make_rng())
+        report = mutation_utils.reset_dormant_neurons(
+            agent.actor, scores, 0.01, make_rng()
+        )
 
-        assert report.neurons_reset > 0
+        assert report > 0
         assert all(
             torch.isfinite(value).all() for value in agent.actor.state_dict().values()
         )
@@ -1449,12 +1252,14 @@ class TestResetDormantNeurons:
             for entry in agent.grama_scores[0]
         ]
 
-        report = regrama.reset_dormant_neurons(agent.actor, scores, 0.01, make_rng())
+        report = mutation_utils.reset_dormant_neurons(
+            agent.actor, scores, 0.01, make_rng()
+        )
 
         # 5 conv channels per sub-encoder, the 8-unit latent, and the head's two
         # 8-unit layers. The two 32-unit sub-encoder tails are excluded: their
         # features are one offset slice of the fusion layer's input.
-        assert report.neurons_reset == 5 + 5 + 8 + 8 + 8
+        assert report == 5 + 5 + 8 + 8 + 8
         assert all(
             torch.isfinite(value).all() for value in agent.actor.state_dict().values()
         )
@@ -1483,12 +1288,12 @@ class TestResetDormantNeurons:
         agent.finalize_training_step(1)
 
         tails = {
-            id(regrama._activation_modules(sub_encoder, include_output=True)[-1])
+            id(mutation_utils._activation_modules(sub_encoder, include_output=True)[-1])
             for sub_encoder in agent.actor.encoder.feature_net.values()
         }
         scores = []
         for activation, entry in zip(
-            regrama._target_activations(agent.actor),
+            mutation_utils.target_activations(agent.actor),
             agent.grama_scores[0],
             strict=True,
         ):
@@ -1505,21 +1310,24 @@ class TestResetDormantNeurons:
             name: value.clone() for name, value in agent.actor.state_dict().items()
         }
 
-        report = regrama.reset_dormant_neurons(agent.actor, scores, 0.01, make_rng())
+        report = mutation_utils.reset_dormant_neurons(
+            agent.actor, scores, 0.01, make_rng()
+        )
 
-        assert report.neurons_reset == 0
+        assert report == 0
         assert all(
             torch.equal(value, before[name])
             for name, value in agent.actor.state_dict().items()
         )
 
-    def test_recurrent_core_is_reported_as_out_of_scope(
+    def test_recurrent_core_is_left_unreset(
         self,
         vector_space,
         discrete_space,
     ):
         # An LSTM's gate non-linearities are fused, so no per-neuron gradient is
-        # captured for them and its hidden units own no contiguous weight rows.
+        # captured for them and its hidden units own no contiguous weight rows:
+        # only the layers from its output projection onward are ever reset.
         agent = PPO(
             vector_space,
             discrete_space,
@@ -1527,10 +1335,36 @@ class TestResetDormantNeurons:
             net_config={"encoder_config": {"hidden_state_size": 8}},
             device="cpu",
         )
+        # Every measured layer is marked fully dormant, so anything the surgery
+        # could reach would be.
+        scores = [
+            torch.zeros(
+                mutation_utils._weight_param(
+                    mutation_utils._resolve_producer_and_next(
+                        activation,
+                        agent.actor.encoder,
+                        agent.actor.head_net,
+                    ).producer,
+                ).shape[0],
+            )
+            for activation in mutation_utils.target_activations(agent.actor)
+        ]
+        # "lstm." (with the trailing dot) matches only the nn.LSTM module's own
+        # parameters, not the output-projection Linear that follows it and is
+        # legitimately reset.
+        lstm_before = {
+            name: value.clone()
+            for name, value in agent.actor.state_dict().items()
+            if "lstm." in name
+        }
 
-        report = regrama.reset_dormant_neurons(agent.actor, None, 0.01, make_rng())
+        mutation_utils.reset_dormant_neurons(agent.actor, scores, 0.01, make_rng())
 
-        assert report.recurrent_seen is True
+        assert lstm_before
+        after = agent.actor.state_dict()
+        assert all(
+            torch.equal(value, after[name]) for name, value in lstm_before.items()
+        )
 
     def test_borrowed_encoder_parameters_are_not_reset(
         self,
@@ -1546,22 +1380,22 @@ class TestResetDormantNeurons:
         # Every measured layer of the critic is marked fully dormant.
         scores = [
             torch.zeros(
-                regrama._weight_param(
-                    regrama._resolve_producer_and_next(
+                mutation_utils._weight_param(
+                    mutation_utils._resolve_producer_and_next(
                         activation,
                         agent.critic.encoder,
                         agent.critic.head_net,
                     ).producer,
                 ).shape[0],
             )
-            for activation in regrama._target_activations(agent.critic)
+            for activation in mutation_utils.target_activations(agent.critic)
         ]
         before = {
             name: value.clone()
             for name, value in agent.critic.encoder.state_dict().items()
         }
 
-        regrama.reset_dormant_neurons(agent.critic, scores, 0.01, make_rng())
+        mutation_utils.reset_dormant_neurons(agent.critic, scores, 0.01, make_rng())
 
         after = agent.critic.encoder.state_dict()
         assert all(torch.equal(before[name], after[name]) for name in before)
@@ -1573,14 +1407,14 @@ class TestSharedLatentBlocks:
     def test_dense_entry_exposes_its_leading_latent_columns(self):
         producer = nn.Linear(4, 8)
 
-        result = regrama._shared_latent_blocks(producer, [nn.Linear(10, 5)])
+        result = mutation_utils._shared_latent_blocks(producer, [nn.Linear(10, 5)])
 
         assert [tuple(target.weight.shape) for target in result] == [(5, 8)]
 
     def test_noisy_entry_also_exposes_its_noise_columns(self):
         producer = nn.Linear(4, 8)
 
-        result = regrama._shared_latent_blocks(producer, [NoisyLinear(8, 5)])
+        result = mutation_utils._shared_latent_blocks(producer, [NoisyLinear(8, 5)])
 
         assert [target.is_noise_scale for target in result] == [False, True]
 
@@ -1592,7 +1426,7 @@ class TestSharedLatentBlocks:
     def test_an_entry_that_cannot_hold_the_latent_is_skipped(self, make_entry):
         producer = nn.Linear(4, 8)
 
-        result = regrama._shared_latent_blocks(producer, [make_entry()])
+        result = mutation_utils._shared_latent_blocks(producer, [make_entry()])
 
         assert result == []
 
@@ -1601,7 +1435,7 @@ class TestSharedLatentBlocks:
         # so a conv producer is never the layer feeding a sharing head.
         producer = nn.Conv2d(3, 8, 3)
 
-        result = regrama._shared_latent_blocks(producer, [nn.Linear(8, 5)])
+        result = mutation_utils._shared_latent_blocks(producer, [nn.Linear(8, 5)])
 
         assert result == []
 
@@ -1613,16 +1447,18 @@ class TestSharedEncoderCompensation:
         return PPO(vector_space, discrete_space, share_encoders=share, device="cpu")
 
     def critic_head(self, network):
-        return regrama._head_entry_layers(network.head_net)[0]
+        return mutation_utils._head_entry_layers(network.head_net)[0]
 
     def reset_actor_latent(self, agent, index=0):
         """Reset one latent unit of the policy, compensating shared consumers."""
-        return regrama.reset_dormant_neurons(
+        return mutation_utils.reset_dormant_neurons(
             agent.actor,
             latent_marked_dormant(agent.actor, index),
             0.01,
             make_rng(),
-            shared_latent_heads=regrama.shared_encoder_heads(agent, None, agent.actor),
+            shared_latent_heads=mutation_utils.shared_encoder_heads(
+                agent.eval_networks(), None, agent.actor
+            ),
         )
 
     def test_only_the_network_that_owns_the_encoder_has_shared_consumers(
@@ -1632,32 +1468,39 @@ class TestSharedEncoderCompensation:
     ):
         agent = self.ppo(vector_space, discrete_space, share=True)
 
-        assert regrama.shared_encoder_heads(agent, None, agent.actor)
-        assert regrama.shared_encoder_heads(agent, None, agent.critic) == []
+        assert mutation_utils.shared_encoder_heads(
+            agent.eval_networks(), None, agent.actor
+        )
+        assert (
+            mutation_utils.shared_encoder_heads(
+                agent.eval_networks(), None, agent.critic
+            )
+            == []
+        )
 
     def test_an_owned_encoder_is_not_shared(self, vector_space, discrete_space):
         agent = self.ppo(vector_space, discrete_space, share=False)
 
-        assert regrama.shared_encoder_heads(agent, None, agent.actor) == []
+        assert (
+            mutation_utils.shared_encoder_heads(
+                agent.eval_networks(), None, agent.actor
+            )
+            == []
+        )
 
     def test_a_network_without_an_encoder_is_not_a_shared_consumer(
         self,
         vector_space,
         discrete_space,
-        monkeypatch,
     ):
         # Nothing borrowed, so nothing to compensate either.
         agent = self.ppo(vector_space, discrete_space, share=True)
-        monkeypatch.setattr(
-            regrama,
-            "eval_networks",
-            lambda _agent: [
-                (None, agent.actor),
-                (None, nn.Sequential(nn.Linear(4, 2))),
-            ],
-        )
+        networks = [
+            (None, agent.actor),
+            (None, nn.Sequential(nn.Linear(4, 2))),
+        ]
 
-        assert regrama.shared_encoder_heads(agent, None, agent.actor) == []
+        assert mutation_utils.shared_encoder_heads(networks, None, agent.actor) == []
 
     def test_the_critic_head_is_reported_as_a_shared_consumer(
         self,
@@ -1666,9 +1509,11 @@ class TestSharedEncoderCompensation:
     ):
         agent = self.ppo(vector_space, discrete_space, share=True)
 
-        result = regrama.shared_encoder_heads(agent, None, agent.actor)
+        result = mutation_utils.shared_encoder_heads(
+            agent.eval_networks(), None, agent.actor
+        )
 
-        assert result == regrama._head_entry_layers(agent.critic.head_net)
+        assert result == mutation_utils._head_entry_layers(agent.critic.head_net)
 
     def test_unshared_encoders_report_no_shared_consumer(
         self,
@@ -1679,7 +1524,12 @@ class TestSharedEncoderCompensation:
         # in here would fade the same column twice.
         agent = self.ppo(vector_space, discrete_space, share=False)
 
-        assert regrama.shared_encoder_heads(agent, None, agent.actor) == []
+        assert (
+            mutation_utils.shared_encoder_heads(
+                agent.eval_networks(), None, agent.actor
+            )
+            == []
+        )
 
     def test_reset_latent_is_faded_in_the_critic_head_too(
         self,
@@ -1693,7 +1543,7 @@ class TestSharedEncoderCompensation:
         self.reset_actor_latent(agent)
 
         assert head.weight.data[:, 0].norm().item() == pytest.approx(
-            regrama.REGRAMA_OUT_SCALE * live,
+            mutation_utils.REGRAMA_OUT_SCALE * live,
             rel=1e-5,
         )
 
@@ -1715,7 +1565,7 @@ class TestSharedEncoderCompensation:
         head = self.critic_head(agent.critic)
         before = head.weight.data.clone()
 
-        regrama.reset_dormant_neurons(
+        mutation_utils.reset_dormant_neurons(
             agent.actor,
             latent_marked_dormant(agent.actor, 0),
             0.01,
@@ -1758,245 +1608,3 @@ class TestSharedEncoderCompensation:
 
         assert torch.equal(*same_action)
         assert not torch.equal(same_action[0], other_action)
-
-
-class TestSetGraMaCapture:
-    """Enable capture only when the mutation operator will actually use it."""
-
-    class FakeMutation:
-        def __init__(self, dormant_reset_param_mut: bool) -> None:
-            self.dormant_reset_param_mut = dormant_reset_param_mut
-
-    def test_capture_is_enabled_for_a_regrama_mutation(self, dqn_agent):
-        regrama.set_grama_capture([dqn_agent], self.FakeMutation(True))
-
-        assert dqn_agent.capture_grama is True
-
-    def test_capture_stays_off_for_a_plain_gaussian_mutation(self, dqn_agent):
-        regrama.set_grama_capture([dqn_agent], self.FakeMutation(False))
-
-        assert dqn_agent.capture_grama is False
-
-    def test_capture_stays_off_without_a_mutation_operator(self, dqn_agent):
-        regrama.set_grama_capture([dqn_agent], None)
-
-        assert dqn_agent.capture_grama is False
-
-    def test_compiled_agents_still_capture_but_are_warned(self, dqn_agent):
-        # Capture works through torch.compile; what it costs is the compiled
-        # graph, which fragments around the hooks. That is the user's call to
-        # make, so the operator reports it and carries on.
-        dqn_agent.torch_compiler = "default"
-
-        with pytest.warns(UserWarning, match=r"torch\.compile"):
-            regrama.set_grama_capture([dqn_agent], self.FakeMutation(True))
-
-        assert dqn_agent.capture_grama is True
-
-    def test_compiled_agents_are_warned_about_once(
-        self,
-        dqn_agent,
-        vector_space,
-        discrete_space,
-    ):
-        # One notice per population, not one per agent.
-        second = DQN(
-            vector_space,
-            discrete_space,
-            net_config=mlp_net_config(),
-            device="cpu",
-        )
-        dqn_agent.torch_compiler = second.torch_compiler = "default"
-
-        with pytest.warns(UserWarning, match=r"torch\.compile") as caught:
-            regrama.set_grama_capture([dqn_agent, second], self.FakeMutation(True))
-
-        assert len(caught) == 1
-        assert all(agent.capture_grama for agent in (dqn_agent, second))
-
-    def test_compiled_agents_are_silent_without_regrama(self, dqn_agent):
-        # Nothing is hooked when ReGraMa is off, so there is no cost to report.
-        dqn_agent.torch_compiler = "default"
-
-        with warnings.catch_warnings():
-            warnings.simplefilter("error")
-            regrama.set_grama_capture([dqn_agent], self.FakeMutation(False))
-
-        assert dqn_agent.capture_grama is False
-
-
-class TestEvalNetworks:
-    """Enumerate the networks ReGraMa measures and rewrites."""
-
-    def test_target_networks_are_excluded(self, dqn_agent):
-        measured = [
-            network for _network_id, network in regrama.eval_networks(dqn_agent)
-        ]
-
-        # The frozen copy must never be scored or reset.
-        assert dqn_agent.actor in measured
-        assert dqn_agent.actor_target not in measured
-
-    def test_actor_and_critic_are_both_measured(self, vector_space, discrete_space):
-        agent = PPO(vector_space, discrete_space, device="cpu")
-
-        measured = [network for _network_id, network in regrama.eval_networks(agent)]
-
-        assert agent.actor in measured
-        assert agent.critic in measured
-
-    def test_multi_agent_module_dicts_are_unrolled_per_sub_policy(
-        self,
-        ma_vector_space,
-        ma_discrete_space,
-    ):
-        from agilerl.algorithms import IPPO
-
-        agent = IPPO(
-            ma_vector_space,
-            ma_discrete_space,
-            agent_ids=["agent_0", "agent_1", "agent_2"],
-            device="cpu",
-        )
-        policy = getattr(agent, agent.registry.policy())
-
-        result = regrama.eval_networks(agent)
-
-        # One entry per sub-policy, each tagged with its own key, so a
-        # captured snapshot is never routed to another sub-agent's network.
-        for key, sub_network in policy.items():
-            assert any(
-                network_id == key and network is sub_network
-                for network_id, network in result
-            )
-
-
-class TestPolicyNetworkIds:
-    """Identify the policy networks whose latent other networks may borrow."""
-
-    def test_the_policy_evaluation_network_is_reported(self, dqn_agent):
-        assert regrama.policy_network_ids(dqn_agent) == {id(dqn_agent.actor)}
-
-    def test_multi_agent_policies_report_every_sub_policy(
-        self,
-        ma_vector_space,
-        ma_discrete_space,
-    ):
-        # Each sub-policy owns an encoder its own critic may borrow, so all of
-        # them count as policy networks.
-        from agilerl.algorithms import IPPO
-
-        agent = IPPO(
-            ma_vector_space,
-            ma_discrete_space,
-            agent_ids=["agent_0", "agent_1", "agent_2"],
-            device="cpu",
-        )
-        policy = getattr(agent, agent.registry.policy())
-
-        result = regrama.policy_network_ids(agent)
-
-        assert result == {id(sub_network) for _key, sub_network in policy.items()}
-
-    def test_an_agent_without_a_policy_group_reports_no_policy(self, dqn_agent):
-        dqn_agent.registry.groups = []
-
-        assert regrama.policy_network_ids(dqn_agent) == set()
-
-    def test_a_policy_the_agent_does_not_carry_reports_no_policy(self, dqn_agent):
-        dqn_agent.actor = None
-
-        assert regrama.policy_network_ids(dqn_agent) == set()
-
-
-class TestGraMaCaptureUnderAccelerator:
-    """Capture on wrapped networks still lines up with the unwrapped ones."""
-
-    def test_snapshot_survives_the_unwrap_before_selection(
-        self,
-        vector_space,
-        discrete_space,
-        encoder_mlp_config,
-    ):
-        from accelerate import Accelerator
-
-        agent = DQN(
-            vector_space,
-            discrete_space,
-            net_config=encoder_mlp_config,
-            accelerator=Accelerator(cpu=True, device_placement=False),
-            device="cpu",
-        )
-        agent.wrap_models()
-        capture_snapshot(agent, torch.rand(4, 4))
-
-        agent.unwrap_models()
-        snapshot = agent.grama_scores[0]
-
-        assert len(snapshot) == len(regrama._target_activations(agent.actor))
-        assert all(entry is not None for entry in snapshot)
-
-    def test_capture_measures_a_distributed_wrapped_network(
-        self,
-        gloo_process_group,
-        vector_space,
-        discrete_space,
-        encoder_mlp_config,
-    ):
-        # On a multi-process launch accelerator.prepare returns a
-        # DistributedDataParallel, which keeps the real network at .module.
-        from accelerate import Accelerator
-
-        agent = DQN(
-            vector_space,
-            discrete_space,
-            net_config=encoder_mlp_config,
-            accelerator=Accelerator(cpu=True, device_placement=False),
-            device="cpu",
-        )
-        agent.actor = nn.parallel.DistributedDataParallel(agent.actor)
-        inner = agent.accelerator.unwrap_model(agent.actor)
-
-        agent.capture_grama = True
-        agent.init_training_step()
-        agent.actor(torch.rand(4, 4)).square().mean().backward()
-        agent.finalize_training_step(1)
-
-        # Every measured layer of the wrapped network scored a gradient,
-        # so the reset acts instead of silently degrading to Gaussian noise.
-        measured = agent.grama_scores[0]
-        assert len(measured) == len(regrama._target_activations(inner))
-        assert all(entry is not None for entry in measured)
-
-    def test_distributed_wrapped_module_dicts_are_still_unrolled(
-        self,
-        gloo_process_group,
-        ma_vector_space,
-        ma_discrete_space,
-    ):
-        # A multi-agent policy is a ModuleDict, so wrap_models hands the whole
-        # container to accelerator.prepare and the wrapper hides every sub-policy
-        # behind .module.
-        from accelerate import Accelerator
-
-        from agilerl.algorithms import IPPO
-
-        agent = IPPO(
-            ma_vector_space,
-            ma_discrete_space,
-            agent_ids=["agent_0", "agent_1", "agent_2"],
-            accelerator=Accelerator(cpu=True, device_placement=False),
-            device="cpu",
-        )
-        policy_name = agent.registry.policy()
-        policy = getattr(agent, policy_name)
-        setattr(agent, policy_name, nn.parallel.DistributedDataParallel(policy))
-
-        result = regrama.eval_networks(agent)
-
-        # Still one entry per sub-policy, each tagged with its own key.
-        for key, sub_network in policy.items():
-            assert any(
-                network_id == key and network is sub_network
-                for network_id, network in result
-            )

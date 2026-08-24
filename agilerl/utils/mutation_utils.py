@@ -1,11 +1,12 @@
 # Copyright 2026 AgileRL
 # SPDX-License-Identifier: Apache-2.0
 
-"""ReGraMa: gradient-guided resetting of dormant neurons.
+"""Neuron-level surgery for ReGraMa parameter mutations.
 
 Implements the reset operator of Liu et al., "Measure gradients, not
-activations! Enhancing neuronal activity in deep reinforcement learning", as an
-optional first stage of AgileRL's parameter mutation.
+activations! Enhancing neuronal activity in deep reinforcement learning", which
+:class:`~agilerl.hpo.mutation.Mutations` runs as the first stage of every
+parameter mutation.
 
 Deep RL networks progressively lose plasticity: a growing fraction of units stop
 receiving gradient, so they stop learning and the network's effective capacity
@@ -17,45 +18,35 @@ re-initialises the ones that have gone quiet. For a neuron i of layer l,
 where ``z_i`` is the neuron's pre-activation, and the neuron is dormant
 when ``G_i <= tau``. ``G_i`` measures a unit's relative learning capacity.
 
-The per-neuron gradient is captured during the real training backward pass.
-For MLPs, the expectation is calculated over the batch, whereas for CNNs the
-expectation is calculated over the batch and the spatial dimensions.
+Only a hidden unit is a candidate: the encoder's output activation can be reset
+(a latent layer is a hidden representation), while a head network's output layer
+is never reset, since those units have fixed semantics such as action logits or
+a state value.
 
-Every registry group's evaluation network is measured; target and shared
-networks are skipped so a frozen copy is never scored or rewritten. Multi-agent
-networks are unrolled one entry per sub-policy. As for the targeted layers,
-the encoder's output activation can be reset (a latent layer is a hidden
-representation), while a head network's output layer is never reset (those units
-have fixed semantics such as action logits or a state value).
+This module owns the structural half of the operator, which reads and rewrites
+networks alone. The per-neuron gradients it thresholds are captured during the
+real training backward pass by
+:meth:`~agilerl.algorithms.core.base.EvolvableAlgorithm.init_training_step`,
+which hooks the activations that :func:`target_activations` names, and which
+decides by way of
+:meth:`~agilerl.algorithms.core.base.EvolvableAlgorithm.eval_networks` which of
+an agent's networks are measured at all.
 """
 
 from __future__ import annotations
 
-import contextlib
 import logging
-import warnings
-from collections.abc import Callable, Sequence
-from typing import TYPE_CHECKING, NamedTuple, cast
+from collections.abc import Sequence
+from typing import NamedTuple
 
 import numpy as np
 import torch
 from torch import nn
-from torch.utils.hooks import RemovableHandle
-from typing_extensions import Self
 
-from agilerl.modules import ModuleDict
 from agilerl.modules.custom_components import NewGELU
 from agilerl.utils.evolvable_networks import ACTIVATION_FUNCTIONS
 
-if TYPE_CHECKING:
-    from agilerl.hpo.mutation import Mutations
-    from agilerl.protocols import EvolvableAlgorithmProtocol
-    from agilerl.typing import GraMaScores
-
 logger = logging.getLogger(__name__)
-
-GradInput = tuple[torch.Tensor | None, ...] | torch.Tensor | None
-BackwardHook = Callable[[nn.Module, GradInput, GradInput], None]
 
 # Outgoing-weight scale a revived neuron is re-seeded at, as a fraction of the
 # consumer layer's live column scale.
@@ -117,20 +108,6 @@ class _ConsumerTarget(NamedTuple):
     is_noise_scale: bool = False
 
 
-class ResetReport(NamedTuple):
-    """Outcome of one network's ReGraMa pass.
-
-    :param neurons_reset: Number of dormant neurons re-initialised.
-    :type neurons_reset: int
-    :param recurrent_seen: Whether the network contains a recurrent core, whose
-        hidden units lie outside what the operator can reset.
-    :type recurrent_seen: bool
-    """
-
-    neurons_reset: int
-    recurrent_seen: bool
-
-
 def _is_weight_layer(module: nn.Module) -> bool:
     """Whether module carries resettable weights (Linear/Conv/Noisy)."""
     if isinstance(module, (nn.Linear, *CONV_LAYER_TYPES)):
@@ -152,14 +129,6 @@ def _weight_param(module: nn.Module) -> torch.Tensor:
         msg = f"{type(module).__name__} exposes no weight tensor to reset."
         raise TypeError(msg)
     return weight
-
-
-def _bias_data(module: nn.Module) -> torch.Tensor | None:
-    """The bias tensor of a weight layer, bias_mu for a noisy one, or None."""
-    bias = getattr(module, "bias_mu", None)
-    if bias is None:
-        bias = getattr(module, "bias", None)
-    return bias.data if isinstance(bias, torch.Tensor) else None
 
 
 def _owns_trainable_weight(module: nn.Module) -> bool:
@@ -218,47 +187,53 @@ def _head_entry_layers(head: nn.Module | None) -> list[nn.Module]:
     return [entry for entry in entries if entry is not None]
 
 
-def _is_output_activation(name: str, ordered: list[tuple[str, nn.Module]]) -> bool:
-    """Whether the activation at name terminates its stream.
-
-    Deciding this structurally rather than positionally is what keeps parallel
-    streams correct: a duelling Q-network's head holds two independent
-    sub-networks.
-    """
-    parent = name.rpartition(".")[0]
-    prefix = f"{parent}." if parent else ""
-    seen = False
-    for other_name, other in ordered:
-        if other_name == name:
-            seen = True
-            continue
-        # Restrict the lookahead to the activation's own parent container so a
-        # sibling stream registered later cannot mask the end of this one.
-        if (
-            seen
-            and other_name.startswith(prefix)
-            and any(hasattr(other, attr) for attr in OUTPUT_WIDTH_ATTRS)
-        ):
-            return False
-    return True
-
-
 def _activation_modules(root: nn.Module, *, include_output: bool) -> list[nn.Module]:
     """The activation sub-modules of root to measure, in forward order.
 
-    include_output also admits the stream-terminating activations.
+    include_output also admits the stream-terminating activations. Whether an
+    excluded activation terminates its stream is decided structurally rather
+    than positionally, which is what keeps parallel streams correct: a
+    duelling Q-network's head holds two independent sub-networks.
     """
     ordered = list(root.named_modules())
-    return [
-        module
-        for name, module in ordered
-        if isinstance(module, ACTIVATION_TYPES)
-        and (include_output or not _is_output_activation(name, ordered))
-    ]
+    if include_output:
+        return [
+            module for _name, module in ordered if isinstance(module, ACTIVATION_TYPES)
+        ]
+
+    targets: list[nn.Module] = []
+    for index, (name, module) in enumerate(ordered):
+        if not isinstance(module, ACTIVATION_TYPES):
+            continue
+        parent = name.rpartition(".")[0]
+        prefix = f"{parent}." if parent else ""
+        # Restrict the lookahead to the activation's own parent container so a
+        # sibling stream registered later cannot mask the end of this one. A
+        # later same-container weight layer means this activation feeds forward
+        # into more of the network, i.e. it does not terminate its stream.
+        has_later_consumer = any(
+            other_name.startswith(prefix)
+            and any(hasattr(other, attr) for attr in OUTPUT_WIDTH_ATTRS)
+            for other_name, other in ordered[index + 1 :]
+        )
+        if has_later_consumer:
+            targets.append(module)
+    return targets
 
 
-def _target_activations(network: nn.Module) -> list[nn.Module]:
-    """The activation sub-modules measured for one network, in forward order."""
+def target_activations(network: nn.Module) -> list[nn.Module]:
+    """The activation sub-modules measured for one network, in forward order.
+
+    This ordering is the snapshot's only layer identity:
+    :meth:`~agilerl.algorithms.core.base.EvolvableAlgorithm.init_training_step`
+    hooks these modules in this order, and the reset pairs each captured score
+    back to its layer by position.
+
+    :param network: One evaluation network of an agent.
+    :type network: torch.nn.Module
+    :return: The activation sub-modules to hook, in forward order.
+    :rtype: list[torch.nn.Module]
+    """
     targets: list[nn.Module] = []
     encoder = getattr(network, "encoder", None)
     if encoder is not None:
@@ -269,65 +244,17 @@ def _target_activations(network: nn.Module) -> list[nn.Module]:
     return targets
 
 
-def eval_networks(
-    agent: EvolvableAlgorithmProtocol,
-) -> list[tuple[str | None, nn.Module]]:
-    """Return the agent's evaluation networks as (network_id, network) pairs.
-
-    Only each registry group's eval_network is returned, so target and shared
-    networks are never measured or rewritten. Multi-agent networks are unrolled
-    one entry per sub-policy.
-
-    :param agent: An AgileRL algorithm instance.
-    :type agent: EvolvableAlgorithmProtocol
-    :return: One (network_id, network) pair per measured network.
-    :rtype: list[tuple[str | None, torch.nn.Module]]
-    """
-    accelerator = agent.accelerator
-    pairs: list[tuple[str | None, nn.Module]] = []
-    for group in agent.registry.groups:
-        # Unwrap first: a wrapped ModuleDict is not a ModuleDict.
-        eval_net = getattr(agent, group.eval_network_name())
-        if accelerator is not None:
-            eval_net = accelerator.unwrap_model(eval_net)
-        if isinstance(eval_net, ModuleDict):
-            sub_networks = cast("ModuleDict[nn.Module]", eval_net)
-            pairs.extend(sub_networks.items())
-        else:
-            pairs.append((None, eval_net))
-    return pairs
-
-
-def policy_network_ids(agent: EvolvableAlgorithmProtocol) -> set[int]:
-    """Return the id of every evaluation network in the agent's policy group.
-
-    :param agent: An AgileRL algorithm instance.
-    :type agent: EvolvableAlgorithmProtocol
-    :return: Identities of the policy's evaluation networks.
-    :rtype: set[int]
-    """
-    policy_name = agent.registry.policy()
-    if policy_name is None:
-        return set()
-    policy = getattr(agent, policy_name, None)
-    if policy is None:
-        return set()
-    if agent.accelerator is not None:
-        policy = agent.accelerator.unwrap_model(policy)
-    if isinstance(policy, ModuleDict):
-        return {id(module) for _key, module in policy.items()}
-    return {id(policy)}
-
-
 def shared_encoder_heads(
-    agent: EvolvableAlgorithmProtocol,
+    networks: Sequence[tuple[str | None, nn.Module]],
     network_id: str | None,
     policy_network: nn.Module,
 ) -> list[nn.Module]:
     """Return the head entry layers of the networks sharing policy_network's encoder.
 
-    :param agent: The agent being mutated.
-    :type agent: EvolvableAlgorithmProtocol
+    :param networks: The measured evaluation networks, as
+        :meth:`~agilerl.algorithms.core.base.EvolvableAlgorithm.eval_networks`
+        returns them.
+    :type networks: Sequence[tuple[str | None, torch.nn.Module]]
     :param network_id: Sub-policy key of policy_network, or None.
     :type network_id: str | None
     :param policy_network: The policy evaluation network whose encoder is shared.
@@ -336,7 +263,7 @@ def shared_encoder_heads(
     :rtype: list[torch.nn.Module]
     """
     entries: list[nn.Module] = []
-    for other_id, other in eval_networks(agent):
+    for other_id, other in networks:
         if other is policy_network or other_id != network_id:
             continue
         encoder = getattr(other, "encoder", None)
@@ -354,28 +281,6 @@ def shared_encoder_heads(
             continue
         entries.extend(_head_entry_layers(getattr(other, "head_net", None)))
     return entries
-
-
-def _per_neuron_grad(grad_input: GradInput) -> torch.Tensor | None:
-    """Reduce an activation's grad_input to one |grad_{z_i}L| per neuron.
-
-    The first element of the tuple a full backward hook receives is the gradient
-    of the loss w.r.t. the module's input, i.e. the pre-activation gradient.
-    Dense gradients have shape (batch, H) and are averaged over the batch;
-    convolutional gradients have shape (batch, C, *spatial) and are averaged
-    over the batch and spatial dimensions. None when no gradient flowed.
-    """
-    if isinstance(grad_input, (tuple, list)):
-        grad = grad_input[0] if len(grad_input) > 0 else None
-    else:
-        grad = grad_input
-    if grad is None:
-        return None
-    magnitude = grad.detach().abs()
-    if magnitude.dim() <= 1:
-        return magnitude
-    reduce_dims = [dim for dim in range(magnitude.dim()) if dim != 1]
-    return magnitude.mean(dim=reduce_dims)
 
 
 def _dormant_indices(per_neuron: torch.Tensor, dormant_threshold: float) -> list[int]:
@@ -399,33 +304,6 @@ def _dormant_indices(per_neuron: torch.Tensor, dormant_threshold: float) -> list
         return list(range(scores.numel()))
     normalised = scores / mean
     return torch.nonzero(normalised <= dormant_threshold).flatten().tolist()
-
-
-def _cnn_dims_by_module(encoder: nn.Module | None) -> dict[int, tuple[int, int]]:
-    """Map each sub-module to the (channels, spatial) dims of its owning CNN.
-
-    A conv -> flatten -> dense consumer spends spatial adjacent columns per
-    feature map, and that layout belongs to the EvolvableCNN owning the conv
-    stack: the encoder itself for an image observation, but a feature_net
-    entry under EvolvableMultiInput. Indexing by producer keeps both on one
-    path; named_modules is outer-first, so a nested CNN's entry correctly
-    overwrites the one its parent would have contributed.
-    """
-    dims: dict[int, tuple[int, int]] = {}
-    if encoder is None:
-        return dims
-
-    for _name, sub in encoder.named_modules():
-        shape = getattr(sub, "cnn_output_size", None)
-        if shape is None or len(shape) < 3:
-            continue
-        spatial = 1
-        for dim in shape[2:]:
-            spatial *= int(dim)
-        for _child_name, child in sub.named_modules():
-            dims[id(child)] = (int(shape[1]), spatial)
-
-    return dims
 
 
 def _resolve_producer_and_next(
@@ -556,25 +434,6 @@ def _noise_params(
     )
 
 
-def _reset_norm_state(norm: nn.Module | None, index: int, neurons: int) -> None:
-    """Reset one neuron's normalisation state to the identity transform.
-
-    Covers the affine gain and shift and, for the batch norms, the running
-    statistics. Tensors whose length does not match the producing layer are
-    left alone.
-    """
-    if norm is None:
-        return
-    for tensor, identity in (
-        (getattr(norm, "weight", None), 1.0),
-        (getattr(norm, "bias", None), 0.0),
-        (getattr(norm, "running_mean", None), 0.0),
-        (getattr(norm, "running_var", None), 1.0),
-    ):
-        if tensor is not None and tensor.dim() == 1 and tensor.shape[0] == neurons:
-            tensor.data[index] = identity
-
-
 def _revived_block(
     template: torch.Tensor,
     scale: float,
@@ -697,7 +556,12 @@ def _reset_layer_neurons(
     neutral normalisation entry.
     """
     producer_weight = _weight_param(producer).data
-    producer_bias = _bias_data(producer)
+    producer_bias = getattr(producer, "bias_mu", None)
+    if producer_bias is None:
+        producer_bias = getattr(producer, "bias", None)
+    producer_bias = (
+        producer_bias.data if isinstance(producer_bias, torch.Tensor) else None
+    )
     sigma_weight, sigma_bias = _noise_params(producer)
     neurons = producer_weight.shape[0]
 
@@ -754,7 +618,23 @@ def _reset_layer_neurons(
                 rng,
                 is_noise_scale=target.is_noise_scale,
             )
-        _reset_norm_state(norm, index, neurons)
+        # A revived neuron's normalisation entry returns to the identity transform:
+        # the affine gain and shift and, for the batch norms, the running
+        # statistics. Tensors whose length does not match the producing layer are
+        # left alone.
+        if norm is not None:
+            for tensor, identity in (
+                (getattr(norm, "weight", None), 1.0),
+                (getattr(norm, "bias", None), 0.0),
+                (getattr(norm, "running_mean", None), 0.0),
+                (getattr(norm, "running_var", None), 1.0),
+            ):
+                if (
+                    tensor is not None
+                    and tensor.dim() == 1
+                    and tensor.shape[0] == neurons
+                ):
+                    tensor.data[index] = identity
 
     # Defensive clamp and NaN scrub so a reset never propagates a broken value.
     for tensor in (producer_weight, producer_bias, sigma_weight, sigma_bias):
@@ -770,7 +650,7 @@ def reset_dormant_neurons(
     dormant_threshold: float,
     rng: np.random.Generator,
     shared_latent_heads: Sequence[nn.Module] = (),
-) -> ResetReport:
+) -> int:
     """Reset every dormant neuron of one evaluation network.
 
     Walks the network's measured activations, resolves each one's producer,
@@ -791,29 +671,43 @@ def reset_dormant_neurons(
     :param shared_latent_heads: Head entry layers of the networks sharing this
         network's encoder.
     :type shared_latent_heads: Sequence[torch.nn.Module]
-    :return: How many neurons were reset, and whether a recurrent core was seen.
-    :rtype: ResetReport
+    :return: How many neurons were reset.
+    :rtype: int
     """
-    recurrent_seen = any(
-        isinstance(module, nn.RNNBase) for _name, module in network.named_modules()
-    )
-
     # A network with a length mismatch is skipped so scores are not mis-paired
     # with layers.
-    targets = _target_activations(network)
+    targets = target_activations(network)
     if not per_neuron_list or len(per_neuron_list) != len(targets):
-        return ResetReport(0, recurrent_seen)
+        return 0
     scores = [
         (act_module, per_neuron)
         for act_module, per_neuron in zip(targets, per_neuron_list, strict=False)
         if per_neuron is not None
     ]
     if not scores:
-        return ResetReport(0, recurrent_seen)
+        return 0
 
     encoder = getattr(network, "encoder", None)
     head = getattr(network, "head_net", None)
-    cnn_dims = _cnn_dims_by_module(encoder)
+
+    # Map each sub-module to the (channels, spatial) dims of its owning CNN, so a
+    # conv -> flatten -> dense consumer's spatial-adjacent columns can be split
+    # per feature map below. Indexing by producer keeps both the encoder's own
+    # conv stack and a nested feature_net's on one path; named_modules is
+    # outer-first, so a nested CNN's entry correctly overwrites the one its
+    # parent would have contributed.
+    cnn_dims: dict[int, tuple[int, int]] = {}
+    if encoder is not None:
+        for _name, sub in encoder.named_modules():
+            shape = getattr(sub, "cnn_output_size", None)
+            if shape is None or len(shape) < 3:
+                continue
+            spatial = 1
+            for dim in shape[2:]:
+                spatial *= int(dim)
+            for _child_name, child in sub.named_modules():
+                cnn_dims[id(child)] = (int(shape[1]), spatial)
+
     head_entries = _head_entry_layers(head)
 
     neurons_reset = 0
@@ -849,138 +743,4 @@ def reset_dormant_neurons(
         _reset_layer_neurons(producer, consumers, norm, indices, rng)
         neurons_reset += len(indices)
 
-    return ResetReport(neurons_reset, recurrent_seen)
-
-
-class GraMaCapture:
-    """Capture per-neuron pre-activation gradient magnitudes during training.
-
-    Registers a full backward hook on every measured activation sub-module of
-    every evaluation network of agent. Each hook reduces the module's grad_input
-    to one mean absolute value per neuron and keeps only the most recent minibatch's
-    value. The release method writes those to agent.grama_scores and removes every
-    hook. It can be used directly as a context manager.
-
-    A measured activation whose gradient never flows is stored as None and skipped
-    downstream. This is a defensive fallback for layers outside the training loss,
-    such as the placeholder critic encoder PPO builds when it shares encoders.
-
-    :param agent: The agent whose training block is being bracketed.
-    :type agent: EvolvableAlgorithmProtocol
-    """
-
-    def __init__(self, agent: EvolvableAlgorithmProtocol) -> None:
-        self.agent = agent
-        self._handles: list[RemovableHandle] = []
-        # Per network a list aligned to _target_activations order, holding that
-        # layer's most recent per-neuron gradient.
-        self._latest: list[list[torch.Tensor | None]] = []
-
-    def register(self) -> Self:
-        """Register the backward hooks and return self.
-
-        An agent that does not expose the expected network surface must never break
-        training, so a failure drops any partial hooks and captures nothing.
-
-        :return: This capture, so it can be stored in one expression.
-        :rtype: GraMaCapture
-        """
-        try:
-            for net_idx, (_network_id, network) in enumerate(eval_networks(self.agent)):
-                targets = _target_activations(network)
-                self._latest.append([None] * len(targets))
-                for mod_idx, module in enumerate(targets):
-                    handle = module.register_full_backward_hook(
-                        self._make_hook(net_idx, mod_idx),
-                    )
-                    self._handles.append(handle)
-        except Exception as exc:  # capture must never break training
-            logger.warning("GraMa capture could not register hooks: %s", exc)
-            self._remove_handles()
-            self._latest = []
-        return self
-
-    def release(self) -> None:
-        """Store the captured snapshot on the agent and remove every hook.
-
-        :return: None.
-        :rtype: None
-        """
-        scores: GraMaScores | None
-        try:
-            scores = [list(net_latest) for net_latest in self._latest]
-        except Exception as exc:  # capture must never break training
-            logger.warning("GraMa capture could not collect scores: %s", exc)
-            scores = None
-        try:
-            self.agent.grama_scores = scores
-        except Exception as exc:  # an agent that will not accept the snapshot
-            logger.warning("GraMa capture could not store scores: %s", exc)
-        finally:
-            self._remove_handles()
-
-    def _make_hook(self, net_idx: int, mod_idx: int) -> BackwardHook:
-        latest = self._latest
-
-        def hook(
-            _module: nn.Module,
-            grad_input: GradInput,
-            _grad_output: GradInput,
-        ) -> None:
-            try:
-                gradient = _per_neuron_grad(grad_input)
-                if gradient is None:
-                    return
-                # Overwrite so that only the last minibatch survives.
-                latest[net_idx][mod_idx] = gradient
-            except Exception:  # never break the training backward pass
-                return
-
-        return hook
-
-    def _remove_handles(self) -> None:
-        for handle in self._handles:
-            # A handle whose module is already gone must not block the rest.
-            with contextlib.suppress(Exception):
-                handle.remove()
-        self._handles = []
-
-    def __enter__(self) -> Self:
-        return self.register()
-
-    def __exit__(self, *_exc: object) -> bool:
-        self.release()
-        return False
-
-
-def set_grama_capture(
-    population: Sequence[EvolvableAlgorithmProtocol],
-    mutation: Mutations | None,
-) -> None:
-    """Enable or disable GraMa capture for a population.
-
-    Capture costs nothing when disabled, so it is switched on only when the
-    mutation operator is actually configured for ReGraMa.
-
-    :param population: The agents to configure.
-    :type population: Sequence[EvolvableAlgorithmProtocol]
-    :param mutation: The mutation operator driving evolution, if any.
-    :type mutation: Mutations | None
-    :return: None.
-    :rtype: None
-    """
-    enabled = bool(
-        mutation is not None and getattr(mutation, "dormant_reset_param_mut", False)
-    )
-    if enabled and any(
-        getattr(agent, "torch_compiler", None) is not None for agent in population
-    ):
-        warnings.warn(
-            "ReGraMa is capturing gradients from torch.compile agents. Every "
-            "measured activation becomes a graph break, so the training step gives "
-            "back much of the speedup compiling bought; acting is unaffected.",
-            stacklevel=2,
-        )
-
-    for agent in population:
-        agent.capture_grama = enabled
+    return neurons_reset

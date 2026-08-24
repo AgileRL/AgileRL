@@ -282,6 +282,41 @@ def _default_selection_strategy(
     return value
 
 
+# These MutationSpec fields default differently on the Arena side (Arena only
+# supports the full three-band Gaussian mutation, so it always defaults to True
+# regardless of what core defaults to). A field the user never set must not be
+# forwarded to Arena as an explicit value, or a manifest that never touched
+# ReGraMa would be rejected over a value it never asked for.
+_ARENA_DIVERGENT_MUTATION_FIELDS = frozenset(
+    {"amplified_gauss_param_mut", "random_reset_param_mut", "dormant_threshold"}
+)
+
+
+def _drop_unset_arena_divergent_mutation_fields(
+    manifest: TrainingManifest, data: dict[str, Any]
+) -> None:
+    """Strip unset :data:`_ARENA_DIVERGENT_MUTATION_FIELDS` keys from an Arena payload.
+
+    ``model_dump`` fills every field with its resolved value regardless of
+    whether the caller set it, so a raw dict/YAML manifest that never mentions
+    one of these fields reaches Arena without the key at all (Arena's own
+    default then applies), while a manifest built as a :class:`TrainingManifest`
+    would otherwise forward the core default explicitly. Dropping the keys the
+    user never set makes the two submission paths behave the same way.
+
+    :param manifest: The core manifest ``data`` was dumped from.
+    :type manifest: TrainingManifest
+    :param data: The dumped Arena payload, mutated in place.
+    :type data: dict[str, Any]
+    """
+    mutation_data = data.get("mutation")
+    if manifest.mutation is None or mutation_data is None:
+        return
+    unset = _ARENA_DIVERGENT_MUTATION_FIELDS - manifest.mutation.model_fields_set
+    for field in unset:
+        mutation_data.pop(field, None)
+
+
 class TrainingManifest(BaseModel):
     """Pydantic model that validates a full training manifest.
 
@@ -576,6 +611,7 @@ class TrainingManifest(BaseModel):
 
         if isinstance(manifest, TrainingManifest):
             data = manifest.model_dump(mode="json", exclude_none=True, by_alias=True)
+            _drop_unset_arena_divergent_mutation_fields(manifest, data)
         elif isinstance(manifest, dict):
             data = manifest
         else:

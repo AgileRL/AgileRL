@@ -12,8 +12,8 @@ from gymnasium import spaces
 from pettingzoo import ParallelEnv
 
 from agilerl.algorithms import IPPO
+from agilerl.algorithms.core import set_grama_capture
 from agilerl.hpo.mutation import Mutations
-from agilerl.hpo.regrama import set_grama_capture
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.networks import StochasticActor
 from agilerl.population import Population

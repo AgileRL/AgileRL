@@ -20,7 +20,6 @@ from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
 
 if HAS_LLM_DEPENDENCIES:
     from peft import LoraConfig
-from agilerl.hpo import regrama
 from agilerl.hpo.mutation import (
     MutationError,
     Mutations,
@@ -29,6 +28,7 @@ from agilerl.hpo.mutation import (
     set_global_seed,
 )
 from agilerl.modules import EvolvableBERT, EvolvableModule, ModuleDict
+from agilerl.utils import mutation_utils
 from agilerl.utils.utils import create_population
 from agilerl.wrappers.agent import AgentWrapper, AsyncAgentsWrapper, RSNorm
 from tests.helper_functions import (
@@ -619,12 +619,23 @@ class TestMutationsParameterMutation:
         """parameter_mutation raises MutationError when the individual has no"""
 
         class NoPolicyRegistry:
+            def __init__(self):
+                self.groups = []
+
             def policy(self, return_group=False):
                 return None
 
         class NoPolicyIndividual:
             def __init__(self):
                 self.registry = NoPolicyRegistry()
+                self.grama_scores = None
+                self.accelerator = None
+
+            def eval_networks(self):
+                return []
+
+            def policy_network_ids(self):
+                return set()
 
         muts = Mutations(0, 1, 0.5, 0, 0, 0, 0.1, device=device)
         with pytest.raises(MutationError, match="No policy network group registered"):
@@ -2620,10 +2631,8 @@ class TestMutationsApplyMutation:
 
 
 def _regrama_mutations(**kwargs) -> Mutations:
-    """A parameter-mutation-only operator with ReGraMa resets enabled."""
-    return Mutations(
-        0, 0, 0, 1, 0, 0, rand_seed=0, dormant_reset_param_mut=True, **kwargs
-    )
+    """A parameter-mutation-only operator; every parameter mutation runs ReGraMa."""
+    return Mutations(0, 0, 0, 1, 0, 0, rand_seed=0, **kwargs)
 
 
 def _all_dormant(agent) -> None:
@@ -2637,7 +2646,7 @@ def _dormant_for(agent, network_ids: set[str]):
     healthy = grama_scores_for(agent, fill=1.0)
     return [
         dormant[idx] if network_id in network_ids else healthy[idx]
-        for idx, (network_id, _network) in enumerate(regrama.eval_networks(agent))
+        for idx, (network_id, _network) in enumerate(agent.eval_networks())
     ]
 
 
@@ -2690,7 +2699,7 @@ def _pinned_policy() -> EvolvableModule:
 
 
 def _pinned_gaussian_pass(
-    *, amplified_gauss_param_mut: bool = True, random_reset_param_mut: bool = True
+    *, amplified_gauss_param_mut: bool = False, random_reset_param_mut: bool = True
 ):
     """Run one Gaussian pass over an identically seeded pinned policy."""
     network = _pinned_policy()
@@ -2724,13 +2733,12 @@ def _smallest_magnitude(baseline, after) -> float:
 
 
 class TestMutationsRegramaConstructor:
-    """Validate the four parameter-mutation switches at construction time."""
+    """Validate the three parameter-mutation switches at construction time."""
 
-    def test_defaults_preserve_the_previous_behaviour(self):
+    def test_defaults(self):
         muts = Mutations(0, 0, 0, 1, 0, 0)
 
-        assert muts.dormant_reset_param_mut is False
-        assert muts.amplified_gauss_param_mut is True
+        assert muts.amplified_gauss_param_mut is False
         assert muts.random_reset_param_mut is True
         assert muts.dormant_threshold == 0.01
 
@@ -2746,11 +2754,10 @@ class TestMutationsRegramaConstructor:
     @pytest.mark.parametrize(
         "kwargs",
         [
-            {"dormant_reset_param_mut": "yes"},
             {"amplified_gauss_param_mut": 1},
             {"random_reset_param_mut": 0},
         ],
-        ids=["dormant_reset", "amplified_gauss", "random_reset"],
+        ids=["amplified_gauss", "random_reset"],
     )
     def test_non_boolean_switches_are_rejected(self, kwargs):
         with pytest.raises(AssertionError, match="boolean value"):
@@ -2921,9 +2928,7 @@ class TestMutationsRegramaParameterMutation:
                 device="cpu",
             )
             agent.grama_scores = grama_scores_for(agent, fill=1.0)
-            networks = [
-                network for _network_id, network in regrama.eval_networks(agent)
-            ]
+            networks = [network for _network_id, network in agent.eval_networks()]
             for entry in agent.grama_scores[networks.index(agent.critic)]:
                 if entry is not None:
                     entry[0] = 0.5
@@ -2960,8 +2965,8 @@ class TestMutationsRegramaParameterMutation:
     def test_snapshot_that_captured_nothing_warns_like_a_missing_one(self):
         agent = self.make_agent()
         agent.grama_scores = [
-            [None] * len(regrama._target_activations(network))
-            for _network_id, network in regrama.eval_networks(agent)
+            [None] * len(mutation_utils.target_activations(network))
+            for _network_id, network in agent.eval_networks()
         ]
         assert agent.grama_scores
 
@@ -3005,7 +3010,7 @@ class TestMutationsRegramaParameterMutation:
             raise RuntimeError(msg)
 
         monkeypatch.setattr(
-            "agilerl.hpo.mutation.regrama.reset_dormant_neurons",
+            "agilerl.hpo.mutation.reset_dormant_neurons",
             explode,
         )
 
@@ -3027,19 +3032,6 @@ class TestMutationsRegramaParameterMutation:
         assert isinstance(result[0], AgentWrapper)
         assert _zeroed_biases(result[0].agent.actor) > 0
 
-    def test_recurrent_encoder_warns_that_its_core_is_out_of_scope(self):
-        agent = PPO(
-            generate_random_box_space((4,)),
-            generate_discrete_space(2),
-            recurrent=True,
-            net_config={"encoder_config": {"hidden_state_size": 8}},
-            device="cpu",
-        )
-        agent.grama_scores = [[None] for _ in range(4)]
-
-        with pytest.warns(UserWarning, match="recurrent core"):
-            _regrama_mutations().parameter_mutation(agent)
-
 
 def _policy_latent_dormant(agent, index: int = 0) -> None:
     """Mark only the policy's latent unit index dormant; everything else healthy."""
@@ -3047,12 +3039,14 @@ def _policy_latent_dormant(agent, index: int = 0) -> None:
     policy = getattr(agent, agent.registry.policy())
     # The latent is the encoder's terminal activation, i.e. the only boundary a
     # shared encoder carries into another network's head.
-    terminal = regrama._activation_modules(policy.encoder, include_output=True)[-1]
-    position = regrama._target_activations(policy).index(terminal)
+    terminal = mutation_utils._activation_modules(policy.encoder, include_output=True)[
+        -1
+    ]
+    position = mutation_utils.target_activations(policy).index(terminal)
     policy_entry = next(
         entry
         for (_network_id, network), entry in zip(
-            regrama.eval_networks(agent),
+            agent.eval_networks(),
             agent.grama_scores,
             strict=True,
         )
@@ -3073,7 +3067,7 @@ class TestMutationsRegramaSharedEncoders:
         )
 
     def critic_head(self, agent):
-        return regrama._head_entry_layers(agent.critic.head_net)[0]
+        return mutation_utils._head_entry_layers(agent.critic.head_net)[0]
 
     def test_shared_critic_head_is_faded_when_the_policy_latent_is_reset(self):
         # The critic borrows the encoder, so it inherits the reset via

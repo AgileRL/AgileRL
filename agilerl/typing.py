@@ -193,6 +193,10 @@ FitnessValue = float | npt.NDArray
 # one list per network, one entry per measured layer.
 GraMaScores = list[list[torch.Tensor | None]]
 
+# The ``grad_input`` / ``grad_output`` a full backward hook is handed.
+GradInput = tuple[torch.Tensor | None, ...] | torch.Tensor | None
+BackwardHook = Callable[[Module, GradInput, GradInput], None]
+
 # Raw Gym/PettingZoo ``info["action_mask"]`` before stacking into a tensor
 # (1 = legal, 0 = illegal). ``None`` means the agent provided no mask.
 ActionMask = np.ndarray | Sequence[int | float | bool]

@@ -137,7 +137,6 @@ class TestBuildMutations:
         from agilerl.utils.trainer_utils import build_mutations_from_spec
 
         spec = MutationSpec(
-            dormant_reset_param_mut=True,
             amplified_gauss_param_mut=False,
             random_reset_param_mut=False,
             dormant_threshold=0.05,
@@ -145,7 +144,6 @@ class TestBuildMutations:
 
         result = build_mutations_from_spec(spec, "cpu")
 
-        assert result.dormant_reset_param_mut is True
         assert result.amplified_gauss_param_mut is False
         assert result.random_reset_param_mut is False
         assert result.dormant_threshold == 0.05
@@ -156,8 +154,7 @@ class TestBuildMutations:
 
         result = build_mutations_from_spec(MutationSpec(), "cpu")
 
-        assert result.dormant_reset_param_mut is False
-        assert result.amplified_gauss_param_mut is True
+        assert result.amplified_gauss_param_mut is False
         assert result.random_reset_param_mut is True
         assert result.dormant_threshold == 0.01
 

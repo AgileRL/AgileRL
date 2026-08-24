@@ -15,10 +15,10 @@ from torch import nn
 
 import agilerl.utils.algo_utils as algo_utils
 from agilerl.components.data import Transition
-from agilerl.hpo import regrama
 from agilerl.hpo.multi_frequency import MultiFrequencySelection
 from agilerl.modules import EvolvableModule
 from agilerl.typing import GraMaScores, NumpyObsType, TorchObsType
+from agilerl.utils import mutation_utils
 
 skip_torch_compile_on_windows_cpu = pytest.mark.skipif(
     sys.platform == "win32" and not torch.cuda.is_available(),
@@ -643,15 +643,16 @@ def grama_scores_for(agent: Any, fill: float = 0.0) -> GraMaScores:
     :type agent: EvolvableAlgorithm
     :param fill: Per-neuron gradient magnitude to record for every neuron.
     :type fill: float, optional
-    :return: A snapshot laid out exactly as :class:`agilerl.hpo.regrama.GraMaCapture`
+    :return: A snapshot laid out exactly as
+        :meth:`~agilerl.algorithms.core.base.EvolvableAlgorithm.finalize_training_step`
         would store it.
     :rtype: GraMaScores
     """
     scores: GraMaScores = []
-    for _network_id, network in regrama.eval_networks(agent):
+    for _network_id, network in agent.eval_networks():
         entries: list[torch.Tensor | None] = []
-        for activation in regrama._target_activations(network):
-            producer = regrama._resolve_producer_and_next(
+        for activation in mutation_utils.target_activations(network):
+            producer = mutation_utils._resolve_producer_and_next(
                 activation,
                 getattr(network, "encoder", None),
                 getattr(network, "head_net", None),
@@ -660,9 +661,30 @@ def grama_scores_for(agent: Any, fill: float = 0.0) -> GraMaScores:
                 None
                 if producer is None
                 else torch.full(
-                    (regrama._weight_param(producer).shape[0],),
+                    (mutation_utils._weight_param(producer).shape[0],),
                     fill,
                 ),
             )
         scores.append(entries)
     return scores
+
+
+def capture_grama_snapshot(agent: Any, observation: torch.Tensor) -> None:
+    """Run one real backward pass through *agent*'s policy under GraMa capture.
+
+    Leaves the agent holding the snapshot a real training cycle would, which is
+    what both the capture tests and the reset tests need to start from.
+
+    :param agent: Agent to capture from.
+    :type agent: EvolvableAlgorithm
+    :param observation: A batch to drive the policy's forward pass with.
+    :type observation: torch.Tensor
+    :return: None.
+    :rtype: None
+    """
+    agent.capture_grama = True
+    agent.init_training_step()
+    policy = getattr(agent, agent.registry.policy())
+    head = mutation_utils._unwrap_module(policy.head_net)
+    head(policy.encoder(observation)).square().mean().backward()
+    agent.finalize_training_step(1)

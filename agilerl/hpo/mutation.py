@@ -22,12 +22,12 @@ from agilerl.algorithms.core import (
     MultiAgentRLAlgorithm,
     RLAlgorithm,
 )
-from agilerl.hpo import regrama
 from agilerl.modules import EvolvableModule, ModuleDict
 from agilerl.protocols import EvolvableAlgorithmProtocol
 from agilerl.typing import MutationReturn
 from agilerl.utils.algo_utils import remove_compile_prefix
 from agilerl.utils.evolvable_networks import compile_model
+from agilerl.utils.mutation_utils import reset_dormant_neurons, shared_encoder_heads
 from agilerl.wrappers.agent import AgentWrapper
 
 AgentT = TypeVar("AgentT", bound=EvolvableAlgorithmProtocol)
@@ -248,20 +248,19 @@ class Mutations:
     :type device: str, optional
     :param accelerator: Accelerator for distributed computing, defaults to None
     :type accelerator: accelerate.Accelerator(), optional
-    :param dormant_reset_param_mut: Reset dormant neurons (ReGraMa) before adding Gaussian
-        noise during a parameter mutation, defaults to False. Works on a compiled algorithm but costs it
-        much of its speedup, since the gradient hooks break the compiled graph; see
-        :func:`~agilerl.hpo.regrama.set_grama_capture`.
-    :type dormant_reset_param_mut: bool, optional
     :param amplified_gauss_param_mut: Apply the amplified ("super") band of the Gaussian
-        parameter mutation, defaults to True.
+        parameter mutation, defaults to False.
     :type amplified_gauss_param_mut: bool, optional
     :param random_reset_param_mut: Apply the random-reset band of the Gaussian parameter
         mutation, which redraws a weight from N(0, 1) and so discards its trained value,
         defaults to True.
     :type random_reset_param_mut: bool, optional
     :param dormant_threshold: Normalised GraMa score at or below which a neuron counts as
-        dormant, defaults to 0.01. Inert unless ``dormant_reset_param_mut`` is True.
+        dormant, defaults to 0.01. Every parameter mutation resets the neurons that fall
+        at or below this threshold (ReGraMa) before adding Gaussian noise; this works on a
+        compiled algorithm but costs it much of its speedup, since the gradient hooks
+        break the compiled graph — see
+        :func:`~agilerl.algorithms.core.base.set_grama_capture`.
     :type dormant_threshold: float, optional
     """
 
@@ -279,8 +278,7 @@ class Mutations:
         rand_seed: int | None = None,
         device: str = "cpu",
         accelerator: Accelerator | None = None,
-        dormant_reset_param_mut: bool = False,
-        amplified_gauss_param_mut: bool = True,
+        amplified_gauss_param_mut: bool = False,
         random_reset_param_mut: bool = True,
         dormant_threshold: float = 0.01,
     ) -> None:
@@ -347,10 +345,6 @@ class Mutations:
         if isinstance(rand_seed, int):
             assert rand_seed >= 0, "Random seed must be greater than or equal to zero."
         assert isinstance(
-            dormant_reset_param_mut,
-            bool,
-        ), "Dormant reset parameter mutation must be boolean value True or False."
-        assert isinstance(
             amplified_gauss_param_mut,
             bool,
         ), "Amplified Gaussian parameter mutation must be boolean value True or False."
@@ -385,11 +379,9 @@ class Mutations:
         self.device = device
         self.accelerator = accelerator
 
-        self.dormant_reset_param_mut = dormant_reset_param_mut
         self.amplified_gauss_param_mut = amplified_gauss_param_mut
         self.random_reset_param_mut = random_reset_param_mut
         self.dormant_threshold = dormant_threshold
-        self._warned_recurrent = False
         self._warned_no_snapshot = False
         self._pre_training_mut = False
 
@@ -686,12 +678,11 @@ class Mutations:
     def parameter_mutation(self, individual: IndividualT) -> IndividualT:
         """Perform a mutation to the weights of the individual.
 
-        Runs in two stages. When dormant_reset_param_mut is set, ReGraMa mutations
-        first re-initialise the neurons that have gone dormant, across every
-        evaluation network of the agent. Gaussian noise is then added to the policy
-        network, in the random-reset, ordinary and amplified bands. The random-reset
-        and amplified bands are each dropped when random_reset_param_mut or
-        amplified_gauss_param_mut is unset.
+        Runs in two stages. ReGraMa mutations first re-initialise the neurons that
+        have gone dormant, across every evaluation network of the agent. Gaussian
+        noise is then added to the policy network, in the random-reset, ordinary and
+        amplified bands. The random-reset and amplified bands are each dropped when
+        random_reset_param_mut or amplified_gauss_param_mut is unset.
 
         .. note::
             This is currently not supported for :class:`LLMAlgorithm <agilerl.algorithms.core.LLMAlgorithm>` agents.
@@ -710,9 +701,7 @@ class Mutations:
             individual.mut = "None"
             return individual
 
-        regrama_applied = (
-            self._regrama_reset(individual) if self.dormant_reset_param_mut else False
-        )
+        regrama_applied = self._regrama_reset(individual)
 
         registry = individual.registry
 
@@ -764,7 +753,15 @@ class Mutations:
     def _regrama_reset(self, individual: IndividualT) -> bool:
         """Reset the dormant neurons of every network of an individual.
 
-        Reads the per-neuron gradient snapshot stored while the agent trained.
+        Reads the per-neuron gradient snapshot stored while the agent trained, and
+        re-initialises the neurons whose normalised GraMa score has fallen to or
+        below :attr:`dormant_threshold`. See
+        :mod:`~agilerl.utils.mutation_utils` for the surgery itself.
+
+        A snapshot that is absent, or one that holds no measurement, warns rather
+        than degrading silently: neither can score a neuron, so the mutation falls
+        back to the Gaussian pass alone and would otherwise be indistinguishable
+        from a run that never captured anything.
 
         A network whose surgery raises is left untouched rather than aborting the
         mutation, so a ReGraMa failure degrades to the plain Gaussian pass.
@@ -777,24 +774,36 @@ class Mutations:
         """
         grama_scores = individual.grama_scores or []
 
-        if not any(entry is not None for network in grama_scores for entry in network):
-            self._warn_missing_grama_snapshot()
+        if (
+            not any(entry is not None for network in grama_scores for entry in network)
+            and not self._pre_training_mut
+            and not self._warned_no_snapshot
+        ):
+            self._warned_no_snapshot = True
+            warnings.warn(
+                "ReGraMa parameter mutations are configured but no GraMa gradient "
+                "snapshot was captured, so this mutation falls back to Gaussian "
+                "noise alone.",
+                stacklevel=3,
+            )
 
-        policy_networks = regrama.policy_network_ids(individual)
+        # Enumerated once: the surgery rewrites weights in place and never
+        # reassigns a network, so this stays valid for the whole pass.
+        networks = individual.eval_networks()
+        policy_networks = individual.policy_network_ids()
 
         neurons_reset = 0
-        recurrent_seen = False
-        for idx, (network_id, network) in enumerate(regrama.eval_networks(individual)):
+        for idx, (network_id, network) in enumerate(networks):
             per_neuron_list = grama_scores[idx] if idx < len(grama_scores) else None
             # The latent columns of the heads that share an encoder with other
             # networks need to be reset properly.
             shared_heads = (
-                regrama.shared_encoder_heads(individual, network_id, network)
+                shared_encoder_heads(networks, network_id, network)
                 if id(network) in policy_networks
                 else ()
             )
             try:
-                report = regrama.reset_dormant_neurons(
+                network_reset_count = reset_dormant_neurons(
                     network,
                     per_neuron_list,
                     self.dormant_threshold,
@@ -804,39 +813,9 @@ class Mutations:
             except Exception as exc:  # leave this network untouched on failure
                 logger.warning("ReGraMa reset skipped for a network: %s", exc)
                 continue
-            neurons_reset += report.neurons_reset
-            recurrent_seen |= report.recurrent_seen
-
-        if recurrent_seen and not self._warned_recurrent:
-            self._warned_recurrent = True
-            warnings.warn(
-                "ReGraMa does not reset the recurrent core of a recurrent encoder: "
-                "its gate non-linearities are fused, so no per-neuron gradient is "
-                "captured for them, and its hidden units do not own contiguous weight "
-                "rows. Only the layers from the output projection onward are reset.",
-                stacklevel=3,
-            )
+            neurons_reset += network_reset_count
 
         return neurons_reset > 0
-
-    def _warn_missing_grama_snapshot(self) -> None:
-        """Warn when ReGraMa is configured but no gradient was captured.
-
-        Covers both a snapshot that is absent and one that holds no measurement,
-        since neither can score a neuron and both would otherwise be silent.
-
-        :return: None.
-        :rtype: None
-        """
-        if self._pre_training_mut or self._warned_no_snapshot:
-            return
-        self._warned_no_snapshot = True
-        warnings.warn(
-            "ReGraMa parameter mutations are configured but no GraMa gradient "
-            "snapshot was captured, so this mutation falls back to Gaussian noise "
-            "alone.",
-            stacklevel=4,
-        )
 
     def _get_mutations_options(
         self,

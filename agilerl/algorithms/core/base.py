@@ -15,7 +15,7 @@ import warnings
 from abc import ABC, ABCMeta, abstractmethod
 from collections import OrderedDict, defaultdict, deque
 from collections.abc import Callable, Generator, Iterable, Mapping, Sequence
-from contextlib import AbstractContextManager, contextmanager, nullcontext
+from contextlib import AbstractContextManager, contextmanager, nullcontext, suppress
 from dataclasses import asdict
 from importlib.metadata import version
 from pathlib import Path
@@ -28,6 +28,7 @@ from typing import (
     NoReturn,
     Protocol,
     TypeVar,
+    cast,
     overload,
 )
 
@@ -42,6 +43,7 @@ from tensordict import TensorDict
 from torch._dynamo import OptimizedModule
 from torch.nn.utils import clip_grad_norm_
 from torch.optim import AdamW
+from torch.utils.hooks import RemovableHandle
 from typing_extensions import Self
 
 from agilerl import HAS_DEEPSPEED, HAS_LIGER_KERNEL, HAS_LLM_DEPENDENCIES, HAS_VLLM
@@ -62,7 +64,6 @@ from agilerl.algorithms.core.registry import (
     OptimizerFactory,
 )
 from agilerl.architectures.nemotron_h import register_nemotron_h_liger
-from agilerl.hpo.regrama import GraMaCapture
 from agilerl.metrics import AgentMetrics, MultiAgentMetrics
 from agilerl.modules.configs import MlpNetConfig, NetConfig
 from agilerl.modules.dummy import DummyEvolvable
@@ -79,10 +80,12 @@ from agilerl.typing import (
     ActionResult,
     ActionType,
     ArrayDict,
+    BackwardHook,
     CheckpointInfo,
     DeviceType,
     ExperiencesT,
     FitnessValue,
+    GradInput,
     GraMaScores,
     GymSpaceType,
     InfosDict,
@@ -136,10 +139,14 @@ from agilerl.utils.llm_packing import (
     unpack_logprobs,
     unpack_values,
 )
+from agilerl.utils.mutation_utils import target_activations
 
 if TYPE_CHECKING:
     from torch.optim.lr_scheduler import SequentialLR
     from transformers import BitsAndBytesConfig
+
+    from agilerl.hpo.mutation import Mutations
+    from agilerl.modules import ModuleDict
 
 # Make imports visible to typechecker and import when required
 if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
@@ -205,7 +212,13 @@ elif HAS_VLLM:
 else:
     LLM = CompletionOutput = SamplingParams = None
 
-__all__ = ["ActionResult", "EvolvableAlgorithm", "MultiAgentRLAlgorithm", "RLAlgorithm"]
+__all__ = [
+    "ActionResult",
+    "EvolvableAlgorithm",
+    "MultiAgentRLAlgorithm",
+    "RLAlgorithm",
+    "set_grama_capture",
+]
 
 logger = logging.getLogger(__name__)
 
@@ -393,6 +406,65 @@ def get_optimizer_cls(
     return getattr(torch.optim, optimizer_cls)
 
 
+def _per_neuron_grad(grad_input: GradInput) -> torch.Tensor | None:
+    """Reduce an activation's grad_input to one |grad_{z_i}L| per neuron.
+
+    The first element of the tuple a full backward hook receives is the gradient
+    of the loss w.r.t. the module's input, i.e. the pre-activation gradient.
+    Dense gradients have shape (batch, H) and are averaged over the batch;
+    convolutional gradients have shape (batch, C, *spatial) and are averaged
+    over the batch and spatial dimensions.
+
+    :param grad_input: The gradient a full backward hook was handed.
+    :type grad_input: GradInput
+    :return: One mean absolute gradient per neuron, or None if none flowed.
+    :rtype: torch.Tensor | None
+    """
+    if isinstance(grad_input, (tuple, list)):
+        grad = grad_input[0] if len(grad_input) > 0 else None
+    else:
+        grad = grad_input
+    if grad is None:
+        return None
+    magnitude = grad.detach().abs()
+    if magnitude.dim() <= 1:
+        return magnitude
+    reduce_dims = [dim for dim in range(magnitude.dim()) if dim != 1]
+    return magnitude.mean(dim=reduce_dims)
+
+
+def set_grama_capture(
+    population: Sequence[EvolvableAlgorithmProtocol],
+    mutation: Mutations | None,
+) -> None:
+    """Enable or disable GraMa capture for a population.
+
+    Every parameter mutation runs ReGraMa, so capture is switched on whenever a
+    mutation operator drives the population at all; a population without one (a
+    no-HPO regime) never mutates, so capture stays off and costs nothing there.
+
+    :param population: The agents to configure.
+    :type population: Sequence[EvolvableAlgorithmProtocol]
+    :param mutation: The mutation operator driving evolution, if any.
+    :type mutation: Mutations | None
+    :return: None.
+    :rtype: None
+    """
+    enabled = mutation is not None
+    if enabled and any(
+        getattr(agent, "torch_compiler", None) is not None for agent in population
+    ):
+        warnings.warn(
+            "ReGraMa is capturing gradients from torch.compile agents. Every "
+            "measured activation becomes a graph break, so the training step gives "
+            "back much of the speedup compiling bought; acting is unaffected.",
+            stacklevel=2,
+        )
+
+    for agent in population:
+        agent.capture_grama = enabled
+
+
 class EvolvableAlgorithm(ABC, Generic[ExperiencesT], metaclass=RegistryMeta):
     """Base object for all algorithms in the AgileRL framework.
 
@@ -451,7 +523,11 @@ class EvolvableAlgorithm(ABC, Generic[ExperiencesT], metaclass=RegistryMeta):
         self.subpopulation_id: int | None = None
         self.capture_grama: bool = False
         self.grama_scores: GraMaScores | None = None
-        self._grama_capture: GraMaCapture | None = None
+        self._grama_handles: list[RemovableHandle] = []
+        # One list per evaluation network, aligned to that network's
+        # target_activations order and holding each layer's most recent
+        # per-neuron gradient. None while no capture is open.
+        self._grama_latest: GraMaScores | None = None
 
     @property
     def index(self) -> int:
@@ -534,7 +610,7 @@ class EvolvableAlgorithm(ABC, Generic[ExperiencesT], metaclass=RegistryMeta):
         self.metrics.init_training_step()
         self._release_grama_capture()
         if self.capture_grama:
-            self._grama_capture = GraMaCapture(self).register()
+            self._register_grama_capture()
 
     def finalize_training_step(self, num_steps: int) -> None:
         """Close the agent's training block, storing any captured GraMa scores.
@@ -545,15 +621,154 @@ class EvolvableAlgorithm(ABC, Generic[ExperiencesT], metaclass=RegistryMeta):
         self.metrics.finalize_training_step(num_steps)
         self._release_grama_capture()
 
-    def _release_grama_capture(self) -> None:
-        """Close any open GraMa capture, storing its snapshot and removing its hooks.
+    def _register_grama_capture(self) -> None:
+        """Hook every measured activation of every evaluation network.
+
+        A full backward hook on an activation is handed ``grad_{z_i}L``, the
+        gradient w.r.t. its input, so the GraMa metric is measured for free
+        during the real training backward pass. An agent that does not expose the
+        expected network surface must never break training, so a failure drops
+        any partial hooks and captures nothing.
 
         :return: None.
         :rtype: None
         """
-        if self._grama_capture is not None:
-            self._grama_capture.release()
-            self._grama_capture = None
+        latest: GraMaScores = []
+        self._grama_latest = latest
+        try:
+            for net_idx, (_network_id, network) in enumerate(self.eval_networks()):
+                targets = target_activations(network)
+                latest.append([None] * len(targets))
+                for mod_idx, module in enumerate(targets):
+                    handle = module.register_full_backward_hook(
+                        self._grama_hook(latest, net_idx, mod_idx),
+                    )
+                    self._grama_handles.append(handle)
+        except Exception as exc:  # capture must never break training
+            logger.warning("GraMa capture could not register hooks: %s", exc)
+            self._remove_grama_handles()
+            # Still an open capture, so the block closes on an empty snapshot
+            # rather than leaving a stale one in place.
+            self._grama_latest = []
+
+    @staticmethod
+    def _grama_hook(
+        latest: GraMaScores,
+        net_idx: int,
+        mod_idx: int,
+    ) -> BackwardHook:
+        """Build the backward hook recording one measured activation's gradient.
+
+        The hook closes over the snapshot rather than over the agent, so a hook
+        that outlives its capture writes into a list nobody reads instead of
+        keeping the agent alive or corrupting the next cycle's snapshot.
+
+        :param latest: The open capture's snapshot, written in place.
+        :type latest: GraMaScores
+        :param net_idx: Position of the layer's network in the snapshot.
+        :type net_idx: int
+        :param mod_idx: Position of the layer within that network's snapshot.
+        :type mod_idx: int
+        :return: The hook to register on that activation.
+        :rtype: BackwardHook
+        """
+
+        def hook(
+            _module: torch.nn.Module,
+            grad_input: GradInput,
+            _grad_output: GradInput,
+        ) -> None:
+            try:
+                gradient = _per_neuron_grad(grad_input)
+                if gradient is None:
+                    return
+                # Overwrite so that only the last minibatch survives: the metric's
+                # expectation is taken at fixed parameters, and the reset acts on
+                # the network as it stands at the end of the cycle.
+                latest[net_idx][mod_idx] = gradient
+            except Exception:  # never break the training backward pass
+                return
+
+        return hook
+
+    def _release_grama_capture(self) -> None:
+        """Close any open GraMa capture, storing its snapshot and removing its hooks.
+
+        A measured activation whose gradient never flowed is stored as None and
+        skipped downstream. This is a defensive fallback for layers outside the
+        training loss, such as the placeholder critic encoder PPO builds when it
+        shares encoders.
+
+        :return: None.
+        :rtype: None
+        """
+        if self._grama_latest is None:
+            return
+        try:
+            self.grama_scores = [list(net_latest) for net_latest in self._grama_latest]
+        except Exception as exc:  # capture must never break training
+            logger.warning("GraMa capture could not store scores: %s", exc)
+        finally:
+            self._remove_grama_handles()
+            self._grama_latest = None
+
+    def _remove_grama_handles(self) -> None:
+        """Detach every backward hook this capture registered.
+
+        :return: None.
+        :rtype: None
+        """
+        for handle in self._grama_handles:
+            # A handle whose module is already gone must not block the rest.
+            with suppress(Exception):
+                handle.remove()
+        self._grama_handles = []
+
+    def eval_networks(self) -> list[tuple[str | None, torch.nn.Module]]:
+        """Return the agent's evaluation networks as (network_id, network) pairs.
+
+        Only each registry group's eval_network is returned, so target and shared
+        networks are never measured or rewritten. Multi-agent networks are unrolled
+        one entry per sub-policy.
+
+        :return: One (network_id, network) pair per measured network.
+        :rtype: list[tuple[str | None, torch.nn.Module]]
+        """
+        from agilerl.modules import ModuleDict
+
+        accelerator = self.accelerator
+        pairs: list[tuple[str | None, torch.nn.Module]] = []
+        for group in self.registry.groups:
+            # Unwrap first: a wrapped ModuleDict is not a ModuleDict.
+            eval_net = getattr(self, group.eval_network_name())
+            if accelerator is not None:
+                eval_net = accelerator.unwrap_model(eval_net)
+            if isinstance(eval_net, ModuleDict):
+                sub_networks = cast("ModuleDict[torch.nn.Module]", eval_net)
+                pairs.extend(sub_networks.items())
+            else:
+                pairs.append((None, eval_net))
+        return pairs
+
+    def policy_network_ids(self) -> set[int]:
+        """Return the id of every evaluation network in the agent's policy group.
+
+        :return: Identities of the policy's evaluation networks.
+        :rtype: set[int]
+        """
+        from agilerl.modules import ModuleDict
+
+        policy_name = self.registry.policy()
+        if policy_name is None:
+            return set()
+        policy = getattr(self, policy_name, None)
+        if policy is None:
+            return set()
+        if self.accelerator is not None:
+            policy = self.accelerator.unwrap_model(policy)
+        if isinstance(policy, ModuleDict):
+            return {id(module) for _key, module in policy.items()}
+        return {id(policy)}
 
     @abstractmethod
     def preprocess_observation(

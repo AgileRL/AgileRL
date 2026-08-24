@@ -1036,6 +1036,47 @@ class TestTrainingManifestArenaBridge:
         assert submission["algorithm"]["name"] == "PPO"
         assert submission["environment"]["name"] == "CartPole-v1"
 
+    def test_to_arena_manifest_untouched_mutation_field_does_not_leak_core_default(
+        self,
+    ):
+        # amplified_gauss_param_mut defaults to False on the core spec (to keep
+        # local training conservative) but Arena only supports it True. A
+        # manifest that only sets mutation_sd never asked for that default, so
+        # it must reach Arena as if the field were absent rather than as an
+        # explicit False that Arena would then reject.
+        core = TrainingManifest.model_validate(
+            {
+                "algorithm": {"name": "DQN"},
+                "environment": {"name": "CartPole-v1"},
+                "mutation": {"mutation_sd": 0.2},
+            }
+        )
+        submission = TrainingManifest.to_arena_manifest(core)
+        assert submission["mutation"]["mutation_sd"] == 0.2
+        assert "amplified_gauss_param_mut" not in submission["mutation"]
+
+    def test_to_arena_manifest_explicit_amplified_gauss_param_mut_is_forwarded(self):
+        core = TrainingManifest.model_validate(
+            {
+                "algorithm": {"name": "DQN"},
+                "environment": {"name": "CartPole-v1"},
+                "mutation": {"amplified_gauss_param_mut": True},
+            }
+        )
+        # Accepted: an explicit True matches what Arena requires.
+        TrainingManifest.to_arena_manifest(core)
+
+    def test_to_arena_manifest_explicit_disabled_band_is_still_rejected(self):
+        core = TrainingManifest.model_validate(
+            {
+                "algorithm": {"name": "DQN"},
+                "environment": {"name": "CartPole-v1"},
+                "mutation": {"amplified_gauss_param_mut": False},
+            }
+        )
+        with pytest.raises(ValidationError, match="Gaussian parameter mutation bands"):
+            TrainingManifest.to_arena_manifest(core)
+
     def test_to_arena_manifest_from_yaml_path(self, tmp_path):
         manifest_path = tmp_path / "manifest.yaml"
         manifest_path.write_text(
@@ -1370,15 +1411,8 @@ class TestLocalTrainerLLM:
 # TestFromConfigFiles - integration tests loading actual YAML configs
 # ============================================================================
 
-# The manifests that deliberately switch a Gaussian parameter-mutation band off,
-# paired with the ones that spell out the default.
+# Every shipped manifest spells out the default explicitly.
 _RANDOM_RESET_PARAM_MUT_CONFIGS = [
-    ("ppo/ppo_regrama.yaml", False),
-    ("dqn/dqn_regrama.yaml", False),
-    ("cqn_regrama.yaml", False),
-    ("bandit/neural_ucb_regrama.yaml", False),
-    ("multi_agent/ippo_regrama.yaml", False),
-    ("multi_agent/maddpg_regrama.yaml", False),
     ("ppo/ppo.yaml", True),
     ("dqn/dqn.yaml", True),
     ("cqn.yaml", True),
@@ -1450,19 +1484,15 @@ _SINGLE_AGENT_CONFIGS = [
     ("ddpg/ddpg_simba.yaml", DDPGSpec, SimbaSpec),
     ("td3.yaml", TD3Spec, MlpSpec),
     ("multi_input.yaml", PPOSpec, MultiInputSpec),
-    ("dqn/dqn_regrama.yaml", DQNSpec, MlpSpec),
-    ("ppo/ppo_regrama.yaml", PPOSpec, MlpSpec),
 ]
 
 _BANDIT_CONFIGS = [
     ("bandit/neural_ts.yaml", NeuralTSSpec, MlpSpec),
     ("bandit/neural_ucb.yaml", NeuralUCBSpec, MlpSpec),
-    ("bandit/neural_ucb_regrama.yaml", NeuralUCBSpec, MlpSpec),
 ]
 
 _OFFLINE_CONFIGS = [
     ("cqn.yaml", CQNSpec, MlpSpec),
-    ("cqn_regrama.yaml", CQNSpec, MlpSpec),
 ]
 
 _MULTI_AGENT_CONFIGS = [
@@ -1470,8 +1500,6 @@ _MULTI_AGENT_CONFIGS = [
     ("multi_agent/matd3.yaml", MATD3Spec),
     ("multi_agent/ippo.yaml", IPPOSpec),
     ("multi_agent/ippo_pong.yaml", IPPOSpec),
-    ("multi_agent/ippo_regrama.yaml", IPPOSpec),
-    ("multi_agent/maddpg_regrama.yaml", MADDPGSpec),
 ]
 
 # Configs omit the network ``arch``, so it is inferred from the observation

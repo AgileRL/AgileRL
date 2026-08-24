@@ -12,11 +12,11 @@ from tensordict import TensorDict
 from torch.utils.data import DataLoader
 
 from agilerl.algorithms import NeuralTS, NeuralUCB
+from agilerl.algorithms.core import set_grama_capture
 from agilerl.components.data import ReplayDataset
 from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.components.sampler import Sampler
 from agilerl.hpo.mutation import Mutations
-from agilerl.hpo.regrama import set_grama_capture
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.population import Population
 from agilerl.protocols import BanditEnvProtocol, SelectionStrategyProtocol

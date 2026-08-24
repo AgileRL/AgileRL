@@ -7,6 +7,7 @@ from .base import (
     LLMAlgorithm,
     MultiAgentRLAlgorithm,
     RLAlgorithm,
+    set_grama_capture,
 )
 from .optimizer_wrapper import OptimizerWrapper
 
@@ -17,4 +18,5 @@ __all__ = [
     "MultiAgentRLAlgorithm",
     "OptimizerWrapper",
     "RLAlgorithm",
+    "set_grama_capture",
 ]

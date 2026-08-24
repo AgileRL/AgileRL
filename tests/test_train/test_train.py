@@ -44,7 +44,6 @@ from agilerl.components.replay_buffer import (
     PrioritizedReplayBuffer,
     ReplayBuffer,
 )
-from agilerl.hpo import regrama
 from agilerl.hpo.multi_frequency import MultiFrequencySelection
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
@@ -595,9 +594,6 @@ class DummyTournament:
 
 
 class DummyMutations:
-    def __init__(self, dormant_reset_param_mut=False):
-        self.dormant_reset_param_mut = dormant_reset_param_mut
-
     def mutation(self, pop, pre_training_mut=False, indices=None):
         return pop
 
@@ -5771,7 +5767,7 @@ def test_remove_saved_models():
 
 
 def _regrama_mutation() -> Mutations:
-    """A ReGraMa-configured operator with the amplified band switched off."""
+    """A parameter-mutation operator with the amplified Gaussian band switched off."""
     return Mutations(
         no_mutation=0.2,
         architecture=0.0,
@@ -5782,7 +5778,6 @@ def _regrama_mutation() -> Mutations:
         mutation_sd=0.1,
         rand_seed=0,
         device="cpu",
-        dormant_reset_param_mut=True,
         amplified_gauss_param_mut=False,
         dormant_threshold=0.01,
     )
@@ -5808,7 +5803,7 @@ def _pin_population_biases(population, value: float = 1.0) -> None:
     """
     with torch.no_grad():
         for agent in population:
-            for _network_id, network in regrama.eval_networks(agent):
+            for _network_id, network in agent.eval_networks():
                 for name, param in network.named_parameters():
                     if name.endswith("bias") and param.dim() == 1:
                         param.fill_(value)
@@ -5819,7 +5814,7 @@ def _population_zeroed_biases(population) -> int:
     return sum(
         int(bool((value == 0).all()))
         for agent in population
-        for _network_id, network in regrama.eval_networks(agent)
+        for _network_id, network in agent.eval_networks()
         for key, value in network.state_dict().items()
         if key.endswith("bias") and value.dim() == 1
     )
@@ -5851,7 +5846,7 @@ def _random_reset_band_mutation(*, random_reset_param_mut: bool) -> Mutations:
 def _mutable_weights(population):
     """Yield every tensor the Gaussian pass is allowed to write."""
     for agent in population:
-        for _network_id, network in regrama.eval_networks(agent):
+        for _network_id, network in agent.eval_networks():
             for key, tensor in network.state_dict().items():
                 if tensor.dim() == 2 and "norm" not in key and "lstm" not in key:
                     yield tensor
@@ -5917,7 +5912,7 @@ class TestRandomResetParameterMutationCrossFamilyEvolution:
         assert len(population) == 8
         assert smallest > _reset_residual
         for agent in population:
-            for _network_id, network in regrama.eval_networks(agent):
+            for _network_id, network in agent.eval_networks():
                 assert all(
                     torch.isfinite(value).all()
                     for value in network.state_dict().values()
@@ -5957,7 +5952,7 @@ class TestRegramaCrossFamilyEvolution:
             assert len(population) == 8
             assert all(isinstance(agent, EvolvableAlgorithm) for agent in population)
             for agent in population:
-                for _network_id, network in regrama.eval_networks(agent):
+                for _network_id, network in agent.eval_networks():
                     assert all(
                         torch.isfinite(value).all()
                         for value in network.state_dict().values()
@@ -6002,7 +5997,7 @@ class TestRegramaCrossFamilyEvolution:
             assert len(population) == 8
             assert len({agent.index for agent in population}) == 8
             for agent in population:
-                for _network_id, network in regrama.eval_networks(agent):
+                for _network_id, network in agent.eval_networks():
                     assert all(
                         torch.isfinite(value).all()
                         for value in network.state_dict().values()
@@ -6051,7 +6046,7 @@ class TestRegramaTrainerWiring:
             max_steps=4,
             evo_steps=4,
             eval_loop=1,
-            mutation=DummyMutations(dormant_reset_param_mut=True),
+            mutation=DummyMutations(),
             wb=False,
             verbose=False,
         )
@@ -6068,7 +6063,7 @@ class TestRegramaTrainerWiring:
             max_steps=4,
             evo_steps=4,
             eval_loop=1,
-            mutation=DummyMutations(dormant_reset_param_mut=True),
+            mutation=DummyMutations(),
             wb=False,
             verbose=False,
         )
@@ -6095,7 +6090,7 @@ class TestRegramaTrainerWiring:
             max_steps=4,
             evo_steps=4,
             eval_loop=1,
-            mutation=DummyMutations(dormant_reset_param_mut=True),
+            mutation=DummyMutations(),
             wb=False,
         )
 
@@ -6119,7 +6114,7 @@ class TestRegramaTrainerWiring:
             evo_steps=5,
             eval_steps=2,
             eval_loop=1,
-            mutation=DummyMutations(dormant_reset_param_mut=True),
+            mutation=DummyMutations(),
             wb=False,
         )
 
@@ -6142,7 +6137,7 @@ class TestRegramaTrainerWiring:
             max_steps=4,
             evo_steps=4,
             eval_loop=1,
-            mutation=DummyMutations(dormant_reset_param_mut=True),
+            mutation=DummyMutations(),
         )
 
         self.assert_capture_enabled(population_multi_agent)
@@ -6162,7 +6157,7 @@ class TestRegramaTrainerWiring:
             max_steps=4,
             evo_steps=4,
             eval_loop=1,
-            mutation=DummyMutations(dormant_reset_param_mut=True),
+            mutation=DummyMutations(),
         )
 
         self.assert_capture_enabled(population_multi_agent)
@@ -6222,7 +6217,7 @@ class TestRegramaTrainerWiring:
         assert population[0].capture_grama is True
         assert any(entry is not None for entry in population[0].grama_scores[0])
 
-    def test_capture_stays_off_without_regrama(self):
+    def test_capture_stays_off_without_a_mutation_operator(self):
         vec_env = gym.vector.SyncVectorEnv([lambda: gym.make("CartPole-v1")])
         agent = DQN(
             vec_env.single_observation_space,
@@ -6230,7 +6225,6 @@ class TestRegramaTrainerWiring:
             batch_size=4,
             learn_step=1,
         )
-        mutation = Mutations(0.2, 0.0, 0.0, 0.4, 0.0, 0.4, rand_seed=0, device="cpu")
 
         population, _fitnesses = train_off_policy(
             vec_env,
@@ -6242,10 +6236,11 @@ class TestRegramaTrainerWiring:
             evo_steps=12,
             eval_steps=2,
             eval_loop=1,
-            mutation=mutation,
+            mutation=None,
             verbose=False,
         )
 
-        # No hooks are registered, so capture costs nothing when off.
+        # No hooks are registered, so capture costs nothing when there is no
+        # mutation operator at all (a no-HPO regime).
         assert population[0].capture_grama is False
         assert population[0].grama_scores is None

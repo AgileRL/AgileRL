@@ -11,8 +11,8 @@ import gymnasium as gym
 from accelerate import Accelerator
 
 from agilerl.algorithms import PPO
+from agilerl.algorithms.core import set_grama_capture
 from agilerl.hpo.mutation import Mutations
-from agilerl.hpo.regrama import set_grama_capture
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.population import Population
 from agilerl.protocols import SelectionStrategyProtocol

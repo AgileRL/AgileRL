@@ -15,6 +15,7 @@ from tensordict import TensorDict
 from torch.utils.data import DataLoader
 
 from agilerl.algorithms import DDPG, DQN, TD3, RainbowDQN
+from agilerl.algorithms.core import set_grama_capture
 from agilerl.components import (
     MultiStepReplayBuffer,
     PrioritizedReplayBuffer,
@@ -27,7 +28,6 @@ from agilerl.components.data import (
 from agilerl.components.replay_buffer import BufferType
 from agilerl.components.sampler import Sampler
 from agilerl.hpo.mutation import Mutations
-from agilerl.hpo.regrama import set_grama_capture
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.networks.actors import DeterministicActor
 from agilerl.population import Population
