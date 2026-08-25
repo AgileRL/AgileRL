@@ -190,7 +190,7 @@ Network Parameter Mutations
 AgileRL allows mutations on the weights of the policy registered through
 :func:`EvolvableAlgorithm.register_network_group() <agilerl.algorithms.core.base.EvolvableAlgorithm.register_network_group>`. Specifically, it selects
 10% of the weights randomly to mutate (ignoring normalization layers) and applies a Gaussian noise with a standard deviation of ``mutation_sd`` to them, clamping
-mutated values to prevent extreme changes. Each selected weight lands in one of two fixed bands:
+mutated values to prevent extreme changes. Each selected weight is affected by one of the following:
 
     - **Normal mutation** (95% of the selected weights): Adds noise with standard deviation proportional to the weight's own current value, scaled by ``mutation_sd``.
 

@@ -12,7 +12,6 @@ from tensordict import TensorDict
 from torch.utils.data import DataLoader
 
 from agilerl.algorithms import NeuralTS, NeuralUCB
-from agilerl.algorithms.core import set_grama_capture
 from agilerl.components.data import ReplayDataset
 from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.components.sampler import Sampler
@@ -209,7 +208,7 @@ def train_bandits(
     )
 
     # Enable the per-neuron gradient capture that ReGraMa parameter mutations read.
-    set_grama_capture(population.agents, mutation)
+    capture_grama = mutation is not None and mutation.parameters_mut > 0
 
     # Pre-training mutation
     if accelerator is None and mutation is not None:
@@ -225,7 +224,7 @@ def train_bandits(
 
         for agent in population.agents:
             agent.set_training_mode(True)
-            agent.init_training_step()
+            agent.init_training_step(capture_grama)
 
             sample = sampler.sample
 

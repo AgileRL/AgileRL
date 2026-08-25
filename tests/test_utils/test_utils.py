@@ -874,7 +874,6 @@ class TestPrintHyperparams:
             INIT_HP=SHARED_INIT_HP,
             population_size=1,
         )
-        pop[0].capture_grama = True
         pop[0].grama_scores = [[torch.zeros(8)]]
 
         with patch("builtins.print") as mock_print:
@@ -882,7 +881,6 @@ class TestPrintHyperparams:
 
         printed = mock_print.call_args[0][0]
         assert "grama_scores" not in printed
-        assert "capture_grama" not in printed
 
     # The function prints the hyperparameters and fitnesses of all agents in the population.
     def test_prints_hyperparams(self):
@@ -913,9 +911,7 @@ class TestPrintHyperparams:
 
         agent = pop[0]
         mean_fitness = np.mean(agent.fitness[-5:]).item()
-        attrs = EvolvableAlgorithm.inspect_attributes(agent)
-        attrs.pop("grama_scores", None)
-        attrs.pop("capture_grama", None)
+        attrs = EvolvableAlgorithm.inspect_attributes(agent, exclude=("grama_scores",))
         expected_lines = [
             f"Agent ID: {agent.index}  |  Mean 5 Fitness: {mean_fitness:.2f}",
             "Attributes:",

@@ -190,6 +190,7 @@ class DummyAgentOffPolicy:
         self.steps = self.metrics.steps
         self.fitness = []
         self.steps_per_second = 0.0
+        self.capture_grama_requested = False
         self.mut = "mutation"
         self.index = 1
         self.registry = MagicMock()
@@ -233,7 +234,8 @@ class DummyAgentOffPolicy:
         self.fitness.append(rand_int)
         return rand_int
 
-    def init_training_step(self):
+    def init_training_step(self, capture_grama=False):
+        self.capture_grama_requested = capture_grama
         self.metrics.init_training_step()
 
     def add_scores(self, scores):
@@ -915,7 +917,9 @@ def _make_base_mock_agent(spec_cls, state_size, action_size, *, metrics=None):
         return score
 
     mock.test.side_effect = _test_side_effect
-    mock.init_training_step.side_effect = lambda: mock.metrics.init_training_step()
+    mock.init_training_step.side_effect = lambda capture_grama=False: (
+        mock.metrics.init_training_step()
+    )
     mock.add_scores.side_effect = lambda scores: mock.metrics.add_scores(scores)
     mock.finalize_training_step.side_effect = lambda num_steps: (
         mock.metrics.finalize_training_step(num_steps)
@@ -6016,7 +6020,7 @@ class TestRegramaTrainerWiring:
     @staticmethod
     def assert_capture_enabled(population) -> None:
         assert population
-        assert all(agent.capture_grama is True for agent in population)
+        assert all(agent.capture_grama_requested is True for agent in population)
 
     @pytest.mark.parametrize(("state_size", "action_size", "vect"), _FLAT_VECT)
     def test_train_off_policy_enables_capture(self, env, population_off_policy):
@@ -6168,7 +6172,6 @@ class TestRegramaTrainerWiring:
             verbose=False,
         )
 
-        assert population[0].capture_grama is True
         assert population[0].grama_scores
         assert any(entry is not None for entry in population[0].grama_scores[0])
 
@@ -6196,7 +6199,6 @@ class TestRegramaTrainerWiring:
             verbose=False,
         )
 
-        assert population[0].capture_grama is True
         assert any(entry is not None for entry in population[0].grama_scores[0])
 
     def test_capture_stays_off_without_a_mutation_operator(self):
@@ -6224,5 +6226,4 @@ class TestRegramaTrainerWiring:
 
         # No hooks are registered, so capture costs nothing when there is no
         # mutation operator at all (a no-HPO regime).
-        assert population[0].capture_grama is False
         assert population[0].grama_scores is None

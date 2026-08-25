@@ -32,9 +32,9 @@ A selection strategy and mutation are applied sequentially to fully evolve a pop
     activation=0,                         # Activation layer mutation
     rl_hp=0.2,                            # Learning HP mutation
     mutation_sd=0.1,                      # Mutation strength
+    dormant_threshold=0.01,               # Normalised score at or below which a neuron is dormant
     rand_seed=1,                          # Random seed
     device=device,
-    dormant_threshold=0.01                # Normalised score at or below which a neuron is dormant
   )
 
 

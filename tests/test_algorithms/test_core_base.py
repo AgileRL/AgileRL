@@ -89,7 +89,6 @@ from agilerl.algorithms.core.base import (
     _is_readonly_property,
     get_checkpoint_dict,
     get_optimizer_cls,
-    set_grama_capture,
 )
 from agilerl.algorithms.core.optimizer_wrapper import OptimizerWrapper
 from agilerl.algorithms.core.registry import NetworkGroup
@@ -319,6 +318,21 @@ class TestInspectAttributes:
         dummy_agent.buffer = TensorDict({"a": torch.zeros(1)}, batch_size=[])
         attrs = EvolvableAlgorithm.inspect_attributes(dummy_agent)
         assert "buffer" not in attrs
+
+    def test_inspect_attributes_exclude_drops_named_attributes(self, dummy_agent):
+        attrs = EvolvableAlgorithm.inspect_attributes(
+            dummy_agent, exclude=("index", "device")
+        )
+        assert "index" not in attrs
+        assert "device" not in attrs
+
+    def test_inspect_attributes_exclude_is_additive_not_a_default(self, dummy_agent):
+        excluded = EvolvableAlgorithm.inspect_attributes(
+            dummy_agent, exclude=("index",)
+        )
+        default = EvolvableAlgorithm.inspect_attributes(dummy_agent)
+        assert "index" not in excluded
+        assert "index" in default
 
 
 def _inspect_signature_params(func):
@@ -8009,10 +8023,9 @@ class TestEvolvableAlgorithmGraMaState:
             device="cpu",
         )
 
-    def test_capture_is_off_and_unmeasured_by_default(self):
+    def test_unmeasured_by_default(self):
         agent = self.agent()
 
-        assert agent.capture_grama is False
         assert agent.grama_scores is None
 
     def test_training_block_captures_only_when_enabled(self):
@@ -8027,9 +8040,8 @@ class TestEvolvableAlgorithmGraMaState:
 
     def test_training_block_stores_a_snapshot_when_enabled(self):
         agent = self.agent()
-        agent.capture_grama = True
 
-        agent.init_training_step()
+        agent.init_training_step(capture_grama=True)
         agent.actor(torch.rand(2, 4)).square().mean().backward()
         agent.finalize_training_step(1)
 
@@ -8040,14 +8052,12 @@ class TestEvolvableAlgorithmGraMaState:
         # This is what lets a child read the gradients captured while its parent
         # trained, under any selection strategy.
         agent = self.agent()
-        agent.capture_grama = True
-        agent.init_training_step()
+        agent.init_training_step(capture_grama=True)
         agent.actor(torch.rand(2, 4)).square().mean().backward()
         agent.finalize_training_step(1)
 
         clone = agent.clone(wrap=False)
 
-        assert clone.capture_grama is True
         assert clone.grama_scores is not None
         assert len(clone.grama_scores) == len(agent.grama_scores)
 
@@ -8069,7 +8079,6 @@ class TestEvolvableAlgorithmGraMaState:
         checkpoint = get_checkpoint_dict(agent)
 
         assert "grama_scores" not in checkpoint
-        assert "capture_grama" in checkpoint
 
     def test_resume_restores_without_reporting_a_missing_attribute(
         self,
@@ -8087,38 +8096,6 @@ class TestEvolvableAlgorithmGraMaState:
             warning for warning in recwarn if "grama_scores" in str(warning.message)
         ]
 
-    def test_load_checkpoint_clears_a_stale_snapshot(self, tmp_path):
-        agent = self.agent()
-        path = str(tmp_path / "agent.pt")
-        agent.save_checkpoint(path)
-
-        stale = self.agent()
-        stale.grama_scores = [[torch.ones(3)]]
-
-        stale.load_checkpoint(path)
-
-        assert stale.grama_scores is None
-
-    def test_resume_from_a_pre_regrama_checkpoint_reports_nothing_missing(
-        self,
-        tmp_path,
-        recwarn,
-    ):
-        agent = self.agent()
-        path = str(tmp_path / "agent.pt")
-        agent.save_checkpoint(path)
-
-        checkpoint = torch.load(path, weights_only=False)
-        del checkpoint["capture_grama"]
-        torch.save(checkpoint, path)
-
-        restored = DQN.load(path, device="cpu")
-
-        assert restored.capture_grama is False
-        assert not [
-            warning for warning in recwarn if "capture_grama" in str(warning.message)
-        ]
-
     def registered_hooks(self, agent):
         """Backward hooks currently attached to the agent's measured activations."""
         return sum(
@@ -8129,30 +8106,27 @@ class TestEvolvableAlgorithmGraMaState:
 
     def test_reopening_a_block_does_not_stack_a_second_set_of_hooks(self):
         agent = self.agent()
-        agent.capture_grama = True
 
-        agent.init_training_step()
+        agent.init_training_step(capture_grama=True)
         after_one = self.registered_hooks(agent)
-        agent.init_training_step()
+        agent.init_training_step(capture_grama=True)
 
         assert after_one > 0
         assert self.registered_hooks(agent) == after_one
 
     def test_one_finalize_clears_the_hooks_of_a_reopened_block(self):
         agent = self.agent()
-        agent.capture_grama = True
 
-        agent.init_training_step()
-        agent.init_training_step()
+        agent.init_training_step(capture_grama=True)
+        agent.init_training_step(capture_grama=True)
         agent.finalize_training_step(1)
 
         assert self.registered_hooks(agent) == 0
 
     def test_wrapped_agent_stores_the_snapshot_on_the_unwrapped_algorithm(self):
         wrapper = RSNorm(self.agent())
-        wrapper.capture_grama = True
 
-        wrapper.init_training_step()
+        wrapper.init_training_step(capture_grama=True)
         wrapper.agent.actor(torch.rand(2, 4)).square().mean().backward()
         wrapper.finalize_training_step(1)
 
@@ -8248,8 +8222,7 @@ class TestGraMaCapture:
     def test_only_the_last_minibatch_survives(self, dqn_agent):
         # The metric's expectation is taken at fixed parameters, and the reset acts
         # on the network as it stands at the end of the cycle.
-        dqn_agent.capture_grama = True
-        dqn_agent.init_training_step()
+        dqn_agent.init_training_step(capture_grama=True)
         dqn_agent.actor(torch.ones(4, 4) * 100.0).square().mean().backward()
         small = torch.rand(4, 4) * 1e-3
         dqn_agent.actor(small).square().mean().backward()
@@ -8257,8 +8230,7 @@ class TestGraMaCapture:
         captured = dqn_agent.grama_scores[0][0]
 
         # Reproduce the second minibatch alone.
-        dqn_agent.capture_grama = True
-        dqn_agent.init_training_step()
+        dqn_agent.init_training_step(capture_grama=True)
         dqn_agent.actor(small).square().mean().backward()
         dqn_agent.finalize_training_step(1)
 
@@ -8276,12 +8248,10 @@ class TestGraMaCapture:
         dqn_agent,
     ):
         activation = target_activations(dqn_agent.actor)[0]
-        dqn_agent.capture_grama = True
-        dqn_agent.init_training_step()
+        dqn_agent.init_training_step(capture_grama=True)
         assert activation._backward_hooks
 
-        dqn_agent.capture_grama = False
-        dqn_agent.init_training_step()
+        dqn_agent.init_training_step(capture_grama=False)
 
         assert not activation._backward_hooks
 
@@ -8309,39 +8279,15 @@ class TestGraMaCapture:
         assert all(entry is None for entry in agent.grama_scores[critic_index])
         assert any(entry is not None for entry in agent.grama_scores[0])
 
-    def test_a_failing_hook_never_breaks_the_backward_pass(
-        self,
-        dqn_agent,
-        monkeypatch,
-    ):
-        # A raising backward hook would abort real training.
+    def test_a_failing_hook_propagates(self, dqn_agent, monkeypatch):
         def explode(_grad_input):
             msg = "hook blew up"
             raise RuntimeError(msg)
 
         monkeypatch.setattr(core_base, "_per_neuron_grad", explode)
 
-        capture_grama_snapshot(dqn_agent, torch.rand(4, 4))
-
-        # Training completed, and the layers are simply unmeasured.
-        assert all(entry is None for entry in dqn_agent.grama_scores[0])
-
-    def test_a_failing_hook_logs_instead_of_staying_silent(
-        self,
-        dqn_agent,
-        monkeypatch,
-        caplog,
-    ):
-        def explode(_grad_input):
-            msg = "hook blew up"
-            raise RuntimeError(msg)
-
-        monkeypatch.setattr(core_base, "_per_neuron_grad", explode)
-
-        with caplog.at_level(logging.WARNING, logger="agilerl.algorithms.core.base"):
+        with pytest.raises(RuntimeError, match="hook blew up"):
             capture_grama_snapshot(dqn_agent, torch.rand(4, 4))
-
-        assert any("hook blew up" in record.message for record in caplog.records)
 
     def test_a_layer_whose_gradient_reduces_to_nothing_stays_unmeasured(
         self,
@@ -8354,57 +8300,22 @@ class TestGraMaCapture:
 
         assert all(entry is None for entry in dqn_agent.grama_scores[0])
 
-    def test_capture_never_breaks_on_an_agent_without_networks(
-        self,
-        dqn_agent,
-        monkeypatch,
-    ):
-        # Registration is best-effort so a training run cannot be broken
-        # by an agent that does not expose the expected surface.
+    def test_a_registration_failure_propagates(self, dqn_agent, monkeypatch):
         def explode(_agent):
             msg = "no networks here"
             raise AttributeError(msg)
 
         monkeypatch.setattr(EvolvableAlgorithm, "eval_networks", explode)
 
-        capture_grama_snapshot(dqn_agent, torch.rand(4, 4))
+        with pytest.raises(AttributeError, match="no networks here"):
+            capture_grama_snapshot(dqn_agent, torch.rand(4, 4))
 
-        assert dqn_agent.grama_scores == []
-
-
-class TestSetGraMaCapture:
-    """Enable capture whenever a mutation operator can actually run ReGraMa."""
-
-    class FakeMutation:
-        """A stand-in mutation operator: only parameters_mut governs capture."""
-
-        def __init__(self, parameters_mut: float = 1.0):
-            self.parameters_mut = parameters_mut
-
-    def test_capture_is_enabled_when_parameter_mutations_can_run(self, dqn_agent):
-        set_grama_capture([dqn_agent], self.FakeMutation())
-
-        assert dqn_agent.capture_grama is True
-
-    def test_capture_stays_off_without_a_mutation_operator(self, dqn_agent):
-        set_grama_capture([dqn_agent], None)
-
-        assert dqn_agent.capture_grama is False
-
-    def test_capture_stays_off_when_parameter_mutation_probability_is_zero(
-        self,
-        dqn_agent,
-    ):
-        set_grama_capture([dqn_agent], self.FakeMutation(parameters_mut=0.0))
-
-        assert dqn_agent.capture_grama is False
-
-    def test_compiled_agents_capture(self, dqn_agent, recwarn):
+    def test_compiled_agent_captures(self, dqn_agent, recwarn):
         dqn_agent.torch_compiler = "default"
 
-        set_grama_capture([dqn_agent], self.FakeMutation())
+        dqn_agent.init_training_step(capture_grama=True)
+        dqn_agent.finalize_training_step(1)
 
-        assert dqn_agent.capture_grama is True
         assert not any(issubclass(w.category, UserWarning) for w in recwarn.list)
 
 
@@ -8452,11 +8363,11 @@ class TestEvalNetworks:
             )
 
 
-class TestPolicyNetworkIds:
+class TestPolicyEvalNetworkIds:
     """Identify the policy networks whose latent other networks may borrow."""
 
     def test_the_policy_evaluation_network_is_reported(self, dqn_agent):
-        assert dqn_agent.policy_network_ids() == {id(dqn_agent.actor)}
+        assert dqn_agent.policy_eval_network_ids() == {id(dqn_agent.actor)}
 
     def test_multi_agent_policies_report_every_sub_policy(
         self,
@@ -8475,19 +8386,19 @@ class TestPolicyNetworkIds:
         )
         policy = getattr(agent, agent.registry.policy())
 
-        result = agent.policy_network_ids()
+        result = agent.policy_eval_network_ids()
 
         assert result == {id(sub_network) for _key, sub_network in policy.items()}
 
     def test_an_agent_without_a_policy_group_reports_no_policy(self, dqn_agent):
         dqn_agent.registry.groups = []
 
-        assert dqn_agent.policy_network_ids() == set()
+        assert dqn_agent.policy_eval_network_ids() == set()
 
     def test_a_policy_the_agent_does_not_carry_reports_no_policy(self, dqn_agent):
         dqn_agent.actor = None
 
-        assert dqn_agent.policy_network_ids() == set()
+        assert dqn_agent.policy_eval_network_ids() == set()
 
 
 class TestGraMaCaptureUnderAccelerator:
@@ -8536,8 +8447,7 @@ class TestGraMaCaptureUnderAccelerator:
         agent.actor = nn.parallel.DistributedDataParallel(agent.actor)
         inner = agent.accelerator.unwrap_model(agent.actor)
 
-        agent.capture_grama = True
-        agent.init_training_step()
+        agent.init_training_step(capture_grama=True)
         agent.actor(torch.rand(4, 4)).square().mean().backward()
         agent.finalize_training_step(1)
 

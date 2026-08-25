@@ -546,40 +546,32 @@ class TestResolveConsumers:
         assert result == []
 
 
-class TestConv1dBlocks:
-    """EvolvableCNN builds Conv1d stacks too, so they must be reachable."""
+class TestConvBlocks:
+    """EvolvableCNN builds Conv2d/Conv3d stacks, so they must be reachable."""
 
     @pytest.mark.parametrize(
         "layer",
-        [nn.Conv1d(3, 4, 3), nn.Conv2d(3, 4, 3), nn.Conv3d(3, 4, 3)],
-        ids=["Conv1d", "Conv2d", "Conv3d"],
+        [nn.Conv2d(3, 4, 3), nn.Conv3d(3, 4, 3)],
+        ids=["Conv2d", "Conv3d"],
     )
     def test_every_evolvable_cnn_block_type_is_a_weight_layer(self, layer):
         assert mutation_utils._is_weight_layer(layer)
 
-    def test_conv1d_pair_is_a_conv_to_conv_boundary(self):
+    def test_conv_pair_is_a_conv_to_conv_boundary(self):
         targets = mutation_utils._resolve_consumers(
-            nn.Conv1d(3, 4, 3),
-            [nn.Conv1d(4, 2, 3)],
+            nn.Conv2d(3, 4, 3),
+            [nn.Conv2d(4, 2, 3)],
             None,
             None,
         )
 
         assert [target.stride for target in targets] == [1]
 
-    def test_conv1d_to_dense_consumer_takes_the_flattened_spatial_stride(self):
-        producer = nn.Conv1d(3, 4, kernel_size=3)
-        consumer = nn.Linear(16, 2)
-
-        result = mutation_utils._resolve_consumers(producer, [consumer], 4, 4)
-
-        assert [target.stride for target in result] == [4]
-
-    def test_conv1d_producer_is_found_rather_than_silently_skipped(self):
+    def test_conv_producer_is_found_rather_than_silently_skipped(self):
         encoder = nn.Sequential(
-            nn.Conv1d(3, 4, kernel_size=3),
+            nn.Conv2d(3, 4, kernel_size=3),
             nn.ReLU(),
-            nn.Conv1d(4, 2, kernel_size=3),
+            nn.Conv2d(4, 2, kernel_size=3),
             nn.ReLU(),
         )
 
@@ -588,10 +580,10 @@ class TestConv1dBlocks:
         assert result.producer is encoder[0]
         assert result.consumers == [encoder[2]]
 
-    def test_dormant_conv1d_filters_are_reset_and_live_ones_untouched(self):
+    def test_dormant_conv_filters_are_reset_and_live_ones_untouched(self):
         # 4 feature maps, of which 1 and 2 are dormant.
-        producer = nn.Conv1d(3, 4, kernel_size=3)
-        consumer = nn.Conv1d(4, 2, kernel_size=3)
+        producer = nn.Conv2d(3, 4, kernel_size=3)
+        consumer = nn.Conv2d(4, 2, kernel_size=3)
         with torch.no_grad():
             producer.weight.fill_(1.0)
             producer.bias.fill_(7.0)
@@ -603,16 +595,16 @@ class TestConv1dBlocks:
         # Assert whole filters move, and the live ones are bit-identical.
         assert indices == [1, 2]
         for index in indices:
-            assert not torch.allclose(producer.weight[index], torch.ones(3, 3))
+            assert not torch.allclose(producer.weight[index], torch.ones(3, 3, 3))
             assert producer.bias[index].item() == 0.0
         for index in (0, 3):
-            assert torch.equal(producer.weight[index], torch.ones(3, 3))
+            assert torch.equal(producer.weight[index], torch.ones(3, 3, 3))
             assert producer.bias[index].item() == pytest.approx(7.0)
-            assert torch.equal(consumer.weight[:, index], torch.full((2, 3), 2.0))
+            assert torch.equal(consumer.weight[:, index], torch.full((2, 3, 3), 2.0))
 
-    def test_revived_conv1d_filter_columns_are_scaled_to_the_live_reference(self):
-        producer = nn.Conv1d(3, 4, kernel_size=3)
-        consumer = nn.Conv1d(4, 2, kernel_size=3)
+    def test_revived_conv_filter_columns_are_scaled_to_the_live_reference(self):
+        producer = nn.Conv2d(3, 4, kernel_size=3)
+        consumer = nn.Conv2d(4, 2, kernel_size=3)
         with torch.no_grad():
             consumer.weight.fill_(2.0)
         live = consumer.weight[:, 0].norm().item()
@@ -1231,8 +1223,7 @@ class TestResetDormantNeurons:
             net_config=encoder_multi_input_config,
             device="cpu",
         )
-        agent.capture_grama = True
-        agent.init_training_step()
+        agent.init_training_step(capture_grama=True)
         observation = {
             key: torch.rand(2, *space.shape) for key, space in dict_space.items()
         }
@@ -1270,8 +1261,7 @@ class TestResetDormantNeurons:
             net_config=encoder_multi_input_config,
             device="cpu",
         )
-        agent.capture_grama = True
-        agent.init_training_step()
+        agent.init_training_step(capture_grama=True)
         observation = {
             key: torch.rand(2, *space.shape) for key, space in dict_space.items()
         }

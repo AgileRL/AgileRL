@@ -376,9 +376,8 @@ class EvolvableAlgorithmProtocol(Protocol):
     torch_compiler: str | None
     # Multi-frequency selection's subpopulation tag; None under any other strategy.
     subpopulation_id: int | None
-    # ReGraMa's per-neuron gradient snapshot, and whether to capture it.
+    # ReGraMa's per-neuron gradient snapshot.
     grama_scores: "GraMaScores | None"
-    capture_grama: bool
 
     @property
     def scores(self) -> list[float | list[float]]:

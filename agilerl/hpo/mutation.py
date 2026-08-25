@@ -40,8 +40,6 @@ BanditAlgorithm = NeuralUCB | NeuralTS
 # individual of the same type.
 MutationFunc = Callable[[IndividualT], IndividualT]
 
-logger = logging.getLogger(__name__)
-
 torch._dynamo.config.cache_size_limit = 64
 torch._logging.set_logs(dynamo=logging.FATAL)
 
@@ -215,8 +213,7 @@ class Mutations:
 
     * No mutation
     * Network architecture mutation - adding layers or nodes. Trained weights are reused and new weights are initialized randomly.
-    * Network parameters mutation - mutating weights with Gaussian noise, optionally preceded by
-      ReGraMa resets of the neurons that have gone dormant.
+    * Network parameters mutation - mutating weights with Gaussian noise, preceded by ReGraMa resets of the neurons that have gone dormant.
     * Network activation layer mutation - change of activation layer.
     * RL algorithm mutation - mutation of learning hyperparameter, (e.g. learning rate or batch size).
 
@@ -238,6 +235,9 @@ class Mutations:
     :type rl_hp_selection: list[str]
     :param mutation_sd: Mutation strength
     :type mutation_sd: float
+    :param dormant_threshold: Normalised GraMa score at or below which a neuron counts as
+        dormant, defaults to 0.01.
+    :type dormant_threshold: float, optional
     :param activation_selection: Activation functions to choose from, defaults to ["ReLU", "ELU", "GELU"]
     :type activation_selection: list[str], optional
     :param mutate_elite: Mutate elite member of population, defaults to True
@@ -248,9 +248,6 @@ class Mutations:
     :type device: str, optional
     :param accelerator: Accelerator for distributed computing, defaults to None
     :type accelerator: accelerate.Accelerator(), optional
-    :param dormant_threshold: Normalised GraMa score at or below which a neuron counts as
-        dormant, defaults to 0.01.
-    :type dormant_threshold: float, optional
     """
 
     def __init__(
@@ -262,12 +259,12 @@ class Mutations:
         activation: float,
         rl_hp: float,
         mutation_sd: float = 0.1,
+        dormant_threshold: float = 0.01,
         activation_selection: list[str] | None = None,
         mutate_elite: bool = True,
         rand_seed: int | None = None,
         device: str = "cpu",
         accelerator: Accelerator | None = None,
-        dormant_threshold: float = 0.01,
     ) -> None:
         if activation_selection is None:
             activation_selection = ["ReLU", "ELU", "GELU"]
@@ -359,8 +356,6 @@ class Mutations:
         self.accelerator = accelerator
 
         self.dormant_threshold = dormant_threshold
-        self._warned_no_snapshot = False
-        self._pre_training_mut = False
 
         self.pretraining_mut_options, self.pretraining_mut_proba = (
             self._get_mutations_options(pretraining=True)
@@ -386,8 +381,6 @@ class Mutations:
         :return: Mutated population
         :rtype: list[EvolvableAlgorithm]
         """
-        self._pre_training_mut = pre_training_mut
-
         # Create lists of possible mutation functions and their respective relative probabilities
         mutation_options = (
             self.pretraining_mut_options if pre_training_mut else self.mut_options
@@ -734,9 +727,9 @@ class Mutations:
         re-initialises the neurons whose normalised GraMa score has fallen to or
         below the dormant threshold.
 
-        A snapshot that is absent, or one that holds no measurement, warns rather
-        than degrading silently: neither can score a neuron, so the mutation falls
-        back to the Gaussian pass alone.
+        A snapshot that is absent, or one that holds no measurement, cannot score
+        any neuron, so the reset is skipped and the mutation falls back to the
+        Gaussian pass alone.
 
         :param individual: Individual agent from population.
         :type individual: RLAlgorithm or MultiAgentRLAlgorithm
@@ -745,43 +738,27 @@ class Mutations:
         :rtype: bool
         """
         grama_scores = individual.grama_scores or []
-
-        if (
-            not any(entry is not None for network in grama_scores for entry in network)
-            and not self._pre_training_mut
-            and not self._warned_no_snapshot
-        ):
-            self._warned_no_snapshot = True
-            warnings.warn(
-                "ReGraMa parameter mutations are configured but no GraMa gradient "
-                "snapshot was captured, so this mutation falls back to Gaussian "
-                "noise alone.",
-                stacklevel=3,
-            )
+        if not any(entry is not None for network in grama_scores for entry in network):
+            return False
 
         networks = individual.eval_networks()
-        policy_networks = individual.policy_network_ids()
+        policy_networks = individual.policy_eval_network_ids()
 
         neurons_reset = 0
         for idx, (network_id, network) in enumerate(networks):
             per_neuron_list = grama_scores[idx] if idx < len(grama_scores) else None
-            try:
-                shared_heads = (
-                    shared_encoder_heads(networks, network_id, network)
-                    if id(network) in policy_networks
-                    else ()
-                )
-                network_reset_count = reset_dormant_neurons(
-                    network,
-                    per_neuron_list,
-                    self.dormant_threshold,
-                    self.rng,
-                    shared_latent_heads=shared_heads,
-                )
-            except Exception as exc:  # leave this network untouched on failure
-                logger.warning("ReGraMa reset skipped for a network: %s", exc)
-                continue
-            neurons_reset += network_reset_count
+            shared_heads = (
+                shared_encoder_heads(networks, network_id, network)
+                if id(network) in policy_networks
+                else ()
+            )
+            neurons_reset += reset_dormant_neurons(
+                network,
+                per_neuron_list,
+                self.dormant_threshold,
+                self.rng,
+                shared_latent_heads=shared_heads,
+            )
 
         return neurons_reset > 0
 

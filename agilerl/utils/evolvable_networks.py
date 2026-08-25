@@ -47,6 +47,19 @@ ACTIVATION_FUNCTIONS: dict[str, type[nn.Module]] = {
     "Identity": nn.Identity,
 }
 
+NORMALIZATION_FUNCTIONS: dict[str, type[nn.Module]] = {
+    "BatchNorm2d": nn.BatchNorm2d,
+    "BatchNorm3d": nn.BatchNorm3d,
+    "InstanceNorm2d": nn.InstanceNorm2d,
+    "InstanceNorm3d": nn.InstanceNorm3d,
+    "LayerNorm": nn.LayerNorm,
+}
+
+CONV_LAYER_FUNCTIONS: dict[str, type[nn.Module]] = {
+    "Conv2d": nn.Conv2d,
+    "Conv3d": nn.Conv3d,
+}
+
 
 # Arity of the size tuple a torch layer expects (e.g. ``tuple[int, int]`` for
 # 2d layers). Ties a layer constructor to a normalizer that produces it.
@@ -456,15 +469,7 @@ def get_normalization(
     :return: Normalization layer
     :rtype: nn.Module
     """
-    normalization_functions = {
-        "BatchNorm2d": nn.BatchNorm2d,
-        "BatchNorm3d": nn.BatchNorm3d,
-        "InstanceNorm2d": nn.InstanceNorm2d,
-        "InstanceNorm3d": nn.InstanceNorm3d,
-        "LayerNorm": nn.LayerNorm,
-    }
-
-    return normalization_functions[normalization_name](layer_size, device=device)
+    return NORMALIZATION_FUNCTIONS[normalization_name](layer_size, device=device)
 
 
 def get_activation(activation_name: str | None, new_gelu: bool = False) -> nn.Module:
@@ -473,7 +478,7 @@ def get_activation(activation_name: str | None, new_gelu: bool = False) -> nn.Mo
     :param activation_names: Activation function name
     :type activation_names: str
     """
-    activation_functions = dict(ACTIVATION_FUNCTIONS)
+    activation_functions = ACTIVATION_FUNCTIONS.copy()
     if new_gelu:
         activation_functions["GELU"] = NewGELU
 

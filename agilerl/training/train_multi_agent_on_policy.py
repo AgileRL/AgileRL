@@ -12,7 +12,6 @@ from gymnasium import spaces
 from pettingzoo import ParallelEnv
 
 from agilerl.algorithms import IPPO
-from agilerl.algorithms.core import set_grama_capture
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.networks import StochasticActor
@@ -208,7 +207,7 @@ def train_multi_agent_on_policy(
     )
 
     # Enable the per-neuron gradient capture that ReGraMa parameter mutations read.
-    set_grama_capture(population.agents, mutation)
+    capture_grama = mutation is not None and mutation.parameters_mut > 0
 
     checkpoint_count = 0
 
@@ -224,7 +223,7 @@ def train_multi_agent_on_policy(
         for agent in population.agents:
             compiled_agent = agent.torch_compiler is not None
             agent.set_training_mode(True)
-            agent.init_training_step()
+            agent.init_training_step(capture_grama)
 
             obs, info = vec_env.reset()
             scores = (

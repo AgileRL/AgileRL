@@ -224,8 +224,6 @@ class ResidualBlock(nn.Module):
         )  # Apply manual padding
         x = self.bn2(self.conv2(x))
 
-        # Left functional on purpose: this activation's input is the residual sum,
-        # so its units have no single producing layer.
         return F.relu(res + x)  # Apply ReLU after summing the residual
 
 
@@ -255,8 +253,6 @@ class SimbaResidualBlock(nn.Module):
 
         self.layer_norm = nn.LayerNorm(hidden_size, device=device)
         self.linear1 = nn.Linear(hidden_size, hidden_size * scale_factor, device=device)
-        # A registered sub-module rather than a functional call, so GraMa capture
-        # can reach the block's hidden channels.
         self.act = nn.ReLU()
         self.linear2 = nn.Linear(hidden_size * scale_factor, hidden_size, device=device)
 

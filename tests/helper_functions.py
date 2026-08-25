@@ -682,8 +682,7 @@ def capture_grama_snapshot(agent: Any, observation: torch.Tensor) -> None:
     :return: None.
     :rtype: None
     """
-    agent.capture_grama = True
-    agent.init_training_step()
+    agent.init_training_step(capture_grama=True)
     policy = getattr(agent, agent.registry.policy())
     head = mutation_utils._unwrap_module(policy.head_net)
     head(policy.encoder(observation)).square().mean().backward()

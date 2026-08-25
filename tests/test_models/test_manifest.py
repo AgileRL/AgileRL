@@ -1036,20 +1036,6 @@ class TestTrainingManifestArenaBridge:
         assert submission["algorithm"]["name"] == "PPO"
         assert submission["environment"]["name"] == "CartPole-v1"
 
-    def test_to_arena_manifest_untouched_mutation_field_does_not_leak_core_default(
-        self,
-    ):
-        core = TrainingManifest.model_validate(
-            {
-                "algorithm": {"name": "DQN"},
-                "environment": {"name": "CartPole-v1"},
-                "mutation": {"mutation_sd": 0.2},
-            }
-        )
-        submission = TrainingManifest.to_arena_manifest(core)
-        assert submission["mutation"]["mutation_sd"] == 0.2
-        assert "dormant_threshold" not in submission["mutation"]
-
     def test_to_arena_manifest_from_yaml_path(self, tmp_path):
         manifest_path = tmp_path / "manifest.yaml"
         manifest_path.write_text(

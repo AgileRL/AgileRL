@@ -189,12 +189,12 @@ class TestMutationsInit:
             parameters,
             activation,
             rl_hp,
-            mutation_sd,
-            activation_selection,
-            mutate_elite,
-            rand_seed,
-            device,
-            accelerator,
+            mutation_sd=mutation_sd,
+            activation_selection=activation_selection,
+            mutate_elite=mutate_elite,
+            rand_seed=rand_seed,
+            device=device,
+            accelerator=accelerator,
         )
 
         assert mutations.rng is not None
@@ -634,7 +634,7 @@ class TestMutationsParameterMutation:
             def eval_networks(self):
                 return []
 
-            def policy_network_ids(self):
+            def policy_eval_network_ids(self):
                 return set()
 
         muts = Mutations(0, 1, 0.5, 0, 0, 0, 0.1, device=device)
@@ -2904,20 +2904,22 @@ class TestMutationsRegramaParameterMutation:
             torch.equal(strict_before[k], strict_after[k]) for k in strict_before
         )
 
-    def test_missing_snapshot_falls_back_to_gaussian_and_warns_once(self):
+    def test_missing_snapshot_falls_back_to_gaussian_silently(self):
         muts = _regrama_mutations()
-        agents = [self.make_agent(), self.make_agent()]
+        agent = self.make_agent()
+        before = {k: v.clone() for k, v in agent.actor.state_dict().items()}
 
-        with pytest.warns(UserWarning, match="no GraMa gradient snapshot"):
-            muts.parameter_mutation(agents[0])
         with warnings.catch_warnings():
             warnings.simplefilter("error")
-            muts.parameter_mutation(agents[1])
+            agent = muts.parameter_mutation(agent)
 
-        assert agents[0].mut == "param"
-        assert agents[1].mut == "param"
+        assert agent.mut == "param"
+        # No snapshot means the reset never runs, so the only source of
+        # change is the Gaussian pass.
+        after = agent.actor.state_dict()
+        assert any(not torch.equal(before[k], after[k]) for k in before)
 
-    def test_snapshot_that_captured_nothing_warns_like_a_missing_one(self):
+    def test_snapshot_that_captured_nothing_behaves_like_a_missing_one(self):
         agent = self.make_agent()
         agent.grama_scores = [
             [None] * len(mutation_utils.target_activations(network))
@@ -2925,10 +2927,13 @@ class TestMutationsRegramaParameterMutation:
         ]
         assert agent.grama_scores
 
-        with pytest.warns(UserWarning, match="no GraMa gradient snapshot"):
-            _regrama_mutations().parameter_mutation(agent)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            agent = _regrama_mutations().parameter_mutation(agent)
 
-    def test_pre_training_step_does_not_warn(self):
+        assert agent.mut == "param"
+
+    def test_pre_training_step_with_no_snapshot_does_not_raise(self):
         # No agent has trained yet there, so a missing snapshot is expected.
         muts = _regrama_mutations()
         agent = self.make_agent()
@@ -2950,15 +2955,13 @@ class TestMutationsRegramaParameterMutation:
 
         assert_state_dicts_equal(first.actor.state_dict(), second.actor.state_dict())
 
-    def test_a_failing_reset_degrades_to_the_gaussian_pass(self, monkeypatch):
-        # A ReGraMa failure must never abort the evolution step.
+    def test_a_reset_failure_propagates(self, monkeypatch):
         agent = PPO(
             generate_random_box_space((4,)),
             generate_discrete_space(2),
             device="cpu",
         )
         _all_dormant(agent)
-        before = {k: v.clone() for k, v in agent.critic.state_dict().items()}
 
         def explode(*_args, **_kwargs):
             msg = "surgery blew up"
@@ -2969,25 +2972,16 @@ class TestMutationsRegramaParameterMutation:
             explode,
         )
 
-        agent = _regrama_mutations().parameter_mutation(agent)
+        with pytest.raises(RuntimeError, match="surgery blew up"):
+            _regrama_mutations().parameter_mutation(agent)
 
-        # The mutation completed, and the networks ReGraMa would have
-        # touched are left exactly as they were.
-        assert agent.mut == "param"
-        after = agent.critic.state_dict()
-        assert all(torch.equal(before[k], after[k]) for k in before)
-
-    def test_a_failing_shared_head_lookup_degrades_to_the_gaussian_pass(
-        self,
-        monkeypatch,
-    ):
+    def test_a_shared_head_lookup_failure_propagates(self, monkeypatch):
         agent = PPO(
             generate_random_box_space((4,)),
             generate_discrete_space(2),
             device="cpu",
         )
         _all_dormant(agent)
-        _pin_biases(agent.actor)
 
         def explode(*_args, **_kwargs):
             msg = "shared head lookup blew up"
@@ -2995,10 +2989,8 @@ class TestMutationsRegramaParameterMutation:
 
         monkeypatch.setattr("agilerl.hpo.mutation.shared_encoder_heads", explode)
 
-        agent = _regrama_mutations().parameter_mutation(agent)
-
-        assert agent.mut == "param"
-        assert _zeroed_biases(agent.actor) == 0
+        with pytest.raises(RuntimeError, match="shared head lookup blew up"):
+            _regrama_mutations().parameter_mutation(agent)
 
     def test_wrapped_agents_are_reset_through_the_wrapper(self):
         agent = RSNorm(self.make_agent())

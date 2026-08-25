@@ -12,7 +12,11 @@ import torch
 from torch import nn
 
 from agilerl.modules.custom_components import NewGELU
-from agilerl.utils.evolvable_networks import ACTIVATION_FUNCTIONS
+from agilerl.utils.evolvable_networks import (
+    ACTIVATION_FUNCTIONS,
+    CONV_LAYER_FUNCTIONS,
+    NORMALIZATION_FUNCTIONS,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -24,7 +28,9 @@ REGRAMA_OUT_SCALE = 0.02
 MAGNITUDE_LIMIT = 1e6
 
 # Every block type EvolvableCNN can build.
-CONV_LAYER_TYPES: tuple[type[nn.Module], ...] = (nn.Conv1d, nn.Conv2d, nn.Conv3d)
+CONV_LAYER_TYPES: tuple[type[nn.Module], ...] = tuple(
+    dict.fromkeys(CONV_LAYER_FUNCTIONS.values())
+)
 
 # Activation sub-modules are recognised by type.
 ACTIVATION_TYPES: tuple[type[nn.Module], ...] = (
@@ -34,20 +40,9 @@ ACTIVATION_TYPES: tuple[type[nn.Module], ...] = (
 
 # Normalisations hold per-neuron state of their own, so a revived neuron's entry
 # has to be reset with it.
-NORM_LAYER_TYPES: tuple[type[nn.Module], ...] = (
-    nn.LayerNorm,
-    nn.GroupNorm,
-    nn.BatchNorm1d,
-    nn.BatchNorm2d,
-    nn.BatchNorm3d,
-    nn.InstanceNorm1d,
-    nn.InstanceNorm2d,
-    nn.InstanceNorm3d,
-    nn.RMSNorm,
+NORM_LAYER_TYPES: tuple[type[nn.Module], ...] = tuple(
+    dict.fromkeys(NORMALIZATION_FUNCTIONS.values())
 )
-
-# Attributes identifying a layer that remaps its input onto fresh neurons.
-OUTPUT_WIDTH_ATTRS = ("out_features", "out_channels", "hidden_size")
 
 
 class ProducerContext(NamedTuple):
@@ -133,12 +128,12 @@ def _head_entry_layers(head: nn.Module | None) -> list[nn.Module]:
     if head is None:
         return []
     children = list(head.children())
-    # A head whose own children are layers is a single flat stream.
-    if any(_is_weight_layer(child) for child in children):
-        first = _first_weight_layer(head)
-        return [first] if first is not None else []
     entries = [_first_weight_layer(child) for child in children]
-    return [entry for entry in entries if entry is not None]
+    found = [entry for entry in entries if entry is not None]
+    is_flat_stream = any(
+        child is entry for child, entry in zip(children, entries, strict=True)
+    )
+    return found[:1] if is_flat_stream else found
 
 
 def _activation_modules(root: nn.Module, *, include_output: bool) -> list[nn.Module]:
@@ -157,7 +152,10 @@ def _activation_modules(root: nn.Module, *, include_output: bool) -> list[nn.Mod
         prefix = f"{parent}." if parent else ""
         has_later_consumer = any(
             other_name.startswith(prefix)
-            and any(hasattr(other, attr) for attr in OUTPUT_WIDTH_ATTRS)
+            and any(
+                hasattr(other, attr)
+                for attr in ("out_features", "out_channels", "hidden_size")
+            )
             for other_name, other in ordered[index + 1 :]
         )
         if has_later_consumer:

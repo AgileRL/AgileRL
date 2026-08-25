@@ -12,7 +12,6 @@ from accelerate import Accelerator
 from torch.utils.data import DataLoader
 
 from agilerl.algorithms import CQN
-from agilerl.algorithms.core import set_grama_capture
 from agilerl.components.data import (
     ReplayDataset,
     Transition,
@@ -260,7 +259,7 @@ def train_offline(
     )
 
     # Enable the per-neuron gradient capture that ReGraMa parameter mutations read.
-    set_grama_capture(population.agents, mutation)
+    capture_grama = mutation is not None and mutation.parameters_mut > 0
 
     checkpoint_count = 0
 
@@ -275,7 +274,7 @@ def train_offline(
 
         for agent in population.agents:
             agent.set_training_mode(True)
-            agent.init_training_step()
+            agent.init_training_step(capture_grama)
 
             # `Sampler.sample` is typed as returning a bare `TensorDict`; the cast
             # asserts the concrete replay-batch layout `CQN.learn` consumes.

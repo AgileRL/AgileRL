@@ -290,5 +290,3 @@ Parameters
 
 .. autoclass:: agilerl.algorithms.core.base.MultiAgentRLAlgorithm
     :members:
-
-.. autofunction:: agilerl.algorithms.core.base.set_grama_capture

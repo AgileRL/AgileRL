@@ -15,7 +15,6 @@ from tensordict import TensorDict
 from torch.utils.data import DataLoader
 
 from agilerl.algorithms import DDPG, DQN, TD3, RainbowDQN
-from agilerl.algorithms.core import set_grama_capture
 from agilerl.components import (
     MultiStepReplayBuffer,
     PrioritizedReplayBuffer,
@@ -330,7 +329,7 @@ def train_off_policy(
     )
 
     # Enable the per-neuron gradient capture that ReGraMa parameter mutations read.
-    set_grama_capture(population.agents, mutation)
+    capture_grama = mutation is not None and mutation.parameters_mut > 0
 
     checkpoint_count = 0
 
@@ -345,7 +344,7 @@ def train_off_policy(
 
         for agent in population.agents:
             agent.set_training_mode(True)
-            agent.init_training_step()
+            agent.init_training_step(capture_grama)
 
             obs, info = vec_env.reset()
             scores = np.zeros(num_envs)
