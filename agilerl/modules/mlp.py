@@ -51,8 +51,6 @@ class EvolvableMLP(EvolvableModule):
     :type noise_std: float, optional
     :param noisy: Add noise to network, defaults to False
     :type noisy: bool, optional
-    :param new_gelu: Use new GELU activation function, defaults to False
-    :type new_gelu: bool, optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: DeviceType, optional
     :param name: Name of the network, defaults to 'mlp'
@@ -78,7 +76,6 @@ class EvolvableMLP(EvolvableModule):
         init_layers: bool = True,
         noisy: bool = False,
         noise_std: float = 0.5,
-        new_gelu: bool = False,
         device: DeviceType = "cpu",
         name: str = "mlp",
         random_seed: int | None = None,
@@ -107,7 +104,6 @@ class EvolvableMLP(EvolvableModule):
         self.num_inputs = num_inputs
         self.num_outputs = num_outputs
         self._activation = activation
-        self.new_gelu = new_gelu
         self.output_activation = output_activation
         self.min_hidden_layers = min_hidden_layers
         self.max_hidden_layers = max_hidden_layers
@@ -134,7 +130,6 @@ class EvolvableMLP(EvolvableModule):
             activation=self.activation,
             noise_std=self.noise_std,
             device=self.device,
-            new_gelu=self.new_gelu,
             name=self.name,
         )
 
@@ -328,7 +323,6 @@ class EvolvableMLP(EvolvableModule):
             output_layernorm=self.output_layernorm,
             activation=self.activation,
             noise_std=self.noise_std,
-            new_gelu=self.new_gelu,
             device=self.device,
             name=self.name,
         )

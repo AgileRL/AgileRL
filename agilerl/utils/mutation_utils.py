@@ -11,7 +11,6 @@ import numpy as np
 import torch
 from torch import nn
 
-from agilerl.modules.custom_components import NewGELU
 from agilerl.utils.evolvable_networks import (
     ACTIVATION_FUNCTIONS,
     CONV_LAYER_FUNCTIONS,
@@ -33,9 +32,8 @@ CONV_LAYER_TYPES: tuple[type[nn.Module], ...] = tuple(
 )
 
 # Activation sub-modules are recognised by type.
-ACTIVATION_TYPES: tuple[type[nn.Module], ...] = (
-    *dict.fromkeys(ACTIVATION_FUNCTIONS.values()),
-    NewGELU,
+ACTIVATION_TYPES: tuple[type[nn.Module], ...] = tuple(
+    dict.fromkeys(ACTIVATION_FUNCTIONS.values())
 )
 
 # Normalisations hold per-neuron state of their own, so a revived neuron's entry

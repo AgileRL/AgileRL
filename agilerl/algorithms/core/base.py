@@ -148,8 +148,6 @@ if TYPE_CHECKING:
     from torch.optim.lr_scheduler import SequentialLR
     from transformers import BitsAndBytesConfig
 
-    from agilerl.modules import ModuleDict
-
 # Make imports visible to typechecker and import when required
 if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
     from peft import (
@@ -661,7 +659,7 @@ class EvolvableAlgorithm(ABC, Generic[ExperiencesT], metaclass=RegistryMeta):
         :rtype: None
         """
         latest = self._grama_latest
-        assert latest is not None  # Callers only invoke this when a capture is open
+        assert latest is not None
         self.grama_scores = [list(net_latest) for net_latest in latest]
         self._remove_grama_handles()
         self._grama_latest = None
@@ -697,7 +695,8 @@ class EvolvableAlgorithm(ABC, Generic[ExperiencesT], metaclass=RegistryMeta):
                 pairs.append((None, eval_net))
         return pairs
 
-    def policy_eval_network_ids(self) -> set[int]:
+    @property
+    def eval_policy_network_ids(self) -> set[int]:
         """Return the id of every evaluation network in the agent's policy group.
 
         :return: Identities of the policy's evaluation networks.
@@ -706,11 +705,20 @@ class EvolvableAlgorithm(ABC, Generic[ExperiencesT], metaclass=RegistryMeta):
         from agilerl.modules import ModuleDict
 
         policy_name = self.registry.policy()
-        if policy_name is None:
+        if not isinstance(policy_name, str):
             return set()
         policy = getattr(self, policy_name, None)
         if policy is None:
             return set()
+        if isinstance(policy, dict) and not isinstance(policy, ModuleDict):
+            return {
+                id(
+                    self.accelerator.unwrap_model(module)
+                    if self.accelerator is not None
+                    else module
+                )
+                for module in policy.values()
+            }
         if self.accelerator is not None:
             policy = self.accelerator.unwrap_model(policy)
         if isinstance(policy, ModuleDict):
@@ -1641,15 +1649,9 @@ class EvolvableAlgorithm(ABC, Generic[ExperiencesT], metaclass=RegistryMeta):
         for name, optimizer in loaded_optimizers.items():
             setattr(self, name, optimizer)
 
-        # Assign other attributes to the algorithm
-        for attribute in EvolvableAlgorithm.inspect_attributes(self):
-            if attribute == "grama_scores":
-                # get_checkpoint_dict() always pops this: it is per-cycle
-                # training state, not persisted checkpoint state, so it is
-                # never present regardless of checkpoint age. Its absence
-                # isn't a version-skew signal, so it doesn't earn the
-                # "not found in checkpoint" warning below.
-                continue
+        for attribute in EvolvableAlgorithm.inspect_attributes(
+            self, exclude=("grama_scores",)
+        ):
             if attribute not in checkpoint:
                 warnings.warn(
                     f"Attribute {attribute} not found in checkpoint. Skipping.",

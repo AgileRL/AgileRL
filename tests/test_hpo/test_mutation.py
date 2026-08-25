@@ -634,7 +634,8 @@ class TestMutationsParameterMutation:
             def eval_networks(self):
                 return []
 
-            def policy_eval_network_ids(self):
+            @property
+            def eval_policy_network_ids(self):
                 return set()
 
         muts = Mutations(0, 1, 0.5, 0, 0, 0, 0.1, device=device)

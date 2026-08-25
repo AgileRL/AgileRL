@@ -23,7 +23,6 @@ from agilerl.modules.configs import (
 )
 from agilerl.modules.custom_components import (
     GumbelSoftmax,
-    NewGELU,
     NoisyLinear,
     ResidualBlock,
     SimbaResidualBlock,
@@ -472,20 +471,16 @@ def get_normalization(
     return NORMALIZATION_FUNCTIONS[normalization_name](layer_size, device=device)
 
 
-def get_activation(activation_name: str | None, new_gelu: bool = False) -> nn.Module:
+def get_activation(activation_name: str | None) -> nn.Module:
     """Return activation function for corresponding activation name.
 
     :param activation_names: Activation function name
     :type activation_names: str
     """
-    activation_functions = ACTIVATION_FUNCTIONS.copy()
-    if new_gelu:
-        activation_functions["GELU"] = NewGELU
-
     activation_name = activation_name if activation_name is not None else "Identity"
     if activation_name == "Softmax":
         return nn.Softmax(dim=-1)
-    return activation_functions[activation_name]()
+    return ACTIVATION_FUNCTIONS[activation_name]()
 
 
 def get_pooling(
@@ -657,7 +652,6 @@ def create_mlp(
     activation: str = "ReLU",
     noise_std: float = 0.1,
     device: DeviceType = "cpu",
-    new_gelu: bool = False,
     name: str = "mlp",
 ) -> nn.Sequential:
     """Create and returns multi-layer perceptron.
@@ -719,10 +713,7 @@ def create_mlp(
             )
 
         # Add activation function
-        net_dict[f"{name}_activation_{l_no!s}"] = get_activation(
-            activation,
-            new_gelu,
-        )
+        net_dict[f"{name}_activation_{l_no!s}"] = get_activation(activation)
 
     # Output layer
     output_layer: NoisyLinear | nn.Linear
@@ -761,7 +752,6 @@ def create_mlp(
 
     net_dict[f"{name}_activation_output"] = get_activation(
         activation_name=output_activation,
-        new_gelu=new_gelu,
     )
     return nn.Sequential(net_dict)
 

@@ -190,13 +190,11 @@ def test_get_normalization():
 
 ######### Test get_activation #########
 class TestGetActivation:
-    def test_get_activation_softmax_and_new_gelu(self):
+    def test_get_activation_softmax_and_identity(self):
         softmax = get_activation("Softmax")
         assert isinstance(softmax, nn.Module)
         x = torch.randn(2, 4)
         _ = softmax(x)
-        new_gelu = get_activation("GELU", new_gelu=True)
-        assert isinstance(new_gelu, nn.Module)
         identity = get_activation(None)
         assert isinstance(identity, nn.Identity)
 
