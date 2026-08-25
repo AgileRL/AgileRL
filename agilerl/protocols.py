@@ -50,8 +50,6 @@ if TYPE_CHECKING:
     from agilerl.typing import (
         GraMaScores,
         MutationApplyDict,
-        ReasoningPrompts,
-        TokenObsStepReturn,
     )
 
 NumpyObsType = npt.NDArray | dict[str, npt.NDArray] | tuple[npt.NDArray, ...]
