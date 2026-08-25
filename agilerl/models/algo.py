@@ -9,12 +9,22 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, ClassVar, TypeVar
 
+import h5py
 from pydantic import BaseModel, ConfigDict, Field
 
-from agilerl import HAS_LLM_DEPENDENCIES, AgentType
+from agilerl import HAS_LLM_DEPENDENCIES, AgentType, algorithms
+from agilerl.algorithms.core import (
+    EvolvableAlgorithm,
+    LLMAlgorithm,
+    MultiAgentRLAlgorithm,
+    RLAlgorithm,
+)
+from agilerl.models.env import LLMEnvSpec, OfflineEnvSpec
 from agilerl.models.networks import NetworkSpec
+from agilerl.utils.algo_utils import VLLMConfig
 from agilerl.utils.llm_utils import (
     apply_pad_token_id,
+    build_bnb_quantization_config,
     load_pad_token_configs,
     resolve_pad_token_id,
 )
@@ -25,19 +35,12 @@ if TYPE_CHECKING:
     from gymnasium import spaces
     from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 
-    from agilerl.algorithms.core import (
-        LLMAlgorithm,
-        MultiAgentRLAlgorithm,
-        RLAlgorithm,
-    )
     from agilerl.algorithms.core.registry import HyperparameterConfig
     from agilerl.components.replay_buffer import BufferType
     from agilerl.models.env import (
         BanditEnvSpec,
         GymEnvSpec,
-        LLMEnvSpec,
         LLMEnvType,
-        OfflineEnvSpec,
         PzEnvSpec,
     )
     from agilerl.models.training import TrainingSpec
@@ -45,12 +48,14 @@ if TYPE_CHECKING:
     if HAS_LLM_DEPENDENCIES:
         from peft import LoraConfig
 
-    AlgoT = TypeVar("AlgoT", bound="RLAlgorithm | MultiAgentRLAlgorithm | LLMAlgorithm")
+    AnyAlgorithm = RLAlgorithm | MultiAgentRLAlgorithm | LLMAlgorithm[Any]
+    AlgoT = TypeVar("AlgoT", bound="AnyAlgorithm")
     EnvSpecType = GymEnvSpec | PzEnvSpec | OfflineEnvSpec | LLMEnvSpec | BanditEnvSpec
     PopulationType = list[RLAlgorithm | MultiAgentRLAlgorithm | LLMAlgorithm]
 else:
     HyperparameterConfig = Any
     LoraConfig = Any
+    AnyAlgorithm = Any
     AlgoT = TypeVar("AlgoT")
 
 
@@ -224,6 +229,89 @@ def _warn_ignored_llm_training_fields(training: TrainingSpec) -> None:
         )
 
 
+# Values whose type makes a meaningful ``!=`` comparison; anything else (an
+# Accelerator, a LoraConfig, a registry) is skipped when diffing hyperparameters.
+COMPARABLE_HP_TYPES = (bool, int, float, str, type(None))
+
+
+def _apply_checkpoint(
+    algo: AnyAlgorithm,
+    resume_from_checkpoint: str | None,
+    load_weights_from: str | None,
+    *,
+    index: int,
+) -> None:
+    """Seed a freshly-built agent from a checkpoint, if asked to.
+
+    The two options are mutually exclusive:
+
+    * ``resume_from_checkpoint`` continues a run from the checkpoint's optimizer
+      state and hyperparameters, warning when they drift from the spec.
+    * ``load_weights_from`` warm-starts a new run from prior weights only, keeping
+      the spec's hyperparameters.
+
+    :param algo: A freshly-built algorithm, configured from its spec.
+    :type algo: AnyAlgorithm
+    :param resume_from_checkpoint: Checkpoint to resume the run from.
+    :type resume_from_checkpoint: str | None
+    :param load_weights_from: Checkpoint to take weights from.
+    :type load_weights_from: str | None
+    :param index: Population slot the agent occupies; restored after a resume,
+        since the checkpoint's slot is not this agent's identity.
+    :type index: int
+    """
+    if resume_from_checkpoint is not None and load_weights_from is not None:
+        msg = (
+            "Provide exactly one of 'resume_from_checkpoint' (continue a run, "
+            "restoring optimizer state and its hyperparameters) or "
+            "'load_weights_from' (warm-start a new run from prior weights)."
+        )
+        raise ValueError(msg)
+
+    if load_weights_from is not None:
+        algo.load_weights(load_weights_from)
+    elif resume_from_checkpoint is not None:
+        _resume_and_warn_on_drift(algo, resume_from_checkpoint, index=index)
+
+
+def _resume_and_warn_on_drift(algo: AnyAlgorithm, path: str, *, index: int) -> None:
+    """Restore a checkpoint, warning about hyperparameters it overrode.
+
+    The checkpoint's hyperparameters win (the restored optimizer state belongs to
+    them), so any drift from the spec is warned about.
+
+    :param algo: A freshly-built algorithm, configured from its spec.
+    :type algo: AnyAlgorithm
+    :param path: Checkpoint to resume from.
+    :type path: str
+    """
+    configured = EvolvableAlgorithm.inspect_attributes(algo, input_args_only=True)
+
+    algo.load_checkpoint(path)
+    algo.index = index
+
+    drifted = {
+        name: (configured[name], getattr(algo, name))
+        for name in configured
+        if isinstance(configured[name], COMPARABLE_HP_TYPES)
+        and hasattr(algo, name)
+        and configured[name] != getattr(algo, name)
+    }
+    if drifted:
+        changes = ", ".join(
+            f"{name}: {new!r} (checkpoint) overrides {old!r} (spec)"
+            for name, (old, new) in sorted(drifted.items())
+        )
+        warnings.warn(
+            f"Resuming from {path} restored hyperparameters that differ from the "
+            f"spec, and the checkpoint's values win because the optimizer state "
+            f"belongs to them -- {changes}. Update the spec to match, or use "
+            f"'load_weights_from' to warm-start with the spec's values instead.",
+            UserWarning,
+            stacklevel=3,
+        )
+
+
 class AlgorithmSpec(BaseModel):
     """Base specification for all algorithms.
 
@@ -231,9 +319,9 @@ class AlgorithmSpec(BaseModel):
     batch size and hyperparameter configuration.  Concrete subclasses must set
     the ``agent_type`` class variable and override :meth:`get_training_fn`.
 
-    The algorithm class is resolved lazily from ``agilerl.algorithms`` using
+    The algorithm class is resolved from ``agilerl.algorithms`` using
     the naming convention ``<Name>Spec`` -> ``<Name>`` (e.g. ``PPOSpec`` ->
-    ``PPO``).  This avoids importing heavy dependencies at spec-import time.
+    ``PPO``).
     """
 
     batch_size: int = Field(default=128, ge=1)
@@ -253,10 +341,8 @@ class AlgorithmSpec(BaseModel):
 
     @classmethod
     def algo_class(cls) -> type[RLAlgorithm | MultiAgentRLAlgorithm | LLMAlgorithm]:
-        """Lazily resolve the algorithm class from ``agilerl.algorithms``."""
+        """Resolve the algorithm class from ``agilerl.algorithms``."""
         if cls._algo_class_cache is None:
-            from agilerl import algorithms
-
             cls._algo_class_cache = getattr(
                 algorithms, cls.__name__.removesuffix("Spec")
             )
@@ -309,8 +395,6 @@ class AlgorithmSpec(BaseModel):
         """
         kwargs = {}
         if isinstance(self, LLMAlgorithmSpec):
-            from agilerl.models.env import LLMEnvSpec
-
             if isinstance(env_spec, LLMEnvSpec) and env_spec.max_reward is not None:
                 kwargs["max_reward"] = env_spec.max_reward
 
@@ -322,7 +406,16 @@ class AlgorithmSpec(BaseModel):
 
             kwargs["evaluation_interval"] = training.evaluation_interval
             if training.num_epochs is not None:
-                kwargs["num_epochs"] = training.num_epochs
+                if self.env_type == "dataset":
+                    kwargs["num_epochs"] = training.num_epochs
+                else:
+                    warnings.warn(
+                        "TrainingSpec.num_epochs only applies to dataset "
+                        "fine-tuning (DPO/SFT) and is ignored for rollout "
+                        "algorithms.",
+                        UserWarning,
+                        stacklevel=2,
+                    )
 
             _warn_ignored_llm_training_fields(training)
             return kwargs
@@ -355,15 +448,11 @@ class AlgorithmSpec(BaseModel):
             if n_step_memory is not None:
                 kwargs["n_step_memory"] = n_step_memory
         elif self.offline:
-            from agilerl.models.env import OfflineEnvSpec
-
             if isinstance(env_spec, OfflineEnvSpec):
                 if env_spec.minari_dataset_id is not None:
                     kwargs["minari_dataset_id"] = env_spec.minari_dataset_id
                     kwargs["remote"] = env_spec.remote
                 elif env_spec.dataset_path is not None:
-                    import h5py
-
                     kwargs["dataset"] = h5py.File(env_spec.dataset_path, "r")
         if self.bandit:
             kwargs["episode_steps"] = training.episode_steps
@@ -389,8 +478,6 @@ class RLAlgorithmSpec(AlgorithmSpec):
     @classmethod
     def algo_class(cls) -> type[RLAlgorithm]:
         """Resolve the concrete single-agent algorithm class for this spec."""
-        from agilerl.algorithms.core import RLAlgorithm
-
         resolved = super().algo_class()
         assert issubclass(resolved, RLAlgorithm)
         return resolved
@@ -401,6 +488,7 @@ class RLAlgorithmSpec(AlgorithmSpec):
         action_space: spaces.Space | None = None,
         index: int | None = None,
         resume_from_checkpoint: str | None = None,
+        load_weights_from: str | None = None,
         device: str | torch.device = "cpu",
         accelerator: Accelerator | None = None,
     ) -> RLAlgorithm:
@@ -411,9 +499,14 @@ class RLAlgorithmSpec(AlgorithmSpec):
         :param action_space: Action space.
         :type action_space: SupportedActionSpace | None
         :param index: Index of the algorithm in the population.
-        :type index: int | None
-        :param resume_from_checkpoint: Path to resume from checkpoint.
+        :type index: int
+        :param resume_from_checkpoint: Checkpoint to continue an interrupted run
+            from, restoring optimizer state and the hyperparameters it belongs to.
+            Mutually exclusive with ``load_weights_from``.
         :type resume_from_checkpoint: str | None
+        :param load_weights_from: Checkpoint to warm-start a new run from, taking
+            only the weights. Mutually exclusive with ``resume_from_checkpoint``.
+        :type load_weights_from: str | None
         :param device: Torch device. Defaults to "cpu".
         :type device: str | torch.device
         :param accelerator: Accelerator object for distributed computing.
@@ -438,9 +531,7 @@ class RLAlgorithmSpec(AlgorithmSpec):
             **self.model_dump(mode="python", exclude_unset=True),
         )
 
-        if resume_from_checkpoint is not None:
-            algo.load_checkpoint(resume_from_checkpoint)
-            algo.index = index
+        _apply_checkpoint(algo, resume_from_checkpoint, load_weights_from, index=index)
 
         return algo
 
@@ -462,8 +553,6 @@ class MultiAgentRLAlgorithmSpec(AlgorithmSpec):
     @classmethod
     def algo_class(cls) -> type[MultiAgentRLAlgorithm]:
         """Resolve the concrete multi-agent algorithm class for this spec."""
-        from agilerl.algorithms.core import MultiAgentRLAlgorithm
-
         resolved = super().algo_class()
         assert issubclass(resolved, MultiAgentRLAlgorithm)
         return resolved
@@ -474,6 +563,7 @@ class MultiAgentRLAlgorithmSpec(AlgorithmSpec):
         action_spaces: dict[str, spaces.Space] | None = None,
         index: int | None = None,
         resume_from_checkpoint: str | None = None,
+        load_weights_from: str | None = None,
         device: str | torch.device = "cpu",
         accelerator: Accelerator | None = None,
     ) -> MultiAgentRLAlgorithm:
@@ -484,9 +574,14 @@ class MultiAgentRLAlgorithmSpec(AlgorithmSpec):
         :param action_spaces: Per-agent action spaces.
         :type action_spaces: dict[str, SupportedActionSpace] | None
         :param index: Index of the algorithm in the population.
-        :type index: int | None
-        :param resume_from_checkpoint: Path to resume from checkpoint.
+        :type index: int
+        :param resume_from_checkpoint: Checkpoint to continue an interrupted run
+            from, restoring optimizer state and the hyperparameters it belongs to.
+            Mutually exclusive with ``load_weights_from``.
         :type resume_from_checkpoint: str | None
+        :param load_weights_from: Checkpoint to warm-start a new run from, taking
+            only the weights. Mutually exclusive with ``resume_from_checkpoint``.
+        :type load_weights_from: str | None
         :param device: Torch device. Defaults to "cpu".
         :type device: str | torch.device
         :param accelerator: Accelerator object for distributed computing.
@@ -511,9 +606,7 @@ class MultiAgentRLAlgorithmSpec(AlgorithmSpec):
             **self.model_dump(mode="python", exclude_unset=True),
         )
 
-        if resume_from_checkpoint is not None:
-            algo.load_checkpoint(resume_from_checkpoint)
-            algo.index = index
+        _apply_checkpoint(algo, resume_from_checkpoint, load_weights_from, index=index)
 
         return algo
 
@@ -524,16 +617,14 @@ class LLMAlgorithmSpec(AlgorithmSpec):
     Extends :class:`AlgorithmSpec` with LLM-specific fields including LoRA
     configuration, model parameters, and training hyperparameters.
 
-    Subclasses must set the :attr:`env_type` class variable to indicate
-    which LLM gym type the algorithm requires (``"reasoning"`` for
-    :class:`~agilerl.utils.llm_utils.ReasoningGym` or ``"preference"``
-    for :class:`~agilerl.utils.llm_utils.PreferenceGym`).
+    Subclasses set :attr:`env_type` to ``"rollout"``
+    (:class:`~agilerl.llm_envs.RolloutHarness`) or ``"dataset"``
+    (:class:`~agilerl.llm_envs.DatasetEnv`, which also sets :attr:`objective`).
     """
 
     beta: float = Field(default=0.001, ge=0.0, le=1.0)
     max_grad_norm: float = Field(default=0.1, ge=0.0)
     update_epochs: int = Field(default=1, ge=1)
-    reduce_memory_peak: bool = Field(default=False)
     use_separate_reference_adapter: bool = Field(default=False)
     calc_position_embeddings: bool = Field(default=True)
     gradient_checkpointing: bool = Field(default=True)
@@ -558,12 +649,11 @@ class LLMAlgorithmSpec(AlgorithmSpec):
     agent_type: ClassVar[AgentType] = AgentType.LLMAgent
     default_evo_steps: ClassVar[int] = 5
     env_type: ClassVar[LLMEnvType]
+    objective: ClassVar[str | None] = None
 
     @classmethod
     def algo_class(cls) -> type[LLMAlgorithm]:
         """Resolve the concrete LLM algorithm class for this spec."""
-        from agilerl.algorithms.core import LLMAlgorithm
-
         resolved = super().algo_class()
         assert issubclass(resolved, LLMAlgorithm)
         return resolved
@@ -573,6 +663,7 @@ class LLMAlgorithmSpec(AlgorithmSpec):
         tokenizer: PreTrainedTokenizerBase | None = None,
         index: int = 0,
         resume_from_checkpoint: str | None = None,
+        load_weights_from: str | None = None,
         accelerator: Accelerator | None = None,
         device: str | torch.device = "cpu",
         actor_network: Any | None = None,  # noqa: ANN401 -- concrete HF/PEFT models (PreTrainedModelType) forwarded here do not structurally satisfy PreTrainedModelProtocol under ty (device attr variance)
@@ -583,8 +674,13 @@ class LLMAlgorithmSpec(AlgorithmSpec):
         :type tokenizer: PreTrainedTokenizerBase | None
         :param index: Index of the algorithm in the population.
         :type index: int
-        :param resume_from_checkpoint: Path to resume from checkpoint.
+        :param resume_from_checkpoint: Checkpoint to continue an interrupted run
+            from, restoring optimizer state and the hyperparameters it belongs to.
+            Mutually exclusive with ``load_weights_from``.
         :type resume_from_checkpoint: str | None
+        :param load_weights_from: Checkpoint to warm-start a new run from, taking
+            only the weights. Mutually exclusive with ``resume_from_checkpoint``.
+        :type load_weights_from: str | None
         :param accelerator: HuggingFace ``Accelerator`` instance.
         :type accelerator: Accelerator | None
         :param device: Torch device. Defaults to "cpu".
@@ -607,8 +703,6 @@ class LLMAlgorithmSpec(AlgorithmSpec):
 
         vllm_cfg = getattr(self, "vllm_config", None)
         if isinstance(vllm_cfg, dict):
-            from agilerl.utils.algo_utils import VLLMConfig
-
             self.vllm_config = VLLMConfig(**vllm_cfg)
 
         # Only forward explicitly-set fields so the algorithm's own defaults
@@ -622,8 +716,6 @@ class LLMAlgorithmSpec(AlgorithmSpec):
         # BitsAndBytesConfig kwargs dict) to the quantization_config the
         # algorithm constructor expects.
         if "quantization" in kwargs:
-            from agilerl.utils.llm_utils import build_bnb_quantization_config
-
             kwargs["quantization_config"] = build_bnb_quantization_config(
                 kwargs.pop("quantization")
             )
@@ -671,28 +763,20 @@ class LLMAlgorithmSpec(AlgorithmSpec):
             **kwargs,
         )
 
-        if resume_from_checkpoint is not None:
-            algo.load_checkpoint(resume_from_checkpoint)
-            algo.index = index
+        _apply_checkpoint(algo, resume_from_checkpoint, load_weights_from, index=index)
 
         return algo
 
     @staticmethod
-    def get_training_fn(
-        *, multiturn: bool = False
-    ) -> Callable[..., tuple[PopulationType, list[float]]]:
+    def get_training_fn() -> Callable[..., Any]:
         """Return the training function for this LLM algorithm.
 
-        :param multiturn: When ``True``, return the multi-turn training loop.
-            Subclasses that do not support multi-turn training must raise
-            :class:`ValueError`.
+        The env type the spec declares selects the loop: ``train_llm_rollout``
+        for generative rollouts, ``train_llm_dataset`` for teacher-forced ones.
+
         :return: Training function
         :raises NotImplementedError: If the training function is not implemented.
-        :raises ValueError: If *multiturn* is requested but unsupported.
         """
-        if multiturn:
-            msg = "This LLM algorithm does not support multi-turn training."
-            raise ValueError(msg)
         msg = "Algorithm specs must implement get_training_fn."
         raise NotImplementedError(msg) from None
 

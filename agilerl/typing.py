@@ -41,7 +41,7 @@ from tensordict import TensorClass, TensorDict
 from torch._dynamo import OptimizedModule
 from torch.nn import Module
 from torch.optim import Optimizer
-from typing_extensions import Never, NotRequired, Self
+from typing_extensions import NotRequired, Self
 
 from agilerl.net_configs import NetConfigType as NetConfigType
 from agilerl.protocols import (
@@ -60,29 +60,23 @@ class IsDataclass(Protocol):
 
 
 # ── TypedDicts: LLM prompts, checkpoint & mutation payloads ──────────────────
-class ReasoningPrompts(TypedDict):
-    """Tokenized reasoning / multi-turn observation prompts."""
+class RolloutPrompt(TypedDict):
+    """What the policy is shown for one generation turn: the transcript so far, tokenized.
+
+    The input side of the rollout loop — what ``get_action`` is handed.
+    :class:`~agilerl.components.llm_rollout_data.Trajectory` and
+    :class:`~agilerl.components.llm_rollout_data.LLMExperienceBatch` are the
+    output side, carrying a finished episode back to ``learn``.
+
+    :param input_ids: ``(1, T)`` initial prompt plus every generation and env
+        observation since — so it grows turn by turn. The only key a
+        ``RolloutHarness`` sets.
+    :param attention_mask: Set only by a caller passing an already-padded batch;
+        a single unpadded row implies an all-ones mask.
+    """
 
     input_ids: torch.Tensor
-    attention_mask: torch.Tensor
-    question: NotRequired[str | list[str] | None]
-    answer: NotRequired[str | list[str] | None]
-    trajectory_input_ids: NotRequired[torch.Tensor | None]
-    trajectory_attention_mask: NotRequired[torch.Tensor | None]
-    initial_prompt_len: NotRequired[int | list[int] | torch.Tensor | None]
-    stitch_prefix_ids: NotRequired[torch.Tensor | None]
-    text: NotRequired[str | None]
-    trajectory_text: NotRequired[str | None]
-
-
-class ModelPromptFields(TypedDict, total=False):
-    """Windowed trajectory / stitch fields merged into a policy observation."""
-
-    trajectory_input_ids: torch.Tensor
-    trajectory_attention_mask: torch.Tensor
-    trajectory_text: str
-    stitch_prefix_ids: torch.Tensor
-    initial_prompt_len: int
+    attention_mask: NotRequired[torch.Tensor]
 
 
 class PreferencePrompts(TypedDict):
@@ -176,7 +170,7 @@ ArrayDict = dict[str, npt.NDArray]
 ArrayTuple = tuple[npt.NDArray, ...]
 KernelSizeType = int | tuple[int, ...]
 GymSpaceType = SupportedObservationSpace | list[SupportedObservationSpace]
-LLMObsType = list[ReasoningPrompts] | ReasoningPrompts
+LLMObsType = list[RolloutPrompt] | RolloutPrompt
 
 # ── Observation & action aliases ─────────────────────────────────────────────
 NumpyObsType = npt.NDArray | ArrayDict | ArrayTuple
@@ -386,7 +380,7 @@ class MultiAgentReplayBatch(TensorClass):
 
 
 # One LLM RL rollout consumed by GRPO/LLMPPO/LLMREINFORCE's ``learn``:
-# ``(completion_ids, action_masks, rewards)``. ``completion_ids`` and
+# ``(token_ids, action_masks, rewards)``. ``token_ids`` and
 # ``action_masks`` are per-trajectory tensor lists, or already-stacked tensors
 # after cross-rank sequence-padding alignment; ``rewards`` is a ``(batch,)`` (or
 # ``(batch, max_turns)`` for per-turn) tensor.
@@ -419,10 +413,6 @@ PzStepReturn = tuple[
     ArrayDict,
     InfosDict,
 ]
-# TokenObservationWrapper obs: ReasoningPrompts mid-episode, empty mapping at done.
-TokenObsType = ReasoningPrompts | dict[str, Never]
-TokenObsStepReturn = tuple[TokenObsType, float, bool, bool, dict[str, Any]]
-
 # ── Network / module / optimizer aliases ─────────────────────────────────────
 SingleAgentModule = (
     T | EvolvableModuleProtocol | OptimizedModule | EvolvableNetworkProtocol
@@ -492,12 +482,14 @@ class ActionResult(NamedTuple):
     """Structured return of an LLM algorithm's :meth:`get_action`.
 
     A tuple subclass, so callers may unpack positionally *or* (preferred, and
-    forward-compatible if fields are added) read by attribute. ``sampling_logps``
-    holds the per-completion vLLM sampling logprobs captured for the
-    sampling-mismatch correction, or ``None`` when not captured (HF generation,
-    evaluation, or correction disabled).
+    forward-compatible if fields are added) read by attribute. ``token_ids``
+    holds ``prompt + generation`` per row, not the generation alone;
+    ``action_masks`` is what marks the generated span within it.
+    ``sampling_logps`` holds the per-completion vLLM sampling logprobs captured
+    for the sampling-mismatch correction, or ``None`` when not captured (HF
+    generation, evaluation, or correction disabled).
     """
 
-    completion_ids: list[torch.Tensor]
+    token_ids: list[torch.Tensor]
     action_masks: list[torch.Tensor]
     sampling_logps: list[torch.Tensor | None] | None = None

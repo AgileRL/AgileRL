@@ -224,7 +224,7 @@ def _copy_trace_value(value: object) -> object:
 
     :param value: Trace attribute value.
     :type value: object
-    :return: Value that no longer aliases live coordinator state.
+    :return: Copy that does not alias live coordinator state.
     :rtype: object
     """
     if isinstance(value, list):

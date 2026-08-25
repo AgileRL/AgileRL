@@ -981,7 +981,7 @@ class TestLigerFusedLinearPolicyLossFunction:
     def test_backward_with_mismatched_hidden_and_weight_dtypes(self) -> None:
         """An fp16 checkpoint under the bf16 autocast reaches the chunked
         matmul with fp32 hidden states and an fp16 lm_head weight; the chunk
-        promotes to a common dtype and gradients land on the leaves in their
+        promotes to a common dtype and gradients go to the leaves in their
         own dtypes.
         """
         B, T, V, H = 2, 4, 16, 8
@@ -1159,7 +1159,7 @@ class TestFusedLossHelpers:
         assert mask_flat.shape == (B * T, 1)
         assert old_flat.shape == (B * T, 1)
         assert ref_flat.shape == (B * T, 1)
-        # Row-major flattening: token (b, t) lands at flat row b * T + t.
+        # Row-major flattening: token (b, t) is written to flat row b * T + t.
         assert torch.equal(h_flat[1 * T + 2, 0], hidden[1, 2])
         assert torch.equal(ids_flat.reshape(B, T), ids)
         assert torch.equal(old_flat.reshape(B, T), old_lp)

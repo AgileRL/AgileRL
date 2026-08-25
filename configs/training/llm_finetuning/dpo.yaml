@@ -6,7 +6,6 @@ algorithm:
     lr: 0.000005
     update_epochs: 1
     max_grad_norm: 0.1
-    reduce_memory_peak: false
     calc_position_embeddings: true
     use_separate_reference_adapter: true
 

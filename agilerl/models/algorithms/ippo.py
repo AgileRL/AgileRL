@@ -48,7 +48,7 @@ class IPPOSpec(MultiAgentRLAlgorithmSpec):
         :return: Training function
         :rtype: Callable[..., Any]
         """
-        from agilerl.training.train_multi_agent_on_policy import (
+        from agilerl.training.train_multi_agent_on_policy import (  # circular import with agilerl.training
             train_multi_agent_on_policy,
         )
 

@@ -46,6 +46,8 @@ class DDPGSpec(RLAlgorithmSpec):
         :return: Training function
         :rtype: Callable[..., Any]
         """
-        from agilerl.training.train_off_policy import train_off_policy
+        from agilerl.training.train_off_policy import (  # circular import with agilerl.training
+            train_off_policy,
+        )
 
         return train_off_policy

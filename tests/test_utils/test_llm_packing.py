@@ -206,7 +206,7 @@ class TestUnpackValues:
 
     def test_single_token_sequence_kept(self):
         # A length-1 sequence has one value and (unlike logprobs) no boundary to
-        # drop, so its single value lands at column 0.
+        # drop, so its single value is written to column 0.
         lengths = [1, 3]
         ids, mask = _make_batch(lengths)
         packed = pack_padded_batch(ids, mask)
@@ -271,7 +271,7 @@ class TestUnpackHiddenStates:
         hidden_dim = 3
         packed_hidden = torch.randn(1, n, hidden_dim, requires_grad=True)
         unpack_hidden_states(packed_hidden, packed).sum().backward()
-        # Every real token's hidden state lands in the frame exactly once
+        # Every real token's hidden state is written to the frame exactly once
         # (no boundary drop), so each receives unit gradient.
         assert packed_hidden.grad is not None
         assert torch.equal(packed_hidden.grad, torch.ones_like(packed_hidden))
