@@ -80,7 +80,7 @@ from gymnasium import spaces
 from torch import nn, optim
 
 from agilerl import HAS_DEEPSPEED, HAS_LLM_DEPENDENCIES, HAS_VLLM
-from agilerl.algorithms import DQN, PPO
+from agilerl.algorithms import DQN, IPPO, PPO
 from agilerl.algorithms.core import base as core_base
 from agilerl.algorithms.core.base import (
     EvolvableAlgorithm,
@@ -8507,8 +8507,6 @@ class TestEvalNetworks:
         ma_vector_space,
         ma_discrete_space,
     ):
-        from agilerl.algorithms import IPPO
-
         agent = IPPO(
             ma_vector_space,
             ma_discrete_space,
@@ -8532,7 +8530,7 @@ class TestPolicyEvalNetworkIds:
     """Identify the policy networks whose latent other networks may borrow."""
 
     def test_the_policy_evaluation_network_is_reported(self, dqn_agent):
-        assert dqn_agent.eval_policy_network_ids == {id(dqn_agent.actor)}
+        assert dqn_agent.eval_policy_network_ids() == {id(dqn_agent.actor)}
 
     def test_multi_agent_policies_report_every_sub_policy(
         self,
@@ -8541,8 +8539,6 @@ class TestPolicyEvalNetworkIds:
     ):
         # Each sub-policy owns an encoder its own critic may borrow, so all of
         # them count as policy networks.
-        from agilerl.algorithms import IPPO
-
         agent = IPPO(
             ma_vector_space,
             ma_discrete_space,
@@ -8551,19 +8547,19 @@ class TestPolicyEvalNetworkIds:
         )
         policy = getattr(agent, agent.registry.policy())
 
-        result = agent.eval_policy_network_ids
+        result = agent.eval_policy_network_ids()
 
         assert result == {id(sub_network) for _key, sub_network in policy.items()}
 
     def test_an_agent_without_a_policy_group_reports_no_policy(self, dqn_agent):
         dqn_agent.registry.groups = []
 
-        assert dqn_agent.eval_policy_network_ids == set()
+        assert dqn_agent.eval_policy_network_ids() == set()
 
     def test_a_policy_the_agent_does_not_carry_reports_no_policy(self, dqn_agent):
         dqn_agent.actor = None
 
-        assert dqn_agent.eval_policy_network_ids == set()
+        assert dqn_agent.eval_policy_network_ids() == set()
 
 
 class TestGraMaCaptureUnderAccelerator:
@@ -8575,8 +8571,6 @@ class TestGraMaCaptureUnderAccelerator:
         discrete_space,
         encoder_mlp_config,
     ):
-        from accelerate import Accelerator
-
         agent = DQN(
             vector_space,
             discrete_space,
@@ -8600,8 +8594,6 @@ class TestGraMaCaptureUnderAccelerator:
         discrete_space,
         encoder_mlp_config,
     ):
-        from accelerate import Accelerator
-
         agent = DQN(
             vector_space,
             discrete_space,
@@ -8628,10 +8620,6 @@ class TestGraMaCaptureUnderAccelerator:
         ma_vector_space,
         ma_discrete_space,
     ):
-        from accelerate import Accelerator
-
-        from agilerl.algorithms import IPPO
-
         agent = IPPO(
             ma_vector_space,
             ma_discrete_space,

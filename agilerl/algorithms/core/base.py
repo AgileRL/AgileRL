@@ -584,8 +584,7 @@ class EvolvableAlgorithm(ABC, Generic[ExperiencesT], metaclass=RegistryMeta):
         :rtype: None
         """
         self.metrics.finalize_training_step(num_steps)
-        if self._grama_latest is not None:
-            self._release_grama_capture()
+        self._release_grama_capture()
 
     def _set_grama_capture(self, capture_grama: bool) -> None:
         """Close any open GraMa capture, then open a new one if requested.
@@ -596,8 +595,7 @@ class EvolvableAlgorithm(ABC, Generic[ExperiencesT], metaclass=RegistryMeta):
         :return: None.
         :rtype: None
         """
-        if self._grama_latest is not None:
-            self._release_grama_capture()
+        self._release_grama_capture()
         if capture_grama:
             self._register_grama_capture()
 
@@ -653,13 +651,14 @@ class EvolvableAlgorithm(ABC, Generic[ExperiencesT], metaclass=RegistryMeta):
         return hook
 
     def _release_grama_capture(self) -> None:
-        """Close the open GraMa capture, storing its snapshot and removing its hooks.
+        """Close any open GraMa capture, storing its snapshot and removing its hooks.
 
         :return: None.
         :rtype: None
         """
         latest = self._grama_latest
-        assert latest is not None
+        if latest is None:
+            return
         self.grama_scores = [list(net_latest) for net_latest in latest]
         self._remove_grama_handles()
         self._grama_latest = None
@@ -680,8 +679,6 @@ class EvolvableAlgorithm(ABC, Generic[ExperiencesT], metaclass=RegistryMeta):
         :return: One (network_id, network) pair per measured network.
         :rtype: list[tuple[str | None, torch.nn.Module]]
         """
-        from agilerl.modules import ModuleDict
-
         accelerator = self.accelerator
         pairs: list[tuple[str | None, torch.nn.Module]] = []
         for group in self.registry.groups:
@@ -695,15 +692,12 @@ class EvolvableAlgorithm(ABC, Generic[ExperiencesT], metaclass=RegistryMeta):
                 pairs.append((None, eval_net))
         return pairs
 
-    @property
     def eval_policy_network_ids(self) -> set[int]:
         """Return the id of every evaluation network in the agent's policy group.
 
         :return: Identities of the policy's evaluation networks.
         :rtype: set[int]
         """
-        from agilerl.modules import ModuleDict
-
         policy_name = self.registry.policy()
         if not isinstance(policy_name, str):
             return set()

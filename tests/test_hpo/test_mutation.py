@@ -634,7 +634,6 @@ class TestMutationsParameterMutation:
             def eval_networks(self):
                 return []
 
-            @property
             def eval_policy_network_ids(self):
                 return set()
 

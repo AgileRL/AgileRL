@@ -579,12 +579,9 @@ def get_free_port():
 
 @pytest.fixture
 def gloo_process_group():
-    """Initialise a single-rank gloo process group so DDP can be constructed.
+    """Fixture that allows a real DistributedDataParallel wrapper to be built.
 
-    DistributedDataParallel is what accelerator.prepare actually returns
-    on a multi-process launch, and it is the only faithful way to exercise the
-    attribute hiding it does. One rank over loopback keeps that hermetic and
-    CPU-only.
+    Tests DDP's attribute-hiding behaviour on a CPU, without a multi-process run.
     """
     if torch.distributed.is_initialized():
         yield
