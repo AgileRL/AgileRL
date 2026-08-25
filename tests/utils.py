@@ -171,7 +171,7 @@ def get_physical_device_indices(devices: list[int]) -> list[int]:
 
 
 def assert_vllm_get_action_contract(
-    completion_ids: list[torch.Tensor],
+    token_ids: list[torch.Tensor],
     action_masks: list[torch.Tensor],
     batch_size: int,
     prompt_len: int,
@@ -179,8 +179,8 @@ def assert_vllm_get_action_contract(
 ) -> None:
     """Assert stable shape/mask invariants for vLLM get_action outputs.
 
-    :param completion_ids: Generated completion tensors, one per prompt.
-    :type completion_ids: list[torch.Tensor]
+    :param token_ids: Generated completion tensors, one per prompt.
+    :type token_ids: list[torch.Tensor]
     :param action_masks: Action masks aligned to completion tensors.
     :type action_masks: list[torch.Tensor]
     :param batch_size: Expected number of prompt entries.
@@ -192,16 +192,18 @@ def assert_vllm_get_action_contract(
     :return: None
     :rtype: None
     """
-    assert len(completion_ids) == batch_size
+    assert len(token_ids) == batch_size
     assert len(action_masks) == batch_size
-    for completion_id, action_mask in zip(completion_ids, action_masks, strict=True):
-        assert completion_id.dim() == 2
+    for row_ids, action_mask in zip(token_ids, action_masks, strict=True):
+        assert row_ids.dim() == 2
         assert action_mask.dim() == 2
-        assert completion_id.shape[1] > prompt_len
-        assert action_mask.shape[1] == completion_id.shape[1] - 1
+        assert row_ids.shape[1] > prompt_len
+        assert action_mask.shape[1] == row_ids.shape[1] - 1
         assert action_mask.dtype == torch.bool
-        pad_positions = completion_id[:, 1:] == pad_token_id
+        pad_positions = row_ids[:, 1:] == pad_token_id
         assert not action_mask[pad_positions].any()
+        if prompt_len > 0:
+            assert not action_mask[:, : prompt_len - 1].any()
 
 
 def make_mock_vllm_instance(llm_spec: type[Any] | None = None) -> Any:

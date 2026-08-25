@@ -12,7 +12,7 @@ weights.
 Computing log-probabilities the obvious way is surprisingly memory-hungry.
 AgileRL does it in a way that keeps the GPU memory cost low, automatically, with
 nothing to switch on. This page explains why the naive way is expensive, what
-AgileRL does instead, and the few knobs you can turn.
+AgileRL does instead, and the few settings you can change.
 
 A few terms
 -----------

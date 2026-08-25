@@ -399,7 +399,7 @@ class EvolvableGPT(EvolvableModule):
         """
         assert model_type in {"gpt2", "gpt2-medium", "gpt2-large", "gpt2-xl"}
         override_args = override_args or {}  # default to empty dict
-        from transformers import GPT2Config, GPT2LMHeadModel
+        from transformers import GPT2Config, GPT2LMHeadModel  # optional extra: llm
 
         config_args: dict[str, Any] = {
             "gpt2": {"n_layer": 12, "n_head": 12, "n_embd": 768},  # 124M params

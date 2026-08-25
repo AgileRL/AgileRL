@@ -28,6 +28,7 @@ from agilerl.typing import (
     NetConfigType,
     TorchObsType,
 )
+from agilerl.utils.algo_utils import get_hidden_states_shape_from_model
 from agilerl.utils.evolvable_networks import get_default_encoder_config, is_image_space
 
 SelfEvolvableNetwork = TypeVar("SelfEvolvableNetwork", bound="EvolvableNetwork")
@@ -523,8 +524,6 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
             ):
                 self.cached_hidden_state = {}
                 self.cached_hidden_state_batch_size = batch_size
-                from agilerl.utils.algo_utils import get_hidden_states_shape_from_model
-
                 for name, shape in get_hidden_states_shape_from_model(
                     self.encoder,
                 ).items():

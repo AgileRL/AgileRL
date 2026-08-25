@@ -3,10 +3,9 @@
 
 import re
 
+from openenv.core.rubrics.base import Rubric
 
-def reward(question: str, answer: str, completion: str) -> float:
-    """Combined GSM8K reward: answer correctness plus output format."""
-    return correctness_reward(answer, completion) + format_reward(completion)
+from agilerl.llm_envs.rubrics import reward_fn_to_rubric
 
 
 def extract_gold_answer(answer: str) -> str | None:
@@ -25,7 +24,6 @@ def extract_model_answer(completion: str) -> str | None:
 
 
 def correctness_reward(answer: str, completion: str) -> float:
-    """Reward 1.0 when the model's final answer matches the gold answer, else 0.0."""
     gold = extract_gold_answer(answer)
     predicted = extract_model_answer(completion)
     if gold is None or predicted is None:
@@ -34,7 +32,47 @@ def correctness_reward(answer: str, completion: str) -> float:
 
 
 def format_reward(completion: str) -> float:
-    """Reward 1.0 when the completion follows ``<think>...</think>\\n<answer>...</answer>``."""
     text = "<think>" + completion
     regex = r"^<think>[\s\S]*?</think>\n<answer>[\s\S]*?</answer>$"
     return 1.0 if re.match(regex, text.strip()) else 0.0
+
+
+def reward(question: str, answer: str, completion: str) -> float:
+    """Combined GSM8K reward: answer correctness plus output format."""
+    del question
+    return correctness_reward(answer, completion) + format_reward(completion)
+
+
+def _combined(completion: str, answer, question) -> float:
+    del question
+    return correctness_reward(answer, completion) + format_reward(completion)
+
+
+RUBRIC = reward_fn_to_rubric(_combined, name="gsm8k")
+
+
+class Correctness(Rubric):
+    """Example leaf rubric for component-level reporting."""
+
+    def forward(self, action, observation) -> float:
+        return correctness_reward(str(observation.answer), action.message)
+
+
+class Format(Rubric):
+    """Example leaf rubric for component-level reporting."""
+
+    def forward(self, action, observation) -> float:
+        del observation
+        return format_reward(action.message)
+
+
+class Combined(Rubric):
+    """Example composition: OpenEnv auto-registers ``correct`` / ``fmt`` children."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.correct = Correctness()
+        self.fmt = Format()
+
+    def forward(self, action, observation) -> float:
+        return self.correct(action, observation) + self.fmt(action, observation)

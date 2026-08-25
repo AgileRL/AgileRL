@@ -105,8 +105,11 @@ for fine-tuning LLMs.
       <a href="../llm_finetuning/sft_dpo_finetuning.html" class="tile">
          <h2>SFT &amp; DPO - Fine-Tuning</h2>
       </a>
-      <a href="../llm_finetuning/multiturn_grpo_ppo.html" class="tile online">
-         <h2>Multiturn - LLMPPO, LLMREINFORCE, GRPO</h2>
+      <a href="../llm_finetuning/env_grpo_ppo.html" class="tile online">
+         <h2>Multi-turn - LLMPPO, LLMREINFORCE, GRPO</h2>
+      </a>
+      <a href="../llm_finetuning/remote_env_server.html" class="tile online">
+         <h2>Remote Environment Server - Coding Env</h2>
       </a>
    </div>
 
@@ -117,5 +120,6 @@ for fine-tuning LLMs.
 
    grpo_finetuning
    grpo_hpo
-   multiturn_grpo_ppo
+   env_grpo_ppo
+   remote_env_server
    sft_dpo_finetuning

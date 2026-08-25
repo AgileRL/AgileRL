@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any, TypeVar
 import gymnasium as gym
 import numpy as np
 import numpy.typing as npt
+import torch
 import tqdm
 import wandb
 from accelerate import Accelerator
@@ -41,6 +42,7 @@ from agilerl.logger import CSVLogger, StdOutLogger, TensorboardLogger, WandbLogg
 from agilerl.protocols import EvolvableAlgorithmProtocol, SelectionStrategyProtocol
 from agilerl.typing import BPTTSequenceType, InfosDict, PopulationType
 from agilerl.utils.algo_utils import CosineLRScheduleConfig, DummyOptimizer, clone_llm
+from agilerl.utils.llm_utils import build_bnb_quantization_config
 from agilerl.vector.pz_async_vec_env import AsyncPettingZooVecEnv
 
 if HAS_LLM_DEPENDENCIES or TYPE_CHECKING:
@@ -95,14 +97,14 @@ def _lora_config_from_init_hp(INIT_HP: dict[str, Any]) -> "LoraConfig | None":
         return None
     if not HAS_LLM_DEPENDENCIES:
         return None
-    from peft import LoraConfig
+    from peft import LoraConfig  # optional extra: llm
 
     if isinstance(modules, str):
         modules = [modules]
-    bias = str(INIT_HP.get("LORA_BIAS", "none"))
-    assert bias in ("none", "all", "lora_only"), (
-        f"LORA_BIAS must be one of 'none', 'all', 'lora_only'; got {bias!r}."
-    )
+    bias = INIT_HP.get("LORA_BIAS", "none")
+    if bias not in ("none", "all", "lora_only"):
+        msg = f"LORA_BIAS must be one of 'none', 'all', 'lora_only'; got {bias!r}."
+        raise ValueError(msg)
     return LoraConfig(
         r=int(INIT_HP.get("LORA_R", 16)),
         lora_alpha=int(INIT_HP.get("LORA_ALPHA", 64)),
@@ -165,10 +167,9 @@ def _prepare_llm_algo_kwargs(
             batch_size,
         )  # NOTE we should take a look into deepspeed auto batch-sizing
     # Plain passthroughs: (merged_key, init_hp_key, caster, present_when_truthy).
-    # reduce_memory_peak/activation_offload fire on key membership (so an explicit
-    # False is honoured); lora_target_scope/chunk_rows fire only on a truthy value.
+    # activation_offload fires on key membership (so an explicit False is honoured);
+    # lora_target_scope/chunk_rows fire only on a truthy value.
     _passthroughs = (
-        ("reduce_memory_peak", "REDUCE_MEMORY_PEAK", bool, False),
         ("activation_offload", "ACTIVATION_OFFLOAD", bool, False),
         ("lora_target_scope", "LORA_TARGET_SCOPE", lambda v: v, True),
         ("chunk_rows", "CHUNK_ROWS", int, True),
@@ -185,8 +186,6 @@ def _prepare_llm_algo_kwargs(
     # An explicit quantization_config in algo_kwargs always wins; otherwise a
     # QUANTIZATION preset name or BitsAndBytesConfig kwargs dict is resolved.
     if "quantization_config" not in merged and INIT_HP.get("QUANTIZATION") is not None:
-        from agilerl.utils.llm_utils import build_bnb_quantization_config
-
         quant_config = build_bnb_quantization_config(INIT_HP["QUANTIZATION"])
         if quant_config is not None:
             merged["quantization_config"] = quant_config
@@ -1778,4 +1777,51 @@ def _distributed_world_size(accelerator: Accelerator | None) -> int:
     """World size for batch accounting: prefer Accelerate, else torch.distributed."""
     if accelerator is not None:
         return accelerator.num_processes
+    if torch.distributed.is_available() and torch.distributed.is_initialized():
+        return torch.distributed.get_world_size()
     return 1
+
+
+def _distributed_rank(accelerator: Accelerator | None) -> int:
+    """Process rank (e.g. for seed decorrelation): prefer Accelerate, else torch.distributed."""
+    if accelerator is not None:
+        return accelerator.process_index
+    if torch.distributed.is_available() and torch.distributed.is_initialized():
+        return torch.distributed.get_rank()
+    return 0
+
+
+def data_parallel_topology(
+    accelerator: Accelerator | None,
+    processes_per_replica: int = 1,
+) -> tuple[int, int]:
+    """Return this process's ``(rank, world_size)`` among data-parallel replicas.
+
+    Training here is data-parallel only; a replica spans more than one process
+    solely because the *generation* engine shards a model across contiguous ranks
+    (vLLM's ``tensor_parallel_size``). Those ranks must be handed the same data,
+    so anything that splits work across replicas — dataset shards, reset seeds,
+    effective batch size — counts replicas rather than processes, and only agrees
+    with the process rank when a replica is one process.
+
+    :param accelerator: Accelerator whose process group defines the topology.
+    :type accelerator: Accelerator | None
+    :param processes_per_replica: Contiguous processes making up one model
+        replica (the generation engine's shard count; ``1`` when unsharded).
+    :type processes_per_replica: int
+    :returns: This replica's index, and the number of replicas.
+    :rtype: tuple[int, int]
+    """
+    world_size = _distributed_world_size(accelerator)
+    rank = _distributed_rank(accelerator)
+    shards = max(1, int(processes_per_replica))
+    if shards == 1:
+        return rank, world_size
+    if world_size % shards:
+        msg = (
+            f"processes_per_replica={shards} does not divide the {world_size}-process "
+            "group, so replicas would straddle it; every replica must be a whole "
+            "number of processes."
+        )
+        raise ValueError(msg)
+    return rank // shards, world_size // shards

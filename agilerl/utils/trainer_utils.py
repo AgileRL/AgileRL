@@ -22,7 +22,7 @@ from agilerl.components.replay_buffer import BufferType
 from agilerl.hpo.multi_frequency import MultiFrequencySelection
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
-from agilerl.llm_envs import PreferenceGym, ReasoningGym, SFTGym
+from agilerl.llm_envs import DatasetEnv, RolloutHarness
 from agilerl.models.algo import (
     AlgoSpec,
     MultiAgentRLAlgorithmSpec,
@@ -36,16 +36,18 @@ from agilerl.models.hpo import (
 )
 from agilerl.models.training import ReplayBufferSpec, TrainingSpec
 from agilerl.protocols import BanditEnvProtocol, SelectionStrategyProtocol
+from agilerl.utils.algo_utils import clone_llm, get_num_envs
 from agilerl.utils.env_utils import GymEnvType, PzEnvType
+from agilerl.utils.llm_utils import get_state_dict
 
 if TYPE_CHECKING:
     import torch
     from transformers import PreTrainedTokenizerBase
 
 
-LLMEnvType = ReasoningGym | PreferenceGym | SFTGym
+LLMEnvType = RolloutHarness | DatasetEnv
 # Union of every env type an ``EnvSpec.make_env`` builds: vectorized gym/pettingzoo
-# envs, a bandit env satisfying ``BanditEnvProtocol``, or an LLM gym.
+# envs, a bandit env satisfying ``BanditEnvProtocol``, or an LLM env.
 EnvironmentType = GymEnvType | PzEnvType | BanditEnvProtocol | LLMEnvType
 PopulationType = list[RLAlgorithm | MultiAgentRLAlgorithm | LLMAlgorithm]
 
@@ -150,6 +152,7 @@ def create_population_from_spec(
     replay_buffer_spec: ReplayBufferSpec | None,
     device: str | torch.device = "cpu",
     resume_from_checkpoint: str | None = None,
+    load_weights_from: str | None = None,
     accelerator: Accelerator | None = None,
     tokenizer: PreTrainedTokenizerBase | None = None,
     selection_strategy_spec: SelectionStrategySpec | None = None,
@@ -170,8 +173,13 @@ def create_population_from_spec(
     :type replay_buffer_spec: ReplayBufferSpec | None
     :param device: Torch device string.
     :type device: str | torch.device
-    :param resume_from_checkpoint: Path to resume from checkpoint.
+    :param resume_from_checkpoint: Checkpoint to continue an interrupted run from,
+        restoring optimizer state and the hyperparameters it belongs to. Mutually
+        exclusive with ``load_weights_from``.
     :type resume_from_checkpoint: str | None
+    :param load_weights_from: Checkpoint to warm-start a new run from, taking only
+        the weights. Mutually exclusive with ``resume_from_checkpoint``.
+    :type load_weights_from: str | None
     :param accelerator: Accelerator instance.
     :type accelerator: Accelerator | None
     :param tokenizer: Pre-loaded HuggingFace tokenizer for LLM algorithms.
@@ -182,8 +190,19 @@ def create_population_from_spec(
     :returns: A list of algorithm instances.
     :rtype: PopulationType
     """
+    # circular import with agilerl.models
     from agilerl.models.algorithms import RainbowDQNSpec
-    from agilerl.utils.algo_utils import get_num_envs
+
+    # Enforced here as well as on the Trainer: this is a public entrypoint, and
+    # every branch below forwards both flags to ``build_algorithm``.
+    if resume_from_checkpoint is not None and load_weights_from is not None:
+        msg = (
+            "resume_from_checkpoint and load_weights_from are mutually "
+            "exclusive: the first continues a run (weights, optimizer state and "
+            "the hyperparameters they belong to), the second warm-starts a new "
+            "one from weights alone. Set one."
+        )
+        raise ValueError(msg)
 
     # Override the hp_config with the one defined in MutationSpec if not already set
     hp_config = algo_spec.hp_config
@@ -241,6 +260,7 @@ def create_population_from_spec(
                     action_by_agent,
                     index=i,
                     resume_from_checkpoint=resume_from_checkpoint,
+                    load_weights_from=load_weights_from,
                     device=device,
                     accelerator=accelerator,
                 )
@@ -258,6 +278,7 @@ def create_population_from_spec(
                 action_space,
                 index=i,
                 resume_from_checkpoint=resume_from_checkpoint,
+                load_weights_from=load_weights_from,
                 device=device,
                 accelerator=accelerator,
             )
@@ -269,13 +290,11 @@ def create_population_from_spec(
     # LLM algorithms — build agent 0 fully, then clone the actor for agents 1..N.
     # Each agent beyond the first gets a fresh Accelerator to avoid sharing the
     # same DeepSpeed distributed context.
-    from agilerl.utils.algo_utils import clone_llm
-    from agilerl.utils.llm_utils import get_state_dict
-
     agent_0 = algo_spec.build_algorithm(
         tokenizer=tokenizer,
         index=0,
         resume_from_checkpoint=resume_from_checkpoint,
+        load_weights_from=load_weights_from,
         accelerator=accelerator,
         device=device,
     )
@@ -298,6 +317,7 @@ def create_population_from_spec(
                 tokenizer=tokenizer,
                 index=i,
                 resume_from_checkpoint=resume_from_checkpoint,
+                load_weights_from=load_weights_from,
                 accelerator=agent_accelerator,
                 device=device,
                 actor_network=cloned_actor,

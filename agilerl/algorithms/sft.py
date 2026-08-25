@@ -19,14 +19,18 @@ from agilerl.typing import (
     ObservationType,
     SFTPrompts,
 )
-from agilerl.utils.llm_utils import aggregate_metrics_dict, resolve_llm_device
+from agilerl.utils.llm_utils import (
+    aggregate_metrics_dict,
+    is_sft_prompts,
+    resolve_llm_device,
+)
 
 if TYPE_CHECKING:
     from accelerate import Accelerator
     from peft import LoraConfig
     from transformers import BitsAndBytesConfig
 
-    from agilerl.llm_envs import SFTGym
+    from agilerl.llm_envs import DatasetEnv
 
 if HAS_LIGER_KERNEL or TYPE_CHECKING:
     from liger_kernel.transformers.fused_linear_cross_entropy import (
@@ -111,12 +115,9 @@ class SFT(LLMAlgorithm[SFTPrompts]):
         speed/kernel choice. The Liger kernel auto-sizes its own chunk; the
         standard path's chunk is set by ``chunk_rows``.
     :type use_liger_loss: bool, optional
-    :param chunk_rows: Primary chunk-size knob for fused logit tiles. On SFT's
+    :param chunk_rows: Primary chunk-size setting for fused logit tiles. On SFT's
         standard path this controls the fused-logprob chunk rows directly.
     :type chunk_rows: int | None, optional
-    :param reduce_memory_peak: Deprecated and ignored; previously hinted
-        peak-memory batching. Configure ``micro_batch_size_per_gpu`` instead.
-    :type reduce_memory_peak: bool, optional
     :param use_separate_reference_adapter: Also create a ``reference`` LoRA adapter
         alongside ``actor``. SFT does not itself use a reference policy, so this
         defaults to ``False``; enable it when you plan to save an SFT checkpoint
@@ -164,7 +165,6 @@ class SFT(LLMAlgorithm[SFTPrompts]):
         gradient_checkpointing: bool = True,
         use_liger_loss: bool = False,
         chunk_rows: int | None = None,
-        reduce_memory_peak: bool = False,
         use_separate_reference_adapter: bool = False,
         quantization_config: BitsAndBytesConfig | None = None,
         activation_offload: bool = False,
@@ -197,7 +197,6 @@ class SFT(LLMAlgorithm[SFTPrompts]):
             accelerator=accelerator,
             name="SFT",
             gradient_checkpointing=gradient_checkpointing,
-            reduce_memory_peak=reduce_memory_peak,
             quantization_config=quantization_config,
             activation_offload=activation_offload,
             lora_target_scope=lora_target_scope,
@@ -239,13 +238,14 @@ class SFT(LLMAlgorithm[SFTPrompts]):
 
         :param experiences: Dict with keys ``input_ids`` (prompt + response token
             IDs), ``attention_mask``, and ``prompt_lengths`` (number of prompt
-            tokens per sample) as produced by :class:`~agilerl.llm_envs.SFTGym`.
-        :type experiences: SFTPrompts
+            tokens per sample) as produced by a ``objective="sft"``
+            :class:`~agilerl.llm_envs.DatasetEnv`.
+        :type experiences: ExperiencesType
         :param training: When ``False`` the backward pass is skipped (eval mode).
         :type training: bool
         :return: ``(loss, perplexity)`` averaged over all samples in
             the batch.
-        :rtype: tuple[float, float]
+        :rtype: dict[str, float]
         """
         gc.collect()
         torch.cuda.empty_cache()
@@ -382,27 +382,32 @@ class SFT(LLMAlgorithm[SFTPrompts]):
 
     def test(
         self,
-        env: SFTGym,
+        env: DatasetEnv,
         loop: int = 1,
         *args: Any,
         **kwargs: Any,
     ) -> npt.NDArray:
         """Return the negative mean loss as a fitness score (higher is better).
 
-        :param env: SFT environment providing evaluation batches
-        :type env: SFTGym
+        :param env: SFT environment providing evaluation batches (``objective="sft"``)
+        :type env: DatasetEnv
         :param loop: Number of evaluation batches, defaults to 1
         :type loop: int, optional
         :return: Mean negative loss (scalar numpy array)
         :rtype: npt.NDArray
         """
         with env.eval_mode(), torch.no_grad():
-            prompts = env.reset()
             losses = []
             for _ in range(loop):
+                prompts = env.reset()
+                if not is_sft_prompts(prompts):
+                    msg = (
+                        f"SFT.test needs an objective='sft' DatasetEnv; got a "
+                        f"batch with keys {sorted(prompts)}."
+                    )
+                    raise TypeError(msg)
                 metrics = self.learn(prompts, training=False)
                 losses.append(metrics["loss"])
-                prompts = env.step()
             mean_fit = -float(np.mean(losses))
         self.metrics.add_fitness(mean_fit)
         if self.accelerator is not None:

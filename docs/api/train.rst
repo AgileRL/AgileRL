@@ -39,11 +39,12 @@ The multi-agent off-policy and on-policy training functions handle PettingZoo-st
 
 .. autofunction:: agilerl.training.train_multi_agent_on_policy.train_multi_agent_on_policy
 
-Finally, if you are training a LLM, you can use our LLM training functions. We have one for preference-based reinforcement learning (``finetune_llm_preference``) which should be used
-with DPO, and one for reinforcement learning with verifiable rewards (``finetune_llm_reasoning``) which should be used with GRPO.
+Finally, if you are training a LLM, you can use our LLM training functions. ``train_llm_rollout`` runs online RL over rollout (generate-and-score) environments and should be
+used with GRPO, PPO or REINFORCE; it drives multi-turn rollouts, and single-turn reasoning is the ``max_turns=1`` case. ``train_llm_dataset`` runs offline, teacher-forced
+training over a ``DatasetEnv`` dataloader; the algorithm of the population selects the regime, with DPO for pairwise preference data and SFT for supervised fine-tuning on static data.
 
-.. autofunction:: agilerl.training.llm.reasoning.finetune_llm_reasoning
+.. autofunction:: agilerl.training.llm.train_llm_rollout
 
-.. _finetune_llm_preference:
+.. _train_llm_dataset:
 
-.. autofunction:: agilerl.training.llm.preference.finetune_llm_preference
+.. autofunction:: agilerl.training.llm.train_llm_dataset

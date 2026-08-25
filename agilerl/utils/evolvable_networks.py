@@ -63,7 +63,7 @@ CONV_LAYER_FUNCTIONS: dict[str, type[nn.Module]] = {
 
 # Arity of the size tuple a torch layer expects (e.g. ``tuple[int, int]`` for
 # 2d layers). Ties a layer constructor to a normalizer that produces it.
-_SizeT = TypeVar("_SizeT")
+SizeT = TypeVar("SizeT")
 
 
 @overload
@@ -90,35 +90,35 @@ def _size_normalizer(dims: int) -> Callable[[KernelSizeType], tuple[int, ...]]:
     return normalize
 
 
-class _ConvConstructor(Protocol[_SizeT]):
-    """A torch conv constructor whose size args all share arity ``_SizeT``."""
+class ConvConstructor(Protocol[SizeT]):
+    """A torch conv constructor whose size args all share arity ``SizeT``."""
 
     def __call__(
         self,
         in_channels: int,
         out_channels: int,
-        kernel_size: _SizeT,
-        stride: _SizeT,
-        padding: _SizeT,
+        kernel_size: SizeT,
+        stride: SizeT,
+        padding: SizeT,
         *,
         device: DeviceType,
     ) -> nn.Module: ...
 
 
-class _PoolConstructor(Protocol[_SizeT]):
-    """A torch pooling constructor whose size args accept int or arity ``_SizeT``."""
+class PoolConstructor(Protocol[SizeT]):
+    """A torch pooling constructor whose size args accept int or arity ``SizeT``."""
 
     def __call__(
         self,
-        kernel_size: int | _SizeT,
-        stride: int | _SizeT,
-        padding: int | _SizeT,
+        kernel_size: int | SizeT,
+        stride: int | SizeT,
+        padding: int | SizeT,
     ) -> nn.Module: ...
 
 
 def _build_conv(
-    conv_cls: _ConvConstructor[_SizeT],
-    to_size: Callable[[KernelSizeType], _SizeT],
+    conv_cls: ConvConstructor[SizeT],
+    to_size: Callable[[KernelSizeType], SizeT],
     in_channels: int,
     out_channels: int,
     kernel_size: KernelSizeType,
@@ -138,8 +138,8 @@ def _build_conv(
 
 
 def _build_pool(
-    pool_cls: _PoolConstructor[_SizeT],
-    to_size: Callable[[KernelSizeType], _SizeT],
+    pool_cls: PoolConstructor[SizeT],
+    to_size: Callable[[KernelSizeType], SizeT],
     kernel_size: KernelSizeType,
     stride: KernelSizeType,
     padding: KernelSizeType,

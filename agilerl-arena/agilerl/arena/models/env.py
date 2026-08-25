@@ -9,12 +9,14 @@ from pydantic import BaseModel, ConfigDict, Field
 
 
 class LLMEnvType(str, Enum):
-    """Type of LLM environment."""
+    """Type of LLM environment.
 
-    REASONING = "reasoning"
-    PREFERENCE = "preference"
-    SFT = "sft"
-    MULTITURN = "multiturn"
+    ``ROLLOUT`` is generative (a ``RolloutHarness``); single-turn reasoning is
+    ``max_turns=1``. ``DATASET`` is teacher-forced (a ``DatasetEnv``).
+    """
+
+    ROLLOUT = "rollout"
+    DATASET = "dataset"
 
     def __str__(self) -> str:
         return str(self.value)

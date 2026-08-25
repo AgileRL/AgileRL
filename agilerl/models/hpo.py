@@ -8,6 +8,8 @@ from typing import Annotated, Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from typing_extensions import Self
 
+from agilerl.hpo.multi_frequency import resolve_and_validate_frequency_ratios
+
 
 class RLHyperparameter(BaseModel):
     """Min/max range and mutation factors for a single RL hyperparameter.
@@ -140,8 +142,6 @@ class MultiFrequencySelectionSpec(BaseModel):
     @model_validator(mode="after")
     def _resolve_and_validate_ratios(self) -> Self:
         """Default and validate the frequency ratios (population-size independent)."""
-        from agilerl.hpo.multi_frequency import resolve_and_validate_frequency_ratios
-
         self.evolution_frequency_ratios = resolve_and_validate_frequency_ratios(
             self.evolution_frequency_ratios, self.n_subpopulations
         )

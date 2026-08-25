@@ -1719,7 +1719,6 @@ def _make_llm_agent(
     *,
     mini_batch_size=None,
     algo_cls=None,
-    reduce_memory_peak: bool = False,
     use_vllm: bool = False,
     use_memory_efficient_params: bool = True,
 ):
@@ -1764,7 +1763,6 @@ def _make_llm_agent(
             accelerator=accelerator,
             device="cpu",
             use_separate_reference_adapter=use_separate_reference_adapter,
-            reduce_memory_peak=reduce_memory_peak,
             use_vllm=use_vllm,
             use_memory_efficient_params=use_memory_efficient_params,
         )
@@ -3105,10 +3103,6 @@ class TestLLMInitWarnings:
         )
         assert agent.cosine_lr_schedule_config is None
 
-    def test_reduce_memory_peak_deprecated_warns(self):
-        with pytest.warns(DeprecationWarning, match="reduce_memory_peak is deprecated"):
-            _make_llm_agent(reduce_memory_peak=True)
-
     def test_lr_overwrite_warning_from_deepspeed(self):
         acc = _make_mock_accelerator(
             ds_config={
@@ -4000,7 +3994,7 @@ class TestDeepspeedLoad:
         # Stub the non-deepspeed branches so they don't actually try to read
         # adapter files / overwrite state — we only care about dispatch here.
         with (
-            patch.object(s.agent, "_load_model_checkpoint"),
+            patch.object(s.agent, "_load_lora_checkpoint"),
             patch.object(inner, "load_state_dict"),
         ):
             s.agent.load_checkpoint(str(s.path), load_optimizer=s.save_optimizer)
@@ -4015,7 +4009,7 @@ class TestDeepspeedLoad:
 
         inner = _inner_actor(s.agent)
         with (
-            patch.object(s.agent, "_load_model_checkpoint") as peft_spy,
+            patch.object(s.agent, "_load_lora_checkpoint") as peft_spy,
             patch.object(inner, "load_state_dict"),
         ):
             s.agent.load_checkpoint(str(s.path), load_optimizer=s.save_optimizer)
@@ -4033,7 +4027,7 @@ class TestDeepspeedLoad:
 
         inner = _inner_actor(s.agent)
         with (
-            patch.object(s.agent, "_load_model_checkpoint"),
+            patch.object(s.agent, "_load_lora_checkpoint"),
             patch.object(inner, "load_state_dict") as sd_spy,
         ):
             s.agent.load_checkpoint(str(s.path), load_optimizer=s.save_optimizer)
@@ -4073,7 +4067,7 @@ class TestDeepspeedLoad:
         )
         loader.actor.load_checkpoint = load_ckpt_spy
         with (
-            patch.object(loader, "_load_model_checkpoint"),
+            patch.object(loader, "_load_lora_checkpoint"),
         ):
             loader.load_checkpoint(str(tmp_path), load_optimizer=False)
         assert load_ckpt_spy.call_count == 1
@@ -4263,7 +4257,7 @@ class TestLLMDeepspeedCheckpointSaveE2E:
 
         # attributes.pt payload:
         #   - ``_lora_only`` flag always matches the save call.
-        #   - ``actor_state_dict`` only lands in attrs.pt for the (F, F)
+        #   - ``actor_state_dict`` is written to attrs.pt only for the (F, F)
         #     deepspeed cell (gather+torch-save branch).
         ck = load_attributes_checkpoint(s.path)
         assert ck.get("_lora_only") == s.lora_only
@@ -4983,6 +4977,87 @@ class TestLLMLoadDistributedActorWithAccelerator:
         agent.actor.load_checkpoint = MagicMock(return_value=(None, None))
         with pytest.raises(ValueError, match="Deepspeed failed"):
             agent._load_distributed_actor(str(tmp_path), tag="save_checkpoint")
+
+
+class TestLLMLoadFullModelActor:
+    """A DeepSpeed full-model warm start, from either checkpoint layout."""
+
+    def test_gathered_state_dict_is_loaded_in_place(self):
+        # Arrange -- save_optimizer=False keeps the weights in attributes.pt.
+        agent = _make_llm_agent(accelerator=_make_mock_accelerator())
+        model_ref = MagicMock()
+        model_ref.parameters.return_value = []
+        agent._get_unwrapped_actor = MagicMock(return_value=model_ref)
+        agent._load_distributed_actor = MagicMock()
+        state_dict = {"weight": torch.zeros(1)}
+        checkpoint = {"network_info": {"modules": {"actor_state_dict": state_dict}}}
+
+        # Act
+        LLMAlgorithm._load_full_model_checkpoint(agent, "/some/path", checkpoint)
+
+        # Assert
+        model_ref.load_state_dict.assert_called_once_with(state_dict)
+        agent._load_distributed_actor.assert_not_called()
+
+    def test_missing_state_dict_falls_back_to_the_tag_directory(self):
+        # Arrange -- save_optimizer=True writes the weights to the tag dir instead.
+        agent = _make_llm_agent(accelerator=_make_mock_accelerator())
+        agent._load_distributed_actor = MagicMock()
+        agent._get_unwrapped_actor = MagicMock()
+
+        # Act
+        LLMAlgorithm._load_full_model_checkpoint(agent, "/some/path", {})
+
+        # Assert
+        agent._load_distributed_actor.assert_called_once_with(
+            "/some/path",
+            tag="save_checkpoint",
+            load_optimizer_states=False,
+            load_lr_scheduler_states=False,
+        )
+        agent._get_unwrapped_actor.assert_not_called()
+
+    def test_deepspeed_full_model_checkpoint_routes_to_the_actor_loader(
+        self,
+        tmp_path,
+    ):
+        # Arrange -- a full-model (non-LoRA) checkpoint under DeepSpeed.
+        agent = _make_llm_agent(accelerator=_make_mock_accelerator())
+        agent._uses_deepspeed = True
+        agent._load_full_model_checkpoint = MagicMock()
+        agent._load_lora_checkpoint = MagicMock()
+        torch.save({"_lora_only": False}, str(tmp_path / "attributes.pt"))
+
+        # Act
+        LLMAlgorithm.load_weights(agent, str(tmp_path))
+
+        # Assert
+        agent._load_full_model_checkpoint.assert_called_once()
+        agent._load_lora_checkpoint.assert_not_called()
+
+    def test_deepspeed_resume_without_optimizer_loads_the_full_actor(
+        self,
+        tmp_path,
+    ):
+        # Arrange -- resuming a full-model DeepSpeed checkpoint without its
+        # optimizer shards: neither the adapter dirs nor the sharded restore
+        # apply, so only the actor weights come back.
+        agent = _make_llm_agent(accelerator=_make_mock_accelerator())
+        agent._uses_deepspeed = True
+        agent._load_full_model_checkpoint = MagicMock()
+        agent._load_distributed_actor = MagicMock()
+        agent._load_lora_checkpoint = MagicMock()
+        agent._restore_checkpoint_attributes = MagicMock()
+        torch.save({"_lora_only": False}, str(tmp_path / "attributes.pt"))
+
+        # Act
+        LLMAlgorithm.load_checkpoint(agent, str(tmp_path), load_optimizer=False)
+
+        # Assert
+        agent._load_full_model_checkpoint.assert_called_once()
+        agent._load_distributed_actor.assert_not_called()
+        agent._load_lora_checkpoint.assert_not_called()
+        agent._restore_checkpoint_attributes.assert_called_once()
 
 
 class TestLLMBackwardPassNonAccelerator:
@@ -6649,6 +6724,95 @@ class TestLLMLoadCheckpointLoraOnlyWithRefAdapter:
         assert any(args[:2] == (str(tmp_path), "actor") for args in load_calls) is False
         mock_copy.assert_called_with(source_adapter="actor", target_adapter="reference")
 
+    def _write_attrs(self, tmp_path):
+        import dill
+
+        torch.save(
+            {"_lora_only": True, "lr": 1e-4},
+            str(tmp_path / "attributes.pt"),
+            pickle_module=dill,
+        )
+
+    def test_reference_seeded_from_actor_when_checkpoint_has_none(self, tmp_path):
+        """A stage-N actor becomes the stage-N+1 reference (e.g. SFT -> DPO)."""
+        agent = _make_llm_agent(
+            accelerator=_make_mock_accelerator(), use_separate_reference_adapter=True
+        )
+        self._write_attrs(tmp_path)
+
+        with (
+            patch.object(LLMAlgorithm, "_load_adapter_weights"),
+            patch.object(LLMAlgorithm, "_copy_adapter_weights") as mock_copy,
+            patch.object(
+                LLMAlgorithm, "_load_checkpoint_lora_config", return_value=None
+            ),
+        ):
+            agent.load_checkpoint(str(tmp_path), load_optimizer=False)
+
+        mock_copy.assert_called_with(source_adapter="actor", target_adapter="reference")
+
+    def test_reference_preserved_when_checkpoint_has_one(self, tmp_path):
+        """Resuming a run keeps the reference anchor it was training against."""
+        agent = _make_llm_agent(
+            accelerator=_make_mock_accelerator(), use_separate_reference_adapter=True
+        )
+        self._write_attrs(tmp_path)
+        (tmp_path / "reference").mkdir()
+
+        with (
+            patch.object(LLMAlgorithm, "_load_adapter_weights"),
+            patch.object(LLMAlgorithm, "_copy_adapter_weights") as mock_copy,
+            patch.object(
+                LLMAlgorithm, "_load_checkpoint_lora_config", return_value=None
+            ),
+        ):
+            agent.load_checkpoint(str(tmp_path), load_optimizer=False)
+
+        assert not any(
+            call.kwargs.get("target_adapter") == "reference"
+            for call in mock_copy.call_args_list
+        )
+
+    def test_critic_is_not_seeded_from_actor_by_default(self, tmp_path):
+        """A critic starts from the base model, not from the policy."""
+        agent = _make_llm_agent(accelerator=_make_mock_accelerator())
+        agent.selected_adapters = ["actor", "critic"]
+        self._write_attrs(tmp_path)
+
+        with (
+            patch.object(LLMAlgorithm, "_load_adapter_weights"),
+            patch.object(LLMAlgorithm, "_copy_adapter_weights") as mock_copy,
+            patch.object(
+                LLMAlgorithm, "_load_checkpoint_lora_config", return_value=None
+            ),
+        ):
+            agent.load_checkpoint(str(tmp_path), load_optimizer=False)
+
+        assert not any(
+            call.kwargs.get("target_adapter") == "critic"
+            for call in mock_copy.call_args_list
+        )
+
+    def test_critic_seeded_from_actor_when_explicitly_requested(self, tmp_path):
+        agent = _make_llm_agent(accelerator=_make_mock_accelerator())
+        agent.selected_adapters = ["actor", "critic"]
+        self._write_attrs(tmp_path)
+
+        with (
+            patch.object(LLMAlgorithm, "_load_adapter_weights"),
+            patch.object(LLMAlgorithm, "_copy_adapter_weights") as mock_copy,
+            patch.object(
+                LLMAlgorithm, "_load_checkpoint_lora_config", return_value=None
+            ),
+        ):
+            agent.load_checkpoint(
+                str(tmp_path),
+                load_optimizer=False,
+                overwrite_critic_adapter=True,
+            )
+
+        mock_copy.assert_called_with(source_adapter="actor", target_adapter="critic")
+
     def test_load_checkpoint_updates_reference_adapter_legacy_weights_only_key(
         self, tmp_path
     ):
@@ -6660,15 +6824,17 @@ class TestLLMLoadCheckpointLoraOnlyWithRefAdapter:
         torch.save(chkpt, str(tmp_path / "attributes.pt"), pickle_module=dill)
 
         with (
-            patch.object(LLMAlgorithm, "_load_model_checkpoint") as mock_model_load,
+            patch.object(LLMAlgorithm, "_load_lora_checkpoint") as mock_model_load,
             patch.object(
                 LLMAlgorithm, "_load_checkpoint_lora_config", return_value=None
             ),
         ):
             agent.load_checkpoint(str(tmp_path), load_optimizer=False)
-        mock_model_load.assert_called_once_with(str(tmp_path), False, True)
+        # ``None`` defers the reference decision to the checkpoint layout; the
+        # critic is never seeded from the actor unless explicitly asked.
+        mock_model_load.assert_called_once_with(str(tmp_path), None, False)
 
-    def test_load_model_checkpoint_fails_fast_on_lora_config_mismatch(self, tmp_path):
+    def test_load_lora_checkpoint_fails_fast_on_lora_config_mismatch(self, tmp_path):
         agent = _make_llm_agent()
         agent.lora_config = LoraConfig(
             r=8,
@@ -6693,7 +6859,7 @@ class TestLLMLoadCheckpointLoraOnlyWithRefAdapter:
             ),
             pytest.raises(ValueError, match="LoRA configs differ"),
         ):
-            agent._load_model_checkpoint(str(tmp_path))
+            agent._load_lora_checkpoint(str(tmp_path))
 
 
 class TestLLMGenerateWithVllmColocateFullPaths:
@@ -6745,14 +6911,14 @@ class TestLLMGenerateWithVllmColocateFullPaths:
                 return_value=(torch.zeros(2, 5), None),
             ),
         ):
-            completion_ids, action_masks, _ = agent._generate_with_vllm_colocate(
+            token_ids, action_masks, _ = agent._generate_with_vllm_colocate(
                 prompts, group_size=2, temperature=0.9
             )
-        assert len(completion_ids) == 2
+        assert len(token_ids) == 2
         assert len(action_masks) == 2
 
-    def test_generate_with_vllm_colocate_uses_trajectory_ids(self):
-        """Multi-turn prompts carry the running trajectory, which vLLM re-reads."""
+    def test_generate_with_vllm_colocate_uses_input_ids(self):
+        """``input_ids`` is the whole running transcript; vLLM re-reads it as-is."""
         agent = _make_llm_agent()
         agent.pad_token = "<pad>"
         agent.pad_token_id = 0
@@ -6773,8 +6939,7 @@ class TestLLMGenerateWithVllmColocateFullPaths:
 
         prompts = [
             {
-                "input_ids": torch.tensor([[1, 2, 3]]),
-                "trajectory_input_ids": torch.tensor([[1, 2, 3, 9, 9]]),
+                "input_ids": torch.tensor([[1, 2, 3, 9, 9]]),
                 "text": "hello",
             },
         ]
@@ -6795,13 +6960,13 @@ class TestLLMGenerateWithVllmColocateFullPaths:
                 return_value=(torch.zeros(2, 5), None),
             ),
         ):
-            completion_ids, _action_masks, _ = agent._generate_with_vllm_colocate(
+            token_ids, _action_masks, _ = agent._generate_with_vllm_colocate(
                 prompts, group_size=2, temperature=0.9
             )
 
         sent = agent.llm.generate.call_args[0][0]
         assert sent[0]["prompt_token_ids"] == [1, 2, 3, 9, 9]
-        assert len(completion_ids) == 1
+        assert len(token_ids) == 1
 
 
 class TestLLMGenerateWithVllmColocateAccelerator:
@@ -6847,11 +7012,11 @@ class TestLLMGenerateWithVllmColocateAccelerator:
                 return_value=(torch.zeros(2, 5), None),
             ),
         ):
-            completion_ids, _action_masks, _ = agent._generate_with_vllm_colocate(
+            token_ids, _action_masks, _ = agent._generate_with_vllm_colocate(
                 prompts, group_size=2, temperature=0.9
             )
         acc.wait_for_everyone.assert_not_called()
-        assert len(completion_ids) == 1
+        assert len(token_ids) == 1
 
 
 class TestLLMGenerateWithVllmColocateTP:
@@ -6905,10 +7070,10 @@ class TestLLMGenerateWithVllmColocateTP:
             patch("torch.distributed.all_gather_object", side_effect=fake_all_gather),
             patch("torch.distributed.get_rank", return_value=0),
         ):
-            completion_ids, _action_masks, _ = agent._generate_with_vllm_colocate(
+            token_ids, _action_masks, _ = agent._generate_with_vllm_colocate(
                 prompts, group_size=2, temperature=0.9
             )
-        assert len(completion_ids) == 1
+        assert len(token_ids) == 1
 
 
 class TestLLMCloneBroadcastMultiProcess:

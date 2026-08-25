@@ -92,8 +92,8 @@ class TestCreatePopulationLLM:
         algo.zero_stage = 0
 
         with (
-            patch("agilerl.utils.algo_utils.clone_llm", return_value=MagicMock()),
-            patch("agilerl.utils.llm_utils.get_state_dict", return_value={}),
+            patch("agilerl.utils.trainer_utils.clone_llm", return_value=MagicMock()),
+            patch("agilerl.utils.trainer_utils.get_state_dict", return_value={}),
         ):
             pop = create_population_from_spec(
                 population_size=2,

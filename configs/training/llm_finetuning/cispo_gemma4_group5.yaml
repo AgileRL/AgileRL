@@ -40,8 +40,12 @@ algorithm:
         strip_multimodal_towers: true
 
 environment:
-    env_type: multiturn
-    env_name: game:Sudoku-v0-hard
+    env_type: rollout
+    entrypoint: gem:make
+    env_config:
+        env_id: game:Sudoku-v0-hard
+    env_packages:
+        uv: [gem-llm==1.0.0]
     max_turns: 50
     max_reward: 1.0
     strict_chat_template_boundary: true
