@@ -2977,6 +2977,29 @@ class TestMutationsRegramaParameterMutation:
         after = agent.critic.state_dict()
         assert all(torch.equal(before[k], after[k]) for k in before)
 
+    def test_a_failing_shared_head_lookup_degrades_to_the_gaussian_pass(
+        self,
+        monkeypatch,
+    ):
+        agent = PPO(
+            generate_random_box_space((4,)),
+            generate_discrete_space(2),
+            device="cpu",
+        )
+        _all_dormant(agent)
+        _pin_biases(agent.actor)
+
+        def explode(*_args, **_kwargs):
+            msg = "shared head lookup blew up"
+            raise RuntimeError(msg)
+
+        monkeypatch.setattr("agilerl.hpo.mutation.shared_encoder_heads", explode)
+
+        agent = _regrama_mutations().parameter_mutation(agent)
+
+        assert agent.mut == "param"
+        assert _zeroed_biases(agent.actor) == 0
+
     def test_wrapped_agents_are_reset_through_the_wrapper(self):
         agent = RSNorm(self.make_agent())
         _all_dormant(agent.agent)

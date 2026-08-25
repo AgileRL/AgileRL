@@ -262,9 +262,3 @@ get very small without ever reaching zero.
     RNN architectures fall outside what ReGraMa can reset. The hidden units of a recurrent core
     have fused gate non-linearities and no single weight matrix whose rows are one unit's incoming weights,
     so only the layers from the output projection onward are reset.
-
-.. note::
-    ReGraMa works on ``torch.compile`` agents, but it costs them the compiled graph. Each measured
-    activation carries a backward hook, and every one of those is a graph break, so the training step
-    fragments into separately launched segments. On the small networks typical of RL that gives back
-    roughly what compiling bought. A warning is emitted once per population.

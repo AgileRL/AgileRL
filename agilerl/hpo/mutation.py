@@ -249,11 +249,7 @@ class Mutations:
     :param accelerator: Accelerator for distributed computing, defaults to None
     :type accelerator: accelerate.Accelerator(), optional
     :param dormant_threshold: Normalised GraMa score at or below which a neuron counts as
-        dormant, defaults to 0.01. Every parameter mutation resets the neurons that fall
-        at or below this threshold (ReGraMa) before adding Gaussian noise; this works on a
-        compiled algorithm but costs it much of its speedup, since the gradient hooks
-        break the compiled graph — see
-        :func:`~agilerl.algorithms.core.base.set_grama_capture`.
+        dormant, defaults to 0.01.
     :type dormant_threshold: float, optional
     """
 
@@ -682,7 +678,7 @@ class Mutations:
             individual.mut = "None"
             return individual
 
-        regrama_applied = self._regrama_reset(individual)
+        regrama_applied = self._regrama_mutation(individual)
 
         registry = individual.registry
 
@@ -731,21 +727,16 @@ class Mutations:
 
         return individual
 
-    def _regrama_reset(self, individual: IndividualT) -> bool:
+    def _regrama_mutation(self, individual: IndividualT) -> bool:
         """Reset the dormant neurons of every network of an individual.
 
         Reads the per-neuron gradient snapshot stored while the agent trained, and
         re-initialises the neurons whose normalised GraMa score has fallen to or
-        below :attr:`dormant_threshold`. See
-        :mod:`~agilerl.utils.mutation_utils` for the surgery itself.
+        below the dormant threshold.
 
         A snapshot that is absent, or one that holds no measurement, warns rather
         than degrading silently: neither can score a neuron, so the mutation falls
-        back to the Gaussian pass alone and would otherwise be indistinguishable
-        from a run that never captured anything.
-
-        A network whose surgery raises is left untouched rather than aborting the
-        mutation, so a ReGraMa failure degrades to the plain Gaussian pass.
+        back to the Gaussian pass alone.
 
         :param individual: Individual agent from population.
         :type individual: RLAlgorithm or MultiAgentRLAlgorithm
@@ -768,22 +759,18 @@ class Mutations:
                 stacklevel=3,
             )
 
-        # Enumerated once: the surgery rewrites weights in place and never
-        # reassigns a network, so this stays valid for the whole pass.
         networks = individual.eval_networks()
         policy_networks = individual.policy_network_ids()
 
         neurons_reset = 0
         for idx, (network_id, network) in enumerate(networks):
             per_neuron_list = grama_scores[idx] if idx < len(grama_scores) else None
-            # The latent columns of the heads that share an encoder with other
-            # networks need to be reset properly.
-            shared_heads = (
-                shared_encoder_heads(networks, network_id, network)
-                if id(network) in policy_networks
-                else ()
-            )
             try:
+                shared_heads = (
+                    shared_encoder_heads(networks, network_id, network)
+                    if id(network) in policy_networks
+                    else ()
+                )
                 network_reset_count = reset_dormant_neurons(
                     network,
                     per_neuron_list,

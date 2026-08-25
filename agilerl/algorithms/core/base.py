@@ -440,8 +440,8 @@ def set_grama_capture(
     """Enable or disable GraMa capture for a population.
 
     Every parameter mutation runs ReGraMa, so capture is switched on whenever a
-    mutation operator drives the population at all; a population without one (a
-    no-HPO regime) never mutates, so capture stays off and costs nothing there.
+    mutation operator with a nonzero parameter-mutation probability drives the
+    population.
 
     :param population: The agents to configure.
     :type population: Sequence[EvolvableAlgorithmProtocol]
@@ -450,7 +450,7 @@ def set_grama_capture(
     :return: None.
     :rtype: None
     """
-    enabled = mutation is not None
+    enabled = mutation is not None and mutation.parameters_mut > 0
     for agent in population:
         agent.capture_grama = enabled
 
@@ -590,12 +590,13 @@ class EvolvableAlgorithm(ABC, Generic[ExperiencesT], metaclass=RegistryMeta):
     def init_training_step(self) -> None:
         """Open the agent's training block: metrics tracking, and GraMa capture.
 
-        Every trainer calls this immediately before an agent's per-cycle training
-        block, which is exactly the window the ReGraMa parameter mutation needs to
-        measure. Hooks are registered afresh each cycle, so they follow the agent
+        Hooks are registered afresh each cycle, so they follow the agent
         through architecture mutations, checkpoint reloads and accelerator
         re-wrapping. Opening a block implicitly closes one that an earlier call
         left open.
+
+        :return: None.
+        :rtype: None
         """
         self.metrics.init_training_step()
         self._release_grama_capture()
@@ -607,6 +608,8 @@ class EvolvableAlgorithm(ABC, Generic[ExperiencesT], metaclass=RegistryMeta):
 
         :param num_steps: Number of steps taken during the training step.
         :type num_steps: int
+        :return: None.
+        :rtype: None
         """
         self.metrics.finalize_training_step(num_steps)
         self._release_grama_capture()
@@ -614,11 +617,9 @@ class EvolvableAlgorithm(ABC, Generic[ExperiencesT], metaclass=RegistryMeta):
     def _register_grama_capture(self) -> None:
         """Hook every measured activation of every evaluation network.
 
-        A full backward hook on an activation is handed ``grad_{z_i}L``, the
+        A full backward hook on an activation is handed grad_{z_i}L, the
         gradient w.r.t. its input, so the GraMa metric is measured for free
-        during the real training backward pass. An agent that does not expose the
-        expected network surface must never break training, so a failure drops
-        any partial hooks and captures nothing.
+        during the real training backward pass.
 
         :return: None.
         :rtype: None
@@ -649,10 +650,6 @@ class EvolvableAlgorithm(ABC, Generic[ExperiencesT], metaclass=RegistryMeta):
     ) -> BackwardHook:
         """Build the backward hook recording one measured activation's gradient.
 
-        The hook closes over the snapshot rather than over the agent, so a hook
-        that outlives its capture writes into a list nobody reads instead of
-        keeping the agent alive or corrupting the next cycle's snapshot.
-
         :param latest: The open capture's snapshot, written in place.
         :type latest: GraMaScores
         :param net_idx: Position of the layer's network in the snapshot.
@@ -672,22 +669,15 @@ class EvolvableAlgorithm(ABC, Generic[ExperiencesT], metaclass=RegistryMeta):
                 gradient = _per_neuron_grad(grad_input)
                 if gradient is None:
                     return
-                # Overwrite so that only the last minibatch survives: the metric's
-                # expectation is taken at fixed parameters, and the reset acts on
-                # the network as it stands at the end of the cycle.
                 latest[net_idx][mod_idx] = gradient
-            except Exception:  # never break the training backward pass
+            except Exception as exc:  # never break the training backward pass
+                logger.warning("GraMa capture could not score a layer: %s", exc)
                 return
 
         return hook
 
     def _release_grama_capture(self) -> None:
         """Close any open GraMa capture, storing its snapshot and removing its hooks.
-
-        A measured activation whose gradient never flowed is stored as None and
-        skipped downstream. This is a defensive fallback for layers outside the
-        training loss, such as the placeholder critic encoder PPO builds when it
-        shares encoders.
 
         :return: None.
         :rtype: None
@@ -713,10 +703,6 @@ class EvolvableAlgorithm(ABC, Generic[ExperiencesT], metaclass=RegistryMeta):
     def eval_networks(self) -> list[tuple[str | None, torch.nn.Module]]:
         """Return the agent's evaluation networks as (network_id, network) pairs.
 
-        Only each registry group's eval_network is returned, so target and shared
-        networks are never measured or rewritten. Multi-agent networks are unrolled
-        one entry per sub-policy.
-
         :return: One (network_id, network) pair per measured network.
         :rtype: list[tuple[str | None, torch.nn.Module]]
         """
@@ -725,7 +711,6 @@ class EvolvableAlgorithm(ABC, Generic[ExperiencesT], metaclass=RegistryMeta):
         accelerator = self.accelerator
         pairs: list[tuple[str | None, torch.nn.Module]] = []
         for group in self.registry.groups:
-            # Unwrap first: a wrapped ModuleDict is not a ModuleDict.
             eval_net = getattr(self, group.eval_network_name())
             if accelerator is not None:
                 eval_net = accelerator.unwrap_model(eval_net)
@@ -1474,6 +1459,7 @@ class EvolvableAlgorithm(ABC, Generic[ExperiencesT], metaclass=RegistryMeta):
 
         # Load other attributes
         checkpoint.pop("network_info")
+        self.grama_scores = None
         # Pre-2.8 checkpoints stored ``steps`` as a cumulative list; coerce to
         # the int expected by the metrics tracker.
         if isinstance(checkpoint.get("steps"), (list, tuple)):

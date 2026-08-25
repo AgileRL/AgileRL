@@ -594,6 +594,8 @@ class DummyTournament:
 
 
 class DummyMutations:
+    parameters_mut = 1.0
+
     def mutation(self, pop, pre_training_mut=False, indices=None):
         return pop
 
@@ -1409,6 +1411,7 @@ def mocked_multi_env(state_size, action_size):
 @pytest.fixture
 def mocked_mutations():
     mock_mutations = MagicMock()
+    mock_mutations.parameters_mut = 1.0
 
     def mutation(pop, pre_training_mut=False, indices=None):
         return pop
@@ -6169,7 +6172,7 @@ class TestRegramaTrainerWiring:
         assert population[0].grama_scores
         assert any(entry is not None for entry in population[0].grama_scores[0])
 
-    def test_compiled_agent_still_captures_with_a_warning(self):
+    def test_compiled_agent_captures(self):
         vec_env = gym.vector.SyncVectorEnv([lambda: gym.make("CartPole-v1")])
         agent = DQN(
             vec_env.single_observation_space,
@@ -6179,20 +6182,19 @@ class TestRegramaTrainerWiring:
         )
         agent.torch_compiler = "default"
 
-        with pytest.warns(UserWarning, match=r"torch\.compile"):
-            population, _fitnesses = train_off_policy(
-                vec_env,
-                "CartPole-v1",
-                "DQN",
-                [agent],
-                ReplayBuffer(max_size=100, device="cpu"),
-                max_steps=12,
-                evo_steps=12,
-                eval_steps=2,
-                eval_loop=1,
-                mutation=_regrama_mutation(),
-                verbose=False,
-            )
+        population, _fitnesses = train_off_policy(
+            vec_env,
+            "CartPole-v1",
+            "DQN",
+            [agent],
+            ReplayBuffer(max_size=100, device="cpu"),
+            max_steps=12,
+            evo_steps=12,
+            eval_steps=2,
+            eval_loop=1,
+            mutation=_regrama_mutation(),
+            verbose=False,
+        )
 
         assert population[0].capture_grama is True
         assert any(entry is not None for entry in population[0].grama_scores[0])

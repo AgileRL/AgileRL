@@ -50,7 +50,7 @@ NORM_LAYER_TYPES: tuple[type[nn.Module], ...] = (
 OUTPUT_WIDTH_ATTRS = ("out_features", "out_channels", "hidden_size")
 
 
-class _ProducerContext(NamedTuple):
+class ProducerContext(NamedTuple):
     """The layers a measured activation's neurons are wired between.
 
     producer's weight rows are the neurons' incoming weights and consumers'
@@ -63,7 +63,7 @@ class _ProducerContext(NamedTuple):
     consumers: list[nn.Module]
 
 
-class _ConsumerTarget(NamedTuple):
+class ConsumerTarget(NamedTuple):
     """One consumer tensor whose columns a reset neuron owns.
 
     weight is rewritten in place, stride columns of it per producer neuron.
@@ -84,12 +84,7 @@ def _is_weight_layer(module: nn.Module) -> bool:
 
 
 def _weight_param(module: nn.Module) -> torch.Tensor:
-    """The weight tensor of a weight layer, or weight_mu for a noisy one.
-
-    Typed as a plain tensor rather than a parameter on purpose: a network whose
-    encoder is pinned by share_encoder_parameters holds detached, non-leaf
-    clones there. Raises TypeError if the module carries no weight tensor.
-    """
+    """The weight tensor of a weight layer, or weight_mu for a noisy one."""
     weight = getattr(module, "weight_mu", None)
     if weight is None:
         weight = getattr(module, "weight", None)
@@ -104,10 +99,7 @@ def _owns_trainable_weight(module: nn.Module) -> bool:
 
     :func:`~agilerl.utils.algo_utils.share_encoder_parameters` pins a non-policy
     network's encoder to detached, non-leaf clones of the policy encoder's
-    parameters, and the algorithm re-runs that pinning from its mutation hook. So
-    resetting a neuron's incoming weights there is discarded moments later, while
-    the matching outgoing rewrite in that network's head survives, leaving the
-    head compensating a reset that no longer exists.
+    parameters.
     """
     weight = _weight_param(module)
     return isinstance(weight, nn.Parameter) and weight.requires_grad
@@ -136,13 +128,7 @@ def _first_weight_layer(module: nn.Module | None) -> nn.Module | None:
 
 
 def _head_entry_layers(head: nn.Module | None) -> list[nn.Module]:
-    """The first weight layer of every parallel stream in head.
-
-    A latent neuron's outgoing weights live in whatever the head feeds it to:
-    one layer for a plain MLP head, but two for a duelling Q-network, whose
-    value and advantage streams are sibling sub-networks that both consume the
-    full latent.
-    """
+    """The first weight layer of every parallel stream in head."""
     head = _unwrap_module(head)
     if head is None:
         return []
@@ -156,13 +142,7 @@ def _head_entry_layers(head: nn.Module | None) -> list[nn.Module]:
 
 
 def _activation_modules(root: nn.Module, *, include_output: bool) -> list[nn.Module]:
-    """The activation sub-modules of root to measure, in forward order.
-
-    include_output also admits the stream-terminating activations. Whether an
-    excluded activation terminates its stream is decided structurally rather
-    than positionally, which is what keeps parallel streams correct: a
-    duelling Q-network's head holds two independent sub-networks.
-    """
+    """The activation sub-modules of root to measure, in forward order."""
     ordered = list(root.named_modules())
     if include_output:
         return [
@@ -186,13 +166,7 @@ def _activation_modules(root: nn.Module, *, include_output: bool) -> list[nn.Mod
 
 
 def target_activations(network: nn.Module) -> list[nn.Module]:
-    """The activation sub-modules measured for one network, in forward order.
-
-    :param network: One evaluation network of an agent.
-    :type network: torch.nn.Module
-    :return: The activation sub-modules to hook, in forward order.
-    :rtype: list[torch.nn.Module]
-    """
+    """The activation sub-modules measured for one network, in forward order."""
     targets: list[nn.Module] = []
     encoder = getattr(network, "encoder", None)
     if encoder is not None:
@@ -208,19 +182,7 @@ def shared_encoder_heads(
     network_id: str | None,
     policy_network: nn.Module,
 ) -> list[nn.Module]:
-    """Return the head entry layers of the networks sharing policy_network's encoder.
-
-    :param networks: The measured evaluation networks, as
-        :meth:`~agilerl.algorithms.core.base.EvolvableAlgorithm.eval_networks`
-        returns them.
-    :type networks: Sequence[tuple[str | None, torch.nn.Module]]
-    :param network_id: Sub-policy key of policy_network, or None.
-    :type network_id: str | None
-    :param policy_network: The policy evaluation network whose encoder is shared.
-    :type policy_network: torch.nn.Module
-    :return: One entry layer per stream of every sharing network's head.
-    :rtype: list[torch.nn.Module]
-    """
+    """Return the head entry layers of the networks sharing policy_network's encoder."""
     entries: list[nn.Module] = []
     for other_id, other in networks:
         if other is policy_network or other_id != network_id:
@@ -269,18 +231,12 @@ def _resolve_producer_and_next(
     act_module: nn.Module,
     encoder: nn.Module | None,
     head: nn.Module | None,
-) -> _ProducerContext:
+) -> ProducerContext:
     """Find the layer that produced act_module's neurons and its consumers.
 
     Any normalisation applied between the producer and the activation is returned
     alongside them, tracked as "the last norm seen since the running producer" and
-    cleared whenever a later weight layer takes over. That is what distinguishes
-    an evolvable MLP's linear -> layer_norm -> activation from a SimBa block's
-    layer_norm -> linear -> activation, where the norm applies to the block's
-    input and leaves these neurons alone.
-
-    Every field is empty when the activation cannot be located, so the caller
-    skips it.
+    cleared whenever a later weight layer takes over.
     """
     for root, is_encoder in ((encoder, True), (head, False)):
         search_root = _unwrap_module(root)
@@ -326,9 +282,9 @@ def _resolve_producer_and_next(
                 [enclosing] if enclosing is not None else _head_entry_layers(head)
             )
 
-        return _ProducerContext(producer, norm, consumers)
+        return ProducerContext(producer, norm, consumers)
 
-    return _ProducerContext(None, None, [])
+    return ProducerContext(None, None, [])
 
 
 def _live_column_scale(weight: torch.Tensor, stride: int, keep: list[int]) -> float:
@@ -403,18 +359,17 @@ def _resolve_consumers(
     next_layers: list[nn.Module],
     cnn_channels: int | None,
     cnn_spatial: int | None,
-) -> list[_ConsumerTarget]:
+) -> list[ConsumerTarget]:
     """Pair each usable consumer weight tensor with its per-neuron column stride.
 
     A consumer must spend its columns on exactly these neurons: one block each,
     none interleaved. Anything failing that is not this producer's consumer and
     rewriting its columns would corrupt weights belonging to other neurons, so it
-    is skipped instead. Each noisy consumer's parallel noise-scale tensor is
-    returned as a target of its own.
+    is skipped instead.
     """
     producer_is_conv = isinstance(producer, CONV_LAYER_TYPES)
     producer_neurons = _weight_param(producer).data.shape[0]
-    consumers: list[_ConsumerTarget] = []
+    consumers: list[ConsumerTarget] = []
     for next_layer in next_layers:
         # A dense layer feeding a convolution is a pairing the surgery cannot index.
         next_is_conv = isinstance(next_layer, CONV_LAYER_TYPES)
@@ -445,13 +400,13 @@ def _resolve_consumers(
             )
             continue
 
-        consumers.append(_ConsumerTarget(next_weight, stride))
+        consumers.append(ConsumerTarget(next_weight, stride))
 
         # The consumer's own noise columns are scales rather than weights and are
         # revived as such.
         next_sigma, _next_bias_sigma = _noise_params(next_layer)
         if next_sigma is not None and next_sigma.shape == next_weight.shape:
-            consumers.append(_ConsumerTarget(next_sigma, stride, is_noise_scale=True))
+            consumers.append(ConsumerTarget(next_sigma, stride, is_noise_scale=True))
 
     return consumers
 
@@ -459,27 +414,27 @@ def _resolve_consumers(
 def _shared_latent_blocks(
     producer: nn.Module,
     entry_layers: Sequence[nn.Module],
-) -> list[_ConsumerTarget]:
+) -> list[ConsumerTarget]:
     """Each sharing head's latent columns as a writable view, noise scales included."""
     if isinstance(producer, CONV_LAYER_TYPES):
         return []
 
     span = _weight_param(producer).data.shape[0]
-    blocks: list[_ConsumerTarget] = []
+    blocks: list[ConsumerTarget] = []
     for entry in entry_layers:
         weight = _weight_param(entry).data
         if weight.dim() != 2 or weight.shape[1] < span:
             continue
-        blocks.append(_ConsumerTarget(weight[:, :span], 1))
+        blocks.append(ConsumerTarget(weight[:, :span], 1))
         sigma, _bias_sigma = _noise_params(entry)
         if sigma is not None and sigma.shape == weight.shape:
-            blocks.append(_ConsumerTarget(sigma[:, :span], 1, is_noise_scale=True))
+            blocks.append(ConsumerTarget(sigma[:, :span], 1, is_noise_scale=True))
     return blocks
 
 
 def _reset_layer_neurons(
     producer: nn.Module,
-    consumers: list[_ConsumerTarget],
+    consumers: list[ConsumerTarget],
     norm: nn.Module | None,
     indices: list[int],
     rng: np.random.Generator,
@@ -588,9 +543,7 @@ def reset_dormant_neurons(
 
     Walks the network's measured activations, resolves each one's producer,
     normalisation and consumers, and re-initialises the neurons whose normalised
-    GraMa score is at or below dormant_threshold. Layers whose producer is
-    unresolvable, has no usable consumer, or does not own its weights are skipped
-    untouched.
+    GraMa score is at or below dormant_threshold.
 
     :param network: An evaluation network to operate on, in place.
     :type network: torch.nn.Module

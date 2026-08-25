@@ -887,7 +887,7 @@ class TestResolveProducerAndNext:
         )
 
         # The caller skips the layer rather than guessing.
-        assert context == mutation_utils._ProducerContext(None, None, [])
+        assert context == mutation_utils.ProducerContext(None, None, [])
 
     def test_activation_is_found_in_the_head_when_the_encoder_is_absent(self):
         head = nn.Sequential(nn.Linear(4, 3), nn.ReLU(), nn.Linear(3, 2))

@@ -8087,6 +8087,18 @@ class TestEvolvableAlgorithmGraMaState:
             warning for warning in recwarn if "grama_scores" in str(warning.message)
         ]
 
+    def test_load_checkpoint_clears_a_stale_snapshot(self, tmp_path):
+        agent = self.agent()
+        path = str(tmp_path / "agent.pt")
+        agent.save_checkpoint(path)
+
+        stale = self.agent()
+        stale.grama_scores = [[torch.ones(3)]]
+
+        stale.load_checkpoint(path)
+
+        assert stale.grama_scores is None
+
     def test_resume_from_a_pre_regrama_checkpoint_reports_nothing_missing(
         self,
         tmp_path,
@@ -8314,6 +8326,23 @@ class TestGraMaCapture:
         # Training completed, and the layers are simply unmeasured.
         assert all(entry is None for entry in dqn_agent.grama_scores[0])
 
+    def test_a_failing_hook_logs_instead_of_staying_silent(
+        self,
+        dqn_agent,
+        monkeypatch,
+        caplog,
+    ):
+        def explode(_grad_input):
+            msg = "hook blew up"
+            raise RuntimeError(msg)
+
+        monkeypatch.setattr(core_base, "_per_neuron_grad", explode)
+
+        with caplog.at_level(logging.WARNING, logger="agilerl.algorithms.core.base"):
+            capture_grama_snapshot(dqn_agent, torch.rand(4, 4))
+
+        assert any("hook blew up" in record.message for record in caplog.records)
+
     def test_a_layer_whose_gradient_reduces_to_nothing_stays_unmeasured(
         self,
         dqn_agent,
@@ -8344,18 +8373,29 @@ class TestGraMaCapture:
 
 
 class TestSetGraMaCapture:
-    """Enable capture whenever a mutation operator is actually driving evolution."""
+    """Enable capture whenever a mutation operator can actually run ReGraMa."""
 
     class FakeMutation:
-        """A stand-in mutation operator: any instance, not its attributes, matters."""
+        """A stand-in mutation operator: only parameters_mut governs capture."""
 
-    def test_capture_is_enabled_for_any_mutation_operator(self, dqn_agent):
+        def __init__(self, parameters_mut: float = 1.0):
+            self.parameters_mut = parameters_mut
+
+    def test_capture_is_enabled_when_parameter_mutations_can_run(self, dqn_agent):
         set_grama_capture([dqn_agent], self.FakeMutation())
 
         assert dqn_agent.capture_grama is True
 
     def test_capture_stays_off_without_a_mutation_operator(self, dqn_agent):
         set_grama_capture([dqn_agent], None)
+
+        assert dqn_agent.capture_grama is False
+
+    def test_capture_stays_off_when_parameter_mutation_probability_is_zero(
+        self,
+        dqn_agent,
+    ):
+        set_grama_capture([dqn_agent], self.FakeMutation(parameters_mut=0.0))
 
         assert dqn_agent.capture_grama is False
 
@@ -8484,8 +8524,6 @@ class TestGraMaCaptureUnderAccelerator:
         discrete_space,
         encoder_mlp_config,
     ):
-        # On a multi-process launch accelerator.prepare returns a
-        # DistributedDataParallel, which keeps the real network at .module.
         from accelerate import Accelerator
 
         agent = DQN(
@@ -8515,9 +8553,6 @@ class TestGraMaCaptureUnderAccelerator:
         ma_vector_space,
         ma_discrete_space,
     ):
-        # A multi-agent policy is a ModuleDict, so wrap_models hands the whole
-        # container to accelerator.prepare and the wrapper hides every sub-policy
-        # behind .module.
         from accelerate import Accelerator
 
         from agilerl.algorithms import IPPO
@@ -8535,7 +8570,6 @@ class TestGraMaCaptureUnderAccelerator:
 
         result = agent.eval_networks()
 
-        # Still one entry per sub-policy, each tagged with its own key.
         for key, sub_network in policy.items():
             assert any(
                 network_id == key and network is sub_network
