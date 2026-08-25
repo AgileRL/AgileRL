@@ -4,19 +4,19 @@
 from __future__ import annotations
 
 import warnings
-from contextlib import nullcontext
 from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
-import numpy.typing as npt
 import torch
 from accelerate import Accelerator
 
 from agilerl import HAS_LIGER_KERNEL, HAS_LLM_DEPENDENCIES
 from agilerl.algorithms.core import ActionResult, LLMAlgorithm
+from agilerl.algorithms.core.advantage_granularity import (
+    resolve_batch_advantage_granularity,
+)
 from agilerl.algorithms.core.llm_ops.fused_lora import unset_fused_adapter_routing
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
-from agilerl.llm_envs import ReasoningGym
 
 if TYPE_CHECKING:
     from peft import LoraConfig
@@ -34,7 +34,6 @@ else:
 from agilerl.protocols import (
     PeftModelProtocol,
     PreTrainedModelProtocol,
-    TokenizedMultiTurnEnv,
 )
 from agilerl.typing import LLMObsType, LLMRolloutExperiences
 from agilerl.utils.algo_utils import (
@@ -50,14 +49,12 @@ from agilerl.utils.llm_utils import (
     build_completion_mask,
     calculate_k3_kl,
     clipped_is_surrogate,
-    is_reasoning_prompts,
     masked_mean,
     masked_whiten,
-    normalize_reasoning_prompt_batch,
+    normalize_prompt_batch,
     pool_by_turns,
     prepare_prompt_hf_generate,
     resolve_llm_device,
-    stitch_completion_after_windowed_hf_generate,
     validate_importance_sampling_level,
     validate_llm_context_lengths,
 )
@@ -187,7 +184,7 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
         token/trajectory level. ``"sum"`` (default) yields the product ratio per
         turn — the standard, paper-aligned per-turn importance weight. ``"mean"``
         yields a length-normalized geometric-mean ratio (GSPO-style); reach for it
-        on long or highly variable-length turns, where the product ratio lands far
+        on long or highly variable-length turns, where the product ratio is far
         outside the clip band on every turn and saturates the clipped surrogate —
         length-normalizing keeps the per-turn ratio in range so the surrogate stays
         informative.
@@ -207,16 +204,13 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
     :type gradient_checkpointing: bool, optional
     :param torch_compiler: Optional torch compile mode.
     :type torch_compiler: str | None, optional
-    :param reduce_memory_peak: Deprecated and ignored; previously hinted
-        peak-memory batching. Configure ``micro_batch_size_per_gpu`` instead.
-    :type reduce_memory_peak: bool, optional
     :param cast_logprobs_to_fp32: When ``True`` (default), run the per-token
         log-prob reduction (``gather`` / ``logsumexp``) in fp32 before casting
         back to the input dtype, for numerically stable log-probs. ``False`` runs
         it in the input dtype, saving a little memory at the cost of a per-token
         bf16 quantisation error that can bias importance-sampling ratios.
     :type cast_logprobs_to_fp32: bool, optional
-    :param chunk_rows: Primary chunk-size knob for fused logit tiles. Applies
+    :param chunk_rows: Primary chunk-size setting for fused logit tiles. Applies
         to both standard and Liger paths.
     :type chunk_rows: int | None, optional
     :param use_liger_loss: Use the Liger fused policy loss, defaults to ``False``
@@ -314,7 +308,6 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
         whiten_advantages: bool = True,
         gradient_checkpointing: bool = True,
         torch_compiler: str | None = None,
-        reduce_memory_peak: bool = False,
         cast_logprobs_to_fp32: bool = True,
         chunk_rows: int | None = None,
         use_liger_loss: bool = False,
@@ -358,7 +351,6 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
             name="LLMPPO",
             gradient_checkpointing=gradient_checkpointing,
             torch_compiler=torch_compiler,
-            reduce_memory_peak=reduce_memory_peak,
             cast_logprobs_to_fp32=cast_logprobs_to_fp32,
             chunk_rows=chunk_rows,
             quantization_config=quantization_config,
@@ -438,7 +430,7 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
             the captured per-row sampling logprobs; otherwise it is ``None``.
         :rtype: ActionResult
         """
-        prompt_batch = normalize_reasoning_prompt_batch(obs)
+        prompts = normalize_prompt_batch(obs)
         # Capture vLLM sampling logprobs only for training rollouts when the
         # mismatch correction is enabled; ``None`` on the HF path / eval.
         sampling_logps: list[torch.Tensor | None] | None = None
@@ -455,55 +447,42 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
                 except StopIteration:
                     actor_device = torch.device(self.device)
                 with torch.inference_mode(), self._amp_ctx():
-                    completion_ids = []
+                    token_ids_list = []
                     completion_masks = []
 
                     for start in range(
                         0,
-                        len(prompt_batch),
+                        len(prompts),
                         self.hf_generate_chunk_size,
                     ):
-                        chunk = prompt_batch[
-                            start : start + self.hf_generate_chunk_size
-                        ]
-                        for prompt_dict in chunk:
-                            prompt = prepare_prompt_hf_generate(
-                                prompt_dict, actor_device
-                            )
+                        chunk = prompts[start : start + self.hf_generate_chunk_size]
+                        for prompt in chunk:
+                            prompt = prepare_prompt_hf_generate(prompt, actor_device)
                             input_ids = prompt["input_ids"]
                             attention_mask = prompt["attention_mask"]
-                            stitch_ids = prompt["stitch_prefix_ids"]
-                            initial_prompt_len = prompt["initial_prompt_len"]
-                            completion_id = self.actor.generate(
+                            token_ids = self.actor.generate(
                                 input_ids=input_ids,
                                 attention_mask=attention_mask,
                                 generation_config=self.generation_config,
                             )
-                            completion_id, full_prompt_len = (
-                                stitch_completion_after_windowed_hf_generate(
-                                    completion_id,
-                                    stitch_ids,
-                                    initial_prompt_len,
-                                )
-                            )
-                            completion_ids.append(completion_id)
+                            token_ids_list.append(token_ids)
                             completion_masks.append(
                                 build_completion_mask(
-                                    completion_id,
-                                    full_prompt_len,
+                                    token_ids,
+                                    int(input_ids.shape[-1]),
                                     self.pad_token_id,
                                 )
                             )
             else:
                 self._prepare_vllm_for_generation()
                 (
-                    completion_ids,
+                    token_ids_list,
                     completion_masks,
                     sampling_logps,
                 ) = self._generate_with_vllm_colocate(
                     # ReasoningPrompts is a TypedDict, i.e. a plain dict at
                     # runtime; the base helper takes untyped prompt dicts.
-                    prompt_batch,
+                    prompts,
                     1,
                     temperature=self.temperature
                     if training
@@ -511,7 +490,7 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
                     capture_sampling_logps=capture_sampling_logps,
                 )
 
-        return ActionResult(completion_ids, completion_masks, sampling_logps)
+        return ActionResult(token_ids_list, completion_masks, sampling_logps)
 
     if TYPE_CHECKING:
         # PPO always trains with a value head, so the fused forward always
@@ -531,7 +510,7 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
     ) -> dict[str, float]:
         """Update actor and critic adapters using configured PPO granularity.
 
-        :param experiences: ``(completion_ids, action_masks, rewards)``. For
+        :param experiences: ``(token_ids, action_masks, rewards)``. For
             single-turn, ``rewards`` is a flat tensor of scalars; for multi-turn,
             shape ``[batch, max_turns]`` per-turn rewards.
         :type experiences: LLMRolloutExperiences
@@ -541,7 +520,7 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
         :param sampling_logps: Optional per-row flat vLLM sampling logprobs (one
             1-D tensor per trajectory, generated tokens only; concatenated across
             turns for multi-turn) for the vLLM sampling-mismatch correction.
-            Parallel to the stacked ``completion_ids`` rows. ``None`` disables
+            Parallel to the stacked ``token_ids`` rows. ``None`` disables
             the correction for this update.
         :type sampling_logps: list[torch.Tensor | None] | None
         :return: Mean training metrics across PPO minibatch updates.
@@ -549,14 +528,14 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
         """
         self._prepare_vllm_for_training()
         with self.memory_efficient_params_context():
-            completion_ids, action_masks, rewards = stack_and_pad_experiences(
+            token_ids, action_masks, rewards = stack_and_pad_experiences(
                 *experiences,
                 padding_values=[self.pad_token_id, False, None],
             )
-            completion_ids = completion_ids.to(self.device)
+            token_ids = token_ids.to(self.device)
             action_masks = action_masks.to(self.device)
             action_mask_bool = action_masks.bool()
-            num_samples = completion_ids.shape[0]
+            num_samples = token_ids.shape[0]
 
             if turn_ids is None:
                 turn_ids = torch.where(
@@ -591,7 +570,7 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
             }
             reference_log_probs, old_log_probs, old_values = (
                 self._fused_forward_no_grad(
-                    completion_ids,
+                    token_ids,
                     batch_size=batch_size,
                 )
             )
@@ -647,7 +626,7 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
                         batch_turn_ids,
                     ) = get_experiences_samples(
                         minibatch_idxs,
-                        completion_ids,
+                        token_ids,
                         action_masks,
                         old_log_probs,
                         reference_log_probs,
@@ -822,8 +801,8 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
         result.update(is_metrics)
 
         # Wire averaged metrics into the metrics tracker.
-        completion_list = experiences[0]
-        completion_length = np.mean([c.shape[-1] for c in completion_list])
+        token_ids_list = experiences[0]
+        completion_length = np.mean([c.shape[-1] for c in token_ids_list])
         agg = aggregate_metrics_dict(
             self.accelerator,
             {
@@ -841,77 +820,6 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
             self.metrics.log(key, value)
 
         return result
-
-    def test(
-        self,
-        env: ReasoningGym | TokenizedMultiTurnEnv,
-        loop: int = 1,
-        *args: Any,
-        **kwargs: Any,
-    ) -> npt.NDArray:
-        """Return fitness (test) score of llm on test sub-set.
-
-        ``ReasoningGym`` (and compatible dataset envs): ``reset`` returns a batch
-        of prompt dicts; each ``step`` accepts completion id tensors and returns
-        the next batch plus rewards. ``loop`` iterations advance the test
-        dataloader that many times.
-
-        :param env: A :class:`~agilerl.utils.llm_utils.ReasoningGym` or
-            :class:`~agilerl.llm_envs.TokenObservationWrapper`.
-        :type env: ReasoningGym | TokenizedMultiTurnEnv
-        :param loop: Number of outer test iterations (dataloader passes or episodes).
-        :type loop: int
-        :return: Mean reward from the test loop (scalar numpy array).
-        :rtype: npt.NDArray
-        """
-        eval_context = getattr(env, "eval_mode", nullcontext)
-        with eval_context():
-            if isinstance(env, ReasoningGym):
-                prompts = env.reset()
-                rewards = []
-                for _ in range(loop):
-                    completion_ids = self.get_action(
-                        prompts, training=False
-                    ).completion_ids
-                    next_prompts, reward = env.step(completion_ids)
-                    prompts = next_prompts
-                    rewards.append(reward)
-                reward_tensor = torch.cat(rewards)
-            elif isinstance(env, TokenizedMultiTurnEnv):
-                all_rewards: list[torch.Tensor] = []
-                for _ in range(loop):
-                    prompt_dict, _info = env.reset()
-                    terminated, truncated = False, False
-                    while not terminated and not truncated:
-                        completion_ids = self.get_action(
-                            [prompt_dict],
-                            training=False,
-                        ).completion_ids
-                        full = completion_ids[0]
-                        obs, reward, terminated, truncated, _info = env.step(full)
-                        # ``obs`` is the empty sentinel once the episode ends;
-                        # only live prompts feed the next turn.
-                        if is_reasoning_prompts(obs):
-                            prompt_dict = obs
-                        all_rewards.append(
-                            torch.tensor(
-                                [float(reward)],
-                                dtype=torch.float32,
-                                device=full.device,
-                            )
-                        )
-                reward_tensor = torch.cat(all_rewards)
-            else:
-                msg = (
-                    "env must be a ReasoningGym (or subclass) or "
-                    f"TokenizedMultiTurnEnv; got {type(env).__name__}"
-                )
-                raise TypeError(msg)
-        mean_fit = torch.mean(reward_tensor.float()).item()
-        self.metrics.add_fitness(mean_fit)
-        if self.accelerator is not None:
-            self.accelerator.wait_for_everyone()
-        return np.array(mean_fit)
 
     def _validate_core_args(
         self,
@@ -998,10 +906,9 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
             msg = "turn_ratio_pooling must be one of ['mean', 'sum']."
             raise ValueError(msg)
         # IS / ratio-pooling level for the policy surrogate, orthogonal to the
-        # GAE advantage granularity. ``"auto"`` preserves legacy behavior:
-        # turn-level when the batch is multi-turn and ``turn_level_clip`` is set,
-        # else token-level. Explicit ``token``/``turn``/``trajectory`` override
-        # (length-normalized mean pooling, consistent with GRPO/GSPO).
+        # GAE advantage granularity. ``"auto"`` pools at GAE granularity when
+        # ``turn_level_clip`` is set, else token-level. Explicit
+        # ``token``/``turn``/``trajectory`` use length-normalized mean pooling.
         self.importance_sampling_level = importance_sampling_level
         # Turn-level ratio pooling reduction (sum=product ratio, mean=geometric
         # mean ratio) used by both the standard and Liger PPO policy losses.
@@ -1062,19 +969,19 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
         :return: Effective PPO granularity.
         :rtype: str
         """
-        if self.advantage_granularity in {"turn", "token"}:
-            return self.advantage_granularity
-
-        per_sample_num_turns = turn_ids.max(dim=1).values + 1
-        all_single_turn = bool((per_sample_num_turns <= 1).all())
-        return "token" if all_single_turn else "turn"
+        return resolve_batch_advantage_granularity(
+            self.advantage_granularity,
+            turn_ids,
+            single_turn="token",
+            multi_turn="turn",
+        )
 
     def _resolve_is_level(self, ppo_granularity: str) -> str:
         """Resolve the effective importance-sampling (ratio-pooling) level.
 
-        ``"auto"`` reproduces the legacy ``turn_level_clip`` behavior: pool at
-        the GAE granularity (``ppo_granularity``) when ``turn_level_clip`` is
-        set, else token-level. Explicit ``token``/``turn``/``trajectory`` override.
+        ``"auto"`` pools at the GAE granularity (``ppo_granularity``) when
+        ``turn_level_clip`` is set, else token-level. Explicit
+        ``token``/``turn``/``trajectory`` override.
 
         :param ppo_granularity: Resolved GAE advantage granularity (token/turn).
         :type ppo_granularity: str

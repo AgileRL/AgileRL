@@ -56,10 +56,10 @@ for you:
 the trajectories a rank holds must divide evenly into mini-batches. AgileRL
 validates both and raises rather than silently rounding.
 
-The useful consequence is that the two knobs are independent:
-``micro_batch_size_per_gpu`` is now purely a **memory** knob, and
-``mini_batch_size`` is purely a **learning-cadence** knob. Lowering the
-micro-batch to fit a longer sequence into memory no longer changes how often the
+The two settings are independent:
+``micro_batch_size_per_gpu`` is a **memory** setting, and
+``mini_batch_size`` is a **learning-cadence** setting. Lowering the
+micro-batch to fit a longer sequence into memory does not change how often the
 optimizer steps.
 
 Defaults

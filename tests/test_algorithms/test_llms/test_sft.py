@@ -23,7 +23,7 @@ from transformers import AutoTokenizer
 
 from agilerl.algorithms.core.base import EvolvableAlgorithm, OptimizerWrapper
 from agilerl.algorithms.sft import SFT
-from agilerl.llm_envs import SFTGym
+from agilerl.llm_envs import DatasetEnv
 from tests import TINY_LLM_FIXTURE_PATH
 from tests.test_algorithms.test_llms.llm_helpers import (
     _patch_mps_learn_hooks,
@@ -40,6 +40,7 @@ def make_sft_gym(
     data_batch_size_per_gpu: int = 8,
     response_column: str = "response",
 ):
+    del accelerator  # DatasetEnv shards via rank/world_size, not accelerator
     train_dataset = Dataset.from_dict(
         {
             "prompt": [f"Prompt {i}" for i in range(num_samples)],
@@ -52,13 +53,13 @@ def make_sft_gym(
             response_column: [f"Response {i}" for i in range(num_samples)],
         }
     )
-    return SFTGym(
+    return DatasetEnv(
         train_dataset=train_dataset,
         test_dataset=test_dataset,
         tokenizer=tokenizer,
+        objective="sft",
         data_batch_size_per_gpu=data_batch_size_per_gpu,
         response_column=response_column,
-        accelerator=accelerator,
     )
 
 
@@ -351,7 +352,7 @@ class TestSFTLearn:
         train_dataset = Dataset.from_dict(
             {
                 "prompt": [f"Prompt {i}" for i in range(100)],
-                "target": [
+                "response": [
                     f"This is a good response for prompt {i}" for i in range(100)
                 ],
             },
@@ -359,18 +360,18 @@ class TestSFTLearn:
         test_dataset = Dataset.from_dict(
             {
                 "prompt": [f"Prompt {i}" for i in range(100)],
-                "target": [
+                "response": [
                     f"This is a good response for prompt {i}" for i in range(100)
                 ],
             },
         )
         tokenizer = AutoTokenizer.from_pretrained(pretrained_model_name_or_path)
-        env = SFTGym(
+        env = DatasetEnv(
             train_dataset=train_dataset,
             test_dataset=test_dataset,
             tokenizer=tokenizer,
+            objective="sft",
             data_batch_size_per_gpu=data_batch_size,
-            accelerator=sft.accelerator,
         )
         for name, param in sft.actor.named_parameters():
             if ("lora_A" in name or "lora_B" in name) and param is not None:
@@ -488,7 +489,7 @@ class TestSFTTest:
         train_dataset = Dataset.from_dict(
             {
                 "prompt": [f"Prompt {i}" for i in range(100)],
-                "target": [
+                "response": [
                     f"This is a good response for prompt {i}" for i in range(100)
                 ],
             },
@@ -496,18 +497,18 @@ class TestSFTTest:
         test_dataset = Dataset.from_dict(
             {
                 "prompt": [f"Prompt {i}" for i in range(100)],
-                "target": [
+                "response": [
                     f"This is a good response for prompt {i}" for i in range(100)
                 ],
             },
         )
         tokenizer = AutoTokenizer.from_pretrained(pretrained_model_name_or_path)
-        env = SFTGym(
+        env = DatasetEnv(
             train_dataset=train_dataset,
             test_dataset=test_dataset,
             tokenizer=tokenizer,
+            objective="sft",
             data_batch_size_per_gpu=data_batch_size,
-            accelerator=sft.accelerator,
         )
         fitness = sft.test(env, loop=loop)
         assert isinstance(fitness, np.ndarray)
@@ -519,15 +520,25 @@ class TestSFTTest:
     def test_sft_test_method_waits_for_everyone(self):
         import contextlib
 
+        # A realistic collated batch: ``test`` narrows what ``reset`` returns
+        # before handing it to ``learn``, so a placeholder would not get through.
+        batch = {
+            "prompt": ["p"],
+            "prompt_lengths": [1],
+            "response": ["r"],
+            "input_ids": torch.ones(1, 3, dtype=torch.long),
+            "attention_mask": torch.ones(1, 3, dtype=torch.long),
+        }
+
         class DummySFTEnv:
             def eval_mode(self):
                 return contextlib.nullcontext()
 
             def reset(self):
-                return {"prompts": []}
+                return batch
 
             def step(self):
-                return {"prompts": []}
+                return batch
 
         sft = SFT(
             actor_network=create_module(
@@ -552,6 +563,47 @@ class TestSFTTest:
         with patch.object(sft, "learn", return_value={"loss": 1.0}):
             sft.test(DummySFTEnv(), loop=1)
         acc.wait_for_everyone.assert_called()
+
+    def test_sft_test_rejects_a_batch_from_the_wrong_objective(self):
+        """An objective='preference' env fails at the boundary, not inside the loss."""
+        import contextlib
+
+        class DummyPreferenceEnv:
+            def eval_mode(self):
+                return contextlib.nullcontext()
+
+            def reset(self):
+                return {
+                    "prompt": ["p"],
+                    "prompt_lengths": [1],
+                    "chosen": ["c"],
+                    "rejected": ["r"],
+                    "chosen_input_ids": torch.ones(1, 3, dtype=torch.long),
+                    "chosen_attention_mask": torch.ones(1, 3, dtype=torch.long),
+                    "rejected_input_ids": torch.ones(1, 3, dtype=torch.long),
+                    "rejected_attention_mask": torch.ones(1, 3, dtype=torch.long),
+                }
+
+        sft = SFT(
+            actor_network=create_module(
+                input_size=10, max_tokens=20, vocab_size=100, device="cpu"
+            ),
+            pad_token_id=99,
+            pad_token="<pad>",
+            lora_config=LoraConfig(
+                r=4,
+                lora_alpha=16,
+                target_modules=["linear_1"],
+                task_type="CAUSAL_LM",
+                lora_dropout=0.05,
+            ),
+            accelerator=None,
+            device="cpu",
+            micro_batch_size_per_gpu=1,
+            use_liger_loss=False,
+        )
+        with pytest.raises(TypeError, match="needs an objective='sft'"):
+            sft.test(DummyPreferenceEnv(), loop=1)
 
 
 class TestSFTLigerUnavailableBehaviour:

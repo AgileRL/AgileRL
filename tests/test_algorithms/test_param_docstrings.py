@@ -3,8 +3,8 @@
 
 """Guard: every algorithm constructor argument must be documented.
 
-With so many tunable knobs across the RL and LLM algorithms it is easy for a
-new ``__init__`` parameter to land without a matching ``:param:`` entry (or for
+With so many tunable settings across the RL and LLM algorithms it is easy for a
+new ``__init__`` parameter to be added without a matching ``:param:`` entry (or for
 a removed parameter to leave a stale one behind). This test parses the source
 with :mod:`ast` -- it imports nothing, so it runs in every CI lane regardless of
 optional dependencies -- and fails if an algorithm class that documents *some*
@@ -13,9 +13,9 @@ of its constructor parameters does not document *all* of them.
 Rule: a class is audited when it defines ``__init__`` and its class (or
 ``__init__``) docstring contains at least one ``:param:`` entry. Audited classes
 must document every constructor parameter (excluding ``self`` and
-``*args`` / ``**kwargs``) and must not carry ``:param:`` entries for parameters
-that no longer exist. Classes that document no parameters at all (internal
-helpers) are exempt.
+``*args`` / ``**kwargs``) and must not carry ``:param:`` entries for
+parameters absent from the class. Classes that document no parameters
+at all (internal helpers) are exempt.
 """
 
 from __future__ import annotations

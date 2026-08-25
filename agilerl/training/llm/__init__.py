@@ -1,14 +1,17 @@
 # Copyright 2026 AgileRL
 # SPDX-License-Identifier: Apache-2.0
 
-from agilerl.training.llm.multiturn import finetune_llm_multiturn
-from agilerl.training.llm.preference import finetune_llm_preference
-from agilerl.training.llm.reasoning import finetune_llm_reasoning
-from agilerl.training.llm.sft import finetune_llm_sft
+"""LLM finetuning entry points.
 
-__all__ = [
-    "finetune_llm_multiturn",
-    "finetune_llm_preference",
-    "finetune_llm_reasoning",
-    "finetune_llm_sft",
-]
+Two loops, matching the LLM env taxonomy:
+
+* :func:`train_llm_rollout` -- generative rollout RL over a ``RolloutHarness``
+  (GRPO / PPO / REINFORCE; reasoning is ``max_turns=1``).
+* :func:`train_llm_dataset` -- teacher-forced dataloader training over a
+  ``DatasetEnv`` (preference / SFT).
+"""
+
+from agilerl.training.llm.dataset import train_llm_dataset
+from agilerl.training.llm.rollout import train_llm_rollout
+
+__all__ = ["train_llm_dataset", "train_llm_rollout"]

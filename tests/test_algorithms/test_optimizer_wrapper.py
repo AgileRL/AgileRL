@@ -1178,8 +1178,8 @@ def test_optimizer_wrapper_importable_without_llm_dependencies():
     original_module = sys.modules.pop("agilerl.algorithms.core.optimizer_wrapper", None)
 
     try:
-        # Patch HAS_LLM_DEPENDENCIES before reimporting: the module no longer
-        # imports peft at runtime, so this must succeed either way.
+        # Patch HAS_LLM_DEPENDENCIES before reimporting: optimizer_wrapper
+        # does not import peft, so the import succeeds either way.
         with patch("agilerl.HAS_LLM_DEPENDENCIES", False):
             import agilerl.algorithms.core.optimizer_wrapper as optimizer_wrapper_reloaded
 

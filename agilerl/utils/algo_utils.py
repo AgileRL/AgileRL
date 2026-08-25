@@ -37,6 +37,7 @@ from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
 from typing_extensions import TypeVarTuple, Unpack
 
 from agilerl import HAS_LLM_DEPENDENCIES
+from agilerl.modules.base import EvolvableModule, ModuleDict
 from agilerl.modules.custom_components import NoisyLinear
 from agilerl.modules.dummy import DummyEvolvable
 from agilerl.protocols import (
@@ -65,7 +66,6 @@ from agilerl.typing import (
 
 if TYPE_CHECKING:
     from agilerl.algorithms.core.base import EvolvableAlgorithm
-    from agilerl.modules.base import ModuleDict
 
 if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
     from peft import PeftConfig, PeftModel, get_peft_model
@@ -399,6 +399,7 @@ def share_encoder_parameters(
     :param others: The other networks whose encoder parameters will be pinned to the policy.
     :type others: EvolvableNetworkProtocol
     """
+    # circular import with agilerl.networks
     from agilerl.networks.base import EvolvableNetwork
 
     assert isinstance(policy, EvolvableNetwork), "Policy must be an EvolvableNetwork"
@@ -880,8 +881,8 @@ def recursive_check_module_attrs(obj: object, networks_only: bool = False) -> bo
     :return: True if the object has any attributes that are EvolvableModuleProtocol objects or Optimizer's, False otherwise.
     :rtype: bool
     """
+    # circular import with agilerl.algorithms.core.registry
     from agilerl.algorithms.core.optimizer_wrapper import OptimizerWrapper
-    from agilerl.modules.base import EvolvableModule
 
     check_types = (OptimizedModule, EvolvableModule)
     if not networks_only:
@@ -1011,8 +1012,6 @@ def module_checkpoint_dict(
     :return: A dictionary containing the module's class, init dict, and state dict.
     :rtype: dict[str, object]
     """
-    from agilerl.modules.base import EvolvableModule, ModuleDict
-
     # Checkpointing is only invoked on network attributes; the wider
     # EvolvableAttributeType arms (optimizers) are handled by OptimizerWrapper.
     if isinstance(module, ModuleDict):
@@ -1188,7 +1187,7 @@ def concatenate_spaces(space_list: list[spaces.Space]) -> spaces.Space:
 
     box_spaces = [space for space in space_list if isinstance(space, spaces.Box)]
     if len(box_spaces) == len(space_list):
-        # Require image spaces to have the same shape in order to concatenate
+        # Require image spaces to have the same shape for concatenation
         if all(is_image_space(space) for space in box_spaces):
             assert all(space.shape == box_spaces[0].shape for space in box_spaces), (
                 "Cannot concatenate image spaces with different CxHxW dimensions."

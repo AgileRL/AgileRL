@@ -29,9 +29,9 @@ from agilerl.arena.typing import JSONValue
 
 logger = logging.getLogger(__name__)
 
-_ALLOWED_OPTION_TYPES = {"string", "int", "bool", "json"}
+ALLOWED_OPTION_TYPES = {"string", "int", "bool", "json"}
 # Manifest option type -> the Click parameter type to parse it with.
-_CLICK_OPTION_TYPES: dict[str, Any] = {
+CLICK_OPTION_TYPES: dict[str, type[str | int] | click.ParamType] = {
     "json": str,
     "int": int,
     "bool": click.BOOL,
@@ -166,7 +166,7 @@ def _typed_option(spec: ManifestParamSpec) -> Callable[[Any], Any]:
     return click.option(
         *tuple(spec["click"]["option"]),
         pythonize_manifest_param_name(spec["name"]),
-        type=_CLICK_OPTION_TYPES[spec["type"]],
+        type=CLICK_OPTION_TYPES[spec["type"]],
         required=bool(spec["required"]),
         default=None,
         show_default=False,
@@ -176,19 +176,19 @@ def _typed_option(spec: ManifestParamSpec) -> Callable[[Any], Any]:
 
 
 @dataclass(frozen=True)
-class _OptionRule:
+class OptionRule:
     """A predicate over a param spec and the Click-option builder it selects."""
 
     match: Callable[[ManifestParamSpec], bool]
     build: Callable[[ManifestParamSpec], Callable[[Any], Any]]
 
 
-_OPTION_RULES: tuple[_OptionRule, ...] = (
-    _OptionRule(
+OPTION_RULES: tuple[OptionRule, ...] = (
+    OptionRule(
         lambda spec: spec["in"] == "client" and spec["type"] == "bool",
         _client_flag_option,
     ),
-    _OptionRule(
+    OptionRule(
         lambda spec: (
             spec["type"] == "bool" and spec["in"] == "body" and not spec["required"]
         ),
@@ -201,7 +201,7 @@ def _manifest_spec_to_click_option(spec: ManifestParamSpec) -> Callable[[Any], A
     """Build the ``click.option`` decorator for a single manifest param spec.
 
     Validates the declared type, then dispatches to the first matching rule in
-    :data:`_OPTION_RULES`, falling back to a plain typed option.
+    :data:`OPTION_RULES`, falling back to a plain typed option.
 
     :param spec: The manifest parameter spec.
     :type spec: ManifestParamSpec
@@ -209,14 +209,14 @@ def _manifest_spec_to_click_option(spec: ManifestParamSpec) -> Callable[[Any], A
     :rtype: Callable[[Any], Any]
     :raises ArenaValidationError: If the declared option type is unsupported.
     """
-    if spec["type"] not in _ALLOWED_OPTION_TYPES:
+    if spec["type"] not in ALLOWED_OPTION_TYPES:
         msg = f"Unsupported on-prem option type {spec['type']!r}"
         raise ArenaValidationError(
             msg,
             cli_hint="Upgrade agilerl — the server sent an on-prem "
             "configuration this version can't use.",
         )
-    for rule in _OPTION_RULES:
+    for rule in OPTION_RULES:
         if rule.match(spec):
             return rule.build(spec)
     return _typed_option(spec)

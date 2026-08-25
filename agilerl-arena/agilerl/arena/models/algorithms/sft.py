@@ -18,4 +18,4 @@ class SFTSpec(LLMAlgorithmSpec):
     """Specification for SFT algorithm."""
 
     lr: float = Field(default=0.00005)
-    env_type: ClassVar[LLMEnvType] = LLMEnvType.SFT
+    env_type: ClassVar[LLMEnvType] = LLMEnvType.DATASET

@@ -3021,7 +3021,10 @@ class TestTrainOnPolicy:
         def fake_collect(*args, **kwargs):
             return [], None, None, None, None
 
-        monkeypatch.setattr("agilerl.rollouts.collect_rollouts_recurrent", fake_collect)
+        monkeypatch.setattr(
+            "agilerl.training.train_on_policy.collect_rollouts_recurrent",
+            fake_collect,
+        )
 
         train_on_policy(
             env,

@@ -41,6 +41,8 @@ class NeuralTSSpec(RLAlgorithmSpec):
         :return: Training function
         :rtype: Callable[..., Any]
         """
-        from agilerl.training.train_bandits import train_bandits
+        from agilerl.training.train_bandits import (  # circular import with agilerl.training
+            train_bandits,
+        )
 
         return train_bandits

@@ -1,4 +1,4 @@
-.. _multiturn_grpo_ppo_tutorial:
+.. _env_grpo_ppo_tutorial:
 
 Multi-turn Fine-Tuning with LLMPPO, LLMREINFORCE, and GRPO
 ==========================================================
@@ -106,7 +106,7 @@ Dependencies
 
 .. code-block:: bash
 
-    pip install -U agilerl[llm] gem
+    pip install -U agilerl[llm] gem-llm
 
 
 .. code-block:: python
@@ -114,11 +114,11 @@ Dependencies
     import gem
     import yaml
     from transformers import AutoTokenizer
-    from agilerl.algorithms import GRPO, LLMPPO, LLMREINFORCE
-    from agilerl.training.llm import finetune_llm_multiturn
+    from agilerl.training.llm import train_llm_rollout
     from agilerl.utils.algo_utils import VLLMConfig
     from agilerl.utils.llm_utils import create_llm_accelerator
-    from agilerl.llm_envs import TokenObservationWrapper
+    from agilerl.utils.utils import create_population
+    from agilerl.llm_envs import RolloutHarness
 
 Shared setup
 ------------
@@ -127,8 +127,8 @@ All runs use:
 
 * Environment: ``game:GuessTheNumber-v0-easy``
 * Model: ``Qwen/Qwen2.5-0.5B-Instruct``
-* Wrapper: :class:`TokenObservationWrapper <agilerl.llm_envs.TokenObservationWrapper>`
-* Training loop: :meth:`finetune_llm_multiturn() <agilerl.training.llm.multiturn.finetune_llm_multiturn>`
+* Driver: :class:`RolloutHarness <agilerl.llm_envs.RolloutHarness>` (over the OpenEnv interface)
+* Training loop: :meth:`train_llm_rollout() <agilerl.training.llm.train_llm_rollout>`
 * Population size: ``1``
 * Evolution/HPO: disabled
 
@@ -151,17 +151,16 @@ All runs use:
         max_model_len = 1024
         max_output_tokens = 64
 
-        def env_factory():
-            env = gem.make(ENV_NAME)
-            return TokenObservationWrapper(
-                env=env,
-                tokenizer=tokenizer,
-                max_turns=max_turns,
-                pad_id=tokenizer.pad_token_id,
-                apply_chat_template=True,
-                max_model_len=max_model_len,
-                max_output_tokens=max_output_tokens,
-            )
+        # Each rollout drives its own in-process gem env instance.
+        env_factory = lambda: RolloutHarness.local(
+            gem.make(ENV_NAME),
+            tokenizer,
+            max_turns=max_turns,
+            pad_id=tokenizer.pad_token_id,
+            apply_chat_template=True,
+            max_model_len=max_model_len,
+            max_output_tokens=max_output_tokens,
+        )
 
         accelerator = create_llm_accelerator()
         vllm_config = VLLMConfig(
@@ -182,7 +181,7 @@ Run a Baseline
 
     .. code-block:: bash
 
-      python tutorials/llm_finetuning/multiturn_grpo_ppo.py \
+      python tutorials/llm_finetuning/env_grpo_ppo.py \
         --algo LLMPPO \
         --config configs/training/llm_finetuning/ppo_llm.yaml \
         --max-steps 4096 \
@@ -195,7 +194,7 @@ Run a Baseline
 
     .. code-block:: bash
 
-      python tutorials/llm_finetuning/multiturn_grpo_ppo.py \
+      python tutorials/llm_finetuning/env_grpo_ppo.py \
         --algo LLMREINFORCE \
         --config configs/training/llm_finetuning/reinforce_llm.yaml \
         --max-steps 4096 \
@@ -208,9 +207,9 @@ Run a Baseline
 
     .. code-block:: bash
 
-      python tutorials/llm_finetuning/multiturn_grpo_ppo.py \
+      python tutorials/llm_finetuning/env_grpo_ppo.py \
         --algo GRPO \
-        --config configs/training/llm_finetuning/grpo_multiturn.yaml \
+        --config configs/training/llm_finetuning/grpo_env.yaml \
         --max-steps 4096 \
         --evaluation-interval 10 \
         --output-dir saved_llms/multiturn_grpo
@@ -307,8 +306,10 @@ These values are intentionally conservative and align with the shipped configs:
 
 .. note::
 
-   For GRPO, ``batch_size`` and ``group_size`` must satisfy divisibility constraints in
-   :meth:`finetune_llm_multiturn() <agilerl.training.llm.multiturn.finetune_llm_multiturn>`.
+   ``BATCH_SIZE`` and ``GROUP_SIZE`` are independent rollout settings. ``RolloutCollector``
+   builds ``batch_size * group_size`` env slots; the shared
+   :class:`~agilerl.llm_envs.TaskAssigner` gives every env in a group the same task
+   (dataset row or seed), so group-relative advantages compare like with like.
 
 Train call (no evo/HPO)
 -----------------------
@@ -317,8 +318,8 @@ The key training call is the same for all algorithms. Evolutionary fields are ex
 
 .. code-block:: python
 
-    finetune_llm_multiturn(
-        pop=pop,
+    train_llm_rollout(
+        pop=[agent],
         max_turns=max_turns,
         env_factory=env_factory,
         init_hp=init_hp,
@@ -340,5 +341,5 @@ Full training code
 
 .. collapse:: Full code
 
-   .. literalinclude:: ../../../tutorials/llm_finetuning/multiturn_grpo_ppo.py
+   .. literalinclude:: ../../../tutorials/llm_finetuning/env_grpo_ppo.py
       :language: python

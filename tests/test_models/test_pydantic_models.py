@@ -353,18 +353,19 @@ class TestLLMEnvSpec:
     def test_name_returns_dataset(self):
         """name property returns dataset."""
         spec = LLMEnvSpec(
-            env_type=LLMEnvType.PREFERENCE,
+            env_type=LLMEnvType.DATASET,
+            objective="sft",
             dataset="my_dataset",
         )
         assert spec.name == "my_dataset"
 
-    def test_reasoning_missing_reward_fn_name(self):
-        """reasoning without reward_fn_name."""
-        with pytest.raises(ValueError, match="reward_fn_name is required"):
+    def test_reasoning_missing_rubric_name(self):
+        """reasoning without rubric_name."""
+        with pytest.raises(ValueError, match="rubric_name is required"):
             LLMEnvSpec(
-                env_type=LLMEnvType.REASONING,
+                env_type=LLMEnvType.ROLLOUT,
                 dataset="ds",
-                reward_file_path="some/path.py",
+                rubric_file_path="some/path.py",
                 prompt_template={"system": "hi"},
             )
 
@@ -372,26 +373,27 @@ class TestLLMEnvSpec:
         """reasoning without prompt_template."""
         with pytest.raises(ValueError, match="Prompt template is required"):
             LLMEnvSpec(
-                env_type=LLMEnvType.REASONING,
+                env_type=LLMEnvType.ROLLOUT,
                 dataset="ds",
-                reward_file_path="some/path.py",
-                reward_fn_name="my_fn",
+                rubric_file_path="some/path.py",
+                rubric_name="my_fn",
             )
 
-    def test_preference_missing_dataset(self):
-        """preference without dataset."""
-        with pytest.raises(ValueError, match="dataset is required for preference"):
-            LLMEnvSpec(env_type=LLMEnvType.PREFERENCE)
+    def test_dataset_missing_dataset(self):
+        """A dataset env without a dataset."""
+        with pytest.raises(ValueError, match="dataset is required for dataset"):
+            LLMEnvSpec(env_type=LLMEnvType.DATASET, objective="sft")
 
-    def test_sft_missing_dataset(self):
-        """SFT without dataset."""
-        with pytest.raises(ValueError, match="dataset is required for SFT"):
-            LLMEnvSpec(env_type=LLMEnvType.SFT)
+    def test_dataset_missing_objective(self):
+        """A dataset env without an objective."""
+        with pytest.raises(ValueError, match="objective is required for dataset"):
+            LLMEnvSpec(env_type=LLMEnvType.DATASET, dataset="ds")
 
     def test_load_dataset_hf(self):
         """_load_dataset_hf with columns rename."""
         spec = LLMEnvSpec(
-            env_type=LLMEnvType.PREFERENCE,
+            env_type=LLMEnvType.DATASET,
+            objective="sft",
             dataset="my_ds",
             columns={"old": "new"},
         )
@@ -413,7 +415,8 @@ class TestLLMEnvSpec:
     def test_load_dataset_file_with_columns(self):
         """_load_dataset_file with columns rename."""
         spec = LLMEnvSpec(
-            env_type=LLMEnvType.PREFERENCE,
+            env_type=LLMEnvType.DATASET,
+            objective="sft",
             dataset="data.parquet",
             columns={"old": "new"},
         )
@@ -434,7 +437,8 @@ class TestLLMEnvSpec:
     def test_load_dataset_dispatches_hf(self):
         """_load_dataset dispatches to HF path for non-parquet."""
         spec = LLMEnvSpec(
-            env_type=LLMEnvType.PREFERENCE,
+            env_type=LLMEnvType.DATASET,
+            objective="sft",
             dataset="some/hf/dataset",
         )
         with patch.object(spec, "_load_dataset_hf", return_value=("t", "v")) as m:
@@ -444,44 +448,74 @@ class TestLLMEnvSpec:
     def test_load_dataset_dispatches_parquet(self):
         """_load_dataset dispatches to the parquet loader for .parquet paths."""
         spec = LLMEnvSpec(
-            env_type=LLMEnvType.PREFERENCE,
+            env_type=LLMEnvType.DATASET,
+            objective="sft",
             dataset="data/train.parquet",
         )
         with patch.object(spec, "_load_dataset_file", return_value=("t", "v")) as m:
             _train, _test = spec._load_dataset()
         m.assert_called_once()
 
-    def test_make_env_invalid_type(self):
-        """make_env with an unexpected env_type."""
+    def test_make_dataset_env_rejects_rollout_spec(self):
+        """A rollout env must be built through make_rollout_env_factory."""
         spec = LLMEnvSpec(
-            env_type=LLMEnvType.PREFERENCE,
+            env_type=LLMEnvType.ROLLOUT,
+            dataset="ds",
+            rubric_file_path="some/path.py",
+            rubric_name="my_fn",
+            prompt_template={"system_0": "hi"},
+        )
+        with pytest.raises(TypeError, match="make_rollout_env_factory"):
+            spec.make_dataset_env(tokenizer=MagicMock())
+
+    def test_make_rollout_env_factory_rejects_dataset_spec(self):
+        """A dataset env must be built through make_dataset_env."""
+        spec = LLMEnvSpec(
+            env_type=LLMEnvType.DATASET,
+            objective="sft",
             dataset="ds",
         )
-        # Monkey-patch env_type to something that passes validators but doesn't
-        # match any if-branch in make_env
-        with (
-            patch.object(
-                spec, "_load_dataset", return_value=(MagicMock(), MagicMock())
-            ),
-            patch.object(spec, "_make_reasoning_env"),
-            patch.object(spec, "_make_preference_env"),
-            patch.object(spec, "_make_sft_env"),
-        ):
-            object.__setattr__(spec, "env_type", "unknown")
-            with pytest.raises(ValueError, match="Invalid environment type"):
-                spec.make_env(tokenizer=MagicMock())
+        with pytest.raises(TypeError, match="make_dataset_env"):
+            spec.make_rollout_env_factory(MagicMock())
 
-    def test_multiturn_entrypoint_non_callable(self):
-        """make_multiturn_env_factory with non-callable entrypoint."""
+    def test_rollout_entrypoint_non_callable(self):
+        """make_rollout_env_factory with non-callable entrypoint."""
         spec = LLMEnvSpec(
-            env_type=LLMEnvType.MULTITURN,
+            env_type=LLMEnvType.ROLLOUT,
             entrypoint="some.module:Cls",
         )
         with patch(
             "agilerl.models.env.resolve_entrypoint_target", return_value="not_callable"
         ):
             with pytest.raises(TypeError, match="resolved to non-callable"):
-                spec.make_multiturn_env_factory(tokenizer=MagicMock())
+                spec.make_rollout_env_factory(tokenizer=MagicMock())
+
+    def test_http_timeout_defaults_to_300s(self):
+        """request_timeout_s unset applies the 300 s per-message bound."""
+        spec = LLMEnvSpec(
+            env_type=LLMEnvType.ROLLOUT, env_url="http://env", max_turns=1
+        )
+        assert spec._http_timeout_s() == 300.0
+
+    def test_http_timeout_zero_disables_the_bound(self):
+        """request_timeout_s=0 means unbounded messages (timeout None)."""
+        spec = LLMEnvSpec(
+            env_type=LLMEnvType.ROLLOUT,
+            env_url="http://env",
+            max_turns=1,
+            request_timeout_s=0,
+        )
+        assert spec._http_timeout_s() is None
+
+    def test_http_timeout_passes_explicit_value_through(self):
+        """An explicit request_timeout_s is used verbatim."""
+        spec = LLMEnvSpec(
+            env_type=LLMEnvType.ROLLOUT,
+            env_url="http://env",
+            max_turns=1,
+            request_timeout_s=7.5,
+        )
+        assert spec._http_timeout_s() == 7.5
 
 
 class TestBanditEnvSpec:
@@ -563,7 +597,7 @@ class TestPzEnvSpecNonCallable:
         mock_module = MagicMock(spec=[])
         with (
             patch("agilerl.models.env.import_module", return_value=mock_module),
-            patch("agilerl.utils.utils.make_multi_agent_vect_envs") as mock_vect,
+            patch("agilerl.models.env.make_multi_agent_vect_envs") as mock_vect,
         ):
             mock_vect.side_effect = lambda env, **kw: env()
             with pytest.raises(AttributeError, match="has no 'parallel_env'"):
@@ -605,28 +639,49 @@ class TestAlgoSpecClassVars:
     """Lines 302, 335-336, 400, 455 in algo.py."""
 
     def test_llm_spec_num_epochs_kwarg(self):
-        """get_training_kwargs includes num_epochs for LLM."""
-        from agilerl.models.algo import LLMAlgorithmSpec
-        from agilerl.models.env import LLMEnvSpec
+        """get_training_kwargs forwards num_epochs for dataset specs only."""
+        from agilerl.models.algorithms.dpo import DPOSpec
+        from agilerl.models.algorithms.grpo import GRPOSpec
+        from agilerl.models.env import LLMEnvSpec, LLMEnvType
         from agilerl.models.training import TrainingSpec
 
-        spec = LLMAlgorithmSpec.__new__(LLMAlgorithmSpec)
-        object.__setattr__(
-            spec,
-            "__dict__",
-            {
-                "batch_size": 8,
-                "hp_config": None,
-            },
-        )
+        def bare_spec(cls):
+            spec = cls.__new__(cls)
+            object.__setattr__(
+                spec,
+                "__dict__",
+                {
+                    "batch_size": 8,
+                    "hp_config": None,
+                },
+            )
+            return spec
+
         training = TrainingSpec(
             num_epochs=3, checkpoint_steps=100, evaluation_interval=10
         )
-        env_spec = LLMEnvSpec(env_type="preference", dataset="dummy", max_reward=1.0)
-        kwargs = spec.get_training_kwargs(training=training, env_spec=env_spec)
+        # A real spec, not a mock: ``max_reward`` is only forwarded for an
+        # actual LLMEnvSpec.
+        env_spec = LLMEnvSpec(
+            env_type=LLMEnvType.DATASET,
+            objective="preference",
+            dataset="dummy",
+            max_reward=1.0,
+        )
+
+        kwargs = bare_spec(DPOSpec).get_training_kwargs(
+            training=training, env_spec=env_spec
+        )
         assert kwargs["num_epochs"] == 3
         assert kwargs["max_reward"] == 1.0
         assert kwargs["checkpoint_steps"] == 100
+
+        # Rollout loops are step-based: num_epochs is warned about and dropped.
+        with pytest.warns(UserWarning, match="num_epochs"):
+            rollout_kwargs = bare_spec(GRPOSpec).get_training_kwargs(
+                training=training, env_spec=env_spec
+            )
+        assert "num_epochs" not in rollout_kwargs
 
     def test_llm_spec_forwards_checkpoint_path(self):
         from agilerl.models.algo import LLMAlgorithmSpec
@@ -899,7 +954,7 @@ class TestLLMAlgorithmSpecBuild:
         assert "micro_batch_size_per_gpu" not in mock_algo_cls.call_args.kwargs
 
     def test_chunk_rows_forwarded_to_constructor(self):
-        """The manifest chunk_rows knob reaches the algorithm constructor."""
+        """The manifest chunk_rows setting reaches the algorithm constructor."""
         from agilerl.models.algorithms.grpo import GRPOSpec
 
         mock_tokenizer = MagicMock()
@@ -969,7 +1024,7 @@ class TestLLMAlgorithmSpecBuild:
 
         with (
             patch.object(type(spec), "algo_class", return_value=mock_algo_cls),
-            patch("agilerl.utils.algo_utils.VLLMConfig") as mock_vllm,
+            patch("agilerl.models.algo.VLLMConfig") as mock_vllm,
         ):
             mock_vllm.return_value = "coerced_config"
             spec.build_algorithm(tokenizer=mock_tokenizer, index=0)
@@ -1016,7 +1071,6 @@ class TestLLMAlgorithmSpecBuild:
             "beta": 0.01,
             "max_grad_norm": 0.1,
             "update_epochs": 1,
-            "reduce_memory_peak": False,
             "use_separate_reference_adapter": False,
             "calc_position_embeddings": True,
             "gradient_checkpointing": True,
@@ -1225,21 +1279,21 @@ class TestLLMPPOSpec:
         assert spec.use_vllm is True
         assert spec.vllm_config is not None
 
-    def test_get_training_fn_multiturn(self):
+    def test_get_training_fn_rollout(self):
         from agilerl.models.algorithms.llmppo import LLMPPOSpec
 
-        fn = LLMPPOSpec.get_training_fn(multiturn=True)
-        from agilerl.training.llm import finetune_llm_multiturn
+        fn = LLMPPOSpec.get_training_fn()
+        from agilerl.training.llm import train_llm_rollout
 
-        assert fn is finetune_llm_multiturn
+        assert fn is train_llm_rollout
 
     def test_get_training_fn_reasoning(self):
         from agilerl.models.algorithms.llmppo import LLMPPOSpec
 
-        fn = LLMPPOSpec.get_training_fn(multiturn=False)
-        from agilerl.training.llm import finetune_llm_reasoning
+        fn = LLMPPOSpec.get_training_fn()
+        from agilerl.training.llm import train_llm_rollout
 
-        assert fn is finetune_llm_reasoning
+        assert fn is train_llm_rollout
 
 
 class TestLLMREINFORCESpec:
@@ -1259,61 +1313,61 @@ class TestLLMREINFORCESpec:
         assert spec.use_vllm is True
         assert spec.vllm_config is not None
 
-    def test_get_training_fn_multiturn(self):
+    def test_get_training_fn_rollout(self):
         from agilerl.models.algorithms.llmreinforce import LLMREINFORCESpec
 
-        fn = LLMREINFORCESpec.get_training_fn(multiturn=True)
-        from agilerl.training.llm import finetune_llm_multiturn
+        fn = LLMREINFORCESpec.get_training_fn()
+        from agilerl.training.llm import train_llm_rollout
 
-        assert fn is finetune_llm_multiturn
+        assert fn is train_llm_rollout
 
     def test_get_training_fn_reasoning(self):
         from agilerl.models.algorithms.llmreinforce import LLMREINFORCESpec
 
-        fn = LLMREINFORCESpec.get_training_fn(multiturn=False)
-        from agilerl.training.llm import finetune_llm_reasoning
+        fn = LLMREINFORCESpec.get_training_fn()
+        from agilerl.training.llm import train_llm_rollout
 
-        assert fn is finetune_llm_reasoning
+        assert fn is train_llm_rollout
 
 
 class TestCISPOSpec:
     """Lines 25-30 in cispo.py."""
 
-    def test_get_training_fn_multiturn(self):
+    def test_get_training_fn_rollout(self):
         from agilerl.models.algorithms.cispo import CISPOSpec
 
-        fn = CISPOSpec.get_training_fn(multiturn=True)
-        from agilerl.training.llm import finetune_llm_multiturn
+        fn = CISPOSpec.get_training_fn()
+        from agilerl.training.llm import train_llm_rollout
 
-        assert fn is finetune_llm_multiturn
+        assert fn is train_llm_rollout
 
     def test_get_training_fn_reasoning(self):
         from agilerl.models.algorithms.cispo import CISPOSpec
 
-        fn = CISPOSpec.get_training_fn(multiturn=False)
-        from agilerl.training.llm import finetune_llm_reasoning
+        fn = CISPOSpec.get_training_fn()
+        from agilerl.training.llm import train_llm_rollout
 
-        assert fn is finetune_llm_reasoning
+        assert fn is train_llm_rollout
 
 
 class TestGSPOSpec:
     """Lines 25-30 in gspo.py."""
 
-    def test_get_training_fn_multiturn(self):
+    def test_get_training_fn_rollout(self):
         from agilerl.models.algorithms.gspo import GSPOSpec
 
-        fn = GSPOSpec.get_training_fn(multiturn=True)
-        from agilerl.training.llm import finetune_llm_multiturn
+        fn = GSPOSpec.get_training_fn()
+        from agilerl.training.llm import train_llm_rollout
 
-        assert fn is finetune_llm_multiturn
+        assert fn is train_llm_rollout
 
     def test_get_training_fn_reasoning(self):
         from agilerl.models.algorithms.gspo import GSPOSpec
 
-        fn = GSPOSpec.get_training_fn(multiturn=False)
-        from agilerl.training.llm import finetune_llm_reasoning
+        fn = GSPOSpec.get_training_fn()
+        from agilerl.training.llm import train_llm_rollout
 
-        assert fn is finetune_llm_reasoning
+        assert fn is train_llm_rollout
 
 
 class TestRainbowDQNSpec:
@@ -1333,19 +1387,31 @@ class TestSFTSpec:
         from agilerl.models.algorithms.sft import SFTSpec
 
         fn = SFTSpec.get_training_fn()
-        from agilerl.training.llm import finetune_llm_sft
+        from agilerl.training.llm import train_llm_dataset
 
-        assert fn is finetune_llm_sft
+        assert fn is train_llm_dataset
 
 
 class TestGRPOSpec:
-    """Lines 39-40 in grpo.py."""
+    """GRPO algorithm specification."""
 
     def test_vllm_required_when_use_vllm(self):
         from agilerl.models.algorithms.grpo import GRPOSpec
 
         with pytest.raises(ValueError, match="VLLM config is not set"):
             GRPOSpec(group_size=4, use_vllm=True, vllm_config=None)
+
+    def test_advantage_granularity_defaults_to_auto(self):
+        from agilerl.models.algorithms.grpo import GRPOSpec
+
+        spec = GRPOSpec(group_size=4)
+        assert spec.advantage_granularity == "auto"
+
+    def test_advantage_granularity_accepts_auto(self):
+        from agilerl.models.algorithms.grpo import GRPOSpec
+
+        spec = GRPOSpec(group_size=4, advantage_granularity="auto")
+        assert spec.advantage_granularity == "auto"
 
 
 class TestMutationSpecExtraForbid:

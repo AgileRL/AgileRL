@@ -1212,3 +1212,76 @@ class TestMapPytree:
 
         # The function should return the original string as-is for non-tensor/numpy types
         assert result == "string"
+
+
+class TestBC_PolicyBeamRawTruncation:
+    """Generated text is cut at the end-of-answer marker before it is returned.
+
+    Decoding is stubbed rather than sampled: the branch under test is the
+    truncation, and which tokens the model happens to emit is irrelevant to it.
+    """
+
+    @staticmethod
+    def _staged_decode(prompt_len: int, full_text: str):
+        def decode(tokenizer, token_ids):
+            del tokenizer
+            return "P" if len(token_ids) <= prompt_len else full_text
+
+        return decode
+
+    def test_text_after_the_eoa_marker_is_dropped(self, bc_policy, monkeypatch):
+        monkeypatch.setattr(
+            "agilerl.algorithms.bc_lm._decode_str",
+            self._staged_decode(1, "P answer </a> leftover"),
+        )
+        tokens = torch.zeros(1, 1, dtype=torch.long)
+        attn_mask = torch.ones(1, 1, dtype=torch.float)
+
+        generations, _scores = bc_policy.beam_raw(
+            tokens,
+            attn_mask,
+            lambda text: False,
+            beam_width=1,
+            max_generation_len=2,
+        )
+
+        _input_str, outputs = generations[0]
+        assert outputs == ["answer"]
+
+    def test_text_after_the_pad_marker_is_dropped(self, bc_policy, monkeypatch):
+        monkeypatch.setattr(
+            "agilerl.algorithms.bc_lm._decode_str",
+            self._staged_decode(1, "P answer <pad> <pad>"),
+        )
+        tokens = torch.zeros(1, 1, dtype=torch.long)
+        attn_mask = torch.ones(1, 1, dtype=torch.float)
+
+        generations, _scores = bc_policy.beam_raw(
+            tokens,
+            attn_mask,
+            lambda text: False,
+            beam_width=1,
+            max_generation_len=2,
+        )
+
+        _input_str, outputs = generations[0]
+        assert outputs == ["answer"]
+
+    def test_text_without_a_marker_is_returned_whole(self, bc_policy, monkeypatch):
+        monkeypatch.setattr(
+            "agilerl.algorithms.bc_lm._decode_str",
+            self._staged_decode(1, "P answer continues"),
+        )
+        tokens = torch.zeros(1, 1, dtype=torch.long)
+        attn_mask = torch.ones(1, 1, dtype=torch.float)
+
+        generations, _scores = bc_policy.beam_raw(
+            tokens,
+            attn_mask,
+            lambda text: False,
+            beam_width=1,
+            max_generation_len=2,
+        )
+
+        _input_str, outputs = generations[0]
+        assert outputs == ["answer continues"]

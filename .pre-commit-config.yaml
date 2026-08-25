@@ -36,7 +36,7 @@ repos:
           - id: codespell
             args:
                 - --skip=*.css,*.js,*.map,*.scss,*.svg
-                - --ignore-words-list=magent,pres,roate
+                - --ignore-words-list=ans,magent,pres,roate
     - repo: https://github.com/astral-sh/ruff-pre-commit
       rev: v0.16.2
       hooks:

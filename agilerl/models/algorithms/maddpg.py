@@ -47,7 +47,7 @@ class MADDPGSpec(MultiAgentRLAlgorithmSpec):
         :return: Training function
         :rtype: Callable[..., Any]
         """
-        from agilerl.training.train_multi_agent_off_policy import (
+        from agilerl.training.train_multi_agent_off_policy import (  # circular import with agilerl.training
             train_multi_agent_off_policy,
         )
 
