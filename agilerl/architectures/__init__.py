@@ -20,13 +20,15 @@ from agilerl.architectures.nemotron_h import (
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
 
+    from agilerl.protocols import PreTrainedModelProtocol
+
 __all__ = [
     "ZERO3_FAMILY_PATCHES",
     "detect_model_families",
     "install_family_zero3_patches",
 ]
 
-ZERO3_FAMILY_PATCHES: Mapping[str, tuple[Callable[[], object], ...]] = {
+ZERO3_FAMILY_PATCHES: Mapping[str, tuple[Callable[..., object], ...]] = {
     "nemotron_h": (
         patch_nemotron_mamba_fused_path,
         patch_nemotron_mamba_stream_ordering,
@@ -55,20 +57,27 @@ def detect_model_families(model_name_or_path: str | None) -> frozenset[str]:
     return frozenset(families)
 
 
-def install_family_zero3_patches(model_name_or_path: str | None) -> frozenset[str]:
+def install_family_zero3_patches(
+    model_name_or_path: str | None,
+    *,
+    model: PreTrainedModelProtocol | None = None,
+) -> frozenset[str]:
     """Install the ZeRO-3 patches every detected family needs.
 
     Architectures other than the detected ones never have their classes
     mutated, so an unrelated model cannot fail on a shape skew. Call before
-    the model is built.
+    the model is built; pass ``model`` to also fix instances that already
+    exist.
 
     :param model_name_or_path: Hugging Face id or local path, or None.
     :type model_name_or_path: str | None
+    :param model: Already-built model the patches also apply to, or None.
+    :type model: PreTrainedModelProtocol | None
     :return: The families that were patched.
     :rtype: frozenset[str]
     """
     families = detect_model_families(model_name_or_path)
     for family in sorted(families):
         for patch in ZERO3_FAMILY_PATCHES.get(family, ()):
-            patch()
+            patch(model=model)
     return families
