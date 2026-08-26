@@ -456,6 +456,19 @@ class TestModuleTraversalHelpers:
         assert len(result) == 2
 
 
+class TestAsModuleDict:
+    def test_returns_the_module_dict_unchanged(self):
+        module = mutation_utils.ModuleDict({"agent_0": nn.Linear(2, 2)}, device="cpu")
+
+        result = mutation_utils.as_module_dict(module)
+
+        assert result is module
+
+    def test_raises_on_a_non_module_dict_module(self):
+        with pytest.raises(TypeError, match="per-agent ModuleDict"):
+            mutation_utils.as_module_dict(nn.Linear(2, 2))
+
+
 class TestResolveConsumers:
     """Pair a producer with the consumers whose columns are safe to rewrite."""
 
