@@ -18,6 +18,7 @@ from collections.abc import Callable, Generator, Iterable, Mapping, Sequence
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from dataclasses import asdict
 from importlib.metadata import version
+from itertools import chain
 from pathlib import Path
 from typing import (
     TYPE_CHECKING,
@@ -708,12 +709,10 @@ class EvolvableAlgorithm(ABC, Generic[ExperiencesT], metaclass=RegistryMeta):
         :rtype: list[tuple[str | None, torch.nn.Module]]
         """
         offspring_policy, offspring_modules = self.get_eval_modules(cloning=False)
-        eval_modules = {**offspring_policy, **offspring_modules}
 
         accelerator = self.accelerator
         pairs: list[tuple[str | None, torch.nn.Module]] = []
-        for group in self.registry.groups:
-            eval_net = eval_modules[group.eval_network_name()]
+        for eval_net in chain(offspring_policy.values(), offspring_modules.values()):
             if accelerator is not None:
                 eval_net = accelerator.unwrap_model(eval_net)
             if isinstance(eval_net, ModuleDict):

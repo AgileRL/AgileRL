@@ -314,6 +314,7 @@ class TestMutationsArchitectureMutateSingle:
             DummyIndividual,
             "get_eval_modules",
             lambda self, cloning=True: ({"actor": DummyPolicy()}, {}),
+            raising=False,
         )
         with pytest.warns(
             UserWarning, match="No mutation methods found for the policy network"
@@ -338,6 +339,7 @@ class TestMutationsArchitectureMutateMulti:
             DummyIndividual,
             "get_eval_modules",
             lambda self, cloning=True: ({"actors": DummyPolicy()}, {}),
+            raising=False,
         )
         with pytest.warns(
             UserWarning, match="No mutation methods found for the policy network"
@@ -400,6 +402,7 @@ class TestMutationsArchitectureMutateMulti:
             DummyIndividual,
             "get_eval_modules",
             lambda self, cloning=True: ({"actors": policy}, {}),
+            raising=False,
         )
         monkeypatch.setattr(
             muts,
@@ -462,6 +465,7 @@ class TestMutationsArchitectureMutateMulti:
             DummyIndividual,
             "get_eval_modules",
             lambda self, cloning=True: ({"actors": policy}, evals),
+            raising=False,
         )
         monkeypatch.setattr(
             muts,

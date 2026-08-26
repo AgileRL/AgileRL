@@ -3,11 +3,10 @@
 
 from __future__ import annotations
 
-import logging
 import math
 from collections.abc import Callable, Sequence
 from functools import wraps
-from typing import TYPE_CHECKING, NamedTuple, TypeGuard, TypeVar, cast
+from typing import TYPE_CHECKING, NamedTuple, TypeGuard, TypeVar
 
 import fastrand  # ty: ignore[unresolved-import] — C extension without type stubs
 import numpy as np
@@ -33,8 +32,6 @@ if TYPE_CHECKING:
     from agilerl.algorithms.core import EvolvableAlgorithm
     from agilerl.hpo.mutation import Mutations
 
-logger = logging.getLogger(__name__)
-
 IndividualT = TypeVar("IndividualT", bound="EvolvableAlgorithm")
 
 # Outgoing-weight scale a revived neuron is re-seeded at, as a fraction of the
@@ -47,11 +44,12 @@ MAGNITUDE_LIMIT = 1e6
 # Every block type EvolvableCNN can build.
 CONV_LAYER_TYPES: tuple[type[nn.Module], ...] = tuple(CONV_LAYER_FUNCTIONS.values())
 
-# Every layer whose weight rows are one neuron's incoming weights.
-WEIGHT_LAYER_TYPES: tuple[type[nn.Module], ...] = (
+WeightLayer = nn.Linear | NoisyLinear | nn.Conv2d | nn.Conv3d
+WEIGHT_LAYER_TYPES: tuple[type[WeightLayer], ...] = (
     nn.Linear,
     NoisyLinear,
-    *CONV_LAYER_TYPES,
+    nn.Conv2d,
+    nn.Conv3d,
 )
 
 # Activation sub-modules are recognised by type.
@@ -70,9 +68,9 @@ class ProducerContext(NamedTuple):
     those neurons between the producer and the activation.
     """
 
-    producer: nn.Module | None
+    producer: WeightLayer | None
     norm: nn.Module | None
-    consumers: list[nn.Module]
+    consumers: list[WeightLayer]
 
 
 class ConsumerTarget(NamedTuple):
@@ -88,13 +86,12 @@ class ConsumerTarget(NamedTuple):
     is_noise_scale: bool = False
 
 
-def _weight_param(module: nn.Module) -> torch.Tensor:
+def _weight_param(module: WeightLayer) -> torch.Tensor:
     """The weight tensor of a weight layer, or weight_mu for a noisy one."""
-    weight = module.weight_mu if isinstance(module, NoisyLinear) else module.weight
-    return cast("torch.Tensor", weight)
+    return module.weight_mu if isinstance(module, NoisyLinear) else module.weight
 
 
-def _owns_trainable_weight(module: nn.Module) -> bool:
+def _owns_trainable_weight(module: WeightLayer) -> bool:
     """Whether module owns the weights the surgery would rewrite.
 
     :func:`~agilerl.utils.algo_utils.share_encoder_parameters` pins a non-policy
@@ -112,7 +109,7 @@ def _unwrap_module(module: nn.Module) -> nn.Module:
     return module
 
 
-def _first_weight_layer(module: nn.Module) -> nn.Module | None:
+def _first_weight_layer(module: nn.Module) -> WeightLayer | None:
     """The first weight-bearing layer inside module, in forward order."""
     for _name, child in module.named_modules():
         if isinstance(child, WEIGHT_LAYER_TYPES):
@@ -120,7 +117,7 @@ def _first_weight_layer(module: nn.Module) -> nn.Module | None:
     return None
 
 
-def _head_entry_layers(head: nn.Module | None) -> list[nn.Module]:
+def _head_entry_layers(head: nn.Module | None) -> list[WeightLayer]:
     """The first weight layer of every parallel stream in head."""
     if head is None:
         return []
@@ -176,9 +173,9 @@ def shared_encoder_heads(
     networks: Sequence[tuple[str | None, nn.Module]],
     network_id: str | None,
     policy_network: nn.Module,
-) -> list[nn.Module]:
+) -> list[WeightLayer]:
     """Return the head entry layers of the networks sharing policy_network's encoder."""
-    entries: list[nn.Module] = []
+    entries: list[WeightLayer] = []
     for other_id, other in networks:
         if other is policy_network or other_id != network_id:
             continue
@@ -238,10 +235,10 @@ def _resolve_producer_and_next(
         prefix = f"{parent}." if parent else ""
         container = name.split(".")[0]
 
-        producer: nn.Module | None = None
+        producer: WeightLayer | None = None
         norm: nn.Module | None = None
-        consumers: list[nn.Module] = []
-        enclosing: nn.Module | None = None
+        consumers: list[WeightLayer] = []
+        enclosing: WeightLayer | None = None
         passed = False
         for other_name, other in ordered:
             if other is act_module:
@@ -315,8 +312,8 @@ def _revived_block(
 
 
 def _resolve_consumers(
-    producer: nn.Module,
-    next_layers: list[nn.Module],
+    producer: WeightLayer,
+    next_layers: list[WeightLayer],
     cnn_spatial: int | None,
 ) -> list[ConsumerTarget]:
     """Pair each usable consumer weight tensor with its per-neuron column stride.
@@ -339,24 +336,10 @@ def _resolve_consumers(
         stride = 1
         if producer_is_conv and not next_is_conv:
             if cnn_spatial is None:
-                logger.debug(
-                    "ReGraMa: no flattened column layout for %s -> %s; "
-                    "leaving the layer unreset.",
-                    type(producer).__name__,
-                    type(next_layer).__name__,
-                )
                 continue
             stride = cnn_spatial
 
         if next_weight.shape[1] != producer_neurons * stride:
-            logger.debug(
-                "ReGraMa: %s spends %d columns where %s's neurons need %d; "
-                "leaving the layer unreset.",
-                type(next_layer).__name__,
-                next_weight.shape[1],
-                type(producer).__name__,
-                producer_neurons * stride,
-            )
             continue
 
         consumers.append(ConsumerTarget(next_weight, stride))
@@ -376,8 +359,8 @@ def _resolve_consumers(
 
 
 def _shared_latent_blocks(
-    producer: nn.Module,
-    entry_layers: Sequence[nn.Module],
+    producer: WeightLayer,
+    entry_layers: Sequence[WeightLayer],
 ) -> list[ConsumerTarget]:
     """Each sharing head's latent columns as a writable view, noise scales included."""
     if isinstance(producer, CONV_LAYER_TYPES):
@@ -402,7 +385,7 @@ def _shared_latent_blocks(
 
 
 def _reset_layer_neurons(
-    producer: nn.Module,
+    producer: WeightLayer,
     consumers: list[ConsumerTarget],
     norm: nn.Module | None,
     indices: list[int],
@@ -437,9 +420,8 @@ def _reset_layer_neurons(
         for target in consumers
     ]
 
-    bias_param = cast(
-        "torch.Tensor | None",
-        noisy.bias_mu if noisy is not None else producer.bias,
+    bias_param = (
+        producer.bias_mu if isinstance(producer, NoisyLinear) else producer.bias
     )
     bias = None if bias_param is None else bias_param.data
     if bias is not None:
@@ -500,7 +482,7 @@ def reset_dormant_neurons(
     per_neuron_list: list[torch.Tensor | None],
     dormant_threshold: float,
     rng: np.random.Generator,
-    shared_latent_heads: Sequence[nn.Module] = (),
+    shared_latent_heads: Sequence[WeightLayer] = (),
 ) -> int:
     """Reset every dormant neuron of one evaluation network.
 
@@ -520,7 +502,7 @@ def reset_dormant_neurons(
     :type rng: numpy.random.Generator
     :param shared_latent_heads: Head entry layers of the networks sharing this
         network's encoder.
-    :type shared_latent_heads: Sequence[torch.nn.Module]
+    :type shared_latent_heads: Sequence[WeightLayer]
     :return: How many neurons were reset.
     :rtype: int
     """
