@@ -8,14 +8,16 @@
 # amplified "super" band as divergence-prone. Paired with the matching
 # *_hpo_dormant.yaml baseline (same config, Gaussian parameter mutation only).
 #
-# POPULATION ablation (pop_size = 4): this is a real run with live tournament
+# POPULATION ablation (pop_size = 3): this is a real run with live tournament
 # selection, not a structurally-inert single-agent probe -- bad mutations can be
 # filtered out, so this reads as an isolation ablation of the ReGraMa operator
 # (only params_mut is active -- arch / new_layer / act / rl_hp mutations are all
 # still OFF) under normal selection pressure. The baseline arm (*_hpo_dormant.yaml,
 # original Gaussian) is the same config with regrama_param_mut: false, so the gap
 # between the two arms' eval/best_dormant_fraction (and fitness) is attributable to
-# the parameter operator alone.
+# the parameter operator alone. mutate_elite: true so the measured best agent
+# always receives a ReGraMa reset rather than sometimes skating through as the
+# unmutated elite.
 #
 # TUNED Double DQN on the Atari 2600 suite. The base hyperparameters, the Mnih et al.
 # (2015) -> AgileRL mapping, and the tuned Double DQN deltas from van Hasselt, Guez &
@@ -64,14 +66,17 @@ mutation:
     # remaining five are the relative weights of each mutation kind (renormalised
     # internally). ISOLATION ABLATION: every operator except the parameter
     # mutation is OFF, so a mutated agent always receives a ReGraMa parameter
-    # mutation; no_mut = 0.5 gives normal population churn (half the agents pass
-    # through unmutated each evolution step, as in the full HPO regime) while
-    # keeping the mutation *kind* restricted to params_mut alone.
+    # mutation; no_mut is lowered to 0.25 (from the full HPO regime's 0.5) so a
+    # whole generation only has a 0.25^pop_size chance of skipping the parameter
+    # operator entirely -- this is a dormancy-diagnostic probe, and a generation
+    # with no parameter mutation at all leaves nothing to counter dormant-neuron
+    # regrowth that cycle, which shows up as an unexplained spike in
+    # eval/best_dormant_fraction.
     probabilities:
-        no_mut: 0.5      # half the agents are left unchanged each evolution step
+        no_mut: 0.25     # a quarter of agents are left unchanged each evolution step
         arch_mut: 0.0    # OFF -- isolate the parameter operator (network shape fixed)
         new_layer: 0.0   # OFF -- conditional within arch_mut, now inert
-        params_mut: 0.5  # the ONLY active mutation: ReGraMa dormant-neuron Xavier reset, then reset + ordinary Gaussian noise (mutation_sd; no amplified)
+        params_mut: 0.75 # the ONLY active mutation: ReGraMa dormant-neuron Xavier reset, then reset + ordinary Gaussian noise (mutation_sd; no amplified)
         act_mut: 0.0     # OFF -- ReLU kept throughout so the dormant-neuron phenomenon (and ReGraMa) stays visible
         rl_hp_mut: 0.0   # OFF -- NB: no hyperparameter search happens under this ablation
     rl_hp_selection:
@@ -122,14 +127,15 @@ mutation:
         # tuned 1/30000 base value; learn_step carries the related search.
     mutation_sd: 0.1  # std of the ordinary Gaussian weight perturbation in the trailing pass after the resets (typical)
     rand_seed: 42
-    # false, matching the full dqn_double_tuned_hpo.yaml regime: the elite survives
-    # unmutated into the next generation (elitism below still clones it). Flip to
-    # true if the elite should also receive ReGraMa mutations.
-    mutate_elite: false
+    # true (unlike the full dqn_double_tuned_hpo.yaml regime, where the elite
+    # survives unmutated): this is a dormancy-diagnostic probe, so the elite must
+    # also receive ReGraMa mutations or eval/best_dormant_fraction can measure an
+    # agent the operator never touched.
+    mutate_elite: true
     random_reset_param_mut: true      # keep the random-reset band of the trailing Gaussian pass (a selected weight is REPLACED by a fresh N(0, 1) draw)
     amplified_gauss_param_mut: false  # drop the amplified ("super") Gaussian band, which is divergence-prone; the dropped mass is NOT redistributed
     regrama_param_mut: true           # ReGraMa: Xavier-reset every dormant neuron (normalised GraMa score <= dormant_tau) before the trailing Gaussian pass
-    dormant_tau: 0.1          # neuron is dormant when its normalised score <= this (the ONLY active threshold here: every such neuron is reset)
+    dormant_tau: 0.01         # neuron is dormant when its normalised score <= this (the ONLY active threshold here: every such neuron is reset)
 
 network:
     # Nature DQN convolutional architecture (see dqn_double_tuned_no_hpo.yaml).
@@ -190,12 +196,12 @@ tournament_selection:
 training:
     max_steps: 1_000_000  # cut down from the full 6.25M for a cheaper population ablation
     target_score:
-    pop_size: 4
+    pop_size: 3
     evo_steps: 50_000  # env steps between evolution events -> 20 parameter-mutation cycles
                        # half of dqn_double_tuned_hpo.yaml's evo_steps convention (100,000)
     eval_steps:
     eval_loop: 1
-    dormant_tau: 0.1  # tau threshold for the dormant-neuron metric (Sokar et al. 2023)
+    dormant_tau: 0.01  # tau threshold for the dormant-neuron metric (Sokar et al. 2023)
     learning_delay: 25_000  # half of dqn_double_tuned_hpo.yaml's full-regime value (50,000)
     eps_start: 1.0
     eps_end: 0.01
