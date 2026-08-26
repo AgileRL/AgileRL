@@ -5,26 +5,37 @@ from __future__ import annotations
 
 import logging
 import math
-from collections.abc import Sequence
-from typing import NamedTuple, cast
+from collections.abc import Callable, Sequence
+from functools import wraps
+from typing import TYPE_CHECKING, NamedTuple, TypeGuard, TypeVar, cast
 
+import fastrand  # ty: ignore[unresolved-import] — C extension without type stubs
 import numpy as np
 import torch
 from torch import nn
 
 from agilerl.modules import (
     EvolvableCNN,
+    EvolvableModule,
     EvolvableResNet,
     EvolvableWrapper,
+    ModuleDict,
     NoisyLinear,
 )
 from agilerl.utils.evolvable_networks import (
     ACTIVATION_FUNCTIONS,
     CONV_LAYER_FUNCTIONS,
     NORMALIZATION_FUNCTIONS,
+    compile_model,
 )
 
+if TYPE_CHECKING:
+    from agilerl.algorithms.core import EvolvableAlgorithm
+    from agilerl.hpo.mutation import Mutations
+
 logger = logging.getLogger(__name__)
+
+IndividualT = TypeVar("IndividualT", bound="EvolvableAlgorithm")
 
 # Outgoing-weight scale a revived neuron is re-seeded at, as a fraction of the
 # consumer layer's live column scale.
@@ -571,3 +582,131 @@ def reset_dormant_neurons(
         neurons_reset += len(indices)
 
     return neurons_reset
+
+
+def set_global_seed(seed: int | None) -> None:
+    """Set the global seed for random number generators.
+
+    :param seed: Random seed for repeatability
+    :type seed: int
+    """
+    if seed is None:
+        return
+
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+    fastrand.pcg32_seed(seed)
+
+
+def _is_module_dict(
+    module: EvolvableModule,
+) -> TypeGuard[ModuleDict[EvolvableModule]]:
+    """Narrow an evaluation module to its per-agent ``ModuleDict`` mapping.
+
+    :param module: The evaluation module to check
+    :type module: EvolvableModule
+    :return: Whether the module is a per-agent ``ModuleDict``
+    :rtype: TypeGuard[ModuleDict[EvolvableModule]]
+    """
+    return isinstance(module, ModuleDict)
+
+
+def _as_module_dict(module: EvolvableModule) -> ModuleDict[EvolvableModule]:
+    """Narrow a multi-agent evaluation module to its per-agent mapping.
+
+    :param module: The evaluation module to reinterpret
+    :type module: EvolvableModule
+    :return: The module as a mapping of per-agent modules
+    :rtype: ModuleDict[EvolvableModule]
+    """
+    assert _is_module_dict(module), (
+        "Multi-agent mutation requires a per-agent ModuleDict container."
+    )
+    return module
+
+
+def get_exp_layer(offspring: EvolvableModule) -> nn.Linear:
+    """Get the output layer of different types of offsprings for bandit algorithms.
+
+    :param offspring: The offspring to inspect
+    :type offspring: EvolvableModule
+
+    :return: The output layer of the offspring
+    :rtype: nn.Linear
+    """
+    if not isinstance(offspring, EvolvableModule):
+        msg = f"Bandit algorithm architecture {type(offspring)} not supported."
+        raise TypeError(msg)
+
+    exp_layer = offspring.get_output_dense()
+    if not isinstance(exp_layer, nn.Linear):
+        msg = (
+            f"Bandit algorithm architecture {type(offspring)} not supported: expected "
+            f"a linear output layer, found {type(exp_layer)}."
+        )
+        raise TypeError(msg)
+
+    return exp_layer
+
+
+def reinit_shared_networks(
+    mutation_func: Callable[[Mutations, IndividualT], IndividualT],
+) -> Callable[[Mutations, IndividualT], IndividualT]:
+    """Reinitialize shared networks after architecture and parameter mutations (decorator).
+
+    :param mutation_func: The mutation function to decorate
+    :type mutation_func: Callable[[Mutations, IndividualT], IndividualT]
+    :return: The decorated mutation function
+    :rtype: Callable[[Mutations, IndividualT], IndividualT]
+    """
+
+    @wraps(mutation_func)
+    def wrapper(self: Mutations, individual: IndividualT) -> IndividualT:
+        # Call the original mutation function
+        individual = mutation_func(self, individual)
+
+        torch._dynamo.reset()  # NOTE: Should we do this?
+
+        # Only proceed if mutation was actually applied
+        if individual.mut == "None":
+            return individual
+
+        # Recompile individual if necessary
+        compiled_model = individual.torch_compiler is not None
+        if compiled_model:
+            # Set dynamo config before recompilation to avoid guard failures.
+            # The ignores below are needed because dynamo's config module infers
+            # its attribute types from the default values, so they read as literals.
+            torch._dynamo.config.force_parameter_static_shapes = False  # ty: ignore[invalid-assignment]
+            individual.recompile()
+
+        # Reinitialize shared networks to mutated evaluation networks
+        for net_group in individual.registry.groups:
+            for shared_name in net_group.shared_network_names():
+                eval_offspring: EvolvableModule = getattr(
+                    individual,
+                    net_group.eval_network_name(),
+                )
+                # Reinitialize shared with frozen weights due to
+                # potential mutation in architecture
+                ind_shared: nn.Module = self._reinit_from_mutated(
+                    eval_offspring,
+                    remove_prefix=compiled_model,
+                )
+                if self.accelerator is None:
+                    ind_shared = ind_shared.to(self.device)
+
+                if compiled_model:
+                    torch._dynamo.config.force_parameter_static_shapes = False  # ty: ignore[invalid-assignment]
+                    ind_shared = compile_model(
+                        ind_shared,
+                        individual.torch_compiler,
+                    )
+
+                setattr(individual, shared_name, ind_shared)
+
+        return individual
+
+    return wrapper

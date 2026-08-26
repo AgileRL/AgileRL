@@ -24,7 +24,6 @@ from agilerl.hpo.mutation import (
     MutationError,
     Mutations,
     get_exp_layer,
-    get_offspring_eval_modules,
     set_global_seed,
 )
 from agilerl.modules import EvolvableBERT, EvolvableModule, ModuleDict
@@ -312,8 +311,9 @@ class TestMutationsArchitectureMutateSingle:
         muts = Mutations(0, 1, 0.5, 0, 0, 0, 0.1, device=device)
         individual = DummyIndividual()
         monkeypatch.setattr(
-            "agilerl.hpo.mutation.get_offspring_eval_modules",
-            lambda _ind: ({"actor": DummyPolicy()}, {}),
+            DummyIndividual,
+            "get_eval_modules",
+            lambda self, cloning=True: ({"actor": DummyPolicy()}, {}),
         )
         with pytest.warns(
             UserWarning, match="No mutation methods found for the policy network"
@@ -335,8 +335,9 @@ class TestMutationsArchitectureMutateMulti:
         muts = Mutations(0, 1, 0.5, 0, 0, 0, 0.1, device=device)
         individual = DummyIndividual()
         monkeypatch.setattr(
-            "agilerl.hpo.mutation.get_offspring_eval_modules",
-            lambda _ind: ({"actors": DummyPolicy()}, {}),
+            DummyIndividual,
+            "get_eval_modules",
+            lambda self, cloning=True: ({"actors": DummyPolicy()}, {}),
         )
         with pytest.warns(
             UserWarning, match="No mutation methods found for the policy network"
@@ -396,8 +397,9 @@ class TestMutationsArchitectureMutateMulti:
         )
         muts = Mutations(0, 1, 0.5, 0, 0, 0, 0.1, device=device)
         monkeypatch.setattr(
-            "agilerl.hpo.mutation.get_offspring_eval_modules",
-            lambda _ind: ({"actors": policy}, {}),
+            DummyIndividual,
+            "get_eval_modules",
+            lambda self, cloning=True: ({"actors": policy}, {}),
         )
         monkeypatch.setattr(
             muts,
@@ -457,8 +459,9 @@ class TestMutationsArchitectureMutateMulti:
         evals = {"critics": ModuleDict({"agent_0": DummyEval()}, device="cpu")}
         muts = Mutations(0, 1, 0.5, 0, 0, 0, 0.1, device=device)
         monkeypatch.setattr(
-            "agilerl.hpo.mutation.get_offspring_eval_modules",
-            lambda _ind: ({"actors": policy}, evals),
+            DummyIndividual,
+            "get_eval_modules",
+            lambda self, cloning=True: ({"actors": policy}, evals),
         )
         monkeypatch.setattr(
             muts,
@@ -634,6 +637,7 @@ class TestMutationsParameterMutation:
             def unrolled_eval_networks(self):
                 return []
 
+            @property
             def eval_policy_network_ids(self):
                 return set()
 
@@ -2456,7 +2460,7 @@ def test_set_global_seed_skips_cuda_without_a_device():
     cuda_seed.assert_not_called()
 
 
-def test_get_offspring_eval_modules_returns_policy_and_modules(
+def test_get_eval_modules_returns_policy_and_modules(
     vector_space, discrete_space, encoder_mlp_config
 ):
     pop = DQN.population(
@@ -2466,13 +2470,13 @@ def test_get_offspring_eval_modules_returns_policy_and_modules(
         net_config=encoder_mlp_config,
         device="cpu",
     )
-    policy, offspring_evals = get_offspring_eval_modules(pop[0])
+    policy, offspring_evals = pop[0].get_eval_modules()
     assert isinstance(policy, dict)
     assert isinstance(offspring_evals, dict)
     assert len(policy) >= 1
 
 
-def test_get_offspring_eval_modules_cloning_false_returns_the_live_modules(
+def test_get_eval_modules_cloning_false_returns_the_live_modules(
     vector_space, discrete_space, encoder_mlp_config
 ):
     pop = DQN.population(
@@ -2485,7 +2489,7 @@ def test_get_offspring_eval_modules_cloning_false_returns_the_live_modules(
     agent = pop[0]
     policy_name = agent.registry.policy()
 
-    policy, _offspring_evals = get_offspring_eval_modules(agent, cloning=False)
+    policy, _offspring_evals = agent.get_eval_modules(cloning=False)
 
     assert policy[policy_name] is getattr(agent, policy_name)
 

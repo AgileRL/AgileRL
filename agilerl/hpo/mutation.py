@@ -6,10 +6,8 @@ import logging
 import warnings
 from collections import OrderedDict
 from collections.abc import Callable, Mapping
-from functools import wraps
-from typing import Any, TypeGuard, TypeVar
+from typing import Any, TypeVar
 
-import fastrand  # ty: ignore[unresolved-import] — C extension without type stubs
 import numpy as np
 import torch
 from accelerate import Accelerator
@@ -22,13 +20,19 @@ from agilerl.algorithms.core import (
     MultiAgentRLAlgorithm,
     RLAlgorithm,
 )
-from agilerl.algorithms.core.base import get_offspring_eval_modules
 from agilerl.modules import EvolvableModule, ModuleDict
 from agilerl.protocols import EvolvableAlgorithmProtocol
 from agilerl.typing import MutationReturn
 from agilerl.utils.algo_utils import remove_compile_prefix
-from agilerl.utils.evolvable_networks import compile_model
-from agilerl.utils.mutation_utils import reset_dormant_neurons, shared_encoder_heads
+from agilerl.utils.mutation_utils import (
+    _as_module_dict,
+    _is_module_dict,
+    get_exp_layer,
+    reinit_shared_networks,
+    reset_dormant_neurons,
+    set_global_seed,
+    shared_encoder_heads,
+)
 from agilerl.wrappers.agent import AgentWrapper
 
 AgentT = TypeVar("AgentT", bound=EvolvableAlgorithmProtocol)
@@ -47,134 +51,6 @@ torch._logging.set_logs(dynamo=logging.FATAL)
 _UNSUPPORTED_ACTIVATION_MUTATION_ALGOS = frozenset(
     {"PPO", "DDPG", "TD3", "IPPO", "MADDPG", "MATD3"},
 )
-
-
-def set_global_seed(seed: int | None) -> None:
-    """Set the global seed for random number generators.
-
-    :param seed: Random seed for repeatability
-    :type seed: int
-    """
-    if seed is None:
-        return
-
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed(seed)
-    fastrand.pcg32_seed(seed)
-
-
-def _is_module_dict(
-    module: EvolvableModule,
-) -> TypeGuard["ModuleDict[EvolvableModule]"]:
-    """Narrow an evaluation module to its per-agent ``ModuleDict`` mapping.
-
-    :param module: The evaluation module to check
-    :type module: EvolvableModule
-    :return: Whether the module is a per-agent ``ModuleDict``
-    :rtype: TypeGuard[ModuleDict[EvolvableModule]]
-    """
-    return isinstance(module, ModuleDict)
-
-
-def _as_module_dict(module: EvolvableModule) -> "ModuleDict[EvolvableModule]":
-    """Narrow a multi-agent evaluation module to its per-agent mapping.
-
-    :param module: The evaluation module to reinterpret
-    :type module: EvolvableModule
-    :return: The module as a mapping of per-agent modules
-    :rtype: ModuleDict[EvolvableModule]
-    """
-    assert _is_module_dict(module), (
-        "Multi-agent mutation requires a per-agent ModuleDict container."
-    )
-    return module
-
-
-def get_exp_layer(offspring: EvolvableModule) -> nn.Linear:
-    """Get the output layer of different types of offsprings for bandit algorithms.
-
-    :param offspring: The offspring to inspect
-    :type offspring: EvolvableModule
-
-    :return: The output layer of the offspring
-    :rtype: nn.Linear
-    """
-    if not isinstance(offspring, EvolvableModule):
-        msg = f"Bandit algorithm architecture {type(offspring)} not supported."
-        raise TypeError(msg)
-
-    exp_layer = offspring.get_output_dense()
-    if not isinstance(exp_layer, nn.Linear):
-        msg = (
-            f"Bandit algorithm architecture {type(offspring)} not supported: expected "
-            f"a linear output layer, found {type(exp_layer)}."
-        )
-        raise TypeError(msg)
-
-    return exp_layer
-
-
-def reinit_shared_networks(
-    mutation_func: Callable[["Mutations", IndividualT], IndividualT],
-) -> Callable[["Mutations", IndividualT], IndividualT]:
-    """Reinitialize shared networks after architecture and parameter mutations (decorator).
-
-    :param mutation_func: The mutation function to decorate
-    :type mutation_func: Callable[[Mutations, IndividualT], IndividualT]
-    :return: The decorated mutation function
-    :rtype: Callable[[Mutations, IndividualT], IndividualT]
-    """
-
-    @wraps(mutation_func)
-    def wrapper(self: "Mutations", individual: IndividualT) -> IndividualT:
-        # Call the original mutation function
-        individual = mutation_func(self, individual)
-
-        torch._dynamo.reset()  # NOTE: Should we do this?
-
-        # Only proceed if mutation was actually applied
-        if individual.mut == "None":
-            return individual
-
-        # Recompile individual if necessary
-        compiled_model = individual.torch_compiler is not None
-        if compiled_model:
-            # Set dynamo config before recompilation to avoid guard failures.
-            # The ignores below are needed because dynamo's config module infers
-            # its attribute types from the default values, so they read as literals.
-            torch._dynamo.config.force_parameter_static_shapes = False  # ty: ignore[invalid-assignment]
-            individual.recompile()
-
-        # Reinitialize shared networks to mutated evaluation networks
-        for net_group in individual.registry.groups:
-            for shared_name in net_group.shared_network_names():
-                eval_offspring: EvolvableModule = getattr(
-                    individual,
-                    net_group.eval_network_name(),
-                )
-                # Reinitialize shared with frozen weights due to
-                # potential mutation in architecture
-                ind_shared: nn.Module = self._reinit_from_mutated(
-                    eval_offspring,
-                    remove_prefix=compiled_model,
-                )
-                if self.accelerator is None:
-                    ind_shared = ind_shared.to(self.device)
-
-                if compiled_model:
-                    torch._dynamo.config.force_parameter_static_shapes = False  # ty: ignore[invalid-assignment]
-                    ind_shared = compile_model(
-                        ind_shared,
-                        individual.torch_compiler,
-                    )
-
-                setattr(individual, shared_name, ind_shared)
-
-        return individual
-
-    return wrapper
 
 
 class Mutations:
@@ -714,7 +590,7 @@ class Mutations:
             return False
 
         networks = individual.unrolled_eval_networks()
-        policy_networks = individual.eval_policy_network_ids()
+        policy_networks = individual.eval_policy_network_ids
 
         neurons_reset = 0
         for idx, (network_id, network) in enumerate(networks):
@@ -1007,7 +883,7 @@ class Mutations:
         # Get the offspring evaluation modules
         # We first extract and apply a mutation to the policy and then apply
         # the same mutation to the rest of the evaluation modules e.g. critics
-        policy, offspring_evals = get_offspring_eval_modules(individual)
+        policy, offspring_evals = individual.get_eval_modules()
         policy_name, policy_offspring = next(iter(policy.items()))
 
         if not policy_offspring.mutation_methods:
@@ -1073,7 +949,7 @@ class Mutations:
         # Get the offspring evaluation modules
         # We first extract and apply a mutation to the policy and then apply
         # the same mutation to the rest of the evaluation modules e.g. critics
-        policy, offspring_evals = get_offspring_eval_modules(individual)
+        policy, offspring_evals = individual.get_eval_modules()
         policy_name, policy_module = next(iter(policy.items()))
 
         if not policy_module.mutation_methods:

@@ -429,39 +429,6 @@ def _per_neuron_grad(grad_input: GradInput) -> torch.Tensor | None:
     return magnitude.mean(dim=reduce_dims)
 
 
-def get_offspring_eval_modules(
-    individual: EvolvableAlgorithm,
-    cloning: bool = True,
-) -> tuple[dict[str, EvolvableModule], dict[str, EvolvableModule]]:
-    """Get the offsprings of all of the evaluation modules in the individual.
-
-    :param individual: The individual to inspect
-    :type individual: EvolvableAlgorithm
-    :param cloning: Whether to clone each evaluation module before returning it,
-        defaults to True.
-    :type cloning: bool, optional
-
-    :return: Tuple of offspring policy and the rest of the evaluation modules
-    :rtype: tuple[dict[str, EvolvableModule], dict[str, EvolvableModule]]
-    """
-    registry = individual.registry
-
-    offspring_modules: dict[str, EvolvableModule] = {}
-    offspring_policy: dict[str, EvolvableModule] = {}
-    for group in registry.groups:
-        eval_name = group.eval_network_name()
-        eval_module: EvolvableModule = getattr(individual, eval_name)
-
-        # Clone the offspring prior to applying mutations
-        offspring = eval_module.clone() if cloning else eval_module
-        if group.policy:
-            offspring_policy[eval_name] = offspring
-        else:
-            offspring_modules[eval_name] = offspring
-
-    return offspring_policy, offspring_modules
-
-
 class EvolvableAlgorithm(ABC, Generic[ExperiencesT], metaclass=RegistryMeta):
     """Base object for all algorithms in the AgileRL framework.
 
@@ -706,16 +673,41 @@ class EvolvableAlgorithm(ABC, Generic[ExperiencesT], metaclass=RegistryMeta):
             handle.remove()
         self._grama_handles = []
 
+    def get_eval_modules(
+        self,
+        cloning: bool = True,
+    ) -> tuple[dict[str, EvolvableModule], dict[str, EvolvableModule]]:
+        """Get the offsprings of all of the evaluation modules in the individual.
+
+        :param cloning: Whether to clone each evaluation module before returning it,
+            defaults to True.
+        :type cloning: bool, optional
+
+        :return: Tuple of offspring policy and the rest of the evaluation modules
+        :rtype: tuple[dict[str, EvolvableModule], dict[str, EvolvableModule]]
+        """
+        offspring_modules: dict[str, EvolvableModule] = {}
+        offspring_policy: dict[str, EvolvableModule] = {}
+        for group in self.registry.groups:
+            eval_name = group.eval_network_name()
+            eval_module: EvolvableModule = getattr(self, eval_name)
+
+            # Clone the offspring prior to applying mutations
+            offspring = eval_module.clone() if cloning else eval_module
+            if group.policy:
+                offspring_policy[eval_name] = offspring
+            else:
+                offspring_modules[eval_name] = offspring
+
+        return offspring_policy, offspring_modules
+
     def unrolled_eval_networks(self) -> list[tuple[str | None, torch.nn.Module]]:
         """Return the agent's evaluation networks as (network_id, network) pairs.
 
         :return: One (network_id, network) pair per measured network.
         :rtype: list[tuple[str | None, torch.nn.Module]]
         """
-        offspring_policy, offspring_modules = get_offspring_eval_modules(
-            self,
-            cloning=False,
-        )
+        offspring_policy, offspring_modules = self.get_eval_modules(cloning=False)
         eval_modules = {**offspring_policy, **offspring_modules}
 
         accelerator = self.accelerator
@@ -731,6 +723,7 @@ class EvolvableAlgorithm(ABC, Generic[ExperiencesT], metaclass=RegistryMeta):
                 pairs.append((None, eval_net))
         return pairs
 
+    @property
     def eval_policy_network_ids(self) -> set[int]:
         """Return the id of every evaluation network in the agent's policy group.
 
@@ -866,8 +859,10 @@ class EvolvableAlgorithm(ABC, Generic[ExperiencesT], metaclass=RegistryMeta):
         :return: A dictionary of attribute names and their values.
         :rtype: dict[str, Any]
         """
-        # Get all attributes of the current object
-        attributes = inspect.getmembers(agent, lambda a: not isroutine(a))
+        names = [n for n in dir(agent) if not _is_readonly_property(agent, n)]
+        attributes = [
+            (n, val) for n in names if not isroutine(val := getattr(agent, n))
+        ]
 
         excluded_names = list(agent.evolvable_attributes().keys())
         excluded_names += [
@@ -879,10 +874,6 @@ class EvolvableAlgorithm(ABC, Generic[ExperiencesT], metaclass=RegistryMeta):
         attributes = [
             a for a in attributes if not (a[0].startswith("_") or a[0].endswith("_"))
         ]
-
-        # Exclude read-only properties — derived values cannot be restored
-        # via setattr and must not be persisted in checkpoints.
-        attributes = [a for a in attributes if not _is_readonly_property(agent, a[0])]
 
         # If input_args_only is True, only include attributes that are
         # input arguments to the constructor
@@ -1250,9 +1241,10 @@ class EvolvableAlgorithm(ABC, Generic[ExperiencesT], metaclass=RegistryMeta):
                 and not attr.endswith("_")
             )
 
-        # Inspect evolvable given specs
         evolvable_attrs: dict[str, Any] = {}
         for attr in dir(self):
+            if _is_readonly_property(self, attr):
+                continue
             obj = getattr(self, attr)
             if is_evolvable(attr, obj):
                 evolvable_attrs[attr] = obj
