@@ -752,17 +752,34 @@ class TestBC_PolicyBeamRaw:
         bc_policy.beam_raw(tokens, attn_mask, term, beam_width=1, max_generation_len=5)
 
     def test_beam_raw_termination_mask_update_guaranteed(self, bc_policy):
-        """Guaranteed test to hit termination_mask update in beam search."""
+        """Bias the model toward eoa so the termination check runs regardless of RNG state."""
         tokens = torch.randint(0, 9, (1, 1), dtype=torch.long)
         attn_mask = torch.ones(1, 1, dtype=torch.float)
 
-        def term(text):
-            return False  # Never terminate
+        class EoaBiasedModel:
+            def __init__(self, inner):
+                self.inner = inner
 
+            def __getattr__(self, name):
+                return getattr(self.inner, name)
+
+            def __call__(self, *args, **kwargs):
+                logits, past_key_values = self.inner(*args, **kwargs)
+                logits = logits.clone()
+                logits[..., 1] = 1e9
+                return logits, past_key_values
+
+        called = []
+
+        def term(text):
+            called.append(text)
+            return False
+
+        bc_policy.bc_lm = EoaBiasedModel(bc_policy.bc_lm)
         bc_policy.kind = "beam"
         bc_policy.generation_kwargs["beam_width"] = 1
-        # Force the while loop to run and hit the termination_mask update
         bc_policy.beam_raw(tokens, attn_mask, term, beam_width=1, max_generation_len=3)
+        assert called, "beam search never sampled eoa past the dialogue length"
 
     def test_beam_raw_none_max_len(self, bc_lm_none_max_len):
         """Test beam_raw when dataset.max_len is None."""
