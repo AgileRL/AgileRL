@@ -1379,7 +1379,7 @@ class TestSharedEncoderCompensation:
             0.01,
             make_rng(),
             shared_latent_heads=mutation_utils.shared_encoder_heads(
-                agent.eval_networks(), None, agent.actor
+                agent.unrolled_eval_networks(), None, agent.actor
             ),
         )
 
@@ -1391,11 +1391,11 @@ class TestSharedEncoderCompensation:
         agent = self.ppo(vector_space, discrete_space, share=True)
 
         assert mutation_utils.shared_encoder_heads(
-            agent.eval_networks(), None, agent.actor
+            agent.unrolled_eval_networks(), None, agent.actor
         )
         assert (
             mutation_utils.shared_encoder_heads(
-                agent.eval_networks(), None, agent.critic
+                agent.unrolled_eval_networks(), None, agent.critic
             )
             == []
         )
@@ -1422,7 +1422,7 @@ class TestSharedEncoderCompensation:
         agent = self.ppo(vector_space, discrete_space, share=True)
 
         result = mutation_utils.shared_encoder_heads(
-            agent.eval_networks(), None, agent.actor
+            agent.unrolled_eval_networks(), None, agent.actor
         )
 
         assert result == mutation_utils._head_entry_layers(agent.critic.head_net)
@@ -1438,7 +1438,7 @@ class TestSharedEncoderCompensation:
 
         assert (
             mutation_utils.shared_encoder_heads(
-                agent.eval_networks(), None, agent.actor
+                agent.unrolled_eval_networks(), None, agent.actor
             )
             == []
         )

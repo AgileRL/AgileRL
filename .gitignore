@@ -173,3 +173,6 @@ AGENTS.md
 
 # Local Arena client backend switcher (dev tooling)
 /set-local-client.sh
+
+# Folders storing results
+**/results/**

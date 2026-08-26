@@ -5812,7 +5812,7 @@ def _pin_population_biases(population, value: float = 1.0) -> None:
     """
     with torch.no_grad():
         for agent in population:
-            for _network_id, network in agent.eval_networks():
+            for _network_id, network in agent.unrolled_eval_networks():
                 for name, param in network.named_parameters():
                     if name.endswith("bias") and param.dim() == 1:
                         param.fill_(value)
@@ -5823,7 +5823,7 @@ def _population_zeroed_biases(population) -> int:
     return sum(
         int(bool((value == 0).all()))
         for agent in population
-        for _network_id, network in agent.eval_networks()
+        for _network_id, network in agent.unrolled_eval_networks()
         for key, value in network.state_dict().items()
         if key.endswith("bias") and value.dim() == 1
     )
@@ -5853,7 +5853,7 @@ def _gaussian_band_mutation() -> Mutations:
 def _mutable_weights(population):
     """Yield every tensor the Gaussian pass is allowed to write."""
     for agent in population:
-        for _network_id, network in agent.eval_networks():
+        for _network_id, network in agent.unrolled_eval_networks():
             for key, tensor in network.state_dict().items():
                 if tensor.dim() == 2 and "norm" not in key and "lstm" not in key:
                     yield tensor
@@ -5942,7 +5942,7 @@ class TestRegramaCrossFamilyEvolution:
             assert len(population) == 8
             assert all(isinstance(agent, EvolvableAlgorithm) for agent in population)
             for agent in population:
-                for _network_id, network in agent.eval_networks():
+                for _network_id, network in agent.unrolled_eval_networks():
                     assert all(
                         torch.isfinite(value).all()
                         for value in network.state_dict().values()
@@ -5987,7 +5987,7 @@ class TestRegramaCrossFamilyEvolution:
             assert len(population) == 8
             assert len({agent.index for agent in population}) == 8
             for agent in population:
-                for _network_id, network in agent.eval_networks():
+                for _network_id, network in agent.unrolled_eval_networks():
                     assert all(
                         torch.isfinite(value).all()
                         for value in network.state_dict().values()

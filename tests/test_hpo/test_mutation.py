@@ -631,7 +631,7 @@ class TestMutationsParameterMutation:
                 self.grama_scores = None
                 self.accelerator = None
 
-            def eval_networks(self):
+            def unrolled_eval_networks(self):
                 return []
 
             def eval_policy_network_ids(self):
@@ -2472,6 +2472,24 @@ def test_get_offspring_eval_modules_returns_policy_and_modules(
     assert len(policy) >= 1
 
 
+def test_get_offspring_eval_modules_cloning_false_returns_the_live_modules(
+    vector_space, discrete_space, encoder_mlp_config
+):
+    pop = DQN.population(
+        size=1,
+        observation_space=vector_space,
+        action_space=discrete_space,
+        net_config=encoder_mlp_config,
+        device="cpu",
+    )
+    agent = pop[0]
+    policy_name = agent.registry.policy()
+
+    policy, _offspring_evals = get_offspring_eval_modules(agent, cloning=False)
+
+    assert policy[policy_name] is getattr(agent, policy_name)
+
+
 class _IndexedAgent:
     """Minimal agent stand-in for the indices-path mutation tests."""
 
@@ -2675,7 +2693,7 @@ def _dormant_for(agent, network_ids: set[str]):
     healthy = grama_scores_for(agent, fill=1.0)
     return [
         dormant[idx] if network_id in network_ids else healthy[idx]
-        for idx, (network_id, _network) in enumerate(agent.eval_networks())
+        for idx, (network_id, _network) in enumerate(agent.unrolled_eval_networks())
     ]
 
 
@@ -2912,7 +2930,9 @@ class TestMutationsRegramaParameterMutation:
                 device="cpu",
             )
             agent.grama_scores = grama_scores_for(agent, fill=1.0)
-            networks = [network for _network_id, network in agent.eval_networks()]
+            networks = [
+                network for _network_id, network in agent.unrolled_eval_networks()
+            ]
             for entry in agent.grama_scores[networks.index(agent.critic)]:
                 if entry is not None:
                     entry[0] = 0.5
@@ -2952,7 +2972,7 @@ class TestMutationsRegramaParameterMutation:
         agent = self.make_agent()
         agent.grama_scores = [
             [None] * len(mutation_utils.target_activations(network))
-            for _network_id, network in agent.eval_networks()
+            for _network_id, network in agent.unrolled_eval_networks()
         ]
         assert agent.grama_scores
 
@@ -3045,7 +3065,7 @@ def _policy_latent_dormant(agent, index: int = 0) -> None:
     policy_entry = next(
         entry
         for (_network_id, network), entry in zip(
-            agent.eval_networks(),
+            agent.unrolled_eval_networks(),
             agent.grama_scores,
             strict=True,
         )

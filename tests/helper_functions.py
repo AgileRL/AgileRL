@@ -649,7 +649,7 @@ def grama_scores_for(agent: Any, fill: float = 0.0) -> GraMaScores:
     :rtype: GraMaScores
     """
     scores: GraMaScores = []
-    for _network_id, network in agent.eval_networks():
+    for _network_id, network in agent.unrolled_eval_networks():
         entries: list[torch.Tensor | None] = []
         for activation in mutation_utils.target_activations(network):
             producer = mutation_utils._resolve_producer_and_next(

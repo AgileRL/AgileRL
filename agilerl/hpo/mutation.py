@@ -22,6 +22,7 @@ from agilerl.algorithms.core import (
     MultiAgentRLAlgorithm,
     RLAlgorithm,
 )
+from agilerl.algorithms.core.base import get_offspring_eval_modules
 from agilerl.modules import EvolvableModule, ModuleDict
 from agilerl.protocols import EvolvableAlgorithmProtocol
 from agilerl.typing import MutationReturn
@@ -62,35 +63,6 @@ def set_global_seed(seed: int | None) -> None:
     if torch.cuda.is_available():
         torch.cuda.manual_seed(seed)
     fastrand.pcg32_seed(seed)
-
-
-def get_offspring_eval_modules(
-    individual: EvolvableAlgorithm,
-) -> tuple[dict[str, EvolvableModule], dict[str, EvolvableModule]]:
-    """Get the offsprings of all of the evaluation modules in the individual.
-
-    :param individual: The individual to inspect
-    :type individual: EvolvableAlgorithm
-
-    :return: Tuple of offspring policy and the rest of the evaluation modules
-    :rtype: tuple[dict[str, EvolvableModule], dict[str, EvolvableModule]]
-    """
-    registry = individual.registry
-
-    offspring_modules: dict[str, EvolvableModule] = {}
-    offspring_policy: dict[str, EvolvableModule] = {}
-    for group in registry.groups:
-        eval_name = group.eval_network_name()
-        eval_module: EvolvableModule = getattr(individual, eval_name)
-
-        # Clone the offspring prior to applying mutations
-        offspring = eval_module.clone()
-        if group.policy:
-            offspring_policy[eval_name] = offspring
-        else:
-            offspring_modules[eval_name] = offspring
-
-    return offspring_policy, offspring_modules
 
 
 def _is_module_dict(
@@ -741,7 +713,7 @@ class Mutations:
         if not any(entry is not None for network in grama_scores for entry in network):
             return False
 
-        networks = individual.eval_networks()
+        networks = individual.unrolled_eval_networks()
         policy_networks = individual.eval_policy_network_ids()
 
         neurons_reset = 0

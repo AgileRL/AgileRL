@@ -429,6 +429,39 @@ def _per_neuron_grad(grad_input: GradInput) -> torch.Tensor | None:
     return magnitude.mean(dim=reduce_dims)
 
 
+def get_offspring_eval_modules(
+    individual: EvolvableAlgorithm,
+    cloning: bool = True,
+) -> tuple[dict[str, EvolvableModule], dict[str, EvolvableModule]]:
+    """Get the offsprings of all of the evaluation modules in the individual.
+
+    :param individual: The individual to inspect
+    :type individual: EvolvableAlgorithm
+    :param cloning: Whether to clone each evaluation module before returning it,
+        defaults to True.
+    :type cloning: bool, optional
+
+    :return: Tuple of offspring policy and the rest of the evaluation modules
+    :rtype: tuple[dict[str, EvolvableModule], dict[str, EvolvableModule]]
+    """
+    registry = individual.registry
+
+    offspring_modules: dict[str, EvolvableModule] = {}
+    offspring_policy: dict[str, EvolvableModule] = {}
+    for group in registry.groups:
+        eval_name = group.eval_network_name()
+        eval_module: EvolvableModule = getattr(individual, eval_name)
+
+        # Clone the offspring prior to applying mutations
+        offspring = eval_module.clone() if cloning else eval_module
+        if group.policy:
+            offspring_policy[eval_name] = offspring
+        else:
+            offspring_modules[eval_name] = offspring
+
+    return offspring_policy, offspring_modules
+
+
 class EvolvableAlgorithm(ABC, Generic[ExperiencesT], metaclass=RegistryMeta):
     """Base object for all algorithms in the AgileRL framework.
 
@@ -611,7 +644,7 @@ class EvolvableAlgorithm(ABC, Generic[ExperiencesT], metaclass=RegistryMeta):
         """
         latest: GraMaScores = []
         self._grama_latest = latest
-        for net_idx, (_network_id, network) in enumerate(self.eval_networks()):
+        for net_idx, (_network_id, network) in enumerate(self.unrolled_eval_networks()):
             targets = target_activations(network)
             latest.append([None] * len(targets))
             for mod_idx, module in enumerate(targets):
@@ -673,16 +706,22 @@ class EvolvableAlgorithm(ABC, Generic[ExperiencesT], metaclass=RegistryMeta):
             handle.remove()
         self._grama_handles = []
 
-    def eval_networks(self) -> list[tuple[str | None, torch.nn.Module]]:
+    def unrolled_eval_networks(self) -> list[tuple[str | None, torch.nn.Module]]:
         """Return the agent's evaluation networks as (network_id, network) pairs.
 
         :return: One (network_id, network) pair per measured network.
         :rtype: list[tuple[str | None, torch.nn.Module]]
         """
+        offspring_policy, offspring_modules = get_offspring_eval_modules(
+            self,
+            cloning=False,
+        )
+        eval_modules = {**offspring_policy, **offspring_modules}
+
         accelerator = self.accelerator
         pairs: list[tuple[str | None, torch.nn.Module]] = []
         for group in self.registry.groups:
-            eval_net = getattr(self, group.eval_network_name())
+            eval_net = eval_modules[group.eval_network_name()]
             if accelerator is not None:
                 eval_net = accelerator.unwrap_model(eval_net)
             if isinstance(eval_net, ModuleDict):

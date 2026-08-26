@@ -8265,7 +8265,7 @@ class TestEvolvableAlgorithmGraMaState:
         """Backward hooks currently attached to the agent's measured activations."""
         return sum(
             len(module._backward_hooks)
-            for _network_id, network in agent.eval_networks()
+            for _network_id, network in agent.unrolled_eval_networks()
             for module in target_activations(network)
         )
 
@@ -8371,7 +8371,7 @@ class TestGraMaCapture:
     def test_snapshot_layout_matches_the_measured_layers(self, dqn_agent):
         expected = [
             len(target_activations(network))
-            for _network_id, network in dqn_agent.eval_networks()
+            for _network_id, network in dqn_agent.unrolled_eval_networks()
         ]
 
         capture_grama_snapshot(dqn_agent, torch.rand(4, 4))
@@ -8436,7 +8436,7 @@ class TestGraMaCapture:
         # Only PPO's actor is exercised, so the critic never fires.
         agent = PPO(vector_space, discrete_space, device="cpu")
         capture_grama_snapshot(agent, torch.rand(4, 4))
-        networks = [network for _network_id, network in agent.eval_networks()]
+        networks = [network for _network_id, network in agent.unrolled_eval_networks()]
         critic_index = networks.index(agent.critic)
 
         # Recorded as None, so it is skipped downstream rather than read
@@ -8470,7 +8470,7 @@ class TestGraMaCapture:
             msg = "no networks here"
             raise AttributeError(msg)
 
-        monkeypatch.setattr(EvolvableAlgorithm, "eval_networks", explode)
+        monkeypatch.setattr(EvolvableAlgorithm, "unrolled_eval_networks", explode)
 
         with pytest.raises(AttributeError, match="no networks here"):
             capture_grama_snapshot(dqn_agent, torch.rand(4, 4))
@@ -8484,11 +8484,13 @@ class TestGraMaCapture:
         assert not any(issubclass(w.category, UserWarning) for w in recwarn.list)
 
 
-class TestEvalNetworks:
+class TestUnrolledEvalNetworks:
     """Enumerate the networks ReGraMa measures and rewrites."""
 
     def test_target_networks_are_excluded(self, dqn_agent):
-        measured = [network for _network_id, network in dqn_agent.eval_networks()]
+        measured = [
+            network for _network_id, network in dqn_agent.unrolled_eval_networks()
+        ]
 
         # The frozen copy must never be scored or reset.
         assert dqn_agent.actor in measured
@@ -8497,7 +8499,7 @@ class TestEvalNetworks:
     def test_actor_and_critic_are_both_measured(self, vector_space, discrete_space):
         agent = PPO(vector_space, discrete_space, device="cpu")
 
-        measured = [network for _network_id, network in agent.eval_networks()]
+        measured = [network for _network_id, network in agent.unrolled_eval_networks()]
 
         assert agent.actor in measured
         assert agent.critic in measured
@@ -8515,7 +8517,7 @@ class TestEvalNetworks:
         )
         policy = getattr(agent, agent.registry.policy())
 
-        result = agent.eval_networks()
+        result = agent.unrolled_eval_networks()
 
         # One entry per sub-policy, each tagged with its own key, so a
         # captured snapshot is never routed to another sub-agent's network.
@@ -8667,7 +8669,7 @@ class TestGraMaCaptureUnderAccelerator:
         policy = getattr(agent, policy_name)
         setattr(agent, policy_name, nn.parallel.DistributedDataParallel(policy))
 
-        result = agent.eval_networks()
+        result = agent.unrolled_eval_networks()
 
         for key, sub_network in policy.items():
             assert any(
