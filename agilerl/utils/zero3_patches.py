@@ -41,6 +41,8 @@ from agilerl.utils.patching import class_is_patched, try_import
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from agilerl.protocols import PreTrainedModelProtocol
+
 logger = logging.getLogger(__name__)
 
 __all__ = [
@@ -70,6 +72,7 @@ def install_zero3_patches(
     deepspeed_config: Mapping[str, Any] | None,
     *,
     model_name_or_path: str | None = None,
+    model: PreTrainedModelProtocol | None = None,
     num_partitions: int = 1,
 ) -> None:
     """Install the ZeRO-3 patches that apply to this run.
@@ -77,12 +80,15 @@ def install_zero3_patches(
     Always installs the fetch-trace workaround and the persistent-release
     guard, then the patches every family detected in *model_name_or_path*
     needs. Parameter persistence installs when the config declares
-    ``stage3_param_persistence_threshold``. Call before the model is built.
+    ``stage3_param_persistence_threshold``. Call before the model is built;
+    pass ``model`` so the family patches also fix an already-built actor.
 
     :param deepspeed_config: Resolved DeepSpeed config, or None.
     :type deepspeed_config: Mapping[str, Any] | None
     :param model_name_or_path: Hugging Face id or local path of the actor.
     :type model_name_or_path: str | None
+    :param model: Already-built actor model, or None.
+    :type model: PreTrainedModelProtocol | None
     :param num_partitions: ZeRO-3 partition count (trainer world size).
     :type num_partitions: int
     :return: None
@@ -90,7 +96,7 @@ def install_zero3_patches(
     """
     patch_zero3_fetch_trace(deepspeed_config)
     patch_zero3_persistent_release()
-    install_family_zero3_patches(model_name_or_path)
+    install_family_zero3_patches(model_name_or_path, model=model)
 
     if not isinstance(deepspeed_config, Mapping):
         return

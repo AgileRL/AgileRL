@@ -3223,15 +3223,17 @@ class TestLLMZero3ThirdPartyHooksWireUp:
             },
             num_processes=4,
         )
+        actor_network = _make_mock_peft_actor()
         with (
             patch("agilerl.algorithms.core.base.install_zero3_patches") as mock_hooks,
             pytest.warns(UserWarning, match="ZeRO Stage 3"),
         ):
-            agent = _make_llm_agent(accelerator=acc)
+            agent = _make_llm_agent(accelerator=acc, actor_network=actor_network)
 
         mock_hooks.assert_called_once_with(
             acc.state.deepspeed_plugin.deepspeed_config,
             model_name_or_path=agent.pretrained_model_name_or_path,
+            model=actor_network,
             num_partitions=4,
         )
 
