@@ -47,6 +47,16 @@ def _make_mixer_class_without_mem_eff_attr():
     return Mixer
 
 
+class FakeModel:
+    """Model double exposing only the module walk the instance sweep needs."""
+
+    def __init__(self, submodules):
+        self.submodules = submodules
+
+    def modules(self):
+        return iter(self.submodules)
+
+
 class TestNemotronMambaFusedPath:
     def test_apply_is_idempotent(self, monkeypatch):
         events = []
@@ -148,6 +158,102 @@ class TestNemotronMambaFusedPath:
         patch_nemotron_mamba_fused_path()
 
         assert mixer_cls(FakeConfig(use_mem_eff_path=True)).use_mem_eff_path is False
+
+    def test_model_sweep_clears_mixers_built_before_the_patch(
+        self,
+        monkeypatch,
+        caplog,
+    ):
+        events = []
+        mixer_cls = _make_fused_path_mixer_class(events)
+        monkeypatch.setattr(
+            mamba,
+            "_resolve_mixer_class",
+            lambda: mixer_cls,
+        )
+        early = mixer_cls(FakeConfig())
+        other = FakeConfig()
+
+        with caplog.at_level(logging.INFO):
+            patch_nemotron_mamba_fused_path(model=FakeModel([early, other]))
+
+        assert early.use_mem_eff_path is False
+        assert mixer_cls(FakeConfig()).use_mem_eff_path is False
+        assert any(
+            "cleared on 1 existing mixers" in record.message
+            for record in caplog.records
+        )
+
+    def test_model_sweep_runs_when_the_class_is_already_patched(self, monkeypatch):
+        events = []
+        mixer_cls = _make_fused_path_mixer_class(events)
+        monkeypatch.setattr(
+            mamba,
+            "_resolve_mixer_class",
+            lambda: mixer_cls,
+        )
+        early = mixer_cls(FakeConfig())
+        patch_nemotron_mamba_fused_path()
+        assert early.use_mem_eff_path is True
+
+        patch_nemotron_mamba_fused_path(model=FakeModel([early]))
+
+        assert early.use_mem_eff_path is False
+
+    def test_model_without_mixers_leaves_the_model_alone(self, monkeypatch, caplog):
+        events = []
+        mixer_cls = _make_fused_path_mixer_class(events)
+        monkeypatch.setattr(
+            mamba,
+            "_resolve_mixer_class",
+            lambda: mixer_cls,
+        )
+
+        with caplog.at_level(logging.INFO):
+            patch_nemotron_mamba_fused_path(model=FakeModel([FakeConfig()]))
+
+        assert not any("existing mixers" in record.message for record in caplog.records)
+
+    def test_model_sweep_raises_on_mixer_class_identity_skew(self, monkeypatch):
+        events = []
+        mixer_cls = _make_fused_path_mixer_class(events)
+        monkeypatch.setattr(
+            mamba,
+            "_resolve_mixer_class",
+            lambda: mixer_cls,
+        )
+        imposter_cls = type("Mixer", (), {})
+
+        with pytest.raises(RuntimeError, match="different mixer class"):
+            patch_nemotron_mamba_fused_path(model=FakeModel([imposter_cls()]))
+
+    def test_disabled_skips_the_model_sweep(self, monkeypatch):
+        events = []
+        mixer_cls = _make_fused_path_mixer_class(events)
+        monkeypatch.setattr(
+            mamba,
+            "_resolve_mixer_class",
+            lambda: mixer_cls,
+        )
+        early = mixer_cls(FakeConfig())
+
+        patch_nemotron_mamba_fused_path(enabled=False, model=FakeModel([early]))
+
+        assert early.use_mem_eff_path is True
+
+    def test_missing_mixer_class_skips_the_model_sweep(self, monkeypatch, caplog):
+        monkeypatch.setattr(
+            mamba,
+            "_resolve_mixer_class",
+            lambda: None,
+        )
+        events = []
+        early = _make_fused_path_mixer_class(events)(FakeConfig())
+
+        with caplog.at_level(logging.WARNING):
+            patch_nemotron_mamba_fused_path(model=FakeModel([early]))
+
+        assert early.use_mem_eff_path is True
 
 
 class FakeStream:
@@ -384,6 +490,31 @@ class TestNemotronMambaStreamOrdering:
         assert mixer_cls().forward(hidden_states) is output
         assert events == ["forward"]
         assert output.recorded == []
+
+    def test_model_is_accepted_for_dispatch_parity_and_ignored(
+        self,
+        cuda_env,
+        monkeypatch,
+    ):
+        events = []
+        output = FakeTensor()
+        mixer_cls = _make_stream_mixer_class(events, output)
+        monkeypatch.setattr(
+            mamba,
+            "_resolve_mixer_class",
+            lambda: mixer_cls,
+        )
+
+        patch_nemotron_mamba_stream_ordering(model=FakeModel([]))
+
+        streams = Streams(events)
+        _install_streams(monkeypatch, streams)
+        assert mixer_cls().forward(FakeTensor()) is output
+        assert events == [
+            "default.wait_stream(current)",
+            "forward",
+            "current.wait_stream(default)",
+        ]
 
     def test_falls_through_when_cuda_is_unavailable(self, cuda_env, monkeypatch):
         events = []

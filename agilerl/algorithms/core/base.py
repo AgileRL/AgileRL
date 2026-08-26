@@ -3001,10 +3001,12 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
                     )
                 if self.zero_stage == 3:
                     # Class-level DeepSpeed / Nemotron-H workarounds; install
-                    # before any model construction below.
+                    # before any model construction below; the pre-built
+                    # actor_network gets its instance-level state swept.
                     install_zero3_patches(
                         ds_config,
                         model_name_or_path=self.pretrained_model_name_or_path,
+                        model=actor_network,
                         num_partitions=int(self.accelerator.num_processes),
                     )
             if self.accelerator.num_processes > 1:

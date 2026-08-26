@@ -1,0 +1,39 @@
+---
+name: CI
+
+on:
+    pull_request:
+        branches: [main]
+        paths:
+            - agilerl/**
+            - agilerl-arena/**
+            - tests/**
+            - .github/workflows/**
+            - pyproject.toml
+            - uv.lock
+    workflow_dispatch:
+
+concurrency:
+    group: ci-${{ github.ref }}
+    cancel-in-progress: true
+
+permissions:
+    contents: read
+
+jobs:
+    linux:
+        uses: ./.github/workflows/reusable-linux.yml
+        secrets: inherit
+    macos:
+        uses: ./.github/workflows/reusable-macos.yml
+    windows:
+        uses: ./.github/workflows/reusable-windows.yml
+    ty:
+        uses: ./.github/workflows/reusable-type-checks.yml
+    codeql:
+        uses: ./.github/workflows/reusable-codeql.yml
+        permissions:
+            contents: read
+            actions: read
+            packages: read
+            security-events: write

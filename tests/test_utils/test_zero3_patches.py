@@ -151,7 +151,7 @@ class TestInstallZero3ThirdPartyHooks:
         monkeypatch.setattr(
             zero3_patches,
             "install_family_zero3_patches",
-            lambda _name: calls.append("families"),
+            lambda _name, model=None: calls.append("families"),
         )
         monkeypatch.setattr(
             zero3_patches,
@@ -163,8 +163,8 @@ class TestInstallZero3ThirdPartyHooks:
 
         assert calls == ["fetch", "release", "families"]
 
-    def test_family_dispatch_receives_the_checkpoint_id(self, monkeypatch):
-        seen: list[str | None] = []
+    def test_family_dispatch_receives_the_checkpoint_id_and_model(self, monkeypatch):
+        seen: list[tuple[str | None, object]] = []
         monkeypatch.setattr(
             zero3_patches,
             "patch_zero3_fetch_trace",
@@ -178,15 +178,17 @@ class TestInstallZero3ThirdPartyHooks:
         monkeypatch.setattr(
             zero3_patches,
             "install_family_zero3_patches",
-            seen.append,
+            lambda name, model=None: seen.append((name, model)),
         )
+        actor = object()
 
         install_zero3_patches(
             {"zero_optimization": {"stage": 3}},
             model_name_or_path="nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
+            model=actor,
         )
 
-        assert seen == ["nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16"]
+        assert seen == [("nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16", actor)]
 
     def test_persistence_when_threshold_set(self, monkeypatch):
         persist_kwargs: dict = {}
@@ -203,7 +205,7 @@ class TestInstallZero3ThirdPartyHooks:
         monkeypatch.setattr(
             zero3_patches,
             "install_family_zero3_patches",
-            lambda _name: None,
+            lambda _name, model=None: None,
         )
 
         def _persist(threshold, **kwargs):

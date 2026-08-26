@@ -56,7 +56,7 @@ llm = [
     "openenv>=0.4.1,<0.5",
     "peft==0.19.1",
     "transformers==5.14.1",
-    "vllm>=0.24; sys_platform == 'linux'",
+    "vllm>=0.26; sys_platform == 'linux'",
 ]
 arena = [
     # Compatible range: arena patches do not require a new agilerl wheel.
