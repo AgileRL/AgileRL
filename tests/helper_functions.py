@@ -652,7 +652,7 @@ def grama_scores_for(agent: Any, fill: float = 0.0) -> GraMaScores:
     for _network_id, network in agent.unrolled_eval_networks():
         entries: list[torch.Tensor | None] = []
         for activation in mutation_utils.target_activations(network):
-            producer = mutation_utils._resolve_producer_and_next(
+            producer = mutation_utils.resolve_producer_and_next(
                 activation,
                 getattr(network, "encoder", None),
                 getattr(network, "head_net", None),
@@ -661,7 +661,7 @@ def grama_scores_for(agent: Any, fill: float = 0.0) -> GraMaScores:
                 None
                 if producer is None
                 else torch.full(
-                    (mutation_utils._weight_param(producer).shape[0],),
+                    (mutation_utils.weight_param(producer).shape[0],),
                     fill,
                 ),
             )
@@ -684,6 +684,6 @@ def capture_grama_snapshot(agent: Any, observation: torch.Tensor) -> None:
     """
     agent.init_training_step(capture_grama=True)
     policy = getattr(agent, agent.registry.policy())
-    head = mutation_utils._unwrap_module(policy.head_net)
+    head = mutation_utils.unwrap_module(policy.head_net)
     head(policy.encoder(observation)).square().mean().backward()
     agent.finalize_training_step(1)

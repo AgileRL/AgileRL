@@ -3066,7 +3066,7 @@ def _policy_latent_dormant(agent, index: int = 0) -> None:
     policy = getattr(agent, agent.registry.policy())
     # The latent is the encoder's terminal activation, i.e. the only boundary a
     # shared encoder carries into another network's head.
-    terminal = mutation_utils._activation_modules(policy.encoder, include_output=True)[
+    terminal = mutation_utils.activation_modules(policy.encoder, include_output=True)[
         -1
     ]
     position = mutation_utils.target_activations(policy).index(terminal)
@@ -3094,7 +3094,7 @@ class TestMutationsRegramaSharedEncoders:
         )
 
     def critic_head(self, agent):
-        return mutation_utils._head_entry_layers(agent.critic.head_net)[0]
+        return mutation_utils.head_entry_layers(agent.critic.head_net)[0]
 
     def test_shared_critic_head_is_faded_when_the_policy_latent_is_reset(self):
         # The critic borrows the encoder, so it inherits the reset via

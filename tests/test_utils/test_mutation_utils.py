@@ -32,9 +32,9 @@ def reset_producer(
     cnn_spatial: int | None = None,
 ) -> list[int]:
     """Reset one hand-built layer's dormant neurons and return their indices."""
-    consumers = mutation_utils._resolve_consumers(producer, next_layers, cnn_spatial)
-    indices = mutation_utils._dormant_indices(per_neuron, dormant_threshold)
-    mutation_utils._reset_layer_neurons(
+    consumers = mutation_utils.resolve_consumers(producer, next_layers, cnn_spatial)
+    indices = mutation_utils.dormant_indices(per_neuron, dormant_threshold)
+    mutation_utils.reset_layer_neurons(
         producer, consumers, norm, indices, make_rng(seed)
     )
     return indices
@@ -53,16 +53,16 @@ def mlp_net_config() -> dict:
 def latent_marked_dormant(network, index: int) -> list[torch.Tensor | None]:
     """Snapshot for network in which only latent unit index is dormant."""
     encoder, head = network.encoder, network.head_net
-    terminal = mutation_utils._activation_modules(encoder, include_output=True)[-1]
+    terminal = mutation_utils.activation_modules(encoder, include_output=True)[-1]
     scores: list[torch.Tensor | None] = []
     for activation in mutation_utils.target_activations(network):
-        producer = mutation_utils._resolve_producer_and_next(
+        producer = mutation_utils.resolve_producer_and_next(
             activation, encoder, head
         ).producer
         if producer is None:
             scores.append(None)
             continue
-        per_neuron = torch.ones(mutation_utils._weight_param(producer).shape[0])
+        per_neuron = torch.ones(mutation_utils.weight_param(producer).shape[0])
         if activation is terminal:
             per_neuron[index] = 0.0
         scores.append(per_neuron)
@@ -86,27 +86,27 @@ class TestDormantIndices:
         # Mean is 1.0, so the scores are the values themselves.
         per_neuron = torch.tensor([2.0, 0.05, 1.0, 0.95])
 
-        result = mutation_utils._dormant_indices(per_neuron, 0.1)
+        result = mutation_utils.dormant_indices(per_neuron, 0.1)
 
         assert result == [1]
 
     def test_threshold_is_scale_invariant(self):
         per_neuron = torch.tensor([2.0, 0.05, 1.0, 0.95])
 
-        scaled = mutation_utils._dormant_indices(per_neuron * 1000.0, 0.1)
+        scaled = mutation_utils.dormant_indices(per_neuron * 1000.0, 0.1)
 
         # Normalising by the layer mean removes the overall scale.
-        assert scaled == mutation_utils._dormant_indices(per_neuron, 0.1)
+        assert scaled == mutation_utils.dormant_indices(per_neuron, 0.1)
 
     def test_layer_with_no_gradient_anywhere_is_entirely_dormant(self):
-        result = mutation_utils._dormant_indices(torch.zeros(4), 0.01)
+        result = mutation_utils.dormant_indices(torch.zeros(4), 0.01)
 
         assert result == [0, 1, 2, 3]
 
     def test_zero_threshold_selects_only_exactly_dead_neurons(self):
         per_neuron = torch.tensor([1.0, 0.0, 1e-9, 2.0])
 
-        result = mutation_utils._dormant_indices(per_neuron, 0.0)
+        result = mutation_utils.dormant_indices(per_neuron, 0.0)
 
         assert result == [1]
 
@@ -114,12 +114,12 @@ class TestDormantIndices:
         # A diverged unit is exactly one worth re-initialising.
         per_neuron = torch.tensor([1.0, float("nan"), float("inf"), 2.0])
 
-        result = mutation_utils._dormant_indices(per_neuron, 0.01)
+        result = mutation_utils.dormant_indices(per_neuron, 0.01)
 
         assert result == [1, 2]
 
     def test_empty_layer_selects_nothing(self):
-        assert mutation_utils._dormant_indices(torch.empty(0), 0.01) == []
+        assert mutation_utils.dormant_indices(torch.empty(0), 0.01) == []
 
 
 class TestResetLayerNeurons:
@@ -307,7 +307,7 @@ class TestLiveColumnScale:
         weight = torch.arange(12, dtype=torch.float32).reshape(2, 6)
         expected = float(weight.pow(2).sum(0).sqrt().median())
 
-        result = mutation_utils._live_column_scale(weight, 1, list(range(6)))
+        result = mutation_utils.live_column_scale(weight, 1, list(range(6)))
 
         assert result == pytest.approx(expected, rel=1e-6)
 
@@ -317,7 +317,7 @@ class TestLiveColumnScale:
         blocks = weight.reshape(2, 3, 4)
         expected = float(blocks.pow(2).sum(dim=(0, 2)).sqrt().median())
 
-        result = mutation_utils._live_column_scale(weight, 4, [0, 1, 2])
+        result = mutation_utils.live_column_scale(weight, 4, [0, 1, 2])
 
         assert result == pytest.approx(expected, rel=1e-6)
 
@@ -327,7 +327,7 @@ class TestLiveColumnScale:
         blocks = weight.reshape(2, 3, -1)
         expected = float(blocks.pow(2).sum(dim=(0, 2)).sqrt().median())
 
-        result = mutation_utils._live_column_scale(weight, 1, [0, 1, 2])
+        result = mutation_utils.live_column_scale(weight, 1, [0, 1, 2])
 
         assert result == pytest.approx(expected, rel=1e-6)
 
@@ -337,8 +337,8 @@ class TestLiveColumnScale:
         weight = torch.ones(2, 5)
         weight[:, :3] = 100.0
 
-        kept = mutation_utils._live_column_scale(weight, 1, [3, 4])
-        everything = mutation_utils._live_column_scale(weight, 1, [0, 1, 2, 3, 4])
+        kept = mutation_utils.live_column_scale(weight, 1, [3, 4])
+        everything = mutation_utils.live_column_scale(weight, 1, [0, 1, 2, 3, 4])
 
         assert kept < everything
 
@@ -346,21 +346,21 @@ class TestLiveColumnScale:
         weight = torch.ones(2, 3) * 4.0
         expected = float(weight.pow(2).sum(0).sqrt().median())
 
-        result = mutation_utils._live_column_scale(weight, 1, [])
+        result = mutation_utils.live_column_scale(weight, 1, [])
 
         assert result == pytest.approx(expected, rel=1e-6)
 
     def test_an_all_zero_layer_falls_back_to_the_xavier_bound(self):
         weight = torch.zeros(2, 3)
 
-        result = mutation_utils._live_column_scale(weight, 1, [])
+        result = mutation_utils.live_column_scale(weight, 1, [])
 
         assert result > 0.0
 
     def test_a_layer_with_no_columns_at_all_falls_back_to_the_xavier_bound(self):
         weight = torch.zeros(2, 0)
 
-        result = mutation_utils._live_column_scale(weight, 1, [])
+        result = mutation_utils.live_column_scale(weight, 1, [])
 
         assert result > 0.0
 
@@ -370,7 +370,7 @@ class TestRevivedBlock:
 
     @pytest.mark.parametrize("is_noise_scale", [False, True], ids=["weight", "noise"])
     def test_block_is_rescaled_to_the_requested_norm(self, is_noise_scale):
-        result = mutation_utils._revived_block(
+        result = mutation_utils.revived_block(
             torch.zeros(4),
             0.5,
             make_rng(),
@@ -380,7 +380,7 @@ class TestRevivedBlock:
         assert result.norm().item() == pytest.approx(0.5, rel=1e-6)
 
     def test_a_noise_block_is_non_negative_and_uniform(self):
-        result = mutation_utils._revived_block(
+        result = mutation_utils.revived_block(
             torch.zeros(3, 2),
             1.0,
             make_rng(),
@@ -391,14 +391,14 @@ class TestRevivedBlock:
         assert result.unique().numel() == 1
 
     def test_a_weight_block_is_a_signed_direction(self):
-        result = mutation_utils._revived_block(torch.zeros(64), 1.0, make_rng())
+        result = mutation_utils.revived_block(torch.zeros(64), 1.0, make_rng())
 
         assert (result < 0).any()
         assert (result > 0).any()
 
     @pytest.mark.parametrize("is_noise_scale", [False, True], ids=["weight", "noise"])
     def test_non_positive_scale_restores_the_zero_column(self, is_noise_scale):
-        result = mutation_utils._revived_block(
+        result = mutation_utils.revived_block(
             torch.ones(4),
             0.0,
             make_rng(),
@@ -415,7 +415,7 @@ class TestRevivedBlock:
     def test_shape_dtype_and_device_follow_the_template(self, device, is_noise_scale):
         template = torch.zeros(2, 3, dtype=torch.float64, device=device)
 
-        result = mutation_utils._revived_block(
+        result = mutation_utils.revived_block(
             template,
             1.0,
             make_rng(),
@@ -431,15 +431,15 @@ class TestModuleTraversalHelpers:
     """Locate weight layers and strip wrappers across the module tree."""
 
     def test_first_weight_layer_of_a_weightless_module_is_none(self):
-        assert mutation_utils._first_weight_layer(nn.Sequential(nn.ReLU())) is None
+        assert mutation_utils.first_weight_layer(nn.Sequential(nn.ReLU())) is None
 
     def test_head_entry_layers_of_an_absent_head_is_empty(self):
-        assert mutation_utils._head_entry_layers(None) == []
+        assert mutation_utils.head_entry_layers(None) == []
 
     def test_flat_head_reports_a_single_entry_layer(self):
         head = nn.Sequential(nn.Linear(4, 3), nn.ReLU(), nn.Linear(3, 2))
 
-        result = mutation_utils._head_entry_layers(head)
+        result = mutation_utils.head_entry_layers(head)
 
         assert result == [head[0]]
 
@@ -451,7 +451,7 @@ class TestModuleTraversalHelpers:
             },
         )
 
-        result = mutation_utils._head_entry_layers(head)
+        result = mutation_utils.head_entry_layers(head)
 
         assert len(result) == 2
 
@@ -463,7 +463,7 @@ class TestResolveConsumers:
         producer = nn.Linear(3, 5)
         consumer = nn.Linear(5, 2)
 
-        result = mutation_utils._resolve_consumers(producer, [consumer], None)
+        result = mutation_utils.resolve_consumers(producer, [consumer], None)
 
         assert [target.stride for target in result] == [1]
 
@@ -471,7 +471,7 @@ class TestResolveConsumers:
         producer = nn.Conv2d(3, 4, kernel_size=3)
         consumer = nn.Linear(16, 2)
 
-        result = mutation_utils._resolve_consumers(producer, [consumer], 4)
+        result = mutation_utils.resolve_consumers(producer, [consumer], 4)
 
         assert [target.stride for target in result] == [4]
 
@@ -481,7 +481,7 @@ class TestResolveConsumers:
         producer = nn.Linear(3, 5)
         fusion = nn.Linear(9, 2)
 
-        result = mutation_utils._resolve_consumers(producer, [fusion], None)
+        result = mutation_utils.resolve_consumers(producer, [fusion], None)
 
         assert result == []
 
@@ -489,7 +489,7 @@ class TestResolveConsumers:
         producer = nn.Conv2d(3, 4, kernel_size=3)
         consumer = nn.Linear(16, 2)
 
-        result = mutation_utils._resolve_consumers(producer, [consumer], None)
+        result = mutation_utils.resolve_consumers(producer, [consumer], None)
 
         assert result == []
 
@@ -497,7 +497,7 @@ class TestResolveConsumers:
         producer = nn.Linear(3, 5)
         consumer = NoisyLinear(5, 2)
 
-        result = mutation_utils._resolve_consumers(producer, [consumer], None)
+        result = mutation_utils.resolve_consumers(producer, [consumer], None)
 
         # The mean weight and its parallel noise scale ride together.
         assert len(result) == 2
@@ -507,7 +507,7 @@ class TestResolveConsumers:
         producer = nn.Linear(3, 5)
         consumer = nn.Conv2d(5, 2, kernel_size=3)
 
-        result = mutation_utils._resolve_consumers(producer, [consumer], None)
+        result = mutation_utils.resolve_consumers(producer, [consumer], None)
 
         assert result == []
 
@@ -524,7 +524,7 @@ class TestConvBlocks:
         assert isinstance(layer, mutation_utils.WEIGHT_LAYER_TYPES)
 
     def test_conv_pair_is_a_conv_to_conv_boundary(self):
-        targets = mutation_utils._resolve_consumers(
+        targets = mutation_utils.resolve_consumers(
             nn.Conv2d(3, 4, 3),
             [nn.Conv2d(4, 2, 3)],
             None,
@@ -540,7 +540,7 @@ class TestConvBlocks:
             nn.ReLU(),
         )
 
-        result = mutation_utils._resolve_producer_and_next(encoder[1], encoder, None)
+        result = mutation_utils.resolve_producer_and_next(encoder[1], encoder, None)
 
         assert result.producer is encoder[0]
         assert result.consumers == [encoder[2]]
@@ -733,7 +733,7 @@ class TestResolveProducerAndNext:
         network = dqn_agent.actor
         activation = mutation_utils.target_activations(network)[0]
 
-        context = mutation_utils._resolve_producer_and_next(
+        context = mutation_utils.resolve_producer_and_next(
             activation,
             network.encoder,
             network.head_net,
@@ -749,7 +749,7 @@ class TestResolveProducerAndNext:
         network = dqn_agent.actor
         activation = mutation_utils.target_activations(network)[0]
 
-        context = mutation_utils._resolve_producer_and_next(
+        context = mutation_utils.resolve_producer_and_next(
             activation,
             network.encoder,
             network.head_net,
@@ -763,7 +763,7 @@ class TestResolveProducerAndNext:
         block = SimbaResidualBlock(hidden_size=8, scale_factor=2)
         encoder = nn.Sequential(block)
 
-        context = mutation_utils._resolve_producer_and_next(block.act, encoder, None)
+        context = mutation_utils.resolve_producer_and_next(block.act, encoder, None)
 
         assert context.producer is block.linear1
         assert context.norm is None
@@ -773,7 +773,7 @@ class TestResolveProducerAndNext:
         block = ResidualBlock(in_channels=3, kernel_size=3, scale_factor=2)
         encoder = nn.Sequential(block)
 
-        context = mutation_utils._resolve_producer_and_next(block.act, encoder, None)
+        context = mutation_utils.resolve_producer_and_next(block.act, encoder, None)
 
         assert context.producer is block.conv1
         assert context.norm is block.bn1
@@ -783,7 +783,7 @@ class TestResolveProducerAndNext:
         block = ResidualBlock(in_channels=3, kernel_size=3, scale_factor=2)
         encoder = nn.Sequential(block)
 
-        measured = mutation_utils._activation_modules(encoder, include_output=False)
+        measured = mutation_utils.activation_modules(encoder, include_output=False)
 
         assert block.act in measured
 
@@ -796,11 +796,11 @@ class TestResolveProducerAndNext:
         # whole latent.
         agent = RainbowDQN(vector_space, discrete_space, device="cpu")
         network = agent.actor
-        latent = mutation_utils._activation_modules(
+        latent = mutation_utils.activation_modules(
             network.encoder, include_output=True
         )[-1]
 
-        context = mutation_utils._resolve_producer_and_next(
+        context = mutation_utils.resolve_producer_and_next(
             latent,
             network.encoder,
             network.head_net,
@@ -824,9 +824,9 @@ class TestResolveProducerAndNext:
         )
         encoder = agent.actor.encoder
         sub_encoder = next(iter(encoder.feature_net.values()))
-        tail = mutation_utils._activation_modules(sub_encoder, include_output=True)[-1]
+        tail = mutation_utils.activation_modules(sub_encoder, include_output=True)[-1]
 
-        context = mutation_utils._resolve_producer_and_next(
+        context = mutation_utils.resolve_producer_and_next(
             tail,
             encoder,
             agent.actor.head_net,
@@ -838,7 +838,7 @@ class TestResolveProducerAndNext:
     def test_unknown_activation_resolves_to_nothing(self, dqn_agent):
         network = dqn_agent.actor
 
-        context = mutation_utils._resolve_producer_and_next(
+        context = mutation_utils.resolve_producer_and_next(
             nn.ReLU(),
             network.encoder,
             network.head_net,
@@ -850,7 +850,7 @@ class TestResolveProducerAndNext:
     def test_activation_is_found_in_the_head_when_the_encoder_is_absent(self):
         head = nn.Sequential(nn.Linear(4, 3), nn.ReLU(), nn.Linear(3, 2))
 
-        context = mutation_utils._resolve_producer_and_next(head[1], None, head)
+        context = mutation_utils.resolve_producer_and_next(head[1], None, head)
 
         assert context.producer is head[0]
         assert context.consumers == [head[2]]
@@ -952,7 +952,7 @@ class TestTargetActivations:
     def test_activations_are_recognised_by_type_not_by_name(self):
         root = nn.Sequential(nn.Linear(3, 4), nn.Tanh(), nn.Linear(4, 2))
 
-        result = mutation_utils._activation_modules(root, include_output=True)
+        result = mutation_utils.activation_modules(root, include_output=True)
 
         assert [type(module) for module in result] == [nn.Tanh]
 
@@ -968,7 +968,7 @@ class TestSnapshotPairing:
         # the dormant one must come through untouched.
         network = dqn_agent.actor
         producers = [
-            mutation_utils._resolve_producer_and_next(
+            mutation_utils.resolve_producer_and_next(
                 activation,
                 network.encoder,
                 network.head_net,
@@ -976,7 +976,7 @@ class TestSnapshotPairing:
             for activation in mutation_utils.target_activations(network)
         ]
         scores = [
-            torch.ones(mutation_utils._weight_param(producer).shape[0])
+            torch.ones(mutation_utils.weight_param(producer).shape[0])
             for producer in producers
         ]
         scores[dormant_index] = torch.zeros_like(scores[dormant_index])
@@ -1213,7 +1213,7 @@ class TestResetDormantNeurons:
         agent.finalize_training_step(1)
 
         tails = {
-            id(mutation_utils._activation_modules(sub_encoder, include_output=True)[-1])
+            id(mutation_utils.activation_modules(sub_encoder, include_output=True)[-1])
             for sub_encoder in agent.actor.encoder.feature_net.values()
         }
         scores = []
@@ -1264,8 +1264,8 @@ class TestResetDormantNeurons:
         # could reach would be.
         scores = [
             torch.zeros(
-                mutation_utils._weight_param(
-                    mutation_utils._resolve_producer_and_next(
+                mutation_utils.weight_param(
+                    mutation_utils.resolve_producer_and_next(
                         activation,
                         agent.actor.encoder,
                         agent.actor.head_net,
@@ -1302,8 +1302,8 @@ class TestResetDormantNeurons:
         # Every measured layer of the critic is marked fully dormant.
         scores = [
             torch.zeros(
-                mutation_utils._weight_param(
-                    mutation_utils._resolve_producer_and_next(
+                mutation_utils.weight_param(
+                    mutation_utils.resolve_producer_and_next(
                         activation,
                         agent.critic.encoder,
                         agent.critic.head_net,
@@ -1329,14 +1329,14 @@ class TestSharedLatentBlocks:
     def test_dense_entry_exposes_its_leading_latent_columns(self):
         producer = nn.Linear(4, 8)
 
-        result = mutation_utils._shared_latent_blocks(producer, [nn.Linear(10, 5)])
+        result = mutation_utils.shared_latent_blocks(producer, [nn.Linear(10, 5)])
 
         assert [tuple(target.weight.shape) for target in result] == [(5, 8)]
 
     def test_noisy_entry_also_exposes_its_noise_columns(self):
         producer = nn.Linear(4, 8)
 
-        result = mutation_utils._shared_latent_blocks(producer, [NoisyLinear(8, 5)])
+        result = mutation_utils.shared_latent_blocks(producer, [NoisyLinear(8, 5)])
 
         assert [target.is_noise_scale for target in result] == [False, True]
 
@@ -1348,7 +1348,7 @@ class TestSharedLatentBlocks:
     def test_an_entry_that_cannot_hold_the_latent_is_skipped(self, make_entry):
         producer = nn.Linear(4, 8)
 
-        result = mutation_utils._shared_latent_blocks(producer, [make_entry()])
+        result = mutation_utils.shared_latent_blocks(producer, [make_entry()])
 
         assert result == []
 
@@ -1357,7 +1357,7 @@ class TestSharedLatentBlocks:
         # so a conv producer is never the layer feeding a sharing head.
         producer = nn.Conv2d(3, 8, 3)
 
-        result = mutation_utils._shared_latent_blocks(producer, [nn.Linear(8, 5)])
+        result = mutation_utils.shared_latent_blocks(producer, [nn.Linear(8, 5)])
 
         assert result == []
 
@@ -1369,7 +1369,7 @@ class TestSharedEncoderCompensation:
         return PPO(vector_space, discrete_space, share_encoders=share, device="cpu")
 
     def critic_head(self, network):
-        return mutation_utils._head_entry_layers(network.head_net)[0]
+        return mutation_utils.head_entry_layers(network.head_net)[0]
 
     def reset_actor_latent(self, agent, index=0):
         """Reset one latent unit of the policy, compensating shared consumers."""
@@ -1425,7 +1425,7 @@ class TestSharedEncoderCompensation:
             agent.unrolled_eval_networks(), None, agent.actor
         )
 
-        assert result == mutation_utils._head_entry_layers(agent.critic.head_net)
+        assert result == mutation_utils.head_entry_layers(agent.critic.head_net)
 
     def test_unshared_encoders_report_no_shared_consumer(
         self,

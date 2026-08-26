@@ -25,9 +25,9 @@ from agilerl.protocols import EvolvableAlgorithmProtocol
 from agilerl.typing import MutationReturn
 from agilerl.utils.algo_utils import remove_compile_prefix
 from agilerl.utils.mutation_utils import (
-    _as_module_dict,
-    _is_module_dict,
+    as_module_dict,
     get_exp_layer,
+    is_module_dict,
     reinit_shared_networks,
     reset_dormant_neurons,
     set_global_seed,
@@ -535,7 +535,7 @@ class Mutations:
 
         policy_name = policy_group.eval_network_name()
         offspring_policy: EvolvableModule = getattr(individual, policy_name)
-        if _is_module_dict(offspring_policy):
+        if is_module_dict(offspring_policy):
             for agent_id, module in offspring_policy.items():
                 offspring_policy[agent_id] = self._gaussian_parameter_mutation(module)
         else:
@@ -707,7 +707,7 @@ class Mutations:
         :rtype: EvolvableModule
         """
         ind_shared: EvolvableModule
-        if _is_module_dict(offspring):
+        if is_module_dict(offspring):
             reinit_modules: dict[str, EvolvableModule] = OrderedDict()
             for agent_id, nested_offspring in offspring.items():
                 reinit_modules[agent_id] = self._reinit_module(
@@ -983,7 +983,7 @@ class Mutations:
             sampled_mutation = None
 
         # Applying to the remaining sub-agents needs the per-agent mapping.
-        policy_offspring = _as_module_dict(policy_module)
+        policy_offspring = as_module_dict(policy_module)
         for agent_id, policy in policy_offspring.items():
             if agent_id == sampled_agent_id:
                 continue
@@ -1004,7 +1004,7 @@ class Mutations:
 
         # Try to apply an analogous mutation to the rest of the evaluation modules
         for name, eval_module in offspring_evals.items():
-            offspring_eval = _as_module_dict(eval_module)
+            offspring_eval = as_module_dict(eval_module)
 
             # Iterate over the agents in the offspring evaluation module
             for agent_id, agent_eval in offspring_eval.items():
