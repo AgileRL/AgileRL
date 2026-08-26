@@ -8561,6 +8561,42 @@ class TestPolicyEvalNetworkIds:
 
         assert dqn_agent.eval_policy_network_ids() == set()
 
+    def test_a_single_agent_policy_is_unwrapped_before_hashing(self, dqn_agent):
+        wrapped = object()
+        real_actor = dqn_agent.actor
+        dqn_agent.actor = wrapped
+        dqn_agent.accelerator = MagicMock(spec=Accelerator)
+        dqn_agent.accelerator.unwrap_model = MagicMock(return_value=real_actor)
+
+        result = dqn_agent.eval_policy_network_ids()
+
+        dqn_agent.accelerator.unwrap_model.assert_called_once_with(wrapped)
+        assert result == {id(real_actor)}
+
+    def test_a_plain_dict_policy_unwraps_every_member_under_accelerator(
+        self,
+        dqn_agent,
+    ):
+        real_actor = dqn_agent.actor
+        wrapped = object()
+        dqn_agent.actor = {"agent_0": wrapped}
+        dqn_agent.accelerator = MagicMock(spec=Accelerator)
+        dqn_agent.accelerator.unwrap_model = MagicMock(return_value=real_actor)
+
+        result = dqn_agent.eval_policy_network_ids()
+
+        dqn_agent.accelerator.unwrap_model.assert_called_once_with(wrapped)
+        assert result == {id(real_actor)}
+
+    def test_a_plain_dict_policy_without_an_accelerator_reports_raw_ids(
+        self,
+        dqn_agent,
+    ):
+        member = object()
+        dqn_agent.actor = {"agent_0": member}
+
+        assert dqn_agent.eval_policy_network_ids() == {id(member)}
+
 
 class TestGraMaCaptureUnderAccelerator:
     """Capture on wrapped networks still lines up with the unwrapped ones."""

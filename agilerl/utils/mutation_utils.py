@@ -4,13 +4,15 @@
 from __future__ import annotations
 
 import logging
+import math
 from collections.abc import Sequence
-from typing import NamedTuple
+from typing import NamedTuple, cast
 
 import numpy as np
 import torch
 from torch import nn
 
+from agilerl.modules.custom_components import NoisyLinear
 from agilerl.utils.evolvable_networks import (
     ACTIVATION_FUNCTIONS,
     CONV_LAYER_FUNCTIONS,
@@ -27,20 +29,21 @@ REGRAMA_OUT_SCALE = 0.02
 MAGNITUDE_LIMIT = 1e6
 
 # Every block type EvolvableCNN can build.
-CONV_LAYER_TYPES: tuple[type[nn.Module], ...] = tuple(
-    dict.fromkeys(CONV_LAYER_FUNCTIONS.values())
+CONV_LAYER_TYPES: tuple[type[nn.Module], ...] = tuple(CONV_LAYER_FUNCTIONS.values())
+
+# Every layer whose weight rows are one neuron's incoming weights.
+WEIGHT_LAYER_TYPES: tuple[type[nn.Module], ...] = (
+    nn.Linear,
+    NoisyLinear,
+    *CONV_LAYER_TYPES,
 )
 
 # Activation sub-modules are recognised by type.
-ACTIVATION_TYPES: tuple[type[nn.Module], ...] = tuple(
-    dict.fromkeys(ACTIVATION_FUNCTIONS.values())
-)
+ACTIVATION_TYPES: tuple[type[nn.Module], ...] = tuple(ACTIVATION_FUNCTIONS.values())
 
 # Normalisations hold per-neuron state of their own, so a revived neuron's entry
 # has to be reset with it.
-NORM_LAYER_TYPES: tuple[type[nn.Module], ...] = tuple(
-    dict.fromkeys(NORMALIZATION_FUNCTIONS.values())
-)
+NORM_LAYER_TYPES: tuple[type[nn.Module], ...] = tuple(NORMALIZATION_FUNCTIONS.values())
 
 
 class ProducerContext(NamedTuple):
@@ -69,22 +72,10 @@ class ConsumerTarget(NamedTuple):
     is_noise_scale: bool = False
 
 
-def _is_weight_layer(module: nn.Module) -> bool:
-    """Whether module carries resettable weights (Linear/Conv/Noisy)."""
-    if isinstance(module, (nn.Linear, *CONV_LAYER_TYPES)):
-        return True
-    return hasattr(module, "weight_mu") and hasattr(module, "bias_mu")
-
-
 def _weight_param(module: nn.Module) -> torch.Tensor:
     """The weight tensor of a weight layer, or weight_mu for a noisy one."""
-    weight = getattr(module, "weight_mu", None)
-    if weight is None:
-        weight = getattr(module, "weight", None)
-    if not isinstance(weight, torch.Tensor):
-        msg = f"{type(module).__name__} exposes no weight tensor to reset."
-        raise TypeError(msg)
-    return weight
+    weight = module.weight_mu if isinstance(module, NoisyLinear) else module.weight
+    return cast("torch.Tensor", weight)
 
 
 def _owns_trainable_weight(module: nn.Module) -> bool:
@@ -98,34 +89,26 @@ def _owns_trainable_weight(module: nn.Module) -> bool:
     return isinstance(weight, nn.Parameter) and weight.requires_grad
 
 
-def _unwrap_module(module: nn.Module | None) -> nn.Module | None:
+def _unwrap_module(module: nn.Module) -> nn.Module:
     """Strip wrapper layers that hide the real module."""
-    seen: set[int] = set()
-    while module is not None and id(module) not in seen:
-        seen.add(id(module))
-        wrapped = getattr(module, "wrapped", None)
-        if wrapped is None:
-            break
+    while (wrapped := getattr(module, "wrapped", None)) is not None:
         module = wrapped
     return module
 
 
-def _first_weight_layer(module: nn.Module | None) -> nn.Module | None:
+def _first_weight_layer(module: nn.Module) -> nn.Module | None:
     """The first weight-bearing layer inside module, in forward order."""
-    if module is None:
-        return None
     for _name, child in module.named_modules():
-        if _is_weight_layer(child):
+        if isinstance(child, WEIGHT_LAYER_TYPES):
             return child
     return None
 
 
 def _head_entry_layers(head: nn.Module | None) -> list[nn.Module]:
     """The first weight layer of every parallel stream in head."""
-    head = _unwrap_module(head)
     if head is None:
         return []
-    children = list(head.children())
+    children = list(_unwrap_module(head).children())
     entries = [_first_weight_layer(child) for child in children]
     found = [entry for entry in entries if entry is not None]
     is_flat_stream = any(
@@ -148,6 +131,8 @@ def _activation_modules(root: nn.Module, *, include_output: bool) -> list[nn.Mod
             continue
         parent = name.rpartition(".")[0]
         prefix = f"{parent}." if parent else ""
+        # Anything declaring an output width downstream consumes these neurons,
+        # so the activation does not terminate its stream.
         has_later_consumer = any(
             other_name.startswith(prefix)
             and any(
@@ -163,14 +148,16 @@ def _activation_modules(root: nn.Module, *, include_output: bool) -> list[nn.Mod
 
 def target_activations(network: nn.Module) -> list[nn.Module]:
     """The activation sub-modules measured for one network, in forward order."""
-    targets: list[nn.Module] = []
-    encoder = getattr(network, "encoder", None)
-    if encoder is not None:
-        targets += _activation_modules(encoder, include_output=True)
-    head = getattr(network, "head_net", None)
-    if head is not None:
-        targets += _activation_modules(head, include_output=False)
-    return targets
+    halves = (
+        (getattr(network, "encoder", None), True),
+        (getattr(network, "head_net", None), False),
+    )
+    return [
+        module
+        for root, is_encoder in halves
+        if root is not None
+        for module in _activation_modules(root, include_output=is_encoder)
+    ]
 
 
 def shared_encoder_heads(
@@ -192,7 +179,7 @@ def shared_encoder_heads(
         layers = [
             module
             for _name, module in encoder.named_modules()
-            if _is_weight_layer(module)
+            if isinstance(module, WEIGHT_LAYER_TYPES)
         ]
         if not layers or any(_owns_trainable_weight(layer) for layer in layers):
             continue
@@ -208,19 +195,11 @@ def _dormant_indices(per_neuron: torch.Tensor, dormant_threshold: float) -> list
     coerced to zero, i.e. treated as dormant: a diverged unit is precisely one
     worth re-initialising.
     """
-    scores = torch.nan_to_num(
-        per_neuron.detach(),
-        nan=0.0,
-        posinf=0.0,
-        neginf=0.0,
-    )
-    if scores.numel() == 0:
-        return []
+    scores = torch.nan_to_num(per_neuron, nan=0.0, posinf=0.0, neginf=0.0)
     mean = float(scores.mean())
     if mean <= 0.0:
         return list(range(scores.numel()))
-    normalised = scores / mean
-    return torch.nonzero(normalised <= dormant_threshold).flatten().tolist()
+    return torch.nonzero(scores / mean <= dormant_threshold).flatten().tolist()
 
 
 def _resolve_producer_and_next(
@@ -235,11 +214,10 @@ def _resolve_producer_and_next(
     cleared whenever a later weight layer takes over.
     """
     for root, is_encoder in ((encoder, True), (head, False)):
-        search_root = _unwrap_module(root)
-        if search_root is None:
+        if root is None:
             continue
 
-        ordered = list(search_root.named_modules())
+        ordered = list(_unwrap_module(root).named_modules())
         name = next((n for n, m in ordered if m is act_module), None)
         if name is None:
             continue
@@ -261,7 +239,7 @@ def _resolve_producer_and_next(
             if not passed and in_stream and isinstance(other, NORM_LAYER_TYPES):
                 norm = other
                 continue
-            if not _is_weight_layer(other):
+            if not isinstance(other, WEIGHT_LAYER_TYPES):
                 continue
             if not passed:
                 if in_stream:
@@ -292,35 +270,15 @@ def _live_column_scale(weight: torch.Tensor, stride: int, keep: list[int]) -> fl
         blocks = weight.reshape(weight.shape[0], -1, stride)
         fan_out = blocks.shape[0]
 
-    def median_norm(indices: list[int] | None) -> float:
-        selected = blocks if indices is None else blocks[:, indices, :]
-        if selected.shape[1] == 0:
-            return 0.0
+    for selected in (blocks[:, keep, :], blocks):
         norms = selected.pow(2).sum(dim=(0, 2)).sqrt()
         norms = norms[norms.isfinite()]
-        return float(norms.median()) if norms.numel() else 0.0
-
-    for candidate in (median_norm(keep) if keep else 0.0, median_norm(None)):
-        if candidate > 0.0:
-            return candidate
+        if norms.numel() and (median := float(norms.median())) > 0.0:
+            return median
 
     fan_in = blocks.shape[1] * blocks.shape[2]
-    block_entries = blocks.shape[0] * blocks.shape[2]
-    bound = float(np.sqrt(6.0 / (fan_in + fan_out)))
-    # RMS of U(-bound, bound) is bound / sqrt(3).
-    return bound / np.sqrt(3.0) * float(np.sqrt(block_entries))
-
-
-def _noise_params(
-    module: nn.Module,
-) -> tuple[torch.Tensor | None, torch.Tensor | None]:
-    """A noisy layer's (weight_sigma, bias_sigma) data tensors."""
-    weight_sigma = getattr(module, "weight_sigma", None)
-    bias_sigma = getattr(module, "bias_sigma", None)
-    return (
-        weight_sigma.data if weight_sigma is not None else None,
-        bias_sigma.data if bias_sigma is not None else None,
-    )
+    bound = math.sqrt(6.0 / (fan_in + fan_out))
+    return bound / math.sqrt(3.0) * math.sqrt(blocks.shape[0] * blocks.shape[2])
 
 
 def _revived_block(
@@ -336,24 +294,17 @@ def _revived_block(
     is instead a single non-negative value, sized the way the weight block is but
     against the noise scales' own live columns rather than the weights'.
     """
-    if scale <= 0.0 or template.numel() == 0:
-        return torch.zeros_like(template)
-
     if is_noise_scale:
-        return torch.full_like(template, scale / float(np.sqrt(template.numel())))
+        return torch.full_like(template, scale / math.sqrt(template.numel()))
 
     sampled = rng.standard_normal(size=tuple(template.shape))
     block = torch.as_tensor(sampled, dtype=template.dtype, device=template.device)
-    norm = float(block.norm())
-    if norm <= 0.0:
-        return torch.zeros_like(template)
-    return block * (scale / norm)
+    return block * (scale / float(block.norm()))
 
 
 def _resolve_consumers(
     producer: nn.Module,
     next_layers: list[nn.Module],
-    cnn_channels: int | None,
     cnn_spatial: int | None,
 ) -> list[ConsumerTarget]:
     """Pair each usable consumer weight tensor with its per-neuron column stride.
@@ -364,7 +315,7 @@ def _resolve_consumers(
     is skipped instead.
     """
     producer_is_conv = isinstance(producer, CONV_LAYER_TYPES)
-    producer_neurons = _weight_param(producer).data.shape[0]
+    producer_neurons = _weight_param(producer).shape[0]
     consumers: list[ConsumerTarget] = []
     for next_layer in next_layers:
         # A dense layer feeding a convolution is a pairing the surgery cannot index.
@@ -375,7 +326,7 @@ def _resolve_consumers(
         next_weight = _weight_param(next_layer).data
         stride = 1
         if producer_is_conv and not next_is_conv:
-            if cnn_spatial is None or cnn_channels is None:
+            if cnn_spatial is None:
                 logger.debug(
                     "ReGraMa: no flattened column layout for %s -> %s; "
                     "leaving the layer unreset.",
@@ -400,9 +351,14 @@ def _resolve_consumers(
 
         # The consumer's own noise columns are scales rather than weights and are
         # revived as such.
-        next_sigma, _next_bias_sigma = _noise_params(next_layer)
-        if next_sigma is not None and next_sigma.shape == next_weight.shape:
-            consumers.append(ConsumerTarget(next_sigma, stride, is_noise_scale=True))
+        if isinstance(next_layer, NoisyLinear):
+            consumers.append(
+                ConsumerTarget(
+                    next_layer.weight_sigma.data,
+                    stride,
+                    is_noise_scale=True,
+                ),
+            )
 
     return consumers
 
@@ -415,16 +371,21 @@ def _shared_latent_blocks(
     if isinstance(producer, CONV_LAYER_TYPES):
         return []
 
-    span = _weight_param(producer).data.shape[0]
+    span = _weight_param(producer).shape[0]
     blocks: list[ConsumerTarget] = []
     for entry in entry_layers:
         weight = _weight_param(entry).data
         if weight.dim() != 2 or weight.shape[1] < span:
             continue
         blocks.append(ConsumerTarget(weight[:, :span], 1))
-        sigma, _bias_sigma = _noise_params(entry)
-        if sigma is not None and sigma.shape == weight.shape:
-            blocks.append(ConsumerTarget(sigma[:, :span], 1, is_noise_scale=True))
+        if isinstance(entry, NoisyLinear):
+            blocks.append(
+                ConsumerTarget(
+                    entry.weight_sigma.data[:, :span],
+                    1,
+                    is_noise_scale=True,
+                ),
+            )
     return blocks
 
 
@@ -443,44 +404,50 @@ def _reset_layer_neurons(
     direction for a weight, a uniform non-negative fill for a noise scale) and a
     neutral normalisation entry.
     """
+    noisy = producer if isinstance(producer, NoisyLinear) else None
     producer_weight = _weight_param(producer).data
-    producer_bias = getattr(producer, "bias_mu", None)
-    if producer_bias is None:
-        producer_bias = getattr(producer, "bias", None)
-    producer_bias = (
-        producer_bias.data if isinstance(producer_bias, torch.Tensor) else None
-    )
-    sigma_weight, sigma_bias = _noise_params(producer)
     neurons = producer_weight.shape[0]
 
     # Xavier-uniform bound of the producing layer.
-    fan_out = producer_weight.shape[0]
     if producer_weight.dim() == 2:  # Linear: (out_features, in_features)
-        fan_in = producer_weight.shape[1]
+        fan_in, fan_out = producer_weight.shape[1], neurons
     else:  # Conv: (out_channels, in_channels, *kernel)
-        receptive = 1
-        for dim in producer_weight.shape[2:]:
-            receptive *= int(dim)
-        fan_in = int(producer_weight.shape[1]) * receptive
-        fan_out = fan_out * receptive
-    bound = float(np.sqrt(6.0 / (fan_in + fan_out)))
+        receptive = math.prod(producer_weight.shape[2:])
+        fan_in = producer_weight.shape[1] * receptive
+        fan_out = neurons * receptive
+    bound = math.sqrt(6.0 / (fan_in + fan_out))
 
-    # A revived unit wants the layer's initial noise scale, not the collapsed or
-    # inflated one it inherits.
-    noise_fills: tuple[float, float] | None = None
-    if sigma_weight is not None and sigma_weight.dim() >= 2:
-        std_init = float(getattr(producer, "std_init", 0.5))
-        noise_fills = (
-            std_init / float(np.sqrt(sigma_weight.shape[1])),
-            std_init / float(np.sqrt(sigma_weight.shape[0])),
-        )
-
-    # Measure against the neurons this pass leaves alone.
-    keep = [n for n in range(neurons) if n not in set(indices)]
+    # Measure the outgoing scale against the neurons this pass leaves alone.
+    reset = set(indices)
+    keep = [neuron for neuron in range(neurons) if neuron not in reset]
     out_scales = [
         REGRAMA_OUT_SCALE * _live_column_scale(target.weight, target.stride, keep)
         for target in consumers
     ]
+
+    bias_param = cast(
+        "torch.Tensor | None",
+        noisy.bias_mu if noisy is not None else producer.bias,
+    )
+    bias = None if bias_param is None else bias_param.data
+    if bias is not None:
+        bias[indices] = 0.0
+
+    if noisy is not None:
+        # A revived unit wants the layer's initial noise scale, not the collapsed
+        # or inflated one it inherits.
+        noisy.weight_sigma.data[indices] = noisy.std_init / math.sqrt(noisy.in_features)
+        noisy.bias_sigma.data[indices] = noisy.std_init / math.sqrt(noisy.out_features)
+
+    if norm is not None:
+        for tensor, identity in (
+            (getattr(norm, "weight", None), 1.0),
+            (getattr(norm, "bias", None), 0.0),
+            (getattr(norm, "running_mean", None), 0.0),
+            (getattr(norm, "running_var", None), 1.0),
+        ):
+            if tensor is not None and tuple(tensor.shape) == (neurons,):
+                tensor.data[indices] = identity
 
     for index in indices:
         sampled = rng.uniform(-bound, bound, size=tuple(producer_weight[index].shape))
@@ -489,48 +456,29 @@ def _reset_layer_neurons(
             dtype=producer_weight.dtype,
             device=producer_weight.device,
         )
-        if producer_bias is not None:
-            producer_bias[index] = 0.0
-        if noise_fills is not None:
-            weight_fill, bias_fill = noise_fills
-            if sigma_weight is not None:
-                sigma_weight[index] = weight_fill
-            if sigma_bias is not None:
-                sigma_bias[index] = bias_fill
         for target, scale in zip(consumers, out_scales, strict=True):
-            weight, stride = target.weight, target.stride
-            block = weight[:, index * stride : (index + 1) * stride]
-            weight[:, index * stride : (index + 1) * stride] = _revived_block(
-                block,
+            columns = slice(index * target.stride, (index + 1) * target.stride)
+            target.weight[:, columns] = _revived_block(
+                target.weight[:, columns],
                 scale,
                 rng,
                 is_noise_scale=target.is_noise_scale,
             )
-        if norm is not None:
-            for tensor, identity in (
-                (getattr(norm, "weight", None), 1.0),
-                (getattr(norm, "bias", None), 0.0),
-                (getattr(norm, "running_mean", None), 0.0),
-                (getattr(norm, "running_var", None), 1.0),
-            ):
-                if (
-                    tensor is not None
-                    and tensor.dim() == 1
-                    and tensor.shape[0] == neurons
-                ):
-                    tensor.data[index] = identity
 
-    # Defensive clamp and NaN scrub so a reset never propagates a broken value.
-    for tensor in (producer_weight, producer_bias, sigma_weight, sigma_bias):
-        if tensor is not None:
-            tensor.clamp_(-MAGNITUDE_LIMIT, MAGNITUDE_LIMIT).nan_to_num_()
-    for target in consumers:
-        target.weight.clamp_(-MAGNITUDE_LIMIT, MAGNITUDE_LIMIT).nan_to_num_()
+    # A diverged agent reaches the operator carrying non-finite weights, which a
+    # reset must not leave in place.
+    rewritten = [producer_weight, *(target.weight for target in consumers)]
+    if bias is not None:
+        rewritten.append(bias)
+    if noisy is not None:
+        rewritten += [noisy.weight_sigma.data, noisy.bias_sigma.data]
+    for tensor in rewritten:
+        tensor.clamp_(-MAGNITUDE_LIMIT, MAGNITUDE_LIMIT).nan_to_num_()
 
 
 def reset_dormant_neurons(
     network: nn.Module,
-    per_neuron_list: list[torch.Tensor | None] | None,
+    per_neuron_list: list[torch.Tensor | None],
     dormant_threshold: float,
     rng: np.random.Generator,
     shared_latent_heads: Sequence[nn.Module] = (),
@@ -543,8 +491,9 @@ def reset_dormant_neurons(
 
     :param network: An evaluation network to operate on, in place.
     :type network: torch.nn.Module
-    :param per_neuron_list: That network's entry of the captured snapshot.
-    :type per_neuron_list: list[torch.Tensor | None] | None
+    :param per_neuron_list: That network's entry of the captured snapshot, one
+        score tensor per measured activation, or None where no gradient flowed.
+    :type per_neuron_list: list[torch.Tensor | None]
     :param dormant_threshold: Normalised score at or below which a neuron is
         dormant.
     :type dormant_threshold: float
@@ -556,35 +505,31 @@ def reset_dormant_neurons(
     :return: How many neurons were reset.
     :rtype: int
     """
-    # A network with a length mismatch is skipped so scores are not mis-paired
-    # with layers.
-    targets = target_activations(network)
-    if not per_neuron_list or len(per_neuron_list) != len(targets):
-        return 0
     scores = [
         (act_module, per_neuron)
-        for act_module, per_neuron in zip(targets, per_neuron_list, strict=False)
+        for act_module, per_neuron in zip(
+            target_activations(network),
+            per_neuron_list,
+            strict=True,
+        )
         if per_neuron is not None
     ]
-    if not scores:
-        return 0
 
     encoder = getattr(network, "encoder", None)
     head = getattr(network, "head_net", None)
 
-    cnn_dims: dict[int, tuple[int, int]] = {}
-    if encoder is not None:
-        for _name, sub in encoder.named_modules():
-            shape = getattr(sub, "cnn_output_size", None)
-            if shape is None or len(shape) < 3:
-                continue
-            spatial = 1
-            for dim in shape[2:]:
-                spatial *= int(dim)
-            for _child_name, child in sub.named_modules():
-                cnn_dims[id(child)] = (int(shape[1]), spatial)
+    # Each conv neuron owns a whole flattened H*W column block of the dense layer
+    # the convolutional stack flattens into. Only EvolvableCNN reports a layout.
+    spatial_of: dict[int, int] = {}
+    for _name, sub in network.named_modules():
+        shape = getattr(sub, "cnn_output_size", None)
+        if shape is None:
+            continue
+        spatial = math.prod(int(dim) for dim in shape[2:])
+        for _child_name, child in sub.named_modules():
+            spatial_of[id(child)] = spatial
 
-    head_entries = _head_entry_layers(head)
+    head_entries = _head_entry_layers(head) if shared_latent_heads else []
 
     neurons_reset = 0
     for act_module, per_neuron in scores:
@@ -595,18 +540,21 @@ def reset_dormant_neurons(
         )
         if producer is None or not next_layers or not _owns_trainable_weight(producer):
             continue
-        if per_neuron.numel() != _weight_param(producer).data.shape[0]:
+        # The producer is resolved structurally, so a width it cannot have
+        # produced means the wrong layer was picked out.
+        if per_neuron.numel() != _weight_param(producer).shape[0]:
             continue
 
-        cnn_channels, cnn_spatial = cnn_dims.get(id(producer), (None, None))
-        consumers = _resolve_consumers(producer, next_layers, cnn_channels, cnn_spatial)
+        consumers = _resolve_consumers(
+            producer,
+            next_layers,
+            spatial_of.get(id(producer)),
+        )
         if not consumers:
             continue
 
-        if shared_latent_heads and any(
-            layer is entry for layer in next_layers for entry in head_entries
-        ):
-            consumers = consumers + _shared_latent_blocks(producer, shared_latent_heads)
+        if any(layer is entry for layer in next_layers for entry in head_entries):
+            consumers += _shared_latent_blocks(producer, shared_latent_heads)
 
         indices = _dormant_indices(per_neuron, dormant_threshold)
         if not indices:

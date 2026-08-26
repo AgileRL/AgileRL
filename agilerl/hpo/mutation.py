@@ -746,7 +746,6 @@ class Mutations:
 
         neurons_reset = 0
         for idx, (network_id, network) in enumerate(networks):
-            per_neuron_list = grama_scores[idx] if idx < len(grama_scores) else None
             shared_heads = (
                 shared_encoder_heads(networks, network_id, network)
                 if id(network) in policy_networks
@@ -754,7 +753,7 @@ class Mutations:
             )
             neurons_reset += reset_dormant_neurons(
                 network,
-                per_neuron_list,
+                grama_scores[idx],
                 self.dormant_threshold,
                 self.rng,
                 shared_latent_heads=shared_heads,

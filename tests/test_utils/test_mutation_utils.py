@@ -29,16 +29,10 @@ def reset_producer(
     dormant_threshold: float = 0.01,
     seed: int = 0,
     norm: nn.Module | None = None,
-    cnn_channels: int | None = None,
     cnn_spatial: int | None = None,
 ) -> list[int]:
     """Reset one hand-built layer's dormant neurons and return their indices."""
-    consumers = mutation_utils._resolve_consumers(
-        producer,
-        next_layers,
-        cnn_channels,
-        cnn_spatial,
-    )
+    consumers = mutation_utils._resolve_consumers(producer, next_layers, cnn_spatial)
     indices = mutation_utils._dormant_indices(per_neuron, dormant_threshold)
     mutation_utils._reset_layer_neurons(
         producer, consumers, norm, indices, make_rng(seed)
@@ -263,7 +257,6 @@ class TestResetLayerNeuronsAcrossTheFlattenBoundary:
             producer,
             [consumer],
             per_neuron,
-            cnn_channels=self.CHANNELS,
             cnn_spatial=self.SPATIAL,
         )
 
@@ -433,35 +426,12 @@ class TestRevivedBlock:
         assert result.dtype == template.dtype
         assert result.device == template.device
 
-    def test_an_all_zero_draw_restores_the_zero_column(self):
-        # A direction of zero norm cannot be rescaled onto the requested one.
-        class ZeroDraw:
-            def standard_normal(self, size):
-                return np.zeros(size)
-
-        result = mutation_utils._revived_block(torch.ones(4), 1.0, ZeroDraw())
-
-        assert torch.equal(result, torch.zeros(4))
-
 
 class TestModuleTraversalHelpers:
     """Locate weight layers and strip wrappers across the module tree."""
 
-    def test_first_weight_layer_of_an_absent_module_is_none(self):
-        assert mutation_utils._first_weight_layer(None) is None
-
     def test_first_weight_layer_of_a_weightless_module_is_none(self):
         assert mutation_utils._first_weight_layer(nn.Sequential(nn.ReLU())) is None
-
-    def test_unwrap_of_an_absent_module_is_none(self):
-        assert mutation_utils._unwrap_module(None) is None
-
-    def test_unwrap_stops_on_a_self_referential_wrapper(self):
-        # A cycle must terminate rather than hang.
-        module = nn.ReLU()
-        module.wrapped = module
-
-        assert mutation_utils._unwrap_module(module) is module
 
     def test_head_entry_layers_of_an_absent_head_is_empty(self):
         assert mutation_utils._head_entry_layers(None) == []
@@ -485,10 +455,6 @@ class TestModuleTraversalHelpers:
 
         assert len(result) == 2
 
-    def test_weight_accessor_rejects_a_layer_with_no_weight_tensor(self):
-        with pytest.raises(TypeError, match="exposes no weight tensor"):
-            mutation_utils._weight_param(nn.ReLU())
-
 
 class TestResolveConsumers:
     """Pair a producer with the consumers whose columns are safe to rewrite."""
@@ -497,7 +463,7 @@ class TestResolveConsumers:
         producer = nn.Linear(3, 5)
         consumer = nn.Linear(5, 2)
 
-        result = mutation_utils._resolve_consumers(producer, [consumer], None, None)
+        result = mutation_utils._resolve_consumers(producer, [consumer], None)
 
         assert [target.stride for target in result] == [1]
 
@@ -505,7 +471,7 @@ class TestResolveConsumers:
         producer = nn.Conv2d(3, 4, kernel_size=3)
         consumer = nn.Linear(16, 2)
 
-        result = mutation_utils._resolve_consumers(producer, [consumer], 4, 4)
+        result = mutation_utils._resolve_consumers(producer, [consumer], 4)
 
         assert [target.stride for target in result] == [4]
 
@@ -515,7 +481,7 @@ class TestResolveConsumers:
         producer = nn.Linear(3, 5)
         fusion = nn.Linear(9, 2)
 
-        result = mutation_utils._resolve_consumers(producer, [fusion], None, None)
+        result = mutation_utils._resolve_consumers(producer, [fusion], None)
 
         assert result == []
 
@@ -523,7 +489,7 @@ class TestResolveConsumers:
         producer = nn.Conv2d(3, 4, kernel_size=3)
         consumer = nn.Linear(16, 2)
 
-        result = mutation_utils._resolve_consumers(producer, [consumer], None, None)
+        result = mutation_utils._resolve_consumers(producer, [consumer], None)
 
         assert result == []
 
@@ -531,7 +497,7 @@ class TestResolveConsumers:
         producer = nn.Linear(3, 5)
         consumer = NoisyLinear(5, 2)
 
-        result = mutation_utils._resolve_consumers(producer, [consumer], None, None)
+        result = mutation_utils._resolve_consumers(producer, [consumer], None)
 
         # The mean weight and its parallel noise scale ride together.
         assert len(result) == 2
@@ -541,7 +507,7 @@ class TestResolveConsumers:
         producer = nn.Linear(3, 5)
         consumer = nn.Conv2d(5, 2, kernel_size=3)
 
-        result = mutation_utils._resolve_consumers(producer, [consumer], None, None)
+        result = mutation_utils._resolve_consumers(producer, [consumer], None)
 
         assert result == []
 
@@ -555,13 +521,12 @@ class TestConvBlocks:
         ids=["Conv2d", "Conv3d"],
     )
     def test_every_evolvable_cnn_block_type_is_a_weight_layer(self, layer):
-        assert mutation_utils._is_weight_layer(layer)
+        assert isinstance(layer, mutation_utils.WEIGHT_LAYER_TYPES)
 
     def test_conv_pair_is_a_conv_to_conv_boundary(self):
         targets = mutation_utils._resolve_consumers(
             nn.Conv2d(3, 4, 3),
             [nn.Conv2d(4, 2, 3)],
-            None,
             None,
         )
 
@@ -1034,34 +999,19 @@ class TestSnapshotPairing:
 
     @pytest.mark.parametrize(
         "snapshot",
-        [None, [], [torch.ones(3)]],
-        ids=["absent", "empty", "wrong-length"],
+        [[], [torch.ones(3)]],
+        ids=["empty", "wrong-length"],
     )
-    def test_a_snapshot_that_does_not_fit_skips_the_whole_network(
-        self,
-        dqn_agent,
-        snapshot,
-    ):
-        # Graceful degradation after an architecture mutation rebuilt the network:
-        # mis-pairing scores with layers would corrupt unrelated neurons.
-        before = [p.detach().clone() for p in dqn_agent.actor.parameters()]
-
-        report = mutation_utils.reset_dormant_neurons(
-            dqn_agent.actor,
-            snapshot,
-            0.01,
-            make_rng(),
-        )
-
-        assert report == 0
-        assert all(
-            torch.equal(current.detach(), original)
-            for current, original in zip(
-                dqn_agent.actor.parameters(),
-                before,
-                strict=True,
+    def test_a_snapshot_that_does_not_fit_is_rejected(self, dqn_agent, snapshot):
+        # A snapshot is captured from this very network, so a length mismatch is
+        # a caller bug rather than something to degrade gracefully around.
+        with pytest.raises(ValueError, match="zip"):
+            mutation_utils.reset_dormant_neurons(
+                dqn_agent.actor,
+                snapshot,
+                0.01,
+                make_rng(),
             )
-        )
 
     def test_layers_with_no_captured_gradient_are_dropped(self, dqn_agent):
         # A layer outside the training loss is stored as None and dropped from the
@@ -1132,13 +1082,6 @@ class TestResetDormantNeurons:
         assert report == 0
         after = dqn_agent.actor.state_dict()
         assert all(torch.equal(before[k], after[k]) for k in before)
-
-    def test_missing_snapshot_is_a_no_op(self, dqn_agent):
-        report = mutation_utils.reset_dormant_neurons(
-            dqn_agent.actor, None, 0.01, make_rng()
-        )
-
-        assert report == 0
 
     def test_snapshot_of_the_wrong_width_skips_that_layer(self, dqn_agent):
         capture_grama_snapshot(dqn_agent, torch.rand(4, 4))
