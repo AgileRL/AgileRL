@@ -9,8 +9,7 @@ name: Publish release
 #
 # Preferred trigger: workflow_dispatch from an existing tag ref (pairs with
 # environment `pypi` required reviewers + tag deployment policy). Tag push
-# remains supported; protect refs/tags/v* and refs/tags/agilerl-arena/v* via
-# a GitHub ruleset.
+# does not publish; minting spoke tags from hub must not upload to PyPI.
 #
 # Auth:
 #   fetch   — GitHub OIDC → read-only IAM role (repository secret
@@ -25,10 +24,6 @@ on:
                 description: Existing spoke tag to publish (e.g. v2.9.0 or agilerl-arena/v0.2.0). Empty = the ref that triggered the run.
                 required: false
                 default: ''
-    push:
-        tags:
-            - v*
-            - agilerl-arena/v*
 
 permissions:
     contents: read
