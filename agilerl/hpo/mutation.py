@@ -829,7 +829,6 @@ class Mutations:
             current_vals: torch.Tensor = W[rows_tensor, cols_tensor]
             new_vals = current_vals.clone()
 
-            # Fixed, unconditional split between the two Gaussian bands.
             mask_reset = rand_vals_tensor < reset_prob
             mask_normal = rand_vals_tensor >= reset_prob
 

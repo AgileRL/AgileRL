@@ -91,12 +91,7 @@ def weight_param(module: WeightLayer) -> torch.Tensor:
 
 
 def owns_trainable_weight(module: WeightLayer) -> bool:
-    """Whether module owns the weights the surgery would rewrite.
-
-    :func:`~agilerl.utils.algo_utils.share_encoder_parameters` pins a non-policy
-    network's encoder to detached, non-leaf clones of the policy encoder's
-    parameters.
-    """
+    """Check if a critic's encoder is shared with and trained by the actor."""
     weight = weight_param(module)
     return isinstance(weight, nn.Parameter) and weight.requires_grad
 
@@ -295,9 +290,9 @@ def revived_block(
     *,
     is_noise_scale: bool = False,
 ) -> torch.Tensor:
-    """Draw the outgoing block a reset neuron is revived with, of norm scale.
+    """Return the new random weights and noise scales for dormant neurons.
 
-    A weight block is a random direction rescaled to scale; a noise-scale block
+    An outgoing weight is a random direction rescaled to scale; a noise-scale value
     is a constant non-negative fill of the same norm.
     """
     if is_noise_scale:
@@ -313,18 +308,12 @@ def resolve_consumers(
     next_layers: list[WeightLayer],
     cnn_spatial: int | None,
 ) -> list[ConsumerTarget]:
-    """Pair each usable consumer weight tensor with its per-neuron column stride.
-
-    A consumer must spend its columns on exactly these neurons: one block each,
-    none interleaved. Anything failing that is not this producer's consumer and
-    rewriting its columns would corrupt weights belonging to other neurons, so it
-    is skipped instead.
-    """
+    """Return the consumer neurons associated with a producer neuron."""
     producer_is_conv = isinstance(producer, CONV_LAYER_TYPES)
     producer_neurons = weight_param(producer).shape[0]
     consumers: list[ConsumerTarget] = []
     for next_layer in next_layers:
-        # A dense layer feeding a convolution is a pairing the surgery cannot index.
+        # A dense layer feeding a convolution is a pairing the ReGraMa cannot index.
         next_is_conv = isinstance(next_layer, CONV_LAYER_TYPES)
         if next_is_conv and not producer_is_conv:
             continue
