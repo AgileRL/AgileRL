@@ -47,7 +47,7 @@ To make a code contribution:
 Keep your pull request open — do not merge it yourself. If we ask for changes, push them here (rebase onto `main` if you are behind). A maintainer adds the `hub-sync-import` label when the change is ready for internal CI; we merge this PR after that passes.
 
 #### Type checking
-AgileRL is type-checked with [`ty`](https://docs.astral.sh/ty/) and ships `py.typed` markers, so the public API's annotations are part of the released package. The configuration lives in `pyproject.toml` under `[tool.ty]`: the whole `agilerl` package is checked strictly. The `Type checks` GitHub workflow blocks PRs on new type errors, so run `just typecheck` before pushing.
+AgileRL is type-checked with [`ty`](https://docs.astral.sh/ty/) and ships `py.typed` markers, so the public API's annotations are part of the released package. The configuration lives in `pyproject.toml` under `[tool.ty]`: the whole `agilerl` package is checked strictly. The CI workflow's ty job blocks PRs on new type errors, so run `just typecheck` before pushing.
 
 Prefer fixing types at the source — tighter annotations, `@overload`s, or a small typed wrapper — over narrowing with `cast()` / `assert isinstance(...)`, or suppressing with `# ty: ignore`. Reach for a suppression only for genuine third-party or stub gaps, and justify it with an inline comment.
 

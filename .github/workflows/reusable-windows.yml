@@ -2,19 +2,7 @@
 name: Windows
 
 on:
-    pull_request:
-        branches: [main]
-        paths:
-            - agilerl/**
-            - agilerl-arena/**
-            - tests/**
-            - .github/workflows/**
-            - pyproject.toml
-            - uv.lock
-
-concurrency:
-    group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
-    cancel-in-progress: true
+    workflow_call:
 
 permissions:
     contents: read
