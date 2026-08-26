@@ -2,14 +2,6 @@
 name: Type checks
 
 on:
-    push:
-        branches: [main]
-        paths:
-            - agilerl/**
-            - agilerl-arena/**
-            - .github/workflows/**
-            - pyproject.toml
-            - uv.lock
     pull_request:
         paths:
             - agilerl/**

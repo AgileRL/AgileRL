@@ -2,15 +2,6 @@
 name: Linux
 
 on:
-    push:
-        branches: [main]
-        paths:
-            - agilerl/**
-            - agilerl-arena/**
-            - tests/**
-            - .github/workflows/**
-            - pyproject.toml
-            - uv.lock
     pull_request:
         paths:
             - agilerl/**
