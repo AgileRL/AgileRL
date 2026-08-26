@@ -2354,13 +2354,14 @@ class TestStringEnvironmentResolution:
         from agilerl.models.env import PzEnvSpec
 
         mock_create_pop.return_value = [MagicMock()]
+        # Bare "simple_spread_v3" only imports once another test has loaded mpe2.
         trainer = LocalTrainer(
             algorithm="MADDPG",
-            environment="simple_spread_v3",
+            environment="mpe2.simple_spread_v3",
             training=training_spec,
         )
         assert isinstance(trainer.env_spec, PzEnvSpec)
-        assert trainer.env_spec.name == "simple_spread_v3"
+        assert trainer.env_spec.name == "mpe2.simple_spread_v3"
 
     def test_offline_string_raises(self, training_spec):
         """Offline algorithms must be given a full OfflineEnvSpec."""
