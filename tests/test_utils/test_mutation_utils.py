@@ -664,14 +664,15 @@ class TestResetNormalisedLayers:
     """A revived neuron's normalisation entry returns to the identity."""
 
     @pytest.mark.parametrize(
-        "norm",
-        [nn.LayerNorm(5), nn.BatchNorm1d(5)],
+        ("norm", "producer", "consumer"),
+        [
+            (nn.LayerNorm(5), nn.Linear(3, 5), nn.Linear(5, 2)),
+            (nn.BatchNorm2d(5), nn.Conv2d(3, 5, 3), nn.Conv2d(5, 2, 3)),
+        ],
         ids=["layer_norm", "batch_norm"],
     )
-    def test_revived_neuron_gets_a_neutral_affine(self, norm):
+    def test_revived_neuron_gets_a_neutral_affine(self, norm, producer, consumer):
         # A decayed gain would immediately re-suppress the new unit.
-        producer = nn.Linear(3, 5)
-        consumer = nn.Linear(5, 2)
         with torch.no_grad():
             norm.weight.fill_(0.01)
             norm.bias.fill_(4.0)
@@ -695,9 +696,9 @@ class TestResetNormalisedLayers:
         assert norm.weight[0].item() == pytest.approx(0.01)
 
     def test_revived_neuron_gets_fresh_running_statistics(self):
-        producer = nn.Linear(3, 5)
-        consumer = nn.Linear(5, 2)
-        norm = nn.BatchNorm1d(5)
+        producer = nn.Conv2d(3, 5, 3)
+        consumer = nn.Conv2d(5, 2, 3)
+        norm = nn.BatchNorm2d(5)
         with torch.no_grad():
             norm.running_mean.fill_(9.0)
             norm.running_var.fill_(9.0)

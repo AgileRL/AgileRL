@@ -12,7 +12,12 @@ import numpy as np
 import torch
 from torch import nn
 
-from agilerl.modules.custom_components import NoisyLinear
+from agilerl.modules import (
+    EvolvableCNN,
+    EvolvableResNet,
+    EvolvableWrapper,
+    NoisyLinear,
+)
 from agilerl.utils.evolvable_networks import (
     ACTIVATION_FUNCTIONS,
     CONV_LAYER_FUNCTIONS,
@@ -91,8 +96,8 @@ def _owns_trainable_weight(module: nn.Module) -> bool:
 
 def _unwrap_module(module: nn.Module) -> nn.Module:
     """Strip wrapper layers that hide the real module."""
-    while (wrapped := getattr(module, "wrapped", None)) is not None:
-        module = wrapped
+    while isinstance(module, EvolvableWrapper):
+        module = module.wrapped
     return module
 
 
@@ -131,14 +136,10 @@ def _activation_modules(root: nn.Module, *, include_output: bool) -> list[nn.Mod
             continue
         parent = name.rpartition(".")[0]
         prefix = f"{parent}." if parent else ""
-        # Anything declaring an output width downstream consumes these neurons,
-        # so the activation does not terminate its stream.
+        # An activation terminates its stream when no later layer of the same
+        # container takes its neurons as input.
         has_later_consumer = any(
-            other_name.startswith(prefix)
-            and any(
-                hasattr(other, attr)
-                for attr in ("out_features", "out_channels", "hidden_size")
-            )
+            other_name.startswith(prefix) and isinstance(other, WEIGHT_LAYER_TYPES)
             for other_name, other in ordered[index + 1 :]
         )
         if has_later_consumer:
@@ -439,15 +440,22 @@ def _reset_layer_neurons(
         noisy.weight_sigma.data[indices] = noisy.std_init / math.sqrt(noisy.in_features)
         noisy.bias_sigma.data[indices] = noisy.std_init / math.sqrt(noisy.out_features)
 
-    if norm is not None:
-        for tensor, identity in (
-            (getattr(norm, "weight", None), 1.0),
-            (getattr(norm, "bias", None), 0.0),
-            (getattr(norm, "running_mean", None), 0.0),
-            (getattr(norm, "running_var", None), 1.0),
-        ):
-            if tensor is not None and tuple(tensor.shape) == (neurons,):
-                tensor.data[indices] = identity
+    entries: tuple[tuple[torch.Tensor | None, float], ...] = ()
+    if isinstance(norm, nn.LayerNorm):
+        entries = ((norm.weight, 1.0), (norm.bias, 0.0))
+    elif isinstance(
+        norm,
+        (nn.BatchNorm2d, nn.BatchNorm3d, nn.InstanceNorm2d, nn.InstanceNorm3d),
+    ):
+        entries = (
+            (norm.weight, 1.0),
+            (norm.bias, 0.0),
+            (norm.running_mean, 0.0),
+            (norm.running_var, 1.0),
+        )
+    for tensor, identity in entries:
+        if tensor is not None and tuple(tensor.shape) == (neurons,):
+            tensor.data[indices] = identity
 
     for index in indices:
         sampled = rng.uniform(-bound, bound, size=tuple(producer_weight[index].shape))
@@ -519,13 +527,12 @@ def reset_dormant_neurons(
     head = getattr(network, "head_net", None)
 
     # Each conv neuron owns a whole flattened H*W column block of the dense layer
-    # the convolutional stack flattens into. Only EvolvableCNN reports a layout.
+    # the convolutional stack flattens into.
     spatial_of: dict[int, int] = {}
     for _name, sub in network.named_modules():
-        shape = getattr(sub, "cnn_output_size", None)
-        if shape is None:
+        if not isinstance(sub, (EvolvableCNN, EvolvableResNet)):
             continue
-        spatial = math.prod(int(dim) for dim in shape[2:])
+        spatial = math.prod(int(dim) for dim in sub.cnn_output_size[2:])
         for _child_name, child in sub.named_modules():
             spatial_of[id(child)] = spatial
 
