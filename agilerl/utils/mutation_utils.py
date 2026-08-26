@@ -29,7 +29,6 @@ from agilerl.utils.evolvable_networks import (
 )
 
 if TYPE_CHECKING:
-    from agilerl.algorithms.core import EvolvableAlgorithm
     from agilerl.hpo.mutation import Mutations
 
 IndividualT = TypeVar("IndividualT", bound="EvolvableAlgorithm")
