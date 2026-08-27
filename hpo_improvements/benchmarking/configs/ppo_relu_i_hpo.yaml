@@ -1,5 +1,37 @@
 ---
-# PPO WITH HPO (population of 16, elitism, architecture + RL-hyperparameter
+# ppo_relu -- IMPROVED HPO (ReGraMa parameter mutations + function-preserving
+# architecture mutations) on PPO / MuJoCo.
+#
+# The matched twin of ppo_relu_hpo.yaml: the *full* AgileRL HPO regime (all five
+# mutation kinds live, RL-hyperparameter search included), with both thesis
+# operators substituted for their AgileRL originals. Everything else -- base
+# hyperparameters, mutation probabilities, rl_hp_selection, network bounds,
+# tournament settings and the step budget -- is inherited from ppo_relu_hpo.yaml
+# unchanged, so the pair differs only in the operator switches below and the
+# comparison isolates the two improvements acting together inside a realistic
+# HPO run (rather than in the single-operator ablations, where every other
+# mutation is switched off).
+#
+# The four switched fields:
+#   regrama_param_mut: true          ReGraMa Xavier-resets every dormant neuron
+#                                    (normalised GraMa score <= dormant_tau)
+#                                    before the trailing Gaussian pass
+#   amplified_gauss_param_mut: false drops the divergence-prone amplified band
+#                                    of that Gaussian pass
+#   arch_mut_type: func_preserving   architecture *additions* become Net2Net-style
+#                                    function-preserving (removals stay original)
+#   arch_fp_noise: 0.02              symmetry-breaking noise on the new units'
+#                                    fan-out, so added capacity is recruitable
+#
+# NB -- the nets here are Tanh (inherited from ppo_relu_hpo.yaml, unlike the
+# single-operator arms, which switch to ReLU). Net2DeeperNet is exact only for
+# ReLU/Identity, so the new_layer mutations fall back to the original
+# initialisation with a one-time warning; add_node / add_latent_node are
+# preserving under any activation and are unaffected.
+#
+# ppo_relu_hpo.yaml's own notes follow.
+#
+# PPO WITH HPO (population of 4, elitism, architecture + RL-hyperparameter
 # mutations; activation mutations OFF) on Gymnasium MuJoCo.
 #
 # This is the HPO counterpart of ppo_relu_no_hpo.yaml. The base hyperparameters,
@@ -9,12 +41,12 @@
 # deliberate exception: ent_coef is raised from the paper's 0.0 to 0.001 so HPO can
 # mutate it (the multiplicative mutation cannot move a 0.0 base off zero). The other
 # additions here are the `mutation` / `tournament_selection` blocks (and
-# pop_size = 16), which switch this same training script into an evolutionary HPO
+# pop_size = 4), which switch this same training script into an evolutionary HPO
 # regime: a population of agents is trained, periodically mutated, and re-selected
 # by tournament instead of a single never-mutated agent.
 #
 # HPO additions over ppo_relu_no_hpo.yaml:
-#   pop_size = 16, elitism = true, tournament_size = 2
+#   pop_size = 4, elitism = true, tournament_size = 2
 #   activation mutations OFF (act_mut = 0.0); arch / new_layer / params / rl_hp on
 #   rl_hp_selection mutates the highest-leverage, well-behaved PPO hyperparameters
 #     (lr, clip_coef, update_epochs, batch_size, learn_step, ent_coef), each with
@@ -135,9 +167,13 @@ mutation:
     mutation_sd: 0.1  # std of the Gaussian weight perturbation for params_mut (typical)
     rand_seed: 42
     mutate_elite: false  # keep the elite member unmutated so the best agent survives intact into the next generation
-    random_reset_param_mut: true      # keep the random-reset band of the Gaussian parameter mutation (a selected weight is REPLACED by a fresh N(0, 1) draw)
-    amplified_gauss_param_mut: true   # keep the amplified ("super") Gaussian band, whose std is 10x the weight's own magnitude
-    regrama_param_mut: false          # original Gaussian parameter mutation only -- no dormant-neuron resets
+    random_reset_param_mut: true      # keep the random-reset band of the trailing Gaussian pass (a selected weight is REPLACED by a fresh N(0, 1) draw)
+    amplified_gauss_param_mut: false  # drop the amplified ("super") Gaussian band, which is divergence-prone; the dropped mass is NOT redistributed
+    regrama_param_mut: true           # ReGraMa: Xavier-reset every dormant neuron (normalised GraMa score <= dormant_tau) before the trailing Gaussian pass
+    dormant_tau: 0.01                 # operator threshold: a neuron is dormant when its normalised GraMa score <= this (matches training.dormant_tau below)
+    arch_mut_type: func_preserving    # original | func_preserving architecture mutations -- only *additions* are preserving; removals stay positional
+    arch_fp_noise: 0.02               # symmetry-breaking noise on new units' fan-out, relative to the consuming layer's weight std (0.0 = exact-zero preservation)
+    arch_encoder_layer_mut: false     # pinned OFF: it is tri-state and would default to true under func_preserving, widening the search space away from the ppo_relu_hpo.yaml twin
 
 network:
     # Paper architecture: width-64 tanh MLP. Under HPO the min/max bounds below
