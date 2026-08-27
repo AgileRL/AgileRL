@@ -61,6 +61,9 @@ class DeterministicActor(EvolvableNetwork):
     :type random_seed: int | None
     :param encoder_name: Name of the encoder network.
     :type encoder_name: str
+    :param encoder_layer_mutations: If True, keep ``add_layer`` / ``remove_layer``
+        enabled on the encoder (MLP encoders only). Defaults to False.
+    :type encoder_layer_mutations: bool | None
     """
 
     supported_spaces: ClassVar[tuple[type[spaces.Space], ...]] = (
@@ -90,6 +93,7 @@ class DeterministicActor(EvolvableNetwork):
         device: str = "cpu",
         random_seed: int | None = None,
         encoder_name: str = "encoder",
+        encoder_layer_mutations: bool | None = False,
     ) -> None:
         super().__init__(
             observation_space,
@@ -104,6 +108,7 @@ class DeterministicActor(EvolvableNetwork):
             device=device,
             random_seed=random_seed,
             encoder_name=encoder_name,
+            encoder_layer_mutations=encoder_layer_mutations,
         )
 
         if isinstance(action_space, spaces.Box):
@@ -258,6 +263,9 @@ class StochasticActor(EvolvableNetwork):
     :type random_seed: int | None
     :param encoder_name: Name of the encoder network.
     :type encoder_name: str
+    :param encoder_layer_mutations: If True, keep ``add_layer`` / ``remove_layer``
+        enabled on the encoder (MLP encoders only). Defaults to False.
+    :type encoder_layer_mutations: bool | None
     """
 
     head_net: EvolvableDistribution
@@ -285,6 +293,7 @@ class StochasticActor(EvolvableNetwork):
         device: str = "cpu",
         random_seed: int | None = None,
         encoder_name: str = "encoder",
+        encoder_layer_mutations: bool | None = False,
     ) -> None:
         super().__init__(
             observation_space,
@@ -299,6 +308,7 @@ class StochasticActor(EvolvableNetwork):
             device=device,
             random_seed=random_seed,
             encoder_name=encoder_name,
+            encoder_layer_mutations=encoder_layer_mutations,
         )
 
         # Require the head to output logits to parameterize a distribution

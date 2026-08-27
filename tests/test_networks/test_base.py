@@ -1,3 +1,6 @@
+import copy
+import warnings
+
 import pytest
 import torch
 import torch.nn.functional as F
@@ -67,6 +70,7 @@ class CustomNetwork(EvolvableNetwork):
         max_latent_dim=128,
         latent_dim=32,
         device="cpu",
+        encoder_layer_mutations=False,
     ):
         super().__init__(
             observation_space=observation_space,
@@ -78,6 +82,7 @@ class CustomNetwork(EvolvableNetwork):
             latent_dim=latent_dim,
             simba=False,
             device=device,
+            encoder_layer_mutations=encoder_layer_mutations,
         )
 
         self.name = "dummy"
@@ -108,9 +113,17 @@ class CustomNetwork(EvolvableNetwork):
 
 
 class RecurrentCustomNetwork(EvolvableNetwork):
-    def __init__(self, observation_space: spaces.Space, device="cpu"):
+    def __init__(
+        self,
+        observation_space: spaces.Space,
+        device="cpu",
+        encoder_layer_mutations=False,
+    ):
         super().__init__(
-            observation_space=observation_space, recurrent=True, device=device
+            observation_space=observation_space,
+            recurrent=True,
+            device=device,
+            encoder_layer_mutations=encoder_layer_mutations,
         )
         self.name = "recurrent_dummy"
         self.build_network_head(net_config={"hidden_size": [32]})
@@ -132,8 +145,18 @@ class RecurrentCustomNetwork(EvolvableNetwork):
 
 
 class SimBaCustomNetwork(EvolvableNetwork):
-    def __init__(self, observation_space: spaces.Space, device="cpu"):
-        super().__init__(observation_space=observation_space, simba=True, device=device)
+    def __init__(
+        self,
+        observation_space: spaces.Space,
+        device="cpu",
+        encoder_layer_mutations=False,
+    ):
+        super().__init__(
+            observation_space=observation_space,
+            simba=True,
+            device=device,
+            encoder_layer_mutations=encoder_layer_mutations,
+        )
         self.name = "simba_dummy"
         self.build_network_head(net_config={"hidden_size": [32]})
 
@@ -548,3 +571,144 @@ class TestEvolvableNetworkExtractFeatures:
         features = net.extract_features(x)
         assert isinstance(features, torch.Tensor)
         assert features.shape[0] == 1
+
+
+class TestEvolvableNetworkEncoderLayerMutations:
+    """Opting encoder ``add_layer`` / ``remove_layer`` back in.
+
+    AgileRL disables encoder LAYER mutations by default (they add a lot of
+    variance); ``encoder_layer_mutations`` re-enables them for MLP encoders,
+    which is what function-preserving architecture mutations rely on.
+    """
+
+    ENCODER_CONFIG = {
+        "hidden_size": [16],
+        "activation": "ReLU",
+        "layer_norm": False,
+        "min_hidden_layers": 1,
+        "max_hidden_layers": 4,
+    }
+
+    def _net(self, observation_space, *, enabled):
+        return CustomNetwork(
+            observation_space,
+            encoder_config=copy.deepcopy(self.ENCODER_CONFIG),
+            encoder_layer_mutations=enabled,
+        )
+
+    @pytest.mark.parametrize(
+        "observation_space",
+        ["dict_space", "discrete_space", "vector_space", "image_space"],
+    )
+    def test_encoder_layer_mutations_disabled_by_default(
+        self, observation_space, request
+    ):
+        observation_space = request.getfixturevalue(observation_space)
+        network = CustomNetwork(observation_space)
+
+        assert network.encoder_layer_mutations is False
+        assert not [
+            m
+            for m in network.mutation_methods
+            if m.startswith("encoder.") and m.endswith(("add_layer", "remove_layer"))
+        ]
+
+    def test_enabled_for_mlp_encoder(self, vector_space):
+        network = self._net(vector_space, enabled=True)
+
+        assert isinstance(network.encoder, EvolvableMLP)
+        assert network.encoder_layer_mutations is True
+        assert "encoder.add_layer" in network.mutation_methods
+        assert "encoder.remove_layer" in network.mutation_methods
+
+    def test_enabled_installs_network_level_wrapper(self, vector_space):
+        """The dotted wrapper is what routes the mutation through the network.
+
+        ``ModuleMeta.__call__`` installs ``network.__dict__["encoder.add_layer"]``
+        only for methods present when ``__init__`` returns. Without it, calling
+        the method resolves to the *encoder's* own bound method, which leaves
+        ``network.last_mutation_attr`` as None -- silently skipping the
+        function-preserving fixup and the mirroring onto the other networks.
+        """
+        network = self._net(vector_space, enabled=True)
+
+        assert "encoder.add_layer" in network.__dict__
+
+    @pytest.mark.parametrize("method", ["encoder.add_layer", "encoder.remove_layer"])
+    def test_mutation_sets_network_last_mutation_attr(self, vector_space, method):
+        network = self._net(vector_space, enabled=True)
+
+        getattr(network, method)()
+
+        assert network.last_mutation_attr is not None
+        assert network.last_mutation_attr.startswith("encoder.")
+
+    def test_add_layer_rebuilds_the_encoder(self, vector_space):
+        """Guards the ``MutationContext`` wrapping: config *and* model must change."""
+        network = self._net(vector_space, enabled=True)
+        depth_before = len(network.encoder.hidden_size)
+        modules_before = len(list(network.encoder.model))
+
+        network.encoder.add_layer()
+
+        assert len(network.encoder.hidden_size) == depth_before + 1
+        assert len(list(network.encoder.model)) > modules_before
+
+    @pytest.mark.parametrize(
+        ("factory", "observation_space"),
+        [
+            (CustomNetwork, "image_space"),
+            (CustomNetwork, "dict_space"),
+            (SimBaCustomNetwork, "vector_space"),
+            (RecurrentCustomNetwork, "vector_space"),
+        ],
+        ids=["cnn", "multi_input", "simba", "lstm"],
+    )
+    def test_warns_and_stays_disabled_for_non_mlp_encoder(
+        self, factory, observation_space, request
+    ):
+        observation_space = request.getfixturevalue(observation_space)
+
+        with pytest.warns(UserWarning, match="only supported for EvolvableMLP"):
+            network = factory(observation_space, encoder_layer_mutations=True)
+
+        assert not isinstance(network.encoder, EvolvableMLP)
+        assert network.encoder_layer_mutations is False
+        assert "encoder.add_layer" not in network.mutation_methods
+
+    def test_resolved_value_survives_clone(self, vector_space):
+        """``get_init_dict`` reflects over the constructor, so the flag must be
+        stored under the same name or the clone silently loses its wrapper."""
+        network = self._net(vector_space, enabled=True)
+
+        clone = network.clone()
+
+        assert clone.init_dict["encoder_layer_mutations"] is True
+        assert clone.encoder_layer_mutations is True
+        assert "encoder.add_layer" in clone.mutation_methods
+        assert "encoder.add_layer" in clone.__dict__
+
+    def test_cloning_a_disabled_network_does_not_warn(self, image_space):
+        """Storing the *resolved* value means clones never re-warn.
+
+        Clones happen on every architecture mutation, so warning on the requested
+        value rather than the resolved one would be deafening.
+        """
+        with pytest.warns(UserWarning, match="only supported for EvolvableMLP"):
+            network = CustomNetwork(image_space, encoder_layer_mutations=True)
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            clone = network.clone()
+
+        assert clone.encoder_layer_mutations is False
+
+    def test_survives_recreate_encoder(self, vector_space):
+        """``add_latent_node`` is the path that rebuilds the encoder object."""
+        network = self._net(vector_space, enabled=True)
+
+        network.add_latent_node()
+
+        assert "encoder.add_layer" in network.mutation_methods
+        network.encoder.add_layer()
+        assert len(network.encoder.hidden_size) == 2

@@ -141,3 +141,40 @@ class TestCreatePopulationLLM:
                 tokenizer=MagicMock(),
             )
         assert len(pop) == 2
+
+
+class TestBuildMutationsArchMutType:
+    def test_forwards_arch_mut_type(self):
+        from agilerl.models.hpo import MutationSpec
+        from agilerl.utils.trainer_utils import build_mutations_from_spec
+
+        spec = MutationSpec(arch_mut_type="func_preserving")
+        muts = build_mutations_from_spec(spec)
+        assert muts.arch_mut_type == "func_preserving"
+
+    def test_defaults_to_original(self):
+        from agilerl.models.hpo import MutationSpec
+        from agilerl.utils.trainer_utils import build_mutations_from_spec
+
+        muts = build_mutations_from_spec(MutationSpec())
+        assert muts.arch_mut_type == "original"
+
+    def test_none_spec_returns_none(self):
+        from agilerl.utils.trainer_utils import build_mutations_from_spec
+
+        assert build_mutations_from_spec(None) is None
+
+    def test_forwards_arch_fp_noise(self):
+        from agilerl.models.hpo import MutationSpec
+        from agilerl.utils.trainer_utils import build_mutations_from_spec
+
+        spec = MutationSpec(arch_fp_noise=0.25)
+        muts = build_mutations_from_spec(spec)
+        assert muts.arch_fp_noise == 0.25
+
+    def test_arch_fp_noise_defaults_to_point_one(self):
+        from agilerl.models.hpo import MutationSpec
+        from agilerl.utils.trainer_utils import build_mutations_from_spec
+
+        muts = build_mutations_from_spec(MutationSpec())
+        assert muts.arch_fp_noise == 0.1

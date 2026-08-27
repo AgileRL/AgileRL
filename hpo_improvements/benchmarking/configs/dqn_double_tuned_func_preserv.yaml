@@ -1,0 +1,180 @@
+---
+# dqn_double_tuned -- ARCHITECTURE-MUTATION ABLATION (function-preserving arch mutations).
+#
+# Derived from dqn_double_tuned_hpo.yaml. Population = 4; only no_mutation and architecture
+# mutations are active (no_mut / arch_mut / new_layer; params / act / rl_hp = 0).
+# arch_mut_type: func_preserving makes each architecture *addition* Net2Net-style
+# function-preserving: added units get zero outgoing weights and new head layers are
+# identity-initialised. Removals keep AgileRL's original random-count positional
+# behaviour, so this arm differs from its baseline only in how capacity is added. Its
+# baseline is dqn_double_tuned_arch_original.yaml (identical except arch_mut_type).
+# TUNED Double DQN WITH HPO (population of 4, elitism, architecture mutations
+# only) on the Atari 2600 suite.
+#
+# This is an architecture-mutation ablation of the HPO counterpart of
+# dqn_double_tuned_no_hpo.yaml. The base hyperparameters, the Mnih et al. (2015)
+# -> AgileRL mapping, and the tuned Double DQN deltas from van Hasselt, Guez &
+# Silver (2016) are all unchanged -- see dqn_double_tuned_no_hpo.yaml for the
+# full derivation (epsilon decay, tau = 1/30000, reward clipping, replay-buffer
+# sizing, etc.). The only additions here are the `mutation` /
+# `tournament_selection` blocks (and pop_size = 4), which switch this same
+# training script into an evolutionary HPO regime: a population of agents is
+# trained, periodically mutated, and re-selected by tournament instead of a
+# single never-mutated agent.
+#
+# HPO additions over dqn_double_tuned_no_hpo.yaml:
+#   pop_size = 4, elitism = true, tournament_size = 2
+#   only no_mutation + architecture mutations active (no_mut / arch_mut /
+#     new_layer); activation / parameter / RL-hyperparameter mutations are OFF
+#     (act_mut = params_mut = rl_hp_mut = 0) to isolate the arch-mutation operator
+#   the rl_hp_selection block below still defines the (unused) HP search space,
+#     but with rl_hp_mut = 0 no RL hyperparameters are mutated
+#   network min/max bounds actively define the architecture search space
+
+algorithm:
+    name: DQN
+    batch_size: 32
+    lr: 0.00025
+    learn_step: 4
+    gamma: 0.99
+    tau: 3.3333333333333334e-05  # target network update freq 30,000 -> Polyak tau = 1/30000
+    double: true
+    cudagraphs: true
+
+environment:
+    name: Pong-v5
+    num_envs: 16
+
+mutation:
+    # Typical AgileRL DQN/CNN mutation probabilities, with activation mutation
+    # enabled. no_mut is the relative weight of "leave this agent unchanged"; the
+    # remaining five are the relative weights of each mutation kind (renormalised
+    # internally), so each non-trivial mutation fires on roughly 1/6 of agents per
+    # evolution step and ~40% are passed through untouched.
+    probabilities:
+        no_mut: 0.5
+        arch_mut: 0.5    # add/remove hidden nodes/channels within the bounds below
+        new_layer: 0.2   # add/remove a whole hidden layer (head) within the bounds below
+        params_mut: 0.0  # Gaussian noise on weights, strength = mutation_sd
+        act_mut: 0.0     # OFF -- fixed ReLU (arch-mutation ablation; act_mut disabled)
+        rl_hp_mut: 0.0   # grow/shrink one of the rl_hp_selection hyperparameters below
+    rl_hp_selection:
+        # The highest-leverage, well-behaved DQN hyperparameters (lr, batch_size,
+        # learn_step), each centred on this config's tuned base value. grow/shrink
+        # factors are the multiplicative step taken per mutation (value *=
+        # grow_factor or *= shrink_factor, clipped to [min, max]); they are widened
+        # or narrowed per hyperparameter according to how sensitive training is to
+        # that knob. gamma and tau are intentionally excluded -- see the note after
+        # learn_step.
+        lr:
+            # Optimisation step size -- the single most impactful knob. Base
+            # 0.00025; explore ~5e-5 .. 1e-3 with the standard coarse factors.
+            min: 0.00005
+            max: 0.001
+            grow_factor: 1.2
+            shrink_factor: 0.8
+        batch_size:
+            # Base 32; 16 .. 256. Coarse factors are fine for a power-of-two-ish knob.
+            min: 16
+            max: 256
+            grow_factor: 1.2
+            shrink_factor: 0.8
+        learn_step:
+            # Update frequency (gradient step every learn_step env steps). Base 4;
+            # 1 .. 16. Coarse factors.
+            min: 1
+            max: 16
+            grow_factor: 1.2
+            shrink_factor: 0.8
+        # gamma and tau are deliberately NOT mutated.
+        #
+        # gamma: the impactful quantity is the effective horizon H = 1/(1 - gamma),
+        # not gamma itself, but the registry mutates gamma multiplicatively. Even
+        # "gentle" 1.005/0.995 factors map to a coarse ~x2 / ~x0.67 swing in H per
+        # mutation (0.99 -> ~0.995 doubles H from 100 to ~200; -> ~0.985 cuts it to
+        # ~67), and the [0.9, 0.999] range spans a 100x horizon range with values
+        # piling up at the clamped bounds. For DQN/Atari gamma = 0.99 is robust and
+        # low-leverage, so it is left fixed at the base value above.
+        #
+        # tau: although target-update cadence matters, soft_update() fires once per
+        # gradient step, so the effective target lag in env steps is ~ learn_step /
+        # tau. With learn_step already mutated, searching tau too makes the space
+        # partially redundant and confounds attribution. tau is left fixed at the
+        # tuned 1/30000 base value; learn_step carries the related search.
+    mutation_sd: 0.1  # std of the Gaussian weight perturbation for params_mut (typical)
+    rand_seed: 42
+    mutate_elite: false  # keep the elite member unmutated so the best agent survives intact into the next generation
+    arch_mut_type: func_preserving  # original | func_preserving architecture mutations
+    arch_fp_noise: 0.1  # symmetry-breaking noise on new units' fan-out, relative to the layer's weight std (0.0 = exact-zero preservation)
+    arch_encoder_layer_mut: false  # encoder add_layer/remove_layer stay OFF here, so this
+                                   # arm's search space is unchanged from the runs already
+                                   # collected. The *_enclayer arms turn them on; compare
+                                   # _enclayer against _enclayer, not against this file.
+
+network:
+    # Nature DQN convolutional architecture (see dqn_double_tuned_no_hpo.yaml).
+    # Under HPO the min/max bounds below define the architecture search space that
+    # arch / new_layer mutations may explore -- they are no longer just there to
+    # satisfy manifest validation.
+    # Width bounds are centred on the base value (geometric centring, since node
+    # counts scale multiplicatively), so arch mutations are equally likely to
+    # explore narrower or wider nets -- the search is unbiased, not capacity-only.
+    latent_dim: 512
+    min_latent_dim: 256    # base 512 centred in 256 .. 1024 (sqrt(256 x 1024) = 512)
+    max_latent_dim: 1024
+    arch: cnn
+    encoder_config:
+        channel_size:
+            - 32
+            - 64
+            - 64
+        kernel_size:
+            - 8
+            - 4
+            - 3
+        stride_size:
+            - 4
+            - 2
+            - 1
+        activation: ReLU       # starting activation; act_mut permutes among {ReLU, ELU, GELU}
+        layer_norm: false
+        init_layers: true
+        min_channel_size: 16   # conv channels: 16 .. 256 (base 64 layers centred;
+        max_channel_size: 256  #   the first layer's base 32 sits below centre, as
+                               #   a single global bound can't centre 32/64/64 at once)
+    head_config:
+        hidden_size:
+            - 512
+        activation: ReLU       # starting activation; act_mut permutes among {ReLU, ELU, GELU}
+        output_activation:
+        layer_norm: false
+        init_layers: true
+        min_hidden_layers: 1   # head depth: 1 .. 3 (1 is the structural floor)
+        max_hidden_layers: 3
+        min_mlp_nodes: 128     # head width: base 512 centred in 128 .. 2048 (4x each way)
+        max_mlp_nodes: 2048
+
+replay_buffer:
+    # 300,000 (not the paper's 1,000,000): AgileRL keeps the buffer on the
+    # training device and stores full 4-frame stacks for obs and next_obs, so 1M
+    # would need ~53 GiB of GPU memory. See dqn_double_tuned_no_hpo.yaml for details.
+    # NOTE: this buffer is allocated per agent, so a population of 4 needs ~4x
+    # the replay memory of the single-agent no-HPO run.
+    max_size: 300_000
+
+tournament_selection:
+    tournament_size: 2
+    elitism: true  # the single best agent is cloned into the next generation each step (preserved unmutated, since mutate_elite is false above)
+
+training:
+    max_steps: 6_250_000
+    target_score:
+    pop_size: 4
+    evo_steps: 100_000  # env steps between evolution events (mutate + tournament select)
+    eval_steps:
+    eval_loop: 1
+    dormant_tau: 0.1  # tau threshold for the dormant-neuron metric (Sokar et al. 2023)
+    learning_delay: 50_000
+    eps_start: 1.0
+    eps_end: 0.01
+    eps_decay: 0.9999263199915294  # = 0.01 ** (num_envs / 1_000_000) for num_envs = 16

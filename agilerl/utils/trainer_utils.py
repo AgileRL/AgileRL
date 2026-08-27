@@ -273,6 +273,8 @@ def build_mutations_from_spec(
         regrama_param_mut=mutation_spec.regrama_param_mut,
         dormant_tau=mutation_spec.dormant_tau,
         regrama_out_scale=mutation_spec.regrama_out_scale,
+        arch_mut_type=mutation_spec.arch_mut_type,
+        arch_fp_noise=mutation_spec.arch_fp_noise,
         device=device,
         accelerator=accelerator,
     )

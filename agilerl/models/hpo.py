@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, ConfigDict, Field
 
 
@@ -91,6 +93,35 @@ class MutationSpec(BaseModel):
         ``0.0`` restores the zeroed-outgoing behaviour.
         Only used when ``regrama_param_mut`` is set.
     :type regrama_out_scale: float
+    :param arch_mut_type: Architecture-mutation strategy: ``"original"`` (AgileRL's
+        default add/remove node/channel/layer) or ``"func_preserving"``
+        (function-preserving Net2Net-style *additions* -- new units are added with
+        zero outgoing weights and new head layers are identity-initialised).
+        Removals are the original random-count positional operator under both
+        settings, so the two differ only in how capacity is added.
+    :type arch_mut_type: Literal["original", "func_preserving"]
+    :param arch_fp_noise: Symmetry-breaking noise scale for function-preserving
+        additions (read *only* when ``arch_mut_type == "func_preserving"`` and an
+        architecture add fires; completely inert otherwise, so its value is
+        irrelevant for ``"original"`` runs). A relative factor ``alpha``: the new
+        units' outgoing weights are seeded with ``randn * (alpha * sigma)`` where
+        ``sigma`` is the std of the existing outgoing weights in that consuming
+        layer. The default ``0.1`` breaks the new units' symmetry so they receive
+        incoming-weight gradient and the added capacity is recruitable, at a
+        negligible (~1%) function-preservation cost; set ``0.0`` for exact-zero,
+        byte-identical preservation.
+    :type arch_fp_noise: float
+    :param arch_encoder_layer_mut: Whether ``add_layer`` / ``remove_layer`` are
+        enabled on the *encoder* as well as the head. AgileRL disables encoder
+        layer mutations by default because restructuring the encoder resets the
+        representation feeding every head, which adds a lot of variance; a
+        function-preserving deepening injects no such shock, so the default here
+        is ``None`` -> ``arch_mut_type == "func_preserving"``. Set it explicitly
+        to compare arms on an equal search space (an ``"original"`` baseline
+        needs ``true`` to match a ``"func_preserving"`` arm). Only takes effect
+        for **MLP** encoders; see :class:`EvolvableNetwork
+        <agilerl.networks.base.EvolvableNetwork>`.
+    :type arch_encoder_layer_mut: bool | None
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -105,6 +136,24 @@ class MutationSpec(BaseModel):
     regrama_param_mut: bool = False
     dormant_tau: float = Field(default=0.1, gt=0.0)
     regrama_out_scale: float = Field(default=0.02, ge=0.0)
+    arch_mut_type: Literal["original", "func_preserving"] = "original"
+    arch_fp_noise: float = Field(default=0.1, ge=0.0)
+    arch_encoder_layer_mut: bool | None = None
+
+    def encoder_layer_mutations_enabled(self) -> bool:
+        """Resolve whether encoder layer mutations should be enabled.
+
+        ``arch_encoder_layer_mut`` is tri-state: an explicit ``True``/``False``
+        wins, while ``None`` derives the value from the mutation strategy so that
+        function-preserving runs get encoder deepening without a second knob.
+
+        :return: Whether to enable encoder ``add_layer`` / ``remove_layer``.
+        :rtype: bool
+        """
+        if self.arch_encoder_layer_mut is not None:
+            return self.arch_encoder_layer_mut
+
+        return self.arch_mut_type == "func_preserving"
 
 
 class TournamentSelectionSpec(BaseModel):

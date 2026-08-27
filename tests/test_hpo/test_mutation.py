@@ -1,5 +1,6 @@
 import copy
 import gc
+import inspect
 import math
 import warnings
 from typing import TYPE_CHECKING
@@ -41,6 +42,7 @@ from tests.helper_functions import (
     assert_state_dicts_equal,
     generate_dict_or_tuple_space,
     generate_discrete_space,
+    generate_multi_agent_box_spaces,
     generate_random_box_space,
 )
 
@@ -216,6 +218,10 @@ class TestMutationsInit:
     def test_raises_for_invalid_new_layer_prob(self):
         with pytest.raises(AssertionError, match="between zero and one"):
             Mutations(0, 0, 1.5, 0, 0, 0, 0.1, device="cpu")
+
+    def test_raises_for_negative_arch_fp_noise(self):
+        with pytest.raises(AssertionError, match="arch_fp_noise"):
+            Mutations(0, 0, 0.5, 0, 0, 0, 0.1, device="cpu", arch_fp_noise=-0.1)
 
 
 class TestMutationsFindAnalogousMutation:
@@ -4102,3 +4108,1115 @@ class TestRebornRecurrentEncoders:
         # Assert
         assert counts["reborn"] > 0
         assert not torch.equal(before, projection.weight.detach())
+
+
+# Function-preserving architecture mutations (arch_mut_type="func_preserving")
+# --------------------------------------------------------------------------- #
+import agilerl.hpo.function_preserving as fp  # noqa: E402
+
+
+def _fp_dqn_pop(device="cpu", head_hidden=(32,), encoder_layer_mutations=False):
+    """A DQN population with a ReLU CNN encoder + MLP head, no norm layers."""
+    obs = spaces.Box(0, 255, shape=(4, 32, 32), dtype=np.uint8)
+    act = spaces.Discrete(4)
+    net_config = {
+        "encoder_layer_mutations": encoder_layer_mutations,
+        "latent_dim": 16,
+        "min_latent_dim": 8,
+        "max_latent_dim": 64,
+        "encoder_config": {
+            "channel_size": [8, 8],
+            "kernel_size": [3, 3],
+            "stride_size": [1, 1],
+            "activation": "ReLU",
+            "min_channel_size": 4,
+            "max_channel_size": 64,
+            "layer_norm": False,
+        },
+        "head_config": {
+            "hidden_size": list(head_hidden),
+            "activation": "ReLU",
+            "min_hidden_layers": 1,
+            "max_hidden_layers": 4,
+            "min_mlp_nodes": 4,
+            "max_mlp_nodes": 256,
+            "layer_norm": False,
+        },
+    }
+    return create_population(
+        algo="DQN",
+        observation_space=obs,
+        action_space=act,
+        net_config=net_config,
+        INIT_HP={
+            "POPULATION_SIZE": 1,
+            "BATCH_SIZE": 8,
+            "LR": 1e-3,
+            "GAMMA": 0.99,
+            "DOUBLE": True,
+            "LEARN_STEP": 1,
+            "TAU": 1e-3,
+        },
+        population_size=1,
+        device=device,
+    )
+
+
+def _fp_ppo_pop(
+    activation="ReLU",
+    device="cpu",
+    encoder_layer_mutations=False,
+    encoder_hidden=(16, 16),
+    encoder_max_layers=4,
+):
+    """A PPO population with a ReLU/Tanh MLP encoder + head, no norm layers."""
+    obs = spaces.Box(-1, 1, shape=(6,), dtype=np.float32)
+    act = spaces.Box(-1, 1, shape=(2,), dtype=np.float32)
+    net_config = {
+        "latent_dim": 16,
+        "min_latent_dim": 4,
+        "max_latent_dim": 64,
+        "encoder_config": {
+            "hidden_size": list(encoder_hidden),
+            "activation": activation,
+            "output_activation": "Identity",
+            "min_hidden_layers": 1,
+            "max_hidden_layers": encoder_max_layers,
+            "min_mlp_nodes": 4,
+            "max_mlp_nodes": 256,
+            "layer_norm": False,
+        },
+        "encoder_layer_mutations": encoder_layer_mutations,
+        "head_config": {
+            "hidden_size": [16, 16],
+            "activation": activation,
+            "min_hidden_layers": 1,
+            "max_hidden_layers": 4,
+            "min_mlp_nodes": 4,
+            "max_mlp_nodes": 256,
+            "layer_norm": False,
+        },
+    }
+    return create_population(
+        algo="PPO",
+        observation_space=obs,
+        action_space=act,
+        net_config=net_config,
+        INIT_HP={
+            "POPULATION_SIZE": 1,
+            "BATCH_SIZE": 8,
+            "LR": 1e-3,
+            "GAMMA": 0.99,
+            "GAE_LAMBDA": 0.95,
+            "ACTION_STD_INIT": 0.0,
+            "CLIP_COEF": 0.2,
+            "ENT_COEF": 0.0,
+            "VF_COEF": 0.5,
+            "MAX_GRAD_NORM": 0.5,
+            "TARGET_KL": None,
+            "UPDATE_EPOCHS": 4,
+            "LEARN_STEP": 1,
+        },
+        population_size=1,
+        device=device,
+    )
+
+
+def _dqn_q(policy, obs):
+    policy.eval()
+    with torch.no_grad():
+        return policy(obs).clone()
+
+
+def _fp_muts(arch="func_preserving", seed=0, arch_fp_noise=0.0):
+    return Mutations(
+        0.5,
+        0.5,
+        0.2,
+        0,
+        0,
+        0,
+        0.1,
+        arch_mut_type=arch,
+        arch_fp_noise=arch_fp_noise,
+        rand_seed=seed,
+        device="cpu",
+    )
+
+
+class TestFunctionPreservingMutations:
+    """Numeric + behavioural checks for arch_mut_type='func_preserving'."""
+
+    def test_add_node_head_preserves_function(self):
+        pop = _fp_dqn_pop()
+        ind = pop[0]
+        obs = np.random.randint(0, 255, size=(8, 4, 32, 32)).astype(np.uint8)
+        pre = ind.preprocess_observation(obs)
+        policy, _ = get_offspring_eval_modules(ind)
+        _n, po = next(iter(policy.items()))
+        q0 = _dqn_q(po, pre)
+        applied, _md = _fp_muts()._apply_arch_mutation(
+            po, "head_net.add_node", {"hidden_layer": 0, "numb_new_nodes": 16}
+        )
+        assert applied == "head_net.add_node"
+        assert torch.allclose(q0, _dqn_q(po, pre), atol=1e-5)
+
+    def test_add_channel_preserves_function_both_boundaries(self):
+        obs = np.random.randint(0, 255, size=(8, 4, 32, 32)).astype(np.uint8)
+        # hidden_layer 0 = conv->conv boundary; hidden_layer 1 = conv->linear_output.
+        for layer in (0, 1):
+            pop = _fp_dqn_pop()
+            ind = pop[0]
+            pre = ind.preprocess_observation(obs)
+            policy, _ = get_offspring_eval_modules(ind)
+            _n, po = next(iter(policy.items()))
+            q0 = _dqn_q(po, pre)
+            applied, _md = _fp_muts()._apply_arch_mutation(
+                po,
+                "encoder.add_channel",
+                {"hidden_layer": layer, "numb_new_channels": 8},
+            )
+            assert applied == "encoder.add_channel"
+            assert torch.allclose(q0, _dqn_q(po, pre), atol=1e-5), f"layer {layer}"
+
+    def test_add_layer_identity_preserves_function_relu(self):
+        pop = _fp_dqn_pop(head_hidden=(32,))
+        ind = pop[0]
+        obs = np.random.randint(0, 255, size=(8, 4, 32, 32)).astype(np.uint8)
+        pre = ind.preprocess_observation(obs)
+        policy, _ = get_offspring_eval_modules(ind)
+        _n, po = next(iter(policy.items()))
+        q0 = _dqn_q(po, pre)
+        applied, _md = _fp_muts()._apply_arch_mutation(po, "head_net.add_layer", {})
+        assert applied == "head_net.add_layer"
+        assert torch.allclose(q0, _dqn_q(po, pre), atol=1e-5)
+
+    def test_add_node_preserves_under_tanh_activation(self):
+        # add_node zeroes the fan-out, so it is function-preserving for ANY
+        # activation (only add_layer's identity needs ReLU/Identity).
+        pop = _fp_ppo_pop("Tanh")
+        ind = pop[0]
+        obs = np.random.randn(8, 6).astype(np.float32)
+        pre = ind.preprocess_observation(obs)
+        policy, _ = get_offspring_eval_modules(ind)
+        _n, po = next(iter(policy.items()))
+        po.eval()
+        with torch.no_grad():
+            y0 = po.head_net.wrapped(po.encoder(pre)).clone()
+        with warnings.catch_warnings():
+            # add_node under a non-ReLU activation (no norm) is preserving, so it
+            # must NOT emit the func-preservation caveat warning.
+            warnings.simplefilter("error")
+            _fp_muts()._apply_arch_mutation(
+                po, "head_net.add_node", {"hidden_layer": 0, "numb_new_nodes": 16}
+            )
+        with torch.no_grad():
+            y1 = po.head_net.wrapped(po.encoder(pre)).clone()
+        assert torch.allclose(y0, y1, atol=1e-5)
+
+    def test_add_layer_not_preserving_under_tanh_and_warns(self):
+        pop = _fp_ppo_pop("Tanh")
+        ind = pop[0]
+        policy, _ = get_offspring_eval_modules(ind)
+        _n, po = next(iter(policy.items()))
+        muts = _fp_muts()
+        with pytest.warns(UserWarning, match="function preservation cannot be"):
+            muts._apply_arch_mutation(po, "head_net.add_layer", {})
+
+    def test_add_latent_node_preserves_function(self):
+        # Widening the latent dim adds new encoder outputs whose fan-out lives in
+        # the head's first layer; zeroing those new head input columns preserves
+        # the function across the encoder->head boundary.
+        pop = _fp_dqn_pop(head_hidden=(32,))
+        ind = pop[0]
+        obs = np.random.randint(0, 255, size=(8, 4, 32, 32)).astype(np.uint8)
+        pre = ind.preprocess_observation(obs)
+        policy, _ = get_offspring_eval_modules(ind)
+        _n, po = next(iter(policy.items()))
+        old_latent = po.latent_dim
+        q0 = _dqn_q(po, pre)
+        applied, _md = _fp_muts()._apply_arch_mutation(
+            po, "add_latent_node", {"numb_new_nodes": 8}
+        )
+        assert applied == "add_latent_node"
+        assert po.latent_dim == old_latent + 8
+        assert torch.allclose(q0, _dqn_q(po, pre), atol=1e-5)
+        # The new head input columns (fan-out of the new latent units) are zero.
+        head_first = fp.head_first_layer(po)
+        assert torch.count_nonzero(head_first.weight.data[:, old_latent:]) == 0
+
+    def test_add_latent_node_noise_breaks_symmetry(self):
+        # With arch_fp_noise > 0 the new latent units' head columns are non-zero
+        # (recruitable) but small relative to the existing weights.
+        pop = _fp_dqn_pop(head_hidden=(32,))
+        ind = pop[0]
+        policy, _ = get_offspring_eval_modules(ind)
+        _n, po = next(iter(policy.items()))
+        old_latent = po.latent_dim
+        _fp_muts(arch_fp_noise=0.1)._apply_arch_mutation(
+            po, "add_latent_node", {"numb_new_nodes": 8}
+        )
+        head_first = fp.head_first_layer(po)
+        new_cols = head_first.weight.data[:, old_latent:]
+        existing = head_first.weight.data[:, :old_latent]
+        assert torch.count_nonzero(new_cols) > 0  # symmetry broken
+        assert float(new_cols.std()) < float(existing.std())  # but small
+
+    def test_add_node_noise_reproducible(self):
+        # arch_fp_noise draws from the seeded global torch RNG, so two identical
+        # seeded runs produce byte-identical noised weights.
+        obs = np.random.randint(0, 255, size=(8, 4, 32, 32)).astype(np.uint8)
+
+        def run():
+            torch.manual_seed(0)
+            np.random.seed(0)
+            pop = _fp_dqn_pop(head_hidden=(32,))
+            ind = pop[0]
+            policy, _ = get_offspring_eval_modules(ind)
+            _n, po = next(iter(policy.items()))
+            _fp_muts(seed=0, arch_fp_noise=0.1)._apply_arch_mutation(
+                po, "head_net.add_node", {"hidden_layer": 0, "numb_new_nodes": 16}
+            )
+            return {k: v.clone() for k, v in po.state_dict().items()}
+
+        a, b = run(), run()
+        assert set(a) == set(b)
+        for k in a:
+            assert torch.equal(a[k], b[k]), k
+
+    def test_add_node_noise_recruitable_vs_exact_zero(self):
+        # noise=0 leaves the new fan-out exactly zero; noise>0 makes it non-zero.
+        obs = np.random.randint(0, 255, size=(8, 4, 32, 32)).astype(np.uint8)
+
+        def run(noise):
+            pop = _fp_dqn_pop(head_hidden=(32,))
+            ind = pop[0]
+            policy, _ = get_offspring_eval_modules(ind)
+            _n, po = next(iter(policy.items()))
+            _fp_muts(seed=0, arch_fp_noise=noise)._apply_arch_mutation(
+                po, "head_net.add_node", {"hidden_layer": 0, "numb_new_nodes": 16}
+            )
+            return _ordered_head_weights(po)[:, -16:].clone()
+
+        assert torch.count_nonzero(run(0.0)) == 0
+        assert torch.count_nonzero(run(0.1)) > 0
+
+    def test_change_kernel_falls_back_and_warns_once(self):
+        pop = _fp_dqn_pop()
+        policy, _ = get_offspring_eval_modules(pop[0])
+        _n, po = next(iter(policy.items()))
+        muts = _fp_muts()
+        with pytest.warns(UserWarning, match="change_kernel cannot be made"):
+            muts._apply_arch_mutation(po, "encoder.change_kernel", {"hidden_layer": 0})
+        assert muts._fp_warned_kernel is True
+
+    def test_layernorm_warns_once(self):
+        # A head MLP with LayerNorm cannot guarantee preservation -> one warning.
+        obs = spaces.Box(-1, 1, shape=(6,), dtype=np.float32)
+        act = spaces.Discrete(3)
+        net_config = {
+            "latent_dim": 16,
+            "encoder_config": {
+                "hidden_size": [16],
+                "activation": "ReLU",
+                "layer_norm": True,
+                "min_mlp_nodes": 4,
+            },
+            "head_config": {
+                "hidden_size": [16],
+                "activation": "ReLU",
+                "layer_norm": True,
+                "min_mlp_nodes": 4,
+                "min_hidden_layers": 1,
+                "max_hidden_layers": 3,
+            },
+        }
+        pop = create_population(
+            algo="DQN",
+            observation_space=obs,
+            action_space=act,
+            net_config=net_config,
+            INIT_HP=SHARED_INIT_HP,
+            population_size=1,
+            device="cpu",
+        )
+        policy, _ = get_offspring_eval_modules(pop[0])
+        _n, po = next(iter(policy.items()))
+        muts = _fp_muts()
+        with pytest.warns(UserWarning, match="function preservation cannot be"):
+            muts._apply_arch_mutation(
+                po, "head_net.add_node", {"hidden_layer": 0, "numb_new_nodes": 8}
+            )
+        assert muts._fp_warned_layernorm is True
+        # Second add does not warn again (guarded).
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            muts._apply_arch_mutation(
+                po, "head_net.add_node", {"hidden_layer": 0, "numb_new_nodes": 8}
+            )
+
+    def test_original_mode_unaffected(self):
+        # arch_mut_type="original" must reproduce the stock behaviour exactly.
+        obs = np.random.randint(0, 255, size=(8, 4, 32, 32)).astype(np.uint8)
+
+        def run(arch):
+            pop = _fp_dqn_pop()
+            ind = pop[0]
+            pre = ind.preprocess_observation(obs)
+            policy, _ = get_offspring_eval_modules(ind)
+            _n, po = next(iter(policy.items()))
+            _fp_muts(arch=arch, seed=0)._apply_arch_mutation(
+                po, "head_net.add_node", {"hidden_layer": 0, "numb_new_nodes": 16}
+            )
+            return _ordered_head_weights(po)
+
+        # The func-preserving path zeroes the new fan-out; original does not.
+        w_orig = run("original")
+        w_fp = run("func_preserving")
+        # Original's new outgoing columns are non-zero; func-preserving's are zero.
+        assert w_orig.abs().sum() > 0
+        assert torch.count_nonzero(w_fp[:, -16:]) == 0
+
+    def test_reproducibility(self):
+        obs = np.random.randint(0, 255, size=(8, 4, 32, 32)).astype(np.uint8)
+
+        def run():
+            torch.manual_seed(0)
+            np.random.seed(0)
+            pop = _fp_dqn_pop()
+            ind = pop[0]
+            policy, _ = get_offspring_eval_modules(ind)
+            _n, po = next(iter(policy.items()))
+            _fp_muts(seed=0)._apply_arch_mutation(po, "head_net.add_node")
+            return {k: v.clone() for k, v in po.state_dict().items()}
+
+        a, b = run(), run()
+        assert set(a) == set(b)
+        for k in a:
+            assert torch.equal(a[k], b[k]), k
+
+
+class TestFunctionPreservingRemovalsMatchOriginal:
+    """Removals under ``func_preserving`` are the stock operator, untouched.
+
+    Only the *additions* are function-preserving. ``remove_node`` /
+    ``remove_channel`` / ``remove_latent_node`` defer entirely to AgileRL's
+    random-count positional removal, so the ``func_preserving`` vs ``original``
+    contrast isolates the add operators.
+    """
+
+    @pytest.mark.parametrize(
+        "method",
+        ["head_net.remove_node", "encoder.remove_channel", "remove_latent_node"],
+    )
+    def test_removal_is_identical_to_the_original_operator(self, method):
+        def run(arch):
+            torch.manual_seed(0)
+            np.random.seed(0)
+            pop = _fp_dqn_pop(head_hidden=(32,))
+            policy, _ = get_offspring_eval_modules(pop[0])
+            _n, po = next(iter(policy.items()))
+            applied, mut_dict = _fp_muts(arch=arch, seed=0)._apply_arch_mutation(
+                po, method
+            )
+            state = {k: v.clone() for k, v in po.state_dict().items()}
+            return applied, mut_dict, state
+
+        applied_fp, dict_fp, state_fp = run("func_preserving")
+        applied_orig, dict_orig, state_orig = run("original")
+
+        assert applied_fp == applied_orig
+        assert dict_fp == dict_orig
+        assert set(state_fp) == set(state_orig)
+        for key in state_fp:
+            assert torch.equal(state_fp[key], state_orig[key]), key
+
+    def test_removal_uses_the_stock_random_count(self):
+        # The count comes from AgileRL's own draw, never from a dormancy measure.
+        # A layer with no dead unit at all still yields a non-zero count -- under
+        # the dormancy-sized removal it would have been a guaranteed no-op.
+        # (Whether the shrink then applies is AgileRL's own min-width guard's call,
+        # which silently skips a count that would breach ``min_mlp_nodes``.)
+        pop = _fp_dqn_pop(head_hidden=(32,))
+        policy, _ = get_offspring_eval_modules(pop[0])
+        _n, po = next(iter(policy.items()))
+        head_layers = fp._ordered_weight_layers(po.head_net)
+        with torch.no_grad():  # every unit comfortably alive: zero dormant units
+            head_layers[0].weight.data.zero_()
+            head_layers[0].bias.data[:] = torch.linspace(1.0, 2.0, 32)
+
+        _applied, mut_dict = _fp_muts()._apply_arch_mutation(po, "head_net.remove_node")
+
+        assert mut_dict["numb_new_nodes"] in (16, 32, 64)
+
+    def test_operator_needs_no_observation_batch(self):
+        # The removal path no longer scores activations, so nothing in the
+        # function-preserving operator collects or accepts an observation batch.
+        # NOTE: `mutation` itself still takes an `env` argument on this branch, but
+        # it belongs to the ReGraMa lineage, which retains it purely for API
+        # compatibility and never reads it -- so the FP surgery is what is asserted
+        # here, not the signature.
+        muts = _fp_muts()
+        assert not hasattr(muts, "_fp_collect_obs")
+        assert not hasattr(muts, "_fp_env")
+        assert "fp_obs" not in inspect.signature(muts._apply_arch_mutation).parameters
+        for hook in (muts._fp_pre_mutation, muts._fp_post_mutation):
+            params = inspect.signature(hook).parameters
+            assert "env" not in params
+            assert "obs" not in params
+
+    def test_removal_records_no_dormancy_details(self):
+        pop = _fp_dqn_pop(head_hidden=(32,))
+        individual = _fp_muts()._architecture_mutate_single(pop[0])
+
+        assert individual.mut_details["arch_func_preserving"] is True
+        assert "arch_dormant_count" not in individual.mut_details
+        assert "arch_neurons_removed" not in individual.mut_details
+
+
+def _ordered_head_weights(policy):
+    layers = fp._ordered_weight_layers(policy.head_net)
+    # Return the consumer weight of hidden layer 0 (where new fan-out lives).
+    return layers[1].weight.data.clone()
+
+
+def _ma_relu_config():
+    return {
+        "latent_dim": 16,
+        "min_latent_dim": 4,
+        "max_latent_dim": 64,
+        "encoder_config": {
+            "hidden_size": [16],
+            "activation": "ReLU",
+            "output_activation": "Identity",
+            "min_mlp_nodes": 4,
+            "max_mlp_nodes": 256,
+            "layer_norm": False,
+        },
+        "head_config": {
+            "hidden_size": [16],
+            "activation": "ReLU",
+            "min_hidden_layers": 1,
+            "max_hidden_layers": 4,
+            "min_mlp_nodes": 4,
+            "max_mlp_nodes": 256,
+            "layer_norm": False,
+        },
+    }
+
+
+class TestFunctionPreservingMultiAgent:
+    def test_ippo_add_node_zeroes_new_fanout_across_moduledict(
+        self, ma_vector_space, ma_discrete_space, monkeypatch
+    ):
+        # Verifies the func-preserving surgery reaches through the multi-agent
+        # ``ModuleDict`` dispatch: after a forced add_node on one sub-agent's head,
+        # the newly added units' outgoing (consumer) columns are exactly zero.
+        pop = create_population(
+            algo="IPPO",
+            observation_space=ma_vector_space,
+            action_space=ma_discrete_space,
+            net_config=_ma_relu_config(),
+            INIT_HP=SHARED_INIT_HP_MA,
+            population_size=1,
+            device="cpu",
+        )
+        ind = pop[0]
+        policy_attr = ind.registry.policy()
+        policy_md = getattr(ind, policy_attr)
+
+        first_id = next(iter(policy_md.keys()))
+        forced = f"{first_id}.head_net.add_node"
+        old_width = fp.hidden_widths(policy_md[first_id].head_net)[0]
+
+        # Force the sampled policy mutation to a specific sub-agent add_node.
+        monkeypatch.setattr(
+            ModuleDict,
+            "sample_mutation_method",
+            lambda _self, *_a, **_k: forced,
+            raising=False,
+        )
+
+        muts = _fp_muts()
+        muts._architecture_mutate_multi(ind)
+
+        assert ind.mut_details.get("arch_func_preserving") is True
+        mutated_head = getattr(ind, policy_attr)[first_id].head_net
+        consumer = fp._ordered_weight_layers(mutated_head)[1]
+        new_width = fp.hidden_widths(mutated_head)[0]
+        assert new_width > old_width
+        # The trailing (new) fan-out columns must be exactly zero.
+        assert torch.count_nonzero(consumer.weight.data[:, old_width:new_width]) == 0
+
+    def test_ippo_add_latent_node_preserves_across_moduledict(
+        self, ma_vector_space, ma_discrete_space, monkeypatch
+    ):
+        # The cross-boundary latent surgery must reach through the multi-agent
+        # ``ModuleDict`` dispatch: after a forced add_latent_node on one sub-agent,
+        # the head's new input columns (the new latent units' fan-out) are zero.
+        pop = create_population(
+            algo="IPPO",
+            observation_space=ma_vector_space,
+            action_space=ma_discrete_space,
+            net_config=_ma_relu_config(),
+            INIT_HP=SHARED_INIT_HP_MA,
+            population_size=1,
+            device="cpu",
+        )
+        ind = pop[0]
+        policy_attr = ind.registry.policy()
+        policy_md = getattr(ind, policy_attr)
+
+        first_id = next(iter(policy_md.keys()))
+        old_latent = policy_md[first_id].latent_dim
+        forced = f"{first_id}.add_latent_node"
+
+        monkeypatch.setattr(
+            ModuleDict,
+            "sample_mutation_method",
+            lambda _self, *_a, **_k: forced,
+            raising=False,
+        )
+
+        muts = _fp_muts()
+        muts._architecture_mutate_multi(ind)
+
+        mutated = getattr(ind, policy_attr)[first_id]
+        assert mutated.latent_dim > old_latent
+        head_first = fp.head_first_layer(mutated)
+        assert torch.count_nonzero(head_first.weight.data[:, old_latent:]) == 0
+
+
+class TestFunctionPreservingUnsupportedArchitectures:
+    """Architectures the add-side surgery cannot describe must not crash.
+
+    ``hidden_widths`` sizes an addition's zeroed fan-out; encoders that expose no
+    flat hidden stack simply yield no widths, and the mutation still applies.
+    """
+
+    @staticmethod
+    def _q_network(**kwargs):
+        from agilerl.networks import QNetwork
+
+        return QNetwork(action_space=generate_discrete_space(4), **kwargs)
+
+    def test_recurrent_encoder_exposes_no_hidden_layers(self):
+        # nn.LSTM fuses its gate non-linearities: nothing to hook, and no single
+        # matrix whose rows are one unit's incoming weights.
+        net = self._q_network(
+            observation_space=generate_random_box_space((6,)), recurrent=True
+        )
+        assert fp.hidden_widths(net.encoder) == []
+
+    def test_nested_multi_input_removal_does_not_crash(self):
+        # 'encoder.feature_net.<key>.remove_channel' parses to an agent_id that is
+        # not a ModuleDict key, so resolving it subscripts a plain module.
+        obs_space = spaces.Dict(
+            {
+                "vec": generate_random_box_space((6,)),
+                "img": spaces.Box(0, 255, shape=(3, 32, 32), dtype=np.uint8),
+            }
+        )
+        net = self._q_network(observation_space=obs_space)
+        nested = [
+            m
+            for m in net.mutation_methods
+            if m.startswith("encoder.feature_net.") and "remove" in m
+        ]
+        assert nested, "expected a nested sub-encoder removal method"
+        _applied, mut_dict = _fp_muts()._apply_arch_mutation(net, nested[0])
+        assert mut_dict is not None
+
+
+# Distinct prefixes so IPPO/MADDPG build one policy per agent rather than
+# parameter-sharing across a common prefix.
+_MA_IDS = ["speaker_0", "listener_0"]
+
+
+class TestFunctionPreservingEncoderLayer:
+    """``encoder.add_layer`` / ``encoder.remove_layer`` under ``func_preserving``.
+
+    AgileRL disables encoder LAYER mutations because restructuring the encoder
+    resets the representation feeding every head. An identity-initialised layer
+    injects no such shock, so ``encoder_layer_mutations`` opts them back in for
+    MLP encoders. The surgery itself needs no new code: ``_fp_post_mutation``
+    already routes ``encoder.add_layer`` exactly as ``head_net.add_layer``.
+    """
+
+    @staticmethod
+    def _forward(policy, obs):
+        """Deterministic forward path (``StochasticActor.forward`` samples)."""
+        policy.eval()
+        with torch.no_grad():
+            return policy.head_net.wrapped(policy.encoder(obs)).clone()
+
+    def test_encoder_add_layer_identity_preserves_function(self):
+        pop = _fp_ppo_pop(encoder_layer_mutations=True)
+        po = pop[0].actor
+        pre = torch.randn(8, 6)
+        y0 = self._forward(po, pre)
+        depth = len(po.encoder.hidden_size)
+
+        applied, _md = _fp_muts()._apply_arch_mutation(po, "encoder.add_layer", {})
+
+        assert applied == "encoder.add_layer"
+        assert len(po.encoder.hidden_size) == depth + 1
+        assert torch.allclose(y0, self._forward(po, pre), atol=1e-5)
+
+    def test_encoder_add_layer_changes_function_under_original(self):
+        """The contrast that makes the ablation meaningful."""
+        pop = _fp_ppo_pop(encoder_layer_mutations=True)
+        po = pop[0].actor
+        pre = torch.randn(8, 6)
+        y0 = self._forward(po, pre)
+
+        applied, _md = _fp_muts(arch="original")._apply_arch_mutation(
+            po, "encoder.add_layer", {}
+        )
+
+        assert applied == "encoder.add_layer"
+        assert not torch.allclose(y0, self._forward(po, pre), atol=1e-5)
+
+    def test_encoder_add_layer_falls_back_to_add_node_at_max_depth(self):
+        pop = _fp_ppo_pop(
+            encoder_layer_mutations=True, encoder_hidden=(16, 16), encoder_max_layers=2
+        )
+        po = pop[0].actor
+        pre = torch.randn(8, 6)
+        y0 = self._forward(po, pre)
+
+        applied, _md = _fp_muts()._apply_arch_mutation(po, "encoder.add_layer", {})
+
+        assert applied == "encoder.add_node"
+        assert torch.allclose(y0, self._forward(po, pre), atol=1e-5)
+
+    def test_encoder_remove_layer_falls_back_to_add_node_at_min_depth(self):
+        pop = _fp_ppo_pop(encoder_layer_mutations=True, encoder_hidden=(16,))
+        po = pop[0].actor
+        pre = torch.randn(8, 6)
+        y0 = self._forward(po, pre)
+
+        applied, _md = _fp_muts()._apply_arch_mutation(po, "encoder.remove_layer", {})
+
+        assert applied == "encoder.add_node"
+        assert torch.allclose(y0, self._forward(po, pre), atol=1e-5)
+
+    def test_encoder_remove_layer_is_identical_to_the_original_operator(self):
+        """Removals stay the stock positional operator under both arms."""
+        results = {}
+        for arch in ("func_preserving", "original"):
+            torch.manual_seed(0)
+            np.random.seed(0)
+            po = _fp_ppo_pop(encoder_layer_mutations=True, encoder_hidden=(16, 16, 16))[
+                0
+            ].actor
+            applied, mut_dict = _fp_muts(arch=arch)._apply_arch_mutation(
+                po, "encoder.remove_layer", {}
+            )
+            results[arch] = (
+                applied,
+                mut_dict,
+                {k: v.clone() for k, v in po.state_dict().items()},
+            )
+
+        fp_applied, fp_dict, fp_state = results["func_preserving"]
+        orig_applied, orig_dict, orig_state = results["original"]
+
+        assert fp_applied == orig_applied == "encoder.remove_layer"
+        assert fp_dict == orig_dict
+        for key in fp_state:
+            assert torch.equal(fp_state[key], orig_state[key]), key
+
+    def test_encoder_layer_mutation_is_mirrored_onto_the_critic(self, monkeypatch):
+        """Regression test for the network-level dotted wrapper.
+
+        If the mutation resolved to the encoder's own bound method instead,
+        ``network.last_mutation_attr`` would stay None -- the fixup would be
+        skipped and the critic would never be mirrored, silently diverging.
+        """
+        monkeypatch.setattr(
+            EvolvableModule,
+            "sample_mutation_method",
+            lambda _self, *_a, **_k: "encoder.add_layer",
+            raising=False,
+        )
+        individual = _fp_ppo_pop(encoder_layer_mutations=True)[0]
+        actor_depth = len(individual.actor.encoder.hidden_size)
+        critic_depth = len(individual.critic.encoder.hidden_size)
+
+        individual = _fp_muts()._architecture_mutate_single(individual)
+
+        assert individual.mut == "encoder.add_layer"
+        assert len(individual.actor.encoder.hidden_size) == actor_depth + 1
+        assert len(individual.critic.encoder.hidden_size) == critic_depth + 1
+
+    def test_cnn_encoder_layer_mutations_stay_disabled(self):
+        with pytest.warns(UserWarning, match="only supported for EvolvableMLP"):
+            po = _fp_dqn_pop(encoder_layer_mutations=True)[0].actor
+
+        assert po.encoder_layer_mutations is False
+        assert "encoder.add_layer" not in po.mutation_methods
+        assert "encoder.remove_layer" not in po.mutation_methods
+
+    @pytest.mark.parametrize("algo", ["MADDPG", "MATD3"])
+    def test_multi_agent_shared_critic_algos_report_the_flag_honestly(self, algo):
+        """MADDPG/MATD3 wipe every encoder mutation right after building the actor
+        (their critics use a different encoder type), so the opted-in flag must not
+        survive as a stale ``True`` -- it would be carried into ``init_dict`` and
+        therefore into checkpoints and clones."""
+        agent = create_population(
+            algo=algo,
+            observation_space={
+                i: spaces.Box(-1, 1, shape=(6,), dtype=np.float32) for i in _MA_IDS
+            },
+            action_space={i: spaces.Discrete(3) for i in _MA_IDS},
+            net_config={
+                "latent_dim": 16,
+                "min_latent_dim": 4,
+                "max_latent_dim": 64,
+                "encoder_config": {
+                    "hidden_size": [16],
+                    "activation": "ReLU",
+                    "layer_norm": False,
+                },
+                "head_config": {
+                    "hidden_size": [16],
+                    "activation": "ReLU",
+                    "layer_norm": False,
+                },
+                "encoder_layer_mutations": True,
+            },
+            INIT_HP={**SHARED_INIT_HP_MA, "AGENT_IDS": _MA_IDS},
+            population_size=1,
+            device="cpu",
+        )[0]
+
+        actors = agent.actors
+        for key in actors.keys():
+            assert actors[key].encoder_layer_mutations is False
+            assert actors[key].init_dict["encoder_layer_mutations"] is False
+        assert not [m for m in actors.mutation_methods if "encoder" in m]
+
+    def test_encoder_layer_mutations_absent_by_default(self):
+        po = _fp_ppo_pop()[0].actor
+
+        assert po.encoder_layer_mutations is False
+        assert "encoder.add_layer" not in po.mutation_methods
+        assert "encoder.remove_layer" not in po.mutation_methods
+
+
+def _fp_strip_norms(policy):
+    """Replace every ``LayerNorm`` in *policy* with an identity, in place.
+
+    ``RainbowQNetwork`` pops ``layer_norm`` out of ``head_config`` and forces
+    ``layer_norm=True`` on the encoder, so a norm-free duelling network cannot be
+    configured -- and an architecture mutation rebuilds the norms anyway via
+    ``recreate_network``. Calling this both before measuring and after mutating
+    isolates the *branched-stream* surgery from the LayerNorm caveat, which is a
+    separate, already-warned-about limitation of every add mutation.
+    """
+    for _name, parent in policy.named_modules():
+        for child_name, child in list(parent.named_children()):
+            if isinstance(child, torch.nn.LayerNorm):
+                setattr(parent, child_name, torch.nn.Identity())
+    return policy
+
+
+def _fp_rainbow_policy(head_hidden=(16,), latent_dim=8):
+    """A Rainbow DQN policy: duelling, distributional, noisy head."""
+    from agilerl.utils.utils import create_population
+
+    pop = create_population(
+        algo="Rainbow DQN",
+        observation_space=spaces.Box(-1, 1, shape=(6,), dtype=np.float32),
+        action_space=spaces.Discrete(4),
+        net_config={
+            "latent_dim": latent_dim,
+            "min_latent_dim": 4,
+            "max_latent_dim": 32,
+            "encoder_config": {"hidden_size": [16], "activation": "ReLU"},
+            "head_config": {"hidden_size": list(head_hidden), "activation": "ReLU"},
+        },
+        INIT_HP=SHARED_INIT_HP,
+        population_size=1,
+        device="cpu",
+    )
+    return pop[0].actor
+
+
+def _rainbow_q(policy, obs):
+    policy.eval()
+    with torch.no_grad():
+        return policy(obs).clone()
+
+
+class TestFunctionPreservingBranchedHeads:
+    """The duelling Rainbow head owns two parallel weight stacks.
+
+    ``DuelingDistributionalMLP`` keeps its value stream in the inherited
+    ``model`` and its advantage stream in a sibling ``nn.Sequential``
+    (``advantage_net``). ``recreate_network`` grows both from the same
+    ``hidden_size``, so the *mutation* is symmetric -- the surgery must be too,
+    or ``func_preserving`` silently produces a network that is neither preserved
+    nor the stock operator's output.
+    """
+
+    def test_weight_stacks_returns_one_stack_for_an_unbranched_head(self):
+        po = _fp_dqn_pop()[0].actor
+
+        stacks = fp._weight_stacks(po.head_net)
+
+        assert len(stacks) == 1
+        assert stacks[0] == fp._ordered_weight_layers(po.head_net)
+
+    def test_weight_stacks_finds_the_duelling_advantage_stream(self):
+        po = _fp_rainbow_policy()
+
+        stacks = fp._weight_stacks(po.head_net)
+
+        assert len(stacks) == 2
+        assert stacks[0] == fp._ordered_weight_layers(po.head_net)
+        assert stacks[1] == [
+            m for m in po.head_net.advantage_net if fp._is_weight_layer(m)
+        ]
+
+    def test_weight_stacks_skips_a_sibling_with_a_different_shape(self):
+        """The guard is structural: a parallel stream shares input dim and widths."""
+        po = _fp_rainbow_policy()
+        po.head_net.unrelated = torch.nn.Sequential(torch.nn.Linear(3, 7))
+
+        stacks = fp._weight_stacks(po.head_net)
+
+        assert len(stacks) == 2
+
+    def test_add_layer_preserves_function(self):
+        po = _fp_strip_norms(_fp_rainbow_policy(head_hidden=(16,)))
+        obs = torch.randn(8, 6)
+        q0 = _rainbow_q(po, obs)
+
+        applied, _md = _fp_muts()._apply_arch_mutation(po, "head_net.add_layer", {})
+
+        assert applied == "head_net.add_layer"
+        assert torch.allclose(q0, _rainbow_q(_fp_strip_norms(po), obs), atol=1e-5)
+
+    def test_add_node_preserves_function(self):
+        po = _fp_strip_norms(_fp_rainbow_policy(head_hidden=(16,)))
+        obs = torch.randn(8, 6)
+        q0 = _rainbow_q(po, obs)
+
+        applied, _md = _fp_muts()._apply_arch_mutation(
+            po, "head_net.add_node", {"hidden_layer": 0, "numb_new_nodes": 16}
+        )
+
+        assert applied == "head_net.add_node"
+        assert torch.allclose(q0, _rainbow_q(_fp_strip_norms(po), obs), atol=1e-5)
+
+    def test_add_latent_node_preserves_function(self):
+        po = _fp_strip_norms(_fp_rainbow_policy(latent_dim=8))
+        obs = torch.randn(8, 6)
+        q0 = _rainbow_q(po, obs)
+
+        applied, _md = _fp_muts()._apply_arch_mutation(
+            po, "add_latent_node", {"numb_new_nodes": 8}
+        )
+
+        assert applied == "add_latent_node"
+        assert torch.allclose(q0, _rainbow_q(_fp_strip_norms(po), obs), atol=1e-5)
+
+    def test_add_layer_changes_function_under_original(self):
+        """The contrast that makes the ablation meaningful."""
+        po = _fp_strip_norms(_fp_rainbow_policy(head_hidden=(16,)))
+        obs = torch.randn(8, 6)
+        q0 = _rainbow_q(po, obs)
+
+        applied, _md = _fp_muts(arch="original")._apply_arch_mutation(
+            po, "head_net.add_layer", {}
+        )
+
+        assert applied == "head_net.add_layer"
+        assert not torch.allclose(q0, _rainbow_q(_fp_strip_norms(po), obs), atol=1e-5)
+
+
+def _fp_continuous_pop(algo="DDPG", latent_dim=16, device="cpu"):
+    """A DDPG/TD3 population whose critic head consumes ``[latent | action]``."""
+    obs = spaces.Box(-1, 1, shape=(6,), dtype=np.float32)
+    act = spaces.Box(-1, 1, shape=(3,), dtype=np.float32)
+    net_config = {
+        "latent_dim": latent_dim,
+        "min_latent_dim": 4,
+        "max_latent_dim": 64,
+        "encoder_config": {
+            "hidden_size": [16],
+            "activation": "ReLU",
+            "output_activation": "Identity",
+            "min_mlp_nodes": 4,
+            "max_mlp_nodes": 256,
+            "layer_norm": False,
+        },
+        "head_config": {
+            "hidden_size": [16],
+            "activation": "ReLU",
+            "min_hidden_layers": 1,
+            "max_hidden_layers": 4,
+            "min_mlp_nodes": 4,
+            "max_mlp_nodes": 256,
+            "layer_norm": False,
+        },
+    }
+    init_hp = SHARED_INIT_HP.copy()
+    init_hp["POPULATION_SIZE"] = 1
+    return create_population(
+        algo=algo,
+        observation_space=obs,
+        action_space=act,
+        net_config=net_config,
+        INIT_HP=init_hp,
+        population_size=1,
+        device=device,
+    )
+
+
+def _critic_q(critic, obs, actions):
+    critic.eval()
+    with torch.no_grad():
+        return critic(obs, actions).clone()
+
+
+class TestFunctionPreservingLatentExtraHeadInputs:
+    """A ``ContinuousQNetwork`` head consumes ``[latent | action]``, not just latent.
+
+    DDPG/TD3/MADDPG/MATD3 critics build their head with
+    ``num_inputs=latent_dim + num_actions`` and forward
+    ``torch.cat([latent, actions], dim=-1)``, so widening the latent shifts the
+    action block to a new offset. Sizing the fixup off the head's *tensor* width
+    mistakes those action columns for new latent units and overwrites them, which
+    zeroes ``dQ/da`` and leaves the deterministic actor with no policy gradient.
+    """
+
+    def test_add_latent_node_preserves_q_values(self, monkeypatch):
+        # Driven through the full single-agent path: DDPG pins the critic's encoder
+        # to the actor's (``share_encoder_parameters``), so the mutation has to run
+        # on the policy and be mirrored onto the critic for the encoder to survive.
+        pop = _fp_continuous_pop()
+        ind = pop[0]
+        obs = torch.randn(8, 6)
+        actions = torch.randn(8, 3)
+        q0 = _critic_q(ind.critic, obs, actions)
+
+        monkeypatch.setattr(
+            type(ind.actor),
+            "sample_mutation_method",
+            lambda _self, *_a, **_k: "add_latent_node",
+            raising=False,
+        )
+        _fp_muts()._architecture_mutate_single(ind)
+
+        assert ind.mut == "add_latent_node"
+        assert torch.allclose(q0, _critic_q(ind.critic, obs, actions), atol=1e-5)
+
+    def test_add_latent_node_keeps_the_action_gradient_alive(self):
+        # The severe symptom: a critic whose action columns were overwritten makes
+        # Q independent of a, so DDPG's actor loss -Q(s, pi(s)) has no gradient.
+        pop = _fp_continuous_pop()
+        critic = pop[0].critic
+
+        _fp_muts()._apply_arch_mutation(
+            critic, "add_latent_node", {"numb_new_nodes": 8}
+        )
+
+        actions = torch.randn(8, 3, requires_grad=True)
+        grad = torch.autograd.grad(critic(torch.randn(8, 6), actions).sum(), actions)[0]
+        assert float(grad.abs().max()) > 0.0
+
+    def test_add_latent_node_zeroes_only_the_new_latent_columns(self):
+        pop = _fp_continuous_pop()
+        critic = pop[0].critic
+        old_latent = critic.latent_dim
+        old_action_cols = (
+            fp.head_first_layer(critic)
+            .weight.data[:, old_latent : old_latent + critic.num_actions]
+            .clone()
+        )
+
+        _fp_muts()._apply_arch_mutation(
+            critic, "add_latent_node", {"numb_new_nodes": 8}
+        )
+
+        head_first = fp.head_first_layer(critic).weight.data
+        new_latent = critic.latent_dim
+        assert new_latent > old_latent
+        # New latent units contribute nothing yet ...
+        assert torch.count_nonzero(head_first[:, old_latent:new_latent]) == 0
+        # ... while the trained action block rides along to its new offset.
+        assert torch.equal(head_first[:, new_latent:], old_action_cols)
+
+    def test_add_latent_node_noise_leaves_the_action_columns_untouched(self):
+        # arch_fp_noise seeds the *new latent* fan-out only; the action block is
+        # not a new unit and must not be reseeded.
+        pop = _fp_continuous_pop()
+        critic = pop[0].critic
+        old_latent = critic.latent_dim
+        old_action_cols = (
+            fp.head_first_layer(critic)
+            .weight.data[:, old_latent : old_latent + critic.num_actions]
+            .clone()
+        )
+
+        _fp_muts(arch_fp_noise=0.1)._apply_arch_mutation(
+            critic, "add_latent_node", {"numb_new_nodes": 8}
+        )
+
+        head_first = fp.head_first_layer(critic).weight.data
+        new_latent = critic.latent_dim
+        assert torch.count_nonzero(head_first[:, old_latent:new_latent]) > 0
+        assert torch.equal(head_first[:, new_latent:], old_action_cols)
+
+    def test_td3_critic_preserves_q_values(self, monkeypatch):
+        pop = _fp_continuous_pop(algo="TD3")
+        ind = pop[0]
+        obs = torch.randn(8, 6)
+        actions = torch.randn(8, 3)
+        q0 = _critic_q(ind.critic_1, obs, actions)
+
+        monkeypatch.setattr(
+            type(ind.actor),
+            "sample_mutation_method",
+            lambda _self, *_a, **_k: "add_latent_node",
+            raising=False,
+        )
+        _fp_muts()._architecture_mutate_single(ind)
+
+        assert ind.mut == "add_latent_node"
+        assert torch.allclose(q0, _critic_q(ind.critic_1, obs, actions), atol=1e-5)
+
+    def test_maddpg_critic_preserves_q_values_across_moduledict(self):
+        obs_spaces = generate_multi_agent_box_spaces(3, (6,))
+        act_spaces = generate_multi_agent_box_spaces(3, (2,))
+        pop = create_population(
+            algo="MADDPG",
+            observation_space=obs_spaces,
+            action_space=act_spaces,
+            net_config=_ma_relu_config(),
+            INIT_HP=SHARED_INIT_HP_MA,
+            population_size=1,
+            device="cpu",
+        )
+        ind = pop[0]
+        critics = ind.critics
+        agent_id = next(iter(critics.keys()))
+        critic = critics[agent_id]
+        # The MADDPG critic scores every agent's observation and every agent's
+        # action, so its encoder is an ``EvolvableMultiInput`` over the dict space.
+        obs = {
+            aid: torch.randn(8, *space.shape)
+            for aid, space in ind.possible_observation_spaces.items()
+        }
+        actions = torch.randn(8, critic.num_actions)
+        q0 = _critic_q(critic, obs, actions)
+
+        applied, _md = _fp_muts()._apply_arch_mutation(
+            critics, f"{agent_id}.add_latent_node", {"numb_new_nodes": 8}
+        )
+
+        assert applied == f"{agent_id}.add_latent_node"
+        assert torch.allclose(q0, _critic_q(critic, obs, actions), atol=1e-5)

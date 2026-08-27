@@ -311,7 +311,15 @@ EncoderType = MlpSpec | CnnSpec | LstmSpec | MultiInputSpec | SimbaSpec
 
 
 class NetworkSpec(BaseModel):
-    """Base model specification for nested AgileRL evolvable networks."""
+    """Base model specification for nested AgileRL evolvable networks.
+
+    ``encoder_layer_mutations`` is tri-state. Leave it unset (``None``) and the
+    manifest resolves it from the ``mutation`` block's ``arch_encoder_layer_mut``
+    (see :meth:`TrainingManifest._process_manifest
+    <agilerl.models.manifest.TrainingManifest._process_manifest>`); set it
+    explicitly here and that value wins, which is also the entry point for the
+    direct Python API, where there is no manifest to resolve from.
+    """
 
     latent_dim: int = Field(default=32, gt=0)
     min_latent_dim: int = Field(default=8, gt=0)
@@ -320,6 +328,7 @@ class NetworkSpec(BaseModel):
     head_config: MlpSpec
     random_seed: int | None = Field(default=None)
     simba: bool = Field(default=False)
+    encoder_layer_mutations: bool | None = Field(default=None)
 
     @model_validator(mode="after")
     def _check_latent_dim(self) -> Self:

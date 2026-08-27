@@ -282,6 +282,130 @@ class TestCSVLogger:
         logger.close()  # should not raise
 
 
+class TestMutationHistoryLogger:
+    """Behaviour of the per-generation mutation-history CSV writer."""
+
+    @staticmethod
+    def _report(
+        *,
+        indices,
+        mut_details,
+        fitnesses,
+        parent_indices=None,
+        steps=(163840, 163840),
+    ):
+        """Build a real MetricsReport carrying the fields the logger reads."""
+        from agilerl.population import MetricsReport, PopulationMetrics
+
+        pop_size = len(indices)
+        metrics = PopulationMetrics(
+            fitnesses=list(fitnesses),
+            scores=[f / 2 for f in fitnesses],
+            steps=list(steps[:pop_size]),
+            steps_per_second=[1.0] * pop_size,
+            mutations=[(d or {}).get("name", "None") for d in mut_details],
+            indices=list(indices),
+            additional_metrics=[{} for _ in range(pop_size)],
+            hyperparameters=[{} for _ in range(pop_size)],
+            mut_details=list(mut_details),
+            parent_indices=list(parent_indices or indices),
+        )
+        return MetricsReport(metrics)
+
+    def test_write_records_architecture_mutation_row(self, tmp_path):
+        # Arrange: the detail keys the architecture operator actually records.
+        from agilerl.logger import MutationHistoryLogger
+
+        logger = MutationHistoryLogger(tmp_path)
+        report = self._report(
+            indices=[0, 1],
+            mut_details=[
+                None,
+                {
+                    "category": "architecture",
+                    "name": "head_net.add_node",
+                    "layer_changed": "head_net.1",
+                    "neurons_delta": 16,
+                    "arch_func_preserving": True,
+                },
+            ],
+            fitnesses=[100.0, 150.0],
+        )
+
+        # Act
+        logger.write(report)
+        logger.close()
+
+        # Assert
+        with open(tmp_path / "mutation_history.csv") as f:
+            reader = csv.DictReader(f)
+            rows = list(reader)
+            header = reader.fieldnames
+
+        assert header == MutationHistoryLogger.FIELDNAMES
+        assert len(rows) == 2
+        assert rows[0]["mutation_category"] == "no mutation"
+        assert rows[1]["mutation_category"] == "architecture"
+        assert rows[1]["mutation_name"] == "head_net.add_node"
+        assert rows[1]["arch_neurons_delta"] == "16"
+        assert rows[1]["arch_func_preserving"] == "True"
+        assert rows[1]["fitness_after"] == "150.0"
+
+    def test_write_links_fitness_before_to_parent(self, tmp_path):
+        # Arrange: generation 2's agent 2 is a clone of generation 1's agent 1.
+        from agilerl.logger import MutationHistoryLogger
+
+        logger = MutationHistoryLogger(tmp_path)
+        gen1 = self._report(
+            indices=[0, 1], mut_details=[None, None], fitnesses=[100.0, 150.0]
+        )
+        gen2 = self._report(
+            indices=[0, 2],
+            parent_indices=[0, 1],
+            mut_details=[None, {"category": "parameters", "name": "param_noise"}],
+            fitnesses=[110.0, 180.0],
+        )
+
+        # Act
+        logger.write(gen1)
+        logger.write(gen2)
+        logger.close()
+
+        # Assert
+        with open(tmp_path / "mutation_history.csv") as f:
+            rows = list(csv.DictReader(f))
+
+        assert [r["generation"] for r in rows] == ["0", "0", "1", "1"]
+        assert rows[3]["parent_id"] == "1"
+        assert rows[3]["fitness_before"] == "150.0"
+        assert rows[3]["fitness_after"] == "180.0"
+        # Generation 0 has no parent generation to link against.
+        assert rows[0]["fitness_before"] == "nan"
+
+    def test_write_handles_unrecorded_details(self, tmp_path):
+        # Arrange: no-HPO runs carry a mutation flag but no detail dict.
+        from agilerl.logger import MutationHistoryLogger
+
+        logger = MutationHistoryLogger(tmp_path)
+        report = self._report(
+            indices=[0, 1], mut_details=[None, None], fitnesses=[100.0, 150.0]
+        )
+        report.metrics.mutations[1] = "head_net.add_layer"
+
+        # Act
+        logger.write(report)
+        logger.close()
+
+        # Assert
+        with open(tmp_path / "mutation_history.csv") as f:
+            rows = list(csv.DictReader(f))
+
+        assert rows[0]["mutation_category"] == "no mutation"
+        assert rows[0]["mutation_name"] == "none"
+        assert rows[1]["mutation_category"] == "other"
+        assert rows[1]["mutation_name"] == "head_net.add_layer"
+
+
 class TestTensorboardLogger:
     def test_init_raises_without_tensorboard(self):
         with patch("agilerl.logger.SummaryWriter", None):

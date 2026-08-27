@@ -257,6 +257,19 @@ class TrainingManifest(BaseModel):
                 )
                 if spec_cls is not None:
                     self.algorithm.net_config = spec_cls.model_validate(self.network)
+
+                    # Encoder layer mutations are configured in the `mutation`
+                    # block (beside `arch_mut_type`, whose value they default
+                    # from) but consumed by the networks, so resolve them here --
+                    # the one place both blocks are in scope. An explicit setting
+                    # in the `network` block wins.
+                    if (
+                        self.mutation is not None
+                        and self.algorithm.net_config.encoder_layer_mutations is None
+                    ):
+                        self.algorithm.net_config.encoder_layer_mutations = (
+                            self.mutation.encoder_layer_mutations_enabled()
+                        )
             # LLM algorithms expect a pretrained model
             elif issubclass(algo_spec_cls, LLMAlgorithmSpec):
                 llm_network = FinetuningNetworkSpec.model_validate(self.network)

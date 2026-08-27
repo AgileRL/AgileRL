@@ -121,6 +121,21 @@ class Trainer(ABC):
         self.env_spec = environment
         self.training_spec = training or TrainingSpec()
         self.mutation_spec = mutation
+
+        # Encoder layer mutations are configured in the mutation spec but consumed by
+        # the networks. `TrainingManifest._process_manifest` already resolves them for
+        # the `from_manifest` paths; repeating it here (idempotently -- an explicitly
+        # set value is never overwritten) covers callers that build the specs directly
+        # in Python, for whom no manifest validation ever runs.
+        net_config = getattr(self.algorithm_spec, "net_config", None)
+        if (
+            mutation is not None
+            and net_config is not None
+            and net_config.encoder_layer_mutations is None
+        ):
+            net_config.encoder_layer_mutations = (
+                mutation.encoder_layer_mutations_enabled()
+            )
         self.tournament_selection_spec = tournament
         self.replay_buffer_spec = replay_buffer
         self.device = device

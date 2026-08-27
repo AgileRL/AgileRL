@@ -931,3 +931,88 @@ except ImportError:
     @contextmanager
     def nullcontext():
         yield
+
+
+class TestMutationSpecArchMutType:
+    def test_default_is_original(self):
+        assert MutationSpec().arch_mut_type == "original"
+
+    def test_accepts_func_preserving(self):
+        assert MutationSpec(arch_mut_type="func_preserving").arch_mut_type == (
+            "func_preserving"
+        )
+
+    def test_rejects_invalid_value(self):
+        with pytest.raises(ValidationError):
+            MutationSpec(arch_mut_type="bogus")
+
+
+class TestMutationSpecArchFpNoise:
+    def test_default_is_point_one(self):
+        assert MutationSpec().arch_fp_noise == 0.1
+
+    def test_accepts_custom_positive(self):
+        assert MutationSpec(arch_fp_noise=0.25).arch_fp_noise == 0.25
+
+    def test_accepts_zero_for_exact_preservation(self):
+        assert MutationSpec(arch_fp_noise=0.0).arch_fp_noise == 0.0
+
+    def test_rejects_negative(self):
+        with pytest.raises(ValidationError):
+            MutationSpec(arch_fp_noise=-0.1)
+
+    def test_rejects_unknown_field(self):
+        # extra="forbid": a typo'd field must fail loudly rather than be ignored.
+        with pytest.raises(ValidationError):
+            MutationSpec(arch_fp_noises=0.1)
+
+
+class TestMutationSpecArchEncoderLayerMut:
+    def test_default_is_none(self):
+        assert MutationSpec().arch_encoder_layer_mut is None
+
+    def test_none_derives_from_arch_mut_type(self):
+        assert MutationSpec().encoder_layer_mutations_enabled() is False
+        assert (
+            MutationSpec(
+                arch_mut_type="func_preserving"
+            ).encoder_layer_mutations_enabled()
+            is True
+        )
+
+    @pytest.mark.parametrize("arch_mut_type", ["original", "func_preserving"])
+    @pytest.mark.parametrize("explicit", [True, False])
+    def test_explicit_value_overrides_the_derived_default(
+        self, arch_mut_type, explicit
+    ):
+        spec = MutationSpec(
+            arch_mut_type=arch_mut_type, arch_encoder_layer_mut=explicit
+        )
+
+        assert spec.encoder_layer_mutations_enabled() is explicit
+
+
+class TestNetworkSpecEncoderLayerMutations:
+    def test_default_is_none(self):
+        spec = NetworkSpec(
+            encoder_config={"arch": "mlp", "hidden_size": [16]},
+            head_config={"hidden_size": [16]},
+        )
+
+        assert spec.encoder_layer_mutations is None
+
+    @pytest.mark.parametrize("value", [True, False])
+    def test_round_trips_through_model_dump(self, value):
+        """``NetworkSpec`` has no ``extra="forbid"``, so a field that is declared
+        but not plumbed would be silently dropped -- and the arm would run as a
+        duplicate of its baseline. Pin the round-trip."""
+        spec = NetworkSpec.model_validate(
+            {
+                "encoder_config": {"arch": "mlp", "hidden_size": [16]},
+                "head_config": {"hidden_size": [16]},
+                "encoder_layer_mutations": value,
+            }
+        )
+
+        assert spec.encoder_layer_mutations is value
+        assert spec.model_dump()["encoder_layer_mutations"] is value

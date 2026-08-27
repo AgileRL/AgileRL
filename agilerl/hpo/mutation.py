@@ -19,6 +19,7 @@ from agilerl.algorithms.core import (
     MultiAgentRLAlgorithm,
     RLAlgorithm,
 )
+from agilerl.hpo import function_preserving as fp
 from agilerl.modules import EvolvableModule, ModuleDict
 from agilerl.typing import (
     EvolvableNetworkType,
@@ -255,6 +256,13 @@ class Mutations:
         Xavier-reset neuron are re-seeded at this fraction of the consumer layer's live
         column scale. ``0.0`` restores the original zero-outgoing behaviour, defaults to 0.02
     :type regrama_out_scale: float, optional
+    :param arch_mut_type: Architecture-mutation strategy, ``"original"`` or
+        ``"func_preserving"`` (Net2Net-style), defaults to ``"original"``
+    :type arch_mut_type: str, optional
+    :param arch_fp_noise: Symmetry-breaking noise scale for function-preserving
+        additions, relative to the consuming layer's existing outgoing-weight std;
+        ``0.0`` keeps the exact-zero fan-out, defaults to 0.1
+    :type arch_fp_noise: float, optional
     """
 
     def __init__(
@@ -277,6 +285,8 @@ class Mutations:
         dormant_tau: float = 0.1,
         overact_beta: float = float("inf"),
         regrama_out_scale: float = 0.02,
+        arch_mut_type: str = "original",
+        arch_fp_noise: float = 0.1,
     ) -> None:
         if activation_selection is None:
             activation_selection = ["ReLU", "ELU", "GELU"]
@@ -355,6 +365,15 @@ class Mutations:
             "overact_beta must be greater than dormant_tau."
         )
         assert regrama_out_scale >= 0, "regrama_out_scale must be non-negative."
+        assert arch_mut_type in ("original", "func_preserving"), (
+            "arch_mut_type must be either 'original' or 'func_preserving'."
+        )
+        assert isinstance(arch_fp_noise, (float, int)), (
+            "arch_fp_noise must be a float or integer."
+        )
+        assert arch_fp_noise >= 0, (
+            "arch_fp_noise must be greater than or equal to zero."
+        )
 
         # Random seed for repeatability
         set_global_seed(rand_seed)
@@ -392,6 +411,21 @@ class Mutations:
         self.regrama_out_scale = regrama_out_scale
         self._grama_side_table: dict[int, Any] | None = None
         self._warned_recurrent = False
+        # Function-preserving architecture-mutation configuration (Net2Net; Chen et
+        # al. / Fehring et al.). When ``arch_mut_type == "func_preserving"`` the
+        # *addition* operators (add_node/add_channel/add_layer, and their latent
+        # counterparts) are modified so a mutated child starts out computing the
+        # parent's function. Removals are deliberately left to AgileRL's original
+        # random-count positional operator, so the two regimes differ only in how
+        # capacity is *added*.
+        self.arch_mut_type = arch_mut_type
+        # Symmetry-breaking noise scale (relative to the existing outgoing-weight
+        # std) for function-preserving additions; 0.0 keeps the exact-zero fan-out.
+        self.arch_fp_noise = arch_fp_noise
+        # One-time warning guards (function preservation caveats / fallbacks).
+        self._fp_warned_layernorm = False
+        self._fp_warned_activation = False
+        self._fp_warned_kernel = False
         self.device = device
         self.accelerator = accelerator
 
@@ -2093,7 +2127,11 @@ class Mutations:
         # Apply the same mutation to the rest of the evaluation modules
         for name, offspring in offspring_evals.items():
             if applied_mutation in offspring.mutation_methods:
-                self._apply_arch_mutation(offspring, applied_mutation, mut_dict)
+                self._apply_arch_mutation(
+                    offspring,
+                    applied_mutation,
+                    mut_dict,
+                )
                 self._to_device_and_set_individual(individual, name, offspring)
 
         individual.mutation_hook()  # Apply mutation hook
@@ -2101,6 +2139,9 @@ class Mutations:
         individual.mut = applied_mutation or "None"
         individual.mut_details = self._build_arch_details(
             applied_mutation, mut_dict, sizes_before, sizes_after
+        )
+        individual.mut_details["arch_func_preserving"] = (
+            self.arch_mut_type == "func_preserving"
         )
 
         return individual
@@ -2234,6 +2275,9 @@ class Mutations:
         individual.mut_details = self._build_arch_details(
             sampled_mutation, mut_dict, sizes_before, sizes_after
         )
+        individual.mut_details["arch_func_preserving"] = (
+            self.arch_mut_type == "func_preserving"
+        )
 
         return individual
 
@@ -2350,7 +2394,9 @@ class Mutations:
         :type networks: EvolvableNetworkType
         :param mut_method: The mutation method to apply
         :type mut_method: str | None
-        :param applied_mut_dict: The mutation dictionary, defaults to None
+        :param applied_mut_dict: The mutation dictionary, defaults to None. Empty on
+            the *policy* call and populated on the mirrored calls that replay the
+            policy's mutation onto the agent's other evaluation networks.
         :type applied_mut_dict: dict[str, Any] | None, optional
 
         :return: The mutation method name and the mutation dictionary
@@ -2367,6 +2413,17 @@ class Mutations:
 
         applied_mut_dict = applied_mut_dict or {}
         mut_dict = None
+
+        # Function-preserving pre-mutation step: warn where preservation is not
+        # guaranteed and snapshot hidden widths so an add fixup can size itself.
+        # A no-op when arch_mut_type == "original".
+        func_preserving = (
+            self.arch_mut_type == "func_preserving" and mut_method is not None
+        )
+        fp_before_widths: list[int] = []
+        if func_preserving:
+            fp_before_widths = self._fp_pre_mutation(network, mut_method)
+
         if mut_method is None:
             mut_dict = {}
             network.last_mutation_attr = None
@@ -2381,12 +2438,181 @@ class Mutations:
                     msg,
                 )
 
+            # The mirrored calls replay the policy's mut_dict, so every evaluation
+            # network of the agent keeps a consistent architecture.
             mut_dict = getattr(network, mut_method)(**applied_mut_dict)
 
         mut_dict = mut_dict or {}
         applied_mut = network.last_mutation_attr
 
+        # Function-preserving post-mutation fixups for the (resolved) addition
+        # operators: zero the new units' outgoing weights / identity-init a new
+        # layer. Keyed on ``applied_mut`` so add_layer -> add_node fallbacks are
+        # handled correctly.
+        if func_preserving and applied_mut is not None:
+            self._fp_post_mutation(network, applied_mut, mut_dict, fp_before_widths)
+
         return applied_mut, mut_dict
+
+    # ------------------------------------------------------------------ #
+    # Function-preserving architecture-mutation helpers
+    # ------------------------------------------------------------------ #
+    def _fp_pre_mutation(
+        self,
+        network: EvolvableNetworkType,
+        mut_method: str,
+    ) -> list[int]:
+        """Warn where preservation is not guaranteed and snapshot hidden widths.
+
+        Only the *additions* need anything done before the mutation runs: the widths
+        recorded here tell :meth:`_fp_post_mutation` which fan-out columns are new.
+        Removals are left entirely to AgileRL's original positional operator, so they
+        need no pre-step at all.
+
+        :param network: The network being mutated.
+        :param mut_method: The mutation method about to be applied.
+        :return: The target sub-module's hidden-layer widths before the mutation
+            (used to size the outgoing-weight zeroing of an addition), or, for a
+            latent-dimension mutation, a single-element list holding the latent dim.
+        """
+        # Latent-dimension mutations cross the encoder->head boundary and are named
+        # without an ``encoder``/``head_net`` segment, so handle them separately.
+        if fp.is_latent_mutation(mut_method.split(".")[-1]):
+            return self._fp_pre_latent_mutation(network, mut_method)
+
+        agent_id, submodule_name, base = fp.parse_mut_target(mut_method)
+        if submodule_name is None:
+            return []
+        try:
+            _fwd_net, submodule = fp.resolve_target(network, agent_id, submodule_name)
+        # TypeError covers a nested sub-encoder method
+        # (``encoder.feature_net.<key>.remove_channel`` on EvolvableMultiInput), whose
+        # name parses to an agent_id that is not a ModuleDict key -- the resolve then
+        # subscripts a plain module. Leave it to the original operator.
+        except (KeyError, AttributeError, TypeError):
+            return []
+
+        if base in fp.ADD_NODE_MUTATIONS:
+            # add_node/add_channel zero the new units' fan-out, so they stay
+            # function-preserving under ANY activation; only a norm layer (which
+            # re-normalises over the changed unit set) breaks preservation.
+            if fp.has_norm_layer(_fwd_net):
+                self._fp_warn_layernorm()
+        elif base in fp.ADD_LAYER_MUTATIONS:
+            # add_layer's Net2DeeperNet identity init additionally requires a
+            # ReLU/Identity base activation, so warn on a norm layer OR a
+            # non-ReLU/Identity activation.
+            if fp.has_norm_layer(_fwd_net):
+                self._fp_warn_layernorm()
+            elif fp.has_nonpreserving_activation(_fwd_net):
+                self._fp_warn_add_layer_activation()
+        if base == "change_kernel":
+            self._fp_warn_kernel()
+
+        return fp.hidden_widths(submodule)
+
+    def _fp_post_mutation(
+        self,
+        network: EvolvableNetworkType,
+        applied_mut: str,
+        mut_dict: dict[str, Any],
+        before_widths: list[int],
+    ) -> None:
+        """Zero/noise new units' outgoing weights / identity-init a new head layer."""
+        # Latent-dimension adds are fixed up across the encoder->head boundary.
+        if fp.is_latent_mutation(applied_mut.split(".")[-1]):
+            self._fp_post_latent_mutation(network, applied_mut, before_widths)
+            return
+
+        agent_id, submodule_name, base = fp.parse_mut_target(applied_mut)
+        if submodule_name is None:
+            return
+        try:
+            _fwd_net, submodule = fp.resolve_target(network, agent_id, submodule_name)
+        except (KeyError, AttributeError, TypeError):
+            return
+
+        if base in fp.ADD_NODE_MUTATIONS:
+            hidden_layer = mut_dict.get("hidden_layer")
+            if hidden_layer is None:
+                return
+            hidden_layer = int(hidden_layer)
+            old_width = (
+                before_widths[hidden_layer]
+                if 0 <= hidden_layer < len(before_widths)
+                else None
+            )
+            fp.init_new_outgoing(submodule, hidden_layer, old_width, self.arch_fp_noise)
+        elif base in fp.ADD_LAYER_MUTATIONS:
+            fp.identity_new_layer(submodule)
+
+    def _fp_pre_latent_mutation(
+        self,
+        network: EvolvableNetworkType,
+        mut_method: str,
+    ) -> list[int]:
+        """Snapshot the latent dim before a latent-dimension mutation.
+
+        :return: ``[latent_dim_before]`` -- the latent dim before the mutation, used
+            to size the head-input-column fixup of a latent addition. Latent
+            removals need nothing here; they run the original positional operator.
+        """
+        agent_id, _base = fp.parse_latent_target(mut_method)
+        try:
+            fwd_net = fp.resolve_latent_network(network, agent_id)
+        except (KeyError, AttributeError, TypeError):
+            return []
+        return [int(getattr(fwd_net, "latent_dim", 0))]
+
+    def _fp_post_latent_mutation(
+        self,
+        network: EvolvableNetworkType,
+        applied_mut: str,
+        before_widths: list[int],
+    ) -> None:
+        """Zero/noise the head's new input columns after a latent-dimension add."""
+        agent_id, base = fp.parse_latent_target(applied_mut)
+        if base not in fp.LATENT_ADD_MUTATIONS:
+            return  # latent removals are handled entirely pre-mutation
+        try:
+            fwd_net = fp.resolve_latent_network(network, agent_id)
+        except (KeyError, AttributeError, TypeError):
+            return
+        old_latent = before_widths[0] if before_widths else None
+        fp.init_new_latent_outgoing(fwd_net, old_latent, self.arch_fp_noise)
+
+    def _fp_warn_layernorm(self) -> None:
+        if not self._fp_warned_layernorm:
+            self._fp_warned_layernorm = True
+            warnings.warn(
+                "arch_mut_type='func_preserving': the network uses a norm layer "
+                "(LayerNorm/BatchNorm/GroupNorm), which re-normalises over the "
+                "changed unit set, so function preservation cannot be guaranteed "
+                "for add_node/add_channel/add_layer mutations.",
+                stacklevel=2,
+            )
+
+    def _fp_warn_add_layer_activation(self) -> None:
+        if not self._fp_warned_activation:
+            self._fp_warned_activation = True
+            warnings.warn(
+                "arch_mut_type='func_preserving': add_layer uses Net2DeeperNet "
+                "identity initialisation, which is only function-preserving for "
+                "ReLU/Identity activations; the base activation is different, so "
+                "function preservation cannot be guaranteed for add_layer "
+                "mutations. (add_node/add_channel remain preserving.)",
+                stacklevel=2,
+            )
+
+    def _fp_warn_kernel(self) -> None:
+        if not self._fp_warned_kernel:
+            self._fp_warned_kernel = True
+            warnings.warn(
+                "arch_mut_type='func_preserving': change_kernel cannot be made "
+                "function-preserving; falling back to the original kernel-change "
+                "behaviour for this mutation.",
+                stacklevel=2,
+            )
 
     # TODO: Can this be implemented as a mutation hook for the bandit algorithms?
     def _reinit_bandit_grads(

@@ -1,0 +1,203 @@
+---
+# ppo_relu -- NODE/CHANNEL ARCHITECTURE-MUTATION ABLATION (BASELINE: original AgileRL arch mutations; no whole-layer add/remove).
+#
+# Derived from ppo_relu_arch_original.yaml, with new_layer disabled (set to 0.0).
+# Population = 4; only no_mutation and node/channel architecture mutations are active
+# (no_mut / arch_mut; new_layer / params / act / rl_hp = 0), so this isolates the
+# node/channel architecture-mutation operator (whole-layer add/remove is off). arch_mut_type: original
+# uses AgileRL's default add/remove node/channel/layer. Its function-preserving
+# counterpart is ppo_relu_func_preserv_nolayer.yaml (identical except arch_mut_type).
+# PPO WITH HPO (population of 4, elitism, node/channel architecture mutations only;
+# whole-layer add/remove and activation mutations OFF) on Gymnasium MuJoCo.
+#
+# This is an architecture-mutation ablation of the HPO counterpart of
+# ppo_relu_no_hpo.yaml. The base hyperparameters, the "ReLU to the Rescue"
+# (Jesson et al., 2024) mapping, and the 1-env -> 16-env CleanRL scaling
+# (learn_step = 16 x 2048 = 32768, batch_size = 32768/32 = 1024) are unchanged --
+# see ppo_relu_no_hpo.yaml for the full derivation. (ent_coef is left at 0.001
+# rather than the paper's 0.0, inherited from the HPO config; it is not mutated
+# here since rl_hp mutations are off.) The other additions here are the
+# `mutation` / `tournament_selection` blocks (and pop_size = 4), which switch this
+# same training script into an evolutionary HPO regime: a population of agents is
+# trained, periodically mutated, and re-selected by tournament instead of a single
+# never-mutated agent.
+#
+# HPO additions over ppo_relu_no_hpo.yaml:
+#   pop_size = 4, elitism = true, tournament_size = 2
+#   only no_mutation + node/channel architecture mutations active (no_mut /
+#     arch_mut); whole-layer (new_layer) / activation / parameter / RL-hyperparameter
+#     mutations are OFF (new_layer = act_mut = params_mut = rl_hp_mut = 0) to isolate
+#     the node/channel arch-mutation operator
+#   the rl_hp_selection block below still defines the (unused) HP search space,
+#     but with rl_hp_mut = 0 no RL hyperparameters are mutated
+#   network min/max bounds actively define the architecture search space
+
+algorithm:
+    name: PPO
+    batch_size: 1024
+    lr: 0.0003
+    learn_step: 32768
+    gamma: 0.99
+    gae_lambda: 0.95
+    action_std_init: 0.0
+    clip_coef: 0.2
+    ent_coef: 0.001  # nonzero so HPO can mutate it (a 0.0 base is a multiplicative
+                     # no-op); matches ppo_relu_no_hpo.yaml's base
+    vf_coef: 0.5
+    max_grad_norm: 0.5
+    target_kl:
+    update_epochs: 10
+    share_encoders: false
+
+environment:
+    name: Ant-v4
+    num_envs: 16
+
+mutation:
+    # Typical AgileRL MLP/MuJoCo mutation probabilities, with activation mutation
+    # disabled (the paper's tanh nets are kept; no permutation among activations).
+    # no_mut is the relative weight of "leave this agent unchanged"; the remaining
+    # weights are the relative weights of each mutation kind (renormalised
+    # internally), so each enabled non-trivial mutation fires on roughly 1/5 of
+    # agents per evolution step and ~40% are passed through untouched.
+    probabilities:
+        no_mut: 0.5
+        arch_mut: 0.5    # add/remove hidden nodes within the bounds below
+        new_layer: 0.0   # OFF -- no whole-layer add/remove (node/channel arch-mutation ablation)
+        params_mut: 0.0  # Gaussian noise on weights, strength = mutation_sd
+        act_mut: 0.0     # OFF -- fixed ReLU (arch-mutation ablation; act_mut disabled)
+        rl_hp_mut: 0.0   # grow/shrink one of the rl_hp_selection hyperparameters below
+    rl_hp_selection:
+        # The highest-leverage, well-behaved PPO hyperparameters, each centred on
+        # this config's base value. grow/shrink factors are the multiplicative step
+        # taken per mutation (value *= grow_factor or *= shrink_factor, clipped to
+        # [min, max]); they are widened or narrowed per hyperparameter according to
+        # how sensitive training is to that knob. See the note after the entries
+        # for the PPO knobs that are intentionally NOT mutated.
+        lr:
+            # Optimisation step size -- the single most impactful knob. Base
+            # 0.0003; explore ~5e-5 .. 1e-3 with the standard coarse factors.
+            min: 0.00005
+            max: 0.001
+            grow_factor: 1.2
+            shrink_factor: 0.8
+        clip_coef:
+            # PPO trust-region width -- the defining PPO knob, controls how far the
+            # policy may move per update. Base 0.2; useful range is narrow
+            # (0.1 .. 0.3), so gentler factors (~+-10% per mutation) explore it
+            # finely without jumping across the whole range in one step.
+            min: 0.1
+            max: 0.3
+            grow_factor: 1.1
+            shrink_factor: 0.9
+        update_epochs:
+            # Number of passes over each rollout -- governs sample reuse vs
+            # off-policy drift / overfitting of the clipped objective. Base 10;
+            # 3 .. 20. Integer knob, coarse factors are fine.
+            min: 3
+            max: 20
+            grow_factor: 1.2
+            shrink_factor: 0.8
+        batch_size:
+            # MINIBATCH size (PPO slices the flattened rollout into chunks of this
+            # size; num_minibatches = learn_step / batch_size), so it sets per-update
+            # gradient noise. Base 1024; 256 .. 4096. Coarse factors. Kept <= the
+            # smallest mutated learn_step (16384) so a minibatch never exceeds the
+            # rollout buffer.
+            min: 256
+            max: 4096
+            grow_factor: 1.2
+            shrink_factor: 0.8
+        learn_step:
+            # Rollout-buffer size (num_envs x per-env horizon) -- controls how
+            # on-policy the data is and the GAE bias/variance trade-off. Base 32768
+            # (= 16 x 2048). Range deliberately bounded to 0.5x .. 2x base
+            # (16384 .. 65536) so the number of update cycles an agent completes per
+            # evolution step stays within ~2x across the population, keeping fitness
+            # comparisons fair. Coarse factors.
+            min: 16384
+            max: 65536
+            grow_factor: 1.2
+            shrink_factor: 0.8
+        ent_coef:
+            # Entropy bonus -- exploration vs policy sharpening. The ReLU-paper
+            # MuJoCo recipe uses 0.0, but a 0.0 base is a permanent multiplicative
+            # no-op, so the base is raised to 0.001 (in the algorithm block) to make
+            # this knob mutable. Base 0.001 is the geometric midpoint of 0.0001 .. 0.01
+            # (sqrt(0.0001 x 0.01) = 0.001), so -- since mutation is multiplicative --
+            # a mutation is equally likely to explore a smaller or larger bonus.
+            # Coarse factors.
+            min: 0.0001
+            max: 0.01
+            grow_factor: 1.2
+            shrink_factor: 0.8
+        # gamma, gae_lambda, vf_coef and max_grad_norm are deliberately NOT mutated:
+        #
+        # gamma / gae_lambda: both sit very close to 1.0, where the impactful
+        # quantity is the effective horizon 1/(1 - x), not the value itself. The
+        # registry mutates multiplicatively, so even gentle factors map to coarse,
+        # asymmetric swings in horizon and pile up at the clamped bounds. They are
+        # also read by the RolloutBuffer, which caches them at construction, so a
+        # mutation on the agent attribute may not even propagate. Left fixed at the
+        # robust 0.99 / 0.95 base values.
+        #
+        # vf_coef / max_grad_norm: low-leverage and robust at their defaults
+        # (0.5 / 0.5); left fixed to keep the search budget on the knobs above.
+    mutation_sd: 0.1  # std of the Gaussian weight perturbation for params_mut (typical)
+    rand_seed: 42
+    mutate_elite: false  # keep the elite member unmutated so the best agent survives intact into the next generation
+    arch_mut_type: original  # original | func_preserving architecture mutations
+
+network:
+    # Paper architecture: width-64 tanh MLP. Under HPO the min/max bounds below
+    # define the architecture search space that arch / new_layer mutations may
+    # explore -- they are no longer just there to satisfy manifest validation.
+    # The width bounds are centred on the base value (geometric centring, since
+    # node counts scale multiplicatively): base 64 sits at the geometric midpoint
+    # of 16 .. 256 (sqrt(16 x 256) = 64), so a mutation is equally likely to
+    # explore a narrower or a wider network -- the search is unbiased, not
+    # capacity-only. (Head depth is the one exception: 1 hidden layer is a hard
+    # structural floor, so depth can only grow, 1 .. 3.)
+    latent_dim: 64
+    min_latent_dim: 16     # encoder output projection: base 64 centred in 16 .. 256
+    max_latent_dim: 256
+    arch: mlp
+    encoder_config:
+        hidden_size:
+            - 64
+        activation: ReLU
+        output_activation: Identity
+        min_mlp_nodes: 16      # encoder width: base 64 centred in 16 .. 256 nodes
+        max_mlp_nodes: 256
+        layer_norm: false
+    head_config:
+        hidden_size:
+            - 64
+        activation: ReLU
+        min_hidden_layers: 1   # head depth: 1 .. 3 (1 is the structural floor)
+        max_hidden_layers: 3
+        min_mlp_nodes: 16      # head width: base 64 centred in 16 .. 256 nodes
+        max_mlp_nodes: 256
+        output_vanish: true
+        layer_norm: false
+
+tournament_selection:
+    tournament_size: 2
+    elitism: true  # the single best agent is cloned into the next generation each step (preserved unmutated, since mutate_elite is false above)
+
+training:
+    max_steps: 12_000_000
+    target_score:
+    pop_size: 4
+    # Env steps each agent trains between evolution events. Set to 5 x the base
+    # rollout (5 x 32768 = 163840), a multiple of learn_step so agents complete
+    # whole collect->update cycles. Five full PPO updates per generation is enough
+    # for a mutation's effect (a new lr, clip_coef, architecture, ...) to show up
+    # in fitness rather than being judged on a single noisy update, while still
+    # giving ~72 evolution generations over the 12M-step budget. With learn_step
+    # bounded to 16384 .. 65536 above, every agent completes between ~2.5 and ~10
+    # updates per generation, keeping the comparison fair.
+    evo_steps: 163840
+    eval_steps:
+    eval_loop: 1
+    dormant_tau: 0.1  # tau threshold for the dormant-neuron metric (Sokar et al. 2023)

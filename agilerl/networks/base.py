@@ -169,6 +169,23 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
     :type device: DeviceType
     :param random_seed: Random seed to use for the network. Defaults to None.
     :type random_seed: int | None
+    :param encoder_layer_mutations: If True, keep ``add_layer`` / ``remove_layer``
+        enabled on the encoder instead of disabling them (see the note below).
+        Only honoured for :class:`EvolvableMLP <agilerl.modules.mlp.EvolvableMLP>`
+        encoders; any other encoder type warns and stays disabled. The attribute
+        stored on the instance is the *resolved* value, so it reflects what the
+        network actually does and survives cloning. Defaults to False.
+    :type encoder_layer_mutations: bool | None
+
+    .. note::
+        Encoder layer mutations are disabled by default because restructuring the
+        encoder resets the representation feeding every head, which adds a lot of
+        variance to the optimization process. Function-preserving (Net2Net)
+        architecture mutations remove that objection -- an identity-initialised
+        new layer changes nothing about the network's output -- which is why the
+        ``func_preserving`` strategy enables them via
+        :attr:`MutationSpec.arch_encoder_layer_mut
+        <agilerl.models.hpo.MutationSpec.arch_encoder_layer_mut>`.
     """
 
     encoder: EvolvableModule
@@ -193,6 +210,7 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
         recurrent: bool = False,
         device: DeviceType = "cpu",
         random_seed: int | None = None,
+        encoder_layer_mutations: bool | None = False,
     ) -> None:
         super().__init__(device, random_seed)
 
@@ -266,8 +284,31 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
             self.encoder = self._build_encoder(encoder_config)
 
         # NOTE: We disable layer mutations for the encoder since this usually adds a lot
-        # of variance to the optimization process
-        self.encoder.disable_mutations(MutationType.LAYER)
+        # of variance to the optimization process. They can be opted back into for MLP
+        # encoders, which is what function-preserving architecture mutations do: an
+        # identity-initialised new layer is exactly the variance this guards against,
+        # removed. Other encoder types stay disabled -- EvolvableCNN.add_layer samples a
+        # random kernel/stride, so the feature map (and with it the flattened width of
+        # the downstream projection) changes; EvolvableLSTM has no identity
+        # initialisation; EvolvableMultiInput only exposes nested sub-encoder methods,
+        # which the surgery cannot resolve; and EvolvableSimBa uses `add_block`.
+        self.encoder_layer_mutations = bool(encoder_layer_mutations) and isinstance(
+            self.encoder,
+            EvolvableMLP,
+        )
+        if encoder_layer_mutations and not self.encoder_layer_mutations:
+            warnings.warn(
+                "encoder_layer_mutations is only supported for EvolvableMLP encoders, "
+                f"but this network's encoder is a {type(self.encoder).__name__}. "
+                "Encoder layer mutations stay disabled.",
+                stacklevel=2,
+            )
+
+        # Storing the *resolved* value above (rather than the requested one) is what
+        # keeps this a no-op on clones: `get_init_dict` reflects over the constructor
+        # signature, so a clone reconstructs with the resolved value and never re-warns.
+        if not self.encoder_layer_mutations:
+            self.encoder.disable_mutations(MutationType.LAYER)
 
     @property
     def encoder_config(self) -> dict[str, Any]:
