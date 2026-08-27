@@ -1309,7 +1309,7 @@ class TestResetDormantNeurons:
         # share_encoder_parameters pins the critic's encoder to detached clones of
         # the actor's, which the mutation hook re-pins moments later, so writing
         # there is discarded while the matching head rewrite survives, leaving the
-        # head compensating a reset that no longer exists.
+        # head compensating a reset that does not exist anymore.
         agent = PPO(vector_space, discrete_space, device="cpu")
         share_encoder_parameters(agent.actor, agent.critic)
         # Every measured layer of the critic is marked fully dormant.
