@@ -722,7 +722,6 @@ class EvolvableAlgorithm(ABC, Generic[ExperiencesT], metaclass=RegistryMeta):
                 pairs.append((None, eval_net))
         return pairs
 
-    @property
     def eval_policy_network_ids(self) -> set[int]:
         """Return the id of every evaluation network in the agent's policy group.
 

@@ -590,7 +590,7 @@ class Mutations:
             return False
 
         networks = individual.unrolled_eval_networks()
-        policy_networks = individual.eval_policy_network_ids
+        policy_networks = individual.eval_policy_network_ids()
 
         neurons_reset = 0
         for idx, (network_id, network) in enumerate(networks):

@@ -8534,7 +8534,7 @@ class TestPolicyEvalNetworkIds:
     """Identify the policy networks whose latent other networks may borrow."""
 
     def test_the_policy_evaluation_network_is_reported(self, dqn_agent):
-        assert dqn_agent.eval_policy_network_ids == {id(dqn_agent.actor)}
+        assert dqn_agent.eval_policy_network_ids() == {id(dqn_agent.actor)}
 
     def test_multi_agent_policies_report_every_sub_policy(
         self,
@@ -8551,19 +8551,19 @@ class TestPolicyEvalNetworkIds:
         )
         policy = getattr(agent, agent.registry.policy())
 
-        result = agent.eval_policy_network_ids
+        result = agent.eval_policy_network_ids()
 
         assert result == {id(sub_network) for _key, sub_network in policy.items()}
 
     def test_an_agent_without_a_policy_group_reports_no_policy(self, dqn_agent):
         dqn_agent.registry.groups = []
 
-        assert dqn_agent.eval_policy_network_ids == set()
+        assert dqn_agent.eval_policy_network_ids() == set()
 
     def test_a_policy_the_agent_does_not_carry_reports_no_policy(self, dqn_agent):
         dqn_agent.actor = None
 
-        assert dqn_agent.eval_policy_network_ids == set()
+        assert dqn_agent.eval_policy_network_ids() == set()
 
     def test_a_single_agent_policy_is_unwrapped_before_hashing(self, dqn_agent):
         wrapped = object()
@@ -8572,7 +8572,7 @@ class TestPolicyEvalNetworkIds:
         dqn_agent.accelerator = MagicMock(spec=Accelerator)
         dqn_agent.accelerator.unwrap_model = MagicMock(return_value=real_actor)
 
-        result = dqn_agent.eval_policy_network_ids
+        result = dqn_agent.eval_policy_network_ids()
 
         dqn_agent.accelerator.unwrap_model.assert_called_once_with(wrapped)
         assert result == {id(real_actor)}
@@ -8587,7 +8587,7 @@ class TestPolicyEvalNetworkIds:
         dqn_agent.accelerator = MagicMock(spec=Accelerator)
         dqn_agent.accelerator.unwrap_model = MagicMock(return_value=real_actor)
 
-        result = dqn_agent.eval_policy_network_ids
+        result = dqn_agent.eval_policy_network_ids()
 
         dqn_agent.accelerator.unwrap_model.assert_called_once_with(wrapped)
         assert result == {id(real_actor)}
@@ -8599,7 +8599,7 @@ class TestPolicyEvalNetworkIds:
         member = object()
         dqn_agent.actor = {"agent_0": member}
 
-        assert dqn_agent.eval_policy_network_ids == {id(member)}
+        assert dqn_agent.eval_policy_network_ids() == {id(member)}
 
 
 class TestGraMaCaptureUnderAccelerator:
