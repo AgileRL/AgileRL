@@ -8,7 +8,7 @@ population.
 The :class:`Mutations <agilerl.hpo.mutation.Mutations>` class is used to mutate agents with pre-set probabilities. The available mutations currently implemented are:
 
   * **No mutation**: An "identity" mutation, whereby the agent is returned unchanged.
-  * **Network architecture mutations**: Currently involves adding layers or nodes. Trained weights are reused and new weights are initialized randomly.
+  * **Network architecture mutations**: Currently involves adding layers or nodes. Trained weights are reused, and new capacity is initialized to preserve the network's function where the architecture allows it (see :ref:`function_preserving`), and randomly otherwise.
   * **Network parameters mutation**: Mutating weights with Gaussian noise, preceded by ReGraMa resets of dormant neurons.
   * **Network activation layer mutation**: Change of activation layer.
   * **RL hyperparameter mutation**: Mutation of a learning hyperparameter (e.g. learning rate or batch size).

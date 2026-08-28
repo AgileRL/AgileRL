@@ -430,8 +430,8 @@ class TestRevivedBlock:
 class TestModuleTraversalHelpers:
     """Locate weight layers and strip wrappers across the module tree."""
 
-    def test_first_weight_layer_of_a_weightless_module_is_none(self):
-        assert mutation_utils.first_weight_layer(nn.Sequential(nn.ReLU())) is None
+    def test_a_weightless_module_reports_no_weight_layers(self):
+        assert mutation_utils.weight_layers(nn.Sequential(nn.ReLU())) == []
 
     def test_head_entry_layers_of_an_absent_head_is_empty(self):
         assert mutation_utils.head_entry_layers(None) == []

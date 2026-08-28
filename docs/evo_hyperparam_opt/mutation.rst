@@ -10,7 +10,7 @@ likely to remain in the population.
 The :class:`Mutations <agilerl.hpo.mutation.Mutations>` class is used to mutate agents with pre-set probabilities. The available mutations currently implemented are:
 
     * **No mutation**: An "identity" mutation, whereby the agent is returned unchanged.
-    * **Network architecture mutations**: Involves adding or removing layers or nodes. Trained weights are reused and new weights are initialized randomly.
+    * **Network architecture mutations**: Involves adding or removing layers or nodes. Trained weights are reused, and added capacity is initialized to preserve the network's function where the architecture allows it (see :ref:`function_preserving`), and randomly otherwise.
     * **Network parameters mutation**: Mutating weights with Gaussian noise, preceded by ReGraMa resets of the neurons that have stopped learning.
     * **Network activation layer mutation**: Change of activation layer.
     * **RL algorithm mutation**: Mutation of a learning hyperparameter (e.g. learning rate or batch size).
@@ -164,6 +164,48 @@ This has proven to be successful in our experiments, but it is still experimenta
 
 .. note::
     AgileRL currently doesn't support architecture mutations for :class:`LLMAlgorithm <agilerl.algorithms.core.LLMAlgorithm>` objects.
+
+.. _function_preserving:
+
+Function-preserving additions
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+When a mutation adds capacity to a network, we initialise the new units so that the network still
+computes what it did before. There are two cases:
+
+  * Widening (``add_node``, ``add_channel``, ``add_latent_node``) leaves the new units' incoming weights
+    as the mutation created them and instead fades out the weights that carry them into the next layer.
+  * Deepening (``add_layer``) initialises the inserted layer to the identity, so the signal passes
+    through it untouched.
+
+An agent therefore comes out of an architecture mutation with the same behaviour, and keeps its
+place in the population, giving more chances for the added capacity to train.
+
+When it applies
+^^^^^^^^^^^^^^^
+
+There is nothing to configure. We do this for every addition we can and fall back to the original random
+initialisation when function preservation cannot be guaranteed. Widening is left alone when:
+
+  * a normalisation layer sits between the widened layer and the layer that reads it. Its statistics are
+    pooled over the whole layer, so the new units shift the existing ones however small their
+    outgoing weights.
+  * the activation mixes units together (``Softmax``, ``LogSoftmax``, ``Softmin`` or ``GumbelSoftmax``).
+  * the widened layer sits inside a recurrent core, a multi-input encoder, a residual network or a SimBa
+    block.
+
+Deepening also needs an MLP layer whose activation is ReLU or Identity, since the identity initialisation
+only holds for idempotent activation functions.
+
+Growing the latent is the exception to the third point, because the surgery happens in the MLP head rather
+than the encoder. Therefore, it works for recurrent, residual, SimBa and multi-input encoders alike; only a
+normalisation layer or a unit-mixing activation on the encoder's output rules it out.
+
+.. note::
+    We fade the outgoing weights to small random values rather than exact zeros, which is what gets
+    gradient flowing to the new units immediately, so the output is very slightly perturbed rather than identical.
+    With noisy layers the guarantee only holds in evaluation mode: rebuilding a ``NoisyLinear`` resamples
+    its noise buffers, which changes what every unit contributes during training, new or not.
 
 RL Hyperparameter Mutations
 ---------------------------

@@ -296,6 +296,10 @@ to wrap their non-evolvable networks in a manner compatible with our mutations f
           )
 
 
+.. seealso::
+    Additions to an evolvable network are initialized to preserve the function it computes
+    wherever the architecture allows it. See :ref:`function_preserving`.
+
 Integrating Architecture Mutations Into a Custom PyTorch Network
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
