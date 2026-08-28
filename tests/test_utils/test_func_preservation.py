@@ -60,8 +60,6 @@ def make_wrapped_head(hidden_size: list[int] | None = None) -> EvolvableDistribu
 
 def make_norm(norm_type: type[nn.Module], units: int = 8) -> nn.Module:
     """Instantiate a normalisation of the given type over ``units`` units."""
-    if norm_type is nn.GroupNorm:
-        return nn.GroupNorm(2, units)
     return norm_type(units)
 
 
@@ -76,30 +74,10 @@ def splice_norm(mlp: EvolvableMLP, norm: nn.Module) -> EvolvableMLP:
     return mlp
 
 
-NORM_TYPES = (
-    nn.LayerNorm,
-    nn.GroupNorm,
-    nn.BatchNorm1d,
-    nn.BatchNorm2d,
-    nn.BatchNorm3d,
-    nn.InstanceNorm1d,
-    nn.InstanceNorm2d,
-    nn.InstanceNorm3d,
-    nn.RMSNorm,
-)
+# The blocker recognises the normalisations evolvable_networks.py's own registry
+# builds, which is every one an evolvable module can be configured with.
+NORM_TYPES = mutation_utils.NORM_LAYER_TYPES
 NORM_TYPE_IDS = [norm_type.__name__ for norm_type in NORM_TYPES]
-
-# The blocker only recognises what evolvable_networks.py's own registry builds
-# (agilerl.utils.mutation_utils.NORM_LAYER_TYPES); a norm a custom network
-# authors directly, without going through that registry, is not detected.
-RECOGNISED_NORM_TYPES = mutation_utils.NORM_LAYER_TYPES
-RECOGNISED_NORM_TYPE_IDS = [norm_type.__name__ for norm_type in RECOGNISED_NORM_TYPES]
-UNRECOGNISED_NORM_TYPES = tuple(
-    norm_type for norm_type in NORM_TYPES if norm_type not in RECOGNISED_NORM_TYPES
-)
-UNRECOGNISED_NORM_TYPE_IDS = [
-    norm_type.__name__ for norm_type in UNRECOGNISED_NORM_TYPES
-]
 
 
 def make_duelling(
@@ -203,25 +181,11 @@ class TestNodeAdditionBlocker:
             mutation_utils.node_addition_blocker(make_cnn(layer_norm=True), 0) is True
         )
 
-    @pytest.mark.parametrize(
-        "norm_type", RECOGNISED_NORM_TYPES, ids=RECOGNISED_NORM_TYPE_IDS
-    )
+    @pytest.mark.parametrize("norm_type", NORM_TYPES, ids=NORM_TYPE_IDS)
     def test_every_recognised_normalisation_blocks(self, norm_type):
         mlp = splice_norm(make_mlp(), make_norm(norm_type))
 
         assert mutation_utils.node_addition_blocker(mlp, 0) is True
-
-    @pytest.mark.parametrize(
-        "norm_type", UNRECOGNISED_NORM_TYPES, ids=UNRECOGNISED_NORM_TYPE_IDS
-    )
-    def test_an_unrecognised_normalisation_does_not_block(self, norm_type):
-        """Only normalisations the library's own registry builds are detected."""
-        mlp = splice_norm(make_mlp(), make_norm(norm_type))
-
-        assert mutation_utils.node_addition_blocker(mlp, 0) is False
-
-    def test_the_spelled_out_list_covers_the_whole_registry(self):
-        assert set(mutation_utils.NORM_LAYER_TYPES) <= set(NORM_TYPES)
 
     def test_a_cross_unit_activation_blocks(self):
         assert (

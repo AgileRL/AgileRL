@@ -82,7 +82,7 @@ CROSS_UNIT_ACTIVATION_TYPES: tuple[type[nn.Module], ...] = (
 # function-preserving layer additions.
 IDENTITY_SAFE_ACTIVATION_TYPES: tuple[type[nn.Module], ...] = (nn.ReLU, nn.Identity)
 
-# Containers hold no units of their own, so they never stand a mutation down.
+# Network wrapped containing layers affected by mutations
 CONTAINER_TYPES: tuple[type[nn.Module], ...] = (
     nn.Sequential,
     nn.ModuleDict,

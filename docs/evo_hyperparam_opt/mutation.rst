@@ -170,42 +170,37 @@ This has proven to be successful in our experiments, but it is still experimenta
 Function-preserving additions
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-When a mutation adds capacity to a network, we initialise the new units so that the network still
-computes what it did before. There are two cases:
+When possible, the node and layer addition operations are function-preserving, in other words, the
+network maintains the same behaviour after being mutated. To implement this:
 
-  * Widening (``add_node``, ``add_channel``, ``add_latent_node``) leaves the new units' incoming weights
-    as the mutation created them and instead fades out the weights that carry them into the next layer.
-  * Deepening (``add_layer``) initialises the inserted layer to the identity, so the signal passes
-    through it untouched.
+ * The outgoing weights(``add_node``, ``add_channel``, ``add_latent_node``) of the new neurons are
+   initialised to values close to zero. Therefore, they do not affect the input fed to the next layer
+   and consequently, the network's output.
+  * ``add_layer`` initialises the new layer with an identity matrix, making its inputs identical to
+  its outputs (`"Net2Net: Accelerating Learning via Knowledge Transfer" <https://arxiv.org/abs/1511.05641>`_).
 
-An agent therefore comes out of an architecture mutation with the same behaviour, and keeps its
-place in the population, giving more chances for the added capacity to train.
+Note that removal operations have not been, since a decrease in network capacity cannot be guaranteed
+to be function-preserving.
 
-When it applies
-^^^^^^^^^^^^^^^
+Function-preserving additions minimise sudden drops in fitness after an architecture mutation, increasing
+the survival rate of individuals whose capacity has been modified and, therefore, allowing for a better
+exploration of the architecture space during training.
 
-There is nothing to configure. We do this for every addition we can and fall back to the original random
-initialisation when function preservation cannot be guaranteed. Widening is left alone when:
+Function-preserving architecture mutations are automatically performed by the framework when the following
+conditions apply:
 
-  * a normalisation layer sits between the widened layer and the layer that reads it. Its statistics are
-    pooled over the whole layer, so the new units shift the existing ones however small their
-    outgoing weights.
-  * the activation mixes units together (``Softmax``, ``LogSoftmax``, ``Softmin`` or ``GumbelSoftmax``).
-  * the widened layer sits inside a recurrent core, a multi-input encoder, a residual network or a SimBa
-    block.
+  * The layer is not normalised as normalisation layers are based on statistics collected on the whole layer,
+    and these values affect both the new and the old neurons.
+  * Cross-unit activations like ``Softmax`` are not used since they make new units affect the output of all
+    units in a layer.
+  * The mutated layer is not part of an RNN, multi-input encoder, residual network or a SimBa block.
 
-Deepening also needs an MLP layer whose activation is ReLU or Identity, since the identity initialisation
-only holds for idempotent activation functions.
+In addition, function-preserving architecture mutations are need an idempotent activation (i.e., ReLU or
+Identity).
 
-Growing the latent is the exception to the third point, because the surgery happens in the MLP head rather
-than the encoder. Therefore, it works for recurrent, residual, SimBa and multi-input encoders alike; only a
-normalisation layer or a unit-mixing activation on the encoder's output rules it out.
+When these conditions are not met, function preservation cannot be guaranteed, and the new capacity is
+initialised randomly.
 
-.. note::
-    We fade the outgoing weights to small random values rather than exact zeros, which is what gets
-    gradient flowing to the new units immediately, so the output is very slightly perturbed rather than identical.
-    With noisy layers the guarantee only holds in evaluation mode: rebuilding a ``NoisyLinear`` resamples
-    its noise buffers, which changes what every unit contributes during training, new or not.
 
 RL Hyperparameter Mutations
 ---------------------------
