@@ -7,7 +7,7 @@ import warnings
 from collections import OrderedDict
 from collections.abc import Callable, Mapping
 from functools import wraps
-from typing import Any, TypeGuard, TypeVar
+from typing import Any, TypeGuard, TypeVar, cast
 
 import fastrand  # ty: ignore[unresolved-import] — C extension without type stubs
 import numpy as np
@@ -24,6 +24,7 @@ from agilerl.algorithms.core import (
 )
 from agilerl.hpo import func_preservation
 from agilerl.modules import EvolvableModule, ModuleDict
+from agilerl.networks.base import EvolvableNetwork
 from agilerl.protocols import EvolvableAlgorithmProtocol
 from agilerl.typing import MutationReturn
 from agilerl.utils.algo_utils import remove_compile_prefix
@@ -42,8 +43,6 @@ MutationFunc = Callable[[IndividualT], IndividualT]
 
 torch._dynamo.config.cache_size_limit = 64
 torch._logging.set_logs(dynamo=logging.FATAL)
-
-logger = logging.getLogger(__name__)
 
 _UNSUPPORTED_ACTIVATION_MUTATION_ALGOS = frozenset(
     {"PPO", "DDPG", "TD3", "IPPO", "MADDPG", "MATD3"},
@@ -348,7 +347,6 @@ class Mutations:
         self.accelerator = accelerator
 
         self._fp_rng = np.random.default_rng(rand_seed)
-        self._warned_fp: set[str] = set()
         self._pre_training_mut = False
 
         self.pretraining_mut_options, self.pretraining_mut_proba = (
@@ -705,14 +703,14 @@ class Mutations:
     def _fp_snapshot(
         self,
         network: EvolvableModule,
-        mut_method: str | None,
+        mut_method: str,
     ) -> list[int] | None:
         """Record the widths an architecture mutation is about to change.
 
         :param network: Network about to be mutated.
         :type network: EvolvableModule
         :param mut_method: The mutation method about to be applied.
-        :type mut_method: str | None
+        :type mut_method: str
 
         :return: The affected widths, or None when there is nothing to record.
         :rtype: list[int] | None
@@ -722,7 +720,7 @@ class Mutations:
             return None
 
         if func_preservation.base_mutation(mut_method).endswith("latent_node"):
-            return [int(getattr(target, "latent_dim", 0))]
+            return [cast("EvolvableNetwork", target).latent_dim]
 
         return func_preservation.hidden_widths(target)
 
@@ -735,8 +733,8 @@ class Mutations:
     ) -> None:
         """Initialise an addition's new capacity so the network is unchanged.
 
-        A fixup that raises leaves the network exactly as the original operator
-        built it, so a failure costs the preservation and nothing else.
+        A structurally unsupported addition falls back to the original
+        operator's random initialisation.
 
         :param network: Network that was mutated.
         :type network: EvolvableModule
@@ -750,6 +748,9 @@ class Mutations:
         :return: None.
         :rtype: None
         """
+        if applied_mut is None:
+            return
+
         base = func_preservation.base_mutation(applied_mut)
         if base not in func_preservation.PRESERVED_MUTATIONS:
             return
@@ -758,13 +759,7 @@ class Mutations:
         if target is None:
             return
 
-        try:
-            reason = self._fp_apply(target, base, mut_dict, before)
-        except Exception as exc:
-            logger.warning("Function-preserving fixup skipped for a network: %s", exc)
-            return
-
-        self._fp_warn_declined(reason)
+        self._fp_apply(target, base, mut_dict, before)
 
     def _fp_apply(
         self,
@@ -772,7 +767,7 @@ class Mutations:
         base: str,
         mut_dict: MutationReturn,
         before: list[int],
-    ) -> str | None:
+    ) -> None:
         """If possible, apply a function-preserving architecture mutation.
 
         :param target: The module the mutation acted on.
@@ -784,71 +779,42 @@ class Mutations:
         :param before: The widths recorded before the mutation.
         :type before: list[int]
 
-        :return: The reason preservation was declined, or None when it applied.
-        :rtype: str | None
+        :return: None.
+        :rtype: None
         """
         if base in func_preservation.LATENT_ADDITIONS:
-            reason = func_preservation.latent_addition_blocker(target)
-            if reason is not None:
-                return reason
+            network = cast("EvolvableNetwork", target)
+            if func_preservation.latent_addition_blocker(network) is not None:
+                return
 
-            written = func_preservation.preserve_added_latent(
-                target,
+            func_preservation.preserve_added_latent(
+                network,
                 before[0],
                 self._fp_rng,
                 func_preservation.FP_NOISE_SCALE,
             )
-            return None if written else "not_written"
+            return
 
         if base in func_preservation.LAYER_ADDITIONS:
-            reason = func_preservation.layer_addition_blocker(target)
-            if reason is not None:
-                return reason
+            if func_preservation.layer_addition_blocker(target) is not None:
+                return
 
-            written = func_preservation.preserve_added_layer(target)
-            return None if written else "not_written"
+            func_preservation.preserve_added_layer(target)
+            return
 
         reported = mut_dict.get("hidden_layer")
-        hidden_layer = reported if isinstance(reported, int) else None
+        hidden_layer = reported if isinstance(reported, int) else -1
 
-        reason = func_preservation.node_addition_blocker(target, hidden_layer)
-        if reason is not None:
-            return reason
-        if hidden_layer is None or not 0 <= hidden_layer < len(before):
-            return "no_consumer"
+        if func_preservation.node_addition_blocker(target, hidden_layer) is not None:
+            return
 
-        written = func_preservation.preserve_added_nodes(
+        func_preservation.preserve_added_nodes(
             target,
             hidden_layer,
             before[hidden_layer],
             self._fp_rng,
             func_preservation.FP_NOISE_SCALE,
         )
-        return None if written else "not_written"
-
-    def _fp_warn_declined(self, reason: str | None) -> None:
-        """Report once per instance that an addition could not be preserved.
-
-        Repeating the warning per agent per generation would drown the training
-        log, while staying silent would leave a configuration that never gets
-        preservation indistinguishable from one that always does.
-
-        :param reason: Why preservation was declined, or None.
-        :type reason: str | None
-
-        :return: None.
-        :rtype: None
-        """
-        if reason is None or self._pre_training_mut or reason in self._warned_fp:
-            return
-
-        warnings.warn(
-            "Architecture mutation fell back from function-preserving "
-            f"initialisation: {func_preservation.DECLINE_REASONS[reason]}. The "
-            "new capacity is initialised randomly instead.",
-            stacklevel=4,
-        )
-        self._warned_fp.add(reason)
 
     def _get_mutations_options(
         self,

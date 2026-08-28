@@ -4,7 +4,6 @@
 import os
 import random
 import shutil
-import warnings
 from collections import Counter
 from contextlib import contextmanager
 from copy import deepcopy
@@ -5813,44 +5812,51 @@ _ARCH_FAMILY_CASES = {
 }
 
 
-def _fp_declines(recorded) -> set:
-    """Return the reason keys the fixup stood down on, from recorded warnings."""
-    messages = [str(warning.message) for warning in recorded]
-    return {
-        reason
-        for reason, prose in func_preservation.DECLINE_REASONS.items()
-        if any(f"initialisation: {prose}." in message for message in messages)
-    }
-
-
 _FP_FIXUPS = ("preserve_added_nodes", "preserve_added_layer", "preserve_added_latent")
+_FP_BLOCKERS = (
+    "node_addition_blocker",
+    "layer_addition_blocker",
+    "latent_addition_blocker",
+)
 
 
 @contextmanager
 def _fp_fixup_engages(expected_declines=frozenset()):
     """Assert additions reach the fixup, and it stands down only where forced."""
     reached = []
-    originals = {name: getattr(func_preservation, name) for name in _FP_FIXUPS}
+    declines = set()
+    originals = {
+        name: getattr(func_preservation, name) for name in (*_FP_FIXUPS, *_FP_BLOCKERS)
+    }
 
-    def spy(original):
+    def spy_fixup(original):
         def record(*args, **kwargs):
             reached.append(original.__name__)
             return original(*args, **kwargs)
 
         return record
 
-    for name, original in originals.items():
-        setattr(func_preservation, name, spy(original))
+    def spy_blocker(original):
+        def record(*args, **kwargs):
+            reason = original(*args, **kwargs)
+            if reason is not None:
+                declines.add(reason)
+            return reason
+
+        return record
+
+    for name in _FP_FIXUPS:
+        setattr(func_preservation, name, spy_fixup(originals[name]))
+    for name in _FP_BLOCKERS:
+        setattr(func_preservation, name, spy_blocker(originals[name]))
     try:
-        with warnings.catch_warnings(record=True) as recorded:
-            warnings.simplefilter("always")
-            yield
+        yield
     finally:
         for name, original in originals.items():
             setattr(func_preservation, name, original)
 
     assert reached, "no architecture addition reached the fixup"
-    assert _fp_declines(recorded) <= set(expected_declines)
+    assert declines <= set(expected_declines)
 
 
 def _arch_mutation(seed: int = 0) -> Mutations:

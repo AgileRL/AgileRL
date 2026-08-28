@@ -212,8 +212,7 @@ multi-input encoders; only a normalisation or unit-mixing activation on the enco
 it down.
 
 Whenever preservation stands down, the mutation simply falls back to AgileRL's original behaviour and the
-new capacity is initialised randomly. A warning is emitted once per reason so a configuration that never
-gets preservation is not silent.
+new capacity is initialised randomly.
 
 .. note::
     Widening applies a small perturbation to the new outgoing weights. This lets gradients flow faster to

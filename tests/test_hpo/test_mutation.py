@@ -1,10 +1,8 @@
 # Copyright 2026 AgileRL
 # SPDX-License-Identifier: Apache-2.0
 
-import contextlib
 import copy
 import gc
-import logging
 import warnings
 from typing import TYPE_CHECKING, ClassVar
 
@@ -2803,8 +2801,7 @@ class TestMutationsFunctionPreservingArchMutation:
         observation = torch.randn(4, 4)
         before = _policy_output(agent, observation)
 
-        with pytest.warns(UserWarning, match="function-preserving"):
-            agent = _fp_mutations().architecture_mutate(agent)
+        agent = _fp_mutations().architecture_mutate(agent)
 
         assert not torch.allclose(_policy_output(agent, observation), before, atol=1e-6)
 
@@ -2864,8 +2861,7 @@ class TestMutationsFunctionPreservingArchMutation:
         observation = torch.randn(4, 4)
         before = _policy_output(agent, observation)
 
-        with pytest.warns(UserWarning, match="neither ReLU nor Identity"):
-            agent = _fp_mutations(activation=0.2).architecture_mutate(agent)
+        agent = _fp_mutations(activation=0.2).architecture_mutate(agent)
 
         assert not torch.allclose(_policy_output(agent, observation), before, atol=1e-6)
 
@@ -2927,63 +2923,53 @@ class TestMutationsFunctionPreservingSingleAgentFamilies:
         torch.testing.assert_close(after, before, rtol=0, atol=1e-6)
 
 
-class TestMutationsFunctionPreservingWarnings:
-    """A declined mutation is reported once per reason per operator."""
+def _assert_declines_without_warning(architecture_mutate, *agents):
+    """Run one or more mutations and assert none of them raised a UserWarning."""
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        for agent in agents:
+            architecture_mutate(agent)
 
-    def test_the_same_reason_warns_only_once(self, monkeypatch):
+    assert not [w for w in caught if issubclass(w.category, UserWarning)]
+
+
+class TestMutationsFunctionPreservingDeclineIsSilent:
+    """A declined mutation falls back to the original operator with no report."""
+
+    def test_a_normalised_layer_declines_without_warning(self, monkeypatch):
         _pin_mutation_method(monkeypatch, "head_net.add_node")
         mutations = _fp_mutations()
 
-        with pytest.warns(UserWarning, match="function-preserving"):
-            mutations.architecture_mutate(_dqn(head_config={"layer_norm": True}))
+        _assert_declines_without_warning(
+            mutations.architecture_mutate, _dqn(head_config={"layer_norm": True})
+        )
 
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
-            mutations.architecture_mutate(_dqn(head_config={"layer_norm": True}))
-
-        assert not [w for w in caught if "function-preserving" in str(w.message)]
-
-    def test_a_different_reason_still_warns(self, monkeypatch):
-        mutations = _fp_mutations()
-        _pin_mutation_method(monkeypatch, "head_net.add_node")
-        with pytest.warns(UserWarning, match="function-preserving"):
-            mutations.architecture_mutate(_dqn(head_config={"layer_norm": True}))
-
+    def test_a_recurrent_encoder_declines_without_warning(self, monkeypatch):
         _pin_mutation_method(monkeypatch, "encoder.add_node")
-        with pytest.warns(UserWarning, match="recurrent"):
-            mutations.architecture_mutate(_recurrent_ppo())
+        mutations = _fp_mutations()
 
-    def test_a_pre_training_mutation_is_silent(self, monkeypatch):
+        _assert_declines_without_warning(
+            mutations.architecture_mutate, _recurrent_ppo()
+        )
+
+    def test_repeated_declines_stay_silent(self, monkeypatch):
+        _pin_mutation_method(monkeypatch, "head_net.add_node")
+        mutations = _fp_mutations()
+
+        _assert_declines_without_warning(
+            mutations.architecture_mutate,
+            _dqn(head_config={"layer_norm": True}),
+            _dqn(head_config={"layer_norm": True}),
+        )
+
+    def test_a_pre_training_mutation_is_also_silent(self, monkeypatch):
         _pin_mutation_method(monkeypatch, "head_net.add_node")
         mutations = _fp_mutations()
         mutations._pre_training_mut = True
 
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
-            mutations.architecture_mutate(_dqn(head_config={"layer_norm": True}))
-
-        assert not [w for w in caught if "function-preserving" in str(w.message)]
-
-    def test_a_decline_reaches_a_caller_that_escalates_warnings(self, monkeypatch):
-        _pin_mutation_method(monkeypatch, "head_net.add_node")
-        mutations = _fp_mutations()
-
-        with warnings.catch_warnings():
-            warnings.simplefilter("error")
-            with pytest.raises(UserWarning, match="function-preserving"):
-                mutations.architecture_mutate(_dqn(head_config={"layer_norm": True}))
-
-    def test_a_decline_that_never_reached_the_caller_warns_again(self, monkeypatch):
-        _pin_mutation_method(monkeypatch, "head_net.add_node")
-        mutations = _fp_mutations()
-
-        with warnings.catch_warnings():
-            warnings.simplefilter("error")
-            with contextlib.suppress(UserWarning):
-                mutations.architecture_mutate(_dqn(head_config={"layer_norm": True}))
-
-        with pytest.warns(UserWarning, match="function-preserving"):
-            mutations.architecture_mutate(_dqn(head_config={"layer_norm": True}))
+        _assert_declines_without_warning(
+            mutations.architecture_mutate, _dqn(head_config={"layer_norm": True})
+        )
 
 
 def _latent_output(network, observation):
@@ -3439,13 +3425,8 @@ def _raise_fixup_failure(*args, **kwargs):
     raise RuntimeError(msg)
 
 
-def _write_nothing(*args, **kwargs):
-    """Stand in for a fixup that finds nothing it can write."""
-    return False
-
-
 class TestMutationsFunctionPreservingDegradation:
-    """A fixup that cannot run leaves the original operator's result in place."""
+    """A fixup that declines leaves the original operator's result in place."""
 
     def test_an_unresolvable_target_records_no_snapshot(self):
         agent = _dqn()
@@ -3462,23 +3443,24 @@ class TestMutationsFunctionPreservingDegradation:
 
         assert_state_dicts_equal(agent.actor.state_dict(), before)
 
-    def test_a_snapshot_that_no_longer_fits_declines(self):
+    def test_an_index_the_network_does_not_have_declines(self):
+        """A mutation sampled on a deeper network reports an unusable index."""
         agent = _dqn()
+        before = copy.deepcopy(agent.actor.state_dict())
 
-        with pytest.warns(UserWarning, match="no consuming layer"):
-            _fp_mutations()._fp_preserve(
-                agent.actor, "head_net.add_node", {"hidden_layer": 0}, []
-            )
+        _fp_mutations()._fp_preserve(
+            agent.actor, "head_net.add_node", {"hidden_layer": 9}, [8, 8]
+        )
 
-    def test_a_fixup_that_writes_nothing_declines(self, monkeypatch):
-        """A structurally-supported addition can still find no layer to write."""
-        _pin_mutation_method(monkeypatch, "head_net.add_node")
-        monkeypatch.setattr(func_preservation, "preserve_added_nodes", _write_nothing)
+        assert_state_dicts_equal(agent.actor.state_dict(), before)
 
-        with pytest.warns(
-            UserWarning, match=func_preservation.DECLINE_REASONS["not_written"]
-        ):
-            _fp_mutations().architecture_mutate(_dqn())
+    def test_a_mutation_reporting_no_index_declines(self):
+        agent = _dqn()
+        before = copy.deepcopy(agent.actor.state_dict())
+
+        _fp_mutations()._fp_preserve(agent.actor, "head_net.add_node", {}, [8, 8])
+
+        assert_state_dicts_equal(agent.actor.state_dict(), before)
 
     def test_a_layer_that_cannot_grow_is_silent(self, monkeypatch):
         _pin_mutation_method(monkeypatch, "head_net.add_node")
@@ -3491,15 +3473,12 @@ class TestMutationsFunctionPreservingDegradation:
         assert agent.actor.head_net.hidden_size == [8]
         assert not [w for w in caught if "function-preserving" in str(w.message)]
 
-    def test_a_failing_fixup_does_not_abort_the_mutation(self, monkeypatch, caplog):
+    def test_a_failing_fixup_propagates(self, monkeypatch):
         _pin_mutation_method(monkeypatch, "head_net.add_node")
         monkeypatch.setattr(
             func_preservation, "preserve_added_nodes", _raise_fixup_failure
         )
         agent = _dqn()
 
-        with caplog.at_level(logging.WARNING):
-            agent = _fp_mutations().architecture_mutate(agent)
-
-        assert agent.mut == "head_net.add_node"
-        assert "Function-preserving fixup skipped" in caplog.text
+        with pytest.raises(RuntimeError, match="fixup failed"):
+            _fp_mutations().architecture_mutate(agent)

@@ -260,10 +260,7 @@ class TestNodeAdditionBlocker:
     def test_an_out_of_range_layer_index_blocks(self):
         assert fp.node_addition_blocker(make_mlp(hidden_size=[8]), 5) == "no_consumer"
 
-    def test_a_missing_layer_index_blocks(self):
-        assert fp.node_addition_blocker(make_mlp(), None) == "no_consumer"
-
-    def test_a_structural_exclusion_outranks_a_missing_index(self):
+    def test_a_structural_exclusion_outranks_an_unusable_index(self):
         from agilerl.modules.lstm import EvolvableLSTM
 
         lstm = EvolvableLSTM(
@@ -274,7 +271,7 @@ class TestNodeAdditionBlocker:
             device="cpu",
         )
 
-        assert fp.node_addition_blocker(lstm, None) == "recurrent"
+        assert fp.node_addition_blocker(lstm, 5) == "recurrent"
 
 
 class TestLayerAdditionBlocker:
@@ -433,15 +430,6 @@ class TestLatentAdditionBlocker:
 
         assert fp.latent_addition_blocker(encoder) == "multi_input"
 
-    def test_a_network_without_an_encoder_blocks(self):
-        assert fp.latent_addition_blocker(nn.Sequential(nn.ReLU())) == "no_latent"
-
-    def test_a_network_without_a_latent_dimension_blocks(self):
-        network = nn.Module()
-        network.encoder = make_mlp()
-
-        assert fp.latent_addition_blocker(network) == "no_latent"
-
     def test_an_encoder_without_weight_layers_blocks(self):
         network = nn.Module()
         network.latent_dim = 8
@@ -457,11 +445,10 @@ class TestPreserveAddedNodes:
     def widen(
         module, hidden_layer=0, added=4, noise_scale=0.0, seed=0, method="add_node"
     ):
-        """Widen a layer and apply the fixup, returning whether it landed."""
         old_width = fp.hidden_widths(module)[hidden_layer]
         count = "numb_new_channels" if method == "add_channel" else "numb_new_nodes"
         getattr(module, method)(hidden_layer=hidden_layer, **{count: added})
-        return fp.preserve_added_nodes(
+        fp.preserve_added_nodes(
             module, hidden_layer, old_width, make_rng(seed), noise_scale=noise_scale
         )
 
@@ -554,14 +541,15 @@ class TestPreserveAddedNodes:
         incoming = fp.weight_stacks(module)[0][0].weight.grad[8:]
         assert incoming.abs().max() > 0
 
-    def test_it_reports_that_the_fixup_landed(self):
-        assert self.widen(make_mlp(), added=4) is True
-
-    def test_a_blocked_growth_reports_nothing_to_preserve(self):
+    def test_a_blocked_growth_leaves_the_consumer_untouched(self):
         module = make_mlp(hidden_size=[8], max_mlp_nodes=8)
+        consumer = fp.weight_stacks(module)[0][1]
+        before = consumer.weight.detach().clone()
 
-        assert self.widen(module, added=4) is True
+        self.widen(module, added=4)
+
         assert module.hidden_size == [8]
+        assert torch.equal(consumer.weight, before)
 
     def test_noise_leaves_the_new_columns_non_zero(self):
         module = make_mlp()
@@ -577,17 +565,6 @@ class TestPreserveAddedNodes:
 
         consumer = fp.weight_stacks(module)[0][1].weight
         assert consumer[:, 8:].std() < consumer[:, :8].std()
-
-    def test_a_consumer_with_no_old_columns_still_gets_noise(self):
-        """With every column new there is no neighbourhood to scale against."""
-        module = make_mlp()
-
-        preserved = fp.preserve_added_nodes(module, 0, 0, make_rng(), noise_scale=0.5)
-
-        consumer = fp.weight_stacks(module)[0][1].weight
-        assert preserved is True
-        assert torch.count_nonzero(consumer) == consumer.numel()
-        assert bool(torch.isfinite(consumer).all())
 
     def test_a_consumer_whose_old_columns_have_no_spread_still_gets_noise(self):
         """A zero-spread neighbourhood must not collapse the noise to nothing."""
@@ -630,11 +607,6 @@ class TestPreserveAddedNodes:
         )
 
         assert torch.equal(torch.random.get_rng_state(), state)
-
-    def test_an_out_of_range_layer_index_preserves_nothing(self):
-        module = make_mlp()
-
-        assert fp.preserve_added_nodes(module, 9, 8, make_rng()) is False
 
 
 class TestPreserveAddedLayer:
@@ -692,22 +664,6 @@ class TestPreserveAddedLayer:
             assert torch.equal(stack[-2].weight_mu, torch.eye(8))
             assert torch.count_nonzero(stack[-2].weight_sigma) == 0
 
-    def test_it_reports_whether_a_layer_was_written(self):
-        module = make_mlp(hidden_size=[8])
-        module.add_layer()
-
-        assert fp.preserve_added_layer(module) is True
-
-    def test_a_non_square_layer_is_left_alone(self):
-        assert fp.preserve_added_layer(make_mlp(hidden_size=[8, 16])) is False
-
-    def test_a_convolutional_layer_is_left_alone(self):
-        """A convolution's weight has four dimensions, so no diagonal to write."""
-        assert fp.preserve_added_layer(make_cnn()) is False
-
-    def test_a_single_layer_stack_gets_no_identity(self):
-        assert fp.preserve_added_layer(nn.Sequential(nn.Linear(4, 4))) is False
-
 
 class TestPreserveAddedLatent:
     """Fade the head's new latent columns so the network's output is unchanged."""
@@ -734,10 +690,10 @@ class TestPreserveAddedLatent:
 
     @staticmethod
     def widen(network, added=4, noise_scale=0.0, seed=0):
-        """Widen the latent and apply the fixup, returning whether it landed."""
+        """Widen the latent and apply the fixup."""
         old_latent = network.latent_dim
         network.add_latent_node(numb_new_nodes=added)
-        return fp.preserve_added_latent(
+        fp.preserve_added_latent(
             network, old_latent, make_rng(seed), noise_scale=noise_scale
         )
 
@@ -776,19 +732,18 @@ class TestPreserveAddedLatent:
         incoming = fp.weight_stacks(network.encoder)[0][-1].weight.grad[8:12]
         assert incoming.abs().max() > 0
 
-    def test_it_reports_that_the_fixup_landed(self, vector_space, discrete_space):
-        network = self.q_network(vector_space, discrete_space)
-
-        assert self.widen(network, added=4) is True
-
-    def test_a_blocked_growth_reports_nothing_to_preserve(
+    def test_a_blocked_growth_leaves_the_head_untouched(
         self, vector_space, discrete_space
     ):
         network = self.q_network(vector_space, discrete_space)
         network.max_latent_dim = 8
+        entry = fp.weight_stacks(network.head_net)[0][0]
+        before = entry.weight.detach().clone()
 
-        assert self.widen(network, added=4) is True
+        self.widen(network, added=4)
+
         assert network.latent_dim == 8
+        assert torch.equal(entry.weight, before)
 
     def test_a_multi_input_encoder_output_is_unchanged(
         self, dict_space, discrete_space
@@ -816,7 +771,7 @@ class TestPreserveAddedLatent:
         }
         before = network(observation)
 
-        assert self.widen(network) is True
+        self.widen(network)
 
         torch.testing.assert_close(network(observation), before, rtol=0, atol=1e-6)
 
@@ -863,31 +818,6 @@ class TestPreserveAddedLatent:
         moved = fp.weight_stacks(network.head_net)[0][0]
         assert torch.equal(moved.weight[:, 12:16], action_block)
 
-    def test_a_network_without_a_head_reports_a_miss(self):
-        network = nn.Module()
-        network.latent_dim = 12
-
-        assert fp.preserve_added_latent(network, 8, make_rng()) is False
-
-    def test_a_head_without_weight_layers_reports_a_miss(self):
-        network = nn.Module()
-        network.latent_dim = 12
-        network.head_net = nn.Sequential(nn.ReLU())
-
-        assert fp.preserve_added_latent(network, 8, make_rng()) is False
-
-    def test_a_head_narrower_than_the_latent_is_left_alone(self):
-        network = nn.Module()
-        network.latent_dim = 12
-        network.head_net = nn.Sequential(nn.Linear(4, 2))
-        entry = network.head_net[0]
-        before = entry.weight.detach().clone()
-
-        preserved = fp.preserve_added_latent(network, 8, make_rng())
-
-        assert preserved is False
-        assert torch.equal(entry.weight, before)
-
 
 class TestPrimaryWeight:
     """Resolve the weight tensor that defines a layer's shape."""
@@ -896,10 +826,6 @@ class TestPrimaryWeight:
         layer = fp.weight_stacks(make_duelling())[0][0]
 
         assert fp._primary_weight(layer) is layer.weight_mu
-
-    def test_a_layer_owning_no_weight_tensor_is_rejected(self):
-        with pytest.raises(TypeError, match="owns no weight tensor"):
-            fp._primary_weight(nn.ReLU())
 
 
 class TestModulesBetween:
@@ -922,13 +848,6 @@ class TestModulesBetween:
         assert layers[-1] in trailing
         assert any(isinstance(module, nn.ReLU) for module in trailing)
 
-    def test_an_unregistered_layer_is_empty(self):
-        container = make_mlp()
-        stray = nn.Linear(4, 4)
-
-        assert fp._modules_between(container, stray, stray) == []
-        assert fp._modules_between(container, stray) == []
-
 
 class TestBaseMutation:
     """Reduce a possibly prefixed mutation name to its trailing method."""
@@ -940,7 +859,6 @@ class TestBaseMutation:
             ("head_net.add_node", "add_node"),
             ("agent_0.head_net.add_node", "add_node"),
             ("agent_0.add_latent_node", "add_latent_node"),
-            (None, ""),
         ],
     )
     def test_it_returns_the_trailing_method(self, mut_method, expected):
@@ -996,6 +914,3 @@ class TestResolveTarget:
 
     def test_an_unresolvable_name_returns_nothing(self):
         assert fp.resolve_target(make_mlp(), "missing.add_node") is None
-
-    def test_a_missing_mutation_name_resolves_to_nothing(self):
-        assert fp.resolve_target(make_mlp(), None) is None
