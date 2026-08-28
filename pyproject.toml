@@ -62,7 +62,7 @@ arena = [
     # Compatible range: arena patches do not require a new agilerl wheel.
     # Exact stack pins live in the ML bundle. Framework +local may rewrite to
     # =={local} for one build when the same MR also publishes arena +local.
-    "agilerl-arena>=0.4.0,<0.5",
+    "agilerl-arena>=0.5.0,<0.6",
 ]
 all = [
     "agilerl[box2d,llm,arena]",

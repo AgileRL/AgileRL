@@ -18,6 +18,7 @@ from collections.abc import Callable, Generator, Iterable, Mapping, Sequence
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from dataclasses import asdict
 from importlib.metadata import version
+from itertools import chain
 from pathlib import Path
 from typing import (
     TYPE_CHECKING,
@@ -28,6 +29,7 @@ from typing import (
     NoReturn,
     Protocol,
     TypeVar,
+    cast,
     overload,
 )
 
@@ -42,6 +44,7 @@ from tensordict import TensorDict
 from torch._dynamo import OptimizedModule
 from torch.nn.utils import clip_grad_norm_
 from torch.optim import AdamW
+from torch.utils.hooks import RemovableHandle
 from typing_extensions import Self
 
 from agilerl import HAS_DEEPSPEED, HAS_LIGER_KERNEL, HAS_LLM_DEPENDENCIES, HAS_VLLM
@@ -80,10 +83,13 @@ from agilerl.typing import (
     ActionResult,
     ActionType,
     ArrayDict,
+    BackwardHook,
     CheckpointInfo,
     DeviceType,
     ExperiencesT,
     FitnessValue,
+    GradInput,
+    GraMaScores,
     GymSpaceType,
     InfosDict,
     LLMObsType,
@@ -137,6 +143,7 @@ from agilerl.utils.llm_packing import (
     unpack_logprobs,
     unpack_values,
 )
+from agilerl.utils.mutation_utils import target_activations
 
 if TYPE_CHECKING:
     from torch.optim.lr_scheduler import SequentialLR
@@ -206,7 +213,12 @@ elif HAS_VLLM:
 else:
     LLM = CompletionOutput = SamplingParams = None
 
-__all__ = ["ActionResult", "EvolvableAlgorithm", "MultiAgentRLAlgorithm", "RLAlgorithm"]
+__all__ = [
+    "ActionResult",
+    "EvolvableAlgorithm",
+    "MultiAgentRLAlgorithm",
+    "RLAlgorithm",
+]
 
 logger = logging.getLogger(__name__)
 
@@ -339,6 +351,7 @@ def get_checkpoint_dict(
     attribute_dict["agilerl_version"] = version("agilerl")
     attribute_dict.pop("accelerator", None)
     attribute_dict.pop("rollout_buffer", None)
+    attribute_dict.pop("grama_scores", None)
 
     if omit_actor_info and "actor" in attribute_dict:
         attribute_dict.pop("actor", None)
@@ -388,6 +401,33 @@ def get_optimizer_cls(
             for agent_id, cls_name in optimizer_cls.items()
         }
     return getattr(torch.optim, optimizer_cls)
+
+
+def _per_neuron_grad(grad_input: GradInput) -> torch.Tensor | None:
+    """Reduce an activation's grad_input to one |grad_{z_i}L| per neuron.
+
+    The first element of the tuple a full backward hook receives is the gradient
+    of the loss w.r.t. the module's input, i.e. the pre-activation gradient.
+    Dense gradients have shape (batch, H) and are averaged over the batch;
+    convolutional gradients have shape (batch, C, *spatial) and are averaged
+    over the batch and spatial dimensions.
+
+    :param grad_input: The gradient a full backward hook was handed.
+    :type grad_input: GradInput
+    :return: One mean absolute gradient per neuron, or None if none flowed.
+    :rtype: torch.Tensor | None
+    """
+    if isinstance(grad_input, (tuple, list)):
+        grad = grad_input[0] if len(grad_input) > 0 else None
+    else:
+        grad = grad_input
+    if grad is None:
+        return None
+    magnitude = grad.detach().abs()
+    if magnitude.dim() <= 1:
+        return magnitude
+    reduce_dims = [dim for dim in range(magnitude.dim()) if dim != 1]
+    return magnitude.mean(dim=reduce_dims)
 
 
 class EvolvableAlgorithm(ABC, Generic[ExperiencesT], metaclass=RegistryMeta):
@@ -446,6 +486,9 @@ class EvolvableAlgorithm(ABC, Generic[ExperiencesT], metaclass=RegistryMeta):
         self.registry = MutationRegistry(hp_config)
         self.training = True
         self.subpopulation_id: int | None = None
+        self.grama_scores: GraMaScores | None = None
+        self._grama_handles: list[RemovableHandle] = []
+        self._grama_latest: GraMaScores | None = None
 
     @property
     def index(self) -> int:
@@ -515,17 +558,196 @@ class EvolvableAlgorithm(ABC, Generic[ExperiencesT], metaclass=RegistryMeta):
         """
         self.metrics.add_scores(scores)
 
-    def init_training_step(self) -> None:
-        """Initialize the training step for metrics tracking."""
+    def init_training_step(self, capture_grama: bool = False) -> None:
+        """Open the agent's training block: metrics tracking, and GraMa capture.
+
+        Hooks are registered afresh each cycle, so they follow the agent
+        through architecture mutations, checkpoint reloads and accelerator
+        re-wrapping. Opening a block implicitly closes one that an earlier call
+        left open.
+
+        :param capture_grama: Whether to register GraMa capture hooks for this
+            training step. Defaults to False since the LLM finetuners never run
+            ReGraMa.
+        :type capture_grama: bool
+        :return: None.
+        :rtype: None
+        """
         self.metrics.init_training_step()
+        self._set_grama_capture(capture_grama)
 
     def finalize_training_step(self, num_steps: int) -> None:
-        """Finalize the training step for metrics tracking.
+        """Close the agent's training block, storing any captured GraMa scores.
 
         :param num_steps: Number of steps taken during the training step.
         :type num_steps: int
+        :return: None.
+        :rtype: None
         """
         self.metrics.finalize_training_step(num_steps)
+        self._release_grama_capture()
+
+    def _set_grama_capture(self, capture_grama: bool) -> None:
+        """Close any open GraMa capture, then open a new one if requested.
+
+        :param capture_grama: Whether to register GraMa capture hooks for the
+            training step being opened.
+        :type capture_grama: bool
+        :return: None.
+        :rtype: None
+        """
+        self._release_grama_capture()
+        if capture_grama:
+            self._register_grama_capture()
+
+    def _register_grama_capture(self) -> None:
+        """Hook every measured activation of every evaluation network.
+
+        A full backward hook on an activation is handed grad_{z_i}L, the
+        gradient w.r.t. its input, so the GraMa metric is measured for free
+        during the real training backward pass.
+
+        :return: None.
+        :rtype: None
+        """
+        latest: GraMaScores = []
+        self._grama_latest = latest
+        for net_idx, (_network_id, network) in enumerate(self.unrolled_eval_networks()):
+            targets = target_activations(network)
+            latest.append([None] * len(targets))
+            for mod_idx, module in enumerate(targets):
+                handle = module.register_full_backward_hook(
+                    self._grama_hook(latest, net_idx, mod_idx),
+                )
+                self._grama_handles.append(handle)
+
+    @staticmethod
+    def _grama_hook(
+        latest: GraMaScores,
+        net_idx: int,
+        mod_idx: int,
+    ) -> BackwardHook:
+        """Build the backward hook recording one measured activation's gradient.
+
+        :param latest: The open capture's snapshot, written in place.
+        :type latest: GraMaScores
+        :param net_idx: Position of the layer's network in the snapshot.
+        :type net_idx: int
+        :param mod_idx: Position of the layer within that network's snapshot.
+        :type mod_idx: int
+        :return: The hook to register on that activation.
+        :rtype: BackwardHook
+        """
+
+        def hook(
+            _module: torch.nn.Module,
+            grad_input: GradInput,
+            _grad_output: GradInput,
+        ) -> None:
+            gradient = _per_neuron_grad(grad_input)
+            if gradient is None:
+                return
+            latest[net_idx][mod_idx] = gradient
+
+        return hook
+
+    def _release_grama_capture(self) -> None:
+        """Close any open GraMa capture, storing its snapshot and removing its hooks.
+
+        :return: None.
+        :rtype: None
+        """
+        latest = self._grama_latest
+        if latest is None:
+            return
+        self.grama_scores = [list(net_latest) for net_latest in latest]
+        self._remove_grama_handles()
+        self._grama_latest = None
+
+    def _remove_grama_handles(self) -> None:
+        """Detach every backward hook this capture registered.
+
+        :return: None.
+        :rtype: None
+        """
+        for handle in self._grama_handles:
+            handle.remove()
+        self._grama_handles = []
+
+    def get_eval_modules(
+        self,
+        cloning: bool = True,
+    ) -> tuple[dict[str, EvolvableModule], dict[str, EvolvableModule]]:
+        """Get the offsprings of all of the evaluation modules in the individual.
+
+        :param cloning: Whether to clone each evaluation module before returning it,
+            defaults to True.
+        :type cloning: bool, optional
+
+        :return: Tuple of offspring policy and the rest of the evaluation modules
+        :rtype: tuple[dict[str, EvolvableModule], dict[str, EvolvableModule]]
+        """
+        offspring_modules: dict[str, EvolvableModule] = {}
+        offspring_policy: dict[str, EvolvableModule] = {}
+        for group in self.registry.groups:
+            eval_name = group.eval_network_name()
+            eval_module: EvolvableModule = getattr(self, eval_name)
+
+            # Clone the offspring prior to applying mutations
+            offspring = eval_module.clone() if cloning else eval_module
+            if group.policy:
+                offspring_policy[eval_name] = offspring
+            else:
+                offspring_modules[eval_name] = offspring
+
+        return offspring_policy, offspring_modules
+
+    def unrolled_eval_networks(self) -> list[tuple[str | None, torch.nn.Module]]:
+        """Return the agent's evaluation networks as (network_id, network) pairs.
+
+        :return: One (network_id, network) pair per measured network.
+        :rtype: list[tuple[str | None, torch.nn.Module]]
+        """
+        offspring_policy, offspring_modules = self.get_eval_modules(cloning=False)
+
+        accelerator = self.accelerator
+        pairs: list[tuple[str | None, torch.nn.Module]] = []
+        for eval_net in chain(offspring_policy.values(), offspring_modules.values()):
+            if accelerator is not None:
+                eval_net = accelerator.unwrap_model(eval_net)
+            if isinstance(eval_net, ModuleDict):
+                sub_networks = cast("ModuleDict[torch.nn.Module]", eval_net)
+                pairs.extend(sub_networks.items())
+            else:
+                pairs.append((None, eval_net))
+        return pairs
+
+    def eval_policy_network_ids(self) -> set[int]:
+        """Return the id of every evaluation network in the agent's policy group.
+
+        :return: Identities of the policy's evaluation networks.
+        :rtype: set[int]
+        """
+        policy_name = self.registry.policy()
+        if not isinstance(policy_name, str):
+            return set()
+        policy = getattr(self, policy_name, None)
+        if policy is None:
+            return set()
+        if isinstance(policy, dict) and not isinstance(policy, ModuleDict):
+            return {
+                id(
+                    self.accelerator.unwrap_model(module)
+                    if self.accelerator is not None
+                    else module
+                )
+                for module in policy.values()
+            }
+        if self.accelerator is not None:
+            policy = self.accelerator.unwrap_model(policy)
+        if isinstance(policy, ModuleDict):
+            return {id(module) for _key, module in policy.items()}
+        return {id(policy)}
 
     @abstractmethod
     def preprocess_observation(
@@ -620,6 +842,7 @@ class EvolvableAlgorithm(ABC, Generic[ExperiencesT], metaclass=RegistryMeta):
     def inspect_attributes(
         agent: EvolvableAlgorithmProtocol | AgentWrapperProtocol[Any],
         input_args_only: bool = False,
+        exclude: Iterable[str] = (),
     ) -> dict[str, Any]:
         """Inspect and retrieve the attributes of the current object, excluding attributes related to the
         underlying evolvable networks (i.e. `EvolvableModule`, `torch.optim.Optimizer`) and with
@@ -628,25 +851,27 @@ class EvolvableAlgorithm(ABC, Generic[ExperiencesT], metaclass=RegistryMeta):
         :param input_args_only: If True, only include attributes that are input arguments to the constructor.
                                 Defaults to False.
         :type input_args_only: bool
+        :param exclude: Extra attribute names to drop from the result, on top of the standard exclusions
+            below. For a caller-specific reason to leave an attribute out of its own view.
+        :type exclude: Iterable[str], optional
         :return: A dictionary of attribute names and their values.
         :rtype: dict[str, Any]
         """
-        # Get all attributes of the current object
-        attributes = inspect.getmembers(agent, lambda a: not isroutine(a))
+        names = [n for n in dir(agent) if not _is_readonly_property(agent, n)]
+        attributes = [
+            (n, val) for n in names if not isroutine(val := getattr(agent, n))
+        ]
 
-        # Exclude attributes that are EvolvableModule or Optimizer objects (also check for nested
-        # module-related attributes for multi-agent algorithms)
-        exclude = list(agent.evolvable_attributes().keys())
-        exclude += [attr for attr, val in attributes if isinstance(val, TensorDict)]
+        excluded_names = list(agent.evolvable_attributes().keys())
+        excluded_names += [
+            attr for attr, val in attributes if isinstance(val, TensorDict)
+        ]
+        excluded_names += list(exclude)
 
         # Exclude private and built-in attributes
         attributes = [
             a for a in attributes if not (a[0].startswith("_") or a[0].endswith("_"))
         ]
-
-        # Exclude read-only properties — derived values cannot be restored
-        # via setattr and must not be persisted in checkpoints.
-        attributes = [a for a in attributes if not _is_readonly_property(agent, a[0])]
 
         # If input_args_only is True, only include attributes that are
         # input arguments to the constructor
@@ -655,11 +880,11 @@ class EvolvableAlgorithm(ABC, Generic[ExperiencesT], metaclass=RegistryMeta):
             attributes = {
                 k: v
                 for k, v in attributes
-                if k not in exclude and k in constructor_params
+                if k not in excluded_names and k in constructor_params
             }
         else:
             # Remove the algo specific guarded variables (if specified)
-            attributes = {k: v for k, v in attributes if k not in exclude}
+            attributes = {k: v for k, v in attributes if k not in excluded_names}
         return attributes
 
     @staticmethod
@@ -1014,9 +1239,10 @@ class EvolvableAlgorithm(ABC, Generic[ExperiencesT], metaclass=RegistryMeta):
                 and not attr.endswith("_")
             )
 
-        # Inspect evolvable given specs
         evolvable_attrs: dict[str, Any] = {}
         for attr in dir(self):
+            if _is_readonly_property(self, attr):
+                continue
             obj = getattr(self, attr)
             if is_evolvable(attr, obj):
                 evolvable_attrs[attr] = obj
@@ -1446,8 +1672,9 @@ class EvolvableAlgorithm(ABC, Generic[ExperiencesT], metaclass=RegistryMeta):
         for name, optimizer in loaded_optimizers.items():
             setattr(self, name, optimizer)
 
-        # Assign other attributes to the algorithm
-        for attribute in EvolvableAlgorithm.inspect_attributes(self):
+        for attribute in EvolvableAlgorithm.inspect_attributes(
+            self, exclude=("grama_scores",)
+        ):
             if attribute not in checkpoint:
                 warnings.warn(
                     f"Attribute {attribute} not found in checkpoint. Skipping.",

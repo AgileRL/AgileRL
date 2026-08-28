@@ -11,7 +11,7 @@ The :class:`Mutations <agilerl.hpo.mutation.Mutations>` class is used to mutate 
 
     * **No mutation**: An "identity" mutation, whereby the agent is returned unchanged.
     * **Network architecture mutations**: Involves adding or removing layers or nodes. Trained weights are reused and new weights are initialized randomly.
-    * **Network parameters mutation**: Mutating weights with Gaussian noise.
+    * **Network parameters mutation**: Mutating weights with Gaussian noise, preceded by ReGraMa resets of the neurons that have stopped learning.
     * **Network activation layer mutation**: Change of activation layer.
     * **RL algorithm mutation**: Mutation of a learning hyperparameter (e.g. learning rate or batch size).
 
@@ -189,11 +189,76 @@ Network Parameter Mutations
 ---------------------------
 AgileRL allows mutations on the weights of the policy registered through
 :func:`EvolvableAlgorithm.register_network_group() <agilerl.algorithms.core.base.EvolvableAlgorithm.register_network_group>`. Specifically, it selects
-10% of the weights randomly to mutate (ignoring normalization layers) and applies a Gaussian noise with a standard deviation of ``mutation_sd`` to them. It does so
-in three different ways, clamping mutated values to prevent extreme changes:
+10% of the weights randomly to mutate (ignoring normalization layers) and applies a Gaussian noise with a standard deviation of ``mutation_sd`` to them, clamping
+mutated values to prevent extreme changes. Each selected weight is affected by one of the following:
 
-    - **Normal mutation**: Adds noise with standard deviation proportional to current weight values.
+    - **Normal mutation** (95% of the selected weights): Adds noise with standard deviation proportional to the weight's own current value, scaled by ``mutation_sd``.
 
-    - **Super mutation**: Adds larger noise for more significant changes.
+    - **Reset mutation** (5% of the selected weights): Completely replaces the weight with a fresh draw from a unit normal, discarding its trained value.
 
-    - **Reset mutation**: Completely resets weights to new random values.
+The split is fixed and unconditional — every parameter mutation applies both bands in this proportion.
+
+.. _regrama:
+
+ReGraMa: resetting dormant neurons
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+As training goes on, deep RL networks steadily lose *plasticity*: a growing fraction of their units stop
+receiving any meaningful gradient. The network keeps its nominal size but its *effective* capacity
+shrinks, and it becomes progressively worse at fitting anything new. Adding Gaussian noise does not fix
+this: noise is applied to randomly chosen weights, with no idea which units have gone quiet.
+
+ReGraMa measures dormancy with the **GraMa** score of Liu et al.,
+`"Measure gradients, not activations!" <https://arxiv.org/abs/2505.24061>`_. A neuron's raw score is the
+mean absolute gradient of the training loss with respect to its pre-activation, and that raw score is
+divided by its own layer's mean. A neuron is *dormant* when its normalised score falls at or below the
+threshold. Because the score is normalised within its layer, one setting works across layers and
+architectures of very different scales.
+
+Each dormant neuron gets fresh Xavier-uniform incoming weights, a zero bias, and a small, freshly drawn
+set of outgoing weights. Its normalisation entry, if it has one, returns to the identity so a decayed gain
+cannot immediately re-suppress it. The outgoing weights are deliberately small but non-zero: zeroing
+them would leave the revived neuron with exactly zero gradient, so it would be potentially flagged dormant
+again in the next evolution, especially if ``evo_steps`` is low.
+
+Every evaluation network is treated this way (actors, critics, and each sub-policy of a multi-agent
+algorithm) while target and other shared networks are re-synced from them afterwards. Output layers of
+head networks are never reset: those units carry fixed meanings, such as action logits or a state
+value, so re-initialising them would throw away the policy itself. Every parameter mutation runs
+ReGraMa's resets first, and the Gaussian bands are applied afterwards.
+
+ReGraMa's sensitivity is configured with one manifest field, on the ``mutation`` block:
+
+.. code-block:: yaml
+
+    mutation:
+        dormant_threshold: 0.01         # default: 0.01
+
+or, equivalently, in Python:
+
+.. code-block:: python
+
+    from agilerl.hpo.mutation import Mutations
+
+    mutations = Mutations(
+        no_mutation=0.4,
+        architecture=0.2,
+        new_layer_prob=0.2,
+        parameters=0.2,
+        activation=0,
+        rl_hp=0.2,
+        dormant_threshold=0.01,
+    )
+
+``dormant_threshold`` must be greater than or equal to ``0.0``.
+
+Raising ``dormant_threshold`` resets more units per generation: dormancy is given more importance, but
+the forgetting can happen more aggressively, since each reset discards whatever the unit had learned.
+Lowering it towards ``0.0`` resets only units whose gradient is exactly zero, which is a reasonable
+conservative setting for ReLU networks but degenerate for smooth activations such as Tanh, where gradients
+get very small without ever reaching zero.
+
+.. note::
+    RNN architectures fall outside what ReGraMa can reset. The hidden units of a recurrent core
+    have fused gate non-linearities and no single weight matrix whose rows are one unit's incoming weights,
+    so only the layers from the output projection onward are reset.

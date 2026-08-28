@@ -578,6 +578,38 @@ def get_free_port():
 
 
 @pytest.fixture
+def gloo_process_group():
+    """Fixture that allows a real DistributedDataParallel wrapper to be built.
+
+    Tests DDP's attribute-hiding behaviour on a CPU, without a multi-process run.
+    """
+    if torch.distributed.is_initialized():
+        yield
+        return
+
+    saved = {
+        key: os.environ.get(key)
+        for key in ("MASTER_ADDR", "MASTER_PORT", "RANK", "WORLD_SIZE")
+    }
+    os.environ.update(
+        MASTER_ADDR="127.0.0.1",
+        MASTER_PORT=str(get_free_port()),
+        RANK="0",
+        WORLD_SIZE="1",
+    )
+    torch.distributed.init_process_group("gloo")
+    try:
+        yield
+    finally:
+        torch.distributed.destroy_process_group()
+        for key, value in saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
+@pytest.fixture
 def deepspeed_env():
 
     dynamic_dist_env = dist_env.copy()

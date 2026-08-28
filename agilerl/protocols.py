@@ -47,7 +47,10 @@ if TYPE_CHECKING:
     from agilerl.algorithms.core.registry import (
         OptimizerConfig as RegistryOptimizerConfig,
     )
-    from agilerl.typing import MutationApplyDict
+    from agilerl.typing import (
+        GraMaScores,
+        MutationApplyDict,
+    )
 
 NumpyObsType = npt.NDArray | dict[str, npt.NDArray] | tuple[npt.NDArray, ...]
 TorchObsType = torch.Tensor | dict[str, torch.Tensor] | tuple[torch.Tensor, ...]
@@ -374,6 +377,8 @@ class EvolvableAlgorithmProtocol(Protocol):
     torch_compiler: str | None
     # Multi-frequency selection's subpopulation tag; None under any other strategy.
     subpopulation_id: int | None
+    # ReGraMa's per-neuron gradient snapshot.
+    grama_scores: "GraMaScores | None"
 
     @property
     def scores(self) -> list[float | list[float]]:

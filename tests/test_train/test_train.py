@@ -11,6 +11,7 @@ from typing import ClassVar
 from unittest.mock import ANY, MagicMock, patch
 
 import dill
+import gymnasium as gym
 import numpy as np
 import pytest
 import torch
@@ -45,6 +46,7 @@ from agilerl.components.replay_buffer import (
 )
 from agilerl.hpo.multi_frequency import MultiFrequencySelection
 from agilerl.hpo.mutation import Mutations
+from agilerl.hpo.tournament import TournamentSelection
 from agilerl.metrics import AgentMetrics, MultiAgentMetrics
 from agilerl.population import Population
 from agilerl.training.train_bandits import train_bandits
@@ -60,6 +62,7 @@ from tests.helper_functions import (
     generate_multi_agent_box_spaces,
     generate_multi_agent_discrete_spaces,
     generate_random_box_space,
+    grama_scores_for,
     rank_population_by_subpopulation,
     weakest_agent_index,
 )
@@ -187,6 +190,7 @@ class DummyAgentOffPolicy:
         self.steps = self.metrics.steps
         self.fitness = []
         self.steps_per_second = 0.0
+        self.capture_grama_requested = False
         self.mut = "mutation"
         self.index = 1
         self.registry = MagicMock()
@@ -230,7 +234,8 @@ class DummyAgentOffPolicy:
         self.fitness.append(rand_int)
         return rand_int
 
-    def init_training_step(self):
+    def init_training_step(self, capture_grama=False):
+        self.capture_grama_requested = capture_grama
         self.metrics.init_training_step()
 
     def add_scores(self, scores):
@@ -591,8 +596,7 @@ class DummyTournament:
 
 
 class DummyMutations:
-    def __init__(self):
-        pass
+    parameters_mut = 1.0
 
     def mutation(self, pop, pre_training_mut=False, indices=None):
         return pop
@@ -913,7 +917,9 @@ def _make_base_mock_agent(spec_cls, state_size, action_size, *, metrics=None):
         return score
 
     mock.test.side_effect = _test_side_effect
-    mock.init_training_step.side_effect = lambda: mock.metrics.init_training_step()
+    mock.init_training_step.side_effect = lambda capture_grama=False: (
+        mock.metrics.init_training_step()
+    )
     mock.add_scores.side_effect = lambda scores: mock.metrics.add_scores(scores)
     mock.finalize_training_step.side_effect = lambda num_steps: (
         mock.metrics.finalize_training_step(num_steps)
@@ -1409,6 +1415,7 @@ def mocked_multi_env(state_size, action_size):
 @pytest.fixture
 def mocked_mutations():
     mock_mutations = MagicMock()
+    mock_mutations.parameters_mut = 1.0
 
     def mutation(pop, pre_training_mut=False, indices=None):
         return pop
@@ -5767,3 +5774,459 @@ def test_remove_saved_models():
         if _try_remove_models_dir():
             return
     shutil.rmtree("models", ignore_errors=True)
+
+
+def _regrama_mutation() -> Mutations:
+    """A parameter-mutation operator with ReGraMa's dormant-neuron reset enabled."""
+    return Mutations(
+        no_mutation=0.2,
+        architecture=0.0,
+        new_layer_prob=0.0,
+        parameters=0.4,
+        activation=0.0,
+        rl_hp=0.4,
+        mutation_sd=0.1,
+        rand_seed=0,
+        device="cpu",
+        dormant_threshold=0.01,
+    )
+
+
+def _give_population_fitness(population) -> None:
+    """Give each agent a distinct fitness so tournament selection can rank."""
+    for position, agent in enumerate(population):
+        agent.fitness = [float(position)]
+
+
+def _mark_population_dormant(population) -> None:
+    """Give every agent a snapshot in which every measured neuron is dormant."""
+    for agent in population:
+        agent.grama_scores = grama_scores_for(agent, fill=0.0)
+
+
+def _pin_population_biases(population, value: float = 1.0) -> None:
+    """Pin every one-dimensional bias of every evaluation network to a sentinel.
+
+    The Gaussian pass only writes two-dimensional tensors, so a bias back at zero
+    afterwards is a neuron ReGraMa reset.
+    """
+    with torch.no_grad():
+        for agent in population:
+            for _network_id, network in agent.unrolled_eval_networks():
+                for name, param in network.named_parameters():
+                    if name.endswith("bias") and param.dim() == 1:
+                        param.fill_(value)
+
+
+def _population_zeroed_biases(population) -> int:
+    """Count the pinned biases ReGraMa has zeroed across a whole population."""
+    return sum(
+        int(bool((value == 0).all()))
+        for agent in population
+        for _network_id, network in agent.unrolled_eval_networks()
+        for key, value in network.state_dict().items()
+        if key.endswith("bias") and value.dim() == 1
+    )
+
+
+_pinned_weight = 5.0
+# A pinned weight can only end up this close to zero if the random-reset band
+# redrew it: ordinary noise on a 5.0 weight has a standard deviation of 0.5.
+_reset_residual = 2.0
+
+
+def _gaussian_band_mutation() -> Mutations:
+    """A parameter-mutation-only operator applying the fixed 95%/5% Gaussian split."""
+    return Mutations(
+        no_mutation=0.0,
+        architecture=0.0,
+        new_layer_prob=0.0,
+        parameters=1.0,
+        activation=0.0,
+        rl_hp=0.0,
+        mutation_sd=0.1,
+        rand_seed=0,
+        device="cpu",
+    )
+
+
+def _mutable_weights(population):
+    """Yield every tensor the Gaussian pass is allowed to write."""
+    for agent in population:
+        for _network_id, network in agent.unrolled_eval_networks():
+            for key, tensor in network.state_dict().items():
+                if tensor.dim() == 2 and "norm" not in key and "lstm" not in key:
+                    yield tensor
+
+
+def _pin_population_weights(population, value: float = _pinned_weight) -> None:
+    """Pin every mutable weight of every evaluation network to a sentinel."""
+    with torch.no_grad():
+        for tensor in _mutable_weights(population):
+            tensor.fill_(value)
+
+
+def _smallest_pinned_magnitude(population) -> float:
+    """Return the smallest weight left across the tensors pinned before mutating."""
+    return min(tensor.abs().min().item() for tensor in _mutable_weights(population))
+
+
+class TestGaussianParameterMutationCrossFamilyEvolution:
+    """The random-reset Gaussian band fires unconditionally for every non-LLM family."""
+
+    def evolve(self, family, *, cycles=3):
+        """Run cycles of selection and parameter mutation over a pinned population."""
+        algo_name, build_population = _CROSS_FAMILY_CASES[family]
+        population = build_population()
+        strategy = TournamentSelection(
+            tournament_size=2,
+            elitism=True,
+            population_size=8,
+        )
+        mutation = _gaussian_band_mutation()
+
+        smallest = _pinned_weight
+        for _cycle in range(cycles):
+            _give_population_fitness(population)
+            _pin_population_weights(population)
+            population = run_selection_and_mutation(
+                strategy,
+                population=population,
+                mutation=mutation,
+                env_name="Env",
+                algo=algo_name,
+            )
+            smallest = min(smallest, _smallest_pinned_magnitude(population))
+        return population, smallest
+
+    @pytest.mark.parametrize(
+        "family", list(_CROSS_FAMILY_CASES), ids=list(_CROSS_FAMILY_CASES)
+    )
+    def test_the_reset_band_redraws_weights(self, family):
+        population, smallest = self.evolve(family)
+
+        assert len(population) == 8
+        assert smallest < _reset_residual
+
+
+class TestRegramaCrossFamilyEvolution:
+    """ReGraMa evolves a real population of every non-LLM algorithm family."""
+
+    @pytest.mark.parametrize(
+        "family", list(_CROSS_FAMILY_CASES), ids=list(_CROSS_FAMILY_CASES)
+    )
+    def test_tournament_selection_evolves_every_family(self, family):
+        algo_name, build_population = _CROSS_FAMILY_CASES[family]
+        population = build_population()
+        mutation = _regrama_mutation()
+        strategy = TournamentSelection(
+            tournament_size=2,
+            elitism=True,
+            population_size=8,
+        )
+
+        resets_seen = 0
+        for _cycle in range(3):
+            _give_population_fitness(population)
+            _mark_population_dormant(population)
+            _pin_population_biases(population)
+            population = run_selection_and_mutation(
+                strategy,
+                population=population,
+                mutation=mutation,
+                env_name="Env",
+                algo=algo_name,
+            )
+            resets_seen += _population_zeroed_biases(population)
+
+            assert len(population) == 8
+            assert all(isinstance(agent, EvolvableAlgorithm) for agent in population)
+            for agent in population:
+                for _network_id, network in agent.unrolled_eval_networks():
+                    assert all(
+                        torch.isfinite(value).all()
+                        for value in network.state_dict().values()
+                    )
+
+        assert resets_seen > 0
+
+    @pytest.mark.parametrize(
+        "family", list(_CROSS_FAMILY_CASES), ids=list(_CROSS_FAMILY_CASES)
+    )
+    def test_multi_frequency_selection_evolves_every_family(self, family):
+        algo_name, build_population = _CROSS_FAMILY_CASES[family]
+        population = build_population()
+        for agent in population:
+            agent.subpopulation_id = agent.index // 4
+        strategy = MultiFrequencySelection(
+            population_size=8,
+            n_subpopulations=2,
+            evolution_frequency_ratios=[1, 2],
+            n_winners=1,
+            n_survivors=1,
+            n_open_for_migration=1,
+            n_losers=1,
+            seed=0,
+        )
+        mutation = _regrama_mutation()
+
+        resets_seen = 0
+        for _cycle in range(3):
+            rank_population_by_subpopulation(population)
+            _mark_population_dormant(population)
+            _pin_population_biases(population)
+            population = run_selection_and_mutation(
+                strategy,
+                population=population,
+                mutation=mutation,
+                env_name="Env",
+                algo=algo_name,
+            )
+            resets_seen += _population_zeroed_biases(population)
+
+            assert len(population) == 8
+            assert len({agent.index for agent in population}) == 8
+            for agent in population:
+                for _network_id, network in agent.unrolled_eval_networks():
+                    assert all(
+                        torch.isfinite(value).all()
+                        for value in network.state_dict().values()
+                    )
+
+        assert resets_seen > 0
+
+    def test_a_child_reads_the_snapshot_captured_while_its_parent_trained(self):
+        # Capture happens on the parent, the reset happens on the clone.
+        population = _build_single_agent_population(DQN)
+        _give_population_fitness(population)
+        _mark_population_dormant(population)
+        strategy = TournamentSelection(
+            tournament_size=2,
+            elitism=True,
+            population_size=8,
+        )
+
+        evolved = run_selection_and_mutation(
+            strategy,
+            population=population,
+            mutation=_regrama_mutation(),
+            env_name="Env",
+            algo="DQN",
+        )
+
+        assert all(agent.grama_scores is not None for agent in evolved)
+
+
+class TestRegramaTrainerWiring:
+    """Every non-LLM trainer enables the capture ReGraMa depends on."""
+
+    @staticmethod
+    def assert_capture_enabled(population) -> None:
+        assert population
+        assert all(agent.capture_grama_requested is True for agent in population)
+
+    @pytest.mark.parametrize(("state_size", "action_size", "vect"), _FLAT_VECT)
+    def test_train_off_policy_enables_capture(self, env, population_off_policy):
+        train_off_policy(
+            env,
+            "env_name",
+            "algo",
+            population_off_policy,
+            DummyMemory(),
+            max_steps=4,
+            evo_steps=4,
+            eval_loop=1,
+            mutation=DummyMutations(),
+            wb=False,
+            verbose=False,
+        )
+
+        self.assert_capture_enabled(population_off_policy)
+
+    @pytest.mark.parametrize(("state_size", "action_size", "vect"), _FLAT_VECT)
+    def test_train_on_policy_enables_capture(self, env, population_on_policy):
+        train_on_policy(
+            env,
+            "env_name",
+            "algo",
+            population_on_policy,
+            max_steps=4,
+            evo_steps=4,
+            eval_loop=1,
+            mutation=DummyMutations(),
+            wb=False,
+            verbose=False,
+        )
+
+        self.assert_capture_enabled(population_on_policy)
+
+    @pytest.mark.parametrize(("state_size", "action_size", "vect"), _FLAT_VECT)
+    def test_train_offline_enables_capture(
+        self,
+        env,
+        population_off_policy,
+        memory,
+        offline_init_hp,
+        dummy_h5py_data,
+    ):
+        train_offline(
+            env,
+            "env_name",
+            "algo",
+            population_off_policy,
+            memory,
+            dataset=dummy_h5py_data,
+            init_hp=offline_init_hp,
+            max_steps=4,
+            evo_steps=4,
+            eval_loop=1,
+            mutation=DummyMutations(),
+            wb=False,
+        )
+
+        self.assert_capture_enabled(population_off_policy)
+
+    @pytest.mark.parametrize(("state_size", "action_size"), _FLAT)
+    def test_train_bandits_enables_capture(
+        self,
+        bandit_env,
+        population_bandit,
+        bandit_memory,
+    ):
+        train_bandits(
+            bandit_env,
+            "bandit_env_name",
+            "algo",
+            population_bandit,
+            bandit_memory,
+            max_steps=10,
+            episode_steps=5,
+            evo_steps=5,
+            eval_steps=2,
+            eval_loop=1,
+            mutation=DummyMutations(),
+            wb=False,
+        )
+
+        self.assert_capture_enabled(population_bandit)
+
+    @pytest.mark.parametrize("on_policy", [False])
+    @pytest.mark.parametrize(("state_size", "action_size"), _FLAT)
+    def test_train_multi_agent_off_policy_enables_capture(
+        self,
+        multi_env,
+        population_multi_agent,
+        multi_memory,
+    ):
+        train_multi_agent_off_policy(
+            multi_env,
+            "env_name",
+            "algo",
+            pop=population_multi_agent,
+            memory=multi_memory,
+            max_steps=4,
+            evo_steps=4,
+            eval_loop=1,
+            mutation=DummyMutations(),
+        )
+
+        self.assert_capture_enabled(population_multi_agent)
+
+    @pytest.mark.parametrize("on_policy", [True])
+    @pytest.mark.parametrize(("state_size", "action_size"), _FLAT)
+    def test_train_multi_agent_on_policy_enables_capture(
+        self,
+        multi_env,
+        population_multi_agent,
+    ):
+        train_multi_agent_on_policy(
+            multi_env,
+            "env_name",
+            "algo",
+            pop=population_multi_agent,
+            max_steps=4,
+            evo_steps=4,
+            eval_loop=1,
+            mutation=DummyMutations(),
+        )
+
+        self.assert_capture_enabled(population_multi_agent)
+
+    def test_off_policy_training_captures_a_snapshot(self):
+        vec_env = gym.vector.SyncVectorEnv([lambda: gym.make("CartPole-v1")])
+        agent = DQN(
+            vec_env.single_observation_space,
+            vec_env.single_action_space,
+            batch_size=4,
+            learn_step=1,
+        )
+
+        population, _fitnesses = train_off_policy(
+            vec_env,
+            "CartPole-v1",
+            "DQN",
+            [agent],
+            ReplayBuffer(max_size=100, device="cpu"),
+            max_steps=12,
+            evo_steps=12,
+            eval_steps=2,
+            eval_loop=1,
+            mutation=_regrama_mutation(),
+            verbose=False,
+        )
+
+        assert population[0].grama_scores
+        assert any(entry is not None for entry in population[0].grama_scores[0])
+
+    def test_compiled_agent_captures(self):
+        vec_env = gym.vector.SyncVectorEnv([lambda: gym.make("CartPole-v1")])
+        agent = DQN(
+            vec_env.single_observation_space,
+            vec_env.single_action_space,
+            batch_size=4,
+            learn_step=1,
+        )
+        agent.torch_compiler = "default"
+
+        population, _fitnesses = train_off_policy(
+            vec_env,
+            "CartPole-v1",
+            "DQN",
+            [agent],
+            ReplayBuffer(max_size=100, device="cpu"),
+            max_steps=12,
+            evo_steps=12,
+            eval_steps=2,
+            eval_loop=1,
+            mutation=_regrama_mutation(),
+            verbose=False,
+        )
+
+        assert any(entry is not None for entry in population[0].grama_scores[0])
+
+    def test_capture_stays_off_without_a_mutation_operator(self):
+        vec_env = gym.vector.SyncVectorEnv([lambda: gym.make("CartPole-v1")])
+        agent = DQN(
+            vec_env.single_observation_space,
+            vec_env.single_action_space,
+            batch_size=4,
+            learn_step=1,
+        )
+
+        population, _fitnesses = train_off_policy(
+            vec_env,
+            "CartPole-v1",
+            "DQN",
+            [agent],
+            ReplayBuffer(max_size=100, device="cpu"),
+            max_steps=12,
+            evo_steps=12,
+            eval_steps=2,
+            eval_loop=1,
+            mutation=None,
+            verbose=False,
+        )
+
+        # No hooks are registered, so capture costs nothing when there is no
+        # mutation operator at all (a no-HPO regime).
+        assert population[0].grama_scores is None

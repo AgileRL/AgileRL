@@ -63,6 +63,11 @@ class MutationSpec(BaseModel):
     :type mutation_sd: float
     :param rand_seed: Random seed for repeatability.
     :type rand_seed: int
+    :param dormant_threshold: Normalised GraMa score at or below which a neuron counts as
+        dormant. Declared and excluded so a core manifest carrying it is accepted
+        rather than reported as unknown, and so the platform payload is unaffected;
+        every parameter mutation runs ReGraMa, so this is never inert.
+    :type dormant_threshold: float
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -71,6 +76,7 @@ class MutationSpec(BaseModel):
     rl_hp_selection: dict[str, RLHyperparameter] = Field(default_factory=dict)
     mutation_sd: float = Field(default=0.1, ge=0.0)
     rand_seed: int = Field(default=42, ge=0)
+    dormant_threshold: float = Field(default=0.01, ge=0.0, exclude=True)
 
 
 class TournamentSelectionSpec(BaseModel):

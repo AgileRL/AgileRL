@@ -17,7 +17,8 @@ import agilerl.utils.algo_utils as algo_utils
 from agilerl.components.data import Transition
 from agilerl.hpo.multi_frequency import MultiFrequencySelection
 from agilerl.modules import EvolvableModule
-from agilerl.typing import NumpyObsType, TorchObsType
+from agilerl.typing import GraMaScores, NumpyObsType, TorchObsType
+from agilerl.utils import mutation_utils
 
 skip_torch_compile_on_windows_cpu = pytest.mark.skipif(
     sys.platform == "win32" and not torch.cuda.is_available(),
@@ -626,3 +627,63 @@ def new_agents(before: list[Any], after: list[Any]) -> list[Any]:
     """
     before_ids = {id(a) for a in before}
     return [a for a in after if id(a) not in before_ids]
+
+
+def grama_scores_for(agent: Any, fill: float = 0.0) -> GraMaScores:
+    """Build a GraMa gradient snapshot for every evaluation network of *agent*.
+
+    Each measured layer gets one score per producing neuron, every one set to
+    fill; a layer whose producer cannot be resolved is recorded as None,
+    which is the shape a real capture leaves behind for a layer that never
+    fired. Scores are normalised by their layer mean before being thresholded,
+    so a uniform snapshot reads as a score of 1.0 everywhere: fill=0.0 marks
+    the whole agent dormant and any positive fill marks it healthy.
+
+    :param agent: Agent whose evaluation networks are measured.
+    :type agent: EvolvableAlgorithm
+    :param fill: Per-neuron gradient magnitude to record for every neuron.
+    :type fill: float, optional
+    :return: A snapshot laid out exactly as
+        :meth:`~agilerl.algorithms.core.base.EvolvableAlgorithm.finalize_training_step`
+        would store it.
+    :rtype: GraMaScores
+    """
+    scores: GraMaScores = []
+    for _network_id, network in agent.unrolled_eval_networks():
+        entries: list[torch.Tensor | None] = []
+        for activation in mutation_utils.target_activations(network):
+            producer = mutation_utils.resolve_producer_and_next(
+                activation,
+                getattr(network, "encoder", None),
+                getattr(network, "head_net", None),
+            ).producer
+            entries.append(
+                None
+                if producer is None
+                else torch.full(
+                    (mutation_utils.weight_param(producer).shape[0],),
+                    fill,
+                ),
+            )
+        scores.append(entries)
+    return scores
+
+
+def capture_grama_snapshot(agent: Any, observation: torch.Tensor) -> None:
+    """Run one real backward pass through *agent*'s policy under GraMa capture.
+
+    Leaves the agent holding the snapshot a real training cycle would, which is
+    what both the capture tests and the reset tests need to start from.
+
+    :param agent: Agent to capture from.
+    :type agent: EvolvableAlgorithm
+    :param observation: A batch to drive the policy's forward pass with.
+    :type observation: torch.Tensor
+    :return: None.
+    :rtype: None
+    """
+    agent.init_training_step(capture_grama=True)
+    policy = getattr(agent, agent.registry.policy())
+    head = mutation_utils.unwrap_module(policy.head_net)
+    head(policy.encoder(observation)).square().mean().backward()
+    agent.finalize_training_step(1)

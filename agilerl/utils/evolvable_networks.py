@@ -23,7 +23,6 @@ from agilerl.modules.configs import (
 )
 from agilerl.modules.custom_components import (
     GumbelSoftmax,
-    NewGELU,
     NoisyLinear,
     ResidualBlock,
     SimbaResidualBlock,
@@ -31,6 +30,34 @@ from agilerl.modules.custom_components import (
 from agilerl.typing import DeviceType, KernelSizeType, NetConfigType
 
 ConvBlockType = Literal["Conv1d", "Conv2d", "Conv3d"]
+
+ACTIVATION_FUNCTIONS: dict[str, type[nn.Module]] = {
+    "Tanh": nn.Tanh,
+    "ReLU": nn.ReLU,
+    "ELU": nn.ELU,
+    "Softsign": nn.Softsign,
+    "Sigmoid": nn.Sigmoid,
+    "GumbelSoftmax": GumbelSoftmax,
+    "Softplus": nn.Softplus,
+    "Softmax": nn.Softmax,
+    "LeakyReLU": nn.LeakyReLU,
+    "PReLU": nn.PReLU,
+    "GELU": nn.GELU,
+    "Identity": nn.Identity,
+}
+
+NORMALIZATION_FUNCTIONS: dict[str, type[nn.Module]] = {
+    "BatchNorm2d": nn.BatchNorm2d,
+    "BatchNorm3d": nn.BatchNorm3d,
+    "InstanceNorm2d": nn.InstanceNorm2d,
+    "InstanceNorm3d": nn.InstanceNorm3d,
+    "LayerNorm": nn.LayerNorm,
+}
+
+CONV_LAYER_FUNCTIONS: dict[str, type[nn.Module]] = {
+    "Conv2d": nn.Conv2d,
+    "Conv3d": nn.Conv3d,
+}
 
 
 # Arity of the size tuple a torch layer expects (e.g. ``tuple[int, int]`` for
@@ -441,42 +468,19 @@ def get_normalization(
     :return: Normalization layer
     :rtype: nn.Module
     """
-    normalization_functions = {
-        "BatchNorm2d": nn.BatchNorm2d,
-        "BatchNorm3d": nn.BatchNorm3d,
-        "InstanceNorm2d": nn.InstanceNorm2d,
-        "InstanceNorm3d": nn.InstanceNorm3d,
-        "LayerNorm": nn.LayerNorm,
-    }
-
-    return normalization_functions[normalization_name](layer_size, device=device)
+    return NORMALIZATION_FUNCTIONS[normalization_name](layer_size, device=device)
 
 
-def get_activation(activation_name: str | None, new_gelu: bool = False) -> nn.Module:
+def get_activation(activation_name: str | None) -> nn.Module:
     """Return activation function for corresponding activation name.
 
     :param activation_names: Activation function name
     :type activation_names: str
     """
-    activation_functions = {
-        "Tanh": nn.Tanh,
-        "ReLU": nn.ReLU,
-        "ELU": nn.ELU,
-        "Softsign": nn.Softsign,
-        "Sigmoid": nn.Sigmoid,
-        "GumbelSoftmax": GumbelSoftmax,
-        "Softplus": nn.Softplus,
-        "Softmax": nn.Softmax,
-        "LeakyReLU": nn.LeakyReLU,
-        "PReLU": nn.PReLU,
-        "GELU": nn.GELU if not new_gelu else NewGELU,
-        "Identity": nn.Identity,
-    }
-
     activation_name = activation_name if activation_name is not None else "Identity"
     if activation_name == "Softmax":
         return nn.Softmax(dim=-1)
-    return activation_functions[activation_name]()
+    return ACTIVATION_FUNCTIONS[activation_name]()
 
 
 def get_pooling(
@@ -648,7 +652,6 @@ def create_mlp(
     activation: str = "ReLU",
     noise_std: float = 0.1,
     device: DeviceType = "cpu",
-    new_gelu: bool = False,
     name: str = "mlp",
 ) -> nn.Sequential:
     """Create and returns multi-layer perceptron.
@@ -710,10 +713,7 @@ def create_mlp(
             )
 
         # Add activation function
-        net_dict[f"{name}_activation_{l_no!s}"] = get_activation(
-            activation,
-            new_gelu,
-        )
+        net_dict[f"{name}_activation_{l_no!s}"] = get_activation(activation)
 
     # Output layer
     output_layer: NoisyLinear | nn.Linear
@@ -752,7 +752,6 @@ def create_mlp(
 
     net_dict[f"{name}_activation_output"] = get_activation(
         activation_name=output_activation,
-        new_gelu=new_gelu,
     )
     return nn.Sequential(net_dict)
 

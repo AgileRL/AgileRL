@@ -6,10 +6,8 @@ import logging
 import warnings
 from collections import OrderedDict
 from collections.abc import Callable, Mapping
-from functools import wraps
-from typing import Any, TypeGuard, TypeVar
+from typing import Any, TypeVar
 
-import fastrand  # ty: ignore[unresolved-import] — C extension without type stubs
 import numpy as np
 import torch
 from accelerate import Accelerator
@@ -26,7 +24,15 @@ from agilerl.modules import EvolvableModule, ModuleDict
 from agilerl.protocols import EvolvableAlgorithmProtocol
 from agilerl.typing import MutationReturn
 from agilerl.utils.algo_utils import remove_compile_prefix
-from agilerl.utils.evolvable_networks import compile_model
+from agilerl.utils.mutation_utils import (
+    as_module_dict,
+    get_exp_layer,
+    is_module_dict,
+    reinit_shared_networks,
+    reset_dormant_neurons,
+    set_global_seed,
+    shared_encoder_heads,
+)
 from agilerl.wrappers.agent import AgentWrapper
 
 AgentT = TypeVar("AgentT", bound=EvolvableAlgorithmProtocol)
@@ -47,163 +53,6 @@ _UNSUPPORTED_ACTIVATION_MUTATION_ALGOS = frozenset(
 )
 
 
-def set_global_seed(seed: int | None) -> None:
-    """Set the global seed for random number generators.
-
-    :param seed: Random seed for repeatability
-    :type seed: int
-    """
-    if seed is None:
-        return
-
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed(seed)
-    fastrand.pcg32_seed(seed)
-
-
-def get_offspring_eval_modules(
-    individual: EvolvableAlgorithm,
-) -> tuple[dict[str, EvolvableModule], dict[str, EvolvableModule]]:
-    """Get the offsprings of all of the evaluation modules in the individual.
-
-    :param individual: The individual to inspect
-    :type individual: EvolvableAlgorithm
-
-    :return: Tuple of offspring policy and the rest of the evaluation modules
-    :rtype: tuple[dict[str, EvolvableModule], dict[str, EvolvableModule]]
-    """
-    registry = individual.registry
-
-    offspring_modules: dict[str, EvolvableModule] = {}
-    offspring_policy: dict[str, EvolvableModule] = {}
-    for group in registry.groups:
-        eval_name = group.eval_network_name()
-        eval_module: EvolvableModule = getattr(individual, eval_name)
-
-        # Clone the offspring prior to applying mutations
-        offspring = eval_module.clone()
-        if group.policy:
-            offspring_policy[eval_name] = offspring
-        else:
-            offspring_modules[eval_name] = offspring
-
-    return offspring_policy, offspring_modules
-
-
-def _is_module_dict(
-    module: EvolvableModule,
-) -> TypeGuard["ModuleDict[EvolvableModule]"]:
-    """Narrow an evaluation module to its per-agent ``ModuleDict`` mapping.
-
-    :param module: The evaluation module to check
-    :type module: EvolvableModule
-    :return: Whether the module is a per-agent ``ModuleDict``
-    :rtype: TypeGuard[ModuleDict[EvolvableModule]]
-    """
-    return isinstance(module, ModuleDict)
-
-
-def _as_module_dict(module: EvolvableModule) -> "ModuleDict[EvolvableModule]":
-    """Narrow a multi-agent evaluation module to its per-agent mapping.
-
-    :param module: The evaluation module to reinterpret
-    :type module: EvolvableModule
-    :return: The module as a mapping of per-agent modules
-    :rtype: ModuleDict[EvolvableModule]
-    """
-    assert _is_module_dict(module), (
-        "Multi-agent mutation requires a per-agent ModuleDict container."
-    )
-    return module
-
-
-def get_exp_layer(offspring: EvolvableModule) -> nn.Linear:
-    """Get the output layer of different types of offsprings for bandit algorithms.
-
-    :param offspring: The offspring to inspect
-    :type offspring: EvolvableModule
-
-    :return: The output layer of the offspring
-    :rtype: nn.Linear
-    """
-    if not isinstance(offspring, EvolvableModule):
-        msg = f"Bandit algorithm architecture {type(offspring)} not supported."
-        raise TypeError(msg)
-
-    exp_layer = offspring.get_output_dense()
-    if not isinstance(exp_layer, nn.Linear):
-        msg = (
-            f"Bandit algorithm architecture {type(offspring)} not supported: expected "
-            f"a linear output layer, found {type(exp_layer)}."
-        )
-        raise TypeError(msg)
-
-    return exp_layer
-
-
-def reinit_shared_networks(
-    mutation_func: Callable[["Mutations", IndividualT], IndividualT],
-) -> Callable[["Mutations", IndividualT], IndividualT]:
-    """Reinitialize shared networks after architecture and parameter mutations (decorator).
-
-    :param mutation_func: The mutation function to decorate
-    :type mutation_func: Callable[[Mutations, IndividualT], IndividualT]
-    :return: The decorated mutation function
-    :rtype: Callable[[Mutations, IndividualT], IndividualT]
-    """
-
-    @wraps(mutation_func)
-    def wrapper(self: "Mutations", individual: IndividualT) -> IndividualT:
-        # Call the original mutation function
-        individual = mutation_func(self, individual)
-
-        torch._dynamo.reset()  # NOTE: Should we do this?
-
-        # Only proceed if mutation was actually applied
-        if individual.mut == "None":
-            return individual
-
-        # Recompile individual if necessary
-        compiled_model = individual.torch_compiler is not None
-        if compiled_model:
-            # Set dynamo config before recompilation to avoid guard failures.
-            # The ignores below are needed because dynamo's config module infers
-            # its attribute types from the default values, so they read as literals.
-            torch._dynamo.config.force_parameter_static_shapes = False  # ty: ignore[invalid-assignment]
-            individual.recompile()
-
-        # Reinitialize shared networks to mutated evaluation networks
-        for net_group in individual.registry.groups:
-            for shared_name in net_group.shared_network_names():
-                eval_offspring: EvolvableModule = getattr(
-                    individual,
-                    net_group.eval_network_name(),
-                )
-                # Reinitialize shared with frozen weights due to
-                # potential mutation in architecture
-                ind_shared: nn.Module = self._reinit_from_mutated(
-                    eval_offspring,
-                    remove_prefix=compiled_model,
-                )
-                if self.accelerator is None:
-                    ind_shared = ind_shared.to(self.device)
-
-                if compiled_model:
-                    torch._dynamo.config.force_parameter_static_shapes = False  # ty: ignore[invalid-assignment]
-                    ind_shared = compile_model(
-                        ind_shared,
-                        individual.torch_compiler,
-                    )
-
-                setattr(individual, shared_name, ind_shared)
-
-        return individual
-
-    return wrapper
-
-
 class Mutations:
     """Allow performing mutations on a population of :class:`EvolvableAlgorithm <agilerl.algorithms.core.EvolvableAlgorithm>` agents.
     Calling :func:`Mutations.mutation() <agilerl.hpo.mutation.Mutations.mutation>` on a population of agents will return a mutated population of agents.
@@ -212,7 +61,7 @@ class Mutations:
 
     * No mutation
     * Network architecture mutation - adding layers or nodes. Trained weights are reused and new weights are initialized randomly.
-    * Network parameters mutation - mutating weights with Gaussian noise.
+    * Network parameters mutation - mutating weights with Gaussian noise, preceded by ReGraMa resets of the neurons that have gone dormant.
     * Network activation layer mutation - change of activation layer.
     * RL algorithm mutation - mutation of learning hyperparameter, (e.g. learning rate or batch size).
 
@@ -234,6 +83,9 @@ class Mutations:
     :type rl_hp_selection: list[str]
     :param mutation_sd: Mutation strength
     :type mutation_sd: float
+    :param dormant_threshold: Normalised GraMa score at or below which a neuron counts as
+        dormant, defaults to 0.01.
+    :type dormant_threshold: float, optional
     :param activation_selection: Activation functions to choose from, defaults to ["ReLU", "ELU", "GELU"]
     :type activation_selection: list[str], optional
     :param mutate_elite: Mutate elite member of population, defaults to True
@@ -255,6 +107,7 @@ class Mutations:
         activation: float,
         rl_hp: float,
         mutation_sd: float = 0.1,
+        dormant_threshold: float = 0.01,
         activation_selection: list[str] | None = None,
         mutate_elite: bool = True,
         rand_seed: int | None = None,
@@ -323,6 +176,13 @@ class Mutations:
         )
         if isinstance(rand_seed, int):
             assert rand_seed >= 0, "Random seed must be greater than or equal to zero."
+        assert isinstance(
+            dormant_threshold,
+            (float, int),
+        ), "Dormant threshold must be a float or integer."
+        assert dormant_threshold >= 0, (
+            "Dormant threshold must be greater than or equal to zero."
+        )
 
         # Random seed for repeatability
         set_global_seed(rand_seed)
@@ -342,6 +202,8 @@ class Mutations:
         self.mutate_elite = mutate_elite
         self.device = device
         self.accelerator = accelerator
+
+        self.dormant_threshold = dormant_threshold
 
         self.pretraining_mut_options, self.pretraining_mut_proba = (
             self._get_mutations_options(pretraining=True)
@@ -632,8 +494,13 @@ class Mutations:
         return individual
 
     def parameter_mutation(self, individual: IndividualT) -> IndividualT:
-        """Perform a random mutation to the weights of the policy network of an agent through
-        the addition of Gaussian noise.
+        """Perform a mutation to the weights of the individual.
+
+        Runs in two stages. ReGraMa mutations first re-initialise the neurons that
+        have gone dormant, across every evaluation network of the agent. Gaussian
+        noise is then added to the policy network: a fixed 5% of the sampled weights
+        are redrawn from N(0, 1) (the random-reset band) and the remaining 95% are
+        perturbed in proportion to their own magnitude (the ordinary band).
 
         .. note::
             This is currently not supported for :class:`LLMAlgorithm <agilerl.algorithms.core.LLMAlgorithm>` agents.
@@ -652,6 +519,8 @@ class Mutations:
             individual.mut = "None"
             return individual
 
+        regrama_applied = self._regrama_mutation(individual)
+
         registry = individual.registry
 
         # We only apply parameter mutations to the evaluation policy network
@@ -666,7 +535,7 @@ class Mutations:
 
         policy_name = policy_group.eval_network_name()
         offspring_policy: EvolvableModule = getattr(individual, policy_name)
-        if _is_module_dict(offspring_policy):
+        if is_module_dict(offspring_policy):
             for agent_id, module in offspring_policy.items():
                 offspring_policy[agent_id] = self._gaussian_parameter_mutation(module)
         else:
@@ -678,19 +547,67 @@ class Mutations:
             offspring_policy,
         )
 
-        # Load state dicts for shared networks
-        for shared in policy_group.shared_network_names():
-            offspring_shared: EvolvableModule = getattr(individual, shared)
-            offspring_shared.load_state_dict(
-                offspring_policy.state_dict(),
-                strict=False,
+        # Load state dicts for shared networks. ReGraMa rewrites non-policy
+        # evaluation networks too, so every group has to be resynced when it ran.
+        groups = registry.groups if regrama_applied else [policy_group]
+        for group in groups:
+            eval_offspring: EvolvableModule = getattr(
+                individual,
+                group.eval_network_name(),
             )
-            self._to_device_and_set_individual(individual, shared, offspring_shared)
+            for shared in group.shared_network_names():
+                offspring_shared: EvolvableModule = getattr(individual, shared)
+                offspring_shared.load_state_dict(
+                    eval_offspring.state_dict(),
+                    strict=False,
+                )
+                self._to_device_and_set_individual(individual, shared, offspring_shared)
 
         individual.reinit_optimizers()  # Reinitialize optimizer
         individual.mut = "param"
 
         return individual
+
+    def _regrama_mutation(self, individual: IndividualT) -> bool:
+        """Reset the dormant neurons of every network of an individual.
+
+        Reads the per-neuron gradient snapshot stored while the agent trained, and
+        re-initialises the neurons whose normalised GraMa score has fallen to or
+        below the dormant threshold.
+
+        A snapshot that is absent, or one that holds no measurement, cannot score
+        any neuron, so the reset is skipped and the mutation falls back to the
+        Gaussian pass alone.
+
+        :param individual: Individual agent from population.
+        :type individual: RLAlgorithm or MultiAgentRLAlgorithm
+
+        :return: Whether any network was modified.
+        :rtype: bool
+        """
+        grama_scores = individual.grama_scores or []
+        if not any(entry is not None for network in grama_scores for entry in network):
+            return False
+
+        networks = individual.unrolled_eval_networks()
+        policy_networks = individual.eval_policy_network_ids()
+
+        neurons_reset = 0
+        for idx, (network_id, network) in enumerate(networks):
+            shared_heads = (
+                shared_encoder_heads(networks, network_id, network)
+                if id(network) in policy_networks
+                else ()
+            )
+            neurons_reset += reset_dormant_neurons(
+                network,
+                grama_scores[idx],
+                self.dormant_threshold,
+                self.rng,
+                shared_latent_heads=shared_heads,
+            )
+
+        return neurons_reset > 0
 
     def _get_mutations_options(
         self,
@@ -790,7 +707,7 @@ class Mutations:
         :rtype: EvolvableModule
         """
         ind_shared: EvolvableModule
-        if _is_module_dict(offspring):
+        if is_module_dict(offspring):
             reinit_modules: dict[str, EvolvableModule] = OrderedDict()
             for agent_id, nested_offspring in offspring.items():
                 reinit_modules[agent_id] = self._reinit_module(
@@ -859,6 +776,12 @@ class Mutations:
     def _gaussian_parameter_mutation(self, network: EvolvableModule) -> EvolvableModule:
         """Return network with mutated weights using a Gaussian distribution.
 
+        Of the weights sampled for mutation, a fixed 5% are redrawn from N(0, 1)
+        (the random-reset band) and the remaining 95% are perturbed with noise
+        proportional to their own magnitude (the ordinary band). The split is
+        unconditional: every parameter mutation applies both bands in this
+        proportion.
+
         :param network: Neural network to mutate.
         :type network: EvolvableModule
         :return: Mutated network.
@@ -867,9 +790,7 @@ class Mutations:
         # Parameters controlling mutation strength and probabilities
         mut_strength = self.mutation_sd
         num_mutation_frac = 0.1
-        super_mut_strength = 10
-        super_mut_prob = 0.05
-        reset_prob = super_mut_prob + 0.05
+        reset_prob = 0.05
         mag_limit = 1000000
 
         model_params: dict[str, torch.Tensor] = network.state_dict()
@@ -908,21 +829,8 @@ class Mutations:
             current_vals: torch.Tensor = W[rows_tensor, cols_tensor]
             new_vals = current_vals.clone()
 
-            # Create masks for the different mutation types
-            mask_super = rand_vals_tensor < super_mut_prob
-            mask_reset = (rand_vals_tensor >= super_mut_prob) & (
-                rand_vals_tensor < reset_prob
-            )
+            mask_reset = rand_vals_tensor < reset_prob
             mask_normal = rand_vals_tensor >= reset_prob
-
-            # Super mutation: add noise with std proportional to the absolute current value times super_mut_strength
-            if mask_super.sum() > 0:
-                std_super = (super_mut_strength * current_vals[mask_super]).abs()
-                noise_super = torch.normal(
-                    mean=torch.zeros_like(std_super),
-                    std=std_super,
-                )
-                new_vals[mask_super] = current_vals[mask_super] + noise_super
 
             # Reset mutation: completely reset the weight using N(0, 1)
             num_reset = int(mask_reset.sum())
@@ -974,7 +882,7 @@ class Mutations:
         # Get the offspring evaluation modules
         # We first extract and apply a mutation to the policy and then apply
         # the same mutation to the rest of the evaluation modules e.g. critics
-        policy, offspring_evals = get_offspring_eval_modules(individual)
+        policy, offspring_evals = individual.get_eval_modules()
         policy_name, policy_offspring = next(iter(policy.items()))
 
         if not policy_offspring.mutation_methods:
@@ -1040,7 +948,7 @@ class Mutations:
         # Get the offspring evaluation modules
         # We first extract and apply a mutation to the policy and then apply
         # the same mutation to the rest of the evaluation modules e.g. critics
-        policy, offspring_evals = get_offspring_eval_modules(individual)
+        policy, offspring_evals = individual.get_eval_modules()
         policy_name, policy_module = next(iter(policy.items()))
 
         if not policy_module.mutation_methods:
@@ -1074,7 +982,7 @@ class Mutations:
             sampled_mutation = None
 
         # Applying to the remaining sub-agents needs the per-agent mapping.
-        policy_offspring = _as_module_dict(policy_module)
+        policy_offspring = as_module_dict(policy_module)
         for agent_id, policy in policy_offspring.items():
             if agent_id == sampled_agent_id:
                 continue
@@ -1095,7 +1003,7 @@ class Mutations:
 
         # Try to apply an analogous mutation to the rest of the evaluation modules
         for name, eval_module in offspring_evals.items():
-            offspring_eval = _as_module_dict(eval_module)
+            offspring_eval = as_module_dict(eval_module)
 
             # Iterate over the agents in the offspring evaluation module
             for agent_id, agent_eval in offspring_eval.items():

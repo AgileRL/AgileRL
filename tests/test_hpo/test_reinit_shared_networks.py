@@ -49,7 +49,7 @@ class TestReinitSharedNetworksDecorator:
             return model
 
         monkeypatch.setattr(
-            "agilerl.hpo.mutation.compile_model",
+            "agilerl.utils.mutation_utils.compile_model",
             fake_compile,
         )
         monkeypatch.setattr(

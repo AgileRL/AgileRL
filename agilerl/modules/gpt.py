@@ -954,7 +954,6 @@ class MLP(EvolvableMLP):
             hidden_size=[hidden_size],
             layer_norm=False,
             output_activation=activation,
-            new_gelu=True,
             **kwargs,
         )
         self.dropout = nn.Dropout(dropout)

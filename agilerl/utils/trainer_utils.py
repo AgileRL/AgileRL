@@ -378,6 +378,7 @@ def build_mutations_from_spec(
         rand_seed=mutation_spec.rand_seed,
         device=str(device),
         accelerator=accelerator,
+        dormant_threshold=mutation_spec.dormant_threshold,
     )
 
 

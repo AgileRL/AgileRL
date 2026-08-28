@@ -77,9 +77,11 @@ import torch.nn.functional as F
 from accelerate import Accelerator
 from accelerate.state import AcceleratorState
 from gymnasium import spaces
-from torch import optim
+from torch import nn, optim
 
 from agilerl import HAS_DEEPSPEED, HAS_LLM_DEPENDENCIES, HAS_VLLM
+from agilerl.algorithms import DQN, IPPO, PPO
+from agilerl.algorithms.core import base as core_base
 from agilerl.algorithms.core.base import (
     EvolvableAlgorithm,
     LLMAlgorithm,
@@ -94,6 +96,9 @@ from agilerl.algorithms.grpo import GRPO
 from agilerl.modules import EvolvableMLP
 from agilerl.modules.dummy import DummyEvolvable
 from agilerl.utils.algo_utils import VLLMConfig
+from agilerl.utils.mutation_utils import target_activations
+from agilerl.wrappers.agent import RSNorm
+from tests.helper_functions import capture_grama_snapshot
 from tests.test_algorithms.test_base import DummyMARLAlgorithm, DummyRLAlgorithm
 
 create_module = None
@@ -313,6 +318,21 @@ class TestInspectAttributes:
         dummy_agent.buffer = TensorDict({"a": torch.zeros(1)}, batch_size=[])
         attrs = EvolvableAlgorithm.inspect_attributes(dummy_agent)
         assert "buffer" not in attrs
+
+    def test_inspect_attributes_exclude_drops_named_attributes(self, dummy_agent):
+        attrs = EvolvableAlgorithm.inspect_attributes(
+            dummy_agent, exclude=("index", "device")
+        )
+        assert "index" not in attrs
+        assert "device" not in attrs
+
+    def test_inspect_attributes_exclude_is_additive_not_a_default(self, dummy_agent):
+        excluded = EvolvableAlgorithm.inspect_attributes(
+            dummy_agent, exclude=("index",)
+        )
+        default = EvolvableAlgorithm.inspect_attributes(dummy_agent)
+        assert "index" not in excluded
+        assert "index" in default
 
 
 def _inspect_signature_params(func):
@@ -8158,3 +8178,503 @@ class TestLoraInputCastUnderAutocast:
         assert with_cast
         assert with_cast.keys() == without_cast.keys()
         assert all(torch.equal(with_cast[k], without_cast[k]) for k in with_cast)
+
+
+class TestEvolvableAlgorithmGraMaState:
+    """The per-agent GraMa state ReGraMa reads at mutation time."""
+
+    def agent(self):
+        return DQN(
+            spaces.Box(-1.0, 1.0, shape=(4,), dtype=np.float32),
+            spaces.Discrete(2),
+            device="cpu",
+        )
+
+    def test_unmeasured_by_default(self):
+        agent = self.agent()
+
+        assert agent.grama_scores is None
+
+    def test_training_block_captures_only_when_enabled(self):
+        agent = self.agent()
+
+        agent.init_training_step()
+        agent.actor(torch.rand(2, 4)).square().mean().backward()
+        agent.finalize_training_step(1)
+
+        # No hooks are registered, so capture costs nothing when off.
+        assert agent.grama_scores is None
+
+    def test_training_block_stores_a_snapshot_when_enabled(self):
+        agent = self.agent()
+
+        agent.init_training_step(capture_grama=True)
+        agent.actor(torch.rand(2, 4)).square().mean().backward()
+        agent.finalize_training_step(1)
+
+        assert agent.grama_scores
+        assert any(entry is not None for entry in agent.grama_scores[0])
+
+    def test_snapshot_travels_to_a_clone(self):
+        # This is what lets a child read the gradients captured while its parent
+        # trained, under any selection strategy.
+        agent = self.agent()
+        agent.init_training_step(capture_grama=True)
+        agent.actor(torch.rand(2, 4)).square().mean().backward()
+        agent.finalize_training_step(1)
+
+        clone = agent.clone(wrap=False)
+
+        assert clone.grama_scores is not None
+        assert len(clone.grama_scores) == len(agent.grama_scores)
+
+    def test_snapshot_is_deep_copied_onto_the_clone(self):
+        # Mutating the parent's snapshot must not reach the child's.
+        agent = self.agent()
+        agent.grama_scores = [[torch.ones(3)]]
+
+        clone = agent.clone(wrap=False)
+        agent.grama_scores[0][0].fill_(9.0)
+
+        assert torch.equal(clone.grama_scores[0][0], torch.ones(3))
+
+    def test_snapshot_is_kept_out_of_checkpoints(self):
+        # Transient training state, recaptured every cycle.
+        agent = self.agent()
+        agent.grama_scores = [[torch.ones(3)]]
+
+        checkpoint = get_checkpoint_dict(agent)
+
+        assert "grama_scores" not in checkpoint
+
+    def test_resume_restores_without_reporting_a_missing_attribute(
+        self,
+        tmp_path,
+        recwarn,
+    ):
+        agent = self.agent()
+        path = str(tmp_path / "agent.pt")
+        agent.save_checkpoint(path)
+
+        restored = DQN.load(path, device="cpu")
+
+        assert restored.grama_scores is None
+        assert not [
+            warning for warning in recwarn if "grama_scores" in str(warning.message)
+        ]
+
+    def registered_hooks(self, agent):
+        """Backward hooks currently attached to the agent's measured activations."""
+        return sum(
+            len(module._backward_hooks)
+            for _network_id, network in agent.unrolled_eval_networks()
+            for module in target_activations(network)
+        )
+
+    def test_reopening_a_block_does_not_stack_a_second_set_of_hooks(self):
+        agent = self.agent()
+
+        agent.init_training_step(capture_grama=True)
+        after_one = self.registered_hooks(agent)
+        agent.init_training_step(capture_grama=True)
+
+        assert after_one > 0
+        assert self.registered_hooks(agent) == after_one
+
+    def test_one_finalize_clears_the_hooks_of_a_reopened_block(self):
+        agent = self.agent()
+
+        agent.init_training_step(capture_grama=True)
+        agent.init_training_step(capture_grama=True)
+        agent.finalize_training_step(1)
+
+        assert self.registered_hooks(agent) == 0
+
+    def test_wrapped_agent_stores_the_snapshot_on_the_unwrapped_algorithm(self):
+        wrapper = RSNorm(self.agent())
+
+        wrapper.init_training_step(capture_grama=True)
+        wrapper.agent.actor(torch.rand(2, 4)).square().mean().backward()
+        wrapper.finalize_training_step(1)
+
+        assert wrapper.agent.grama_scores
+
+
+def grama_mlp_net_config() -> dict:
+    """Return a fresh MLP net config.
+
+    Deliberately not the shared encoder_mlp_config fixture.
+    """
+    return {
+        "latent_dim": 8,
+        "min_latent_dim": 1,
+        "encoder_config": {"hidden_size": [8, 8], "min_mlp_nodes": 1},
+        "head_config": {"hidden_size": [8, 8], "min_mlp_nodes": 1},
+    }
+
+
+@pytest.fixture
+def dqn_agent(vector_space, discrete_space):
+    return DQN(
+        vector_space,
+        discrete_space,
+        net_config=grama_mlp_net_config(),
+        device="cpu",
+    )
+
+
+class TestPerNeuronGrad:
+    """Reduce a backward hook's grad_input to one magnitude per neuron."""
+
+    def test_dense_gradient_averages_over_the_batch(self):
+        gradient = torch.tensor([[1.0, -2.0, 3.0], [1.0, -2.0, 3.0]])
+
+        result = core_base._per_neuron_grad((gradient,))
+
+        assert torch.allclose(result, torch.tensor([1.0, 2.0, 3.0]))
+
+    def test_conv_gradient_averages_over_batch_and_spatial(self):
+        # (batch=2, channels=3, 4, 4), one constant per channel.
+        gradient = torch.ones(2, 3, 4, 4)
+        gradient[:, 1] = -5.0
+        gradient[:, 2] = 2.0
+
+        result = core_base._per_neuron_grad((gradient,))
+
+        assert result.shape == (3,)
+        assert torch.allclose(result, torch.tensor([1.0, 5.0, 2.0]))
+
+    def test_absolute_value_is_taken_before_the_reduction(self):
+        # A neuron whose gradient cancels across the batch.
+        gradient = torch.tensor([[4.0], [-4.0]])
+
+        result = core_base._per_neuron_grad((gradient,))
+
+        # Assert 4.0, not 0.0.
+        assert torch.allclose(result, torch.tensor([4.0]))
+
+    def test_already_per_neuron_gradient_is_returned_unreduced(self):
+        gradient = torch.tensor([1.0, -2.0])
+
+        result = core_base._per_neuron_grad((gradient,))
+
+        assert torch.allclose(result, torch.tensor([1.0, 2.0]))
+
+    @pytest.mark.parametrize("grad_input", [(None,), None, ()])
+    def test_missing_gradient_is_unmeasured_rather_than_zero(self, grad_input):
+        result = core_base._per_neuron_grad(grad_input)
+
+        assert result is None
+
+
+class TestGraMaCapture:
+    """Capture per-neuron pre-activation gradients during a training block."""
+
+    def test_snapshot_layout_matches_the_measured_layers(self, dqn_agent):
+        expected = [
+            len(target_activations(network))
+            for _network_id, network in dqn_agent.unrolled_eval_networks()
+        ]
+
+        capture_grama_snapshot(dqn_agent, torch.rand(4, 4))
+
+        assert [len(entry) for entry in dqn_agent.grama_scores] == expected
+
+    def test_captured_widths_match_the_producing_layers(self, dqn_agent):
+        capture_grama_snapshot(dqn_agent, torch.rand(4, 4))
+
+        for entry in dqn_agent.grama_scores[0]:
+            assert entry is None or entry.dim() == 1
+
+    def test_only_the_last_minibatch_survives(self, dqn_agent):
+        # The metric's expectation is taken at fixed parameters, and the reset acts
+        # on the network as it stands at the end of the cycle.
+        dqn_agent.init_training_step(capture_grama=True)
+        dqn_agent.actor(torch.ones(4, 4) * 100.0).square().mean().backward()
+        small = torch.rand(4, 4) * 1e-3
+        dqn_agent.actor(small).square().mean().backward()
+        dqn_agent.finalize_training_step(1)
+        captured = dqn_agent.grama_scores[0][0]
+
+        # Reproduce the second minibatch alone.
+        dqn_agent.init_training_step(capture_grama=True)
+        dqn_agent.actor(small).square().mean().backward()
+        dqn_agent.finalize_training_step(1)
+
+        assert torch.allclose(captured, dqn_agent.grama_scores[0][0], atol=1e-8)
+
+    def test_hooks_are_released_when_the_block_completes(self, dqn_agent):
+        activation = target_activations(dqn_agent.actor)[0]
+
+        capture_grama_snapshot(dqn_agent, torch.rand(4, 4))
+
+        assert not activation._backward_hooks
+
+    def test_hooks_left_by_an_aborted_block_are_cleared_by_the_next_one(
+        self,
+        dqn_agent,
+    ):
+        activation = target_activations(dqn_agent.actor)[0]
+        dqn_agent.init_training_step(capture_grama=True)
+        assert activation._backward_hooks
+
+        dqn_agent.init_training_step(capture_grama=False)
+
+        assert not activation._backward_hooks
+
+    def test_repeated_captures_do_not_accumulate_hooks(self, dqn_agent):
+        activation = target_activations(dqn_agent.actor)[0]
+
+        for _ in range(3):
+            capture_grama_snapshot(dqn_agent, torch.rand(4, 4))
+
+        assert not activation._backward_hooks
+
+    def test_layer_outside_the_loss_graph_is_stored_as_unmeasured(
+        self,
+        vector_space,
+        discrete_space,
+    ):
+        # Only PPO's actor is exercised, so the critic never fires.
+        agent = PPO(vector_space, discrete_space, device="cpu")
+        capture_grama_snapshot(agent, torch.rand(4, 4))
+        networks = [network for _network_id, network in agent.unrolled_eval_networks()]
+        critic_index = networks.index(agent.critic)
+
+        # Recorded as None, so it is skipped downstream rather than read
+        # as a fully dormant layer and needlessly reset.
+        assert all(entry is None for entry in agent.grama_scores[critic_index])
+        assert any(entry is not None for entry in agent.grama_scores[0])
+
+    def test_a_failing_hook_propagates(self, dqn_agent, monkeypatch):
+        def explode(_grad_input):
+            msg = "hook blew up"
+            raise RuntimeError(msg)
+
+        monkeypatch.setattr(core_base, "_per_neuron_grad", explode)
+
+        with pytest.raises(RuntimeError, match="hook blew up"):
+            capture_grama_snapshot(dqn_agent, torch.rand(4, 4))
+
+    def test_a_layer_whose_gradient_reduces_to_nothing_stays_unmeasured(
+        self,
+        dqn_agent,
+        monkeypatch,
+    ):
+        monkeypatch.setattr(core_base, "_per_neuron_grad", lambda _grad_input: None)
+
+        capture_grama_snapshot(dqn_agent, torch.rand(4, 4))
+
+        assert all(entry is None for entry in dqn_agent.grama_scores[0])
+
+    def test_a_registration_failure_propagates(self, dqn_agent, monkeypatch):
+        def explode(_agent):
+            msg = "no networks here"
+            raise AttributeError(msg)
+
+        monkeypatch.setattr(EvolvableAlgorithm, "unrolled_eval_networks", explode)
+
+        with pytest.raises(AttributeError, match="no networks here"):
+            capture_grama_snapshot(dqn_agent, torch.rand(4, 4))
+
+    def test_compiled_agent_captures(self, dqn_agent, recwarn):
+        dqn_agent.torch_compiler = "default"
+
+        dqn_agent.init_training_step(capture_grama=True)
+        dqn_agent.finalize_training_step(1)
+
+        assert not any(issubclass(w.category, UserWarning) for w in recwarn.list)
+
+
+class TestUnrolledEvalNetworks:
+    """Enumerate the networks ReGraMa measures and rewrites."""
+
+    def test_target_networks_are_excluded(self, dqn_agent):
+        measured = [
+            network for _network_id, network in dqn_agent.unrolled_eval_networks()
+        ]
+
+        # The frozen copy must never be scored or reset.
+        assert dqn_agent.actor in measured
+        assert dqn_agent.actor_target not in measured
+
+    def test_actor_and_critic_are_both_measured(self, vector_space, discrete_space):
+        agent = PPO(vector_space, discrete_space, device="cpu")
+
+        measured = [network for _network_id, network in agent.unrolled_eval_networks()]
+
+        assert agent.actor in measured
+        assert agent.critic in measured
+
+    def test_multi_agent_module_dicts_are_unrolled_per_sub_policy(
+        self,
+        ma_vector_space,
+        ma_discrete_space,
+    ):
+        agent = IPPO(
+            ma_vector_space,
+            ma_discrete_space,
+            agent_ids=["agent_0", "agent_1", "agent_2"],
+            device="cpu",
+        )
+        policy = getattr(agent, agent.registry.policy())
+
+        result = agent.unrolled_eval_networks()
+
+        # One entry per sub-policy, each tagged with its own key, so a
+        # captured snapshot is never routed to another sub-agent's network.
+        for key, sub_network in policy.items():
+            assert any(
+                network_id == key and network is sub_network
+                for network_id, network in result
+            )
+
+
+class TestPolicyEvalNetworkIds:
+    """Identify the policy networks whose latent other networks may borrow."""
+
+    def test_the_policy_evaluation_network_is_reported(self, dqn_agent):
+        assert dqn_agent.eval_policy_network_ids() == {id(dqn_agent.actor)}
+
+    def test_multi_agent_policies_report_every_sub_policy(
+        self,
+        ma_vector_space,
+        ma_discrete_space,
+    ):
+        # Each sub-policy owns an encoder its own critic may borrow, so all of
+        # them count as policy networks.
+        agent = IPPO(
+            ma_vector_space,
+            ma_discrete_space,
+            agent_ids=["agent_0", "agent_1", "agent_2"],
+            device="cpu",
+        )
+        policy = getattr(agent, agent.registry.policy())
+
+        result = agent.eval_policy_network_ids()
+
+        assert result == {id(sub_network) for _key, sub_network in policy.items()}
+
+    def test_an_agent_without_a_policy_group_reports_no_policy(self, dqn_agent):
+        dqn_agent.registry.groups = []
+
+        assert dqn_agent.eval_policy_network_ids() == set()
+
+    def test_a_policy_the_agent_does_not_carry_reports_no_policy(self, dqn_agent):
+        dqn_agent.actor = None
+
+        assert dqn_agent.eval_policy_network_ids() == set()
+
+    def test_a_single_agent_policy_is_unwrapped_before_hashing(self, dqn_agent):
+        wrapped = object()
+        real_actor = dqn_agent.actor
+        dqn_agent.actor = wrapped
+        dqn_agent.accelerator = MagicMock(spec=Accelerator)
+        dqn_agent.accelerator.unwrap_model = MagicMock(return_value=real_actor)
+
+        result = dqn_agent.eval_policy_network_ids()
+
+        dqn_agent.accelerator.unwrap_model.assert_called_once_with(wrapped)
+        assert result == {id(real_actor)}
+
+    def test_a_plain_dict_policy_unwraps_every_member_under_accelerator(
+        self,
+        dqn_agent,
+    ):
+        real_actor = dqn_agent.actor
+        wrapped = object()
+        dqn_agent.actor = {"agent_0": wrapped}
+        dqn_agent.accelerator = MagicMock(spec=Accelerator)
+        dqn_agent.accelerator.unwrap_model = MagicMock(return_value=real_actor)
+
+        result = dqn_agent.eval_policy_network_ids()
+
+        dqn_agent.accelerator.unwrap_model.assert_called_once_with(wrapped)
+        assert result == {id(real_actor)}
+
+    def test_a_plain_dict_policy_without_an_accelerator_reports_raw_ids(
+        self,
+        dqn_agent,
+    ):
+        member = object()
+        dqn_agent.actor = {"agent_0": member}
+
+        assert dqn_agent.eval_policy_network_ids() == {id(member)}
+
+
+class TestGraMaCaptureUnderAccelerator:
+    """Capture on wrapped networks still lines up with the unwrapped ones."""
+
+    def test_snapshot_survives_the_unwrap_before_selection(
+        self,
+        vector_space,
+        discrete_space,
+        encoder_mlp_config,
+    ):
+        agent = DQN(
+            vector_space,
+            discrete_space,
+            net_config=encoder_mlp_config,
+            accelerator=Accelerator(cpu=True, device_placement=False),
+            device="cpu",
+        )
+        agent.wrap_models()
+        capture_grama_snapshot(agent, torch.rand(4, 4))
+
+        agent.unwrap_models()
+        snapshot = agent.grama_scores[0]
+
+        assert len(snapshot) == len(target_activations(agent.actor))
+        assert all(entry is not None for entry in snapshot)
+
+    def test_capture_measures_a_distributed_wrapped_network(
+        self,
+        gloo_process_group,
+        vector_space,
+        discrete_space,
+        encoder_mlp_config,
+    ):
+        agent = DQN(
+            vector_space,
+            discrete_space,
+            net_config=encoder_mlp_config,
+            accelerator=Accelerator(cpu=True, device_placement=False),
+            device="cpu",
+        )
+        agent.actor = nn.parallel.DistributedDataParallel(agent.actor)
+        inner = agent.accelerator.unwrap_model(agent.actor)
+
+        agent.init_training_step(capture_grama=True)
+        agent.actor(torch.rand(4, 4)).square().mean().backward()
+        agent.finalize_training_step(1)
+
+        # Every measured layer of the wrapped network scored a gradient,
+        # so the reset acts instead of silently degrading to Gaussian noise.
+        measured = agent.grama_scores[0]
+        assert len(measured) == len(target_activations(inner))
+        assert all(entry is not None for entry in measured)
+
+    def test_distributed_wrapped_module_dicts_are_still_unrolled(
+        self,
+        gloo_process_group,
+        ma_vector_space,
+        ma_discrete_space,
+    ):
+        agent = IPPO(
+            ma_vector_space,
+            ma_discrete_space,
+            agent_ids=["agent_0", "agent_1", "agent_2"],
+            accelerator=Accelerator(cpu=True, device_placement=False),
+            device="cpu",
+        )
+        policy_name = agent.registry.policy()
+        policy = getattr(agent, policy_name)
+        setattr(agent, policy_name, nn.parallel.DistributedDataParallel(policy))
+
+        result = agent.unrolled_eval_networks()
+
+        for key, sub_network in policy.items():
+            assert any(
+                network_id == key and network is sub_network
+                for network_id, network in result
+            )
