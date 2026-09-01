@@ -15,7 +15,7 @@ clean-dist:
 
 # Fail publish if the arena pin drifts, or the all extra misses an extra.
 check-extras:
-    python scripts/check-extras.py
+    uv run python scripts/check-extras.py
 
 build: clean-dist
     uv build --package agilerl-arena
@@ -62,3 +62,7 @@ typecheck:
     uv sync --all-groups --extra all
     uv run pre-commit run arena-symlink --all-files
     uv run pre-commit run ty --all-files
+
+# This tree's .pre-commit-config.yaml (AgileRL/AgileRL git root).
+pre-commit *args:
+    uv run pre-commit run --all-files {{ args }}

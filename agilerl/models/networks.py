@@ -523,7 +523,7 @@ class FinetuningNetworkSpec(BaseModel):
             if not HAS_LLM_DEPENDENCIES:
                 msg = "LLM dependencies are required to resolve LoRA configuration."
                 raise ImportError(msg)
-            from peft import LoraConfig as _LoraConfig
+            from peft import LoraConfig as _LoraConfig  # optional extra: llm
 
             peft_lora = self.lora_config.model_dump()
             peft_lora["r"] = peft_lora.pop("lora_r")

@@ -18,13 +18,13 @@ algorithm:
         sleep_mode: false
 
 environment:
-    env_type: reasoning
+    env_type: rollout
     dataset: Jiayi-Pan/Countdown-Tasks-3to4
     columns:
         nums: question
         target: answer
-    reward_file_path: reward.py
-    reward_fn_name: combined_rewards
+    rubric_file_path: reward.py
+    rubric_name: RUBRIC
     prompt_template:
         system_0: You are a helpful assistant. You first think about the reasoning process in your mind and then provide the user with the answer.
         user_1: Using each number in this list only once {question}, create an equation that equals {answer}. You can use basic arithmetic operations (+,

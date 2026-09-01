@@ -134,24 +134,6 @@ class NoisyLinear(nn.Module):
         return x.sign().mul_(x.abs().sqrt_())
 
 
-class NewGELU(nn.Module):
-    """Implement the GELU activation function currently in Google BERT repo (identical to OpenAI GPT).
-    Reference: Gaussian Error Linear Units (GELU) paper: https://arxiv.org/abs/1606.08415.
-    """
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return (
-            0.5
-            * x
-            * (
-                1.0
-                + torch.tanh(
-                    math.sqrt(2.0 / math.pi) * (x + 0.044715 * torch.pow(x, 3.0)),
-                )
-            )
-        )
-
-
 class ResidualBlock(nn.Module):
     """Residual block with support for even and odd kernel sizes.
 
@@ -185,6 +167,9 @@ class ResidualBlock(nn.Module):
             device=device,
         )
         self.bn1 = nn.BatchNorm2d(hidden_channels, device=device)
+        # A registered sub-module rather than a functional call, so GraMa capture
+        # can reach the block's hidden channels.
+        self.act = nn.ReLU()
 
         self.conv2 = nn.Conv2d(
             hidden_channels,
@@ -213,7 +198,7 @@ class ResidualBlock(nn.Module):
             x,
             kernel_size=self.conv1.kernel_size[0],
         )  # Apply manual padding
-        x = F.relu(self.bn1(self.conv1(x)))
+        x = self.act(self.bn1(self.conv1(x)))
 
         x = self.asymmetric_padding(
             x,
@@ -250,6 +235,7 @@ class SimbaResidualBlock(nn.Module):
 
         self.layer_norm = nn.LayerNorm(hidden_size, device=device)
         self.linear1 = nn.Linear(hidden_size, hidden_size * scale_factor, device=device)
+        self.act = nn.ReLU()
         self.linear2 = nn.Linear(hidden_size * scale_factor, hidden_size, device=device)
 
         # initialize weigts using he initialization
@@ -259,6 +245,6 @@ class SimbaResidualBlock(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         res = x
         x = self.layer_norm(x)
-        x = F.relu(self.linear1(x))
+        x = self.act(self.linear1(x))
         x = self.linear2(x)
         return res + x

@@ -51,8 +51,6 @@ class DuelingDistributionalMLP(EvolvableMLP):
     :type min_mlp_nodes: int, optional
     :param max_mlp_nodes: Maximum number of nodes a layer can have within the network, defaults to 500
     :type max_mlp_nodes: int, optional
-    :param new_gelu: Use new GELU activation function, defaults to False
-    :type new_gelu: bool, optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: DeviceType, optional
     """
@@ -76,7 +74,6 @@ class DuelingDistributionalMLP(EvolvableMLP):
         max_hidden_layers: int = 3,
         min_mlp_nodes: int = 64,
         max_mlp_nodes: int = 500,
-        new_gelu: bool = False,
         device: DeviceType = "cpu",
     ) -> None:
 
@@ -96,7 +93,6 @@ class DuelingDistributionalMLP(EvolvableMLP):
             init_layers=init_layers,
             noisy=noisy,
             noise_std=noise_std,
-            new_gelu=new_gelu,
             device=device,
             name="value",
         )
@@ -117,7 +113,6 @@ class DuelingDistributionalMLP(EvolvableMLP):
             activation=self.activation,
             noise_std=self.noise_std,
             device=self.device,
-            new_gelu=self.new_gelu,
             name="advantage",
         )
 
@@ -185,7 +180,6 @@ class DuelingDistributionalMLP(EvolvableMLP):
             activation=self.activation,
             noise_std=self.noise_std,
             device=self.device,
-            new_gelu=self.new_gelu,
             name="advantage",
         )
 

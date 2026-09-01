@@ -2264,12 +2264,10 @@ class TestGetNumActions:
 
 class TestModuleCheckpointDict:
     def test_dispatches_to_multiagent_for_module_dict(self, monkeypatch):
-        import agilerl.modules.base as base_mod
-
         class FakeModuleDict:
             pass
 
-        monkeypatch.setattr(base_mod, "ModuleDict", FakeModuleDict)
+        monkeypatch.setattr(algo_utils, "ModuleDict", FakeModuleDict)
         sentinel = {"multi": True}
         monkeypatch.setattr(
             algo_utils, "module_checkpoint_multiagent", lambda module, name: sentinel

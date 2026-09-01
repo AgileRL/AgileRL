@@ -83,8 +83,6 @@ Below we show our implementation of our custom head with a distributional duelin
             :type output_vanish: bool, optional
             :param init_layers: Initialise network layers, defaults to True
             :type init_layers: bool, optional
-            :param new_gelu: Use new GELU activation function, defaults to False
-            :type new_gelu: bool, optional
             :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
             :type device: str, optional
             """
@@ -103,7 +101,6 @@ Below we show our implementation of our custom head with a distributional duelin
                 max_hidden_layers: int = 3,
                 min_mlp_nodes: int = 64,
                 max_mlp_nodes: int = 500,
-                new_gelu: bool = False,
                 device: str = "cpu",
             ) -> None:
 
@@ -122,7 +119,6 @@ Below we show our implementation of our custom head with a distributional duelin
                     init_layers=False,
                     noisy=True,
                     noise_std=noise_std,
-                    new_gelu=new_gelu,
                     device=device,
                     name="value",
                 )
@@ -143,7 +139,6 @@ Below we show our implementation of our custom head with a distributional duelin
                     activation=self.activation,
                     noise_std=self.noise_std,
                     device=self.device,
-                    new_gelu=self.new_gelu,
                     name="advantage",
                 )
 
@@ -206,7 +201,6 @@ Below we show our implementation of our custom head with a distributional duelin
                     activation=self.activation,
                     noise_std=self.noise_std,
                     device=self.device,
-                    new_gelu=self.new_gelu,
                     name="advantage",
                 )
 

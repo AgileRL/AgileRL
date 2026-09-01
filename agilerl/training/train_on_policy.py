@@ -15,6 +15,7 @@ from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.population import Population
 from agilerl.protocols import SelectionStrategyProtocol
+from agilerl.rollouts import collect_rollouts, collect_rollouts_recurrent
 from agilerl.typing import InitHyperparams, RolloutReturn
 from agilerl.utils.algo_utils import get_num_envs
 from agilerl.utils.utils import (
@@ -208,6 +209,9 @@ def train_on_policy(
         loggers=loggers,
     )
 
+    # Enable the per-neuron gradient capture that ReGraMa parameter mutations read.
+    capture_grama = mutation is not None and mutation.parameters_mut > 0
+
     checkpoint_count = 0
 
     # Pre-training mutation
@@ -222,18 +226,16 @@ def train_on_policy(
 
         for agent in population.agents:
             agent.set_training_mode(True)
-            agent.init_training_step()
+            agent.init_training_step(capture_grama)
 
             steps = 0
             completed_episode_scores: list[float] = []
             n_steps = -(agent.learn_step // -num_envs)
             if active_collect is None:
                 if getattr(agent, "recurrent", False):
-                    from agilerl.rollouts import (
-                        collect_rollouts_recurrent as active_collect,
-                    )
+                    active_collect = collect_rollouts_recurrent
                 else:
-                    from agilerl.rollouts import collect_rollouts as active_collect
+                    active_collect = collect_rollouts
 
             # Collect rollouts and learn until evo_steps is reached
             last_obs, last_done, last_scores, last_info = None, None, None, None

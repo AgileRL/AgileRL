@@ -427,7 +427,7 @@ def test_expert_lora_vllm_key_map_and_filter():
 
     _, routed_block = _routed_pair()
     key_map = expert_lora_vllm_key_map(routed_block)
-    # Whatever the nesting order, gate_up lands on <experts>.base_layer and
+    # Whatever the nesting order, gate_up is assigned to <experts>.base_layer and
     # down on <experts> — the file format vLLM's fused-MoE loader parses.
     assert set(key_map.values()) == {"experts", "experts.base_layer"}
     gate_up_key = next(

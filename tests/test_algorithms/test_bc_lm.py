@@ -752,17 +752,34 @@ class TestBC_PolicyBeamRaw:
         bc_policy.beam_raw(tokens, attn_mask, term, beam_width=1, max_generation_len=5)
 
     def test_beam_raw_termination_mask_update_guaranteed(self, bc_policy):
-        """Guaranteed test to hit termination_mask update in beam search."""
+        """Bias the model toward eoa so the termination check runs regardless of RNG state."""
         tokens = torch.randint(0, 9, (1, 1), dtype=torch.long)
         attn_mask = torch.ones(1, 1, dtype=torch.float)
 
-        def term(text):
-            return False  # Never terminate
+        class EoaBiasedModel:
+            def __init__(self, inner):
+                self.inner = inner
 
+            def __getattr__(self, name):
+                return getattr(self.inner, name)
+
+            def __call__(self, *args, **kwargs):
+                logits, past_key_values = self.inner(*args, **kwargs)
+                logits = logits.clone()
+                logits[..., 1] = 1e9
+                return logits, past_key_values
+
+        called = []
+
+        def term(text):
+            called.append(text)
+            return False
+
+        bc_policy.bc_lm = EoaBiasedModel(bc_policy.bc_lm)
         bc_policy.kind = "beam"
         bc_policy.generation_kwargs["beam_width"] = 1
-        # Force the while loop to run and hit the termination_mask update
         bc_policy.beam_raw(tokens, attn_mask, term, beam_width=1, max_generation_len=3)
+        assert called, "beam search never sampled eoa past the dialogue length"
 
     def test_beam_raw_none_max_len(self, bc_lm_none_max_len):
         """Test beam_raw when dataset.max_len is None."""
@@ -1212,3 +1229,76 @@ class TestMapPytree:
 
         # The function should return the original string as-is for non-tensor/numpy types
         assert result == "string"
+
+
+class TestBC_PolicyBeamRawTruncation:
+    """Generated text is cut at the end-of-answer marker before it is returned.
+
+    Decoding is stubbed rather than sampled: the branch under test is the
+    truncation, and which tokens the model happens to emit is irrelevant to it.
+    """
+
+    @staticmethod
+    def _staged_decode(prompt_len: int, full_text: str):
+        def decode(tokenizer, token_ids):
+            del tokenizer
+            return "P" if len(token_ids) <= prompt_len else full_text
+
+        return decode
+
+    def test_text_after_the_eoa_marker_is_dropped(self, bc_policy, monkeypatch):
+        monkeypatch.setattr(
+            "agilerl.algorithms.bc_lm._decode_str",
+            self._staged_decode(1, "P answer </a> leftover"),
+        )
+        tokens = torch.zeros(1, 1, dtype=torch.long)
+        attn_mask = torch.ones(1, 1, dtype=torch.float)
+
+        generations, _scores = bc_policy.beam_raw(
+            tokens,
+            attn_mask,
+            lambda text: False,
+            beam_width=1,
+            max_generation_len=2,
+        )
+
+        _input_str, outputs = generations[0]
+        assert outputs == ["answer"]
+
+    def test_text_after_the_pad_marker_is_dropped(self, bc_policy, monkeypatch):
+        monkeypatch.setattr(
+            "agilerl.algorithms.bc_lm._decode_str",
+            self._staged_decode(1, "P answer <pad> <pad>"),
+        )
+        tokens = torch.zeros(1, 1, dtype=torch.long)
+        attn_mask = torch.ones(1, 1, dtype=torch.float)
+
+        generations, _scores = bc_policy.beam_raw(
+            tokens,
+            attn_mask,
+            lambda text: False,
+            beam_width=1,
+            max_generation_len=2,
+        )
+
+        _input_str, outputs = generations[0]
+        assert outputs == ["answer"]
+
+    def test_text_without_a_marker_is_returned_whole(self, bc_policy, monkeypatch):
+        monkeypatch.setattr(
+            "agilerl.algorithms.bc_lm._decode_str",
+            self._staged_decode(1, "P answer continues"),
+        )
+        tokens = torch.zeros(1, 1, dtype=torch.long)
+        attn_mask = torch.ones(1, 1, dtype=torch.float)
+
+        generations, _scores = bc_policy.beam_raw(
+            tokens,
+            attn_mask,
+            lambda text: False,
+            beam_width=1,
+            max_generation_len=2,
+        )
+
+        _input_str, outputs = generations[0]
+        assert outputs == ["answer continues"]

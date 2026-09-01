@@ -3,6 +3,7 @@
 
 import copy
 import gc
+import warnings
 from typing import TYPE_CHECKING, ClassVar
 
 import numpy as np
@@ -14,7 +15,7 @@ from accelerate.utils import DeepSpeedPlugin
 from gymnasium import spaces
 
 from agilerl import HAS_DEEPSPEED, HAS_LLM_DEPENDENCIES, HAS_VLLM
-from agilerl.algorithms import DDPG, DQN, PPO, TD3, NeuralUCB
+from agilerl.algorithms import CQN, DDPG, DQN, IPPO, MADDPG, PPO, TD3, NeuralUCB
 from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
 
 if HAS_LLM_DEPENDENCIES:
@@ -23,16 +24,19 @@ from agilerl.hpo.mutation import (
     MutationError,
     Mutations,
     get_exp_layer,
-    get_offspring_eval_modules,
     set_global_seed,
 )
 from agilerl.modules import EvolvableBERT, EvolvableModule, ModuleDict
+from agilerl.utils import mutation_utils
 from agilerl.utils.utils import create_population
 from agilerl.wrappers.agent import AgentWrapper, AsyncAgentsWrapper, RSNorm
 from tests.helper_functions import (
     assert_state_dicts_equal,
     generate_discrete_space,
+    generate_multi_agent_box_spaces,
+    generate_multi_agent_discrete_spaces,
     generate_random_box_space,
+    grama_scores_for,
 )
 
 if HAS_DEEPSPEED and HAS_VLLM:
@@ -184,12 +188,12 @@ class TestMutationsInit:
             parameters,
             activation,
             rl_hp,
-            mutation_sd,
-            activation_selection,
-            mutate_elite,
-            rand_seed,
-            device,
-            accelerator,
+            mutation_sd=mutation_sd,
+            activation_selection=activation_selection,
+            mutate_elite=mutate_elite,
+            rand_seed=rand_seed,
+            device=device,
+            accelerator=accelerator,
         )
 
         assert mutations.rng is not None
@@ -307,8 +311,10 @@ class TestMutationsArchitectureMutateSingle:
         muts = Mutations(0, 1, 0.5, 0, 0, 0, 0.1, device=device)
         individual = DummyIndividual()
         monkeypatch.setattr(
-            "agilerl.hpo.mutation.get_offspring_eval_modules",
-            lambda _ind: ({"actor": DummyPolicy()}, {}),
+            DummyIndividual,
+            "get_eval_modules",
+            lambda self, cloning=True: ({"actor": DummyPolicy()}, {}),
+            raising=False,
         )
         with pytest.warns(
             UserWarning, match="No mutation methods found for the policy network"
@@ -330,8 +336,10 @@ class TestMutationsArchitectureMutateMulti:
         muts = Mutations(0, 1, 0.5, 0, 0, 0, 0.1, device=device)
         individual = DummyIndividual()
         monkeypatch.setattr(
-            "agilerl.hpo.mutation.get_offspring_eval_modules",
-            lambda _ind: ({"actors": DummyPolicy()}, {}),
+            DummyIndividual,
+            "get_eval_modules",
+            lambda self, cloning=True: ({"actors": DummyPolicy()}, {}),
+            raising=False,
         )
         with pytest.warns(
             UserWarning, match="No mutation methods found for the policy network"
@@ -391,8 +399,10 @@ class TestMutationsArchitectureMutateMulti:
         )
         muts = Mutations(0, 1, 0.5, 0, 0, 0, 0.1, device=device)
         monkeypatch.setattr(
-            "agilerl.hpo.mutation.get_offspring_eval_modules",
-            lambda _ind: ({"actors": policy}, {}),
+            DummyIndividual,
+            "get_eval_modules",
+            lambda self, cloning=True: ({"actors": policy}, {}),
+            raising=False,
         )
         monkeypatch.setattr(
             muts,
@@ -452,8 +462,10 @@ class TestMutationsArchitectureMutateMulti:
         evals = {"critics": ModuleDict({"agent_0": DummyEval()}, device="cpu")}
         muts = Mutations(0, 1, 0.5, 0, 0, 0, 0.1, device=device)
         monkeypatch.setattr(
-            "agilerl.hpo.mutation.get_offspring_eval_modules",
-            lambda _ind: ({"actors": policy}, evals),
+            DummyIndividual,
+            "get_eval_modules",
+            lambda self, cloning=True: ({"actors": policy}, evals),
+            raising=False,
         )
         monkeypatch.setattr(
             muts,
@@ -614,12 +626,23 @@ class TestMutationsParameterMutation:
         """parameter_mutation raises MutationError when the individual has no"""
 
         class NoPolicyRegistry:
+            def __init__(self):
+                self.groups = []
+
             def policy(self, return_group=False):
                 return None
 
         class NoPolicyIndividual:
             def __init__(self):
                 self.registry = NoPolicyRegistry()
+                self.grama_scores = None
+                self.accelerator = None
+
+            def unrolled_eval_networks(self):
+                return []
+
+            def eval_policy_network_ids(self):
+                return set()
 
         muts = Mutations(0, 1, 0.5, 0, 0, 0, 0.1, device=device)
         with pytest.raises(MutationError, match="No policy network group registered"):
@@ -2411,7 +2434,36 @@ def test_set_global_seed(seed):
         assert state is not None
 
 
-def test_get_offspring_eval_modules_returns_policy_and_modules(
+def test_set_global_seed_seeds_cuda_when_a_device_is_present():
+    """CPU CI never takes this branch, so the device check is faked.
+
+    An unseeded CUDA generator makes a GPU run unreproducible even though the
+    CPU generators were seeded.
+    """
+    from unittest.mock import patch
+
+    with (
+        patch("agilerl.hpo.mutation.torch.cuda.is_available", return_value=True),
+        patch("agilerl.hpo.mutation.torch.cuda.manual_seed") as cuda_seed,
+    ):
+        set_global_seed(42)
+
+    cuda_seed.assert_called_once_with(42)
+
+
+def test_set_global_seed_skips_cuda_without_a_device():
+    from unittest.mock import patch
+
+    with (
+        patch("agilerl.hpo.mutation.torch.cuda.is_available", return_value=False),
+        patch("agilerl.hpo.mutation.torch.cuda.manual_seed") as cuda_seed,
+    ):
+        set_global_seed(42)
+
+    cuda_seed.assert_not_called()
+
+
+def test_get_eval_modules_returns_policy_and_modules(
     vector_space, discrete_space, encoder_mlp_config
 ):
     pop = DQN.population(
@@ -2421,10 +2473,28 @@ def test_get_offspring_eval_modules_returns_policy_and_modules(
         net_config=encoder_mlp_config,
         device="cpu",
     )
-    policy, offspring_evals = get_offspring_eval_modules(pop[0])
+    policy, offspring_evals = pop[0].get_eval_modules()
     assert isinstance(policy, dict)
     assert isinstance(offspring_evals, dict)
     assert len(policy) >= 1
+
+
+def test_get_eval_modules_cloning_false_returns_the_live_modules(
+    vector_space, discrete_space, encoder_mlp_config
+):
+    pop = DQN.population(
+        size=1,
+        observation_space=vector_space,
+        action_space=discrete_space,
+        net_config=encoder_mlp_config,
+        device="cpu",
+    )
+    agent = pop[0]
+    policy_name = agent.registry.policy()
+
+    policy, _offspring_evals = agent.get_eval_modules(cloning=False)
+
+    assert policy[policy_name] is getattr(agent, policy_name)
 
 
 class _IndexedAgent:
@@ -2612,3 +2682,1357 @@ class TestMutationsApplyMutation:
             assert wrapper.agent is not original
             assert wrapper.agent.mut == "tagged"
             assert wrapper.agent.hook_calls == 1
+
+
+_FP_NET_CONFIG = {
+    "latent_dim": 8,
+    "min_latent_dim": 1,
+    "max_latent_dim": 128,
+    "encoder_config": {"hidden_size": [8], "min_mlp_nodes": 1, "layer_norm": False},
+    "head_config": {"hidden_size": [8], "min_mlp_nodes": 1, "layer_norm": False},
+}
+
+
+def _fp_net_config(**overrides):
+    """Return the function-preserving net config with nested overrides applied."""
+    config = copy.deepcopy(_FP_NET_CONFIG)
+    for key, value in overrides.items():
+        if isinstance(value, dict) and isinstance(config.get(key), dict):
+            config[key].update(value)
+        else:
+            config[key] = value
+    return config
+
+
+def _fp_mutations(seed=0, activation=0.0):
+    """Return an architecture-mutation-only operator."""
+    return Mutations(0, 1, 0, 0, activation, 0, rand_seed=seed, device="cpu")
+
+
+def _pin_mutation_method(monkeypatch, method):
+    """Force every sampled architecture mutation to be the given method."""
+    monkeypatch.setattr(
+        EvolvableModule,
+        "sample_mutation_method",
+        lambda self, *args, **kwargs: method,
+    )
+
+
+def _dqn(**config_overrides):
+    """Return a small unnormalised DQN whose additions can be preserved."""
+    return DQN(
+        generate_random_box_space((4,)),
+        generate_discrete_space(2),
+        net_config=_fp_net_config(**config_overrides),
+        device="cpu",
+    )
+
+
+def _recurrent_ppo():
+    """Return a PPO agent whose recurrent encoder is out of scope."""
+    return PPO(
+        generate_random_box_space((4,)),
+        generate_discrete_space(2),
+        recurrent=True,
+        net_config={"encoder_config": {"hidden_state_size": 8}},
+        device="cpu",
+    )
+
+
+def _fp_neural_ucb():
+    """Return a small unnormalised bandit agent."""
+    return NeuralUCB(
+        generate_random_box_space((4,)),
+        generate_discrete_space(2),
+        net_config=_fp_net_config(),
+        device="cpu",
+    )
+
+
+def _fp_cqn():
+    """Return a small unnormalised offline agent."""
+    return CQN(
+        generate_random_box_space((4,)),
+        generate_discrete_space(2),
+        net_config=_fp_net_config(),
+        device="cpu",
+    )
+
+
+def _fp_ippo():
+    """Return a small unnormalised multi-agent on-policy agent."""
+    return IPPO(
+        generate_multi_agent_box_spaces(2, (4,)),
+        generate_multi_agent_discrete_spaces(2, 2),
+        agent_ids=["speaker_0", "listener_0"],
+        net_config=_fp_net_config(),
+        device="cpu",
+    )
+
+
+def _fp_maddpg():
+    """Return a small unnormalised multi-agent off-policy agent."""
+    return MADDPG(
+        generate_multi_agent_box_spaces(2, (4,)),
+        generate_multi_agent_discrete_spaces(2, 2),
+        agent_ids=["agent_0", "other_0"],
+        net_config=_fp_net_config(),
+        device="cpu",
+    )
+
+
+def _policy_output(agent, observation):
+    """Return the policy's evaluation-mode output."""
+    policy = getattr(agent, agent.registry.policy())
+    policy.eval()
+    return policy(observation)
+
+
+def _mutation_shift(agent, observation, seed=0):
+    """Return how far one architecture mutation moves the policy's output."""
+    policy = getattr(agent, agent.registry.policy())
+    policy.rng = np.random.default_rng(seed)
+    before = _policy_output(agent, observation)
+    mutated = _fp_mutations().architecture_mutate(agent)
+    return (_policy_output(mutated, observation) - before).abs().max().item()
+
+
+class TestMutationsFunctionPreservingArchMutation:
+    """Architecture additions leave the network's output unchanged."""
+
+    @pytest.mark.parametrize(
+        "method",
+        [
+            "head_net.add_node",
+            "encoder.add_node",
+            "add_latent_node",
+            "head_net.add_layer",
+        ],
+    )
+    def test_an_addition_keeps_the_policy_output(self, monkeypatch, method):
+        _pin_mutation_method(monkeypatch, method)
+        monkeypatch.setattr(mutation_utils, "FP_NOISE_SCALE", 0.0)
+        agent = _dqn()
+        observation = torch.randn(4, 4)
+        before = _policy_output(agent, observation)
+
+        agent = _fp_mutations().architecture_mutate(agent)
+
+        after = _policy_output(agent, observation)
+        torch.testing.assert_close(after, before, rtol=0, atol=1e-6)
+
+    @pytest.mark.parametrize(
+        "method",
+        [
+            "head_net.add_node",
+            "encoder.add_node",
+            "add_latent_node",
+            "head_net.add_layer",
+        ],
+    )
+    def test_an_addition_disturbs_the_policy_far_less_than_the_original(
+        self, monkeypatch, method
+    ):
+        torch.manual_seed(0)
+        _pin_mutation_method(monkeypatch, method)
+        observation = torch.randn(4, 4)
+        agent = _dqn()
+        baseline = agent.clone()
+
+        preserved_shift = _mutation_shift(agent, observation)
+        monkeypatch.setattr(
+            "agilerl.hpo.mutation.preserve_architecture_mutation",
+            lambda *args, **kwargs: None,
+        )
+        original_shift = _mutation_shift(baseline, observation)
+
+        assert preserved_shift < original_shift / 5
+
+    @pytest.mark.parametrize(
+        ("method", "attribute"),
+        [
+            ("head_net.add_node", "head_net"),
+            ("encoder.add_node", "encoder"),
+        ],
+    )
+    def test_the_architecture_actually_grew(self, monkeypatch, method, attribute):
+        _pin_mutation_method(monkeypatch, method)
+        agent = _dqn()
+        before = getattr(agent.actor, attribute).hidden_size[0]
+
+        agent = _fp_mutations().architecture_mutate(agent)
+
+        assert getattr(agent.actor, attribute).hidden_size[0] > before
+
+    def test_a_normalised_head_falls_back_to_the_original_operator(self, monkeypatch):
+        _pin_mutation_method(monkeypatch, "head_net.add_node")
+        agent = _dqn(head_config={"layer_norm": True})
+        observation = torch.randn(4, 4)
+        before = _policy_output(agent, observation)
+
+        agent = _fp_mutations().architecture_mutate(agent)
+
+        assert not torch.allclose(_policy_output(agent, observation), before, atol=1e-6)
+
+    def test_a_wrapped_agent_is_preserved(self, monkeypatch):
+        _pin_mutation_method(monkeypatch, "head_net.add_node")
+        monkeypatch.setattr(mutation_utils, "FP_NOISE_SCALE", 0.0)
+        agent = RSNorm(_dqn())
+        observation = torch.randn(4, 4)
+        before = _policy_output(agent.agent, observation)
+
+        mutations = _fp_mutations()
+        agent = mutations._apply_mutation(agent, mutations.architecture_mutate)
+
+        after = _policy_output(agent.agent, observation)
+        torch.testing.assert_close(after, before, rtol=0, atol=1e-6)
+
+    def test_a_deeper_head_at_max_depth_falls_back_to_a_preserved_widening(
+        self, monkeypatch
+    ):
+        _pin_mutation_method(monkeypatch, "head_net.add_layer")
+        monkeypatch.setattr(mutation_utils, "FP_NOISE_SCALE", 0.0)
+        agent = _dqn(
+            head_config={
+                "hidden_size": [8, 8],
+                "min_hidden_layers": 1,
+                "max_hidden_layers": 2,
+            }
+        )
+        observation = torch.randn(4, 4)
+        before = _policy_output(agent, observation)
+
+        agent = _fp_mutations().architecture_mutate(agent)
+
+        assert agent.mut == "head_net.add_node"
+        torch.testing.assert_close(
+            _policy_output(agent, observation), before, rtol=0, atol=1e-6
+        )
+
+    def test_enabled_activation_mutations_leave_the_new_layer_preserved(
+        self, monkeypatch
+    ):
+        _pin_mutation_method(monkeypatch, "head_net.add_layer")
+        agent = _dqn()
+        observation = torch.randn(4, 4)
+        before = _policy_output(agent, observation)
+
+        agent = _fp_mutations(activation=0.2).architecture_mutate(agent)
+
+        after = _policy_output(agent, observation)
+        torch.testing.assert_close(after, before, rtol=0, atol=1e-6)
+
+    def test_a_non_relu_head_falls_back_with_activation_mutations_enabled(
+        self, monkeypatch
+    ):
+        _pin_mutation_method(monkeypatch, "head_net.add_layer")
+        agent = _dqn(head_config={"activation": "Tanh"})
+        observation = torch.randn(4, 4)
+        before = _policy_output(agent, observation)
+
+        agent = _fp_mutations(activation=0.2).architecture_mutate(agent)
+
+        assert not torch.allclose(_policy_output(agent, observation), before, atol=1e-6)
+
+    def test_a_widened_latent_keeps_a_continuous_critic_intact(self, monkeypatch):
+        _pin_mutation_method(monkeypatch, "add_latent_node")
+        monkeypatch.setattr(mutation_utils, "FP_NOISE_SCALE", 0.0)
+        agent = DDPG(
+            generate_random_box_space((4,)),
+            generate_random_box_space((2,), low=-1, high=1),
+            net_config=_fp_net_config(),
+            device="cpu",
+        )
+        observation = torch.randn(4, 4)
+        actions = torch.randn(4, 2, requires_grad=True)
+        agent.critic.eval()
+        before = agent.critic(observation, actions)
+
+        agent = _fp_mutations().architecture_mutate(agent)
+
+        agent.critic.eval()
+        after = agent.critic(observation, actions)
+        torch.testing.assert_close(after, before, rtol=0, atol=1e-6)
+        assert torch.count_nonzero(torch.autograd.grad(after.sum(), actions)[0]) > 0
+
+
+# These are the remaining single-agent families, whose trainers reach the architecture
+# operator and whose preservation is otherwise never asserted.
+_FP_SINGLE_AGENT_FAMILIES = {
+    "bandit (NeuralUCB)": _fp_neural_ucb,
+    "offline (CQN)": _fp_cqn,
+}
+
+
+class TestMutationsFunctionPreservingSingleAgentFamilies:
+    """Additions are preserved for the bandit and offline families too."""
+
+    @pytest.mark.parametrize(
+        "method",
+        [
+            "head_net.add_node",
+            "encoder.add_node",
+            "add_latent_node",
+            "head_net.add_layer",
+        ],
+    )
+    @pytest.mark.parametrize(
+        "family", list(_FP_SINGLE_AGENT_FAMILIES), ids=list(_FP_SINGLE_AGENT_FAMILIES)
+    )
+    def test_an_addition_keeps_the_policy_output(self, monkeypatch, family, method):
+        _pin_mutation_method(monkeypatch, method)
+        monkeypatch.setattr(mutation_utils, "FP_NOISE_SCALE", 0.0)
+        agent = _FP_SINGLE_AGENT_FAMILIES[family]()
+        observation = torch.randn(4, 4)
+        before = _policy_output(agent, observation)
+
+        agent = _fp_mutations().architecture_mutate(agent)
+
+        after = _policy_output(agent, observation)
+        torch.testing.assert_close(after, before, rtol=0, atol=1e-6)
+
+
+def _assert_declines_without_warning(architecture_mutate, *agents):
+    """Run one or more mutations and assert none of them raised a UserWarning."""
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        for agent in agents:
+            architecture_mutate(agent)
+
+    assert not [w for w in caught if issubclass(w.category, UserWarning)]
+
+
+class TestMutationsFunctionPreservingDeclineIsSilent:
+    """A declined mutation falls back to the original operator with no report."""
+
+    def test_a_normalised_layer_declines_without_warning(self, monkeypatch):
+        _pin_mutation_method(monkeypatch, "head_net.add_node")
+        mutations = _fp_mutations()
+
+        _assert_declines_without_warning(
+            mutations.architecture_mutate, _dqn(head_config={"layer_norm": True})
+        )
+
+    def test_a_recurrent_encoder_declines_without_warning(self, monkeypatch):
+        _pin_mutation_method(monkeypatch, "encoder.add_node")
+        mutations = _fp_mutations()
+
+        _assert_declines_without_warning(
+            mutations.architecture_mutate, _recurrent_ppo()
+        )
+
+    def test_repeated_declines_stay_silent(self, monkeypatch):
+        _pin_mutation_method(monkeypatch, "head_net.add_node")
+        mutations = _fp_mutations()
+
+        _assert_declines_without_warning(
+            mutations.architecture_mutate,
+            _dqn(head_config={"layer_norm": True}),
+            _dqn(head_config={"layer_norm": True}),
+        )
+
+
+def _latent_output(network, observation):
+    """Return a network's deterministic output, bypassing any sampling head."""
+    network.eval()
+    head = getattr(network.head_net, "wrapped", network.head_net)
+    with torch.random.fork_rng(devices=[]):
+        torch.manual_seed(0)
+        return head(network.encoder(observation))
+
+
+def _critic_inputs(critic, batch=4):
+    """Return a fixed (joint observation, action) pair a critic accepts."""
+    observation = {
+        key: torch.as_tensor(
+            np.stack([subspace.sample() for _ in range(batch)])
+        ).float()
+        for key, subspace in critic.observation_space.spaces.items()
+    }
+    return observation, torch.randn(batch, critic.num_actions)
+
+
+def _critic_output(critic, observation, actions):
+    """Return a critic's evaluation-mode output."""
+    critic.eval()
+    with torch.no_grad():
+        return critic(observation, actions).clone()
+
+
+# Each family paired with the sub-agent the pinned mutation names.
+_FP_MULTI_AGENT_FAMILIES = {
+    "on-policy (IPPO)": (_fp_ippo, "speaker_0"),
+    "off-policy (MADDPG)": (_fp_maddpg, "agent_0"),
+}
+
+
+class TestMutationsFunctionPreservingMultiAgent:
+    """Every sub-policy of a multi-agent algorithm is preserved."""
+
+    @pytest.mark.parametrize("method", ["head_net.add_node", "add_latent_node"])
+    @pytest.mark.parametrize(
+        "family", list(_FP_MULTI_AGENT_FAMILIES), ids=list(_FP_MULTI_AGENT_FAMILIES)
+    )
+    def test_every_sub_policy_keeps_its_output(self, monkeypatch, family, method):
+        build_agent, lead_agent = _FP_MULTI_AGENT_FAMILIES[family]
+        _pin_mutation_method(monkeypatch, f"{lead_agent}.{method}")
+        monkeypatch.setattr(mutation_utils, "FP_NOISE_SCALE", 0.0)
+        agent = build_agent()
+        observation = torch.randn(4, 4)
+        before = {
+            key: _latent_output(policy, observation)
+            for key, policy in agent.actors.items()
+        }
+
+        agent = _fp_mutations().architecture_mutate(agent)
+
+        for key, policy in agent.actors.items():
+            torch.testing.assert_close(
+                _latent_output(policy, observation), before[key], rtol=0, atol=1e-6
+            )
+
+    def test_every_critic_keeps_its_output(self, monkeypatch):
+        """The critic is preserved too, not just the policy it scores."""
+        _pin_mutation_method(monkeypatch, "agent_0.add_latent_node")
+        monkeypatch.setattr(mutation_utils, "FP_NOISE_SCALE", 0.0)
+        agent = _fp_maddpg()
+        inputs = {key: _critic_inputs(critic) for key, critic in agent.critics.items()}
+        before = {
+            key: _critic_output(critic, *inputs[key])
+            for key, critic in agent.critics.items()
+        }
+
+        agent = _fp_mutations().architecture_mutate(agent)
+
+        for key, critic in agent.critics.items():
+            torch.testing.assert_close(
+                _critic_output(critic, *inputs[key]), before[key], rtol=0, atol=1e-6
+            )
+
+
+def _simba_dqn():
+    """Return a DQN whose encoder is a SimBa residual trunk."""
+    net_config = _fp_net_config(simba=True)
+    net_config["encoder_config"] = {"hidden_size": 8, "num_blocks": 1}
+    return DQN(
+        generate_random_box_space((4,)),
+        generate_discrete_space(2),
+        net_config=net_config,
+        device="cpu",
+    )
+
+
+def _dict_dqn(dict_space):
+    """Return a DQN whose encoder fuses a dict observation."""
+    net_config = _fp_net_config()
+    del net_config["encoder_config"]
+    return DQN(
+        dict_space,
+        generate_discrete_space(2),
+        net_config=net_config,
+        device="cpu",
+    )
+
+
+class TestMutationsFunctionPreservingLatentEncoders:
+    """Growing the latent is preserved whatever the encoder is built from.
+
+    A latent widening only rewrites the head's new input columns, so the
+    encoder's interior has no say in whether it can be preserved.
+    """
+
+    @staticmethod
+    def _latent(network, observation):
+        """Return the head's deterministic output for a fixed observation."""
+        network.eval()
+        kwargs = {}
+        if getattr(network, "recurrent", False):
+            batch = (
+                next(iter(observation.values()))
+                if isinstance(observation, dict)
+                else observation
+            )
+            kwargs["hidden_state"] = {
+                f"{network.encoder.name}_{key}": torch.zeros(
+                    *[dim if isinstance(dim, int) else batch.shape[0] for dim in shape]
+                )
+                for key, shape in network.encoder.hidden_state_architecture.items()
+            }
+        with torch.no_grad():
+            latent = network.encoder(observation, **kwargs)
+            if isinstance(latent, tuple):
+                latent = latent[0]
+            head = getattr(network.head_net, "wrapped", network.head_net)
+            return head(latent).clone()
+
+    @pytest.mark.parametrize("encoder", ["simba", "recurrent", "multi_input"])
+    def test_the_policy_output_survives(self, monkeypatch, dict_space, encoder):
+        _pin_mutation_method(monkeypatch, "add_latent_node")
+        monkeypatch.setattr(mutation_utils, "FP_NOISE_SCALE", 0.0)
+        agent, observation = {
+            "simba": lambda: (_simba_dqn(), torch.randn(4, 4)),
+            "recurrent": lambda: (_recurrent_ppo(), torch.randn(4, 2, 4)),
+            "multi_input": lambda: (
+                _dict_dqn(dict_space),
+                {
+                    key: torch.as_tensor(subspace.sample()).unsqueeze(0).float()
+                    for key, subspace in dict_space.spaces.items()
+                },
+            ),
+        }[encoder]()
+        policy = getattr(agent, agent.registry.policy())
+        before = self._latent(policy, observation)
+
+        agent = _fp_mutations().architecture_mutate(agent)
+
+        policy = getattr(agent, agent.registry.policy())
+        torch.testing.assert_close(
+            self._latent(policy, observation), before, rtol=0, atol=1e-6
+        )
+
+    @pytest.mark.parametrize("encoder", ["simba", "recurrent", "multi_input"])
+    def test_it_does_not_stand_down(self, monkeypatch, dict_space, encoder):
+        _pin_mutation_method(monkeypatch, "add_latent_node")
+        agent = {
+            "simba": _simba_dqn,
+            "recurrent": _recurrent_ppo,
+            "multi_input": lambda: _dict_dqn(dict_space),
+        }[encoder]()
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            _fp_mutations().architecture_mutate(agent)
+
+        assert not [w for w in caught if "function-preserving" in str(w.message)]
+
+
+def _encoder_is_pinned(network):
+    """Return whether network's encoder is borrowed from the policy network."""
+    encoder = getattr(network, "encoder", None)
+    return encoder is not None and not list(encoder.parameters())
+
+
+class TestMutationsFunctionPreservingSharedEncoders:
+    """A borrowed encoder's own head is preserved alongside the policy's."""
+
+    @staticmethod
+    def ppo():
+        return PPO(
+            generate_random_box_space((4,)),
+            generate_discrete_space(2),
+            share_encoders=True,
+            net_config=_fp_net_config(),
+            device="cpu",
+        )
+
+    def test_the_borrowing_critic_keeps_its_output(self, monkeypatch):
+        _pin_mutation_method(monkeypatch, "add_latent_node")
+        monkeypatch.setattr(mutation_utils, "FP_NOISE_SCALE", 0.0)
+        agent = self.ppo()
+        observation = torch.randn(4, 4)
+        agent.critic.eval()
+        before = agent.critic(observation)
+
+        agent = _fp_mutations().architecture_mutate(agent)
+
+        agent.critic.eval()
+        torch.testing.assert_close(agent.critic(observation), before, rtol=0, atol=1e-6)
+
+    def test_the_critic_encoder_is_still_borrowed(self, monkeypatch):
+        _pin_mutation_method(monkeypatch, "add_latent_node")
+        agent = self.ppo()
+
+        agent = _fp_mutations().architecture_mutate(agent)
+
+        assert not _encoder_is_pinned(agent.actor)
+        assert _encoder_is_pinned(agent.critic)
+
+
+_FP_CNN_NET_CONFIG = {
+    "latent_dim": 8,
+    "min_latent_dim": 1,
+    "max_latent_dim": 128,
+    "encoder_config": {
+        "channel_size": [4, 4],
+        "kernel_size": [3, 3],
+        "stride_size": [1, 1],
+        "layer_norm": False,
+        "min_channel_size": 1,
+    },
+    "head_config": {"hidden_size": [8], "min_mlp_nodes": 1, "layer_norm": False},
+}
+
+
+def _cnn_dqn():
+    """Return a DQN whose encoder is a small unnormalised ReLU CNN."""
+    return DQN(
+        generate_random_box_space((3, 16, 16), low=0, high=255),
+        generate_discrete_space(2),
+        net_config=_FP_CNN_NET_CONFIG,
+        device="cpu",
+    )
+
+
+class TestMutationsFunctionPreservingConvolutionalEncoder:
+    """A convolutional encoder is preserved through the whole operator."""
+
+    @staticmethod
+    def widen_convolutions(steps=6, seed=0):
+        """Widen the encoder repeatedly, reporting the shift and layers grown."""
+        agent = _cnn_dqn()
+        agent.actor.rng = np.random.default_rng(seed)
+        observation = torch.rand(4, 3, 16, 16)
+        mutations = _fp_mutations()
+        shift, grown = 0.0, set()
+
+        for _ in range(steps):
+            widths = list(agent.actor.encoder.channel_size)
+            before = _policy_output(agent, observation)
+
+            agent = mutations.architecture_mutate(agent)
+
+            after = _policy_output(agent, observation)
+            shift = max(shift, (after - before).abs().max().item())
+            grown |= {
+                layer
+                for layer, width in enumerate(agent.actor.encoder.channel_size)
+                if width > widths[layer]
+            }
+
+        return shift, grown
+
+    def test_a_widened_convolution_keeps_the_policy_output(self, monkeypatch):
+        _pin_mutation_method(monkeypatch, "encoder.add_channel")
+        monkeypatch.setattr(mutation_utils, "FP_NOISE_SCALE", 0.0)
+
+        shift, _grown = self.widen_convolutions()
+
+        assert shift <= 1e-6
+
+    def test_widening_reaches_both_convolutional_boundaries(self, monkeypatch):
+        """Both the conv-to-conv and the conv-to-flatten-to-dense fan-outs are hit."""
+        _pin_mutation_method(monkeypatch, "encoder.add_channel")
+
+        _shift, grown = self.widen_convolutions()
+
+        assert grown == {0, 1}
+
+    def test_a_widened_latent_keeps_the_policy_output(self, monkeypatch):
+        _pin_mutation_method(monkeypatch, "add_latent_node")
+        monkeypatch.setattr(mutation_utils, "FP_NOISE_SCALE", 0.0)
+        agent = _cnn_dqn()
+        observation = torch.rand(4, 3, 16, 16)
+        before = _policy_output(agent, observation)
+
+        agent = _fp_mutations().architecture_mutate(agent)
+
+        after = _policy_output(agent, observation)
+        torch.testing.assert_close(after, before, rtol=0, atol=1e-6)
+        assert agent.actor.latent_dim > _FP_CNN_NET_CONFIG["latent_dim"]
+
+
+class TestMutationsFunctionPreservingDistributionHead:
+    """A distribution-wrapped head is preserved like a plain one."""
+
+    @staticmethod
+    def ppo():
+        return PPO(
+            generate_random_box_space((4,)),
+            generate_discrete_space(2),
+            net_config=_fp_net_config(),
+            device="cpu",
+        )
+
+    def test_a_deeper_head_keeps_the_policy_output(self, monkeypatch):
+        _pin_mutation_method(monkeypatch, "head_net.add_layer")
+        monkeypatch.setattr(mutation_utils, "FP_NOISE_SCALE", 0.0)
+        agent = self.ppo()
+        observation = torch.randn(4, 4)
+        before = _latent_output(agent.actor, observation)
+
+        agent = _fp_mutations().architecture_mutate(agent)
+
+        after = _latent_output(agent.actor, observation)
+        torch.testing.assert_close(after, before, rtol=0, atol=1e-6)
+
+    def test_the_head_actually_deepened(self, monkeypatch):
+        _pin_mutation_method(monkeypatch, "head_net.add_layer")
+        agent = self.ppo()
+        before = len(agent.actor.head_net.wrapped.hidden_size)
+
+        agent = _fp_mutations().architecture_mutate(agent)
+
+        assert len(agent.actor.head_net.wrapped.hidden_size) == before + 1
+
+
+class TestMutationsFunctionPreservingDeterminism:
+    """The fixup draws its noise without disturbing anything else."""
+
+    def test_it_leaves_the_mutation_sampling_stream_untouched(self, monkeypatch):
+        _pin_mutation_method(monkeypatch, "head_net.add_node")
+        mutations = _fp_mutations(seed=42)
+        mutations.architecture_mutate(_dqn())
+        with_fixup = mutations.rng.integers(0, 10_000, size=8).tolist()
+
+        monkeypatch.setattr(
+            "agilerl.hpo.mutation.preserve_architecture_mutation",
+            lambda *args, **kwargs: None,
+        )
+        baseline = _fp_mutations(seed=42)
+        baseline.architecture_mutate(_dqn())
+        without_fixup = baseline.rng.integers(0, 10_000, size=8).tolist()
+
+        assert with_fixup == without_fixup
+
+    def test_it_leaves_the_global_generator_untouched(self, monkeypatch):
+        _pin_mutation_method(monkeypatch, "head_net.add_node")
+        mutations = _fp_mutations(seed=42)
+        agent = _dqn()
+        network = agent.actor
+        before = mutation_utils.hidden_widths(network.head_net)
+        network.head_net.add_node(hidden_layer=0, numb_new_nodes=4)
+        state = torch.random.get_rng_state()
+
+        mutation_utils.preserve_architecture_mutation(
+            network, "head_net.add_node", {"hidden_layer": 0}, before, mutations._fp_rng
+        )
+
+        assert torch.equal(torch.random.get_rng_state(), state)
+
+
+class TestFunctionPreservingRemovalsUnchanged:
+    """Removals keep AgileRL's original behaviour, weight for weight."""
+
+    @pytest.mark.parametrize(
+        "method",
+        [
+            "head_net.remove_node",
+            "encoder.remove_node",
+            "remove_latent_node",
+            "head_net.remove_layer",
+        ],
+    )
+    def test_a_removal_matches_the_original_operator(self, monkeypatch, method):
+        _pin_mutation_method(monkeypatch, method)
+        agent = _dqn(
+            head_config={
+                "hidden_size": [16, 16],
+                "min_mlp_nodes": 1,
+                "min_hidden_layers": 1,
+            }
+        )
+
+        preserved = _fp_mutations(seed=3).architecture_mutate(agent.clone())
+        monkeypatch.setattr(
+            "agilerl.hpo.mutation.preserve_architecture_mutation",
+            lambda *args, **kwargs: None,
+        )
+        original = _fp_mutations(seed=3).architecture_mutate(agent.clone())
+
+        assert_state_dicts_equal(
+            preserved.actor.state_dict(), original.actor.state_dict()
+        )
+
+
+class TestMutationsFunctionPreservingAccelerator:
+    """The fixup lands the same way when an accelerator owns the networks."""
+
+    def test_an_addition_keeps_the_policy_output(self, monkeypatch):
+        _pin_mutation_method(monkeypatch, "head_net.add_node")
+        monkeypatch.setattr(mutation_utils, "FP_NOISE_SCALE", 0.0)
+        accelerator = Accelerator(cpu=True, device_placement=False)
+        agent = DQN(
+            generate_random_box_space((4,)),
+            generate_discrete_space(2),
+            net_config=_fp_net_config(),
+            accelerator=accelerator,
+            device="cpu",
+        )
+        agent.wrap_models()
+        observation = torch.randn(4, 4)
+        agent.unwrap_models()
+        before = _policy_output(agent, observation)
+        agent.wrap_models()
+
+        mutations = Mutations(
+            0, 1, 0, 0, 0, 0, rand_seed=0, device="cpu", accelerator=accelerator
+        )
+        agent = mutations.architecture_mutate(agent)
+
+        agent.unwrap_models()
+        torch.testing.assert_close(
+            _policy_output(agent, observation), before, rtol=0, atol=1e-6
+        )
+
+    def test_the_architecture_actually_grew(self, monkeypatch):
+        _pin_mutation_method(monkeypatch, "head_net.add_node")
+        accelerator = Accelerator(cpu=True, device_placement=False)
+        agent = DQN(
+            generate_random_box_space((4,)),
+            generate_discrete_space(2),
+            net_config=_fp_net_config(),
+            accelerator=accelerator,
+            device="cpu",
+        )
+        agent.wrap_models()
+        before = agent.actor.head_net.hidden_size[0]
+
+        mutations = Mutations(
+            0, 1, 0, 0, 0, 0, rand_seed=0, device="cpu", accelerator=accelerator
+        )
+        agent = mutations.architecture_mutate(agent)
+
+        assert agent.actor.head_net.hidden_size[0] > before
+
+
+def _raise_fixup_failure(*args, **kwargs):
+    """Stand in for a fixup that cannot complete."""
+    msg = "fixup failed"
+    raise RuntimeError(msg)
+
+
+class TestMutationsFunctionPreservingDegradation:
+    """A fixup that declines leaves the original operator's result in place."""
+
+    def test_an_unresolvable_target_records_no_snapshot(self):
+        agent = _dqn()
+
+        assert (
+            mutation_utils.pre_mutation_widths(agent.actor, "missing.add_node") is None
+        )
+
+    def test_an_unresolvable_applied_mutation_writes_nothing(self):
+        agent = _dqn()
+        before = copy.deepcopy(agent.actor.state_dict())
+
+        mutation_utils.preserve_architecture_mutation(
+            agent.actor,
+            "missing.add_node",
+            {"hidden_layer": 0},
+            [8],
+            np.random.default_rng(0),
+        )
+
+        assert_state_dicts_equal(agent.actor.state_dict(), before)
+
+    def test_an_index_the_network_does_not_have_declines(self):
+        """A mutation sampled on a deeper network reports an unusable index."""
+        agent = _dqn()
+        before = copy.deepcopy(agent.actor.state_dict())
+
+        mutation_utils.preserve_architecture_mutation(
+            agent.actor,
+            "head_net.add_node",
+            {"hidden_layer": 9},
+            [8, 8],
+            np.random.default_rng(0),
+        )
+
+        assert_state_dicts_equal(agent.actor.state_dict(), before)
+
+    def test_a_mutation_reporting_no_index_declines(self):
+        agent = _dqn()
+        before = copy.deepcopy(agent.actor.state_dict())
+
+        mutation_utils.preserve_architecture_mutation(
+            agent.actor, "head_net.add_node", {}, [8, 8], np.random.default_rng(0)
+        )
+
+        assert_state_dicts_equal(agent.actor.state_dict(), before)
+
+    def test_a_layer_that_cannot_grow_is_silent(self, monkeypatch):
+        _pin_mutation_method(monkeypatch, "head_net.add_node")
+        agent = _dqn(head_config={"max_mlp_nodes": 8})
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            agent = _fp_mutations().architecture_mutate(agent)
+
+        assert agent.actor.head_net.hidden_size == [8]
+        assert not [w for w in caught if "function-preserving" in str(w.message)]
+
+    def test_a_failing_fixup_propagates(self, monkeypatch):
+        _pin_mutation_method(monkeypatch, "head_net.add_node")
+        monkeypatch.setattr(
+            mutation_utils, "preserve_added_nodes", _raise_fixup_failure
+        )
+        agent = _dqn()
+
+        with pytest.raises(RuntimeError, match="fixup failed"):
+            _fp_mutations().architecture_mutate(agent)
+
+
+def _regrama_mutations(**kwargs) -> Mutations:
+    """A parameter-mutation-only operator; every parameter mutation runs ReGraMa."""
+    return Mutations(0, 0, 0, 1, 0, 0, rand_seed=0, **kwargs)
+
+
+def _all_dormant(agent) -> None:
+    """Mark every measured neuron of every evaluation network as dormant."""
+    agent.grama_scores = grama_scores_for(agent, fill=0.0)
+
+
+def _dormant_for(agent, network_ids: set[str]):
+    """Mark only the sub-agents in network_ids as dormant, the rest healthy."""
+    dormant = grama_scores_for(agent, fill=0.0)
+    healthy = grama_scores_for(agent, fill=1.0)
+    return [
+        dormant[idx] if network_id in network_ids else healthy[idx]
+        for idx, (network_id, _network) in enumerate(agent.unrolled_eval_networks())
+    ]
+
+
+def _pin_biases(module, value: float = 1.0) -> None:
+    """Set every one-dimensional bias of module to a non-zero sentinel.
+
+    The Gaussian pass only ever writes two-dimensional tensors, so a bias sitting
+    at zero after a parameter mutation can only have been zeroed by a ReGraMa reset.
+    """
+    with torch.no_grad():
+        for name, param in module.named_parameters():
+            if name.endswith("bias") and param.dim() == 1:
+                param.fill_(value)
+
+
+def _zeroed_biases(module) -> int:
+    """Count the pinned biases a ReGraMa reset has zeroed."""
+    return sum(
+        int(bool((value == 0).all()))
+        for key, value in module.state_dict().items()
+        if key.endswith("bias") and value.dim() == 1
+    )
+
+
+_pinned_weight = 5.0
+# Band separators, each mid-gap between what the two bands can reach on a
+# pinned weight: ordinary noise is N(0, 0.5) here, while a reset redraws from N(0, 1).
+_reset_floor = 3.0
+_reset_residual = 2.0
+
+
+def _pinned_policy() -> EvolvableModule:
+    """Return a DQN policy with every mutable weight pinned to one value.
+
+    Pinning turns each Gaussian band into a known displacement, so a band can be
+    shown to have fired, or not, without reaching into the operator.
+    """
+    torch.manual_seed(0)
+    network = DQN(
+        generate_random_box_space((4,)),
+        generate_discrete_space(2),
+        device="cpu",
+    ).actor
+    with torch.no_grad():
+        for key, value in network.state_dict().items():
+            if value.dim() == 2 and "norm" not in key and "lstm" not in key:
+                value.fill_(_pinned_weight)
+    return network
+
+
+def _pinned_gaussian_pass():
+    """Run one Gaussian pass over an identically seeded pinned policy."""
+    network = _pinned_policy()
+    baseline = {key: value.clone() for key, value in network.state_dict().items()}
+    Mutations(
+        0,
+        0,
+        0,
+        1,
+        0,
+        0,
+        rand_seed=0,
+    )._gaussian_parameter_mutation(network)
+    return baseline, network.state_dict()
+
+
+def _largest_step(baseline, after) -> float:
+    """Return the largest absolute weight change the pass made."""
+    return max((after[key] - baseline[key]).abs().max().item() for key in baseline)
+
+
+def _smallest_magnitude(baseline, after) -> float:
+    """Return the smallest weight left in a tensor that was pinned before the pass."""
+    return min(
+        after[key].abs().min().item()
+        for key, value in baseline.items()
+        if bool((value == _pinned_weight).all())
+    )
+
+
+def _ordinary_band_step_exists(baseline, after) -> bool:
+    """Return whether any pinned entry moved by an ordinary-band-sized step.
+
+    An ordinary step has standard deviation mutation_sd * pinned_weight = 0.5,
+    so a nonzero step under _reset_floor that leaves the weight still far from
+    zero can only be the ordinary band: a reset redraws from N(0, 1) and so
+    almost never lands within reach of the original pinned value.
+    """
+    for key, value in baseline.items():
+        if not bool((value == _pinned_weight).all()):
+            continue
+        after_value = after[key]
+        delta = (after_value - value).abs()
+        small_step = (delta > 0) & (delta < _reset_floor)
+        far_from_zero = after_value.abs() > _reset_residual
+        if bool((small_step & far_from_zero).any()):
+            return True
+    return False
+
+
+class TestMutationsRegramaConstructor:
+    """Validate the parameter-mutation dormancy threshold at construction time."""
+
+    def test_defaults(self):
+        muts = Mutations(0, 0, 0, 1, 0, 0)
+
+        assert muts.dormant_threshold == 0.01
+
+    def test_zero_dormant_threshold_is_accepted(self):
+        muts = Mutations(0, 0, 0, 1, 0, 0, dormant_threshold=0.0)
+
+        assert muts.dormant_threshold == 0.0
+
+    def test_negative_dormant_threshold_is_rejected(self):
+        with pytest.raises(AssertionError, match="Dormant threshold"):
+            Mutations(0, 0, 0, 1, 0, 0, dormant_threshold=-0.1)
+
+
+class TestMutationsGaussianParameterMutationFixedSplit:
+    """The Gaussian parameter mutation applies a fixed, unconditional 95%/5% split."""
+
+    def test_the_reset_band_fires(self):
+        # Only a reset can move a pinned weight this far, and only a reset can
+        # leave one this close to zero.
+        baseline, after = _pinned_gaussian_pass()
+
+        assert _largest_step(baseline, after) > _reset_floor
+        assert _smallest_magnitude(baseline, after) < _reset_residual
+
+    def test_the_ordinary_band_also_fires_in_the_same_pass(self):
+        baseline, after = _pinned_gaussian_pass()
+
+        assert _ordinary_band_step_exists(baseline, after)
+
+
+class TestMutationsRegramaParameterMutation:
+    """Reset dormant neurons before the Gaussian pass of a parameter mutation."""
+
+    def make_agent(self):
+        return DQN(
+            generate_random_box_space((4,)),
+            generate_discrete_space(2),
+            device="cpu",
+        )
+
+    def test_dormant_neurons_are_reset_and_the_mutation_is_still_a_parameter_one(
+        self,
+    ):
+        agent = self.make_agent()
+        _all_dormant(agent)
+        _pin_biases(agent.actor)
+
+        agent = _regrama_mutations().parameter_mutation(agent)
+
+        assert agent.mut == "param"
+        # The Gaussian pass changes the state dict on its own, so the reset has
+        # to be witnessed by something only ReGraMa writes.
+        assert _zeroed_biases(agent.actor) > 0
+        assert all(
+            torch.isfinite(value).all() for value in agent.actor.state_dict().values()
+        )
+
+    def test_target_network_is_resynced_with_the_reset_policy(self):
+        agent = self.make_agent()
+        _all_dormant(agent)
+
+        agent = _regrama_mutations().parameter_mutation(agent)
+
+        actor_state = agent.actor.state_dict()
+        target_state = agent.actor_target.state_dict()
+        assert all(torch.equal(actor_state[k], target_state[k]) for k in actor_state)
+
+    def test_non_policy_networks_are_reset_too(self):
+        # ReGraMa measures every evaluation network, not just the policy, so a
+        # dormant critic is recovered as well.
+        agent = PPO(
+            generate_random_box_space((4,)),
+            generate_discrete_space(2),
+            device="cpu",
+        )
+        _all_dormant(agent)
+        before = {k: v.clone() for k, v in agent.critic.state_dict().items()}
+
+        agent = _regrama_mutations().parameter_mutation(agent)
+
+        # The Gaussian pass only touches the policy, so any change here
+        # is the ReGraMa reset.
+        after = agent.critic.state_dict()
+        assert any(not torch.equal(before[k], after[k]) for k in before)
+
+    def test_resets_run_before_the_gaussian_pass(self):
+        agent = self.make_agent()
+        _all_dormant(agent)
+        muts = _regrama_mutations()
+        original = muts._gaussian_parameter_mutation
+        seen = {}
+
+        def recording(network):
+            seen["weights"] = {k: v.clone() for k, v in network.state_dict().items()}
+            return original(network)
+
+        muts._gaussian_parameter_mutation = recording
+        before = {k: v.clone() for k, v in agent.actor.state_dict().items()}
+
+        muts.parameter_mutation(agent)
+
+        assert any(not torch.equal(before[k], seen["weights"][k]) for k in before)
+
+    def test_healthy_agent_is_only_perturbed_by_the_gaussian_pass(self):
+        agent = PPO(
+            generate_random_box_space((4,)),
+            generate_discrete_space(2),
+            device="cpu",
+        )
+        _all_dormant(agent)
+        agent.grama_scores = [
+            [None if entry is None else torch.ones_like(entry) for entry in network]
+            for network in agent.grama_scores
+        ]
+        before = {k: v.clone() for k, v in agent.critic.state_dict().items()}
+
+        agent = _regrama_mutations().parameter_mutation(agent)
+
+        after = agent.critic.state_dict()
+        assert all(torch.equal(before[k], after[k]) for k in before)
+
+    def test_the_configured_threshold_decides_what_counts_as_dormant(self):
+        # The critic is the clean witness: the Gaussian pass only ever runs on
+        # the policy, so any change here is the ReGraMa reset.
+        def reset_critic_with(threshold: float):
+            agent = PPO(
+                generate_random_box_space((4,)),
+                generate_discrete_space(2),
+                device="cpu",
+            )
+            agent.grama_scores = grama_scores_for(agent, fill=1.0)
+            networks = [
+                network for _network_id, network in agent.unrolled_eval_networks()
+            ]
+            for entry in agent.grama_scores[networks.index(agent.critic)]:
+                if entry is not None:
+                    entry[0] = 0.5
+            before = {k: v.clone() for k, v in agent.critic.state_dict().items()}
+            agent = _regrama_mutations(dormant_threshold=threshold).parameter_mutation(
+                agent,
+            )
+            return before, agent.critic.state_dict()
+
+        permissive_before, permissive_after = reset_critic_with(0.6)
+        strict_before, strict_after = reset_critic_with(0.1)
+
+        assert any(
+            not torch.equal(permissive_before[k], permissive_after[k])
+            for k in permissive_before
+        )
+        assert all(
+            torch.equal(strict_before[k], strict_after[k]) for k in strict_before
+        )
+
+    def test_missing_snapshot_falls_back_to_gaussian_silently(self):
+        muts = _regrama_mutations()
+        agent = self.make_agent()
+        before = {k: v.clone() for k, v in agent.actor.state_dict().items()}
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            agent = muts.parameter_mutation(agent)
+
+        assert agent.mut == "param"
+        # No snapshot means the reset never runs, so the only source of
+        # change is the Gaussian pass.
+        after = agent.actor.state_dict()
+        assert any(not torch.equal(before[k], after[k]) for k in before)
+
+    def test_snapshot_that_captured_nothing_behaves_like_a_missing_one(self):
+        agent = self.make_agent()
+        agent.grama_scores = [
+            [None] * len(mutation_utils.target_activations(network))
+            for _network_id, network in agent.unrolled_eval_networks()
+        ]
+        assert agent.grama_scores
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            agent = _regrama_mutations().parameter_mutation(agent)
+
+        assert agent.mut == "param"
+
+    def test_pre_training_step_with_no_snapshot_does_not_raise(self):
+        # No agent has trained yet there, so a missing snapshot is expected.
+        muts = _regrama_mutations()
+        agent = self.make_agent()
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            muts.mutation([agent], pre_training_mut=True)
+
+    def test_reset_is_reproducible_across_equally_seeded_operators(self):
+        first, second = self.make_agent(), self.make_agent()
+        second.actor.load_state_dict(first.actor.state_dict())
+        _all_dormant(first)
+        _all_dormant(second)
+
+        torch.manual_seed(0)
+        _regrama_mutations().parameter_mutation(first)
+        torch.manual_seed(0)
+        _regrama_mutations().parameter_mutation(second)
+
+        assert_state_dicts_equal(first.actor.state_dict(), second.actor.state_dict())
+
+    def test_a_reset_failure_propagates(self, monkeypatch):
+        agent = PPO(
+            generate_random_box_space((4,)),
+            generate_discrete_space(2),
+            device="cpu",
+        )
+        _all_dormant(agent)
+
+        def explode(*_args, **_kwargs):
+            msg = "surgery blew up"
+            raise RuntimeError(msg)
+
+        monkeypatch.setattr(
+            "agilerl.hpo.mutation.reset_dormant_neurons",
+            explode,
+        )
+
+        with pytest.raises(RuntimeError, match="surgery blew up"):
+            _regrama_mutations().parameter_mutation(agent)
+
+    def test_a_shared_head_lookup_failure_propagates(self, monkeypatch):
+        agent = PPO(
+            generate_random_box_space((4,)),
+            generate_discrete_space(2),
+            device="cpu",
+        )
+        _all_dormant(agent)
+
+        def explode(*_args, **_kwargs):
+            msg = "shared head lookup blew up"
+            raise RuntimeError(msg)
+
+        monkeypatch.setattr("agilerl.hpo.mutation.shared_encoder_heads", explode)
+
+        with pytest.raises(RuntimeError, match="shared head lookup blew up"):
+            _regrama_mutations().parameter_mutation(agent)
+
+    def test_wrapped_agents_are_reset_through_the_wrapper(self):
+        agent = RSNorm(self.make_agent())
+        _all_dormant(agent.agent)
+        _pin_biases(agent.agent.actor)
+
+        result = _regrama_mutations().mutation([agent])
+
+        assert isinstance(result[0], AgentWrapper)
+        assert _zeroed_biases(result[0].agent.actor) > 0
+
+
+def _policy_latent_dormant(agent, index: int = 0) -> None:
+    """Mark only the policy's latent unit index dormant; everything else healthy."""
+    agent.grama_scores = grama_scores_for(agent, fill=1.0)
+    policy = getattr(agent, agent.registry.policy())
+    # The latent is the encoder's terminal activation, i.e. the only boundary a
+    # shared encoder carries into another network's head.
+    terminal = mutation_utils.activation_modules(policy.encoder, include_output=True)[
+        -1
+    ]
+    position = mutation_utils.target_activations(policy).index(terminal)
+    policy_entry = next(
+        entry
+        for (_network_id, network), entry in zip(
+            agent.unrolled_eval_networks(),
+            agent.grama_scores,
+            strict=True,
+        )
+        if network is policy
+    )
+    policy_entry[position][index] = 0.0
+
+
+class TestMutationsRegramaSharedEncoders:
+    """Networks borrowing the policy's encoder are faded along with it."""
+
+    def make_agent(self, *, share):
+        return PPO(
+            generate_random_box_space((4,)),
+            generate_discrete_space(2),
+            share_encoders=share,
+            device="cpu",
+        )
+
+    def critic_head(self, agent):
+        return mutation_utils.head_entry_layers(agent.critic.head_net)[0]
+
+    def test_shared_critic_head_is_faded_when_the_policy_latent_is_reset(self):
+        # The critic borrows the encoder, so it inherits the reset via
+        # the mutation hook and its head must be faded to match.
+        agent = self.make_agent(share=True)
+        _policy_latent_dormant(agent)
+        before = self.critic_head(agent).weight.data.clone()
+
+        agent = _regrama_mutations().parameter_mutation(agent)
+
+        after = self.critic_head(agent).weight.data
+        assert after[:, 0].norm() < 0.1 * before[:, 0].norm()
+        assert torch.equal(after[:, 1:], before[:, 1:])
+
+    def test_unshared_critic_head_is_untouched_by_the_policy_pass(self):
+        # A critic that owns its encoder compensates its own resets, so the
+        # policy's pass must not reach across into it at all.
+        agent = self.make_agent(share=False)
+        _policy_latent_dormant(agent)
+        before = self.critic_head(agent).weight.data.clone()
+
+        agent = _regrama_mutations().parameter_mutation(agent)
+
+        assert torch.equal(self.critic_head(agent).weight.data, before)
+
+
+class TestMutationsRegramaMultiAgent:
+    """Route each sub-policy's snapshot to its own network."""
+
+    def make_agent(self):
+        return IPPO(
+            generate_multi_agent_box_spaces(2, (4,)),
+            generate_multi_agent_discrete_spaces(2, 2),
+            agent_ids=["agent_0", "other_0"],
+            device="cpu",
+        )
+
+    def policies(self, agent):
+        return getattr(agent, agent.registry.policy())
+
+    def test_every_sub_policy_is_reset_from_its_own_entry(self):
+        agent = self.make_agent()
+        _all_dormant(agent)
+        for module in self.policies(agent).values():
+            _pin_biases(module)
+
+        agent = _regrama_mutations().parameter_mutation(agent)
+
+        # A changed state dict would prove nothing here: the Gaussian pass runs
+        # on every sub-policy regardless of whether ReGraMa reset anything.
+        for module in self.policies(agent).values():
+            assert _zeroed_biases(module) > 0
+
+    def test_a_sub_policy_left_healthy_is_not_reset(self):
+        agent = self.make_agent()
+        agent.grama_scores = _dormant_for(agent, {"agent_0"})
+        for module in self.policies(agent).values():
+            _pin_biases(module)
+
+        agent = _regrama_mutations().parameter_mutation(agent)
+
+        policies = self.policies(agent)
+        assert _zeroed_biases(policies["agent_0"]) > 0
+        assert _zeroed_biases(policies["other_0"]) == 0

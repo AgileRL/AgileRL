@@ -92,8 +92,8 @@ def _requirements(extra: str, extras: dict[str, list[str]], seen: set[str]) -> s
 def _last_namespaced_tag_version(prefix: str) -> str:
     """Latest ``{prefix}/vX.Y.Z`` tag in this clone. Fail closed if git or tags are missing."""
     try:
-        result = subprocess.run(  # noqa: S603
-            ["git", "tag", "-l", f"{prefix}/v*", "--sort=-v:refname"],  # noqa: S607
+        result = subprocess.run(
+            ["git", "tag", "-l", f"{prefix}/v*", "--sort=-v:refname"],
             cwd=REPO_ROOT,
             check=False,
             capture_output=True,
@@ -125,8 +125,8 @@ def _semver_bump(version: str, kind: str) -> str | None:
     if not script.is_file():
         return None
     try:
-        result = subprocess.run(  # noqa: S603
-            [  # noqa: S607
+        result = subprocess.run(
+            [
                 "bash",
                 "-c",
                 'set -euo pipefail; . "$1"; semver_bump "$2" "$3"',

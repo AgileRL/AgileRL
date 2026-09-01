@@ -231,6 +231,9 @@ def train_multi_agent_off_policy(
         loggers=loggers,
     )
 
+    # Enable the per-neuron gradient capture that ReGraMa parameter mutations read.
+    capture_grama = mutation is not None and mutation.parameters_mut > 0
+
     checkpoint_count = 0
 
     # Pre-training mutation
@@ -244,7 +247,7 @@ def train_multi_agent_off_policy(
 
         for agent in population.agents:
             agent.set_training_mode(True)
-            agent.init_training_step()
+            agent.init_training_step(capture_grama)
 
             # `Sampler.sample` is typed as returning a bare `TensorDict`; the casts
             # below assert the nested per-agent batch layout MADDPG/MATD3 consume.

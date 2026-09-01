@@ -28,7 +28,7 @@ from agilerl.algorithms.core.base import (
     OptimizerWrapper,
 )
 from agilerl.algorithms.dpo import DPO
-from agilerl.llm_envs import PreferenceGym
+from agilerl.llm_envs import DatasetEnv
 from tests import TINY_LLM_FIXTURE_PATH
 from tests.test_algorithms.test_llms.llm_helpers import (
     create_module,
@@ -43,6 +43,7 @@ def make_preference_gym(
     tokenizer: AutoTokenizer,
     data_batch_size_per_gpu: int = 8,
 ):
+    del accelerator  # DatasetEnv shards via rank/world_size, not accelerator
     train_dataset = Dataset.from_dict(
         {
             "prompt": [f"Prompt {i}" for i in range(num_samples)],
@@ -57,12 +58,12 @@ def make_preference_gym(
             "rejected": [f"Rejected {i}" for i in range(num_samples)],
         }
     )
-    return PreferenceGym(
+    return DatasetEnv(
         train_dataset=train_dataset,
         test_dataset=test_dataset,
         tokenizer=tokenizer,
+        objective="preference",
         data_batch_size_per_gpu=data_batch_size_per_gpu,
-        accelerator=accelerator,
     )
 
 
@@ -408,12 +409,12 @@ class TestDPOLearn:
             },
         )
         tokenizer = AutoTokenizer.from_pretrained(pretrained_model_name_or_path)
-        env = PreferenceGym(
+        env = DatasetEnv(
             train_dataset=train_dataset,
             test_dataset=test_dataset,
             tokenizer=tokenizer,
+            objective="preference",
             data_batch_size_per_gpu=data_batch_size,
-            accelerator=dpo.accelerator,
         )
         for name, param in dpo.actor.named_parameters():
             if ("lora_A" in name or "lora_B" in name) and param is not None:
@@ -470,6 +471,7 @@ class TestDPOTest:
     @pytest.mark.gpu
     @pytest.mark.parametrize("data_batch_size", [2])
     @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
+    @pytest.mark.parametrize("loop", [1, 2])
     def test_dpo_test(
         self,
         deepspeed_env,
@@ -485,6 +487,7 @@ class TestDPOTest:
         max_tokens,
         data_batch_size,
         micro_batch_size_per_gpu,
+        loop,
     ):
         dpo = dpo_factory(
             accelerator_factory,
@@ -520,28 +523,41 @@ class TestDPOTest:
             },
         )
         tokenizer = AutoTokenizer.from_pretrained(pretrained_model_name_or_path)
-        env = PreferenceGym(
+        env = DatasetEnv(
             train_dataset=train_dataset,
             test_dataset=test_dataset,
             tokenizer=tokenizer,
+            objective="preference",
             data_batch_size_per_gpu=data_batch_size,
-            accelerator=dpo.accelerator,
         )
-        fitness = dpo.test(env)
+        fitness = dpo.test(env, loop=loop)
         assert isinstance(fitness, np.ndarray)
         dpo.clean_up()
         AcceleratorState._reset_state(True)
 
     def test_dpo_test_method_waits_for_everyone(self):
+        # A realistic collated batch: ``test`` narrows what ``reset`` returns
+        # before handing it to ``learn``, so a placeholder would not get through.
+        batch = {
+            "prompt": ["p"],
+            "prompt_lengths": [1],
+            "chosen": ["c"],
+            "rejected": ["r"],
+            "chosen_input_ids": torch.ones(1, 3, dtype=torch.long),
+            "chosen_attention_mask": torch.ones(1, 3, dtype=torch.long),
+            "rejected_input_ids": torch.ones(1, 3, dtype=torch.long),
+            "rejected_attention_mask": torch.ones(1, 3, dtype=torch.long),
+        }
+
         class DummyPreferenceEnv:
             def eval_mode(self):
                 return contextlib.nullcontext()
 
             def reset(self):
-                return {"prompts": []}
+                return batch
 
             def step(self):
-                return {"prompts": []}
+                return batch
 
         dpo = _make_cpu_dpo_for_branch_tests()
         acc = MagicMock()
@@ -553,6 +569,26 @@ class TestDPOTest:
         ):
             dpo.test(DummyPreferenceEnv(), loop=1)
         acc.wait_for_everyone.assert_called()
+
+    def test_dpo_test_rejects_a_batch_from_the_wrong_objective(self):
+        """An objective='sft' env fails at the boundary, not inside the loss."""
+
+        class DummySFTEnv:
+            def eval_mode(self):
+                return contextlib.nullcontext()
+
+            def reset(self):
+                return {
+                    "prompt": ["p"],
+                    "prompt_lengths": [1],
+                    "response": ["r"],
+                    "input_ids": torch.ones(1, 3, dtype=torch.long),
+                    "attention_mask": torch.ones(1, 3, dtype=torch.long),
+                }
+
+        dpo = _make_cpu_dpo_for_branch_tests()
+        with pytest.raises(TypeError, match="needs an objective='preference'"):
+            dpo.test(DummySFTEnv(), loop=1)
 
 
 class TestDPOLigerUnavailableBehaviour:

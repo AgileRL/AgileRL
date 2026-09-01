@@ -65,7 +65,7 @@ os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
 # ``deepspeed_env`` fixture) inherit torch's default MASTER_PORT. Parallel
 # xdist workers then race to bind the same port and one fails with
 # ``EADDRINUSE``. Give each worker a deterministic, unique MASTER_PORT here
-# so any later distributed init lands on a non-colliding port.
+# so any later distributed init uses a non-colliding port.
 if _xdist_worker_id:
     _worker_num = int("".join(c for c in _xdist_worker_id if c.isdigit()) or "0")
     os.environ.setdefault("MASTER_PORT", str(29500 + _worker_num))
@@ -158,15 +158,17 @@ def pytest_collection_modifyitems(config, items):
          keeps simultaneous inits rare.
 
       ``vllm`` tests run in ``subprocess_runner.py``-spawned subprocesses, so
-      worker-process state is reset between them. ``gpu`` tests run
-      in-process and can leak DeepSpeed groups / accelerator state to the
-      next test sharing the same group; the per-fixture cleanup
-      (``AcceleratorState._reset_state(True)`` etc.) handles this in
-      practice for the test sets in this repo, but **don't add many more
-      ``gpu``-marked tests without re-checking** — DeepSpeed has no clean
-      ``destroy_process_group`` path so sharing a worker between two
-      DeepSpeed-init tests can surface ``Group <ProcessGroup ...> is not
-      registered`` or ``EADDRINUSE``-on-MASTER_PORT.
+      worker-process state is reset between them. ``gpu`` tests run in-process
+      and share accelerator / DeepSpeed distributed state across the worker:
+      accelerator state is reset per fixture (``AcceleratorState._reset_state``),
+      and ``generate_accelerator`` clears DeepSpeed's cached comm backend +
+      cloned process groups *only* when the world group has been torn down
+      (``not dist.is_initialized()``), so an interleaved ``destroy_process_group``
+      (e.g. test_mutation) cannot dangle DeepSpeed's group handles into
+      ``Group <ProcessGroup ...> is not registered`` — while leaving the cache
+      intact otherwise (re-cloning every build leaks NCCL communicators and OOMs
+      concurrent workers). MASTER_PORT is still per-test (``get_free_port``) to
+      avoid ``EADDRINUSE`` on concurrent inits.
     - ``test_minari_utils``: tests create/delete shared Minari datasets on disk.
 
     Uses ``tryfirst=True`` so the ``xdist_group`` markers below are attached
@@ -576,6 +578,38 @@ def get_free_port():
 
 
 @pytest.fixture
+def gloo_process_group():
+    """Fixture that allows a real DistributedDataParallel wrapper to be built.
+
+    Tests DDP's attribute-hiding behaviour on a CPU, without a multi-process run.
+    """
+    if torch.distributed.is_initialized():
+        yield
+        return
+
+    saved = {
+        key: os.environ.get(key)
+        for key in ("MASTER_ADDR", "MASTER_PORT", "RANK", "WORLD_SIZE")
+    }
+    os.environ.update(
+        MASTER_ADDR="127.0.0.1",
+        MASTER_PORT=str(get_free_port()),
+        RANK="0",
+        WORLD_SIZE="1",
+    )
+    torch.distributed.init_process_group("gloo")
+    try:
+        yield
+    finally:
+        torch.distributed.destroy_process_group()
+        for key, value in saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
+@pytest.fixture
 def deepspeed_env():
 
     dynamic_dist_env = dist_env.copy()
@@ -605,3 +639,26 @@ def deepspeed_env():
                 os.environ[key] = existing_vars[key]
             else:
                 os.environ.pop(key, None)
+
+
+@pytest.fixture
+def serve_env():
+    """Host local envs over OpenEnv HTTP for a test, stopping them all at teardown.
+
+    ``url = serve_env(MyEnv())`` returns a base URL to hand to
+    ``RemoteEnvClient`` / ``RolloutHarness``; the server (and any others hosted in
+    the same test) is shut down
+    when the test finishes, so individual tests stay free of start/stop boilerplate.
+    """
+    from agilerl.llm_envs.openenv_server import OpenEnvServer
+
+    servers = []
+
+    def _serve(env):
+        server = OpenEnvServer(env).start()
+        servers.append(server)
+        return server.base_url
+
+    yield _serve
+    for server in servers:
+        server.stop()

@@ -18,6 +18,7 @@ from collections.abc import Callable, Generator, Iterable, Mapping, Sequence
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from dataclasses import asdict
 from importlib.metadata import version
+from itertools import chain
 from pathlib import Path
 from typing import (
     TYPE_CHECKING,
@@ -28,6 +29,7 @@ from typing import (
     NoReturn,
     Protocol,
     TypeVar,
+    cast,
     overload,
 )
 
@@ -42,6 +44,7 @@ from tensordict import TensorDict
 from torch._dynamo import OptimizedModule
 from torch.nn.utils import clip_grad_norm_
 from torch.optim import AdamW
+from torch.utils.hooks import RemovableHandle
 from typing_extensions import Self
 
 from agilerl import HAS_DEEPSPEED, HAS_LIGER_KERNEL, HAS_LLM_DEPENDENCIES, HAS_VLLM
@@ -62,7 +65,9 @@ from agilerl.algorithms.core.registry import (
     OptimizerFactory,
 )
 from agilerl.architectures.nemotron_h import register_nemotron_h_liger
+from agilerl.llm_envs import RolloutHarness
 from agilerl.metrics import AgentMetrics, MultiAgentMetrics
+from agilerl.modules import EvolvableModule, ModuleDict
 from agilerl.modules.configs import MlpNetConfig, NetConfig
 from agilerl.modules.dummy import DummyEvolvable
 from agilerl.protocols import (
@@ -78,12 +83,16 @@ from agilerl.typing import (
     ActionResult,
     ActionType,
     ArrayDict,
+    BackwardHook,
     CheckpointInfo,
     DeviceType,
     ExperiencesT,
     FitnessValue,
+    GradInput,
+    GraMaScores,
     GymSpaceType,
     InfosDict,
+    LLMObsType,
     LrNameType,
     MaybeActionMask,
     ModuleType,
@@ -94,7 +103,7 @@ from agilerl.typing import (
     NetConfigType,
     ObservationType,
     OptimizerType,
-    ReasoningPrompts,
+    RolloutPrompt,
     TorchObsType,
     coerce_action_mask,
 )
@@ -134,6 +143,7 @@ from agilerl.utils.llm_packing import (
     unpack_logprobs,
     unpack_values,
 )
+from agilerl.utils.mutation_utils import target_activations
 
 if TYPE_CHECKING:
     from torch.optim.lr_scheduler import SequentialLR
@@ -183,12 +193,12 @@ if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
         gather_if_zero3,
         get_model_name_or_path,
         get_state_dict,
+        is_rollout_prompt,
         log_cuda_memory_snapshot,
         move_params_to_cpu,
         move_params_to_gpu,
         offload_colocated_trainer_from_gpu,
         save_peft_adapter_for_vllm_rollout,
-        stitch_completion_after_windowed_vllm_generate,
         zero3_full_shape_views,
     )
     from agilerl.utils.zero3_patches import install_zero3_patches
@@ -203,7 +213,12 @@ elif HAS_VLLM:
 else:
     LLM = CompletionOutput = SamplingParams = None
 
-__all__ = ["ActionResult", "EvolvableAlgorithm", "MultiAgentRLAlgorithm", "RLAlgorithm"]
+__all__ = [
+    "ActionResult",
+    "EvolvableAlgorithm",
+    "MultiAgentRLAlgorithm",
+    "RLAlgorithm",
+]
 
 logger = logging.getLogger(__name__)
 
@@ -332,14 +347,12 @@ def get_checkpoint_dict(
     :return: A dictionary of the agent's attributes.
     :rtype: dict[str, Any]
     """
-    from agilerl.modules import EvolvableModule
-
     attribute_dict = EvolvableAlgorithm.inspect_attributes(agent)
     attribute_dict["agilerl_version"] = version("agilerl")
     attribute_dict.pop("accelerator", None)
     attribute_dict.pop("rollout_buffer", None)
+    attribute_dict.pop("grama_scores", None)
 
-    # NOTE: this feels messy, refactor this to be more elegant
     if omit_actor_info and "actor" in attribute_dict:
         attribute_dict.pop("actor", None)
     if omit_optimizer_info and "optimizer" in attribute_dict:
@@ -388,6 +401,33 @@ def get_optimizer_cls(
             for agent_id, cls_name in optimizer_cls.items()
         }
     return getattr(torch.optim, optimizer_cls)
+
+
+def _per_neuron_grad(grad_input: GradInput) -> torch.Tensor | None:
+    """Reduce an activation's grad_input to one |grad_{z_i}L| per neuron.
+
+    The first element of the tuple a full backward hook receives is the gradient
+    of the loss w.r.t. the module's input, i.e. the pre-activation gradient.
+    Dense gradients have shape (batch, H) and are averaged over the batch;
+    convolutional gradients have shape (batch, C, *spatial) and are averaged
+    over the batch and spatial dimensions.
+
+    :param grad_input: The gradient a full backward hook was handed.
+    :type grad_input: GradInput
+    :return: One mean absolute gradient per neuron, or None if none flowed.
+    :rtype: torch.Tensor | None
+    """
+    if isinstance(grad_input, (tuple, list)):
+        grad = grad_input[0] if len(grad_input) > 0 else None
+    else:
+        grad = grad_input
+    if grad is None:
+        return None
+    magnitude = grad.detach().abs()
+    if magnitude.dim() <= 1:
+        return magnitude
+    reduce_dims = [dim for dim in range(magnitude.dim()) if dim != 1]
+    return magnitude.mean(dim=reduce_dims)
 
 
 class EvolvableAlgorithm(ABC, Generic[ExperiencesT], metaclass=RegistryMeta):
@@ -446,6 +486,9 @@ class EvolvableAlgorithm(ABC, Generic[ExperiencesT], metaclass=RegistryMeta):
         self.registry = MutationRegistry(hp_config)
         self.training = True
         self.subpopulation_id: int | None = None
+        self.grama_scores: GraMaScores | None = None
+        self._grama_handles: list[RemovableHandle] = []
+        self._grama_latest: GraMaScores | None = None
 
     @property
     def index(self) -> int:
@@ -515,17 +558,196 @@ class EvolvableAlgorithm(ABC, Generic[ExperiencesT], metaclass=RegistryMeta):
         """
         self.metrics.add_scores(scores)
 
-    def init_training_step(self) -> None:
-        """Initialize the training step for metrics tracking."""
+    def init_training_step(self, capture_grama: bool = False) -> None:
+        """Open the agent's training block: metrics tracking, and GraMa capture.
+
+        Hooks are registered afresh each cycle, so they follow the agent
+        through architecture mutations, checkpoint reloads and accelerator
+        re-wrapping. Opening a block implicitly closes one that an earlier call
+        left open.
+
+        :param capture_grama: Whether to register GraMa capture hooks for this
+            training step. Defaults to False since the LLM finetuners never run
+            ReGraMa.
+        :type capture_grama: bool
+        :return: None.
+        :rtype: None
+        """
         self.metrics.init_training_step()
+        self._set_grama_capture(capture_grama)
 
     def finalize_training_step(self, num_steps: int) -> None:
-        """Finalize the training step for metrics tracking.
+        """Close the agent's training block, storing any captured GraMa scores.
 
         :param num_steps: Number of steps taken during the training step.
         :type num_steps: int
+        :return: None.
+        :rtype: None
         """
         self.metrics.finalize_training_step(num_steps)
+        self._release_grama_capture()
+
+    def _set_grama_capture(self, capture_grama: bool) -> None:
+        """Close any open GraMa capture, then open a new one if requested.
+
+        :param capture_grama: Whether to register GraMa capture hooks for the
+            training step being opened.
+        :type capture_grama: bool
+        :return: None.
+        :rtype: None
+        """
+        self._release_grama_capture()
+        if capture_grama:
+            self._register_grama_capture()
+
+    def _register_grama_capture(self) -> None:
+        """Hook every measured activation of every evaluation network.
+
+        A full backward hook on an activation is handed grad_{z_i}L, the
+        gradient w.r.t. its input, so the GraMa metric is measured for free
+        during the real training backward pass.
+
+        :return: None.
+        :rtype: None
+        """
+        latest: GraMaScores = []
+        self._grama_latest = latest
+        for net_idx, (_network_id, network) in enumerate(self.unrolled_eval_networks()):
+            targets = target_activations(network)
+            latest.append([None] * len(targets))
+            for mod_idx, module in enumerate(targets):
+                handle = module.register_full_backward_hook(
+                    self._grama_hook(latest, net_idx, mod_idx),
+                )
+                self._grama_handles.append(handle)
+
+    @staticmethod
+    def _grama_hook(
+        latest: GraMaScores,
+        net_idx: int,
+        mod_idx: int,
+    ) -> BackwardHook:
+        """Build the backward hook recording one measured activation's gradient.
+
+        :param latest: The open capture's snapshot, written in place.
+        :type latest: GraMaScores
+        :param net_idx: Position of the layer's network in the snapshot.
+        :type net_idx: int
+        :param mod_idx: Position of the layer within that network's snapshot.
+        :type mod_idx: int
+        :return: The hook to register on that activation.
+        :rtype: BackwardHook
+        """
+
+        def hook(
+            _module: torch.nn.Module,
+            grad_input: GradInput,
+            _grad_output: GradInput,
+        ) -> None:
+            gradient = _per_neuron_grad(grad_input)
+            if gradient is None:
+                return
+            latest[net_idx][mod_idx] = gradient
+
+        return hook
+
+    def _release_grama_capture(self) -> None:
+        """Close any open GraMa capture, storing its snapshot and removing its hooks.
+
+        :return: None.
+        :rtype: None
+        """
+        latest = self._grama_latest
+        if latest is None:
+            return
+        self.grama_scores = [list(net_latest) for net_latest in latest]
+        self._remove_grama_handles()
+        self._grama_latest = None
+
+    def _remove_grama_handles(self) -> None:
+        """Detach every backward hook this capture registered.
+
+        :return: None.
+        :rtype: None
+        """
+        for handle in self._grama_handles:
+            handle.remove()
+        self._grama_handles = []
+
+    def get_eval_modules(
+        self,
+        cloning: bool = True,
+    ) -> tuple[dict[str, EvolvableModule], dict[str, EvolvableModule]]:
+        """Get the offsprings of all of the evaluation modules in the individual.
+
+        :param cloning: Whether to clone each evaluation module before returning it,
+            defaults to True.
+        :type cloning: bool, optional
+
+        :return: Tuple of offspring policy and the rest of the evaluation modules
+        :rtype: tuple[dict[str, EvolvableModule], dict[str, EvolvableModule]]
+        """
+        offspring_modules: dict[str, EvolvableModule] = {}
+        offspring_policy: dict[str, EvolvableModule] = {}
+        for group in self.registry.groups:
+            eval_name = group.eval_network_name()
+            eval_module: EvolvableModule = getattr(self, eval_name)
+
+            # Clone the offspring prior to applying mutations
+            offspring = eval_module.clone() if cloning else eval_module
+            if group.policy:
+                offspring_policy[eval_name] = offspring
+            else:
+                offspring_modules[eval_name] = offspring
+
+        return offspring_policy, offspring_modules
+
+    def unrolled_eval_networks(self) -> list[tuple[str | None, torch.nn.Module]]:
+        """Return the agent's evaluation networks as (network_id, network) pairs.
+
+        :return: One (network_id, network) pair per measured network.
+        :rtype: list[tuple[str | None, torch.nn.Module]]
+        """
+        offspring_policy, offspring_modules = self.get_eval_modules(cloning=False)
+
+        accelerator = self.accelerator
+        pairs: list[tuple[str | None, torch.nn.Module]] = []
+        for eval_net in chain(offspring_policy.values(), offspring_modules.values()):
+            if accelerator is not None:
+                eval_net = accelerator.unwrap_model(eval_net)
+            if isinstance(eval_net, ModuleDict):
+                sub_networks = cast("ModuleDict[torch.nn.Module]", eval_net)
+                pairs.extend(sub_networks.items())
+            else:
+                pairs.append((None, eval_net))
+        return pairs
+
+    def eval_policy_network_ids(self) -> set[int]:
+        """Return the id of every evaluation network in the agent's policy group.
+
+        :return: Identities of the policy's evaluation networks.
+        :rtype: set[int]
+        """
+        policy_name = self.registry.policy()
+        if not isinstance(policy_name, str):
+            return set()
+        policy = getattr(self, policy_name, None)
+        if policy is None:
+            return set()
+        if isinstance(policy, dict) and not isinstance(policy, ModuleDict):
+            return {
+                id(
+                    self.accelerator.unwrap_model(module)
+                    if self.accelerator is not None
+                    else module
+                )
+                for module in policy.values()
+            }
+        if self.accelerator is not None:
+            policy = self.accelerator.unwrap_model(policy)
+        if isinstance(policy, ModuleDict):
+            return {id(module) for _key, module in policy.items()}
+        return {id(policy)}
 
     @abstractmethod
     def preprocess_observation(
@@ -620,6 +842,7 @@ class EvolvableAlgorithm(ABC, Generic[ExperiencesT], metaclass=RegistryMeta):
     def inspect_attributes(
         agent: EvolvableAlgorithmProtocol | AgentWrapperProtocol[Any],
         input_args_only: bool = False,
+        exclude: Iterable[str] = (),
     ) -> dict[str, Any]:
         """Inspect and retrieve the attributes of the current object, excluding attributes related to the
         underlying evolvable networks (i.e. `EvolvableModule`, `torch.optim.Optimizer`) and with
@@ -628,25 +851,27 @@ class EvolvableAlgorithm(ABC, Generic[ExperiencesT], metaclass=RegistryMeta):
         :param input_args_only: If True, only include attributes that are input arguments to the constructor.
                                 Defaults to False.
         :type input_args_only: bool
+        :param exclude: Extra attribute names to drop from the result, on top of the standard exclusions
+            below. For a caller-specific reason to leave an attribute out of its own view.
+        :type exclude: Iterable[str], optional
         :return: A dictionary of attribute names and their values.
         :rtype: dict[str, Any]
         """
-        # Get all attributes of the current object
-        attributes = inspect.getmembers(agent, lambda a: not isroutine(a))
+        names = [n for n in dir(agent) if not _is_readonly_property(agent, n)]
+        attributes = [
+            (n, val) for n in names if not isroutine(val := getattr(agent, n))
+        ]
 
-        # Exclude attributes that are EvolvableModule or Optimizer objects (also check for nested
-        # module-related attributes for multi-agent algorithms)
-        exclude = list(agent.evolvable_attributes().keys())
-        exclude += [attr for attr, val in attributes if isinstance(val, TensorDict)]
+        excluded_names = list(agent.evolvable_attributes().keys())
+        excluded_names += [
+            attr for attr, val in attributes if isinstance(val, TensorDict)
+        ]
+        excluded_names += list(exclude)
 
         # Exclude private and built-in attributes
         attributes = [
             a for a in attributes if not (a[0].startswith("_") or a[0].endswith("_"))
         ]
-
-        # Exclude read-only properties — derived values cannot be restored
-        # via setattr and must not be persisted in checkpoints.
-        attributes = [a for a in attributes if not _is_readonly_property(agent, a[0])]
 
         # If input_args_only is True, only include attributes that are
         # input arguments to the constructor
@@ -655,11 +880,11 @@ class EvolvableAlgorithm(ABC, Generic[ExperiencesT], metaclass=RegistryMeta):
             attributes = {
                 k: v
                 for k, v in attributes
-                if k not in exclude and k in constructor_params
+                if k not in excluded_names and k in constructor_params
             }
         else:
             # Remove the algo specific guarded variables (if specified)
-            attributes = {k: v for k, v in attributes if k not in exclude}
+            attributes = {k: v for k, v in attributes if k not in excluded_names}
         return attributes
 
     @staticmethod
@@ -1014,9 +1239,10 @@ class EvolvableAlgorithm(ABC, Generic[ExperiencesT], metaclass=RegistryMeta):
                 and not attr.endswith("_")
             )
 
-        # Inspect evolvable given specs
         evolvable_attrs: dict[str, Any] = {}
         for attr in dir(self):
+            if _is_readonly_property(self, attr):
+                continue
             obj = getattr(self, attr)
             if is_evolvable(attr, obj):
                 evolvable_attrs[attr] = obj
@@ -1137,8 +1363,11 @@ class EvolvableAlgorithm(ABC, Generic[ExperiencesT], metaclass=RegistryMeta):
             pickle_module=dill,
         )
 
-    def load_checkpoint(self, path: str) -> None:
-        """Load saved agent properties and network weights from checkpoint.
+    def load_weights(self, path: str) -> None:
+        """Load only the network weights from a checkpoint.
+
+        Warm-starts a new run from prior weights; optimizer, LR schedule,
+        training progress and hyperparameters are not loaded.
 
         :param path: Location to load checkpoint from
         :type path: string
@@ -1149,11 +1378,22 @@ class EvolvableAlgorithm(ABC, Generic[ExperiencesT], metaclass=RegistryMeta):
             pickle_module=dill,
             weights_only=False,
         )
+        self._load_torch_checkpoint(checkpoint)
 
-        # Recreate evolvable modules
+        if self.accelerator is not None:
+            self.wrap_models()
+        elif self.torch_compiler:
+            configure_tf32_precision()
+            self.recompile()
+
+    def _load_torch_checkpoint(self, checkpoint: dict[str, Any]) -> None:
+        """Recreate the evolvable modules and load their state dicts.
+
+        :param checkpoint: Deserialized checkpoint dictionary.
+        :type checkpoint: dict[str, Any]
+        """
         network_info: CheckpointInfo = checkpoint["network_info"]
         modules = network_info["modules"]
-        optimizers = network_info["optimizers"]
         network_names = network_info["network_names"]
         for name in network_names:
             net_dict = {k: v for k, v in modules.items() if k.startswith(name)}
@@ -1201,6 +1441,26 @@ class EvolvableAlgorithm(ABC, Generic[ExperiencesT], metaclass=RegistryMeta):
             elif state_dict:
                 loaded_module.load_state_dict(state_dict)
 
+    def load_checkpoint(self, path: str) -> None:
+        """Load saved agent properties and network weights from checkpoint.
+
+        Restores full training state (weights, optimizer, LR schedule,
+        hyperparameters) to resume a run; :meth:`load_weights` takes weights only.
+
+        :param path: Location to load checkpoint from
+        :type path: string
+        """
+        checkpoint: dict[str, Any] = torch.load(
+            path,
+            map_location=self.device,
+            pickle_module=dill,
+            weights_only=False,
+        )
+
+        self._load_torch_checkpoint(checkpoint)
+
+        network_info: CheckpointInfo = checkpoint["network_info"]
+        optimizers = network_info["optimizers"]
         optimizer_names = network_info["optimizer_names"]
         for name in optimizer_names:
             opt_dict = {k: v for k, v in optimizers.items() if k.startswith(name)}
@@ -1288,8 +1548,6 @@ class EvolvableAlgorithm(ABC, Generic[ExperiencesT], metaclass=RegistryMeta):
         :return: An instance of the algorithm
         :rtype: RLAlgorithm
         """
-        from agilerl.modules import EvolvableModule, ModuleDict
-
         checkpoint: dict[str, Any] = torch.load(
             path,
             map_location=device,
@@ -1414,8 +1672,9 @@ class EvolvableAlgorithm(ABC, Generic[ExperiencesT], metaclass=RegistryMeta):
         for name, optimizer in loaded_optimizers.items():
             setattr(self, name, optimizer)
 
-        # Assign other attributes to the algorithm
-        for attribute in EvolvableAlgorithm.inspect_attributes(self):
+        for attribute in EvolvableAlgorithm.inspect_attributes(
+            self, exclude=("grama_scores",)
+        ):
             if attribute not in checkpoint:
                 warnings.warn(
                     f"Attribute {attribute} not found in checkpoint. Skipping.",
@@ -1815,8 +2074,6 @@ class MultiAgentRLAlgorithm(
 
     def _registry_init(self) -> None:
         super()._registry_init()
-
-        from agilerl.modules import ModuleDict
 
         # Additional check to ensure multi-agent networks are initialized with valid keys
         for name, network in self.evolvable_attributes(networks_only=True).items():
@@ -2458,7 +2715,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
     :param actor_network: The actor network.
     :type actor_network: PreTrainedModelProtocol | None
     :param micro_batch_size_per_gpu: Samples per backward pass on one rank (the
-        memory knob). Optimizer-step cadence comes from ``mini_batch_size``.
+        memory setting). Optimizer-step cadence comes from ``mini_batch_size``.
     :type micro_batch_size_per_gpu: int | None
     :param mini_batch_size: Per-rank samples covered by one optimizer step;
         DeepSpeed's ``gradient_accumulation_steps`` = ``mini_batch_size /
@@ -2489,7 +2746,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
     :param lora_target_scope: Optional PEFT LoRA path scope for multimodal models
         (e.g. ``"language_model"``). Passed to :func:`adapt_lora_config_for_model`.
     :type lora_target_scope: str | None, optional
-    :param chunk_rows: Primary chunk-size knob for fused logit tiles used by
+    :param chunk_rows: Primary chunk-size setting for fused logit tiles used by
         both the standard fused-logprob path and the Liger fused-loss path.
         ``None`` (default) preserves each path's auto-tuned behavior.
     :type chunk_rows: int | None, optional
@@ -2508,9 +2765,6 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
     :param torch_compiler: The torch compiler mode to use ('default',
         'reduce-overhead', or 'max-autotune'), defaults to None.
     :type torch_compiler: str | None, optional
-    :param reduce_memory_peak: Deprecated. Previously hinted peak-memory batching;
-        ignored. Configure ``micro_batch_size_per_gpu`` and DeepSpeed instead.
-    :type reduce_memory_peak: bool, optional
     :param cast_logprobs_to_fp32: When ``True`` (the default), the per-token
         log-probability reduction (``gather`` / ``logsumexp``) runs in fp32
         before being cast back to the input dtype, for numerically stable
@@ -2596,7 +2850,6 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         model_config: dict[str, Any] | PretrainedConfigProtocol | None = None,
         gradient_checkpointing: bool = True,
         torch_compiler: str | None = None,
-        reduce_memory_peak: bool = False,
         cast_logprobs_to_fp32: bool = True,
         quantization_config: BitsAndBytesConfig | None = None,
         activation_offload: bool = False,
@@ -2609,13 +2862,6 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         if not HAS_LLM_DEPENDENCIES:
             msg = "LLM dependencies are not installed. Please install them using `pip install agilerl[llm]`."
             raise ImportError(msg)
-        if reduce_memory_peak:
-            warnings.warn(
-                "reduce_memory_peak is deprecated and has no effect; configure batch "
-                "size via micro_batch_size_per_gpu and DeepSpeed settings instead.",
-                DeprecationWarning,
-                stacklevel=2,
-            )
         if use_liger_loss and not HAS_LIGER_KERNEL:
             warnings.warn(
                 "use_liger_loss=True requested, but `liger-kernel` is not available on this platform/environment. "
@@ -2713,6 +2959,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         self.batch_size = batch_size
         self.lr = align_deepspeed_lr(float(lr), self.accelerator)
         self.lr_critic = lr_critic
+        self.seed = seed
 
         if self.accelerator is not None:
             ds_plugin = getattr(self.accelerator.state, "deepspeed_plugin", None)
@@ -2753,10 +3000,12 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
                     )
                 if self.zero_stage == 3:
                     # Class-level DeepSpeed / Nemotron-H workarounds; install
-                    # before any model construction below.
+                    # before any model construction below; the pre-built
+                    # actor_network gets its instance-level state swept.
                     install_zero3_patches(
                         ds_config,
                         model_name_or_path=self.pretrained_model_name_or_path,
+                        model=actor_network,
                         num_partitions=int(self.accelerator.num_processes),
                     )
             if self.accelerator.num_processes > 1:
@@ -2867,6 +3116,79 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         """
         # Dummy pass-through: LLM observations are already batched tensors.
         return observation
+
+    @abstractmethod
+    def get_action(
+        self,
+        obs: LLMObsType,
+        training: bool = True,
+        *args: Any,
+        **kwargs: Any,
+    ) -> ActionResult:
+        """Generate completions for each prompt in ``obs``.
+
+        :param obs: A single prompt dict or a list of HF-style prompt dicts.
+        :type obs: LLMObsType
+        :param training: Whether the rollout is a training rollout.
+        :type training: bool
+        :return: The generated completions and their masks.
+        :rtype: ActionResult
+        """
+
+    def test(
+        self,
+        env: RolloutHarness,
+        loop: int = 1,
+        *args: Any,
+        **kwargs: Any,
+    ) -> np.ndarray:
+        """Return fitness (test) score of the llm on the test sub-set.
+
+        :param env: Tokenized rollout episode environment (single- or multi-turn).
+        :type env: RolloutHarness
+        :param loop: Number of outer test iterations (episodes).
+        :type loop: int
+        :return: Zero-dimensional array holding the mean per-step reward,
+            which is also recorded in the agent's fitness history.
+        :rtype: np.ndarray
+        """
+        if not isinstance(env, RolloutHarness):
+            msg = f"env must be a RolloutHarness; got {type(env).__name__}"
+            raise TypeError(msg)
+        rewards: list[float] = []
+        with env.eval_mode():
+            for _ in range(loop):
+                prompt, _info = env.reset()
+                while not env.done:
+                    # ``current_prompt`` is only empty once the env is done,
+                    # so inside this loop it always carries token ids.
+                    if not is_rollout_prompt(prompt):
+                        msg = "an active env always holds a prompt"
+                        raise TypeError(msg)
+                    token_ids = self.get_action(
+                        [prompt],
+                        training=False,
+                    ).token_ids
+                    prompt, reward, _terminated, _truncated, _info = env.step(
+                        token_ids[0],
+                    )
+                    rewards.append(float(reward))
+        if rewards:
+            mean_fit = float(np.mean(rewards))
+        else:
+            warnings.warn(
+                "test() collected no turns (every reset was already done, e.g. "
+                "over-budget prompts); recording fitness 0.0.",
+                UserWarning,
+                stacklevel=2,
+            )
+            mean_fit = 0.0
+        self.metrics.add_fitness(mean_fit)
+        if self.accelerator is not None:
+            # Episodes early-exit at their own turn counts, so ranks reach here
+            # out of step; sync once before training resumes.
+            self.accelerator.wait_for_everyone()
+        return np.array(mean_fit)
 
     def save_checkpoint(
         self,
@@ -3011,25 +3333,104 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         if self.accelerator is not None:
             self.accelerator.wait_for_everyone()
 
+    def load_weights(
+        self,
+        path: str,
+        overwrite_reference_adapter: bool | None = None,
+        overwrite_critic_adapter: bool = False,
+    ) -> None:
+        """Load only the LoRA adapters (and value head) from a checkpoint directory.
+
+        :param path: Directory containing a checkpoint written by
+            :meth:`save_checkpoint`.
+        :type path: str
+        :param overwrite_reference_adapter: See :meth:`load_checkpoint`.
+        :type overwrite_reference_adapter: bool | None
+        :param overwrite_critic_adapter: See :meth:`load_checkpoint`.
+        :type overwrite_critic_adapter: bool
+        """
+        checkpoint: dict[str, Any] = torch.load(
+            str(Path(path) / "attributes.pt"),
+            weights_only=False,
+            pickle_module=dill if self.accelerator is None else pickle,
+        )
+        lora_only = checkpoint.get("_lora_only", False) or checkpoint.get(
+            "_weights_only", False
+        )
+        if lora_only:
+            self._load_lora_checkpoint(
+                path,
+                overwrite_reference_adapter,
+                overwrite_critic_adapter,
+            )
+        elif self._uses_deepspeed:
+            self._load_full_model_checkpoint(path, checkpoint)
+        else:
+            # A full-model checkpoint keeps the actor's weights in ``attributes.pt``.
+            self._load_torch_checkpoint(checkpoint)
+
+    def _load_full_model_checkpoint(
+        self, path: str, checkpoint: dict[str, Any]
+    ) -> None:
+        """Load only the actor weights of a DeepSpeed full-model checkpoint.
+
+        :param path: Checkpoint directory written by :meth:`save_checkpoint`.
+        :type path: str
+        :param checkpoint: Deserialized ``attributes.pt`` payload.
+        :type checkpoint: dict[str, Any]
+        """
+        actor_state_dict = (
+            checkpoint.get("network_info", {})
+            .get("modules", {})
+            .get("actor_state_dict")
+        )
+        if actor_state_dict is None:
+            self._load_distributed_actor(
+                path,
+                tag="save_checkpoint",
+                load_optimizer_states=False,
+                load_lr_scheduler_states=False,
+            )
+        else:
+            model_ref = self._get_unwrapped_actor()
+            params_to_gather = [
+                p
+                for name, p in model_ref.named_parameters()
+                if name in actor_state_dict
+            ]
+            with gather_if_zero3(
+                self.zero_stage,
+                params_to_gather,
+                modifier_rank=0,
+            ):
+                model_ref.load_state_dict(actor_state_dict)
+
     def load_checkpoint(
         self,
         path: str,
         load_optimizer: bool = False,
-        overwrite_reference_adapter: bool = False,
-        overwrite_critic_adapter: bool = True,
+        overwrite_reference_adapter: bool | None = None,
+        overwrite_critic_adapter: bool = False,
     ) -> None:
         """Load adapter weights and algorithm state from a checkpoint directory.
+
+        Restores full training state (adapters, optimizer, LR schedule,
+        hyperparameters) to resume a run; :meth:`load_weights` takes adapters only.
 
         Adapter roles restored on load:
 
           * ``actor``     — the trained policy. Always loaded.
-          * ``reference`` — the fixed policy used for KL / comparison. The
-            checkpoint's ``actor`` adapter is copied onto ``reference`` so
-            that SFT -> DPO -> GRPO chains work out of the box: the stage-N
-            actor becomes the stage-N+1 reference.
-          * ``critic``    — optional value head. Loaded from disk if a
-            ``critic/`` adapter is present, else copied from ``actor``, else
-            left as the live fresh LoRA init.
+          * ``reference`` — the fixed policy used for KL / comparison. Loaded from
+            the checkpoint's ``reference/`` adapter when it has one, so a resumed
+            run keeps the anchor it was training against. When it has none, the
+            checkpoint's ``actor`` is copied onto ``reference`` instead, so
+            SFT -> DPO -> GRPO chains work out of the box: the stage-N actor
+            becomes the stage-N+1 reference.
+          * ``critic``    — optional value head. Loaded from the checkpoint's
+            ``critic/`` adapter when it has one, otherwise left at its fresh LoRA
+            init (all-zero ``lora_B``), i.e. a critic that starts from the base
+            model. Set ``overwrite_critic_adapter`` to seed it from the actor
+            instead.
 
         The checkpoint's LoRA config must match the live algorithm's config;
         a mismatch raises ``ValueError`` (re-create the agent with the
@@ -3086,46 +3487,19 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
                 # checkpoints also load adapter dirs so reference/critic adapters
                 # are refreshed from PEFT artifacts.
                 if lora_only:
-                    self._load_model_checkpoint(
+                    self._load_lora_checkpoint(
                         path,
                         overwrite_reference_adapter,
                         overwrite_critic_adapter,
                     )
             elif lora_only:
-                self._load_model_checkpoint(
+                self._load_lora_checkpoint(
                     path,
                     overwrite_reference_adapter,
                     overwrite_critic_adapter,
                 )
             else:
-                actor_state_dict = (
-                    checkpoint.get("network_info", {})
-                    .get("modules", {})
-                    .get("actor_state_dict")
-                )
-                if actor_state_dict is None:
-                    # DeepSpeed full-model checkpoints saved with
-                    # save_optimizer=True persist module weights in the
-                    # save_checkpoint tag directory (not attributes.pt).
-                    self._load_distributed_actor(
-                        path,
-                        tag="save_checkpoint",
-                        load_optimizer_states=False,
-                        load_lr_scheduler_states=False,
-                    )
-                else:
-                    model_ref = self._get_unwrapped_actor()
-                    params_to_gather = [
-                        p
-                        for n, p in model_ref.named_parameters()
-                        if n in actor_state_dict
-                    ]
-                    with gather_if_zero3(
-                        self.zero_stage,
-                        params_to_gather,
-                        modifier_rank=0,
-                    ):
-                        model_ref.load_state_dict(actor_state_dict)
+                self._load_full_model_checkpoint(path, checkpoint)
 
             self._restore_checkpoint_attributes(checkpoint)
 
@@ -3142,7 +3516,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
                     stacklevel=2,
                 )
             if lora_only:
-                self._load_model_checkpoint(
+                self._load_lora_checkpoint(
                     path,
                     overwrite_reference_adapter,
                     overwrite_critic_adapter,
@@ -3160,25 +3534,32 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         if "lr_scheduler" in checkpoint and self.lr_scheduler is not None:
             self.lr_scheduler.load_state_dict(checkpoint["lr_scheduler"])
 
-    def _load_model_checkpoint(
+    def _load_lora_checkpoint(
         self,
         path: str,
-        overwrite_reference_adapter: bool = False,
-        overwrite_critic_adapter: bool = True,
+        overwrite_reference_adapter: bool | None = None,
+        overwrite_critic_adapter: bool = False,
     ) -> None:
         """Restore LoRA adapter weights from a checkpoint directory.
 
-        The checkpoint's LoRA config must match the live algorithm's; a mismatch
-        (e.g. a different rank) raises ``ValueError``. Reference and Critic
-        LoRA adapters in the checkpoint can be overwritten by the Actor using the
-        ``overwrite_reference_adapter`` and ``overwrite_critic_adapter`` flags.
+        Each selected adapter is loaded from its own subdirectory; a LoRA-config
+        mismatch raises ``ValueError``.
 
         :param path: Checkpoint directory path.
         :type path: str
-        :param overwrite_reference_adapter: If ``True`` do not overwrite the live reference
-            adapter. Defaults to ``False``.
-        :type overwrite_reference_adapter: bool
+        :param overwrite_reference_adapter: Seed the reference adapter from the
+            actor. ``None`` (the default) decides from the checkpoint: seed when it
+            carries no ``reference/`` adapter of its own, otherwise keep the one
+            just loaded from disk.
+        :type overwrite_reference_adapter: bool | None
+        :param overwrite_critic_adapter: Seed the critic adapter from the actor.
+            Defaults to ``False``: a critic absent from the checkpoint keeps its
+            fresh LoRA init and so starts from the base model.
+        :type overwrite_critic_adapter: bool
         """
+        if overwrite_reference_adapter is None:
+            overwrite_reference_adapter = not (Path(path) / "reference").exists()
+
         ckpt_lora_config = self._load_checkpoint_lora_config(path)
         if ckpt_lora_config is not None:
             if self.lora_config is None or self._lora_configs_equivalent(
@@ -3202,7 +3583,6 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             )
 
         if "critic" in self.selected_adapters and overwrite_critic_adapter:
-            # Always overwrite the critic
             self._copy_adapter_weights(source_adapter="actor", target_adapter="critic")
 
         # The value head (PPO's ``v_head`` Linear) is a non-LoRA module saved
@@ -3251,7 +3631,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
 
         ``lora_config`` and ``selected_adapters`` are intentionally skipped \u2014 the current
         algorithm's values are authoritative, and any LoRA-shape reconciliation is done
-        inside :meth:`_load_model_checkpoint`. ``device`` is skipped for the same reason:
+        inside :meth:`_load_lora_checkpoint`. ``device`` is skipped for the same reason:
         the live agent owns the device its models sit on. Read-only properties are
         skipped because they are derived (e.g. GRPO's ``aux_metric_name``) and cannot
         be assigned via ``setattr``.
@@ -4090,7 +4470,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
 
         ``sampling_logps`` is one 1-D tensor per row (the generated-token
         logprobs in order; single-turn = one rollout, multi-turn = concatenated
-        across turns), parallel to the stacked ``completion_ids`` rows. Each is
+        across turns), parallel to the stacked ``token_ids`` rows. Each is
         scattered onto the ``True`` positions of that row's action mask. Rows
         whose token count doesn't match the mask (e.g. env truncation) keep the
         ``old_log_probs`` value there, so their importance ratio is 1 (no
@@ -5117,7 +5497,6 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             self.actor.train(mode=not eval_mode)
             num_samples = ids.shape[0]
             if attention_mask is None:
-                # TODO this calc is avoided when using PreferenceGym, need to make ReasoningGym do the same
                 attention_mask = attention_mask_from_padded_ids(ids, self.pad_token_id)
             if self.calc_position_embeddings:
                 position_ids = self._position_ids_from_mask(attention_mask)
@@ -5420,7 +5799,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
 
     def _generate_with_vllm_colocate(
         self,
-        prompts: Sequence[ReasoningPrompts],
+        prompts: Sequence[RolloutPrompt],
         group_size: int,
         temperature: float | None,
         capture_sampling_logps: bool = False,
@@ -5429,18 +5808,13 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
     ]:
         """Generate completions with colocated vLLM for GRPO/LLMPPO-style batches.
 
-        Each entry in ``prompts`` is repeated ``group_size`` times so vLLM receives
-        a flat list of length ``len(prompts) * group_size`` (e.g. GRPO groups).
+        Each entry in ``prompts`` is repeated ``group_size`` times so vLLM
+        receives a flat list of length ``len(prompts) * group_size``
+        (e.g. GRPO groups). Action masks use the full prompt length from
+        ``input_ids``.
 
-        **Prompt dict fields:** ``input_ids`` and usually ``text`` for decoding.
-        For sliding-window multi-turn prompts, optionally set ``trajectory_input_ids``,
-        ``trajectory_text`` (decoded string passed to vLLM), ``stitch_prefix_ids``, and
-        ``initial_prompt_len`` (required when ``stitch_prefix_ids`` is
-        non-empty). Action masks use the full logical prompt length from
-        ``input_ids``, not only ``trajectory_input_ids``.
-
-        :param prompts: Length-``N`` sequence of observation mappings for this rank.
-        :type prompts: Sequence[ReasoningPrompts]
+        :param prompts: Length-``N`` sequence of prompt mappings for this rank.
+        :type prompts: Sequence[RolloutPrompt]
         :param group_size: Repeat factor per prompt (1 for plain PPO).
         :type group_size: int
         :param temperature: Temperature for sampling.
@@ -5462,20 +5836,8 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             else self.max_model_len
         )
 
-        def _trajectory_input_ids(prompt: ReasoningPrompts) -> torch.Tensor:
-            traj = prompt.get("trajectory_input_ids")
-            if traj is None:
-                return prompt["input_ids"]
-            return traj
-
         def _token_prompt_for_vllm(ids: torch.Tensor) -> dict[str, list[int]]:
             return {"prompt_token_ids": ids.squeeze(0).tolist()}
-
-        def _stitch_prefix(prompt: ReasoningPrompts, ref: torch.Tensor) -> torch.Tensor:
-            st = prompt.get("stitch_prefix_ids")
-            if st is None:
-                return ref.new_zeros((ref.shape[0], 0))
-            return st
 
         def _vllm_max_new_tokens(model_prompt_len: int) -> int:
             room = self.max_model_len - model_prompt_len
@@ -5489,22 +5851,17 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
 
         # Compute the per-prompt work once per *unique* prompt (N items),
         # then alias by reference across each group (N·G items)
-        unique_ids = [_trajectory_input_ids(p) for p in prompts]
+        unique_ids = [prompt["input_ids"] for prompt in prompts]
         unique_tokens = [_token_prompt_for_vllm(ids) for ids in unique_ids]
         unique_max = [_vllm_max_new_tokens(int(ids.shape[1])) for ids in unique_ids]
-        unique_stitch = [
-            _stitch_prefix(p, ids) for p, ids in zip(prompts, unique_ids, strict=True)
-        ]
 
         # Replicate by reference for the flat vLLM batch. Entries within a
         # group of `group_size` are aliased references to the same tensor / dict
-        # — safe because downstream use is read-only is read-only w.r.t. these objects.
+        # — safe because downstream use is read-only w.r.t. these objects.
         # Do not introduce in-place ops on these aliases.
-        group_prompts = [p for p in prompts for _ in range(group_size)]
         prompts_ids = [ids for ids in unique_ids for _ in range(group_size)]
         token_prompts = [tp for tp in unique_tokens for _ in range(group_size)]
         max_output_tokens = [m for m in unique_max for _ in range(group_size)]
-        stitch_prefixes = [sp for sp in unique_stitch for _ in range(group_size)]
 
         if vllm_config.tensor_parallel_size > 1:
             orig_size = len(token_prompts)
@@ -5515,9 +5872,6 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             gathered_token_prompts: list[Any] = [
                 None
             ] * vllm_config.tensor_parallel_size
-            gathered_stitch_prefixes: list[Any] = [
-                None
-            ] * vllm_config.tensor_parallel_size
             gathered_max_output_tokens: list[Any] = [
                 None
             ] * vllm_config.tensor_parallel_size
@@ -5526,10 +5880,9 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
                 (
                     gathered_prompts_ids,
                     gathered_token_prompts,
-                    gathered_stitch_prefixes,
                     gathered_max_output_tokens,
                 ),
-                (prompts_ids, token_prompts, stitch_prefixes, max_output_tokens),
+                (prompts_ids, token_prompts, max_output_tokens),
                 strict=True,
             ):
                 torch.distributed.all_gather_object(gathered, obj, group=self.tp_group)
@@ -5540,22 +5893,14 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             all_token_prompts = [
                 prompt for sublist in gathered_token_prompts for prompt in sublist
             ]
-            all_stitch_prefixes = [
-                sp for sublist in gathered_stitch_prefixes for sp in sublist
-            ]
             all_max_output_tokens = [
                 max_out for sublist in gathered_max_output_tokens for max_out in sublist
             ]
         else:
             all_token_prompts = token_prompts
             all_prompts_ids = prompts_ids
-            all_stitch_prefixes = stitch_prefixes
             all_max_output_tokens = max_output_tokens
 
-        # The windowed stitch path reorders tokens, so sampling-logprob capture
-        # (for the vLLM mismatch correction) is excluded there.
-        stitch_active = any(int(sp.shape[1]) > 0 for sp in stitch_prefixes)
-        capture_sampling_logps = capture_sampling_logps and not stitch_active
         generation_kwargs: dict[str, Any] = {
             "n": 1,  # vLLM on each GPU generates only 1 in colocate mode
             "repetition_penalty": self.repetition_penalty,
@@ -5588,11 +5933,11 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
 
         all_outputs = self.llm.generate(all_token_prompts, **generate_kwargs)
 
-        completion_ids = [
+        generated_ids = [
             output.token_ids for outputs in all_outputs for output in outputs.outputs
         ]
         # Flat per-completion lists of the sampled tokens' logprobs (one float
-        # per generated token), parallel to ``completion_ids``. Empty when not
+        # per generated token), parallel to ``generated_ids``. Empty when not
         # capturing.
         sampling_logps_flat: list[list[float]] = (
             [
@@ -5611,9 +5956,8 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
                 local_rank_in_group * orig_size,
                 (local_rank_in_group + 1) * orig_size,
             )
-            completion_ids = completion_ids[tp_slice]
+            generated_ids = generated_ids[tp_slice]
             prompts_ids = all_prompts_ids[tp_slice]
-            stitch_prefixes = all_stitch_prefixes[tp_slice]
             if capture_sampling_logps:
                 sampling_logps_flat = sampling_logps_flat[tp_slice]
 
@@ -5622,14 +5966,9 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             prompts_ids[group_size * i].to(self.device, non_blocking=True)
             for i in range(len(prompts))
         ]
-        unique_stitch_dev = [
-            stitch_prefixes[group_size * i].to(self.device, non_blocking=True)
-            for i in range(len(prompts))
-        ]
         prompts_ids = [ids for ids in unique_prompts_ids_dev for _ in range(group_size)]
-        stitch_prefixes = [sp for sp in unique_stitch_dev for _ in range(group_size)]
 
-        completion_ids = [
+        token_ids_list = [
             torch.cat(
                 [
                     torch.cat(
@@ -5637,7 +5976,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
                         dim=0,
                     ),
                     stack_and_pad_experiences(
-                        completion_ids[group_size * i : group_size * (i + 1)],
+                        generated_ids[group_size * i : group_size * (i + 1)],
                         padding_values=[self.pad_token_id],
                         device=self.device,
                     )[0],
@@ -5656,26 +5995,15 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             else None
         )
 
-        if any(int(sp.shape[1]) > 0 for sp in stitch_prefixes):
-            completion_ids = stitch_completion_after_windowed_vllm_generate(
-                completion_ids,
-                stitch_prefixes,
-                group_prompts,
-                group_size,
-                prompts,
-            )
-
-        # Prompt mappings type their values as `Any`, so `input_ids` reads back
-        # as `Any`; pin it to `torch.Tensor` to read the sequence-length dimension.
         num_input_tokens = [
             int(prompts[i]["input_ids"].shape[1]) for i in range(len(prompts))
         ]
         completion_masks = [
-            build_completion_mask(completion_id, num_input_tokens[i], self.pad_token_id)
-            for i, completion_id in enumerate(completion_ids)
+            build_completion_mask(token_ids, num_input_tokens[i], self.pad_token_id)
+            for i, token_ids in enumerate(token_ids_list)
         ]
 
-        return completion_ids, completion_masks, sampling_logps
+        return token_ids_list, completion_masks, sampling_logps
 
     @staticmethod
     def _logprobs_from_logits(
@@ -6256,6 +6584,8 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         """
         prompt_lengths_tensor = torch.tensor(prompt_lengths, dtype=torch.long)
         positions = torch.arange(max_length, dtype=torch.long).unsqueeze(0)
+        # The first response token sits AT index prompt_length, so the mask must
+        # include it — a strict ``>`` silently drops it from every loss.
         return positions >= prompt_lengths_tensor.unsqueeze(1)
 
     def _configure_vllm(self) -> None:

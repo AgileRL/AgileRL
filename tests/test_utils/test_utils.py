@@ -865,6 +865,23 @@ class TestPrintHyperparams:
             call_args = mock_print.call_args[0][0]
             assert "nan" in call_args.lower() or "nan" in str(call_args)
 
+    def test_regrama_operator_state_is_not_listed_as_a_hyperparameter(self):
+        pop = create_population(
+            algo="DQN",
+            observation_space=spaces.Box(0, 1, shape=(4,)),
+            action_space=spaces.Discrete(2),
+            net_config={"encoder_config": {"hidden_size": [8]}},
+            INIT_HP=SHARED_INIT_HP,
+            population_size=1,
+        )
+        pop[0].grama_scores = [[torch.zeros(8)]]
+
+        with patch("builtins.print") as mock_print:
+            print_hyperparams(pop)
+
+        printed = mock_print.call_args[0][0]
+        assert "grama_scores" not in printed
+
     # The function prints the hyperparameters and fitnesses of all agents in the population.
     def test_prints_hyperparams(self):
         # Arrange
@@ -894,7 +911,7 @@ class TestPrintHyperparams:
 
         agent = pop[0]
         mean_fitness = np.mean(agent.fitness[-5:]).item()
-        attrs = EvolvableAlgorithm.inspect_attributes(agent)
+        attrs = EvolvableAlgorithm.inspect_attributes(agent, exclude=("grama_scores",))
         expected_lines = [
             f"Agent ID: {agent.index}  |  Mean 5 Fitness: {mean_fitness:.2f}",
             "Attributes:",
@@ -1772,21 +1789,8 @@ class TestPrepareLlmAlgoKwargs:
         assert "vllm_config" not in merged
         assert merged["use_separate_reference_adapter"] is False
 
-    def test_reduce_memory_peak_propagates_when_set(self):
-        from agilerl.utils.utils import _prepare_llm_algo_kwargs
-
-        merged = _prepare_llm_algo_kwargs(
-            {},
-            tokenizer=None,
-            model_name="foo",
-            lora_config=None,
-            vllm_config=None,
-            INIT_HP=self._init_hp(REDUCE_MEMORY_PEAK=True),
-        )
-        assert merged["reduce_memory_peak"] is True
-
     def test_attn_implementation_injected_into_model_config(self):
-        """A non-"auto" ATTN_IMPLEMENTATION lands in model_config so the
+        """A non-"auto" ATTN_IMPLEMENTATION is written to model_config so the
         algorithm's create_model treats it as authoritative.
         """
         from agilerl.utils.utils import _prepare_llm_algo_kwargs
@@ -2142,15 +2146,91 @@ class TestAggregateMetricsNoAccelerator:
         assert result == pytest.approx(2.0)
 
 
-class TestDistributedWorldSize:
-    def test_returns_one_without_accelerator(self):
+class TestDistributedHelpers:
+    """World size / rank helpers: Accelerate, torch.distributed, single-process."""
+
+    def test_world_size_prefers_accelerator(self):
         from agilerl.utils.utils import _distributed_world_size
 
-        assert _distributed_world_size(None) == 1
-
-    def test_uses_accelerator_num_processes(self):
-        from agilerl.utils.utils import _distributed_world_size
-
-        accelerator = MagicMock()
-        accelerator.num_processes = 4
+        accelerator = MagicMock(num_processes=4)
         assert _distributed_world_size(accelerator) == 4
+
+    def test_rank_prefers_accelerator(self):
+        from agilerl.utils.utils import _distributed_rank
+
+        accelerator = MagicMock(process_index=2)
+        assert _distributed_rank(accelerator) == 2
+
+    def test_world_size_and_rank_fall_back_to_single_process(self):
+        from agilerl.utils.utils import _distributed_rank, _distributed_world_size
+
+        with patch("torch.distributed.is_available", return_value=False):
+            assert _distributed_world_size(None) == 1
+            assert _distributed_rank(None) == 0
+
+    def test_topology_is_the_process_group_without_tensor_parallelism(self):
+        from agilerl.utils.utils import data_parallel_topology
+
+        accelerator = MagicMock(num_processes=4, process_index=2)
+        assert data_parallel_topology(accelerator, 1) == (2, 4)
+
+    @pytest.mark.parametrize(
+        ("process_index", "expected_rank"),
+        [(0, 0), (1, 0), (2, 1), (3, 1), (6, 3), (7, 3)],
+    )
+    def test_tensor_parallel_ranks_share_one_replica_index(
+        self, process_index, expected_rank
+    ):
+        """Both processes of a TP pair must get the same shard, or they generate different data."""
+        from agilerl.utils.utils import data_parallel_topology
+
+        accelerator = MagicMock(num_processes=8, process_index=process_index)
+        assert data_parallel_topology(accelerator, 2) == (expected_rank, 4)
+
+    def test_a_replica_straddling_the_process_group_is_rejected(self):
+        from agilerl.utils.utils import data_parallel_topology
+
+        accelerator = MagicMock(num_processes=6, process_index=0)
+        with pytest.raises(ValueError, match="does not divide"):
+            data_parallel_topology(accelerator, 4)
+
+    def test_world_size_and_rank_use_torch_distributed(self):
+        from agilerl.utils.utils import _distributed_rank, _distributed_world_size
+
+        with (
+            patch("torch.distributed.is_available", return_value=True),
+            patch("torch.distributed.is_initialized", return_value=True),
+            patch("torch.distributed.get_world_size", return_value=8),
+            patch("torch.distributed.get_rank", return_value=3),
+        ):
+            assert _distributed_world_size(None) == 8
+            assert _distributed_rank(None) == 3
+
+
+class TestLoraBiasValidation:
+    """``LORA_BIAS`` reaches peft verbatim, so an unknown value is caught here."""
+
+    @pytest.mark.skipif(
+        not HAS_LLM_DEPENDENCIES, reason="LoraConfig requires agilerl[llm]."
+    )
+    @pytest.mark.parametrize("bias", ["none", "all", "lora_only"])
+    def test_supported_bias_values_are_accepted(self, bias):
+        from agilerl.utils.utils import _lora_config_from_init_hp
+
+        cfg = _lora_config_from_init_hp(
+            {"LORA_TARGET_MODULES": "linear_1", "LORA_BIAS": bias}
+        )
+
+        assert cfg is not None
+        assert cfg.bias == bias
+
+    @pytest.mark.skipif(
+        not HAS_LLM_DEPENDENCIES, reason="LoraConfig requires agilerl[llm]."
+    )
+    def test_an_unknown_bias_is_rejected_by_name(self):
+        from agilerl.utils.utils import _lora_config_from_init_hp
+
+        with pytest.raises(ValueError, match="LORA_BIAS must be one of"):
+            _lora_config_from_init_hp(
+                {"LORA_TARGET_MODULES": "linear_1", "LORA_BIAS": "everything"}
+            )

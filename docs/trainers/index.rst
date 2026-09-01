@@ -121,7 +121,11 @@ training on Arena, we check that the environment has been registered and validat
    * - Bandit
      - ``name`` plus either ``features`` and ``targets`` (paths or in-memory tables) **or** a custom ``entrypoint``.
    * - LLM Fine-tuning
-     -  ``dataset``, reward/column/template fields per type. ``env_type`` is usually inferred from the algorithm if omitted.
+     - ``env_type`` is required and is either ``rollout`` (the model generates
+       and is scored) or ``dataset`` (supervised, with ``objective: sft``
+       or ``preference``). A rollout names exactly one source: dataset rows plus
+       a reward file, an ``entrypoint``, or an ``env_url``. See
+       :ref:`llm_environments`.
 
 3. ``training``
 ^^^^^^^^^^^^^^^

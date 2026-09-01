@@ -955,7 +955,7 @@ class TestTrainingManifestArenaBridge:
         assert manifest.selection_strategy.tournament_size == 3
 
     def test_from_trainer_specs_accepts_multi_frequency_selection_strategy(self):
-        """Both regimes land in the one discriminated field."""
+        """Both regimes go to the one discriminated field."""
         manifest = TrainingManifest.from_trainer_specs(
             algorithm=PPOSpec(learn_step=64),
             environment=GymEnvSpec(name="CartPole-v1"),
@@ -1074,7 +1074,7 @@ class TestTrainingManifestArenaBridgeWithoutDeps:
 
 @pytest.mark.skipif(not HAS_LLM_DEPENDENCIES, reason="LLM deps not installed")
 class TestManifestBatchSizing:
-    """Both batch-sizing knobs reach the algorithm from the manifest.
+    """Both batch-sizing settings reach the algorithm from the manifest.
 
     An unknown algorithm key is rejected outright, so a manifest cannot set an
     optimizer-step size the spec does not carry.
@@ -1101,7 +1101,7 @@ class TestManifestBatchSizing:
             },
         )
 
-    def test_both_batch_knobs_survive_the_manifest(self):
+    def test_both_batch_settings_survive_the_manifest(self):
         manifest = TrainingManifest.get_validated(
             self._manifest(micro_batch_size_per_gpu=2, mini_batch_size=4),
             mode="python",
@@ -1123,7 +1123,8 @@ class TestTrainerGetValidatedManifestLLMNetwork:
         data = _make_manifest(
             algo={"name": "DPO", "batch_size": 8},
             env={
-                "env_type": "preference",
+                "env_type": "dataset",
+                "objective": "preference",
                 "dataset": "d.parquet",
                 "columns": {"prompt": "p", "chosen": "c"},
             },
@@ -1162,7 +1163,8 @@ class TestTrainerGetValidatedManifestLLMNetwork:
                 ),
             },
             env={
-                "env_type": "preference",
+                "env_type": "dataset",
+                "objective": "preference",
                 "dataset": "d.parquet",
                 "columns": {"prompt": "p", "chosen": "c"},
             },
@@ -1187,7 +1189,8 @@ class TestTrainerGetValidatedManifestLLMNetwork:
         data = _make_manifest(
             algo={"name": "DPO", "batch_size": 8},
             env={
-                "env_type": "preference",
+                "env_type": "dataset",
+                "objective": "preference",
                 "dataset": "d.parquet",
                 "columns": {"prompt": "p", "chosen": "c"},
             },
@@ -1218,6 +1221,9 @@ class TestLocalTrainerLLM:
                 task_type="CAUSAL_LM",
             ),
             "max_model_len": 512,
+            # Below max_model_len, so rollout prompts get a non-zero budget
+            # (GRPOSpec's 1024 default would leave none at this context size).
+            "max_output_tokens": 128,
             "use_separate_reference_adapter": True,
             "pretrained_model_name_or_path": "test-model",
             "calc_position_embeddings": True,
@@ -1241,8 +1247,8 @@ class TestLocalTrainerLLM:
             algo=algo,
             env={
                 "dataset": "train.parquet",
-                "reward_file_path": "reward.py",
-                "reward_fn_name": "combined_rewards",
+                "rubric_file_path": "reward.py",
+                "rubric_name": "combined_rewards",
                 "prompt_template": {
                     "system_0": "You are a helpful assistant.",
                     "user_1": "Solve {question} to get {answer}.",
@@ -1265,10 +1271,14 @@ class TestLocalTrainerLLM:
             "beta": 0.001,
             **cls._llm_algo_base(),
         }
+        # Teacher-forced DPO never generates, so its spec has no
+        # max_output_tokens; the strict manifest check rejects unknown keys.
+        del algo["max_output_tokens"]
         return _make_manifest(
             algo=algo,
             env={
-                "env_type": "preference",
+                "env_type": "dataset",
+                "objective": "preference",
                 "dataset": "dpo_data.parquet",
                 "columns": {"prompt": "question", "chosen": "accepted"},
             },
@@ -1314,7 +1324,7 @@ class TestLocalTrainerLLM:
         manifest = self._grpo_manifest()
         manifest["environment"].pop("env_type", None)
         trainer = LocalTrainer.from_manifest(manifest)
-        assert str(trainer.env_spec.env_type) == "reasoning"
+        assert str(trainer.env_spec.env_type) == "rollout"
 
     def test_grpo_algorithm_fields(self):
         trainer = LocalTrainer.from_manifest(self._grpo_manifest())
@@ -1325,8 +1335,8 @@ class TestLocalTrainerLLM:
     def test_grpo_env_fields(self):
         trainer = LocalTrainer.from_manifest(self._grpo_manifest())
         assert trainer.env_spec.dataset == "train.parquet"
-        assert trainer.env_spec.reward_file_path == "reward.py"
-        assert trainer.env_spec.reward_fn_name == "combined_rewards"
+        assert trainer.env_spec.rubric_file_path == "reward.py"
+        assert trainer.env_spec.rubric_name == "combined_rewards"
         assert trainer.env_spec.max_reward == 10.0
         assert trainer.env_spec.train_test_split == 0.8
         assert trainer.env_spec.prompt_template == {
@@ -1340,9 +1350,10 @@ class TestLocalTrainerLLM:
         assert isinstance(trainer.algorithm_spec, DPOSpec)
         assert isinstance(trainer.env_spec, LLMEnvSpec)
 
-    def test_dpo_env_type_preference(self):
+    def test_dpo_env_type_dataset_with_preference_objective(self):
         trainer = LocalTrainer.from_manifest(self._dpo_manifest())
-        assert str(trainer.env_spec.env_type) == "preference"
+        assert str(trainer.env_spec.env_type) == "dataset"
+        assert trainer.env_spec.objective == "preference"
 
     def test_dpo_env_fields(self):
         trainer = LocalTrainer.from_manifest(self._dpo_manifest())
@@ -1382,15 +1393,19 @@ _SINGLE_AGENT_CONFIGS = [
     ("ddpg/ddpg_simba.yaml", DDPGSpec, SimbaSpec),
     ("td3.yaml", TD3Spec, MlpSpec),
     ("multi_input.yaml", PPOSpec, MultiInputSpec),
+    ("dqn/dqn_func_preserving.yaml", DQNSpec, MlpSpec),
+    ("ppo/ppo_func_preserving.yaml", PPOSpec, MlpSpec),
 ]
 
 _BANDIT_CONFIGS = [
     ("bandit/neural_ts.yaml", NeuralTSSpec, MlpSpec),
     ("bandit/neural_ucb.yaml", NeuralUCBSpec, MlpSpec),
+    ("bandit/neural_ucb_func_preserving.yaml", NeuralUCBSpec, MlpSpec),
 ]
 
 _OFFLINE_CONFIGS = [
     ("cqn.yaml", CQNSpec, MlpSpec),
+    ("cqn_func_preserving.yaml", CQNSpec, MlpSpec),
 ]
 
 _MULTI_AGENT_CONFIGS = [
@@ -1398,6 +1413,8 @@ _MULTI_AGENT_CONFIGS = [
     ("multi_agent/matd3.yaml", MATD3Spec),
     ("multi_agent/ippo.yaml", IPPOSpec),
     ("multi_agent/ippo_pong.yaml", IPPOSpec),
+    ("multi_agent/ippo_func_preserving.yaml", IPPOSpec),
+    ("multi_agent/maddpg_func_preserving.yaml", MADDPGSpec),
 ]
 
 # Configs omit the network ``arch``, so it is inferred from the observation
@@ -1540,7 +1557,7 @@ class TestFromConfigFiles:
         self, rel_path, expected_chunk_rows
     ):
         """Shipped configs pass strict manifest validation, and their
-        ``chunk_rows`` knob is a real spec field that survives the round trip.
+        ``chunk_rows`` setting is a real spec field that survives the round trip.
         """
         config_path = CONFIGS_DIR / rel_path
         if not config_path.exists():
@@ -1685,3 +1702,105 @@ class TestSimbaRecurrentConflict:
         )
         manifest = TrainingManifest.model_validate(raw)
         assert manifest.algorithm.recurrent is False
+
+
+_FUNC_PRESERVING_CONFIGS = [
+    "ppo/ppo_func_preserving.yaml",
+    "dqn/dqn_func_preserving.yaml",
+    "cqn_func_preserving.yaml",
+    "bandit/neural_ucb_func_preserving.yaml",
+    "multi_agent/ippo_func_preserving.yaml",
+    "multi_agent/maddpg_func_preserving.yaml",
+]
+
+
+class TestFunctionPreservingManifests:
+    """The shipped manifests that let architecture additions be preserved."""
+
+    @staticmethod
+    def validated(rel_path):
+        """Return the validated manifest at a path under the configs directory."""
+        config_path = CONFIGS_DIR / rel_path
+        if not config_path.exists():
+            pytest.skip(f"Config not found: {config_path}")
+        with open(config_path) as handle:
+            return TrainingManifest.get_validated(yaml.safe_load(handle), mode="python")
+
+    @staticmethod
+    def net_config(validated):
+        """Return the network configuration as a plain dictionary."""
+        net_config = validated.algorithm.net_config
+        return net_config if isinstance(net_config, dict) else net_config.model_dump()
+
+    @pytest.mark.parametrize("rel_path", _FUNC_PRESERVING_CONFIGS)
+    def test_normalisation_is_switched_off(self, rel_path):
+        net_config = self.net_config(self.validated(rel_path))
+
+        for block in ("encoder_config", "head_config"):
+            assert net_config[block]["layer_norm"] is False
+
+    @pytest.mark.parametrize("rel_path", _FUNC_PRESERVING_CONFIGS)
+    def test_activation_mutations_are_disabled(self, rel_path):
+        validated = self.validated(rel_path)
+
+        assert validated.mutation.probabilities.act_mut == 0.0
+
+    @pytest.mark.parametrize("rel_path", _FUNC_PRESERVING_CONFIGS)
+    def test_architecture_mutations_are_enabled(self, rel_path):
+        probabilities = self.validated(rel_path).mutation.probabilities
+
+        assert probabilities.arch_mut > 0.0
+        assert probabilities.new_layer > 0.0
+
+
+# The LLM manifests are the ones the demo (``demos/llm/demo_llm_finetuning.py``)
+# runs against, and the only place the algorithm-injected ``env_type`` /
+# ``objective`` are exercised straight from disk.
+_LLM_CONFIG_ENV_TYPES = {
+    "cispo.yaml": ("rollout", None),
+    "cispo_gemma4_group5.yaml": ("rollout", None),
+    "cispo_quant_bench.yaml": ("rollout", None),
+    "cispo_quant_bench_qwen.yaml": ("rollout", None),
+    "dpo.yaml": ("dataset", "preference"),
+    "grpo.yaml": ("rollout", None),
+    "grpo_env.yaml": ("rollout", None),
+    "gspo.yaml": ("rollout", None),
+    "ppo_llm.yaml": ("rollout", None),
+    "ppo_llm_quant_bench.yaml": ("rollout", None),
+    "reinforce_llm.yaml": ("rollout", None),
+    "reinforce_quant_bench.yaml": ("rollout", None),
+    "sft.yaml": ("dataset", "sft"),
+}
+
+
+@pytest.mark.skipif(not HAS_LLM_DEPENDENCIES, reason="LLM dependencies not installed")
+class TestLLMConfigFiles:
+    """Every manifest under ``configs/training/llm_finetuning/`` must validate.
+
+    Building a ``LocalTrainer`` from these would download a tokenizer, so this
+    stops at the manifest and env-spec layer -- which is exactly the contract
+    the LLM demo relies on.
+    """
+
+    def test_every_llm_config_is_covered(self):
+        """Guard against a new config slipping in unvalidated."""
+        on_disk = {
+            path.name for path in (CONFIGS_DIR / "llm_finetuning").glob("*.yaml")
+        }
+        assert on_disk == set(_LLM_CONFIG_ENV_TYPES)
+
+    @pytest.mark.parametrize(
+        ("filename", "expected"),
+        sorted(_LLM_CONFIG_ENV_TYPES.items()),
+        ids=sorted(_LLM_CONFIG_ENV_TYPES),
+    )
+    def test_llm_config_resolves_env_spec(self, filename, expected):
+        expected_env_type, expected_objective = expected
+        manifest = TrainingManifest.get_validated(
+            CONFIGS_DIR / "llm_finetuning" / filename, mode="python"
+        )
+        env_spec = LocalTrainer._resolve_env_spec(manifest)
+
+        assert isinstance(env_spec, LLMEnvSpec)
+        assert str(env_spec.env_type) == expected_env_type
+        assert env_spec.objective == expected_objective

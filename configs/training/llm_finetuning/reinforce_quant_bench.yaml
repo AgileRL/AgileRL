@@ -2,7 +2,7 @@
 # LLMREINFORCE quantization benchmark on a multimodal, long-context gemma model
 # over the hard Sudoku env (mirrors cispo_quant_bench.yaml). REINFORCE uses
 # Return Batch Normalization (ReBN), not group-relative advantages, so the
-# GRPO-family knobs (group_size / adv_norm / filter_zero_adv) do not apply.
+# GRPO-family settings (group_size / adv_norm / filter_zero_adv) do not apply.
 # Set algorithm.quantization to none | int8 | nf4 to switch recipe. The model
 # below should be a multimodal gemma with ClippableLinear-wrapped projections
 # (hence the ``.linear`` LoRA targets and ``lora_target_scope: language_model``).
@@ -32,8 +32,12 @@ algorithm:
         sleep_mode: true
 
 environment:
-    env_type: multiturn
-    env_name: game:Sudoku-v0-hard
+    env_type: rollout
+    entrypoint: gem:make
+    env_config:
+        env_id: game:Sudoku-v0-hard
+    env_packages:
+        uv: [gem-llm==1.0.0]
     max_turns: 50
     max_reward: 1.0
 

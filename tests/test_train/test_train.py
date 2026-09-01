@@ -5,12 +5,14 @@ import os
 import random
 import shutil
 from collections import Counter
+from contextlib import contextmanager
 from copy import deepcopy
 from pathlib import Path
 from typing import ClassVar
 from unittest.mock import ANY, MagicMock, patch
 
 import dill
+import gymnasium as gym
 import numpy as np
 import pytest
 import torch
@@ -45,6 +47,7 @@ from agilerl.components.replay_buffer import (
 )
 from agilerl.hpo.multi_frequency import MultiFrequencySelection
 from agilerl.hpo.mutation import Mutations
+from agilerl.hpo.tournament import TournamentSelection
 from agilerl.metrics import AgentMetrics, MultiAgentMetrics
 from agilerl.population import Population
 from agilerl.training.train_bandits import train_bandits
@@ -53,6 +56,7 @@ from agilerl.training.train_multi_agent_on_policy import train_multi_agent_on_po
 from agilerl.training.train_off_policy import train_off_policy
 from agilerl.training.train_offline import train_offline
 from agilerl.training.train_on_policy import train_on_policy
+from agilerl.utils import mutation_utils
 from agilerl.utils.utils import make_multi_agent_vect_envs, run_selection_and_mutation
 from agilerl.vector.pz_vec_env import PettingZooVecEnv
 from tests.helper_functions import (
@@ -60,6 +64,7 @@ from tests.helper_functions import (
     generate_multi_agent_box_spaces,
     generate_multi_agent_discrete_spaces,
     generate_random_box_space,
+    grama_scores_for,
     rank_population_by_subpopulation,
     weakest_agent_index,
 )
@@ -187,6 +192,7 @@ class DummyAgentOffPolicy:
         self.steps = self.metrics.steps
         self.fitness = []
         self.steps_per_second = 0.0
+        self.capture_grama_requested = False
         self.mut = "mutation"
         self.index = 1
         self.registry = MagicMock()
@@ -230,7 +236,8 @@ class DummyAgentOffPolicy:
         self.fitness.append(rand_int)
         return rand_int
 
-    def init_training_step(self):
+    def init_training_step(self, capture_grama=False):
+        self.capture_grama_requested = capture_grama
         self.metrics.init_training_step()
 
     def add_scores(self, scores):
@@ -591,8 +598,7 @@ class DummyTournament:
 
 
 class DummyMutations:
-    def __init__(self):
-        pass
+    parameters_mut = 1.0
 
     def mutation(self, pop, pre_training_mut=False, indices=None):
         return pop
@@ -913,7 +919,9 @@ def _make_base_mock_agent(spec_cls, state_size, action_size, *, metrics=None):
         return score
 
     mock.test.side_effect = _test_side_effect
-    mock.init_training_step.side_effect = lambda: mock.metrics.init_training_step()
+    mock.init_training_step.side_effect = lambda capture_grama=False: (
+        mock.metrics.init_training_step()
+    )
     mock.add_scores.side_effect = lambda scores: mock.metrics.add_scores(scores)
     mock.finalize_training_step.side_effect = lambda num_steps: (
         mock.metrics.finalize_training_step(num_steps)
@@ -1409,6 +1417,7 @@ def mocked_multi_env(state_size, action_size):
 @pytest.fixture
 def mocked_mutations():
     mock_mutations = MagicMock()
+    mock_mutations.parameters_mut = 1.0
 
     def mutation(pop, pre_training_mut=False, indices=None):
         return pop
@@ -3021,7 +3030,10 @@ class TestTrainOnPolicy:
         def fake_collect(*args, **kwargs):
             return [], None, None, None, None
 
-        monkeypatch.setattr("agilerl.rollouts.collect_rollouts_recurrent", fake_collect)
+        monkeypatch.setattr(
+            "agilerl.training.train_on_policy.collect_rollouts_recurrent",
+            fake_collect,
+        )
 
         train_on_policy(
             env,
@@ -5644,37 +5656,37 @@ def _multi_agent_hp_config() -> HyperparameterConfig:
     )
 
 
-def _build_single_agent_population(algo_cls):
+def _build_single_agent_population(algo_cls, net_config=_CROSS_FAMILY_NET_CONFIG):
     return algo_cls.population(
         size=8,
         observation_space=generate_random_box_space((4,)),
         action_space=generate_discrete_space(2),
         hp_config=_single_agent_hp_config(),
-        net_config=_CROSS_FAMILY_NET_CONFIG,
+        net_config=net_config,
         device="cpu",
     )
 
 
-def _build_maddpg_population():
+def _build_maddpg_population(net_config=_CROSS_FAMILY_NET_CONFIG):
     return MADDPG.population(
         size=8,
         observation_space=generate_multi_agent_box_spaces(2, (4,)),
         action_space=generate_multi_agent_discrete_spaces(2, 2),
         agent_ids=["agent_0", "agent_1"],
         hp_config=_multi_agent_hp_config(),
-        net_config=_CROSS_FAMILY_NET_CONFIG,
+        net_config=net_config,
         device="cpu",
     )
 
 
-def _build_ippo_population():
+def _build_ippo_population(net_config=_CROSS_FAMILY_NET_CONFIG):
     return IPPO.population(
         size=8,
         observation_space=generate_multi_agent_box_spaces(2, (4,)),
         action_space=generate_multi_agent_discrete_spaces(2, 2),
         agent_ids=["agent_0", "agent_1"],
         hp_config=_single_agent_hp_config(),
-        net_config=_CROSS_FAMILY_NET_CONFIG,
+        net_config=net_config,
         device="cpu",
     )
 
@@ -5764,3 +5776,945 @@ def test_remove_saved_models():
         if _try_remove_models_dir():
             return
     shutil.rmtree("models", ignore_errors=True)
+
+
+def _give_population_fitness(population) -> None:
+    """Give each agent a distinct fitness so tournament selection can rank."""
+    for position, agent in enumerate(population):
+        agent.fitness = [float(position)]
+
+
+_FP_FAMILY_NET_CONFIG = {
+    "encoder_config": {
+        "hidden_size": [8, 8],
+        "min_mlp_nodes": 7,
+        "layer_norm": False,
+        "activation": "ReLU",
+    },
+    "head_config": {
+        "hidden_size": [8],
+        "min_mlp_nodes": 7,
+        "layer_norm": False,
+        "activation": "ReLU",
+    },
+}
+
+
+_ARCH_FAMILY_CASES = {
+    "off-policy (DQN)": lambda: _build_single_agent_population(
+        DQN, _FP_FAMILY_NET_CONFIG
+    ),
+    "multi-agent off-policy (MADDPG)": lambda: _build_maddpg_population(
+        _FP_FAMILY_NET_CONFIG
+    ),
+    "multi-agent on-policy (IPPO)": lambda: _build_ippo_population(
+        _FP_FAMILY_NET_CONFIG
+    ),
+    "bandit (NeuralUCB)": lambda: _build_single_agent_population(
+        NeuralUCB, _FP_FAMILY_NET_CONFIG
+    ),
+    "offline (CQN)": lambda: _build_single_agent_population(CQN, _FP_FAMILY_NET_CONFIG),
+    "on-policy (PPO)": lambda: _build_single_agent_population(
+        PPO, _FP_FAMILY_NET_CONFIG
+    ),
+}
+
+
+_FP_FIXUPS = ("preserve_added_nodes", "preserve_added_layer", "preserve_added_latent")
+_FP_BLOCKERS = (
+    "node_addition_blocker",
+    "layer_addition_blocker",
+    "latent_addition_blocker",
+)
+
+
+@contextmanager
+def _fp_fixup_engages(declines_allowed=False):
+    """Assert additions reach the fixup, and it stands down only where allowed."""
+    reached = []
+    declined = False
+    originals = {
+        name: getattr(mutation_utils, name) for name in (*_FP_FIXUPS, *_FP_BLOCKERS)
+    }
+
+    def spy_fixup(original):
+        def record(*args, **kwargs):
+            reached.append(original.__name__)
+            return original(*args, **kwargs)
+
+        return record
+
+    def spy_blocker(original):
+        def record(*args, **kwargs):
+            nonlocal declined
+            blocked = original(*args, **kwargs)
+            declined = declined or blocked
+            return blocked
+
+        return record
+
+    for name in _FP_FIXUPS:
+        setattr(mutation_utils, name, spy_fixup(originals[name]))
+    for name in _FP_BLOCKERS:
+        setattr(mutation_utils, name, spy_blocker(originals[name]))
+    try:
+        yield
+    finally:
+        for name, original in originals.items():
+            setattr(mutation_utils, name, original)
+
+    assert reached, "no architecture addition reached the fixup"
+    if not declines_allowed:
+        assert not declined, "an addition declined where none was expected"
+
+
+def _arch_mutation(seed: int = 0) -> Mutations:
+    """Return an architecture-mutation-only operator."""
+    return Mutations(
+        no_mutation=0.0,
+        architecture=1.0,
+        new_layer_prob=0.5,
+        parameters=0.0,
+        activation=0.0,
+        rl_hp=0.0,
+        mutation_sd=0.1,
+        rand_seed=seed,
+        device="cpu",
+    )
+
+
+def _population_is_finite(population) -> bool:
+    """Return whether every agent's policy weights are still finite."""
+    for agent in population:
+        policy = getattr(agent, agent.registry.policy())
+        for tensor in policy.state_dict().values():
+            if tensor.is_floating_point() and not bool(torch.isfinite(tensor).all()):
+                return False
+    return True
+
+
+def _architecture_fingerprint(population) -> list:
+    """Return every agent's policy parameter shapes."""
+    return [
+        [
+            tuple(tensor.shape)
+            for tensor in getattr(agent, agent.registry.policy()).state_dict().values()
+        ]
+        for agent in population
+    ]
+
+
+class TestFunctionPreservingCrossFamilyEvolution:
+    """Architecture mutations evolve a real population of every non-LLM family."""
+
+    @staticmethod
+    def evolve(population, strategy, cycles: int = 3):
+        """Run several evaluate-select-mutate cycles and return the population."""
+        mutation = _arch_mutation()
+        for _ in range(cycles):
+            _give_population_fitness(population)
+            population = run_selection_and_mutation(
+                strategy,
+                population=population,
+                mutation=mutation,
+                env_name="Env",
+                algo="algo",
+            )
+        return population
+
+    @pytest.mark.parametrize(
+        "family", list(_ARCH_FAMILY_CASES), ids=list(_ARCH_FAMILY_CASES)
+    )
+    def test_the_fixup_engages_for_every_family(self, family):
+        """Additions reach the fixup rather than falling back to random init."""
+        build_population = _ARCH_FAMILY_CASES[family]
+        population = build_population()
+
+        with _fp_fixup_engages():
+            self.evolve(
+                population,
+                TournamentSelection(
+                    tournament_size=2, elitism=True, population_size=len(population)
+                ),
+            )
+
+    @pytest.mark.parametrize(
+        "family", list(_ARCH_FAMILY_CASES), ids=list(_ARCH_FAMILY_CASES)
+    )
+    def test_tournament_selection_evolves_every_family(self, family):
+        build_population = _ARCH_FAMILY_CASES[family]
+        population = build_population()
+        before = _architecture_fingerprint(population)
+
+        population = self.evolve(
+            population,
+            TournamentSelection(
+                tournament_size=2, elitism=True, population_size=len(population)
+            ),
+        )
+
+        assert len(population) == 8
+        assert _population_is_finite(population)
+        assert _architecture_fingerprint(population) != before
+
+    @pytest.mark.parametrize(
+        "family", list(_ARCH_FAMILY_CASES), ids=list(_ARCH_FAMILY_CASES)
+    )
+    def test_multi_frequency_selection_evolves_every_family(self, family):
+        build_population = _ARCH_FAMILY_CASES[family]
+        population = build_population()
+        for agent in population:
+            agent.subpopulation_id = agent.index // 4
+        strategy = MultiFrequencySelection(
+            population_size=8,
+            n_subpopulations=2,
+            evolution_frequency_ratios=[1, 2],
+            n_winners=1,
+            n_survivors=1,
+            n_open_for_migration=1,
+            n_losers=1,
+            seed=0,
+        )
+        mutation = _arch_mutation()
+
+        for _ in range(3):
+            rank_population_by_subpopulation(population)
+            population = run_selection_and_mutation(
+                strategy,
+                population=population,
+                mutation=mutation,
+                env_name="Env",
+                algo="algo",
+            )
+
+        assert len(population) == 8
+        assert len({agent.index for agent in population}) == 8
+        assert _population_is_finite(population)
+
+
+class _FunctionPreservingParallelEnv(ParallelEnv):
+    """Two-agent parallel env with no env-defined action overrides."""
+
+    def __init__(self, state_dims=(4,), action_dims=5):
+        self.state_dims = state_dims
+        self.action_dims = action_dims
+        self.agents = ["agent_0", "other_agent_0"]
+        self.possible_agents = list(self.agents)
+        self.metadata = {"name": "function_preserving_parallel_v0"}
+        self.render_mode = None
+
+    def reset(self, seed=None, options=None):
+        return self._observations(), {agent: {} for agent in self.agents}
+
+    def step(self, action):
+        return (
+            self._observations(),
+            {agent: float(np.random.rand()) for agent in self.agents},
+            dict.fromkeys(self.agents, False),
+            dict.fromkeys(self.agents, False),
+            {agent: {} for agent in self.agents},
+        )
+
+    def _observations(self):
+        return {
+            agent: np.random.rand(*self.state_dims).astype(np.float32)
+            for agent in self.agents
+        }
+
+    def action_space(self, agent):
+        return Discrete(self.action_dims)
+
+    def observation_space(self, agent):
+        return Box(0.0, 1.0, self.state_dims, dtype=np.float32)
+
+
+class _FunctionPreservingBanditEnv:
+    """Contextual bandit env yielding one float32 context per arm."""
+
+    def __init__(self, context_dims=(4,), arms=2):
+        self.arms = arms
+        self.state_size = (arms, *context_dims)
+        self.observation_space = Box(0.0, 1.0, self.state_size, dtype=np.float32)
+        self.action_space = Discrete(arms)
+        self.num_envs = 1
+
+    def reset(self, seed=None, options=None):
+        return self._context()
+
+    def step(self, action):
+        return self._context(), np.random.rand(1).astype(np.float32)
+
+    def _context(self):
+        return np.random.rand(*self.state_size).astype(np.float32)
+
+
+class TestFunctionPreservingTrainerWiring:
+    """Real agents evolve through every non-LLM trainer with the fixup active."""
+
+    @staticmethod
+    def assert_evolved(population, before) -> None:
+        """Assert the population survived and its architectures actually moved."""
+        assert population
+        assert _population_is_finite(population)
+        assert _architecture_fingerprint(population) != before
+
+    def test_off_policy(self):
+        vec_env = gym.vector.SyncVectorEnv([lambda: gym.make("CartPole-v1")])
+        population = DQN.population(
+            size=2,
+            observation_space=vec_env.single_observation_space,
+            action_space=vec_env.single_action_space,
+            net_config=_FP_FAMILY_NET_CONFIG,
+            batch_size=4,
+            learn_step=1,
+            device="cpu",
+        )
+        before = _architecture_fingerprint(population)
+
+        with _fp_fixup_engages():
+            population, _fitnesses = train_off_policy(
+                vec_env,
+                "CartPole-v1",
+                "DQN",
+                population,
+                ReplayBuffer(max_size=100, device="cpu"),
+                max_steps=24,
+                evo_steps=8,
+                eval_steps=2,
+                eval_loop=1,
+                selection_strategy=TournamentSelection(
+                    tournament_size=2, elitism=True, population_size=2
+                ),
+                mutation=_arch_mutation(),
+                verbose=False,
+            )
+
+        self.assert_evolved(population, before)
+
+    def test_on_policy(self):
+        vec_env = gym.vector.SyncVectorEnv([lambda: gym.make("CartPole-v1")])
+        population = PPO.population(
+            size=2,
+            observation_space=vec_env.single_observation_space,
+            action_space=vec_env.single_action_space,
+            net_config=_FP_FAMILY_NET_CONFIG,
+            batch_size=4,
+            learn_step=8,
+            device="cpu",
+        )
+        before = _architecture_fingerprint(population)
+
+        with _fp_fixup_engages():
+            population, _fitnesses = train_on_policy(
+                vec_env,
+                "CartPole-v1",
+                "PPO",
+                population,
+                max_steps=24,
+                evo_steps=8,
+                eval_steps=2,
+                eval_loop=1,
+                selection_strategy=TournamentSelection(
+                    tournament_size=2, elitism=True, population_size=2
+                ),
+                mutation=_arch_mutation(),
+                verbose=False,
+            )
+
+        self.assert_evolved(population, before)
+
+    def test_multi_agent_on_policy(self):
+        env = make_multi_agent_vect_envs(
+            _FunctionPreservingParallelEnv, num_envs=2, state_dims=(4,), action_dims=5
+        )
+        population = IPPO.population(
+            size=2,
+            observation_space=[Box(0.0, 1.0, (4,)), Box(0.0, 1.0, (4,))],
+            action_space=[Discrete(5), Discrete(5)],
+            agent_ids=["agent_0", "other_agent_0"],
+            net_config=_FP_FAMILY_NET_CONFIG,
+            device="cpu",
+        )
+        before = _architecture_fingerprint(population)
+
+        with _fp_fixup_engages():
+            population, _fitnesses = train_multi_agent_on_policy(
+                env,
+                "env_name",
+                "IPPO",
+                pop=population,
+                max_steps=24,
+                evo_steps=8,
+                eval_steps=2,
+                eval_loop=1,
+                selection_strategy=TournamentSelection(
+                    tournament_size=2, elitism=True, population_size=2
+                ),
+                mutation=_arch_mutation(),
+                verbose=False,
+            )
+        env.close()
+
+        self.assert_evolved(population, before)
+
+    def test_multi_agent_off_policy(self):
+        env = make_multi_agent_vect_envs(
+            _FunctionPreservingParallelEnv, num_envs=2, state_dims=(4,), action_dims=5
+        )
+        population = MADDPG.population(
+            size=2,
+            observation_space=[Box(0.0, 1.0, (4,)), Box(0.0, 1.0, (4,))],
+            action_space=[Discrete(5), Discrete(5)],
+            agent_ids=["agent_0", "other_agent_0"],
+            net_config=_FP_FAMILY_NET_CONFIG,
+            batch_size=4,
+            device="cpu",
+        )
+        before = _architecture_fingerprint(population)
+
+        with _fp_fixup_engages(declines_allowed=True):
+            population, _fitnesses = train_multi_agent_off_policy(
+                env,
+                "env_name",
+                "MADDPG",
+                pop=population,
+                memory=ReplayBuffer(max_size=100, device="cpu"),
+                max_steps=24,
+                evo_steps=8,
+                eval_steps=2,
+                eval_loop=1,
+                learning_delay=0,
+                selection_strategy=TournamentSelection(
+                    tournament_size=2, elitism=True, population_size=2
+                ),
+                mutation=_arch_mutation(),
+                verbose=False,
+            )
+        env.close()
+
+        self.assert_evolved(population, before)
+
+    def test_bandits(self):
+        env = _FunctionPreservingBanditEnv((4,), 2)
+        population = NeuralUCB.population(
+            size=2,
+            observation_space=generate_random_box_space((4,)),
+            action_space=generate_discrete_space(2),
+            net_config=_FP_FAMILY_NET_CONFIG,
+            batch_size=4,
+            device="cpu",
+        )
+        before = _architecture_fingerprint(population)
+
+        with _fp_fixup_engages():
+            population, _fitnesses = train_bandits(
+                env,
+                "bandit_env_name",
+                "NeuralUCB",
+                population,
+                ReplayBuffer(max_size=100, device="cpu"),
+                max_steps=24,
+                episode_steps=4,
+                evo_steps=8,
+                eval_steps=2,
+                eval_loop=1,
+                selection_strategy=TournamentSelection(
+                    tournament_size=2, elitism=True, population_size=2
+                ),
+                mutation=_arch_mutation(),
+                wb=False,
+                verbose=False,
+            )
+
+        self.assert_evolved(population, before)
+
+    def test_offline(self):
+        vec_env = gym.vector.SyncVectorEnv([lambda: gym.make("CartPole-v1")])
+        population = CQN.population(
+            size=2,
+            observation_space=vec_env.single_observation_space,
+            action_space=vec_env.single_action_space,
+            net_config=_FP_FAMILY_NET_CONFIG,
+            batch_size=4,
+            learn_step=1,
+            device="cpu",
+        )
+        dataset = {
+            "observations": np.random.randn(16, 4).astype(np.float32),
+            "actions": np.random.randint(0, 2, size=(16, 1)),
+            "rewards": np.random.randn(16).astype(np.float32),
+            "terminals": np.zeros(16, dtype=bool),
+        }
+        before = _architecture_fingerprint(population)
+
+        with _fp_fixup_engages():
+            population, _fitnesses = train_offline(
+                vec_env,
+                "CartPole-v1",
+                "CQN",
+                population,
+                ReplayBuffer(max_size=100, device="cpu"),
+                dataset=dataset,
+                max_steps=24,
+                evo_steps=8,
+                eval_steps=2,
+                eval_loop=1,
+                selection_strategy=TournamentSelection(
+                    tournament_size=2, elitism=True, population_size=2
+                ),
+                mutation=_arch_mutation(),
+                wb=False,
+                verbose=False,
+            )
+
+        self.assert_evolved(population, before)
+
+
+def _regrama_mutation() -> Mutations:
+    """A parameter-mutation operator with ReGraMa's dormant-neuron reset enabled."""
+    return Mutations(
+        no_mutation=0.2,
+        architecture=0.0,
+        new_layer_prob=0.0,
+        parameters=0.4,
+        activation=0.0,
+        rl_hp=0.4,
+        mutation_sd=0.1,
+        rand_seed=0,
+        device="cpu",
+        dormant_threshold=0.01,
+    )
+
+
+def _mark_population_dormant(population) -> None:
+    """Give every agent a snapshot in which every measured neuron is dormant."""
+    for agent in population:
+        agent.grama_scores = grama_scores_for(agent, fill=0.0)
+
+
+def _pin_population_biases(population, value: float = 1.0) -> None:
+    """Pin every one-dimensional bias of every evaluation network to a sentinel.
+
+    The Gaussian pass only writes two-dimensional tensors, so a bias back at zero
+    afterwards is a neuron ReGraMa reset.
+    """
+    with torch.no_grad():
+        for agent in population:
+            for _network_id, network in agent.unrolled_eval_networks():
+                for name, param in network.named_parameters():
+                    if name.endswith("bias") and param.dim() == 1:
+                        param.fill_(value)
+
+
+def _population_zeroed_biases(population) -> int:
+    """Count the pinned biases ReGraMa has zeroed across a whole population."""
+    return sum(
+        int(bool((value == 0).all()))
+        for agent in population
+        for _network_id, network in agent.unrolled_eval_networks()
+        for key, value in network.state_dict().items()
+        if key.endswith("bias") and value.dim() == 1
+    )
+
+
+_pinned_weight = 5.0
+# A pinned weight can only end up this close to zero if the random-reset band
+# redrew it: ordinary noise on a 5.0 weight has a standard deviation of 0.5.
+_reset_residual = 2.0
+
+
+def _gaussian_band_mutation() -> Mutations:
+    """A parameter-mutation-only operator applying the fixed 95%/5% Gaussian split."""
+    return Mutations(
+        no_mutation=0.0,
+        architecture=0.0,
+        new_layer_prob=0.0,
+        parameters=1.0,
+        activation=0.0,
+        rl_hp=0.0,
+        mutation_sd=0.1,
+        rand_seed=0,
+        device="cpu",
+    )
+
+
+def _mutable_weights(population):
+    """Yield every tensor the Gaussian pass is allowed to write."""
+    for agent in population:
+        for _network_id, network in agent.unrolled_eval_networks():
+            for key, tensor in network.state_dict().items():
+                if tensor.dim() == 2 and "norm" not in key and "lstm" not in key:
+                    yield tensor
+
+
+def _pin_population_weights(population, value: float = _pinned_weight) -> None:
+    """Pin every mutable weight of every evaluation network to a sentinel."""
+    with torch.no_grad():
+        for tensor in _mutable_weights(population):
+            tensor.fill_(value)
+
+
+def _smallest_pinned_magnitude(population) -> float:
+    """Return the smallest weight left across the tensors pinned before mutating."""
+    return min(tensor.abs().min().item() for tensor in _mutable_weights(population))
+
+
+class TestGaussianParameterMutationCrossFamilyEvolution:
+    """The random-reset Gaussian band fires unconditionally for every non-LLM family."""
+
+    def evolve(self, family, *, cycles=3):
+        """Run cycles of selection and parameter mutation over a pinned population."""
+        algo_name, build_population = _CROSS_FAMILY_CASES[family]
+        population = build_population()
+        strategy = TournamentSelection(
+            tournament_size=2,
+            elitism=True,
+            population_size=8,
+        )
+        mutation = _gaussian_band_mutation()
+
+        smallest = _pinned_weight
+        for _cycle in range(cycles):
+            _give_population_fitness(population)
+            _pin_population_weights(population)
+            population = run_selection_and_mutation(
+                strategy,
+                population=population,
+                mutation=mutation,
+                env_name="Env",
+                algo=algo_name,
+            )
+            smallest = min(smallest, _smallest_pinned_magnitude(population))
+        return population, smallest
+
+    @pytest.mark.parametrize(
+        "family", list(_CROSS_FAMILY_CASES), ids=list(_CROSS_FAMILY_CASES)
+    )
+    def test_the_reset_band_redraws_weights(self, family):
+        population, smallest = self.evolve(family)
+
+        assert len(population) == 8
+        assert smallest < _reset_residual
+
+
+class TestRegramaCrossFamilyEvolution:
+    """ReGraMa evolves a real population of every non-LLM algorithm family."""
+
+    @pytest.mark.parametrize(
+        "family", list(_CROSS_FAMILY_CASES), ids=list(_CROSS_FAMILY_CASES)
+    )
+    def test_tournament_selection_evolves_every_family(self, family):
+        algo_name, build_population = _CROSS_FAMILY_CASES[family]
+        population = build_population()
+        mutation = _regrama_mutation()
+        strategy = TournamentSelection(
+            tournament_size=2,
+            elitism=True,
+            population_size=8,
+        )
+
+        resets_seen = 0
+        for _cycle in range(3):
+            _give_population_fitness(population)
+            _mark_population_dormant(population)
+            _pin_population_biases(population)
+            population = run_selection_and_mutation(
+                strategy,
+                population=population,
+                mutation=mutation,
+                env_name="Env",
+                algo=algo_name,
+            )
+            resets_seen += _population_zeroed_biases(population)
+
+            assert len(population) == 8
+            assert all(isinstance(agent, EvolvableAlgorithm) for agent in population)
+            for agent in population:
+                for _network_id, network in agent.unrolled_eval_networks():
+                    assert all(
+                        torch.isfinite(value).all()
+                        for value in network.state_dict().values()
+                    )
+
+        assert resets_seen > 0
+
+    @pytest.mark.parametrize(
+        "family", list(_CROSS_FAMILY_CASES), ids=list(_CROSS_FAMILY_CASES)
+    )
+    def test_multi_frequency_selection_evolves_every_family(self, family):
+        algo_name, build_population = _CROSS_FAMILY_CASES[family]
+        population = build_population()
+        for agent in population:
+            agent.subpopulation_id = agent.index // 4
+        strategy = MultiFrequencySelection(
+            population_size=8,
+            n_subpopulations=2,
+            evolution_frequency_ratios=[1, 2],
+            n_winners=1,
+            n_survivors=1,
+            n_open_for_migration=1,
+            n_losers=1,
+            seed=0,
+        )
+        mutation = _regrama_mutation()
+
+        resets_seen = 0
+        for _cycle in range(3):
+            rank_population_by_subpopulation(population)
+            _mark_population_dormant(population)
+            _pin_population_biases(population)
+            population = run_selection_and_mutation(
+                strategy,
+                population=population,
+                mutation=mutation,
+                env_name="Env",
+                algo=algo_name,
+            )
+            resets_seen += _population_zeroed_biases(population)
+
+            assert len(population) == 8
+            assert len({agent.index for agent in population}) == 8
+            for agent in population:
+                for _network_id, network in agent.unrolled_eval_networks():
+                    assert all(
+                        torch.isfinite(value).all()
+                        for value in network.state_dict().values()
+                    )
+
+        assert resets_seen > 0
+
+    def test_a_child_reads_the_snapshot_captured_while_its_parent_trained(self):
+        # Capture happens on the parent, the reset happens on the clone.
+        population = _build_single_agent_population(DQN)
+        _give_population_fitness(population)
+        _mark_population_dormant(population)
+        strategy = TournamentSelection(
+            tournament_size=2,
+            elitism=True,
+            population_size=8,
+        )
+
+        evolved = run_selection_and_mutation(
+            strategy,
+            population=population,
+            mutation=_regrama_mutation(),
+            env_name="Env",
+            algo="DQN",
+        )
+
+        assert all(agent.grama_scores is not None for agent in evolved)
+
+
+class TestRegramaTrainerWiring:
+    """Every non-LLM trainer enables the capture ReGraMa depends on."""
+
+    @staticmethod
+    def assert_capture_enabled(population) -> None:
+        assert population
+        assert all(agent.capture_grama_requested is True for agent in population)
+
+    @pytest.mark.parametrize(("state_size", "action_size", "vect"), _FLAT_VECT)
+    def test_train_off_policy_enables_capture(self, env, population_off_policy):
+        train_off_policy(
+            env,
+            "env_name",
+            "algo",
+            population_off_policy,
+            DummyMemory(),
+            max_steps=4,
+            evo_steps=4,
+            eval_loop=1,
+            mutation=DummyMutations(),
+            wb=False,
+            verbose=False,
+        )
+
+        self.assert_capture_enabled(population_off_policy)
+
+    @pytest.mark.parametrize(("state_size", "action_size", "vect"), _FLAT_VECT)
+    def test_train_on_policy_enables_capture(self, env, population_on_policy):
+        train_on_policy(
+            env,
+            "env_name",
+            "algo",
+            population_on_policy,
+            max_steps=4,
+            evo_steps=4,
+            eval_loop=1,
+            mutation=DummyMutations(),
+            wb=False,
+            verbose=False,
+        )
+
+        self.assert_capture_enabled(population_on_policy)
+
+    @pytest.mark.parametrize(("state_size", "action_size", "vect"), _FLAT_VECT)
+    def test_train_offline_enables_capture(
+        self,
+        env,
+        population_off_policy,
+        memory,
+        offline_init_hp,
+        dummy_h5py_data,
+    ):
+        train_offline(
+            env,
+            "env_name",
+            "algo",
+            population_off_policy,
+            memory,
+            dataset=dummy_h5py_data,
+            init_hp=offline_init_hp,
+            max_steps=4,
+            evo_steps=4,
+            eval_loop=1,
+            mutation=DummyMutations(),
+            wb=False,
+        )
+
+        self.assert_capture_enabled(population_off_policy)
+
+    @pytest.mark.parametrize(("state_size", "action_size"), _FLAT)
+    def test_train_bandits_enables_capture(
+        self,
+        bandit_env,
+        population_bandit,
+        bandit_memory,
+    ):
+        train_bandits(
+            bandit_env,
+            "bandit_env_name",
+            "algo",
+            population_bandit,
+            bandit_memory,
+            max_steps=10,
+            episode_steps=5,
+            evo_steps=5,
+            eval_steps=2,
+            eval_loop=1,
+            mutation=DummyMutations(),
+            wb=False,
+        )
+
+        self.assert_capture_enabled(population_bandit)
+
+    @pytest.mark.parametrize("on_policy", [False])
+    @pytest.mark.parametrize(("state_size", "action_size"), _FLAT)
+    def test_train_multi_agent_off_policy_enables_capture(
+        self,
+        multi_env,
+        population_multi_agent,
+        multi_memory,
+    ):
+        train_multi_agent_off_policy(
+            multi_env,
+            "env_name",
+            "algo",
+            pop=population_multi_agent,
+            memory=multi_memory,
+            max_steps=4,
+            evo_steps=4,
+            eval_loop=1,
+            mutation=DummyMutations(),
+        )
+
+        self.assert_capture_enabled(population_multi_agent)
+
+    @pytest.mark.parametrize("on_policy", [True])
+    @pytest.mark.parametrize(("state_size", "action_size"), _FLAT)
+    def test_train_multi_agent_on_policy_enables_capture(
+        self,
+        multi_env,
+        population_multi_agent,
+    ):
+        train_multi_agent_on_policy(
+            multi_env,
+            "env_name",
+            "algo",
+            pop=population_multi_agent,
+            max_steps=4,
+            evo_steps=4,
+            eval_loop=1,
+            mutation=DummyMutations(),
+        )
+
+        self.assert_capture_enabled(population_multi_agent)
+
+    def test_off_policy_training_captures_a_snapshot(self):
+        vec_env = gym.vector.SyncVectorEnv([lambda: gym.make("CartPole-v1")])
+        agent = DQN(
+            vec_env.single_observation_space,
+            vec_env.single_action_space,
+            batch_size=4,
+            learn_step=1,
+        )
+
+        population, _fitnesses = train_off_policy(
+            vec_env,
+            "CartPole-v1",
+            "DQN",
+            [agent],
+            ReplayBuffer(max_size=100, device="cpu"),
+            max_steps=12,
+            evo_steps=12,
+            eval_steps=2,
+            eval_loop=1,
+            mutation=_regrama_mutation(),
+            verbose=False,
+        )
+
+        assert population[0].grama_scores
+        assert any(entry is not None for entry in population[0].grama_scores[0])
+
+    def test_compiled_agent_captures(self):
+        vec_env = gym.vector.SyncVectorEnv([lambda: gym.make("CartPole-v1")])
+        agent = DQN(
+            vec_env.single_observation_space,
+            vec_env.single_action_space,
+            batch_size=4,
+            learn_step=1,
+        )
+        agent.torch_compiler = "default"
+
+        population, _fitnesses = train_off_policy(
+            vec_env,
+            "CartPole-v1",
+            "DQN",
+            [agent],
+            ReplayBuffer(max_size=100, device="cpu"),
+            max_steps=12,
+            evo_steps=12,
+            eval_steps=2,
+            eval_loop=1,
+            mutation=_regrama_mutation(),
+            verbose=False,
+        )
+
+        assert any(entry is not None for entry in population[0].grama_scores[0])
+
+    def test_capture_stays_off_without_a_mutation_operator(self):
+        vec_env = gym.vector.SyncVectorEnv([lambda: gym.make("CartPole-v1")])
+        agent = DQN(
+            vec_env.single_observation_space,
+            vec_env.single_action_space,
+            batch_size=4,
+            learn_step=1,
+        )
+
+        population, _fitnesses = train_off_policy(
+            vec_env,
+            "CartPole-v1",
+            "DQN",
+            [agent],
+            ReplayBuffer(max_size=100, device="cpu"),
+            max_steps=12,
+            evo_steps=12,
+            eval_steps=2,
+            eval_loop=1,
+            mutation=None,
+            verbose=False,
+        )
+
+        # No hooks are registered, so capture costs nothing when there is no
+        # mutation operator at all (a no-HPO regime).
+        assert population[0].grama_scores is None
