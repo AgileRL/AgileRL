@@ -189,10 +189,6 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
         length-normalizing keeps the per-turn ratio in range so the surrogate stays
         informative.
     :type turn_ratio_pooling: Literal["sum", "mean"], optional
-    :param action_granularity: Deprecated alias for ``advantage_granularity``;
-        when set it overrides ``advantage_granularity`` and emits a
-        ``DeprecationWarning``.
-    :type action_granularity: str | None, optional
     :param turn_value_reduction: Aggregation used to map token critic values to
         turn values. ``"mean"`` reproduces existing behavior, ``"final_value"``
         uses the final action token value in each turn.
@@ -303,7 +299,6 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
         ] = "auto",
         advantage_granularity: Literal["turn", "token", "auto"] = "auto",
         turn_ratio_pooling: Literal["sum", "mean"] = "sum",
-        action_granularity: Literal["turn", "token", "auto"] | None = None,
         turn_value_reduction: Literal["mean", "final_value"] = "final_value",
         whiten_advantages: bool = True,
         gradient_checkpointing: bool = True,
@@ -381,7 +376,6 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
         self._setup_advantage_options(
             turn_level_clip,
             advantage_granularity,
-            action_granularity,
             turn_value_reduction,
             whiten_advantages,
             gamma,
@@ -857,7 +851,6 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
         self,
         turn_level_clip: bool,
         advantage_granularity: str,
-        action_granularity: str | None,
         turn_value_reduction: str,
         whiten_advantages: bool,
         gamma: float,
@@ -865,13 +858,6 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
     ) -> None:
         """Validate and store the GAE advantage options."""
         valid_action_granularities = {"turn", "token", "auto"}
-        if action_granularity is not None:
-            warnings.warn(
-                "action_granularity is deprecated; use advantage_granularity.",
-                DeprecationWarning,
-                stacklevel=3,
-            )
-            advantage_granularity = action_granularity
         if advantage_granularity not in valid_action_granularities:
             msg = (
                 "advantage_granularity must be one of "

@@ -5,10 +5,10 @@
 
 from __future__ import annotations
 
-from agilerl.arena.models.algo import register
 from agilerl.arena.models.algorithms.grpo import GRPOSpec
+from agilerl.arena.models.registry import register
 
 
 @register()
 class GSPOSpec(GRPOSpec):
-    """Specification for GSPO algorithm (GRPO with GSPO loss)."""
+    """GRPO with the GSPO sequence-level loss."""

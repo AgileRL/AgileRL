@@ -3,8 +3,8 @@
 Creating Custom Algorithms
 ==========================
 
-To create a custom algorithm, you must inherit from :class:`RLAlgorithm <agilerl.algorithms.core.base.RLAlgorithm>` for
-single-agent algorithms or :class:`MultiAgentRLAlgorithm <agilerl.algorithms.core.base.MultiAgentRLAlgorithm>` for multi-agent
+To create a custom algorithm, you must inherit from :class:`SingleAgentAlgorithm <agilerl.algorithms.core.base.SingleAgentAlgorithm>` for
+single-agent algorithms or :class:`MultiAgentAlgorithm <agilerl.algorithms.core.base.MultiAgentAlgorithm>` for multi-agent
 algorithms. We have implemented this hierarchy with the idea of making evolutionary hyperparameter optimization as seamless as possible,
 and have users focus on their implementation only. Here we go over the key components in developing a custom AgileRL algorithm.
 

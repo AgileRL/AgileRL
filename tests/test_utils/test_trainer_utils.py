@@ -45,7 +45,8 @@ class TestGetSpacesFromEnv:
 
 class TestRainbowNStepOverride:
     def test_n_step_overridden_from_replay_buffer_spec(self):
-        from agilerl.models.algorithms.rainbow_dqn import RainbowDQNSpec
+        from agilerl.arena.models.algorithms import RainbowDQNSpec
+        from agilerl.builders import SingleAgentBuilder
         from agilerl.models.training import NStepBufferArgs, ReplayBufferSpec
         from agilerl.utils.trainer_utils import create_population_from_spec
 
@@ -58,7 +59,7 @@ class TestRainbowNStepOverride:
         env.single_action_space = MagicMock()
         env.num_envs = 1
 
-        with patch.object(RainbowDQNSpec, "build_algorithm", return_value=MagicMock()):
+        with patch.object(SingleAgentBuilder, "build", return_value=MagicMock()):
             create_population_from_spec(
                 population_size=1,
                 algo_spec=algo,
@@ -81,17 +82,21 @@ class TestCreatePopulationLLM:
 
         call_count = {"n": 0}
 
-        def _build_side_effect(**kwargs):
+        def _build_side_effect(spec, **kwargs):
             call_count["n"] += 1
             if call_count["n"] == 1:
                 return mock_agent0
             return mock_agent1
 
-        algo = MagicMock()
-        algo.build_algorithm = MagicMock(side_effect=_build_side_effect)
-        algo.zero_stage = 0
+        # The strategy is picked from the spec's paradigm; the build itself
+        # is what this test drives.
+        from agilerl.arena.models.algorithms import GRPOSpec
+        from agilerl.builders import LLMBuilder
+
+        algo = GRPOSpec(pretrained_model_name_or_path="gpt2", group_size=4)
 
         with (
+            patch.object(LLMBuilder, "build", side_effect=_build_side_effect),
             patch("agilerl.utils.trainer_utils.clone_llm", return_value=MagicMock()),
             patch("agilerl.utils.trainer_utils.get_state_dict", return_value={}),
         ):
@@ -346,7 +351,7 @@ class TestResolveDeprecatedSelectionKwargs:
                 None,
                 {"tournament_selection": spec},
                 deprecated_key="tournament_selection",
-                caller="TrainingManifest.from_trainer_specs",
+                caller="from_trainer_specs",
             )
 
         assert resolved is spec
@@ -498,3 +503,103 @@ class TestAssignSubpopulations:
         _assign_subpopulations(agents, spec)
 
         assert [a.subpopulation_id for a in agents] == [0, 0, 0, 0, 1, 1, 1, 1]
+
+
+class TestCreatePopulationSpaceGuards:
+    """The space-shape guards between ``get_spaces_from_env`` and the builders."""
+
+    @pytest.fixture
+    def box(self):
+        from gymnasium import spaces
+
+        return spaces.Box(low=-1.0, high=1.0, shape=(3,))
+
+    def _create(self, algo_spec, spaces_pair, monkeypatch):
+        import agilerl.utils.trainer_utils as trainer_utils
+
+        monkeypatch.setattr(
+            trainer_utils, "get_spaces_from_env", lambda spec, env: spaces_pair
+        )
+        return trainer_utils.create_population_from_spec(
+            population_size=1,
+            algo_spec=algo_spec,
+            env=MagicMock(),
+            mutation_spec=None,
+            replay_buffer_spec=None,
+        )
+
+    def test_multi_agent_rejects_plain_spaces(self, box, monkeypatch):
+        from agilerl.arena.models.algorithms import MADDPGSpec
+
+        with pytest.raises(TypeError, match="per-agent space mappings"):
+            self._create(MADDPGSpec(), (box, box), monkeypatch)
+
+    def test_multi_agent_rejects_a_plain_action_space(self, box, monkeypatch):
+        from agilerl.arena.models.algorithms import MADDPGSpec
+
+        with pytest.raises(TypeError, match="per-agent space mappings"):
+            self._create(MADDPGSpec(), ({"agent_0": box}, box), monkeypatch)
+
+    def test_multi_agent_rejects_a_non_space_observation(self, box, monkeypatch):
+        from agilerl.arena.models.algorithms import MADDPGSpec
+
+        with pytest.raises(TypeError, match="Observation space for 'agent_0'"):
+            self._create(
+                MADDPGSpec(), ({"agent_0": object()}, {"agent_0": box}), monkeypatch
+            )
+
+    def test_multi_agent_rejects_a_non_space_action(self, box, monkeypatch):
+        from agilerl.arena.models.algorithms import MADDPGSpec
+
+        with pytest.raises(TypeError, match="Action space for 'agent_0'"):
+            self._create(
+                MADDPGSpec(), ({"agent_0": box}, {"agent_0": object()}), monkeypatch
+            )
+
+    def test_single_agent_rejects_space_mappings(self, box, monkeypatch):
+        from agilerl.arena.models.algorithms import DQNSpec
+
+        with pytest.raises(TypeError, match="plain observation/action spaces"):
+            self._create(DQNSpec(), ({"agent_0": box}, {"agent_0": box}), monkeypatch)
+
+    def test_single_agent_rejects_an_action_space_mapping(self, box, monkeypatch):
+        from agilerl.arena.models.algorithms import DQNSpec
+
+        with pytest.raises(TypeError, match="plain observation/action spaces"):
+            self._create(DQNSpec(), (box, {"agent_0": box}), monkeypatch)
+
+
+class TestCreatePopulationLLMGuards:
+    def test_rejects_a_spec_outside_every_paradigm(self):
+        from agilerl.arena.models.algorithms import AlgorithmSpec
+        from agilerl.utils.trainer_utils import create_population_from_spec
+
+        with pytest.raises(TypeError, match="not an LLMAlgorithmSpec"):
+            create_population_from_spec(
+                population_size=1,
+                algo_spec=AlgorithmSpec.model_construct(),
+                env=None,
+                mutation_spec=None,
+                replay_buffer_spec=None,
+            )
+
+    def test_an_uninitialized_agent_0_actor_stops_cloning(self, monkeypatch):
+        from types import SimpleNamespace
+
+        from agilerl.arena.models.algorithms import GRPOSpec
+        from agilerl.builders import LLMBuilder
+        from agilerl.utils.trainer_utils import create_population_from_spec
+
+        monkeypatch.setattr(
+            LLMBuilder,
+            "build",
+            classmethod(lambda cls, *args, **kwargs: SimpleNamespace(actor=None)),
+        )
+        with pytest.raises(TypeError, match="Agent 0 actor is not initialized"):
+            create_population_from_spec(
+                population_size=2,
+                algo_spec=GRPOSpec.model_construct(),
+                env=None,
+                mutation_spec=None,
+                replay_buffer_spec=None,
+            )

@@ -6,7 +6,7 @@ from __future__ import annotations
 import math
 from collections.abc import Callable, Sequence
 from functools import wraps
-from typing import TYPE_CHECKING, NamedTuple, TypeGuard, TypeVar, cast
+from typing import TYPE_CHECKING, NamedTuple, TypeGuard, TypeVar
 
 import fastrand  # ty: ignore[unresolved-import] — C extension without type stubs
 import numpy as np
@@ -21,11 +21,6 @@ from agilerl.modules import (
     ModuleDict,
     NoisyLinear,
 )
-from agilerl.modules.custom_components import (
-    GumbelSoftmax,
-    ResidualBlock,
-    SimbaResidualBlock,
-)
 from agilerl.utils.evolvable_networks import (
     ACTIVATION_FUNCTIONS,
     CONV_LAYER_FUNCTIONS,
@@ -36,8 +31,6 @@ from agilerl.utils.evolvable_networks import (
 if TYPE_CHECKING:
     from agilerl.algorithms.core import EvolvableAlgorithm
     from agilerl.hpo.mutation import Mutations
-    from agilerl.networks.base import EvolvableNetwork
-    from agilerl.typing import MutationReturn
 
 IndividualT = TypeVar("IndividualT", bound="EvolvableAlgorithm")
 
@@ -61,38 +54,9 @@ WEIGHT_LAYER_TYPES: tuple[type[WeightLayer], ...] = (
 
 ACTIVATION_TYPES: tuple[type[nn.Module], ...] = tuple(ACTIVATION_FUNCTIONS.values())
 
-# Normalised layers are not compatible with function-preserving architecture mutations as
-# they pool their statistics across old and new units.
+# Normalisations hold per-neuron state of their own, so a revived neuron's entry
+# has to be reset with it.
 NORM_LAYER_TYPES: tuple[type[nn.Module], ...] = tuple(NORMALIZATION_FUNCTIONS.values())
-
-# Noise applied to a new unit's outgoing weights, as a fraction of the consumer
-# layer's existing column scale.
-FP_NOISE_SCALE = 0.02
-
-# Activations that mix units together, so a new unit changes its neighbours'
-# outputs even when it contributes nothing downstream.
-CROSS_UNIT_ACTIVATION_TYPES: tuple[type[nn.Module], ...] = (
-    nn.Softmax,
-    nn.LogSoftmax,
-    nn.Softmin,
-    GumbelSoftmax,
-)
-
-# Only idempotent activations are compatible with the identity initialisation used during
-# function-preserving layer additions.
-IDENTITY_SAFE_ACTIVATION_TYPES: tuple[type[nn.Module], ...] = (nn.ReLU, nn.Identity)
-
-# Network wrapped containing layers affected by mutations
-CONTAINER_TYPES: tuple[type[nn.Module], ...] = (
-    nn.Sequential,
-    nn.ModuleDict,
-    nn.ModuleList,
-)
-
-NODE_ADDITIONS = frozenset({"add_node", "add_channel"})
-LAYER_ADDITIONS = frozenset({"add_layer"})
-LATENT_ADDITIONS = frozenset({"add_latent_node"})
-PRESERVED_MUTATIONS = NODE_ADDITIONS | LAYER_ADDITIONS | LATENT_ADDITIONS
 
 
 class ProducerContext(NamedTuple):
@@ -139,13 +103,12 @@ def unwrap_module(module: nn.Module) -> nn.Module:
     return module
 
 
-def weight_layers(container: nn.Module) -> list[WeightLayer]:
-    """The weight layers container holds, in registration (forward) order."""
-    return [
-        module
-        for _name, module in container.named_modules()
-        if isinstance(module, WEIGHT_LAYER_TYPES)
-    ]
+def first_weight_layer(module: nn.Module) -> WeightLayer | None:
+    """The first weight-bearing layer inside module, in forward order."""
+    for _name, child in module.named_modules():
+        if isinstance(child, WEIGHT_LAYER_TYPES):
+            return child
+    return None
 
 
 def head_entry_layers(head: nn.Module | None) -> list[WeightLayer]:
@@ -153,7 +116,7 @@ def head_entry_layers(head: nn.Module | None) -> list[WeightLayer]:
     if head is None:
         return []
     children = list(unwrap_module(head).children())
-    entries = [next(iter(weight_layers(child)), None) for child in children]
+    entries = [first_weight_layer(child) for child in children]
     found = [entry for entry in entries if entry is not None]
     is_flat_stream = any(
         child is entry for child, entry in zip(children, entries, strict=True)
@@ -216,7 +179,11 @@ def shared_encoder_heads(
         # share_encoder_parameters writes the policy encoder's values into the
         # other encoders as plain detached tensors, so a borrowed encoder is
         # exactly one whose weight layers are not nn.Parameter.
-        layers = weight_layers(encoder)
+        layers = [
+            module
+            for _name, module in encoder.named_modules()
+            if isinstance(module, WEIGHT_LAYER_TYPES)
+        ]
         if not layers or any(owns_trainable_weight(layer) for layer in layers):
             continue
         entries.extend(head_entry_layers(getattr(other, "head_net", None)))
@@ -583,391 +550,6 @@ def reset_dormant_neurons(
         neurons_reset += len(indices)
 
     return neurons_reset
-
-
-def layer_container(submodule: nn.Module) -> nn.Module:
-    """The container holding a sub-module's weight layers, in forward order."""
-    inner = unwrap_module(submodule)
-    return getattr(inner, "model", inner)
-
-
-def weight_stacks(submodule: nn.Module) -> list[list[WeightLayer]]:
-    """The parallel weight-layer streams of a sub-module, each in forward order.
-
-    Most modules have one stream. A duelling head has two (the inherited value
-    stream and its sibling advantage stream) and one architecture mutation widens
-    or deepens both, so both need the same fixup.
-    """
-    inner = unwrap_module(submodule)
-    primary_container = layer_container(submodule)
-    primary = weight_layers(primary_container)
-    if not primary:
-        return []
-
-    # A sibling forms a parallel stream when its layers read the same widths as
-    # the primary one's, i.e. the stream's input width followed by its hidden
-    # widths. Output widths are left out: a duelling head's value stream ends in
-    # a single node and its advantage stream in one per action.
-    signature = [weight_param(layer).shape[1] for layer in primary]
-    stacks: list[list[WeightLayer]] = [primary]
-    for child in inner.children():
-        if child is primary_container:
-            continue
-        layers = weight_layers(child)
-        if layers and [weight_param(layer).shape[1] for layer in layers] == signature:
-            stacks.append(layers)
-
-    return stacks
-
-
-def hidden_widths(submodule: nn.Module) -> list[int]:
-    """The output width of every non-output weight layer of the primary stream."""
-    stacks = weight_stacks(submodule)
-    if not stacks:
-        return []
-    return [weight_param(layer).shape[0] for layer in stacks[0][:-1]]
-
-
-def modules_between(
-    container: nn.Module,
-    producer: nn.Module,
-    consumer: nn.Module | None = None,
-) -> list[nn.Module]:
-    """The modules a widened output passes through after producer, in forward order.
-
-    With no consumer, every module registered after producer is returned.
-    """
-    ordered = [module for _name, module in container.named_modules()]
-    start = ordered.index(producer)
-    stop = len(ordered) if consumer is None else ordered.index(consumer)
-    return ordered[start + 1 : stop]
-
-
-def interposed_blocker(modules: Sequence[nn.Module]) -> bool:
-    """Whether the modules between a producer and its consumer defeat the fade."""
-    return any(
-        isinstance(module, (*NORM_LAYER_TYPES, *CROSS_UNIT_ACTIVATION_TYPES))
-        for module in modules
-    )
-
-
-def structural_blocker(module: nn.Module) -> bool:
-    """Whether widening a layer inside module is out of scope.
-
-    Each of these defeats the fade at the point where a hidden layer grows. A
-    recurrent core fuses its gate non-linearities, so no single weight matrix
-    holds one unit's incoming weights. A residual skip carries a new unit's
-    coordinate straight past the layer that would fade it. A multi-input
-    encoder's fusion layer reads an interleaved concatenation, so widening a
-    sub-encoder does not append columns at the tail.
-    """
-    for _name, child in module.named_modules():
-        if isinstance(child, (nn.RNNBase, SimbaResidualBlock, ResidualBlock)):
-            return True
-        if hasattr(child, "feature_net") and hasattr(child, "final_dense"):
-            return True
-    return False
-
-
-def node_addition_blocker(submodule: nn.Module, hidden_layer: int) -> bool:
-    """Whether widening a layer cannot preserve the function."""
-    if structural_blocker(submodule):
-        return True
-
-    stacks = weight_stacks(submodule)
-    if not stacks or not 0 <= hidden_layer < len(stacks[0]) - 1:
-        return True
-
-    layers = stacks[0]
-    return interposed_blocker(
-        modules_between(
-            layer_container(submodule),
-            layers[hidden_layer],
-            layers[hidden_layer + 1],
-        ),
-    )
-
-
-def layer_addition_blocker(submodule: nn.Module) -> bool:
-    """Whether an inserted layer cannot be an identity.
-
-    Net2DeeperNet is exact only while the activation is positively homogeneous
-    and idempotent on its own output, which holds for ReLU and Identity.
-    """
-    if structural_blocker(submodule):
-        return True
-
-    stacks = weight_stacks(submodule)
-    if not stacks or len(stacks[0]) < 2:
-        return True
-
-    layers = stacks[0]
-    if any(isinstance(layer, CONV_LAYER_TYPES) for layer in layers):
-        return True
-
-    new_layer = layers[-2]
-    weight = weight_param(new_layer)
-    if weight.shape[0] != weight.shape[1]:
-        return True
-
-    between = modules_between(layer_container(submodule), new_layer, layers[-1])
-    if interposed_blocker(between):
-        return True
-
-    return any(
-        not isinstance(module, (*IDENTITY_SAFE_ACTIVATION_TYPES, *CONTAINER_TYPES))
-        for module in between
-    )
-
-
-def latent_addition_blocker(network: EvolvableNetwork) -> bool:
-    """Whether widening the latent cannot preserve the function."""
-    # Detected structurally, not by isinstance: EvolvableMultiInput fuses
-    # several sub-encoders into one vector via these two attributes.
-    if hasattr(network, "feature_net") and hasattr(network, "final_dense"):
-        return True
-
-    encoder = network.encoder
-    stacks = weight_stacks(encoder)
-    if not stacks:
-        return True
-
-    return interposed_blocker(
-        modules_between(layer_container(encoder), stacks[0][-1]),
-    )
-
-
-def fade_new_columns(
-    consumer: WeightLayer,
-    columns: slice,
-    rng: np.random.Generator,
-    noise_scale: float,
-) -> None:
-    """Fade the columns through which new units reach a consuming layer.
-
-    A small positive scale lets the new units learn more rapidly since gradients
-    flow faster at a small cost in exactness. A noisy layer's stochastic scales
-    are always zeroed, so the new units add no exploration noise either.
-    """
-    weight = weight_param(consumer)
-    with torch.no_grad():
-        # Measure the columns the new block sits beside, so the noise stays small
-        # relative to the signal the consumer already carries.
-        keep = torch.ones(weight.shape[1], dtype=torch.bool, device=weight.device)
-        keep[columns] = False
-        scale = float(weight[:, keep].std())
-
-        noise = torch.as_tensor(
-            rng.standard_normal(tuple(weight[:, columns].shape)),
-            dtype=weight.dtype,
-            device=weight.device,
-        )
-        weight[:, columns] = noise * noise_scale * (scale if scale > 0.0 else 1e-3)
-
-        if isinstance(consumer, NoisyLinear):
-            consumer.weight_sigma[:, columns] = 0.0
-            consumer.weight_epsilon[:, columns] = 0.0
-
-
-def preserve_added_nodes(
-    submodule: nn.Module,
-    hidden_layer: int,
-    old_width: int,
-    rng: np.random.Generator,
-    noise_scale: float,
-) -> None:
-    """Fade a widened layer's new units so the module's output is unchanged.
-
-    The new units keep the incoming weights the stock operator gave them, and
-    only their outgoing weights are rewritten. submodule must have been cleared
-    by node_addition_blocker.
-    """
-    for layers in weight_stacks(submodule):
-        producer, consumer = layers[hidden_layer], layers[hidden_layer + 1]
-        new_width = weight_param(producer).shape[0]
-        # A layer held at its maximum width grows by nothing.
-        if new_width <= old_width:
-            continue
-
-        # A dense layer reads the flattened feature map, so each widened channel
-        # owns a whole H*W block of its columns.
-        block = 1
-        if isinstance(producer, CONV_LAYER_TYPES) and not isinstance(
-            consumer,
-            CONV_LAYER_TYPES,
-        ):
-            block = weight_param(consumer).shape[1] // new_width
-
-        fade_new_columns(
-            consumer,
-            slice(old_width * block, new_width * block),
-            rng,
-            noise_scale,
-        )
-
-
-def preserve_added_layer(submodule: nn.Module) -> None:
-    """Initialise an inserted layer to the identity so the output is unchanged.
-
-    A noisy layer's stochastic scale is zeroed as well, so the identity holds
-    while training. submodule must have been cleared by layer_addition_blocker.
-    """
-    for layers in weight_stacks(submodule):
-        new_layer = layers[-2]
-        with torch.no_grad():
-            weight_param(new_layer).zero_().fill_diagonal_(1.0)
-            if isinstance(new_layer, NoisyLinear):
-                new_layer.weight_sigma.zero_()
-                new_layer.bias_mu.zero_()
-                new_layer.bias_sigma.zero_()
-            elif new_layer.bias is not None:
-                new_layer.bias.zero_()
-
-
-def preserve_added_latent(
-    network: EvolvableNetwork,
-    old_latent: int,
-    rng: np.random.Generator,
-    noise_scale: float,
-) -> None:
-    """Fade the head's new latent columns so the network's output is unchanged.
-
-    network must have been cleared by latent_addition_blocker.
-    """
-    new_latent = network.latent_dim
-    # A latent held at its maximum grows by nothing.
-    if new_latent <= old_latent:
-        return
-
-    for layers in weight_stacks(network.head_net):
-        consumer = layers[0]
-
-        # A continuous critic reads the actions from the columns past the latent,
-        # so they have to slide out to their new offset before the new latent
-        # columns are faded over the ones they used to occupy.
-        extra = weight_param(consumer).shape[1] - new_latent
-        if extra > 0:
-            action_weights = (
-                [consumer.weight_mu, consumer.weight_sigma, consumer.weight_epsilon]
-                if isinstance(consumer, NoisyLinear)
-                else [weight_param(consumer)]
-            )
-            with torch.no_grad():
-                for weight in action_weights:
-                    weight[:, new_latent : new_latent + extra] = weight[
-                        :,
-                        old_latent : old_latent + extra,
-                    ].clone()
-
-        fade_new_columns(consumer, slice(old_latent, new_latent), rng, noise_scale)
-
-
-def resolve_target(network: nn.Module, mut_method: str) -> nn.Module | None:
-    """Walk a dotted mutation name to the module it acts on.
-
-    A latent mutation names no sub-module, so it resolves to the network that
-    owns the latent.
-    """
-    target = network
-    for segment in mut_method.split(".")[:-1]:
-        # Sub-modules of a ModuleDict are registered under their key, so a
-        # per-agent segment resolves by attribute lookup like any other.
-        child = getattr(target, segment, None)
-        if child is None:
-            return None
-        target = child
-
-    return target
-
-
-def pre_mutation_widths(network: EvolvableModule, mut_method: str) -> list[int] | None:
-    """Record the widths an architecture mutation is about to change.
-
-    The stock operator appends new units at the tail, so the fixup needs to know
-    where the old ones ended.
-
-    :param network: Network about to be mutated.
-    :type network: EvolvableModule
-    :param mut_method: The mutation method about to be applied.
-    :type mut_method: str
-
-    :return: The affected widths, or None when there is nothing to record.
-    :rtype: list[int] | None
-    """
-    target = resolve_target(network, mut_method)
-    if target is None:
-        return None
-
-    # mut_method may be dotted/per-agent-prefixed (see resolve_target); only
-    # the trailing method identifies which mutation this is.
-    if mut_method.split(".")[-1].endswith("latent_node"):
-        return [cast("EvolvableNetwork", target).latent_dim]
-
-    return hidden_widths(target)
-
-
-def preserve_architecture_mutation(
-    network: EvolvableModule,
-    applied_mut: str | None,
-    mut_dict: MutationReturn,
-    before: list[int],
-    rng: np.random.Generator,
-) -> None:
-    """Initialise an addition's new capacity so the network's function is unchanged.
-
-    Dispatches on the mutation that was actually applied rather than the one that
-    was sampled, since add_layer falls back to widening once a stream has reached
-    its depth limit. An addition the architecture cannot support keeps the stock
-    operator's random initialisation.
-
-    :param network: Network that was mutated, operated on in place.
-    :type network: EvolvableModule
-    :param applied_mut: The mutation the network reports having applied.
-    :type applied_mut: str | None
-    :param mut_dict: The mutation's own report of what it changed.
-    :type mut_dict: MutationReturn
-    :param before: The widths recorded by :func:`pre_mutation_widths`.
-    :type before: list[int]
-    :param rng: Seeded generator the symmetry-breaking noise is drawn from.
-    :type rng: numpy.random.Generator
-
-    :return: None.
-    :rtype: None
-    """
-    if applied_mut is None:
-        return
-
-    # applied_mut may be dotted/per-agent-prefixed (see resolve_target); only
-    # the trailing method identifies the mutation that ran.
-    base = applied_mut.split(".")[-1]
-    if base not in PRESERVED_MUTATIONS:
-        return
-
-    target = resolve_target(network, applied_mut)
-    if target is None:
-        return
-
-    if base in LATENT_ADDITIONS:
-        latent_network = cast("EvolvableNetwork", target)
-        if not latent_addition_blocker(latent_network):
-            preserve_added_latent(latent_network, before[0], rng, FP_NOISE_SCALE)
-        return
-
-    if base in LAYER_ADDITIONS:
-        if not layer_addition_blocker(target):
-            preserve_added_layer(target)
-        return
-
-    reported = mut_dict.get("hidden_layer")
-    hidden_layer = reported if isinstance(reported, int) else -1
-    if not node_addition_blocker(target, hidden_layer):
-        preserve_added_nodes(
-            target,
-            hidden_layer,
-            before[hidden_layer],
-            rng,
-            FP_NOISE_SCALE,
-        )
 
 
 def set_global_seed(seed: int | None) -> None:

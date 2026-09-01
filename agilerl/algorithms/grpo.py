@@ -319,10 +319,6 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
 
         Any advantage x IS combination is valid.
     :type advantage_granularity: Literal["auto", "trajectory", "turn"], optional
-    :param action_granularity: Deprecated alias for ``advantage_granularity``;
-        when set it overrides ``advantage_granularity`` and emits a
-        ``DeprecationWarning``.
-    :type action_granularity: str | None, optional
     :param use_separate_reference_adapter: Keep a dedicated ``reference`` LoRA
         adapter whose weights are frozen snapshots of the actor used for the
         KL-divergence baseline. When ``False`` the reference log-probs are
@@ -450,7 +446,6 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
         loss_type: Literal["grpo", "gspo", "cispo"] = "grpo",
         importance_sampling_level: Literal["token", "turn", "trajectory"] | None = None,
         advantage_granularity: Literal["auto", "trajectory", "turn"] = "auto",
-        action_granularity: Literal["auto", "trajectory", "turn"] | None = None,
         use_separate_reference_adapter: bool = True,
         whiten_advantages: bool = False,
         adv_clip_range: float | None = None,
@@ -522,7 +517,6 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
             adv_norm,
             group_size,
             advantage_granularity,
-            action_granularity,
             whiten_advantages,
             adv_clip_range,
             filter_zero_adv,
@@ -873,7 +867,6 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
         adv_norm: str,
         group_size: int,
         advantage_granularity: str,
-        action_granularity: str | None,
         whiten_advantages: bool,
         adv_clip_range: float | None,
         filter_zero_adv: bool,
@@ -901,13 +894,6 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
         if adv_filter_eps < 0:
             msg = "adv_filter_eps must be >= 0."
             raise ValueError(msg)
-        if action_granularity is not None:
-            warnings.warn(
-                "action_granularity is deprecated; use advantage_granularity.",
-                DeprecationWarning,
-                stacklevel=3,
-            )
-            advantage_granularity = action_granularity
         if advantage_granularity not in {"auto", "trajectory", "turn"}:
             msg = (
                 f"Invalid advantage_granularity '{advantage_granularity}'. Expected "

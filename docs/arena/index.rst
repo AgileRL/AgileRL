@@ -28,7 +28,7 @@ To use the Arena client, install the standalone package directly with lightweigh
 
    pip install agilerl-arena
    # or
-   pip install "agilerl[arena]"
+   pip install agilerl
 
 Authentication
 --------------

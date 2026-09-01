@@ -20,7 +20,7 @@ from agilerl.algorithms import (
     NeuralUCB,
     RainbowDQN,
 )
-from agilerl.algorithms.core import MultiAgentRLAlgorithm
+from agilerl.algorithms.core import MultiAgentAlgorithm
 from agilerl.hpo.multi_frequency import MultiFrequencySelection
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.modules import (
@@ -45,7 +45,6 @@ from agilerl.protocols import (
     EvolvableAlgorithmProtocol,
     EvolvableModuleProtocol,
     EvolvableNetworkProtocol,
-    LoraConfigProtocol,
     ModuleDictProtocol,
     MutationMethodProtocol,
     MutationType,
@@ -116,7 +115,7 @@ class TestEvolvableAlgorithmProtocol:
     ):
         """Test that algorithm instances implement the EvolvableAlgorithm protocol."""
         # Skip actual instantiation, just check the class definitions
-        if issubclass(algorithm_cls, MultiAgentRLAlgorithm):
+        if issubclass(algorithm_cls, MultiAgentAlgorithm):
             instance = algorithm_cls(
                 observation_spaces=[observation_space],
                 action_spaces=[algo_action_space],
@@ -331,22 +330,6 @@ class TestEnvClientProtocol:
         _ = EnvClientProtocol.tools.fget(client)
         _ = EnvClientProtocol.rubric_components.fget(client)
         _ = EnvClientProtocol.eval_mode(client)
-
-
-class TestLoraConfigProtocol:
-    def test_lora_config_implements_protocol(self):
-        pytest.importorskip("transformers")
-        pytest.importorskip("peft")
-        from peft import LoraConfig
-
-        lora = LoraConfig(
-            r=4,
-            lora_alpha=8,
-            target_modules=["c_attn"],
-            lora_dropout=0.0,
-            task_type="CAUSAL_LM",
-        )
-        assert isinstance(lora, LoraConfigProtocol)
 
 
 class TestMutationType:

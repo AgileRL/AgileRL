@@ -1,50 +1,187 @@
 # Copyright 2026 AgileRL
 # SPDX-License-Identifier: Apache-2.0
 
+"""The AgileRL training manifest contract."""
+
 from __future__ import annotations
 
-from agilerl.arena.models.algo import (  # noqa: F401
-    ARENA_REGISTRY,
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as _distribution_version
+
+from agilerl.arena.models.algorithms import (
+    AlgorithmSpec,
     AlgoSpec,
-    LLMAlgorithmSpec,
-    MultiAgentRLAlgorithmSpec,
-    RLAlgorithmSpec,
-)
-from agilerl.arena.models.algorithms import (  # noqa: F401
+    BanditSpec,
     CISPOSpec,
+    CQNSpec,
     DDPGSpec,
     DPOSpec,
     DQNSpec,
     GRPOSpec,
     GSPOSpec,
     IPPOSpec,
+    LLMAlgorithmSpec,
     LLMPPOSpec,
     LLMREINFORCESpec,
     MADDPGSpec,
     MATD3Spec,
+    MultiAgentAlgorithmSpec,
+    NeuralTSSpec,
+    NeuralUCBSpec,
     PPOSpec,
     RainbowDQNSpec,
+    RolloutLLMSpec,
     SFTSpec,
+    SingleAgentAlgorithmSpec,
     TD3Spec,
 )
-from agilerl.arena.models.hpo import (  # noqa: F401
+from agilerl.arena.models.env import (
+    BanditEnvSpec,
+    EnvSpec,
+    GymEnvSpec,
+    LLMEnvSpec,
+    LLMEnvType,
+    OfflineEnvSpec,
+)
+from agilerl.arena.models.hpo import (
+    MultiFrequencySelectionSpec,
     MutationProbabilities,
     MutationSpec,
+    NetworkMutationRanges,
+    RLHyperparameter,
+    SelectionStrategySpec,
     TournamentSelectionSpec,
+    mutation_ceiling,
+    resolve_frequency_ratios,
+    resolve_selection_brackets,
 )
-from agilerl.arena.models.manifest import TrainingManifest  # noqa: F401
-from agilerl.arena.models.networks import (  # noqa: F401
+from agilerl.arena.models.manifest import (
+    API_VERSION,
+    DeferredNetworkSpec,
+    TrainingManifest,
+    normalize_network_section,
+)
+from agilerl.arena.models.networks import (
     CnnSpec,
     ContinuousQNetworkSpec,
+    CosineLRScheduleConfig,
     DeterministicActorSpec,
+    EncoderType,
     FinetuningNetworkSpec,
+    LoraConfigDict,
     LstmSpec,
     MlpSpec,
     MultiInputSpec,
     NetworkSpec,
     QNetworkSpec,
+    RainbowQNetworkSpec,
     SimbaSpec,
     StochasticActorSpec,
     ValueNetworkSpec,
+    VLLMConfig,
+    default_colocated_vllm_config,
+    dump_network_section,
+    encoder_spec_for_arch,
+    network_arch_is_resolvable,
+    normalize_manifest_network,
 )
-from agilerl.arena.models.training import ReplayBufferSpec, TrainingSpec  # noqa: F401
+from agilerl.arena.models.registry import MANIFEST_REGISTRY, AgentType, register
+from agilerl.arena.models.schema import SCHEMA_ID, manifest_schema
+from agilerl.arena.models.training import (
+    BufferSpec,
+    LLMRolloutBufferSpec,
+    NStepBufferArgs,
+    PerBufferArgs,
+    ReplayBufferSpec,
+    RolloutMode,
+    RolloutVersionStamp,
+    TrainingSpec,
+)
+
+try:
+    __version__ = _distribution_version("agilerl-arena")
+except PackageNotFoundError:  # running straight from a source tree
+    __version__ = "0+unknown"
+
+__all__ = [
+    "API_VERSION",
+    "MANIFEST_REGISTRY",
+    "SCHEMA_ID",
+    "AgentType",
+    "AlgoSpec",
+    "AlgorithmSpec",
+    "BanditEnvSpec",
+    "BanditSpec",
+    "BufferSpec",
+    "CISPOSpec",
+    "CQNSpec",
+    "CnnSpec",
+    "ContinuousQNetworkSpec",
+    "CosineLRScheduleConfig",
+    "DDPGSpec",
+    "DPOSpec",
+    "DQNSpec",
+    "DeferredNetworkSpec",
+    "DeterministicActorSpec",
+    "EncoderType",
+    "EnvSpec",
+    "FinetuningNetworkSpec",
+    "GRPOSpec",
+    "GSPOSpec",
+    "GymEnvSpec",
+    "IPPOSpec",
+    "LLMAlgorithmSpec",
+    "LLMEnvSpec",
+    "LLMEnvType",
+    "LLMPPOSpec",
+    "LLMREINFORCESpec",
+    "LLMRolloutBufferSpec",
+    "LoraConfigDict",
+    "LstmSpec",
+    "MADDPGSpec",
+    "MATD3Spec",
+    "MlpSpec",
+    "MultiAgentAlgorithmSpec",
+    "MultiFrequencySelectionSpec",
+    "MultiInputSpec",
+    "MutationProbabilities",
+    "MutationSpec",
+    "NStepBufferArgs",
+    "NetworkMutationRanges",
+    "NetworkSpec",
+    "NeuralTSSpec",
+    "NeuralUCBSpec",
+    "OfflineEnvSpec",
+    "PPOSpec",
+    "PerBufferArgs",
+    "QNetworkSpec",
+    "RLHyperparameter",
+    "RainbowDQNSpec",
+    "RainbowQNetworkSpec",
+    "ReplayBufferSpec",
+    "RolloutLLMSpec",
+    "RolloutMode",
+    "RolloutVersionStamp",
+    "SFTSpec",
+    "SelectionStrategySpec",
+    "SimbaSpec",
+    "SingleAgentAlgorithmSpec",
+    "StochasticActorSpec",
+    "TD3Spec",
+    "TournamentSelectionSpec",
+    "TrainingManifest",
+    "TrainingSpec",
+    "VLLMConfig",
+    "ValueNetworkSpec",
+    "default_colocated_vllm_config",
+    "dump_network_section",
+    "encoder_spec_for_arch",
+    "manifest_schema",
+    "mutation_ceiling",
+    "network_arch_is_resolvable",
+    "normalize_manifest_network",
+    "normalize_network_section",
+    "register",
+    "resolve_frequency_ratios",
+    "resolve_selection_brackets",
+]

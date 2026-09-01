@@ -1,39 +1,48 @@
 # Copyright 2026 AgileRL
 # SPDX-License-Identifier: Apache-2.0
 
-"""LLMREINFORCE algorithm specification."""
+"""LLM REINFORCE algorithm specification."""
 
 from __future__ import annotations
 
-from typing import ClassVar, Literal
+from typing import Literal
 
-from pydantic import Field, model_validator
+from pydantic import Field
 
-from agilerl.arena.models.algo import LLMAlgorithmSpec, register
-from agilerl.arena.models.env import LLMEnvType
-from agilerl.arena.models.networks import CosineLRScheduleConfig, VLLMConfig
+from agilerl.arena.models.algorithms.rollout_llm import RolloutLLMSpec
+from agilerl.arena.models.descriptions import (
+    BETA,
+    CLIP_COEF,
+    IS_LEVEL,
+    LR,
+    TEMPERATURE,
+    TURN_RATIO_POOLING,
+)
+from agilerl.arena.models.registry import register
 
 
 @register()
-class LLMREINFORCESpec(LLMAlgorithmSpec):
-    """Specification for LLMREINFORCE algorithm."""
+class LLMREINFORCESpec(RolloutLLMSpec):
+    """REINFORCE with return batch normalization."""
 
-    lr: float = Field(default=5e-6, ge=0.0)
-    clip_coef: float = Field(default=0.2, ge=0.0, le=1.0)
-    gamma: float = Field(default=0.99, ge=0.0, le=1.0)
-    temperature: float = Field(default=0.9)
-    max_output_tokens: int | None = Field(default=1024, exclude=True)
-    min_output_tokens: int | None = Field(default=None)
-    action_granularity: Literal["turn", "token", "auto"] = Field(default="auto")
-    cosine_lr_schedule_config: CosineLRScheduleConfig | None = Field(default=None)
-    vllm_config: VLLMConfig | None = Field(default=None)
-    use_vllm: bool = Field(default=False)
-
-    env_type: ClassVar[LLMEnvType] = LLMEnvType.ROLLOUT
-
-    @model_validator(mode="after")
-    def _validate_vllm_config(self) -> LLMREINFORCESpec:
-        if self.use_vllm and not self.vllm_config:
-            msg = "VLLM config is not set, please provide a VLLM config in the algorithm section of the manifest."
-            raise ValueError(msg)
-        return self
+    temperature: float = Field(default=1.0, description=TEMPERATURE)
+    beta: float = Field(default=0.01, ge=0.0, le=1.0, description=BETA)
+    max_grad_norm: float = Field(
+        default=1.0,
+        ge=0.0,
+        description="Gradients are clipped to this global norm before each step.",
+    )
+    lr: float = Field(default=5e-7, ge=0.0, description=LR)
+    clip_coef: float = Field(default=0.2, ge=0.0, le=1.0, description=CLIP_COEF)
+    gamma: float = Field(
+        default=1.0,
+        ge=0.0,
+        le=1.0,
+        description="Discount factor applied across turns.",
+    )
+    importance_sampling_level: Literal["token", "turn", "trajectory"] = Field(
+        default="token", description=IS_LEVEL
+    )
+    turn_ratio_pooling: Literal["sum", "mean"] = Field(
+        default="sum", description=TURN_RATIO_POOLING
+    )

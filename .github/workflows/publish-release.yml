@@ -156,4 +156,6 @@ jobs:
                     echo "missing dist artifacts for ${DIST}==${VER}"; ls -la dist; exit 1
                   fi
                   echo "Publishing ${DIST}==${VER} from tag ${TAG} via Trusted Publishing"
-                  uv publish --trusted-publishing always "${artifacts[@]}"
+                  # --check-url skips an artifact already on the index, so a re-run
+                  # of a partly-failed release does not fail on what did land.
+                  uv publish --trusted-publishing always --check-url https://pypi.org/simple "${artifacts[@]}"

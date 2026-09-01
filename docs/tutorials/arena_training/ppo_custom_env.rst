@@ -22,7 +22,7 @@ the AgileRL extra:
 
    pip install agilerl-arena
    # or
-   pip install "agilerl[arena]"
+   pip install agilerl
 
 Authentication
 ~~~~~~~~~~~~~~

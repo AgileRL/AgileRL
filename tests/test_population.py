@@ -458,10 +458,10 @@ class TestPopulationInit:
         assert pop.agent_ids is None
 
     def test_init_multi_agent_real(self):
-        """is_multi_agent=True when all agents are MultiAgentRLAlgorithm."""
-        from agilerl.algorithms.core.base import MultiAgentRLAlgorithm
+        """is_multi_agent=True when all agents are MultiAgentAlgorithm."""
+        from agilerl.algorithms.core.base import MultiAgentAlgorithm
 
-        agent = MagicMock(spec=MultiAgentRLAlgorithm)
+        agent = MagicMock(spec=MultiAgentAlgorithm)
         agent.metrics = MagicMock(spec=MultiAgentMetrics)
         agent.metrics.additional_metrics = []
         agent.metrics.nonscalar_metrics = []

@@ -10,7 +10,7 @@ likely to remain in the population.
 The :class:`Mutations <agilerl.hpo.mutation.Mutations>` class is used to mutate agents with pre-set probabilities. The available mutations currently implemented are:
 
     * **No mutation**: An "identity" mutation, whereby the agent is returned unchanged.
-    * **Network architecture mutations**: Involves adding or removing layers or nodes. Trained weights are reused, and added capacity is initialized to preserve the network's function where the architecture allows it (see :ref:`function_preserving`), and randomly otherwise.
+    * **Network architecture mutations**: Involves adding or removing layers or nodes. Trained weights are reused and new weights are initialized randomly.
     * **Network parameters mutation**: Mutating weights with Gaussian noise, preceded by ReGraMa resets of the neurons that have stopped learning.
     * **Network activation layer mutation**: Change of activation layer.
     * **RL algorithm mutation**: Mutation of a learning hyperparameter (e.g. learning rate or batch size).
@@ -164,43 +164,6 @@ This has proven to be successful in our experiments, but it is still experimenta
 
 .. note::
     AgileRL currently doesn't support architecture mutations for :class:`LLMAlgorithm <agilerl.algorithms.core.LLMAlgorithm>` objects.
-
-.. _function_preserving:
-
-Function-preserving additions
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-When possible, the node and layer addition operations are function-preserving, in other words, the
-network maintains the same behaviour after being mutated. To implement this:
-
- * The outgoing weights(``add_node``, ``add_channel``, ``add_latent_node``) of the new neurons are
-   initialised to values close to zero. Therefore, they do not affect the input fed to the next layer
-   and consequently, the network's output.
-  * ``add_layer`` initialises the new layer with an identity matrix, making its inputs identical to
-  its outputs (`"Net2Net: Accelerating Learning via Knowledge Transfer" <https://arxiv.org/abs/1511.05641>`_).
-
-Note that removal operations have not been, since a decrease in network capacity cannot be guaranteed
-to be function-preserving.
-
-Function-preserving additions minimise sudden drops in fitness after an architecture mutation, increasing
-the survival rate of individuals whose capacity has been modified and, therefore, allowing for a better
-exploration of the architecture space during training.
-
-Function-preserving architecture mutations are automatically performed by the framework when the following
-conditions apply:
-
-  * The layer is not normalised as normalisation layers are based on statistics collected on the whole layer,
-    and these values affect both the new and the old neurons.
-  * Cross-unit activations like ``Softmax`` are not used since they make new units affect the output of all
-    units in a layer.
-  * The mutated layer is not part of an RNN, multi-input encoder, residual network or a SimBa block.
-
-In addition, function-preserving architecture mutations are need an idempotent activation (i.e., ReLU or
-Identity).
-
-When these conditions are not met, function preservation cannot be guaranteed, and the new capacity is
-initialised randomly.
-
 
 RL Hyperparameter Mutations
 ---------------------------

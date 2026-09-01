@@ -10,14 +10,12 @@ is treated as tournament selection so existing configs are unchanged.
 
 The block was previously named ``tournament_selection``; that spelling is still
 accepted as an alias, so manifests written against earlier versions keep validating.
-Reading it back as ``TrainingManifest.tournament_selection`` (core or Arena) also still
-works, with a ``DeprecationWarning``; it returns ``None`` when the configured strategy
-is not tournament selection.
+Serialized output still uses ``tournament_selection``.
 
 Both regimes take their population size from the mandatory ``training.pop_size`` field.
 
 In Python, the trainers and
-:meth:`TrainingManifest.from_trainer_specs <agilerl.models.manifest.TrainingManifest.from_trainer_specs>`
+:func:`~agilerl.models.manifest.from_trainer_specs`
 take this block through a single ``selection_strategy`` argument. The former
 spellings (``tournament`` on the trainers and ``tournament_selection`` on
 ``from_trainer_specs``) are still accepted with a ``DeprecationWarning``.
