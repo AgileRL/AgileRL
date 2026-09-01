@@ -70,7 +70,7 @@ jobs:
                   echo "dist_name=${DIST}" >> "$GITHUB_OUTPUT"
 
             - name: Checkout fetch script
-              uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+              uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
               with:
                   persist-credentials: false
                   fetch-depth: 1
@@ -130,7 +130,7 @@ jobs:
                     --region us-east-1
 
             - name: Upload dist
-              uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+              uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
               with:
                   name: pypi-dist
                   path: dist/
@@ -146,13 +146,15 @@ jobs:
             id-token: write
         steps:
             - name: Download dist
-              uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+              uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
               with:
                   name: pypi-dist
                   path: dist
 
             - name: Install uv
-              uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
+              uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
+              with:
+                  enable-cache: false
 
             - name: Publish to PyPI (OIDC)
               env:
@@ -177,7 +179,7 @@ jobs:
             contents: write
         steps:
             - name: Download dist
-              uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+              uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
               with:
                   name: pypi-dist
                   path: dist
