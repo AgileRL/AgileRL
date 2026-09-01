@@ -30,6 +30,26 @@ def _fail(message: str) -> NoReturn:
     raise SystemExit(1)
 
 
+def _aws_cli_stderr(exc: subprocess.CalledProcessError) -> str:
+    err = exc.stderr
+    return err if isinstance(err, str) else ""
+
+
+def describe_package_version_failure(
+    stderr: str, package: str, version: str, repository: str
+) -> str:
+    """Map a failed describe-package-version to an operator-facing error."""
+    if "AccessDeniedException" in stderr:
+        return (
+            f"error: IAM denied DescribePackageVersion for {package}=={version} "
+            f"on {repository}"
+        )
+    return (
+        f"error: {package}=={version} is not on {repository}. "
+        "The INTERNAL release must exist before this job can upload it."
+    )
+
+
 def _require_allowed_package(package: str) -> str:
     if package not in ALLOWED_PACKAGES:
         _fail(f"error: package must be agilerl or agilerl-arena (got {package!r})")
@@ -170,8 +190,8 @@ class CodeArtifactClient:
             cmd.extend(["--output", "json"])
             completed = subprocess.run(cmd, check=True, capture_output=True, text=True)
         except subprocess.CalledProcessError as exc:
-            err = exc.stderr
-            if isinstance(err, str) and err.strip():
+            err = _aws_cli_stderr(exc)
+            if err.strip():
                 print(err.strip(), file=sys.stderr)
             raise
         if not completed.stdout.strip():
@@ -193,10 +213,11 @@ class CodeArtifactClient:
                     version,
                 ]
             )
-        except subprocess.CalledProcessError:
+        except subprocess.CalledProcessError as exc:
             _fail(
-                f"error: {package}=={version} is not on {self.repository}. "
-                "The INTERNAL release must exist before this job can upload it."
+                describe_package_version_failure(
+                    _aws_cli_stderr(exc), package, version, self.repository
+                )
             )
 
     def list_assets(self, package: str, version: str) -> list[dict[str, object]]:

@@ -7,23 +7,19 @@ name: Publish release
 #   vX.Y.Z              → agilerl
 #   agilerl-arena/vX.Y.Z → agilerl-arena
 #
-# Preferred trigger: workflow_dispatch from an existing tag ref (pairs with
-# environment `pypi` required reviewers + tag deployment policy). Tag push
-# does not publish; minting spoke tags from hub must not upload to PyPI.
+# Trigger: workflow_dispatch from an existing tag ref (Use workflow from).
+# No inputs. Tag push does not publish; minting spoke tags from hub must not
+# upload to PyPI.
 #
 # Auth:
 #   fetch   — GitHub OIDC → read-only IAM role (repository secret
 #             AWS_CODEARTIFACT_READ_ROLE_ARN). No long-lived AWS keys.
 #   publish — PyPI Trusted Publishing (OIDC) via environment `pypi`.
 #             No UV_PUBLISH_TOKEN. Fetch credentials do not leak into publish.
+#   release — GITHUB_TOKEN creates the GitHub Release after PyPI succeeds.
 
 on:
     workflow_dispatch:
-        inputs:
-            tag:
-                description: Existing spoke tag to publish (e.g. v2.9.0 or agilerl-arena/v0.2.0). Empty = the ref that triggered the run.
-                required: false
-                default: ''
 
 permissions:
     contents: read
@@ -40,18 +36,17 @@ jobs:
             version: ${{ steps.tag.outputs.version }}
             dist_name: ${{ steps.tag.outputs.dist_name }}
             package: ${{ steps.tag.outputs.package }}
+            previous_tag: ${{ steps.prev.outputs.previous_tag }}
         steps:
             - name: Resolve tag
               id: tag
-              env:
-                  INPUT_TAG: ${{ inputs.tag }}
               run: |
                   set -euo pipefail
-                  if [[ -n "${INPUT_TAG}" ]]; then
-                    TAG="${INPUT_TAG}"
-                  else
-                    TAG="${GITHUB_REF_NAME}"
+                  if [[ "${GITHUB_REF_TYPE}" != "tag" ]]; then
+                    echo "Run this workflow from a v* or agilerl-arena/v* tag (Use workflow from), not ${GITHUB_REF_TYPE} ${GITHUB_REF_NAME}" >&2
+                    exit 1
                   fi
+                  TAG="${GITHUB_REF_NAME}"
                   TAG="${TAG#refs/tags/}"
                   case "${TAG}" in
                     agilerl-arena/v*)
@@ -79,6 +74,22 @@ jobs:
               with:
                   persist-credentials: false
                   fetch-depth: 1
+
+            - name: Previous same-family tag
+              id: prev
+              env:
+                  GH_TOKEN: ${{ github.token }}
+                  TAG: ${{ steps.tag.outputs.tag }}
+              run: |
+                  set -euo pipefail
+                  tags="$(
+                    gh api --paginate \
+                      "repos/${GITHUB_REPOSITORY}/git/matching-refs/tags" \
+                      --jq '.[].ref' \
+                      | sed 's#^refs/tags/##'
+                  )"
+                  PREV="$(printf '%s\n' "${tags}" | python3 scripts/previous_spoke_tag.py "${TAG}")"
+                  echo "previous_tag=${PREV}" >> "$GITHUB_OUTPUT"
 
             - name: Require read role
               env:
@@ -157,3 +168,44 @@ jobs:
                   fi
                   echo "Publishing ${DIST}==${VER} from tag ${TAG} via Trusted Publishing"
                   uv publish --trusted-publishing always "${artifacts[@]}"
+
+    github-release:
+        needs: [fetch, publish]
+        if: github.repository == 'AgileRL/AgileRL'
+        runs-on: ubuntu-latest
+        permissions:
+            contents: write
+        steps:
+            - name: Download dist
+              uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+              with:
+                  name: pypi-dist
+                  path: dist
+
+            - name: Create GitHub Release
+              env:
+                  GH_TOKEN: ${{ github.token }}
+                  TAG: ${{ needs.fetch.outputs.tag }}
+                  PREV: ${{ needs.fetch.outputs.previous_tag }}
+              run: |
+                  set -euo pipefail
+                  shopt -s nullglob
+                  artifacts=(dist/*)
+                  if [[ ${#artifacts[@]} -eq 0 ]]; then
+                    echo "missing dist artifacts"; ls -la dist; exit 1
+                  fi
+                  if gh release view "${TAG}" >/dev/null 2>&1; then
+                    echo "GitHub Release ${TAG} already exists; leaving body unchanged"
+                    exit 0
+                  fi
+                  notes_args=(--generate-notes)
+                  if [[ -n "${PREV}" ]]; then
+                    notes_args+=(--notes-start-tag "${PREV}")
+                  fi
+                  latest_args=()
+                  if [[ "${TAG}" == agilerl-arena/* ]]; then
+                    latest_args+=(--latest=false)
+                  fi
+                  gh release create "${TAG}" "${artifacts[@]}" \
+                    "${notes_args[@]}" \
+                    "${latest_args[@]}"
