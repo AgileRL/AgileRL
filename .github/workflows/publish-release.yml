@@ -17,6 +17,8 @@ name: Publish release
 #   publish — PyPI Trusted Publishing (OIDC) via environment `pypi`.
 #             No UV_PUBLISH_TOKEN. Fetch credentials do not leak into publish.
 #   release — GITHUB_TOKEN creates the GitHub Release after PyPI succeeds.
+#             Title and body come from spoke commit messages (spoke-public
+#             copy), not GitHub generate-notes.
 
 on:
     workflow_dispatch:
@@ -178,6 +180,12 @@ jobs:
         permissions:
             contents: write
         steps:
+            - name: Checkout notes script
+              uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+              with:
+                  persist-credentials: false
+                  fetch-depth: 1
+
             - name: Download dist
               uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
               with:
@@ -200,14 +208,28 @@ jobs:
                     echo "GitHub Release ${TAG} already exists; leaving body unchanged"
                     exit 0
                   fi
-                  notes_args=(--generate-notes)
+                  notes_dir="${RUNNER_TEMP}/spoke-release"
+                  mkdir -p "${notes_dir}"
                   if [[ -n "${PREV}" ]]; then
-                    notes_args+=(--notes-start-tag "${PREV}")
+                    gh api "repos/${GITHUB_REPOSITORY}/compare/${PREV}...${TAG}" \
+                      > "${notes_dir}/compare.json"
+                  else
+                    gh api "repos/${GITHUB_REPOSITORY}/commits/${TAG}" \
+                      > "${notes_dir}/compare.json"
                   fi
+                  python3 scripts/spoke_release_notes.py \
+                    --tag "${TAG}" \
+                    --previous-tag "${PREV}" \
+                    --repo "${GITHUB_REPOSITORY}" \
+                    --title-file "${notes_dir}/title.txt" \
+                    --notes-file "${notes_dir}/notes.md" \
+                    < "${notes_dir}/compare.json"
+                  TITLE="$(cat "${notes_dir}/title.txt")"
                   latest_args=()
                   if [[ "${TAG}" == agilerl-arena/* ]]; then
                     latest_args+=(--latest=false)
                   fi
                   gh release create "${TAG}" "${artifacts[@]}" \
-                    "${notes_args[@]}" \
+                    --title "${TITLE}" \
+                    --notes-file "${notes_dir}/notes.md" \
                     "${latest_args[@]}"
