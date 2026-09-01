@@ -154,6 +154,17 @@ class TestTD3Init:
         assert isinstance(td3.criterion, nn.MSELoss)
         td3.clean_up()
 
+    def test_initialize_td3_disables_encoder_layer_norm(self, vector_space):
+        with pytest.warns(UserWarning, match="Layer normalization is not supported"):
+            td3 = TD3(
+                vector_space,
+                copy.deepcopy(vector_space),
+                net_config={
+                    "encoder_config": {"hidden_size": [64, 64], "layer_norm": True},
+                },
+            )
+        td3.clean_up()
+
     # Can initialize td3 with an actor network
     # TODO: This will be deprecated in the future
     @pytest.mark.parametrize(
