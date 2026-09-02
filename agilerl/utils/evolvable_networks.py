@@ -23,7 +23,6 @@ from agilerl.modules.configs import (
 )
 from agilerl.modules.custom_components import (
     GumbelSoftmax,
-    NewGELU,
     NoisyLinear,
     ResidualBlock,
     SimbaResidualBlock,
@@ -32,10 +31,38 @@ from agilerl.typing import DeviceType, KernelSizeType, NetConfigType
 
 ConvBlockType = Literal["Conv1d", "Conv2d", "Conv3d"]
 
+ACTIVATION_FUNCTIONS: dict[str, type[nn.Module]] = {
+    "Tanh": nn.Tanh,
+    "ReLU": nn.ReLU,
+    "ELU": nn.ELU,
+    "Softsign": nn.Softsign,
+    "Sigmoid": nn.Sigmoid,
+    "GumbelSoftmax": GumbelSoftmax,
+    "Softplus": nn.Softplus,
+    "Softmax": nn.Softmax,
+    "LeakyReLU": nn.LeakyReLU,
+    "PReLU": nn.PReLU,
+    "GELU": nn.GELU,
+    "Identity": nn.Identity,
+}
+
+NORMALIZATION_FUNCTIONS: dict[str, type[nn.Module]] = {
+    "BatchNorm2d": nn.BatchNorm2d,
+    "BatchNorm3d": nn.BatchNorm3d,
+    "InstanceNorm2d": nn.InstanceNorm2d,
+    "InstanceNorm3d": nn.InstanceNorm3d,
+    "LayerNorm": nn.LayerNorm,
+}
+
+CONV_LAYER_FUNCTIONS: dict[str, type[nn.Module]] = {
+    "Conv2d": nn.Conv2d,
+    "Conv3d": nn.Conv3d,
+}
+
 
 # Arity of the size tuple a torch layer expects (e.g. ``tuple[int, int]`` for
 # 2d layers). Ties a layer constructor to a normalizer that produces it.
-_SizeT = TypeVar("_SizeT")
+SizeT = TypeVar("SizeT")
 
 
 @overload
@@ -62,35 +89,35 @@ def _size_normalizer(dims: int) -> Callable[[KernelSizeType], tuple[int, ...]]:
     return normalize
 
 
-class _ConvConstructor(Protocol[_SizeT]):
-    """A torch conv constructor whose size args all share arity ``_SizeT``."""
+class ConvConstructor(Protocol[SizeT]):
+    """A torch conv constructor whose size args all share arity ``SizeT``."""
 
     def __call__(
         self,
         in_channels: int,
         out_channels: int,
-        kernel_size: _SizeT,
-        stride: _SizeT,
-        padding: _SizeT,
+        kernel_size: SizeT,
+        stride: SizeT,
+        padding: SizeT,
         *,
         device: DeviceType,
     ) -> nn.Module: ...
 
 
-class _PoolConstructor(Protocol[_SizeT]):
-    """A torch pooling constructor whose size args accept int or arity ``_SizeT``."""
+class PoolConstructor(Protocol[SizeT]):
+    """A torch pooling constructor whose size args accept int or arity ``SizeT``."""
 
     def __call__(
         self,
-        kernel_size: int | _SizeT,
-        stride: int | _SizeT,
-        padding: int | _SizeT,
+        kernel_size: int | SizeT,
+        stride: int | SizeT,
+        padding: int | SizeT,
     ) -> nn.Module: ...
 
 
 def _build_conv(
-    conv_cls: _ConvConstructor[_SizeT],
-    to_size: Callable[[KernelSizeType], _SizeT],
+    conv_cls: ConvConstructor[SizeT],
+    to_size: Callable[[KernelSizeType], SizeT],
     in_channels: int,
     out_channels: int,
     kernel_size: KernelSizeType,
@@ -110,8 +137,8 @@ def _build_conv(
 
 
 def _build_pool(
-    pool_cls: _PoolConstructor[_SizeT],
-    to_size: Callable[[KernelSizeType], _SizeT],
+    pool_cls: PoolConstructor[SizeT],
+    to_size: Callable[[KernelSizeType], SizeT],
     kernel_size: KernelSizeType,
     stride: KernelSizeType,
     padding: KernelSizeType,
@@ -441,42 +468,19 @@ def get_normalization(
     :return: Normalization layer
     :rtype: nn.Module
     """
-    normalization_functions = {
-        "BatchNorm2d": nn.BatchNorm2d,
-        "BatchNorm3d": nn.BatchNorm3d,
-        "InstanceNorm2d": nn.InstanceNorm2d,
-        "InstanceNorm3d": nn.InstanceNorm3d,
-        "LayerNorm": nn.LayerNorm,
-    }
-
-    return normalization_functions[normalization_name](layer_size, device=device)
+    return NORMALIZATION_FUNCTIONS[normalization_name](layer_size, device=device)
 
 
-def get_activation(activation_name: str | None, new_gelu: bool = False) -> nn.Module:
+def get_activation(activation_name: str | None) -> nn.Module:
     """Return activation function for corresponding activation name.
 
     :param activation_names: Activation function name
     :type activation_names: str
     """
-    activation_functions = {
-        "Tanh": nn.Tanh,
-        "ReLU": nn.ReLU,
-        "ELU": nn.ELU,
-        "Softsign": nn.Softsign,
-        "Sigmoid": nn.Sigmoid,
-        "GumbelSoftmax": GumbelSoftmax,
-        "Softplus": nn.Softplus,
-        "Softmax": nn.Softmax,
-        "LeakyReLU": nn.LeakyReLU,
-        "PReLU": nn.PReLU,
-        "GELU": nn.GELU if not new_gelu else NewGELU,
-        "Identity": nn.Identity,
-    }
-
     activation_name = activation_name if activation_name is not None else "Identity"
     if activation_name == "Softmax":
         return nn.Softmax(dim=-1)
-    return activation_functions[activation_name]()
+    return ACTIVATION_FUNCTIONS[activation_name]()
 
 
 def get_pooling(
@@ -648,7 +652,6 @@ def create_mlp(
     activation: str = "ReLU",
     noise_std: float = 0.1,
     device: DeviceType = "cpu",
-    new_gelu: bool = False,
     name: str = "mlp",
 ) -> nn.Sequential:
     """Create and returns multi-layer perceptron.
@@ -710,10 +713,7 @@ def create_mlp(
             )
 
         # Add activation function
-        net_dict[f"{name}_activation_{l_no!s}"] = get_activation(
-            activation,
-            new_gelu,
-        )
+        net_dict[f"{name}_activation_{l_no!s}"] = get_activation(activation)
 
     # Output layer
     output_layer: NoisyLinear | nn.Linear
@@ -752,7 +752,6 @@ def create_mlp(
 
     net_dict[f"{name}_activation_output"] = get_activation(
         activation_name=output_activation,
-        new_gelu=new_gelu,
     )
     return nn.Sequential(net_dict)
 

@@ -155,14 +155,12 @@ class LLMAlgorithmSpec(AlgorithmSpec):
     configuration, model parameters, and training hyperparameters.
 
     Subclasses must set the :attr:`env_type` class variable to indicate
-    which LLM gym type the algorithm requires (``"reasoning"``,
-    ``"preference"``, ``"sft"``, ``"multiturn"``).
+    which LLM env type the algorithm requires (``"rollout"`` or ``"dataset"``).
     """
 
     beta: float = Field(default=0.001, ge=0.0, le=1.0)
     max_grad_norm: float = Field(default=0.1, ge=0.0)
     update_epochs: int = Field(default=1, ge=1)
-    reduce_memory_peak: bool = Field(default=False)
     use_separate_reference_adapter: bool = Field(default=False)
     calc_position_embeddings: bool = Field(default=True)
     gradient_checkpointing: bool = Field(default=True)

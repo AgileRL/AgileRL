@@ -92,8 +92,8 @@ class TestCreatePopulationLLM:
         algo.zero_stage = 0
 
         with (
-            patch("agilerl.utils.algo_utils.clone_llm", return_value=MagicMock()),
-            patch("agilerl.utils.llm_utils.get_state_dict", return_value={}),
+            patch("agilerl.utils.trainer_utils.clone_llm", return_value=MagicMock()),
+            patch("agilerl.utils.trainer_utils.get_state_dict", return_value={}),
         ):
             pop = create_population_from_spec(
                 population_size=2,
@@ -131,6 +131,24 @@ class TestBuildMutations:
         assert result.no_mut == 0.5
         assert result.parameters_mut == 0.3
         assert result.mutation_sd == 0.05
+
+    def test_regrama_fields_reach_the_operator(self):
+        from agilerl.models.hpo import MutationSpec
+        from agilerl.utils.trainer_utils import build_mutations_from_spec
+
+        spec = MutationSpec(dormant_threshold=0.05)
+
+        result = build_mutations_from_spec(spec, "cpu")
+
+        assert result.dormant_threshold == 0.05
+
+    def test_regrama_defaults_reach_the_operator(self):
+        from agilerl.models.hpo import MutationSpec
+        from agilerl.utils.trainer_utils import build_mutations_from_spec
+
+        result = build_mutations_from_spec(MutationSpec(), "cpu")
+
+        assert result.dormant_threshold == 0.01
 
 
 class TestBuildTournament:

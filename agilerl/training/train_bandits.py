@@ -207,6 +207,9 @@ def train_bandits(
         loggers=loggers,
     )
 
+    # Enable the per-neuron gradient capture that ReGraMa parameter mutations read.
+    capture_grama = mutation is not None and mutation.parameters_mut > 0
+
     # Pre-training mutation
     if accelerator is None and mutation is not None:
         population.update(mutation.mutation(population.agents, pre_training_mut=True))
@@ -221,7 +224,7 @@ def train_bandits(
 
         for agent in population.agents:
             agent.set_training_mode(True)
-            agent.init_training_step()
+            agent.init_training_step(capture_grama)
 
             sample = sampler.sample
 

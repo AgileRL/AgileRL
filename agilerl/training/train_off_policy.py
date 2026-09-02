@@ -328,6 +328,9 @@ def train_off_policy(
         loggers=loggers,
     )
 
+    # Enable the per-neuron gradient capture that ReGraMa parameter mutations read.
+    capture_grama = mutation is not None and mutation.parameters_mut > 0
+
     checkpoint_count = 0
 
     # Pre-training mutation
@@ -341,7 +344,7 @@ def train_off_policy(
 
         for agent in population.agents:
             agent.set_training_mode(True)
-            agent.init_training_step()
+            agent.init_training_step(capture_grama)
 
             obs, info = vec_env.reset()
             scores = np.zeros(num_envs)

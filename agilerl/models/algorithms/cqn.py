@@ -39,6 +39,8 @@ class CQNSpec(RLAlgorithmSpec):
         :return: Training function
         :rtype: Callable[..., Any]
         """
-        from agilerl.training.train_offline import train_offline
+        from agilerl.training.train_offline import (  # circular import with agilerl.training
+            train_offline,
+        )
 
         return train_offline

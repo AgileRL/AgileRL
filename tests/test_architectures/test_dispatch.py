@@ -42,7 +42,10 @@ class TestInstallFamilyZero3Patches:
         monkeypatch.setitem(
             architectures.ZERO3_FAMILY_PATCHES,
             "nemotron_h",
-            (lambda: calls.append("fused"), lambda: calls.append("stream")),
+            (
+                lambda model=None: calls.append("fused"),
+                lambda model=None: calls.append("stream"),
+            ),
         )
 
         patched = architectures.install_family_zero3_patches("nvidia/Nemotron-H-8B")
@@ -50,12 +53,31 @@ class TestInstallFamilyZero3Patches:
         assert patched == frozenset({"nemotron_h"})
         assert calls == ["fused", "stream"]
 
+    def test_every_patch_receives_the_already_built_model(self, monkeypatch):
+        seen: list[object] = []
+        monkeypatch.setitem(
+            architectures.ZERO3_FAMILY_PATCHES,
+            "nemotron_h",
+            (
+                lambda model=None: seen.append(model),
+                lambda model=None: seen.append(model),
+            ),
+        )
+        actor = object()
+
+        architectures.install_family_zero3_patches(
+            "nvidia/Nemotron-H-8B",
+            model=actor,
+        )
+
+        assert seen == [actor, actor]
+
     def test_undetected_family_leaves_its_classes_alone(self, monkeypatch):
         calls: list[str] = []
         monkeypatch.setitem(
             architectures.ZERO3_FAMILY_PATCHES,
             "nemotron_h",
-            (lambda: calls.append("fused"),),
+            (lambda model=None: calls.append("fused"),),
         )
 
         patched = architectures.install_family_zero3_patches("meta-llama/Llama-3.1-8B")

@@ -306,6 +306,33 @@ class TestNStepAgentAccess:
         assert rainbow.beta == pytest.approx(start + 0.1)
 
 
+class TestTextEnvProtocol:
+    def test_protocol_methods_executed(self):
+        from unittest.mock import MagicMock
+
+        from agilerl.protocols import TextEnvProtocol
+
+        env = MagicMock()
+        _ = TextEnvProtocol.reset(env)
+        _ = TextEnvProtocol.step(env, "action text")
+
+
+class TestEnvClientProtocol:
+    def test_protocol_methods_executed(self):
+        from unittest.mock import MagicMock
+
+        from agilerl.protocols import EnvClientProtocol
+
+        client = MagicMock()
+        _ = EnvClientProtocol.reset(client)
+        _ = EnvClientProtocol.step(client, "action text")
+        EnvClientProtocol.close(client)
+        _ = EnvClientProtocol.dataset_size.fget(client)
+        _ = EnvClientProtocol.tools.fget(client)
+        _ = EnvClientProtocol.rubric_components.fget(client)
+        _ = EnvClientProtocol.eval_mode(client)
+
+
 class TestLoraConfigProtocol:
     def test_lora_config_implements_protocol(self):
         pytest.importorskip("transformers")
@@ -337,6 +364,32 @@ def test_protocol_type_aliases_importable():
 
     assert NumpyObsType is not None
     assert TorchObsType is not None
+
+
+class TestLLMEnvHierarchy:
+    """The LLM env classes live in :mod:`agilerl.llm_envs`.
+
+    The teacher-forced ``DatasetEnv`` and the token rollout ``RolloutHarness``
+    (driven through an env client) each own their interface outright, sharing
+    no base with one another or with ``gymnasium``.
+    """
+
+    def test_llm_env_hierarchy(self):
+        pytest.importorskip("datasets", reason="LLM dependencies not installed")
+        import gymnasium as gym
+
+        from agilerl.llm_envs import DatasetEnv, RolloutHarness
+
+        # Neither LLM env is a gymnasium.Env: DatasetEnv is a teacher-forced
+        # dataloader (no action, no episode) and RolloutHarness is a token harness
+        # over an env client, so both own their interfaces outright.
+        assert not issubclass(DatasetEnv, gym.Env)
+        assert not issubclass(RolloutHarness, gym.Env)
+        # agilerl.protocols exposes no env classes (they live in agilerl.llm_envs).
+        import agilerl.protocols as protocols
+
+        assert not hasattr(protocols, "RolloutHarness")
+        assert not hasattr(protocols, "DatasetEnv")
 
 
 class TestBanditEnvProtocol:

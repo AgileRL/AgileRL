@@ -28,7 +28,7 @@ from agilerl.algorithms.core.base import (
     OptimizerWrapper,
 )
 from agilerl.algorithms.dpo import DPO
-from agilerl.llm_envs import PreferenceGym
+from agilerl.llm_envs import DatasetEnv
 from tests import TINY_LLM_FIXTURE_PATH
 from tests.test_algorithms.test_llms.llm_helpers import (
     create_module,
@@ -43,6 +43,7 @@ def make_preference_gym(
     tokenizer: AutoTokenizer,
     data_batch_size_per_gpu: int = 8,
 ):
+    del accelerator  # DatasetEnv shards via rank/world_size, not accelerator
     train_dataset = Dataset.from_dict(
         {
             "prompt": [f"Prompt {i}" for i in range(num_samples)],
@@ -57,12 +58,12 @@ def make_preference_gym(
             "rejected": [f"Rejected {i}" for i in range(num_samples)],
         }
     )
-    return PreferenceGym(
+    return DatasetEnv(
         train_dataset=train_dataset,
         test_dataset=test_dataset,
         tokenizer=tokenizer,
+        objective="preference",
         data_batch_size_per_gpu=data_batch_size_per_gpu,
-        accelerator=accelerator,
     )
 
 
@@ -408,12 +409,12 @@ class TestDPOLearn:
             },
         )
         tokenizer = AutoTokenizer.from_pretrained(pretrained_model_name_or_path)
-        env = PreferenceGym(
+        env = DatasetEnv(
             train_dataset=train_dataset,
             test_dataset=test_dataset,
             tokenizer=tokenizer,
+            objective="preference",
             data_batch_size_per_gpu=data_batch_size,
-            accelerator=dpo.accelerator,
         )
         for name, param in dpo.actor.named_parameters():
             if ("lora_A" in name or "lora_B" in name) and param is not None:
@@ -470,6 +471,7 @@ class TestDPOTest:
     @pytest.mark.gpu
     @pytest.mark.parametrize("data_batch_size", [2])
     @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
+    @pytest.mark.parametrize("loop", [1, 2])
     def test_dpo_test(
         self,
         deepspeed_env,
@@ -485,6 +487,7 @@ class TestDPOTest:
         max_tokens,
         data_batch_size,
         micro_batch_size_per_gpu,
+        loop,
     ):
         dpo = dpo_factory(
             accelerator_factory,
@@ -520,28 +523,41 @@ class TestDPOTest:
             },
         )
         tokenizer = AutoTokenizer.from_pretrained(pretrained_model_name_or_path)
-        env = PreferenceGym(
+        env = DatasetEnv(
             train_dataset=train_dataset,
             test_dataset=test_dataset,
             tokenizer=tokenizer,
+            objective="preference",
             data_batch_size_per_gpu=data_batch_size,
-            accelerator=dpo.accelerator,
         )
-        fitness = dpo.test(env)
+        fitness = dpo.test(env, loop=loop)
         assert isinstance(fitness, np.ndarray)
         dpo.clean_up()
         AcceleratorState._reset_state(True)
 
     def test_dpo_test_method_waits_for_everyone(self):
+        # A realistic collated batch: ``test`` narrows what ``reset`` returns
+        # before handing it to ``learn``, so a placeholder would not get through.
+        batch = {
+            "prompt": ["p"],
+            "prompt_lengths": [1],
+            "chosen": ["c"],
+            "rejected": ["r"],
+            "chosen_input_ids": torch.ones(1, 3, dtype=torch.long),
+            "chosen_attention_mask": torch.ones(1, 3, dtype=torch.long),
+            "rejected_input_ids": torch.ones(1, 3, dtype=torch.long),
+            "rejected_attention_mask": torch.ones(1, 3, dtype=torch.long),
+        }
+
         class DummyPreferenceEnv:
             def eval_mode(self):
                 return contextlib.nullcontext()
 
             def reset(self):
-                return {"prompts": []}
+                return batch
 
             def step(self):
-                return {"prompts": []}
+                return batch
 
         dpo = _make_cpu_dpo_for_branch_tests()
         acc = MagicMock()
@@ -553,6 +569,26 @@ class TestDPOTest:
         ):
             dpo.test(DummyPreferenceEnv(), loop=1)
         acc.wait_for_everyone.assert_called()
+
+    def test_dpo_test_rejects_a_batch_from_the_wrong_objective(self):
+        """An objective='sft' env fails at the boundary, not inside the loss."""
+
+        class DummySFTEnv:
+            def eval_mode(self):
+                return contextlib.nullcontext()
+
+            def reset(self):
+                return {
+                    "prompt": ["p"],
+                    "prompt_lengths": [1],
+                    "response": ["r"],
+                    "input_ids": torch.ones(1, 3, dtype=torch.long),
+                    "attention_mask": torch.ones(1, 3, dtype=torch.long),
+                }
+
+        dpo = _make_cpu_dpo_for_branch_tests()
+        with pytest.raises(TypeError, match="needs an objective='preference'"):
+            dpo.test(DummySFTEnv(), loop=1)
 
 
 class TestDPOLigerUnavailableBehaviour:
@@ -617,6 +653,93 @@ class TestDPOLigerUnavailableBehaviour:
                     chosen_mask=torch.ones((1, 1), dtype=torch.long),
                     rejected_mask=torch.ones((1, 1), dtype=torch.long),
                 )
+
+        dpo.clean_up()
+        AcceleratorState._reset_state(True)
+
+
+class TestDPOLigerHiddenCapture:
+    def test_get_hidden_never_runs_lm_head(
+        self,
+        monkeypatch,
+        dpo_factory,
+        accelerator_factory,
+        model_factory,
+    ):
+        """``_get_hidden`` must identity-patch ``lm_head``, not run it: a
+        pre-hook capture still materializes a discarded ``(B, T, V)`` logits
+        tensor per forward (12+ GiB at production shapes).
+        """
+        vocab_size = 30
+        dpo = dpo_factory(
+            accelerator_factory=accelerator_factory,
+            model_factory=model_factory,
+            config=None,
+            use_deepspeed_optimizer=False,
+            vocab_size=vocab_size,
+            input_size=5,
+            max_tokens=10,
+            use_separate_reference_adapter=False,
+            pretrained_model_name_or_path=None,
+            micro_batch_size_per_gpu=None,
+            from_name=False,
+            use_liger_loss=False,
+        )
+        # Force the liger branch; stub the kernel so the test runs without
+        # liger-kernel (and off-GPU) while capturing what would be fed to it.
+        monkeypatch.setattr("agilerl.algorithms.dpo.HAS_LIGER_KERNEL", True)
+
+        lm_head = dpo._get_lm_head()
+        hidden_size = lm_head.weight.shape[1]
+        monkeypatch.setattr(
+            lm_head,
+            "forward",
+            MagicMock(
+                side_effect=AssertionError(
+                    "lm_head must not run inside _get_hidden: its (B, T, V) "
+                    "output is exactly the transient the identity patch avoids"
+                )
+            ),
+        )
+
+        captured = {}
+
+        class _FakeLigerDPO:
+            @staticmethod
+            def apply(policy_hidden, weight, target, bias, ref_hidden, *rest):
+                captured["policy_hidden"] = policy_hidden
+                captured["ref_hidden"] = ref_hidden
+                aux = tuple(torch.zeros(()) for _ in range(7))
+                return torch.zeros(()), aux
+
+        # raising=False: the guarded import means the attribute is absent
+        # when liger-kernel is not installed.
+        monkeypatch.setattr(
+            "agilerl.algorithms.dpo.LigerDPOWithAlpha", _FakeLigerDPO, raising=False
+        )
+
+        b, seq_len = 2, 6
+        ids = torch.randint(0, vocab_size, (b, seq_len))
+        attn = torch.ones((b, seq_len), dtype=torch.long)
+        mask = torch.ones((b, seq_len - 1), dtype=torch.long)
+
+        dpo._dpo_loss_liger(
+            chosen_ids=ids,
+            rejected_ids=ids,
+            chosen_attn=attn,
+            rejected_attn=attn,
+            chosen_mask=mask,
+            rejected_mask=mask,
+        )
+
+        # Hidden-state-sized (2B, T-1, H), never vocab-sized.
+        assert captured["policy_hidden"].shape == (2 * b, seq_len - 1, hidden_size)
+        assert captured["ref_hidden"].shape == (2 * b, seq_len - 1, hidden_size)
+        # Reference forwards ran under no_grad; policy forwards kept grad.
+        assert not captured["ref_hidden"].requires_grad
+        assert captured["policy_hidden"].requires_grad
+        # The patch restored the real lm_head after each forward.
+        assert dpo._get_lm_head() is lm_head
 
         dpo.clean_up()
         AcceleratorState._reset_state(True)

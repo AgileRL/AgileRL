@@ -65,7 +65,7 @@ os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
 # ``deepspeed_env`` fixture) inherit torch's default MASTER_PORT. Parallel
 # xdist workers then race to bind the same port and one fails with
 # ``EADDRINUSE``. Give each worker a deterministic, unique MASTER_PORT here
-# so any later distributed init lands on a non-colliding port.
+# so any later distributed init uses a non-colliding port.
 if _xdist_worker_id:
     _worker_num = int("".join(c for c in _xdist_worker_id if c.isdigit()) or "0")
     os.environ.setdefault("MASTER_PORT", str(29500 + _worker_num))
@@ -94,6 +94,40 @@ from tests.helper_functions import (  # noqa: E402
 
 if not torch.cuda.is_available():
     os.environ.setdefault("ACCELERATE_USE_CPU", "true")
+
+# Env vars PartialState / Accelerator inspect when choosing a distributed
+# backend. Leaks from DeepSpeed / LLM tests cause later Accelerator() calls to
+# DDP-wrap models (Linux) or hang on rendezvous (macOS / Windows).
+_DIST_ENV_VARS = (
+    "WORLD_SIZE",
+    "RANK",
+    "LOCAL_RANK",
+    "MASTER_ADDR",
+    "GROUP_RANK",
+    "LOCAL_WORLD_SIZE",
+    "ACCELERATE_USE_DEEPSPEED",
+)
+
+# Per-xdist-worker MASTER_PORT from above; restored after clearing leaked dist env.
+_WORKER_MASTER_PORT = os.environ.get("MASTER_PORT") if _xdist_worker_id else None
+
+
+def _reset_distributed_env() -> None:
+    """Clear distributed launch env vars leaked by DeepSpeed / LLM tests.
+
+    Does not call ``destroy_process_group()``. DeepSpeed has no clean destroy
+    path; tearing down the group between consecutive ``@pytest.mark.gpu``
+    DeepSpeed tests surfaces ``Group <ProcessGroup ...> is not registered``.
+    Suites that need an explicit destroy (multi-agent) do so in
+    ``tests/test_algorithms/test_multi_agent/conftest.py``.
+    """
+    for var in _DIST_ENV_VARS:
+        os.environ.pop(var, None)
+
+    if _WORKER_MASTER_PORT is not None:
+        os.environ["MASTER_PORT"] = _WORKER_MASTER_PORT
+    else:
+        os.environ.pop("MASTER_PORT", None)
 
 
 @pytest.hookimpl(tryfirst=True)
@@ -124,15 +158,17 @@ def pytest_collection_modifyitems(config, items):
          keeps simultaneous inits rare.
 
       ``vllm`` tests run in ``subprocess_runner.py``-spawned subprocesses, so
-      worker-process state is reset between them. ``gpu`` tests run
-      in-process and can leak DeepSpeed groups / accelerator state to the
-      next test sharing the same group; the per-fixture cleanup
-      (``AcceleratorState._reset_state(True)`` etc.) handles this in
-      practice for the test sets in this repo, but **don't add many more
-      ``gpu``-marked tests without re-checking** — DeepSpeed has no clean
-      ``destroy_process_group`` path so sharing a worker between two
-      DeepSpeed-init tests can surface ``Group <ProcessGroup ...> is not
-      registered`` or ``EADDRINUSE``-on-MASTER_PORT.
+      worker-process state is reset between them. ``gpu`` tests run in-process
+      and share accelerator / DeepSpeed distributed state across the worker:
+      accelerator state is reset per fixture (``AcceleratorState._reset_state``),
+      and ``generate_accelerator`` clears DeepSpeed's cached comm backend +
+      cloned process groups *only* when the world group has been torn down
+      (``not dist.is_initialized()``), so an interleaved ``destroy_process_group``
+      (e.g. test_mutation) cannot dangle DeepSpeed's group handles into
+      ``Group <ProcessGroup ...> is not registered`` — while leaving the cache
+      intact otherwise (re-cloning every build leaks NCCL communicators and OOMs
+      concurrent workers). MASTER_PORT is still per-test (``get_free_port``) to
+      avoid ``EADDRINUSE`` on concurrent inits.
     - ``test_minari_utils``: tests create/delete shared Minari datasets on disk.
 
     Uses ``tryfirst=True`` so the ``xdist_group`` markers below are attached
@@ -189,6 +225,12 @@ def cleanup():
     # ``ACCELERATE_USE_CPU=true`` above) then hits ``_check_initialized`` and
     # fails with ``AcceleratorState has already been initialized ...``.
     #
+    # Also clear leaked distributed launch env vars (WORLD_SIZE, RANK, …).
+    # Otherwise a later ``Accelerator()`` can DDP-wrap models so attribute
+    # access like ``actor.encoder`` fails, or hang on a multi-worker rendezvous.
+    # Process-group destroy stays out of this global path — see
+    # ``_reset_distributed_env``.
+    #
     # Resetting at setup (vs. teardown) is robust to fixtures that swallow
     # exceptions, tests that create accelerators inside ``with`` blocks that
     # raise, and ordering with subdirectory conftests like
@@ -196,10 +238,15 @@ def cleanup():
     # teardown — those will continue to work and just be redundant on the next
     # test's setup. ``.clear()`` is a no-op when state is empty, so this is
     # cheap.
+    _reset_distributed_env()
     AcceleratorState._reset_state(reset_partial_state=True)
     PartialState._reset_state()
 
     yield
+
+    _reset_distributed_env()
+    AcceleratorState._reset_state(reset_partial_state=True)
+    PartialState._reset_state()
 
     # Only clear CUDA cache if CUDA was actually used
     if torch.cuda.is_available() and torch.cuda.is_initialized():
@@ -531,6 +578,38 @@ def get_free_port():
 
 
 @pytest.fixture
+def gloo_process_group():
+    """Fixture that allows a real DistributedDataParallel wrapper to be built.
+
+    Tests DDP's attribute-hiding behaviour on a CPU, without a multi-process run.
+    """
+    if torch.distributed.is_initialized():
+        yield
+        return
+
+    saved = {
+        key: os.environ.get(key)
+        for key in ("MASTER_ADDR", "MASTER_PORT", "RANK", "WORLD_SIZE")
+    }
+    os.environ.update(
+        MASTER_ADDR="127.0.0.1",
+        MASTER_PORT=str(get_free_port()),
+        RANK="0",
+        WORLD_SIZE="1",
+    )
+    torch.distributed.init_process_group("gloo")
+    try:
+        yield
+    finally:
+        torch.distributed.destroy_process_group()
+        for key, value in saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
+@pytest.fixture
 def deepspeed_env():
 
     dynamic_dist_env = dist_env.copy()
@@ -560,3 +639,26 @@ def deepspeed_env():
                 os.environ[key] = existing_vars[key]
             else:
                 os.environ.pop(key, None)
+
+
+@pytest.fixture
+def serve_env():
+    """Host local envs over OpenEnv HTTP for a test, stopping them all at teardown.
+
+    ``url = serve_env(MyEnv())`` returns a base URL to hand to
+    ``RemoteEnvClient`` / ``RolloutHarness``; the server (and any others hosted in
+    the same test) is shut down
+    when the test finishes, so individual tests stay free of start/stop boilerplate.
+    """
+    from agilerl.llm_envs.openenv_server import OpenEnvServer
+
+    servers = []
+
+    def _serve(env):
+        server = OpenEnvServer(env).start()
+        servers.append(server)
+        return server.base_url
+
+    yield _serve
+    for server in servers:
+        server.stop()

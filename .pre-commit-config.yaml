@@ -7,7 +7,7 @@ exclude: ^tests/assets/tiny_llm/
 ci:
     autofix_prs: true
     autofix_commit_msg: '[pre-commit.ci] auto fixes from pre-commit hooks'
-    autoupdate_branch: nightly
+    autoupdate_branch: main
     # ty needs the project venv for import resolution; pre-commit.ci has none.
     skip: [codeql-python, ty]
 repos:
@@ -36,9 +36,9 @@ repos:
           - id: codespell
             args:
                 - --skip=*.css,*.js,*.map,*.scss,*.svg
-                - --ignore-words-list=magent,pres,roate
+                - --ignore-words-list=ans,magent,pres,roate
     - repo: https://github.com/astral-sh/ruff-pre-commit
-      rev: v0.16.1
+      rev: v0.16.2
       hooks:
           - id: ruff-check
             name: Ruff Linter
@@ -66,7 +66,7 @@ repos:
             pass_filenames: false
             always_run: true
           - id: check-extras
-            name: Check the arena pin and that the all extra unions every extra
+            name: Check the arena extra range and that the all extra unions every extra
             entry: python scripts/check-extras.py
             language: python
             additional_dependencies: [tomli; python_version < '3.11']

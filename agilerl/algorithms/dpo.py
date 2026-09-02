@@ -18,7 +18,7 @@ if TYPE_CHECKING:
     from peft import LoraConfig
     from transformers import BitsAndBytesConfig
 
-    from agilerl.llm_envs import PreferenceGym
+    from agilerl.llm_envs import DatasetEnv
 
 from agilerl.algorithms.core.base import LLMAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
@@ -29,7 +29,11 @@ from agilerl.typing import (
     PreferencePrompts,
 )
 from agilerl.utils.algo_utils import get_experiences_samples
-from agilerl.utils.llm_utils import aggregate_metrics_dict, resolve_llm_device
+from agilerl.utils.llm_utils import (
+    aggregate_metrics_dict,
+    is_preference_prompts,
+    resolve_llm_device,
+)
 
 if HAS_LIGER_KERNEL:
     from agilerl.algorithms.core.llm_ops.fused_loss import LigerDPOWithAlpha
@@ -100,12 +104,9 @@ class DPO(LLMAlgorithm[PreferencePrompts]):
         to ``False`` otherwise). When ``training=False`` the standard
         path is always used regardless of this flag.
     :type use_liger_loss: bool, optional
-    :param chunk_rows: Primary chunk-size knob for fused logit tiles used by
+    :param chunk_rows: Primary chunk-size setting for fused logit tiles used by
         both standard and Liger paths.
     :type chunk_rows: int | None, optional
-    :param reduce_memory_peak: Deprecated and ignored; previously hinted
-        peak-memory batching. Configure ``micro_batch_size_per_gpu`` instead.
-    :type reduce_memory_peak: bool, optional
     :param cast_logprobs_to_fp32: When ``True`` (default), run the per-token
         log-prob reduction (``gather`` / ``logsumexp``) in fp32 before casting
         back to the input dtype, for numerically stable log-probs. ``False`` runs
@@ -162,7 +163,6 @@ class DPO(LLMAlgorithm[PreferencePrompts]):
         torch_compiler: str | None = None,
         use_liger_loss: bool = False,
         chunk_rows: int | None = None,
-        reduce_memory_peak: bool = False,
         cast_logprobs_to_fp32: bool = True,
         use_separate_reference_adapter: bool = True,
         quantization_config: BitsAndBytesConfig | None = None,
@@ -196,7 +196,6 @@ class DPO(LLMAlgorithm[PreferencePrompts]):
             name="DPO",
             gradient_checkpointing=gradient_checkpointing,
             torch_compiler=torch_compiler,
-            reduce_memory_peak=reduce_memory_peak,
             cast_logprobs_to_fp32=cast_logprobs_to_fp32,
             use_separate_reference_adapter=use_separate_reference_adapter,
             quantization_config=quantization_config,
@@ -252,7 +251,8 @@ class DPO(LLMAlgorithm[PreferencePrompts]):
         """Update agent network parameters to learn from preference data.
 
         :param experiences: Batched chosen/rejected input ids and attention masks
-            with prompt lengths, as produced by :class:`~agilerl.llm_envs.PreferenceGym`.
+            with prompt lengths, as produced by a preference
+            :class:`~agilerl.llm_envs.DatasetEnv`.
         :type experiences: PreferencePrompts
         :param training: Whether the agent is training or not
         :type training: bool
@@ -350,14 +350,15 @@ class DPO(LLMAlgorithm[PreferencePrompts]):
         # Aggregate metrics across GPUs for both train/test paths. (Fresh dict
         # display so ty checks the values against the parameter's wider,
         # invariant dict value union.)
-        agg = aggregate_metrics_dict(self.accelerator, {**learn_metrics})
+        learn_metrics = aggregate_metrics_dict(self.accelerator, {**learn_metrics})
 
         if training:
-            self.metrics.log("loss", agg["loss"])
-            self.metrics.log("chosen_reward", agg["chosen_reward"])
-            self.metrics.log("rejected_reward", agg["rejected_reward"])
+            self.metrics.log("loss", learn_metrics["loss"])
+            self.metrics.log("chosen_reward", learn_metrics["chosen_reward"])
+            self.metrics.log("rejected_reward", learn_metrics["rejected_reward"])
             self.metrics.log(
-                "reward_margin", agg["chosen_reward"] - agg["rejected_reward"]
+                "reward_margin",
+                learn_metrics["chosen_reward"] - learn_metrics["rejected_reward"],
             )
 
         return learn_metrics
@@ -561,15 +562,13 @@ class DPO(LLMAlgorithm[PreferencePrompts]):
             :return: Hidden states before the LM head ``[batch, seq_len, hidden]``.
             :rtype: torch.Tensor
             """
-            captured = []
-            hook = lm_head.register_forward_pre_hook(
-                lambda m, inputs: captured.append(inputs[0])
-            )
-            try:
-                self.actor(input_ids=ids, attention_mask=attn_mask, use_cache=False)
-            finally:
-                hook.remove()
-            return captured[0]  # (B, seq_len, hidden_size)
+            with self._patch_lm_head_to_identity():
+                output = self.actor(
+                    input_ids=ids, attention_mask=attn_mask, use_cache=False
+                )
+            return (
+                output[0] if isinstance(output, tuple) else output.logits
+            )  # (B, seq_len, hidden_size)
 
         chosen_ids = chosen_ids.to(self.device)
         rejected_ids = rejected_ids.to(self.device)
@@ -664,30 +663,35 @@ class DPO(LLMAlgorithm[PreferencePrompts]):
 
     def test(
         self,
-        env: PreferenceGym,
+        env: DatasetEnv,
         loop: int = 1,
         *args: Any,
         **kwargs: Any,
     ) -> npt.NDArray:
         """Return the fitness (test) score of the agent.
 
-        :param env: The environment to be tested in
-        :type env: PreferenceGym environment
+        :param env: The environment to be tested in (``objective="preference"``)
+        :type env: DatasetEnv
         :param loop: Number of testing loops/episodes to complete. The returned score is the mean. Defaults to 1
         :type loop: int, optional
         :return: Mean test score (numpy array)
         :rtype: npt.NDArray
         """
         with env.eval_mode(), torch.no_grad():
-            prompts = env.reset()
             rewards = []
             for _ in range(loop):
+                prompts = env.reset()
+                if not is_preference_prompts(prompts):
+                    msg = (
+                        f"DPO.test needs an objective='preference' DatasetEnv; "
+                        f"got a batch with keys {sorted(prompts)}."
+                    )
+                    raise TypeError(msg)
                 learn_result = self.learn(prompts, training=False)
                 chosen_reward = learn_result["chosen_reward"]
                 rejected_reward = learn_result["rejected_reward"]
                 reward_margin = chosen_reward - rejected_reward
                 rewards.append(np.asarray(reward_margin).item())
-                prompts = env.step()
             mean_fit = float(np.mean(rewards))
         self.metrics.add_fitness(mean_fit)
         if self.accelerator is not None:

@@ -50,6 +50,7 @@ from agilerl.models.networks import (
     network_arch_is_resolvable,
 )
 from agilerl.utils.chat_template import DEFAULT_CHAT_TEMPLATE
+from agilerl.utils.evolvable_networks import get_default_encoder_config
 from agilerl.utils.llm_utils import (
     apply_pad_token_id,
     load_pad_token_configs,
@@ -117,8 +118,13 @@ class Trainer(ABC):
     :param replay_buffer: Replay buffer configuration.  Off-policy algorithms
         auto-create a default buffer when this is ``None``.
     :type replay_buffer: ReplayBufferType | None
-    :param resume_from_checkpoint: Path to resume from checkpoint.
+    :param resume_from_checkpoint: Checkpoint to continue an interrupted run from,
+        restoring optimizer state and the hyperparameters it belongs to. Mutually
+        exclusive with ``load_weights_from``.
     :type resume_from_checkpoint: str | None
+    :param load_weights_from: Checkpoint to warm-start a new run from, taking only
+        the weights. Mutually exclusive with ``resume_from_checkpoint``.
+    :type load_weights_from: str | None
     :param device: Torch device (e.g. ``"cpu"``, ``"cuda"``).
     :type device: str | torch.device
     :param accelerator: Accelerator instance.
@@ -137,6 +143,7 @@ class Trainer(ABC):
         replay_buffer: ReplayBufferType | None = None,
         *,
         resume_from_checkpoint: str | None = None,
+        load_weights_from: str | None = None,
         device: str | torch.device = "cpu",
         accelerator: Accelerator | None = None,
         **kwargs: Any,
@@ -162,7 +169,16 @@ class Trainer(ABC):
         self.replay_buffer_spec = replay_buffer
         self.device = device
         self.accelerator = accelerator
+        if resume_from_checkpoint is not None and load_weights_from is not None:
+            msg = (
+                "resume_from_checkpoint and load_weights_from are mutually "
+                "exclusive: the first continues a run (weights, optimizer state "
+                "and the hyperparameters they belong to), the second warm-starts "
+                "a new one from weights alone. Set one."
+            )
+            raise ValueError(msg)
         self._resume_checkpoint = resume_from_checkpoint
+        self._load_weights_from = load_weights_from
 
         # MF-PBT's bracket sizes derive from pop_size, which the spec cannot see on its own.
         if isinstance(selection_strategy, MultiFrequencySelectionSpec):
@@ -250,7 +266,11 @@ class Trainer(ABC):
     def from_manifest(
         cls,
         manifest: str | Path | dict[str, Any] | TrainingManifest,
-        **kwargs: Any,
+        *,
+        resume_from_checkpoint: str | None = None,
+        load_weights_from: str | None = None,
+        device: str | torch.device = "cpu",
+        accelerator: Accelerator | None = None,
     ) -> Self:
         """Instantiate a :class:`Trainer` from a JSON-style manifest or a TrainingManifest instance.
 
@@ -262,8 +282,17 @@ class Trainer(ABC):
 
         :param manifest: Path to a YAML/JSON file, or a raw dict, or a TrainingManifest instance.
         :type manifest: str | Path | dict[str, Any] | TrainingManifest
-        :param kwargs: Trainer-specific construction arguments forwarded to the
-            subclass constructor.
+        :param resume_from_checkpoint: Checkpoint to continue an interrupted run
+            from, restoring optimizer state and the hyperparameters it belongs to.
+            Mutually exclusive with ``load_weights_from``.
+        :type resume_from_checkpoint: str | None
+        :param load_weights_from: Checkpoint to warm-start a new run from, taking
+            only the weights. Mutually exclusive with ``resume_from_checkpoint``.
+        :type load_weights_from: str | None
+        :param device: Torch device string (e.g. ``"cpu"``, ``"cuda"``).
+        :type device: str | torch.device
+        :param accelerator: Accelerator instance.
+        :type accelerator: Accelerator | None
         :returns: A fully configured :class:`Trainer` instance.
         :rtype: SelfTrainerT
         """
@@ -282,6 +311,10 @@ class Trainer(ABC):
             mutation=validated_manifest.mutation,
             selection_strategy=validated_manifest.selection_strategy,
             replay_buffer=validated_manifest.replay_buffer,
+            resume_from_checkpoint=resume_from_checkpoint,
+            load_weights_from=load_weights_from,
+            device=device,
+            accelerator=accelerator,
         )
 
     @staticmethod
@@ -343,8 +376,13 @@ class LocalTrainer(Trainer):
     :param hpo: Whether to enable evolutionary HPO using default mutation probabilities, tournament selection,
         and RL hyperparameters to mutate. Defaults to ``False``.
     :type hpo: bool
-    :param resume_from_checkpoint: Path to resume from checkpoint.
+    :param resume_from_checkpoint: Checkpoint to continue an interrupted run from,
+        restoring optimizer state and the hyperparameters it belongs to. Mutually
+        exclusive with ``load_weights_from``.
     :type resume_from_checkpoint: str | None
+    :param load_weights_from: Checkpoint to warm-start a new run from, taking only
+        the weights. Mutually exclusive with ``resume_from_checkpoint``.
+    :type load_weights_from: str | None
     :param device: Torch device string (e.g. ``"cpu"``, ``"cuda"``).
     :type device: str
     :param accelerator: Accelerator instance.
@@ -362,8 +400,9 @@ class LocalTrainer(Trainer):
         selection_strategy: SelectionStrategySpec | None = None,
         replay_buffer: ReplayBufferType | None = None,
         *,
-        hpo: bool = False,
         resume_from_checkpoint: str | None = None,
+        load_weights_from: str | None = None,
+        hpo: bool = False,
         device: str | torch.device = "cpu",
         accelerator: Accelerator | None = None,
         **kwargs: Any,
@@ -379,6 +418,7 @@ class LocalTrainer(Trainer):
             ),
             replay_buffer=replay_buffer,
             resume_from_checkpoint=resume_from_checkpoint,
+            load_weights_from=load_weights_from,
             device=device,
             accelerator=accelerator,
         )
@@ -424,6 +464,7 @@ class LocalTrainer(Trainer):
             accelerator=self.accelerator,
             tokenizer=self.tokenizer,
             resume_from_checkpoint=self._resume_checkpoint,
+            load_weights_from=self._load_weights_from,
             selection_strategy_spec=self.selection_strategy_spec,
         )
         self.mutations = build_mutations_from_spec(
@@ -447,27 +488,26 @@ class LocalTrainer(Trainer):
             if self.replay_buffer_spec is not None
             else None
         )
-        self._multiturn = (
+        self._rollout = (
             isinstance(self.env_spec, LLMEnvSpec)
-            and self.env_spec.env_type == LLMEnvType.MULTITURN
+            and self.env_spec.env_type == LLMEnvType.ROLLOUT
         )
 
-        # Multi-turn LLM training requires an env factory rather than an instantiated environment.
-        if self._multiturn:
+        # Rollout training needs an env factory rather than an instantiated environment.
+        if self._rollout:
             assert isinstance(self.env_spec, LLMEnvSpec)
             assert isinstance(self.algorithm_spec, LLMAlgorithmSpec)
-            max_model_len = getattr(self.algorithm_spec, "max_model_len", None)
-            max_output_tokens = getattr(self.algorithm_spec, "max_output_tokens", None)
             assert self.tokenizer is not None
-            self.env_factory = self.env_spec.make_multiturn_env_factory(
+            self.env_factory = self.env_spec.make_rollout_env_factory(
                 self.tokenizer,
-                max_model_len=max_model_len,
-                max_output_tokens=max_output_tokens,
+                max_model_len=self.algorithm_spec.max_model_len,
+                max_output_tokens=getattr(
+                    self.algorithm_spec, "max_output_tokens", None
+                ),
             )
-            self.train_fn = self.algorithm_spec.get_training_fn(multiturn=True)
         else:
             self.env_factory = None
-            self.train_fn = self.algorithm_spec.get_training_fn()
+        self.train_fn = self.algorithm_spec.get_training_fn()
 
     def _resolve_deferred_net_config(self) -> None:
         """Resolve a manifest network section whose ``arch`` was omitted.
@@ -543,8 +583,6 @@ class LocalTrainer(Trainer):
         :returns: A resolved ``encoder_config`` dict including its ``arch``.
         :rtype: dict[str, Any]
         """
-        from agilerl.utils.evolvable_networks import get_default_encoder_config
-
         arch = infer_encoder_arch(observation_space, recurrent=recurrent, simba=simba)
         encoder_spec_cls = encoder_spec_for_arch(arch)
         required = {
@@ -677,22 +715,23 @@ class LocalTrainer(Trainer):
         :rtype: GymEnvType | PzEnvType | LLMEnvType | BanditEnv | None
         """
         if isinstance(self.env_spec, LLMEnvSpec):
-            if self.env_spec.env_type == LLMEnvType.MULTITURN:
-                return None
-
             assert isinstance(self.algorithm_spec, LLMAlgorithmSpec)
 
             # Some LLMEnvSpec fields are dependent on the algo configuration
-            self.env_spec.return_raw_completions = getattr(
-                self.algorithm_spec, "use_vllm", False
-            )
             self.env_spec.max_context_length = self.algorithm_spec.max_model_len
             self.env_spec.seed = self.algorithm_spec.seed
             self.env_spec.data_batch_size_per_gpu = self.algorithm_spec.batch_size
 
+            # Rollout envs are built per-trajectory by ``make_rollout_env_factory``,
+            # but a dataset-backed one still splits its rows off this seed.
+            if self.env_spec.env_type == LLMEnvType.ROLLOUT:
+                return None
+
             assert self.tokenizer is not None
-            return self.env_spec.make_env(
-                tokenizer=self.tokenizer, accelerator=self.accelerator
+            return self.env_spec.make_dataset_env(
+                tokenizer=self.tokenizer,
+                rank=self.accelerator.process_index if self.accelerator else 0,
+                world_size=self.accelerator.num_processes if self.accelerator else 1,
             )
 
         return self.env_spec.make_env()
@@ -715,6 +754,8 @@ class LocalTrainer(Trainer):
             # is a class variable; narrow so it resolves without an ignore.
             assert isinstance(manifest.algorithm, LLMAlgorithmSpec)
             env_data.setdefault("env_type", manifest.algorithm.env_type)
+            if manifest.algorithm.objective is not None:
+                env_data.setdefault("objective", manifest.algorithm.objective)
             return LLMEnvSpec(**env_data)
 
         if agent_type == AgentType.MultiAgent:
@@ -835,7 +876,7 @@ class LocalTrainer(Trainer):
             "wandb_kwargs": wandb_kwargs,
         }
 
-        if self._multiturn:
+        if self._rollout:
             assert isinstance(self.env_spec, LLMEnvSpec)
             kwargs["env_factory"] = self.env_factory
             kwargs["max_turns"] = self.env_spec.max_turns

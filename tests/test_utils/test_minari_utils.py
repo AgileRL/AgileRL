@@ -76,6 +76,12 @@ def create_dataset_return_timesteps(dataset_id: str, env_id: str) -> int:
     num_episodes = 10
     total_timesteps = 0
 
+    # Minari 0.5.2 EpisodeBuffer keys: termination/truncation.
+    # Minari 0.5.3+ keys: terminated/truncated.
+    _minari_ver = tuple(int(p) for p in minari.__version__.split(".")[:3])
+    _term_key = "terminated" if _minari_ver >= (0, 5, 3) else "termination"
+    _trunc_key = "truncated" if _minari_ver >= (0, 5, 3) else "truncation"
+
     observation, info = env.reset()
     episode_buffer = EpisodeBuffer(observations=observation, infos=info)
     for _episode in range(num_episodes):
@@ -91,8 +97,8 @@ def create_dataset_return_timesteps(dataset_id: str, env_id: str) -> int:
                     "observation": observation,
                     "action": action,
                     "reward": reward,
-                    "termination": terminated,
-                    "truncation": truncated,
+                    _term_key: terminated,
+                    _trunc_key: truncated,
                     "info": info,
                 },
             )

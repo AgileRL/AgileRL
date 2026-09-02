@@ -22,7 +22,7 @@ Example
 .. code-block:: python
 
   from agilerl.algorithms.sft import SFT
-  from agilerl.llm_envs import SFTGym
+  from agilerl.llm_envs import DatasetEnv
   from accelerate import Accelerator
   from datasets import load_dataset
   from peft import LoraConfig
@@ -39,17 +39,18 @@ Example
   # Instantiate an accelerator object for distributed training
   accelerator = Accelerator()
 
-  # Load the dataset into an SFTGym environment
+  # Load the dataset into an SFT DatasetEnv
   raw_dataset = load_dataset("HumanLLMs/Human-Like-DPO-Dataset", split="train").shuffle(seed=42)
   train_test_split = raw_dataset.train_test_split(test_size=0.1)
   train_dataset = train_test_split["train"]
   test_dataset = train_test_split["test"]
-  env = SFTGym(
+  env = DatasetEnv(
     train_dataset=train_dataset,
     test_dataset=test_dataset,
     tokenizer=tokenizer,
-    data_batch_size_per_gpu=16,
+    objective="sft",
     response_column="chosen",
+    data_batch_size_per_gpu=16,
     accelerator=accelerator,
   )
 
@@ -73,20 +74,19 @@ Example
     update_epochs=1,
     lora_config=lora_config,
     seed=42,
-    reduce_memory_peak=True,
     accelerator=accelerator,
   )
 
 Training an SFT agent
 ---------------------
 
-To train an SFT agent on a single SFT gym environment, use the :ref:`finetune_llm_sft<finetune_llm_sft>` function:
+To train an SFT agent on a single dataset environment, use the :ref:`train_llm_dataset<train_llm_dataset>` function:
 
 .. code-block:: python
 
-  from agilerl.training.llm import finetune_llm_sft
+  from agilerl.training.llm import train_llm_dataset
 
-  finetune_llm_sft(
+  train_llm_dataset(
     pop=[agent],
     env=env,
     init_hp={"BATCH_SIZE": 32, "UPDATE_EPOCHS": 1},

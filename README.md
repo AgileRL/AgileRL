@@ -8,9 +8,7 @@
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![Documentation Status](https://readthedocs.org/projects/agilerl/badge/?version=latest)](https://docs.agilerl.com/en/latest/?badge=latest)
 [![Coverage](https://codecov.io/gh/AgileRL/AgileRL/graph/badge.svg)](https://codecov.io/gh/AgileRL/AgileRL)
-[![Linux](https://github.com/AgileRL/AgileRL/actions/workflows/linux-tests.yml/badge.svg)](https://github.com/AgileRL/AgileRL/actions/workflows/linux-tests.yml)
-[![macOS](https://github.com/AgileRL/AgileRL/actions/workflows/macos-tests.yml/badge.svg)](https://github.com/AgileRL/AgileRL/actions/workflows/macos-tests.yml)
-[![Windows](https://github.com/AgileRL/AgileRL/actions/workflows/windows-tests.yml/badge.svg)](https://github.com/AgileRL/AgileRL/actions/workflows/windows-tests.yml)
+[![CI](https://github.com/AgileRL/AgileRL/actions/workflows/ci.yml/badge.svg)](https://github.com/AgileRL/AgileRL/actions/workflows/ci.yml)
 [![Downloads](https://static.pepy.tech/badge/agilerl)](https://pypi.python.org/pypi/agilerl/)
 [![Discord](https://dcbadge.limes.pink/api/server/https://discord.gg/eB8HyTA2ux?style=flat)](https://discord.gg/eB8HyTA2ux)
 [![Arena](./.github/badges/arena-github-badge.svg)](https://arena.agilerl.com)
@@ -94,10 +92,10 @@ In development mode, quote the extras:
 pip install -e ".[arena]"
 ```
 
-To install the ``nightly`` version of AgileRL with the latest features, use:
+To install AgileRL from the development tip of ``main`` (not a PyPI release), use:
 
 ```bash
-pip install git+https://github.com/AgileRL/AgileRL.git@nightly
+pip install git+https://github.com/AgileRL/AgileRL.git@main
 ```
 
 ## Training Locally

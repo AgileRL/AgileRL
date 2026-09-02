@@ -45,11 +45,11 @@ In development mode, quote the extras - for example:
 
    pip install -e ".[all]"
 
-To install the ``nightly`` version of AgileRL with the latest features, use:
+To install AgileRL from the development tip of ``main`` (not a PyPI release), use:
 
 .. code-block:: bash
 
-   pip install git+https://github.com/AgileRL/AgileRL.git@nightly
+   pip install git+https://github.com/AgileRL/AgileRL.git@main
 
 .. raw:: html
 
@@ -271,7 +271,7 @@ faster hyperparameter optimization. Please see the available tutorials below.
      - Learn how to finetune an LLM using AgileRL.
      - `GRPO <../tutorials/llm_finetuning/grpo_finetuning.html>`_ |br|
        `GRPO with Evo HPO <../tutorials/llm_finetuning/grpo_hpo.html>`_ |br|
-       `Multi-turn GRPO/PPO <../tutorials/llm_finetuning/multiturn_grpo_ppo.html>`_ |br|
+       `Multi-turn GRPO/PPO <../tutorials/llm_finetuning/env_grpo_ppo.html>`_ |br|
        `SFT + DPO <../tutorials/llm_finetuning/sft_dpo_finetuning.html>`_
 
 .. |br| raw:: html
