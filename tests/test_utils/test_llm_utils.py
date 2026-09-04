@@ -1110,50 +1110,72 @@ class TestRenderChatTemplate:
 
 
 class TestMaxPromptTokensForModelLen:
-    def test_reserves_one_token_when_max_output_tokens_none(self):
+    def test_reserves_one_token_of_generation_room(self):
         from agilerl.utils.llm_utils import max_prompt_tokens_for_model_len
 
-        assert max_prompt_tokens_for_model_len(128, None) == 127
-
-    def test_reserves_max_output_tokens_when_set(self):
-        from agilerl.utils.llm_utils import max_prompt_tokens_for_model_len
-
-        assert max_prompt_tokens_for_model_len(128, 32) == 96
-
-    def test_caps_reservation_at_max_model_len(self):
-        from agilerl.utils.llm_utils import max_prompt_tokens_for_model_len
-
-        # max_output_tokens > max_model_len → reserve max_model_len, return 0
-        assert max_prompt_tokens_for_model_len(64, 256) == 0
+        assert max_prompt_tokens_for_model_len(128) == 127
 
     def test_clamps_at_zero_when_no_room(self):
         from agilerl.utils.llm_utils import max_prompt_tokens_for_model_len
 
-        assert max_prompt_tokens_for_model_len(0, None) == 0
+        assert max_prompt_tokens_for_model_len(0) == 0
 
 
-class TestValidateLlmContextLengths:
-    def test_skips_when_max_output_tokens_none(self):
-        from agilerl.utils.llm_utils import validate_llm_context_lengths
+class TestGenerationTokensForTurn:
+    def test_uses_remaining_context_when_cap_unset(self):
+        from agilerl.utils.llm_utils import generation_tokens_for_turn
 
-        validate_llm_context_lengths(32768, None)
+        assert generation_tokens_for_turn(128, 40, None) == 88
 
-    def test_accepts_strictly_smaller_max_output_tokens(self):
-        from agilerl.utils.llm_utils import validate_llm_context_lengths
+    def test_uses_configured_cap_when_it_fits(self):
+        from agilerl.utils.llm_utils import generation_tokens_for_turn
 
-        validate_llm_context_lengths(32768, 1024)
+        assert generation_tokens_for_turn(128, 40, 32) == 32
 
-    def test_raises_when_max_output_equals_max_model_len(self):
-        from agilerl.utils.llm_utils import validate_llm_context_lengths
+    def test_clamps_configured_cap_to_remaining_context(self):
+        from agilerl.utils.llm_utils import generation_tokens_for_turn
 
-        with pytest.raises(ValueError, match="max_output_tokens \\(32768\\)"):
-            validate_llm_context_lengths(32768, 32768)
+        assert generation_tokens_for_turn(20, 15, 8) == 5
 
-    def test_raises_when_max_output_exceeds_max_model_len(self):
-        from agilerl.utils.llm_utils import validate_llm_context_lengths
+    def test_returns_zero_when_prompt_fills_the_window(self):
+        from agilerl.utils.llm_utils import generation_tokens_for_turn
 
-        with pytest.raises(ValueError, match="max_prompt_tokens=0"):
-            validate_llm_context_lengths(64, 256)
+        assert generation_tokens_for_turn(16, 16, 8) == 0
+        assert generation_tokens_for_turn(16, 20, None) == 0
+
+
+class TestHfTurnGenerationConfig:
+    def test_copies_config_and_sets_per_turn_max_new_tokens(self):
+        from agilerl.utils.llm_utils import hf_turn_generation_config
+
+        original = SimpleNamespace(max_new_tokens=64, temperature=0.9)
+
+        turn_config = hf_turn_generation_config(
+            original,
+            max_model_len=20,
+            prompt_length=15,
+            max_output_tokens=64,
+        )
+
+        assert turn_config is not original
+        assert turn_config.max_new_tokens == 5
+        assert original.max_new_tokens == 64
+        assert turn_config.temperature == 0.9
+
+    def test_unset_cap_uses_remaining_context(self):
+        from agilerl.utils.llm_utils import hf_turn_generation_config
+
+        original = SimpleNamespace(max_new_tokens=None)
+
+        turn_config = hf_turn_generation_config(
+            original,
+            max_model_len=32,
+            prompt_length=10,
+            max_output_tokens=None,
+        )
+
+        assert turn_config.max_new_tokens == 22
+        assert original.max_new_tokens is None
 
 
 class TestNormalizeReasoningPromptBatch:

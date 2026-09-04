@@ -428,7 +428,7 @@ class TestPPOInit:
             )
         ppo.clean_up()
 
-    def test_init_rejects_output_tokens_not_less_than_model_len(self):
+    def test_init_accepts_output_tokens_not_less_than_model_len(self):
         actor = create_module(10, 8, 100, "cpu")
         lora = LoraConfig(
             r=4,
@@ -437,17 +437,20 @@ class TestPPOInit:
             task_type="CAUSAL_LM",
             modules_to_save=["summary"],
         )
-        with pytest.raises(ValueError, match="must be less than"):
-            LLMPPO(
-                actor_network=actor,
-                pad_token_id=99,
-                pad_token="<pad>",
-                lora_config=lora,
-                max_output_tokens=32,
-                max_model_len=16,
-                wrap=False,
-                gradient_checkpointing=False,
-            )
+        ppo = LLMPPO(
+            actor_network=actor,
+            pad_token_id=99,
+            pad_token="<pad>",
+            lora_config=lora,
+            max_output_tokens=32,
+            max_model_len=16,
+            wrap=False,
+            gradient_checkpointing=False,
+        )
+
+        assert ppo.max_output_tokens == 32
+        assert ppo.max_model_len == 16
+        ppo.clean_up()
 
     def test_init_clip_coef_non_negative(self):
         actor = create_module(10, 8, 100, "cpu")

@@ -299,9 +299,7 @@ class TestAsyncBatchCollectorResetOverflow:
     def test_reset_marks_done_on_turn_zero_overflow(self) -> None:
         client = _OverflowClient()
         inner = RolloutCollector(
-            env_factory=_harness_factory(
-                client, max_turns=2, max_model_len=20, max_output_tokens=4
-            ),
+            env_factory=_harness_factory(client, max_turns=2, max_model_len=20),
             batch_size=1,
             group_size=1,
         )

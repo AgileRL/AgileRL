@@ -49,6 +49,7 @@ from agilerl.utils.llm_utils import (
     build_completion_mask,
     calculate_k3_kl,
     clipped_is_surrogate,
+    hf_turn_generation_config,
     masked_mean,
     masked_whiten,
     normalize_prompt_batch,
@@ -56,7 +57,6 @@ from agilerl.utils.llm_utils import (
     prepare_prompt_hf_generate,
     resolve_llm_device,
     validate_importance_sampling_level,
-    validate_llm_context_lengths,
 )
 
 if HAS_LLM_DEPENDENCIES:
@@ -463,7 +463,12 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
                             token_ids = self.actor.generate(
                                 input_ids=input_ids,
                                 attention_mask=attention_mask,
-                                generation_config=self.generation_config,
+                                generation_config=hf_turn_generation_config(
+                                    self.generation_config,
+                                    max_model_len=self.max_model_len,
+                                    prompt_length=int(input_ids.shape[-1]),
+                                    max_output_tokens=self.max_output_tokens,
+                                ),
                             )
                             token_ids_list.append(token_ids)
                             completion_masks.append(
@@ -932,13 +937,12 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
         max_model_len: int,
         hf_generate_chunk_size: int | None,
     ) -> None:
-        """Validate context lengths and build the HF generation config."""
+        """Build the HF generation config."""
         self.max_output_tokens = (
             max_output_tokens if max_output_tokens is not None else max_model_len
         )
         self.min_output_tokens = min_output_tokens
         self.max_model_len = max_model_len
-        validate_llm_context_lengths(self.max_model_len, max_output_tokens)
         self.hf_generate_chunk_size = int(
             1 if hf_generate_chunk_size is None else max(1, hf_generate_chunk_size)
         )

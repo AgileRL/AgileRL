@@ -501,9 +501,6 @@ class LocalTrainer(Trainer):
             self.env_factory = self.env_spec.make_rollout_env_factory(
                 self.tokenizer,
                 max_model_len=self.algorithm_spec.max_model_len,
-                max_output_tokens=getattr(
-                    self.algorithm_spec, "max_output_tokens", None
-                ),
             )
         else:
             self.env_factory = None

@@ -61,7 +61,6 @@ class RolloutHarness:
         apply_chat_template: bool = True,
         chat_template_kwargs: dict[str, Any] | None = None,
         max_model_len: int | None = None,
-        max_output_tokens: int | None = None,
         system_prompt: str | None = None,
     ) -> None:
         """Drive a text env at the token level over ``env_client`` (a URL or a client object).
@@ -92,7 +91,6 @@ class RolloutHarness:
             render (e.g. ``{"enable_thinking": False}``); the env's tool schemas
             are set on top under ``tools``.
         :param max_model_len: Engine context length; enables stop-on-overflow when set.
-        :param max_output_tokens: Generation budget reserved under ``max_model_len``.
         :param system_prompt: Rendered as a leading ``system`` message ahead of the
             env's first observation. Requires ``apply_chat_template``; a template
             without a system slot raises at reset rather than dropping it silently.
@@ -146,7 +144,6 @@ class RolloutHarness:
         self._tools: list[Any] | None = None
         self._tools_known = False
         self._max_model_len = max_model_len
-        self._max_output_tokens = max_output_tokens
         self.full_ids: torch.Tensor | None = None
         self.turn_boundaries: list[tuple[int, int, int]] = []
         self.turn_rewards: list[float] = []
@@ -477,10 +474,7 @@ class RolloutHarness:
         """Max prompt tokens before context overflow, or ``None`` when no model length is set."""
         if self._max_model_len is None:
             return None
-        return max_prompt_tokens_for_model_len(
-            self._max_model_len,
-            self._max_output_tokens,
-        )
+        return max_prompt_tokens_for_model_len(self._max_model_len)
 
     def _policy_prompt_from_state(self) -> dict[str, Any]:
         """Build the ``get_action`` prompt dict from the current ``full_ids``."""

@@ -38,9 +38,9 @@ class _StubTokenizer:
 def test_max_prompt_tokens_for_model_len() -> None:
     from agilerl.utils.llm_utils import max_prompt_tokens_for_model_len
 
-    assert max_prompt_tokens_for_model_len(8192, 1024) == 8192 - 1024
-    assert max_prompt_tokens_for_model_len(100, 50) == 50
-    assert max_prompt_tokens_for_model_len(100, None) == 99
+    assert max_prompt_tokens_for_model_len(8192) == 8191
+    assert max_prompt_tokens_for_model_len(100) == 99
+    assert max_prompt_tokens_for_model_len(1) == 0
 
 
 class _ChrTokenizer:
@@ -113,7 +113,6 @@ class TestRolloutEnvReset:
             max_turns=3,
             apply_chat_template=False,
             max_model_len=20,
-            max_output_tokens=4,
         )
 
         obs, _ = w.reset(row_index=0)
@@ -132,6 +131,60 @@ class TestRolloutEnvReset:
         extra = torch.tensor([[ord("y"), ord("z")]], dtype=torch.long)
         gen_text = w._step_prepare(torch.cat([w.full_ids, extra], dim=1))
         assert gen_text == "yz"
+        w.close()
+
+    def test_reset_keeps_a_prompt_that_leaves_less_room_than_a_large_output_cap(
+        self,
+    ) -> None:
+        class LongPromptEnv:
+            def reset(
+                self, seed: int | None = None, *, row_index: int | None = None
+            ) -> tuple[str, dict]:
+                del seed, row_index
+                return "a" * 15, {}
+
+            def step(self, gen_text: str) -> tuple[str, float, bool, bool, dict]:
+                del gen_text
+                return "", 1.0, True, False, {}
+
+        w = RolloutHarness.local(
+            LongPromptEnv(),
+            _ChrTokenizer(),
+            max_turns=1,
+            apply_chat_template=False,
+            max_model_len=20,
+        )
+
+        obs, _ = w.reset()
+
+        assert w.done is False
+        assert obs["input_ids"].shape[1] == 15
+        w.close()
+
+    def test_reset_truncates_when_the_prompt_fills_the_context_window(self) -> None:
+        class FullWindowEnv:
+            def reset(
+                self, seed: int | None = None, *, row_index: int | None = None
+            ) -> tuple[str, dict]:
+                del seed, row_index
+                return "a" * 20, {}
+
+            def step(self, gen_text: str) -> tuple[str, float, bool, bool, dict]:
+                del gen_text
+                return "", 1.0, True, False, {}
+
+        w = RolloutHarness.local(
+            FullWindowEnv(),
+            _ChrTokenizer(),
+            max_turns=1,
+            apply_chat_template=False,
+            max_model_len=20,
+        )
+
+        obs, _ = w.reset()
+
+        assert obs == {}
+        assert w.done is True
         w.close()
 
 
@@ -205,19 +258,18 @@ class TestRolloutEnvStep:
 
     def test_strict_mode_terminates_on_context_overflow(self, serve_env) -> None:
         """When the cumulative prompt would exceed
-        ``max_model_len - max_output_tokens``, the trajectory ends with
+        ``max_model_len - 1``, the trajectory ends with
         ``truncated=True`` and no next prompt.
         """
         env = _NonTerminalEnv()
-        # Tiny budget: 20 - 4 = 16 prompt tokens. Initial prompt "P:hello\nS"
-        # is 9 char-tokens; +2 gen +12 feedback ("F:feedback\nT") => 23 > 16.
+        # Tiny budget: 20 - 1 = 19 prompt tokens. Initial prompt "P:hello\nS"
+        # is 9 char-tokens; +2 gen +12 feedback ("F:feedback\nT") => 23 > 19.
         w = RolloutHarness(
             serve_env(env),
             _ChrTokenizer(),
             max_turns=4,
             apply_chat_template=False,
             max_model_len=20,
-            max_output_tokens=4,
         )
         obs, _ = w.reset()
         completion = torch.cat(
@@ -229,6 +281,28 @@ class TestRolloutEnvStep:
         assert terminated is False
         assert next_obs == {}
         assert info == {}
+
+    def test_later_turns_budget_from_the_actual_prompt_length(self, serve_env) -> None:
+        env = _NonTerminalEnv()
+        w = RolloutHarness(
+            serve_env(env),
+            _ChrTokenizer(),
+            max_turns=4,
+            apply_chat_template=False,
+            max_model_len=64,
+        )
+        obs, _ = w.reset()
+        first_len = obs["input_ids"].shape[1]
+        completion = torch.cat(
+            [obs["input_ids"], torch.tensor([[120, 121]], dtype=torch.long)],
+            dim=1,
+        )
+
+        next_obs, _, terminated, truncated, _ = w.step(completion)
+
+        assert truncated is False
+        assert terminated is False
+        assert next_obs["input_ids"].shape[1] > first_len
 
 
 class TestRolloutEnvChatTemplateBoundary:
@@ -1040,7 +1114,6 @@ class TestFeedbackTerminatorDedupe:
         w.apply_chat_template = True
         w.max_turns = 3
         w._max_model_len = None
-        w._max_output_tokens = None
         w._turn_idx = 0
         w.turn_rewards = []
         w._feedback_texts = []
@@ -1715,7 +1788,6 @@ class TestRolloutEnvPhaseGuards:
         w.apply_chat_template = False
         w.max_turns = 3
         w._max_model_len = None
-        w._max_output_tokens = None
         w._turn_idx = 0
         w.turn_rewards = []
         w.rubric_score_sums = {}

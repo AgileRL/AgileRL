@@ -191,6 +191,7 @@ if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
         fill_outside_mask,
         gather_if_ds_param,
         gather_if_zero3,
+        generation_tokens_for_turn,
         get_model_name_or_path,
         get_state_dict,
         is_rollout_prompt,
@@ -5828,12 +5829,6 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             "vllm_config must be configured for colocated vLLM generation."
         )
 
-        max_token_cap = (
-            self.max_output_tokens
-            if self.max_output_tokens is not None
-            else self.max_model_len
-        )
-
         def _token_prompt_for_vllm(ids: torch.Tensor) -> dict[str, list[int]]:
             return {"prompt_token_ids": ids.squeeze(0).tolist()}
 
@@ -5842,7 +5837,11 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             if room <= 0:
                 error_msg = f"Model prompt length ({model_prompt_len}) is greater than the model length ({self.max_model_len})"
                 raise ValueError(error_msg)
-            max_out = min(max_token_cap, room)
+            max_out = generation_tokens_for_turn(
+                self.max_model_len,
+                model_prompt_len,
+                self.max_output_tokens,
+            )
             if self.min_output_tokens is not None:
                 max_out = max(max_out, min(self.min_output_tokens, room))
             return min(max_out, room)

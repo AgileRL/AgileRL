@@ -16,7 +16,7 @@ import warnings
 from collections.abc import Callable, Generator, Iterable, Mapping
 from contextlib import contextmanager
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, TypeGuard
+from typing import TYPE_CHECKING, Any, TypeGuard, TypeVar
 
 import numpy as np
 import numpy.typing as npt
@@ -48,6 +48,8 @@ else:
     PreTrainedTokenizerBase = object
 
 logger = logging.getLogger(__name__)
+
+GenConfigT = TypeVar("GenConfigT")
 
 if HAS_LLM_DEPENDENCIES:
     from datasets import Dataset
@@ -272,28 +274,57 @@ def __dir__() -> list[str]:
     return sorted(set(globals()) | set(DEPRECATED_LLM_ENV_NAMES))
 
 
-def validate_llm_context_lengths(
+def generation_tokens_for_turn(
     max_model_len: int,
+    prompt_length: int,
     max_output_tokens: int | None,
-) -> None:
-    """Reject configs that leave no prompt room for multi-turn rollouts.
+) -> int:
+    """Tokens this turn may generate: remaining context, capped by ``max_output_tokens``.
 
-    :param max_model_len: Total context length (prompt + completion ceiling).
+    :param max_model_len: Model context window (prompt + completion).
     :type max_model_len: int
-    :param max_output_tokens: Per-generation token cap; skipped when ``None``.
+    :param prompt_length: Token length of this turn's prompt.
+    :type prompt_length: int
+    :param max_output_tokens: Configured per-turn cap; ``None`` uses remaining context.
     :type max_output_tokens: int | None
-    :raises ValueError: If ``max_output_tokens >= max_model_len``.
+    :return: Non-negative generation budget for this turn.
+    :rtype: int
     """
+    remaining = max_model_len - prompt_length
+    if remaining <= 0:
+        return 0
     if max_output_tokens is None:
-        return
-    if max_output_tokens >= max_model_len:
-        msg = (
-            f"max_output_tokens ({max_output_tokens}) must be less than "
-            f"max_model_len ({max_model_len}); equal or larger values leave no "
-            "prompt budget for multi-turn rollouts "
-            f"(max_prompt_tokens={max_prompt_tokens_for_model_len(max_model_len, max_output_tokens)})."
-        )
-        raise ValueError(msg)
+        return remaining
+    return min(int(max_output_tokens), remaining)
+
+
+def hf_turn_generation_config(
+    generation_config: GenConfigT,
+    *,
+    max_model_len: int,
+    prompt_length: int,
+    max_output_tokens: int | None,
+) -> GenConfigT:
+    """Copy of ``generation_config`` with ``max_new_tokens`` set for this turn's prompt.
+
+    :param generation_config: Shared HuggingFace generation config.
+    :type generation_config: GenConfigT
+    :param max_model_len: Model context window (prompt + completion).
+    :type max_model_len: int
+    :param prompt_length: Token length of this turn's prompt.
+    :type prompt_length: int
+    :param max_output_tokens: Configured per-turn cap; ``None`` uses remaining context.
+    :type max_output_tokens: int | None
+    :return: Per-turn config; the original object is unchanged.
+    :rtype: GenConfigT
+    """
+    turn_config = copy.copy(generation_config)
+    turn_config.max_new_tokens = generation_tokens_for_turn(
+        max_model_len,
+        prompt_length,
+        max_output_tokens,
+    )
+    return turn_config
 
 
 def gather_tensor(
@@ -2665,31 +2696,15 @@ def render_chat_template(
     return rendered
 
 
-def max_prompt_tokens_for_model_len(
-    max_model_len: int,
-    max_output_tokens: int | None,
-) -> int:
+def max_prompt_tokens_for_model_len(max_model_len: int) -> int:
     """Upper bound on prompt tokens so at least one completion token can be generated.
-
-    Reserve generation headroom while keeping prompt budget as large as possible.
-    When ``max_output_tokens`` is provided, reserve up to that many tokens
-    (capped by ``max_model_len``). When it is ``None``, reserve exactly one
-    token so generation remains possible without collapsing prompt budget.
 
     :param max_model_len: Engine context length (prompt + completion ceiling).
     :type max_model_len: int
-    :param max_output_tokens: Configured completion cap; if ``None``, reserve
-        one token of generation headroom.
-    :type max_output_tokens: int | None
     :return: Largest allowed prompt length under that headroom (may be 0).
     :rtype: int
     """
-    gen_reserve = (
-        max(1, min(max_output_tokens, max_model_len))
-        if max_output_tokens is not None
-        else 1
-    )
-    return max(0, max_model_len - gen_reserve)
+    return max(0, max_model_len - 1)
 
 
 def normalize_prompt_batch(
