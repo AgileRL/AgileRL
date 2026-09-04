@@ -201,7 +201,7 @@ if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
         save_peft_adapter_for_vllm_rollout,
         zero3_full_shape_views,
     )
-    from agilerl.utils.zero3_patches import install_zero3_patches
+    from agilerl.utils.zero3_patches import install_model_patches
 
 if TYPE_CHECKING or HAS_DEEPSPEED:
     from deepspeed.checkpoint.utils import clone_tensors_for_torch_save
@@ -2998,16 +2998,14 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
                         "DeepSpeed ZeRO Stage 3 is nascent and may not work as expected, proceed with caution when using this feature.",
                         stacklevel=2,
                     )
-                if self.zero_stage == 3:
-                    # Class-level DeepSpeed / Nemotron-H workarounds; install
-                    # before any model construction below; the pre-built
-                    # actor_network gets its instance-level state swept.
-                    install_zero3_patches(
-                        ds_config,
-                        model_name_or_path=self.pretrained_model_name_or_path,
-                        model=actor_network,
-                        num_partitions=int(self.accelerator.num_processes),
-                    )
+                # Family fused-path on every stage; ZeRO-3 wraps only at 3.
+                install_model_patches(
+                    self.zero_stage,
+                    ds_config,
+                    model_name_or_path=self.pretrained_model_name_or_path,
+                    model=actor_network,
+                    num_partitions=int(self.accelerator.num_processes),
+                )
             if self.accelerator.num_processes > 1:
                 seed = broadcast_object_list([seed], from_process=0)[0]
             seed += self.accelerator.process_index

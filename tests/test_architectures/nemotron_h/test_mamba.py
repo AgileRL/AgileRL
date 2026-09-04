@@ -594,3 +594,41 @@ class TestResolveMixerClass:
         )
 
         assert mamba._resolve_mixer_class() is mixer
+
+
+class TestInstallNemotronHPatches:
+    def test_stage_2_runs_fused_path_and_stream_ordering(self, monkeypatch):
+        seen: list[tuple[str, object]] = []
+        actor = object()
+        monkeypatch.setattr(
+            mamba,
+            "patch_nemotron_mamba_fused_path",
+            lambda *, model=None: seen.append(("fused", model)),
+        )
+        monkeypatch.setattr(
+            mamba,
+            "patch_nemotron_mamba_stream_ordering",
+            lambda *, model=None: seen.append(("stream", model)),
+        )
+
+        mamba.install_nemotron_h_patches(zero_stage=2, model=actor)
+
+        assert seen == [("fused", actor), ("stream", actor)]
+
+    def test_stage_3_runs_fused_path_and_stream_ordering(self, monkeypatch):
+        seen: list[tuple[str, object]] = []
+        actor = object()
+        monkeypatch.setattr(
+            mamba,
+            "patch_nemotron_mamba_fused_path",
+            lambda *, model=None: seen.append(("fused", model)),
+        )
+        monkeypatch.setattr(
+            mamba,
+            "patch_nemotron_mamba_stream_ordering",
+            lambda *, model=None: seen.append(("stream", model)),
+        )
+
+        mamba.install_nemotron_h_patches(zero_stage=3, model=actor)
+
+        assert seen == [("fused", actor), ("stream", actor)]

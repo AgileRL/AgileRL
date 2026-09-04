@@ -3245,19 +3245,20 @@ class TestLLMZero3ThirdPartyHooksWireUp:
         )
         actor_network = _make_mock_peft_actor()
         with (
-            patch("agilerl.algorithms.core.base.install_zero3_patches") as mock_hooks,
+            patch("agilerl.algorithms.core.base.install_model_patches") as mock_hooks,
             pytest.warns(UserWarning, match="ZeRO Stage 3"),
         ):
             agent = _make_llm_agent(accelerator=acc, actor_network=actor_network)
 
         mock_hooks.assert_called_once_with(
+            3,
             acc.state.deepspeed_plugin.deepspeed_config,
             model_name_or_path=agent.pretrained_model_name_or_path,
             model=actor_network,
             num_partitions=4,
         )
 
-    def test_skips_when_stage_is_not_3(self):
+    def test_installs_when_stage_is_2(self):
         acc = _make_mock_accelerator(
             ds_config={
                 "zero_optimization": {
@@ -3267,10 +3268,17 @@ class TestLLMZero3ThirdPartyHooksWireUp:
                 "train_micro_batch_size_per_gpu": "auto",
             }
         )
-        with patch("agilerl.algorithms.core.base.install_zero3_patches") as mock_hooks:
-            _make_llm_agent(accelerator=acc)
+        actor_network = _make_mock_peft_actor()
+        with patch("agilerl.algorithms.core.base.install_model_patches") as mock_hooks:
+            agent = _make_llm_agent(accelerator=acc, actor_network=actor_network)
 
-        mock_hooks.assert_not_called()
+        mock_hooks.assert_called_once_with(
+            2,
+            acc.state.deepspeed_plugin.deepspeed_config,
+            model_name_or_path=agent.pretrained_model_name_or_path,
+            model=actor_network,
+            num_partitions=1,
+        )
 
 
 class TestLLMSyncDeepSpeedGradientClipping:
