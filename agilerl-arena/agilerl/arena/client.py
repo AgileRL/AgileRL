@@ -844,8 +844,84 @@ class ArenaClient:
         return data, files
 
     # -------------------------------------------------------------------------
+    ### Models ###
+    # -------------------------------------------------------------------------
+
+    def list_models(self) -> list[dict[str, Any]]:
+        """List HuggingFace models in the Arena catalog.
+
+        :returns: Catalog rows including ``model_name``, ``num_params``,
+            ``lora_info``, and ``max_context_length``.
+        :rtype: list[dict[str, Any]]
+        """
+        return self._request("GET", "/api/cli/v1/models")
+
+    def get_model_info(self, model_name: str) -> dict[str, Any]:
+        """Fetch LoRA modules and catalog metadata for a model.
+
+        :param model_name: HuggingFace model id as stored in the catalog.
+        :type model_name: str
+        :returns: ``modules``, ``parameters``, ``lora_info``, ``num_params``, and
+            ``max_context_length``.
+        :rtype: dict[str, Any]
+        """
+        return self._request(
+            "POST",
+            "/api/cli/v1/models/info",
+            json={"model_name": model_name},
+        )
+
+    # -------------------------------------------------------------------------
     ### Training Jobs ###
     # -------------------------------------------------------------------------
+
+    def get_default_run_spec(
+        self,
+        algorithm: str,
+        *,
+        gym_env: str | None = None,
+        gym_env_entrypoint: str | None = None,
+        dataset_name: str | None = None,
+        field: str | None = None,
+        pretrained_model_name_or_path: str | None = None,
+    ) -> dict[str, Any]:
+        """Fetch a default RunSpec for an algorithm.
+
+        ``field`` returns one section instead of the full spec.
+
+        :param algorithm: Catalog algorithm name.
+        :type algorithm: str
+        :param gym_env: Gym environment display name.
+        :type gym_env: str | None
+        :param gym_env_entrypoint: Gym entrypoint.
+        :type gym_env_entrypoint: str | None
+        :param dataset_name: Dataset name.
+        :type dataset_name: str | None
+        :param field: RunSpec section to return (``algorithm``, ``environment``,
+            ``mutation``, ``network``, ``replay_buffer``, ``tournament_selection``,
+            or ``training``).
+        :type field: str | None
+        :param pretrained_model_name_or_path: HuggingFace model name in the catalog.
+        :type pretrained_model_name_or_path: str | None
+        :returns: A filled RunSpec, or one section when ``field`` is set.
+        :rtype: dict[str, Any]
+        """
+        params: dict[str, Any] = {"algorithm": algorithm}
+        optional = {
+            "gymEnv": gym_env,
+            "gymEnvEntrypoint": gym_env_entrypoint,
+            "datasetName": dataset_name,
+            "field": field,
+            "pretrainedModelNameOrPath": pretrained_model_name_or_path,
+        }
+        params.update(
+            {key: value for key, value in optional.items() if value is not None}
+        )
+        return self._request(
+            "GET",
+            "/api/cli/v1/experiments/run-spec/default",
+            params=params,
+        )
 
     def submit_experiment(
         self,

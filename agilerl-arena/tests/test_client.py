@@ -2139,3 +2139,114 @@ class TestOpenInferenceAgentAfterARedeploy:
         assert agent.metadata is not None
         assert agent.metadata.agent.algo == "GRPO"
         assert repr(agent) == "<Agent endpoint='http://fresh'>"
+
+
+class TestListModels:
+    def test_returns_catalog_rows(self, api_key_client):
+        catalog = [
+            {
+                "model_name": "ibm-granite/granite-3.3-2b-instruct",
+                "num_params": 2_000_000_000,
+                "max_context_length": 8192,
+            }
+        ]
+        api_key_client._request = MagicMock(return_value=catalog)
+
+        result = api_key_client.list_models()
+
+        api_key_client._request.assert_called_once_with("GET", "/api/cli/v1/models")
+        assert result == catalog
+
+    def test_empty_catalog(self, api_key_client):
+        api_key_client._request = MagicMock(return_value=[])
+
+        result = api_key_client.list_models()
+
+        assert result == []
+
+
+class TestGetModelInfo:
+    def test_posts_model_name(self, api_key_client):
+        info = {
+            "modules": ["q_proj", "v_proj"],
+            "parameters": 2_000_000_000,
+            "lora_info": {"target_modules": ["q_proj", "v_proj"]},
+            "num_params": 2_000_000_000,
+            "max_context_length": 8192,
+        }
+        api_key_client._request = MagicMock(return_value=info)
+
+        result = api_key_client.get_model_info("ibm-granite/granite-3.3-2b-instruct")
+
+        api_key_client._request.assert_called_once_with(
+            "POST",
+            "/api/cli/v1/models/info",
+            json={"model_name": "ibm-granite/granite-3.3-2b-instruct"},
+        )
+        assert result == info
+
+
+class TestGetDefaultRunSpec:
+    def test_algorithm_and_dataset_name(self, api_key_client):
+        spec = {"algorithm": {"name": "GRPO"}, "network": {}}
+        api_key_client._request = MagicMock(return_value=spec)
+
+        result = api_key_client.get_default_run_spec("GRPO", dataset_name="countdown")
+
+        api_key_client._request.assert_called_once_with(
+            "GET",
+            "/api/cli/v1/experiments/run-spec/default",
+            params={"algorithm": "GRPO", "datasetName": "countdown"},
+        )
+        assert result == spec
+
+    def test_gym_query_params(self, api_key_client):
+        api_key_client._request = MagicMock(return_value={"algorithm": {"name": "PPO"}})
+
+        api_key_client.get_default_run_spec(
+            "PPO",
+            gym_env="Space Invaders",
+            gym_env_entrypoint="python3",
+        )
+
+        api_key_client._request.assert_called_once_with(
+            "GET",
+            "/api/cli/v1/experiments/run-spec/default",
+            params={
+                "algorithm": "PPO",
+                "gymEnv": "Space Invaders",
+                "gymEnvEntrypoint": "python3",
+            },
+        )
+
+    def test_omits_unset_optional_params(self, api_key_client):
+        api_key_client._request = MagicMock(return_value={})
+
+        api_key_client.get_default_run_spec("GRPO")
+
+        api_key_client._request.assert_called_once_with(
+            "GET",
+            "/api/cli/v1/experiments/run-spec/default",
+            params={"algorithm": "GRPO"},
+        )
+
+    def test_optional_field_dataset_name_and_pretrained_model(self, api_key_client):
+        api_key_client._request = MagicMock(return_value={"name": "GRPO"})
+
+        api_key_client.get_default_run_spec(
+            "GRPO",
+            dataset_name="countdown",
+            field="algorithm",
+            pretrained_model_name_or_path="ibm-granite/granite-3.3-2b-instruct",
+        )
+
+        api_key_client._request.assert_called_once_with(
+            "GET",
+            "/api/cli/v1/experiments/run-spec/default",
+            params={
+                "algorithm": "GRPO",
+                "datasetName": "countdown",
+                "field": "algorithm",
+                "pretrainedModelNameOrPath": "ibm-granite/granite-3.3-2b-instruct",
+            },
+        )

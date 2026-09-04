@@ -199,6 +199,37 @@ You can find the analogous CLI commands by running ``arena env --help``.
 - :meth:`~agilerl.arena.client.ArenaClient.profile_environment`: Profile a validated environment to determine its resource requirements.
 - :meth:`~agilerl.arena.client.ArenaClient.delete_environment`: Delete one or all versions of a registered environment.
 
+.. _arena_models:
+
+HuggingFace Models
+------------------
+
+Arena keeps a catalog of HuggingFace models you can train. List the catalog, or
+fetch LoRA target modules and context length for one model.
+
+.. tab-set::
+   :sync-group: interface
+
+   .. tab-item:: Python
+      :sync: python
+
+      .. code-block:: python
+
+         models = client.list_models()
+         for row in models:
+             print(row["model_name"], row["num_params"], row["max_context_length"])
+
+         info = client.get_model_info("ibm-granite/granite-3.3-2b-instruct")
+         print(info["modules"], info["max_context_length"])
+
+   .. tab-item:: CLI
+      :sync: cli
+
+      .. code-block:: bash
+
+         arena models list
+         arena models info ibm-granite/granite-3.3-2b-instruct
+
 .. _arena_projects:
 
 Project Management
