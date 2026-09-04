@@ -16,6 +16,7 @@ import torch
 
 from agilerl.utils import zero3_patches
 from agilerl.utils.zero3_patches import (
+    install_model_patches,
     install_zero3_patches,
     patch_zero3_fetch_trace,
     patch_zero3_param_persistence,
@@ -150,45 +151,13 @@ class TestInstallZero3ThirdPartyHooks:
         )
         monkeypatch.setattr(
             zero3_patches,
-            "install_family_zero3_patches",
-            lambda _name, model=None: calls.append("families"),
-        )
-        monkeypatch.setattr(
-            zero3_patches,
             "patch_zero3_param_persistence",
             lambda *args, **kwargs: calls.append("persist"),
         )
 
         install_zero3_patches({"zero_optimization": {"stage": 3}})
 
-        assert calls == ["fetch", "release", "families"]
-
-    def test_family_dispatch_receives_the_checkpoint_id_and_model(self, monkeypatch):
-        seen: list[tuple[str | None, object]] = []
-        monkeypatch.setattr(
-            zero3_patches,
-            "patch_zero3_fetch_trace",
-            lambda config: None,
-        )
-        monkeypatch.setattr(
-            zero3_patches,
-            "patch_zero3_persistent_release",
-            lambda **kwargs: None,
-        )
-        monkeypatch.setattr(
-            zero3_patches,
-            "install_family_zero3_patches",
-            lambda name, model=None: seen.append((name, model)),
-        )
-        actor = object()
-
-        install_zero3_patches(
-            {"zero_optimization": {"stage": 3}},
-            model_name_or_path="nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
-            model=actor,
-        )
-
-        assert seen == [("nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16", actor)]
+        assert calls == ["fetch", "release"]
 
     def test_persistence_when_threshold_set(self, monkeypatch):
         persist_kwargs: dict = {}
@@ -201,11 +170,6 @@ class TestInstallZero3ThirdPartyHooks:
             zero3_patches,
             "patch_zero3_persistent_release",
             lambda **kwargs: None,
-        )
-        monkeypatch.setattr(
-            zero3_patches,
-            "install_family_zero3_patches",
-            lambda _name, model=None: None,
         )
 
         def _persist(threshold, **kwargs):
@@ -273,6 +237,62 @@ class TestInstallZero3ThirdPartyHooks:
         install_zero3_patches(config)
 
         assert calls == ["fetch", "release"]
+
+
+class TestInstallModelPatches:
+    def test_stage_2_runs_family_only(self, monkeypatch) -> None:
+        calls: list[str] = []
+        actor = object()
+        monkeypatch.setattr(
+            zero3_patches,
+            "install_family_patches",
+            lambda _name, *, zero_stage, model=None: calls.append(
+                f"family:{model is actor}:{zero_stage}"
+            ),
+        )
+        monkeypatch.setattr(
+            zero3_patches,
+            "install_zero3_patches",
+            lambda *_args, **_kwargs: calls.append("zero3"),
+        )
+
+        install_model_patches(
+            2,
+            {"zero_optimization": {"stage": 2}},
+            model_name_or_path="nvidia/Nemotron-H-8B",
+            model=actor,
+        )
+
+        assert calls == ["family:True:2"]
+
+    def test_stage_3_runs_family_then_zero3(self, monkeypatch) -> None:
+        calls: list[str] = []
+        actor = object()
+        config = {"zero_optimization": {"stage": 3}}
+        monkeypatch.setattr(
+            zero3_patches,
+            "install_family_patches",
+            lambda _name, *, zero_stage, model=None: calls.append(
+                f"family:{zero_stage}"
+            ),
+        )
+
+        def _zero3(ds_config, **kwargs):
+            calls.append("zero3")
+            assert ds_config is config
+            assert kwargs["num_partitions"] == 4
+
+        monkeypatch.setattr(zero3_patches, "install_zero3_patches", _zero3)
+
+        install_model_patches(
+            3,
+            config,
+            model_name_or_path="nvidia/Nemotron-H-8B",
+            model=actor,
+            num_partitions=4,
+        )
+
+        assert calls == ["family:3", "zero3"]
 
 
 class TestZero3Resolvers:

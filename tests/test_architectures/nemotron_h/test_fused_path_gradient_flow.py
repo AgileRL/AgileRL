@@ -18,7 +18,7 @@ from transformers.models.nemotron_h.modeling_nemotron_h import (
     NemotronHMamba2Mixer,
 )
 
-from agilerl.architectures import install_family_zero3_patches
+from agilerl.architectures import install_family_patches
 from agilerl.architectures.nemotron_h.mamba import (
     FUSED_PATH_PATCHED_FLAG,
     STREAM_PATCHED_FLAG,
@@ -157,8 +157,8 @@ def test_family_patches_after_build_restore_out_proj_lora_gradients(
     pristine_mixer_class,
 ):
     base = _tiny_nemotron_h()
-    patched = install_family_zero3_patches(CHECKPOINT_ID, model=base)
-    assert patched == frozenset({"nemotron_h"})
+    patched = install_family_patches(CHECKPOINT_ID, zero_stage=2, model=base)
+    assert patched == "nemotron_h"
     assert base.model.layers[0].mixer.use_mem_eff_path is False
     _force_cuda_kernels_path()
 

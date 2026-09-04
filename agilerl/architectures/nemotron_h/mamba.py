@@ -1,7 +1,7 @@
 # Copyright 2026 AgileRL
 # SPDX-License-Identifier: Apache-2.0
 
-"""Class-level workarounds for the Nemotron-H Mamba2 mixer under ZeRO-3.
+"""Class-level workarounds for the Nemotron-H Mamba2 mixer.
 
 Both patches install once at the class level, are idempotent, and take
 ``enabled`` so a caller can turn them off. ``NemotronHMamba2Mixer`` is resolved
@@ -27,6 +27,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 __all__ = [
+    "install_nemotron_h_patches",
     "patch_nemotron_mamba_fused_path",
     "patch_nemotron_mamba_stream_ordering",
 ]
@@ -322,3 +323,25 @@ def patch_nemotron_mamba_stream_ordering(
         "[mamba-stream] NemotronHMamba2Mixer.forward patched; default-stream "
         "kernels ordered against the calling stream",
     )
+
+
+def install_nemotron_h_patches(
+    *,
+    zero_stage: int,
+    model: PreTrainedModelProtocol | None = None,
+) -> None:
+    """Install Nemotron-H Mamba2 workarounds.
+
+    Fused-path is always cleared. Stream ordering always installs: the mixer
+    launches scan/conv kernels on the default stream, so a caller on another
+    stream can race regardless of ZeRO stage.
+
+    :param zero_stage: DeepSpeed ZeRO stage for this run.
+    :type zero_stage: int
+    :param model: Already-built model the patches also apply to, or None.
+    :type model: PreTrainedModelProtocol | None
+    :return: None
+    :rtype: None
+    """
+    patch_nemotron_mamba_fused_path(model=model)
+    patch_nemotron_mamba_stream_ordering(model=model)

@@ -1,14 +1,14 @@
 # Copyright 2026 AgileRL
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tests for family detection and the ZeRO-3 family patch dispatch."""
+"""Tests for family detection and family patch dispatch."""
 
 import pytest
 
 from agilerl import architectures
 
 
-class TestDetectModelFamilies:
+class TestDetectModelFamily:
     @pytest.mark.parametrize(
         "name",
         [
@@ -20,7 +20,7 @@ class TestDetectModelFamilies:
         ],
     )
     def test_nemotron_ids_resolve_to_nemotron_h(self, name):
-        assert architectures.detect_model_families(name) == frozenset({"nemotron_h"})
+        assert architectures.detect_model_family(name) == "nemotron_h"
 
     @pytest.mark.parametrize(
         "name",
@@ -33,73 +33,57 @@ class TestDetectModelFamilies:
         ],
     )
     def test_other_ids_resolve_to_nothing(self, name):
-        assert architectures.detect_model_families(name) == frozenset()
+        assert architectures.detect_model_family(name) is None
 
 
-class TestInstallFamilyZero3Patches:
-    def test_detected_family_runs_every_patch_it_declares(self, monkeypatch):
-        calls: list[str] = []
-        monkeypatch.setitem(
-            architectures.ZERO3_FAMILY_PATCHES,
-            "nemotron_h",
-            (
-                lambda model=None: calls.append("fused"),
-                lambda model=None: calls.append("stream"),
-            ),
-        )
-
-        patched = architectures.install_family_zero3_patches("nvidia/Nemotron-H-8B")
-
-        assert patched == frozenset({"nemotron_h"})
-        assert calls == ["fused", "stream"]
-
-    def test_every_patch_receives_the_already_built_model(self, monkeypatch):
-        seen: list[object] = []
-        monkeypatch.setitem(
-            architectures.ZERO3_FAMILY_PATCHES,
-            "nemotron_h",
-            (
-                lambda model=None: seen.append(model),
-                lambda model=None: seen.append(model),
-            ),
-        )
+class TestInstallFamilyPatches:
+    def test_detected_family_runs_its_patch(self, monkeypatch):
+        seen: list[tuple[object, int]] = []
         actor = object()
+        monkeypatch.setitem(
+            architectures.FAMILY_PATCHES,
+            "nemotron_h",
+            lambda *, model=None, zero_stage: seen.append((model, zero_stage)),
+        )
 
-        architectures.install_family_zero3_patches(
+        patched = architectures.install_family_patches(
             "nvidia/Nemotron-H-8B",
+            zero_stage=2,
             model=actor,
         )
 
-        assert seen == [actor, actor]
+        assert patched == "nemotron_h"
+        assert seen == [(actor, 2)]
 
     def test_undetected_family_leaves_its_classes_alone(self, monkeypatch):
         calls: list[str] = []
         monkeypatch.setitem(
-            architectures.ZERO3_FAMILY_PATCHES,
+            architectures.FAMILY_PATCHES,
             "nemotron_h",
-            (lambda model=None: calls.append("fused"),),
+            lambda *, model=None, zero_stage: calls.append("nemo"),
         )
 
-        patched = architectures.install_family_zero3_patches("meta-llama/Llama-3.1-8B")
+        patched = architectures.install_family_patches(
+            "meta-llama/Llama-3.1-8B",
+            zero_stage=3,
+        )
 
-        assert patched == frozenset()
+        assert patched is None
         assert calls == []
 
     def test_family_without_registered_patches_is_a_no_op(self, monkeypatch):
         monkeypatch.setattr(
             architectures,
-            "detect_model_families",
-            lambda _name: frozenset({"unregistered"}),
+            "detect_model_family",
+            lambda _name: "unregistered",
         )
 
-        assert architectures.install_family_zero3_patches("whatever") == frozenset(
-            {"unregistered"},
+        assert (
+            architectures.install_family_patches("whatever", zero_stage=3)
+            == "unregistered"
         )
 
-    def test_real_nemotron_h_entry_declares_both_mixer_patches(self):
-        from agilerl.architectures import nemotron_h
+    def test_nemotron_h_entry_is_install_nemotron_h_patches(self):
+        from agilerl.architectures.nemotron_h import install_nemotron_h_patches
 
-        assert set(architectures.ZERO3_FAMILY_PATCHES["nemotron_h"]) == {
-            nemotron_h.patch_nemotron_mamba_fused_path,
-            nemotron_h.patch_nemotron_mamba_stream_ordering,
-        }
+        assert architectures.FAMILY_PATCHES["nemotron_h"] is install_nemotron_h_patches
