@@ -1918,6 +1918,20 @@ class TestRewindUploadFiles:
         ArenaClient._rewind_upload_files(None)
         ArenaClient._rewind_upload_files({"a": ("name", object(), "text/plain")})
 
+    def test_rewinds_list_multipart_entries(self):
+        import io
+
+        buf = io.BytesIO(b"payload")
+        buf.seek(7)
+        files = [("file", ("train.parquet", buf, "application/vnd.apache.parquet"))]
+        ArenaClient._rewind_upload_files(files)
+        assert buf.tell() == 0
+
+    def test_skips_non_tuple_multipart_values(self):
+        ArenaClient._rewind_upload_files({"a": "not-a-tuple"})
+        ArenaClient._rewind_upload_files({"a": ("only-name",)})
+        ArenaClient._close_upload_files([("file", "not-a-tuple")])
+
 
 class TestGetCliCapabilities:
     def test_returns_cached_without_refetch(self, api_key_client):

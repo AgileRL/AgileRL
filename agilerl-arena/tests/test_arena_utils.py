@@ -196,6 +196,30 @@ class TestPrepareFileUpload:
         assert payload == b"raw"
         assert content_type == "text/plain"
 
+    def test_bytes_filename_override(self):
+        name, payload, content_type = prepare_file_upload(
+            b"raw",
+            default_name="default.txt",
+            content_type="text/plain",
+            filename="custom.txt",
+        )
+        assert name == "custom.txt"
+        assert payload == b"raw"
+        assert content_type == "text/plain"
+
+    def test_filename_override(self, tmp_path: Path):
+        path = tmp_path / "train-00000-of-00001.parquet"
+        path.write_bytes(b"PAR1")
+        name, payload, content_type = prepare_file_upload(
+            path,
+            default_name="dataset.parquet",
+            content_type="application/vnd.apache.parquet",
+            filename="main/train-00000-of-00001.parquet",
+        )
+        assert name == "main/train-00000-of-00001.parquet"
+        assert _read_payload(payload) == b"PAR1"
+        assert content_type == "application/vnd.apache.parquet"
+
     def test_missing_file_raises(self, tmp_path: Path):
         with pytest.raises(ArenaFileNotFoundError, match="Upload file not found"):
             prepare_file_upload(

@@ -7,7 +7,7 @@ import json
 import logging
 import os
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, BinaryIO, ClassVar, Literal, TypedDict
@@ -51,6 +51,8 @@ from agilerl.arena.utils import (
 logger = logging.getLogger(__name__)
 
 DATASET_CATEGORIES = frozenset({"sft", "preference", "reasoning"})
+PARQUET_CONTENT_TYPE = "application/vnd.apache.parquet"
+CSV_CONTENT_TYPE = "text/csv"
 
 MemoryScope = Literal["user", "organization"]
 MEMORY_SCOPES: tuple[MemoryScope, ...] = ("user", "organization")
@@ -702,14 +704,16 @@ class ArenaClient:
         column_mapping: str | dict[str, Any],
         description: str | None = None,
         file: str | os.PathLike[str] | bytes | None = None,
+        config: str | None = None,
         hf_dataset_name: str | None = None,
         hf_config: str | None = None,
         hf_split: str | None = None,
     ) -> dict[str, Any]:
         """Create an LLM dataset on Arena.
 
-        Upload a local CSV, import from HuggingFace, or create metadata only
-        (no file or HF fields). Validation is performed by the Arena API.
+        Upload a local CSV, a parquet file, a Hugging Face parquet folder,
+        import from HuggingFace, or create metadata only. Validation is
+        performed by the Arena API.
 
         :param name: Dataset name.
         :type name: str
@@ -719,8 +723,12 @@ class ArenaClient:
         :type column_mapping: str | dict[str, Any]
         :param description: Optional description.
         :type description: str | None
-        :param file: Local CSV file path or raw bytes.
+        :param file: Local CSV or parquet path, a directory of parquet shards,
+            or raw CSV bytes.
         :type file: str | os.PathLike[str] | bytes | None
+        :param config: Parquet config name when *file* is a folder with more
+            than one config (e.g. gsm8k ``main`` vs ``socratic``).
+        :type config: str | None
         :param hf_dataset_name: HuggingFace dataset id for import.
         :type hf_dataset_name: str | None
         :param hf_config: HuggingFace dataset config name.
@@ -736,14 +744,15 @@ class ArenaClient:
             column_mapping=column_mapping,
             description=description,
             file=file,
+            config=config,
             hf_dataset_name=hf_dataset_name,
             hf_config=hf_config,
             hf_split=hf_split,
         )
-        files: dict[str, tuple[None, str] | tuple[str, Any, str]] = {
-            **multipart_text_fields(data),
-            **upload_files,
-        }
+        files: list[tuple[str, tuple[None, str] | tuple[str, Any, str]]] = [
+            *multipart_text_fields(data).items(),
+            *upload_files,
+        ]
         try:
             resp: dict[str, Any] = self._request(
                 "POST",
@@ -813,10 +822,11 @@ class ArenaClient:
         column_mapping: str | dict[str, Any],
         description: str | None = None,
         file: str | os.PathLike[str] | bytes | None = None,
+        config: str | None = None,
         hf_dataset_name: str | None = None,
         hf_config: str | None = None,
         hf_split: str | None = None,
-    ) -> tuple[dict[str, str | None], dict[str, tuple[str, Any, str]]]:
+    ) -> tuple[dict[str, str | None], list[tuple[str, tuple[str, Any, str]]]]:
         """Build multipart form fields for dataset creation."""
         category = ArenaClient._validate_dataset_category(category)
         column_mapping_str = (
@@ -824,7 +834,7 @@ class ArenaClient:
             if isinstance(column_mapping, dict)
             else column_mapping
         )
-        data = {
+        data: dict[str, str | None] = {
             "name": name,
             "category": category,
             "column_mapping": column_mapping_str,
@@ -833,15 +843,115 @@ class ArenaClient:
             "hf_config": hf_config,
             "hf_split": hf_split,
         }
+        if config is not None:
+            data["config"] = config
 
-        files: dict[str, tuple[str, Any, str]] = {}
-        if file is not None:
-            files["file"] = prepare_file_upload(
-                file,
-                default_name="dataset.csv",
-                content_type="text/csv",
+        return data, ArenaClient._dataset_upload_parts(file, config=config)
+
+    @staticmethod
+    def _content_type_for_upload_path(path: Path) -> str:
+        if path.suffix.lower() == ".parquet":
+            return PARQUET_CONTENT_TYPE
+        return CSV_CONTENT_TYPE
+
+    @staticmethod
+    def _parquet_shard_paths(root: Path) -> list[Path]:
+        shards = sorted(
+            child
+            for child in root.rglob("*")
+            if child.is_file() and child.suffix.lower() == ".parquet"
+        )
+        if not shards:
+            msg = f"No parquet files found in {root}"
+            raise ArenaValidationError(msg)
+        return shards
+
+    @staticmethod
+    def _parquet_config_names(root: Path, shards: list[Path]) -> list[str]:
+        names: set[str] = set()
+        for shard in shards:
+            relative = shard.relative_to(root).as_posix()
+            if "/" in relative:
+                names.add(relative.split("/", 1)[0])
+        return sorted(names)
+
+    @staticmethod
+    def _dataset_upload_parts(
+        file: str | os.PathLike[str] | bytes | None,
+        *,
+        config: str | None,
+    ) -> list[tuple[str, tuple[str, Any, str]]]:
+        if file is None:
+            return []
+        if isinstance(file, bytes):
+            return [
+                (
+                    "file",
+                    prepare_file_upload(
+                        file,
+                        default_name="dataset.csv",
+                        content_type=CSV_CONTENT_TYPE,
+                    ),
+                )
+            ]
+
+        path = Path(os.fspath(file)).expanduser().resolve()
+        if path.is_dir():
+            return ArenaClient._parquet_directory_parts(path, config=config)
+
+        content_type = ArenaClient._content_type_for_upload_path(path)
+        return [
+            (
+                "file",
+                prepare_file_upload(
+                    file,
+                    default_name="dataset.csv",
+                    content_type=content_type,
+                ),
             )
-        return data, files
+        ]
+
+    @staticmethod
+    def _parquet_directory_parts(
+        root: Path,
+        *,
+        config: str | None,
+    ) -> list[tuple[str, tuple[str, Any, str]]]:
+        shards = ArenaClient._parquet_shard_paths(root)
+        configs = ArenaClient._parquet_config_names(root, shards)
+        if config is None and len(configs) > 1:
+            listed = ", ".join(configs)
+            msg = (
+                f"Parquet folder {root} has multiple configs ({listed}); "
+                "pass config= to choose one."
+            )
+            raise ArenaValidationError(msg)
+        if config is not None:
+            prefix = f"{config}/"
+            shards = [
+                shard
+                for shard in shards
+                if shard.relative_to(root).as_posix().startswith(prefix)
+            ]
+            if not shards:
+                msg = f"No parquet files for config {config!r} in {root}"
+                raise ArenaValidationError(msg)
+
+        parts: list[tuple[str, tuple[str, Any, str]]] = []
+        for shard in shards:
+            relative = shard.relative_to(root).as_posix()
+            parts.append(
+                (
+                    "file",
+                    prepare_file_upload(
+                        shard,
+                        default_name=relative,
+                        content_type=PARQUET_CONTENT_TYPE,
+                        filename=relative,
+                    ),
+                )
+            )
+        return parts
 
     # -------------------------------------------------------------------------
     ### Models ###
@@ -1787,19 +1897,37 @@ class ArenaClient:
         return resp
 
     @staticmethod
-    def _close_upload_files(files: dict[str, tuple] | None) -> None:
-        """Close any open file handles in an httpx multipart ``files`` dict."""
-        for value in (files or {}).values():
-            payload = value[1] if isinstance(value, tuple) and len(value) > 1 else None
+    def _iter_multipart_payloads(
+        files: Mapping[str, tuple] | Sequence[tuple] | None,
+    ) -> Iterator[Any]:
+        """Yield the payload object from each httpx multipart file entry."""
+        if files is None:
+            return
+        values = (
+            files.values()
+            if isinstance(files, Mapping)
+            else (item[1] for item in files)
+        )
+        for value in values:
+            if isinstance(value, tuple) and len(value) > 1:
+                yield value[1]
+
+    @staticmethod
+    def _close_upload_files(
+        files: Mapping[str, tuple] | Sequence[tuple] | None,
+    ) -> None:
+        """Close any open file handles in an httpx multipart ``files`` value."""
+        for payload in ArenaClient._iter_multipart_payloads(files):
             close = getattr(payload, "close", None)
             if callable(close):
                 close()
 
     @staticmethod
-    def _rewind_upload_files(files: dict[str, tuple] | None) -> None:
+    def _rewind_upload_files(
+        files: Mapping[str, tuple] | Sequence[tuple] | None,
+    ) -> None:
         """Rewind seekable upload payloads so a retried request resends them."""
-        for value in (files or {}).values():
-            payload = value[1] if isinstance(value, tuple) and len(value) > 1 else None
+        for payload in ArenaClient._iter_multipart_payloads(files):
             seek = getattr(payload, "seek", None)
             if callable(seek):
                 seek(0)
