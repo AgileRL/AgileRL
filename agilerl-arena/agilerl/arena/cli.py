@@ -3,7 +3,9 @@
 
 from __future__ import annotations
 
+import json
 import logging
+import sys
 import uuid
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
@@ -11,6 +13,7 @@ from pathlib import Path
 from typing import Any, TypeVar
 
 import click
+import yaml
 
 from agilerl.arena import console
 from agilerl.arena.cli_manifest import handle_help_option
@@ -25,6 +28,8 @@ from agilerl.arena.inference.cache import (
     save_active_agent,
     save_active_session,
 )
+from agilerl.arena.models import verdict as manifest_verdict
+from agilerl.arena.models.schema import manifest_schema
 from agilerl.arena.on_prem import ArenaRootGroup, register_on_prem_manifest_group
 from agilerl.arena.output import (
     emit_csv_preview,
@@ -142,6 +147,52 @@ def logout(
     """Log out and clear persisted credentials."""
     with arena_client(config) as client:
         client.logout()
+
+
+@main.group("manifest")
+def manifest_group() -> None:
+    """Validate a training manifest, or print its JSON Schema."""
+
+
+@manifest_group.command("validate")
+@click.argument("manifest")
+@click.option("--payload", is_flag=True, help="Print the resolved manifest.")
+@click.option(
+    "--json",
+    "as_json",
+    is_flag=True,
+    help=(
+        "Report the verdict as one JSON document on stdout and exit 0 for "
+        "either verdict; a non-zero exit then means the tool itself failed."
+    ),
+)
+def manifest_validate(manifest: str, payload: bool, as_json: bool) -> None:
+    """Validate MANIFEST (a path, or - for stdin) against the contract."""
+    try:
+        document = manifest_verdict.read_manifest(manifest)
+    except (OSError, ValueError, yaml.YAMLError) as err:
+        click.echo(f"could not read {manifest}: {err}", err=True)
+        sys.exit(manifest_verdict.EXIT_FAILED)
+
+    result = manifest_verdict.verdict(document)
+    if as_json:
+        click.echo(json.dumps(result))
+        return
+    if not result["ok"]:
+        for error in result["errors"]:
+            where = f"{error['path']}: " if error["path"] else ""
+            click.echo(f"{where}{error['message']}", err=True)
+        sys.exit(manifest_verdict.EXIT_INVALID)
+    if payload:
+        click.echo(json.dumps(result["payload"], indent=2))
+    else:
+        click.echo(f"{manifest}: valid ({result['payload']['algorithm']['name']})")
+
+
+@manifest_group.command("schema")
+def manifest_schema_command() -> None:
+    """Print the training manifest JSON Schema."""
+    click.echo(json.dumps(manifest_schema(), indent=2))
 
 
 @main.group("user")
@@ -1298,3 +1349,7 @@ def projects_get_default(config: CommandConfig) -> None:
 
 
 register_on_prem_manifest_group(main)
+
+
+if __name__ == "__main__":
+    main()

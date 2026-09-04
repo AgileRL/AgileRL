@@ -17,8 +17,8 @@ from agilerl.algorithms import NeuralTS, NeuralUCB
 from agilerl.algorithms.core import (
     EvolvableAlgorithm,
     LLMAlgorithm,
-    MultiAgentRLAlgorithm,
-    RLAlgorithm,
+    MultiAgentAlgorithm,
+    SingleAgentAlgorithm,
 )
 from agilerl.modules import EvolvableModule, ModuleDict
 from agilerl.protocols import EvolvableAlgorithmProtocol
@@ -39,8 +39,8 @@ from agilerl.wrappers.agent import AgentWrapper
 
 AgentT = TypeVar("AgentT", bound=EvolvableAlgorithmProtocol)
 IndividualT = TypeVar("IndividualT", bound=EvolvableAlgorithm)
-SingleAgentT = TypeVar("SingleAgentT", bound=RLAlgorithm)
-MultiAgentT = TypeVar("MultiAgentT", bound=MultiAgentRLAlgorithm)
+SingleAgentT = TypeVar("SingleAgentT", bound=SingleAgentAlgorithm)
+MultiAgentT = TypeVar("MultiAgentT", bound=MultiAgentAlgorithm)
 BanditAlgorithm = NeuralUCB | NeuralTS
 
 # A bound mutation method of `Mutations`: maps an individual to a mutated
@@ -373,19 +373,19 @@ class Mutations:
             This is currently not supported for :class:`LLMAlgorithm <agilerl.algorithms.core.LLMAlgorithm>` agents.
 
         :param individual: Individual agent from population
-        :type individual: RLAlgorithm or MultiAgentRLAlgorithm
+        :type individual: SingleAgentAlgorithm or MultiAgentAlgorithm
 
         :return: Individual from population with network architecture mutation
-        :rtype: RLAlgorithm or MultiAgentRLAlgorithm
+        :rtype: SingleAgentAlgorithm or MultiAgentAlgorithm
         """
-        if isinstance(individual, RLAlgorithm):
+        if isinstance(individual, SingleAgentAlgorithm):
             individual = self._architecture_mutate_single(individual)
-        elif isinstance(individual, MultiAgentRLAlgorithm):
+        elif isinstance(individual, MultiAgentAlgorithm):
             individual = self._architecture_mutate_multi(individual)
         else:
             msg = (
                 f"Architecture mutations are not supported for {individual.__class__.__name__}. "
-                "Please make sure your algorithm inherits from 'RLAlgorithm' or 'MultiAgentRLAlgorithm'."
+                "Please make sure your algorithm inherits from 'SingleAgentAlgorithm' or 'MultiAgentAlgorithm'."
             )
             raise MutationError(
                 msg,
@@ -444,10 +444,10 @@ class Mutations:
             This is currently not supported for :class:`LLMAlgorithm <agilerl.algorithms.core.LLMAlgorithm>` agents.
 
         :param individual: Individual agent from population
-        :type individual: RLAlgorithm or MultiAgentRLAlgorithm
+        :type individual: SingleAgentAlgorithm or MultiAgentAlgorithm
 
         :return: Individual from population with activation layer mutation
-        :rtype: RLAlgorithm or MultiAgentRLAlgorithm
+        :rtype: SingleAgentAlgorithm or MultiAgentAlgorithm
         """
         # Needs to stay constant for policy gradient methods
         # NOTE: Could set up an algorithm registry to make algo checks more robust
@@ -513,10 +513,10 @@ class Mutations:
             This is currently not supported for :class:`LLMAlgorithm <agilerl.algorithms.core.LLMAlgorithm>` agents.
 
         :param individual: Individual agent from population
-        :type individual: RLAlgorithm or MultiAgentRLAlgorithm
+        :type individual: SingleAgentAlgorithm or MultiAgentAlgorithm
 
         :return: Individual from population with network parameters mutation
-        :rtype: RLAlgorithm or MultiAgentRLAlgorithm
+        :rtype: SingleAgentAlgorithm or MultiAgentAlgorithm
         """
         if isinstance(individual, LLMAlgorithm):
             warnings.warn(
@@ -881,10 +881,10 @@ class Mutations:
         therefore share a similar architecture.
 
         :param individual: Individual agent from population
-        :type individual: RLAlgorithm
+        :type individual: SingleAgentAlgorithm
 
         :return: Individual from population with network architecture mutation
-        :rtype: RLAlgorithm
+        :rtype: SingleAgentAlgorithm
         """
         # Get the offspring evaluation modules
         # We first extract and apply a mutation to the policy and then apply
@@ -947,10 +947,10 @@ class Mutations:
             methods will have the form ``<agent_id>.<mutation_method>``.
 
         :param individual: Individual agent from population
-        :type individual: MultiAgentRLAlgorithm
+        :type individual: MultiAgentAlgorithm
 
         :return: Individual from population with network architecture mutation
-        :rtype: MultiAgentRLAlgorithm
+        :rtype: MultiAgentAlgorithm
         """
         # Get the offspring evaluation modules
         # We first extract and apply a mutation to the policy and then apply

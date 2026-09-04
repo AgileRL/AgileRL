@@ -15,7 +15,7 @@ from rich.console import Console
 from rich.table import Table
 from rich.text import Text
 
-from agilerl.algorithms.core.base import MultiAgentRLAlgorithm
+from agilerl.algorithms.core.base import MultiAgentAlgorithm
 from agilerl.logger import Logger
 from agilerl.metrics import MultiAgentMetrics
 from agilerl.utils.population_utils import (
@@ -33,10 +33,10 @@ if TYPE_CHECKING:
 
     from agilerl.algorithms.core.base import (
         LLMAlgorithm,
-        RLAlgorithm,
+        SingleAgentAlgorithm,
     )
 
-    AlgoType = RLAlgorithm | MultiAgentRLAlgorithm | LLMAlgorithm
+    AlgoType = SingleAgentAlgorithm | MultiAgentAlgorithm | LLMAlgorithm
 
 
 AgentT = TypeVar("AgentT", bound="AlgoType")
@@ -522,7 +522,7 @@ class Population(Generic[AgentT]):
         """
         sample_agent = self._agents[0]
         self.is_multi_agent = all(
-            isinstance(agent, MultiAgentRLAlgorithm) for agent in self._agents
+            isinstance(agent, MultiAgentAlgorithm) for agent in self._agents
         )
         sample_metrics = sample_agent.metrics
         self.additional_metric_names = sample_metrics.additional_metrics

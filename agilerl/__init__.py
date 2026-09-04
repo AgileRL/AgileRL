@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import warnings
-from enum import Enum
 from importlib.metadata import PackageNotFoundError, metadata, version
 from pkgutil import extend_path
 from typing import TYPE_CHECKING
@@ -16,9 +15,10 @@ from packaging.requirements import Requirement
 __path__ = extend_path(__path__, __name__)
 
 if TYPE_CHECKING:
+    from agilerl.arena.models.registry import AgentType
     from agilerl.training.trainer import ArenaTrainer, LocalTrainer
 
-__all__ = ["ArenaTrainer", "LocalTrainer"]
+__all__ = ["AgentType", "ArenaTrainer", "LocalTrainer"]
 
 # pygame currently imports deprecated pkg_resources -> suppress warning
 warnings.filterwarnings(
@@ -41,7 +41,6 @@ def get_extra_dependencies(package: str, extra: str) -> list[str]:
 
 
 LLM_PACKAGES = get_extra_dependencies("agilerl", "llm")
-ARENA_PACKAGES = get_extra_dependencies("agilerl", "arena")
 
 
 def _is_distribution_installed(distribution: str) -> bool:
@@ -54,26 +53,18 @@ def _is_distribution_installed(distribution: str) -> bool:
 
 # Use these flags for lazy import checks
 HAS_LLM_DEPENDENCIES = all(_is_distribution_installed(pkg) for pkg in LLM_PACKAGES)
-HAS_ARENA_DEPENDENCIES = all(_is_distribution_installed(pkg) for pkg in ARENA_PACKAGES)
 HAS_LIGER_KERNEL = _is_distribution_installed("liger-kernel")
 HAS_VLLM = _is_distribution_installed("vllm")
 HAS_DEEPSPEED = _is_distribution_installed("deepspeed")
 
-
-class AgentType(Enum):
-    """Enumeration of supported agent types."""
-
-    SingleAgent = "single_agent"
-    MultiAgent = "multi_agent"
-    LLMAgent = "llm_agent"
-    OfflineAgent = "offline_agent"
-    BanditAgent = "bandit_agent"
-
-
-# NOTE: Need to lazy-load to avoid circular imports
+# AgentType comes from agilerl-arena, a separate distribution merged into
+# this namespace. lazy.attach must run after extend_path, or a wheel install
+# raises ModuleNotFoundError. LocalTrainer and ArenaTrainer are lazy to
+# avoid circular imports.
 __getattr__, __dir__, _ = lazy.attach(
     __name__,
     submod_attrs={
+        "arena.models.registry": ["AgentType"],
         "training.trainer": ["LocalTrainer", "ArenaTrainer"],
     },
 )

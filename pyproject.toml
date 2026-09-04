@@ -10,6 +10,7 @@ requires-python = ">=3.10,<3.14"
 
 dependencies = [
     "accelerate>=1.7.0",
+    "agilerl-arena>=1.0.0,<2.0",
     "dill>=0.3.7",
     "fastrand>=1.3.0",
     "flatten_dict>=0.4.2",
@@ -58,14 +59,8 @@ llm = [
     "transformers==5.14.1",
     "vllm>=0.26; sys_platform == 'linux'",
 ]
-arena = [
-    # Compatible range: arena patches do not require a new agilerl wheel.
-    # Exact stack pins live in the ML bundle. Framework +local may rewrite to
-    # =={local} for one build when the same MR also publishes arena +local.
-    "agilerl-arena>=0.6.0,<0.7",
-]
 all = [
-    "agilerl[box2d,llm,arena]",
+    "agilerl[box2d,llm]",
 ]
 
 [dependency-groups]
@@ -78,6 +73,9 @@ dev = [
     "nvidia-ml-py>=12.0.0",  # For GPU memory monitoring in tests
 ]
 docs = [
+    # Renders pydantic Field(description=...) in the API reference; the spec
+    # models carry their documentation on the fields, not in the docstring.
+    "autodoc-pydantic>=2.2",
     "furo>=2025.12.19",
     "sphinx>=7,<9",
     "sphinx-autobuild>=2024.10.3",

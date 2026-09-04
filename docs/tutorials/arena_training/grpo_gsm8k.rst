@@ -20,14 +20,14 @@ Installation
 
 Arena is provided by the separate ``agilerl-arena`` distribution (``agilerl.arena.*``
 in the shared namespace). It pulls in lightweight client dependencies (``httpx``,
-``rich``, etc.) rather than core training stacks. Install it directly, or through
-the AgileRL extra:
+``rich``, etc.) rather than core training stacks. Install it directly, or install
+AgileRL, which depends on it:
 
 .. code-block:: bash
 
    pip install agilerl-arena
    # or
-   pip install "agilerl[arena]"
+   pip install agilerl
 
 Authentication
 ~~~~~~~~~~~~~~

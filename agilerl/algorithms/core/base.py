@@ -216,8 +216,10 @@ else:
 __all__ = [
     "ActionResult",
     "EvolvableAlgorithm",
+    "MultiAgentAlgorithm",
     "MultiAgentRLAlgorithm",
     "RLAlgorithm",
+    "SingleAgentAlgorithm",
 ]
 
 logger = logging.getLogger(__name__)
@@ -1546,7 +1548,7 @@ class EvolvableAlgorithm(ABC, Generic[ExperiencesT], metaclass=RegistryMeta):
         :type accelerator: Accelerator | None, optional
 
         :return: An instance of the algorithm
-        :rtype: RLAlgorithm
+        :rtype: SingleAgentAlgorithm
         """
         checkpoint: dict[str, Any] = torch.load(
             path,
@@ -1717,7 +1719,9 @@ class EvolvableAlgorithm(ABC, Generic[ExperiencesT], metaclass=RegistryMeta):
             delattr(self, attr_name)
 
 
-class RLAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT]):
+class SingleAgentAlgorithm(
+    EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT]
+):
     """Base object for all single-agent algorithms in the AgileRL framework.
 
     :param observation_space: The observation space of the environment.
@@ -1771,7 +1775,7 @@ class RLAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT]):
         :param kwargs: Additional keyword arguments to pass to the algorithm constructor.
         :type kwargs: Any
         :return: A list of algorithms.
-        :rtype: list[RLAlgorithm]
+        :rtype: list[SingleAgentAlgorithm]
         """
         return build_classic_rl_population(
             cls,
@@ -1836,9 +1840,7 @@ class RLAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT]):
         )
 
 
-class MultiAgentRLAlgorithm(
-    EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT]
-):
+class MultiAgentAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT]):
     """Base object for all multi-agent algorithms in the AgileRL framework.
 
     :param observation_spaces: The observation spaces of the agent environments.
@@ -1906,7 +1908,7 @@ class MultiAgentRLAlgorithm(
         :param kwargs: Additional keyword arguments to pass to the algorithm constructor.
         :type kwargs: Any
         :return: A list of algorithms.
-        :rtype: list[MultiAgentRLAlgorithm]
+        :rtype: list[MultiAgentAlgorithm]
         """
         return build_classic_rl_population(
             cls,
@@ -2641,6 +2643,11 @@ class MultiAgentRLAlgorithm(
                 )
 
         return group_outputs
+
+
+# Ray still imports these names from agilerl.algorithms.core.
+RLAlgorithm = SingleAgentAlgorithm
+MultiAgentRLAlgorithm = MultiAgentAlgorithm
 
 
 def _vllm_sampled_token_logprobs(output: CompletionOutput) -> list[float]:
