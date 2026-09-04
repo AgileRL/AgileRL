@@ -22,7 +22,7 @@ dependencies = [
     "numpy>=2.0.0,<3.0",
     "omegaconf>=2.3.0",
     "pandas>=2.2.3",
-    "pettingzoo>=1.23.1,<1.27",
+    "pettingzoo>=1.23.1,<1.28",
     # MPE envs, moved out of pettingzoo into their own package as of 1.25.
     "mpe2>=1.1.0",
     "jax[cpu]>=0.4.31",
