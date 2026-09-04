@@ -17,7 +17,7 @@ from torch import nn, optim
 from torch.nn.utils import clip_grad_norm_
 from torch.optim import Optimizer
 
-from agilerl.algorithms.core import MultiAgentRLAlgorithm, OptimizerWrapper
+from agilerl.algorithms.core import MultiAgentAlgorithm, OptimizerWrapper
 from agilerl.algorithms.core.registry import (
     HyperparameterConfig,
     NetworkGroup,
@@ -56,7 +56,7 @@ from agilerl.utils.algo_utils import (
 from agilerl.vector.pz_vec_env import PettingZooVecEnv
 
 
-class IPPO(MultiAgentRLAlgorithm[tuple[Mapping[str, Any], ...]]):
+class IPPO(MultiAgentAlgorithm[tuple[Mapping[str, Any], ...]]):
     """Independent Proximal Policy Optimization (IPPO).
 
     Paper: https://arxiv.org/pdf/2011.09533

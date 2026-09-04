@@ -12,7 +12,7 @@ from agilerl.models.hpo import (
     MultiFrequencySelectionSpec,
     TournamentSelectionSpec,
 )
-from agilerl.models.manifest import TrainingManifest
+from agilerl.models.manifest import TrainingManifest, from_trainer_specs
 
 # A fully-specified valid spec (for pop_size = 16)
 VALID_MULTI_FREQUENCY = {
@@ -162,7 +162,7 @@ class TestMultiFrequencyPopulationLayout:
         assert spec.n_losers == 1
 
     def test_rejects_missing_pop_size(self):
-        with pytest.raises(ValidationError, match="pop_size is required"):
+        with pytest.raises(ValidationError, match="population_size must be >= 6"):
             _validated_multi_frequency({"max_steps": 1000, "evo_steps": 100})
 
     def test_rejects_pop_size_below_six(self):
@@ -344,7 +344,7 @@ class TestSelectionStrategyBackwardsCompatibility:
         assert legacy.selection_strategy == current.selection_strategy
 
     def test_from_trainer_specs_accepts_either_spelling(self):
-        from agilerl.models.algorithms.dqn import DQNSpec
+        from agilerl.arena.models.algorithms import DQNSpec
         from agilerl.models.env import GymEnvSpec
         from agilerl.models.training import TrainingSpec
 
@@ -353,11 +353,11 @@ class TestSelectionStrategyBackwardsCompatibility:
             "environment": GymEnvSpec(name="CartPole-v1"),
             "training": TrainingSpec(max_steps=1000, pop_size=2),
         }
-        current = TrainingManifest.from_trainer_specs(
+        current = from_trainer_specs(
             **common, selection_strategy=TournamentSelectionSpec(tournament_size=3)
         )
         with pytest.warns(DeprecationWarning, match="'tournament_selection' argument"):
-            legacy = TrainingManifest.from_trainer_specs(
+            legacy = from_trainer_specs(
                 **common,
                 tournament_selection=TournamentSelectionSpec(tournament_size=3),
             )

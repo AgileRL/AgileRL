@@ -1160,11 +1160,12 @@ def resolve_attn_implementation(requested: str | None = None) -> str:
         ``from_config``.
     :rtype: str
     """
-    if requested is not None and requested != "auto":
-        return requested
-    if importlib.util.find_spec("flash_attn") is not None:
-        return "flash_attention_2"
-    return "sdpa"
+    from agilerl.arena.memory.formulas import resolve_attn_implementation as resolve
+
+    return resolve(
+        "auto" if requested is None else requested,
+        importlib.util.find_spec("flash_attn") is not None,
+    )
 
 
 def flex_decode_kernel_options(
@@ -2341,13 +2342,13 @@ def resolve_vllm_max_num_batched_tokens(
     when the trainer is offloaded. Default caps prefill batching while keeping
     at least one full ``max_model_len`` context for chunked prefill.
     """
-    if explicit is not None:
-        return int(explicit)
-    worst_case = max_num_seqs * max_model_len
-    # Allow concurrent prefills up to 8k tokens per slot unless that exceeds one
-    # max-length context (then cap at max_model_len).
-    concurrent_budget = max(max_model_len, max_num_seqs * 8192)
-    return min(worst_case, concurrent_budget)
+    from agilerl.arena.memory.formulas import resolve_max_num_batched_tokens as resolve
+
+    return resolve(
+        max_num_seqs,
+        max_model_len,
+        int(explicit) if explicit is not None else None,
+    )
 
 
 def build_vllm_llm_init_kwargs(

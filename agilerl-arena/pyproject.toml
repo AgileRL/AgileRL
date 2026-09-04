@@ -16,6 +16,19 @@ dependencies = [
     "python-keycloak>=4.0,<8",
     "pyyaml>=6.0",
     "rich>=13.0,<16",
+    # Imported directly (typing_extensions.Self); do not rely on pydantic's
+    # transitive pin.
+    "typing-extensions>=4.4",
+]
+
+[project.optional-dependencies]
+# Only `arena memory estimate` / `solve` need these, and only to resolve a model id:
+# `AutoConfig` for the geometry and the Hub's safetensors metadata for the
+# exact parameter count. Both are imported lazily inside the resolving
+# functions, so `--config path/to/config.json` works with neither installed.
+hub = [
+    "huggingface-hub>=0.30",
+    "transformers>=4.40",
 ]
 
 [project.scripts]

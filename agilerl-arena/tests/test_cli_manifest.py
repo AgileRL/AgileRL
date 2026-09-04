@@ -568,8 +568,16 @@ class TestManifestCommandCallbackBinary:
 
 
 class TestArenaArchOptional:
-    def test_arch_present_passes_network_raw(self) -> None:
-        from agilerl.arena.models.manifest import TrainingManifest
+    """``arch`` picks the encoder spec; it is not carried in the payload.
+
+    The section is validated against a concrete encoder when ``arch`` says
+    which one, and left deferred when it does not — the trainer picks the
+    encoder from the observation space in that case. Either way ``arch``
+    itself is resolved away, so the payload never carries it.
+    """
+
+    def test_arch_selects_a_concrete_encoder(self) -> None:
+        from agilerl.arena.models import NetworkSpec, TrainingManifest
 
         raw = {
             "algorithm": {"name": "PPO"},
@@ -580,26 +588,33 @@ class TestArenaArchOptional:
                 "head_config": {"hidden_size": [64]},
             },
         }
-        out = TrainingManifest.get_validated(raw, mode="json")
-        # `arch` is resolved server-side: the network section is passed through
-        # untouched, with no promotion or `name` injection.
-        assert out["network"] == raw["network"]
+        validated = TrainingManifest.model_validate(raw)
+        assert isinstance(validated.network, NetworkSpec)
 
-    def test_arch_absent_passes_network_raw(self) -> None:
-        from agilerl.arena.models.manifest import TrainingManifest
+        out = TrainingManifest.get_validated(raw, mode="json")
+        assert out["network"]["encoder_config"]["hidden_size"] == [64]
+        # Normalization nests the discriminator on the encoder it selected;
+        # the runtime needs it there to rebuild the union.
+        assert "arch" not in out["network"]
+        assert out["network"]["encoder_config"]["arch"] == "mlp"
+
+    def test_no_arch_leaves_the_encoder_deferred(self) -> None:
+        from agilerl.arena.models import DeferredNetworkSpec, TrainingManifest
 
         raw = {
             "algorithm": {"name": "PPO"},
             "environment": {"name": "merge-env", "version": "v1"},
             "network": {"latent_dim": 64, "encoder_config": {"hidden_size": [64]}},
         }
+        validated = TrainingManifest.model_validate(raw)
+        assert isinstance(validated.network, DeferredNetworkSpec)
+
         out = TrainingManifest.get_validated(raw, mode="json")
-        # Network section is left raw for the server to validate.
-        assert out["network"] == {
-            "latent_dim": 64,
-            "encoder_config": {"hidden_size": [64]},
-        }
-        assert "arch" not in out["network"]["encoder_config"]
+        assert out["network"]["latent_dim"] == 64
+        # Unvalidated here: the architecture is only known once the observation
+        # space is, so the encoder settings pass through as written.
+        assert out["network"]["encoder_config"] == {"hidden_size": [64]}
+        assert "arch" not in out["network"]
 
 
 class TestArenaSimbaRecurrentConflict:
@@ -612,7 +627,7 @@ class TestArenaSimbaRecurrentConflict:
 
     def test_simba_and_recurrent_raises(self) -> None:
         """A top-level ``simba`` flag with ``recurrent`` is a contradiction."""
-        from agilerl.arena.models.manifest import TrainingManifest
+        from agilerl.arena.models import TrainingManifest
 
         raw = {
             "algorithm": {"name": "PPO", "recurrent": True},
@@ -624,7 +639,7 @@ class TestArenaSimbaRecurrentConflict:
 
     def test_only_simba_validates(self) -> None:
         """Either request on its own is fine; only the combination is rejected."""
-        from agilerl.arena.models.manifest import TrainingManifest
+        from agilerl.arena.models import TrainingManifest
 
         raw = {
             "algorithm": {"name": "PPO"},
@@ -632,7 +647,7 @@ class TestArenaSimbaRecurrentConflict:
             "network": {"simba": True, "head_config": {"hidden_size": [64]}},
         }
         manifest = TrainingManifest.model_validate(raw)
-        assert manifest.network.get("simba") is True
+        assert manifest.network.simba is True
 
 
 class TestAttachManifestTree:

@@ -22,13 +22,13 @@ inference.
 Installation
 ------------
 
-To use the Arena client, install the standalone package directly with lightweight dependencies, or use the AgileRL extra:
+To use the Arena client, install the standalone package directly with lightweight dependencies, or install AgileRL, which depends on it:
 
 .. code-block:: bash
 
    pip install agilerl-arena
    # or
-   pip install "agilerl[arena]"
+   pip install agilerl
 
 Authentication
 --------------
@@ -345,6 +345,11 @@ Job Submission
 A training configuration is defined via a **manifest** (YAML or JSON file) describing
 the algorithm, environment, training parameters, and evolutionary HPO settings. The formulation of the manifest is described in the :ref:`training_manifests` section,
 and is mostly analogous for both the :class:`~agilerl.training.trainer.LocalTrainer` and training jobs in Arena.
+
+For an LLM manifest, check the GPU before you submit. ``arena memory estimate``
+prints the training and generation bars against the card; ``arena memory solve``
+inverts one knob (context length, concurrency, or micro-batch) given the rest.
+See :ref:`llm_memory_estimate`.
 
 Here is an example manifest for training DQN on LunarLander-v3:
 

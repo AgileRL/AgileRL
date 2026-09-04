@@ -6,27 +6,26 @@ It provides:
 
 - Python client for Arena workflows (auth, environment validation, experiment submission, deployment, inference)
 - `arena` CLI for scripting and CI usage
-- Lightweight manifest validation models for Arena job manifests
+- The training manifest schema (`agilerl.arena.models`): the Pydantic models every runtime trains from, plus `arena manifest validate` and `arena manifest schema`
 
 This package is distributed independently from core `agilerl`, but exposes modules through the shared namespace:
 
 ```python
 from agilerl.arena import ArenaClient, Agent
+from agilerl.arena.models import TrainingManifest
 ```
+
+Core `agilerl` re-exports those models and adds only what a local run needs (environment construction, a buildable replay buffer).
 
 ## Installation
 
-Install directly:
+Install the SDK and CLI on their own (no torch):
 
 ```bash
 pip install agilerl-arena
 ```
 
-Or install through core AgileRL extras:
-
-```bash
-pip install "agilerl[arena]"
-```
+Core `agilerl` depends on this package, so `pip install agilerl` includes it.
 
 ## Quickstart
 
@@ -44,13 +43,35 @@ Or interactive login:
 arena login
 ```
 
-### 2) Validate an environment
+### 2) Validate a training manifest
+
+```bash
+arena manifest validate path/to/manifest.yaml
+arena manifest schema
+```
+
+### 3) Validate an environment
 
 ```bash
 arena env validate --source path/to/my_env.py --name my-env
 ```
 
-### 3) Submit a training manifest
+### 4) Check GPU memory (LLM manifests)
+
+```bash
+arena memory estimate path/to/manifest.yaml --gpu "NVIDIA L4"
+
+# Longest context a dedicated L4 serving pod can honour:
+arena memory solve max_model_len --inference --gpu "NVIDIA L4" \
+    --model Qwen/Qwen2.5-7B-Instruct
+```
+
+``estimate`` is a pre-submission gate (exit 0 fits, 3 over budget).
+``solve`` holds every other input fixed and returns the largest value of one
+knob. Install ``agilerl-arena[hub]`` if you pass a model id rather than
+``--config path/to/config.json``. See ``agilerl/arena/memory/README.md``.
+
+### 5) Submit a training manifest
 
 ```bash
 arena experiments submit path/to/manifest.yaml --project my-project
@@ -60,8 +81,11 @@ arena experiments submit path/to/manifest.yaml --project my-project
 
 ```python
 from agilerl.arena import ArenaClient
+from agilerl.arena.models import TrainingManifest
 
 client = ArenaClient()  # uses ARENA_API_KEY if set
+
+TrainingManifest.get_validated("dqn.yaml")
 
 client.validate_environment(
     source="acrobot.py",

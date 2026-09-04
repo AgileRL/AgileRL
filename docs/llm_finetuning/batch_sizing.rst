@@ -154,3 +154,6 @@ Or in the ``algorithm`` section of a training manifest:
     takes the same number of optimizer steps per update. This is required, not
     incidental: ranks that stepped at different times would desynchronise the
     ZeRO collectives.
+
+To pick ``micro_batch_size_per_gpu`` from a GPU's free memory, invert that
+knob with :ref:`arena memory solve<llm_memory_estimate>` instead of guessing.

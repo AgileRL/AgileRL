@@ -540,7 +540,7 @@ class TestREINFORCEInit:
                 gradient_checkpointing=False,
             )
 
-    def test_init_chunk_rows_must_be_positive(self):
+    def test_init_chunk_rows_must_be_in_the_auto_tune_range(self):
         actor = create_dummy_actor(10, 8, 100, "cpu")
         lora = LoraConfig(
             r=4,
@@ -548,7 +548,7 @@ class TestREINFORCEInit:
             target_modules=["lin"],
             task_type="CAUSAL_LM",
         )
-        with pytest.raises(ValueError, match="chunk_rows must be a positive int"):
+        with pytest.raises(ValueError, match=r"chunk_rows must be None"):
             REINFORCE(
                 actor_network=actor,
                 pad_token_id=99,
@@ -585,14 +585,6 @@ class TestREINFORCEInit:
     def test_init_default_turn_ratio_pooling_is_sum(self):
         rf = _cpu_llmreinforce()
         assert rf.turn_ratio_pooling == "sum"
-
-    def test_init_action_granularity_deprecated_warns_and_overrides(self):
-        """The legacy ``action_granularity`` kwarg warns and is carried over
-        into ``advantage_granularity``.
-        """
-        with pytest.warns(DeprecationWarning, match="action_granularity is deprecated"):
-            rf = _cpu_llmreinforce(action_granularity="turn")
-        assert rf.advantage_granularity == "turn"
 
     @pytest.mark.parametrize("is_level", ["turn", "trajectory"])
     def test_init_liger_non_token_is_level_warns_memory_unbounded(
@@ -1304,7 +1296,7 @@ class TestReinforceLossLiger:
         assert torch.all(ratio <= rf.vllm_importance_sampling_cap)
 
     def test_forwards_configured_chunk_rows(self) -> None:
-        rf = _cpu_llmreinforce(chunk_rows=123)
+        rf = _cpu_llmreinforce(chunk_rows=256)
         B, T = 2, 5
         ids = torch.randint(1, 50, (B, T), dtype=torch.long)
         mask = torch.ones(B, T - 1, dtype=torch.float32)
@@ -1322,7 +1314,7 @@ class TestReinforceLossLiger:
             mock_apply.return_value = (torch.tensor(0.4, requires_grad=True), fake_aux)
             rf._reinforce_loss_liger(ids, mask, old_lp, ref_lp, adv)
 
-        assert mock_apply.call_args.kwargs["token_chunk_size"] == 123
+        assert mock_apply.call_args.kwargs["token_chunk_size"] == 256
 
     def test_turn_level_requires_turn_ids(self) -> None:
         rf = _cpu_llmreinforce(importance_sampling_level="turn")

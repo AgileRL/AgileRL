@@ -65,6 +65,10 @@ from agilerl.algorithms.core.registry import (
     OptimizerFactory,
 )
 from agilerl.architectures.nemotron_h import register_nemotron_h_liger
+from agilerl.arena.memory.formulas import (
+    FUSED_CHUNK_ROWS_MAX,
+    FUSED_CHUNK_ROWS_MIN,
+)
 from agilerl.llm_envs import RolloutHarness
 from agilerl.metrics import AgentMetrics, MultiAgentMetrics
 from agilerl.modules import EvolvableModule, ModuleDict
@@ -216,8 +220,8 @@ else:
 __all__ = [
     "ActionResult",
     "EvolvableAlgorithm",
-    "MultiAgentRLAlgorithm",
-    "RLAlgorithm",
+    "MultiAgentAlgorithm",
+    "SingleAgentAlgorithm",
 ]
 
 logger = logging.getLogger(__name__)
@@ -1546,7 +1550,7 @@ class EvolvableAlgorithm(ABC, Generic[ExperiencesT], metaclass=RegistryMeta):
         :type accelerator: Accelerator | None, optional
 
         :return: An instance of the algorithm
-        :rtype: RLAlgorithm
+        :rtype: SingleAgentAlgorithm
         """
         checkpoint: dict[str, Any] = torch.load(
             path,
@@ -1717,7 +1721,9 @@ class EvolvableAlgorithm(ABC, Generic[ExperiencesT], metaclass=RegistryMeta):
             delattr(self, attr_name)
 
 
-class RLAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT]):
+class SingleAgentAlgorithm(
+    EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT]
+):
     """Base object for all single-agent algorithms in the AgileRL framework.
 
     :param observation_space: The observation space of the environment.
@@ -1771,7 +1777,7 @@ class RLAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT]):
         :param kwargs: Additional keyword arguments to pass to the algorithm constructor.
         :type kwargs: Any
         :return: A list of algorithms.
-        :rtype: list[RLAlgorithm]
+        :rtype: list[SingleAgentAlgorithm]
         """
         return build_classic_rl_population(
             cls,
@@ -1836,9 +1842,7 @@ class RLAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT]):
         )
 
 
-class MultiAgentRLAlgorithm(
-    EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT]
-):
+class MultiAgentAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT]):
     """Base object for all multi-agent algorithms in the AgileRL framework.
 
     :param observation_spaces: The observation spaces of the agent environments.
@@ -1906,7 +1910,7 @@ class MultiAgentRLAlgorithm(
         :param kwargs: Additional keyword arguments to pass to the algorithm constructor.
         :type kwargs: Any
         :return: A list of algorithms.
-        :rtype: list[MultiAgentRLAlgorithm]
+        :rtype: list[MultiAgentAlgorithm]
         """
         return build_classic_rl_population(
             cls,
@@ -3036,8 +3040,19 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         self.wrap = wrap
         self.use_separate_reference_adapter = use_separate_reference_adapter
         self.cast_logprobs_to_fp32 = cast_logprobs_to_fp32
-        if chunk_rows is not None and chunk_rows <= 0:
-            msg = f"chunk_rows must be a positive int or None, got {chunk_rows}."
+        if chunk_rows is not None and not (
+            FUSED_CHUNK_ROWS_MIN <= chunk_rows <= FUSED_CHUNK_ROWS_MAX
+        ):
+            # The auto-tune clamps to this range; an explicit value did
+            # not. Too small: lm_head is re-read once per chunk. Too
+            # large: the fp32 tile is chunk_rows x vocab x 4. Rejected
+            # rather than clamped: silently rewriting an explicit
+            # setting hides the mistake.
+            msg = (
+                f"chunk_rows must be None (auto-tune) or in "
+                f"[{FUSED_CHUNK_ROWS_MIN}, {FUSED_CHUNK_ROWS_MAX}], got "
+                f"{chunk_rows}."
+            )
             raise ValueError(msg)
         self.chunk_rows = chunk_rows
         # vLLM sampling-mismatch correction (truncated importance sampling).
@@ -3083,15 +3098,10 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         self._vllm_lora_staging_dir: Path | None = None
         self._vllm_lora_staging_dir_is_temp = True
         self._vllm_rollout_lora_request: Any | None = None
-        # Colocated vLLM (use_vllm=True) runs the rollout engine and the HF
-        # trainer in one process. Each holds its OWN base: vLLM cycles its base
-        # CPU<->GPU via native sleep/wake (vLLM >= 0.22 round-trips dense and
-        # bnb 4-bit losslessly), and the trainer base is offloaded to CPU during
-        # rollout (use_memory_efficient_params) so the two never coexist on the
-        # GPU. Only LoRA adapters are synced to vLLM per rollout. The in-process
-        # external_launcher engine is single-GPU, so tensor parallelism is not
-        # yet available when colocated (use a non-colocated / async rollout for
-        # TP today). NOTE: colocated tensor-parallel support is planned.
+        # Colocated vLLM and the HF trainer share a process but not a
+        # base: the engine sleep/wakes its copy; the trainer offloads
+        # during rollout. Only LoRA adapters are synced. TP is not
+        # available on the in-process engine.
         if self.use_vllm and self.vllm_config is not None:
             tp = getattr(self.vllm_config, "tensor_parallel_size", 1)
             if tp != 1:
@@ -6081,10 +6091,9 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         :return: Rows per chunk.
         :rtype: int
         """
-        if explicit is not None:
-            return explicit
-        workspace_bytes = 256 * 1024 * 1024
-        return min(max(workspace_bytes // max(1, vocab_size * 4), 128), 4096)
+        from agilerl.arena.memory.formulas import resolve_chunk_rows
+
+        return resolve_chunk_rows(vocab_size, explicit)
 
     @staticmethod
     def _logprobs_from_hidden_fused(

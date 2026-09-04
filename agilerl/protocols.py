@@ -290,66 +290,6 @@ EvolvableNetworkDict = dict[str, EvolvableNetworkProtocol]
 EvolvableAttributeDict = dict[str, EvolvableAttributeType]
 
 
-@runtime_checkable
-class NetworkConfigProtocol(Protocol):
-    """Protocol for network configuration information.
-
-    Stores metadata about networks including their name, evaluation status,
-    and associated optimizer.
-    """
-
-    name: str
-    eval: bool
-    optimizer: str | None
-
-
-@runtime_checkable
-class NetworkGroupProtocol(Protocol):
-    """Protocol for grouping related networks in an algorithm.
-
-    Groups evaluation and shared networks together, indicating whether
-    they represent policy networks and if they're used in multi-agent setups.
-    """
-
-    eval: EvolvableNetworkProtocol
-    shared: EvolvableNetworkProtocol | list[EvolvableNetworkProtocol] | None
-    policy: bool
-    multiagent: bool
-
-
-@runtime_checkable
-class OptimizerConfig(Protocol):
-    """Protocol for optimizer configuration and management.
-
-    Defines the configuration for optimizers including which networks they
-    optimize, learning rate, optimizer class, and additional parameters.
-    """
-
-    name: str
-    networks: str | list[str]
-    lr: str
-    optimizer_cls: type[Optimizer] | list[type[Optimizer]]
-    optimizer_kwargs: dict[str, Any] | list[dict[str, Any]]
-    multiagent: bool
-
-    def get_optimizer_cls(self) -> type[Optimizer] | list[type[Optimizer]]: ...
-
-
-@runtime_checkable
-class MutationRegistryProtocol(Protocol):
-    """Protocol for registering and managing mutation-related components.
-
-    Maintains collections of network groups, optimizers, and hooks that
-    are used during the mutation and evolution process.
-    """
-
-    groups: list[NetworkGroupProtocol]
-    optimizers: list[OptimizerConfig]
-    hooks: list[Callable[[], None]]
-
-    def networks(self) -> list[NetworkConfigProtocol]: ...
-
-
 EvolvableAlgorithm = TypeVar(
     "EvolvableAlgorithm",
     bound="EvolvableAlgorithmProtocol",
@@ -485,20 +425,6 @@ class AgentWrapperProtocol(Protocol, Generic[EvolvableAlgorithmT]):
         self,
         networks_only: bool = False,
     ) -> EvolvableAttributeDict: ...
-
-
-@runtime_checkable
-class LoraConfigProtocol(Protocol):
-    """Protocol for LoRA configuration.
-
-    LoRA configuration is used to configure the LoRA module.
-    """
-
-    r: int
-    lora_alpha: int
-    target_modules: str
-    task_type: str
-    lora_dropout: float
 
 
 @runtime_checkable

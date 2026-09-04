@@ -153,6 +153,74 @@ jobs:
                   name: pypi-dist
                   path: dist
 
+            # agilerl hard-depends on agilerl-arena; uploading the agilerl
+            # wheel before its arena pin is resolvable on PyPI would break
+            # `pip install agilerl` for everyone until arena lands. The order
+            # in sync/README.md (arena first) is enforced here, not just prose.
+            - name: Gate agilerl on a resolvable agilerl-arena pin
+              if: needs.fetch.outputs.package == 'agilerl'
+              env:
+                  VER: ${{ needs.fetch.outputs.version }}
+                  DIST: ${{ needs.fetch.outputs.dist_name }}
+              run: |
+                  set -euo pipefail
+                  python3 -m pip install --quiet packaging
+                  python3 - <<'PY'
+                  import glob
+                  import json
+                  import os
+                  import sys
+                  import urllib.request
+                  import zipfile
+
+                  from packaging.requirements import Requirement
+                  from packaging.utils import canonicalize_name
+                  from packaging.version import InvalidVersion, Version
+
+                  dist = os.environ["DIST"]
+                  ver = os.environ["VER"]
+                  wheels = glob.glob(f"dist/{dist}-{ver}-*.whl")
+                  if not wheels:
+                      sys.exit(f"no wheel found for {dist}=={ver} in dist/")
+                  with zipfile.ZipFile(wheels[0]) as zf:
+                      meta_name = next(
+                          n for n in zf.namelist() if n.endswith(".dist-info/METADATA")
+                      )
+                      metadata = zf.read(meta_name).decode()
+                  arena_reqs = [
+                      Requirement(line.split(":", 1)[1].strip())
+                      for line in metadata.splitlines()
+                      if line.startswith("Requires-Dist:")
+                  ]
+                  arena_reqs = [
+                      r for r in arena_reqs
+                      if canonicalize_name(r.name) == "agilerl-arena" and r.marker is None
+                  ]
+                  if not arena_reqs:
+                      print("wheel declares no unconditional agilerl-arena dependency; nothing to gate")
+                      sys.exit(0)
+                  spec = arena_reqs[0].specifier
+                  with urllib.request.urlopen(
+                      "https://pypi.org/pypi/agilerl-arena/json", timeout=30
+                  ) as resp:
+                      releases = json.load(resp)["releases"]
+                  available = []
+                  for version, files in releases.items():
+                      if not files or all(f.get("yanked") for f in files):
+                          continue
+                      try:
+                          available.append(Version(version))
+                      except InvalidVersion:
+                          continue
+                  if not any(spec.contains(v) for v in available):
+                      sys.exit(
+                          f"agilerl=={ver} requires agilerl-arena{spec}, but PyPI has "
+                          f"{sorted(map(str, available)) or 'no releases'}. Publish the "
+                          "agilerl-arena tag first (see sync/README.md), then re-run."
+                      )
+                  print(f"agilerl-arena{spec} is resolvable on PyPI")
+                  PY
+
             - name: Install uv
               uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
               with:
@@ -171,7 +239,9 @@ jobs:
                     echo "missing dist artifacts for ${DIST}==${VER}"; ls -la dist; exit 1
                   fi
                   echo "Publishing ${DIST}==${VER} from tag ${TAG} via Trusted Publishing"
-                  uv publish --trusted-publishing always "${artifacts[@]}"
+                  # --check-url skips an artifact already on the index, so a re-run
+                  # of a partly-failed release does not fail on what did land.
+                  uv publish --trusted-publishing always --check-url https://pypi.org/simple "${artifacts[@]}"
 
     github-release:
         needs: [fetch, publish]

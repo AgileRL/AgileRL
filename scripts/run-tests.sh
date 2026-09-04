@@ -51,7 +51,8 @@ for arg in "$@"; do
       flags+=("-o" "addopts=")
       ;;
     cov)
-      # Use [tool.coverage.run] source from pyproject.toml (agilerl + agilerl-arena/agilerl).
+      # Use [tool.coverage.run] source from pyproject.toml (agilerl +
+      # agilerl-arena/agilerl).
       # --cov agilerl alone misses arena code in the namespace package split.
       flags+=("--cov")
       cov_enabled=1

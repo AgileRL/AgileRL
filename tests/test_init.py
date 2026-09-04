@@ -1,6 +1,8 @@
 # Copyright 2026 AgileRL
 # SPDX-License-Identifier: Apache-2.0
 
+from pathlib import Path
+
 import pytest
 
 import agilerl
@@ -16,6 +18,20 @@ def test_get_extra_dependencies(package, extra):
 def test_llm_packages_and_has_llm_dependencies():
     _ = agilerl.LLM_PACKAGES
     _ = agilerl.HAS_LLM_DEPENDENCIES
+
+
+def test_agent_type_reexports_arena_registry():
+    from agilerl.arena.models.registry import AgentType as ArenaAgentType
+
+    assert agilerl.AgentType is ArenaAgentType
+
+
+def test_agent_type_loads_after_extend_path():
+    source = Path(agilerl.__file__).read_text(encoding="utf-8")
+    extend_at = source.index("__path__ = extend_path")
+    attach_at = source.index("lazy.attach")
+    assert extend_at < attach_at
+    assert "AgentType" in source[attach_at:]
 
 
 class TestIsDistributionInstalled:

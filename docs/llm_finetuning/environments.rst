@@ -368,10 +368,12 @@ On GRPO (and CISPO / GSPO), ``algorithm.advantage_granularity`` is
 ``auto | trajectory | turn``, default ``auto``. ``trajectory`` is one
 group-relative scalar per completion; ``turn`` normalises each turn's reward
 within the group; ``auto`` picks ``turn`` when the batch has per-turn rewards
-and more than one turn. ``token`` is not a GRPO value. ``action_granularity``
-still aliases it.
+and more than one turn. ``token`` is not a GRPO value. The old
+``action_granularity`` spelling is no longer accepted; rename it in existing
+manifests.
 
-LLMPPO and LLMREINFORCE still take ``{turn, token, auto}``.
+LLMPPO and LLMREINFORCE take ``advantage_granularity`` over
+``{turn, token, auto}``.
 
 Observations that are not plain text
 ------------------------------------
@@ -494,11 +496,11 @@ Manifest keys:
      - ``env_type: dataset`` with ``objective: sft``
    * - ``env_type: preference``
      - ``env_type: dataset`` with ``objective: preference``
-   * - GRPO ``action_granularity``
-     - ``advantage_granularity`` — ``auto | trajectory | turn``, default
-       ``auto``. ``action_granularity`` still aliases it. ``token`` is not a
-       GRPO value; ``LLMPPO`` and ``LLMREINFORCE`` still take
-       ``{turn, token, auto}``.
+   * - ``action_granularity``
+     - ``advantage_granularity`` — for GRPO ``auto | trajectory | turn``,
+       default ``auto`` (``token`` is not a GRPO value); for ``LLMPPO`` and
+       ``LLMREINFORCE`` ``turn | token | auto``. The old spelling is
+       rejected, not aliased.
 
 Python API:
 

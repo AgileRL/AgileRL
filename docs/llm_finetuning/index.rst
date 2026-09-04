@@ -71,6 +71,7 @@ This example demonstrates how to use the GRPO algorithm to fine-tune a LLM on a 
 
    environments
    batch_sizing
+   memory_estimate
    fused_logprobs
    quantization
    llm_checkpoints
@@ -82,6 +83,10 @@ This example demonstrates how to use the GRPO algorithm to fine-tune a LLM on a 
 
    :doc:`batch_sizing`
       Rollout, mini- and micro-batch sizes, and how often the optimizer steps.
+
+   :doc:`memory_estimate`
+      ``arena memory estimate`` and ``arena memory solve`` — peak VRAM and the
+      largest context / batch that still fits.
 
    :doc:`fused_logprobs`
       Fused linear log-probability computation for memory-efficient training.

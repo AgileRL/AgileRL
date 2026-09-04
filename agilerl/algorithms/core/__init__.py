@@ -5,8 +5,8 @@ from .base import (
     ActionResult,
     EvolvableAlgorithm,
     LLMAlgorithm,
-    MultiAgentRLAlgorithm,
-    RLAlgorithm,
+    MultiAgentAlgorithm,
+    SingleAgentAlgorithm,
 )
 from .optimizer_wrapper import OptimizerWrapper
 
@@ -14,7 +14,7 @@ __all__ = [
     "ActionResult",
     "EvolvableAlgorithm",
     "LLMAlgorithm",
-    "MultiAgentRLAlgorithm",
+    "MultiAgentAlgorithm",
     "OptimizerWrapper",
-    "RLAlgorithm",
+    "SingleAgentAlgorithm",
 ]

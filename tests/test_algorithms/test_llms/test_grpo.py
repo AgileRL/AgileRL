@@ -6454,12 +6454,6 @@ class TestGRPORealLigerVllmCorrection:
 
 
 class TestGRPOInitWarnings:
-    def test_init_action_granularity_deprecated_warns_and_overrides(self):
-        with pytest.warns(DeprecationWarning, match="action_granularity is deprecated"):
-            grpo = _make_cpu_grpo_for_branch_tests(action_granularity="turn")
-        assert grpo.advantage_granularity == "turn"
-        grpo.clean_up()
-
     @pytest.mark.parametrize(
         ("level", "algo_name"), [("turn", "GRPO"), ("trajectory", "GSPO")]
     )

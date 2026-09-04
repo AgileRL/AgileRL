@@ -5,10 +5,19 @@
 
 from __future__ import annotations
 
-from agilerl.arena.models.algo import register
+from typing import Literal
+
+from pydantic import Field
+
 from agilerl.arena.models.algorithms.grpo import GRPOSpec
+from agilerl.arena.models.registry import register
 
 
 @register()
 class CISPOSpec(GRPOSpec):
-    """Specification for CISPO algorithm (GRPO with CISPO loss)."""
+    """GRPO with the CISPO loss and asymmetric clip bounds."""
+
+    loss_type: Literal["cispo"] = Field(
+        default="cispo",
+        description="CISPO's clipped importance-sampling loss.",
+    )

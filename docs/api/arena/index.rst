@@ -13,10 +13,10 @@ modules through the shared ``agilerl.*`` namespace:
 
 - Core ``agilerl`` ships ``agilerl.models``, ``agilerl.training``, algorithms,
   and other runtime modules.
-- ``agilerl-arena`` ships only ``agilerl.arena`` (client, CLI, inference, and
-  :mod:`agilerl.arena.models`).
+- ``agilerl-arena`` ships only ``agilerl.arena`` (client, CLI, inference,
+  :mod:`agilerl.arena.models`, and :mod:`agilerl.arena.memory`).
 
-After ``pip install agilerl-arena`` or ``pip install "agilerl[arena]"``, import
+After ``pip install agilerl``, import
 Arena code as ``agilerl.arena``, not as a top-level ``arena`` or
 ``agilerl_arena`` module:
 
