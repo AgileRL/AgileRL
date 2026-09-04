@@ -1750,7 +1750,7 @@ class TestMutationsMutation:
 
 class TestMutationsArchitectureMutate:
     def test_raises_for_unsupported_individual(self):
-        """Mutations.architecture_mutate raises MutationError when individual is not RLAlgorithm or MultiAgentRLAlgorithm."""
+        """Mutations.architecture_mutate raises MutationError when individual is not SingleAgentAlgorithm or MultiAgentAlgorithm."""
         mutations = Mutations(0, 1, 0.5, 0, 0, 0, 0.5, device="cpu")
         with pytest.raises(
             MutationError, match="Architecture mutations are not supported"

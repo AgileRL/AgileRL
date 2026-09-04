@@ -63,6 +63,7 @@ name = "agilerl"
 source = { editable = "." }
 dependencies = [
     { name = "accelerate" },
+    { name = "agilerl-arena" },
     { name = "dill" },
     { name = "fastrand" },
     { name = "flatten-dict" },
@@ -101,7 +102,6 @@ dependencies = [
 
 [package.optional-dependencies]
 all = [
-    { name = "agilerl-arena" },
     { name = "bitsandbytes", marker = "sys_platform == 'linux'" },
     { name = "datasets" },
     { name = "deepspeed", marker = "sys_platform == 'linux'" },
@@ -112,9 +112,6 @@ all = [
     { name = "swig", marker = "sys_platform != 'win32'" },
     { name = "transformers" },
     { name = "vllm", marker = "sys_platform == 'linux'" },
-]
-arena = [
-    { name = "agilerl-arena" },
 ]
 box2d = [
     { name = "gymnasium", extra = ["box2d"], marker = "sys_platform != 'win32'" },
@@ -141,6 +138,7 @@ dev = [
     { name = "pytest-xdist" },
 ]
 docs = [
+    { name = "autodoc-pydantic" },
     { name = "furo" },
     { name = "sphinx" },
     { name = "sphinx-autobuild", version = "2024.10.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
@@ -158,8 +156,7 @@ docs = [
 [package.metadata]
 requires-dist = [
     { name = "accelerate", specifier = ">=1.7.0" },
-    { name = "agilerl-arena", marker = "extra == 'all'", editable = "agilerl-arena" },
-    { name = "agilerl-arena", marker = "extra == 'arena'", editable = "agilerl-arena" },
+    { name = "agilerl-arena", editable = "agilerl-arena" },
     { name = "bitsandbytes", marker = "sys_platform == 'linux' and extra == 'all'", specifier = "==0.49.2" },
     { name = "bitsandbytes", marker = "sys_platform == 'linux' and extra == 'llm'", specifier = "==0.49.2" },
     { name = "datasets", marker = "extra == 'all'", specifier = "==5.0.1" },
@@ -211,7 +208,7 @@ requires-dist = [
     { name = "vllm", marker = "sys_platform == 'linux' and extra == 'llm'", specifier = ">=0.26" },
     { name = "wandb", specifier = ">=0.18.0" },
 ]
-provides-extras = ["all", "arena", "box2d", "llm"]
+provides-extras = ["all", "box2d", "llm"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -223,6 +220,7 @@ dev = [
     { name = "pytest-xdist", specifier = ">=3.5" },
 ]
 docs = [
+    { name = "autodoc-pydantic", specifier = ">=2.2" },
     { name = "furo", specifier = ">=2025.12.19" },
     { name = "sphinx", specifier = ">=7,<9" },
     { name = "sphinx-autobuild", specifier = ">=2024.10.3" },
@@ -249,6 +247,7 @@ dependencies = [
     { name = "python-keycloak" },
     { name = "pyyaml" },
     { name = "rich" },
+    { name = "typing-extensions" },
 ]
 
 [package.metadata]
@@ -262,6 +261,7 @@ requires-dist = [
     { name = "python-keycloak", specifier = ">=4.0,<8" },
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "rich", specifier = ">=13.0,<16" },
+    { name = "typing-extensions", specifier = ">=4.4" },
 ]
 
 [[package]]
@@ -629,6 +629,19 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/36/98/7d93f30d029643c0275dbc0bd6d5a6f670661ee6c9a94d93af7ab4887600/authlib-1.7.2.tar.gz", hash = "sha256:2cea25fefcd4e7173bdf1372c0afc265c8034b23a8cd5dcb6a9164b826c64231", size = 176511, upload-time = "2026-05-06T08:10:23.116Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/fb/95/adcb68e20c34162e9135f370d6e31737719c2b6f94bc953fe7ed1f10fe21/authlib-1.7.2-py2.py3-none-any.whl", hash = "sha256:3e1faedc9d87e7d56a164eca3ccb6ace0d61b94abe83e92242f8dc8bba9b4a9f", size = 259548, upload-time = "2026-05-06T08:10:21.436Z" },
+]
+
+[[package]]
+name = "autodoc-pydantic"
+version = "2.2.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "pydantic" },
+    { name = "pydantic-settings" },
+    { name = "sphinx" },
+]
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/7b/df/87120e2195f08d760bc5cf8a31cfa2381a6887517aa89453b23f1ae3354f/autodoc_pydantic-2.2.0-py3-none-any.whl", hash = "sha256:8c6a36fbf6ed2700ea9c6d21ea76ad541b621fbdf16b5a80ee04673548af4d95", size = 34001, upload-time = "2024-04-27T10:57:00.542Z" },
 ]
 
 [[package]]
@@ -3322,7 +3335,6 @@ sdist = { url = "https://files.pythonhosted.org/packages/da/91/6bc8bb503dc259e46
 wheels = [
     { url = "https://files.pythonhosted.org/packages/51/b9/dc76d7716e04dc7b3427cae52eaa32bd20771382d4d1dd9f4538a9dd2086/llguidance-1.7.6-cp39-abi3-manylinux_2_31_aarch64.whl", hash = "sha256:e70fa25ed550c2b50c2fd70baa9e2808b4ecb859d01e453bd5459aff62ba38c3", size = 2899993, upload-time = "2026-06-03T20:13:13.563Z" },
     { url = "https://files.pythonhosted.org/packages/1a/64/d74336f22242ef94356a456057d4ff1be7c1bc9c7dbc867171c6982a5512/llguidance-1.7.6-cp39-abi3-manylinux_2_31_x86_64.whl", hash = "sha256:ceec951d29a74309984e3be0fe7f5f56c1362434cd937abd517b259a60908b1e", size = 3074809, upload-time = "2026-06-03T20:13:15.498Z" },
-    { url = "https://files.pythonhosted.org/packages/47/e6/6b61cecced5233739bc85e463d68d67d4b4c29fb6f91bd12e6b6a65647e3/llguidance-1.7.6-cp39-abi3-manylinux_2_39_riscv64.whl", hash = "sha256:e9f68206e0f3f89aceabb90aa1f8ed570db22fb7cb1fd9ebf96fa7727a65af55", size = 3603845, upload-time = "2026-06-03T20:13:19.473Z" },
 ]
 
 [[package]]

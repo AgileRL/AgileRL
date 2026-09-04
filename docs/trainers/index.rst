@@ -74,7 +74,7 @@ How validation works
 1. ``algorithm``
 ^^^^^^^^^^^^^^^^
 Dispatches to the appropriate Pydantic model for algorithm argument validation based on the ``name`` field
-(e.g. ``"DQN"`` → :class:`~agilerl.models.algorithms.dqn.DQNSpec`). Names are **case-sensitive** and must
+(e.g. ``"DQN"`` → :class:`~agilerl.arena.models.algorithms.DQNSpec`). Names are **case-sensitive** and must
 match the registered class name exactly.
 
 .. code-block:: yaml
@@ -87,16 +87,17 @@ match the registered class name exactly.
 
 .. _manifest_models_split:
 
-Local training vs Arena manifest models
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+Local training and Arena share one manifest schema
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-Local validation uses :class:`~agilerl.models.manifest.TrainingManifest` and
-:data:`~agilerl.models.algo.ALGO_REGISTRY` to dispatch manifest fields to the appropriate Pydantic model.
-Arena submission uses the
-**separate** models shipped in the ``agilerl-arena`` package (:class:`~agilerl.arena.models.TrainingManifest` and
-:data:`~agilerl.arena.models.ARENA_REGISTRY`, containing the algorithms eligible for Arena training). Local training
-models can instantiate environments and tie into local training loops; Arena models are lightweight schemas for remote
-validation and serialization.
+The algorithm, network, and training sections are defined once, in the
+``agilerl-arena`` package (:mod:`agilerl.arena.models`), and dispatched
+through :data:`~agilerl.arena.models.MANIFEST_REGISTRY`. Local training and
+Arena both validate against
+:class:`~agilerl.models.manifest.TrainingManifest` (the same class as
+:class:`~agilerl.arena.models.TrainingManifest`). How an algorithm is built
+and trained from its spec lives in :mod:`agilerl.builders` and
+:mod:`agilerl.strategies`, not on the spec, so the same spec class serves both.
 
 
 1. ``environment``
@@ -423,13 +424,13 @@ Pre-requisites
 Installation
 ^^^^^^^^^^^^
 
-Make sure you have `agilerl-arena` installed, either directly or through the AgileRL extra:
+Make sure you have `agilerl-arena` installed, either directly or as part of AgileRL, which depends on it:
 
 .. code-block:: bash
 
   pip install agilerl-arena
   # or
-  pip install "agilerl[arena]"
+  pip install agilerl
 
 
 Authentication

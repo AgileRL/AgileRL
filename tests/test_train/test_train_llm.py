@@ -18,7 +18,7 @@ if not HAS_LLM_DEPENDENCIES:
 
 from agilerl.algorithms import DPO, GRPO, LLMPPO, LLMREINFORCE
 from agilerl.algorithms.core import ActionResult
-from agilerl.algorithms.core.base import MultiAgentRLAlgorithm
+from agilerl.algorithms.core.base import MultiAgentAlgorithm
 from agilerl.algorithms.sft import SFT
 from agilerl.hpo.multi_frequency import MultiFrequencySelection
 from agilerl.hpo.mutation import Mutations
@@ -59,7 +59,7 @@ def _population_init_skip_per_mock_class():
         self.last_fitnesses = []
         self.evo_steps = 0
         self.is_multi_agent = all(
-            isinstance(agent, MultiAgentRLAlgorithm) for agent in agents
+            isinstance(agent, MultiAgentAlgorithm) for agent in agents
         )
         self.additional_metric_names = self.sample_agent.metrics.additional_metrics
         self.nonscalar_metric_names = self.sample_agent.metrics.nonscalar_metrics

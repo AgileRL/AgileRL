@@ -66,7 +66,7 @@ repos:
             pass_filenames: false
             always_run: true
           - id: check-extras
-            name: Check the arena extra range and that the all extra unions every extra
+            name: Check the agilerl-arena requirement and that all unions every extra
             entry: python scripts/check-extras.py
             language: python
             additional_dependencies: [tomli; python_version < '3.11']

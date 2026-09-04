@@ -533,14 +533,6 @@ class TestPPOInit:
         ppo = _cpu_llmppo(chunk_rows=256)
         assert ppo.chunk_rows == 256
 
-    def test_init_action_granularity_deprecated_warns_and_overrides(self):
-        """The legacy ``action_granularity`` kwarg warns and is carried over
-        into ``advantage_granularity``.
-        """
-        with pytest.warns(DeprecationWarning, match="action_granularity is deprecated"):
-            ppo = _cpu_llmppo(action_granularity="turn")
-        assert ppo.advantage_granularity == "turn"
-
     @pytest.mark.parametrize("is_level", ["turn", "trajectory"])
     def test_init_liger_non_token_is_level_warns_memory_unbounded(
         self, monkeypatch, is_level

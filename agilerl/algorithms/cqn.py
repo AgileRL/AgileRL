@@ -14,7 +14,7 @@ from tensordict import TensorDict
 from torch import nn, optim
 from torch.nn.utils import clip_grad_norm_
 
-from agilerl.algorithms.core import OptimizerWrapper, RLAlgorithm
+from agilerl.algorithms.core import OptimizerWrapper, SingleAgentAlgorithm
 from agilerl.algorithms.core.registry import (
     HyperparameterConfig,
     NetworkGroup,
@@ -37,7 +37,7 @@ from agilerl.utils.algo_utils import (
 )
 
 
-class CQN(RLAlgorithm[TensorDict]):
+class CQN(SingleAgentAlgorithm[TensorDict]):
     """Conservative Q-Learning for Offline Reinforcement Learning.
 
     Paper: https://arxiv.org/abs/2006.04779
@@ -78,7 +78,7 @@ class CQN(RLAlgorithm[TensorDict]):
     :type wrap: bool, optional
     """
 
-    # Narrowed from RLAlgorithm.action_space; enforced at construction.
+    # Narrowed from SingleAgentAlgorithm.action_space; enforced at construction.
     action_space: spaces.Discrete | spaces.MultiDiscrete
 
     # Discrete action space, so the network output size is a plain int

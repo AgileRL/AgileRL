@@ -18,7 +18,6 @@ algorithm:
     gae_lambda: 1
     vf_coef: 0.5
     temperature: 0.7
-    advantage_granularity: token
     max_output_tokens: 64
     use_liger_loss: true
     quantization: none
@@ -49,6 +48,7 @@ environment:
 
 training:
     max_steps: 100000
+    evo_steps: 100000
     pop_size: 1
     eval_loop: 1
     evaluation_interval: 5

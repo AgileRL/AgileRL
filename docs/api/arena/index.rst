@@ -16,7 +16,7 @@ modules through the shared ``agilerl.*`` namespace:
 - ``agilerl-arena`` ships only ``agilerl.arena`` (client, CLI, inference, and
   :mod:`agilerl.arena.models`).
 
-After ``pip install agilerl-arena`` or ``pip install "agilerl[arena]"``, import
+After ``pip install agilerl``, import
 Arena code as ``agilerl.arena``, not as a top-level ``arena`` or
 ``agilerl_arena`` module:
 

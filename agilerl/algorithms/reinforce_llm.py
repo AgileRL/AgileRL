@@ -161,10 +161,6 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
         token-level advantages, and ``"auto"`` uses token-level only when all
         samples are single-turn.
     :type advantage_granularity: Literal["turn", "token", "auto"]
-    :param action_granularity: Deprecated alias for ``advantage_granularity``;
-        when set it overrides ``advantage_granularity`` and emits a
-        ``DeprecationWarning``.
-    :type action_granularity: str | None, optional
     :param importance_sampling_level: IS / ratio-pooling level for the clipped
         surrogate, orthogonal to ``advantage_granularity``. ``"token"`` (default)
         clips per token; ``"turn"`` pools the ratio per turn (requires
@@ -277,7 +273,6 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
         vllm_config: VLLMConfig | None = None,
         seed: int = 42,
         advantage_granularity: Literal["turn", "token", "auto"] = "auto",
-        action_granularity: Literal["turn", "token", "auto"] | None = None,
         importance_sampling_level: Literal["token", "turn", "trajectory"] = "token",
         turn_ratio_pooling: Literal["sum", "mean"] = "sum",
         gradient_checkpointing: bool = True,
@@ -344,7 +339,7 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
         self.top_p = top_p
         self.top_k = top_k
         self.min_p = min_p
-        self._setup_advantage_options(advantage_granularity, action_granularity, gamma)
+        self._setup_advantage_options(advantage_granularity, gamma)
         self._setup_objective(importance_sampling_level, turn_ratio_pooling)
         self._setup_generation(
             max_output_tokens, min_output_tokens, max_model_len, hf_generate_chunk_size
@@ -738,18 +733,10 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
     def _setup_advantage_options(
         self,
         advantage_granularity: str,
-        action_granularity: str | None,
         gamma: float,
     ) -> None:
         """Validate and store the ReBN advantage options."""
         valid_action_granularities = {"turn", "token", "auto"}
-        if action_granularity is not None:
-            warnings.warn(
-                "action_granularity is deprecated; use advantage_granularity.",
-                DeprecationWarning,
-                stacklevel=3,
-            )
-            advantage_granularity = action_granularity
         if advantage_granularity not in valid_action_granularities:
             msg = (
                 "advantage_granularity must be one of "
