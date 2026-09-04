@@ -77,6 +77,8 @@ def mock_client() -> MagicMock:
             "dataset_exists",
             "create_dataset",
             "delete_dataset",
+            "list_models",
+            "get_model_info",
         ]
     )
 
@@ -667,6 +669,51 @@ class TestDatasetsExistsCommand:
             result = runner.invoke(main, ["datasets", "exists", "my-ds"])
         assert result.exit_code == 0
         mock_client.dataset_exists.assert_called_once_with(name="my-ds")
+
+
+class TestModelsListCommand:
+    def test_list(self, runner, mock_client):
+        mock_client.list_models.return_value = [
+            {
+                "model_name": "ibm-granite/granite-3.3-2b-instruct",
+                "num_params": 2_000_000_000,
+                "max_context_length": 8192,
+            }
+        ]
+
+        with _patched_arena_client(mock_client):
+            result = runner.invoke(main, ["models", "list"])
+
+        assert result.exit_code == 0
+        mock_client.list_models.assert_called_once_with()
+        assert "ibm-granite/granite-3.3-2b-instruct" in result.output
+
+
+class TestModelsInfoCommand:
+    def test_info(self, runner, mock_client):
+        mock_client.get_model_info.return_value = {
+            "modules": ["q_proj", "v_proj"],
+            "max_context_length": 8192,
+        }
+
+        with _patched_arena_client(mock_client):
+            result = runner.invoke(
+                main,
+                ["models", "info", "ibm-granite/granite-3.3-2b-instruct"],
+            )
+
+        assert result.exit_code == 0
+        mock_client.get_model_info.assert_called_once_with(
+            "ibm-granite/granite-3.3-2b-instruct"
+        )
+        assert "q_proj" in result.output
+
+    def test_info_requires_model_name(self, runner, mock_client):
+        with _patched_arena_client(mock_client):
+            result = runner.invoke(main, ["models", "info"])
+
+        assert result.exit_code != 0
+        mock_client.get_model_info.assert_not_called()
 
 
 class TestDatasetsCreateCommand:

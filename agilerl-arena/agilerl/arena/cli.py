@@ -535,6 +535,28 @@ def datasets_delete(
         client.delete_dataset(name=name, confirm=yes)
 
 
+@main.group("models")
+def models_group() -> None:
+    """List HuggingFace models in the Arena catalog."""
+
+
+@models_group.command("list")
+@click.pass_obj
+def models_list(config: CommandConfig) -> None:
+    """List HuggingFace models in the Arena catalog."""
+    with arena_client(config) as client:
+        emit_result(client.list_models())
+
+
+@models_group.command("info")
+@click.argument("model_name")
+@click.pass_obj
+def models_info(config: CommandConfig, model_name: str) -> None:
+    """Fetch LoRA modules and catalog metadata for a model."""
+    with arena_client(config) as client:
+        emit_result(client.get_model_info(model_name))
+
+
 @main.group("experiments")
 def experiment() -> None:
     """Manage experiments (training jobs) by name."""
