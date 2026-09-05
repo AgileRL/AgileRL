@@ -5,21 +5,27 @@ import copy
 import warnings
 from collections import OrderedDict, defaultdict
 from collections.abc import Mapping
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from typing import Any
 
 import numpy as np
 import numpy.typing as npt
 import torch
-from accelerate import Accelerator
 from gymnasium import spaces
 from pettingzoo import ParallelEnv
 from tensordict import TensorDict
 from torch import nn, optim
 
+from agilerl.algorithms.configs import (
+    AlgorithmRuntime,
+    ExplorationNoise,
+    MADDPGLearnConfig,
+    MultiAgentActorCriticSetup,
+    MultiAgentEnvConfig,
+    PopulationIndex,
+)
 from agilerl.algorithms.core import MultiAgentRLAlgorithm, OptimizerWrapper
 from agilerl.algorithms.core.registry import (
-    HyperparameterConfig,
     NetworkGroup,
     make_default_hp_config,
 )
@@ -130,43 +136,43 @@ class MADDPG(MultiAgentRLAlgorithm[TensorDict]):
         self,
         observation_spaces: list[SupportedObservationSpace] | spaces.Dict,
         action_spaces: list[SupportedActionSpace] | spaces.Dict,
-        agent_ids: list[str] | None = None,
-        O_U_noise: bool = True,
-        expl_noise: float = 0.1,
-        vect_noise_dim: int = 1,
-        mean_noise: float = 0.0,
-        theta: float = 0.15,
-        dt: float = 1e-2,
-        index: int = 0,
-        hp_config: HyperparameterConfig | None = None,
-        net_config: dict[str, Any] | None = None,
-        batch_size: int = 64,
-        lr_actor: float = 0.001,
-        lr_critic: float = 0.01,
-        learn_step: int = 5,
-        gamma: float = 0.95,
-        tau: float = 0.01,
-        mut: str | None = None,
-        normalize_images: bool = True,
-        actor_networks: list[EvolvableModule] | ModuleDict | None = None,
-        critic_networks: list[EvolvableModule] | ModuleDict | None = None,
-        device: str = "cpu",
-        accelerator: Accelerator | None = None,
-        torch_compiler: str | None = None,
-        wrap: bool = True,
+        member: PopulationIndex | None = None,
+        learn: MADDPGLearnConfig | None = None,
+        network: MultiAgentActorCriticSetup | None = None,
+        noise: ExplorationNoise | None = None,
+        agents: MultiAgentEnvConfig | None = None,
+        runtime: AlgorithmRuntime | None = None,
     ) -> None:
+        member = member or PopulationIndex()
+        learn = learn or MADDPGLearnConfig()
+        network = network or MultiAgentActorCriticSetup()
+        noise = noise or ExplorationNoise()
+        agents = agents or MultiAgentEnvConfig()
+        runtime = runtime or AlgorithmRuntime()
+        mut = member.mut
+        batch_size = learn.batch_size
+        lr_actor = learn.lr_actor
+        lr_critic = learn.lr_critic
+        learn_step = learn.learn_step
+        gamma = learn.gamma
+        tau = learn.tau
+        net_config = network.net_config
+        actor_networks = network.actor_networks
+        critic_networks = network.critic_networks
+        O_U_noise = noise.O_U_noise
+        expl_noise = noise.expl_noise
+        vect_noise_dim = noise.vect_noise_dim
+        mean_noise = noise.mean_noise
+        theta = noise.theta
+        dt = noise.dt
+        wrap = runtime.wrap
 
         super().__init__(
             observation_spaces,
             action_spaces,
-            index=index,
-            agent_ids=agent_ids,
-            hp_config=hp_config,
-            device=device,
-            accelerator=accelerator,
-            normalize_images=normalize_images,
-            torch_compiler=torch_compiler,
-            name="MADDPG",
+            member=member,
+            agents=agents,
+            runtime=replace(runtime, name=runtime.name or "MADDPG"),
         )
 
         assert learn_step >= 1, "Learn step must be greater than or equal to one."

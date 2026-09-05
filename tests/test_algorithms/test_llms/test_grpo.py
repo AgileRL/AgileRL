@@ -12,7 +12,8 @@ from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
-from unittest.mock import MagicMock, PropertyMock, patch
+from unittest.mock import MagicMock, PropertyMock
+from unittest.mock import patch as unittest_patch
 
 import numpy as np
 import pytest
@@ -47,6 +48,7 @@ from agilerl.algorithms.grpo import (
 from agilerl.modules.dummy import DummyEvolvable
 from agilerl.utils.algo_utils import CosineLRScheduleConfig, VLLMConfig, clone_llm
 from tests import TINY_LLM_FIXTURE_PATH
+from tests.helpers.patch_algo_core import make_core_patch, setattr_core
 from tests.helpers.rollout_doubles import FakeEnvClient, RolloutHarnessDouble
 from tests.test_algorithms.test_llms.llm_helpers import (
     DummyConfig,
@@ -63,6 +65,9 @@ from tests.utils import (
     make_mock_vllm_instance,
     spawn_new_process_for_each_test,
 )
+
+patch = make_core_patch(unittest_patch)
+mock.patch = make_core_patch(mock.patch)
 
 
 class DummyReasoningEnv(RolloutHarnessDouble):
@@ -1645,6 +1650,7 @@ class TestGRPOInit:
     ):
         with (
             mock.patch("agilerl.algorithms.core.base.HAS_LLM_DEPENDENCIES", False),
+            mock.patch("agilerl.algorithms.core.llm_init.HAS_LLM_DEPENDENCIES", False),
             pytest.raises(
                 ImportError,
                 match=r"LLM dependencies are not installed. Please install them using \`pip install agilerl\[llm\]\`.",
@@ -1676,7 +1682,8 @@ class TestGRPOInit:
         accelerator_factory,
         assertion_mode,
     ):
-        monkeypatch.setattr("agilerl.algorithms.core.base.HAS_LIGER_KERNEL", False)
+        setattr_core(monkeypatch, "HAS_LIGER_KERNEL", False)
+        monkeypatch.setattr("agilerl.algorithms.core.llm_init.HAS_LIGER_KERNEL", False)
         monkeypatch.setattr("agilerl.algorithms.grpo.HAS_LIGER_KERNEL", False)
         if assertion_mode == "warns_and_fallback":
             with pytest.warns(
@@ -6115,7 +6122,7 @@ class TestGRPOVLLMSamplingCorrection:
         keeps the Liger path and threads ``sampling_log_probs`` through —
         no fallback warning.
         """
-        monkeypatch.setattr("agilerl.algorithms.core.base.HAS_LIGER_KERNEL", True)
+        setattr_core(monkeypatch, "HAS_LIGER_KERNEL", True)
         monkeypatch.setattr("agilerl.algorithms.grpo.HAS_LIGER_KERNEL", True)
         grpo = _make_cpu_grpo_for_branch_tests(
             group_size=2, update_epochs=1, use_liger_loss=True
@@ -6170,7 +6177,7 @@ class TestGRPOVLLMSamplingCorrection:
         correction warns once and runs the standard path (``_liger_loss`` not
         called).
         """
-        monkeypatch.setattr("agilerl.algorithms.core.base.HAS_LIGER_KERNEL", True)
+        setattr_core(monkeypatch, "HAS_LIGER_KERNEL", True)
         monkeypatch.setattr("agilerl.algorithms.grpo.HAS_LIGER_KERNEL", True)
         grpo = _make_cpu_grpo_for_branch_tests(
             group_size=2,

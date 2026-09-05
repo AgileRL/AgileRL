@@ -19,6 +19,7 @@ from agilerl.networks import StochasticActor
 from agilerl.networks.value_networks import ValueNetwork
 from agilerl.rollouts import collect_rollouts, collect_rollouts_recurrent
 from agilerl.typing import BPTTSequenceType
+from agilerl.utils.constructor_kwargs import assemble_init_kwargs
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 from tests.helper_functions import assert_state_dicts_equal
 
@@ -130,7 +131,13 @@ def _bootstrap_next_obs(
 
 class DummyPPO(PPO):
     def __init__(self, observation_space, action_space, *args, **kwargs):
-        super().__init__(observation_space, action_space, *args, **kwargs)
+        super().__init__(
+            **assemble_init_kwargs(
+                PPO,
+                (observation_space, action_space, *args),
+                kwargs,
+            )
+        )
 
         self.tensor_test = torch.randn(1)
 

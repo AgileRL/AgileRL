@@ -8,7 +8,10 @@
 objectives.
 """
 
+from __future__ import annotations
+
 from collections.abc import Callable
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
 from accelerate import Accelerator
@@ -16,15 +19,17 @@ from accelerate import Accelerator
 from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.algorithms import DPO
 from agilerl.algorithms.sft import SFT
-from agilerl.hpo.mutation import Mutations
-from agilerl.hpo.tournament import TournamentSelection
 from agilerl.population import Population
-from agilerl.protocols import SelectionStrategyProtocol
+from agilerl.training.configs import LLMDatasetRunConfig, LoggerExperiment
 from agilerl.training.llm.common import (
+    LLMCheckpointProgress,
     _compute_training_steps,
     _resolve_training_envs,
     _validate_finetune_args,
+    maybe_save_llm_step_checkpoint,
+    save_llm_elite_if_requested,
 )
+from agilerl.utils.constructor_kwargs import accept_flat_kwargs
 from agilerl.utils.llm_utils import is_preference_prompts, is_sft_prompts
 from agilerl.utils.utils import (
     _distributed_world_size,
@@ -32,42 +37,263 @@ from agilerl.utils.utils import (
     init_loggers,
     resolve_selection_strategy,
     run_selection_and_mutation,
-    save_llm_checkpoint,
 )
 
 if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
     from agilerl.llm_envs import DatasetEnv
 
 if TYPE_CHECKING:
-    SupportedDataset = DPO | SFT
+    from tqdm import tqdm
+
+SupportedDataset = DPO | SFT
 
 
+@dataclass
+class LLMDatasetSession:
+    """Population, envs, and run config for one ``train_llm_dataset`` loop."""
+
+    population: Population
+    run: LLMDatasetRunConfig
+    envs: list[DatasetEnv]
+    uses_env_fn: bool
+    accelerator: Accelerator | None
+    pbar: tqdm
+    env_name: str
+    max_steps: int
+    training_steps: int
+    effective_data_batch_size: int
+    checkpoint_progress: LLMCheckpointProgress
+    total_steps: int = 0
+    displayed_steps: int = 0
+
+
+def _resolve_dataset_run(run: LLMDatasetRunConfig | None) -> LLMDatasetRunConfig:
+    run = run or LLMDatasetRunConfig()
+    evolution = run.evolution
+    selection = resolve_selection_strategy(
+        evolution.selection_strategy,
+        evolution.tournament,
+    )
+    return replace(run, evolution=replace(evolution, selection_strategy=selection))
+
+
+def _validate_dataset_run(
+    pop: list[SupportedDataset],
+    run: LLMDatasetRunConfig,
+) -> None:
+    loop = run.loop
+    evolution = run.evolution
+    _validate_finetune_args(
+        loop.evo_steps,
+        evolution.selection_strategy,
+        evolution.mutation,
+        loop.num_epochs,
+        loop.max_steps,
+        pop,
+        (DPO, SFT),
+        (
+            "The algorithm must be DPO (preference) or SFT (supervised) for "
+            f"dataset finetuning. Got {type(pop[0])} instead."
+        ),
+        checkpoint_steps=run.checkpoint.checkpoint_steps,
+    )
+
+
+def _start_llm_dataset(
+    pop: list[SupportedDataset],
+    env: DatasetEnv | None,
+    env_fn: Callable[[], DatasetEnv] | None,
+    init_hp: dict[str, Any] | None,
+    run: LLMDatasetRunConfig,
+    accelerator: Accelerator | None,
+) -> LLMDatasetSession:
+    """Validate args, resolve envs, and build loggers."""
+    envs, uses_env_fn = _resolve_training_envs(pop=pop, env=env, env_fn=env_fn)
+    env_name = envs[0].name
+    _validate_dataset_run(pop, run)
+    init_hp = (
+        {
+            "BATCH_SIZE_PER_GPU": pop[0].batch_size_per_process,
+            "ALGO": pop[0].algo,
+        }
+        if init_hp is None
+        else init_hp
+    )
+    data_increment = _distributed_world_size(accelerator)
+    effective_data_batch_size = data_increment * envs[0].data_batch_size_per_gpu
+    if envs[0].world_size != data_increment:
+        msg = (
+            f"DatasetEnv was built with world_size={envs[0].world_size} but the "
+            f"run has {data_increment} data-parallel ranks; every rank would "
+            "draw the same batches. Build the env with the runtime rank/world_size."
+        )
+        raise ValueError(msg)
+    if run.logging.wb:
+        init_hp["effective_data_batch_size"] = effective_data_batch_size
+        init_hp["batch_size"] = init_hp.get("BATCH_SIZE", 1)
+        init_hp["distributed_training"] = accelerator is not None
+        init_hp["model_name"] = pop[0].pretrained_model_name_or_path
+    # ``len(envs[0])`` is this rank's shard; scale back to the global row count
+    # so epoch accounting matches the whole dataset.
+    max_steps, training_steps = _compute_training_steps(
+        run.loop.max_steps,
+        run.loop.num_epochs,
+        len(envs[0]) * data_increment,
+        effective_data_batch_size,
+        len(pop),
+    )
+    pbar = default_progress_bar(max_steps, accelerator)
+    loggers = init_loggers(
+        experiment=LoggerExperiment(
+            algo=init_hp.get("ALGO", pop[0].algo),
+            env_name=env_name,
+            init_hyperparams=init_hp,
+        ),
+        pbar=pbar,
+        logging=run.logging,
+        accelerator=accelerator,
+    )
+    return LLMDatasetSession(
+        population=Population(agents=pop, accelerator=accelerator, loggers=loggers),
+        run=run,
+        envs=envs,
+        uses_env_fn=uses_env_fn,
+        accelerator=accelerator,
+        pbar=pbar,
+        env_name=env_name,
+        max_steps=max_steps,
+        training_steps=training_steps,
+        effective_data_batch_size=effective_data_batch_size,
+        checkpoint_progress=LLMCheckpointProgress(run.checkpoint.checkpoint_steps),
+    )
+
+
+def _learn_dataset_batch(
+    agent: SupportedDataset,
+    batch: dict[str, Any],
+) -> float:
+    if isinstance(agent, DPO):
+        if not is_preference_prompts(batch):
+            msg = (
+                "DPO needs an objective='preference' DatasetEnv batch; "
+                f"got keys {sorted(batch)}."
+            )
+            raise ValueError(msg)
+        learn_result = agent.learn(batch)
+        return float(learn_result["chosen_reward"] - learn_result["rejected_reward"])
+    if not is_sft_prompts(batch):
+        msg = (
+            "SFT needs an objective='sft' DatasetEnv batch; "
+            f"got keys {sorted(batch)}."
+        )
+        raise ValueError(msg)
+    learn_result = agent.learn(batch)
+    return -float(learn_result["loss"])
+
+
+def _train_one_dataset_agent(
+    session: LLMDatasetSession,
+    agent: SupportedDataset,
+    agent_idx: int,
+    iteration: int,
+) -> None:
+    training_env = session.envs[agent_idx] if session.uses_env_fn else session.envs[0]
+    agent.set_reference_policy(training_env.num_epochs)
+    agent.init_training_step()
+    # ``reset`` returns the next collated batch; ``step`` does nothing.
+    # Rewind a reused env at run start so it does not begin mid-epoch.
+    # Shared env: once (first agent). Per-agent envs: each env once.
+    reset_dataloaders = iteration == 0 and (session.uses_env_fn or agent_idx == 0)
+    score = _learn_dataset_batch(
+        agent, training_env.reset(reset_dataloaders=reset_dataloaders)
+    )
+    agent.add_scores([score])
+    agent.finalize_training_step(training_env.data_batch_size_per_gpu)
+    session.total_steps += session.effective_data_batch_size
+
+
+def _maybe_eval_dataset(session: LLMDatasetSession, iteration: int) -> None:
+    if (iteration + 1) % session.run.loop.evaluation_interval != 0:
+        return
+    for agent_idx, agent in enumerate(session.population.agents):
+        agent.test(session.envs[agent_idx] if session.uses_env_fn else session.envs[0])
+    if session.accelerator is not None:
+        session.accelerator.wait_for_everyone()
+
+
+def _report_dataset_metrics(session: LLMDatasetSession) -> None:
+    if session.accelerator is None or session.accelerator.is_main_process:
+        increment = min(
+            session.effective_data_batch_size,
+            session.max_steps - session.displayed_steps,
+        )
+        if increment > 0:
+            session.pbar.update(increment)
+            session.displayed_steps += increment
+        session.population.report_metrics(clear=True)
+        return
+    # Metrics accumulate on every rank; only main reports, so the
+    # others must still clear or their stores grow for the whole run.
+    session.population.clear_agent_metrics()
+
+
+def _evolve_or_checkpoint_dataset(session: LLMDatasetSession, iteration: int) -> None:
+    evolution = session.run.evolution
+    if evolution.selection_strategy is not None and evolution.mutation is not None:
+        # evo_steps is guaranteed set here: it is validated as set on entry
+        # when a selection strategy and mutation are enabled.
+        assert session.run.loop.evo_steps is not None
+        if (iteration + 1) % session.run.loop.evo_steps != 0:
+            return
+        if session.accelerator is not None:
+            session.accelerator.wait_for_everyone()
+        session.population.update(
+            run_selection_and_mutation(
+                evolution.selection_strategy,
+                population=session.population.agents,
+                mutation=evolution.mutation,
+                env_name=session.env_name,
+                accelerator=session.accelerator,
+                language_model=True,
+                elite_path=session.run.checkpoint.elite_path,
+                save_elite=bool(session.run.checkpoint.save_elite),
+            ),
+        )
+        if session.accelerator is not None:
+            session.accelerator.wait_for_everyone()
+        session.population.increment_evo_step()
+        return
+    maybe_save_llm_step_checkpoint(
+        session.population.agents,
+        session.checkpoint_progress,
+        session.run.checkpoint,
+        session.total_steps,
+        session.max_steps,
+    )
+
+
+def _run_llm_dataset_loop(session: LLMDatasetSession) -> None:
+    for iteration in range(session.training_steps):
+        if session.accelerator is not None:
+            session.accelerator.wait_for_everyone()
+        for agent_idx, agent in enumerate(session.population.agents):
+            if session.total_steps >= session.max_steps:
+                break
+            _train_one_dataset_agent(session, agent, agent_idx, iteration)
+        _maybe_eval_dataset(session, iteration)
+        _report_dataset_metrics(session)
+        _evolve_or_checkpoint_dataset(session, iteration)
+
+
+@accept_flat_kwargs
 def train_llm_dataset(
-    pop: "list[SupportedDataset]",
-    env: "DatasetEnv | None" = None,
-    env_fn: "Callable[[], DatasetEnv] | None" = None,
+    pop: list[SupportedDataset],
+    env: DatasetEnv | None = None,
+    env_fn: Callable[[], DatasetEnv] | None = None,
     init_hp: dict[str, Any] | None = None,
-    save_elite: bool | None = None,
-    elite_path: str | None = None,
-    wb: bool = False,
-    tensorboard: bool = False,
-    tensorboard_log_dir: str | None = None,
-    csv: bool = False,
-    csv_log_dir: str | None = None,
-    evo_steps: int | None = None,
-    checkpoint_steps: int | None = None,
-    checkpoint_path: str | None = None,
-    selection_strategy: SelectionStrategyProtocol | None = None,
-    tournament: TournamentSelection | None = None,
-    mutation: Mutations | None = None,
-    wandb_api_key: str | None = None,
-    wandb_kwargs: dict[str, Any] | None = None,
-    evaluation_interval: int = 10,
-    verbose: bool = True,
+    run: LLMDatasetRunConfig | None = None,
     accelerator: Accelerator | None = None,
-    max_steps: int | None = None,
-    num_epochs: int | None = None,
-) -> "tuple[list[SupportedDataset], Any]":
+) -> tuple[list[SupportedDataset], Any]:
     """Train a population of DPO or SFT agents over a ``DatasetEnv`` dataloader.
 
     Each training step draws a labelled batch from the dataset environment. The
@@ -83,248 +309,17 @@ def train_llm_dataset(
     :type env_fn: Callable[[], DatasetEnv] | None
     :param init_hp: Initial hyperparameters for logging and defaults.
     :type init_hp: dict[str, Any] | None
-    :param save_elite: Whether to save the elite checkpoint during evolution.
-    :type save_elite: bool | None
-    :param elite_path: Path used for checkpoint saving.
-    :type elite_path: str | None
-    :param wb: Whether to log metrics to Weights and Biases.
-    :type wb: bool
-    :param tensorboard: Whether to log to TensorBoard.
-    :type tensorboard: bool
-    :param tensorboard_log_dir: Directory for TensorBoard event files.
-    :type tensorboard_log_dir: str | None
-    :param csv: Whether to log aggregate metrics to CSV.
-    :type csv: bool
-    :param csv_log_dir: Path for the CSV file.
-    :type csv_log_dir: str | None
-    :param evo_steps: Number of outer iterations between evolution steps.
-    :type evo_steps: int | None
-    :param checkpoint_steps: Number of iterations between checkpoint saves when
-        evolution is disabled.
-    :type checkpoint_steps: int | None
-    :param checkpoint_path: Directory for periodic checkpoints; falls back to elite_path.
-    :type checkpoint_path: str | None
-    :param selection_strategy: Selection strategy driving evolution.
-    :type selection_strategy: SelectionStrategyProtocol | None
-    :param tournament: Deprecated alias for selection_strategy.
-    :type tournament: TournamentSelection | None
-    :param mutation: Mutation operator used during evolution.
-    :type mutation: Mutations | None
-    :param wandb_api_key: Optional W&B API key.
-    :type wandb_api_key: str | None
-    :param wandb_kwargs: Additional kwargs forwarded to ``wandb.init()``.
-    :type wandb_kwargs: dict[str, Any] | None
-    :param evaluation_interval: Frequency (iterations) for evaluation.
-    :type evaluation_interval: int
-    :param verbose: Whether to print periodic training summaries.
-    :type verbose: bool
+    :param run: Loop, evolution, checkpoint, and logging settings.
+    :type run: LLMDatasetRunConfig, optional
     :param accelerator: Optional accelerator for distributed training.
     :type accelerator: Accelerator | None
-    :param max_steps: Maximum step budget; defaults to dataset-driven length.
-    :type max_steps: int | None
-    :param num_epochs: Number of epochs to run; takes precedence over max_steps.
-    :type num_epochs: int | None
     :return: The finetuned population and its last recorded fitnesses.
     :rtype: tuple[list[SupportedDataset], Any]
     """
-    envs, uses_env_fn = _resolve_training_envs(pop=pop, env=env, env_fn=env_fn)
-    env_name = envs[0].name
-
-    selection_strategy = resolve_selection_strategy(selection_strategy, tournament)
-
-    _validate_finetune_args(
-        evo_steps,
-        selection_strategy,
-        mutation,
-        num_epochs,
-        max_steps,
-        pop,
-        (DPO, SFT),
-        (
-            "The algorithm must be DPO (preference) or SFT (supervised) for "
-            f"dataset finetuning. Got {type(pop[0])} instead."
-        ),
-        checkpoint_steps=checkpoint_steps,
-    )
-
-    init_hp = (
-        {
-            "BATCH_SIZE_PER_GPU": pop[0].batch_size_per_process,
-            "ALGO": pop[0].algo,
-        }
-        if init_hp is None
-        else init_hp
-    )
-
-    data_increment = _distributed_world_size(accelerator)
-    effective_data_batch_size = data_increment * envs[0].data_batch_size_per_gpu
-    if envs[0].world_size != data_increment:
-        msg = (
-            f"DatasetEnv was built with world_size={envs[0].world_size} but the "
-            f"run has {data_increment} data-parallel ranks; every rank would "
-            "draw the same batches. Build the env with the runtime rank/world_size."
-        )
-        raise ValueError(msg)
-
-    if wb:
-        init_hp["effective_data_batch_size"] = effective_data_batch_size
-        init_hp["batch_size"] = init_hp.get("BATCH_SIZE", 1)
-        init_hp["distributed_training"] = accelerator is not None
-        init_hp["model_name"] = pop[0].pretrained_model_name_or_path
-
-    # ``len(envs[0])`` is this rank's shard; scale back to the global row count
-    # so epoch accounting matches the whole dataset.
-    max_steps, training_steps = _compute_training_steps(
-        max_steps,
-        num_epochs,
-        len(envs[0]) * data_increment,
-        effective_data_batch_size,
-        len(pop),
-    )
-
-    pbar = default_progress_bar(max_steps, accelerator)
-
-    loggers = init_loggers(
-        algo=init_hp.get("ALGO", pop[0].algo),
-        env_name=env_name,
-        pbar=pbar,
-        verbose=verbose,
-        wb=wb,
-        tensorboard=tensorboard,
-        csv=csv,
-        tensorboard_log_dir=tensorboard_log_dir,
-        csv_log_dir=csv_log_dir,
-        accelerator=accelerator,
-        wandb_api_key=wandb_api_key,
-        wandb_kwargs=wandb_kwargs,
-        init_hyperparams=init_hp,
-    )
-
-    population = Population(agents=pop, accelerator=accelerator, loggers=loggers)
-
-    total_steps = 0
-    displayed_steps = 0
-    next_checkpoint_step = checkpoint_steps
-    max_steps_checkpoint_saved = False
-
-    for i in range(training_steps):
-        if accelerator is not None:
-            accelerator.wait_for_everyone()
-
-        for agent_idx, agent in enumerate(population.agents):
-            if total_steps >= max_steps:
-                break
-            training_env = envs[agent_idx] if uses_env_fn else envs[0]
-
-            agent.set_reference_policy(training_env.num_epochs)
-            agent.init_training_step()
-
-            # ``reset`` returns the next collated batch; ``step`` does nothing.
-            # Rewind a reused env at run start so it does not begin mid-epoch.
-            # Shared env: once (first agent). Per-agent envs: each env once.
-            reset_dataloaders = i == 0 and (uses_env_fn or agent_idx == 0)
-            batch = training_env.reset(reset_dataloaders=reset_dataloaders)
-            if isinstance(agent, DPO):
-                if not is_preference_prompts(batch):
-                    msg = (
-                        "DPO needs an objective='preference' DatasetEnv batch; "
-                        f"got keys {sorted(batch)}."
-                    )
-                    raise ValueError(msg)
-                learn_result = agent.learn(batch)
-                score = float(
-                    learn_result["chosen_reward"] - learn_result["rejected_reward"]
-                )
-            else:
-                if not is_sft_prompts(batch):
-                    msg = (
-                        "SFT needs an objective='sft' DatasetEnv batch; "
-                        f"got keys {sorted(batch)}."
-                    )
-                    raise ValueError(msg)
-                learn_result = agent.learn(batch)
-                score = -float(learn_result["loss"])
-
-            agent.add_scores([score])
-            agent.finalize_training_step(training_env.data_batch_size_per_gpu)
-            total_steps += effective_data_batch_size
-
-        if (i + 1) % evaluation_interval == 0:
-            for agent_idx, agent in enumerate(population.agents):
-                agent.test(envs[agent_idx] if uses_env_fn else envs[0])
-            if accelerator is not None:
-                accelerator.wait_for_everyone()
-
-        if accelerator is None or accelerator.is_main_process:
-            increment = min(effective_data_batch_size, max_steps - displayed_steps)
-            if increment > 0:
-                pbar.update(increment)
-                displayed_steps += increment
-
-            population.report_metrics(clear=True)
-        else:
-            # Metrics accumulate on every rank; only main reports, so the
-            # others must still clear or their stores grow for the whole run.
-            population.clear_agent_metrics()
-
-        if selection_strategy is not None and mutation is not None:
-            # evo_steps is guaranteed set here: it is validated as set on entry
-            # when a selection strategy and mutation are enabled.
-            assert evo_steps is not None
-            if (i + 1) % evo_steps == 0:
-                if accelerator is not None:
-                    accelerator.wait_for_everyone()
-                population.update(
-                    run_selection_and_mutation(
-                        selection_strategy,
-                        population=population.agents,
-                        mutation=mutation,
-                        env_name=env_name,
-                        accelerator=accelerator,
-                        language_model=True,
-                        elite_path=elite_path,
-                        save_elite=bool(save_elite),
-                    ),
-                )
-                if accelerator is not None:
-                    accelerator.wait_for_everyone()
-
-                population.increment_evo_step()
-        else:
-            checkpoint_due = False
-            if checkpoint_steps is not None:
-                while (
-                    next_checkpoint_step is not None
-                    and total_steps >= next_checkpoint_step
-                ):
-                    checkpoint_due = True
-                    next_checkpoint_step += checkpoint_steps
-            if (
-                total_steps >= max_steps
-                and not max_steps_checkpoint_saved
-                and (
-                    checkpoint_steps is not None
-                    or checkpoint_path is not None
-                    or elite_path is not None
-                )
-            ):
-                checkpoint_due = True
-                max_steps_checkpoint_saved = True
-            if checkpoint_due:
-                save_llm_checkpoint(
-                    population.agents[-1],
-                    checkpoint_path if checkpoint_path is not None else elite_path,
-                )
-
-    if save_elite and elite_path is not None:
-        elite = max(
-            population.agents,
-            key=lambda a: a.fitness[-1] if a.fitness else float("-inf"),
-        )
-        save_llm_checkpoint(elite, elite_path)
-
-    population.finish()
-    pbar.close()
-    # LLM fitnesses are scalar mean rewards; `Population` types them as the wider
-    # scalar-or-per-agent-dict row shared with multi-agent training.
-    return population.agents, population.last_scalar_fitnesses
+    run = _resolve_dataset_run(run)
+    session = _start_llm_dataset(pop, env, env_fn, init_hp, run, accelerator)
+    _run_llm_dataset_loop(session)
+    save_llm_elite_if_requested(session.population.agents, session.run.checkpoint)
+    session.population.finish()
+    session.pbar.close()
+    return session.population.agents, session.population.last_scalar_fitnesses

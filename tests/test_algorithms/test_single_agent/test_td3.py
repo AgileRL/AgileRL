@@ -16,6 +16,7 @@ from agilerl.modules import EvolvableCNN, EvolvableMLP, EvolvableMultiInput
 from agilerl.networks.actors import DeterministicActor
 from agilerl.networks.q_networks import ContinuousQNetwork
 from agilerl.utils.algo_utils import is_train_eval_invariant
+from agilerl.utils.constructor_kwargs import assemble_init_kwargs
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 from tests.helper_functions import (
     assert_not_equal_state_dict,
@@ -29,7 +30,13 @@ from tests.helper_functions import (
 
 class DummyTD3(TD3):
     def __init__(self, observation_space, action_space, *args, **kwargs):
-        super().__init__(observation_space, action_space, *args, **kwargs)
+        super().__init__(
+            **assemble_init_kwargs(
+                TD3,
+                (observation_space, action_space, *args),
+                kwargs,
+            )
+        )
 
         self.tensor_test = torch.randn(1)
 

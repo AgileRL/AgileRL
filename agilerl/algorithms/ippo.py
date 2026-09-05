@@ -5,21 +5,27 @@ import copy
 import warnings
 from collections import defaultdict
 from collections.abc import Mapping
+from dataclasses import replace
 from typing import Any
 
 import numpy as np
 import numpy.typing as npt
 import torch
-from accelerate import Accelerator
 from gymnasium import spaces
 from pettingzoo import ParallelEnv
 from torch import nn, optim
 from torch.nn.utils import clip_grad_norm_
 from torch.optim import Optimizer
 
+from agilerl.algorithms.configs import (
+    AlgorithmRuntime,
+    IPPOAgentSetup,
+    IPPONetworkSetup,
+    PopulationIndex,
+    PPOLearnConfig,
+)
 from agilerl.algorithms.core import MultiAgentRLAlgorithm, OptimizerWrapper
 from agilerl.algorithms.core.registry import (
-    HyperparameterConfig,
     NetworkGroup,
     make_default_hp_config,
 )
@@ -127,44 +133,42 @@ class IPPO(MultiAgentRLAlgorithm[tuple[Mapping[str, Any], ...]]):
         self,
         observation_spaces: list[SupportedObservationSpace] | spaces.Dict,
         action_spaces: list[spaces.Space] | spaces.Dict,
-        agent_ids: list[str] | None = None,
-        index: int = 0,
-        hp_config: HyperparameterConfig | None = None,
-        net_config: dict[str, Any] | None = None,
-        batch_size: int = 64,
-        lr: float = 1e-4,
-        learn_step: int = 2048,
-        gamma: float = 0.99,
-        gae_lambda: float = 0.95,
-        mut: str | None = None,
-        action_std_init: float = 0.0,
-        clip_coef: float = 0.2,
-        ent_coef: float = 0.01,
-        vf_coef: float = 0.5,
-        max_grad_norm: float = 0.5,
-        target_kl: float | None = None,
-        normalize_images: bool = True,
-        update_epochs: int = 4,
-        actor_networks: list[EvolvableModule] | ModuleDict | None = None,
-        critic_networks: list[EvolvableModule] | ModuleDict | None = None,
-        action_batch_size: int | None = None,
-        device: str = "cpu",
-        accelerator: Accelerator | None = None,
-        torch_compiler: str | None = None,
-        wrap: bool = True,
+        member: PopulationIndex | None = None,
+        learn: PPOLearnConfig | None = None,
+        network: IPPONetworkSetup | None = None,
+        agents: IPPOAgentSetup | None = None,
+        runtime: AlgorithmRuntime | None = None,
     ) -> None:
+        member = member or PopulationIndex()
+        learn = learn or PPOLearnConfig()
+        network = network or IPPONetworkSetup()
+        agents = agents or IPPOAgentSetup()
+        runtime = runtime or AlgorithmRuntime()
+        mut = member.mut
+        batch_size = learn.batch_size
+        lr = learn.lr
+        learn_step = learn.learn_step
+        gamma = learn.gamma
+        gae_lambda = learn.gae_lambda
+        clip_coef = learn.clip_coef
+        ent_coef = learn.ent_coef
+        vf_coef = learn.vf_coef
+        max_grad_norm = learn.max_grad_norm
+        target_kl = learn.target_kl
+        update_epochs = learn.update_epochs
+        net_config = network.net_config
+        actor_networks = network.actor_networks
+        critic_networks = network.critic_networks
+        action_std_init = network.action_std_init
+        action_batch_size = network.action_batch_size
+        wrap = runtime.wrap
+
         super().__init__(
             observation_spaces,
             action_spaces,
-            index=index,
-            agent_ids=agent_ids,
-            hp_config=hp_config,
-            device=device,
-            accelerator=accelerator,
-            torch_compiler=torch_compiler,
-            normalize_images=normalize_images,
-            placeholder_value=None,
-            name="IPPO",
+            member=member,
+            agents=agents,
+            runtime=replace(runtime, name=runtime.name or "IPPO"),
         )
 
         assert learn_step >= 1, "Learn step must be greater than or equal to one."

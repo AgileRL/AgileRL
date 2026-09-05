@@ -747,7 +747,6 @@ class TestDatasetsCreateCommand:
             column_mapping='{"prompt": "question"}',
             description="test set",
             file=csv_file,
-            config=None,
             hf_dataset_name=None,
             hf_config=None,
             hf_split=None,
@@ -762,43 +761,6 @@ class TestDatasetsCreateCommand:
         assert result.exit_code != 0
         assert "Provide --column-mapping or --column-mapping-file." in result.output
         mock_client.create_dataset.assert_not_called()
-
-    def test_create_with_parquet_folder_and_config(self, runner, mock_client, tmp_path):
-        mapping_file = tmp_path / "mapping.json"
-        mapping_file.write_text('{"question": "q"}', encoding="utf-8")
-        shard = tmp_path / "main" / "train.parquet"
-        shard.parent.mkdir()
-        shard.write_bytes(b"PAR1")
-        mock_client.create_dataset.return_value = {"name": "gsm8k", "id": 2}
-        with _patched_arena_client(mock_client):
-            result = runner.invoke(
-                main,
-                [
-                    "datasets",
-                    "create",
-                    "gsm8k",
-                    "--category",
-                    "reasoning",
-                    "--column-mapping-file",
-                    str(mapping_file),
-                    "--file",
-                    str(tmp_path),
-                    "--config",
-                    "main",
-                ],
-            )
-        assert result.exit_code == 0
-        mock_client.create_dataset.assert_called_once_with(
-            name="gsm8k",
-            category="reasoning",
-            column_mapping='{"question": "q"}',
-            description=None,
-            file=tmp_path,
-            config="main",
-            hf_dataset_name=None,
-            hf_config=None,
-            hf_split=None,
-        )
 
 
 class TestDatasetsDeleteCommand:

@@ -2,9 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import logging
-import warnings
-from datetime import datetime
-from typing import Any
+from dataclasses import dataclass
 
 import gymnasium as gym
 import torch
@@ -19,319 +17,170 @@ from agilerl.components.data import (
 )
 from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.components.sampler import Sampler
-from agilerl.hpo.mutation import Mutations
-from agilerl.hpo.tournament import TournamentSelection
-from agilerl.population import Population
-from agilerl.protocols import SelectionStrategyProtocol
-from agilerl.typing import InitHyperparams
-from agilerl.utils.minari_utils import minari_to_agile_buffer
-from agilerl.utils.utils import (
-    default_progress_bar,
-    init_loggers,
-    resolve_selection_strategy,
-    run_selection_and_mutation,
-    save_population_checkpoint,
+from agilerl.training.configs import OfflineDatasetConfig, TrainRunConfig
+from agilerl.training.loop import (
+    TrainSession,
+    close_training,
+    maybe_checkpoint,
+    maybe_evolve,
+    report_after_eval,
+    resolve_train_evolution,
+    start_train_session,
+    stop_if_target,
+    validate_train_run,
 )
+from agilerl.typing import InitHyperparams
+from agilerl.utils.constructor_kwargs import accept_flat_kwargs
+from agilerl.utils.minari_utils import minari_to_agile_buffer
 
 PopulationType = list[CQN]
 
 logger = logging.getLogger(__name__)
 
 
-def train_offline(
-    env: gym.vector.VectorEnv,
-    env_name: str,
-    algo: str,
-    pop: PopulationType,
+@dataclass
+class OfflineSession:
+    """Replay sampler and eval env for one offline training run."""
+
+    train: TrainSession
+    env: gym.vector.VectorEnv
+    sampler: Sampler
+
+
+def _fill_offline_memory(
     memory: ReplayBuffer,
-    init_hp: InitHyperparams = None,
-    mut_p: InitHyperparams = None,
-    max_steps: int = 1000000,
-    evo_steps: int = 10000,
-    eval_steps: int | None = None,
-    eval_loop: int = 1,
-    target: float | None = None,
-    selection_strategy: SelectionStrategyProtocol | None = None,
-    tournament: TournamentSelection | None = None,
-    mutation: Mutations | None = None,
-    checkpoint: int | None = None,
-    checkpoint_path: str | None = None,
-    overwrite_checkpoints: bool = False,
-    save_elite: bool = False,
-    elite_path: str | None = None,
-    wb: bool = False,
-    tensorboard: bool = False,
-    tensorboard_log_dir: str | None = None,
-    verbose: bool = True,
-    accelerator: Accelerator | None = None,
-    dataset: ReplayDataset | None = None,
-    minari_dataset_id: str | None = None,
-    remote: bool = False,
-    wandb_api_key: str | None = None,
-    wandb_kwargs: dict[str, Any] | None = None,
-) -> tuple[PopulationType, list[float]]:
-    """Run the general offline RL training; returns trained population of agents and their fitnesses.
-
-    :param env: The vectorized environment used to evaluate the population
-    :type env: gym.vector.VectorEnv
-    :param env_name: Environment name
-    :type env_name: str
-    :param algo: RL algorithm name
-    :type algo: str
-    :param pop: Population of agents
-    :type pop: list[CQN]
-    :param memory: Experience Replay Buffer
-    :type memory: ReplayBuffer
-    :param init_hp: Dictionary containing initial hyperparameters, defaults to None
-    :type init_hp: dict, optional
-    :param mut_p: Dictionary containing mutation parameters, defaults to None
-    :type mut_p: dict, optional
-    :param max_steps: Maximum number of steps in environment, defaults to 1000000
-    :type max_steps: int, optional
-    :param evo_steps: Evolution frequency (steps), defaults to 10000
-    :type evo_steps: int, optional
-    :param eval_steps: Number of evaluation steps per episode. If None, will evaluate until
-        environment terminates or truncates. Defaults to None
-    :type eval_steps: int, optional
-    :param eval_loop: Number of evaluation episodes, defaults to 1
-    :type eval_loop: int, optional
-    :param target: Target score for early stopping, defaults to None
-    :type target: float, optional
-    :param selection_strategy: selection strategy driving population evolution. A
-        :class:`~agilerl.hpo.tournament.TournamentSelection` or
-        :class:`~agilerl.hpo.multi_frequency.MultiFrequencySelection` (MF-PBT) object,
-        defaults to None
-    :type selection_strategy: object, optional
-    :param tournament: Deprecated alias for selection_strategy (a
-        :class:`~agilerl.hpo.tournament.TournamentSelection` object), defaults to None
-    :type tournament: object, optional
-    :param mutation: Mutation object, defaults to None
-    :type mutation: object, optional
-    :param checkpoint: Checkpoint frequency (steps), defaults to None
-    :type checkpoint: int, optional
-    :param checkpoint_path: Location to save checkpoint, defaults to None
-    :type checkpoint_path: str, optional
-    :param overwrite_checkpoints: Overwrite previous checkpoints during training, defaults to False
-    :type overwrite_checkpoints: bool, optional
-    :param save_elite: Boolean flag indicating whether to save elite member at the end
-        of training, defaults to False
-    :type save_elite: bool, optional
-    :param elite_path: Location to save elite agent, defaults to None
-    :type elite_path: str, optional
-    :param wb: Weights & Biases tracking, defaults to False
-    :type wb: bool, optional
-    :param tensorboard: TensorBoard tracking, defaults to False
-    :type tensorboard: bool, optional
-    :param tensorboard_log_dir: Directory for TensorBoard logs, defaults to None
-    :type tensorboard_log_dir: str, optional
-    :param verbose: Display training stats, defaults to True
-    :type verbose: bool, optional
-    :param accelerator: Accelerator for distributed computing, defaults to None
-    :type accelerator: accelerate.Accelerator(), optional
-    :param dataset: Offline RL dataset (h5py file). Required when
-        ``minari_dataset_id`` is not provided, defaults to None
-    :type dataset: ReplayDataset | None, optional
-    :param minari_dataset_id: Minari dataset ID for loading data, defaults to None
-    :type minari_dataset_id: str, optional
-    :param remote: Load Minari dataset from remote, defaults to False
-    :type remote: bool, optional
-    :param wandb_api_key: API key for Weights & Biases, defaults to None
-    :type wandb_api_key: str, optional
-    :param wandb_kwargs: Additional kwargs to pass to wandb.init()
-    :type wandb_kwargs: dict, optional
-
-    :return: Trained population of agents and their fitnesses
-    :rtype: tuple[list[CQN], list[float]]
-    """
-    selection_strategy = resolve_selection_strategy(selection_strategy, tournament)
-    assert isinstance(
-        algo,
-        str,
-    ), "'algo' must be the name of the algorithm as a string."
-    assert isinstance(max_steps, int), "Number of steps must be an integer."
-    assert isinstance(evo_steps, int), "Evolution frequency must be an integer."
-    if target is not None:
-        assert isinstance(
-            target,
-            (float, int),
-        ), "Target score must be a float or an integer."
-    if checkpoint is not None:
-        assert isinstance(checkpoint, int), "Checkpoint must be an integer."
-    assert isinstance(
-        wb,
-        bool,
-    ), "'wb' must be a boolean flag, indicating whether to record run with W&B"
-    assert isinstance(verbose, bool), "Verbose must be a boolean."
-    if save_elite is False and elite_path is not None:
-        warnings.warn(
-            "'save_elite' set to False but 'elite_path' has been defined, elite will not\
-                      be saved unless 'save_elite' is set to True.",
-            stacklevel=2,
-        )
-    if checkpoint is None and checkpoint_path is not None:
-        warnings.warn(
-            "'checkpoint' set to None but 'checkpoint_path' has been defined, checkpoint will not\
-                      be saved unless 'checkpoint' is defined.",
-            stacklevel=2,
-        )
-
-    save_path = (
-        checkpoint_path.split(".pt")[0]
-        if checkpoint_path is not None
-        else "{}-EvoHPO-{}-{}".format(
-            env_name,
-            algo,
-            datetime.now().strftime("%m%d%Y%H%M%S"),
-        )
-    )
-
+    data: OfflineDatasetConfig,
+    accelerator: Accelerator | None,
+) -> ReplayBuffer:
+    """Load a Minari id or a transition dict into *memory*."""
     if accelerator is not None:
         if accelerator.is_main_process:
             logger.info("Filling replay buffer with dataset...")
         accelerator.wait_for_everyone()
     else:
         logger.info("Filling replay buffer with dataset...")
-
-    if minari_dataset_id:
-        memory = minari_to_agile_buffer(minari_dataset_id, memory, accelerator, remote)
-
-    elif dataset is not None:
-        dataset_length = dataset["rewards"].shape[0]
-        for i in range(dataset_length - 1):
-            obs = dataset["observations"][i]
-            next_obs = dataset["observations"][i + 1]
-            action = dataset["actions"][i]
-            reward = dataset["rewards"][i]
-            done = bool(dataset["terminals"][i])
-
-            # Add transition to memory
-            transition = transition_to_tensordict(
-                Transition(
-                    obs=obs,
-                    action=action,
-                    reward=reward,
-                    next_obs=next_obs,
-                    done=done,
-                )
-            ).unsqueeze(0)
-            transition.batch_size = torch.Size([1])
-            memory.add(transition)
-
-        if accelerator is not None:
-            accelerator.wait_for_everyone()
-
-    else:
+    if data.minari_dataset_id:
+        return minari_to_agile_buffer(
+            data.minari_dataset_id,
+            memory,
+            accelerator,
+            data.remote,
+        )
+    if data.dataset is None:
         msg = "Either 'minari_dataset_id' or 'dataset' must be provided for offline training."
         raise ValueError(msg)
-
+    dataset = data.dataset
+    dataset_length = dataset["rewards"].shape[0]
+    for i in range(dataset_length - 1):
+        transition = transition_to_tensordict(
+            Transition(
+                obs=dataset["observations"][i],
+                action=dataset["actions"][i],
+                reward=dataset["rewards"][i],
+                next_obs=dataset["observations"][i + 1],
+                done=bool(dataset["terminals"][i]),
+            )
+        ).unsqueeze(0)
+        transition.batch_size = torch.Size([1])
+        memory.add(transition)
     if accelerator is not None:
-        # Create dataloader from replay buffer
-        replay_dataset = ReplayDataset(memory, pop[0].batch_size)
-        replay_dataloader = DataLoader(replay_dataset, batch_size=None)
-        replay_dataloader = accelerator.prepare(replay_dataloader)
-        sampler = Sampler(dataset=replay_dataset, dataloader=replay_dataloader)
-    else:
-        sampler = Sampler(memory=memory)
+        accelerator.wait_for_everyone()
+    return memory
 
-    # Format progress bar
-    pbar = default_progress_bar(max_steps, accelerator)
 
-    loggers = init_loggers(
+def _offline_sampler(
+    pop: PopulationType,
+    memory: ReplayBuffer,
+    accelerator: Accelerator | None,
+) -> Sampler:
+    """Build a replay sampler, wrapping the buffer in a dataloader when distributed."""
+    if accelerator is None:
+        return Sampler(memory=memory)
+    replay_dataset = ReplayDataset(memory, pop[0].batch_size)
+    replay_dataloader = accelerator.prepare(DataLoader(replay_dataset, batch_size=None))
+    return Sampler(dataset=replay_dataset, dataloader=replay_dataloader)
+
+
+def _learn_offline_generation(session: OfflineSession) -> None:
+    """Sample replay and learn for one evolution window per agent."""
+    if session.train.accelerator is not None:
+        session.train.accelerator.wait_for_everyone()
+    evo_steps = session.train.run.loop.evo_steps
+    for agent in session.train.population.agents:
+        agent.set_training_mode(True)
+        agent.init_training_step(session.train.capture_grama)
+        for _ in range(evo_steps):
+            agent.learn(session.sampler.sample(agent.batch_size))
+        agent.finalize_training_step(evo_steps)
+        session.train.pbar.update(evo_steps // session.train.population.size)
+
+
+def _evaluate_offline(session: OfflineSession) -> None:
+    """Run test episodes in the evaluation environment."""
+    loop = session.train.run.loop
+    for agent in session.train.population.agents:
+        agent.test(session.env, max_steps=loop.eval_steps, loop=loop.eval_loop)
+
+
+@accept_flat_kwargs
+def train_offline(
+    env: gym.vector.VectorEnv,
+    env_name: str,
+    algo: str,
+    pop: PopulationType,
+    memory: ReplayBuffer,
+    run: TrainRunConfig | None = None,
+    data: OfflineDatasetConfig | None = None,
+    init_hp: InitHyperparams = None,
+    accelerator: Accelerator | None = None,
+) -> tuple[PopulationType, list[float]]:
+    """Train an offline population; returns agents and fitnesses.
+
+    :param env: Vectorized environment used to evaluate the population.
+    :type env: gym.vector.VectorEnv
+    :param env_name: Environment name used in logs and checkpoint paths.
+    :type env_name: str
+    :param algo: Algorithm name.
+    :type algo: str
+    :param pop: Population of offline agents.
+    :type pop: list
+    :param memory: Replay buffer filled from *data*.
+    :type memory: ReplayBuffer
+    :param run: Loop, evolution, checkpoint, and logging settings.
+    :type run: TrainRunConfig, optional
+    :param data: Minari id or transition dict used to fill the buffer.
+    :type data: OfflineDatasetConfig, optional
+    :param init_hp: Initial hyperparameters logged to W&B.
+    :type init_hp: dict, optional
+    :param accelerator: Accelerator for distributed training.
+    :type accelerator: Accelerator, optional
+    :return: Trained population and last fitnesses.
+    :rtype: tuple[list, list[float]]
+    """
+    run = resolve_train_evolution(run or TrainRunConfig())
+    data = data or OfflineDatasetConfig()
+    validate_train_run(run, algo=algo)
+    memory = _fill_offline_memory(memory, data, accelerator)
+    train = start_train_session(
+        pop,
+        run,
         algo=algo,
         env_name=env_name,
-        pbar=pbar,
-        verbose=verbose,
-        wb=wb,
-        tensorboard=tensorboard,
-        tensorboard_log_dir=tensorboard_log_dir,
         accelerator=accelerator,
-        wandb_api_key=wandb_api_key,
-        wandb_kwargs=wandb_kwargs,
-        init_hyperparams=init_hp,
-        mutation_hyperparams=mut_p,
+        init_hp=init_hp,
     )
-
-    # Initialize population wrapper for metrics reporting
-    population = Population(
-        agents=pop,
-        accelerator=accelerator,
-        loggers=loggers,
+    session = OfflineSession(
+        train=train,
+        env=env,
+        sampler=_offline_sampler(pop, memory, accelerator),
     )
-
-    # Enable the per-neuron gradient capture that ReGraMa parameter mutations read.
-    capture_grama = mutation is not None and mutation.parameters_mut > 0
-
-    checkpoint_count = 0
-
-    # Pre-training mutation
-    if accelerator is None and mutation is not None:
-        population.update(mutation.mutation(population.agents, pre_training_mut=True))
-
-    # RL training loop
-    while population.all_below(max_steps):
-        if accelerator is not None:
-            accelerator.wait_for_everyone()
-
-        for agent in population.agents:
-            agent.set_training_mode(True)
-            agent.init_training_step(capture_grama)
-
-            # `Sampler.sample` is typed as returning a bare `TensorDict`; the cast
-            # asserts the concrete replay-batch layout `CQN.learn` consumes.
-            for _idx_step in range(evo_steps):
-                experiences = sampler.sample(agent.batch_size)
-                agent.learn(experiences)
-
-            agent.finalize_training_step(evo_steps)
-            pbar.update(evo_steps // population.size)
-
-        # Evaluate population
-        for agent in population.agents:
-            agent.test(
-                env,
-                max_steps=eval_steps,
-                loop=eval_loop,
-            )
-
-        # Report progress
-        population.increment_evo_step()
-        population.report_metrics(clear=True)
-
-        # Check if we have met the target score
-        if population.should_stop(target):
-            logger.info("Target score has been reached. Stopping training.")
-            population.finish()
-            pbar.close()
-            # Single-agent fitnesses are scalars; `Population` types them as the
-            # wider scalar-or-per-agent-dict row shared with multi-agent training.
-            return population.agents, population.last_scalar_fitnesses
-
-        # Perform HPO
-        if selection_strategy is not None and mutation is not None:
-            population.update(
-                run_selection_and_mutation(
-                    selection_strategy,
-                    population=population.agents,
-                    mutation=mutation,
-                    env_name=env_name,
-                    algo=algo,
-                    elite_path=elite_path,
-                    save_elite=save_elite,
-                    accelerator=accelerator,
-                ),
-            )
-
-        # Save model checkpoint
-        if checkpoint is not None:
-            if population.agents[0].metrics.steps // checkpoint > checkpoint_count:
-                save_population_checkpoint(
-                    population=population.agents,
-                    save_path=save_path,
-                    overwrite_checkpoints=overwrite_checkpoints,
-                    accelerator=accelerator,
-                )
-                checkpoint_count += 1
-
-    population.finish()
-    pbar.close()
-    return population.agents, population.last_scalar_fitnesses
+    while train.population.all_below(run.loop.max_steps):
+        _learn_offline_generation(session)
+        _evaluate_offline(session)
+        report_after_eval(train)
+        if stop_if_target(train):
+            return train.population.agents, train.population.last_scalar_fitnesses
+        maybe_evolve(train)
+        maybe_checkpoint(train, steps=train.population.agents[0].metrics.steps)
+    close_training(train)
+    return train.population.agents, train.population.last_scalar_fitnesses

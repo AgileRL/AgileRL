@@ -10,14 +10,19 @@ import gymnasium as gym
 import numpy as np
 import numpy.typing as npt
 import torch
-from accelerate import Accelerator
 from gymnasium import spaces
 from tensordict import TensorDict
 from torch import nn, optim
 
+from agilerl.algorithms.configs import (
+    ActorCriticNetworkSetup,
+    AlgorithmRuntime,
+    ExplorationNoise,
+    PopulationIndex,
+    TD3LearnConfig,
+)
 from agilerl.algorithms.core import OptimizerWrapper, RLAlgorithm
 from agilerl.algorithms.core.registry import (
-    HyperparameterConfig,
     NetworkGroup,
     make_default_hp_config,
 )
@@ -114,31 +119,42 @@ class TD3(RLAlgorithm[TensorDict]):
         self,
         observation_space: SupportedObservationSpace,
         action_space: spaces.Box,
-        O_U_noise: bool = True,
-        vect_noise_dim: int = 1,
-        expl_noise: float | npt.NDArray = 0.1,
-        mean_noise: float | npt.NDArray = 0.0,
-        theta: float = 0.15,
-        dt: float = 1e-2,
-        index: int = 0,
-        hp_config: HyperparameterConfig | None = None,
-        net_config: dict[str, Any] | None = None,
-        batch_size: int = 64,
-        lr_actor: float = 1e-4,
-        lr_critic: float = 1e-3,
-        learn_step: int = 5,
-        gamma: float = 0.99,
-        tau: float = 0.005,
-        normalize_images: bool = True,
-        mut: str | None = None,
-        policy_freq: int = 2,
-        actor_network: EvolvableModule | None = None,
-        critic_networks: list[EvolvableModule] | None = None,
-        share_encoders: bool = False,
-        device: str = "cpu",
-        accelerator: Accelerator | None = None,
-        wrap: bool = True,
+        member: PopulationIndex | None = None,
+        learn: TD3LearnConfig | None = None,
+        network: ActorCriticNetworkSetup | None = None,
+        noise: ExplorationNoise | None = None,
+        runtime: AlgorithmRuntime | None = None,
     ) -> None:
+        member = member or PopulationIndex()
+        learn = learn or TD3LearnConfig()
+        network = network or ActorCriticNetworkSetup()
+        noise = noise or ExplorationNoise()
+        runtime = runtime or AlgorithmRuntime()
+        index = member.index
+        hp_config = member.hp_config
+        mut = member.mut
+        batch_size = learn.batch_size
+        lr_actor = learn.lr_actor
+        lr_critic = learn.lr_critic
+        learn_step = learn.learn_step
+        gamma = learn.gamma
+        tau = learn.tau
+        policy_freq = learn.policy_freq
+        net_config = network.net_config
+        actor_network = network.actor_network
+        critic_networks = network.critic_networks
+        share_encoders = network.share_encoders
+        normalize_images = network.normalize_images
+        O_U_noise = noise.O_U_noise
+        expl_noise = noise.expl_noise
+        vect_noise_dim = noise.vect_noise_dim
+        mean_noise = noise.mean_noise
+        theta = noise.theta
+        dt = noise.dt
+        device = runtime.device
+        accelerator = runtime.accelerator
+        wrap = runtime.wrap
+
         super().__init__(
             observation_space,
             action_space,
@@ -147,7 +163,7 @@ class TD3(RLAlgorithm[TensorDict]):
             device=device,
             accelerator=accelerator,
             normalize_images=normalize_images,
-            name="TD3",
+            name=runtime.name or "TD3",
         )
 
         assert isinstance(

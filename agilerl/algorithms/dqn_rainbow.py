@@ -7,15 +7,19 @@ import gymnasium as gym
 import numpy as np
 import numpy.typing as npt
 import torch
-from accelerate import Accelerator
 from gymnasium import spaces
 from tensordict import TensorDict
 from torch import optim
 from torch.nn.utils import clip_grad_norm_
 
+from agilerl.algorithms.configs import (
+    AlgorithmRuntime,
+    PopulationIndex,
+    QNetworkSetup,
+    RainbowLearnConfig,
+)
 from agilerl.algorithms.core import OptimizerWrapper, RLAlgorithm
 from agilerl.algorithms.core.registry import (
-    HyperparameterConfig,
     NetworkGroup,
     make_default_hp_config,
 )
@@ -104,29 +108,38 @@ class RainbowDQN(RLAlgorithm[TensorDict]):
         self,
         observation_space: SupportedObservationSpace,
         action_space: spaces.Discrete,
-        index: int = 0,
-        hp_config: HyperparameterConfig | None = None,
-        net_config: dict[str, Any] | None = None,
-        batch_size: int = 64,
-        lr: float = 1e-4,
-        learn_step: int = 5,
-        gamma: float = 0.99,
-        tau: float = 1e-3,
-        beta: float = 0.4,
-        prior_eps: float = 1e-6,
-        num_atoms: int = 51,
-        v_min: float = 0,
-        v_max: float = 200,
-        noise_std: float = 0.5,
-        n_step: int = 3,
-        mut: str | None = None,
-        normalize_images: bool = True,
-        combined_reward: bool = False,
-        actor_network: EvolvableModule | None = None,
-        device: str = "cpu",
-        accelerator: Accelerator | None = None,
-        wrap: bool = True,
+        member: PopulationIndex | None = None,
+        learn: RainbowLearnConfig | None = None,
+        network: QNetworkSetup | None = None,
+        runtime: AlgorithmRuntime | None = None,
     ) -> None:
+        member = member or PopulationIndex()
+        learn = learn or RainbowLearnConfig()
+        network = network or QNetworkSetup()
+        runtime = runtime or AlgorithmRuntime()
+        index = member.index
+        hp_config = member.hp_config
+        mut = member.mut
+        batch_size = learn.batch_size
+        lr = learn.lr
+        learn_step = learn.learn_step
+        gamma = learn.gamma
+        tau = learn.tau
+        beta = learn.beta
+        prior_eps = learn.prior_eps
+        num_atoms = learn.num_atoms
+        v_min = learn.v_min
+        v_max = learn.v_max
+        noise_std = learn.noise_std
+        n_step = learn.n_step
+        combined_reward = learn.combined_reward
+        net_config = network.net_config
+        actor_network = network.actor_network
+        normalize_images = network.normalize_images
+        device = runtime.device
+        accelerator = runtime.accelerator
+        wrap = runtime.wrap
+
         super().__init__(
             observation_space,
             action_space,
@@ -135,7 +148,7 @@ class RainbowDQN(RLAlgorithm[TensorDict]):
             device=device,
             accelerator=accelerator,
             normalize_images=normalize_images,
-            name="Rainbow DQN",
+            name=runtime.name or "Rainbow DQN",
         )
 
         assert learn_step >= 1, "Learn step must be greater than or equal to one."

@@ -5,7 +5,8 @@ import gc
 import warnings
 from contextlib import contextmanager
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
+from unittest.mock import patch as unittest_patch
 
 import pytest
 import torch
@@ -26,11 +27,14 @@ from agilerl.algorithms.reinforce_llm import REINFORCE
 from agilerl.llm_envs import RolloutHarness
 from agilerl.utils.algo_utils import CosineLRScheduleConfig, VLLMConfig
 from tests import TINY_LLM_FIXTURE_PATH
+from tests.helpers.patch_algo_core import make_core_patch, setattr_core
 from tests.helpers.rollout_doubles import FakeEnvClient, RolloutHarnessDouble
 from tests.utils import (
     assert_vllm_get_action_contract,
     make_mock_vllm_instance,
 )
+
+patch = make_core_patch(unittest_patch)
 
 deepspeed_base_config = {
     "bf16": {
@@ -601,7 +605,7 @@ class TestREINFORCEInit:
         """Liger + non-token IS is permitted but not memory-bounded; the
         constructor emits the canonical warning once via the base helper.
         """
-        monkeypatch.setattr("agilerl.algorithms.core.base.HAS_LIGER_KERNEL", True)
+        setattr_core(monkeypatch, "HAS_LIGER_KERNEL", True)
         monkeypatch.setattr("agilerl.algorithms.reinforce_llm.HAS_LIGER_KERNEL", True)
         with pytest.warns(UserWarning, match="NOT memory-bounded"):
             rf = _cpu_llmreinforce(
@@ -1421,7 +1425,7 @@ class TestREINFORCELearnWithLiger:
         # Force the construct-time HAS_LIGER_KERNEL guard to allow
         # ``use_liger_loss=True`` even on environments without
         # ``liger-kernel`` installed.
-        monkeypatch.setattr("agilerl.algorithms.core.base.HAS_LIGER_KERNEL", True)
+        setattr_core(monkeypatch, "HAS_LIGER_KERNEL", True)
         monkeypatch.setattr("agilerl.algorithms.reinforce_llm.HAS_LIGER_KERNEL", True)
         rf = _cpu_llmreinforce(lr=0.05, update_epochs=1, use_liger_loss=True)
         assert rf.use_liger_loss is True
@@ -1456,7 +1460,7 @@ class TestREINFORCELearnWithLiger:
         correction is fused into the kernel (``vllm_is_ratio``), so learn()
         keeps the fused path and threads ``sampling_log_probs`` through.
         """
-        monkeypatch.setattr("agilerl.algorithms.core.base.HAS_LIGER_KERNEL", True)
+        setattr_core(monkeypatch, "HAS_LIGER_KERNEL", True)
         monkeypatch.setattr("agilerl.algorithms.reinforce_llm.HAS_LIGER_KERNEL", True)
         rf = _cpu_llmreinforce(lr=0.05, update_epochs=1, use_liger_loss=True)
         assert rf.importance_sampling_level == "token"
@@ -1502,7 +1506,7 @@ class TestREINFORCELearnWithLiger:
         reweight can't be pooled into the turn ratio, so learn() warns once and
         routes the minibatch through the standard PyTorch path.
         """
-        monkeypatch.setattr("agilerl.algorithms.core.base.HAS_LIGER_KERNEL", True)
+        setattr_core(monkeypatch, "HAS_LIGER_KERNEL", True)
         monkeypatch.setattr("agilerl.algorithms.reinforce_llm.HAS_LIGER_KERNEL", True)
         rf = _cpu_llmreinforce(
             lr=0.05,

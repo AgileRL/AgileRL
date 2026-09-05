@@ -6,6 +6,7 @@ import logging
 import warnings
 from collections import OrderedDict
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from typing import Any, TypeVar
 
 import numpy as np
@@ -24,6 +25,7 @@ from agilerl.modules import EvolvableModule, ModuleDict
 from agilerl.protocols import EvolvableAlgorithmProtocol
 from agilerl.typing import MutationReturn
 from agilerl.utils.algo_utils import remove_compile_prefix
+from agilerl.utils.constructor_kwargs import accept_flat_kwargs
 from agilerl.utils.mutation_utils import (
     as_module_dict,
     get_exp_layer,
@@ -53,6 +55,117 @@ torch._logging.set_logs(dynamo=logging.FATAL)
 _UNSUPPORTED_ACTIVATION_MUTATION_ALGOS = frozenset(
     {"PPO", "DDPG", "TD3", "IPPO", "MADDPG", "MATD3"},
 )
+
+
+@dataclass(frozen=True)
+class MutationRates:
+    """Relative probabilities for each mutation type."""
+
+    no_mutation: float
+    architecture: float
+    new_layer_prob: float
+    parameters: float
+    activation: float
+    rl_hp: float
+
+
+@dataclass(frozen=True)
+class MutationNoise:
+    """Mutation strength and dormant-neuron threshold."""
+
+    mutation_sd: float = 0.1
+    dormant_threshold: float = 0.01
+
+
+@dataclass(frozen=True)
+class MutationOptions:
+    """Activation choices, elite mutation, and RNG seed."""
+
+    activation_selection: list[str] | None = None
+    mutate_elite: bool = True
+    rand_seed: int | None = None
+
+
+@dataclass(frozen=True)
+class MutationRuntime:
+    """Device placement for mutation operators."""
+
+    device: str = "cpu"
+    accelerator: Accelerator | None = None
+
+
+DEFAULT_MUTATION_NOISE = MutationNoise()
+DEFAULT_MUTATION_OPTIONS = MutationOptions()
+DEFAULT_MUTATION_RUNTIME = MutationRuntime()
+
+
+def _validate_mutation_rates(rates: MutationRates) -> None:
+    """Raise AssertionError when a mutation probability is invalid."""
+    assert isinstance(rates.no_mutation, (float, int)), (
+        "Probability of no mutation must be a float or integer."
+    )
+    assert rates.no_mutation >= 0, (
+        "Probability of no mutation must be greater than or equal to zero."
+    )
+    assert isinstance(rates.architecture, (float, int)), (
+        "Probability of architecture mutation must be a float or integer."
+    )
+    assert rates.architecture >= 0, (
+        "Probability of architecture mutation must be greater than or equal to zero."
+    )
+    assert isinstance(rates.new_layer_prob, (float, int)), (
+        "Probability of new layer architecture mutation must be a float or integer."
+    )
+    assert 1 >= rates.new_layer_prob >= 0, (
+        "Probability of new layer architecture mutation must be between zero and one (inclusive)."
+    )
+    assert isinstance(rates.parameters, (float, int)), (
+        "Probability of parameters mutation must be a float or integer."
+    )
+    assert rates.parameters >= 0, (
+        "Probability of parameters mutation must be greater than or equal to zero."
+    )
+    assert isinstance(rates.activation, (float, int)), (
+        "Probability of activation mutation must be a float or integer."
+    )
+    assert rates.activation >= 0, (
+        "Probability of activation mutation must be greater than or equal to zero."
+    )
+    assert isinstance(rates.rl_hp, (float, int)), (
+        "Probability of reinforcement learning hyperparameter mutation must be a float or integer."
+    )
+    assert rates.rl_hp >= 0, (
+        "Probability of reinforcement learning hyperparameter mutation must be greater than or equal to zero."
+    )
+
+
+def _validate_mutation_noise_and_options(
+    noise: MutationNoise,
+    options: MutationOptions,
+) -> None:
+    """Raise AssertionError when mutation noise or option arguments are invalid."""
+    assert isinstance(noise.mutation_sd, (float, int)), (
+        "Mutation strength must be a float or integer."
+    )
+    assert noise.mutation_sd >= 0, (
+        "Mutation strength must be greater than or equal to zero."
+    )
+    assert isinstance(options.mutate_elite, bool), (
+        "Mutate elite must be boolean value True or False."
+    )
+    assert isinstance(options.rand_seed, int) or options.rand_seed is None, (
+        "Random seed must be an integer or None."
+    )
+    if isinstance(options.rand_seed, int):
+        assert options.rand_seed >= 0, (
+            "Random seed must be greater than or equal to zero."
+        )
+    assert isinstance(noise.dormant_threshold, (float, int)), (
+        "Dormant threshold must be a float or integer."
+    )
+    assert noise.dormant_threshold >= 0, (
+        "Dormant threshold must be greater than or equal to zero."
+    )
 
 
 class Mutations:
@@ -101,116 +214,38 @@ class Mutations:
     :type accelerator: accelerate.Accelerator(), optional
     """
 
+    @accept_flat_kwargs
     def __init__(
         self,
-        no_mutation: float,
-        architecture: float,
-        new_layer_prob: float,
-        parameters: float,
-        activation: float,
-        rl_hp: float,
-        mutation_sd: float = 0.1,
-        dormant_threshold: float = 0.01,
-        activation_selection: list[str] | None = None,
-        mutate_elite: bool = True,
-        rand_seed: int | None = None,
-        device: str = "cpu",
-        accelerator: Accelerator | None = None,
+        rates: MutationRates,
+        noise: MutationNoise = DEFAULT_MUTATION_NOISE,
+        options: MutationOptions = DEFAULT_MUTATION_OPTIONS,
+        runtime: MutationRuntime = DEFAULT_MUTATION_RUNTIME,
     ) -> None:
+        activation_selection = options.activation_selection
         if activation_selection is None:
             activation_selection = ["ReLU", "ELU", "GELU"]
-        assert isinstance(
-            no_mutation,
-            (float, int),
-        ), "Probability of no mutation must be a float or integer."
-        assert no_mutation >= 0, (
-            "Probability of no mutation must be greater than or equal to zero."
-        )
-        assert isinstance(
-            architecture,
-            (float, int),
-        ), "Probability of architecture mutation must be a float or integer."
-        assert architecture >= 0, (
-            "Probability of architecture mutation must be greater than or equal to zero."
-        )
-        assert isinstance(
-            new_layer_prob,
-            (float, int),
-        ), "Probability of new layer architecture mutation must be a float or integer."
-        assert 1 >= new_layer_prob >= 0, (
-            "Probability of new layer architecture mutation must be between zero and one (inclusive)."
-        )
-        assert isinstance(
-            parameters,
-            (float, int),
-        ), "Probability of parameters mutation must be a float or integer."
-        assert parameters >= 0, (
-            "Probability of parameters mutation must be greater than or equal to zero."
-        )
-        assert isinstance(
-            activation,
-            (float, int),
-        ), "Probability of activation mutation must be a float or integer."
-        assert activation >= 0, (
-            "Probability of activation mutation must be greater than or equal to zero."
-        )
-        assert isinstance(
-            rl_hp,
-            (float, int),
-        ), (
-            "Probability of reinforcement learning hyperparameter mutation must be a float or integer."
-        )
-        assert rl_hp >= 0, (
-            "Probability of reinforcement learning hyperparameter mutation must be greater than or equal to zero."
-        )
-        assert mutation_sd >= 0, (
-            "Mutation strength must be greater than or equal to zero."
-        )
-        assert isinstance(
-            mutation_sd,
-            (float, int),
-        ), "Mutation strength must be a float or integer."
-        assert isinstance(
-            mutate_elite,
-            bool,
-        ), "Mutate elite must be boolean value True or False."
-        assert isinstance(rand_seed, int) or rand_seed is None, (
-            "Random seed must be an integer or None."
-        )
-        if isinstance(rand_seed, int):
-            assert rand_seed >= 0, "Random seed must be greater than or equal to zero."
-        assert isinstance(
-            dormant_threshold,
-            (float, int),
-        ), "Dormant threshold must be a float or integer."
-        assert dormant_threshold >= 0, (
-            "Dormant threshold must be greater than or equal to zero."
-        )
+        _validate_mutation_rates(rates)
+        _validate_mutation_noise_and_options(noise, options)
 
-        # Random seed for repeatability
-        set_global_seed(rand_seed)
-        self.rng = np.random.default_rng(rand_seed)
+        set_global_seed(options.rand_seed)
+        self.rng = np.random.default_rng(options.rand_seed)
 
-        # Relative probabilities of mutation
-        self.no_mut = no_mutation  # No mutation
-        self.architecture_mut = architecture  # Architecture mutation
-        self.new_layer_prob = (
-            new_layer_prob  # New layer mutation (type of architecture mutation)
-        )
-        self.parameters_mut = parameters  # Network parameters mutation
-        self.activation_mut = activation  # Activation layer mutation
-        self.rl_hp_mut = rl_hp  # Learning HP mutation
-        self.activation_selection = activation_selection  # Activation functions
-        self.mutation_sd = mutation_sd  # Mutation strength
-        self.mutate_elite = mutate_elite
-        self.device = device
-        self.accelerator = accelerator
-
-        self.dormant_threshold = dormant_threshold
-        # The noise used to initialise new units in function-preserving architecture mutations is
-        # drawn independently not to affect the trajectory of the random generator used for mutations,
-        # as the number of neurons added depends on the generator carried by the evolvable module.
-        self._fp_rng = np.random.default_rng(rand_seed)
+        self.no_mut = rates.no_mutation
+        self.architecture_mut = rates.architecture
+        self.new_layer_prob = rates.new_layer_prob
+        self.parameters_mut = rates.parameters
+        self.activation_mut = rates.activation
+        self.rl_hp_mut = rates.rl_hp
+        self.activation_selection = activation_selection
+        self.mutation_sd = noise.mutation_sd
+        self.mutate_elite = options.mutate_elite
+        self.device = runtime.device
+        self.accelerator = runtime.accelerator
+        self.dormant_threshold = noise.dormant_threshold
+        # Drawn independently of ``self.rng`` so added-neuron count does not
+        # shift the mutation generator.
+        self._fp_rng = np.random.default_rng(options.rand_seed)
 
         self.pretraining_mut_options, self.pretraining_mut_proba = (
             self._get_mutations_options(pretraining=True)

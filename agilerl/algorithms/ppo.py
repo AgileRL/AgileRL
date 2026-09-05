@@ -3,22 +3,27 @@
 
 import copy
 import warnings
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any, overload
 
 import gymnasium as gym
 import numpy as np
 import numpy.typing as npt
 import torch
-from accelerate import Accelerator
 from gymnasium import spaces
 from tensordict import TensorDict
 from torch import optim
 from torch.nn.utils import clip_grad_norm_
 
+from agilerl.algorithms.configs import (
+    AlgorithmRuntime,
+    PopulationIndex,
+    PPOLearnConfig,
+    PPONetworkSetup,
+    PPORolloutConfig,
+)
 from agilerl.algorithms.core import OptimizerWrapper, RLAlgorithm
 from agilerl.algorithms.core.registry import (
-    HyperparameterConfig,
     NetworkGroup,
     make_default_hp_config,
 )
@@ -42,6 +47,55 @@ from agilerl.utils.algo_utils import (
     make_safe_deepcopies,
     share_encoder_parameters,
 )
+
+
+def _stack_vectorized_action_masks(
+    info: Mapping[str, object] | Sequence[object] | npt.NDArray,
+    num_envs: int,
+) -> npt.NDArray | None:
+    """Stack per-env ``action_mask`` values from vectorized ``env.step`` info."""
+    if (
+        isinstance(info, (list, np.ndarray))
+        and len(info) == num_envs
+        and all(isinstance(i, dict) for i in info)
+    ):
+        masks = [
+            env_info.get("action_mask")
+            for env_info in info
+            if isinstance(env_info, dict)
+        ]
+        present_masks = [m for m in masks if m is not None]
+        if len(present_masks) == len(masks):
+            try:
+                return np.stack(present_masks)
+            except Exception as e:
+                warnings.warn(
+                    f"Could not stack action masks: {e}",
+                    stacklevel=3,
+                )
+                return None
+        if present_masks:
+            warnings.warn(
+                "Action masks not provided for all vectorized environments. Skipping mask.",
+                stacklevel=3,
+            )
+        return None
+    if isinstance(info, dict):
+        return info.get("action_mask", None)
+    return None
+
+
+def _reset_finished_hidden_states(
+    hidden_state: dict[str, torch.Tensor],
+    newly_finished: npt.NDArray,
+    initial_hidden_states: dict[str, torch.Tensor],
+) -> None:
+    """Copy initial hidden states into finished vectorized env slots."""
+    for key in hidden_state:
+        reset_states = initial_hidden_states[key][:, newly_finished, :]
+        if reset_states.shape[1] > 0:
+            hidden_state[key][:, newly_finished, :] = reset_states
+
 
 ActionReturnType = tuple[npt.NDArray, npt.NDArray, npt.NDArray, npt.NDArray]
 RecurrentActionReturnType = tuple[
@@ -131,35 +185,46 @@ class PPO(RLAlgorithm[TensorDict]):
         self,
         observation_space: SupportedObservationSpace,
         action_space: spaces.Space,
-        index: int = 0,
-        hp_config: HyperparameterConfig | None = None,
-        net_config: dict[str, Any] | None = None,
-        batch_size: int = 64,
-        lr: float = 1e-4,
-        learn_step: int = 2048,
-        gamma: float = 0.99,
-        gae_lambda: float = 0.95,
-        mut: str | None = None,
-        action_std_init: float = 0.0,
-        clip_coef: float = 0.2,
-        ent_coef: float = 0.01,
-        vf_coef: float = 0.5,
-        max_grad_norm: float = 0.5,
-        target_kl: float | None = None,
-        normalize_images: bool = True,
-        update_epochs: int = 4,
-        actor_network: EvolvableModule | None = None,
-        critic_network: EvolvableModule | None = None,
-        share_encoders: bool = True,
-        num_envs: int = 1,
-        rollout_buffer_config: dict[str, Any] | None = None,
-        recurrent: bool = False,
-        device: str = "cpu",
-        accelerator: Accelerator | None = None,
-        wrap: bool = True,
-        bptt_sequence_type: str | BPTTSequenceType = BPTTSequenceType.CHUNKED,
-        max_seq_len: int | None = None,
+        member: PopulationIndex | None = None,
+        learn: PPOLearnConfig | None = None,
+        network: PPONetworkSetup | None = None,
+        rollout: PPORolloutConfig | None = None,
+        runtime: AlgorithmRuntime | None = None,
     ) -> None:
+        member = member or PopulationIndex()
+        learn = learn or PPOLearnConfig()
+        network = network or PPONetworkSetup()
+        rollout = rollout or PPORolloutConfig()
+        runtime = runtime or AlgorithmRuntime()
+        index = member.index
+        hp_config = member.hp_config
+        mut = member.mut
+        batch_size = learn.batch_size
+        lr = learn.lr
+        learn_step = learn.learn_step
+        gamma = learn.gamma
+        gae_lambda = learn.gae_lambda
+        clip_coef = learn.clip_coef
+        ent_coef = learn.ent_coef
+        vf_coef = learn.vf_coef
+        max_grad_norm = learn.max_grad_norm
+        target_kl = learn.target_kl
+        update_epochs = learn.update_epochs
+        net_config = network.net_config
+        actor_network = network.actor_network
+        critic_network = network.critic_network
+        share_encoders = network.share_encoders
+        action_std_init = network.action_std_init
+        normalize_images = network.normalize_images
+        num_envs = rollout.num_envs
+        rollout_buffer_config = rollout.rollout_buffer_config
+        recurrent = rollout.recurrent
+        bptt_sequence_type = rollout.bptt_sequence_type
+        max_seq_len = rollout.max_seq_len
+        device = runtime.device
+        accelerator = runtime.accelerator
+        wrap = runtime.wrap
+
         super().__init__(
             observation_space,
             action_space,
@@ -168,7 +233,7 @@ class PPO(RLAlgorithm[TensorDict]):
             device=device,
             accelerator=accelerator,
             normalize_images=normalize_images,
-            name="PPO",
+            name=runtime.name or "PPO",
         )
 
         assert learn_step >= 1, "Learn step must be greater than or equal to one."
@@ -1136,45 +1201,9 @@ class PPO(RLAlgorithm[TensorDict]):
                 # Initialize last_info holder
                 last_infos = [{}] * num_envs if vectorized else {}
                 while not np.all(finished):
-                    # Process action mask
                     action_mask = None
                     if vectorized:
-                        # Check if info is a list/array of dicts
-                        if (
-                            isinstance(info, (list, np.ndarray))
-                            and len(info) == num_envs
-                            and all(isinstance(i, dict) for i in info)
-                        ):
-                            # The guard established one info dict per
-                            # sub-environment.
-                            info_dicts = info
-                            masks = [
-                                env_info.get("action_mask")
-                                for env_info in info_dicts
-                                if isinstance(env_info, dict)
-                            ]
-                            present_masks = [m for m in masks if m is not None]
-                            # If all environments returned a mask and they are not None
-                            if len(present_masks) == len(masks):
-                                try:
-                                    action_mask = np.stack(present_masks)
-                                except Exception as e:
-                                    warnings.warn(
-                                        f"Could not stack action masks: {e}",
-                                        stacklevel=2,
-                                    )
-                                    action_mask = None
-                            # If only some environments returned masks, we probably can't use them reliably
-                            elif present_masks:
-                                warnings.warn(
-                                    "Action masks not provided for all vectorized environments. Skipping mask.",
-                                    stacklevel=2,
-                                )
-                                action_mask = None
-                        # Handle case where info might be a single dict even if vectorized (e.g. VecNormalize)
-                        elif isinstance(info, dict):
-                            action_mask = info.get("action_mask", None)
-
+                        action_mask = _stack_vectorized_action_masks(info, num_envs)
                     elif isinstance(info, dict):
                         action_mask = info.get("action_mask", None)
 
@@ -1217,18 +1246,11 @@ class PPO(RLAlgorithm[TensorDict]):
                             num_envs,
                         )
                         if isinstance(test_hidden_state, dict):
-                            for key in test_hidden_state:
-                                reset_states = initial_hidden_states_for_reset[key][
-                                    :,
-                                    newly_finished,
-                                    :,
-                                ]
-                                if reset_states.shape[1] > 0:
-                                    test_hidden_state[key][
-                                        :,
-                                        newly_finished,
-                                        :,
-                                    ] = reset_states
+                            _reset_finished_hidden_states(
+                                test_hidden_state,
+                                newly_finished,
+                                initial_hidden_states_for_reset,
+                            )
 
                     if np.any(newly_finished):
                         completed_episode_scores[newly_finished] = scores[

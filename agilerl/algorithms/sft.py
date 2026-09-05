@@ -11,9 +11,10 @@ import numpy.typing as npt
 import torch
 
 from agilerl import HAS_LIGER_KERNEL
+from agilerl.algorithms.configs import PopulationIndex, SFTObjective, SFTSetup
 from agilerl.algorithms.core.base import LLMAlgorithm
-from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
-from agilerl.protocols import PreTrainedModelProtocol
+from agilerl.algorithms.core.llm_init import named_llm_setup
+from agilerl.algorithms.core.registry import NetworkGroup
 from agilerl.typing import (
     MultiAgentObservationType,
     ObservationType,
@@ -22,13 +23,9 @@ from agilerl.typing import (
 from agilerl.utils.llm_utils import (
     aggregate_metrics_dict,
     is_sft_prompts,
-    resolve_llm_device,
 )
 
 if TYPE_CHECKING:
-    from accelerate import Accelerator
-    from peft import LoraConfig
-    from transformers import BitsAndBytesConfig
 
     from agilerl.llm_envs import DatasetEnv
 
@@ -142,74 +139,24 @@ class SFT(LLMAlgorithm[SFTPrompts]):
 
     def __init__(
         self,
-        pad_token_id: int,
-        pad_token: str,
-        model_name: str | None = None,
-        actor_network: PreTrainedModelProtocol | None = None,
-        model_config: dict[str, Any] | None = None,
-        hp_config: HyperparameterConfig | None = None,
-        index: int = 0,
-        batch_size: int = 16,
-        lr: float = 5e-5,
-        max_grad_norm: float = 0.1,
-        update_epochs: int = 1,
-        calc_position_embeddings: bool = True,
-        micro_batch_size_per_gpu: int | None = None,
-        mini_batch_size: int | None = None,
-        device: str | torch.device | None = None,
-        lora_config: LoraConfig | None = None,
-        accelerator: Accelerator | None = None,
-        wrap: bool = True,
-        clone: bool = False,
-        seed: int = 42,
-        gradient_checkpointing: bool = True,
-        use_liger_loss: bool = False,
-        chunk_rows: int | None = None,
-        use_separate_reference_adapter: bool = False,
-        quantization_config: BitsAndBytesConfig | None = None,
-        activation_offload: bool = False,
-        lora_target_scope: str | None = None,
+        llm: SFTSetup,
+        objective: SFTObjective | None = None,
+        member: PopulationIndex | None = None,
     ) -> None:
-        resolved_device = resolve_llm_device(accelerator, device)
-        super().__init__(
-            index=index,
-            batch_size=batch_size,
-            lr=lr,
-            max_grad_norm=max_grad_norm,
-            clone=clone,
-            calc_position_embeddings=calc_position_embeddings,
-            seed=seed,
-            pad_token_id=pad_token_id,
-            pad_token=pad_token,
-            use_liger_loss=use_liger_loss,
-            chunk_rows=chunk_rows,
-            lora_config=lora_config,
-            use_separate_reference_adapter=use_separate_reference_adapter,
-            model_name=model_name,
-            actor_network=actor_network,
-            model_config=model_config,
-            micro_batch_size_per_gpu=micro_batch_size_per_gpu,
-            mini_batch_size=mini_batch_size,
-            cosine_lr_schedule_config=None,
-            hp_config=hp_config,
-            wrap=wrap,
-            device=resolved_device,
-            accelerator=accelerator,
-            name="SFT",
-            gradient_checkpointing=gradient_checkpointing,
-            quantization_config=quantization_config,
-            activation_offload=activation_offload,
-            lora_target_scope=lora_target_scope,
-        )
+        objective = objective or SFTObjective()
+        member = member or PopulationIndex()
+        super().__init__(named_llm_setup(llm, "SFT"), member)
+        self._bind_sft(llm, objective)
+
+    def _bind_sft(self, llm: SFTSetup, objective: SFTObjective) -> None:
+        """Bind SFT epoch count and actor networks."""
         self.temperature = 0
         self.use_vllm = False
-        self.update_epochs = update_epochs
-
-        self._initialize_actors(actor_network, not clone)
+        self.update_epochs = objective.update_epochs
+        self._initialize_actors(llm.model.actor_network, not llm.train.clone)
         self.register_network_group(NetworkGroup(eval_network=self.actor, policy=True))
         if self.wrap:
             self.wrap_models()
-
         self.metrics.register("loss")
         self.metrics.register("perplexity")
 

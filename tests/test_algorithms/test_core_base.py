@@ -67,7 +67,8 @@ import warnings
 from contextlib import contextmanager, nullcontext
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
-from unittest.mock import MagicMock, PropertyMock, call, patch
+from unittest.mock import MagicMock, PropertyMock, call
+from unittest.mock import patch as unittest_patch
 
 import dill
 import numpy as np
@@ -96,10 +97,14 @@ from agilerl.algorithms.grpo import GRPO
 from agilerl.modules import EvolvableMLP
 from agilerl.modules.dummy import DummyEvolvable
 from agilerl.utils.algo_utils import VLLMConfig
+from agilerl.utils.constructor_kwargs import assemble_init_kwargs
 from agilerl.utils.mutation_utils import target_activations
 from agilerl.wrappers.agent import RSNorm
 from tests.helper_functions import capture_grama_snapshot
+from tests.helpers.patch_algo_core import make_core_patch, setattr_core
 from tests.test_algorithms.test_base import DummyMARLAlgorithm, DummyRLAlgorithm
+
+patch = make_core_patch(unittest_patch)
 
 create_module = None
 if HAS_DEEPSPEED and HAS_VLLM:
@@ -125,7 +130,8 @@ _VLLM_SKIP = pytest.mark.skipif(not HAS_VLLM, reason="vLLM not installed")
 
 def test_core_base_vllm_types_none_when_vllm_not_installed():
     """vLLM symbols are None when HAS_VLLM is false at import time."""
-    original_module = sys.modules.pop("agilerl.algorithms.core.base", None)
+    original_base = sys.modules.pop("agilerl.algorithms.core.base", None)
+    original_vllm = sys.modules.pop("agilerl.algorithms.core.llm_vllm", None)
 
     try:
         with patch("agilerl.HAS_VLLM", False):
@@ -134,10 +140,16 @@ def test_core_base_vllm_types_none_when_vllm_not_installed():
             assert reloaded.CompletionOutput is None
             assert reloaded.SamplingParams is None
     finally:
-        sys.modules["agilerl.algorithms.core.base"] = original_module
+        if original_vllm is not None:
+            sys.modules["agilerl.algorithms.core.llm_vllm"] = original_vllm
+        if original_base is not None:
+            sys.modules["agilerl.algorithms.core.base"] = original_base
         import agilerl.algorithms.core as _core_pkg
 
-        _core_pkg.base = original_module
+        if original_base is not None:
+            _core_pkg.base = original_base
+        if original_vllm is not None:
+            _core_pkg.llm_vllm = original_vllm
 
 
 @pytest.fixture
@@ -1691,7 +1703,8 @@ class _StubLLMAlgorithm(LLMAlgorithm):
 
     def __init__(self, *args, **kwargs):
         actor_network = kwargs.get("actor_network")
-        super().__init__(*args, **kwargs)
+        assembled = assemble_init_kwargs(LLMAlgorithm, args, kwargs)
+        super().__init__(**assembled)
         if actor_network is not None:
             self.actor = actor_network
 
@@ -4914,26 +4927,29 @@ class TestLLMPreprocessObservation:
 @_LLM_DEPS_SKIP
 class TestLLMInitMissingDeps:
     def test_raises_when_no_llm_deps(self):
-        with patch("agilerl.algorithms.core.base.HAS_LLM_DEPENDENCIES", False):
-            with pytest.raises(ImportError, match="LLM dependencies"):
-                with (
-                    patch.object(EvolvableAlgorithm, "_registry_init"),
-                ):
-                    _StubLLMAlgorithm(
-                        index=0,
-                        batch_size=4,
-                        lr=1e-4,
-                        max_grad_norm=0.0,
-                        clone=True,
-                        calc_position_embeddings=False,
-                        seed=42,
-                        pad_token_id=0,
-                        pad_token="<pad>",
-                        use_liger_loss=False,
-                        lora_config=MagicMock(),
-                        actor_network=_make_mock_peft_actor(),
-                        device="cpu",
-                    )
+        with (
+            patch("agilerl.algorithms.core.base.HAS_LLM_DEPENDENCIES", False),
+            patch("agilerl.algorithms.core.llm_init.HAS_LLM_DEPENDENCIES", False),
+            pytest.raises(ImportError, match="LLM dependencies"),
+        ):
+            with (
+                patch.object(EvolvableAlgorithm, "_registry_init"),
+            ):
+                _StubLLMAlgorithm(
+                    index=0,
+                    batch_size=4,
+                    lr=1e-4,
+                    max_grad_norm=0.0,
+                    clone=True,
+                    calc_position_embeddings=False,
+                    seed=42,
+                    pad_token_id=0,
+                    pad_token="<pad>",
+                    use_liger_loss=False,
+                    lora_config=MagicMock(),
+                    actor_network=_make_mock_peft_actor(),
+                    device="cpu",
+                )
 
     def test_raises_when_no_model_name_or_network(self):
         with pytest.raises(ValueError, match="At least one"):
@@ -5625,10 +5641,11 @@ class TestLLMQuantizedClone:
         ):
             agent._create_clone_instance()
 
-        assert captured["actor_network"] is None
-        assert captured["model_name"] == "org/model"
-        assert captured["clone"] is True
-        assert captured["wrap"] is False
+        llm = captured["llm"]
+        assert llm.model.actor_network is None
+        assert llm.model.model_name == "org/model"
+        assert llm.train.clone is True
+        assert llm.runtime.wrap is False
 
     def test_save_clone_distributed_uses_lora_only_under_zero2(self):
         acc = _make_mock_accelerator(num_processes=1)
@@ -6413,7 +6430,7 @@ class TestLLMConfigureVllmAcceleratorPaths:
                 "agilerl.algorithms.core.base.patch_vllm_3d_moe_lora_flag",
                 return_value=True,
             ) as flag,
-            caplog.at_level(logging.INFO, logger="agilerl.algorithms.core.base"),
+            caplog.at_level(logging.INFO, logger="agilerl.algorithms.core.llm_vllm"),
         ):
             agent._configure_vllm()
 
@@ -7333,7 +7350,7 @@ class TestLLMInitializeActorsStrayAdapter:
                 create=True,
             ),
             patch.object(agent, "use_adapter"),
-            caplog.at_level(logging.WARNING, logger="agilerl.algorithms.core.base"),
+            caplog.at_level(logging.WARNING, logger="agilerl.algorithms.core.llm_actors"),
         ):
             LLMAlgorithm._initialize_actors(agent, base_model, add_adapters=True)
 
@@ -8459,7 +8476,7 @@ class TestGraMaCapture:
             msg = "hook blew up"
             raise RuntimeError(msg)
 
-        monkeypatch.setattr(core_base, "_per_neuron_grad", explode)
+        setattr_core(monkeypatch, "_per_neuron_grad", explode)
 
         with pytest.raises(RuntimeError, match="hook blew up"):
             capture_grama_snapshot(dqn_agent, torch.rand(4, 4))
@@ -8469,7 +8486,7 @@ class TestGraMaCapture:
         dqn_agent,
         monkeypatch,
     ):
-        monkeypatch.setattr(core_base, "_per_neuron_grad", lambda _grad_input: None)
+        setattr_core(monkeypatch, "_per_neuron_grad", lambda _grad_input: None)
 
         capture_grama_snapshot(dqn_agent, torch.rand(4, 4))
 

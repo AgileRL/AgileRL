@@ -16,7 +16,13 @@ import httpx
 import pytest
 
 from agilerl.arena.auth import ArenaOAuth2
-from agilerl.arena.client import ArenaClient, _TokenStore
+from agilerl.arena.client import (
+    ArenaClient,
+    EnvironmentIdentity,
+    EnvironmentKind,
+    EnvironmentSource,
+    _TokenStore,
+)
 from agilerl.arena.exceptions import (
     ArenaAPIError,
     ArenaAuthError,
@@ -813,6 +819,26 @@ class TestValidateEnvironment:
         )
         files = api_key_client._open_stream.call_args[1]["files"]
         assert files["requirements"][0] == "explicit-reqs.txt"
+
+    def test_grouped_dataclasses_match_flat_kwargs(self, api_key_client, tmp_path):
+        archive = tmp_path / "env.tar.gz"
+        archive.write_bytes(b"fake")
+        mock_stream = _mock_ndjson_stream({"status": "ok"})
+        api_key_client._open_stream = MagicMock(return_value=mock_stream)
+
+        api_key_client.validate_environment(
+            EnvironmentIdentity(name="MyEnv", version="v1", description="desc"),
+            EnvironmentSource(source=archive, entrypoint="my_env:make"),
+            EnvironmentKind(multi_agent=True, do_rollouts=True),
+        )
+
+        data = api_key_client._open_stream.call_args[1]["data"]
+        assert data["name"] == "MyEnv"
+        assert data["version"] == "v1"
+        assert data["description"] == "desc"
+        assert data["entrypoint"] == "my_env:make"
+        assert data["multi_agent"] == "true"
+        assert data["do_rollouts"] == "true"
 
 
 class TestDefaultProjectConfig:
@@ -1917,20 +1943,6 @@ class TestRewindUploadFiles:
         # No tuple payload and a non-seekable payload must both be ignored.
         ArenaClient._rewind_upload_files(None)
         ArenaClient._rewind_upload_files({"a": ("name", object(), "text/plain")})
-
-    def test_rewinds_list_multipart_entries(self):
-        import io
-
-        buf = io.BytesIO(b"payload")
-        buf.seek(7)
-        files = [("file", ("train.parquet", buf, "application/vnd.apache.parquet"))]
-        ArenaClient._rewind_upload_files(files)
-        assert buf.tell() == 0
-
-    def test_skips_non_tuple_multipart_values(self):
-        ArenaClient._rewind_upload_files({"a": "not-a-tuple"})
-        ArenaClient._rewind_upload_files({"a": ("only-name",)})
-        ArenaClient._close_upload_files([("file", "not-a-tuple")])
 
 
 class TestGetCliCapabilities:

@@ -5,7 +5,8 @@ import copy
 import gc
 import tempfile
 from unittest import mock
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
+from unittest.mock import patch as unittest_patch
 
 import numpy as np
 import pytest
@@ -30,11 +31,15 @@ from agilerl.algorithms.core.base import (
 from agilerl.algorithms.dpo import DPO
 from agilerl.llm_envs import DatasetEnv
 from tests import TINY_LLM_FIXTURE_PATH
+from tests.helpers.patch_algo_core import make_core_patch, setattr_core
 from tests.test_algorithms.test_llms.llm_helpers import (
     create_module,
     deepspeed_config_stage_1,
     deepspeed_config_stage_2,
 )
+
+patch = make_core_patch(unittest_patch)
+mock.patch = make_core_patch(mock.patch)
 
 
 def make_preference_gym(
@@ -604,7 +609,8 @@ class TestDPOLigerUnavailableBehaviour:
         # LLMAlgorithm reads HAS_LIGER_KERNEL from core.base; DPO's module copy is
         # separate. Patch both so fallback warning runs on machines where liger is
         # installed and _dpo_loss_liger still raises when called directly.
-        monkeypatch.setattr("agilerl.algorithms.core.base.HAS_LIGER_KERNEL", False)
+        setattr_core(monkeypatch, "HAS_LIGER_KERNEL", False)
+        monkeypatch.setattr("agilerl.algorithms.core.llm_init.HAS_LIGER_KERNEL", False)
         monkeypatch.setattr("agilerl.algorithms.dpo.HAS_LIGER_KERNEL", False)
         if assertion_mode == "warns_and_fallback":
             with pytest.warns(
@@ -962,6 +968,7 @@ class TestDPONoLLMDependencies:
     ):
         with (
             mock.patch("agilerl.algorithms.core.base.HAS_LLM_DEPENDENCIES", False),
+            mock.patch("agilerl.algorithms.core.llm_init.HAS_LLM_DEPENDENCIES", False),
             pytest.raises(
                 ImportError,
                 match=r"LLM dependencies are not installed. Please install them using \`pip install agilerl\[llm\]\`.",

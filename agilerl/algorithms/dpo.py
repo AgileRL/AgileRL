@@ -14,15 +14,13 @@ import torch.nn.functional as F
 from agilerl import HAS_LIGER_KERNEL
 
 if TYPE_CHECKING:
-    from accelerate import Accelerator
-    from peft import LoraConfig
-    from transformers import BitsAndBytesConfig
 
     from agilerl.llm_envs import DatasetEnv
 
+from agilerl.algorithms.configs import DPOObjective, DPOSetup, PopulationIndex
 from agilerl.algorithms.core.base import LLMAlgorithm
-from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
-from agilerl.protocols import PreTrainedModelProtocol
+from agilerl.algorithms.core.llm_init import named_llm_setup
+from agilerl.algorithms.core.registry import NetworkGroup
 from agilerl.typing import (
     MultiAgentObservationType,
     ObservationType,
@@ -32,7 +30,6 @@ from agilerl.utils.algo_utils import get_experiences_samples
 from agilerl.utils.llm_utils import (
     aggregate_metrics_dict,
     is_preference_prompts,
-    resolve_llm_device,
 )
 
 if HAS_LIGER_KERNEL:
@@ -137,86 +134,26 @@ class DPO(LLMAlgorithm[PreferencePrompts]):
 
     def __init__(
         self,
-        pad_token_id: int,
-        pad_token: str,
-        model_name: str | None = None,
-        actor_network: PreTrainedModelProtocol | None = None,
-        model_config: dict[str, Any] | None = None,
-        hp_config: HyperparameterConfig | None = None,
-        index: int = 0,
-        batch_size: int = 16,
-        lr: float = 0.000005,
-        beta: float = 0.1,
-        nll_alpha: float = 1.0,
-        max_grad_norm: float = 0.1,
-        update_epochs: int = 1,
-        calc_position_embeddings: bool = True,
-        micro_batch_size_per_gpu: int | None = None,
-        mini_batch_size: int | None = None,
-        device: str | torch.device | None = None,
-        lora_config: LoraConfig | None = None,
-        accelerator: Accelerator | None = None,
-        wrap: bool = True,
-        clone: bool = False,
-        seed: int = 42,
-        gradient_checkpointing: bool = True,
-        torch_compiler: str | None = None,
-        use_liger_loss: bool = False,
-        chunk_rows: int | None = None,
-        cast_logprobs_to_fp32: bool = True,
-        use_separate_reference_adapter: bool = True,
-        quantization_config: BitsAndBytesConfig | None = None,
-        activation_offload: bool = False,
-        lora_target_scope: str | None = None,
+        llm: DPOSetup,
+        objective: DPOObjective | None = None,
+        member: PopulationIndex | None = None,
     ) -> None:
-        resolved_device = resolve_llm_device(accelerator, device)
-        super().__init__(
-            index=index,
-            batch_size=batch_size,
-            lr=lr,
-            max_grad_norm=max_grad_norm,
-            clone=clone,
-            calc_position_embeddings=calc_position_embeddings,
-            seed=seed,
-            pad_token_id=pad_token_id,
-            pad_token=pad_token,
-            use_liger_loss=use_liger_loss,
-            chunk_rows=chunk_rows,
-            lora_config=lora_config,
-            model_name=model_name,
-            actor_network=actor_network,
-            model_config=model_config,
-            micro_batch_size_per_gpu=micro_batch_size_per_gpu,
-            mini_batch_size=mini_batch_size,
-            cosine_lr_schedule_config=None,
-            hp_config=hp_config,
-            wrap=wrap,
-            device=resolved_device,
-            accelerator=accelerator,
-            name="DPO",
-            gradient_checkpointing=gradient_checkpointing,
-            torch_compiler=torch_compiler,
-            cast_logprobs_to_fp32=cast_logprobs_to_fp32,
-            use_separate_reference_adapter=use_separate_reference_adapter,
-            quantization_config=quantization_config,
-            activation_offload=activation_offload,
-            lora_target_scope=lora_target_scope,
-        )
-        self.beta = beta
-        self.nll_alpha = nll_alpha
-        self.temperature = (
-            1  # Temperature for logits calculation, DPO does not use temperature
-        )
-        self.use_vllm = False  # DPO does not use VLLM
-        self.update_epochs = update_epochs
+        objective = objective or DPOObjective()
+        member = member or PopulationIndex()
+        super().__init__(named_llm_setup(llm, "DPO"), member)
+        self._bind_dpo(llm, objective)
 
-        self._initialize_actors(actor_network, not clone)
-        # Register network groups for mutations
+    def _bind_dpo(self, llm: DPOSetup, objective: DPOObjective) -> None:
+        """Bind DPO preference-objective fields and actor networks."""
+        self.beta = objective.beta
+        self.nll_alpha = objective.nll_alpha
+        self.temperature = 1
+        self.use_vllm = False
+        self.update_epochs = objective.update_epochs
+        self._initialize_actors(llm.model.actor_network, not llm.train.clone)
         self.register_network_group(NetworkGroup(eval_network=self.actor, policy=True))
         if self.wrap:
             self.wrap_models()
-
-        # Register metrics to keep track of during training
         self.metrics.register("loss")
         self.metrics.register("chosen_reward")
         self.metrics.register("rejected_reward")

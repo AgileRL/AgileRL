@@ -297,7 +297,7 @@ class TestLoadWeightsCoversBothCheckpointFormats:
         agent.torch_compiler = "default"
         with (
             patch.object(DQN, "recompile") as mock_recompile,
-            patch("agilerl.algorithms.core.base.configure_tf32_precision") as mock_tf32,
+            patch("agilerl.algorithms.core.evolvable_checkpoint.configure_tf32_precision") as mock_tf32,
         ):
             agent.load_weights(path)
 

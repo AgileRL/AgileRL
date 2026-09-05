@@ -185,7 +185,6 @@ def prepare_file_upload(
     *,
     default_name: str,
     content_type: str,
-    filename: str | None = None,
 ) -> tuple[str, BinaryIO | bytes, str]:
     """Resolve a path or raw bytes into an httpx multipart file tuple.
 
@@ -199,17 +198,15 @@ def prepare_file_upload(
     :type default_name: str
     :param content_type: MIME type for the upload part.
     :type content_type: str
-    :param filename: Multipart filename override (relative parquet shard path).
-    :type filename: str | None
     :returns: ``(filename, payload, content_type)`` for httpx ``files=``.
     :rtype: tuple[str, BinaryIO | bytes, str]
     :raises ArenaFileNotFoundError: If *source* is a path that does not exist.
     """
     if isinstance(source, bytes):
-        return (filename or default_name, source, content_type)
+        return (default_name, source, content_type)
 
     path = Path(os.fspath(source)).expanduser().resolve()
     if not path.is_file():
         msg = f"Upload file not found: {path}"
         raise ArenaFileNotFoundError(msg)
-    return (filename or path.name, path.open("rb"), content_type)
+    return (path.name, path.open("rb"), content_type)

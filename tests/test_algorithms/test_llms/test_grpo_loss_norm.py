@@ -26,6 +26,7 @@ pytest.importorskip("peft", reason="LLM tests require peft.")
 import numpy as np
 
 from agilerl.algorithms import grpo as grpo_module
+from agilerl.algorithms.configs import GRPOObjective, LLMTrainSetup
 from agilerl.algorithms.core.base import LLMAlgorithm
 from agilerl.algorithms.grpo import GRPO
 
@@ -369,8 +370,7 @@ class TestGRPOLossNormConfig:
             _Stub()._resolve_loss_norm("per_token")
 
     def test_default_is_the_micro_batch(self) -> None:
-        default = inspect.signature(GRPO.__init__).parameters["loss_norm"].default
-        assert default == "micro_batch"
+        assert GRPOObjective().loss_norm == "micro_batch"
 
     def test_the_window_is_accepted_when_each_micro_batch_is_a_step(self) -> None:
         algo = _Stub(uses_deepspeed=False, accelerator=None)
@@ -831,10 +831,7 @@ class TestFusedActivationOffload:
 
     def test_the_context_comes_from_the_algorithm_hierarchy(self) -> None:
         assert GRPO._activation_offload_ctx is LLMAlgorithm._activation_offload_ctx
-        assert (
-            inspect.signature(GRPO.__init__).parameters["activation_offload"].default
-            is False
-        )
+        assert LLMTrainSetup().activation_offload is False
 
 
 class TestLigerNormalizerWorldSize:

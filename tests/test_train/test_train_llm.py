@@ -38,6 +38,12 @@ from tests.helper_functions import (
 pytestmark = pytest.mark.llm
 
 
+def _logger_call(mock_init_loggers):
+    """Grouped ``init_loggers`` kwargs: experiment identity and logging config."""
+    kwargs = mock_init_loggers.call_args.kwargs
+    return kwargs["experiment"], kwargs["logging"]
+
+
 @contextmanager
 def _population_init_skip_per_mock_class():
     """Bypass Population's homogeneous type() check for multiple MagicMock(spec=…) agents.
@@ -347,7 +353,7 @@ class TestTrainLlmDatasetPreference:
 
         with (
             patch("agilerl.training.llm.dataset.default_progress_bar") as mock_pbar_fn,
-            patch("agilerl.training.llm.dataset.save_llm_checkpoint") as mock_save,
+            patch("agilerl.training.llm.common.save_llm_checkpoint") as mock_save,
             patch("agilerl.training.llm.dataset.init_loggers", return_value=[]),
             _population_init_skip_per_mock_class(),
         ):
@@ -369,7 +375,7 @@ class TestTrainLlmDatasetPreference:
 
         with (
             patch("agilerl.training.llm.dataset.default_progress_bar") as mock_pbar_fn,
-            patch("agilerl.training.llm.dataset.save_llm_checkpoint"),
+            patch("agilerl.training.llm.common.save_llm_checkpoint"),
             patch("agilerl.training.llm.dataset.init_loggers", return_value=[]),
         ):
             mock_pbar_fn.return_value = MagicMock()
@@ -395,7 +401,7 @@ class TestTrainLlmDatasetPreference:
         with (
             patch("agilerl.training.llm.dataset.default_progress_bar") as mock_pbar_fn,
             patch("agilerl.training.llm.dataset.init_loggers") as mock_init_loggers,
-            patch("agilerl.training.llm.dataset.save_llm_checkpoint") as mock_save,
+            patch("agilerl.training.llm.common.save_llm_checkpoint") as mock_save,
         ):
             mock_pbar_fn.return_value = MagicMock()
             mock_init_loggers.return_value = []
@@ -412,7 +418,8 @@ class TestTrainLlmDatasetPreference:
             )
 
             mock_init_loggers.assert_called_once()
-            assert mock_init_loggers.call_args.kwargs["wb"] is True
+            _, logging_cfg = _logger_call(mock_init_loggers)
+            assert logging_cfg.wb is True
             assert mock_save.call_count == 1
             assert mock_agent.test.call_count == 2
 
@@ -436,7 +443,7 @@ class TestTrainLlmDatasetPreference:
 
         with (
             patch("agilerl.training.llm.dataset.default_progress_bar") as mock_pbar_fn,
-            patch("agilerl.training.llm.dataset.save_llm_checkpoint"),
+            patch("agilerl.training.llm.common.save_llm_checkpoint"),
             patch("agilerl.training.llm.dataset.init_loggers", return_value=[]),
             patch(
                 "agilerl.training.llm.dataset.run_selection_and_mutation"
@@ -466,7 +473,7 @@ class TestTrainLlmDatasetPreference:
 
         with (
             patch("agilerl.training.llm.dataset.default_progress_bar") as mock_pbar_fn,
-            patch("agilerl.training.llm.dataset.save_llm_checkpoint"),
+            patch("agilerl.training.llm.common.save_llm_checkpoint"),
             patch("agilerl.training.llm.dataset.init_loggers", return_value=[]),
             patch(
                 "agilerl.training.llm.dataset.run_selection_and_mutation"
@@ -492,7 +499,7 @@ class TestTrainLlmDatasetPreference:
         with (
             patch("agilerl.training.llm.dataset.default_progress_bar") as mock_pbar_fn,
             patch("agilerl.training.llm.dataset.init_loggers", return_value=[]),
-            patch("agilerl.training.llm.dataset.save_llm_checkpoint"),
+            patch("agilerl.training.llm.common.save_llm_checkpoint"),
         ):
             mock_pbar_fn.return_value = MagicMock()
             mock_env.num_epochs = 2
@@ -550,7 +557,7 @@ class TestTrainLlmDatasetPreference:
             patch(
                 "agilerl.training.llm.rollout.safe_aggregate_metrics", return_value=0.5
             ),
-            patch("agilerl.training.llm.dataset.save_llm_checkpoint"),
+            patch("agilerl.training.llm.common.save_llm_checkpoint"),
             patch("agilerl.training.llm.dataset.init_loggers", return_value=[]),
         ):
             mock_pbar_fn.return_value = MagicMock()
@@ -590,7 +597,7 @@ class TestTrainLlmDatasetSft:
 
         with (
             patch("agilerl.training.llm.dataset.default_progress_bar") as mock_pbar_fn,
-            patch("agilerl.training.llm.dataset.save_llm_checkpoint") as mock_save,
+            patch("agilerl.training.llm.common.save_llm_checkpoint") as mock_save,
             patch("agilerl.training.llm.dataset.init_loggers", return_value=[]),
             _population_init_skip_per_mock_class(),
         ):
@@ -618,7 +625,7 @@ class TestTrainLlmDatasetSft:
 
         with (
             patch("agilerl.training.llm.dataset.default_progress_bar") as mock_pbar_fn,
-            patch("agilerl.training.llm.dataset.save_llm_checkpoint"),
+            patch("agilerl.training.llm.common.save_llm_checkpoint"),
             patch("agilerl.training.llm.dataset.init_loggers", return_value=[]),
         ):
             mock_pbar_fn.return_value = MagicMock()
@@ -647,7 +654,7 @@ class TestTrainLlmDatasetSft:
         with (
             patch("agilerl.training.llm.dataset.default_progress_bar") as mock_pbar_fn,
             patch("agilerl.training.llm.dataset.init_loggers") as mock_init_loggers,
-            patch("agilerl.training.llm.dataset.save_llm_checkpoint") as mock_save,
+            patch("agilerl.training.llm.common.save_llm_checkpoint") as mock_save,
         ):
             mock_pbar_fn.return_value = MagicMock()
             mock_init_loggers.return_value = []
@@ -664,7 +671,8 @@ class TestTrainLlmDatasetSft:
             )
 
             mock_init_loggers.assert_called_once()
-            assert mock_init_loggers.call_args.kwargs["wb"] is True
+            _, logging_cfg = _logger_call(mock_init_loggers)
+            assert logging_cfg.wb is True
             assert mock_save.call_count == 1
             assert mock_agent.test.call_count == 2
 
@@ -692,7 +700,7 @@ class TestTrainLlmDatasetSft:
 
         with (
             patch("agilerl.training.llm.dataset.default_progress_bar") as mock_pbar_fn,
-            patch("agilerl.training.llm.dataset.save_llm_checkpoint"),
+            patch("agilerl.training.llm.common.save_llm_checkpoint"),
             patch("agilerl.training.llm.dataset.init_loggers", return_value=[]),
             patch(
                 "agilerl.training.llm.dataset.run_selection_and_mutation"
@@ -728,7 +736,7 @@ class TestTrainLlmDatasetSft:
 
         with (
             patch("agilerl.training.llm.dataset.default_progress_bar") as mock_pbar_fn,
-            patch("agilerl.training.llm.dataset.save_llm_checkpoint"),
+            patch("agilerl.training.llm.common.save_llm_checkpoint"),
             patch("agilerl.training.llm.dataset.init_loggers", return_value=[]),
         ):
             mock_pbar_fn.return_value = MagicMock()
@@ -755,7 +763,7 @@ class TestTrainLlmDatasetSft:
         with (
             patch("agilerl.training.llm.dataset.default_progress_bar") as mock_pbar_fn,
             patch("agilerl.training.llm.dataset.init_loggers", return_value=[]),
-            patch("agilerl.training.llm.dataset.save_llm_checkpoint"),
+            patch("agilerl.training.llm.common.save_llm_checkpoint"),
         ):
             mock_pbar_fn.return_value = MagicMock()
             mock_env.num_epochs = 2
@@ -820,7 +828,7 @@ def test_train_llm_dataset_requires_batch_matching_algorithm(
     with (
         patch("agilerl.training.llm.dataset.default_progress_bar") as mock_pbar_fn,
         patch("agilerl.training.llm.dataset.init_loggers", return_value=[]),
-        patch("agilerl.training.llm.dataset.save_llm_checkpoint"),
+        patch("agilerl.training.llm.common.save_llm_checkpoint"),
     ):
         mock_pbar_fn.return_value = MagicMock()
         if error_match is not None:
@@ -865,7 +873,7 @@ class TestTrainLlmRollout:
             patch("agilerl.training.llm.rollout.default_progress_bar") as mock_pbar_fn,
             patch("agilerl.training.llm.rollout.init_loggers", return_value=[]),
             patch("agilerl.training.llm.rollout.safe_aggregate_metrics") as mock_agg,
-            patch("agilerl.training.llm.rollout.save_llm_checkpoint") as mock_save,
+            patch("agilerl.training.llm.common.save_llm_checkpoint") as mock_save,
             patch("agilerl.training.llm.rollout.RolloutCollector"),
             patch("agilerl.training.llm.rollout.collect_rollouts_llm") as mock_collect,
         ):
@@ -906,7 +914,7 @@ class TestTrainLlmRollout:
                 "agilerl.training.llm.rollout.init_loggers", return_value=[]
             ) as mock_init_loggers,
             patch("agilerl.training.llm.rollout.safe_aggregate_metrics"),
-            patch("agilerl.training.llm.rollout.save_llm_checkpoint"),
+            patch("agilerl.training.llm.common.save_llm_checkpoint"),
             patch("agilerl.training.llm.rollout.RolloutCollector"),
             patch("agilerl.training.llm.rollout.collect_rollouts_llm") as mock_collect,
         ):
@@ -923,8 +931,9 @@ class TestTrainLlmRollout:
                 accelerator=None,
             )
 
-        assert mock_init_loggers.call_args.kwargs["algo"] == "GRPO"
-        assert mock_init_loggers.call_args.kwargs["env_name"] == "game:Sudoku-v0-hard"
+        experiment, _ = _logger_call(mock_init_loggers)
+        assert experiment.algo == "GRPO"
+        assert experiment.env_name == "game:Sudoku-v0-hard"
 
     def test_train_llm_rollout_final_checkpoint_needs_a_configured_path(self):
         """The end-of-run checkpoint fires only when a save target is configured."""
@@ -939,7 +948,7 @@ class TestTrainLlmRollout:
                 "agilerl.training.llm.rollout.safe_aggregate_metrics",
                 return_value=0.5,
             ),
-            patch("agilerl.training.llm.rollout.save_llm_checkpoint") as mock_save,
+            patch("agilerl.training.llm.common.save_llm_checkpoint") as mock_save,
             patch("agilerl.training.llm.rollout.RolloutCollector"),
             patch(
                 "agilerl.training.llm.rollout.collect_rollouts_llm",
@@ -977,7 +986,7 @@ class TestTrainLlmRollout:
                 "agilerl.training.llm.rollout.safe_aggregate_metrics",
                 return_value=0.5,
             ),
-            patch("agilerl.training.llm.rollout.save_llm_checkpoint"),
+            patch("agilerl.training.llm.common.save_llm_checkpoint"),
             patch("agilerl.training.llm.rollout.RolloutCollector"),
             patch(
                 "agilerl.training.llm.rollout.collect_rollouts_llm",
@@ -1028,7 +1037,7 @@ class TestTrainLlmRollout:
                 "agilerl.training.llm.rollout.safe_aggregate_metrics",
                 return_value=0.5,
             ),
-            patch("agilerl.training.llm.rollout.save_llm_checkpoint"),
+            patch("agilerl.training.llm.common.save_llm_checkpoint"),
             patch("agilerl.training.llm.rollout.RolloutCollector"),
             patch(
                 "agilerl.training.llm.rollout.collect_rollouts_llm",
@@ -1065,7 +1074,7 @@ class TestTrainLlmRollout:
                 "agilerl.training.llm.rollout.safe_aggregate_metrics",
                 return_value=0.5,
             ),
-            patch("agilerl.training.llm.rollout.save_llm_checkpoint"),
+            patch("agilerl.training.llm.common.save_llm_checkpoint"),
             patch("agilerl.training.llm.rollout.RolloutCollector"),
             patch("agilerl.training.llm.rollout.collect_rollouts_llm") as mock_collect,
         ):
@@ -1124,7 +1133,7 @@ class TestTrainLlmRollout:
             patch("agilerl.training.llm.rollout.default_progress_bar") as mock_pbar_fn,
             patch("agilerl.training.llm.rollout.init_loggers") as mock_init_loggers,
             patch("agilerl.training.llm.rollout.safe_aggregate_metrics") as mock_agg,
-            patch("agilerl.training.llm.rollout.save_llm_checkpoint") as mock_save,
+            patch("agilerl.training.llm.common.save_llm_checkpoint") as mock_save,
             patch("agilerl.training.llm.rollout.RolloutCollector"),
             patch("agilerl.training.llm.rollout.collect_rollouts_llm") as mock_collect,
         ):
@@ -1148,7 +1157,8 @@ class TestTrainLlmRollout:
             )
 
         mock_init_loggers.assert_called_once()
-        assert mock_init_loggers.call_args.kwargs["wb"] is True
+        _, logging_cfg = _logger_call(mock_init_loggers)
+        assert logging_cfg.wb is True
         assert mock_save.call_count >= 1
 
     @pytest.mark.parametrize("use_accelerator", [True, False])
@@ -1164,7 +1174,7 @@ class TestTrainLlmRollout:
             patch("agilerl.training.llm.rollout.default_progress_bar") as mock_pbar_fn,
             patch("agilerl.training.llm.rollout.init_loggers", return_value=[]),
             patch("agilerl.training.llm.rollout.safe_aggregate_metrics") as mock_agg,
-            patch("agilerl.training.llm.rollout.save_llm_checkpoint") as mock_save,
+            patch("agilerl.training.llm.common.save_llm_checkpoint") as mock_save,
             patch("agilerl.training.llm.rollout.RolloutCollector"),
             patch("agilerl.training.llm.rollout.collect_rollouts_llm") as mock_collect,
             patch(
@@ -1214,7 +1224,7 @@ class TestTrainLlmRollout:
                 "agilerl.training.llm.rollout.safe_aggregate_metrics",
                 return_value=0.5,
             ),
-            patch("agilerl.training.llm.rollout.save_llm_checkpoint"),
+            patch("agilerl.training.llm.common.save_llm_checkpoint"),
             patch(
                 "agilerl.training.llm.rollout.RolloutCollector"
             ) as mock_collector_cls,
@@ -1308,7 +1318,7 @@ class TestTrainLlmRollout:
             patch("agilerl.training.llm.rollout.default_progress_bar") as mock_pbar_fn,
             patch("agilerl.training.llm.rollout.init_loggers", return_value=[]),
             patch("agilerl.training.llm.rollout.safe_aggregate_metrics") as mock_agg,
-            patch("agilerl.training.llm.rollout.save_llm_checkpoint"),
+            patch("agilerl.training.llm.common.save_llm_checkpoint"),
             patch("agilerl.training.llm.rollout.RolloutCollector"),
             patch("agilerl.training.llm.rollout.collect_rollouts_llm") as mock_collect,
         ):
@@ -1339,7 +1349,7 @@ class TestTrainLlmRollout:
             patch("agilerl.training.llm.rollout.default_progress_bar") as mock_pbar_fn,
             patch("agilerl.training.llm.rollout.init_loggers", return_value=[]),
             patch("agilerl.training.llm.rollout.safe_aggregate_metrics") as mock_agg,
-            patch("agilerl.training.llm.rollout.save_llm_checkpoint"),
+            patch("agilerl.training.llm.common.save_llm_checkpoint"),
             patch("agilerl.training.llm.rollout.RolloutCollector"),
             patch("agilerl.training.llm.rollout.collect_rollouts_llm") as mock_collect,
         ):
@@ -1380,7 +1390,7 @@ class TestTrainLlmRollout:
                 "agilerl.training.llm.rollout.safe_aggregate_metrics",
                 side_effect=_agg,
             ),
-            patch("agilerl.training.llm.rollout.save_llm_checkpoint"),
+            patch("agilerl.training.llm.common.save_llm_checkpoint"),
             patch(
                 "agilerl.training.llm.rollout.RolloutCollector",
                 return_value=mock_rollout_env,
@@ -1410,7 +1420,7 @@ class TestTrainLlmRollout:
             patch("agilerl.training.llm.rollout.default_progress_bar") as mock_pbar_fn,
             patch("agilerl.training.llm.rollout.init_loggers", return_value=[]),
             patch("agilerl.training.llm.rollout.safe_aggregate_metrics") as mock_agg,
-            patch("agilerl.training.llm.rollout.save_llm_checkpoint"),
+            patch("agilerl.training.llm.common.save_llm_checkpoint"),
             patch("agilerl.training.llm.rollout.RolloutCollector"),
             patch("agilerl.training.llm.rollout.collect_rollouts_llm") as mock_collect,
             patch(
@@ -1444,7 +1454,7 @@ class TestTrainLlmRollout:
             patch("agilerl.training.llm.rollout.default_progress_bar") as mock_pbar_fn,
             patch("agilerl.training.llm.rollout.init_loggers", return_value=[]),
             patch("agilerl.training.llm.rollout.safe_aggregate_metrics") as mock_agg,
-            patch("agilerl.training.llm.rollout.save_llm_checkpoint"),
+            patch("agilerl.training.llm.common.save_llm_checkpoint"),
             patch("agilerl.training.llm.rollout.RolloutCollector"),
             patch("agilerl.training.llm.rollout.collect_rollouts_llm") as mock_collect,
             patch(
@@ -1479,7 +1489,7 @@ class TestTrainLlmRollout:
             patch("agilerl.training.llm.rollout.default_progress_bar") as mock_pbar_fn,
             patch("agilerl.training.llm.rollout.init_loggers", return_value=[]),
             patch("agilerl.training.llm.rollout.safe_aggregate_metrics") as mock_agg,
-            patch("agilerl.training.llm.rollout.save_llm_checkpoint"),
+            patch("agilerl.training.llm.common.save_llm_checkpoint"),
             patch("agilerl.training.llm.rollout.RolloutCollector"),
             patch("agilerl.training.llm.rollout.collect_rollouts_llm") as mock_collect,
         ):
@@ -1510,7 +1520,7 @@ class TestTrainLlmRollout:
             patch("agilerl.training.llm.rollout.default_progress_bar") as mock_pbar_fn,
             patch("agilerl.training.llm.rollout.init_loggers", return_value=[]),
             patch("agilerl.training.llm.rollout.safe_aggregate_metrics") as mock_agg,
-            patch("agilerl.training.llm.rollout.save_llm_checkpoint") as mock_save,
+            patch("agilerl.training.llm.common.save_llm_checkpoint") as mock_save,
             patch("agilerl.training.llm.rollout.RolloutCollector"),
             patch("agilerl.training.llm.rollout.collect_rollouts_llm") as mock_collect,
             _population_init_skip_per_mock_class(),
@@ -1542,7 +1552,7 @@ class TestTrainLlmRollout:
             patch("agilerl.training.llm.rollout.default_progress_bar") as mock_pbar_fn,
             patch("agilerl.training.llm.rollout.init_loggers") as mock_init_loggers,
             patch("agilerl.training.llm.rollout.safe_aggregate_metrics") as mock_agg,
-            patch("agilerl.training.llm.rollout.save_llm_checkpoint"),
+            patch("agilerl.training.llm.common.save_llm_checkpoint"),
             patch("agilerl.training.llm.rollout.RolloutCollector"),
             patch("agilerl.training.llm.rollout.collect_rollouts_llm") as mock_collect,
         ):
@@ -1562,7 +1572,8 @@ class TestTrainLlmRollout:
                 accelerator=None,
             )
 
-        init_hp_passed = mock_init_loggers.call_args.kwargs["init_hyperparams"]
+        experiment, _ = _logger_call(mock_init_loggers)
+        init_hp_passed = experiment.init_hyperparams
         assert init_hp_passed["BATCH_SIZE_PER_GPU"] == 7
         assert init_hp_passed["ALGO"] == "LLMPPO"
 
@@ -1688,7 +1699,7 @@ def test_train_llm_dataset_shared_env_first_iteration_yields_successive_batches(
     with (
         _population_init_skip_per_mock_class(),
         patch("agilerl.training.llm.dataset.default_progress_bar") as mock_pbar_fn,
-        patch("agilerl.training.llm.dataset.save_llm_checkpoint"),
+        patch("agilerl.training.llm.common.save_llm_checkpoint"),
         patch("agilerl.training.llm.dataset.init_loggers", return_value=[]),
     ):
         mock_pbar_fn.return_value = MagicMock()
@@ -1719,7 +1730,7 @@ def test_train_llm_dataset_env_fn_rewinds_each_env_on_first_iteration():
     with (
         _population_init_skip_per_mock_class(),
         patch("agilerl.training.llm.dataset.default_progress_bar") as mock_pbar_fn,
-        patch("agilerl.training.llm.dataset.save_llm_checkpoint"),
+        patch("agilerl.training.llm.common.save_llm_checkpoint"),
         patch("agilerl.training.llm.dataset.init_loggers", return_value=[]),
     ):
         mock_pbar_fn.return_value = MagicMock()
@@ -1752,7 +1763,7 @@ def test_train_llm_checkpoint_triggering_non_divisible_steps():
     with (
         patch("agilerl.training.llm.dataset.default_progress_bar") as mock_pbar_fn,
         patch("agilerl.training.llm.rollout.safe_aggregate_metrics", return_value=0.5),
-        patch("agilerl.training.llm.dataset.save_llm_checkpoint") as mock_save,
+        patch("agilerl.training.llm.common.save_llm_checkpoint") as mock_save,
         patch("agilerl.training.llm.dataset.init_loggers", return_value=[]),
     ):
         mock_pbar_fn.return_value = MagicMock()
@@ -1792,7 +1803,7 @@ def test_inner_loop_breaks_after_max_steps_first_agent(agent_spec):
     with (
         _population_init_skip_per_mock_class(),
         patch("agilerl.training.llm.dataset.default_progress_bar") as mock_pbar_fn,
-        patch("agilerl.training.llm.dataset.save_llm_checkpoint"),
+        patch("agilerl.training.llm.common.save_llm_checkpoint"),
         patch("agilerl.training.llm.rollout.safe_aggregate_metrics", return_value=0.5),
         patch("agilerl.training.llm.dataset.init_loggers", return_value=[]),
     ):
@@ -1864,7 +1875,7 @@ def test_train_llm_rollout_closes_envs_on_teardown():
         ),
         patch("agilerl.training.llm.rollout.init_loggers", return_value=[]),
         patch("agilerl.training.llm.rollout.safe_aggregate_metrics", return_value=0.5),
-        patch("agilerl.training.llm.rollout.save_llm_checkpoint"),
+        patch("agilerl.training.llm.common.save_llm_checkpoint"),
         patch("agilerl.training.llm.rollout.RolloutCollector") as mock_batch_env_cls,
         patch("agilerl.training.llm.rollout.collect_rollouts_llm") as mock_collect,
     ):
@@ -1923,7 +1934,7 @@ def test_train_llm_rollout_syncs_ranks_after_evaluation():
         ),
         patch("agilerl.training.llm.rollout.init_loggers", return_value=[]),
         patch("agilerl.training.llm.rollout.safe_aggregate_metrics", return_value=0.5),
-        patch("agilerl.training.llm.rollout.save_llm_checkpoint"),
+        patch("agilerl.training.llm.common.save_llm_checkpoint"),
         patch("agilerl.training.llm.rollout.RolloutCollector"),
         patch("agilerl.training.llm.rollout.collect_rollouts_llm") as mock_collect,
         patch.object(accelerator, "wait_for_everyone") as mock_wait,
@@ -2048,7 +2059,7 @@ class TestTrainLlmRolloutDistributedBranches:
                 "agilerl.training.llm.rollout.safe_aggregate_metrics",
                 return_value=0.5,
             ),
-            patch("agilerl.training.llm.rollout.save_llm_checkpoint"),
+            patch("agilerl.training.llm.common.save_llm_checkpoint"),
             patch("agilerl.training.llm.rollout.RolloutCollector"),
             patch(
                 "agilerl.training.llm.rollout.collect_rollouts_llm",
@@ -2090,7 +2101,7 @@ class TestTrainLlmRolloutDistributedBranches:
                 "agilerl.training.llm.rollout.safe_aggregate_metrics",
                 return_value=0.5,
             ),
-            patch("agilerl.training.llm.rollout.save_llm_checkpoint"),
+            patch("agilerl.training.llm.common.save_llm_checkpoint"),
             patch("agilerl.training.llm.rollout.RolloutCollector"),
             patch(
                 "agilerl.training.llm.rollout.collect_rollouts_llm",
@@ -2142,7 +2153,7 @@ class TestTrainLlmRolloutDistributedBranches:
                 "agilerl.training.llm.rollout.safe_aggregate_metrics",
                 return_value=0.5,
             ),
-            patch("agilerl.training.llm.rollout.save_llm_checkpoint"),
+            patch("agilerl.training.llm.common.save_llm_checkpoint"),
             patch("agilerl.training.llm.rollout.RolloutCollector"),
             patch(
                 "agilerl.training.llm.rollout.collect_rollouts_llm",
@@ -2178,7 +2189,7 @@ class TestTrainLlmRolloutDistributedBranches:
                 "agilerl.training.llm.rollout.safe_aggregate_metrics",
                 return_value=0.5,
             ),
-            patch("agilerl.training.llm.rollout.save_llm_checkpoint"),
+            patch("agilerl.training.llm.common.save_llm_checkpoint"),
             patch("agilerl.training.llm.rollout.RolloutCollector"),
             patch(
                 "agilerl.training.llm.rollout.collect_rollouts_llm",
@@ -2367,7 +2378,7 @@ class TestTrainLlmRolloutCrossRankPadding:
                 "agilerl.training.llm.rollout.safe_aggregate_metrics",
                 return_value=0.5,
             ),
-            patch("agilerl.training.llm.rollout.save_llm_checkpoint"),
+            patch("agilerl.training.llm.common.save_llm_checkpoint"),
             patch("agilerl.training.llm.rollout.RolloutCollector"),
             patch(
                 "agilerl.training.llm.rollout.collect_rollouts_llm",

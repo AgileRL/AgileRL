@@ -461,15 +461,9 @@ def datasets_exists(config: CommandConfig, name: str) -> None:
 @click.option(
     "--file",
     "dataset_file",
-    type=click.Path(exists=True, dir_okay=True, path_type=Path),
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
     default=None,
-    help="Local CSV or parquet file, or a Hugging Face parquet folder.",
-)
-@click.option(
-    "--config",
-    "parquet_config",
-    default=None,
-    help="Parquet config when --file is a folder with more than one config.",
+    help="Local CSV file to upload.",
 )
 @click.option(
     "--hf-dataset",
@@ -496,7 +490,6 @@ def datasets_create(
     column_mapping_file: Path | None,
     description: str | None,
     dataset_file: Path | None,
-    parquet_config: str | None,
     hf_dataset_name: str | None,
     hf_config: str | None,
     hf_split: str | None,
@@ -517,7 +510,6 @@ def datasets_create(
             column_mapping=mapping,
             description=description,
             file=dataset_file,
-            config=parquet_config,
             hf_dataset_name=hf_dataset_name,
             hf_config=hf_config,
             hf_split=hf_split,

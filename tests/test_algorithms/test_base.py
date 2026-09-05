@@ -20,6 +20,7 @@ from agilerl.algorithms.core.registry import (
     RLParameter,
 )
 from agilerl.modules import EvolvableCNN, EvolvableMLP, EvolvableMultiInput, ModuleDict
+from agilerl.utils.constructor_kwargs import assemble_init_kwargs
 from agilerl.utils.evolvable_networks import is_image_space
 from tests.helper_functions import assert_state_dicts_equal, is_processed_observation
 
@@ -386,19 +387,24 @@ class DummyMARLAlgorithm(MultiAgentRLAlgorithm):
         self,
         observation_spaces,
         action_spaces,
-        agent_ids,
-        index,
+        agent_ids=None,
+        index=0,
         device="cpu",
         **kwargs,
     ):
         kwargs.pop("wrap", None)
+        if "agents" not in kwargs:
+            kwargs["agent_ids"] = agent_ids
+        if "member" not in kwargs:
+            kwargs["index"] = index
+        if "runtime" not in kwargs:
+            kwargs["device"] = device
         super().__init__(
-            observation_spaces,
-            action_spaces,
-            index,
-            agent_ids,
-            device=device,
-            **kwargs,
+            **assemble_init_kwargs(
+                MultiAgentRLAlgorithm,
+                (observation_spaces, action_spaces),
+                kwargs,
+            )
         )
 
         def create_actor(idx):

@@ -14,6 +14,7 @@ from torch import nn, optim
 
 from agilerl.algorithms.neural_ts_bandit import NeuralTS
 from agilerl.modules import EvolvableCNN, EvolvableMLP, EvolvableMultiInput
+from agilerl.utils.constructor_kwargs import assemble_init_kwargs
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 from tests.helper_functions import (
     assert_not_equal_state_dict,
@@ -34,11 +35,11 @@ class DummyNeuralTS(NeuralTS):
         **kwargs,
     ):
         super().__init__(
-            *args,
-            observation_space=observation_space,
-            action_space=action_space,
-            net_config=net_config,
-            **kwargs,
+            **assemble_init_kwargs(
+                NeuralTS,
+                (observation_space, action_space, *args),
+                {**kwargs, "net_config": net_config},
+            )
         )
 
         self.tensor_test = torch.randn(1)

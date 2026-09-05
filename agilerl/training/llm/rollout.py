@@ -8,9 +8,12 @@
 (``max_turns=1``) and multi-turn share this one loop.
 """
 
+from __future__ import annotations
+
 import time
 import warnings
 from collections.abc import Callable
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
 import torch
@@ -18,11 +21,16 @@ from accelerate import Accelerator
 
 from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.algorithms import GRPO
-from agilerl.hpo.mutation import Mutations
-from agilerl.hpo.tournament import TournamentSelection
+from agilerl.components.llm_rollout_data import LLMExperienceBatch
 from agilerl.population import Population
-from agilerl.protocols import SelectionStrategyProtocol
-from agilerl.training.llm.common import _validate_finetune_args
+from agilerl.training.configs import LLMRolloutRunConfig, LoggerExperiment
+from agilerl.training.llm.common import (
+    LLMCheckpointProgress,
+    _validate_finetune_args,
+    maybe_save_llm_step_checkpoint,
+    save_llm_elite_if_requested,
+)
+from agilerl.utils.constructor_kwargs import accept_flat_kwargs
 from agilerl.utils.llm_utils import (
     align_completion_batch_shapes_across_ranks,
     allreduce_minmax_int,
@@ -35,7 +43,6 @@ from agilerl.utils.utils import (
     init_loggers,
     resolve_selection_strategy,
     run_selection_and_mutation,
-    save_llm_checkpoint,
 )
 
 if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
@@ -43,8 +50,12 @@ if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
     from agilerl.llm_envs import RolloutCollector, RolloutHarness
     from agilerl.rollouts.on_policy import collate_llm_rollouts, collect_rollouts_llm
 
-if TYPE_CHECKING:
     SupportedRollout = GRPO | LLMPPO | LLMREINFORCE
+else:
+    SupportedRollout = GRPO
+
+if TYPE_CHECKING:
+    from tqdm import tqdm
 
 
 def _any_rank_flag(
@@ -67,42 +78,429 @@ def _any_rank_empty_batch(
     return _any_rank_flag(local_empty, accelerator)
 
 
-def train_llm_rollout(
-    pop: "list[SupportedRollout]",
+@dataclass
+class LLMRolloutSession:
+    """Population, collector, and run config for one ``train_llm_rollout`` loop."""
+
+    population: Population
+    run: LLMRolloutRunConfig
+    max_turns: int
+    env_factory: Callable[[], RolloutHarness]
+    init_hp: dict[str, Any]
+    accelerator: Accelerator | None
+    pbar: tqdm
+    collector: RolloutCollector
+    env_name: str
+    batch_size: int
+    data_increment: int
+    group_size: int
+    group_seed: int
+    checkpoint_progress: LLMCheckpointProgress
+    test_env: RolloutHarness | None = None
+    total_steps: int = 0
+    iteration: int = 0
+    consecutive_stalls: int = 0
+    wall_deadline: float | None = None
+
+
+def _resolve_rollout_run(run: LLMRolloutRunConfig | None) -> LLMRolloutRunConfig:
+    run = run or LLMRolloutRunConfig()
+    evolution = run.evolution
+    selection = resolve_selection_strategy(
+        evolution.selection_strategy,
+        evolution.tournament,
+    )
+    return replace(run, evolution=replace(evolution, selection_strategy=selection))
+
+
+def _validate_rollout_run(
+    pop: list[SupportedRollout],
+    run: LLMRolloutRunConfig,
+) -> None:
+    loop = run.loop
+    evolution = run.evolution
+    _validate_finetune_args(
+        loop.evo_steps,
+        evolution.selection_strategy,
+        evolution.mutation,
+        None,
+        loop.max_steps,
+        pop,
+        (LLMPPO, LLMREINFORCE, GRPO),
+        (
+            "The algorithm must be LLMPPO, LLMREINFORCE, or GRPO (including the "
+            "GRPO variants CISPO and GSPO) for rollout finetuning. Got "
+            f"{type(pop[0])} instead."
+        ),
+        checkpoint_steps=run.checkpoint.checkpoint_steps,
+    )
+
+
+def _start_llm_rollout(
+    pop: list[SupportedRollout],
     max_turns: int,
-    env_factory: "Callable[[], RolloutHarness]",
+    env_factory: Callable[[], RolloutHarness],
+    init_hp: dict[str, Any] | None,
+    run: LLMRolloutRunConfig,
+    accelerator: Accelerator | None,
+) -> LLMRolloutSession:
+    """Validate args, build loggers, and open the rollout collector."""
+    _validate_rollout_run(pop, run)
+    if init_hp is None:
+        init_hp = {
+            "BATCH_SIZE_PER_GPU": pop[0].batch_size_per_process,
+            "ALGO": pop[0].algo,
+        }
+    batch_size = init_hp.get("BATCH_SIZE", pop[0].batch_size)
+    env_name = init_hp.get("env_name", "rollout")
+    # Tensor-parallel ranks of one replica generate the same sequences, so the
+    # data-parallel topology -- not the process group -- is what splits work.
+    dp_rank, data_increment = data_parallel_topology(
+        accelerator,
+        getattr(getattr(pop[0], "vllm_config", None), "tensor_parallel_size", 1) or 1,
+    )
+    if run.logging.wb:
+        init_hp["effective_data_batch_size"] = data_increment * batch_size
+        init_hp["batch_size"] = batch_size
+        init_hp["distributed_training"] = accelerator is not None
+        init_hp["model_name"] = pop[0].pretrained_model_name_or_path
+        init_hp["max_turns"] = max_turns
+    pbar = default_progress_bar(run.loop.max_steps, accelerator)
+    loggers = init_loggers(
+        experiment=LoggerExperiment(
+            algo=init_hp.get("ALGO", pop[0].algo),
+            env_name=env_name,
+            init_hyperparams=init_hp,
+        ),
+        pbar=pbar,
+        logging=run.logging,
+        accelerator=accelerator,
+    )
+    group_size = getattr(pop[0], "group_size", 1)
+    return LLMRolloutSession(
+        population=Population(agents=pop, accelerator=accelerator, loggers=loggers),
+        run=run,
+        max_turns=max_turns,
+        env_factory=env_factory,
+        init_hp=init_hp,
+        accelerator=accelerator,
+        pbar=pbar,
+        collector=RolloutCollector(
+            env_factory,
+            batch_size,
+            group_size,
+            io_timeout_s=run.loop.io_timeout_s,
+            rank=dp_rank,
+            world_size=data_increment,
+        ),
+        env_name=env_name,
+        batch_size=batch_size,
+        data_increment=data_increment,
+        group_size=group_size,
+        group_seed=int(pop[0].seed) + dp_rank * (1 << 31),
+        checkpoint_progress=LLMCheckpointProgress(run.checkpoint.checkpoint_steps),
+        wall_deadline=_rollout_wall_deadline(run.loop.max_wall_seconds),
+    )
+
+
+def _rollout_wall_deadline(max_wall_seconds: float | None) -> float | None:
+    if max_wall_seconds is None or max_wall_seconds <= 0:
+        return None
+    return time.monotonic() + max_wall_seconds
+
+
+def _wall_limit_reached(session: LLMRolloutSession) -> bool:
+    if session.wall_deadline is None:
+        return False
+    # Every DP rank takes the same stop/continue branch; a rank-local
+    # wall-clock check can leave a peer blocked in collect's barrier.
+    if not _any_rank_flag(time.monotonic() >= session.wall_deadline, session.accelerator):
+        return False
+    if session.accelerator is None or session.accelerator.is_main_process:
+        print(
+            f"\nStopping rollout training: wall time limit "
+            f"({session.run.loop.max_wall_seconds}s) reached.",
+        )
+    return True
+
+
+def _collect_rollout_batch(
+    session: LLMRolloutSession,
+    agent: SupportedRollout,
+) -> tuple[LLMExperienceBatch, int]:
+    """Collect and collate one agent's rollout; updates ``group_seed``."""
+    agent.set_reference_policy(session.collector.num_epochs)
+    agent.init_training_step()
+    (
+        token_ids_list,
+        action_masks_list,
+        all_turn_ids,
+        all_rewards,
+        batch_steps,
+        group_seed,
+        all_sampling_logps,
+    ) = collect_rollouts_llm(
+        agent=agent,
+        env=session.collector,
+        n_steps=session.max_turns,
+        batch_size=session.batch_size,
+        group_seed=session.group_seed,
+    )
+    session.group_seed = group_seed
+    # Collated a prompt group at a time, so the group-divisibility the
+    # algorithms rely on holds by construction, and a misaligned
+    # rollout fails here rather than inside a loss.
+    batch = collate_llm_rollouts(
+        token_ids_list,
+        action_masks_list,
+        all_turn_ids,
+        all_rewards,
+        all_sampling_logps,
+        group_size=session.group_size,
+    )
+    return batch, batch_steps
+
+
+def _experiences_for_learn(
+    session: LLMRolloutSession,
+    agent: SupportedRollout,
+    batch: LLMExperienceBatch,
+) -> tuple[tuple[object, object, object], torch.Tensor | None]:
+    experiences = batch.experiences()
+    turn_ids = batch.turn_ids
+    if session.accelerator is None or not needs_cross_rank_seq_padding(
+        agent, world_size=session.data_increment
+    ):
+        return experiences, turn_ids
+    # Multi-rank Liger token-level losses allreduce per chunk, so
+    # every rank must pad to one global sequence length.
+    token_ids, action_masks, rewards = align_completion_batch_shapes_across_ranks(
+        batch.token_ids,
+        batch.action_masks,
+        batch.rewards,
+        pad_token_id=agent.pad_token_id,
+        accelerator=session.accelerator,
+    )
+    if turn_ids is None:
+        msg = "aligned batches are non-empty"
+        raise RuntimeError(msg)
+    target_mask_len = int(action_masks.shape[1])
+    if int(turn_ids.shape[1]) < target_mask_len:
+        turn_ids = torch.nn.functional.pad(
+            turn_ids,
+            (0, target_mask_len - int(turn_ids.shape[1])),
+            value=-1,
+        )
+    return (token_ids, action_masks, rewards), turn_ids
+
+
+def _log_rollout_agent_metrics(
+    session: LLMRolloutSession,
+    agent: SupportedRollout,
+    batch: LLMExperienceBatch,
+    mean_score: torch.Tensor,
+) -> None:
+    loop = session.run.loop
+    if loop.max_reward is not None:
+        if "accuracy" not in agent.metrics.additional_metrics:
+            agent.metrics.register("accuracy")
+        accuracy = (batch.rewards.sum(dim=1) >= loop.max_reward).float().mean()
+        accuracy = accuracy.to(agent.device)
+        agg_accuracy = safe_aggregate_metrics(session.accelerator, accuracy)
+        if session.accelerator is None or session.accelerator.is_main_process:
+            agent.metrics.log("accuracy", agg_accuracy)
+    for name, mean_value in session.collector.get_rubric_score_means().items():
+        metric = f"reward_{name}"
+        if metric not in agent.metrics.additional_metrics:
+            agent.metrics.register(metric)
+        agg = safe_aggregate_metrics(
+            session.accelerator, mean_score.new_tensor(mean_value)
+        )
+        if session.accelerator is None or session.accelerator.is_main_process:
+            agent.metrics.log(metric, agg)
+
+
+def _learn_nonempty_rollout(
+    session: LLMRolloutSession,
+    agent: SupportedRollout,
+    batch: LLMExperienceBatch,
+    batch_steps: int,
+) -> int:
+    episode_scores = batch.rewards.sum(dim=1)
+    mean_score = episode_scores.mean().to(agent.device)
+    experiences, turn_ids = _experiences_for_learn(session, agent, batch)
+    agent.learn(
+        experiences,
+        turn_ids=turn_ids,
+        sampling_logps=batch.sampling_logps,
+    )
+    agg_score = safe_aggregate_metrics(session.accelerator, mean_score)
+    _log_rollout_agent_metrics(session, agent, batch, mean_score)
+    effective_batch_steps = batch_steps * session.data_increment
+    agent.finalize_training_step(batch_steps)
+    session.total_steps += effective_batch_steps
+    if session.accelerator is None or session.accelerator.is_main_process:
+        agent.add_scores([float(agg_score)])
+    return effective_batch_steps
+
+
+def _train_one_rollout_agent(
+    session: LLMRolloutSession,
+    agent: SupportedRollout,
+) -> int:
+    """Collect, learn, and return effective batch steps for one agent."""
+    batch, batch_steps = _collect_rollout_batch(session, agent)
+    # Empty collated batches have no trajectories; learn() raises on them.
+    # iteration_steps stays 0, so the stall guard after this loop fires.
+    if _any_rank_empty_batch(
+        batch_steps == 0 or batch.is_empty,
+        session.accelerator,
+    ):
+        agent.finalize_training_step(0)
+        return 0
+    return _learn_nonempty_rollout(session, agent, batch, batch_steps)
+
+
+def _maybe_eval_rollout_agent(
+    session: LLMRolloutSession,
+    agent: SupportedRollout,
+) -> None:
+    if (session.iteration + 1) % session.run.loop.evaluation_interval != 0:
+        return
+    if session.test_env is None:
+        session.test_env = session.env_factory()
+    agent.test(session.test_env, loop=session.run.loop.eval_loop)
+    if session.accelerator is not None:
+        session.accelerator.wait_for_everyone()
+
+
+def _note_rollout_progress(session: LLMRolloutSession, iteration_steps: int) -> None:
+    """Abort when rollouts repeatedly yield no usable turns."""
+    if iteration_steps != 0:
+        session.consecutive_stalls = 0
+        return
+    session.consecutive_stalls += 1
+    if session.accelerator is None or session.accelerator.is_main_process:
+        warnings.warn(
+            "Rollout produced no usable turns this iteration "
+            "(batch_steps == 0 for every agent), so training did not "
+            "advance. Every prompt likely exceeds the context budget — "
+            "check that max_output_tokens leaves room under "
+            "max_context_length.",
+            stacklevel=2,
+        )
+    if session.consecutive_stalls < 8:
+        return
+    msg = (
+        f"Rollout training made no progress for {session.consecutive_stalls} "
+        "consecutive iterations (batch_steps == 0 every time), so "
+        "total_steps can never reach max_steps. Aborting instead of "
+        "looping forever. Likely cause: the prompt budget is "
+        "exhausted (max_output_tokens too close to "
+        "max_context_length), or every sampled prompt exceeds the "
+        "context length."
+    )
+    raise RuntimeError(msg)
+
+
+def _report_rollout_metrics(session: LLMRolloutSession, iteration_steps: int) -> None:
+    if session.accelerator is None or session.accelerator.is_main_process:
+        session.pbar.update(iteration_steps // len(session.population.agents))
+        session.population.report_metrics(clear=True)
+    else:
+        # Metrics accumulate on every rank; only main reports, so the
+        # others must still clear or their stores grow for the whole run.
+        session.population.clear_agent_metrics()
+    if session.accelerator is not None:
+        session.accelerator.wait_for_everyone()
+
+
+def _evolve_llm_rollout(session: LLMRolloutSession) -> None:
+    evolution = session.run.evolution
+    checkpoint = session.run.checkpoint
+    if session.accelerator is not None:
+        session.accelerator.wait_for_everyone()
+    session.population.update(
+        run_selection_and_mutation(
+            evolution.selection_strategy,
+            population=session.population.agents,
+            mutation=evolution.mutation,
+            env_name=session.env_name,
+            accelerator=session.accelerator,
+            language_model=True,
+            elite_path=checkpoint.elite_path,
+            save_elite=bool(checkpoint.save_elite),
+        ),
+    )
+    session.group_size = getattr(session.population.agents[0], "group_size", 1)
+    session.collector.update_rollout_geometry(
+        rollout_batch_size=session.batch_size,
+        group_size=session.group_size,
+    )
+    if session.accelerator is not None:
+        session.accelerator.wait_for_everyone()
+    session.population.increment_evo_step()
+
+
+def _evolve_or_checkpoint_rollout(session: LLMRolloutSession) -> None:
+    evolution = session.run.evolution
+    loop = session.run.loop
+    evo_ready = (
+        evolution.selection_strategy is not None
+        and evolution.mutation is not None
+        and loop.evo_steps is not None
+    )
+    if evo_ready and (session.iteration + 1) % loop.evo_steps == 0:
+        _evolve_llm_rollout(session)
+        return
+    if evo_ready:
+        return
+    maybe_save_llm_step_checkpoint(
+        session.population.agents,
+        session.checkpoint_progress,
+        session.run.checkpoint,
+        session.total_steps,
+        loop.max_steps,
+    )
+
+
+def _close_llm_rollout(session: LLMRolloutSession) -> None:
+    try:
+        session.collector.close()
+    finally:
+        if session.test_env is not None:
+            session.test_env.close()
+
+
+def _run_llm_rollout_loop(session: LLMRolloutSession) -> None:
+    max_steps = session.run.loop.max_steps
+    while session.total_steps < max_steps:
+        if _wall_limit_reached(session):
+            break
+        iteration_steps = 0
+        for agent in session.population.agents:
+            iteration_steps += _train_one_rollout_agent(session, agent)
+            _maybe_eval_rollout_agent(session, agent)
+        _note_rollout_progress(session, iteration_steps)
+        _report_rollout_metrics(session, iteration_steps)
+        _evolve_or_checkpoint_rollout(session)
+        session.iteration += 1
+
+
+@accept_flat_kwargs
+def train_llm_rollout(
+    pop: list[SupportedRollout],
+    max_turns: int,
+    env_factory: Callable[[], RolloutHarness],
     init_hp: dict[str, Any] | None = None,
-    max_steps: int = 32768,
-    save_elite: bool | None = None,
-    elite_path: str | None = None,
-    wb: bool = False,
-    tensorboard: bool = False,
-    tensorboard_log_dir: str | None = None,
-    csv: bool = False,
-    csv_log_dir: str | None = None,
-    evo_steps: int | None = None,
-    checkpoint_steps: int | None = None,
-    checkpoint_path: str | None = None,
-    selection_strategy: SelectionStrategyProtocol | None = None,
-    tournament: TournamentSelection | None = None,
-    mutation: Mutations | None = None,
-    wandb_api_key: str | None = None,
-    wandb_kwargs: dict[str, Any] | None = None,
-    evaluation_interval: int = 50,
-    eval_loop: int = 1,
-    max_reward: float | None = None,
-    verbose: bool = True,
+    run: LLMRolloutRunConfig | None = None,
     accelerator: Accelerator | None = None,
-    max_wall_seconds: float | None = None,
-    io_timeout_s: float | None = 600.0,
-) -> "tuple[list[SupportedRollout], Any]":
+) -> tuple[list[SupportedRollout], Any]:
     """Train a population of LLM agents over rollout (generate-and-score) environments.
 
-    Collects token-level episodes (``reset`` returns ``(obs, info)``, repeated
-    ``get_action`` / ``step`` (full completion tensor), then ``get_episode_data``),
-    then runs turn-level updates. For a ``RolloutHarness`` with ``max_model_len`` set,
-    a trajectory whose cumulative prompt would overflow the context is stopped
-    with ``truncated=True``.
+    Collects token-level episodes then runs turn-level updates. For a
+    ``RolloutHarness`` with ``max_model_len`` set, a trajectory whose cumulative
+    prompt would overflow the context is stopped with ``truncated=True``.
 
     :param pop: Population of LLMPPO, LLMREINFORCE or GRPO agents to finetune.
     :type pop: list[SupportedRollout]
@@ -113,399 +511,22 @@ def train_llm_rollout(
     :type env_factory: Callable[[], RolloutHarness]
     :param init_hp: Initial hyperparameters.
     :type init_hp: dict, optional
-    :param max_steps: Progress-bar budget in sample steps, defaults to 32768.
-    :type max_steps: int
-    :param save_elite: Whether to save the elite checkpoint, defaults to None.
-    :type save_elite: bool, optional
-    :param elite_path: Directory for checkpoints, defaults to None.
-    :type elite_path: str, optional
-    :param wb: Whether to log to Weights and Biases, defaults to False.
-    :type wb: bool, optional
-    :param tensorboard: Whether to log to TensorBoard, defaults to False.
-    :type tensorboard: bool, optional
-    :param tensorboard_log_dir: Directory for TensorBoard event files, defaults to None.
-    :type tensorboard_log_dir: str, optional
-    :param csv: Whether to log aggregate metrics to CSV, defaults to False.
-    :type csv: bool, optional
-    :param csv_log_dir: Path for the CSV file, defaults to None.
-    :type csv_log_dir: str, optional
-    :param evo_steps: Steps between evolution (requires a selection strategy and mutation).
-    :type evo_steps: int, optional
-    :param checkpoint_steps: Save checkpoint every N outer iterations when no evolution.
-    :type checkpoint_steps: int, optional
-    :param checkpoint_path: Directory for periodic checkpoints; falls back to elite_path.
-    :type checkpoint_path: str, optional
-    :param selection_strategy: Selection strategy driving evolution, defaults to None.
-    :type selection_strategy: SelectionStrategyProtocol | None, optional
-    :param tournament: Deprecated alias for selection_strategy, defaults to None.
-    :type tournament: TournamentSelection, optional
-    :param mutation: Mutation operator for evolution, defaults to None.
-    :type mutation: Mutations, optional
-    :param wandb_api_key: W&B API key, defaults to None.
-    :type wandb_api_key: str, optional
-    :param wandb_kwargs: Additional kwargs forwarded to ``wandb.init()``.
-    :type wandb_kwargs: dict, optional
-    :param evaluation_interval: How often to call ``agent.test`` on a fresh
-        environment from ``env_factory``.
-    :type evaluation_interval: int, optional
-    :param eval_loop: Episodes averaged per evaluation for the HPO fitness score;
-        defaults to 1 (matching the other trainers). Raise it for less noisy
-        tournament selection at higher eval cost.
-    :type eval_loop: int, optional
-    :param max_reward: If set, adds accuracy metric vs this threshold.
-    :type max_reward: float, optional
-    :param verbose: Progress bar and periodic train summaries, defaults to True.
-    :type verbose: bool
+    :param run: Loop, evolution, checkpoint, and logging settings.
+    :type run: LLMRolloutRunConfig, optional
     :param accelerator: Hugging Face Accelerate instance, defaults to None.
     :type accelerator: Accelerator, optional
-    :param max_wall_seconds: Stop after this wall-clock duration (seconds); ``None`` disables.
-    :type max_wall_seconds: float | None
-    :param io_timeout_s: Backstop deadline for one concurrent round of env
-        round-trips; a hung env or stalled transport raises ``TimeoutError``
-        rather than blocking the batch forever. Defaults to 600 s; ``None``
-        disables it. Forwarded to :class:`RolloutCollector`.
-    :type io_timeout_s: float | None
     :return: The finetuned population and its last recorded fitnesses.
     :rtype: tuple[list[SupportedRollout], Any]
     """
-    selection_strategy = resolve_selection_strategy(selection_strategy, tournament)
-
-    _validate_finetune_args(
-        evo_steps,
-        selection_strategy,
-        mutation,
-        None,
-        max_steps,
-        pop,
-        # GRPO covers its variants too -- CISPO and GSPO subclass it, so they
-        # pass this check without being named.
-        (LLMPPO, LLMREINFORCE, GRPO),
-        (
-            "The algorithm must be LLMPPO, LLMREINFORCE, or GRPO (including the "
-            "GRPO variants CISPO and GSPO) for rollout finetuning. Got "
-            f"{type(pop[0])} instead."
-        ),
-        checkpoint_steps=checkpoint_steps,
+    run = _resolve_rollout_run(run)
+    session = _start_llm_rollout(
+        pop, max_turns, env_factory, init_hp, run, accelerator
     )
-
-    if init_hp is None:
-        init_hp = {
-            "BATCH_SIZE_PER_GPU": pop[0].batch_size_per_process,
-            "ALGO": pop[0].algo,
-        }
-
-    batch_size = init_hp.get("BATCH_SIZE", pop[0].batch_size)
-    env_name = init_hp.get("env_name", "rollout")
-    # Tensor-parallel ranks of one replica generate the same sequences, so the
-    # data-parallel topology -- not the process group -- is what splits work.
-    dp_rank, data_increment = data_parallel_topology(
-        accelerator,
-        getattr(getattr(pop[0], "vllm_config", None), "tensor_parallel_size", 1) or 1,
-    )
-    effective_data_batch_size = data_increment * batch_size
-
-    if wb:
-        init_hp["effective_data_batch_size"] = effective_data_batch_size
-        init_hp["batch_size"] = batch_size
-        init_hp["distributed_training"] = accelerator is not None
-        init_hp["model_name"] = pop[0].pretrained_model_name_or_path
-        init_hp["max_turns"] = max_turns
-
-    pbar = default_progress_bar(max_steps, accelerator)
-
-    loggers = init_loggers(
-        algo=init_hp.get("ALGO", pop[0].algo),
-        env_name=env_name,
-        pbar=pbar,
-        verbose=verbose,
-        wb=wb,
-        tensorboard=tensorboard,
-        csv=csv,
-        tensorboard_log_dir=tensorboard_log_dir,
-        csv_log_dir=csv_log_dir,
-        accelerator=accelerator,
-        wandb_api_key=wandb_api_key,
-        wandb_kwargs=wandb_kwargs,
-        init_hyperparams=init_hp,
-    )
-
-    population = Population(agents=pop, accelerator=accelerator, loggers=loggers)
-
-    total_steps = 0
-    i = 0
-    next_checkpoint_step = checkpoint_steps
-    max_steps_checkpoint_saved = False
-    # Count consecutive iterations that advanced ``total_steps`` by 0 so a rollout
-    # that can never make progress aborts instead of looping forever (see the
-    # guard after the per-agent loop).
-    consecutive_stalls = 0
-    group_size = getattr(pop[0], "group_size", 1)
-    # Rank-offset seed for procedural env reset(seed=...) uniqueness only. Dataset
-    # rows are split by the TaskAssigner's contiguous per-rank shard instead.
-    group_seed = int(pop[0].seed) + dp_rank * (1 << 31)
-    rollout_collector = RolloutCollector(
-        env_factory,
-        batch_size,
-        group_size,
-        io_timeout_s=io_timeout_s,
-        rank=dp_rank,
-        world_size=data_increment,
-    )
-    test_env: RolloutHarness | None = None
     try:
-        wall_deadline = (
-            time.monotonic() + max_wall_seconds
-            if max_wall_seconds is not None and max_wall_seconds > 0
-            else None
-        )
-        while total_steps < max_steps:
-            # Every DP rank takes the same stop/continue branch; a rank-local
-            # wall-clock check can leave a peer blocked in collect's barrier.
-            if wall_deadline is not None and _any_rank_flag(
-                time.monotonic() >= wall_deadline,
-                accelerator,
-            ):
-                if accelerator is None or accelerator.is_main_process:
-                    print(
-                        f"\nStopping rollout training: wall time limit ({max_wall_seconds}s) reached.",
-                    )
-                break
-
-            iteration_steps = 0
-            for agent in population.agents:
-                # Refresh the KL reference once per completed pass over the dataset
-                # rows; a non-dataset env keeps ``num_epochs == 0``, leaving the
-                # anchor at the initial policy.
-                agent.set_reference_policy(rollout_collector.num_epochs)
-                agent.init_training_step()
-                (
-                    token_ids_list,
-                    action_masks_list,
-                    all_turn_ids,
-                    all_rewards,
-                    batch_steps,
-                    group_seed,
-                    all_sampling_logps,
-                ) = collect_rollouts_llm(
-                    agent=agent,
-                    env=rollout_collector,
-                    n_steps=max_turns,
-                    batch_size=batch_size,
-                    group_seed=group_seed,
-                )
-
-                # Collated a prompt group at a time, so the group-divisibility the
-                # algorithms rely on holds by construction, and a misaligned
-                # rollout fails here rather than inside a loss.
-                batch = collate_llm_rollouts(
-                    token_ids_list,
-                    action_masks_list,
-                    all_turn_ids,
-                    all_rewards,
-                    all_sampling_logps,
-                    group_size=group_size,
-                )
-                # Empty collated batches have no trajectories; learn() raises on them.
-                # iteration_steps stays 0, so the stall guard after this loop fires.
-                if _any_rank_empty_batch(
-                    batch_steps == 0 or batch.is_empty,
-                    accelerator,
-                ):
-                    agent.finalize_training_step(0)
-                else:
-                    episode_scores = batch.rewards.sum(dim=1)
-                    mean_score = episode_scores.mean().to(agent.device)
-
-                    experiences = batch.experiences()
-                    turn_ids = batch.turn_ids
-                    if accelerator is not None and needs_cross_rank_seq_padding(
-                        agent, world_size=data_increment
-                    ):
-                        # Multi-rank Liger token-level losses allreduce per chunk, so
-                        # every rank must pad to one global sequence length.
-                        token_ids, action_masks, rewards = (
-                            align_completion_batch_shapes_across_ranks(
-                                batch.token_ids,
-                                batch.action_masks,
-                                batch.rewards,
-                                pad_token_id=agent.pad_token_id,
-                                accelerator=accelerator,
-                            )
-                        )
-                        experiences = (token_ids, action_masks, rewards)
-                        if turn_ids is None:
-                            msg = "aligned batches are non-empty"
-                            raise RuntimeError(msg)
-                        target_mask_len = int(action_masks.shape[1])
-                        if int(turn_ids.shape[1]) < target_mask_len:
-                            turn_ids = torch.nn.functional.pad(
-                                turn_ids,
-                                (0, target_mask_len - int(turn_ids.shape[1])),
-                                value=-1,
-                            )
-
-                    agent.learn(
-                        experiences,
-                        turn_ids=turn_ids,
-                        sampling_logps=batch.sampling_logps,
-                    )
-
-                    agg_score = safe_aggregate_metrics(accelerator, mean_score)
-
-                    if max_reward is not None:
-                        if "accuracy" not in agent.metrics.additional_metrics:
-                            agent.metrics.register("accuracy")
-                        accuracy = (
-                            (episode_scores >= max_reward)
-                            .float()
-                            .mean()
-                            .to(agent.device)
-                        )
-                        agg_accuracy = safe_aggregate_metrics(accelerator, accuracy)
-                        if accelerator is None or accelerator.is_main_process:
-                            agent.metrics.log("accuracy", agg_accuracy)
-
-                    for (
-                        name,
-                        mean_value,
-                    ) in rollout_collector.get_rubric_score_means().items():
-                        metric = f"reward_{name}"
-                        if metric not in agent.metrics.additional_metrics:
-                            agent.metrics.register(metric)
-                        agg = safe_aggregate_metrics(
-                            accelerator, mean_score.new_tensor(mean_value)
-                        )
-                        if accelerator is None or accelerator.is_main_process:
-                            agent.metrics.log(metric, agg)
-
-                    effective_batch_steps = batch_steps * data_increment
-                    agent.finalize_training_step(batch_steps)
-                    total_steps += effective_batch_steps
-                    iteration_steps += effective_batch_steps
-
-                    if accelerator is None or accelerator.is_main_process:
-                        agent.add_scores([float(agg_score)])
-
-                if (i + 1) % evaluation_interval == 0:
-                    if test_env is None:
-                        test_env = env_factory()
-                    agent.test(test_env, loop=eval_loop)
-                    if accelerator is not None:
-                        accelerator.wait_for_everyone()
-
-            # ``total_steps`` only advances by ``batch_steps``; an iteration where
-            # every agent's rollout yielded no turns leaves it unchanged, so a
-            # rollout that always yields nothing would loop forever. Tolerate a few
-            # such iterations (e.g. an occasional over-budget dataset row) but abort
-            # once it is clearly systematic, rather than spinning silently.
-            if iteration_steps == 0:
-                consecutive_stalls += 1
-                if accelerator is None or accelerator.is_main_process:
-                    warnings.warn(
-                        "Rollout produced no usable turns this iteration "
-                        "(batch_steps == 0 for every agent), so training did not "
-                        "advance. Every prompt likely exceeds the context budget — "
-                        "check that max_output_tokens leaves room under "
-                        "max_context_length.",
-                        stacklevel=2,
-                    )
-                if consecutive_stalls >= 8:
-                    msg = (
-                        f"Rollout training made no progress for {consecutive_stalls} "
-                        "consecutive iterations (batch_steps == 0 every time), so "
-                        "total_steps can never reach max_steps. Aborting instead of "
-                        "looping forever. Likely cause: the prompt budget is "
-                        "exhausted (max_output_tokens too close to "
-                        "max_context_length), or every sampled prompt exceeds the "
-                        "context length."
-                    )
-                    raise RuntimeError(msg)
-            else:
-                consecutive_stalls = 0
-
-            if accelerator is None or accelerator.is_main_process:
-                pbar.update(iteration_steps // len(population.agents))
-                population.report_metrics(clear=True)
-            else:
-                # Metrics accumulate on every rank; only main reports, so the
-                # others must still clear or their stores grow for the whole run.
-                population.clear_agent_metrics()
-
-            if accelerator is not None:
-                accelerator.wait_for_everyone()
-
-            if (
-                selection_strategy is not None
-                and mutation is not None
-                and evo_steps is not None
-            ):
-                if (i + 1) % evo_steps == 0:
-                    if accelerator is not None:
-                        accelerator.wait_for_everyone()
-                    population.update(
-                        run_selection_and_mutation(
-                            selection_strategy,
-                            population=population.agents,
-                            mutation=mutation,
-                            env_name=env_name,
-                            accelerator=accelerator,
-                            language_model=True,
-                            elite_path=elite_path,
-                            save_elite=bool(save_elite),
-                        ),
-                    )
-                    group_size = getattr(population.agents[0], "group_size", 1)
-                    rollout_collector.update_rollout_geometry(
-                        rollout_batch_size=batch_size,
-                        group_size=group_size,
-                    )
-                    if accelerator is not None:
-                        accelerator.wait_for_everyone()
-
-                    population.increment_evo_step()
-            else:
-                checkpoint_due = False
-                if checkpoint_steps is not None:
-                    while (
-                        next_checkpoint_step is not None
-                        and total_steps >= next_checkpoint_step
-                    ):
-                        checkpoint_due = True
-                        next_checkpoint_step += checkpoint_steps
-                if (
-                    total_steps >= max_steps
-                    and not max_steps_checkpoint_saved
-                    and (
-                        checkpoint_steps is not None
-                        or checkpoint_path is not None
-                        or elite_path is not None
-                    )
-                ):
-                    checkpoint_due = True
-                    max_steps_checkpoint_saved = True
-                if checkpoint_due:
-                    save_llm_checkpoint(
-                        population.agents[-1],
-                        checkpoint_path if checkpoint_path is not None else elite_path,
-                    )
-
-            i += 1
-
-        if save_elite and elite_path is not None:
-            elite = max(
-                population.agents,
-                key=lambda agent: agent.fitness[-1] if agent.fitness else float("-inf"),
-            )
-            save_llm_checkpoint(elite, elite_path)
+        _run_llm_rollout_loop(session)
+        save_llm_elite_if_requested(session.population.agents, session.run.checkpoint)
     finally:
-        # Release the rollout envs (and any per-rollout OpenEnv servers they own)
-        # plus the test env, including on error.
-        try:
-            rollout_collector.close()
-        finally:
-            if test_env is not None:
-                test_env.close()
-
-    population.finish()
-    pbar.close()
-    return population.agents, population.last_fitnesses
+        _close_llm_rollout(session)
+    session.population.finish()
+    session.pbar.close()
+    return session.population.agents, session.population.last_fitnesses

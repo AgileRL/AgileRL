@@ -4,22 +4,25 @@
 from __future__ import annotations
 
 import warnings
-from typing import TYPE_CHECKING, Any, Literal
+from dataclasses import replace
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import torch
-from accelerate import Accelerator
 
 from agilerl import HAS_LIGER_KERNEL, HAS_LLM_DEPENDENCIES
+from agilerl.algorithms.configs import (
+    PopulationIndex,
+    PPOLLMObjective,
+    PPOLLMSetup,
+)
 from agilerl.algorithms.core import ActionResult, LLMAlgorithm
 from agilerl.algorithms.core.advantage_granularity import (
     resolve_batch_advantage_granularity,
 )
+from agilerl.algorithms.core.llm_init import named_llm_setup
 from agilerl.algorithms.core.llm_ops.fused_lora import unset_fused_adapter_routing
-from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
-
-if TYPE_CHECKING:
-    from peft import LoraConfig
+from agilerl.algorithms.core.registry import NetworkGroup
 
 if HAS_LIGER_KERNEL or TYPE_CHECKING:
     from agilerl.algorithms.core.llm_ops.fused_loss import (
@@ -37,13 +40,10 @@ from agilerl.protocols import (
 )
 from agilerl.typing import LLMObsType, LLMRolloutExperiences
 from agilerl.utils.algo_utils import (
-    CosineLRScheduleConfig,
-    VLLMConfig,
     get_experiences_samples,
     stack_and_pad_experiences,
 )
 from agilerl.utils.llm_utils import (
-    BitsAndBytesConfig,
     aggregate_metrics_dict,
     attention_mask_from_padded_ids,
     build_completion_mask,
@@ -54,7 +54,6 @@ from agilerl.utils.llm_utils import (
     normalize_prompt_batch,
     pool_by_turns,
     prepare_prompt_hf_generate,
-    resolve_llm_device,
     validate_importance_sampling_level,
     validate_llm_context_lengths,
 )
@@ -257,148 +256,67 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
 
     def __init__(
         self,
-        pad_token_id: int,
-        pad_token: str,
-        model_name: str | None = None,
-        actor_network: PreTrainedModelProtocol | None = None,
-        model_config: dict[str, Any] | None = None,
-        hp_config: HyperparameterConfig | None = None,
-        index: int = 0,
-        batch_size: int = 16,
-        beta: float = 0.01,
-        vf_coef: float = 0.5,
-        clip_coef: float = 0.2,
-        gamma: float = 1.0,
-        gae_lambda: float = 1.0,
-        lr_actor: float = 5e-7,
-        lr_critic: float | None = 5e-5,
-        max_grad_norm: float = 1.0,
-        update_epochs: int = 1,
-        temperature: float = 1.0,
-        repetition_penalty: float = 1.0,
-        top_p: float = 1.0,
-        top_k: int = 50,
-        min_p: float = 0.0,
-        use_separate_reference_adapter: bool = True,
-        calc_position_embeddings: bool = True,
-        micro_batch_size_per_gpu: int | None = None,
-        mini_batch_size: int | None = None,
-        max_output_tokens: int | None = None,
-        min_output_tokens: int | None = None,
-        max_model_len: int = 1024,
-        hf_generate_chunk_size: int | None = None,
-        lora_config: LoraConfig | None = None,
-        cosine_lr_schedule_config: CosineLRScheduleConfig | None = None,
-        accelerator: Accelerator | None = None,
-        device: str | torch.device | None = None,
-        wrap: bool = True,
-        clone: bool = False,
-        use_vllm: bool = False,
-        use_memory_efficient_params: bool = True,
-        vllm_config: VLLMConfig | None = None,
-        seed: int = 42,
-        turn_level_clip: bool = True,
-        importance_sampling_level: Literal[
-            "auto", "token", "turn", "trajectory"
-        ] = "auto",
-        advantage_granularity: Literal["turn", "token", "auto"] = "auto",
-        turn_ratio_pooling: Literal["sum", "mean"] = "sum",
-        action_granularity: Literal["turn", "token", "auto"] | None = None,
-        turn_value_reduction: Literal["mean", "final_value"] = "final_value",
-        whiten_advantages: bool = True,
-        gradient_checkpointing: bool = True,
-        torch_compiler: str | None = None,
-        cast_logprobs_to_fp32: bool = True,
-        chunk_rows: int | None = None,
-        use_liger_loss: bool = False,
-        quantization_config: BitsAndBytesConfig | None = None,
-        activation_offload: bool = False,
-        use_sequence_packing: bool = False,
-        lora_target_scope: str | None = None,
-        vllm_importance_sampling_correction: bool = True,
-        vllm_importance_sampling_cap: float = 2.0,
+        llm: PPOLLMSetup,
+        objective: PPOLLMObjective | None = None,
+        member: PopulationIndex | None = None,
+        lr_actor: float | None = None,
     ) -> None:
+        objective = objective or PPOLLMObjective()
+        member = member or PopulationIndex()
+        if lr_actor is not None:
+            llm = replace(llm, train=replace(llm.train, lr=lr_actor))
+        super().__init__(named_llm_setup(llm, "LLMPPO"), member)
+        self._bind_ppo_llm(llm, objective)
 
-        resolved_device = resolve_llm_device(accelerator, device)
-        super().__init__(
-            index=index,
-            batch_size=batch_size,
-            lr=lr_actor,
-            lr_critic=lr_critic,
-            max_grad_norm=max_grad_norm,
-            clone=clone,
-            calc_position_embeddings=calc_position_embeddings,
-            seed=seed,
-            pad_token_id=pad_token_id,
-            pad_token=pad_token,
-            use_value_head=True,
-            use_vllm=use_vllm,
-            vllm_config=vllm_config,
-            use_liger_loss=use_liger_loss,
-            lora_config=lora_config,
-            use_separate_reference_adapter=use_separate_reference_adapter,
-            model_name=model_name,
-            actor_network=actor_network,
-            model_config=model_config,
-            micro_batch_size_per_gpu=micro_batch_size_per_gpu,
-            mini_batch_size=mini_batch_size,
-            cosine_lr_schedule_config=cosine_lr_schedule_config,
-            hp_config=hp_config,
-            use_memory_efficient_params=use_memory_efficient_params,
-            wrap=wrap,
-            device=resolved_device,
-            accelerator=accelerator,
-            name="LLMPPO",
-            gradient_checkpointing=gradient_checkpointing,
-            torch_compiler=torch_compiler,
-            cast_logprobs_to_fp32=cast_logprobs_to_fp32,
-            chunk_rows=chunk_rows,
-            quantization_config=quantization_config,
-            activation_offload=activation_offload,
-            use_sequence_packing=use_sequence_packing,
-            lora_target_scope=lora_target_scope,
-            vllm_importance_sampling_correction=vllm_importance_sampling_correction,
-            vllm_importance_sampling_cap=vllm_importance_sampling_cap,
-        )
+    def _bind_ppo_llm(self, llm: PPOLLMSetup, objective: PPOLLMObjective) -> None:
+        """Bind PPO_LLM objective, generation, and actor networks."""
+        train = llm.train
+        gen = llm.generation
+        model = llm.model
+        lr_actor = train.lr
         self._validate_core_args(
-            batch_size, lr_actor, clip_coef, update_epochs, actor_network, clone
+            train.batch_size,
+            lr_actor,
+            objective.clip_coef,
+            objective.update_epochs,
+            model.actor_network,
+            train.clone,
         )
-        self.beta = beta
-        self.vf_coef = vf_coef
-        self.clip_coef = clip_coef
-        # Expose lr_actor explicitly (base stores it as ``self.lr``): the split
-        # LLM optimizer's lr_name is ``("lr_actor", "lr_critic")``, and the
-        # clone/checkpoint init_dict captures attributes by constructor-param
-        # name — both look up ``self.lr_actor``.
+        self.beta = objective.beta
+        self.vf_coef = objective.vf_coef
+        self.clip_coef = objective.clip_coef
+        # Optimizer lr_name is ("lr_actor", "lr_critic"); mutation looks up
+        # self.lr_actor.
         self.lr_actor = lr_actor
-        self.lr_critic = lr_critic if lr_critic is not None else lr_actor
-        self.update_epochs = update_epochs
-        self.temperature = temperature
-        self.repetition_penalty = repetition_penalty
-        self.top_p = top_p
-        self.top_k = top_k
-        self.min_p = min_p
+        self.lr_critic = train.lr_critic if train.lr_critic is not None else lr_actor
+        self.update_epochs = objective.update_epochs
+        self.temperature = gen.temperature
+        self.repetition_penalty = gen.repetition_penalty
+        self.top_p = gen.top_p
+        self.top_k = gen.top_k
+        self.min_p = gen.min_p
         self._setup_advantage_options(
-            turn_level_clip,
-            advantage_granularity,
-            action_granularity,
-            turn_value_reduction,
-            whiten_advantages,
-            gamma,
-            gae_lambda,
+            objective.turn_level_clip,
+            objective.advantage_granularity,
+            objective.action_granularity,
+            objective.turn_value_reduction,
+            objective.whiten_advantages,
+            objective.gamma,
+            objective.gae_lambda,
         )
-        self._setup_objective(importance_sampling_level, turn_ratio_pooling)
+        self._setup_objective(
+            objective.importance_sampling_level, objective.turn_ratio_pooling
+        )
         self._setup_generation(
-            max_output_tokens, min_output_tokens, max_model_len, hf_generate_chunk_size
+            gen.max_output_tokens,
+            gen.min_output_tokens,
+            gen.max_model_len,
+            gen.hf_generate_chunk_size,
         )
-        self._setup_actors(actor_network, clone=clone)
-
-        # Register network groups for mutations
+        self._setup_actors(model.actor_network, clone=train.clone)
         self.register_network_group(NetworkGroup(eval_network=self.actor, policy=True))
         if self.wrap:
             self.wrap_models()
-
-        # Register algorithm metrics
         for m in (
             "loss",
             "pg_loss",

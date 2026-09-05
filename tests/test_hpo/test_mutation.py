@@ -22,6 +22,10 @@ if HAS_LLM_DEPENDENCIES:
     from peft import LoraConfig
 from agilerl.hpo.mutation import (
     MutationError,
+    MutationNoise,
+    MutationOptions,
+    MutationRates,
+    MutationRuntime,
     Mutations,
     get_exp_layer,
     set_global_seed,
@@ -208,6 +212,41 @@ class TestMutationsInit:
         assert mutations.mutate_elite == mutate_elite
         assert mutations.device == device
         assert mutations.accelerator == accelerator
+
+    def test_grouped_dataclasses_match_flat_kwargs(self):
+        grouped = Mutations(
+            MutationRates(0.1, 0.2, 0.3, 0.4, 0.5, 0.6),
+            MutationNoise(mutation_sd=0.7),
+            MutationOptions(
+                activation_selection=["ReLU", "Sigmoid"],
+                mutate_elite=True,
+                rand_seed=12345,
+            ),
+            MutationRuntime(device="cpu"),
+        )
+        flat = Mutations(
+            0.1,
+            0.2,
+            0.3,
+            0.4,
+            0.5,
+            0.6,
+            mutation_sd=0.7,
+            activation_selection=["ReLU", "Sigmoid"],
+            mutate_elite=True,
+            rand_seed=12345,
+            device="cpu",
+        )
+
+        assert grouped.no_mut == flat.no_mut == 0.1
+        assert grouped.architecture_mut == flat.architecture_mut == 0.2
+        assert grouped.new_layer_prob == flat.new_layer_prob == 0.3
+        assert grouped.parameters_mut == flat.parameters_mut == 0.4
+        assert grouped.activation_mut == flat.activation_mut == 0.5
+        assert grouped.rl_hp_mut == flat.rl_hp_mut == 0.6
+        assert grouped.mutation_sd == flat.mutation_sd == 0.7
+        assert grouped.activation_selection == flat.activation_selection
+        assert grouped.device == flat.device == "cpu"
 
     def test_raises_for_negative_no_mutation(self):
         with pytest.raises(AssertionError, match="greater than or equal to zero"):

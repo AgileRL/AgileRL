@@ -10,7 +10,8 @@ from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
+from unittest.mock import patch as unittest_patch
 
 import pytest
 import torch
@@ -85,6 +86,19 @@ from agilerl.utils.llm_utils import (
     zero3_full_shape_views,
 )
 from tests import TINY_LLM_FIXTURE_PATH
+from tests.helpers.patch_split import (
+    LLM_UTILS_MODULES,
+    LLM_UTILS_PREFIX,
+    make_split_patch,
+    setattr_split,
+)
+
+patch = make_split_patch(LLM_UTILS_PREFIX, LLM_UTILS_MODULES, unittest_patch)
+
+
+def setattr_llm(monkeypatch: pytest.MonkeyPatch, name: str, value: object) -> None:
+    """Set ``name`` on every llm_utils split module."""
+    setattr_split(monkeypatch, LLM_UTILS_MODULES, name, value)
 
 
 class DummyTokenizer:
@@ -874,8 +888,7 @@ def test_llm_utils_fallback_types_when_no_llm_dependencies():
     """Test that llm_utils sets fallback sentinels when HAS_LLM_DEPENDENCIES is False:"""
     import agilerl.utils as agilerl_utils_pkg
 
-    # Remove the module from cache to force reimport
-    original_module = sys.modules.pop("agilerl.utils.llm_utils", None)
+    originals = {name: sys.modules.pop(name, None) for name in LLM_UTILS_MODULES}
 
     try:
         # Patch HAS_LLM_DEPENDENCIES before reimporting
@@ -890,17 +903,16 @@ def test_llm_utils_fallback_types_when_no_llm_dependencies():
             assert llm_utils_reloaded.AutoModelForCausalLMWithValueHead is None
             assert llm_utils_reloaded.BitsAndBytesConfig is None
     finally:
-        # Restore original module to avoid affecting other tests. Both the
-        # sys.modules entry AND the parent-package attribute have to be
-        # restored — ``from agilerl.utils import llm_utils`` resolves through
-        # the package attribute, not sys.modules, so leaving the reloaded
-        # (Any-bound) module bound on ``agilerl.utils`` leaks symbols into
-        # any tests that import this way on the same xdist worker.
-        if original_module is not None:
-            sys.modules["agilerl.utils.llm_utils"] = original_module
-            agilerl_utils_pkg.llm_utils = original_module
-        else:
-            sys.modules.pop("agilerl.utils.llm_utils", None)
+        # Restore original modules in both sys.modules and the parent package.
+        # ``from agilerl.utils import llm_utils`` resolves through the package
+        # attribute, not sys.modules.
+        for name, original in originals.items():
+            attr = name.rsplit(".", 1)[-1]
+            if original is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = original
+                setattr(agilerl_utils_pkg, attr, original)
 
 
 class TestCreateLlmAccelerator:
@@ -1767,8 +1779,8 @@ class TestBuildBnbQuantizationConfig:
 
     @pytest.fixture(autouse=True)
     def _fake_bnb(self, monkeypatch):
-        monkeypatch.setattr(llm_utils_module, "HAS_LLM_DEPENDENCIES", True)
-        monkeypatch.setattr(llm_utils_module, "BitsAndBytesConfig", self._FakeBnbConfig)
+        setattr_llm(monkeypatch, "HAS_LLM_DEPENDENCIES", True)
+        setattr_llm(monkeypatch, "BitsAndBytesConfig", self._FakeBnbConfig)
 
     def test_none_spec_returns_none(self):
         assert build_bnb_quantization_config(None) is None
@@ -1842,12 +1854,12 @@ class TestBuildBnbQuantizationConfig:
             build_bnb_quantization_config(42)
 
     def test_missing_llm_dependencies_raises_import_error(self, monkeypatch):
-        monkeypatch.setattr(llm_utils_module, "HAS_LLM_DEPENDENCIES", False)
+        setattr_llm(monkeypatch, "HAS_LLM_DEPENDENCIES", False)
         with pytest.raises(ImportError, match=r"install agilerl\[llm\]"):
             build_bnb_quantization_config("int8")
 
     def test_none_spec_skips_dependency_check(self, monkeypatch):
-        monkeypatch.setattr(llm_utils_module, "HAS_LLM_DEPENDENCIES", False)
+        setattr_llm(monkeypatch, "HAS_LLM_DEPENDENCIES", False)
         assert build_bnb_quantization_config(None) is None
 
 
@@ -2114,7 +2126,7 @@ class TestAdaptLoraConfigForModel:
 class TestLogCudaMemorySnapshot:
     def test_noop_without_cuda(self, monkeypatch, caplog):
         monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
-        with caplog.at_level(logging.INFO, logger="agilerl.utils.llm_utils"):
+        with caplog.at_level(logging.INFO, logger="agilerl.utils.llm_model"):
             log_cuda_memory_snapshot("label")
         assert caplog.text == ""
 
@@ -2122,7 +2134,7 @@ class TestLogCudaMemorySnapshot:
         monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
         monkeypatch.setattr(torch.cuda, "memory_allocated", lambda device: 2 * GiB)
         monkeypatch.setattr(torch.cuda, "memory_reserved", lambda device: 3 * GiB)
-        with caplog.at_level(logging.INFO, logger="agilerl.utils.llm_utils"):
+        with caplog.at_level(logging.INFO, logger="agilerl.utils.llm_model"):
             log_cuda_memory_snapshot("after wake_up", device_index=0)
         assert "after wake_up" in caplog.text
         assert "allocated=2.00 GiB" in caplog.text
@@ -2375,8 +2387,8 @@ class TestCreateModelFromNameOrPathDefaults:
 
     def test_defaults_to_bf16_and_sdpa(self, monkeypatch):
         captured = {}
-        monkeypatch.setattr(
-            llm_utils_module, "AutoModelForCausalLM", self._fake_loader(captured)
+        setattr_llm(
+            monkeypatch, "AutoModelForCausalLM", self._fake_loader(captured)
         )
         monkeypatch.setattr("importlib.util.find_spec", lambda name: None)
         out = create_model_from_name_or_path("org/tiny")
@@ -2387,8 +2399,8 @@ class TestCreateModelFromNameOrPathDefaults:
 
     def test_accelerator_defaults_to_fp16(self, monkeypatch):
         captured = {}
-        monkeypatch.setattr(
-            llm_utils_module, "AutoModelForCausalLM", self._fake_loader(captured)
+        setattr_llm(
+            monkeypatch, "AutoModelForCausalLM", self._fake_loader(captured)
         )
         monkeypatch.setattr("importlib.util.find_spec", lambda name: None)
         create_model_from_name_or_path("org/tiny", use_accelerator=True)
@@ -2396,8 +2408,8 @@ class TestCreateModelFromNameOrPathDefaults:
 
     def test_caller_dtype_stays_authoritative(self, monkeypatch):
         captured = {}
-        monkeypatch.setattr(
-            llm_utils_module, "AutoModelForCausalLM", self._fake_loader(captured)
+        setattr_llm(
+            monkeypatch, "AutoModelForCausalLM", self._fake_loader(captured)
         )
         monkeypatch.setattr("importlib.util.find_spec", lambda name: None)
         create_model_from_name_or_path(
@@ -2408,11 +2420,11 @@ class TestCreateModelFromNameOrPathDefaults:
     def test_flex_attention_triggers_kernel_options_patch(self, monkeypatch):
         captured = {}
         patch_calls = []
-        monkeypatch.setattr(
-            llm_utils_module, "AutoModelForCausalLM", self._fake_loader(captured)
+        setattr_llm(
+            monkeypatch, "AutoModelForCausalLM", self._fake_loader(captured)
         )
-        monkeypatch.setattr(
-            llm_utils_module,
+        setattr_llm(
+            monkeypatch,
             "patch_flex_attention_kernel_options",
             lambda *a, **k: patch_calls.append(1),
         )
@@ -2872,14 +2884,14 @@ class TestSavePeftAdapterForVllmRollout:
         fake_st.save_file = fake_save_file
         monkeypatch.setitem(sys.modules, "peft", fake_peft)
         monkeypatch.setitem(sys.modules, "safetensors.torch", fake_st)
-        monkeypatch.setattr(llm_utils_module, "HAS_LLM_DEPENDENCIES", True)
+        setattr_llm(monkeypatch, "HAS_LLM_DEPENDENCIES", True)
         return calls
 
     def _peft_model(self):
         return SimpleNamespace(peft_config={"actor": self._FakePeftConfig()})
 
     def test_requires_llm_dependencies(self, monkeypatch, tmp_path):
-        monkeypatch.setattr(llm_utils_module, "HAS_LLM_DEPENDENCIES", False)
+        setattr_llm(monkeypatch, "HAS_LLM_DEPENDENCIES", False)
         with pytest.raises(ImportError, match="requires peft and transformers"):
             save_peft_adapter_for_vllm_rollout(
                 MagicMock(), tmp_path, "actor", target_modules=["q_proj"]
@@ -3269,9 +3281,8 @@ class TestCrossRankLigerAlign:
         rewards = torch.zeros(1, dtype=torch.float32)
         acc = MagicMock()
 
-        with patch.object(
-            llm_utils_module,
-            "allreduce_minmax_int",
+        with patch(
+            "agilerl.utils.llm_utils.allreduce_minmax_int",
             side_effect=lambda value, _acc: (value, value),
         ) as mock_minmax:
             out_ids, _, _ = llm_utils_module.align_completion_batch_shapes_across_ranks(

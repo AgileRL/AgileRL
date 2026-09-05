@@ -5,7 +5,8 @@ import copy
 import gc
 import tempfile
 from unittest import mock
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
+from unittest.mock import patch as unittest_patch
 
 import numpy as np
 import pytest
@@ -25,12 +26,16 @@ from agilerl.algorithms.core.base import EvolvableAlgorithm, OptimizerWrapper
 from agilerl.algorithms.sft import SFT
 from agilerl.llm_envs import DatasetEnv
 from tests import TINY_LLM_FIXTURE_PATH
+from tests.helpers.patch_algo_core import make_core_patch, setattr_core
 from tests.test_algorithms.test_llms.llm_helpers import (
     _patch_mps_learn_hooks,
     create_module,
     deepspeed_config_stage_1,
     deepspeed_config_stage_2,
 )
+
+patch = make_core_patch(unittest_patch)
+mock.patch = make_core_patch(mock.patch)
 
 
 def make_sft_gym(
@@ -616,7 +621,8 @@ class TestSFTLigerUnavailableBehaviour:
         model_factory,
         assertion_mode,
     ):
-        monkeypatch.setattr("agilerl.algorithms.core.base.HAS_LIGER_KERNEL", False)
+        setattr_core(monkeypatch, "HAS_LIGER_KERNEL", False)
+        monkeypatch.setattr("agilerl.algorithms.core.llm_init.HAS_LIGER_KERNEL", False)
         monkeypatch.setattr("agilerl.algorithms.sft.HAS_LIGER_KERNEL", False)
         if assertion_mode == "warns_and_fallback":
             with pytest.warns(
@@ -865,6 +871,7 @@ class TestSFTNoLLMDependencies:
     ):
         with (
             mock.patch("agilerl.algorithms.core.base.HAS_LLM_DEPENDENCIES", False),
+            mock.patch("agilerl.algorithms.core.llm_init.HAS_LLM_DEPENDENCIES", False),
             pytest.raises(
                 ImportError,
                 match=r"LLM dependencies are not installed. Please install them using \`pip install agilerl\[llm\]\`.",
