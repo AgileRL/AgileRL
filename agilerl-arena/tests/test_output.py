@@ -327,10 +327,13 @@ class TestRendererLogEvent:
     def test_check_event_starts_live_renderer(self):
         renderer = StreamRichRenderer()
         event = CheckEvent(name="imports", success=True, warnings=[], error="", raw={})
-        renderer.handle_event(event)
+        try:
+            renderer.handle_event(event)
 
-        assert renderer._live is not None
-        assert len(renderer._rows) == 1
+            assert renderer._live is not None
+            assert len(renderer._rows) == 1
+        finally:
+            renderer.close()
 
     def test_empty_log_event_no_row(self):
         renderer = StreamRichRenderer()
@@ -535,15 +538,51 @@ ROWS = [
 def _pick(keys, rows=None, **kwargs):
     """Drive select_row with a scripted sequence of keypresses."""
     presses = iter(keys)
-    with patch("agilerl.arena.output._read_key", side_effect=lambda: next(presses)):
+
+    class DummyLive:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return None
+
+        def update(self, *args, **kwargs):
+            return None
+
+    with (
+        patch("agilerl.arena.output._read_key", side_effect=lambda: next(presses)),
+        patch(
+            "agilerl.arena.output.Live",
+            side_effect=lambda *args, **kwargs: DummyLive(),
+        ),
+    ):
         return select_row(rows if rows is not None else ROWS, **kwargs)
 
 
 def _last_rendered(keys, **kwargs):
     """The final table select_row drew before the user committed."""
-    with patch("agilerl.arena.output.Live") as mock_live:
-        _pick(keys, **kwargs)
-    return mock_live.return_value.__enter__.return_value.update.call_args.args[0]
+    updates: list = []
+
+    class RecordingLive:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return None
+
+        def update(self, table, **kwargs):
+            updates.append(table)
+
+    presses = iter(keys)
+    with (
+        patch("agilerl.arena.output._read_key", side_effect=lambda: next(presses)),
+        patch(
+            "agilerl.arena.output.Live",
+            side_effect=lambda *args, **kwargs: RecordingLive(),
+        ),
+    ):
+        select_row(ROWS, **kwargs)
+    return updates[-1]
 
 
 class TestSelectRow:
