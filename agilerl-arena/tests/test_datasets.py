@@ -10,7 +10,11 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from agilerl.arena.client import ArenaClient
+from agilerl.arena.client import (
+    CSV_CONTENT_TYPE,
+    PARQUET_CONTENT_TYPE,
+    ArenaClient,
+)
 from agilerl.arena.exceptions import ArenaFileNotFoundError, ArenaValidationError
 
 
@@ -20,10 +24,22 @@ def api_key_client():
         return ArenaClient(api_key="test-key")
 
 
-def _multipart_text(files: dict, key: str) -> str:
-    part = files[key]
-    assert part[0] is None
-    return part[1]
+def _multipart_items(files) -> list[tuple]:
+    if isinstance(files, dict):
+        return list(files.items())
+    return list(files)
+
+
+def _multipart_text(files, key: str) -> str:
+    for name, part in _multipart_items(files):
+        if name == key:
+            assert part[0] is None
+            return part[1]
+    raise KeyError(key)
+
+
+def _file_uploads(files) -> list[tuple]:
+    return [part for name, part in _multipart_items(files) if name == "file"]
 
 
 class TestListDatasets:
@@ -123,7 +139,10 @@ class TestCreateDataset:
         assert json.loads(_multipart_text(files, "column_mapping")) == {
             "prompt": "question",
         }
-        assert files["file"][0] == "data.csv"
+        uploads = _file_uploads(files)
+        assert len(uploads) == 1
+        assert uploads[0][0] == "data.csv"
+        assert uploads[0][2] == CSV_CONTENT_TYPE
         assert result["id"] == 1
 
     def test_create_hf_import(self, api_key_client):
@@ -177,9 +196,110 @@ class TestCreateDataset:
         files = call[1]["files"]
         assert "data" not in call[1]
         assert _multipart_text(files, "name") == "meta"
-        assert "file" not in files
+        assert _file_uploads(files) == []
 
-    def test_missing_file_raises(self, api_key_client):
+    def test_create_parquet_file(self, api_key_client, tmp_path):
+        parquet_path = tmp_path / "train.parquet"
+        parquet_path.write_bytes(b"PAR1")
+        api_key_client._request = MagicMock(return_value={"name": "ds1", "id": 2})
+
+        api_key_client.create_dataset(
+            name="ds1",
+            category="sft",
+            column_mapping={"prompt": "text"},
+            file=parquet_path,
+        )
+
+        files = api_key_client._request.call_args[1]["files"]
+        uploads = _file_uploads(files)
+        assert len(uploads) == 1
+        assert uploads[0][0] == "train.parquet"
+        assert uploads[0][2] == PARQUET_CONTENT_TYPE
+        assert all(name != "config" for name, _ in _multipart_items(files))
+
+    def test_create_parquet_folder_omits_config_when_one_config(
+        self, api_key_client, tmp_path
+    ):
+        shard = tmp_path / "main" / "train-00000-of-00001.parquet"
+        shard.parent.mkdir()
+        shard.write_bytes(b"PAR1")
+        (tmp_path / "README.md").write_text("skip")
+        (tmp_path / "eval.yaml").write_text("skip: true")
+        api_key_client._request = MagicMock(return_value={"name": "ds1"})
+
+        api_key_client.create_dataset(
+            name="ds1",
+            category="reasoning",
+            column_mapping={"question": "q", "answer": "a"},
+            file=tmp_path,
+        )
+
+        files = api_key_client._request.call_args[1]["files"]
+        uploads = _file_uploads(files)
+        assert len(uploads) == 1
+        assert uploads[0][0] == "main/train-00000-of-00001.parquet"
+        assert uploads[0][2] == PARQUET_CONTENT_TYPE
+        assert all(name != "config" for name, _ in _multipart_items(files))
+
+    def test_create_parquet_folder_sends_config_when_required(
+        self, api_key_client, tmp_path
+    ):
+        main = tmp_path / "main" / "train-00000-of-00001.parquet"
+        socratic = tmp_path / "socratic" / "train-00000-of-00001.parquet"
+        main.parent.mkdir()
+        socratic.parent.mkdir()
+        main.write_bytes(b"MAIN")
+        socratic.write_bytes(b"SOC")
+        api_key_client._request = MagicMock(return_value={"name": "gsm8k"})
+
+        api_key_client.create_dataset(
+            name="gsm8k",
+            category="reasoning",
+            column_mapping={"question": "q", "answer": "a"},
+            file=tmp_path,
+            config="main",
+        )
+
+        files = api_key_client._request.call_args[1]["files"]
+        uploads = _file_uploads(files)
+        assert len(uploads) == 1
+        assert uploads[0][0] == "main/train-00000-of-00001.parquet"
+        assert _multipart_text(files, "config") == "main"
+
+    def test_create_parquet_folder_requires_config_when_multiple(
+        self, api_key_client, tmp_path
+    ):
+        main = tmp_path / "main" / "train.parquet"
+        socratic = tmp_path / "socratic" / "train.parquet"
+        main.parent.mkdir()
+        socratic.parent.mkdir()
+        main.write_bytes(b"MAIN")
+        socratic.write_bytes(b"SOC")
+
+        with pytest.raises(ArenaValidationError, match="multiple configs"):
+            api_key_client.create_dataset(
+                name="gsm8k",
+                category="reasoning",
+                column_mapping={},
+                file=tmp_path,
+            )
+
+    def test_create_parquet_folder_root_shards(self, api_key_client, tmp_path):
+        (tmp_path / "train.parquet").write_bytes(b"PAR1")
+        (tmp_path / "valid.parquet").write_bytes(b"PAR2")
+        api_key_client._request = MagicMock(return_value={"name": "ds1"})
+
+        api_key_client.create_dataset(
+            name="ds1",
+            category="sft",
+            column_mapping={"prompt": "text"},
+            file=tmp_path,
+        )
+
+        uploads = _file_uploads(api_key_client._request.call_args[1]["files"])
+        names = [part[0] for part in uploads]
+        assert names == ["train.parquet", "valid.parquet"]
+        assert all(part[2] == PARQUET_CONTENT_TYPE for part in uploads)
         with pytest.raises(ArenaFileNotFoundError, match="Upload file not found"):
             api_key_client.create_dataset(
                 name="ds",
@@ -220,7 +340,7 @@ class TestBuildCreateDatasetMultipart:
             column_mapping='{"a": "b"}',
         )
         assert data["column_mapping"] == '{"a": "b"}'
-        assert files == {}
+        assert files == []
 
     def test_category_normalized_to_lowercase(self):
         data, _ = ArenaClient._build_create_dataset_multipart(
@@ -237,7 +357,74 @@ class TestBuildCreateDatasetMultipart:
             column_mapping={},
             file=b"col\n1\n",
         )
-        assert files["file"] == ("dataset.csv", b"col\n1\n", "text/csv")
+        assert files == [("file", ("dataset.csv", b"col\n1\n", CSV_CONTENT_TYPE))]
+
+    def test_parquet_file_uses_parquet_content_type(self, tmp_path):
+        path = tmp_path / "split.parquet"
+        path.write_bytes(b"PAR1")
+        _, files = ArenaClient._build_create_dataset_multipart(
+            name="n",
+            category="sft",
+            column_mapping={},
+            file=path,
+        )
+        try:
+            assert files[0][0] == "file"
+            assert files[0][1][0] == "split.parquet"
+            assert files[0][1][2] == PARQUET_CONTENT_TYPE
+        finally:
+            ArenaClient._close_upload_files(files)
+
+    def test_empty_parquet_folder_raises(self, tmp_path):
+        empty = tmp_path / "empty"
+        empty.mkdir()
+        (empty / "README.md").write_text("no shards")
+        with pytest.raises(ArenaValidationError, match="No parquet files found"):
+            ArenaClient._build_create_dataset_multipart(
+                name="n",
+                category="sft",
+                column_mapping={},
+                file=empty,
+            )
+
+    def test_csv_only_folder_raises(self, tmp_path):
+        csv_dir = tmp_path / "csv"
+        csv_dir.mkdir()
+        (csv_dir / "data.csv").write_text("a,b\n1,2\n")
+        with pytest.raises(ArenaValidationError, match="No parquet files found"):
+            ArenaClient._build_create_dataset_multipart(
+                name="n",
+                category="sft",
+                column_mapping={},
+                file=csv_dir,
+            )
+
+    def test_uppercase_parquet_suffix(self, tmp_path):
+        path = tmp_path / "train.PARQUET"
+        path.write_bytes(b"PAR1")
+        _, files = ArenaClient._build_create_dataset_multipart(
+            name="n",
+            category="sft",
+            column_mapping={},
+            file=path,
+        )
+        try:
+            assert files[0][1][2] == PARQUET_CONTENT_TYPE
+        finally:
+            ArenaClient._close_upload_files(files)
+
+    def test_unknown_config_raises(self, tmp_path):
+        shard = tmp_path / "main" / "train.parquet"
+        shard.parent.mkdir()
+        shard.write_bytes(b"PAR1")
+        with pytest.raises(ArenaValidationError, match="No parquet files for config"):
+            ArenaClient._build_create_dataset_multipart(
+                name="n",
+                category="sft",
+                column_mapping={},
+                file=tmp_path,
+                config="socratic",
+            )
 
 
 class TestDeleteDataset:
