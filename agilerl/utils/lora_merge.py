@@ -5,7 +5,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import shutil
 from collections.abc import Generator, Iterable, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -30,6 +32,10 @@ from agilerl.utils.ppo_value_head import AutoModelForCausalLMWithValueHead
 
 DEFAULT_MAX_SHARD_SIZE = "5GB"
 DEFAULT_TORCH_DTYPE = torch.bfloat16
+ARENA_ARTIFACT_MANIFEST_FILENAME = "arena_artifact_manifest.json"
+MERGED_COMPLETE_MARKER = ".complete"
+HF_MERGED_FORMAT = "hf_merged"
+ADAPTER_CONFIG_FILENAME = "adapter_config.json"
 
 
 class MergedExportError(RuntimeError):
@@ -137,8 +143,9 @@ def export_merged_pretrained(
     wrapper whose ``pretrained_model`` is PEFT). Replay shape: pass ``adapter_path``
     (the ``actor/`` PEFT directory) and ``base_model_name_or_path``.
 
-    :param output_dir: Directory for ``config.json``, safetensors, and optional
-        tokenizer / ``generation_config.json``.
+    :param output_dir: Directory for ``config.json``, safetensors, optional
+        tokenizer / ``generation_config.json``, ``arena_artifact_manifest.json``,
+        and ``.complete``.
     :param model: Live PEFT module currently on the training ranks.
     :param adapter_path: Saved PEFT adapter directory for replay.
     :param base_model_name_or_path: Base model id or local HF directory for replay.
@@ -203,6 +210,43 @@ def export_merged_pretrained(
     except Exception as exc:
         error = exc
     _reraise_if_any_rank_failed(accelerator, error)
+
+
+def _sha256_and_size(path: Path) -> tuple[str, int]:
+    """Return the hex sha256 and byte length of ``path``."""
+    digest = hashlib.sha256()
+    size = 0
+    with path.open("rb") as handle:
+        while chunk := handle.read(1024 * 1024):
+            digest.update(chunk)
+            size += len(chunk)
+    return digest.hexdigest(), size
+
+
+def write_merged_completeness_files(output_dir: str | Path) -> None:
+    """Write Arena ``inspect_merged`` markers for a successful HF export.
+
+    :param output_dir: Directory that already holds merged Hugging Face files.
+    """
+    output_path = Path(output_dir)
+    skip = {
+        MERGED_COMPLETE_MARKER,
+        ARENA_ARTIFACT_MANIFEST_FILENAME,
+        ADAPTER_CONFIG_FILENAME,
+    }
+    files: list[dict[str, str | int]] = []
+    for path in sorted(output_path.rglob("*")):
+        if not path.is_file() or path.name in skip:
+            continue
+        rel = path.relative_to(output_path).as_posix()
+        sha256, size = _sha256_and_size(path)
+        files.append({"key": rel, "sha256": sha256, "bytes": size})
+    manifest = {"format": HF_MERGED_FORMAT, "files": files}
+    (output_path / ARENA_ARTIFACT_MANIFEST_FILENAME).write_text(
+        json.dumps(manifest) + "\n",
+        encoding="utf-8",
+    )
+    (output_path / MERGED_COMPLETE_MARKER).write_text("1", encoding="utf-8")
 
 
 def _any_rank_failed(
@@ -386,7 +430,9 @@ def _export_live_model(
     is_main = accelerator is None or accelerator.is_main_process
     if is_main:
         try:
-            output_path.mkdir(parents=True, exist_ok=True)
+            if output_path.is_dir():
+                shutil.rmtree(output_path)
+            output_path.mkdir(parents=True)
         except Exception as exc:
             error = exc
 
@@ -435,6 +481,7 @@ def _export_live_model(
         pretrained.generation_config.save_pretrained(output_path)
     if tokenizer is not None:
         tokenizer.save_pretrained(output_path)
+    write_merged_completeness_files(output_path)
 
 
 def _tied_weight_names(pretrained: PreTrainedModel) -> set[str]:

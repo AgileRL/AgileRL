@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import gc
+import hashlib
 import json
 import os
 import socket
@@ -42,10 +43,13 @@ from transformers import (
 
 from agilerl.utils import lora_merge as lora_merge_mod
 from agilerl.utils.lora_merge import (
+    ARENA_ARTIFACT_MANIFEST_FILENAME,
+    MERGED_COMPLETE_MARKER,
     BaseWeightStore,
     MergedExportError,
     ModuleCopy,
     export_merged_pretrained,
+    write_merged_completeness_files,
 )
 from agilerl.utils.ppo_value_head import AutoModelForCausalLMWithValueHead
 
@@ -128,6 +132,27 @@ def _assert_unmutated(model: nn.Module, before: dict[str, torch.Tensor]) -> None
         assert torch.equal(tensor, before[name]), name
 
 
+def _assert_arena_completeness(merged: Path) -> dict[str, object]:
+    """Assert Arena inspect_merged files exist and hashes match file bytes."""
+    marker = merged / MERGED_COMPLETE_MARKER
+    manifest_path = merged / ARENA_ARTIFACT_MANIFEST_FILENAME
+    assert marker.is_file()
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert payload["format"] == "hf_merged"
+    files = payload["files"]
+    assert files
+    keys = [entry["key"] for entry in files]
+    assert "adapter_config.json" not in keys
+    for entry in files:
+        rel = entry["key"]
+        assert not rel.startswith("/")
+        assert ".." not in Path(rel).parts
+        data = (merged / rel).read_bytes()
+        assert hashlib.sha256(data).hexdigest() == entry["sha256"]
+        assert entry["bytes"] == len(data)
+    return payload
+
+
 def _peft_logits(model: nn.Module, input_ids: torch.Tensor) -> torch.Tensor:
     """Forward logits from a PEFT or HF causal LM."""
     model.eval()
@@ -161,6 +186,34 @@ class TestExportMergedPretrainedLive:
         assert not (out / "adapter_config.json").exists()
         assert (out / "config.json").exists()
         assert (out / "generation_config.json").exists()
+        _assert_arena_completeness(out)
+
+    def test_writes_completeness_files_matching_hashes(self, tmp_path: Path) -> None:
+        peft_model = _tiny_peft()
+        out = tmp_path / "merged"
+
+        export_merged_pretrained(out, model=peft_model, torch_dtype=torch.float32)
+
+        payload = _assert_arena_completeness(out)
+        listed = {entry["key"] for entry in payload["files"]}
+        assert "config.json" in listed
+        assert "model.safetensors" in listed
+        assert MERGED_COMPLETE_MARKER not in listed
+        assert ARENA_ARTIFACT_MANIFEST_FILENAME not in listed
+
+    def test_clears_leftover_shards_before_write(self, tmp_path: Path) -> None:
+        peft_model = _tiny_peft()
+        out = tmp_path / "merged"
+        out.mkdir()
+        leftover = out / "model-00001-of-00002.safetensors"
+        leftover.write_bytes(b"stale")
+
+        export_merged_pretrained(out, model=peft_model, torch_dtype=torch.float32)
+
+        payload = _assert_arena_completeness(out)
+        listed = {entry["key"] for entry in payload["files"]}
+        assert leftover.name not in listed
+        assert not leftover.exists()
 
     def test_default_dtype_is_bfloat16(self, tmp_path: Path) -> None:
         peft_model = _tiny_peft()
@@ -340,6 +393,24 @@ class TestExportMergedPretrainedLive:
         )
 
 
+class TestWriteMergedCompletenessFiles:
+    def test_skips_adapter_config_and_writes_marker_last(self, tmp_path: Path) -> None:
+        merged = tmp_path / "merged"
+        merged.mkdir()
+        (merged / "config.json").write_text("{}", encoding="utf-8")
+        (merged / "adapter_config.json").write_text("{}", encoding="utf-8")
+        nested = merged / "tokenizer"
+        nested.mkdir()
+        (nested / "tokenizer.json").write_bytes(b"tok")
+
+        write_merged_completeness_files(merged)
+
+        payload = _assert_arena_completeness(merged)
+        keys = [entry["key"] for entry in payload["files"]]
+        assert keys == ["config.json", "tokenizer/tokenizer.json"]
+        assert (merged / "adapter_config.json").is_file()
+
+
 class TestExportMergedPretrainedReplay:
     def test_reload_from_actor_dir_and_base(self, tmp_path: Path) -> None:
         torch.manual_seed(0)
@@ -353,14 +424,15 @@ class TestExportMergedPretrainedReplay:
         input_ids = torch.randint(0, 32, (2, 8))
         live_logits = _peft_logits(peft_model, input_ids)
 
+        out = tmp_path / "merged"
         export_merged_pretrained(
-            tmp_path / "merged",
+            out,
             adapter_path=actor_dir,
             base_model_name_or_path=base_dir,
             adapter_name="actor",
             torch_dtype=torch.float32,
         )
-        reloaded = AutoModelForCausalLM.from_pretrained(tmp_path / "merged")
+        reloaded = AutoModelForCausalLM.from_pretrained(out)
 
         assert torch.allclose(
             live_logits,
@@ -368,6 +440,7 @@ class TestExportMergedPretrainedReplay:
             atol=LOGIT_ATOL,
             rtol=LOGIT_RTOL,
         )
+        _assert_arena_completeness(out)
 
     def test_non_main_replay_skips_write(self, tmp_path: Path) -> None:
         accelerator = SimpleNamespace(
