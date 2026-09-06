@@ -14,7 +14,7 @@ import click
 
 from agilerl.arena import console
 from agilerl.arena.cli_manifest import handle_help_option
-from agilerl.arena.client import MEMORY_SCOPES, MemoryScope
+from agilerl.arena.client import DATASET_CATEGORIES, MEMORY_SCOPES, MemoryScope
 from agilerl.arena.config import CommandConfig, arena_client
 from agilerl.arena.exceptions import ArenaError
 from agilerl.arena.inference import Agent, SessionInfo
@@ -50,6 +50,16 @@ ClickDecorated = TypeVar("ClickDecorated", bound=Callable[..., Any] | click.Comm
     "--api-key",
     default=None,
     help="Bearer secret: profile CLI PAT (arena_pat_…) or access token.",
+)
+@click.option(
+    "--org-key",
+    default=None,
+    help="Organisation API key (arena_org_…). Requires --external-user-id.",
+)
+@click.option(
+    "--external-user-id",
+    default=None,
+    help="Partner user id sent as X-External-User-Id. Requires --org-key.",
 )
 @click.option(
     "--base-url",
@@ -90,6 +100,8 @@ ClickDecorated = TypeVar("ClickDecorated", bound=Callable[..., Any] | click.Comm
 def main(
     ctx: click.Context,
     api_key: str | None,
+    org_key: str | None,
+    external_user_id: str | None,
     base_url: str | None,
     keycloak_url: str | None,
     realm: str | None,
@@ -100,6 +112,8 @@ def main(
     """Arena CLI - Interact with the Arena RLOps platform directly from the command-line."""
     ctx.obj = CommandConfig(
         api_key=api_key,
+        org_key=org_key,
+        external_user_id=external_user_id,
         base_url=base_url,
         keycloak_url=keycloak_url,
         realm=realm,
@@ -406,9 +420,6 @@ def env_duplicate(
         )
 
 
-_DATASET_CATEGORIES = ("reasoning", "preference", "sft")
-
-
 @main.group("datasets")
 def datasets_group() -> None:
     """Manage your language model datasets in Arena."""
@@ -443,7 +454,7 @@ def datasets_exists(config: CommandConfig, name: str) -> None:
 @click.option(
     "--category",
     required=True,
-    type=click.Choice(_DATASET_CATEGORIES, case_sensitive=False),
+    type=click.Choice(sorted(DATASET_CATEGORIES), case_sensitive=False),
     help="Dataset category.",
 )
 @click.option(

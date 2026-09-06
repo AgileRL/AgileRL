@@ -26,6 +26,8 @@ class CommandConfig:
     client_id: str | None
     request_timeout: int
     upload_timeout: int
+    org_key: str | None = None
+    external_user_id: str | None = None
 
 
 def _resolve_root_command_config(ctx: click.Context) -> CommandConfig:
@@ -45,6 +47,8 @@ def _resolve_root_command_config(ctx: click.Context) -> CommandConfig:
         params = {}
     return CommandConfig(
         api_key=params.get("api_key"),
+        org_key=params.get("org_key"),
+        external_user_id=params.get("external_user_id"),
         base_url=params.get("base_url"),
         keycloak_url=params.get("keycloak_url"),
         realm=params.get("realm"),
@@ -70,6 +74,8 @@ def build_client(config: CommandConfig) -> ArenaClient:
     )
     return ArenaClient(
         api_key=config.api_key,
+        org_key=config.org_key,
+        external_user_id=config.external_user_id,
         request_timeout=config.request_timeout,
         upload_timeout=config.upload_timeout,
     )
