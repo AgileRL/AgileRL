@@ -12,6 +12,7 @@ import httpx
 from pydantic import BaseModel, ConfigDict, Field
 from typing_extensions import Self
 
+from agilerl.arena.auth import EXTERNAL_USER_ID_HEADER, validate_partner_credentials
 from agilerl.arena.exceptions import ArenaAuthError, ArenaInferenceError
 from agilerl.arena.inference.serde import (
     RLData,
@@ -250,7 +251,8 @@ class Agent:
 
     Every request carries your own Arena credential as ``Authorization: Bearer``.
     A deployment that keeps memory per user works out who is calling from it, so
-    there is nothing else to pass. The credential is never logged, shown in
+    there is nothing else to pass. Organisation-key clients also send
+    ``X-External-User-Id``. The credential is never logged, shown in
     :func:`repr`, or written to disk.
 
     :param endpoint: Base URL of the Arena inference deployment.
@@ -259,6 +261,12 @@ class Agent:
         from :meth:`~agilerl.arena.client.ArenaClient.login`. Falls back to the
         ``ARENA_API_KEY`` environment variable.
     :type api_key: str | None
+    :param org_key: Organisation API key (``arena_org_…``). Requires
+        *external_user_id*. Falls back to ``ARENA_ORG_KEY``.
+    :type org_key: str | None
+    :param external_user_id: Partner user id sent as ``X-External-User-Id``.
+        Requires *org_key*. Falls back to ``ARENA_EXTERNAL_USER_ID``.
+    :type external_user_id: str | None
     :param timeout: Request timeout in seconds.
     :type timeout: int
     :param generate_params: Default LLM sampling parameters; defaults to
@@ -273,16 +281,26 @@ class Agent:
         endpoint: str,
         *,
         api_key: str | None = None,
+        org_key: str | None = None,
+        external_user_id: str | None = None,
         timeout: int = 30,
         generate_params: LLMParams | None = None,
         probe_on_init: bool = True,
     ) -> None:
         self._base_url = endpoint.rstrip("/")
 
-        credential = api_key or os.environ.get("ARENA_API_KEY")
+        org_key = org_key or os.environ.get("ARENA_ORG_KEY")
+        external_user_id = external_user_id or os.environ.get("ARENA_EXTERNAL_USER_ID")
+        validate_partner_credentials(org_key, external_user_id)
+
         headers: dict[str, str] = {}
-        if credential:
-            headers["Authorization"] = f"Bearer {credential}"
+        if org_key is not None and external_user_id is not None:
+            headers["Authorization"] = f"Bearer {org_key}"
+            headers[EXTERNAL_USER_ID_HEADER] = external_user_id
+        else:
+            credential = api_key or os.environ.get("ARENA_API_KEY")
+            if credential:
+                headers["Authorization"] = f"Bearer {credential}"
 
         self._http = httpx.Client(
             headers=headers,
@@ -308,7 +326,8 @@ class Agent:
 
     _AUTH_SDK_HINT = (
         "Call client.login() and build the agent with "
-        "client.open_inference_agent(), or pass a profile PAT as api_key."
+        "client.open_inference_agent(), pass a profile PAT as api_key, "
+        "or pass org_key and external_user_id."
     )
 
     def _raise_for_status(

@@ -13,6 +13,7 @@ import httpx
 import numpy as np
 import pytest
 
+from agilerl.arena.auth import EXTERNAL_USER_ID_HEADER
 from agilerl.arena.exceptions import ArenaAuthError, ArenaInferenceError
 from agilerl.arena.inference import (
     Agent,
@@ -670,6 +671,43 @@ class TestAgentCredentialResolution:
     def test_no_credential_sends_no_auth_header(self, mock_http_cls):
         Agent("http://endpoint", probe_on_init=False)
         assert mock_http_cls.call_args[1]["headers"] == {}
+
+    @patch("agilerl.arena.inference.agent.httpx.Client")
+    def test_org_key_headers(self, mock_http_cls):
+        Agent(
+            "http://endpoint",
+            org_key="arena_org_secret",
+            external_user_id="partner-user-1",
+            probe_on_init=False,
+        )
+        headers = mock_http_cls.call_args[1]["headers"]
+        assert headers == {
+            "Authorization": "Bearer arena_org_secret",
+            EXTERNAL_USER_ID_HEADER: "partner-user-1",
+        }
+
+    @patch("agilerl.arena.inference.agent.httpx.Client")
+    def test_org_key_wins_over_api_key(self, mock_http_cls):
+        Agent(
+            "http://endpoint",
+            api_key="arena_pat_abc",
+            org_key="arena_org_secret",
+            external_user_id="partner-user-1",
+            probe_on_init=False,
+        )
+        headers = mock_http_cls.call_args[1]["headers"]
+        assert headers == {
+            "Authorization": "Bearer arena_org_secret",
+            EXTERNAL_USER_ID_HEADER: "partner-user-1",
+        }
+
+    def test_org_key_without_external_user_id_raises(self):
+        with pytest.raises(ArenaAuthError, match="must be set together"):
+            Agent(
+                "http://endpoint",
+                org_key="arena_org_secret",
+                probe_on_init=False,
+            )
 
 
 SECRET = "arena_pat_supersecret"

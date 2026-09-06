@@ -144,6 +144,8 @@ class TestCommandConfig:
             )
             MockArenaClient.assert_called_once_with(
                 api_key="pat_123",
+                org_key=None,
+                external_user_id=None,
                 request_timeout=5,
                 upload_timeout=120,
             )
@@ -177,6 +179,8 @@ class TestResolveRootCommandConfig:
         cfg = _resolve_root_command_config(ctx)
         assert isinstance(cfg, CommandConfig)
         assert cfg.api_key is None
+        assert cfg.org_key is None
+        assert cfg.external_user_id is None
         assert cfg.base_url is None
         assert cfg.request_timeout == 30
         assert cfg.upload_timeout == 300
@@ -1583,6 +1587,32 @@ class TestGlobalOptions:
         assert result.exit_code == 0
         config_arg = m.call_args[0][0]
         assert config_arg.api_key == "pat_abc"
+
+    def test_org_key_passed_to_config(self, runner, mock_client):
+        with patch("agilerl.arena.config.build_client", return_value=mock_client) as m:
+            result = runner.invoke(
+                main,
+                [
+                    "--org-key",
+                    "arena_org_secret",
+                    "--external-user-id",
+                    "partner-user-1",
+                    "logout",
+                ],
+            )
+        assert result.exit_code == 0
+        config_arg = m.call_args[0][0]
+        assert config_arg.org_key == "arena_org_secret"
+        assert config_arg.external_user_id == "partner-user-1"
+
+    def test_keycloak_url_passed_to_config(self, runner, mock_client):
+        with patch("agilerl.arena.config.build_client", return_value=mock_client) as m:
+            result = runner.invoke(
+                main, ["--keycloak-url", "http://kc.example", "logout"]
+            )
+        assert result.exit_code == 0
+        config_arg = m.call_args[0][0]
+        assert config_arg.keycloak_url == "http://kc.example"
 
     def test_base_url_passed_to_config(self, runner, mock_client):
         with patch("agilerl.arena.config.build_client", return_value=mock_client) as m:
