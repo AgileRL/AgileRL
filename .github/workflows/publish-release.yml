@@ -39,6 +39,7 @@ jobs:
             dist_name: ${{ steps.tag.outputs.dist_name }}
             package: ${{ steps.tag.outputs.package }}
             previous_tag: ${{ steps.prev.outputs.previous_tag }}
+            arena_pin: ${{ steps.arena-pin.outputs.pin }}
         steps:
             - name: Resolve tag
               id: tag
@@ -76,6 +77,18 @@ jobs:
               with:
                   persist-credentials: false
                   fetch-depth: 1
+
+            - name: Read agilerl-arena pin
+              id: arena-pin
+              if: steps.tag.outputs.package == 'agilerl'
+              run: |
+                  set -euo pipefail
+                  pin="$(grep -o '"agilerl-arena[^"]*"' pyproject.toml | head -n1 | tr -d '"')"
+                  if [[ -z "${pin}" ]]; then
+                    echo "agilerl pyproject.toml must declare an agilerl-arena pin" >&2
+                    exit 1
+                  fi
+                  echo "pin=${pin}" >> "$GITHUB_OUTPUT"
 
             - name: Previous same-family tag
               id: prev
@@ -153,6 +166,13 @@ jobs:
                   name: pypi-dist
                   path: dist
 
+            # Fail if the agilerl-arena pin is not on PyPI.
+            - name: Gate agilerl on a resolvable agilerl-arena pin
+              if: needs.fetch.outputs.package == 'agilerl'
+              env:
+                  PIN: ${{ needs.fetch.outputs.arena_pin }}
+              run: python3 -m pip install --dry-run --no-deps "${PIN}"
+
             - name: Install uv
               uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
               with:
@@ -171,7 +191,8 @@ jobs:
                     echo "missing dist artifacts for ${DIST}==${VER}"; ls -la dist; exit 1
                   fi
                   echo "Publishing ${DIST}==${VER} from tag ${TAG} via Trusted Publishing"
-                  uv publish --trusted-publishing always "${artifacts[@]}"
+                  # Skip artifacts already on PyPI so a retry can finish.
+                  uv publish --trusted-publishing always --check-url https://pypi.org/simple "${artifacts[@]}"
 
     github-release:
         needs: [fetch, publish]
