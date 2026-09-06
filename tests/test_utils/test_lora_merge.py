@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import gc
+import hashlib
 import json
 import os
 import socket
@@ -42,10 +43,14 @@ from transformers import (
 
 from agilerl.utils import lora_merge as lora_merge_mod
 from agilerl.utils.lora_merge import (
+    ARENA_ARTIFACT_MANIFEST_FILENAME,
+    COMPLETE_MARKER_FILENAME,
+    MERGED_ARTIFACT_FORMAT,
     BaseWeightStore,
     MergedExportError,
     ModuleCopy,
     export_merged_pretrained,
+    write_merged_artifact_completeness,
 )
 from agilerl.utils.ppo_value_head import AutoModelForCausalLMWithValueHead
 
@@ -135,6 +140,92 @@ def _peft_logits(model: nn.Module, input_ids: torch.Tensor) -> torch.Tensor:
         return model(input_ids).logits.float()
 
 
+def _assert_merged_completeness(out: Path) -> None:
+    """Assert ``.complete`` and a valid ``arena_artifact_manifest.json`` under ``out``."""
+    manifest_path = out / ARENA_ARTIFACT_MANIFEST_FILENAME
+    assert (out / COMPLETE_MARKER_FILENAME).is_file()
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert payload["format"] == MERGED_ARTIFACT_FORMAT
+    files = payload["files"]
+    assert files
+    listed = {entry["path"] for entry in files}
+    assert COMPLETE_MARKER_FILENAME not in listed
+    assert ARENA_ARTIFACT_MANIFEST_FILENAME not in listed
+    assert "adapter_config.json" not in listed
+    for entry in files:
+        path = out / entry["path"]
+        assert path.is_file()
+        data = path.read_bytes()
+        assert entry["bytes"] == len(data)
+        assert entry["sha256"] == hashlib.sha256(data).hexdigest()
+        assert ".." not in Path(entry["path"]).parts
+        assert not entry["path"].startswith("/")
+
+
+class TestWriteMergedArtifactCompleteness:
+    def test_writes_manifest_and_complete_marker(self, tmp_path: Path) -> None:
+        merged = tmp_path / "merged"
+        merged.mkdir()
+        (merged / "config.json").write_text('{"hidden": 1}\n', encoding="utf-8")
+        weights = merged / "model.safetensors"
+        weights.write_bytes(b"weights")
+
+        write_merged_artifact_completeness(merged)
+
+        _assert_merged_completeness(merged)
+
+    def test_skips_complete_adapter_config_and_manifest(self, tmp_path: Path) -> None:
+        merged = tmp_path / "merged"
+        merged.mkdir()
+        (merged / "config.json").write_bytes(b"cfg")
+        (merged / "adapter_config.json").write_bytes(b"peft")
+        (merged / COMPLETE_MARKER_FILENAME).write_text("stale", encoding="utf-8")
+        (merged / ARENA_ARTIFACT_MANIFEST_FILENAME).write_text("{}\n", encoding="utf-8")
+
+        write_merged_artifact_completeness(merged)
+
+        payload = json.loads(
+            (merged / ARENA_ARTIFACT_MANIFEST_FILENAME).read_text(encoding="utf-8")
+        )
+        listed = {entry["path"] for entry in payload["files"]}
+        assert listed == {"config.json"}
+        assert (merged / COMPLETE_MARKER_FILENAME).read_text(encoding="utf-8") == ""
+
+    def test_nested_relative_keys(self, tmp_path: Path) -> None:
+        merged = tmp_path / "merged"
+        nested = merged / "tokenizer"
+        nested.mkdir(parents=True)
+        (nested / "tokenizer.json").write_bytes(b"tok")
+
+        write_merged_artifact_completeness(merged)
+
+        payload = json.loads(
+            (merged / ARENA_ARTIFACT_MANIFEST_FILENAME).read_text(encoding="utf-8")
+        )
+        assert payload["files"][0]["path"] == "tokenizer/tokenizer.json"
+
+    def test_empty_tree_raises(self, tmp_path: Path) -> None:
+        merged = tmp_path / "merged"
+        merged.mkdir()
+
+        with pytest.raises(ValueError, match="no files to list"):
+            write_merged_artifact_completeness(merged)
+
+        assert not (merged / ARENA_ARTIFACT_MANIFEST_FILENAME).exists()
+        assert not (merged / COMPLETE_MARKER_FILENAME).exists()
+
+    def test_symlink_outside_tree_raises(self, tmp_path: Path) -> None:
+        merged = tmp_path / "merged"
+        merged.mkdir()
+        (merged / "config.json").write_bytes(b"cfg")
+        outside = tmp_path / "outside.bin"
+        outside.write_bytes(b"x")
+        (merged / "escape.bin").symlink_to(outside)
+
+        with pytest.raises(ValueError, match="is not in the subpath"):
+            write_merged_artifact_completeness(merged)
+
+
 class TestExportMergedPretrainedLive:
     def test_reload_logits_match_adapter_plus_base(self, tmp_path: Path) -> None:
         peft_model = _tiny_peft()
@@ -161,6 +252,7 @@ class TestExportMergedPretrainedLive:
         assert not (out / "adapter_config.json").exists()
         assert (out / "config.json").exists()
         assert (out / "generation_config.json").exists()
+        _assert_merged_completeness(out)
 
     def test_default_dtype_is_bfloat16(self, tmp_path: Path) -> None:
         peft_model = _tiny_peft()
@@ -199,6 +291,16 @@ class TestExportMergedPretrainedLive:
         )
 
         assert (tmp_path / "merged" / "tokenizer_config.json").exists()
+        _assert_merged_completeness(tmp_path / "merged")
+        listed = {
+            entry["path"]
+            for entry in json.loads(
+                (tmp_path / "merged" / ARENA_ARTIFACT_MANIFEST_FILENAME).read_text(
+                    encoding="utf-8"
+                )
+            )["files"]
+        }
+        assert "tokenizer_config.json" in listed
 
     def test_merges_lora_bias_when_configured(self, tmp_path: Path) -> None:
         peft_model = _tiny_peft()

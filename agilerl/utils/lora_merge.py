@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import Generator, Iterable, Sequence
 from contextlib import contextmanager
@@ -30,10 +31,63 @@ from agilerl.utils.ppo_value_head import AutoModelForCausalLMWithValueHead
 
 DEFAULT_MAX_SHARD_SIZE = "5GB"
 DEFAULT_TORCH_DTYPE = torch.bfloat16
+ARENA_ARTIFACT_MANIFEST_FILENAME = "arena_artifact_manifest.json"
+COMPLETE_MARKER_FILENAME = ".complete"
+MERGED_ARTIFACT_FORMAT = "hf_merged"
+MANIFEST_SKIP_NAMES = frozenset(
+    {
+        ARENA_ARTIFACT_MANIFEST_FILENAME,
+        COMPLETE_MARKER_FILENAME,
+        "adapter_config.json",
+    }
+)
+HASH_CHUNK_SIZE = 1024 * 1024
 
 
 class MergedExportError(RuntimeError):
     """Layer-wise merge or HF write failed; every rank has left collectives."""
+
+
+def write_merged_artifact_completeness(output_dir: str | Path) -> None:
+    """Write ``arena_artifact_manifest.json`` then ``.complete`` for a merged HF tree.
+
+    :param output_dir: Directory that already holds merged Hugging Face files.
+    """
+    root = Path(output_dir)
+    files: list[dict[str, str | int]] = []
+    for path in sorted(root.rglob("*")):
+        if not path.is_file() or path.name in MANIFEST_SKIP_NAMES:
+            continue
+        files.append(
+            {
+                "path": _relative_safe_key(root, path),
+                "sha256": _sha256_file(path),
+                "bytes": path.stat().st_size,
+            }
+        )
+    if not files:
+        msg = f"Merged HF export at {root} has no files to list"
+        raise ValueError(msg)
+    payload = {"format": MERGED_ARTIFACT_FORMAT, "files": files}
+    (root / ARENA_ARTIFACT_MANIFEST_FILENAME).write_text(
+        json.dumps(payload, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    (root / COMPLETE_MARKER_FILENAME).write_text("", encoding="utf-8")
+
+
+def _relative_safe_key(root: Path, path: Path) -> str:
+    """Return a POSIX path of ``path`` relative to ``root``."""
+    return path.resolve().relative_to(root.resolve()).as_posix()
+
+
+def _sha256_file(path: Path) -> str:
+    """Return the SHA-256 hex digest of ``path``."""
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(HASH_CHUNK_SIZE), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 @dataclass(frozen=True)
@@ -435,6 +489,7 @@ def _export_live_model(
         pretrained.generation_config.save_pretrained(output_path)
     if tokenizer is not None:
         tokenizer.save_pretrained(output_path)
+    write_merged_artifact_completeness(output_path)
 
 
 def _tied_weight_names(pretrained: PreTrainedModel) -> set[str]:
