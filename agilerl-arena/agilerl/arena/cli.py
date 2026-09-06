@@ -14,7 +14,7 @@ import click
 
 from agilerl.arena import console
 from agilerl.arena.cli_manifest import handle_help_option
-from agilerl.arena.client import MEMORY_SCOPES, MemoryScope
+from agilerl.arena.client import DATASET_CATEGORIES, MEMORY_SCOPES, MemoryScope
 from agilerl.arena.config import CommandConfig, arena_client
 from agilerl.arena.exceptions import ArenaError
 from agilerl.arena.inference import Agent, SessionInfo
@@ -406,9 +406,6 @@ def env_duplicate(
         )
 
 
-_DATASET_CATEGORIES = ("reasoning", "preference", "sft")
-
-
 @main.group("datasets")
 def datasets_group() -> None:
     """Manage your language model datasets in Arena."""
@@ -443,7 +440,7 @@ def datasets_exists(config: CommandConfig, name: str) -> None:
 @click.option(
     "--category",
     required=True,
-    type=click.Choice(_DATASET_CATEGORIES, case_sensitive=False),
+    type=click.Choice(tuple(sorted(DATASET_CATEGORIES)), case_sensitive=False),
     help="Dataset category.",
 )
 @click.option(

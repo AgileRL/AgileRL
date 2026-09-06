@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import logging
 import os
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from typing import Any
 
 import httpx
@@ -255,10 +255,13 @@ class Agent:
 
     :param endpoint: Base URL of the Arena inference deployment.
     :type endpoint: str
-    :param api_key: Profile PAT (``arena_pat_<uuid>_<secret>``) or an access token
-        from :meth:`~agilerl.arena.client.ArenaClient.login`. Falls back to the
-        ``ARENA_API_KEY`` environment variable.
+    :param api_key: Profile PAT (``arena_pat_<uuid>_<secret>``), organisation key,
+        or an access token from :meth:`~agilerl.arena.client.ArenaClient.login`.
+        Falls back to the ``ARENA_API_KEY`` environment variable.
     :type api_key: str | None
+    :param extra_headers: Extra HTTP headers on every request (for example
+        ``X-External-User-Id`` with an organisation key).
+    :type extra_headers: Mapping[str, str] | None
     :param timeout: Request timeout in seconds.
     :type timeout: int
     :param generate_params: Default LLM sampling parameters; defaults to
@@ -273,6 +276,7 @@ class Agent:
         endpoint: str,
         *,
         api_key: str | None = None,
+        extra_headers: Mapping[str, str] | None = None,
         timeout: int = 30,
         generate_params: LLMParams | None = None,
         probe_on_init: bool = True,
@@ -283,6 +287,8 @@ class Agent:
         headers: dict[str, str] = {}
         if credential:
             headers["Authorization"] = f"Bearer {credential}"
+        if extra_headers:
+            headers.update(extra_headers)
 
         self._http = httpx.Client(
             headers=headers,

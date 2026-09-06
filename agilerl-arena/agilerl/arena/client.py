@@ -50,9 +50,11 @@ from agilerl.arena.utils import (
 
 logger = logging.getLogger(__name__)
 
-DATASET_CATEGORIES = frozenset({"sft", "preference", "reasoning"})
+DATASET_CATEGORIES = frozenset({"sft", "preference", "reasoning", "tabular"})
 PARQUET_CONTENT_TYPE = "application/vnd.apache.parquet"
 CSV_CONTENT_TYPE = "text/csv"
+EXTERNAL_USER_ID_HEADER = "X-External-User-Id"
+PARQUET_SPLIT_DIRS = frozenset({"train", "test", "validation", "val", "dev", "eval"})
 
 MemoryScope = Literal["user", "organization"]
 MEMORY_SCOPES: tuple[MemoryScope, ...] = ("user", "organization")
@@ -134,18 +136,28 @@ class ArenaClient:
 
     Authentication is resolved in priority order:
 
-    1. *api_key* constructor argument
-    2. ``ARENA_API_KEY`` environment variable
-    3. Stored OAuth credentials from ``~/.arena/credentials.json``
-    4. Interactive :meth:`login` (device authorization flow)
+    1. *org_key* and *external_user_id* constructor arguments
+    2. ``ARENA_ORG_KEY`` and ``ARENA_EXTERNAL_USER_ID`` environment variables
+    3. *api_key* constructor argument
+    4. ``ARENA_API_KEY`` environment variable
+    5. Stored OAuth credentials from ``~/.arena/credentials.json``
+    6. Interactive :meth:`login` (device authorization flow)
 
-    For (1) and (2), the value is sent as ``Authorization: Bearer <value>``.
+    Partner organisation keys (``arena_org_…``) are sent as
+    ``Authorization: Bearer <org_key>`` with header ``X-External-User-Id``.
+    Both the key and the external user id are required together.
+
+    For profile PATs and OAuth, the value is sent as ``Authorization: Bearer <value>``.
     Use a **personal access token** from your Arena account profile (``arena_pat_<uuid>_<secret>``)
     to skip OAuth device login. You can also pass a Keycloak access token in the same way
     if you obtain one elsewhere.
 
     :param api_key: Bearer token material (profile PAT or OAuth access token). When set, device login is not required.
     :type api_key: str | None
+    :param org_key: Organisation API key (``arena_org_…``) for a partner server.
+    :type org_key: str | None
+    :param external_user_id: External user identity sent as ``X-External-User-Id``.
+    :type external_user_id: str | None
     :param request_timeout: Default timeout in seconds for API requests.
     :type request_timeout: int
     :param upload_timeout: Timeout in seconds for file-upload requests.
@@ -179,6 +191,8 @@ class ArenaClient:
         self,
         *,
         api_key: str | None = None,
+        org_key: str | None = None,
+        external_user_id: str | None = None,
         request_timeout: int = 30,
         upload_timeout: int = 300,
         verbose: bool = True,
@@ -189,6 +203,10 @@ class ArenaClient:
         self._upload_timeout = upload_timeout
 
         self._api_key = api_key or os.environ.get("ARENA_API_KEY")
+        self._org_key, self._external_user_id = self._resolve_partner_auth(
+            org_key=org_key,
+            external_user_id=external_user_id,
+        )
         self._auth = ArenaOAuth2()
         self._tokens = _TokenStore()
         self._verbose = verbose
@@ -201,7 +219,8 @@ class ArenaClient:
             follow_redirects=True,
         )
 
-        self._try_restore_session()
+        if self._org_key is None:
+            self._try_restore_session()
 
     @classmethod
     def configure(
@@ -291,6 +310,21 @@ class ArenaClient:
         On success the tokens are persisted to
         ``~/.arena/credentials.json``.
         """
+        if self._org_key is not None and not force:
+            logger.info(
+                "Organisation key in use; device login not required. "
+                "Use --force to override."
+            )
+            return
+
+        if self._org_key is not None and force:
+            logger.info(
+                "Forcing device login; organisation key will be ignored "
+                "for this session."
+            )
+            self._org_key = None
+            self._external_user_id = None
+
         if self._api_key is not None and not force:
             logger.info(
                 "API key in use; device login not required. Use --force to override."
@@ -338,8 +372,12 @@ class ArenaClient:
 
     @property
     def is_authenticated(self) -> bool:
-        """``True`` when the client holds a valid API key or access token."""
-        return self._api_key is not None or self._tokens.access_token is not None
+        """``True`` when the client holds a valid API key, org key, or access token."""
+        return (
+            self._org_key is not None
+            or self._api_key is not None
+            or self._tokens.access_token is not None
+        )
 
     def set_stream_handler(self, handler: Callable[[StreamEvent], None] | None) -> None:
         """Register a callback invoked for each :class:`StreamEvent` during streaming.
@@ -717,7 +755,7 @@ class ArenaClient:
 
         :param name: Dataset name.
         :type name: str
-        :param category: Dataset category (e.g. ``reasoning``, ``preference``).
+        :param category: Dataset category (``reasoning``, ``preference``, ``sft``, ``tabular``).
         :type category: str
         :param column_mapping: Column mapping as a JSON string or dict.
         :type column_mapping: str | dict[str, Any]
@@ -867,10 +905,38 @@ class ArenaClient:
         return shards
 
     @staticmethod
-    def _parquet_config_names(root: Path, shards: list[Path]) -> list[str]:
+    def _parquet_common_prefix_depth(relatives: list[str]) -> int:
+        """Count shared wrapping directories above the config (and any split dirs)."""
+        parts_list = [relative.split("/") for relative in relatives]
+        depth = 0
+        while (
+            all(len(parts) > depth + 2 for parts in parts_list)
+            and len({parts[depth] for parts in parts_list}) == 1
+        ):
+            next_dirs = {parts[depth + 1].lower() for parts in parts_list}
+            if next_dirs <= PARQUET_SPLIT_DIRS:
+                break
+            depth += 1
+        return depth
+
+    @staticmethod
+    def _strip_parquet_prefix(relative: str, depth: int) -> str:
+        if depth == 0:
+            return relative
+        return "/".join(relative.split("/")[depth:])
+
+    @staticmethod
+    def _parquet_upload_names(root: Path, shards: list[Path]) -> list[str]:
+        relatives = [shard.relative_to(root).as_posix() for shard in shards]
+        depth = ArenaClient._parquet_common_prefix_depth(relatives)
+        return [
+            ArenaClient._strip_parquet_prefix(relative, depth) for relative in relatives
+        ]
+
+    @staticmethod
+    def _parquet_config_names(upload_names: list[str]) -> list[str]:
         names: set[str] = set()
-        for shard in shards:
-            relative = shard.relative_to(root).as_posix()
+        for relative in upload_names:
             if "/" in relative:
                 names.add(relative.split("/", 1)[0])
         return sorted(names)
@@ -918,7 +984,8 @@ class ArenaClient:
         config: str | None,
     ) -> list[tuple[str, tuple[str, Any, str]]]:
         shards = ArenaClient._parquet_shard_paths(root)
-        configs = ArenaClient._parquet_config_names(root, shards)
+        upload_names = ArenaClient._parquet_upload_names(root, shards)
+        configs = ArenaClient._parquet_config_names(upload_names)
         if config is None and len(configs) > 1:
             listed = ", ".join(configs)
             msg = (
@@ -926,20 +993,18 @@ class ArenaClient:
                 "pass config= to choose one."
             )
             raise ArenaValidationError(msg)
+        selected = list(zip(shards, upload_names, strict=True))
         if config is not None:
             prefix = f"{config}/"
-            shards = [
-                shard
-                for shard in shards
-                if shard.relative_to(root).as_posix().startswith(prefix)
+            selected = [
+                (shard, name) for shard, name in selected if name.startswith(prefix)
             ]
-            if not shards:
+            if not selected:
                 msg = f"No parquet files for config {config!r} in {root}"
                 raise ArenaValidationError(msg)
 
         parts: list[tuple[str, tuple[str, Any, str]]] = []
-        for shard in shards:
-            relative = shard.relative_to(root).as_posix()
+        for shard, relative in selected:
             parts.append(
                 (
                     "file",
@@ -1507,8 +1572,8 @@ class ArenaClient:
 
         Attempts to load the deployment from the cache, and if not found, fetches it from the API.
 
-        The agent carries this client's own credential, so run :meth:`login` or set
-        ``ARENA_API_KEY`` before using a deployment that keeps memory per user.
+        The agent carries this client's credential: organisation key plus
+        ``X-External-User-Id``, else a profile PAT / OAuth token.
 
         :param deployment_name: The name of the deployment to open.
         :type deployment_name: str
@@ -1553,6 +1618,16 @@ class ArenaClient:
 
     def _open_agent_at(self, url: str, timeout: int | None) -> Agent:
         """Build an agent for *url*, probing it to confirm the URL still serves."""
+        if self._org_key is not None:
+            headers = self._auth_headers()
+            return Agent(
+                url,
+                api_key=self._org_key,
+                extra_headers={
+                    EXTERNAL_USER_ID_HEADER: headers[EXTERNAL_USER_ID_HEADER],
+                },
+                timeout=timeout or self._request_timeout,
+            )
         return Agent(
             url,
             api_key=self._inference_credential(),
@@ -1736,7 +1811,7 @@ class ArenaClient:
 
     def _proactively_refresh_oauth(self) -> None:
         """If stored access token is expired (JWT ``exp``) but refresh exists, refresh once."""
-        if self._api_key is not None:
+        if self._org_key is not None or self._api_key is not None:
             return
         if not self._tokens.refresh_token or not self._tokens.access_token:
             return
@@ -1757,12 +1832,57 @@ class ArenaClient:
             "refresh_token", self._tokens.refresh_token
         )
 
+    @staticmethod
+    def _optional_env_text(value: str | None, env_name: str) -> str | None:
+        raw = value if value is not None else os.environ.get(env_name)
+        if raw is None:
+            return None
+        stripped = raw.strip()
+        return stripped or None
+
+    @staticmethod
+    def _resolve_partner_auth(
+        *,
+        org_key: str | None,
+        external_user_id: str | None,
+    ) -> tuple[str | None, str | None]:
+        resolved_org_key = ArenaClient._optional_env_text(org_key, "ARENA_ORG_KEY")
+        resolved_user_id = ArenaClient._optional_env_text(
+            external_user_id,
+            "ARENA_EXTERNAL_USER_ID",
+        )
+        if resolved_org_key is None and resolved_user_id is None:
+            return None, None
+        if resolved_org_key is None or resolved_user_id is None:
+            msg = (
+                "Partner authentication requires both an organisation key "
+                "and an external user id."
+            )
+            raise ArenaConfigError(
+                msg,
+                sdk_hint=(
+                    "Pass org_key and external_user_id to ArenaClient(), or set "
+                    "ARENA_ORG_KEY and ARENA_EXTERNAL_USER_ID."
+                ),
+                cli_hint="Set ARENA_ORG_KEY and ARENA_EXTERNAL_USER_ID together.",
+            )
+        return resolved_org_key, resolved_user_id
+
     def _credential(self) -> str | None:
         """Return the bearer material to authenticate with: PAT, else OAuth token."""
         return self._api_key or self._tokens.access_token
 
     def _auth_headers(self) -> dict[str, str]:
         """Return the authentication headers for the request."""
+        if self._org_key is not None:
+            user_id = self._external_user_id
+            if user_id is None:
+                msg = "Organisation key is set without an external user id."
+                raise ArenaConfigError(msg)
+            return {
+                "Authorization": f"Bearer {self._org_key}",
+                EXTERNAL_USER_ID_HEADER: user_id,
+            }
         credential = self._credential()
         if credential:
             return {"Authorization": f"Bearer {credential}"}
@@ -1827,6 +1947,7 @@ class ArenaClient:
         if (
             resp.status_code == 401
             and not _retried
+            and self._org_key is None
             and self._api_key is None
             and self._tokens.refresh_token
         ):
@@ -1856,7 +1977,12 @@ class ArenaClient:
             raw = self._read_response_body(resp, stream=stream)
 
             # If the API key failed but we have stored OAuth credentials, retry with those.
-            if self._api_key and not _retried and self._tokens.access_token:
+            if (
+                self._api_key
+                and self._org_key is None
+                and not _retried
+                and self._tokens.access_token
+            ):
                 logger.debug(
                     "API key rejected; falling back to stored OAuth credentials."
                 )
@@ -1872,6 +1998,19 @@ class ArenaClient:
                     **kwargs,
                 )
 
+            if self._org_key is not None:
+                msg = (
+                    "Invalid organisation key. Please check that your "
+                    "ARENA_ORG_KEY and ARENA_EXTERNAL_USER_ID are correct."
+                )
+                raise ArenaAuthError(
+                    msg,
+                    sdk_hint=(
+                        "Verify org_key and external_user_id passed to ArenaClient() "
+                        "or ARENA_ORG_KEY and ARENA_EXTERNAL_USER_ID."
+                    ),
+                    cli_hint="Verify ARENA_ORG_KEY and ARENA_EXTERNAL_USER_ID.",
+                )
             if self._api_key:
                 msg = (
                     "Invalid API key. Please check that your ARENA_API_KEY is correct."

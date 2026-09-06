@@ -800,6 +800,57 @@ class TestDatasetsCreateCommand:
             hf_split=None,
         )
 
+    def test_create_with_tabular_category(self, runner, mock_client, tmp_path):
+        mapping_file = tmp_path / "mapping.json"
+        mapping_file.write_text('{"col": "value"}', encoding="utf-8")
+        parquet_file = tmp_path / "table.parquet"
+        parquet_file.write_bytes(b"PAR1")
+        mock_client.create_dataset.return_value = {"name": "table-ds", "id": 3}
+        with _patched_arena_client(mock_client):
+            result = runner.invoke(
+                main,
+                [
+                    "datasets",
+                    "create",
+                    "table-ds",
+                    "--category",
+                    "tabular",
+                    "--column-mapping-file",
+                    str(mapping_file),
+                    "--file",
+                    str(parquet_file),
+                ],
+            )
+        assert result.exit_code == 0
+        mock_client.create_dataset.assert_called_once_with(
+            name="table-ds",
+            category="tabular",
+            column_mapping='{"col": "value"}',
+            description=None,
+            file=parquet_file,
+            config=None,
+            hf_dataset_name=None,
+            hf_config=None,
+            hf_split=None,
+        )
+
+    def test_create_rejects_unknown_category(self, runner, mock_client):
+        with _patched_arena_client(mock_client):
+            result = runner.invoke(
+                main,
+                [
+                    "datasets",
+                    "create",
+                    "new-ds",
+                    "--category",
+                    "multiturn",
+                    "--column-mapping",
+                    "{}",
+                ],
+            )
+        assert result.exit_code != 0
+        mock_client.create_dataset.assert_not_called()
+
 
 class TestDatasetsDeleteCommand:
     def test_delete_with_yes(self, runner, mock_client):

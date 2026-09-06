@@ -316,6 +316,142 @@ class TestCreateDataset:
                 column_mapping={},
             )
 
+    def test_create_tabular_reaches_http_without_category_error(
+        self, api_key_client, tmp_path
+    ):
+        parquet_path = tmp_path / "table.parquet"
+        parquet_path.write_bytes(b"PAR1")
+        api_key_client._request = MagicMock(return_value={"name": "ds1", "id": 3})
+
+        result = api_key_client.create_dataset(
+            name="ds1",
+            category="tabular",
+            column_mapping={"col": "value"},
+            file=parquet_path,
+        )
+
+        files = api_key_client._request.call_args[1]["files"]
+        assert _multipart_text(files, "category") == "tabular"
+        uploads = _file_uploads(files)
+        assert uploads[0][0] == "table.parquet"
+        assert uploads[0][2] == PARQUET_CONTENT_TYPE
+        assert result["id"] == 3
+
+    def test_nested_gsm8k_folder_uses_main_not_gsm8k(self, api_key_client, tmp_path):
+        shard = tmp_path / "gsm8k" / "main" / "train.parquet"
+        shard.parent.mkdir(parents=True)
+        shard.write_bytes(b"PAR1")
+        api_key_client._request = MagicMock(return_value={"name": "gsm8k"})
+
+        api_key_client.create_dataset(
+            name="gsm8k",
+            category="reasoning",
+            column_mapping={"question": "q", "answer": "a"},
+            file=tmp_path,
+        )
+
+        files = api_key_client._request.call_args[1]["files"]
+        uploads = _file_uploads(files)
+        assert uploads[0][0] == "main/train.parquet"
+        assert uploads[0][2] == PARQUET_CONTENT_TYPE
+        assert all(name != "config" for name, _ in _multipart_items(files))
+
+    def test_nested_two_config_folder_requires_config(self, api_key_client, tmp_path):
+        main = tmp_path / "gsm8k" / "main" / "train.parquet"
+        socratic = tmp_path / "gsm8k" / "socratic" / "train.parquet"
+        main.parent.mkdir(parents=True)
+        socratic.parent.mkdir(parents=True)
+        main.write_bytes(b"MAIN")
+        socratic.write_bytes(b"SOC")
+
+        with pytest.raises(ArenaValidationError, match="multiple configs"):
+            api_key_client.create_dataset(
+                name="gsm8k",
+                category="reasoning",
+                column_mapping={},
+                file=tmp_path,
+            )
+
+    def test_nested_two_config_folder_filters_main(self, api_key_client, tmp_path):
+        main = tmp_path / "gsm8k" / "main" / "train.parquet"
+        socratic = tmp_path / "gsm8k" / "socratic" / "train.parquet"
+        main.parent.mkdir(parents=True)
+        socratic.parent.mkdir(parents=True)
+        main.write_bytes(b"MAIN")
+        socratic.write_bytes(b"SOC")
+        api_key_client._request = MagicMock(return_value={"name": "gsm8k"})
+
+        api_key_client.create_dataset(
+            name="gsm8k",
+            category="reasoning",
+            column_mapping={"question": "q", "answer": "a"},
+            file=tmp_path,
+            config="main",
+        )
+
+        files = api_key_client._request.call_args[1]["files"]
+        uploads = _file_uploads(files)
+        assert len(uploads) == 1
+        assert uploads[0][0] == "main/train.parquet"
+        assert _multipart_text(files, "config") == "main"
+
+    def test_nested_two_config_folder_rejects_wrapping_name(
+        self, api_key_client, tmp_path
+    ):
+        main = tmp_path / "gsm8k" / "main" / "train.parquet"
+        socratic = tmp_path / "gsm8k" / "socratic" / "train.parquet"
+        main.parent.mkdir(parents=True)
+        socratic.parent.mkdir(parents=True)
+        main.write_bytes(b"MAIN")
+        socratic.write_bytes(b"SOC")
+
+        with pytest.raises(ArenaValidationError, match="No parquet files for config"):
+            api_key_client.create_dataset(
+                name="gsm8k",
+                category="reasoning",
+                column_mapping={},
+                file=tmp_path,
+                config="gsm8k",
+            )
+
+    def test_split_folders_keep_main_config(self, api_key_client, tmp_path):
+        train = tmp_path / "gsm8k" / "main" / "train" / "0000.parquet"
+        test = tmp_path / "gsm8k" / "main" / "test" / "0000.parquet"
+        train.parent.mkdir(parents=True)
+        test.parent.mkdir(parents=True)
+        train.write_bytes(b"TRN")
+        test.write_bytes(b"TST")
+        api_key_client._request = MagicMock(return_value={"name": "gsm8k"})
+
+        api_key_client.create_dataset(
+            name="gsm8k",
+            category="reasoning",
+            column_mapping={"question": "q", "answer": "a"},
+            file=tmp_path,
+        )
+
+        files = api_key_client._request.call_args[1]["files"]
+        uploads = {part[0] for part in _file_uploads(files)}
+        assert uploads == {"main/train/0000.parquet", "main/test/0000.parquet"}
+        assert all(name != "config" for name, _ in _multipart_items(files))
+
+    def test_train_only_split_folder_keeps_main_config(self, api_key_client, tmp_path):
+        shard = tmp_path / "gsm8k" / "main" / "train" / "0000.parquet"
+        shard.parent.mkdir(parents=True)
+        shard.write_bytes(b"TRN")
+        api_key_client._request = MagicMock(return_value={"name": "gsm8k"})
+
+        api_key_client.create_dataset(
+            name="gsm8k",
+            category="reasoning",
+            column_mapping={"question": "q", "answer": "a"},
+            file=tmp_path,
+        )
+
+        files = api_key_client._request.call_args[1]["files"]
+        uploads = _file_uploads(files)
+        assert uploads[0][0] == "main/train/0000.parquet"
+
 
 class TestBuildSubmitExperimentMultipart:
     def test_omits_blank_completion(self):
@@ -425,6 +561,56 @@ class TestBuildCreateDatasetMultipart:
                 file=tmp_path,
                 config="socratic",
             )
+
+    def test_tabular_category_accepted(self, tmp_path):
+        path = tmp_path / "table.parquet"
+        path.write_bytes(b"PAR1")
+        data, files = ArenaClient._build_create_dataset_multipart(
+            name="n",
+            category="tabular",
+            column_mapping={},
+            file=path,
+        )
+        try:
+            assert data["category"] == "tabular"
+            assert files[0][1][0] == "table.parquet"
+            assert files[0][1][2] == PARQUET_CONTENT_TYPE
+        finally:
+            ArenaClient._close_upload_files(files)
+
+    def test_wrapped_gsm8k_folder_strips_common_prefix(self, tmp_path):
+        shard = tmp_path / "gsm8k" / "main" / "train.parquet"
+        shard.parent.mkdir(parents=True)
+        shard.write_bytes(b"PAR1")
+        _, files = ArenaClient._build_create_dataset_multipart(
+            name="n",
+            category="reasoning",
+            column_mapping={},
+            file=tmp_path,
+        )
+        try:
+            assert files[0][1][0] == "main/train.parquet"
+        finally:
+            ArenaClient._close_upload_files(files)
+
+    def test_split_folders_do_not_become_configs(self, tmp_path):
+        train = tmp_path / "gsm8k" / "main" / "train" / "0000.parquet"
+        test = tmp_path / "gsm8k" / "main" / "test" / "0000.parquet"
+        train.parent.mkdir(parents=True)
+        test.parent.mkdir(parents=True)
+        train.write_bytes(b"TRN")
+        test.write_bytes(b"TST")
+        _, files = ArenaClient._build_create_dataset_multipart(
+            name="n",
+            category="reasoning",
+            column_mapping={},
+            file=tmp_path,
+        )
+        try:
+            names = {part[0] for name, part in files if name == "file"}
+            assert names == {"main/train/0000.parquet", "main/test/0000.parquet"}
+        finally:
+            ArenaClient._close_upload_files(files)
 
 
 class TestDeleteDataset:

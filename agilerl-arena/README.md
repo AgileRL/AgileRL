@@ -38,6 +38,13 @@ Preferred for CI/automation:
 export ARENA_API_KEY="arena_pat_..."
 ```
 
+A partner server can authenticate with an organisation key and the caller's external user id instead of a profile PAT:
+
+```bash
+export ARENA_ORG_KEY="arena_org_..."
+export ARENA_EXTERNAL_USER_ID="partner-user-id"
+```
+
 Or interactive login:
 
 ```bash

@@ -462,6 +462,23 @@ class TestAgentInit:
         assert call_kwargs["headers"]["Authorization"] == "Bearer abc"
 
     @patch("agilerl.arena.inference.agent.httpx.Client")
+    def test_extra_headers_are_sent_with_bearer(self, mock_http_cls):
+        mock_client = MagicMock()
+        mock_http_cls.return_value = mock_client
+
+        Agent(
+            "http://endpoint",
+            api_key="arena_org_test",
+            extra_headers={"X-External-User-Id": "partner-user-1"},
+            probe_on_init=False,
+        )
+        headers = mock_http_cls.call_args[1]["headers"]
+        assert headers == {
+            "Authorization": "Bearer arena_org_test",
+            "X-External-User-Id": "partner-user-1",
+        }
+
+    @patch("agilerl.arena.inference.agent.httpx.Client")
     def test_probe_on_init_false_defers_metadata(self, mock_http_cls):
         mock_client = MagicMock()
         mock_http_cls.return_value = mock_client

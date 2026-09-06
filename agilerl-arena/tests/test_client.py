@@ -120,6 +120,69 @@ class TestArenaClientInit:
         assert client._api_key == "env-key"
 
     @patch("agilerl.arena.auth.KeycloakOpenID")
+    def test_with_explicit_org_key(self, mock_keycloak):
+        client = ArenaClient(
+            org_key="arena_org_test",
+            external_user_id="partner-user-1",
+        )
+        assert client._org_key == "arena_org_test"
+        assert client._external_user_id == "partner-user-1"
+        assert client.is_authenticated
+
+    @patch("agilerl.arena.auth.KeycloakOpenID")
+    def test_with_org_key_env_vars(self, mock_keycloak):
+        with patch.dict(
+            os.environ,
+            {
+                "ARENA_ORG_KEY": "arena_org_env",
+                "ARENA_EXTERNAL_USER_ID": "env-user",
+            },
+        ):
+            client = ArenaClient()
+        assert client._org_key == "arena_org_env"
+        assert client._external_user_id == "env-user"
+
+    @patch("agilerl.arena.auth.KeycloakOpenID")
+    def test_org_key_without_external_user_id_raises(self, mock_keycloak):
+        with pytest.raises(ArenaConfigError, match="organisation key"):
+            ArenaClient(org_key="arena_org_test")
+
+    @patch("agilerl.arena.auth.KeycloakOpenID")
+    def test_external_user_id_without_org_key_raises(self, mock_keycloak):
+        with pytest.raises(ArenaConfigError, match="organisation key"):
+            ArenaClient(external_user_id="partner-user-1")
+
+    @patch("agilerl.arena.auth.KeycloakOpenID")
+    def test_org_key_skips_session_restore(self, mock_keycloak):
+        with patch.object(ArenaClient, "_try_restore_session") as mock_restore:
+            ArenaClient(
+                org_key="arena_org_test",
+                external_user_id="partner-user-1",
+            )
+        mock_restore.assert_not_called()
+
+    @patch("agilerl.arena.auth.KeycloakOpenID")
+    def test_constructor_org_key_wins_over_env(self, mock_keycloak):
+        with patch.dict(
+            os.environ,
+            {
+                "ARENA_ORG_KEY": "arena_org_env",
+                "ARENA_EXTERNAL_USER_ID": "env-user",
+            },
+        ):
+            client = ArenaClient(
+                org_key="arena_org_ctor",
+                external_user_id="ctor-user",
+            )
+        assert client._org_key == "arena_org_ctor"
+        assert client._external_user_id == "ctor-user"
+
+    @patch("agilerl.arena.auth.KeycloakOpenID")
+    def test_blank_org_key_is_missing(self, mock_keycloak):
+        with pytest.raises(ArenaConfigError, match="organisation key"):
+            ArenaClient(org_key="  ", external_user_id="partner-user-1")
+
+    @patch("agilerl.arena.auth.KeycloakOpenID")
     def test_without_key_calls_restore_session(self, mock_keycloak):
         with patch.dict(os.environ, {}, clear=False):
             env = os.environ.copy()
@@ -235,6 +298,29 @@ class TestArenaClientLogin:
         client.login()
         client._auth.device_login.assert_not_called()
 
+    def test_login_noop_with_org_key(self):
+        with patch("agilerl.arena.auth.KeycloakOpenID"):
+            client = ArenaClient(
+                org_key="arena_org_test",
+                external_user_id="partner-user-1",
+            )
+        client._auth.device_login = MagicMock()
+        client.login()
+        client._auth.device_login.assert_not_called()
+
+    def test_login_force_clears_org_key(self):
+        with patch("agilerl.arena.auth.KeycloakOpenID"):
+            client = ArenaClient(
+                org_key="arena_org_test",
+                external_user_id="partner-user-1",
+            )
+        tokens = {"access_token": "at", "refresh_token": "rt"}
+        client._auth.device_login = MagicMock(return_value=tokens)
+        client.login(force=True)
+        assert client._org_key is None
+        assert client._external_user_id is None
+        client._auth.device_login.assert_called_once()
+
     @patch("agilerl.arena.client.load_credentials")
     @patch("agilerl.arena.auth.KeycloakOpenID")
     def test_restore_session_proactively_refreshes_expired_jwt(
@@ -289,6 +375,16 @@ class TestArenaClientLogin:
         client._proactively_refresh_oauth()
         client._auth.refresh_access_token.assert_not_called()
 
+    def test_proactively_refresh_skips_when_org_key_set(self):
+        with patch("agilerl.arena.auth.KeycloakOpenID"):
+            client = ArenaClient(
+                org_key="arena_org_test",
+                external_user_id="partner-user-1",
+            )
+        client._auth.refresh_access_token = MagicMock()
+        client._proactively_refresh_oauth()
+        client._auth.refresh_access_token.assert_not_called()
+
 
 class TestArenaClientLogout:
     def test_logout_revokes_and_clears(self, token_client):
@@ -316,6 +412,14 @@ class TestIsAuthenticated:
 
     def test_true_with_access_token(self, token_client):
         assert token_client.is_authenticated is True
+
+    def test_true_with_org_key(self):
+        with patch("agilerl.arena.auth.KeycloakOpenID"):
+            client = ArenaClient(
+                org_key="arena_org_test",
+                external_user_id="partner-user-1",
+            )
+        assert client.is_authenticated is True
 
     def test_false_with_nothing(self, unauthenticated_client):
         assert unauthenticated_client.is_authenticated is False
@@ -354,6 +458,39 @@ class TestAuthHeaders:
     def test_token_header(self, token_client):
         headers = token_client._auth_headers()
         assert headers == {"Authorization": "Bearer tok_access"}
+
+    def test_org_key_header_includes_external_user_id(self):
+        with patch("agilerl.arena.auth.KeycloakOpenID"):
+            client = ArenaClient(
+                org_key="arena_org_test",
+                external_user_id="partner-user-1",
+            )
+        headers = client._auth_headers()
+        assert headers == {
+            "Authorization": "Bearer arena_org_test",
+            "X-External-User-Id": "partner-user-1",
+        }
+
+    def test_org_key_takes_priority_over_api_key(self):
+        with patch("agilerl.arena.auth.KeycloakOpenID"):
+            client = ArenaClient(
+                api_key="arena_pat_test",
+                org_key="arena_org_test",
+                external_user_id="partner-user-1",
+            )
+        headers = client._auth_headers()
+        assert headers["Authorization"] == "Bearer arena_org_test"
+        assert headers["X-External-User-Id"] == "partner-user-1"
+
+    def test_org_key_without_user_id_on_headers_raises(self):
+        with patch("agilerl.arena.auth.KeycloakOpenID"):
+            client = ArenaClient(
+                org_key="arena_org_test",
+                external_user_id="partner-user-1",
+            )
+        client._external_user_id = None
+        with pytest.raises(ArenaConfigError, match="without an external user id"):
+            client._auth_headers()
 
     def test_no_auth_raises(self, unauthenticated_client):
         with pytest.raises(ArenaAuthError, match="not been authenticated"):
@@ -545,6 +682,44 @@ class TestRequest:
         assert result == {"ok": True}
         assert api_key_client._api_key is None
         assert api_key_client._http.request.call_count == 2
+
+    def test_401_invalid_org_key_does_not_fall_back_to_oauth(self):
+        with patch("agilerl.arena.auth.KeycloakOpenID"):
+            client = ArenaClient(
+                org_key="arena_org_test",
+                external_user_id="partner-user-1",
+            )
+        client._tokens.access_token = "oauth_at"
+        client._tokens.refresh_token = "oauth_rt"
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 401
+        mock_resp.is_success = False
+        mock_resp.text = "Unauthorized"
+        client._http.request = MagicMock(return_value=mock_resp)
+
+        with pytest.raises(ArenaAuthError, match="Invalid organisation key"):
+            client._request("GET", "/api/test")
+        assert client._http.request.call_count == 1
+
+    def test_request_sends_org_key_and_external_user_id_headers(self):
+        with patch("agilerl.arena.auth.KeycloakOpenID"):
+            client = ArenaClient(
+                org_key="arena_org_test",
+                external_user_id="partner-user-1",
+            )
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.is_success = True
+        mock_resp.headers = {"content-type": "application/json"}
+        mock_resp.json.return_value = {}
+        client._http.request = MagicMock(return_value=mock_resp)
+
+        client._request("GET", "/api/test")
+
+        headers = client._http.request.call_args.kwargs["headers"]
+        assert headers["Authorization"] == "Bearer arena_org_test"
+        assert headers["X-External-User-Id"] == "partner-user-1"
 
     def test_request_raw_returns_bytes_and_headers(self, api_key_client):
         mock_resp = MagicMock()
@@ -1869,6 +2044,25 @@ class TestOpenInferenceAgent:
         api_key_client.open_inference_agent("dep1")
 
         assert mock_agent_cls.call_args[1]["api_key"] is None
+        assert "extra_headers" not in mock_agent_cls.call_args[1]
+
+    @patch("agilerl.arena.client.Agent")
+    def test_forwards_org_key_and_external_user_id(self, mock_agent_cls):
+        with patch("agilerl.arena.auth.KeycloakOpenID"):
+            client = ArenaClient(
+                org_key="arena_org_test",
+                external_user_id="partner-user-1",
+            )
+        client._ensure_inference_binding = MagicMock(return_value="http://url")
+
+        client.open_inference_agent("dep1")
+
+        mock_agent_cls.assert_called_once_with(
+            "http://url",
+            api_key="arena_org_test",
+            extra_headers={"X-External-User-Id": "partner-user-1"},
+            timeout=client._request_timeout,
+        )
 
     @patch("agilerl.arena.client.Agent")
     def test_custom_timeout(self, mock_agent_cls, api_key_client):
