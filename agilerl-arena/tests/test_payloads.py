@@ -45,7 +45,7 @@ class TestResolveMetricsOutputPath:
     def test_explicit_output_file_takes_priority(self, tmp_path):
         explicit = tmp_path / "my_output.csv"
         result = resolve_metrics_output_path(
-            experiment_id=1,
+            experiment_name="exp1",
             payload=b"data",
             content_type="text/csv",
             disposition='attachment; filename="server.csv"',
@@ -55,7 +55,7 @@ class TestResolveMetricsOutputPath:
 
     def test_disposition_fallback(self):
         result = resolve_metrics_output_path(
-            experiment_id=42,
+            experiment_name="exp42",
             payload=b"data",
             content_type="text/csv",
             disposition='attachment; filename="exp42_metrics.csv"',
@@ -65,47 +65,46 @@ class TestResolveMetricsOutputPath:
 
     def test_zip_content_type_heuristic(self):
         result = resolve_metrics_output_path(
-            experiment_id=7,
+            experiment_name="exp7",
             payload=b"PK\x03\x04fake",
             content_type="application/zip",
             disposition=None,
             output_file=None,
         )
-        assert result == Path("experiment_7_metrics.zip")
+        assert result == Path("experiment_exp7_metrics.zip")
 
     def test_pk_magic_bytes_heuristic(self):
         result = resolve_metrics_output_path(
-            experiment_id=3,
+            experiment_name="exp3",
             payload=b"PK\x03\x04data",
             content_type=None,
             disposition=None,
             output_file=None,
         )
-        assert result == Path("experiment_3_metrics.zip")
+        assert result == Path("experiment_exp3_metrics.zip")
 
     def test_csv_fallback(self):
         result = resolve_metrics_output_path(
-            experiment_id=5,
+            experiment_name="exp5",
             payload=b"col1,col2\n1,2\n",
             content_type="text/csv",
             disposition=None,
             output_file=None,
         )
-        assert result == Path("experiment_5_metrics.csv")
+        assert result == Path("experiment_exp5_metrics.csv")
 
     def test_no_hints_defaults_to_csv(self):
         result = resolve_metrics_output_path(
-            experiment_id=9,
+            experiment_name="exp9",
             payload=b"some data",
             content_type=None,
             disposition=None,
             output_file=None,
         )
-        assert result == Path("experiment_9_metrics.csv")
+        assert result == Path("experiment_exp9_metrics.csv")
 
-    def test_experiment_name_without_id(self):
+    def test_experiment_name_without_disposition(self):
         result = resolve_metrics_output_path(
-            experiment_id=None,
             experiment_name="My Experiment!",
             payload=b"col1\n1",
             content_type="text/csv",
@@ -114,9 +113,8 @@ class TestResolveMetricsOutputPath:
         )
         assert result == Path("experiment_My_Experiment__metrics.csv")
 
-    def test_generic_fallback_without_id_or_name(self):
+    def test_generic_fallback_without_name(self):
         result = resolve_metrics_output_path(
-            experiment_id=None,
             experiment_name=None,
             payload=b"col1\n1",
             content_type="text/csv",

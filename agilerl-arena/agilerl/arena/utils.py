@@ -32,13 +32,17 @@ def order_dataset_fields(
     :returns: The ordered dataset row.
     :rtype: dict[str, str | None | int]
     """
-    ordered = {
+    ordered: dict[str, str | int | None] = {
         "name": row.get("name"),
         "hf_dataset_id": row.get("hf_dataset_id"),
     }
     for key, value in row.items():
-        if key not in ordered:
-            ordered[key] = value
+        if key in ordered:
+            continue
+        # Hub search may send a string id; integer Arena row ids are not in the contract.
+        if key == "id" and not isinstance(value, str):
+            continue
+        ordered[key] = value
     return ordered
 
 

@@ -1464,7 +1464,7 @@ class TestExperimentMethods:
     @patch("agilerl.arena.client.TrainingManifest.get_validated")
     def test_submit_experiment(self, mock_validated, api_key_client):
         mock_validated.return_value = {"algorithm": "PPO"}
-        mock_stream = _mock_ndjson_stream({"job_id": 1})
+        mock_stream = _mock_ndjson_stream({"accepted": True, "experiment_name": "exp1"})
         api_key_client._open_stream = MagicMock(return_value=mock_stream)
 
         result = api_key_client.submit_experiment(
@@ -1475,7 +1475,7 @@ class TestExperimentMethods:
             experiment_name="exp1",
         )
 
-        assert result == {"job_id": 1}
+        assert result == {"accepted": True, "experiment_name": "exp1"}
         mock_validated.assert_called_once()
         call_kwargs = api_key_client._open_stream.call_args[1]
         assert call_kwargs["json"]["manifest"] == {"algorithm": "PPO"}
@@ -1494,7 +1494,7 @@ class TestExperimentMethods:
         reward_path.write_text(
             "def reward(question, answer, completion):\n    return 1.0\n",
         )
-        mock_stream = _mock_ndjson_stream({"job_id": 2})
+        mock_stream = _mock_ndjson_stream({"accepted": True, "experiment_name": "exp1"})
         api_key_client._open_stream = MagicMock(return_value=mock_stream)
 
         result = api_key_client.submit_experiment(
@@ -1507,7 +1507,7 @@ class TestExperimentMethods:
             completion="wrong answer",
         )
 
-        assert result == {"job_id": 2}
+        assert result == {"accepted": True, "experiment_name": "exp1"}
         call_kwargs = api_key_client._open_stream.call_args[1]
         assert "json" not in call_kwargs
         files = call_kwargs["files"]
@@ -1530,14 +1530,32 @@ class TestExperimentMethods:
         assert result == {"resumed": True}
 
     def test_list_checkpoints(self, api_key_client):
-        api_key_client._request = MagicMock(return_value=[{"step": 100}])
+        api_key_client._request = MagicMock(
+            return_value=[
+                {
+                    "id": 9,
+                    "steps": 100,
+                    "training_score": 0.5,
+                    "evaluation_score": None,
+                    "size_mb": 1.25,
+                }
+            ]
+        )
         result = api_key_client.list_checkpoints("exp1")
         api_key_client._request.assert_called_once_with(
             "GET",
             "/api/cli/v1/experiments/jobs/checkpoints",
             params={"experiment_name": "exp1"},
         )
-        assert result == [{"step": 100}]
+        assert result == [
+            {
+                "steps": 100,
+                "training_score": 0.5,
+                "evaluation_score": None,
+                "size_mb": 1.25,
+            }
+        ]
+        assert "id" not in result[0]
 
 
 class TestPreviewExperimentMetricsCsv:
@@ -1595,7 +1613,8 @@ class TestListExperimentMetricNames:
             "project": "proj1",
             "details": True,
         }
-        assert result == {"experiment_id": "123", "metrics": ["a"]}
+        assert result == {"metrics": ["a"]}
+        assert "experiment_id" not in result
 
 
 class TestListResources:
@@ -1720,14 +1739,25 @@ class TestProjectMethods:
         assert api_key_client.list_projects() == []
 
     def test_create_project(self, api_key_client):
-        api_key_client._request = MagicMock(return_value={"id": 1, "name": "p1"})
+        api_key_client._request = MagicMock(
+            return_value={
+                "name": "p1",
+                "type": "LLM Fine-tuning",
+                "description": "desc",
+            }
+        )
         result = api_key_client.create_project("p1", "desc", llm_based=True)
         api_key_client._request.assert_called_once_with(
             "POST",
             "/api/cli/v1/projects/create",
             json={"name": "p1", "description": "desc", "llm_based": True},
         )
-        assert result == {"id": 1, "name": "p1"}
+        assert result == {
+            "name": "p1",
+            "type": "LLM Fine-tuning",
+            "description": "desc",
+        }
+        assert "id" not in result
 
     def test_delete_project(self, api_key_client):
         api_key_client._request = MagicMock(return_value=None)

@@ -67,14 +67,14 @@ class TestParseNdjsonLine:
                 "stage": "submit",
                 "status": "completed",
                 "message": "Job submitted",
-                "detail": {"accepted": True, "experiment_id": 42},
+                "detail": {"accepted": True, "experiment_name": "exp-42"},
             }
         )
         event = parse_ndjson_line(line)
         assert isinstance(event, StatusEvent)
         assert event.status == "completed"
         assert event.detail["accepted"] is True
-        assert event.detail["experiment_id"] == 42
+        assert event.detail["experiment_name"] == "exp-42"
 
     def test_status_event_without_level_is_none(self):
         line = json.dumps(
@@ -415,7 +415,7 @@ class TestNDJsonStream:
                     "stage": "submission",
                     "status": "completed",
                     "message": "Job submitted",
-                    "detail": {"accepted": True, "experiment_id": 7},
+                    "detail": {"accepted": True, "experiment_name": "exp-7"},
                 }
             ),
         ]

@@ -92,8 +92,9 @@ class TestListDatasets:
             ],
         )
         result = api_key_client.list_datasets()
-        assert list(result[0].keys()) == ["name", "hf_dataset_id", "id", "category"]
+        assert list(result[0].keys()) == ["name", "hf_dataset_id", "category"]
         assert result[0]["hf_dataset_id"] == "org/ds"
+        assert "id" not in result[0]
 
 
 class TestDatasetExists:
@@ -112,7 +113,8 @@ class TestDatasetExists:
             params={"name": "my-dataset"},
         )
         assert result["exists"] is True
-        assert result["id"] == 7
+        assert result["datasetType"] == "reasoning"
+        assert "id" not in result
 
 
 class TestCreateDataset:
@@ -143,7 +145,8 @@ class TestCreateDataset:
         assert len(uploads) == 1
         assert uploads[0][0] == "data.csv"
         assert uploads[0][2] == CSV_CONTENT_TYPE
-        assert result["id"] == 1
+        assert result == {"name": "ds1"}
+        assert "id" not in result
 
     def test_create_hf_import(self, api_key_client):
         api_key_client._request = MagicMock(return_value={"name": "hf-ds"})
@@ -201,7 +204,7 @@ class TestCreateDataset:
     def test_create_parquet_file(self, api_key_client, tmp_path):
         parquet_path = tmp_path / "train.parquet"
         parquet_path.write_bytes(b"PAR1")
-        api_key_client._request = MagicMock(return_value={"name": "ds1", "id": 2})
+        api_key_client._request = MagicMock(return_value={"name": "ds1"})
 
         api_key_client.create_dataset(
             name="ds1",

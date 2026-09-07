@@ -790,7 +790,7 @@ def _format_checkpoint_rows_for_display(
         if "steps" in row:
             ordered["steps"] = row["steps"]
         for key, value in row.items():
-            if key == "steps":
+            if key in ("steps", "id"):
                 continue
             if key == "size_mb" and isinstance(value, (int, float)):
                 value = f"{value:.2f}"

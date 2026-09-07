@@ -32,13 +32,21 @@ class TestOrderDatasetFields:
             "hf_dataset_id": "org/foo",
         }
         ordered = order_dataset_fields(row)
-        assert list(ordered.keys()) == ["name", "hf_dataset_id", "id", "category"]
+        assert list(ordered.keys()) == ["name", "hf_dataset_id", "category"]
+        assert "id" not in ordered
 
     def test_always_includes_name_and_hf_dataset_id_keys(self):
         row = {"id": 1, "name": "ds"}
         ordered = order_dataset_fields(row)
-        assert list(ordered.keys()) == ["name", "hf_dataset_id", "id"]
+        assert list(ordered.keys()) == ["name", "hf_dataset_id"]
         assert ordered["hf_dataset_id"] is None
+        assert "id" not in ordered
+
+    def test_keeps_string_hub_id(self):
+        row = {"id": "org/foo", "name": "ds", "hf_dataset_id": "org/foo"}
+        ordered = order_dataset_fields(row)
+        assert list(ordered.keys()) == ["name", "hf_dataset_id", "id"]
+        assert ordered["id"] == "org/foo"
 
     def test_leaves_other_keys_unchanged(self):
         row = {"hf_dataset_id": "org/bar", "name": "ds", "downloads": 10}

@@ -9,7 +9,6 @@ from pathlib import Path
 
 def resolve_metrics_output_path(
     *,
-    experiment_id: int | None = None,
     experiment_name: str | None = None,
     payload: bytes,
     content_type: str | None,
@@ -18,8 +17,6 @@ def resolve_metrics_output_path(
 ) -> Path:
     """Resolve the output path for metrics.
 
-    :param experiment_id: Numeric experiment id used in default filenames.
-    :type experiment_id: int | None
     :param experiment_name: Experiment name used in default filenames.
     :type experiment_name: str | None
     :param payload: The payload to resolve the output path for.
@@ -46,9 +43,6 @@ def resolve_metrics_output_path(
     is_zip = payload.startswith(b"PK") or "zip" in (content_type or "").lower()
     suffix = ".zip" if is_zip else ".csv"
 
-    # Return the output path from id, name, or a generic fallback
-    if experiment_id is not None:
-        return Path(f"experiment_{experiment_id}_metrics{suffix}")
     if experiment_name is not None:
         safe = re.sub(r"[^\w\-.]", "_", experiment_name)[:200]
         return Path(f"experiment_{safe}_metrics{suffix}")

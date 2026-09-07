@@ -15,6 +15,7 @@ import pytest
 from click.testing import CliRunner
 
 from agilerl.arena.cli import (
+    _format_checkpoint_rows_for_display,
     _redact_agent_rows_for_display,
     arena_client,
     main,
@@ -577,7 +578,7 @@ class TestExperimentSubmitCommand:
     def test_submit(self, runner, mock_client, tmp_path):
         manifest = tmp_path / "manifest.yaml"
         manifest.write_text("experiment: test")
-        mock_client.submit_experiment.return_value = {"id": "exp-123"}
+        mock_client.submit_experiment.return_value = {"accepted": True}
         with _patched_arena_client(mock_client):
             result = runner.invoke(main, ["experiments", "submit", str(manifest)])
         assert result.exit_code == 0
@@ -596,7 +597,7 @@ class TestExperimentSubmitCommand:
         manifest.write_text("x: 1")
         reward = tmp_path / "reward.py"
         reward.write_text("def reward(q, a, c):\n    return 0.0\n")
-        mock_client.submit_experiment.return_value = {"id": "exp-456"}
+        mock_client.submit_experiment.return_value = {"accepted": True}
         with _patched_arena_client(mock_client):
             result = runner.invoke(
                 main,
@@ -668,7 +669,10 @@ class TestDatasetsListCommand:
 
 class TestDatasetsExistsCommand:
     def test_exists(self, runner, mock_client):
-        mock_client.dataset_exists.return_value = {"exists": True, "id": 3}
+        mock_client.dataset_exists.return_value = {
+            "exists": True,
+            "datasetType": "sft",
+        }
         with _patched_arena_client(mock_client):
             result = runner.invoke(main, ["datasets", "exists", "my-ds"])
         assert result.exit_code == 0
@@ -726,7 +730,7 @@ class TestDatasetsCreateCommand:
         mapping_file.write_text('{"prompt": "question"}', encoding="utf-8")
         csv_file = tmp_path / "data.csv"
         csv_file.write_bytes(b"question,answer\nhi,bye\n")
-        mock_client.create_dataset.return_value = {"name": "new-ds", "id": 1}
+        mock_client.create_dataset.return_value = {"name": "new-ds"}
         with _patched_arena_client(mock_client):
             result = runner.invoke(
                 main,
@@ -773,7 +777,7 @@ class TestDatasetsCreateCommand:
         shard = tmp_path / "main" / "train.parquet"
         shard.parent.mkdir()
         shard.write_bytes(b"PAR1")
-        mock_client.create_dataset.return_value = {"name": "gsm8k", "id": 2}
+        mock_client.create_dataset.return_value = {"name": "gsm8k"}
         with _patched_arena_client(mock_client):
             result = runner.invoke(
                 main,
@@ -867,7 +871,7 @@ class TestExperimentStopCommand:
 
 class TestExperimentCheckpointsCommand:
     def test_checkpoints(self, runner, mock_client):
-        mock_client.list_checkpoints.return_value = [{"step": 100}]
+        mock_client.list_checkpoints.return_value = [{"steps": 100}]
         with _patched_arena_client(mock_client):
             result = runner.invoke(main, ["experiments", "checkpoints", "my-exp"])
         assert result.exit_code == 0
@@ -891,6 +895,46 @@ class TestExperimentCheckpointsCommand:
         assert output.index("steps") < output.index("size_mb")
         assert "0.83" in output
         assert "0.8336706161499023" not in output
+
+    def test_checkpoints_strips_id_even_if_server_sends_it(self, runner, mock_client):
+        mock_client.list_checkpoints.return_value = [
+            {
+                "id": 99,
+                "steps": 100,
+                "training_score": 0.2,
+                "size_mb": 1.5,
+            }
+        ]
+        with _patched_arena_client(mock_client):
+            result = runner.invoke(main, ["experiments", "checkpoints", "my-exp"])
+        assert result.exit_code == 0
+        assert "99" not in result.output
+        assert "steps" in result.output
+
+
+class TestFormatCheckpointRowsForDisplay:
+    def test_puts_steps_first_and_drops_id(self):
+        rows = [
+            {
+                "id": 12,
+                "evaluation_score": 0.1,
+                "size_mb": 2.3456,
+                "steps": 50,
+                "training_score": 0.2,
+            }
+        ]
+
+        formatted = _format_checkpoint_rows_for_display(rows)
+
+        assert formatted == [
+            {
+                "steps": 50,
+                "evaluation_score": 0.1,
+                "size_mb": "2.35",
+                "training_score": 0.2,
+            }
+        ]
+        assert "id" not in formatted[0]
 
 
 class TestExperimentMetricsCommand:

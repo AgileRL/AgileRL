@@ -713,14 +713,16 @@ class ArenaClient:
 
         :param name: Dataset name.
         :type name: str
-        :returns: ``exists``, optional ``id``, and ``datasetType`` when present.
+        :returns: ``exists`` and ``datasetType`` when present.
         :rtype: dict[str, bool | str]
         """
-        return self._request(
+        resp = self._request(
             "GET",
             "/api/cli/v1/datasets/exists",
             params={"name": name},
         )
+        resp.pop("id", None)
+        return resp
 
     def create_dataset(
         self,
@@ -791,6 +793,8 @@ class ArenaClient:
             self._close_upload_files(upload_files)
         if resp and resp.get("is_ready", False) and resp.get("uploaded", False):
             logger.info("Dataset %s created successfully.", name)
+        if resp:
+            resp.pop("id", None)
 
         return resp
 
@@ -1229,18 +1233,21 @@ class ArenaClient:
         )
 
     def list_checkpoints(self, experiment_name: str) -> list[dict[str, Any]]:
-        """List all checkpoints for an experiment.
+        """List checkpoints for an experiment by name.
 
         :param experiment_name: The name of the experiment to list checkpoints for.
         :type experiment_name: str
-        :returns: A list of checkpoints.
+        :returns: Rows with ``steps``, scores, and ``size_mb``.
         :rtype: list[dict[str, Any]]
         """
-        return self._request(
+        rows = self._request(
             "GET",
             "/api/cli/v1/experiments/jobs/checkpoints",
             params={"experiment_name": experiment_name},
         )
+        return [
+            {key: value for key, value in row.items() if key != "id"} for row in rows
+        ]
 
     def preview_experiment_metrics_csv(
         self,
@@ -1288,7 +1295,7 @@ class ArenaClient:
         project: str | None = None,
         details: bool = False,
     ) -> list[str] | dict[str, Any]:
-        r"""List metric column names recorded for an experiment (JSON).
+        """List metric column names recorded for an experiment (JSON).
 
         For a **CSV preview** with ``--metric`` / ``--preview-rows``-style filters,
         use :meth:`preview_experiment_metrics_csv`.
@@ -1297,9 +1304,9 @@ class ArenaClient:
         :type experiment_name: str
         :param project: Optional exact project name in the current org.
         :type project: str | None
-        :param details: When True, the API returns ``{\"experiment_id\", \"metrics\"}``.
+        :param details: When True, return the metrics payload object instead of a name list.
         :type details: bool
-        :returns: Sorted unique metric names, or that object when ``details`` is True.
+        :returns: Sorted unique metric names, or the metrics payload when ``details`` is True.
         :rtype: list[str] | dict[str, Any]
         """
         resolved_project = self._resolve_project(project)
@@ -1308,11 +1315,14 @@ class ArenaClient:
             params["project"] = resolved_project
         if details:
             params["details"] = True
-        return self._request(
+        result = self._request(
             "GET",
             "/api/cli/v1/experiments/metrics",
             params=params,
         )
+        if details:
+            result.pop("experiment_id", None)
+        return result
 
     def list_resources(self) -> dict[str, Any]:
         """List compute resource tiers for Arena training jobs.
