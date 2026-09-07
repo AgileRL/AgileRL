@@ -83,13 +83,13 @@ AgileRL ships optional dependency groups that you can install as needed:
 | Installation | Description |
 |-------|--------------|
 | `agilerl[box2d]` | Box2D physics engine for Gymnasium environments |
-| `agilerl[arena]` | [Arena](https://arena.agilerl.com) SDK & CLI. Validate custom environments, and train & deploy agents on managed cloud infrastructure. |
+| `agilerl-arena` | [Arena](https://arena.agilerl.com) SDK & CLI. Validate custom environments, and train & deploy agents on managed cloud infrastructure. |
 | `agilerl[llm]` | LLM reinforcement fine-tuning. |
 | `agilerl[all]` | Cover all functionalities of AgileRL. |
 
-In development mode, quote the extras:
+In development mode:
 ```bash
-pip install -e ".[arena]"
+pip install -e .
 ```
 
 To install AgileRL from the development tip of ``main`` (not a PyPI release), use:
@@ -132,8 +132,8 @@ from agilerl.models import TrainingSpec
 trainer = LocalTrainer(
     algorithm="DQN",
     environment="LunarLander-v3",
-    training=TrainingSpec(pop_size=4), # Train four agents simultaneously
-    hpo=True, # Enable evolutionary HPO using default settings
+    training=TrainingSpec(pop_size=4),  # Train four agents simultaneously
+    hpo=True,  # Enable evolutionary HPO using default settings
 )
 population, fitnesses = trainer.train()
 ```
@@ -263,7 +263,7 @@ env = make_vect_envs(env_name="LunarLander-v3", num_envs=16)
 net_config = {
     "latent_dim": 64,
     "encoder_config": {"hidden_size": [64]},
-    "head_config": {"hidden_size": [64]}
+    "head_config": {"hidden_size": [64]},
 }
 
 # Algorithm hyperparameters
@@ -273,18 +273,18 @@ init_hp = {
     "lr": 1e-3,
     "gamma": 0.99,
     "learn_step": 1,
-    "tau": 1e-3
+    "tau": 1e-3,
 }
 
 # Create a population of DQN agents
-population_size=6
+population_size = 6
 agent_pop = DQN.population(
     size=population_size,
     observation_space=env.single_observation_space,
     action_space=env.single_action_space,
     net_config=net_config,
     device=device,
-    **init_hp
+    **init_hp,
 )
 
 # Replay buffer
@@ -292,9 +292,7 @@ memory = ReplayBuffer(max_size=10_000, device=device)
 
 # Evolutionary HPO
 tournament = TournamentSelection(
-    tournament_size=2,
-    elitism=True,
-    population_size=population_size
+    tournament_size=2, elitism=True, population_size=population_size
 )
 mutations = Mutations(
     no_mutation=0.4,
@@ -330,12 +328,12 @@ This approach gives you the flexibility to swap in your own Gymnasium or Petting
 
 [Arena](https://arena.agilerl.com) is the RLOps platform from AgileRL. We provide tools to create and validate custom reinforcement learning environments on the platform and train RL agents on managed cloud infrastructure specifically tailored to RL workloads.
 
-AgileRL ships a **Python SDK** and a **CLI** for interacting with the platform through the [`agilerl-arena`](agilerl-arena/README.md) package. It is a **separate PyPI distribution** that contributes the `agilerl.arena` namespace. Install it directly, or via the AgileRL extra:
+AgileRL ships a **Python SDK** and a **CLI** for interacting with the platform through the [`agilerl-arena`](agilerl-arena/README.md) package. It is a **separate PyPI distribution** that contributes the `agilerl.arena` namespace. Install it directly, or with `agilerl` (arena is a base dependency):
 
 ```bash
 pip install agilerl-arena
 # or
-pip install "agilerl[arena]"
+pip install agilerl
 ```
 
 ### Python
@@ -346,7 +344,7 @@ Use the `ArenaClient` to interact with Arena programmatically from scripts or no
 from agilerl.arena import ArenaClient
 
 client = ArenaClient()
-client.login() # OAuth2 device-flow authentication
+client.login()  # OAuth2 device-flow authentication
 
 # Upload and validate a custom environment
 client.validate_environment(name="my-custom-env", source="path/to/my_env.py")

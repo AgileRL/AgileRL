@@ -46,6 +46,7 @@ environment:
 
 training:
     max_steps: 4096
+    evo_steps: 4096
     pop_size: 1
     eval_loop: 1
     evaluation_interval: 5

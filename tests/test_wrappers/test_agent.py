@@ -14,7 +14,7 @@ from gymnasium import spaces
 from pettingzoo import ParallelEnv
 
 from agilerl.algorithms import DDPG, IPPO, PPO
-from agilerl.algorithms.core import MultiAgentRLAlgorithm, RLAlgorithm
+from agilerl.algorithms.core import MultiAgentAlgorithm, SingleAgentAlgorithm
 from agilerl.modules import EvolvableMLP
 from agilerl.rollouts.on_policy import collect_rollouts
 from agilerl.wrappers.agent import AsyncAgentsWrapper, RSNorm
@@ -148,7 +148,7 @@ class DummyEnv:
 @pytest.fixture
 def setup_rs_norm():
     observation_space = spaces.Box(low=-1.0, high=1.0, shape=(3,))
-    mock_agent = MagicMock(spec=RLAlgorithm)
+    mock_agent = MagicMock(spec=SingleAgentAlgorithm)
     mock_agent.observation_space = observation_space
     mock_agent.action_space = spaces.Discrete(2)
     mock_agent.device = "cpu"
@@ -166,7 +166,7 @@ def setup_rs_norm_dict():
             "sensor2": spaces.Box(low=-1.0, high=1.0, shape=(2,)),
         },
     )
-    mock_agent = MagicMock(spec=RLAlgorithm)
+    mock_agent = MagicMock(spec=SingleAgentAlgorithm)
     mock_agent.observation_space = observation_space
     mock_agent.action_space = spaces.Discrete(2)
     mock_agent.device = "cpu"
@@ -184,7 +184,7 @@ def setup_rs_norm_tuple():
             spaces.Box(low=-1.0, high=1.0, shape=(2,)),
         ),
     )
-    mock_agent = MagicMock(spec=RLAlgorithm)
+    mock_agent = MagicMock(spec=SingleAgentAlgorithm)
     mock_agent.observation_space = observation_space
     mock_agent.action_space = spaces.Discrete(2)
     mock_agent.device = "cpu"
@@ -200,7 +200,7 @@ def setup_rs_norm_multi_agent():
         "agent_1": spaces.Box(low=-1.0, high=1.0, shape=(3,)),
         "other_agent_1": spaces.Box(low=-1.0, high=1.0, shape=(2,)),
     }
-    mock_agent = MagicMock(spec=MultiAgentRLAlgorithm)
+    mock_agent = MagicMock(spec=MultiAgentAlgorithm)
     mock_agent.observation_space = observation_space
     mock_agent.action_space = {
         "agent_1": spaces.Discrete(2),

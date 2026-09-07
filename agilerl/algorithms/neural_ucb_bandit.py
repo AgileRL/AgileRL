@@ -10,7 +10,7 @@ from gymnasium import spaces
 from tensordict import TensorDict
 from torch import nn, optim
 
-from agilerl.algorithms.core import OptimizerWrapper, RLAlgorithm
+from agilerl.algorithms.core import OptimizerWrapper, SingleAgentAlgorithm
 from agilerl.algorithms.core.registry import (
     HyperparameterConfig,
     NetworkGroup,
@@ -30,7 +30,7 @@ from agilerl.utils.algo_utils import make_safe_deepcopies
 from agilerl.utils.evolvable_networks import get_default_encoder_config
 
 
-class NeuralUCB(RLAlgorithm[TensorDict]):
+class NeuralUCB(SingleAgentAlgorithm[TensorDict]):
     """Neural Upper Confidence Bound (UCB).
 
     Paper: https://arxiv.org/abs/1911.04462

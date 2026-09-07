@@ -12,7 +12,11 @@ from gymnasium import spaces
 from torch import optim
 from torch._dynamo.eval_frame import OptimizedModule
 
-from agilerl.algorithms.core import MultiAgentRLAlgorithm, OptimizerWrapper, RLAlgorithm
+from agilerl.algorithms.core import (
+    MultiAgentAlgorithm,
+    OptimizerWrapper,
+    SingleAgentAlgorithm,
+)
 from agilerl.algorithms.core.registry import (
     HyperparameterConfig,
     MutationRegistry,
@@ -175,7 +179,7 @@ def heterogeneous_agent():
     return DummyMARLAlgorithm(obs_spaces, action_spaces, agent_ids=agent_ids, index=0)
 
 
-class DummyRLAlgorithm(RLAlgorithm):
+class DummyRLAlgorithm(SingleAgentAlgorithm):
     def __init__(
         self,
         observation_space,
@@ -266,7 +270,7 @@ class DummyRLAlgorithm(RLAlgorithm):
         return
 
 
-class DummyRLAlgorithmNoPolicy(RLAlgorithm):
+class DummyRLAlgorithmNoPolicy(SingleAgentAlgorithm):
     """Algorithm that has a policy group but we clear policy flag so get_policy() raises."""
 
     def __init__(self, observation_space, action_space, index=0):
@@ -313,7 +317,7 @@ class DummyRLAlgorithmNoPolicy(RLAlgorithm):
         return
 
 
-class NoRegistryRLAlgorithm(RLAlgorithm):
+class NoRegistryRLAlgorithm(SingleAgentAlgorithm):
     """Algorithm that never registers any network group, so _registry_init raises."""
 
     def __init__(self, observation_space, action_space, index=0):
@@ -334,7 +338,7 @@ class NoRegistryRLAlgorithm(RLAlgorithm):
         return None
 
 
-class NoPolicyRegistryRLAlgorithm(RLAlgorithm):
+class NoPolicyRegistryRLAlgorithm(SingleAgentAlgorithm):
     """Algorithm that registers a network group with policy=False."""
 
     def __init__(self, observation_space, action_space, index=0):
@@ -381,7 +385,7 @@ class NoPolicyRegistryRLAlgorithm(RLAlgorithm):
         return None
 
 
-class DummyMARLAlgorithm(MultiAgentRLAlgorithm):
+class DummyMARLAlgorithm(MultiAgentAlgorithm):
     def __init__(
         self,
         observation_spaces,
@@ -614,7 +618,7 @@ class TestMultiAgentRLAlgorithmInit:
     def test_multi_agent_algorithm_observation_spaces_type_error(
         self, observation_spaces, action_spaces, error_match
     ):
-        """MultiAgentRLAlgorithm raises TypeError when observation_spaces is not list or dict."""
+        """MultiAgentAlgorithm raises TypeError when observation_spaces is not list or dict."""
         agent_ids = ["agent_0", "agent_1"]
         with pytest.raises(TypeError, match=error_match):
             DummyMARLAlgorithm(
@@ -930,10 +934,10 @@ class TestRLAlgorithmGetStateDim:
     def test_get_state_dim_returns_expected_output(self, vector_space, discrete_space):
         """get_state_dim returns the same as get_input_size_from_space for observation space."""
         with pytest.warns(DeprecationWarning, match="get_input_size_from_space"):
-            state_dim = RLAlgorithm.get_state_dim(vector_space)
+            state_dim = SingleAgentAlgorithm.get_state_dim(vector_space)
         assert state_dim == vector_space.shape
         with pytest.warns(DeprecationWarning, match="get_input_size_from_space"):
-            state_dim_discrete = RLAlgorithm.get_state_dim(discrete_space)
+            state_dim_discrete = SingleAgentAlgorithm.get_state_dim(discrete_space)
         assert state_dim_discrete == (discrete_space.n,)
 
 
@@ -941,10 +945,10 @@ class TestRLAlgorithmGetActionDim:
     def test_get_action_dim_returns_expected_output(self, vector_space, discrete_space):
         """get_action_dim returns the same as get_output_size_from_space for action space."""
         with pytest.warns(DeprecationWarning, match="get_output_size_from_space"):
-            action_dim = RLAlgorithm.get_action_dim(discrete_space)
+            action_dim = SingleAgentAlgorithm.get_action_dim(discrete_space)
         assert action_dim == discrete_space.n
         with pytest.warns(DeprecationWarning, match="get_output_size_from_space"):
-            action_dim_box = RLAlgorithm.get_action_dim(vector_space)
+            action_dim_box = SingleAgentAlgorithm.get_action_dim(vector_space)
         assert action_dim_box == vector_space.shape[0]
 
 

@@ -9,7 +9,11 @@ import torch
 from gymnasium import spaces
 from torch import nn
 
-from agilerl.algorithms.core import MultiAgentRLAlgorithm, OptimizerWrapper, RLAlgorithm
+from agilerl.algorithms.core import (
+    MultiAgentAlgorithm,
+    OptimizerWrapper,
+    SingleAgentAlgorithm,
+)
 from agilerl.algorithms.core.base import LLMAlgorithm
 from agilerl.algorithms.core.optimizer_wrapper import init_llm_optimizer
 from agilerl.algorithms.core.registry import NetworkGroup
@@ -42,7 +46,7 @@ class MockEvolvableNetwork(EvolvableModule):
         return {"device": self.device}
 
 
-class MockAlgorithm(RLAlgorithm):
+class MockAlgorithm(SingleAgentAlgorithm):
     def __init__(self, actor=None, critic=None, lr=0.001, optimizer_cls=None):
         observation_space = spaces.Box(low=-1, high=1, shape=(10,))
         action_space = spaces.Box(low=-1, high=1, shape=(5,))
@@ -94,7 +98,7 @@ class MockAlgorithm(RLAlgorithm):
         return 0.0
 
 
-class MockMultiAgentAlgorithm(MultiAgentRLAlgorithm):
+class MockMultiAgentAlgorithm(MultiAgentAlgorithm):
     def __init__(
         self,
         actors=None,

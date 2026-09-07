@@ -52,6 +52,7 @@ environment:
 
 training:
     max_steps: 100000
+    evo_steps: 100000
     max_wall_seconds: 200000
     pop_size: 1
     eval_loop: 1

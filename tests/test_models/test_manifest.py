@@ -12,7 +12,6 @@ Test manifests live under ``tests/manifests/`` as YAML files.
 
 from __future__ import annotations
 
-import warnings
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -22,30 +21,33 @@ import yaml
 from gymnasium import spaces
 from pydantic import ValidationError
 
-from agilerl import HAS_ARENA_DEPENDENCIES, HAS_LLM_DEPENDENCIES
-from agilerl.models.algorithms.cqn import CQNSpec
-from agilerl.models.algorithms.ddpg import DDPGSpec
-from agilerl.models.algorithms.dqn import DQNSpec
-from agilerl.models.algorithms.ippo import IPPOSpec
-from agilerl.models.algorithms.maddpg import MADDPGSpec
-from agilerl.models.algorithms.matd3 import MATD3Spec
-from agilerl.models.algorithms.neural_ts import NeuralTSSpec
-from agilerl.models.algorithms.neural_ucb import NeuralUCBSpec
-from agilerl.models.algorithms.ppo import PPOSpec
-from agilerl.models.algorithms.rainbow_dqn import RainbowDQNSpec
-from agilerl.models.algorithms.td3 import TD3Spec
+from agilerl import HAS_LLM_DEPENDENCIES
+from agilerl.arena.models import GymEnvSpec as ArenaEnvSpec
+from agilerl.arena.models.algorithms import (
+    CQNSpec,
+    DDPGSpec,
+    DQNSpec,
+    IPPOSpec,
+    MADDPGSpec,
+    MATD3Spec,
+    NeuralTSSpec,
+    NeuralUCBSpec,
+    PPOSpec,
+    RainbowDQNSpec,
+    TD3Spec,
+)
 from agilerl.models.env import (
     BanditEnvSpec,
     GymEnvSpec,
     OfflineEnvSpec,
-    PzEnvSpec,
 )
 from agilerl.models.hpo import (
     MultiFrequencySelectionSpec,
     MutationSpec,
+    NetworkMutationRanges,
     TournamentSelectionSpec,
 )
-from agilerl.models.manifest import TrainingManifest
+from agilerl.models.manifest import TrainingManifest, from_trainer_specs
 from agilerl.models.networks import (
     CnnSpec,
     LstmSpec,
@@ -59,8 +61,7 @@ from agilerl.models.training import ReplayBufferSpec, TrainingSpec
 from agilerl.training.trainer import LocalTrainer
 
 if HAS_LLM_DEPENDENCIES:
-    from agilerl.models.algorithms.dpo import DPOSpec
-    from agilerl.models.algorithms.grpo import GRPOSpec
+    from agilerl.arena.models.algorithms import DPOSpec, GRPOSpec
     from agilerl.models.env import LLMEnvSpec
 else:
     # Placeholder names so ``@pytest.mark.parametrize`` decorators (evaluated at
@@ -86,18 +87,28 @@ def _load(name: str) -> dict:
 
 
 def _make_manifest(algo: dict, env: dict | None = None, **sections) -> dict:
-    """Build an ad-hoc manifest dict (for one-off / error-case tests)."""
+    """Build an ad-hoc manifest dict (for one-off / error-case tests).
+
+    The environment defaults to a valid gym section: it is now validated like
+    every other section, so an empty one fails on the name a gym env requires
+    rather than passing straight through.
+    """
     m = {
         "algorithm": algo,
-        "environment": env if env is not None else {},
+        "environment": env if env is not None else {"name": "CartPole-v1"},
         "training": sections.pop("training", _TRAINING),
     }
     m.update(sections)
     return m
 
 
-def test_get_validated_json_omits_unset_optional_sections() -> None:
-    """JSON omits optional sections when they are not present."""
+def test_get_validated_json_resolves_unset_optional_sections() -> None:
+    """The payload carries the sections the runtime indexes straight into.
+
+    The runtime reads ``mutation["rl_hp_selection"]`` and
+    ``tournament_selection["tournament_size"]`` without guarding them, so an
+    omitted section has to arrive filled rather than empty or absent.
+    """
     raw = {
         "algorithm": {
             "name": "DQN",
@@ -110,9 +121,41 @@ def test_get_validated_json_omits_unset_optional_sections() -> None:
         "training": {"max_steps": 1_000_000, "evo_steps": 10_000, "pop_size": 4},
     }
     out = TrainingManifest.get_validated(raw, mode="json")
-    assert "mutation" not in out
-    assert "selection_strategy" not in out
+    assert out["mutation"]["rl_hp_selection"] == {}
+    assert out["mutation"]["probabilities"]["no_mut"] == 1.0
+    assert out["mutation"]["probabilities"]["arch_mut"] == 0.0
+    assert out["tournament_selection"]["tournament_size"] == 2
+    assert out["tournament_selection"]["elitism"] is True
+    # The encoder is inferred from the observation space, so there is no
+    # architecture to fill in here.
     assert "network" not in out
+    assert "selection_strategy" not in out
+
+
+def test_recurrent_ppo_alias_sets_recurrent() -> None:
+    raw = {
+        "algorithm": {"name": "Recurrent PPO", "lr": 3e-4},
+        "environment": {"name": "CartPole-v1", "num_envs": 8},
+        "training": {"max_steps": 1000, "evo_steps": 100, "pop_size": 2},
+    }
+    validated = TrainingManifest.model_validate(raw)
+    assert validated.algorithm.recurrent is True
+    assert validated.algorithm.name == "Recurrent PPO"
+
+
+def test_recurrent_ppo_rejects_an_explicit_false() -> None:
+    with pytest.raises(ValueError, match="recurrent"):
+        TrainingManifest.model_validate(
+            {
+                "algorithm": {
+                    "name": "Recurrent PPO",
+                    "recurrent": False,
+                    "lr": 3e-4,
+                },
+                "environment": {"name": "CartPole-v1", "num_envs": 8},
+                "training": {"max_steps": 1000, "evo_steps": 100, "pop_size": 2},
+            }
+        )
 
 
 def test_get_validated_raises_on_unknown_algorithm_field() -> None:
@@ -151,7 +194,7 @@ def test_get_validated_accepts_known_aliased_or_excluded_fields() -> None:
     )
 
 
-def test_get_validated_accepts_the_legacy_selection_key() -> None:
+def test_get_validated_accepts_the_tournament_selection_alias() -> None:
     TrainingManifest.get_validated(
         _make_manifest(
             {"name": "DQN"},
@@ -161,8 +204,14 @@ def test_get_validated_accepts_the_legacy_selection_key() -> None:
     )
 
 
-def test_get_validated_reports_unknown_keys_under_the_legacy_selection_key() -> None:
-    with pytest.raises(ValueError, match=r"tournament_selection\.bogus_key"):
+def test_get_validated_reports_unknown_keys_under_the_tournament_selection_alias() -> (
+    None
+):
+    # The error names the key the manifest actually wrote, so the author can
+    # find it; pydantic reports under whichever alias the document used.
+    with pytest.raises(
+        ValueError, match=r"tournament_selection\.tournament\.bogus_key"
+    ):
         TrainingManifest.get_validated(
             _make_manifest(
                 {"name": "DQN"},
@@ -173,7 +222,7 @@ def test_get_validated_reports_unknown_keys_under_the_legacy_selection_key() -> 
 
 
 def test_get_validated_reports_unknown_keys_under_the_current_selection_key() -> None:
-    with pytest.raises(ValueError, match=r"selection_strategy\.bogus_key"):
+    with pytest.raises(ValueError, match=r"selection_strategy\.tournament\.bogus_key"):
         TrainingManifest.get_validated(
             _make_manifest(
                 {"name": "DQN"},
@@ -183,21 +232,28 @@ def test_get_validated_reports_unknown_keys_under_the_current_selection_key() ->
         )
 
 
-def test_get_validated_json_writes_the_current_selection_key() -> None:
+@pytest.mark.parametrize("key", ["tournament_selection", "selection_strategy"])
+def test_get_validated_json_writes_the_serialized_selection_key(key: str) -> None:
+    """Either spelling normalizes onto the one key the runtime indexes.
+
+    ``selection_strategy`` is the field name; ``tournament_selection`` is its
+    serialization alias, and SpecAssembler reads the payload with that name and
+    no fallback, so the payload has to carry it.
+    """
     out = TrainingManifest.get_validated(
         _make_manifest(
             {"name": "DQN"},
             env={"name": "CartPole-v1"},
-            tournament_selection={"tournament_size": 3},
+            **{key: {"tournament_size": 3}},
         ),
         mode="json",
     )
-    assert out["selection_strategy"]["tournament_size"] == 3
-    assert "tournament_selection" not in out
+    assert out["tournament_selection"]["tournament_size"] == 3
+    assert "selection_strategy" not in out
 
 
 @pytest.mark.parametrize("key", ["selection_strategy", "tournament_selection"])
-def test_deprecated_tournament_selection_property_returns_the_spec(key: str) -> None:
+def test_selection_strategy_accepts_either_manifest_key(key: str) -> None:
     manifest = TrainingManifest.get_validated(
         _make_manifest(
             {"name": "DQN"},
@@ -206,22 +262,18 @@ def test_deprecated_tournament_selection_property_returns_the_spec(key: str) -> 
         ),
         mode="python",
     )
-    with pytest.warns(DeprecationWarning, match="tournament_selection is deprecated"):
-        assert manifest.tournament_selection is manifest.selection_strategy
+    assert isinstance(manifest.selection_strategy, TournamentSelectionSpec)
+    assert manifest.selection_strategy.tournament_size == 3
 
 
-def test_deprecated_tournament_selection_property_is_none_when_unset() -> None:
+def test_selection_strategy_is_none_when_unset() -> None:
     manifest = TrainingManifest.get_validated(
         _make_manifest({"name": "DQN"}, env={"name": "CartPole-v1"}), mode="python"
     )
-    with pytest.warns(DeprecationWarning, match="tournament_selection is deprecated"):
-        assert manifest.tournament_selection is None
+    assert manifest.selection_strategy is None
 
 
-def test_deprecated_tournament_selection_property_is_none_under_multi_frequency() -> (
-    None
-):
-    """The legacy name only ever denoted tournament selection, so MF-PBT reads None."""
+def test_selection_strategy_is_multi_frequency_when_configured() -> None:
     manifest = TrainingManifest.get_validated(
         _make_manifest(
             {"name": "DQN"},
@@ -232,11 +284,9 @@ def test_deprecated_tournament_selection_property_is_none_under_multi_frequency(
         mode="python",
     )
     assert isinstance(manifest.selection_strategy, MultiFrequencySelectionSpec)
-    with pytest.warns(DeprecationWarning, match="tournament_selection is deprecated"):
-        assert manifest.tournament_selection is None
 
 
-def test_deprecated_tournament_selection_property_is_not_serialized() -> None:
+def test_selection_strategy_serializes_as_tournament_selection() -> None:
     manifest = TrainingManifest.get_validated(
         _make_manifest(
             {"name": "DQN"},
@@ -246,52 +296,17 @@ def test_deprecated_tournament_selection_property_is_not_serialized() -> None:
         mode="python",
     )
     assert "tournament_selection" not in TrainingManifest.model_computed_fields
-    with warnings.catch_warnings():
-        warnings.simplefilter("error", DeprecationWarning)
-        dumped = manifest.model_dump(exclude_none=True, by_alias=True)
+    dumped = manifest.model_dump(exclude_none=True, by_alias=True)
     assert dumped["tournament_selection"]["tournament_size"] == 3
-
-
-def test_collect_unknown_fields_ignores_non_dict_raw() -> None:
-    from agilerl.models.manifest import _collect_unknown_fields
-
-    validated = TrainingManifest.get_validated(
-        _make_manifest({"name": "DQN"}, env={"name": "CartPole-v1"}), mode="python"
-    )
-    assert _collect_unknown_fields("not-a-dict", validated) == []
-    assert _collect_unknown_fields(None, validated) == []
-
-
-def test_known_field_names_includes_all_alias_forms() -> None:
-    from pydantic import AliasChoices, BaseModel, Field
-
-    from agilerl.models.manifest import _known_field_names
-
-    class _M(BaseModel):
-        plain: int = Field(default=0)
-        aliased: int = Field(default=0, alias="aliased_in")
-        val_str: int = Field(default=0, validation_alias="val_str_in")
-        val_choices: int = Field(
-            default=0, validation_alias=AliasChoices("choice_a", "choice_b")
-        )
-
-    names = _known_field_names(_M())
-    assert {
-        "plain",
-        "aliased",
-        "aliased_in",
-        "val_str",
-        "val_str_in",
-        "val_choices",
-        "choice_a",
-        "choice_b",
-    } <= names
 
 
 class TestNormalizeNetworkForPlatform:
     """Tests for network normalization via get_validated(mode='json')."""
 
-    def test_arch_kept_under_encoder_config(self):
+    def test_arch_is_carried_on_the_encoder_not_the_top_level(self):
+        # arch picks the encoder spec, and normalization moves it onto the
+        # encoder it selected. The dump must keep arch on the encoder so a
+        # later validate does not infer a different one.
         raw = {
             "algorithm": {"name": "DQN"},
             "environment": {"name": "CartPole-v1"},
@@ -305,8 +320,9 @@ class TestNormalizeNetworkForPlatform:
         }
         out = TrainingManifest.get_validated(raw, mode="json")
         network = out["network"]
-        assert "arch" in network.get("encoder_config", {})
+        assert "arch" not in network
         assert network["encoder_config"]["arch"] == "mlp"
+        assert network["encoder_config"]["hidden_size"] == [64]
 
     def test_name_field_not_added(self):
         raw = {
@@ -405,24 +421,29 @@ class TestTrainingManifest:
         ],
     )
     def test_algorithm_dispatch_llm(self, name, extra_fields, expected_cls):
-        from peft import LoraConfig
-
         algo = {
             "name": name,
             "update_epochs": 1,
-            "lora_config": LoraConfig(
-                r=16,
-                lora_alpha=16,
-                lora_dropout=0.05,
-                task_type="CAUSAL_LM",
-            ),
+            "lora_config": {
+                "lora_r": 16,
+                "lora_alpha": 16,
+                "lora_dropout": 0.05,
+                "task_type": "CAUSAL_LM",
+            },
             "max_model_len": 512,
             "use_separate_reference_adapter": True,
             "pretrained_model_name_or_path": "test-model",
             "calc_position_embeddings": True,
             **extra_fields,
         }
-        data = _make_manifest(algo=algo)
+        env = {"dataset": "d.parquet"}
+        if name == "GRPO":
+            # A rollout over rows needs its rubric; a dataset env rejects one.
+            env.update(
+                reward_file_path="reward.py",
+                prompt_template={"user_0": "{question}"},
+            )
+        data = _make_manifest(algo=algo, env=env)
         manifest = TrainingManifest.model_validate(data)
         assert isinstance(manifest.algorithm, expected_cls)
 
@@ -433,7 +454,7 @@ class TestTrainingManifest:
 
     def test_algorithm_unknown_name_raises(self):
         data = _make_manifest(algo={"name": "NonExistentAlgo"})
-        with pytest.raises(KeyError, match="NonExistentAlgo"):
+        with pytest.raises(ValueError, match="NonExistentAlgo"):
             TrainingManifest.model_validate(data)
 
     # -- Network architecture injection -------------------------------------
@@ -448,11 +469,10 @@ class TestTrainingManifest:
             },
         )
         manifest = TrainingManifest.model_validate(data)
-        # Deferred: no arch declared, so net_config is left as a raw dict for
-        # the trainer to resolve from the observation space (Task 3), rather
-        # than raising.
-        assert isinstance(manifest.algorithm.net_config, dict)
-        assert "arch" not in manifest.algorithm.net_config.get("encoder_config", {})
+        # Deferred: no arch declared, so the network section stays untyped and
+        # algorithm.net_config is unset until the trainer infers the encoder.
+        assert not manifest.network_arch_is_resolvable
+        assert manifest.algorithm.net_config is None
 
     @pytest.mark.parametrize(
         ("arch", "encoder_kwargs", "expected_encoder_cls"),
@@ -487,8 +507,10 @@ class TestTrainingManifest:
             },
         )
         manifest = TrainingManifest.model_validate(data)
-        assert isinstance(manifest.network, dict)
-        assert manifest.network["encoder_config"]["arch"] == arch
+        # arch selects the encoder spec rather than surviving as data: the
+        # section is validated now, not carried as a raw dict.
+        assert isinstance(manifest.network.encoder_config, expected_encoder_cls)
+        assert manifest.network.encoder_config.arch == arch
 
     def test_simba_convenience_flag_stripped(self):
         data = _make_manifest(
@@ -502,7 +524,7 @@ class TestTrainingManifest:
             },
         )
         manifest = TrainingManifest.model_validate(data)
-        assert manifest.network["encoder_config"]["arch"] == "mlp"
+        assert manifest.network.encoder_config.arch == "mlp"
 
     # -- Field aliases ------------------------------------------------------
 
@@ -548,14 +570,14 @@ class TestTrainingManifest:
         assert manifest.training.pop_size == 1
         assert manifest.training.hpo is True
 
-    def test_environment_kept_as_raw_dict(self):
+    def test_environment_is_validated_not_passed_through(self):
         data = _make_manifest(
             algo={"name": "DQN"},
             env={"name": "CartPole-v1", "num_envs": 4, "custom": False},
         )
         manifest = TrainingManifest.model_validate(data)
-        assert isinstance(manifest.environment, dict)
-        assert manifest.environment["name"] == "CartPole-v1"
+        assert manifest.environment.name == "CartPole-v1"
+        assert manifest.environment.num_envs == 4
 
     # -- Full manifest parsing ----------------------------------------------
 
@@ -569,9 +591,8 @@ class TestTrainingManifest:
         assert manifest.algorithm.lr == pytest.approx(6.3e-4)
 
         assert isinstance(manifest.mutation, MutationSpec)
-        assert isinstance(manifest.network, dict)
-        assert manifest.network["encoder_config"]["arch"] == "mlp"
-        assert isinstance(manifest.replay_buffer, ReplayBufferSpec)
+        assert manifest.network.encoder_config.arch == "mlp"
+        assert manifest.replay_buffer is not None
         assert manifest.replay_buffer.max_size == 100_000
         assert isinstance(manifest.selection_strategy, TournamentSelectionSpec)
         assert isinstance(manifest.training, TrainingSpec)
@@ -794,8 +815,15 @@ class TestLocalTrainerSingleAgent:
     # -- Extra kwargs -------------------------------------------------------
 
     def test_device_kwarg_forwarded(self):
-        trainer = LocalTrainer.from_manifest(DQN_MANIFEST, device="cpu")
-        assert str(trainer.device) == "cpu"
+        with patch.object(LocalTrainer, "__init__", return_value=None) as init:
+            LocalTrainer.from_manifest(DQN_MANIFEST, device="cuda")
+        assert init.call_args.kwargs["device"] == "cuda"
+
+    def test_hp_config_kwarg_forwarded(self):
+        hp_config = object()
+        with patch.object(LocalTrainer, "__init__", return_value=None) as init:
+            LocalTrainer.from_manifest(DQN_MANIFEST, hp_config=hp_config)
+        assert init.call_args.kwargs["hp_config"] is hp_config
 
     # -- Minimal manifest ---------------------------------------------------
 
@@ -806,7 +834,7 @@ class TestLocalTrainerSingleAgent:
         )
         trainer = LocalTrainer.from_manifest(data)
         assert isinstance(trainer, LocalTrainer)
-        assert trainer.algorithm_spec.batch_size == 128  # DQN default
+        assert trainer.algorithm_spec.batch_size == 64  # DQN's constructor default
         assert trainer.env_spec.name == "CartPole-v1"
         assert trainer.mutation_spec is None
         assert trainer.selection_strategy_spec is None
@@ -848,7 +876,7 @@ class TestLocalTrainerMultiAgent:
 
         assert isinstance(trainer, LocalTrainer)
         assert isinstance(trainer.algorithm_spec, expected_algo_cls)
-        assert isinstance(trainer.env_spec, PzEnvSpec)
+        assert isinstance(trainer.env_spec, GymEnvSpec)
         assert isinstance(trainer.training_spec, TrainingSpec)
 
     def test_maddpg_env_name(self):
@@ -893,19 +921,9 @@ class TestLocalTrainerMultiAgent:
 # TrainingManifest - Arena bridge helpers
 # ============================================================================
 
-requires_arena = pytest.mark.skipif(
-    not HAS_ARENA_DEPENDENCIES, reason="agilerl-arena is not installed"
-)
 
-if HAS_ARENA_DEPENDENCIES:
-    from agilerl.arena.models.env import EnvSpec as ArenaEnvSpec
-else:
-    ArenaEnvSpec = None  # type: ignore[misc, assignment]
-
-
-@requires_arena
 class TestTrainingManifestArenaBridge:
-    """``from_trainer_specs`` and ``to_arena_manifest``."""
+    """``from_trainer_specs`` and ``get_validated`` / ``to_payload``."""
 
     def test_from_trainer_specs_builds_core_manifest(self):
         ppo_spec = PPOSpec(
@@ -915,7 +933,7 @@ class TestTrainingManifestArenaBridge:
                 head_config=MlpSpec(hidden_size=[64]),
             ),
         )
-        manifest = TrainingManifest.from_trainer_specs(
+        manifest = from_trainer_specs(
             algorithm=ppo_spec,
             environment=GymEnvSpec(name="CartPole-v1"),
             training=TrainingSpec(max_steps=500),
@@ -925,17 +943,17 @@ class TestTrainingManifestArenaBridge:
 
     def test_from_trainer_specs_accepts_arena_env_spec(self):
         ppo_spec = PPOSpec(learn_step=128)
-        manifest = TrainingManifest.from_trainer_specs(
+        manifest = from_trainer_specs(
             algorithm=ppo_spec,
             environment=ArenaEnvSpec(name="CartPole-v1"),
             training=TrainingSpec(max_steps=500),
         )
-        assert manifest.environment["name"] == "CartPole-v1"
+        assert manifest.environment.name == "CartPole-v1"
         assert isinstance(manifest.algorithm, PPOSpec)
 
     def test_from_trainer_specs_passthrough_plain_dict_mutation(self):
         """Plain dict mutation hits the _coerce passthrough branch."""
-        manifest = TrainingManifest.from_trainer_specs(
+        manifest = from_trainer_specs(
             algorithm=PPOSpec(learn_step=64),
             environment=ArenaEnvSpec(name="CartPole-v1"),
             training=TrainingSpec(max_steps=200),
@@ -944,8 +962,27 @@ class TestTrainingManifestArenaBridge:
         assert manifest.mutation is not None
         assert manifest.mutation.mutation_sd == 0.05
 
+    def test_from_trainer_specs_folds_mutation_network_onto_network_spec(self):
+        manifest = from_trainer_specs(
+            algorithm=PPOSpec(
+                learn_step=128,
+                net_config=StochasticActorSpec(
+                    encoder_config=MlpSpec(hidden_size=[64]),
+                    head_config=MlpSpec(hidden_size=[64]),
+                ),
+            ),
+            environment=GymEnvSpec(name="CartPole-v1"),
+            training=TrainingSpec(max_steps=500),
+            mutation=MutationSpec(
+                network=NetworkMutationRanges(head_net={"max_mlp_nodes": 1024}),
+            ),
+        )
+
+        assert manifest.network.head_config.max_mlp_nodes == 1024
+        assert manifest.mutation.network is None
+
     def test_from_trainer_specs_accepts_selection_strategy(self):
-        manifest = TrainingManifest.from_trainer_specs(
+        manifest = from_trainer_specs(
             algorithm=PPOSpec(learn_step=64),
             environment=GymEnvSpec(name="CartPole-v1"),
             training=TrainingSpec(max_steps=200),
@@ -955,8 +992,8 @@ class TestTrainingManifestArenaBridge:
         assert manifest.selection_strategy.tournament_size == 3
 
     def test_from_trainer_specs_accepts_multi_frequency_selection_strategy(self):
-        """Both regimes go to the one discriminated field."""
-        manifest = TrainingManifest.from_trainer_specs(
+        """Both regimes land in the one discriminated field."""
+        manifest = from_trainer_specs(
             algorithm=PPOSpec(learn_step=64),
             environment=GymEnvSpec(name="CartPole-v1"),
             training=TrainingSpec(max_steps=200, pop_size=16),
@@ -968,7 +1005,7 @@ class TestTrainingManifestArenaBridge:
     def test_from_trainer_specs_deprecated_tournament_selection_kwarg_warns(self):
         spec = TournamentSelectionSpec(tournament_size=3)
         with pytest.warns(DeprecationWarning, match="'tournament_selection' argument"):
-            manifest = TrainingManifest.from_trainer_specs(
+            manifest = from_trainer_specs(
                 algorithm=PPOSpec(learn_step=64),
                 environment=GymEnvSpec(name="CartPole-v1"),
                 training=TrainingSpec(max_steps=200),
@@ -981,7 +1018,7 @@ class TestTrainingManifestArenaBridge:
             pytest.warns(DeprecationWarning, match="'tournament_selection' argument"),
             pytest.raises(ValueError, match="conflicting selection strategies"),
         ):
-            TrainingManifest.from_trainer_specs(
+            from_trainer_specs(
                 algorithm=PPOSpec(learn_step=64),
                 environment=GymEnvSpec(name="CartPole-v1"),
                 training=TrainingSpec(max_steps=200),
@@ -991,7 +1028,7 @@ class TestTrainingManifestArenaBridge:
 
     def test_from_trainer_specs_unknown_kwarg_raises_type_error(self):
         with pytest.raises(TypeError, match="tournament_seletcion"):
-            TrainingManifest.from_trainer_specs(
+            from_trainer_specs(
                 algorithm=PPOSpec(learn_step=64),
                 environment=GymEnvSpec(name="CartPole-v1"),
                 training=TrainingSpec(max_steps=200),
@@ -1003,7 +1040,7 @@ class TestTrainingManifestArenaBridge:
             TournamentSelectionSpec as ArenaTournamentSelectionSpec,
         )
 
-        manifest = TrainingManifest.from_trainer_specs(
+        manifest = from_trainer_specs(
             algorithm=PPOSpec(learn_step=64),
             environment=ArenaEnvSpec(name="CartPole-v1"),
             training=TrainingSpec(max_steps=200),
@@ -1012,7 +1049,7 @@ class TestTrainingManifestArenaBridge:
         assert isinstance(manifest.selection_strategy, TournamentSelectionSpec)
         assert manifest.selection_strategy.tournament_size == 4
 
-    def test_to_arena_manifest_from_dict_payload(self):
+    def test_get_validated_from_dict_payload(self):
         data = {
             "algorithm": {"name": "PPO", "learn_step": 128},
             "environment": {"name": "CartPole-v1", "num_envs": 4},
@@ -1022,21 +1059,21 @@ class TestTrainingManifestArenaBridge:
                 "head_config": {"arch": "mlp", "hidden_size": [64]},
             },
         }
-        submission = TrainingManifest.to_arena_manifest(data)
+        submission = TrainingManifest.get_validated(data)
         assert submission["algorithm"]["name"] == "PPO"
         assert submission["network"]["encoder_config"]["hidden_size"] == [64]
 
-    def test_to_arena_manifest_from_core_manifest(self):
-        core = TrainingManifest.from_trainer_specs(
+    def test_to_payload_from_trainer_specs_manifest(self):
+        core = from_trainer_specs(
             algorithm=PPOSpec(learn_step=64),
             environment=ArenaEnvSpec(name="CartPole-v1"),
             training=TrainingSpec(max_steps=200),
         )
-        submission = TrainingManifest.to_arena_manifest(core)
+        submission = core.to_payload()
         assert submission["algorithm"]["name"] == "PPO"
         assert submission["environment"]["name"] == "CartPole-v1"
 
-    def test_to_arena_manifest_from_yaml_path(self, tmp_path):
+    def test_get_validated_from_yaml_path(self, tmp_path):
         manifest_path = tmp_path / "manifest.yaml"
         manifest_path.write_text(
             yaml.safe_dump(
@@ -1051,20 +1088,9 @@ class TestTrainingManifestArenaBridge:
                 }
             )
         )
-        submission = TrainingManifest.to_arena_manifest(manifest_path)
+        submission = TrainingManifest.get_validated(manifest_path)
         assert submission["algorithm"]["learn_step"] == 32
         assert submission["environment"]["num_envs"] == 2
-
-
-class TestTrainingManifestArenaBridgeWithoutDeps:
-    """Arena bridge import guard when agilerl-arena is absent."""
-
-    def test_to_arena_manifest_requires_arena_dependencies(self):
-        with patch("agilerl.models.manifest.HAS_ARENA_DEPENDENCIES", False):
-            with pytest.raises(
-                ImportError, match="Arena dependencies are not installed"
-            ):
-                TrainingManifest.to_arena_manifest({"algorithm": {"name": "PPO"}})
 
 
 # ============================================================================
@@ -1074,7 +1100,7 @@ class TestTrainingManifestArenaBridgeWithoutDeps:
 
 @pytest.mark.skipif(not HAS_LLM_DEPENDENCIES, reason="LLM deps not installed")
 class TestManifestBatchSizing:
-    """Both batch-sizing settings reach the algorithm from the manifest.
+    """Both batch-sizing fields reach the algorithm from the manifest.
 
     An unknown algorithm key is rejected outright, so a manifest cannot set an
     optimizer-step size the spec does not carry.
@@ -1089,7 +1115,12 @@ class TestManifestBatchSizing:
                 "group_size": 4,
                 **algo_overrides,
             },
-            env={"env_type": "reasoning", "dataset": "d.parquet"},
+            env={
+                "env_type": "rollout",
+                "dataset": "d.parquet",
+                "reward_file_path": "reward.py",
+                "prompt_template": {"user_0": "{question}"},
+            },
             network={
                 "pretrained_model_name_or_path": "net-model",
                 "max_context_length": 256,
@@ -1101,7 +1132,7 @@ class TestManifestBatchSizing:
             },
         )
 
-    def test_both_batch_settings_survive_the_manifest(self):
+    def test_both_batch_fields_survive_the_manifest(self):
         manifest = TrainingManifest.get_validated(
             self._manifest(micro_batch_size_per_gpu=2, mini_batch_size=4),
             mode="python",
@@ -1117,7 +1148,7 @@ class TestManifestBatchSizing:
 
 @pytest.mark.skipif(not HAS_LLM_DEPENDENCIES, reason="LLM deps not installed")
 class TestTrainerGetValidatedManifestLLMNetwork:
-    """``network`` fills or overrides LLM algorithm model fields after manifest parse."""
+    """``network`` fills LLM algorithm model fields after manifest parse."""
 
     def test_network_fills_pretrained_and_lora_when_absent_in_algorithm(self):
         data = _make_manifest(
@@ -1143,24 +1174,22 @@ class TestTrainerGetValidatedManifestLLMNetwork:
         assert manifest.algorithm.pretrained_model_name_or_path == "net-model"
         assert manifest.algorithm.max_model_len == 256
         assert manifest.algorithm.lora_config is not None
-        assert manifest.algorithm.lora_config.r == 8
+        assert manifest.algorithm.lora_config.lora_r == 8
         assert manifest.algorithm.lora_config.lora_alpha == 16
 
-    def test_network_overrides_algorithm_pretrained_max_len_and_lora(self):
-        from peft import LoraConfig
-
+    def test_disagreeing_network_and_algorithm_model_ids_are_an_error(self):
         data = _make_manifest(
             algo={
                 "name": "DPO",
                 "batch_size": 8,
                 "pretrained_model_name_or_path": "algo-model",
                 "max_model_len": 128,
-                "lora_config": LoraConfig(
-                    r=2,
-                    lora_alpha=4,
-                    target_modules=["k_proj"],
-                    task_type="CAUSAL_LM",
-                ),
+                "lora_config": {
+                    "lora_r": 2,
+                    "lora_alpha": 4,
+                    "target_modules": ["k_proj"],
+                    "task_type": "CAUSAL_LM",
+                },
             },
             env={
                 "env_type": "dataset",
@@ -1178,12 +1207,8 @@ class TestTrainerGetValidatedManifestLLMNetwork:
                 },
             },
         )
-        manifest = TrainingManifest.get_validated(data, mode="python")
-        assert manifest.algorithm.pretrained_model_name_or_path == "network-model"
-        assert manifest.algorithm.max_model_len == 512
-        assert manifest.algorithm.lora_config.r == 32
-        tm = manifest.algorithm.lora_config.target_modules
-        assert tm == {"o_proj"} or tm == ["o_proj"]
+        with pytest.raises(ValueError, match="pretrained_model_name_or_path"):
+            TrainingManifest.get_validated(data, mode="python")
 
     def test_missing_pretrained_after_merge_raises(self):
         data = _make_manifest(
@@ -1210,16 +1235,14 @@ class TestLocalTrainerLLM:
 
     @staticmethod
     def _llm_algo_base() -> dict:
-        from peft import LoraConfig
-
         return {
             "update_epochs": 1,
-            "lora_config": LoraConfig(
-                r=16,
-                lora_alpha=16,
-                lora_dropout=0.05,
-                task_type="CAUSAL_LM",
-            ),
+            "lora_config": {
+                "lora_r": 16,
+                "lora_alpha": 16,
+                "lora_dropout": 0.05,
+                "task_type": "CAUSAL_LM",
+            },
             "max_model_len": 512,
             # Below max_model_len, so rollout prompts get a non-zero budget
             # (GRPOSpec's 1024 default would leave none at this context size).
@@ -1376,6 +1399,17 @@ class TestLocalTrainerLLM:
             else True
         )
 
+    def test_llm_rollout_buffer_does_not_init_n_step_memory(self):
+        data = self._grpo_manifest()
+        data["replay_buffer"] = {"kind": "llm"}
+        with patch(
+            "agilerl.training.trainer.build_replay_buffer_from_spec",
+            return_value=None,
+        ):
+            trainer = LocalTrainer.from_manifest(data)
+        assert trainer.n_step_memory is None
+        assert not isinstance(trainer.replay_buffer_spec, ReplayBufferSpec)
+
 
 # ============================================================================
 # TestFromConfigFiles - integration tests loading actual YAML configs
@@ -1428,6 +1462,15 @@ _OBS_SPACE_FOR_ENCODER = {
         {"vector": spaces.Box(-1.0, 1.0, shape=(4,), dtype=np.float32)}
     ),
 }
+
+
+_LLM_CONFIGS = sorted((CONFIGS_DIR / "llm_finetuning").glob("*.yaml"))
+
+
+@pytest.mark.parametrize("path", _LLM_CONFIGS, ids=lambda p: p.name)
+def test_shipped_llm_configs_satisfy_the_contract(path) -> None:
+    """Every shipped LLM config must validate against the manifest contract."""
+    TrainingManifest.model_validate(yaml.safe_load(path.read_text()))
 
 
 class TestFromConfigFiles:
@@ -1542,7 +1585,7 @@ class TestFromConfigFiles:
         trainer = LocalTrainer.from_manifest(config_path)
 
         assert isinstance(trainer.algorithm_spec, expected_algo_cls)
-        assert isinstance(trainer.env_spec, PzEnvSpec)
+        assert isinstance(trainer.env_spec, GymEnvSpec)
 
     @pytest.mark.skipif(not HAS_LLM_DEPENDENCIES, reason="LLM deps not installed")
     @pytest.mark.parametrize(
@@ -1556,8 +1599,8 @@ class TestFromConfigFiles:
     def test_llm_quant_bench_configs_validate_strictly(
         self, rel_path, expected_chunk_rows
     ):
-        """Shipped configs pass strict manifest validation, and their
-        ``chunk_rows`` setting is a real spec field that survives the round trip.
+        """Shipped configs pass strict manifest validation, and ``chunk_rows``
+        survives the round trip as a spec field.
         """
         config_path = CONFIGS_DIR / rel_path
         if not config_path.exists():
@@ -1577,8 +1620,6 @@ class TestFromConfigFiles:
         config, etc.) before they fully validate.  This test merges
         those fields in, mirroring what the benchmarking script does.
         """
-        from peft import LoraConfig
-
         config_path = CONFIGS_DIR / rel_path
         if not config_path.exists():
             pytest.skip(f"Config not found: {config_path}")
@@ -1588,12 +1629,12 @@ class TestFromConfigFiles:
 
         data["algorithm"].update(
             {
-                "lora_config": LoraConfig(
-                    r=16,
-                    lora_alpha=16,
-                    lora_dropout=0.05,
-                    task_type="CAUSAL_LM",
-                ),
+                "lora_config": {
+                    "lora_r": 16,
+                    "lora_alpha": 16,
+                    "lora_dropout": 0.05,
+                    "task_type": "CAUSAL_LM",
+                },
                 "max_model_len": 512,
                 "use_separate_reference_adapter": True,
                 "pretrained_model_name_or_path": "test-model",
@@ -1629,9 +1670,9 @@ class TestArchOptional:
             "network": {"latent_dim": 64, "encoder_config": {"hidden_size": [64]}},
         }
         manifest = TM.model_validate(raw)
-        # Deferred: net_config left as a raw dict, not a NetworkSpec.
-        assert isinstance(manifest.algorithm.net_config, dict)
-        assert "arch" not in manifest.algorithm.net_config.get("encoder_config", {})
+        # Deferred: the network section is kept, algorithm.net_config is not.
+        assert not manifest.network_arch_is_resolvable
+        assert manifest.algorithm.net_config is None
 
     def test_network_arch_is_resolvable(self):
         from agilerl.models.networks import network_arch_is_resolvable
@@ -1682,8 +1723,9 @@ class TestSimbaRecurrentConflict:
             network={"simba": True, "head_config": {"hidden_size": [64]}},
         )
         manifest = TrainingManifest.model_validate(raw)
-        assert isinstance(manifest.algorithm.net_config, dict)
-        assert manifest.algorithm.net_config.get("simba") is True
+        assert manifest.network is not None
+        assert manifest.network.simba is True
+        assert manifest.algorithm.net_config is None
 
     def test_only_recurrent_validates(self):
         raw = _make_manifest(
@@ -1728,9 +1770,8 @@ class TestFunctionPreservingManifests:
 
     @staticmethod
     def net_config(validated):
-        """Return the network configuration as a plain dictionary."""
-        net_config = validated.algorithm.net_config
-        return net_config if isinstance(net_config, dict) else net_config.model_dump()
+        """Return the network section as a plain dictionary."""
+        return validated.network.model_dump()
 
     @pytest.mark.parametrize("rel_path", _FUNC_PRESERVING_CONFIGS)
     def test_normalisation_is_switched_off(self, rel_path):
@@ -1804,3 +1845,11 @@ class TestLLMConfigFiles:
         assert isinstance(env_spec, LLMEnvSpec)
         assert str(env_spec.env_type) == expected_env_type
         assert env_spec.objective == expected_objective
+
+
+def test_network_section_is_none_for_a_paradigm_base_spec():
+    from agilerl.arena.models.algorithms import MultiAgentAlgorithmSpec
+    from agilerl.models.manifest import _network_from_algorithm
+
+    # The multi-agent base carries no net_config; only its concrete specs do.
+    assert _network_from_algorithm(MultiAgentAlgorithmSpec()) is None

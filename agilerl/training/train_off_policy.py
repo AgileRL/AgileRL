@@ -162,7 +162,7 @@ def train_off_policy(
     :param algo: RL algorithm name
     :type algo: str
     :param pop: Population of agents
-    :type pop: list[RLAlgorithm]
+    :type pop: list[SingleAgentAlgorithm]
     :param memory: Experience Replay Buffer
     :type memory: object
     :param init_hp: Dictionary containing initial hyperparameters, defaults to None
@@ -228,7 +228,7 @@ def train_off_policy(
     :type wandb_kwargs: dict, optional
 
     :return: Trained population of agents and their fitnesses
-    :rtype: tuple[list[RLAlgorithm], list[float]]
+    :rtype: tuple[list[SingleAgentAlgorithm], list[float]]
     """
     selection_strategy = resolve_selection_strategy(selection_strategy, tournament)
     assert isinstance(

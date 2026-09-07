@@ -9,6 +9,8 @@ algorithm:
     gradient_checkpointing: true
 
 environment:
+    env_type: dataset
+    objective: sft
     dataset: HumanLLMs/Human-Like-DPO-Dataset
     response_column: chosen
 

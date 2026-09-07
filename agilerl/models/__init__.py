@@ -7,36 +7,41 @@ from typing import TYPE_CHECKING
 
 import lazy_loader as lazy
 
-from agilerl import HAS_LLM_DEPENDENCIES
-from agilerl.models.algo import (  # noqa: F401
-    ALGO_REGISTRY,
+from agilerl.arena.models.algorithms import (
     AlgoSpec,
-    LLMAlgorithmSpec,
-    MultiAgentRLAlgorithmSpec,
-    RLAlgorithmSpec,
-)
-from agilerl.models.algorithms import (  # noqa: F401
+    CISPOSpec,
     CQNSpec,
     DDPGSpec,
+    DPOSpec,
     DQNSpec,
+    GRPOSpec,
+    GSPOSpec,
     IPPOSpec,
+    LLMAlgorithmSpec,
+    LLMPPOSpec,
+    LLMREINFORCESpec,
     MADDPGSpec,
     MATD3Spec,
+    MultiAgentAlgorithmSpec,
     NeuralTSSpec,
     NeuralUCBSpec,
     PPOSpec,
     RainbowDQNSpec,
+    SFTSpec,
+    SingleAgentAlgorithmSpec,
     TD3Spec,
 )
-from agilerl.models.hpo import (  # noqa: F401
+from agilerl.arena.models.registry import MANIFEST_REGISTRY
+from agilerl.models.hpo import (
     MultiFrequencySelectionSpec,
     MutationProbabilities,
     MutationSpec,
+    NetworkMutationRanges,
     SelectionStrategySpec,
     TournamentSelectionSpec,
 )
-from agilerl.models.manifest import TrainingManifest  # noqa: F401
-from agilerl.models.networks import (  # noqa: F401
+from agilerl.models.manifest import TrainingManifest
+from agilerl.models.networks import (
     CnnSpec,
     ContinuousQNetworkSpec,
     DeterministicActorSpec,
@@ -46,6 +51,7 @@ from agilerl.models.networks import (  # noqa: F401
     MultiInputSpec,
     NetworkSpec,
     QNetworkSpec,
+    RainbowQNetworkSpec,
     SimbaSpec,
     StochasticActorSpec,
     ValueNetworkSpec,
@@ -53,32 +59,80 @@ from agilerl.models.networks import (  # noqa: F401
 )
 from agilerl.models.training import ReplayBufferSpec, TrainingSpec
 
-if HAS_LLM_DEPENDENCIES:
-    from agilerl.models.algorithms import DPOSpec, GRPOSpec  # noqa: F401
-
 # NOTE: env has heavy imports (gymnasium, pandas, datasets, pettingzoo)
 # so we lazy-load it to keep imports from agilerl.models lightweight.
 __getattr__, __dir__, _ = lazy.attach(
     __name__,
     submod_attrs={
         "env": [
+            "BanditEnvSpec",
+            "EnvSpec",
             "GymEnvSpec",
             "LLMEnvSpec",
+            "LLMEnvType",
             "OfflineEnvSpec",
-            "PzEnvSpec",
         ],
     },
 )
 
 if TYPE_CHECKING:
     from agilerl.models.env import (
+        BanditEnvSpec,
         GymEnvSpec,
         LLMEnvSpec,
         OfflineEnvSpec,
-        PzEnvSpec,
     )
 
-    EnvironmentSpecType = GymEnvSpec | PzEnvSpec | LLMEnvSpec | OfflineEnvSpec
+    EnvironmentSpecType = GymEnvSpec | OfflineEnvSpec | LLMEnvSpec | BanditEnvSpec
     ReplayBufferSpecType = ReplayBufferSpec | None
     TrainingSpecType = TrainingSpec | None
     MutationSpecType = MutationSpec | None
+
+__all__ = [
+    "MANIFEST_REGISTRY",
+    "AlgoSpec",
+    "CISPOSpec",
+    "CQNSpec",
+    "CnnSpec",
+    "ContinuousQNetworkSpec",
+    "DDPGSpec",
+    "DPOSpec",
+    "DQNSpec",
+    "DeterministicActorSpec",
+    "FinetuningNetworkSpec",
+    "GRPOSpec",
+    "GSPOSpec",
+    "IPPOSpec",
+    "LLMAlgorithmSpec",
+    "LLMPPOSpec",
+    "LLMREINFORCESpec",
+    "LstmSpec",
+    "MADDPGSpec",
+    "MATD3Spec",
+    "MlpSpec",
+    "MultiAgentAlgorithmSpec",
+    "MultiFrequencySelectionSpec",
+    "MultiInputSpec",
+    "MutationProbabilities",
+    "MutationSpec",
+    "NetworkMutationRanges",
+    "NetworkSpec",
+    "NeuralTSSpec",
+    "NeuralUCBSpec",
+    "PPOSpec",
+    "QNetworkSpec",
+    "RainbowDQNSpec",
+    "RainbowQNetworkSpec",
+    "ReplayBufferSpec",
+    "SFTSpec",
+    "SelectionStrategySpec",
+    "SimbaSpec",
+    "SingleAgentAlgorithmSpec",
+    "StochasticActorSpec",
+    "TD3Spec",
+    "TournamentSelectionSpec",
+    "TrainingManifest",
+    "TrainingSpec",
+    "ValueNetworkSpec",
+    "normalize_manifest_network",
+]

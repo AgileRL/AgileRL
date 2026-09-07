@@ -37,7 +37,7 @@ from agilerl.algorithms import (
     NeuralUCB,
     RainbowDQN,
 )
-from agilerl.algorithms.core.base import EvolvableAlgorithm, MultiAgentRLAlgorithm
+from agilerl.algorithms.core.base import EvolvableAlgorithm, MultiAgentAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
 from agilerl.components.data import Transition
 from agilerl.components.replay_buffer import (
@@ -585,8 +585,8 @@ class DummyMultiAgent(DummyAgentOffPolicy):
         return {}, obs
 
 
-# Register the dummy multi-agent algorithm with the MultiAgentRLAlgorithm base class.
-MultiAgentRLAlgorithm.register(DummyMultiAgent)
+# Register the dummy multi-agent algorithm with the MultiAgentAlgorithm base class.
+MultiAgentAlgorithm.register(DummyMultiAgent)
 
 
 class DummyTournament:

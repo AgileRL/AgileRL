@@ -183,7 +183,7 @@ class TestLLMAlgorithmValidators:
         ],
     )
     def test_use_vllm_requires_config(self, spec_cls, kwargs) -> None:
-        with pytest.raises(ValueError, match="VLLM config is not set"):
+        with pytest.raises(ValueError, match="no vllm_config"):
             spec_cls(use_vllm=True, **kwargs)
 
 
@@ -191,3 +191,32 @@ class TestRainbowDQNSpec:
     def test_rejects_invalid_value_range(self) -> None:
         with pytest.raises(ValueError, match="v_min must be less than v_max"):
             RainbowDQNSpec(v_min=10.0, v_max=10.0)
+
+
+class TestEncoderArchHelpers:
+    def test_unknown_arch_raises(self) -> None:
+        from agilerl.arena.models.networks import encoder_spec_for_arch
+
+        with pytest.raises(ValueError, match="Unknown encoder arch"):
+            encoder_spec_for_arch("nope")
+
+    def test_known_arch_returns_mlp_spec(self) -> None:
+        from agilerl.arena.models.networks import MlpSpec, encoder_spec_for_arch
+
+        assert encoder_spec_for_arch("mlp") is MlpSpec
+
+    def test_non_dict_network_is_not_resolvable(self) -> None:
+        from agilerl.arena.models.networks import (
+            network_arch_is_resolvable,
+            normalize_manifest_network,
+        )
+
+        assert network_arch_is_resolvable("mlp") is False
+        assert network_arch_is_resolvable({"encoder_config": {"arch": "mlp"}}) is True
+        assert normalize_manifest_network("passthrough") == "passthrough"
+
+    def test_top_level_arch_without_encoder_config(self) -> None:
+        from agilerl.arena.models.networks import normalize_manifest_network
+
+        normalized = normalize_manifest_network({"arch": "mlp", "latent_dim": 32})
+        assert normalized["encoder_config"] == {"arch": "mlp"}

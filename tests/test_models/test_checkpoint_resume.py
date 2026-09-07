@@ -22,19 +22,26 @@ import torch
 
 from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.algorithms import DQN
-from agilerl.models.algorithms.dqn import DQNSpec
+from agilerl.arena.models.algorithms import DQNSpec
+from agilerl.builders import select_builder
 from tests.helper_functions import generate_discrete_space, generate_random_box_space
 
 if HAS_LLM_DEPENDENCIES:
     from peft import LoraConfig
 
     from agilerl.algorithms.grpo import GRPO
-    from agilerl.models.algorithms.grpo import GRPOSpec
+    from agilerl.arena.models.algorithms import GRPOSpec
     from agilerl.utils.algo_utils import CosineLRScheduleConfig
     from tests import TINY_LLM_FIXTURE_PATH
 
 
+def build_algorithm(spec, *args, **kwargs):
+    """Build via the spec's paradigm builder, as the trainer does."""
+    return select_builder(spec).build(spec, *args, **kwargs)
+
+
 def _lora_config():
+    """The peft config the algorithm constructor takes directly."""
     return LoraConfig(
         r=16,
         lora_alpha=64,
@@ -44,8 +51,23 @@ def _lora_config():
     )
 
 
+def _lora_config_dict():
+    """The manifest form of the same adapter, for the contract spec."""
+    return {
+        "lora_r": 16,
+        "lora_alpha": 64,
+        "target_modules": ["q_proj"],
+        "task_type": "CAUSAL_LM",
+        "lora_dropout": 0.05,
+    }
+
+
 def _schedule_config():
     return CosineLRScheduleConfig(num_epochs=10, warmup_proportion=0.1)
+
+
+def _schedule_config_dict():
+    return {"num_epochs": 10, "warmup_proportion": 0.1}
 
 
 def _stub_tokenizer():
@@ -139,8 +161,12 @@ class TestRLSpecResumeVsLoad:
         observation_space, action_space = spaces
 
         with pytest.warns(UserWarning, match="restored hyperparameters that differ"):
-            agent = DQNSpec(lr=7e-4).build_algorithm(
-                observation_space, action_space, index=0, resume_from_checkpoint=path
+            agent = build_algorithm(
+                DQNSpec(lr=7e-4),
+                observation_space,
+                action_space,
+                index=0,
+                resume_from_checkpoint=path,
             )
 
         assert agent.lr == 1e-3
@@ -152,8 +178,12 @@ class TestRLSpecResumeVsLoad:
 
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
-            agent = DQNSpec(lr=1e-3).build_algorithm(
-                observation_space, action_space, index=0, resume_from_checkpoint=path
+            agent = build_algorithm(
+                DQNSpec(lr=1e-3),
+                observation_space,
+                action_space,
+                index=0,
+                resume_from_checkpoint=path,
             )
 
         assert agent.lr == 1e-3
@@ -163,8 +193,12 @@ class TestRLSpecResumeVsLoad:
         source, path = dqn_checkpoint
         observation_space, action_space = spaces
 
-        agent = DQNSpec(lr=7e-4).build_algorithm(
-            observation_space, action_space, index=0, load_weights_from=path
+        agent = build_algorithm(
+            DQNSpec(lr=7e-4),
+            observation_space,
+            action_space,
+            index=0,
+            load_weights_from=path,
         )
 
         assert agent.lr == 7e-4
@@ -181,7 +215,8 @@ class TestRLSpecResumeVsLoad:
         observation_space, action_space = spaces
 
         with pytest.raises(ValueError, match="Provide exactly one of"):
-            DQNSpec(lr=7e-4).build_algorithm(
+            build_algorithm(
+                DQNSpec(lr=7e-4),
                 observation_space,
                 action_space,
                 index=0,
@@ -203,12 +238,13 @@ class TestLLMSpecResumeVsLoad:
             pretrained_model_name_or_path=TINY_LLM_FIXTURE_PATH,
             lr=lr,
             group_size=2,
-            lora_config=_lora_config(),
-            cosine_lr_schedule_config=_schedule_config(),
+            lora_config=_lora_config_dict(),
+            cosine_lr_schedule_config=_schedule_config_dict(),
         )
 
     def test_resume_restores_the_schedule_position(self, grpo_checkpoint):
-        agent = self._spec(5e-5).build_algorithm(
+        agent = build_algorithm(
+            self._spec(5e-5),
             tokenizer=self._tokenizer(),
             resume_from_checkpoint=grpo_checkpoint,
             device="cpu",
@@ -218,7 +254,8 @@ class TestLLMSpecResumeVsLoad:
 
     def test_resume_warns_when_the_spec_disagrees(self, grpo_checkpoint):
         with pytest.warns(UserWarning, match="restored hyperparameters that differ"):
-            agent = self._spec(5e-6).build_algorithm(
+            agent = build_algorithm(
+                self._spec(5e-6),
                 tokenizer=self._tokenizer(),
                 resume_from_checkpoint=grpo_checkpoint,
                 device="cpu",
@@ -227,7 +264,8 @@ class TestLLMSpecResumeVsLoad:
         assert agent.lr == 5e-5
 
     def test_load_weights_starts_a_fresh_schedule_and_optimizer(self, grpo_checkpoint):
-        agent = self._spec(5e-6).build_algorithm(
+        agent = build_algorithm(
+            self._spec(5e-6),
             tokenizer=self._tokenizer(),
             load_weights_from=grpo_checkpoint,
             device="cpu",
@@ -237,8 +275,8 @@ class TestLLMSpecResumeVsLoad:
         # as it would for an agent built without a checkpoint at all.
         assert agent.lr_scheduler.last_epoch == 0
 
-        fresh = self._spec(5e-6).build_algorithm(
-            tokenizer=self._tokenizer(), device="cpu"
+        fresh = build_algorithm(
+            self._spec(5e-6), tokenizer=self._tokenizer(), device="cpu"
         )
         assert [g["lr"] for g in agent.optimizer.optimizer.param_groups] == [
             g["lr"] for g in fresh.optimizer.optimizer.param_groups
