@@ -32,6 +32,7 @@ def _clean_cascade_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """Default to "no arena change" so the ambient CI env cannot leak in."""
     monkeypatch.delenv("ML_REBUILD_ARENA", raising=False)
     monkeypatch.delenv("ML_SEMVER_KIND", raising=False)
+    monkeypatch.delenv("ML_ARENA_SEMVER_KIND", raising=False)
 
 
 @pytest.fixture
@@ -426,7 +427,7 @@ def test_arena_rebuild_checks_bumped_version(
     _git(tmp_path, "tag", "agilerl-arena/v0.2.0")
     _bind_repo(check_extras, tmp_path, pyproject)
     monkeypatch.setenv("ML_REBUILD_ARENA", "1")
-    monkeypatch.setenv("ML_SEMVER_KIND", kind)
+    monkeypatch.setenv("ML_ARENA_SEMVER_KIND", kind)
 
     extras = check_extras._extras(pyproject)
     assert check_extras._check_arena_extra(extras, require_tags=True) == committed
@@ -445,14 +446,14 @@ def test_arena_rebuild_rejects_range_missing_the_bump(
     _git(tmp_path, "tag", "agilerl-arena/v0.2.0")
     _bind_repo(check_extras, tmp_path, pyproject)
     monkeypatch.setenv("ML_REBUILD_ARENA", "1")
-    monkeypatch.setenv("ML_SEMVER_KIND", "major")
+    monkeypatch.setenv("ML_ARENA_SEMVER_KIND", "major")
 
     extras = check_extras._extras(pyproject)
     with pytest.raises(SystemExit) as exc:
         check_extras._check_arena_extra(extras, require_tags=True)
     assert exc.value.code == 1
     err = capsys.readouterr().err
-    assert "semver:major" in err
+    assert "agilerl-arena:semver:major" in err
     assert "will be 1.0.0" in err
     assert ">=0.3.0,<0.4" in err
     assert "agilerl-arena/v0.2.0" in err
@@ -470,6 +471,25 @@ def test_arena_unchanged_ignores_the_label(
     _git(tmp_path, "tag", "agilerl-arena/v0.2.0")
     _bind_repo(check_extras, tmp_path, pyproject)
     monkeypatch.setenv("ML_REBUILD_ARENA", "0")
+    monkeypatch.setenv("ML_SEMVER_KIND", "major")
+    monkeypatch.setenv("ML_ARENA_SEMVER_KIND", "major")
+
+    extras = check_extras._extras(pyproject)
+    assert check_extras._check_arena_extra(extras, require_tags=True) == ">=0.2.0,<0.3"
+
+
+def test_arena_rebuild_ignores_generic_semver_kind(
+    check_extras: ModuleType,
+    hub_semver: None,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Generic semver:* must not move the arena extra range."""
+    pyproject = _write_pyproject(tmp_path)
+    _init_git(tmp_path)
+    _git(tmp_path, "tag", "agilerl-arena/v0.2.0")
+    _bind_repo(check_extras, tmp_path, pyproject)
+    monkeypatch.setenv("ML_REBUILD_ARENA", "1")
     monkeypatch.setenv("ML_SEMVER_KIND", "major")
 
     extras = check_extras._extras(pyproject)
@@ -491,7 +511,7 @@ def test_unresolvable_kind_keeps_last_tag_rule(
     _git(tmp_path, "tag", "agilerl-arena/v0.2.0")
     _bind_repo(check_extras, tmp_path, pyproject)
     monkeypatch.setenv("ML_REBUILD_ARENA", "1")
-    monkeypatch.setenv("ML_SEMVER_KIND", kind)
+    monkeypatch.setenv("ML_ARENA_SEMVER_KIND", kind)
 
     extras = check_extras._extras(pyproject)
     _assert_exit_err(
@@ -518,7 +538,7 @@ def test_missing_semver_helper_keeps_last_tag_rule(
         check_extras, "_hub_semver_script", lambda: tmp_path / "nope" / "semver.sh"
     )
     monkeypatch.setenv("ML_REBUILD_ARENA", "1")
-    monkeypatch.setenv("ML_SEMVER_KIND", "minor")
+    monkeypatch.setenv("ML_ARENA_SEMVER_KIND", "minor")
 
     extras = check_extras._extras(pyproject)
     _assert_exit_err(
