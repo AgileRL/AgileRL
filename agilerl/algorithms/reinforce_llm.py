@@ -4,21 +4,23 @@
 from __future__ import annotations
 
 import warnings
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import torch
-from accelerate import Accelerator
 
 from agilerl import HAS_LIGER_KERNEL, HAS_LLM_DEPENDENCIES
+from agilerl.algorithms.configs import (
+    PopulationIndex,
+    REINFORCELLMObjective,
+    REINFORCELLMSetup,
+)
 from agilerl.algorithms.core import ActionResult, LLMAlgorithm
 from agilerl.algorithms.core.advantage_granularity import (
     resolve_batch_advantage_granularity,
 )
-from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
-
-if TYPE_CHECKING:
-    from peft import LoraConfig
+from agilerl.algorithms.core.llm_init import named_llm_setup
+from agilerl.algorithms.core.registry import NetworkGroup
 
 if HAS_LIGER_KERNEL or TYPE_CHECKING:
     from agilerl.algorithms.core.llm_ops.fused_loss import (
@@ -36,13 +38,10 @@ from agilerl.protocols import (
 )
 from agilerl.typing import LLMObsType, LLMRolloutExperiences
 from agilerl.utils.algo_utils import (
-    CosineLRScheduleConfig,
-    VLLMConfig,
     get_experiences_samples,
     stack_and_pad_experiences,
 )
 from agilerl.utils.llm_utils import (
-    BitsAndBytesConfig,
     aggregate_metrics_dict,
     attention_mask_from_padded_ids,
     build_completion_mask,
@@ -51,7 +50,6 @@ from agilerl.utils.llm_utils import (
     normalize_prompt_batch,
     pool_by_turns,
     prepare_prompt_hf_generate,
-    resolve_llm_device,
     validate_importance_sampling_level,
     validate_llm_context_lengths,
 )
@@ -71,290 +69,69 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
     Optionally uses PPO-style clipped surrogate objectives for safe multi-epoch
     updates (controlled by ``clip_coef`` and ``update_epochs``).
 
-    :param pad_token_id: Pad token id.
-    :type pad_token_id: int
-    :param pad_token: Pad token string.
-    :type pad_token: str
-    :param model_name: Model name or path.
-    :type model_name: str | None
-    :param actor_network: Pre-instantiated HuggingFace model.
-    :type actor_network: PreTrainedModelProtocol | None
-    :param model_config: Model configuration dict.
-    :type model_config: dict[str, Any] | None
-    :param hp_config: RL hyperparameter mutation configuration.
-    :type hp_config: HyperparameterConfig | None
-    :param index: Instance index for tournament selection.
-    :type index: int
-    :param batch_size: Mini-batch size for learning.
-    :type batch_size: int
-    :param beta: KL penalty coefficient against the reference policy.
-    :type beta: float
-    :param clip_coef: PPO-style surrogate clipping coefficient.
-    :type clip_coef: float
-    :param gamma: Discount factor for multi-turn returns.
-    :type gamma: float
-    :param lr: Learning rate for the actor optimizer.
-    :type lr: float
-    :param max_grad_norm: Maximum gradient norm for clipping.
-    :type max_grad_norm: float
-    :param update_epochs: Number of policy update epochs per batch.
-    :type update_epochs: int
-    :param temperature: Sampling temperature for generation.
-    :type temperature: float
-    :param repetition_penalty: Repetition penalty for generation.
-    :type repetition_penalty: float
-    :param top_p: Top-p (nucleus) sampling parameter.
-    :type top_p: float
-    :param top_k: Top-k sampling parameter.
-    :type top_k: int
-    :param min_p: Min-p sampling parameter.
-    :type min_p: float
-    :param use_separate_reference_adapter: Use a dedicated LoRA adapter for
-        the frozen reference policy.
-    :type use_separate_reference_adapter: bool
-    :param calc_position_embeddings: Calculate position embeddings explicitly.
-    :type calc_position_embeddings: bool
-    :param micro_batch_size_per_gpu: Micro-batch size for gradient accumulation.
-    :type micro_batch_size_per_gpu: int | None
-    :param mini_batch_size: Per-rank trajectories covered by one optimizer
-        step; DeepSpeed's gradient_accumulation_steps is set to
-        ``mini_batch_size / micro_batch_size_per_gpu``. Defaults to None,
-        which resolves to ``micro_batch_size_per_gpu`` (one optimizer step
-        per micro-batch).
-    :type mini_batch_size: int | None, optional
-    :param max_output_tokens: Maximum new tokens per generation.
-    :type max_output_tokens: int | None
-    :param min_output_tokens: Minimum new tokens per generation.
-    :type min_output_tokens: int | None
-    :param max_model_len: Maximum context window length.
-    :type max_model_len: int
-    :param hf_generate_chunk_size: Number of prompts per HuggingFace generation
-        chunk. Ignored when ``use_vllm=True``.
-    :type hf_generate_chunk_size: int | None, optional
-    :param use_memory_efficient_params: For colocated vLLM, offload the trainer's
-        own base to CPU during rollout (and bring it back for the training step)
-        so the rollout engine and the trainer never both hold a base on the GPU.
-        Defaults to True; inert without colocated vLLM, and disabled under
-        DeepSpeed ZeRO-3.
-    :type use_memory_efficient_params: bool
-    :param lora_config: LoRA adapter configuration.
-    :type lora_config: LoraConfig | None
-    :param cosine_lr_schedule_config: Cosine LR schedule configuration.
-    :type cosine_lr_schedule_config: CosineLRScheduleConfig | None
-    :param accelerator: HuggingFace Accelerator for distributed training.
-    :type accelerator: Accelerator | None
-    :param device: Device to train on. Ignored when an accelerator is given (each rank
-        owns its own GPU); ``None`` auto-detects CUDA/MPS/CPU.
-    :type device: str
-    :param wrap: Wrap models for distributed training upon creation.
-    :type wrap: bool
-    :param clone: Whether this is a clone instantiation.
-    :type clone: bool
-    :param use_vllm: Use vLLM for generation.
-    :type use_vllm: bool
-    :param vllm_config: vLLM configuration.
-    :type vllm_config: VLLMConfig | None
-    :param seed: Random seed.
-    :type seed: int
-    :param advantage_granularity: Policy-action granularity (ReBN advantage axis).
-        ``"turn"`` enforces turn-level advantages, ``"token"`` enforces
-        token-level advantages, and ``"auto"`` uses token-level only when all
-        samples are single-turn.
-    :type advantage_granularity: Literal["turn", "token", "auto"]
-    :param action_granularity: Deprecated alias for ``advantage_granularity``;
-        when set it overrides ``advantage_granularity`` and emits a
-        ``DeprecationWarning``.
-    :type action_granularity: str | None, optional
-    :param importance_sampling_level: IS / ratio-pooling level for the clipped
-        surrogate, orthogonal to ``advantage_granularity``. ``"token"`` (default)
-        clips per token; ``"turn"`` pools the ratio per turn (requires
-        ``turn_ids`` in :meth:`learn`); ``"trajectory"`` pools over
-        the whole completion; the advantage is pooled to the same bucket.
-        Turn/trajectory pooling cannot be token-chunked in the fused kernel, so
-        set ``use_liger_loss=False`` there (the standard path is always
-        memory-bounded).
-    :type importance_sampling_level: Literal["token", "turn", "trajectory"], optional
-    :param turn_ratio_pooling: Reduction used to pool per-token log-ratios into a
-        per-turn ratio when ``importance_sampling_level="turn"``; ignored at
-        token/trajectory level. ``"sum"`` (default) yields the product ratio per
-        turn - the standard, paper-aligned per-turn importance weight. ``"mean"``
-        yields a length-normalized geometric-mean ratio (GSPO-style); reach for it
-        on long or highly variable-length turns, where the product ratio is far
-        outside the clip band on every turn and saturates the clipped surrogate -
-        length-normalizing keeps the per-turn ratio in range so the surrogate stays
-        informative.
-    :type turn_ratio_pooling: Literal["sum", "mean"], optional
-    :param gradient_checkpointing: Enable gradient checkpointing.
-    :type gradient_checkpointing: bool
-    :param torch_compiler: Torch compiler mode.
-    :type torch_compiler: str | None
-    :param cast_logprobs_to_fp32: When ``True`` (default), run the per-token
-        log-prob reduction (``gather`` / ``logsumexp``) in fp32 before casting
-        back to the input dtype, for numerically stable log-probs. ``False`` runs
-        it in the input dtype, saving a little memory at the cost of a per-token
-        bf16 quantisation error that can bias importance-sampling ratios.
-    :type cast_logprobs_to_fp32: bool, optional
-    :param chunk_rows: Primary chunk-size setting for fused logit tiles. Applies to
-        both standard and Liger paths.
-    :type chunk_rows: int | None, optional
-    :param use_liger_loss: Use the Liger fused policy loss, defaults to ``False``
-        (requires ``liger-kernel``). **Recommended for REINFORCE**: via AgileRL's
-        ``LigerFusedLinearPolicyLossFunction`` (the same liger-based path as PPO,
-        not the upstream Liger GRPO kernel), it is roughly memory-neutral with a
-        mild speedup that grows with sequence length at token-level IS. Separate
-        from the Liger *model* patches (fused RMSNorm/RoPE/SwiGLU), which apply
-        whenever ``liger-kernel`` is installed.
-    :type use_liger_loss: bool, optional
-    :param quantization_config: Optional ``transformers.BitsAndBytesConfig`` for
-        loading the base model in 4-/8-bit (QLoRA). ``lm_head`` is kept
-        unquantized so the fused-linear-logprob path stays numerically exact.
-    :type quantization_config: BitsAndBytesConfig | None, optional
-    :param activation_offload: When ``True``, run the training forward inside
-        ``torch.autograd.graph.save_on_cpu`` so tensors saved for backward live
-        in pinned host RAM instead of GPU memory. Trades PCIe bandwidth for GPU
-        memory (the win grows with sequence length); a no-op during rollout /
-        reference forwards.
-    :type activation_offload: bool, optional
-    :param vllm_importance_sampling_correction: When ``True`` (default) and
-        ``use_vllm=True``, correct the rollout/trainer log-prob mismatch by
-        weighting each training token by ``clamp(exp(trainer - sampling),
-        max=vllm_importance_sampling_cap)``. Active only for training rollouts;
-        inert on the HuggingFace path and at eval.
-    :type vllm_importance_sampling_correction: bool, optional
-    :param vllm_importance_sampling_cap: Upper clamp on the vLLM
-        importance-sampling ratio (default ``2.0``), bounding the correction
-        weight to limit variance from outlier tokens. Must be > 0.
-    :type vllm_importance_sampling_cap: float, optional
-    :param use_sequence_packing: Opt in to padding-free sequence packing for the
-        gradient forward pass. Only honoured under a FlashAttention-2 backend;
-        otherwise inert.
-    :type use_sequence_packing: bool, optional
-    :param lora_target_scope: Optional PEFT LoRA path scope for multimodal models
-        (e.g. ``"language_model"``). Passed to
-        :func:`adapt_lora_config_for_model`.
-    :type lora_target_scope: str | None, optional
+    :param llm: Base model, tokenizer, LoRA, and training setup
+    :type llm: REINFORCELLMSetup
+    :param objective: Algorithm-specific objective hyperparameters
+    :type objective: REINFORCELLMObjective | None
+    :param member: Population index, mutation config, and last mutation
+    :type member: PopulationIndex | None
+
     """
 
     _mini_batch_size_default = "micro_batch"
 
     def __init__(
         self,
-        pad_token_id: int,
-        pad_token: str,
-        model_name: str | None = None,
-        actor_network: PreTrainedModelProtocol | None = None,
-        model_config: dict[str, Any] | None = None,
-        hp_config: HyperparameterConfig | None = None,
-        index: int = 0,
-        batch_size: int = 16,
-        beta: float = 0.01,
-        clip_coef: float = 0.2,
-        gamma: float = 1.0,
-        lr: float = 5e-7,
-        max_grad_norm: float = 1.0,
-        update_epochs: int = 1,
-        temperature: float = 1.0,
-        repetition_penalty: float = 1.0,
-        top_p: float = 1.0,
-        top_k: int = 50,
-        min_p: float = 0.0,
-        use_memory_efficient_params: bool = True,
-        use_separate_reference_adapter: bool = True,
-        calc_position_embeddings: bool = True,
-        micro_batch_size_per_gpu: int | None = None,
-        mini_batch_size: int | None = None,
-        max_output_tokens: int | None = None,
-        min_output_tokens: int | None = None,
-        max_model_len: int = 1024,
-        hf_generate_chunk_size: int | None = None,
-        lora_config: LoraConfig | None = None,
-        cosine_lr_schedule_config: CosineLRScheduleConfig | None = None,
-        accelerator: Accelerator | None = None,
-        device: str | torch.device | None = None,
-        wrap: bool = True,
-        clone: bool = False,
-        use_vllm: bool = False,
-        vllm_config: VLLMConfig | None = None,
-        seed: int = 42,
-        advantage_granularity: Literal["turn", "token", "auto"] = "auto",
-        action_granularity: Literal["turn", "token", "auto"] | None = None,
-        importance_sampling_level: Literal["token", "turn", "trajectory"] = "token",
-        turn_ratio_pooling: Literal["sum", "mean"] = "sum",
-        gradient_checkpointing: bool = True,
-        torch_compiler: str | None = None,
-        cast_logprobs_to_fp32: bool = True,
-        chunk_rows: int | None = None,
-        use_liger_loss: bool = False,
-        quantization_config: BitsAndBytesConfig | None = None,
-        activation_offload: bool = False,
-        use_sequence_packing: bool = False,
-        lora_target_scope: str | None = None,
-        vllm_importance_sampling_correction: bool = True,
-        vllm_importance_sampling_cap: float = 2.0,
+        llm: REINFORCELLMSetup,
+        objective: REINFORCELLMObjective | None = None,
+        member: PopulationIndex | None = None,
     ) -> None:
+        objective = objective or REINFORCELLMObjective()
+        member = member or PopulationIndex()
+        super().__init__(named_llm_setup(llm, "LLMREINFORCE"), member)
+        self._bind_reinforce_llm(llm, objective)
 
-        resolved_device = resolve_llm_device(accelerator, device)
-        super().__init__(
-            index=index,
-            batch_size=batch_size,
-            lr=lr,
-            max_grad_norm=max_grad_norm,
-            clone=clone,
-            calc_position_embeddings=calc_position_embeddings,
-            seed=seed,
-            pad_token_id=pad_token_id,
-            pad_token=pad_token,
-            use_value_head=False,
-            use_liger_loss=use_liger_loss,
-            use_memory_efficient_params=use_memory_efficient_params,
-            lora_config=lora_config,
-            use_separate_reference_adapter=use_separate_reference_adapter,
-            use_vllm=use_vllm,
-            vllm_config=vllm_config,
-            model_name=model_name,
-            actor_network=actor_network,
-            model_config=model_config,
-            micro_batch_size_per_gpu=micro_batch_size_per_gpu,
-            mini_batch_size=mini_batch_size,
-            cosine_lr_schedule_config=cosine_lr_schedule_config,
-            hp_config=hp_config,
-            wrap=wrap,
-            device=resolved_device,
-            accelerator=accelerator,
-            name="LLMREINFORCE",
-            gradient_checkpointing=gradient_checkpointing,
-            torch_compiler=torch_compiler,
-            cast_logprobs_to_fp32=cast_logprobs_to_fp32,
-            chunk_rows=chunk_rows,
-            quantization_config=quantization_config,
-            activation_offload=activation_offload,
-            use_sequence_packing=use_sequence_packing,
-            lora_target_scope=lora_target_scope,
-            vllm_importance_sampling_correction=vllm_importance_sampling_correction,
-            vllm_importance_sampling_cap=vllm_importance_sampling_cap,
-        )
+    def _bind_reinforce_llm(
+        self, llm: REINFORCELLMSetup, objective: REINFORCELLMObjective
+    ) -> None:
+        """Bind REINFORCE_LLM objective, generation, and actor networks."""
+        train = llm.train
+        gen = llm.generation
+        model = llm.model
         self._validate_core_args(
-            batch_size, lr, clip_coef, update_epochs, actor_network, clone
+            train.batch_size,
+            train.lr,
+            objective.clip_coef,
+            objective.update_epochs,
+            model.actor_network,
+            train.clone,
         )
-        self.beta = beta
-        self.clip_coef = clip_coef
-        self.update_epochs = update_epochs
-        self.temperature = temperature
-        self.repetition_penalty = repetition_penalty
-        self.top_p = top_p
-        self.top_k = top_k
-        self.min_p = min_p
-        self._setup_advantage_options(advantage_granularity, action_granularity, gamma)
-        self._setup_objective(importance_sampling_level, turn_ratio_pooling)
+        self.beta = objective.beta
+        self.clip_coef = objective.clip_coef
+        self.update_epochs = objective.update_epochs
+        self.temperature = gen.temperature
+        self.repetition_penalty = gen.repetition_penalty
+        self.top_p = gen.top_p
+        self.top_k = gen.top_k
+        self.min_p = gen.min_p
+        self._setup_advantage_options(
+            objective.advantage_granularity,
+            objective.action_granularity,
+            objective.gamma,
+        )
+        self._setup_objective(
+            objective.importance_sampling_level, objective.turn_ratio_pooling
+        )
         self._setup_generation(
-            max_output_tokens, min_output_tokens, max_model_len, hf_generate_chunk_size
+            gen.max_output_tokens,
+            gen.min_output_tokens,
+            gen.max_model_len,
+            gen.hf_generate_chunk_size,
         )
-        self._setup_actors(actor_network, clone=clone)
-
+        self._setup_actors(model.actor_network, clone=train.clone)
         self.register_network_group(NetworkGroup(eval_network=self.actor, policy=True))
         if self.wrap:
             self.wrap_models()
-
         for m in ("loss", "kl", "entropy", "completion_length"):
             self.metrics.register(m)
 

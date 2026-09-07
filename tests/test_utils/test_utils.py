@@ -4,7 +4,8 @@
 import copy
 import os
 from typing import TYPE_CHECKING
-from unittest.mock import MagicMock, Mock, call, patch
+from unittest.mock import MagicMock, Mock, call
+from unittest.mock import patch as unittest_patch
 
 import gymnasium as gym
 import numpy as np
@@ -65,10 +66,13 @@ from tests.helper_functions import (
     make_multi_frequency_selection,
     new_agents,
 )
+from tests.helpers.patch_split import UTILS_MODULES, UTILS_PREFIX, make_split_patch
 
 create_module = None
 if HAS_DEEPSPEED and HAS_VLLM:
     from tests.test_algorithms.test_llms.test_grpo import create_module
+
+patch = make_split_patch(UTILS_PREFIX, UTILS_MODULES, unittest_patch)
 
 # Shared HP dict that can be used by any algorithm
 SHARED_INIT_HP = {
@@ -317,6 +321,32 @@ class TestCreatePopulation:
                 assert agent.action_space == action_space
                 assert agent.device == "cpu"
                 assert agent.accelerator is None
+
+    def test_grouped_dataclasses_build_the_same_population(self):
+        from agilerl.utils.population import PopulationRuntime, PopulationSpaces
+
+        observation_space = spaces.Box(0, 1, shape=(4,))
+        action_space = spaces.Discrete(2)
+        net_config = {"encoder_config": {"hidden_size": [8, 8]}}
+        population = create_population(
+            "DQN",
+            net_config,
+            SHARED_INIT_HP,
+            spaces=PopulationSpaces(
+                observation_space=observation_space,
+                action_space=action_space,
+            ),
+            runtime=PopulationRuntime(population_size=2, device="cpu"),
+        )
+
+        assert len(population) == 2
+        for agent in population:
+            assert isinstance(agent, DQN)
+            assert agent.observation_space == observation_space
+            assert agent.device == "cpu"
+
+    def test_unknown_algorithm_returns_empty_population(self):
+        assert create_population("not-an-algo", None, {}) == []
 
     # Can create a population of agent for bandit algorithms
     def test_initial_population_bandits(self):
@@ -1886,7 +1916,7 @@ class TestLoraConfigFromInitHp:
     def test_returns_none_when_llm_deps_missing(self):
         from agilerl.utils import utils as utils_mod
 
-        with patch.object(utils_mod, "HAS_LLM_DEPENDENCIES", False):
+        with patch("agilerl.utils.utils.HAS_LLM_DEPENDENCIES", False):
             assert (
                 utils_mod._lora_config_from_init_hp({"LORA_TARGET_MODULES": "linear_1"})
                 is None
@@ -2085,7 +2115,7 @@ class TestCreatePopulationLlmDepGuard:
     ):
         from agilerl.utils import utils as utils_mod
 
-        with patch.object(utils_mod, "HAS_LLM_DEPENDENCIES", False):
+        with patch("agilerl.utils.utils.HAS_LLM_DEPENDENCIES", False):
             with pytest.raises(ImportError, match=match):
                 utils_mod.create_population(
                     algo=algo,

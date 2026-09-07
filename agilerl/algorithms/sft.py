@@ -11,9 +11,10 @@ import numpy.typing as npt
 import torch
 
 from agilerl import HAS_LIGER_KERNEL
+from agilerl.algorithms.configs import PopulationIndex, SFTObjective, SFTSetup
 from agilerl.algorithms.core.base import LLMAlgorithm
-from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
-from agilerl.protocols import PreTrainedModelProtocol
+from agilerl.algorithms.core.llm_init import named_llm_setup
+from agilerl.algorithms.core.registry import NetworkGroup
 from agilerl.typing import (
     MultiAgentObservationType,
     ObservationType,
@@ -22,14 +23,9 @@ from agilerl.typing import (
 from agilerl.utils.llm_utils import (
     aggregate_metrics_dict,
     is_sft_prompts,
-    resolve_llm_device,
 )
 
 if TYPE_CHECKING:
-    from accelerate import Accelerator
-    from peft import LoraConfig
-    from transformers import BitsAndBytesConfig
-
     from agilerl.llm_envs import DatasetEnv
 
 if HAS_LIGER_KERNEL or TYPE_CHECKING:
@@ -53,163 +49,35 @@ class SFT(LLMAlgorithm[SFTPrompts]):
     2. **DPO** — further align the SFT-initialised model using
        ``(prompt, chosen_response, rejected_response)`` triples.
 
-    :param pad_token_id: Pad token id
-    :type pad_token_id: int
-    :param pad_token: Pad token string
-    :type pad_token: str
-    :param model_name: HuggingFace model name or path, used when no
-        ``actor_network`` is supplied
-    :type model_name: str, optional
-    :param actor_network: Pre-built HuggingFace causal LM
-    :type actor_network: PreTrainedModelProtocol, optional
-    :param model_config: Extra kwargs forwarded to the model constructor
-    :type model_config: dict, optional
-    :param hp_config: Hyperparameter mutation config for AgileRL HPO, defaults
-        to None (mutations disabled)
-    :type hp_config: HyperparameterConfig, optional
-    :param index: Population index, defaults to 0
-    :type index: int, optional
-    :param batch_size: Total training batch size (across all GPUs), defaults to 16
-    :type batch_size: int, optional
-    :param lr: Learning rate, defaults to 5e-5
-    :type lr: float, optional
-    :param max_grad_norm: Gradient clipping norm, defaults to 0.1
-    :type max_grad_norm: float, optional
-    :param update_epochs: Number of passes over each data batch, defaults to 1
-    :type update_epochs: int, optional
-    :param calc_position_embeddings: Whether to recompute position ids from the
-        attention mask (recommended for packed/padded inputs), defaults to True
-    :type calc_position_embeddings: bool, optional
-    :param micro_batch_size_per_gpu: Micro-batch size for gradient accumulation.
-        When None the full batch is used in a single forward pass.
-    :type micro_batch_size_per_gpu: int, optional
-    :param mini_batch_size: Per-rank rows covered by one optimizer step;
-        DeepSpeed's gradient_accumulation_steps is set to
-        ``mini_batch_size / micro_batch_size_per_gpu``. Defaults to None,
-        which resolves to the per-rank batch (one optimizer step per
-        batch).
-    :type mini_batch_size: int | None, optional
-    :param device: Device to train on. Ignored when an accelerator is given (each rank
-        owns its own GPU); ``None`` auto-detects CUDA/MPS/CPU.
-    :type device: str, optional
-    :param lora_config: LoRA config; when supplied the base model is wrapped with
-        PEFT adapters, defaults to None
-    :type lora_config: LoraConfig, optional
-    :param accelerator: Accelerate distributed-training handle, defaults to None
-    :type accelerator: accelerate.Accelerator, optional
-    :param wrap: Wrap models for distributed training on construction, defaults to
-        True
-    :type wrap: bool, optional
-    :param clone: Flag that suppresses adapter initialisation when cloning an
-        existing agent, defaults to False
-    :type clone: bool, optional
-    :param seed: Random seed, defaults to 42
-    :type seed: int, optional
-    :param gradient_checkpointing: Use gradient checkpointing to trade compute for
-        memory, defaults to True
-    :type gradient_checkpointing: bool, optional
-    :param use_liger_loss: Use the Liger fused-linear cross-entropy kernel,
-        defaults to ``False`` (requires ``liger-kernel``; warns and falls back
-        otherwise). Both this and the standard path are memory-bounded — the
-        full ``(B, L, V)`` logits are never materialized — so this is mainly a
-        speed/kernel choice. The Liger kernel auto-sizes its own chunk; the
-        standard path's chunk is set by ``chunk_rows``.
-    :type use_liger_loss: bool, optional
-    :param chunk_rows: Primary chunk-size setting for fused logit tiles. On SFT's
-        standard path this controls the fused-logprob chunk rows directly.
-    :type chunk_rows: int | None, optional
-    :param use_separate_reference_adapter: Also create a ``reference`` LoRA adapter
-        alongside ``actor``. SFT does not itself use a reference policy, so this
-        defaults to ``False``; enable it when you plan to save an SFT checkpoint
-        that will be consumed by a downstream algorithm (e.g. DPO/GRPO) which
-        expects a reference adapter. Defaults to False.
-    :type use_separate_reference_adapter: bool, optional
-    :param quantization_config: Optional ``transformers.BitsAndBytesConfig`` for
-        loading the base model in 4-/8-bit (QLoRA). ``lm_head`` is kept
-        unquantized so the fused-linear-logprob path stays numerically exact.
-    :type quantization_config: BitsAndBytesConfig | None, optional
-    :param activation_offload: When ``True``, run the training forward inside
-        ``torch.autograd.graph.save_on_cpu`` so tensors saved for backward live
-        in pinned host RAM instead of GPU memory. Trades PCIe bandwidth for GPU
-        memory (the win grows with sequence length); a no-op during rollout /
-        reference forwards.
-    :type activation_offload: bool, optional
-    :param lora_target_scope: Optional PEFT LoRA path scope for multimodal models
-        (e.g. ``"language_model"``). Passed to
-        :func:`adapt_lora_config_for_model`.
-    :type lora_target_scope: str | None, optional
+    :param llm: Base model, tokenizer, LoRA, and training setup
+    :type llm: SFTSetup
+    :param objective: Algorithm-specific objective hyperparameters
+    :type objective: SFTObjective | None
+    :param member: Population index, mutation config, and last mutation
+    :type member: PopulationIndex | None
+
     """
 
     def __init__(
         self,
-        pad_token_id: int,
-        pad_token: str,
-        model_name: str | None = None,
-        actor_network: PreTrainedModelProtocol | None = None,
-        model_config: dict[str, Any] | None = None,
-        hp_config: HyperparameterConfig | None = None,
-        index: int = 0,
-        batch_size: int = 16,
-        lr: float = 5e-5,
-        max_grad_norm: float = 0.1,
-        update_epochs: int = 1,
-        calc_position_embeddings: bool = True,
-        micro_batch_size_per_gpu: int | None = None,
-        mini_batch_size: int | None = None,
-        device: str | torch.device | None = None,
-        lora_config: LoraConfig | None = None,
-        accelerator: Accelerator | None = None,
-        wrap: bool = True,
-        clone: bool = False,
-        seed: int = 42,
-        gradient_checkpointing: bool = True,
-        use_liger_loss: bool = False,
-        chunk_rows: int | None = None,
-        use_separate_reference_adapter: bool = False,
-        quantization_config: BitsAndBytesConfig | None = None,
-        activation_offload: bool = False,
-        lora_target_scope: str | None = None,
+        llm: SFTSetup,
+        objective: SFTObjective | None = None,
+        member: PopulationIndex | None = None,
     ) -> None:
-        resolved_device = resolve_llm_device(accelerator, device)
-        super().__init__(
-            index=index,
-            batch_size=batch_size,
-            lr=lr,
-            max_grad_norm=max_grad_norm,
-            clone=clone,
-            calc_position_embeddings=calc_position_embeddings,
-            seed=seed,
-            pad_token_id=pad_token_id,
-            pad_token=pad_token,
-            use_liger_loss=use_liger_loss,
-            chunk_rows=chunk_rows,
-            lora_config=lora_config,
-            use_separate_reference_adapter=use_separate_reference_adapter,
-            model_name=model_name,
-            actor_network=actor_network,
-            model_config=model_config,
-            micro_batch_size_per_gpu=micro_batch_size_per_gpu,
-            mini_batch_size=mini_batch_size,
-            cosine_lr_schedule_config=None,
-            hp_config=hp_config,
-            wrap=wrap,
-            device=resolved_device,
-            accelerator=accelerator,
-            name="SFT",
-            gradient_checkpointing=gradient_checkpointing,
-            quantization_config=quantization_config,
-            activation_offload=activation_offload,
-            lora_target_scope=lora_target_scope,
-        )
+        objective = objective or SFTObjective()
+        member = member or PopulationIndex()
+        super().__init__(named_llm_setup(llm, "SFT"), member)
+        self._bind_sft(llm, objective)
+
+    def _bind_sft(self, llm: SFTSetup, objective: SFTObjective) -> None:
+        """Bind SFT epoch count and actor networks."""
         self.temperature = 0
         self.use_vllm = False
-        self.update_epochs = update_epochs
-
-        self._initialize_actors(actor_network, not clone)
+        self.update_epochs = objective.update_epochs
+        self._initialize_actors(llm.model.actor_network, not llm.train.clone)
         self.register_network_group(NetworkGroup(eval_network=self.actor, policy=True))
         if self.wrap:
             self.wrap_models()
-
         self.metrics.register("loss")
         self.metrics.register("perplexity")
 

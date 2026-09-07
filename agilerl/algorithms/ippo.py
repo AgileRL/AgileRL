@@ -5,21 +5,27 @@ import copy
 import warnings
 from collections import defaultdict
 from collections.abc import Mapping
+from dataclasses import replace
 from typing import Any
 
 import numpy as np
 import numpy.typing as npt
 import torch
-from accelerate import Accelerator
 from gymnasium import spaces
 from pettingzoo import ParallelEnv
 from torch import nn, optim
 from torch.nn.utils import clip_grad_norm_
 from torch.optim import Optimizer
 
+from agilerl.algorithms.configs import (
+    AlgorithmRuntime,
+    IPPOAgentSetup,
+    IPPONetworkSetup,
+    PopulationIndex,
+    PPOLearnConfig,
+)
 from agilerl.algorithms.core import MultiAgentRLAlgorithm, OptimizerWrapper
 from agilerl.algorithms.core.registry import (
-    HyperparameterConfig,
     NetworkGroup,
     make_default_hp_config,
 )
@@ -65,57 +71,17 @@ class IPPO(MultiAgentRLAlgorithm[tuple[Mapping[str, Any], ...]]):
     :type observation_spaces: list[SupportedObservationSpace] | spaces.Dict
     :param action_spaces: Action space for each agent
     :type action_spaces: list[spaces.Space] | spaces.Dict
-    :param agent_ids: Agent ID for each agent
-    :type agent_ids: list[str] | None, optional
-    :param index: Index to keep track of object instance during tournament selection and mutation, defaults to 0
-    :type index: int, optional
-    :param hp_config: RL hyperparameter mutation configuration, defaults to None, whereby algorithm mutations are disabled.
-    :type hp_config: HyperparameterConfig, optional
-    :param net_config: Network configuration, defaults to None
-    :type net_config: dict, optional
-    :param batch_size: Size of batched sample from replay buffer for learning, defaults to 64
-    :type batch_size: int, optional
-    :param lr: Learning rate for optimizer, defaults to 1e-4
-    :type lr: float, optional
-    :param learn_step: Learning frequency, defaults to 2048
-    :type learn_step: int, optional
-    :param gamma: Discount factor, defaults to 0.99
-    :type gamma: float, optional
-    :param gae_lambda: Lambda for general advantage estimation, defaults to 0.95
-    :type gae_lambda: float, optional
-    :param mut: Most recent mutation to agent, defaults to None
-    :type mut: str, optional
-    :param action_std_init: Initial action standard deviation, defaults to 0.0
-    :type action_std_init: float, optional
-    :param clip_coef: Surrogate clipping coefficient, defaults to 0.2
-    :type clip_coef: float, optional
-    :param ent_coef: Entropy coefficient, defaults to 0.01
-    :type ent_coef: float, optional
-    :param vf_coef: Value function coefficient, defaults to 0.5
-    :type vf_coef: float, optional
-    :param max_grad_norm: Maximum norm for gradient clipping, defaults to 0.5
-    :type max_grad_norm: float, optional
-    :param target_kl: Target KL divergence threshold, defaults to None
-    :type target_kl: float, optional
-    :param normalize_images: Flag to normalize images, defaults to True
-    :type normalize_images: bool, optional
-    :param update_epochs: Number of policy update epochs, defaults to 4
-    :type update_epochs: int, optional
-    :param actor_networks: List of custom actor networks, defaults to None
-    :type actor_networks: list[EvolvableModule] | ModuleDict | None, optional
-    :param critic_networks: List of custom critic networks, defaults to None
-    :type critic_networks: list[EvolvableModule] | ModuleDict | None, optional
-    :param action_batch_size: Size of batches to use when getting an action for stepping in the environment.
-        Defaults to None, whereby the entire observation is used at once.
-    :type action_batch_size: int, optional
-    :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
-    :type device: str, optional
-    :param accelerator: Accelerator for distributed computing, defaults to None
-    :type accelerator: accelerate.Accelerator(), optional
-    :param torch_compiler: The torch compile mode 'default', 'reduce-overhead' or 'max-autotune', defaults to None
-    :type torch_compiler: str, optional
-    :param wrap: Wrap models for distributed training upon creation, defaults to True
-    :type wrap: bool, optional
+    :param member: Population index, mutation config, and last mutation
+    :type member: PopulationIndex | None
+    :param learn: Learning-rate, batch, and update hyperparameters
+    :type learn: PPOLearnConfig | None
+    :param network: Network construction and encoder config
+    :type network: IPPONetworkSetup | None
+    :param agents: Per-agent IDs and missing-observation placeholder
+    :type agents: IPPOAgentSetup | None
+    :param runtime: Device, accelerator, wrap, and compiler settings
+    :type runtime: AlgorithmRuntime | None
+
     """
 
     # Values are StochasticActor/ValueNetwork instances; torch.compile and
@@ -127,44 +93,42 @@ class IPPO(MultiAgentRLAlgorithm[tuple[Mapping[str, Any], ...]]):
         self,
         observation_spaces: list[SupportedObservationSpace] | spaces.Dict,
         action_spaces: list[spaces.Space] | spaces.Dict,
-        agent_ids: list[str] | None = None,
-        index: int = 0,
-        hp_config: HyperparameterConfig | None = None,
-        net_config: dict[str, Any] | None = None,
-        batch_size: int = 64,
-        lr: float = 1e-4,
-        learn_step: int = 2048,
-        gamma: float = 0.99,
-        gae_lambda: float = 0.95,
-        mut: str | None = None,
-        action_std_init: float = 0.0,
-        clip_coef: float = 0.2,
-        ent_coef: float = 0.01,
-        vf_coef: float = 0.5,
-        max_grad_norm: float = 0.5,
-        target_kl: float | None = None,
-        normalize_images: bool = True,
-        update_epochs: int = 4,
-        actor_networks: list[EvolvableModule] | ModuleDict | None = None,
-        critic_networks: list[EvolvableModule] | ModuleDict | None = None,
-        action_batch_size: int | None = None,
-        device: str = "cpu",
-        accelerator: Accelerator | None = None,
-        torch_compiler: str | None = None,
-        wrap: bool = True,
+        member: PopulationIndex | None = None,
+        learn: PPOLearnConfig | None = None,
+        network: IPPONetworkSetup | None = None,
+        agents: IPPOAgentSetup | None = None,
+        runtime: AlgorithmRuntime | None = None,
     ) -> None:
+        member = member or PopulationIndex()
+        learn = learn or PPOLearnConfig()
+        network = network or IPPONetworkSetup()
+        agents = agents or IPPOAgentSetup()
+        runtime = runtime or AlgorithmRuntime()
+        mut = member.mut
+        batch_size = learn.batch_size
+        lr = learn.lr
+        learn_step = learn.learn_step
+        gamma = learn.gamma
+        gae_lambda = learn.gae_lambda
+        clip_coef = learn.clip_coef
+        ent_coef = learn.ent_coef
+        vf_coef = learn.vf_coef
+        max_grad_norm = learn.max_grad_norm
+        target_kl = learn.target_kl
+        update_epochs = learn.update_epochs
+        net_config = network.net_config
+        actor_networks = network.actor_networks
+        critic_networks = network.critic_networks
+        action_std_init = network.action_std_init
+        action_batch_size = network.action_batch_size
+        wrap = runtime.wrap
+
         super().__init__(
             observation_spaces,
             action_spaces,
-            index=index,
-            agent_ids=agent_ids,
-            hp_config=hp_config,
-            device=device,
-            accelerator=accelerator,
-            torch_compiler=torch_compiler,
-            normalize_images=normalize_images,
-            placeholder_value=None,
-            name="IPPO",
+            member=member,
+            agents=agents,
+            runtime=replace(runtime, name=runtime.name or "IPPO"),
         )
 
         assert learn_step >= 1, "Learn step must be greater than or equal to one."

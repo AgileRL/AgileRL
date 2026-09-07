@@ -16,7 +16,14 @@ import httpx
 import pytest
 
 from agilerl.arena.auth import ArenaOAuth2
-from agilerl.arena.client import EXTERNAL_USER_ID_HEADER, ArenaClient, _TokenStore
+from agilerl.arena.client import (
+    EXTERNAL_USER_ID_HEADER,
+    ArenaClient,
+    EnvironmentIdentity,
+    EnvironmentKind,
+    EnvironmentSource,
+    _TokenStore,
+)
 from agilerl.arena.exceptions import (
     ArenaAPIError,
     ArenaAuthError,
@@ -921,6 +928,26 @@ class TestValidateEnvironment:
         )
         files = api_key_client._open_stream.call_args[1]["files"]
         assert files["requirements"][0] == "explicit-reqs.txt"
+
+    def test_grouped_dataclasses_match_flat_kwargs(self, api_key_client, tmp_path):
+        archive = tmp_path / "env.tar.gz"
+        archive.write_bytes(b"fake")
+        mock_stream = _mock_ndjson_stream({"status": "ok"})
+        api_key_client._open_stream = MagicMock(return_value=mock_stream)
+
+        api_key_client.validate_environment(
+            EnvironmentIdentity(name="MyEnv", version="v1", description="desc"),
+            EnvironmentSource(source=archive, entrypoint="my_env:make"),
+            EnvironmentKind(multi_agent=True, do_rollouts=True),
+        )
+
+        data = api_key_client._open_stream.call_args[1]["data"]
+        assert data["name"] == "MyEnv"
+        assert data["version"] == "v1"
+        assert data["description"] == "desc"
+        assert data["entrypoint"] == "my_env:make"
+        assert data["multi_agent"] == "true"
+        assert data["do_rollouts"] == "true"
 
 
 class TestDefaultProjectConfig:

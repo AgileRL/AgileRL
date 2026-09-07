@@ -5,7 +5,8 @@ import gc
 import warnings
 from contextlib import contextmanager, nullcontext
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
+from unittest.mock import patch as unittest_patch
 
 import pytest
 import torch
@@ -28,12 +29,15 @@ from agilerl.utils.algo_utils import CosineLRScheduleConfig, VLLMConfig
 from agilerl.utils.llm_utils import masked_whiten
 from agilerl.utils.ppo_value_head import AutoModelForCausalLMWithValueHead
 from tests import TINY_LLM_FIXTURE_PATH
+from tests.helpers.patch_algo_core import make_core_patch, setattr_core
 from tests.helpers.rollout_doubles import FakeEnvClient, RolloutHarnessDouble
 from tests.utils import (
     assert_vllm_get_action_contract,
     make_mock_vllm_instance,
     spawn_new_process_for_each_test,
 )
+
+patch = make_core_patch(unittest_patch)
 
 deepspeed_base_config = {
     "bf16": {
@@ -340,7 +344,7 @@ class TestPPOInit:
     def test_init_auto_detects_device_when_none_given(self):
         """Regression: no ``device`` must auto-detect, not silently fall back to CPU."""
         with patch(
-            "agilerl.algorithms.ppo_llm.resolve_llm_device", return_value="cpu"
+            "agilerl.algorithms.core.base.resolve_llm_device", return_value="cpu"
         ) as mock_resolve:
             ppo = _cpu_llmppo(device=None)
 
@@ -549,7 +553,7 @@ class TestPPOInit:
         memory-bounded; the constructor emits the canonical warning once via
         the base helper.
         """
-        monkeypatch.setattr("agilerl.algorithms.core.base.HAS_LIGER_KERNEL", True)
+        setattr_core(monkeypatch, "HAS_LIGER_KERNEL", True)
         monkeypatch.setattr("agilerl.algorithms.ppo_llm.HAS_LIGER_KERNEL", True)
         with pytest.warns(UserWarning, match="NOT memory-bounded"):
             ppo = _cpu_llmppo(use_liger_loss=True, importance_sampling_level=is_level)
@@ -1656,7 +1660,7 @@ class TestPPOLearnWithLiger:
         # ``use_liger_loss=True`` would normally trip the construct-time
         # ``HAS_LIGER_KERNEL`` guard and fall back to ``False``. Patch the
         # flag in both modules so PPO accepts the kwarg as-is.
-        monkeypatch.setattr("agilerl.algorithms.core.base.HAS_LIGER_KERNEL", True)
+        setattr_core(monkeypatch, "HAS_LIGER_KERNEL", True)
         monkeypatch.setattr("agilerl.algorithms.ppo_llm.HAS_LIGER_KERNEL", True)
         ppo = _cpu_llmppo(lr_actor=0.05, update_epochs=1, use_liger_loss=True)
         assert ppo.use_liger_loss is True
@@ -1705,7 +1709,7 @@ class TestPPOLearnWithLiger:
         correction is fused into the kernel (``vllm_is_ratio``), so learn()
         keeps the fused path and threads ``sampling_log_probs`` through.
         """
-        monkeypatch.setattr("agilerl.algorithms.core.base.HAS_LIGER_KERNEL", True)
+        setattr_core(monkeypatch, "HAS_LIGER_KERNEL", True)
         monkeypatch.setattr("agilerl.algorithms.ppo_llm.HAS_LIGER_KERNEL", True)
         # Force token-level IS so the fused correction path is exercised
         # (default turn_level_clip=True resolves multi-turn batches to "turn").
@@ -1763,7 +1767,7 @@ class TestPPOLearnWithLiger:
         per-token reweight can't be pooled into the sequence ratio, so learn()
         warns once and routes the minibatch through the standard PyTorch path.
         """
-        monkeypatch.setattr("agilerl.algorithms.core.base.HAS_LIGER_KERNEL", True)
+        setattr_core(monkeypatch, "HAS_LIGER_KERNEL", True)
         monkeypatch.setattr("agilerl.algorithms.ppo_llm.HAS_LIGER_KERNEL", True)
         ppo = _cpu_llmppo(
             lr_actor=0.05,

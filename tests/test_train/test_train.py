@@ -25,6 +25,7 @@ from tensordict import TensorDict
 
 import agilerl
 import agilerl.rollouts.on_policy
+import agilerl.training.loop
 from agilerl.algorithms import (
     CQN,
     DDPG,
@@ -2377,7 +2378,7 @@ class TestTrainTargetEarlyReturn:
 
         with (
             patch(
-                "agilerl.training.train_off_policy.Population",
+                "agilerl.training.loop.Population",
                 return_value=population,
             ),
             patch("agilerl.utils.utils.init_wandb"),
@@ -2410,7 +2411,7 @@ class TestTrainTargetEarlyReturn:
 
         with (
             patch(
-                "agilerl.training.train_on_policy.Population",
+                "agilerl.training.loop.Population",
                 return_value=population,
             ),
             patch("agilerl.utils.utils.init_wandb"),
@@ -2452,7 +2453,7 @@ class TestTrainTargetEarlyReturn:
 
         with (
             patch(
-                "agilerl.training.train_offline.Population",
+                "agilerl.training.loop.Population",
                 return_value=population,
             ),
             patch("agilerl.utils.utils.init_wandb"),
@@ -2496,7 +2497,7 @@ class TestTrainTargetEarlyReturn:
 
         with (
             patch(
-                "agilerl.training.train_multi_agent_off_policy.Population",
+                "agilerl.training.loop.Population",
                 return_value=population,
             ),
             patch("agilerl.utils.utils.init_wandb"),
@@ -2538,7 +2539,7 @@ class TestTrainTargetEarlyReturn:
 
         with (
             patch(
-                "agilerl.training.train_multi_agent_on_policy.Population",
+                "agilerl.training.loop.Population",
                 return_value=population,
             ),
             patch("agilerl.utils.utils.init_wandb"),
@@ -4324,7 +4325,7 @@ class TestTrainMultiAgentOnPolicy:
                 return 0 if self.calls == 1 else 2
 
         monkeypatch.setattr(
-            agilerl.training.train_multi_agent_on_policy,
+            agilerl.training.loop,
             "default_progress_bar",
             lambda *args, **kwargs: DummyPbar(),
         )
@@ -5563,20 +5564,14 @@ def _route_bandits(get, **strategy_kwarg):
     return pop
 
 
-# (trainer module, runner) per non-LLM trainer
+# Runner per non-LLM trainer. Evolution runs in ``agilerl.training.loop``.
 _SELECTION_ROUTING_CASES = {
-    "off-policy": ("agilerl.training.train_off_policy", _route_off_policy),
-    "on-policy": ("agilerl.training.train_on_policy", _route_on_policy),
-    "multi-agent off-policy": (
-        "agilerl.training.train_multi_agent_off_policy",
-        _route_multi_agent_off_policy,
-    ),
-    "multi-agent on-policy": (
-        "agilerl.training.train_multi_agent_on_policy",
-        _route_multi_agent_on_policy,
-    ),
-    "offline": ("agilerl.training.train_offline", _route_offline),
-    "bandits": ("agilerl.training.train_bandits", _route_bandits),
+    "off-policy": _route_off_policy,
+    "on-policy": _route_on_policy,
+    "multi-agent off-policy": _route_multi_agent_off_policy,
+    "multi-agent on-policy": _route_multi_agent_on_policy,
+    "offline": _route_offline,
+    "bandits": _route_bandits,
 }
 
 
@@ -5590,11 +5585,11 @@ class TestTrainerSelectionStrategyRouting:
     def test_trainer_forwards_selection_strategy(
         self, request, case, state_size, action_size, vect
     ):
-        module, route = _SELECTION_ROUTING_CASES[case]
+        route = _SELECTION_ROUTING_CASES[case]
         strategy = _make_multi_frequency_selection()
 
         with patch(
-            f"{module}.run_selection_and_mutation",
+            "agilerl.training.loop.run_selection_and_mutation",
             side_effect=lambda _strategy, **kwargs: kwargs["population"],
         ) as spy:
             pop = route(request.getfixturevalue, selection_strategy=strategy)
@@ -5619,12 +5614,12 @@ class TestTrainerDeprecatedTournamentArgument:
     def test_deprecated_tournament_argument_reaches_the_entry_point(
         self, request, case, state_size, action_size, vect
     ):
-        module, route = _SELECTION_ROUTING_CASES[case]
+        route = _SELECTION_ROUTING_CASES[case]
         strategy = DummyTournament()
 
         with (
             patch(
-                f"{module}.run_selection_and_mutation",
+                "agilerl.training.loop.run_selection_and_mutation",
                 side_effect=lambda _strategy, **kwargs: kwargs["population"],
             ) as spy,
             pytest.warns(DeprecationWarning, match="'tournament' argument"),

@@ -9,15 +9,19 @@ import gymnasium as gym
 import numpy as np
 import numpy.typing as npt
 import torch
-from accelerate import Accelerator
 from gymnasium import spaces
 from tensordict import TensorDict
 from tensordict.nn import CudaGraphModule
 from torch import nn, optim
 
+from agilerl.algorithms.configs import (
+    AlgorithmRuntime,
+    OffPolicyLearnConfig,
+    PopulationIndex,
+    QNetworkSetup,
+)
 from agilerl.algorithms.core import OptimizerWrapper, RLAlgorithm
 from agilerl.algorithms.core.registry import (
-    HyperparameterConfig,
     NetworkGroup,
     make_default_hp_config,
 )
@@ -49,38 +53,15 @@ class DQN(RLAlgorithm[TensorDict]):
     :type observation_space: SupportedObservationSpace
     :param action_space: Action space of the environment
     :type action_space: gymnasium.spaces.Discrete
-    :param index: Index to keep track of object instance during tournament selection and mutation, defaults to 0
-    :type index: int, optional
-    :param hp_config: RL hyperparameter mutation configuration, defaults to None, whereby algorithm mutations are disabled.
-    :type hp_config: HyperparameterConfig, optional
-    :param net_config: Network configuration, defaults to None
-    :type net_config: dict, optional
-    :param batch_size: Size of batched sample from replay buffer for learning, defaults to 64
-    :type batch_size: int, optional
-    :param lr: Learning rate for optimizer, defaults to 1e-4
-    :type lr: float, optional
-    :param learn_step: Learning frequency, defaults to 5
-    :type learn_step: int, optional
-    :param gamma: Discount factor, defaults to 0.99
-    :type gamma: float, optional
-    :param tau: For soft update of target network parameters, defaults to 1e-3
-    :type tau: float, optional
-    :param mut: Most recent mutation to agent, defaults to None
-    :type mut: str, optional
-    :param double: Use double Q-learning, defaults to False
-    :type double: bool, optional
-    :param normalize_images: Flag to normalize images, defaults to True
-    :type normalize_images: bool, optional
-    :param actor_network: Custom actor network, defaults to None
-    :type actor_network: nn.Module, optional
-    :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
-    :type device: str, optional
-    :param accelerator: Accelerator for distributed computing, defaults to None
-    :type accelerator: accelerate.Accelerator(), optional
-    :param cudagraphs: Use CUDA graphs for optimization, defaults to False
-    :type cudagraphs: bool, optional
-    :param wrap: Wrap models for distributed training upon creation, defaults to True
-    :type wrap: bool, optional
+    :param member: Population index, mutation config, and last mutation
+    :type member: PopulationIndex | None
+    :param learn: Learning-rate, batch, and update hyperparameters
+    :type learn: OffPolicyLearnConfig | None
+    :param network: Network construction and encoder config
+    :type network: QNetworkSetup | None
+    :param runtime: Device, accelerator, wrap, and compiler settings
+    :type runtime: AlgorithmRuntime | None
+
     """
 
     # Narrowed from RLAlgorithm.action_space; enforced at construction.
@@ -103,23 +84,32 @@ class DQN(RLAlgorithm[TensorDict]):
         self,
         observation_space: SupportedObservationSpace,
         action_space: spaces.Discrete,
-        index: int = 0,
-        hp_config: HyperparameterConfig | None = None,
-        net_config: dict[str, Any] | None = None,
-        batch_size: int = 64,
-        lr: float = 1e-4,
-        learn_step: int = 5,
-        gamma: float = 0.99,
-        tau: float = 1e-3,
-        mut: str | None = None,
-        double: bool = False,
-        normalize_images: bool = True,
-        actor_network: EvolvableModule | None = None,
-        device: str = "cpu",
-        accelerator: Accelerator | None = None,
-        cudagraphs: bool = False,
-        wrap: bool = True,
+        member: PopulationIndex | None = None,
+        learn: OffPolicyLearnConfig | None = None,
+        network: QNetworkSetup | None = None,
+        runtime: AlgorithmRuntime | None = None,
     ) -> None:
+        member = member or PopulationIndex()
+        learn = learn or OffPolicyLearnConfig()
+        network = network or QNetworkSetup()
+        runtime = runtime or AlgorithmRuntime()
+        index = member.index
+        hp_config = member.hp_config
+        mut = member.mut
+        batch_size = learn.batch_size
+        lr = learn.lr
+        learn_step = learn.learn_step
+        gamma = learn.gamma
+        tau = learn.tau
+        net_config = network.net_config
+        actor_network = network.actor_network
+        double = network.double
+        normalize_images = network.normalize_images
+        cudagraphs = network.cudagraphs
+        device = runtime.device
+        accelerator = runtime.accelerator
+        wrap = runtime.wrap
+
         super().__init__(
             observation_space,
             action_space,
@@ -128,7 +118,7 @@ class DQN(RLAlgorithm[TensorDict]):
             device=device,
             accelerator=accelerator,
             normalize_images=normalize_images,
-            name="DQN",
+            name=runtime.name or "DQN",
         )
 
         assert learn_step >= 1, "Learn step must be greater than or equal to one."
@@ -159,6 +149,7 @@ class DQN(RLAlgorithm[TensorDict]):
         self.net_config = net_config
         self.cudagraphs = cudagraphs
         self.capturable = cudagraphs
+        self.wrap = wrap
 
         # Default RL hyperparameters to mutate when doing Evo-HPO
         self.hp_config = self.hp_config or make_default_hp_config(

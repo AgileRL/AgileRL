@@ -9,7 +9,8 @@ import sys
 from collections import OrderedDict
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import MagicMock, Mock, patch
+from unittest.mock import MagicMock, Mock
+from unittest.mock import patch as unittest_patch
 
 import numpy as np
 import pytest
@@ -76,6 +77,19 @@ from agilerl.utils.algo_utils import (
     transpose_image_space,
     vectorize_experiences_by_agent,
 )
+from tests.helpers.patch_split import (
+    ALGO_UTILS_MODULES,
+    ALGO_UTILS_PREFIX,
+    make_split_patch,
+    setattr_split,
+)
+
+patch = make_split_patch(ALGO_UTILS_PREFIX, ALGO_UTILS_MODULES, unittest_patch)
+
+
+def setattr_algo(monkeypatch: pytest.MonkeyPatch, name: str, value: object) -> None:
+    """Set ``name`` on every algo_utils split module."""
+    setattr_split(monkeypatch, ALGO_UTILS_MODULES, name, value)
 
 
 def test_stack_and_pad_experiences_with_padding():
@@ -1774,7 +1788,7 @@ class TestRemoveNestedFiles:
 
 def test_algo_utils_fallback_pretrained_model_type_when_no_llm_dependencies():
     """Test that algo_utils sets PreTrainedModelType to Any when HAS_LLM_DEPENDENCIES is False."""
-    original_module = sys.modules.pop("agilerl.utils.algo_utils", None)
+    originals = {name: sys.modules.pop(name, None) for name in ALGO_UTILS_MODULES}
 
     try:
         # Patch HAS_LLM_DEPENDENCIES before reimporting
@@ -1784,14 +1798,19 @@ def test_algo_utils_fallback_pretrained_model_type_when_no_llm_dependencies():
 
             assert algo_utils_reloaded.PreTrainedModelType is Any
     finally:
-        # Restore original module in both sys.modules and the parent package
+        # Restore original modules in both sys.modules and the parent package
         # to avoid affecting other tests (importlib.import_module sets the
         # attribute on the parent package, which won't be undone by just
         # restoring sys.modules).
-        sys.modules["agilerl.utils.algo_utils"] = original_module
         import agilerl.utils as _utils_pkg
 
-        _utils_pkg.algo_utils = original_module
+        for name, original in originals.items():
+            attr = name.rsplit(".", 1)[-1]
+            if original is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = original
+                setattr(_utils_pkg, attr, original)
 
 
 class TestMatchActionNdims:
@@ -2267,18 +2286,18 @@ class TestModuleCheckpointDict:
         class FakeModuleDict:
             pass
 
-        monkeypatch.setattr(algo_utils, "ModuleDict", FakeModuleDict)
+        setattr_algo(monkeypatch, "ModuleDict", FakeModuleDict)
         sentinel = {"multi": True}
-        monkeypatch.setattr(
-            algo_utils, "module_checkpoint_multiagent", lambda module, name: sentinel
+        setattr_algo(
+            monkeypatch, "module_checkpoint_multiagent", lambda module, name: sentinel
         )
         out = algo_utils.module_checkpoint_dict(FakeModuleDict(), "actor")
         assert out == sentinel
 
     def test_dispatches_to_single_for_non_module_dict(self, monkeypatch):
         sentinel = {"single": True}
-        monkeypatch.setattr(
-            algo_utils, "module_checkpoint_single", lambda module, name: sentinel
+        setattr_algo(
+            monkeypatch, "module_checkpoint_single", lambda module, name: sentinel
         )
         out = algo_utils.module_checkpoint_dict(
             MagicMock(spec=EvolvableModule), "actor"
@@ -2303,7 +2322,7 @@ class TestModuleCheckpointMultiagent:
             def state_dict(self):
                 return {"weight": torch.tensor([2.0])}
 
-        monkeypatch.setattr(algo_utils, "OptimizedModule", FakeOptimizedModule)
+        setattr_algo(monkeypatch, "OptimizedModule", FakeOptimizedModule)
 
         module = {
             "a0": FakeOptimizedModule(FakeAgentModule()),
@@ -2464,8 +2483,8 @@ class TestCloneLlm:
             assert adapter_name == "actor"
             return model
 
-        monkeypatch.setattr(algo_utils, "PeftModel", FakePeftModel)
-        monkeypatch.setattr(algo_utils, "get_peft_model", fake_get_peft_model)
+        setattr_algo(monkeypatch, "PeftModel", FakePeftModel)
+        setattr_algo(monkeypatch, "get_peft_model", fake_get_peft_model)
 
         original = FakePeftModel()
         cloned = algo_utils.clone_llm(
@@ -2498,7 +2517,7 @@ class TestCloneLlm:
             def parameters(self):
                 return [torch.nn.Parameter(torch.tensor([1.0]))]
 
-        monkeypatch.setattr(algo_utils, "PreTrainedModel", FakePreTrainedModel)
+        setattr_algo(monkeypatch, "PreTrainedModel", FakePreTrainedModel)
         original = FakePreTrainedModel()
         cloned = algo_utils.clone_llm(original_model=original, zero_stage=0)
         assert isinstance(cloned, FakeBaseModel)
@@ -2568,8 +2587,8 @@ class TestCloneLlm:
         def fake_get_peft_model(model, first_config, adapter_name="actor", **kwargs):
             return model
 
-        monkeypatch.setattr(algo_utils, "PeftModel", FakePeftModel)
-        monkeypatch.setattr(algo_utils, "get_peft_model", fake_get_peft_model)
+        setattr_algo(monkeypatch, "PeftModel", FakePeftModel)
+        setattr_algo(monkeypatch, "get_peft_model", fake_get_peft_model)
 
         original = FakePeftModel()
         cloned = clone_llm(original_model=original, zero_stage=3, state_dict=None)
@@ -2603,8 +2622,8 @@ class TestCloneLlm:
             assert kwargs.get("autocast_adapter_dtype") is False
             return model
 
-        monkeypatch.setattr(algo_utils, "PeftModel", FakePeftModel)
-        monkeypatch.setattr(algo_utils, "get_peft_model", fake_get_peft_model)
+        setattr_algo(monkeypatch, "PeftModel", FakePeftModel)
+        setattr_algo(monkeypatch, "get_peft_model", fake_get_peft_model)
 
         cloned = clone_llm(
             original_model=FakePeftModel(), zero_stage=3, state_dict=None
@@ -2645,8 +2664,8 @@ class TestCloneLlm:
             upgraded.append(model)
             return 1
 
-        monkeypatch.setattr(algo_utils, "PeftModel", FakePeftModel)
-        monkeypatch.setattr(algo_utils, "get_peft_model", fake_get_peft_model)
+        setattr_algo(monkeypatch, "PeftModel", FakePeftModel)
+        setattr_algo(monkeypatch, "get_peft_model", fake_get_peft_model)
         monkeypatch.setattr(
             "agilerl.algorithms.core.llm_ops.moe_lora.upgrade_moe_param_wrappers",
             fake_upgrade,
