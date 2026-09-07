@@ -7,24 +7,35 @@ name: Publish release
 #   vX.Y.Z              → agilerl
 #   agilerl-arena/vX.Y.Z → agilerl-arena
 #
-# Trigger: workflow_dispatch from an existing tag ref (Use workflow from).
-# No inputs. Tag push does not publish; minting spoke tags from hub must not
-# upload to PyPI.
+# Trigger: pushing the release tag. workflow_dispatch from a tag ref backfills
+# a version PyPI is missing, or retries a failed run. No inputs — the tag ref
+# is the only source of truth.
 #
 # Auth:
 #   fetch   — GitHub OIDC → read-only IAM role (repository secret
 #             AWS_CODEARTIFACT_READ_ROLE_ARN). No long-lived AWS keys.
 #   publish — PyPI Trusted Publishing (OIDC) via environment `pypi`.
 #             No UV_PUBLISH_TOKEN. Fetch credentials do not leak into publish.
+#             A framework tag and its arena tag are pushed together, so the
+#             agilerl upload waits for the arena range its wheel declares.
 #   release — GITHUB_TOKEN creates the GitHub Release after PyPI succeeds.
 #             Title and body come from spoke commit messages (spoke-public
 #             copy), not GitHub generate-notes.
 
 on:
+    push:
+        tags:
+            - v*
+            - agilerl-arena/v*
     workflow_dispatch:
 
 permissions:
     contents: read
+
+# One run per tag. Never cancel: an interrupted upload leaves PyPI half-done.
+concurrency:
+    group: publish-release-${{ github.ref }}
+    cancel-in-progress: false
 
 jobs:
     fetch:
@@ -39,7 +50,6 @@ jobs:
             dist_name: ${{ steps.tag.outputs.dist_name }}
             package: ${{ steps.tag.outputs.package }}
             previous_tag: ${{ steps.prev.outputs.previous_tag }}
-            arena_pin: ${{ steps.arena-pin.outputs.pin }}
         steps:
             - name: Resolve tag
               id: tag
@@ -77,18 +87,6 @@ jobs:
               with:
                   persist-credentials: false
                   fetch-depth: 1
-
-            - name: Read agilerl-arena pin
-              id: arena-pin
-              if: steps.tag.outputs.package == 'agilerl'
-              run: |
-                  set -euo pipefail
-                  pin="$(grep -o '"agilerl-arena[^"]*"' pyproject.toml | head -n1 | tr -d '"')"
-                  if [[ -z "${pin}" ]]; then
-                    echo "agilerl pyproject.toml must declare an agilerl-arena pin" >&2
-                    exit 1
-                  fi
-                  echo "pin=${pin}" >> "$GITHUB_OUTPUT"
 
             - name: Previous same-family tag
               id: prev
@@ -156,27 +154,36 @@ jobs:
         if: github.repository == 'AgileRL/AgileRL'
         runs-on: ubuntu-latest
         environment: pypi
+        timeout-minutes: 45
         permissions:
             contents: read
             id-token: write
         steps:
+            - name: Checkout wait script
+              uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+              with:
+                  persist-credentials: false
+                  fetch-depth: 1
+
             - name: Download dist
               uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
               with:
                   name: pypi-dist
                   path: dist
 
-            # Fail if the agilerl-arena pin is not on PyPI.
-            - name: Gate agilerl on a resolvable agilerl-arena pin
-              if: needs.fetch.outputs.package == 'agilerl'
-              env:
-                  PIN: ${{ needs.fetch.outputs.arena_pin }}
-              run: python3 -m pip install --dry-run --no-deps "${PIN}"
-
             - name: Install uv
               uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
               with:
                   enable-cache: false
+
+            # The wheel states the agilerl-arena range it needs. Uploading
+            # agilerl before that range resolves ships a broken arena extra.
+            - name: Wait for agilerl-arena on PyPI
+              run: |
+                  uv run --no-project --with packaging \
+                    python3 scripts/await_pypi_dependency.py \
+                    --dist-dir dist \
+                    --requirement agilerl-arena
 
             - name: Publish to PyPI (OIDC)
               env:
