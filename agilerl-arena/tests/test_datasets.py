@@ -237,7 +237,7 @@ class TestCreateDataset:
         files = api_key_client._request.call_args[1]["files"]
         uploads = _file_uploads(files)
         assert len(uploads) == 1
-        assert uploads[0][0] == "main/train-00000-of-00001.parquet"
+        assert uploads[0][0] == "train-00000-of-00001.parquet"
         assert uploads[0][2] == PARQUET_CONTENT_TYPE
         assert all(name != "config" for name, _ in _multipart_items(files))
 
@@ -317,12 +317,14 @@ class TestCreateDataset:
             )
 
     def test_create_tabular_category_raises(self, api_key_client):
+        api_key_client._request = MagicMock()
         with pytest.raises(ArenaValidationError, match="Invalid dataset category"):
             api_key_client.create_dataset(
                 name="ds1",
                 category="tabular",
                 column_mapping={"feature": "x", "target": "y"},
             )
+        api_key_client._request.assert_not_called()
 
     def test_nested_hf_folder_uses_inner_config_names(self, api_key_client, tmp_path):
         main = tmp_path / "gsm8k" / "main" / "train.parquet"
@@ -366,9 +368,7 @@ class TestCreateDataset:
                 file=tmp_path,
             )
 
-    def test_single_nested_hf_folder_keeps_config_directory(
-        self, api_key_client, tmp_path
-    ):
+    def test_single_nested_hf_folder_strips_to_filename(self, api_key_client, tmp_path):
         shard = tmp_path / "gsm8k" / "main" / "train.parquet"
         shard.parent.mkdir(parents=True)
         shard.write_bytes(b"PAR1")
@@ -383,10 +383,28 @@ class TestCreateDataset:
 
         files = api_key_client._request.call_args[1]["files"]
         uploads = _file_uploads(files)
-        assert uploads[0][0] == "main/train.parquet"
+        assert uploads[0][0] == "train.parquet"
         assert all(name != "config" for name, _ in _multipart_items(files))
 
-    def test_create_parquet_split_directories_keeps_config(
+    def test_create_parquet_split_directories_requires_config(
+        self, api_key_client, tmp_path
+    ):
+        train = tmp_path / "main" / "train" / "data.parquet"
+        test = tmp_path / "main" / "test" / "data.parquet"
+        train.parent.mkdir(parents=True)
+        test.parent.mkdir(parents=True)
+        train.write_bytes(b"TR")
+        test.write_bytes(b"TEST")
+
+        with pytest.raises(ArenaValidationError, match="multiple configs"):
+            api_key_client.create_dataset(
+                name="ds1",
+                category="reasoning",
+                column_mapping={"question": "q", "answer": "a"},
+                file=tmp_path,
+            )
+
+    def test_create_parquet_split_directories_selects_named_config(
         self, api_key_client, tmp_path
     ):
         train = tmp_path / "main" / "train" / "data.parquet"
@@ -402,14 +420,15 @@ class TestCreateDataset:
             category="reasoning",
             column_mapping={"question": "q", "answer": "a"},
             file=tmp_path,
-            config="main",
+            config="train",
         )
 
         files = api_key_client._request.call_args[1]["files"]
         uploads = _file_uploads(files)
         names = [part[0] for part in uploads]
-        assert names == ["main/test/data.parquet", "main/train/data.parquet"]
-        assert _multipart_text(files, "config") == "main"
+        assert names == ["train/data.parquet"]
+        assert uploads[0][2] == PARQUET_CONTENT_TYPE
+        assert _multipart_text(files, "config") == "train"
 
 
 class TestBuildSubmitExperimentMultipart:
@@ -521,7 +540,7 @@ class TestBuildCreateDatasetMultipart:
 
         assert names == ["main", "socratic"]
 
-    def test_config_names_keep_config_when_split_directories(self, tmp_path):
+    def test_config_names_split_directories_are_configs(self, tmp_path):
         train = tmp_path / "main" / "train" / "data.parquet"
         test = tmp_path / "main" / "test" / "data.parquet"
         train.parent.mkdir(parents=True)
@@ -532,9 +551,9 @@ class TestBuildCreateDatasetMultipart:
 
         names = ArenaClient._parquet_config_names(tmp_path, shards)
 
-        assert names == ["main"]
+        assert names == ["test", "train"]
 
-    def test_wrapping_folder_with_split_directories_keeps_config(self, tmp_path):
+    def test_config_names_wrapping_folder_split_directories_are_configs(self, tmp_path):
         train = tmp_path / "gsm8k" / "main" / "train" / "data.parquet"
         test = tmp_path / "gsm8k" / "main" / "test" / "data.parquet"
         train.parent.mkdir(parents=True)
@@ -545,7 +564,32 @@ class TestBuildCreateDatasetMultipart:
 
         names = ArenaClient._parquet_config_names(tmp_path, shards)
 
-        assert names == ["main"]
+        assert names == ["test", "train"]
+
+    def test_config_names_flat_shards_use_default(self, tmp_path):
+        (tmp_path / "train.parquet").write_bytes(b"A")
+        (tmp_path / "test.parquet").write_bytes(b"B")
+        shards = ArenaClient._parquet_shard_paths(tmp_path)
+
+        names = ArenaClient._parquet_config_names(tmp_path, shards)
+
+        assert names == ["default"]
+
+    def test_flat_shards_accept_default_config(self, tmp_path):
+        (tmp_path / "train.parquet").write_bytes(b"A")
+        (tmp_path / "test.parquet").write_bytes(b"B")
+        _, files = ArenaClient._build_create_dataset_multipart(
+            name="n",
+            category="sft",
+            column_mapping={},
+            file=tmp_path,
+            config="default",
+        )
+        try:
+            names = [part[1][0] for part in files]
+            assert names == ["test.parquet", "train.parquet"]
+        finally:
+            ArenaClient._close_upload_files(files)
 
     def test_config_names_keep_distinct_nested_roots(self, tmp_path):
         alpha = tmp_path / "alpha" / "extra" / "train.parquet"

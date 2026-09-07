@@ -55,9 +55,6 @@ logger = logging.getLogger(__name__)
 DATASET_CATEGORIES = frozenset({"sft", "preference", "reasoning"})
 PARQUET_CONTENT_TYPE = "application/vnd.apache.parquet"
 CSV_CONTENT_TYPE = "text/csv"
-PARQUET_SPLIT_DIR_NAMES = frozenset(
-    {"train", "test", "validation", "val", "dev", "eval", "predict"}
-)
 
 MemoryScope = Literal["user", "organization"]
 MEMORY_SCOPES: tuple[MemoryScope, ...] = ("user", "organization")
@@ -903,12 +900,9 @@ class ArenaClient:
     @staticmethod
     def _strip_common_path_prefixes(paths: list[list[str]]) -> list[list[str]]:
         remaining = [list(parts) for parts in paths]
-        # Shared wrapping dirs only. A split dir after the config is not a wrap.
-        while remaining and all(len(parts) > 2 for parts in remaining):
+        while remaining and all(len(parts) > 1 for parts in remaining):
             head = remaining[0][0]
             if any(parts[0] != head for parts in remaining):
-                break
-            if all(parts[1] in PARQUET_SPLIT_DIR_NAMES for parts in remaining):
                 break
             remaining = [parts[1:] for parts in remaining]
         return remaining
@@ -923,12 +917,20 @@ class ArenaClient:
         return ["/".join(parts) for parts in stripped]
 
     @staticmethod
+    def _parquet_config_name(relative: str) -> str:
+        parts = ArenaClient._posix_path_components(relative)
+        if len(parts) > 1:
+            return parts[0]
+        return "default"
+
+    @staticmethod
     def _parquet_config_names(root: Path, shards: list[Path]) -> list[str]:
-        names: set[str] = set()
-        for relative in ArenaClient._parquet_stripped_relatives(root, shards):
-            if "/" in relative:
-                names.add(relative.split("/", 1)[0])
-        return sorted(names)
+        return sorted(
+            {
+                ArenaClient._parquet_config_name(relative)
+                for relative in ArenaClient._parquet_stripped_relatives(root, shards)
+            }
+        )
 
     @staticmethod
     def _dataset_upload_parts(
@@ -974,7 +976,9 @@ class ArenaClient:
     ) -> list[tuple[str, tuple[str, Any, str]]]:
         shards = ArenaClient._parquet_shard_paths(root)
         stripped = ArenaClient._parquet_stripped_relatives(root, shards)
-        configs = ArenaClient._parquet_config_names(root, shards)
+        configs = sorted(
+            {ArenaClient._parquet_config_name(relative) for relative in stripped}
+        )
         selected = list(zip(shards, stripped, strict=True))
         if config is None and len(configs) > 1:
             listed = ", ".join(configs)
@@ -984,11 +988,10 @@ class ArenaClient:
             )
             raise ArenaValidationError(msg)
         if config is not None:
-            prefix = f"{config}/"
             selected = [
                 (shard, relative)
                 for shard, relative in selected
-                if relative.startswith(prefix)
+                if ArenaClient._parquet_config_name(relative) == config
             ]
             if not selected:
                 msg = f"No parquet files for config {config!r} in {root}"
