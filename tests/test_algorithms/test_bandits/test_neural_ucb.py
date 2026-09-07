@@ -14,6 +14,7 @@ from torch import nn, optim
 
 from agilerl.algorithms.neural_ucb_bandit import NeuralUCB
 from agilerl.modules import EvolvableCNN, EvolvableMLP, EvolvableMultiInput
+from agilerl.utils.constructor_kwargs import assemble_init_kwargs
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 from tests.helper_functions import (
     assert_state_dicts_equal,
@@ -24,20 +25,13 @@ from tests.helper_functions import (
 
 
 class DummyNeuralUCB(NeuralUCB):
-    def __init__(
-        self,
-        observation_space,
-        action_space,
-        net_config=None,
-        *args,
-        **kwargs,
-    ):
+    def __init__(self, observation_space, action_space, *args, **kwargs):
         super().__init__(
-            *args,
-            observation_space=observation_space,
-            action_space=action_space,
-            net_config=net_config,
-            **kwargs,
+            **assemble_init_kwargs(
+                NeuralUCB,
+                (observation_space, action_space, *args),
+                kwargs,
+            )
         )
 
         self.tensor_test = torch.randn(1)

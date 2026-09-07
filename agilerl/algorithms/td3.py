@@ -10,14 +10,19 @@ import gymnasium as gym
 import numpy as np
 import numpy.typing as npt
 import torch
-from accelerate import Accelerator
 from gymnasium import spaces
 from tensordict import TensorDict
 from torch import nn, optim
 
+from agilerl.algorithms.configs import (
+    ActorCriticNetworkSetup,
+    AlgorithmRuntime,
+    ExplorationNoise,
+    PopulationIndex,
+    TD3LearnConfig,
+)
 from agilerl.algorithms.core import OptimizerWrapper, RLAlgorithm
 from agilerl.algorithms.core.registry import (
-    HyperparameterConfig,
     NetworkGroup,
     make_default_hp_config,
 )
@@ -55,55 +60,18 @@ class TD3(RLAlgorithm[TensorDict]):
     :param observation_space: Observation space of the environment
     :type observation_space: gym.spaces.Space
     :param action_space: Action space of the environment
-    :type action_space: gym.spaces.Space
-    :param O_U_noise: Use Ornstein Uhlenbeck action noise for exploration. If False, uses Gaussian noise. Defaults to True
-    :type O_U_noise: bool, optional
-    :param vect_noise_dim: Vectorization dimension of environment for action noise, defaults to 1
-    :type vect_noise_dim: int, optional
-    :param expl_noise: Scale for Ornstein Uhlenbeck action noise, or standard deviation for Gaussian exploration noise
-    :type expl_noise: float | npt.NDArray, optional
-    :param mean_noise: Mean of exploration noise, defaults to 0.0
-    :type mean_noise: float | npt.NDArray, optional
-    :param theta: Rate of mean reversion in Ornstein Uhlenbeck action noise, defaults to 0.15
-    :type theta: float, optional
-    :param dt: Timestep for Ornstein Uhlenbeck action noise update, defaults to 1e-2
-    :type dt: float, optional
-    :param index: Index to keep track of object instance during tournament selection and mutation, defaults to 0
-    :type index: int, optional
-    :param hp_config: RL hyperparameter mutation configuration, defaults to None, whereby algorithm mutations are disabled.
-    :type hp_config: HyperparameterConfig, optional
-    :param net_config: Network configuration, defaults to None
-    :type net_config: dict, optional
-    :param batch_size: Size of batched sample from replay buffer for learning, defaults to 64
-    :type batch_size: int, optional
-    :param lr_actor: Learning rate for actor optimizer, defaults to 1e-4
-    :type lr_actor: float, optional
-    :param lr_critic: Learning rate for critic optimizer, defaults to 1e-3
-    :type lr_critic: float, optional
-    :param learn_step: Learning frequency, defaults to 5
-    :type learn_step: int, optional
-    :param gamma: Discount factor, defaults to 0.99
-    :type gamma: float, optional
-    :param tau: For soft update of target network parameters, defaults to 0.005
-    :type tau: float, optional
-    :param normalize_images: Flag to normalize images, defaults to True
-    :type normalize_images: bool, optional
-    :param mut: Most recent mutation to agent, defaults to None
-    :type mut: str, optional
-    :param policy_freq: Frequency of critic network updates compared to policy network, defaults to 2
-    :type policy_freq: int, optional
-    :param actor_network: Custom actor network, defaults to None
-    :type actor_network: nn.Module, optional
-    :param critic_networks: List of two custom critic networks (one for each of the two critics), defaults to None
-    :type critic_networks: list[nn.Module], optional
-    :param share_encoders: Share encoders between actor and critic, defaults to False
-    :type share_encoders: bool, optional
-    :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
-    :type device: str, optional
-    :param accelerator: Accelerator for distributed computing, defaults to None
-    :type accelerator: accelerate.Accelerator(), optional
-    :param wrap: Wrap models for distributed training upon creation, defaults to True
-    :type wrap: bool, optional
+    :type action_space: gymnasium.spaces.Box
+    :param member: Population index, mutation config, and last mutation
+    :type member: PopulationIndex | None
+    :param learn: Learning-rate, batch, and update hyperparameters
+    :type learn: TD3LearnConfig | None
+    :param network: Network construction and encoder config
+    :type network: ActorCriticNetworkSetup | None
+    :param noise: Exploration noise settings
+    :type noise: ExplorationNoise | None
+    :param runtime: Device, accelerator, wrap, and compiler settings
+    :type runtime: AlgorithmRuntime | None
+
     """
 
     action_space: spaces.Box
@@ -114,31 +82,42 @@ class TD3(RLAlgorithm[TensorDict]):
         self,
         observation_space: SupportedObservationSpace,
         action_space: spaces.Box,
-        O_U_noise: bool = True,
-        vect_noise_dim: int = 1,
-        expl_noise: float | npt.NDArray = 0.1,
-        mean_noise: float | npt.NDArray = 0.0,
-        theta: float = 0.15,
-        dt: float = 1e-2,
-        index: int = 0,
-        hp_config: HyperparameterConfig | None = None,
-        net_config: dict[str, Any] | None = None,
-        batch_size: int = 64,
-        lr_actor: float = 1e-4,
-        lr_critic: float = 1e-3,
-        learn_step: int = 5,
-        gamma: float = 0.99,
-        tau: float = 0.005,
-        normalize_images: bool = True,
-        mut: str | None = None,
-        policy_freq: int = 2,
-        actor_network: EvolvableModule | None = None,
-        critic_networks: list[EvolvableModule] | None = None,
-        share_encoders: bool = False,
-        device: str = "cpu",
-        accelerator: Accelerator | None = None,
-        wrap: bool = True,
+        member: PopulationIndex | None = None,
+        learn: TD3LearnConfig | None = None,
+        network: ActorCriticNetworkSetup | None = None,
+        noise: ExplorationNoise | None = None,
+        runtime: AlgorithmRuntime | None = None,
     ) -> None:
+        member = member or PopulationIndex()
+        learn = learn or TD3LearnConfig()
+        network = network or ActorCriticNetworkSetup()
+        noise = noise or ExplorationNoise()
+        runtime = runtime or AlgorithmRuntime()
+        index = member.index
+        hp_config = member.hp_config
+        mut = member.mut
+        batch_size = learn.batch_size
+        lr_actor = learn.lr_actor
+        lr_critic = learn.lr_critic
+        learn_step = learn.learn_step
+        gamma = learn.gamma
+        tau = learn.tau
+        policy_freq = learn.policy_freq
+        net_config = network.net_config
+        actor_network = network.actor_network
+        critic_networks = network.critic_networks
+        share_encoders = network.share_encoders
+        normalize_images = network.normalize_images
+        O_U_noise = noise.O_U_noise
+        expl_noise = noise.expl_noise
+        vect_noise_dim = noise.vect_noise_dim
+        mean_noise = noise.mean_noise
+        theta = noise.theta
+        dt = noise.dt
+        device = runtime.device
+        accelerator = runtime.accelerator
+        wrap = runtime.wrap
+
         super().__init__(
             observation_space,
             action_space,
@@ -147,7 +126,7 @@ class TD3(RLAlgorithm[TensorDict]):
             device=device,
             accelerator=accelerator,
             normalize_images=normalize_images,
-            name="TD3",
+            name=runtime.name or "TD3",
         )
 
         assert isinstance(

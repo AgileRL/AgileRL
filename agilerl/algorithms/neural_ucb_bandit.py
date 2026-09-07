@@ -5,14 +5,18 @@ from typing import Any
 
 import numpy as np
 import torch
-from accelerate import Accelerator
 from gymnasium import spaces
 from tensordict import TensorDict
 from torch import nn, optim
 
+from agilerl.algorithms.configs import (
+    AlgorithmRuntime,
+    BanditLearnConfig,
+    BanditNetworkSetup,
+    PopulationIndex,
+)
 from agilerl.algorithms.core import OptimizerWrapper, RLAlgorithm
 from agilerl.algorithms.core.registry import (
-    HyperparameterConfig,
     NetworkGroup,
     make_default_hp_config,
 )
@@ -39,36 +43,15 @@ class NeuralUCB(RLAlgorithm[TensorDict]):
     :type observation_space: gym.spaces.Space
     :param action_space: Action space of the environment
     :type action_space: gym.spaces.Space
-    :param index: Index to keep track of object instance during tournament selection and mutation, defaults to 0
-    :type index: int, optional
-    :param hp_config: RL hyperparameter mutation configuration, defaults to None, whereby algorithm mutations are disabled.
-    :type hp_config: HyperparameterConfig, optional
-    :param net_config: Network configuration, defaults to None
-    :type net_config: dict, optional
-    :param gamma: Positive scaling factor, defaults to 1.0
-    :type gamma: float, optional
-    :param lamb: Regularization parameter lambda, defaults to 1.0
-    :type lamb: float, optional
-    :param reg: Loss regularization parameter, defaults to 0.000625
-    :type reg: float, optional
-    :param batch_size: Size of batched sample from replay buffer for learning, defaults to 64
-    :type batch_size: int, optional
-    :param normalize_images: Flag to normalize images, defaults to True
-    :type normalize_images: bool, optional
-    :param lr: Learning rate for optimizer, defaults to 1e-3
-    :type lr: float, optional
-    :param learn_step: Learning frequency, defaults to 2
-    :type learn_step: int, optional
-    :param mut: Most recent mutation to agent, defaults to None
-    :type mut: str, optional
-    :param actor_network: Custom actor network, defaults to None
-    :type actor_network: EvolvableModule | None, optional
-    :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
-    :type device: str, optional
-    :param accelerator: Accelerator for distributed computing, defaults to None
-    :type accelerator: accelerate.Accelerator(), optional
-    :param wrap: Wrap models for distributed training upon creation, defaults to True
-    :type wrap: bool, optional
+    :param member: Population index, mutation config, and last mutation
+    :type member: PopulationIndex | None
+    :param learn: Learning-rate, batch, and update hyperparameters
+    :type learn: BanditLearnConfig | None
+    :param network: Network construction and encoder config
+    :type network: BanditNetworkSetup | None
+    :param runtime: Device, accelerator, wrap, and compiler settings
+    :type runtime: AlgorithmRuntime | None
+
     """
 
     # Bandit arms are discrete, so the network output size is a plain int
@@ -78,22 +61,31 @@ class NeuralUCB(RLAlgorithm[TensorDict]):
         self,
         observation_space: SupportedObservationSpace,
         action_space: spaces.Space,
-        index: int = 0,
-        hp_config: HyperparameterConfig | None = None,
-        net_config: dict[str, Any] | None = None,
-        gamma: float = 1.0,
-        lamb: float = 1.0,
-        reg: float = 0.000625,
-        batch_size: int = 64,
-        normalize_images: bool = True,
-        lr: float = 1e-3,
-        learn_step: int = 2,
-        mut: str | None = None,
-        actor_network: EvolvableModule | None = None,
-        device: str = "cpu",
-        accelerator: Accelerator | None = None,
-        wrap: bool = True,
+        member: PopulationIndex | None = None,
+        learn: BanditLearnConfig | None = None,
+        network: BanditNetworkSetup | None = None,
+        runtime: AlgorithmRuntime | None = None,
     ) -> None:
+        member = member or PopulationIndex()
+        learn = learn or BanditLearnConfig()
+        network = network or BanditNetworkSetup()
+        runtime = runtime or AlgorithmRuntime()
+        index = member.index
+        hp_config = member.hp_config
+        mut = member.mut
+        gamma = learn.gamma
+        lamb = learn.lamb
+        reg = learn.reg
+        batch_size = learn.batch_size
+        lr = learn.lr
+        learn_step = learn.learn_step
+        net_config = network.net_config
+        actor_network = network.actor_network
+        normalize_images = network.normalize_images
+        device = runtime.device
+        accelerator = runtime.accelerator
+        wrap = runtime.wrap
+
         super().__init__(
             observation_space,
             action_space,
@@ -102,7 +94,7 @@ class NeuralUCB(RLAlgorithm[TensorDict]):
             device=device,
             accelerator=accelerator,
             normalize_images=normalize_images,
-            name="NeuralUCB",
+            name=runtime.name or "NeuralUCB",
         )
 
         assert learn_step >= 1, "Learn step must be greater than or equal to one."

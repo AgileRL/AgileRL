@@ -10,10 +10,13 @@ training).
 
 import warnings
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from agilerl.hpo.mutation import Mutations
 from agilerl.protocols import SelectionStrategyProtocol
+from agilerl.training.configs import LLMTrainCheckpointConfig
+from agilerl.utils.utils import save_llm_checkpoint
 
 if TYPE_CHECKING:
     from agilerl.llm_envs import DatasetEnv
@@ -133,3 +136,62 @@ def _resolve_training_envs(
         )
     assert env is not None
     return [env], False
+
+
+@dataclass
+class LLMCheckpointProgress:
+    """Step-based checkpoint cadence for LLM train loops without evolution."""
+
+    next_checkpoint_step: int | None
+    max_steps_checkpoint_saved: bool = False
+
+
+def save_llm_elite_if_requested(
+    agents: list[Any],
+    checkpoint: LLMTrainCheckpointConfig,
+) -> None:
+    """Write the highest-fitness agent when elite export is configured."""
+    if not checkpoint.save_elite or checkpoint.elite_path is None:
+        return
+    elite = max(
+        agents,
+        key=lambda agent: agent.fitness[-1] if agent.fitness else float("-inf"),
+    )
+    save_llm_checkpoint(elite, checkpoint.elite_path)
+
+
+def maybe_save_llm_step_checkpoint(
+    agents: list[Any],
+    progress: LLMCheckpointProgress,
+    checkpoint: LLMTrainCheckpointConfig,
+    total_steps: int,
+    max_steps: int,
+) -> None:
+    """Save a periodic or end-of-run checkpoint when evolution is off."""
+    due = False
+    if checkpoint.checkpoint_steps is not None:
+        while (
+            progress.next_checkpoint_step is not None
+            and total_steps >= progress.next_checkpoint_step
+        ):
+            due = True
+            progress.next_checkpoint_step += checkpoint.checkpoint_steps
+    path_configured = (
+        checkpoint.checkpoint_steps is not None
+        or checkpoint.checkpoint_path is not None
+        or checkpoint.elite_path is not None
+    )
+    if (
+        total_steps >= max_steps
+        and not progress.max_steps_checkpoint_saved
+        and path_configured
+    ):
+        due = True
+        progress.max_steps_checkpoint_saved = True
+    if due:
+        save_llm_checkpoint(
+            agents[-1],
+            checkpoint.checkpoint_path
+            if checkpoint.checkpoint_path is not None
+            else checkpoint.elite_path,
+        )

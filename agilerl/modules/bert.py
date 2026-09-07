@@ -451,24 +451,23 @@ class EvolvableBERT(EvolvableModule):
         :type src_key_padding_mask_for_layers: torch.Tensor | None.
         """
         convert_to_nested = False
-        if (
-            isinstance(first_layer, torch.nn.TransformerEncoderLayer)
-            and first_layer.norm_first
-            and first_layer.training
-            and first_layer.self_attn.batch_first
-            and first_layer.self_attn._qkv_same_embed_dim
-            and first_layer.norm1.eps == first_layer.norm2.eps
-            and src.dim() == 3
-            and src_key_padding_mask is not None
-            and torch._nested_tensor_from_mask_left_aligned(
-                src,
-                src_key_padding_mask.logical_not(),
-            )
-            and not output.is_nested
-            and mask is None
-            and first_layer.self_attn.num_heads % 2 != 1
-            and not torch.is_autocast_enabled()
-        ):
+        eligible = isinstance(first_layer, torch.nn.TransformerEncoderLayer)
+        eligible = eligible and first_layer.norm_first
+        eligible = eligible and first_layer.training
+        eligible = eligible and first_layer.self_attn.batch_first
+        eligible = eligible and first_layer.self_attn._qkv_same_embed_dim
+        eligible = eligible and first_layer.norm1.eps == first_layer.norm2.eps
+        eligible = eligible and src.dim() == 3
+        eligible = eligible and src_key_padding_mask is not None
+        eligible = eligible and torch._nested_tensor_from_mask_left_aligned(
+            src,
+            src_key_padding_mask.logical_not(),
+        )
+        eligible = eligible and not output.is_nested
+        eligible = eligible and mask is None
+        eligible = eligible and first_layer.self_attn.num_heads % 2 != 1
+        eligible = eligible and not torch.is_autocast_enabled()
+        if eligible:
             tensor_args = (
                 src,
                 first_layer.self_attn.in_proj_weight,

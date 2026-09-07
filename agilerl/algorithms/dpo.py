@@ -14,15 +14,12 @@ import torch.nn.functional as F
 from agilerl import HAS_LIGER_KERNEL
 
 if TYPE_CHECKING:
-    from accelerate import Accelerator
-    from peft import LoraConfig
-    from transformers import BitsAndBytesConfig
-
     from agilerl.llm_envs import DatasetEnv
 
+from agilerl.algorithms.configs import DPOObjective, DPOSetup, PopulationIndex
 from agilerl.algorithms.core.base import LLMAlgorithm
-from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
-from agilerl.protocols import PreTrainedModelProtocol
+from agilerl.algorithms.core.llm_init import named_llm_setup
+from agilerl.algorithms.core.registry import NetworkGroup
 from agilerl.typing import (
     MultiAgentObservationType,
     ObservationType,
@@ -32,7 +29,6 @@ from agilerl.utils.algo_utils import get_experiences_samples
 from agilerl.utils.llm_utils import (
     aggregate_metrics_dict,
     is_preference_prompts,
-    resolve_llm_device,
 )
 
 if HAS_LIGER_KERNEL:
@@ -44,179 +40,37 @@ class DPO(LLMAlgorithm[PreferencePrompts]):
 
     Paper: https://arxiv.org/pdf/2305.18290
 
-    :param pad_token_id: Pad token id
-    :type pad_token_id: int
-    :param pad_token: Pad token
-    :type pad_token: str
-    :param model_name: Model name
-    :type model_name: str, optional
-    :param actor_network: HuggingFace LLM
-    :type actor_network: PreTrainedModelProtocol
-    :param model_config: Model configuration, to be used when creating the model from a name or path.
-    :type model_config: dict[str, Any] | None
-    :param hp_config: RL hyperparameter mutation configuration, defaults to None, whereby algorithm mutations are disabled.
-    :type hp_config: HyperparameterConfig, optional
-    :param index: Index to keep track of object instance during tournament selection and mutation, defaults to 0
-    :type index: int, optional
-    :param batch_size: Batch size for training, defaults to 16
-    :type batch_size: int, optional
-    :param lr: Learning rate, defaults to 0.000005
-    :type lr: float, optional
-    :param beta: DPO beta parameter, defaults to 0.1
-    :type beta: float, optional
-    :param nll_alpha: Weight for the NLL loss on chosen responses (DPO + NLL), defaults to 1.0.
-        Set to 0 to disable the NLL term entirely.
-    :type nll_alpha: float, optional
-    :param max_grad_norm: Maximum gradient norm, defaults to 0.1
-    :type max_grad_norm: float, optional
-    :param update_epochs: Number of update epochs, defaults to 1
-    :type update_epochs: int, optional
-    :param calc_position_embeddings: Flag to indicate if position embeddings should be calculated, defaults to True
-    :type calc_position_embeddings: bool, optional
-    :param micro_batch_size_per_gpu: Micro batch size per GPU, defaults to None
-    :type micro_batch_size_per_gpu: int, optional
-    :param mini_batch_size: Per-rank rows covered by one optimizer step;
-        DeepSpeed's gradient_accumulation_steps is set to
-        ``mini_batch_size / micro_batch_size_per_gpu``. Defaults to None,
-        which resolves to the per-rank batch (one optimizer step per
-        batch).
-    :type mini_batch_size: int | None, optional
-    :param device: Device to train on. Ignored when an accelerator is given (each rank
-        owns its own GPU); ``None`` auto-detects CUDA/MPS/CPU.
-    :type device: str, optional
-    :param lora_config: Config for LoRA, defaults to None
-    :type lora_config: LoraConfig, optional
-    :param accelerator: Accelerator for distributed computing, defaults to None
-    :type accelerator: accelerate.Accelerator(), optional
-    :param wrap: Wrap models for distributed training upon creation, defaults to True
-    :type wrap: bool, optional
-    :param clone: Flag to indicate if the instantiation is a cloning, defaults to False
-    :type clone: bool, optional
-    :param seed: Seed for the random number generator, defaults to 42
-    :type seed: int, optional
-    :param gradient_checkpointing: Flag to indicate if gradient checkpointing should be used, defaults to True
-    :type gradient_checkpointing: bool, optional
-    :param torch_compiler: Torch compile mode (e.g. ``'default'``), defaults to None
-    :type torch_compiler: str | None, optional
-    :param use_liger_loss: Use Liger kernel for memory-efficient loss
-        computation. Defaults to ``False``. Pass ``True`` to opt in
-        (requires ``liger-kernel`` to be installed; warns and falls back
-        to ``False`` otherwise). When ``training=False`` the standard
-        path is always used regardless of this flag.
-    :type use_liger_loss: bool, optional
-    :param chunk_rows: Primary chunk-size setting for fused logit tiles used by
-        both standard and Liger paths.
-    :type chunk_rows: int | None, optional
-    :param cast_logprobs_to_fp32: When ``True`` (default), run the per-token
-        log-prob reduction (``gather`` / ``logsumexp``) in fp32 before casting
-        back to the input dtype, for numerically stable log-probs. ``False`` runs
-        it in the input dtype, saving a little memory at the cost of a per-token
-        bf16 quantisation error that can bias importance-sampling ratios.
-    :type cast_logprobs_to_fp32: bool, optional
-    :param use_separate_reference_adapter: Keep a dedicated ``reference`` LoRA
-        adapter whose weights are frozen snapshots of the actor used for the
-        DPO log-probability baseline. When ``False`` the reference log-probs
-        are obtained by disabling the actor adapter at inference time.
-        Defaults to True.
-    :type use_separate_reference_adapter: bool, optional
-    :param quantization_config: Optional ``transformers.BitsAndBytesConfig`` for
-        loading the base model in 4-/8-bit (QLoRA). ``lm_head`` is kept
-        unquantized so the fused-linear-logprob path stays numerically exact.
-    :type quantization_config: BitsAndBytesConfig | None, optional
-    :param activation_offload: When ``True``, run the training forward inside
-        ``torch.autograd.graph.save_on_cpu`` so tensors saved for backward live
-        in pinned host RAM instead of GPU memory. Trades PCIe bandwidth for GPU
-        memory (the win grows with sequence length); a no-op during rollout /
-        reference forwards.
-    :type activation_offload: bool, optional
-    :param lora_target_scope: Optional PEFT LoRA path scope for multimodal models
-        (e.g. ``"language_model"``). Passed to
-        :func:`adapt_lora_config_for_model`.
-    :type lora_target_scope: str | None, optional
+    :param llm: Base model, tokenizer, LoRA, and training setup
+    :type llm: DPOSetup
+    :param objective: Algorithm-specific objective hyperparameters
+    :type objective: DPOObjective | None
+    :param member: Population index, mutation config, and last mutation
+    :type member: PopulationIndex | None
+
     """
 
     def __init__(
         self,
-        pad_token_id: int,
-        pad_token: str,
-        model_name: str | None = None,
-        actor_network: PreTrainedModelProtocol | None = None,
-        model_config: dict[str, Any] | None = None,
-        hp_config: HyperparameterConfig | None = None,
-        index: int = 0,
-        batch_size: int = 16,
-        lr: float = 0.000005,
-        beta: float = 0.1,
-        nll_alpha: float = 1.0,
-        max_grad_norm: float = 0.1,
-        update_epochs: int = 1,
-        calc_position_embeddings: bool = True,
-        micro_batch_size_per_gpu: int | None = None,
-        mini_batch_size: int | None = None,
-        device: str | torch.device | None = None,
-        lora_config: LoraConfig | None = None,
-        accelerator: Accelerator | None = None,
-        wrap: bool = True,
-        clone: bool = False,
-        seed: int = 42,
-        gradient_checkpointing: bool = True,
-        torch_compiler: str | None = None,
-        use_liger_loss: bool = False,
-        chunk_rows: int | None = None,
-        cast_logprobs_to_fp32: bool = True,
-        use_separate_reference_adapter: bool = True,
-        quantization_config: BitsAndBytesConfig | None = None,
-        activation_offload: bool = False,
-        lora_target_scope: str | None = None,
+        llm: DPOSetup,
+        objective: DPOObjective | None = None,
+        member: PopulationIndex | None = None,
     ) -> None:
-        resolved_device = resolve_llm_device(accelerator, device)
-        super().__init__(
-            index=index,
-            batch_size=batch_size,
-            lr=lr,
-            max_grad_norm=max_grad_norm,
-            clone=clone,
-            calc_position_embeddings=calc_position_embeddings,
-            seed=seed,
-            pad_token_id=pad_token_id,
-            pad_token=pad_token,
-            use_liger_loss=use_liger_loss,
-            chunk_rows=chunk_rows,
-            lora_config=lora_config,
-            model_name=model_name,
-            actor_network=actor_network,
-            model_config=model_config,
-            micro_batch_size_per_gpu=micro_batch_size_per_gpu,
-            mini_batch_size=mini_batch_size,
-            cosine_lr_schedule_config=None,
-            hp_config=hp_config,
-            wrap=wrap,
-            device=resolved_device,
-            accelerator=accelerator,
-            name="DPO",
-            gradient_checkpointing=gradient_checkpointing,
-            torch_compiler=torch_compiler,
-            cast_logprobs_to_fp32=cast_logprobs_to_fp32,
-            use_separate_reference_adapter=use_separate_reference_adapter,
-            quantization_config=quantization_config,
-            activation_offload=activation_offload,
-            lora_target_scope=lora_target_scope,
-        )
-        self.beta = beta
-        self.nll_alpha = nll_alpha
-        self.temperature = (
-            1  # Temperature for logits calculation, DPO does not use temperature
-        )
-        self.use_vllm = False  # DPO does not use VLLM
-        self.update_epochs = update_epochs
+        objective = objective or DPOObjective()
+        member = member or PopulationIndex()
+        super().__init__(named_llm_setup(llm, "DPO"), member)
+        self._bind_dpo(llm, objective)
 
-        self._initialize_actors(actor_network, not clone)
-        # Register network groups for mutations
+    def _bind_dpo(self, llm: DPOSetup, objective: DPOObjective) -> None:
+        """Bind DPO preference-objective fields and actor networks."""
+        self.beta = objective.beta
+        self.nll_alpha = objective.nll_alpha
+        self.temperature = 1
+        self.use_vllm = False
+        self.update_epochs = objective.update_epochs
+        self._initialize_actors(llm.model.actor_network, not llm.train.clone)
         self.register_network_group(NetworkGroup(eval_network=self.actor, policy=True))
         if self.wrap:
             self.wrap_models()
-
-        # Register metrics to keep track of during training
         self.metrics.register("loss")
         self.metrics.register("chosen_reward")
         self.metrics.register("rejected_reward")
