@@ -34,7 +34,7 @@ from agilerl.utils.env_utils import (
     make_conversation_template,
     resolve_entrypoint_target,
 )
-from agilerl.utils.llm_utils import render_chat_template, validate_llm_context_lengths
+from agilerl.utils.llm_utils import render_chat_template
 from agilerl.utils.utils import make_multi_agent_vect_envs, make_vect_envs
 from agilerl.vector import AsyncPettingZooVecEnv
 from agilerl.wrappers.learning import BanditEnv
@@ -659,7 +659,6 @@ class LLMEnvSpec(BaseModel):
         tokenizer: PreTrainedTokenizerBase,
         *,
         max_model_len: int | None = None,
-        max_output_tokens: int | None = None,
     ) -> Callable[[], RolloutHarness]:
         """Build a factory that creates fresh :class:`RolloutHarness` instances.
 
@@ -672,8 +671,6 @@ class LLMEnvSpec(BaseModel):
         :type tokenizer: PreTrainedTokenizerBase
         :param max_model_len: Maximum model context length for prompt truncation.
         :type max_model_len: int | None
-        :param max_output_tokens: Maximum newly generated tokens per turn.
-        :type max_output_tokens: int | None
         :returns: A zero-argument callable that creates a ``RolloutHarness``.
         :rtype: Callable[[], RolloutHarness]
         """
@@ -684,14 +681,8 @@ class LLMEnvSpec(BaseModel):
             )
             raise TypeError(msg)
 
-        # max_output_tokens >= max_model_len zeroes the prompt budget: every episode
-        # truncates at reset and training silently never advances. Fail at setup.
-        if max_model_len is not None:
-            validate_llm_context_lengths(max_model_len, max_output_tokens)
-
         harness_kwargs: dict[str, Any] = {
             "max_model_len": max_model_len,
-            "max_output_tokens": max_output_tokens,
             "chat_template_kwargs": dict(self.chat_template_kwargs),
         }
         if self.dataset_backed_rollout:
@@ -770,7 +761,6 @@ class LLMEnvSpec(BaseModel):
                 # ``prompt_builder`` already rendered the chat template.
                 apply_chat_template=False,
                 max_model_len=harness_kwargs["max_model_len"],
-                max_output_tokens=harness_kwargs["max_output_tokens"],
             )
 
         return _dataset_factory

@@ -97,7 +97,6 @@ class TestLLMAlgorithmTest:
             FakeEnvClient(),
             max_turns=3,
             max_model_len=4,
-            max_output_tokens=2,
         )
 
         with pytest.warns(UserWarning, match="collected no turns"):
