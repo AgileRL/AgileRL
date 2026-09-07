@@ -43,15 +43,13 @@ def _detach_arena_rich_handler() -> None:
 
 @pytest.fixture(autouse=True)
 def _isolate_arena_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Prevent a developer's real Arena credentials from leaking into tests.
+    """Prevent a developer's real ``ARENA_API_KEY`` from leaking into tests.
 
     Without this, a key exported in the shell makes the CLI attempt real
     authentication (e.g. ``arena --help`` building a client), producing
     spurious 401 failures. Tests that need a key set it explicitly.
     """
     monkeypatch.delenv("ARENA_API_KEY", raising=False)
-    monkeypatch.delenv("ARENA_ORG_KEY", raising=False)
-    monkeypatch.delenv("ARENA_EXTERNAL_USER_ID", raising=False)
 
 
 @pytest.fixture

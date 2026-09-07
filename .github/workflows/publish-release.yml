@@ -2,10 +2,11 @@
 name: Publish release
 
 # Public PyPI path for spoke tags. Uploads the already-published wheel/sdist
-# for that tag. Does not rebuild. Does not publish to any private index.
+# for those tags. Does not rebuild. Does not publish to any private index.
 #
-#   vX.Y.Z              → agilerl
-#   agilerl-arena/vX.Y.Z → agilerl-arena
+#   vX.Y.Z              → latest agilerl-arena in this tree's extra range,
+#                         then agilerl (same order as `just publish`)
+#   agilerl-arena/vX.Y.Z → agilerl-arena only
 #
 # Trigger: workflow_dispatch from an existing tag ref (Use workflow from).
 # No inputs. Tag push does not publish; minting spoke tags from hub must not
@@ -34,43 +35,19 @@ jobs:
             contents: read
             id-token: write
         outputs:
-            tag: ${{ steps.tag.outputs.tag }}
-            version: ${{ steps.tag.outputs.version }}
-            dist_name: ${{ steps.tag.outputs.dist_name }}
-            package: ${{ steps.tag.outputs.package }}
-            previous_tag: ${{ steps.prev.outputs.previous_tag }}
-            arena_pin: ${{ steps.arena-pin.outputs.pin }}
+            tag: ${{ steps.plan.outputs.tag }}
+            version: ${{ steps.plan.outputs.version }}
+            dist_name: ${{ steps.plan.outputs.dist_name }}
+            package: ${{ steps.plan.outputs.package }}
+            previous_tag: ${{ steps.plan.outputs.previous_tag }}
         steps:
-            - name: Resolve tag
-              id: tag
+            - name: Require tag ref
               run: |
                   set -euo pipefail
                   if [[ "${GITHUB_REF_TYPE}" != "tag" ]]; then
                     echo "Run this workflow from a v* or agilerl-arena/v* tag (Use workflow from), not ${GITHUB_REF_TYPE} ${GITHUB_REF_NAME}" >&2
                     exit 1
                   fi
-                  TAG="${GITHUB_REF_NAME}"
-                  TAG="${TAG#refs/tags/}"
-                  case "${TAG}" in
-                    agilerl-arena/v*)
-                      VER="${TAG#agilerl-arena/v}"
-                      PKG=agilerl-arena
-                      DIST=agilerl_arena
-                      ;;
-                    v*)
-                      VER="${TAG#v}"
-                      PKG=agilerl
-                      DIST=agilerl
-                      ;;
-                    *)
-                      echo "ref ${TAG} is not a v* or agilerl-arena/v* release tag" >&2
-                      exit 1
-                      ;;
-                  esac
-                  echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
-                  echo "version=${VER}" >> "$GITHUB_OUTPUT"
-                  echo "package=${PKG}" >> "$GITHUB_OUTPUT"
-                  echo "dist_name=${DIST}" >> "$GITHUB_OUTPUT"
 
             - name: Checkout fetch script
               uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
@@ -78,33 +55,25 @@ jobs:
                   persist-credentials: false
                   fetch-depth: 1
 
-            - name: Read agilerl-arena pin
-              id: arena-pin
-              if: steps.tag.outputs.package == 'agilerl'
-              run: |
-                  set -euo pipefail
-                  pin="$(grep -o '"agilerl-arena[^"]*"' pyproject.toml | head -n1 | tr -d '"')"
-                  if [[ -z "${pin}" ]]; then
-                    echo "agilerl pyproject.toml must declare an agilerl-arena pin" >&2
-                    exit 1
-                  fi
-                  echo "pin=${pin}" >> "$GITHUB_OUTPUT"
-
-            - name: Previous same-family tag
-              id: prev
+            - name: Plan packages
+              id: plan
               env:
                   GH_TOKEN: ${{ github.token }}
-                  TAG: ${{ steps.tag.outputs.tag }}
+                  TAG: ${{ github.ref_name }}
               run: |
                   set -euo pipefail
+                  TAG="${TAG#refs/tags/}"
                   tags="$(
                     gh api --paginate \
                       "repos/${GITHUB_REPOSITORY}/git/matching-refs/tags" \
                       --jq '.[].ref' \
                       | sed 's#^refs/tags/##'
                   )"
-                  PREV="$(printf '%s\n' "${tags}" | python3 scripts/previous_spoke_tag.py "${TAG}")"
-                  echo "previous_tag=${PREV}" >> "$GITHUB_OUTPUT"
+                  printf '%s\n' "${tags}" | python3 scripts/spoke_pypi_plan.py \
+                    --tag "${TAG}" \
+                    --pyproject pyproject.toml \
+                    --json-out plan.json \
+                    --github-output "$GITHUB_OUTPUT"
 
             - name: Require read role
               env:
@@ -128,27 +97,35 @@ jobs:
                   allowed-account-ids: '761296822462'
 
             - name: Fetch INTERNAL dist
-              env:
-                  VER: ${{ steps.tag.outputs.version }}
-                  PKG: ${{ steps.tag.outputs.package }}
               run: |
                   set -euo pipefail
                   rm -rf dist
                   mkdir -p dist
-                  python3 scripts/fetch_arena_internal_dist.py \
-                    --package "${PKG}" \
-                    --version "${VER}" \
-                    --out-dir dist \
-                    --domain agilerl-pypi \
-                    --domain-owner 761296822462 \
-                    --repository arena \
-                    --region us-east-1
+                  while IFS=$'\t' read -r pkg ver; do
+                    python3 scripts/fetch_arena_internal_dist.py \
+                      --package "${pkg}" \
+                      --version "${ver}" \
+                      --out-dir dist \
+                      --domain agilerl-pypi \
+                      --domain-owner 761296822462 \
+                      --repository arena \
+                      --region us-east-1
+                  done < <(
+                    python3 scripts/spoke_pypi_plan.py --print-fetch --plan plan.json
+                  )
 
             - name: Upload dist
               uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
               with:
                   name: pypi-dist
                   path: dist/
+                  if-no-files-found: error
+
+            - name: Upload plan
+              uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+              with:
+                  name: pypi-plan
+                  path: plan.json
                   if-no-files-found: error
 
     publish:
@@ -166,13 +143,6 @@ jobs:
                   name: pypi-dist
                   path: dist
 
-            # Fail if the agilerl-arena pin is not on PyPI.
-            - name: Gate agilerl on a resolvable agilerl-arena pin
-              if: needs.fetch.outputs.package == 'agilerl'
-              env:
-                  PIN: ${{ needs.fetch.outputs.arena_pin }}
-              run: python3 -m pip install --dry-run --no-deps "${PIN}"
-
             - name: Install uv
               uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
               with:
@@ -180,19 +150,27 @@ jobs:
 
             - name: Publish to PyPI (OIDC)
               env:
-                  TAG: ${{ needs.fetch.outputs.tag }}
-                  VER: ${{ needs.fetch.outputs.version }}
-                  DIST: ${{ needs.fetch.outputs.dist_name }}
+                  PKG: ${{ needs.fetch.outputs.package }}
               run: |
                   set -euo pipefail
                   shopt -s nullglob
-                  artifacts=(dist/${DIST}-${VER}*)
-                  if [[ ${#artifacts[@]} -eq 0 ]]; then
-                    echo "missing dist artifacts for ${DIST}==${VER}"; ls -la dist; exit 1
+                  arena=(dist/agilerl_arena-*)
+                  core=(dist/agilerl-[0-9]*)
+                  if [[ "${PKG}" == agilerl-arena && ${#arena[@]} -eq 0 ]]; then
+                    echo "missing dist artifacts for agilerl-arena"; ls -la dist; exit 1
                   fi
-                  echo "Publishing ${DIST}==${VER} from tag ${TAG} via Trusted Publishing"
+                  if [[ "${PKG}" == agilerl && ${#core[@]} -eq 0 ]]; then
+                    echo "missing dist artifacts for agilerl"; ls -la dist; exit 1
+                  fi
                   # Skip artifacts already on PyPI so a retry can finish.
-                  uv publish --trusted-publishing always --check-url https://pypi.org/simple "${artifacts[@]}"
+                  if [[ ${#arena[@]} -gt 0 ]]; then
+                    echo "Publishing agilerl-arena first via Trusted Publishing"
+                    uv publish --trusted-publishing always --check-url https://pypi.org/simple "${arena[@]}"
+                  fi
+                  if [[ ${#core[@]} -gt 0 ]]; then
+                    echo "Publishing agilerl via Trusted Publishing"
+                    uv publish --trusted-publishing always --check-url https://pypi.org/simple "${core[@]}"
+                  fi
 
     github-release:
         needs: [fetch, publish]
@@ -213,44 +191,18 @@ jobs:
                   name: pypi-dist
                   path: dist
 
+            - name: Download plan
+              uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+              with:
+                  name: pypi-plan
+                  path: .
+
             - name: Create GitHub Release
               env:
                   GH_TOKEN: ${{ github.token }}
-                  TAG: ${{ needs.fetch.outputs.tag }}
-                  PREV: ${{ needs.fetch.outputs.previous_tag }}
               run: |
                   set -euo pipefail
-                  shopt -s nullglob
-                  artifacts=(dist/*)
-                  if [[ ${#artifacts[@]} -eq 0 ]]; then
-                    echo "missing dist artifacts"; ls -la dist; exit 1
-                  fi
-                  if gh release view "${TAG}" >/dev/null 2>&1; then
-                    echo "GitHub Release ${TAG} already exists; leaving body unchanged"
-                    exit 0
-                  fi
-                  notes_dir="${RUNNER_TEMP}/spoke-release"
-                  mkdir -p "${notes_dir}"
-                  if [[ -n "${PREV}" ]]; then
-                    gh api "repos/${GITHUB_REPOSITORY}/compare/${PREV}...${TAG}" \
-                      > "${notes_dir}/compare.json"
-                  else
-                    gh api "repos/${GITHUB_REPOSITORY}/commits/${TAG}" \
-                      > "${notes_dir}/compare.json"
-                  fi
-                  python3 scripts/spoke_release_notes.py \
-                    --tag "${TAG}" \
-                    --previous-tag "${PREV}" \
-                    --repo "${GITHUB_REPOSITORY}" \
-                    --title-file "${notes_dir}/title.txt" \
-                    --notes-file "${notes_dir}/notes.md" \
-                    < "${notes_dir}/compare.json"
-                  TITLE="$(cat "${notes_dir}/title.txt")"
-                  latest_args=()
-                  if [[ "${TAG}" == agilerl-arena/* ]]; then
-                    latest_args+=(--latest=false)
-                  fi
-                  gh release create "${TAG}" "${artifacts[@]}" \
-                    --title "${TITLE}" \
-                    --notes-file "${notes_dir}/notes.md" \
-                    "${latest_args[@]}"
+                  python3 scripts/spoke_github_releases.py \
+                    --plan plan.json \
+                    --dist dist \
+                    --repo "${GITHUB_REPOSITORY}"

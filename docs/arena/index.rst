@@ -35,15 +35,11 @@ Authentication
 
 Authentication is resolved automatically in priority order:
 
-1. **Organisation key** plus **external user id** (constructor arguments
-   ``org_key`` / ``external_user_id``, or ``ARENA_ORG_KEY`` /
-   ``ARENA_EXTERNAL_USER_ID``). Sends ``Authorization: Bearer <org key>``
-   and the header ``X-External-User-Id``. For partner servers.
-2. **api_key argument** passed directly to the client or CLI.
-3. **ARENA_API_KEY environment variable**: if set, no login is needed.
-4. **Stored OAuth credentials** from ``~/.arena/credentials.json`` (persisted
+1. **api_key argument** passed directly to the client or CLI.
+2. **ARENA_API_KEY environment variable**: if set, no login is needed.
+3. **Stored OAuth credentials** from ``~/.arena/credentials.json`` (persisted
    after a successful ``arena login``).
-5. **Interactive device login**: opens a browser for OAuth authorization.
+4. **Interactive device login**: opens a browser for OAuth authorization.
 
 The simplest approach for scripting and CI is to set the environment variable:
 
@@ -53,8 +49,6 @@ The simplest approach for scripting and CI is to set the environment variable:
 
 .. note::
    Personal access tokens can be found in the Arena account profile, under *Profile management* -> *CLI API Key*.
-   Organisation keys (``arena_org_…``) are minted by platform operators for partner
-   integrations and must be sent with ``X-External-User-Id``.
 
 Once set, all CLI commands and SDK calls authenticate automatically without
 requiring ``arena login``.
@@ -78,13 +72,7 @@ persists credentials locally so you only need to log in once per machine:
          # Option 2: Pass the key explicitly
          client = ArenaClient(api_key="arena_pat_...")
 
-         # Option 3: Partner organisation key (requires an external user id)
-         client = ArenaClient(
-             org_key="arena_org_...",
-             external_user_id="partner-user-id",
-         )
-
-         # Option 4: Interactive device login (one-time)
+         # Option 3: Interactive device login (one-time)
          client = ArenaClient()
          client.login()  # opens browser, persists credentials
 
@@ -98,9 +86,6 @@ persists credentials locally so you only need to log in once per machine:
 
          # Or skip login entirely with an env var or flag
          export ARENA_API_KEY="arena_pat_..."
-         # Partner servers:
-         export ARENA_ORG_KEY="arena_org_..."
-         export ARENA_EXTERNAL_USER_ID="partner-user-id"
 
 
 .. _arena_environments:

@@ -21,22 +21,7 @@ from agilerl.arena.exceptions import ArenaAuthError, ArenaTimeoutError
 
 logger = logging.getLogger(__name__)
 
-EXTERNAL_USER_ID_HEADER = "X-External-User-Id"
 _DEFAULT_ACCESS_SKEW_SECONDS = 60
-
-
-def validate_partner_credentials(
-    org_key: str | None, external_user_id: str | None
-) -> None:
-    """Raise if only one of organisation key and external user id is set."""
-    if bool(org_key) == bool(external_user_id):
-        return
-    msg = "Organisation key and external user id must be set together."
-    raise ArenaAuthError(
-        msg,
-        sdk_hint="Pass org_key and external_user_id together, or set ARENA_ORG_KEY and ARENA_EXTERNAL_USER_ID.",
-        cli_hint="Pass --org-key and --external-user-id, or set ARENA_ORG_KEY and ARENA_EXTERNAL_USER_ID.",
-    )
 
 
 def oauth_access_token_expires_at(access_token: str | None) -> float | None:

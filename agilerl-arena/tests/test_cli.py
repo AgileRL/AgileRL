@@ -144,8 +144,6 @@ class TestCommandConfig:
             )
             MockArenaClient.assert_called_once_with(
                 api_key="pat_123",
-                org_key=None,
-                external_user_id=None,
                 request_timeout=5,
                 upload_timeout=120,
             )
@@ -179,8 +177,6 @@ class TestResolveRootCommandConfig:
         cfg = _resolve_root_command_config(ctx)
         assert isinstance(cfg, CommandConfig)
         assert cfg.api_key is None
-        assert cfg.org_key is None
-        assert cfg.external_user_id is None
         assert cfg.base_url is None
         assert cfg.request_timeout == 30
         assert cfg.upload_timeout == 300
@@ -751,7 +747,6 @@ class TestDatasetsCreateCommand:
             column_mapping='{"prompt": "question"}',
             description="test set",
             file=csv_file,
-            config=None,
             hf_dataset_name=None,
             hf_config=None,
             hf_split=None,
@@ -766,43 +761,6 @@ class TestDatasetsCreateCommand:
         assert result.exit_code != 0
         assert "Provide --column-mapping or --column-mapping-file." in result.output
         mock_client.create_dataset.assert_not_called()
-
-    def test_create_with_parquet_folder_and_config(self, runner, mock_client, tmp_path):
-        mapping_file = tmp_path / "mapping.json"
-        mapping_file.write_text('{"question": "q"}', encoding="utf-8")
-        shard = tmp_path / "main" / "train.parquet"
-        shard.parent.mkdir()
-        shard.write_bytes(b"PAR1")
-        mock_client.create_dataset.return_value = {"name": "gsm8k", "id": 2}
-        with _patched_arena_client(mock_client):
-            result = runner.invoke(
-                main,
-                [
-                    "datasets",
-                    "create",
-                    "gsm8k",
-                    "--category",
-                    "reasoning",
-                    "--column-mapping-file",
-                    str(mapping_file),
-                    "--file",
-                    str(tmp_path),
-                    "--config",
-                    "main",
-                ],
-            )
-        assert result.exit_code == 0
-        mock_client.create_dataset.assert_called_once_with(
-            name="gsm8k",
-            category="reasoning",
-            column_mapping='{"question": "q"}',
-            description=None,
-            file=tmp_path,
-            config="main",
-            hf_dataset_name=None,
-            hf_config=None,
-            hf_split=None,
-        )
 
 
 class TestDatasetsDeleteCommand:
@@ -1587,32 +1545,6 @@ class TestGlobalOptions:
         assert result.exit_code == 0
         config_arg = m.call_args[0][0]
         assert config_arg.api_key == "pat_abc"
-
-    def test_org_key_passed_to_config(self, runner, mock_client):
-        with patch("agilerl.arena.config.build_client", return_value=mock_client) as m:
-            result = runner.invoke(
-                main,
-                [
-                    "--org-key",
-                    "arena_org_secret",
-                    "--external-user-id",
-                    "partner-user-1",
-                    "logout",
-                ],
-            )
-        assert result.exit_code == 0
-        config_arg = m.call_args[0][0]
-        assert config_arg.org_key == "arena_org_secret"
-        assert config_arg.external_user_id == "partner-user-1"
-
-    def test_keycloak_url_passed_to_config(self, runner, mock_client):
-        with patch("agilerl.arena.config.build_client", return_value=mock_client) as m:
-            result = runner.invoke(
-                main, ["--keycloak-url", "http://kc.example", "logout"]
-            )
-        assert result.exit_code == 0
-        config_arg = m.call_args[0][0]
-        assert config_arg.keycloak_url == "http://kc.example"
 
     def test_base_url_passed_to_config(self, runner, mock_client):
         with patch("agilerl.arena.config.build_client", return_value=mock_client) as m:
