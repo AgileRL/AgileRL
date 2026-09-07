@@ -328,6 +328,9 @@ class LoraConfigDict(BaseModel):
     lora_r: int = Field(default=16, ge=1)
     lora_alpha: int = Field(default=32, ge=1)
     target_modules: list[str] | str | set[str] = Field(default="all-linear")
+    # Packed MoE expert parameter paths (PEFT ``target_parameters``), e.g.
+    # ["block_sparse_moe.experts.gate_up_proj", ...]; requires lora_dropout=0.
+    target_parameters: list[str] | None = Field(default=None)
     task_type: str = Field(default="CAUSAL_LM", min_length=1)
     lora_dropout: float = Field(default=0.05, ge=0.0, le=1.0)
 

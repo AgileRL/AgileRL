@@ -1371,7 +1371,8 @@ class TestLLMSpecConstruction:
     def test_dpo_spec_fields(self, dpo_spec):
         assert dpo_spec.name == "DPO"
         assert dpo_spec.env_type == "dataset"
-        assert dpo_spec.objective == "preference"
+        assert "objective" not in type(dpo_spec).__dict__
+        assert dpo_spec.objective is None
         assert isinstance(dpo_spec, LLMAlgorithmSpec)
         assert dpo_spec.pretrained_model_name_or_path == "gpt2"
 
@@ -2208,7 +2209,6 @@ class TestLocalTrainerIntegration:
             update_epochs=1,
             lora_config=lora_config,
             max_model_len=128,
-            # Must stay under max_model_len or the rollout prompt budget is 0.
             max_output_tokens=32,
         )
 
@@ -3003,6 +3003,21 @@ class TestLocalTrainerResolveEnvSpecBranches:
         result = LocalTrainer._resolve_env_spec(manifest)
         assert isinstance(result, LLMEnvSpec)
         assert result.env_type == LLMEnvType.ROLLOUT
+
+    @pytest.mark.skipif(not HAS_LLM_DEPENDENCIES, reason="LLM deps not installed")
+    def test_dpo_fills_preference_when_env_omits_objective(self):
+        from agilerl.models.algorithms.dpo import DPOSpec
+        from agilerl.models.env import LLMEnvSpec, LLMEnvType
+
+        manifest = MagicMock()
+        manifest.environment = {"dataset": "dpo.parquet"}
+        manifest.algorithm = DPOSpec(pretrained_model_name_or_path="gpt2")
+
+        result = LocalTrainer._resolve_env_spec(manifest)
+
+        assert isinstance(result, LLMEnvSpec)
+        assert result.env_type == LLMEnvType.DATASET
+        assert result.objective == "preference"
 
 
 def test_from_manifest_infers_multiinput_when_arch_absent(tmp_path):

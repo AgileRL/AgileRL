@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import warnings
-from enum import Enum
 from importlib.metadata import PackageNotFoundError, metadata, version
 from pkgutil import extend_path
 from typing import TYPE_CHECKING
@@ -16,9 +15,10 @@ from packaging.requirements import Requirement
 __path__ = extend_path(__path__, __name__)
 
 if TYPE_CHECKING:
+    from agilerl.arena import AgentType
     from agilerl.training.trainer import ArenaTrainer, LocalTrainer
 
-__all__ = ["ArenaTrainer", "LocalTrainer"]
+__all__ = ["AgentType", "ArenaTrainer", "LocalTrainer"]
 
 # pygame currently imports deprecated pkg_resources -> suppress warning
 warnings.filterwarnings(
@@ -60,20 +60,12 @@ HAS_VLLM = _is_distribution_installed("vllm")
 HAS_DEEPSPEED = _is_distribution_installed("deepspeed")
 
 
-class AgentType(Enum):
-    """Enumeration of supported agent types."""
-
-    SingleAgent = "single_agent"
-    MultiAgent = "multi_agent"
-    LLMAgent = "llm_agent"
-    OfflineAgent = "offline_agent"
-    BanditAgent = "bandit_agent"
-
-
-# NOTE: Need to lazy-load to avoid circular imports
+# AgentType lives on agilerl-arena. lazy.attach must run after extend_path.
+# LocalTrainer and ArenaTrainer are lazy to avoid circular imports.
 __getattr__, __dir__, _ = lazy.attach(
     __name__,
     submod_attrs={
+        "arena": ["AgentType"],
         "training.trainer": ["LocalTrainer", "ArenaTrainer"],
     },
 )

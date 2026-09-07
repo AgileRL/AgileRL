@@ -63,6 +63,7 @@ name = "agilerl"
 source = { editable = "." }
 dependencies = [
     { name = "accelerate" },
+    { name = "agilerl-arena" },
     { name = "dill" },
     { name = "fastrand" },
     { name = "flatten-dict" },
@@ -158,6 +159,7 @@ docs = [
 [package.metadata]
 requires-dist = [
     { name = "accelerate", specifier = ">=1.7.0" },
+    { name = "agilerl-arena", editable = "agilerl-arena" },
     { name = "agilerl-arena", marker = "extra == 'all'", editable = "agilerl-arena" },
     { name = "agilerl-arena", marker = "extra == 'arena'", editable = "agilerl-arena" },
     { name = "bitsandbytes", marker = "sys_platform == 'linux' and extra == 'all'", specifier = "==0.49.2" },

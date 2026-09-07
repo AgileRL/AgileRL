@@ -10,17 +10,17 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, ClassVar, TypeVar
 
 import h5py
-from pydantic import BaseModel, ConfigDict, Field
 
-from agilerl import HAS_LLM_DEPENDENCIES, AgentType, algorithms
+from agilerl import HAS_LLM_DEPENDENCIES, algorithms
 from agilerl.algorithms.core import (
     EvolvableAlgorithm,
     LLMAlgorithm,
     MultiAgentRLAlgorithm,
     RLAlgorithm,
 )
+from agilerl.arena import AgentType
+from agilerl.arena.models.algo import AlgorithmSpec as ArenaAlgorithmSpec
 from agilerl.models.env import LLMEnvSpec, OfflineEnvSpec
-from agilerl.models.networks import NetworkSpec
 from agilerl.utils.algo_utils import VLLMConfig
 from agilerl.utils.llm_utils import (
     apply_pad_token_id,
@@ -40,9 +40,9 @@ if TYPE_CHECKING:
     from agilerl.models.env import (
         BanditEnvSpec,
         GymEnvSpec,
-        LLMEnvType,
         PzEnvSpec,
     )
+    from agilerl.models.env_types import LLMEnvType
     from agilerl.models.training import TrainingSpec
 
     if HAS_LLM_DEPENDENCIES:
@@ -312,32 +312,22 @@ def _resume_and_warn_on_drift(algo: AnyAlgorithm, path: str, *, index: int) -> N
         )
 
 
-class AlgorithmSpec(BaseModel):
-    """Base specification for all algorithms.
+class AlgorithmSpec(ArenaAlgorithmSpec):
+    """Framework algorithm spec: arena fields plus construction.
 
-    Defines common fields and behavior for algorithm specifications, including
-    batch size and hyperparameter configuration.  Concrete subclasses must set
-    the ``agent_type`` class variable and override :meth:`get_training_fn`.
-
-    The algorithm class is resolved from ``agilerl.algorithms`` using
-    the naming convention ``<Name>Spec`` -> ``<Name>`` (e.g. ``PPOSpec`` ->
-    ``PPO``).
+    Concrete subclasses must override :meth:`get_training_fn`. The algorithm
+    class is resolved from ``agilerl.algorithms`` as ``<Name>Spec`` -> ``<Name>``.
     """
 
-    batch_size: int = Field(default=128, ge=1)
     hp_config: HyperparameterConfig | None = None
 
     off_policy: ClassVar[bool] = False
     offline: ClassVar[bool] = False
     bandit: ClassVar[bool] = False
-    default_evo_steps: ClassVar[int] = 10_000
 
     _algo_class_cache: ClassVar[
         type[RLAlgorithm | MultiAgentRLAlgorithm | LLMAlgorithm] | None
     ] = None
-
-    agent_type: ClassVar[AgentType]
-    model_config = ConfigDict(arbitrary_types_allowed=True)
 
     @classmethod
     def algo_class(cls) -> type[RLAlgorithm | MultiAgentRLAlgorithm | LLMAlgorithm]:
@@ -347,11 +337,6 @@ class AlgorithmSpec(BaseModel):
                 algorithms, cls.__name__.removesuffix("Spec")
             )
         return cls._algo_class_cache
-
-    @property
-    def name(self) -> str:
-        """Return the name of the algorithm."""
-        return self.__class__.__name__.removesuffix("Spec")
 
     def build_algorithm(self) -> AlgoT:
         """Build the algorithm instance using spec fields + runtime args."""
@@ -463,17 +448,16 @@ class AlgorithmSpec(BaseModel):
 
 
 class RLAlgorithmSpec(AlgorithmSpec):
-    """Specification for single-agent reinforcement learning algorithms.
+    """Single-agent RL spec: construction methods.
 
-    Extends :class:`AlgorithmSpec` with single-agent specific fields like
-    network configuration, learning step frequency, and discount factor.
+    Concrete specs inherit the arena algorithm class for fields. This base
+    does not inherit arena ``RLAlgorithmSpec``; that would put base-class
+    field defaults ahead of the concrete arena spec in the MRO.
     """
 
-    learn_step: int = Field(default=5, ge=1)
-    gamma: float = Field(default=0.99, ge=0.0, le=1.0)
-    net_config: NetworkSpec | None = Field(default=None)
-
-    agent_type: ClassVar[AgentType] = AgentType.SingleAgent
+    # Concrete specs declare ``net_config``; the trainer writes it through this base.
+    if TYPE_CHECKING:
+        net_config: Any = None
 
     @classmethod
     def algo_class(cls) -> type[RLAlgorithm]:
@@ -537,18 +521,16 @@ class RLAlgorithmSpec(AlgorithmSpec):
 
 
 class MultiAgentRLAlgorithmSpec(AlgorithmSpec):
-    """Specification for multi-agent reinforcement learning algorithms.
+    """Multi-agent RL spec: construction methods.
 
-    Extends :class:`AlgorithmSpec` with multi-agent specific fields and
-    support for multiple observation/action spaces and agent IDs.
+    Concrete specs inherit the arena algorithm class for fields. This base
+    does not inherit arena ``MultiAgentRLAlgorithmSpec``; that would put
+    base-class field defaults ahead of the concrete arena spec in the MRO.
     """
 
-    learn_step: int = Field(default=2048, ge=1)
-    gamma: float = Field(default=0.99, ge=0.0, le=1.0)
-    torch_compiler: str | None = Field(default=None)
-    net_config: NetworkSpec | dict[str, NetworkSpec] | None = Field(default=None)
-
-    agent_type: ClassVar[AgentType] = AgentType.MultiAgent
+    # Concrete specs declare ``net_config``; the trainer writes it through this base.
+    if TYPE_CHECKING:
+        net_config: Any = None
 
     @classmethod
     def algo_class(cls) -> type[MultiAgentRLAlgorithm]:
@@ -612,44 +594,22 @@ class MultiAgentRLAlgorithmSpec(AlgorithmSpec):
 
 
 class LLMAlgorithmSpec(AlgorithmSpec):
-    """Specification for LLM fine-tuning algorithms.
+    """LLM spec: construction methods plus PEFT ``lora_config``.
 
-    Extends :class:`AlgorithmSpec` with LLM-specific fields including LoRA
-    configuration, model parameters, and training hyperparameters.
-
-    Subclasses set :attr:`env_type` to ``"rollout"``
-    (:class:`~agilerl.llm_envs.RolloutHarness`) or ``"dataset"``
-    (:class:`~agilerl.llm_envs.DatasetEnv`, which also sets :attr:`objective`).
+    Concrete specs inherit the arena algorithm class for fields. This base
+    does not inherit arena ``LLMAlgorithmSpec``; that would put base-class
+    field defaults ahead of the concrete arena spec in the MRO.
     """
 
-    beta: float = Field(default=0.001, ge=0.0, le=1.0)
-    max_grad_norm: float = Field(default=0.1, ge=0.0)
-    update_epochs: int = Field(default=1, ge=1)
-    use_separate_reference_adapter: bool = Field(default=False)
-    calc_position_embeddings: bool = Field(default=True)
-    gradient_checkpointing: bool = Field(default=True)
-    use_liger_loss: bool = Field(default=False)
-    seed: int = Field(default=42)
-    quantization: str | dict[str, Any] | None = Field(default=None)
-    activation_offload: bool = Field(default=False)
-    use_sequence_packing: bool = Field(default=False)
-    lora_target_scope: str | None = Field(default=None)
-    chunk_rows: int | None = Field(default=None, ge=1)
-    micro_batch_size_per_gpu: int | None = Field(default=None, ge=1)
-    mini_batch_size: int | None = Field(default=None, ge=1)
-    vllm_importance_sampling_correction: bool = Field(default=True)
-    vllm_importance_sampling_cap: float = Field(default=2.0, ge=0.0)
-    attn_implementation: str | None = Field(default=None)
+    lora_config: LoraConfig | None = None
 
-    # These fields come from the "network" section of the manifest
-    pretrained_model_name_or_path: str | None = Field(default=None, min_length=1)
-    max_model_len: int = Field(default=1024, ge=1)
-    lora_config: LoraConfig | None = Field(default=None)
-
-    agent_type: ClassVar[AgentType] = AgentType.LLMAgent
-    default_evo_steps: ClassVar[int] = 5
-    env_type: ClassVar[LLMEnvType]
-    objective: ClassVar[str | None] = None
+    # Arena LLM specs declare these; construction and the trainer read them here.
+    if TYPE_CHECKING:
+        env_type: ClassVar[LLMEnvType]
+        objective: ClassVar[str | None]
+        pretrained_model_name_or_path: str | None = None
+        max_model_len: int = 1024
+        seed: int = 42
 
     @classmethod
     def algo_class(cls) -> type[LLMAlgorithm]:

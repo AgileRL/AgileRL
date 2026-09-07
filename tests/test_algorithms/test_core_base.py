@@ -6978,6 +6978,59 @@ class TestLLMGenerateWithVllmColocateFullPaths:
         assert sent[0]["prompt_token_ids"] == [1, 2, 3, 9, 9]
         assert len(token_ids) == 1
 
+    def test_generate_with_vllm_colocate_clamps_min_tokens_to_remaining(self):
+        agent = _make_llm_agent()
+        agent.pad_token = "<pad>"
+        agent.pad_token_id = 0
+        agent.max_output_tokens = 64
+        agent.max_model_len = 20
+        agent.repetition_penalty = 1.0
+        agent.temperature = 1.0
+        agent.top_p = 1.0
+        agent.top_k = None
+        agent.min_p = None
+        agent.min_output_tokens = 16
+        agent.accelerator = None
+
+        vllm_config = MagicMock()
+        vllm_config.tensor_parallel_size = 1
+        vllm_config.presence_penalty = 0.0
+        vllm_config.frequency_penalty = 0.0
+        vllm_config.stop_sequences = None
+        agent.vllm_config = vllm_config
+        agent.device = "cpu"
+
+        prompts = [
+            {"input_ids": torch.tensor([[1, 2, 3, 4, 5]]), "text": "hello"},
+        ]
+
+        mock_output = MagicMock()
+        mock_output.outputs = [MagicMock(token_ids=list(range(5)))]
+        agent.llm = MagicMock()
+        agent.llm.generate.return_value = [mock_output]
+
+        captured: list[dict] = []
+
+        def capture_sampling_params(**kwargs):
+            captured.append(kwargs)
+            return MagicMock()
+
+        with (
+            patch(
+                "agilerl.algorithms.core.base.SamplingParams",
+                side_effect=capture_sampling_params,
+                create=True,
+            ),
+            patch(
+                "agilerl.algorithms.core.base.stack_and_pad_experiences",
+                return_value=(torch.zeros(1, 5), None),
+            ),
+        ):
+            agent._generate_with_vllm_colocate(prompts, group_size=1, temperature=0.9)
+
+        assert captured[0]["max_tokens"] == 15
+        assert captured[0]["min_tokens"] == 15
+
 
 class TestLLMGenerateWithVllmColocateAccelerator:
     """_generate_with_vllm_colocate does not world-barrier before generate."""

@@ -10,8 +10,8 @@ from typing import TYPE_CHECKING, Any
 
 from pydantic import Field
 
+from agilerl.arena.models.algorithms.td3 import TD3Spec as ArenaTD3Spec
 from agilerl.models.algo import RLAlgorithmSpec, off_policy, register
-from agilerl.models.networks import DeterministicActorSpec
 
 if TYPE_CHECKING:
     from agilerl.modules import EvolvableModule
@@ -21,21 +21,9 @@ else:
 
 @register()
 @off_policy()
-class TD3Spec(RLAlgorithmSpec):
+class TD3Spec(RLAlgorithmSpec, ArenaTD3Spec):
     """Specification for TD3 algorithm."""
 
-    vect_noise_dim: int = Field(default=1, ge=1)
-    lr_actor: float = Field(default=0.0001, ge=0.0)
-    lr_critic: float = Field(default=0.001, ge=0.0)
-    tau: float = Field(default=0.005)
-    policy_freq: int = Field(default=2, ge=1)
-    O_U_noise: bool = Field(default=True)
-    expl_noise: float = Field(default=0.1)
-    mean_noise: float = Field(default=0.0)
-    theta: float = Field(default=0.15)
-    dt: float = Field(default=0.01)
-    share_encoders: bool = Field(default=False)
-    net_config: DeterministicActorSpec | None = Field(default=None)
     actor_network: EvolvableModule | None = Field(default=None)
     critic_networks: list[EvolvableModule] | None = Field(default=None)
 

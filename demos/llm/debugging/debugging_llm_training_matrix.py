@@ -337,7 +337,6 @@ def run_rollout_case(
             max_turns=1,
             apply_chat_template=False,
             max_model_len=args.max_model_len,
-            max_output_tokens=args.max_output_tokens,
         )
 
     tournament = mutation = None

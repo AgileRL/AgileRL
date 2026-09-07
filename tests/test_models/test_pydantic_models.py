@@ -836,9 +836,9 @@ class TestBuildAlgorithmForwardsOnlySetFields:
     """Unset spec fields must fall through to the algorithm's own defaults."""
 
     def test_rl_spec_forwards_only_set_fields(self):
-        from agilerl.models.algo import RLAlgorithmSpec
+        from agilerl.models.algorithms.dqn import DQNSpec
 
-        spec = RLAlgorithmSpec(learn_step=2)
+        spec = DQNSpec(learn_step=2)
         mock_algo_cls = MagicMock()
         with patch.object(type(spec), "algo_class", return_value=mock_algo_cls):
             spec.build_algorithm(
@@ -852,9 +852,9 @@ class TestBuildAlgorithmForwardsOnlySetFields:
         assert "batch_size" not in kwargs
 
     def test_multi_agent_spec_forwards_only_set_fields(self):
-        from agilerl.models.algo import MultiAgentRLAlgorithmSpec
+        from agilerl.models.algorithms.ippo import IPPOSpec
 
-        spec = MultiAgentRLAlgorithmSpec(gamma=0.9)
+        spec = IPPOSpec(gamma=0.9)
         mock_algo_cls = MagicMock()
         with patch.object(type(spec), "algo_class", return_value=mock_algo_cls):
             spec.build_algorithm(

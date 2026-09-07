@@ -19,3 +19,4 @@ class SFTSpec(LLMAlgorithmSpec):
 
     lr: float = Field(default=0.00005)
     env_type: ClassVar[LLMEnvType] = LLMEnvType.DATASET
+    objective: ClassVar[str] = "sft"

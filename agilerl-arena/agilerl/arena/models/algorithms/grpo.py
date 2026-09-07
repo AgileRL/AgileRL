@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from typing import ClassVar
+from typing import ClassVar, Literal
 
 from pydantic import Field, model_validator
 
@@ -27,6 +27,18 @@ class GRPOSpec(LLMAlgorithmSpec):
     cosine_lr_schedule_config: CosineLRScheduleConfig | None = Field(default=None)
     vllm_config: VLLMConfig | None = Field(default=None)
     use_vllm: bool = Field(default=False)
+    adv_norm: str = Field(default="mean_std")
+    importance_sampling_level: Literal["token", "turn", "trajectory"] | None = Field(
+        default=None
+    )
+    advantage_granularity: Literal["auto", "trajectory", "turn"] = Field(default="auto")
+    whiten_advantages: bool = Field(default=False)
+    adv_clip_range: float | None = Field(default=None)
+    filter_zero_adv: bool = Field(default=False)
+    turn_advantage_trajectory_fallback: bool = Field(default=True)
+    loss_norm: Literal["micro_batch", "accumulation_window"] = Field(
+        default="micro_batch"
+    )
 
     env_type: ClassVar[LLMEnvType] = LLMEnvType.ROLLOUT
 
