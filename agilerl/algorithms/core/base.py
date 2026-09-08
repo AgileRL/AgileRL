@@ -5601,26 +5601,31 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
     def _backward_pass(self, loss: torch.Tensor) -> None:
         """Perform a backward pass and optimizer step.
 
+        Non-reentrant checkpointing recomputes the actor forward during
+        ``backward``. ``_amp_ctx`` must still be active then so AMP and PEFT
+        LoRA input dtypes match the tensors saved on the first forward.
+
         :param loss: Combined loss.
         :type loss: torch.Tensor
         """
-        if self._uses_deepspeed:
-            assert self.accelerator is not None  # _uses_deepspeed implies one
-            self.accelerator.backward(loss)
-            if self.lr_scheduler is not None:
-                self.lr_scheduler.step()
-                self.lr = float(self.lr_scheduler.get_last_lr()[0])
-        else:
-            loss.backward()
+        with self._amp_ctx():
+            if self._uses_deepspeed:
+                assert self.accelerator is not None  # _uses_deepspeed implies one
+                self.accelerator.backward(loss)
+                if self.lr_scheduler is not None:
+                    self.lr_scheduler.step()
+                    self.lr = float(self.lr_scheduler.get_last_lr()[0])
+            else:
+                loss.backward()
 
-            for group in self.optimizer.optimizer.param_groups:
-                clip_grad_norm_(group["params"], self.max_grad_norm)
+                for group in self.optimizer.optimizer.param_groups:
+                    clip_grad_norm_(group["params"], self.max_grad_norm)
 
-            self.optimizer.step()
-            self.optimizer.zero_grad()
-            if self.lr_scheduler is not None:
-                self.lr_scheduler.step()
-                self.lr = float(self.lr_scheduler.get_last_lr()[0])
+                self.optimizer.step()
+                self.optimizer.zero_grad()
+                if self.lr_scheduler is not None:
+                    self.lr_scheduler.step()
+                    self.lr = float(self.lr_scheduler.get_last_lr()[0])
 
     @property
     def _peft_model(self) -> Any:  # noqa: ANN401 -- PeftModel lives at a wrapper-specific attribute; concrete type varies

@@ -1793,25 +1793,41 @@ class _PlainLinearModel(nn.Module):
 class _PlainLoraConfig:
     """Minimal LoraConfig stand-in without ``to_dict`` (deepcopy clone path)."""
 
-    def __init__(self, target_modules, exclude_modules=None):
+    def __init__(self, target_modules, exclude_modules=None, target_parameters=None):
         self.target_modules = target_modules
         self.exclude_modules = exclude_modules
+        self.target_parameters = target_parameters
 
 
 class _DictLoraConfig:
     """LoraConfig stand-in with ``to_dict`` (reconstruction clone path)."""
 
-    def __init__(self, target_modules=None, exclude_modules=None, r=8):
+    def __init__(
+        self, target_modules=None, exclude_modules=None, target_parameters=None, r=8
+    ):
         self.target_modules = target_modules
         self.exclude_modules = exclude_modules
+        self.target_parameters = target_parameters
         self.r = r
 
     def to_dict(self):
         return {
             "target_modules": self.target_modules,
             "exclude_modules": self.exclude_modules,
+            "target_parameters": self.target_parameters,
             "r": self.r,
         }
+
+
+class _MambaLikeModel(nn.Module):
+    """Tiny module with a Mamba-family ``config.model_type``."""
+
+    def __init__(self):
+        super().__init__()
+        self.config = SimpleNamespace(model_type="nemotron_h")
+        self.in_proj = nn.Linear(4, 4)
+        self.out_proj = nn.Linear(4, 4)
+        self.conv1d = nn.Conv1d(4, 4, 1)
 
 
 class TestBuildBnbQuantizationConfig:
@@ -2165,6 +2181,78 @@ class TestAdaptLoraConfigForModel:
         ) as exc_info:
             adapt_lora_config_for_model(model, cfg)
         assert "LORA_TARGET_SCOPE" in str(exc_info.value)
+
+
+class TestAdaptLoraConfigForModelMamba:
+    def test_non_mamba_model_is_unchanged(self):
+        cfg = _PlainLoraConfig(target_modules=["in_proj", "out_proj"])
+
+        assert adapt_lora_config_for_model(_PlainLinearModel(), cfg) is cfg
+
+    def test_all_linear_excludes_fused_mamba_modules(self):
+        cfg = _PlainLoraConfig(target_modules="all-linear")
+
+        adapted = adapt_lora_config_for_model(_MambaLikeModel(), cfg)
+
+        assert adapted is not cfg
+        assert adapted.target_modules == "all-linear"
+        assert set(adapted.exclude_modules) == {"conv1d", "out_proj"}
+        assert adapted.target_parameters is None
+
+    def test_named_out_proj_and_conv1d_are_dropped(self):
+        cfg = _PlainLoraConfig(
+            target_modules=["in_proj", "out_proj", "conv1d"],
+            target_parameters=["mixer.experts.up_proj"],
+        )
+
+        adapted = adapt_lora_config_for_model(_MambaLikeModel(), cfg)
+
+        assert adapted.target_modules == ["in_proj"]
+        assert adapted.target_parameters == ["mixer.experts.up_proj"]
+        assert set(adapted.exclude_modules) == {"conv1d", "out_proj"}
+        assert cfg.target_modules == ["in_proj", "out_proj", "conv1d"]
+
+    def test_out_proj_only_raises(self):
+        cfg = _PlainLoraConfig(target_modules=["out_proj"])
+
+        with pytest.raises(ValueError, match="Mamba-incompatible"):
+            adapt_lora_config_for_model(_MambaLikeModel(), cfg)
+
+    def test_out_proj_weight_parameter_target_is_dropped(self):
+        cfg = _PlainLoraConfig(
+            target_modules=["in_proj"],
+            target_parameters=["out_proj.weight", "mixer.experts.up_proj"],
+        )
+
+        adapted = adapt_lora_config_for_model(_MambaLikeModel(), cfg)
+
+        assert adapted.target_parameters == ["mixer.experts.up_proj"]
+
+    def test_to_dict_config_reconstructs_without_forbidden_modules(self):
+        cfg = _DictLoraConfig(target_modules=["q_proj", "out_proj"], r=16)
+
+        adapted = adapt_lora_config_for_model(_MambaLikeModel(), cfg)
+
+        assert isinstance(adapted, _DictLoraConfig)
+        assert adapted.r == 16
+        assert adapted.target_modules == ["q_proj"]
+        assert set(adapted.exclude_modules) == {"conv1d", "out_proj"}
+
+    def test_regex_targets_are_not_rewritten(self):
+        cfg = _PlainLoraConfig(target_modules=r".*\.in_proj")
+
+        adapted = adapt_lora_config_for_model(_MambaLikeModel(), cfg)
+
+        assert adapted.target_modules == r".*\.in_proj"
+        assert set(adapted.exclude_modules) == {"conv1d", "out_proj"}
+
+    def test_already_excluded_fused_modules_is_identity(self):
+        cfg = _PlainLoraConfig(
+            target_modules=["in_proj"],
+            exclude_modules=["conv1d", "out_proj"],
+        )
+
+        assert adapt_lora_config_for_model(_MambaLikeModel(), cfg) is cfg
 
 
 class TestLogCudaMemorySnapshot:

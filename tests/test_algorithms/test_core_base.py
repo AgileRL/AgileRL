@@ -2229,6 +2229,25 @@ class TestLLMBackwardPass:
         agent.lr_scheduler.step.assert_called_once()
         assert agent.lr == 5e-5
 
+    def test_backward_pass_holds_amp_ctx_through_backward(self):
+        agent = _make_llm_agent(accelerator=None)
+        agent.accelerator = None
+        agent.max_grad_norm = 1.0
+        entered: list[bool] = []
+        inner = agent._amp_ctx
+
+        @contextmanager
+        def tracking_amp_ctx():
+            entered.append(True)
+            with inner():
+                yield
+
+        agent._amp_ctx = tracking_amp_ctx
+        loss = MagicMock()
+        LLMAlgorithm._backward_pass(agent, loss)
+        assert entered == [True]
+        loss.backward.assert_called_once()
+
 
 class TestLLMLogprobsFromLogits:
     def test_logprobs_from_logits_computes_log_probs(self):
