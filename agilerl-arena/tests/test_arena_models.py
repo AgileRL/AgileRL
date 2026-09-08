@@ -23,6 +23,7 @@ from agilerl.arena.models import (
     TrainingManifest,
     TrainingSpec,
 )
+from agilerl.arena.models.algorithms.dpo import DPOSpec
 from agilerl.arena.models.algorithms.dqn import DQNSpec
 from agilerl.arena.models.env import EnvSpec, LLMEnvType
 from agilerl.arena.models.manifest import (
@@ -464,3 +465,9 @@ def test_python_manifest_accepts_network_spec_object() -> None:
     assert manifest.network is not None
     assert manifest.network["encoder_config"]["hidden_size"] == [64]
     assert "arch" not in manifest.network["encoder_config"]
+
+
+class TestDPOSpec:
+    def test_does_not_declare_objective(self) -> None:
+        assert "objective" not in DPOSpec.__dict__
+        assert DPOSpec.objective is None

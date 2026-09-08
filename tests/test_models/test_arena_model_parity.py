@@ -188,6 +188,14 @@ class TestArenaModelRegistryParity:
             f"Arena algorithms missing from core ALGO_REGISTRY: {missing}"
         )
 
+    def test_core_only_algorithm_names_empty_when_llm_installed(self) -> None:
+        missing = core_only_algorithm_names()
+        if missing and not HAS_LLM_DEPENDENCIES:
+            pytest.skip(
+                "LLM algorithms are not registered in core without agilerl[llm]"
+            )
+        assert missing == []
+
 
 @requires_arena
 class TestArenaSharedAlgorithmSpecParity:

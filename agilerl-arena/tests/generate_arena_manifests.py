@@ -38,6 +38,8 @@ _DEFAULT_ENV = {
     AgentType.SingleAgent: "CartPole-v1",
     AgentType.MultiAgent: "mpe2.simple_speaker_listener_v4",
     AgentType.LLMAgent: "CartPole-v1",
+    AgentType.OfflineAgent: "CartPole-v1",
+    AgentType.BanditAgent: "CartPole-v1",
 }
 _GRPO_FAMILY = frozenset({"GRPO", "CISPO", "GSPO"})
 _OFF_POLICY_ALGOS = frozenset({"DQN", "DDPG", "TD3", "RainbowDQN", "MADDPG", "MATD3"})

@@ -10,15 +10,17 @@ from typing import Any
 
 from pydantic import Field
 
+from agilerl.arena.models.algorithms.cispo import CISPOSpec as ArenaCISPOSpec
 from agilerl.models.algo import register
 from agilerl.models.algorithms.grpo import GRPOSpec
 
 
 @register()
-class CISPOSpec(GRPOSpec):
+class CISPOSpec(GRPOSpec, ArenaCISPOSpec):
     """Specification for CISPO algorithm (GRPO with CISPO loss)."""
 
     # CISPO uses asymmetric clip bounds [epsilon_low, epsilon_high].
+    # GRPOSpec is first in the MRO and types clip_coef as float.
     clip_coef: float | list[float] = Field(default=0.2)
 
     @staticmethod

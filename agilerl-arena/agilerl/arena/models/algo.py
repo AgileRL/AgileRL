@@ -6,7 +6,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import ClassVar, TypeVar
+from typing import Any, ClassVar, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -166,6 +166,16 @@ class LLMAlgorithmSpec(AlgorithmSpec):
     gradient_checkpointing: bool = Field(default=True)
     use_liger_loss: bool = Field(default=False)
     seed: int = Field(default=42)
+    quantization: str | dict[str, Any] | None = Field(default=None)
+    activation_offload: bool = Field(default=False)
+    use_sequence_packing: bool = Field(default=False)
+    lora_target_scope: str | None = Field(default=None)
+    chunk_rows: int | None = Field(default=None, ge=1)
+    micro_batch_size_per_gpu: int | None = Field(default=None, ge=1)
+    mini_batch_size: int | None = Field(default=None, ge=1)
+    vllm_importance_sampling_correction: bool = Field(default=True)
+    vllm_importance_sampling_cap: float = Field(default=2.0, ge=0.0)
+    attn_implementation: str | None = Field(default=None)
 
     # These fields come from the "network" section of the manifest
     pretrained_model_name_or_path: str | None = Field(default=None, min_length=1)
@@ -175,6 +185,7 @@ class LLMAlgorithmSpec(AlgorithmSpec):
     agent_type: ClassVar[AgentType] = AgentType.LLMAgent
     default_evo_steps: ClassVar[int] = 5
     env_type: ClassVar[LLMEnvType]
+    objective: ClassVar[str | None] = None
 
 
 AlgoSpec = RLAlgorithmSpec | MultiAgentRLAlgorithmSpec | LLMAlgorithmSpec

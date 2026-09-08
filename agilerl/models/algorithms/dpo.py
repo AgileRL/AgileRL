@@ -6,22 +6,15 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import Any, ClassVar
+from typing import Any
 
-from pydantic import Field
-
+from agilerl.arena.models.algorithms.dpo import DPOSpec as ArenaDPOSpec
 from agilerl.models.algo import LLMAlgorithmSpec, register
-from agilerl.models.env_types import LLMEnvType
 
 
 @register()
-class DPOSpec(LLMAlgorithmSpec):
+class DPOSpec(LLMAlgorithmSpec, ArenaDPOSpec):
     """Specification for DPO algorithm."""
-
-    lr: float = Field(default=0.000005)
-
-    env_type: ClassVar[LLMEnvType] = LLMEnvType.DATASET
-    objective: ClassVar[str] = "preference"
 
     @staticmethod
     def get_training_fn() -> Callable[..., Any]:

@@ -46,3 +46,5 @@ class AgentType(Enum):
     SingleAgent = "single_agent"
     MultiAgent = "multi_agent"
     LLMAgent = "llm_agent"
+    OfflineAgent = "offline_agent"
+    BanditAgent = "bandit_agent"

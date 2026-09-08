@@ -12,6 +12,7 @@ from agilerl.arena.models.algo import (  # noqa: F401
 )
 from agilerl.arena.models.algorithms import (  # noqa: F401
     CISPOSpec,
+    CQNSpec,
     DDPGSpec,
     DPOSpec,
     DQNSpec,
@@ -22,6 +23,8 @@ from agilerl.arena.models.algorithms import (  # noqa: F401
     LLMREINFORCESpec,
     MADDPGSpec,
     MATD3Spec,
+    NeuralTSSpec,
+    NeuralUCBSpec,
     PPOSpec,
     RainbowDQNSpec,
     SFTSpec,

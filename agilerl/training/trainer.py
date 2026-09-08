@@ -740,7 +740,8 @@ class LocalTrainer(Trainer):
         Uses the algorithm's ``agent_type`` to choose the spec class.
         For LLM algorithms, ``env_type`` is injected from the algorithm
         spec so the manifest environment section doesn't need to
-        duplicate it.
+        duplicate it. DPO always trains on preference data, so that
+        objective is filled here.
         """
         env_data = dict(manifest.environment)
         env_data = {k: v for k, v in env_data.items() if v is not None}
@@ -751,7 +752,9 @@ class LocalTrainer(Trainer):
             # is a class variable; narrow so it resolves without an ignore.
             assert isinstance(manifest.algorithm, LLMAlgorithmSpec)
             env_data.setdefault("env_type", manifest.algorithm.env_type)
-            if manifest.algorithm.objective is not None:
+            if manifest.algorithm.name == "DPO":
+                env_data.setdefault("objective", "preference")
+            elif manifest.algorithm.objective is not None:
                 env_data.setdefault("objective", manifest.algorithm.objective)
             return LLMEnvSpec(**env_data)
 

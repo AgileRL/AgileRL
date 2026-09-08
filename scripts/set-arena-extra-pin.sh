@@ -44,11 +44,10 @@ new, n = re.subn(
     r'^(\s*"agilerl-arena)(?:==[^"]+|>=[^"]+)(")',
     rf'\1=={pin}\2',
     text,
-    count=1,
     flags=re.MULTILINE,
 )
-if n != 1:
-    sys.exit(f"error: expected one agilerl-arena extra in {path}, replaced {n}")
+if n < 1:
+    sys.exit(f"error: expected agilerl-arena pins in {path}, replaced {n}")
 path.write_text(new, encoding="utf-8")
 print(f"pinned agilerl extra to agilerl-arena=={pin}")
 PY

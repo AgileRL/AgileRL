@@ -6,48 +6,24 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any, ClassVar, Literal
+from typing import Any
 
-from pydantic import Field, model_validator
+from pydantic import Field
 
+from agilerl.arena.models.algorithms.llmreinforce import (
+    LLMREINFORCESpec as ArenaLLMREINFORCESpec,
+)
 from agilerl.models.algo import LLMAlgorithmSpec, register
-from agilerl.models.env_types import LLMEnvType
-
-if TYPE_CHECKING:
-    from agilerl.utils.algo_utils import CosineLRScheduleConfig, VLLMConfig
-else:
-    CosineLRScheduleConfig = Any
-    VLLMConfig = Any
 
 
 @register()
-class LLMREINFORCESpec(LLMAlgorithmSpec):
+class LLMREINFORCESpec(LLMAlgorithmSpec, ArenaLLMREINFORCESpec):
     """Specification for LLMREINFORCE algorithm."""
 
-    lr: float = Field(default=5e-6, ge=0.0)
-    clip_coef: float = Field(default=0.2, ge=0.0, le=1.0)
-    gamma: float = Field(default=0.99, ge=0.0, le=1.0)
-    temperature: float = Field(default=0.9)
     max_output_tokens: int | None = Field(default=1024)
-    min_output_tokens: int | None = Field(default=None)
-    action_granularity: Literal["turn", "token", "auto"] = Field(default="auto")
-    cosine_lr_schedule_config: CosineLRScheduleConfig | None = Field(default=None)
-    vllm_config: VLLMConfig | None = Field(default=None)
-    use_vllm: bool = Field(default=False)
-    advantage_granularity: Literal["turn", "token", "auto"] = Field(default="auto")
-    importance_sampling_level: Literal["token", "turn", "trajectory"] = Field(
-        default="token"
-    )
-    turn_ratio_pooling: Literal["sum", "mean"] = Field(default="sum")
-
-    env_type: ClassVar[LLMEnvType] = LLMEnvType.ROLLOUT
-
-    @model_validator(mode="after")
-    def _validate_vllm_config(self) -> LLMREINFORCESpec:
-        if self.use_vllm and not self.vllm_config:
-            msg = "VLLM config is not set, please provide a VLLM config in the algorithm section of the manifest."
-            raise ValueError(msg)
-        return self
+    # Construction uses algo_utils dataclasses, not arena pydantic models.
+    vllm_config: Any = Field(default=None)
+    cosine_lr_schedule_config: Any = Field(default=None)
 
     @staticmethod
     def get_training_fn() -> Callable[..., Any]:
