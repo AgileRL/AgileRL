@@ -56,6 +56,7 @@ from agilerl.utils.llm_utils import (
     build_completion_mask,
     calculate_k3_kl,
     fill_outside_mask,
+    hf_turn_generation_config,
     masked_mean,
     masked_whiten,
     needs_cross_rank_seq_padding,
@@ -64,7 +65,6 @@ from agilerl.utils.llm_utils import (
     prepare_prompt_hf_generate,
     resolve_llm_device,
     validate_importance_sampling_level,
-    validate_llm_context_lengths,
 )
 
 if HAS_LLM_DEPENDENCIES or TYPE_CHECKING:
@@ -606,7 +606,12 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
                             token_ids = self.actor.generate(
                                 input_ids=input_ids,
                                 attention_mask=attention_mask,
-                                generation_config=self.generation_config,
+                                generation_config=hf_turn_generation_config(
+                                    self.generation_config,
+                                    max_model_len=self.max_model_len,
+                                    prompt_length=int(input_ids.shape[-1]),
+                                    max_output_tokens=self.max_output_tokens,
+                                ),
                             )
                             token_ids_list.append(token_ids)
                             completion_masks.append(
@@ -1007,7 +1012,7 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
         max_model_len: int | None,
         hf_generate_chunk_size: int | None,
     ) -> None:
-        """Validate context lengths and build the HF generation config."""
+        """Build the HF generation config."""
         if max_output_tokens is None and max_model_len is None:
             msg = "Either max_output_tokens or max_model_len must be specified"
             raise ValueError(
@@ -1023,7 +1028,6 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
         # One of the two is non-None (guarded above).
         assert resolved_max_model_len is not None
         self.max_model_len = resolved_max_model_len
-        validate_llm_context_lengths(self.max_model_len, max_output_tokens)
         self.hf_generate_chunk_size = int(
             1 if hf_generate_chunk_size is None else max(1, hf_generate_chunk_size)
         )

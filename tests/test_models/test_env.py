@@ -1187,9 +1187,7 @@ class TestLLMEnvSpecRollout:
             patch("agilerl.models.env.RolloutHarness", mock_rollout_cls),
             patch("agilerl.llm_envs.openenv.RemoteEnvClient", mock_session_cls),
         ):
-            spec.make_rollout_env_factory(
-                mock_tokenizer, max_model_len=512, max_output_tokens=128
-            )()
+            spec.make_rollout_env_factory(mock_tokenizer, max_model_len=512)()
         # env_url opens a WebSocket session; the transport params bake into the client.
         mock_session_cls.assert_called_once_with(
             "http://env-host:8000",
@@ -1206,7 +1204,6 @@ class TestLLMEnvSpecRollout:
             apply_chat_template=True,
             chat_template_kwargs={},
             max_model_len=512,
-            max_output_tokens=128,
             strict_chat_template_boundary=True,
         )
         mock_rollout_cls.local.assert_not_called()
@@ -1249,9 +1246,7 @@ class TestLLMEnvSpecRollout:
             ),
             patch("agilerl.models.env.RolloutHarness", mock_rollout_cls),
         ):
-            factory = spec.make_rollout_env_factory(
-                mock_tokenizer, max_model_len=512, max_output_tokens=128
-            )
+            factory = spec.make_rollout_env_factory(mock_tokenizer, max_model_len=512)
             assert callable(factory)
             factory()
 
@@ -1266,7 +1261,6 @@ class TestLLMEnvSpecRollout:
             apply_chat_template=True,
             chat_template_kwargs={},
             max_model_len=512,
-            max_output_tokens=128,
             strict_chat_template_boundary=True,
         )
 
@@ -1291,9 +1285,7 @@ class TestLLMEnvSpecRollout:
             ),
             patch("agilerl.models.env.RolloutHarness", mock_rollout_cls),
         ):
-            spec.make_rollout_env_factory(
-                mock_tokenizer, max_model_len=512, max_output_tokens=128
-            )()
+            spec.make_rollout_env_factory(mock_tokenizer, max_model_len=512)()
 
         mock_constructor.assert_called_with(difficulty="easy")
         assert mock_env.system_prompt == "be terse"
@@ -1353,25 +1345,27 @@ class TestLLMEnvSpecRollout:
 
         assert spec.max_turns == 12
 
-    def test_factory_rejects_zero_prompt_budget(self):
-        """``max_output_tokens >= max_model_len`` leaves no prompt room (budget
-        0), so every rollout episode is truncated at reset and training can never
-        advance. The factory must reject it at setup rather than build envs that
-        silently produce a non-terminating loop.
-        """
+    def test_factory_builds_when_max_model_len_is_set(self):
         mock_tokenizer = MagicMock()
         mock_tokenizer.pad_token_id = 0
-
         spec = LLMEnvSpec(
             env_type=LLMEnvType.ROLLOUT,
             entrypoint="my_mod:MyEnv",
             max_turns=3,
         )
+        mock_rollout_cls = MagicMock()
 
-        with pytest.raises(ValueError, match="must be less than"):
-            spec.make_rollout_env_factory(
-                mock_tokenizer, max_model_len=512, max_output_tokens=512
-            )
+        with (
+            patch(
+                "agilerl.models.env.resolve_entrypoint_target",
+                return_value=MagicMock(),
+            ),
+            patch("agilerl.models.env.RolloutHarness", mock_rollout_cls),
+        ):
+            factory = spec.make_rollout_env_factory(mock_tokenizer, max_model_len=512)
+            factory()
+
+        assert mock_rollout_cls.local.call_args.kwargs["max_model_len"] == 512
 
     def test_rubric_fields_alone_are_not_a_source(self):
         with pytest.raises(ValueError, match="Exactly one of dataset, entrypoint"):

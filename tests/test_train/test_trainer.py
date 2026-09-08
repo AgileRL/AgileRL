@@ -2208,7 +2208,6 @@ class TestLocalTrainerIntegration:
             update_epochs=1,
             lora_config=lora_config,
             max_model_len=128,
-            # Must stay under max_model_len or the rollout prompt budget is 0.
             max_output_tokens=32,
         )
 

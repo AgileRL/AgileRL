@@ -582,6 +582,27 @@ class TestGRPOInit:
             )
         grpo.clean_up()
 
+    def test_init_accepts_output_tokens_not_less_than_model_len(self):
+        actor = create_module(input_size=6, max_tokens=4, vocab_size=64, device="cpu")
+        grpo = GRPO(
+            actor_network=actor,
+            pad_token_id=63,
+            pad_token="<pad>",
+            batch_size=4,
+            group_size=2,
+            max_output_tokens=32,
+            max_model_len=16,
+            wrap=False,
+            gradient_checkpointing=False,
+            accelerator=None,
+            device="cpu",
+            use_liger_loss=False,
+        )
+
+        assert grpo.max_output_tokens == 32
+        assert grpo.max_model_len == 16
+        grpo.clean_up()
+
     @pytest.mark.parametrize(
         ("config", "use_deepspeed_optimizer"),
         [
