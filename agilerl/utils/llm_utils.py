@@ -969,17 +969,132 @@ def _infer_clippable_lora_scope(model: nn.Module) -> str | None:
     return None
 
 
+# PEFT LoRA inject rejects these module names on Mamba-family model_type values
+# (fused kernels read the raw weights and skip the wrapped forward).
+MAMBA_LORA_MODEL_TYPES = frozenset(
+    {"falcon_h1", "falcon_mamba", "mamba", "mamba2", "nemotron_h"}
+)
+MAMBA_LORA_FORBIDDEN_MODULES = frozenset({"conv1d", "out_proj"})
+
+
+def _mamba_lora_model_type(model: nn.Module) -> str | None:
+    """Return the Mamba-family ``model_type``, or None."""
+    config = getattr(model, "config", None)
+    model_type = getattr(config, "model_type", None)
+    if isinstance(model_type, str) and model_type in MAMBA_LORA_MODEL_TYPES:
+        return model_type
+    return None
+
+
+def _clone_lora_config(lora_config: LoraConfig, **updates: Any) -> LoraConfig:
+    """Return a new ``LoraConfig`` with the given field updates."""
+    if hasattr(lora_config, "to_dict"):
+        cfg_dict = lora_config.to_dict()
+        cfg_dict.update(updates)
+        return lora_config.__class__(**cfg_dict)
+    adapted = copy.deepcopy(lora_config)
+    for key, value in updates.items():
+        setattr(adapted, key, value)
+    return adapted
+
+
 def _clone_lora_config_with_targets(
     lora_config: LoraConfig, target_modules: str | list[str]
 ) -> LoraConfig:
     """Return a new ``LoraConfig`` with updated ``target_modules``."""
-    if hasattr(lora_config, "to_dict"):
-        cfg_dict = lora_config.to_dict()
-        cfg_dict["target_modules"] = target_modules
-        return lora_config.__class__(**cfg_dict)
-    adapted = copy.deepcopy(lora_config)
-    adapted.target_modules = target_modules
-    return adapted
+    return _clone_lora_config(lora_config, target_modules=target_modules)
+
+
+def _rewriteable_lora_module_targets(
+    raw_targets: str | Iterable[str] | None,
+) -> list[str] | None:
+    """Plain suffix names to rewrite, or None for regex / ``all-linear`` / unset."""
+    if raw_targets is None or raw_targets == "all-linear":
+        return None
+    raw_list = [raw_targets] if isinstance(raw_targets, str) else list(raw_targets)
+    if any(
+        isinstance(target, str) and _looks_like_peft_target_regex(target)
+        for target in raw_list
+    ):
+        return None
+    return [str(target) for target in raw_list]
+
+
+def _adapt_mamba_lora_config(model: nn.Module, lora_config: LoraConfig) -> LoraConfig:
+    """Exclude fused Mamba modules from LoRA inject.
+
+    PEFT 0.20+ raises if LoRA wraps ``out_proj`` or ``conv1d`` on Mamba-family
+    models, including when those names are reached via ``target_parameters``.
+    ``exclude_modules`` skips inject; named targets are dropped.
+    """
+    if _mamba_lora_model_type(model) is None:
+        return lora_config
+
+    existing_exclude = list(getattr(lora_config, "exclude_modules", None) or [])
+    exclude_modules = list(existing_exclude)
+    for name in sorted(MAMBA_LORA_FORBIDDEN_MODULES):
+        if name not in exclude_modules:
+            exclude_modules.append(name)
+
+    updates: dict[str, Any] = {}
+    if exclude_modules != existing_exclude:
+        updates["exclude_modules"] = exclude_modules
+
+    rewriteable = _rewriteable_lora_module_targets(lora_config.target_modules)
+    if rewriteable is not None:
+        kept: list[str] = []
+        dropped: list[str] = []
+        for target in rewriteable:
+            leaf = target.rsplit(".", 1)[-1]
+            if leaf in MAMBA_LORA_FORBIDDEN_MODULES:
+                dropped.append(target)
+                continue
+            kept.append(target)
+        new_targets: str | list[str] | None = kept
+        if not kept:
+            new_targets = None
+        if new_targets != rewriteable:
+            updates["target_modules"] = new_targets
+            if dropped:
+                logger.info(
+                    "Dropped Mamba-incompatible LoRA target_modules %s",
+                    dropped,
+                )
+
+    raw_parameters = getattr(lora_config, "target_parameters", None)
+    if raw_parameters:
+        kept_params: list[str] = []
+        dropped_params: list[str] = []
+        for param in raw_parameters:
+            module_path, _, _name = str(param).rpartition(".")
+            parent_leaf = module_path.rsplit(".", 1)[-1] if module_path else str(param)
+            if parent_leaf in MAMBA_LORA_FORBIDDEN_MODULES:
+                dropped_params.append(str(param))
+                continue
+            kept_params.append(str(param))
+        if dropped_params:
+            updates["target_parameters"] = kept_params or None
+            logger.info(
+                "Dropped Mamba-incompatible LoRA target_parameters %s",
+                dropped_params,
+            )
+
+    remaining_modules = updates.get("target_modules", lora_config.target_modules)
+    remaining_params = updates.get(
+        "target_parameters",
+        getattr(lora_config, "target_parameters", None),
+    )
+    if remaining_modules in (None, [], "") and not remaining_params:
+        msg = (
+            "All LoRA targets are Mamba-incompatible "
+            f"({sorted(MAMBA_LORA_FORBIDDEN_MODULES)}); add other "
+            "targets such as in_proj or attention projections"
+        )
+        raise ValueError(msg)
+
+    if not updates:
+        return lora_config
+    return _clone_lora_config(lora_config, **updates)
 
 
 def _example_module_keys_for_lora_scope(
@@ -1014,7 +1129,11 @@ def adapt_lora_config_for_model(
     that path are targeted. The scoped regex matches plain ``nn.Linear`` language
     layers and ``.linear`` inside ClippableLinear towers. Unscoped fallbacks are
     not used when the scope is explicit.
+
+    On Mamba-family ``model_type`` values, ``out_proj`` and ``conv1d`` are excluded
+    from LoRA inject (PEFT 0.20+ forbids wrapping those fused-kernel modules).
     """
+    lora_config = _adapt_mamba_lora_config(model, lora_config)
     raw_targets = lora_config.target_modules
     projection_names = _projection_names_for_clippable_lora(model, raw_targets)
     if projection_names is None:
