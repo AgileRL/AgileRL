@@ -1,10 +1,10 @@
 # Copyright 2026 AgileRL
 # SPDX-License-Identifier: Apache-2.0
 
-"""Environment type vocabulary.
+"""Re-export of :class:`~agilerl.arena.models.env.LLMEnvType`.
 
-Re-exports :class:`agilerl.arena.models.env.LLMEnvType` so manifest parsing
-can import the enum without pulling torch or the protocol hierarchy.
+Importable as ``agilerl.models.env_types.LLMEnvType`` without loading
+:mod:`agilerl.models.env`.
 """
 
 from __future__ import annotations

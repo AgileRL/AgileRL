@@ -482,6 +482,32 @@ class TestMATD3Init:
         )
         assert matd3.torch_compiler == "default"
 
+    def test_compiler_falls_back_to_default_for_gumbel_softmax(
+        self,
+        ma_vector_space,
+        ma_discrete_space,
+        monkeypatch,
+    ):
+        monkeypatch.setattr(MATD3, "recompile", lambda self: None)
+        net_config = {
+            "head_config": {
+                "hidden_size": [32],
+                "output_activation": "GumbelSoftmax",
+            },
+        }
+
+        with pytest.warns(UserWarning, match="not compatible with GumbelSoftmax"):
+            matd3 = MATD3(
+                observation_spaces=ma_vector_space,
+                action_spaces=ma_discrete_space,
+                agent_ids=["agent_0", "agent_1", "other_agent_0"],
+                net_config=net_config,
+                device="cpu",
+                torch_compiler="reduce-overhead",
+            )
+
+        assert matd3.torch_compiler == "default"
+
     @pytest.mark.gpu
     @pytest.mark.parametrize("accelerator_flag", [False, True])
     @pytest.mark.parametrize("compile_mode", [None, "default"])

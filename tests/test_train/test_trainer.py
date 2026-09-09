@@ -28,6 +28,7 @@ from gymnasium.spaces import Box, Discrete
 from agilerl import HAS_ARENA_DEPENDENCIES, HAS_LLM_DEPENDENCIES, AgentType
 from agilerl.algorithms import DQN
 from agilerl.algorithms.core.base import EvolvableAlgorithm
+from agilerl.builders import select_builder
 from agilerl.components.replay_buffer import MultiStepReplayBuffer, ReplayBuffer
 from agilerl.hpo.multi_frequency import MultiFrequencySelection
 from agilerl.hpo.mutation import Mutations
@@ -1461,9 +1462,11 @@ class TestLLMBuildAlgorithm:
         mock_tokenizer.unk_token_id = None
 
         with (
-            patch.object(type(dpo_spec), "algo_class", return_value=mock_algo),
+            patch.object(
+                select_builder(dpo_spec), "algo_class", return_value=mock_algo
+            ),
             patch(
-                "agilerl.utils.llm_utils.load_pad_token_configs",
+                "agilerl.builders.llm.load_pad_token_configs",
                 return_value=(None, None),
             ),
         ):
@@ -1485,9 +1488,11 @@ class TestLLMBuildAlgorithm:
         mock_tokenizer.unk_token_id = None
 
         with (
-            patch.object(type(grpo_spec), "algo_class", return_value=mock_algo),
+            patch.object(
+                select_builder(grpo_spec), "algo_class", return_value=mock_algo
+            ),
             patch(
-                "agilerl.utils.llm_utils.load_pad_token_configs",
+                "agilerl.builders.llm.load_pad_token_configs",
                 return_value=(None, None),
             ),
         ):
@@ -1509,9 +1514,11 @@ class TestLLMBuildAlgorithm:
         mock_accel.num_processes = 2
 
         with (
-            patch.object(type(dpo_spec), "algo_class", return_value=mock_algo),
+            patch.object(
+                select_builder(dpo_spec), "algo_class", return_value=mock_algo
+            ),
             patch(
-                "agilerl.utils.llm_utils.load_pad_token_configs",
+                "agilerl.builders.llm.load_pad_token_configs",
                 return_value=(None, None),
             ),
         ):

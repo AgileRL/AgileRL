@@ -13,21 +13,16 @@ import h5py
 
 from agilerl import HAS_LLM_DEPENDENCIES, algorithms
 from agilerl.algorithms.core import (
-    EvolvableAlgorithm,
     LLMAlgorithm,
     MultiAgentRLAlgorithm,
     RLAlgorithm,
 )
+from agilerl.algorithms.core.registry import HyperparameterConfig
 from agilerl.arena import AgentType
 from agilerl.arena.models.algo import AlgorithmSpec as ArenaAlgorithmSpec
+from agilerl.builders import LLMBuilder, MultiAgentBuilder, SingleAgentBuilder
+from agilerl.builders.base import AlgorithmBuildRuntime
 from agilerl.models.env import LLMEnvSpec, OfflineEnvSpec
-from agilerl.utils.algo_utils import VLLMConfig
-from agilerl.utils.llm_utils import (
-    apply_pad_token_id,
-    build_bnb_quantization_config,
-    load_pad_token_configs,
-    resolve_pad_token_id,
-)
 
 if TYPE_CHECKING:
     import torch
@@ -35,7 +30,6 @@ if TYPE_CHECKING:
     from gymnasium import spaces
     from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 
-    from agilerl.algorithms.core.registry import HyperparameterConfig
     from agilerl.components.replay_buffer import BufferType
     from agilerl.models.env import (
         BanditEnvSpec,
@@ -53,7 +47,6 @@ if TYPE_CHECKING:
     EnvSpecType = GymEnvSpec | PzEnvSpec | OfflineEnvSpec | LLMEnvSpec | BanditEnvSpec
     PopulationType = list[RLAlgorithm | MultiAgentRLAlgorithm | LLMAlgorithm]
 else:
-    HyperparameterConfig = Any
     LoraConfig = Any
     AnyAlgorithm = Any
     AlgoT = TypeVar("AlgoT")
@@ -199,24 +192,21 @@ def bandit() -> Callable[[type[AlgoSpecT]], type[AlgoSpecT]]:
     return decorator
 
 
-# TrainingSpec fields with no equivalent in the LLM fine-tuning loops
-_LLM_UNSUPPORTED_TRAINING_FIELDS = (
-    "target_score",
-    "eval_steps",
-    "eval_loop",
-    "learning_delay",
-    "eps_start",
-    "eps_end",
-    "eps_decay",
-    "overwrite_checkpoints",
-)
-
-
 def _warn_ignored_llm_training_fields(training: TrainingSpec) -> None:
     """Warn when explicitly-set TrainingSpec fields are ignored by LLM loops."""
+    llm_unsupported_training_fields = (
+        "target_score",
+        "eval_steps",
+        "eval_loop",
+        "learning_delay",
+        "eps_start",
+        "eps_end",
+        "eps_decay",
+        "overwrite_checkpoints",
+    )
     ignored = [
         name
-        for name in _LLM_UNSUPPORTED_TRAINING_FIELDS
+        for name in llm_unsupported_training_fields
         if name in training.model_fields_set
         and getattr(training, name) != type(training).model_fields[name].default
     ]
@@ -224,89 +214,6 @@ def _warn_ignored_llm_training_fields(training: TrainingSpec) -> None:
         warnings.warn(
             "TrainingSpec fields not supported by LLM fine-tuning are ignored: "
             + ", ".join(ignored),
-            UserWarning,
-            stacklevel=3,
-        )
-
-
-# Values whose type makes a meaningful ``!=`` comparison; anything else (an
-# Accelerator, a LoraConfig, a registry) is skipped when diffing hyperparameters.
-COMPARABLE_HP_TYPES = (bool, int, float, str, type(None))
-
-
-def _apply_checkpoint(
-    algo: AnyAlgorithm,
-    resume_from_checkpoint: str | None,
-    load_weights_from: str | None,
-    *,
-    index: int,
-) -> None:
-    """Seed a freshly-built agent from a checkpoint, if asked to.
-
-    The two options are mutually exclusive:
-
-    * ``resume_from_checkpoint`` continues a run from the checkpoint's optimizer
-      state and hyperparameters, warning when they drift from the spec.
-    * ``load_weights_from`` warm-starts a new run from prior weights only, keeping
-      the spec's hyperparameters.
-
-    :param algo: A freshly-built algorithm, configured from its spec.
-    :type algo: AnyAlgorithm
-    :param resume_from_checkpoint: Checkpoint to resume the run from.
-    :type resume_from_checkpoint: str | None
-    :param load_weights_from: Checkpoint to take weights from.
-    :type load_weights_from: str | None
-    :param index: Population slot the agent occupies; restored after a resume,
-        since the checkpoint's slot is not this agent's identity.
-    :type index: int
-    """
-    if resume_from_checkpoint is not None and load_weights_from is not None:
-        msg = (
-            "Provide exactly one of 'resume_from_checkpoint' (continue a run, "
-            "restoring optimizer state and its hyperparameters) or "
-            "'load_weights_from' (warm-start a new run from prior weights)."
-        )
-        raise ValueError(msg)
-
-    if load_weights_from is not None:
-        algo.load_weights(load_weights_from)
-    elif resume_from_checkpoint is not None:
-        _resume_and_warn_on_drift(algo, resume_from_checkpoint, index=index)
-
-
-def _resume_and_warn_on_drift(algo: AnyAlgorithm, path: str, *, index: int) -> None:
-    """Restore a checkpoint, warning about hyperparameters it overrode.
-
-    The checkpoint's hyperparameters win (the restored optimizer state belongs to
-    them), so any drift from the spec is warned about.
-
-    :param algo: A freshly-built algorithm, configured from its spec.
-    :type algo: AnyAlgorithm
-    :param path: Checkpoint to resume from.
-    :type path: str
-    """
-    configured = EvolvableAlgorithm.inspect_attributes(algo, input_args_only=True)
-
-    algo.load_checkpoint(path)
-    algo.index = index
-
-    drifted = {
-        name: (configured[name], getattr(algo, name))
-        for name in configured
-        if isinstance(configured[name], COMPARABLE_HP_TYPES)
-        and hasattr(algo, name)
-        and configured[name] != getattr(algo, name)
-    }
-    if drifted:
-        changes = ", ".join(
-            f"{name}: {new!r} (checkpoint) overrides {old!r} (spec)"
-            for name, (old, new) in sorted(drifted.items())
-        )
-        warnings.warn(
-            f"Resuming from {path} restored hyperparameters that differ from the "
-            f"spec, and the checkpoint's values win because the optimizer state "
-            f"belongs to them -- {changes}. Update the spec to match, or use "
-            f"'load_weights_from' to warm-start with the spec's values instead.",
             UserWarning,
             stacklevel=3,
         )
@@ -499,25 +406,18 @@ class RLAlgorithmSpec(AlgorithmSpec):
         :rtype: RLAlgorithm
         :raises ValueError: If observation_space, action_space, or index is None.
         """
-        if observation_space is None or action_space is None or index is None:
-            msg = (
-                "RLAlgorithmSpec.build_algorithm requires observation_space, "
-                "action_space, and index."
-            )
-            raise ValueError(msg)
-        algo_cls = self.algo_class()
-        algo = algo_cls(
+        return SingleAgentBuilder.build(
+            self,
             observation_space=observation_space,
             action_space=action_space,
-            index=index,
-            device=device,
-            accelerator=accelerator,
-            **self.model_dump(mode="python", exclude_unset=True),
+            runtime=AlgorithmBuildRuntime(
+                index=index,
+                device=device,
+                accelerator=accelerator,
+                resume_from_checkpoint=resume_from_checkpoint,
+                load_weights_from=load_weights_from,
+            ),
         )
-
-        _apply_checkpoint(algo, resume_from_checkpoint, load_weights_from, index=index)
-
-        return algo
 
 
 class MultiAgentRLAlgorithmSpec(AlgorithmSpec):
@@ -572,25 +472,18 @@ class MultiAgentRLAlgorithmSpec(AlgorithmSpec):
         :rtype: MultiAgentRLAlgorithm
         :raises ValueError: If observation_spaces, action_spaces, or index is None.
         """
-        if observation_spaces is None or action_spaces is None or index is None:
-            msg = (
-                "MultiAgentRLAlgorithmSpec.build_algorithm requires "
-                "observation_spaces, action_spaces, and index."
-            )
-            raise ValueError(msg)
-        algo_cls = self.algo_class()
-        algo = algo_cls(
+        return MultiAgentBuilder.build(
+            self,
             observation_spaces=observation_spaces,
             action_spaces=action_spaces,
-            index=index,
-            device=device,
-            accelerator=accelerator,
-            **self.model_dump(mode="python", exclude_unset=True),
+            runtime=AlgorithmBuildRuntime(
+                index=index,
+                device=device,
+                accelerator=accelerator,
+                resume_from_checkpoint=resume_from_checkpoint,
+                load_weights_from=load_weights_from,
+            ),
         )
-
-        _apply_checkpoint(algo, resume_from_checkpoint, load_weights_from, index=index)
-
-        return algo
 
 
 class LLMAlgorithmSpec(AlgorithmSpec):
@@ -653,79 +546,18 @@ class LLMAlgorithmSpec(AlgorithmSpec):
         :rtype: LLMAlgorithm
         :raises ValueError: If tokenizer is None.
         """
-        if tokenizer is None:
-            msg = "LLMAlgorithmSpec.build_algorithm requires a tokenizer."
-            raise ValueError(msg)
-
-        use_vllm = getattr(self, "use_vllm", False)
-        if not use_vllm and hasattr(self, "vllm_config"):
-            self.vllm_config = None
-
-        vllm_cfg = getattr(self, "vllm_config", None)
-        if isinstance(vllm_cfg, dict):
-            self.vllm_config = VLLMConfig(**vllm_cfg)
-
-        # Only forward explicitly-set fields so the algorithm's own defaults
-        # apply to everything a manifest omits, matching direct construction.
-        kwargs = {k: v for k, v in vars(self).items() if k in self.model_fields_set}
-        kwargs.pop("pretrained_model_name_or_path", None)
-        if not use_vllm:
-            kwargs.pop("max_model_len", None)
-
-        # Resolve trainer-side bitsandbytes quantization (a preset name or a
-        # BitsAndBytesConfig kwargs dict) to the quantization_config the
-        # algorithm constructor expects.
-        if "quantization" in kwargs:
-            kwargs["quantization_config"] = build_bnb_quantization_config(
-                kwargs.pop("quantization")
-            )
-
-        # A non-"auto" attn_implementation is forwarded through model_config so
-        # the model-creation path treats it as authoritative.
-        attn_implementation = kwargs.pop("attn_implementation", None)
-        if attn_implementation is not None and attn_implementation != "auto":
-            model_config = dict(kwargs.get("model_config") or {})
-            model_config.setdefault("attn_implementation", attn_implementation)
-            kwargs["model_config"] = model_config
-
-        model_config = None
-        generation_config = None
-        if actor_network is not None:
-            model_config = getattr(actor_network, "config", None)
-            generation_config = getattr(actor_network, "generation_config", None)
-        if model_config is None:
-            model_config, generation_config = load_pad_token_configs(
-                self.pretrained_model_name_or_path
-            )
-
-        pad_token_id, pad_source = resolve_pad_token_id(
-            tokenizer,
-            model_config=model_config,
-            generation_config=generation_config,
-        )
-        apply_pad_token_id(tokenizer, pad_token_id)
-        logger.info(
-            "Resolved algorithm pad_token_id=%s from %s (eos_token_id=%s)",
-            pad_token_id,
-            pad_source,
-            getattr(tokenizer, "eos_token_id", None),
-        )
-
-        algo_cls = self.algo_class()
-        algo = algo_cls(
-            model_name=self.pretrained_model_name_or_path,
-            pad_token_id=pad_token_id,
-            pad_token=tokenizer.pad_token,
-            accelerator=accelerator,
-            index=index,
-            device=device,
+        return LLMBuilder.build(
+            self,
+            tokenizer=tokenizer,
             actor_network=actor_network,
-            **kwargs,
+            runtime=AlgorithmBuildRuntime(
+                index=index,
+                device=device,
+                accelerator=accelerator,
+                resume_from_checkpoint=resume_from_checkpoint,
+                load_weights_from=load_weights_from,
+            ),
         )
-
-        _apply_checkpoint(algo, resume_from_checkpoint, load_weights_from, index=index)
-
-        return algo
 
     @staticmethod
     def get_training_fn() -> Callable[..., Any]:
