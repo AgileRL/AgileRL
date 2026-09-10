@@ -49,6 +49,7 @@ from agilerl.models.networks import (
     infer_encoder_arch,
     network_arch_is_resolvable,
 )
+from agilerl.strategies import select_strategy
 from agilerl.utils.chat_template import DEFAULT_CHAT_TEMPLATE
 from agilerl.utils.evolvable_networks import get_default_encoder_config
 from agilerl.utils.llm_utils import (
@@ -422,6 +423,7 @@ class LocalTrainer(Trainer):
             device=device,
             accelerator=accelerator,
         )
+        self.strategy = select_strategy(self.algorithm_spec)
 
         # If HPO is enabled, use default mutation probabilities, RL hyperparameters
         # to mutate, and, unless a strategy was configured, tournament selection
@@ -504,7 +506,7 @@ class LocalTrainer(Trainer):
             )
         else:
             self.env_factory = None
-        self.train_fn = self.algorithm_spec.get_training_fn()
+        self.train_fn = self.strategy.get_training_loop(self.algorithm_spec)
 
     def _resolve_deferred_net_config(self) -> None:
         """Resolve a manifest network section whose ``arch`` was omitted.
@@ -898,9 +900,9 @@ class LocalTrainer(Trainer):
         self.training_spec.checkpoint_path = checkpoint_path
         self.training_spec.overwrite_checkpoints = overwrite_checkpoints
 
-        # Extract algo-specific kwargs from the algorithm spec.
         kwargs.update(
-            self.algorithm_spec.get_training_kwargs(
+            self.strategy.get_trainer_kwargs(
+                self.algorithm_spec,
                 training=self.training_spec,
                 env_spec=self.env_spec,
                 memory=self.memory,

@@ -33,5 +33,5 @@ class TestGetTrainingFn:
         assert GRPOSpec.get_training_fn() is train_llm_rollout
 
     def test_base_default_not_implemented(self):
-        with pytest.raises(NotImplementedError, match="must implement get_training_fn"):
+        with pytest.raises(KeyError, match="No training strategy"):
             LLMAlgorithmSpec.get_training_fn()

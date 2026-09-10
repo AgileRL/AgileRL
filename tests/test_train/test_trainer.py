@@ -51,6 +51,7 @@ from agilerl.models.hpo import (
 )
 from agilerl.models.networks import MlpSpec, QNetworkSpec, StochasticActorSpec
 from agilerl.models.training import ReplayBufferSpec, TrainingSpec
+from agilerl.strategies import LLM_DATASET, LLM_ROLLOUT, SINGLE_AGENT_ON_POLICY
 from agilerl.training.trainer import ArenaTrainer, LocalTrainer, Trainer
 from agilerl.utils.trainer_utils import (
     build_mutations_from_spec,
@@ -572,7 +573,9 @@ class TestLocalTrainerTrain:
         mock_env = MagicMock()
 
         with (
-            patch.object(PPOSpec, "get_training_fn", return_value=mock_train_fn),
+            patch.object(
+                SINGLE_AGENT_ON_POLICY, "get_training_loop", return_value=mock_train_fn
+            ),
             patch.object(LocalTrainer, "_make_env", return_value=mock_env),
         ):
             trainer = LocalTrainer(
@@ -598,7 +601,9 @@ class TestLocalTrainerTrain:
         mock_train_fn = MagicMock(return_value=(mock_pop, [[1.0]]))
 
         with (
-            patch.object(PPOSpec, "get_training_fn", return_value=mock_train_fn),
+            patch.object(
+                SINGLE_AGENT_ON_POLICY, "get_training_loop", return_value=mock_train_fn
+            ),
             patch.object(LocalTrainer, "_make_env", return_value=MagicMock()),
         ):
             trainer = LocalTrainer(
@@ -1751,7 +1756,7 @@ class TestLLMLocalTrainer:
                 "agilerl.training.trainer.create_population_from_spec",
                 return_value=mock_pop,
             ),
-            patch.object(type(dpo_spec), "get_training_fn", return_value=mock_train_fn),
+            patch.object(LLM_DATASET, "get_training_loop", return_value=mock_train_fn),
             patch.object(LocalTrainer, "to_manifest", return_value={}),
             patch(
                 "agilerl.training.trainer.create_llm_accelerator",
@@ -2593,7 +2598,9 @@ class TestLocalTrainerTrainKwargs:
         mock_env = MagicMock()
 
         with (
-            patch.object(PPOSpec, "get_training_fn", return_value=mock_train_fn),
+            patch.object(
+                SINGLE_AGENT_ON_POLICY, "get_training_loop", return_value=mock_train_fn
+            ),
             patch.object(LocalTrainer, "_make_env", return_value=mock_env),
         ):
             trainer = LocalTrainer(
@@ -2733,8 +2740,8 @@ class TestLocalTrainerRollout:
                 return_value=mock_env_factory,
             ),
             patch.object(
-                type(grpo_spec),
-                "get_training_fn",
+                LLM_ROLLOUT,
+                "get_training_loop",
                 return_value=mock_train_fn,
             ),
             patch.object(LocalTrainer, "to_manifest", return_value={}),
@@ -2790,8 +2797,8 @@ class TestLocalTrainerRollout:
                 return_value=MagicMock(),
             ),
             patch.object(
-                type(grpo_spec),
-                "get_training_fn",
+                LLM_ROLLOUT,
+                "get_training_loop",
                 return_value=mock_train_fn,
             ),
             patch.object(LocalTrainer, "to_manifest", return_value={}),
