@@ -82,6 +82,7 @@ from agilerl.utils.llm_utils import (
     sample_eval_prompts,
     save_peft_adapter_for_vllm_rollout,
     validate_importance_sampling_level,
+    validate_llm_context_lengths,
     zero3_full_shape_views,
 )
 from tests import TINY_LLM_FIXTURE_PATH
@@ -1119,6 +1120,19 @@ class TestMaxPromptTokensForModelLen:
         from agilerl.utils.llm_utils import max_prompt_tokens_for_model_len
 
         assert max_prompt_tokens_for_model_len(0) == 0
+
+
+class TestValidateLlmContextLengths:
+    def test_allows_room_for_prompt(self):
+        validate_llm_context_lengths(512, 256)
+
+    def test_skips_when_output_cap_unset(self):
+        validate_llm_context_lengths(512, None)
+
+    @pytest.mark.parametrize("max_output_tokens", [512, 513])
+    def test_rejects_when_output_leaves_no_prompt_room(self, max_output_tokens):
+        with pytest.raises(ValueError, match="must be less than"):
+            validate_llm_context_lengths(512, max_output_tokens)
 
 
 class TestGenerationTokensForTurn:

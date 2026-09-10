@@ -14,8 +14,8 @@ from agilerl.strategies.base import TrainingStrategy, rl_trainer_kwargs
 from agilerl.training.train_offline import train_offline
 
 if TYPE_CHECKING:
+    from agilerl.arena.models.algorithms import AlgoSpec
     from agilerl.components.replay_buffer import BufferType
-    from agilerl.models.algo import AlgoSpec
     from agilerl.models.training import TrainingSpec
     from agilerl.strategies.base import EnvSpecType, TrainingLoop
 

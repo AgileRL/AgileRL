@@ -5,13 +5,13 @@
 
 from __future__ import annotations
 
-from agilerl.models.algo import (
+from agilerl.arena.models.algorithms import (
     AlgoSpec,
     LLMAlgorithmSpec,
     MultiAgentRLAlgorithmSpec,
     RLAlgorithmSpec,
 )
-from agilerl.models.env_types import LLMEnvType
+from agilerl.arena.models.env import LLMEnvType
 from agilerl.strategies.bandit import BanditStrategy
 from agilerl.strategies.base import TrainingStrategy
 from agilerl.strategies.llm import (

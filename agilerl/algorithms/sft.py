@@ -13,7 +13,6 @@ import torch
 from agilerl import HAS_LIGER_KERNEL
 from agilerl.algorithms.core.base import LLMAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
-from agilerl.protocols import PreTrainedModelProtocol
 from agilerl.typing import (
     MultiAgentObservationType,
     ObservationType,
@@ -27,8 +26,8 @@ from agilerl.utils.llm_utils import (
 
 if TYPE_CHECKING:
     from accelerate import Accelerator
-    from peft import LoraConfig
-    from transformers import BitsAndBytesConfig
+    from peft import LoraConfig, PeftModel
+    from transformers import BitsAndBytesConfig, PreTrainedModel
 
     from agilerl.llm_envs import DatasetEnv
 
@@ -61,7 +60,7 @@ class SFT(LLMAlgorithm[SFTPrompts]):
         ``actor_network`` is supplied
     :type model_name: str, optional
     :param actor_network: Pre-built HuggingFace causal LM
-    :type actor_network: PreTrainedModelProtocol, optional
+    :type actor_network: PreTrainedModel | PeftModel | None, optional
     :param model_config: Extra kwargs forwarded to the model constructor
     :type model_config: dict, optional
     :param hp_config: Hyperparameter mutation config for AgileRL HPO, defaults
@@ -145,7 +144,7 @@ class SFT(LLMAlgorithm[SFTPrompts]):
         pad_token_id: int,
         pad_token: str,
         model_name: str | None = None,
-        actor_network: PreTrainedModelProtocol | None = None,
+        actor_network: PreTrainedModel | PeftModel | None = None,
         model_config: dict[str, Any] | None = None,
         hp_config: HyperparameterConfig | None = None,
         index: int = 0,

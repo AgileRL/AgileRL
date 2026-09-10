@@ -45,7 +45,6 @@ from agilerl.protocols import (
     EvolvableAlgorithmProtocol,
     EvolvableModuleProtocol,
     EvolvableNetworkProtocol,
-    LoraConfigProtocol,
     ModuleDictProtocol,
     MutationMethodProtocol,
     MutationType,
@@ -331,22 +330,6 @@ class TestEnvClientProtocol:
         _ = EnvClientProtocol.tools.fget(client)
         _ = EnvClientProtocol.rubric_components.fget(client)
         _ = EnvClientProtocol.eval_mode(client)
-
-
-class TestLoraConfigProtocol:
-    def test_lora_config_implements_protocol(self):
-        pytest.importorskip("transformers")
-        pytest.importorskip("peft")
-        from peft import LoraConfig
-
-        lora = LoraConfig(
-            r=4,
-            lora_alpha=8,
-            target_modules=["c_attn"],
-            lora_dropout=0.0,
-            task_type="CAUSAL_LM",
-        )
-        assert isinstance(lora, LoraConfigProtocol)
 
 
 class TestMutationType:

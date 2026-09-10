@@ -9,7 +9,11 @@ import torch
 from gymnasium import spaces
 from torch import nn
 
-from agilerl.algorithms.core import MultiAgentRLAlgorithm, OptimizerWrapper, RLAlgorithm
+from agilerl.algorithms.core import (
+    MultiAgentRLAlgorithm,
+    OptimizerWrapper,
+    RLAlgorithm,
+)
 from agilerl.algorithms.core.base import LLMAlgorithm
 from agilerl.algorithms.core.optimizer_wrapper import init_llm_optimizer
 from agilerl.algorithms.core.registry import NetworkGroup
@@ -94,7 +98,7 @@ class MockAlgorithm(RLAlgorithm):
         return 0.0
 
 
-class MockMultiAgentAlgorithm(MultiAgentRLAlgorithm):
+class MockMultiAgentRLAlgorithm(MultiAgentRLAlgorithm):
     def __init__(
         self,
         actors=None,
@@ -385,7 +389,7 @@ class TestOptimizerWrapper:
                 return_value="lr_actor",
             ),
         ):
-            algo = MockMultiAgentAlgorithm(actors=networks, lr_actor=lr)
+            algo = MockMultiAgentRLAlgorithm(actors=networks, lr_actor=lr)
 
         assert all(
             isinstance(opt, torch.optim.Adam)
@@ -411,7 +415,7 @@ class TestOptimizerWrapper:
                 side_effect=["lr_actor", "lr_critic"],
             ),
         ):
-            algo = MockMultiAgentAlgorithm()
+            algo = MockMultiAgentRLAlgorithm()
 
         # Check actor optimizers
         assert isinstance(algo.actor_optimizers.optimizer, dict)
@@ -512,7 +516,7 @@ class TestOptimizerWrapper:
                 side_effect=["lr_actor", "lr_critic"],
             ),
         ):
-            algo = MockMultiAgentAlgorithm()
+            algo = MockMultiAgentRLAlgorithm()
 
         # Test indexing for actor optimizers
         for agent_name in algo.actor_optimizers.optimizer:

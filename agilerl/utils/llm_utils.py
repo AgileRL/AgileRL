@@ -2830,6 +2830,30 @@ def max_prompt_tokens_for_model_len(max_model_len: int) -> int:
     return max(0, max_model_len - 1)
 
 
+def validate_llm_context_lengths(
+    max_model_len: int,
+    max_output_tokens: int | None,
+) -> None:
+    """Reject configs that leave no prompt room for multi-turn rollouts.
+
+    :param max_model_len: Total context length (prompt + completion ceiling).
+    :type max_model_len: int
+    :param max_output_tokens: Per-generation token cap; skipped when ``None``.
+    :type max_output_tokens: int | None
+    :raises ValueError: If ``max_output_tokens >= max_model_len``.
+    """
+    if max_output_tokens is None:
+        return
+    if max_output_tokens >= max_model_len:
+        msg = (
+            f"max_output_tokens ({max_output_tokens}) must be less than "
+            f"max_model_len ({max_model_len}); equal or larger values leave no "
+            "prompt budget for multi-turn rollouts "
+            f"(max_prompt_tokens={max_prompt_tokens_for_model_len(max_model_len)})."
+        )
+        raise ValueError(msg)
+
+
 def normalize_prompt_batch(
     prompts: RolloutPrompt | list[RolloutPrompt],
 ) -> list[RolloutPrompt]:

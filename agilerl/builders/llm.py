@@ -12,7 +12,11 @@ from pydantic import BaseModel
 
 from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.algorithms.core import LLMAlgorithm
-from agilerl.arena.models.algo import AlgorithmSpec, LLMAlgorithmSpec
+from agilerl.arena.models.algorithms import (
+    AlgorithmSpec,
+    LLMAlgorithmSpec,
+    RolloutLLMSpec,
+)
 from agilerl.arena.models.networks import LoraConfigDict
 from agilerl.builders.base import (
     AlgorithmBuilder,
@@ -30,10 +34,9 @@ from agilerl.utils.llm_utils import (
 )
 
 if TYPE_CHECKING:
-    from peft import LoraConfig
+    from peft import LoraConfig, PeftModel
+    from transformers import PreTrainedModel
     from transformers.tokenization_utils_base import PreTrainedTokenizerBase
-
-    from agilerl.protocols import PreTrainedModelProtocol
 
 logger = logging.getLogger(__name__)
 
@@ -59,7 +62,7 @@ class LLMBuilder(AlgorithmBuilder):
         *,
         tokenizer: PreTrainedTokenizerBase | None = None,
         runtime: AlgorithmBuildRuntime | None = None,
-        actor_network: PreTrainedModelProtocol | None = None,
+        actor_network: PreTrainedModel | PeftModel | None = None,
     ) -> LLMAlgorithm:
         """Build an LLM algorithm.
 
@@ -73,7 +76,7 @@ class LLMBuilder(AlgorithmBuilder):
         :param actor_network: Pre-built or cloned actor. When provided it is
             handed to the constructor instead of loading the model from
             ``pretrained_model_name_or_path``.
-        :type actor_network: PreTrainedModelProtocol | None
+        :type actor_network: PreTrainedModel | PeftModel | None
         :returns: LLM algorithm instance.
         :rtype: LLMAlgorithm
         :raises ValueError: If tokenizer is None.
@@ -93,7 +96,7 @@ class LLMBuilder(AlgorithmBuilder):
         kwargs = spec_kwargs(spec, hp_config=runtime.hp_config)
         kwargs.pop("pretrained_model_name_or_path", None)
 
-        use_vllm = bool(getattr(spec, "use_vllm", False))
+        use_vllm = spec.use_vllm if isinstance(spec, RolloutLLMSpec) else False
         if not use_vllm:
             kwargs.pop("max_model_len", None)
             kwargs.pop("vllm_config", None)
@@ -126,7 +129,7 @@ class LLMBuilder(AlgorithmBuilder):
         model_config = None
         generation_config = None
         if actor_network is not None:
-            model_config = getattr(actor_network, "config", None)
+            model_config = actor_network.config
             generation_config = getattr(actor_network, "generation_config", None)
         if model_config is None:
             model_config, generation_config = load_pad_token_configs(

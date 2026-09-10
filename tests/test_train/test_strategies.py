@@ -7,18 +7,20 @@ from typing import ClassVar
 
 import pytest
 
-from agilerl.models.algo import ALGO_REGISTRY, LLMAlgorithmSpec, RLAlgorithmSpec
-from agilerl.models.algorithms import (
+from agilerl.arena.models.algorithms import (
     CQNSpec,
     DPOSpec,
     DQNSpec,
     GRPOSpec,
     IPPOSpec,
+    LLMAlgorithmSpec,
     MADDPGSpec,
     NeuralTSSpec,
     PPOSpec,
+    RLAlgorithmSpec,
     SFTSpec,
 )
+from agilerl.arena.models.registry import MANIFEST_REGISTRY
 from agilerl.strategies import (
     BANDIT,
     LLM_DATASET,
@@ -73,16 +75,16 @@ class TestStrategyFor:
             select_strategy(LLMAlgorithmSpec.model_construct())
 
     def test_every_registered_spec_has_a_strategy(self):
-        for entry in ALGO_REGISTRY._entries.values():
+        for spec_cls in dict(MANIFEST_REGISTRY.items()).values():
             assert isinstance(
-                select_strategy(entry.spec_cls.model_construct()), TrainingStrategy
+                select_strategy(spec_cls.model_construct()), TrainingStrategy
             )
 
 
 class TestTrainingLoops:
     def test_every_registered_spec_has_a_loop(self):
-        for entry in ALGO_REGISTRY._entries.values():
-            spec = entry.spec_cls.model_construct()
+        for spec_cls in dict(MANIFEST_REGISTRY.items()).values():
+            spec = spec_cls.model_construct()
             assert select_strategy(spec).get_training_loop(spec) is not None
 
     def test_each_paradigm_names_its_loop(self):

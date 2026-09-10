@@ -8,7 +8,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from agilerl.algorithms.core import MultiAgentRLAlgorithm
-from agilerl.arena.models.algo import AlgorithmSpec
+from agilerl.arena.models.algorithms import AlgorithmSpec
 from agilerl.builders.base import (
     AlgorithmBuilder,
     AlgorithmBuildRuntime,

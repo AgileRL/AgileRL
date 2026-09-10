@@ -15,12 +15,29 @@ from unittest.mock import MagicMock, patch
 import pytest
 from pydantic import ValidationError
 
-from agilerl import HAS_ARENA_DEPENDENCIES, HAS_LLM_DEPENDENCIES
+from agilerl import HAS_LLM_DEPENDENCIES
+from agilerl.arena.models.algorithms import PPOSpec
 from agilerl.builders import select_builder
-from agilerl.models.algorithms.ppo import PPOSpec
-from agilerl.models.env import BanditEnvSpec, GymEnvSpec, LLMEnvSpec, LLMEnvType
+from agilerl.models.env import (
+    BanditEnvSpec,
+    GymEnvSpec,
+    LLMEnvSpec,
+    LLMEnvType,
+    _http_timeout_s,
+    _load_dataframe,
+    _load_dataset_file,
+    _load_dataset_hf,
+    _load_llm_dataset,
+    construct_custom_env_fn,
+    construct_custom_pz_env_fn,
+    make_bandit_env,
+    make_llm_env,
+    make_pz_env,
+    make_rollout_env_factory,
+    make_single_env,
+)
 from agilerl.models.hpo import MutationSpec
-from agilerl.models.manifest import TrainingManifest
+from agilerl.models.manifest import from_trainer_specs
 from agilerl.models.networks import (
     CnnSpec,
     FinetuningNetworkSpec,
@@ -33,11 +50,14 @@ from agilerl.models.networks import (
     min_max_validator,
     normalize_manifest_network,
 )
-from agilerl.models.training import ReplayBufferSpec, TrainingSpec
-
-requires_arena = pytest.mark.skipif(
-    not HAS_ARENA_DEPENDENCIES, reason="agilerl-arena is not installed"
+from agilerl.models.training import (
+    ReplayBufferSpec,
+    TrainingSpec,
+    init_buffer,
+    init_n_step_buffer,
 )
+from agilerl.strategies import select_strategy
+from tests.helper_functions import build_from_spec
 
 
 class TestNormalizeManifestNetwork:
@@ -192,53 +212,7 @@ class TestCnnSpec:
 
 
 class TestFinetuningNetworkSpec:
-    """PEFT LoRA coercion, resolution, and serialization in networks.py."""
-
-    def test_coerce_non_dict_passthrough(self):
-        """_coerce_peft_lora with non-dict data returns input unchanged."""
-        payload = "not-a-dict"
-        assert FinetuningNetworkSpec._coerce_peft_lora(payload) is payload
-
-    @pytest.mark.skipif(not HAS_LLM_DEPENDENCIES, reason="LLM deps not installed")
-    def test_coerce_peft_lora_config_instance(self):
-        """PEFT LoraConfig is converted before Pydantic validation."""
-        from types import SimpleNamespace
-
-        from peft import LoraConfig, TaskType
-
-        from agilerl.models.networks import _peft_lora_config_to_manifest_dict
-
-        peft_lora = LoraConfig(
-            r=8,
-            lora_alpha=16,
-            lora_dropout=0.1,
-            target_modules=["q_proj", "v_proj"],
-            task_type=TaskType.CAUSAL_LM,
-        )
-        manifest_dict = _peft_lora_config_to_manifest_dict(peft_lora)
-        assert manifest_dict["target_modules"] == ["q_proj", "v_proj"]
-        assert manifest_dict["task_type"] == "CAUSAL_LM"
-
-        enum_task = SimpleNamespace(value="SEQ_CLS")
-        manifest_dict = _peft_lora_config_to_manifest_dict(
-            SimpleNamespace(
-                r=4,
-                lora_alpha=8,
-                lora_dropout=0.0,
-                target_modules={"b", "a"},
-                task_type=enum_task,
-            )
-        )
-        assert manifest_dict["task_type"] == "SEQ_CLS"
-        assert manifest_dict["target_modules"] == ["a", "b"]
-
-        spec = FinetuningNetworkSpec(
-            pretrained_model_name_or_path="gpt2",
-            max_context_length=512,
-            lora_config=peft_lora,
-        )
-        assert spec.lora_config is not None
-        assert spec.lora_config.r == 8
+    """The contract's fine-tuning network section, as the framework uses it."""
 
     @pytest.mark.skipif(not HAS_LLM_DEPENDENCIES, reason="LLM deps not installed")
     def test_target_parameters_round_trip(self):
@@ -263,51 +237,6 @@ class TestFinetuningNetworkSpec:
         dumped = spec.model_dump(mode="json")
         assert dumped["lora_config"]["target_parameters"] == experts
 
-    @pytest.mark.skipif(not HAS_LLM_DEPENDENCIES, reason="LLM deps not installed")
-    def test_coerce_peft_lora_none_target_modules(self):
-        """PEFT LoraConfig with target_modules=None maps to all-linear."""
-        from peft import LoraConfig, TaskType
-
-        peft_lora = LoraConfig(
-            r=4,
-            lora_alpha=8,
-            target_modules=None,
-            task_type=TaskType.CAUSAL_LM,
-        )
-        spec = FinetuningNetworkSpec(
-            pretrained_model_name_or_path="gpt2",
-            max_context_length=512,
-            lora_config=peft_lora,
-        )
-        dumped = spec.model_dump(mode="json")
-        assert dumped["lora_config"]["target_modules"] == "all-linear"
-
-    def test_resolve_lora_config_without_llm_dependencies(self):
-        """LoraConfigDict resolution raises when LLM extras are absent."""
-        with patch("agilerl.models.networks.HAS_LLM_DEPENDENCIES", False):
-            with pytest.raises(ImportError, match="LLM dependencies are required"):
-                FinetuningNetworkSpec(
-                    pretrained_model_name_or_path="gpt2",
-                    max_context_length=512,
-                    lora_config=LoraConfigDict(),
-                )
-
-    @pytest.mark.skipif(not HAS_LLM_DEPENDENCIES, reason="LLM deps not installed")
-    def test_serialize_lora_config_non_json_mode(self):
-        """_serialize_lora_config returns the live object outside json mode."""
-        from peft import LoraConfig, TaskType
-
-        peft_lora = LoraConfig(r=4, lora_alpha=8, task_type=TaskType.CAUSAL_LM)
-        spec = FinetuningNetworkSpec(
-            pretrained_model_name_or_path="gpt2",
-            max_context_length=512,
-            lora_config=peft_lora,
-        )
-        result = FinetuningNetworkSpec._serialize_lora_config(
-            spec, peft_lora, MagicMock(mode="python")
-        )
-        assert result is peft_lora
-
     def test_serialize_lora_none(self):
         """_serialize_lora_config with None value."""
         spec = FinetuningNetworkSpec(
@@ -317,29 +246,6 @@ class TestFinetuningNetworkSpec:
         )
         dumped = spec.model_dump(mode="json")
         assert dumped["lora_config"] is None
-
-    def test_serialize_lora_config_dict_json(self):
-        """_serialize_lora_config with LoraConfigDict in json mode."""
-        lora = LoraConfigDict()
-        spec = FinetuningNetworkSpec.__new__(FinetuningNetworkSpec)
-        object.__setattr__(
-            spec,
-            "__dict__",
-            {
-                "pretrained_model_name_or_path": "gpt2",
-                "max_context_length": 512,
-                "lora_config": lora,
-            },
-        )
-        object.__setattr__(
-            spec,
-            "__pydantic_fields_set__",
-            {"pretrained_model_name_or_path", "max_context_length", "lora_config"},
-        )
-        result = FinetuningNetworkSpec._serialize_lora_config(
-            spec, lora, MagicMock(mode="json")
-        )
-        assert isinstance(result, dict)
 
     def test_lora_config_dict_serialize_set_target_modules(self):
         """Line 363, 368, 372 of networks.py: _serialize_target_modules with set."""
@@ -351,24 +257,24 @@ class TestFinetuningNetworkSpec:
 class TestLLMEnvSpec:
     """Covers LLMEnvSpec validators and properties."""
 
-    def test_name_returns_dataset(self):
-        """name property returns dataset."""
+    def test_name_is_dataset_alias(self):
+        """YAML ``name`` fills ``dataset``."""
         spec = LLMEnvSpec(
             env_type=LLMEnvType.DATASET,
             objective="sft",
             dataset="my_dataset",
         )
-        assert spec.name == "my_dataset"
+        assert spec.dataset == "my_dataset"
 
-    def test_reasoning_missing_rubric_name(self):
-        """reasoning without rubric_name."""
-        with pytest.raises(ValueError, match="rubric_name is required"):
-            LLMEnvSpec(
-                env_type=LLMEnvType.ROLLOUT,
-                dataset="ds",
-                rubric_file_path="some/path.py",
-                prompt_template={"system": "hi"},
-            )
+    def test_rollout_defaults_rubric_name(self):
+        """An omitted rubric_name defaults to reward_fn."""
+        spec = LLMEnvSpec(
+            env_type=LLMEnvType.ROLLOUT,
+            dataset="ds",
+            rubric_file_path="some/path.py",
+            prompt_template={"system": "hi"},
+        )
+        assert spec.rubric_name == "reward_fn"
 
     def test_reasoning_missing_prompt_template(self):
         """reasoning without prompt_template."""
@@ -382,7 +288,7 @@ class TestLLMEnvSpec:
 
     def test_dataset_missing_dataset(self):
         """A dataset env without a dataset."""
-        with pytest.raises(ValueError, match="dataset is required for dataset"):
+        with pytest.raises(ValueError, match="must name its dataset"):
             LLMEnvSpec(env_type=LLMEnvType.DATASET, objective="sft")
 
     def test_dataset_missing_objective(self):
@@ -407,7 +313,7 @@ class TestLLMEnvSpec:
         }
 
         with patch("datasets.load_dataset", return_value=mock_ds):
-            train, test = spec._load_dataset_hf()
+            train, test = _load_dataset_hf(spec, spec.dataset)
 
         mock_ds.rename_columns.assert_called_once_with({"old": "new"})
         assert train == "train_split"
@@ -431,7 +337,7 @@ class TestLLMEnvSpec:
             patch("agilerl.models.env.pd.read_parquet", return_value=mock_df),
             patch("datasets.Dataset.from_pandas", return_value=mock_hf_ds),
         ):
-            _train, _test = spec._load_dataset_file()
+            _train, _test = _load_dataset_file(spec, spec.dataset)
 
         mock_df.rename.assert_called_once_with(columns={"old": "new"})
 
@@ -442,8 +348,8 @@ class TestLLMEnvSpec:
             objective="sft",
             dataset="some/hf/dataset",
         )
-        with patch.object(spec, "_load_dataset_hf", return_value=("t", "v")) as m:
-            _train, _test = spec._load_dataset()
+        with patch("agilerl.models.env._load_dataset_hf", return_value=("t", "v")) as m:
+            _train, _test = _load_llm_dataset(spec)
         m.assert_called_once()
 
     def test_load_dataset_dispatches_parquet(self):
@@ -453,8 +359,10 @@ class TestLLMEnvSpec:
             objective="sft",
             dataset="data/train.parquet",
         )
-        with patch.object(spec, "_load_dataset_file", return_value=("t", "v")) as m:
-            _train, _test = spec._load_dataset()
+        with patch(
+            "agilerl.models.env._load_dataset_file", return_value=("t", "v")
+        ) as m:
+            _train, _test = _load_llm_dataset(spec)
         m.assert_called_once()
 
     def test_make_dataset_env_rejects_rollout_spec(self):
@@ -467,7 +375,7 @@ class TestLLMEnvSpec:
             prompt_template={"system_0": "hi"},
         )
         with pytest.raises(TypeError, match="make_rollout_env_factory"):
-            spec.make_dataset_env(tokenizer=MagicMock())
+            make_llm_env(spec, MagicMock())
 
     def test_make_rollout_env_factory_rejects_dataset_spec(self):
         """A dataset env must be built through make_dataset_env."""
@@ -476,8 +384,8 @@ class TestLLMEnvSpec:
             objective="sft",
             dataset="ds",
         )
-        with pytest.raises(TypeError, match="make_dataset_env"):
-            spec.make_rollout_env_factory(MagicMock())
+        with pytest.raises(TypeError, match="make_llm_env"):
+            make_rollout_env_factory(spec, MagicMock())
 
     def test_rollout_entrypoint_non_callable(self):
         """make_rollout_env_factory with non-callable entrypoint."""
@@ -489,14 +397,14 @@ class TestLLMEnvSpec:
             "agilerl.models.env.resolve_entrypoint_target", return_value="not_callable"
         ):
             with pytest.raises(TypeError, match="resolved to non-callable"):
-                spec.make_rollout_env_factory(tokenizer=MagicMock())
+                make_rollout_env_factory(spec, tokenizer=MagicMock())
 
     def test_http_timeout_defaults_to_300s(self):
         """request_timeout_s unset applies the 300 s per-message bound."""
         spec = LLMEnvSpec(
             env_type=LLMEnvType.ROLLOUT, env_url="http://env", max_turns=1
         )
-        assert spec._http_timeout_s() == 300.0
+        assert _http_timeout_s(spec) == 300.0
 
     def test_http_timeout_zero_disables_the_bound(self):
         """request_timeout_s=0 means unbounded messages (timeout None)."""
@@ -506,7 +414,7 @@ class TestLLMEnvSpec:
             max_turns=1,
             request_timeout_s=0,
         )
-        assert spec._http_timeout_s() is None
+        assert _http_timeout_s(spec) is None
 
     def test_http_timeout_passes_explicit_value_through(self):
         """An explicit request_timeout_s is used verbatim."""
@@ -516,7 +424,7 @@ class TestLLMEnvSpec:
             max_turns=1,
             request_timeout_s=7.5,
         )
-        assert spec._http_timeout_s() == 7.5
+        assert _http_timeout_s(spec) == 7.5
 
 
 class TestBanditEnvSpec:
@@ -526,45 +434,34 @@ class TestBanditEnvSpec:
         """_load_dataframe with .h5 extension."""
         import pandas as pd
 
-        spec = BanditEnvSpec(
-            features=pd.DataFrame({"a": [1]}),
-            targets=pd.DataFrame({"b": [2]}),
-        )
         with patch(
             "agilerl.models.env.pd.read_hdf", return_value=pd.DataFrame({"x": [1]})
         ):
-            df = spec._load_dataframe("data.h5")
+            df = _load_dataframe("data.h5")
         assert "x" in df.columns
 
     def test_unsupported_file_type(self):
         """_load_dataframe with unsupported extension."""
-        import pandas as pd
-
-        spec = BanditEnvSpec(
-            features=pd.DataFrame({"a": [1]}),
-            targets=pd.DataFrame({"b": [2]}),
-        )
         with pytest.raises(ValueError, match="Unsupported file type"):
-            spec._load_dataframe("data.xlsx")
+            _load_dataframe("data.xlsx")
 
     def test_entrypoint_non_callable(self):
-        """make_env entrypoint resolves to non-callable."""
+        """make_bandit_env entrypoint resolves to non-callable."""
         spec = BanditEnvSpec(entrypoint="some.module:Cls")
         with patch(
             "agilerl.models.env.resolve_entrypoint_target", return_value="not_callable"
         ):
             with pytest.raises(TypeError, match="resolved to non-callable"):
-                spec.make_env()
+                make_bandit_env(spec)
 
 
 class TestGymEnvSpecNonCallable:
     """Lines 120-121 in env.py: construct_custom_env_fn with non-callable entrypoint."""
 
     def test_non_callable_entrypoint(self):
-        from agilerl.models.env import GymEnvSpec
 
         with patch("agilerl.models.env.resolve_entrypoint_target", return_value=42):
-            factory = GymEnvSpec.construct_custom_env_fn("some:entry")
+            factory = construct_custom_env_fn("some:entry")
             with pytest.raises(TypeError, match="resolved to non-callable"):
                 factory()
 
@@ -573,28 +470,26 @@ class TestPzEnvSpecNonCallable:
     """Lines 219-220, 247-248, 275-276 in env.py."""
 
     def test_non_callable_entrypoint(self):
-        from agilerl.models.env import PzEnvSpec
-
         with patch("agilerl.models.env.resolve_entrypoint_target", return_value=42):
-            factory = PzEnvSpec.construct_custom_env_fn("some:entry")
+            factory = construct_custom_pz_env_fn("some:entry")
             with pytest.raises(TypeError, match="resolved to non-callable"):
                 factory()
 
     def test_make_single_env_no_parallel_env(self):
         """fallback path for PZ module without parallel_env."""
-        from agilerl.models.env import PzEnvSpec
+        from agilerl.models.env import GymEnvSpec
 
-        spec = PzEnvSpec(name="fake_pz_module")
+        spec = GymEnvSpec(name="fake_pz_module")
         mock_module = MagicMock(spec=[])  # no parallel_env attr
         with patch("agilerl.models.env.import_module", return_value=mock_module):
             with pytest.raises(AttributeError, match="has no 'parallel_env'"):
-                spec.make_single_env()
+                make_single_env(spec, multi_agent=True)
 
     def test_make_env_no_entrypoint_no_parallel_env(self):
         """make_env inner closure raises on missing parallel_env."""
-        from agilerl.models.env import PzEnvSpec
+        from agilerl.models.env import GymEnvSpec
 
-        spec = PzEnvSpec(name="fake_pz_module")
+        spec = GymEnvSpec(name="fake_pz_module")
         mock_module = MagicMock(spec=[])
         with (
             patch("agilerl.models.env.import_module", return_value=mock_module),
@@ -602,64 +497,36 @@ class TestPzEnvSpecNonCallable:
         ):
             mock_vect.side_effect = lambda env, **kw: env()
             with pytest.raises(AttributeError, match="has no 'parallel_env'"):
-                spec.make_env()
+                make_pz_env(spec)
 
 
 class TestAlgorithmRegistry:
     def test_registry_override_warning(self):
         """warning on re-registering same algorithm name."""
-        from agilerl.models.algo import ALGO_REGISTRY, AlgorithmRegistry, AlgorithmSpec
+        from agilerl.arena.models.algorithms import AlgorithmSpec
+        from agilerl.arena.models.registry import MANIFEST_REGISTRY
 
         class DummySpec(AlgorithmSpec):
             pass
 
-        registry = AlgorithmRegistry()
-        registry.add("__test_dup__", DummySpec)
-        with patch("agilerl.models.algo.logger") as mock_logger:
-            registry.add("__test_dup__", DummySpec)
-            mock_logger.warning.assert_called_once()
-
-        assert "__test_dup__" not in ALGO_REGISTRY._entries
-
-    def test_build_algorithm_not_implemented(self):
-        """AlgorithmSpec.build_algorithm raises."""
-        from agilerl.models.algo import AlgorithmSpec
-
-        spec = AlgorithmSpec.__new__(AlgorithmSpec)
-        with pytest.raises(
-            NotImplementedError, match="must implement a build_algorithm"
-        ):
-            spec.build_algorithm()
-
-    def test_get_training_fn_not_implemented(self):
-        """Bare AlgorithmSpec is not a paradigm spec, so it has no strategy."""
-        from agilerl.models.algo import AlgorithmSpec
-
-        with pytest.raises(TypeError, match="is not an algorithm spec"):
-            AlgorithmSpec.get_training_fn()
-
-    def test_get_training_kwargs_not_an_algorithm_spec(self):
-        from agilerl.models.algo import AlgorithmSpec
-        from agilerl.models.env import GymEnvSpec
-        from agilerl.models.training import TrainingSpec
-
-        spec = AlgorithmSpec.__new__(AlgorithmSpec)
-        with pytest.raises(TypeError, match="is not an algorithm spec"):
-            spec.get_training_kwargs(
-                training=TrainingSpec(max_steps=10),
-                env_spec=GymEnvSpec(name="CartPole-v1"),
-            )
+        try:
+            MANIFEST_REGISTRY.add("__test_dup__", DummySpec)
+            with patch("agilerl.arena.models.registry.logger") as mock_logger:
+                MANIFEST_REGISTRY.add("__test_dup__", DummySpec)
+                mock_logger.warning.assert_called_once()
+        finally:
+            MANIFEST_REGISTRY._entries.pop("__test_dup__", None)
 
 
 class TestAlgoSpecClassVars:
-    """Kwargs the spec forwards into the training loop."""
+    """Lines 302, 335-336, 400, 455 in algo.py."""
 
     def test_llm_spec_num_epochs_kwarg(self):
-        """get_training_kwargs forwards num_epochs for dataset specs only."""
-        from agilerl.models.algorithms.dpo import DPOSpec
-        from agilerl.models.algorithms.grpo import GRPOSpec
+        """The LLM strategies forward num_epochs for dataset specs only."""
+        from agilerl.arena.models.algorithms import DPOSpec, GRPOSpec
         from agilerl.models.env import LLMEnvSpec, LLMEnvType
         from agilerl.models.training import TrainingSpec
+        from agilerl.strategies import LLM_DATASET, LLM_ROLLOUT
 
         def bare_spec(cls):
             spec = cls.__new__(cls)
@@ -685,8 +552,8 @@ class TestAlgoSpecClassVars:
             max_reward=1.0,
         )
 
-        kwargs = bare_spec(DPOSpec).get_training_kwargs(
-            training=training, env_spec=env_spec
+        kwargs = LLM_DATASET.get_trainer_kwargs(
+            bare_spec(DPOSpec), training=training, env_spec=env_spec
         )
         assert kwargs["num_epochs"] == 3
         assert kwargs["max_reward"] == 1.0
@@ -694,74 +561,88 @@ class TestAlgoSpecClassVars:
 
         # Rollout loops are step-based: num_epochs is warned about and dropped.
         with pytest.warns(UserWarning, match="num_epochs"):
-            rollout_kwargs = bare_spec(GRPOSpec).get_training_kwargs(
-                training=training, env_spec=env_spec
+            rollout_kwargs = LLM_ROLLOUT.get_trainer_kwargs(
+                bare_spec(GRPOSpec), training=training, env_spec=env_spec
             )
         assert "num_epochs" not in rollout_kwargs
 
     def test_llm_spec_forwards_checkpoint_path(self):
-        from agilerl.models.algorithms.dpo import DPOSpec
+        from agilerl.arena.models.algorithms import LLMAlgorithmSpec
         from agilerl.models.training import TrainingSpec
+        from agilerl.strategies import LLM_ROLLOUT
 
-        spec = DPOSpec.model_construct()
+        spec = LLMAlgorithmSpec.__new__(LLMAlgorithmSpec)
+        object.__setattr__(spec, "__dict__", {"batch_size": 8, "hp_config": None})
         training = TrainingSpec(checkpoint_path="/ckpts", evaluation_interval=10)
         env_spec = MagicMock()
         env_spec.max_reward = None
-        kwargs = spec.get_training_kwargs(training=training, env_spec=env_spec)
+        kwargs = LLM_ROLLOUT.get_trainer_kwargs(
+            spec, training=training, env_spec=env_spec
+        )
         assert kwargs["checkpoint_path"] == "/ckpts"
 
     def test_llm_spec_warns_on_unsupported_training_fields(self):
-        from agilerl.models.algorithms.dpo import DPOSpec
+        from agilerl.arena.models.algorithms import LLMAlgorithmSpec
         from agilerl.models.training import TrainingSpec
+        from agilerl.strategies import LLM_ROLLOUT
 
-        spec = DPOSpec.model_construct()
+        spec = LLMAlgorithmSpec.__new__(LLMAlgorithmSpec)
+        object.__setattr__(spec, "__dict__", {"batch_size": 8, "hp_config": None})
         training = TrainingSpec(
             target_score=200.0, eval_steps=100, evaluation_interval=10
         )
         env_spec = MagicMock()
         env_spec.max_reward = None
         with pytest.warns(UserWarning, match="target_score, eval_steps"):
-            kwargs = spec.get_training_kwargs(training=training, env_spec=env_spec)
+            kwargs = LLM_ROLLOUT.get_trainer_kwargs(
+                spec, training=training, env_spec=env_spec
+            )
         assert "target_score" not in kwargs
         assert "eval_steps" not in kwargs
 
     def test_llm_spec_no_warning_for_default_training_fields(self, recwarn):
-        from agilerl.models.algorithms.dpo import DPOSpec
+        from agilerl.arena.models.algorithms import LLMAlgorithmSpec
         from agilerl.models.training import TrainingSpec
+        from agilerl.strategies import LLM_ROLLOUT
 
-        spec = DPOSpec.model_construct()
+        spec = LLMAlgorithmSpec.__new__(LLMAlgorithmSpec)
+        object.__setattr__(spec, "__dict__", {"batch_size": 8, "hp_config": None})
         # Setting an unsupported field to its default (as the trainer does for
         # overwrite_checkpoints) must not warn
         training = TrainingSpec(evaluation_interval=10, overwrite_checkpoints=False)
         env_spec = MagicMock()
         env_spec.max_reward = None
-        spec.get_training_kwargs(training=training, env_spec=env_spec)
+        LLM_ROLLOUT.get_trainer_kwargs(spec, training=training, env_spec=env_spec)
         assert not any("not supported by LLM" in str(w.message) for w in recwarn.list)
 
     def test_offline_spec_dataset_path(self):
-        """get_training_kwargs for offline algo with dataset_path."""
-        from agilerl.models.algo import RLAlgorithmSpec, offline
+        """Offline training kwargs carry the Minari id and remote flag."""
+        from typing import ClassVar
+
+        from agilerl.arena.models.algorithms import RLAlgorithmSpec
         from agilerl.models.env import OfflineEnvSpec
 
-        @offline()
         class _OffSpec(RLAlgorithmSpec):
-            pass
+            offline: ClassVar[bool] = True
 
         spec = _OffSpec()
         env_spec = OfflineEnvSpec(name="test", minari_dataset_id="cart-v0", remote=True)
         training = TrainingSpec()
-        kwargs = spec.get_training_kwargs(training=training, env_spec=env_spec)
+        kwargs = select_strategy(spec).get_trainer_kwargs(
+            spec, training=training, env_spec=env_spec
+        )
         assert kwargs["minari_dataset_id"] == "cart-v0"
         assert kwargs["remote"] is True
 
     def test_offline_spec_dataset_path_uses_h5py(self, tmp_path):
-        """get_training_kwargs opens an offline HDF5 dataset when no Minari id."""
-        from agilerl.models.algo import RLAlgorithmSpec, offline
+        """Offline training kwargs open the HDF5 dataset when there is no Minari id."""
+        from typing import ClassVar
+
+        from agilerl.arena.models.algorithms import RLAlgorithmSpec
         from agilerl.models.env import OfflineEnvSpec
 
-        @offline()
         class _OffSpec(RLAlgorithmSpec):
-            pass
+            offline: ClassVar[bool] = True
 
         dataset_path = tmp_path / "offline.h5"
         dataset_path.write_bytes(b"")
@@ -771,16 +652,18 @@ class TestAlgoSpecClassVars:
         mock_file = MagicMock()
 
         with patch("h5py.File", return_value=mock_file) as mock_h5:
-            kwargs = spec.get_training_kwargs(training=training, env_spec=env_spec)
+            kwargs = select_strategy(spec).get_trainer_kwargs(
+                spec, training=training, env_spec=env_spec
+            )
 
         mock_h5.assert_called_once_with(str(dataset_path), "r")
         assert kwargs["dataset"] is mock_file
 
     def test_rl_spec_resume_from_checkpoint(self):
-        """DQNSpec.build_algorithm with resume."""
-        from agilerl.models.algorithms.dqn import DQNSpec
+        """RLAlgorithmSpec.build_algorithm with resume."""
+        from agilerl.arena.models.algorithms import RLAlgorithmSpec
 
-        spec = DQNSpec(learn_step=1)
+        spec = RLAlgorithmSpec(learn_step=1)
         mock_algo_cls = MagicMock()
         mock_algo = MagicMock()
         mock_algo_cls.return_value = mock_algo
@@ -790,7 +673,8 @@ class TestAlgoSpecClassVars:
         with patch.object(
             select_builder(spec), "algo_class", return_value=mock_algo_cls
         ):
-            spec.build_algorithm(
+            build_from_spec(
+                spec,
                 observation_space=MagicMock(),
                 action_space=MagicMock(),
                 index=2,
@@ -801,10 +685,10 @@ class TestAlgoSpecClassVars:
         assert mock_algo.index == 2
 
     def test_multi_agent_resume_from_checkpoint(self):
-        """MADDPGSpec.build_algorithm with resume."""
-        from agilerl.models.algorithms.maddpg import MADDPGSpec
+        """MultiAgentRLAlgorithmSpec.build_algorithm with resume."""
+        from agilerl.arena.models.algorithms import MultiAgentRLAlgorithmSpec
 
-        spec = MADDPGSpec()
+        spec = MultiAgentRLAlgorithmSpec()
         mock_algo_cls = MagicMock()
         mock_algo = MagicMock()
         mock_algo_cls.return_value = mock_algo
@@ -814,7 +698,8 @@ class TestAlgoSpecClassVars:
         with patch.object(
             select_builder(spec), "algo_class", return_value=mock_algo_cls
         ):
-            spec.build_algorithm(
+            build_from_spec(
+                spec,
                 observation_spaces={"a": MagicMock()},
                 action_spaces={"a": MagicMock()},
                 index=2,
@@ -824,65 +709,44 @@ class TestAlgoSpecClassVars:
         assert mock_algo.index == 2
 
 
-class TestAlgoClass:
-    def test_rl_spec_resolves_the_algorithm_class(self):
-        from agilerl.algorithms import DQN
-        from agilerl.algorithms.core import RLAlgorithm
-        from agilerl.models.algorithms.dqn import DQNSpec
-
-        resolved = DQNSpec.algo_class()
-
-        assert resolved is DQN
-        assert issubclass(resolved, RLAlgorithm)
-
-    def test_multi_agent_spec_resolves_the_algorithm_class(self):
-        from agilerl.algorithms import MADDPG
-        from agilerl.algorithms.core import MultiAgentRLAlgorithm
-        from agilerl.models.algorithms.maddpg import MADDPGSpec
-
-        resolved = MADDPGSpec.algo_class()
-
-        assert resolved is MADDPG
-        assert issubclass(resolved, MultiAgentRLAlgorithm)
-
-
 class TestBuildAlgorithmMissingArgsRaise:
     """build_algorithm overrides reject missing required inputs."""
 
     def test_rl_spec_requires_spaces_and_index(self):
-        from agilerl.models.algorithms.dqn import DQNSpec
+        from agilerl.arena.models.algorithms import RLAlgorithmSpec
 
-        spec = DQNSpec(learn_step=1)
+        spec = RLAlgorithmSpec(learn_step=1)
         with pytest.raises(ValueError, match="observation_space"):
-            spec.build_algorithm()
+            build_from_spec(spec)
 
     def test_multi_agent_spec_requires_spaces_and_index(self):
-        from agilerl.models.algorithms.maddpg import MADDPGSpec
+        from agilerl.arena.models.algorithms import MultiAgentRLAlgorithmSpec
 
-        spec = MADDPGSpec()
+        spec = MultiAgentRLAlgorithmSpec()
         with pytest.raises(ValueError, match="observation_spaces"):
-            spec.build_algorithm()
+            build_from_spec(spec)
 
     def test_llm_spec_requires_tokenizer(self):
-        from agilerl.models.algorithms.grpo import GRPOSpec
+        from agilerl.arena.models.algorithms import LLMAlgorithmSpec
 
-        spec = GRPOSpec.model_construct()
+        spec = LLMAlgorithmSpec.__new__(LLMAlgorithmSpec)
         with pytest.raises(ValueError, match="requires a tokenizer"):
-            spec.build_algorithm()
+            build_from_spec(spec)
 
 
 class TestBuildAlgorithmForwardsOnlySetFields:
     """Unset spec fields must fall through to the algorithm's own defaults."""
 
     def test_rl_spec_forwards_only_set_fields(self):
-        from agilerl.models.algorithms.dqn import DQNSpec
+        from agilerl.arena.models.algorithms import RLAlgorithmSpec
 
-        spec = DQNSpec(learn_step=2)
+        spec = RLAlgorithmSpec(learn_step=2)
         mock_algo_cls = MagicMock()
         with patch.object(
             select_builder(spec), "algo_class", return_value=mock_algo_cls
         ):
-            spec.build_algorithm(
+            build_from_spec(
+                spec,
                 observation_space=MagicMock(),
                 action_space=MagicMock(),
                 index=0,
@@ -893,14 +757,15 @@ class TestBuildAlgorithmForwardsOnlySetFields:
         assert "batch_size" not in kwargs
 
     def test_multi_agent_spec_forwards_only_set_fields(self):
-        from agilerl.models.algorithms.ippo import IPPOSpec
+        from agilerl.arena.models.algorithms import MultiAgentRLAlgorithmSpec
 
-        spec = IPPOSpec(gamma=0.9)
+        spec = MultiAgentRLAlgorithmSpec(gamma=0.9)
         mock_algo_cls = MagicMock()
         with patch.object(
             select_builder(spec), "algo_class", return_value=mock_algo_cls
         ):
-            spec.build_algorithm(
+            build_from_spec(
+                spec,
                 observation_spaces={"a": MagicMock()},
                 action_spaces={"a": MagicMock()},
                 index=0,
@@ -911,7 +776,7 @@ class TestBuildAlgorithmForwardsOnlySetFields:
         assert "batch_size" not in kwargs
 
     def test_llm_spec_forwards_only_set_fields(self):
-        from agilerl.models.algorithms.grpo import GRPOSpec
+        from agilerl.arena.models.algorithms import GRPOSpec
 
         spec = GRPOSpec(pretrained_model_name_or_path="gpt2", beta=0.05, group_size=4)
         mock_tokenizer = MagicMock()
@@ -925,11 +790,11 @@ class TestBuildAlgorithmForwardsOnlySetFields:
                 select_builder(spec), "algo_class", return_value=mock_algo_cls
             ),
             patch(
-                "agilerl.builders.llm.load_pad_token_configs",
+                "agilerl.utils.llm_utils.load_pad_token_configs",
                 return_value=(None, None),
             ),
         ):
-            spec.build_algorithm(tokenizer=mock_tokenizer, index=0)
+            build_from_spec(spec, tokenizer=mock_tokenizer, index=0)
         kwargs = mock_algo_cls.call_args.kwargs
         assert kwargs["beta"] == 0.05
         assert kwargs["model_name"] == "gpt2"
@@ -941,11 +806,12 @@ class TestBuildAlgorithmForwardsOnlySetFields:
         import gymnasium as gym
 
         from agilerl.algorithms import DQN
-        from agilerl.models.algorithms.dqn import DQNSpec
+        from agilerl.arena.models.algorithms import DQNSpec
 
         observation_space = gym.spaces.Box(low=-1.0, high=1.0, shape=(4,))
         action_space = gym.spaces.Discrete(2)
-        from_spec = DQNSpec().build_algorithm(
+        from_spec = build_from_spec(
+            DQNSpec(),
             observation_space=observation_space,
             action_space=action_space,
             index=0,
@@ -961,19 +827,11 @@ class TestBuildAlgorithmForwardsOnlySetFields:
 
 
 class TestLLMAlgorithmSpecBuild:
-    """LLM spec.build_algorithm delegates to LLMBuilder."""
-
-    @pytest.fixture(autouse=True)
-    def _stub_pad_token_loader(self):
-        with patch(
-            "agilerl.builders.llm.load_pad_token_configs",
-            return_value=(None, None),
-        ):
-            yield
+    """Lines 531-533, 554 in algo.py."""
 
     def test_micro_batch_size_per_gpu_forwarded_only_when_set(self):
         """Explicit micro batch reaches the constructor; unset leaves the algorithm's default."""
-        from agilerl.models.algorithms.grpo import GRPOSpec
+        from agilerl.arena.models.algorithms import GRPOSpec
 
         mock_tokenizer = MagicMock()
         mock_tokenizer.eos_token_id = 0
@@ -991,8 +849,8 @@ class TestLLMAlgorithmSpecBuild:
         with patch.object(
             select_builder(spec), "algo_class", return_value=mock_algo_cls
         ):
-            spec.build_algorithm(
-                tokenizer=mock_tokenizer, index=0, accelerator=accelerator
+            build_from_spec(
+                spec, tokenizer=mock_tokenizer, index=0, accelerator=accelerator
             )
         assert mock_algo_cls.call_args.kwargs["micro_batch_size_per_gpu"] == 1
 
@@ -1005,14 +863,14 @@ class TestLLMAlgorithmSpecBuild:
         with patch.object(
             select_builder(derived), "algo_class", return_value=mock_algo_cls
         ):
-            derived.build_algorithm(
-                tokenizer=mock_tokenizer, index=0, accelerator=accelerator
+            build_from_spec(
+                derived, tokenizer=mock_tokenizer, index=0, accelerator=accelerator
             )
         assert "micro_batch_size_per_gpu" not in mock_algo_cls.call_args.kwargs
 
     def test_chunk_rows_forwarded_to_constructor(self):
-        """The manifest chunk_rows setting reaches the algorithm constructor."""
-        from agilerl.models.algorithms.grpo import GRPOSpec
+        """The manifest chunk_rows field reaches the algorithm constructor."""
+        from agilerl.arena.models.algorithms import GRPOSpec
 
         mock_tokenizer = MagicMock()
         mock_tokenizer.eos_token_id = 0
@@ -1025,12 +883,12 @@ class TestLLMAlgorithmSpecBuild:
         with patch.object(
             select_builder(spec), "algo_class", return_value=mock_algo_cls
         ):
-            spec.build_algorithm(tokenizer=mock_tokenizer, index=0)
+            build_from_spec(spec, tokenizer=mock_tokenizer, index=0)
         assert mock_algo_cls.call_args.kwargs["chunk_rows"] == 128
 
     def test_build_algorithm_uses_model_config_pad(self):
         """Actor network config.pad_token_id wins over tokenizer pad=im_end."""
-        from agilerl.models.algorithms.grpo import GRPOSpec
+        from agilerl.arena.models.algorithms import GRPOSpec
 
         mock_tokenizer = MagicMock()
         mock_tokenizer.eos_token_id = 2
@@ -1052,11 +910,13 @@ class TestLLMAlgorithmSpecBuild:
                 select_builder(spec), "algo_class", return_value=mock_algo_cls
             ),
             patch(
-                "agilerl.builders.llm.load_pad_token_configs",
+                "agilerl.utils.llm_utils.load_pad_token_configs",
                 return_value=(None, None),
             ),
         ):
-            spec.build_algorithm(tokenizer=mock_tokenizer, index=0, actor_network=actor)
+            build_from_spec(
+                spec, tokenizer=mock_tokenizer, index=0, actor_network=actor
+            )
 
         kwargs = mock_algo_cls.call_args.kwargs
         assert kwargs["pad_token_id"] == 0
@@ -1065,7 +925,7 @@ class TestLLMAlgorithmSpecBuild:
 
     def test_vllm_config_dict_coerced(self):
         """build_algorithm coerces dict vllm_config."""
-        from agilerl.models.algorithms.grpo import GRPOSpec
+        from agilerl.arena.models.algorithms import GRPOSpec
 
         spec = GRPOSpec(
             pretrained_model_name_or_path="gpt2",
@@ -1090,14 +950,14 @@ class TestLLMAlgorithmSpecBuild:
             patch("agilerl.builders.llm.VLLMConfig") as mock_vllm,
         ):
             mock_vllm.return_value = "coerced_config"
-            spec.build_algorithm(tokenizer=mock_tokenizer, index=0)
+            build_from_spec(spec, tokenizer=mock_tokenizer, index=0)
 
         mock_vllm.assert_called_once_with(tensor_parallel_size=1)
 
     @pytest.mark.skipif(not HAS_LLM_DEPENDENCIES, reason="LLM deps not installed")
     def test_build_algorithm_quantization_and_attn_implementation(self):
         """build_algorithm resolves nf4 quantization and attn_implementation."""
-        from agilerl.models.algorithms.grpo import GRPOSpec
+        from agilerl.arena.models.algorithms import GRPOSpec
         from agilerl.utils.llm_utils import build_bnb_quantization_config
 
         spec = GRPOSpec(
@@ -1114,7 +974,7 @@ class TestLLMAlgorithmSpecBuild:
         with patch.object(
             select_builder(spec), "algo_class", return_value=mock_algo_cls
         ):
-            spec.build_algorithm(tokenizer=mock_tokenizer, index=0)
+            build_from_spec(spec, tokenizer=mock_tokenizer, index=0)
 
         kwargs = mock_algo_cls.call_args.kwargs
         assert "quantization" not in kwargs
@@ -1123,9 +983,29 @@ class TestLLMAlgorithmSpecBuild:
 
     def test_resume_from_checkpoint(self):
         """build_algorithm with resume_from_checkpoint."""
-        from agilerl.models.algorithms.grpo import GRPOSpec
+        from agilerl.arena.models.algorithms import LLMAlgorithmSpec
 
-        spec = GRPOSpec(pretrained_model_name_or_path="gpt2", group_size=4)
+        spec = LLMAlgorithmSpec.__new__(LLMAlgorithmSpec)
+        attrs = {
+            "batch_size": 4,
+            "pretrained_model_name_or_path": "gpt2",
+            "lora_config": None,
+            "hp_config": None,
+            "use_vllm": False,
+            "max_model_len": 512,
+            "beta": 0.01,
+            "max_grad_norm": 0.1,
+            "update_epochs": 1,
+            "reduce_memory_peak": False,
+            "use_separate_reference_adapter": False,
+            "calc_position_embeddings": True,
+            "gradient_checkpointing": True,
+            "use_liger_loss": False,
+            "seed": 42,
+        }
+        object.__setattr__(spec, "__dict__", attrs)
+        object.__setattr__(spec, "__pydantic_fields_set__", set(attrs.keys()))
+
         mock_tokenizer = MagicMock()
         mock_tokenizer.eos_token_id = 0
         mock_tokenizer.eos_token = "<|endoftext|>"
@@ -1136,16 +1016,11 @@ class TestLLMAlgorithmSpecBuild:
             mock_algo, "index", 3
         )
 
-        with (
-            patch.object(
-                select_builder(spec), "algo_class", return_value=mock_algo_cls
-            ),
-            patch(
-                "agilerl.builders.llm.load_pad_token_configs",
-                return_value=(None, None),
-            ),
+        with patch.object(
+            select_builder(spec), "algo_class", return_value=mock_algo_cls
         ):
-            spec.build_algorithm(
+            build_from_spec(
+                spec,
                 tokenizer=mock_tokenizer,
                 index=2,
                 resume_from_checkpoint="/ckpt",
@@ -1155,51 +1030,14 @@ class TestLLMAlgorithmSpecBuild:
         assert mock_algo.index == 2
 
 
-class TestManifestResolveAlgorithm:
-    """Lines 57-58, 69-71, 74-75 in manifest.py."""
-
-    def test_resolve_non_dict_non_spec(self):
-        """_resolve_algorithm with invalid type."""
-        from agilerl.models.manifest import _resolve_algorithm
-
-        with pytest.raises(TypeError, match="Expected a dict or AlgorithmSpec"):
-            _resolve_algorithm(42)
-
-    def test_resolve_llm_without_dependencies(self):
-        """LLM algo without LLM deps raises ImportError."""
-        from agilerl.models.manifest import _resolve_algorithm
-
-        with patch("agilerl.models.manifest.HAS_LLM_DEPENDENCIES", False):
-            with pytest.raises(ImportError, match="LLM dependencies"):
-                _resolve_algorithm({"name": "GRPO", "group_size": 4})
-
-
 class TestManifestHelpers:
     """Helper resolvers and trainer-spec coercion in manifest.py."""
 
-    def test_coerce_environment_invalid_type(self):
-        from agilerl.models.manifest import _coerce_environment
-
-        with pytest.raises(TypeError, match="Expected a dict or environment spec"):
-            _coerce_environment(42)
-
-    def test_resolve_network_finetuning_spec(self):
-        from agilerl.models.manifest import _resolve_network
-
-        network = FinetuningNetworkSpec(
-            pretrained_model_name_or_path="gpt2",
-            max_context_length=512,
-        )
-        resolved = _resolve_network(network)
-        assert resolved["pretrained_model_name_or_path"] == "gpt2"
-        assert resolved["max_context_length"] == 512
-
     @pytest.mark.skipif(not HAS_LLM_DEPENDENCIES, reason="LLM deps not installed")
     def test_network_from_algorithm_llm_agent(self):
-        from agilerl.models.algorithms.grpo import GRPOSpec
-        from agilerl.models.manifest import TrainingManifest
+        from agilerl.arena.models.algorithms import GRPOSpec
 
-        manifest = TrainingManifest.from_trainer_specs(
+        manifest = from_trainer_specs(
             algorithm=GRPOSpec(
                 group_size=4,
                 pretrained_model_name_or_path="gpt2",
@@ -1209,48 +1047,53 @@ class TestManifestHelpers:
             training=TrainingSpec(max_steps=10),
         )
         assert manifest.network is not None
-        assert manifest.network["pretrained_model_name_or_path"] == "gpt2"
-        assert manifest.network["max_context_length"] == 256
+        assert manifest.network.pretrained_model_name_or_path == "gpt2"
+        assert manifest.network.max_context_length == 256
 
 
-@requires_arena
 class TestManifestFromTrainerSpecsForeignModels:
     """Foreign BaseModel inputs are dumped before manifest validation."""
 
     def test_from_trainer_specs_coerces_foreign_training_model(self):
         from pydantic import BaseModel
 
-        from agilerl.arena.models.env import EnvSpec as ArenaEnvSpec
+        from agilerl.arena.models import GymEnvSpec as ArenaEnvSpec
 
         class ForeignTraining(BaseModel):
             max_steps: int = 300
             evo_steps: int = 50
             pop_size: int = 2
 
-        manifest = TrainingManifest.from_trainer_specs(
+        manifest = from_trainer_specs(
             algorithm=PPOSpec(learn_step=64),
             environment=ArenaEnvSpec(name="CartPole-v1"),
             training=ForeignTraining(),
         )
         assert manifest.training.max_steps == 300
 
-    def test_resolve_foreign_arena_algorithm(self):
-        from agilerl.arena.models.algorithms.ppo import PPOSpec as ArenaPPOSpec
-        from agilerl.models.manifest import _resolve_algorithm
+    def test_from_trainer_specs_coerces_a_foreign_mutation_model(self):
+        from pydantic import BaseModel
 
-        resolved = _resolve_algorithm(ArenaPPOSpec(learn_step=48))
-        assert isinstance(resolved, PPOSpec)
-        assert resolved.learn_step == 48
+        from agilerl.arena.models import GymEnvSpec as ArenaEnvSpec
+
+        class ForeignMutation(BaseModel):
+            mutation_sd: float = 0.05
+
+        manifest = from_trainer_specs(
+            algorithm=PPOSpec(learn_step=64),
+            environment=ArenaEnvSpec(name="CartPole-v1"),
+            training=TrainingSpec(max_steps=200),
+            mutation=ForeignMutation(),
+        )
+        assert manifest.mutation is not None
+        assert manifest.mutation.mutation_sd == 0.05
 
 
 class TestTrainingSpec:
     """Lines 247-248 in training.py."""
 
-    def test_eval_steps_must_exceed_evaluation_interval(self):
-        with pytest.raises(
-            ValueError, match="eval_steps must be greater than evaluation_interval"
-        ):
-            TrainingSpec(eval_steps=5, evaluation_interval=10)
+    def test_eval_steps_is_independent_of_evaluation_interval(self):
+        assert TrainingSpec(eval_steps=5, evaluation_interval=10).eval_steps == 5
 
     def test_max_wall_seconds_accepted(self):
         assert TrainingSpec(max_wall_seconds=3600).max_wall_seconds == 3600
@@ -1273,13 +1116,13 @@ class TestReplayBufferSpecNStep:
 
     def test_init_n_step_buffer_with_per(self):
         """init_n_step_buffer when per + n_step enabled."""
-        from agilerl.models.algorithms.rainbow_dqn import RainbowDQNSpec
+        from agilerl.arena.models.algorithms import RainbowDQNSpec
 
         spec = ReplayBufferSpec(per_buffer=True, n_step_buffer=True)
         algo = RainbowDQNSpec(
             net_config=None,
         )
-        buf = spec.init_n_step_buffer(algo, device="cpu")
+        buf = init_n_step_buffer(spec, algo, device="cpu")
         assert buf is not None
 
     def test_init_n_step_buffer_no_gamma(self):
@@ -1287,64 +1130,68 @@ class TestReplayBufferSpecNStep:
         spec = ReplayBufferSpec(per_buffer=True, n_step_buffer=True)
         algo = MagicMock(spec=[])  # no gamma attribute
         with pytest.raises(ValueError, match="Gamma must be specified"):
-            spec.init_n_step_buffer(algo, device="cpu")
+            init_n_step_buffer(spec, algo, device="cpu")
 
     def test_init_buffer_per_with_n_step_builds_per_main_memory(self):
         """Combined PER + n-step: main memory is PER, n-step is secondary."""
+        from agilerl.arena.models.algorithms import RainbowDQNSpec
         from agilerl.components.replay_buffer import (
             MultiStepReplayBuffer,
             PrioritizedReplayBuffer,
         )
-        from agilerl.models.algorithms.rainbow_dqn import RainbowDQNSpec
 
         spec = ReplayBufferSpec(per_buffer=True, n_step_buffer=True)
         algo = RainbowDQNSpec(net_config=None)
-        memory = spec.init_buffer(algo, device="cpu")
-        n_step_memory = spec.init_n_step_buffer(algo, device="cpu")
+        memory = init_buffer(spec, algo, device="cpu")
+        n_step_memory = init_n_step_buffer(spec, algo, device="cpu")
         assert isinstance(memory, PrioritizedReplayBuffer)
         assert isinstance(n_step_memory, MultiStepReplayBuffer)
 
     def test_init_buffer_n_step_only_builds_multi_step_main_memory(self):
         """n-step without PER keeps the main memory as the n-step buffer."""
+        from agilerl.arena.models.algorithms import RainbowDQNSpec
         from agilerl.components.replay_buffer import MultiStepReplayBuffer
-        from agilerl.models.algorithms.rainbow_dqn import RainbowDQNSpec
 
         spec = ReplayBufferSpec(n_step_buffer=True)
         algo = RainbowDQNSpec(net_config=None)
-        memory = spec.init_buffer(algo, device="cpu")
+        memory = init_buffer(spec, algo, device="cpu")
         assert isinstance(memory, MultiStepReplayBuffer)
-        assert spec.init_n_step_buffer(algo, device="cpu") is None
+        assert init_n_step_buffer(spec, algo, device="cpu") is None
 
 
 class TestLLMPPOSpec:
     """Lines 42-45, 56-61 in llmppo.py."""
 
     def test_vllm_required_when_use_vllm(self):
-        from agilerl.models.algorithms.llmppo import LLMPPOSpec
+        from agilerl.arena.models.algorithms import LLMPPOSpec
 
-        with pytest.raises(ValueError, match="VLLM config is not set"):
+        with pytest.raises(ValueError, match="use_vllm is set but no vllm_config"):
             LLMPPOSpec(use_vllm=True, vllm_config=None)
 
     def test_vllm_config_accepted_when_use_vllm(self):
-        from agilerl.models.algorithms.llmppo import LLMPPOSpec
-        from agilerl.utils.algo_utils import VLLMConfig
+        from agilerl.arena.models.algorithms import LLMPPOSpec
+        from agilerl.arena.models.networks import VLLMConfig
 
         spec = LLMPPOSpec(use_vllm=True, vllm_config=VLLMConfig())
         assert spec.use_vllm is True
         assert spec.vllm_config is not None
 
-    def test_get_training_fn_rollout(self):
-        from agilerl.models.algorithms.llmppo import LLMPPOSpec
+    def test_rollout_training_loop(self):
+        from agilerl.arena.models.algorithms import LLMPPOSpec
 
-        fn = LLMPPOSpec.get_training_fn()
+        fn = select_strategy(LLMPPOSpec.model_construct()).get_training_loop(
+            LLMPPOSpec.model_construct()
+        )
         from agilerl.training.llm import train_llm_rollout
 
         assert fn is train_llm_rollout
 
-    def test_get_training_fn_reasoning(self):
-        from agilerl.models.algorithms.llmppo import LLMPPOSpec
+    def test_training_loop_default(self):
+        from agilerl.arena.models.algorithms import LLMPPOSpec
 
-        fn = LLMPPOSpec.get_training_fn()
+        fn = select_strategy(LLMPPOSpec.model_construct()).get_training_loop(
+            LLMPPOSpec.model_construct()
+        )
         from agilerl.training.llm import train_llm_rollout
 
         assert fn is train_llm_rollout
@@ -1354,31 +1201,35 @@ class TestLLMREINFORCESpec:
     """Lines 39-42, 53-58 in llmreinforce.py."""
 
     def test_vllm_required_when_use_vllm(self):
-        from agilerl.models.algorithms.llmreinforce import LLMREINFORCESpec
+        from agilerl.arena.models.algorithms import LLMREINFORCESpec
 
-        with pytest.raises(ValueError, match="VLLM config is not set"):
+        with pytest.raises(ValueError, match="use_vllm is set but no vllm_config"):
             LLMREINFORCESpec(use_vllm=True, vllm_config=None)
 
     def test_vllm_config_accepted_when_use_vllm(self):
-        from agilerl.models.algorithms.llmreinforce import LLMREINFORCESpec
-        from agilerl.utils.algo_utils import VLLMConfig
+        from agilerl.arena.models.algorithms import LLMREINFORCESpec
+        from agilerl.arena.models.networks import VLLMConfig
 
         spec = LLMREINFORCESpec(use_vllm=True, vllm_config=VLLMConfig())
         assert spec.use_vllm is True
         assert spec.vllm_config is not None
 
-    def test_get_training_fn_rollout(self):
-        from agilerl.models.algorithms.llmreinforce import LLMREINFORCESpec
+    def test_rollout_training_loop(self):
+        from agilerl.arena.models.algorithms import LLMREINFORCESpec
 
-        fn = LLMREINFORCESpec.get_training_fn()
+        fn = select_strategy(LLMREINFORCESpec.model_construct()).get_training_loop(
+            LLMREINFORCESpec.model_construct()
+        )
         from agilerl.training.llm import train_llm_rollout
 
         assert fn is train_llm_rollout
 
-    def test_get_training_fn_reasoning(self):
-        from agilerl.models.algorithms.llmreinforce import LLMREINFORCESpec
+    def test_training_loop_default(self):
+        from agilerl.arena.models.algorithms import LLMREINFORCESpec
 
-        fn = LLMREINFORCESpec.get_training_fn()
+        fn = select_strategy(LLMREINFORCESpec.model_construct()).get_training_loop(
+            LLMREINFORCESpec.model_construct()
+        )
         from agilerl.training.llm import train_llm_rollout
 
         assert fn is train_llm_rollout
@@ -1387,18 +1238,22 @@ class TestLLMREINFORCESpec:
 class TestCISPOSpec:
     """Lines 25-30 in cispo.py."""
 
-    def test_get_training_fn_rollout(self):
-        from agilerl.models.algorithms.cispo import CISPOSpec
+    def test_rollout_training_loop(self):
+        from agilerl.arena.models.algorithms import CISPOSpec
 
-        fn = CISPOSpec.get_training_fn()
+        fn = select_strategy(CISPOSpec.model_construct()).get_training_loop(
+            CISPOSpec.model_construct()
+        )
         from agilerl.training.llm import train_llm_rollout
 
         assert fn is train_llm_rollout
 
-    def test_get_training_fn_reasoning(self):
-        from agilerl.models.algorithms.cispo import CISPOSpec
+    def test_training_loop_default(self):
+        from agilerl.arena.models.algorithms import CISPOSpec
 
-        fn = CISPOSpec.get_training_fn()
+        fn = select_strategy(CISPOSpec.model_construct()).get_training_loop(
+            CISPOSpec.model_construct()
+        )
         from agilerl.training.llm import train_llm_rollout
 
         assert fn is train_llm_rollout
@@ -1407,18 +1262,22 @@ class TestCISPOSpec:
 class TestGSPOSpec:
     """Lines 25-30 in gspo.py."""
 
-    def test_get_training_fn_rollout(self):
-        from agilerl.models.algorithms.gspo import GSPOSpec
+    def test_rollout_training_loop(self):
+        from agilerl.arena.models.algorithms import GSPOSpec
 
-        fn = GSPOSpec.get_training_fn()
+        fn = select_strategy(GSPOSpec.model_construct()).get_training_loop(
+            GSPOSpec.model_construct()
+        )
         from agilerl.training.llm import train_llm_rollout
 
         assert fn is train_llm_rollout
 
-    def test_get_training_fn_reasoning(self):
-        from agilerl.models.algorithms.gspo import GSPOSpec
+    def test_training_loop_default(self):
+        from agilerl.arena.models.algorithms import GSPOSpec
 
-        fn = GSPOSpec.get_training_fn()
+        fn = select_strategy(GSPOSpec.model_construct()).get_training_loop(
+            GSPOSpec.model_construct()
+        )
         from agilerl.training.llm import train_llm_rollout
 
         assert fn is train_llm_rollout
@@ -1428,7 +1287,7 @@ class TestRainbowDQNSpec:
     """Lines 40-41 in rainbow_dqn.py."""
 
     def test_v_min_gte_v_max(self):
-        from agilerl.models.algorithms.rainbow_dqn import RainbowDQNSpec
+        from agilerl.arena.models.algorithms import RainbowDQNSpec
 
         with pytest.raises(ValueError, match="v_min must be less than v_max"):
             RainbowDQNSpec(v_min=200, v_max=100)
@@ -1437,10 +1296,12 @@ class TestRainbowDQNSpec:
 class TestSFTSpec:
     """Lines 31-33 in sft.py."""
 
-    def test_get_training_fn(self):
-        from agilerl.models.algorithms.sft import SFTSpec
+    def test_training_loop(self):
+        from agilerl.arena.models.algorithms import SFTSpec
 
-        fn = SFTSpec.get_training_fn()
+        fn = select_strategy(SFTSpec.model_construct()).get_training_loop(
+            SFTSpec.model_construct()
+        )
         from agilerl.training.llm import train_llm_dataset
 
         assert fn is train_llm_dataset
@@ -1450,19 +1311,19 @@ class TestGRPOSpec:
     """GRPO algorithm specification."""
 
     def test_vllm_required_when_use_vllm(self):
-        from agilerl.models.algorithms.grpo import GRPOSpec
+        from agilerl.arena.models.algorithms import GRPOSpec
 
-        with pytest.raises(ValueError, match="VLLM config is not set"):
+        with pytest.raises(ValueError, match="use_vllm is set but no vllm_config"):
             GRPOSpec(group_size=4, use_vllm=True, vllm_config=None)
 
     def test_advantage_granularity_defaults_to_auto(self):
-        from agilerl.models.algorithms.grpo import GRPOSpec
+        from agilerl.arena.models.algorithms import GRPOSpec
 
         spec = GRPOSpec(group_size=4)
         assert spec.advantage_granularity == "auto"
 
     def test_advantage_granularity_accepts_auto(self):
-        from agilerl.models.algorithms.grpo import GRPOSpec
+        from agilerl.arena.models.algorithms import GRPOSpec
 
         spec = GRPOSpec(group_size=4, advantage_granularity="auto")
         assert spec.advantage_granularity == "auto"
@@ -1486,12 +1347,13 @@ class TestMutationSpecRegramaFields:
 
         assert spec.dormant_threshold == 0.01
 
-    def test_values_round_trip_through_a_dump(self):
+    def test_dormant_threshold_is_omitted_from_dump(self):
         spec = MutationSpec(dormant_threshold=0.05)
 
         dumped = spec.model_dump()
 
-        assert MutationSpec(**dumped) == spec
+        assert "dormant_threshold" not in dumped
+        assert spec.dormant_threshold == 0.05
 
     def test_zero_dormant_threshold_is_accepted(self):
         assert MutationSpec(dormant_threshold=0.0).dormant_threshold == 0.0

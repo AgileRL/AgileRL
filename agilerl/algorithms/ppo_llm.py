@@ -19,7 +19,8 @@ from agilerl.algorithms.core.llm_ops.fused_lora import unset_fused_adapter_routi
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
 
 if TYPE_CHECKING:
-    from peft import LoraConfig
+    from peft import LoraConfig, PeftModel
+    from transformers import PreTrainedModel
 
 if HAS_LIGER_KERNEL or TYPE_CHECKING:
     from agilerl.algorithms.core.llm_ops.fused_loss import (
@@ -77,7 +78,7 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
     :param model_name: HF model name or local path used when building internally.
     :type model_name: str | None, optional
     :param actor_network: Pre-built actor model. If omitted, ``model_name`` is used.
-    :type actor_network: Any | None, optional
+    :type actor_network: PreTrainedModel | PeftModel | None, optional
     :param model_config: Extra kwargs passed when constructing a model from ``model_name``.
     :type model_config: dict[str, Any] | None, optional
     :param hp_config: Hyperparameter mutation configuration.
@@ -260,7 +261,7 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
         pad_token_id: int,
         pad_token: str,
         model_name: str | None = None,
-        actor_network: PreTrainedModelProtocol | None = None,
+        actor_network: PreTrainedModel | PeftModel | None = None,
         model_config: dict[str, Any] | None = None,
         hp_config: HyperparameterConfig | None = None,
         index: int = 0,
@@ -832,7 +833,7 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
         lr: float,
         clip_coef: float,
         update_epochs: int,
-        actor_network: PreTrainedModelProtocol | None,
+        actor_network: PreTrainedModel | PeftModel | None,
         clone: bool,
     ) -> None:
         """Validate the core training arguments."""

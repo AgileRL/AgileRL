@@ -22,6 +22,7 @@ extensions = [
     "sphinx.ext.duration",
     "sphinx.ext.doctest",
     "sphinx.ext.autodoc",
+    "sphinxcontrib.autodoc_pydantic",
     "sphinx.ext.autosummary",
     "sphinx.ext.graphviz",
     "sphinx.ext.intersphinx",
@@ -53,6 +54,17 @@ pygments_dark_style = "monokai"
 # -- Options for HTML output
 
 html_title = "AgileRL Documentation"
+# The spec models document each field on the field itself, so the reference
+# shows descriptions, constraints and defaults rather than the validators.
+autodoc_pydantic_model_show_json = False
+autodoc_pydantic_model_show_config_summary = False
+autodoc_pydantic_model_show_validator_summary = False
+autodoc_pydantic_model_show_validator_members = False
+autodoc_pydantic_field_list_validators = False
+autodoc_pydantic_field_show_constraints = True
+autodoc_pydantic_field_show_default = True
+
+
 html_theme = "furo"
 html_static_path = ["_static"]
 html_css_files = ["css/custom.css"]

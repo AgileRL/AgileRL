@@ -17,7 +17,8 @@ from agilerl.architectures.nemotron_h import install_nemotron_h_patches
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
 
-    from agilerl.protocols import PreTrainedModelProtocol
+    from peft import PeftModel
+    from transformers import PreTrainedModel
 
 __all__ = [
     "FAMILY_PATCHES",
@@ -54,7 +55,7 @@ def install_family_patches(
     model_name_or_path: str | None,
     *,
     zero_stage: int,
-    model: PreTrainedModelProtocol | None = None,
+    model: PreTrainedModel | PeftModel | None = None,
 ) -> str | None:
     """Install the detected family's patches for this ZeRO stage.
 
@@ -63,7 +64,7 @@ def install_family_patches(
     :param zero_stage: DeepSpeed ZeRO stage for this run.
     :type zero_stage: int
     :param model: Already-built model the patches also apply to, or None.
-    :type model: PreTrainedModelProtocol | None
+    :type model: PreTrainedModel | PeftModel | None
     :return: The family that was patched, or None.
     :rtype: str | None
     """

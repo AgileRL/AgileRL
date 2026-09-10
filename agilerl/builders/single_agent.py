@@ -8,6 +8,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from agilerl.algorithms.core import RLAlgorithm
+from agilerl.arena.models.algorithms import AlgorithmSpec
 from agilerl.builders.base import (
     AlgorithmBuilder,
     AlgorithmBuildRuntime,
@@ -18,8 +19,6 @@ from agilerl.builders.base import (
 
 if TYPE_CHECKING:
     from gymnasium import spaces
-
-    from agilerl.arena.models.algo import AlgorithmSpec
 
 
 class SingleAgentBuilder(AlgorithmBuilder):

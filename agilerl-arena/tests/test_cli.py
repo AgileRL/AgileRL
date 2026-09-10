@@ -261,6 +261,77 @@ class TestMainGroup:
         assert "timeout=42" in result.output
 
 
+class TestManifestCommands:
+    def test_validate_reports_a_valid_file(self, runner, tmp_path):
+        path = tmp_path / "dqn.yaml"
+        path.write_text(
+            "algorithm: {name: DQN}\nenvironment: {name: CartPole-v1}\n",
+            encoding="utf-8",
+        )
+
+        result = runner.invoke(main, ["manifest", "validate", str(path)])
+
+        assert result.exit_code == 0
+        assert "valid (DQN)" in result.output
+
+    def test_validate_json_reports_an_invalid_manifest(self, runner):
+        result = runner.invoke(
+            main,
+            ["manifest", "validate", "-", "--json"],
+            input="algorithm: {name: NOPE}\nenvironment: {name: CartPole-v1}\n",
+        )
+
+        assert result.exit_code == 0
+        assert '"ok": false' in result.output
+
+    def test_validate_prints_errors_without_json(self, runner):
+        result = runner.invoke(
+            main,
+            ["manifest", "validate", "-"],
+            input="algorithm: {name: NOPE}\nenvironment: {name: CartPole-v1}\n",
+        )
+
+        assert result.exit_code == 1
+        assert "not a registered algorithm" in result.output
+
+    def test_validate_payload_prints_resolved_manifest(self, runner, tmp_path):
+        path = tmp_path / "dqn.yaml"
+        path.write_text(
+            "algorithm: {name: DQN}\nenvironment: {name: CartPole-v1}\n",
+            encoding="utf-8",
+        )
+
+        result = runner.invoke(main, ["manifest", "validate", str(path), "--payload"])
+
+        assert result.exit_code == 0
+        assert '"name": "DQN"' in result.output
+
+    def test_validate_unreadable_file_exits_failed(self, runner):
+        result = runner.invoke(main, ["manifest", "validate", "/does/not/exist.yaml"])
+
+        assert result.exit_code == 2
+        assert "could not read" in result.output
+
+    def test_schema_prints_json(self, runner):
+        result = runner.invoke(main, ["manifest", "schema"])
+
+        assert result.exit_code == 0
+        assert '"title": "AgileRL training manifest"' in result.output
+
+    def test_module_entrypoint_prints_help(self, monkeypatch, capsys):
+        import runpy
+        import sys
+
+        from agilerl.arena import cli as cli_mod
+
+        monkeypatch.setattr(sys, "argv", ["agilerl.arena.cli", "--help"])
+        with pytest.raises(SystemExit) as exc_info:
+            runpy.run_path(cli_mod.__file__, run_name="__main__")
+
+        assert exc_info.value.code == 0
+        assert "Arena CLI" in capsys.readouterr().out
+
+
 class TestLoginCommand:
     def test_login(self, runner, mock_client):
         with _patched_arena_client(mock_client):
