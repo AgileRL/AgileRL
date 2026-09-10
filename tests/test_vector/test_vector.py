@@ -1178,6 +1178,32 @@ class TestAsyncWorker:
             queue.close()
             queue.join_thread()
 
+    def test_worker_unknown_command_raises_in_process(self):
+        env_fns = [speaker_listener_like_env]
+        vec_env = AsyncPettingZooVecEnv(env_fns)
+        pipe = MagicMock()
+        pipe.recv.return_value = ("Unknown", {})
+        parent_pipe = MagicMock()
+        queue = mp.Queue()
+        try:
+            _async_worker(
+                0,
+                CloudpickleWrapper(env_fns[0]),
+                pipe,
+                parent_pipe,
+                vec_env._obs_buffer,
+                queue,
+                vec_env.agents,
+            )
+            _, exctype, value, _ = queue.get(timeout=5)
+            assert exctype is RuntimeError
+            assert "unknown command `Unknown`" in str(value)
+            pipe.send.assert_called_with((None, False))
+        finally:
+            vec_env.close()
+            queue.close()
+            queue.join_thread()
+
 
 class ImageObsTestEnv(ParallelEnv):
     metadata: ClassVar[dict] = {"render_modes": ["human"], "name": "image_obs_test_v0"}

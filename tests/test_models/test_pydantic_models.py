@@ -16,6 +16,7 @@ import pytest
 from pydantic import ValidationError
 
 from agilerl import HAS_ARENA_DEPENDENCIES, HAS_LLM_DEPENDENCIES
+from agilerl.builders import select_builder
 from agilerl.models.algorithms.ppo import PPOSpec
 from agilerl.models.env import BanditEnvSpec, GymEnvSpec, LLMEnvSpec, LLMEnvType
 from agilerl.models.hpo import MutationSpec
@@ -764,17 +765,19 @@ class TestAlgoSpecClassVars:
         assert kwargs["dataset"] is mock_file
 
     def test_rl_spec_resume_from_checkpoint(self):
-        """RLAlgorithmSpec.build_algorithm with resume."""
-        from agilerl.models.algo import RLAlgorithmSpec
+        """DQNSpec.build_algorithm with resume."""
+        from agilerl.models.algorithms.dqn import DQNSpec
 
-        spec = RLAlgorithmSpec(learn_step=1)
+        spec = DQNSpec(learn_step=1)
         mock_algo_cls = MagicMock()
         mock_algo = MagicMock()
         mock_algo_cls.return_value = mock_algo
         mock_algo.load_checkpoint.side_effect = lambda _p: setattr(
             mock_algo, "index", 3
         )
-        with patch.object(type(spec), "algo_class", return_value=mock_algo_cls):
+        with patch.object(
+            select_builder(spec), "algo_class", return_value=mock_algo_cls
+        ):
             spec.build_algorithm(
                 observation_space=MagicMock(),
                 action_space=MagicMock(),
@@ -786,17 +789,19 @@ class TestAlgoSpecClassVars:
         assert mock_algo.index == 2
 
     def test_multi_agent_resume_from_checkpoint(self):
-        """MultiAgentRLAlgorithmSpec.build_algorithm with resume."""
-        from agilerl.models.algo import MultiAgentRLAlgorithmSpec
+        """MADDPGSpec.build_algorithm with resume."""
+        from agilerl.models.algorithms.maddpg import MADDPGSpec
 
-        spec = MultiAgentRLAlgorithmSpec()
+        spec = MADDPGSpec()
         mock_algo_cls = MagicMock()
         mock_algo = MagicMock()
         mock_algo_cls.return_value = mock_algo
         mock_algo.load_checkpoint.side_effect = lambda _p: setattr(
             mock_algo, "index", 3
         )
-        with patch.object(type(spec), "algo_class", return_value=mock_algo_cls):
+        with patch.object(
+            select_builder(spec), "algo_class", return_value=mock_algo_cls
+        ):
             spec.build_algorithm(
                 observation_spaces={"a": MagicMock()},
                 action_spaces={"a": MagicMock()},
@@ -807,27 +812,49 @@ class TestAlgoSpecClassVars:
         assert mock_algo.index == 2
 
 
+class TestAlgoClass:
+    def test_rl_spec_resolves_the_algorithm_class(self):
+        from agilerl.algorithms import DQN
+        from agilerl.algorithms.core import RLAlgorithm
+        from agilerl.models.algorithms.dqn import DQNSpec
+
+        resolved = DQNSpec.algo_class()
+
+        assert resolved is DQN
+        assert issubclass(resolved, RLAlgorithm)
+
+    def test_multi_agent_spec_resolves_the_algorithm_class(self):
+        from agilerl.algorithms import MADDPG
+        from agilerl.algorithms.core import MultiAgentRLAlgorithm
+        from agilerl.models.algorithms.maddpg import MADDPGSpec
+
+        resolved = MADDPGSpec.algo_class()
+
+        assert resolved is MADDPG
+        assert issubclass(resolved, MultiAgentRLAlgorithm)
+
+
 class TestBuildAlgorithmMissingArgsRaise:
     """build_algorithm overrides reject missing required inputs."""
 
     def test_rl_spec_requires_spaces_and_index(self):
-        from agilerl.models.algo import RLAlgorithmSpec
+        from agilerl.models.algorithms.dqn import DQNSpec
 
-        spec = RLAlgorithmSpec(learn_step=1)
+        spec = DQNSpec(learn_step=1)
         with pytest.raises(ValueError, match="observation_space"):
             spec.build_algorithm()
 
     def test_multi_agent_spec_requires_spaces_and_index(self):
-        from agilerl.models.algo import MultiAgentRLAlgorithmSpec
+        from agilerl.models.algorithms.maddpg import MADDPGSpec
 
-        spec = MultiAgentRLAlgorithmSpec()
+        spec = MADDPGSpec()
         with pytest.raises(ValueError, match="observation_spaces"):
             spec.build_algorithm()
 
     def test_llm_spec_requires_tokenizer(self):
-        from agilerl.models.algo import LLMAlgorithmSpec
+        from agilerl.models.algorithms.grpo import GRPOSpec
 
-        spec = LLMAlgorithmSpec.__new__(LLMAlgorithmSpec)
+        spec = GRPOSpec.model_construct()
         with pytest.raises(ValueError, match="requires a tokenizer"):
             spec.build_algorithm()
 
@@ -840,7 +867,9 @@ class TestBuildAlgorithmForwardsOnlySetFields:
 
         spec = DQNSpec(learn_step=2)
         mock_algo_cls = MagicMock()
-        with patch.object(type(spec), "algo_class", return_value=mock_algo_cls):
+        with patch.object(
+            select_builder(spec), "algo_class", return_value=mock_algo_cls
+        ):
             spec.build_algorithm(
                 observation_space=MagicMock(),
                 action_space=MagicMock(),
@@ -856,7 +885,9 @@ class TestBuildAlgorithmForwardsOnlySetFields:
 
         spec = IPPOSpec(gamma=0.9)
         mock_algo_cls = MagicMock()
-        with patch.object(type(spec), "algo_class", return_value=mock_algo_cls):
+        with patch.object(
+            select_builder(spec), "algo_class", return_value=mock_algo_cls
+        ):
             spec.build_algorithm(
                 observation_spaces={"a": MagicMock()},
                 action_spaces={"a": MagicMock()},
@@ -878,9 +909,11 @@ class TestBuildAlgorithmForwardsOnlySetFields:
         mock_tokenizer.unk_token_id = None
         mock_algo_cls = MagicMock()
         with (
-            patch.object(type(spec), "algo_class", return_value=mock_algo_cls),
+            patch.object(
+                select_builder(spec), "algo_class", return_value=mock_algo_cls
+            ),
             patch(
-                "agilerl.utils.llm_utils.load_pad_token_configs",
+                "agilerl.builders.llm.load_pad_token_configs",
                 return_value=(None, None),
             ),
         ):
@@ -916,7 +949,15 @@ class TestBuildAlgorithmForwardsOnlySetFields:
 
 
 class TestLLMAlgorithmSpecBuild:
-    """Lines 531-533, 554 in algo.py."""
+    """LLM spec.build_algorithm delegates to LLMBuilder."""
+
+    @pytest.fixture(autouse=True)
+    def _stub_pad_token_loader(self):
+        with patch(
+            "agilerl.builders.llm.load_pad_token_configs",
+            return_value=(None, None),
+        ):
+            yield
 
     def test_micro_batch_size_per_gpu_forwarded_only_when_set(self):
         """Explicit micro batch reaches the constructor; unset leaves the algorithm's default."""
@@ -935,7 +976,9 @@ class TestLLMAlgorithmSpecBuild:
             micro_batch_size_per_gpu=1,
         )
         mock_algo_cls = MagicMock()
-        with patch.object(type(spec), "algo_class", return_value=mock_algo_cls):
+        with patch.object(
+            select_builder(spec), "algo_class", return_value=mock_algo_cls
+        ):
             spec.build_algorithm(
                 tokenizer=mock_tokenizer, index=0, accelerator=accelerator
             )
@@ -947,7 +990,9 @@ class TestLLMAlgorithmSpecBuild:
             pretrained_model_name_or_path="gpt2", group_size=4, batch_size=8
         )
         mock_algo_cls.reset_mock()
-        with patch.object(type(derived), "algo_class", return_value=mock_algo_cls):
+        with patch.object(
+            select_builder(derived), "algo_class", return_value=mock_algo_cls
+        ):
             derived.build_algorithm(
                 tokenizer=mock_tokenizer, index=0, accelerator=accelerator
             )
@@ -965,7 +1010,9 @@ class TestLLMAlgorithmSpecBuild:
             pretrained_model_name_or_path="gpt2", group_size=4, chunk_rows=128
         )
         mock_algo_cls = MagicMock()
-        with patch.object(type(spec), "algo_class", return_value=mock_algo_cls):
+        with patch.object(
+            select_builder(spec), "algo_class", return_value=mock_algo_cls
+        ):
             spec.build_algorithm(tokenizer=mock_tokenizer, index=0)
         assert mock_algo_cls.call_args.kwargs["chunk_rows"] == 128
 
@@ -989,9 +1036,11 @@ class TestLLMAlgorithmSpecBuild:
         spec = GRPOSpec(pretrained_model_name_or_path="gpt2", group_size=4)
         mock_algo_cls = MagicMock()
         with (
-            patch.object(type(spec), "algo_class", return_value=mock_algo_cls),
+            patch.object(
+                select_builder(spec), "algo_class", return_value=mock_algo_cls
+            ),
             patch(
-                "agilerl.utils.llm_utils.load_pad_token_configs",
+                "agilerl.builders.llm.load_pad_token_configs",
                 return_value=(None, None),
             ),
         ):
@@ -1023,8 +1072,10 @@ class TestLLMAlgorithmSpecBuild:
         mock_algo_cls.return_value = mock_algo
 
         with (
-            patch.object(type(spec), "algo_class", return_value=mock_algo_cls),
-            patch("agilerl.models.algo.VLLMConfig") as mock_vllm,
+            patch.object(
+                select_builder(spec), "algo_class", return_value=mock_algo_cls
+            ),
+            patch("agilerl.builders.llm.VLLMConfig") as mock_vllm,
         ):
             mock_vllm.return_value = "coerced_config"
             spec.build_algorithm(tokenizer=mock_tokenizer, index=0)
@@ -1048,7 +1099,9 @@ class TestLLMAlgorithmSpecBuild:
         mock_tokenizer.eos_token = "<|endoftext|>"
         mock_algo_cls = MagicMock()
 
-        with patch.object(type(spec), "algo_class", return_value=mock_algo_cls):
+        with patch.object(
+            select_builder(spec), "algo_class", return_value=mock_algo_cls
+        ):
             spec.build_algorithm(tokenizer=mock_tokenizer, index=0)
 
         kwargs = mock_algo_cls.call_args.kwargs
@@ -1058,28 +1111,9 @@ class TestLLMAlgorithmSpecBuild:
 
     def test_resume_from_checkpoint(self):
         """build_algorithm with resume_from_checkpoint."""
-        from agilerl.models.algo import LLMAlgorithmSpec
+        from agilerl.models.algorithms.grpo import GRPOSpec
 
-        spec = LLMAlgorithmSpec.__new__(LLMAlgorithmSpec)
-        attrs = {
-            "batch_size": 4,
-            "pretrained_model_name_or_path": "gpt2",
-            "lora_config": None,
-            "hp_config": None,
-            "use_vllm": False,
-            "max_model_len": 512,
-            "beta": 0.01,
-            "max_grad_norm": 0.1,
-            "update_epochs": 1,
-            "use_separate_reference_adapter": False,
-            "calc_position_embeddings": True,
-            "gradient_checkpointing": True,
-            "use_liger_loss": False,
-            "seed": 42,
-        }
-        object.__setattr__(spec, "__dict__", attrs)
-        object.__setattr__(spec, "__pydantic_fields_set__", set(attrs.keys()))
-
+        spec = GRPOSpec(pretrained_model_name_or_path="gpt2", group_size=4)
         mock_tokenizer = MagicMock()
         mock_tokenizer.eos_token_id = 0
         mock_tokenizer.eos_token = "<|endoftext|>"
@@ -1090,7 +1124,15 @@ class TestLLMAlgorithmSpecBuild:
             mock_algo, "index", 3
         )
 
-        with patch.object(type(spec), "algo_class", return_value=mock_algo_cls):
+        with (
+            patch.object(
+                select_builder(spec), "algo_class", return_value=mock_algo_cls
+            ),
+            patch(
+                "agilerl.builders.llm.load_pad_token_configs",
+                return_value=(None, None),
+            ),
+        ):
             spec.build_algorithm(
                 tokenizer=mock_tokenizer,
                 index=2,
