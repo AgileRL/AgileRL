@@ -97,6 +97,8 @@ if TYPE_CHECKING:
     from gymnasium import spaces
     from transformers import PreTrainedTokenizerBase
 
+    from agilerl.strategies.base import TrainingLoopReturn
+
 
 SelfTrainerT = TypeVar("SelfTrainerT", bound="Trainer")
 
@@ -332,7 +334,7 @@ class Trainer(ABC):
         raise NotImplementedError(msg)
 
     @abstractmethod
-    def train(self) -> tuple[PopulationType, list[float]] | dict[str, Any]:
+    def train(self) -> TrainingLoopReturn | dict[str, Any]:
         """Run the training loop.
 
         - :class:`LocalTrainer` runs training locally and returns a tuple of
@@ -343,7 +345,7 @@ class Trainer(ABC):
           response as a ``dict``.
 
         :returns: The training result, whose type depends on the trainer.
-        :rtype: tuple[PopulationType, list[float]] | dict[str, Any]
+        :rtype: TrainingLoopReturn | dict[str, Any]
         """
         msg = "Trainer subclass must implement train method."
         raise NotImplementedError(msg)
@@ -821,7 +823,7 @@ class LocalTrainer(Trainer):
         overwrite_checkpoints: bool = False,
         wandb_api_key: str | None = None,
         wandb_kwargs: dict[str, Any] | None = None,
-    ) -> tuple[PopulationType, list[float]]:
+    ) -> TrainingLoopReturn:
         """Run a local training job given the passed configuration.
 
         :param verbose: If ``True``, print verbose output. Defaults to ``True``.
@@ -852,7 +854,7 @@ class LocalTrainer(Trainer):
             *population* is the final evolved population and
             *fitnesses* contains each agent's fitness from the final
             evaluation round.
-        :rtype: tuple[PopulationType, list[float]]
+        :rtype: TrainingLoopReturn
         """
         manifest = self.to_manifest()
         evo_steps = (

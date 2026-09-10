@@ -608,15 +608,18 @@ class TestPzEnvSpecNonCallable:
 class TestAlgorithmRegistry:
     def test_registry_override_warning(self):
         """warning on re-registering same algorithm name."""
-        from agilerl.models.algo import ALGO_REGISTRY, AlgorithmSpec
+        from agilerl.models.algo import ALGO_REGISTRY, AlgorithmRegistry, AlgorithmSpec
 
-        class _DummySpec(AlgorithmSpec):
+        class DummySpec(AlgorithmSpec):
             pass
 
-        ALGO_REGISTRY.add("__test_dup__", _DummySpec)
+        registry = AlgorithmRegistry()
+        registry.add("__test_dup__", DummySpec)
         with patch("agilerl.models.algo.logger") as mock_logger:
-            ALGO_REGISTRY.add("__test_dup__", _DummySpec)
+            registry.add("__test_dup__", DummySpec)
             mock_logger.warning.assert_called_once()
+
+        assert "__test_dup__" not in ALGO_REGISTRY._entries
 
     def test_build_algorithm_not_implemented(self):
         """AlgorithmSpec.build_algorithm raises."""
@@ -634,6 +637,18 @@ class TestAlgorithmRegistry:
 
         with pytest.raises(TypeError, match="is not an algorithm spec"):
             AlgorithmSpec.get_training_fn()
+
+    def test_get_training_kwargs_not_an_algorithm_spec(self):
+        from agilerl.models.algo import AlgorithmSpec
+        from agilerl.models.env import GymEnvSpec
+        from agilerl.models.training import TrainingSpec
+
+        spec = AlgorithmSpec.__new__(AlgorithmSpec)
+        with pytest.raises(TypeError, match="is not an algorithm spec"):
+            spec.get_training_kwargs(
+                training=TrainingSpec(max_steps=10),
+                env_spec=GymEnvSpec(name="CartPole-v1"),
+            )
 
 
 class TestAlgoSpecClassVars:
