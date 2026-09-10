@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 from pydantic import Field
@@ -30,16 +29,3 @@ class MATD3Spec(MultiAgentRLAlgorithmSpec, ArenaMATD3Spec):
     )
     actor_networks: ModuleDict | None = Field(default=None)
     critic_networks: list[ModuleDict] | None = Field(default=None)
-
-    @staticmethod
-    def get_training_fn() -> Callable[..., Any]:
-        """Get the training function for MATD3.
-
-        :return: Training function
-        :rtype: Callable[..., Any]
-        """
-        from agilerl.training.train_multi_agent_off_policy import (  # circular import with agilerl.training
-            train_multi_agent_off_policy,
-        )
-
-        return train_multi_agent_off_policy

@@ -155,7 +155,11 @@ def main() -> None:
         verbose=args.verbose,
     )
 
-    logger.info("Training complete. Best fitness: %.4f", max(last_fitnesses))
+    best_fitness = max(
+        fitness if isinstance(fitness, (int, float)) else max(fitness.values())
+        for fitness in last_fitnesses
+    )
+    logger.info("Training complete. Best fitness: %.4f", best_fitness)
 
 
 if __name__ == "__main__":  # pragma: no cover

@@ -4,12 +4,9 @@
 from __future__ import annotations
 
 import logging
-import warnings
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, ClassVar, TypeVar
-
-import h5py
 
 from agilerl import HAS_LLM_DEPENDENCIES, algorithms
 from agilerl.algorithms.core import (
@@ -22,7 +19,6 @@ from agilerl.arena import AgentType
 from agilerl.arena.models.algo import AlgorithmSpec as ArenaAlgorithmSpec
 from agilerl.builders import LLMBuilder, MultiAgentBuilder, SingleAgentBuilder
 from agilerl.builders.base import AlgorithmBuildRuntime
-from agilerl.models.env import LLMEnvSpec, OfflineEnvSpec
 
 if TYPE_CHECKING:
     import torch
@@ -34,6 +30,8 @@ if TYPE_CHECKING:
     from agilerl.models.env import (
         BanditEnvSpec,
         GymEnvSpec,
+        LLMEnvSpec,
+        OfflineEnvSpec,
         PzEnvSpec,
     )
     from agilerl.models.env_types import LLMEnvType
@@ -192,38 +190,12 @@ def bandit() -> Callable[[type[AlgoSpecT]], type[AlgoSpecT]]:
     return decorator
 
 
-def _warn_ignored_llm_training_fields(training: TrainingSpec) -> None:
-    """Warn when explicitly-set TrainingSpec fields are ignored by LLM loops."""
-    llm_unsupported_training_fields = (
-        "target_score",
-        "eval_steps",
-        "eval_loop",
-        "learning_delay",
-        "eps_start",
-        "eps_end",
-        "eps_decay",
-        "overwrite_checkpoints",
-    )
-    ignored = [
-        name
-        for name in llm_unsupported_training_fields
-        if name in training.model_fields_set
-        and getattr(training, name) != type(training).model_fields[name].default
-    ]
-    if ignored:
-        warnings.warn(
-            "TrainingSpec fields not supported by LLM fine-tuning are ignored: "
-            + ", ".join(ignored),
-            UserWarning,
-            stacklevel=3,
-        )
-
-
 class AlgorithmSpec(ArenaAlgorithmSpec):
     """Framework algorithm spec: arena fields plus construction.
 
-    Concrete subclasses must override :meth:`get_training_fn`. The algorithm
-    class is resolved from ``agilerl.algorithms`` as ``<Name>Spec`` -> ``<Name>``.
+    The algorithm class is resolved from ``agilerl.algorithms`` as
+    ``<Name>Spec`` -> ``<Name>``. Training dispatch lives in
+    :mod:`agilerl.strategies`.
     """
 
     hp_config: HyperparameterConfig | None = None
@@ -250,19 +222,17 @@ class AlgorithmSpec(ArenaAlgorithmSpec):
         msg = "Algorithm specs must implement a build_algorithm method."
         raise NotImplementedError(msg)
 
-    @staticmethod
-    def get_training_fn() -> Callable[..., tuple[PopulationType, list[float]]]:
-        """Return the training function for this algorithm.
-
-        Concrete specs **must** override this to return their training
-        function (e.g. ``train_off_policy``).
+    @classmethod
+    def get_training_fn(cls) -> Callable[..., tuple[PopulationType, list[float]]]:
+        """Return the training loop for this spec.
 
         :return: Training function
         :rtype: Callable[..., tuple[PopulationType, list[float]]]
-        :raises NotImplementedError: If the training function is not implemented.
         """
-        msg = "Algorithm specs must implement get_training_fn."
-        raise NotImplementedError(msg) from None
+        from agilerl.strategies import select_strategy
+
+        spec = cls.model_construct()
+        return select_strategy(spec).get_training_loop(spec)
 
     def get_training_kwargs(
         self,
@@ -285,73 +255,15 @@ class AlgorithmSpec(ArenaAlgorithmSpec):
         :returns: Extra keyword arguments for the training function.
         :rtype: dict[str, Any]
         """
-        kwargs = {}
-        if isinstance(self, LLMAlgorithmSpec):
-            if isinstance(env_spec, LLMEnvSpec) and env_spec.max_reward is not None:
-                kwargs["max_reward"] = env_spec.max_reward
+        from agilerl.strategies import select_strategy
 
-            if training.checkpoint_steps is not None:
-                kwargs["checkpoint_steps"] = training.checkpoint_steps
-
-            if training.checkpoint_path is not None:
-                kwargs["checkpoint_path"] = training.checkpoint_path
-
-            kwargs["evaluation_interval"] = training.evaluation_interval
-            if training.num_epochs is not None:
-                if self.env_type == "dataset":
-                    kwargs["num_epochs"] = training.num_epochs
-                else:
-                    warnings.warn(
-                        "TrainingSpec.num_epochs only applies to dataset "
-                        "fine-tuning (DPO/SFT) and is ignored for rollout "
-                        "algorithms.",
-                        UserWarning,
-                        stacklevel=2,
-                    )
-
-            _warn_ignored_llm_training_fields(training)
-            return kwargs
-
-        # Core RL algorithm kwargs
-        kwargs.update(
-            {
-                "env_name": env_spec.name,
-                "algo": self.name,
-                "eval_steps": training.eval_steps,
-                "eval_loop": training.eval_loop,
-                "target": training.target_score,
-                "checkpoint": training.checkpoint_steps,
-                "checkpoint_path": training.checkpoint_path,
-                "overwrite_checkpoints": training.overwrite_checkpoints,
-            }
+        return select_strategy(self).get_trainer_kwargs(
+            self,
+            training=training,
+            env_spec=env_spec,
+            memory=memory,
+            n_step_memory=n_step_memory,
         )
-
-        if self.off_policy or self.offline or self.bandit:
-            kwargs["memory"] = memory
-
-        if self.off_policy:
-            kwargs["learning_delay"] = training.learning_delay
-            if training.eps_start is not None:
-                kwargs["eps_start"] = training.eps_start
-            if training.eps_end is not None:
-                kwargs["eps_end"] = training.eps_end
-            if training.eps_decay is not None:
-                kwargs["eps_decay"] = training.eps_decay
-            if n_step_memory is not None:
-                kwargs["n_step_memory"] = n_step_memory
-        elif self.offline:
-            if isinstance(env_spec, OfflineEnvSpec):
-                if env_spec.minari_dataset_id is not None:
-                    kwargs["minari_dataset_id"] = env_spec.minari_dataset_id
-                    kwargs["remote"] = env_spec.remote
-                elif env_spec.dataset_path is not None:
-                    kwargs["dataset"] = h5py.File(env_spec.dataset_path, "r")
-        if self.bandit:
-            kwargs["episode_steps"] = training.episode_steps
-        if self.agent_type == AgentType.MultiAgent:
-            kwargs["sum_scores"] = training.sum_scores
-
-        return kwargs
 
 
 class RLAlgorithmSpec(AlgorithmSpec):
@@ -558,19 +470,6 @@ class LLMAlgorithmSpec(AlgorithmSpec):
                 load_weights_from=load_weights_from,
             ),
         )
-
-    @staticmethod
-    def get_training_fn() -> Callable[..., Any]:
-        """Return the training function for this LLM algorithm.
-
-        The env type the spec declares selects the loop: ``train_llm_rollout``
-        for generative rollouts, ``train_llm_dataset`` for teacher-forced ones.
-
-        :return: Training function
-        :raises NotImplementedError: If the training function is not implemented.
-        """
-        msg = "Algorithm specs must implement get_training_fn."
-        raise NotImplementedError(msg) from None
 
 
 AlgoSpec = RLAlgorithmSpec | MultiAgentRLAlgorithmSpec | LLMAlgorithmSpec

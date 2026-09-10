@@ -629,15 +629,15 @@ class TestAlgorithmRegistry:
             spec.build_algorithm()
 
     def test_get_training_fn_not_implemented(self):
-        """AlgorithmSpec.get_training_fn raises."""
+        """Bare AlgorithmSpec is not a paradigm spec, so it has no strategy."""
         from agilerl.models.algo import AlgorithmSpec
 
-        with pytest.raises(NotImplementedError, match="must implement get_training_fn"):
+        with pytest.raises(TypeError, match="is not an algorithm spec"):
             AlgorithmSpec.get_training_fn()
 
 
 class TestAlgoSpecClassVars:
-    """Lines 302, 335-336, 400, 455 in algo.py."""
+    """Kwargs the spec forwards into the training loop."""
 
     def test_llm_spec_num_epochs_kwarg(self):
         """get_training_kwargs forwards num_epochs for dataset specs only."""
@@ -685,11 +685,10 @@ class TestAlgoSpecClassVars:
         assert "num_epochs" not in rollout_kwargs
 
     def test_llm_spec_forwards_checkpoint_path(self):
-        from agilerl.models.algo import LLMAlgorithmSpec
+        from agilerl.models.algorithms.dpo import DPOSpec
         from agilerl.models.training import TrainingSpec
 
-        spec = LLMAlgorithmSpec.__new__(LLMAlgorithmSpec)
-        object.__setattr__(spec, "__dict__", {"batch_size": 8, "hp_config": None})
+        spec = DPOSpec.model_construct()
         training = TrainingSpec(checkpoint_path="/ckpts", evaluation_interval=10)
         env_spec = MagicMock()
         env_spec.max_reward = None
@@ -697,11 +696,10 @@ class TestAlgoSpecClassVars:
         assert kwargs["checkpoint_path"] == "/ckpts"
 
     def test_llm_spec_warns_on_unsupported_training_fields(self):
-        from agilerl.models.algo import LLMAlgorithmSpec
+        from agilerl.models.algorithms.dpo import DPOSpec
         from agilerl.models.training import TrainingSpec
 
-        spec = LLMAlgorithmSpec.__new__(LLMAlgorithmSpec)
-        object.__setattr__(spec, "__dict__", {"batch_size": 8, "hp_config": None})
+        spec = DPOSpec.model_construct()
         training = TrainingSpec(
             target_score=200.0, eval_steps=100, evaluation_interval=10
         )
@@ -713,11 +711,10 @@ class TestAlgoSpecClassVars:
         assert "eval_steps" not in kwargs
 
     def test_llm_spec_no_warning_for_default_training_fields(self, recwarn):
-        from agilerl.models.algo import LLMAlgorithmSpec
+        from agilerl.models.algorithms.dpo import DPOSpec
         from agilerl.models.training import TrainingSpec
 
-        spec = LLMAlgorithmSpec.__new__(LLMAlgorithmSpec)
-        object.__setattr__(spec, "__dict__", {"batch_size": 8, "hp_config": None})
+        spec = DPOSpec.model_construct()
         # Setting an unsupported field to its default (as the trainer does for
         # overwrite_checkpoints) must not warn
         training = TrainingSpec(evaluation_interval=10, overwrite_checkpoints=False)

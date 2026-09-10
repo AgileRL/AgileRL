@@ -5,9 +5,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
-from typing import Any
-
 from pydantic import Field
 
 from agilerl.arena.models.algorithms.cispo import CISPOSpec as ArenaCISPOSpec
@@ -22,16 +19,3 @@ class CISPOSpec(GRPOSpec, ArenaCISPOSpec):
     # CISPO uses asymmetric clip bounds [epsilon_low, epsilon_high].
     # GRPOSpec is first in the MRO and types clip_coef as float.
     clip_coef: float | list[float] = Field(default=0.2)
-
-    @staticmethod
-    def get_training_fn() -> Callable[..., Any]:
-        """Get the training function for CISPO.
-
-        :return: Training function
-        :rtype: Callable[..., Any]
-        """
-        from agilerl.training.llm import (  # circular import with agilerl.training
-            train_llm_rollout,
-        )
-
-        return train_llm_rollout
