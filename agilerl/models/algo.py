@@ -36,6 +36,7 @@ if TYPE_CHECKING:
     )
     from agilerl.models.env_types import LLMEnvType
     from agilerl.models.training import TrainingSpec
+    from agilerl.strategies.base import TrainingLoop
 
     if HAS_LLM_DEPENDENCIES:
         from peft import LoraConfig
@@ -43,7 +44,6 @@ if TYPE_CHECKING:
     AnyAlgorithm = RLAlgorithm | MultiAgentRLAlgorithm | LLMAlgorithm[Any]
     AlgoT = TypeVar("AlgoT", bound="AnyAlgorithm")
     EnvSpecType = GymEnvSpec | PzEnvSpec | OfflineEnvSpec | LLMEnvSpec | BanditEnvSpec
-    PopulationType = list[RLAlgorithm | MultiAgentRLAlgorithm | LLMAlgorithm]
 else:
     LoraConfig = Any
     AnyAlgorithm = Any
@@ -223,15 +223,20 @@ class AlgorithmSpec(ArenaAlgorithmSpec):
         raise NotImplementedError(msg)
 
     @classmethod
-    def get_training_fn(cls) -> Callable[..., tuple[PopulationType, list[float]]]:
+    def get_training_fn(cls) -> TrainingLoop:
         """Return the training loop for this spec.
 
         :return: Training function
-        :rtype: Callable[..., tuple[PopulationType, list[float]]]
+        :rtype: TrainingLoop
         """
         from agilerl.strategies import select_strategy
 
         spec = cls.model_construct()
+        if not isinstance(
+            spec, (RLAlgorithmSpec, MultiAgentRLAlgorithmSpec, LLMAlgorithmSpec)
+        ):
+            msg = f"{cls.__name__} is not an algorithm spec."
+            raise TypeError(msg)
         return select_strategy(spec).get_training_loop(spec)
 
     def get_training_kwargs(
@@ -257,6 +262,11 @@ class AlgorithmSpec(ArenaAlgorithmSpec):
         """
         from agilerl.strategies import select_strategy
 
+        if not isinstance(
+            self, (RLAlgorithmSpec, MultiAgentRLAlgorithmSpec, LLMAlgorithmSpec)
+        ):
+            msg = f"{type(self).__name__} is not an algorithm spec."
+            raise TypeError(msg)
         return select_strategy(self).get_trainer_kwargs(
             self,
             training=training,

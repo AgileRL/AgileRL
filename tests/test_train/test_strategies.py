@@ -157,3 +157,15 @@ class TestStrategyDefensiveBranches:
             env_spec=GymEnvSpec(name="mpe2.simple_spread_v3"),
         )
         assert kwargs["sum_scores"] is False
+
+    def test_classic_kwargs_need_a_named_env(self):
+        from agilerl.models.env import LLMEnvSpec, LLMEnvType
+        from agilerl.models.training import TrainingSpec
+        from agilerl.strategies.base import rl_trainer_kwargs
+
+        with pytest.raises(TypeError, match="is not a named env spec"):
+            rl_trainer_kwargs(
+                PPOSpec(),
+                training=TrainingSpec(max_steps=10),
+                env_spec=LLMEnvSpec.model_construct(env_type=LLMEnvType.DATASET),
+            )
