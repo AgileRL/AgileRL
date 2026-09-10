@@ -33,7 +33,7 @@
 
    </div>
 
-**AgileRL** is a Deep Reinforcement Learning library focused on improving development by introducing RLOps - MLOps for reinforcement learning.
+**AgileRL** is a Deep Reinforcement Learning library focused on improving development by introducing RLOps, MLOps for reinforcement learning.
 
 This library is initially focused on reducing the time taken for training models and hyperparameter optimization (HPO) by pioneering
 `evolutionary HPO techniques <../evo_hyperparam_opt/index.html>`_ for reinforcement learning. Evolutionary HPO has been shown to drastically reduce
