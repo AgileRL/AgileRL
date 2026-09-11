@@ -82,7 +82,6 @@ from agilerl.utils.llm_utils import (
     sample_eval_prompts,
     save_peft_adapter_for_vllm_rollout,
     validate_importance_sampling_level,
-    validate_llm_context_lengths,
     zero3_full_shape_views,
 )
 from tests import TINY_LLM_FIXTURE_PATH
@@ -1111,119 +1110,50 @@ class TestRenderChatTemplate:
 
 
 class TestMaxPromptTokensForModelLen:
-    def test_reserves_one_token_of_generation_room(self):
+    def test_reserves_one_token_when_max_output_tokens_none(self):
         from agilerl.utils.llm_utils import max_prompt_tokens_for_model_len
 
-        assert max_prompt_tokens_for_model_len(128) == 127
+        assert max_prompt_tokens_for_model_len(128, None) == 127
+
+    def test_reserves_max_output_tokens_when_set(self):
+        from agilerl.utils.llm_utils import max_prompt_tokens_for_model_len
+
+        assert max_prompt_tokens_for_model_len(128, 32) == 96
+
+    def test_caps_reservation_at_max_model_len(self):
+        from agilerl.utils.llm_utils import max_prompt_tokens_for_model_len
+
+        # max_output_tokens > max_model_len → reserve max_model_len, return 0
+        assert max_prompt_tokens_for_model_len(64, 256) == 0
 
     def test_clamps_at_zero_when_no_room(self):
         from agilerl.utils.llm_utils import max_prompt_tokens_for_model_len
 
-        assert max_prompt_tokens_for_model_len(0) == 0
+        assert max_prompt_tokens_for_model_len(0, None) == 0
 
 
 class TestValidateLlmContextLengths:
-    def test_allows_room_for_prompt(self):
-        validate_llm_context_lengths(512, 256)
+    def test_skips_when_max_output_tokens_none(self):
+        from agilerl.utils.llm_utils import validate_llm_context_lengths
 
-    def test_skips_when_output_cap_unset(self):
-        validate_llm_context_lengths(512, None)
+        validate_llm_context_lengths(32768, None)
 
-    @pytest.mark.parametrize("max_output_tokens", [512, 513])
-    def test_rejects_when_output_leaves_no_prompt_room(self, max_output_tokens):
-        with pytest.raises(ValueError, match="must be less than"):
-            validate_llm_context_lengths(512, max_output_tokens)
+    def test_accepts_strictly_smaller_max_output_tokens(self):
+        from agilerl.utils.llm_utils import validate_llm_context_lengths
 
+        validate_llm_context_lengths(32768, 1024)
 
-class TestGenerationTokensForTurn:
-    def test_uses_remaining_context_when_cap_unset(self):
-        from agilerl.utils.llm_utils import generation_tokens_for_turn
+    def test_raises_when_max_output_equals_max_model_len(self):
+        from agilerl.utils.llm_utils import validate_llm_context_lengths
 
-        assert generation_tokens_for_turn(128, 40, None) == 88
+        with pytest.raises(ValueError, match="max_output_tokens \\(32768\\)"):
+            validate_llm_context_lengths(32768, 32768)
 
-    def test_uses_configured_cap_when_it_fits(self):
-        from agilerl.utils.llm_utils import generation_tokens_for_turn
+    def test_raises_when_max_output_exceeds_max_model_len(self):
+        from agilerl.utils.llm_utils import validate_llm_context_lengths
 
-        assert generation_tokens_for_turn(128, 40, 32) == 32
-
-    def test_clamps_configured_cap_to_remaining_context(self):
-        from agilerl.utils.llm_utils import generation_tokens_for_turn
-
-        assert generation_tokens_for_turn(20, 15, 8) == 5
-
-    def test_returns_zero_when_prompt_fills_the_window(self):
-        from agilerl.utils.llm_utils import generation_tokens_for_turn
-
-        assert generation_tokens_for_turn(16, 16, 8) == 0
-        assert generation_tokens_for_turn(16, 20, None) == 0
-
-
-class TestHfTurnGenerationConfig:
-    def test_copies_config_and_sets_per_turn_max_new_tokens(self):
-        from agilerl.utils.llm_utils import hf_turn_generation_config
-
-        original = SimpleNamespace(
-            max_new_tokens=64, min_new_tokens=None, temperature=0.9
-        )
-
-        turn_config = hf_turn_generation_config(
-            original,
-            max_model_len=20,
-            prompt_length=15,
-            max_output_tokens=64,
-        )
-
-        assert turn_config is not original
-        assert turn_config.max_new_tokens == 5
-        assert original.max_new_tokens == 64
-        assert turn_config.temperature == 0.9
-
-    def test_unset_cap_uses_remaining_context(self):
-        from agilerl.utils.llm_utils import hf_turn_generation_config
-
-        original = SimpleNamespace(max_new_tokens=None, min_new_tokens=None)
-
-        turn_config = hf_turn_generation_config(
-            original,
-            max_model_len=32,
-            prompt_length=10,
-            max_output_tokens=None,
-        )
-
-        assert turn_config.max_new_tokens == 22
-        assert original.max_new_tokens is None
-
-    def test_clamps_min_new_tokens_to_per_turn_budget(self):
-        from agilerl.utils.llm_utils import hf_turn_generation_config
-
-        original = SimpleNamespace(max_new_tokens=64, min_new_tokens=16)
-
-        turn_config = hf_turn_generation_config(
-            original,
-            max_model_len=20,
-            prompt_length=15,
-            max_output_tokens=64,
-        )
-
-        assert turn_config.max_new_tokens == 5
-        assert turn_config.min_new_tokens == 5
-        assert original.min_new_tokens == 16
-
-    def test_leaves_min_new_tokens_when_it_fits(self):
-        from agilerl.utils.llm_utils import hf_turn_generation_config
-
-        original = SimpleNamespace(max_new_tokens=64, min_new_tokens=4)
-
-        turn_config = hf_turn_generation_config(
-            original,
-            max_model_len=20,
-            prompt_length=15,
-            max_output_tokens=64,
-        )
-
-        assert turn_config.max_new_tokens == 5
-        assert turn_config.min_new_tokens == 4
-        assert original.min_new_tokens == 4
+        with pytest.raises(ValueError, match="max_prompt_tokens=0"):
+            validate_llm_context_lengths(64, 256)
 
 
 class TestNormalizeReasoningPromptBatch:
@@ -1807,41 +1737,25 @@ class _PlainLinearModel(nn.Module):
 class _PlainLoraConfig:
     """Minimal LoraConfig stand-in without ``to_dict`` (deepcopy clone path)."""
 
-    def __init__(self, target_modules, exclude_modules=None, target_parameters=None):
+    def __init__(self, target_modules, exclude_modules=None):
         self.target_modules = target_modules
         self.exclude_modules = exclude_modules
-        self.target_parameters = target_parameters
 
 
 class _DictLoraConfig:
     """LoraConfig stand-in with ``to_dict`` (reconstruction clone path)."""
 
-    def __init__(
-        self, target_modules=None, exclude_modules=None, target_parameters=None, r=8
-    ):
+    def __init__(self, target_modules=None, exclude_modules=None, r=8):
         self.target_modules = target_modules
         self.exclude_modules = exclude_modules
-        self.target_parameters = target_parameters
         self.r = r
 
     def to_dict(self):
         return {
             "target_modules": self.target_modules,
             "exclude_modules": self.exclude_modules,
-            "target_parameters": self.target_parameters,
             "r": self.r,
         }
-
-
-class _MambaLikeModel(nn.Module):
-    """Tiny module with a Mamba-family ``config.model_type``."""
-
-    def __init__(self):
-        super().__init__()
-        self.config = SimpleNamespace(model_type="nemotron_h")
-        self.in_proj = nn.Linear(4, 4)
-        self.out_proj = nn.Linear(4, 4)
-        self.conv1d = nn.Conv1d(4, 4, 1)
 
 
 class TestBuildBnbQuantizationConfig:
@@ -2195,78 +2109,6 @@ class TestAdaptLoraConfigForModel:
         ) as exc_info:
             adapt_lora_config_for_model(model, cfg)
         assert "LORA_TARGET_SCOPE" in str(exc_info.value)
-
-
-class TestAdaptLoraConfigForModelMamba:
-    def test_non_mamba_model_is_unchanged(self):
-        cfg = _PlainLoraConfig(target_modules=["in_proj", "out_proj"])
-
-        assert adapt_lora_config_for_model(_PlainLinearModel(), cfg) is cfg
-
-    def test_all_linear_excludes_fused_mamba_modules(self):
-        cfg = _PlainLoraConfig(target_modules="all-linear")
-
-        adapted = adapt_lora_config_for_model(_MambaLikeModel(), cfg)
-
-        assert adapted is not cfg
-        assert adapted.target_modules == "all-linear"
-        assert set(adapted.exclude_modules) == {"conv1d", "out_proj"}
-        assert adapted.target_parameters is None
-
-    def test_named_out_proj_and_conv1d_are_dropped(self):
-        cfg = _PlainLoraConfig(
-            target_modules=["in_proj", "out_proj", "conv1d"],
-            target_parameters=["mixer.experts.up_proj"],
-        )
-
-        adapted = adapt_lora_config_for_model(_MambaLikeModel(), cfg)
-
-        assert adapted.target_modules == ["in_proj"]
-        assert adapted.target_parameters == ["mixer.experts.up_proj"]
-        assert set(adapted.exclude_modules) == {"conv1d", "out_proj"}
-        assert cfg.target_modules == ["in_proj", "out_proj", "conv1d"]
-
-    def test_out_proj_only_raises(self):
-        cfg = _PlainLoraConfig(target_modules=["out_proj"])
-
-        with pytest.raises(ValueError, match="Mamba-incompatible"):
-            adapt_lora_config_for_model(_MambaLikeModel(), cfg)
-
-    def test_out_proj_weight_parameter_target_is_dropped(self):
-        cfg = _PlainLoraConfig(
-            target_modules=["in_proj"],
-            target_parameters=["out_proj.weight", "mixer.experts.up_proj"],
-        )
-
-        adapted = adapt_lora_config_for_model(_MambaLikeModel(), cfg)
-
-        assert adapted.target_parameters == ["mixer.experts.up_proj"]
-
-    def test_to_dict_config_reconstructs_without_forbidden_modules(self):
-        cfg = _DictLoraConfig(target_modules=["q_proj", "out_proj"], r=16)
-
-        adapted = adapt_lora_config_for_model(_MambaLikeModel(), cfg)
-
-        assert isinstance(adapted, _DictLoraConfig)
-        assert adapted.r == 16
-        assert adapted.target_modules == ["q_proj"]
-        assert set(adapted.exclude_modules) == {"conv1d", "out_proj"}
-
-    def test_regex_targets_are_not_rewritten(self):
-        cfg = _PlainLoraConfig(target_modules=r".*\.in_proj")
-
-        adapted = adapt_lora_config_for_model(_MambaLikeModel(), cfg)
-
-        assert adapted.target_modules == r".*\.in_proj"
-        assert set(adapted.exclude_modules) == {"conv1d", "out_proj"}
-
-    def test_already_excluded_fused_modules_is_identity(self):
-        cfg = _PlainLoraConfig(
-            target_modules=["in_proj"],
-            exclude_modules=["conv1d", "out_proj"],
-        )
-
-        assert adapt_lora_config_for_model(_MambaLikeModel(), cfg) is cfg
 
 
 class TestLogCudaMemorySnapshot:

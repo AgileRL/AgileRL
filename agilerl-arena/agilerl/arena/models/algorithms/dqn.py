@@ -9,14 +9,14 @@ from typing import ClassVar
 
 from pydantic import Field
 
-from agilerl.arena.models.algorithms.base import RLAlgorithmSpec
+from agilerl.arena.models.algorithms.base import SingleAgentAlgorithmSpec
 from agilerl.arena.models.descriptions import DOUBLE, LR, NET_CONFIG, TAU
 from agilerl.arena.models.networks import QNetworkSpec
 from agilerl.arena.models.registry import register
 
 
 @register()
-class DQNSpec(RLAlgorithmSpec):
+class DQNSpec(SingleAgentAlgorithmSpec):
     """Deep Q-Network."""
 
     tau: float = Field(default=0.001, description=TAU)

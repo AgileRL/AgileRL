@@ -22,7 +22,7 @@ from agilerl.arena.models.algorithms import (
     LLMAlgorithmSpec,
     MADDPGSpec,
     MATD3Spec,
-    RLAlgorithmSpec,
+    SingleAgentAlgorithmSpec,
 )
 from agilerl.models.hpo import (
     MultiFrequencySelectionSpec,
@@ -54,8 +54,8 @@ def from_trainer_specs(
     :type algorithm: AlgoSpec
     :param environment: Environment spec held on the trainer.
     :type environment: BaseModel
-    :param training: Training loop parameters; a model that is not already
-        :class:`TrainingSpec` is dumped so the manifest can validate it.
+    :param training: Training loop parameters; a foreign model is dumped so the
+        manifest rebuilds it as its own :class:`TrainingSpec`.
     :type training: TrainingSpec | BaseModel
     :param mutation: Optional mutation spec.
     :type mutation: MutationSpec | None
@@ -76,11 +76,11 @@ def from_trainer_specs(
         caller="from_trainer_specs",
     )
 
-    def _section(
+    def _coerce(
         value: BaseModel | Mapping[str, Any] | None,
         accepted: type[SpecT] | tuple[type[SpecT], ...],
     ) -> SpecT | Mapping[str, Any] | None:
-        """Pass through an already-typed section; dump anything else for re-validation."""
+        """Dump a foreign section so the field can rebuild it as its own class."""
         if value is None or isinstance(value, accepted):
             return value
         if isinstance(value, BaseModel):
@@ -96,9 +96,9 @@ def from_trainer_specs(
             else training.model_dump(mode="json", exclude_none=True)
         ),
         network=_network_from_algorithm(algorithm),
-        mutation=_section(mutation, MutationSpec),
-        replay_buffer=_section(replay_buffer, (ReplayBufferSpec, LLMRolloutBufferSpec)),
-        selection_strategy=_section(
+        mutation=_coerce(mutation, MutationSpec),
+        replay_buffer=_coerce(replay_buffer, (ReplayBufferSpec, LLMRolloutBufferSpec)),
+        selection_strategy=_coerce(
             selection_strategy,
             (TournamentSelectionSpec, MultiFrequencySelectionSpec),
         ),
@@ -119,7 +119,7 @@ def _network_from_algorithm(
                 "lora_config": algorithm.lora_config,
             }
         )
-    if isinstance(algorithm, RLAlgorithmSpec):
+    if isinstance(algorithm, SingleAgentAlgorithmSpec):
         return algorithm.net_config
     if isinstance(algorithm, (IPPOSpec, MADDPGSpec, MATD3Spec)):
         return algorithm.net_config

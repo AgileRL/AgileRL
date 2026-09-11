@@ -18,8 +18,7 @@ from agilerl.algorithms.core.advantage_granularity import (
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
 
 if TYPE_CHECKING:
-    from peft import LoraConfig, PeftModel
-    from transformers import PreTrainedModel
+    from peft import LoraConfig
 
 if HAS_LIGER_KERNEL or TYPE_CHECKING:
     from agilerl.algorithms.core.llm_ops.fused_loss import (
@@ -48,13 +47,13 @@ from agilerl.utils.llm_utils import (
     attention_mask_from_padded_ids,
     build_completion_mask,
     clipped_is_surrogate,
-    hf_turn_generation_config,
     masked_mean,
     normalize_prompt_batch,
     pool_by_turns,
     prepare_prompt_hf_generate,
     resolve_llm_device,
     validate_importance_sampling_level,
+    validate_llm_context_lengths,
 )
 
 if HAS_LLM_DEPENDENCIES:
@@ -79,7 +78,7 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
     :param model_name: Model name or path.
     :type model_name: str | None
     :param actor_network: Pre-instantiated HuggingFace model.
-    :type actor_network: PreTrainedModel | PeftModel | None
+    :type actor_network: PreTrainedModelProtocol | None
     :param model_config: Model configuration dict.
     :type model_config: dict[str, Any] | None
     :param hp_config: RL hyperparameter mutation configuration.
@@ -243,7 +242,7 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
         pad_token_id: int,
         pad_token: str,
         model_name: str | None = None,
-        actor_network: PreTrainedModel | PeftModel | None = None,
+        actor_network: PreTrainedModelProtocol | None = None,
         model_config: dict[str, Any] | None = None,
         hp_config: HyperparameterConfig | None = None,
         index: int = 0,
@@ -413,12 +412,7 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
                             token_ids = self.actor.generate(
                                 input_ids=input_ids,
                                 attention_mask=attention_mask,
-                                generation_config=hf_turn_generation_config(
-                                    self.generation_config,
-                                    max_model_len=self.max_model_len,
-                                    prompt_length=int(input_ids.shape[-1]),
-                                    max_output_tokens=self.max_output_tokens,
-                                ),
+                                generation_config=self.generation_config,
                             )
                             token_ids_list.append(token_ids)
                             completion_masks.append(
@@ -715,7 +709,7 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
         lr: float,
         clip_coef: float,
         update_epochs: int,
-        actor_network: PreTrainedModel | PeftModel | None,
+        actor_network: PreTrainedModelProtocol | None,
         clone: bool,
     ) -> None:
         """Validate the core training arguments."""
@@ -806,12 +800,13 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
         max_model_len: int,
         hf_generate_chunk_size: int | None,
     ) -> None:
-        """Build the HF generation config."""
+        """Validate context lengths and build the HF generation config."""
         self.max_output_tokens = (
             max_output_tokens if max_output_tokens is not None else max_model_len
         )
         self.min_output_tokens = min_output_tokens
         self.max_model_len = max_model_len
+        validate_llm_context_lengths(self.max_model_len, max_output_tokens)
         self.hf_generate_chunk_size = int(
             1 if hf_generate_chunk_size is None else max(1, hf_generate_chunk_size)
         )

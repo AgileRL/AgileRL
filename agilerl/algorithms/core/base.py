@@ -77,6 +77,7 @@ from agilerl.protocols import (
     ModuleDictProtocol,
     PeftModelProtocol,
     PretrainedConfigProtocol,
+    PreTrainedModelProtocol,
 )
 from agilerl.typing import (
     ActionResult,
@@ -146,13 +147,12 @@ from agilerl.utils.mutation_utils import target_activations
 
 if TYPE_CHECKING:
     from torch.optim.lr_scheduler import SequentialLR
-    from transformers import BitsAndBytesConfig, PreTrainedModel
+    from transformers import BitsAndBytesConfig
 
 # Make imports visible to typechecker and import when required
 if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
     from peft import (
         LoraConfig,
-        PeftModel,
         get_peft_model,
         prepare_model_for_kbit_training,
         set_peft_model_state_dict,
@@ -191,7 +191,6 @@ if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
         fill_outside_mask,
         gather_if_ds_param,
         gather_if_zero3,
-        generation_tokens_for_turn,
         get_model_name_or_path,
         get_state_dict,
         is_rollout_prompt,
@@ -217,8 +216,10 @@ else:
 __all__ = [
     "ActionResult",
     "EvolvableAlgorithm",
+    "MultiAgentAlgorithm",
     "MultiAgentRLAlgorithm",
     "RLAlgorithm",
+    "SingleAgentAlgorithm",
 ]
 
 logger = logging.getLogger(__name__)
@@ -1547,7 +1548,7 @@ class EvolvableAlgorithm(ABC, Generic[ExperiencesT], metaclass=RegistryMeta):
         :type accelerator: Accelerator | None, optional
 
         :return: An instance of the algorithm
-        :rtype: RLAlgorithm
+        :rtype: SingleAgentAlgorithm
         """
         checkpoint: dict[str, Any] = torch.load(
             path,
@@ -1718,7 +1719,9 @@ class EvolvableAlgorithm(ABC, Generic[ExperiencesT], metaclass=RegistryMeta):
             delattr(self, attr_name)
 
 
-class RLAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT]):
+class SingleAgentAlgorithm(
+    EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT]
+):
     """Base object for all single-agent algorithms in the AgileRL framework.
 
     :param observation_space: The observation space of the environment.
@@ -1772,7 +1775,7 @@ class RLAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT]):
         :param kwargs: Additional keyword arguments to pass to the algorithm constructor.
         :type kwargs: Any
         :return: A list of algorithms.
-        :rtype: list[RLAlgorithm]
+        :rtype: list[SingleAgentAlgorithm]
         """
         return build_classic_rl_population(
             cls,
@@ -1837,7 +1840,7 @@ class RLAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT]):
         )
 
 
-class MultiAgentRLAlgorithm(
+class MultiAgentAlgorithm(
     EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT]
 ):
     """Base object for all multi-agent algorithms in the AgileRL framework.
@@ -1907,7 +1910,7 @@ class MultiAgentRLAlgorithm(
         :param kwargs: Additional keyword arguments to pass to the algorithm constructor.
         :type kwargs: Any
         :return: A list of algorithms.
-        :rtype: list[MultiAgentRLAlgorithm]
+        :rtype: list[MultiAgentAlgorithm]
         """
         return build_classic_rl_population(
             cls,
@@ -2644,6 +2647,11 @@ class MultiAgentRLAlgorithm(
         return group_outputs
 
 
+# Old names remain importable from agilerl.algorithms.core.
+RLAlgorithm = SingleAgentAlgorithm
+MultiAgentRLAlgorithm = MultiAgentAlgorithm
+
+
 def _vllm_sampled_token_logprobs(output: CompletionOutput) -> list[float]:
     """Per-token logprob of the *sampled* token from a vLLM ``CompletionOutput``.
 
@@ -2714,7 +2722,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
     :param model_name: The name of the model.
     :type model_name: str | None
     :param actor_network: The actor network.
-    :type actor_network: PreTrainedModel | PeftModel | None
+    :type actor_network: PreTrainedModelProtocol | None
     :param micro_batch_size_per_gpu: Samples per backward pass on one rank (the
         memory setting). Optimizer-step cadence comes from ``mini_batch_size``.
     :type micro_batch_size_per_gpu: int | None
@@ -2838,7 +2846,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         use_vllm: bool = False,
         vllm_config: VLLMConfig | None = None,
         model_name: str | None = None,
-        actor_network: PreTrainedModel | PeftModel | None = None,
+        actor_network: PreTrainedModelProtocol | None = None,
         micro_batch_size_per_gpu: int | None = None,
         mini_batch_size: int | None = None,
         cosine_lr_schedule_config: CosineLRScheduleConfig | None = None,
@@ -5601,31 +5609,26 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
     def _backward_pass(self, loss: torch.Tensor) -> None:
         """Perform a backward pass and optimizer step.
 
-        Non-reentrant checkpointing recomputes the actor forward during
-        ``backward``. ``_amp_ctx`` must still be active then so AMP and PEFT
-        LoRA input dtypes match the tensors saved on the first forward.
-
         :param loss: Combined loss.
         :type loss: torch.Tensor
         """
-        with self._amp_ctx():
-            if self._uses_deepspeed:
-                assert self.accelerator is not None  # _uses_deepspeed implies one
-                self.accelerator.backward(loss)
-                if self.lr_scheduler is not None:
-                    self.lr_scheduler.step()
-                    self.lr = float(self.lr_scheduler.get_last_lr()[0])
-            else:
-                loss.backward()
+        if self._uses_deepspeed:
+            assert self.accelerator is not None  # _uses_deepspeed implies one
+            self.accelerator.backward(loss)
+            if self.lr_scheduler is not None:
+                self.lr_scheduler.step()
+                self.lr = float(self.lr_scheduler.get_last_lr()[0])
+        else:
+            loss.backward()
 
-                for group in self.optimizer.optimizer.param_groups:
-                    clip_grad_norm_(group["params"], self.max_grad_norm)
+            for group in self.optimizer.optimizer.param_groups:
+                clip_grad_norm_(group["params"], self.max_grad_norm)
 
-                self.optimizer.step()
-                self.optimizer.zero_grad()
-                if self.lr_scheduler is not None:
-                    self.lr_scheduler.step()
-                    self.lr = float(self.lr_scheduler.get_last_lr()[0])
+            self.optimizer.step()
+            self.optimizer.zero_grad()
+            if self.lr_scheduler is not None:
+                self.lr_scheduler.step()
+                self.lr = float(self.lr_scheduler.get_last_lr()[0])
 
     @property
     def _peft_model(self) -> Any:  # noqa: ANN401 -- PeftModel lives at a wrapper-specific attribute; concrete type varies
@@ -5834,6 +5837,12 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             "vllm_config must be configured for colocated vLLM generation."
         )
 
+        max_token_cap = (
+            self.max_output_tokens
+            if self.max_output_tokens is not None
+            else self.max_model_len
+        )
+
         def _token_prompt_for_vllm(ids: torch.Tensor) -> dict[str, list[int]]:
             return {"prompt_token_ids": ids.squeeze(0).tolist()}
 
@@ -5842,11 +5851,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             if room <= 0:
                 error_msg = f"Model prompt length ({model_prompt_len}) is greater than the model length ({self.max_model_len})"
                 raise ValueError(error_msg)
-            max_out = generation_tokens_for_turn(
-                self.max_model_len,
-                model_prompt_len,
-                self.max_output_tokens,
-            )
+            max_out = min(max_token_cap, room)
             if self.min_output_tokens is not None:
                 max_out = max(max_out, min(self.min_output_tokens, room))
             return min(max_out, room)
@@ -5903,9 +5908,6 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             all_prompts_ids = prompts_ids
             all_max_output_tokens = max_output_tokens
 
-        configured_min_tokens = (
-            0 if self.min_output_tokens is None else int(self.min_output_tokens)
-        )
         generation_kwargs: dict[str, Any] = {
             "n": 1,  # vLLM on each GPU generates only 1 in colocate mode
             "repetition_penalty": self.repetition_penalty,
@@ -5913,6 +5915,9 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             "top_p": self.top_p,
             "top_k": -1 if (self.top_k is None or self.top_k == 0) else self.top_k,
             "min_p": 0.0 if self.min_p is None else self.min_p,
+            "min_tokens": (
+                0 if self.min_output_tokens is None else self.min_output_tokens
+            ),
             "presence_penalty": vllm_config.presence_penalty,
             "frequency_penalty": vllm_config.frequency_penalty,
         }
@@ -5922,11 +5927,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         if vllm_config.stop_sequences:
             generation_kwargs["stop"] = vllm_config.stop_sequences
         sampling_params = [
-            SamplingParams(
-                **generation_kwargs,
-                max_tokens=max_output_token,
-                min_tokens=min(configured_min_tokens, max_output_token),
-            )
+            SamplingParams(**generation_kwargs, max_tokens=max_output_token)
             for max_output_token in all_max_output_tokens
         ]
 

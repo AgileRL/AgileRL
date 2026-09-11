@@ -15,7 +15,7 @@ from gymnasium import spaces
 from tensordict import TensorDict
 from torch import nn, optim
 
-from agilerl.algorithms.core import OptimizerWrapper, RLAlgorithm
+from agilerl.algorithms.core import OptimizerWrapper, SingleAgentAlgorithm
 from agilerl.algorithms.core.registry import (
     HyperparameterConfig,
     NetworkGroup,
@@ -47,7 +47,7 @@ from agilerl.utils.evolvable_networks import (
 )
 
 
-class DDPG(RLAlgorithm[TensorDict]):
+class DDPG(SingleAgentAlgorithm[TensorDict]):
     """Deep Deterministic Policy Gradient (DDPG).
 
     Paper: https://arxiv.org/abs/1509.02971

@@ -326,6 +326,7 @@ def run_single_seed(cfg: dict, seed: int) -> tuple[float, float]:
                 max_turns=max_turns,
                 apply_chat_template=False,
                 max_model_len=max_ctx,
+                max_output_tokens=max_new,
             )
 
         original_save = train_llm.save_llm_checkpoint

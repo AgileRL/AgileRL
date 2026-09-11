@@ -69,7 +69,6 @@ from agilerl.utils.trainer_utils import (
 )
 from agilerl.utils.utils import run_selection_and_mutation
 from tests.helper_functions import (
-    build_from_spec,
     rank_population_by_subpopulation,
     weakest_agent_index,
 )
@@ -1361,7 +1360,7 @@ class TestLLMBuildAlgorithm:
                 return_value=(None, None),
             ),
         ):
-            build_from_spec(dpo_spec, tokenizer=mock_tokenizer, index=0)
+            select_builder(dpo_spec).build(dpo_spec, tokenizer=mock_tokenizer, index=0)
 
         mock_algo.assert_called_once()
         call_kwargs = mock_algo.call_args[1]
@@ -1387,7 +1386,9 @@ class TestLLMBuildAlgorithm:
                 return_value=(None, None),
             ),
         ):
-            build_from_spec(grpo_spec, tokenizer=mock_tokenizer, index=1)
+            select_builder(grpo_spec).build(
+                grpo_spec, tokenizer=mock_tokenizer, index=1
+            )
 
         mock_algo.assert_called_once()
         call_kwargs = mock_algo.call_args[1]
@@ -1413,7 +1414,7 @@ class TestLLMBuildAlgorithm:
                 return_value=(None, None),
             ),
         ):
-            build_from_spec(
+            select_builder(dpo_spec).build(
                 dpo_spec, tokenizer=mock_tokenizer, index=0, accelerator=mock_accel
             )
 
@@ -2144,6 +2145,7 @@ class TestLocalTrainerIntegration:
             update_epochs=1,
             lora_config=lora_config,
             max_model_len=128,
+            # Must stay under max_model_len or the rollout prompt budget is 0.
             max_output_tokens=32,
         )
 
@@ -3230,7 +3232,7 @@ class TestResumeAndWarmStartAreExclusive:
             )
 
         builder_call = mock_build.call_args
-        assert builder_call.kwargs["runtime"].load_weights_from == "warm-start"
+        assert builder_call.kwargs["load_weights_from"] == "warm-start"
 
 
 class TestCreatePopulationFromSpecMultiFrequency:
@@ -3576,6 +3578,12 @@ class TestDeferredNetConfigParadigmGuard:
 
 
 class TestMakeRolloutFactoryGuards:
+    def _trainer_with(self, algorithm_spec, tokenizer):
+        trainer = LocalTrainer.__new__(LocalTrainer)
+        trainer.algorithm_spec = algorithm_spec
+        trainer.tokenizer = tokenizer
+        return trainer
+
     def _rollout_spec(self):
         return ArenaLLMEnvSpec(
             env_type="rollout",
@@ -3587,23 +3595,11 @@ class TestMakeRolloutFactoryGuards:
     def test_a_non_llm_algorithm_gets_no_rollout_factory(self):
         from agilerl.arena.models.algorithms import DQNSpec
 
-        with (
-            patch("agilerl.training.trainer.create_population_from_spec"),
-            patch("agilerl.training.trainer.build_replay_buffer_from_spec"),
-            patch.object(LocalTrainer, "_make_env", return_value=None),
-        ):
-            with pytest.raises(TypeError, match="not an LLMAlgorithmSpec"):
-                LocalTrainer(DQNSpec(), self._rollout_spec())
+        trainer = self._trainer_with(DQNSpec(), MagicMock())
+        with pytest.raises(TypeError, match="not an LLMAlgorithmSpec"):
+            trainer._make_rollout_factory(self._rollout_spec())
 
     def test_a_missing_tokenizer_gets_no_rollout_factory(self):
-        from agilerl.arena.models.algorithms import GRPOSpec
-
-        with (
-            patch("agilerl.training.trainer.create_llm_accelerator", MagicMock()),
-            patch.object(LocalTrainer, "_make_tokenizer", return_value=None),
-            patch("agilerl.training.trainer.create_population_from_spec"),
-            patch("agilerl.training.trainer.build_replay_buffer_from_spec"),
-            patch.object(LocalTrainer, "_make_env", return_value=None),
-        ):
-            with pytest.raises(TypeError, match="requires a tokenizer"):
-                LocalTrainer(GRPOSpec.model_construct(), self._rollout_spec())
+        trainer = self._trainer_with(LLMAlgorithmSpec.model_construct(), None)
+        with pytest.raises(TypeError, match="requires a tokenizer"):
+            trainer._make_rollout_factory(self._rollout_spec())

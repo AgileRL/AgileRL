@@ -20,7 +20,7 @@ from agilerl.algorithms import (
     NeuralUCB,
     RainbowDQN,
 )
-from agilerl.algorithms.core import MultiAgentRLAlgorithm
+from agilerl.algorithms.core import MultiAgentAlgorithm
 from agilerl.hpo.multi_frequency import MultiFrequencySelection
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.modules import (
@@ -115,7 +115,7 @@ class TestEvolvableAlgorithmProtocol:
     ):
         """Test that algorithm instances implement the EvolvableAlgorithm protocol."""
         # Skip actual instantiation, just check the class definitions
-        if issubclass(algorithm_cls, MultiAgentRLAlgorithm):
+        if issubclass(algorithm_cls, MultiAgentAlgorithm):
             instance = algorithm_cls(
                 observation_spaces=[observation_space],
                 action_spaces=[algo_action_space],

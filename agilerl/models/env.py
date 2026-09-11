@@ -64,6 +64,17 @@ __all__ = [
 ]
 
 
+def _env_kwargs(spec: GymEnvSpec | BanditEnvSpec) -> dict[str, Any]:
+    config = spec.env_config
+    return config if isinstance(config, dict) else {}
+
+
+def _wrappers(
+    spec: GymEnvSpec,
+) -> list[str | tuple[str, dict[str, Any]]] | None:
+    return spec.env_wrappers
+
+
 def construct_custom_env_fn(
     entrypoint: str,
     path: str | None = None,
@@ -112,8 +123,8 @@ def make_single_env(
         return construct_custom_env_fn(
             spec.entrypoint,
             spec.path,
-            spec.env_config if isinstance(spec.env_config, dict) else {},
-            spec.env_wrappers,
+            _env_kwargs(spec),
+            _wrappers(spec),
         )()
     return gym.make(spec.name)
 
@@ -123,17 +134,15 @@ def _make_single_pz_env(spec: GymEnvSpec) -> ParallelEnv:
         return construct_custom_pz_env_fn(
             spec.entrypoint,
             spec.path,
-            spec.env_config if isinstance(spec.env_config, dict) else {},
-            spec.env_wrappers,
+            _env_kwargs(spec),
+            _wrappers(spec),
         )()
     module = import_module(spec.name)
     if not hasattr(module, "parallel_env"):
         msg = f"PettingZoo module '{spec.name}' has no 'parallel_env' constructor."
         raise AttributeError(msg)
-    env = module.parallel_env(
-        **(spec.env_config if isinstance(spec.env_config, dict) else {})
-    )
-    return apply_wrappers(env, spec.env_wrappers, path=spec.path)
+    env = module.parallel_env(**_env_kwargs(spec))
+    return apply_wrappers(env, _wrappers(spec), path=spec.path)
 
 
 def make_gym_env(
@@ -142,12 +151,12 @@ def make_gym_env(
     wrappers: Sequence[WrapperSpec] | None = None,
 ) -> GymEnvType:
     """Instantiate the vectorized gym environment."""
-    resolved = wrappers if wrappers is not None else spec.env_wrappers
+    resolved = wrappers if wrappers is not None else _wrappers(spec)
     if spec.entrypoint is not None:
         make_one = construct_custom_env_fn(
             spec.entrypoint,
             spec.path,
-            spec.env_config if isinstance(spec.env_config, dict) else {},
+            _env_kwargs(spec),
             resolved,
         )
     else:
@@ -168,12 +177,12 @@ def make_pz_env(
     wrappers: Sequence[WrapperSpec] | None = None,
 ) -> AsyncPettingZooVecEnv:
     """Instantiate vectorized PettingZoo environments."""
-    resolved = wrappers if wrappers is not None else spec.env_wrappers
+    resolved = wrappers if wrappers is not None else _wrappers(spec)
     if spec.entrypoint is not None:
         make_one = construct_custom_pz_env_fn(
             spec.entrypoint,
             spec.path,
-            spec.env_config if isinstance(spec.env_config, dict) else {},
+            _env_kwargs(spec),
             resolved,
         )
     else:
@@ -183,9 +192,7 @@ def make_pz_env(
             if not hasattr(module, "parallel_env"):
                 msg = f"PettingZoo module '{spec.name}' has no 'parallel_env' constructor."
                 raise AttributeError(msg)
-            env = module.parallel_env(
-                **(spec.env_config if isinstance(spec.env_config, dict) else {})
-            )
+            env = module.parallel_env(**_env_kwargs(spec))
             return apply_wrappers(env, resolved, path=spec.path)
 
     return make_multi_agent_vect_envs(
@@ -239,9 +246,7 @@ def make_bandit_env(
         if not callable(constructor):
             msg = f"Entrypoint '{spec.entrypoint}' resolved to non-callable object."
             raise TypeError(msg)
-        return constructor(
-            **(spec.env_config if isinstance(spec.env_config, dict) else {})
-        )
+        return constructor(**_env_kwargs(spec))
 
     loaded_features = (
         _load_dataframe(resolved_features)
@@ -439,6 +444,7 @@ def make_rollout_env_factory(
 
     harness_kwargs: dict[str, Any] = {
         "max_model_len": max_model_len,
+        "max_output_tokens": max_output_tokens,
         "chat_template_kwargs": dict(spec.chat_template_kwargs),
     }
     if spec.dataset_backed_rollout:
@@ -519,6 +525,7 @@ def _make_dataset_rollout_factory(
             # ``prompt_builder`` already rendered the chat template.
             apply_chat_template=False,
             max_model_len=harness_kwargs["max_model_len"],
+            max_output_tokens=harness_kwargs["max_output_tokens"],
         )
 
     # A dataset-backed rollout is single-turn; the contract pins max_turns to 1.
@@ -659,13 +666,25 @@ def make_env(
     features: pd.DataFrame | str | Path | None = None,
     targets: pd.DataFrame | str | Path | None = None,
     seed: int | None = None,
+    data_batch_size_per_gpu: int = 8,
+    max_context_length: int | None = None,
+    rank: int = 0,
+    world_size: int = 1,
 ) -> GymEnvType | AsyncPettingZooVecEnv | BanditEnvProtocol | DatasetEnv:
     """Build the live environment described by *spec*."""
     if isinstance(spec, LLMEnvSpec):
         if tokenizer is None:
             msg = "LLM environment construction requires a tokenizer."
             raise TypeError(msg)
-        return make_llm_env(spec, tokenizer, seed=seed)
+        return make_llm_env(
+            spec,
+            tokenizer,
+            data_batch_size_per_gpu=data_batch_size_per_gpu,
+            max_context_length=max_context_length,
+            seed=seed,
+            rank=rank,
+            world_size=world_size,
+        )
     if isinstance(spec, BanditEnvSpec):
         return make_bandit_env(spec, features=features, targets=targets)
     if not isinstance(spec, GymEnvSpec):

@@ -22,8 +22,7 @@ from agilerl.utils.patching import class_is_patched, try_import
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
 
-    from peft import PeftModel
-    from transformers import PreTrainedModel
+    from agilerl.protocols import PreTrainedModelProtocol
 
 logger = logging.getLogger(__name__)
 
@@ -90,7 +89,7 @@ def _make_patched_init(original_init: Callable[..., None]) -> Callable[..., None
 
 def _drop_fused_path_on_instances(
     mixer_cls: type,
-    model: PreTrainedModel | PeftModel,
+    model: PreTrainedModelProtocol,
 ) -> int:
     """Clear the fused-path attribute on every existing mixer in *model*.
 
@@ -100,7 +99,7 @@ def _drop_fused_path_on_instances(
     :param mixer_cls: The patched mixer class.
     :type mixer_cls: type
     :param model: Model whose submodules are swept.
-    :type model: PreTrainedModel | PeftModel
+    :type model: PreTrainedModelProtocol
     :return: Number of mixer instances cleared.
     :rtype: int
     """
@@ -124,7 +123,7 @@ def _drop_fused_path_on_instances(
 def patch_nemotron_mamba_fused_path(
     *,
     enabled: bool = True,
-    model: PreTrainedModel | PeftModel | None = None,
+    model: PreTrainedModelProtocol | None = None,
 ) -> None:
     """Keep every Nemotron-H Mamba2 mixer on its decomposed forward path.
 
@@ -147,7 +146,7 @@ def patch_nemotron_mamba_fused_path(
     :type enabled: bool, optional
     :param model: Already-built model whose mixers are also cleared,
         defaults to None.
-    :type model: PreTrainedModel | PeftModel | None, optional
+    :type model: PreTrainedModelProtocol | None, optional
     :return: None
     :rtype: None
     """
@@ -274,7 +273,7 @@ def _make_patched_forward(
 def patch_nemotron_mamba_stream_ordering(
     *,
     enabled: bool = True,
-    model: PreTrainedModel | PeftModel | None = None,
+    model: PreTrainedModelProtocol | None = None,
 ) -> None:
     """Order the Nemotron-H Mamba2 mixer's default-stream kernels against its caller.
 
@@ -295,7 +294,7 @@ def patch_nemotron_mamba_stream_ordering(
     :param enabled: Install the patch, defaults to True.
     :type enabled: bool, optional
     :param model: Unused; accepted for family-dispatch parity, defaults to None.
-    :type model: PreTrainedModel | PeftModel | None, optional
+    :type model: PreTrainedModelProtocol | None, optional
     :return: None
     :rtype: None
     """
@@ -329,7 +328,7 @@ def patch_nemotron_mamba_stream_ordering(
 def install_nemotron_h_patches(
     *,
     zero_stage: int,
-    model: PreTrainedModel | PeftModel | None = None,
+    model: PreTrainedModelProtocol | None = None,
 ) -> None:
     """Install Nemotron-H Mamba2 workarounds.
 
@@ -340,7 +339,7 @@ def install_nemotron_h_patches(
     :param zero_stage: DeepSpeed ZeRO stage for this run.
     :type zero_stage: int
     :param model: Already-built model the patches also apply to, or None.
-    :type model: PreTrainedModel | PeftModel | None
+    :type model: PreTrainedModelProtocol | None
     :return: None
     :rtype: None
     """

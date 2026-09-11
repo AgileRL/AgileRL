@@ -10,11 +10,12 @@ from typing import TYPE_CHECKING, Any
 from agilerl.arena.models.algorithms import (
     AlgoSpec,
     RainbowDQNSpec,
-    RLAlgorithmSpec,
+    SingleAgentAlgorithmSpec,
 )
 from agilerl.arena.models.registry import AgentType
 from agilerl.arena.models.training import (
     BufferSpec,
+    CheckpointExportSpec,
     LLMRolloutBufferSpec,
     NStepBufferArgs,
     PerBufferArgs,
@@ -34,6 +35,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "BufferSpec",
+    "CheckpointExportSpec",
     "LLMRolloutBufferSpec",
     "NStepBufferArgs",
     "PerBufferArgs",
@@ -65,7 +67,7 @@ def init_buffer(
             buffer_class = PrioritizedReplayBuffer
 
         elif spec.n_step_buffer:
-            if not isinstance(algo_spec, RLAlgorithmSpec):
+            if not isinstance(algo_spec, SingleAgentAlgorithmSpec):
                 msg = "Gamma must be specified for N-step buffer"
                 raise ValueError(msg)
 
@@ -99,7 +101,7 @@ def init_n_step_buffer(
     if not (spec.per_buffer and spec.n_step_buffer):
         return None
 
-    if not isinstance(algo_spec, RLAlgorithmSpec):
+    if not isinstance(algo_spec, SingleAgentAlgorithmSpec):
         msg = "Gamma must be specified for N-step buffer"
         raise ValueError(msg)
 

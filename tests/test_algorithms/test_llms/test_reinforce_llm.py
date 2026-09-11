@@ -463,7 +463,7 @@ class TestREINFORCEInit:
             )
         rf.clean_up()
 
-    def test_init_accepts_output_tokens_not_less_than_model_len(self):
+    def test_init_rejects_output_tokens_not_less_than_model_len(self):
         actor = create_dummy_actor(10, 8, 100, "cpu")
         lora = LoraConfig(
             r=4,
@@ -471,20 +471,17 @@ class TestREINFORCEInit:
             target_modules=["lin"],
             task_type="CAUSAL_LM",
         )
-        rf = REINFORCE(
-            actor_network=actor,
-            pad_token_id=99,
-            pad_token="<pad>",
-            lora_config=lora,
-            max_output_tokens=32,
-            max_model_len=16,
-            wrap=False,
-            gradient_checkpointing=False,
-        )
-
-        assert rf.max_output_tokens == 32
-        assert rf.max_model_len == 16
-        rf.clean_up()
+        with pytest.raises(ValueError, match="must be less than"):
+            REINFORCE(
+                actor_network=actor,
+                pad_token_id=99,
+                pad_token="<pad>",
+                lora_config=lora,
+                max_output_tokens=32,
+                max_model_len=16,
+                wrap=False,
+                gradient_checkpointing=False,
+            )
 
     def test_init_clip_coef_non_negative(self):
         actor = create_dummy_actor(10, 8, 100, "cpu")
@@ -1193,6 +1190,7 @@ class TestREINFORCETest:
                 max_turns=1,
                 apply_chat_template=False,
                 max_model_len=128,
+                max_output_tokens=8,
             )
             rf = _cpu_llmreinforce(max_model_len=128, max_output_tokens=8)
             out = rf.test(env, loop=1)

@@ -492,10 +492,8 @@ class PreTrainedModelProtocol(Protocol):
     These models support text generation, state management, and device operations.
     """
 
+    device: DeviceType
     config: Any
-
-    @property
-    def device(self) -> DeviceType: ...
 
     def eval(self) -> "PreTrainedModelProtocol": ...
 

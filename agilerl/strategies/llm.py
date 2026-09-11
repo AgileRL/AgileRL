@@ -67,8 +67,7 @@ class LLMStrategy(TrainingStrategy):
             "checkpoint_path": training.checkpoint_path,
         }
         if training.num_epochs is not None:
-            env_type = getattr(spec, "env_type", None)
-            if env_type is not None and LLMEnvType(env_type) == LLMEnvType.DATASET:
+            if LLMEnvType(spec.env_type) == LLMEnvType.DATASET:
                 maybe_kwargs["num_epochs"] = training.num_epochs
             else:
                 warnings.warn(

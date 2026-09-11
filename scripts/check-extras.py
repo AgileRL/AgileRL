@@ -153,7 +153,7 @@ def _expected_arena_version(tagged: str) -> tuple[str, str | None]:
     """Return (arena version this release cuts, semver kind or None)."""
     if os.environ.get("ML_REBUILD_ARENA", "").strip() != "1":
         return tagged, None
-    kind = os.environ.get("ML_ARENA_SEMVER_KIND", "").strip()
+    kind = os.environ.get("ML_SEMVER_KIND", "").strip()
     if kind not in {"major", "minor", "patch"}:
         return tagged, None
     bumped = _semver_bump(tagged, kind)
@@ -215,7 +215,7 @@ def _check_arena_requirement(
     expected, kind = _expected_arena_version(tagged)
     if kind is not None:
         print(
-            f"arena paths changed: agilerl-arena:semver:{kind} cuts agilerl-arena "
+            f"arena paths changed: semver:{kind} cuts agilerl-arena "
             f"{tagged} -> {expected}",
             flush=True,
         )
@@ -226,7 +226,7 @@ def _check_arena_requirement(
                 f"({PARENT_PYPROJECT})"
             )
         _fail(
-            f"agilerl-arena:semver:{kind} -> agilerl-arena will be {expected}, outside the "
+            f"semver:{kind} -> agilerl-arena will be {expected}, outside the "
             f"committed range {ranges[0]} (last released agilerl-arena/v{tagged}; "
             f"{PARENT_PYPROJECT})"
         )

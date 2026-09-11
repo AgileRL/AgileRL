@@ -1,7 +1,7 @@
 # Copyright 2026 AgileRL
 # SPDX-License-Identifier: Apache-2.0
 
-"""What a manifest accepts, rejects, and resolves to."""
+"""Contract tests: what a manifest accepts, rejects, and resolves to."""
 
 from __future__ import annotations
 

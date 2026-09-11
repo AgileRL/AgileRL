@@ -8,8 +8,8 @@ from __future__ import annotations
 from agilerl.arena.models.algorithms import (
     AlgoSpec,
     LLMAlgorithmSpec,
-    MultiAgentRLAlgorithmSpec,
-    RLAlgorithmSpec,
+    MultiAgentAlgorithmSpec,
+    SingleAgentAlgorithmSpec,
 )
 from agilerl.arena.models.env import LLMEnvType
 from agilerl.strategies.bandit import BanditStrategy
@@ -38,6 +38,11 @@ MULTI_AGENT_OFF_POLICY = MultiAgentOffPolicyStrategy()
 LLM_ROLLOUT = LLMRolloutStrategy()
 LLM_DATASET = LLMDatasetStrategy()
 
+LLM_BY_ENV_TYPE: dict[LLMEnvType, LLMStrategy] = {
+    LLMEnvType.ROLLOUT: LLM_ROLLOUT,
+    LLMEnvType.DATASET: LLM_DATASET,
+}
+
 
 def select_strategy(spec: AlgoSpec) -> TrainingStrategy:
     """Return the strategy that trains *spec*, from its paradigm flags.
@@ -54,16 +59,14 @@ def select_strategy(spec: AlgoSpec) -> TrainingStrategy:
     :raises KeyError: If an LLM spec's ``env_type`` has no strategy.
     """
     if isinstance(spec, LLMAlgorithmSpec):
-        env_type = getattr(spec, "env_type", None)
-        if env_type == LLMEnvType.ROLLOUT:
-            return LLM_ROLLOUT
-        if env_type == LLMEnvType.DATASET:
-            return LLM_DATASET
-        msg = f"No training strategy for LLM env_type {env_type!r}."
-        raise KeyError(msg)
-    if isinstance(spec, MultiAgentRLAlgorithmSpec):
+        try:
+            return LLM_BY_ENV_TYPE[LLMEnvType(spec.env_type)]
+        except (KeyError, ValueError) as err:
+            msg = f"No training strategy for LLM env_type {spec.env_type!r}."
+            raise KeyError(msg) from err
+    if isinstance(spec, MultiAgentAlgorithmSpec):
         return MULTI_AGENT_OFF_POLICY if spec.off_policy else MULTI_AGENT_ON_POLICY
-    if isinstance(spec, RLAlgorithmSpec):
+    if isinstance(spec, SingleAgentAlgorithmSpec):
         if spec.bandit:
             return BANDIT
         if spec.offline:

@@ -41,8 +41,7 @@ from agilerl.utils.patching import class_is_patched, try_import
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from peft import PeftModel
-    from transformers import PreTrainedModel
+    from agilerl.protocols import PreTrainedModelProtocol
 
 logger = logging.getLogger(__name__)
 
@@ -75,7 +74,7 @@ def install_model_patches(
     deepspeed_config: Mapping[str, Any] | None,
     *,
     model_name_or_path: str | None = None,
-    model: PreTrainedModel | PeftModel | None = None,
+    model: PreTrainedModelProtocol | None = None,
     num_partitions: int = 1,
 ) -> None:
     """Install family patches, then ZeRO-3 wraps when ``zero_stage`` is 3.
@@ -87,7 +86,7 @@ def install_model_patches(
     :param model_name_or_path: Hugging Face id or local path of the actor.
     :type model_name_or_path: str | None
     :param model: Already-built actor model, or None.
-    :type model: PreTrainedModel | PeftModel | None
+    :type model: PreTrainedModelProtocol | None
     :param num_partitions: ZeRO-3 partition count (trainer world size).
     :type num_partitions: int
     :return: None

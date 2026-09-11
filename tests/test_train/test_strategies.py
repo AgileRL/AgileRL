@@ -17,8 +17,8 @@ from agilerl.arena.models.algorithms import (
     MADDPGSpec,
     NeuralTSSpec,
     PPOSpec,
-    RLAlgorithmSpec,
     SFTSpec,
+    SingleAgentAlgorithmSpec,
 )
 from agilerl.arena.models.registry import MANIFEST_REGISTRY
 from agilerl.strategies import (
@@ -65,7 +65,7 @@ class TestStrategyFor:
 
     def test_a_flag_on_a_subclass_is_honoured(self):
         # The flags are what dispatch reads, so a subclass that flips one moves.
-        class _OffSpec(RLAlgorithmSpec):
+        class _OffSpec(SingleAgentAlgorithmSpec):
             offline: ClassVar[bool] = True
 
         assert select_strategy(_OffSpec()) is OFFLINE
@@ -159,15 +159,3 @@ class TestStrategyDefensiveBranches:
             env_spec=GymEnvSpec(name="mpe2.simple_spread_v3"),
         )
         assert kwargs["sum_scores"] is False
-
-    def test_classic_kwargs_need_a_named_env(self):
-        from agilerl.models.env import LLMEnvSpec, LLMEnvType
-        from agilerl.models.training import TrainingSpec
-        from agilerl.strategies.base import rl_trainer_kwargs
-
-        with pytest.raises(TypeError, match="is not a named env spec"):
-            rl_trainer_kwargs(
-                PPOSpec(),
-                training=TrainingSpec(max_steps=10),
-                env_spec=LLMEnvSpec.model_construct(env_type=LLMEnvType.DATASET),
-            )

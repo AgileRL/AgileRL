@@ -71,6 +71,7 @@ class TestCollectRolloutsLlm:
                 max_turns=1,
                 apply_chat_template=False,
                 max_model_len=128,
+                max_output_tokens=8,
             )
 
         env = RolloutCollector(env_factory=env_fn, batch_size=2, group_size=1)
@@ -242,6 +243,7 @@ class TestCollectRolloutsLlmGrpo:
                 max_turns=1,
                 apply_chat_template=False,
                 max_model_len=128,
+                max_output_tokens=8,
             )
 
         env = RolloutCollector(env_factory=env_fn, batch_size=1, group_size=1)

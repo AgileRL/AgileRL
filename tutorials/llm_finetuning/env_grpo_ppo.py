@@ -155,6 +155,7 @@ def main() -> None:
             max_turns=max_turns,
             apply_chat_template=True,
             max_model_len=init_hp.get("MAX_MODEL_LEN"),
+            max_output_tokens=init_hp.get("MAX_OUTPUT_TOKENS"),
         )
 
     accelerator = create_llm_accelerator()

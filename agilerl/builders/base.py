@@ -8,19 +8,14 @@ from __future__ import annotations
 import inspect
 import warnings
 from collections.abc import Mapping
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from pydantic import BaseModel
 
 from agilerl import HAS_LLM_DEPENDENCIES, algorithms
 from agilerl.algorithms.core import EvolvableAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig
-from agilerl.arena.models.algorithms import AlgorithmSpec, LLMAlgorithmSpec
-
-if TYPE_CHECKING:
-    import torch
-    from accelerate import Accelerator
+from agilerl.arena.models.algorithms import AlgoSpec, LLMAlgorithmSpec
 
 
 class AlgorithmBuilder:
@@ -31,26 +26,22 @@ class AlgorithmBuilder:
     """
 
     @classmethod
-    def algo_class(cls, spec: AlgorithmSpec) -> type[EvolvableAlgorithm]:
+    def algo_class(cls, spec: AlgoSpec) -> type[EvolvableAlgorithm]:
         """Resolve the algorithm class from :mod:`agilerl.algorithms`.
 
-        Naming convention: ``<Name>Spec`` -> ``<Name>``. Walks the spec's
-        MRO so a user subclass still maps to the parent algorithm.
+        Naming convention: ``<Name>Spec`` -> ``<Name>``.
 
         :param spec: The algorithm spec.
-        :type spec: AlgorithmSpec
+        :type spec: AlgoSpec
         :returns: The algorithm class.
         :rtype: type[EvolvableAlgorithm]
         :raises AttributeError: If no algorithm matches the spec's name.
         """
-        for spec_cls in type(spec).__mro__:
-            name = spec_cls.__name__.removesuffix("Spec")
-            if name == spec_cls.__name__:
-                continue
-            resolved = getattr(algorithms, name, None)
-            if isinstance(resolved, type) and issubclass(resolved, EvolvableAlgorithm):
-                return resolved
         spec_cls = type(spec)
+        name = spec_cls.__name__.removesuffix("Spec")
+        resolved = getattr(algorithms, name, None)
+        if isinstance(resolved, type) and issubclass(resolved, EvolvableAlgorithm):
+            return resolved
         msg = f"No algorithm class in agilerl.algorithms for {spec_cls.__name__}."
         if not HAS_LLM_DEPENDENCIES and issubclass(spec_cls, LLMAlgorithmSpec):
             msg += (
@@ -60,16 +51,9 @@ class AlgorithmBuilder:
         raise AttributeError(msg)
 
 
-@dataclass(frozen=True)
-class AlgorithmBuildRuntime:
-    """Population slot, device, HPO, and optional checkpoint for ``build``."""
-
-    index: int | None = None
-    device: str | torch.device = "cpu"
-    accelerator: Accelerator | None = None
-    hp_config: HyperparameterConfig | None = None
-    resume_from_checkpoint: str | None = None
-    load_weights_from: str | None = None
+# Values whose type makes a meaningful ``!=`` comparison; anything else (an
+# Accelerator, a LoraConfig, a registry) is skipped when diffing hyperparameters.
+COMPARABLE_HP_TYPES = (bool, int, float, str, type(None))
 
 
 def apply_checkpoint(
@@ -128,12 +112,10 @@ def _resume_and_warn_on_drift(
     algo.load_checkpoint(path)
     algo.index = index
 
-    # Skip Accelerator / LoraConfig / registry values; only these compare with ``!=``.
-    comparable_hp_types = (bool, int, float, str, type(None))
     drifted = {
         name: (configured[name], getattr(algo, name))
         for name in configured
-        if isinstance(configured[name], comparable_hp_types)
+        if isinstance(configured[name], COMPARABLE_HP_TYPES)
         and hasattr(algo, name)
         and configured[name] != getattr(algo, name)
     }
@@ -153,7 +135,7 @@ def _resume_and_warn_on_drift(
 
 
 def spec_kwargs(
-    spec: AlgorithmSpec, *, hp_config: HyperparameterConfig | None
+    spec: AlgoSpec, *, hp_config: HyperparameterConfig | None
 ) -> dict[str, Any]:
     """The constructor kwargs a spec contributes: its explicitly-set fields.
 
@@ -163,7 +145,7 @@ def spec_kwargs(
     constructors take, again with only its set fields.
 
     :param spec: The algorithm spec.
-    :type spec: AlgorithmSpec
+    :type spec: AlgoSpec
     :param hp_config: Resolved hyperparameter config, forwarded when given.
     :type hp_config: HyperparameterConfig | None
     :returns: Keyword arguments for the algorithm constructor.

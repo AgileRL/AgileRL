@@ -7,30 +7,35 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from agilerl.algorithms.core import RLAlgorithm
-from agilerl.arena.models.algorithms import AlgorithmSpec
+from agilerl.algorithms.core import SingleAgentAlgorithm
 from agilerl.builders.base import (
     AlgorithmBuilder,
-    AlgorithmBuildRuntime,
     apply_checkpoint,
     constructor_kwargs,
     spec_kwargs,
 )
 
 if TYPE_CHECKING:
+    import torch
+    from accelerate import Accelerator
     from gymnasium import spaces
+
+    from agilerl.algorithms.core.registry import HyperparameterConfig
+    from agilerl.arena.models.algorithms import AlgoSpec
+else:
+    HyperparameterConfig = Any
 
 
 class SingleAgentBuilder(AlgorithmBuilder):
     """Single-agent reinforcement learning."""
 
     @classmethod
-    def algo_class(cls, spec: AlgorithmSpec) -> type[RLAlgorithm]:
+    def algo_class(cls, spec: AlgoSpec) -> type[SingleAgentAlgorithm]:
         resolved = super().algo_class(spec)
-        if not issubclass(resolved, RLAlgorithm):
+        if not issubclass(resolved, SingleAgentAlgorithm):
             msg = (
                 f"{type(spec).__name__} resolved to {resolved.__name__}, "
-                "which is not a subclass of RLAlgorithm."
+                "which is not a subclass of SingleAgentAlgorithm."
             )
             raise TypeError(msg)
         return resolved
@@ -38,33 +43,49 @@ class SingleAgentBuilder(AlgorithmBuilder):
     @classmethod
     def build(
         cls,
-        spec: AlgorithmSpec,
+        spec: AlgoSpec,
         observation_space: spaces.Space | None = None,
         action_space: spaces.Space | None = None,
         *,
-        runtime: AlgorithmBuildRuntime | None = None,
+        index: int | None = None,
+        resume_from_checkpoint: str | None = None,
+        load_weights_from: str | None = None,
+        device: str | torch.device = "cpu",
+        accelerator: Accelerator | None = None,
+        hp_config: HyperparameterConfig | None = None,
         **networks: Any,
-    ) -> RLAlgorithm:
+    ) -> SingleAgentAlgorithm:
         """Build a single-agent algorithm.
 
         :param spec: The algorithm spec.
-        :type spec: AlgorithmSpec
+        :type spec: AlgoSpec
         :param observation_space: Observation space.
         :type observation_space: spaces.Space | None
         :param action_space: Action space.
         :type action_space: spaces.Space | None
-        :param runtime: Population slot, device, HPO, and optional checkpoint.
-        :type runtime: AlgorithmBuildRuntime | None
+        :param index: Index of the agent in the population.
+        :type index: int | None
+        :param resume_from_checkpoint: Checkpoint to continue an interrupted run
+            from, restoring optimizer state and the hyperparameters it belongs to.
+            Mutually exclusive with ``load_weights_from``.
+        :type resume_from_checkpoint: str | None
+        :param load_weights_from: Checkpoint to warm-start a new run from, taking
+            only the weights. Mutually exclusive with ``resume_from_checkpoint``.
+        :type load_weights_from: str | None
+        :param device: Torch device. Defaults to "cpu".
+        :type device: str | torch.device
+        :param accelerator: Accelerator object for distributed computing.
+        :type accelerator: Accelerator | None
+        :param hp_config: Resolved hyperparameter config for HPO.
+        :type hp_config: HyperparameterConfig | None
         :param networks: Pre-built modules to hand the constructor, e.g.
             ``actor_network`` and ``critic_network``. Only pass the ones the
             algorithm takes.
         :type networks: EvolvableModule
         :returns: Single-agent algorithm instance.
-        :rtype: RLAlgorithm
+        :rtype: SingleAgentAlgorithm
         :raises ValueError: If observation_space, action_space, or index is None.
         """
-        runtime = runtime or AlgorithmBuildRuntime()
-        index = runtime.index
         if observation_space is None or action_space is None or index is None:
             msg = "SingleAgentBuilder.build requires observation_space, action_space, and index."
             raise ValueError(msg)
@@ -73,17 +94,10 @@ class SingleAgentBuilder(AlgorithmBuilder):
             observation_space=observation_space,
             action_space=action_space,
             index=index,
-            device=runtime.device,
-            accelerator=runtime.accelerator,
-            **constructor_kwargs(
-                algo_cls, spec_kwargs(spec, hp_config=runtime.hp_config)
-            ),
+            device=device,
+            accelerator=accelerator,
+            **constructor_kwargs(algo_cls, spec_kwargs(spec, hp_config=hp_config)),
             **networks,
         )
-        apply_checkpoint(
-            algo,
-            runtime.resume_from_checkpoint,
-            runtime.load_weights_from,
-            index=index,
-        )
+        apply_checkpoint(algo, resume_from_checkpoint, load_weights_from, index=index)
         return algo

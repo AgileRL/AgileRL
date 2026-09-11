@@ -8,6 +8,7 @@ from __future__ import annotations
 import logging
 import warnings
 from abc import ABC, abstractmethod
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeVar, get_args, get_origin
 
@@ -16,9 +17,10 @@ from typing_extensions import Never, Self
 
 from agilerl import HAS_LLM_DEPENDENCIES, AgentType
 from agilerl.algorithms.core.base import (
+    EvolvableAlgorithm,
     LLMAlgorithm,
-    MultiAgentRLAlgorithm,
-    RLAlgorithm,
+    MultiAgentAlgorithm,
+    SingleAgentAlgorithm,
 )
 from agilerl.arena import ArenaClient
 from agilerl.arena.models import BanditEnvSpec as ArenaBanditEnvSpec
@@ -40,7 +42,7 @@ from agilerl.models import (
     MutationSpec,
     PPOSpec,
     ReplayBufferSpec,
-    RLAlgorithmSpec,
+    SingleAgentAlgorithmSpec,
     TournamentSelectionSpec,
     TrainingManifest,
     TrainingSpec,
@@ -89,7 +91,12 @@ logger = logging.getLogger(__name__)
 
 EnvSpecType = EnvSpec
 ReplayBufferType = ReplayBufferSpec | LLMRolloutBufferSpec | None
-PopulationType = list[RLAlgorithm | MultiAgentRLAlgorithm | LLMAlgorithm]
+PopulationType = list[SingleAgentAlgorithm | MultiAgentAlgorithm | LLMAlgorithm]
+# What a training loop hands back: the concrete population list and one fitness
+# entry per agent (a per-agent dict from the multi-agent loops).
+TrainResult = tuple[
+    Sequence[EvolvableAlgorithm], Sequence[int | float | dict[str, int | float]]
+]
 
 
 def _algorithm_with_network(manifest: TrainingManifest) -> AlgoSpec:
@@ -129,8 +136,8 @@ if TYPE_CHECKING:
     from transformers import PreTrainedTokenizerBase
 
     from agilerl.algorithms.core.registry import HyperparameterConfig
+    from agilerl.llm_envs import RolloutHarness
     from agilerl.modules import EvolvableModule, ModuleDict
-    from agilerl.strategies.base import TrainingLoopReturn
 
 
 SelfTrainerT = TypeVar("SelfTrainerT", bound="Trainer")
@@ -389,7 +396,7 @@ class Trainer(ABC):
         raise NotImplementedError(msg)
 
     @abstractmethod
-    def train(self) -> TrainingLoopReturn | dict[str, Any]:
+    def train(self) -> TrainResult | dict[str, Any]:
         """Run the training loop.
 
         - :class:`LocalTrainer` runs training locally and returns a tuple of
@@ -400,7 +407,7 @@ class Trainer(ABC):
           response as a ``dict``.
 
         :returns: The training result, whose type depends on the trainer.
-        :rtype: TrainingLoopReturn | dict[str, Any]
+        :rtype: TrainResult | dict[str, Any]
         """
         msg = "Trainer subclass must implement train method."
         raise NotImplementedError(msg)
@@ -567,24 +574,41 @@ class LocalTrainer(Trainer):
             if isinstance(self.replay_buffer_spec, ReplayBufferSpec)
             else None
         )
-        self._init_rollout_factory()
-        self.train_fn = self.strategy.get_training_loop(self.algorithm_spec)
-
-    def _init_rollout_factory(self) -> None:
-        """Set the per-trajectory env factory for rollout LLM training.
-
-        Dataset LLM and non-LLM runs leave ``env_factory`` unset.
-        """
-        if not (
-            isinstance(self.env_spec, LLMEnvSpec)
+        # Rollout LLM training requires an env factory rather than an
+        # instantiated environment; hold the narrowed spec so later phases can
+        # use it without re-deriving the narrow.
+        self._rollout_env_spec = (
+            self.env_spec
+            if isinstance(self.env_spec, LLMEnvSpec)
             and self.env_spec.env_type == LLMEnvType.ROLLOUT
-        ):
-            self._rollout_env_spec = None
+            else None
+        )
+        if self._rollout_env_spec is not None:
+            self.env_factory, self.rollout_max_turns = self._make_rollout_factory(
+                self._rollout_env_spec
+            )
+        else:
             self.env_factory = None
             self.rollout_max_turns = None
-            return
+        self.train_fn = self.strategy.get_training_loop(self.algorithm_spec)
 
-        self._rollout_env_spec = self.env_spec
+    @property
+    def _rollout(self) -> bool:
+        """Whether training builds rollout envs per-trajectory."""
+        return self._rollout_env_spec is not None
+
+    def _make_rollout_factory(
+        self, env_spec: LLMEnvSpec
+    ) -> tuple[Callable[[], RolloutHarness], int]:
+        """Build the per-trajectory rollout env factory and its turn budget.
+
+        :param env_spec: The rollout LLM env spec.
+        :type env_spec: LLMEnvSpec
+        :returns: The env factory and the rollout's turn budget.
+        :rtype: tuple[Callable[[], RolloutHarness], int]
+        :raises TypeError: If the algorithm is not an LLM algorithm, or no
+            tokenizer is loaded.
+        """
         if not isinstance(self.algorithm_spec, LLMAlgorithmSpec):
             msg = f"{type(self.algorithm_spec).__name__} is not an LLMAlgorithmSpec."
             raise TypeError(msg)
@@ -596,18 +620,13 @@ class LocalTrainer(Trainer):
             if isinstance(self.algorithm_spec, RolloutLLMSpec)
             else None
         )
-        self.env_factory, self.rollout_max_turns = make_rollout_env_factory(
-            self._rollout_env_spec,
+        return make_rollout_env_factory(
+            env_spec,
             self.tokenizer,
             max_model_len=self.algorithm_spec.max_model_len,
             max_output_tokens=max_output_tokens,
             seed=self.algorithm_spec.seed,
         )
-
-    @property
-    def _rollout(self) -> bool:
-        """Whether training builds rollout envs per-trajectory."""
-        return self._rollout_env_spec is not None
 
     def _resolve_deferred_net_config(self) -> None:
         """Resolve a manifest network section whose ``arch`` was omitted.
@@ -620,11 +639,11 @@ class LocalTrainer(Trainer):
         """
         if "net_config" not in type(self.algorithm_spec).model_fields:
             return
-        # The base MultiAgentRLAlgorithmSpec carries no net_config field; each
+        # The base MultiAgentAlgorithmSpec carries no net_config field; each
         # concrete multi-agent spec declares its own, so narrow to those.
         if not isinstance(
             self.algorithm_spec,
-            (RLAlgorithmSpec, IPPOSpec, MADDPGSpec, MATD3Spec),
+            (SingleAgentAlgorithmSpec, IPPOSpec, MADDPGSpec, MATD3Spec),
         ):
             return
         raw_net_config = self.algorithm_spec.net_config
@@ -663,7 +682,7 @@ class LocalTrainer(Trainer):
             recurrent=recurrent,
         )
         resolved = {**net_config, "encoder_config": encoder_config}
-        if isinstance(self.algorithm_spec, RLAlgorithmSpec):
+        if isinstance(self.algorithm_spec, SingleAgentAlgorithmSpec):
             spec_cls = self._algo_net_spec_cls()
             self.algorithm_spec.net_config = spec_cls.model_validate(
                 {
@@ -936,7 +955,7 @@ class LocalTrainer(Trainer):
         overwrite_checkpoints: bool = False,
         wandb_api_key: str | None = None,
         wandb_kwargs: dict[str, Any] | None = None,
-    ) -> TrainingLoopReturn:
+    ) -> TrainResult:
         """Run a local training job given the passed configuration.
 
         :param verbose: If ``True``, print verbose output. Defaults to ``True``.
@@ -967,7 +986,7 @@ class LocalTrainer(Trainer):
             *population* is the final evolved population and
             *fitnesses* contains each agent's fitness from the final
             evaluation round.
-        :rtype: TrainingLoopReturn
+        :rtype: TrainResult
         """
         manifest = self.to_manifest()
         evo_steps = (
