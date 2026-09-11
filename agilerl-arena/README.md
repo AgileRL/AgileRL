@@ -56,7 +56,22 @@ arena manifest schema
 arena env validate --source path/to/my_env.py --name my-env
 ```
 
-### 4) Submit a training manifest
+### 4) Check GPU memory (LLM manifests)
+
+```bash
+arena memory estimate path/to/manifest.yaml --gpu "NVIDIA L4"
+
+# Longest context a dedicated L4 serving pod can honour:
+arena memory solve max_model_len --inference --gpu "NVIDIA L4" \
+    --model Qwen/Qwen2.5-7B-Instruct
+```
+
+``estimate`` is a pre-submission gate (exit 0 fits, 3 over budget).
+``solve`` holds every other input fixed and returns the largest value of one
+field. Install ``agilerl-arena[hub]`` if you pass a model id rather than
+``--config path/to/config.json``. See ``agilerl/arena/memory/README.md``.
+
+### 5) Submit a training manifest
 
 ```bash
 arena experiments submit path/to/manifest.yaml --project my-project

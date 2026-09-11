@@ -392,6 +392,11 @@ A training configuration is defined via a **manifest** (YAML or JSON file) descr
 the algorithm, environment, training parameters, and evolutionary HPO settings. The formulation of the manifest is described in the :ref:`training_manifests` section,
 and is mostly analogous for both the :class:`~agilerl.training.trainer.LocalTrainer` and training jobs in Arena.
 
+For an LLM manifest, check the GPU before you submit. ``arena memory estimate``
+prints the training and generation bars against the card; ``arena memory solve``
+inverts one field (context length, concurrency, or micro-batch) given the rest.
+See :ref:`llm_memory_estimate`.
+
 Here is an example manifest for training DQN on LunarLander-v3:
 
 .. collapse:: dqn.yaml
