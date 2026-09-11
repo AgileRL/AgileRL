@@ -1,7 +1,7 @@
 # Copyright 2026 AgileRL
 # SPDX-License-Identifier: Apache-2.0
 
-"""ZeRO-aware layer-wise LoRA merge into a Hugging Face weight directory."""
+"""Layer-wise LoRA merge into a Hugging Face weight directory via FSDP2/DTensor gather."""
 
 from __future__ import annotations
 
@@ -15,19 +15,25 @@ from pathlib import Path
 from typing import Literal
 
 import torch
-from accelerate import Accelerator, init_empty_weights
+from accelerate import init_empty_weights
 from huggingface_hub.serialization import split_torch_state_dict_into_shards
 from peft import PeftConfig, PeftModel, get_peft_model
 from peft.tuners.lora.layer import Conv1d, Conv2d, Conv3d, Embedding, Linear, LoraLayer
 from safetensors import safe_open
 from safetensors.torch import load_file, save_file
 from torch import nn
+from torch.distributed.tensor import DTensor
 from transformers import AutoConfig, AutoModelForCausalLM, PreTrainedModel
 from transformers.pytorch_utils import Conv1D
 from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 from transformers.utils import SAFE_WEIGHTS_INDEX_NAME, SAFE_WEIGHTS_NAME, cached_file
 
-from agilerl.utils.llm_utils import gather_if_zero3, zero3_full_shape_views
+from agilerl.distributed import (
+    full_shape_views,
+    gather_params,
+    is_main_process,
+    raise_on_any_rank,
+)
 from agilerl.utils.ppo_value_head import AutoModelForCausalLMWithValueHead
 
 DEFAULT_MAX_SHARD_SIZE = "5GB"
@@ -131,8 +137,6 @@ def export_merged_pretrained(
     adapter_path: str | Path | None = None,
     base_model_name_or_path: str | Path | None = None,
     adapter_name: str = "actor",
-    zero_stage: int | None = None,
-    accelerator: Accelerator | None = None,
     max_shard_size: str | int = DEFAULT_MAX_SHARD_SIZE,
     torch_dtype: torch.dtype = DEFAULT_TORCH_DTYPE,
     tokenizer: PreTrainedTokenizerBase | None = None,
@@ -150,14 +154,10 @@ def export_merged_pretrained(
     :param adapter_path: Saved PEFT adapter directory for replay.
     :param base_model_name_or_path: Base model id or local HF directory for replay.
     :param adapter_name: PEFT adapter to fold in, defaults to ``actor``.
-    :param zero_stage: DeepSpeed ZeRO stage; ``3`` gathers one module at a time.
-    :param accelerator: Optional Accelerate handle so every rank enters gathers
-        and a failed write cannot leave ranks stuck in a collective.
     :param max_shard_size: Hugging Face shard budget (``"5GB"`` default).
     :param torch_dtype: Dtype of written weights, defaults to ``bfloat16``.
     :param tokenizer: Optional tokenizer written beside the weights.
     """
-    error: BaseException | None = None
     try:
         if model is not None:
             if adapter_path is not None or base_model_name_or_path is not None:
@@ -170,46 +170,43 @@ def export_merged_pretrained(
                 model,
                 output_dir=output_dir,
                 adapter_name=adapter_name,
-                zero_stage=zero_stage,
-                accelerator=accelerator,
                 max_shard_size=max_shard_size,
                 torch_dtype=torch_dtype,
                 tokenizer=tokenizer,
                 weight_store=None,
             )
-        elif adapter_path is not None:
+            return
+        if adapter_path is not None:
             if base_model_name_or_path is None:
                 msg = "Replay export requires base_model_name_or_path with adapter_path"
                 raise ValueError(msg)
-            if accelerator is None or accelerator.is_main_process:
-                replay_model, weight_store = _load_replay_peft(
-                    adapter_path=adapter_path,
-                    base_model_name_or_path=base_model_name_or_path,
-                    adapter_name=adapter_name,
-                )
-                _export_live_model(
-                    replay_model,
-                    output_dir=output_dir,
-                    adapter_name=adapter_name,
-                    zero_stage=None,
-                    accelerator=None,
-                    max_shard_size=max_shard_size,
-                    torch_dtype=torch_dtype,
-                    tokenizer=tokenizer,
-                    weight_store=weight_store,
-                )
-        elif base_model_name_or_path is not None:
+            replay_model, weight_store = _load_replay_peft(
+                adapter_path=adapter_path,
+                base_model_name_or_path=base_model_name_or_path,
+                adapter_name=adapter_name,
+            )
+            _export_live_model(
+                replay_model,
+                output_dir=output_dir,
+                adapter_name=adapter_name,
+                max_shard_size=max_shard_size,
+                torch_dtype=torch_dtype,
+                tokenizer=tokenizer,
+                weight_store=weight_store,
+            )
+            return
+        if base_model_name_or_path is not None:
             msg = "Replay export requires adapter_path with base_model_name_or_path"
             raise ValueError(msg)
-        else:
-            msg = (
-                "export_merged_pretrained expects either model=... (live) or "
-                "adapter_path=... and base_model_name_or_path=... (replay)"
-            )
-            raise ValueError(msg)
+        msg = (
+            "export_merged_pretrained expects either model=... (live) or "
+            "adapter_path=... and base_model_name_or_path=... (replay)"
+        )
+        raise ValueError(msg)
+    except (MergedExportError, TypeError, ValueError):
+        raise
     except Exception as exc:
-        error = exc
-    _reraise_if_any_rank_failed(accelerator, error)
+        raise MergedExportError(str(exc)) from exc
 
 
 def _sha256_and_size(path: Path) -> tuple[str, int]:
@@ -247,42 +244,6 @@ def write_merged_completeness_files(output_dir: str | Path) -> None:
         encoding="utf-8",
     )
     (output_path / MERGED_COMPLETE_MARKER).write_text("1", encoding="utf-8")
-
-
-def _any_rank_failed(
-    accelerator: Accelerator | None,
-    error: BaseException | None,
-) -> bool:
-    """Return whether this rank or any other rank has already failed the export."""
-    if accelerator is None or accelerator.num_processes <= 1:
-        return error is not None
-
-    accelerator.wait_for_everyone()
-    flag = torch.zeros(1, dtype=torch.int64, device=accelerator.device)
-    if error is not None:
-        flag[0] = 1
-    flag = accelerator.reduce(flag, reduction="sum")
-    return int(flag.item()) != 0
-
-
-def _reraise_if_any_rank_failed(
-    accelerator: Accelerator | None,
-    error: BaseException | None,
-) -> None:
-    """Raise on every rank when any rank failed, after collectives have exited."""
-    if accelerator is None or accelerator.num_processes <= 1:
-        if error is None:
-            return
-        if isinstance(error, (MergedExportError, TypeError, ValueError)):
-            raise error
-        raise MergedExportError(str(error)) from error
-
-    if not _any_rank_failed(accelerator, error):
-        return
-    if isinstance(error, MergedExportError):
-        raise error
-    msg = "Merged HF export failed on at least one rank"
-    raise MergedExportError(msg) from error
 
 
 def _load_replay_peft(
@@ -404,8 +365,6 @@ def _export_live_model(
     *,
     output_dir: str | Path,
     adapter_name: str,
-    zero_stage: int | None,
-    accelerator: Accelerator | None,
     max_shard_size: str | int,
     torch_dtype: torch.dtype,
     tokenizer: PreTrainedTokenizerBase | None,
@@ -426,62 +385,51 @@ def _export_live_model(
     specs = _collect_export_specs(pretrained, adapter_name, weight_store)
     shard_plan = _plan_shards(specs, max_shard_size)
     output_path = Path(output_dir)
-    error: BaseException | None = None
-    is_main = accelerator is None or accelerator.is_main_process
-    if is_main:
-        try:
+    is_main = is_main_process()
+
+    with raise_on_any_rank():
+        if is_main:
             if output_path.is_dir():
                 shutil.rmtree(output_path)
             output_path.mkdir(parents=True)
-        except Exception as exc:
-            error = exc
 
     for filename, hf_names in shard_plan:
-        if _any_rank_failed(accelerator, error):
-            break
-        shard_tensors = _materialize_shard(
-            specs,
-            hf_names,
-            zero_stage=zero_stage,
-            torch_dtype=torch_dtype,
-            keep_tensors=is_main,
-            weight_store=weight_store,
-        )
-        if is_main:
-            try:
+        with raise_on_any_rank():
+            shard_tensors = _materialize_shard(
+                specs,
+                hf_names,
+                torch_dtype=torch_dtype,
+                keep_tensors=is_main,
+                weight_store=weight_store,
+            )
+            if is_main:
                 save_file(shard_tensors, str(output_path / filename))
-            except Exception as exc:
-                error = exc
-        del shard_tensors
+            del shard_tensors
 
-    if error is not None:
-        raise error
+    with raise_on_any_rank():
+        if is_main:
+            if len(shard_plan) > 1:
+                weight_map = {
+                    hf_name: filename
+                    for filename, hf_names in shard_plan
+                    for hf_name in hf_names
+                }
+                total_size = sum(_spec_nbytes(spec, torch_dtype) for spec in specs)
+                index = {
+                    "metadata": {"total_size": total_size},
+                    "weight_map": weight_map,
+                }
+                (output_path / "model.safetensors.index.json").write_text(
+                    json.dumps(index, indent=2),
+                    encoding="utf-8",
+                )
 
-    if not is_main:
-        return
-
-    if len(shard_plan) > 1:
-        weight_map = {
-            hf_name: filename
-            for filename, hf_names in shard_plan
-            for hf_name in hf_names
-        }
-        total_size = sum(_spec_nbytes(spec, torch_dtype) for spec in specs)
-        index = {
-            "metadata": {"total_size": total_size},
-            "weight_map": weight_map,
-        }
-        (output_path / "model.safetensors.index.json").write_text(
-            json.dumps(index, indent=2),
-            encoding="utf-8",
-        )
-
-    pretrained.config.save_pretrained(output_path)
-    if pretrained.generation_config is not None:
-        pretrained.generation_config.save_pretrained(output_path)
-    if tokenizer is not None:
-        tokenizer.save_pretrained(output_path)
-    write_merged_completeness_files(output_path)
+            pretrained.config.save_pretrained(output_path)
+            if pretrained.generation_config is not None:
+                pretrained.generation_config.save_pretrained(output_path)
+            if tokenizer is not None:
+                tokenizer.save_pretrained(output_path)
+            write_merged_completeness_files(output_path)
 
 
 def _tied_weight_names(pretrained: PreTrainedModel) -> set[str]:
@@ -559,8 +507,8 @@ def _parameters_and_buffers(
 
 
 def _full_shape(tensor: torch.Tensor) -> tuple[int, ...]:
-    """Unsharded shape: ``ds_shape`` under ZeRO-3, else ``tensor.shape``."""
-    with zero3_full_shape_views([tensor]):
+    """Unsharded shape: DTensor global shape under FSDP2, else ``tensor.shape``."""
+    with full_shape_views([tensor]):
         return tuple(tensor.shape)
 
 
@@ -640,7 +588,7 @@ def _delta_weight(
     """LoRA delta for ``adapter_name``.
 
     PEFT's CPU bf16 ``get_delta_weight`` writes the upcast-then-cast tensors
-    back onto ``.data``; restore the gathered storage so ZeRO can re-shard.
+    back onto ``.data``; restore the gathered storage so shards can be reinstalled.
     """
     delta_fn = layer.get_delta_weight
     if not callable(delta_fn):
@@ -668,45 +616,55 @@ def _delta_weight(
 def _merged_weight_and_bias(
     layer: Linear | Embedding | Conv1d | Conv2d | Conv3d,
     adapter_name: str,
-    torch_dtype: torch.dtype,
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
-    """Fold LoRA into clones of the base weight and bias; do not write the module."""
+    """Fold LoRA into the gathered base weight and bias; do not write the module."""
     base_layer = _as_lora_base(layer)
-    base_weight = base_layer.weight.detach()
+    base_weight = _dense_local(base_layer.weight).detach()
     if _adapter_on_layer(layer, adapter_name):
-        delta = _delta_weight(layer, adapter_name)
+        delta = _dense_local(_delta_weight(layer, adapter_name))
         weight = base_weight + delta.to(dtype=base_weight.dtype)
     else:
         weight = base_weight
     bias_tensor = _base_bias(base_layer)
     bias: torch.Tensor | None = None
     if bias_tensor is not None:
+        bias_tensor = _dense_local(bias_tensor)
         if adapter_name in layer.lora_B:
             lora_b_mod = layer.lora_B[adapter_name]
             if isinstance(lora_b_mod, nn.Linear) and isinstance(
                 lora_b_mod.bias, torch.Tensor
             ):
                 scaling = layer.scaling[adapter_name]
-                bias = bias_tensor.detach() + lora_b_mod.bias.detach() * scaling
+                bias = (
+                    bias_tensor.detach()
+                    + _dense_local(lora_b_mod.bias).detach() * scaling
+                )
             else:
                 bias = bias_tensor.detach()
         else:
             bias = bias_tensor.detach()
-    weight_cpu = weight.detach().to(dtype=torch_dtype, device="cpu").contiguous()
-    bias_cpu = (
-        None
-        if bias is None
-        else bias.detach().to(dtype=torch_dtype, device="cpu").contiguous()
-    )
-    return weight_cpu, bias_cpu
+    return weight, bias
+
+
+def _dense_local(tensor: torch.Tensor) -> torch.Tensor:
+    """Plain tensor for one parameter; ``full_tensor`` if it is still a DTensor."""
+    if isinstance(tensor, DTensor):
+        return tensor.full_tensor()
+    return tensor
 
 
 def _copy_to_cpu(tensor: torch.Tensor, torch_dtype: torch.dtype) -> torch.Tensor:
-    """Detach ``tensor`` to contiguous CPU memory; cast floats to ``torch_dtype``."""
-    detached = tensor.detach()
+    """Offload one unsharded tensor to owned CPU storage; cast floats to ``torch_dtype``."""
+    dense = _dense_local(tensor)
+    detached = dense.detach()
     if detached.is_floating_point():
-        return detached.to(dtype=torch_dtype, device="cpu").contiguous()
-    return detached.to(device="cpu").contiguous()
+        copied = detached.to(dtype=torch_dtype, device="cpu").contiguous()
+    else:
+        copied = detached.to(device="cpu").contiguous()
+    copied = copied.clone()
+    if dense is not tensor:
+        del dense
+    return copied
 
 
 def _merged_checkpoint_names(hf_name: str) -> tuple[str, str | None]:
@@ -757,15 +715,19 @@ def _materialize_shard(
     specs: Sequence[ExportItem],
     hf_names: Sequence[str],
     *,
-    zero_stage: int | None,
     torch_dtype: torch.dtype,
     keep_tensors: bool,
     weight_store: BaseWeightStore | None = None,
 ) -> dict[str, torch.Tensor]:
-    """Gather and merge only the tensors that belong to one safetensors file."""
+    """Gather and merge one safetensors file: one module (or tensor) at a time.
+
+    Each ``gather_params`` unshards that FSDP unit, rank 0 copies to CPU, then
+    the context restores DTensor shards so the rest of the model stays sharded.
+    """
     by_name = {spec.hf_name: spec for spec in specs}
     shard: dict[str, torch.Tensor] = {}
-    merged_done: dict[int, tuple[torch.Tensor, torch.Tensor | None]] = {}
+    merged_cpu: dict[int, tuple[torch.Tensor, torch.Tensor | None]] = {}
+    gathered_layers: set[int] = set()
 
     for hf_name in hf_names:
         spec = by_name[hf_name]
@@ -776,23 +738,29 @@ def _materialize_shard(
                     msg = f"Cannot copy meta tensor {hf_name} without a weight store"
                     raise RuntimeError(msg)
                 source = weight_store.load(hf_name)
-            with gather_if_zero3(zero_stage, [source]):
-                copied = _copy_to_cpu(source, torch_dtype)
-            if keep_tensors:
-                shard[hf_name] = copied
+            with gather_params([source]) as gathered:
+                dense = gathered[0]
+                if keep_tensors:
+                    shard[hf_name] = _copy_to_cpu(dense, torch_dtype)
             continue
 
         layer_id = id(spec.layer)
-        if layer_id not in merged_done:
-            gather_params = _layer_gather_params(spec.layer)
-            with gather_if_zero3(zero_stage, gather_params):
+        if layer_id not in gathered_layers:
+            layer_params = _layer_gather_params(spec.layer)
+            with gather_params(layer_params):
                 with _base_layer_from_store(spec.layer, spec, weight_store):
-                    merged_done[layer_id] = _merged_weight_and_bias(
-                        spec.layer, spec.adapter_name, torch_dtype
+                    weight, bias = _merged_weight_and_bias(
+                        spec.layer, spec.adapter_name
                     )
-        weight, bias = merged_done[layer_id]
+                    if keep_tensors:
+                        merged_cpu[layer_id] = (
+                            _copy_to_cpu(weight, torch_dtype),
+                            None if bias is None else _copy_to_cpu(bias, torch_dtype),
+                        )
+            gathered_layers.add(layer_id)
         if not keep_tensors:
             continue
+        weight, bias = merged_cpu[layer_id]
         if spec.part == "weight":
             shard[hf_name] = weight
         elif bias is not None:

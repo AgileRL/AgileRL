@@ -1,17 +1,13 @@
-Training Manifest
-=================
+Training Manifest (local training)
+==================================
 
-:class:`~agilerl.models.manifest.TrainingManifest` *is*
-:class:`~agilerl.arena.models.TrainingManifest`. The YAML schema is defined
-once in ``agilerl-arena``; the framework does not subclass it.
+The core :class:`~agilerl.models.manifest.TrainingManifest` validates a full
+YAML/JSON training configuration for **local** runs. It dispatches the
+algorithm, network, and environment sections to concrete spec classes under
+:mod:`agilerl.models` and uses :data:`~agilerl.models.algo.ALGO_REGISTRY`.
 
-Building a gym from an environment spec, or a replay buffer from a buffer
-spec, is not part of that schema. Those helpers live beside the models, and
-in :class:`~agilerl.training.trainer.LocalTrainer`.
-:func:`~agilerl.models.manifest.from_trainer_specs` builds a manifest from the
-objects a trainer already holds.
+For Arena job submission, use the separate manifest model in
+:mod:`agilerl.arena.models` instead (see :doc:`../arena/models`).
 
-.. autoclass:: agilerl.arena.models.TrainingManifest
+.. autoclass:: agilerl.models.manifest.TrainingManifest
    :members:
-
-.. autofunction:: agilerl.models.manifest.from_trainer_specs

@@ -11,6 +11,7 @@ validated on GPU.
 """
 
 import warnings
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -327,33 +328,28 @@ class _PackingGateStub:
     from agilerl.algorithms.core.base import LLMAlgorithm
 
     _resolve_attn_implementation = LLMAlgorithm._resolve_attn_implementation
-    _sequence_packing_active = LLMAlgorithm._sequence_packing_active
     _packing_mode = LLMAlgorithm._packing_mode
 
     def __init__(self, use_sequence_packing, attn_impl):
         self.use_sequence_packing = use_sequence_packing
+        self.actor = SimpleNamespace(
+            config=SimpleNamespace(_attn_implementation=attn_impl)
+        )
         self.model_config = {"attn_implementation": attn_impl}
-
-    def _get_unwrapped_actor(self):  # no real model in this unit test
-        msg = "no model"
-        raise RuntimeError(msg)
 
 
 class TestSequencePackingGate:
     def test_disabled_when_flag_off(self):
         stub = _PackingGateStub(False, "flash_attention_2")
         assert stub._packing_mode() is None
-        assert stub._sequence_packing_active() is False
 
     def test_fa2_uses_varlen(self):
         stub = _PackingGateStub(True, "flash_attention_2")
         assert stub._packing_mode() == "varlen"
-        assert stub._sequence_packing_active() is True
 
     def test_flex_uses_blockmask(self):
         stub = _PackingGateStub(True, "flex_attention")
         assert stub._packing_mode() == "blockmask"
-        assert stub._sequence_packing_active() is True
 
     @pytest.mark.parametrize("impl", ["sdpa", "eager", "something_weird"])
     def test_unsupported_backends_disable_and_warn_once(self, impl):
@@ -361,7 +357,6 @@ class TestSequencePackingGate:
         stub = _PackingGateStub(True, impl)
         with pytest.warns(UserWarning, match="varlen/block-sparse"):
             assert stub._packing_mode() is None
-        assert stub._sequence_packing_active() is False
         with warnings.catch_warnings():
             warnings.simplefilter("error")
             assert stub._packing_mode() is None

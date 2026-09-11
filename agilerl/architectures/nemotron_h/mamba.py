@@ -22,8 +22,7 @@ from agilerl.utils.patching import class_is_patched, try_import
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
 
-    from peft import PeftModel
-    from transformers import PreTrainedModel
+    from agilerl.protocols import PreTrainedModelProtocol
 
 logger = logging.getLogger(__name__)
 
@@ -90,7 +89,7 @@ def _make_patched_init(original_init: Callable[..., None]) -> Callable[..., None
 
 def _drop_fused_path_on_instances(
     mixer_cls: type,
-    model: PreTrainedModel | PeftModel,
+    model: PreTrainedModelProtocol,
 ) -> int:
     """Clear the fused-path attribute on every existing mixer in *model*.
 
@@ -100,7 +99,7 @@ def _drop_fused_path_on_instances(
     :param mixer_cls: The patched mixer class.
     :type mixer_cls: type
     :param model: Model whose submodules are swept.
-    :type model: PreTrainedModel | PeftModel
+    :type model: PreTrainedModelProtocol
     :return: Number of mixer instances cleared.
     :rtype: int
     """
@@ -124,7 +123,7 @@ def _drop_fused_path_on_instances(
 def patch_nemotron_mamba_fused_path(
     *,
     enabled: bool = True,
-    model: PreTrainedModel | PeftModel | None = None,
+    model: PreTrainedModelProtocol | None = None,
 ) -> None:
     """Keep every Nemotron-H Mamba2 mixer on its decomposed forward path.
 
@@ -133,21 +132,19 @@ def patch_nemotron_mamba_fused_path(
     training mode. That branch hands ``conv1d.weight``, ``conv1d.bias``,
     ``norm.weight``, ``out_proj.weight`` and ``out_proj.bias`` to
     ``mamba_split_conv1d_scan_combined`` as raw tensors, so those submodules are
-    never called: their ZeRO-3 pre-forward gather hooks do not fire, leaving the
-    parameters to deepspeed's residency-dependent fallback all-gather, which
-    ranks can disagree about and deadlock on; the set of traced submodules also
-    shifts with training mode and per-rank padding; and the LoRA delta on
-    ``out_proj`` is dropped because the kernel reads the base weight. Clearing
-    the attribute on every instance as it is constructed removes the branch, so
-    ``self.norm`` and ``self.out_proj`` run as modules. This wraps ``__init__``,
-    so it only covers mixers built afterwards; pass ``model`` to sweep mixers
-    that already exist.
+    never called: wrap-time parameter-gather hooks on ``norm`` / ``out_proj``
+    do not fire, the set of traced submodules shifts with training mode and
+    per-rank padding, and the LoRA delta on ``out_proj`` is dropped because the
+    kernel reads the base weight. Clearing the attribute on every instance as
+    it is constructed removes the branch, so ``self.norm`` and ``self.out_proj``
+    run as modules. This wraps ``__init__``, so it only covers mixers built
+    afterwards; pass ``model`` to sweep mixers that already exist.
 
     :param enabled: Install the patch, defaults to True.
     :type enabled: bool, optional
     :param model: Already-built model whose mixers are also cleared,
         defaults to None.
-    :type model: PreTrainedModel | PeftModel | None, optional
+    :type model: PreTrainedModelProtocol | None, optional
     :return: None
     :rtype: None
     """
@@ -274,16 +271,16 @@ def _make_patched_forward(
 def patch_nemotron_mamba_stream_ordering(
     *,
     enabled: bool = True,
-    model: PreTrainedModel | PeftModel | None = None,
+    model: PreTrainedModelProtocol | None = None,
 ) -> None:
     """Order the Nemotron-H Mamba2 mixer's default-stream kernels against its caller.
 
     ``NemotronHMamba2Mixer.forward`` runs the mamba and causal-conv1d kernels
-    inside ``torch.cuda.stream(default_stream)``. A ZeRO-3 parameter all-gather
-    completes on the stream that was current when the fetch was issued, so when
-    that stream is not the default one the kernels carry no dependency on it and
-    can read a parameter buffer that is still being filled. The wrapper makes
-    the default stream wait on the current stream before the call, which
+    inside ``torch.cuda.stream(default_stream)``. Parameter all-gathers complete
+    on the stream that was current when the fetch was issued, so when that
+    stream is not the default one the kernels carry no dependency on it and can
+    read a parameter buffer that is still being filled. The wrapper makes the
+    default stream wait on the current stream before the call, which
     transitively covers the all-gather, and makes the current stream wait on the
     default stream afterwards so downstream compute sees finished results.
     Inputs and outputs are recorded against both streams so the caching
@@ -295,7 +292,7 @@ def patch_nemotron_mamba_stream_ordering(
     :param enabled: Install the patch, defaults to True.
     :type enabled: bool, optional
     :param model: Unused; accepted for family-dispatch parity, defaults to None.
-    :type model: PreTrainedModel | PeftModel | None, optional
+    :type model: PreTrainedModelProtocol | None, optional
     :return: None
     :rtype: None
     """
@@ -329,7 +326,7 @@ def patch_nemotron_mamba_stream_ordering(
 def install_nemotron_h_patches(
     *,
     zero_stage: int,
-    model: PreTrainedModel | PeftModel | None = None,
+    model: PreTrainedModelProtocol | None = None,
 ) -> None:
     """Install Nemotron-H Mamba2 workarounds.
 
@@ -340,7 +337,7 @@ def install_nemotron_h_patches(
     :param zero_stage: DeepSpeed ZeRO stage for this run.
     :type zero_stage: int
     :param model: Already-built model the patches also apply to, or None.
-    :type model: PreTrainedModel | PeftModel | None
+    :type model: PreTrainedModelProtocol | None
     :return: None
     :rtype: None
     """

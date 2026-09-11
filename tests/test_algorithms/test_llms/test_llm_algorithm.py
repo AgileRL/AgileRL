@@ -4,9 +4,9 @@
 """CPU tests for the shared :meth:`LLMAlgorithm.test` evaluation loop.
 
 The method only touches ``self.get_action``, ``self.metrics`` and
-``self.accelerator`` (the end-of-eval barrier), so it is exercised here with a
-stub in place of a fully constructed algorithm — no model, GPU, deepspeed, or
-vllm required.
+``self.distributed`` (the end-of-eval barrier), so it is exercised here with a
+stub in place of a fully constructed algorithm — no model, GPU, or vLLM
+required.
 """
 
 import numpy as np
@@ -25,7 +25,7 @@ class _StubAlgo:
 
     def __init__(self):
         self.metrics = AgentMetrics()
-        self.accelerator = None  # single-process: the end-of-eval barrier is a no-op
+        self.distributed = False
 
     @property
     def fitness(self):

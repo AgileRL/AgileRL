@@ -5,12 +5,12 @@ from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
-from accelerate import Accelerator
 
-from agilerl import HAS_DEEPSPEED, HAS_LLM_DEPENDENCIES, HAS_VLLM
+from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.algorithms import CQN, DDPG, DQN, MADDPG, MATD3, PPO, TD3, RainbowDQN
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.utils.algo_utils import clone_llm
+from agilerl.utils.utils import create_population
 from tests.helper_functions import (
     generate_discrete_space,
     generate_multi_agent_box_spaces,
@@ -22,10 +22,45 @@ if HAS_LLM_DEPENDENCIES:
     from peft import LoraConfig
 
     from agilerl.algorithms import GRPO
-
-create_module = None
-if HAS_DEEPSPEED and HAS_VLLM:
     from tests.test_algorithms.test_llms.test_grpo import create_module
+
+# Shared HP dict that can be used by any algorithm
+INIT_HP = {
+    "POPULATION_SIZE": 4,
+    "DOUBLE": True,
+    "BATCH_SIZE": 128,
+    "LR": 1e-3,
+    "CUDAGRAPHS": False,
+    "LR_ACTOR": 1e-4,
+    "LR_CRITIC": 1e-3,
+    "GAMMA": 0.99,
+    "LEARN_STEP": 1,
+    "TAU": 1e-3,
+    "BETA": 0.4,
+    "PRIOR_EPS": 0.000001,
+    "NUM_ATOMS": 51,
+    "V_MIN": 0,
+    "V_MAX": 200,
+    "N_STEP": 3,
+    "POLICY_FREQ": 10,
+    "GAE_LAMBDA": 0.95,
+    "ACTION_STD_INIT": 0.6,
+    "CLIP_COEF": 0.2,
+    "ENT_COEF": 0.01,
+    "VF_COEF": 0.5,
+    "MAX_GRAD_NORM": 0.5,
+    "TARGET_KL": None,
+    "UPDATE_EPOCHS": 4,
+    "AGENT_IDS": ["agent1", "agent2"],
+    "LAMBDA": 1.0,
+    "REG": 0.000625,
+    "CHANNELS_LAST": False,
+    "O_U_NOISE": True,
+    "EXPL_NOISE": 0.1,
+    "MEAN_NOISE": 0.0,
+    "THETA": 0.15,
+    "DT": 0.01,
+}
 
 
 class TestTournamentSelectionInit:
@@ -81,17 +116,19 @@ class TestTournamentSelectionSelect:
             "CQN": CQN,
         }
 
-        for algo_name, algo_cls in algo_classes.items():
-            if algo_name in ["TD3", "DDPG"]:
+        for algo in algo_classes:
+            if algo in ["TD3", "DDPG"]:
                 action_space = continuous_action_space
             else:
                 action_space = discrete_action_space
 
-            population = algo_cls.population(
-                size=population_size,
+            population = create_population(
+                algo=algo,
                 observation_space=observation_space,
                 action_space=action_space,
                 net_config=net_config,
+                INIT_HP=INIT_HP,
+                population_size=population_size,
                 device=device,
             )
 
@@ -135,17 +172,19 @@ class TestTournamentSelectionSelect:
             "CQN": CQN,
         }
 
-        for algo_name, algo_cls in algo_classes.items():
-            if algo_name in ["TD3", "DDPG"]:
+        for algo in algo_classes:
+            if algo in ["TD3", "DDPG"]:
                 action_space = continuous_action_space
             else:
                 action_space = discrete_action_space
 
-            population = algo_cls.population(
-                size=population_size,
+            population = create_population(
+                algo=algo,
                 observation_space=observation_space,
                 action_space=action_space,
                 net_config=net_config,
+                INIT_HP=INIT_HP,
+                population_size=population_size,
                 device=device,
             )
 
@@ -171,7 +210,6 @@ class TestTournamentSelectionSelect:
     def test_returns_best_agent_and_new_population_multi_agent(self):
         observation_space = generate_multi_agent_box_spaces(2, (4,))
         action_space = generate_multi_agent_discrete_spaces(2, 2)
-        agent_ids = ["agent_0", "agent_1"]
         net_config = {"encoder_config": {"hidden_size": [8, 8], "min_mlp_nodes": 7}}
         device = "cpu"
         population_size = 5
@@ -181,13 +219,14 @@ class TestTournamentSelectionSelect:
 
         algo_classes = {"MADDPG": MADDPG, "MATD3": MATD3}
 
-        for algo_cls in algo_classes.values():
-            population = algo_cls.population(
-                size=population_size,
+        for algo in algo_classes:
+            population = create_population(
+                algo=algo,
                 observation_space=observation_space,
                 action_space=action_space,
-                agent_ids=agent_ids,
                 net_config=net_config,
+                INIT_HP=INIT_HP,
+                population_size=population_size,
                 device=device,
             )
 
@@ -214,7 +253,6 @@ class TestTournamentSelectionSelect:
     def test_returns_best_agent_and_new_population_without_elitism_multi_agent(self):
         observation_space = generate_multi_agent_box_spaces(2, (4,))
         action_space = generate_multi_agent_discrete_spaces(2, 2)
-        agent_ids = ["agent_0", "agent_1"]
         net_config = {"encoder_config": {"hidden_size": [8, 8], "min_mlp_nodes": 7}}
         device = "cpu"
         population_size = 5
@@ -224,13 +262,14 @@ class TestTournamentSelectionSelect:
 
         algo_classes = {"MADDPG": MADDPG, "MATD3": MATD3}
 
-        for algo_cls in algo_classes.values():
-            population = algo_cls.population(
-                size=population_size,
+        for algo in algo_classes:
+            population = create_population(
+                algo=algo,
                 observation_space=observation_space,
                 action_space=action_space,
-                agent_ids=agent_ids,
                 net_config=net_config,
+                INIT_HP=INIT_HP,
+                population_size=population_size,
                 device=device,
             )
 
@@ -252,12 +291,9 @@ class TestTournamentSelectionSelect:
             assert len(new_population) == population_size
 
     @pytest.mark.skipif(
-        not (HAS_VLLM and HAS_DEEPSPEED),
-        reason="Need to install agilerl with deepspeed + vllm",
+        not HAS_LLM_DEPENDENCIES, reason="LLM dependencies not installed"
     )
-    @pytest.mark.parametrize("use_accelerator", [True, False])
-    @pytest.mark.parametrize("num_processes", [1, 2])
-    def test_language_model_tournament(self, use_accelerator, num_processes):
+    def test_language_model_tournament(self):
         # LLM populations require elitism; the elitism=False path is rejected and
         # covered separately by test_llm_without_elitism_rejected.
         tournament_selection = TournamentSelection(3, True, 4)
@@ -290,21 +326,9 @@ class TestTournamentSelectionSelect:
             vocab_size=100,
             device="cpu",
         )
-        accelerator = MagicMock(spec=Accelerator)
-        accelerator.is_main_process = True
-        accelerator.wait_for_everyone = MagicMock()
-        accelerator.state = MagicMock()
-        accelerator.state.deepspeed_plugin = MagicMock()
-        accelerator.state.deepspeed_plugin.deepspeed_config = {
-            "zero_optimization": {"stage": 1},
-        }
-        accelerator.free_memory = lambda *args: args
-        accelerator.unwrap_model = lambda arg: arg
-        accelerator.num_processes = num_processes
-
         population = [
             GRPO(
-                actor_network=clone_llm(actor_network, 0),
+                actor_network=clone_llm(actor_network),
                 pad_token_id=init_hp.get("PAD_TOKEN_ID"),
                 pad_token="<pad>",
                 hp_config=None,
@@ -332,21 +356,16 @@ class TestTournamentSelectionSelect:
                     lora_dropout=0.05,
                 ),
                 cosine_lr_schedule_config=None,
-                accelerator=None,
                 device="cpu",
             )
             for idx in range(init_hp.get("POP_SIZE"))
         ]
-        for agent in population:
-            if use_accelerator:
-                agent.accelerator = accelerator
 
         for agent in population:
             # Create a mock clone that returns a new mock agent
             def mock_clone(index=None, wrap=False, _agent=agent):
                 mock_agent = MagicMock()
                 mock_agent.index = index
-                mock_agent.accelerator = accelerator
                 mock_agent.clean_up = MagicMock()
                 mock_agent.fitness = _agent.fitness
                 return mock_agent
@@ -358,7 +377,6 @@ class TestTournamentSelectionSelect:
         population[2].fitness = [7, 8, 9]
         population[3].fitness = [10, 11, 12]
 
-        # Call the select method
         elite, new_population, indices = tournament_selection.select(population)
         assert indices is None
 
@@ -370,8 +388,7 @@ class TestTournamentSelectionSelect:
         assert len(new_population) == population_size
 
     @pytest.mark.skipif(
-        not (HAS_VLLM and HAS_DEEPSPEED),
-        reason="Need to install agilerl with deepspeed + vllm",
+        not HAS_LLM_DEPENDENCIES, reason="LLM dependencies not installed"
     )
     def test_detects_llm_by_type_not_algo_name(self):
         """LLM branch selection should rely on type, not a specific algo string."""
@@ -408,7 +425,6 @@ class TestTournamentSelectionSelect:
                 lora_dropout=0.05,
             ),
             cosine_lr_schedule_config=None,
-            accelerator=None,
             device="cpu",
         )
         # Simulate a different LLM algorithm label to guard against string checks.
@@ -475,11 +491,13 @@ class TestTournamentSelectionElitism:
         observation_space = generate_random_box_space((4,))
         discrete_action_space = generate_discrete_space(2)
         net_config = {"encoder_config": {"hidden_size": [8, 8], "min_mlp_nodes": 7}}
-        population = DQN.population(
-            size=4,
+        population = create_population(
+            algo="DQN",
             observation_space=observation_space,
             action_space=discrete_action_space,
             net_config=net_config,
+            INIT_HP=INIT_HP,
+            population_size=4,
             device="cpu",
         )
         population[0].fitness = [1, 2]

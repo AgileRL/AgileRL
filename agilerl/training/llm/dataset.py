@@ -11,11 +11,15 @@ objectives.
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
-from accelerate import Accelerator
-
 from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.algorithms import DPO
 from agilerl.algorithms.sft import SFT
+from agilerl.distributed import (
+    barrier,
+    get_world_size,
+    is_distributed,
+    is_main_process,
+)
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.population import Population
@@ -27,7 +31,6 @@ from agilerl.training.llm.common import (
 )
 from agilerl.utils.llm_utils import is_preference_prompts, is_sft_prompts
 from agilerl.utils.utils import (
-    _distributed_world_size,
     default_progress_bar,
     init_loggers,
     resolve_selection_strategy,
@@ -64,7 +67,6 @@ def train_llm_dataset(
     wandb_kwargs: dict[str, Any] | None = None,
     evaluation_interval: int = 10,
     verbose: bool = True,
-    accelerator: Accelerator | None = None,
     max_steps: int | None = None,
     num_epochs: int | None = None,
 ) -> "tuple[list[SupportedDataset], Any]":
@@ -118,8 +120,6 @@ def train_llm_dataset(
     :type evaluation_interval: int
     :param verbose: Whether to print periodic training summaries.
     :type verbose: bool
-    :param accelerator: Optional accelerator for distributed training.
-    :type accelerator: Accelerator | None
     :param max_steps: Maximum step budget; defaults to dataset-driven length.
     :type max_steps: int | None
     :param num_epochs: Number of epochs to run; takes precedence over max_steps.
@@ -156,7 +156,7 @@ def train_llm_dataset(
         else init_hp
     )
 
-    data_increment = _distributed_world_size(accelerator)
+    data_increment = get_world_size()
     effective_data_batch_size = data_increment * envs[0].data_batch_size_per_gpu
     if envs[0].world_size != data_increment:
         msg = (
@@ -169,7 +169,7 @@ def train_llm_dataset(
     if wb:
         init_hp["effective_data_batch_size"] = effective_data_batch_size
         init_hp["batch_size"] = init_hp.get("BATCH_SIZE", 1)
-        init_hp["distributed_training"] = accelerator is not None
+        init_hp["distributed_training"] = is_distributed()
         init_hp["model_name"] = pop[0].pretrained_model_name_or_path
 
     # ``len(envs[0])`` is this rank's shard; scale back to the global row count
@@ -182,7 +182,7 @@ def train_llm_dataset(
         len(pop),
     )
 
-    pbar = default_progress_bar(max_steps, accelerator)
+    pbar = default_progress_bar(max_steps)
 
     loggers = init_loggers(
         algo=init_hp.get("ALGO", pop[0].algo),
@@ -194,13 +194,12 @@ def train_llm_dataset(
         csv=csv,
         tensorboard_log_dir=tensorboard_log_dir,
         csv_log_dir=csv_log_dir,
-        accelerator=accelerator,
         wandb_api_key=wandb_api_key,
         wandb_kwargs=wandb_kwargs,
         init_hyperparams=init_hp,
     )
 
-    population = Population(agents=pop, accelerator=accelerator, loggers=loggers)
+    population = Population(agents=pop, loggers=loggers)
 
     total_steps = 0
     displayed_steps = 0
@@ -208,8 +207,7 @@ def train_llm_dataset(
     max_steps_checkpoint_saved = False
 
     for i in range(training_steps):
-        if accelerator is not None:
-            accelerator.wait_for_everyone()
+        barrier()
 
         for agent_idx, agent in enumerate(population.agents):
             if total_steps >= max_steps:
@@ -252,10 +250,9 @@ def train_llm_dataset(
         if (i + 1) % evaluation_interval == 0:
             for agent_idx, agent in enumerate(population.agents):
                 agent.test(envs[agent_idx] if uses_env_fn else envs[0])
-            if accelerator is not None:
-                accelerator.wait_for_everyone()
+            barrier()
 
-        if accelerator is None or accelerator.is_main_process:
+        if is_main_process():
             increment = min(effective_data_batch_size, max_steps - displayed_steps)
             if increment > 0:
                 pbar.update(increment)
@@ -272,22 +269,19 @@ def train_llm_dataset(
             # when a selection strategy and mutation are enabled.
             assert evo_steps is not None
             if (i + 1) % evo_steps == 0:
-                if accelerator is not None:
-                    accelerator.wait_for_everyone()
+                barrier()
                 population.update(
                     run_selection_and_mutation(
                         selection_strategy,
                         population=population.agents,
                         mutation=mutation,
                         env_name=env_name,
-                        accelerator=accelerator,
                         language_model=True,
                         elite_path=elite_path,
                         save_elite=bool(save_elite),
                     ),
                 )
-                if accelerator is not None:
-                    accelerator.wait_for_everyone()
+                barrier()
 
                 population.increment_evo_step()
         else:

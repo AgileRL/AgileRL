@@ -14,12 +14,13 @@ from __future__ import annotations
 
 import argparse
 import logging
+import warnings
 from pathlib import Path
 
 import torch
-from accelerate import Accelerator
 
 from agilerl.training.trainer import LocalTrainer
+from agilerl.utils.trainer_utils import started_by_accelerate_launch
 
 logging.basicConfig(
     level=logging.DEBUG,
@@ -48,7 +49,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--use-accelerator",
         action="store_true",
-        help="Use Accelerator for training.",
+        help="Deprecated; accelerate launch is detected automatically.",
     )
     parser.add_argument(
         "--wb",
@@ -116,20 +117,38 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _warn_unused_use_accelerator_flag() -> None:
+    """Warn that ``--use-accelerator`` does not construct Accelerator."""
+    warnings.warn(
+        "--use-accelerator is unused; accelerate launch is detected automatically.",
+        DeprecationWarning,
+        stacklevel=3,
+    )
+    if not started_by_accelerate_launch():
+        warnings.warn(
+            "No accelerate launch detected; not using Accelerator. "
+            "Launch with: accelerate launch --config_file "
+            "configs/accelerate/accelerate.yaml -m agilerl.train "
+            "<manifest>",
+            UserWarning,
+            stacklevel=3,
+        )
+
+
 def main() -> None:
     """Run local evolutionary RL training from a manifest."""
     args = parse_args()
 
-    logger.info("Loading manifest: %s", args.manifest)
+    if args.use_accelerator:
+        _warn_unused_use_accelerator_flag()
 
-    accelerator = Accelerator() if args.use_accelerator else None
+    logger.info("Loading manifest: %s", args.manifest)
 
     # Load the Trainer from the manifest
     trainer = LocalTrainer.from_manifest(
         manifest=args.manifest,
         resume_from_checkpoint=args.resume_from_checkpoint,
         device=args.device,
-        accelerator=accelerator,
     )
 
     logger.info(
@@ -155,11 +174,7 @@ def main() -> None:
         verbose=args.verbose,
     )
 
-    best_fitness = max(
-        fitness if isinstance(fitness, (int, float)) else max(fitness.values())
-        for fitness in last_fitnesses
-    )
-    logger.info("Training complete. Best fitness: %.4f", best_fitness)
+    logger.info("Training complete. Best fitness: %.4f", max(last_fitnesses))
 
 
 if __name__ == "__main__":  # pragma: no cover

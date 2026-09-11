@@ -16,7 +16,7 @@ from tensordict import TensorDict
 from torch import optim
 from torch.nn.utils import clip_grad_norm_
 
-from agilerl.algorithms.core import OptimizerWrapper, SingleAgentAlgorithm
+from agilerl.algorithms.core import OptimizerWrapper, RLAlgorithm
 from agilerl.algorithms.core.registry import (
     HyperparameterConfig,
     NetworkGroup,
@@ -53,7 +53,7 @@ RecurrentActionReturnType = tuple[
 ]
 
 
-class PPO(SingleAgentAlgorithm[TensorDict]):
+class PPO(RLAlgorithm[TensorDict]):
     """Proximal Policy Optimization (PPO).
 
     Paper: https://arxiv.org/abs/1707.06347v2

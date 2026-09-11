@@ -4,11 +4,10 @@ Saving and Loading LLM Checkpoints
 ==================================
 
 LLM checkpoints in AgileRL can persist just LoRA adapters, the full model, and
-optionally the optimizer/LR-scheduler state, with separate code paths for
-plain (single-process) training and distributed training via
-`DeepSpeed <https://www.deepspeed.ai/>`_ + `Accelerate
-<https://huggingface.co/docs/accelerate/index>`_. The defaults are
-``lora_only=True`` and ``save_optimizer=True``.
+optionally the optimizer/LR-scheduler state. The same on-disk layout is used
+for single-process, DDP, and FSDP2 runs: sharded parameters are gathered to
+full tensors before save, so a checkpoint is not tied to the rank count that
+wrote it. The defaults are ``lora_only=True`` and ``save_optimizer=True``.
 
 Checkpoint layout on disk
 -------------------------
@@ -27,11 +26,9 @@ A typical checkpoint directory written by :meth:`save_checkpoint` looks like:
     ├── reference/                 # only if use_separate_reference_adapter=True
     │   ├── adapter_model.safetensors
     │   └── adapter_config.json
-    ├── critic/                    # only for algorithms with a value head
-    │   ├── adapter_model.safetensors
-    │   └── adapter_config.json
-    └── save_checkpoint/           # DeepSpeed sharded checkpoint; only when
-                                   # training with an Accelerator
+    └── critic/                    # only for algorithms with a value head
+        ├── adapter_model.safetensors
+        └── adapter_config.json
 
 Which adapter subdirectories appear depends on the algorithm:
 
@@ -50,7 +47,7 @@ Saving
         save_optimizer=True,   # default: persist optimizer + LR scheduler
     )
 
-The four combinations on the non-distributed path:
+The four combinations:
 
 +---------------+--------------------+---------------------------------------------------+
 | ``lora_only`` | ``save_optimizer`` | Produces                                          |
@@ -67,11 +64,9 @@ The four combinations on the non-distributed path:
 |               |                    | (no optimizer state).                             |
 +---------------+--------------------+---------------------------------------------------+
 
-On the DeepSpeed path, ``save_optimizer=True`` writes a sharded checkpoint
-into ``<path>/save_checkpoint/`` via the engine instead of bundling optimizer
-state into ``attributes.pt``. ``lora_only=True`` still writes adapter
-directories. The ``lora_only=False, save_optimizer=False`` cell gathers ZeRO-3
-shards and injects the full ``state_dict`` into ``attributes.pt``.
+Under FSDP2, adapter weights and optimizer state are gathered to full tensors
+before they are written into this same layout. There is no separate sharded
+checkpoint directory.
 
 Common scenarios:
 
@@ -95,7 +90,7 @@ Loading
 
     agent.load_checkpoint(
         path,
-        load_optimizer=True,   # default: restore optimizer + LR scheduler
+        load_optimizer=True,   # restore optimizer + LR scheduler
     )
 
 ``save_optimizer`` and ``load_optimizer`` are independent flags: you can
@@ -114,33 +109,19 @@ The checkpoint's LoRA config must match the live algorithm's (rank,
 target modules, etc.); a mismatch raises ``ValueError``. Re-create the
 agent with the checkpoint's LoRA config to load it.
 
+.. note::
+
+   Checkpoints written by older AgileRL versions that used DeepSpeed engine
+   directories (a ``save_checkpoint/`` shard folder, no actor weights in
+   ``attributes.pt``) cannot be loaded.
+
 Common scenarios:
 
 .. code-block:: python
 
     # Resume training:
-    agent.load_checkpoint(path)
+    agent.load_checkpoint(path, load_optimizer=True)
 
     # Inference / evaluation with a checkpoint that may or may not contain
     # optimizer state, which we don't need:
     agent.load_checkpoint(path, load_optimizer=False)
-
-DeepSpeed and Accelerate
-------------------------
-
-When an :class:`~accelerate.Accelerator` with a ``DeepSpeedPlugin`` is
-attached, the save/load paths differ as follows:
-
-* ``save_optimizer=True`` delegates to the DeepSpeed engine's own sharded
-  checkpoint format, written to ``<path>/save_checkpoint/``. The matching
-  load path reads the same directory.
-* ``save_optimizer=False`` falls back to the PEFT / torch-save path, which
-  produces the same adapter directories / ``attributes.pt`` as plain training.
-* ZeRO-3 sharded parameters are gathered via the appropriate gather context
-  before being written, so the on-disk layout is identical regardless of
-  ZeRO stage.
-
-Multi-process correctness (only the main process writes ``attributes.pt``,
-followed by ``accelerator.wait_for_everyone()``) is handled internally; you
-call :meth:`save_checkpoint` / :meth:`load_checkpoint` the same way whether
-you're on one GPU or many.

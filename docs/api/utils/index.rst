@@ -9,6 +9,7 @@ Utils
    algo_utils
    population_utils
    cache
+   distributed
    evolvable_networks
    ilql_utils
    log_utils

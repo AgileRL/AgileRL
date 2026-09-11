@@ -12,25 +12,21 @@ from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
-from unittest.mock import MagicMock, PropertyMock, patch
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
 import torch
 
-pytest.importorskip("deepspeed", reason="LLM tests require deepspeed.")
 pytest.importorskip("vllm", reason="LLM tests require vllm.")
 import vllm
-from accelerate import Accelerator
-from accelerate.scheduler import AcceleratedScheduler
-from accelerate.state import AcceleratorState
-from accelerate.utils.deepspeed import DeepSpeedOptimizerWrapper
-from deepspeed.runtime.engine import DeepSpeedEngine
-from deepspeed.runtime.zero.stage_1_and_2 import DeepSpeedZeroOptimizer
-from peft import LoraConfig, get_peft_model
+from peft import LoraConfig, PeftModel, get_peft_model
 from torch import nn
 from torch.optim.lr_scheduler import SequentialLR
+from transformers.configuration_utils import PretrainedConfig
 from transformers.generation.configuration_utils import GenerationConfig
+from transformers.generation.utils import GenerationMixin
+from transformers.modeling_utils import PreTrainedModel
 
 from agilerl.algorithms import CISPO, GRPO, GSPO
 from agilerl.algorithms.core import ActionResult
@@ -44,25 +40,122 @@ from agilerl.algorithms.grpo import (
     LIGER_CLIP_FRACTION_METRIC,
     REFERENCE_KL_METRIC,
 )
-from agilerl.modules.dummy import DummyEvolvable
+from agilerl.distributed import FSDPConfig, resolve_device
 from agilerl.utils.algo_utils import CosineLRScheduleConfig, VLLMConfig, clone_llm
 from tests import TINY_LLM_FIXTURE_PATH
 from tests.helpers.rollout_doubles import FakeEnvClient, RolloutHarnessDouble
 from tests.test_algorithms.test_llms.llm_helpers import (
-    DummyConfig,
-    DummyMLPPreTrainedModel,
     _patch_mps_learn_hooks,
     create_module,
-    deepspeed_config_stage_1,
-    deepspeed_config_stage_1_with_scheduler,
-    deepspeed_config_stage_2,
-    deepspeed_config_stage_3,
 )
 from tests.utils import (
     assert_vllm_get_action_contract,
     make_mock_vllm_instance,
     spawn_new_process_for_each_test,
 )
+
+
+class DummyConfig(PretrainedConfig):
+    def __init__(
+        self,
+        input_size=16,
+        max_tokens=8,
+        vocab_size=100,
+        intermediate_size=128,
+        **kwargs,
+    ):
+        super().__init__(**kwargs)
+        self.input_size = input_size
+        self.max_tokens = max_tokens
+        self.vocab_size = vocab_size
+
+
+class DummyForwardOutput:
+    def __init__(self, logits):
+        self.logits = logits
+
+
+class DummyMLPPreTrainedModel(PreTrainedModel, GenerationMixin):
+    config_class = DummyConfig
+    base_model_prefix = "dummy_mlp"
+
+    def __init__(self, config: DummyConfig, device="cpu"):
+        super().__init__(config)
+        self.input_size = config.input_size
+        self.max_tokens = config.max_tokens
+        self.vocab_size = config.vocab_size
+        self.gradient_checkpointing_enabled = False
+        self.datatype = (
+            torch.bfloat16
+            if (torch.cuda.is_available() and torch.cuda.is_bf16_supported())
+            else torch.float32
+        )
+        hidden_size = 32
+        # Standard causal-LM shape (embed -> body -> lm_head) so the
+        # (now unconditional) fused-linear-logprob path can identity-patch
+        # ``lm_head`` and read the hidden state. ``linear_1`` stays the LoRA
+        # target the fixtures expect.
+        self.embed = nn.Embedding(
+            self.vocab_size, hidden_size, device=device, dtype=self.datatype
+        )
+        self.linear_1 = nn.Linear(
+            hidden_size,
+            hidden_size,
+            device=device,
+            dtype=self.datatype,
+        )
+        self.lm_head = nn.Linear(
+            hidden_size,
+            self.vocab_size,
+            bias=False,
+            device=device,
+            dtype=self.datatype,
+        )
+
+    def get_input_embeddings(self):
+        return self.embed
+
+    def get_output_embeddings(self):
+        return self.lm_head
+
+    def set_output_embeddings(self, new_embeddings):
+        self.lm_head = new_embeddings
+
+    @property
+    def model(self):
+        return self
+
+    def forward(
+        self,
+        input_ids: torch.Tensor | None = None,
+        *args,
+        **kwargs,
+    ) -> DummyForwardOutput:
+        # ``lm_head`` may be identity-patched by the fused-linear-logprob path,
+        # in which case this returns the hidden state instead of logits.
+        hidden = self.linear_1(self.embed(input_ids.long()))
+        return DummyForwardOutput(logits=self.lm_head(hidden))
+
+    def generate(self, *args, **kwargs):
+        input_ids = kwargs.get("input_ids")
+        if input_ids is None:
+            msg = "`input_ids` must be provided for generation."
+            raise ValueError(msg)
+        input_shape = input_ids.shape
+        group_size = input_shape[0]
+        prompt_size = input_shape[1]
+        # Simple generation: just return random tokens based on vocab size and desired length
+        return torch.randint(
+            0,
+            self.vocab_size,
+            (group_size, prompt_size + self.config.max_tokens),
+        )
+
+    def gradient_checkpointing_enable(self, *args, **kwargs):
+        self.gradient_checkpointing_enabled = True
+
+    def prepare_inputs_for_generation(self, *args, **kwargs):
+        return
 
 
 class DummyReasoningEnv(RolloutHarnessDouble):
@@ -133,7 +226,7 @@ class DummyVLLM:
             use_tqdm=True,
         )  # Change this to False.
 
-        token_ids = [
+        completion_ids = [
             output.token_ids for outputs in all_outputs for output in outputs.outputs
         ]
         """
@@ -168,10 +261,9 @@ class DummyVLLM:
 
 
 def generate_grpo(
-    accelerator_factory,
+    dist_mode_factory,
     model_factory,
-    config,
-    use_deepspeed_optimizer,
+    dist_mode,
     vocab_size,
     input_size,
     max_tokens,
@@ -184,19 +276,13 @@ def generate_grpo(
     from_name=False,
     use_liger_loss=False,
 ):
-    if config is not None and not torch.cuda.is_available():
-        pytest.skip("DeepSpeed-configured LLM tests require CUDA support.")
-
     gc.collect()
     torch.cuda.empty_cache()
-    AcceleratorState._reset_state(True)
 
-    accelerator = accelerator_factory(use_deepspeed_optimizer, config)
-    if not use_deepspeed_optimizer and accelerator is not None:
-        accelerator.state.deepspeed_plugin.deepspeed_config.pop("optimizer", None)
+    dist_mode_factory(dist_mode)
     if use_vllm:
         lora_config = None
-        # Two settings, both required for parallel vLLM testing:
+        # Two knobs, both load-bearing for parallel vLLM testing:
         #
         # ``kv_cache_memory_bytes`` pins the KV cache to a tiny fixed size and
         # short-circuits vLLM's ``determine_available_memory`` profile-snapshot
@@ -205,7 +291,7 @@ def generate_grpo(
         # ``tests/conftest.py:pytest_collection_modifyitems`` for the full
         # rationale.
         #
-        # ``gpu_memory_utilization`` is also required — it is *not*
+        # ``gpu_memory_utilization`` is **also** load-bearing — it is *not*
         # ignored when ``kv_cache_memory_bytes`` is set. The startup check in
         # ``vllm/v1/worker/gpu_worker.py:init_device`` asserts ``free_memory
         # >= total_memory * gpu_memory_utilization`` *before* the KV-cache
@@ -269,12 +355,12 @@ def generate_grpo(
         "device": "cuda" if torch.cuda.is_available() else "cpu",
         "group_size": group_size,
         "lora_config": lora_config,
+        "fsdp_config": FSDPConfig() if dist_mode == "fsdp2" else None,
         "cosine_lr_schedule_config": (
             None
-            if accelerator is not None
+            if dist_mode is not None
             else CosineLRScheduleConfig(num_epochs=10, warmup_proportion=0.05)
         ),
-        "accelerator": accelerator,
         "use_separate_reference_adapter": use_separate_reference_adapter,
         "use_vllm": use_vllm,
         "vllm_config": vllm_config,
@@ -282,9 +368,6 @@ def generate_grpo(
         "max_model_len": max_tokens + 5,
         "micro_batch_size_per_gpu": micro_batch_size_per_gpu,
         "use_liger_loss": use_liger_loss,
-        # Scalar-reward factory batches omit turn_ids; trajectory advantages
-        # match that batch.
-        "advantage_granularity": "trajectory",
     }
     return GRPO(**grpo_kwargs)
 
@@ -310,15 +393,11 @@ def _make_cpu_grpo_for_branch_tests(**kwargs):
         "max_model_len": 12,
         "wrap": False,
         "gradient_checkpointing": False,
-        "accelerator": None,
         "device": "cpu",
         # Pin so the unfused learn() path is exercised by default
         # regardless of liger-kernel availability. Liger-specific tests
         # override this.
         "use_liger_loss": False,
-        # Scalar-reward branch tests omit turn_ids; trajectory advantages
-        # match that batch.
-        "advantage_granularity": "trajectory",
     }
     defaults.update(kwargs)
     return GRPO(**defaults)
@@ -335,27 +414,16 @@ def _patch_surviving_sample_idxs(grpo, batch_idxs):
     return patch.object(grpo, "_calculate_advantages", side_effect=_with_batch_idxs)
 
 
-def _make_two_process_accelerator_mock():
-    """Mock a two-process accelerator whose gathers are single-rank identities."""
-    acc = MagicMock()
-    acc.num_processes = 2
-    acc.device = torch.device("cpu")
-    acc.gather.side_effect = lambda t: t
-    acc.free_memory.side_effect = lambda *objs: objs
-    return acc
-
-
 def _build_grpo_for_colocate_tests(
     grpo_factory,
-    accelerator_factory,
+    dist_mode_factory,
     model_factory,
     tensor_parallel_size: int = 1,
 ):
     grpo = grpo_factory(
-        accelerator_factory,
+        dist_mode_factory,
         model_factory,
         None,
-        False,
         100,
         10,
         8,
@@ -396,7 +464,7 @@ class _GrpoLossStub:
         importance_sampling_level: str = "token",
         group_size: int = 2,
         adv_norm: str = "mean_std",
-        advantage_granularity: str = "turn",
+        advantage_granularity: str = "auto",
         vllm_importance_sampling_cap: float = 2.0,
         turn_advantage_trajectory_fallback: bool = True,
         device: str = "cpu",
@@ -414,15 +482,11 @@ class _GrpoLossStub:
         self.vllm_importance_sampling_cap = vllm_importance_sampling_cap
         self.turn_advantage_trajectory_fallback = turn_advantage_trajectory_fallback
         self.device = device
-        self.accelerator = None
-        self._uses_deepspeed = False
         self._window_action_tokens = None
 
     _apply_kl_advantage_shaping = GRPO._apply_kl_advantage_shaping
     _reduce_masked_loss = GRPO._reduce_masked_loss
     _resolve_loss_window = GRPO._resolve_loss_window
-    _accumulation_steps = GRPO._accumulation_steps
-    _accumulation_steps_without_deepspeed = GRPO._accumulation_steps_without_deepspeed
     _log_importance_weights = GRPO._log_importance_weights
     _compute_policy_loss = GRPO._compute_policy_loss
     _grpo_loss_standard = GRPO._grpo_loss_standard
@@ -445,14 +509,14 @@ def _build_branch_experiences(
     seq_len: int = 10,
     vocab_size: int = 64,
 ):
-    token_ids = [
+    completion_ids = [
         torch.randint(0, vocab_size, (1, seq_len), dtype=torch.long)
         for _ in range(batch_size)
     ]
     action_masks = [
         torch.ones(1, seq_len - 1, dtype=torch.bool) for _ in range(batch_size)
     ]
-    return token_ids, action_masks
+    return completion_ids, action_masks
 
 
 def check_ref_adapater_is_same_as_actor_after_learning(grpo):
@@ -475,25 +539,6 @@ def check_ref_adapater_is_same_as_actor_after_learning(grpo):
 
 
 class TestGRPOInit:
-    def test_init_advantage_granularity_defaults_to_auto(self):
-        actor = create_module(input_size=6, max_tokens=4, vocab_size=64, device="cpu")
-        grpo = GRPO(
-            actor_network=actor,
-            pad_token_id=63,
-            pad_token="<pad>",
-            batch_size=4,
-            group_size=2,
-            max_output_tokens=4,
-            max_model_len=12,
-            wrap=False,
-            gradient_checkpointing=False,
-            accelerator=None,
-            device="cpu",
-            use_liger_loss=False,
-        )
-        assert grpo.advantage_granularity == "auto"
-        grpo.clean_up()
-
     def test_init_cispo_sets_fixed_loss_type_and_hides_loss_type_arg(self):
         actor = create_module(input_size=6, max_tokens=4, vocab_size=64, device="cpu")
         cispo = CISPO(
@@ -506,7 +551,6 @@ class TestGRPOInit:
             max_model_len=12,
             wrap=False,
             gradient_checkpointing=False,
-            accelerator=None,
             device="cpu",
         )
         assert cispo.loss_type == "cispo"
@@ -529,7 +573,6 @@ class TestGRPOInit:
             max_model_len=12,
             wrap=False,
             gradient_checkpointing=False,
-            accelerator=None,
             device="cpu",
         )
         assert gspo.loss_type == "gspo"
@@ -539,6 +582,20 @@ class TestGRPOInit:
         assert "loss_type" not in init_sig
         assert "self" not in class_sig
         assert isinstance(gspo, GRPO)
+        gspo.clean_up()
+
+    def test_init_unset_mini_is_per_rank_collect_times_group_size(self):
+        grpo = _make_cpu_grpo_for_branch_tests(
+            batch_size=4,
+            group_size=2,
+            micro_batch_size_per_gpu=1,
+        )
+
+        assert grpo.batch_size == 4
+        assert grpo.batch_size_per_process == 8
+        assert grpo.mini_batch_size == 8
+        assert grpo.gradient_accumulation_steps == 8
+        grpo.clean_up()
 
     def test_cispo_gspo_signatures_match_grpo_minus_loss_type(self):
         # @inherit_init_signature must expose exactly GRPO's params minus
@@ -594,7 +651,6 @@ class TestGRPOInit:
             max_model_len=16,
             wrap=False,
             gradient_checkpointing=False,
-            accelerator=None,
             device="cpu",
             use_liger_loss=False,
         )
@@ -603,17 +659,7 @@ class TestGRPOInit:
         assert grpo.max_model_len == 16
         grpo.clean_up()
 
-    @pytest.mark.parametrize(
-        ("config", "use_deepspeed_optimizer"),
-        [
-            (deepspeed_config_stage_1, False),
-            (deepspeed_config_stage_1, True),
-            (deepspeed_config_stage_1_with_scheduler, False),
-            (deepspeed_config_stage_1_with_scheduler, True),
-            (deepspeed_config_stage_2, False),
-            (deepspeed_config_stage_2, True),
-        ],
-    )
+    @pytest.mark.parametrize("dist_mode", ["dist", "fsdp2"])
     @pytest.mark.parametrize("vocab_size", [1000])
     @pytest.mark.parametrize("input_size", [10])
     @pytest.mark.parametrize("max_tokens", [20])
@@ -638,14 +684,12 @@ class TestGRPOInit:
         [True, False],
     )
     @pytest.mark.vllm
-    def test_init_grpo_with_accelerator(
+    def test_init_grpo_distributed(
         self,
-        deepspeed_env,
         grpo_factory,
-        accelerator_factory,
+        dist_mode_factory,
         model_factory,
-        config,
-        use_deepspeed_optimizer,
+        dist_mode,
         vocab_size,
         input_size,
         max_tokens,
@@ -662,12 +706,13 @@ class TestGRPOInit:
             if use_vllm
             else nullcontext()
         )
+        if dist_mode == "fsdp2" and use_vllm:
+            pytest.skip("Colocated vLLM requires whole (non-sharded) base weights.")
         with llm_patch_ctx:
             grpo = grpo_factory(
-                accelerator_factory,
+                dist_mode_factory,
                 model_factory,
-                config,
-                use_deepspeed_optimizer,
+                dist_mode,
                 vocab_size,
                 input_size,
                 max_tokens,
@@ -679,8 +724,7 @@ class TestGRPOInit:
                 from_name=from_name,
             )
 
-        accelerator = accelerator_factory(use_deepspeed_optimizer, config)
-        assert grpo.batch_size_per_process == 16
+        assert grpo.batch_size_per_process == 16 * group_size
         assert grpo.beta == 0.001
         assert grpo.lr == 1e-5
         assert grpo.clip_coef == 0.2
@@ -689,34 +733,21 @@ class TestGRPOInit:
         assert grpo.group_size == group_size
         assert grpo.temperature == 0.9
         assert grpo.calc_position_embeddings
-        assert grpo.device == accelerator.device
+        assert grpo.distributed is True
+        assert grpo.device == resolve_device(
+            "cuda" if torch.cuda.is_available() else "cpu"
+        )
         assert grpo.index == 0
         assert grpo.scores == []
         assert grpo.fitness == []
         assert grpo.steps == 0
-        assert 3 > grpo.zero_stage >= 1
         assert isinstance(grpo.generation_config, GenerationConfig)
-        assert isinstance(grpo.actor, DeepSpeedEngine)
+        assert isinstance(grpo.actor, torch.nn.Module)
         assert grpo.pad_token_id == 999
         assert grpo.pad_token == "<pad>"
-        if not use_deepspeed_optimizer:
-            if accelerator is None:
-                assert isinstance(
-                    grpo.lr_scheduler,
-                    AcceleratedScheduler,
-                ), grpo.lr_scheduler
-                assert isinstance(
-                    grpo.cosine_lr_schedule_config,
-                    CosineLRScheduleConfig,
-                ), type(grpo.cosine_lr_schedule_config)
-            assert isinstance(grpo.optimizer, OptimizerWrapper)
-            assert isinstance(grpo.optimizer.optimizer, DeepSpeedOptimizerWrapper)
-        else:
-            assert isinstance(grpo.optimizer, OptimizerWrapper)
-            assert isinstance(grpo.optimizer.optimizer, DeepSpeedZeroOptimizer)
-            assert isinstance(grpo.actor.optimizer, DeepSpeedZeroOptimizer)
-            assert grpo.lr_scheduler is None
-            assert grpo.cosine_lr_schedule_config is None
+        assert isinstance(grpo.optimizer, OptimizerWrapper)
+        assert grpo.optimizer.optimizer_cls is torch.optim.AdamW
+        assert isinstance(grpo.optimizer.optimizer, torch.optim.AdamW)
 
         if use_vllm:
             assert grpo.use_vllm
@@ -724,8 +755,7 @@ class TestGRPOInit:
             assert grpo.llm is mock_llm_instance
         grpo.clean_up()
 
-    @pytest.mark.parametrize("config", [deepspeed_config_stage_2])
-    @pytest.mark.parametrize("use_deepspeed_optimizer", [False])
+    @pytest.mark.parametrize("dist_mode", ["dist"])
     @pytest.mark.parametrize("use_vllm", [True])
     @pytest.mark.parametrize(
         "pretrained_model_name_or_path",
@@ -739,8 +769,7 @@ class TestGRPOInit:
     @pytest.mark.parametrize("use_separate_reference_adapter", [True])
     def test_init_grpo_vllm_with_tp_gt_one(
         self,
-        deepspeed_env,
-        accelerator_factory,
+        dist_mode_factory,
         model_factory,
         vocab_size,
         input_size,
@@ -749,13 +778,12 @@ class TestGRPOInit:
         use_separate_reference_adapter,
         use_vllm,
         pretrained_model_name_or_path,
-        use_deepspeed_optimizer,
-        config,
+        dist_mode,
     ):
         mock_instance = make_mock_vllm_instance(vllm.LLM)
-        accelerator = accelerator_factory(use_deepspeed_optimizer, config)
-        # Colocated vLLM requires tensor_parallel_size==1 (the in-process
-        # shared base assumes a single worker); TP>1 raises at construction.
+        dist_mode_factory(dist_mode)
+        # Colocated vLLM no longer supports tensor parallelism (the in-process
+        # shared base assumes a single worker): TP>1 raises at construction.
         with (
             patch.object(
                 torch.distributed,
@@ -763,8 +791,7 @@ class TestGRPOInit:
                 return_value=("tp_group_calculated", None),
             ),
             patch(
-                "accelerate.Accelerator.num_processes",
-                new_callable=PropertyMock,
+                "agilerl.algorithms.core.base.get_world_size",
                 return_value=2,
             ),
             patch.object(vllm.LLM, "__init__", return_value=None),
@@ -779,7 +806,7 @@ class TestGRPOInit:
                 group_size=group_size,
                 cosine_lr_schedule_config=(
                     None
-                    if accelerator is not None
+                    if dist_mode is not None
                     else CosineLRScheduleConfig(num_epochs=10, warmup_proportion=0.05)
                 ),
                 use_vllm=use_vllm,
@@ -788,13 +815,11 @@ class TestGRPOInit:
                     tensor_parallel_size=2,
                     max_num_seqs=1,
                 ),
-                accelerator=accelerator,
                 use_separate_reference_adapter=use_separate_reference_adapter,
                 max_output_tokens=max_tokens,
             )
 
-    @pytest.mark.parametrize("config", [deepspeed_config_stage_2])
-    @pytest.mark.parametrize("use_deepspeed_optimizer", [False])
+    @pytest.mark.parametrize("dist_mode", ["dist"])
     @pytest.mark.parametrize("use_vllm", [True])
     @pytest.mark.parametrize(
         "pretrained_model_name_or_path",
@@ -809,8 +834,7 @@ class TestGRPOInit:
     @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
     def test_init_grpo_vllm_tp_value_error(
         self,
-        deepspeed_env,
-        accelerator_factory,
+        dist_mode_factory,
         model_factory,
         vocab_size,
         input_size,
@@ -819,12 +843,11 @@ class TestGRPOInit:
         use_separate_reference_adapter,
         use_vllm,
         pretrained_model_name_or_path,
-        use_deepspeed_optimizer,
-        config,
+        dist_mode,
         micro_batch_size_per_gpu,
     ):
         mock_instance = make_mock_vllm_instance(vllm.LLM)
-        accelerator = accelerator_factory(use_deepspeed_optimizer, config)
+        dist_mode_factory(dist_mode)
         with (
             patch.object(
                 torch.distributed,
@@ -843,7 +866,7 @@ class TestGRPOInit:
                 group_size=group_size,
                 cosine_lr_schedule_config=(
                     None
-                    if accelerator is not None
+                    if dist_mode is not None
                     else CosineLRScheduleConfig(num_epochs=10, warmup_proportion=0.05)
                 ),
                 use_vllm=use_vllm,
@@ -852,27 +875,23 @@ class TestGRPOInit:
                     tensor_parallel_size=2,
                     max_num_seqs=1,
                 ),
-                accelerator=accelerator,
                 use_separate_reference_adapter=use_separate_reference_adapter,
                 max_output_tokens=max_tokens,
             )
 
     @pytest.mark.gpu
-    @pytest.mark.parametrize("config", [deepspeed_config_stage_2])
-    @pytest.mark.parametrize("use_deepspeed_optimizer", [False])
+    @pytest.mark.parametrize("dist_mode", ["dist"])
     def test_init_grpo_vllm_invalid_attention_backend_value_error(
         self,
-        deepspeed_env,
-        accelerator_factory,
+        dist_mode_factory,
         model_factory,
-        use_deepspeed_optimizer,
-        config,
+        dist_mode,
     ):
         pretrained_model_name_or_path = TINY_LLM_FIXTURE_PATH
         vocab_size = 1000
         max_tokens = 20
         group_size = 5
-        accelerator = accelerator_factory(use_deepspeed_optimizer, config)
+        dist_mode_factory(dist_mode)
         with (
             patch.dict(
                 os.environ, {"VLLM_ATTENTION_BACKEND": "TORCH_SDPA"}, clear=False
@@ -897,7 +916,7 @@ class TestGRPOInit:
                 group_size=group_size,
                 cosine_lr_schedule_config=(
                     None
-                    if accelerator is not None
+                    if dist_mode is not None
                     else CosineLRScheduleConfig(num_epochs=10, warmup_proportion=0.05)
                 ),
                 use_vllm=True,
@@ -905,7 +924,6 @@ class TestGRPOInit:
                     gpu_memory_utilization=0.05,
                     max_num_seqs=1,
                 ),
-                accelerator=accelerator,
                 use_separate_reference_adapter=True,
                 max_output_tokens=max_tokens,
             )
@@ -918,9 +936,8 @@ class TestGRPOInit:
         [(False, TINY_LLM_FIXTURE_PATH)],
     )
     @pytest.mark.vllm
-    def test_init_grpo_scheduler_warning_no_accelerator(
+    def test_init_grpo_scheduler_warning_single_device(
         self,
-        deepspeed_env,
         model_factory,
         vocab_size,
         group_size,
@@ -943,13 +960,11 @@ class TestGRPOInit:
                     warmup_proportion=0.05,
                 ),
                 use_vllm=use_vllm,
-                accelerator=None,
                 use_separate_reference_adapter=use_separate_reference_adapter,
                 max_output_tokens=20,
             )
 
-    @pytest.mark.parametrize("config", [deepspeed_config_stage_2])
-    @pytest.mark.parametrize("use_deepspeed_optimizer", [False])
+    @pytest.mark.parametrize("dist_mode", ["dist"])
     @pytest.mark.parametrize("vocab_size", [1000])
     @pytest.mark.parametrize("input_size", [10])
     @pytest.mark.parametrize("max_tokens", [20])
@@ -963,11 +978,9 @@ class TestGRPOInit:
     @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
     def test_init_grpo_batch_size_value_error(
         self,
-        deepspeed_env,
-        accelerator_factory,
+        dist_mode_factory,
         model_factory,
-        config,
-        use_deepspeed_optimizer,
+        dist_mode,
         vocab_size,
         input_size,
         max_tokens,
@@ -977,15 +990,14 @@ class TestGRPOInit:
         pretrained_model_name_or_path,
         micro_batch_size_per_gpu,
     ):
-        accelerator = accelerator_factory(use_deepspeed_optimizer, config)
+        dist_mode_factory(dist_mode)
         with (
             pytest.raises(
                 ValueError,
-                match=r"Batch size \(17\) must be divisible by the number of processes \(2\)\.",
+                match=r"Batch size \(17\) must be divisible by the data-parallel size \(2\)\.",
             ),
             patch(
-                "accelerate.Accelerator.num_processes",
-                new_callable=PropertyMock,
+                "agilerl.algorithms.core.base.get_world_size",
                 return_value=2,
             ),
         ):
@@ -994,7 +1006,6 @@ class TestGRPOInit:
                 pad_token_id=vocab_size - 1,
                 batch_size=17,
                 pad_token="<pad>",
-                accelerator=accelerator,
                 device="cuda" if torch.cuda.is_available() else "cpu",
                 group_size=group_size,
                 cosine_lr_schedule_config=CosineLRScheduleConfig(
@@ -1005,8 +1016,7 @@ class TestGRPOInit:
                 use_separate_reference_adapter=use_separate_reference_adapter,
             )
 
-    @pytest.mark.parametrize("config", [deepspeed_config_stage_2])
-    @pytest.mark.parametrize("use_deepspeed_optimizer", [False])
+    @pytest.mark.parametrize("dist_mode", ["dist"])
     @pytest.mark.parametrize("vocab_size", [1000])
     @pytest.mark.parametrize("input_size", [10])
     @pytest.mark.parametrize("max_tokens", [20])
@@ -1020,11 +1030,9 @@ class TestGRPOInit:
     @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
     def test_init_grpo_max_model_len_and_max_output_tokens_none_error(
         self,
-        deepspeed_env,
-        accelerator_factory,
+        dist_mode_factory,
         model_factory,
-        config,
-        use_deepspeed_optimizer,
+        dist_mode,
         vocab_size,
         input_size,
         max_tokens,
@@ -1034,7 +1042,7 @@ class TestGRPOInit:
         pretrained_model_name_or_path,
         micro_batch_size_per_gpu,
     ):
-        accelerator = accelerator_factory(use_deepspeed_optimizer, config)
+        dist_mode_factory(dist_mode)
         with pytest.raises(
             ValueError,
             match="Either max_output_tokens or max_model_len must be specified",
@@ -1044,7 +1052,6 @@ class TestGRPOInit:
                 pad_token_id=vocab_size - 1,
                 batch_size=17,
                 pad_token="<pad>",
-                accelerator=accelerator,
                 device="cuda" if torch.cuda.is_available() else "cpu",
                 group_size=group_size,
                 cosine_lr_schedule_config=CosineLRScheduleConfig(
@@ -1168,8 +1175,7 @@ class TestGRPOInit:
         )
         grpo.clean_up()
 
-    @pytest.mark.parametrize("config", [deepspeed_config_stage_2])
-    @pytest.mark.parametrize("use_deepspeed_optimizer", [False])
+    @pytest.mark.parametrize("dist_mode", ["dist"])
     @pytest.mark.parametrize("vocab_size", [1000])
     @pytest.mark.parametrize("input_size", [10])
     @pytest.mark.parametrize("max_tokens", [20])
@@ -1181,13 +1187,11 @@ class TestGRPOInit:
     )
     @pytest.mark.vllm
     @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
-    def test_init_grpo_batch_size_grad_accum_error(
+    def test_init_grpo_mini_batch_not_divisible(
         self,
-        deepspeed_env,
-        accelerator_factory,
+        dist_mode_factory,
         model_factory,
-        config,
-        use_deepspeed_optimizer,
+        dist_mode,
         vocab_size,
         input_size,
         max_tokens,
@@ -1197,18 +1201,14 @@ class TestGRPOInit:
         pretrained_model_name_or_path,
         micro_batch_size_per_gpu,
     ):
-        accelerator = accelerator_factory(use_deepspeed_optimizer, config)
-        accelerator.state.deepspeed_plugin.deepspeed_config[
-            "gradient_accumulation_steps"
-        ] = 7
+        dist_mode_factory(dist_mode)
         with (
             pytest.raises(
                 ValueError,
-                match=r"Batch size \(16\) must be divisible by the product of the number of processes \(2\) and gradient accumulation steps \(7\)\.",
+                match=r"batch_size_per_process \(40\) must be divisible by mini_batch_size \(3\)",
             ),
             patch(
-                "accelerate.Accelerator.num_processes",
-                new_callable=PropertyMock,
+                "agilerl.algorithms.core.base.get_world_size",
                 return_value=2,
             ),
         ):
@@ -1219,22 +1219,17 @@ class TestGRPOInit:
                 pad_token="<pad>",
                 device="cuda" if torch.cuda.is_available() else "cpu",
                 group_size=group_size,
+                mini_batch_size=3,
                 cosine_lr_schedule_config=CosineLRScheduleConfig(
                     num_epochs=10,
                     warmup_proportion=0.05,
                 ),
                 use_vllm=use_vllm,
-                accelerator=accelerator,
                 use_separate_reference_adapter=use_separate_reference_adapter,
                 max_output_tokens=max_tokens,
             )
 
-    @pytest.mark.parametrize(
-        ("config", "use_deepspeed_optimizer"),
-        [
-            (None, False),
-        ],
-    )
+    @pytest.mark.parametrize("dist_mode", [None])
     @pytest.mark.parametrize("vocab_size", [1000])
     @pytest.mark.parametrize("input_size", [10])
     @pytest.mark.parametrize("max_tokens", [20])
@@ -1246,14 +1241,12 @@ class TestGRPOInit:
     )
     @pytest.mark.vllm
     @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
-    def test_init_grpo_with_no_accelerator(
+    def test_init_grpo_single_device(
         self,
-        deepspeed_env,
         grpo_factory,
-        accelerator_factory,
+        dist_mode_factory,
         model_factory,
-        config,
-        use_deepspeed_optimizer,
+        dist_mode,
         vocab_size,
         input_size,
         max_tokens,
@@ -1264,10 +1257,9 @@ class TestGRPOInit:
         micro_batch_size_per_gpu,
     ):
         grpo = grpo_factory(
-            accelerator_factory,
+            dist_mode_factory,
             model_factory,
-            config,
-            use_deepspeed_optimizer,
+            dist_mode,
             vocab_size,
             input_size,
             max_tokens,
@@ -1277,7 +1269,7 @@ class TestGRPOInit:
             pretrained_model_name_or_path,
             micro_batch_size_per_gpu,
         )
-        assert grpo.batch_size_per_process == 16
+        assert grpo.batch_size_per_process == 16 * group_size
         assert grpo.beta == 0.001
         assert grpo.lr == 1e-5
         assert grpo.clip_coef == 0.2
@@ -1289,13 +1281,9 @@ class TestGRPOInit:
         assert isinstance(grpo.cosine_lr_schedule_config, CosineLRScheduleConfig), type(
             grpo.cosine_lr_schedule_config,
         )
-        assert grpo.device == (
-            "cuda"
-            if torch.cuda.is_available()
-            else "mps"
-            if torch.backends.mps.is_available()
-            else "cpu"
-        )
+        # The factory explicitly requests "cuda"/"cpu", and resolve_device
+        # honours an explicit request (no MPS fallback).
+        assert grpo.device == ("cuda" if torch.cuda.is_available() else "cpu")
         assert grpo.index == 0
         assert grpo.scores == []
         assert grpo.fitness == []
@@ -1303,238 +1291,46 @@ class TestGRPOInit:
         assert grpo.pad_token_id == 999
         assert grpo.pad_token == "<pad>"
         assert isinstance(grpo.generation_config, GenerationConfig)
-        assert isinstance(grpo.actor, DummyEvolvable)
+        assert isinstance(grpo.actor, PeftModel)
         assert isinstance(grpo.optimizer, OptimizerWrapper)
         assert isinstance(grpo.lr_scheduler, SequentialLR), grpo.lr_scheduler
         grpo.clean_up()
 
-    @pytest.mark.gpu
-    @pytest.mark.parametrize("config", [deepspeed_config_stage_3])
-    @pytest.mark.parametrize("use_deepspeed_optimizer", [False])
-    @pytest.mark.parametrize("use_separate_reference_adapter", [False, True])
-    def test_init_grpo_zero3_warning(
-        self,
-        deepspeed_env,
-        accelerator_factory,
-        config,
-        use_deepspeed_optimizer,
-        use_separate_reference_adapter,
-    ):
-        accelerator = accelerator_factory(use_deepspeed_optimizer, config)
-        gc.collect()
-        vocab_size = 1000
-        input_size = 10
-        max_tokens = 20
-        group_size = 5
-        with pytest.warns(
-            UserWarning,
-            match=r"DeepSpeed ZeRO Stage 3 is nascent and may not work as expected",
-        ):
-            grpo = GRPO(
-                actor_network=create_module(
-                    input_size=input_size,
-                    max_tokens=max_tokens,
-                    vocab_size=vocab_size,
-                    device="cuda" if torch.cuda.is_available() else "cpu",
-                ),
-                lr=0.1,
-                pad_token_id=vocab_size - 1,
-                pad_token="<pad>",
-                device="cuda" if torch.cuda.is_available() else "cpu",
-                group_size=group_size,
-                lora_config=LoraConfig(
-                    r=16,
-                    lora_alpha=64,
-                    target_modules=["linear_1"],
-                    task_type="CAUSAL_LM",
-                    lora_dropout=0.05,
-                ),
-                cosine_lr_schedule_config=(
-                    None
-                    if accelerator is not None
-                    else CosineLRScheduleConfig(num_epochs=10, warmup_proportion=0.05)
-                ),
-                accelerator=accelerator,
-                use_separate_reference_adapter=use_separate_reference_adapter,
-                max_output_tokens=max_tokens,
-            )
-        grpo.clean_up()
-
-    @pytest.mark.gpu
-    @pytest.mark.parametrize("config", [deepspeed_config_stage_2])
-    @pytest.mark.parametrize("use_deepspeed_optimizer", [False])
-    @pytest.mark.parametrize("use_separate_reference_adapter", [False, True])
-    def test_init_grpo_lr_warning(
-        self,
-        deepspeed_env,
-        accelerator_factory,
-        config,
-        use_deepspeed_optimizer,
-        use_separate_reference_adapter,
-    ):
-        accelerator = accelerator_factory(use_deepspeed_optimizer, config)
-        gc.collect()
-        vocab_size = 1000
-        input_size = 10
-        max_tokens = 20
-        group_size = 5
-        lora_config = LoraConfig(
-            r=16,
-            lora_alpha=64,
-            target_modules=["linear_1"],
-            task_type="CAUSAL_LM",
-            lora_dropout=0.05,
-        )
-        with pytest.warns(
-            UserWarning,
-            match=r"Argument 'max_grad_norm' will overwrite the equivalent value set for 'gradient_clipping'",
-        ):
-            grpo = GRPO(
-                actor_network=create_module(
-                    input_size=input_size,
-                    max_tokens=max_tokens,
-                    vocab_size=vocab_size,
-                    device="cuda" if torch.cuda.is_available() else "cpu",
-                ),
-                lr=0.1,
-                pad_token_id=vocab_size - 1,
-                pad_token="<pad>",
-                device="cuda" if torch.cuda.is_available() else "cpu",
-                group_size=group_size,
-                lora_config=lora_config,
-                cosine_lr_schedule_config=(
-                    None
-                    if accelerator is not None
-                    else CosineLRScheduleConfig(num_epochs=10, warmup_proportion=0.05)
-                ),
-                max_grad_norm=0.1,
-                accelerator=accelerator,
-                use_separate_reference_adapter=use_separate_reference_adapter,
-                max_output_tokens=max_tokens,
-            )
-        assert grpo.lr == 1e-4 if use_deepspeed_optimizer else 0.1
-        grpo.clean_up()
-
-    @pytest.mark.gpu
-    @pytest.mark.parametrize("config", [deepspeed_config_stage_2])
-    @pytest.mark.parametrize("use_deepspeed_optimizer", [False])
-    @pytest.mark.parametrize("use_separate_reference_adapter", [False, True])
-    def test_init_grpo_max_grad_norm_warning(
-        self,
-        deepspeed_env,
-        accelerator_factory,
-        config,
-        use_deepspeed_optimizer,
-        use_separate_reference_adapter,
-    ):
-        accelerator = accelerator_factory(use_deepspeed_optimizer, config)
-        gc.collect()
-        vocab_size = 1000
-        input_size = 10
-        max_tokens = 20
-        group_size = 5
-        lora_config = LoraConfig(
-            r=16,
-            lora_alpha=64,
-            target_modules=["linear_1"],
-            task_type="CAUSAL_LM",
-            lora_dropout=0.05,
-        )
-        with pytest.warns(
-            UserWarning,
-            match=r"Argument 'max_grad_norm' will overwrite the equivalent value set for 'gradient_clipping'",
+    def test_init_grpo_fsdp_config_without_distributed_raises(self):
+        """FSDP2 sharding needs an initialised process group; reject otherwise."""
+        with pytest.raises(
+            ValueError, match="fsdp_config requires distributed training"
         ):
             GRPO(
                 actor_network=create_module(
-                    input_size=input_size,
-                    max_tokens=max_tokens,
-                    vocab_size=vocab_size,
-                    device="cuda" if torch.cuda.is_available() else "cpu",
+                    input_size=10,
+                    max_tokens=20,
+                    vocab_size=1000,
+                    device="cpu",
                 ),
-                lr=0.1,
-                pad_token_id=vocab_size - 1,
+                pad_token_id=999,
                 pad_token="<pad>",
-                device="cuda" if torch.cuda.is_available() else "cpu",
-                group_size=group_size,
-                lora_config=lora_config,
-                cosine_lr_schedule_config=(
-                    None
-                    if accelerator is not None
-                    else CosineLRScheduleConfig(num_epochs=10, warmup_proportion=0.05)
-                ),
-                max_grad_norm=0.1,
-                accelerator=accelerator,
-                use_separate_reference_adapter=use_separate_reference_adapter,
+                device="cpu",
+                group_size=5,
+                max_output_tokens=20,
+                wrap=False,
+                fsdp_config=FSDPConfig(),
             )
 
     @pytest.mark.gpu
-    @pytest.mark.parametrize("config", [deepspeed_config_stage_1_with_scheduler])
-    @pytest.mark.parametrize("use_deepspeed_optimizer", [True])
-    @pytest.mark.parametrize("use_separate_reference_adapter", [False, True])
-    def test_init_grpo_scheduler_warning(
-        self,
-        deepspeed_env,
-        accelerator_factory,
-        config,
-        use_deepspeed_optimizer,
-        use_separate_reference_adapter,
-    ):
-        accelerator = accelerator_factory(use_deepspeed_optimizer, config)
-        gc.collect()
-        vocab_size = 1000
-        input_size = 10
-        max_tokens = 20
-        group_size = 5
-        lora_config = LoraConfig(
-            r=16,
-            lora_alpha=64,
-            target_modules=["linear_1"],
-            task_type="CAUSAL_LM",
-            lora_dropout=0.05,
-        )
-        with pytest.warns(
-            UserWarning,
-            match=r"Cannot specify the optimizer in the DeepSpeed config and use AgileRL's LR scheduler",
-        ):
-            GRPO(
-                actor_network=create_module(
-                    input_size=input_size,
-                    max_tokens=max_tokens,
-                    vocab_size=vocab_size,
-                    device="cuda" if torch.cuda.is_available() else "cpu",
-                ),
-                lr=0.1,
-                pad_token_id=vocab_size - 1,
-                pad_token="<pad>",
-                device="cuda" if torch.cuda.is_available() else "cpu",
-                group_size=group_size,
-                lora_config=lora_config,
-                cosine_lr_schedule_config=CosineLRScheduleConfig(
-                    num_epochs=10,
-                    warmup_proportion=0.05,
-                ),
-                max_grad_norm=0.1,
-                accelerator=accelerator,
-                use_separate_reference_adapter=use_separate_reference_adapter,
-            )
-
-    @pytest.mark.gpu
-    @pytest.mark.parametrize("config", [deepspeed_config_stage_2])
-    @pytest.mark.parametrize("use_deepspeed_optimizer", [False])
+    @pytest.mark.parametrize("dist_mode", ["dist"])
     @pytest.mark.parametrize("use_separate_reference_adapter", [False])
     @pytest.mark.parametrize("micro_batch_size_per_gpu", [7])
     @pytest.mark.parametrize("batch_size", [16])
     def test_init_grpo_micro_batch_size_per_gpu_division_error(
         self,
-        deepspeed_env,
-        accelerator_factory,
-        config,
-        use_deepspeed_optimizer,
+        dist_mode_factory,
+        dist_mode,
         use_separate_reference_adapter,
         micro_batch_size_per_gpu,
         batch_size,
     ):
-        accelerator = accelerator_factory(use_deepspeed_optimizer, config)
+        dist_mode_factory(dist_mode)
         gc.collect()
         vocab_size = 1000
         input_size = 10
@@ -1549,7 +1345,13 @@ class TestGRPOInit:
         )
         with pytest.raises(
             ValueError,
-            match=r"When specifying micro_batch_size_per_gpu, batch_size \(16\) must be divisible by the product of the number of processes",
+            match=re.escape(
+                f"mini_batch_size ({batch_size * group_size}) must be divisible by "
+                f"micro_batch_size_per_gpu ({micro_batch_size_per_gpu}): "
+                "gradient_accumulation_steps = mini_batch_size / "
+                "micro_batch_size_per_gpu must be a whole number of backward "
+                "passes."
+            ),
         ):
             GRPO(
                 actor_network=create_module(
@@ -1570,22 +1372,18 @@ class TestGRPOInit:
                 ),
                 batch_size=batch_size,
                 max_grad_norm=0.1,
-                accelerator=accelerator,
                 use_separate_reference_adapter=use_separate_reference_adapter,
                 micro_batch_size_per_gpu=micro_batch_size_per_gpu,
             )
 
     @pytest.mark.gpu
-    @pytest.mark.parametrize("use_deepspeed_optimizer", [False])
-    @pytest.mark.parametrize("config", [None])
+    @pytest.mark.parametrize("dist_mode", [None])
     def test_init_grpo_lora_config_warning(
         self,
-        deepspeed_env,
-        accelerator_factory,
-        config,
-        use_deepspeed_optimizer,
+        dist_mode_factory,
+        dist_mode,
     ):
-        accelerator = accelerator_factory(use_deepspeed_optimizer, config)
+        dist_mode_factory(dist_mode)
         gc.collect()
         vocab_size = 1000
         input_size = 10
@@ -1609,25 +1407,21 @@ class TestGRPOInit:
                 group_size=group_size,
                 cosine_lr_schedule_config=(
                     None
-                    if accelerator is not None
+                    if dist_mode is not None
                     else CosineLRScheduleConfig(num_epochs=10, warmup_proportion=0.05)
                 ),
-                accelerator=accelerator,
             )
 
-    @pytest.mark.parametrize("use_deepspeed_optimizer", [False])
-    @pytest.mark.parametrize("config", [None])
+    @pytest.mark.parametrize("dist_mode", [None])
     def test_init_grpo_separate_reference_adapter_no_deprecation_warning(
         self,
-        deepspeed_env,
-        accelerator_factory,
-        config,
-        use_deepspeed_optimizer,
+        dist_mode_factory,
+        dist_mode,
     ):
         """use_separate_reference_adapter=True is the supported way to keep an
         updating reference policy and must not emit a DeprecationWarning.
         """
-        accelerator = accelerator_factory(use_deepspeed_optimizer, config)
+        dist_mode_factory(dist_mode)
         vocab_size = 1000
         input_size = 10
         max_tokens = 20
@@ -1649,10 +1443,9 @@ class TestGRPOInit:
                 use_separate_reference_adapter=True,
                 cosine_lr_schedule_config=(
                     None
-                    if accelerator is not None
+                    if dist_mode is not None
                     else CosineLRScheduleConfig(num_epochs=10, warmup_proportion=0.05)
                 ),
-                accelerator=accelerator,
             )
         assert not [
             w
@@ -1662,7 +1455,7 @@ class TestGRPOInit:
         ]
 
     def test_grpo_no_llm_dependencies(
-        self, grpo_factory, model_factory, accelerator_factory
+        self, grpo_factory, model_factory, dist_mode_factory
     ):
         with (
             mock.patch("agilerl.algorithms.core.base.HAS_LLM_DEPENDENCIES", False),
@@ -1672,10 +1465,9 @@ class TestGRPOInit:
             ),
         ):
             grpo_factory(
-                accelerator_factory=accelerator_factory,
+                dist_mode_factory=dist_mode_factory,
                 model_factory=model_factory,
-                config=None,
-                use_deepspeed_optimizer=False,
+                dist_mode=None,
                 vocab_size=30,
                 input_size=5,
                 max_tokens=10,
@@ -1686,7 +1478,6 @@ class TestGRPOInit:
                 group_size=2,
                 use_vllm=False,
             ).clean_up()
-        AcceleratorState._reset_state(True)
 
     @pytest.mark.parametrize("assertion_mode", ["warns_and_fallback", "private_guard"])
     def test_grpo_liger_unavailable_behaviour(
@@ -1694,7 +1485,7 @@ class TestGRPOInit:
         monkeypatch,
         grpo_factory,
         model_factory,
-        accelerator_factory,
+        dist_mode_factory,
         assertion_mode,
     ):
         monkeypatch.setattr("agilerl.algorithms.core.base.HAS_LIGER_KERNEL", False)
@@ -1705,10 +1496,9 @@ class TestGRPOInit:
                 match=r"use_liger_loss=True requested.*Falling back to standard loss\.",
             ):
                 grpo = grpo_factory(
-                    accelerator_factory=accelerator_factory,
+                    dist_mode_factory=dist_mode_factory,
                     model_factory=model_factory,
-                    config=None,
-                    use_deepspeed_optimizer=False,
+                    dist_mode=None,
                     vocab_size=30,
                     input_size=5,
                     max_tokens=10,
@@ -1723,10 +1513,9 @@ class TestGRPOInit:
             assert grpo.use_liger_loss is False
         else:
             grpo = grpo_factory(
-                accelerator_factory=accelerator_factory,
+                dist_mode_factory=dist_mode_factory,
                 model_factory=model_factory,
-                config=None,
-                use_deepspeed_optimizer=False,
+                dist_mode=None,
                 vocab_size=30,
                 input_size=5,
                 max_tokens=10,
@@ -1751,7 +1540,6 @@ class TestGRPOInit:
                 )
 
         grpo.clean_up()
-        AcceleratorState._reset_state(True)
 
 
 class TestGRPOClipCoefTuple:
@@ -1802,7 +1590,7 @@ class TestGRPOLearnRewardsShape:
 
     def test_multi_turn_rewards_are_summed_along_last_dim(self) -> None:
         grpo = _make_cpu_grpo_for_branch_tests(group_size=2)
-        token_ids, action_masks = _build_branch_experiences(batch_size=4)
+        completion_ids, action_masks = _build_branch_experiences(batch_size=4)
         # Shape [batch, max_turns]; sums to [3, 7, 11, 15] post-collapse.
         rewards = torch.tensor(
             [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0], [7.0, 8.0]],
@@ -1840,7 +1628,7 @@ class TestGRPOLearnRewardsShape:
             ),
             patch.object(grpo, "_backward_pass", return_value=None),
         ):
-            grpo.learn((token_ids, action_masks, rewards))
+            grpo.learn((completion_ids, action_masks, rewards))
 
         collapsed = captured["rewards_passed_to_adv"]
         # After collapse, rewards should be 1-D with summed per-trajectory values.
@@ -2103,6 +1891,7 @@ class _CtxFreeActor(nn.Module):
         super().__init__()
         self.embed = nn.Embedding(vocab, hidden)
         self.last_input_shape: tuple[int, ...] | None = None
+        self.config = SimpleNamespace(_attn_implementation=None)
 
     def forward(self, input_ids=None, **kwargs):
         self.last_input_shape = tuple(input_ids.shape)
@@ -2181,7 +1970,6 @@ class TestGRPOLigerSequencePacking:
                 ),
                 patch.object(grpo, "_get_lm_head", return_value=lm_head),
                 patch.object(grpo, "_patch_lm_head_to_identity", nullcontext),
-                patch.object(grpo, "_get_unwrapped_actor", return_value=actor),
                 patch.object(
                     LLMAlgorithm, "select_adapter", lambda self, name: nullcontext()
                 ),
@@ -2239,7 +2027,6 @@ class TestGRPOLigerSequencePacking:
             ),
             patch.object(grpo, "_get_lm_head", return_value=lm_head),
             patch.object(grpo, "_patch_lm_head_to_identity", nullcontext),
-            patch.object(grpo, "_get_unwrapped_actor", return_value=actor),
             patch.object(
                 LLMAlgorithm, "select_adapter", lambda self, name: nullcontext()
             ),
@@ -2260,16 +2047,15 @@ class TestGRPOGetAction:
     def test_get_action_grpo_hf_path_contract(
         self,
         grpo_factory,
-        accelerator_factory,
+        dist_mode_factory,
         model_factory,
     ):
         input_size = 10
         max_tokens = 8
         grpo = grpo_factory(
-            accelerator_factory,
+            dist_mode_factory,
             model_factory,
             None,
-            False,
             100,
             input_size,
             max_tokens,
@@ -2287,16 +2073,18 @@ class TestGRPOGetAction:
             for _ in range(3)
         ]
         for training in (True, False):
-            token_ids, action_masks, _ = grpo.get_action(prompts, training=training)
-            expected_group_size = grpo.group_size if training else 1
-            assert all(ids.shape[0] == expected_group_size for ids in token_ids)
-            assert_vllm_get_action_contract(
-                token_ids=token_ids,
-                action_masks=action_masks,
-                batch_size=len(prompts),
-                prompt_len=input_size,
-                pad_token_id=grpo.pad_token_id,
+            completion_ids, action_masks, _ = grpo.get_action(
+                prompts, training=training
             )
+            expected_group_size = grpo.group_size if training else 1
+            assert all(ids.shape[0] == expected_group_size for ids in completion_ids)
+            assert len(completion_ids) == len(prompts)
+            assert len(action_masks) == len(prompts)
+            for row_ids, action_mask in zip(completion_ids, action_masks, strict=True):
+                assert row_ids.dim() == 2
+                assert action_mask.dim() == 2
+                assert row_ids.shape[1] > input_size
+                assert action_mask.shape[1] == row_ids.shape[1] - 1
 
         grpo.clean_up()
 
@@ -2308,15 +2096,22 @@ class TestGRPOGetAction:
                 "attention_mask": torch.ones(1, 6, device=grpo.device),
             },
         ]
-        no_param_actor = SimpleNamespace(parameters=lambda: iter(()))
-        with patch.object(grpo, "_get_unwrapped_actor", return_value=no_param_actor):
-            token_ids, action_masks, _ = grpo.get_action(prompts, training=False)
-        assert len(token_ids) == 1
+        real_actor = grpo.actor
+
+        class _NoParamActor:
+            def parameters(self):
+                return iter(())
+
+            def __getattr__(self, name):
+                return getattr(real_actor, name)
+
+        grpo.actor = _NoParamActor()
+        completion_ids, action_masks, _ = grpo.get_action(prompts, training=False)
+        assert len(completion_ids) == 1
         assert len(action_masks) == 1
         grpo.clean_up()
 
-    @pytest.mark.parametrize("config", [deepspeed_config_stage_2])
-    @pytest.mark.parametrize("use_deepspeed_optimizer", [False])
+    @pytest.mark.parametrize("dist_mode", ["dist"])
     @pytest.mark.parametrize("use_separate_reference_adapter", [False])
     @pytest.mark.parametrize("vocab_size", [100])
     @pytest.mark.parametrize("input_size", [10])
@@ -2337,12 +2132,10 @@ class TestGRPOGetAction:
     def test_get_action_grpo_vllm_sleep_mode(
         self,
         MockLLM,
-        deepspeed_env,
         grpo_factory,
-        accelerator_factory,
+        dist_mode_factory,
         model_factory,
-        config,
-        use_deepspeed_optimizer,
+        dist_mode,
         use_separate_reference_adapter,
         pretrained_model_name_or_path,
         vocab_size,
@@ -2361,10 +2154,9 @@ class TestGRPOGetAction:
         MockLLM.return_value = mock_instance
 
         grpo = grpo_factory(
-            accelerator_factory,
+            dist_mode_factory,
             model_factory,
-            config,
-            use_deepspeed_optimizer,
+            dist_mode,
             vocab_size,
             input_size,
             max_tokens,
@@ -2392,12 +2184,12 @@ class TestGRPOGetAction:
                 ),
             ) as mock_generate_with_vllm_colocate,
         ):
-            observation = {
+            prompt_dict = {
                 "input_ids": torch.randint(0, vocab_size, (1, 10)),
                 "attention_mask": torch.randint(0, 2, (1, 10)),
                 "text": "Write me a short story about a cat.",
             }
-            grpo.get_action([observation] * data_batch_size, training)
+            grpo.get_action([prompt_dict] * data_batch_size, training)
             mock_prepare_vllm_for_generation.assert_called()
             mock_generate_with_vllm_colocate.assert_called()
         mock_instance.sleep.assert_called()
@@ -2405,8 +2197,7 @@ class TestGRPOGetAction:
         grpo.clean_up()
 
     @spawn_new_process_for_each_test
-    @pytest.mark.parametrize("config", [deepspeed_config_stage_2])
-    @pytest.mark.parametrize("use_deepspeed_optimizer", [False])
+    @pytest.mark.parametrize("dist_mode", ["dist"])
     @pytest.mark.parametrize("use_separate_reference_adapter", [True])
     @pytest.mark.parametrize("vocab_size", [1000])
     @pytest.mark.parametrize("input_size", [10])
@@ -2422,12 +2213,10 @@ class TestGRPOGetAction:
     @pytest.mark.parametrize("tensor_parallel_size", [1, 2])
     def test_get_action_grpo_vllm_multiple_gpus(
         self,
-        deepspeed_env,
         grpo_factory,
-        accelerator_factory,
+        dist_mode_factory,
         model_factory,
-        config,
-        use_deepspeed_optimizer,
+        dist_mode,
         use_separate_reference_adapter,
         vocab_size,
         input_size,
@@ -2445,10 +2234,9 @@ class TestGRPOGetAction:
             patch.object(vllm.LLM, "__new__", return_value=mock_instance),
         ):
             grpo = grpo_factory(
-                accelerator_factory,
+                dist_mode_factory,
                 model_factory,
-                config,
-                use_deepspeed_optimizer,
+                dist_mode,
                 vocab_size,
                 input_size,
                 max_tokens,
@@ -2474,13 +2262,7 @@ class TestGRPOGetAction:
 
 class TestGRPOMoveModelToVllm:
     @spawn_new_process_for_each_test
-    @pytest.mark.parametrize(
-        "config",
-        [
-            deepspeed_config_stage_2,
-        ],
-    )
-    @pytest.mark.parametrize("use_deepspeed_optimizer", [False])
+    @pytest.mark.parametrize("dist_mode", ["dist"])
     @pytest.mark.parametrize("use_separate_reference_adapter", [True])
     @pytest.mark.parametrize("vocab_size", [100])
     @pytest.mark.parametrize("input_size", [10])
@@ -2494,12 +2276,10 @@ class TestGRPOMoveModelToVllm:
     @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
     def test_grpo_sync_actor_to_vllm(
         self,
-        deepspeed_env,
         grpo_factory,
         model_factory,
-        accelerator_factory,
-        config,
-        use_deepspeed_optimizer,
+        dist_mode_factory,
+        dist_mode,
         use_separate_reference_adapter,
         vocab_size,
         input_size,
@@ -2510,10 +2290,9 @@ class TestGRPOMoveModelToVllm:
         micro_batch_size_per_gpu,
     ):
         grpo = grpo_factory(
-            accelerator_factory,
+            dist_mode_factory,
             model_factory,
-            config,
-            use_deepspeed_optimizer,
+            dist_mode,
             vocab_size,
             input_size,
             max_tokens,
@@ -2542,11 +2321,11 @@ class TestGRPOGenerateWithVllmColocate:
     def test_generate_with_vllm_colocate_basic_contract(
         self,
         grpo_factory,
-        accelerator_factory,
+        dist_mode_factory,
         model_factory,
     ):
         grpo = _build_grpo_for_colocate_tests(
-            grpo_factory, accelerator_factory, model_factory
+            grpo_factory, dist_mode_factory, model_factory
         )
         prompts = [
             {
@@ -2564,13 +2343,13 @@ class TestGRPOGenerateWithVllmColocate:
             SimpleNamespace(outputs=[SimpleNamespace(token_ids=[10])]),
             SimpleNamespace(outputs=[SimpleNamespace(token_ids=[11, 12])]),
         ]
-        token_ids, action_masks, _ = grpo._generate_with_vllm_colocate(
+        completion_ids, action_masks, _ = grpo._generate_with_vllm_colocate(
             prompts=prompts,
             group_size=2,
             temperature=0.7,
         )
         assert_vllm_get_action_contract(
-            token_ids=token_ids,
+            token_ids=completion_ids,
             action_masks=action_masks,
             batch_size=2,
             prompt_len=3,
@@ -2581,11 +2360,11 @@ class TestGRPOGenerateWithVllmColocate:
     def test_generate_with_vllm_colocate_respects_training_kwargs(
         self,
         grpo_factory,
-        accelerator_factory,
+        dist_mode_factory,
         model_factory,
     ):
         grpo = _build_grpo_for_colocate_tests(
-            grpo_factory, accelerator_factory, model_factory, tensor_parallel_size=2
+            grpo_factory, dist_mode_factory, model_factory, tensor_parallel_size=2
         )
         prompts = [
             {
@@ -2609,14 +2388,14 @@ class TestGRPOGenerateWithVllmColocate:
             ),
             patch.object(torch.distributed, "get_rank", return_value=1),
         ):
-            token_ids, action_masks, _ = grpo._generate_with_vllm_colocate(
+            completion_ids, action_masks, _ = grpo._generate_with_vllm_colocate(
                 prompts=prompts,
                 group_size=1,
                 temperature=0.7,
             )
-        assert token_ids[0].shape[0] == 1
-        assert token_ids[0][0, -1].item() == 8
-        assert action_masks[0].shape[1] == token_ids[0].shape[1] - 1
+        assert completion_ids[0].shape[0] == 1
+        assert completion_ids[0][0, -1].item() == 8
+        assert action_masks[0].shape[1] == completion_ids[0].shape[1] - 1
         grpo.clean_up()
 
 
@@ -2955,8 +2734,11 @@ class TestGRPOAdvantageGranularityDecoupling:
     @pytest.mark.parametrize(
         ("advantage_granularity", "is_level", "expected"),
         [
-            ("trajectory", "turn", "trajectory"),
-            ("turn", "token", "turn"),
+            ("auto", "token", "trajectory"),
+            ("auto", "turn", "trajectory"),
+            ("auto", "trajectory", "trajectory"),
+            ("trajectory", "turn", "trajectory"),  # decoupled
+            ("turn", "token", "turn"),  # decoupled
             ("turn", "trajectory", "turn"),
             ("trajectory", "token", "trajectory"),
         ],
@@ -2976,7 +2758,7 @@ class TestGRPOAdvantageGranularityDecoupling:
         loss — the surrogate broadcasts a per-turn (B,T) or per-trajectory
         (B,1) advantage against a token/turn/trajectory-pooled ratio.
         """
-        stub = self._stub(adv_shape, is_level)
+        stub = self._stub("auto", is_level)
         torch.manual_seed(0)
         B, T = 4, 6
         log_probs = torch.randn(B, T)
@@ -3005,12 +2787,6 @@ class TestGRPOAdvantageGranularityDecoupling:
         """GRPO has no token-level advantage; the constructor must reject it."""
         with pytest.raises(ValueError, match="advantage_granularity"):
             _make_cpu_grpo_for_branch_tests(advantage_granularity="token")
-
-    def test_auto_advantage_granularity_accepted(self):
-        """``"auto"`` is stored as-is and resolved from the batch at learn time."""
-        grpo = _make_cpu_grpo_for_branch_tests(advantage_granularity="auto")
-        assert grpo.advantage_granularity == "auto"
-        grpo.clean_up()
 
 
 def _adv_stub(
@@ -3089,33 +2865,37 @@ class TestGRPOTrajectoryAdvantages:
 
     def test_collapses_per_turn_rewards_to_episode_returns(self):
         stub = _adv_stub()
-        token_ids = torch.zeros(2, 5, dtype=torch.long)
+        completion_ids = torch.zeros(2, 5, dtype=torch.long)
         # Per-turn rewards sum to [3, 6]; mean_only centering -> [-1.5, 1.5].
         rewards = torch.tensor([[1.0, 2.0], [2.0, 4.0]])
-        out = stub._trajectory_advantages(rewards, 2, token_ids)
+        out = stub._trajectory_advantages(rewards, 2, completion_ids)
         assert torch.allclose(out, torch.tensor([[-1.5], [1.5]]), atol=1e-6)
 
     def test_accepts_flat_per_trajectory_rewards(self):
         stub = _adv_stub()
-        token_ids = torch.zeros(2, 5, dtype=torch.long)
-        out = stub._trajectory_advantages(torch.tensor([1.0, 5.0]), 2, token_ids)
+        completion_ids = torch.zeros(2, 5, dtype=torch.long)
+        out = stub._trajectory_advantages(torch.tensor([1.0, 5.0]), 2, completion_ids)
         assert torch.allclose(out, torch.tensor([[-2.0], [2.0]]), atol=1e-6)
 
     def test_raises_when_rewards_do_not_collapse_to_one_per_trajectory(self):
         stub = _adv_stub()
-        token_ids = torch.zeros(2, 5, dtype=torch.long)
+        completion_ids = torch.zeros(2, 5, dtype=torch.long)
         with pytest.raises(
             ValueError, match="Rewards must provide one scalar per trajectory"
         ):
-            stub._trajectory_advantages(torch.tensor([1.0, 2.0, 3.0]), 2, token_ids)
+            stub._trajectory_advantages(
+                torch.tensor([1.0, 2.0, 3.0]), 2, completion_ids
+            )
 
     def test_raises_when_batch_not_divisible_by_group_size(self):
         stub = _adv_stub(group_size=2)
-        token_ids = torch.zeros(3, 5, dtype=torch.long)
+        completion_ids = torch.zeros(3, 5, dtype=torch.long)
         with pytest.raises(
             ValueError, match=r"Batch size \(3\) must be divisible by group_size \(2\)"
         ):
-            stub._trajectory_advantages(torch.tensor([1.0, 2.0, 3.0]), 3, token_ids)
+            stub._trajectory_advantages(
+                torch.tensor([1.0, 2.0, 3.0]), 3, completion_ids
+            )
 
 
 class TestGRPOWhitenAdvantages:
@@ -3255,8 +3035,7 @@ class TestGRPOCispoLoss:
 
 
 class TestGRPOLoss:
-    @pytest.mark.parametrize("config", [deepspeed_config_stage_2])
-    @pytest.mark.parametrize("use_deepspeed_optimizer", [False])
+    @pytest.mark.parametrize("dist_mode", ["dist"])
     @pytest.mark.parametrize("use_separate_reference_adapter", [False, True])
     @pytest.mark.parametrize("vocab_size", [1000])
     @pytest.mark.parametrize("input_size", [10])
@@ -3270,12 +3049,10 @@ class TestGRPOLoss:
     @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
     def test_grpo_loss(
         self,
-        deepspeed_env,
         grpo_factory,
-        accelerator_factory,
+        dist_mode_factory,
         model_factory,
-        config,
-        use_deepspeed_optimizer,
+        dist_mode,
         use_separate_reference_adapter,
         vocab_size,
         input_size,
@@ -3286,10 +3063,9 @@ class TestGRPOLoss:
         micro_batch_size_per_gpu,
     ):
         grpo = grpo_factory(
-            accelerator_factory,
+            dist_mode_factory,
             model_factory,
-            config,
-            use_deepspeed_optimizer,
+            dist_mode,
             vocab_size,
             input_size,
             max_tokens,
@@ -3316,7 +3092,7 @@ class TestGRPOLoss:
         loss, kl = grpo._loss(
             batch_size=10,
             minibatch_idxs=torch.arange(10, device=grpo.device),
-            token_ids=torch.randint(
+            completion_ids=torch.randint(
                 0, vocab_size, (10, max_tokens + 1), device=grpo.device
             ),
             action_mask=mask,
@@ -3330,8 +3106,7 @@ class TestGRPOLoss:
 
 
 class TestGRPOLearn:
-    @pytest.mark.parametrize("config", [deepspeed_config_stage_2])
-    @pytest.mark.parametrize("use_deepspeed_optimizer", [False])
+    @pytest.mark.parametrize("dist_mode", ["dist"])
     @pytest.mark.parametrize("use_separate_reference_adapter", [False, True])
     @pytest.mark.parametrize("vocab_size", [1000])
     @pytest.mark.parametrize("input_size", [10])
@@ -3347,12 +3122,10 @@ class TestGRPOLearn:
     @pytest.mark.parametrize("use_liger_loss", [False, True])
     def test_grpo_learn(
         self,
-        deepspeed_env,
         grpo_factory,
-        accelerator_factory,
+        dist_mode_factory,
         model_factory,
-        config,
-        use_deepspeed_optimizer,
+        dist_mode,
         use_separate_reference_adapter,
         vocab_size,
         input_size,
@@ -3374,10 +3147,33 @@ class TestGRPOLearn:
         )
         with llm_patch_ctx:
             grpo = grpo_factory(
-                accelerator_factory,
+                dist_mode_factory,
                 model_factory,
-                config,
-                use_deepspeed_optimizer,
+                dist_mode,
+                vocab_size,
+                input_size,
+                max_tokens,
+                group_size,
+                use_separate_reference_adapter,
+                use_vllm,
+                pretrained_model_name_or_path,
+                micro_batch_size_per_gpu,
+                sleep_mode=True,
+                use_liger_loss=use_liger_loss,
+            )
+        if use_vllm and use_liger_loss:
+            pytest.skip("Skip vLLM learn path with liger in this mocked-call test.")
+        mock_llm_instance = make_mock_vllm_instance(vllm.LLM)
+        llm_patch_ctx = (
+            patch("agilerl.algorithms.core.base.LLM", return_value=mock_llm_instance)
+            if use_vllm
+            else nullcontext()
+        )
+        with llm_patch_ctx:
+            grpo = grpo_factory(
+                dist_mode_factory,
+                model_factory,
+                dist_mode,
                 vocab_size,
                 input_size,
                 max_tokens,
@@ -3463,20 +3259,20 @@ class TestGRPOLearn:
 
     def test_learn_raises_when_rewards_count_mismatch(self):
         grpo = _make_cpu_grpo_for_branch_tests(group_size=2)
-        token_ids, action_masks = _build_branch_experiences(batch_size=3)
+        completion_ids, action_masks = _build_branch_experiences(batch_size=3)
         rewards = torch.tensor([1.0, -1.0], dtype=torch.float32)
         with pytest.raises(
             ValueError, match="Rewards must provide one scalar per trajectory"
         ):
-            grpo.learn((token_ids, action_masks, rewards))
+            grpo.learn((completion_ids, action_masks, rewards))
         grpo.clean_up()
 
     def test_learn_raises_when_batch_not_divisible_by_group_size(self):
         grpo = _make_cpu_grpo_for_branch_tests(group_size=2)
-        token_ids, action_masks = _build_branch_experiences(batch_size=3)
+        completion_ids, action_masks = _build_branch_experiences(batch_size=3)
         rewards = torch.tensor([1.0, 0.0, -1.0], dtype=torch.float32)
         with pytest.raises(ValueError, match="must be divisible by group_size"):
-            grpo.learn((token_ids, action_masks, rewards))
+            grpo.learn((completion_ids, action_masks, rewards))
         grpo.clean_up()
 
     def test_learn_filter_whiten_clip_branch_path_with_active_subset(self):
@@ -3487,7 +3283,7 @@ class TestGRPOLearn:
             adv_clip_range=0.1,
             adv_filter_eps=0.05,
         )
-        token_ids, action_masks = _build_branch_experiences(batch_size=4)
+        completion_ids, action_masks = _build_branch_experiences(batch_size=4)
         rewards = torch.tensor([1.0, 0.0, -1.0, 2.0], dtype=torch.float32)
 
         def fake_fused_forward(ids, batch_size):
@@ -3513,7 +3309,7 @@ class TestGRPOLearn:
             ) as mock_grpo_loss,
             patch.object(grpo, "_backward_pass", return_value=None),
         ):
-            metrics = grpo.learn((token_ids, action_masks, rewards))
+            metrics = grpo.learn((completion_ids, action_masks, rewards))
         processed_advantages = mock_grpo_loss.call_args.args[5]
         assert processed_advantages.abs().max().item() <= 0.100001
         assert metrics["loss"] == pytest.approx(1.0)
@@ -3568,9 +3364,8 @@ class TestGRPOLearn:
             zeros = torch.zeros(shape, dtype=torch.float32, device=ids.device)
             return zeros, zeros, None
 
-        grpo._uses_deepspeed = True
         grpo.micro_batch_size_per_gpu = 1
-        grpo.actor.gradient_accumulation_steps = lambda: 2
+        grpo.gradient_accumulation_steps = 2
         original_record = GRPO._record_window_action_tokens
         window_sizes: list[int] = []
 
@@ -3611,9 +3406,8 @@ class TestGRPOLearn:
             zeros = torch.zeros(shape, dtype=torch.float32, device=ids.device)
             return zeros, zeros, None
 
-        grpo._uses_deepspeed = True
         grpo.micro_batch_size_per_gpu = 1
-        grpo.actor.gradient_accumulation_steps = lambda: 2
+        grpo.gradient_accumulation_steps = 2
         with (
             patch.object(
                 grpo, "_fused_forward_no_grad", side_effect=fake_fused_forward
@@ -3639,7 +3433,7 @@ class TestGRPOLearn:
             adv_filter_eps=0.5,
             whiten_advantages=True,
         )
-        token_ids, action_masks = _build_branch_experiences(batch_size=4)
+        completion_ids, action_masks = _build_branch_experiences(batch_size=4)
         rewards = torch.tensor([1.0, 0.0, -1.0, 2.0], dtype=torch.float32)
         with (
             pytest.warns(
@@ -3652,7 +3446,7 @@ class TestGRPOLearn:
                 return_value=torch.zeros(4, 1, dtype=torch.float32),
             ),
         ):
-            metrics = grpo.learn((token_ids, action_masks, rewards))
+            metrics = grpo.learn((completion_ids, action_masks, rewards))
         assert metrics == {"loss": 0.0, "kl": 0.0}
         grpo.clean_up()
 
@@ -3663,7 +3457,6 @@ class TestGRPOLearn:
             adv_filter_eps=0.5,
             whiten_advantages=True,
         )
-        grpo.accelerator = _make_two_process_accelerator_mock()
         completion_ids, action_masks = _build_branch_experiences(batch_size=4)
         rewards = torch.tensor([1.0, 0.0, -1.0, 2.0], dtype=torch.float32)
         seen_advantages: list[torch.Tensor] = []
@@ -3677,6 +3470,11 @@ class TestGRPOLearn:
 
         with (
             warnings.catch_warnings(),
+            patch("agilerl.algorithms.grpo.get_world_size", return_value=2),
+            patch(
+                "agilerl.algorithms.grpo.allreduce_minmax_int",
+                side_effect=lambda value: (value, value),
+            ),
             patch.object(
                 grpo,
                 "_calculate_advantage",
@@ -3689,82 +3487,18 @@ class TestGRPOLearn:
                 "error", message="All samples were filtered by advantage threshold"
             )
             metrics = grpo.learn((completion_ids, action_masks, rewards))
-        assert "completion_length" in metrics
-        assert mock_loss.call_count == mock_backward.call_count > 0
-        assert sum(adv.shape[0] for adv in seen_advantages) == 4
-        assert all(torch.all(adv == 0.0) for adv in seen_advantages)
-        grpo.accelerator.wait_for_everyone.assert_not_called()
-        grpo.clean_up()
-
-    def test_learn_multiprocess_filtered_rank_matches_peer_and_has_zero_grads(self):
-        torch.manual_seed(42)
-        ranks = [
-            _make_cpu_grpo_for_branch_tests(
-                group_size=2,
-                filter_zero_adv=True,
-                adv_filter_eps=0.5,
-                beta=0.0,
-            )
-            for _ in range(2)
-        ]
-        backward_counts = []
-        for rank, rewards in zip(
-            ranks,
-            [
-                torch.tensor([1.0, 1.0, 2.0, 2.0], dtype=torch.float32),
-                torch.tensor([1.0, 1.0, -1.0, 2.0], dtype=torch.float32),
-            ],
-            strict=True,
-        ):
-            rank.accelerator = _make_two_process_accelerator_mock()
-            rank.micro_batch_size_per_gpu = 1
-            completion_ids, action_masks = _build_branch_experiences(batch_size=4)
-            with patch.object(
-                rank,
-                "_backward_pass",
-                side_effect=lambda loss: loss.backward(),
-            ) as mock_backward:
-                metrics = rank.learn((completion_ids, action_masks, rewards))
-            assert "completion_length" in metrics
-            backward_counts.append(mock_backward.call_count)
-        # Uniform rewards zero every advantage on rank 0 and half on rank 1;
-        # masking keeps all four samples on both ranks, so each runs the same
-        # four single-sample backward passes.
-        assert backward_counts == [4, 4]
-
-        filtered_grads = [
-            p.grad for p in ranks[0].actor.parameters() if p.grad is not None
-        ]
-        assert filtered_grads
-        assert all(torch.all(grad == 0.0) for grad in filtered_grads)
-        active_grads = [
-            p.grad for p in ranks[1].actor.parameters() if p.grad is not None
-        ]
-        assert any(torch.any(grad != 0.0) for grad in active_grads)
-        for rank in ranks:
-            rank.clean_up()
-
-    def test_learn_raises_on_cross_rank_seq_len_mismatch(self):
-        grpo = _make_cpu_grpo_for_branch_tests()
-        grpo.zero_stage = 3
-        acc = MagicMock()
-        acc.num_processes = 2
-        acc.device = torch.device("cpu")
-        acc.gather.side_effect = lambda t: torch.tensor([3, 5], dtype=t.dtype)
-        acc.free_memory.side_effect = lambda *objs: objs
-        grpo.accelerator = acc
-        completion_ids, action_masks = _build_branch_experiences(batch_size=2)
-        rewards = torch.tensor([1.0, -1.0], dtype=torch.float32)
-        with pytest.raises(
-            RuntimeError, match="Cross-rank completion sequence length mismatch"
-        ):
-            grpo.learn((completion_ids, action_masks, rewards))
+        assert mock_loss.called
+        assert mock_backward.called
+        assert seen_advantages
+        assert all(torch.equal(adv, torch.zeros_like(adv)) for adv in seen_advantages)
+        assert metrics["loss"] == 0.0
+        assert metrics[grpo.aux_metric_name] == 0.0
         grpo.clean_up()
 
     def test_learn_empty_minibatch_branch_continues_without_grpo_step(self):
         grpo = _make_cpu_grpo_for_branch_tests(group_size=2, update_epochs=1)
         grpo.rng = SimpleNamespace(shuffle=lambda _x: None)
-        token_ids, action_masks = _build_branch_experiences(batch_size=2)
+        completion_ids, action_masks = _build_branch_experiences(batch_size=2)
         rewards = torch.tensor([1.0, -1.0], dtype=torch.float32)
 
         class EmptySlicingBatchIndices(np.ndarray):
@@ -3792,13 +3526,12 @@ class TestGRPOLearn:
                 grpo, "_loss", side_effect=AssertionError("should not be called")
             ),
         ):
-            metrics = grpo.learn((token_ids, action_masks, rewards))
+            metrics = grpo.learn((completion_ids, action_masks, rewards))
         assert metrics["loss"] == 0.0
-        assert metrics["kl"] == 0.0
+        assert metrics[grpo.aux_metric_name] == 0.0
         grpo.clean_up()
 
-    @pytest.mark.parametrize("config", [deepspeed_config_stage_2])
-    @pytest.mark.parametrize("use_deepspeed_optimizer", [False])
+    @pytest.mark.parametrize("dist_mode", ["dist"])
     @pytest.mark.parametrize("use_separate_reference_adapter", [False, True])
     @pytest.mark.parametrize("vocab_size", [1000])
     @pytest.mark.parametrize("input_size", [10])
@@ -3813,12 +3546,10 @@ class TestGRPOLearn:
     @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
     def test_grpo_value_error_with_nan_loss(
         self,
-        deepspeed_env,
         grpo_factory,
         model_factory,
-        accelerator_factory,
-        config,
-        use_deepspeed_optimizer,
+        dist_mode_factory,
+        dist_mode,
         use_separate_reference_adapter,
         vocab_size,
         input_size,
@@ -3830,10 +3561,9 @@ class TestGRPOLearn:
         micro_batch_size_per_gpu,
     ):
         grpo = grpo_factory(
-            accelerator_factory,
+            dist_mode_factory,
             model_factory,
-            config,
-            use_deepspeed_optimizer,
+            dist_mode,
             vocab_size,
             input_size,
             max_tokens,
@@ -3877,11 +3607,6 @@ class TestGRPOLearn:
 
     def test_grpo_learn_raises_when_peer_rank_has_nonfinite_loss(self):
         grpo = _make_cpu_grpo_for_branch_tests(group_size=2, update_epochs=1)
-        mock_acc = MagicMock()
-        mock_acc.num_processes = 2
-        mock_acc.device = torch.device("cpu")
-        mock_acc.free_memory.side_effect = lambda *objs: objs
-        grpo.accelerator = mock_acc
         completion_ids, action_masks = _build_branch_experiences(batch_size=2)
         rewards = torch.tensor([1.0, -1.0], dtype=torch.float32)
 
@@ -3890,7 +3615,21 @@ class TestGRPOLearn:
             zeros = torch.zeros(shape, dtype=torch.float32, device=ids.device)
             return zeros, zeros, None
 
+        def fake_minmax(value):
+            if value in (0, 1):
+                return (0, 1)
+            return (value, value)
+
         with (
+            patch("agilerl.algorithms.core.base.get_world_size", return_value=2),
+            patch("agilerl.algorithms.grpo.get_world_size", return_value=2),
+            patch(
+                "agilerl.algorithms.core.base.allreduce_minmax_int",
+                side_effect=fake_minmax,
+            ),
+            patch(
+                "agilerl.algorithms.grpo.allreduce_minmax_int", side_effect=fake_minmax
+            ),
             patch.object(
                 grpo, "_fused_forward_no_grad", side_effect=fake_fused_forward
             ),
@@ -3902,31 +3641,24 @@ class TestGRPOLearn:
                     torch.tensor(0.0, dtype=torch.float32),
                 ),
             ),
-            patch(
-                "agilerl.algorithms.core.base.allreduce_minmax_int",
-                return_value=(0, 1),
-            ) as mock_reduce,
             patch.object(grpo, "_backward_pass") as mock_backward,
             pytest.raises(ValueError, match="Loss is not finite"),
         ):
             grpo.learn((completion_ids, action_masks, rewards))
 
-        mock_reduce.assert_called_once_with(0, mock_acc)
         mock_backward.assert_not_called()
         grpo.clean_up()
 
     def test_grpo_learn_raises_when_loss_not_finite(
         self,
-        deepspeed_env,
         grpo_factory,
-        accelerator_factory,
+        dist_mode_factory,
         model_factory,
     ):
         grpo = grpo_factory(
-            accelerator_factory,
+            dist_mode_factory,
             model_factory,
-            config=None,
-            use_deepspeed_optimizer=False,
+            dist_mode=None,
             vocab_size=30,
             input_size=5,
             max_tokens=10,
@@ -3960,16 +3692,14 @@ class TestGRPOLearn:
 
     def test_grpo_learn_runs_without_gradient_checkpointing_hooks(
         self,
-        deepspeed_env,
         grpo_factory,
-        accelerator_factory,
+        dist_mode_factory,
         model_factory,
     ):
         grpo = grpo_factory(
-            accelerator_factory,
+            dist_mode_factory,
             model_factory,
-            config=None,
-            use_deepspeed_optimizer=False,
+            dist_mode=None,
             vocab_size=30,
             input_size=5,
             max_tokens=10,
@@ -3991,75 +3721,20 @@ class TestGRPOLearn:
         rewards = torch.stack([torch.rand(2, dtype=torch.float32)], dim=0)
 
         metrics = grpo.learn((completions, action_masks, rewards))
-        assert set(metrics.keys()) == {"loss", "kl", "completion_length"}
-        grpo.clean_up()
-
-    @pytest.mark.gpu
-    def test_grpo_learn_with_natively_loaded_fp16_checkpoint(self):
-        """A checkpoint declaring fp16 trains without an explicit recast.
-
-        transformers honors the checkpoint's ``dtype`` (the tiny_llm fixture
-        stores float16), and under the bf16 autocast in ``_amp_ctx`` the final
-        norm promotes hidden states to fp32 while the lm_head weight stays
-        fp16 — the fused logprob matmul must reconcile the operand dtypes.
-        """
-        if not torch.cuda.is_available():
-            pytest.skip("The autocast/checkpoint dtype mismatch requires CUDA.")
-        from transformers import AutoModelForCausalLM
-
-        actor = AutoModelForCausalLM.from_pretrained(
-            TINY_LLM_FIXTURE_PATH, attn_implementation="sdpa"
-        )
-        # The fixture must keep declaring fp16 for this regression test to
-        # exercise the mixed-dtype path.
-        assert next(actor.parameters()).dtype == torch.float16
-
-        vocab_size, input_size, max_tokens, group_size = 1000, 5, 10, 2
-        grpo = GRPO(
-            actor_network=actor,
-            lr=1e-5,
-            pad_token_id=vocab_size - 1,
-            pad_token="<pad>",
-            device="cuda",
-            group_size=group_size,
-            lora_config=LoraConfig(
-                r=8,
-                lora_alpha=16,
-                target_modules=["q_proj", "v_proj"],
-                task_type="CAUSAL_LM",
-            ),
-            max_output_tokens=max_tokens,
-            max_model_len=input_size + max_tokens,
-        )
-        completions = [
-            torch.randint(
-                0, vocab_size, (group_size, input_size + max_tokens), device="cuda"
-            )
-            for _ in range(2)
-        ]
-        action_masks = [
-            torch.ones((group_size, input_size + max_tokens - 1), device="cuda")
-            for _ in range(2)
-        ]
-        rewards = torch.stack([torch.rand(group_size) for _ in range(2)], dim=0)
-
-        metrics = grpo.learn((completions, action_masks, rewards))
-        assert np.isfinite(metrics["loss"])
-        assert np.isfinite(metrics["kl"])
+        assert {"loss", grpo.aux_metric_name} <= set(metrics)
         grpo.clean_up()
 
     def test_grpo_learn_calls_mps_empty_cache(
         self,
         monkeypatch: pytest.MonkeyPatch,
-        accelerator_factory,
+        dist_mode_factory,
         model_factory,
     ) -> None:
         """Patch MPS on CI so ``torch.mps.empty_cache()`` in ``learn()`` is exercised."""
         grpo = generate_grpo(
-            accelerator_factory,
+            dist_mode_factory,
             model_factory,
-            config=None,
-            use_deepspeed_optimizer=False,
+            dist_mode=None,
             vocab_size=30,
             input_size=5,
             max_tokens=10,
@@ -4096,12 +3771,10 @@ class TestGRPOLearn:
         grpo.learn((completions, action_masks, rewards))
         empty.assert_called()
         grpo.clean_up()
-        AcceleratorState._reset_state(True)
 
 
 class TestGRPOGetLogprobs:
-    @pytest.mark.parametrize("config", [deepspeed_config_stage_2])
-    @pytest.mark.parametrize("use_deepspeed_optimizer", [False])
+    @pytest.mark.parametrize("dist_mode", ["dist"])
     @pytest.mark.parametrize("use_separate_reference_adapter", [False, True])
     @pytest.mark.parametrize("vocab_size", [1000])
     @pytest.mark.parametrize("input_size", [10])
@@ -4119,12 +3792,10 @@ class TestGRPOGetLogprobs:
     @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
     def test_get_logprobs(
         self,
-        deepspeed_env,
         grpo_factory,
-        accelerator_factory,
+        dist_mode_factory,
         model_factory,
-        config,
-        use_deepspeed_optimizer,
+        dist_mode,
         use_separate_reference_adapter,
         vocab_size,
         input_size,
@@ -4136,10 +3807,9 @@ class TestGRPOGetLogprobs:
         micro_batch_size_per_gpu,
     ):
         grpo = grpo_factory(
-            accelerator_factory,
+            dist_mode_factory,
             model_factory,
-            config,
-            use_deepspeed_optimizer,
+            dist_mode,
             vocab_size,
             input_size,
             max_tokens,
@@ -4159,8 +3829,7 @@ class TestGRPOGetLogprobs:
 
 
 class TestGRPOBackwardPass:
-    @pytest.mark.parametrize("config", [None])
-    @pytest.mark.parametrize("use_deepspeed_optimizer", [False])
+    @pytest.mark.parametrize("dist_mode", [None])
     @pytest.mark.parametrize("use_separate_reference_adapter", [False, True])
     @pytest.mark.parametrize("vocab_size", [1000])
     @pytest.mark.parametrize("input_size", [10])
@@ -4175,12 +3844,10 @@ class TestGRPOBackwardPass:
     @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
     def test_get_backward_pass_with_scheduler(
         self,
-        deepspeed_env,
         grpo_factory,
-        accelerator_factory,
+        dist_mode_factory,
         model_factory,
-        config,
-        use_deepspeed_optimizer,
+        dist_mode,
         use_separate_reference_adapter,
         vocab_size,
         input_size,
@@ -4192,10 +3859,9 @@ class TestGRPOBackwardPass:
         micro_batch_size_per_gpu,
     ):
         grpo = grpo_factory(
-            accelerator_factory,
+            dist_mode_factory,
             model_factory,
-            config,
-            use_deepspeed_optimizer,
+            dist_mode,
             vocab_size,
             input_size,
             max_tokens,
@@ -4220,14 +3886,7 @@ class TestGRPOLoad:
 
 
 class TestGRPOSaveLoadCheckpoint:
-    @pytest.mark.parametrize(
-        ("config", "use_deepspeed_optimizer"),
-        [
-            (deepspeed_config_stage_2, True),
-            (None, False),
-            (deepspeed_config_stage_1, True),
-        ],
-    )
+    @pytest.mark.parametrize("dist_mode", [None, "dist"])
     @pytest.mark.parametrize("use_separate_reference_adapter", [False, True])
     @pytest.mark.parametrize("vocab_size", [1000])
     @pytest.mark.parametrize("input_size", [10])
@@ -4242,12 +3901,10 @@ class TestGRPOSaveLoadCheckpoint:
     @pytest.mark.parametrize("lora_only", [False, True])
     def test_grpo_save_load_checkpoint(
         self,
-        deepspeed_env,
         grpo_factory,
-        accelerator_factory,
+        dist_mode_factory,
         model_factory,
-        config,
-        use_deepspeed_optimizer,
+        dist_mode,
         use_separate_reference_adapter,
         vocab_size,
         input_size,
@@ -4260,10 +3917,9 @@ class TestGRPOSaveLoadCheckpoint:
         lora_only,
     ):
         grpo = grpo_factory(
-            accelerator_factory,
+            dist_mode_factory,
             model_factory,
-            config,
-            use_deepspeed_optimizer,
+            dist_mode,
             vocab_size,
             input_size,
             max_tokens,
@@ -4273,7 +3929,7 @@ class TestGRPOSaveLoadCheckpoint:
             pretrained_model_name_or_path,
             micro_batch_size_per_gpu,
         )
-        accelerator = accelerator_factory(use_deepspeed_optimizer, config)
+        dist_mode_factory(dist_mode)
         with tempfile.TemporaryDirectory() as tmpdir:
             grpo.save_checkpoint(tmpdir, lora_only=lora_only)
             new_grpo = GRPO(
@@ -4285,11 +3941,10 @@ class TestGRPOSaveLoadCheckpoint:
                 lora_config=copy.deepcopy(grpo.lora_config),
                 cosine_lr_schedule_config=(
                     None
-                    if accelerator is not None
+                    if dist_mode is not None
                     else CosineLRScheduleConfig(num_epochs=10, warmup_proportion=0.05)
                 ),
                 use_vllm=use_vllm,
-                accelerator=accelerator,
                 use_separate_reference_adapter=use_separate_reference_adapter,
                 # Match the saved agent's setting so the constructor doesn't
                 # mutate ``lora_config`` differently (``use_liger_loss=True``
@@ -4319,7 +3974,7 @@ class TestGRPOSaveLoadCheckpoint:
                             strict=False,
                         ):
                             assert torch.equal(param, new_param)
-                    elif attr in {"accelerator", "lr_scheduler"}:
+                    elif attr == "lr_scheduler":
                         assert (
                             getattr(new_grpo, attr).__class__.__name__
                             == getattr(grpo, attr).__class__.__name__
@@ -4353,99 +4008,10 @@ class TestGRPOSaveLoadCheckpoint:
         new_grpo.clean_up()
 
 
-class TestLLMRestoreCheckpointAttributes:
-    def test_live_device_and_lora_config_survive_restore(self):
-        """A checkpoint written on another device must not relocate the loader.
+class TestGRPOSaveLoadCheckpointResume:
+    """Resume-style round trips: optimizer state embedded in attributes.pt."""
 
-        Population members share a checkpoint but occupy different GPUs, so the
-        device recorded in the payload belongs to whichever member saved it.
-        """
-        agent = SimpleNamespace(
-            device=torch.device("cuda", 2),
-            lora_config="live",
-            selected_adapters=("actor",),
-        )
-        checkpoint = {
-            "device": torch.device("cuda", 0),
-            "lora_config": "stale",
-            "selected_adapters": ("actor", "reference"),
-            "steps": 6,
-        }
-
-        LLMAlgorithm._restore_checkpoint_attributes(agent, checkpoint)
-
-        assert agent.device == torch.device("cuda", 2)
-        assert agent.lora_config == "live"
-        assert agent.selected_adapters == ("actor",)
-        assert agent.steps == 6
-
-
-class TestGRPOSaveLoadDistributedActor:
-    @pytest.mark.parametrize("config", [None])
-    @pytest.mark.parametrize("use_deepspeed_optimizer", [False])
-    @pytest.mark.parametrize("use_separate_reference_adapter", [False])
-    @pytest.mark.parametrize("vocab_size", [1000])
-    @pytest.mark.parametrize("input_size", [10])
-    @pytest.mark.parametrize("max_tokens", [20])
-    @pytest.mark.parametrize("group_size", [5])
-    @pytest.mark.parametrize(
-        ("use_vllm", "pretrained_model_name_or_path"),
-        [(False, TINY_LLM_FIXTURE_PATH)],
-    )
-    @pytest.mark.vllm
-    @pytest.mark.parametrize("batch_size", [1])
-    @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
-    def test_save_load_distributed_actor_no_accelerator(
-        self,
-        deepspeed_env,
-        grpo_factory,
-        model_factory,
-        accelerator_factory,
-        config,
-        use_deepspeed_optimizer,
-        use_separate_reference_adapter,
-        vocab_size,
-        input_size,
-        max_tokens,
-        group_size,
-        use_vllm,
-        pretrained_model_name_or_path,
-        batch_size,
-        tmpdir,
-        micro_batch_size_per_gpu,
-    ):
-        grpo = grpo_factory(
-            accelerator_factory,
-            model_factory,
-            config,
-            use_deepspeed_optimizer,
-            vocab_size,
-            input_size,
-            max_tokens,
-            group_size,
-            use_separate_reference_adapter,
-            use_vllm,
-            pretrained_model_name_or_path,
-            micro_batch_size_per_gpu,
-        )
-        checkpoint_path = Path(tmpdir) / "checkpoint.pth"
-        with pytest.warns(
-            UserWarning,
-            match=r"Distributed actor save not supported for non-distributed training\.",
-        ):
-            grpo._save_distributed_actor(checkpoint_path)
-
-        with pytest.warns(
-            UserWarning,
-            match=r"Distributed actor load not supported for non-distributed training\.",
-        ):
-            grpo._load_distributed_actor(checkpoint_path)
-        grpo.clean_up()
-
-    @pytest.mark.parametrize(
-        "config", [deepspeed_config_stage_2, deepspeed_config_stage_1]
-    )
-    @pytest.mark.parametrize("use_deepspeed_optimizer", [False, True])
+    @pytest.mark.parametrize("dist_mode", [None, "dist"])
     @pytest.mark.parametrize("use_separate_reference_adapter", [False, True])
     @pytest.mark.parametrize("vocab_size", [1000])
     @pytest.mark.parametrize("input_size", [10])
@@ -4457,14 +4023,12 @@ class TestGRPOSaveLoadDistributedActor:
     )
     @pytest.mark.vllm
     @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
-    def test_grpo_save_load_distributed_actor(
+    def test_grpo_save_load_checkpoint_with_optimizer(
         self,
-        deepspeed_env,
         grpo_factory,
-        accelerator_factory,
         model_factory,
-        config,
-        use_deepspeed_optimizer,
+        dist_mode_factory,
+        dist_mode,
         use_separate_reference_adapter,
         vocab_size,
         input_size,
@@ -4476,10 +4040,9 @@ class TestGRPOSaveLoadDistributedActor:
         micro_batch_size_per_gpu,
     ):
         grpo = grpo_factory(
-            accelerator_factory,
+            dist_mode_factory,
             model_factory,
-            config,
-            use_deepspeed_optimizer,
+            dist_mode,
             vocab_size,
             input_size,
             max_tokens,
@@ -4489,100 +4052,65 @@ class TestGRPOSaveLoadDistributedActor:
             pretrained_model_name_or_path,
             micro_batch_size_per_gpu,
         )
-        accelerator = accelerator_factory(use_deepspeed_optimizer, config)
-        checkpoint_path = Path(tmpdir) / "checkpoint.pth"
-        grpo._save_distributed_actor(checkpoint_path)
-        grpo_optim_state_dict = (
-            grpo.actor.optimizer.state_dict()
-            if use_deepspeed_optimizer
-            else grpo.optimizer.state_dict()
+        # Take an optimizer step so there is real state to round-trip.
+        ids = torch.randint(
+            0, vocab_size, (1, input_size + max_tokens), device=grpo.device
         )
-        grpo_optim_state_dict.pop("loss_scaler", None)
+        loss = grpo.actor.forward(ids).logits.mean()
+        grpo._backward_pass(loss)
+
+        grpo.save_checkpoint(tmpdir, save_optimizer=True)
+
+        attributes = torch.load(str(Path(tmpdir) / "attributes.pt"), weights_only=False)
+        assert attributes["network_info"]["optimizers"]["optimizer_state_dict"]
+        # No engine-format tag directories are written anymore.
+        assert not (Path(tmpdir) / "save_checkpoint").exists()
+
+        dist_mode_factory(dist_mode)
         new_grpo = GRPO(
             actor_network=model_factory(pretrained_model_name_or_path),
             pad_token_id=vocab_size - 1,
             pad_token="<pad>",
             device="cuda" if torch.cuda.is_available() else "cpu",
             group_size=group_size,
-            lora_config=LoraConfig(
-                r=16,
-                lora_alpha=64,
-                target_modules=[
-                    "q_proj",
-                    "k_proj",
-                    "v_proj",
-                    "o_proj",
-                    "gate_proj",
-                    "up_proj",
-                    "down_proj",
-                ],
-                task_type="CAUSAL_LM",
-                lora_dropout=0.05,
-            ),
-            cosine_lr_schedule_config=(
-                None
-                if accelerator is not None
-                else CosineLRScheduleConfig(num_epochs=10, warmup_proportion=0.05)
-            ),
-            accelerator=accelerator,
+            lora_config=copy.deepcopy(grpo.lora_config),
+            cosine_lr_schedule_config=None,
             use_separate_reference_adapter=use_separate_reference_adapter,
+            max_output_tokens=max_tokens,
         )
-        new_grpo._load_distributed_actor(checkpoint_path)
+        new_grpo.load_checkpoint(tmpdir, load_optimizer=True)
 
-        if use_deepspeed_optimizer:
-            opt = grpo.actor.optimizer
-            new_opt = new_grpo.actor.optimizer
-        else:
-            opt = grpo.optimizer
-            new_opt = new_grpo.optimizer
-
-        if not use_deepspeed_optimizer and accelerator is None:
-            assert (
-                new_opt.optimizer.loss_scaler.cur_scale
-                == opt.optimizer.loss_scaler.cur_scale
-            )
-        assert new_opt.state_dict().keys() == opt.state_dict().keys()
-
-        # Check that the actor network is updated and the reference actor is not
-        for param, pre_learn_param in zip(
-            new_grpo.actor.parameters(),
-            grpo.actor.parameters(),
-            strict=False,
-        ):
-            assert torch.equal(param, pre_learn_param)
-
-        for key in new_opt.state_dict():
-            if key == "loss_scaler":
-                continue
-            assert str(new_opt.state_dict()[key]) == str(grpo_optim_state_dict[key])
+        old_state = grpo.optimizer.state_dict()
+        new_state = new_grpo.optimizer.state_dict()
+        assert len(old_state["state"]) == len(new_state["state"])
+        for idx, entry in old_state["state"].items():
+            for key, value in entry.items():
+                if isinstance(value, torch.Tensor):
+                    assert torch.allclose(
+                        value.cpu(), new_state["state"][idx][key].cpu()
+                    ), f"Optimizer state {idx}/{key} not equal"
+                else:
+                    assert value == new_state["state"][idx][key]
         grpo.clean_up()
         new_grpo.clean_up()
 
-    @pytest.mark.skip(
-        reason="This line adds no additional coverage, methods not dependent on vllm.",
-    )
-    @pytest.mark.parametrize("config", [deepspeed_config_stage_2])
-    @pytest.mark.parametrize("use_deepspeed_optimizer", [True])
-    @pytest.mark.parametrize("use_separate_reference_adapter", [True])
+    @pytest.mark.parametrize("dist_mode", [None])
     @pytest.mark.parametrize("vocab_size", [1000])
     @pytest.mark.parametrize("input_size", [10])
     @pytest.mark.parametrize("max_tokens", [20])
     @pytest.mark.parametrize("group_size", [5])
     @pytest.mark.parametrize(
         ("use_vllm", "pretrained_model_name_or_path"),
-        [(True, TINY_LLM_FIXTURE_PATH)],
+        [(False, TINY_LLM_FIXTURE_PATH)],
     )
     @pytest.mark.vllm
     @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
-    def test_grpo_save_load_distributed_actor_vllm(
+    def test_grpo_load_optimizer_warns_when_state_missing(
         self,
-        deepspeed_env,
         grpo_factory,
-        accelerator_factory,
         model_factory,
-        config,
-        use_deepspeed_optimizer,
-        use_separate_reference_adapter,
+        dist_mode_factory,
+        dist_mode,
         vocab_size,
         input_size,
         max_tokens,
@@ -4593,94 +4121,26 @@ class TestGRPOSaveLoadDistributedActor:
         micro_batch_size_per_gpu,
     ):
         grpo = grpo_factory(
-            accelerator_factory,
+            dist_mode_factory,
             model_factory,
-            config,
-            use_deepspeed_optimizer,
+            dist_mode,
             vocab_size,
             input_size,
             max_tokens,
             group_size,
-            use_separate_reference_adapter,
+            False,
             use_vllm,
             pretrained_model_name_or_path,
             micro_batch_size_per_gpu,
         )
-        accelerator = accelerator_factory(use_deepspeed_optimizer, config)
-        checkpoint_path = Path(tmpdir) / "checkpoint.pth"
-        grpo._save_distributed_actor(checkpoint_path)
-        grpo_optim_state_dict = (
-            grpo.actor.optimizer.state_dict()
-            if use_deepspeed_optimizer
-            else grpo.optimizer.state_dict()
-        )
-        grpo_optim_state_dict.pop("loss_scaler", None)
-        new_grpo = GRPO(
-            actor_network=model_factory(pretrained_model_name_or_path),
-            pad_token_id=vocab_size - 1,
-            pad_token="<pad>",
-            device="cuda" if torch.cuda.is_available() else "cpu",
-            group_size=group_size,
-            lora_config=LoraConfig(
-                r=16,
-                lora_alpha=64,
-                target_modules=[
-                    "q_proj",
-                    "k_proj",
-                    "v_proj",
-                    "o_proj",
-                    "gate_proj",
-                    "up_proj",
-                    "down_proj",
-                ],
-                task_type="CAUSAL_LM",
-                lora_dropout=0.05,
-            ),
-            cosine_lr_schedule_config=(
-                None
-                if accelerator is not None
-                else CosineLRScheduleConfig(num_epochs=10, warmup_proportion=0.05)
-            ),
-            accelerator=accelerator,
-            use_separate_reference_adapter=use_separate_reference_adapter,
-        )
-        new_grpo._load_distributed_actor(checkpoint_path)
-
-        if use_deepspeed_optimizer:
-            opt = grpo.actor.optimizer
-            new_opt = new_grpo.actor.optimizer
-        else:
-            opt = grpo.optimizer
-            new_opt = new_grpo.optimizer
-
-        if not use_deepspeed_optimizer and accelerator is None:
-            assert (
-                new_opt.optimizer.loss_scaler.cur_scale
-                == opt.optimizer.loss_scaler.cur_scale
-            )
-        assert new_opt.state_dict().keys() == opt.state_dict().keys()
-
-        # Check that the actor network is updated and the reference actor is not
-        for param, pre_learn_param in zip(
-            new_grpo.actor.parameters(),
-            grpo.actor.parameters(),
-            strict=False,
-        ):
-            assert torch.equal(param, pre_learn_param)
-
-        for key in new_opt.state_dict():
-            if key == "loss_scaler":
-                continue
-            assert str(new_opt.state_dict()[key]) == str(grpo_optim_state_dict[key])
+        grpo.save_checkpoint(tmpdir, save_optimizer=False)
+        with pytest.warns(UserWarning, match="Optimizer state not found"):
+            grpo.load_checkpoint(tmpdir, load_optimizer=True)
         grpo.clean_up()
-        new_grpo.clean_up()
 
 
 class TestGRPOClone:
-    @pytest.mark.parametrize(
-        "config", [deepspeed_config_stage_2, deepspeed_config_stage_1]
-    )
-    @pytest.mark.parametrize("use_deepspeed_optimizer", [False, True])
+    @pytest.mark.parametrize("dist_mode", ["dist"])
     @pytest.mark.parametrize("use_separate_reference_adapter", [False, True])
     @pytest.mark.parametrize("vocab_size", [1000])
     @pytest.mark.parametrize("input_size", [10])
@@ -4692,14 +4152,12 @@ class TestGRPOClone:
     )
     @pytest.mark.vllm
     @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
-    def test_grpo_clone_with_accelerator(
+    def test_grpo_clone_distributed(
         self,
-        deepspeed_env,
         grpo_factory,
-        accelerator_factory,
+        dist_mode_factory,
         model_factory,
-        config,
-        use_deepspeed_optimizer,
+        dist_mode,
         use_separate_reference_adapter,
         vocab_size,
         input_size,
@@ -4711,10 +4169,9 @@ class TestGRPOClone:
         micro_batch_size_per_gpu,
     ):
         grpo = grpo_factory(
-            accelerator_factory,
+            dist_mode_factory,
             model_factory,
-            config,
-            use_deepspeed_optimizer,
+            dist_mode,
             vocab_size,
             input_size,
             max_tokens,
@@ -4724,14 +4181,9 @@ class TestGRPOClone:
             pretrained_model_name_or_path,
             micro_batch_size_per_gpu,
         )
-        grpo_accelerator = grpo.accelerator
         grpo_lr_scheduler = grpo.lr_scheduler
         grpo.fitness = [1, 2, 3]
-        original_actor_state_dict = (
-            grpo.actor.state_dict()
-            if grpo.accelerator is None
-            else grpo.accelerator.unwrap_model(grpo.actor).state_dict()
-        )
+        original_actor_state_dict = grpo.actor.state_dict()
         new_grpo = grpo.clone(index=1)
 
         # Check that the actor network is updated and the reference actor is not
@@ -4743,17 +4195,11 @@ class TestGRPOClone:
             assert torch.equal(cloned_param, param)
 
         assert new_grpo.index == 1
-        if grpo.accelerator is not None:
-            assert new_grpo.accelerator != grpo_accelerator
         if grpo.lr_scheduler is not None:
             assert new_grpo.lr_scheduler != grpo_lr_scheduler
 
-        if use_deepspeed_optimizer:
-            opt = grpo.actor.optimizer
-            new_opt = new_grpo.actor.optimizer
-        else:
-            opt = grpo.optimizer
-            new_opt = new_grpo.optimizer
+        opt = grpo.optimizer
+        new_opt = new_grpo.optimizer
 
         for pg1, pg2 in zip(
             opt.param_groups,
@@ -4782,8 +4228,7 @@ class TestGRPOClone:
         new_grpo.clean_up()
 
     @spawn_new_process_for_each_test
-    @pytest.mark.parametrize("config", [deepspeed_config_stage_2])
-    @pytest.mark.parametrize("use_deepspeed_optimizer", [True])
+    @pytest.mark.parametrize("dist_mode", ["dist"])
     @pytest.mark.parametrize("use_separate_reference_adapter", [True])
     @pytest.mark.parametrize("vocab_size", [1000])
     @pytest.mark.parametrize("input_size", [10])
@@ -4796,14 +4241,12 @@ class TestGRPOClone:
     @pytest.mark.vllm
     @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
     @patch("agilerl.algorithms.core.base.LLM", DummyVLLM)
-    def test_grpo_clone_with_accelerator_vllm(
+    def test_grpo_clone_distributed_vllm(
         self,
-        deepspeed_env,
         grpo_factory,
-        accelerator_factory,
+        dist_mode_factory,
         model_factory,
-        config,
-        use_deepspeed_optimizer,
+        dist_mode,
         use_separate_reference_adapter,
         vocab_size,
         input_size,
@@ -4815,10 +4258,9 @@ class TestGRPOClone:
         micro_batch_size_per_gpu,
     ):
         grpo = grpo_factory(
-            accelerator_factory,
+            dist_mode_factory,
             model_factory,
-            config,
-            use_deepspeed_optimizer,
+            dist_mode,
             vocab_size,
             input_size,
             max_tokens,
@@ -4828,14 +4270,9 @@ class TestGRPOClone:
             pretrained_model_name_or_path,
             micro_batch_size_per_gpu,
         )
-        grpo_accelerator = grpo.accelerator
         grpo_lr_scheduler = grpo.lr_scheduler
         grpo.fitness = [1, 2, 3]
-        original_actor_state_dict = (
-            grpo.actor.state_dict()
-            if grpo.accelerator is None
-            else grpo.accelerator.unwrap_model(grpo.actor).state_dict()
-        )
+        original_actor_state_dict = grpo.actor.state_dict()
         new_grpo = grpo.clone(index=1)
 
         # Check that the actor network is updated and the reference actor is not
@@ -4847,17 +4284,11 @@ class TestGRPOClone:
             assert torch.equal(cloned_param, param)
 
         assert new_grpo.index == 1
-        if grpo.accelerator is not None:
-            assert new_grpo.accelerator != grpo_accelerator
         if grpo.lr_scheduler is not None:
             assert new_grpo.lr_scheduler != grpo_lr_scheduler
 
-        if use_deepspeed_optimizer:
-            opt = grpo.actor.optimizer
-            new_opt = new_grpo.actor.optimizer
-        else:
-            opt = grpo.optimizer
-            new_opt = new_grpo.optimizer
+        opt = grpo.optimizer
+        new_opt = new_grpo.optimizer
 
         for pg1, pg2 in zip(
             opt.param_groups,
@@ -4888,11 +4319,7 @@ class TestGRPOClone:
 
 
 class TestGRPOTest:
-    @pytest.mark.parametrize(
-        "config",
-        [None, deepspeed_config_stage_2, deepspeed_config_stage_1],
-    )
-    @pytest.mark.parametrize("use_deepspeed_optimizer", [False, True])
+    @pytest.mark.parametrize("dist_mode", [None, "dist"])
     @pytest.mark.parametrize("use_separate_reference_adapter", [False, True])
     @pytest.mark.parametrize("vocab_size", [1000])
     @pytest.mark.parametrize("input_size", [10])
@@ -4907,12 +4334,10 @@ class TestGRPOTest:
     @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
     def test_grpo_test(
         self,
-        deepspeed_env,
         grpo_factory,
-        accelerator_factory,
+        dist_mode_factory,
         model_factory,
-        config,
-        use_deepspeed_optimizer,
+        dist_mode,
         use_separate_reference_adapter,
         vocab_size,
         input_size,
@@ -4924,10 +4349,9 @@ class TestGRPOTest:
         micro_batch_size_per_gpu,
     ):
         grpo = grpo_factory(
-            accelerator_factory,
+            dist_mode_factory,
             model_factory,
-            config,
-            use_deepspeed_optimizer,
+            dist_mode,
             vocab_size,
             input_size,
             max_tokens,
@@ -4945,7 +4369,7 @@ class TestGRPOTest:
     def test_grpo_test_method_rollout_episode_env_branch(
         self,
         grpo_factory,
-        accelerator_factory,
+        dist_mode_factory,
         model_factory,
     ):
         class DummyRolloutEpisodeEnv(RolloutHarnessDouble):
@@ -4953,6 +4377,7 @@ class TestGRPOTest:
 
             def __init__(self):
                 super().__init__()
+                self._step_count = 0
                 self._env_client = FakeEnvClient()
                 self.done = False
                 self.valid_prompt = {
@@ -4962,11 +4387,13 @@ class TestGRPOTest:
 
             def reset(self, seed=None):
                 del seed
+                self._step_count = 0
                 self.done = False
                 return self.valid_prompt, {}
 
             def step(self, token_ids):
                 del token_ids
+                self._step_count += 1
                 self.done = True
                 return {}, 1.0, True, False, {}
 
@@ -4982,10 +4409,9 @@ class TestGRPOTest:
                 return None
 
         grpo = grpo_factory(
-            accelerator_factory,
+            dist_mode_factory,
             model_factory,
             None,
-            False,
             100,
             10,
             8,
@@ -5045,14 +4471,17 @@ class TestGRPOTest:
                 return None
 
         grpo = _make_cpu_grpo_for_branch_tests()
-        acc = MagicMock()
-        grpo.accelerator = acc
+        grpo.distributed = True
         completion = torch.ones(1, 6, dtype=torch.long)
-        with patch.object(
-            grpo, "get_action", return_value=ActionResult([completion], None)
+        with (
+            patch.object(
+                grpo, "get_action", return_value=ActionResult([completion], None)
+            ),
+            patch("agilerl.algorithms.core.base.barrier") as mock_barrier,
         ):
             grpo.test(DummyRolloutEpisodeEnv(), loop=1)
-        acc.wait_for_everyone.assert_called()
+        mock_barrier.assert_called()
+        grpo.clean_up()
 
     def test_grpo_test_method_rollout_continues_when_not_done(self):
         """Cover prompt update when the episode spans turns."""
@@ -5152,7 +4581,7 @@ class TestCloneLlm:
         peft_model = get_peft_model(base_model, peft_config, adapter_name="actor")
 
         # Clone the PEFT model
-        cloned_model = clone_llm(peft_model, 0, peft_model.state_dict())
+        cloned_model = clone_llm(peft_model, peft_model.state_dict())
 
         # Verify the cloned model is a PEFT model
         assert isinstance(cloned_model, type(peft_model))
@@ -5185,11 +4614,7 @@ class TestCloneLlm:
 
 
 class TestGRPOCleanUp:
-    @pytest.mark.parametrize(
-        "config",
-        [None, deepspeed_config_stage_2, deepspeed_config_stage_1],
-    )
-    @pytest.mark.parametrize("use_deepspeed_optimizer", [False, True])
+    @pytest.mark.parametrize("dist_mode", [None, "dist"])
     @pytest.mark.parametrize("use_separate_reference_adapter", [False, True])
     @pytest.mark.parametrize("vocab_size", [1000])
     @pytest.mark.parametrize("input_size", [10])
@@ -5204,13 +4629,11 @@ class TestGRPOCleanUp:
     @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
     def test_grpo_clean_up(
         self,
-        deepspeed_env,
         grpo_factory,
         model_factory,
-        accelerator_factory,
+        dist_mode_factory,
         batch_size,
-        config,
-        use_deepspeed_optimizer,
+        dist_mode,
         use_separate_reference_adapter,
         vocab_size,
         input_size,
@@ -5221,10 +4644,9 @@ class TestGRPOCleanUp:
         micro_batch_size_per_gpu,
     ):
         grpo = grpo_factory(
-            accelerator_factory,
+            dist_mode_factory,
             model_factory,
-            config,
-            use_deepspeed_optimizer,
+            dist_mode,
             vocab_size,
             input_size,
             max_tokens,
@@ -5241,8 +4663,7 @@ class TestGRPOCleanUp:
 
 
 class TestGRPOPreprocessObservation:
-    @pytest.mark.parametrize("config", [None])
-    @pytest.mark.parametrize("use_deepspeed_optimizer", [False, True])
+    @pytest.mark.parametrize("dist_mode", [None])
     @pytest.mark.parametrize("use_separate_reference_adapter", [False, True])
     @pytest.mark.parametrize("vocab_size", [1000])
     @pytest.mark.parametrize("input_size", [10])
@@ -5257,13 +4678,11 @@ class TestGRPOPreprocessObservation:
     @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
     def test_grpo_preprocess_observation(
         self,
-        deepspeed_env,
         grpo_factory,
         model_factory,
-        accelerator_factory,
+        dist_mode_factory,
         batch_size,
-        config,
-        use_deepspeed_optimizer,
+        dist_mode,
         use_separate_reference_adapter,
         vocab_size,
         input_size,
@@ -5274,10 +4693,9 @@ class TestGRPOPreprocessObservation:
         micro_batch_size_per_gpu,
     ):
         grpo = grpo_factory(
-            accelerator_factory,
+            dist_mode_factory,
             model_factory,
-            config,
-            use_deepspeed_optimizer,
+            dist_mode,
             vocab_size,
             input_size,
             max_tokens,
@@ -5293,178 +4711,9 @@ class TestGRPOPreprocessObservation:
         assert torch.equal(obs, orig_obs)
         grpo.clean_up()
 
-    @pytest.mark.gpu
-    @pytest.mark.parametrize("config", [deepspeed_config_stage_3])
-    @pytest.mark.parametrize("use_deepspeed_optimizer", [False])
-    @pytest.mark.parametrize("use_separate_reference_adapter", [False, True])
-    def test_init_grpo_zero3_warning(
-        self,
-        deepspeed_env,
-        accelerator_factory,
-        config,
-        use_deepspeed_optimizer,
-        use_separate_reference_adapter,
-    ):
-        accelerator = accelerator_factory(use_deepspeed_optimizer, config)
-        vocab_size = 1000
-        input_size = 10
-        max_tokens = 20
-        group_size = 5
-        gc.collect()
-        with pytest.warns(UserWarning, match=r"DeepSpeed ZeRO Stage 3"):
-            grpo = GRPO(
-                actor_network=create_module(
-                    input_size=input_size,
-                    max_tokens=max_tokens,
-                    vocab_size=vocab_size,
-                    device="cuda" if torch.cuda.is_available() else "cpu",
-                ),
-                lr=0.1,
-                pad_token_id=vocab_size - 1,
-                pad_token="<pad>",
-                device="cuda" if torch.cuda.is_available() else "cpu",
-                group_size=group_size,
-                lora_config=LoraConfig(
-                    r=16,
-                    lora_alpha=64,
-                    target_modules=["linear_1"],
-                    task_type="CAUSAL_LM",
-                    lora_dropout=0.05,
-                ),
-                cosine_lr_schedule_config=(
-                    None
-                    if accelerator is not None
-                    else CosineLRScheduleConfig(num_epochs=10, warmup_proportion=0.05)
-                ),
-                accelerator=accelerator,
-                use_separate_reference_adapter=use_separate_reference_adapter,
-                max_output_tokens=max_tokens,
-            )
-        grpo.clean_up()
-
-
-class TestGRPOLoadDistributedActor:
-    @pytest.mark.parametrize("config", [None])
-    @pytest.mark.parametrize("use_deepspeed_optimizer", [False, True])
-    @pytest.mark.parametrize("use_separate_reference_adapter", [False, True])
-    @pytest.mark.parametrize("vocab_size", [1000])
-    @pytest.mark.parametrize("input_size", [10])
-    @pytest.mark.parametrize("max_tokens", [20])
-    @pytest.mark.parametrize("group_size", [5])
-    @pytest.mark.parametrize(
-        ("use_vllm", "pretrained_model_name_or_path"),
-        [(False, TINY_LLM_FIXTURE_PATH)],
-    )
-    @pytest.mark.vllm
-    @pytest.mark.parametrize("batch_size", [1])
-    @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
-    def test_load_distributed_actor_value_error(
-        self,
-        deepspeed_env,
-        grpo_factory,
-        model_factory,
-        accelerator_factory,
-        batch_size,
-        config,
-        use_deepspeed_optimizer,
-        use_separate_reference_adapter,
-        vocab_size,
-        input_size,
-        max_tokens,
-        group_size,
-        use_vllm,
-        pretrained_model_name_or_path,
-        micro_batch_size_per_gpu,
-    ):
-        grpo = grpo_factory(
-            accelerator_factory,
-            model_factory,
-            config,
-            use_deepspeed_optimizer,
-            vocab_size,
-            input_size,
-            max_tokens,
-            group_size,
-            use_separate_reference_adapter,
-            use_vllm,
-            pretrained_model_name_or_path,
-            micro_batch_size_per_gpu,
-        )
-        accelerator = MagicMock(spec=Accelerator)
-        accelerator.state = MagicMock(spec=AcceleratorState)
-        accelerator.free_memory.side_effect = lambda *args: [None] * len(args)
-        grpo.accelerator = accelerator
-        with pytest.raises(
-            TypeError,
-            match=r"(argument should be a str or an os\.PathLike object|expected str, bytes or os\.PathLike object).*not\s+'?NoneType'?",
-        ):
-            grpo._load_distributed_actor(None)
-        grpo.clean_up()
-
-    @pytest.mark.parametrize("config", [None])
-    @pytest.mark.parametrize("use_deepspeed_optimizer", [False, True])
-    @pytest.mark.parametrize("use_separate_reference_adapter", [False, True])
-    @pytest.mark.parametrize("vocab_size", [1000])
-    @pytest.mark.parametrize("input_size", [10])
-    @pytest.mark.parametrize("max_tokens", [20])
-    @pytest.mark.parametrize("group_size", [5])
-    @pytest.mark.parametrize(
-        ("use_vllm", "pretrained_model_name_or_path"),
-        [(False, TINY_LLM_FIXTURE_PATH)],
-    )
-    @pytest.mark.vllm
-    @pytest.mark.parametrize("batch_size", [1])
-    @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
-    def test_load_distributed_actor_warning(
-        self,
-        deepspeed_env,
-        grpo_factory,
-        model_factory,
-        accelerator_factory,
-        batch_size,
-        config,
-        use_deepspeed_optimizer,
-        use_separate_reference_adapter,
-        vocab_size,
-        input_size,
-        max_tokens,
-        group_size,
-        use_vllm,
-        pretrained_model_name_or_path,
-        micro_batch_size_per_gpu,
-    ):
-        grpo = grpo_factory(
-            accelerator_factory,
-            model_factory,
-            config,
-            use_deepspeed_optimizer,
-            vocab_size,
-            input_size,
-            max_tokens,
-            group_size,
-            use_separate_reference_adapter,
-            use_vllm,
-            pretrained_model_name_or_path,
-            micro_batch_size_per_gpu,
-        )
-        with pytest.warns(
-            UserWarning,
-            match="Distributed actor load not supported for non-distributed training.",
-        ):
-            grpo._load_distributed_actor(None)
-        grpo.clean_up()
-
 
 class TestGRPOUpdateLr:
-    @pytest.mark.parametrize(
-        "config",
-        [
-            deepspeed_config_stage_2,
-            deepspeed_config_stage_1,
-            deepspeed_config_stage_1_with_scheduler,
-        ],
-    )
-    @pytest.mark.parametrize("use_deepspeed_optimizer", [False, True])
+    @pytest.mark.parametrize("dist_mode", [None, "dist"])
     @pytest.mark.parametrize("use_separate_reference_adapter", [False, True])
     @pytest.mark.parametrize("vocab_size", [1000])
     @pytest.mark.parametrize("input_size", [10])
@@ -5478,12 +4727,10 @@ class TestGRPOUpdateLr:
     @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
     def test_grpo_update_lr(
         self,
-        deepspeed_env,
         grpo_factory,
         model_factory,
-        accelerator_factory,
-        config,
-        use_deepspeed_optimizer,
+        dist_mode_factory,
+        dist_mode,
         use_separate_reference_adapter,
         vocab_size,
         input_size,
@@ -5494,10 +4741,9 @@ class TestGRPOUpdateLr:
         micro_batch_size_per_gpu,
     ):
         grpo = grpo_factory(
-            accelerator_factory,
+            dist_mode_factory,
             model_factory,
-            config,
-            use_deepspeed_optimizer,
+            dist_mode,
             vocab_size,
             input_size,
             max_tokens,
@@ -5507,49 +4753,32 @@ class TestGRPOUpdateLr:
             pretrained_model_name_or_path,
             micro_batch_size_per_gpu,
         )
-        opt = (
-            grpo.optimizer.optimizer
-            if not use_deepspeed_optimizer
-            else grpo.actor.optimizer
-        )
-        grpo.accelerator, grpo.lr_scheduler = LLMAlgorithm.update_lr(
+        opt = grpo.optimizer.optimizer
+        grpo.lr_scheduler = LLMAlgorithm.update_lr(
             opt,
             0.5,
-            grpo.accelerator,
-            grpo.cosine_lr_schedule_config,
+            scheduler_config=None,
         )
         for param_group in opt.param_groups:
             assert param_group["lr"] == 0.5
+        assert grpo.lr_scheduler is None
 
-        if use_deepspeed_optimizer:
-            grpo.accelerator.deepspeed_plugin.deepspeed_config["optimizer"]["params"][
-                "lr"
-            ] = 0.5
-
-            if (
-                grpo.accelerator.deepspeed_plugin.deepspeed_config.get(
-                    "scheduler", None
-                )
-                is not None
-            ):
-                grpo.accelerator.deepspeed_plugin.deepspeed_config["scheduler"][
-                    "params"
-                ]["warmup_max_lr"] = 0.5
-                grpo.accelerator.deepspeed_plugin.deepspeed_config["scheduler"][
-                    "params"
-                ]["num_epochs"] = 10
-                grpo.accelerator.deepspeed_plugin.deepspeed_config["scheduler"][
-                    "params"
-                ]["warmup_proportion"] = 0.05
+        # A fresh warmup scheduler is returned whenever a schedule config is
+        # set; it owns the lr from then on.
+        scheduler = LLMAlgorithm.update_lr(
+            opt,
+            0.5,
+            grpo.cosine_lr_schedule_config,
+        )
+        if grpo.cosine_lr_schedule_config is not None:
+            assert scheduler is not None
+        else:
+            assert scheduler is None
         grpo.clean_up()
 
 
 class TestGRPOSetReferencePolicy:
-    @pytest.mark.parametrize(
-        "config",
-        [None, deepspeed_config_stage_2, deepspeed_config_stage_1],
-    )
-    @pytest.mark.parametrize("use_deepspeed_optimizer", [False, True])
+    @pytest.mark.parametrize("dist_mode", [None, "dist"])
     @pytest.mark.parametrize("use_separate_reference_adapter", [False, True])
     @pytest.mark.parametrize("vocab_size", [1000])
     @pytest.mark.parametrize("input_size", [10])
@@ -5563,12 +4792,10 @@ class TestGRPOSetReferencePolicy:
     @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
     def test_set_reference_policy(
         self,
-        deepspeed_env,
         grpo_factory,
         model_factory,
-        accelerator_factory,
-        config,
-        use_deepspeed_optimizer,
+        dist_mode_factory,
+        dist_mode,
         use_separate_reference_adapter,
         vocab_size,
         input_size,
@@ -5579,10 +4806,9 @@ class TestGRPOSetReferencePolicy:
         micro_batch_size_per_gpu,
     ):
         grpo = grpo_factory(
-            accelerator_factory,
+            dist_mode_factory,
             model_factory,
-            config,
-            use_deepspeed_optimizer,
+            dist_mode,
             vocab_size,
             input_size,
             max_tokens,
@@ -5616,11 +4842,7 @@ class TestGRPOSetReferencePolicy:
         assert grpo.reference_update_tracker == reference_update_tracker
         grpo.clean_up()
 
-    @pytest.mark.parametrize(
-        "config",
-        [None, deepspeed_config_stage_2, deepspeed_config_stage_1],
-    )
-    @pytest.mark.parametrize("use_deepspeed_optimizer", [False, True])
+    @pytest.mark.parametrize("dist_mode", [None, "dist"])
     @pytest.mark.parametrize("use_separate_reference_adapter", [False, True])
     @pytest.mark.parametrize("vocab_size", [1000])
     @pytest.mark.parametrize("input_size", [10])
@@ -5634,12 +4856,10 @@ class TestGRPOSetReferencePolicy:
     @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
     def test_grpo_ref_actor_is_same_as_actor_after_learning_reference_adapater(
         self,
-        deepspeed_env,
         grpo_factory,
         model_factory,
-        accelerator_factory,
-        config,
-        use_deepspeed_optimizer,
+        dist_mode_factory,
+        dist_mode,
         use_separate_reference_adapter,
         vocab_size,
         input_size,
@@ -5650,10 +4870,9 @@ class TestGRPOSetReferencePolicy:
         micro_batch_size_per_gpu,
     ):
         grpo_factory(
-            accelerator_factory,
+            dist_mode_factory,
             model_factory,
-            config,
-            use_deepspeed_optimizer,
+            dist_mode,
             vocab_size,
             input_size,
             max_tokens,
@@ -5663,7 +4882,7 @@ class TestGRPOSetReferencePolicy:
             pretrained_model_name_or_path,
             micro_batch_size_per_gpu,
         )
-        accelerator = accelerator_factory(use_deepspeed_optimizer, config)
+        dist_mode_factory(dist_mode)
         gc.collect()
         grpo = GRPO(
             actor_network=create_module(
@@ -5686,15 +4905,14 @@ class TestGRPOSetReferencePolicy:
             ),
             cosine_lr_schedule_config=(
                 None
-                if accelerator is not None
+                if dist_mode is not None
                 else CosineLRScheduleConfig(num_epochs=10, warmup_proportion=0.05)
             ),
-            accelerator=accelerator,
             use_separate_reference_adapter=True,
         )
 
         # Ensure adapters have different params
-        grpo.actor.set_adapter("actor")
+        grpo.use_adapter("actor")
         for name, param in grpo.actor.named_parameters():
             if "actor" in name:
                 param.data *= 2
@@ -5705,8 +4923,7 @@ class TestGRPOSetReferencePolicy:
 
 
 class TestGRPORecompile:
-    @pytest.mark.parametrize("config", [deepspeed_config_stage_2])
-    @pytest.mark.parametrize("use_deepspeed_optimizer", [False])
+    @pytest.mark.parametrize("dist_mode", ["dist"])
     @pytest.mark.parametrize("use_separate_reference_adapter", [False])
     @pytest.mark.parametrize("vocab_size", [100])
     @pytest.mark.parametrize("input_size", [10])
@@ -5724,12 +4941,10 @@ class TestGRPORecompile:
     @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
     def test_grpo_exception_on_recompile(
         self,
-        deepspeed_env,
         grpo_factory,
-        accelerator_factory,
+        dist_mode_factory,
         model_factory,
-        config,
-        use_deepspeed_optimizer,
+        dist_mode,
         use_separate_reference_adapter,
         pretrained_model_name_or_path,
         vocab_size,
@@ -5742,10 +4957,9 @@ class TestGRPORecompile:
         micro_batch_size_per_gpu,
     ):
         grpo = grpo_factory(
-            accelerator_factory,
+            dist_mode_factory,
             model_factory,
-            config,
-            use_deepspeed_optimizer,
+            dist_mode,
             vocab_size,
             input_size,
             max_tokens,
@@ -5757,149 +4971,6 @@ class TestGRPORecompile:
         )
         grpo.recompile()
         grpo.clean_up()
-
-
-class TestGRPOSyncDeepspeedGradientClipping:
-    def test_sync_deepspeed_returns_early_when_accelerator_is_none(self):
-        """Test that the method returns early when accelerator is None."""
-        mock_algorithm = MagicMock(spec=LLMAlgorithm)
-        mock_algorithm.accelerator = None
-        mock_algorithm.max_grad_norm = 1.0
-        mock_algorithm.actor = MagicMock(spec=[])
-
-        # Should return early without error (return None)
-        result = LLMAlgorithm._sync_deepspeed_gradient_clipping(mock_algorithm)
-
-        assert result is None
-
-    def test_sync_deepspeed_returns_early_when_gradient_clipping_not_in_config(self):
-        """Test that the method returns early when gradient_clipping is not in deepspeed config."""
-        mock_ds_plugin = MagicMock()
-        mock_ds_plugin.deepspeed_config = {"zero_optimization": {"stage": 2}}
-
-        mock_state = MagicMock()
-        mock_state.deepspeed_plugin = mock_ds_plugin
-
-        mock_accelerator = MagicMock()
-        mock_accelerator.state = mock_state
-
-        mock_algorithm = MagicMock(spec=LLMAlgorithm)
-        mock_algorithm.accelerator = mock_accelerator
-        mock_algorithm.max_grad_norm = 1.0
-        mock_algorithm.actor = MagicMock()
-
-        LLMAlgorithm._sync_deepspeed_gradient_clipping(mock_algorithm)
-
-        # Verify that the config was not modified (gradient_clipping should not be added)
-        assert "gradient_clipping" not in mock_ds_plugin.deepspeed_config
-
-    def test_sync_deepspeed_updates_gradient_clipping_when_different(self):
-        """Test that gradient_clipping is updated when it differs from max_grad_norm."""
-        mock_ds_plugin = MagicMock()
-        mock_ds_plugin.deepspeed_config = {
-            "zero_optimization": {"stage": 2},
-            "gradient_clipping": 0.5,
-        }
-
-        mock_state = MagicMock()
-        mock_state.deepspeed_plugin = mock_ds_plugin
-
-        mock_accelerator = MagicMock()
-        mock_accelerator.state = mock_state
-
-        mock_algorithm = MagicMock(spec=LLMAlgorithm)
-        mock_algorithm.accelerator = mock_accelerator
-        mock_algorithm.max_grad_norm = 1.0
-        mock_algorithm.actor = MagicMock(spec=[])  # No optimizer attribute
-
-        LLMAlgorithm._sync_deepspeed_gradient_clipping(mock_algorithm)
-
-        # Verify that gradient_clipping was updated to match max_grad_norm
-        assert mock_ds_plugin.deepspeed_config["gradient_clipping"] == 1.0
-
-    def test_sync_deepspeed_does_not_update_when_same(self):
-        """Test that gradient_clipping is not modified when it matches max_grad_norm."""
-        mock_ds_plugin = MagicMock()
-        mock_ds_plugin.deepspeed_config = {
-            "zero_optimization": {"stage": 2},
-            "gradient_clipping": 1.0,
-        }
-
-        mock_state = MagicMock()
-        mock_state.deepspeed_plugin = mock_ds_plugin
-
-        mock_accelerator = MagicMock()
-        mock_accelerator.state = mock_state
-
-        mock_algorithm = MagicMock(spec=LLMAlgorithm)
-        mock_algorithm.accelerator = mock_accelerator
-        mock_algorithm.max_grad_norm = 1.0
-        mock_algorithm.actor = MagicMock(spec=[])  # No optimizer attribute
-
-        LLMAlgorithm._sync_deepspeed_gradient_clipping(mock_algorithm)
-
-        # Verify gradient_clipping is still the same
-        assert mock_ds_plugin.deepspeed_config["gradient_clipping"] == 1.0
-
-    def test_sync_deepspeed_updates_actor_optimizer_grad_clip(self):
-        """Test that actor.optimizer.grad_clip is updated when it exists."""
-        mock_ds_plugin = MagicMock()
-        mock_ds_plugin.deepspeed_config = {
-            "zero_optimization": {"stage": 2},
-            "gradient_clipping": 0.5,
-        }
-
-        mock_state = MagicMock()
-        mock_state.deepspeed_plugin = mock_ds_plugin
-
-        mock_accelerator = MagicMock()
-        mock_accelerator.state = mock_state
-
-        mock_optimizer = MagicMock()
-        mock_optimizer.grad_clip = 0.5
-
-        mock_actor = MagicMock()
-        mock_actor.optimizer = mock_optimizer
-
-        mock_algorithm = MagicMock(spec=LLMAlgorithm)
-        mock_algorithm.accelerator = mock_accelerator
-        mock_algorithm.max_grad_norm = 1.0
-        mock_algorithm.actor = mock_actor
-
-        LLMAlgorithm._sync_deepspeed_gradient_clipping(mock_algorithm)
-
-        # Verify that optimizer grad_clip was updated
-        assert mock_optimizer.grad_clip == 1.0
-
-    def test_sync_deepspeed_updates_actor_optimizer_clip_grad(self):
-        """Test that actor.optimizer.clip_grad is updated when it exists."""
-        mock_ds_plugin = MagicMock()
-        mock_ds_plugin.deepspeed_config = {
-            "zero_optimization": {"stage": 2},
-            "gradient_clipping": 0.5,
-        }
-
-        mock_state = MagicMock()
-        mock_state.deepspeed_plugin = mock_ds_plugin
-
-        mock_accelerator = MagicMock()
-        mock_accelerator.state = mock_state
-
-        mock_optimizer = MagicMock()
-        mock_optimizer.clip_grad = 0.5
-
-        mock_actor = MagicMock()
-        mock_actor.optimizer = mock_optimizer
-
-        mock_algorithm = MagicMock(spec=LLMAlgorithm)
-        mock_algorithm.accelerator = mock_accelerator
-        mock_algorithm.max_grad_norm = 1.0
-        mock_algorithm.actor = mock_actor
-
-        LLMAlgorithm._sync_deepspeed_gradient_clipping(mock_algorithm)
-
-        # Verify that optimizer clip_grad was updated
-        assert mock_optimizer.clip_grad == 1.0
 
 
 class TestGRPOVLLMSamplingCorrection:
@@ -6043,7 +5114,7 @@ class TestGRPOVLLMSamplingCorrection:
         flat = [torch.tensor([-0.1, -0.2]), torch.tensor([-0.3, -0.4, -0.5])]
         aligned, n_skipped = stub._align_sampling_logprobs(flat, action_masks, old)
         assert n_skipped == 0
-        # Logprobs are written to the True positions, in order; elsewhere = old.
+        # Logprobs land exactly on the True positions, in order; elsewhere = old.
         expected = torch.tensor([[-9.0, -0.1, -0.2, -9.0], [-0.3, -9.0, -0.4, -0.5]])
         assert torch.allclose(aligned, expected, atol=1e-7)
 
@@ -6142,7 +5213,7 @@ class TestGRPOVLLMSamplingCorrection:
             group_size=2, update_epochs=1, use_liger_loss=True
         )
         assert grpo.importance_sampling_level == "token"
-        token_ids, action_masks = _build_branch_experiences(batch_size=2)
+        completion_ids, action_masks = _build_branch_experiences(batch_size=2)
         rewards = torch.tensor([1.0, -1.0], dtype=torch.float32)
         n_act = int(action_masks[0].sum())
         sampling_logps = [
@@ -6171,7 +5242,7 @@ class TestGRPOVLLMSamplingCorrection:
         ):
             warnings.simplefilter("always")
             grpo.learn(
-                (token_ids, action_masks, rewards),
+                (completion_ids, action_masks, rewards),
                 sampling_logps=sampling_logps,
             )
         # Liger path taken, with the correction threaded into it.
@@ -6199,7 +5270,7 @@ class TestGRPOVLLMSamplingCorrection:
             use_liger_loss=True,
             importance_sampling_level="trajectory",
         )
-        token_ids, action_masks = _build_branch_experiences(batch_size=2)
+        completion_ids, action_masks = _build_branch_experiences(batch_size=2)
         rewards = torch.tensor([1.0, -1.0], dtype=torch.float32)
         n_act = int(action_masks[0].sum())
         sampling_logps = [
@@ -6232,7 +5303,7 @@ class TestGRPOVLLMSamplingCorrection:
             ),
         ):
             metrics = grpo.learn(
-                (token_ids, action_masks, rewards),
+                (completion_ids, action_masks, rewards),
                 sampling_logps=sampling_logps,
             )
         # The fused kernel was bypassed in favour of the standard path.
@@ -6526,12 +5597,12 @@ class TestGRPOTurnAdvantageLearnPath:
 
     def test_learn_turn_ids_batch_mismatch_raises(self):
         grpo = _make_cpu_grpo_for_branch_tests(group_size=2, update_epochs=1)
-        token_ids, action_masks = _build_branch_experiences(batch_size=2)
+        completion_ids, action_masks = _build_branch_experiences(batch_size=2)
         rewards = torch.tensor([1.0, -1.0])
         bad_turn_ids = torch.zeros(3, 9, dtype=torch.long)  # batch 3 != 2
         p1, p2, p3 = self._stubbed_forwards(grpo)
         with p1, p2, p3, pytest.raises(ValueError, match="must match"):
-            grpo.learn((token_ids, action_masks, rewards), turn_ids=bad_turn_ids)
+            grpo.learn((completion_ids, action_masks, rewards), turn_ids=bad_turn_ids)
         grpo.clean_up()
 
     def test_learn_turn_advantage_path_end_to_end(self):
@@ -6541,28 +5612,16 @@ class TestGRPOTurnAdvantageLearnPath:
         grpo = _make_cpu_grpo_for_branch_tests(
             group_size=2, update_epochs=1, advantage_granularity="turn"
         )
-        token_ids, action_masks = _build_branch_experiences(batch_size=2)
+        completion_ids, action_masks = _build_branch_experiences(batch_size=2)
         turn_rewards = torch.tensor([[1.0, 0.0], [0.0, 1.0]])  # (B, max_turns)
         turn_ids = torch.zeros(2, 9, dtype=torch.long)
         turn_ids[:, 5:] = 1
         p1, p2, p3 = self._stubbed_forwards(grpo)
         with p1, p2, p3:
             metrics = grpo.learn(
-                (token_ids, action_masks, turn_rewards), turn_ids=turn_ids
+                (completion_ids, action_masks, turn_rewards), turn_ids=turn_ids
             )
         assert np.isfinite(metrics["loss"])
-        grpo.clean_up()
-
-    def test_learn_turn_granularity_without_turn_ids_raises(self):
-        grpo = _make_cpu_grpo_for_branch_tests(
-            group_size=2, update_epochs=1, advantage_granularity="turn"
-        )
-        token_ids, action_masks = _build_branch_experiences(batch_size=2)
-        rewards = torch.tensor([1.0, -1.0])
-        with pytest.raises(
-            ValueError, match="advantage_granularity='turn' requires turn_ids"
-        ):
-            grpo.learn((token_ids, action_masks, rewards))
         grpo.clean_up()
 
     def test_learn_liger_turn_level_falls_back_to_standard_path(self):
@@ -6581,14 +5640,14 @@ class TestGRPOTurnAdvantageLearnPath:
                 importance_sampling_level="turn",
                 advantage_granularity="turn",
             )
-        token_ids, action_masks = _build_branch_experiences(batch_size=2)
+        completion_ids, action_masks = _build_branch_experiences(batch_size=2)
         turn_rewards = torch.tensor([[1.0, 0.0], [0.0, 1.0]])
         turn_ids = torch.zeros(2, 9, dtype=torch.long)
         turn_ids[:, 5:] = 1
         p1, p2, p3 = self._stubbed_forwards(grpo)
         with p1, p2, p3, patch.object(grpo, "_liger_loss") as mock_liger:
             metrics = grpo.learn(
-                (token_ids, action_masks, turn_rewards), turn_ids=turn_ids
+                (completion_ids, action_masks, turn_rewards), turn_ids=turn_ids
             )
         mock_liger.assert_not_called()
         assert np.isfinite(metrics["loss"])

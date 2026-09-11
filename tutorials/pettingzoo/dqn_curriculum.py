@@ -684,7 +684,7 @@ if __name__ == "__main__":
                 fitnesses = [evaluate(agent, LESSON, NUM_ENVS) for agent in pop]
                 for agent, fit in zip(pop, fitnesses):
                     agent.metrics.add_fitness(fit)
-                elite, pop, _ = tournament.select(pop)
+                elite, pop = tournament.select(pop)
                 pop = mutations.mutation(pop)
                 pbar.set_postfix_str(
                     f"Lesson {lesson_number}  Eval win-rate (best): {max(fitnesses):.2f}  "

@@ -6,26 +6,27 @@ It provides:
 
 - Python client for Arena workflows (auth, environment validation, experiment submission, deployment, inference)
 - `arena` CLI for scripting and CI usage
-- The training manifest schema (`agilerl.arena.models`): the Pydantic models every runtime trains from, plus `arena manifest validate` and `arena manifest schema`
+- Lightweight manifest validation models for Arena job manifests
 
 This package is distributed independently from core `agilerl`, but exposes modules through the shared namespace:
 
 ```python
 from agilerl.arena import ArenaClient, Agent
-from agilerl.arena.models import TrainingManifest
 ```
-
-Core `agilerl` re-exports those models and adds only what a local run needs (environment construction, a buildable replay buffer).
 
 ## Installation
 
-Install the SDK and CLI on their own (no torch):
+Install directly:
 
 ```bash
 pip install agilerl-arena
 ```
 
-Core `agilerl` depends on this package, so `pip install agilerl` includes it.
+Or install through core AgileRL extras:
+
+```bash
+pip install "agilerl[arena]"
+```
 
 ## Quickstart
 
@@ -43,20 +44,13 @@ Or interactive login:
 arena login
 ```
 
-### 2) Validate a training manifest
-
-```bash
-arena manifest validate path/to/manifest.yaml
-arena manifest schema
-```
-
-### 3) Validate an environment
+### 2) Validate an environment
 
 ```bash
 arena env validate --source path/to/my_env.py --name my-env
 ```
 
-### 4) Submit a training manifest
+### 3) Submit a training manifest
 
 ```bash
 arena experiments submit path/to/manifest.yaml --project my-project
@@ -66,11 +60,8 @@ arena experiments submit path/to/manifest.yaml --project my-project
 
 ```python
 from agilerl.arena import ArenaClient
-from agilerl.arena.models import TrainingManifest
 
 client = ArenaClient()  # uses ARENA_API_KEY if set
-
-TrainingManifest.get_validated("dqn.yaml")
 
 client.validate_environment(
     source="acrobot.py",

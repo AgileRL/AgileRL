@@ -17,9 +17,8 @@ import torch
 from agilerl import HAS_LIGER_KERNEL, HAS_LLM_DEPENDENCIES
 
 if TYPE_CHECKING:
-    from accelerate import Accelerator
-    from peft import LoraConfig, PeftModel
-    from transformers import BitsAndBytesConfig, PreTrainedModel
+    from peft import LoraConfig
+    from transformers import BitsAndBytesConfig
 
 if HAS_LIGER_KERNEL or TYPE_CHECKING:
     from liger_kernel.chunked_loss.grpo_loss import LigerFusedLinearGRPOFunction
@@ -29,10 +28,15 @@ else:
     LigerFusedLinearGRPOFunction = None  # type: ignore[assignment]
 
 from agilerl.algorithms.core import ActionResult, LLMAlgorithm
-from agilerl.algorithms.core.advantage_granularity import (
-    resolve_batch_advantage_granularity,
-)
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
+from agilerl.distributed import (
+    FSDPConfig,
+    aggregate_metrics_dict,
+    allreduce_minmax_int,
+    barrier,
+    get_world_size,
+    resolve_device,
+)
 from agilerl.protocols import (
     PeftModelProtocol,
     PreTrainedModelProtocol,
@@ -44,16 +48,15 @@ from agilerl.utils.algo_utils import (
     get_experiences_samples,
     stack_and_pad_experiences,
 )
+from agilerl.utils.gram_phase_log import log_gram_phase
 from agilerl.utils.llm_packing import (
     pack_padded_batch,
     unpack_hidden_states,
 )
 from agilerl.utils.llm_utils import (
-    aggregate_metrics_dict,
-    allreduce_minmax_int,
     attention_mask_from_padded_ids,
     baseline_free_turn_cells,
-    build_completion_mask,
+    build_hf_completion_mask,
     calculate_k3_kl,
     fill_outside_mask,
     hf_turn_generation_config,
@@ -63,7 +66,7 @@ from agilerl.utils.llm_utils import (
     normalize_prompt_batch,
     pool_log_ratio_by_level,
     prepare_prompt_hf_generate,
-    resolve_llm_device,
+    resolve_batch_advantage_granularity,
     validate_importance_sampling_level,
 )
 
@@ -178,7 +181,7 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
     :param model_name: Model name
     :type model_name: str, optional
     :param actor_network: HuggingFace LLM
-    :type actor_network: PreTrainedModel | PeftModel | None
+    :type actor_network: PreTrainedModelProtocol
     :param model_config: Model configuration, to be used when creating the model from a name or path
     :type model_config: dict[str, Any], optional
     :param hp_config: RL hyperparameter mutation configuration, defaults to None, whereby algorithm mutations are disabled.
@@ -215,16 +218,13 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
     :type calc_position_embeddings: bool, optional
     :param micro_batch_size_per_gpu: Trajectories per backward pass on one rank
         (the memory setting). Optimizer-step cadence comes from
-        ``mini_batch_size``. If None, derived from the DeepSpeed config's
-        gradient_accumulation_steps, defaults to None
+        ``mini_batch_size``. If None, the full per-rank batch is used in a
+        single forward pass, defaults to None
     :type micro_batch_size_per_gpu: int, optional
     :param mini_batch_size: Per-rank trajectories covered by one optimizer
-        step. DeepSpeed's gradient_accumulation_steps is set to
-        ``mini_batch_size / micro_batch_size_per_gpu`` (validated for
-        divisibility). Defaults to None, which resolves to
-        ``micro_batch_size_per_gpu`` — one optimizer step per micro-batch. Set
-        it to the per-rank rollout batch (``batch_size / num_processes x
-        group_size``) to accumulate the whole batch into a single step.
+        step. ``None`` uses ``(batch_size / world_size) * group_size``.
+        ``gradient_accumulation_steps`` is derived as
+        ``mini_batch_size / micro_batch_size_per_gpu``.
     :type mini_batch_size: int, optional
     :param max_output_tokens: Max number of answer tokens, defaults to None
     :type max_output_tokens: int, optional
@@ -243,12 +243,14 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
         own base to CPU during rollout (and bring it back for the training step)
         so the rollout engine and the trainer never both hold a base on the GPU.
         Defaults to True; inert without colocated vLLM, and disabled under
-        DeepSpeed ZeRO-3.
+        FSDP2 sharding.
     :type use_memory_efficient_params: bool
-    :param accelerator: Accelerator for distributed computing, defaults to None
-    :type accelerator: accelerate.Accelerator(), optional
-    :param device: Device to train on. Ignored when an accelerator is given (each rank
-        owns its own GPU); ``None`` auto-detects CUDA/MPS/CPU.
+    :param gradient_accumulation_steps: Deprecated and ignored. Derived as
+        ``mini_batch_size / micro_batch_size_per_gpu``.
+    :type gradient_accumulation_steps: int | None, optional
+    :param fsdp_config: FSDP2 sharding settings for distributed runs, defaults to None
+    :type fsdp_config: FSDPConfig | None, optional
+    :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str, optional
     :param wrap: Wrap models for distributed training upon creation, defaults to True
     :type wrap: bool, optional
@@ -402,14 +404,12 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
     _window_action_tokens: int | None = None
     """Action tokens of this rank's samples entering the optimizer step in progress."""
 
-    _mini_batch_size_default = "micro_batch"
-
     def __init__(
         self,
         pad_token_id: int,
         pad_token: str,
         model_name: str | None = None,
-        actor_network: PreTrainedModel | PeftModel | None = None,
+        actor_network: PreTrainedModelProtocol | None = None,
         model_config: dict[str, Any] | None = None,
         hp_config: HyperparameterConfig | None = None,
         index: int = 0,
@@ -435,7 +435,8 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
         hf_generate_chunk_size: int | None = None,
         lora_config: LoraConfig | None = None,
         cosine_lr_schedule_config: CosineLRScheduleConfig | None = None,
-        accelerator: Accelerator | None = None,
+        gradient_accumulation_steps: int | None = None,
+        fsdp_config: FSDPConfig | None = None,
         device: str | torch.device | None = None,
         wrap: bool = True,
         clone: bool = False,
@@ -467,7 +468,7 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
         use_sequence_packing: bool = False,
         loss_norm: Literal["micro_batch", "accumulation_window"] = "micro_batch",
     ) -> None:
-        resolved_device = resolve_llm_device(accelerator, device)
+        resolved_device = resolve_device(device)
         super().__init__(
             index=index,
             batch_size=batch_size,
@@ -489,11 +490,13 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
             model_config=model_config,
             micro_batch_size_per_gpu=micro_batch_size_per_gpu,
             mini_batch_size=mini_batch_size,
+            group_size=group_size,
             cosine_lr_schedule_config=cosine_lr_schedule_config,
             wrap=wrap,
             hp_config=hp_config,
             device=resolved_device,
-            accelerator=accelerator,
+            gradient_accumulation_steps=gradient_accumulation_steps,
+            fsdp_config=fsdp_config,
             name="GRPO",
             gradient_checkpointing=gradient_checkpointing,
             torch_compiler=torch_compiler,
@@ -581,12 +584,10 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
         with self.select_adapter("actor"):
             self.actor.eval()
             if not self.use_vllm:
-                actor_module = self._get_unwrapped_actor()
-                try:
-                    actor_device = next(actor_module.parameters()).device
-                except StopIteration:
-                    actor_device = torch.device(self.device)
-                with torch.inference_mode(), self._amp_ctx():
+                actor_device = self.shard_runtime.actor_compute_device(
+                    self.actor, torch.device(self.device)
+                )
+                with torch.no_grad(), self._amp_ctx():
                     token_ids_list = []
                     completion_masks = []
 
@@ -603,24 +604,19 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
                             if training and group_size > 1:
                                 input_ids = input_ids.repeat(group_size, 1)
                                 attention_mask = attention_mask.repeat(group_size, 1)
-                            token_ids = self.actor.generate(
-                                input_ids=input_ids,
-                                attention_mask=attention_mask,
-                                generation_config=hf_turn_generation_config(
-                                    self.generation_config,
-                                    max_model_len=self.max_model_len,
-                                    prompt_length=int(input_ids.shape[-1]),
-                                    max_output_tokens=self.max_output_tokens,
+                            token_ids, completion_mask = build_hf_completion_mask(
+                                self.actor.generate(
+                                    input_ids=input_ids,
+                                    attention_mask=attention_mask,
+                                    generation_config=self.generation_config,
                                 ),
+                                int(input_ids.shape[-1]),
+                                None,
+                                None,
+                                self.pad_token_id,
                             )
                             token_ids_list.append(token_ids)
-                            completion_masks.append(
-                                build_completion_mask(
-                                    token_ids,
-                                    int(input_ids.shape[-1]),
-                                    self.pad_token_id,
-                                )
-                            )
+                            completion_masks.append(completion_mask)
             else:
                 self._prepare_vllm_for_generation()
                 (
@@ -698,16 +694,13 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
                 experiences, turn_ids
             )
             num_samples = token_ids.shape[0]
-            world_size = (
-                self.accelerator.num_processes if self.accelerator is not None else 1
-            )
+            world_size = get_world_size()
             if (
                 needs_cross_rank_seq_padding(self, world_size=world_size)
-                and self.accelerator is not None
-                and self.accelerator.num_processes > 1
+                and world_size > 1
             ):
                 seq_len = token_ids.shape[1]
-                min_t, max_t = allreduce_minmax_int(seq_len, self.accelerator)
+                min_t, max_t = allreduce_minmax_int(seq_len)
                 if min_t != max_t:
                     msg = (
                         "Cross-rank completion sequence length mismatch before "
@@ -729,6 +722,8 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
                     "All samples were filtered by advantage threshold; skipping GRPO update.",
                     stacklevel=2,
                 )
+                if get_world_size() > 1:
+                    barrier()
                 return {"loss": 0.0, aux_metric: 0.0}
 
             updates = 0
@@ -738,10 +733,13 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
                 else num_samples
             )
             with torch.no_grad():
-                reference_log_probs, old_log_probs, _ = self._fused_forward_no_grad(
-                    token_ids,
-                    batch_size,
-                )
+                with self.shard_runtime.timed("fused_forward_no_grad"):
+                    reference_log_probs, old_log_probs, _ = (
+                        self._fused_forward_no_grad(
+                            token_ids,
+                            batch_size,
+                        )
+                    )
 
             is_turn_ids = turn_ids if self.importance_sampling_level == "turn" else None
             sampling_log_probs, is_metrics = (
@@ -760,7 +758,7 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
                 effective_num_samples, batch_size
             )
             if self.loss_norm == "accumulation_window":
-                window_size = batch_size * self._accumulation_steps()
+                window_size = batch_size * self.gradient_accumulation_steps
             else:
                 window_size = effective_num_samples
             for _ in range(self.update_epochs):
@@ -771,17 +769,19 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
                         self._record_window_action_tokens(action_masks, window_idxs)
                     for start in range(0, len(window_idxs), batch_size):
                         minibatch_idxs = window_idxs[start : start + batch_size]
-                        loss, aux = self._loss(
-                            batch_size,
-                            minibatch_idxs,
-                            token_ids,
-                            action_masks,
-                            advantages,
-                            old_log_probs,
-                            reference_log_probs,
-                            turn_ids=is_turn_ids,
-                            sampling_log_probs=sampling_log_probs,
-                        )
+                        with self.shard_runtime.timed("microbatch_forward"):
+                            with log_gram_phase("forward"):
+                                loss, aux = self._loss(
+                                    batch_size,
+                                    minibatch_idxs,
+                                    token_ids,
+                                    action_masks,
+                                    advantages,
+                                    old_log_probs,
+                                    reference_log_probs,
+                                    turn_ids=is_turn_ids,
+                                    sampling_log_probs=sampling_log_probs,
+                                )
                         self._raise_if_loss_not_finite_on_any_rank(loss)
 
                         self._backward_pass(loss)
@@ -799,7 +799,7 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
         # Aggregate across GPUs and report to the metrics tracker (new API).
         # (Fresh dict display so ty checks the values against the parameter's
         # wider, invariant dict value union.)
-        agg = aggregate_metrics_dict(self.accelerator, {**result})
+        agg = aggregate_metrics_dict({**result})
         agg["completion_length"] = int(agg["completion_length"])
         for key, value in agg.items():
             self.metrics.log(key, value)
@@ -813,7 +813,7 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
         batch_size: int,
         lr: float,
         update_epochs: int,
-        actor_network: PreTrainedModel | PeftModel | None,
+        actor_network: PreTrainedModelProtocol | None,
     ) -> None:
         """Validate the core training arguments."""
         assert isinstance(batch_size, int), "Batch size must be an integer."
@@ -869,8 +869,6 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
                 "['micro_batch', 'accumulation_window']."
             )
             raise ValueError(msg)
-        if loss_norm == "accumulation_window" and not self._uses_deepspeed:
-            self._accumulation_steps_without_deepspeed()
         return loss_norm
 
     def _setup_advantage_options(
@@ -1132,7 +1130,7 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
 
         if active_adv_mask is None:
             return advantages, np.arange(num_samples)
-        if self.accelerator is not None and self.accelerator.num_processes > 1:
+        if get_world_size() > 1:
             advantages = advantages * active_adv_mask.unsqueeze(-1).to(advantages.dtype)
             return advantages, np.arange(num_samples)
         return advantages, np.where(active_adv_mask.detach().cpu().numpy())[0]
@@ -1477,9 +1475,6 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
     ) -> None:
         """Warn when an epoch's micro-batches do not fill whole optimizer steps.
 
-        Reads the engine accumulation width leniently so mocked or non-DeepSpeed
-        actors never fail here; the strict accessor guards the loss path.
-
         :param effective_num_samples: Trajectories entering this update.
         :type effective_num_samples: int
         :param micro_batch_size: Trajectories per backward pass.
@@ -1487,19 +1482,14 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
         :return: None
         :rtype: None
         """
-        if not self._uses_deepspeed:
-            return
-        accessor = getattr(self.actor, "gradient_accumulation_steps", None)
-        if not callable(accessor):
-            return
-        steps = accessor()
-        if not isinstance(steps, int) or isinstance(steps, bool) or steps <= 1:
+        steps = self.gradient_accumulation_steps
+        if steps <= 1:
             return
         micro_batches = -(-effective_num_samples // micro_batch_size)
         if micro_batches % steps == 0:
             return
         warnings.warn(
-            f"The DeepSpeed engine folds {steps} micro-batches into one "
+            f"The trainer folds {steps} micro-batches into one "
             f"optimizer step, but this update runs {micro_batches} "
             f"micro-batches per epoch, so the trailing {micro_batches % steps} "
             "micro-batch(es) only reach the optimizer during a later epoch or "
@@ -1507,66 +1497,6 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
             "so the per-rank batch splits into whole optimizer steps.",
             stacklevel=3,
         )
-
-    def _accumulation_steps_without_deepspeed(self) -> int:
-        """Micro-batches one optimizer step spans with no DeepSpeed engine.
-
-        :return: ``1``; :meth:`_backward_pass` steps and zeroes the optimizer on
-            every micro-batch when no engine owns the accumulation.
-        :rtype: int
-        :raises ValueError: If the accelerator declares an accumulation width
-            wider than one micro-batch, which no backward pass here applies.
-        """
-        width = (
-            1
-            if self.accelerator is None
-            else self.accelerator.gradient_accumulation_steps
-        )
-        if width == 1:
-            return 1
-        msg = (
-            f"The accelerator declares gradient_accumulation_steps={width!r}, "
-            "but with no DeepSpeed engine each micro-batch takes its own "
-            "optimizer step, so a window that wide is never accumulated and "
-            "normalizing a loss over it would scale samples that never share a "
-            "step. Run under DeepSpeed, which owns the accumulation, or leave "
-            "the accelerator's accumulation width at 1."
-        )
-        raise ValueError(msg)
-
-    def _accumulation_steps(self) -> int:
-        """Micro-batches the live engine folds into one optimizer step.
-
-        The DeepSpeed engine divides every micro-batch loss by this value before
-        accumulating it, and ``set_train_batch_size`` can move it away from the
-        plugin config, so the engine's own accessor is the value that matches
-        the scaling actually applied.
-
-        :return: Engine gradient-accumulation steps, ``1`` without DeepSpeed.
-        :rtype: int
-        :raises TypeError: If the actor exposes no accumulation-steps accessor.
-        :raises RuntimeError: If the engine reports a non-positive step count.
-        """
-        if not self._uses_deepspeed:
-            return self._accumulation_steps_without_deepspeed()
-        accessor = getattr(self.actor, "gradient_accumulation_steps", None)
-        if not callable(accessor):
-            msg = (
-                "Cannot read the DeepSpeed engine's accumulation steps: "
-                f"{type(self.actor).__name__} has no callable "
-                "gradient_accumulation_steps, which is the value the engine "
-                "scales each micro-batch loss by."
-            )
-            raise TypeError(msg)
-        steps = accessor()
-        if not isinstance(steps, int) or isinstance(steps, bool) or steps < 1:
-            msg = (
-                f"DeepSpeed engine gradient_accumulation_steps() returned "
-                f"{steps!r}; the loss cannot be scaled to a window without a "
-                "positive step count."
-            )
-            raise RuntimeError(msg)
-        return steps
 
     def _resolve_loss_window(self, mask: torch.Tensor) -> tuple[int, int] | None:
         """Accumulation steps and action tokens of the window a micro-batch joins.
@@ -1585,7 +1515,7 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
         """
         if self.loss_norm != "accumulation_window":
             return None
-        steps = self._accumulation_steps()
+        steps = self.gradient_accumulation_steps
         if steps == 1:
             tokens = int(mask.sum().item())
             if tokens <= 0:
@@ -2169,7 +2099,6 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
         )
         lm_head = self._get_lm_head()
         lm_head_weight = lm_head.weight
-        lm_head_bias = lm_head.bias
 
         attention_mask = attention_mask_from_padded_ids(
             batch_ids, self.pad_token_id
@@ -2297,41 +2226,41 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
             adv_arg = adv
             chunk_size = 1
 
-        kernel_args: tuple[Any, ...] = (
-            policy_arg,
-            lm_head_weight,
-            target_ids_arg,
-            mask_arg,
-            adv_arg,
-            lm_head_bias,
-            ref_lp_arg,
-            old_lp_arg,
-            None,
-            None,
-            None,
-            self.beta,
-            epsilon_low,
-            epsilon_high,
-            liger_loss_type,
-            self.max_output_tokens,
-            importance_sampling_level,
-            None,
-            None,
-            self.temperature,
-            None,
-            ref_log_probs is not None,  # use_ref_model
-            chunk_size,
-            vllm_is_ratio_arg,
-        )
-        if window is not None:
-            # The kernel divides the count it is given by the world size, so the
-            # rank-local window reaches the reduction as its own normalizer.
-            kernel_args = _liger_args_with_normalizer(
-                kernel_args,
-                float(window[1] * _liger_normalizer_world_size()),
+        with self._liger_head_gather() as (lm_head_weight, lm_head_bias):
+            kernel_args: tuple[Any, ...] = (
+                policy_arg,
+                lm_head_weight,
+                target_ids_arg,
+                mask_arg,
+                adv_arg,
+                lm_head_bias,
+                ref_lp_arg,
+                old_lp_arg,
+                None,
+                None,
+                None,
+                self.beta,
+                epsilon_low,
+                epsilon_high,
+                liger_loss_type,
+                self.max_output_tokens,
+                importance_sampling_level,
+                None,
+                None,
+                self.temperature,
+                None,
+                ref_log_probs is not None,  # use_ref_model
+                chunk_size,
+                vllm_is_ratio_arg,
             )
-
-        with self._liger_head_gather():
+            if window is not None:
+                # The kernel divides the count it is given by the world size, so
+                # the rank-local window reaches the reduction as its own
+                # normalizer.
+                kernel_args = _liger_args_with_normalizer(
+                    kernel_args,
+                    float(window[1] * _liger_normalizer_world_size()),
+                )
             loss, aux = LigerFusedLinearGRPOFunction.apply(*kernel_args)
 
         kl = aux[0]

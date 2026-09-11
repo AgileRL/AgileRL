@@ -6,7 +6,6 @@ from contextlib import contextmanager
 import pytest
 import torch
 
-pytest.importorskip("deepspeed", reason="LLM tests require deepspeed.")
 pytest.importorskip("vllm", reason="LLM tests require vllm.")
 
 from agilerl.llm_envs import RolloutHarness
@@ -72,9 +71,8 @@ class TestREINFORCETest:
     @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
     def test_vllm_methods(
         self,
-        deepspeed_env,
         reinforce_factory,
-        accelerator_factory,
+        dist_mode_factory,
         model_factory,
         vocab_size,
         input_size,
@@ -82,12 +80,10 @@ class TestREINFORCETest:
         pretrained_model_name_or_path,
         micro_batch_size_per_gpu,
     ):
-        del deepspeed_env
         rf = reinforce_factory(
-            accelerator_factory=accelerator_factory,
+            dist_mode_factory=dist_mode_factory,
             model_factory=model_factory,
-            config=None,
-            use_deepspeed_optimizer=False,
+            dist_mode=None,
             vocab_size=vocab_size,
             input_size=input_size,
             max_tokens=max_tokens,
@@ -125,9 +121,9 @@ class TestREINFORCETest:
         )
 
         for training in (True, False):
-            token_ids, action_masks, _ = rf.get_action(prompts, training=training)
+            completion_ids, action_masks, _ = rf.get_action(prompts, training=training)
             assert_vllm_get_action_contract(
-                token_ids=token_ids,
+                token_ids=completion_ids,
                 action_masks=action_masks,
                 batch_size=batch_size,
                 prompt_len=input_size,
@@ -152,9 +148,8 @@ class TestREINFORCETest:
     @pytest.mark.parametrize("pretrained_model_name_or_path", [TINY_LLM_FIXTURE_PATH])
     def test_quantized_generate_survives_sleep_wake(
         self,
-        deepspeed_env,
         reinforce_factory,
-        accelerator_factory,
+        dist_mode_factory,
         model_factory,
         vocab_size,
         input_size,
@@ -181,12 +176,10 @@ class TestREINFORCETest:
             pytest.skip("bnb nf4 preset uses bf16 compute; GPU lacks native bf16.")
         from agilerl.utils.llm_utils import build_bnb_quantization_config
 
-        del deepspeed_env
         rf = reinforce_factory(
-            accelerator_factory=accelerator_factory,
+            dist_mode_factory=dist_mode_factory,
             model_factory=model_factory,
-            config=None,
-            use_deepspeed_optimizer=False,
+            dist_mode=None,
             vocab_size=vocab_size,
             input_size=input_size,
             max_tokens=max_tokens,
@@ -206,9 +199,8 @@ class TestREINFORCETest:
             temperature=0.0,  # greedy → outputs comparable across sleep/wake
         )
 
-        # The trainer holds its own 4-bit bnb base. NB: the actor is a
-        # DummyEvolvable, whose ``modules()`` is the EvolvableModule registry
-        # API, not torch's recursive walk — use ``named_modules()``.
+        # The trainer holds its own 4-bit bnb base. Use ``named_modules()``
+        # (torch's recursive walk), not ``modules()``.
         assert any(
             isinstance(m, bnb.nn.Linear4bit) for _, m in rf.actor.named_modules()
         )
@@ -260,9 +252,8 @@ class TestREINFORCETest:
     @pytest.mark.parametrize("pretrained_model_name_or_path", [TINY_LLM_FIXTURE_PATH])
     def test_dense_generate_survives_sleep_wake(
         self,
-        deepspeed_env,
         reinforce_factory,
-        accelerator_factory,
+        dist_mode_factory,
         model_factory,
         vocab_size,
         input_size,
@@ -275,12 +266,10 @@ class TestREINFORCETest:
         decode of the same prompts has to be identical before sleep and after
         wake. fp16 (not bf16) so the test also runs on pre-Ampere CI GPUs.
         """
-        del deepspeed_env
         rf = reinforce_factory(
-            accelerator_factory=accelerator_factory,
+            dist_mode_factory=dist_mode_factory,
             model_factory=model_factory,
-            config=None,
-            use_deepspeed_optimizer=False,
+            dist_mode=None,
             vocab_size=vocab_size,
             input_size=input_size,
             max_tokens=max_tokens,

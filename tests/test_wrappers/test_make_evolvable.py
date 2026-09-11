@@ -870,6 +870,7 @@ class TestMakeEvolvableAddCnnLayer:
         evolvable_cnn.add_cnn_layer()
         assert len(original_channels) + 1 == len(evolvable_cnn.channel_size)
 
+    @pytest.mark.gpu
     def test_make_evo_add_cnn_layer_else_statement(self, simple_cnn, device):
         evolvable_cnn = MakeEvolvable(
             simple_cnn,
@@ -936,6 +937,7 @@ class TestMakeEvolvableRemoveCnnLayer:
 
 ######### Test add_cnn_channel #########
 class TestMakeEvolvableAddCnnChannel:
+    @pytest.mark.gpu
     def test_make_evo_add_cnn_channel(self, simple_cnn, device):
         input_tensor = torch.randn(1, 3, 32, 32)
         evolvable_network = MakeEvolvable(simple_cnn, input_tensor, device=device)

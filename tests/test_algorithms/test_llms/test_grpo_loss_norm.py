@@ -150,15 +150,10 @@ class _KernelWithoutCtx:
 
 
 class _CallableActor:
-    """DeepSpeed engine stand-in returning the owner's fixed hidden states."""
+    """Actor stand-in returning the owner's fixed hidden states."""
 
-    def __init__(self, owner: _Stub, accumulation_steps: int) -> None:
+    def __init__(self, owner: _Stub) -> None:
         self._owner = owner
-        self._accumulation_steps = accumulation_steps
-
-    def gradient_accumulation_steps(self) -> int:
-        """Report the engine's live accumulation steps."""
-        return self._accumulation_steps
 
     def train(self) -> None:
         """Match the training-mode call the fused path makes."""
@@ -179,13 +174,10 @@ class _Stub:
         loss_type: str = "cispo",
         accumulation_steps: int = 4,
         window_tokens: int | None = None,
-        uses_deepspeed: bool = True,
         activation_offload: bool = False,
         lm_head: torch.nn.Linear | None = None,
-        accelerator: Any = None,
     ) -> None:
         self.device = torch.device("cpu")
-        self.accelerator = accelerator
         self.loss_norm = loss_norm
         self.loss_type = loss_type
         self.importance_sampling_level = "token"
@@ -200,14 +192,12 @@ class _Stub:
         self.use_kl_advantage_shaping = False
         self.vllm_importance_sampling_cap = 2.0
         self.activation_offload = activation_offload
-        self._uses_deepspeed = uses_deepspeed
+        self.gradient_accumulation_steps = accumulation_steps
         self._window_action_tokens = window_tokens
         self.lm_head = lm_head or torch.nn.Linear(HIDDEN, VOCAB, bias=False)
         self.hidden: torch.Tensor | None = None
-        self.actor: Any = _CallableActor(self, accumulation_steps)
+        self.actor: Any = _CallableActor(self)
 
-    _accumulation_steps = GRPO._accumulation_steps
-    _accumulation_steps_without_deepspeed = GRPO._accumulation_steps_without_deepspeed
     _resolve_loss_norm = GRPO._resolve_loss_norm
     _activation_offload_ctx = GRPO._activation_offload_ctx
     _apply_kl_advantage_shaping = GRPO._apply_kl_advantage_shaping
@@ -241,7 +231,7 @@ class _Stub:
         return nullcontext()
 
     def _liger_head_gather(self):
-        return nullcontext()
+        return nullcontext((self.lm_head.weight, self.lm_head.bias))
 
 
 class _SaveOnCpuSpy:
@@ -299,8 +289,8 @@ def _per_token_weights(
 ) -> list[torch.Tensor]:
     """Per-token gradient weights the optimizer sees for each micro-batch.
 
-    Each micro-batch loss is divided by ``accumulation_steps`` the way DeepSpeed
-    scales it before accumulating.
+    Each micro-batch loss is divided by ``accumulation_steps`` so the
+    accumulated gradient matches a mini-batch mean.
     """
     weights = []
     for mask in masks:
@@ -373,22 +363,11 @@ class TestGRPOLossNormConfig:
         assert default == "micro_batch"
 
     def test_the_window_is_accepted_when_each_micro_batch_is_a_step(self) -> None:
-        algo = _Stub(uses_deepspeed=False, accelerator=None)
+        algo = _Stub(accumulation_steps=1)
         assert algo._resolve_loss_norm("accumulation_window") == "accumulation_window"
 
-    def test_a_declared_accelerate_window_without_deepspeed_is_rejected(self) -> None:
-        algo = _Stub(
-            uses_deepspeed=False,
-            accelerator=SimpleNamespace(gradient_accumulation_steps=4),
-        )
-        with pytest.raises(ValueError, match="never accumulated"):
-            algo._resolve_loss_norm("accumulation_window")
-
-    def test_the_micro_batch_mode_ignores_the_declared_accelerate_window(self) -> None:
-        algo = _Stub(
-            uses_deepspeed=False,
-            accelerator=SimpleNamespace(gradient_accumulation_steps=4),
-        )
+    def test_the_micro_batch_mode_is_accepted_alongside_accumulation(self) -> None:
+        algo = _Stub(accumulation_steps=4)
         assert algo._resolve_loss_norm("micro_batch") == "micro_batch"
 
 
@@ -464,7 +443,7 @@ class TestWindowNormalizedReduction:
     def test_single_accumulation_step_uses_the_micro_batch(self) -> None:
         mask = _mask_of_lengths([4, 6], 8)
         loss = torch.full(mask.shape, 2.0) * mask
-        algo = _Stub(accumulation_steps=1, uses_deepspeed=False)
+        algo = _Stub(accumulation_steps=1)
         reduced = algo._reduce_masked_loss(loss, mask).mean()
         assert float(reduced) == pytest.approx(2.0)
 
@@ -479,7 +458,7 @@ class TestWindowNormalizedReduction:
     def test_non_finite_padding_stays_out_of_the_window_reduction(self) -> None:
         mask = torch.tensor([[1.0, 1.0, 0.0]])
         loss = torch.tensor([[2.0, 4.0, float("nan")]])
-        algo = _Stub(accumulation_steps=1, uses_deepspeed=False)
+        algo = _Stub(accumulation_steps=1)
         reduced = algo._reduce_masked_loss(loss, mask)
         assert reduced.tolist() == pytest.approx([3.0])
 
@@ -497,48 +476,21 @@ class TestWindowNormalizedReduction:
 
     def test_empty_micro_batch_without_accumulation_raises(self) -> None:
         mask = torch.zeros(1, 8)
-        algo = _Stub(accumulation_steps=1, uses_deepspeed=False)
+        algo = _Stub(accumulation_steps=1)
         with pytest.raises(RuntimeError, match="action-token count is zero"):
             algo._reduce_masked_loss(torch.zeros(mask.shape), mask)
 
 
 class TestAccumulationSteps:
-    """The step count comes from the engine that applies the scaling."""
+    """The step count comes from the trainer loop that applies the scaling."""
 
-    def test_without_deepspeed_the_update_spans_one_micro_batch(self) -> None:
-        algo = _Stub(accumulation_steps=8, uses_deepspeed=False)
-        assert algo._accumulation_steps() == 1
-
-    def test_a_declared_accelerate_window_without_deepspeed_raises(self) -> None:
-        algo = _Stub(
-            uses_deepspeed=False,
-            accelerator=SimpleNamespace(gradient_accumulation_steps=2),
-        )
-        with pytest.raises(ValueError, match="never accumulated"):
-            algo._accumulation_steps()
-
-    def test_the_engine_outranks_what_the_accelerator_declares(self) -> None:
-        algo = _Stub(
-            accumulation_steps=6,
-            accelerator=SimpleNamespace(gradient_accumulation_steps=2),
-        )
-        assert algo._accumulation_steps() == 6
-
-    def test_the_engine_accessor_supplies_the_count(self) -> None:
+    def test_the_configured_width_is_reported(self) -> None:
         algo = _Stub(accumulation_steps=6)
-        assert algo._accumulation_steps() == 6
+        assert algo.gradient_accumulation_steps == 6
 
-    def test_missing_engine_accessor_raises(self) -> None:
-        algo = _Stub(window_tokens=10)
-        algo.actor = SimpleNamespace()
-        with pytest.raises(TypeError, match="no callable gradient_accumulation_steps"):
-            algo._accumulation_steps()
-
-    def test_non_positive_engine_count_raises(self) -> None:
-        algo = _Stub(window_tokens=10)
-        algo.actor = SimpleNamespace(gradient_accumulation_steps=lambda: 0)
-        with pytest.raises(RuntimeError, match="returned 0"):
-            algo._accumulation_steps()
+    def test_a_single_step_window_reports_one(self) -> None:
+        algo = _Stub(accumulation_steps=1)
+        assert algo.gradient_accumulation_steps == 1
 
 
 class TestStraddleWarning:
@@ -561,18 +513,9 @@ class TestStraddleWarning:
     def test_micro_batches_filling_whole_steps_stay_silent(self) -> None:
         assert self._emitted(_Stub(accumulation_steps=2), 4, 1) == []
 
-    def test_an_engine_without_the_accessor_stays_silent(self) -> None:
-        """A stand-in actor carries no accumulation width to compare against."""
-        algo = _Stub()
-        algo.actor = SimpleNamespace()
-        assert self._emitted(algo, 3, 2) == []
-
     def test_a_single_step_window_stays_silent(self) -> None:
         """Every micro-batch takes its own step, so none can straddle one."""
         assert self._emitted(_Stub(accumulation_steps=1), 3, 2) == []
-
-    def test_without_deepspeed_no_engine_owns_the_window(self) -> None:
-        assert self._emitted(_Stub(uses_deepspeed=False), 3, 2) == []
 
 
 class TestWindowActionTokenRecording:

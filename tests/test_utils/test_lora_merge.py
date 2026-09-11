@@ -1,28 +1,21 @@
 # Copyright 2026 AgileRL
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tests for ZeRO-aware LoRA merge to Hugging Face format."""
+"""Tests for FSDP2/DTensor LoRA merge to Hugging Face format."""
 
 from __future__ import annotations
 
 import gc
 import hashlib
 import json
-import os
-import socket
-import subprocess
-import sys
-import textwrap
 import weakref
 from contextlib import contextmanager
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
 
 import pytest
 import torch
-from accelerate import Accelerator
 from torch import nn
 
 pytest.importorskip("peft")
@@ -312,27 +305,67 @@ class TestExportMergedPretrainedLive:
             rtol=LOGIT_RTOL,
         )
 
-    def test_zero3_gathers_one_module_not_the_full_model(self, tmp_path: Path) -> None:
+    def test_gathers_one_module_not_the_full_model(self, tmp_path: Path) -> None:
         peft_model = _tiny_peft()
         n_params = sum(1 for _ in peft_model.parameters())
         gather_sizes: list[int] = []
 
         @contextmanager
-        def recording_gather(zero_stage, params, _modifier_rank=None):
+        def recording_gather(params):
             gather_sizes.append(len(params))
-            yield
+            yield list(params)
 
-        with patch("agilerl.utils.lora_merge.gather_if_zero3", recording_gather):
+        with patch("agilerl.utils.lora_merge.gather_params", recording_gather):
             export_merged_pretrained(
                 tmp_path / "merged",
                 model=peft_model,
-                zero_stage=3,
                 torch_dtype=torch.float32,
             )
 
         assert gather_sizes
         assert all(size < n_params for size in gather_sizes)
         assert any(size > 0 for size in gather_sizes)
+
+    def test_copy_to_cpu_uses_yielded_gather_not_pre_gather_handle(self) -> None:
+        shard_tensor = torch.ones(2, 2)
+        dense_tensor = torch.arange(4, dtype=torch.float32).reshape(2, 2)
+        spec = ModuleCopy("w", shard_tensor)
+
+        @contextmanager
+        def yield_dense(params):
+            assert params[0] is shard_tensor
+            yield [dense_tensor]
+
+        with patch("agilerl.utils.lora_merge.gather_params", yield_dense):
+            shard = lora_merge_mod._materialize_shard(
+                [spec],
+                ["w"],
+                torch_dtype=torch.float32,
+                keep_tensors=True,
+            )
+
+        assert torch.equal(shard["w"], dense_tensor.cpu())
+        assert not torch.equal(shard["w"], shard_tensor.cpu())
+
+    def test_keep_tensors_false_returns_empty_shard(self) -> None:
+        spec = ModuleCopy("w", torch.ones(2, 2))
+
+        shard = lora_merge_mod._materialize_shard(
+            [spec],
+            ["w"],
+            torch_dtype=torch.float32,
+            keep_tensors=False,
+        )
+
+        assert shard == {}
+
+    def test_copy_to_cpu_owns_storage_for_save_file(self, tmp_path: Path) -> None:
+        view = torch.ones((), dtype=torch.float32).expand(4, 4)
+
+        copied = lora_merge_mod._copy_to_cpu(view, torch.float32)
+
+        save_file({"w": copied}, str(tmp_path / "t.safetensors"))
+        assert copied.data_ptr() != 0
 
     def test_uses_ds_shape_when_planning_shards(self, tmp_path: Path) -> None:
         peft_model = _tiny_peft()
@@ -443,20 +476,21 @@ class TestExportMergedPretrainedReplay:
         _assert_arena_completeness(out)
 
     def test_non_main_replay_skips_write(self, tmp_path: Path) -> None:
-        accelerator = SimpleNamespace(
-            is_main_process=False,
-            num_processes=1,
-            device=torch.device("cpu"),
-            wait_for_everyone=lambda: None,
-        )
+        torch.manual_seed(0)
+        base = _tiny_gpt2()
+        base.save_pretrained(tmp_path / "base")
+        peft_model = get_peft_model(base, _lora_config(), adapter_name="actor")
+        peft_model.save_pretrained(tmp_path / "ckpt")
         out = tmp_path / "merged"
 
-        export_merged_pretrained(
-            out,
-            adapter_path=tmp_path / "actor",
-            base_model_name_or_path=tmp_path / "base",
-            accelerator=accelerator,
-        )
+        with patch("agilerl.utils.lora_merge.is_main_process", return_value=False):
+            export_merged_pretrained(
+                out,
+                adapter_path=tmp_path / "ckpt" / "actor",
+                base_model_name_or_path=tmp_path / "base",
+                adapter_name="actor",
+                torch_dtype=torch.float32,
+            )
 
         assert not out.exists()
 
@@ -507,8 +541,6 @@ class TestExportMergedPretrainedReplay:
             skeleton,
             output_dir=tmp_path / "merged",
             adapter_name="actor",
-            zero_stage=None,
-            accelerator=None,
             max_shard_size="1KB",
             torch_dtype=torch.float32,
             tokenizer=None,
@@ -669,7 +701,6 @@ class TestExportMergedPretrainedReplay:
             lora_merge_mod._materialize_shard(
                 [spec],
                 ["w"],
-                zero_stage=None,
                 torch_dtype=torch.float32,
                 keep_tensors=True,
             )
@@ -835,12 +866,11 @@ class TestExportMergedPretrainedFailures:
             msg = "collective failed"
             raise RuntimeError(msg)
 
-        with patch("agilerl.utils.lora_merge.gather_if_zero3", failing_gather):
+        with patch("agilerl.utils.lora_merge.gather_params", failing_gather):
             with pytest.raises(MergedExportError, match="collective failed"):
                 export_merged_pretrained(
                     tmp_path / "merged",
                     model=peft_model,
-                    zero_stage=3,
                     torch_dtype=torch.float32,
                 )
 
@@ -864,51 +894,53 @@ class TestExportMergedPretrainedFailures:
 
     def test_non_main_live_skips_files(self, tmp_path: Path) -> None:
         peft_model = _tiny_peft()
-        accelerator = SimpleNamespace(
-            is_main_process=False,
-            num_processes=1,
-            device=torch.device("cpu"),
-            wait_for_everyone=lambda: None,
-        )
         out = tmp_path / "merged"
 
-        export_merged_pretrained(
-            out,
-            model=peft_model,
-            accelerator=accelerator,
-            torch_dtype=torch.float32,
-        )
+        with patch("agilerl.utils.lora_merge.is_main_process", return_value=False):
+            export_merged_pretrained(
+                out,
+                model=peft_model,
+                torch_dtype=torch.float32,
+            )
 
         assert not out.exists()
 
 
 class TestExportMergedPretrainedDistributedFailure:
+    @contextmanager
+    def _distributed(self, *, is_main: bool = True, all_reduce: Any = None):
+        def _noop_all_reduce(_flag_tensor: torch.Tensor, **_kwargs: Any) -> None:
+            pass
+
+        with (
+            patch("agilerl.distributed.process.is_distributed", return_value=True),
+            patch("agilerl.distributed.process.dist.get_world_size", return_value=2),
+            patch("agilerl.utils.lora_merge.is_main_process", return_value=is_main),
+            patch(
+                "agilerl.distributed.process.dist.all_reduce",
+                all_reduce if all_reduce is not None else _noop_all_reduce,
+            ),
+        ):
+            yield
+
     def test_reduce_propagates_failure_to_every_rank(self, tmp_path: Path) -> None:
         peft_model = _tiny_peft()
         reduced: list[torch.Tensor] = []
 
-        def fake_reduce(flag: torch.Tensor, reduction: str = "sum") -> torch.Tensor:
-            assert reduction == "sum"
-            reduced.append(flag.clone())
-            return flag.clone()
+        def fake_all_reduce(flag_tensor: torch.Tensor, **_kwargs: Any) -> None:
+            reduced.append(flag_tensor.clone())
 
-        accelerator = SimpleNamespace(
-            is_main_process=True,
-            num_processes=2,
-            device=torch.device("cpu"),
-            wait_for_everyone=lambda: None,
-            reduce=fake_reduce,
-        )
-
-        with patch(
-            "agilerl.utils.lora_merge.save_file",
-            side_effect=OSError("disk full"),
+        with (
+            self._distributed(all_reduce=fake_all_reduce),
+            patch(
+                "agilerl.utils.lora_merge.save_file",
+                side_effect=OSError("disk full"),
+            ),
         ):
-            with pytest.raises(MergedExportError, match="at least one rank"):
+            with pytest.raises(MergedExportError, match="disk full"):
                 export_merged_pretrained(
                     tmp_path / "merged",
                     model=peft_model,
-                    accelerator=accelerator,
                     torch_dtype=torch.float32,
                 )
 
@@ -917,51 +949,33 @@ class TestExportMergedPretrainedDistributedFailure:
     def test_reduce_success_when_no_rank_failed(self, tmp_path: Path) -> None:
         peft_model = _tiny_peft()
 
-        def fake_reduce(flag: torch.Tensor, reduction: str = "sum") -> torch.Tensor:
-            assert reduction == "sum"
-            return torch.zeros_like(flag)
+        def fake_all_reduce(flag_tensor: torch.Tensor, **_kwargs: Any) -> None:
+            flag_tensor.zero_()
 
-        accelerator = SimpleNamespace(
-            is_main_process=True,
-            num_processes=2,
-            device=torch.device("cpu"),
-            wait_for_everyone=lambda: None,
-            reduce=fake_reduce,
-        )
-
-        export_merged_pretrained(
-            tmp_path / "merged",
-            model=peft_model,
-            accelerator=accelerator,
-            torch_dtype=torch.float32,
-        )
+        with self._distributed(all_reduce=fake_all_reduce):
+            export_merged_pretrained(
+                tmp_path / "merged",
+                model=peft_model,
+                torch_dtype=torch.float32,
+            )
 
         assert (tmp_path / "merged" / "model.safetensors").exists()
 
     def test_reraises_merged_export_error_from_other_rank(self, tmp_path: Path) -> None:
-        def fake_reduce(flag: torch.Tensor, reduction: str = "sum") -> torch.Tensor:
-            assert reduction == "sum"
-            out = flag.clone()
-            out[0] = 1
-            return out
+        def fake_all_reduce(flag_tensor: torch.Tensor, **_kwargs: Any) -> None:
+            flag_tensor.fill_(1)
 
-        accelerator = SimpleNamespace(
-            is_main_process=True,
-            num_processes=2,
-            device=torch.device("cpu"),
-            wait_for_everyone=lambda: None,
-            reduce=fake_reduce,
-        )
-
-        with patch(
-            "agilerl.utils.lora_merge._export_live_model",
-            side_effect=MergedExportError("already wrapped"),
+        with (
+            self._distributed(all_reduce=fake_all_reduce),
+            patch(
+                "agilerl.utils.lora_merge._export_live_model",
+                side_effect=MergedExportError("already wrapped"),
+            ),
         ):
             with pytest.raises(MergedExportError, match="already wrapped"):
                 export_merged_pretrained(
                     tmp_path / "merged",
                     model=_tiny_peft(),
-                    accelerator=accelerator,
                 )
 
     def test_save_file_failure_on_first_shard_skips_later_gathers(
@@ -988,42 +1002,32 @@ class TestExportMergedPretrainedDistributedFailure:
             materialize_count += 1
             return orig_materialize(*args, **kwargs)
 
-        def fake_reduce(flag: torch.Tensor, reduction: str = "sum") -> torch.Tensor:
+        def fake_all_reduce(flag_tensor: torch.Tensor, **_kwargs: Any) -> None:
             nonlocal aborting
-            assert reduction == "sum"
-            out = flag.clone()
             if materialize_count > 0:
                 aborting = True
-                out[0] = 1
-            return out
-
-        accelerator = SimpleNamespace(
-            is_main_process=False,
-            num_processes=2,
-            device=torch.device("cpu"),
-            wait_for_everyone=lambda: None,
-            reduce=fake_reduce,
-        )
+                flag_tensor.fill_(1)
 
         @contextmanager
-        def recording_gather(zero_stage: Any, params: Any, _modifier_rank: Any = None):
+        def recording_gather(params: Any):
             gather_entered.append(len(params))
             if aborting:
                 gathers_after_abort.append(len(params))
-            yield
+            yield list(params)
 
         with (
+            self._distributed(is_main=False, all_reduce=fake_all_reduce),
             patch("agilerl.utils.lora_merge._materialize_shard", spy_materialize),
-            patch("agilerl.utils.lora_merge.gather_if_zero3", recording_gather),
+            patch("agilerl.utils.lora_merge.gather_params", recording_gather),
         ):
-            with pytest.raises(MergedExportError, match="at least one rank"):
+            with pytest.raises(
+                MergedExportError, match="Peer rank failed in shard runtime collective"
+            ):
                 export_merged_pretrained(
                     tmp_path / "merged",
                     model=peft_model,
-                    accelerator=accelerator,
                     torch_dtype=torch.float32,
                     max_shard_size="1KB",
-                    zero_stage=3,
                 )
 
         assert materialize_count == 1
@@ -1036,32 +1040,24 @@ class TestExportMergedPretrainedDistributedFailure:
         blocker.write_text("not a directory", encoding="utf-8")
         gather_entered: list[int] = []
 
-        def fake_reduce(flag: torch.Tensor, reduction: str = "sum") -> torch.Tensor:
-            assert reduction == "sum"
-            return flag.clone()
-
-        accelerator = SimpleNamespace(
-            is_main_process=True,
-            num_processes=2,
-            device=torch.device("cpu"),
-            wait_for_everyone=lambda: None,
-            reduce=fake_reduce,
-        )
+        def fake_all_reduce(_flag_tensor: torch.Tensor, **_kwargs: Any) -> None:
+            return None
 
         @contextmanager
-        def recording_gather(zero_stage: Any, params: Any, _modifier_rank: Any = None):
+        def recording_gather(params: Any):
             gather_entered.append(len(params))
-            yield
+            yield list(params)
 
-        with patch("agilerl.utils.lora_merge.gather_if_zero3", recording_gather):
+        with (
+            self._distributed(all_reduce=fake_all_reduce),
+            patch("agilerl.utils.lora_merge.gather_params", recording_gather),
+        ):
             with pytest.raises(MergedExportError):
                 export_merged_pretrained(
                     blocker,
                     model=peft_model,
-                    accelerator=accelerator,
                     torch_dtype=torch.float32,
                     max_shard_size="1KB",
-                    zero_stage=3,
                 )
 
         assert gather_entered == []
@@ -1289,8 +1285,6 @@ class TestExportMergedPretrainedMemory:
             skeleton,
             output_dir=tmp_path / "merged",
             adapter_name="actor",
-            zero_stage=None,
-            accelerator=None,
             max_shard_size="1KB",
             torch_dtype=torch.float32,
             tokenizer=None,
@@ -1382,89 +1376,6 @@ class TestExportMergedPretrainedDevices:
             atol=BF16_LOGIT_ATOL,
             rtol=BF16_LOGIT_ATOL,
         )
-
-
-ZERO3_GPU_EXPORT_SCRIPT = textwrap.dedent(
-    """
-    import json
-    import sys
-    from pathlib import Path
-
-    import deepspeed
-    import torch
-    from peft import LoraConfig, get_peft_model
-    from transformers import AutoModelForCausalLM, GPT2Config, GPT2LMHeadModel
-
-    from agilerl.utils.lora_merge import export_merged_pretrained
-
-    out = Path(sys.argv[1])
-    torch.manual_seed(0)
-    torch.backends.cuda.matmul.allow_tf32 = False
-    torch.backends.cudnn.allow_tf32 = False
-    deepspeed.init_distributed(dist_backend="nccl")
-    config = GPT2Config(
-        vocab_size=32,
-        n_positions=16,
-        n_embd=16,
-        n_layer=1,
-        n_head=2,
-        n_inner=32,
-        bos_token_id=0,
-        eos_token_id=0,
-        pad_token_id=0,
-    )
-    peft = get_peft_model(
-        GPT2LMHeadModel(config).cuda(),
-        LoraConfig(
-            r=2,
-            lora_alpha=4,
-            target_modules=["c_attn"],
-            lora_dropout=0.0,
-            task_type="CAUSAL_LM",
-            init_lora_weights=False,
-            fan_in_fan_out=True,
-        ),
-        adapter_name="actor",
-    )
-    peft.eval()
-    input_ids = torch.randint(0, 32, (2, 8), device="cuda")
-    with torch.no_grad():
-        live = peft(input_ids).logits.float()
-    engine, _, _, _ = deepspeed.initialize(
-        model=peft,
-        model_parameters=[param for param in peft.parameters() if param.requires_grad],
-        config={
-            "train_batch_size": 1,
-            "train_micro_batch_size_per_gpu": 1,
-            "gradient_accumulation_steps": 1,
-            "zero_optimization": {"stage": 3},
-        },
-    )
-    n_ds = sum(1 for param in engine.module.parameters() if hasattr(param, "ds_id"))
-    merged = out / "merged"
-    export_merged_pretrained(
-        merged,
-        model=engine.module,
-        zero_stage=3,
-        torch_dtype=torch.float32,
-    )
-    reloaded = AutoModelForCausalLM.from_pretrained(merged).cuda()
-    reloaded.eval()
-    with torch.no_grad():
-        got = reloaded(input_ids).logits.float()
-    max_abs = float((live - got).abs().max())
-    print(
-        "RESULT "
-        + json.dumps(
-            {
-                "n_ds": n_ds,
-                "close": bool(torch.allclose(live, got, atol=1e-5, rtol=1e-5)),
-                "max_abs": max_abs,
-            }
-        )
-    )
-    """
-)
 
 
 @pytest.mark.gpu
@@ -1597,23 +1508,18 @@ class TestExportMergedPretrainedGPU:
             rtol=LOGIT_RTOL,
         )
 
-    def test_live_export_with_cuda_accelerator(self, tmp_path: Path) -> None:
-        accelerator = Accelerator()
-        peft_model = _tiny_peft().to(accelerator.device)
-        input_ids = torch.randint(0, 32, (2, 8), device=accelerator.device)
+    def test_live_export_on_cuda(self, tmp_path: Path) -> None:
+        peft_model = _tiny_peft().cuda()
+        input_ids = torch.randint(0, 32, (2, 8), device="cuda")
         live_logits = _peft_logits(peft_model, input_ids)
 
         export_merged_pretrained(
             tmp_path / "merged",
             model=peft_model,
-            accelerator=accelerator,
             torch_dtype=torch.float32,
         )
-        reloaded = AutoModelForCausalLM.from_pretrained(tmp_path / "merged").to(
-            accelerator.device
-        )
+        reloaded = AutoModelForCausalLM.from_pretrained(tmp_path / "merged").cuda()
 
-        assert accelerator.device.type == "cuda"
         assert torch.allclose(
             live_logits,
             _peft_logits(reloaded, input_ids),
@@ -1661,41 +1567,3 @@ class TestExportMergedPretrainedGPU:
             atol=LOGIT_ATOL,
             rtol=LOGIT_RTOL,
         )
-
-    def test_zero3_partitioned_params_merge(self, tmp_path: Path) -> None:
-        pytest.importorskip("deepspeed")
-        with socket.socket() as sock:
-            sock.bind(("127.0.0.1", 0))
-            port = sock.getsockname()[1]
-        spoke_root = Path(__file__).resolve().parents[2]
-        env = os.environ | {
-            "RANK": "0",
-            "LOCAL_RANK": "0",
-            "WORLD_SIZE": "1",
-            "MASTER_ADDR": "127.0.0.1",
-            "MASTER_PORT": str(port),
-            "PYTHONPATH": os.pathsep.join(
-                [str(spoke_root), os.environ.get("PYTHONPATH", "")]
-            ).rstrip(os.pathsep),
-        }
-        proc = subprocess.run(
-            [sys.executable, "-c", ZERO3_GPU_EXPORT_SCRIPT, str(tmp_path)],
-            env=env,
-            capture_output=True,
-            text=True,
-            timeout=180,
-            check=False,
-        )
-
-        assert proc.returncode == 0, (
-            f"ZeRO-3 GPU export failed\nstdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
-        )
-        result_line = next(
-            line for line in proc.stdout.splitlines() if line.startswith("RESULT ")
-        )
-        result = json.loads(result_line.removeprefix("RESULT "))
-        weights = load_file(tmp_path / "merged" / "model.safetensors")
-
-        assert result["n_ds"] > 0
-        assert result["close"] is True, result
-        assert all("lora" not in key for key in weights)

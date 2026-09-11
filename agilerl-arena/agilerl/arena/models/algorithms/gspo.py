@@ -5,19 +5,10 @@
 
 from __future__ import annotations
 
-from typing import Literal
-
-from pydantic import Field
-
+from agilerl.arena.models.algo import register
 from agilerl.arena.models.algorithms.grpo import GRPOSpec
-from agilerl.arena.models.registry import register
 
 
 @register()
 class GSPOSpec(GRPOSpec):
-    """GRPO with the GSPO sequence-level loss."""
-
-    loss_type: Literal["gspo"] = Field(
-        default="gspo",
-        description="GSPO's sequence-level loss.",
-    )
+    """Specification for GSPO algorithm (GRPO with GSPO loss)."""

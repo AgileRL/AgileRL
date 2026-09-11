@@ -83,13 +83,13 @@ AgileRL ships optional dependency groups that you can install as needed:
 | Installation | Description |
 |-------|--------------|
 | `agilerl[box2d]` | Box2D physics engine for Gymnasium environments |
-| `agilerl-arena` | [Arena](https://arena.agilerl.com) SDK & CLI. Validate custom environments, and train & deploy agents on managed cloud infrastructure. |
+| `agilerl[arena]` | [Arena](https://arena.agilerl.com) SDK & CLI. Validate custom environments, and train & deploy agents on managed cloud infrastructure. |
 | `agilerl[llm]` | LLM reinforcement fine-tuning. |
 | `agilerl[all]` | Cover all functionalities of AgileRL. |
 
-In development mode:
+In development mode, quote the extras:
 ```bash
-pip install -e .
+pip install -e ".[arena]"
 ```
 
 To install AgileRL from the development tip of ``main`` (not a PyPI release), use:
@@ -328,12 +328,12 @@ This approach gives you the flexibility to swap in your own Gymnasium or Petting
 
 [Arena](https://arena.agilerl.com) is the RLOps platform from AgileRL. We provide tools to create and validate custom reinforcement learning environments on the platform and train RL agents on managed cloud infrastructure specifically tailored to RL workloads.
 
-AgileRL ships a **Python SDK** and a **CLI** for interacting with the platform through the [`agilerl-arena`](agilerl-arena/README.md) package. It is a **separate PyPI distribution** that contributes the `agilerl.arena` namespace. Install it directly, or with `agilerl` (arena is a base dependency):
+AgileRL ships a **Python SDK** and a **CLI** for interacting with the platform through the [`agilerl-arena`](agilerl-arena/README.md) package. It is a **separate PyPI distribution** that contributes the `agilerl.arena` namespace. Install it directly, or via the AgileRL extra:
 
 ```bash
 pip install agilerl-arena
 # or
-pip install agilerl
+pip install "agilerl[arena]"
 ```
 
 ### Python

@@ -419,7 +419,6 @@ def _cpu_grpo(**kwargs):
         "max_model_len": 12,
         "wrap": False,
         "gradient_checkpointing": False,
-        "accelerator": None,
         "device": "cpu",
         "use_liger_loss": False,
     }

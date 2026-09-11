@@ -196,14 +196,11 @@ answers, so give it more headroom than the default.
 Step 4 — Launch training on the GPU server
 ------------------------------------------
 
-LLM training uses DeepSpeed, so launch through ``accelerate`` with a DeepSpeed config (a single-GPU one
-ships in ``configs/accelerate/``):
+Launch LLM training with ``torchrun``:
 
 .. code-block:: bash
 
-    accelerate launch \
-        --config_file configs/accelerate/bench_accelerate_config.yaml \
-        -m agilerl.train path/to/manifest.yaml --device cuda
+    torchrun --nproc_per_node=N -m agilerl.train path/to/manifest.yaml --device cuda
 
 As the run starts you will see the env server log a burst of sessions opening — one per rollout slot — as
 the first rollout begins:

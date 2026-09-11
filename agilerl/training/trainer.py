@@ -11,63 +11,46 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeVar, get_args, get_origin
 
-from pydantic import BaseModel
-from typing_extensions import Never, Self
+from accelerate import Accelerator
+from typing_extensions import Self
 
-from agilerl import HAS_LLM_DEPENDENCIES, AgentType
+from agilerl import HAS_ARENA_DEPENDENCIES, HAS_LLM_DEPENDENCIES, AgentType
 from agilerl.algorithms.core.base import (
     LLMAlgorithm,
-    MultiAgentAlgorithm,
-    SingleAgentAlgorithm,
+    MultiAgentRLAlgorithm,
+    RLAlgorithm,
 )
-from agilerl.arena import ArenaClient
-from agilerl.arena.models import BanditEnvSpec as ArenaBanditEnvSpec
-from agilerl.arena.models import GymEnvSpec as ArenaEnvSpec
-from agilerl.arena.models import LLMEnvSpec as ArenaLLMEnvSpec
-from agilerl.arena.models import TrainingManifest as ArenaManifest
-from agilerl.arena.models.algorithms.rollout_llm import RolloutLLMSpec
-from agilerl.builders import select_builder
+from agilerl.distributed import get_rank, get_world_size
 from agilerl.hpo.multi_frequency import MultiFrequencySelection
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.models import (
-    MANIFEST_REGISTRY,
+    ALGO_REGISTRY,
     AlgoSpec,
-    IPPOSpec,
     LLMAlgorithmSpec,
-    MADDPGSpec,
-    MATD3Spec,
+    MultiAgentRLAlgorithmSpec,
     MultiFrequencySelectionSpec,
     MutationSpec,
-    PPOSpec,
     ReplayBufferSpec,
-    SingleAgentAlgorithmSpec,
+    RLAlgorithmSpec,
     TournamentSelectionSpec,
     TrainingManifest,
     TrainingSpec,
 )
 from agilerl.models.env import (
     BanditEnvSpec,
-    EnvSpec,
     GymEnvSpec,
     LLMEnvSpec,
     LLMEnvType,
-    make_bandit_env,
-    make_gym_env,
-    make_llm_env,
-    make_pz_env,
-    make_rollout_env_factory,
+    OfflineEnvSpec,
+    PzEnvSpec,
 )
 from agilerl.models.hpo import SelectionStrategySpec
-from agilerl.models.manifest import from_trainer_specs
 from agilerl.models.networks import (
     NetworkSpec,
-    dump_network_section,
     encoder_spec_for_arch,
     infer_encoder_arch,
     network_arch_is_resolvable,
 )
-from agilerl.models.training import LLMRolloutBufferSpec, init_n_step_buffer
-from agilerl.strategies import select_strategy
 from agilerl.utils.chat_template import DEFAULT_CHAT_TEMPLATE
 from agilerl.utils.evolvable_networks import get_default_encoder_config
 from agilerl.utils.llm_utils import (
@@ -82,55 +65,35 @@ from agilerl.utils.trainer_utils import (
     build_selection_from_spec,
     create_population_from_spec,
     get_spaces_from_env,
+    resolve_accelerator,
     resolve_deprecated_selection_kwargs,
 )
 
 logger = logging.getLogger(__name__)
 
-EnvSpecType = EnvSpec
-ReplayBufferType = ReplayBufferSpec | LLMRolloutBufferSpec | None
-PopulationType = list[SingleAgentAlgorithm | MultiAgentAlgorithm | LLMAlgorithm]
+EnvSpecType = GymEnvSpec | PzEnvSpec | OfflineEnvSpec | LLMEnvSpec | BanditEnvSpec
+ReplayBufferType = ReplayBufferSpec | None
+PopulationType = list[RLAlgorithm | MultiAgentRLAlgorithm | LLMAlgorithm]
 
 
-def _algorithm_with_network(manifest: TrainingManifest) -> AlgoSpec:
-    """Copy the network section onto ``algorithm.net_config`` when the spec has that field."""
-    algorithm = manifest.algorithm
-    if manifest.network is None:
-        return algorithm
-    net_config_field = type(algorithm).model_fields.get("net_config")
-    if net_config_field is None:
-        return algorithm
-    spec_cls: type[NetworkSpec] | None = next(
-        (t for t in get_args(net_config_field.annotation) if t is not type(None)),
-        None,
-    )
-    if spec_cls is None:
-        return algorithm
-    network = dump_network_section(manifest.network, exclude_none=True)
-    if network_arch_is_resolvable(network):
-        resolved: NetworkSpec | dict[str, Any] = spec_cls.model_validate(network)
-    else:
-        resolved = network
-    return algorithm.model_copy(update={"net_config": resolved})
-
+if HAS_ARENA_DEPENDENCIES:
+    from agilerl.arena import ArenaClient
+    from agilerl.arena.models import TrainingManifest as ArenaManifest
+    from agilerl.arena.models.env import EnvSpec as ArenaEnvSpec
+else:
+    ArenaClient = None
+    ArenaManifest = None
+    ArenaEnvSpec = None
 
 if HAS_LLM_DEPENDENCIES:
     from transformers import AutoTokenizer
-
-    from agilerl.utils.llm_utils import create_llm_accelerator
 else:
     AutoTokenizer = None
-    create_llm_accelerator = None
 
 if TYPE_CHECKING:
     import torch
-    from accelerate import Accelerator
     from gymnasium import spaces
     from transformers import PreTrainedTokenizerBase
-
-    from agilerl.algorithms.core.registry import HyperparameterConfig
-    from agilerl.modules import EvolvableModule, ModuleDict
-    from agilerl.strategies.base import TrainingLoopReturn
 
 
 SelfTrainerT = TypeVar("SelfTrainerT", bound="Trainer")
@@ -165,20 +128,6 @@ class Trainer(ABC):
     :type device: str | torch.device
     :param accelerator: Accelerator instance.
     :type accelerator: Accelerator | None
-    :param hp_config: Hyperparameter config for HPO. Falls back to the one the
-        mutation spec describes.
-    :type hp_config: HyperparameterConfig | None
-    :param actor_network: Pre-built actor to hand every agent's constructor
-        instead of building one from the spec.
-    :type actor_network: EvolvableModule | None
-    :param critic_network: Pre-built critic, for the algorithms that take one.
-    :type critic_network: EvolvableModule | None
-    :param actor_networks: Pre-built per-agent actors, for multi-agent
-        algorithms.
-    :type actor_networks: ModuleDict | None
-    :param critic_networks: Pre-built critics, for the algorithms that take
-        several: per-agent for multi-agent algorithms, a pair for TD3.
-    :type critic_networks: ModuleDict | list[EvolvableModule] | None
     :param kwargs: Accepts the deprecated tournament alias for
         selection_strategy.
     """
@@ -196,11 +145,6 @@ class Trainer(ABC):
         load_weights_from: str | None = None,
         device: str | torch.device = "cpu",
         accelerator: Accelerator | None = None,
-        hp_config: HyperparameterConfig | None = None,
-        actor_network: EvolvableModule | None = None,
-        critic_network: EvolvableModule | None = None,
-        actor_networks: ModuleDict | None = None,
-        critic_networks: ModuleDict | list[EvolvableModule] | None = None,
         **kwargs: Any,
     ) -> None:
 
@@ -210,7 +154,7 @@ class Trainer(ABC):
 
         # Convert string algorithm name to spec if provided.
         if isinstance(algorithm, str):
-            algorithm: AlgoSpec = MANIFEST_REGISTRY.create(algorithm)
+            algorithm: AlgoSpec = ALGO_REGISTRY.get(algorithm).spec_cls()
 
         # Convert a plain environment name string to the appropriate spec.
         if isinstance(environment, str):
@@ -234,21 +178,6 @@ class Trainer(ABC):
             raise ValueError(msg)
         self._resume_checkpoint = resume_from_checkpoint
         self._load_weights_from = load_weights_from
-        self.builder = select_builder(algorithm)
-        self.strategy = select_strategy(algorithm)
-        self.hp_config = hp_config
-        # Only the modules that were given: each algorithm's constructor takes
-        # a different subset, and an unexpected kwarg is a TypeError there.
-        self.networks: dict[str, Any] = {
-            name: module
-            for name, module in {
-                "actor_network": actor_network,
-                "critic_network": critic_network,
-                "actor_networks": actor_networks,
-                "critic_networks": critic_networks,
-            }.items()
-            if module is not None
-        }
 
         # MF-PBT's bracket sizes derive from pop_size, which the spec cannot see on its own.
         if isinstance(selection_strategy, MultiFrequencySelectionSpec):
@@ -324,7 +253,7 @@ class Trainer(ABC):
             return GymEnvSpec(name=name)
 
         if agent_type == AgentType.MultiAgent:
-            return GymEnvSpec(name=name)
+            return PzEnvSpec(name=name)
 
         msg = (
             "Only Gym and PettingZoo-based environments support passing "
@@ -336,7 +265,11 @@ class Trainer(ABC):
     def from_manifest(
         cls,
         manifest: str | Path | dict[str, Any] | TrainingManifest,
-        **kwargs: Any,
+        *,
+        resume_from_checkpoint: str | None = None,
+        load_weights_from: str | None = None,
+        device: str | torch.device = "cpu",
+        accelerator: Accelerator | None = None,
     ) -> Self:
         """Instantiate a :class:`Trainer` from a JSON-style manifest or a TrainingManifest instance.
 
@@ -348,8 +281,17 @@ class Trainer(ABC):
 
         :param manifest: Path to a YAML/JSON file, or a raw dict, or a TrainingManifest instance.
         :type manifest: str | Path | dict[str, Any] | TrainingManifest
-        :param kwargs: Trainer-specific construction arguments forwarded to the
-            subclass constructor.
+        :param resume_from_checkpoint: Checkpoint to continue an interrupted run
+            from, restoring optimizer state and the hyperparameters it belongs to.
+            Mutually exclusive with ``load_weights_from``.
+        :type resume_from_checkpoint: str | None
+        :param load_weights_from: Checkpoint to warm-start a new run from, taking
+            only the weights. Mutually exclusive with ``resume_from_checkpoint``.
+        :type load_weights_from: str | None
+        :param device: Torch device string (e.g. ``"cpu"``, ``"cuda"``).
+        :type device: str | torch.device
+        :param accelerator: Accelerator instance.
+        :type accelerator: Accelerator | None
         :returns: A fully configured :class:`Trainer` instance.
         :rtype: SelfTrainerT
         """
@@ -358,25 +300,25 @@ class Trainer(ABC):
             if not isinstance(manifest, TrainingManifest)
             else manifest
         )
-        if not isinstance(validated_manifest, TrainingManifest):
-            msg = (
-                f"get_validated(mode='python') returned {type(validated_manifest).__name__}, "
-                "expected TrainingManifest."
-            )
-            raise TypeError(msg)
+        # `mode="python"` always yields a model; only `mode="json"` returns a dict.
+        assert isinstance(validated_manifest, TrainingManifest)
         env_spec = cls._resolve_env_spec(validated_manifest)
+        accelerator = resolve_accelerator(validated_manifest.algorithm, accelerator)
         return cls(
-            algorithm=_algorithm_with_network(validated_manifest),
+            algorithm=validated_manifest.algorithm,
             environment=env_spec,
             training=validated_manifest.training,
             mutation=validated_manifest.mutation,
             selection_strategy=validated_manifest.selection_strategy,
             replay_buffer=validated_manifest.replay_buffer,
-            **kwargs,
+            resume_from_checkpoint=resume_from_checkpoint,
+            load_weights_from=load_weights_from,
+            device=device,
+            accelerator=accelerator,
         )
 
     @staticmethod
-    def _resolve_env_spec(manifest: TrainingManifest) -> EnvSpecType | ArenaEnvSpec:
+    def _resolve_env_spec(manifest: TrainingManifest) -> Any:  # noqa: ANN401 -- env spec type is subclass-specific (EnvSpecType locally vs ArenaEnvSpec)
         """Build an environment spec from the parsed manifest.
 
         :param manifest: The validated training manifest.
@@ -389,7 +331,7 @@ class Trainer(ABC):
         raise NotImplementedError(msg)
 
     @abstractmethod
-    def train(self) -> TrainingLoopReturn | dict[str, Any]:
+    def train(self) -> tuple[PopulationType, list[float]] | dict[str, Any]:
         """Run the training loop.
 
         - :class:`LocalTrainer` runs training locally and returns a tuple of
@@ -400,7 +342,7 @@ class Trainer(ABC):
           response as a ``dict``.
 
         :returns: The training result, whose type depends on the trainer.
-        :rtype: TrainingLoopReturn | dict[str, Any]
+        :rtype: tuple[PopulationType, list[float]] | dict[str, Any]
         """
         msg = "Trainer subclass must implement train method."
         raise NotImplementedError(msg)
@@ -421,9 +363,9 @@ class LocalTrainer(Trainer):
     :param training: Training parameters. Defaults to ``TrainingSpec()`` (1M steps,
         single agent, no HPO).
     :type training: TrainingSpec | None
-    :param mutation: Mutation probabilities and RL hyperparameter ranges.
-        When ``hp_config`` is omitted, ranges come from
-        ``mutation.rl_hp_selection``.
+    :param mutation: Mutation probabilities and RL hyperparameter ranges.  When an
+        :class:`RLAlgorithmSpec` is used and ``hp_config`` is not set on it,
+        hyperparameter ranges are derived from ``mutation.rl_hp_selection``.
     :type mutation: MutationSpec | Mutations | None
     :param selection_strategy: Selection strategy driving evolutionary HPO: a
         :class:`~agilerl.models.hpo.TournamentSelectionSpec` or a
@@ -463,11 +405,6 @@ class LocalTrainer(Trainer):
         hpo: bool = False,
         device: str | torch.device = "cpu",
         accelerator: Accelerator | None = None,
-        hp_config: HyperparameterConfig | None = None,
-        actor_network: EvolvableModule | None = None,
-        critic_network: EvolvableModule | None = None,
-        actor_networks: ModuleDict | None = None,
-        critic_networks: ModuleDict | list[EvolvableModule] | None = None,
         **kwargs: Any,
     ) -> None:
 
@@ -484,12 +421,17 @@ class LocalTrainer(Trainer):
             load_weights_from=load_weights_from,
             device=device,
             accelerator=accelerator,
-            hp_config=hp_config,
-            actor_network=actor_network,
-            critic_network=critic_network,
-            actor_networks=actor_networks,
-            critic_networks=critic_networks,
         )
+
+        if (
+            isinstance(self.algorithm_spec, LLMAlgorithmSpec)
+            and self.accelerator is not None
+        ):
+            msg = (
+                "LLM training does not use Accelerate. Launch with torchrun, "
+                "not accelerate launch."
+            )
+            raise ValueError(msg)
 
         # If HPO is enabled, use default mutation probabilities, RL hyperparameters
         # to mutate, and, unless a strategy was configured, tournament selection
@@ -497,20 +439,6 @@ class LocalTrainer(Trainer):
             self.mutation_spec = self.mutation_spec or MutationSpec()
             if self.selection_strategy_spec is None:
                 self.selection_strategy_spec = TournamentSelectionSpec()
-
-        # LLM algorithms require a DeepSpeed-aware accelerator
-        if (
-            isinstance(self.algorithm_spec, LLMAlgorithmSpec)
-            and self.accelerator is None
-        ):
-            if create_llm_accelerator is None:
-                msg = "LLM dependencies are not installed. Please install them using: pip install agilerl[llm]"
-                raise ImportError(msg)
-
-            logger.info(
-                "User did not provide an accelerator, creating one with DeepSpeed..."
-            )
-            self.accelerator = create_llm_accelerator()
 
         # For LLM algorithms, load the tokenizer once and share it.
         self.tokenizer = (
@@ -527,23 +455,27 @@ class LocalTrainer(Trainer):
             algo_spec=self.algorithm_spec,
             env=self.env,
             mutation_spec=self.mutation_spec,
-            replay_buffer_spec=(
-                self.replay_buffer_spec
-                if isinstance(self.replay_buffer_spec, ReplayBufferSpec)
+            replay_buffer_spec=self.replay_buffer_spec,
+            device=self.device,
+            accelerator=(
+                self.accelerator
+                if not isinstance(self.algorithm_spec, LLMAlgorithmSpec)
                 else None
             ),
-            device=self.device,
-            accelerator=self.accelerator,
             tokenizer=self.tokenizer,
             resume_from_checkpoint=self._resume_checkpoint,
             load_weights_from=self._load_weights_from,
             selection_strategy_spec=self.selection_strategy_spec,
-            hp_config=self.hp_config,
-            networks=self.networks,
         )
-        self.mutations = build_mutations_from_spec(
-            self.mutation_spec, self.device, accelerator=self.accelerator
-        )
+        # Classic RL algorithms keep Accelerate; LLM training uses torch.distributed.
+        if not isinstance(self.algorithm_spec, LLMAlgorithmSpec):
+            self.mutations = build_mutations_from_spec(
+                self.mutation_spec, self.device, accelerator=self.accelerator
+            )
+        else:
+            self.mutations = build_mutations_from_spec(
+                self.mutation_spec, self.device, accelerator=None
+            )
 
         self.selection_strategy = build_selection_from_spec(
             self.selection_strategy_spec,
@@ -554,93 +486,50 @@ class LocalTrainer(Trainer):
         )
         self.memory = build_replay_buffer_from_spec(
             self.algorithm_spec,
-            # The LLM rollout deque is Ray-side wiring; no RL buffer locally.
-            self.replay_buffer_spec
-            if isinstance(self.replay_buffer_spec, ReplayBufferSpec)
-            else None,
+            self.replay_buffer_spec,
             self.device,
         )
         self.n_step_memory = (
-            init_n_step_buffer(
-                self.replay_buffer_spec, self.algorithm_spec, self.device
-            )
-            if isinstance(self.replay_buffer_spec, ReplayBufferSpec)
+            self.replay_buffer_spec.init_n_step_buffer(self.algorithm_spec, self.device)
+            if self.replay_buffer_spec is not None
             else None
         )
-        self._init_rollout_factory()
-        self.train_fn = self.strategy.get_training_loop(self.algorithm_spec)
-
-    def _init_rollout_factory(self) -> None:
-        """Set the per-trajectory env factory for rollout LLM training.
-
-        Dataset LLM and non-LLM runs leave ``env_factory`` unset.
-        """
-        if not (
+        self._rollout = (
             isinstance(self.env_spec, LLMEnvSpec)
             and self.env_spec.env_type == LLMEnvType.ROLLOUT
-        ):
-            self._rollout_env_spec = None
+        )
+
+        # Rollout training needs an env factory rather than an instantiated environment.
+        if self._rollout:
+            assert isinstance(self.env_spec, LLMEnvSpec)
+            assert isinstance(self.algorithm_spec, LLMAlgorithmSpec)
+            assert self.tokenizer is not None
+            self.env_factory = self.env_spec.make_rollout_env_factory(
+                self.tokenizer,
+                max_model_len=self.algorithm_spec.max_model_len,
+            )
+        else:
             self.env_factory = None
-            self.rollout_max_turns = None
-            return
-
-        self._rollout_env_spec = self.env_spec
-        if not isinstance(self.algorithm_spec, LLMAlgorithmSpec):
-            msg = f"{type(self.algorithm_spec).__name__} is not an LLMAlgorithmSpec."
-            raise TypeError(msg)
-        if self.tokenizer is None:
-            msg = "Rollout LLM training requires a tokenizer."
-            raise TypeError(msg)
-        max_output_tokens = (
-            self.algorithm_spec.max_output_tokens
-            if isinstance(self.algorithm_spec, RolloutLLMSpec)
-            else None
-        )
-        self.env_factory, self.rollout_max_turns = make_rollout_env_factory(
-            self._rollout_env_spec,
-            self.tokenizer,
-            max_model_len=self.algorithm_spec.max_model_len,
-            max_output_tokens=max_output_tokens,
-            seed=self.algorithm_spec.seed,
-        )
-
-    @property
-    def _rollout(self) -> bool:
-        """Whether training builds rollout envs per-trajectory."""
-        return self._rollout_env_spec is not None
+        self.train_fn = self.algorithm_spec.get_training_fn()
 
     def _resolve_deferred_net_config(self) -> None:
         """Resolve a manifest network section whose ``arch`` was omitted.
 
         When the manifest did not declare ``arch``, ``net_config`` is left as a
-        raw dict by manifest validation. Once the environment (hence the
+        raw dict by manifest validation. Now that the environment (hence the
         observation space) exists, infer the arch and validate the network into
         the algorithm's concrete ``NetworkSpec``. No-ops when ``net_config`` is
         already a validated spec (programmatic construction) or None.
         """
-        if "net_config" not in type(self.algorithm_spec).model_fields:
+        net_config = getattr(self.algorithm_spec, "net_config", None)
+        if not isinstance(net_config, dict):
             return
-        # The base MultiAgentAlgorithmSpec carries no net_config field; each
-        # concrete multi-agent spec declares its own, so narrow to those.
-        if not isinstance(
-            self.algorithm_spec,
-            (SingleAgentAlgorithmSpec, IPPOSpec, MADDPGSpec, MATD3Spec),
-        ):
-            return
-        raw_net_config = self.algorithm_spec.net_config
-        if not isinstance(raw_net_config, dict):
-            return
-        # A deferred section is the manifest's raw mapping (``model_copy``
-        # skips validation), not per-group network specs.
-        net_config: dict[str, Any] = dict(raw_net_config)
         if network_arch_is_resolvable(net_config):
             return
 
         observation_space, _ = get_spaces_from_env(self.algorithm_spec, self.env)
         simba = bool(net_config.get("simba", False))
-        recurrent = (
-            isinstance(self.algorithm_spec, PPOSpec) and self.algorithm_spec.recurrent
-        )
+        recurrent = bool(getattr(self.algorithm_spec, "recurrent", False))
 
         if isinstance(observation_space, dict):
             # ``isinstance`` narrowing leaves a ``Space & dict`` intersection, so
@@ -663,14 +552,9 @@ class LocalTrainer(Trainer):
             recurrent=recurrent,
         )
         resolved = {**net_config, "encoder_config": encoder_config}
-        if isinstance(self.algorithm_spec, SingleAgentAlgorithmSpec):
-            spec_cls = self._algo_net_spec_cls()
-            self.algorithm_spec.net_config = spec_cls.model_validate(
-                {
-                    key: value
-                    for key, value in resolved.items()
-                    if key in spec_cls.model_fields
-                }
+        if isinstance(self.algorithm_spec, RLAlgorithmSpec):
+            self.algorithm_spec.net_config = self._algo_net_spec_cls().model_validate(
+                resolved
             )
 
     def _resolve_encoder_config(
@@ -771,7 +655,7 @@ class LocalTrainer(Trainer):
         shared_fields = {k: v for k, v in net_config.items() if k != "encoder_config"}
         user_encoder_config = net_config.get("encoder_config")
 
-        resolved: dict[str, Any] = {}
+        resolved: dict[str, NetworkSpec] = {}
         for agent_id, observation_space in observation_spaces.items():
             group_id = (
                 agent_id.rsplit("_", 1)[0] if isinstance(agent_id, str) else agent_id
@@ -784,17 +668,10 @@ class LocalTrainer(Trainer):
                 simba=simba,
                 recurrent=recurrent,
             )
-            agent_net_config = {
-                key: value
-                for key, value in {
-                    **shared_fields,
-                    "encoder_config": encoder_config,
-                }.items()
-                if key in spec_cls.model_fields
-            }
+            agent_net_config = {**shared_fields, "encoder_config": encoder_config}
             resolved[group_id] = spec_cls.model_validate(agent_net_config)
 
-        if isinstance(self.algorithm_spec, (IPPOSpec, MADDPGSpec, MATD3Spec)):
+        if isinstance(self.algorithm_spec, MultiAgentRLAlgorithmSpec):
             self.algorithm_spec.net_config = resolved
 
     def _make_tokenizer(self) -> PreTrainedTokenizerBase:
@@ -808,15 +685,11 @@ class LocalTrainer(Trainer):
             msg = "LLM dependencies are not installed. Please install them using: pip install agilerl[llm]"
             raise ImportError(msg)
 
-        if not isinstance(self.algorithm_spec, LLMAlgorithmSpec):
-            msg = f"{type(self.algorithm_spec).__name__} is not an LLMAlgorithmSpec."
-            raise TypeError(msg)
+        assert isinstance(self.algorithm_spec, LLMAlgorithmSpec)
         tokenizer = AutoTokenizer.from_pretrained(
             self.algorithm_spec.pretrained_model_name_or_path
         )
-        if tokenizer is None:
-            msg = "AutoTokenizer.from_pretrained returned None."
-            raise TypeError(msg)
+        assert tokenizer is not None
 
         if tokenizer.chat_template is None:
             tokenizer.chat_template = DEFAULT_CHAT_TEMPLATE
@@ -844,47 +717,63 @@ class LocalTrainer(Trainer):
 
         :rtype: GymEnvType | PzEnvType | LLMEnvType | BanditEnv | None
         """
-        spec = self.env_spec
-        if isinstance(spec, LLMEnvSpec):
-            # Rollout envs are built per-trajectory by ``make_rollout_env_factory``.
-            if spec.env_type == LLMEnvType.ROLLOUT:
+        if isinstance(self.env_spec, LLMEnvSpec):
+            assert isinstance(self.algorithm_spec, LLMAlgorithmSpec)
+
+            # Some LLMEnvSpec fields are dependent on the algo configuration
+            self.env_spec.max_context_length = self.algorithm_spec.max_model_len
+            self.env_spec.seed = self.algorithm_spec.seed
+            self.env_spec.data_batch_size_per_gpu = self.algorithm_spec.batch_size
+
+            # Rollout envs are built per-trajectory by ``make_rollout_env_factory``,
+            # but a dataset-backed one still splits its rows off this seed.
+            if self.env_spec.env_type == LLMEnvType.ROLLOUT:
                 return None
 
-            if not isinstance(self.algorithm_spec, LLMAlgorithmSpec):
-                msg = (
-                    f"{type(self.algorithm_spec).__name__} is not an LLMAlgorithmSpec."
-                )
-                raise TypeError(msg)
-            if self.tokenizer is None:
-                msg = "LLM environment construction requires a tokenizer."
-                raise TypeError(msg)
-            return make_llm_env(
-                spec,
-                self.tokenizer,
-                data_batch_size_per_gpu=self.algorithm_spec.batch_size,
-                max_context_length=self.algorithm_spec.max_model_len,
-                seed=self.algorithm_spec.seed,
-                rank=self.accelerator.process_index if self.accelerator else 0,
-                world_size=self.accelerator.num_processes if self.accelerator else 1,
+            assert self.tokenizer is not None
+            return self.env_spec.make_dataset_env(
+                tokenizer=self.tokenizer,
+                rank=get_rank(),
+                world_size=get_world_size(),
             )
-        if isinstance(spec, BanditEnvSpec):
-            return make_bandit_env(spec)
-        if isinstance(spec, GymEnvSpec):
-            if self.algorithm_spec.agent_type == AgentType.MultiAgent:
-                return make_pz_env(spec)
-            return make_gym_env(spec)
-        if isinstance(spec, BaseModel):
-            msg = (
-                f"Unsupported environment spec {type(spec).__name__}. "
-                "Build gym, bandit, and LLM envs through the trainer's env factories."
-            )
-            raise TypeError(msg)
-        return spec
+
+        return self.env_spec.make_env()
 
     @staticmethod
     def _resolve_env_spec(manifest: TrainingManifest) -> EnvSpecType:
-        """Return the environment spec already validated on the manifest."""
-        return manifest.environment
+        """Build the appropriate environment spec from the manifest.
+
+        Uses the algorithm's ``agent_type`` to choose the spec class.
+        For LLM algorithms, ``env_type`` is injected from the algorithm
+        spec so the manifest environment section doesn't need to
+        duplicate it. DPO always trains on preference data, so that
+        objective is filled here.
+        """
+        env_data = dict(manifest.environment)
+        env_data = {k: v for k, v in env_data.items() if v is not None}
+        agent_type = manifest.algorithm.agent_type
+
+        if agent_type == AgentType.LLMAgent:
+            # `agent_type == LLMAgent` selects an LLM spec, on which `env_type`
+            # is a class variable; narrow so it resolves without an ignore.
+            assert isinstance(manifest.algorithm, LLMAlgorithmSpec)
+            env_data.setdefault("env_type", manifest.algorithm.env_type)
+            if manifest.algorithm.name == "DPO":
+                env_data.setdefault("objective", "preference")
+            elif manifest.algorithm.objective is not None:
+                env_data.setdefault("objective", manifest.algorithm.objective)
+            return LLMEnvSpec(**env_data)
+
+        if agent_type == AgentType.MultiAgent:
+            return PzEnvSpec(**env_data)
+
+        if agent_type == AgentType.OfflineAgent:
+            return OfflineEnvSpec(**env_data)
+
+        if agent_type == AgentType.BanditAgent:
+            return BanditEnvSpec(**env_data)
+
+        return GymEnvSpec(**env_data)
 
     @property
     def tournament_selection(self) -> TournamentSelection | None:
@@ -910,10 +799,10 @@ class LocalTrainer(Trainer):
     def to_manifest(self) -> dict[str, Any]:
         """Build a local training manifest from the :class:`LocalTrainer` instance.
 
-        :returns: A JSON-serializable manifest.
+        :returns: A JSON-serializable manifest using core :mod:`agilerl.models`.
         :rtype: dict[str, Any]
         """
-        manifest = from_trainer_specs(
+        manifest = TrainingManifest.from_trainer_specs(
             algorithm=self.algorithm_spec,
             environment=self.env_spec,
             training=self.training_spec,
@@ -936,7 +825,7 @@ class LocalTrainer(Trainer):
         overwrite_checkpoints: bool = False,
         wandb_api_key: str | None = None,
         wandb_kwargs: dict[str, Any] | None = None,
-    ) -> TrainingLoopReturn:
+    ) -> tuple[PopulationType, list[float]]:
         """Run a local training job given the passed configuration.
 
         :param verbose: If ``True``, print verbose output. Defaults to ``True``.
@@ -967,7 +856,7 @@ class LocalTrainer(Trainer):
             *population* is the final evolved population and
             *fitnesses* contains each agent's fitness from the final
             evaluation round.
-        :rtype: TrainingLoopReturn
+        :rtype: tuple[PopulationType, list[float]]
         """
         manifest = self.to_manifest()
         evo_steps = (
@@ -988,15 +877,15 @@ class LocalTrainer(Trainer):
             "tensorboard": tensorboard,
             "tensorboard_log_dir": tensorboard_log_dir,
             "verbose": verbose,
-            "accelerator": self.accelerator,
             "wandb_api_key": wandb_api_key,
             "wandb_kwargs": wandb_kwargs,
         }
 
-        if self._rollout_env_spec is not None:
+        if self._rollout:
+            assert isinstance(self.env_spec, LLMEnvSpec)
             kwargs["env_factory"] = self.env_factory
-            kwargs["max_turns"] = self.rollout_max_turns
-            manifest["env_name"] = self._rollout_env_spec.name
+            kwargs["max_turns"] = self.env_spec.max_turns
+            manifest["env_name"] = self.env_spec.name
             if self.training_spec.max_wall_seconds is not None:
                 kwargs["max_wall_seconds"] = self.training_spec.max_wall_seconds
         else:
@@ -1016,14 +905,15 @@ class LocalTrainer(Trainer):
 
         # Extract algo-specific kwargs from the algorithm spec.
         kwargs.update(
-            self.strategy.get_trainer_kwargs(
-                self.algorithm_spec,
+            self.algorithm_spec.get_training_kwargs(
                 training=self.training_spec,
                 env_spec=self.env_spec,
                 memory=self.memory,
                 n_step_memory=self.n_step_memory,
             )
         )
+        if not isinstance(self.algorithm_spec, LLMAlgorithmSpec):
+            kwargs["accelerator"] = self.accelerator
         return self.train_fn(**kwargs)
 
 
@@ -1079,8 +969,18 @@ class ArenaTrainer(Trainer):
         selection_strategy = resolved_selection
 
         if isinstance(environment, str):
+            if ArenaEnvSpec is None:
+                msg = (
+                    "Arena dependencies are not installed. "
+                    "Please install them using: pip install agilerl-arena"
+                )
+                raise ImportError(msg)
+
             environment = ArenaEnvSpec(name=environment)
 
+        # Arena specs mirror the core ones on the server side; they are a separate
+        # model hierarchy, so they are not members of `EnvSpecType`/`AlgoSpec` and are
+        # bridged through Any for the base constructor.
         arena_environment: Any = environment
         super().__init__(
             algorithm,
@@ -1094,6 +994,13 @@ class ArenaTrainer(Trainer):
         if client is not None:
             self._client = client
         else:
+            if not HAS_ARENA_DEPENDENCIES or ArenaClient is None:
+                msg = (
+                    "Arena dependencies are not installed. "
+                    "Please install them using: pip install agilerl-arena"
+                )
+                raise ImportError(msg)
+
             self._client = ArenaClient(api_key=api_key)
 
     @classmethod
@@ -1115,21 +1022,31 @@ class ArenaTrainer(Trainer):
         :returns: A fully configured :class:`ArenaTrainer` instance.
         :rtype: ArenaTrainer
         """
+        if ArenaManifest is None:
+            msg = (
+                "Arena dependencies are not installed. "
+                "Please install them using: pip install agilerl-arena"
+            )
+            raise ImportError(msg)
+
         client: ArenaClient | None = kwargs.get("client")
         api_key: str | None = kwargs.get("api_key")
 
-        # Arena training is driven by a serialized manifest, so a pre-validated
-        # :class:`TrainingManifest` instance cannot be submitted directly.
+        # Arena training is driven by the Arena manifest schema, so a pre-validated
+        # core :class:`TrainingManifest` instance cannot be submitted directly.
         if isinstance(manifest, TrainingManifest):
             msg = (
                 "ArenaTrainer.from_manifest expects a serialized manifest "
-                "(a path, JSON string, or dict), not a TrainingManifest instance."
+                "(a path, JSON string, or dict), not a core TrainingManifest instance."
             )
             raise TypeError(msg)
 
         validated_manifest = ArenaManifest.get_validated(manifest, mode="python")
         env_spec = cls._resolve_env_spec(validated_manifest)
 
+        # Arena specs mirror the core ones on the server side but form a separate
+        # model hierarchy, so they are bridged through `Any` for the base
+        # constructor, as `__init__` does for the environment spec.
         algorithm: Any = validated_manifest.algorithm
         training: Any = validated_manifest.training
         mutation: Any = validated_manifest.mutation
@@ -1158,32 +1075,31 @@ class ArenaTrainer(Trainer):
         )
 
     @staticmethod
-    def _resolve_env_spec(manifest: ArenaManifest) -> ArenaEnvSpec:
+    def _resolve_env_spec(manifest: Any) -> ArenaEnvSpec:  # noqa: ANN401 -- Arena manifest is a distinct schema; a concrete type would break the base-method override
         """Build an :class:`ArenaEnvSpec` from the manifest.
 
         :param manifest: The validated training manifest.
-        :type manifest: ArenaManifest
+        :type manifest: TrainingManifest
         :returns: An environment spec for training on a validated Arena environment.
         :rtype: ArenaEnvSpec
         """
-        env_data = manifest.environment
-        if isinstance(env_data, (ArenaEnvSpec, ArenaBanditEnvSpec)):
-            name = env_data.name
-        elif isinstance(env_data, ArenaLLMEnvSpec):
+        if ArenaEnvSpec is None:
             msg = (
-                "ArenaTrainer does not run LLM environments; submit the "
-                "manifest with ArenaClient.submit_experiment instead."
+                "Arena dependencies are not installed. "
+                "Please install them using: pip install agilerl-arena"
             )
+            raise ImportError(msg)
+
+        env_data = manifest.environment
+
+        if env_data.get("name") is None:
+            msg = "Environment name is required for Arena training."
             raise ValueError(msg)
-        else:
-            _never: Never = env_data
-            msg = f"{type(_never).__name__} is not a supported Arena environment spec."
-            raise TypeError(msg)
 
         return ArenaEnvSpec(
-            name=name,
-            num_envs=env_data.num_envs,
-            version=str(env_data.version),
+            name=env_data.get("name", ""),
+            num_envs=env_data.get("num_envs", 16),
+            version=str(env_data.get("version")),
         )
 
     def to_manifest(self) -> dict[str, Any]:
@@ -1193,14 +1109,15 @@ class ArenaTrainer(Trainer):
             :class:`~agilerl.arena.models.TrainingManifest`.
         :rtype: dict[str, Any]
         """
-        return from_trainer_specs(
+        manifest = TrainingManifest.from_trainer_specs(
             algorithm=self.algorithm_spec,
             environment=self.env_spec,
             training=self.training_spec,
             mutation=self.mutation_spec,
             replay_buffer=self.replay_buffer_spec,
             selection_strategy=self.selection_strategy_spec,
-        ).to_payload()
+        )
+        return TrainingManifest.to_arena_manifest(manifest)
 
     def train(
         self,

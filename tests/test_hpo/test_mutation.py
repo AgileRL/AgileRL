@@ -9,12 +9,9 @@ from typing import TYPE_CHECKING, ClassVar
 import numpy as np
 import pytest
 import torch
-from accelerate import Accelerator
-from accelerate.state import AcceleratorState
-from accelerate.utils import DeepSpeedPlugin
 from gymnasium import spaces
 
-from agilerl import HAS_DEEPSPEED, HAS_LLM_DEPENDENCIES, HAS_VLLM
+from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.algorithms import CQN, DDPG, DQN, IPPO, MADDPG, PPO, TD3, NeuralUCB
 from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
 
@@ -38,11 +35,7 @@ from tests.helper_functions import (
     generate_random_box_space,
     grama_scores_for,
 )
-
-if HAS_DEEPSPEED and HAS_VLLM:
-    from tests.test_algorithms.test_llms.test_grpo import create_module
-else:
-    create_module = None
+from tests.test_algorithms.test_llms.test_grpo import create_module
 
 if TYPE_CHECKING:
     from agilerl.algorithms.core import EvolvableAlgorithm
@@ -77,6 +70,7 @@ SHARED_INIT_HP = {
     "AGENT_IDS": ["agent_0", "agent_1", "other_agent_0"],
     "LAMBDA": 1.0,
     "REG": 0.000625,
+    "CHANNELS_LAST": False,
     "O_U_NOISE": True,
     "EXPL_NOISE": 0.1,
     "MEAN_NOISE": 0.0,
@@ -128,14 +122,12 @@ def init_pop(
     INIT_HP,
     population_size,
     device,
-    accelerator_flag,
     hp_config,
     torch_compiler,
     request,
     actor_network=None,
     critic_network=None,
 ):
-    accelerator = Accelerator(device_placement=False) if accelerator_flag else None
     observation_space = request.getfixturevalue(observation_space)
     action_space = request.getfixturevalue(action_space)
 
@@ -156,7 +148,6 @@ def init_pop(
         INIT_HP=INIT_HP,
         population_size=population_size,
         device=device,
-        accelerator=accelerator,
         actor_network=actor_network,
         critic_network=critic_network,
         torch_compiler=torch_compiler,
@@ -179,7 +170,6 @@ class TestMutationsInit:
         mutate_elite = True
         rand_seed = 12345
         device = "cpu"
-        accelerator = None
 
         mutations = Mutations(
             no_mutation,
@@ -193,7 +183,6 @@ class TestMutationsInit:
             mutate_elite=mutate_elite,
             rand_seed=rand_seed,
             device=device,
-            accelerator=accelerator,
         )
 
         assert mutations.rng is not None
@@ -207,7 +196,6 @@ class TestMutationsInit:
         assert mutations.activation_selection == activation_selection
         assert mutations.mutate_elite == mutate_elite
         assert mutations.device == device
-        assert mutations.accelerator == accelerator
 
     def test_raises_for_negative_no_mutation(self):
         with pytest.raises(AssertionError, match="greater than or equal to zero"):
@@ -514,39 +502,6 @@ class TestMutationsApplyArchMutation:
 
 
 class TestMutationsReinitBanditGrads:
-    def test_grown_parameters_extend_the_matrix(self):
-        """A parameter that grows contributes its extra indices to ``to_add``."""
-
-        class DummyActor(EvolvableModule):
-            def __init__(self, out_mod):
-                super().__init__(device="cpu")
-                self.out_mod = out_mod
-
-            def forward(self, x):
-                return x
-
-            def recreate_network(self):
-                pass
-
-            def get_output_dense(self):
-                return self.out_mod
-
-        class DummyBandit:
-            def __init__(self):
-                self.sigma_inv = torch.eye(3)  # old weight 2 + bias 1
-                self.lamb = 2.0
-                self.device = "cpu"
-                self.accelerator = None
-
-        old_layer = torch.nn.Linear(2, 1)  # weight 2 + bias 1 = 3
-        new_layer = torch.nn.Linear(2, 2)  # weight 4 + bias 2 = 6
-
-        bandit = DummyBandit()
-        Mutations(0, 1, 0.5, 0, 0, 0, 0.1, device="cpu")._reinit_bandit_grads(
-            bandit, DummyActor(new_layer), old_layer
-        )
-        assert bandit.sigma_inv.shape[0] == 6
-
     @pytest.mark.gpu
     def test_error_and_matrix_resize_paths(self, device):
         class DummyActor(EvolvableModule):
@@ -658,7 +613,6 @@ class TestMutationsMutation:
         [("vector_space", "encoder_mlp_config")],
     )
     @pytest.mark.parametrize("action_space", ["discrete_space"])
-    @pytest.mark.parametrize("accelerator_flag", [False])
     @pytest.mark.parametrize("torch_compiler", [None])
     @pytest.mark.parametrize("INIT_HP", [SHARED_INIT_HP])
     @pytest.mark.parametrize("population_size", [1])
@@ -694,15 +648,13 @@ class TestMutationsMutation:
         ],
     )
     @pytest.mark.parametrize("torch_compiler", [None])
-    @pytest.mark.parametrize("accelerator_flag", [False, True])
     @pytest.mark.parametrize("INIT_HP", [SHARED_INIT_HP])
     @pytest.mark.parametrize(
         ("observation_space", "net_config"),
         [("vector_space", "encoder_mlp_config")],
     )
     @pytest.mark.parametrize("population_size", [1])
-    def test_applies_random_mutations(self, algo, init_pop, device, accelerator_flag):
-        accelerator = Accelerator(device_placement=False) if accelerator_flag else None
+    def test_applies_random_mutations(self, algo, init_pop, device):
         population = init_pop
         pre_training_mut = True
 
@@ -716,13 +668,7 @@ class TestMutationsMutation:
             0.1,
             mutate_elite=False,
             device=device,
-            accelerator=accelerator,
         )
-
-        # Unwrap models if using accelerator
-        if accelerator is not None:
-            for agent in population:
-                agent.unwrap_models()
 
         mutated_population = mutations.mutation(population, pre_training_mut)
 
@@ -764,12 +710,10 @@ class TestMutationsMutation:
         [("vector_space", "encoder_mlp_config")],
     )
     @pytest.mark.parametrize("torch_compiler", [None])
-    @pytest.mark.parametrize("accelerator_flag", [False, True])
     @pytest.mark.parametrize("INIT_HP", [SHARED_INIT_HP])
     @pytest.mark.parametrize("hp_config", [None])
     @pytest.mark.parametrize("population_size", [1])
-    def test_applies_no_mutations(self, init_pop, device, accelerator_flag):
-        accelerator = Accelerator(device_placement=False) if accelerator_flag else None
+    def test_applies_no_mutations(self, init_pop, device):
         pre_training_mut = False
 
         population = init_pop
@@ -783,7 +727,6 @@ class TestMutationsMutation:
             0,
             0.1,
             device=device,
-            accelerator=accelerator,
         )
 
         new_population = [agent.clone(wrap=False) for agent in population]
@@ -817,15 +760,11 @@ class TestMutationsMutation:
         ("observation_space", "net_config"),
         [("vector_space", "encoder_mlp_config")],
     )
-    @pytest.mark.parametrize("accelerator_flag", [False, True])
     @pytest.mark.parametrize("INIT_HP", [SHARED_INIT_HP])
     @pytest.mark.parametrize("torch_compiler", [None])
     @pytest.mark.parametrize("hp_config", [None])
     @pytest.mark.parametrize("population_size", [1])
-    def test_applies_no_mutations_pre_training_mut(
-        self, init_pop, device, accelerator_flag
-    ):
-        accelerator = Accelerator(device_placement=False) if accelerator_flag else None
+    def test_applies_no_mutations_pre_training_mut(self, init_pop, device):
         pre_training_mut = True
         population = init_pop
 
@@ -839,7 +778,6 @@ class TestMutationsMutation:
             1,
             0.1,
             device=device,
-            accelerator=accelerator,
         )
 
         new_population = [agent.clone(wrap=False) for agent in population]
@@ -881,18 +819,15 @@ class TestMutationsMutation:
         [("vector_space", "encoder_mlp_config")],
     )
     @pytest.mark.parametrize("torch_compiler", [None])
-    @pytest.mark.parametrize("accelerator_flag", [False, True])
     @pytest.mark.parametrize("INIT_HP", [SHARED_INIT_HP])
     @pytest.mark.parametrize("population_size", [1])
     def test_applies_rl_hp_mutations(
         self,
         init_pop,
         device,
-        accelerator_flag,
         hp_config,
         request,
     ):
-        accelerator = Accelerator(device_placement=False) if accelerator_flag else None
         pre_training_mut = False
         population = init_pop
         mutations = Mutations(
@@ -904,7 +839,6 @@ class TestMutationsMutation:
             1,
             0.1,
             device=device,
-            accelerator=accelerator,
         )
         hp_config = request.getfixturevalue(hp_config)
 
@@ -946,7 +880,6 @@ class TestMutationsMutation:
         ],
     )
     @pytest.mark.parametrize("torch_compiler", [None])
-    @pytest.mark.parametrize("accelerator_flag", [False, True])
     @pytest.mark.parametrize("INIT_HP", [SHARED_INIT_HP])
     @pytest.mark.parametrize("hp_config", [None])
     @pytest.mark.parametrize("population_size", [1])
@@ -955,9 +888,7 @@ class TestMutationsMutation:
         init_pop,
         observation_space,
         device,
-        accelerator_flag,
     ):
-        accelerator = Accelerator(device_placement=False) if accelerator_flag else None
         pre_training_mut = False
         population = init_pop
 
@@ -979,7 +910,6 @@ class TestMutationsMutation:
             0.1,
             activation_selection=activation_selection,
             device=device,
-            accelerator=accelerator,
         )
 
         new_population = [agent.clone(wrap=False) for agent in population]
@@ -1005,15 +935,11 @@ class TestMutationsMutation:
         ],
     )
     @pytest.mark.parametrize(("algo", "action_space"), [("DDPG", "vector_space")])
-    @pytest.mark.parametrize("accelerator_flag", [False, True])
     @pytest.mark.parametrize("INIT_HP", [SHARED_INIT_HP])
     @pytest.mark.parametrize("torch_compiler", [None])
     @pytest.mark.parametrize("hp_config", [None])
     @pytest.mark.parametrize("population_size", [1])
-    def test_applies_activation_mutations_no_skip(
-        self, init_pop, device, accelerator_flag
-    ):
-        accelerator = Accelerator(device_placement=False) if accelerator_flag else None
+    def test_applies_activation_mutations_no_skip(self, init_pop, device):
         pre_training_mut = False
         population = init_pop
         mutations = Mutations(
@@ -1025,7 +951,6 @@ class TestMutationsMutation:
             0,
             0.1,
             device=device,
-            accelerator=accelerator,
         )
 
         for individual in population:
@@ -1063,7 +988,6 @@ class TestMutationsMutation:
         [("vector_space", "encoder_mlp_config")],
     )
     @pytest.mark.parametrize("torch_compiler", [None])
-    @pytest.mark.parametrize("accelerator_flag", [False, True])
     @pytest.mark.parametrize("INIT_HP", [SHARED_INIT_HP])
     @pytest.mark.parametrize("hp_config", [None])
     @pytest.mark.parametrize("population_size", [1])
@@ -1071,11 +995,9 @@ class TestMutationsMutation:
         self,
         algo,
         device,
-        accelerator_flag,
         init_pop,
         wrapper_cls,
     ):
-        accelerator = Accelerator(device_placement=False) if accelerator_flag else None
         pre_training_mut = False
 
         population = init_pop
@@ -1092,7 +1014,6 @@ class TestMutationsMutation:
             0,
             0.5,
             device=device,
-            accelerator=accelerator,
         )
 
         new_population = [agent.clone(wrap=False) for agent in population]
@@ -1134,12 +1055,8 @@ class TestMutationsMutation:
     @pytest.mark.parametrize("hp_config", [None])
     @pytest.mark.parametrize("population_size", [1])
     @pytest.mark.parametrize("torch_compiler", [None])
-    @pytest.mark.parametrize("accelerator_flag", [False, True])
     @pytest.mark.parametrize("INIT_HP", [SHARED_INIT_HP_MA])
-    def test_applies_random_mutations_multi_agent(
-        self, init_pop, device, accelerator_flag
-    ):
-        accelerator = Accelerator(device_placement=False) if accelerator_flag else None
+    def test_applies_random_mutations_multi_agent(self, init_pop, device):
         pre_training_mut = False
         population = init_pop
 
@@ -1153,12 +1070,7 @@ class TestMutationsMutation:
             0.1,
             0.1,
             device=device,
-            accelerator=accelerator,
         )
-
-        if accelerator is not None:
-            for agent in population:
-                agent.unwrap_models()
 
         mutated_population = mutations.mutation(population, pre_training_mut)
 
@@ -1194,9 +1106,7 @@ class TestMutationsMutation:
     @pytest.mark.parametrize("population_size", [1])
     @pytest.mark.parametrize("hp_config", [None])
     @pytest.mark.parametrize("torch_compiler", [None])
-    @pytest.mark.parametrize("accelerator_flag", [False, True])
-    def test_applies_no_mutations_multi_agent(self, init_pop, device, accelerator_flag):
-        accelerator = Accelerator(device_placement=False) if accelerator_flag else None
+    def test_applies_no_mutations_multi_agent(self, init_pop, device):
         pre_training_mut = False
         population = init_pop
 
@@ -1209,12 +1119,7 @@ class TestMutationsMutation:
             0,
             0.1,
             device=device,
-            accelerator=accelerator,
         )
-
-        if accelerator is not None:
-            for agent in population:
-                agent.unwrap_models()
 
         mutated_population = mutations.mutation(population, pre_training_mut)
 
@@ -1240,17 +1145,14 @@ class TestMutationsMutation:
     @pytest.mark.parametrize("action_space", ["ma_discrete_space"])
     @pytest.mark.parametrize("population_size", [1])
     @pytest.mark.parametrize("torch_compiler", [None])
-    @pytest.mark.parametrize("accelerator_flag", [False, True])
     @pytest.mark.parametrize("INIT_HP", [SHARED_INIT_HP_MA])
     def test_applies_rl_hp_mutations_multi_agent(
         self,
         init_pop,
         device,
-        accelerator_flag,
         hp_config,
         request,
     ):
-        accelerator = Accelerator(device_placement=False) if accelerator_flag else None
         pre_training_mut = False
         population = init_pop
 
@@ -1263,7 +1165,6 @@ class TestMutationsMutation:
             1,
             0.1,
             device=device,
-            accelerator=accelerator,
         )
 
         new_population = [agent.clone(wrap=False) for agent in population]
@@ -1297,15 +1198,12 @@ class TestMutationsMutation:
     @pytest.mark.parametrize("population_size", [1])
     @pytest.mark.parametrize("hp_config", [None])
     @pytest.mark.parametrize("torch_compiler", [None])
-    @pytest.mark.parametrize("accelerator_flag", [False, True])
     @pytest.mark.parametrize("INIT_HP", [SHARED_INIT_HP_MA])
     def test_applies_activation_mutations_multi_agent(
         self,
         init_pop,
         device,
-        accelerator_flag,
     ):
-        accelerator = Accelerator(device_placement=False) if accelerator_flag else None
         pre_training_mut = False
         population = init_pop
 
@@ -1318,7 +1216,6 @@ class TestMutationsMutation:
             0,
             0.1,
             device=device,
-            accelerator=accelerator,
         )
 
         new_population = [agent.clone(wrap=False) for agent in population]
@@ -1350,15 +1247,12 @@ class TestMutationsMutation:
     @pytest.mark.parametrize("population_size", [1])
     @pytest.mark.parametrize("hp_config", [None])
     @pytest.mark.parametrize("torch_compiler", [None])
-    @pytest.mark.parametrize("accelerator_flag", [False, True])
     @pytest.mark.parametrize("INIT_HP", [SHARED_INIT_HP_MA])
     def test_applies_activation_mutations_multi_agent_no_skip(
         self,
         init_pop,
         device,
-        accelerator_flag,
     ):
-        accelerator = Accelerator(device_placement=False) if accelerator_flag else None
         pre_training_mut = False
         population = init_pop
 
@@ -1371,7 +1265,6 @@ class TestMutationsMutation:
             0,
             0.1,
             device=device,
-            accelerator=accelerator,
         )
 
         for individual in population:
@@ -1415,16 +1308,13 @@ class TestMutationsMutation:
     @pytest.mark.parametrize("population_size", [1])
     @pytest.mark.parametrize("hp_config", [None])
     @pytest.mark.parametrize("torch_compiler", [None])
-    @pytest.mark.parametrize("accelerator_flag", [False, True])
     @pytest.mark.parametrize("INIT_HP", [SHARED_INIT_HP_MA])
     def test_applies_parameter_mutations_multi_agent(
         self,
         init_pop,
         device,
-        accelerator_flag,
         wrapper_cls,
     ):
-        accelerator = Accelerator(device_placement=False) if accelerator_flag else None
         pre_training_mut = False
         population = init_pop
 
@@ -1440,7 +1330,6 @@ class TestMutationsMutation:
             0,
             0.5,
             device=device,
-            accelerator=accelerator,
         )
 
         new_population = [agent.clone(wrap=False) for agent in population]
@@ -1474,14 +1363,6 @@ class TestMutationsMutation:
     @pytest.mark.skipif(
         not HAS_LLM_DEPENDENCIES, reason="LLM dependencies not installed"
     )
-    @pytest.mark.parametrize(
-        ("use_accelerator", "use_deepspeed_optimizer"),
-        [
-            (True, True),
-            (True, False),
-            (False, False),
-        ],
-    )
     @pytest.mark.parametrize("algo", ["GRPO", "DPO"])
     @pytest.mark.parametrize(
         "hp_to_mutate",
@@ -1495,16 +1376,10 @@ class TestMutationsMutation:
         request,
         vector_space,
         monkeypatch,
-        use_accelerator,
-        use_deepspeed_optimizer,
         algo,
         hp_to_mutate,
         grpo_hp_config,
-        deepspeed_env,
     ):
-        if use_accelerator and not torch.cuda.is_available():
-            pytest.skip("DeepSpeed accelerator LLM mutation tests require CUDA.")
-
         if hp_to_mutate == "max_grad_norm":
             grpo_hp_config = HyperparameterConfig(
                 max_grad_norm=RLParameter(min=0.1, max=1.0),
@@ -1512,43 +1387,6 @@ class TestMutationsMutation:
 
         pre_training_mut = False
 
-        if use_accelerator:
-            if torch.distributed.is_initialized():
-                torch.distributed.destroy_process_group()
-            try:
-                import deepspeed.comm.comm as ds_comm
-                import deepspeed.utils.groups as ds_groups
-
-                for attr in dir(ds_groups):
-                    if attr.startswith("_") and attr.endswith("_GROUP"):
-                        setattr(ds_groups, attr, None)
-                ds_comm.cdb = None
-            except ImportError:
-                pass
-            AcceleratorState._reset_state(True)
-
-            deepspeed_config = {
-                "gradient_accumulation_steps": 1,
-                "zero_optimization": {
-                    "stage": 2,
-                },
-                "gradient_clipping": 0.3,
-            }
-            if use_deepspeed_optimizer:
-                deepspeed_config["optimizer"] = {
-                    "type": "AdamW",
-                    "params": {
-                        "lr": 1e-4,  # Smaller learning rate
-                        "betas": [0.9, 0.999],
-                        "eps": 1e-8,
-                        "weight_decay": 0.01,
-                    },
-                }
-            accelerator = Accelerator(
-                deepspeed_plugin=DeepSpeedPlugin(hf_ds_config=deepspeed_config),
-            )
-        else:
-            accelerator = None
         init_hp = {
             "PAD_TOKEN_ID": 1000 - 1,
             "PAD_TOKEN": "<pad>",
@@ -1585,7 +1423,6 @@ class TestMutationsMutation:
                 "pad_token_id": 1000 - 1,
                 "pad_token": "<pad>",
             },
-            accelerator=accelerator,
             device=device,
         )
 
@@ -1598,7 +1435,6 @@ class TestMutationsMutation:
             1,
             1,
             device=device,
-            accelerator=accelerator,
         )
 
         print("original lr: ", [agent.lr for agent in population])
@@ -1619,43 +1455,17 @@ class TestMutationsMutation:
             assert min_value <= new_value <= max_value
             assert old.index == individual.index
         for agent in mutated_population:
-            opt = (
-                agent.actor.optimizer
-                if (use_deepspeed_optimizer and use_accelerator)
-                else agent.optimizer.optimizer
-            )
+            opt = agent.optimizer.optimizer
             for param_group in opt.param_groups:
                 assert param_group["lr"] == agent.lr
-            if use_accelerator:
-                assert (
-                    agent.accelerator.state.deepspeed_plugin.deepspeed_config[
-                        "gradient_clipping"
-                    ]
-                    == agent.max_grad_norm
-                )
         for mut_agent, old_agent in zip(
             mutated_population, new_population, strict=False
         ):
             mut_agent.clean_up()
             old_agent.clean_up()
-        if use_accelerator:
-            if torch.distributed.is_initialized():
-                torch.distributed.destroy_process_group()
-            try:
-                import deepspeed.comm.comm as ds_comm
-                import deepspeed.utils.groups as ds_groups
-
-                for attr in dir(ds_groups):
-                    if attr.startswith("_") and attr.endswith("_GROUP"):
-                        setattr(ds_groups, attr, None)
-                ds_comm.cdb = None
-            except ImportError:
-                pass
-            AcceleratorState._reset_state(True)
 
     @pytest.mark.skipif(
-        not (HAS_VLLM and HAS_DEEPSPEED),
-        reason="Need to install agilerl with deepspeed + vllm",
+        not HAS_LLM_DEPENDENCIES, reason="LLM dependencies not installed"
     )
     @pytest.mark.parametrize(
         "mutation_type", ["architecture", "parameters", "activation"]
@@ -1717,7 +1527,6 @@ class TestMutationsMutation:
             0,
             0.1,
             device="cuda" if torch.cuda.is_available() else "cpu",
-            accelerator=None,
         )
 
         new_population = [agent.clone(wrap=False) for agent in population]
@@ -1750,7 +1559,7 @@ class TestMutationsMutation:
 
 class TestMutationsArchitectureMutate:
     def test_raises_for_unsupported_individual(self):
-        """Mutations.architecture_mutate raises MutationError when individual is not SingleAgentAlgorithm or MultiAgentAlgorithm."""
+        """Mutations.architecture_mutate raises MutationError when individual is not RLAlgorithm or MultiAgentRLAlgorithm."""
         mutations = Mutations(0, 1, 0.5, 0, 0, 0, 0.5, device="cpu")
         with pytest.raises(
             MutationError, match="Architecture mutations are not supported"
@@ -1782,7 +1591,6 @@ class TestMutationsArchitectureMutate:
         ],
     )
     @pytest.mark.parametrize("torch_compiler", [None])
-    @pytest.mark.parametrize("accelerator_flag", [False, True])
     @pytest.mark.parametrize("INIT_HP", [SHARED_INIT_HP])
     @pytest.mark.parametrize("hp_config", [None])
     @pytest.mark.parametrize("population_size", [1])
@@ -1790,10 +1598,8 @@ class TestMutationsArchitectureMutate:
         self,
         init_pop,
         device,
-        accelerator_flag,
         wrapper_cls,
     ):
-        accelerator = Accelerator(device_placement=False) if accelerator_flag else None
         population: list[EvolvableAlgorithm] = init_pop
         if wrapper_cls is not None:
             population = [wrapper_cls(agent) for agent in population]
@@ -1807,7 +1613,6 @@ class TestMutationsArchitectureMutate:
             0,
             0.5,
             device=device,
-            accelerator=accelerator,
         )
 
         mut_methods = population[0].actor.mutation_methods
@@ -1896,7 +1701,6 @@ class TestMutationsArchitectureMutate:
     @pytest.mark.parametrize("hp_config", [None])
     @pytest.mark.parametrize("population_size", [1])
     @pytest.mark.parametrize("torch_compiler", [None])
-    @pytest.mark.parametrize("accelerator_flag", [False, True])
     @pytest.mark.parametrize(
         "mut_method",
         [
@@ -1915,14 +1719,12 @@ class TestMutationsArchitectureMutate:
         observation_space,
         action_space,
         device,
-        accelerator_flag,
         mut_method,
         actor_network,
         critic_network,
         init_pop,
         request,
     ):
-        accelerator = Accelerator(device_placement=True) if accelerator_flag else None
         observation_space = request.getfixturevalue(observation_space)
         action_space = request.getfixturevalue(action_space)
 
@@ -1946,7 +1748,6 @@ class TestMutationsArchitectureMutate:
             INIT_HP=SHARED_INIT_HP,
             population_size=1,
             device=device,
-            accelerator=accelerator,
             actor_network=actual_actor_network,
             critic_network=actual_critic_network,
         )
@@ -1960,7 +1761,6 @@ class TestMutationsArchitectureMutate:
             0,
             0.5,
             device=device,
-            accelerator=accelerator,
         )
 
         class DummyRNG:
@@ -2006,7 +1806,6 @@ class TestMutationsArchitectureMutate:
     @pytest.mark.parametrize("action_space", ["ma_discrete_space"])
     @pytest.mark.parametrize("population_size", [1])
     @pytest.mark.parametrize("hp_config", [None])
-    @pytest.mark.parametrize("accelerator_flag", [False])
     @pytest.mark.parametrize("torch_compiler", [None])
     @pytest.mark.parametrize("INIT_HP", [SHARED_INIT_HP_MA])
     def test_applies_architecture_mutations_multi_agent(
@@ -2014,10 +1813,8 @@ class TestMutationsArchitectureMutate:
         algo,
         init_pop,
         device,
-        accelerator_flag,
         wrapper_cls,
     ):
-        accelerator = Accelerator(device_placement=False) if accelerator_flag else None
         population: list[EvolvableAlgorithm] = init_pop
         mutations = Mutations(
             0,
@@ -2028,7 +1825,6 @@ class TestMutationsArchitectureMutate:
             0,
             0.5,
             device=device,
-            accelerator=accelerator,
         )
 
         # Change EvolvableModule random number generator to test mutation methods
@@ -2125,13 +1921,11 @@ class TestMutationsArchitectureMutate:
     @pytest.mark.parametrize("INIT_HP", [SHARED_INIT_HP_MA])
     @pytest.mark.parametrize("population_size", [1])
     @pytest.mark.parametrize("hp_config", [None])
-    @pytest.mark.parametrize("accelerator_flag", [False, True])
     @pytest.mark.parametrize("torch_compiler", [None])
     def test_applies_bert_architecture_mutations_multi_agent(
         self,
         algo,
         device,
-        accelerator_flag,
         init_pop,
         observation_space,
         action_space,
@@ -2139,7 +1933,6 @@ class TestMutationsArchitectureMutate:
         actor_network,
         critic_network,
     ):
-        accelerator = Accelerator(device_placement=False) if accelerator_flag else None
         observation_space = request.getfixturevalue(observation_space)
         action_space = request.getfixturevalue(action_space)
 
@@ -2163,7 +1956,6 @@ class TestMutationsArchitectureMutate:
             INIT_HP=SHARED_INIT_HP_MA,
             population_size=1,
             device=device,
-            accelerator=accelerator,
             actor_network=actual_actor_network,
             critic_network=actual_critic_network,
         )
@@ -2177,7 +1969,6 @@ class TestMutationsArchitectureMutate:
             0,
             0.5,
             device=device,
-            accelerator=accelerator,
         )
 
         sample_agent_id = population[0].agent_ids[0]
@@ -2241,26 +2032,30 @@ class TestMutationsNoMutation:
 
 class TestMutationsActivationMutation:
     @pytest.mark.gpu
-    @pytest.mark.parametrize("algo_cls", [PPO, DDPG, TD3])
+    @pytest.mark.parametrize("algo", ["PPO", "DDPG", "TD3"])
     def test_warns_for_policy_gradient_algos(
-        self, algo_cls, vector_space, encoder_mlp_config, device
+        self, algo, vector_space, encoder_mlp_config, device
     ):
+        from agilerl.utils.utils import create_population
+
         action_space = (
             generate_random_box_space((2,))
-            if algo_cls in (DDPG, TD3)
+            if algo in ("DDPG", "TD3")
             else generate_discrete_space(2)
         )
-        pop = algo_cls.population(
-            size=1,
+        pop = create_population(
+            algo=algo,
             observation_space=vector_space,
             action_space=action_space,
             net_config=encoder_mlp_config,
+            INIT_HP=SHARED_INIT_HP,
+            population_size=1,
             device=device,
         )
         muts = Mutations(0, 0, 0, 0, 1, 0, 0.1, device=device)
         with pytest.warns(
             UserWarning,
-            match=f"Activation mutations are not supported for {algo_cls.__name__}",
+            match=f"Activation mutations are not supported for {algo}",
         ):
             out = muts.activation_mutation(pop[0].clone(wrap=False))
         assert out.mut == "None"
@@ -2295,8 +2090,7 @@ class TestMutationsActivationMutation:
         assert out.mut == "None"
 
     @pytest.mark.skipif(
-        not (HAS_VLLM and HAS_DEEPSPEED),
-        reason="Need to install agilerl with deepspeed + vllm",
+        not HAS_LLM_DEPENDENCIES, reason="LLM dependencies not installed"
     )
     @pytest.mark.parametrize("algo", ["GRPO", "DPO"])
     def test_warns_for_llm_algorithms(self, algo, grpo_hp_config, vector_space, device):
@@ -2340,7 +2134,7 @@ class TestMutationsActivationMutation:
             population_size=1,
             device=device,
         )
-        muts = Mutations(0, 0, 0, 0, 1, 0, 0.1, device=device, accelerator=None)
+        muts = Mutations(0, 0, 0, 0, 1, 0, 0.1, device=device)
         agent = pop[0].clone(wrap=False)
         try:
             with pytest.warns(
@@ -2390,34 +2184,18 @@ class TestGetExpLayer:
         ):
             get_exp_layer(torch.nn.Linear(2, 2))
 
-    def test_raises_for_non_linear_output_layer(self):
-        """get_exp_layer raises TypeError when the output layer is not nn.Linear."""
-
-        class NonLinearOutputModule(EvolvableModule):
-            def __init__(self):
-                super().__init__(device="cpu")
-                self.out = torch.nn.ReLU()
-
-            def forward(self, x):
-                return x
-
-            def recreate_network(self):
-                pass
-
-            def get_output_dense(self):
-                return self.out
-
-        with pytest.raises(TypeError, match=r"expected a linear output layer"):
-            get_exp_layer(NonLinearOutputModule())
-
     def test_returns_output_layer_for_evolvable_module(
         self, vector_space, discrete_space, encoder_mlp_config
     ):
-        pop = NeuralUCB.population(
-            size=1,
+        from agilerl.utils.utils import create_population
+
+        pop = create_population(
+            algo="NeuralUCB",
             observation_space=vector_space,
             action_space=discrete_space,
             net_config=encoder_mlp_config,
+            INIT_HP=SHARED_INIT_HP,
+            population_size=1,
             device="cpu",
         )
         offspring = pop[0].actor.clone()
@@ -2466,11 +2244,15 @@ def test_set_global_seed_skips_cuda_without_a_device():
 def test_get_eval_modules_returns_policy_and_modules(
     vector_space, discrete_space, encoder_mlp_config
 ):
-    pop = DQN.population(
-        size=1,
+    from agilerl.utils.utils import create_population
+
+    pop = create_population(
+        algo="DQN",
         observation_space=vector_space,
         action_space=discrete_space,
         net_config=encoder_mlp_config,
+        INIT_HP=SHARED_INIT_HP,
+        population_size=1,
         device="cpu",
     )
     policy, offspring_evals = pop[0].get_eval_modules()

@@ -372,3 +372,103 @@ class TestEpisodeSeeding:
             assert collector.envs[0].seen_seed is not None
         finally:
             collector.close()
+
+
+class TestRolloutCollectorDpBatch:
+    """Global ``batch_size`` is split across data-parallel ranks."""
+
+    def test_splits_prompt_groups_evenly_across_ranks(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr("agilerl.llm_envs.collector.get_world_size", lambda: 2)
+        monkeypatch.setattr("agilerl.llm_envs.collector.get_rank", lambda: 1)
+        collector = RolloutCollector(
+            env_factory=_PlainEnv,
+            batch_size=8,
+            group_size=4,
+        )
+        try:
+            collector.reset(seed=0)
+
+            assert collector.batch_size == 4
+            assert collector.num_envs == 16
+            assert len(collector.envs) == 16
+        finally:
+            collector.close()
+
+    def test_single_rank_keeps_the_full_batch(self) -> None:
+        collector = RolloutCollector(
+            env_factory=_PlainEnv,
+            batch_size=8,
+            group_size=4,
+        )
+        try:
+            assert collector.batch_size == 8
+            assert collector.num_envs == 32
+        finally:
+            collector.close()
+
+    def test_rejects_batch_not_divisible_by_world_size(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr("agilerl.llm_envs.collector.get_world_size", lambda: 3)
+        monkeypatch.setattr("agilerl.llm_envs.collector.get_rank", lambda: 0)
+        with pytest.raises(ValueError, match="divisible by the data-parallel"):
+            RolloutCollector(
+                env_factory=_PlainEnv,
+                batch_size=8,
+                group_size=1,
+            )
+
+    def test_explicit_rank_overrides_get_rank(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr("agilerl.llm_envs.collector.get_world_size", lambda: 2)
+        monkeypatch.setattr("agilerl.llm_envs.collector.get_rank", lambda: 0)
+        collector = RolloutCollector(
+            env_factory=_PlainEnv,
+            batch_size=8,
+            group_size=4,
+            rank=1,
+        )
+        try:
+            collector.reset(seed=0)
+
+            assert collector._task_assigner is not None
+            assert collector._task_assigner.rank == 1
+        finally:
+            collector.close()
+
+    def test_explicit_world_size_overrides_get_world_size(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr("agilerl.llm_envs.collector.get_world_size", lambda: 4)
+        monkeypatch.setattr("agilerl.llm_envs.collector.get_rank", lambda: 0)
+        collector = RolloutCollector(
+            env_factory=_PlainEnv,
+            batch_size=8,
+            group_size=4,
+            rank=0,
+            world_size=2,
+        )
+        try:
+            collector.reset(seed=0)
+
+            assert collector.batch_size == 4
+            assert collector.num_envs == 16
+            assert collector._task_assigner is not None
+            assert collector._task_assigner.world_size == 2
+        finally:
+            collector.close()
+
+    def test_rejects_rank_outside_world_size(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr("agilerl.llm_envs.collector.get_world_size", lambda: 2)
+        with pytest.raises(ValueError, match="rank must be in"):
+            RolloutCollector(
+                env_factory=_PlainEnv,
+                batch_size=8,
+                group_size=1,
+                rank=2,
+            )

@@ -186,7 +186,7 @@ accepts the spec declaratively from YAML / ``INIT_HP``:
    * - ``"nf4"``
      - ~0.56 byte/param
      - 4-bit NF4 with BF16 compute, BF16 quant storage and double
-       quantization. The QLoRA recipe; ZeRO-3 compatible. Also accepted as
+       quantization. The QLoRA recipe; FSDP2 compatible. Also accepted as
        ``"4bit"``, ``"4-bit"``, ``"bnb-4bit"``, or ``"bnb_4bit"``.
    * - ``None`` / ``"none"``
      - 2 bytes/param
@@ -209,19 +209,16 @@ A ``dict`` is also accepted and forwarded verbatim as
    never updated, so its quantization error does not accumulate during
    training.
 
-Works with DeepSpeed
-~~~~~~~~~~~~~~~~~~~~~
+Works with FSDP2
+~~~~~~~~~~~~~~~~
 
 The ``nf4`` preset sets ``bnb_4bit_quant_storage=torch.bfloat16`` specifically
 so the quantized parameters present a floating-point storage dtype that
-`DeepSpeed <https://www.deepspeed.ai/>`_ and
-`Accelerate <https://huggingface.co/docs/accelerate/index>`_ can shard. QLoRA
-training therefore composes with ZeRO (DeepSpeed's memory-saving strategy for
-splitting model and optimizer state across GPUs, including its most aggressive
-ZeRO-3 tier) and gradient checkpointing; no extra configuration is required
-beyond the usual
-:class:`~accelerate.Accelerator` / ``DeepSpeedPlugin`` setup. See
-:ref:`distributed_training` for the distributed setup.
+FSDP2 can shard. QLoRA training therefore composes with FSDP2 full shard and
+gradient checkpointing; pass an :class:`~agilerl.distributed.FSDPConfig` on
+the algorithm and launch with ``torchrun --nproc_per_node=N``. See
+:ref:`llm_distributed` for :class:`~agilerl.distributed.FSDPConfig` fields and
+examples.
 
 When the trainer is quantized and a colocated vLLM rollout runs in sleep
 mode, AgileRL loads the bitsandbytes-quantized trainer **before** starting

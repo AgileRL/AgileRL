@@ -14,10 +14,18 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 import torch
-from accelerate import Accelerator
 
 from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.algorithms import GRPO
+from agilerl.distributed import (
+    all_ranks,
+    allreduce_minmax_int,
+    any_rank,
+    barrier,
+    is_distributed,
+    is_main_process,
+    aggregate_metrics_across_gpus,
+)
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.population import Population
@@ -25,9 +33,7 @@ from agilerl.protocols import SelectionStrategyProtocol
 from agilerl.training.llm.common import _validate_finetune_args
 from agilerl.utils.llm_utils import (
     align_completion_batch_shapes_across_ranks,
-    allreduce_minmax_int,
     needs_cross_rank_seq_padding,
-    safe_aggregate_metrics,
 )
 from agilerl.utils.utils import (
     data_parallel_topology,
@@ -45,26 +51,6 @@ if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
 
 if TYPE_CHECKING:
     SupportedRollout = GRPO | LLMPPO | LLMREINFORCE
-
-
-def _any_rank_flag(
-    local: bool,
-    accelerator: Accelerator | None,
-) -> bool:
-    """Whether any data-parallel rank has this flag set."""
-    if accelerator is None:
-        return local
-    _, max_flag = allreduce_minmax_int(int(local), accelerator)
-    return max_flag == 1
-
-
-def _any_rank_empty_batch(
-    local_empty: bool,
-    accelerator: Accelerator | None,
-) -> bool:
-    """Whether any data-parallel rank has an empty rollout this step."""
-    # Mixed empty/non-empty ranks would split learn() collectives.
-    return _any_rank_flag(local_empty, accelerator)
 
 
 def train_llm_rollout(
@@ -92,7 +78,6 @@ def train_llm_rollout(
     eval_loop: int = 1,
     max_reward: float | None = None,
     verbose: bool = True,
-    accelerator: Accelerator | None = None,
     max_wall_seconds: float | None = None,
     io_timeout_s: float | None = 600.0,
 ) -> "tuple[list[SupportedRollout], Any]":
@@ -156,8 +141,6 @@ def train_llm_rollout(
     :type max_reward: float, optional
     :param verbose: Progress bar and periodic train summaries, defaults to True.
     :type verbose: bool
-    :param accelerator: Hugging Face Accelerate instance, defaults to None.
-    :type accelerator: Accelerator, optional
     :param max_wall_seconds: Stop after this wall-clock duration (seconds); ``None`` disables.
     :type max_wall_seconds: float | None
     :param io_timeout_s: Backstop deadline for one concurrent round of env
@@ -199,19 +182,18 @@ def train_llm_rollout(
     # Tensor-parallel ranks of one replica generate the same sequences, so the
     # data-parallel topology -- not the process group -- is what splits work.
     dp_rank, data_increment = data_parallel_topology(
-        accelerator,
         getattr(getattr(pop[0], "vllm_config", None), "tensor_parallel_size", 1) or 1,
     )
-    effective_data_batch_size = data_increment * batch_size
+    effective_data_batch_size = batch_size
 
     if wb:
         init_hp["effective_data_batch_size"] = effective_data_batch_size
         init_hp["batch_size"] = batch_size
-        init_hp["distributed_training"] = accelerator is not None
+        init_hp["distributed_training"] = is_distributed()
         init_hp["model_name"] = pop[0].pretrained_model_name_or_path
         init_hp["max_turns"] = max_turns
 
-    pbar = default_progress_bar(max_steps, accelerator)
+    pbar = default_progress_bar(max_steps)
 
     loggers = init_loggers(
         algo=init_hp.get("ALGO", pop[0].algo),
@@ -223,13 +205,12 @@ def train_llm_rollout(
         csv=csv,
         tensorboard_log_dir=tensorboard_log_dir,
         csv_log_dir=csv_log_dir,
-        accelerator=accelerator,
         wandb_api_key=wandb_api_key,
         wandb_kwargs=wandb_kwargs,
         init_hyperparams=init_hp,
     )
 
-    population = Population(agents=pop, accelerator=accelerator, loggers=loggers)
+    population = Population(agents=pop, loggers=loggers)
 
     total_steps = 0
     i = 0
@@ -258,14 +239,11 @@ def train_llm_rollout(
             if max_wall_seconds is not None and max_wall_seconds > 0
             else None
         )
-        while total_steps < max_steps:
-            # Every DP rank takes the same stop/continue branch; a rank-local
-            # wall-clock check can leave a peer blocked in collect's barrier.
-            if wall_deadline is not None and _any_rank_flag(
+        while all_ranks(total_steps < max_steps):
+            if wall_deadline is not None and any_rank(
                 time.monotonic() >= wall_deadline,
-                accelerator,
             ):
-                if accelerator is None or accelerator.is_main_process:
+                if is_main_process():
                     print(
                         f"\nStopping rollout training: wall time limit ({max_wall_seconds}s) reached.",
                     )
@@ -290,7 +268,7 @@ def train_llm_rollout(
                     agent=agent,
                     env=rollout_collector,
                     n_steps=max_turns,
-                    batch_size=batch_size,
+                    batch_size=rollout_collector.batch_size,
                     group_seed=group_seed,
                 )
 
@@ -305,12 +283,9 @@ def train_llm_rollout(
                     all_sampling_logps,
                     group_size=group_size,
                 )
-                # Empty collated batches have no trajectories; learn() raises on them.
-                # iteration_steps stays 0, so the stall guard after this loop fires.
-                if _any_rank_empty_batch(
-                    batch_steps == 0 or batch.is_empty,
-                    accelerator,
-                ):
+                # Empty batches have no trajectories; learn() raises on them.
+                # Skip on every rank if any rank is empty (keeps collectives aligned).
+                if any_rank(batch_steps == 0 or batch.is_empty):
                     agent.finalize_training_step(0)
                 else:
                     episode_scores = batch.rewards.sum(dim=1)
@@ -318,9 +293,7 @@ def train_llm_rollout(
 
                     experiences = batch.experiences()
                     turn_ids = batch.turn_ids
-                    if accelerator is not None and needs_cross_rank_seq_padding(
-                        agent, world_size=data_increment
-                    ):
+                    if needs_cross_rank_seq_padding(agent, world_size=data_increment):
                         # Multi-rank Liger token-level losses allreduce per chunk, so
                         # every rank must pad to one global sequence length.
                         token_ids, action_masks, rewards = (
@@ -329,7 +302,6 @@ def train_llm_rollout(
                                 batch.action_masks,
                                 batch.rewards,
                                 pad_token_id=agent.pad_token_id,
-                                accelerator=accelerator,
                             )
                         )
                         experiences = (token_ids, action_masks, rewards)
@@ -350,7 +322,7 @@ def train_llm_rollout(
                         sampling_logps=batch.sampling_logps,
                     )
 
-                    agg_score = safe_aggregate_metrics(accelerator, mean_score)
+                    agg_score = aggregate_metrics_across_gpus(mean_score)
 
                     if max_reward is not None:
                         if "accuracy" not in agent.metrics.additional_metrics:
@@ -361,8 +333,8 @@ def train_llm_rollout(
                             .mean()
                             .to(agent.device)
                         )
-                        agg_accuracy = safe_aggregate_metrics(accelerator, accuracy)
-                        if accelerator is None or accelerator.is_main_process:
+                        agg_accuracy = aggregate_metrics_across_gpus(accuracy)
+                        if is_main_process():
                             agent.metrics.log("accuracy", agg_accuracy)
 
                     for (
@@ -372,26 +344,24 @@ def train_llm_rollout(
                         metric = f"reward_{name}"
                         if metric not in agent.metrics.additional_metrics:
                             agent.metrics.register(metric)
-                        agg = safe_aggregate_metrics(
-                            accelerator, mean_score.new_tensor(mean_value)
-                        )
-                        if accelerator is None or accelerator.is_main_process:
+                        agg = aggregate_metrics_across_gpus(mean_score.new_tensor(mean_value))
+                        if is_main_process():
                             agent.metrics.log(metric, agg)
 
-                    effective_batch_steps = batch_steps * data_increment
+                    _, shared_batch_steps = allreduce_minmax_int(batch_steps)
+                    effective_batch_steps = shared_batch_steps * data_increment
                     agent.finalize_training_step(batch_steps)
                     total_steps += effective_batch_steps
                     iteration_steps += effective_batch_steps
 
-                    if accelerator is None or accelerator.is_main_process:
+                    if is_main_process():
                         agent.add_scores([float(agg_score)])
 
                 if (i + 1) % evaluation_interval == 0:
                     if test_env is None:
                         test_env = env_factory()
                     agent.test(test_env, loop=eval_loop)
-                    if accelerator is not None:
-                        accelerator.wait_for_everyone()
+                    barrier()
 
             # ``total_steps`` only advances by ``batch_steps``; an iteration where
             # every agent's rollout yielded no turns leaves it unchanged, so a
@@ -400,7 +370,7 @@ def train_llm_rollout(
             # once it is clearly systematic, rather than spinning silently.
             if iteration_steps == 0:
                 consecutive_stalls += 1
-                if accelerator is None or accelerator.is_main_process:
+                if is_main_process():
                     warnings.warn(
                         "Rollout produced no usable turns this iteration "
                         "(batch_steps == 0 for every agent), so training did not "
@@ -423,7 +393,7 @@ def train_llm_rollout(
             else:
                 consecutive_stalls = 0
 
-            if accelerator is None or accelerator.is_main_process:
+            if is_main_process():
                 pbar.update(iteration_steps // len(population.agents))
                 population.report_metrics(clear=True)
             else:
@@ -431,8 +401,7 @@ def train_llm_rollout(
                 # others must still clear or their stores grow for the whole run.
                 population.clear_agent_metrics()
 
-            if accelerator is not None:
-                accelerator.wait_for_everyone()
+            barrier()
 
             if (
                 selection_strategy is not None
@@ -440,15 +409,13 @@ def train_llm_rollout(
                 and evo_steps is not None
             ):
                 if (i + 1) % evo_steps == 0:
-                    if accelerator is not None:
-                        accelerator.wait_for_everyone()
+                    barrier()
                     population.update(
                         run_selection_and_mutation(
                             selection_strategy,
                             population=population.agents,
                             mutation=mutation,
                             env_name=env_name,
-                            accelerator=accelerator,
                             language_model=True,
                             elite_path=elite_path,
                             save_elite=bool(save_elite),
@@ -459,8 +426,7 @@ def train_llm_rollout(
                         rollout_batch_size=batch_size,
                         group_size=group_size,
                     )
-                    if accelerator is not None:
-                        accelerator.wait_for_everyone()
+                    barrier()
 
                     population.increment_evo_step()
             else:

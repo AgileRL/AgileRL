@@ -15,7 +15,8 @@ from rich.console import Console
 from rich.table import Table
 from rich.text import Text
 
-from agilerl.algorithms.core.base import MultiAgentAlgorithm
+from agilerl.algorithms.core.base import MultiAgentRLAlgorithm
+from agilerl.distributed import get_world_size, is_distributed, is_main_process
 from agilerl.logger import Logger
 from agilerl.metrics import MultiAgentMetrics
 from agilerl.utils.population_utils import (
@@ -33,10 +34,10 @@ if TYPE_CHECKING:
 
     from agilerl.algorithms.core.base import (
         LLMAlgorithm,
-        SingleAgentAlgorithm,
+        RLAlgorithm,
     )
 
-    AlgoType = SingleAgentAlgorithm | MultiAgentAlgorithm | LLMAlgorithm
+    AlgoType = RLAlgorithm | MultiAgentRLAlgorithm | LLMAlgorithm
 
 
 AgentT = TypeVar("AgentT", bound="AlgoType")
@@ -151,18 +152,28 @@ class PopulationMetrics:
 
         # Both aggregates follow the layout of ``fitnesses``, so the guards on
         # ``best_fitness`` only ever take the branch matching ``mean_fitness``.
-        mean_fitness = self.mean_fitness
-        best_fitness = self.best_fitness
-        if isinstance(mean_fitness, dict):
-            for agent_id, value in mean_fitness.items():
-                d[f"eval/mean_fitness/{agent_id}"] = value
-            if isinstance(best_fitness, dict):
-                for agent_id, value in best_fitness.items():
-                    d[f"eval/best_fitness/{agent_id}"] = value
-        else:
-            d["eval/mean_fitness"] = mean_fitness
-            if not isinstance(best_fitness, dict):
-                d["eval/best_fitness"] = best_fitness
+        # Skip eval fitness keys until at least one agent has been evaluated —
+        # logging NaN placeholders every train step is noise for wandb/CSV.
+        if self.fitnesses:
+            mean_fitness = self.mean_fitness
+            best_fitness = self.best_fitness
+            if isinstance(mean_fitness, dict):
+                for agent_id, value in mean_fitness.items():
+                    d[f"eval/mean_fitness/{agent_id}"] = value
+                if isinstance(best_fitness, dict):
+                    for agent_id, value in best_fitness.items():
+                        d[f"eval/best_fitness/{agent_id}"] = value
+            else:
+                d["eval/mean_fitness"] = mean_fitness
+                if not isinstance(best_fitness, dict):
+                    d["eval/best_fitness"] = best_fitness
+
+            for idx, fitness in enumerate(self.fitnesses):
+                if isinstance(fitness, dict):
+                    for agent_id, value in fitness.items():
+                        d[f"eval/agent_{idx}/fitness/{agent_id}"] = value
+                else:
+                    d[f"eval/agent_{idx}/fitness"] = fitness
 
         if self.scores:
             mean_score = self.mean_score
@@ -174,13 +185,6 @@ class PopulationMetrics:
 
         for idx, local_steps in enumerate(self.steps):
             d[f"train/agent_{idx}/local_steps"] = local_steps
-
-        for idx, fitness in enumerate(self.fitnesses):
-            if isinstance(fitness, dict):
-                for agent_id, value in fitness.items():
-                    d[f"eval/agent_{idx}/fitness/{agent_id}"] = value
-            else:
-                d[f"eval/agent_{idx}/fitness"] = fitness
 
         for idx, score in enumerate(self.scores):
             if isinstance(score, dict):
@@ -258,6 +262,8 @@ class MetricsReport:
         :returns: List of evaluation metric rows.
         :rtype: list[ScalarMetricRow | NestedMetricRow]
         """
+        if not self.metrics.fitnesses:
+            return []
         return [
             build_metric_row(
                 name="eval/fitness",
@@ -522,7 +528,7 @@ class Population(Generic[AgentT]):
         """
         sample_agent = self._agents[0]
         self.is_multi_agent = all(
-            isinstance(agent, MultiAgentAlgorithm) for agent in self._agents
+            isinstance(agent, MultiAgentRLAlgorithm) for agent in self._agents
         )
         sample_metrics = sample_agent.metrics
         self.additional_metric_names = sample_metrics.additional_metrics
@@ -655,6 +661,8 @@ class Population(Generic[AgentT]):
         steps = [agent.metrics.steps for agent in self.agents]
         if self.accelerator is not None and self.accelerator.is_main_process:
             steps = [step * self.accelerator.num_processes for step in steps]
+        elif is_distributed() and is_main_process():
+            steps = [step * get_world_size() for step in steps]
 
         return PopulationMetrics(
             fitnesses=fitnesses,
@@ -672,9 +680,15 @@ class Population(Generic[AgentT]):
     def _collect_fitnesses(self) -> ScalarOrNestedRow:
         """Collect the most recent fitness value from each agent.
 
+        Returns an empty list when no agent has been evaluated yet, so callers
+        omit fitness from logs/tables instead of emitting NaN placeholders.
+
         :returns: Fitness values for each individual in population.
         :rtype: ScalarOrNestedRow
         """
+        if not any(agent.fitness for agent in self.agents):
+            return []
+
         nested = any(
             isinstance(agent.fitness[-1], (dict, list, tuple, np.ndarray))
             for agent in self.agents

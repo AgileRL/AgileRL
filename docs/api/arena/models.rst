@@ -1,12 +1,10 @@
 Arena manifest models
 =====================
 
-The ``agilerl-arena`` package is where the training manifest schema lives:
-the Pydantic models under :mod:`agilerl.arena.models` describe every
-algorithm, network, and training section, with no dependency on torch. They
-are the same classes :class:`~agilerl.training.trainer.LocalTrainer` trains
-from; :mod:`agilerl.models` re-exports them and adds only what a local run
-needs (see :doc:`../models/index`).
+The ``agilerl-arena`` package provides lightweight Pydantic schemas under
+:mod:`agilerl.arena.models` for validating and serializing training manifests
+before they are sent to Arena. These models are **not** a substitute for
+:mod:`agilerl.models` when running :class:`~agilerl.training.trainer.LocalTrainer`.
 
 Training manifest
 -----------------
@@ -17,7 +15,7 @@ Training manifest
 Algorithm registry
 ------------------
 
-One registry maps algorithm names to their spec classes, and every consumer
--- the local trainer, the manifest, Arena submission -- reads it.
+Arena maintains its own algorithm registry for manifest parsing and
+platform-specific eligibility checks.
 
-.. autodata:: agilerl.arena.models.MANIFEST_REGISTRY
+.. autodata:: agilerl.arena.models.ARENA_REGISTRY

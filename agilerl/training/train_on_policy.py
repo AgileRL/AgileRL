@@ -76,7 +76,7 @@ def train_on_policy(
     :param algo: RL algorithm name
     :type algo: str
     :param pop: Population of agents
-    :type pop: list[SingleAgentAlgorithm]
+    :type pop: list[RLAlgorithm]
     :param init_hp: Dictionary containing initial hyperparameters, defaults to None
     :type init_hp: dict, optional
     :param mut_p: Dictionary containing mutation parameters, defaults to None
@@ -133,7 +133,7 @@ def train_on_policy(
     :type collect_rollouts_fn: Callable or None, optional
 
     :return: Trained population of agents and their fitnesses
-    :rtype: list[SingleAgentAlgorithm], list[float]
+    :rtype: list[RLAlgorithm], list[float]
     """
     selection_strategy = resolve_selection_strategy(selection_strategy, tournament)
     assert isinstance(

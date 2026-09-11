@@ -14,14 +14,20 @@ import torch.nn.functional as F
 from agilerl import HAS_LIGER_KERNEL
 
 if TYPE_CHECKING:
-    from accelerate import Accelerator
-    from peft import LoraConfig, PeftModel
-    from transformers import BitsAndBytesConfig, PreTrainedModel
+    from peft import LoraConfig
+    from transformers import BitsAndBytesConfig
 
     from agilerl.llm_envs import DatasetEnv
 
 from agilerl.algorithms.core.base import LLMAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
+from agilerl.distributed import (
+    FSDPConfig,
+    aggregate_metrics_dict,
+    barrier,
+    resolve_device,
+)
+from agilerl.protocols import PreTrainedModelProtocol
 from agilerl.typing import (
     MultiAgentObservationType,
     ObservationType,
@@ -29,9 +35,7 @@ from agilerl.typing import (
 )
 from agilerl.utils.algo_utils import get_experiences_samples
 from agilerl.utils.llm_utils import (
-    aggregate_metrics_dict,
     is_preference_prompts,
-    resolve_llm_device,
 )
 
 if HAS_LIGER_KERNEL:
@@ -50,7 +54,7 @@ class DPO(LLMAlgorithm[PreferencePrompts]):
     :param model_name: Model name
     :type model_name: str, optional
     :param actor_network: HuggingFace LLM
-    :type actor_network: PreTrainedModel | PeftModel | None
+    :type actor_network: PreTrainedModelProtocol
     :param model_config: Model configuration, to be used when creating the model from a name or path.
     :type model_config: dict[str, Any] | None
     :param hp_config: RL hyperparameter mutation configuration, defaults to None, whereby algorithm mutations are disabled.
@@ -74,19 +78,20 @@ class DPO(LLMAlgorithm[PreferencePrompts]):
     :type calc_position_embeddings: bool, optional
     :param micro_batch_size_per_gpu: Micro batch size per GPU, defaults to None
     :type micro_batch_size_per_gpu: int, optional
-    :param mini_batch_size: Per-rank rows covered by one optimizer step;
-        DeepSpeed's gradient_accumulation_steps is set to
-        ``mini_batch_size / micro_batch_size_per_gpu``. Defaults to None,
-        which resolves to the per-rank batch (one optimizer step per
-        batch).
+    :param mini_batch_size: Per-rank samples covered by one optimizer step.
+        ``None`` uses ``batch_size / world_size``.
+        ``gradient_accumulation_steps`` is derived as
+        ``mini_batch_size / micro_batch_size_per_gpu``.
     :type mini_batch_size: int | None, optional
-    :param device: Device to train on. Ignored when an accelerator is given (each rank
-        owns its own GPU); ``None`` auto-detects CUDA/MPS/CPU.
+    :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str, optional
     :param lora_config: Config for LoRA, defaults to None
     :type lora_config: LoraConfig, optional
-    :param accelerator: Accelerator for distributed computing, defaults to None
-    :type accelerator: accelerate.Accelerator(), optional
+    :param gradient_accumulation_steps: Deprecated and ignored. Derived as
+        ``mini_batch_size / micro_batch_size_per_gpu``.
+    :type gradient_accumulation_steps: int | None, optional
+    :param fsdp_config: FSDP2 sharding settings for distributed runs, defaults to None
+    :type fsdp_config: FSDPConfig | None, optional
     :param wrap: Wrap models for distributed training upon creation, defaults to True
     :type wrap: bool, optional
     :param clone: Flag to indicate if the instantiation is a cloning, defaults to False
@@ -103,9 +108,12 @@ class DPO(LLMAlgorithm[PreferencePrompts]):
         to ``False`` otherwise). When ``training=False`` the standard
         path is always used regardless of this flag.
     :type use_liger_loss: bool, optional
-    :param chunk_rows: Primary chunk-size setting for fused logit tiles used by
+    :param chunk_rows: Primary chunk-size knob for fused logit tiles used by
         both standard and Liger paths.
     :type chunk_rows: int | None, optional
+    :param reduce_memory_peak: Deprecated and ignored; previously hinted
+        peak-memory batching. Configure ``micro_batch_size_per_gpu`` instead.
+    :type reduce_memory_peak: bool, optional
     :param cast_logprobs_to_fp32: When ``True`` (default), run the per-token
         log-prob reduction (``gather`` / ``logsumexp``) in fp32 before casting
         back to the input dtype, for numerically stable log-probs. ``False`` runs
@@ -139,7 +147,7 @@ class DPO(LLMAlgorithm[PreferencePrompts]):
         pad_token_id: int,
         pad_token: str,
         model_name: str | None = None,
-        actor_network: PreTrainedModel | PeftModel | None = None,
+        actor_network: PreTrainedModelProtocol | None = None,
         model_config: dict[str, Any] | None = None,
         hp_config: HyperparameterConfig | None = None,
         index: int = 0,
@@ -154,7 +162,8 @@ class DPO(LLMAlgorithm[PreferencePrompts]):
         mini_batch_size: int | None = None,
         device: str | torch.device | None = None,
         lora_config: LoraConfig | None = None,
-        accelerator: Accelerator | None = None,
+        gradient_accumulation_steps: int | None = None,
+        fsdp_config: FSDPConfig | None = None,
         wrap: bool = True,
         clone: bool = False,
         seed: int = 42,
@@ -162,13 +171,14 @@ class DPO(LLMAlgorithm[PreferencePrompts]):
         torch_compiler: str | None = None,
         use_liger_loss: bool = False,
         chunk_rows: int | None = None,
+        reduce_memory_peak: bool = False,
         cast_logprobs_to_fp32: bool = True,
         use_separate_reference_adapter: bool = True,
         quantization_config: BitsAndBytesConfig | None = None,
         activation_offload: bool = False,
         lora_target_scope: str | None = None,
     ) -> None:
-        resolved_device = resolve_llm_device(accelerator, device)
+        resolved_device = resolve_device(device)
         super().__init__(
             index=index,
             batch_size=batch_size,
@@ -191,10 +201,12 @@ class DPO(LLMAlgorithm[PreferencePrompts]):
             hp_config=hp_config,
             wrap=wrap,
             device=resolved_device,
-            accelerator=accelerator,
+            gradient_accumulation_steps=gradient_accumulation_steps,
+            fsdp_config=fsdp_config,
             name="DPO",
             gradient_checkpointing=gradient_checkpointing,
             torch_compiler=torch_compiler,
+            reduce_memory_peak=reduce_memory_peak,
             cast_logprobs_to_fp32=cast_logprobs_to_fp32,
             use_separate_reference_adapter=use_separate_reference_adapter,
             quantization_config=quantization_config,
@@ -349,15 +361,14 @@ class DPO(LLMAlgorithm[PreferencePrompts]):
         # Aggregate metrics across GPUs for both train/test paths. (Fresh dict
         # display so ty checks the values against the parameter's wider,
         # invariant dict value union.)
-        learn_metrics = aggregate_metrics_dict(self.accelerator, {**learn_metrics})
+        agg = aggregate_metrics_dict({**learn_metrics})
 
         if training:
-            self.metrics.log("loss", learn_metrics["loss"])
-            self.metrics.log("chosen_reward", learn_metrics["chosen_reward"])
-            self.metrics.log("rejected_reward", learn_metrics["rejected_reward"])
+            self.metrics.log("loss", agg["loss"])
+            self.metrics.log("chosen_reward", agg["chosen_reward"])
+            self.metrics.log("rejected_reward", agg["rejected_reward"])
             self.metrics.log(
-                "reward_margin",
-                learn_metrics["chosen_reward"] - learn_metrics["rejected_reward"],
+                "reward_margin", agg["chosen_reward"] - agg["rejected_reward"]
             )
 
         return learn_metrics
@@ -547,10 +558,6 @@ class DPO(LLMAlgorithm[PreferencePrompts]):
             )
             raise ImportError(msg)
 
-        lm_head = self._get_lm_head()
-        lm_head_weight = lm_head.weight  # (vocab_size, hidden_size)
-        lm_head_bias = lm_head.bias
-
         def _get_hidden(ids: torch.Tensor, attn_mask: torch.Tensor) -> torch.Tensor:
             """Run a forward pass and return hidden states fed into the language-model head.
 
@@ -617,7 +624,7 @@ class DPO(LLMAlgorithm[PreferencePrompts]):
         policy_hidden = policy_hidden[:, :-1, :].contiguous()
         ref_hidden = ref_hidden[:, :-1, :].contiguous()
 
-        with self._liger_head_gather():
+        with self._liger_head_gather() as (lm_head_weight, lm_head_bias):
             loss, aux = LigerDPOWithAlpha.apply(
                 policy_hidden,
                 lm_head_weight,
@@ -693,6 +700,6 @@ class DPO(LLMAlgorithm[PreferencePrompts]):
                 rewards.append(np.asarray(reward_margin).item())
             mean_fit = float(np.mean(rewards))
         self.metrics.add_fitness(mean_fit)
-        if self.accelerator is not None:
-            self.accelerator.wait_for_everyone()
+        if self.distributed:
+            barrier()
         return np.array(mean_fit)

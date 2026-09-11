@@ -40,7 +40,7 @@ Each step
 
 1. ``sleep(level=1)`` — vLLM parks its base and frees the GPU.
 2. ``_memory_efficient_params`` brings the trainer base onto the GPU for
-   the forward/backward, then parks it again. Off under DeepSpeed ZeRO-3,
+   the forward/backward, then parks it again. Off under FSDP2 sharding,
    where params are already sharded.
 
 ``torch.cuda.memory_allocated()`` does not track vLLM's allocator. Use

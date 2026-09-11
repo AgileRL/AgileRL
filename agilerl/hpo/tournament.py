@@ -8,9 +8,9 @@ from typing import Any, TypeVar
 
 import numpy as np
 import numpy.typing as npt
-from accelerate.utils import broadcast_object_list
 
 from agilerl.algorithms.core.base import LLMAlgorithm
+from agilerl.distributed import barrier, broadcast_object_list, is_distributed, is_main_process
 from agilerl.protocols import EvolvableAlgorithmProtocol
 from agilerl.utils.population_utils import scalar_fitness
 
@@ -104,8 +104,8 @@ class TournamentSelection:
         population: list[AgentT],
     ) -> tuple[AgentT, list[AgentT], None]:
         """Return best agent and new population of agents following tournament selection. Used for
-        a population of :class:`SingleAgentAlgorithm <agilerl.algorithms.core.SingleAgentAlgorithm>` or
-        :class:`MultiAgentAlgorithm <agilerl.algorithms.core.MultiAgentAlgorithm>` agents.
+        a population of :class:`RLAlgorithm <agilerl.algorithms.core.RLAlgorithm>` or
+        :class:`MultiAgentRLAlgorithm <agilerl.algorithms.core.MultiAgentRLAlgorithm>` agents.
 
         :param population: Population of agents
         :type population: list[AgentT]
@@ -144,14 +144,11 @@ class TournamentSelection:
         """
         agent_slots: Any = population
 
-        accelerator = population[0].accelerator
         new_population_idxs: list[tuple[int, int]] = []
         old_population_idxs = [ind.index for ind in population]
         unwanted_agents: set[int] = set()
 
-        if accelerator is None or (
-            accelerator is not None and accelerator.is_main_process
-        ):
+        if is_main_process():
             best_agent, rank, max_id = self._elitism(population)
             elite_idx = best_agent.index
             # Elitism is required for LLM populations (enforced in select()), so
@@ -172,40 +169,39 @@ class TournamentSelection:
                 idx for idx, _ in new_population_idxs
             }
 
-        if accelerator is not None:
-            accelerator.wait_for_everyone()
-            if accelerator.num_processes > 1:
-                new_population_idxs, old_population_idxs, unwanted_agents = (
-                    broadcast_object_list(
-                        [new_population_idxs, old_population_idxs, unwanted_agents],
-                        from_process=0,
-                    )
+        if is_distributed():
+            barrier()
+            new_population_idxs, old_population_idxs, unwanted_agents = (
+                broadcast_object_list(
+                    [new_population_idxs, old_population_idxs, unwanted_agents],
+                    src=0,
                 )
+            )
 
         # Delete any unwanted agents from memory. ``agent_slots`` only receives
         # None in the later cloning loop, so no slot is None during this pass.
         for agent_idx in old_population_idxs:
             if agent_idx in unwanted_agents:
                 unwanted_ref = agent_slots[old_population_idxs.index(agent_idx)]
-                if unwanted_ref.accelerator is not None:
-                    unwanted_ref.accelerator.wait_for_everyone()
+                if is_distributed():
+                    barrier()
                 unwanted_ref.clean_up()
-                if unwanted_ref.accelerator is not None:
-                    unwanted_ref.accelerator.wait_for_everyone()
+                if is_distributed():
+                    barrier()
 
         new_population: list[AgentT] = []
         index_tracker: dict[int, AgentT] = {}
         for idx_to_clone, new_idx in new_population_idxs:
             slot = old_population_idxs.index(idx_to_clone)
             if (agent_ref := agent_slots[slot]) is not None:
-                if agent_ref.accelerator is not None:
-                    agent_ref.accelerator.wait_for_everyone()
+                if is_distributed():
+                    barrier()
                 actor_parent = agent_ref.clone(index=new_idx, wrap=False)
-                if agent_ref.accelerator is not None:
-                    agent_ref.accelerator.wait_for_everyone()
+                if is_distributed():
+                    barrier()
                 agent_ref.clean_up()
-                if agent_ref.accelerator is not None:
-                    agent_ref.accelerator.wait_for_everyone()
+                if is_distributed():
+                    barrier()
                 agent_slots[slot] = None
                 index_tracker[idx_to_clone] = actor_parent
             else:

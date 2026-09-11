@@ -5,28 +5,30 @@ from __future__ import annotations
 
 import copy
 import gc
-import importlib.util
-import json
 import logging
 import random
 import re
 import shutil
 import textwrap
 import warnings
-from collections.abc import Callable, Generator, Iterable, Mapping
-from contextlib import contextmanager
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeGuard, TypeVar
 
-import numpy as np
-import numpy.typing as npt
 import torch
-from accelerate import Accelerator
+import torch.distributed as dist
 from torch import nn
+from torch.distributed.tensor import DTensor
 
-from agilerl import HAS_DEEPSPEED, HAS_LLM_DEPENDENCIES
+from agilerl import HAS_LLM_DEPENDENCIES
+from agilerl.architectures import install_family_patches
+from agilerl.distributed.process import (
+    allreduce_minmax_int,
+    barrier,
+)
 from agilerl.protocols import GenerationConfigProtocol
 from agilerl.typing import (
+    HFGeneratePrompts,
     JSONValue,
     PopulationType,
     PreferencePrompts,
@@ -35,7 +37,6 @@ from agilerl.typing import (
 )
 
 if TYPE_CHECKING:
-    from accelerate.utils import DeepSpeedPlugin
     from peft import LoraConfig, PeftModel
     from torch.nn.attention.flex_attention import BlockMask
     from transformers.tokenization_utils_base import (
@@ -66,11 +67,6 @@ else:
     AutoModelForCausalLM: Any = None
     AutoModelForCausalLMWithValueHead: Any = None
     BitsAndBytesConfig: Any = None
-
-# Sentinel when DeepSpeed is absent; overwritten by the real enum otherwise.
-ZeroParamStatus = None
-if HAS_DEEPSPEED:
-    from deepspeed.runtime.zero.partition_parameters import ZeroParamStatus
 
 DEPRECATED_LLM_ENV_NAMES = frozenset(("apply_chat_template",))
 
@@ -299,6 +295,30 @@ def generation_tokens_for_turn(
     return min(int(max_output_tokens), remaining)
 
 
+def validate_llm_context_lengths(
+    max_model_len: int,
+    max_output_tokens: int | None,
+) -> None:
+    """Reject configs that leave no prompt room under sliding-window rollouts.
+
+    :param max_model_len: Total context length (prompt + completion ceiling).
+    :type max_model_len: int
+    :param max_output_tokens: Per-generation token cap; skipped when ``None``.
+    :type max_output_tokens: int | None
+    :raises ValueError: If ``max_output_tokens >= max_model_len``.
+    """
+    if max_output_tokens is None:
+        return
+    if max_output_tokens >= max_model_len:
+        msg = (
+            f"max_output_tokens ({max_output_tokens}) must be less than "
+            f"max_model_len ({max_model_len}); equal or larger values leave no "
+            "prompt budget for multi-turn rollouts "
+            "(max_prompt_tokens=0)."
+        )
+        raise ValueError(msg)
+
+
 def hf_turn_generation_config(
     generation_config: GenConfigT,
     *,
@@ -331,59 +351,85 @@ def hf_turn_generation_config(
     return turn_config
 
 
-def gather_tensor(
-    tensor: torch.Tensor | npt.NDArray | float,
-    accelerator: Accelerator,
-) -> torch.Tensor:
-    """Gather tensors from gpus.
+def is_rollout_prompt(obs: Mapping[str, object]) -> TypeGuard[RolloutPrompt]:
+    """Check whether a mapping is a tokenized rollout prompt.
 
-    :param tensor: Tensor (or array/scalar convertible to one) to gather
-    :type tensor: torch.Tensor | npt.NDArray | float
-    :param accelerator: Accelerator object
-    :type accelerator: accelerate.Accelerator
-    :return: Stacked tensors
-    :rtype: torch.Tensor
+    :param obs: A prompt mapping returned by a rollout env.
+    :type obs: Mapping[str, object]
+    :return: ``True`` when the mapping carries prompt tokens.
+    :rtype: TypeGuard[RolloutPrompt]
     """
-    if not isinstance(tensor, torch.Tensor):
-        tensor = torch.tensor(tensor, device=accelerator.device)
-    tensor = tensor.to(accelerator.device)
-    return accelerator.gather(tensor)
+    return isinstance(obs.get("input_ids"), torch.Tensor)
+
+
+def normalize_prompt_batch(
+    prompts: RolloutPrompt | list[RolloutPrompt],
+) -> list[RolloutPrompt]:
+    """Normalize reasoning prompts into a list-of-dicts per sample.
+
+    Supports both legacy list-of-dicts and stacked dict formats where tensor/list
+    values are batched on dimension 0.
+    :param prompts: The prompts to normalize.
+    :type prompts: RolloutPrompt | list[RolloutPrompt]
+    :return: The normalized prompts.
+    :rtype: list[RolloutPrompt]
+    """
+    if isinstance(prompts, list):
+        return prompts
+
+    input_ids = prompts["input_ids"]
+    if not isinstance(input_ids, torch.Tensor) or input_ids.dim() == 1:
+        return [prompts]
+
+    batch_size = int(input_ids.shape[0])
+    if batch_size == 0:
+        return []
+
+    # Inspect each key once and write it into every output dict in one pass.
+    # Keys not declared on ``RolloutPrompt`` (caller-supplied metadata) are
+    # copied through unchanged, which a key-by-key typed construction can't do.
+    samples: list[dict[str, object]] = [{} for _ in range(batch_size)]
+    for key, value in prompts.items():
+        if (
+            isinstance(value, torch.Tensor)
+            and value.dim() > 0
+            and value.shape[0] == batch_size
+        ):
+            chunks = value.unbind(0) if value.dim() == 1 else value.split(1, dim=0)
+            for sample, chunk in zip(samples, chunks, strict=True):
+                sample[key] = chunk
+        elif isinstance(value, list) and len(value) == batch_size:
+            for sample, item in zip(samples, value, strict=True):
+                sample[key] = item
+        else:
+            for sample in samples:
+                sample[key] = value
+    # Open dicts preserve undeclared metadata; the closed TypedDict return can't
+    # name those keys, and a TypeGuard pass would only add a Python loop.
+    return samples  # ty: ignore[invalid-return-type]
 
 
 def needs_cross_rank_seq_padding(algo: object, *, world_size: int) -> bool:
     """Return whether ranks must sync completion seq lengths before ``learn()``.
 
     Multi-rank Liger token-level losses chunk over ``B * (T - 1)`` and issue one
-    NCCL allreduce per chunk (DAPO/CISPO normaliser). ZeRO-3 parameter gathers
-    also require identical per-rank ``T`` so every rank issues the same NCCL
-    collectives. Divergent per-rank ``T`` after local ``stack_and_pad`` therefore
-    deadlocks.
+    NCCL allreduce per chunk (DAPO/CISPO normaliser). FSDP2 full-shard (and any
+    collective-heavy DP path) also requires identical per-rank ``T`` so every
+    rank issues the same NCCL collectives.
     """
     if world_size <= 1:
         return False
-    zero_stage = getattr(algo, "zero_stage", 0)
-    if zero_stage == 3 or zero_stage == "3":
+    if getattr(algo, "fsdp_config", None) is not None:
+        return True
+    if getattr(algo, "distributed", False):
         return True
     if not getattr(algo, "use_liger_loss", False):
         return False
     return getattr(algo, "importance_sampling_level", "token") == "token"
 
 
-def allreduce_minmax_int(value: int, accelerator: Accelerator) -> tuple[int, int]:
-    """Return ``(min, max)`` of ``value`` across Accelerate ranks.
-
-    Uses :meth:`Accelerator.gather` so the reduction participates in the same
-    process-group bookkeeping as the rest of the Accelerate/DeepSpeed run
-    (plain ``torch.distributed.all_reduce`` on the default group is easy to
-    desync from DeepSpeed's communicator set).
-    """
-    t = torch.tensor([int(value)], device=accelerator.device, dtype=torch.long)
-    gathered = accelerator.gather(t)
-    return int(gathered.min().item()), int(gathered.max().item())
-
-
 def pad_completion_batch_to_seq_len(
-    token_ids: torch.Tensor,
+    completion_ids: torch.Tensor,
     action_masks: torch.Tensor,
     *,
     target_seq_len: int,
@@ -395,29 +441,30 @@ def pad_completion_batch_to_seq_len(
     to the masked CISPO/Liger objective.
     """
     required_dims = 2
-    if token_ids.dim() != required_dims:
-        msg = f"token_ids must be (B, T), got shape {tuple(token_ids.shape)}"
+    if completion_ids.dim() != required_dims:
+        msg = f"completion_ids must be (B, T), got shape {tuple(completion_ids.shape)}"
         raise ValueError(msg)
     if action_masks.dim() != required_dims:
         msg = f"action_masks must be (B, T-1), got shape {tuple(action_masks.shape)}"
         raise ValueError(msg)
 
-    batch, seq_len = token_ids.shape
+    batch, seq_len = completion_ids.shape
     mask_len = action_masks.shape[1]
     if mask_len != seq_len - 1:
         msg = (
-            f"action_masks length ({mask_len}) must be token_ids length ({seq_len}) - 1"
+            f"action_masks length ({mask_len}) must be completion_ids length "
+            f"({seq_len}) - 1"
         )
         raise ValueError(msg)
     if target_seq_len < seq_len:
         msg = f"target_seq_len ({target_seq_len}) must be >= local seq_len ({seq_len})"
         raise ValueError(msg)
     if target_seq_len == seq_len:
-        return token_ids, action_masks
+        return completion_ids, action_masks
 
     pad_t = target_seq_len - seq_len
-    token_ids = torch.nn.functional.pad(
-        token_ids,
+    completion_ids = torch.nn.functional.pad(
+        completion_ids,
         (0, pad_t),
         value=pad_token_id,
     )
@@ -426,9 +473,9 @@ def pad_completion_batch_to_seq_len(
         (0, pad_t),
         value=False,
     )
-    if token_ids.shape != (batch, target_seq_len):
+    if completion_ids.shape != (batch, target_seq_len):
         msg = (
-            f"padded completions shape {tuple(token_ids.shape)} != "
+            f"padded completions shape {tuple(completion_ids.shape)} != "
             f"({batch}, {target_seq_len})"
         )
         raise RuntimeError(msg)
@@ -438,7 +485,7 @@ def pad_completion_batch_to_seq_len(
             f"({batch}, {target_seq_len - 1})"
         )
         raise RuntimeError(msg)
-    return token_ids, action_masks
+    return completion_ids, action_masks
 
 
 def _local_batch_and_seq_len(
@@ -464,14 +511,13 @@ def align_completion_batch_shapes_across_ranks(
     rewards: Any,  # noqa: ANN401 -- see completion_ids
     *,
     pad_token_id: int,
-    accelerator: Accelerator,
     minmax_fn: Callable[[int], tuple[int, int]] | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Sync ``B``/``T`` across ranks before heavy local pad/stack work.
 
     Collective metadata sync happens first; pad/stack follows. A DP barrier runs
-    after pad so no rank enters ZeRO ``learn`` collectives while peers are still
-    padding. Call immediately before ``learn()`` when
+    after pad so no rank enters sharded ``learn`` collectives while peers are
+    still padding. Call immediately before ``learn()`` when
     :func:`needs_cross_rank_seq_padding` is true. Shorter ranks are right-padded
     to the global max ``T`` so Liger token-level chunk collectives stay in
     lockstep.
@@ -480,7 +526,7 @@ def align_completion_batch_shapes_across_ranks(
     from agilerl.utils.algo_utils import stack_and_pad_experiences
 
     local_b, local_t = _local_batch_and_seq_len(completion_ids)
-    reduce_fn = minmax_fn or (lambda value: allreduce_minmax_int(value, accelerator))
+    reduce_fn = minmax_fn or allreduce_minmax_int
 
     min_b, max_b = reduce_fn(local_b)
     if min_b != max_b:
@@ -513,216 +559,154 @@ def align_completion_batch_shapes_across_ranks(
         )
         raise RuntimeError(msg)
 
-    accelerator.wait_for_everyone()
+    barrier()
     return completion_ids, action_masks, rewards
 
 
-def aggregate_metrics_across_gpus(
-    accelerator: Accelerator | None,
-    metric_tensor: torch.Tensor | npt.NDArray | float,
-) -> float:
-    """Aggregate gathered tensors.
+def get_lora_named_params(model: nn.Module) -> list[tuple[str, torch.Tensor]]:
+    """Return ``(name, param)`` adapter pairs for name-keyed gathers/exports.
 
-    :param accelerator: Accelerator object
-    :type accelerator: accelerate.Accelerator | None
-    :param metric_tensor: Metrics
-    :type metric_tensor: torch.Tensor | npt.NDArray | float
-    :return: Mean metric
-    :rtype: float
-    """
-    if accelerator is None:
-        if isinstance(metric_tensor, torch.Tensor):
-            return metric_tensor.float().mean().item()
-        return float(metric_tensor)
-    all_metrics = gather_tensor(metric_tensor, accelerator)
-    return all_metrics.mean().item()
-
-
-def safe_aggregate_metrics(
-    accelerator: Accelerator | None,
-    metrics: torch.Tensor | npt.NDArray | float,
-) -> float:
-    """Aggregate metrics generically, handling both when an accelerator is being used and when it isn't.
-
-    :param accelerator: Accelerator object
-    :type accelerator: Accelerator | None
-    :param metrics: Metrics
-    :type metrics: torch.Tensor | npt.NDArray | float
-    :return: Mean metric
-    :rtype: float
-    """
-    if accelerator is None:
-        if isinstance(metrics, (torch.Tensor, np.ndarray)):
-            return float(
-                np.mean(metrics)
-                if isinstance(metrics, np.ndarray)
-                else metrics.float().mean().item()
-            )
-        return float(metrics)
-    return aggregate_metrics_across_gpus(accelerator, metrics)
-
-
-def aggregate_metrics_dict(
-    accelerator: Accelerator | None,
-    metrics: dict[str, torch.Tensor | npt.NDArray | float],
-) -> dict[str, float]:
-    """Aggregate all values in a metrics dict across GPUs (or locally if no accelerator).
-
-    :param accelerator: Accelerator object (or None for single-device).
-    :type accelerator: Accelerator | None
-    :param metrics: Dictionary mapping metric names to raw values.
-    :type metrics: dict[str, torch.Tensor | npt.NDArray | float]
-    :return: Dictionary with all values aggregated to floats.
-    :rtype: dict[str, float]
-    """
-    return {k: safe_aggregate_metrics(accelerator, v) for k, v in metrics.items()}
-
-
-@contextmanager
-def gather_if_zero3(
-    zero_stage: int | None,
-    params: list[torch.Tensor],
-    modifier_rank: int | None = None,
-) -> Generator[None, None, None]:
-    """Conditional context manager for setting the zero stage for the model.
-
-    :param zero_stage: The zero stage
-    :type zero_stage: int | None
-    :param params: The parameters to gather
-    :type params: list[torch.Tensor]
-    :param modifier_rank: The modifier rank
-    :type modifier_rank: int | None
-    """
-    if zero_stage == 3:
-        if not HAS_DEEPSPEED:
-            msg = (
-                "DeepSpeed is required for ZeRO stage 3 parameter gathering, but it "
-                "is not installed."
-            )
-            raise ImportError(msg)
-        # Lazy: deepspeed is an optional dependency and only ZeRO-3 needs it.
-        import deepspeed
-
-        with deepspeed.zero.GatheredParameters(
-            params=params,
-            modifier_rank=modifier_rank,
-        ):
-            yield
-    else:
-        yield
-
-
-@contextmanager
-def zero3_full_shape_views(
-    params: list[torch.Tensor],
-) -> Generator[None, None, None]:
-    """Expose full ``ds_shape`` views on partitioned ZeRO-3 params for shape-only reads.
-
-    Each partitioned param temporarily swaps its placeholder ``data`` for a
-    zero-storage view (a scalar expanded to ``ds_shape``), so shape, dtype and
-    device reads inside the block see the full tensor without an all-gather.
-    Values must not be read inside the block; the placeholder is restored on
-    exit. Params without ``ds_shape``, or already ``AVAILABLE``, pass through
-    untouched.
-
-    :param params: Candidate parameters; only partitioned ZeRO-3 params get views.
-    :type params: list[torch.Tensor]
-    """
-    saved: list[tuple[torch.Tensor, torch.Tensor]] = []
-    seen: set[int] = set()
-    try:
-        for param in params:
-            if id(param) in seen:
-                continue
-            ds_shape = getattr(param, "ds_shape", None)
-            if ds_shape is None:
-                continue
-            status = getattr(param, "ds_status", None)
-            if getattr(status, "name", None) == "AVAILABLE":
-                continue
-            seen.add(id(param))
-            saved.append((param, param.data))
-            param.data = torch.empty((), dtype=param.dtype, device=param.device).expand(
-                tuple(ds_shape)
-            )
-        yield
-    finally:
-        for param, data in saved:
-            param.data = data
-
-
-@contextmanager
-def gather_if_ds_param(
-    *tensors: torch.Tensor | None,
-    modifier_rank: int | None = 0,
-) -> Generator[None, None, None]:
-    """Allgather ZeRO-3 params for the duration of the block.
-
-    No-op when none of ``tensors`` carry a DeepSpeed ``ds_id``, or when every
-    such param is already ``AVAILABLE`` (tied embeddings owned by
-    ``embed_tokens``). Duplicate references are gathered once (by identity).
-    Defaults to ``modifier_rank=0`` so DeepSpeed releases the gathered buffer
-    after the block.
-
-    The gather must wrap only the matmul / fused loss that reads the weight —
-    not a module ``forward`` — because ZeRO-3's post-forward hooks
-    re-partition the param and free the gathered buffer.
-
-    :param tensors: Candidate weight tensors; only those with ``ds_id`` gather.
-    :param modifier_rank: Passed to DeepSpeed ``GatheredParameters``.
-    """
-    seen: set[int] = set()
-    params: list[torch.Tensor] = []
-    for t in tensors:
-        if t is None or not hasattr(t, "ds_id"):
-            continue
-        tid = id(t)
-        if tid in seen:
-            continue
-        seen.add(tid)
-        if (
-            ZeroParamStatus is not None
-            and hasattr(t, "ds_status")
-            and t.ds_status == ZeroParamStatus.AVAILABLE
-        ):
-            continue
-        params.append(t)
-    if not params:
-        yield
-        return
-    with gather_if_zero3(3, params, modifier_rank=modifier_rank):
-        yield
-
-
-def adapter_checkpoint_params(model: nn.Module) -> list[torch.Tensor]:
-    """Return the parameters PEFT's adapter checkpoint I/O reads and writes.
-
-    Scopes ZeRO-3 gathers around ``save_pretrained`` /
-    ``get_peft_model_state_dict`` / ``set_peft_model_state_dict`` so base
-    parameters stay sharded instead of being materialised on every rank.
-
-    :param model: The model to collect adapter checkpoint parameters from.
-    :type model: nn.Module
-    :return: LoRA A/B and DoRA magnitude parameters, plus the
-        ``modules_to_save`` copies PEFT writes into the same checkpoint (an LLM
-        PPO value head).
-    :rtype: list[torch.Tensor]
+    Includes LoRA A/B, DoRA magnitude (``lora`` in the name), and PEFT
+    ``modules_to_save`` copies written into the same adapter checkpoint.
     """
     return [
-        p for n, p in model.named_parameters() if "lora" in n or "modules_to_save" in n
+        (n, p)
+        for n, p in model.named_parameters()
+        if "lora" in n or "modules_to_save" in n
     ]
 
 
-def get_state_dict(model: nn.Module) -> dict[str, torch.Tensor]:
-    """Get the state dict of the model for zero3.
+def get_lora_params(model: nn.Module) -> list[torch.Tensor]:
+    """Return adapter parameters for scoped gathers / export.
 
-    :param model: The model to get the state dict of.
-    :type model: nn.Module
-    :return: The state dict of the model.
-    :rtype: dict[str, torch.Tensor]
+    Pass the result to :func:`agilerl.distributed.gather_params` for adapter-only save, export, or
+    copy so base-model shards stay unmaterialised.
     """
-    with gather_if_zero3(3, list(model.parameters()), modifier_rank=0):
-        return model.state_dict()
+    return [p for _, p in get_lora_named_params(model)]
+
+
+def save_lora_adapters(
+    model: nn.Module,
+    path: str | Path,
+    selected_adapters: Sequence[str],
+    use_value_head: bool = False,
+    is_main: bool = True,
+) -> None:
+    r"""Save LoRA adapter weights and configs in PEFT-compatible format.
+
+    Gathers FSDP2-sharded adapter parameters to CPU *before* handing them to
+    safetensors, avoiding the invalid-storage error that occurs when
+    ``full_tensor()`` results are installed as live GPU ``nn.Parameter``\ s
+    and then serialised via PEFT's ``save_pretrained``.
+
+    All ranks must call this together (``full_tensor()`` is a collective),
+    but only ``is_main`` writes to disk.
+    """
+    from peft.utils import get_peft_model_state_dict
+    from safetensors.torch import save_file
+
+    base_path = Path(path)
+
+    is_dist = dist.is_available() and dist.is_initialized()
+
+    for adapter_name in selected_adapters:
+        adapter_dir = base_path / adapter_name
+        if is_main:
+            adapter_dir.mkdir(parents=True, exist_ok=True)
+
+        # get_peft_model_state_dict filters by adapter and strips the
+        # adapter-name segment from the keys, producing the exact format
+        # that set_peft_model_state_dict expects on load. Value-head
+        # wrappers keep the PEFT model on ``pretrained_model``.
+        peft_model = (
+            model.pretrained_model
+            if use_value_head and hasattr(model, "pretrained_model")
+            else model
+        )
+        raw_state = get_peft_model_state_dict(peft_model, adapter_name=adapter_name)
+        cpu_state: dict[str, torch.Tensor] = {}
+        for key, value in raw_state.items():
+            if hasattr(value, "full_tensor"):
+                value = value.full_tensor()
+            cpu_state[key] = value.to("cpu").contiguous()
+
+        if is_main:
+            save_file(
+                cpu_state,
+                str(adapter_dir / "adapter_model.safetensors"),
+                metadata={"format": "pt"},
+            )
+            if (
+                hasattr(peft_model, "peft_config")
+                and adapter_name in peft_model.peft_config
+            ):
+                peft_model.peft_config[adapter_name].save_pretrained(str(adapter_dir))
+
+        del cpu_state
+        if is_dist:
+            dist.barrier()
+
+    # Save the value head (PPO's v_head Linear) as pytorch_model.bin
+    if use_value_head:
+        v_head_state: dict[str, torch.Tensor] = {}
+        for name, param in model.named_parameters():
+            if "v_head" in name:
+                full = param.full_tensor() if hasattr(param, "full_tensor") else param
+                v_head_state[name] = full.to("cpu").contiguous()
+        if is_main and v_head_state:
+            torch.save(v_head_state, str(base_path / "pytorch_model.bin"))
+        if is_dist:
+            dist.barrier()
+
+
+def load_lora_adapters(
+    model: nn.Module,
+    path: str | Path,
+    adapter_name: str,
+    device: torch.device | str = "cpu",
+) -> None:
+    """Load LoRA adapter weights from a PEFT-compatible checkpoint directory.
+
+    Handles FSDP2-sharded models by scattering loaded full tensors into DTensor
+    local shards via ``distribute_tensor``. For non-sharded models, falls
+    back to a plain ``copy_``.
+
+    All ranks must call this together (``distribute_tensor`` is a collective).
+    """
+    from safetensors.torch import load_file as safe_load_file
+
+    adapter_path = Path(path) / adapter_name / "adapter_model.safetensors"
+    adapter_state = safe_load_file(str(adapter_path), device=str(device))
+
+    is_dist = dist.is_available() and dist.is_initialized()
+
+    with torch.no_grad():
+        for name, param in model.named_parameters():
+            # Only touch parameters belonging to this adapter.
+            if f".{adapter_name}." not in name:
+                continue
+            # Map model param name → loaded state dict key by removing the
+            # adapter-name segment: ...lora_A.actor.weight → ...lora_A.weight
+            loaded_key = name.replace(f".{adapter_name}.", ".")
+            if loaded_key not in adapter_state:
+                continue
+
+            full_tensor = adapter_state[loaded_key].to(device)
+
+            if hasattr(param, "device_mesh"):
+                # FSDP2 DTensor: scatter the full tensor onto the mesh
+                # and copy the local shard into the parameter's local shard.
+                from torch.distributed.tensor import distribute_tensor
+
+                sharded = distribute_tensor(
+                    full_tensor, param.device_mesh, param.placements
+                )
+                param.data._local_tensor.copy_(sharded._local_tensor)
+            else:
+                param.data.copy_(full_tensor)
+
+    if is_dist:
+        dist.barrier()
 
 
 def build_bnb_quantization_config(
@@ -738,7 +722,7 @@ def build_bnb_quantization_config(
     * ``"int8"`` -- LLM.int8() 8-bit weights.
     * ``"nf4"``, ``"4bit"``, ``"4-bit"``, ``"bnb-4bit"`` or ``"bnb_4bit"`` --
       4-bit NF4 with bf16 compute, bf16 quant storage and double quantisation
-      (the QLoRA recipe, ZeRO-3 / FSDP compatible).
+      (the QLoRA recipe; FSDP compatible).
     * ``dict`` -- forwarded verbatim as ``BitsAndBytesConfig(**spec)`` for full
       control; ``bnb_4bit_compute_dtype`` / ``bnb_4bit_quant_storage`` may be
       given as dtype strings (e.g. ``"bfloat16"``), which transformers resolves.
@@ -969,132 +953,17 @@ def _infer_clippable_lora_scope(model: nn.Module) -> str | None:
     return None
 
 
-# PEFT LoRA inject rejects these module names on Mamba-family model_type values
-# (fused kernels read the raw weights and skip the wrapped forward).
-MAMBA_LORA_MODEL_TYPES = frozenset(
-    {"falcon_h1", "falcon_mamba", "mamba", "mamba2", "nemotron_h"}
-)
-MAMBA_LORA_FORBIDDEN_MODULES = frozenset({"conv1d", "out_proj"})
-
-
-def _mamba_lora_model_type(model: nn.Module) -> str | None:
-    """Return the Mamba-family ``model_type``, or None."""
-    config = getattr(model, "config", None)
-    model_type = getattr(config, "model_type", None)
-    if isinstance(model_type, str) and model_type in MAMBA_LORA_MODEL_TYPES:
-        return model_type
-    return None
-
-
-def _clone_lora_config(lora_config: LoraConfig, **updates: Any) -> LoraConfig:
-    """Return a new ``LoraConfig`` with the given field updates."""
-    if hasattr(lora_config, "to_dict"):
-        cfg_dict = lora_config.to_dict()
-        cfg_dict.update(updates)
-        return lora_config.__class__(**cfg_dict)
-    adapted = copy.deepcopy(lora_config)
-    for key, value in updates.items():
-        setattr(adapted, key, value)
-    return adapted
-
-
 def _clone_lora_config_with_targets(
     lora_config: LoraConfig, target_modules: str | list[str]
 ) -> LoraConfig:
     """Return a new ``LoraConfig`` with updated ``target_modules``."""
-    return _clone_lora_config(lora_config, target_modules=target_modules)
-
-
-def _rewriteable_lora_module_targets(
-    raw_targets: str | Iterable[str] | None,
-) -> list[str] | None:
-    """Plain suffix names to rewrite, or None for regex / ``all-linear`` / unset."""
-    if raw_targets is None or raw_targets == "all-linear":
-        return None
-    raw_list = [raw_targets] if isinstance(raw_targets, str) else list(raw_targets)
-    if any(
-        isinstance(target, str) and _looks_like_peft_target_regex(target)
-        for target in raw_list
-    ):
-        return None
-    return [str(target) for target in raw_list]
-
-
-def _adapt_mamba_lora_config(model: nn.Module, lora_config: LoraConfig) -> LoraConfig:
-    """Exclude fused Mamba modules from LoRA inject.
-
-    PEFT 0.20+ raises if LoRA wraps ``out_proj`` or ``conv1d`` on Mamba-family
-    models, including when those names are reached via ``target_parameters``.
-    ``exclude_modules`` skips inject; named targets are dropped.
-    """
-    if _mamba_lora_model_type(model) is None:
-        return lora_config
-
-    existing_exclude = list(getattr(lora_config, "exclude_modules", None) or [])
-    exclude_modules = list(existing_exclude)
-    for name in sorted(MAMBA_LORA_FORBIDDEN_MODULES):
-        if name not in exclude_modules:
-            exclude_modules.append(name)
-
-    updates: dict[str, Any] = {}
-    if exclude_modules != existing_exclude:
-        updates["exclude_modules"] = exclude_modules
-
-    rewriteable = _rewriteable_lora_module_targets(lora_config.target_modules)
-    if rewriteable is not None:
-        kept: list[str] = []
-        dropped: list[str] = []
-        for target in rewriteable:
-            leaf = target.rsplit(".", 1)[-1]
-            if leaf in MAMBA_LORA_FORBIDDEN_MODULES:
-                dropped.append(target)
-                continue
-            kept.append(target)
-        new_targets: str | list[str] | None = kept
-        if not kept:
-            new_targets = None
-        if new_targets != rewriteable:
-            updates["target_modules"] = new_targets
-            if dropped:
-                logger.info(
-                    "Dropped Mamba-incompatible LoRA target_modules %s",
-                    dropped,
-                )
-
-    raw_parameters = getattr(lora_config, "target_parameters", None)
-    if raw_parameters:
-        kept_params: list[str] = []
-        dropped_params: list[str] = []
-        for param in raw_parameters:
-            module_path, _, _name = str(param).rpartition(".")
-            parent_leaf = module_path.rsplit(".", 1)[-1] if module_path else str(param)
-            if parent_leaf in MAMBA_LORA_FORBIDDEN_MODULES:
-                dropped_params.append(str(param))
-                continue
-            kept_params.append(str(param))
-        if dropped_params:
-            updates["target_parameters"] = kept_params or None
-            logger.info(
-                "Dropped Mamba-incompatible LoRA target_parameters %s",
-                dropped_params,
-            )
-
-    remaining_modules = updates.get("target_modules", lora_config.target_modules)
-    remaining_params = updates.get(
-        "target_parameters",
-        getattr(lora_config, "target_parameters", None),
-    )
-    if remaining_modules in (None, [], "") and not remaining_params:
-        msg = (
-            "All LoRA targets are Mamba-incompatible "
-            f"({sorted(MAMBA_LORA_FORBIDDEN_MODULES)}); add other "
-            "targets such as in_proj or attention projections"
-        )
-        raise ValueError(msg)
-
-    if not updates:
-        return lora_config
-    return _clone_lora_config(lora_config, **updates)
+    if hasattr(lora_config, "to_dict"):
+        cfg_dict = lora_config.to_dict()
+        cfg_dict["target_modules"] = target_modules
+        return lora_config.__class__(**cfg_dict)
+    adapted = copy.deepcopy(lora_config)
+    adapted.target_modules = target_modules
+    return adapted
 
 
 def _example_module_keys_for_lora_scope(
@@ -1129,11 +998,7 @@ def adapt_lora_config_for_model(
     that path are targeted. The scoped regex matches plain ``nn.Linear`` language
     layers and ``.linear`` inside ClippableLinear towers. Unscoped fallbacks are
     not used when the scope is explicit.
-
-    On Mamba-family ``model_type`` values, ``out_proj`` and ``conv1d`` are excluded
-    from LoRA inject (PEFT 0.20+ forbids wrapping those fused-kernel modules).
     """
-    lora_config = _adapt_mamba_lora_config(model, lora_config)
     raw_targets = lora_config.target_modules
     projection_names = _projection_names_for_clippable_lora(model, raw_targets)
     if projection_names is None:
@@ -1278,8 +1143,8 @@ def format_colocated_vllm_oom_hint(
         )
     if trainer_on_gpu:
         lines.append(
-            "The DeepSpeed trainer was still on GPU when wake_up ran. With sleep_mode, "
-            "AgileRL moves trainer weights to CPU before wake_up; ZeRO optimizer state "
+            "The trainer was still on GPU when wake_up ran. With sleep_mode, "
+            "AgileRL moves trainer weights to CPU before wake_up; optimizer state "
             "may still remain on GPU."
         )
     lines.append(
@@ -1316,6 +1181,8 @@ def resolve_attn_implementation(requested: str | None = None) -> str:
     """
     if requested is not None and requested != "auto":
         return requested
+    import importlib.util
+
     if importlib.util.find_spec("flash_attn") is not None:
         return "flash_attention_2"
     return "sdpa"
@@ -1440,11 +1307,24 @@ def patch_flex_attention_kernel_options(options: dict[str, Any] | None = None) -
         ALL_ATTENTION_FUNCTIONS.register("flex_attention", _flex_with_opts)
 
 
+def install_packed_expert_grouped_gemm(model: nn.Module) -> int:
+    """Bind grouped GEMM on packed-expert modules. No-op on dense models.
+
+    Imported lazily: ``moe_lora`` lives under ``agilerl.algorithms``, and
+    loading that package imports ``base``, which imports ``llm_envs``.
+    """
+    from agilerl.algorithms.core.llm_ops.moe_lora import (
+        install_packed_expert_grouped_gemm as install,
+    )
+
+    return install(model)
+
+
 def create_model_from_name_or_path(
     model_name_or_path: str,
     model_config: dict[str, Any] | None = None,
     add_value_head: bool = False,
-    use_accelerator: bool = False,
+    use_distributed: bool = False,
 ) -> PreTrainedModel:
     """Create a model from a name or path.
 
@@ -1457,18 +1337,21 @@ def create_model_from_name_or_path(
     :type model_config: dict[str, Any ] | None
     :param use_value_head: Flag to indicate if a value head should be added to the model, defaults to False
     :type use_value_head: bool, optional
-    :param use_accelerator: Flag to indicate if the model should be created with the accelerator, defaults to False
-    :type use_accelerator: bool, optional
+    :param use_distributed: Whether the model is created for a distributed
+        run, defaults to False
+    :type use_distributed: bool, optional
     :return: The created model.
     :rtype: PreTrainedModel
     """
+    # Class-level family patches (e.g. Nemotron-H Mamba mixers) wrap
+    # ``__init__`` and must be in place before ``from_pretrained``.
+    install_family_patches(model_name_or_path)
+
     # Start from the caller's config (if any) and fill in our SDPA + dtype
     # defaults with ``setdefault``, so any explicit caller value stays
     # authoritative.
     model_config = dict(model_config) if model_config else {}
-    model_config.setdefault(
-        "torch_dtype", torch.bfloat16 if not use_accelerator else torch.float16
-    )
+    model_config.setdefault("torch_dtype", torch.bfloat16)
     # Auto-select the best available attention backend (flash_attention_2 when
     # the flash_attn package is installed, else sdpa). ``resolve_*`` treats an
     # explicit caller value (incl. "flex_attention") as authoritative.
@@ -1478,14 +1361,17 @@ def create_model_from_name_or_path(
     if model_config["attn_implementation"] == "flex_attention":
         patch_flex_attention_kernel_options()
     if add_value_head:
-        return AutoModelForCausalLMWithValueHead.from_pretrained(
+        model = AutoModelForCausalLMWithValueHead.from_pretrained(
             pretrained_model_name_or_path=model_name_or_path,
             **model_config,
         )
-    return AutoModelForCausalLM.from_pretrained(
-        pretrained_model_name_or_path=model_name_or_path,
-        **model_config,
-    )
+    else:
+        model = AutoModelForCausalLM.from_pretrained(
+            pretrained_model_name_or_path=model_name_or_path,
+            **model_config,
+        )
+    install_packed_expert_grouped_gemm(model)
+    return model
 
 
 def fill_outside_mask(
@@ -1534,7 +1420,7 @@ def masked_var(
         if mask_sum <= 1:
             msg = (
                 "Unbiased masked variance requires at least 2 unmasked values; "
-                "increase `mini_batch_size` or `gradient_accumulation_steps`."
+                "increase `mini_batch_size` or `micro_batch_size_per_gpu`."
             )
             raise ValueError(msg)
         bessel_correction = mask_sum / (mask_sum - 1)
@@ -1629,6 +1515,57 @@ def baseline_free_turn_cells(turn_mask: torch.Tensor, group_size: int) -> torch.
     count = turn_mask.reshape(-1, group_size, num_turns).sum(dim=1, keepdim=True)
     lone = (count <= 1).expand(-1, group_size, -1).reshape(batch, num_turns)
     return turn_mask & lone
+
+
+def batch_is_single_turn(turn_ids: torch.Tensor | None) -> bool:
+    """True when every sample has at most one turn, or ``turn_ids`` is missing.
+
+    :param turn_ids: Per-token turn index ``[batch, seq_len]``; ``-1`` for
+        padding. ``None`` is treated as a single-turn batch.
+    :type turn_ids: torch.Tensor | None
+    :return: Whether the batch has no multi-turn structure.
+    :rtype: bool
+    """
+    if turn_ids is None:
+        return True
+    per_sample_num_turns = turn_ids.max(dim=1).values + 1
+    return bool((per_sample_num_turns <= 1).all())
+
+
+def resolve_batch_advantage_granularity(
+    configured: str,
+    turn_ids: torch.Tensor | None,
+    *,
+    single_turn: str,
+    multi_turn: str,
+    can_use_multi_turn: bool = True,
+) -> str:
+    """Resolve ``"auto"`` from batch turn structure; pass explicit values through.
+
+    PPO and REINFORCE map single-turn batches to ``"token"`` and multi-turn
+    batches to ``"turn"``. GRPO has no token-level advantage, so it maps
+    single-turn batches to ``"trajectory"`` and multi-turn batches to
+    ``"turn"``.
+
+    :param configured: User setting, including ``"auto"``.
+    :type configured: str
+    :param turn_ids: Per-token turn indices, or ``None``.
+    :type turn_ids: torch.Tensor | None
+    :param single_turn: Grain for a single-turn batch.
+    :type single_turn: str
+    :param multi_turn: Grain when any sample has more than one turn.
+    :type multi_turn: str
+    :param can_use_multi_turn: False when the batch cannot support ``multi_turn``
+        (GRPO: no per-turn rewards).
+    :type can_use_multi_turn: bool
+    :return: The effective advantage granularity.
+    :rtype: str
+    """
+    if configured != "auto":
+        return configured
+    if can_use_multi_turn and not batch_is_single_turn(turn_ids):
+        return multi_turn
+    return single_turn
 
 
 def validate_importance_sampling_level(level: str, *, allow_auto: bool) -> None:
@@ -1878,83 +1815,6 @@ def clipped_is_surrogate(
     )
 
 
-def create_llm_accelerator(
-    *,
-    deepspeed_plugin: DeepSpeedPlugin | None = None,
-) -> Accelerator | None:
-    """Create an :class:`Accelerator` for LLM training with DeepSpeed.
-
-    This helper enforces a strict DeepSpeed contract for LLM workloads:
-
-    * **0 GPUs** — returns ``None`` (the ``accelerator=None`` code-path
-      in :class:`~agilerl.algorithms.core.base.LLMAlgorithm` handles
-      CPU-only training).
-    * When ``deepspeed_plugin`` is provided, returns an
-      ``Accelerator(deepspeed_plugin=...)``.
-    * Otherwise, instantiates ``Accelerator()`` and requires that a
-      DeepSpeed plugin is already present (for example via
-      ``accelerate config`` + ``accelerate launch``).
-      If no plugin is detected, raises ``RuntimeError`` with setup
-      instructions.
-
-    :param deepspeed_plugin: Explicit DeepSpeed plugin instance. If
-        omitted, this function expects a launch-configured plugin to be
-        present in ``Accelerator.state``.
-    :type deepspeed_plugin: DeepSpeedPlugin | None
-    :return: A configured ``Accelerator``, or ``None`` when no GPU is
-        available.
-    """
-    num_gpus = torch.cuda.device_count()
-
-    if num_gpus == 0:
-        logger.info("No GPUs detected — returning None (CPU-only path).")
-        return None
-
-    if deepspeed_plugin is not None:
-        return Accelerator(deepspeed_plugin=deepspeed_plugin)
-
-    accelerator = Accelerator()
-    if accelerator.state.deepspeed_plugin is None:
-        msg = (
-            "DeepSpeed is required for create_llm_accelerator(), but no "
-            "DeepSpeed plugin was detected. Use one of: "
-            "(1) run `accelerate config` and launch with `accelerate launch ...`; "
-            "(2) pass `deepspeed_plugin=` explicitly to create_llm_accelerator()."
-        )
-        raise RuntimeError(msg)
-    return accelerator
-
-
-def get_llm_accelerator(
-    base_accelerator: Accelerator | None,
-    idx: int,
-) -> Accelerator | None:
-    """Return a per-agent accelerator from a base accelerator.
-
-    ``idx == 0`` reuses ``base_accelerator``. For additional agents this helper
-    creates a fresh ``Accelerator`` instance so each LLM algorithm owns an
-    independent accelerator/engine reference.
-
-    :param base_accelerator: Accelerator passed into population creation.
-    :type base_accelerator: Accelerator | None
-    :param idx: Agent index in the population.
-    :type idx: int
-    :return: Accelerator for the specific agent, or ``None``.
-    :rtype: Accelerator | None
-    """
-    if idx < 0:
-        msg = f"Population index must be non-negative, got {idx}."
-        raise ValueError(msg)
-
-    if base_accelerator is None:
-        return None
-
-    if idx == 0:
-        return base_accelerator
-
-    return Accelerator()
-
-
 def cuda_tensor_bytes_in_module(module: torch.nn.Module) -> int:
     """Sum nbytes of parameters and buffers still on a CUDA device."""
     total = 0
@@ -1968,8 +1828,8 @@ def collect_trainable_param_stats(pop: PopulationType) -> dict[str, Any]:
     """Best-effort LoRA / trainable-param accounting for a population's first agent.
 
     Recorded once at init so runs can be correlated against LoRA size.
-    Wrapped in a broad except: introspecting peft-wrapped accelerator-managed
-    models can fail in odd ways, and a logging-only field shouldn't fault training.
+    Wrapped in a broad except: introspecting peft-wrapped models can fail
+    in odd ways, and a logging-only field shouldn't fault training.
 
     :param pop: Population of LLM algorithms; only ``pop[0]`` is inspected.
     :type pop: PopulationType
@@ -1983,7 +1843,7 @@ def collect_trainable_param_stats(pop: PopulationType) -> dict[str, Any]:
         actor = getattr(agent, "actor", None)
         if actor is None:
             return out
-        # Unwrap accelerate / peft / DDP layers if present.
+        # Unwrap PEFT / FSDP wrappers if present.
         inner = actor
         for attr in ("module", "model"):
             unwrapped = getattr(inner, attr, None)
@@ -2003,35 +1863,6 @@ def collect_trainable_param_stats(pop: PopulationType) -> dict[str, Any]:
     except Exception:  # pragma: no cover — best-effort
         pass
     return out
-
-
-def resolve_llm_device(
-    accelerator: Accelerator | None,
-    device: str | torch.device | None = None,
-) -> str:
-    """Resolve the training device for an LLM algorithm.
-
-    The accelerator outranks *device*: under ``accelerate``/DeepSpeed each rank
-    must own its own GPU, so a caller passing a bare ``"cuda"`` cannot be allowed
-    to collapse every rank onto device 0.
-
-    :param accelerator: Accelerator object, or ``None`` for single-process runs.
-    :type accelerator: accelerate.Accelerator | None
-    :param device: Caller-requested device, or ``None`` to auto-detect.
-    :type device: str | torch.device | None
-    :return: The rank's device under an accelerator, else *device*, else the best
-        locally available device.
-    :rtype: str
-    """
-    if accelerator is not None:
-        return f"cuda:{accelerator.process_index}"
-    if device is not None:
-        return str(device)
-    if torch.cuda.is_available():
-        return "cuda"
-    if torch.backends.mps.is_available():
-        return "mps"
-    return "cpu"
 
 
 def offload_colocated_trainer_from_gpu(unwrapped_model: torch.nn.Module) -> int:
@@ -2098,65 +1929,317 @@ def attention_mask_from_padded_ids(
     return trailing == 0
 
 
+def stitch_completion_after_windowed_hf_generate(
+    completion_id: torch.Tensor,
+    stitch: torch.Tensor | None,
+    initial_len: int | None,
+) -> tuple[torch.Tensor, int | None]:
+    """Reinsert dropped middle tokens after HF ``generate`` on a windowed prompt.
+
+    ``completion_id`` is ``concat(model_input_ids, new_tokens)``. The full
+    chronological sequence is
+    ``concat(completion_id[:, :initial_len], stitch, completion_id[:, initial_len:])``.
+
+    :param completion_id: Output of ``generate`` on the truncated prompt,
+        shape ``(1, seq_len)``.
+    :type completion_id: torch.Tensor
+    :param stitch: Middle segment removed for context windowing, shape ``(1, K)``.
+    :type stitch: torch.Tensor | None
+    :param initial_len: ``model_window_initial_len`` (length of the initial
+        user segment within ``model_input_ids``).
+    :type initial_len: int | None
+    :return: Full prompt plus generation with stitch restored.
+    :rtype: torch.Tensor
+    """
+    if stitch is None:
+        return completion_id, initial_len
+    # A windowed prompt always pairs a stitch tensor with its initial length.
+    assert initial_len is not None
+    stitch = stitch.to(completion_id.device, non_blocking=True)
+    stitch_len = stitch.shape[1]
+    full_prompt_len = initial_len + stitch_len
+    return (
+        torch.cat(
+            [
+                completion_id[:, :initial_len],
+                stitch,
+                completion_id[:, initial_len:],
+            ],
+            dim=1,
+        ),
+        full_prompt_len,
+    )
+
+
 def build_completion_mask(
-    token_ids: torch.Tensor,
+    completion_id: torch.Tensor,
     prompt_len: int | None,
     pad_token_id: int,
+    completion_len: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """Build the boolean action mask marking the completion within a token sequence.
+    """Build the boolean action mask for a completion tensor.
 
-    Returns ``True`` at positions that are (a) past the prompt and (b) not
-    pad tokens, dropping the leading position to align with the
+    Returns ``True`` at positions that are part of the generated completion
+    (i.e. past the prompt), dropping the leading position to align with the
     next-token-prediction shift used downstream.
 
-    :param token_ids: Token tensor of shape ``(B, seq_len)`` containing
+    When ``completion_len`` is provided (per-row generated-token counts) the
+    completion span is marked by position — ``positions in
+    [prompt_len, prompt_len + completion_len)`` — so the mask is correct even
+    when ``pad_token_id == eos_token_id`` (a real generated EOS is included, only
+    the trailing padding is excluded). When ``None`` the span is inferred from
+    non-pad tokens, which miscounts a generated EOS when pad aliases eos.
+
+    :param completion_id: Token tensor of shape ``(B, seq_len)`` containing
         the prompt followed by generated tokens.
-    :type token_ids: torch.Tensor
+    :type completion_id: torch.Tensor
     :param prompt_len: Number of leading tokens to mask out (the full
-        prompt length). ``None`` means "no prompt prefix" — every non-pad
-        token is part of the completion, so the entire dim is set before
-        pads are zeroed back out.
+        prompt length, possibly after sliding-window stitching). ``None``
+        means "no prompt prefix" — every non-pad token is part of the
+        completion. This matches the legacy slice semantics where
+        ``mask[:, None:] = True`` set the entire dim before pads were
+        zeroed back out.
     :type prompt_len: int | None
     :param pad_token_id: Pad token id used to suppress padding positions.
     :type pad_token_id: int
+    :param completion_len: Per-row count of generated tokens. When provided,
+        the completion span is marked by position (robust to
+        ``pad_token_id == eos_token_id``); otherwise it is inferred from
+        non-pad tokens. Shape ``(B,)``, same device as ``completion_id``.
+    :type completion_len: torch.Tensor | None
     :return: Boolean mask of shape ``(B, seq_len - 1)``.
     :rtype: torch.Tensor
     """
-    non_pad = token_ids != pad_token_id
+    if completion_len is not None and (prompt_len is None or prompt_len == 0):
+        msg = "completion_len requires a non-zero prompt_len to locate the span."
+        raise ValueError(msg)
+    if completion_len is not None:
+        positions = torch.arange(completion_id.shape[1], device=completion_id.device)
+        end = prompt_len + completion_len.to(device=completion_id.device)
+        mask = (positions.unsqueeze(0) >= prompt_len) & (
+            positions.unsqueeze(0) < end.unsqueeze(-1)
+        )
+        return mask[:, 1:]
+    non_pad = completion_id != pad_token_id
     if prompt_len is None or prompt_len == 0:
         mask = non_pad
     else:
-        positions = torch.arange(token_ids.shape[1], device=token_ids.device)
+        positions = torch.arange(completion_id.shape[1], device=completion_id.device)
         mask = (positions.unsqueeze(0) >= prompt_len) & non_pad
     return mask[:, 1:]
 
 
-def prepare_prompt_hf_generate(
-    prompt: RolloutPrompt, device: torch.device
-) -> dict[str, torch.Tensor]:
-    """Turn one rollout prompt into HuggingFace ``generate`` inputs.
+def hf_completion_lengths(
+    completion_id: torch.Tensor,
+    prompt_len: int,
+    pad_token_id: int,
+) -> torch.Tensor:
+    """Recover the true per-row generated-token count from an HF ``generate`` output.
 
-    ``attention_mask`` is taken from the prompt when present (e.g. a padded
-    batch) and derived as all-ones otherwise (a single unpadded row, the
-    ``RolloutHarness`` prompt shape).
+    HF ``generate`` pads finished rows with ``pad_token_id`` up to the batch's
+    longest generation. When ``pad_token_id == eos_token_id`` the padded
+    positions and a real stopping EOS share an id, so a token-id scan can't
+    tell them apart. This helper disambiguates by position: a row's generated
+    region is ``[prompt_len, prompt_len + G)`` where ``G`` is the batch max. The
+    first token equal to ``pad_token_id`` within that region is the stopping
+    EOS (so the row generated ``first_pad - prompt_len + 1`` tokens, EOS
+    included); if no such token exists the row ran to ``G`` (no EOS, hit the
+    cap). At most one EOS can appear because ``generate`` stops a row at its
+    first EOS.
 
-    :param prompt: The prompt to prepare.
-    :type prompt: RolloutPrompt
-    :param device: The device to move the tensors to.
-    :type device: torch.device
-    :return: ``input_ids`` / ``attention_mask`` moved to ``device``.
-    :rtype: dict[str, torch.Tensor]
+    :param completion_id: ``generate`` output, shape ``(B, prompt_len + G)``.
+    :type completion_id: torch.Tensor
+    :param prompt_len: Number of leading prompt tokens.
+    :type prompt_len: int
+    :param pad_token_id: Pad token id (may equal the eos id).
+    :type pad_token_id: int
+    :return: Per-row generated-token counts, shape ``(B,)``, on
+        ``completion_id``'s device.
+    :rtype: torch.Tensor
     """
-    input_ids = prompt["input_ids"].to(device)
-    attention_mask = prompt.get("attention_mask")
-    return {
-        "input_ids": input_ids,
-        "attention_mask": (
-            torch.ones_like(input_ids)
-            if attention_mask is None
-            else attention_mask.to(device)
-        ),
+    B, L = completion_id.shape
+    device = completion_id.device
+    G = L - prompt_len
+    if G <= 0:
+        return torch.zeros(B, dtype=torch.long, device=device)
+    gen_region = completion_id[:, prompt_len:]
+    is_pad = gen_region == pad_token_id
+    has_pad = is_pad.any(dim=1)
+    first_pad = is_pad.int().argmax(dim=1)
+    first_pad = torch.where(has_pad, first_pad, torch.full_like(first_pad, G))
+    gen_len = torch.where(first_pad < G, first_pad + 1, first_pad)
+    return gen_len.to(torch.long)
+
+
+def build_hf_completion_mask(
+    completion_id: torch.Tensor,
+    input_ids_len: int,
+    initial_prompt_len: int | None,
+    stitch_ids: torch.Tensor | None,
+    pad_token_id: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Stitch a windowed HF ``generate`` output and build its action mask.
+
+    Wraps :func:`stitch_completion_after_windowed_hf_generate` and
+    :func:`build_completion_mask` so the mask is correct when
+    ``pad_token_id == eos_token_id``. The generated span is marked by position
+    using the true per-row generation length recovered from the raw output,
+    so a real stopping EOS (which aliases the pad id) is included and only the
+    trailing padding is excluded — for both the current turn and any prior
+    turns retained in the windowed prompt suffix.
+
+    The windowed prompt is ``[initial_segment | recent_suffix]`` of length
+    ``input_ids_len``; ``generate`` appends ``new_tokens``; stitching
+    reinserts the dropped middle to give
+    ``[initial_segment | stitch | recent_suffix | new_tokens | pad]``. The
+    action span is ``[full_prompt_len, full_prompt_len + recent_suffix_len +
+    new_token_len)`` where ``recent_suffix_len = input_ids_len -
+    initial_prompt_len``.
+
+    :param completion_id: Raw ``generate`` output, shape ``(B, input_ids_len
+        + G)``.
+    :type completion_id: torch.Tensor
+    :param input_ids_len: Length of the prompt fed to ``generate`` (the
+        windowed prompt length).
+    :type input_ids_len: int
+    :param initial_prompt_len: Length of the initial segment within the
+        windowed prompt (``None`` when no windowing).
+    :type initial_prompt_len: int | None
+    :param stitch_ids: Dropped middle segment to reinsert (``None`` when no
+        windowing).
+    :type stitch_ids: torch.Tensor | None
+    :param pad_token_id: Pad token id (may equal the eos id).
+    :type pad_token_id: int
+    :return: ``(stitched_completion_id, action_mask)`` where the mask has
+        shape ``(B, seq_len - 1)``.
+    :rtype: tuple[torch.Tensor, torch.Tensor]
+    """
+    new_token_len = hf_completion_lengths(completion_id, input_ids_len, pad_token_id)
+    completion_id, full_prompt_len = stitch_completion_after_windowed_hf_generate(
+        completion_id, stitch_ids, initial_prompt_len
+    )
+    if stitch_ids is None:
+        # Non-windowed path: prompt length equals the generate input length.
+        completion_len = new_token_len
+        full_prompt_len = input_ids_len
+    else:
+        recent_suffix_len = input_ids_len - initial_prompt_len
+        completion_len = new_token_len + recent_suffix_len
+    mask = build_completion_mask(
+        completion_id, full_prompt_len, pad_token_id, completion_len=completion_len
+    )
+    return completion_id, mask
+
+
+def stitch_completion_after_windowed_vllm_generate(
+    completion_ids: list[torch.Tensor],
+    stitch_prefixes: list[torch.Tensor],
+    group_prompts: Sequence[RolloutPrompt],
+    group_size: int,
+    prompts: Sequence[RolloutPrompt],
+) -> list[torch.Tensor]:
+    """Reinsert dropped middle segments into ``model_prompt | generation`` tensors.
+
+    For each logical prompt ``i``, ``block`` is
+    ``concat(trajectory_input_ids, new_tokens)`` (batched over ``group_size``).
+    When ``stitch_prefix_ids`` is non-empty, the full chronological sequence is
+    ``concat(block[:, :I], stitch, block[:, I:], dim=1)`` with
+    ``I = initial_prompt_len`` from the corresponding prompt dict.
+
+    :param completion_ids: One tensor per logical prompt: prompt+gen per row.
+    :type completion_ids: list[torch.Tensor]
+    :param stitch_prefixes: Parallel to expanded ``group_prompts``; empty
+        tensors when no windowing for that slot.
+    :type stitch_prefixes: list[torch.Tensor]
+    :param group_prompts: ``prompts`` expanded so each original prompt repeats
+        ``group_size`` times (same order as vLLM batch).
+    :type group_prompts: Sequence[RolloutPrompt]
+    :param group_size: Number of repeated entries per logical prompt.
+    :type group_size: int
+    :param prompts: Original batch of observation mappings (length ``N``).
+    :type prompts: Sequence[RolloutPrompt]
+    :return: Same length as ``completion_ids``, with middle stitch applied
+        where ``stitch_prefixes`` is non-empty.
+    :rtype: list[torch.Tensor]
+    """
+    if group_size != 1:
+        error_msg = f"vLLM sliding-window stitch is only implemented for group_size=1 (got {group_size})."
+        raise ValueError(error_msg)
+    stitched: list[torch.Tensor] = []
+    for i, _ in enumerate(prompts):
+        completion_i = completion_ids[i]
+        stitch_i = stitch_prefixes[group_size * i]
+        if stitch_i.shape[1] == 0:
+            stitched.append(completion_i)
+            continue
+        initial_prompt_len_raw = group_prompts[group_size * i].get("initial_prompt_len")
+        if initial_prompt_len_raw is None:
+            msg = "initial_prompt_len required when stitch_prefix_ids is non-empty"
+            raise ValueError(
+                msg,
+            )
+        if isinstance(initial_prompt_len_raw, torch.Tensor):
+            initial_prompt_len_i = int(initial_prompt_len_raw.item())
+        elif isinstance(initial_prompt_len_raw, list):
+            if not initial_prompt_len_raw:
+                msg = "initial_prompt_len list is empty"
+                raise ValueError(msg)
+            initial_prompt_len_i = int(initial_prompt_len_raw[0])
+        else:
+            initial_prompt_len_i = int(initial_prompt_len_raw)
+        group_size_i = completion_i.shape[0]
+        stitch_group_i = stitch_i.expand(group_size_i, -1)
+        stitched.append(
+            torch.cat(
+                [
+                    completion_i[:, :initial_prompt_len_i],
+                    stitch_group_i,
+                    completion_i[:, initial_prompt_len_i:],
+                ],
+                dim=1,
+            ),
+        )
+    return stitched
+
+
+def prepare_prompt_hf_generate(
+    prompt_dict: RolloutPrompt, device: torch.device
+) -> HFGeneratePrompts:
+    """Prepare a prompt dictionary for HuggingFace generate.
+
+    :param prompt_dict: The prompt dictionary to prepare.
+    :type prompt_dict: RolloutPrompt
+    :param device: The device to move the prompt dictionary to.
+    :type device: torch.device
+    :return: The prepared prompt dictionary.
+    :rtype: HFGeneratePrompts
+    """
+    # Trajectory keys may be absent or explicitly None (first turn); both fall
+    # back to the initial prompt tensors.
+    input_ids = prompt_dict.get("trajectory_input_ids")
+    if input_ids is None:
+        input_ids = prompt_dict["input_ids"]
+    attention_mask = prompt_dict.get("trajectory_attention_mask")
+    if attention_mask is None:
+        attention_mask = prompt_dict.get("attention_mask")
+    if attention_mask is None:
+        attention_mask = torch.ones_like(input_ids)
+    stitched = prompt_dict.get("stitch_prefix_ids")
+    initial_prompt_len = prompt_dict.get("initial_prompt_len")
+    if isinstance(initial_prompt_len, torch.Tensor):
+        initial_prompt_len = (
+            int(initial_prompt_len.item()) if initial_prompt_len.numel() == 1 else None
+        )
+    elif isinstance(initial_prompt_len, list):
+        initial_prompt_len = initial_prompt_len[0] if initial_prompt_len else None
+
+    result: HFGeneratePrompts = {
+        "input_ids": input_ids.to(device),
+        "attention_mask": attention_mask.to(device),
+        "stitch_prefix_ids": stitched,
+        "initial_prompt_len": initial_prompt_len,
     }
+    return result
 
 
 def get_model_name_or_path(model: PreTrainedModel) -> str:
@@ -2187,99 +2270,6 @@ def get_model_name_or_path(model: PreTrainedModel) -> str:
     raise ValueError(msg)
 
 
-ACTIVATION_CHECKPOINTING_KEY = "activation_checkpointing"
-
-
-def _named_activation_checkpointing_keys(block: Any) -> str:  # noqa: ANN401 -- DeepSpeed config values are untyped
-    """Describe the settings a rejected activation-checkpointing section carries.
-
-    :param block: Value found under the activation-checkpointing key.
-    :type block: Any
-    :return: Human-readable list of the keys, or a description of the value.
-    :rtype: str
-    """
-    if isinstance(block, Mapping):
-        if not block:
-            return "no keys"
-        return ", ".join(sorted(str(key) for key in block))
-    return repr(block)
-
-
-def assert_no_activation_checkpointing_config(
-    deepspeed_config: Any,  # noqa: ANN401 -- DeepSpeed configs arrive as opaque mappings
-    *,
-    source: str,
-) -> None:
-    """Reject a DeepSpeed config carrying an activation-checkpointing section.
-
-    :param deepspeed_config: DeepSpeed config mapping to inspect.
-    :type deepspeed_config: Any
-    :param source: Where the config came from, quoted back in the message.
-    :type source: str
-    :return: None
-    :rtype: None
-    :raises TypeError: If the config is not a mapping and so cannot be checked.
-    :raises RuntimeError: If the activation-checkpointing section is present.
-    """
-    if deepspeed_config is None:
-        return
-    if not isinstance(deepspeed_config, Mapping):
-        msg = (
-            f"DeepSpeed config from {source} is {type(deepspeed_config).__name__}, "
-            f"not a mapping, so its {ACTIVATION_CHECKPOINTING_KEY} section cannot "
-            "be checked."
-        )
-        raise TypeError(msg)
-    if ACTIVATION_CHECKPOINTING_KEY not in deepspeed_config:
-        return
-    block = deepspeed_config[ACTIVATION_CHECKPOINTING_KEY]
-    msg = (
-        f"DeepSpeed config from {source} sets {ACTIVATION_CHECKPOINTING_KEY} "
-        f"({_named_activation_checkpointing_keys(block)}), which is not honoured "
-        "on this training path. DeepSpeed only reads that section for checkpoints "
-        "routed through deepspeed.checkpointing.checkpoint. Gradient checkpointing "
-        "here is enabled through HuggingFace's gradient_checkpointing_enable, which "
-        "binds torch.utils.checkpoint.checkpoint, and that never consults the "
-        "DeepSpeed config. Routing it through DeepSpeed instead is not available "
-        "on this stack: partition_activations shards along the model-parallel "
-        "group, which is size 1 here, so it saves nothing; "
-        "contiguous_memory_optimization requires partition_activations plus a "
-        "fixed layer count; and deepspeed.checkpointing.checkpoint is a reentrant "
-        "autograd Function with no use_reentrant argument, which the LoRA plus "
-        "ZeRO-3 recompute path needs to control. Remove the section rather than "
-        "carry settings that do nothing."
-    )
-    raise RuntimeError(msg)
-
-
-def align_deepspeed_lr(lr: float, accelerator: Accelerator | None) -> float:
-    """Align the learning rate for DeepSpeed.
-
-    :param lr: The learning rate to align.
-    :type lr: float
-    :param accelerator: The accelerator to align the learning rate for.
-    :type accelerator: Accelerator | None
-    :return: The aligned learning rate.
-    :rtype: float
-    """
-    if accelerator is not None:
-        optim_lr = (
-            accelerator.state.deepspeed_plugin.deepspeed_config.get("optimizer", {})
-            .get("params", {})
-            .get("lr", None)
-        )
-        if optim_lr is not None and optim_lr != lr:
-            warnings.warn(
-                f"DeepSpeed learning rate is set to {optim_lr} but the argument 'lr' is set to {lr}. "
-                "Overwriting deepspeed learning rate with the argument 'lr'.",
-                stacklevel=2,
-            )
-            accelerator.state.deepspeed_plugin.deepspeed_config["optimizer"]["params"][
-                "lr"
-            ] = lr
-    return lr
-
-
 def sample_eval_prompts(
     env: Any,  # noqa: ANN401 -- gym env duck-typed across SFT/Preference/other gyms
     n: int = 5,
@@ -2288,13 +2278,13 @@ def sample_eval_prompts(
     """Randomly sample *n* ``(prompt, chosen, rejected)`` triples from
     *env*'s held-out test dataset.
 
-    Columns are resolved automatically per dataset ``objective``:
+    Columns are resolved automatically per gym type:
 
-    * ``objective="sft"`` — ``chosen`` is ``env.response_column``; ``rejected``
+    * :class:`SFTGym` — ``chosen`` is ``env.response_column``; ``rejected``
       is ``None`` (SFT has no negative example).
-    * ``objective="preference"`` — ``chosen`` and ``rejected`` map to the
+    * :class:`PreferenceGym` — ``chosen`` and ``rejected`` map to the
       dataset's ``"chosen"`` / ``"rejected"`` columns.
-    * Any other env — both are ``None``.
+    * Any other gym — both are ``None``.
 
     :param env: AgileRL gym environment with a ``test_dataloader`` attribute.
     :type env: Any
@@ -2311,10 +2301,9 @@ def sample_eval_prompts(
 
     chosen_col: str | None = None
     rejected_col: str | None = None
-    objective = getattr(env, "objective", None)
-    if objective == "sft":
+    if hasattr(env, "response_column"):  # SFTGym
         chosen_col = env.response_column
-    elif objective == "preference":
+    elif "chosen" in dataset.features:  # PreferenceGym
         chosen_col = "chosen"
         rejected_col = "rejected"
 
@@ -2566,7 +2555,7 @@ def build_vllm_rollout_lora_request(
     lora_int_id: int = 1,
 ) -> Any:  # noqa: ANN401 -- returns vllm.LoRARequest (optional Linux-only dependency)
     """Build a vLLM :class:`~vllm.lora.request.LoRARequest` for rollout."""
-    from vllm.lora.request import LoRARequest  # optional extra: llm
+    from vllm.lora.request import LoRARequest
 
     return LoRARequest(
         lora_name=lora_name,
@@ -2599,7 +2588,7 @@ def remap_peft_lora_key_for_vllm(key: str) -> str:
 
 def expert_lora_vllm_key_map(peft_model: nn.Module) -> dict[str, str]:
     """Map packed-experts LoRA module keys to the paths vLLM's fused-MoE loader reads (down on ``<experts>``, gate/up on ``<experts>.base_layer``)."""
-    from peft.tuners.lora.layer import ParamWrapper  # optional extra: llm
+    from peft.tuners.lora.layer import ParamWrapper
 
     key_map: dict[str, str] = {}
     unmapped: list[str] = []
@@ -2688,8 +2677,8 @@ def save_peft_adapter_for_vllm_rollout(
         msg = "save_peft_adapter_for_vllm_rollout requires peft and transformers."
         raise ImportError(msg)
 
-    from peft import get_peft_model_state_dict  # optional extra: llm
-    from safetensors.torch import save_file  # optional extra: llm
+    from peft import get_peft_model_state_dict
+    from safetensors.torch import save_file
 
     adapter_path = Path(staging_dir) / adapter_name
     state = get_peft_model_state_dict(peft_model, adapter_name=adapter_name)
@@ -2714,6 +2703,13 @@ def save_peft_adapter_for_vllm_rollout(
         )
 
     adapter_path.mkdir(parents=True, exist_ok=True)
+    # FSDP2 keeps adapter params as sharded ``DTensor``s; ``gather_params``
+    # may not install dense locals on the module for every param, so
+    # materialise any remaining ``DTensor`` entries here before safetensors
+    # serialisation (which cannot read a DTensor storage pointer).
+    state = {
+        k: (v.full_tensor() if isinstance(v, DTensor) else v) for k, v in state.items()
+    }
     save_file(state, adapter_path / "adapter_model.safetensors")
 
     peft_cfg = peft_model.peft_config[adapter_name]
@@ -2721,6 +2717,8 @@ def save_peft_adapter_for_vllm_rollout(
         str(key): _json_safe_value(value) for key, value in peft_cfg.to_dict().items()
     }
     cfg_dict["target_modules"] = _json_safe_value(target_modules or [])
+
+    import json
 
     (adapter_path / "adapter_config.json").write_text(
         json.dumps(cfg_dict, indent=2),
@@ -2828,89 +2826,6 @@ def max_prompt_tokens_for_model_len(max_model_len: int) -> int:
     :rtype: int
     """
     return max(0, max_model_len - 1)
-
-
-def validate_llm_context_lengths(
-    max_model_len: int,
-    max_output_tokens: int | None,
-) -> None:
-    """Reject configs that leave no prompt room for multi-turn rollouts.
-
-    :param max_model_len: Total context length (prompt + completion ceiling).
-    :type max_model_len: int
-    :param max_output_tokens: Per-generation token cap; skipped when ``None``.
-    :type max_output_tokens: int | None
-    :raises ValueError: If ``max_output_tokens >= max_model_len``.
-    """
-    if max_output_tokens is None:
-        return
-    if max_output_tokens >= max_model_len:
-        msg = (
-            f"max_output_tokens ({max_output_tokens}) must be less than "
-            f"max_model_len ({max_model_len}); equal or larger values leave no "
-            "prompt budget for multi-turn rollouts "
-            f"(max_prompt_tokens={max_prompt_tokens_for_model_len(max_model_len)})."
-        )
-        raise ValueError(msg)
-
-
-def normalize_prompt_batch(
-    prompts: RolloutPrompt | list[RolloutPrompt],
-) -> list[RolloutPrompt]:
-    """Normalize rollout prompts into a list-of-dicts per sample.
-
-    Supports both a list of per-sample dicts and a single stacked dict whose
-    tensor/list values are batched on dimension 0.
-
-    :param prompts: The prompts to normalize.
-    :type prompts: RolloutPrompt | list[RolloutPrompt]
-    :return: One prompt dict per sample.
-    :rtype: list[RolloutPrompt]
-    """
-    if isinstance(prompts, list):
-        return prompts
-
-    input_ids = prompts["input_ids"]
-    if not isinstance(input_ids, torch.Tensor) or input_ids.dim() == 1:
-        return [prompts]
-
-    batch_size = int(input_ids.shape[0])
-    if batch_size == 0:
-        return []
-
-    # Inspect each key once and write it into every output dict in one pass.
-    # Keys not declared on ``RolloutPrompt`` (caller-supplied metadata) are
-    # copied through unchanged, which a key-by-key typed construction can't do.
-    samples: list[dict[str, object]] = [{} for _ in range(batch_size)]
-    for key, value in prompts.items():
-        if (
-            isinstance(value, torch.Tensor)
-            and value.dim() > 0
-            and value.shape[0] == batch_size
-        ):
-            chunks = value.unbind(0) if value.dim() == 1 else value.split(1, dim=0)
-            for sample, chunk in zip(samples, chunks, strict=True):
-                sample[key] = chunk
-        elif isinstance(value, list) and len(value) == batch_size:
-            for sample, item in zip(samples, value, strict=True):
-                sample[key] = item
-        else:
-            for sample in samples:
-                sample[key] = value
-    # Open dicts preserve undeclared metadata; the closed TypedDict return can't
-    # name those keys, and a TypeGuard pass would only add a Python loop.
-    return samples  # ty: ignore[invalid-return-type]
-
-
-def is_rollout_prompt(obs: Mapping[str, object]) -> TypeGuard[RolloutPrompt]:
-    """Check whether a mapping is a tokenized rollout prompt.
-
-    :param obs: A prompt mapping returned by a rollout env.
-    :type obs: Mapping[str, object]
-    :return: ``True`` when the mapping carries prompt tokens.
-    :rtype: TypeGuard[RolloutPrompt]
-    """
-    return isinstance(obs.get("input_ids"), torch.Tensor)
 
 
 def is_preference_prompts(batch: Mapping[str, object]) -> TypeGuard[PreferencePrompts]:

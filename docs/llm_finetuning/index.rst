@@ -71,6 +71,7 @@ This example demonstrates how to use the GRPO algorithm to fine-tune a LLM on a 
 
    environments
    batch_sizing
+   distributed
    fused_logprobs
    quantization
    llm_checkpoints
@@ -82,6 +83,9 @@ This example demonstrates how to use the GRPO algorithm to fine-tune a LLM on a 
 
    :doc:`batch_sizing`
       Rollout, mini- and micro-batch sizes, and how often the optimizer steps.
+
+   :doc:`distributed`
+      Multi-GPU with ``torchrun``: a full replica per GPU, or FSDP2 sharding when the actor does not fit.
 
    :doc:`fused_logprobs`
       Fused linear log-probability computation for memory-efficient training.

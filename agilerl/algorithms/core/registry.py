@@ -13,10 +13,9 @@ import torch
 
 from agilerl.protocols import EvolvableAlgorithmProtocol, NamedCallable
 from agilerl.typing import LrNameType, NetworkType
-from agilerl.utils.algo_utils import DummyOptimizer
 
 # An optimizer "class": a torch ``Optimizer`` subclass or an optimizer-like
-# constructor such as ``DummyOptimizer`` or a DeepSpeed/accelerate wrapper type.
+# constructor.
 OptimizerFactory = NamedCallable
 
 # A mutation hook: a zero-argument function or bound method registered by name
@@ -113,7 +112,6 @@ class OptimizerConfig:
             "ASGD": torch.optim.ASGD,
             "LBFGS": torch.optim.LBFGS,
             "Rprop": torch.optim.Rprop,
-            "DummyOptimizer": DummyOptimizer,
         }
         # ``__post_init__`` serializes optimizer_cls to name string/s.
         if not isinstance(self.optimizer_cls, (str, NamedCallable)):

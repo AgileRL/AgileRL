@@ -9,7 +9,6 @@ from unittest.mock import ANY, MagicMock, Mock, call, patch
 
 import pytest
 import torch
-from accelerate import Accelerator
 
 from agilerl import HAS_LLM_DEPENDENCIES
 
@@ -18,7 +17,7 @@ if not HAS_LLM_DEPENDENCIES:
 
 from agilerl.algorithms import DPO, GRPO, LLMPPO, LLMREINFORCE
 from agilerl.algorithms.core import ActionResult
-from agilerl.algorithms.core.base import MultiAgentAlgorithm
+from agilerl.algorithms.core.base import MultiAgentRLAlgorithm
 from agilerl.algorithms.sft import SFT
 from agilerl.hpo.multi_frequency import MultiFrequencySelection
 from agilerl.hpo.mutation import Mutations
@@ -28,7 +27,6 @@ from agilerl.training.llm import (
     train_llm_dataset,
     train_llm_rollout,
 )
-from agilerl.training.llm.rollout import _any_rank_empty_batch
 from agilerl.utils.utils import run_selection_and_mutation
 from tests.helper_functions import (
     rank_population_by_subpopulation,
@@ -59,7 +57,7 @@ def _population_init_skip_per_mock_class():
         self.last_fitnesses = []
         self.evo_steps = 0
         self.is_multi_agent = all(
-            isinstance(agent, MultiAgentAlgorithm) for agent in agents
+            isinstance(agent, MultiAgentRLAlgorithm) for agent in agents
         )
         self.additional_metric_names = self.sample_agent.metrics.additional_metrics
         self.nonscalar_metric_names = self.sample_agent.metrics.nonscalar_metrics
@@ -362,8 +360,7 @@ class TestTrainLlmDatasetPreference:
 
             assert mock_save.call_args_list[-1] == call(stronger, "/tmp/dpo-elite")
 
-    @pytest.mark.parametrize("use_accelerator", [True, False])
-    def test_train_llm_dataset_preference_basic_training_loop(self, use_accelerator):
+    def test_train_llm_dataset_preference_basic_training_loop(self):
         mock_agent = _mock_dpo_agent()
         mock_env = self._pref_env()
 
@@ -377,7 +374,6 @@ class TestTrainLlmDatasetPreference:
                 pop=[mock_agent],
                 env=mock_env,
                 evaluation_interval=2,
-                accelerator=None if use_accelerator else Accelerator(),
             )
             assert mock_env.reset.call_count == 6
             assert mock_agent.get_action.call_count == 0
@@ -385,10 +381,7 @@ class TestTrainLlmDatasetPreference:
             assert mock_agent.learn.call_count == 6
             assert mock_agent.test.call_count == 3
 
-    @pytest.mark.parametrize("use_accelerator", [True, False])
-    def test_train_llm_dataset_preference_with_wandb_and_checkpoints(
-        self, use_accelerator
-    ):
+    def test_train_llm_dataset_preference_with_wandb_and_checkpoints(self):
         mock_agent = _mock_dpo_agent()
         mock_env = self._pref_env()
 
@@ -407,7 +400,6 @@ class TestTrainLlmDatasetPreference:
                 wb=True,
                 wandb_api_key="fake_key",
                 evaluation_interval=3,
-                accelerator=None if use_accelerator else Accelerator(),
                 checkpoint_steps=6,
             )
 
@@ -416,10 +408,7 @@ class TestTrainLlmDatasetPreference:
             assert mock_save.call_count == 1
             assert mock_agent.test.call_count == 2
 
-    @pytest.mark.parametrize("use_accelerator", [True, False])
-    def test_train_llm_dataset_preference_evolvable_training_loop(
-        self, use_accelerator
-    ):
+    def test_train_llm_dataset_preference_evolvable_training_loop(self):
         mock_agent = _mock_dpo_agent()
         mock_env = self._pref_env()
 
@@ -450,7 +439,6 @@ class TestTrainLlmDatasetPreference:
                 env=mock_env,
                 evaluation_interval=2,
                 evo_steps=1,
-                accelerator=None if use_accelerator else Accelerator(),
                 selection_strategy=Mock(),
                 mutation=mutation,
             )
@@ -501,7 +489,6 @@ class TestTrainLlmDatasetPreference:
                 env=mock_env,
                 evaluation_interval=2,
                 evo_steps=1,
-                accelerator=None,
                 num_epochs=2,
                 checkpoint_steps=3,
             )
@@ -517,7 +504,6 @@ class TestTrainLlmDatasetPreference:
                 pop=[mock_agent],
                 env=MagicMock(),
                 evaluation_interval=2,
-                accelerator=None,
             )
 
     def test_train_llm_dataset_preference_env_fn_uses_distinct_env_instances(self):
@@ -548,7 +534,7 @@ class TestTrainLlmDatasetPreference:
             _population_init_skip_per_mock_class(),
             patch("agilerl.training.llm.dataset.default_progress_bar") as mock_pbar_fn,
             patch(
-                "agilerl.training.llm.rollout.safe_aggregate_metrics", return_value=0.5
+                "agilerl.training.llm.rollout.aggregate_metrics_across_gpus", return_value=0.5
             ),
             patch("agilerl.training.llm.dataset.save_llm_checkpoint"),
             patch("agilerl.training.llm.dataset.init_loggers", return_value=[]),
@@ -560,7 +546,6 @@ class TestTrainLlmDatasetPreference:
                 max_steps=2,
                 evaluation_interval=100,
                 verbose=False,
-                accelerator=None,
             )
 
         assert env_fn.call_count == 2
@@ -605,8 +590,7 @@ class TestTrainLlmDatasetSft:
 
             assert mock_save.call_args_list[-1] == call(stronger, "/tmp/sft-elite")
 
-    @pytest.mark.parametrize("use_accelerator", [True, False])
-    def test_train_llm_dataset_sft_basic_training_loop(self, use_accelerator):
+    def test_train_llm_dataset_sft_basic_training_loop(self):
         mock_agent = _mock_sft_agent()
 
         mock_env = MagicMock()
@@ -626,15 +610,13 @@ class TestTrainLlmDatasetSft:
                 pop=[mock_agent],
                 env=mock_env,
                 evaluation_interval=2,
-                accelerator=None if use_accelerator else Accelerator(),
             )
             assert mock_env.reset.call_count == 6
             assert mock_env.step.call_count == 0
             assert mock_agent.learn.call_count == 6
             assert mock_agent.test.call_count == 3
 
-    @pytest.mark.parametrize("use_accelerator", [True, False])
-    def test_train_llm_dataset_sft_with_wandb_and_checkpoints(self, use_accelerator):
+    def test_train_llm_dataset_sft_with_wandb_and_checkpoints(self):
         mock_agent = _mock_sft_agent()
 
         mock_env = MagicMock()
@@ -659,7 +641,6 @@ class TestTrainLlmDatasetSft:
                 wb=True,
                 wandb_api_key="fake_key",
                 evaluation_interval=3,
-                accelerator=None if use_accelerator else Accelerator(),
                 checkpoint_steps=6,
             )
 
@@ -668,8 +649,7 @@ class TestTrainLlmDatasetSft:
             assert mock_save.call_count == 1
             assert mock_agent.test.call_count == 2
 
-    @pytest.mark.parametrize("use_accelerator", [True, False])
-    def test_train_llm_dataset_sft_evolvable_training_loop(self, use_accelerator):
+    def test_train_llm_dataset_sft_evolvable_training_loop(self):
         mock_agent = _mock_sft_agent()
 
         mock_env = MagicMock()
@@ -706,7 +686,6 @@ class TestTrainLlmDatasetSft:
                 env=mock_env,
                 evaluation_interval=2,
                 evo_steps=1,
-                accelerator=None if use_accelerator else Accelerator(),
                 selection_strategy=Mock(),
                 mutation=mutation,
             )
@@ -764,7 +743,6 @@ class TestTrainLlmDatasetSft:
                 env=mock_env,
                 evaluation_interval=2,
                 evo_steps=1,
-                accelerator=None,
                 num_epochs=2,
                 checkpoint_steps=3,
             )
@@ -780,7 +758,6 @@ class TestTrainLlmDatasetSft:
                 pop=[mock_agent],
                 env=MagicMock(),
                 evaluation_interval=2,
-                accelerator=None,
             )
 
     def test_train_llm_dataset_sft_evo_steps_not_set(self):
@@ -789,7 +766,6 @@ class TestTrainLlmDatasetSft:
                 pop=[MagicMock(spec=SFT)],
                 env=MagicMock(),
                 evo_steps=None,
-                accelerator=None,
                 selection_strategy=MagicMock(),
                 mutation=MagicMock(),
             )
@@ -831,7 +807,6 @@ def test_train_llm_dataset_requires_batch_matching_algorithm(
                     max_steps=1,
                     evaluation_interval=100,
                     verbose=False,
-                    accelerator=None,
                 )
             agent.learn.assert_not_called()
             return
@@ -842,7 +817,6 @@ def test_train_llm_dataset_requires_batch_matching_algorithm(
             max_steps=1,
             evaluation_interval=100,
             verbose=False,
-            accelerator=None,
         )
 
     agent.learn.assert_called_with(batch)
@@ -855,8 +829,7 @@ def test_train_llm_dataset_requires_batch_matching_algorithm(
 
 class TestTrainLlmRollout:
     @pytest.mark.parametrize("agent_spec", [LLMPPO, LLMREINFORCE, GRPO])
-    @pytest.mark.parametrize("use_accelerator", [True, False])
-    def test_train_llm_rollout_basic_training_loop(self, agent_spec, use_accelerator):
+    def test_train_llm_rollout_basic_training_loop(self, agent_spec):
         mock_agent = _make_rollout_mock_agent(spec=agent_spec)
         batch_steps = 3
         max_steps = 9
@@ -864,7 +837,7 @@ class TestTrainLlmRollout:
         with (
             patch("agilerl.training.llm.rollout.default_progress_bar") as mock_pbar_fn,
             patch("agilerl.training.llm.rollout.init_loggers", return_value=[]),
-            patch("agilerl.training.llm.rollout.safe_aggregate_metrics") as mock_agg,
+            patch("agilerl.training.llm.rollout.aggregate_metrics_across_gpus") as mock_agg,
             patch("agilerl.training.llm.rollout.save_llm_checkpoint") as mock_save,
             patch("agilerl.training.llm.rollout.RolloutCollector"),
             patch("agilerl.training.llm.rollout.collect_rollouts_llm") as mock_collect,
@@ -881,7 +854,6 @@ class TestTrainLlmRollout:
                 max_steps=max_steps,
                 evaluation_interval=100,
                 verbose=False,
-                accelerator=None if use_accelerator else Accelerator(),
             )
 
         num_outer = max_steps // batch_steps
@@ -905,7 +877,7 @@ class TestTrainLlmRollout:
             patch(
                 "agilerl.training.llm.rollout.init_loggers", return_value=[]
             ) as mock_init_loggers,
-            patch("agilerl.training.llm.rollout.safe_aggregate_metrics"),
+            patch("agilerl.training.llm.rollout.aggregate_metrics_across_gpus"),
             patch("agilerl.training.llm.rollout.save_llm_checkpoint"),
             patch("agilerl.training.llm.rollout.RolloutCollector"),
             patch("agilerl.training.llm.rollout.collect_rollouts_llm") as mock_collect,
@@ -920,7 +892,6 @@ class TestTrainLlmRollout:
                 max_steps=3,
                 evaluation_interval=100,
                 verbose=False,
-                accelerator=None,
             )
 
         assert mock_init_loggers.call_args.kwargs["algo"] == "GRPO"
@@ -936,7 +907,7 @@ class TestTrainLlmRollout:
             ),
             patch("agilerl.training.llm.rollout.init_loggers", return_value=[]),
             patch(
-                "agilerl.training.llm.rollout.safe_aggregate_metrics",
+                "agilerl.training.llm.rollout.aggregate_metrics_across_gpus",
                 return_value=0.5,
             ),
             patch("agilerl.training.llm.rollout.save_llm_checkpoint") as mock_save,
@@ -955,7 +926,6 @@ class TestTrainLlmRollout:
                 checkpoint_path="ckpts",
                 evaluation_interval=100,
                 verbose=False,
-                accelerator=None,
             )
         mock_save.assert_called_once_with(mock_agent, "ckpts")
 
@@ -974,7 +944,7 @@ class TestTrainLlmRollout:
             ),
             patch("agilerl.training.llm.rollout.init_loggers", return_value=[]),
             patch(
-                "agilerl.training.llm.rollout.safe_aggregate_metrics",
+                "agilerl.training.llm.rollout.aggregate_metrics_across_gpus",
                 return_value=0.5,
             ),
             patch("agilerl.training.llm.rollout.save_llm_checkpoint"),
@@ -996,7 +966,6 @@ class TestTrainLlmRollout:
                 max_steps=1000,
                 evaluation_interval=100,
                 verbose=False,
-                accelerator=None,
             )
 
         # Bounded: aborted after the stall threshold rather than looping forever.
@@ -1025,7 +994,7 @@ class TestTrainLlmRollout:
             ),
             patch("agilerl.training.llm.rollout.init_loggers", return_value=[]),
             patch(
-                "agilerl.training.llm.rollout.safe_aggregate_metrics",
+                "agilerl.training.llm.rollout.aggregate_metrics_across_gpus",
                 return_value=0.5,
             ),
             patch("agilerl.training.llm.rollout.save_llm_checkpoint"),
@@ -1043,7 +1012,6 @@ class TestTrainLlmRollout:
                 max_steps=3,  # one outer iteration (batch_steps=3)
                 evaluation_interval=100,
                 verbose=False,
-                accelerator=None,
             )
 
         _, learn_kwargs = mock_agent.learn.call_args
@@ -1062,7 +1030,7 @@ class TestTrainLlmRollout:
             ),
             patch("agilerl.training.llm.rollout.init_loggers", return_value=[]),
             patch(
-                "agilerl.training.llm.rollout.safe_aggregate_metrics",
+                "agilerl.training.llm.rollout.aggregate_metrics_across_gpus",
                 return_value=0.5,
             ),
             patch("agilerl.training.llm.rollout.save_llm_checkpoint"),
@@ -1078,7 +1046,6 @@ class TestTrainLlmRollout:
                 max_steps=3,
                 evaluation_interval=100,
                 verbose=False,
-                accelerator=None,
             )
 
         assert mock_collect.call_args_list[0].kwargs["group_seed"] == 1234
@@ -1112,18 +1079,16 @@ class TestTrainLlmRollout:
                 env_factory=MagicMock(),
                 init_hp={"BATCH_SIZE": 3, "ALGO": "GRPO"},
                 max_steps=100,
-                accelerator=None,
                 verbose=False,
             )
 
-    @pytest.mark.parametrize("use_accelerator", [True, False])
-    def test_train_llm_rollout_with_wandb_and_checkpoints(self, use_accelerator):
+    def test_train_llm_rollout_with_wandb_and_checkpoints(self):
         mock_agent = _make_rollout_mock_agent()
 
         with (
             patch("agilerl.training.llm.rollout.default_progress_bar") as mock_pbar_fn,
             patch("agilerl.training.llm.rollout.init_loggers") as mock_init_loggers,
-            patch("agilerl.training.llm.rollout.safe_aggregate_metrics") as mock_agg,
+            patch("agilerl.training.llm.rollout.aggregate_metrics_across_gpus") as mock_agg,
             patch("agilerl.training.llm.rollout.save_llm_checkpoint") as mock_save,
             patch("agilerl.training.llm.rollout.RolloutCollector"),
             patch("agilerl.training.llm.rollout.collect_rollouts_llm") as mock_collect,
@@ -1144,15 +1109,13 @@ class TestTrainLlmRollout:
                 wb=True,
                 wandb_api_key="fake_key",
                 checkpoint_steps=2,
-                accelerator=None if use_accelerator else Accelerator(),
             )
 
         mock_init_loggers.assert_called_once()
         assert mock_init_loggers.call_args.kwargs["wb"] is True
         assert mock_save.call_count >= 1
 
-    @pytest.mark.parametrize("use_accelerator", [True, False])
-    def test_train_llm_rollout_evolvable_training_loop(self, use_accelerator):
+    def test_train_llm_rollout_evolvable_training_loop(self):
         mock_agent = _make_rollout_mock_agent()
         mutation = MagicMock()
         mutation.architecture_mut = 0
@@ -1163,7 +1126,7 @@ class TestTrainLlmRollout:
         with (
             patch("agilerl.training.llm.rollout.default_progress_bar") as mock_pbar_fn,
             patch("agilerl.training.llm.rollout.init_loggers", return_value=[]),
-            patch("agilerl.training.llm.rollout.safe_aggregate_metrics") as mock_agg,
+            patch("agilerl.training.llm.rollout.aggregate_metrics_across_gpus") as mock_agg,
             patch("agilerl.training.llm.rollout.save_llm_checkpoint") as mock_save,
             patch("agilerl.training.llm.rollout.RolloutCollector"),
             patch("agilerl.training.llm.rollout.collect_rollouts_llm") as mock_collect,
@@ -1187,7 +1150,6 @@ class TestTrainLlmRollout:
                 evo_steps=1,
                 selection_strategy=Mock(),
                 mutation=mutation,
-                accelerator=None if use_accelerator else Accelerator(),
             )
 
         assert mock_tourn.call_count == 3
@@ -1211,7 +1173,7 @@ class TestTrainLlmRollout:
             ),
             patch("agilerl.training.llm.rollout.init_loggers", return_value=[]),
             patch(
-                "agilerl.training.llm.rollout.safe_aggregate_metrics",
+                "agilerl.training.llm.rollout.aggregate_metrics_across_gpus",
                 return_value=0.5,
             ),
             patch("agilerl.training.llm.rollout.save_llm_checkpoint"),
@@ -1239,7 +1201,6 @@ class TestTrainLlmRollout:
                 evo_steps=1,
                 selection_strategy=Mock(),
                 mutation=mutation,
-                accelerator=None,
             )
 
         collector.update_rollout_geometry.assert_any_call(
@@ -1266,7 +1227,6 @@ class TestTrainLlmRollout:
                 evo_steps=None,
                 selection_strategy=MagicMock(),
                 mutation=mutation,
-                accelerator=None,
             )
 
     def test_train_llm_rollout_warns_when_evo_steps_without_tournament(self):
@@ -1281,7 +1241,6 @@ class TestTrainLlmRollout:
                 evo_steps=3,
                 selection_strategy=None,
                 mutation=None,
-                accelerator=None,
                 verbose=False,
             )
 
@@ -1297,7 +1256,6 @@ class TestTrainLlmRollout:
                 max_turns=1,
                 init_hp={"BATCH_SIZE": 1, "ALGO": "DPO"},
                 max_steps=0,
-                accelerator=None,
                 verbose=False,
             )
 
@@ -1307,7 +1265,7 @@ class TestTrainLlmRollout:
         with (
             patch("agilerl.training.llm.rollout.default_progress_bar") as mock_pbar_fn,
             patch("agilerl.training.llm.rollout.init_loggers", return_value=[]),
-            patch("agilerl.training.llm.rollout.safe_aggregate_metrics") as mock_agg,
+            patch("agilerl.training.llm.rollout.aggregate_metrics_across_gpus") as mock_agg,
             patch("agilerl.training.llm.rollout.save_llm_checkpoint"),
             patch("agilerl.training.llm.rollout.RolloutCollector"),
             patch("agilerl.training.llm.rollout.collect_rollouts_llm") as mock_collect,
@@ -1324,7 +1282,6 @@ class TestTrainLlmRollout:
                 evaluation_interval=100,
                 max_reward=1.0,
                 verbose=False,
-                accelerator=None,
             )
 
         num_outer = 3
@@ -1338,7 +1295,7 @@ class TestTrainLlmRollout:
         with (
             patch("agilerl.training.llm.rollout.default_progress_bar") as mock_pbar_fn,
             patch("agilerl.training.llm.rollout.init_loggers", return_value=[]),
-            patch("agilerl.training.llm.rollout.safe_aggregate_metrics") as mock_agg,
+            patch("agilerl.training.llm.rollout.aggregate_metrics_across_gpus") as mock_agg,
             patch("agilerl.training.llm.rollout.save_llm_checkpoint"),
             patch("agilerl.training.llm.rollout.RolloutCollector"),
             patch("agilerl.training.llm.rollout.collect_rollouts_llm") as mock_collect,
@@ -1355,7 +1312,6 @@ class TestTrainLlmRollout:
                 evaluation_interval=100,
                 max_reward=1.0,
                 verbose=False,
-                accelerator=None,
             )
 
         mock_agent.metrics.register.assert_called_with("accuracy")
@@ -1368,7 +1324,8 @@ class TestTrainLlmRollout:
         mock_rollout_env.num_epochs = 0
         mock_rollout_env.get_rubric_score_means.return_value = {"fmt": 0.75}
 
-        def _agg(_accelerator, value):
+        def _agg(*args):
+            value = args[-1]
             return (
                 value if isinstance(value, torch.Tensor) else torch.tensor(float(value))
             )
@@ -1377,7 +1334,7 @@ class TestTrainLlmRollout:
             patch("agilerl.training.llm.rollout.default_progress_bar") as mock_pbar_fn,
             patch("agilerl.training.llm.rollout.init_loggers", return_value=[]),
             patch(
-                "agilerl.training.llm.rollout.safe_aggregate_metrics",
+                "agilerl.training.llm.rollout.aggregate_metrics_across_gpus",
                 side_effect=_agg,
             ),
             patch("agilerl.training.llm.rollout.save_llm_checkpoint"),
@@ -1397,7 +1354,6 @@ class TestTrainLlmRollout:
                 max_steps=3,
                 evaluation_interval=100,
                 verbose=False,
-                accelerator=None,
             )
 
         mock_agent.metrics.register.assert_any_call("reward_fmt")
@@ -1409,7 +1365,7 @@ class TestTrainLlmRollout:
         with (
             patch("agilerl.training.llm.rollout.default_progress_bar") as mock_pbar_fn,
             patch("agilerl.training.llm.rollout.init_loggers", return_value=[]),
-            patch("agilerl.training.llm.rollout.safe_aggregate_metrics") as mock_agg,
+            patch("agilerl.training.llm.rollout.aggregate_metrics_across_gpus") as mock_agg,
             patch("agilerl.training.llm.rollout.save_llm_checkpoint"),
             patch("agilerl.training.llm.rollout.RolloutCollector"),
             patch("agilerl.training.llm.rollout.collect_rollouts_llm") as mock_collect,
@@ -1430,7 +1386,6 @@ class TestTrainLlmRollout:
                 max_wall_seconds=50,
                 evaluation_interval=100,
                 verbose=False,
-                accelerator=None,
             )
 
         assert "wall time limit (50s) reached" in capsys.readouterr().out
@@ -1438,19 +1393,17 @@ class TestTrainLlmRollout:
 
     def test_train_llm_rollout_wall_clock_stop_is_rank_aligned(self, capsys):
         mock_agent = _make_rollout_mock_agent()
-        accelerator = _two_rank_accelerator(peer_empty=True)
 
         with (
             patch("agilerl.training.llm.rollout.default_progress_bar") as mock_pbar_fn,
             patch("agilerl.training.llm.rollout.init_loggers", return_value=[]),
-            patch("agilerl.training.llm.rollout.safe_aggregate_metrics") as mock_agg,
+            patch("agilerl.training.llm.rollout.aggregate_metrics_across_gpus") as mock_agg,
             patch("agilerl.training.llm.rollout.save_llm_checkpoint"),
             patch("agilerl.training.llm.rollout.RolloutCollector"),
             patch("agilerl.training.llm.rollout.collect_rollouts_llm") as mock_collect,
-            patch(
-                "agilerl.training.llm.rollout.time.monotonic",
-                return_value=100,
-            ),
+            patch("agilerl.training.llm.rollout.time.monotonic", return_value=100),
+            patch("agilerl.training.llm.rollout.all_ranks", return_value=True),
+            patch("agilerl.training.llm.rollout.any_rank", return_value=True),
         ):
             mock_pbar_fn.return_value = MagicMock()
             mock_agg.return_value = 0.5
@@ -1464,11 +1417,83 @@ class TestTrainLlmRollout:
                 max_wall_seconds=50,
                 evaluation_interval=100,
                 verbose=False,
-                accelerator=accelerator,
             )
 
         assert "wall time limit (50s) reached" in capsys.readouterr().out
         mock_collect.assert_not_called()
+
+    def test_train_llm_rollout_stops_when_any_rank_hits_max_steps(self):
+        """A peer that already met max_steps must stop this rank too, or the
+        next collect's barrier hangs after that peer has left the group."""
+        mock_agent = _make_rollout_mock_agent()
+
+        with (
+            patch("agilerl.training.llm.rollout.default_progress_bar") as mock_pbar_fn,
+            patch("agilerl.training.llm.rollout.init_loggers", return_value=[]),
+            patch("agilerl.training.llm.rollout.aggregate_metrics_across_gpus") as mock_agg,
+            patch("agilerl.training.llm.rollout.save_llm_checkpoint"),
+            patch("agilerl.training.llm.rollout.RolloutCollector"),
+            patch("agilerl.training.llm.rollout.collect_rollouts_llm") as mock_collect,
+            patch("agilerl.training.llm.rollout.all_ranks", return_value=False),
+        ):
+            mock_pbar_fn.return_value = MagicMock()
+            mock_agg.return_value = 0.5
+            mock_collect.return_value = _rollout_collect_return(batch_steps=3)
+            train_llm_rollout(
+                pop=[mock_agent],
+                env_factory=MagicMock(),
+                max_turns=2,
+                init_hp={"BATCH_SIZE": 1, "ALGO": mock_agent.algo},
+                max_steps=100,
+                evaluation_interval=100,
+                verbose=False,
+            )
+
+        mock_collect.assert_not_called()
+
+    def test_train_llm_rollout_progress_uses_max_batch_steps_across_ranks(self):
+        """Local batch_steps can lag a peer on a multi-turn env; progress uses
+        the shared max so both ranks exit after the same number of collects."""
+        mock_agent = _make_rollout_mock_agent()
+        local_batch_steps = 3
+        peer_max_batch_steps = 8
+        max_steps = 8
+
+        def fake_minmax(value: int) -> tuple[int, int]:
+            v = int(value)
+            if v <= 1:
+                return (v, v)
+            return (v, peer_max_batch_steps)
+
+        with (
+            patch("agilerl.training.llm.rollout.default_progress_bar") as mock_pbar_fn,
+            patch("agilerl.training.llm.rollout.init_loggers", return_value=[]),
+            patch("agilerl.training.llm.rollout.aggregate_metrics_across_gpus") as mock_agg,
+            patch("agilerl.training.llm.rollout.save_llm_checkpoint"),
+            patch("agilerl.training.llm.rollout.RolloutCollector"),
+            patch("agilerl.training.llm.rollout.collect_rollouts_llm") as mock_collect,
+            patch(
+                "agilerl.training.llm.rollout.allreduce_minmax_int",
+                side_effect=fake_minmax,
+            ),
+        ):
+            mock_pbar_fn.return_value = MagicMock()
+            mock_agg.return_value = 0.5
+            mock_collect.return_value = _rollout_collect_return(
+                batch_steps=local_batch_steps
+            )
+            train_llm_rollout(
+                pop=[mock_agent],
+                env_factory=MagicMock(),
+                max_turns=2,
+                init_hp={"BATCH_SIZE": 1, "ALGO": mock_agent.algo},
+                max_steps=max_steps,
+                evaluation_interval=100,
+                verbose=False,
+            )
+
+        assert mock_collect.call_count == 1
+        mock_agent.finalize_training_step.assert_called_with(local_batch_steps)
 
     def test_train_llm_rollout_eval_interval_calls_test(self):
         mock_agent = _make_rollout_mock_agent()
@@ -1478,7 +1503,7 @@ class TestTrainLlmRollout:
         with (
             patch("agilerl.training.llm.rollout.default_progress_bar") as mock_pbar_fn,
             patch("agilerl.training.llm.rollout.init_loggers", return_value=[]),
-            patch("agilerl.training.llm.rollout.safe_aggregate_metrics") as mock_agg,
+            patch("agilerl.training.llm.rollout.aggregate_metrics_across_gpus") as mock_agg,
             patch("agilerl.training.llm.rollout.save_llm_checkpoint"),
             patch("agilerl.training.llm.rollout.RolloutCollector"),
             patch("agilerl.training.llm.rollout.collect_rollouts_llm") as mock_collect,
@@ -1494,7 +1519,6 @@ class TestTrainLlmRollout:
                 max_steps=max_steps,
                 evaluation_interval=1,
                 verbose=False,
-                accelerator=None,
             )
 
         num_outer = max_steps // batch_steps
@@ -1509,7 +1533,7 @@ class TestTrainLlmRollout:
         with (
             patch("agilerl.training.llm.rollout.default_progress_bar") as mock_pbar_fn,
             patch("agilerl.training.llm.rollout.init_loggers", return_value=[]),
-            patch("agilerl.training.llm.rollout.safe_aggregate_metrics") as mock_agg,
+            patch("agilerl.training.llm.rollout.aggregate_metrics_across_gpus") as mock_agg,
             patch("agilerl.training.llm.rollout.save_llm_checkpoint") as mock_save,
             patch("agilerl.training.llm.rollout.RolloutCollector"),
             patch("agilerl.training.llm.rollout.collect_rollouts_llm") as mock_collect,
@@ -1528,7 +1552,6 @@ class TestTrainLlmRollout:
                 save_elite=True,
                 elite_path="/tmp/rollout-elite",
                 verbose=False,
-                accelerator=None,
             )
 
         assert mock_save.call_args_list[-1] == call(stronger, "/tmp/rollout-elite")
@@ -1541,7 +1564,7 @@ class TestTrainLlmRollout:
         with (
             patch("agilerl.training.llm.rollout.default_progress_bar") as mock_pbar_fn,
             patch("agilerl.training.llm.rollout.init_loggers") as mock_init_loggers,
-            patch("agilerl.training.llm.rollout.safe_aggregate_metrics") as mock_agg,
+            patch("agilerl.training.llm.rollout.aggregate_metrics_across_gpus") as mock_agg,
             patch("agilerl.training.llm.rollout.save_llm_checkpoint"),
             patch("agilerl.training.llm.rollout.RolloutCollector"),
             patch("agilerl.training.llm.rollout.collect_rollouts_llm") as mock_collect,
@@ -1559,7 +1582,6 @@ class TestTrainLlmRollout:
                 wb=True,
                 wandb_api_key="fake",
                 verbose=False,
-                accelerator=None,
             )
 
         init_hp_passed = mock_init_loggers.call_args.kwargs["init_hyperparams"]
@@ -1601,7 +1623,6 @@ class TestTrainLlmRollout:
                 env_factory=MagicMock(),
                 init_hp={"BATCH_SIZE": 2, "BATCH_SIZE_PER_GPU": 2, "ALGO": "GRPO"},
                 max_steps=8,
-                accelerator=None,
                 wb=False,
                 verbose=False,
             )
@@ -1636,7 +1657,6 @@ def test_train_llm_dataset_env_and_env_fn_mutually_exclusive():
             env_fn=lambda: env,
             max_steps=0,
             verbose=False,
-            accelerator=None,
         )
 
 
@@ -1648,7 +1668,6 @@ def test_train_llm_dataset_requires_env_or_env_fn():
             env_fn=None,
             max_steps=0,
             verbose=False,
-            accelerator=None,
         )
 
 
@@ -1676,7 +1695,6 @@ def test_train_llm_dataset_warns_on_shared_env_with_population():
             env=env,
             max_steps=0,
             verbose=False,
-            accelerator=None,
         )
 
 
@@ -1699,7 +1717,6 @@ def test_train_llm_dataset_shared_env_first_iteration_yields_successive_batches(
                 max_steps=2,
                 evaluation_interval=100,
                 verbose=False,
-                accelerator=None,
             )
 
     assert env.reset_dataloaders_calls == [True, False]
@@ -1729,7 +1746,6 @@ def test_train_llm_dataset_env_fn_rewinds_each_env_on_first_iteration():
             max_steps=2,
             evaluation_interval=100,
             verbose=False,
-            accelerator=None,
         )
 
     assert env_a.reset_dataloaders_calls == [True]
@@ -1751,7 +1767,7 @@ def test_train_llm_checkpoint_triggering_non_divisible_steps():
 
     with (
         patch("agilerl.training.llm.dataset.default_progress_bar") as mock_pbar_fn,
-        patch("agilerl.training.llm.rollout.safe_aggregate_metrics", return_value=0.5),
+        patch("agilerl.training.llm.rollout.aggregate_metrics_across_gpus", return_value=0.5),
         patch("agilerl.training.llm.dataset.save_llm_checkpoint") as mock_save,
         patch("agilerl.training.llm.dataset.init_loggers", return_value=[]),
     ):
@@ -1763,7 +1779,6 @@ def test_train_llm_checkpoint_triggering_non_divisible_steps():
             checkpoint_steps=2,
             evaluation_interval=100,
             verbose=False,
-            accelerator=None,
         )
 
     assert mock_save.call_count == 3
@@ -1793,14 +1808,13 @@ def test_inner_loop_breaks_after_max_steps_first_agent(agent_spec):
         _population_init_skip_per_mock_class(),
         patch("agilerl.training.llm.dataset.default_progress_bar") as mock_pbar_fn,
         patch("agilerl.training.llm.dataset.save_llm_checkpoint"),
-        patch("agilerl.training.llm.rollout.safe_aggregate_metrics", return_value=0.5),
+        patch("agilerl.training.llm.rollout.aggregate_metrics_across_gpus", return_value=0.5),
         patch("agilerl.training.llm.dataset.init_loggers", return_value=[]),
     ):
         mock_pbar_fn.return_value = MagicMock()
         train_llm_dataset(
             pop=[agent0, agent1],
             env=env,
-            accelerator=None,
             max_steps=1,
             evaluation_interval=100,
             verbose=False,
@@ -1863,7 +1877,7 @@ def test_train_llm_rollout_closes_envs_on_teardown():
             return_value=MagicMock(),
         ),
         patch("agilerl.training.llm.rollout.init_loggers", return_value=[]),
-        patch("agilerl.training.llm.rollout.safe_aggregate_metrics", return_value=0.5),
+        patch("agilerl.training.llm.rollout.aggregate_metrics_across_gpus", return_value=0.5),
         patch("agilerl.training.llm.rollout.save_llm_checkpoint"),
         patch("agilerl.training.llm.rollout.RolloutCollector") as mock_batch_env_cls,
         patch("agilerl.training.llm.rollout.collect_rollouts_llm") as mock_collect,
@@ -1879,7 +1893,6 @@ def test_train_llm_rollout_closes_envs_on_teardown():
             max_steps=3,
             evaluation_interval=1,
             verbose=False,
-            accelerator=None,
         )
 
     rollout_env.close.assert_called_once()
@@ -1914,7 +1927,6 @@ def test_validate_finetune_args_warns_when_checkpoint_steps_ignored():
 def test_train_llm_rollout_syncs_ranks_after_evaluation():
     """Distributed evaluation must rendezvous before training continues."""
     mock_agent = _make_rollout_mock_agent(spec=LLMPPO)
-    accelerator = Accelerator()
 
     with (
         patch(
@@ -1922,11 +1934,12 @@ def test_train_llm_rollout_syncs_ranks_after_evaluation():
             return_value=MagicMock(),
         ),
         patch("agilerl.training.llm.rollout.init_loggers", return_value=[]),
-        patch("agilerl.training.llm.rollout.safe_aggregate_metrics", return_value=0.5),
+        patch("agilerl.training.llm.rollout.aggregate_metrics_across_gpus", return_value=0.5),
         patch("agilerl.training.llm.rollout.save_llm_checkpoint"),
         patch("agilerl.training.llm.rollout.RolloutCollector"),
         patch("agilerl.training.llm.rollout.collect_rollouts_llm") as mock_collect,
-        patch.object(accelerator, "wait_for_everyone") as mock_wait,
+        patch("agilerl.training.llm.rollout.barrier") as mock_barrier,
+        patch("agilerl.training.llm.rollout.is_distributed", return_value=True),
     ):
         mock_collect.return_value = _rollout_collect_return(batch_steps=3)
 
@@ -1938,61 +1951,10 @@ def test_train_llm_rollout_syncs_ranks_after_evaluation():
             max_steps=3,
             evaluation_interval=1,
             verbose=False,
-            accelerator=accelerator,
         )
 
     assert mock_agent.test.call_count == 1
-    mock_wait.assert_called()
-
-
-def _non_main_accelerator():
-    """Single-process stand-in for a non-main DP rank."""
-    return SimpleNamespace(
-        is_main_process=False,
-        num_processes=1,
-        process_index=0,
-        device=torch.device("cpu"),
-        wait_for_everyone=lambda: None,
-        gather=lambda t: t,
-    )
-
-
-def _two_rank_accelerator(*, peer_empty: bool):
-    """Two-rank stand-in whose gather reports a peer empty/non-empty flag."""
-
-    def gather(t):
-        peer = torch.tensor([int(peer_empty)], device=t.device, dtype=t.dtype)
-        return torch.cat([t.reshape(-1), peer])
-
-    return SimpleNamespace(
-        is_main_process=True,
-        num_processes=2,
-        process_index=0,
-        device=torch.device("cpu"),
-        wait_for_everyone=lambda: None,
-        gather=gather,
-    )
-
-
-class TestAnyRankEmptyBatch:
-    def test_returns_local_flag_without_accelerator(self):
-        assert _any_rank_empty_batch(True, None) is True
-        assert _any_rank_empty_batch(False, None) is False
-
-    def test_is_true_when_any_peer_is_empty(self):
-        acc = _two_rank_accelerator(peer_empty=True)
-
-        assert _any_rank_empty_batch(False, acc) is True
-
-    def test_is_false_when_every_rank_has_data(self):
-        acc = _two_rank_accelerator(peer_empty=False)
-
-        assert _any_rank_empty_batch(False, acc) is False
-
-    def test_is_true_when_local_and_peer_are_empty(self):
-        acc = _two_rank_accelerator(peer_empty=True)
-
-        assert _any_rank_empty_batch(True, acc) is True
+    mock_barrier.assert_called()
 
 
 def test_train_llm_dataset_rejects_an_unsharded_env_on_distributed_runs():
@@ -2019,6 +1981,7 @@ def test_train_llm_dataset_non_main_ranks_clear_metrics():
         _population_init_skip_per_mock_class(),
         patch("agilerl.training.llm.dataset.default_progress_bar") as mock_pbar_fn,
         patch("agilerl.training.llm.dataset.init_loggers", return_value=[]),
+        patch("agilerl.training.llm.dataset.is_main_process", return_value=False),
         patch(
             "agilerl.training.llm.dataset.Population.clear_agent_metrics"
         ) as mock_clear,
@@ -2029,7 +1992,6 @@ def test_train_llm_dataset_non_main_ranks_clear_metrics():
             pop=[mock_agent],
             env=mock_env,
             max_steps=1,
-            accelerator=_non_main_accelerator(),
         )
     mock_clear.assert_called()
     mock_report.assert_not_called()
@@ -2045,7 +2007,7 @@ class TestTrainLlmRolloutDistributedBranches:
             ),
             patch("agilerl.training.llm.rollout.init_loggers", return_value=[]),
             patch(
-                "agilerl.training.llm.rollout.safe_aggregate_metrics",
+                "agilerl.training.llm.rollout.aggregate_metrics_across_gpus",
                 return_value=0.5,
             ),
             patch("agilerl.training.llm.rollout.save_llm_checkpoint"),
@@ -2060,6 +2022,7 @@ class TestTrainLlmRolloutDistributedBranches:
             patch(
                 "agilerl.training.llm.rollout.Population.report_metrics"
             ) as mock_report,
+            patch("agilerl.training.llm.rollout.is_main_process", return_value=False),
         ):
             train_llm_rollout(
                 pop=[mock_agent],
@@ -2069,7 +2032,6 @@ class TestTrainLlmRolloutDistributedBranches:
                 max_steps=3,
                 evaluation_interval=100,
                 verbose=False,
-                accelerator=_non_main_accelerator(),
             )
         mock_clear.assert_called()
         mock_report.assert_not_called()
@@ -2087,7 +2049,7 @@ class TestTrainLlmRolloutDistributedBranches:
             ),
             patch("agilerl.training.llm.rollout.init_loggers", return_value=[]),
             patch(
-                "agilerl.training.llm.rollout.safe_aggregate_metrics",
+                "agilerl.training.llm.rollout.aggregate_metrics_across_gpus",
                 return_value=0.5,
             ),
             patch("agilerl.training.llm.rollout.save_llm_checkpoint"),
@@ -2100,6 +2062,7 @@ class TestTrainLlmRolloutDistributedBranches:
                 "agilerl.training.llm.rollout.needs_cross_rank_seq_padding",
                 return_value=True,
             ),
+            patch("agilerl.training.llm.rollout.is_distributed", return_value=True),
             patch(
                 "agilerl.training.llm.rollout.align_completion_batch_shapes_across_ranks",
                 return_value=(rect_ids, rect_masks, rect_rewards),
@@ -2117,7 +2080,6 @@ class TestTrainLlmRolloutDistributedBranches:
                 max_steps=3,
                 evaluation_interval=100,
                 verbose=False,
-                accelerator=_non_main_accelerator(),
             )
         mock_align.assert_called_once()
         experiences, kwargs = (
@@ -2139,7 +2101,7 @@ class TestTrainLlmRolloutDistributedBranches:
             ),
             patch("agilerl.training.llm.rollout.init_loggers", return_value=[]),
             patch(
-                "agilerl.training.llm.rollout.safe_aggregate_metrics",
+                "agilerl.training.llm.rollout.aggregate_metrics_across_gpus",
                 return_value=0.5,
             ),
             patch("agilerl.training.llm.rollout.save_llm_checkpoint"),
@@ -2148,6 +2110,10 @@ class TestTrainLlmRolloutDistributedBranches:
                 "agilerl.training.llm.rollout.collect_rollouts_llm",
                 return_value=_rollout_collect_return(batch_steps=3),
             ) as mock_collect,
+            patch(
+                "agilerl.training.llm.rollout.any_rank",
+                return_value=True,
+            ),
             pytest.warns(UserWarning, match="no usable turns"),
             pytest.raises(RuntimeError, match="made no progress"),
         ):
@@ -2159,7 +2125,6 @@ class TestTrainLlmRolloutDistributedBranches:
                 max_steps=1000,
                 evaluation_interval=100,
                 verbose=False,
-                accelerator=_two_rank_accelerator(peer_empty=True),
             )
 
         mock_agent.learn.assert_not_called()
@@ -2175,7 +2140,7 @@ class TestTrainLlmRolloutDistributedBranches:
             ),
             patch("agilerl.training.llm.rollout.init_loggers", return_value=[]),
             patch(
-                "agilerl.training.llm.rollout.safe_aggregate_metrics",
+                "agilerl.training.llm.rollout.aggregate_metrics_across_gpus",
                 return_value=0.5,
             ),
             patch("agilerl.training.llm.rollout.save_llm_checkpoint"),
@@ -2193,7 +2158,6 @@ class TestTrainLlmRolloutDistributedBranches:
                 max_steps=6,
                 evaluation_interval=100,
                 verbose=False,
-                accelerator=_two_rank_accelerator(peer_empty=False),
             )
 
         mock_agent.learn.assert_called()
@@ -2231,7 +2195,6 @@ class _LLMFinetuneAgent:
         self.subpopulation_id = subpopulation_id
         self.fitness = [fitness]
         self.lr = lr
-        self.accelerator = None
         self.mut = "stale-mut"
         self.registry = SimpleNamespace(
             hp_config=_LLMHPConfig({"lr": lr}), optimizers=[]
@@ -2364,7 +2327,7 @@ class TestTrainLlmRolloutCrossRankPadding:
             ),
             patch("agilerl.training.llm.rollout.init_loggers", return_value=[]),
             patch(
-                "agilerl.training.llm.rollout.safe_aggregate_metrics",
+                "agilerl.training.llm.rollout.aggregate_metrics_across_gpus",
                 return_value=0.5,
             ),
             patch("agilerl.training.llm.rollout.save_llm_checkpoint"),
@@ -2394,7 +2357,6 @@ class TestTrainLlmRolloutCrossRankPadding:
                 max_steps=3,
                 evaluation_interval=100,
                 verbose=False,
-                accelerator=Accelerator(),
             )
         return mock_agent
 

@@ -29,9 +29,9 @@ from enum import Enum
 from typing import Any
 
 import numpy as np
-from accelerate.utils import broadcast_object_list
 
 from agilerl.algorithms.core.base import LLMAlgorithm
+from agilerl.distributed import barrier, broadcast_object_list, is_distributed, is_main_process
 from agilerl.protocols import EvolvableAlgorithmProtocol
 from agilerl.typing import PopulationType
 from agilerl.utils.population_utils import scalar_fitness
@@ -490,19 +490,13 @@ class MultiFrequencySelection:
         :return: (elite, population, indices_to_mutate).
         :rtype: tuple[EvolvableAlgorithmProtocol, PopulationType, list[int]]
         """
-        accelerator = getattr(population[0], "accelerator", None)
-
-        # Only the main process plans the generation, so the operator's mutable
-        # state advances on rank 0 alone and deliberately diverges on the workers
         plan: dict[str, Any] | None = None
-        if accelerator is None or accelerator.is_main_process:
+        if is_main_process():
             plan = self._plan_llm_evolution(population)
 
-        # Broadcast the main process's decisions so all ranks clone identically
-        if accelerator is not None:
-            accelerator.wait_for_everyone()
-            if accelerator.num_processes > 1:
-                plan = broadcast_object_list([plan], from_process=0)[0]
+        if is_distributed():
+            barrier()
+            plan = broadcast_object_list([plan], src=0)[0]
 
         assert plan is not None, "LLM evolution plan was neither planned nor received."
 
@@ -643,23 +637,22 @@ class MultiFrequencySelection:
 
     @staticmethod
     def _clean_up(agent: EvolvableAlgorithmProtocol) -> None:
-        """Free an agent, bracketed by its accelerator barriers.
+        """Free an agent, with a rank barrier around ``clean_up`` when distributed.
 
         :param agent: The agent to free.
         :type agent: ~agilerl.protocols.EvolvableAlgorithmProtocol
         """
-        accelerator = getattr(agent, "accelerator", None)
-        if accelerator is not None:
-            accelerator.wait_for_everyone()
+        if is_distributed():
+            barrier()
         agent.clean_up()
-        if accelerator is not None:
-            accelerator.wait_for_everyone()
+        if is_distributed():
+            barrier()
 
     @staticmethod
     def _collective_clone(
         source: EvolvableAlgorithmProtocol, new_index: int
     ) -> EvolvableAlgorithmProtocol:
-        """Clone an agent, bracketed by its accelerator barriers.
+        """Clone an agent, with a rank barrier around ``clone`` when distributed.
 
         :param source: The agent to clone.
         :type source: ~agilerl.protocols.EvolvableAlgorithmProtocol
@@ -668,12 +661,11 @@ class MultiFrequencySelection:
         :return: The unwrapped clone.
         :rtype: ~agilerl.protocols.EvolvableAlgorithmProtocol
         """
-        accelerator = getattr(source, "accelerator", None)
-        if accelerator is not None:
-            accelerator.wait_for_everyone()
+        if is_distributed():
+            barrier()
         clone = source.clone(index=new_index, wrap=False)
-        if accelerator is not None:
-            accelerator.wait_for_everyone()
+        if is_distributed():
+            barrier()
         return clone
 
     def _clone_winners_over_losers(

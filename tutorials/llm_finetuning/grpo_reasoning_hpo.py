@@ -3,18 +3,17 @@
 
 import re
 
-from accelerate import Accelerator
 from torch.utils.data import Dataset
 
 from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
+from agilerl.algorithms import GRPO
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.training.llm import train_llm_rollout
 from agilerl.utils.algo_utils import VLLMConfig
 from agilerl.llm_envs import RolloutHarness
 from agilerl.llm_envs.rubrics import reward_fn_to_rubric
-from agilerl.utils.utils import create_population
 
 if HAS_LLM_DEPENDENCIES:
     from datasets import load_dataset
@@ -111,8 +110,6 @@ def main(init_hp, mut_p):
         tokenizer.pad_token = tokenizer.eos_token
     train_dataset, test_dataset = make_dataset(DATASET)
 
-    accelerator = Accelerator()
-
     # Define the conversation template
     conversation_template = [
         {
@@ -158,7 +155,6 @@ def main(init_hp, mut_p):
 
     pop = GRPO.population(
         size=init_hp["POP_SIZE"],
-        accelerator=accelerator,
         hp_config=hp_config,
         model_name=MODEL_PATH,
         lora_config=LoraConfig(
@@ -198,7 +194,6 @@ def main(init_hp, mut_p):
         rl_hp=mut_p["RL_HP_MUT"],
         mutation_sd=mut_p["MUT_SD"],
         rand_seed=mut_p["RAND_SEED"],
-        accelerator=accelerator,
     )
 
     train_llm_rollout(
@@ -214,10 +209,8 @@ def main(init_hp, mut_p):
         evo_steps=10,
         mutation=mutations,
         selection_strategy=tournament,
-        accelerator=accelerator,
         verbose=True,
     )
-    accelerator.end_training()
 
 
 if __name__ == "__main__":

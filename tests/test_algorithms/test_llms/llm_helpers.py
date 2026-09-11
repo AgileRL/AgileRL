@@ -16,47 +16,6 @@ from transformers.configuration_utils import PretrainedConfig
 from transformers.generation.utils import GenerationMixin
 from transformers.modeling_utils import PreTrainedModel
 
-deepspeed_base_config = {
-    "bf16": {
-        "enabled": torch.cuda.is_available() and torch.cuda.is_bf16_supported(),
-    },
-    "auto_cast": True,
-    "gradient_clipping": 0.5,
-    "gradient_accumulation_steps": 1,
-}
-
-deepspeed_config_stage_1 = deepspeed_base_config | {
-    "zero_optimization": {
-        "stage": 1,
-    },
-}
-
-deepspeed_config_stage_2 = deepspeed_base_config | {
-    "zero_optimization": {
-        "stage": 2,
-    },
-}
-
-deepspeed_config_stage_3 = deepspeed_base_config | {
-    "zero_optimization": {
-        "stage": 3,
-    },
-}
-
-deepspeed_config_stage_1_with_scheduler = deepspeed_base_config | {
-    "zero_optimization": {
-        "stage": 1,
-    },
-    "scheduler": {
-        "params": {
-            "warmup_max_lr": 0.001,
-            "num_epochs": 10,
-            "warmup_proportion": 0.05,
-        },
-    },
-}
-
-
 class DummyConfig(PretrainedConfig):
     def __init__(
         self,
@@ -89,12 +48,8 @@ class DummyMLPPreTrainedModel(PreTrainedModel, GenerationMixin):
         self.gradient_checkpointing_enabled = False
         self.datatype = (
             torch.bfloat16
-            if deepspeed_base_config.get("bf16", {}).get("enabled", False)
-            else (
-                torch.float16
-                if deepspeed_base_config.get("fp16", {}).get("enabled", False)
-                else torch.float32
-            )
+            if torch.cuda.is_available() and torch.cuda.is_bf16_supported()
+            else torch.float32
         )
         hidden_size = 32
         # Standard causal-LM shape (embed -> body -> lm_head) so the
@@ -117,6 +72,15 @@ class DummyMLPPreTrainedModel(PreTrainedModel, GenerationMixin):
             device=device,
             dtype=self.datatype,
         )
+
+    def get_input_embeddings(self):
+        return self.embed
+
+    def get_output_embeddings(self):
+        return self.lm_head
+
+    def set_output_embeddings(self, new_embeddings):
+        self.lm_head = new_embeddings
 
     @property
     def model(self):
