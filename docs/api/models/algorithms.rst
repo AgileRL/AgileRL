@@ -25,10 +25,10 @@ Base Specs
 .. autoclass:: agilerl.arena.models.algorithms.AlgorithmSpec
    :members:
 
-.. autoclass:: agilerl.arena.models.algorithms.RLAlgorithmSpec
+.. autoclass:: agilerl.arena.models.algorithms.SingleAgentAlgorithmSpec
    :members:
 
-.. autoclass:: agilerl.arena.models.algorithms.MultiAgentRLAlgorithmSpec
+.. autoclass:: agilerl.arena.models.algorithms.MultiAgentAlgorithmSpec
    :members:
 
 .. autoclass:: agilerl.arena.models.algorithms.LLMAlgorithmSpec

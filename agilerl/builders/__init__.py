@@ -8,8 +8,8 @@ from __future__ import annotations
 from agilerl.arena.models.algorithms import (
     AlgorithmSpec,
     LLMAlgorithmSpec,
-    MultiAgentRLAlgorithmSpec,
-    RLAlgorithmSpec,
+    MultiAgentAlgorithmSpec,
+    SingleAgentAlgorithmSpec,
 )
 from agilerl.builders.base import AlgorithmBuilder, AlgorithmBuildRuntime
 from agilerl.builders.llm import LLMBuilder
@@ -28,9 +28,9 @@ def select_builder(spec: AlgorithmSpec) -> type[AlgorithmBuilder]:
     """
     if isinstance(spec, LLMAlgorithmSpec):
         return LLMBuilder
-    if isinstance(spec, MultiAgentRLAlgorithmSpec):
+    if isinstance(spec, MultiAgentAlgorithmSpec):
         return MultiAgentBuilder
-    if isinstance(spec, RLAlgorithmSpec):
+    if isinstance(spec, SingleAgentAlgorithmSpec):
         return SingleAgentBuilder
     msg = f"{type(spec).__name__} is not an algorithm spec."
     raise TypeError(msg)

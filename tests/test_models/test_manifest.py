@@ -1848,8 +1848,8 @@ class TestLLMConfigFiles:
 
 
 def test_network_section_is_none_for_a_paradigm_base_spec():
-    from agilerl.arena.models.algorithms import MultiAgentRLAlgorithmSpec
+    from agilerl.arena.models.algorithms import MultiAgentAlgorithmSpec
     from agilerl.models.manifest import _network_from_algorithm
 
     # The multi-agent base carries no net_config; only its concrete specs do.
-    assert _network_from_algorithm(MultiAgentRLAlgorithmSpec()) is None
+    assert _network_from_algorithm(MultiAgentAlgorithmSpec()) is None

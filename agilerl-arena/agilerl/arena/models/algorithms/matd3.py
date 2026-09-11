@@ -9,7 +9,7 @@ from typing import ClassVar
 
 from pydantic import Field
 
-from agilerl.arena.models.algorithms.base import MultiAgentRLAlgorithmSpec
+from agilerl.arena.models.algorithms.base import MultiAgentAlgorithmSpec
 from agilerl.arena.models.descriptions import (
     DT,
     EXPL_NOISE,
@@ -28,7 +28,7 @@ from agilerl.arena.models.registry import register
 
 
 @register()
-class MATD3Spec(MultiAgentRLAlgorithmSpec):
+class MATD3Spec(MultiAgentAlgorithmSpec):
     """Multi-Agent TD3."""
 
     vect_noise_dim: int = Field(default=1, ge=1, description=VECT_NOISE_DIM)

@@ -15,7 +15,7 @@ from tensordict import TensorDict
 from tensordict.nn import CudaGraphModule
 from torch import nn, optim
 
-from agilerl.algorithms.core import OptimizerWrapper, RLAlgorithm
+from agilerl.algorithms.core import OptimizerWrapper, SingleAgentAlgorithm
 from agilerl.algorithms.core.registry import (
     HyperparameterConfig,
     NetworkGroup,
@@ -40,7 +40,7 @@ from agilerl.utils.algo_utils import (
 )
 
 
-class DQN(RLAlgorithm[TensorDict]):
+class DQN(SingleAgentAlgorithm[TensorDict]):
     """Deep Q-Network (DQN).
 
     Paper: https://arxiv.org/abs/1312.5602
@@ -83,7 +83,7 @@ class DQN(RLAlgorithm[TensorDict]):
     :type wrap: bool, optional
     """
 
-    # Narrowed from RLAlgorithm.action_space; enforced at construction.
+    # Narrowed from SingleAgentAlgorithm.action_space; enforced at construction.
     action_space: spaces.Discrete | spaces.MultiDiscrete
 
     # Discrete action space, so the network output size is a plain int
