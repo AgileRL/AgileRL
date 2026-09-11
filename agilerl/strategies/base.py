@@ -9,18 +9,18 @@ from abc import ABC, abstractmethod
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, ClassVar
 
-from agilerl.models.env import BanditEnvSpec, EnvSpec
+from agilerl.models.env import BanditEnvSpec, GymEnvSpec
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from agilerl.algorithms.core import EvolvableAlgorithm
+    from agilerl.arena.models.algorithms import AlgoSpec
     from agilerl.components.replay_buffer import BufferType
-    from agilerl.models.algo import AlgoSpec
     from agilerl.models.env import LLMEnvSpec
     from agilerl.models.training import TrainingSpec
 
-    EnvSpecType = EnvSpec | BanditEnvSpec | LLMEnvSpec
+    EnvSpecType = GymEnvSpec | BanditEnvSpec | LLMEnvSpec
     # Loops return their concrete population list plus one fitness entry per
     # agent (a per-agent dict from the multi-agent loops); Sequence keeps the
     # alias covariant with those concrete types.
@@ -99,7 +99,7 @@ def rl_trainer_kwargs(
     :returns: The shared keyword arguments.
     :rtype: dict[str, Any]
     """
-    if not isinstance(env_spec, (EnvSpec, BanditEnvSpec)):
+    if not isinstance(env_spec, (GymEnvSpec, BanditEnvSpec)):
         msg = f"{type(env_spec).__name__} is not a named env spec."
         raise TypeError(msg)
     return {

@@ -12,8 +12,8 @@ from agilerl.models.env import LLMEnvSpec, LLMEnvType
 from agilerl.strategies.base import TrainingStrategy
 
 if TYPE_CHECKING:
+    from agilerl.arena.models.algorithms import AlgoSpec
     from agilerl.components.replay_buffer import BufferType
-    from agilerl.models.algo import AlgoSpec
     from agilerl.models.training import TrainingSpec
     from agilerl.strategies.base import EnvSpecType, TrainingLoop
 

@@ -12,8 +12,8 @@ from agilerl.training.train_off_policy import train_off_policy
 from agilerl.training.train_on_policy import train_on_policy
 
 if TYPE_CHECKING:
+    from agilerl.arena.models.algorithms import AlgoSpec
     from agilerl.components.replay_buffer import BufferType
-    from agilerl.models.algo import AlgoSpec
     from agilerl.models.training import TrainingSpec
     from agilerl.strategies.base import EnvSpecType, TrainingLoop
 

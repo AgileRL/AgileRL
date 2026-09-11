@@ -14,11 +14,30 @@ from tensordict import TensorDict
 from torch import nn
 
 import agilerl.utils.algo_utils as algo_utils
+from agilerl.builders import AlgorithmBuildRuntime, select_builder
 from agilerl.components.data import Transition
 from agilerl.hpo.multi_frequency import MultiFrequencySelection
 from agilerl.modules import EvolvableModule
 from agilerl.typing import GraMaScores, NumpyObsType, TorchObsType
 from agilerl.utils import mutation_utils
+
+BUILD_RUNTIME_KEYS = (
+    "index",
+    "device",
+    "accelerator",
+    "hp_config",
+    "resume_from_checkpoint",
+    "load_weights_from",
+)
+
+
+def build_from_spec(spec, *args, **kwargs):
+    """Build via the spec's paradigm builder, packing slot kwargs into runtime."""
+    runtime = AlgorithmBuildRuntime(
+        **{key: kwargs.pop(key) for key in BUILD_RUNTIME_KEYS if key in kwargs}
+    )
+    return select_builder(spec).build(spec, *args, runtime=runtime, **kwargs)
+
 
 skip_torch_compile_on_windows_cpu = pytest.mark.skipif(
     sys.platform == "win32" and not torch.cuda.is_available(),

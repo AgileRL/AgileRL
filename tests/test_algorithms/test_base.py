@@ -12,7 +12,11 @@ from gymnasium import spaces
 from torch import optim
 from torch._dynamo.eval_frame import OptimizedModule
 
-from agilerl.algorithms.core import MultiAgentRLAlgorithm, OptimizerWrapper, RLAlgorithm
+from agilerl.algorithms.core import (
+    MultiAgentRLAlgorithm,
+    OptimizerWrapper,
+    RLAlgorithm,
+)
 from agilerl.algorithms.core.registry import (
     HyperparameterConfig,
     MutationRegistry,

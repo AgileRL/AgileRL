@@ -15,14 +15,13 @@ from agilerl import HAS_LIGER_KERNEL
 
 if TYPE_CHECKING:
     from accelerate import Accelerator
-    from peft import LoraConfig
-    from transformers import BitsAndBytesConfig
+    from peft import LoraConfig, PeftModel
+    from transformers import BitsAndBytesConfig, PreTrainedModel
 
     from agilerl.llm_envs import DatasetEnv
 
 from agilerl.algorithms.core.base import LLMAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
-from agilerl.protocols import PreTrainedModelProtocol
 from agilerl.typing import (
     MultiAgentObservationType,
     ObservationType,
@@ -51,7 +50,7 @@ class DPO(LLMAlgorithm[PreferencePrompts]):
     :param model_name: Model name
     :type model_name: str, optional
     :param actor_network: HuggingFace LLM
-    :type actor_network: PreTrainedModelProtocol
+    :type actor_network: PreTrainedModel | PeftModel | None
     :param model_config: Model configuration, to be used when creating the model from a name or path.
     :type model_config: dict[str, Any] | None
     :param hp_config: RL hyperparameter mutation configuration, defaults to None, whereby algorithm mutations are disabled.
@@ -140,7 +139,7 @@ class DPO(LLMAlgorithm[PreferencePrompts]):
         pad_token_id: int,
         pad_token: str,
         model_name: str | None = None,
-        actor_network: PreTrainedModelProtocol | None = None,
+        actor_network: PreTrainedModel | PeftModel | None = None,
         model_config: dict[str, Any] | None = None,
         hp_config: HyperparameterConfig | None = None,
         index: int = 0,

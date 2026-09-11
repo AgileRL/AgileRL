@@ -10,6 +10,8 @@ algorithm:
     use_separate_reference_adapter: true
 
 environment:
+    env_type: dataset
+    objective: preference
     dataset: HumanLLMs/Human-Like-DPO-Dataset
 
 training:

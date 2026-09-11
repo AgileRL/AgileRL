@@ -13,16 +13,23 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
+from agilerl.arena.models.algorithms import (
+    DDPGSpec,
+    DQNSpec,
+    MADDPGSpec,
+    RainbowDQNSpec,
+)
 from agilerl.components.replay_buffer import (
     MultiStepReplayBuffer,
     PrioritizedReplayBuffer,
     ReplayBuffer,
 )
-from agilerl.models.algorithms.ddpg import DDPGSpec
-from agilerl.models.algorithms.dqn import DQNSpec
-from agilerl.models.algorithms.maddpg import MADDPGSpec
-from agilerl.models.algorithms.rainbow_dqn import RainbowDQNSpec
-from agilerl.models.training import NStepBufferArgs, PerBufferArgs, ReplayBufferSpec
+from agilerl.models.training import (
+    NStepBufferArgs,
+    PerBufferArgs,
+    ReplayBufferSpec,
+    init_buffer,
+)
 
 # ============================================================================
 # NStepBufferArgs
@@ -154,7 +161,7 @@ class TestReplayBufferSpecValidation:
 
 
 # ============================================================================
-# ReplayBufferSpec.init_buffer - standard (single-agent) path
+# init_buffer - standard (single-agent) path
 # ============================================================================
 
 
@@ -163,31 +170,31 @@ class TestInitBufferStandard:
 
     def test_standard_buffer_default(self):
         spec = ReplayBufferSpec()
-        buf = spec.init_buffer(DQNSpec())
+        buf = init_buffer(spec, DQNSpec())
         assert isinstance(buf, ReplayBuffer)
         assert buf.max_size == 100_000
 
     def test_standard_buffer_custom_size(self):
         spec = ReplayBufferSpec(max_size=2048)
-        buf = spec.init_buffer(DQNSpec())
+        buf = init_buffer(spec, DQNSpec())
         assert isinstance(buf, ReplayBuffer)
         assert buf.max_size == 2048
 
     def test_standard_buffer_device_forwarded(self):
         spec = ReplayBufferSpec()
-        buf = spec.init_buffer(DQNSpec(), device="cpu")
+        buf = init_buffer(spec, DQNSpec(), device="cpu")
         assert isinstance(buf, ReplayBuffer)
 
     @pytest.mark.parametrize("algo_cls", [DQNSpec, DDPGSpec])
     def test_standard_buffer_for_off_policy_algos(self, algo_cls):
         spec = ReplayBufferSpec()
-        buf = spec.init_buffer(algo_cls())
+        buf = init_buffer(spec, algo_cls())
         assert isinstance(buf, ReplayBuffer)
         assert not isinstance(buf, (MultiStepReplayBuffer, PrioritizedReplayBuffer))
 
 
 # ============================================================================
-# ReplayBufferSpec.init_buffer - n-step path
+# init_buffer - n-step path
 # ============================================================================
 
 
@@ -196,13 +203,13 @@ class TestInitBufferNStep:
 
     def test_n_step_buffer_created(self):
         spec = ReplayBufferSpec(n_step_buffer=True)
-        buf = spec.init_buffer(DQNSpec())
+        buf = init_buffer(spec, DQNSpec())
         assert isinstance(buf, MultiStepReplayBuffer)
 
     def test_n_step_uses_algo_gamma(self):
         algo = DQNSpec(gamma=0.95)
         spec = ReplayBufferSpec(n_step_buffer=True)
-        buf = spec.init_buffer(algo)
+        buf = init_buffer(spec, algo)
         assert isinstance(buf, MultiStepReplayBuffer)
         assert buf.gamma == 0.95
 
@@ -211,18 +218,18 @@ class TestInitBufferNStep:
             n_step_buffer=True,
             n_step_buffer_args=NStepBufferArgs(n_step=5),
         )
-        buf = spec.init_buffer(DQNSpec())
+        buf = init_buffer(spec, DQNSpec())
         assert isinstance(buf, MultiStepReplayBuffer)
         assert buf.n_step == 5
 
     def test_n_step_default_n(self):
         spec = ReplayBufferSpec(n_step_buffer=True)
-        buf = spec.init_buffer(DQNSpec())
+        buf = init_buffer(spec, DQNSpec())
         assert buf.n_step == 3
 
     def test_n_step_respects_max_size(self):
         spec = ReplayBufferSpec(n_step_buffer=True, max_size=512)
-        buf = spec.init_buffer(DQNSpec())
+        buf = init_buffer(spec, DQNSpec())
         assert buf.max_size == 512
 
     def test_n_step_missing_gamma_raises(self):
@@ -235,11 +242,11 @@ class TestInitBufferNStep:
         algo.agent_type = AgentType.SingleAgent
         spec = ReplayBufferSpec(n_step_buffer=True)
         with pytest.raises(ValueError, match=r"[Gg]amma"):
-            spec.init_buffer(algo)
+            init_buffer(spec, algo)
 
 
 # ============================================================================
-# ReplayBufferSpec.init_buffer - PER path
+# init_buffer - PER path
 # ============================================================================
 
 
@@ -248,7 +255,7 @@ class TestInitBufferPER:
 
     def test_per_buffer_with_rainbow_dqn(self):
         spec = ReplayBufferSpec(per_buffer=True)
-        buf = spec.init_buffer(RainbowDQNSpec())
+        buf = init_buffer(spec, RainbowDQNSpec())
         assert isinstance(buf, PrioritizedReplayBuffer)
 
     def test_per_buffer_uses_custom_alpha(self):
@@ -256,34 +263,34 @@ class TestInitBufferPER:
             per_buffer=True,
             per_buffer_args=PerBufferArgs(alpha=0.7),
         )
-        buf = spec.init_buffer(RainbowDQNSpec())
+        buf = init_buffer(spec, RainbowDQNSpec())
         assert isinstance(buf, PrioritizedReplayBuffer)
         assert buf.alpha == 0.7
 
     def test_per_buffer_default_alpha(self):
         spec = ReplayBufferSpec(per_buffer=True)
-        buf = spec.init_buffer(RainbowDQNSpec())
+        buf = init_buffer(spec, RainbowDQNSpec())
         assert buf.alpha == 0.5
 
     def test_per_buffer_respects_max_size(self):
         spec = ReplayBufferSpec(per_buffer=True, max_size=4096)
-        buf = spec.init_buffer(RainbowDQNSpec())
+        buf = init_buffer(spec, RainbowDQNSpec())
         assert buf.max_size == 4096
 
     def test_per_buffer_non_rainbow_raises(self):
         spec = ReplayBufferSpec(per_buffer=True)
         with pytest.raises(ValueError, match="Rainbow DQN"):
-            spec.init_buffer(DQNSpec())
+            init_buffer(spec, DQNSpec())
 
     @pytest.mark.parametrize("algo_cls", [DDPGSpec])
     def test_per_buffer_rejects_non_rainbow_algos(self, algo_cls):
         spec = ReplayBufferSpec(per_buffer=True)
         with pytest.raises(ValueError, match="Rainbow DQN"):
-            spec.init_buffer(algo_cls())
+            init_buffer(spec, algo_cls())
 
 
 # ============================================================================
-# ReplayBufferSpec.init_buffer - multi-agent path
+# init_buffer - multi-agent path
 # ============================================================================
 
 
@@ -292,7 +299,7 @@ class TestInitBufferMultiAgent:
 
     def test_multi_agent_buffer_created(self):
         spec = ReplayBufferSpec()
-        buf = spec.init_buffer(MADDPGSpec())
+        buf = init_buffer(spec, MADDPGSpec())
         assert isinstance(buf, ReplayBuffer)
 
     def test_multi_agent_ignores_n_step_flag(self):
@@ -300,7 +307,7 @@ class TestInitBufferMultiAgent:
         ``ReplayBuffer``.
         """
         spec = ReplayBufferSpec(n_step_buffer=True)
-        buf = spec.init_buffer(MADDPGSpec())
+        buf = init_buffer(spec, MADDPGSpec())
         assert isinstance(buf, ReplayBuffer)
         assert not isinstance(buf, MultiStepReplayBuffer)
 
@@ -309,24 +316,24 @@ class TestInitBufferMultiAgent:
         ``ReplayBuffer``.
         """
         spec = ReplayBufferSpec(per_buffer=True)
-        buf = spec.init_buffer(MADDPGSpec())
+        buf = init_buffer(spec, MADDPGSpec())
         assert isinstance(buf, ReplayBuffer)
         assert not isinstance(buf, PrioritizedReplayBuffer)
 
     def test_multi_agent_respects_max_size(self):
         spec = ReplayBufferSpec(max_size=10_000)
-        buf = spec.init_buffer(MADDPGSpec())
+        buf = init_buffer(spec, MADDPGSpec())
         assert isinstance(buf, ReplayBuffer)
         assert buf.max_size == 10_000
 
     def test_multi_agent_device_forwarded(self):
         spec = ReplayBufferSpec()
-        buf = spec.init_buffer(MADDPGSpec(), device="cpu")
+        buf = init_buffer(spec, MADDPGSpec(), device="cpu")
         assert isinstance(buf, ReplayBuffer)
 
 
 # ============================================================================
-# ReplayBufferSpec.init_buffer - priority between flags
+# init_buffer - priority between flags
 # ============================================================================
 
 
@@ -338,22 +345,22 @@ class TestInitBufferFlagPriority:
 
     def test_per_takes_precedence_over_n_step(self):
         spec = ReplayBufferSpec(n_step_buffer=True, per_buffer=True)
-        buf = spec.init_buffer(RainbowDQNSpec(net_config=None))
+        buf = init_buffer(spec, RainbowDQNSpec(net_config=None))
         assert isinstance(buf, PrioritizedReplayBuffer)
 
     def test_per_with_unsupported_algorithm_raises(self):
         spec = ReplayBufferSpec(n_step_buffer=True, per_buffer=True)
         with pytest.raises(ValueError, match="only supported for Rainbow"):
-            spec.init_buffer(DQNSpec())
+            init_buffer(spec, DQNSpec())
 
     def test_standard_when_both_flags_false(self):
         spec = ReplayBufferSpec(n_step_buffer=False, per_buffer=False)
-        buf = spec.init_buffer(DQNSpec())
+        buf = init_buffer(spec, DQNSpec())
         assert isinstance(buf, ReplayBuffer)
         assert not isinstance(buf, (MultiStepReplayBuffer, PrioritizedReplayBuffer))
 
     def test_multi_agent_overrides_all_flags(self):
         spec = ReplayBufferSpec(n_step_buffer=True, per_buffer=True)
-        buf = spec.init_buffer(MADDPGSpec())
+        buf = init_buffer(spec, MADDPGSpec())
         assert isinstance(buf, ReplayBuffer)
         assert not isinstance(buf, (MultiStepReplayBuffer, PrioritizedReplayBuffer))

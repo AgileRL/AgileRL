@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from agilerl.arena.models.algo import (
+from agilerl.arena.models.algorithms import (
     AlgorithmSpec,
     LLMAlgorithmSpec,
     MultiAgentRLAlgorithmSpec,
@@ -17,15 +17,13 @@ from agilerl.builders.multi_agent import MultiAgentBuilder
 from agilerl.builders.single_agent import SingleAgentBuilder
 
 
-def select_builder(
-    spec: AlgorithmSpec,
-) -> type[LLMBuilder | MultiAgentBuilder | SingleAgentBuilder]:
+def select_builder(spec: AlgorithmSpec) -> type[AlgorithmBuilder]:
     """Return the builder class for *spec*'s paradigm.
 
     :param spec: The algorithm spec.
     :type spec: AlgorithmSpec
     :returns: The paradigm's builder class.
-    :rtype: type[LLMBuilder | MultiAgentBuilder | SingleAgentBuilder]
+    :rtype: type[AlgorithmBuilder]
     :raises TypeError: If *spec* is not one of the contract's algorithm specs.
     """
     if isinstance(spec, LLMAlgorithmSpec):

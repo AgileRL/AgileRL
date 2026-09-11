@@ -13,17 +13,16 @@ from agilerl.algorithms.core import (
     MultiAgentRLAlgorithm,
     RLAlgorithm,
 )
-from agilerl.arena.models.algo import (
-    LLMAlgorithmSpec,
-    MultiAgentRLAlgorithmSpec,
-    RLAlgorithmSpec,
-)
 from agilerl.arena.models.algorithms import (
     DPOSpec,
     DQNSpec,
     GRPOSpec,
+    IPPOSpec,
+    LLMAlgorithmSpec,
     MADDPGSpec,
+    MultiAgentRLAlgorithmSpec,
     PPOSpec,
+    RLAlgorithmSpec,
     SFTSpec,
 )
 from agilerl.arena.models.networks import (
@@ -32,6 +31,7 @@ from agilerl.arena.models.networks import (
     QNetworkSpec,
     StochasticActorSpec,
 )
+from agilerl.arena.models.registry import MANIFEST_REGISTRY
 from agilerl.builders import (
     AlgorithmBuildRuntime,
     LLMBuilder,
@@ -40,7 +40,6 @@ from agilerl.builders import (
     select_builder,
 )
 from agilerl.builders import llm as llm_builder
-from agilerl.models import algorithms as framework_algorithms
 
 requires_llm = pytest.mark.skipif(
     not HAS_LLM_DEPENDENCIES, reason="LLM deps not installed"
@@ -52,13 +51,6 @@ class TestBuilderFor:
         assert select_builder(DQNSpec()) is SingleAgentBuilder
         assert select_builder(MADDPGSpec()) is MultiAgentBuilder
         assert select_builder(DPOSpec.model_construct()) is LLMBuilder
-
-    def test_framework_subclass_specs_dispatch(self):
-        from agilerl.models.algorithms.dqn import DQNSpec as FrameworkDQNSpec
-        from agilerl.models.algorithms.maddpg import MADDPGSpec as FrameworkMADDPGSpec
-
-        assert select_builder(FrameworkDQNSpec()) is SingleAgentBuilder
-        assert select_builder(FrameworkMADDPGSpec()) is MultiAgentBuilder
 
     def test_rejects_a_non_spec(self):
         with pytest.raises(TypeError, match="not an algorithm spec"):
@@ -88,6 +80,14 @@ class TestAlgoClass:
         assert issubclass(resolved, base)
         assert resolved is getattr(algorithms, spec_cls.__name__.removesuffix("Spec"))
 
+    def test_a_user_subclass_resolves_to_its_parent(self):
+        from agilerl.algorithms import DQN
+
+        class MyDQNSpec(DQNSpec):
+            pass
+
+        assert SingleAgentBuilder.algo_class(MyDQNSpec()) is DQN
+
     @requires_llm
     def test_paradigm_mismatch_is_caught(self):
         # An LLM spec handed to the RL builder is a programming error, not a
@@ -96,8 +96,7 @@ class TestAlgoClass:
             SingleAgentBuilder.algo_class(DPOSpec.model_construct())
 
     def test_every_registered_spec_resolves(self):
-        for name in framework_algorithms.__all__:
-            spec_cls = getattr(framework_algorithms, name)
+        for spec_cls in dict(MANIFEST_REGISTRY.items()).values():
             spec = spec_cls.model_construct()
             builder = select_builder(spec)
             if not HAS_LLM_DEPENDENCIES and isinstance(spec, LLMAlgorithmSpec):
@@ -171,11 +170,12 @@ class TestPeftLoraConfig:
         assert lora.lora_alpha == 16
         assert set(lora.target_modules) == {"q_proj"}
 
-    def test_peft_object_is_passed_through(self):
+    def test_already_built_peft_config_is_returned(self):
         from peft import LoraConfig
 
-        existing = LoraConfig(r=4, lora_alpha=8, target_modules=["q_proj"])
-        assert llm_builder.peft_lora_config(existing) is existing
+        peft_lora = LoraConfig(r=4, lora_alpha=8, target_modules=["q_proj"])
+
+        assert llm_builder.peft_lora_config(peft_lora) is peft_lora
 
 
 def test_peft_lora_config_needs_the_llm_extras(monkeypatch):
@@ -193,6 +193,9 @@ def test_arena_only_fields_are_not_forwarded_to_the_constructor():
         group_size=4,
         attn_implementation="sdpa",
         quantization="nf4",
+        zero_stage=2,
+        deepspeed={"train_batch_size": 1},
+        vllm_engine_args={"trust_remote_code": True},
         pretrained_model_name_or_path="Qwen/Qwen2.5-0.5B-Instruct",
     )
 
@@ -201,8 +204,14 @@ def test_arena_only_fields_are_not_forwarded_to_the_constructor():
 
     assert kwargs["attn_implementation"] == "sdpa"
     assert kwargs["quantization"] == "nf4"
+    assert kwargs["zero_stage"] == 2
+    assert kwargs["deepspeed"] == {"train_batch_size": 1}
+    assert kwargs["vllm_engine_args"] == {"trust_remote_code": True}
     assert "attn_implementation" not in filtered
     assert "quantization" not in filtered
+    assert "zero_stage" not in filtered
+    assert "deepspeed" not in filtered
+    assert "vllm_engine_args" not in filtered
     assert filtered["group_size"] == 4
 
 
@@ -240,7 +249,6 @@ class TestSpecKwargsNetConfig:
 
     def test_dumps_per_agent_net_config_to_plain_dicts(self):
         from agilerl.builders.base import spec_kwargs
-        from agilerl.models.algorithms.ippo import IPPOSpec
 
         spec = IPPOSpec(
             net_config={
@@ -262,6 +270,8 @@ class TestSpecKwargsNetConfig:
 
 class TestAlgoClassParadigmGuards:
     def test_a_paradigm_base_spec_resolves_no_algorithm(self):
+        # The registry walks the MRO but stops at the paradigm bases, which
+        # name no concrete algorithm.
         with pytest.raises(AttributeError, match="No algorithm class"):
             SingleAgentBuilder.algo_class(RLAlgorithmSpec())
 
@@ -341,6 +351,13 @@ class TestLLMBuildGuards:
         )
         built = _build_llm_with_dummy_algo(spec, monkeypatch)
         assert "vllm_config" not in built
+
+    def test_sft_does_not_forward_vllm(self, monkeypatch):
+        spec = SFTSpec(pretrained_model_name_or_path="stub/model")
+        built = _build_llm_with_dummy_algo(spec, monkeypatch)
+
+        assert "vllm_config" not in built
+        assert "use_vllm" not in built
 
     def test_defaults_index_to_zero(self, monkeypatch):
         spec = GRPOSpec(

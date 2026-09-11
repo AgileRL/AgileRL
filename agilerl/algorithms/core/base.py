@@ -77,7 +77,6 @@ from agilerl.protocols import (
     ModuleDictProtocol,
     PeftModelProtocol,
     PretrainedConfigProtocol,
-    PreTrainedModelProtocol,
 )
 from agilerl.typing import (
     ActionResult,
@@ -147,12 +146,13 @@ from agilerl.utils.mutation_utils import target_activations
 
 if TYPE_CHECKING:
     from torch.optim.lr_scheduler import SequentialLR
-    from transformers import BitsAndBytesConfig
+    from transformers import BitsAndBytesConfig, PreTrainedModel
 
 # Make imports visible to typechecker and import when required
 if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
     from peft import (
         LoraConfig,
+        PeftModel,
         get_peft_model,
         prepare_model_for_kbit_training,
         set_peft_model_state_dict,
@@ -2714,7 +2714,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
     :param model_name: The name of the model.
     :type model_name: str | None
     :param actor_network: The actor network.
-    :type actor_network: PreTrainedModelProtocol | None
+    :type actor_network: PreTrainedModel | PeftModel | None
     :param micro_batch_size_per_gpu: Samples per backward pass on one rank (the
         memory setting). Optimizer-step cadence comes from ``mini_batch_size``.
     :type micro_batch_size_per_gpu: int | None
@@ -2838,7 +2838,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         use_vllm: bool = False,
         vllm_config: VLLMConfig | None = None,
         model_name: str | None = None,
-        actor_network: PreTrainedModelProtocol | None = None,
+        actor_network: PreTrainedModel | PeftModel | None = None,
         micro_batch_size_per_gpu: int | None = None,
         mini_batch_size: int | None = None,
         cosine_lr_schedule_config: CosineLRScheduleConfig | None = None,

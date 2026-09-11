@@ -35,6 +35,7 @@ environment:
 
 training:
     max_steps: 100000
+    evo_steps: 100000
     pop_size: 1
     eval_loop: 1
     evaluation_interval: 5

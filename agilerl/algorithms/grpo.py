@@ -18,8 +18,8 @@ from agilerl import HAS_LIGER_KERNEL, HAS_LLM_DEPENDENCIES
 
 if TYPE_CHECKING:
     from accelerate import Accelerator
-    from peft import LoraConfig
-    from transformers import BitsAndBytesConfig
+    from peft import LoraConfig, PeftModel
+    from transformers import BitsAndBytesConfig, PreTrainedModel
 
 if HAS_LIGER_KERNEL or TYPE_CHECKING:
     from liger_kernel.chunked_loss.grpo_loss import LigerFusedLinearGRPOFunction
@@ -178,7 +178,7 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
     :param model_name: Model name
     :type model_name: str, optional
     :param actor_network: HuggingFace LLM
-    :type actor_network: PreTrainedModelProtocol
+    :type actor_network: PreTrainedModel | PeftModel | None
     :param model_config: Model configuration, to be used when creating the model from a name or path
     :type model_config: dict[str, Any], optional
     :param hp_config: RL hyperparameter mutation configuration, defaults to None, whereby algorithm mutations are disabled.
@@ -409,7 +409,7 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
         pad_token_id: int,
         pad_token: str,
         model_name: str | None = None,
-        actor_network: PreTrainedModelProtocol | None = None,
+        actor_network: PreTrainedModel | PeftModel | None = None,
         model_config: dict[str, Any] | None = None,
         hp_config: HyperparameterConfig | None = None,
         index: int = 0,
@@ -813,7 +813,7 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
         batch_size: int,
         lr: float,
         update_epochs: int,
-        actor_network: PreTrainedModelProtocol | None,
+        actor_network: PreTrainedModel | PeftModel | None,
     ) -> None:
         """Validate the core training arguments."""
         assert isinstance(batch_size, int), "Batch size must be an integer."

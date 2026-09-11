@@ -16,6 +16,9 @@ dependencies = [
     "python-keycloak>=4.0,<8",
     "pyyaml>=6.0",
     "rich>=13.0,<16",
+    # Imported directly (typing_extensions.Self); do not rely on pydantic's
+    # transitive pin.
+    "typing-extensions>=4.4",
 ]
 
 [project.scripts]

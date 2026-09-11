@@ -16,7 +16,7 @@ from pydantic import BaseModel
 from agilerl import HAS_LLM_DEPENDENCIES, algorithms
 from agilerl.algorithms.core import EvolvableAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig
-from agilerl.arena.models.algo import AlgorithmSpec, LLMAlgorithmSpec
+from agilerl.arena.models.algorithms import AlgorithmSpec, LLMAlgorithmSpec
 
 if TYPE_CHECKING:
     import torch
@@ -34,7 +34,8 @@ class AlgorithmBuilder:
     def algo_class(cls, spec: AlgorithmSpec) -> type[EvolvableAlgorithm]:
         """Resolve the algorithm class from :mod:`agilerl.algorithms`.
 
-        Naming convention: ``<Name>Spec`` -> ``<Name>``.
+        Naming convention: ``<Name>Spec`` -> ``<Name>``. Walks the spec's
+        MRO so a user subclass still maps to the parent algorithm.
 
         :param spec: The algorithm spec.
         :type spec: AlgorithmSpec
@@ -42,11 +43,14 @@ class AlgorithmBuilder:
         :rtype: type[EvolvableAlgorithm]
         :raises AttributeError: If no algorithm matches the spec's name.
         """
+        for spec_cls in type(spec).__mro__:
+            name = spec_cls.__name__.removesuffix("Spec")
+            if name == spec_cls.__name__:
+                continue
+            resolved = getattr(algorithms, name, None)
+            if isinstance(resolved, type) and issubclass(resolved, EvolvableAlgorithm):
+                return resolved
         spec_cls = type(spec)
-        name = spec_cls.__name__.removesuffix("Spec")
-        resolved = getattr(algorithms, name, None)
-        if isinstance(resolved, type) and issubclass(resolved, EvolvableAlgorithm):
-            return resolved
         msg = f"No algorithm class in agilerl.algorithms for {spec_cls.__name__}."
         if not HAS_LLM_DEPENDENCIES and issubclass(spec_cls, LLMAlgorithmSpec):
             msg += (
@@ -124,8 +128,7 @@ def _resume_and_warn_on_drift(
     algo.load_checkpoint(path)
     algo.index = index
 
-    # Skip Accelerator, LoraConfig, registries, and other objects with no
-    # meaningful ``!=`` when diffing hyperparameters against the spec.
+    # Skip Accelerator / LoraConfig / registry values; only these compare with ``!=``.
     comparable_hp_types = (bool, int, float, str, type(None))
     drifted = {
         name: (configured[name], getattr(algo, name))
