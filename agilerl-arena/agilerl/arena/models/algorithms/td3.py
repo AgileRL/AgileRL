@@ -9,7 +9,7 @@ from typing import ClassVar
 
 from pydantic import Field
 
-from agilerl.arena.models.algorithms.base import RLAlgorithmSpec
+from agilerl.arena.models.algorithms.base import SingleAgentAlgorithmSpec
 from agilerl.arena.models.descriptions import (
     DT,
     EXPL_NOISE,
@@ -29,7 +29,7 @@ from agilerl.arena.models.registry import register
 
 
 @register()
-class TD3Spec(RLAlgorithmSpec):
+class TD3Spec(SingleAgentAlgorithmSpec):
     """Twin Delayed DDPG."""
 
     vect_noise_dim: int = Field(default=1, ge=1, description=VECT_NOISE_DIM)

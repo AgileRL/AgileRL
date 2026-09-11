@@ -233,7 +233,7 @@ def collect_rollouts(
     """Collect rollouts for non-recurrent on-policy algorithms.
 
     :param agent: The agent to collect rollouts for.
-    :type agent: RLAlgorithm
+    :type agent: SingleAgentAlgorithm
     :param env: The environment to collect rollouts from.
     :type env: gym.Env | gym.vector.VectorEnv
     :param n_steps: The number of steps to collect rollouts for.
@@ -255,7 +255,7 @@ def collect_rollouts_recurrent(
     """Collect rollouts for recurrent on-policy algorithms.
 
     :param agent: The agent to collect rollouts for.
-    :type agent: RLAlgorithm
+    :type agent: SingleAgentAlgorithm
     :param env: The environment to collect rollouts from.
     :type env: gym.Env | gym.vector.VectorEnv
     :param n_steps: The number of steps to collect rollouts for.

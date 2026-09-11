@@ -10,8 +10,8 @@ from agilerl.arena.models.algorithms.base import (
     AlgorithmSpec,
     AlgoSpec,
     LLMAlgorithmSpec,
-    MultiAgentRLAlgorithmSpec,
-    RLAlgorithmSpec,
+    MultiAgentAlgorithmSpec,
+    SingleAgentAlgorithmSpec,
 )
 from agilerl.arena.models.algorithms.cispo import CISPOSpec
 from agilerl.arena.models.algorithms.cqn import CQNSpec
@@ -50,13 +50,13 @@ __all__ = [
     "LLMREINFORCESpec",
     "MADDPGSpec",
     "MATD3Spec",
-    "MultiAgentRLAlgorithmSpec",
+    "MultiAgentAlgorithmSpec",
     "NeuralTSSpec",
     "NeuralUCBSpec",
     "PPOSpec",
-    "RLAlgorithmSpec",
     "RainbowDQNSpec",
     "RolloutLLMSpec",
     "SFTSpec",
+    "SingleAgentAlgorithmSpec",
     "TD3Spec",
 ]

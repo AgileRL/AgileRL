@@ -22,6 +22,38 @@ from typing_extensions import Self
 
 RolloutMode = Literal["colocated", "async"]
 RolloutVersionStamp = Literal["publish", "oldest_turn"]
+CheckpointExportFormat = Literal["adapter", "merged"]
+CheckpointExportTrigger = Literal["final", "best", "on_demand", "every"]
+
+
+class CheckpointExportSpec(BaseModel):
+    """When to write a merged Hugging Face package next to adapter checkpoints.
+
+    :param format: ``adapter`` writes LoRA weights only; ``merged`` also
+        writes ``merged/`` after a durable adapter save when ``trigger`` matches.
+    :param trigger: ``final`` (last durable save of the run), ``best`` (best
+        checkpoint if the trainer marks one, otherwise ``final``), ``on_demand``
+        (no merge during train), or ``every`` (after every adapter save).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    format: CheckpointExportFormat = "adapter"
+    trigger: CheckpointExportTrigger = "final"
+
+    def should_merge(self, is_final: bool, is_best: bool) -> bool:
+        """Return whether this adapter save should write merged HF weights."""
+        if self.format != "merged":
+            return False
+        match self.trigger:
+            case "every":
+                return True
+            case "on_demand":
+                return False
+            case "best":
+                return is_best or is_final
+            case "final":
+                return is_final
 
 
 class NStepBufferArgs(BaseModel):
@@ -383,6 +415,13 @@ class TrainingSpec(BaseModel):
             "'oldest_turn' ages a group by how long it ran, so long episodes "
             "are dropped first; 'publish' makes buffer residency independent "
             "of episode duration."
+        ),
+    )
+    checkpoint_export: CheckpointExportSpec = Field(
+        default_factory=CheckpointExportSpec,
+        description=(
+            "Adapter-only save by default, or a merged Hugging Face export "
+            "when format is merged and trigger matches."
         ),
     )
 

@@ -15,7 +15,7 @@ from gymnasium import spaces
 from tensordict import TensorDict
 from torch import nn, optim
 
-from agilerl.algorithms.core import OptimizerWrapper, RLAlgorithm
+from agilerl.algorithms.core import OptimizerWrapper, SingleAgentAlgorithm
 from agilerl.algorithms.core.registry import (
     HyperparameterConfig,
     NetworkGroup,
@@ -47,7 +47,7 @@ from agilerl.utils.evolvable_networks import (
 )
 
 
-class TD3(RLAlgorithm[TensorDict]):
+class TD3(SingleAgentAlgorithm[TensorDict]):
     """Twin Delayed Deep Deterministic Policy Gradient (TD3).
 
     Paper: https://arxiv.org/abs/1802.09477

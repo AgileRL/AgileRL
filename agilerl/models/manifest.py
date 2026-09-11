@@ -22,7 +22,7 @@ from agilerl.arena.models.algorithms import (
     LLMAlgorithmSpec,
     MADDPGSpec,
     MATD3Spec,
-    RLAlgorithmSpec,
+    SingleAgentAlgorithmSpec,
 )
 from agilerl.models.hpo import (
     MultiFrequencySelectionSpec,
@@ -119,7 +119,7 @@ def _network_from_algorithm(
                 "lora_config": algorithm.lora_config,
             }
         )
-    if isinstance(algorithm, RLAlgorithmSpec):
+    if isinstance(algorithm, SingleAgentAlgorithmSpec):
         return algorithm.net_config
     if isinstance(algorithm, (IPPOSpec, MADDPGSpec, MATD3Spec)):
         return algorithm.net_config
