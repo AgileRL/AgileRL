@@ -11,14 +11,17 @@ from unittest.mock import patch
 
 import pytest
 import yaml
+from annotated_types import Ge, Le
 from pydantic import ValidationError
 
+from agilerl.arena.memory.specs import FUSED_CHUNK_ROWS_MAX, FUSED_CHUNK_ROWS_MIN
 from agilerl.arena.models import (
     MANIFEST_REGISTRY,
     ReplayBufferSpec,
     TrainingManifest,
     TrainingSpec,
 )
+from agilerl.arena.models.algorithms.base import LLMAlgorithmSpec
 from agilerl.arena.models.algorithms.dqn import DQNSpec
 from agilerl.arena.models.algorithms.grpo import GRPOSpec
 from agilerl.arena.models.env import GymEnvSpec, LLMEnvType
@@ -225,6 +228,17 @@ class TestLLMAlgorithmSpecValidators:
     def test_mini_batch_multiple_of_micro_batch(self) -> None:
         spec = GRPOSpec(group_size=2, mini_batch_size=4, micro_batch_size_per_gpu=2)
         assert spec.mini_batch_size == 4
+
+    def test_chunk_rows_shares_fused_tile_bounds(self) -> None:
+        spec = GRPOSpec(group_size=2, chunk_rows=FUSED_CHUNK_ROWS_MIN)
+        assert spec.chunk_rows == FUSED_CHUNK_ROWS_MIN
+        meta = LLMAlgorithmSpec.model_fields["chunk_rows"].metadata
+        assert Ge(ge=FUSED_CHUNK_ROWS_MIN) in meta
+        assert Le(le=FUSED_CHUNK_ROWS_MAX) in meta
+
+    def test_chunk_rows_rejects_below_fused_min(self) -> None:
+        with pytest.raises(ValidationError, match="greater than or equal"):
+            GRPOSpec(group_size=2, chunk_rows=64)
 
 
 class TestGRPOClipCoef:

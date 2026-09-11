@@ -543,7 +543,7 @@ class TestREINFORCEInit:
                 gradient_checkpointing=False,
             )
 
-    def test_init_chunk_rows_must_be_positive(self):
+    def test_init_chunk_rows_must_be_in_the_auto_tune_range(self):
         actor = create_dummy_actor(10, 8, 100, "cpu")
         lora = LoraConfig(
             r=4,
@@ -551,7 +551,7 @@ class TestREINFORCEInit:
             target_modules=["lin"],
             task_type="CAUSAL_LM",
         )
-        with pytest.raises(ValueError, match="chunk_rows must be a positive int"):
+        with pytest.raises(ValueError, match=r"chunk_rows must be None"):
             REINFORCE(
                 actor_network=actor,
                 pad_token_id=99,
@@ -1306,7 +1306,7 @@ class TestReinforceLossLiger:
         assert torch.all(ratio <= rf.vllm_importance_sampling_cap)
 
     def test_forwards_configured_chunk_rows(self) -> None:
-        rf = _cpu_llmreinforce(chunk_rows=123)
+        rf = _cpu_llmreinforce(chunk_rows=256)
         B, T = 2, 5
         ids = torch.randint(1, 50, (B, T), dtype=torch.long)
         mask = torch.ones(B, T - 1, dtype=torch.float32)
@@ -1324,7 +1324,7 @@ class TestReinforceLossLiger:
             mock_apply.return_value = (torch.tensor(0.4, requires_grad=True), fake_aux)
             rf._reinforce_loss_liger(ids, mask, old_lp, ref_lp, adv)
 
-        assert mock_apply.call_args.kwargs["token_chunk_size"] == 123
+        assert mock_apply.call_args.kwargs["token_chunk_size"] == 256
 
     def test_turn_level_requires_turn_ids(self) -> None:
         rf = _cpu_llmreinforce(importance_sampling_level="turn")

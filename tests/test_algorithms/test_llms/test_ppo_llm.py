@@ -10,6 +10,11 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 
+from agilerl.arena.memory.formulas import (
+    FUSED_CHUNK_ROWS_MAX,
+    FUSED_CHUNK_ROWS_MIN,
+)
+
 pytest.importorskip("deepspeed", reason="LLM tests require deepspeed.")
 pytest.importorskip("vllm", reason="LLM tests require vllm.")
 
@@ -512,7 +517,7 @@ class TestPPOInit:
                 gradient_checkpointing=False,
             )
 
-    def test_init_chunk_rows_must_be_positive(self):
+    def test_init_chunk_rows_must_be_in_the_auto_tune_range(self):
         actor = create_module(10, 8, 100, "cpu")
         lora = LoraConfig(
             r=4,
@@ -521,7 +526,7 @@ class TestPPOInit:
             task_type="CAUSAL_LM",
             modules_to_save=["summary"],
         )
-        with pytest.raises(ValueError, match="chunk_rows must be a positive int"):
+        with pytest.raises(ValueError, match=r"chunk_rows must be None"):
             LLMPPO(
                 actor_network=actor,
                 pad_token_id=99,
@@ -543,6 +548,15 @@ class TestPPOInit:
         with pytest.warns(DeprecationWarning, match="action_granularity is deprecated"):
             ppo = _cpu_llmppo(action_granularity="turn")
         assert ppo.advantage_granularity == "turn"
+
+    @pytest.mark.parametrize("rows", [0, 1, 127, 4097])
+    def test_init_rejects_chunk_rows_outside_the_auto_tune_range(self, rows):
+        with pytest.raises(ValueError, match=r"chunk_rows must be None"):
+            _cpu_llmppo(chunk_rows=rows)
+
+    @pytest.mark.parametrize("rows", [FUSED_CHUNK_ROWS_MIN, 441, FUSED_CHUNK_ROWS_MAX])
+    def test_init_accepts_chunk_rows_inside_the_range(self, rows):
+        assert _cpu_llmppo(chunk_rows=rows).chunk_rows == rows
 
     @pytest.mark.parametrize("is_level", ["turn", "trajectory"])
     def test_init_liger_non_token_is_level_warns_memory_unbounded(
@@ -1491,7 +1505,7 @@ class TestPPOLossLiger:
         assert isinstance(total_loss, torch.Tensor)
 
     def test_token_mode_forwards_configured_chunk_rows(self) -> None:
-        ppo = _cpu_llmppo(chunk_rows=123)
+        ppo = _cpu_llmppo(chunk_rows=256)
         B, T = 2, 5
         ids = torch.randint(1, 50, (B, T), dtype=torch.long)
         mask = torch.ones(B, T - 1, dtype=torch.float32)
@@ -1520,7 +1534,7 @@ class TestPPOLossLiger:
                 "token",
             )
 
-        assert mock_apply.call_args.kwargs["token_chunk_size"] == 123
+        assert mock_apply.call_args.kwargs["token_chunk_size"] == 256
 
     def test_turn_mode_passes_turn_args_to_liger(self) -> None:
         """Turn-granularity passes ``turn_ids`` and ``max_turns`` into the
