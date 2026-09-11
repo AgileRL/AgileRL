@@ -129,7 +129,7 @@ def train_bandits(
     :type wandb_kwargs: dict, optional
 
     :return: Trained population of agents and their fitnesses
-    :rtype: tuple[list[RLAlgorithm], list[float]]
+    :rtype: tuple[list[SingleAgentAlgorithm], list[float]]
     """
     selection_strategy = resolve_selection_strategy(selection_strategy, tournament)
     assert isinstance(

@@ -11,7 +11,7 @@ from pydantic import Field
 
 from agilerl.arena.models.algorithms.base import (
     ON_POLICY_HPO_RANGES,
-    MultiAgentRLAlgorithmSpec,
+    MultiAgentAlgorithmSpec,
 )
 from agilerl.arena.models.descriptions import (
     ACTION_STD_INIT,
@@ -31,7 +31,7 @@ from agilerl.arena.models.registry import register
 
 
 @register()
-class IPPOSpec(MultiAgentRLAlgorithmSpec):
+class IPPOSpec(MultiAgentAlgorithmSpec):
     """Independent PPO."""
 
     learn_step: int = Field(

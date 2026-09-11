@@ -9,13 +9,13 @@ from typing import ClassVar
 
 from pydantic import Field
 
-from agilerl.arena.models.algorithms.base import RLAlgorithmSpec
+from agilerl.arena.models.algorithms.base import SingleAgentAlgorithmSpec
 from agilerl.arena.models.descriptions import NET_CONFIG
 from agilerl.arena.models.networks import QNetworkSpec
 from agilerl.arena.models.registry import AgentType
 
 
-class BanditSpec(RLAlgorithmSpec):
+class BanditSpec(SingleAgentAlgorithmSpec):
     """Shared surface for the neural contextual bandits."""
 
     gamma: float = Field(

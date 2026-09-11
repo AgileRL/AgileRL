@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from agilerl.algorithms.core import MultiAgentRLAlgorithm
+from agilerl.algorithms.core import MultiAgentAlgorithm
 from agilerl.arena.models.algorithms import AlgorithmSpec
 from agilerl.builders.base import (
     AlgorithmBuilder,
@@ -25,12 +25,12 @@ class MultiAgentBuilder(AlgorithmBuilder):
     """Multi-agent reinforcement learning."""
 
     @classmethod
-    def algo_class(cls, spec: AlgorithmSpec) -> type[MultiAgentRLAlgorithm]:
+    def algo_class(cls, spec: AlgorithmSpec) -> type[MultiAgentAlgorithm]:
         resolved = super().algo_class(spec)
-        if not issubclass(resolved, MultiAgentRLAlgorithm):
+        if not issubclass(resolved, MultiAgentAlgorithm):
             msg = (
                 f"{type(spec).__name__} resolved to {resolved.__name__}, "
-                "which is not a subclass of MultiAgentRLAlgorithm."
+                "which is not a subclass of MultiAgentAlgorithm."
             )
             raise TypeError(msg)
         return resolved
@@ -44,7 +44,7 @@ class MultiAgentBuilder(AlgorithmBuilder):
         *,
         runtime: AlgorithmBuildRuntime | None = None,
         **networks: Any,
-    ) -> MultiAgentRLAlgorithm:
+    ) -> MultiAgentAlgorithm:
         """Build a multi-agent algorithm.
 
         :param spec: The algorithm spec.
@@ -59,7 +59,7 @@ class MultiAgentBuilder(AlgorithmBuilder):
             ``actor_networks`` and ``critic_networks``.
         :type networks: ModuleDict
         :returns: Multi-agent algorithm instance.
-        :rtype: MultiAgentRLAlgorithm
+        :rtype: MultiAgentAlgorithm
         :raises ValueError: If observation_spaces, action_spaces, or index is None.
         """
         runtime = runtime or AlgorithmBuildRuntime()

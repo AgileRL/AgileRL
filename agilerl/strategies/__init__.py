@@ -8,8 +8,8 @@ from __future__ import annotations
 from agilerl.arena.models.algorithms import (
     AlgoSpec,
     LLMAlgorithmSpec,
-    MultiAgentRLAlgorithmSpec,
-    RLAlgorithmSpec,
+    MultiAgentAlgorithmSpec,
+    SingleAgentAlgorithmSpec,
 )
 from agilerl.arena.models.env import LLMEnvType
 from agilerl.strategies.bandit import BanditStrategy
@@ -61,9 +61,9 @@ def select_strategy(spec: AlgoSpec) -> TrainingStrategy:
             return LLM_DATASET
         msg = f"No training strategy for LLM env_type {env_type!r}."
         raise KeyError(msg)
-    if isinstance(spec, MultiAgentRLAlgorithmSpec):
+    if isinstance(spec, MultiAgentAlgorithmSpec):
         return MULTI_AGENT_OFF_POLICY if spec.off_policy else MULTI_AGENT_ON_POLICY
-    if isinstance(spec, RLAlgorithmSpec):
+    if isinstance(spec, SingleAgentAlgorithmSpec):
         if spec.bandit:
             return BANDIT
         if spec.offline:
