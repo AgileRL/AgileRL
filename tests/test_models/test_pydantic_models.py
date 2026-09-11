@@ -619,10 +619,10 @@ class TestAlgoSpecClassVars:
         """Offline training kwargs carry the Minari id and remote flag."""
         from typing import ClassVar
 
-        from agilerl.arena.models.algorithms import RLAlgorithmSpec
+        from agilerl.arena.models.algorithms import SingleAgentAlgorithmSpec
         from agilerl.models.env import OfflineEnvSpec
 
-        class _OffSpec(RLAlgorithmSpec):
+        class _OffSpec(SingleAgentAlgorithmSpec):
             offline: ClassVar[bool] = True
 
         spec = _OffSpec()
@@ -638,10 +638,10 @@ class TestAlgoSpecClassVars:
         """Offline training kwargs open the HDF5 dataset when there is no Minari id."""
         from typing import ClassVar
 
-        from agilerl.arena.models.algorithms import RLAlgorithmSpec
+        from agilerl.arena.models.algorithms import SingleAgentAlgorithmSpec
         from agilerl.models.env import OfflineEnvSpec
 
-        class _OffSpec(RLAlgorithmSpec):
+        class _OffSpec(SingleAgentAlgorithmSpec):
             offline: ClassVar[bool] = True
 
         dataset_path = tmp_path / "offline.h5"
@@ -660,10 +660,10 @@ class TestAlgoSpecClassVars:
         assert kwargs["dataset"] is mock_file
 
     def test_rl_spec_resume_from_checkpoint(self):
-        """RLAlgorithmSpec.build_algorithm with resume."""
-        from agilerl.arena.models.algorithms import RLAlgorithmSpec
+        """SingleAgentAlgorithmSpec.build_algorithm with resume."""
+        from agilerl.arena.models.algorithms import SingleAgentAlgorithmSpec
 
-        spec = RLAlgorithmSpec(learn_step=1)
+        spec = SingleAgentAlgorithmSpec(learn_step=1)
         mock_algo_cls = MagicMock()
         mock_algo = MagicMock()
         mock_algo_cls.return_value = mock_algo
@@ -685,10 +685,10 @@ class TestAlgoSpecClassVars:
         assert mock_algo.index == 2
 
     def test_multi_agent_resume_from_checkpoint(self):
-        """MultiAgentRLAlgorithmSpec.build_algorithm with resume."""
-        from agilerl.arena.models.algorithms import MultiAgentRLAlgorithmSpec
+        """MultiAgentAlgorithmSpec.build_algorithm with resume."""
+        from agilerl.arena.models.algorithms import MultiAgentAlgorithmSpec
 
-        spec = MultiAgentRLAlgorithmSpec()
+        spec = MultiAgentAlgorithmSpec()
         mock_algo_cls = MagicMock()
         mock_algo = MagicMock()
         mock_algo_cls.return_value = mock_algo
@@ -713,16 +713,16 @@ class TestBuildAlgorithmMissingArgsRaise:
     """build_algorithm overrides reject missing required inputs."""
 
     def test_rl_spec_requires_spaces_and_index(self):
-        from agilerl.arena.models.algorithms import RLAlgorithmSpec
+        from agilerl.arena.models.algorithms import SingleAgentAlgorithmSpec
 
-        spec = RLAlgorithmSpec(learn_step=1)
+        spec = SingleAgentAlgorithmSpec(learn_step=1)
         with pytest.raises(ValueError, match="observation_space"):
             build_from_spec(spec)
 
     def test_multi_agent_spec_requires_spaces_and_index(self):
-        from agilerl.arena.models.algorithms import MultiAgentRLAlgorithmSpec
+        from agilerl.arena.models.algorithms import MultiAgentAlgorithmSpec
 
-        spec = MultiAgentRLAlgorithmSpec()
+        spec = MultiAgentAlgorithmSpec()
         with pytest.raises(ValueError, match="observation_spaces"):
             build_from_spec(spec)
 
@@ -738,9 +738,9 @@ class TestBuildAlgorithmForwardsOnlySetFields:
     """Unset spec fields must fall through to the algorithm's own defaults."""
 
     def test_rl_spec_forwards_only_set_fields(self):
-        from agilerl.arena.models.algorithms import RLAlgorithmSpec
+        from agilerl.arena.models.algorithms import SingleAgentAlgorithmSpec
 
-        spec = RLAlgorithmSpec(learn_step=2)
+        spec = SingleAgentAlgorithmSpec(learn_step=2)
         mock_algo_cls = MagicMock()
         with patch.object(
             select_builder(spec), "algo_class", return_value=mock_algo_cls
@@ -757,9 +757,9 @@ class TestBuildAlgorithmForwardsOnlySetFields:
         assert "batch_size" not in kwargs
 
     def test_multi_agent_spec_forwards_only_set_fields(self):
-        from agilerl.arena.models.algorithms import MultiAgentRLAlgorithmSpec
+        from agilerl.arena.models.algorithms import MultiAgentAlgorithmSpec
 
-        spec = MultiAgentRLAlgorithmSpec(gamma=0.9)
+        spec = MultiAgentAlgorithmSpec(gamma=0.9)
         mock_algo_cls = MagicMock()
         with patch.object(
             select_builder(spec), "algo_class", return_value=mock_algo_cls

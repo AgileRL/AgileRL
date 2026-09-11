@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from agilerl.algorithms.core import RLAlgorithm
+from agilerl.algorithms.core import SingleAgentAlgorithm
 from agilerl.arena.models.algorithms import AlgorithmSpec
 from agilerl.builders.base import (
     AlgorithmBuilder,
@@ -25,12 +25,12 @@ class SingleAgentBuilder(AlgorithmBuilder):
     """Single-agent reinforcement learning."""
 
     @classmethod
-    def algo_class(cls, spec: AlgorithmSpec) -> type[RLAlgorithm]:
+    def algo_class(cls, spec: AlgorithmSpec) -> type[SingleAgentAlgorithm]:
         resolved = super().algo_class(spec)
-        if not issubclass(resolved, RLAlgorithm):
+        if not issubclass(resolved, SingleAgentAlgorithm):
             msg = (
                 f"{type(spec).__name__} resolved to {resolved.__name__}, "
-                "which is not a subclass of RLAlgorithm."
+                "which is not a subclass of SingleAgentAlgorithm."
             )
             raise TypeError(msg)
         return resolved
@@ -44,7 +44,7 @@ class SingleAgentBuilder(AlgorithmBuilder):
         *,
         runtime: AlgorithmBuildRuntime | None = None,
         **networks: Any,
-    ) -> RLAlgorithm:
+    ) -> SingleAgentAlgorithm:
         """Build a single-agent algorithm.
 
         :param spec: The algorithm spec.
@@ -60,7 +60,7 @@ class SingleAgentBuilder(AlgorithmBuilder):
             algorithm takes.
         :type networks: EvolvableModule
         :returns: Single-agent algorithm instance.
-        :rtype: RLAlgorithm
+        :rtype: SingleAgentAlgorithm
         :raises ValueError: If observation_space, action_space, or index is None.
         """
         runtime = runtime or AlgorithmBuildRuntime()

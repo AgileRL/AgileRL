@@ -10,8 +10,8 @@ import pytest
 from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.algorithms.core import (
     LLMAlgorithm,
-    MultiAgentRLAlgorithm,
-    RLAlgorithm,
+    MultiAgentAlgorithm,
+    SingleAgentAlgorithm,
 )
 from agilerl.arena.models.algorithms import (
     DPOSpec,
@@ -20,10 +20,10 @@ from agilerl.arena.models.algorithms import (
     IPPOSpec,
     LLMAlgorithmSpec,
     MADDPGSpec,
-    MultiAgentRLAlgorithmSpec,
+    MultiAgentAlgorithmSpec,
     PPOSpec,
-    RLAlgorithmSpec,
     SFTSpec,
+    SingleAgentAlgorithmSpec,
 )
 from agilerl.arena.models.networks import (
     LoraConfigDict,
@@ -67,8 +67,8 @@ class TestAlgoClass:
     @pytest.mark.parametrize(
         ("spec_cls", "builder", "base"),
         [
-            (DQNSpec, SingleAgentBuilder, RLAlgorithm),
-            (MADDPGSpec, MultiAgentBuilder, MultiAgentRLAlgorithm),
+            (DQNSpec, SingleAgentBuilder, SingleAgentAlgorithm),
+            (MADDPGSpec, MultiAgentBuilder, MultiAgentAlgorithm),
             pytest.param(DPOSpec, LLMBuilder, LLMAlgorithm, marks=requires_llm),
             pytest.param(SFTSpec, LLMBuilder, LLMAlgorithm, marks=requires_llm),
         ],
@@ -109,11 +109,11 @@ class TestAlgoClass:
 class TestBuildRequiresRuntimeArgs:
     def test_rl_requires_spaces_and_index(self):
         with pytest.raises(ValueError, match="observation_space"):
-            SingleAgentBuilder.build(RLAlgorithmSpec(learn_step=1))
+            SingleAgentBuilder.build(SingleAgentAlgorithmSpec(learn_step=1))
 
     def test_multi_agent_requires_spaces_and_index(self):
         with pytest.raises(ValueError, match="observation_spaces"):
-            MultiAgentBuilder.build(MultiAgentRLAlgorithmSpec())
+            MultiAgentBuilder.build(MultiAgentAlgorithmSpec())
 
     def test_llm_requires_tokenizer(self):
         with pytest.raises(ValueError, match="requires a tokenizer"):
@@ -273,7 +273,7 @@ class TestAlgoClassParadigmGuards:
         # The registry walks the MRO but stops at the paradigm bases, which
         # name no concrete algorithm.
         with pytest.raises(AttributeError, match="No algorithm class"):
-            SingleAgentBuilder.algo_class(RLAlgorithmSpec())
+            SingleAgentBuilder.algo_class(SingleAgentAlgorithmSpec())
 
     def test_unresolved_llm_spec_points_at_the_llm_extra(self, monkeypatch):
         from agilerl.builders import base as builders_base
@@ -291,7 +291,7 @@ class TestAlgoClassParadigmGuards:
             LLMBuilder.algo_class(DQNSpec())
 
     def test_multi_agent_builder_rejects_an_rl_resolution(self):
-        with pytest.raises(TypeError, match="not a subclass of MultiAgentRLAlgorithm"):
+        with pytest.raises(TypeError, match="not a subclass of MultiAgentAlgorithm"):
             MultiAgentBuilder.algo_class(DQNSpec())
 
 

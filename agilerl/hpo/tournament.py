@@ -104,8 +104,8 @@ class TournamentSelection:
         population: list[AgentT],
     ) -> tuple[AgentT, list[AgentT], None]:
         """Return best agent and new population of agents following tournament selection. Used for
-        a population of :class:`RLAlgorithm <agilerl.algorithms.core.RLAlgorithm>` or
-        :class:`MultiAgentRLAlgorithm <agilerl.algorithms.core.MultiAgentRLAlgorithm>` agents.
+        a population of :class:`SingleAgentAlgorithm <agilerl.algorithms.core.SingleAgentAlgorithm>` or
+        :class:`MultiAgentAlgorithm <agilerl.algorithms.core.MultiAgentAlgorithm>` agents.
 
         :param population: Population of agents
         :type population: list[AgentT]

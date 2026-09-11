@@ -11,7 +11,7 @@ from pydantic import Field
 
 from agilerl.arena.models.algorithms.base import (
     ON_POLICY_HPO_RANGES,
-    RLAlgorithmSpec,
+    SingleAgentAlgorithmSpec,
 )
 from agilerl.arena.models.descriptions import (
     ACTION_STD_INIT,
@@ -34,7 +34,7 @@ from agilerl.arena.models.registry import register
 @register("Recurrent PPO")
 @register("RecurrentPPO")
 @register()
-class PPOSpec(RLAlgorithmSpec):
+class PPOSpec(SingleAgentAlgorithmSpec):
     """Proximal Policy Optimization."""
 
     num_envs: int = Field(

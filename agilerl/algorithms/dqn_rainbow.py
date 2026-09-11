@@ -13,7 +13,7 @@ from tensordict import TensorDict
 from torch import optim
 from torch.nn.utils import clip_grad_norm_
 
-from agilerl.algorithms.core import OptimizerWrapper, RLAlgorithm
+from agilerl.algorithms.core import OptimizerWrapper, SingleAgentAlgorithm
 from agilerl.algorithms.core.registry import (
     HyperparameterConfig,
     NetworkGroup,
@@ -39,7 +39,7 @@ from agilerl.utils.algo_utils import (
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 
 
-class RainbowDQN(RLAlgorithm[TensorDict]):
+class RainbowDQN(SingleAgentAlgorithm[TensorDict]):
     """Rainbow Deep Q-Network (DQN).
 
     Paper: https://arxiv.org/abs/1710.02298
@@ -94,7 +94,7 @@ class RainbowDQN(RLAlgorithm[TensorDict]):
     :type wrap: bool, optional
     """
 
-    # Narrowed from RLAlgorithm.action_space; enforced at construction.
+    # Narrowed from SingleAgentAlgorithm.action_space; enforced at construction.
     action_space: spaces.Discrete
 
     # Discrete action space, so the network output size is a plain int
