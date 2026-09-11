@@ -7440,12 +7440,47 @@ class TestLLMInitializeActorsExpertLoraGuards:
         ):
             LLMAlgorithm._initialize_actors(agent, base_model, add_adapters=True)
 
-    def test_target_parameters_rejects_extra_adapters(self) -> None:
+    def test_target_parameters_attaches_reference_adapter(self) -> None:
         lora = MagicMock()
         lora.target_parameters = ["experts.up_proj"]
         lora.lora_dropout = 0.0
         agent = _make_llm_agent(lora_config=lora)
         agent.selected_adapters = ("actor", "reference")
+        peft_actor = _make_mock_peft_actor()
+        peft_actor.peft_config = {"actor": MagicMock()}
+        base_model = torch.nn.Linear(4, 4)
+
+        with (
+            patch(
+                "agilerl.algorithms.core.base.adapt_lora_config_for_model",
+                side_effect=lambda _model, cfg, **kw: cfg,
+            ),
+            patch(
+                "agilerl.algorithms.core.base.get_peft_model",
+                return_value=peft_actor,
+            ),
+            patch(
+                "agilerl.algorithms.core.base.patch_lora_for_fused_forward",
+                create=True,
+            ),
+            patch("agilerl.algorithms.core.base.HAS_LIGER_KERNEL", False),
+            patch(
+                "agilerl.algorithms.core.base.upgrade_moe_param_wrappers",
+                return_value=1,
+            ),
+            patch.object(agent, "use_adapter"),
+        ):
+            LLMAlgorithm._initialize_actors(agent, base_model, add_adapters=True)
+
+        peft_actor.add_adapter.assert_called_once()
+        assert peft_actor.add_adapter.call_args.kwargs["adapter_name"] == "reference"
+
+    def test_target_parameters_rejects_value_head(self) -> None:
+        lora = MagicMock()
+        lora.target_parameters = ["experts.up_proj"]
+        lora.lora_dropout = 0.0
+        agent = _make_llm_agent(lora_config=lora)
+        agent.selected_adapters = ("actor", "reference", "critic")
         base_model = torch.nn.Linear(4, 4)
 
         with (
@@ -7458,9 +7493,55 @@ class TestLLMInitializeActorsExpertLoraGuards:
                 create=True,
             ),
             patch("agilerl.algorithms.core.base.HAS_LIGER_KERNEL", False),
-            pytest.raises(ValueError, match="only the 'actor' adapter"),
+            pytest.raises(ValueError, match="use_value_head=False"),
         ):
             LLMAlgorithm._initialize_actors(agent, base_model, add_adapters=True)
+
+    def test_target_parameters_attaches_actor_and_reference_wrappers(self) -> None:
+        from peft.tuners.lora.layer import ParamWrapper
+
+        lora = LoraConfig(
+            r=4,
+            lora_alpha=8,
+            lora_dropout=0.0,
+            target_modules=[],
+            target_parameters=["experts.up_proj", "experts.down_proj"],
+        )
+        agent = _make_llm_agent(lora_config=lora, use_separate_reference_adapter=True)
+        agent.selected_adapters = ("actor", "reference")
+        agent.use_value_head = False
+        agent.zero_stage = None
+        base_model = _PackedMoeModel()
+
+        with (
+            patch(
+                "agilerl.algorithms.core.base.adapt_lora_config_for_model",
+                side_effect=lambda _model, cfg, **kw: cfg,
+            ),
+            patch(
+                "agilerl.algorithms.core.base.patch_lora_for_fused_forward",
+                create=True,
+            ),
+            patch("agilerl.algorithms.core.base.HAS_LIGER_KERNEL", False),
+            patch(
+                "agilerl.algorithms.core.base.DummyEvolvable",
+                side_effect=lambda module, device: module,
+            ),
+        ):
+            LLMAlgorithm._initialize_actors(agent, base_model, add_adapters=True)
+
+        wrappers = [
+            module
+            for module in agent.actor.modules()
+            if isinstance(module, ParamWrapper)
+        ]
+        assert wrappers
+        assert "actor" in agent.actor.peft_config
+        assert "reference" in agent.actor.peft_config
+        for wrapper in wrappers:
+            assert set(wrapper.lora_A) == {"actor", "reference"}
+            assert wrapper.lora_A["actor"].weight.requires_grad
+            assert not wrapper.lora_A["reference"].weight.requires_grad
 
     def test_zero3_upgrades_and_marks_expert_wrappers(self) -> None:
         lora = MagicMock()

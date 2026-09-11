@@ -370,6 +370,100 @@ def test_fused_mixed_routing_raises():
     unpatch_lora_for_fused_forward(upgraded)
 
 
+def _actor_reference_model(block_cls, target_parameters):
+    torch.manual_seed(0)
+    model = inject_adapter_in_model(
+        _lora_config(target_parameters, init_lora_weights=False),
+        block_cls(),
+        adapter_name="actor",
+    )
+    model = inject_adapter_in_model(
+        _lora_config(target_parameters, init_lora_weights=False),
+        model,
+        adapter_name="reference",
+    )
+    assert upgrade_moe_param_wrappers(model) > 0
+    for wrapper in _wrappers(model):
+        wrapper.set_adapter("actor")
+    for name, param in model.named_parameters():
+        if "lora" not in name:
+            continue
+        param.requires_grad_("actor" in name)
+    return model
+
+
+def test_actor_reference_expert_lora_wrappers_and_freeze():
+    model = _actor_reference_model(
+        _UngatedMoeBlock, ["experts.up_proj", "experts.down_proj"]
+    )
+    wrappers = _wrappers(model)
+    assert wrappers
+    for wrapper in wrappers:
+        assert set(wrapper.lora_A) == {"actor", "reference"}
+        assert wrapper.lora_A["actor"].weight.requires_grad
+        assert not wrapper.lora_A["reference"].weight.requires_grad
+
+    x = torch.randn(12, HIDDEN)
+    model.eval()
+    with torch.no_grad():
+        for wrapper in wrappers:
+            wrapper.set_adapter("actor")
+        actor_out = model(x)
+        for wrapper in wrappers:
+            wrapper.set_adapter("reference")
+        reference_out = model(x)
+        for wrapper in wrappers:
+            wrapper.enable_adapters(False)
+        base_out = model(x)
+        for wrapper in wrappers:
+            wrapper.enable_adapters(True)
+            wrapper.set_adapter("actor")
+
+    assert not torch.allclose(actor_out, reference_out, atol=1e-5)
+    assert not torch.allclose(reference_out, base_out, atol=1e-5)
+
+    before = {
+        name: param.detach().clone()
+        for name, param in model.named_parameters()
+        if "reference" in name
+    }
+    model.train()
+    model(x).square().mean().backward()
+    for name, param in model.named_parameters():
+        if "actor" in name and param.requires_grad:
+            assert param.grad is not None
+            param.data.add_(param.grad, alpha=-0.1)
+        if "reference" in name:
+            assert param.grad is None or torch.count_nonzero(param.grad) == 0
+    for name, snapshot in before.items():
+        assert torch.equal(model.get_parameter(name), snapshot)
+
+
+@pytest.mark.parametrize(
+    ("block_cls", "targets"),
+    [
+        (_RoutedMoeBlock, ["experts.gate_up_proj", "experts.down_proj"]),
+        (_UngatedMoeBlock, ["experts.up_proj", "experts.down_proj"]),
+    ],
+)
+def test_fused_mixed_actor_reference_matches_uniform_slices(block_cls, targets):
+    model = _actor_reference_model(block_cls, targets)
+    x = torch.randn(12, HIDDEN)
+    patch_lora_for_fused_forward(model)
+    with torch.no_grad():
+        set_fused_adapter_routing(model, ["actor"] * 12)
+        all_actor = model(x)
+        set_fused_adapter_routing(model, ["reference"] * 12)
+        all_reference = model(x)
+        set_fused_adapter_routing(model, ["actor"] * 6 + ["reference"] * 6)
+        mixed = model(x)
+    unset_fused_adapter_routing(model)
+    unpatch_lora_for_fused_forward(model)
+
+    assert torch.allclose(mixed[:6], all_actor[:6], atol=1e-5)
+    assert torch.allclose(mixed[6:], all_reference[6:], atol=1e-5)
+
+
 def test_fused_mixed_routing_raises_on_fallback_param_wrapper():
     model = inject_adapter_in_model(
         _lora_config(["odd.weight"]), _odd_model(), adapter_name="actor"

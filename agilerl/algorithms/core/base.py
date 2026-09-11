@@ -4827,15 +4827,17 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
                         "product."
                     )
                     raise ValueError(msg)
+                # PEFT hosts multiple target_parameters adapters only when they
+                # share the same parameter set; actor+reference uses that.
                 extra_adapters = [a for a in self.selected_adapters if a != "actor"]
-                if extra_adapters:
+                unsupported = [a for a in extra_adapters if a != "reference"]
+                if unsupported:
                     msg = (
                         "lora_config.target_parameters (packed-experts LoRA) "
-                        "supports only the 'actor' adapter — PEFT allows one "
-                        "adapter per model with target_parameters, but "
-                        f"selected_adapters also lists {extra_adapters}. Use "
-                        "use_separate_reference_adapter=False and no value "
-                        "head with expert LoRA."
+                        "does not support adapters "
+                        f"{unsupported}. Actor plus a frozen 'reference' "
+                        "adapter is attached; a value head is not. Set "
+                        "use_value_head=False."
                     )
                     raise ValueError(msg)
             keep_adapter_base_dtype = self.zero_stage == 3 and not quantized_base
@@ -5101,8 +5103,8 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         if self.calc_position_embeddings:
             position_ids = self._position_ids_from_mask(fused_mask)
 
-        # Micro-batches never straddle an adapter run: packed-experts LoRA
-        # layers see expert-sorted rows and can only apply one adapter per
+        # Micro-batches never straddle an adapter run: sorted-experts LoRA
+        # wrappers see expert-sorted rows and can only apply one adapter per
         # forward call.
         chunks = (
             [(0, total)]

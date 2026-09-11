@@ -447,17 +447,17 @@ class TestParamWrapperRoutedForward:
         assert calls == [False, True]
         ROUTING_STATE.pop(layer, None)
 
-    def test_active_adapters_mismatch_raises(self) -> None:
+    def test_routed_adapter_applies_when_another_is_active(self) -> None:
         model = _build_model(adapters=("actor", "critic"))
         layer = model.proj
+        x = torch.randn(2, 8)
+        layer.set_adapter("actor")
+        expected = type(layer).forward(layer, x)
         layer.set_adapter("critic")
         ROUTING_STATE[layer] = ["actor"]
 
-        with pytest.raises(RuntimeError, match="active adapters"):
-            _param_wrapper_routed_forward(
-                layer,
-                type(layer).forward,
-                torch.randn(2, 8),
-            )
+        out = _param_wrapper_routed_forward(layer, type(layer).forward, x)
 
+        assert torch.allclose(out, expected)
+        assert list(layer.active_adapters) == ["critic"]
         ROUTING_STATE.pop(layer, None)

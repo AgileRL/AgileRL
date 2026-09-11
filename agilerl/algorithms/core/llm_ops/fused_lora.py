@@ -42,7 +42,9 @@ def uniform_routed_adapter(layer: LoraLayer) -> str | None:
 
     Parameter-level LoRA applies its delta to whole parameters (and packed
     experts see rows grouped by expert, not by sample), so only uniform
-    routings are computable there; mixed routings raise.
+    routings are computable on the default ``ParamWrapper`` / sorted-experts
+    path; mixed routings raise. Self-routing packed-experts wrappers apply
+    per-token adapter masks instead.
     """
     routing = ROUTING_STATE.get(layer)
     if routing is None:
@@ -51,9 +53,9 @@ def uniform_routed_adapter(layer: LoraLayer) -> str | None:
     if len(names) > 1:
         msg = (
             "Fused multi-adapter routing is not supported on parameter-level "
-            "LoRA layers (LoraConfig.target_parameters). Use a single-adapter "
-            "configuration (e.g. use_separate_reference_adapter=False, no "
-            "value head)."
+            "LoRA layers (LoraConfig.target_parameters). Packed-experts "
+            "wrappers regroup tokens by expert, so a mixed batch must be "
+            "split into uniform adapter runs (adapter_aligned_chunks)."
         )
         raise RuntimeError(msg)
     return next(iter(names))
@@ -163,15 +165,14 @@ def _param_wrapper_routed_forward(
     if name is None:
         return original_forward(layer, x, *forward_args, **forward_kwargs)
     if name in layer.lora_A:
-        if list(layer.active_adapters) != [name]:
-            msg = (
-                f"Fused routing requested adapter {name!r} on a "
-                "parameter-level LoRA wrapper whose active adapters are "
-                f"{list(layer.active_adapters)}; set the adapter before "
-                "routing."
-            )
-            raise RuntimeError(msg)
-        return original_forward(layer, x, *forward_args, **forward_kwargs)
+        previous = list(layer.active_adapters)
+        if previous != [name]:
+            layer.set_adapter(name)
+        try:
+            return original_forward(layer, x, *forward_args, **forward_kwargs)
+        finally:
+            if previous != [name] and previous:
+                layer.set_adapter(previous if len(previous) > 1 else previous[0])
     previously_disabled = layer.disable_adapters
     layer.enable_adapters(False)
     try:
