@@ -17,7 +17,7 @@ from pettingzoo import ParallelEnv
 from tensordict import TensorDict
 from torch import nn, optim
 
-from agilerl.algorithms.core import MultiAgentRLAlgorithm, OptimizerWrapper
+from agilerl.algorithms.core import MultiAgentAlgorithm, OptimizerWrapper
 from agilerl.algorithms.core.registry import (
     HyperparameterConfig,
     NetworkGroup,
@@ -59,7 +59,7 @@ from agilerl.vector.pz_vec_env import PettingZooVecEnv
 SupportedActionSpace = spaces.Discrete | spaces.Box
 
 
-class MATD3(MultiAgentRLAlgorithm[TensorDict]):
+class MATD3(MultiAgentAlgorithm[TensorDict]):
     """Multi-Agent Twin Delayed Deep Deterministic Policy Gradient (MATD3).
 
     Paper: https://arxiv.org/abs/1910.01465

@@ -10,7 +10,7 @@ from typing import ClassVar
 from pydantic import Field, model_validator
 from typing_extensions import Self
 
-from agilerl.arena.models.algorithms.base import RLAlgorithmSpec
+from agilerl.arena.models.algorithms.base import SingleAgentAlgorithmSpec
 from agilerl.arena.models.descriptions import LR, NET_CONFIG, TAU
 from agilerl.arena.models.networks import RainbowQNetworkSpec
 from agilerl.arena.models.registry import register
@@ -18,7 +18,7 @@ from agilerl.arena.models.registry import register
 
 @register("Rainbow DQN")
 @register()
-class RainbowDQNSpec(RLAlgorithmSpec):
+class RainbowDQNSpec(SingleAgentAlgorithmSpec):
     """Rainbow DQN."""
 
     tau: float = Field(default=0.001, description=TAU)

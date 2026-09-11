@@ -118,7 +118,7 @@ class AlgorithmSpec(BaseModel):
         return self.__class__.__name__.removesuffix("Spec")
 
 
-class RLAlgorithmSpec(AlgorithmSpec):
+class SingleAgentAlgorithmSpec(AlgorithmSpec):
     """Single-agent reinforcement learning algorithms."""
 
     learn_step: int = Field(
@@ -151,7 +151,7 @@ class RLAlgorithmSpec(AlgorithmSpec):
     hpo_ranges: ClassVar[dict[str, RLHyperparameter]] = RL_HPO_RANGES
 
 
-class MultiAgentRLAlgorithmSpec(AlgorithmSpec):
+class MultiAgentAlgorithmSpec(AlgorithmSpec):
     """Multi-agent reinforcement learning algorithms."""
 
     learn_step: int = Field(
@@ -519,4 +519,4 @@ class LLMAlgorithmSpec(AlgorithmSpec):
         return self
 
 
-AlgoSpec = RLAlgorithmSpec | MultiAgentRLAlgorithmSpec | LLMAlgorithmSpec
+AlgoSpec = SingleAgentAlgorithmSpec | MultiAgentAlgorithmSpec | LLMAlgorithmSpec

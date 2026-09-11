@@ -17,7 +17,7 @@ from pettingzoo import ParallelEnv
 from tensordict import TensorDict
 from torch import nn, optim
 
-from agilerl.algorithms.core import MultiAgentRLAlgorithm, OptimizerWrapper
+from agilerl.algorithms.core import MultiAgentAlgorithm, OptimizerWrapper
 from agilerl.algorithms.core.registry import (
     HyperparameterConfig,
     NetworkGroup,
@@ -58,7 +58,7 @@ from agilerl.vector.pz_vec_env import PettingZooVecEnv
 SupportedActionSpace = spaces.Discrete | spaces.Box
 
 
-class MADDPG(MultiAgentRLAlgorithm[TensorDict]):
+class MADDPG(MultiAgentAlgorithm[TensorDict]):
     """Multi-Agent Deep Deterministic Policy Gradient (MADDPG).
 
     Paper: https://arxiv.org/abs/1706.02275

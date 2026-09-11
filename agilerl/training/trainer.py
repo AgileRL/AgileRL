@@ -17,8 +17,8 @@ from typing_extensions import Never, Self
 from agilerl import HAS_LLM_DEPENDENCIES, AgentType
 from agilerl.algorithms.core.base import (
     LLMAlgorithm,
-    MultiAgentRLAlgorithm,
-    RLAlgorithm,
+    MultiAgentAlgorithm,
+    SingleAgentAlgorithm,
 )
 from agilerl.arena import ArenaClient
 from agilerl.arena.models import BanditEnvSpec as ArenaBanditEnvSpec
@@ -40,7 +40,7 @@ from agilerl.models import (
     MutationSpec,
     PPOSpec,
     ReplayBufferSpec,
-    RLAlgorithmSpec,
+    SingleAgentAlgorithmSpec,
     TournamentSelectionSpec,
     TrainingManifest,
     TrainingSpec,
@@ -89,7 +89,7 @@ logger = logging.getLogger(__name__)
 
 EnvSpecType = EnvSpec
 ReplayBufferType = ReplayBufferSpec | LLMRolloutBufferSpec | None
-PopulationType = list[RLAlgorithm | MultiAgentRLAlgorithm | LLMAlgorithm]
+PopulationType = list[SingleAgentAlgorithm | MultiAgentAlgorithm | LLMAlgorithm]
 
 
 def _algorithm_with_network(manifest: TrainingManifest) -> AlgoSpec:
@@ -620,11 +620,11 @@ class LocalTrainer(Trainer):
         """
         if "net_config" not in type(self.algorithm_spec).model_fields:
             return
-        # The base MultiAgentRLAlgorithmSpec carries no net_config field; each
+        # The base MultiAgentAlgorithmSpec carries no net_config field; each
         # concrete multi-agent spec declares its own, so narrow to those.
         if not isinstance(
             self.algorithm_spec,
-            (RLAlgorithmSpec, IPPOSpec, MADDPGSpec, MATD3Spec),
+            (SingleAgentAlgorithmSpec, IPPOSpec, MADDPGSpec, MATD3Spec),
         ):
             return
         raw_net_config = self.algorithm_spec.net_config
@@ -663,7 +663,7 @@ class LocalTrainer(Trainer):
             recurrent=recurrent,
         )
         resolved = {**net_config, "encoder_config": encoder_config}
-        if isinstance(self.algorithm_spec, RLAlgorithmSpec):
+        if isinstance(self.algorithm_spec, SingleAgentAlgorithmSpec):
             spec_cls = self._algo_net_spec_cls()
             self.algorithm_spec.net_config = spec_cls.model_validate(
                 {
