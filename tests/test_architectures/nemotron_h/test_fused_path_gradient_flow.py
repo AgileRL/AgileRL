@@ -25,9 +25,6 @@ from agilerl.architectures.nemotron_h.mamba import (
 )
 from agilerl.utils.llm_utils import adapt_lora_config_for_model
 
-CHECKPOINT_ID = "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16"
-
-
 KERNEL_GLOBALS = ("mamba_split_conv1d_scan_combined", "mamba_chunk_scan_combined")
 
 
@@ -157,8 +154,7 @@ def test_family_patches_after_build_restore_out_proj_lora_gradients(
     pristine_mixer_class,
 ):
     base = _tiny_nemotron_h()
-    patched = install_family_patches(CHECKPOINT_ID, zero_stage=2, model=base)
-    assert patched == "nemotron_h"
+    install_family_patches(base.config.model_type, base)
     assert base.model.layers[0].mixer.use_mem_eff_path is False
     _force_cuda_kernels_path()
 

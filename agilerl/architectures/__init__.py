@@ -1,77 +1,62 @@
 # Copyright 2026 AgileRL
 # SPDX-License-Identifier: Apache-2.0
 
-"""Architecture-scoped model patches, dispatched by family.
+"""Architecture-scoped family runtime catalog and patches.
 
-A family is a stable key (``nemotron_h``) detected from the checkpoint id.
-:func:`install_family_patches` runs the family's installer with the run's
-ZeRO stage.
+Per-``model_type`` trainer, vLLM, and patch defaults live in
+:mod:`agilerl.architectures.catalog`. :func:`family_runtime` reads
+``config.json`` then looks up that type. :func:`install_family_patches` calls
+:attr:`~agilerl.architectures.runtime.PatchRuntimeConfig.install` when it is
+set.
 """
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from agilerl.architectures.nemotron_h import install_nemotron_h_patches
+from agilerl.architectures.catalog import (
+    FAMILY_RUNTIME_CONFIGS,
+    family_runtime,
+    pretrained_model_type,
+)
+from agilerl.architectures.runtime import (
+    MambaPatchConfig,
+    ModelRuntimeConfig,
+    PatchRuntimeConfig,
+    TrainerRuntimeConfig,
+    VllmRuntimeConfig,
+)
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
-
     from peft import PeftModel
     from transformers import PreTrainedModel
 
 __all__ = [
-    "FAMILY_PATCHES",
-    "detect_model_family",
+    "FAMILY_RUNTIME_CONFIGS",
+    "MambaPatchConfig",
+    "ModelRuntimeConfig",
+    "PatchRuntimeConfig",
+    "TrainerRuntimeConfig",
+    "VllmRuntimeConfig",
+    "family_runtime",
     "install_family_patches",
+    "pretrained_model_type",
 ]
-
-FAMILY_PATCHES: Mapping[str, Callable[..., object]] = {
-    "nemotron_h": install_nemotron_h_patches,
-}
-
-
-def detect_model_family(model_name_or_path: str | None) -> str | None:
-    """Detect the architecture family from a Hugging Face id or local path.
-
-    Hybrid Nano / Nemotron-H checkpoints often omit ``H`` from the repo name
-    (e.g. ``NVIDIA-Nemotron-3-Nano-30B-A3B-BF16``) even when
-    ``model_type == "nemotron_h"``, so the substring is intentionally broad.
-
-    :param model_name_or_path: Hugging Face id or local path, or None.
-    :type model_name_or_path: str | None
-    :return: Family key that should receive patches, or None.
-    :rtype: str | None
-    """
-    if not model_name_or_path:
-        return None
-    normalized = model_name_or_path.replace("\\", "/").lower()
-    if "nemotron" in normalized:
-        return "nemotron_h"
-    return None
 
 
 def install_family_patches(
-    model_name_or_path: str | None,
-    *,
-    zero_stage: int,
+    model_type: str | None,
     model: PreTrainedModel | PeftModel | None = None,
-) -> str | None:
-    """Install the detected family's patches for this ZeRO stage.
+) -> None:
+    """Install the family's catalog patches when patch.install is set.
 
-    :param model_name_or_path: Hugging Face id or local path, or None.
-    :type model_name_or_path: str | None
-    :param zero_stage: DeepSpeed ZeRO stage for this run.
-    :type zero_stage: int
+    :param model_type: Hugging Face ``model_type``, or None.
+    :type model_type: str | None
     :param model: Already-built model the patches also apply to, or None.
     :type model: PreTrainedModel | PeftModel | None
-    :return: The family that was patched, or None.
-    :rtype: str | None
     """
-    family = detect_model_family(model_name_or_path)
-    if family is None:
-        return None
-    patch = FAMILY_PATCHES.get(family)
-    if patch is not None:
-        patch(model=model, zero_stage=zero_stage)
-    return family
+    runtime = FAMILY_RUNTIME_CONFIGS.get(model_type, ModelRuntimeConfig())
+    install = runtime.patch.install
+    if install is None:
+        return
+    install(runtime.patch, model=model)

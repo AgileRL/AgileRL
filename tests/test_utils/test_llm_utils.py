@@ -1663,7 +1663,9 @@ class TestCreateModelFromNameOrPathValueHead:
     when a value head is requested.
     """
 
-    def test_add_value_head_calls_value_head_loader(self) -> None:
+    def test_add_value_head_calls_value_head_loader(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         from agilerl.utils import llm_utils as llm_utils_module
 
         # When agilerl[llm] isn't installed (e.g. Windows CI without vllm),
@@ -1677,6 +1679,10 @@ class TestCreateModelFromNameOrPathValueHead:
                 "AutoModelForCausalLMWithValueHead unavailable without agilerl[llm]."
             )
 
+        monkeypatch.setattr(
+            "transformers.AutoConfig.from_pretrained",
+            lambda *args, **kwargs: SimpleNamespace(model_type="llama"),
+        )
         sentinel_model = object()
         with patch.object(
             llm_utils_module.AutoModelForCausalLMWithValueHead,
@@ -2520,6 +2526,13 @@ class TestFlexDecodeKernelOptions:
 
 
 class TestCreateModelFromNameOrPathDefaults:
+    @pytest.fixture(autouse=True)
+    def stub_llama_model_type(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(
+            "transformers.AutoConfig.from_pretrained",
+            lambda *args, **kwargs: SimpleNamespace(model_type="llama"),
+        )
+
     @staticmethod
     def _fake_loader(captured):
         class _Loader:
@@ -2580,6 +2593,56 @@ class TestCreateModelFromNameOrPathDefaults:
         assert patch_calls == [1]
         # The caller's dict is copied, not mutated.
         assert caller_config == {"attn_implementation": "flex_attention"}
+
+    @pytest.mark.parametrize("model_type", ["gemma3", "gemma4"])
+    def test_gemma_swa_defaults_to_flex_attention(self, monkeypatch, model_type: str):
+        captured = {}
+        patch_calls = []
+        monkeypatch.setattr(
+            llm_utils_module, "AutoModelForCausalLM", self._fake_loader(captured)
+        )
+        monkeypatch.setattr(
+            llm_utils_module,
+            "patch_flex_attention_kernel_options",
+            lambda *a, **k: patch_calls.append(1),
+        )
+        monkeypatch.setattr("importlib.util.find_spec", lambda name: object())
+        monkeypatch.setattr(
+            "transformers.AutoConfig.from_pretrained",
+            lambda *args, **kwargs: SimpleNamespace(model_type=model_type),
+        )
+        create_model_from_name_or_path("google/gemma")
+        assert captured["kwargs"]["attn_implementation"] == "flex_attention"
+        assert patch_calls == [1]
+
+    def test_gemma2_does_not_default_to_flex_attention(self, monkeypatch):
+        captured = {}
+        monkeypatch.setattr(
+            llm_utils_module, "AutoModelForCausalLM", self._fake_loader(captured)
+        )
+        monkeypatch.setattr("importlib.util.find_spec", lambda name: object())
+        monkeypatch.setattr(
+            "transformers.AutoConfig.from_pretrained",
+            lambda *args, **kwargs: SimpleNamespace(model_type="gemma2"),
+        )
+        create_model_from_name_or_path("google/gemma-2-9b")
+        assert captured["kwargs"]["attn_implementation"] != "flex_attention"
+
+    def test_explicit_attn_implementation_not_overwritten(self, monkeypatch):
+        captured = {}
+        monkeypatch.setattr(
+            llm_utils_module, "AutoModelForCausalLM", self._fake_loader(captured)
+        )
+        monkeypatch.setattr("importlib.util.find_spec", lambda name: object())
+        monkeypatch.setattr(
+            "transformers.AutoConfig.from_pretrained",
+            lambda *args, **kwargs: SimpleNamespace(model_type="gemma4"),
+        )
+        create_model_from_name_or_path(
+            "google/gemma-4",
+            model_config={"attn_implementation": "sdpa"},
+        )
+        assert captured["kwargs"]["attn_implementation"] == "sdpa"
 
 
 class TestValidateImportanceSamplingLevel:
@@ -2841,6 +2904,13 @@ def _vllm_config(**overrides):
 
 
 class TestBuildVllmLlmInitKwargs:
+    @pytest.fixture(autouse=True)
+    def stub_llama_model_type(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(
+            "transformers.AutoConfig.from_pretrained",
+            lambda *args, **kwargs: SimpleNamespace(model_type="llama"),
+        )
+
     def test_defaults_fall_back_to_trainer_model(self):
         kwargs = build_vllm_llm_init_kwargs(
             _vllm_config(),
@@ -2896,6 +2966,64 @@ class TestBuildVllmLlmInitKwargs:
         assert kwargs["max_num_batched_tokens"] == 4096
         assert kwargs["seed"] == 2  # process_index // tensor_parallel_size
         assert kwargs["max_lora_rank"] == 64  # trainer rank outranks the config
+
+    def test_nemotron_family_defaults_fill_unset_engine_kwargs(self, monkeypatch):
+        monkeypatch.setattr(
+            "transformers.AutoConfig.from_pretrained",
+            lambda *args, **kwargs: SimpleNamespace(model_type="nemotron_h"),
+        )
+        kwargs = build_vllm_llm_init_kwargs(
+            _vllm_config(),
+            trainer_model_name_or_path="nvidia/nemotron",
+            max_model_len=32768,
+        )
+        assert kwargs["mamba_cache_mode"] == "align"
+        assert kwargs["max_num_batched_tokens"] == 8192
+        assert kwargs["reasoning_parser"] == "nemotron_v3"
+        assert kwargs["enable_prefix_caching"] is True
+
+    def test_explicit_config_wins_over_nemotron_family_defaults(self, monkeypatch):
+        monkeypatch.setattr(
+            "transformers.AutoConfig.from_pretrained",
+            lambda *args, **kwargs: SimpleNamespace(model_type="nemotron_h"),
+        )
+        kwargs = build_vllm_llm_init_kwargs(
+            _vllm_config(max_num_batched_tokens=4096),
+            trainer_model_name_or_path="nvidia/nemotron",
+            max_model_len=32768,
+        )
+        assert kwargs["max_num_batched_tokens"] == 4096
+        assert kwargs["mamba_cache_mode"] == "align"
+        assert kwargs["reasoning_parser"] == "nemotron_v3"
+        assert kwargs["enable_prefix_caching"] is True
+
+    def test_family_defaults_follow_vllm_model_not_trainer_path(self, monkeypatch):
+        def fake_from_pretrained(name, **kwargs):
+            model_type = "nemotron_h" if name == "nvidia/nemotron" else "qwen2"
+            return SimpleNamespace(model_type=model_type)
+
+        monkeypatch.setattr(
+            "transformers.AutoConfig.from_pretrained", fake_from_pretrained
+        )
+        kwargs = build_vllm_llm_init_kwargs(
+            _vllm_config(vllm_model_name_or_path="nvidia/nemotron"),
+            trainer_model_name_or_path="Qwen/Qwen2.5-7B",
+            max_model_len=32768,
+        )
+        assert kwargs["model"] == "nvidia/nemotron"
+        assert kwargs["mamba_cache_mode"] == "align"
+        assert kwargs["max_num_batched_tokens"] == 8192
+
+    def test_non_nemotron_keeps_generic_batched_token_cap(self):
+        kwargs = build_vllm_llm_init_kwargs(
+            _vllm_config(),
+            trainer_model_name_or_path="Qwen/Qwen2.5-7B",
+            max_model_len=32768,
+        )
+        assert kwargs["max_num_batched_tokens"] == 65536
+        assert "mamba_cache_mode" not in kwargs
+        assert "reasoning_parser" not in kwargs
+        assert "enable_prefix_caching" not in kwargs
 
 
 class TestBuildVllmRolloutLoraRequest:

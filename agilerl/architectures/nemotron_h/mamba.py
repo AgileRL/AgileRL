@@ -1,12 +1,13 @@
 # Copyright 2026 AgileRL
 # SPDX-License-Identifier: Apache-2.0
 
-"""Class-level workarounds for the Nemotron-H Mamba2 mixer.
+"""Class-level workarounds for a catalog Mamba2 mixer.
 
 Both patches install once at the class level, are idempotent, and take
-``enabled`` so a caller can turn them off. ``NemotronHMamba2Mixer`` is resolved
-when a patch runs, not when this module is imported: an absent target is a
-no-op with a warning, and a present class with the wrong shape raises.
+``enabled`` so a caller can turn them off. The mixer class is resolved from a
+dotted path when a patch runs, not when this module is imported: an absent
+target is a no-op with a warning, and a present class with the wrong shape
+raises.
 """
 
 from __future__ import annotations
@@ -17,6 +18,7 @@ from typing import TYPE_CHECKING, Any
 
 import torch
 
+from agilerl.architectures.runtime import PatchRuntimeConfig
 from agilerl.utils.patching import class_is_patched, try_import
 
 if TYPE_CHECKING:
@@ -28,12 +30,10 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 __all__ = [
-    "install_nemotron_h_patches",
+    "install_mamba_patches",
     "patch_nemotron_mamba_fused_path",
     "patch_nemotron_mamba_stream_ordering",
 ]
-
-NEMOTRON_H_MODULE = "transformers.models.nemotron_h.modeling_nemotron_h"
 
 MEM_EFF_ATTR = "use_mem_eff_path"
 
@@ -41,22 +41,26 @@ STREAM_PATCHED_FLAG = "_agilerl_mamba_stream_patched"
 FUSED_PATH_PATCHED_FLAG = "_agilerl_mamba_fused_path_patched"
 
 
-def _resolve_mixer_class() -> type | None:
-    """Resolve ``NemotronHMamba2Mixer``, or None when the modeling module is absent.
+def _resolve_mixer_class(mixer: str) -> type | None:
+    """Resolve the mixer class at ``mixer``, or None when its module is absent.
 
+    :param mixer: Dotted path ``module.Class``.
+    :type mixer: str
     :return: The mixer class, or None.
     :rtype: type | None
     """
-    module = try_import(NEMOTRON_H_MODULE)
+    module_path, sep, class_name = mixer.rpartition(".")
+    if not sep or not module_path or not class_name:
+        message = f"[mamba] invalid mixer path {mixer!r}"
+        raise RuntimeError(message)
+    module = try_import(module_path)
     if module is None:
         return None
-    mixer = getattr(module, "NemotronHMamba2Mixer", None)
-    if mixer is None:
-        message = (
-            f"[mamba] {NEMOTRON_H_MODULE} is present but missing NemotronHMamba2Mixer"
-        )
+    mixer_cls = getattr(module, class_name, None)
+    if mixer_cls is None:
+        message = f"[mamba] {module_path} is present but missing {class_name}"
         raise RuntimeError(message)
-    return mixer
+    return mixer_cls
 
 
 def _assigns_mem_eff_attr(original_init: Callable[..., None]) -> bool:
@@ -123,12 +127,13 @@ def _drop_fused_path_on_instances(
 
 def patch_nemotron_mamba_fused_path(
     *,
+    mixer: str,
     enabled: bool = True,
     model: PreTrainedModel | PeftModel | None = None,
 ) -> None:
-    """Keep every Nemotron-H Mamba2 mixer on its decomposed forward path.
+    """Keep every catalog Mamba2 mixer on its decomposed forward path.
 
-    ``NemotronHMamba2Mixer.cuda_kernels_forward`` takes a fused branch when
+    The mixer's ``cuda_kernels_forward`` takes a fused branch when
     ``use_mem_eff_path`` is set and the batch is unpadded and the mixer is in
     training mode. That branch hands ``conv1d.weight``, ``conv1d.bias``,
     ``norm.weight``, ``out_proj.weight`` and ``out_proj.bias`` to
@@ -143,6 +148,8 @@ def patch_nemotron_mamba_fused_path(
     so it only covers mixers built afterwards; pass ``model`` to sweep mixers
     that already exist.
 
+    :param mixer: Dotted path of the mixer class to patch.
+    :type mixer: str
     :param enabled: Install the patch, defaults to True.
     :type enabled: bool, optional
     :param model: Already-built model whose mixers are also cleared,
@@ -155,11 +162,11 @@ def patch_nemotron_mamba_fused_path(
         logger.info("[mamba-fused-path] disabled by caller; __init__ left unpatched")
         return
 
-    mixer_cls = _resolve_mixer_class()
+    mixer_cls = _resolve_mixer_class(mixer)
     if mixer_cls is None:
         logger.warning(
-            "[mamba-fused-path] NemotronHMamba2Mixer unavailable; "
-            "__init__ left unpatched",
+            "[mamba-fused-path] %s unavailable; __init__ left unpatched",
+            mixer.rpartition(".")[2],
         )
         return
 
@@ -167,7 +174,7 @@ def patch_nemotron_mamba_fused_path(
         original_init = getattr(mixer_cls, "__init__", None)
         if original_init is None or not _assigns_mem_eff_attr(original_init):
             message = (
-                f"[mamba-fused-path] NemotronHMamba2Mixer.__init__ does not set "
+                f"[mamba-fused-path] {mixer_cls.__name__}.__init__ does not set "
                 f"{MEM_EFF_ATTR}"
             )
             raise RuntimeError(message)
@@ -176,8 +183,8 @@ def patch_nemotron_mamba_fused_path(
         mixer_target.__init__ = _make_patched_init(original_init)
         setattr(mixer_cls, FUSED_PATH_PATCHED_FLAG, True)
         logger.info(
-            "[mamba-fused-path] NemotronHMamba2Mixer.__init__ patched; %s cleared "
-            "on every mixer",
+            "[mamba-fused-path] %s.__init__ patched; %s cleared on every mixer",
+            mixer_cls.__name__,
             MEM_EFF_ATTR,
         )
 
@@ -273,13 +280,14 @@ def _make_patched_forward(
 
 def patch_nemotron_mamba_stream_ordering(
     *,
+    mixer: str,
     enabled: bool = True,
     model: PreTrainedModel | PeftModel | None = None,
 ) -> None:
-    """Order the Nemotron-H Mamba2 mixer's default-stream kernels against its caller.
+    """Order the Mamba2 mixer's default-stream kernels against its caller.
 
-    ``NemotronHMamba2Mixer.forward`` runs the mamba and causal-conv1d kernels
-    inside ``torch.cuda.stream(default_stream)``. A ZeRO-3 parameter all-gather
+    The mixer's ``forward`` runs the mamba and causal-conv1d kernels inside
+    ``torch.cuda.stream(default_stream)``. A ZeRO-3 parameter all-gather
     completes on the stream that was current when the fetch was issued, so when
     that stream is not the default one the kernels carry no dependency on it and
     can read a parameter buffer that is still being filled. The wrapper makes
@@ -292,6 +300,8 @@ def patch_nemotron_mamba_stream_ordering(
     redundant and the wrapper calls straight through. The first CUDA call logs
     whether the caller stream matched the default stream.
 
+    :param mixer: Dotted path of the mixer class to patch.
+    :type mixer: str
     :param enabled: Install the patch, defaults to True.
     :type enabled: bool, optional
     :param model: Unused; accepted for family-dispatch parity, defaults to None.
@@ -303,10 +313,11 @@ def patch_nemotron_mamba_stream_ordering(
         logger.info("[mamba-stream] disabled by caller; forward left unpatched")
         return
 
-    mixer_cls = _resolve_mixer_class()
+    mixer_cls = _resolve_mixer_class(mixer)
     if mixer_cls is None:
         logger.warning(
-            "[mamba-stream] NemotronHMamba2Mixer unavailable; forward left unpatched",
+            "[mamba-stream] %s unavailable; forward left unpatched",
+            mixer.rpartition(".")[2],
         )
         return
     if class_is_patched(mixer_cls, STREAM_PATCHED_FLAG):
@@ -314,35 +325,41 @@ def patch_nemotron_mamba_stream_ordering(
 
     original_forward = getattr(mixer_cls, "forward", None)
     if original_forward is None:
-        message = "[mamba-stream] NemotronHMamba2Mixer lacks forward"
+        message = f"[mamba-stream] {mixer_cls.__name__} lacks forward"
         raise RuntimeError(message)
 
     mixer_target: Any = mixer_cls
     mixer_target.forward = _make_patched_forward(original_forward)
     setattr(mixer_cls, STREAM_PATCHED_FLAG, True)
     logger.info(
-        "[mamba-stream] NemotronHMamba2Mixer.forward patched; default-stream "
-        "kernels ordered against the calling stream",
+        "[mamba-stream] %s.forward patched; default-stream kernels ordered "
+        "against the calling stream",
+        mixer_cls.__name__,
     )
 
 
-def install_nemotron_h_patches(
+def install_mamba_patches(
+    patch: PatchRuntimeConfig,
     *,
-    zero_stage: int,
     model: PreTrainedModel | PeftModel | None = None,
 ) -> None:
-    """Install Nemotron-H Mamba2 workarounds.
+    """Install catalog Mamba2 mixer workarounds.
 
-    Fused-path is always cleared. Stream ordering always installs: the mixer
-    launches scan/conv kernels on the default stream, so a caller on another
-    stream can race regardless of ZeRO stage.
+    ``fused_path`` clears the mixer's fused-path attribute. ``stream_ordering``
+    wraps mixer ``forward`` so default-stream scan/conv kernels wait on the
+    caller stream. Those kernels launch on the default stream, so a caller on
+    another stream can race regardless of ZeRO stage.
 
-    :param zero_stage: DeepSpeed ZeRO stage for this run.
-    :type zero_stage: int
+    :param patch: Catalog patch config; mamba flags and mixer class path.
+    :type patch: PatchRuntimeConfig
     :param model: Already-built model the patches also apply to, or None.
     :type model: PreTrainedModel | PeftModel | None
     :return: None
     :rtype: None
     """
-    patch_nemotron_mamba_fused_path(model=model)
-    patch_nemotron_mamba_stream_ordering(model=model)
+    if patch.mamba is None:
+        return
+    if patch.mamba.fused_path:
+        patch_nemotron_mamba_fused_path(mixer=patch.mamba.mixer, model=model)
+    if patch.mamba.stream_ordering:
+        patch_nemotron_mamba_stream_ordering(mixer=patch.mamba.mixer, model=model)

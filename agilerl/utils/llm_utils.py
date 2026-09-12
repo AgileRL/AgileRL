@@ -25,6 +25,7 @@ from accelerate import Accelerator
 from torch import nn
 
 from agilerl import HAS_DEEPSPEED, HAS_LLM_DEPENDENCIES
+from agilerl.architectures import family_runtime
 from agilerl.protocols import GenerationConfigProtocol
 from agilerl.typing import (
     JSONValue,
@@ -1451,9 +1452,11 @@ def create_model_from_name_or_path(
     :param model_name_or_path: The name or path of the model to create.
     :type model_name_or_path: str
     :param model_config: Extra keyword arguments forwarded to ``from_pretrained``
-        (e.g. a ``quantization_config``). ``torch_dtype`` and
-        ``attn_implementation`` are filled in as defaults when not already
-        present, so passing a config never silently disables SDPA attention.
+        (e.g. a ``quantization_config``). ``torch_dtype`` and trainer defaults
+        for the Hugging Face ``model_type`` (for example Gemma SWA
+        ``flex_attention``) fill keys that are not already present, then
+        ``attn_implementation`` is resolved. An explicit caller value stays
+        authoritative.
     :type model_config: dict[str, Any ] | None
     :param use_value_head: Flag to indicate if a value head should be added to the model, defaults to False
     :type use_value_head: bool, optional
@@ -1462,16 +1465,18 @@ def create_model_from_name_or_path(
     :return: The created model.
     :rtype: PreTrainedModel
     """
-    # Start from the caller's config (if any) and fill in our SDPA + dtype
-    # defaults with ``setdefault``, so any explicit caller value stays
-    # authoritative.
+    # Start from the caller's config (if any) and fill in dtype + trainer
+    # defaults for the Hugging Face ``model_type`` with ``setdefault``, so any
+    # explicit caller value stays authoritative. ``resolve_*`` then picks
+    # flash_attention_2 / sdpa when attn is still unset (including "auto").
     model_config = dict(model_config) if model_config else {}
     model_config.setdefault(
         "torch_dtype", torch.bfloat16 if not use_accelerator else torch.float16
     )
-    # Auto-select the best available attention backend (flash_attention_2 when
-    # the flash_attn package is installed, else sdpa). ``resolve_*`` treats an
-    # explicit caller value (incl. "flex_attention") as authoritative.
+    for key, value in (
+        family_runtime(model_name_or_path).trainer.model_dump(exclude_none=True).items()
+    ):
+        model_config.setdefault(key, value)
     model_config["attn_implementation"] = resolve_attn_implementation(
         model_config.get("attn_implementation")
     )
@@ -2518,6 +2523,13 @@ def build_vllm_llm_init_kwargs(
         if vllm_config.vllm_model_name_or_path is not None
         else trainer_model_name_or_path
     )
+    family_vllm_kwargs = family_runtime(vllm_model).vllm.model_dump(exclude_none=True)
+    explicit_batched_tokens = getattr(vllm_config, "max_num_batched_tokens", None)
+    batched_tokens = (
+        explicit_batched_tokens
+        if explicit_batched_tokens is not None
+        else family_vllm_kwargs.get("max_num_batched_tokens")
+    )
     kwargs: dict[str, Any] = {
         "model": vllm_model,
         "tensor_parallel_size": vllm_config.tensor_parallel_size,
@@ -2529,7 +2541,7 @@ def build_vllm_llm_init_kwargs(
         "max_num_batched_tokens": resolve_vllm_max_num_batched_tokens(
             vllm_config.max_num_seqs,
             max_model_len,
-            getattr(vllm_config, "max_num_batched_tokens", None),
+            batched_tokens,
         ),
         "model_impl": "vllm",
         "enable_sleep_mode": vllm_config.sleep_mode,
@@ -2555,6 +2567,8 @@ def build_vllm_llm_init_kwargs(
         lora_rank,
     )
     kwargs["max_loras"] = vllm_config.max_loras
+    for key, value in family_vllm_kwargs.items():
+        kwargs.setdefault(key, value)
     return kwargs
 
 

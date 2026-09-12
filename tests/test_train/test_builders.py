@@ -13,6 +13,7 @@ from agilerl.algorithms.core import (
     MultiAgentAlgorithm,
     SingleAgentAlgorithm,
 )
+from agilerl.architectures.runtime import ModelRuntimeConfig
 from agilerl.arena.models.algorithms import (
     DPOSpec,
     DQNSpec,
@@ -304,6 +305,11 @@ def _build_llm_with_dummy_algo(spec, monkeypatch):
 
     monkeypatch.setattr(
         LLMBuilder, "algo_class", classmethod(lambda cls, spec: DummyAlgo)
+    )
+    monkeypatch.setattr(
+        llm_builder,
+        "family_runtime",
+        lambda _name: ModelRuntimeConfig(),
     )
     monkeypatch.setattr(
         llm_builder,

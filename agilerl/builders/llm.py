@@ -12,6 +12,7 @@ from pydantic import BaseModel
 
 from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.algorithms.core import LLMAlgorithm
+from agilerl.architectures import family_runtime
 from agilerl.arena.models.algorithms import (
     AlgorithmSpec,
     LLMAlgorithmSpec,
@@ -118,12 +119,8 @@ class LLMBuilder(AlgorithmBuilder):
                 kwargs.pop("quantization")
             )
 
-        # A non-"auto" attn_implementation is forwarded through model_config so
-        # the model-creation path treats it as authoritative.
-        attn_implementation = kwargs.pop("attn_implementation", None)
-        if attn_implementation is not None and attn_implementation != "auto":
-            model_config = dict(kwargs.get("model_config") or {})
-            model_config.setdefault("attn_implementation", attn_implementation)
+        model_config = cls._model_config_with_family_defaults(spec, kwargs)
+        if model_config:
             kwargs["model_config"] = model_config
 
         model_config = None
@@ -168,6 +165,32 @@ class LLMBuilder(AlgorithmBuilder):
             index=index,
         )
         return algo
+
+    @staticmethod
+    def _model_config_with_family_defaults(
+        spec: LLMAlgorithmSpec,
+        kwargs: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Merge explicit attn and family trainer defaults into ``model_config``.
+
+        :param spec: LLM spec whose checkpoint id is read for ``model_type``.
+        :type spec: LLMAlgorithmSpec
+        :param kwargs: Constructor kwargs; ``attn_implementation`` is popped.
+        :type kwargs: dict[str, Any]
+        :return: ``model_config`` with family trainer keys filled via setdefault.
+        :rtype: dict[str, Any]
+        """
+        attn_implementation = kwargs.pop("attn_implementation", None)
+        model_config = dict(kwargs.get("model_config") or {})
+        if attn_implementation is not None and attn_implementation != "auto":
+            model_config.setdefault("attn_implementation", attn_implementation)
+        model_name = spec.pretrained_model_name_or_path
+        if model_name is not None:
+            for key, value in (
+                family_runtime(model_name).trainer.model_dump(exclude_none=True).items()
+            ):
+                model_config.setdefault(key, value)
+        return model_config
 
 
 def peft_lora_config(lora: LoraConfigDict | dict[str, Any] | LoraConfig) -> LoraConfig:

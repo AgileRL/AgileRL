@@ -1650,6 +1650,7 @@ class _MockPeftActor(torch.nn.Module):
         super().__init__()
         self._dummy_param = torch.nn.Parameter(torch.tensor([1.0]))
         self.name_or_path = "mock-model"
+        self.config = SimpleNamespace(model_type="llama")
         self.peft_config = {}
         self.base_model = MagicMock()
         self.base_model.model = MagicMock()

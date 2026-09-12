@@ -775,9 +775,13 @@ class TestBuildAlgorithmForwardsOnlySetFields:
         assert "learn_step" not in kwargs
         assert "batch_size" not in kwargs
 
-    def test_llm_spec_forwards_only_set_fields(self):
+    def test_llm_spec_forwards_only_set_fields(self, monkeypatch: pytest.MonkeyPatch):
         from agilerl.arena.models.algorithms import GRPOSpec
 
+        monkeypatch.setattr(
+            "agilerl.architectures.AutoConfig.from_pretrained",
+            lambda *_args, **_kwargs: SimpleNamespace(model_type="llama"),
+        )
         spec = GRPOSpec(pretrained_model_name_or_path="gpt2", beta=0.05, group_size=4)
         mock_tokenizer = MagicMock()
         mock_tokenizer.eos_token_id = 0
@@ -828,6 +832,13 @@ class TestBuildAlgorithmForwardsOnlySetFields:
 
 class TestLLMAlgorithmSpecBuild:
     """Lines 531-533, 554 in algo.py."""
+
+    @pytest.fixture(autouse=True)
+    def stub_auto_config(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(
+            "agilerl.architectures.AutoConfig.from_pretrained",
+            lambda *_args, **_kwargs: SimpleNamespace(model_type="llama"),
+        )
 
     def test_micro_batch_size_per_gpu_forwarded_only_when_set(self):
         """Explicit micro batch reaches the constructor; unset leaves the algorithm's default."""
@@ -979,6 +990,108 @@ class TestLLMAlgorithmSpecBuild:
         kwargs = mock_algo_cls.call_args.kwargs
         assert "quantization" not in kwargs
         assert kwargs["quantization_config"] == build_bnb_quantization_config("nf4")
+        assert kwargs["model_config"] == {"attn_implementation": "sdpa"}
+
+    @pytest.mark.skipif(not HAS_LLM_DEPENDENCIES, reason="LLM deps not installed")
+    def test_build_algorithm_gemma_defaults_to_flex_attention(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        from agilerl.arena.models.algorithms import GRPOSpec
+
+        monkeypatch.setattr(
+            "agilerl.architectures.AutoConfig.from_pretrained",
+            lambda *_args, **_kwargs: SimpleNamespace(model_type="gemma4"),
+        )
+        spec = GRPOSpec(
+            pretrained_model_name_or_path="google/gemma-4",
+            group_size=4,
+        )
+        mock_tokenizer = MagicMock()
+        mock_tokenizer.eos_token_id = 0
+        mock_tokenizer.eos_token = "<|endoftext|>"
+        mock_algo_cls = MagicMock()
+
+        with (
+            patch.object(
+                select_builder(spec), "algo_class", return_value=mock_algo_cls
+            ),
+            patch(
+                "agilerl.builders.llm.load_pad_token_configs",
+                return_value=(None, None),
+            ),
+        ):
+            build_from_spec(spec, tokenizer=mock_tokenizer, index=0)
+
+        kwargs = mock_algo_cls.call_args.kwargs
+        assert kwargs["model_config"] == {"attn_implementation": "flex_attention"}
+
+    @pytest.mark.skipif(not HAS_LLM_DEPENDENCIES, reason="LLM deps not installed")
+    def test_build_algorithm_gemma2_does_not_default_to_flex_attention(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        from agilerl.arena.models.algorithms import GRPOSpec
+
+        monkeypatch.setattr(
+            "agilerl.architectures.AutoConfig.from_pretrained",
+            lambda *_args, **_kwargs: SimpleNamespace(model_type="gemma2"),
+        )
+        spec = GRPOSpec(
+            pretrained_model_name_or_path="google/gemma-2-9b",
+            group_size=4,
+        )
+        mock_tokenizer = MagicMock()
+        mock_tokenizer.eos_token_id = 0
+        mock_tokenizer.eos_token = "<|endoftext|>"
+        mock_algo_cls = MagicMock()
+
+        with (
+            patch.object(
+                select_builder(spec), "algo_class", return_value=mock_algo_cls
+            ),
+            patch(
+                "agilerl.builders.llm.load_pad_token_configs",
+                return_value=(None, None),
+            ),
+        ):
+            build_from_spec(spec, tokenizer=mock_tokenizer, index=0)
+
+        kwargs = mock_algo_cls.call_args.kwargs
+        assert (kwargs.get("model_config") or {}).get("attn_implementation") != (
+            "flex_attention"
+        )
+
+    @pytest.mark.skipif(not HAS_LLM_DEPENDENCIES, reason="LLM deps not installed")
+    def test_build_algorithm_explicit_attn_wins_over_gemma_default(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        from agilerl.arena.models.algorithms import GRPOSpec
+
+        monkeypatch.setattr(
+            "agilerl.architectures.AutoConfig.from_pretrained",
+            lambda *_args, **_kwargs: SimpleNamespace(model_type="gemma4"),
+        )
+        spec = GRPOSpec(
+            pretrained_model_name_or_path="google/gemma-4",
+            group_size=4,
+            attn_implementation="sdpa",
+        )
+        mock_tokenizer = MagicMock()
+        mock_tokenizer.eos_token_id = 0
+        mock_tokenizer.eos_token = "<|endoftext|>"
+        mock_algo_cls = MagicMock()
+
+        with (
+            patch.object(
+                select_builder(spec), "algo_class", return_value=mock_algo_cls
+            ),
+            patch(
+                "agilerl.builders.llm.load_pad_token_configs",
+                return_value=(None, None),
+            ),
+        ):
+            build_from_spec(spec, tokenizer=mock_tokenizer, index=0)
+
+        kwargs = mock_algo_cls.call_args.kwargs
         assert kwargs["model_config"] == {"attn_implementation": "sdpa"}
 
     def test_resume_from_checkpoint(self):

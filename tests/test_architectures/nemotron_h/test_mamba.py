@@ -19,6 +19,9 @@ from agilerl.architectures.nemotron_h.mamba import (
     patch_nemotron_mamba_fused_path,
     patch_nemotron_mamba_stream_ordering,
 )
+from agilerl.architectures.runtime import MambaPatchConfig, PatchRuntimeConfig
+
+MIXER = "transformers.models.nemotron_h.modeling_nemotron_h.NemotronHMamba2Mixer"
 
 
 class FakeConfig:
@@ -64,13 +67,13 @@ class TestNemotronMambaFusedPath:
         monkeypatch.setattr(
             mamba,
             "_resolve_mixer_class",
-            lambda: mixer_cls,
+            lambda _mixer: mixer_cls,
         )
 
-        patch_nemotron_mamba_fused_path()
+        patch_nemotron_mamba_fused_path(mixer=MIXER)
         patched_init = mixer_cls.__init__
-        patch_nemotron_mamba_fused_path()
-        patch_nemotron_mamba_fused_path()
+        patch_nemotron_mamba_fused_path(mixer=MIXER)
+        patch_nemotron_mamba_fused_path(mixer=MIXER)
 
         assert mixer_cls.__init__ is patched_init
 
@@ -86,11 +89,11 @@ class TestNemotronMambaFusedPath:
         monkeypatch.setattr(
             mamba,
             "_resolve_mixer_class",
-            lambda: mixer_cls,
+            lambda _mixer: mixer_cls,
         )
 
         with caplog.at_level(logging.INFO):
-            patch_nemotron_mamba_fused_path(enabled=False)
+            patch_nemotron_mamba_fused_path(mixer=MIXER, enabled=False)
 
         assert mixer_cls.__init__ is original_init
         assert any("disabled by caller" in record.message for record in caplog.records)
@@ -104,11 +107,11 @@ class TestNemotronMambaFusedPath:
         monkeypatch.setattr(
             mamba,
             "_resolve_mixer_class",
-            lambda: None,
+            lambda _mixer: None,
         )
 
         with caplog.at_level(logging.WARNING):
-            patch_nemotron_mamba_fused_path()
+            patch_nemotron_mamba_fused_path(mixer=MIXER)
 
         assert any(
             "NemotronHMamba2Mixer unavailable" in record.message
@@ -121,11 +124,11 @@ class TestNemotronMambaFusedPath:
         monkeypatch.setattr(
             mamba,
             "_resolve_mixer_class",
-            lambda: mixer_cls,
+            lambda _mixer: mixer_cls,
         )
 
         with pytest.raises(RuntimeError, match="does not set use_mem_eff_path"):
-            patch_nemotron_mamba_fused_path()
+            patch_nemotron_mamba_fused_path(mixer=MIXER)
 
         assert mixer_cls.__init__ is original_init
         assert not hasattr(mixer_cls(FakeConfig()), "use_mem_eff_path")
@@ -136,9 +139,9 @@ class TestNemotronMambaFusedPath:
         monkeypatch.setattr(
             mamba,
             "_resolve_mixer_class",
-            lambda: mixer_cls,
+            lambda _mixer: mixer_cls,
         )
-        patch_nemotron_mamba_fused_path()
+        patch_nemotron_mamba_fused_path(mixer=MIXER)
         config = FakeConfig()
 
         mixer = mixer_cls(config, layer_idx=7)
@@ -153,9 +156,9 @@ class TestNemotronMambaFusedPath:
         monkeypatch.setattr(
             mamba,
             "_resolve_mixer_class",
-            lambda: mixer_cls,
+            lambda _mixer: mixer_cls,
         )
-        patch_nemotron_mamba_fused_path()
+        patch_nemotron_mamba_fused_path(mixer=MIXER)
 
         assert mixer_cls(FakeConfig(use_mem_eff_path=True)).use_mem_eff_path is False
 
@@ -169,13 +172,15 @@ class TestNemotronMambaFusedPath:
         monkeypatch.setattr(
             mamba,
             "_resolve_mixer_class",
-            lambda: mixer_cls,
+            lambda _mixer: mixer_cls,
         )
         early = mixer_cls(FakeConfig())
         other = FakeConfig()
 
         with caplog.at_level(logging.INFO):
-            patch_nemotron_mamba_fused_path(model=FakeModel([early, other]))
+            patch_nemotron_mamba_fused_path(
+                mixer=MIXER, model=FakeModel([early, other])
+            )
 
         assert early.use_mem_eff_path is False
         assert mixer_cls(FakeConfig()).use_mem_eff_path is False
@@ -190,13 +195,13 @@ class TestNemotronMambaFusedPath:
         monkeypatch.setattr(
             mamba,
             "_resolve_mixer_class",
-            lambda: mixer_cls,
+            lambda _mixer: mixer_cls,
         )
         early = mixer_cls(FakeConfig())
-        patch_nemotron_mamba_fused_path()
+        patch_nemotron_mamba_fused_path(mixer=MIXER)
         assert early.use_mem_eff_path is True
 
-        patch_nemotron_mamba_fused_path(model=FakeModel([early]))
+        patch_nemotron_mamba_fused_path(mixer=MIXER, model=FakeModel([early]))
 
         assert early.use_mem_eff_path is False
 
@@ -206,11 +211,13 @@ class TestNemotronMambaFusedPath:
         monkeypatch.setattr(
             mamba,
             "_resolve_mixer_class",
-            lambda: mixer_cls,
+            lambda _mixer: mixer_cls,
         )
 
         with caplog.at_level(logging.INFO):
-            patch_nemotron_mamba_fused_path(model=FakeModel([FakeConfig()]))
+            patch_nemotron_mamba_fused_path(
+                mixer=MIXER, model=FakeModel([FakeConfig()])
+            )
 
         assert not any("existing mixers" in record.message for record in caplog.records)
 
@@ -220,12 +227,14 @@ class TestNemotronMambaFusedPath:
         monkeypatch.setattr(
             mamba,
             "_resolve_mixer_class",
-            lambda: mixer_cls,
+            lambda _mixer: mixer_cls,
         )
         imposter_cls = type("Mixer", (), {})
 
         with pytest.raises(RuntimeError, match="different mixer class"):
-            patch_nemotron_mamba_fused_path(model=FakeModel([imposter_cls()]))
+            patch_nemotron_mamba_fused_path(
+                mixer=MIXER, model=FakeModel([imposter_cls()])
+            )
 
     def test_disabled_skips_the_model_sweep(self, monkeypatch):
         events = []
@@ -233,11 +242,13 @@ class TestNemotronMambaFusedPath:
         monkeypatch.setattr(
             mamba,
             "_resolve_mixer_class",
-            lambda: mixer_cls,
+            lambda _mixer: mixer_cls,
         )
         early = mixer_cls(FakeConfig())
 
-        patch_nemotron_mamba_fused_path(enabled=False, model=FakeModel([early]))
+        patch_nemotron_mamba_fused_path(
+            mixer=MIXER, enabled=False, model=FakeModel([early])
+        )
 
         assert early.use_mem_eff_path is True
 
@@ -245,13 +256,13 @@ class TestNemotronMambaFusedPath:
         monkeypatch.setattr(
             mamba,
             "_resolve_mixer_class",
-            lambda: None,
+            lambda _mixer: None,
         )
         events = []
         early = _make_fused_path_mixer_class(events)(FakeConfig())
 
         with caplog.at_level(logging.WARNING):
-            patch_nemotron_mamba_fused_path(model=FakeModel([early]))
+            patch_nemotron_mamba_fused_path(mixer=MIXER, model=FakeModel([early]))
 
         assert early.use_mem_eff_path is True
 
@@ -317,13 +328,13 @@ class TestNemotronMambaStreamOrdering:
         monkeypatch.setattr(
             mamba,
             "_resolve_mixer_class",
-            lambda: mixer_cls,
+            lambda _mixer: mixer_cls,
         )
 
-        patch_nemotron_mamba_stream_ordering()
+        patch_nemotron_mamba_stream_ordering(mixer=MIXER)
         patched_forward = mixer_cls.forward
-        patch_nemotron_mamba_stream_ordering()
-        patch_nemotron_mamba_stream_ordering()
+        patch_nemotron_mamba_stream_ordering(mixer=MIXER)
+        patch_nemotron_mamba_stream_ordering(mixer=MIXER)
 
         assert mixer_cls.forward is patched_forward
 
@@ -340,11 +351,11 @@ class TestNemotronMambaStreamOrdering:
         monkeypatch.setattr(
             mamba,
             "_resolve_mixer_class",
-            lambda: mixer_cls,
+            lambda _mixer: mixer_cls,
         )
 
         with caplog.at_level(logging.INFO):
-            patch_nemotron_mamba_stream_ordering(enabled=False)
+            patch_nemotron_mamba_stream_ordering(mixer=MIXER, enabled=False)
 
         assert mixer_cls.forward is original_forward
         assert any("disabled by caller" in record.message for record in caplog.records)
@@ -363,11 +374,11 @@ class TestNemotronMambaStreamOrdering:
         monkeypatch.setattr(
             mamba,
             "_resolve_mixer_class",
-            lambda: None,
+            lambda _mixer: None,
         )
 
         with caplog.at_level(logging.WARNING):
-            patch_nemotron_mamba_stream_ordering()
+            patch_nemotron_mamba_stream_ordering(mixer=MIXER)
 
         assert any(
             "NemotronHMamba2Mixer unavailable" in record.message
@@ -381,11 +392,11 @@ class TestNemotronMambaStreamOrdering:
         monkeypatch.setattr(
             mamba,
             "_resolve_mixer_class",
-            lambda: Mixer,
+            lambda _mixer: Mixer,
         )
 
         with pytest.raises(RuntimeError, match="lacks forward"):
-            patch_nemotron_mamba_stream_ordering()
+            patch_nemotron_mamba_stream_ordering(mixer=MIXER)
 
     def test_identical_streams_issue_no_waits(self, cuda_env, monkeypatch):
         events = []
@@ -394,9 +405,9 @@ class TestNemotronMambaStreamOrdering:
         monkeypatch.setattr(
             mamba,
             "_resolve_mixer_class",
-            lambda: mixer_cls,
+            lambda _mixer: mixer_cls,
         )
-        patch_nemotron_mamba_stream_ordering()
+        patch_nemotron_mamba_stream_ordering(mixer=MIXER)
         streams = Streams(events, same=True)
         _install_streams(monkeypatch, streams)
         hidden_states = FakeTensor()
@@ -417,9 +428,9 @@ class TestNemotronMambaStreamOrdering:
         monkeypatch.setattr(
             mamba,
             "_resolve_mixer_class",
-            lambda: mixer_cls,
+            lambda _mixer: mixer_cls,
         )
-        patch_nemotron_mamba_stream_ordering()
+        patch_nemotron_mamba_stream_ordering(mixer=MIXER)
         streams = Streams(events)
         _install_streams(monkeypatch, streams)
         hidden_states = FakeTensor()
@@ -439,9 +450,9 @@ class TestNemotronMambaStreamOrdering:
         monkeypatch.setattr(
             mamba,
             "_resolve_mixer_class",
-            lambda: mixer_cls,
+            lambda _mixer: mixer_cls,
         )
-        patch_nemotron_mamba_stream_ordering()
+        patch_nemotron_mamba_stream_ordering(mixer=MIXER)
         streams = Streams(events)
         _install_streams(monkeypatch, streams)
         hidden_states = FakeTensor()
@@ -462,9 +473,9 @@ class TestNemotronMambaStreamOrdering:
         monkeypatch.setattr(
             mamba,
             "_resolve_mixer_class",
-            lambda: mixer_cls,
+            lambda _mixer: mixer_cls,
         )
-        patch_nemotron_mamba_stream_ordering()
+        patch_nemotron_mamba_stream_ordering(mixer=MIXER)
         streams = Streams(events)
         _install_streams(monkeypatch, streams)
 
@@ -480,9 +491,9 @@ class TestNemotronMambaStreamOrdering:
         monkeypatch.setattr(
             mamba,
             "_resolve_mixer_class",
-            lambda: mixer_cls,
+            lambda _mixer: mixer_cls,
         )
-        patch_nemotron_mamba_stream_ordering()
+        patch_nemotron_mamba_stream_ordering(mixer=MIXER)
         streams = Streams(events)
         _install_streams(monkeypatch, streams)
         hidden_states = FakeTensor(device="cpu", is_cuda=False)
@@ -502,10 +513,10 @@ class TestNemotronMambaStreamOrdering:
         monkeypatch.setattr(
             mamba,
             "_resolve_mixer_class",
-            lambda: mixer_cls,
+            lambda _mixer: mixer_cls,
         )
 
-        patch_nemotron_mamba_stream_ordering(model=FakeModel([]))
+        patch_nemotron_mamba_stream_ordering(mixer=MIXER, model=FakeModel([]))
 
         streams = Streams(events)
         _install_streams(monkeypatch, streams)
@@ -523,9 +534,9 @@ class TestNemotronMambaStreamOrdering:
         monkeypatch.setattr(
             mamba,
             "_resolve_mixer_class",
-            lambda: mixer_cls,
+            lambda _mixer: mixer_cls,
         )
-        patch_nemotron_mamba_stream_ordering()
+        patch_nemotron_mamba_stream_ordering(mixer=MIXER)
         monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
         streams = Streams(events)
         _install_streams(monkeypatch, streams)
@@ -554,10 +565,10 @@ class TestBothMixerPatchesCoexist:
         monkeypatch.setattr(
             mamba,
             "_resolve_mixer_class",
-            lambda: Mixer,
+            lambda _mixer: Mixer,
         )
-        patch_nemotron_mamba_fused_path()
-        patch_nemotron_mamba_stream_ordering()
+        patch_nemotron_mamba_fused_path(mixer=MIXER)
+        patch_nemotron_mamba_stream_ordering(mixer=MIXER)
         _install_streams(monkeypatch, Streams(events))
 
         mixer = Mixer(FakeConfig())
@@ -578,57 +589,110 @@ class TestResolveMixerClass:
         monkeypatch.setattr(mamba, "try_import", lambda _path: type("M", (), {})())
 
         with pytest.raises(RuntimeError, match="NemotronHMamba2Mixer"):
-            mamba._resolve_mixer_class()
+            mamba._resolve_mixer_class(MIXER)
 
     def test_returns_none_when_module_missing(self, monkeypatch) -> None:
         monkeypatch.setattr(mamba, "try_import", lambda _path: None)
 
-        assert mamba._resolve_mixer_class() is None
+        assert mamba._resolve_mixer_class(MIXER) is None
 
     def test_returns_the_mixer(self, monkeypatch) -> None:
         mixer = type("NemotronHMamba2Mixer", (), {})
-        monkeypatch.setattr(
-            mamba,
-            "try_import",
-            lambda _path: SimpleNamespace(NemotronHMamba2Mixer=mixer),
-        )
+        seen: list[str] = []
 
-        assert mamba._resolve_mixer_class() is mixer
+        def fake_import(path):
+            seen.append(path)
+            return SimpleNamespace(NemotronHMamba2Mixer=mixer)
+
+        monkeypatch.setattr(mamba, "try_import", fake_import)
+
+        assert mamba._resolve_mixer_class(MIXER) is mixer
+        assert seen == ["transformers.models.nemotron_h.modeling_nemotron_h"]
+
+    @pytest.mark.parametrize("mixer", ["NemotronHMamba2Mixer", "module.", ".Mixer", ""])
+    def test_invalid_path_raises(self, mixer: str) -> None:
+        with pytest.raises(RuntimeError, match="invalid mixer path"):
+            mamba._resolve_mixer_class(mixer)
 
 
-class TestInstallNemotronHPatches:
-    def test_stage_2_runs_fused_path_and_stream_ordering(self, monkeypatch):
+class TestInstallMambaPatches:
+    def test_runs_fused_path_and_stream_ordering(self, monkeypatch):
         seen: list[tuple[str, object]] = []
         actor = object()
         monkeypatch.setattr(
             mamba,
             "patch_nemotron_mamba_fused_path",
-            lambda *, model=None: seen.append(("fused", model)),
+            lambda *, mixer, model=None: seen.append(("fused", mixer, model)),
         )
         monkeypatch.setattr(
             mamba,
             "patch_nemotron_mamba_stream_ordering",
-            lambda *, model=None: seen.append(("stream", model)),
+            lambda *, mixer, model=None: seen.append(("stream", mixer, model)),
         )
 
-        mamba.install_nemotron_h_patches(zero_stage=2, model=actor)
+        mamba.install_mamba_patches(
+            PatchRuntimeConfig(mamba=MambaPatchConfig(mixer=MIXER)), model=actor
+        )
 
-        assert seen == [("fused", actor), ("stream", actor)]
+        assert seen == [("fused", MIXER, actor), ("stream", MIXER, actor)]
 
-    def test_stage_3_runs_fused_path_and_stream_ordering(self, monkeypatch):
+    def test_fused_path_false_skips_fused_path(self, monkeypatch):
         seen: list[tuple[str, object]] = []
         actor = object()
         monkeypatch.setattr(
             mamba,
             "patch_nemotron_mamba_fused_path",
-            lambda *, model=None: seen.append(("fused", model)),
+            lambda *, mixer, model=None: seen.append(("fused", mixer, model)),
         )
         monkeypatch.setattr(
             mamba,
             "patch_nemotron_mamba_stream_ordering",
-            lambda *, model=None: seen.append(("stream", model)),
+            lambda *, mixer, model=None: seen.append(("stream", mixer, model)),
         )
 
-        mamba.install_nemotron_h_patches(zero_stage=3, model=actor)
+        mamba.install_mamba_patches(
+            PatchRuntimeConfig(mamba=MambaPatchConfig(mixer=MIXER, fused_path=False)),
+            model=actor,
+        )
 
-        assert seen == [("fused", actor), ("stream", actor)]
+        assert seen == [("stream", MIXER, actor)]
+
+    def test_stream_ordering_false_skips_stream_ordering(self, monkeypatch):
+        seen: list[tuple[str, object]] = []
+        actor = object()
+        monkeypatch.setattr(
+            mamba,
+            "patch_nemotron_mamba_fused_path",
+            lambda *, mixer, model=None: seen.append(("fused", mixer, model)),
+        )
+        monkeypatch.setattr(
+            mamba,
+            "patch_nemotron_mamba_stream_ordering",
+            lambda *, mixer, model=None: seen.append(("stream", mixer, model)),
+        )
+
+        mamba.install_mamba_patches(
+            PatchRuntimeConfig(
+                mamba=MambaPatchConfig(mixer=MIXER, stream_ordering=False)
+            ),
+            model=actor,
+        )
+
+        assert seen == [("fused", MIXER, actor)]
+
+    def test_missing_mamba_is_a_no_op(self, monkeypatch):
+        seen: list[tuple[str, object]] = []
+        monkeypatch.setattr(
+            mamba,
+            "patch_nemotron_mamba_fused_path",
+            lambda *, mixer, model=None: seen.append(("fused", mixer, model)),
+        )
+        monkeypatch.setattr(
+            mamba,
+            "patch_nemotron_mamba_stream_ordering",
+            lambda *, mixer, model=None: seen.append(("stream", mixer, model)),
+        )
+
+        mamba.install_mamba_patches(PatchRuntimeConfig(), model=object())
+
+        assert seen == []

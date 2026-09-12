@@ -10,6 +10,7 @@ deepspeed or a GPU.
 import collections
 import enum
 import logging
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -242,13 +243,11 @@ class TestInstallZero3ThirdPartyHooks:
 class TestInstallModelPatches:
     def test_stage_2_runs_family_only(self, monkeypatch) -> None:
         calls: list[str] = []
-        actor = object()
+        actor = SimpleNamespace(config=SimpleNamespace(model_type="nemotron_h"))
         monkeypatch.setattr(
             zero3_patches,
             "install_family_patches",
-            lambda _name, *, zero_stage, model=None: calls.append(
-                f"family:{model is actor}:{zero_stage}"
-            ),
+            lambda _model_type, model=None: calls.append(f"family:{model is actor}"),
         )
         monkeypatch.setattr(
             zero3_patches,
@@ -263,18 +262,16 @@ class TestInstallModelPatches:
             model=actor,
         )
 
-        assert calls == ["family:True:2"]
+        assert calls == ["family:True"]
 
     def test_stage_3_runs_family_then_zero3(self, monkeypatch) -> None:
         calls: list[str] = []
-        actor = object()
+        actor = SimpleNamespace(config=SimpleNamespace(model_type="nemotron_h"))
         config = {"zero_optimization": {"stage": 3}}
         monkeypatch.setattr(
             zero3_patches,
             "install_family_patches",
-            lambda _name, *, zero_stage, model=None: calls.append(
-                f"family:{zero_stage}"
-            ),
+            lambda _model_type, model=None: calls.append(f"family:{model is actor}"),
         )
 
         def _zero3(ds_config, **kwargs):
@@ -292,7 +289,7 @@ class TestInstallModelPatches:
             num_partitions=4,
         )
 
-        assert calls == ["family:3", "zero3"]
+        assert calls == ["family:True", "zero3"]
 
 
 class TestZero3Resolvers:

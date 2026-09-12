@@ -2980,6 +2980,7 @@ class TestMutationsFunctionPreservingSingleAgentFamilies:
         "family", list(_FP_SINGLE_AGENT_FAMILIES), ids=list(_FP_SINGLE_AGENT_FAMILIES)
     )
     def test_an_addition_keeps_the_policy_output(self, monkeypatch, family, method):
+        torch.manual_seed(0)
         _pin_mutation_method(monkeypatch, method)
         monkeypatch.setattr(mutation_utils, "FP_NOISE_SCALE", 0.0)
         agent = _FP_SINGLE_AGENT_FAMILIES[family]()
@@ -2989,7 +2990,8 @@ class TestMutationsFunctionPreservingSingleAgentFamilies:
         agent = _fp_mutations().architecture_mutate(agent)
 
         after = _policy_output(agent, observation)
-        torch.testing.assert_close(after, before, rtol=0, atol=1e-6)
+        # Extra-column float32 GEMM is not bit-identical once weights are O(1).
+        torch.testing.assert_close(after, before, rtol=1e-5, atol=1e-6)
 
 
 def _assert_declines_without_warning(architecture_mutate, *agents):
