@@ -390,6 +390,13 @@ def _minimal_reasoning_rollout_env(device: str, vocab_size: int, input_size: int
 
 
 class TestREINFORCEInit:
+    @pytest.fixture(autouse=True)
+    def stub_llama_auto_config(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(
+            "transformers.AutoConfig.from_pretrained",
+            lambda *args, **kwargs: SimpleNamespace(model_type="llama"),
+        )
+
     @patch("agilerl.algorithms.core.base.LLM")
     def test_init_reinforce_vllm_sleep_mode(self, MockLLM):
         mock_instance = make_mock_vllm_instance()

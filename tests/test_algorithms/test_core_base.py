@@ -1650,6 +1650,7 @@ class _MockPeftActor(torch.nn.Module):
         super().__init__()
         self._dummy_param = torch.nn.Parameter(torch.tensor([1.0]))
         self.name_or_path = "mock-model"
+        self.config = SimpleNamespace(model_type="llama")
         self.peft_config = {}
         self.base_model = MagicMock()
         self.base_model.model = MagicMock()
@@ -3402,6 +3403,13 @@ class TestLLMGetLmHead:
     reason="_configure_vllm exercises the vllm extra.",
 )
 class TestLLMConfigureVllm:
+    @pytest.fixture(autouse=True)
+    def stub_llama_auto_config(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(
+            "transformers.AutoConfig.from_pretrained",
+            lambda *args, **kwargs: SimpleNamespace(model_type="llama"),
+        )
+
     def test_raises_when_vllm_not_installed(self):
         agent = _make_llm_agent()
         with patch("agilerl.algorithms.core.base.LLM", None, create=True):
@@ -6385,6 +6393,13 @@ class TestLLMLoadAdapterWeights:
 )
 class TestLLMConfigureVllmAcceleratorPaths:
     """_configure_vllm with accelerator and various TP configurations."""
+
+    @pytest.fixture(autouse=True)
+    def stub_llama_auto_config(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(
+            "transformers.AutoConfig.from_pretrained",
+            lambda *args, **kwargs: SimpleNamespace(model_type="llama"),
+        )
 
     def test_configure_vllm_tp_size_1(self):
         acc = _make_mock_accelerator(num_processes=1)
