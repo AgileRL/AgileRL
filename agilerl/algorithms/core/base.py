@@ -218,8 +218,6 @@ __all__ = [
     "ActionResult",
     "EvolvableAlgorithm",
     "MultiAgentAlgorithm",
-    "MultiAgentRLAlgorithm",
-    "RLAlgorithm",
     "SingleAgentAlgorithm",
 ]
 
@@ -2644,11 +2642,6 @@ class MultiAgentAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[Experie
                 )
 
         return group_outputs
-
-
-# Old names remain importable from agilerl.algorithms.core.
-RLAlgorithm = SingleAgentAlgorithm
-MultiAgentRLAlgorithm = MultiAgentAlgorithm
 
 
 def _vllm_sampled_token_logprobs(output: CompletionOutput) -> list[float]:
