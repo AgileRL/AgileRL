@@ -1,3 +1,5 @@
+# Read the Docs pip-installs this file before Sphinx.
+autodoc-pydantic
 furo
 sphinx-copybutton
 sphinx-design
