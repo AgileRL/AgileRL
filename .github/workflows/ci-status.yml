@@ -1,0 +1,34 @@
+---
+name: CI status
+
+on:
+    push:
+        branches: [main]
+        paths:
+            - agilerl/**
+            - agilerl-arena/**
+            - tests/**
+            - .github/workflows/**
+            - pyproject.toml
+            - uv.lock
+    workflow_dispatch:
+
+concurrency:
+    group: ci-status-${{ github.ref }}
+    cancel-in-progress: true
+
+permissions:
+    contents: read
+    actions: read
+    pull-requests: read
+
+jobs:
+    mirror:
+        runs-on: ubuntu-latest
+        timeout-minutes: 5
+        steps:
+            - uses: actions/checkout@v4
+            - name: Report the CI run that gated this commit
+              env:
+                  GITHUB_TOKEN: ${{ github.token }}
+              run: python3 scripts/ci_status.py
