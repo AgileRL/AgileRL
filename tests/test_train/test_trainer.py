@@ -18,6 +18,7 @@ import importlib
 import warnings
 from collections import Counter
 from pathlib import Path
+from types import SimpleNamespace
 from typing import ClassVar
 from unittest.mock import MagicMock, patch
 
@@ -1344,6 +1345,13 @@ class TestLLMBuildAlgorithm:
     constructor with the right arguments.
     """
 
+    @pytest.fixture(autouse=True)
+    def stub_llama_auto_config(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(
+            "transformers.AutoConfig.from_pretrained",
+            lambda *args, **kwargs: SimpleNamespace(model_type="llama"),
+        )
+
     def test_dpo_build_algorithm(self, dpo_spec):
         mock_algo = MagicMock()
         mock_tokenizer = MagicMock()
@@ -1433,6 +1441,13 @@ class TestLLMLocalTrainer:
     """
 
     POP_SIZE = 2
+
+    @pytest.fixture(autouse=True)
+    def stub_llama_auto_config(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(
+            "transformers.AutoConfig.from_pretrained",
+            lambda *args, **kwargs: SimpleNamespace(model_type="llama"),
+        )
 
     def _training(self):
         return TrainingSpec(max_steps=100, evo_steps=10, pop_size=self.POP_SIZE)

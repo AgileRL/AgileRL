@@ -35,7 +35,7 @@ from typing import TYPE_CHECKING, Any
 
 import torch
 
-from agilerl.architectures import install_family_patches
+from agilerl.architectures import install_family_patches, pretrained_model_type
 from agilerl.utils.patching import class_is_patched, try_import
 
 if TYPE_CHECKING:
@@ -93,11 +93,13 @@ def install_model_patches(
     :return: None
     :rtype: None
     """
-    install_family_patches(
-        model_name_or_path,
-        zero_stage=zero_stage,
-        model=model,
-    )
+    if model is not None:
+        model_type = model.config.model_type
+    elif model_name_or_path:
+        model_type = pretrained_model_type(model_name_or_path)
+    else:
+        model_type = None
+    install_family_patches(model_type, model)
     if zero_stage == 3:
         install_zero3_patches(
             deepspeed_config,
