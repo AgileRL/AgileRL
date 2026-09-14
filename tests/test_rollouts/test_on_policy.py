@@ -24,7 +24,7 @@ from agilerl.rollouts.on_policy import (
 from tests.assets.tiny_tokenizer import TinyTokenizer
 from tests.helpers.rollout_doubles import RolloutEnvDoubleMixin
 
-if importlib.util.find_spec("deepspeed") and importlib.util.find_spec("vllm"):
+if all(importlib.util.find_spec(pkg) for pkg in ("transformers", "peft", "vllm")):
     from tests.test_algorithms.test_llms.test_ppo_llm import _cpu_llmppo
     from tests.test_algorithms.test_llms.test_reinforce_llm import _cpu_llmreinforce
 else:
@@ -33,7 +33,7 @@ else:
 
 _LLM_ROLLOUTS = pytest.mark.skipif(
     _cpu_llmppo is None or _cpu_llmreinforce is None,
-    reason="LLM rollout tests require deepspeed and vllm.",
+    reason="LLM rollout tests require transformers, peft and vllm.",
 )
 
 

@@ -1,10 +1,7 @@
 # Copyright 2026 AgileRL
 # SPDX-License-Identifier: Apache-2.0
 
-"""Ensure the agilerl-arena requirement is a compatible range (or a build-time exact pin), and ``all`` unions every extra.
-
-agilerl-arena is a base dependency, not an extra: the manifest contract lives there.
-"""
+"""Ensure the arena extra is a compatible range (or a build-time exact pin), and ``all`` unions every extra."""
 
 from __future__ import annotations
 
@@ -150,7 +147,11 @@ def _semver_bump(version: str, kind: str) -> str | None:
 
 
 def _expected_arena_version(tagged: str) -> tuple[str, str | None]:
-    """Return (arena version this release cuts, semver kind or None)."""
+    """Arena version this release will cut, plus the kind behind it.
+
+    Falls back to ``(tagged, None)`` — the stricter last-tag rule — when arena is
+    untouched or the kind is unresolvable. Never skips the range check.
+    """
     if os.environ.get("ML_REBUILD_ARENA", "").strip() != "1":
         return tagged, None
     kind = os.environ.get("ML_ARENA_SEMVER_KIND", "").strip()
@@ -162,26 +163,21 @@ def _expected_arena_version(tagged: str) -> tuple[str, str | None]:
     return bumped, kind
 
 
-def _arena_requirements(path: Path) -> list[str]:
-    """Return the agilerl-arena requirement lines in ``[project].dependencies``."""
-    deps = _pyproject(path).get("project", {}).get("dependencies", [])
-    return [req.strip() for req in deps if req.strip().startswith("agilerl-arena")]
-
-
-def _check_arena_requirement(
-    reqs: list[str],
+def _check_arena_extra(
+    extras: dict[str, list[str]],
     *,
     require_tags: bool = False,
 ) -> str:
-    """Return the agilerl-arena specifier after checking range vs build-time pin.
+    """Return the arena extra specifier after checking range vs build-time pin.
 
     With ``require_tags``, the range must cover ``agilerl-arena/v*`` in this
     clone (hub CI after ``git fetch --tags``).
     """
-    if not reqs:
-        _fail(f"Missing agilerl-arena in [project].dependencies ({PARENT_PYPROJECT})")
+    if "arena" not in extras:
+        _fail(f"Missing [project.optional-dependencies].arena in {PARENT_PYPROJECT}")
 
     pin_override = os.environ.get("AGILERL_ARENA_PIN", "").strip()
+    reqs = [req.strip() for req in extras["arena"]]
     exact = [m.group(1) for m in (_EXACT_RE.match(req) for req in reqs) if m]
     ranges = [m.group(1) for m in (_RANGE_RE.match(req) for req in reqs) if m]
 
@@ -189,7 +185,7 @@ def _check_arena_requirement(
         if len(exact) != 1 or ranges:
             _fail(
                 "AGILERL_ARENA_PIN requires exactly one agilerl-arena== pin in "
-                f"[project].dependencies ({PARENT_PYPROJECT})"
+                f"the arena extra ({PARENT_PYPROJECT})"
             )
         if exact[0] != pin_override:
             _fail(
@@ -200,14 +196,14 @@ def _check_arena_requirement(
 
     if exact:
         _fail(
-            "The committed agilerl-arena requirement must be a compatible range "
+            "Committed arena extra must be a compatible range "
             "(agilerl-arena>=X.Y.Z,<X+1), not an exact == pin. Exact pins belong "
             f"in the ML bundle / framework +local build ({PARENT_PYPROJECT})"
         )
     if len(ranges) != 1:
         _fail(
             "Expected one agilerl-arena>=X.Y.Z,<A.B range in "
-            f"[project].dependencies ({PARENT_PYPROJECT})"
+            f"[project.optional-dependencies].arena ({PARENT_PYPROJECT})"
         )
     if not require_tags:
         return ranges[0]
@@ -222,7 +218,7 @@ def _check_arena_requirement(
     if not _in_range(expected, ranges[0]):
         if kind is None:
             _fail(
-                f"agilerl-arena/v{tagged} is outside the requirement range {ranges[0]} "
+                f"agilerl-arena/v{tagged} is outside extra range {ranges[0]} "
                 f"({PARENT_PYPROJECT})"
             )
         _fail(
@@ -263,15 +259,13 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument(
         "--require-tags",
         action="store_true",
-        help="Require the agilerl-arena range to cover agilerl-arena/v* tags in this clone.",
+        help="Require the arena extra to cover agilerl-arena/v* tags in this clone.",
     )
     args = parser.parse_args(argv)
     extras = _extras(PARENT_PYPROJECT)
-    spec = _check_arena_requirement(
-        _arena_requirements(PARENT_PYPROJECT), require_tags=args.require_tags
-    )
+    spec = _check_arena_extra(extras, require_tags=args.require_tags)
     _check_all_extra(extras)
-    print(f"OK: agilerl-arena {spec}; all unions every extra")
+    print(f"OK: arena extra {spec}; all unions every extra")
 
 
 if __name__ == "__main__":

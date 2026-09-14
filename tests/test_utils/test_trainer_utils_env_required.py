@@ -3,7 +3,8 @@
 
 import pytest
 
-from agilerl.arena.models.algorithms import PPOSpec, RainbowDQNSpec
+from agilerl.models.algorithms.ppo import PPOSpec
+from agilerl.models.algorithms.rainbow_dqn import RainbowDQNSpec
 from agilerl.utils.trainer_utils import create_population_from_spec
 
 

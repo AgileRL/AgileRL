@@ -10,8 +10,8 @@ an algorithm such that architecture mutations on the networks are applied correc
 :class:`MutationRegistry <agilerl.algorithms.core.registry.MutationRegistry>` object that keeps a log of the network groups, optimizers, and the
 hyperparameters of the algorithm that the user wishes to mutate during training.
 
-We have base classes for single-agent and multi-agent algorithms, namely :class:`SingleAgentAlgorithm <agilerl.algorithms.core.base.SingleAgentAlgorithm>`
-and :class:`MultiAgentAlgorithm <agilerl.algorithms.core.base.MultiAgentAlgorithm>`, respectively.
+We have base classes for single-agent and multi-agent algorithms, namely :class:`RLAlgorithm <agilerl.algorithms.core.base.RLAlgorithm>`
+and :class:`MultiAgentRLAlgorithm <agilerl.algorithms.core.base.MultiAgentRLAlgorithm>`, respectively.
 
 Network Groups
 --------------
@@ -44,7 +44,7 @@ being flagged as having shared parameters. We also have two separate optimizers 
 
     .. code-block:: python
 
-        class DDPG(SingleAgentAlgorithm):
+        class DDPG(RLAlgorithm):
             """The DDPG algorithm class. DDPG paper: https://arxiv.org/abs/1509.02971
 
             :param observation_space: Environment observation space
@@ -285,8 +285,8 @@ Parameters
 .. autoclass:: agilerl.algorithms.core.base.EvolvableAlgorithm
     :members:
 
-.. autoclass:: agilerl.algorithms.core.base.SingleAgentAlgorithm
+.. autoclass:: agilerl.algorithms.core.base.RLAlgorithm
     :members:
 
-.. autoclass:: agilerl.algorithms.core.base.MultiAgentAlgorithm
+.. autoclass:: agilerl.algorithms.core.base.MultiAgentRLAlgorithm
     :members:

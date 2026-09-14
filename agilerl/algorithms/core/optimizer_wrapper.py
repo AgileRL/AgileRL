@@ -23,8 +23,6 @@ def init_from_multiple(
     optimizer_cls: OptimizerFactory,
     lr: float,
     optimizer_kwargs: dict[str, Any] | list[dict[str, Any]],
-    lr_critic: bool = False,
-    use_lora: bool = False,
 ) -> Optimizer:
     """Initialize an optimizer from a list of networks.
 
@@ -473,15 +471,20 @@ class OptimizerWrapper:
             out[f"{name}_is_llm_optimizer"] = True
         return out
 
-    def zero_grad(self) -> None:
-        """Zero the gradients of the optimizer."""
+    def zero_grad(self, set_to_none: bool = True) -> None:
+        """Zero the gradients of the optimizer.
+
+        ``set_to_none=True`` drops ``.grad`` so the next backward allocates
+        fresh tensors. FSDP accumulation then reduce-scatters into sharded
+        grads instead of holding unsharded zeros.
+        """
         if isinstance(self.optimizer, dict):
             msg = (
                 "Please use the zero_grad() method of the individual optimizer in "
                 "a multi-agent algorithm."
             )
             raise TypeError(msg)
-        self._single_optimizer().zero_grad()
+        self._single_optimizer().zero_grad(set_to_none=set_to_none)
 
     def step(self) -> None:
         """Perform a single optimization step."""

@@ -893,7 +893,6 @@ class FakeLLMAgent:
         weights="w",
         lr=1e-3,
         batch_size=64,
-        accelerator=None,
         mut="stale-mut",
     ):
         self.index = index
@@ -906,7 +905,6 @@ class FakeLLMAgent:
         self.registry.hp_config["lr"].value = lr
         self.registry.hp_config["batch_size"].value = batch_size
         self.optimizer = FakeOptimizerWrapper(lr)
-        self.accelerator = accelerator
         self.mut = mut
         self.reinit_called = False
         self.mutation_hook_called = False
@@ -923,7 +921,6 @@ class FakeLLMAgent:
             weights=self.weights,
             lr=self.lr,
             batch_size=self.batch_size,
-            accelerator=self.accelerator,
             mut=self.mut,  # the real clone copies attributes, incl. the parent's mut
         )
         for name in self.registry.hp_config.names():
@@ -941,17 +938,13 @@ class FakeLLMAgent:
         self.clean_up_calls += 1
 
 
-def make_llm_population(subpop_fitnesses, accelerator=None):
+def make_llm_population(subpop_fitnesses):
     """Build a population of :class:`FakeLLMAgent` with unique indices."""
     population = []
     idx = 0
     for subpop, fitnesses in subpop_fitnesses.items():
         for fit in fitnesses:
-            population.append(
-                FakeLLMAgent(
-                    idx, subpop, fit, weights=f"w{idx}", accelerator=accelerator
-                )
-            )
+            population.append(FakeLLMAgent(idx, subpop, fit, weights=f"w{idx}"))
             idx += 1
     return population
 
@@ -1194,61 +1187,45 @@ class TestSelectLLM:
         assert migrant.registry.hp_config["lr"].value == 0.001
 
 
-class _MultiProcAccelerator:
-    """Minimal multi-process accelerator stand-in for the LLM selection path."""
-
-    def __init__(self, is_main_process, num_processes):
-        self.is_main_process = is_main_process
-        self.num_processes = num_processes
-        self.wait_calls = 0
-
-    def wait_for_everyone(self):
-        self.wait_calls += 1
-
-
-class TestSelectLLMAccelerator:
-    def test_main_process_broadcasts_the_plan_to_workers(self, monkeypatch):
+class TestSelectLLMDistributed:
+    def test_rank0_broadcasts_the_plan_to_workers(self, monkeypatch):
         monkeypatch.setattr(mf_module, "LLMAlgorithm", FakeLLMAgent)
+        monkeypatch.setattr(mf_module, "is_main_process", lambda: True)
+        monkeypatch.setattr(mf_module, "is_distributed", lambda: True)
+        monkeypatch.setattr(mf_module, "barrier", lambda: None)
         broadcasts = []
 
-        def fake_broadcast(obj, from_process=0):
-            broadcasts.append((obj, from_process))
+        def fake_broadcast(obj, src=0):
+            broadcasts.append((obj, src))
             return obj
 
         monkeypatch.setattr(mf_module, "broadcast_object_list", fake_broadcast)
-        accelerator = _MultiProcAccelerator(is_main_process=True, num_processes=2)
         strategy = make_multi_frequency_selection(
             n_subpop=2, population_size=8, ratios=[1, 2]
         )
-        pop = make_llm_population(
-            {0: [4.0, 3.0, 2.0, 1.0], 1: [8.0, 7.0, 6.0, 5.0]},
-            accelerator=accelerator,
-        )
+        pop = make_llm_population({0: [4.0, 3.0, 2.0, 1.0], 1: [8.0, 7.0, 6.0, 5.0]})
 
         elite, _new_pop, indices = strategy.select(pop)
 
         assert len(broadcasts) == 1
-        payload, from_process = broadcasts[0]
-        assert from_process == 0  # decisions originate on the main process
+        payload, src = broadcasts[0]
+        assert src == 0
         (plan,) = payload
         assert set(plan) == {"ops", "elite_index", "indices_to_mutate"}
         assert len(plan["ops"]) == len(pop)
-        assert plan["elite_index"] == 4  # global best sits at index 4
+        assert plan["elite_index"] == 4
         assert elite.index == plan["elite_index"]
         assert plan["indices_to_mutate"] == indices
 
-    def test_worker_process_builds_population_from_broadcast_plan(self, monkeypatch):
-        # A worker must not advance its own counters/RNG; it consumes the plan the main
-        # process broadcast and materialises exactly that generation
+    def test_worker_rank_builds_population_from_broadcast_plan(self, monkeypatch):
         monkeypatch.setattr(mf_module, "LLMAlgorithm", FakeLLMAgent)
+        monkeypatch.setattr(mf_module, "is_main_process", lambda: False)
+        monkeypatch.setattr(mf_module, "is_distributed", lambda: True)
+        monkeypatch.setattr(mf_module, "barrier", lambda: None)
         strategy = make_multi_frequency_selection(
             n_subpop=2, population_size=8, ratios=[1, 2]
         )
-        accelerator = _MultiProcAccelerator(is_main_process=False, num_processes=2)
-        pop = make_llm_population(
-            {0: [4.0, 3.0, 2.0, 1.0], 1: [8.0, 7.0, 6.0, 5.0]},
-            accelerator=accelerator,
-        )
+        pop = make_llm_population({0: [4.0, 3.0, 2.0, 1.0], 1: [8.0, 7.0, 6.0, 5.0]})
 
         keep = (MultiFrequencyOp.KEEP,)
         plan = {
@@ -1266,13 +1243,13 @@ class TestSelectLLMAccelerator:
             "indices_to_mutate": [8],
         }
         monkeypatch.setattr(
-            mf_module, "broadcast_object_list", lambda obj, from_process=0: [plan]
+            mf_module, "broadcast_object_list", lambda obj, src=0: [plan]
         )
 
         elite, new_pop, indices = strategy.select(pop)
 
-        assert strategy.counters == [0, 0]  # worker never advanced its counters
+        assert strategy.counters == [0, 0]
         assert indices == [8]
         assert elite.index == 4
         clone = next(a for a in new_pop if a.index == 8)
-        assert clone.fitness[-1] == 4.0  # cloned from the winner
+        assert clone.fitness[-1] == 4.0

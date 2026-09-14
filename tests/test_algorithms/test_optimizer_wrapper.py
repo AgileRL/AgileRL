@@ -9,11 +9,7 @@ import torch
 from gymnasium import spaces
 from torch import nn
 
-from agilerl.algorithms.core import (
-    MultiAgentAlgorithm,
-    OptimizerWrapper,
-    SingleAgentAlgorithm,
-)
+from agilerl.algorithms.core import MultiAgentRLAlgorithm, OptimizerWrapper, RLAlgorithm
 from agilerl.algorithms.core.base import LLMAlgorithm
 from agilerl.algorithms.core.optimizer_wrapper import init_llm_optimizer
 from agilerl.algorithms.core.registry import NetworkGroup
@@ -46,7 +42,7 @@ class MockEvolvableNetwork(EvolvableModule):
         return {"device": self.device}
 
 
-class MockAlgorithm(SingleAgentAlgorithm):
+class MockAlgorithm(RLAlgorithm):
     def __init__(self, actor=None, critic=None, lr=0.001, optimizer_cls=None):
         observation_space = spaces.Box(low=-1, high=1, shape=(10,))
         action_space = spaces.Box(low=-1, high=1, shape=(5,))
@@ -98,7 +94,7 @@ class MockAlgorithm(SingleAgentAlgorithm):
         return 0.0
 
 
-class MockMultiAgentAlgorithm(MultiAgentAlgorithm):
+class MockMultiAgentAlgorithm(MultiAgentRLAlgorithm):
     def __init__(
         self,
         actors=None,
@@ -552,7 +548,7 @@ class TestOptimizerWrapper:
         # Now test with a method that actually exists
         wrapper.optimizer.zero_grad = Mock()  # Replace with mock to verify call
         wrapper.zero_grad()
-        wrapper.optimizer.zero_grad.assert_called_once()
+        wrapper.optimizer.zero_grad.assert_called_once_with(set_to_none=True)
 
         # Multi-agent case - attribute delegation should fail
         networks = ModuleDict(
@@ -587,7 +583,10 @@ class TestOptimizerWrapper:
         wrapper.optimizer.zero_grad = Mock()
 
         wrapper.zero_grad()
-        wrapper.optimizer.zero_grad.assert_called_once()
+        wrapper.optimizer.zero_grad.assert_called_once_with(set_to_none=True)
+        wrapper.optimizer.zero_grad.reset_mock()
+        wrapper.zero_grad(set_to_none=False)
+        wrapper.optimizer.zero_grad.assert_called_once_with(set_to_none=False)
 
         # Restore method
         wrapper.optimizer.zero_grad = original_zero_grad

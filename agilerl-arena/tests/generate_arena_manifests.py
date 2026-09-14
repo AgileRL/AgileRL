@@ -3,8 +3,7 @@
 
 """Build full Arena training manifests for every registered algorithm.
 
-Used by ``test_generate_arena_manifests.py`` and as a manual helper to inspect
-manifests::
+Used by ``test_arena_models.py`` and as a manual helper to inspect manifests::
 
     uv run python agilerl-arena/tests/generate_arena_manifests.py
     uv run python agilerl-arena/tests/generate_arena_manifests.py /tmp/arena_manifests
@@ -19,22 +18,19 @@ from typing import Any, get_args
 import yaml
 
 from agilerl.arena import AgentType
-from agilerl.arena.models import (
-    MANIFEST_REGISTRY,
+from agilerl.arena.models import TrainingManifest as ArenaManifest
+from agilerl.arena.models.algo import ARENA_REGISTRY, LLMAlgorithmSpec
+from agilerl.arena.models.env import EnvSpec as ArenaEnvSpec
+from agilerl.arena.models.hpo import MutationSpec, TournamentSelectionSpec
+from agilerl.arena.models.networks import (
     DeterministicActorSpec,
-    LLMAlgorithmSpec,
     MlpSpec,
-    MutationSpec,
     NetworkSpec,
     QNetworkSpec,
     RainbowQNetworkSpec,
-    ReplayBufferSpec,
     StochasticActorSpec,
-    TournamentSelectionSpec,
-    TrainingSpec,
 )
-from agilerl.arena.models import GymEnvSpec as ArenaEnvSpec
-from agilerl.arena.models import TrainingManifest as ArenaManifest
+from agilerl.arena.models.training import ReplayBufferSpec, TrainingSpec
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _TINY_LLM = str(_REPO_ROOT / "tests" / "assets" / "tiny_llm")
@@ -69,14 +65,11 @@ _DEFAULT_MLP_NETWORK: dict[type[NetworkSpec], NetworkSpec] = {
 
 def arena_algorithm_names() -> list[str]:
     """Return sorted names of all algorithms registered for Arena."""
-    return MANIFEST_REGISTRY.names()
+    return sorted(ARENA_REGISTRY._entries)
 
 
 def _attach_default_network(algorithm) -> None:
-    if (
-        "net_config" in type(algorithm).model_fields
-        and algorithm.net_config is not None
-    ):
+    if getattr(algorithm, "net_config", None) is not None:
         return
 
     net_config_field = type(algorithm).model_fields.get("net_config")
@@ -93,7 +86,7 @@ def _attach_default_network(algorithm) -> None:
 
 
 def _default_algorithm_spec(name: str):
-    spec_cls = MANIFEST_REGISTRY.get(name)
+    spec_cls = ARENA_REGISTRY.get(name).spec_cls
     if issubclass(spec_cls, LLMAlgorithmSpec):
         kwargs: dict = {"pretrained_model_name_or_path": _TINY_LLM}
         if name in _GRPO_FAMILY:
@@ -114,11 +107,9 @@ def _build_manifest_dict(algorithm, algo_name: str) -> dict[str, Any]:
     }
     if algo_name in _OFF_POLICY_ALGOS:
         data["replay_buffer"] = ReplayBufferSpec()
-    if (
-        "net_config" in type(algorithm).model_fields
-        and algorithm.net_config is not None
-    ):
-        data["network"] = algorithm.net_config
+    net_config = getattr(algorithm, "net_config", None)
+    if net_config is not None:
+        data["network"] = net_config
     return data
 
 

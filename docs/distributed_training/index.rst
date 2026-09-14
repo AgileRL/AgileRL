@@ -3,11 +3,14 @@
 Distributed Training
 ====================
 
-AgileRL can also be used for distributed training if you have multiple devices you want to take advantage of. We use the HuggingFace `Accelerate
-<https://github.com/huggingface/accelerate>`_ library to implement this in an open manner, without hiding behind too many layers of abstraction.
-This should make implementations simple, but also highly customisable, by continuing to expose the PyTorch training loop beneath it all.
+This page is for **classic RL** (DQN, PPO, MADDPG, …) and uses HuggingFace
+`Accelerate <https://github.com/huggingface/accelerate>`_. LLM fine-tuning
+is a separate stack: ``torchrun`` and optional FSDP2 — see
+:ref:`llm_distributed`.
 
-To launch distributed training scripts in bash, use ``accelerate launch``. To customise the distributed training properties, specify the key ``--config_file``. An example
+To launch distributed training scripts in bash, use ``accelerate launch``. The
+manifest CLI (``python -m agilerl.train``) auto-detects that launcher and
+constructs ``Accelerator`` for classic RL. To customise the distributed training properties, specify the key ``--config_file``. An example
 config file has been provided at ``configs/accelerate/accelerate.yaml``.
 
 Putting this all together, launching a distributed training script can be done as follows:

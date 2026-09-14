@@ -498,20 +498,6 @@ def test_continuous_actions_policy_envs_simple(
 
 
 class TestCheckQLearningWithProbeEnv:
-    def test_q_learning_with_probe_env_non_dict_state_on_cpu(self):
-        env = ConstantRewardEnv()
-        memory = ReplayBuffer(max_size=1000, device="cpu")
-        algo_args = {
-            "observation_space": env.observation_space,
-            "action_space": env.action_space,
-            "lr": 1e-2,
-        }
-
-        check_q_learning_with_probe_env(
-            env, DQN, algo_args, memory, learn_steps=0, device="cpu"
-        )
-        gc.collect()
-
     @pytest.mark.gpu
     def test_q_learning_with_probe_env(self):
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")

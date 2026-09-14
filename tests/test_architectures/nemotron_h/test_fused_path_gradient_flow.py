@@ -23,7 +23,9 @@ from agilerl.architectures.nemotron_h.mamba import (
     FUSED_PATH_PATCHED_FLAG,
     STREAM_PATCHED_FLAG,
 )
-from agilerl.utils.llm_utils import adapt_lora_config_for_model
+
+CHECKPOINT_ID = "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16"
+
 
 KERNEL_GLOBALS = ("mamba_split_conv1d_scan_combined", "mamba_chunk_scan_combined")
 
@@ -123,7 +125,7 @@ def _one_backward(base):
         r=4,
         lora_alpha=8,
         lora_dropout=0.0,
-        target_modules=["in_proj"],
+        target_modules=["in_proj", "out_proj"],
         init_lora_weights=False,
         task_type="CAUSAL_LM",
     )
@@ -146,78 +148,22 @@ def test_fused_kernel_path_starves_out_proj_lora_of_gradients(pristine_mixer_cla
     in_proj = _lora_grad_sums(model, "in_proj")
     out_proj = _lora_grad_sums(model, "out_proj")
     assert len(in_proj) == 2
-    assert out_proj == {}
+    assert len(out_proj) == 2
     assert all(value is not None and value > 0 for value in in_proj.values())
+    assert all(value is None for value in out_proj.values())
 
 
 def test_family_patches_after_build_restore_out_proj_lora_gradients(
     pristine_mixer_class,
 ):
     base = _tiny_nemotron_h()
-    install_family_patches(base.config.model_type, base)
+    patched = install_family_patches(CHECKPOINT_ID, zero_stage=2, model=base)
+    assert patched == "nemotron_h"
     assert base.model.layers[0].mixer.use_mem_eff_path is False
     _force_cuda_kernels_path()
 
     model = _one_backward(base)
 
-    grads = _lora_grad_sums(model, "in_proj")
-    assert len(grads) == 2
+    grads = _lora_grad_sums(model, "in_proj") | _lora_grad_sums(model, "out_proj")
+    assert len(grads) == 4
     assert all(value is not None and value > 0 for value in grads.values())
-    assert _lora_grad_sums(model, "out_proj") == {}
-
-
-def test_peft_rejects_out_proj_module_targets_on_nemotron_h(pristine_mixer_class):
-    base = _tiny_nemotron_h()
-    lora_config = LoraConfig(
-        r=4,
-        lora_alpha=8,
-        lora_dropout=0.0,
-        target_modules=["in_proj", "out_proj"],
-        init_lora_weights=False,
-        task_type="CAUSAL_LM",
-    )
-
-    with pytest.raises(ValueError, match="incompatible with Mamba"):
-        get_peft_model(base, lora_config, adapter_name="actor")
-
-
-def test_adapted_lora_config_drops_out_proj_and_attaches(pristine_mixer_class):
-    base = _tiny_nemotron_h()
-    lora_config = LoraConfig(
-        r=4,
-        lora_alpha=8,
-        lora_dropout=0.0,
-        target_modules=["in_proj", "out_proj"],
-        init_lora_weights=False,
-        task_type="CAUSAL_LM",
-    )
-
-    adapted = adapt_lora_config_for_model(base, lora_config)
-    model = get_peft_model(base, adapted, adapter_name="actor")
-
-    assert set(adapted.target_modules) == {"in_proj"}
-    assert "out_proj" in set(adapted.exclude_modules or [])
-    names = [name for name, _ in model.named_parameters()]
-    assert any("in_proj" in name and "lora_A" in name for name in names)
-    assert not any("out_proj" in name and "lora_A" in name for name in names)
-
-
-def test_all_linear_adapts_and_attaches(pristine_mixer_class):
-    base = _tiny_nemotron_h()
-    lora_config = LoraConfig(
-        r=4,
-        lora_alpha=8,
-        lora_dropout=0.0,
-        target_modules="all-linear",
-        init_lora_weights=False,
-        task_type="CAUSAL_LM",
-    )
-
-    adapted = adapt_lora_config_for_model(base, lora_config)
-    model = get_peft_model(base, adapted, adapter_name="actor")
-
-    assert set(adapted.exclude_modules) == {"conv1d", "out_proj"}
-    lora_names = [name for name, _ in model.named_parameters() if "lora_A" in name]
-    assert lora_names
-    assert not any("out_proj" in name for name in lora_names)
-    assert not any("conv1d" in name for name in lora_names)

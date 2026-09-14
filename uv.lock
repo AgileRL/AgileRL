@@ -102,9 +102,9 @@ dependencies = [
 
 [package.optional-dependencies]
 all = [
+    { name = "agilerl-arena" },
     { name = "bitsandbytes", marker = "sys_platform == 'linux'" },
     { name = "datasets" },
-    { name = "deepspeed", marker = "sys_platform == 'linux'" },
     { name = "gymnasium", extra = ["box2d"], marker = "sys_platform != 'win32'" },
     { name = "liger-kernel", marker = "sys_platform == 'linux'" },
     { name = "openenv" },
@@ -113,6 +113,9 @@ all = [
     { name = "transformers" },
     { name = "vllm", marker = "sys_platform == 'linux'" },
 ]
+arena = [
+    { name = "agilerl-arena" },
+]
 box2d = [
     { name = "gymnasium", extra = ["box2d"], marker = "sys_platform != 'win32'" },
     { name = "swig", marker = "sys_platform != 'win32'" },
@@ -120,7 +123,6 @@ box2d = [
 llm = [
     { name = "bitsandbytes", marker = "sys_platform == 'linux'" },
     { name = "datasets" },
-    { name = "deepspeed", marker = "sys_platform == 'linux'" },
     { name = "liger-kernel", marker = "sys_platform == 'linux'" },
     { name = "openenv" },
     { name = "peft" },
@@ -138,7 +140,6 @@ dev = [
     { name = "pytest-xdist" },
 ]
 docs = [
-    { name = "autodoc-pydantic" },
     { name = "furo" },
     { name = "sphinx" },
     { name = "sphinx-autobuild", version = "2024.10.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
@@ -157,12 +158,12 @@ docs = [
 requires-dist = [
     { name = "accelerate", specifier = ">=1.7.0" },
     { name = "agilerl-arena", editable = "agilerl-arena" },
+    { name = "agilerl-arena", marker = "extra == 'all'", editable = "agilerl-arena" },
+    { name = "agilerl-arena", marker = "extra == 'arena'", editable = "agilerl-arena" },
     { name = "bitsandbytes", marker = "sys_platform == 'linux' and extra == 'all'", specifier = "==0.49.2" },
     { name = "bitsandbytes", marker = "sys_platform == 'linux' and extra == 'llm'", specifier = "==0.49.2" },
     { name = "datasets", marker = "extra == 'all'", specifier = "==5.0.1" },
     { name = "datasets", marker = "extra == 'llm'", specifier = "==5.0.1" },
-    { name = "deepspeed", marker = "sys_platform == 'linux' and extra == 'all'", specifier = ">=0.19.1" },
-    { name = "deepspeed", marker = "sys_platform == 'linux' and extra == 'llm'", specifier = ">=0.19.1" },
     { name = "dill", specifier = ">=0.3.7" },
     { name = "fastrand", specifier = ">=1.3.0" },
     { name = "flatten-dict", specifier = ">=0.4.2" },
@@ -171,22 +172,22 @@ requires-dist = [
     { name = "gymnasium", extras = ["box2d"], marker = "sys_platform != 'win32' and extra == 'all'", specifier = ">=1.0.0" },
     { name = "gymnasium", extras = ["box2d"], marker = "sys_platform != 'win32' and extra == 'box2d'", specifier = ">=1.0.0" },
     { name = "h5py", specifier = ">=3.15.0" },
-    { name = "hydra-core", specifier = ">=1.3.2,<1.4" },
+    { name = "hydra-core", specifier = ">=1.3.2" },
     { name = "jax", extras = ["cpu"], specifier = ">=0.4.31" },
     { name = "lazy-loader", specifier = ">=0.4" },
-    { name = "liger-kernel", marker = "sys_platform == 'linux' and extra == 'all'", specifier = "==0.8.2" },
-    { name = "liger-kernel", marker = "sys_platform == 'linux' and extra == 'llm'", specifier = "==0.8.2" },
+    { name = "liger-kernel", marker = "sys_platform == 'linux' and extra == 'all'", specifier = "==0.8.1" },
+    { name = "liger-kernel", marker = "sys_platform == 'linux' and extra == 'llm'", specifier = "==0.8.1" },
     { name = "matplotlib", specifier = ">=3.9.4" },
     { name = "minari", extras = ["all"], specifier = ">=0.5.2" },
     { name = "mpe2", specifier = ">=1.1.0" },
     { name = "numpy", specifier = ">=2.0.0,<3.0" },
-    { name = "omegaconf", specifier = ">=2.3.0,<2.4" },
+    { name = "omegaconf", specifier = ">=2.3.0" },
     { name = "openenv", marker = "extra == 'all'", specifier = ">=0.4.1,<0.5" },
     { name = "openenv", marker = "extra == 'llm'", specifier = ">=0.4.1,<0.5" },
     { name = "packaging", specifier = ">=20.0" },
     { name = "pandas", specifier = ">=2.2.3" },
-    { name = "peft", marker = "extra == 'all'", specifier = "==0.20.0" },
-    { name = "peft", marker = "extra == 'llm'", specifier = "==0.20.0" },
+    { name = "peft", marker = "extra == 'all'", specifier = "==0.19.1" },
+    { name = "peft", marker = "extra == 'llm'", specifier = "==0.19.1" },
     { name = "pettingzoo", specifier = ">=1.23.1,<1.27" },
     { name = "pre-commit", specifier = ">=3.8.0" },
     { name = "pydantic", specifier = ">=2.0,<3" },
@@ -208,7 +209,7 @@ requires-dist = [
     { name = "vllm", marker = "sys_platform == 'linux' and extra == 'llm'", specifier = ">=0.26" },
     { name = "wandb", specifier = ">=0.18.0" },
 ]
-provides-extras = ["all", "box2d", "llm"]
+provides-extras = ["all", "arena", "box2d", "llm"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -220,7 +221,6 @@ dev = [
     { name = "pytest-xdist", specifier = ">=3.5" },
 ]
 docs = [
-    { name = "autodoc-pydantic", specifier = ">=2.2" },
     { name = "furo", specifier = ">=2025.12.19" },
     { name = "sphinx", specifier = ">=7,<9" },
     { name = "sphinx-autobuild", specifier = ">=2024.10.3" },
@@ -247,7 +247,6 @@ dependencies = [
     { name = "python-keycloak" },
     { name = "pyyaml" },
     { name = "rich" },
-    { name = "typing-extensions" },
 ]
 
 [package.metadata]
@@ -261,7 +260,6 @@ requires-dist = [
     { name = "python-keycloak", specifier = ">=4.0,<8" },
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "rich", specifier = ">=13.0,<16" },
-    { name = "typing-extensions", specifier = ">=4.4" },
 ]
 
 [[package]]
@@ -629,19 +627,6 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/36/98/7d93f30d029643c0275dbc0bd6d5a6f670661ee6c9a94d93af7ab4887600/authlib-1.7.2.tar.gz", hash = "sha256:2cea25fefcd4e7173bdf1372c0afc265c8034b23a8cd5dcb6a9164b826c64231", size = 176511, upload-time = "2026-05-06T08:10:23.116Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/fb/95/adcb68e20c34162e9135f370d6e31737719c2b6f94bc953fe7ed1f10fe21/authlib-1.7.2-py2.py3-none-any.whl", hash = "sha256:3e1faedc9d87e7d56a164eca3ccb6ace0d61b94abe83e92242f8dc8bba9b4a9f", size = 259548, upload-time = "2026-05-06T08:10:21.436Z" },
-]
-
-[[package]]
-name = "autodoc-pydantic"
-version = "2.2.0"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "pydantic" },
-    { name = "pydantic-settings" },
-    { name = "sphinx" },
-]
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/7b/df/87120e2195f08d760bc5cf8a31cfa2381a6887517aa89453b23f1ae3354f/autodoc_pydantic-2.2.0-py3-none-any.whl", hash = "sha256:8c6a36fbf6ed2700ea9c6d21ea76ad541b621fbdf16b5a80ee04673548af4d95", size = 34001, upload-time = "2024-04-27T10:57:00.542Z" },
 ]
 
 [[package]]
@@ -1598,27 +1583,6 @@ sdist = { url = "https://files.pythonhosted.org/packages/0a/5b/836516269d4f618ef
 wheels = [
     { url = "https://files.pythonhosted.org/packages/44/0b/98fc6eb83333508ca5f44c52b3e287ea8137a0ad582714e2cbc67a02154b/datasets-5.0.1-py3-none-any.whl", hash = "sha256:9fbf73688f8c18f7529b4fe592abd04015f81d1e58001e4bac73ffb2b39d7cc4", size = 559079, upload-time = "2026-07-28T11:09:10.266Z" },
 ]
-
-[[package]]
-name = "deepspeed"
-version = "0.19.3"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "einops" },
-    { name = "hjson" },
-    { name = "msgpack" },
-    { name = "ninja" },
-    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
-    { name = "numpy", version = "2.3.5", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11' and python_full_version < '3.13'" },
-    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.13'" },
-    { name = "packaging" },
-    { name = "psutil" },
-    { name = "py-cpuinfo" },
-    { name = "pydantic" },
-    { name = "torch" },
-    { name = "tqdm" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/ea/2f/a1579adbdedaad56845e3b14263b8e12920bc3e52ab8ef7a6743fb7df657/deepspeed-0.19.3.tar.gz", hash = "sha256:82b4b92d0cd58f8fc461b80428a5be2838f4adad48ae3aef509495c640c9ed2f", size = 1817754, upload-time = "2026-07-23T01:09:16.523Z" }
 
 [[package]]
 name = "deprecation"
@@ -2589,15 +2553,6 @@ wheels = [
 ]
 
 [[package]]
-name = "hjson"
-version = "3.1.0"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/82/e5/0b56d723a76ca67abadbf7fb71609fb0ea7e6926e94fcca6c65a85b36a0e/hjson-3.1.0.tar.gz", hash = "sha256:55af475a27cf83a7969c808399d7bccdec8fb836a07ddbd574587593b9cdcf75", size = 40541, upload-time = "2022-08-13T02:53:01.919Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/1f/7f/13cd798d180af4bf4c0ceddeefba2b864a63c71645abc0308b768d67bb81/hjson-3.1.0-py3-none-any.whl", hash = "sha256:65713cdcf13214fb554eb8b4ef803419733f4f5e551047c9b711098ab7186b89", size = 54018, upload-time = "2022-08-13T02:52:59.899Z" },
-]
-
-[[package]]
 name = "html5lib"
 version = "1.1"
 source = { registry = "https://pypi.org/simple" }
@@ -3316,15 +3271,15 @@ wheels = [
 
 [[package]]
 name = "liger-kernel"
-version = "0.8.2"
+version = "0.8.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "torch" },
     { name = "triton" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/ff/a5/27575f85fd91cb92a0d72b4c37daa79021334926b5c4624f7ce9fa15e6ae/liger_kernel-0.8.2.tar.gz", hash = "sha256:387673ed6bf64fc8150cc8315fed578d2fc717ec3450f53489f480880223c1b8", size = 6136426, upload-time = "2026-08-18T20:54:30.62Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/1a/6b/5d4b965e411d35fb1f533d4b2a2a9a1e99f4bf3fc751ab22b989159c2a18/liger_kernel-0.8.1.tar.gz", hash = "sha256:ae708a8079d2283070128e38497aa2976294d822e21a0f21ea86e63c67334a8b", size = 4157449, upload-time = "2026-07-23T00:01:37.77Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/e2/b3/a66f1d9143697784ad2c2abf665b02c47aa17857232ed72224588186103c/liger_kernel-0.8.2-py3-none-any.whl", hash = "sha256:84c0a7bc9bf4d4cf8ea5ba89ff84d28686afc94215b220851d9f57dc87852741", size = 644266, upload-time = "2026-08-18T20:54:28.728Z" },
+    { url = "https://files.pythonhosted.org/packages/fc/dc/68b2d8400e97d64412536bf3bd72c8890238013ebf75b95598c56b3b10a8/liger_kernel-0.8.1-py3-none-any.whl", hash = "sha256:90836c1e9de22a1c57a640775fb79151ea704748cf9c3f6658dddaa06fff1989", size = 506445, upload-time = "2026-07-23T00:01:35.995Z" },
 ]
 
 [[package]]
@@ -5016,7 +4971,7 @@ wheels = [
 
 [[package]]
 name = "peft"
-version = "0.20.0"
+version = "0.19.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "accelerate" },
@@ -5032,9 +4987,9 @@ dependencies = [
     { name = "tqdm" },
     { name = "transformers" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/b4/08/02541a2c29be7c78698f73d438bc0e733b214f3f35ec5db79fca8da8fc61/peft-0.20.0.tar.gz", hash = "sha256:4769c8093a4ca145fd6fb3fd4dd50449675f5fe46434ad1e98b285a132d4b1d0", size = 880503, upload-time = "2026-07-28T13:46:01.85Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/86/cf/037f1e3d5186496c05513a6754639e2dab3038a05f384284d49a9bd06a2d/peft-0.19.1.tar.gz", hash = "sha256:0d97542fe96dcdaa20d3b81c06f26f988618f416a73544ab23c3618ccb674a40", size = 763738, upload-time = "2026-04-16T15:46:45.105Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/28/79/13bcabb8048126422d5c4b880575d40886c726f354db88cfeed4325525bb/peft-0.20.0-py3-none-any.whl", hash = "sha256:0fbba16ffebfad3de96e06f2da6860fd860292324b85b6141909fa1e26ea9233", size = 775777, upload-time = "2026-07-28T13:45:59.809Z" },
+    { url = "https://files.pythonhosted.org/packages/e8/b6/f54d676ed93cc2dd2234c3b172ea9c8c3d7d29361e66b1b23dec57a67465/peft-0.19.1-py3-none-any.whl", hash = "sha256:2113f72a81621b5913ef28f9022204c742df111890c5f49d812716a4a301e356", size = 680692, upload-time = "2026-04-16T15:46:42.886Z" },
 ]
 
 [[package]]

@@ -26,7 +26,6 @@ Dependencies
     import re
     import torch
     import yaml
-    from accelerate import Accelerator
     from datasets import load_dataset
     from peft import LoraConfig, get_peft_model
     from torch.utils.data import Dataset
@@ -244,9 +243,6 @@ environment: each rollout runs its own env instance in-process via
             {"role": "assistant", "content": "Let me solve this step by step.\n<think>"},
         ]
 
-        # Define accelerators for distributed training
-        accelerator = Accelerator()
-
         def prompt_builder(question: str) -> str:
             parts = [
                 m["content"].format(question=question, answer="")
@@ -312,8 +308,8 @@ for the GRPO hyperparameters and the mutation parameters.
 An important part of training an LLM to display reasoning behavaiour is distributed training. They are
 called *Large* Language Models for a reason, and are often too large to train on a single GPU. If you want
 to train a larger, more powerful model, then this becomes even more infeasible. Instead, we can leverage
-distributed training, to share the workload across multiple devices and speed up training. To enable distributed
-training in this tutorial, we use deepspeed and accelerate.
+distributed training, to share the workload across multiple devices and speed up training. Launch
+multi-GPU LLM training with ``torchrun``. See :ref:`llm_distributed`.
 
 .. code-block:: python
 
@@ -323,7 +319,6 @@ training in this tutorial, we use deepspeed and accelerate.
         model_name=MODEL_PATH,
         pad_token_id=tokenizer.pad_token_id,
         pad_token=tokenizer.pad_token,
-        accelerator=accelerator,
         **init_hp,
     )
 
@@ -390,59 +385,16 @@ with ``max_turns=1`` for single-turn reasoning.
         evo_steps=10,
         mutation=mutations,
         selection_strategy=tournament,
-        accelerator=accelerator,
         verbose=True,
-        num_epochs=1
     )
 
-Configuring Accelerate and DeepSpeed
+Launching multi-GPU training
 ------------------------------------
-To generate an accelerate file, run the command ``accelerate config`` in your terminal, following the instructions
-on screen to outline the details of the compute you intend to use for your finetuning, saying yes to the question
-"Do you want to use DeepSpeed?" and no to the question "Do you want to specify a json file to a DeepSpeed config?"
-if you want an auto-generated deepspeed config file. More information on the deepspeed configuration can be found
-in their `docs <https://www.deepspeed.ai/docs/config-json/>`_. The accelerate config will handle the details of
-the distribution and the GRPO class handles how the accelerator is used during training. You can then launch a training
-run using ``accelerate`` with the following command:
+Launch from the repository root with ``torchrun`` (``N`` is the number of GPUs):
 
 .. code-block:: bash
 
-    accelerate launch path/to/training_script
-
-Alternatively, you can avoid ``accelerate config`` by defining your own accelerate-deepspeed config file and pass
-it as an argument to ``accelerate launch``:
-
-.. code-block:: bash
-
-    accelerate launch --config_file path/to/accelerate-deepspeed-config.yaml path/to/training_script
-
-Example config file:
-
-.. code-block:: yaml
-
-    compute_environment: LOCAL_MACHINE
-    debug: false
-    deepspeed_config:
-        gradient_accumulation_steps: 2
-        gradient_clipping: 1.0
-        offload_optimizer_device: cpu
-        offload_param_device: cpu
-        zero3_init_flag: false
-        zero_stage: 2
-    distributed_type: DEEPSPEED
-    downcast_bf16: no
-    enable_cpu_affinity: false
-    machine_rank: 0
-    main_training_function: main
-    mixed_precision: bf16
-    num_machines: 4
-    num_processes: 1
-    rdzv_backend: static
-    same_network: true
-    tpu_env: []
-    tpu_use_cluster: false
-    tpu_use_sudo: false
-    use_cpu: false
+    torchrun --nproc_per_node=N path/to/training_script
 
 
 Using a Custom Training Loop
@@ -460,12 +412,11 @@ for rollout training.
         import numpy as np
         from agilerl.llm_envs import RolloutCollector
         from agilerl.rollouts.on_policy import collect_rollouts_llm
-        from agilerl.utils.llm_utils import aggregate_metrics_across_gpus
+        from agilerl.distributed import aggregate_metrics_across_gpus
         from agilerl.utils.utils import run_selection_and_mutation
 
         batch_size = init_hp["BATCH_SIZE"]
         group_size = getattr(pop[0], "group_size", 1)
-        accelerator = pop[0].accelerator
         rollout_env = RolloutCollector(env_factory, batch_size, group_size)
         group_seed = int(np.random.randint(0, 1_000_000))
 
@@ -496,7 +447,7 @@ for rollout training.
                     metrics = agent.learn(experiences, **learn_kwargs)
 
                     # Example distributed-safe metric aggregation.
-                    mean_loss = aggregate_metrics_across_gpus(accelerator, metrics["mean_loss"])
+                    mean_loss = aggregate_metrics_across_gpus(metrics["mean_loss"])
 
                 if tournament and mutation is not None and (i + 1) % evo_steps == 0:
                     pop = run_selection_and_mutation(
@@ -504,7 +455,6 @@ for rollout training.
                         population=pop,
                         mutation=mutations,
                         env_name="reasoning_env",
-                        accelerator=None,
                         language_model=True,
                         elite_path=elite_path,
                         save_elite=save_elite,

@@ -183,7 +183,7 @@ def apply_liger_kernel_to_nemotron_h(
     rope: bool = True,
     relu_squared: bool = True,
     cross_entropy: bool = False,
-    fused_linear_cross_entropy: bool = True,
+    fused_linear_cross_entropy: bool = False,
     model: PreTrainedModel | None = None,
     **kwargs: Any,
 ) -> None:
@@ -197,7 +197,10 @@ def apply_liger_kernel_to_nemotron_h(
     :type relu_squared: bool
     :param cross_entropy: Use LigerCrossEntropyLoss (mutually exclusive with LCE).
     :type cross_entropy: bool
-    :param fused_linear_cross_entropy: Replace CausalLM forward with fused LCE.
+    :param fused_linear_cross_entropy: Replace CausalLM ``forward`` with fused LCE.
+        Defaults to ``False``: learn identity-patches ``lm_head`` and scores via
+        fused logprobs, and LCE's ``self.model(...)`` call makes the first FSDP
+        hook a nested unit so prefetch hits an empty comm context.
     :type fused_linear_cross_entropy: bool
     :param model: Optional loaded model for instance-level patches.
     :type model: PreTrainedModel | None

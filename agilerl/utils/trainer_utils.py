@@ -5,8 +5,8 @@
 
 from __future__ import annotations
 
+import os
 import warnings
-from collections.abc import Mapping
 from functools import singledispatch
 from typing import TYPE_CHECKING, Any, Protocol
 
@@ -15,32 +15,31 @@ from gymnasium import spaces
 
 from agilerl.algorithms.core.base import (
     LLMAlgorithm,
-    MultiAgentAlgorithm,
-    SingleAgentAlgorithm,
+    MultiAgentRLAlgorithm,
+    RLAlgorithm,
 )
 from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
-from agilerl.arena.models.algorithms import (
-    AlgoSpec,
-    LLMAlgorithmSpec,
-    MultiAgentAlgorithmSpec,
-    SingleAgentAlgorithmSpec,
-)
 from agilerl.components.replay_buffer import BufferType
 from agilerl.hpo.multi_frequency import MultiFrequencySelection
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.llm_envs import DatasetEnv, RolloutHarness
+from agilerl.models.algo import (
+    AlgoSpec,
+    LLMAlgorithmSpec,
+    MultiAgentRLAlgorithmSpec,
+    RLAlgorithmSpec,
+)
 from agilerl.models.hpo import (
     MultiFrequencySelectionSpec,
     MutationSpec,
     SelectionStrategySpec,
     TournamentSelectionSpec,
 )
-from agilerl.models.training import ReplayBufferSpec, TrainingSpec, init_buffer
+from agilerl.models.training import ReplayBufferSpec, TrainingSpec
 from agilerl.protocols import BanditEnvProtocol, SelectionStrategyProtocol
-from agilerl.utils.algo_utils import clone_llm, get_num_envs
+from agilerl.utils.algo_utils import get_num_envs
 from agilerl.utils.env_utils import GymEnvType, PzEnvType
-from agilerl.utils.llm_utils import get_state_dict
 
 if TYPE_CHECKING:
     import torch
@@ -48,20 +47,20 @@ if TYPE_CHECKING:
 
 
 LLMEnvType = RolloutHarness | DatasetEnv
-# Union of every env type the construction functions build: vectorized gym/pettingzoo
+# Union of every env type an ``EnvSpec.make_env`` builds: vectorized gym/pettingzoo
 # envs, a bandit env satisfying ``BanditEnvProtocol``, or an LLM env.
 EnvironmentType = GymEnvType | PzEnvType | BanditEnvProtocol | LLMEnvType
-PopulationType = list[SingleAgentAlgorithm | MultiAgentAlgorithm | LLMAlgorithm]
+PopulationType = list[RLAlgorithm | MultiAgentRLAlgorithm | LLMAlgorithm]
 
 
-class SingleAgentVectorEnv(Protocol):
+class _SingleAgentVectorEnv(Protocol):
     """Vectorized single-agent env exposing batch-less spaces as attributes."""
 
     single_observation_space: spaces.Space
     single_action_space: spaces.Space
 
 
-class MultiAgentVectorEnv(Protocol):
+class _MultiAgentVectorEnv(Protocol):
     """Vectorized multi-agent env exposing per-agent batch-less spaces."""
 
     agents: list[str]
@@ -69,6 +68,44 @@ class MultiAgentVectorEnv(Protocol):
     def single_observation_space(self, agent: str) -> spaces.Space: ...
 
     def single_action_space(self, agent: str) -> spaces.Space: ...
+
+
+def started_by_accelerate_launch() -> bool:
+    """Return True if this process was started by ``accelerate launch``."""
+    value = os.environ.get("ACCELERATE_STARTED_BY_LAUNCH", "").strip().lower()
+    return value in frozenset[str]({"true", "1", "yes"})
+
+
+def resolve_accelerator(
+    algorithm: AlgoSpec,
+    accelerator: Accelerator | None,
+) -> Accelerator | None:
+    """Build Accelerator for classic RL under ``accelerate launch``.
+
+    An explicit ``accelerator`` is kept. LLM jobs under launch raise
+    before ``Accelerator()``.
+    """
+    if accelerator is not None:
+        return accelerator
+    if not started_by_accelerate_launch():
+        return None
+
+    world_size = int(os.environ.get("WORLD_SIZE") or 1)
+    if world_size == 1:
+        warnings.warn(
+            "Only one process was detected.",
+            UserWarning,
+            stacklevel=2,
+        )
+
+    if isinstance(algorithm, LLMAlgorithmSpec):
+        msg = (
+            "LLM training does not use Accelerate. Launch with torchrun, "
+            "not accelerate launch."
+        )
+        raise ValueError(msg)
+
+    return Accelerator()
 
 
 def hp_config_from_mutation_spec(spec: MutationSpec) -> HyperparameterConfig | None:
@@ -110,17 +147,17 @@ def get_spaces_from_env(
     raise NotImplementedError(msg)
 
 
-@get_spaces_from_env.register(MultiAgentAlgorithmSpec)
+@get_spaces_from_env.register(MultiAgentRLAlgorithmSpec)
 def get_spaces_from_env_multi_agent(
-    algo_spec: MultiAgentAlgorithmSpec,
-    env: MultiAgentVectorEnv,
+    algo_spec: MultiAgentRLAlgorithmSpec,
+    env: _MultiAgentVectorEnv,
 ) -> tuple[dict[str, spaces.Space], dict[str, spaces.Space]]:
     """Get the observation and action spaces from the environment for a multi-agent algorithm.
 
     :param algo_spec: Algorithm spec.
-    :type algo_spec: MultiAgentAlgorithmSpec
+    :type algo_spec: MultiAgentRLAlgorithmSpec
     :param env: Vectorized multi-agent environment.
-    :type env: MultiAgentVectorEnv
+    :type env: _MultiAgentVectorEnv
     :returns: A tuple of observation and action spaces.
     :rtype: tuple[dict[str, spaces.Space], dict[str, spaces.Space]]
     """
@@ -129,17 +166,17 @@ def get_spaces_from_env_multi_agent(
     }
 
 
-@get_spaces_from_env.register(SingleAgentAlgorithmSpec)
+@get_spaces_from_env.register(RLAlgorithmSpec)
 def get_spaces_from_env_single_agent(
-    algo_spec: SingleAgentAlgorithmSpec,
-    env: SingleAgentVectorEnv,
+    algo_spec: RLAlgorithmSpec,
+    env: _SingleAgentVectorEnv,
 ) -> tuple[spaces.Space, spaces.Space]:
     """Get the observation and action spaces from the environment for a single-agent algorithm.
 
     :param algo_spec: Algorithm spec.
-    :type algo_spec: SingleAgentAlgorithmSpec
+    :type algo_spec: RLAlgorithmSpec
     :param env: Vectorized single-agent environment.
-    :type env: SingleAgentVectorEnv
+    :type env: _SingleAgentVectorEnv
     :returns: A tuple of observation and action spaces.
     :rtype: tuple[spaces.Space, spaces.Space]
     """
@@ -158,8 +195,6 @@ def create_population_from_spec(
     accelerator: Accelerator | None = None,
     tokenizer: PreTrainedTokenizerBase | None = None,
     selection_strategy_spec: SelectionStrategySpec | None = None,
-    hp_config: HyperparameterConfig | None = None,
-    networks: Mapping[str, Any] | None = None,
 ) -> PopulationType:
     """Instantiate a population of agents from an algorithm spec.
 
@@ -191,26 +226,14 @@ def create_population_from_spec(
     :param selection_strategy_spec: Selection-strategy spec. Only MF-PBT
         consumes it here, to tag each agent with its subpopulation.
     :type selection_strategy_spec: SelectionStrategySpec | None
-    :param hp_config: Hyperparameter config for HPO. Falls back to the one the
-        mutation spec describes.
-    :type hp_config: HyperparameterConfig | None
-    :param networks: Pre-built modules to hand every agent's constructor, e.g.
-        ``{"actor_network": ...}``. Not used for LLM algorithms, whose actor
-        is built once and cloned.
-    :type networks: Mapping[str, Any] | None
     :returns: A list of algorithm instances.
     :rtype: PopulationType
     """
-    from agilerl.arena.models.algorithms import RainbowDQNSpec
-    from agilerl.builders import (
-        AlgorithmBuildRuntime,
-        LLMBuilder,
-        MultiAgentBuilder,
-        SingleAgentBuilder,
-    )
+    # circular import with agilerl.models
+    from agilerl.models.algorithms import RainbowDQNSpec
 
     # Enforced here as well as on the Trainer: this is a public entrypoint, and
-    # every branch below forwards both flags to the builder.
+    # every branch below forwards both flags to ``build_algorithm``.
     if resume_from_checkpoint is not None and load_weights_from is not None:
         msg = (
             "resume_from_checkpoint and load_weights_from are mutually "
@@ -220,13 +243,16 @@ def create_population_from_spec(
         )
         raise ValueError(msg)
 
-    networks = dict(networks or {})
+    # Override the hp_config with the one defined in MutationSpec if not already set
+    hp_config = algo_spec.hp_config
     if hp_config is None and mutation_spec is not None:
         hp_config = hp_config_from_mutation_spec(mutation_spec)
+        algo_spec.hp_config = hp_config
 
     # Some algorithms require num_envs as argument -> add to algo_spec
+    # NOTE: We should identify these lazily during training...
     for num_envs_arg in ["num_envs", "vect_noise_dim"]:
-        if num_envs_arg in type(algo_spec).model_fields:
+        if hasattr(algo_spec, num_envs_arg):
             if env is None:
                 msg = (
                     f"Algorithm spec {type(algo_spec).__name__} requires an "
@@ -238,7 +264,7 @@ def create_population_from_spec(
             setattr(algo_spec, num_envs_arg, get_num_envs(env))
 
     # Classic RL algorithms
-    if isinstance(algo_spec, (SingleAgentAlgorithmSpec, MultiAgentAlgorithmSpec)):
+    if isinstance(algo_spec, (RLAlgorithmSpec, MultiAgentRLAlgorithmSpec)):
         if env is None:
             msg = "Classic RL algorithms require an instantiated environment."
             raise ValueError(msg)
@@ -253,42 +279,29 @@ def create_population_from_spec(
 
         # ``get_spaces_from_env`` returns a per-agent mapping for multi-agent specs
         # and a plain space for single-agent specs; narrow the shared return here.
-        if isinstance(algo_spec, MultiAgentAlgorithmSpec):
+        if isinstance(algo_spec, MultiAgentRLAlgorithmSpec):
             ma_error = "Multi-agent specs require per-agent space mappings."
-            if not isinstance(observation_space, dict):
-                raise TypeError(ma_error)
-            if not isinstance(action_space, dict):
-                raise TypeError(ma_error)
+            assert isinstance(observation_space, dict), ma_error
+            assert isinstance(action_space, dict), ma_error
             # ``spaces.Dict`` is itself dict-like, so the ``dict`` narrow above leaves
             # an ambiguous value type; rebuild explicit per-agent space mappings.
             obs_by_agent: dict[str, spaces.Space] = {}
             action_by_agent: dict[str, spaces.Space] = {}
             for agent_id, obs_space in observation_space.items():
-                if not isinstance(obs_space, spaces.Space):
-                    msg = (
-                        f"Observation space for {agent_id!r} is not a gymnasium Space."
-                    )
-                    raise TypeError(msg)
+                assert isinstance(obs_space, spaces.Space)
                 obs_by_agent[str(agent_id)] = obs_space
             for agent_id, act_space in action_space.items():
-                if not isinstance(act_space, spaces.Space):
-                    msg = f"Action space for {agent_id!r} is not a gymnasium Space."
-                    raise TypeError(msg)
+                assert isinstance(act_space, spaces.Space)
                 action_by_agent[str(agent_id)] = act_space
             multi_agent_population: PopulationType = [
-                MultiAgentBuilder.build(
-                    algo_spec,
+                algo_spec.build_algorithm(
                     obs_by_agent,
                     action_by_agent,
-                    runtime=AlgorithmBuildRuntime(
-                        index=i,
-                        device=device,
-                        accelerator=accelerator,
-                        hp_config=hp_config,
-                        resume_from_checkpoint=resume_from_checkpoint,
-                        load_weights_from=load_weights_from,
-                    ),
-                    **networks,
+                    index=i,
+                    resume_from_checkpoint=resume_from_checkpoint,
+                    load_weights_from=load_weights_from,
+                    device=device,
+                    accelerator=accelerator,
                 )
                 for i in range(population_size)
             ]
@@ -296,24 +309,17 @@ def create_population_from_spec(
             return multi_agent_population
 
         sa_error = "Single-agent specs require plain observation/action spaces."
-        if isinstance(observation_space, dict):
-            raise TypeError(sa_error)
-        if isinstance(action_space, dict):
-            raise TypeError(sa_error)
+        assert not isinstance(observation_space, dict), sa_error
+        assert not isinstance(action_space, dict), sa_error
         single_agent_population: PopulationType = [
-            SingleAgentBuilder.build(
-                algo_spec,
+            algo_spec.build_algorithm(
                 observation_space,
                 action_space,
-                runtime=AlgorithmBuildRuntime(
-                    index=i,
-                    device=device,
-                    accelerator=accelerator,
-                    hp_config=hp_config,
-                    resume_from_checkpoint=resume_from_checkpoint,
-                    load_weights_from=load_weights_from,
-                ),
-                **networks,
+                index=i,
+                resume_from_checkpoint=resume_from_checkpoint,
+                load_weights_from=load_weights_from,
+                device=device,
+                accelerator=accelerator,
             )
             for i in range(population_size)
         ]
@@ -321,52 +327,25 @@ def create_population_from_spec(
         return single_agent_population
 
     # LLM algorithms — build agent 0 fully, then clone the actor for agents 1..N.
-    # Each agent beyond the first gets a fresh Accelerator to avoid sharing the
-    # same DeepSpeed distributed context.
-    if not isinstance(algo_spec, LLMAlgorithmSpec):
-        msg = f"{type(algo_spec).__name__} is not an LLMAlgorithmSpec."
-        raise TypeError(msg)
-
-    agent_0 = LLMBuilder.build(
-        algo_spec,
+    agent_0 = algo_spec.build_algorithm(
         tokenizer=tokenizer,
-        runtime=AlgorithmBuildRuntime(
-            index=0,
-            device=device,
-            accelerator=accelerator,
-            hp_config=hp_config,
-            resume_from_checkpoint=resume_from_checkpoint,
-            load_weights_from=load_weights_from,
-        ),
+        index=0,
+        resume_from_checkpoint=resume_from_checkpoint,
+        load_weights_from=load_weights_from,
+        device=device,
     )
-    population: PopulationType = [agent_0]
+    population = [agent_0]
 
     for i in range(1, population_size):
-        agent_accelerator = Accelerator() if accelerator is not None else None
-        if agent_0.actor is None:
-            msg = "Agent 0 actor is not initialized"
-            raise TypeError(msg)
-        cloned_actor = clone_llm(
-            agent_0.actor,
-            zero_stage=algo_spec.zero_stage,
-            state_dict=(
-                agent_0.actor.state_dict()
-                if accelerator is None
-                else get_state_dict(agent_0.actor)
-            ),
-        )
+        assert agent_0.actor is not None, "Agent 0 actor is not initialized"
+        cloned_actor = agent_0._clone_actor_network()
         population.append(
-            LLMBuilder.build(
-                algo_spec,
+            algo_spec.build_algorithm(
                 tokenizer=tokenizer,
-                runtime=AlgorithmBuildRuntime(
-                    index=i,
-                    device=device,
-                    accelerator=agent_accelerator,
-                    hp_config=hp_config,
-                    resume_from_checkpoint=resume_from_checkpoint,
-                    load_weights_from=load_weights_from,
-                ),
+                index=i,
+                resume_from_checkpoint=resume_from_checkpoint,
+                load_weights_from=load_weights_from,
+                device=device,
                 actor_network=cloned_actor,
             )
         )
@@ -620,4 +599,4 @@ def build_replay_buffer_from_spec(
         )
         buffer_spec = ReplayBufferSpec(max_size=100_000)
 
-    return init_buffer(buffer_spec, algo_spec, device)
+    return buffer_spec.init_buffer(algo_spec, device)

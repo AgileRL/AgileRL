@@ -45,7 +45,6 @@ def _cpu_algo(cls: type, *, value_head: bool = False, **kwargs: object) -> objec
         "max_model_len": 12,
         "wrap": False,
         "gradient_checkpointing": False,
-        "accelerator": None,
         "device": "cpu",
         "use_vllm": False,
     }

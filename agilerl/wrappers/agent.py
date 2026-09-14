@@ -18,8 +18,8 @@ from typing_extensions import Self, TypeIs
 from agilerl.algorithms import PPO
 from agilerl.algorithms.core import (
     EvolvableAlgorithm,
-    MultiAgentAlgorithm,
-    SingleAgentAlgorithm,
+    MultiAgentRLAlgorithm,
+    RLAlgorithm,
 )
 from agilerl.algorithms.core.base import get_checkpoint_dict
 from agilerl.protocols import EvolvableAttributeDict
@@ -38,7 +38,7 @@ from agilerl.typing import (
 from agilerl.utils.algo_utils import obs_to_tensor, stack_experiences
 from agilerl.wrappers.utils import RunningMeanStd
 
-AgentT = TypeVar("AgentT", bound=SingleAgentAlgorithm | MultiAgentAlgorithm)
+AgentT = TypeVar("AgentT", bound=RLAlgorithm | MultiAgentRLAlgorithm)
 
 
 class AgentWrapper(ABC, Generic[AgentT]):
@@ -57,7 +57,7 @@ class AgentWrapper(ABC, Generic[AgentT]):
         self.agent = agent
         self.observation_space = agent.observation_space
         self.action_space = agent.action_space
-        self.multi_agent = isinstance(agent, MultiAgentAlgorithm)
+        self.multi_agent = isinstance(agent, MultiAgentRLAlgorithm)
 
         # Wrap the agent's methods
         self.wrapped_get_action = agent.get_action
@@ -310,7 +310,7 @@ class RSNorm(AgentWrapper[AgentT]):
         observations stored in the rollout buffer before learning.
 
     :param agent: Agent to be wrapped
-    :type agent: SingleAgentAlgorithm, MultiAgentAlgorithm
+    :type agent: RLAlgorithm, MultiAgentRLAlgorithm
     :param epsilon: Small value to avoid division by zero, defaults to 1e-4
     :type epsilon: float, optional
     :param norm_obs_keys: List of observation keys to normalize, defaults to None
@@ -334,10 +334,10 @@ class RSNorm(AgentWrapper[AgentT]):
         # populated and expose the union through ``obs_rms``.
         self._single_obs_rms: RunningStatsType | None = None
         self._multi_obs_rms: dict[str, RunningStatsType] | None = None
-        # ``multi_agent`` is exactly ``isinstance(agent, MultiAgentAlgorithm)``
+        # ``multi_agent`` is exactly ``isinstance(agent, MultiAgentRLAlgorithm)``
         # (see the base constructor); narrowing the agent yields its precisely-typed
         # observation space(s) rather than the delegated, widened attribute.
-        if isinstance(self.agent, MultiAgentAlgorithm):
+        if isinstance(self.agent, MultiAgentRLAlgorithm):
             # Multi-agent algorithms expose `observation_space` as a per-agent mapping
             # (either a `spaces.Dict` or an `OrderedDict` of the unique agent spaces).
             multi_stats: dict[str, RunningStatsType] = OrderedDict(
@@ -350,7 +350,7 @@ class RSNorm(AgentWrapper[AgentT]):
             self._multi_obs_rms = multi_stats
             self.obs_rms = multi_stats
         else:
-            assert isinstance(self.agent, SingleAgentAlgorithm)
+            assert isinstance(self.agent, RLAlgorithm)
             single_stats = RSNorm.build_rms(
                 self.agent.observation_space,
                 epsilon,
@@ -628,18 +628,18 @@ def _mask_rows(array: np.ndarray, mask: np.ndarray) -> np.ndarray:
     return array[mask]
 
 
-class AsyncAgentsWrapper(AgentWrapper[MultiAgentAlgorithm]):
+class AsyncAgentsWrapper(AgentWrapper[MultiAgentRLAlgorithm]):
     """Wrapper for multi-agent algorithms that solve environments with asynchronous agents (i.e. environments
     where agents don't return observations with the same frequency).
 
     .. note::
         This currently supports IPPO, MADDPG, and MATD3.
 
-    :param agent: MultiAgentAlgorithm instance to be wrapped.
-    :type agent: MultiAgentAlgorithm
+    :param agent: MultiAgentRLAlgorithm instance to be wrapped.
+    :type agent: MultiAgentRLAlgorithm
     """
 
-    def __init__(self, agent: MultiAgentAlgorithm) -> None:
+    def __init__(self, agent: MultiAgentRLAlgorithm) -> None:
         super().__init__(agent)
 
         assert self.agent.algo in {"IPPO", "MADDPG", "MATD3"}, (

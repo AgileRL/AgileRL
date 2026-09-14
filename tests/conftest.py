@@ -62,7 +62,7 @@ os.environ.setdefault("HF_HUB_OFFLINE", "1")
 os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
 
 # Tests that construct ``Accelerator()`` directly (instead of via the
-# ``deepspeed_env`` fixture) inherit torch's default MASTER_PORT. Parallel
+# ``distributed_env`` fixture) inherit torch's default MASTER_PORT. Parallel
 # xdist workers then race to bind the same port and one fails with
 # ``EADDRINUSE``. Give each worker a deterministic, unique MASTER_PORT here
 # so any later distributed init uses a non-colliding port.
@@ -96,7 +96,7 @@ if not torch.cuda.is_available():
     os.environ.setdefault("ACCELERATE_USE_CPU", "true")
 
 # Env vars PartialState / Accelerator inspect when choosing a distributed
-# backend. Leaks from DeepSpeed / LLM tests cause later Accelerator() calls to
+# backend. Leaks from distributed tests cause later Accelerator() calls to
 # DDP-wrap models (Linux) or hang on rendezvous (macOS / Windows).
 _DIST_ENV_VARS = (
     "WORLD_SIZE",
@@ -113,11 +113,10 @@ _WORKER_MASTER_PORT = os.environ.get("MASTER_PORT") if _xdist_worker_id else Non
 
 
 def _reset_distributed_env() -> None:
-    """Clear distributed launch env vars leaked by DeepSpeed / LLM tests.
+    """Clear distributed launch env vars leaked by GPU / LLM tests.
 
-    Does not call ``destroy_process_group()``. DeepSpeed has no clean destroy
-    path; tearing down the group between consecutive ``@pytest.mark.gpu``
-    DeepSpeed tests surfaces ``Group <ProcessGroup ...> is not registered``.
+    Does not call ``destroy_process_group()``. Tearing the group down between
+    consecutive ``@pytest.mark.gpu`` tests can leave handles unregistered.
     Suites that need an explicit destroy (multi-agent) do so in
     ``tests/test_algorithms/test_multi_agent/conftest.py``.
     """
@@ -146,12 +145,12 @@ def pytest_collection_modifyitems(config, items):
       1. **GPU memory.** Each container has a dedicated ~14.6 GiB GPU. Peak
          per-test usage: ~4.4 GiB (``test_grpo_sync_actor_to_vllm``), ~3.0
          GiB (``test_grpo_learn``), ~2.5 GiB
-         (``test_grpo_clone_with_accelerator_vllm``); median ~1.5 GiB.
+         (``test_grpo_clone_distributed_vllm``); median ~1.5 GiB.
          With every test factory constructing ``VLLMConfig`` with
          ``gpu_memory_utilization≈0.2`` and
          ``kv_cache_memory_bytes=32 * 1024 * 1024``, a vLLM worker reserves
-         ~3.2 GiB and ``gpu`` (DeepSpeed) tests use ~0.5 GiB; the worst-case
-         "4 vLLM workers + small DeepSpeed share" still fits in ~13 GiB.
+         ~3.2 GiB and ``gpu`` (FSDP) tests use ~0.5 GiB; the worst-case
+         "4 vLLM workers + small FSDP share" still fits in ~13 GiB.
       2. **Port races.** Concurrent distributed inits race on MASTER_PORT;
          ``get_free_port`` hands each xdist worker a disjoint port range to
          avoid cross-worker ``EADDRINUSE``, and capping GPU-test concurrency
@@ -159,16 +158,10 @@ def pytest_collection_modifyitems(config, items):
 
       ``vllm`` tests run in ``subprocess_runner.py``-spawned subprocesses, so
       worker-process state is reset between them. ``gpu`` tests run in-process
-      and share accelerator / DeepSpeed distributed state across the worker:
-      accelerator state is reset per fixture (``AcceleratorState._reset_state``),
-      and ``generate_accelerator`` clears DeepSpeed's cached comm backend +
-      cloned process groups *only* when the world group has been torn down
-      (``not dist.is_initialized()``), so an interleaved ``destroy_process_group``
-      (e.g. test_mutation) cannot dangle DeepSpeed's group handles into
-      ``Group <ProcessGroup ...> is not registered`` — while leaving the cache
-      intact otherwise (re-cloning every build leaks NCCL communicators and OOMs
-      concurrent workers). MASTER_PORT is still per-test (``get_free_port``) to
-      avoid ``EADDRINUSE`` on concurrent inits.
+      and share Accelerator / process-group state across the worker:
+      Accelerator state is reset per fixture (``AcceleratorState._reset_state``).
+      MASTER_PORT is still per-test (``get_free_port``) to avoid
+      ``EADDRINUSE`` on concurrent inits.
     - ``test_minari_utils``: tests create/delete shared Minari datasets on disk.
 
     Uses ``tryfirst=True`` so the ``xdist_group`` markers below are attached
@@ -194,8 +187,8 @@ def pytest_collection_modifyitems(config, items):
     # regardless of -n auto's worker count. See docstring above.
     gputest_groups = [pytest.mark.xdist_group(f"gputest{i}") for i in range(4)]
     minari_group = pytest.mark.xdist_group("minari")
-    # ``gpu``/``vllm``-marked tests need a usable CUDA device (real DeepSpeed
-    # init, a live vLLM engine). Skip them when CUDA is unavailable — a CPU-only
+    # ``gpu``/``vllm``-marked tests need a usable CUDA device (FSDP wrap,
+    # a live vLLM engine). Skip them when CUDA is unavailable — a CPU-only
     # runner, or a GPU whose driver is too old for the installed torch (the GPU
     # is then hidden via ``CUDA_VISIBLE_DEVICES=``, so ``is_available()`` is
     # False). On a real GPU the guard is inert and they run as before.
@@ -534,7 +527,6 @@ def dummy_rng():
 
 
 dist_env = {
-    "ACCELERATE_USE_DEEPSPEED": "true",
     "MASTER_ADDR": "localhost",
     "MASTER_PORT": "10999",
     "RANK": "0",
@@ -610,8 +602,8 @@ def gloo_process_group():
 
 
 @pytest.fixture
-def deepspeed_env():
-
+def distributed_env():
+    """Single-process torch.distributed environment for distributed LLM tests."""
     dynamic_dist_env = dist_env.copy()
     dynamic_dist_env["MASTER_PORT"] = str(get_free_port())
     # On a CPU-only / hidden-GPU runner the GPU is masked via

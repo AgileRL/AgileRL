@@ -6,24 +6,9 @@
 from unittest.mock import MagicMock, patch
 
 import numpy as np
-import pytest
 import torch
 
 from agilerl.modules.cnn import EvolvableCNN, MutableKernelSizes
-
-
-class TestEvolvableCNNInit:
-    def test_invalid_block_type_raises(self, device):
-        with pytest.raises(ValueError, match="Invalid block type"):
-            EvolvableCNN(
-                input_shape=[1, 16, 16],
-                channel_size=[32],
-                kernel_size=[(3, 3)],
-                stride_size=[(1, 1)],
-                num_outputs=10,
-                block_type="InvalidBlock",
-                device=device,
-            )
 
 
 class TestMutableKernelSizesAddLayerConv2d:

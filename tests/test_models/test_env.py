@@ -17,15 +17,7 @@ from agilerl.models.env import (
     LLMEnvSpec,
     LLMEnvType,
     OfflineEnvSpec,
-    _load_llm_dataset,
-    _make_url_rollout_factory,
-    construct_custom_env_fn,
-    make_bandit_env,
-    make_gym_env,
-    make_llm_env,
-    make_pz_env,
-    make_rollout_env_factory,
-    make_single_env,
+    PzEnvSpec,
 )
 
 
@@ -70,7 +62,7 @@ class CustomGymEnv:
             env.wrapper_trace.append(tag)
             return env
 
-        make_env = construct_custom_env_fn(
+        make_env = GymEnvSpec.construct_custom_env_fn(
             entrypoint="custom_gym_env:CustomGymEnv",
             path=str(tmp_path),
             config={"value": 12},
@@ -94,7 +86,7 @@ class CwdEnv:
         )
         monkeypatch.chdir(tmp_path)
 
-        make_env = construct_custom_env_fn(
+        make_env = GymEnvSpec.construct_custom_env_fn(
             entrypoint="cwd_env:CwdEnv",
             path=None,
             config={"value": 99},
@@ -103,12 +95,12 @@ class CwdEnv:
         assert env.value == 99
 
     def test_custom_env_with_invalid_entrypoint(self):
-        make_env = construct_custom_env_fn(entrypoint="invalid-entrypoint")
+        make_env = GymEnvSpec.construct_custom_env_fn(entrypoint="invalid-entrypoint")
         with pytest.raises(ValueError, match="Invalid entrypoint format"):
             make_env()
 
     def test_custom_env_with_missing_module(self):
-        make_env = construct_custom_env_fn(entrypoint="does_not_exist:Env")
+        make_env = GymEnvSpec.construct_custom_env_fn(entrypoint="does_not_exist:Env")
         with pytest.raises(ModuleNotFoundError, match="Could not resolve module"):
             make_env()
 
@@ -121,7 +113,7 @@ class OtherEnv:
     pass
 """,
         )
-        make_env = construct_custom_env_fn(
+        make_env = GymEnvSpec.construct_custom_env_fn(
             entrypoint="missing_target:WantedEnv",
             path=str(tmp_path),
         )
@@ -133,7 +125,7 @@ class OtherEnv:
 
         with patch("agilerl.models.env.make_vect_envs") as make_vect_mock:
             make_vect_mock.return_value = "gym_vec_env"
-            result = make_gym_env(spec)
+            result = spec.make_env()
 
         assert result == "gym_vec_env"
         assert make_vect_mock.call_args.kwargs["env_name"] == "CartPole-v1"
@@ -162,7 +154,7 @@ class MyGymEnv:
 
         with patch("agilerl.models.env.make_vect_envs") as make_vect_mock:
             make_vect_mock.return_value = "custom_vec_env"
-            result = make_gym_env(spec)
+            result = spec.make_env()
 
         assert result == "custom_vec_env"
         assert make_vect_mock.call_args.kwargs["should_async_vector"] is False
@@ -172,7 +164,7 @@ class MyGymEnv:
 
     def test_make_env_with_gym_env(self):
         spec = GymEnvSpec(name="CartPole-v1", num_envs=1, sync=True)
-        env = make_gym_env(spec)
+        env = spec.make_env()
         try:
             assert env.num_envs == 1
             obs, info = env.reset()
@@ -202,17 +194,18 @@ def build_env(size=0):
             env.tag = tag
             return env
 
-        spec = GymEnvSpec(
+        spec = PzEnvSpec(
             name="unused",
             num_envs=3,
             entrypoint="custom_pz_env:build_env",
             path=str(tmp_path),
             config={"size": 5},
+            wrappers=[(wrapper, {"tag": "wrapped"})],
         )
 
         with patch("agilerl.models.env.make_multi_agent_vect_envs") as make_multi_mock:
             make_multi_mock.return_value = "vector_env"
-            result = make_pz_env(spec, wrappers=[(wrapper, {"tag": "wrapped"})])
+            result = spec.make_env()
 
         assert result == "vector_env"
         assert make_multi_mock.call_args.kwargs["num_envs"] == 3
@@ -239,7 +232,7 @@ def parallel_env(value=0):
         )
         monkeypatch.syspath_prepend(str(tmp_path))
 
-        spec = GymEnvSpec(
+        spec = PzEnvSpec(
             name="pz_pkg",
             num_envs=2,
             config={"value": 42},
@@ -247,7 +240,7 @@ def parallel_env(value=0):
 
         with patch("agilerl.models.env.make_multi_agent_vect_envs") as make_multi_mock:
             make_multi_mock.return_value = "pz_vec_env"
-            result = make_pz_env(spec)
+            result = spec.make_env()
 
         assert result == "pz_vec_env"
         constructor = make_multi_mock.call_args.kwargs["env"]
@@ -273,7 +266,7 @@ def mark_wrapped(env):
 """,
         )
 
-        spec = GymEnvSpec(
+        spec = PzEnvSpec(
             name="unused",
             num_envs=1,
             entrypoint="custom_pz_env_with_wrapper:build_env",
@@ -284,7 +277,7 @@ def mark_wrapped(env):
 
         with patch("agilerl.models.env.make_multi_agent_vect_envs") as make_multi_mock:
             make_multi_mock.return_value = "pz_vec_env"
-            result = make_pz_env(spec)
+            result = spec.make_env()
 
         assert result == "pz_vec_env"
         constructor = make_multi_mock.call_args.kwargs["env"]
@@ -293,13 +286,13 @@ def mark_wrapped(env):
         assert env.wrapped is True
 
     def test_make_env_with_registered_pettingzoo_environment(self):
-        spec = GymEnvSpec(
+        spec = PzEnvSpec(
             name="mpe2.simple_speaker_listener_v4",
             num_envs=1,
             env_config={"max_cycles": 5, "continuous_actions": False},
         )
 
-        env = make_pz_env(spec)
+        env = spec.make_env()
         try:
             observations, infos = env.reset(seed=0)
             assert env.num_envs == 1
@@ -352,7 +345,7 @@ class TestLLMEnvSpec:
         assert spec.max_reward is None
         assert spec.chat_template_kwargs == {}
 
-    def test_carries_no_gym_env_fields(self):
+    def test_is_standalone_model(self):
         spec = LLMEnvSpec(
             env_type=LLMEnvType.ROLLOUT,
             dataset="dataset.parquet",
@@ -360,9 +353,7 @@ class TestLLMEnvSpec:
             rubric_name="reward_fn",
             prompt_template={"role": "user", "content": "{q}"},
         )
-        assert spec.num_envs == 1
-        for field in ("name", "custom", "default_type", "sync", "env_wrappers"):
-            assert field not in type(spec).model_fields
+        assert not hasattr(spec, "num_envs")
 
     def test_custom_fields(self):
         spec = LLMEnvSpec(
@@ -390,7 +381,7 @@ class TestLLMEnvSpec:
 
     @patch("agilerl.models.env.make_conversation_template")
     @patch("agilerl.models.env.get_rubric_factory")
-    @patch("agilerl.models.env._load_llm_dataset")
+    @patch.object(LLMEnvSpec, "_load_dataset")
     def test_dataset_backed_rollout_factory(
         self, mock_load, mock_get_rubric_factory, mock_conv_tmpl
     ):
@@ -414,7 +405,7 @@ class TestLLMEnvSpec:
 
         mock_rollout_cls = MagicMock()
         with patch("agilerl.models.env.RolloutHarness", mock_rollout_cls):
-            factory, _max_turns = make_rollout_env_factory(spec, mock_tokenizer)
+            factory = spec.make_rollout_env_factory(mock_tokenizer)
             # Building the factory reads nothing.
             mock_load.assert_not_called()
             mock_get_rubric_factory.assert_not_called()
@@ -442,7 +433,7 @@ class TestLLMEnvSpec:
 
     @patch("agilerl.models.env.make_conversation_template")
     @patch("agilerl.models.env.get_rubric_factory")
-    @patch("agilerl.models.env._load_llm_dataset")
+    @patch.object(LLMEnvSpec, "_load_dataset")
     def test_chat_template_kwargs_reach_dataset_factory_and_prompt_builder(
         self, mock_load, mock_get_rubric_factory, mock_conv_tmpl
     ):
@@ -461,7 +452,7 @@ class TestLLMEnvSpec:
         )
         mock_rollout_cls = MagicMock()
         with patch("agilerl.models.env.RolloutHarness", mock_rollout_cls):
-            make_rollout_env_factory(spec, mock_tokenizer)[0]()
+            spec.make_rollout_env_factory(mock_tokenizer)()
 
         kwargs = mock_rollout_cls.from_dataset.call_args.kwargs
         # apply_chat_template is False on this env, so the kwargs would be dead
@@ -483,7 +474,7 @@ class TestLLMEnvSpec:
         )
         mock_rollout_cls = MagicMock()
         with patch("agilerl.models.env.RolloutHarness", mock_rollout_cls):
-            make_rollout_env_factory(spec, mock_tokenizer)[0]()
+            spec.make_rollout_env_factory(mock_tokenizer)()
         assert mock_rollout_cls.call_args.kwargs["chat_template_kwargs"] == {
             "enable_thinking": False
         }
@@ -502,7 +493,7 @@ class TestLLMEnvSpec:
             patch("agilerl.models.env.ensure_importable") as mock_ensure,
             patch("agilerl.models.env.RolloutHarness", MagicMock()),
         ):
-            make_rollout_env_factory(spec, mock_tokenizer)[0]()
+            spec.make_rollout_env_factory(mock_tokenizer)()
 
         mock_ensure.assert_called_once_with(
             "tests.test_models.test_env:_StubTextEnv", {"uv": ["some-env-lib"]}
@@ -519,12 +510,12 @@ class TestLLMEnvSpec:
         )
         mock_rollout_cls = MagicMock()
         with patch("agilerl.models.env.RolloutHarness", mock_rollout_cls):
-            make_rollout_env_factory(spec, mock_tokenizer)[0]()
+            spec.make_rollout_env_factory(mock_tokenizer)()
         assert mock_rollout_cls.local.call_args.kwargs["chat_template_kwargs"] == {
             "enable_thinking": False
         }
 
-    @patch("agilerl.models.env._load_llm_dataset")
+    @patch.object(LLMEnvSpec, "_load_dataset")
     def test_make_env_preference(self, mock_load):
         mock_train_ds = MagicMock()
         mock_test_ds = MagicMock()
@@ -541,7 +532,7 @@ class TestLLMEnvSpec:
 
         with patch("agilerl.models.env.DatasetEnv") as MockEnv:
             MockEnv.return_value = "dataset_env"
-            result = make_llm_env(spec, mock_tokenizer)
+            result = spec.make_dataset_env(tokenizer=mock_tokenizer)
 
         assert result == "dataset_env"
         MockEnv.assert_called_once()
@@ -581,7 +572,8 @@ class TestBanditEnvSpec:
 
     def test_dataset_mode_from_dataframes(self):
         features, targets = self._make_dataset()
-        env = make_bandit_env(BanditEnvSpec(), features=features, targets=targets)
+        spec = BanditEnvSpec(features=features, targets=targets)
+        env = spec.make_env()
 
         assert hasattr(env, "single_observation_space")
         assert hasattr(env, "single_action_space")
@@ -601,7 +593,7 @@ class TestBanditEnvSpec:
             features=str(feat_path),
             targets=str(tgt_path),
         )
-        env = make_bandit_env(spec)
+        env = spec.make_env()
         state = env.reset()
         assert state.dtype == np.float32
 
@@ -634,28 +626,28 @@ class FakeBandit:
             path=str(tmp_path),
             config={"n_arms": 3, "context_dim": 8},
         )
-        env = make_bandit_env(spec)
+        env = spec.make_env()
         assert env.arms == 3
         assert env.single_action_space.n == 3
         assert env.single_observation_space.shape == (8,)
 
     def test_validation_requires_dataset_or_entrypoint(self):
         with pytest.raises(ValueError, match="requires either"):
-            make_bandit_env(BanditEnvSpec(name="empty"))
+            BanditEnvSpec(name="empty")
 
     def test_validation_rejects_both(self):
+        features, targets = self._make_dataset()
         with pytest.raises(ValueError, match="not both"):
-            make_bandit_env(
-                BanditEnvSpec(
-                    features="features.csv",
-                    targets="targets.csv",
-                    entrypoint="some_module:SomeClass",
-                )
+            BanditEnvSpec(
+                features=features,
+                targets=targets,
+                entrypoint="some_module:SomeClass",
             )
 
     def test_validation_requires_both_features_and_targets(self):
+        features, _ = self._make_dataset()
         with pytest.raises(ValueError, match="together"):
-            make_bandit_env(BanditEnvSpec(features="features.csv"))
+            BanditEnvSpec(features=features)
 
     def test_serialization_roundtrip(self):
         spec = BanditEnvSpec(
@@ -678,7 +670,7 @@ class FakeBandit:
         data = spec.model_dump(mode="json")
         restored = BanditEnvSpec.model_validate(data)
         assert restored.entrypoint == "my_module:MyBandit"
-        assert restored.env_config == {"n_arms": 5}
+        assert restored.config == {"n_arms": 5}
         assert restored.features is None
 
 
@@ -697,21 +689,23 @@ class TestLLMEnvSpecDatasetSplit:
         return path
 
     @staticmethod
-    def _spec(path):
-        return LLMEnvSpec(
+    def _spec(path, seed):
+        spec = LLMEnvSpec(
             env_type=LLMEnvType.ROLLOUT,
             dataset=str(path),
             rubric_file_path="reward.py",
             rubric_name="reward_fn",
             prompt_template={"user_0": "{question}"},
         )
+        spec.seed = seed
+        return spec
 
     def test_same_seed_gives_every_rank_the_same_rows(self, tmp_path):
         """Row ``n`` must be the same row on every rank, or index shards overlap."""
         path = self._write_rows(tmp_path)
 
-        train_a, test_a = _load_llm_dataset(self._spec(path), seed=7)
-        train_b, test_b = _load_llm_dataset(self._spec(path), seed=7)
+        train_a, test_a = self._spec(path, 7)._load_dataset()
+        train_b, test_b = self._spec(path, 7)._load_dataset()
 
         assert train_a["question"] == train_b["question"]
         assert test_a["question"] == test_b["question"]
@@ -720,16 +714,16 @@ class TestLLMEnvSpecDatasetSplit:
         """A manifest that names no seed must not fall back to a random split."""
         path = self._write_rows(tmp_path)
 
-        train_a, _ = _load_llm_dataset(self._spec(path))
-        train_b, _ = _load_llm_dataset(self._spec(path))
+        train_a, _ = self._spec(path, None)._load_dataset()
+        train_b, _ = self._spec(path, None)._load_dataset()
 
         assert train_a["question"] == train_b["question"]
 
     def test_different_seeds_give_different_splits(self, tmp_path):
         path = self._write_rows(tmp_path)
 
-        train_a, _ = _load_llm_dataset(self._spec(path), seed=7)
-        train_c, _ = _load_llm_dataset(self._spec(path), seed=8)
+        train_a, _ = self._spec(path, 7)._load_dataset()
+        train_c, _ = self._spec(path, 8)._load_dataset()
 
         assert train_a["question"] != train_c["question"]
 
@@ -754,7 +748,7 @@ class TestLLMEnvSpecSFT:
         spec = LLMEnvSpec(env_type=LLMEnvType.DATASET, objective="sft", dataset="ds")
         assert spec.response_column == "response"
 
-    @patch("agilerl.models.env._load_llm_dataset")
+    @patch.object(LLMEnvSpec, "_load_dataset")
     def test_sft_make_env_creates_sft_gym(self, mock_load):
         mock_train_ds = MagicMock()
         mock_test_ds = MagicMock()
@@ -770,7 +764,7 @@ class TestLLMEnvSpecSFT:
 
         with patch("agilerl.models.env.DatasetEnv") as MockEnv:
             MockEnv.return_value = "dataset_env"
-            result = make_llm_env(spec, mock_tokenizer)
+            result = spec.make_dataset_env(tokenizer=mock_tokenizer)
 
         assert result == "dataset_env"
         MockEnv.assert_called_once()
@@ -817,7 +811,7 @@ class TestLLMEnvSpecSFT:
 class TestGymEnvSpecSingleEnv:
     def test_make_single_env_registered(self):
         spec = GymEnvSpec(name="CartPole-v1")
-        env = make_single_env(spec)
+        env = spec.make_single_env()
         try:
             assert hasattr(env, "reset")
             assert hasattr(env, "step")
@@ -840,7 +834,7 @@ class SingleEnv:
             path=str(tmp_path),
             config={"val": 42},
         )
-        env = make_single_env(spec)
+        env = spec.make_single_env()
         assert env.val == 42
 
     def test_make_env_extra_wrappers(self):
@@ -848,7 +842,7 @@ class SingleEnv:
 
         with patch("agilerl.models.env.make_vect_envs") as mock_make:
             mock_make.return_value = "vec_env"
-            make_gym_env(spec, extra_wrappers=["SomeWrapper"])
+            spec.make_env(extra_wrappers=["SomeWrapper"])
 
         assert mock_make.call_args.kwargs["extra_wrappers"] == ["SomeWrapper"]
 
@@ -867,13 +861,13 @@ class PzSingleEnv:
         self.size = size
 """,
         )
-        spec = GymEnvSpec(
+        spec = PzEnvSpec(
             name="unused",
             entrypoint="pz_single_mod:PzSingleEnv",
             path=str(tmp_path),
             config={"size": 7},
         )
-        env = make_single_env(spec, multi_agent=True)
+        env = spec.make_single_env()
         assert env.size == 7
 
     def test_make_single_env_module_with_parallel_env(self, tmp_path, monkeypatch):
@@ -891,8 +885,8 @@ def parallel_env(value=0):
         )
         monkeypatch.syspath_prepend(str(tmp_path))
 
-        spec = GymEnvSpec(name="pz_parallel_single", config={"value": 99})
-        env = make_single_env(spec, multi_agent=True)
+        spec = PzEnvSpec(name="pz_parallel_single", config={"value": 99})
+        env = spec.make_single_env()
         assert env.value == 99
 
     def test_make_single_env_module_missing_parallel_env(self, tmp_path, monkeypatch):
@@ -906,9 +900,9 @@ class SomeEnv:
         )
         monkeypatch.syspath_prepend(str(tmp_path))
 
-        spec = GymEnvSpec(name="pz_no_parallel", num_envs=1)
+        spec = PzEnvSpec(name="pz_no_parallel", num_envs=1)
         with pytest.raises(AttributeError, match="no 'parallel_env'"):
-            make_single_env(spec, multi_agent=True)
+            spec.make_single_env()
 
     def test_make_env_extra_wrappers(self, tmp_path):
         _write_module(
@@ -919,7 +913,7 @@ class PzEw:
     pass
 """,
         )
-        spec = GymEnvSpec(
+        spec = PzEnvSpec(
             name="unused",
             num_envs=1,
             entrypoint="pz_ew:PzEw",
@@ -928,7 +922,7 @@ class PzEw:
 
         with patch("agilerl.models.env.make_multi_agent_vect_envs") as mock_make:
             mock_make.return_value = "pz_vec"
-            make_pz_env(spec, extra_wrappers=["Wrapper"])
+            spec.make_env(extra_wrappers=["Wrapper"])
 
         assert mock_make.call_args.kwargs["extra_wrappers"] == ["Wrapper"]
 
@@ -937,6 +931,10 @@ class PzEw:
 # OfflineEnvSpec
 # ---------------------------------------------------------------------------
 class TestOfflineEnvSpec:
+    def test_requires_dataset_source(self):
+        with pytest.raises(ValueError, match="requires either"):
+            OfflineEnvSpec(name="CartPole-v1")
+
     def test_valid_with_dataset_path(self):
         spec = OfflineEnvSpec(name="CartPole-v1", dataset_path="/tmp/data.h5")
         assert spec.dataset_path == "/tmp/data.h5"
@@ -984,17 +982,34 @@ class TestBanditEnvSpecExtended:
             features=str(feat_path),
             targets=str(tgt_path),
         )
-        env = make_bandit_env(spec)
+        env = spec.make_env()
         assert hasattr(env, "arms")
         state = env.reset()
         assert state is not None
+
+    def test_serializer_with_dataframe(self):
+        import pandas as pd
+
+        features = pd.DataFrame(np.random.randn(5, 2))
+        targets = pd.DataFrame(np.random.randint(0, 2, size=(5, 1)))
+        spec = BanditEnvSpec(features=features, targets=targets)
+        data = spec.model_dump(mode="json")
+        assert data["features"] is None
+        assert data["targets"] is None
 
     def test_make_env_dataset_mode_missing_targets_raises(self):
         import pandas as pd
 
         features = pd.DataFrame(np.random.randn(5, 3).astype(np.float32))
-        with pytest.raises(ValueError, match="together"):
-            make_bandit_env(BanditEnvSpec(), features=features)
+        # The "features + targets together" validator normally blocks this;
+        # model_construct bypasses it to reach make_env's dataset-mode guard.
+        spec = BanditEnvSpec.model_construct(features=features)
+        assert spec.targets is None
+        assert spec.entrypoint is None
+        with pytest.raises(
+            ValueError, match="Both 'features' and 'targets' are required"
+        ):
+            spec.make_env()
 
 
 # ---------------------------------------------------------------------------
@@ -1004,11 +1019,11 @@ class TestLLMEnvSpecRollout:
     """Verify LLMEnvSpec validation and factory creation for rollout."""
 
     def test_rollout_requires_a_source(self):
-        with pytest.raises(ValueError, match="needs exactly one source"):
+        with pytest.raises(ValueError, match="Exactly one of dataset, entrypoint"):
             LLMEnvSpec(env_type=LLMEnvType.ROLLOUT, max_turns=5)
 
     def test_rollout_rejects_two_sources(self):
-        with pytest.raises(ValueError, match="needs exactly one source"):
+        with pytest.raises(ValueError, match="Exactly one of dataset, entrypoint"):
             LLMEnvSpec(
                 env_type=LLMEnvType.ROLLOUT,
                 entrypoint="my_mod:make",
@@ -1036,14 +1051,13 @@ class TestLLMEnvSpecRollout:
                 max_turns=5,
             )
 
-    def test_env_config_rejected_for_dataset_backed_rollout(self):
-        with pytest.raises(ValueError, match="no env to configure"):
+    def test_env_config_rejected_without_entrypoint(self):
+        with pytest.raises(ValueError, match="env_config is only used with entrypoint"):
             LLMEnvSpec(
                 env_type=LLMEnvType.ROLLOUT,
-                dataset="ds",
-                reward_file_path="reward.py",
-                prompt_template={"user_0": "{question}"},
+                env_url="http://envs:8000",
                 env_config={"difficulty": "easy"},
+                max_turns=5,
             )
 
     def test_rollout_valid_spec_library_factory(self):
@@ -1070,6 +1084,7 @@ class TestLLMEnvSpecRollout:
         assert spec.env_type == LLMEnvType.ROLLOUT
         assert spec.entrypoint == "my_mod:MyEnv"
         assert spec.env_config == {"difficulty": "easy"}
+        assert spec.name == "my_mod:MyEnv"
 
     def test_rollout_valid_spec_env_url(self):
         spec = LLMEnvSpec(
@@ -1086,7 +1101,7 @@ class TestLLMEnvSpecRollout:
             LLMEnvSpec(env_type=LLMEnvType.ROLLOUT, env_url="http://h:8000")
 
     def test_env_url_is_mutually_exclusive_with_other_sources(self):
-        with pytest.raises(ValueError, match="needs exactly one source"):
+        with pytest.raises(ValueError, match="Exactly one of dataset, entrypoint"):
             LLMEnvSpec(
                 env_type=LLMEnvType.ROLLOUT,
                 env_url="http://h:8000",
@@ -1094,16 +1109,15 @@ class TestLLMEnvSpecRollout:
                 max_turns=1,
             )
 
-    def test_mcp_tool_rejected_for_dataset_backed_rollout(self):
+    def test_mcp_tool_requires_env_url(self):
         with pytest.raises(
             ValueError,
             match="mcp_tool / request_timeout_s",
         ):
             LLMEnvSpec(
                 env_type=LLMEnvType.ROLLOUT,
-                dataset="ds",
-                reward_file_path="reward.py",
-                prompt_template={"user_0": "{question}"},
+                entrypoint="my_mod:make",
+                max_turns=1,
                 mcp_tool="run_code",
             )
 
@@ -1173,9 +1187,7 @@ class TestLLMEnvSpecRollout:
             patch("agilerl.models.env.RolloutHarness", mock_rollout_cls),
             patch("agilerl.llm_envs.openenv.RemoteEnvClient", mock_session_cls),
         ):
-            make_rollout_env_factory(
-                spec, mock_tokenizer, max_model_len=512, max_output_tokens=128
-            )[0]()
+            spec.make_rollout_env_factory(mock_tokenizer, max_model_len=512)()
         # env_url opens a WebSocket session; the transport params bake into the client.
         mock_session_cls.assert_called_once_with(
             "http://env-host:8000",
@@ -1210,7 +1222,7 @@ class TestLLMEnvSpecRollout:
             max_turns=5,
         )
         with pytest.raises(TypeError, match="make_rollout_env_factory"):
-            make_llm_env(spec, MagicMock())
+            spec.make_dataset_env(tokenizer=MagicMock())
 
     def test_entrypoint_factory_creates_wrapper(self):
         mock_env = MagicMock()
@@ -1234,9 +1246,7 @@ class TestLLMEnvSpecRollout:
             ),
             patch("agilerl.models.env.RolloutHarness", mock_rollout_cls),
         ):
-            factory, _max_turns = make_rollout_env_factory(
-                spec, mock_tokenizer, max_model_len=512, max_output_tokens=128
-            )
+            factory = spec.make_rollout_env_factory(mock_tokenizer, max_model_len=512)
             assert callable(factory)
             factory()
 
@@ -1275,9 +1285,7 @@ class TestLLMEnvSpecRollout:
             ),
             patch("agilerl.models.env.RolloutHarness", mock_rollout_cls),
         ):
-            make_rollout_env_factory(
-                spec, mock_tokenizer, max_model_len=512, max_output_tokens=128
-            )[0]()
+            spec.make_rollout_env_factory(mock_tokenizer, max_model_len=512)()
 
         mock_constructor.assert_called_with(difficulty="easy")
         assert mock_env.system_prompt == "be terse"
@@ -1297,7 +1305,7 @@ class TestLLMEnvSpecRollout:
         )
         mock_rollout_cls = MagicMock()
         with patch("agilerl.models.env.RolloutHarness", mock_rollout_cls):
-            make_rollout_env_factory(spec, mock_tokenizer)[0]()
+            spec.make_rollout_env_factory(mock_tokenizer)()
         kwargs = mock_rollout_cls.local.call_args.kwargs
         assert kwargs["observation_field"] is None
         assert kwargs["observation_processor"]({"info_state": [1, 2]}) == "obs:[1, 2]"
@@ -1314,7 +1322,7 @@ class TestLLMEnvSpecRollout:
             observation_processor=f"{proc_file}:render",
         )
         with pytest.raises(TypeError, match="non-callable"):
-            make_rollout_env_factory(spec, mock_tokenizer)
+            spec.make_rollout_env_factory(mock_tokenizer)
 
     def test_entrypoint_factory_probes_max_turns(self):
         mock_env = MagicMock()
@@ -1333,34 +1341,34 @@ class TestLLMEnvSpecRollout:
             "agilerl.models.env.resolve_entrypoint_target",
             return_value=mock_constructor,
         ):
-            _factory, max_turns = make_rollout_env_factory(spec, mock_tokenizer)
+            spec.make_rollout_env_factory(mock_tokenizer)
 
-        assert max_turns == 12
-        # The probe result is returned, not written back: the spec stays data.
-        assert spec.max_turns is None
+        assert spec.max_turns == 12
 
-    def test_factory_rejects_zero_prompt_budget(self):
-        """``max_output_tokens >= max_model_len`` leaves no prompt room (budget
-        0), so every rollout episode is truncated at reset and training can never
-        advance. The factory must reject it at setup rather than build envs that
-        silently produce a non-terminating loop.
-        """
+    def test_factory_builds_when_max_model_len_is_set(self):
         mock_tokenizer = MagicMock()
         mock_tokenizer.pad_token_id = 0
-
         spec = LLMEnvSpec(
             env_type=LLMEnvType.ROLLOUT,
             entrypoint="my_mod:MyEnv",
             max_turns=3,
         )
+        mock_rollout_cls = MagicMock()
 
-        with pytest.raises(ValueError, match="must be less than"):
-            make_rollout_env_factory(
-                spec, mock_tokenizer, max_model_len=512, max_output_tokens=512
-            )
+        with (
+            patch(
+                "agilerl.models.env.resolve_entrypoint_target",
+                return_value=MagicMock(),
+            ),
+            patch("agilerl.models.env.RolloutHarness", mock_rollout_cls),
+        ):
+            factory = spec.make_rollout_env_factory(mock_tokenizer, max_model_len=512)
+            factory()
+
+        assert mock_rollout_cls.local.call_args.kwargs["max_model_len"] == 512
 
     def test_rubric_fields_alone_are_not_a_source(self):
-        with pytest.raises(ValueError, match="needs exactly one source"):
+        with pytest.raises(ValueError, match="Exactly one of dataset, entrypoint"):
             LLMEnvSpec(
                 env_type=LLMEnvType.ROLLOUT,
                 rubric_file_path="r.py",
@@ -1407,13 +1415,27 @@ class TestLLMEnvSpecRollout:
 
 
 class TestLLMEnvSpecLoadDataset:
-    """Defensive ``dataset is None`` guard in the dataset loader."""
+    """Defensive ``dataset is None`` guards in the private dataset loaders."""
 
-    def test_load_dataset_requires_dataset(self):
+    def _spec_without_dataset(self) -> LLMEnvSpec:
         spec = LLMEnvSpec(env_type=LLMEnvType.ROLLOUT, entrypoint="my_mod:make")
         assert spec.dataset is None
+        return spec
+
+    def test_load_dataset_requires_dataset(self):
+        spec = self._spec_without_dataset()
         with pytest.raises(ValueError, match="dataset is required to load"):
-            _load_llm_dataset(spec)
+            spec._load_dataset()
+
+    def test_load_dataset_hf_requires_dataset(self):
+        spec = self._spec_without_dataset()
+        with pytest.raises(ValueError, match="dataset is required to load"):
+            spec._load_dataset_hf()
+
+    def test_load_dataset_file_requires_dataset(self):
+        spec = self._spec_without_dataset()
+        with pytest.raises(ValueError, match="dataset is required to load"):
+            spec._load_dataset_file()
 
 
 class TestDatasetBackedRolloutRewardFields:
@@ -1429,8 +1451,9 @@ class TestDatasetBackedRolloutRewardFields:
         spec = LLMEnvSpec.model_construct(
             env_type=LLMEnvType.ROLLOUT, dataset="dummy/dataset"
         )
+        assert spec.rubric_name is None
 
-        factory, _max_turns = make_rollout_env_factory(spec, mock_tokenizer)
+        factory = spec.make_rollout_env_factory(mock_tokenizer)
         with pytest.raises(
             ValueError,
             match="rubric_name, rubric_file_path, and prompt_template",
@@ -1469,7 +1492,7 @@ class TestLLMEnvSpecFactoryGuards:
         )
         spec.objective = None
         with pytest.raises(ValueError, match="objective is required"):
-            make_llm_env(spec, MagicMock())
+            spec.make_dataset_env(MagicMock())
 
     def test_factory_requires_a_source_even_when_mutated_away(self):
         spec = LLMEnvSpec(
@@ -1479,7 +1502,7 @@ class TestLLMEnvSpecFactoryGuards:
         )
         spec.entrypoint = None
         with pytest.raises(ValueError, match="An entrypoint is required"):
-            make_rollout_env_factory(spec, MagicMock())
+            spec.make_rollout_env_factory(MagicMock())
 
     def test_non_callable_entrypoint_target_is_rejected(self):
         # json.__version__ resolves fine but is a string, not an env factory.
@@ -1489,7 +1512,7 @@ class TestLLMEnvSpecFactoryGuards:
             max_turns=2,
         )
         with pytest.raises(TypeError, match="non-callable"):
-            make_rollout_env_factory(spec, MagicMock())
+            spec.make_rollout_env_factory(MagicMock())
 
 
 class TestLLMEnvSpecUrlFactoryGuard:
@@ -1507,77 +1530,4 @@ class TestLLMEnvSpecUrlFactoryGuard:
         spec.env_url = None
 
         with pytest.raises(RuntimeError, match="env_url is required"):
-            _make_url_rollout_factory(spec, MagicMock(), {})
-
-
-class TestBanditDatasetLoadGuard:
-    def test_an_unloadable_dataset_is_rejected(self, monkeypatch):
-        import agilerl.models.env as env_module
-
-        monkeypatch.setattr(env_module, "_load_dataframe", lambda path: None)
-        with pytest.raises(ValueError, match="required for dataset-mode"):
-            make_bandit_env(
-                BanditEnvSpec(features="features.csv", targets="targets.csv")
-            )
-
-
-class TestRolloutFactoryGuards:
-    def test_env_image_needs_the_ray_runtime(self):
-        spec = LLMEnvSpec.model_construct(
-            env_type=LLMEnvType.ROLLOUT, env_image="registry/env:latest"
-        )
-        with pytest.raises(ValueError, match="env_image runs the env as its own Pod"):
-            make_rollout_env_factory(spec, MagicMock())
-
-    def test_an_empty_env_url_list_is_rejected(self):
-        pytest.importorskip("openenv", reason="RemoteEnvClient needs the openenv extra")
-        spec = LLMEnvSpec.model_construct(env_type=LLMEnvType.ROLLOUT, env_url=[])
-        with pytest.raises(ValueError, match="empty list"):
-            _make_url_rollout_factory(spec, MagicMock(), {})
-
-
-class TestMakeEnvDispatch:
-    """``make_env`` routes each spec family to its construction function."""
-
-    def test_llm_spec_requires_a_tokenizer(self):
-        from agilerl.models.env import make_env
-
-        spec = LLMEnvSpec.model_construct(env_type=LLMEnvType.DATASET)
-        with pytest.raises(TypeError, match="requires a tokenizer"):
-            make_env(spec)
-
-    def test_llm_spec_routes_to_make_llm_env(self, monkeypatch):
-        import agilerl.models.env as env_module
-
-        sentinel = object()
-        monkeypatch.setattr(env_module, "make_llm_env", lambda *a, **k: sentinel)
-        spec = LLMEnvSpec.model_construct(env_type=LLMEnvType.DATASET)
-        assert env_module.make_env(spec, tokenizer=MagicMock()) is sentinel
-
-    def test_bandit_spec_routes_to_make_bandit_env(self, monkeypatch):
-        import agilerl.models.env as env_module
-
-        sentinel = object()
-        monkeypatch.setattr(env_module, "make_bandit_env", lambda *a, **k: sentinel)
-        assert env_module.make_env(BanditEnvSpec.model_construct()) is sentinel
-
-    def test_a_non_gym_spec_is_rejected(self):
-        from pydantic import BaseModel
-
-        from agilerl.models.env import make_env
-
-        class ForeignEnvSpec(BaseModel):
-            pass
-
-        with pytest.raises(TypeError, match="Cannot build a gym environment"):
-            make_env(ForeignEnvSpec())
-
-    def test_gym_spec_routes_by_agent_count(self, monkeypatch):
-        import agilerl.models.env as env_module
-
-        gym_sentinel, pz_sentinel = object(), object()
-        monkeypatch.setattr(env_module, "make_gym_env", lambda *a, **k: gym_sentinel)
-        monkeypatch.setattr(env_module, "make_pz_env", lambda *a, **k: pz_sentinel)
-        spec = GymEnvSpec(name="CartPole-v1")
-        assert env_module.make_env(spec) is gym_sentinel
-        assert env_module.make_env(spec, multi_agent=True) is pz_sentinel
+            spec._make_url_rollout_factory(MagicMock(), {})

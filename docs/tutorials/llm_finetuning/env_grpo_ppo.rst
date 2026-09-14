@@ -116,7 +116,6 @@ Dependencies
     from transformers import AutoTokenizer
     from agilerl.training.llm import train_llm_rollout
     from agilerl.utils.algo_utils import VLLMConfig
-    from agilerl.utils.llm_utils import create_llm_accelerator
     from agilerl.utils.utils import create_population
     from agilerl.llm_envs import RolloutHarness
 
@@ -162,13 +161,23 @@ All runs use:
             max_output_tokens=max_output_tokens,
         )
 
-        accelerator = create_llm_accelerator()
         vllm_config = VLLMConfig(
             tensor_parallel_size=1,
             gpu_memory_utilization=0.85,
             max_num_seqs=16,
             sleep_mode=True,
         )
+
+Multi-GPU training
+------------------
+
+Launch with ``torchrun`` from the repository root (``N`` is the number of GPUs):
+
+.. code-block:: bash
+
+    torchrun --nproc_per_node=N tutorials/llm_finetuning/env_grpo_ppo.py \
+      --algo LLMPPO \
+      --config configs/training/llm_finetuning/ppo_llm.yaml
 
 Run a Baseline
 --------------
@@ -247,7 +256,6 @@ These values are intentionally conservative and align with the shipped configs:
           model_name=MODEL_PATH,
           pad_token_id=tokenizer.pad_token_id,
           pad_token=tokenizer.pad_token,
-          accelerator=accelerator,
           **init_hp,
       )
 
@@ -274,7 +282,6 @@ These values are intentionally conservative and align with the shipped configs:
           model_name=MODEL_PATH,
           pad_token_id=tokenizer.pad_token_id,
           pad_token=tokenizer.pad_token,
-          accelerator=accelerator,
           **init_hp,
       )
 
@@ -300,7 +307,6 @@ These values are intentionally conservative and align with the shipped configs:
           model_name=MODEL_PATH,
           pad_token_id=tokenizer.pad_token_id,
           pad_token=tokenizer.pad_token,
-          accelerator=accelerator,
           **init_hp,
       )
 
@@ -333,7 +339,6 @@ The key training call is the same for all algorithms. Evolutionary fields are ex
         evaluation_interval=10,
         max_reward=1.0,
         verbose=True,
-        accelerator=accelerator,
     )
 
 Full training code

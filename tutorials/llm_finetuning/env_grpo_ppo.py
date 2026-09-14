@@ -5,6 +5,14 @@
 
 This script is used by the multi-turn GRPO vs LLMPPO tutorial and keeps the
 setup identical between runs so only the optimization algorithm changes.
+
+Single process::
+
+    python tutorials/llm_finetuning/env_grpo_ppo.py --algo LLMPPO
+
+Multi-GPU distributed training::
+
+    torchrun --nproc_per_node=2 tutorials/llm_finetuning/env_grpo_ppo.py --algo LLMPPO
 """
 
 from __future__ import annotations
@@ -20,7 +28,6 @@ from transformers import AutoTokenizer
 from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.training.llm import train_llm_rollout
 from agilerl.utils.algo_utils import VLLMConfig
-from agilerl.utils.llm_utils import create_llm_accelerator
 from agilerl.utils.utils import create_population, _normalize_algo_name
 from agilerl.llm_envs import RolloutHarness
 
@@ -157,7 +164,6 @@ def main() -> None:
             max_model_len=init_hp.get("MAX_MODEL_LEN"),
         )
 
-    accelerator = create_llm_accelerator()
     use_vllm = bool(init_hp.get("USE_VLLM", True))
     vllm_config = (
         VLLMConfig(
@@ -177,7 +183,6 @@ def main() -> None:
         "model_name": args.model_path,
         "pad_token_id": tokenizer.pad_token_id,
         "pad_token": tokenizer.pad_token,
-        "accelerator": accelerator,
     }
     if use_vllm:
         algo_kwargs["use_vllm"] = True
@@ -207,27 +212,22 @@ def main() -> None:
     pop = algo_cls.population(size=1, **algo_kwargs)
     agent = pop[0]
 
-    try:
-        train_llm_rollout(
-            pop=[agent],
-            max_turns=max_turns,
-            env_factory=env_factory,
-            init_hp=init_hp,
-            max_steps=args.max_steps,
-            save_elite=True,
-            elite_path=args.output_dir,
-            wb=args.wandb,
-            evo_steps=None,
-            selection_strategy=None,
-            mutation=None,
-            evaluation_interval=args.evaluation_interval,
-            max_reward=1.0,
-            verbose=True,
-            accelerator=accelerator,
-        )
-    finally:
-        if accelerator is not None:
-            accelerator.end_training()
+    train_llm_rollout(
+        pop=[agent],
+        max_turns=max_turns,
+        env_factory=env_factory,
+        init_hp=init_hp,
+        max_steps=args.max_steps,
+        save_elite=True,
+        elite_path=args.output_dir,
+        wb=args.wandb,
+        evo_steps=None,
+        selection_strategy=None,
+        mutation=None,
+        evaluation_interval=args.evaluation_interval,
+        max_reward=1.0,
+        verbose=True,
+    )
 
 
 if __name__ == "__main__":

@@ -35,12 +35,10 @@ import gymnasium as gym
 import numpy as np
 import numpy.typing as npt
 import torch
-from accelerate.optimizer import AcceleratedOptimizer
 from gymnasium import spaces
 from tensordict import TensorClass, TensorDict
 from torch._dynamo import OptimizedModule
 from torch.nn import Module
-from torch.optim import Optimizer
 from typing_extensions import NotRequired, Self
 
 from agilerl.net_configs import NetConfigType as NetConfigType
@@ -431,7 +429,6 @@ EvolvableNetworkType = (
     EvolvableModuleProtocol | ModuleDictProtocol[EvolvableModuleProtocol]
 )
 DeviceType = str | torch.device
-OptimizerType = Optimizer | AcceleratedOptimizer
 
 MultiAgentMutReturn = dict[str, MutationApplyDict]
 MutationReturn = MutationApplyDict | MultiAgentMutReturn

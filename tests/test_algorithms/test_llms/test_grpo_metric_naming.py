@@ -65,7 +65,6 @@ class _Stub:
         aux_value: float = 0.25,
     ) -> None:
         self.device = torch.device("cpu")
-        self.accelerator = None
         self.beta = beta
         self.use_liger_loss = use_liger_loss
         self.importance_sampling_level = importance_sampling_level
@@ -74,10 +73,10 @@ class _Stub:
         self.vllm_importance_sampling_cap = 2.0
         self.filter_zero_adv = filter_zero_adv
         self.loss_norm = "micro_batch"
-        self._uses_deepspeed = False
         self.pad_token_id = PAD_TOKEN_ID
         self.update_epochs = 1
         self.micro_batch_size_per_gpu = 2
+        self.gradient_accumulation_steps = 1
         self._is_correction_liger_warned = False
         self._liger_non_token_warned = False
         self._survivors = survivors

@@ -1,173 +1,117 @@
 # Copyright 2026 AgileRL
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tests for family runtime lookup and family patch dispatch."""
-
-from __future__ import annotations
-
-from types import SimpleNamespace
+"""Tests for family detection and family patch dispatch."""
 
 import pytest
 
 from agilerl import architectures
-from agilerl.architectures.catalog import FAMILY_RUNTIME_CONFIGS
-from agilerl.architectures.nemotron_h.mamba import install_mamba_patches
-from agilerl.architectures.runtime import (
-    MambaPatchConfig,
-    ModelRuntimeConfig,
-    PatchRuntimeConfig,
-)
 
 
-def recording_install(sink: list[object]):
-    def install(patch: PatchRuntimeConfig, *, model=None):
-        sink.append((patch, model))
-
-    return install
-
-
-def loaded_model(model_type: str) -> SimpleNamespace:
-    return SimpleNamespace(config=SimpleNamespace(model_type=model_type))
-
-
-def stub_auto_config(monkeypatch: pytest.MonkeyPatch, model_type: str) -> None:
-    monkeypatch.setattr(
-        "transformers.AutoConfig.from_pretrained",
-        lambda *args, **kwargs: SimpleNamespace(model_type=model_type),
+class TestDetectModelFamilies:
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
+            "NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16/",
+            "nvidia/Nemotron-H-8B-Base-8K",
+            "/ckpt/nemotron_local",
+            r"C:\ckpt\Nemotron-H-8B",
+        ],
     )
+    def test_nemotron_ids_resolve_to_nemotron_h(self, name):
+        assert architectures.detect_model_families(name) == frozenset({"nemotron_h"})
 
+    @pytest.mark.parametrize(
+        "name",
+        [
+            None,
+            "",
+            "mock-model",
+            "meta-llama/Llama-3.1-8B",
+            "google/gemma-4-E4B-it",
+        ],
+    )
+    def test_other_ids_resolve_to_nothing(self, name):
+        assert architectures.detect_model_families(name) == frozenset()
 
-NEMOTRON_PATCH = FAMILY_RUNTIME_CONFIGS["nemotron_h"].patch
+    def test_model_type_dispatches_when_path_has_no_family_name(self):
+        assert architectures.detect_model_families(
+            "/ckpt/local", model_type="nemotron_h"
+        ) == frozenset({"nemotron_h"})
+
+    def test_unknown_model_type_does_not_invent_a_family(self):
+        assert (
+            architectures.detect_model_families("/ckpt/local", model_type="llama")
+            == frozenset()
+        )
 
 
 class TestInstallFamilyPatches:
-    def test_loaded_nemotron_runs_its_patch(self, monkeypatch) -> None:
-        seen: list[object] = []
-        actor = loaded_model("nemotron_h")
-        monkeypatch.setattr(NEMOTRON_PATCH, "install", recording_install(seen))
-
-        architectures.install_family_patches(actor.config.model_type, actor)
-
-        assert seen == [(NEMOTRON_PATCH, actor)]
-
-    def test_type_lookup_runs_patch_when_no_model(self, monkeypatch) -> None:
-        seen: list[object] = []
-        monkeypatch.setattr(NEMOTRON_PATCH, "install", recording_install(seen))
-
-        architectures.install_family_patches("nemotron_h")
-
-        assert seen == [(NEMOTRON_PATCH, None)]
-
-    def test_unpatched_type_is_a_no_op(self, monkeypatch) -> None:
-        seen: list[object] = []
-        actor = loaded_model("llama")
-        monkeypatch.setattr(NEMOTRON_PATCH, "install", recording_install(seen))
-
-        architectures.install_family_patches(actor.config.model_type, actor)
-
-        assert seen == []
-
-    def test_custom_install_is_invoked(self, monkeypatch) -> None:
-        seen: list[object] = []
-        actor = loaded_model("custom")
-        other_patch = PatchRuntimeConfig(install=recording_install(seen))
+    def test_detected_family_runs_every_patch_it_declares(self, monkeypatch):
+        calls: list[str] = []
         monkeypatch.setitem(
-            architectures.FAMILY_RUNTIME_CONFIGS,
-            "custom",
-            ModelRuntimeConfig(patch=other_patch),
-        )
-
-        architectures.install_family_patches(actor.config.model_type, actor)
-
-        assert seen == [(other_patch, actor)]
-
-    def test_type_without_install_leaves_classes_alone(self, monkeypatch) -> None:
-        seen: list[object] = []
-        monkeypatch.setattr(NEMOTRON_PATCH, "install", recording_install(seen))
-
-        architectures.install_family_patches("llama")
-
-        assert seen == []
-
-    def test_family_without_registered_patches_is_a_no_op(self, monkeypatch) -> None:
-        seen: list[object] = []
-        monkeypatch.setattr(NEMOTRON_PATCH, "install", recording_install(seen))
-
-        architectures.install_family_patches("unregistered")
-
-        assert seen == []
-
-    def test_loaded_gemma_does_not_patch(self, monkeypatch) -> None:
-        seen: list[object] = []
-        actor = loaded_model("gemma4")
-        monkeypatch.setattr(NEMOTRON_PATCH, "install", recording_install(seen))
-
-        architectures.install_family_patches(actor.config.model_type, actor)
-
-        assert seen == []
-
-    def test_catalog_patch_is_passed_to_installer(self, monkeypatch) -> None:
-        seen: list[object] = []
-        actor = loaded_model("nemotron_h")
-        patch = PatchRuntimeConfig(
-            install=recording_install(seen),
-            mamba=MambaPatchConfig(
-                mixer="pkg.Mixer", fused_path=False, stream_ordering=True
+            architectures.FAMILY_PATCHES,
+            "nemotron_h",
+            (
+                lambda model=None: calls.append("fused"),
+                lambda model=None: calls.append("stream"),
             ),
         )
+
+        patched = architectures.install_family_patches("nvidia/Nemotron-H-8B")
+
+        assert patched == frozenset({"nemotron_h"})
+        assert calls == ["fused", "stream"]
+
+    def test_every_patch_receives_the_already_built_model(self, monkeypatch):
+        seen: list[object] = []
         monkeypatch.setitem(
-            architectures.FAMILY_RUNTIME_CONFIGS,
+            architectures.FAMILY_PATCHES,
             "nemotron_h",
-            ModelRuntimeConfig(patch=patch),
+            (
+                lambda model=None: seen.append(model),
+                lambda model=None: seen.append(model),
+            ),
+        )
+        actor = object()
+
+        patched = architectures.install_family_patches(
+            "nvidia/Nemotron-H-8B",
+            model=actor,
         )
 
-        architectures.install_family_patches(actor.config.model_type, actor)
+        assert patched == frozenset({"nemotron_h"})
+        assert seen == [actor, actor]
 
-        assert seen == [(patch, actor)]
+    def test_undetected_family_leaves_its_classes_alone(self, monkeypatch):
+        calls: list[str] = []
+        monkeypatch.setitem(
+            architectures.FAMILY_PATCHES,
+            "nemotron_h",
+            (lambda model=None: calls.append("fused"),),
+        )
 
-    def test_nemotron_catalog_install_is_mamba_patches(self) -> None:
-        patch = FAMILY_RUNTIME_CONFIGS["nemotron_h"].patch
-        assert patch.install is install_mamba_patches
-        assert patch.mamba is not None
+        patched = architectures.install_family_patches("meta-llama/Llama-3.1-8B")
 
+        assert patched == frozenset()
+        assert calls == []
 
-class TestFamilyRuntime:
-    def test_gemma4_trainer_dumps_flex_attention(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        stub_auto_config(monkeypatch, "gemma4")
-        config = architectures.family_runtime("google/gemma-4")
-        assert config.trainer.model_dump(exclude_none=True) == {
-            "attn_implementation": "flex_attention"
+    def test_family_without_registered_patches_is_a_no_op(self, monkeypatch):
+        monkeypatch.setattr(
+            architectures,
+            "detect_model_families",
+            lambda _name, **_kw: frozenset({"unregistered"}),
+        )
+
+        assert architectures.install_family_patches("whatever") == frozenset(
+            {"unregistered"},
+        )
+
+    def test_real_nemotron_h_entry_declares_both_mixer_patches(self):
+        from agilerl.architectures import nemotron_h
+
+        assert set(architectures.FAMILY_PATCHES["nemotron_h"]) == {
+            nemotron_h.patch_nemotron_mamba_fused_path,
+            nemotron_h.patch_nemotron_mamba_stream_ordering,
         }
-
-    def test_llama_trainer_dumps_empty(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        stub_auto_config(monkeypatch, "llama")
-        assert (
-            architectures.family_runtime("meta/llama").trainer.model_dump(
-                exclude_none=True
-            )
-            == {}
-        )
-
-    def test_nemotron_vllm_dumps_engine_kwargs(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        stub_auto_config(monkeypatch, "nemotron_h")
-        assert architectures.family_runtime("nvidia/nemotron").vllm.model_dump(
-            exclude_none=True
-        ) == {
-            "mamba_cache_mode": "align",
-            "max_num_batched_tokens": 8192,
-            "reasoning_parser": "nemotron_v3",
-            "enable_prefix_caching": True,
-        }
-
-    def test_llama_vllm_dumps_empty(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        stub_auto_config(monkeypatch, "llama")
-        assert (
-            architectures.family_runtime("meta/llama").vllm.model_dump(
-                exclude_none=True
-            )
-            == {}
-        )

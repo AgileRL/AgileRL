@@ -27,9 +27,9 @@ Evaluate a saved checkpoint interactively::
 
     python demos/llm/demo_llm_finetuning.py sft --eval --load-path outputs/20260101_120000_SFT
 
-Multi-GPU / DeepSpeed via accelerate::
+Multi-GPU distributed training via torchrun::
 
-    accelerate launch demos/llm/demo_llm_finetuning.py sft
+    torchrun --nproc_per_node=2 demos/llm/demo_llm_finetuning.py sft
 """
 
 from agilerl import HAS_LLM_DEPENDENCIES
@@ -47,7 +47,6 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from accelerate import Accelerator
 from peft import LoraConfig
 from transformers import AutoTokenizer
 
@@ -57,15 +56,6 @@ from agilerl.training.trainer import LocalTrainer
 from agilerl.utils.llm_utils import compare_responses, sample_eval_prompts
 
 CONFIG_DIR = "configs/training/llm_finetuning"
-
-
-def _make_accelerator() -> Accelerator | None:
-    """Return an ``Accelerator`` only when launched under DeepSpeed."""
-    try:
-        accelerator = Accelerator()
-    except Exception:
-        return None
-    return accelerator if accelerator.state.deepspeed_plugin is not None else None
 
 
 def build_manifest(config_path: str) -> dict[str, Any]:
@@ -102,7 +92,6 @@ def main(
     :param eval_samples: Number of prompts used for the qualitative comparison.
     :type eval_samples: int
     """
-    accelerator = _make_accelerator()
     manifest = build_manifest(config_path)
 
     print(f"Building trainer from {config_path} ...")
@@ -111,7 +100,6 @@ def main(
     trainer = LocalTrainer.from_manifest(
         manifest,
         load_weights_from=load_path,
-        accelerator=accelerator,
     )
 
     print(f"Fine-tuning {trainer.algorithm_spec.name} agents...")

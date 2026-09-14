@@ -1,62 +1,96 @@
 # Copyright 2026 AgileRL
 # SPDX-License-Identifier: Apache-2.0
 
-"""Architecture-scoped family runtime catalog and patches.
+"""Architecture-scoped model patches, dispatched by family.
 
-Per-``model_type`` trainer, vLLM, and patch defaults live in
-:mod:`agilerl.architectures.catalog`. :func:`family_runtime` reads
-``config.json`` then looks up that type. :func:`install_family_patches` calls
-:attr:`~agilerl.architectures.runtime.PatchRuntimeConfig.install` when it is
-set.
+A family is a stable key (``nemotron_h``) detected from the checkpoint id
+and, when provided, the Hugging Face ``model_type``. :func:`install_family_patches`
+runs the patches a family needs before its model is built;
+:data:`FAMILY_PATCHES` is the table it reads.
 """
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from agilerl.architectures.catalog import (
-    FAMILY_RUNTIME_CONFIGS,
-    family_runtime,
-    pretrained_model_type,
-)
-from agilerl.architectures.runtime import (
-    MambaPatchConfig,
-    ModelRuntimeConfig,
-    PatchRuntimeConfig,
-    TrainerRuntimeConfig,
-    VllmRuntimeConfig,
+from agilerl.architectures.nemotron_h import (
+    patch_nemotron_mamba_fused_path,
+    patch_nemotron_mamba_stream_ordering,
 )
 
 if TYPE_CHECKING:
-    from peft import PeftModel
-    from transformers import PreTrainedModel
+    from collections.abc import Callable, Mapping
+
+    from agilerl.protocols import PreTrainedModelProtocol
 
 __all__ = [
-    "FAMILY_RUNTIME_CONFIGS",
-    "MambaPatchConfig",
-    "ModelRuntimeConfig",
-    "PatchRuntimeConfig",
-    "TrainerRuntimeConfig",
-    "VllmRuntimeConfig",
-    "family_runtime",
+    "FAMILY_PATCHES",
+    "detect_model_families",
     "install_family_patches",
-    "pretrained_model_type",
 ]
+
+FAMILY_PATCHES: Mapping[str, tuple[Callable[..., object], ...]] = {
+    "nemotron_h": (
+        patch_nemotron_mamba_fused_path,
+        patch_nemotron_mamba_stream_ordering,
+    ),
+}
+
+
+def detect_model_families(
+    model_name_or_path: str | None,
+    *,
+    model_type: str | None = None,
+) -> frozenset[str]:
+    """Detect architecture families from a checkpoint id and/or HF model type.
+
+    Hybrid Nano / Nemotron-H checkpoints often omit ``H`` from the repo name
+    (e.g. ``NVIDIA-Nemotron-3-Nano-30B-A3B-BF16``) even when
+    ``model_type == "nemotron_h"``, so the name substring is intentionally
+    broad. ``model_type`` is matched against :data:`FAMILY_PATCHES` keys so a
+    local path that does not contain the family name still dispatches.
+
+    :param model_name_or_path: Hugging Face id or local path, or None.
+    :type model_name_or_path: str | None
+    :param model_type: Hugging Face ``config.model_type``, or None.
+    :type model_type: str | None
+    :return: Family keys that should receive patches.
+    :rtype: frozenset[str]
+    """
+    families: set[str] = set()
+    if model_type is not None and model_type in FAMILY_PATCHES:
+        families.add(model_type)
+    if model_name_or_path:
+        normalized = model_name_or_path.replace("\\", "/").lower()
+        if "nemotron" in normalized:
+            families.add("nemotron_h")
+    return frozenset(families)
 
 
 def install_family_patches(
-    model_type: str | None,
-    model: PreTrainedModel | PeftModel | None = None,
-) -> None:
-    """Install the family's catalog patches when patch.install is set.
+    model_name_or_path: str | None,
+    *,
+    model_type: str | None = None,
+    model: PreTrainedModelProtocol | None = None,
+) -> frozenset[str]:
+    """Install the class-level patches every detected family needs.
 
-    :param model_type: Hugging Face ``model_type``, or None.
+    Architectures other than the detected ones never have their classes
+    mutated, so an unrelated model cannot fail on a shape skew. Call before
+    the model is built; pass ``model`` to also fix instances that already
+    exist.
+
+    :param model_name_or_path: Hugging Face id or local path, or None.
+    :type model_name_or_path: str | None
+    :param model_type: Hugging Face ``config.model_type``, or None.
     :type model_type: str | None
     :param model: Already-built model the patches also apply to, or None.
-    :type model: PreTrainedModel | PeftModel | None
+    :type model: PreTrainedModelProtocol | None
+    :return: The families that were patched.
+    :rtype: frozenset[str]
     """
-    runtime = FAMILY_RUNTIME_CONFIGS.get(model_type, ModelRuntimeConfig())
-    install = runtime.patch.install
-    if install is None:
-        return
-    install(runtime.patch, model=model)
+    families = detect_model_families(model_name_or_path, model_type=model_type)
+    for family in sorted(families):
+        for patch in FAMILY_PATCHES.get(family, ()):
+            patch(model=model)
+    return families

@@ -1,0 +1,30 @@
+---
+INIT_HP:
+    ALGO: GRPO
+    BATCH_SIZE: 32
+    MICRO_BATCH_SIZE_PER_GPU: 8
+    GROUP_SIZE: 8
+    BETA: 0.0
+    LR: 0.01
+    CLIP_COEF: 0.2
+    MAX_GRAD_NORM: 1.0
+    TEMPERATURE: 1.0
+    UPDATE_EPOCHS: 4
+    USE_SEPARATE_REFERENCE_ADAPTER: false
+    USE_VLLM: false
+    ATTN_IMPLEMENTATION: sdpa
+
+DEBUG:
+    target_token_id: 3
+    eval_episodes: 64
+    max_context_length: 32
+    max_output_tokens: 1
+    max_sample_steps: 2048
+    evaluation_interval: 20
+    seeds: [0]
+    lora:
+        r: 8
+        lora_alpha: 32
+        lora_dropout: 0.0
+        target_modules: [q_proj, k_proj, v_proj, o_proj]
+        modules_to_save: [lm_head]

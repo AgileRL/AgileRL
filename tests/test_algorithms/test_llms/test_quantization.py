@@ -9,7 +9,7 @@ classes at the bottom are the exception — they load the tiny fixture for real
 and verify quantization actually happened. Validates that:
   * `create_model_from_name_or_path` forwards a ``model_config`` (incl. a
     ``quantization_config``) into transformers' ``from_pretrained`` while
-    still applying the SDPA + dtype defaults.
+    still applying the auto-selected attn + dtype defaults.
   * `build_bnb_quantization_config` resolves YAML-friendly presets / dicts.
   * `_prepare_llm_algo_kwargs` wires ``INIT_HP['QUANTIZATION']`` and
     ``INIT_HP['ACTIVATION_OFFLOAD']`` through.
@@ -64,6 +64,7 @@ from agilerl.utils.llm_utils import (
     offload_colocated_trainer_from_gpu,
     peft_target_key_matches,
     remap_peft_lora_key_for_vllm,
+    resolve_attn_implementation,
     resolve_vllm_max_lora_rank,
     resolve_vllm_max_num_batched_tokens,
 )
@@ -72,13 +73,6 @@ from tests import TINY_LLM_FIXTURE_PATH
 
 
 class TestCreateModelFromNameOrPath:
-    @pytest.fixture(autouse=True)
-    def stub_llama_model_type(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(
-            "transformers.AutoConfig.from_pretrained",
-            lambda *args, **kwargs: types.SimpleNamespace(model_type="llama"),
-        )
-
     def test_forwards_quantization_config(self):
         # The production path (LLMAlgorithm.__init__) folds quantization_config
         # into the model_config dict; verify it reaches from_pretrained intact.
@@ -101,8 +95,9 @@ class TestCreateModelFromNameOrPath:
 
     def test_quant_config_keeps_sdpa_and_dtype(self):
         # Regression: a model_config carrying a quantization_config must NOT
-        # suppress the SDPA + dtype defaults. Eager attention and fp32
-        # non-quantized weights at long context erase the quantization win.
+        # suppress the auto-selected attn + dtype defaults. Eager attention
+        # and fp32 non-quantized weights at long context erase the
+        # quantization win.
         cfg = BitsAndBytesConfig(load_in_4bit=True)
         captured = {}
 
@@ -118,7 +113,7 @@ class TestCreateModelFromNameOrPath:
                 "dummy/path", model_config={"quantization_config": cfg}
             )
 
-        assert captured.get("attn_implementation") == "sdpa"
+        assert captured.get("attn_implementation") == resolve_attn_implementation()
         assert "torch_dtype" in captured
         assert captured.get("quantization_config") is cfg
 
@@ -338,7 +333,7 @@ class TestVLLMConfigDefaults:
 
 
 # These tests touch the LLMAlgorithm constructor with quantization paths.
-# Real instantiation requires deepspeed/vllm import-time wiring; we exercise
+# Real instantiation requires vllm import-time wiring; we exercise
 # only the bnb-skip-list logic via a stripped-down helper that mirrors the
 # production block in base.py. Keeping the algo constructor out of scope lets
 # these tests run quickly without GPU.
@@ -443,13 +438,6 @@ class TestResolveVllmMaxLoraRank:
 
 class TestConfigureVllmKwargs:
     """Verify build_vllm_llm_init_kwargs wires VLLMConfig into LLM()."""
-
-    @pytest.fixture(autouse=True)
-    def stub_llama_model_type(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(
-            "transformers.AutoConfig.from_pretrained",
-            lambda *args, **kwargs: types.SimpleNamespace(model_type="llama"),
-        )
 
     def test_default_config_enables_lora(self):
         cfg = VLLMConfig()
@@ -580,8 +568,6 @@ class TestColocatedInitOrdering:
         agent.use_vllm = kwargs.get("use_vllm", True)
         agent.vllm_config = kwargs.get("vllm_config", VLLMConfig(sleep_mode=True))
         agent.quantization_config = kwargs.get("quantization_config")
-        agent.accelerator = kwargs.get("accelerator")
-        agent.zero_stage = kwargs.get("zero_stage")
         return agent
 
     def test_trainer_first_for_fresh_bnb_trainer_under_sleep_mode(self):
@@ -677,6 +663,8 @@ class TestPrepareVllmForGenerationOffload:
         agent._vllm_awake = not sleep_mode
         agent._vllm_moved = False
         agent.llm = mock.MagicMock()
+        agent.actor = mock.MagicMock()
+        agent.shard_runtime = mock.MagicMock(is_sharded=False)
         return agent
 
     def test_log_fires_only_when_base_actually_moves(self):
@@ -689,7 +677,6 @@ class TestPrepareVllmForGenerationOffload:
                 "agilerl.algorithms.core.base.log_cuda_memory_snapshot"
             ) as log_snapshot,
             mock.patch("torch.cuda.empty_cache"),
-            mock.patch.object(agent, "_get_unwrapped_actor"),
             mock.patch.object(agent, "_sync_actor_to_vllm"),
         ):
             move_to_cpu.side_effect = [True, False, False]
@@ -716,7 +703,6 @@ class TestPrepareVllmForGenerationOffload:
             mock.patch(
                 "agilerl.algorithms.core.base.log_cuda_memory_snapshot"
             ) as log_snapshot,
-            mock.patch.object(agent, "_get_unwrapped_actor"),
             mock.patch.object(agent, "_sync_actor_to_vllm"),
         ):
             agent._prepare_vllm_for_generation()
@@ -924,7 +910,7 @@ def _require_bf16_cuda() -> None:
 def _assert_finite_logits_forward(model: torch.nn.Module, vocab_size: int) -> None:
     device = next(model.parameters()).device
     input_ids = torch.randint(0, vocab_size, (2, 8), device=device)
-    with torch.inference_mode():
+    with torch.no_grad():
         logits = model(input_ids=input_ids).logits
     assert logits.shape == (2, 8, vocab_size)
     assert torch.isfinite(logits.float()).all()
@@ -1033,9 +1019,8 @@ class TestReinforceQuantizedInit:
             "Linear8bitLt",
         )
 
-        # The PEFT-wrapped actor sits on a genuinely 4-bit base. NB: the actor
-        # is a DummyEvolvable, whose ``modules()`` is the EvolvableModule
-        # registry API, not torch's recursive walk — use ``named_modules()``.
+        # The PEFT-wrapped actor sits on a genuinely 4-bit base. Use
+        # ``named_modules()`` (torch's recursive walk), not ``modules()``.
         assert any(
             isinstance(m, bnb.nn.Linear4bit) for _, m in agent.actor.named_modules()
         )
@@ -1046,6 +1031,4 @@ class TestReinforceQuantizedInit:
         assert lora_param_names
         assert all("q_proj" in name or "v_proj" in name for name in lora_param_names)
 
-        _assert_finite_logits_forward(
-            agent.actor, agent._get_unwrapped_actor().config.vocab_size
-        )
+        _assert_finite_logits_forward(agent.actor, agent.actor.config.vocab_size)

@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import os
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
 from importlib import import_module
 from importlib import util as importlib_util
 from pathlib import Path
@@ -278,7 +278,7 @@ def _resolve_wrapper(
 
 def apply_wrappers(
     env: EnvT,
-    wrappers: Sequence[WrapperSpec] | None,
+    wrappers: list[WrapperSpec] | None,
     path: str | None = None,
 ) -> EnvT:
     """Apply environment wrappers to an environment.

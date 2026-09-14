@@ -45,8 +45,7 @@ The three sizes
      - ``micro_batch_size_per_gpu``
      - How many trajectories go through one **backward pass**, per rank.
 
-They are related by a single rule, which AgileRL applies to the DeepSpeed engine
-for you:
+They are related by a single rule, which AgileRL applies for you:
 
 .. code-block:: text
 
@@ -65,14 +64,13 @@ optimizer steps.
 Defaults
 --------
 
-Leaving ``mini_batch_size`` unset is fine, and what it resolves to depends on the
-algorithm:
+Leaving ``mini_batch_size`` unset uses the rank's whole batch
+(``batch_size / world_size``) for every LLM algorithm. Leaving
+``micro_batch_size_per_gpu`` unset uses the mini-batch, so
+``gradient_accumulation_steps`` is 1.
 
-* **RL rollout algorithms** (:ref:`GRPO<grpo>`, :ref:`GSPO<gspo>`,
-  :ref:`CISPO<cispo>`, :ref:`LLM PPO<llmppo>`, :ref:`LLM REINFORCE<llmreinforce>`)
-  default to ``micro_batch_size_per_gpu`` — one optimizer step per backward pass.
-* **SFT and DPO** default to the rank's whole batch — one optimizer step per
-  batch, the usual supervised cadence.
+``gradient_accumulation_steps`` as a constructor argument is ignored; the value
+on the algorithm is always ``mini_batch_size / micro_batch_size_per_gpu``.
 
 Why the cadence matters
 -----------------------
@@ -107,12 +105,12 @@ Now the cadence is yours to choose:
    * - ``mini_batch_size``
      - Accumulation
      - Optimizer steps per rank, per update
-   * - unset (defaults to 1)
-     - 1
-     - 5 — one per backward pass
-   * - 5
+   * - unset (defaults to 5)
      - 5
      - 1 — the whole rank batch in a single step
+   * - 1
+     - 1
+     - 5 — one per backward pass
    * - 3
      - --
      - rejected: 5 trajectories do not divide into mini-batches of 3
@@ -134,7 +132,6 @@ In Python, pass it to the constructor alongside the micro-batch:
         group_size=5,
         micro_batch_size_per_gpu=1,  # memory
         mini_batch_size=5,           # cadence: one step per rank per update
-        accelerator=accelerator,
     )
 
 Or in the ``algorithm`` section of a training manifest:
@@ -153,4 +150,4 @@ Or in the ``algorithm`` section of a training manifest:
     Under data parallelism every rank derives the same accumulation width and so
     takes the same number of optimizer steps per update. This is required, not
     incidental: ranks that stepped at different times would desynchronise the
-    ZeRO collectives.
+    FSDP2 collectives.
