@@ -337,13 +337,6 @@ class _PPOStub:
 
 
 class TestPPOInit:
-    @pytest.fixture(autouse=True)
-    def stub_llama_auto_config(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(
-            "transformers.AutoConfig.from_pretrained",
-            lambda *args, **kwargs: SimpleNamespace(model_type="llama"),
-        )
-
     def test_init_auto_detects_device_when_none_given(self):
         """Regression: no ``device`` must auto-detect, not silently fall back to CPU."""
         with patch(

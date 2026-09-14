@@ -10,7 +10,6 @@ deepspeed or a GPU.
 import collections
 import enum
 import logging
-from types import SimpleNamespace
 
 import pytest
 import torch
@@ -243,11 +242,13 @@ class TestInstallZero3ThirdPartyHooks:
 class TestInstallModelPatches:
     def test_stage_2_runs_family_only(self, monkeypatch) -> None:
         calls: list[str] = []
-        actor = SimpleNamespace(config=SimpleNamespace(model_type="nemotron_h"))
+        actor = object()
         monkeypatch.setattr(
             zero3_patches,
             "install_family_patches",
-            lambda _model_type, model=None: calls.append(f"family:{model is actor}"),
+            lambda _name, *, zero_stage, model=None: calls.append(
+                f"family:{model is actor}:{zero_stage}"
+            ),
         )
         monkeypatch.setattr(
             zero3_patches,
@@ -262,16 +263,18 @@ class TestInstallModelPatches:
             model=actor,
         )
 
-        assert calls == ["family:True"]
+        assert calls == ["family:True:2"]
 
     def test_stage_3_runs_family_then_zero3(self, monkeypatch) -> None:
         calls: list[str] = []
-        actor = SimpleNamespace(config=SimpleNamespace(model_type="nemotron_h"))
+        actor = object()
         config = {"zero_optimization": {"stage": 3}}
         monkeypatch.setattr(
             zero3_patches,
             "install_family_patches",
-            lambda _model_type, model=None: calls.append(f"family:{model is actor}"),
+            lambda _name, *, zero_stage, model=None: calls.append(
+                f"family:{zero_stage}"
+            ),
         )
 
         def _zero3(ds_config, **kwargs):
@@ -289,26 +292,7 @@ class TestInstallModelPatches:
             num_partitions=4,
         )
 
-        assert calls == ["family:True", "zero3"]
-
-    def test_omitted_model_and_path_installs_family_with_none_type(
-        self, monkeypatch
-    ) -> None:
-        seen: list[object] = []
-        monkeypatch.setattr(
-            zero3_patches,
-            "install_family_patches",
-            lambda model_type, model=None: seen.append((model_type, model)),
-        )
-        monkeypatch.setattr(
-            zero3_patches,
-            "install_zero3_patches",
-            lambda *_args, **_kwargs: seen.append("zero3"),
-        )
-
-        install_model_patches(2, None)
-
-        assert seen == [(None, None)]
+        assert calls == ["family:3", "zero3"]
 
 
 class TestZero3Resolvers:

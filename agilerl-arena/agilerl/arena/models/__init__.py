@@ -89,6 +89,7 @@ from agilerl.arena.models.registry import MANIFEST_REGISTRY, AgentType, register
 from agilerl.arena.models.schema import SCHEMA_ID, manifest_schema
 from agilerl.arena.models.training import (
     BufferSpec,
+    CheckpointExportSpec,
     LLMRolloutBufferSpec,
     NStepBufferArgs,
     PerBufferArgs,
@@ -115,6 +116,7 @@ __all__ = [
     "BufferSpec",
     "CISPOSpec",
     "CQNSpec",
+    "CheckpointExportSpec",
     "CnnSpec",
     "ContinuousQNetworkSpec",
     "CosineLRScheduleConfig",
