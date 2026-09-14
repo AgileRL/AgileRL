@@ -15,6 +15,7 @@ from pydantic import ValidationError
 
 from agilerl.arena.models import (
     MANIFEST_REGISTRY,
+    CheckpointExportSpec,
     ReplayBufferSpec,
     TrainingManifest,
     TrainingSpec,
@@ -68,6 +69,55 @@ class TestTrainingSpecValidators:
             ValueError, match=r"eps_start .* must be greater than or equal to eps_end"
         ):
             TrainingSpec(eps_start=0.1, eps_end=0.9)
+
+
+class TestCheckpointExportSpec:
+    def test_defaults_to_adapter_final(self) -> None:
+        spec = TrainingSpec()
+
+        assert spec.checkpoint_export.format == "adapter"
+        assert spec.checkpoint_export.trigger == "final"
+        assert spec.checkpoint_export.should_merge(is_final=True, is_best=True) is False
+
+    def test_parses_merged_every_from_training_dict(self) -> None:
+        spec = TrainingSpec.model_validate(
+            {
+                "max_steps": 100,
+                "checkpoint_export": {"format": "merged", "trigger": "every"},
+            }
+        )
+
+        assert spec.checkpoint_export.format == "merged"
+        assert spec.checkpoint_export.trigger == "every"
+        assert (
+            spec.checkpoint_export.should_merge(is_final=False, is_best=False) is True
+        )
+
+    def test_final_merges_only_on_final_save(self) -> None:
+        export = CheckpointExportSpec(format="merged", trigger="final")
+
+        assert export.should_merge(is_final=False, is_best=False) is False
+        assert export.should_merge(is_final=True, is_best=False) is True
+
+    def test_best_falls_back_to_final(self) -> None:
+        export = CheckpointExportSpec(format="merged", trigger="best")
+
+        assert export.should_merge(is_final=False, is_best=False) is False
+        assert export.should_merge(is_final=False, is_best=True) is True
+        assert export.should_merge(is_final=True, is_best=False) is True
+
+    def test_on_demand_never_merges_during_train(self) -> None:
+        export = CheckpointExportSpec(format="merged", trigger="on_demand")
+
+        assert export.should_merge(is_final=True, is_best=True) is False
+
+    def test_rejects_unknown_format(self) -> None:
+        with pytest.raises(ValidationError, match="format"):
+            CheckpointExportSpec(format="full", trigger="final")
+
+    def test_rejects_unknown_trigger(self) -> None:
+        with pytest.raises(ValidationError, match="trigger"):
+            CheckpointExportSpec(format="merged", trigger="interval")
 
 
 class TestLLMEnvType:

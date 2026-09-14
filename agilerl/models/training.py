@@ -15,6 +15,7 @@ from agilerl.arena.models.algorithms import (
 from agilerl.arena.models.registry import AgentType
 from agilerl.arena.models.training import (
     BufferSpec,
+    CheckpointExportSpec,
     LLMRolloutBufferSpec,
     NStepBufferArgs,
     PerBufferArgs,
@@ -34,6 +35,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "BufferSpec",
+    "CheckpointExportSpec",
     "LLMRolloutBufferSpec",
     "NStepBufferArgs",
     "PerBufferArgs",
