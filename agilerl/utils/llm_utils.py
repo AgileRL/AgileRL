@@ -8,6 +8,7 @@ import gc
 import importlib.util
 import json
 import logging
+import os
 import random
 import re
 import shutil
@@ -1291,32 +1292,39 @@ def format_colocated_vllm_oom_hint(
     return "\n".join(lines)
 
 
-def resolve_attn_implementation(requested: str | None = None) -> str:
-    """Pick the most memory-efficient attention implementation available.
+def resolve_attn_implementation(
+    requested: str | None = None,
+    *,
+    model_name_or_path: str | None = None,
+) -> str:
+    """Pick the trainer attention backend.
 
-    Long-context RL rollouts make attention the memory bottleneck. SDPA's flash
-    backend is only used when there is no explicit attention mask, but
-    sliding-window models (e.g. Gemma) pass an explicit mask, so SDPA falls back
-    to a backend that materialises the full TxT scores/bias (OOM at ~30k
-    tokens). ``flash_attention_2`` (the ``flash_attn`` package) uses native
-    windowed-causal attention with O(T) memory and no TxT mask, so prefer it
-    when installed; otherwise fall back to SDPA.
+    Order: explicit ``requested`` (anything other than ``None`` / ``"auto"``) →
+    ``ATTN_IMPLEMENTATION`` / ``AGILERL_ATTN_IMPLEMENTATION`` → family trainer
+    default for ``model_name_or_path`` (Gemma SWA ``flex_attention``) →
+    ``flash_attention_2`` if ``flash_attn`` is installed, else ``sdpa``.
 
-    To force a specific backend, pass it explicitly — e.g.
-    ``model_config={"attn_implementation": "flex_attention"}`` on the algorithm
-    for PyTorch's built-in FlexAttention (block-sparse masked attention with
-    O(T) memory and no TxT mask, which handles sliding-window models at long
-    context without needing the ``flash_attn`` package).
-
-    :param requested: An explicit choice from the caller. Anything other than
-        ``None`` / ``"auto"`` is returned unchanged (caller stays authoritative).
+    :param requested: Explicit choice from the caller. ``None`` / ``"auto"``
+        continue to env, family, then the flash/sdpa fallback.
     :type requested: str | None
+    :param model_name_or_path: Checkpoint id used to look up family trainer
+        defaults when nothing more specific is set.
+    :type model_name_or_path: str | None
     :return: The attention implementation string for ``from_pretrained`` /
         ``from_config``.
     :rtype: str
     """
     if requested is not None and requested != "auto":
         return requested
+    env_attn = os.environ.get("ATTN_IMPLEMENTATION") or os.environ.get(
+        "AGILERL_ATTN_IMPLEMENTATION"
+    )
+    if env_attn and env_attn != "auto":
+        return env_attn.strip()
+    if model_name_or_path is not None:
+        family_attn = family_runtime(model_name_or_path).trainer.attn_implementation
+        if family_attn is not None and family_attn != "auto":
+            return family_attn
     if importlib.util.find_spec("flash_attn") is not None:
         return "flash_attention_2"
     return "sdpa"
@@ -1452,11 +1460,10 @@ def create_model_from_name_or_path(
     :param model_name_or_path: The name or path of the model to create.
     :type model_name_or_path: str
     :param model_config: Extra keyword arguments forwarded to ``from_pretrained``
-        (e.g. a ``quantization_config``). ``torch_dtype`` and trainer defaults
-        for the Hugging Face ``model_type`` (for example Gemma SWA
-        ``flex_attention``) fill keys that are not already present, then
-        ``attn_implementation`` is resolved. An explicit caller value stays
-        authoritative.
+        (e.g. a ``quantization_config``). ``torch_dtype`` fills if absent, then
+        ``attn_implementation`` is resolved (explicit value, env, family
+        trainer default, then flash/sdpa). Other family trainer keys fill
+        via ``setdefault``.
     :type model_config: dict[str, Any ] | None
     :param use_value_head: Flag to indicate if a value head should be added to the model, defaults to False
     :type use_value_head: bool, optional
@@ -1465,10 +1472,6 @@ def create_model_from_name_or_path(
     :return: The created model.
     :rtype: PreTrainedModel
     """
-    # Start from the caller's config (if any) and fill in dtype + trainer
-    # defaults for the Hugging Face ``model_type`` with ``setdefault``, so any
-    # explicit caller value stays authoritative. ``resolve_*`` then picks
-    # flash_attention_2 / sdpa when attn is still unset (including "auto").
     model_config = dict(model_config) if model_config else {}
     model_config.setdefault(
         "torch_dtype", torch.bfloat16 if not use_accelerator else torch.float16
@@ -1476,9 +1479,12 @@ def create_model_from_name_or_path(
     for key, value in (
         family_runtime(model_name_or_path).trainer.model_dump(exclude_none=True).items()
     ):
+        if key == "attn_implementation":
+            continue
         model_config.setdefault(key, value)
     model_config["attn_implementation"] = resolve_attn_implementation(
-        model_config.get("attn_implementation")
+        model_config.get("attn_implementation"),
+        model_name_or_path=model_name_or_path,
     )
     if model_config["attn_implementation"] == "flex_attention":
         patch_flex_attention_kernel_options()

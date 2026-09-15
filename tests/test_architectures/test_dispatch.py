@@ -141,6 +141,15 @@ class TestFamilyRuntime:
             "attn_implementation": "flex_attention"
         }
 
+    def test_nemotron_trainer_dumps_flash_attention_2(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        stub_auto_config(monkeypatch, "nemotron_h")
+        config = architectures.family_runtime("nvidia/nemotron")
+        assert config.trainer.model_dump(exclude_none=True) == {
+            "attn_implementation": "flash_attention_2"
+        }
+
     def test_llama_trainer_dumps_empty(self, monkeypatch: pytest.MonkeyPatch) -> None:
         stub_auto_config(monkeypatch, "llama")
         assert (

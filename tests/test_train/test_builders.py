@@ -13,7 +13,6 @@ from agilerl.algorithms.core import (
     MultiAgentAlgorithm,
     SingleAgentAlgorithm,
 )
-from agilerl.architectures.runtime import ModelRuntimeConfig
 from agilerl.arena.models.algorithms import (
     DPOSpec,
     DQNSpec,
@@ -307,10 +306,10 @@ def _build_llm_with_dummy_algo(spec, monkeypatch):
         LLMBuilder, "algo_class", classmethod(lambda cls, spec: DummyAlgo)
     )
     monkeypatch.setattr(
-        llm_builder,
-        "family_runtime",
-        lambda _name: ModelRuntimeConfig(),
+        "transformers.AutoConfig.from_pretrained",
+        lambda *args, **kwargs: MagicMock(model_type="llama"),
     )
+    monkeypatch.setattr("importlib.util.find_spec", lambda name, package=None: None)
     monkeypatch.setattr(
         llm_builder,
         "load_pad_token_configs",

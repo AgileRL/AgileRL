@@ -9,7 +9,7 @@ classes at the bottom are the exception — they load the tiny fixture for real
 and verify quantization actually happened. Validates that:
   * `create_model_from_name_or_path` forwards a ``model_config`` (incl. a
     ``quantization_config``) into transformers' ``from_pretrained`` while
-    still applying the SDPA + dtype defaults.
+    still applying the flash/sdpa + dtype defaults.
   * `build_bnb_quantization_config` resolves YAML-friendly presets / dicts.
   * `_prepare_llm_algo_kwargs` wires ``INIT_HP['QUANTIZATION']`` and
     ``INIT_HP['ACTIVATION_OFFLOAD']`` through.
@@ -64,6 +64,7 @@ from agilerl.utils.llm_utils import (
     offload_colocated_trainer_from_gpu,
     peft_target_key_matches,
     remap_peft_lora_key_for_vllm,
+    resolve_attn_implementation,
     resolve_vllm_max_lora_rank,
     resolve_vllm_max_num_batched_tokens,
 )
@@ -99,10 +100,9 @@ class TestCreateModelFromNameOrPath:
 
         assert captured.get("quantization_config") is cfg
 
-    def test_quant_config_keeps_sdpa_and_dtype(self):
-        # Regression: a model_config carrying a quantization_config must NOT
-        # suppress the SDPA + dtype defaults. Eager attention and fp32
-        # non-quantized weights at long context erase the quantization win.
+    def test_quant_config_keeps_attn_and_dtype(self):
+        # A model_config carrying a quantization_config must still get the
+        # default attn backend and dtype.
         cfg = BitsAndBytesConfig(load_in_4bit=True)
         captured = {}
 
@@ -118,7 +118,9 @@ class TestCreateModelFromNameOrPath:
                 "dummy/path", model_config={"quantization_config": cfg}
             )
 
-        assert captured.get("attn_implementation") == "sdpa"
+        assert captured.get("attn_implementation") == resolve_attn_implementation(
+            None, model_name_or_path="dummy/path"
+        )
         assert "torch_dtype" in captured
         assert captured.get("quantization_config") is cfg
 
