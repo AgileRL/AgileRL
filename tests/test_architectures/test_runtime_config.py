@@ -23,6 +23,7 @@ NEMOTRON_VLLM_KWARGS = {
     "enable_prefix_caching": True,
 }
 
+NEMOTRON_TRAINER_KWARGS = {"attn_implementation": "flash_attention_2"}
 GEMMA_TRAINER_KWARGS = {"attn_implementation": "flex_attention"}
 
 SWA_MODEL_TYPES = ("gemma3", "gemma3_text", "gemma4", "gemma4_text")
@@ -48,6 +49,7 @@ class TestFamilyRuntimeConfigs:
     def test_nemotron_h_lookup(self) -> None:
         config = FAMILY_RUNTIME_CONFIGS["nemotron_h"]
         assert config.vllm.model_dump(exclude_none=True) == NEMOTRON_VLLM_KWARGS
+        assert config.trainer.model_dump(exclude_none=True) == NEMOTRON_TRAINER_KWARGS
         assert config.patch.install is install_mamba_patches
 
     def test_nemotron_h_enables_prefix_caching(self) -> None:

@@ -1683,6 +1683,7 @@ class TestCreateModelFromNameOrPathValueHead:
             "transformers.AutoConfig.from_pretrained",
             lambda *args, **kwargs: SimpleNamespace(model_type="llama"),
         )
+        monkeypatch.setattr("importlib.util.find_spec", lambda name: None)
         sentinel_model = object()
         with patch.object(
             llm_utils_module.AutoModelForCausalLMWithValueHead,
@@ -2357,6 +2358,51 @@ class TestResolveAttnImplementation:
         monkeypatch.setattr("importlib.util.find_spec", lambda name: None)
         assert resolve_attn_implementation(None) == "sdpa"
 
+    def test_env_override_when_unset(self, monkeypatch):
+        monkeypatch.setenv("AGILERL_ATTN_IMPLEMENTATION", "eager")
+        assert resolve_attn_implementation(None) == "eager"
+
+    def test_attn_implementation_env_beats_agilerl_env(self, monkeypatch):
+        monkeypatch.setenv("ATTN_IMPLEMENTATION", "sdpa")
+        monkeypatch.setenv("AGILERL_ATTN_IMPLEMENTATION", "eager")
+        assert resolve_attn_implementation(None) == "sdpa"
+
+    def test_explicit_beats_env(self, monkeypatch):
+        monkeypatch.setenv("ATTN_IMPLEMENTATION", "eager")
+        assert resolve_attn_implementation("flex_attention") == "flex_attention"
+
+    def test_family_default_when_unset(self, monkeypatch):
+        monkeypatch.setattr(
+            "transformers.AutoConfig.from_pretrained",
+            lambda *args, **kwargs: SimpleNamespace(model_type="gemma4"),
+        )
+        assert (
+            resolve_attn_implementation(None, model_name_or_path="google/gemma")
+            == "flex_attention"
+        )
+
+    def test_env_beats_family(self, monkeypatch):
+        monkeypatch.setenv("ATTN_IMPLEMENTATION", "sdpa")
+        monkeypatch.setattr(
+            "transformers.AutoConfig.from_pretrained",
+            lambda *args, **kwargs: SimpleNamespace(model_type="gemma4"),
+        )
+        assert (
+            resolve_attn_implementation(None, model_name_or_path="google/gemma")
+            == "sdpa"
+        )
+
+    def test_nemotron_family_defaults_to_flash_attention_2(self, monkeypatch):
+        monkeypatch.setattr(
+            "transformers.AutoConfig.from_pretrained",
+            lambda *args, **kwargs: SimpleNamespace(model_type="nemotron_h"),
+        )
+        monkeypatch.setattr("importlib.util.find_spec", lambda name: None)
+        assert (
+            resolve_attn_implementation(None, model_name_or_path="nvidia/nemotron")
+            == "flash_attention_2"
+        )
+
 
 class _RegisterOnlyRegistry:
     """Attention-function registry that rejects item assignment."""
@@ -2626,7 +2672,7 @@ class TestCreateModelFromNameOrPathDefaults:
             lambda *args, **kwargs: SimpleNamespace(model_type="gemma2"),
         )
         create_model_from_name_or_path("google/gemma-2-9b")
-        assert captured["kwargs"]["attn_implementation"] != "flex_attention"
+        assert captured["kwargs"]["attn_implementation"] == "flash_attention_2"
 
     def test_explicit_attn_implementation_not_overwritten(self, monkeypatch):
         captured = {}
@@ -2643,6 +2689,69 @@ class TestCreateModelFromNameOrPathDefaults:
             model_config={"attn_implementation": "sdpa"},
         )
         assert captured["kwargs"]["attn_implementation"] == "sdpa"
+
+    def test_nemotron_defaults_to_flash_attention_2(self, monkeypatch):
+        captured = {}
+        monkeypatch.setattr(
+            llm_utils_module, "AutoModelForCausalLM", self._fake_loader(captured)
+        )
+        monkeypatch.setattr("importlib.util.find_spec", lambda name: None)
+        monkeypatch.setattr(
+            "transformers.AutoConfig.from_pretrained",
+            lambda *args, **kwargs: SimpleNamespace(model_type="nemotron_h"),
+        )
+        create_model_from_name_or_path("nvidia/nemotron")
+        assert captured["kwargs"]["attn_implementation"] == "flash_attention_2"
+
+    def test_family_trainer_non_attn_keys_fill_when_absent(self, monkeypatch):
+        captured = {}
+        monkeypatch.setattr(
+            llm_utils_module, "AutoModelForCausalLM", self._fake_loader(captured)
+        )
+        monkeypatch.setattr("importlib.util.find_spec", lambda name: None)
+
+        class FakeTrainer:
+            attn_implementation = None
+
+            def model_dump(self, exclude_none=True):
+                return {"attn_implementation": "eager", "use_cache": False}
+
+        monkeypatch.setattr(
+            llm_utils_module,
+            "family_runtime",
+            lambda *_a, **_k: SimpleNamespace(trainer=FakeTrainer()),
+        )
+
+        create_model_from_name_or_path("org/tiny")
+
+        assert captured["kwargs"]["use_cache"] is False
+        assert captured["kwargs"]["attn_implementation"] == "sdpa"
+
+    def test_family_trainer_non_attn_keys_do_not_overwrite_caller(self, monkeypatch):
+        captured = {}
+        monkeypatch.setattr(
+            llm_utils_module, "AutoModelForCausalLM", self._fake_loader(captured)
+        )
+        monkeypatch.setattr("importlib.util.find_spec", lambda name: None)
+
+        class FakeTrainer:
+            attn_implementation = None
+
+            def model_dump(self, exclude_none=True):
+                return {"use_cache": False}
+
+        monkeypatch.setattr(
+            llm_utils_module,
+            "family_runtime",
+            lambda *_a, **_k: SimpleNamespace(trainer=FakeTrainer()),
+        )
+
+        create_model_from_name_or_path(
+            "org/tiny",
+            model_config={"use_cache": True},
+        )
+
+        assert captured["kwargs"]["use_cache"] is True
 
 
 class TestValidateImportanceSamplingLevel:

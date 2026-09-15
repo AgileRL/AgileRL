@@ -19,6 +19,7 @@ from agilerl.architectures.runtime import (
 )
 
 NEMOTRON_H_RUNTIME_CONFIG = ModelRuntimeConfig(
+    trainer=TrainerRuntimeConfig(attn_implementation="flash_attention_2"),
     vllm=VllmRuntimeConfig(
         mamba_cache_mode="align",
         max_num_batched_tokens=8192,

@@ -12,7 +12,6 @@ from pydantic import BaseModel
 
 from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.algorithms.core import LLMAlgorithm
-from agilerl.architectures import family_runtime
 from agilerl.arena.models.algorithms import (
     AlgorithmSpec,
     LLMAlgorithmSpec,
@@ -31,6 +30,7 @@ from agilerl.utils.llm_utils import (
     apply_pad_token_id,
     build_bnb_quantization_config,
     load_pad_token_configs,
+    resolve_attn_implementation,
     resolve_pad_token_id,
 )
 
@@ -171,25 +171,23 @@ class LLMBuilder(AlgorithmBuilder):
         spec: LLMAlgorithmSpec,
         kwargs: dict[str, Any],
     ) -> dict[str, Any]:
-        """Merge explicit attn and family trainer defaults into ``model_config``.
+        """Merge explicit attn and the resolved trainer backend into ``model_config``.
 
-        :param spec: LLM spec whose checkpoint id is read for ``model_type``.
+        :param spec: LLM spec whose checkpoint id is read for family defaults.
         :type spec: LLMAlgorithmSpec
         :param kwargs: Constructor kwargs; ``attn_implementation`` is popped.
         :type kwargs: dict[str, Any]
-        :return: ``model_config`` with family trainer keys filled via setdefault.
+        :return: ``model_config`` with ``attn_implementation`` resolved.
         :rtype: dict[str, Any]
         """
         attn_implementation = kwargs.pop("attn_implementation", None)
         model_config = dict(kwargs.get("model_config") or {})
         if attn_implementation is not None and attn_implementation != "auto":
             model_config.setdefault("attn_implementation", attn_implementation)
-        model_name = spec.pretrained_model_name_or_path
-        if model_name is not None:
-            for key, value in (
-                family_runtime(model_name).trainer.model_dump(exclude_none=True).items()
-            ):
-                model_config.setdefault(key, value)
+        model_config["attn_implementation"] = resolve_attn_implementation(
+            model_config.get("attn_implementation"),
+            model_name_or_path=spec.pretrained_model_name_or_path,
+        )
         return model_config
 
 
