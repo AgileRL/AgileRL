@@ -160,7 +160,6 @@ if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
     from safetensors.torch import load_file
 
     from agilerl.algorithms.core.llm_ops.fused_lora import (
-        adapter_aligned_chunks,
         get_cached_lora_layers,
         patch_lora_for_fused_forward,
         set_fused_adapter_routing,
@@ -4827,17 +4826,6 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
                         "product."
                     )
                     raise ValueError(msg)
-                extra_adapters = [a for a in self.selected_adapters if a != "actor"]
-                if extra_adapters:
-                    msg = (
-                        "lora_config.target_parameters (packed-experts LoRA) "
-                        "supports only the 'actor' adapter — PEFT allows one "
-                        "adapter per model with target_parameters, but "
-                        f"selected_adapters also lists {extra_adapters}. Use "
-                        "use_separate_reference_adapter=False and no value "
-                        "head with expert LoRA."
-                    )
-                    raise ValueError(msg)
             keep_adapter_base_dtype = self.zero_stage == 3 and not quantized_base
             # PEFT reads only the targeted parameters' shapes when attaching
             # expert wrappers; under zero.Init they are partitioned
@@ -4884,11 +4872,6 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
                         stacklevel=2,
                     )
                     peft_target.delete_adapter(stray)
-
-            if keep_adapter_base_dtype:
-                for name, param in peft_target.named_parameters():
-                    if "lora" in name and param.dtype != torch.bfloat16:
-                        param.data = param.data.to(torch.bfloat16)
 
             if expert_target_parameters:
                 # The upgrade's convention checks read the packed weights'
@@ -4953,6 +4936,16 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
                 actor = vh_wrapper
             else:
                 actor = peft_target
+            # ZeRO-3 defragment requires one dtype across trainable params.
+            # Run after the value-head wrapper is attached so ``v_head`` is included.
+            if keep_adapter_base_dtype:
+                for param in actor.parameters():
+                    if (
+                        param.requires_grad
+                        and param.dtype.is_floating_point
+                        and param.dtype != torch.bfloat16
+                    ):
+                        param.data = param.data.to(torch.bfloat16)
         else:
             actor = base_model
 
@@ -5086,7 +5079,9 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         When *batch_size* is ``None`` the full batch is processed in a single
         ``model.forward`` call — required when gradients are active so that
         gradient-checkpoint recomputation sees the same routing.  When set,
-        the batch is iterated in micro-batches (safe under ``no_grad``).
+        the batch is iterated in micro-batches of that many rows (safe under
+        ``no_grad``). Packed-expert wrappers mask mixed adapter rows in one
+        forward, so a micro-batch may contain more than one adapter.
 
         :return: ``(log_probs, values)`` where *log_probs* has shape
             ``(fused_ids.shape[0], seq_len - 1)`` and *values* matches that
@@ -5101,13 +5096,15 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         if self.calc_position_embeddings:
             position_ids = self._position_ids_from_mask(fused_mask)
 
-        # Micro-batches never straddle an adapter run: packed-experts LoRA
-        # layers see expert-sorted rows and can only apply one adapter per
-        # forward call.
+        # Packed-expert wrappers mask mixed adapters in one forward, so
+        # micro-batches may straddle adapter runs.
         chunks = (
             [(0, total)]
             if batch_size is None
-            else adapter_aligned_chunks(routing, batch_size)
+            else [
+                (start, min(start + batch_size, total))
+                for start in range(0, total, batch_size)
+            ]
         )
 
         fused_fn, lm_head_weight, lm_head_bias = self._fused_logprob_fn_and_head()
@@ -6727,6 +6724,26 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         if self.accelerator is not None:
             self.accelerator.wait_for_everyone()
 
+    def _sleep_vllm_engine(self) -> None:
+        """Put the colocated engine to sleep and mark it asleep.
+
+        vLLM's post-sleep ``mem_get_info()`` check can fail after CUDA graphs /
+        inductor even when CuMemAllocator already freed the engine; that is
+        still a successful sleep.
+        """
+        assert self.vllm_config is not None  # _configure_vllm guarantees a config
+        try:
+            self.llm.sleep(level=self.vllm_config.sleep_mode_level)
+        except AssertionError as exc:
+            if "Memory usage increased after sleeping" not in str(exc):
+                raise
+            warnings.warn(
+                "vLLM sleep finished but driver memory accounting increased; "
+                "continuing with the engine marked asleep.",
+                stacklevel=2,
+            )
+        self._vllm_awake = False
+
     def _sleep_vllm_after_init(self) -> None:
         """Put the colocated engine to sleep once after construction.
 
@@ -6734,9 +6751,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         state based on the configured sleep level; ``wake_up()`` restores the
         engine allocations.
         """
-        assert self.vllm_config is not None  # _configure_vllm guarantees a config
-        self.llm.sleep(level=self.vllm_config.sleep_mode_level)
-        self._vllm_awake = False
+        self._sleep_vllm_engine()
         if self.accelerator is None or self.accelerator.is_main_process:
             log_cuda_memory_snapshot("vLLM sleep complete")
 
@@ -6867,8 +6882,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         # every rank must sleep it — not just the main process.
         if self.vllm_config.sleep_mode and self._vllm_awake:
             torch.cuda.empty_cache()
-            self.llm.sleep(level=self.vllm_config.sleep_mode_level)
-            self._vllm_awake = False
+            self._sleep_vllm_engine()
 
         self._vllm_moved = False
 

@@ -943,6 +943,43 @@ def test_server_start_fails_fast_when_port_is_taken() -> None:
         blocker.close()
 
 
+def test_server_start_binds_an_explicit_free_port() -> None:
+    """A requested free port is probed with connect-refused, then uvicorn binds it."""
+    holder = socket.socket()
+    holder.bind(("127.0.0.1", 0))
+    port = holder.getsockname()[1]
+    holder.close()
+    inner = _CountingEnv()
+    server = OpenEnvServer(inner, port=port).start()
+    try:
+        assert server.port == port
+        payload = RemoteEnvClient(base_url=server.base_url).reset()[0]
+        assert payload["prompt"] == "Start.\nReply 'go'."
+    finally:
+        server.stop()
+
+
+@pytest.mark.filterwarnings("ignore::pytest.PytestUnhandledThreadExceptionWarning")
+def test_server_start_fails_when_thread_exits(monkeypatch: Any) -> None:
+    """A uvicorn thread that dies before ``started`` raises without waiting 30s."""
+    import uvicorn
+
+    class _DeadServer:
+        def __init__(self, config: Any) -> None:
+            del config
+            self.started = False
+            self.should_exit = False
+
+        def run(self) -> None:
+            return
+
+    monkeypatch.setattr(uvicorn, "Server", _DeadServer)
+    inner = _CountingEnv()
+    with pytest.raises(RuntimeError, match="during startup"):
+        OpenEnvServer(inner).start()
+    assert inner.closed
+
+
 def test_server_requires_exactly_one_env_source() -> None:
     """A server hosts either one shared env or a per-session factory, never both."""
     with pytest.raises(ValueError, match="exactly one of env or make_env"):

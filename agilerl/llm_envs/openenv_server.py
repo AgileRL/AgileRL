@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import contextlib
 import inspect
+import socket
 import threading
 import time
 from collections.abc import Callable
@@ -300,8 +301,41 @@ class OpenEnvServer:
         """The ``http://host:port`` clients should dial (after :meth:`start`)."""
         return f"http://{self._advertise_host}:{self.port}"
 
+    def _assert_listen_port_available(self) -> None:
+        """Raise ``OSError`` if something is already accepting on ``host:port``.
+
+        Port 0 is OS-assigned. Uses ``connect`` rather than bind-and-close so a
+        free port is not left in ``TIME_WAIT`` before uvicorn binds.
+        """
+        if self._port == 0:
+            return
+        connect_host = "127.0.0.1" if self._host in ("0.0.0.0", "") else self._host
+        family = socket.AF_INET6 if ":" in connect_host else socket.AF_INET
+        probe = socket.socket(family, socket.SOCK_STREAM)
+        probe.settimeout(0.2)
+        try:
+            probe.connect((connect_host, self._port))
+        except OSError:
+            return
+        else:
+            msg = "port already in use"
+            raise OSError(msg)
+        finally:
+            probe.close()
+
     def start(self) -> Self:
         """Serve in a background daemon thread (waits for bind); returns ``self``."""
+        try:
+            self._assert_listen_port_available()
+        except OSError as exc:
+            self.stop()
+            msg = (
+                "OpenEnvServer thread exited during startup — the port may "
+                f"be in use or the app failed to start "
+                f"(host={self._host!r}, port={self._port})"
+            )
+            raise RuntimeError(msg) from exc
+
         env = self._env
         make_env = self._make_env
         env_name = self._env_name
