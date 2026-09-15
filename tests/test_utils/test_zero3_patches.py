@@ -42,6 +42,30 @@ _LEAF_MODULE_CONFIG = {
     },
 }
 
+_PACKED_MOE_CLASS_CONFIG = {
+    "zero_optimization": {
+        "stage": 3,
+        "leaf_module": {
+            "classes": [
+                "transformers.models.nemotron_h.modeling_nemotron_h.NemotronHMoE"
+            ]
+        },
+    },
+}
+
+# Rank-divergent per-expert ModuleList children cannot replay a recorded fetch order.
+_PER_EXPERT_LEAF_CONFIG = {
+    "zero_optimization": {
+        "stage": 3,
+        "leaf_module": {"name_suffixes": ["expert"]},
+    },
+}
+
+
+class _FakeParamStatus(enum.Enum):
+    AVAILABLE = 1
+    NOT_AVAILABLE = 2
+
 
 class _FakeTraceMode(enum.Enum):
     RECORD = 1
@@ -310,6 +334,28 @@ class TestInstallModelPatches:
 
         assert seen == [(None, None)]
 
+    def test_path_without_model_resolves_family_type(self, monkeypatch) -> None:
+        seen: list[object] = []
+        monkeypatch.setattr(
+            zero3_patches,
+            "pretrained_model_type",
+            lambda path: seen.append(path) or "nemotron_h",
+        )
+        monkeypatch.setattr(
+            zero3_patches,
+            "install_family_patches",
+            lambda model_type, model=None: seen.append((model_type, model)),
+        )
+        monkeypatch.setattr(
+            zero3_patches,
+            "install_zero3_patches",
+            lambda *_args, **_kwargs: None,
+        )
+
+        install_model_patches(2, None, model_name_or_path="nvidia/nemotron")
+
+        assert seen == ["nvidia/nemotron", ("nemotron_h", None)]
+
 
 class TestZero3Resolvers:
     def test_resolve_zero3_targets_returns_none_pair_when_import_fails(
@@ -331,6 +377,17 @@ class TestZero3Resolvers:
         with pytest.raises(RuntimeError, match="missing"):
             zero3_patches._resolve_zero3_targets()
 
+    def test_resolve_zero3_targets_returns_symbols(self, monkeypatch) -> None:
+        coordinator = type("PartitionedParameterCoordinator", (), {})
+        trace_mode = type("ZeRoTraceMode", (), {})
+        module = SimpleNamespace(
+            PartitionedParameterCoordinator=coordinator,
+            ZeRoTraceMode=trace_mode,
+        )
+        monkeypatch.setattr(zero3_patches, "try_import", lambda _path: module)
+
+        assert zero3_patches._resolve_zero3_targets() == (coordinator, trace_mode)
+
     def test_resolve_zero3_init_returns_none_when_module_missing(
         self, monkeypatch
     ) -> None:
@@ -343,7 +400,12 @@ class TestZero3Resolvers:
     ) -> None:
         monkeypatch.setattr(zero3_patches, "try_import", lambda _path: None)
 
-        assert zero3_patches._resolve_zero3_release_targets() == (None, None, None)
+        assert zero3_patches._resolve_zero3_release_targets() == (
+            None,
+            None,
+            None,
+            None,
+        )
 
     def test_resolve_release_targets_raises_when_symbols_missing(
         self, monkeypatch
@@ -355,8 +417,40 @@ class TestZero3Resolvers:
         )()
         monkeypatch.setattr(zero3_patches, "try_import", lambda _path: module)
 
-        with pytest.raises(RuntimeError, match="iter_params, z3_leaf_module"):
+        with pytest.raises(
+            RuntimeError,
+            match=r"iter_params, z3_leaf_module, ZeroParamStatus\.AVAILABLE",
+        ):
             zero3_patches._resolve_zero3_release_targets()
+
+    def test_resolve_release_targets_returns_symbols(self, monkeypatch) -> None:
+        coordinator = type("PartitionedParameterCoordinator", (), {})
+
+        def iter_params(module, recurse=False):
+            return []
+
+        def z3_leaf_module(module):
+            return False
+
+        available = object()
+
+        def try_import(path):
+            if path == zero3_patches.ZERO3_COORDINATOR_MODULE:
+                return SimpleNamespace(
+                    PartitionedParameterCoordinator=coordinator,
+                    iter_params=iter_params,
+                    z3_leaf_module=z3_leaf_module,
+                )
+            return SimpleNamespace(ZeroParamStatus=SimpleNamespace(AVAILABLE=available))
+
+        monkeypatch.setattr(zero3_patches, "try_import", try_import)
+
+        assert zero3_patches._resolve_zero3_release_targets() == (
+            coordinator,
+            iter_params,
+            z3_leaf_module,
+            available,
+        )
 
     def test_snapshot_skips_attributes_the_coordinator_lacks(self) -> None:
         assert zero3_patches._snapshot_trace_state(object()) == {}
@@ -374,7 +468,7 @@ class TestZero3Resolvers:
 
 
 class TestRoutesToConditionalSubmodules:
-    """Only a declared ``leaf_module`` marks a model as data-routed."""
+    """Packed experts keep a recorded fetch order; per-expert children do not."""
 
     @pytest.mark.parametrize(
         "config",
@@ -388,28 +482,81 @@ class TestRoutesToConditionalSubmodules:
             {"zero_optimization": [("leaf_module", True)]},
             {"leaf_module": {"name_suffixes": ["experts"]}},
             "not-a-mapping",
+            _LEAF_MODULE_CONFIG,
+            _PACKED_MOE_CLASS_CONFIG,
+            {"zero_optimization": {"leaf_module": {"classes": ["NemotronHMoE"]}}},
         ],
     )
-    def test_absent_or_empty_leaf_module_is_false(self, config):
+    def test_absent_empty_or_packed_leaf_module_is_false(self, config):
         assert zero3_patches._routes_to_conditional_submodules(config) is False
 
-    def test_declared_leaf_module_is_true(self):
-        assert zero3_patches._routes_to_conditional_submodules(_LEAF_MODULE_CONFIG)
+    def test_per_expert_child_leaf_is_true(self):
+        assert zero3_patches._routes_to_conditional_submodules(_PER_EXPERT_LEAF_CONFIG)
 
-    def test_leaf_module_by_classes_is_true(self):
-        config = {"zero_optimization": {"leaf_module": {"classes": ["NemotronHMoE"]}}}
+    def test_per_expert_class_leaf_is_true(self):
+        config = {
+            "zero_optimization": {
+                "leaf_module": {"classes": ["MixtralBlockSparseTop2MLP"]},
+            }
+        }
         assert zero3_patches._routes_to_conditional_submodules(config)
+
+    def test_packed_moe_class_skips_non_string_entries(self):
+        leaf = {"classes": [object(), "NemotronHMoE"]}
+        assert zero3_patches._is_packed_experts_leaf(leaf) is True
+
+    def test_packed_suffix_as_frozenset_is_packed(self):
+        leaf = {"name_suffixes": frozenset({"experts"})}
+        assert zero3_patches._is_packed_experts_leaf(leaf) is True
 
     def test_not_exported_in_all(self):
         assert "routes_to_conditional_submodules" not in zero3_patches.__all__
         assert not hasattr(zero3_patches, "routes_to_conditional_submodules")
 
 
+class TestPackedLeafModuleKeepsFetchTrace:
+    """Packed experts leaves record a fetch order every rank can replay."""
+
+    @pytest.mark.parametrize(
+        "config",
+        [_LEAF_MODULE_CONFIG, _PACKED_MOE_CLASS_CONFIG],
+        ids=["experts_suffix", "nemotron_h_moe_class"],
+    )
+    def test_grad_enabled_reset_step_stays_on_recorded_mode(
+        self, coordinator_cls, config
+    ):
+        patch_zero3_fetch_trace(config)
+        coordinator = coordinator_cls()
+        _set_attr(coordinator, "__trace_mode", _FakeTraceMode.RECORD)
+
+        coordinator.reset_step()
+
+        assert _attr(coordinator, "__trace_mode") is _FakeTraceMode.RECORD
+
+    def test_no_grad_snapshots_invalidates_and_restores(self, coordinator_cls):
+        patch_zero3_fetch_trace(_LEAF_MODULE_CONFIG)
+        coordinator = coordinator_cls()
+        expected_modules = list(_attr(coordinator, "__submodule_order"))
+        expected_params = list(_attr(coordinator, "__param_order"))
+
+        with torch.no_grad():
+            coordinator.reset_step()
+        assert _attr(coordinator, "__trace_mode") is _FakeTraceMode.INVALID
+        assert getattr(coordinator, zero3_patches.SNAPSHOT_ATTR) is not None
+
+        coordinator.reset_step()
+
+        assert _attr(coordinator, "__trace_mode") is _FakeTraceMode.COMPLETE
+        assert _attr(coordinator, "__submodule_order") == expected_modules
+        assert _attr(coordinator, "__param_order") == expected_params
+        assert getattr(coordinator, zero3_patches.SNAPSHOT_ATTR) is None
+
+
 class TestLeafModuleForcesOnDemandFetch:
-    """A data-routed model records no trace, so nothing is replayed."""
+    """Per-expert child modules record no trace, so nothing is replayed."""
 
     def test_grad_forward_never_records_a_trace(self, coordinator_cls):
-        patch_zero3_fetch_trace(_LEAF_MODULE_CONFIG)
+        patch_zero3_fetch_trace(_PER_EXPERT_LEAF_CONFIG)
         coordinator = coordinator_cls()
         _set_attr(coordinator, "__trace_mode", _FakeTraceMode.RECORD)
 
@@ -418,7 +565,7 @@ class TestLeafModuleForcesOnDemandFetch:
         assert _attr(coordinator, "__trace_mode") is _FakeTraceMode.INVALID
 
     def test_mode_holds_across_repeated_grad_steps(self, coordinator_cls):
-        patch_zero3_fetch_trace(_LEAF_MODULE_CONFIG)
+        patch_zero3_fetch_trace(_PER_EXPERT_LEAF_CONFIG)
         coordinator = coordinator_cls()
 
         for _ in range(3):
@@ -428,7 +575,7 @@ class TestLeafModuleForcesOnDemandFetch:
         assert _attr(coordinator, "__trace_mode") is _FakeTraceMode.INVALID
 
     def test_no_grad_forward_takes_no_snapshot(self, coordinator_cls):
-        patch_zero3_fetch_trace(_LEAF_MODULE_CONFIG)
+        patch_zero3_fetch_trace(_PER_EXPERT_LEAF_CONFIG)
         coordinator = coordinator_cls()
 
         with torch.no_grad():
@@ -438,7 +585,7 @@ class TestLeafModuleForcesOnDemandFetch:
         assert _attr(coordinator, "__trace_mode") is _FakeTraceMode.INVALID
 
     def test_per_step_bookkeeping_still_resets(self, coordinator_cls):
-        patch_zero3_fetch_trace(_LEAF_MODULE_CONFIG)
+        patch_zero3_fetch_trace(_PER_EXPERT_LEAF_CONFIG)
         coordinator = coordinator_cls()
         _simulate_no_grad_forward(coordinator)
 
@@ -874,12 +1021,33 @@ class TestZero3ParamPersistence:
 
 
 class _FakeReleaseParam:
-    def __init__(self, ds_id, ds_persist=False, is_external_param=False):
+    def __init__(
+        self,
+        ds_id,
+        ds_persist=False,
+        is_external_param=False,
+        ds_numel=1,
+        ds_status=None,
+        ds_active_sub_modules=None,
+    ):
         self.ds_id = ds_id
         self.ds_persist = ds_persist
         self.is_external_param = is_external_param
+        self.ds_numel = ds_numel
+        self.ds_status = (
+            _FakeParamStatus.NOT_AVAILABLE if ds_status is None else ds_status
+        )
+        self.ds_active_sub_modules = (
+            set() if ds_active_sub_modules is None else set(ds_active_sub_modules)
+        )
         self.release_count = 0
         self.data_cleared = False
+        self.partition_calls = 0
+
+    def partition(self, free_data=True):
+        self.partition_calls += 1
+        self.ds_status = _FakeParamStatus.NOT_AVAILABLE
+        self.ds_active_sub_modules.clear()
 
 
 class _FakeReleaseSubmodule:
@@ -898,6 +1066,8 @@ def _make_release_coordinator_class():
     class PartitionedParameterCoordinator:
         def __init__(self, complete_trace=False):
             self.complete_trace = complete_trace
+            self.__n_available_params = 0
+            self.__active_backward_submodules = {}
 
         def is_complete_trace(self):
             return self.complete_trace
@@ -935,7 +1105,12 @@ def release_coordinator_cls(monkeypatch):
     monkeypatch.setattr(
         zero3_patches,
         "_resolve_zero3_release_targets",
-        lambda: (cls, fake_iter_params, lambda module: module.leaf),
+        lambda: (
+            cls,
+            fake_iter_params,
+            lambda module: module.leaf,
+            _FakeParamStatus.AVAILABLE,
+        ),
     )
     cls.recurse_calls = recurse_calls
     return cls
@@ -982,6 +1157,172 @@ class TestZero3PersistentRelease:
         assert transient.data_cleared is True
         assert release_coordinator_cls.recurse_calls[-1] is True
 
+    def test_large_leaf_param_with_stale_active_ids_is_partitioned(
+        self, release_coordinator_cls
+    ):
+        patch_zero3_persistent_release()
+        leftover = _FakeReleaseParam(
+            1,
+            ds_numel=450_000_000,
+            ds_status=_FakeParamStatus.AVAILABLE,
+            ds_active_sub_modules={99},
+        )
+        submodule = _FakeReleaseSubmodule([leftover], leaf=True)
+        coordinator = release_coordinator_cls()
+        _set_attr(coordinator, "__n_available_params", leftover.ds_numel)
+
+        coordinator.release_sub_module(submodule)
+
+        assert leftover.ds_status is _FakeParamStatus.NOT_AVAILABLE
+        assert leftover.ds_active_sub_modules == set()
+        assert leftover.partition_calls == 1
+        assert _attr(coordinator, "__n_available_params") == 0
+
+    def test_available_leaf_param_without_active_ids_stays_gathered(
+        self, release_coordinator_cls
+    ):
+        patch_zero3_persistent_release()
+        leftover = _FakeReleaseParam(
+            1,
+            ds_numel=450_000_000,
+            ds_status=_FakeParamStatus.AVAILABLE,
+        )
+        submodule = _FakeReleaseSubmodule([leftover], leaf=True)
+        coordinator = release_coordinator_cls()
+        _set_attr(coordinator, "__n_available_params", leftover.ds_numel)
+
+        coordinator.release_sub_module(submodule)
+
+        assert leftover.ds_status is _FakeParamStatus.AVAILABLE
+        assert leftover.partition_calls == 0
+        assert _attr(coordinator, "__n_available_params") == leftover.ds_numel
+
+    def test_forward_release_keeps_recompute_owner_gathered(
+        self, release_coordinator_cls
+    ):
+        patch_zero3_persistent_release()
+        leftover = _FakeReleaseParam(
+            1,
+            ds_numel=450_000_000,
+            ds_status=_FakeParamStatus.AVAILABLE,
+            ds_active_sub_modules={99},
+        )
+        submodule = _FakeReleaseSubmodule([leftover], leaf=True)
+
+        release_coordinator_cls().release_sub_module(submodule, forward=True)
+
+        assert leftover.ds_status is _FakeParamStatus.AVAILABLE
+        assert leftover.ds_active_sub_modules == {99}
+        assert leftover.partition_calls == 0
+
+    def test_positional_forward_release_keeps_recompute_owner_gathered(
+        self, release_coordinator_cls
+    ):
+        patch_zero3_persistent_release()
+        leftover = _FakeReleaseParam(
+            1,
+            ds_status=_FakeParamStatus.AVAILABLE,
+            ds_active_sub_modules={99},
+        )
+        submodule = _FakeReleaseSubmodule([leftover], leaf=True)
+
+        release_coordinator_cls().release_sub_module(submodule, True)
+
+        assert leftover.ds_status is _FakeParamStatus.AVAILABLE
+        assert leftover.ds_active_sub_modules == {99}
+        assert leftover.partition_calls == 0
+
+    def test_live_backward_owner_is_not_cleared(self, release_coordinator_cls):
+        patch_zero3_persistent_release()
+        leftover = _FakeReleaseParam(
+            1,
+            ds_numel=450_000_000,
+            ds_status=_FakeParamStatus.AVAILABLE,
+            ds_active_sub_modules={99},
+        )
+        submodule = _FakeReleaseSubmodule([leftover], leaf=True)
+        coordinator = release_coordinator_cls()
+        _attr(coordinator, "__active_backward_submodules")[99] = object()
+        _set_attr(coordinator, "__n_available_params", leftover.ds_numel)
+
+        coordinator.release_sub_module(submodule)
+
+        assert leftover.ds_status is _FakeParamStatus.AVAILABLE
+        assert leftover.ds_active_sub_modules == {99}
+        assert leftover.partition_calls == 0
+        assert _attr(coordinator, "__n_available_params") == leftover.ds_numel
+
+    def test_mixed_live_and_stale_owners_stay_gathered(self, release_coordinator_cls):
+        patch_zero3_persistent_release()
+        leftover = _FakeReleaseParam(
+            1,
+            ds_status=_FakeParamStatus.AVAILABLE,
+            ds_active_sub_modules={99, 100},
+        )
+        submodule = _FakeReleaseSubmodule([leftover], leaf=True)
+        coordinator = release_coordinator_cls()
+        _attr(coordinator, "__active_backward_submodules")[99] = object()
+
+        coordinator.release_sub_module(submodule)
+
+        assert leftover.ds_status is _FakeParamStatus.AVAILABLE
+        assert leftover.ds_active_sub_modules == {99, 100}
+        assert leftover.partition_calls == 0
+
+    def test_external_leaf_param_is_not_force_partitioned(
+        self, release_coordinator_cls
+    ):
+        patch_zero3_persistent_release()
+        leftover = _FakeReleaseParam(
+            1,
+            is_external_param=True,
+            ds_status=_FakeParamStatus.AVAILABLE,
+            ds_active_sub_modules={99},
+        )
+        submodule = _FakeReleaseSubmodule([leftover], leaf=True)
+
+        release_coordinator_cls().release_sub_module(submodule)
+
+        assert leftover.ds_status is _FakeParamStatus.AVAILABLE
+        assert leftover.ds_active_sub_modules == {99}
+        assert leftover.partition_calls == 0
+
+    def test_persistent_leaf_param_stays_resident_despite_stale_active_ids(
+        self, release_coordinator_cls
+    ):
+        patch_zero3_persistent_release()
+        persistent = _FakeReleaseParam(
+            1,
+            ds_persist=True,
+            ds_status=_FakeParamStatus.AVAILABLE,
+            ds_active_sub_modules={99},
+        )
+        submodule = _FakeReleaseSubmodule([persistent], leaf=True)
+
+        release_coordinator_cls().release_sub_module(submodule)
+
+        assert persistent.ds_status is _FakeParamStatus.AVAILABLE
+        assert persistent.ds_active_sub_modules == {99}
+        assert persistent.partition_calls == 0
+        assert persistent.data_cleared is False
+
+    def test_non_leaf_available_param_is_not_force_partitioned(
+        self, release_coordinator_cls
+    ):
+        patch_zero3_persistent_release()
+        leftover = _FakeReleaseParam(
+            1,
+            ds_status=_FakeParamStatus.AVAILABLE,
+            ds_active_sub_modules={99},
+        )
+        submodule = _FakeReleaseSubmodule([leftover], leaf=False)
+
+        release_coordinator_cls().release_sub_module(submodule)
+
+        assert leftover.ds_status is _FakeParamStatus.AVAILABLE
+        assert leftover.ds_active_sub_modules == {99}
+        assert leftover.partition_calls == 0
+
     def test_complete_trace_behaviour_is_unchanged(self, release_coordinator_cls):
         patch_zero3_persistent_release()
         persistent = _FakeReleaseParam(1, ds_persist=True)
@@ -1017,6 +1358,7 @@ class TestZero3PersistentRelease:
                 PartitionedParameterCoordinator,
                 lambda module, recurse=False: list(module.params),
                 lambda module: module.leaf,
+                _FakeParamStatus.AVAILABLE,
             ),
         )
         patch_zero3_persistent_release()
@@ -1056,6 +1398,7 @@ class TestZero3PersistentRelease:
                 PartitionedParameterCoordinator,
                 lambda module, recurse=False: [],
                 lambda module: False,
+                _FakeParamStatus.AVAILABLE,
             ),
         )
 
@@ -1066,7 +1409,7 @@ class TestZero3PersistentRelease:
         monkeypatch.setattr(
             zero3_patches,
             "_resolve_zero3_release_targets",
-            lambda: (None, None, None),
+            lambda: (None, None, None, None),
         )
 
         with caplog.at_level(logging.WARNING):

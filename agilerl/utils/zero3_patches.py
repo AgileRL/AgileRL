@@ -63,6 +63,9 @@ SNAPSHOT_ATTR = "_agilerl_zero3_trace_snapshot"
 TRACE_PATCHED_FLAG = "_agilerl_zero3_trace_patched"
 PERSIST_RELEASE_PATCHED_FLAG = "_agilerl_zero3_persist_release_patched"
 
+PACKED_LEAF_NAME_SUFFIXES = frozenset({"experts"})
+PACKED_LEAF_CLASS_SUFFIX = "MoE"
+
 TRACE_ATTRS = (
     "__trace_mode",
     "__submodule_order",
@@ -178,28 +181,40 @@ def _resolve_zero3_targets() -> tuple[type | None, type | None]:
 
 
 def _resolve_zero3_release_targets() -> tuple[
-    type | None, Callable[..., Any] | None, Callable[[Any], bool] | None
+    type | None,
+    Callable[..., Any] | None,
+    Callable[[Any], bool] | None,
+    object | None,
 ]:
     """Resolve the ZeRO-3 coordinator class and its param-iteration helpers.
 
     All None when deepspeed is absent. A loaded module that lacks any symbol
     is version skew and raises.
 
-    :return: ``(coordinator_cls, iter_params, z3_leaf_module)``, or all None.
-    :rtype: tuple[type | None, Callable | None, Callable | None]
+    :return: ``(coordinator_cls, iter_params, z3_leaf_module, available_status)``,
+        or all None.
+    :rtype: tuple[type | None, Callable | None, Callable | None, object | None]
     """
     module = try_import(ZERO3_COORDINATOR_MODULE)
     if module is None:
-        return None, None, None
+        return None, None, None, None
+    partition_module = try_import(ZERO3_PARTITION_MODULE)
     coordinator = getattr(module, "PartitionedParameterCoordinator", None)
     iter_params = getattr(module, "iter_params", None)
     z3_leaf_module = getattr(module, "z3_leaf_module", None)
+    zero_param_status = (
+        getattr(partition_module, "ZeroParamStatus", None)
+        if partition_module is not None
+        else None
+    )
+    available_status = getattr(zero_param_status, "AVAILABLE", None)
     missing = [
         name
         for name, value in (
             ("PartitionedParameterCoordinator", coordinator),
             ("iter_params", iter_params),
             ("z3_leaf_module", z3_leaf_module),
+            ("ZeroParamStatus.AVAILABLE", available_status),
         )
         if value is None
     ]
@@ -210,7 +225,7 @@ def _resolve_zero3_release_targets() -> tuple[
             f"{', '.join(missing)}"
         )
         raise RuntimeError(message)
-    return coordinator, iter_params, z3_leaf_module
+    return coordinator, iter_params, z3_leaf_module, available_status
 
 
 def _resolve_zero3_init() -> type | None:
@@ -236,11 +251,35 @@ def _mangled(name: str) -> str:
     return f"{MANGLE_PREFIX}{name}"
 
 
-def _routes_to_conditional_submodules(deepspeed_config: object) -> bool:
-    """Whether the config describes a model that picks submodules from the data.
+def _is_packed_experts_leaf(leaf_module: Mapping[Any, Any]) -> bool:
+    """Whether ``leaf_module`` names a packed experts block every rank always enters.
 
-    A ``leaf_module`` entry is how a mixture-of-experts block is declared, and
-    such a block runs only the experts its router selected.
+    :param leaf_module: DeepSpeed ``zero_optimization.leaf_module`` mapping.
+    :type leaf_module: Mapping[Any, Any]
+    :return: True for packed ``experts`` suffixes or packed ``*MoE`` classes.
+    :rtype: bool
+    """
+    suffixes = leaf_module.get("name_suffixes")
+    if isinstance(suffixes, (list, tuple, set, frozenset)):
+        if any(suffix in PACKED_LEAF_NAME_SUFFIXES for suffix in suffixes):
+            return True
+    classes = leaf_module.get("classes")
+    if isinstance(classes, (list, tuple, set, frozenset)):
+        for cls in classes:
+            if not isinstance(cls, str):
+                continue
+            simple_name = cls.rsplit(".", 1)[-1]
+            if simple_name.endswith(PACKED_LEAF_CLASS_SUFFIX):
+                return True
+    return False
+
+
+def _routes_to_conditional_submodules(deepspeed_config: object) -> bool:
+    """Whether a recorded submodule fetch order cannot be replayed.
+
+    Packed ``experts`` is one module every rank always enters; a recorded
+    fetch order is valid. Per-expert ModuleList children with rank-divergent
+    visit order cannot replay a recorded order.
 
     :param deepspeed_config: Resolved DeepSpeed config, or None.
     :type deepspeed_config: object
@@ -252,7 +291,16 @@ def _routes_to_conditional_submodules(deepspeed_config: object) -> bool:
     zero_optimization = deepspeed_config.get("zero_optimization")
     if not isinstance(zero_optimization, Mapping):
         return False
-    return bool(zero_optimization.get("leaf_module"))
+    leaf_module = zero_optimization.get("leaf_module")
+    if not isinstance(leaf_module, Mapping) or not leaf_module:
+        return False
+    if _is_packed_experts_leaf(leaf_module):
+        return False
+    suffixes = leaf_module.get("name_suffixes")
+    classes = leaf_module.get("classes")
+    has_suffixes = isinstance(suffixes, (list, tuple)) and len(suffixes) > 0
+    classes_listed = isinstance(classes, (list, tuple)) and len(classes) > 0
+    return has_suffixes or classes_listed
 
 
 def _copy_trace_value(value: object) -> object:
@@ -368,9 +416,11 @@ def patch_zero3_fetch_trace(
     forced to ``INVALID`` (on-demand fetch, deterministic across ranks for
     forward-only passes), and the next grad-enabled call restores it, so the
     training forward and backward passes form a contiguous chain of matching
-    steps and the trace reaches ``COMPLETE``. A config declaring
-    ``leaf_module`` describes a model that picks submodules from the data, so
-    every step fetches on demand and no trace is recorded.
+    steps and the trace reaches ``COMPLETE``. A ``leaf_module`` of per-expert
+    child modules with rank-divergent visit order cannot replay a recorded
+    fetch sequence, so every step fetches on demand. Packed ``experts`` leaves
+    are one module every rank always enters, so they keep the RECORD →
+    COMPLETE path.
 
     :param deepspeed_config: Resolved DeepSpeed config, or None.
     :type deepspeed_config: Mapping[str, Any] | None
@@ -423,12 +473,53 @@ def patch_zero3_fetch_trace(
     )
 
 
+def _partition_unreleased_leaf_params(
+    coordinator: object,
+    submodule: object,
+    iter_params: Callable[..., Any],
+    available_status: object,
+) -> None:
+    """Partition leaf params blocked only by stale leftover owner ids.
+
+    :param coordinator: Live parameter coordinator.
+    :type coordinator: object
+    :param submodule: ZeRO-3 leaf submodule whose params were just released.
+    :type submodule: object
+    :param iter_params: deepspeed's parameter iterator for a submodule.
+    :type iter_params: Callable[..., Any]
+    :param available_status: ``ZeroParamStatus.AVAILABLE``.
+    :type available_status: object
+    :return: None
+    :rtype: None
+    """
+    live_owners = set(getattr(coordinator, _mangled("__active_backward_submodules")))
+    n_available_attr = _mangled("__n_available_params")
+    for param in iter_params(submodule, recurse=True):
+        if getattr(param, "ds_persist", False):
+            continue
+        if getattr(param, "is_external_param", False):
+            continue
+        if getattr(param, "ds_status", None) != available_status:
+            continue
+        active = getattr(param, "ds_active_sub_modules", None)
+        if not active or active & live_owners:
+            continue
+        active.clear()
+        param.partition()
+        setattr(
+            coordinator,
+            n_available_attr,
+            getattr(coordinator, n_available_attr) - param.ds_numel,
+        )
+
+
 def _make_patched_release_sub_module(
     original_release_sub_module: Callable[..., None],
     iter_params: Callable[..., Any],
     z3_leaf_module: Callable[[Any], bool],
+    available_status: object,
 ) -> Callable[..., None]:
-    """Build the ``release_sub_module`` wrapper that pins persistent params.
+    """Build the ``release_sub_module`` wrapper that pins persist and frees leaves.
 
     :param original_release_sub_module: Unbound ``release_sub_module`` to call
         through to.
@@ -437,6 +528,8 @@ def _make_patched_release_sub_module(
     :type iter_params: Callable[..., Any]
     :param z3_leaf_module: Predicate for deepspeed leaf modules.
     :type z3_leaf_module: Callable[[Any], bool]
+    :param available_status: ``ZeroParamStatus.AVAILABLE``.
+    :type available_status: object
     :return: Replacement ``release_sub_module``.
     :rtype: Callable[..., None]
     """
@@ -445,9 +538,10 @@ def _make_patched_release_sub_module(
     def patched_release_sub_module(
         self: object, submodule: object, *args: Any, **kwargs: Any
     ) -> None:
+        is_leaf = z3_leaf_module(submodule)
         pinned = [
             (param, getattr(param, "is_external_param", False))
-            for param in iter_params(submodule, recurse=z3_leaf_module(submodule))
+            for param in iter_params(submodule, recurse=is_leaf)
             if getattr(param, "ds_persist", False)
         ]
         for param, _ in pinned:
@@ -457,6 +551,16 @@ def _make_patched_release_sub_module(
         finally:
             for param, was_external in pinned:
                 param.is_external_param = was_external
+        if "forward" in kwargs:
+            is_forward = kwargs["forward"]
+        elif args:
+            is_forward = args[0]
+        else:
+            is_forward = False
+        if is_leaf and not is_forward:
+            _partition_unreleased_leaf_params(
+                self, submodule, iter_params, available_status
+            )
 
     return patched_release_sub_module
 
@@ -466,14 +570,18 @@ def patch_zero3_persistent_release(*, enabled: bool = True) -> None:
 
     ``release_sub_module`` excludes persistent parameters from release only
     when its recorded fetch trace is complete; while the trace is recording or
-    invalid — every step, for a model that picks submodules from the data — it
-    releases them like any other parameter, and each one is re-gathered on its
-    next use. The wrapper flags the submodule's persistent parameters as
-    external for the duration of each call, which every guard in the release
-    loop honours (both the partition call and the leaf-module data swap), then
-    restores the flags. Whole-model releases (``release_and_reset_all``)
-    ignore the external flag, so optimizer-step and teardown partitioning
-    still cover every parameter. A no-op when deepspeed is unavailable.
+    invalid it releases them like any other parameter, and each one is
+    re-gathered on its next use. The wrapper flags the submodule's persistent
+    parameters as external for the duration of each call, which every guard in
+    the release loop honours (both the partition call and the leaf-module data
+    swap), then restores the flags. After a backward leaf release, leftover
+    owner ids that are not in the active backward set are stale; those
+    non-persist params are partitioned and ``__n_available_params`` is
+    decremented. Empty-active AVAILABLE params and params a live backward
+    owner still holds stay gathered.
+    Whole-model releases (``release_and_reset_all``) ignore the external flag,
+    so optimizer-step and teardown partitioning still cover every parameter.
+    A no-op when deepspeed is unavailable.
 
     :param enabled: Install the patch, defaults to True.
     :type enabled: bool, optional
@@ -487,8 +595,15 @@ def patch_zero3_persistent_release(*, enabled: bool = True) -> None:
         )
         return
 
-    coordinator_cls, iter_params, z3_leaf_module = _resolve_zero3_release_targets()
-    if coordinator_cls is None or iter_params is None or z3_leaf_module is None:
+    coordinator_cls, iter_params, z3_leaf_module, available_status = (
+        _resolve_zero3_release_targets()
+    )
+    if (
+        coordinator_cls is None
+        or iter_params is None
+        or z3_leaf_module is None
+        or available_status is None
+    ):
         logger.warning(
             "[zero3-persist-release] deepspeed ZeRO-3 coordinator unavailable; "
             "release_sub_module left unpatched",
@@ -504,7 +619,10 @@ def patch_zero3_persistent_release(*, enabled: bool = True) -> None:
 
     coordinator_target: Any = coordinator_cls
     coordinator_target.release_sub_module = _make_patched_release_sub_module(
-        original_release_sub_module, iter_params, z3_leaf_module
+        original_release_sub_module,
+        iter_params,
+        z3_leaf_module,
+        available_status,
     )
     setattr(coordinator_cls, PERSIST_RELEASE_PATCHED_FLAG, True)
     logger.info(
