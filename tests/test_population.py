@@ -535,6 +535,27 @@ class TestPopulationUpdate:
         assert pop.additional_metric_names == ["loss", "entropy"]
         assert all(vars(pop)[k] is not a1 for k in vars(pop))
 
+    def test_update_sync_replaces_caller_population_list(self):
+        original = [_make_mock_agent(fitness=[1.0]), _make_mock_agent(fitness=[2.0])]
+        caller_pop = list(original)
+        population = _make_population(original)
+        evolved = [_make_mock_agent(fitness=[3.0]), _make_mock_agent(fitness=[4.0])]
+
+        population.update(evolved, sync=caller_pop)
+
+        assert population.agents == evolved
+        assert caller_pop == evolved
+        assert all(id(a) == id(b) for a, b in zip(caller_pop, evolved, strict=True))
+
+    def test_update_sync_same_list_keeps_agents(self):
+        agents = [_make_mock_agent(index=0), _make_mock_agent(index=1)]
+        population = _make_population(agents)
+
+        population.update(agents, sync=agents)
+
+        assert len(population.agents) == 2
+        assert agents == population.agents
+
 
 class TestPopulationIncrementEvoStep:
     def test_increment(self):

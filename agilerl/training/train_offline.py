@@ -7,6 +7,7 @@ from datetime import datetime
 from typing import Any
 
 import gymnasium as gym
+import h5py
 import torch
 from accelerate import Accelerator
 from torch.utils.data import DataLoader
@@ -27,6 +28,7 @@ from agilerl.typing import InitHyperparams
 from agilerl.utils.minari_utils import minari_to_agile_buffer
 from agilerl.utils.utils import (
     default_progress_bar,
+    finish_training_run,
     init_loggers,
     resolve_selection_strategy,
     run_selection_and_mutation,
@@ -36,6 +38,28 @@ from agilerl.utils.utils import (
 PopulationType = list[CQN]
 
 logger = logging.getLogger(__name__)
+
+
+def load_offline_transitions(dataset: h5py.File, memory: ReplayBuffer) -> None:
+    """Copy HDF5 transitions into ``memory``."""
+    dataset_length = dataset["rewards"].shape[0]
+    for i in range(dataset_length - 1):
+        obs = dataset["observations"][i]
+        next_obs = dataset["observations"][i + 1]
+        action = dataset["actions"][i]
+        reward = dataset["rewards"][i]
+        done = bool(dataset["terminals"][i])
+        transition = transition_to_tensordict(
+            Transition(
+                obs=obs,
+                action=action,
+                reward=reward,
+                next_obs=next_obs,
+                done=done,
+            )
+        ).unsqueeze(0)
+        transition.batch_size = torch.Size([1])
+        memory.add(transition)
 
 
 def train_offline(
@@ -64,7 +88,7 @@ def train_offline(
     tensorboard_log_dir: str | None = None,
     verbose: bool = True,
     accelerator: Accelerator | None = None,
-    dataset: ReplayDataset | None = None,
+    dataset: h5py.File | None = None,
     minari_dataset_id: str | None = None,
     remote: bool = False,
     wandb_api_key: str | None = None,
@@ -128,9 +152,8 @@ def train_offline(
     :type verbose: bool, optional
     :param accelerator: Accelerator for distributed computing, defaults to None
     :type accelerator: accelerate.Accelerator(), optional
-    :param dataset: Offline RL dataset (h5py file). Required when
-        ``minari_dataset_id`` is not provided, defaults to None
-    :type dataset: ReplayDataset | None, optional
+    :param dataset: Open HDF5 handle, defaults to None
+    :type dataset: h5py.File | None, optional
     :param minari_dataset_id: Minari dataset ID for loading data, defaults to None
     :type minari_dataset_id: str, optional
     :param remote: Load Minari dataset from remote, defaults to False
@@ -196,33 +219,19 @@ def train_offline(
         memory = minari_to_agile_buffer(minari_dataset_id, memory, accelerator, remote)
 
     elif dataset is not None:
-        dataset_length = dataset["rewards"].shape[0]
-        for i in range(dataset_length - 1):
-            obs = dataset["observations"][i]
-            next_obs = dataset["observations"][i + 1]
-            action = dataset["actions"][i]
-            reward = dataset["rewards"][i]
-            done = bool(dataset["terminals"][i])
-
-            # Add transition to memory
-            transition = transition_to_tensordict(
-                Transition(
-                    obs=obs,
-                    action=action,
-                    reward=reward,
-                    next_obs=next_obs,
-                    done=done,
-                )
-            ).unsqueeze(0)
-            transition.batch_size = torch.Size([1])
-            memory.add(transition)
-
-        if accelerator is not None:
-            accelerator.wait_for_everyone()
+        load_offline_transitions(dataset, memory)
+        dataset.close()
 
     else:
-        msg = "Either 'minari_dataset_id' or 'dataset' must be provided for offline training."
+        msg = (
+            "Either 'minari_dataset_id' or 'dataset' must be provided for offline "
+            "training."
+        )
         raise ValueError(msg)
+
+    if accelerator is not None and not minari_dataset_id:
+        # HDF5 load is per-rank; wait before building the shared dataloader.
+        accelerator.wait_for_everyone()
 
     if accelerator is not None:
         # Create dataloader from replay buffer
@@ -265,7 +274,10 @@ def train_offline(
 
     # Pre-training mutation
     if accelerator is None and mutation is not None:
-        population.update(mutation.mutation(population.agents, pre_training_mut=True))
+        population.update(
+            mutation.mutation(population.agents, pre_training_mut=True),
+            sync=pop,
+        )
 
     # RL training loop
     while population.all_below(max_steps):
@@ -300,10 +312,9 @@ def train_offline(
         # Check if we have met the target score
         if population.should_stop(target):
             logger.info("Target score has been reached. Stopping training.")
-            population.finish()
-            pbar.close()
             # Single-agent fitnesses are scalars; `Population` types them as the
             # wider scalar-or-per-agent-dict row shared with multi-agent training.
+            finish_training_run(population=population, pbar=pbar, env=env)
             return population.agents, population.last_scalar_fitnesses
 
         # Perform HPO
@@ -319,6 +330,7 @@ def train_offline(
                     save_elite=save_elite,
                     accelerator=accelerator,
                 ),
+                sync=pop,
             )
 
         # Save model checkpoint
@@ -332,6 +344,5 @@ def train_offline(
                 )
                 checkpoint_count += 1
 
-    population.finish()
-    pbar.close()
+    finish_training_run(population=population, pbar=pbar, env=env)
     return population.agents, population.last_scalar_fitnesses

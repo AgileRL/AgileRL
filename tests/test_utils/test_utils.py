@@ -29,6 +29,7 @@ from agilerl.algorithms import (
     RainbowDQN,
 )
 from agilerl.algorithms.core import EvolvableAlgorithm, LLMAlgorithm
+from agilerl.algorithms.core.base import DISPLAY_OMIT_ATTRIBUTES
 
 if HAS_LLM_DEPENDENCIES or TYPE_CHECKING:
     from agilerl.algorithms import GRPO, LLMPPO, LLMREINFORCE
@@ -45,6 +46,7 @@ from agilerl.utils.utils import (
     consolidate_mutations,
     create_population,
     default_progress_bar,
+    finish_training_run,
     get_env_defined_actions,
     init_loggers,
     init_wandb,
@@ -911,7 +913,10 @@ class TestPrintHyperparams:
 
         agent = pop[0]
         mean_fitness = np.mean(agent.fitness[-5:]).item()
-        attrs = EvolvableAlgorithm.inspect_attributes(agent, exclude=("grama_scores",))
+        attrs = EvolvableAlgorithm.inspect_attributes(
+            agent,
+            exclude=DISPLAY_OMIT_ATTRIBUTES,
+        )
         expected_lines = [
             f"Agent ID: {agent.index}  |  Mean 5 Fitness: {mean_fitness:.2f}",
             "Attributes:",
@@ -2205,6 +2210,29 @@ class TestDistributedHelpers:
         ):
             assert _distributed_world_size(None) == 8
             assert _distributed_rank(None) == 3
+
+
+class TestFinishTrainingRun:
+    def test_finishes_population_closes_pbar_and_env(self):
+        population = MagicMock()
+        population.agents = [MagicMock()]
+        pbar = MagicMock()
+        env = MagicMock()
+
+        finish_training_run(population, pbar, env)
+
+        population.finish.assert_called_once()
+        pbar.close.assert_called_once()
+        env.close.assert_called_once()
+
+    def test_skips_env_close_when_env_is_none(self):
+        population = MagicMock(agents=[])
+        pbar = MagicMock()
+
+        finish_training_run(population=population, pbar=pbar, env=None)
+
+        population.finish.assert_called_once()
+        pbar.close.assert_called_once()
 
 
 class TestLoraBiasValidation:

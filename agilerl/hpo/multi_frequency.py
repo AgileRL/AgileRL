@@ -34,7 +34,7 @@ from accelerate.utils import broadcast_object_list
 from agilerl.algorithms.core.base import LLMAlgorithm
 from agilerl.protocols import EvolvableAlgorithmProtocol
 from agilerl.typing import PopulationType
-from agilerl.utils.population_utils import scalar_fitness
+from agilerl.utils.population_utils import release_agents, scalar_fitness
 
 
 class MultiFrequencyOp(str, Enum):
@@ -643,17 +643,12 @@ class MultiFrequencySelection:
 
     @staticmethod
     def _clean_up(agent: EvolvableAlgorithmProtocol) -> None:
-        """Free an agent, bracketed by its accelerator barriers.
+        """Free an agent.
 
         :param agent: The agent to free.
         :type agent: ~agilerl.protocols.EvolvableAlgorithmProtocol
         """
-        accelerator = getattr(agent, "accelerator", None)
-        if accelerator is not None:
-            accelerator.wait_for_everyone()
         agent.clean_up()
-        if accelerator is not None:
-            accelerator.wait_for_everyone()
 
     @staticmethod
     def _collective_clone(
@@ -707,6 +702,8 @@ class MultiFrequencySelection:
             clone_for_loser[id(loser)] = clone
             clone_indices.append(clone.index)
         new_population = [clone_for_loser.get(id(a), a) for a in population]
+        accelerator = getattr(population[0], "accelerator", None)
+        release_agents(losers, accelerator)
         return new_population, clone_indices
 
     def _migrate(
@@ -746,6 +743,7 @@ class MultiFrequencySelection:
         """
         self._sync_index(population)
         replacements: dict[int, EvolvableAlgorithmProtocol] = {}
+        evicted: list[EvolvableAlgorithmProtocol] = []
         for open_agent, ext, kind, elite in self._migration_decisions(
             subpop, winners, open_for_migration, external_pool
         ):
@@ -755,7 +753,10 @@ class MultiFrequencySelection:
                 else self._migrate_full_clone(ext, subpop)
             )
             replacements[id(open_agent)] = migrant
+            evicted.append(open_agent)
 
+        accelerator = getattr(population[0], "accelerator", None)
+        release_agents(evicted, accelerator)
         return [replacements.get(id(a), a) for a in population]
 
     def _migration_decisions(

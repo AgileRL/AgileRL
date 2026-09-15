@@ -392,6 +392,7 @@ class TestBanditEnvProtocol:
         next_state, reward = env.step(0)
         assert isinstance(next_state, np.ndarray)
         assert isinstance(reward, float)
+        env.close()
 
 
 _SELECTION_STRATEGIES = {

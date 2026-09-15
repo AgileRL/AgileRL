@@ -35,15 +35,22 @@ from agilerl.algorithms import (
     RainbowDQN,
 )
 from agilerl.algorithms.core import EvolvableAlgorithm, LLMAlgorithm
+from agilerl.algorithms.core.base import DISPLAY_OMIT_ATTRIBUTES
 from agilerl.algorithms.core.registry import HyperparameterConfig
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.logger import CSVLogger, StdOutLogger, TensorboardLogger, WandbLogger
-from agilerl.protocols import EvolvableAlgorithmProtocol, SelectionStrategyProtocol
+from agilerl.population import Population
+from agilerl.protocols import (
+    BanditEnvProtocol,
+    EvolvableAlgorithmProtocol,
+    SelectionStrategyProtocol,
+)
 from agilerl.typing import BPTTSequenceType, InfosDict, PopulationType
 from agilerl.utils.algo_utils import CosineLRScheduleConfig, DummyOptimizer, clone_llm
 from agilerl.utils.llm_utils import build_bnb_quantization_config
 from agilerl.vector.pz_async_vec_env import AsyncPettingZooVecEnv
+from agilerl.vector.pz_vec_env import PettingZooVecEnv
 
 if HAS_LLM_DEPENDENCIES or TYPE_CHECKING:
     from agilerl.algorithms import CISPO, DPO, GRPO, GSPO, LLMPPO, LLMREINFORCE, SFT
@@ -57,6 +64,11 @@ if TYPE_CHECKING:
 AgentT = TypeVar("AgentT", bound=EvolvableAlgorithmProtocol)
 
 SupportedObservationSpace = spaces.Box | spaces.Discrete | spaces.Dict | spaces.Tuple
+
+# Envs the six non-LLM train_* loops pass into finish_training_run.
+TrainingEnvType = (
+    gym.Env | gym.vector.VectorEnv | ParallelEnv | PettingZooVecEnv | BanditEnvProtocol
+)
 
 _BOX2D_ENV_PREFIXES = (
     "LunarLander",
@@ -1584,6 +1596,18 @@ def init_loggers(
     return loggers
 
 
+def finish_training_run(
+    population: Population,
+    pbar: tqdm.tqdm,
+    env: TrainingEnvType | None = None,
+) -> None:
+    """Release loggers, progress bar, and optional env."""
+    population.finish()
+    pbar.close()
+    if env is not None:
+        env.close()
+
+
 def calculate_vectorized_scores(
     rewards: npt.NDArray,
     terminations: npt.NDArray,
@@ -1659,9 +1683,10 @@ def print_hyperparams(pop: PopulationType) -> None:
             if len(agent.fitness) > 0
             else float("nan")
         )
-        # GraMa scores are operator-internal state, not a hyperparameter.
-        # Exclude them from this display only.
-        attrs = EvolvableAlgorithm.inspect_attributes(agent, exclude=("grama_scores",))
+        attrs = EvolvableAlgorithm.inspect_attributes(
+            agent,
+            exclude=DISPLAY_OMIT_ATTRIBUTES,
+        )
         lines = [
             f"Agent ID: {agent.index}  |  Mean 5 Fitness: {mean_fitness:.2f}",
             "Attributes:",

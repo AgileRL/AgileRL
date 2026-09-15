@@ -21,6 +21,7 @@ from agilerl.typing import InitHyperparams
 from agilerl.utils.algo_utils import get_num_envs
 from agilerl.utils.utils import (
     default_progress_bar,
+    finish_training_run,
     init_loggers,
     resolve_selection_strategy,
     run_selection_and_mutation,
@@ -213,7 +214,10 @@ def train_multi_agent_on_policy(
 
     # Pre-training mutation
     if accelerator is None and mutation is not None:
-        population.update(mutation.mutation(population.agents, pre_training_mut=True))
+        population.update(
+            mutation.mutation(population.agents, pre_training_mut=True),
+            sync=pop,
+        )
 
     # RL training loop
     while population.all_below(max_steps):
@@ -394,8 +398,7 @@ def train_multi_agent_on_policy(
         # Check if we have met the target score
         if population.should_stop(target):
             logger.info("Target score has been reached. Stopping training.")
-            population.finish()
-            pbar.close()
+            finish_training_run(population=population, pbar=pbar, env=vec_env)
             return population.agents, population.last_fitnesses
 
         # Perform HPO
@@ -411,6 +414,7 @@ def train_multi_agent_on_policy(
                     save_elite=save_elite,
                     accelerator=accelerator,
                 ),
+                sync=pop,
             )
 
         # Save model checkpoint
@@ -424,6 +428,5 @@ def train_multi_agent_on_policy(
                 )
                 checkpoint_count += 1
 
-    population.finish()
-    pbar.close()
+    finish_training_run(population=population, pbar=pbar, env=vec_env)
     return population.agents, population.last_fitnesses

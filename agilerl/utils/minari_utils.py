@@ -133,15 +133,15 @@ def minari_to_agile_buffer(
     return memory
 
 
-def minari_to_agile_dataset(dataset_id: str, remote: bool = False) -> h5py.File:
+def minari_to_agile_dataset(dataset_id: str, remote: bool = False) -> str:
     """Convert a Minari dataset to an agile dataset.
 
     :param dataset_id: The ID of the Minari dataset to load
     :type dataset_id: str
     :param remote: Whether to load from remote repository. Defaults to False.
     :type remote: bool
-    :return: The loaded Minari dataset
-    :rtype: h5py.File
+    :return: Path to the written HDF5 dataset file
+    :rtype: str
     :raises MinariDatasetNotFoundError: If the dataset is not found
     """
     observations = []
@@ -171,13 +171,11 @@ def minari_to_agile_dataset(dataset_id: str, remote: bool = False) -> h5py.File:
     agile_dataset_path.mkdir(parents=True, exist_ok=True)
     data_path = agile_dataset_path / "main_data.hdf5"
 
-    # with h5py.File(os.path.join(agile_file_path, "data", "main_data.hdf5"), "w") as f:
-    f = h5py.File(data_path, "w")
+    with h5py.File(data_path, "w") as dataset_file:
+        dataset_file.create_dataset("observations", data=observations)
+        dataset_file.create_dataset("next_observations", data=next_observations)
+        dataset_file.create_dataset("actions", data=actions)
+        dataset_file.create_dataset("rewards", data=rewards)
+        dataset_file.create_dataset("terminals", data=terminals)
 
-    f.create_dataset("observations", data=observations)
-    f.create_dataset("next_observations", data=next_observations)
-    f.create_dataset("actions", data=actions)
-    f.create_dataset("rewards", data=rewards)
-    f.create_dataset("terminals", data=terminals)
-
-    return f
+    return str(data_path)

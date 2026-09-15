@@ -1024,7 +1024,15 @@ class LocalTrainer(Trainer):
                 n_step_memory=self.n_step_memory,
             )
         )
-        return self.train_fn(**kwargs)
+        result = self.train_fn(**kwargs)
+        self.population = result[0]
+        return result
+
+    def close(self) -> None:
+        """Close the training environment when held by this trainer."""
+        # A rollout env spec owns the env; only close a locally held one.
+        if self._rollout_env_spec is None and self.env is not None:
+            self.env.close()
 
 
 class ArenaTrainer(Trainer):

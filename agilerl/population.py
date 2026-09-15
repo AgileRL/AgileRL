@@ -567,9 +567,17 @@ class Population(Generic[AgentT]):
                 return True
         return False
 
-    def update(self, agents: list[AgentT]) -> None:
+    def update(
+        self,
+        agents: list[AgentT],
+        sync: list[AgentT] | None = None,
+    ) -> None:
         """Replace the population (e.g. after tournament selection + mutation)."""
-        self._agents = agents
+        replacement = list(agents)
+        self._agents = replacement
+        # Copy onto the caller-held list; assigning a new list would desync it.
+        if sync is not None:
+            sync[:] = replacement
         self._refresh_derived()
 
     def increment_evo_step(self) -> None:

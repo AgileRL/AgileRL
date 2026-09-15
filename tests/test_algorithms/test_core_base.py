@@ -188,7 +188,7 @@ class TestGetCheckpointDict:
         chkpt = get_checkpoint_dict(dummy_agent)
         assert chkpt["lr_scheduler"] == {"step": 0}
 
-    def test_checkpoint_dict_pops_rollout_buffer(self, dummy_agent):
+    def test_checkpoint_dict_omits_rollout_buffer(self, dummy_agent):
         dummy_agent.rollout_buffer = MagicMock()
         chkpt = get_checkpoint_dict(dummy_agent)
         assert "rollout_buffer" not in chkpt
@@ -715,6 +715,19 @@ class TestCleanUp:
         assert not hasattr(dummy_agent, "dummy_actor")
         assert not hasattr(dummy_agent, "dummy_optimizer")
 
+    def test_clean_up_removes_rollout_buffer(self, dummy_agent):
+        dummy_agent.rollout_buffer = MagicMock()
+        dummy_agent.clean_up()
+        assert not hasattr(dummy_agent, "rollout_buffer")
+
+
+class TestCloneSkipsEphemeralAttributes:
+    def test_clone_does_not_copy_rollout_buffer(self, vector_space, discrete_space):
+        agent = PPO(vector_space, discrete_space, device="cpu")
+        parent_buffer = agent.rollout_buffer
+        child = agent.clone()
+        assert child.rollout_buffer is not parent_buffer
+
 
 class TestGetLrNames:
     def test_get_lr_names_returns_lr_attr_names(self, dummy_agent):
@@ -1031,7 +1044,7 @@ class TestLoadWithWrapperCls:
 
 
 class TestSetTrainingModeNetworksWithoutActor:
-    def test_set_training_mode_skips_networks_without_actor_in_name(self, vector_space):
+    def test_set_training_mode_toggles_critic_networks(self, vector_space):
         class AgentWithCritic(DummyRLAlgorithm):
             def __init__(self, obs_space, act_space, index=0):
                 super().__init__(obs_space, act_space, index=index)
@@ -1063,7 +1076,7 @@ class TestSetTrainingModeNetworksWithoutActor:
         agent.set_training_mode(False)
         assert agent.training is False
         assert not agent.dummy_actor.training
-        assert agent.dummy_critic.training
+        assert not agent.dummy_critic.training
 
 
 class TestGetCheckpointDictOptimizedModule:
@@ -5150,6 +5163,42 @@ class TestEvolvableAlgorithmCloneWithAccelerator:
         assert accelerator.prepare.call_count >= 1
         agent.accelerator = None
         clone.accelerator = None
+        AcceleratorState._reset_state(True)
+
+    def test_clone_wrap_true_rewraps_parent(self, vector_space):
+        action_space = spaces.Discrete(2)
+        AcceleratorState._reset_state(True)
+        accelerator = Accelerator(cpu=True)
+        accelerator.prepare = MagicMock(side_effect=lambda x: x)
+        accelerator.unwrap_model = MagicMock(side_effect=lambda x: x)
+        agent = DummyRLAlgorithm(
+            vector_space, action_space, index=0, accelerator=accelerator
+        )
+
+        with patch.object(agent, "wrap_models") as mock_wrap:
+            clone = agent.clone(index=1, wrap=True)
+
+        mock_wrap.assert_called()
+        clone.accelerator = None
+        agent.accelerator = None
+        AcceleratorState._reset_state(True)
+
+    def test_clone_wrap_false_does_not_rewrap_parent(self, vector_space):
+        action_space = spaces.Discrete(2)
+        AcceleratorState._reset_state(True)
+        accelerator = Accelerator(cpu=True)
+        accelerator.prepare = MagicMock(side_effect=lambda x: x)
+        accelerator.unwrap_model = MagicMock(side_effect=lambda x: x)
+        agent = DummyRLAlgorithm(
+            vector_space, action_space, index=0, accelerator=accelerator
+        )
+
+        with patch.object(agent, "wrap_models") as mock_wrap:
+            clone = agent.clone(index=1, wrap=False)
+
+        mock_wrap.assert_not_called()
+        clone.accelerator = None
+        agent.accelerator = None
         AcceleratorState._reset_state(True)
 
 

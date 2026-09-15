@@ -634,9 +634,10 @@ class TestAlgoSpecClassVars:
         assert kwargs["minari_dataset_id"] == "cart-v0"
         assert kwargs["remote"] is True
 
-    def test_offline_spec_dataset_path_uses_h5py(self, tmp_path):
-        """Offline training kwargs open the HDF5 dataset when there is no Minari id."""
+    def test_offline_spec_dataset_path_passed_to_trainer(self, tmp_path):
+        """Offline training kwargs pass an open HDF5 handle when there is no Minari id."""
         from typing import ClassVar
+        from unittest.mock import MagicMock, patch
 
         from agilerl.arena.models.algorithms import SingleAgentAlgorithmSpec
         from agilerl.models.env import OfflineEnvSpec
@@ -649,15 +650,16 @@ class TestAlgoSpecClassVars:
         spec = _OffSpec()
         env_spec = OfflineEnvSpec(name="test", dataset_path=str(dataset_path))
         training = TrainingSpec()
-        mock_file = MagicMock()
+        mock_dataset = MagicMock()
+        mock_dataset.filename = str(dataset_path)
 
-        with patch("h5py.File", return_value=mock_file) as mock_h5:
+        with patch("agilerl.strategies.offline.h5py.File", return_value=mock_dataset):
             kwargs = select_strategy(spec).get_trainer_kwargs(
                 spec, training=training, env_spec=env_spec
             )
 
-        mock_h5.assert_called_once_with(str(dataset_path), "r")
-        assert kwargs["dataset"] is mock_file
+        assert kwargs["dataset"] is mock_dataset
+        assert "dataset_path" not in kwargs
 
     def test_rl_spec_resume_from_checkpoint(self):
         """SingleAgentAlgorithmSpec.build_algorithm with resume."""

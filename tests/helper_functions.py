@@ -547,6 +547,7 @@ class FakeSelectionAgent:
         self.registry = FakeRegistry(["lr", "batch_size"])
         self.optimizer = FakeOptimizerWrapper(lr)
         self.reinit_called = False
+        self.accelerator = None
 
     def clone(self, index=None, wrap=False):
         # type(self) so subclasses adding their own bookkeeping survive cloning
@@ -569,6 +570,9 @@ class FakeSelectionAgent:
         # Mirror the real reinit_optimizers
         self.reinit_called = True
         self.optimizer = FakeOptimizerWrapper(self.lr)
+
+    def clean_up(self):
+        pass
 
     def save_checkpoint(self, path):
         with open(path, "w") as fh:

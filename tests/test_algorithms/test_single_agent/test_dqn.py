@@ -540,6 +540,7 @@ class TestDQNTest:
         agent = DQN(observation_space=observation_space, action_space=discrete_space)
         mean_score = agent.test(env, max_steps=10)
         assert isinstance(mean_score, float)
+        assert agent.training is True
         agent.clean_up()
 
     def test_swap_channels_path(self, discrete_space, monkeypatch):

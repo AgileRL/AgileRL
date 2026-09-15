@@ -328,6 +328,11 @@ class RegistryMeta(ABCMeta):
         return instance
 
 
+CHECKPOINT_OMIT_ATTRIBUTES = ("accelerator", "rollout_buffer", "grama_scores")
+CLONE_OMIT_ATTRIBUTES = ("rollout_buffer",)
+DISPLAY_OMIT_ATTRIBUTES = ("grama_scores",)
+
+
 def get_checkpoint_dict(
     agent: EvolvableAlgorithm,
     omit_actor_info: bool = False,
@@ -348,11 +353,11 @@ def get_checkpoint_dict(
     :return: A dictionary of the agent's attributes.
     :rtype: dict[str, Any]
     """
-    attribute_dict = EvolvableAlgorithm.inspect_attributes(agent)
+    attribute_dict = EvolvableAlgorithm.inspect_attributes(
+        agent,
+        exclude=CHECKPOINT_OMIT_ATTRIBUTES,
+    )
     attribute_dict["agilerl_version"] = version("agilerl")
-    attribute_dict.pop("accelerator", None)
-    attribute_dict.pop("rollout_buffer", None)
-    attribute_dict.pop("grama_scores", None)
 
     if omit_actor_info and "actor" in attribute_dict:
         attribute_dict.pop("actor", None)
@@ -901,7 +906,10 @@ class EvolvableAlgorithm(ABC, Generic[ExperiencesT], metaclass=RegistryMeta):
         :return: The clone of the algorithm.
         :rtype: EvolvableAlgorithm
         """
-        for attribute in EvolvableAlgorithm.inspect_attributes(agent):
+        for attribute in EvolvableAlgorithm.inspect_attributes(
+            agent,
+            exclude=CLONE_OMIT_ATTRIBUTES,
+        ):
             if hasattr(agent, attribute) and hasattr(clone, attribute):
                 attr, clone_attr = getattr(agent, attribute), getattr(clone, attribute)
 
@@ -1130,7 +1138,7 @@ class EvolvableAlgorithm(ABC, Generic[ExperiencesT], metaclass=RegistryMeta):
         """
         self.training = training
         for name, network in self.evolvable_attributes(networks_only=True).items():
-            if "actor" in name:
+            if "actor" in name or "critic" in name:
                 network.train(mode=training)
 
     def get_lr_names(self) -> list[LrNameType]:
@@ -1338,9 +1346,10 @@ class EvolvableAlgorithm(ABC, Generic[ExperiencesT], metaclass=RegistryMeta):
             opt.load_state_dict(orig_optimizer.state_dict())
             setattr(clone, opt_config.name, opt)
 
-        # Prepare with accelerator / compiler if necessary
+        # Parent is unwrapped so module.clone() copies raw weights; wrap it back for the caller.
         if self.accelerator is not None and wrap:
             clone.wrap_models()
+            self.wrap_models()
         elif self.torch_compiler:
             configure_tf32_precision()
             clone.recompile()
@@ -1674,7 +1683,8 @@ class EvolvableAlgorithm(ABC, Generic[ExperiencesT], metaclass=RegistryMeta):
             setattr(self, name, optimizer)
 
         for attribute in EvolvableAlgorithm.inspect_attributes(
-            self, exclude=("grama_scores",)
+            self,
+            exclude=CHECKPOINT_OMIT_ATTRIBUTES,
         ):
             if attribute not in checkpoint:
                 warnings.warn(
@@ -1714,8 +1724,14 @@ class EvolvableAlgorithm(ABC, Generic[ExperiencesT], metaclass=RegistryMeta):
         :return: None
         :rtype: None
         """
-        for attr_name in self.evolvable_attributes():
+        self._release_grama_capture()
+        # Snapshot names first; deleting during iteration drops remaining attrs.
+        for attr_name in list(self.evolvable_attributes()):
             delattr(self, attr_name)
+        # On-policy agents keep a rollout buffer that is not an evolvable attribute.
+        for attr_name in CLONE_OMIT_ATTRIBUTES:
+            if hasattr(self, attr_name):
+                delattr(self, attr_name)
 
 
 class SingleAgentAlgorithm(

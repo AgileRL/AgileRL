@@ -784,6 +784,7 @@ def test_dataset_env_len_reflects_active_split():
         assert len(env) == 2  # held-out split length
     assert env.evaluation_mode is False
     assert len(env) == 6  # restored to the train split
+    env.close()
 
 
 def test_dataset_env_eval_mode_restores_prior_mode_when_nested():

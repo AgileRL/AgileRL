@@ -1084,8 +1084,10 @@ class MATD3(MultiAgentAlgorithm[TensorDict]):
         if sum_scores:
             fitness = float(mean_fit_row[0])
             self.metrics.add_fitness(fitness)
+            self.set_training_mode(True)
             return fitness
 
         # Per-agent fitness rows are stored as-is by BaseMetrics.add_fitness.
         self.metrics.add_fitness(mean_fit_row)
+        self.set_training_mode(True)
         return mean_fit_row
