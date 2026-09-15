@@ -292,10 +292,11 @@ class LLMAlgorithmSpec(AlgorithmSpec):
     )
     chunk_rows: int | None = Field(
         default=None,
-        ge=1,
+        ge=128,
+        le=4096,
         description=(
-            "Rows per chunk when the loss is computed in slices. Lower values "
-            "cut peak memory on long sequences."
+            "Rows per fused logit tile. None auto-tunes to a ~256 MiB fp32 "
+            "workspace, clamped to [128, 4096]."
         ),
     )
     attn_implementation: str | None = Field(

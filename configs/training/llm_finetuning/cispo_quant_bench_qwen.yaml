@@ -25,7 +25,7 @@ algorithm:
     vllm_importance_sampling_correction: true
     attn_implementation: flex_attention
     quantization: nf4
-    chunk_rows: 64
+    chunk_rows: 128
     activation_offload: true
     use_vllm: true
     vllm_config:

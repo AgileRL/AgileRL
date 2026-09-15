@@ -65,6 +65,11 @@ from agilerl.algorithms.core.registry import (
     OptimizerFactory,
 )
 from agilerl.architectures.nemotron_h import register_nemotron_h_liger
+from agilerl.arena.memory.formulas import (
+    FUSED_CHUNK_ROWS_MAX,
+    FUSED_CHUNK_ROWS_MIN,
+    resolve_chunk_rows,
+)
 from agilerl.llm_envs import RolloutHarness
 from agilerl.metrics import AgentMetrics, MultiAgentMetrics
 from agilerl.modules import EvolvableModule, ModuleDict
@@ -3035,8 +3040,16 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         self.wrap = wrap
         self.use_separate_reference_adapter = use_separate_reference_adapter
         self.cast_logprobs_to_fp32 = cast_logprobs_to_fp32
-        if chunk_rows is not None and chunk_rows <= 0:
-            msg = f"chunk_rows must be a positive int or None, got {chunk_rows}."
+        if chunk_rows is not None and not (
+            FUSED_CHUNK_ROWS_MIN <= chunk_rows <= FUSED_CHUNK_ROWS_MAX
+        ):
+            # Below this range lm_head is re-read once per chunk; above it
+            # the fp32 tile is chunk_rows x vocab x 4.
+            msg = (
+                f"chunk_rows must be None (auto-tune) or in "
+                f"[{FUSED_CHUNK_ROWS_MIN}, {FUSED_CHUNK_ROWS_MAX}], got "
+                f"{chunk_rows}."
+            )
             raise ValueError(msg)
         self.chunk_rows = chunk_rows
         # vLLM sampling-mismatch correction (truncated importance sampling).
@@ -3082,15 +3095,10 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         self._vllm_lora_staging_dir: Path | None = None
         self._vllm_lora_staging_dir_is_temp = True
         self._vllm_rollout_lora_request: Any | None = None
-        # Colocated vLLM (use_vllm=True) runs the rollout engine and the HF
-        # trainer in one process. Each holds its OWN base: vLLM cycles its base
-        # CPU<->GPU via native sleep/wake (vLLM >= 0.22 round-trips dense and
-        # bnb 4-bit losslessly), and the trainer base is offloaded to CPU during
-        # rollout (use_memory_efficient_params) so the two never coexist on the
-        # GPU. Only LoRA adapters are synced to vLLM per rollout. The in-process
-        # external_launcher engine is single-GPU, so tensor parallelism is not
-        # yet available when colocated (use a non-colocated / async rollout for
-        # TP today). NOTE: colocated tensor-parallel support is planned.
+        # Colocated vLLM and the HF trainer share a process but not a
+        # base: the engine sleep/wakes its copy; the trainer offloads
+        # during rollout. Only LoRA adapters are synced. TP is not
+        # available on the in-process engine.
         if self.use_vllm and self.vllm_config is not None:
             tp = getattr(self.vllm_config, "tensor_parallel_size", 1)
             if tp != 1:
@@ -6087,10 +6095,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         :return: Rows per chunk.
         :rtype: int
         """
-        if explicit is not None:
-            return explicit
-        workspace_bytes = 256 * 1024 * 1024
-        return min(max(workspace_bytes // max(1, vocab_size * 4), 128), 4096)
+        return resolve_chunk_rows(vocab_size, explicit)
 
     @staticmethod
     def _logprobs_from_hidden_fused(

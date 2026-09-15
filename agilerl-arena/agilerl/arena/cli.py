@@ -28,6 +28,7 @@ from agilerl.arena.inference.cache import (
     save_active_agent,
     save_active_session,
 )
+from agilerl.arena.memory.cli import memory_group
 from agilerl.arena.models import verdict as manifest_verdict
 from agilerl.arena.models.schema import manifest_schema
 from agilerl.arena.on_prem import ArenaRootGroup, register_on_prem_manifest_group
@@ -207,6 +208,9 @@ def manifest_validate(manifest: str, payload: bool, as_json: bool) -> None:
 def manifest_schema_command() -> None:
     """Print the training manifest JSON Schema."""
     click.echo(json.dumps(manifest_schema(), indent=2))
+
+
+main.add_command(memory_group)
 
 
 @main.group("user")

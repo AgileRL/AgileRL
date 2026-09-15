@@ -1592,7 +1592,7 @@ class TestFromConfigFiles:
         ("rel_path", "expected_chunk_rows"),
         [
             ("llm_finetuning/cispo_quant_bench.yaml", 128),
-            ("llm_finetuning/cispo_quant_bench_qwen.yaml", 64),
+            ("llm_finetuning/cispo_quant_bench_qwen.yaml", 128),
         ],
         ids=["cispo-gemma", "cispo-qwen"],
     )

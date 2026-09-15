@@ -56,7 +56,17 @@ arena manifest schema
 arena env validate --source path/to/my_env.py --name my-env
 ```
 
-### 4) Submit a training manifest
+### 4) Check GPU memory (LLM manifests)
+
+```bash
+arena memory estimate path/to/manifest.yaml --gpu "NVIDIA L4"
+```
+
+``estimate`` is a pre-submission gate (exit 0 fits, 3 over budget).
+Install ``agilerl-arena[hub]`` if you pass a model id rather than
+``--config path/to/config.json``. See ``agilerl/arena/memory/README.md``.
+
+### 5) Submit a training manifest
 
 ```bash
 arena experiments submit path/to/manifest.yaml --project my-project

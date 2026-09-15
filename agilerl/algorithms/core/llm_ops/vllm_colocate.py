@@ -28,11 +28,22 @@ if TYPE_CHECKING:
     import torch.nn as nn
 
 __all__ = [
+    "MULTIMODAL_TOWER_ATTRS",
     "get_vllm_internal_model",
     "patch_vllm_3d_moe_lora_flag",
     "patch_vllm_lora_keep_resident",
     "patch_vllm_strip_multimodal_towers",
 ]
+
+#: Standard HF tower attribute names for *ForConditionalGeneration wrappers,
+#: plus Gemma-4-style per-modality embedders.
+MULTIMODAL_TOWER_ATTRS = (
+    "vision_tower",
+    "audio_tower",
+    "multi_modal_projector",
+    "embed_vision",
+    "embed_audio",
+)
 
 
 class _StrippedTower:
@@ -86,15 +97,7 @@ def patch_vllm_strip_multimodal_towers(
     :rtype: dict[str, int]
     """
     if tower_attrs is None:
-        # Standard HF names for *ForConditionalGeneration wrappers, plus
-        # Gemma-4-style per-modality embedders.
-        tower_attrs = (
-            "vision_tower",
-            "audio_tower",
-            "multi_modal_projector",
-            "embed_vision",
-            "embed_audio",
-        )
+        tower_attrs = MULTIMODAL_TOWER_ATTRS
     try:
         model = get_vllm_internal_model(llm)
     except Exception:
