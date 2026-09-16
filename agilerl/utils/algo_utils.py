@@ -2607,10 +2607,6 @@ def clone_llm(
                 adapter_name=adapter_name,
                 autocast_adapter_dtype=not keep_adapter_base_dtype,
             )
-        if keep_adapter_base_dtype:
-            for name, param in model.named_parameters():
-                if "lora" in name and param.dtype != torch.bfloat16:
-                    param.data = param.data.to(torch.bfloat16)
         expert_targets = getattr(peft_configs[first_adapter], "target_parameters", None)
         if isinstance(expert_targets, (list, tuple)) and expert_targets:
             # Lazy import avoids a circular dependency with algorithms -> registry -> algo_utils.
@@ -2619,6 +2615,16 @@ def clone_llm(
             )
 
             upgrade_moe_param_wrappers(model)
+        # ZeRO-3 defragment requires one dtype across trainable params
+        # (LoRA adapters and a value head).
+        if keep_adapter_base_dtype:
+            for param in model.parameters():
+                if (
+                    param.requires_grad
+                    and param.dtype.is_floating_point
+                    and param.dtype != torch.bfloat16
+                ):
+                    param.data = param.data.to(torch.bfloat16)
         model.disable_adapter()
 
     if state_dict is not None:

@@ -40,9 +40,9 @@ ROUTING_STATE: WeakKeyDictionary[LoraLayer, list[str] | None] = WeakKeyDictionar
 def uniform_routed_adapter(layer: LoraLayer) -> str | None:
     """The single adapter the active routing assigns *layer*, or ``None`` when routing is inactive.
 
-    Parameter-level LoRA applies its delta to whole parameters (and packed
-    experts see rows grouped by expert, not by sample), so only uniform
-    routings are computable there; mixed routings raise.
+    Default ``ParamWrapper`` applies a delta to a whole parameter, so mixed
+    routings raise. Sorted- and routed-experts wrappers set
+    ``_self_routed_lora`` and apply per-token masks in their own forward.
     """
     routing = ROUTING_STATE.get(layer)
     if routing is None:
@@ -51,9 +51,8 @@ def uniform_routed_adapter(layer: LoraLayer) -> str | None:
     if len(names) > 1:
         msg = (
             "Fused multi-adapter routing is not supported on parameter-level "
-            "LoRA layers (LoraConfig.target_parameters). Use a single-adapter "
-            "configuration (e.g. use_separate_reference_adapter=False, no "
-            "value head)."
+            "LoRA layers (LoraConfig.target_parameters) that do not implement "
+            "per-token adapter masks."
         )
         raise RuntimeError(msg)
     return next(iter(names))
@@ -163,15 +162,14 @@ def _param_wrapper_routed_forward(
     if name is None:
         return original_forward(layer, x, *forward_args, **forward_kwargs)
     if name in layer.lora_A:
-        if list(layer.active_adapters) != [name]:
-            msg = (
-                f"Fused routing requested adapter {name!r} on a "
-                "parameter-level LoRA wrapper whose active adapters are "
-                f"{list(layer.active_adapters)}; set the adapter before "
-                "routing."
-            )
-            raise RuntimeError(msg)
-        return original_forward(layer, x, *forward_args, **forward_kwargs)
+        previous = list(layer.active_adapters)
+        if previous != [name]:
+            layer.set_adapter(name)
+        try:
+            return original_forward(layer, x, *forward_args, **forward_kwargs)
+        finally:
+            if previous != [name] and previous:
+                layer.set_adapter(previous if len(previous) > 1 else previous[0])
     previously_disabled = layer.disable_adapters
     layer.enable_adapters(False)
     try:
@@ -188,22 +186,6 @@ def _is_routed_layer(module: LoraLayer) -> bool:
         _routed_forward,
         _param_wrapper_routed_forward,
     )
-
-
-def adapter_aligned_chunks(
-    routing: Sequence[str], batch_size: int
-) -> list[tuple[int, int]]:
-    """Micro-batch ``(start, end)`` spans of at most *batch_size* rows that never straddle an adapter run."""
-    chunks: list[tuple[int, int]] = []
-    run_start = 0
-    for _, run in itertools.groupby(routing):
-        run_len = sum(1 for _ in run)
-        chunks.extend(
-            (start, min(start + batch_size, run_start + run_len))
-            for start in range(run_start, run_start + run_len, batch_size)
-        )
-        run_start += run_len
-    return chunks
 
 
 def _store_layer_cache(model: nn.Module, layers: list[LoraLayer]) -> None:

@@ -63,6 +63,7 @@ from agilerl.utils.llm_utils import (
     log_cuda_memory_snapshot,
     masked_mean,
     masked_var,
+    masked_whiten,
     model_has_clippable_linear_wrappers,
     move_params_to_cpu,
     move_params_to_gpu,
@@ -1459,17 +1460,18 @@ class TestMaskedMeanAxis:
         assert result.tolist() == pytest.approx([2.0, 8.0])
 
 
-class TestMaskedWhitenShiftMean:
-    """Cover the ``shift_mean=False`` branch in :func:`masked_whiten`."""
+class TestMaskedWhiten:
+    def test_leaves_values_unchanged_with_fewer_than_two_unmasked(self) -> None:
+        values = torch.tensor([[1.0, 3.0, 5.0]])
+        mask = torch.tensor([[1.0, 0.0, 0.0]])
+
+        assert torch.equal(masked_whiten(values, mask), values)
 
     def test_shift_mean_false_adds_mean_back(self) -> None:
-        from agilerl.utils.llm_utils import masked_whiten
-
         values = torch.tensor([[1.0, 3.0, 5.0, 7.0]])
         mask = torch.tensor([[1.0, 1.0, 1.0, 1.0]])
         whitened_no_shift = masked_whiten(values, mask, shift_mean=False)
         whitened_shift = masked_whiten(values, mask, shift_mean=True)
-        # The two outputs differ by exactly the masked mean (=4.0).
         diff = whitened_no_shift - whitened_shift
         assert torch.allclose(diff, torch.full_like(diff, 4.0), atol=1e-5)
 
