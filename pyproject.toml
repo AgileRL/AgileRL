@@ -52,7 +52,8 @@ box2d = [
 llm = [
     "bitsandbytes==0.49.2; sys_platform == 'linux'",
     "datasets==5.0.1",
-    "deepspeed>=0.19.1; sys_platform == 'linux'",
+    # 0.19.3+ (#8148) keeps ZeRO-3 frozen params gathered after activation-ckpt recompute.
+    "deepspeed==0.19.2; sys_platform == 'linux'",
     "liger-kernel==0.8.2; sys_platform == 'linux'",
     "openenv>=0.4.1,<0.5",
     "peft==0.20.0",
