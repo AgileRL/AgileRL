@@ -25,7 +25,10 @@ import torch
 import torch.nn as nn
 from peft.tuners.lora.layer import ParamWrapper
 
-from agilerl.algorithms.core.llm_ops.fused_lora import uniform_routed_adapter
+from agilerl.algorithms.core.llm_ops.fused_lora import (
+    ROUTING_STATE,
+    uniform_routed_adapter,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -147,6 +150,36 @@ def _expert_counts(
     return counts
 
 
+def _adapters_in_routing(wrapper: ParamWrapper, routing: Sequence[str]) -> list[str]:
+    """Adapter names from *routing* that this wrapper actually hosts."""
+    return [name for name in dict.fromkeys(routing) if name in wrapper.lora_A]
+
+
+def _token_adapter_ids(
+    routing: Sequence[str], n_rows: int, token_idx: torch.Tensor
+) -> tuple[torch.Tensor, dict[str, int]]:
+    """Expand per-sample fused routing to tokens, then permute into expert-sorted order.
+
+    ``token_idx`` is the gate's ``batch_index``: ``token_idx[i]`` is the original
+    token for expert-sorted row ``i``.
+    """
+    factor, remainder = divmod(n_rows, len(routing))
+    if remainder:
+        msg = (
+            f"Fused adapter routing covers {len(routing)} rows but the "
+            f"experts input's leading dimension is {n_rows}."
+        )
+        raise ValueError(msg)
+    expanded = [name for name in routing for _ in range(factor)]
+    name_to_id = {name: index for index, name in enumerate(dict.fromkeys(expanded))}
+    table = torch.tensor(
+        [name_to_id[name] for name in expanded],
+        device=token_idx.device,
+        dtype=torch.int64,
+    )
+    return table[token_idx], name_to_id
+
+
 def _resolve_adapters(wrapper: ParamWrapper) -> list[str]:
     """Adapter names to apply on this forward, honoring fused routing and adapter state."""
     routed = uniform_routed_adapter(wrapper)
@@ -222,6 +255,7 @@ def _routed_lora_residual(
     chain: dict[str, ParamWrapper],
     experts: nn.Module,
     adapters: dict[str, list[str]],
+    routing: Sequence[str] | None = None,
 ) -> torch.Tensor:
     """LoRA-only residual for a routed experts block (``full_lora - native_base``)."""
     projections = _routed_projection_names(experts)
@@ -252,11 +286,18 @@ def _routed_lora_residual(
     counts = torch.bincount(flat_experts, minlength=num_experts)
     token_idx = torch.div(order, top_k, rounding_mode="floor")
     x = hidden_states[token_idx]
+    row_ids: torch.Tensor | None = None
+    id_map: dict[str, int] | None = None
+    if routing is not None and len(set(routing)) > 1:
+        row_ids, id_map = _token_adapter_ids(routing, hidden_states.shape[0], token_idx)
 
     projected_base = _expert_linear_loop(x, up_weight, counts)
     projected = projected_base.to(_lora_compute_dtype(projected_base.dtype))
     for name in adapters.get(up_name, []):
         delta = _split_lora_delta(chain[up_name], x, counts, name)
+        if row_ids is not None and id_map is not None:
+            mask = (row_ids == id_map[name]).to(delta.dtype).unsqueeze(-1)
+            delta = delta * mask
         projected = projected + delta.to(projected.dtype)
     projected = projected.to(projected_base.dtype)
 
@@ -275,6 +316,9 @@ def _routed_lora_residual(
     residual = residual.to(_lora_compute_dtype(residual.dtype))
     for name in adapters.get("down_proj", []):
         delta = _split_lora_delta(chain["down_proj"], intermediate, counts, name)
+        if row_ids is not None and id_map is not None:
+            mask = (row_ids == id_map[name]).to(delta.dtype).unsqueeze(-1)
+            delta = delta * mask
         residual = residual + delta.to(residual.dtype)
 
     routed_weights = top_k_weights.reshape(-1)[order].unsqueeze(-1)
@@ -301,6 +345,8 @@ class SortedExpertsLoraWrapper(ParamWrapper):
     """Split-LoRA ``ParamWrapper`` for grouped linears taking expert-sorted rows."""
 
     _self_routed_lora = True
+    token_index: torch.Tensor | None = None
+    n_tokens: int | None = None
 
     def forward(
         self,
@@ -309,13 +355,40 @@ class SortedExpertsLoraWrapper(ParamWrapper):
         *args: Any,
         **kwargs: Any,
     ) -> torch.Tensor:
-        adapters = _resolve_adapters(self)
+        routing = ROUTING_STATE.get(self)
+        mixed = routing is not None and len(set(routing)) > 1
+        row_ids: torch.Tensor | None = None
+        id_map: dict[str, int] | None = None
+        if mixed:
+            assert routing is not None
+            adapters = _adapters_in_routing(self, routing)
+            token_idx = self.token_index
+            n_tokens = self.n_tokens
+            if token_idx is None or n_tokens is None:
+                msg = (
+                    "Mixed fused routing on sorted-experts LoRA needs "
+                    "token_index from the gate."
+                )
+                raise RuntimeError(msg)
+            if token_idx.shape[0] != x.shape[0]:
+                msg = (
+                    "Gate batch_index length "
+                    f"{token_idx.shape[0]} does not match expert-sorted rows "
+                    f"{x.shape[0]}."
+                )
+                raise ValueError(msg)
+            row_ids, id_map = _token_adapter_ids(routing, n_tokens, token_idx)
+        else:
+            adapters = _resolve_adapters(self)
         result = self.base_layer(x, expert_size, *args, **kwargs)
         if not adapters:
             return result
         counts = _expert_counts(expert_size, self.num_experts)
         for name in adapters:
             delta = _split_lora_delta(self, x, counts, name)
+            if row_ids is not None and id_map is not None:
+                mask = (row_ids == id_map[name]).to(delta.dtype).unsqueeze(-1)
+                delta = delta * mask
             result = result + delta.to(result.dtype)
         return result
 
@@ -339,14 +412,29 @@ class RoutedExpertsLoraWrapper(ParamWrapper):
             )
         chain = _wrapper_chain(self)
         experts = self.get_base_layer()
-        adapters = {name: _resolve_adapters(w) for name, w in chain.items()}
+        routing = ROUTING_STATE.get(self)
+        mixed = routing is not None and len(set(routing)) > 1
+        if mixed:
+            assert routing is not None
+            adapters = {
+                name: _adapters_in_routing(wrapper, routing)
+                for name, wrapper in chain.items()
+            }
+        else:
+            adapters = {name: _resolve_adapters(w) for name, w in chain.items()}
         base = experts(hidden_states, top_k_index, top_k_weights)
         if not any(adapters.values()):
             return base
         if _routed_projection_names(experts) is None:
             return ParamWrapper.forward(self, hidden_states, top_k_index, top_k_weights)
         delta = _routed_lora_residual(
-            hidden_states, top_k_index, top_k_weights, chain, experts, adapters
+            hidden_states,
+            top_k_index,
+            top_k_weights,
+            chain,
+            experts,
+            adapters,
+            routing=routing if mixed else None,
         )
         return base + delta.to(base.dtype)
 
@@ -367,6 +455,48 @@ def mark_expert_wrappers_as_zero3_leaves(model: nn.Module) -> int:
 
     set_z3_leaf_modules(model, list(wrapper_classes))
     return count
+
+
+def _bind_gate_token_index(model: nn.Module) -> None:
+    """Copy each sorted-MoE gate's ``batch_index`` onto sibling expert wrappers.
+
+    The sibling ``router`` returns ``(index_sorted_experts, batch_index, ...)``.
+    Fused routing is in token order; the wrappers permute adapter ids with
+    that index (see ``_token_adapter_ids``).
+    """
+    for parent in model.modules():
+        router = getattr(parent, "router", None)
+        if router is None:
+            continue
+        experts = [
+            child
+            for child in parent.children()
+            if type(child) is SortedExpertsLoraWrapper
+        ]
+        if not experts or getattr(router, "agilerl_token_index_hook", False):
+            continue
+
+        def hook(
+            _module: nn.Module,
+            args: tuple[Any, ...],
+            output: object,
+            _experts: list[SortedExpertsLoraWrapper] = experts,
+        ) -> None:
+            if not (isinstance(output, tuple) and len(output) >= 2):
+                return
+            token_index = output[1]
+            hidden = args[0] if args else None
+            if not isinstance(token_index, torch.Tensor) or not isinstance(
+                hidden, torch.Tensor
+            ):
+                return
+            n_tokens = int(hidden.shape[0])
+            for expert in _experts:
+                expert.token_index = token_index
+                expert.n_tokens = n_tokens
+
+        router.register_forward_hook(hook)
+        router.agilerl_token_index_hook = True
 
 
 def upgrade_moe_param_wrappers(model: nn.Module) -> int:
@@ -398,6 +528,7 @@ def upgrade_moe_param_wrappers(model: nn.Module) -> int:
             upgraded += 1
         elif module.get_param().ndim == 3:
             fallbacks.append(name)
+    _bind_gate_token_index(model)
     if fallbacks:
         warnings.warn(
             "Packed-experts LoRA wrappers on unrecognized module conventions "

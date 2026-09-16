@@ -1557,6 +1557,10 @@ def masked_whiten(
     values: torch.Tensor, mask: torch.Tensor, shift_mean: bool = True
 ) -> torch.Tensor:
     """Whiten values with masked values."""
+    # Unbiased variance needs two unmasked points. A 1-turn micro-batch
+    # would otherwise raise, or explode the scale via rsqrt(eps).
+    if mask.sum() <= 1:
+        return values
     mean, var = masked_mean(values, mask), masked_var(values, mask)
     whitened = (values - mean) * torch.rsqrt(var + 1e-8)
     if not shift_mean:

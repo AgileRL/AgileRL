@@ -2589,6 +2589,7 @@ class TestCloneLlm:
                 self.config = config
                 self.disabled = False
                 self.lora_A = torch.nn.Parameter(torch.ones(2, 2, dtype=torch.float32))
+                self.v_head = torch.nn.Parameter(torch.ones(2, dtype=torch.float32))
 
             def disable_adapter(self):
                 self.disabled = True
@@ -2612,6 +2613,7 @@ class TestCloneLlm:
 
         assert isinstance(cloned, FakeBaseModel)
         assert cloned.lora_A.dtype == torch.bfloat16
+        assert cloned.v_head.dtype == torch.bfloat16
         assert cloned.disabled is True
 
     def test_clone_llm_upgrades_moe_wrappers_when_target_parameters(

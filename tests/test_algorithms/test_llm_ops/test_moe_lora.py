@@ -21,7 +21,7 @@ from torch import nn
 
 from agilerl.algorithms.core.llm_ops import moe_lora as moe_lora_module
 from agilerl.algorithms.core.llm_ops.fused_lora import (
-    adapter_aligned_chunks,
+    ROUTING_STATE,
     patch_lora_for_fused_forward,
     set_fused_adapter_routing,
     unpatch_lora_for_fused_forward,
@@ -34,6 +34,7 @@ from agilerl.algorithms.core.llm_ops.moe_lora import (
     _forward_param_names,
     _is_partitioned,
     _routed_projection_names,
+    _token_adapter_ids,
     moe_expert_target_parameters,
     upgrade_moe_param_wrappers,
 )
@@ -49,7 +50,7 @@ INTERMEDIATE = 6
 
 
 class _SortedExperts(nn.Module):
-    """Grouped linear over expert-sorted rows (GraniteMoe ``ParallelExperts`` convention)."""
+    """Grouped linear over expert-sorted rows (``forward(inputs, expert_size)``, stacked 3D ``weight``)."""
 
     def __init__(self, input_size: int, output_size: int) -> None:
         super().__init__()
@@ -65,30 +66,49 @@ class _SortedExperts(nn.Module):
         )
 
 
-class _SortedMoeBlock(nn.Module):
-    """Routing parent for :class:`_SortedExperts`, mirroring GraniteMoeHybridMoE."""
+class _SortedTopKGate(nn.Module):
+    """Top-k gate that returns ``(index_sorted_experts, batch_index, batch_gates, expert_size, logits)``.
+
+    ``batch_index`` permutes tokens into expert-sorted order. JetMoE's ``router``
+    uses this layout; any sibling ``router`` with the same tuple works.
+    """
 
     def __init__(self) -> None:
         super().__init__()
-        self.router = nn.Linear(HIDDEN, NUM_EXPERTS, bias=False)
+        self.layer = nn.Linear(HIDDEN, NUM_EXPERTS, bias=False)
+        self.num_experts = NUM_EXPERTS
+        self.top_k = TOP_K
+
+    def forward(self, hidden_states):
+        logits = self.layer(hidden_states)
+        top_k_logits, top_k_indices = logits.topk(self.top_k, dim=1)
+        gates = torch.softmax(top_k_logits, dim=1).type_as(hidden_states)
+        flat_experts = top_k_indices.flatten()
+        expert_size = (
+            torch.bincount(flat_experts, minlength=self.num_experts).long().tolist()
+        )
+        index_sorted_experts = flat_experts.argsort(stable=True)
+        batch_index = index_sorted_experts.div(self.top_k, rounding_mode="trunc")
+        batch_gates = gates.flatten()[index_sorted_experts]
+        return index_sorted_experts, batch_index, batch_gates, expert_size, logits
+
+
+class _SortedMoeBlock(nn.Module):
+    """MoE block: gate then grouped ``input_linear`` / ``output_linear`` (JetMoE layout)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.router = _SortedTopKGate()
         self.input_linear = _SortedExperts(HIDDEN, 2 * INTERMEDIATE)
         self.output_linear = _SortedExperts(INTERMEDIATE, HIDDEN)
 
     def forward(self, hidden_states):
-        logits = self.router(hidden_states)
-        top_k_logits, top_k_indices = logits.topk(TOP_K, dim=1)
-        gates = torch.softmax(top_k_logits, dim=1)
-        flat_experts = top_k_indices.flatten()
-        expert_size = (
-            torch.bincount(flat_experts, minlength=NUM_EXPERTS).long().tolist()
-        )
-        order = flat_experts.argsort(stable=True)
-        batch_index = order.div(TOP_K, rounding_mode="trunc")
+        _, batch_index, batch_gates, expert_size, _ = self.router(hidden_states)
         expert_inputs = hidden_states[batch_index]
         inner = self.input_linear(expert_inputs, expert_size)
         gate, up = inner.chunk(2, dim=-1)
         expert_outputs = self.output_linear(F.silu(gate) * up, expert_size)
-        expert_outputs = expert_outputs * gates.flatten()[order, None]
+        expert_outputs = expert_outputs * batch_gates.unsqueeze(-1)
         out = torch.zeros_like(hidden_states)
         return out.index_add(0, batch_index, expert_outputs)
 
@@ -360,14 +380,182 @@ def test_fused_routing_uniform_and_base(pair_factory):
     unpatch_lora_for_fused_forward(upgraded)
 
 
-def test_fused_mixed_routing_raises():
+def test_fused_mixed_sorted_actor_and_base_matches_uniform_slices():
     _, upgraded = _sorted_pair()
     patch_lora_for_fused_forward(upgraded)
-    set_fused_adapter_routing(upgraded, ["actor"] * 6 + ["__base__"] * 6)
-    with pytest.raises(RuntimeError, match="Fused multi-adapter routing"):
-        upgraded(torch.randn(12, HIDDEN))
+    x = torch.randn(12, HIDDEN)
+    with torch.no_grad():
+        set_fused_adapter_routing(upgraded, ["actor"] * 12)
+        all_actor = upgraded(x)
+        set_fused_adapter_routing(upgraded, ["__base__"] * 12)
+        all_base = upgraded(x)
+        set_fused_adapter_routing(upgraded, ["actor"] * 6 + ["__base__"] * 6)
+        mixed = upgraded(x)
     unset_fused_adapter_routing(upgraded)
     unpatch_lora_for_fused_forward(upgraded)
+
+    assert torch.allclose(mixed[:6], all_actor[:6], atol=1e-5)
+    assert torch.allclose(mixed[6:], all_base[6:], atol=1e-5)
+
+
+def _expert_lora_model(block_cls, target_parameters, adapters, *, trainable):
+    torch.manual_seed(0)
+    model = block_cls()
+    for name in adapters:
+        model = inject_adapter_in_model(
+            _lora_config(target_parameters, init_lora_weights=False),
+            model,
+            adapter_name=name,
+        )
+    assert upgrade_moe_param_wrappers(model) > 0
+    for wrapper in _wrappers(model):
+        wrapper.set_adapter(adapters[0])
+    for name, param in model.named_parameters():
+        if "lora" not in name:
+            continue
+        param.requires_grad_(any(tag in name for tag in trainable))
+    return model
+
+
+def _actor_reference_model(block_cls, target_parameters):
+    return _expert_lora_model(
+        block_cls,
+        target_parameters,
+        ("actor", "reference"),
+        trainable=("actor",),
+    )
+
+
+def test_actor_reference_expert_lora_wrappers_and_freeze():
+    model = _actor_reference_model(
+        _UngatedMoeBlock, ["experts.up_proj", "experts.down_proj"]
+    )
+    wrappers = _wrappers(model)
+    assert wrappers
+    for wrapper in wrappers:
+        assert set(wrapper.lora_A) == {"actor", "reference"}
+        assert wrapper.lora_A["actor"].weight.requires_grad
+        assert not wrapper.lora_A["reference"].weight.requires_grad
+
+    x = torch.randn(12, HIDDEN)
+    model.eval()
+    with torch.no_grad():
+        for wrapper in wrappers:
+            wrapper.set_adapter("actor")
+        actor_out = model(x)
+        for wrapper in wrappers:
+            wrapper.set_adapter("reference")
+        reference_out = model(x)
+        for wrapper in wrappers:
+            wrapper.enable_adapters(False)
+        base_out = model(x)
+        for wrapper in wrappers:
+            wrapper.enable_adapters(True)
+            wrapper.set_adapter("actor")
+
+    assert not torch.allclose(actor_out, reference_out, atol=1e-5)
+    assert not torch.allclose(reference_out, base_out, atol=1e-5)
+
+    before = {
+        name: param.detach().clone()
+        for name, param in model.named_parameters()
+        if "reference" in name
+    }
+    model.train()
+    model(x).square().mean().backward()
+    for name, param in model.named_parameters():
+        if "actor" in name and param.requires_grad:
+            assert param.grad is not None
+            param.data.add_(param.grad, alpha=-0.1)
+        if "reference" in name:
+            assert param.grad is None or torch.count_nonzero(param.grad) == 0
+    for name, snapshot in before.items():
+        assert torch.equal(model.get_parameter(name), snapshot)
+
+
+@pytest.mark.parametrize(
+    ("block_cls", "targets"),
+    [
+        (_RoutedMoeBlock, ["experts.gate_up_proj", "experts.down_proj"]),
+        (_UngatedMoeBlock, ["experts.up_proj", "experts.down_proj"]),
+        (_SortedMoeBlock, ["input_linear.weight", "output_linear.weight"]),
+    ],
+)
+def test_fused_mixed_actor_reference_matches_uniform_slices(block_cls, targets):
+    model = _actor_reference_model(block_cls, targets)
+    x = torch.randn(12, HIDDEN)
+    patch_lora_for_fused_forward(model)
+    with torch.no_grad():
+        set_fused_adapter_routing(model, ["actor"] * 12)
+        all_actor = model(x)
+        set_fused_adapter_routing(model, ["reference"] * 12)
+        all_reference = model(x)
+        set_fused_adapter_routing(model, ["actor"] * 6 + ["reference"] * 6)
+        mixed = model(x)
+    unset_fused_adapter_routing(model)
+    unpatch_lora_for_fused_forward(model)
+
+    assert torch.allclose(mixed[:6], all_actor[:6], atol=1e-5)
+    assert torch.allclose(mixed[6:], all_reference[6:], atol=1e-5)
+
+
+@pytest.mark.parametrize(
+    ("block_cls", "targets"),
+    [
+        (_RoutedMoeBlock, ["experts.gate_up_proj", "experts.down_proj"]),
+        (_UngatedMoeBlock, ["experts.up_proj", "experts.down_proj"]),
+        (_SortedMoeBlock, ["input_linear.weight", "output_linear.weight"]),
+    ],
+)
+def test_fused_mixed_actor_critic_matches_uniform_slices(block_cls, targets):
+    model = _expert_lora_model(
+        block_cls,
+        targets,
+        ("actor", "critic"),
+        trainable=("actor", "critic"),
+    )
+    x = torch.randn(12, HIDDEN)
+    patch_lora_for_fused_forward(model)
+    with torch.no_grad():
+        set_fused_adapter_routing(model, ["actor"] * 12)
+        all_actor = model(x)
+        set_fused_adapter_routing(model, ["critic"] * 12)
+        all_critic = model(x)
+        set_fused_adapter_routing(model, ["actor"] * 6 + ["critic"] * 6)
+        mixed = model(x)
+    unset_fused_adapter_routing(model)
+    unpatch_lora_for_fused_forward(model)
+
+    assert torch.allclose(mixed[:6], all_actor[:6], atol=1e-5)
+    assert torch.allclose(mixed[6:], all_critic[6:], atol=1e-5)
+
+
+@pytest.mark.parametrize(
+    ("block_cls", "targets"),
+    [
+        (_UngatedMoeBlock, ["experts.up_proj", "experts.down_proj"]),
+        (_SortedMoeBlock, ["input_linear.weight", "output_linear.weight"]),
+    ],
+)
+def test_actor_critic_expert_lora_both_trainable(block_cls, targets):
+    model = _expert_lora_model(
+        block_cls,
+        targets,
+        ("actor", "critic"),
+        trainable=("actor", "critic"),
+    )
+    x = torch.randn(12, HIDDEN)
+    patch_lora_for_fused_forward(model)
+    set_fused_adapter_routing(model, ["actor"] * 6 + ["critic"] * 6)
+    model.train()
+    model(x).square().mean().backward()
+    unset_fused_adapter_routing(model)
+    unpatch_lora_for_fused_forward(model)
+    for name, param in model.named_parameters():
+        if "lora" not in name:
+            continue
+        assert param.grad is not None
+        assert param.requires_grad
 
 
 def test_fused_mixed_routing_raises_on_fallback_param_wrapper():
@@ -391,11 +579,108 @@ def test_fused_mixed_routing_raises_on_fallback_param_wrapper():
     unpatch_lora_for_fused_forward(model)
 
 
-def test_adapter_aligned_chunks():
-    routing = ["ref"] * 5 + ["actor"] * 5
-    assert adapter_aligned_chunks(routing, 4) == [(0, 4), (4, 5), (5, 9), (9, 10)]
-    assert adapter_aligned_chunks(routing, 5) == [(0, 5), (5, 10)]
-    assert adapter_aligned_chunks(["actor"] * 4, 8) == [(0, 4)]
+def test_sorted_mixed_routing_requires_token_index() -> None:
+    _, model = _sorted_pair()
+    wrapper = next(
+        module
+        for module in _wrappers(model)
+        if isinstance(module, SortedExpertsLoraWrapper)
+    )
+    x = torch.randn(8, HIDDEN)
+    ROUTING_STATE[wrapper] = ["actor"] * 4 + ["__base__"] * 4
+
+    with pytest.raises(RuntimeError, match="token_index"):
+        wrapper(x, [2, 2, 2, 2])
+
+    ROUTING_STATE.pop(wrapper, None)
+
+
+def test_sorted_mixed_routing_rejects_mismatched_token_index() -> None:
+    _, model = _sorted_pair()
+    wrapper = next(
+        module
+        for module in _wrappers(model)
+        if isinstance(module, SortedExpertsLoraWrapper)
+    )
+    x = torch.randn(8, HIDDEN)
+    wrapper.token_index = torch.tensor([0, 1, 2])
+    wrapper.n_tokens = 4
+    ROUTING_STATE[wrapper] = ["actor"] * 4 + ["__base__"] * 4
+
+    with pytest.raises(ValueError, match="does not match expert-sorted rows"):
+        wrapper(x, [2, 2, 2, 2])
+
+    ROUTING_STATE.pop(wrapper, None)
+
+
+def test_sorted_gate_copies_batch_index_onto_wrappers() -> None:
+    _, model = _sorted_pair()
+    x = torch.randn(4, HIDDEN)
+
+    model(x)
+
+    wrappers = [
+        module
+        for module in _wrappers(model)
+        if isinstance(module, SortedExpertsLoraWrapper)
+    ]
+    assert wrappers
+    for wrapper in wrappers:
+        assert wrapper.n_tokens == 4
+        assert wrapper.token_index is not None
+        assert wrapper.token_index.shape == (4 * TOP_K,)
+
+
+def test_gate_token_index_hook_skips_non_tuple_output() -> None:
+    _, model = _sorted_pair()
+    hidden = torch.randn(4, HIDDEN)
+    model.router.forward = lambda _hidden: torch.zeros(1)
+
+    try:
+        model.router(hidden)
+    finally:
+        del model.router.forward
+
+    for wrapper in _wrappers(model):
+        if isinstance(wrapper, SortedExpertsLoraWrapper):
+            assert wrapper.token_index is None
+            assert wrapper.n_tokens is None
+
+
+def test_gate_token_index_hook_skips_non_tensor_batch_index() -> None:
+    _, model = _sorted_pair()
+    hidden = torch.randn(4, HIDDEN)
+    model.router.forward = lambda _hidden: (torch.zeros(1), "not-a-tensor")
+
+    try:
+        model.router(hidden)
+    finally:
+        del model.router.forward
+
+    for wrapper in _wrappers(model):
+        if isinstance(wrapper, SortedExpertsLoraWrapper):
+            assert wrapper.token_index is None
+            assert wrapper.n_tokens is None
+
+
+def test_fused_mixed_sorted_routing_uses_sequence_factor() -> None:
+    model = _actor_reference_model(
+        _SortedMoeBlock, ["input_linear.weight", "output_linear.weight"]
+    )
+    x = torch.randn(12, HIDDEN)
+    patch_lora_for_fused_forward(model)
+    with torch.no_grad():
+        set_fused_adapter_routing(model, ["actor"] * 12)
+        all_actor = model(x)
+        set_fused_adapter_routing(model, ["reference"] * 12)
+        all_reference = model(x)
+        set_fused_adapter_routing(model, ["actor", "reference"])
+        mixed = model(x)
+    unset_fused_adapter_routing(model)
+    unpatch_lora_for_fused_forward(model)
+
+    assert torch.allclose(mixed[:6], all_actor[:6], atol=1e-5)
+    assert torch.allclose(mixed[6:], all_reference[6:], atol=1e-5)
 
 
 def test_moe_expert_target_parameters_detects_both_conventions():
@@ -712,6 +997,26 @@ class TestMoeLoraHelpers:
     def test_expert_counts_wrong_length_raises(self) -> None:
         with pytest.raises(ValueError, match="Expected 4"):
             _expert_counts([1, 2], num_experts=4)
+
+    def test_token_adapter_ids_expands_then_permutes(self) -> None:
+        row_ids, id_map = _token_adapter_ids(
+            ["actor", "reference"],
+            n_rows=4,
+            token_idx=torch.tensor([2, 0, 3, 1]),
+        )
+
+        assert id_map == {"actor": 0, "reference": 1}
+        assert torch.equal(row_ids, torch.tensor([1, 0, 1, 0]))
+
+    def test_token_adapter_ids_rejects_row_count_that_does_not_divide_routing(
+        self,
+    ) -> None:
+        with pytest.raises(ValueError, match="experts input's leading dimension"):
+            _token_adapter_ids(
+                ["actor", "reference"],
+                n_rows=3,
+                token_idx=torch.tensor([0, 1, 2]),
+            )
 
     def test_routed_projection_names_rejects_bias(self) -> None:
         module = _RoutedExperts()

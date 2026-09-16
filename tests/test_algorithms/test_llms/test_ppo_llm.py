@@ -848,6 +848,21 @@ class TestPPOComputeGaeReturns:
         assert torch.allclose(advantages, expected_advantages)
         assert torch.allclose(returns, expected_returns)
 
+    def test_compute_gae_returns_single_turn_skips_whitening(self):
+        stub = _PPOStub(gamma=1.0, gae_lambda=1.0)
+        action_mask = torch.ones(1, 2, dtype=torch.bool)
+        turn_ids = torch.tensor([[0, 0]])
+        values = torch.tensor([[0.0, 0.0]])
+        rewards = torch.tensor([[1.0, 1.0]])
+
+        returns, advantages = stub._compute_gae_returns(
+            rewards, values, action_mask, turn_ids
+        )
+
+        expected = torch.tensor([[1.0, 1.0]])
+        assert torch.allclose(advantages, expected)
+        assert torch.allclose(returns, expected)
+
 
 class TestPPOComputeGaeReturnsToken:
     def test_compute_gae_returns_token_padding_positions_zero_advantage(self):
