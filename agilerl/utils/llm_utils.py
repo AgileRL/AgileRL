@@ -2504,15 +2504,17 @@ def resolve_vllm_max_num_batched_tokens(
 ) -> int:
     """Resolve vLLM ``max_num_batched_tokens`` for colocated rollout.
 
-    Do not use ``max_num_seqs * max_model_len`` (e.g. 8x32768 = 262144): that
-    drives torch.compile inductor benchmark tensors of ~5+ GiB during ``LLM()``
-    init and multimodal encoder-cache budgets, which OOMs on a 40GB GPU even
-    when the trainer is offloaded. Default caps prefill batching while keeping
-    at least one full ``max_model_len`` context for chunked prefill.
+    Do not use ``max_num_seqs * max_model_len`` as the default (e.g. 8x32768 =
+    262144): that drives torch.compile inductor benchmark tensors of ~5+ GiB
+    during ``LLM()`` init and multimodal encoder-cache budgets, which OOMs on a
+    40GB GPU even when the trainer is offloaded. Default caps prefill batching
+    while keeping at least one full ``max_model_len`` context for chunked
+    prefill. vLLM cannot schedule more tokens than ``max_num_seqs *
+    max_model_len``, so an explicit value is capped at that product.
     """
-    if explicit is not None:
-        return int(explicit)
     worst_case = max_num_seqs * max_model_len
+    if explicit is not None:
+        return min(int(explicit), worst_case)
     # Allow concurrent prefills up to 8k tokens per slot unless that exceeds one
     # max-length context (then cap at max_model_len).
     concurrent_budget = max(max_model_len, max_num_seqs * 8192)

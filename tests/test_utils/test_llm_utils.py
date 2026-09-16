@@ -2992,6 +2992,9 @@ class TestResolveVllmMaxNumBatchedTokens:
         # Budget never drops below one max_model_len context.
         assert resolve_vllm_max_num_batched_tokens(1, 32768) == 32768
 
+    def test_explicit_value_is_capped_at_seqs_times_model_len(self):
+        assert resolve_vllm_max_num_batched_tokens(8, 512, explicit=8192) == 4096
+
 
 def _vllm_config(**overrides):
     """SimpleNamespace mirroring the VLLMConfig fields read by the builder."""
@@ -3092,6 +3095,19 @@ class TestBuildVllmLlmInitKwargs:
         assert kwargs["max_num_batched_tokens"] == 8192
         assert kwargs["reasoning_parser"] == "nemotron_v3"
         assert kwargs["enable_prefix_caching"] is True
+
+    def test_nemotron_family_default_is_capped_when_context_is_short(self, monkeypatch):
+        monkeypatch.setattr(
+            "transformers.AutoConfig.from_pretrained",
+            lambda *args, **kwargs: SimpleNamespace(model_type="nemotron_h"),
+        )
+        kwargs = build_vllm_llm_init_kwargs(
+            _vllm_config(),
+            trainer_model_name_or_path="nvidia/nemotron",
+            max_model_len=512,
+        )
+
+        assert kwargs["max_num_batched_tokens"] == 4096
 
     def test_explicit_config_wins_over_nemotron_family_defaults(self, monkeypatch):
         monkeypatch.setattr(
