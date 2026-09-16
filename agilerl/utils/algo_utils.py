@@ -2061,8 +2061,9 @@ class VLLMConfig:
     :param max_num_batched_tokens: Cap on tokens vLLM may process in one scheduler
         iteration (prefill batching / compile profiling).  ``None`` uses
         :func:`~agilerl.utils.llm_utils.resolve_vllm_max_num_batched_tokens`
-        (not ``max_num_seqs * max_model_len``, which OOMs long-context colocated
-        init).  Set explicitly when you need full parallel max-length prefills.
+        (not ``max_num_seqs * max_model_len`` as the default, which OOMs
+        long-context colocated init).  The resolved value never exceeds
+        ``max_num_seqs * max_model_len``.
     :type max_num_batched_tokens: int | None, optional
     :param sleep_mode: Put vLLM to sleep between ``get_action`` calls to free GPU memory
         for training.  Cannot be used with agent populations on a single device,
