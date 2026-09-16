@@ -99,11 +99,6 @@ COSINE_LR = (
     "Cosine learning-rate schedule with warmup. Unset holds the learning rate constant."
 )
 VLLM_CONFIG = "vLLM engine settings for generation."
-USE_VLLM = (
-    "Run generation through vLLM in the trainer process. Resolved from "
-    "training.rollout_mode: async rollout moves generation onto its own "
-    "engines and turns this off."
-)
 IS_CORRECTION = (
     "Correct for the mismatch between the vLLM sampler's log-probabilities and "
     "the trainer's recomputed ones."

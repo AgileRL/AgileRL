@@ -940,7 +940,6 @@ class TestLLMAlgorithmSpecBuild:
 
         spec = GRPOSpec(
             pretrained_model_name_or_path="gpt2",
-            use_vllm=True,
             vllm_config={"tensor_parallel_size": 1},
             group_size=4,
         )
@@ -961,7 +960,9 @@ class TestLLMAlgorithmSpecBuild:
             patch("agilerl.builders.llm.VLLMConfig") as mock_vllm,
         ):
             mock_vllm.return_value = "coerced_config"
-            build_from_spec(spec, tokenizer=mock_tokenizer, index=0)
+            build_from_spec(
+                spec, tokenizer=mock_tokenizer, index=0, rollout_mode="colocated"
+            )
 
         mock_vllm.assert_called_once_with(tensor_parallel_size=1)
 
@@ -1104,7 +1105,6 @@ class TestLLMAlgorithmSpecBuild:
             "pretrained_model_name_or_path": "gpt2",
             "lora_config": None,
             "hp_config": None,
-            "use_vllm": False,
             "max_model_len": 512,
             "beta": 0.01,
             "max_grad_norm": 0.1,
@@ -1275,18 +1275,11 @@ class TestReplayBufferSpecNStep:
 class TestLLMPPOSpec:
     """Lines 42-45, 56-61 in llmppo.py."""
 
-    def test_vllm_required_when_use_vllm(self):
-        from agilerl.arena.models.algorithms import LLMPPOSpec
-
-        with pytest.raises(ValueError, match="use_vllm is set but no vllm_config"):
-            LLMPPOSpec(use_vllm=True, vllm_config=None)
-
-    def test_vllm_config_accepted_when_use_vllm(self):
+    def test_vllm_config_is_accepted(self):
         from agilerl.arena.models.algorithms import LLMPPOSpec
         from agilerl.arena.models.networks import VLLMConfig
 
-        spec = LLMPPOSpec(use_vllm=True, vllm_config=VLLMConfig())
-        assert spec.use_vllm is True
+        spec = LLMPPOSpec(vllm_config=VLLMConfig())
         assert spec.vllm_config is not None
 
     def test_rollout_training_loop(self):
@@ -1313,18 +1306,11 @@ class TestLLMPPOSpec:
 class TestLLMREINFORCESpec:
     """Lines 39-42, 53-58 in llmreinforce.py."""
 
-    def test_vllm_required_when_use_vllm(self):
-        from agilerl.arena.models.algorithms import LLMREINFORCESpec
-
-        with pytest.raises(ValueError, match="use_vllm is set but no vllm_config"):
-            LLMREINFORCESpec(use_vllm=True, vllm_config=None)
-
-    def test_vllm_config_accepted_when_use_vllm(self):
+    def test_vllm_config_is_accepted(self):
         from agilerl.arena.models.algorithms import LLMREINFORCESpec
         from agilerl.arena.models.networks import VLLMConfig
 
-        spec = LLMREINFORCESpec(use_vllm=True, vllm_config=VLLMConfig())
-        assert spec.use_vllm is True
+        spec = LLMREINFORCESpec(vllm_config=VLLMConfig())
         assert spec.vllm_config is not None
 
     def test_rollout_training_loop(self):
@@ -1422,12 +1408,6 @@ class TestSFTSpec:
 
 class TestGRPOSpec:
     """GRPO algorithm specification."""
-
-    def test_vllm_required_when_use_vllm(self):
-        from agilerl.arena.models.algorithms import GRPOSpec
-
-        with pytest.raises(ValueError, match="use_vllm is set but no vllm_config"):
-            GRPOSpec(group_size=4, use_vllm=True, vllm_config=None)
 
     def test_advantage_granularity_defaults_to_auto(self):
         from agilerl.arena.models.algorithms import GRPOSpec

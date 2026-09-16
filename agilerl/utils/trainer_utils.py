@@ -160,6 +160,7 @@ def create_population_from_spec(
     selection_strategy_spec: SelectionStrategySpec | None = None,
     hp_config: HyperparameterConfig | None = None,
     networks: Mapping[str, Any] | None = None,
+    rollout_mode: str = "",
 ) -> PopulationType:
     """Instantiate a population of agents from an algorithm spec.
 
@@ -198,6 +199,9 @@ def create_population_from_spec(
         ``{"actor_network": ...}``. Not used for LLM algorithms, whose actor
         is built once and cloned.
     :type networks: Mapping[str, Any] | None
+    :param rollout_mode: ``training.rollout_mode``. Colocated runs vLLM in the
+        trainer process.
+    :type rollout_mode: str
     :returns: A list of algorithm instances.
     :rtype: PopulationType
     """
@@ -338,6 +342,7 @@ def create_population_from_spec(
             resume_from_checkpoint=resume_from_checkpoint,
             load_weights_from=load_weights_from,
         ),
+        rollout_mode=rollout_mode,
     )
     population: PopulationType = [agent_0]
 
@@ -368,6 +373,7 @@ def create_population_from_spec(
                     load_weights_from=load_weights_from,
                 ),
                 actor_network=cloned_actor,
+                rollout_mode=rollout_mode,
             )
         )
     _assign_subpopulations(population, selection_strategy_spec)

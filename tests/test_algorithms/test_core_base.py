@@ -1720,8 +1720,8 @@ def _make_llm_agent(
     *,
     mini_batch_size=None,
     algo_cls=None,
-    use_vllm: bool = False,
     use_memory_efficient_params: bool = True,
+    vllm_config=None,
 ):
     """Helper to create a _StubLLMAlgorithm with heavily mocked internals."""
     if not HAS_LLM_DEPENDENCIES:
@@ -1764,8 +1764,8 @@ def _make_llm_agent(
             accelerator=accelerator,
             device="cpu",
             use_separate_reference_adapter=use_separate_reference_adapter,
-            use_vllm=use_vllm,
             use_memory_efficient_params=use_memory_efficient_params,
+            vllm_config=vllm_config,
         )
     agent.actor = actor_network
     agent.optimizer = MagicMock()
@@ -1774,7 +1774,7 @@ def _make_llm_agent(
         {"lr": 1e-4, "params": torch.tensor([1.0])}
     ]
     agent.lr_scheduler = None
-    agent.use_vllm = False
+    agent.colocated = False
     agent.max_output_tokens = None
     agent.max_model_len = 512
     agent.temperature = 1.0
@@ -3225,8 +3225,8 @@ class TestLLMInitWarnings:
         ):
             agent = _make_llm_agent(
                 accelerator=acc,
-                use_vllm=True,
                 use_memory_efficient_params=True,
+                vllm_config=VLLMConfig(),
             )
         assert agent.use_memory_efficient_params is False
 
@@ -4645,7 +4645,7 @@ class TestLLMGenerateWithVllmColocate:
             with pytest.raises(
                 ImportError,
                 match=re.escape(
-                    "vLLM is required when use_vllm=True. Install AgileRL with vLLM support for this platform: `pip install agilerl[llm]`."
+                    "vLLM is required for colocated generation. Install AgileRL with vLLM support for this platform: `pip install agilerl[llm]`."
                 ),
             ):
                 agent._generate_with_vllm_colocate([], 1, 0.9)
@@ -5486,7 +5486,7 @@ class TestLLMCloneWithoutAccelerator:
         agent = _make_llm_agent(accelerator=None, clone=True)
         agent.accelerator = None
         agent.zero_stage = -1
-        agent.use_vllm = False
+        agent.colocated = False
         agent.lr_scheduler = MagicMock()
         agent.lr_scheduler.state_dict.return_value = {"step": 0}
         agent.optimizer.optimizer.state_dict.return_value = {}
@@ -5497,7 +5497,7 @@ class TestLLMCloneWithoutAccelerator:
         cloned.optimizer = MagicMock()
         cloned.optimizer.optimizer = MagicMock()
         cloned.llm = None
-        cloned.use_vllm = False
+        cloned.colocated = False
 
         with (
             patch(
@@ -5541,7 +5541,7 @@ class TestLLMCloneWithAccelerator:
         acc = _make_mock_accelerator(num_processes=1)
         agent = _make_llm_agent(accelerator=acc)
         agent.zero_stage = -1
-        agent.use_vllm = False
+        agent.colocated = False
         agent.lr_scheduler = MagicMock()
         acc.unwrap_model = MagicMock(return_value=agent.actor)
 
@@ -5550,7 +5550,7 @@ class TestLLMCloneWithAccelerator:
         cloned.lr_scheduler = MagicMock()
         cloned.optimizer = MagicMock()
         cloned.llm = None
-        cloned.use_vllm = False
+        cloned.colocated = False
         cloned.mutation_hook = MagicMock()
 
         with (
@@ -5596,7 +5596,7 @@ class TestLLMCloneWithDeepSpeed:
         acc = _make_mock_accelerator(num_processes=1)
         agent = _make_llm_agent(accelerator=acc)
         agent.zero_stage = 2
-        agent.use_vllm = False
+        agent.colocated = False
         agent.lr_scheduler = MagicMock()
         acc.unwrap_model = MagicMock(return_value=agent.actor)
 
@@ -5605,7 +5605,7 @@ class TestLLMCloneWithDeepSpeed:
         cloned.lr_scheduler = MagicMock()
         cloned.optimizer = MagicMock()
         cloned.llm = None
-        cloned.use_vllm = False
+        cloned.colocated = False
         cloned.mutation_hook = MagicMock()
 
         with (
@@ -5859,7 +5859,7 @@ class TestLLMQuantizedClone:
 
     def test_setup_actors_attaches_adapters_when_rebuild_from_pretrained(self):
         agent = _make_llm_agent(accelerator=None, clone=True)
-        agent.use_vllm = False
+        agent.colocated = False
 
         with patch.object(LLMAlgorithm, "_initialize_actors") as mock_init:
             agent._setup_actors(None, clone=True)
@@ -5868,7 +5868,7 @@ class TestLLMQuantizedClone:
 
     def test_setup_actors_skips_adapters_for_dense_peft_clone(self):
         agent = _make_llm_agent(accelerator=None, clone=True)
-        agent.use_vllm = False
+        agent.colocated = False
         peft_net = MagicMock(name="peft_actor")
 
         with patch.object(LLMAlgorithm, "_initialize_actors") as mock_init:
@@ -5878,7 +5878,7 @@ class TestLLMQuantizedClone:
 
     def test_setup_actors_routes_quant_clone_through_colocated_vllm(self):
         agent = _make_llm_agent(accelerator=None, clone=True)
-        agent.use_vllm = True
+        agent.colocated = True
 
         with patch.object(
             LLMAlgorithm, "_initialize_colocated_vllm_and_actors"
@@ -5893,7 +5893,7 @@ class TestLLMQuantizedClone:
 
         acc = _make_mock_accelerator(num_processes=1)
         agent = _make_llm_agent(accelerator=acc, clone=True)
-        agent.use_vllm = True
+        agent.colocated = True
         agent.vllm_config = VLLMConfig(sleep_mode=True)
         agent.llm = MagicMock(name="stale_llm")
 
@@ -5918,7 +5918,7 @@ class TestLLMCloneWithVllm:
         agent = _make_llm_agent(accelerator=None, clone=True)
         agent.accelerator = None
         agent.zero_stage = -1
-        agent.use_vllm = True
+        agent.colocated = True
         agent.llm = MagicMock()
         agent.lr_scheduler = MagicMock()
         agent.lr_scheduler.state_dict.return_value = {"step": 0}
@@ -5930,7 +5930,7 @@ class TestLLMCloneWithVllm:
         cloned.optimizer = MagicMock()
         cloned.optimizer.optimizer = MagicMock()
         cloned.llm = MagicMock()
-        cloned.use_vllm = True
+        cloned.colocated = True
 
         with (
             patch(
@@ -5973,7 +5973,7 @@ class TestLLMCloneWithVllm:
         agent = _make_llm_agent(accelerator=None, clone=True)
         agent.accelerator = None
         agent.zero_stage = -1
-        agent.use_vllm = True
+        agent.colocated = True
         agent.vllm_config = VLLMConfig(sleep_mode=True)
         parent_llm = MagicMock(name="parent_llm")
         agent.llm = parent_llm
@@ -5993,7 +5993,7 @@ class TestLLMCloneWithVllm:
         cloned.optimizer = MagicMock()
         cloned.optimizer.optimizer = MagicMock()
         cloned.llm = None  # sleep-mode clone skips LLM construction
-        cloned.use_vllm = True
+        cloned.colocated = True
 
         with (
             patch(
@@ -7222,7 +7222,7 @@ class TestLLMCloneBroadcastMultiProcess:
         acc = _make_mock_accelerator(num_processes=2)
         agent = _make_llm_agent(accelerator=acc)
         agent.zero_stage = -1
-        agent.use_vllm = False
+        agent.colocated = False
         agent.lr_scheduler = MagicMock()
         acc.unwrap_model = MagicMock(return_value=agent.actor)
 
@@ -7231,7 +7231,7 @@ class TestLLMCloneBroadcastMultiProcess:
         cloned.lr_scheduler = MagicMock()
         cloned.optimizer = MagicMock()
         cloned.llm = None
-        cloned.use_vllm = False
+        cloned.colocated = False
         cloned.mutation_hook = MagicMock()
 
         with (
@@ -7277,18 +7277,15 @@ class TestLLMCloneBroadcastMultiProcess:
 class TestLLMInitEdgeCases:
     """Constructor branches not covered by _make_llm_agent defaults."""
 
-    def test_vllm_config_warns_when_use_vllm_false(self):
+    def test_vllm_config_enables_colocated_vllm(self):
         lora = MagicMock()
         with (
             patch.object(LLMAlgorithm, "_initialize_actors"),
             patch.object(LLMAlgorithm, "_configure_vllm"),
             patch.object(LLMAlgorithm, "wrap_models"),
             patch.object(EvolvableAlgorithm, "_registry_init"),
-            pytest.warns(
-                UserWarning, match="vllm_config is provided but use_vllm is False"
-            ),
         ):
-            _StubLLMAlgorithm(
+            agent = _StubLLMAlgorithm(
                 index=0,
                 batch_size=4,
                 lr=1e-4,
@@ -7303,9 +7300,10 @@ class TestLLMInitEdgeCases:
                 actor_network=_make_mock_peft_actor(),
                 device="cpu",
                 model_name="mock-model",
-                use_vllm=False,
                 vllm_config=VLLMConfig(),
             )
+
+        assert agent.colocated is True
 
     def test_model_config_strips_lora_target_scope(self):
         lora = MagicMock()

@@ -177,9 +177,9 @@ def generate_grpo(
     max_tokens,
     group_size,
     use_separate_reference_adapter,
-    use_vllm,
-    pretrained_model_name_or_path,
-    micro_batch_size_per_gpu,
+    colocated=False,
+    pretrained_model_name_or_path=None,
+    micro_batch_size_per_gpu=None,
     sleep_mode=False,
     from_name=False,
     use_liger_loss=False,
@@ -194,7 +194,7 @@ def generate_grpo(
     accelerator = accelerator_factory(use_deepspeed_optimizer, config)
     if not use_deepspeed_optimizer and accelerator is not None:
         accelerator.state.deepspeed_plugin.deepspeed_config.pop("optimizer", None)
-    if use_vllm:
+    if colocated:
         lora_config = None
         # Two settings, both required for parallel vLLM testing:
         #
@@ -276,7 +276,6 @@ def generate_grpo(
         ),
         "accelerator": accelerator,
         "use_separate_reference_adapter": use_separate_reference_adapter,
-        "use_vllm": use_vllm,
         "vllm_config": vllm_config,
         "max_output_tokens": max_tokens,
         "max_model_len": max_tokens + 5,
@@ -560,14 +559,14 @@ class TestGRPOInit:
         # engine is mocked here; the tiny actor is passed as the trainer base
         # (``_initialize_actors`` uses it directly when ``base_model`` is given).
         with pytest.warns(
-            UserWarning, match="hf_generate_chunk_size.*ignored.*use_vllm=True"
+            UserWarning,
+            match="hf_generate_chunk_size is only used for HuggingFace generation and is ignored when colocated",
         ):
             grpo = GRPO(
                 actor_network=actor,
                 pad_token_id=999,
                 pad_token="<pad>",
                 group_size=2,
-                use_vllm=True,
                 vllm_config=VLLMConfig(
                     gpu_memory_utilization=0.05,
                     max_num_seqs=1,
@@ -623,7 +622,7 @@ class TestGRPOInit:
         [False, True],
     )
     @pytest.mark.parametrize(
-        ("use_vllm", "pretrained_model_name_or_path"),
+        ("colocated", "pretrained_model_name_or_path"),
         [
             (False, TINY_LLM_FIXTURE_PATH),
             (True, TINY_LLM_FIXTURE_PATH),
@@ -651,7 +650,7 @@ class TestGRPOInit:
         max_tokens,
         group_size,
         use_separate_reference_adapter,
-        use_vllm,
+        colocated,
         pretrained_model_name_or_path,
         micro_batch_size_per_gpu,
         from_name,
@@ -659,7 +658,7 @@ class TestGRPOInit:
         mock_llm_instance = make_mock_vllm_instance(vllm.LLM)
         llm_patch_ctx = (
             patch("agilerl.algorithms.core.base.LLM", return_value=mock_llm_instance)
-            if use_vllm
+            if colocated
             else nullcontext()
         )
         with llm_patch_ctx:
@@ -673,7 +672,7 @@ class TestGRPOInit:
                 max_tokens,
                 group_size,
                 use_separate_reference_adapter,
-                use_vllm,
+                colocated,
                 pretrained_model_name_or_path,
                 micro_batch_size_per_gpu,
                 from_name=from_name,
@@ -718,15 +717,15 @@ class TestGRPOInit:
             assert grpo.lr_scheduler is None
             assert grpo.cosine_lr_schedule_config is None
 
-        if use_vllm:
-            assert grpo.use_vllm
+        if colocated:
+            assert grpo.colocated
             assert isinstance(grpo.vllm_config, VLLMConfig)
             assert grpo.llm is mock_llm_instance
         grpo.clean_up()
 
     @pytest.mark.parametrize("config", [deepspeed_config_stage_2])
     @pytest.mark.parametrize("use_deepspeed_optimizer", [False])
-    @pytest.mark.parametrize("use_vllm", [True])
+    @pytest.mark.parametrize("colocated", [True])
     @pytest.mark.parametrize(
         "pretrained_model_name_or_path",
         [TINY_LLM_FIXTURE_PATH],
@@ -747,7 +746,7 @@ class TestGRPOInit:
         max_tokens,
         group_size,
         use_separate_reference_adapter,
-        use_vllm,
+        colocated,
         pretrained_model_name_or_path,
         use_deepspeed_optimizer,
         config,
@@ -782,7 +781,6 @@ class TestGRPOInit:
                     if accelerator is not None
                     else CosineLRScheduleConfig(num_epochs=10, warmup_proportion=0.05)
                 ),
-                use_vllm=use_vllm,
                 vllm_config=VLLMConfig(
                     gpu_memory_utilization=0.05,
                     tensor_parallel_size=2,
@@ -795,7 +793,7 @@ class TestGRPOInit:
 
     @pytest.mark.parametrize("config", [deepspeed_config_stage_2])
     @pytest.mark.parametrize("use_deepspeed_optimizer", [False])
-    @pytest.mark.parametrize("use_vllm", [True])
+    @pytest.mark.parametrize("colocated", [True])
     @pytest.mark.parametrize(
         "pretrained_model_name_or_path",
         [TINY_LLM_FIXTURE_PATH],
@@ -817,7 +815,7 @@ class TestGRPOInit:
         max_tokens,
         group_size,
         use_separate_reference_adapter,
-        use_vllm,
+        colocated,
         pretrained_model_name_or_path,
         use_deepspeed_optimizer,
         config,
@@ -846,7 +844,6 @@ class TestGRPOInit:
                     if accelerator is not None
                     else CosineLRScheduleConfig(num_epochs=10, warmup_proportion=0.05)
                 ),
-                use_vllm=use_vllm,
                 vllm_config=VLLMConfig(
                     gpu_memory_utilization=0.05,
                     tensor_parallel_size=2,
@@ -900,7 +897,6 @@ class TestGRPOInit:
                     if accelerator is not None
                     else CosineLRScheduleConfig(num_epochs=10, warmup_proportion=0.05)
                 ),
-                use_vllm=True,
                 vllm_config=VLLMConfig(
                     gpu_memory_utilization=0.05,
                     max_num_seqs=1,
@@ -914,7 +910,7 @@ class TestGRPOInit:
     @pytest.mark.parametrize("group_size", [5])
     @pytest.mark.parametrize("use_separate_reference_adapter", [False])
     @pytest.mark.parametrize(
-        ("use_vllm", "pretrained_model_name_or_path"),
+        ("colocated", "pretrained_model_name_or_path"),
         [(False, TINY_LLM_FIXTURE_PATH)],
     )
     @pytest.mark.vllm
@@ -925,7 +921,7 @@ class TestGRPOInit:
         vocab_size,
         group_size,
         use_separate_reference_adapter,
-        use_vllm,
+        colocated,
         pretrained_model_name_or_path,
     ):
         with pytest.warns(
@@ -942,7 +938,6 @@ class TestGRPOInit:
                     num_epochs=10,
                     warmup_proportion=0.05,
                 ),
-                use_vllm=use_vllm,
                 accelerator=None,
                 use_separate_reference_adapter=use_separate_reference_adapter,
                 max_output_tokens=20,
@@ -956,7 +951,7 @@ class TestGRPOInit:
     @pytest.mark.parametrize("group_size", [5])
     @pytest.mark.parametrize("use_separate_reference_adapter", [False])
     @pytest.mark.parametrize(
-        ("use_vllm", "pretrained_model_name_or_path"),
+        ("colocated", "pretrained_model_name_or_path"),
         [(False, TINY_LLM_FIXTURE_PATH)],
     )
     @pytest.mark.vllm
@@ -973,7 +968,7 @@ class TestGRPOInit:
         max_tokens,
         group_size,
         use_separate_reference_adapter,
-        use_vllm,
+        colocated,
         pretrained_model_name_or_path,
         micro_batch_size_per_gpu,
     ):
@@ -1001,7 +996,6 @@ class TestGRPOInit:
                     num_epochs=10,
                     warmup_proportion=0.05,
                 ),
-                use_vllm=use_vllm,
                 use_separate_reference_adapter=use_separate_reference_adapter,
             )
 
@@ -1013,7 +1007,7 @@ class TestGRPOInit:
     @pytest.mark.parametrize("group_size", [5])
     @pytest.mark.parametrize("use_separate_reference_adapter", [False])
     @pytest.mark.parametrize(
-        ("use_vllm", "pretrained_model_name_or_path"),
+        ("colocated", "pretrained_model_name_or_path"),
         [(False, TINY_LLM_FIXTURE_PATH)],
     )
     @pytest.mark.vllm
@@ -1030,7 +1024,7 @@ class TestGRPOInit:
         max_tokens,
         group_size,
         use_separate_reference_adapter,
-        use_vllm,
+        colocated,
         pretrained_model_name_or_path,
         micro_batch_size_per_gpu,
     ):
@@ -1051,7 +1045,6 @@ class TestGRPOInit:
                     num_epochs=10,
                     warmup_proportion=0.05,
                 ),
-                use_vllm=use_vllm,
                 use_separate_reference_adapter=use_separate_reference_adapter,
                 max_output_tokens=None,
                 max_model_len=None,
@@ -1176,7 +1169,7 @@ class TestGRPOInit:
     @pytest.mark.parametrize("group_size", [5])
     @pytest.mark.parametrize("use_separate_reference_adapter", [False])
     @pytest.mark.parametrize(
-        ("use_vllm", "pretrained_model_name_or_path"),
+        ("colocated", "pretrained_model_name_or_path"),
         [(False, TINY_LLM_FIXTURE_PATH)],
     )
     @pytest.mark.vllm
@@ -1193,7 +1186,7 @@ class TestGRPOInit:
         max_tokens,
         group_size,
         use_separate_reference_adapter,
-        use_vllm,
+        colocated,
         pretrained_model_name_or_path,
         micro_batch_size_per_gpu,
     ):
@@ -1223,7 +1216,6 @@ class TestGRPOInit:
                     num_epochs=10,
                     warmup_proportion=0.05,
                 ),
-                use_vllm=use_vllm,
                 accelerator=accelerator,
                 use_separate_reference_adapter=use_separate_reference_adapter,
                 max_output_tokens=max_tokens,
@@ -1241,7 +1233,7 @@ class TestGRPOInit:
     @pytest.mark.parametrize("group_size", [5])
     @pytest.mark.parametrize("use_separate_reference_adapter", [False, True])
     @pytest.mark.parametrize(
-        ("use_vllm", "pretrained_model_name_or_path"),
+        ("colocated", "pretrained_model_name_or_path"),
         [(False, TINY_LLM_FIXTURE_PATH)],
     )
     @pytest.mark.vllm
@@ -1259,7 +1251,7 @@ class TestGRPOInit:
         max_tokens,
         group_size,
         use_separate_reference_adapter,
-        use_vllm,
+        colocated,
         pretrained_model_name_or_path,
         micro_batch_size_per_gpu,
     ):
@@ -1273,7 +1265,7 @@ class TestGRPOInit:
             max_tokens,
             group_size,
             use_separate_reference_adapter,
-            use_vllm,
+            colocated,
             pretrained_model_name_or_path,
             micro_batch_size_per_gpu,
         )
@@ -1684,7 +1676,6 @@ class TestGRPOInit:
                 micro_batch_size_per_gpu=None,
                 from_name=False,
                 group_size=2,
-                use_vllm=False,
             ).clean_up()
         AcceleratorState._reset_state(True)
 
@@ -1717,7 +1708,6 @@ class TestGRPOInit:
                     micro_batch_size_per_gpu=None,
                     from_name=False,
                     group_size=2,
-                    use_vllm=False,
                     use_liger_loss=True,
                 )
             assert grpo.use_liger_loss is False
@@ -1735,7 +1725,6 @@ class TestGRPOInit:
                 micro_batch_size_per_gpu=None,
                 from_name=False,
                 group_size=2,
-                use_vllm=False,
                 use_liger_loss=False,
             )
             with pytest.raises(
@@ -2323,7 +2312,7 @@ class TestGRPOGetAction:
     @pytest.mark.parametrize("max_tokens", [20])
     @pytest.mark.parametrize("group_size", [2])
     @pytest.mark.parametrize(
-        ("use_vllm", "pretrained_model_name_or_path"),
+        ("colocated", "pretrained_model_name_or_path"),
         [
             (True, TINY_LLM_FIXTURE_PATH),
         ],
@@ -2349,7 +2338,7 @@ class TestGRPOGetAction:
         input_size,
         max_tokens,
         group_size,
-        use_vllm,
+        colocated,
         training,
         data_batch_size,
         micro_batch_size_per_gpu,
@@ -2370,12 +2359,12 @@ class TestGRPOGetAction:
             max_tokens,
             group_size,
             use_separate_reference_adapter,
-            use_vllm,
+            colocated,
             pretrained_model_name_or_path,
             micro_batch_size_per_gpu,
             sleep_mode,
         )
-        assert grpo.use_vllm is True
+        assert grpo.colocated is True
         with (
             patch.object(
                 grpo,
@@ -2413,7 +2402,7 @@ class TestGRPOGetAction:
     @pytest.mark.parametrize("max_tokens", [20])
     @pytest.mark.parametrize("group_size", [5])
     @pytest.mark.parametrize(
-        ("use_vllm", "pretrained_model_name_or_path"),
+        ("colocated", "pretrained_model_name_or_path"),
         [(True, TINY_LLM_FIXTURE_PATH)],
     )
     @pytest.mark.gpu
@@ -2433,7 +2422,7 @@ class TestGRPOGetAction:
         input_size,
         max_tokens,
         group_size,
-        use_vllm,
+        colocated,
         pretrained_model_name_or_path,
         training,
         data_batch_size,
@@ -2454,7 +2443,7 @@ class TestGRPOGetAction:
                 max_tokens,
                 group_size,
                 use_separate_reference_adapter,
-                use_vllm,
+                colocated,
                 pretrained_model_name_or_path,
                 None,
             )
@@ -2487,7 +2476,7 @@ class TestGRPOMoveModelToVllm:
     @pytest.mark.parametrize("max_tokens", [20])
     @pytest.mark.parametrize("group_size", [5])
     @pytest.mark.parametrize(
-        ("use_vllm", "pretrained_model_name_or_path"),
+        ("colocated", "pretrained_model_name_or_path"),
         [(True, TINY_LLM_FIXTURE_PATH)],
     )
     @pytest.mark.vllm
@@ -2505,7 +2494,7 @@ class TestGRPOMoveModelToVllm:
         input_size,
         max_tokens,
         group_size,
-        use_vllm,
+        colocated,
         pretrained_model_name_or_path,
         micro_batch_size_per_gpu,
     ):
@@ -2519,7 +2508,7 @@ class TestGRPOMoveModelToVllm:
             max_tokens,
             group_size,
             use_separate_reference_adapter,
-            use_vllm,
+            colocated,
             pretrained_model_name_or_path,
             micro_batch_size_per_gpu,
         )
@@ -3263,7 +3252,7 @@ class TestGRPOLoss:
     @pytest.mark.parametrize("max_tokens", [20])
     @pytest.mark.parametrize("group_size", [5])
     @pytest.mark.parametrize(
-        ("use_vllm", "pretrained_model_name_or_path"),
+        ("colocated", "pretrained_model_name_or_path"),
         [(False, TINY_LLM_FIXTURE_PATH)],
     )
     @pytest.mark.vllm
@@ -3281,7 +3270,7 @@ class TestGRPOLoss:
         input_size,
         max_tokens,
         group_size,
-        use_vllm,
+        colocated,
         pretrained_model_name_or_path,
         micro_batch_size_per_gpu,
     ):
@@ -3295,7 +3284,7 @@ class TestGRPOLoss:
             max_tokens,
             group_size,
             use_separate_reference_adapter,
-            use_vllm,
+            colocated,
             pretrained_model_name_or_path,
             micro_batch_size_per_gpu,
         )
@@ -3338,7 +3327,7 @@ class TestGRPOLearn:
     @pytest.mark.parametrize("max_tokens", [20])
     @pytest.mark.parametrize("group_size", [6])
     @pytest.mark.parametrize(
-        ("use_vllm", "pretrained_model_name_or_path"),
+        ("colocated", "pretrained_model_name_or_path"),
         [(False, TINY_LLM_FIXTURE_PATH)],
     )
     @pytest.mark.vllm
@@ -3358,18 +3347,18 @@ class TestGRPOLearn:
         input_size,
         max_tokens,
         group_size,
-        use_vllm,
+        colocated,
         pretrained_model_name_or_path,
         batch_size,
         micro_batch_size_per_gpu,
         use_liger_loss,
     ):
-        if use_vllm and use_liger_loss:
+        if colocated and use_liger_loss:
             pytest.skip("Skip vLLM learn path with liger in this mocked-call test.")
         mock_llm_instance = make_mock_vllm_instance(vllm.LLM)
         llm_patch_ctx = (
             patch("agilerl.algorithms.core.base.LLM", return_value=mock_llm_instance)
-            if use_vllm
+            if colocated
             else nullcontext()
         )
         with llm_patch_ctx:
@@ -3383,7 +3372,7 @@ class TestGRPOLearn:
                 max_tokens,
                 group_size,
                 use_separate_reference_adapter,
-                use_vllm,
+                colocated,
                 pretrained_model_name_or_path,
                 micro_batch_size_per_gpu,
                 sleep_mode=True,
@@ -3416,7 +3405,7 @@ class TestGRPOLearn:
                 param.data.normal_()
 
         pre_learn_actor_state_dict = copy.deepcopy(grpo.actor.state_dict())
-        if use_vllm:
+        if colocated:
             grpo._vllm_awake = True
         with patch.object(
             grpo,
@@ -3425,11 +3414,11 @@ class TestGRPOLearn:
         ) as mock_prepare_vllm_for_training:
             learn_result = grpo.learn((completions, action_masks, rewards))
         assert mock_prepare_vllm_for_training.call_count == 1
-        if use_vllm:
+        if colocated:
             mock_llm_instance.sleep.assert_called_once()
         mean_loss = learn_result["loss"]
         mean_kl = learn_result["kl"]
-        if use_vllm:
+        if colocated:
             grpo._vllm_awake = True
         with patch.object(
             grpo,
@@ -3438,7 +3427,7 @@ class TestGRPOLearn:
         ) as mock_prepare_vllm_for_training:
             learn_result = grpo.learn((completions, action_masks, rewards))
         assert mock_prepare_vllm_for_training.call_count == 1
-        if use_vllm:
+        if colocated:
             mock_llm_instance.sleep.assert_called_once()
         mean_loss = learn_result["loss"]
         mean_kl = learn_result["kl"]
@@ -3805,7 +3794,7 @@ class TestGRPOLearn:
     @pytest.mark.parametrize("max_tokens", [20])
     @pytest.mark.parametrize("group_size", [5])
     @pytest.mark.parametrize(
-        ("use_vllm", "pretrained_model_name_or_path"),
+        ("colocated", "pretrained_model_name_or_path"),
         [(False, TINY_LLM_FIXTURE_PATH)],
     )
     @pytest.mark.vllm
@@ -3824,7 +3813,7 @@ class TestGRPOLearn:
         input_size,
         max_tokens,
         group_size,
-        use_vllm,
+        colocated,
         pretrained_model_name_or_path,
         batch_size,
         micro_batch_size_per_gpu,
@@ -3839,7 +3828,7 @@ class TestGRPOLearn:
             max_tokens,
             group_size,
             use_separate_reference_adapter,
-            use_vllm,
+            colocated,
             pretrained_model_name_or_path,
             micro_batch_size_per_gpu,
         )
@@ -3932,7 +3921,6 @@ class TestGRPOLearn:
             max_tokens=10,
             group_size=2,
             use_separate_reference_adapter=False,
-            use_vllm=False,
             pretrained_model_name_or_path=None,
             micro_batch_size_per_gpu=None,
             from_name=False,
@@ -3975,7 +3963,6 @@ class TestGRPOLearn:
             max_tokens=10,
             group_size=2,
             use_separate_reference_adapter=False,
-            use_vllm=False,
             pretrained_model_name_or_path=None,
             micro_batch_size_per_gpu=None,
             from_name=False,
@@ -4065,7 +4052,6 @@ class TestGRPOLearn:
             max_tokens=10,
             group_size=2,
             use_separate_reference_adapter=False,
-            use_vllm=False,
             pretrained_model_name_or_path=None,
             micro_batch_size_per_gpu=None,
             from_name=False,
@@ -4108,7 +4094,7 @@ class TestGRPOGetLogprobs:
     @pytest.mark.parametrize("max_tokens", [20])
     @pytest.mark.parametrize("group_size", [5])
     @pytest.mark.parametrize(
-        ("use_vllm", "pretrained_model_name_or_path"),
+        ("colocated", "pretrained_model_name_or_path"),
         [
             (False, TINY_LLM_FIXTURE_PATH),
             (False, None),
@@ -4130,7 +4116,7 @@ class TestGRPOGetLogprobs:
         input_size,
         max_tokens,
         group_size,
-        use_vllm,
+        colocated,
         pretrained_model_name_or_path,
         batch_size,
         micro_batch_size_per_gpu,
@@ -4145,7 +4131,7 @@ class TestGRPOGetLogprobs:
             max_tokens,
             group_size,
             use_separate_reference_adapter,
-            use_vllm,
+            colocated,
             pretrained_model_name_or_path,
             micro_batch_size_per_gpu,
         )
@@ -4167,7 +4153,7 @@ class TestGRPOBackwardPass:
     @pytest.mark.parametrize("max_tokens", [20])
     @pytest.mark.parametrize("group_size", [5])
     @pytest.mark.parametrize(
-        ("use_vllm", "pretrained_model_name_or_path"),
+        ("colocated", "pretrained_model_name_or_path"),
         [(False, None)],
     )
     @pytest.mark.vllm
@@ -4186,7 +4172,7 @@ class TestGRPOBackwardPass:
         input_size,
         max_tokens,
         group_size,
-        use_vllm,
+        colocated,
         pretrained_model_name_or_path,
         batch_size,
         micro_batch_size_per_gpu,
@@ -4201,7 +4187,7 @@ class TestGRPOBackwardPass:
             max_tokens,
             group_size,
             use_separate_reference_adapter,
-            use_vllm,
+            colocated,
             pretrained_model_name_or_path,
             micro_batch_size_per_gpu,
         )
@@ -4234,7 +4220,7 @@ class TestGRPOSaveLoadCheckpoint:
     @pytest.mark.parametrize("max_tokens", [20])
     @pytest.mark.parametrize("group_size", [5])
     @pytest.mark.parametrize(
-        ("use_vllm", "pretrained_model_name_or_path"),
+        ("colocated", "pretrained_model_name_or_path"),
         [(False, TINY_LLM_FIXTURE_PATH)],
     )
     @pytest.mark.vllm
@@ -4253,7 +4239,7 @@ class TestGRPOSaveLoadCheckpoint:
         input_size,
         max_tokens,
         group_size,
-        use_vllm,
+        colocated,
         pretrained_model_name_or_path,
         tmpdir,
         micro_batch_size_per_gpu,
@@ -4269,7 +4255,7 @@ class TestGRPOSaveLoadCheckpoint:
             max_tokens,
             group_size,
             use_separate_reference_adapter,
-            use_vllm,
+            colocated,
             pretrained_model_name_or_path,
             micro_batch_size_per_gpu,
         )
@@ -4288,7 +4274,6 @@ class TestGRPOSaveLoadCheckpoint:
                     if accelerator is not None
                     else CosineLRScheduleConfig(num_epochs=10, warmup_proportion=0.05)
                 ),
-                use_vllm=use_vllm,
                 accelerator=accelerator,
                 use_separate_reference_adapter=use_separate_reference_adapter,
                 # Match the saved agent's setting so the constructor doesn't
@@ -4389,7 +4374,7 @@ class TestGRPOSaveLoadDistributedActor:
     @pytest.mark.parametrize("max_tokens", [20])
     @pytest.mark.parametrize("group_size", [5])
     @pytest.mark.parametrize(
-        ("use_vllm", "pretrained_model_name_or_path"),
+        ("colocated", "pretrained_model_name_or_path"),
         [(False, TINY_LLM_FIXTURE_PATH)],
     )
     @pytest.mark.vllm
@@ -4408,7 +4393,7 @@ class TestGRPOSaveLoadDistributedActor:
         input_size,
         max_tokens,
         group_size,
-        use_vllm,
+        colocated,
         pretrained_model_name_or_path,
         batch_size,
         tmpdir,
@@ -4424,7 +4409,7 @@ class TestGRPOSaveLoadDistributedActor:
             max_tokens,
             group_size,
             use_separate_reference_adapter,
-            use_vllm,
+            colocated,
             pretrained_model_name_or_path,
             micro_batch_size_per_gpu,
         )
@@ -4452,7 +4437,7 @@ class TestGRPOSaveLoadDistributedActor:
     @pytest.mark.parametrize("max_tokens", [20])
     @pytest.mark.parametrize("group_size", [5])
     @pytest.mark.parametrize(
-        ("use_vllm", "pretrained_model_name_or_path"),
+        ("colocated", "pretrained_model_name_or_path"),
         [(False, TINY_LLM_FIXTURE_PATH)],
     )
     @pytest.mark.vllm
@@ -4470,7 +4455,7 @@ class TestGRPOSaveLoadDistributedActor:
         input_size,
         max_tokens,
         group_size,
-        use_vllm,
+        colocated,
         pretrained_model_name_or_path,
         tmpdir,
         micro_batch_size_per_gpu,
@@ -4485,7 +4470,7 @@ class TestGRPOSaveLoadDistributedActor:
             max_tokens,
             group_size,
             use_separate_reference_adapter,
-            use_vllm,
+            colocated,
             pretrained_model_name_or_path,
             micro_batch_size_per_gpu,
         )
@@ -4569,7 +4554,7 @@ class TestGRPOSaveLoadDistributedActor:
     @pytest.mark.parametrize("max_tokens", [20])
     @pytest.mark.parametrize("group_size", [5])
     @pytest.mark.parametrize(
-        ("use_vllm", "pretrained_model_name_or_path"),
+        ("colocated", "pretrained_model_name_or_path"),
         [(True, TINY_LLM_FIXTURE_PATH)],
     )
     @pytest.mark.vllm
@@ -4587,7 +4572,7 @@ class TestGRPOSaveLoadDistributedActor:
         input_size,
         max_tokens,
         group_size,
-        use_vllm,
+        colocated,
         pretrained_model_name_or_path,
         tmpdir,
         micro_batch_size_per_gpu,
@@ -4602,7 +4587,7 @@ class TestGRPOSaveLoadDistributedActor:
             max_tokens,
             group_size,
             use_separate_reference_adapter,
-            use_vllm,
+            colocated,
             pretrained_model_name_or_path,
             micro_batch_size_per_gpu,
         )
@@ -4687,7 +4672,7 @@ class TestGRPOClone:
     @pytest.mark.parametrize("max_tokens", [20])
     @pytest.mark.parametrize("group_size", [5])
     @pytest.mark.parametrize(
-        ("use_vllm", "pretrained_model_name_or_path"),
+        ("colocated", "pretrained_model_name_or_path"),
         [(False, TINY_LLM_FIXTURE_PATH)],
     )
     @pytest.mark.vllm
@@ -4705,7 +4690,7 @@ class TestGRPOClone:
         input_size,
         max_tokens,
         group_size,
-        use_vllm,
+        colocated,
         pretrained_model_name_or_path,
         tmpdir,
         micro_batch_size_per_gpu,
@@ -4720,7 +4705,7 @@ class TestGRPOClone:
             max_tokens,
             group_size,
             use_separate_reference_adapter,
-            use_vllm,
+            colocated,
             pretrained_model_name_or_path,
             micro_batch_size_per_gpu,
         )
@@ -4790,7 +4775,7 @@ class TestGRPOClone:
     @pytest.mark.parametrize("max_tokens", [20])
     @pytest.mark.parametrize("group_size", [5])
     @pytest.mark.parametrize(
-        ("use_vllm", "pretrained_model_name_or_path"),
+        ("colocated", "pretrained_model_name_or_path"),
         [(True, TINY_LLM_FIXTURE_PATH)],
     )
     @pytest.mark.vllm
@@ -4809,7 +4794,7 @@ class TestGRPOClone:
         input_size,
         max_tokens,
         group_size,
-        use_vllm,
+        colocated,
         pretrained_model_name_or_path,
         tmpdir,
         micro_batch_size_per_gpu,
@@ -4824,7 +4809,7 @@ class TestGRPOClone:
             max_tokens,
             group_size,
             use_separate_reference_adapter,
-            use_vllm,
+            colocated,
             pretrained_model_name_or_path,
             micro_batch_size_per_gpu,
         )
@@ -4899,7 +4884,7 @@ class TestGRPOTest:
     @pytest.mark.parametrize("max_tokens", [20])
     @pytest.mark.parametrize("group_size", [5])
     @pytest.mark.parametrize(
-        ("use_vllm", "pretrained_model_name_or_path"),
+        ("colocated", "pretrained_model_name_or_path"),
         [(False, TINY_LLM_FIXTURE_PATH)],
     )
     @pytest.mark.vllm
@@ -4918,7 +4903,7 @@ class TestGRPOTest:
         input_size,
         max_tokens,
         group_size,
-        use_vllm,
+        colocated,
         pretrained_model_name_or_path,
         batch_size,
         micro_batch_size_per_gpu,
@@ -4933,7 +4918,7 @@ class TestGRPOTest:
             max_tokens,
             group_size,
             use_separate_reference_adapter,
-            use_vllm,
+            colocated,
             pretrained_model_name_or_path,
             micro_batch_size_per_gpu,
         )
@@ -5196,7 +5181,7 @@ class TestGRPOCleanUp:
     @pytest.mark.parametrize("max_tokens", [20])
     @pytest.mark.parametrize("group_size", [5])
     @pytest.mark.parametrize(
-        ("use_vllm", "pretrained_model_name_or_path"),
+        ("colocated", "pretrained_model_name_or_path"),
         [(False, TINY_LLM_FIXTURE_PATH)],
     )
     @pytest.mark.vllm
@@ -5216,7 +5201,7 @@ class TestGRPOCleanUp:
         input_size,
         max_tokens,
         group_size,
-        use_vllm,
+        colocated,
         pretrained_model_name_or_path,
         micro_batch_size_per_gpu,
     ):
@@ -5230,7 +5215,7 @@ class TestGRPOCleanUp:
             max_tokens,
             group_size,
             use_separate_reference_adapter,
-            use_vllm,
+            colocated,
             pretrained_model_name_or_path,
             micro_batch_size_per_gpu,
         )
@@ -5249,7 +5234,7 @@ class TestGRPOPreprocessObservation:
     @pytest.mark.parametrize("max_tokens", [20])
     @pytest.mark.parametrize("group_size", [5])
     @pytest.mark.parametrize(
-        ("use_vllm", "pretrained_model_name_or_path"),
+        ("colocated", "pretrained_model_name_or_path"),
         [(False, TINY_LLM_FIXTURE_PATH)],
     )
     @pytest.mark.vllm
@@ -5269,7 +5254,7 @@ class TestGRPOPreprocessObservation:
         input_size,
         max_tokens,
         group_size,
-        use_vllm,
+        colocated,
         pretrained_model_name_or_path,
         micro_batch_size_per_gpu,
     ):
@@ -5283,7 +5268,7 @@ class TestGRPOPreprocessObservation:
             max_tokens,
             group_size,
             use_separate_reference_adapter,
-            use_vllm,
+            colocated,
             pretrained_model_name_or_path,
             micro_batch_size_per_gpu,
         )
@@ -5352,7 +5337,7 @@ class TestGRPOLoadDistributedActor:
     @pytest.mark.parametrize("max_tokens", [20])
     @pytest.mark.parametrize("group_size", [5])
     @pytest.mark.parametrize(
-        ("use_vllm", "pretrained_model_name_or_path"),
+        ("colocated", "pretrained_model_name_or_path"),
         [(False, TINY_LLM_FIXTURE_PATH)],
     )
     @pytest.mark.vllm
@@ -5372,7 +5357,7 @@ class TestGRPOLoadDistributedActor:
         input_size,
         max_tokens,
         group_size,
-        use_vllm,
+        colocated,
         pretrained_model_name_or_path,
         micro_batch_size_per_gpu,
     ):
@@ -5386,7 +5371,7 @@ class TestGRPOLoadDistributedActor:
             max_tokens,
             group_size,
             use_separate_reference_adapter,
-            use_vllm,
+            colocated,
             pretrained_model_name_or_path,
             micro_batch_size_per_gpu,
         )
@@ -5409,7 +5394,7 @@ class TestGRPOLoadDistributedActor:
     @pytest.mark.parametrize("max_tokens", [20])
     @pytest.mark.parametrize("group_size", [5])
     @pytest.mark.parametrize(
-        ("use_vllm", "pretrained_model_name_or_path"),
+        ("colocated", "pretrained_model_name_or_path"),
         [(False, TINY_LLM_FIXTURE_PATH)],
     )
     @pytest.mark.vllm
@@ -5429,7 +5414,7 @@ class TestGRPOLoadDistributedActor:
         input_size,
         max_tokens,
         group_size,
-        use_vllm,
+        colocated,
         pretrained_model_name_or_path,
         micro_batch_size_per_gpu,
     ):
@@ -5443,7 +5428,7 @@ class TestGRPOLoadDistributedActor:
             max_tokens,
             group_size,
             use_separate_reference_adapter,
-            use_vllm,
+            colocated,
             pretrained_model_name_or_path,
             micro_batch_size_per_gpu,
         )
@@ -5471,7 +5456,7 @@ class TestGRPOUpdateLr:
     @pytest.mark.parametrize("max_tokens", [20])
     @pytest.mark.parametrize("group_size", [5])
     @pytest.mark.parametrize(
-        ("use_vllm", "pretrained_model_name_or_path"),
+        ("colocated", "pretrained_model_name_or_path"),
         [(False, TINY_LLM_FIXTURE_PATH)],
     )
     @pytest.mark.vllm
@@ -5489,7 +5474,7 @@ class TestGRPOUpdateLr:
         input_size,
         max_tokens,
         group_size,
-        use_vllm,
+        colocated,
         pretrained_model_name_or_path,
         micro_batch_size_per_gpu,
     ):
@@ -5503,7 +5488,7 @@ class TestGRPOUpdateLr:
             max_tokens,
             group_size,
             use_separate_reference_adapter,
-            use_vllm,
+            colocated,
             pretrained_model_name_or_path,
             micro_batch_size_per_gpu,
         )
@@ -5556,7 +5541,7 @@ class TestGRPOSetReferencePolicy:
     @pytest.mark.parametrize("max_tokens", [20])
     @pytest.mark.parametrize("group_size", [5])
     @pytest.mark.parametrize(
-        ("use_vllm", "pretrained_model_name_or_path"),
+        ("colocated", "pretrained_model_name_or_path"),
         [(False, TINY_LLM_FIXTURE_PATH)],
     )
     @pytest.mark.vllm
@@ -5574,7 +5559,7 @@ class TestGRPOSetReferencePolicy:
         input_size,
         max_tokens,
         group_size,
-        use_vllm,
+        colocated,
         pretrained_model_name_or_path,
         micro_batch_size_per_gpu,
     ):
@@ -5588,7 +5573,7 @@ class TestGRPOSetReferencePolicy:
             max_tokens,
             group_size,
             use_separate_reference_adapter,
-            use_vllm,
+            colocated,
             pretrained_model_name_or_path,
             micro_batch_size_per_gpu,
         )
@@ -5627,7 +5612,7 @@ class TestGRPOSetReferencePolicy:
     @pytest.mark.parametrize("max_tokens", [20])
     @pytest.mark.parametrize("group_size", [5])
     @pytest.mark.parametrize(
-        ("use_vllm", "pretrained_model_name_or_path"),
+        ("colocated", "pretrained_model_name_or_path"),
         [(False, TINY_LLM_FIXTURE_PATH)],
     )
     @pytest.mark.vllm
@@ -5645,7 +5630,7 @@ class TestGRPOSetReferencePolicy:
         input_size,
         max_tokens,
         group_size,
-        use_vllm,
+        colocated,
         pretrained_model_name_or_path,
         micro_batch_size_per_gpu,
     ):
@@ -5659,7 +5644,7 @@ class TestGRPOSetReferencePolicy:
             max_tokens,
             group_size,
             use_separate_reference_adapter,
-            use_vllm,
+            colocated,
             pretrained_model_name_or_path,
             micro_batch_size_per_gpu,
         )
@@ -5713,7 +5698,7 @@ class TestGRPORecompile:
     @pytest.mark.parametrize("max_tokens", [20])
     @pytest.mark.parametrize("group_size", [2])
     @pytest.mark.parametrize(
-        ("use_vllm", "pretrained_model_name_or_path"),
+        ("colocated", "pretrained_model_name_or_path"),
         [
             (False, TINY_LLM_FIXTURE_PATH),
         ],
@@ -5736,7 +5721,7 @@ class TestGRPORecompile:
         input_size,
         max_tokens,
         group_size,
-        use_vllm,
+        colocated,
         training,
         data_batch_size,
         micro_batch_size_per_gpu,
@@ -5751,7 +5736,7 @@ class TestGRPORecompile:
             max_tokens,
             group_size,
             use_separate_reference_adapter,
-            use_vllm,
+            colocated,
             pretrained_model_name_or_path,
             micro_batch_size_per_gpu,
         )

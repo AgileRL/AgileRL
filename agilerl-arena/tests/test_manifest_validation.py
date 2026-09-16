@@ -217,84 +217,13 @@ class TestResolution:
         )
         assert validated.algorithm.max_model_len == 512
 
-    def test_colocated_rollout_turns_the_trainers_vllm_on(self) -> None:
+    def test_colocated_rollout_fills_default_vllm_config(self) -> None:
         validated = TrainingManifest.model_validate(GRPO)
-        assert validated.algorithm.use_vllm is True
+        assert validated.training.rollout_mode == "colocated"
         assert validated.algorithm.vllm_config is not None
         assert validated.algorithm.vllm_config.sleep_mode is True
         assert validated.algorithm.vllm_config.max_num_seqs == 16
         assert validated.algorithm.vllm_config.gpu_memory_utilization == 0.9
-
-    def test_async_rollout_turns_the_trainers_vllm_off(self) -> None:
-        validated = TrainingManifest.model_validate(
-            manifest(
-                GRPO,
-                environment={
-                    "env_type": "rollout",
-                    "entrypoint": "gem:make",
-                    "env_config": {"env_id": "game:Sudoku-v0"},
-                    "dataset": None,
-                    "reward_file_path": None,
-                    "prompt_template": None,
-                },
-                training={
-                    "rollout_mode": "async",
-                    "rollout_engines_per_agent": 1,
-                },
-                replay_buffer={"kind": "llm"},
-            )
-        )
-        assert validated.algorithm.use_vllm is False
-
-    def test_explicit_use_vllm_false_with_colocated_is_an_error(self) -> None:
-        with pytest.raises(ValidationError, match="use_vllm"):
-            TrainingManifest.model_validate(
-                manifest(
-                    GRPO,
-                    algorithm={"use_vllm": False},
-                    training={"rollout_mode": "colocated"},
-                )
-            )
-
-    def test_explicit_use_vllm_false_without_rollout_mode_stays_false(self) -> None:
-        validated = TrainingManifest.model_validate(
-            manifest(GRPO, algorithm={"use_vllm": False})
-        )
-        assert validated.algorithm.use_vllm is False
-
-    def test_explicit_use_vllm_false_without_rollout_mode_round_trips(self) -> None:
-        payload = TrainingManifest.model_validate(
-            manifest(GRPO, algorithm={"use_vllm": False})
-        ).to_payload()
-        assert payload["algorithm"]["use_vllm"] is False
-        assert "rollout_mode" not in payload["training"]
-        reloaded = TrainingManifest.model_validate(payload)
-        assert reloaded.algorithm.use_vllm is False
-
-    def test_explicit_use_vllm_true_with_async_is_an_error(self) -> None:
-        with pytest.raises(ValidationError, match="use_vllm"):
-            TrainingManifest.model_validate(
-                manifest(
-                    GRPO,
-                    algorithm={
-                        "use_vllm": True,
-                        "vllm_config": {"max_num_seqs": 4},
-                    },
-                    environment={
-                        "env_type": "rollout",
-                        "entrypoint": "gem:make",
-                        "env_config": {"env_id": "game:Sudoku-v0"},
-                        "dataset": None,
-                        "reward_file_path": None,
-                        "prompt_template": None,
-                    },
-                    training={
-                        "rollout_mode": "async",
-                        "rollout_engines_per_agent": 1,
-                    },
-                    replay_buffer={"kind": "llm"},
-                )
-            )
 
     def test_gym_num_envs_default_does_not_overwrite_ppo(self) -> None:
         validated = TrainingManifest.model_validate(
@@ -587,6 +516,28 @@ class TestCrossSectionConsistency:
         broken["replay_buffer"] = replay_buffer
         with pytest.raises(ValidationError, match="LLMRolloutBufferSpec"):
             TrainingManifest.model_validate(broken)
+
+    def test_async_rollout_accepts_the_llm_rollout_buffer(self) -> None:
+        payload = manifest(
+            GRPO,
+            environment={
+                "env_type": "rollout",
+                "entrypoint": "gem:make",
+                "env_config": {"env_id": "game:Sudoku-v0"},
+                "dataset": None,
+                "reward_file_path": None,
+                "prompt_template": None,
+            },
+            training={
+                "rollout_mode": "async",
+                "rollout_engines_per_agent": 1,
+            },
+            replay_buffer={"kind": "llm"},
+        )
+
+        validated = TrainingManifest.model_validate(payload)
+
+        assert isinstance(validated.replay_buffer, LLMRolloutBufferSpec)
 
     def test_an_anchored_answer_pattern_is_rejected(self) -> None:
         # Detection searches for the pattern; a grammar matches the whole

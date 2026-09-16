@@ -7,8 +7,7 @@ from __future__ import annotations
 
 from typing import ClassVar
 
-from pydantic import Field, model_validator
-from typing_extensions import Self
+from pydantic import Field
 
 from agilerl.arena.models.algorithms.base import LLMAlgorithmSpec
 from agilerl.arena.models.descriptions import (
@@ -25,7 +24,6 @@ from agilerl.arena.models.descriptions import (
     TEMPERATURE,
     TOP_K,
     TOP_P,
-    USE_VLLM,
     VLLM_CONFIG,
 )
 from agilerl.arena.models.env import LLMEnvType
@@ -55,23 +53,12 @@ class RolloutLLMSpec(LLMAlgorithmSpec):
         default=None, description=COSINE_LR
     )
     vllm_config: VLLMConfig | None = Field(default=None, description=VLLM_CONFIG)
-    use_vllm: bool = Field(default=False, description=USE_VLLM)
     vllm_importance_sampling_correction: bool = Field(
         default=True, description=IS_CORRECTION
     )
     vllm_importance_sampling_cap: float = Field(default=2.0, ge=0.0, description=IS_CAP)
 
     env_type: ClassVar[LLMEnvType] = LLMEnvType.ROLLOUT
-
-    @model_validator(mode="after")
-    def _validate_vllm_config(self) -> Self:
-        if self.use_vllm and self.vllm_config is None:
-            msg = (
-                "use_vllm is set but no vllm_config was provided in the algorithm "
-                "section of the manifest."
-            )
-            raise ValueError(msg)
-        return self
 
     def _max_output_tokens(self) -> int | None:
         return self.max_output_tokens

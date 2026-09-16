@@ -91,7 +91,7 @@ class TestREINFORCETest:
             vocab_size=vocab_size,
             input_size=input_size,
             max_tokens=max_tokens,
-            use_vllm=True,
+            colocated=True,
             pretrained_model_name_or_path=pretrained_model_name_or_path,
             micro_batch_size_per_gpu=micro_batch_size_per_gpu,
             # Keep the always-awake path covered here; the sleep/wake cycle is
@@ -99,7 +99,7 @@ class TestREINFORCETest:
             sleep_mode=False,
         )
 
-        assert rf.use_vllm
+        assert rf.colocated
         assert rf.llm is not None
         assert not rf.vllm_config.sleep_mode
 
@@ -190,7 +190,7 @@ class TestREINFORCETest:
             vocab_size=vocab_size,
             input_size=input_size,
             max_tokens=max_tokens,
-            use_vllm=True,
+            colocated=True,
             pretrained_model_name_or_path=pretrained_model_name_or_path,
             micro_batch_size_per_gpu=None,
             sleep_mode=True,
@@ -284,7 +284,7 @@ class TestREINFORCETest:
             vocab_size=vocab_size,
             input_size=input_size,
             max_tokens=max_tokens,
-            use_vllm=True,
+            colocated=True,
             pretrained_model_name_or_path=pretrained_model_name_or_path,
             micro_batch_size_per_gpu=None,
             sleep_mode=True,

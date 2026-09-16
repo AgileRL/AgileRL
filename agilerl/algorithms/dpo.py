@@ -206,7 +206,6 @@ class DPO(LLMAlgorithm[PreferencePrompts]):
         self.temperature = (
             1  # Temperature for logits calculation, DPO does not use temperature
         )
-        self.use_vllm = False  # DPO does not use VLLM
         self.update_epochs = update_epochs
 
         self._initialize_actors(actor_network, not clone)

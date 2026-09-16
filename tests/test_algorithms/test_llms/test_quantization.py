@@ -579,7 +579,7 @@ class TestColocatedInitOrdering:
                 raise NotImplementedError
 
         agent = object.__new__(_ConcreteLLMAlgorithm)
-        agent.use_vllm = kwargs.get("use_vllm", True)
+        agent.colocated = kwargs.get("colocated", True)
         agent.vllm_config = kwargs.get("vllm_config", VLLMConfig(sleep_mode=True))
         agent.quantization_config = kwargs.get("quantization_config")
         agent.accelerator = kwargs.get("accelerator")

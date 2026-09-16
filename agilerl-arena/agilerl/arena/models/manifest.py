@@ -26,6 +26,7 @@ from typing_extensions import Self
 
 from agilerl.arena.models.algorithms.base import AlgoSpec, LLMAlgorithmSpec
 from agilerl.arena.models.algorithms.ppo import PPOSpec
+from agilerl.arena.models.algorithms.rollout_llm import RolloutLLMSpec
 from agilerl.arena.models.env import EnvSpec
 from agilerl.arena.models.hpo import (
     MultiFrequencySelectionSpec,
@@ -468,24 +469,12 @@ class TrainingManifest(BaseModel):
                 source_set="lora_config" in self.network.model_fields_set,
             )
 
-        if "use_vllm" in type(self.algorithm).model_fields:
-            # Async rollout owns generation on its own engines, so the trainer's
-            # in-process vLLM must be off. An omitted use_vllm follows
-            # rollout_mode; both sides set and disagree is an error.
-            implied = self.training.rollout_mode == "colocated"
-            if "use_vllm" not in self.algorithm.model_fields_set:
-                self.algorithm.use_vllm = implied
-            elif (
-                "rollout_mode" in self.training.model_fields_set
-                and self.algorithm.use_vllm != implied
-            ):
-                msg = (
-                    f"algorithm.use_vllm={self.algorithm.use_vllm!r} disagrees with "
-                    f"training.rollout_mode={self.training.rollout_mode!r}."
-                )
-                raise ValueError(msg)
-            if self.algorithm.use_vllm and self.algorithm.vllm_config is None:
-                self.algorithm.vllm_config = default_colocated_vllm_config()
+        if (
+            isinstance(self.algorithm, RolloutLLMSpec)
+            and self.training.rollout_mode == "colocated"
+            and self.algorithm.vllm_config is None
+        ):
+            self.algorithm.vllm_config = default_colocated_vllm_config()
         return self
 
     @model_validator(mode="after")
