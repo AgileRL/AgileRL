@@ -189,7 +189,6 @@ def _cpu_llmreinforce(**kwargs):
         "accelerator": None,
         "wrap": False,
         "gradient_checkpointing": False,
-        "use_vllm": False,
         "lr": 1e-3,
         "update_epochs": 1,
         "beta": 0.01,
@@ -211,9 +210,9 @@ def generate_reinforce(
     vocab_size,
     input_size,
     max_tokens,
-    use_vllm,
-    pretrained_model_name_or_path,
-    micro_batch_size_per_gpu,
+    colocated=False,
+    pretrained_model_name_or_path=None,
+    micro_batch_size_per_gpu=None,
     lr=1e-5,
     lr_eff=None,
     sleep_mode=False,
@@ -232,7 +231,7 @@ def generate_reinforce(
     if not use_deepspeed_optimizer and accelerator is not None:
         accelerator.state.deepspeed_plugin.deepspeed_config.pop("optimizer", None)
 
-    if use_vllm:
+    if colocated:
         lora_config = None
         # See ``tests/test_algorithms/test_llms/test_grpo.py:generate_grpo``
         # for the full rationale. tl;dr both settings are required for
@@ -307,7 +306,6 @@ def generate_reinforce(
             else CosineLRScheduleConfig(num_epochs=10, warmup_proportion=0.05)
         ),
         "accelerator": accelerator,
-        "use_vllm": use_vllm,
         "vllm_config": vllm_config,
         "max_output_tokens": max_tokens,
         "max_model_len": max_tokens + 5,
@@ -417,7 +415,6 @@ class TestREINFORCEInit:
             pad_token_id=99,
             pad_token="<pad>",
             lora_config=lora,
-            use_vllm=True,
             vllm_config=VLLMConfig(
                 gpu_memory_utilization=0.2,
                 max_num_seqs=1,
@@ -429,7 +426,7 @@ class TestREINFORCEInit:
             gradient_checkpointing=False,
             device="cpu",
         )
-        assert rf.use_vllm
+        assert rf.colocated
         mock_instance.sleep.assert_called()
         rf.clean_up()
 
@@ -448,14 +445,14 @@ class TestREINFORCEInit:
         )
         # The vLLM engine is mocked; the dummy actor is the trainer base.
         with pytest.warns(
-            UserWarning, match="hf_generate_chunk_size.*ignored.*use_vllm=True"
+            UserWarning,
+            match="hf_generate_chunk_size is only used for HuggingFace generation and is ignored when colocated",
         ):
             rf = REINFORCE(
                 actor_network=actor,
                 pad_token_id=99,
                 pad_token="<pad>",
                 lora_config=lora,
-                use_vllm=True,
                 vllm_config=VLLMConfig(
                     gpu_memory_utilization=0.2,
                     max_num_seqs=1,
@@ -634,8 +631,8 @@ class TestREINFORCEInit:
 
 class TestREINFORCEGetAction:
     def test_llmreinforce_get_action_vllm_routes_through_vllm_calls(self):
-        rf = _cpu_llmreinforce(use_vllm=False)
-        rf.use_vllm = True
+        rf = _cpu_llmreinforce()
+        rf.colocated = True
         rf.vllm_config = VLLMConfig(
             gpu_memory_utilization=0.2,
             max_num_seqs=1,
@@ -689,7 +686,7 @@ class TestREINFORCEGetAction:
         rf.clean_up()
 
     def test_llmreinforce_get_action_hf_path_contract(self):
-        rf = _cpu_llmreinforce(use_vllm=False, max_model_len=128, max_output_tokens=8)
+        rf = _cpu_llmreinforce(max_model_len=128, max_output_tokens=8)
         prompt_len = 10
         prompts = [
             {
@@ -710,7 +707,7 @@ class TestREINFORCEGetAction:
         rf.clean_up()
 
     def test_llmreinforce_get_action_hf_path_handles_actor_without_parameters(self):
-        rf = _cpu_llmreinforce(use_vllm=False, max_model_len=128, max_output_tokens=8)
+        rf = _cpu_llmreinforce(max_model_len=128, max_output_tokens=8)
 
         class _NoParamModule:
             def parameters(self):
@@ -862,17 +859,16 @@ class TestREINFORCELearn:
         rewards = torch.tensor([[0.5, -0.5]], dtype=torch.float32)
         rf.learn((completions, action_masks, rewards), turn_ids=turn_ids)
 
-    @pytest.mark.parametrize("use_vllm", [False, True])
-    def test_llmreinforce_learns_rollout(self, use_vllm):
+    @pytest.mark.parametrize("colocated", [False, True])
+    def test_llmreinforce_learns_rollout(self, colocated):
         """Multi-turn learn path updates actor adapters without vLLM/DeepSpeed."""
         torch.manual_seed(0)
         rf = _cpu_llmreinforce(
             lr=0.05,
             update_epochs=2,
-            use_vllm=False,
         )
-        if use_vllm:
-            rf.use_vllm = True
+        if colocated:
+            rf.colocated = True
             rf.vllm_config = VLLMConfig(
                 gpu_memory_utilization=0.2,
                 max_num_seqs=1,
@@ -921,7 +917,7 @@ class TestREINFORCELearn:
         ):
             rf.learn((completions, action_masks, rewards), turn_ids=turn_ids)
         assert mock_prepare_vllm_for_training.call_count == 1
-        if use_vllm:
+        if colocated:
             rf.llm.sleep.assert_called_once()
         pre_learn_actor_state_dict = {
             name: param.clone().detach() for name, param in rf.actor.named_parameters()
@@ -1000,7 +996,6 @@ class TestREINFORCELearn:
             accelerator=None,
             wrap=True,
             gradient_checkpointing=False,
-            use_vllm=False,
             lr=0.05,
             update_epochs=1,
             device="cpu",
@@ -1558,9 +1553,8 @@ class TestREINFORCEVllmISCorrection:
         rf = _cpu_llmreinforce(
             importance_sampling_level=is_level, lr=0.05, update_epochs=1
         )
-        # use_vllm=False auto-disables the correction in __init__; force it on to
-        # exercise the capture/align/metrics/reweight path that the base class now
-        # shares with GRPO.
+        # CPU agents are not colocated; keep the flag on so learn() still
+        # applies the reweight path.
         rf.vllm_importance_sampling_correction = True
         rf.vllm_importance_sampling_cap = 2.0
         vocab, inp, mtok = 100, 10, 8

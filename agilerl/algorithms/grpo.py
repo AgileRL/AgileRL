@@ -233,7 +233,7 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
     :param max_model_len: Maximum context window length, defaults to 1024
     :type max_model_len: int, optional
     :param hf_generate_chunk_size: Number of prompts per HuggingFace generation
-        chunk. Ignored when ``use_vllm=True``.
+        chunk. Ignored when colocated.
     :type hf_generate_chunk_size: int | None, optional
     :param lora_config: Config for LoRA, defaults to None
     :type lora_config: LoraConfig, optional
@@ -254,9 +254,7 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
     :type wrap: bool, optional
     :param clone: Flag to indicate if the instantiation is a cloning, defaults to False
     :type clone: bool, optional
-    :param use_vllm: Flag to indicate if the model should use vllm for generation, defaults to False
-    :type use_vllm: bool, optional
-    :param vllm_config: Config for VLLM generation, defaults to None
+    :param vllm_config: Config for colocated VLLM generation, defaults to None
     :type vllm_config: VLLMConfig, optional
     :param seed: Seed for the random number generator, defaults to 42
     :type seed: int, optional
@@ -374,7 +372,7 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
         :func:`adapt_lora_config_for_model`.
     :type lora_target_scope: str | None, optional
     :param vllm_importance_sampling_correction: When ``True`` (default) and
-        ``use_vllm=True``, correct the rollout/trainer log-prob mismatch by
+        ``vllm_config`` is set, correct the rollout/trainer log-prob mismatch by
         weighting each training token by ``clamp(exp(trainer - sampling),
         max=vllm_importance_sampling_cap)``. Active only for training rollouts;
         inert on the HuggingFace path and at eval.
@@ -439,7 +437,6 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
         device: str | torch.device | None = None,
         wrap: bool = True,
         clone: bool = False,
-        use_vllm: bool = False,
         vllm_config: VLLMConfig | None = None,
         seed: int = 42,
         gradient_checkpointing: bool = True,
@@ -482,7 +479,6 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
             use_liger_loss=use_liger_loss,
             lora_config=lora_config,
             use_separate_reference_adapter=use_separate_reference_adapter,
-            use_vllm=use_vllm,
             vllm_config=vllm_config,
             model_name=model_name,
             actor_network=actor_network,
@@ -576,11 +572,11 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
         # mismatch correction is enabled; ``None`` on the HF path / eval.
         sampling_logps: list[torch.Tensor | None] | None = None
         capture_sampling_logps = (
-            training and self.use_vllm and self.vllm_importance_sampling_correction
+            training and self.colocated and self.vllm_importance_sampling_correction
         )
         with self.select_adapter("actor"):
             self.actor.eval()
-            if not self.use_vllm:
+            if not self.colocated:
                 actor_module = self._get_unwrapped_actor()
                 try:
                     actor_device = next(actor_module.parameters()).device
@@ -1031,10 +1027,10 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
         self.hf_generate_chunk_size = int(
             1 if hf_generate_chunk_size is None else max(1, hf_generate_chunk_size)
         )
-        if self.use_vllm and hf_generate_chunk_size is not None:
+        if self.colocated and hf_generate_chunk_size is not None:
             warnings.warn(
                 "hf_generate_chunk_size is only used for HuggingFace generation "
-                "(use_vllm=False) and will be ignored when use_vllm=True.",
+                "and is ignored when colocated.",
                 stacklevel=3,
             )
         self.generation_config = GenerationConfig(

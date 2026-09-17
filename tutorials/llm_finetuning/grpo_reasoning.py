@@ -17,7 +17,6 @@ from agilerl.llm_envs.rubrics import reward_fn_to_rubric
 
 MODEL_PATH = "Qwen/Qwen2.5-0.5B"
 DATASET = "Jiayi-Pan/Countdown-Tasks-3to4"
-USE_VLLM = True
 MAX_CONTEXT_LENGTH = 1024
 
 
@@ -171,7 +170,6 @@ def main():
         max_model_len=MAX_CONTEXT_LENGTH,
         group_size=8,
         accelerator=accelerator,
-        use_vllm=USE_VLLM,
         vllm_config=VLLMConfig(sleep_mode=True, max_num_seqs=4),
     )
     train_llm_rollout(

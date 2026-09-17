@@ -134,7 +134,7 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
     :param max_model_len: Maximum model context length.
     :type max_model_len: int, optional
     :param hf_generate_chunk_size: Number of prompts per HuggingFace generation chunk.
-        Ignored when ``use_vllm=True``.
+        Ignored when colocated.
     :type hf_generate_chunk_size: int | None, optional
     :param lora_config: LoRA configuration.
     :type lora_config: LoraConfig | None, optional
@@ -149,15 +149,13 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
     :type wrap: bool, optional
     :param clone: Whether this instance is being created as a clone.
     :type clone: bool, optional
-    :param use_vllm: Whether to route generation through vLLM.
-    :type use_vllm: bool, optional
     :param use_memory_efficient_params: For colocated vLLM, offload the trainer's
         own base to CPU during rollout (and bring it back for the training step)
         so the rollout engine and the trainer never both hold a base on the GPU.
         Defaults to True; inert without colocated vLLM, and disabled under
         DeepSpeed ZeRO-3.
     :type use_memory_efficient_params: bool, optional
-    :param vllm_config: vLLM runtime configuration.
+    :param vllm_config: Colocated vLLM runtime configuration.
     :type vllm_config: VLLMConfig | None, optional
     :param seed: Random seed.
     :type seed: int, optional
@@ -233,7 +231,7 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
         reference forwards.
     :type activation_offload: bool, optional
     :param vllm_importance_sampling_correction: When ``True`` (default) and
-        ``use_vllm=True``, correct the rollout/trainer log-prob mismatch by
+        ``vllm_config`` is set, correct the rollout/trainer log-prob mismatch by
         weighting each training token by ``clamp(exp(trainer - sampling),
         max=vllm_importance_sampling_cap)``. Active only for training rollouts;
         inert on the HuggingFace path and at eval.
@@ -294,7 +292,6 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
         device: str | torch.device | None = None,
         wrap: bool = True,
         clone: bool = False,
-        use_vllm: bool = False,
         use_memory_efficient_params: bool = True,
         vllm_config: VLLMConfig | None = None,
         seed: int = 42,
@@ -333,7 +330,6 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
             pad_token_id=pad_token_id,
             pad_token=pad_token,
             use_value_head=True,
-            use_vllm=use_vllm,
             vllm_config=vllm_config,
             use_liger_loss=use_liger_loss,
             lora_config=lora_config,
@@ -436,12 +432,12 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
         # mismatch correction is enabled; ``None`` on the HF path / eval.
         sampling_logps: list[torch.Tensor | None] | None = None
         capture_sampling_logps = (
-            training and self.use_vllm and self.vllm_importance_sampling_correction
+            training and self.colocated and self.vllm_importance_sampling_correction
         )
 
         with self.select_adapter("actor"):
             self.actor.eval()
-            if not self.use_vllm:
+            if not self.colocated:
                 actor_module = self._get_unwrapped_actor()
                 try:
                     actor_device = next(actor_module.parameters()).device
@@ -947,10 +943,10 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
         self.hf_generate_chunk_size = int(
             1 if hf_generate_chunk_size is None else max(1, hf_generate_chunk_size)
         )
-        if self.use_vllm and hf_generate_chunk_size is not None:
+        if self.colocated and hf_generate_chunk_size is not None:
             warnings.warn(
                 "hf_generate_chunk_size is only used for HuggingFace generation "
-                "(use_vllm=False) and will be ignored when use_vllm=True.",
+                "and is ignored when colocated.",
                 stacklevel=3,
             )
         self.generation_config = GenerationConfig(

@@ -76,14 +76,12 @@ class TestCollectRolloutsLlm:
         env = RolloutCollector(env_factory=env_fn, batch_size=2, group_size=1)
         if algo_name == "ppo":
             agent = _cpu_llmppo(
-                use_vllm=False,
                 hf_generate_chunk_size=hf_generate_chunk_size,
                 max_model_len=128,
                 max_output_tokens=8,
             )
         else:
             agent = _cpu_llmreinforce(
-                use_vllm=False,
                 hf_generate_chunk_size=hf_generate_chunk_size,
                 max_model_len=128,
                 max_output_tokens=8,

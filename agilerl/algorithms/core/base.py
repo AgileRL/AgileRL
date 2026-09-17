@@ -2706,9 +2706,9 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
     :type lr_critic: float | None, optional
     :param use_value_head: Whether to use a separate value head.
     :type use_value_head: bool
-    :param use_vllm: Whether to route generation through vLLM.
-    :type use_vllm: bool, optional
-    :param vllm_config: vLLM runtime configuration.
+    :param vllm_config: Colocated vLLM runtime configuration. Set to enable
+        an in-process rollout engine; ``None`` leaves generation to a
+        separate engine (or HuggingFace generate in tests).
     :type vllm_config: VLLMConfig | None, optional
     :param model_name: The name of the model.
     :type model_name: str | None
@@ -2751,7 +2751,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         ``None`` (default) preserves each path's auto-tuned behavior.
     :type chunk_rows: int | None, optional
     :param vllm_importance_sampling_correction: When ``True`` (default) and
-        ``use_vllm=True``, correct the rollout/trainer log-prob mismatch by
+        colocated, correct the rollout/trainer log-prob mismatch by
         weighting each training token by ``clamp(exp(trainer - sampling),
         max=vllm_importance_sampling_cap)``. Active only for training rollouts;
         inert on the HuggingFace path and at eval.
@@ -2808,6 +2808,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
     llm: Any
     tp_group: Any
     lr: float
+    colocated: bool
 
     temperature: float
     repetition_penalty: float | None
@@ -2834,7 +2835,6 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         use_separate_reference_adapter: bool = False,
         lr_critic: float | None = None,
         use_value_head: bool = False,
-        use_vllm: bool = False,
         vllm_config: VLLMConfig | None = None,
         model_name: str | None = None,
         actor_network: PreTrainedModel | PeftModel | None = None,
@@ -2902,15 +2902,9 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         # during rollout (and brings it back for the training step) so the
         # colocated rollout engine and the trainer never both hold a base on the
         # GPU. It is meaningful only for colocated vLLM; inert otherwise.
-        if not use_vllm:
+        colocated = vllm_config is not None
+        if not colocated:
             use_memory_efficient_params = False
-
-        if vllm_config is not None and not use_vllm:
-            warnings.warn(
-                "vllm_config is provided but use_vllm is False. Setting vllm_config to None.",
-                stacklevel=2,
-            )
-            vllm_config = None
 
         super().__init__(index, hp_config, device, accelerator, torch_compiler, name)
         self.gradient_checkpointing = gradient_checkpointing
@@ -3013,7 +3007,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
 
         # YAML / config loaders may supply LR as a string (e.g. "5e-5"); PyTorch optimizers require float.
         self.lora_config = lora_config
-        self.use_vllm = use_vllm
+        self.colocated = colocated
         self.vllm_config = vllm_config
         self.max_grad_norm = max_grad_norm
         # ZeRO-3 shards params in place; naive ``.to("cpu")`` breaks DeepSpeed
@@ -3050,8 +3044,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             vllm_importance_sampling_correction
         )
         self.vllm_importance_sampling_cap = float(vllm_importance_sampling_cap)
-        # Kept on even when use_vllm=False: decoupled rollouts still sample
-        # from a separate vLLM engine.
+        # Kept on when not colocated: rollout engines still sample from vLLM.
         self._is_correction_liger_warned = False
         # Warn-once flag for the canonical Liger + non-token importance-sampling
         # "not memory-bounded" warning (see :meth:`_warn_liger_non_token_is`).
@@ -3073,7 +3066,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             self.accelerator is not None
             and getattr(self.accelerator.state, "deepspeed_plugin", None) is not None
         )
-        self._vllm_awake = self.use_vllm and not (
+        self._vllm_awake = self.colocated and not (
             self.vllm_config is not None and self.vllm_config.sleep_mode
         )
         self._vllm_moved = False
@@ -3081,22 +3074,22 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         self._vllm_lora_staging_dir: Path | None = None
         self._vllm_lora_staging_dir_is_temp = True
         self._vllm_rollout_lora_request: Any | None = None
-        # Colocated vLLM (use_vllm=True) runs the rollout engine and the HF
-        # trainer in one process. Each holds its OWN base: vLLM cycles its base
-        # CPU<->GPU via native sleep/wake (vLLM >= 0.22 round-trips dense and
-        # bnb 4-bit losslessly), and the trainer base is offloaded to CPU during
-        # rollout (use_memory_efficient_params) so the two never coexist on the
-        # GPU. Only LoRA adapters are synced to vLLM per rollout. The in-process
+        # Colocated vLLM runs the rollout engine and the HF trainer in one
+        # process. Each holds its OWN base: vLLM cycles its base CPU<->GPU via
+        # native sleep/wake (vLLM >= 0.22 round-trips dense and bnb 4-bit
+        # losslessly), and the trainer base is offloaded to CPU during rollout
+        # (use_memory_efficient_params) so the two never coexist on the GPU.
+        # Only LoRA adapters are synced to vLLM per rollout. The in-process
         # external_launcher engine is single-GPU, so tensor parallelism is not
-        # yet available when colocated (use a non-colocated / async rollout for
-        # TP today). NOTE: colocated tensor-parallel support is planned.
-        if self.use_vllm and self.vllm_config is not None:
+        # yet available when colocated (use a non-colocated rollout for TP
+        # today). NOTE: colocated tensor-parallel support is planned.
+        if self.colocated:
             tp = getattr(self.vllm_config, "tensor_parallel_size", 1)
             if tp != 1:
                 msg = (
                     "Colocated vLLM requires tensor_parallel_size==1 (the "
                     f"in-process external_launcher engine is single-GPU), got "
-                    f"{tp}. Use a non-colocated / async rollout for "
+                    f"{tp}. Use a non-colocated rollout for "
                     "tensor-parallel generation (colocated TP support is planned)."
                 )
                 raise ValueError(msg)
@@ -4045,11 +4038,11 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         clone.lr_scheduler = None
         self.lr_scheduler = None
         sleep_mode = bool(
-            self.use_vllm
+            self.colocated
             and self.vllm_config is not None
             and self.vllm_config.sleep_mode
         )
-        if self.use_vllm:
+        if self.colocated:
             original_llm = self.llm
             cloned_llm = clone.llm
             clone.llm = None
@@ -4060,7 +4053,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         clone.lr_scheduler = cloned_lr_scheduler
         self.lr_scheduler = original_lr_scheduler
 
-        if self.use_vllm:
+        if self.colocated:
             if sleep_mode:
                 # CuMem is process-global: transfer the single sleep-mode engine
                 # to the clone. Tournament selection cleans up the parent next.
@@ -4595,7 +4588,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         # Rebuild-from-pretrained (actor_network is None) always needs adapters,
         # including when clone=True for the quantized path.
         add_adapters = (not clone) or (actor_network is None)
-        if self.use_vllm:
+        if self.colocated:
             self._initialize_colocated_vllm_and_actors(
                 actor_network, add_adapters=add_adapters, clone=clone
             )
@@ -4681,7 +4674,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         so a fresh quantized trainer under sleep mode is loaded first.
         """
         return (
-            self.use_vllm
+            self.colocated
             and self.vllm_config is not None
             and self.vllm_config.sleep_mode
             and self.quantization_config is not None
@@ -4744,7 +4737,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             # When trainer bnb quant is enabled, _initialize_colocated_vllm_and_actors
             # loads the trainer before vLLM so bnb kernels do not run after vLLM sleep.
             if (
-                self.use_vllm
+                self.colocated
                 and self.vllm_config is not None
                 and self.vllm_config.sleep_mode
             ):
@@ -4752,7 +4745,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
                     model_config = {}
                 model_config.setdefault("device_map", "cpu")
             if (
-                self.use_vllm
+                self.colocated
                 and getattr(self, "llm", None) is not None
                 and torch.cuda.is_available()
             ):
@@ -5824,7 +5817,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         :rtype: tuple[list[torch.Tensor], list[torch.Tensor]]
         """
         if SamplingParams is None:
-            msg = "vLLM is required when use_vllm=True. Install AgileRL with vLLM support for this platform: `pip install agilerl[llm]`."
+            msg = "vLLM is required for colocated generation. Install AgileRL with vLLM support for this platform: `pip install agilerl[llm]`."
             raise ImportError(msg)
         vllm_config = self.vllm_config
         assert vllm_config is not None, (
@@ -6594,7 +6587,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
     def _configure_vllm(self) -> None:
         """Configure vLLM for efficient inference during generation in 'get_action'."""
         if LLM is None:
-            msg = "vLLM is required when use_vllm=True. Install AgileRL with vLLM support for this platform: `pip install agilerl[llm]`."
+            msg = "vLLM is required for colocated generation. Install AgileRL with vLLM support for this platform: `pip install agilerl[llm]`."
             raise ImportError(msg)
         if self.vllm_config is None:
             warnings.warn(
@@ -6875,7 +6868,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
 
     def _prepare_vllm_for_training(self) -> None:
         """Prepare vLLM for learning."""
-        if not self.use_vllm:
+        if not self.colocated:
             return
         assert self.vllm_config is not None  # _configure_vllm guarantees a config
         # Every rank holds its own colocated engine (external_launcher), so

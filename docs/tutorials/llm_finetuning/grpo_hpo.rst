@@ -83,7 +83,6 @@ unlike the rest of the AgileRL framework, we can only tune the RL hyperparameter
             "group_size": 8,
             "temperature": 0.9,
             "max_model_len": 1024,
-            "use_vllm": True,
             "vllm_config": VLLMConfig(
                 sleep_mode=False,
                 max_num_seqs=4,

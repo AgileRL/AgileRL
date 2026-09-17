@@ -295,7 +295,7 @@ class TestAlgoClassParadigmGuards:
             MultiAgentBuilder.algo_class(DQNSpec())
 
 
-def _build_llm_with_dummy_algo(spec, monkeypatch):
+def _build_llm_with_dummy_algo(spec, monkeypatch, *, rollout_mode: str = ""):
     built = {}
 
     class DummyAlgo:
@@ -322,7 +322,7 @@ def _build_llm_with_dummy_algo(spec, monkeypatch):
 
     tokenizer = MagicMock()
     tokenizer.pad_token = "<pad>"
-    LLMBuilder.build(spec, tokenizer=tokenizer)
+    LLMBuilder.build(spec, tokenizer=tokenizer, rollout_mode=rollout_mode)
     return built
 
 
@@ -339,14 +339,26 @@ class TestLLMBuildGuards:
         spec = GRPOSpec(
             group_size=2,
             pretrained_model_name_or_path="stub/model",
-            use_vllm=True,
             vllm_config=VLLMConfigSpec(tensor_parallel_size=2),
         )
-        built = _build_llm_with_dummy_algo(spec, monkeypatch)
+        built = _build_llm_with_dummy_algo(spec, monkeypatch, rollout_mode="colocated")
         assert isinstance(built["vllm_config"], VLLMConfig)
         assert built["vllm_config"].tensor_parallel_size == 2
 
-    def test_vllm_config_is_dropped_when_use_vllm_is_false(self, monkeypatch):
+    def test_colocated_rollout_fills_a_default_vllm_config(self, monkeypatch):
+        from agilerl.utils.algo_utils import VLLMConfig
+
+        spec = GRPOSpec(
+            group_size=2,
+            pretrained_model_name_or_path="stub/model",
+        )
+        built = _build_llm_with_dummy_algo(spec, monkeypatch, rollout_mode="colocated")
+
+        assert isinstance(built["vllm_config"], VLLMConfig)
+
+    def test_vllm_config_is_dropped_when_the_trainer_does_not_host_vllm(
+        self, monkeypatch
+    ):
         from agilerl.arena.models.networks import VLLMConfig as VLLMConfigSpec
 
         spec = GRPOSpec(
@@ -362,7 +374,6 @@ class TestLLMBuildGuards:
         built = _build_llm_with_dummy_algo(spec, monkeypatch)
 
         assert "vllm_config" not in built
-        assert "use_vllm" not in built
 
     def test_defaults_index_to_zero(self, monkeypatch):
         spec = GRPOSpec(
