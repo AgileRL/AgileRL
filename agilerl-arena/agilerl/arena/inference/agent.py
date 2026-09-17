@@ -73,7 +73,7 @@ class LLMParams(BaseModel):
     :type do_sample: bool
     """
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(extra="forbid", frozen=True)
 
     max_new_tokens: int = 100
     temperature: float = 0.7
@@ -99,7 +99,7 @@ class AgentInfo(BaseModel):
     :type supervised: bool
     """
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(extra="forbid", frozen=True)
 
     algo: str = ""
     multi_agent: bool = False
@@ -125,7 +125,7 @@ class StatusResponse(BaseModel):
     :type agent: AgentInfo | None
     """
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(extra="forbid", frozen=True)
 
     success: bool = True
     deployment_id: str = ""
@@ -147,6 +147,7 @@ class PredictResult(BaseModel):
     :type success: bool
     """
 
+    # POST /predict JSON also includes results; those tensors are deserialized separately.
     model_config = ConfigDict(extra="ignore", frozen=True)
 
     batch_size: int
@@ -163,7 +164,7 @@ class LLMCompletionResult(BaseModel):
     :type completion: str
     """
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(extra="forbid", frozen=True)
 
     prompt: str = ""
     completion: str = ""
@@ -187,7 +188,7 @@ class LLMResults(BaseModel):
     :type success: bool
     """
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(extra="forbid", frozen=True)
 
     results: list[LLMCompletionResult]
     batch_size: int
@@ -210,6 +211,7 @@ class SessionInfo(BaseModel):
     :type last_updated: str | None
     """
 
+    # Listing JSON also has title and created_by; detail JSON also has success.
     model_config = ConfigDict(extra="ignore", frozen=True)
 
     session_id: str = ""
@@ -226,7 +228,7 @@ class SessionMessage(BaseModel):
     :type content: str
     """
 
-    model_config = ConfigDict(extra="ignore", frozen=True)
+    model_config = ConfigDict(extra="forbid", frozen=True)
 
     role: str = ""
     content: str = ""

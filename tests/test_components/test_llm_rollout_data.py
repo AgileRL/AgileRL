@@ -8,6 +8,7 @@ import random
 import numpy as np
 import pytest
 import torch
+from pydantic import ValidationError
 
 from agilerl.components.llm_rollout_data import (
     LLMExperienceBatch,
@@ -76,6 +77,16 @@ class TestTrajectory:
         assert traj.token_ids is tokens
         assert traj.turn_ids is turn_ids
 
+    def test_rejects_unknown_fields(self):
+        with pytest.raises(ValidationError, match="extra_forbidden"):
+            Trajectory(
+                token_ids=torch.ones(1, 8, dtype=torch.long),
+                action_masks=torch.ones(1, 7, dtype=torch.bool),
+                turn_ids=torch.zeros(1, 7, dtype=torch.long),
+                rewards=torch.ones(2),
+                bogus=True,
+            )
+
 
 class TestRolloutGroup:
     def test_trajectory_count_must_match_group_size(self):
@@ -85,6 +96,10 @@ class TestRolloutGroup:
     def test_group_size_must_be_positive(self):
         with pytest.raises(ValueError, match="greater than or equal to 1"):
             RolloutGroup(group_size=0, trajectories=[])
+
+    def test_rejects_unknown_fields(self):
+        with pytest.raises(ValidationError, match="extra_forbidden"):
+            RolloutGroup(group_size=1, trajectories=[make_trajectory(8)], bogus=True)
 
 
 class TestCollate:

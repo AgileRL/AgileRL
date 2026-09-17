@@ -712,16 +712,21 @@ class TestAgentCredentialResolution:
 
 SECRET = "arena_pat_supersecret"
 
-# Satisfies StatusResponse, LLMResults and the sessions body at once.
-_ANY_ROUTE_BODY = {
-    "success": True,
-    "agent": {"algo": "GRPO", "llm": True},
-    "results": [{"prompt": "hi", "completion": "yo"}],
-    "batch_size": 1,
-    "inference_time_ms": 1.0,
-    "tokens_per_second": 1.0,
-    "sessions": [],
-}
+
+def _body_for_path(path: str) -> dict[str, Any]:
+    if path == "/status":
+        return {"success": True, "agent": {"algo": "GRPO", "llm": True}}
+    if path == "/generate":
+        return {
+            "results": [{"prompt": "hi", "completion": "yo"}],
+            "batch_size": 1,
+            "inference_time_ms": 1.0,
+            "tokens_per_second": 1.0,
+            "success": True,
+        }
+    if path == "/sessions":
+        return {"success": True, "sessions": []}
+    return {}
 
 
 def _agent_over_mock_transport(
@@ -733,7 +738,7 @@ def _agent_over_mock_transport(
 
     def handler(request: httpx.Request) -> httpx.Response:
         seen.append((request.url.path, request.headers.get("authorization")))
-        return httpx.Response(status_code, json=_ANY_ROUTE_BODY)
+        return httpx.Response(status_code, json=_body_for_path(request.url.path))
 
     agent = _llm_agent()
     agent._http = httpx.Client(
@@ -822,6 +827,8 @@ class TestSessions:
                     "session_id": "s1",
                     "created_at": "2026-07-30T00:00:00Z",
                     "last_updated": "2026-08-01T00:00:00Z",
+                    "created_by": "user-1",
+                    "title": "chat",
                 },
                 {"session_id": "s2", "created_at": None, "last_updated": None},
             ],
@@ -833,6 +840,8 @@ class TestSessions:
         assert sessions[0].last_updated == "2026-08-01T00:00:00Z"
         assert sessions[1].last_updated is None
         assert isinstance(sessions[0], SessionInfo)
+        assert not hasattr(sessions[0], "created_by")
+        assert not hasattr(sessions[0], "title")
         assert agent._http.request.call_args[0][1] == "http://test/sessions"
 
     def test_list_sessions_preserves_deployment_ordering(self):
@@ -899,6 +908,7 @@ class TestSessions:
             {
                 "session_id": "s1",
                 "last_updated": "2026-08-01T00:00:00Z",
+                "success": True,
                 "messages": [
                     {"role": "user", "content": "hi"},
                     {"role": "assistant", "content": "hello"},
@@ -910,6 +920,7 @@ class TestSessions:
         assert isinstance(detail, SessionDetail)
         assert detail.session_id == "s1"
         assert [m.role for m in detail.messages] == ["user", "assistant"]
+        assert not hasattr(detail, "success")
         assert agent._http.request.call_args[0][1] == "http://test/sessions/s1"
 
     def test_delete_session_on_204(self):

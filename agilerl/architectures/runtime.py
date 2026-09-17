@@ -17,6 +17,8 @@ class VllmRuntimeConfig(BaseModel):
     engine-args dict without overwriting user values with empties.
     """
 
+    model_config = ConfigDict(extra="forbid")
+
     mamba_cache_mode: str | None = Field(default=None, min_length=1)
     max_num_batched_tokens: int | None = Field(default=None, ge=1)
     reasoning_parser: str | None = Field(default=None, min_length=1)
@@ -30,6 +32,8 @@ class TrainerRuntimeConfig(BaseModel):
     model-config dict without overwriting user values with empties.
     """
 
+    model_config = ConfigDict(extra="forbid")
+
     attn_implementation: str | None = Field(default=None, min_length=1)
 
 
@@ -39,6 +43,8 @@ class MambaPatchConfig(BaseModel):
     ``mixer`` is a dotted path resolved when the patch runs; the transformers
     class may be absent at import time.
     """
+
+    model_config = ConfigDict(extra="forbid")
 
     mixer: str = Field(min_length=1)
     fused_path: bool = True
@@ -51,7 +57,7 @@ class PatchRuntimeConfig(BaseModel):
     Unset families leave ``install`` as ``None`` so dispatch skips the installer.
     """
 
-    model_config = ConfigDict(arbitrary_types_allowed=True)
+    model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
 
     install: Callable[..., object] | None = None
     mamba: MambaPatchConfig | None = Field(default=None)
@@ -59,6 +65,8 @@ class PatchRuntimeConfig(BaseModel):
 
 class ModelRuntimeConfig(BaseModel):
     """Per-``model_type`` runtime settings for vLLM, trainer, and patches."""
+
+    model_config = ConfigDict(extra="forbid")
 
     vllm: VllmRuntimeConfig = Field(default_factory=VllmRuntimeConfig)
     trainer: TrainerRuntimeConfig = Field(default_factory=TrainerRuntimeConfig)
