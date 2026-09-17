@@ -521,6 +521,21 @@ class TestNeuralUCBClone:
         bandit.clean_up()
         clone_agent.clean_up()
 
+    def test_clone_keeps_cumulative_regret_not_full_history(
+        self, vector_space, discrete_space
+    ):
+        # Arrange
+        bandit = NeuralUCB(vector_space, discrete_space, device="cpu")
+        bandit.regret = [0.0, 0.1, 0.3, 0.5]
+
+        # Act
+        clone_agent = bandit.clone()
+
+        # Assert
+        assert clone_agent.regret == [0.5]
+        bandit.clean_up()
+        clone_agent.clean_up()
+
     # TODO: Will be deprecated in the future
     @pytest.mark.parametrize(
         ("observation_space", "actor_network", "input_tensor"),

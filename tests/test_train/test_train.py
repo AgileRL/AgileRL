@@ -145,6 +145,9 @@ class DummyEnv(VectorEnv):
             {},
         )
 
+    def close(self):
+        pass
+
 
 class DummyBanditEnv:
     def __init__(self, state_size, arms):
@@ -163,6 +166,9 @@ class DummyBanditEnv:
             np.random.rand(*self.state_size),
             np.random.rand(1),
         )
+
+    def close(self):
+        pass
 
 
 class DummyAgentOffPolicy:
@@ -208,6 +214,10 @@ class DummyAgentOffPolicy:
         )
         self.actor = actor if actor is not None else MagicMock()
         self.actor.output_activation = "Tanh"
+        self.accelerator = None
+
+    def clean_up(self):
+        pass
 
     def set_training_mode(self, training):
         self.training = training
@@ -338,6 +348,9 @@ class ScalarDoneEnv:
 
     def step(self, action):
         return np.array([0.0], dtype=np.float32), 1.0, True, False, {}
+
+    def close(self):
+        pass
 
 
 class DummyStochastic:
@@ -6046,6 +6059,9 @@ class _FunctionPreservingBanditEnv:
 
     def _context(self):
         return np.random.rand(*self.state_size).astype(np.float32)
+
+    def close(self):
+        pass
 
 
 class TestFunctionPreservingTrainerWiring:

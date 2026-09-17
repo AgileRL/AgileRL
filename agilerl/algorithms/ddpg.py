@@ -587,4 +587,5 @@ class DDPG(SingleAgentAlgorithm[TensorDict]):
                 rewards.append(np.mean(completed_episode_scores))
         mean_fit = float(np.mean(rewards))
         self.metrics.add_fitness(mean_fit)
+        self.set_training_mode(True)
         return mean_fit

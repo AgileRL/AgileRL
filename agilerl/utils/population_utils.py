@@ -6,11 +6,15 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 import numpy as np
 import numpy.typing as npt
+from accelerate import Accelerator
 from typing_extensions import TypeIs
+
+from agilerl.protocols import EvolvableAlgorithmProtocol
 
 
 def get_nested_mean(metrics: list[dict[str, float]]) -> dict[str, float]:
@@ -84,6 +88,17 @@ def scalar_fitness(fitness: float | npt.NDArray | dict[str, float]) -> float:
     if isinstance(fitness, (list, tuple, np.ndarray)):
         return float(np.mean(fitness))
     return float(fitness)
+
+
+def release_agents(
+    agents: Sequence[EvolvableAlgorithmProtocol],
+    accelerator: Accelerator | None = None,
+) -> None:
+    """Free evicted agents, with one accelerator barrier when distributed."""
+    for agent in agents:
+        agent.clean_up()
+    if accelerator is not None:
+        accelerator.wait_for_everyone()
 
 
 def fmt_value(value: float) -> str:

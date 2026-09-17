@@ -143,3 +143,7 @@ class BanditEnv:
         next_reward[target] = 1
         self.prev_reward = next_reward
         return next_state
+
+    def close(self) -> None:
+        # finish_training_run always calls close(); this env holds no file handles.
+        pass

@@ -518,6 +518,21 @@ class TestNeuralTSClone:
         bandit.clean_up()
         clone_agent.clean_up()
 
+    def test_clone_keeps_cumulative_regret_not_full_history(
+        self, vector_space, discrete_space
+    ):
+        # Arrange
+        bandit = NeuralTS(vector_space, discrete_space, device="cpu")
+        bandit.regret = [0.0, 0.1, 0.3, 0.5]
+
+        # Act
+        clone_agent = bandit.clone()
+
+        # Assert
+        assert clone_agent.regret == [0.5]
+        bandit.clean_up()
+        clone_agent.clean_up()
+
     def test_clone_new_index(self, vector_space, discrete_space):
         bandit = NeuralTS(vector_space, discrete_space)
         clone_agent = bandit.clone(index=100)

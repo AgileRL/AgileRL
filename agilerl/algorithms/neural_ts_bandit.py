@@ -9,6 +9,7 @@ from accelerate import Accelerator
 from gymnasium import spaces
 from tensordict import TensorDict
 from torch import nn, optim
+from typing_extensions import Self
 
 from agilerl.algorithms.core import OptimizerWrapper, SingleAgentAlgorithm
 from agilerl.algorithms.core.registry import (
@@ -338,6 +339,12 @@ class NeuralTS(SingleAgentAlgorithm[TensorDict]):
         self.metrics.log("loss", loss)
         return loss
 
+    def clone(self, index: int | None = None, wrap: bool = True) -> Self:
+        """Clone the bandit, keeping cumulative regret but not the full history."""
+        clone = super().clone(index=index, wrap=wrap)
+        clone.regret = [clone.regret[-1]]
+        return clone
+
     def test(
         self,
         env: BanditEnvProtocol,
@@ -370,4 +377,5 @@ class NeuralTS(SingleAgentAlgorithm[TensorDict]):
                 rewards.append(score)
         mean_fit = float(np.mean(rewards))
         self.metrics.add_fitness(mean_fit)
+        self.set_training_mode(True)
         return mean_fit

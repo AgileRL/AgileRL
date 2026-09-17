@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+from unittest.mock import patch
+
 import numpy as np
 import pytest
 
@@ -487,6 +489,21 @@ class TestCloneWinnersOverLosers:
         assert clone.subpopulation_id == 0
         # The clone inherits its winner-parent's fitness (4.0)
         assert clone.fitness[-1] == 4.0
+
+    def test_clone_winners_over_losers_releases_losers(self):
+        strategy = make_multi_frequency_selection(n_subpop=2, population_size=8)
+        pop = make_fake_selection_population(
+            {0: [4.0, 3.0, 2.0, 1.0], 1: [8.0, 7.0, 6.0, 5.0]}
+        )
+        winners, _survivors, _open_for_migration, losers = (
+            strategy._bracket_subpopulation(pop, subpop=0)
+        )
+
+        with patch("agilerl.hpo.multi_frequency.release_agents") as mock_release:
+            strategy._clone_winners_over_losers(pop, winners, losers, subpop=0)
+
+        mock_release.assert_called_once()
+        assert mock_release.call_args.args[0] == losers
 
     def test_clone_winners_over_losers_returns_new_list(self):
         # Cloning must return a new population rather than mutating the one it's handed
