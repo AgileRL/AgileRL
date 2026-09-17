@@ -5,13 +5,16 @@
 
 from __future__ import annotations
 
+import importlib
+import inspect
+import pkgutil
 from importlib.metadata import PackageNotFoundError
 from io import StringIO
 from unittest.mock import patch
 
 import pytest
 import yaml
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
 from agilerl.arena.models import (
     MANIFEST_REGISTRY,
@@ -614,3 +617,48 @@ class TestReplayBufferParse:
         spec = ReplayBufferSpec()
         assert _parse_buffer_section(spec) is spec
         assert _parse_buffer_section("raw") == "raw"
+
+
+def _extra(cls: type) -> str | None:
+    cfg = getattr(cls, "model_config", None) or {}
+    extra = cfg.get("extra") if hasattr(cfg, "get") else None
+    if extra is None:
+        return None
+    return extra if isinstance(extra, str) else getattr(extra, "value", str(extra))
+
+
+def _base_models(package) -> list[type]:
+    models: list[type] = []
+    for info in pkgutil.walk_packages(package.__path__, package.__name__ + "."):
+        module = importlib.import_module(info.name)
+        for _, obj in inspect.getmembers(module, inspect.isclass):
+            if obj.__module__ != module.__name__:
+                continue
+            try:
+                if issubclass(obj, BaseModel) and obj is not BaseModel:
+                    models.append(obj)
+            except TypeError:
+                continue
+    return models
+
+
+class TestPydanticModelsForbidExtra:
+    def test_arena_models_forbid_extra(self) -> None:
+        import agilerl.arena.inference as inference
+        import agilerl.arena.models as models
+
+        # These parse a subset of inference JSON (results, title/created_by, success).
+        wire_subset = {
+            "agilerl.arena.inference.agent.PredictResult",
+            "agilerl.arena.inference.agent.SessionDetail",
+            "agilerl.arena.inference.agent.SessionInfo",
+        }
+        found = (*_base_models(models), *_base_models(inference))
+        assert found
+        extra_by_name = {
+            f"{cls.__module__}.{cls.__name__}": _extra(cls) for cls in found
+        }
+        missing = {name for name, extra in extra_by_name.items() if extra != "forbid"}
+
+        assert missing == wire_subset
+        assert all(extra_by_name[name] == "ignore" for name in wire_subset)

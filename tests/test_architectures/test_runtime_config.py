@@ -8,6 +8,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import pytest
+from pydantic import ValidationError
 
 from agilerl.architectures.catalog import (
     FAMILY_RUNTIME_CONFIGS,
@@ -130,3 +131,25 @@ class TestPretrainedModelType:
         )
         with pytest.raises(OSError, match="missing config"):
             pretrained_model_type("nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16")
+
+
+class TestRuntimeConfigsForbidExtra:
+    def test_unknown_fields_are_rejected(self) -> None:
+        from agilerl.architectures.runtime import (
+            MambaPatchConfig,
+            ModelRuntimeConfig,
+            PatchRuntimeConfig,
+            TrainerRuntimeConfig,
+            VllmRuntimeConfig,
+        )
+
+        cases = (
+            (VllmRuntimeConfig, {}),
+            (TrainerRuntimeConfig, {}),
+            (MambaPatchConfig, {"mixer": "agilerl.architectures.nemotron_h.mamba"}),
+            (PatchRuntimeConfig, {}),
+            (ModelRuntimeConfig, {}),
+        )
+        for cls, payload in cases:
+            with pytest.raises(ValidationError, match="extra_forbidden"):
+                cls.model_validate({**payload, "__unknown__": True})
