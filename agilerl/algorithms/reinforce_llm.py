@@ -130,7 +130,7 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
     :param max_model_len: Maximum context window length.
     :type max_model_len: int
     :param hf_generate_chunk_size: Number of prompts per HuggingFace generation
-        chunk. Ignored when ``use_vllm=True``.
+        chunk. Ignored when colocated.
     :type hf_generate_chunk_size: int | None, optional
     :param use_memory_efficient_params: For colocated vLLM, offload the trainer's
         own base to CPU during rollout (and bring it back for the training step)
@@ -151,9 +151,7 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
     :type wrap: bool
     :param clone: Whether this is a clone instantiation.
     :type clone: bool
-    :param use_vllm: Use vLLM for generation.
-    :type use_vllm: bool
-    :param vllm_config: vLLM configuration.
+    :param vllm_config: Colocated vLLM configuration.
     :type vllm_config: VLLMConfig | None
     :param seed: Random seed.
     :type seed: int
@@ -217,7 +215,7 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
         reference forwards.
     :type activation_offload: bool, optional
     :param vllm_importance_sampling_correction: When ``True`` (default) and
-        ``use_vllm=True``, correct the rollout/trainer log-prob mismatch by
+        ``vllm_config`` is set, correct the rollout/trainer log-prob mismatch by
         weighting each training token by ``clamp(exp(trainer - sampling),
         max=vllm_importance_sampling_cap)``. Active only for training rollouts;
         inert on the HuggingFace path and at eval.
@@ -274,7 +272,6 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
         device: str | torch.device | None = None,
         wrap: bool = True,
         clone: bool = False,
-        use_vllm: bool = False,
         vllm_config: VLLMConfig | None = None,
         seed: int = 42,
         advantage_granularity: Literal["turn", "token", "auto"] = "auto",
@@ -310,7 +307,6 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
             use_memory_efficient_params=use_memory_efficient_params,
             lora_config=lora_config,
             use_separate_reference_adapter=use_separate_reference_adapter,
-            use_vllm=use_vllm,
             vllm_config=vllm_config,
             model_name=model_name,
             actor_network=actor_network,
@@ -385,12 +381,12 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
         # mismatch correction is enabled; ``None`` on the HF path / eval.
         sampling_logps: list[torch.Tensor | None] | None = None
         capture_sampling_logps = (
-            training and self.use_vllm and self.vllm_importance_sampling_correction
+            training and self.colocated and self.vllm_importance_sampling_correction
         )
 
         with self.select_adapter("actor"):
             self.actor.eval()
-            if not self.use_vllm:
+            if not self.colocated:
                 actor_module = self._get_unwrapped_actor()
                 try:
                     actor_device = next(actor_module.parameters()).device
@@ -815,10 +811,10 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
         self.hf_generate_chunk_size = int(
             1 if hf_generate_chunk_size is None else max(1, hf_generate_chunk_size)
         )
-        if self.use_vllm and hf_generate_chunk_size is not None:
+        if self.colocated and hf_generate_chunk_size is not None:
             warnings.warn(
                 "hf_generate_chunk_size is only used for HuggingFace generation "
-                "(use_vllm=False) and will be ignored when use_vllm=True.",
+                "and is ignored when colocated.",
                 stacklevel=3,
             )
         self.generation_config = GenerationConfig(

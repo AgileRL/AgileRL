@@ -9,7 +9,6 @@ algorithm:
     update_epochs: 1
     group_size: 2                         # Number of completions sampled per prompt
     temperature: 0.9                       # Sampling temperature for generation
-    use_vllm: false
     vllm_config:                          # VLLM config
         tensor_parallel_size: 1
         gpu_memory_utilization: 0.3

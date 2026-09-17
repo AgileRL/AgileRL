@@ -540,6 +540,7 @@ class LocalTrainer(Trainer):
             selection_strategy_spec=self.selection_strategy_spec,
             hp_config=self.hp_config,
             networks=self.networks,
+            rollout_mode=self.training_spec.rollout_mode,
         )
         self.mutations = build_mutations_from_spec(
             self.mutation_spec, self.device, accelerator=self.accelerator

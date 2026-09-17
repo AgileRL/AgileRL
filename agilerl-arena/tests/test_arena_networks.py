@@ -7,9 +7,6 @@ from __future__ import annotations
 
 import pytest
 
-from agilerl.arena.models.algorithms.grpo import GRPOSpec
-from agilerl.arena.models.algorithms.llmppo import LLMPPOSpec
-from agilerl.arena.models.algorithms.llmreinforce import LLMREINFORCESpec
 from agilerl.arena.models.algorithms.rainbow_dqn import RainbowDQNSpec
 from agilerl.arena.models.networks import (
     CnnSpec,
@@ -171,20 +168,6 @@ class TestLoraConfigDict:
         config = LoraConfigDict(target_modules={"q_proj", "v_proj"})
         dumped = config.model_dump(mode="json")
         assert dumped["target_modules"] == ["q_proj", "v_proj"]
-
-
-class TestLLMAlgorithmValidators:
-    @pytest.mark.parametrize(
-        ("spec_cls", "kwargs"),
-        [
-            (GRPOSpec, {"group_size": 2, "pretrained_model_name_or_path": "gpt2"}),
-            (LLMPPOSpec, {"pretrained_model_name_or_path": "gpt2"}),
-            (LLMREINFORCESpec, {"pretrained_model_name_or_path": "gpt2"}),
-        ],
-    )
-    def test_use_vllm_requires_config(self, spec_cls, kwargs) -> None:
-        with pytest.raises(ValueError, match="no vllm_config"):
-            spec_cls(use_vllm=True, **kwargs)
 
 
 class TestRainbowDQNSpec:

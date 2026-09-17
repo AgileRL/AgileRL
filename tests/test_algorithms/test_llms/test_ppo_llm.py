@@ -195,7 +195,6 @@ def _cpu_llmppo(**kwargs):
         "accelerator": None,
         "wrap": False,
         "gradient_checkpointing": False,
-        "use_vllm": False,
         "lr_actor": 1e-3,
         "lr_critic": 1e-3,
         "update_epochs": 1,
@@ -220,9 +219,9 @@ def generate_ppo(
     vocab_size,
     input_size,
     max_tokens,
-    use_vllm,
-    pretrained_model_name_or_path,
-    micro_batch_size_per_gpu,
+    colocated=False,
+    pretrained_model_name_or_path=None,
+    micro_batch_size_per_gpu=None,
     lr_actor=1e-5,
     lr_critic=1e-4,
     sleep_mode=False,
@@ -239,7 +238,7 @@ def generate_ppo(
     if not use_deepspeed_optimizer and accelerator is not None:
         accelerator.state.deepspeed_plugin.deepspeed_config.pop("optimizer", None)
 
-    if use_vllm:
+    if colocated:
         lora_config = None
         vllm_config = VLLMConfig(
             gpu_memory_utilization=0.2, max_num_seqs=1, sleep_mode=sleep_mode
@@ -294,7 +293,6 @@ def generate_ppo(
             )
         ),
         accelerator=accelerator,
-        use_vllm=use_vllm,
         vllm_config=vllm_config,
         max_output_tokens=max_tokens,
         max_model_len=max_tokens + 5,
@@ -383,7 +381,6 @@ class TestPPOInit:
             pad_token_id=99,
             pad_token="<pad>",
             lora_config=lora,
-            use_vllm=True,
             vllm_config=VLLMConfig(
                 gpu_memory_utilization=0.2,
                 max_num_seqs=1,
@@ -395,7 +392,7 @@ class TestPPOInit:
             gradient_checkpointing=False,
             device="cpu",
         )
-        assert ppo.use_vllm
+        assert ppo.colocated
         mock_instance.sleep.assert_called()
         ppo.clean_up()
 
@@ -413,14 +410,14 @@ class TestPPOInit:
         )
         # The vLLM engine is mocked; the dummy actor is the trainer base.
         with pytest.warns(
-            UserWarning, match="hf_generate_chunk_size.*ignored.*use_vllm=True"
+            UserWarning,
+            match="hf_generate_chunk_size is only used for HuggingFace generation and is ignored when colocated",
         ):
             ppo = LLMPPO(
                 actor_network=actor,
                 pad_token_id=99,
                 pad_token="<pad>",
                 lora_config=lora,
-                use_vllm=True,
                 vllm_config=VLLMConfig(
                     gpu_memory_utilization=0.2,
                     max_num_seqs=1,
@@ -644,8 +641,8 @@ class TestPPOInit:
 
 class TestPPOGetAction:
     def test_llmppo_get_action_vllm_routes_through_vllm_calls(self):
-        ppo = _cpu_llmppo(use_vllm=False)
-        ppo.use_vllm = True
+        ppo = _cpu_llmppo()
+        ppo.colocated = True
         ppo.vllm_config = VLLMConfig(
             gpu_memory_utilization=0.2,
             max_num_seqs=1,
@@ -700,7 +697,6 @@ class TestPPOGetAction:
 
     def test_llmppo_get_action_hf_path_contract(self):
         ppo = _cpu_llmppo(
-            use_vllm=False,
             hf_generate_chunk_size=2,
             max_model_len=128,
             max_output_tokens=8,
@@ -727,7 +723,6 @@ class TestPPOGetAction:
 
     def test_llmppo_get_action_hf_path_handles_actor_without_parameters(self):
         ppo = _cpu_llmppo(
-            use_vllm=False,
             hf_generate_chunk_size=2,
             max_model_len=128,
             max_output_tokens=8,
@@ -918,18 +913,17 @@ class TestPPOLearn:
         rewards = torch.tensor([[0.5, -0.5]], dtype=torch.float32)
         ppo.learn((completions, action_masks, rewards), turn_ids=turn_ids)
 
-    @pytest.mark.parametrize("use_vllm", [False, True])
-    def test_llmppo_learns_rollout(self, use_vllm):
+    @pytest.mark.parametrize("colocated", [False, True])
+    def test_llmppo_learns_rollout(self, colocated):
         """Multi-turn learn path updates actor/critic adapters without vLLM/DeepSpeed."""
         torch.manual_seed(0)
         ppo = _cpu_llmppo(
             lr_actor=0.05,
             lr_critic=0.05,
             update_epochs=2,
-            use_vllm=False,
         )
-        if use_vllm:
-            ppo.use_vllm = True
+        if colocated:
+            ppo.colocated = True
             ppo.vllm_config = VLLMConfig(
                 gpu_memory_utilization=0.2,
                 max_num_seqs=1,
@@ -976,7 +970,7 @@ class TestPPOLearn:
         ) as mock_prepare_vllm_for_training:
             ppo.learn((completions, action_masks, rewards), turn_ids=turn_ids)
         assert mock_prepare_vllm_for_training.call_count == 1
-        if use_vllm:
+        if colocated:
             ppo.llm.sleep.assert_called_once()
         pre_learn_actor_state_dict = {
             name: param.clone().detach() for name, param in ppo.actor.named_parameters()
@@ -1103,7 +1097,6 @@ class TestPPOLearn:
             accelerator=None,
             wrap=True,
             gradient_checkpointing=False,
-            use_vllm=False,
             lr_actor=0.05,
             lr_critic=0.05,
             update_epochs=1,
@@ -1834,9 +1827,8 @@ class TestPPOVllmISCorrection:
         ppo = _cpu_llmppo(
             importance_sampling_level=is_level, lr_actor=0.05, update_epochs=1
         )
-        # use_vllm=False auto-disables the correction in __init__; force it on to
-        # exercise the capture/align/metrics/reweight path (applied to the policy
-        # surrogate via clipped_is_surrogate's loss_weight hook).
+        # CPU agents are not colocated; keep the flag on so learn() still
+        # applies the reweight path.
         ppo.vllm_importance_sampling_correction = True
         ppo.vllm_importance_sampling_cap = 2.0
         vocab, inp, mtok = 100, 10, 8
@@ -1912,7 +1904,7 @@ class TestPPOSequencePacking:
         assert torch.isfinite(torch.tensor(metrics["loss"]))
 
     def test_packed_fused_forward_matches_padded(self):
-        ppo = _cpu_llmppo(use_vllm=False)
+        ppo = _cpu_llmppo()
         ppo.pad_token_id = 0
         assert ppo.use_value_head is True
         vocab, hidden = 16, 8
@@ -1997,7 +1989,6 @@ class TestPPOSaveLoadValueHead:
                 lora_dropout=0.0,
             ),
             accelerator=None,
-            use_vllm=False,
             wrap=False,
             gradient_checkpointing=False,
             max_output_tokens=8,
@@ -2077,7 +2068,6 @@ class TestPPOColocatedVllm:
                 target_modules=["q_proj", "v_proj"],
                 task_type="CAUSAL_LM",
             ),
-            use_vllm=True,
             # Both settings are required under parallel vLLM testing; see the
             # rationale on ``generate_grpo`` in test_grpo.py.
             vllm_config=VLLMConfig(

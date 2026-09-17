@@ -237,7 +237,6 @@ These values are intentionally conservative and align with the shipped configs:
           "update_epochs": 2,
           "max_model_len": 1024,
           "max_output_tokens": 64,
-          "use_vllm": True,
           "vllm_config": vllm_config,
           "micro_batch_size_per_gpu": 32,
       }
@@ -264,7 +263,6 @@ These values are intentionally conservative and align with the shipped configs:
           "update_epochs": 2,
           "max_model_len": 1024,
           "max_output_tokens": 64,
-          "use_vllm": True,
           "vllm_config": vllm_config,
           "micro_batch_size_per_gpu": 32,
       }
@@ -291,7 +289,6 @@ These values are intentionally conservative and align with the shipped configs:
           "update_epochs": 2,
           "temperature": 0.85,
           "max_model_len": 2048,
-          "use_vllm": True,
           "vllm_config": vllm_config,
       }
 

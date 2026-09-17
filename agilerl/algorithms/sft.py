@@ -201,7 +201,6 @@ class SFT(LLMAlgorithm[SFTPrompts]):
             lora_target_scope=lora_target_scope,
         )
         self.temperature = 0
-        self.use_vllm = False
         self.update_epochs = update_epochs
 
         self._initialize_actors(actor_network, not clone)

@@ -9,7 +9,6 @@ algorithm:
     update_epochs: 1
     gamma: 0.99
     temperature: 0.9
-    use_vllm: true
     vllm_config:
         tensor_parallel_size: 1
         gpu_memory_utilization: 0.3

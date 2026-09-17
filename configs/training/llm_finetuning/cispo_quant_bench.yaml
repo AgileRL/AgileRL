@@ -29,7 +29,6 @@ algorithm:
     quantization: nf4
     activation_offload: true
     chunk_rows: 128
-    use_vllm: true
     vllm_config:
         tensor_parallel_size: 1
         gpu_memory_utilization: 0.3

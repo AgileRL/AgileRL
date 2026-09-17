@@ -22,7 +22,6 @@ algorithm:
     use_liger_loss: true
     quantization: none
     activation_offload: false
-    use_vllm: true
     vllm_config:
         tensor_parallel_size: 1
         gpu_memory_utilization: 0.3

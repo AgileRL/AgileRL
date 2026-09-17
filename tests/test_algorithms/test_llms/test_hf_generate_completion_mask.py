@@ -47,7 +47,6 @@ def _cpu_algo(cls: type, *, value_head: bool = False, **kwargs: object) -> objec
         "gradient_checkpointing": False,
         "accelerator": None,
         "device": "cpu",
-        "use_vllm": False,
     }
     defaults.update(kwargs)
     return cls(**defaults)

@@ -28,7 +28,6 @@ else:
 
 MODEL_PATH = "Qwen/Qwen2.5-0.5B"
 DATASET = "Jiayi-Pan/Countdown-Tasks-3to4"
-USE_VLLM = True
 
 
 def make_dataset(dataset_name: str) -> tuple[Dataset, Dataset]:
@@ -168,7 +167,6 @@ def main(init_hp, mut_p):
             lora_dropout=0.05,
             bias="none",
         ),
-        use_vllm=USE_VLLM,
         vllm_config=VLLMConfig(sleep_mode=False, max_num_seqs=4),
         pad_token_id=tokenizer.pad_token_id,
         pad_token=tokenizer.pad_token,

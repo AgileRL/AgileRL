@@ -158,7 +158,6 @@ def main() -> None:
         )
 
     accelerator = create_llm_accelerator()
-    use_vllm = bool(init_hp.get("USE_VLLM", True))
     vllm_config = (
         VLLMConfig(
             tensor_parallel_size=1,
@@ -166,7 +165,7 @@ def main() -> None:
             max_num_seqs=16,
             sleep_mode=True,
         )
-        if use_vllm
+        if init_hp.get("USE_VLLM", True)
         else None
     )
 
@@ -179,8 +178,7 @@ def main() -> None:
         "pad_token": tokenizer.pad_token,
         "accelerator": accelerator,
     }
-    if use_vllm:
-        algo_kwargs["use_vllm"] = True
+    if vllm_config is not None:
         algo_kwargs["vllm_config"] = vllm_config
 
     # Forward numeric/string hyperparams from the YAML config

@@ -9,7 +9,6 @@ algorithm:
     update_epochs: 1
     group_size: 8
     temperature: 0.9
-    use_vllm: false
     calc_position_embeddings: true
 
 environment:

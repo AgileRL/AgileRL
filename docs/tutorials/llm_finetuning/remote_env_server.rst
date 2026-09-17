@@ -161,7 +161,6 @@ the env scores a single answer. Everything else is an ordinary rollout config:
         group_size: 4          # 2 * 4 = 8 rollout sessions (+1 for eval)
         lr: 0.00002
         max_output_tokens: 512  # room for a whole program, not one move
-        use_vllm: true
         quantization: nf4
         vllm_config:
             gpu_memory_utilization: 0.7   # give vLLM room on a small GPU

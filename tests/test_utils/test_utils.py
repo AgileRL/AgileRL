@@ -429,7 +429,6 @@ class TestCreatePopulation:
                 "lora_config": LoraConfig(**lora_kw),
                 "pad_token_id": 1000 - 1,
                 "pad_token": "<pad>",
-                "use_vllm": False,
             },
         }
 
@@ -506,7 +505,7 @@ class TestCreatePopulation:
         second_kw = mock_llmppo.call_args_list[1].kwargs
         assert first_kw["actor_network"] is actor
         assert second_kw["actor_network"] is cloned_actor
-        assert first_kw["use_vllm"] is True
+        assert "use_vllm" not in first_kw
         assert first_kw["vllm_config"] is vllm_cfg
         assert first_kw["lr_actor"] == init_hp["LR"]
         assert first_kw["cosine_lr_schedule_config"] is not None
@@ -564,7 +563,6 @@ class TestCreatePopulation:
                 algo_kwargs={
                     "pad_token_id": 999,
                     "pad_token": "<pad>",
-                    "use_vllm": True,
                     "vllm_config": local_vllm_cfg,
                 },
             )
@@ -575,7 +573,7 @@ class TestCreatePopulation:
         second_kw = mock_reinforce.call_args_list[1].kwargs
         assert first_kw["actor_network"] is actor
         assert second_kw["actor_network"] is cloned_actor
-        assert first_kw["use_vllm"] is True
+        assert "use_vllm" not in first_kw
         assert first_kw["vllm_config"] is local_vllm_cfg
         assert first_kw["torch_compiler"] == "inductor"
         assert first_kw["lr"] == init_hp["LR"]
@@ -631,7 +629,6 @@ class TestCreatePopulation:
                 algo_kwargs={
                     "pad_token_id": 999,
                     "pad_token": "<pad>",
-                    "use_vllm": False,
                 },
             )
 
@@ -695,7 +692,6 @@ class TestCreatePopulation:
                 algo_kwargs={
                     "pad_token_id": 999,
                     "pad_token": "<pad>",
-                    "use_vllm": False,
                 },
             )
 
@@ -1755,9 +1751,25 @@ class TestPrepareLlmAlgoKwargs:
         assert merged["pad_token_id"] == 7
         assert merged["pad_token"] == "<pad>"
         assert merged["model_name"] == "foo/bar"
-        assert merged["use_vllm"] is False
+        assert "use_vllm" not in merged
+        assert "vllm_config" not in merged
         assert merged["use_separate_reference_adapter"] is True
         assert merged["micro_batch_size_per_gpu"] == 8
+
+    def test_use_vllm_init_hp_fills_a_default_vllm_config(self):
+        from agilerl.utils.algo_utils import VLLMConfig
+        from agilerl.utils.utils import _prepare_llm_algo_kwargs
+
+        merged = _prepare_llm_algo_kwargs(
+            {},
+            tokenizer=None,
+            model_name="foo/bar",
+            lora_config=None,
+            vllm_config=None,
+            INIT_HP=self._init_hp(USE_VLLM=True),
+        )
+
+        assert isinstance(merged["vllm_config"], VLLMConfig)
 
     def test_existing_kwargs_take_priority_over_init_hp(self):
         from agilerl.utils.utils import _prepare_llm_algo_kwargs
@@ -2024,7 +2036,6 @@ class TestCreatePopulationLlmTorchCompiler:
                 algo_kwargs={
                     "pad_token_id": 29,
                     "pad_token": "<pad>",
-                    "use_vllm": False,
                 },
             )
         call_kw = mock_cls.call_args.kwargs
@@ -2055,7 +2066,6 @@ class TestCreatePopulationLlmTorchCompiler:
                 algo_kwargs={
                     "pad_token_id": 29,
                     "pad_token": "<pad>",
-                    "use_vllm": False,
                 },
             )
         call_kw = mock_cls.call_args.kwargs

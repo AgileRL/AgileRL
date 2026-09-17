@@ -17,7 +17,7 @@ from agilerl.arena.models.algorithms import (
     LLMAlgorithmSpec,
     RolloutLLMSpec,
 )
-from agilerl.arena.models.networks import LoraConfigDict
+from agilerl.arena.models.networks import LoraConfigDict, default_colocated_vllm_config
 from agilerl.builders.base import (
     AlgorithmBuilder,
     AlgorithmBuildRuntime,
@@ -64,6 +64,7 @@ class LLMBuilder(AlgorithmBuilder):
         tokenizer: PreTrainedTokenizerBase | None = None,
         runtime: AlgorithmBuildRuntime | None = None,
         actor_network: PreTrainedModel | PeftModel | None = None,
+        rollout_mode: str = "",
     ) -> LLMAlgorithm:
         """Build an LLM algorithm.
 
@@ -78,6 +79,9 @@ class LLMBuilder(AlgorithmBuilder):
             handed to the constructor instead of loading the model from
             ``pretrained_model_name_or_path``.
         :type actor_network: PreTrainedModel | PeftModel | None
+        :param rollout_mode: ``training.rollout_mode``. Colocated runs vLLM in
+            the trainer process.
+        :type rollout_mode: str
         :returns: LLM algorithm instance.
         :rtype: LLMAlgorithm
         :raises ValueError: If tokenizer is None.
@@ -97,16 +101,20 @@ class LLMBuilder(AlgorithmBuilder):
         kwargs = spec_kwargs(spec, hp_config=runtime.hp_config)
         kwargs.pop("pretrained_model_name_or_path", None)
 
-        use_vllm = spec.use_vllm if isinstance(spec, RolloutLLMSpec) else False
-        if not use_vllm:
-            kwargs.pop("max_model_len", None)
-            kwargs.pop("vllm_config", None)
-        elif kwargs.get("vllm_config") is not None:
+        colocated_vllm = (
+            isinstance(spec, RolloutLLMSpec) and rollout_mode == "colocated"
+        )
+        if colocated_vllm:
+            if kwargs.get("vllm_config") is None:
+                kwargs["vllm_config"] = default_colocated_vllm_config()
             vllm_cfg = kwargs["vllm_config"]
             if isinstance(vllm_cfg, BaseModel):
                 vllm_cfg = vllm_cfg.model_dump(exclude_none=True)
             if isinstance(vllm_cfg, dict):
                 kwargs["vllm_config"] = VLLMConfig(**vllm_cfg)
+        else:
+            kwargs.pop("max_model_len", None)
+            kwargs.pop("vllm_config", None)
 
         if kwargs.get("lora_config") is not None:
             kwargs["lora_config"] = peft_lora_config(kwargs["lora_config"])

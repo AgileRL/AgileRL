@@ -186,7 +186,6 @@ def main(cfg: dict) -> None:
         actor_network=actor_network,
         lora_config=lora_config_from_dict(lora),
         micro_batch_size_per_gpu=int(dbg["micro_batch_size_per_gpu"]),
-        use_vllm=False,
         pad_token_id=tokenizer.pad_token_id,
         pad_token=tokenizer.pad_token,
         use_separate_reference_adapter=True,

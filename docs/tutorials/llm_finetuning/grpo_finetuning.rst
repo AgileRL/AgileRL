@@ -276,7 +276,6 @@ training in this tutorial, we use deepspeed and accelerate.
         batch_size=4,
         group_size=12,
         accelerator=Accelerator(),
-        use_vllm=True,
         vllm_config=VLLMConfig(
             sleep_mode=True,
             max_num_seqs=4

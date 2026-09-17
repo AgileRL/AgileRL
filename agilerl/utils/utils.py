@@ -41,7 +41,12 @@ from agilerl.hpo.tournament import TournamentSelection
 from agilerl.logger import CSVLogger, StdOutLogger, TensorboardLogger, WandbLogger
 from agilerl.protocols import EvolvableAlgorithmProtocol, SelectionStrategyProtocol
 from agilerl.typing import BPTTSequenceType, InfosDict, PopulationType
-from agilerl.utils.algo_utils import CosineLRScheduleConfig, DummyOptimizer, clone_llm
+from agilerl.utils.algo_utils import (
+    CosineLRScheduleConfig,
+    DummyOptimizer,
+    VLLMConfig,
+    clone_llm,
+)
 from agilerl.utils.llm_utils import build_bnb_quantization_config
 from agilerl.vector.pz_async_vec_env import AsyncPettingZooVecEnv
 
@@ -129,7 +134,7 @@ def _prepare_llm_algo_kwargs(
 
     When ``with_generation_defaults`` is True (GRPO / LLMPPO / LLMREINFORCE), also
     merges vLLM-related defaults. When False (DPO), skips generation stack keys so
-    callers do not inherit ``use_vllm`` / ``vllm_config``; reference-adapter
+    callers do not inherit ``vllm_config``; reference-adapter
     default matches offline preference training (False unless ``INIT_HP`` says
     otherwise).
     """
@@ -150,7 +155,8 @@ def _prepare_llm_algo_kwargs(
     if with_generation_defaults:
         if vllm_config is not None:
             merged.setdefault("vllm_config", vllm_config)
-        merged.setdefault("use_vllm", bool(INIT_HP.get("USE_VLLM", False)))
+        elif INIT_HP.get("USE_VLLM"):
+            merged.setdefault("vllm_config", VLLMConfig())
         merged.setdefault(
             "use_separate_reference_adapter",
             INIT_HP.get("USE_SEPARATE_REFERENCE_ADAPTER", True),

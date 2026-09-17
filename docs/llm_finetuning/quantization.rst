@@ -250,7 +250,7 @@ for colocated QLoRA rollouts:
         max_lora_rank=16,              # >= trainer lora_config.r
     )
 
-    agent = GRPO(..., use_vllm=True, vllm_config=vllm_config)
+    agent = GRPO(..., vllm_config=vllm_config)
 
 ``VLLMConfig.quantization`` is forwarded verbatim to
 ``vllm.LLM(quantization=...)``. Any other vLLM-supported backend (e.g. ``"awq"``,
@@ -335,7 +335,6 @@ A typical memory-constrained QLoRA + colocated-vLLM setup on A100:
         model_name="Qwen/Qwen2.5-7B-Instruct",
         lora_config=lora_config,
         quantization_config=quantization_config,
-        use_vllm=True,
         vllm_config=vllm_config,
     )
 
