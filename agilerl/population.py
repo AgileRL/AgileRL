@@ -569,7 +569,8 @@ class Population(Generic[AgentT]):
 
     def update(self, agents: list[AgentT]) -> None:
         """Replace the population (e.g. after tournament selection + mutation)."""
-        self._agents = agents
+        # In-place so a caller-held list passed to __init__ stays in sync.
+        self._agents[:] = list(agents)
         self._refresh_derived()
 
     def increment_evo_step(self) -> None:

@@ -1,7 +1,7 @@
 # Copyright 2026 AgileRL
 # SPDX-License-Identifier: Apache-2.0
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
@@ -516,3 +516,32 @@ class TestTournamentSelectionElitism:
         assert elite is population[1]
         assert rank.tolist() == [0, 1]
         assert max_id == 1
+
+
+class TestTournamentAgentEviction:
+    def test_standard_selection_calls_clean_up_on_replaced_agents(self):
+        observation_space = generate_random_box_space((4,))
+        action_space = generate_discrete_space(2)
+        net_config = {"encoder_config": {"hidden_size": [8, 8], "min_mlp_nodes": 7}}
+        population = DQN.population(
+            size=3,
+            observation_space=observation_space,
+            action_space=action_space,
+            net_config=net_config,
+            device="cpu",
+        )
+        for index, agent in enumerate(population):
+            agent.fitness = [float(index)]
+            agent.clean_up = MagicMock()
+
+        tournament = TournamentSelection(2, True, 3)
+        with patch("agilerl.hpo.tournament.release_agents") as mock_release:
+            elite, new_population, _indices = tournament._select_standard_agents(
+                population
+            )
+
+        mock_release.assert_called_once()
+        released = set(mock_release.call_args.args[0])
+        assert released == set(population)
+        assert elite in new_population
+        assert new_population[0] is elite

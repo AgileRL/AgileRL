@@ -208,6 +208,10 @@ class DatasetEnv:
         """Return row count for the currently active split."""
         return self.dataset_size["test" if self.evaluation_mode else "train"]
 
+    def close(self) -> None:
+        # LocalTrainer.close() always calls close(); this env holds no file handles.
+        pass
+
     def _reset_dataloaders(
         self, reset_train: bool = True, reset_test: bool = True
     ) -> None:

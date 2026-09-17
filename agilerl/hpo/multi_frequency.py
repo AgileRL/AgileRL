@@ -34,7 +34,7 @@ from accelerate.utils import broadcast_object_list
 from agilerl.algorithms.core.base import LLMAlgorithm
 from agilerl.protocols import EvolvableAlgorithmProtocol
 from agilerl.typing import PopulationType
-from agilerl.utils.population_utils import scalar_fitness
+from agilerl.utils.population_utils import release_agents, scalar_fitness
 
 
 class MultiFrequencyOp(str, Enum):
@@ -490,7 +490,7 @@ class MultiFrequencySelection:
         :return: (elite, population, indices_to_mutate).
         :rtype: tuple[EvolvableAlgorithmProtocol, PopulationType, list[int]]
         """
-        accelerator = getattr(population[0], "accelerator", None)
+        accelerator = population[0].accelerator
 
         # Only the main process plans the generation, so the operator's mutable
         # state advances on rank 0 alone and deliberately diverges on the workers
@@ -618,7 +618,7 @@ class MultiFrequencySelection:
         # Free agents whose slot is overwritten and that no operation needs as a source
         for agent in population:
             if agent.index in replaced_indices and agent.index not in source_indices:
-                self._clean_up(agent)
+                agent.clean_up()
                 by_index[agent.index] = None
 
         new_population: PopulationType = []
@@ -636,24 +636,10 @@ class MultiFrequencySelection:
             new_population.append(clone)
             # A non-kept source is freed after its last use
             if src not in kept_indices and last_use[src] == i:
-                self._clean_up(source)
+                source.clean_up()
                 by_index[src] = None
 
         return new_population
-
-    @staticmethod
-    def _clean_up(agent: EvolvableAlgorithmProtocol) -> None:
-        """Free an agent, bracketed by its accelerator barriers.
-
-        :param agent: The agent to free.
-        :type agent: ~agilerl.protocols.EvolvableAlgorithmProtocol
-        """
-        accelerator = getattr(agent, "accelerator", None)
-        if accelerator is not None:
-            accelerator.wait_for_everyone()
-        agent.clean_up()
-        if accelerator is not None:
-            accelerator.wait_for_everyone()
 
     @staticmethod
     def _collective_clone(
@@ -668,12 +654,11 @@ class MultiFrequencySelection:
         :return: The unwrapped clone.
         :rtype: ~agilerl.protocols.EvolvableAlgorithmProtocol
         """
-        accelerator = getattr(source, "accelerator", None)
-        if accelerator is not None:
-            accelerator.wait_for_everyone()
+        if source.accelerator is not None:
+            source.accelerator.wait_for_everyone()
         clone = source.clone(index=new_index, wrap=False)
-        if accelerator is not None:
-            accelerator.wait_for_everyone()
+        if source.accelerator is not None:
+            source.accelerator.wait_for_everyone()
         return clone
 
     def _clone_winners_over_losers(
@@ -707,6 +692,7 @@ class MultiFrequencySelection:
             clone_for_loser[id(loser)] = clone
             clone_indices.append(clone.index)
         new_population = [clone_for_loser.get(id(a), a) for a in population]
+        release_agents(losers, population[0].accelerator)
         return new_population, clone_indices
 
     def _migrate(
@@ -746,6 +732,7 @@ class MultiFrequencySelection:
         """
         self._sync_index(population)
         replacements: dict[int, EvolvableAlgorithmProtocol] = {}
+        evicted: list[EvolvableAlgorithmProtocol] = []
         for open_agent, ext, kind, elite in self._migration_decisions(
             subpop, winners, open_for_migration, external_pool
         ):
@@ -755,7 +742,9 @@ class MultiFrequencySelection:
                 else self._migrate_full_clone(ext, subpop)
             )
             replacements[id(open_agent)] = migrant
+            evicted.append(open_agent)
 
+        release_agents(evicted, population[0].accelerator)
         return [replacements.get(id(a), a) for a in population]
 
     def _migration_decisions(

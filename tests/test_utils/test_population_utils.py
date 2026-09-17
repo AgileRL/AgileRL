@@ -3,10 +3,17 @@
 
 """Tests for the agilerl.utils.population_utils aggregation and formatting helpers."""
 
+from unittest.mock import MagicMock
+
 import numpy as np
 import pytest
 
-from agilerl.utils.population_utils import ScalarMetricRow, fmt_value, scalar_fitness
+from agilerl.utils.population_utils import (
+    ScalarMetricRow,
+    fmt_value,
+    release_agents,
+    scalar_fitness,
+)
 
 
 class TestScalarMetricRowFormatting:
@@ -54,3 +61,21 @@ class TestScalarFitness:
     def test_preserves_the_ordering_of_vector_fitnesses(self):
         rows = [{"a": 9.0, "b": 0.0}, {"a": 0.0, "b": 5.0}, {"a": 4.0, "b": 4.0}]
         assert sorted(rows, key=scalar_fitness) == [rows[1], rows[2], rows[0]]
+
+
+class TestReleaseAgents:
+    def test_calls_clean_up_on_each_agent_without_accelerator(self):
+        agents = [MagicMock(accelerator=None) for _ in range(3)]
+        release_agents(agents)
+        for agent in agents:
+            agent.clean_up.assert_called_once()
+
+    def test_waits_once_on_accelerator_after_clean_up(self):
+        accelerator = MagicMock()
+        agents = [MagicMock(accelerator=accelerator) for _ in range(2)]
+
+        release_agents(agents, accelerator)
+
+        for agent in agents:
+            agent.clean_up.assert_called_once()
+        accelerator.wait_for_everyone.assert_called_once()

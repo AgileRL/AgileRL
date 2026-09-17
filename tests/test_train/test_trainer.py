@@ -547,6 +547,58 @@ class TestLocalTrainerTrain:
         assert result == (mock_pop, [[1.0]])
 
     @patch("agilerl.training.trainer.create_population_from_spec")
+    def test_train_syncs_population_from_train_fn_result(
+        self,
+        mock_create_pop,
+        training_spec,
+    ):
+        from agilerl.models.env import GymEnvSpec
+
+        env_spec = GymEnvSpec(name="CartPole-v1")
+        initial_pop = [MagicMock(name="gen0")]
+        evolved_pop = [MagicMock(name="evolved")]
+        mock_create_pop.return_value = initial_pop
+        mock_train_fn = MagicMock(return_value=(evolved_pop, [1.0, 2.0]))
+
+        with (
+            patch.object(
+                SingleAgentOnPolicyStrategy,
+                "get_training_loop",
+                return_value=mock_train_fn,
+            ),
+            patch.object(LocalTrainer, "_make_env", return_value=MagicMock()),
+        ):
+            trainer = LocalTrainer(
+                algorithm="PPO",
+                environment=env_spec,
+                training=training_spec,
+            )
+            trainer.train()
+
+        assert trainer.population is evolved_pop
+
+    @patch("agilerl.training.trainer.create_population_from_spec")
+    def test_close_closes_training_env(
+        self,
+        mock_create_pop,
+        training_spec,
+    ):
+        from agilerl.models.env import GymEnvSpec
+
+        mock_create_pop.return_value = [MagicMock()]
+        mock_env = MagicMock()
+
+        with patch.object(LocalTrainer, "_make_env", return_value=mock_env):
+            trainer = LocalTrainer(
+                algorithm="PPO",
+                environment=GymEnvSpec(name="CartPole-v1"),
+                training=training_spec,
+            )
+            trainer.close()
+
+        mock_env.close.assert_called_once()
+
+    @patch("agilerl.training.trainer.create_population_from_spec")
     def test_train_warns_max_wall_seconds_ignored_for_non_multiturn(
         self,
         mock_create_pop,
@@ -2186,7 +2238,7 @@ class TestLocalTrainerIntegration:
         finally:
             rollout_env.close()
 
-        mock_fn = MagicMock(return_value=None)
+        mock_fn = MagicMock(return_value=(mock_pop, [0.0]))
         with patch.object(trainer, "train_fn", mock_fn):
             trainer.train()
             mock_fn.assert_called_once()
@@ -2261,7 +2313,7 @@ class TestLocalTrainerIntegration:
         assert isinstance(trainer.env, DatasetEnv)
         assert trainer.tokenizer is not None
 
-        mock_fn = MagicMock(return_value=None)
+        mock_fn = MagicMock(return_value=(mock_pop, [0.0]))
         with patch.object(trainer, "train_fn", mock_fn):
             trainer.train()
             mock_fn.assert_called_once()
@@ -2654,7 +2706,7 @@ class TestLocalTrainerRollout:
 
         mock_pop = [MagicMock()]
         mock_tokenizer = MagicMock(eos_token_id=0, eos_token="<eos>", pad_token_id=0)
-        mock_train_fn = MagicMock(return_value=mock_pop)
+        mock_train_fn = MagicMock(return_value=(mock_pop, [0.0]))
         mock_env_factory = MagicMock()
 
         env_spec = LLMEnvSpec(
@@ -2709,7 +2761,7 @@ class TestLocalTrainerRollout:
 
         mock_pop = [MagicMock()]
         mock_tokenizer = MagicMock(eos_token_id=0, eos_token="<eos>", pad_token_id=0)
-        mock_train_fn = MagicMock(return_value=mock_pop)
+        mock_train_fn = MagicMock(return_value=(mock_pop, [0.0]))
 
         env_spec = LLMEnvSpec(
             env_type=LLMEnvType.ROLLOUT,

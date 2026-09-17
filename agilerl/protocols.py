@@ -606,6 +606,8 @@ class BanditEnvProtocol(Protocol):
 
     def step(self, k: int) -> tuple[npt.NDArray, float]: ...
 
+    def close(self) -> None: ...
+
 
 class TextEnvProtocol(Protocol):
     """Structural type for local text envs served or wrapped by OpenEnv.

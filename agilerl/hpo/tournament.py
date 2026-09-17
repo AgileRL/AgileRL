@@ -12,7 +12,7 @@ from accelerate.utils import broadcast_object_list
 
 from agilerl.algorithms.core.base import LLMAlgorithm
 from agilerl.protocols import EvolvableAlgorithmProtocol
-from agilerl.utils.population_utils import scalar_fitness
+from agilerl.utils.population_utils import release_agents, scalar_fitness
 
 AgentT = TypeVar("AgentT", bound=EvolvableAlgorithmProtocol)
 
@@ -113,10 +113,10 @@ class TournamentSelection:
         :rtype: tuple[AgentT, list[AgentT], None]
         """
         best_agent, rank, max_id = self._elitism(population)
-        elite = best_agent.clone(index=None, wrap=True)
         new_population: list[AgentT] = []
+        elite = best_agent.clone(index=None, wrap=False)
         if self.elitism:  # keep top agent in population
-            new_population.append(elite.clone(index=None, wrap=False))
+            new_population.append(elite)
             selection_size = self.population_size - 1
         else:
             selection_size = self.population_size
@@ -127,6 +127,10 @@ class TournamentSelection:
             actor_parent = population[self._tournament(rank)]
             new_individual = actor_parent.clone(index=max_id, wrap=False)
             new_population.append(new_individual)
+
+        new_ids = {id(agent) for agent in new_population}
+        evicted = [agent for agent in population if id(agent) not in new_ids]
+        release_agents(evicted, population[0].accelerator)
 
         return elite, new_population, None
 
@@ -182,30 +186,23 @@ class TournamentSelection:
                     )
                 )
 
-        # Delete any unwanted agents from memory. ``agent_slots`` only receives
-        # None in the later cloning loop, so no slot is None during this pass.
-        for agent_idx in old_population_idxs:
-            if agent_idx in unwanted_agents:
-                unwanted_ref = agent_slots[old_population_idxs.index(agent_idx)]
-                if unwanted_ref.accelerator is not None:
-                    unwanted_ref.accelerator.wait_for_everyone()
-                unwanted_ref.clean_up()
-                if unwanted_ref.accelerator is not None:
-                    unwanted_ref.accelerator.wait_for_everyone()
+        index_to_slot = {
+            agent_idx: slot for slot, agent_idx in enumerate(old_population_idxs)
+        }
+        unwanted_refs = [
+            agent_slots[index_to_slot[agent_idx]] for agent_idx in unwanted_agents
+        ]
+        release_agents(unwanted_refs, accelerator)
 
         new_population: list[AgentT] = []
         index_tracker: dict[int, AgentT] = {}
         for idx_to_clone, new_idx in new_population_idxs:
-            slot = old_population_idxs.index(idx_to_clone)
+            slot = index_to_slot[idx_to_clone]
             if (agent_ref := agent_slots[slot]) is not None:
                 if agent_ref.accelerator is not None:
                     agent_ref.accelerator.wait_for_everyone()
                 actor_parent = agent_ref.clone(index=new_idx, wrap=False)
-                if agent_ref.accelerator is not None:
-                    agent_ref.accelerator.wait_for_everyone()
                 agent_ref.clean_up()
-                if agent_ref.accelerator is not None:
-                    agent_ref.accelerator.wait_for_everyone()
                 agent_slots[slot] = None
                 index_tracker[idx_to_clone] = actor_parent
             else:

@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import gymnasium as gym
+import h5py
 import minari
 import pytest
 import torch
@@ -129,8 +130,9 @@ def create_dataset_return_timesteps(dataset_id: str, env_id: str) -> int:
 def test_minari_to_agile_dataset(dataset_id: str, env_id: str) -> None:
     """Test create agile dataset from minari dataset."""
     total_timesteps = create_dataset_return_timesteps(dataset_id, env_id)
-    dataset = minari_utils.minari_to_agile_dataset(dataset_id)
-    assert len(dataset["rewards"][:]) == total_timesteps
+    dataset_path = minari_utils.minari_to_agile_dataset(dataset_id)
+    with h5py.File(dataset_path, "r") as dataset:
+        assert len(dataset["rewards"][:]) == total_timesteps
     check_delete_dataset(dataset_id)
 
 
