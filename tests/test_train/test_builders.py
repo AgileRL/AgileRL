@@ -193,8 +193,6 @@ def test_arena_only_fields_are_not_forwarded_to_the_constructor():
         group_size=4,
         attn_implementation="sdpa",
         quantization="nf4",
-        zero_stage=2,
-        deepspeed={"train_batch_size": 1},
         vllm_engine_args={"trust_remote_code": True},
         pretrained_model_name_or_path="Qwen/Qwen2.5-0.5B-Instruct",
     )
@@ -204,13 +202,9 @@ def test_arena_only_fields_are_not_forwarded_to_the_constructor():
 
     assert kwargs["attn_implementation"] == "sdpa"
     assert kwargs["quantization"] == "nf4"
-    assert kwargs["zero_stage"] == 2
-    assert kwargs["deepspeed"] == {"train_batch_size": 1}
     assert kwargs["vllm_engine_args"] == {"trust_remote_code": True}
     assert "attn_implementation" not in filtered
     assert "quantization" not in filtered
-    assert "zero_stage" not in filtered
-    assert "deepspeed" not in filtered
     assert "vllm_engine_args" not in filtered
     assert filtered["group_size"] == 4
 

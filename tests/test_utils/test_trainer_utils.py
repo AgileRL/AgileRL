@@ -76,7 +76,8 @@ class TestCreatePopulationLLM:
 
         mock_agent0 = MagicMock()
         mock_agent0.actor = MagicMock()
-        mock_agent0.actor.state_dict.return_value = {}
+        cloned_actor = MagicMock()
+        mock_agent0._clone_actor_network.return_value = cloned_actor
 
         mock_agent1 = MagicMock()
 
@@ -95,11 +96,9 @@ class TestCreatePopulationLLM:
 
         algo = GRPOSpec(pretrained_model_name_or_path="gpt2", group_size=4)
 
-        with (
-            patch.object(LLMBuilder, "build", side_effect=_build_side_effect),
-            patch("agilerl.utils.trainer_utils.clone_llm", return_value=MagicMock()),
-            patch("agilerl.utils.trainer_utils.get_state_dict", return_value={}),
-        ):
+        with patch.object(
+            LLMBuilder, "build", side_effect=_build_side_effect
+        ) as mock_build:
             pop = create_population_from_spec(
                 population_size=2,
                 algo_spec=algo,
@@ -110,6 +109,8 @@ class TestCreatePopulationLLM:
                 tokenizer=MagicMock(),
             )
         assert len(pop) == 2
+        mock_agent0._clone_actor_network.assert_called_once()
+        assert mock_build.call_args_list[1].kwargs["actor_network"] is cloned_actor
 
 
 class TestBuildMutations:

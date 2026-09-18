@@ -31,8 +31,8 @@ with its ``indices`` argument so only the clones are mutated (see :ref:`mutation
 The class :class:`MultiFrequencySelection <agilerl.hpo.multi_frequency.MultiFrequencySelection>`
 implements the multi-frequency selection operator needed in MF-PBT; its
 :func:`select() <agilerl.hpo.multi_frequency.MultiFrequencySelection.select>` returns the
-global elite, the evolved population, and the winner-clone indices to mutate. MF-PBT supports
-an ``accelerator`` and both the classic-RL and the LLM finetuning algorithms.
+global elite, the evolved population, and the winner-clone indices to mutate. MF-PBT works
+with classic RL (Accelerate) and LLM finetuning (``torch.distributed``).
 
 .. code-block:: python
 

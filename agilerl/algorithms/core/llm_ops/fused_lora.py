@@ -188,6 +188,53 @@ def _is_routed_layer(module: LoraLayer) -> bool:
     )
 
 
+def adapter_aligned_chunks(
+    routing: Sequence[str], batch_size: int
+) -> list[tuple[int, int]]:
+    """Micro-batch ``(start, end)`` spans of at most *batch_size* rows that never straddle an adapter run."""
+    chunks: list[tuple[int, int]] = []
+    run_start = 0
+    for _, run in itertools.groupby(routing):
+        run_len = sum(1 for _ in run)
+        chunks.extend(
+            (start, min(start + batch_size, run_start + run_len))
+            for start in range(run_start, run_start + run_len, batch_size)
+        )
+        run_start += run_len
+    return chunks
+
+
+def interleaved_sequence_adapter_plan(
+    routing: Sequence[str],
+) -> tuple[list[str], list[tuple[int, int]], list[int]] | None:
+    """Plan a sequence-major layout that mixes equal-length adapter runs.
+
+    Adapter-major ``[a0]*S + [a1]*S + …`` becomes ``[a0, a1, …] * S``. Each
+    chunk is one sequence x all adapters (typically ref+actor). Returns
+    ``None`` when mixing does not apply (one run, or unequal run lengths).
+
+    :param routing: Adapter name per fused row (adapter-major).
+    :return: Interleaved routing, chunks, and source row indices into the
+        adapter-major batch; or ``None``.
+    """
+    runs = [(name, sum(1 for _ in group)) for name, group in itertools.groupby(routing)]
+    if len(runs) < 2:
+        return None
+    n_sequences = runs[0][1]
+    if any(length != n_sequences for _, length in runs):
+        return None
+    adapters = [name for name, _ in runs]
+    n_adapters = len(adapters)
+    interleaved = adapters * n_sequences
+    chunks = [(seq * n_adapters, (seq + 1) * n_adapters) for seq in range(n_sequences)]
+    src_rows = [
+        adapter * n_sequences + seq
+        for seq in range(n_sequences)
+        for adapter in range(n_adapters)
+    ]
+    return interleaved, chunks, src_rows
+
+
 def _store_layer_cache(model: nn.Module, layers: list[LoraLayer]) -> None:
     LORA_LAYER_CACHE[model] = layers
 

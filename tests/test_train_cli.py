@@ -5,10 +5,23 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 import agilerl.train as train_mod
+
+
+def _mock_trainer(*, name: str = "PPO", env: str = "CartPole-v1") -> MagicMock:
+    mock_trainer = MagicMock()
+    mock_trainer.algorithm_spec.name = name
+    mock_trainer.env_spec.name = env
+    mock_trainer.training_spec.pop_size = 6
+    mock_trainer.training_spec.max_steps = 100
+    mock_trainer.train.return_value = ([], [0.5])
+    return mock_trainer
 
 
 class TestParseArgs:
@@ -116,25 +129,21 @@ class TestParseArgs:
 
 class TestMain:
     def test_main_calls_from_manifest_and_train(self):
-        mock_trainer = MagicMock()
-        mock_trainer.algorithm_spec.name = "PPO"
-        mock_trainer.env_spec.name = "CartPole-v1"
-        mock_trainer.training_spec.pop_size = 6
-        mock_trainer.training_spec.max_steps = 100
-        mock_trainer.train.return_value = ([], [0.5])
+        mock_trainer = _mock_trainer()
 
-        with patch.object(
-            train_mod.LocalTrainer, "from_manifest", return_value=mock_trainer
-        ) as mock_from:
-            with patch("sys.argv", ["train", "config.yaml", "-d", "cpu"]):
-                train_mod.main()
+        with (
+            patch.object(
+                train_mod.LocalTrainer, "from_manifest", return_value=mock_trainer
+            ) as mock_from,
+            patch("sys.argv", ["train", "config.yaml", "-d", "cpu"]),
+        ):
+            train_mod.main()
 
-            mock_from.assert_called_once_with(
-                manifest=Path("config.yaml"),
-                resume_from_checkpoint=None,
-                device="cpu",
-                accelerator=None,
-            )
+        mock_from.assert_called_once_with(
+            manifest=Path("config.yaml"),
+            resume_from_checkpoint=None,
+            device="cpu",
+        )
         mock_trainer.train.assert_called_once_with(
             wb=False,
             wandb_api_key=None,
@@ -148,27 +157,50 @@ class TestMain:
             verbose=True,
         )
 
-    def test_main_with_accelerator(self):
-        mock_trainer = MagicMock()
-        mock_trainer.algorithm_spec.name = "DQN"
-        mock_trainer.env_spec.name = "LunarLander-v2"
-        mock_trainer.training_spec.pop_size = 4
-        mock_trainer.training_spec.max_steps = 50
-        mock_trainer.train.return_value = ([], [1.0])
+    def test_use_accelerator_without_launch_warns(self):
+        mock_trainer = _mock_trainer(name="DQN", env="LunarLander-v2")
 
-        mock_accel_instance = MagicMock()
+        with (
+            patch.object(
+                train_mod.LocalTrainer, "from_manifest", return_value=mock_trainer
+            ) as mock_from,
+            patch("sys.argv", ["train", "m.yaml", "--use-accelerator", "-d", "cpu"]),
+            patch.dict(
+                os.environ,
+                {"ACCELERATE_STARTED_BY_LAUNCH": "", "WORLD_SIZE": ""},
+            ),
+            pytest.warns(DeprecationWarning, match="unused"),
+            pytest.warns(UserWarning, match="not using Accelerator"),
+        ):
+            train_mod.main()
 
-        with patch.object(
-            train_mod.LocalTrainer, "from_manifest", return_value=mock_trainer
-        ) as mock_from:
-            with patch.object(
-                train_mod, "Accelerator", return_value=mock_accel_instance
-            ) as mock_accel:
-                with patch(
-                    "sys.argv", ["train", "m.yaml", "--use-accelerator", "-d", "cpu"]
-                ):
-                    train_mod.main()
+        mock_from.assert_called_once_with(
+            manifest=Path("m.yaml"),
+            resume_from_checkpoint=None,
+            device="cpu",
+        )
 
-            mock_accel.assert_called_once()
-            call_kwargs = mock_from.call_args[1]
-            assert call_kwargs["accelerator"] is mock_accel_instance
+    def test_use_accelerator_with_launch_only_deprecates(self):
+        mock_trainer = _mock_trainer(name="DQN", env="LunarLander-v2")
+
+        with (
+            patch.object(
+                train_mod.LocalTrainer, "from_manifest", return_value=mock_trainer
+            ) as mock_from,
+            patch("sys.argv", ["train", "m.yaml", "--use-accelerator", "-d", "cpu"]),
+            patch.dict(
+                os.environ,
+                {
+                    "ACCELERATE_STARTED_BY_LAUNCH": "true",
+                    "WORLD_SIZE": "2",
+                },
+            ),
+            pytest.warns(DeprecationWarning, match="unused"),
+        ):
+            train_mod.main()
+
+        mock_from.assert_called_once_with(
+            manifest=Path("m.yaml"),
+            resume_from_checkpoint=None,
+            device="cpu",
+        )

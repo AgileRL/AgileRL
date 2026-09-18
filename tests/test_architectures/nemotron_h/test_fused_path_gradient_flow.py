@@ -166,7 +166,8 @@ def test_family_patches_after_build_restore_out_proj_lora_gradients(
     assert _lora_grad_sums(model, "out_proj") == {}
 
 
-def test_peft_rejects_out_proj_module_targets_on_nemotron_h(pristine_mixer_class):
+def test_raw_peft_attaches_out_proj_without_mamba_adapter(pristine_mixer_class):
+    """PEFT wraps mixer.out_proj unless :func:`adapt_lora_config_for_model` drops it."""
     base = _tiny_nemotron_h()
     lora_config = LoraConfig(
         r=4,
@@ -177,8 +178,9 @@ def test_peft_rejects_out_proj_module_targets_on_nemotron_h(pristine_mixer_class
         task_type="CAUSAL_LM",
     )
 
-    with pytest.raises(ValueError, match="incompatible with Mamba"):
-        get_peft_model(base, lora_config, adapter_name="actor")
+    model = get_peft_model(base, lora_config, adapter_name="actor")
+    names = [name for name, _ in model.named_parameters()]
+    assert any("out_proj" in name and "lora_A" in name for name in names)
 
 
 def test_adapted_lora_config_drops_out_proj_and_attaches(pristine_mixer_class):

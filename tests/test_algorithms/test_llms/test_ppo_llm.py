@@ -10,10 +10,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 
-pytest.importorskip("deepspeed", reason="LLM tests require deepspeed.")
 pytest.importorskip("vllm", reason="LLM tests require vllm.")
 
-from accelerate.state import AcceleratorState
 from peft import LoraConfig
 from torch import nn
 from transformers.configuration_utils import PretrainedConfig
@@ -23,6 +21,7 @@ from transformers.modeling_utils import PreTrainedModel
 
 from agilerl.algorithms.core import ActionResult
 from agilerl.algorithms.ppo_llm import PPO as LLMPPO
+from agilerl.distributed import FSDPConfig
 from agilerl.llm_envs import RolloutHarness
 from agilerl.utils.algo_utils import CosineLRScheduleConfig, VLLMConfig
 from agilerl.utils.llm_utils import masked_whiten
@@ -34,21 +33,6 @@ from tests.utils import (
     make_mock_vllm_instance,
     spawn_new_process_for_each_test,
 )
-
-deepspeed_base_config = {
-    "bf16": {
-        "enabled": True,
-    },
-    "auto_cast": True,
-    "gradient_clipping": 0.5,
-    "gradient_accumulation_steps": 1,
-}
-
-deepspeed_config_stage_2 = deepspeed_base_config | {
-    "zero_optimization": {
-        "stage": 2,
-    },
-}
 
 
 class DummyConfig(PretrainedConfig):
@@ -79,16 +63,21 @@ class DummyCausalInner(PreTrainedModel):
         super().__init__(config)
         self.name_or_path = "dummy-causal-llm"
         self.gradient_checkpointing_enabled = False
-        # Real ``PreTrainedModel``s expose a ``generation_config`` that the HF
-        # ``generate`` path (now reached through the PEFT wrappers) reads. This
-        # dummy doesn't inherit ``GenerationMixin`` so transformers skips the
-        # auto-init; set it explicitly to mirror a generation-capable model.
         self.generation_config = GenerationConfig.from_model_config(config)
         hs = config.hidden_size
         vs = config.vocab_size
         self.embed = nn.Embedding(vs, hs, device=device)
         self.lin = nn.Linear(hs, hs, device=device)
         self.lm_head = nn.Linear(hs, vs, device=device)
+
+    def get_input_embeddings(self):
+        return self.embed
+
+    def get_output_embeddings(self):
+        return self.lm_head
+
+    def set_output_embeddings(self, new_embeddings):
+        self.lm_head = new_embeddings
 
     def forward(
         self,
@@ -170,7 +159,7 @@ def create_module(input_size, max_tokens, vocab_size, device):
 
 
 def _cpu_llmppo(**kwargs):
-    """Small CPU LLMPPO for fast unit tests (dummy actor + LoRA, no accelerator)."""
+    """Small CPU LLMPPO for fast unit tests (dummy actor + LoRA, single device)."""
     device = "cpu"
     vocab_size = 100
     input_size = 10
@@ -192,9 +181,9 @@ def _cpu_llmppo(**kwargs):
         "micro_batch_size_per_gpu": 2,
         "max_output_tokens": max_tokens,
         "max_model_len": input_size + max_tokens + 4,
-        "accelerator": None,
         "wrap": False,
         "gradient_checkpointing": False,
+        "use_vllm": False,
         "lr_actor": 1e-3,
         "lr_critic": 1e-3,
         "update_epochs": 1,
@@ -212,16 +201,15 @@ def _cpu_llmppo(**kwargs):
 
 
 def generate_ppo(
-    accelerator_factory,
+    dist_mode_factory,
     model_factory,
-    config,
-    use_deepspeed_optimizer,
+    dist_mode,
     vocab_size,
     input_size,
     max_tokens,
-    colocated=False,
-    pretrained_model_name_or_path=None,
-    micro_batch_size_per_gpu=None,
+    use_vllm,
+    pretrained_model_name_or_path,
+    micro_batch_size_per_gpu,
     lr_actor=1e-5,
     lr_critic=1e-4,
     sleep_mode=False,
@@ -232,13 +220,10 @@ def generate_ppo(
 
     gc.collect()
     torch.cuda.empty_cache()
-    AcceleratorState._reset_state(True)
 
-    accelerator = accelerator_factory(use_deepspeed_optimizer, config)
-    if not use_deepspeed_optimizer and accelerator is not None:
-        accelerator.state.deepspeed_plugin.deepspeed_config.pop("optimizer", None)
+    dist_mode_factory(dist_mode)
 
-    if colocated:
+    if use_vllm:
         lora_config = None
         vllm_config = VLLMConfig(
             gpu_memory_utilization=0.2, max_num_seqs=1, sleep_mode=sleep_mode
@@ -283,16 +268,17 @@ def generate_ppo(
         pad_token="<pad>",
         device="cuda" if torch.cuda.is_available() else "cpu",
         lora_config=lora_config,
+        fsdp_config=FSDPConfig() if dist_mode == "fsdp2" else None,
         cosine_lr_schedule_config=(
             None
-            if accelerator is not None
+            if dist_mode is not None
             else (
                 CosineLRScheduleConfig(num_epochs=10, warmup_proportion=0.05)
                 if use_scheduler
                 else None
             )
         ),
-        accelerator=accelerator,
+        use_vllm=use_vllm,
         vllm_config=vllm_config,
         max_output_tokens=max_tokens,
         max_model_len=max_tokens + 5,
@@ -335,31 +321,6 @@ class _PPOStub:
 
 
 class TestPPOInit:
-    @pytest.fixture(autouse=True)
-    def stub_llama_auto_config(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(
-            "transformers.AutoConfig.from_pretrained",
-            lambda *args, **kwargs: SimpleNamespace(model_type="llama"),
-        )
-
-    def test_init_auto_detects_device_when_none_given(self):
-        """Regression: no ``device`` must auto-detect, not silently fall back to CPU."""
-        with patch(
-            "agilerl.algorithms.ppo_llm.resolve_llm_device", return_value="cpu"
-        ) as mock_resolve:
-            ppo = _cpu_llmppo(device=None)
-
-        mock_resolve.assert_called_once_with(None, None)
-        assert ppo.device == "cpu"
-
-    def test_init_honours_an_explicitly_requested_device(self):
-        """An explicit ``device`` is used as-is when no accelerator is present."""
-        with patch("torch.cuda.is_available", return_value=True):
-            ppo = _cpu_llmppo(device="cpu")
-
-        assert ppo.device == "cpu"
-        assert all(param.device.type == "cpu" for param in ppo.actor.parameters())
-
     @patch("agilerl.algorithms.core.base.LLM")
     def test_init_llmppo_vllm_sleep_mode_calls_sleep(self, MockLLM):
         mock_instance = make_mock_vllm_instance()
@@ -381,6 +342,7 @@ class TestPPOInit:
             pad_token_id=99,
             pad_token="<pad>",
             lora_config=lora,
+            use_vllm=True,
             vllm_config=VLLMConfig(
                 gpu_memory_utilization=0.2,
                 max_num_seqs=1,
@@ -392,7 +354,7 @@ class TestPPOInit:
             gradient_checkpointing=False,
             device="cpu",
         )
-        assert ppo.colocated
+        assert ppo.use_vllm
         mock_instance.sleep.assert_called()
         ppo.clean_up()
 
@@ -410,14 +372,14 @@ class TestPPOInit:
         )
         # The vLLM engine is mocked; the dummy actor is the trainer base.
         with pytest.warns(
-            UserWarning,
-            match="hf_generate_chunk_size is only used for HuggingFace generation and is ignored when colocated",
+            UserWarning, match="hf_generate_chunk_size.*ignored.*use_vllm=True"
         ):
             ppo = LLMPPO(
                 actor_network=actor,
                 pad_token_id=99,
                 pad_token="<pad>",
                 lora_config=lora,
+                use_vllm=True,
                 vllm_config=VLLMConfig(
                     gpu_memory_utilization=0.2,
                     max_num_seqs=1,
@@ -641,8 +603,8 @@ class TestPPOInit:
 
 class TestPPOGetAction:
     def test_llmppo_get_action_vllm_routes_through_vllm_calls(self):
-        ppo = _cpu_llmppo()
-        ppo.colocated = True
+        ppo = _cpu_llmppo(use_vllm=False)
+        ppo.use_vllm = True
         ppo.vllm_config = VLLMConfig(
             gpu_memory_utilization=0.2,
             max_num_seqs=1,
@@ -681,7 +643,7 @@ class TestPPOGetAction:
                 return_value=(mocked_ids, mocked_masks, None),
             ) as mock_generate,
         ):
-            token_ids, action_masks, _ = ppo.get_action(prompts, training=False)
+            completion_ids, action_masks, _ = ppo.get_action(prompts, training=False)
 
         mock_prepare.assert_called_once()
         mock_move.assert_called_once()
@@ -691,12 +653,13 @@ class TestPPOGetAction:
         ppo.llm.wake_up.assert_called_once()
         ppo._prepare_vllm_for_training()
         ppo.llm.sleep.assert_called_once()
-        assert token_ids == mocked_ids
+        assert completion_ids == mocked_ids
         assert action_masks == mocked_masks
         ppo.clean_up()
 
     def test_llmppo_get_action_hf_path_contract(self):
         ppo = _cpu_llmppo(
+            use_vllm=False,
             hf_generate_chunk_size=2,
             max_model_len=128,
             max_output_tokens=8,
@@ -711,9 +674,9 @@ class TestPPOGetAction:
             for _ in range(batch_size)
         ]
         for training in (True, False):
-            token_ids, action_masks, _ = ppo.get_action(prompts, training=training)
+            completion_ids, action_masks, _ = ppo.get_action(prompts, training=training)
             assert_vllm_get_action_contract(
-                token_ids=token_ids,
+                token_ids=completion_ids,
                 action_masks=action_masks,
                 batch_size=batch_size,
                 prompt_len=prompt_len,
@@ -723,14 +686,20 @@ class TestPPOGetAction:
 
     def test_llmppo_get_action_hf_path_handles_actor_without_parameters(self):
         ppo = _cpu_llmppo(
+            use_vllm=False,
             hf_generate_chunk_size=2,
             max_model_len=128,
             max_output_tokens=8,
         )
 
+        real_actor = ppo.actor
+
         class _NoParamModule:
             def parameters(self):
                 return iter(())
+
+            def __getattr__(self, name):
+                return getattr(real_actor, name)
 
         prompts = [
             {
@@ -739,11 +708,11 @@ class TestPPOGetAction:
             }
         ]
 
-        with patch.object(ppo, "_get_unwrapped_actor", return_value=_NoParamModule()):
-            token_ids, action_masks, _ = ppo.get_action(prompts, training=True)
+        ppo.actor = _NoParamModule()
+        completion_ids, action_masks, _ = ppo.get_action(prompts, training=True)
 
         assert_vllm_get_action_contract(
-            token_ids=token_ids,
+            token_ids=completion_ids,
             action_masks=action_masks,
             batch_size=1,
             prompt_len=10,
@@ -843,21 +812,6 @@ class TestPPOComputeGaeReturns:
         assert torch.allclose(advantages, expected_advantages)
         assert torch.allclose(returns, expected_returns)
 
-    def test_compute_gae_returns_single_turn_skips_whitening(self):
-        stub = _PPOStub(gamma=1.0, gae_lambda=1.0)
-        action_mask = torch.ones(1, 2, dtype=torch.bool)
-        turn_ids = torch.tensor([[0, 0]])
-        values = torch.tensor([[0.0, 0.0]])
-        rewards = torch.tensor([[1.0, 1.0]])
-
-        returns, advantages = stub._compute_gae_returns(
-            rewards, values, action_mask, turn_ids
-        )
-
-        expected = torch.tensor([[1.0, 1.0]])
-        assert torch.allclose(advantages, expected)
-        assert torch.allclose(returns, expected)
-
 
 class TestPPOComputeGaeReturnsToken:
     def test_compute_gae_returns_token_padding_positions_zero_advantage(self):
@@ -913,17 +867,18 @@ class TestPPOLearn:
         rewards = torch.tensor([[0.5, -0.5]], dtype=torch.float32)
         ppo.learn((completions, action_masks, rewards), turn_ids=turn_ids)
 
-    @pytest.mark.parametrize("colocated", [False, True])
-    def test_llmppo_learns_rollout(self, colocated):
-        """Multi-turn learn path updates actor/critic adapters without vLLM/DeepSpeed."""
+    @pytest.mark.parametrize("use_vllm", [False, True])
+    def test_llmppo_learns_rollout(self, use_vllm):
+        """Multi-turn learn path updates actor/critic adapters on a single device."""
         torch.manual_seed(0)
         ppo = _cpu_llmppo(
             lr_actor=0.05,
             lr_critic=0.05,
             update_epochs=2,
+            use_vllm=False,
         )
-        if colocated:
-            ppo.colocated = True
+        if use_vllm:
+            ppo.use_vllm = True
             ppo.vllm_config = VLLMConfig(
                 gpu_memory_utilization=0.2,
                 max_num_seqs=1,
@@ -970,7 +925,7 @@ class TestPPOLearn:
         ) as mock_prepare_vllm_for_training:
             ppo.learn((completions, action_masks, rewards), turn_ids=turn_ids)
         assert mock_prepare_vllm_for_training.call_count == 1
-        if colocated:
+        if use_vllm:
             ppo.llm.sleep.assert_called_once()
         pre_learn_actor_state_dict = {
             name: param.clone().detach() for name, param in ppo.actor.named_parameters()
@@ -1075,7 +1030,7 @@ class TestPPOLearn:
         ppo.learn((completions, masks, rewards), turn_ids=turn_ids)
 
     def test_llmppo_wrap_true_runs_learn(self):
-        """``wrap=True`` with no accelerator still calls :meth:`wrap_models`."""
+        """``wrap=True`` on a single device still calls :meth:`wrap_models`."""
         actor = create_module(10, 8, 100, "cpu")
         lora = LoraConfig(
             r=4,
@@ -1094,9 +1049,9 @@ class TestPPOLearn:
             micro_batch_size_per_gpu=2,
             max_output_tokens=8,
             max_model_len=32,
-            accelerator=None,
             wrap=True,
             gradient_checkpointing=False,
+            use_vllm=False,
             lr_actor=0.05,
             lr_critic=0.05,
             update_epochs=1,
@@ -1312,14 +1267,16 @@ class TestPPOTest:
                 return None
 
         ppo = _cpu_llmppo()
-        acc = MagicMock()
-        ppo.accelerator = acc
+        ppo.distributed = True
         completion = torch.ones(1, 6, dtype=torch.long)
-        with patch.object(
-            ppo, "get_action", return_value=ActionResult([completion], None)
+        with (
+            patch.object(
+                ppo, "get_action", return_value=ActionResult([completion], None)
+            ),
+            patch("agilerl.algorithms.core.base.barrier") as mock_barrier,
         ):
             ppo.test(DummyRolloutEpisodeEnv(), loop=1)
-        acc.wait_for_everyone.assert_called()
+        mock_barrier.assert_called()
 
     def test_test_method_rollout_continues_when_not_done(self):
         """Cover prompt update when the episode spans turns."""
@@ -1827,8 +1784,9 @@ class TestPPOVllmISCorrection:
         ppo = _cpu_llmppo(
             importance_sampling_level=is_level, lr_actor=0.05, update_epochs=1
         )
-        # CPU agents are not colocated; keep the flag on so learn() still
-        # applies the reweight path.
+        # use_vllm=False auto-disables the correction in __init__; force it on to
+        # exercise the capture/align/metrics/reweight path (applied to the policy
+        # surrogate via clipped_is_surrogate's loss_weight hook).
         ppo.vllm_importance_sampling_correction = True
         ppo.vllm_importance_sampling_cap = 2.0
         vocab, inp, mtok = 100, 10, 8
@@ -1854,6 +1812,25 @@ class TestPPOVllmISCorrection:
         assert torch.isfinite(torch.tensor(metrics["loss"]))
 
 
+class _CtxFreeCausalInner(nn.Module):
+    """PEFT-shaped causal inner: ``get_base_model()`` is itself."""
+
+    def __init__(self, vocab: int, hidden: int) -> None:
+        super().__init__()
+        self.embed = nn.Embedding(vocab, hidden)
+        self.lm_head = nn.Linear(hidden, vocab, bias=False)
+        self.last_input_shape: tuple[int, ...] | None = None
+
+    def get_base_model(self):
+        return self
+
+    def get_output_embeddings(self):
+        return self.lm_head
+
+    def set_output_embeddings(self, new_embeddings):
+        self.lm_head = new_embeddings
+
+
 class _CtxFreeValueActor(nn.Module):
     """Context-free actor + value head for packing-equivalence tests.
 
@@ -1868,14 +1845,18 @@ class _CtxFreeValueActor(nn.Module):
 
     def __init__(self, vocab: int, hidden: int) -> None:
         super().__init__()
-        self.embed = nn.Embedding(vocab, hidden)
+        self.pretrained_model = _CtxFreeCausalInner(vocab, hidden)
         self.value_head = nn.Linear(hidden, 1)
-        self.last_input_shape: tuple[int, ...] | None = None
+        self.config = SimpleNamespace(_attn_implementation=None)
+
+    @property
+    def last_input_shape(self) -> tuple[int, ...] | None:
+        return self.pretrained_model.last_input_shape
 
     def forward(self, input_ids=None, **kwargs):
-        self.last_input_shape = tuple(input_ids.shape)
-        h = self.embed(input_ids)  # (rows, S, H)
-        value = self.value_head(h).squeeze(-1)  # (rows, S)
+        self.pretrained_model.last_input_shape = tuple(input_ids.shape)
+        h = self.pretrained_model.embed(input_ids)
+        value = self.value_head(h).squeeze(-1)
         return (h, None, value)
 
 
@@ -1904,7 +1885,7 @@ class TestPPOSequencePacking:
         assert torch.isfinite(torch.tensor(metrics["loss"]))
 
     def test_packed_fused_forward_matches_padded(self):
-        ppo = _cpu_llmppo()
+        ppo = _cpu_llmppo(use_vllm=False)
         ppo.pad_token_id = 0
         assert ppo.use_value_head is True
         vocab, hidden = 16, 8
@@ -1936,7 +1917,6 @@ class TestPPOSequencePacking:
                 patch.object(ppo, "_patch_lm_head_to_identity", nullcontext),
                 patch.object(ppo, "_amp_ctx", nullcontext),
                 patch.object(ppo, "_activation_offload_ctx", nullcontext),
-                patch.object(ppo, "_get_unwrapped_actor", return_value=actor),
                 patch.object(
                     ppo,
                     "_fused_logprob_fn_and_head",
@@ -1988,8 +1968,8 @@ class TestPPOSaveLoadValueHead:
                 task_type="CAUSAL_LM",
                 lora_dropout=0.0,
             ),
-            accelerator=None,
-            wrap=False,
+            wrap=True,
+            use_vllm=False,
             gradient_checkpointing=False,
             max_output_tokens=8,
             max_model_len=64,
@@ -2002,7 +1982,7 @@ class TestPPOSaveLoadValueHead:
         actor LoRA adapter (and not crash on optimizer metadata).
         """
         ppo = self._build(model_factory)
-        unwrapped = ppo._get_unwrapped_actor()
+        unwrapped = ppo.actor
         # Make the value head + actor LoRA clearly non-default before saving.
         for p in unwrapped.v_head.parameters():
             p.data.normal_(0.0, 1.0)
@@ -2026,7 +2006,7 @@ class TestPPOSaveLoadValueHead:
         # after load — exercising the default save_optimizer=True path too.
         new_ppo = self._build(model_factory)
         new_ppo.load_checkpoint(str(tmp_path))
-        new_unwrapped = new_ppo._get_unwrapped_actor()
+        new_unwrapped = new_ppo.actor
 
         for k, v in saved_vhead.items():
             assert torch.equal(
@@ -2039,7 +2019,6 @@ class TestPPOSaveLoadValueHead:
 
         ppo.clean_up()
         new_ppo.clean_up()
-        AcceleratorState._reset_state(True)
 
 
 class TestPPOColocatedVllm:
@@ -2068,6 +2047,7 @@ class TestPPOColocatedVllm:
                 target_modules=["q_proj", "v_proj"],
                 task_type="CAUSAL_LM",
             ),
+            use_vllm=True,
             # Both settings are required under parallel vLLM testing; see the
             # rationale on ``generate_grpo`` in test_grpo.py.
             vllm_config=VLLMConfig(
@@ -2085,7 +2065,7 @@ class TestPPOColocatedVllm:
         assert ppo.use_memory_efficient_params
         assert torch.device(ppo.device).type == "cuda"
 
-        vocab_size = ppo._get_unwrapped_actor().config.vocab_size
+        vocab_size = ppo.actor.config.vocab_size
         prompts = [
             {
                 "input_ids": torch.randint(
@@ -2100,7 +2080,7 @@ class TestPPOColocatedVllm:
         token_ids, action_masks, sampling_logps = ppo.get_action(prompts, training=True)
         # The rollout parks the trainer on CPU; ``learn`` must bring the whole
         # tree — base weights and value head alike — back onto the GPU.
-        unwrapped = ppo._get_unwrapped_actor()
+        unwrapped = ppo.actor
         assert all(p.device.type == "cpu" for p in unwrapped.parameters())
 
         rewards = torch.randn(len(token_ids), device=ppo.device)

@@ -25,6 +25,7 @@ from agilerl.builders.base import (
     constructor_kwargs,
     spec_kwargs,
 )
+from agilerl.distributed import get_world_size, is_distributed
 from agilerl.utils.algo_utils import VLLMConfig
 from agilerl.utils.llm_utils import (
     apply_pad_token_id,
@@ -154,13 +155,20 @@ class LLMBuilder(AlgorithmBuilder):
             getattr(tokenizer, "eos_token_id", None),
         )
 
+        if "micro_batch_size_per_gpu" not in kwargs and is_distributed():
+            kwargs["micro_batch_size_per_gpu"] = max(
+                spec.batch_size // get_world_size(), 1
+            )
+        fsdp = getattr(spec, "fsdp", None)
+        if fsdp is not None:
+            kwargs["fsdp_config"] = fsdp
+
         algo_cls = cls.algo_class(spec)
         kwargs = constructor_kwargs(algo_cls, kwargs)
         algo = algo_cls(
             model_name=spec.pretrained_model_name_or_path,
             pad_token_id=pad_token_id,
             pad_token=tokenizer.pad_token,
-            accelerator=runtime.accelerator,
             index=index,
             device=runtime.device,
             actor_network=actor_network,

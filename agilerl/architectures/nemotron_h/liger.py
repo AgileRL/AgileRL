@@ -183,7 +183,7 @@ def apply_liger_kernel_to_nemotron_h(
     rope: bool = True,
     relu_squared: bool = True,
     cross_entropy: bool = False,
-    fused_linear_cross_entropy: bool = True,
+    fused_linear_cross_entropy: bool = False,
     model: PreTrainedModel | None = None,
     **kwargs: Any,
 ) -> None:
@@ -197,7 +197,10 @@ def apply_liger_kernel_to_nemotron_h(
     :type relu_squared: bool
     :param cross_entropy: Use LigerCrossEntropyLoss (mutually exclusive with LCE).
     :type cross_entropy: bool
-    :param fused_linear_cross_entropy: Replace CausalLM forward with fused LCE.
+    :param fused_linear_cross_entropy: Replace CausalLM ``forward`` with fused LCE.
+        Defaults to ``False``: learn identity-patches ``lm_head`` and scores via
+        fused logprobs, and LCE's ``self.model(...)`` call makes the first FSDP
+        hook a nested unit so prefetch hits an empty comm context.
     :type fused_linear_cross_entropy: bool
     :param model: Optional loaded model for instance-level patches.
     :type model: PreTrainedModel | None
@@ -232,13 +235,15 @@ def apply_liger_kernel_to_nemotron_h(
         if rms_norm:
             _patch_rms_norm_module(base_model.norm_f)
         for layer in base_model.layers:  # ty: ignore[not-iterable]  # Nemotron-H layers is a ModuleList at runtime
-            if rms_norm:
-                _patch_rms_norm_module(layer.norm)
-            if relu_squared:
-                _patch_relu2_mixer(
-                    layer.mixer,  # ty: ignore[unresolved-attribute]  # Nemotron-H block mixer; getattr(model) widens layer type
-                    getattr(layer, "block_type", None),
-                )
+            inner = list(getattr(layer, "blocks", ())) or [layer]
+            for block in inner:
+                if rms_norm:
+                    _patch_rms_norm_module(block.norm)
+                if relu_squared:
+                    _patch_relu2_mixer(
+                        block.mixer,  # ty: ignore[unresolved-attribute]  # Nemotron-H block mixer
+                        getattr(block, "block_type", None),
+                    )
 
 
 def register_nemotron_h_liger() -> bool:

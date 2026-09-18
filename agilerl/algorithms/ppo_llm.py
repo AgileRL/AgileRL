@@ -8,13 +8,9 @@ from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
 import torch
-from accelerate import Accelerator
 
 from agilerl import HAS_LIGER_KERNEL, HAS_LLM_DEPENDENCIES
 from agilerl.algorithms.core import ActionResult, LLMAlgorithm
-from agilerl.algorithms.core.advantage_granularity import (
-    resolve_batch_advantage_granularity,
-)
 from agilerl.algorithms.core.llm_ops.fused_lora import unset_fused_adapter_routing
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
 
@@ -32,6 +28,7 @@ else:
     # tests can patch it. ``_ppo_loss_liger`` guards against actual use.
     LigerFusedLinearPolicyLossFunction = None  # type: ignore[assignment]
     apply_fused_policy_loss = None  # type: ignore[assignment]
+from agilerl.distributed import FSDPConfig, aggregate_metrics_dict, resolve_device
 from agilerl.protocols import (
     PeftModelProtocol,
     PreTrainedModelProtocol,
@@ -45,18 +42,16 @@ from agilerl.utils.algo_utils import (
 )
 from agilerl.utils.llm_utils import (
     BitsAndBytesConfig,
-    aggregate_metrics_dict,
     attention_mask_from_padded_ids,
-    build_completion_mask,
+    build_hf_completion_mask,
     calculate_k3_kl,
     clipped_is_surrogate,
-    hf_turn_generation_config,
     masked_mean,
     masked_whiten,
     normalize_prompt_batch,
     pool_by_turns,
     prepare_prompt_hf_generate,
-    resolve_llm_device,
+    resolve_batch_advantage_granularity,
     validate_importance_sampling_level,
 )
 
@@ -122,10 +117,9 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
     :param micro_batch_size_per_gpu: Optional target micro-batch size per GPU.
     :type micro_batch_size_per_gpu: int | None, optional
     :param mini_batch_size: Per-rank trajectories covered by one optimizer
-        step; DeepSpeed's gradient_accumulation_steps is set to
-        ``mini_batch_size / micro_batch_size_per_gpu``. Defaults to None,
-        which resolves to ``micro_batch_size_per_gpu`` (one optimizer step
-        per micro-batch).
+        step. ``None`` uses ``batch_size / world_size``.
+        ``gradient_accumulation_steps`` is derived as
+        ``mini_batch_size / micro_batch_size_per_gpu``.
     :type mini_batch_size: int | None, optional
     :param max_output_tokens: Maximum newly generated tokens per completion.
     :type max_output_tokens: int | None, optional
@@ -134,28 +128,32 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
     :param max_model_len: Maximum model context length.
     :type max_model_len: int, optional
     :param hf_generate_chunk_size: Number of prompts per HuggingFace generation chunk.
-        Ignored when colocated.
+        Ignored when ``use_vllm=True``.
     :type hf_generate_chunk_size: int | None, optional
     :param lora_config: LoRA configuration.
     :type lora_config: LoraConfig | None, optional
     :param cosine_lr_schedule_config: Cosine LR scheduler configuration.
     :type cosine_lr_schedule_config: CosineLRScheduleConfig | None, optional
-    :param accelerator: Optional HuggingFace ``Accelerator`` instance.
-    :type accelerator: Accelerator | None, optional
-    :param device: Device to train on. Ignored when an accelerator is given (each rank
-        owns its own GPU); ``None`` auto-detects CUDA/MPS/CPU.
+    :param gradient_accumulation_steps: Deprecated and ignored. Derived as
+        ``mini_batch_size / micro_batch_size_per_gpu``.
+    :type gradient_accumulation_steps: int | None, optional
+    :param fsdp_config: FSDP2 sharding settings for distributed runs, defaults to None
+    :type fsdp_config: FSDPConfig | None, optional
+    :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str, optional
     :param wrap: Whether to wrap models for distributed execution.
     :type wrap: bool, optional
     :param clone: Whether this instance is being created as a clone.
     :type clone: bool, optional
+    :param use_vllm: Whether to route generation through vLLM.
+    :type use_vllm: bool, optional
     :param use_memory_efficient_params: For colocated vLLM, offload the trainer's
         own base to CPU during rollout (and bring it back for the training step)
         so the rollout engine and the trainer never both hold a base on the GPU.
         Defaults to True; inert without colocated vLLM, and disabled under
-        DeepSpeed ZeRO-3.
+        FSDP2 sharding.
     :type use_memory_efficient_params: bool, optional
-    :param vllm_config: Colocated vLLM runtime configuration.
+    :param vllm_config: vLLM runtime configuration.
     :type vllm_config: VLLMConfig | None, optional
     :param seed: Random seed.
     :type seed: int, optional
@@ -231,7 +229,7 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
         reference forwards.
     :type activation_offload: bool, optional
     :param vllm_importance_sampling_correction: When ``True`` (default) and
-        ``vllm_config`` is set, correct the rollout/trainer log-prob mismatch by
+        ``use_vllm=True``, correct the rollout/trainer log-prob mismatch by
         weighting each training token by ``clamp(exp(trainer - sampling),
         max=vllm_importance_sampling_cap)``. Active only for training rollouts;
         inert on the HuggingFace path and at eval.
@@ -251,8 +249,6 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
         :func:`adapt_lora_config_for_model`.
     :type lora_target_scope: str | None, optional
     """
-
-    _mini_batch_size_default = "micro_batch"
 
     def __init__(
         self,
@@ -288,10 +284,12 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
         hf_generate_chunk_size: int | None = None,
         lora_config: LoraConfig | None = None,
         cosine_lr_schedule_config: CosineLRScheduleConfig | None = None,
-        accelerator: Accelerator | None = None,
+        gradient_accumulation_steps: int | None = None,
+        fsdp_config: FSDPConfig | None = None,
         device: str | torch.device | None = None,
         wrap: bool = True,
         clone: bool = False,
+        use_vllm: bool = False,
         use_memory_efficient_params: bool = True,
         vllm_config: VLLMConfig | None = None,
         seed: int = 42,
@@ -317,7 +315,7 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
         vllm_importance_sampling_cap: float = 2.0,
     ) -> None:
 
-        resolved_device = resolve_llm_device(accelerator, device)
+        resolved_device = resolve_device(device)
         super().__init__(
             index=index,
             batch_size=batch_size,
@@ -330,6 +328,7 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
             pad_token_id=pad_token_id,
             pad_token=pad_token,
             use_value_head=True,
+            use_vllm=use_vllm,
             vllm_config=vllm_config,
             use_liger_loss=use_liger_loss,
             lora_config=lora_config,
@@ -344,7 +343,8 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
             use_memory_efficient_params=use_memory_efficient_params,
             wrap=wrap,
             device=resolved_device,
-            accelerator=accelerator,
+            gradient_accumulation_steps=gradient_accumulation_steps,
+            fsdp_config=fsdp_config,
             name="LLMPPO",
             gradient_checkpointing=gradient_checkpointing,
             torch_compiler=torch_compiler,
@@ -392,7 +392,7 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
 
         # Register network groups for mutations
         self.register_network_group(NetworkGroup(eval_network=self.actor, policy=True))
-        if self.wrap:
+        if not clone:
             self.wrap_models()
 
         # Register algorithm metrics
@@ -432,18 +432,16 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
         # mismatch correction is enabled; ``None`` on the HF path / eval.
         sampling_logps: list[torch.Tensor | None] | None = None
         capture_sampling_logps = (
-            training and self.colocated and self.vllm_importance_sampling_correction
+            training and self.use_vllm and self.vllm_importance_sampling_correction
         )
 
         with self.select_adapter("actor"):
             self.actor.eval()
-            if not self.colocated:
-                actor_module = self._get_unwrapped_actor()
-                try:
-                    actor_device = next(actor_module.parameters()).device
-                except StopIteration:
-                    actor_device = torch.device(self.device)
-                with torch.inference_mode(), self._amp_ctx():
+            if not self.use_vllm:
+                actor_device = self.shard_runtime.actor_compute_device(
+                    self.actor, torch.device(self.device)
+                )
+                with torch.no_grad(), self._amp_ctx():
                     token_ids_list = []
                     completion_masks = []
 
@@ -457,24 +455,19 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
                             prompt = prepare_prompt_hf_generate(prompt, actor_device)
                             input_ids = prompt["input_ids"]
                             attention_mask = prompt["attention_mask"]
-                            token_ids = self.actor.generate(
-                                input_ids=input_ids,
-                                attention_mask=attention_mask,
-                                generation_config=hf_turn_generation_config(
-                                    self.generation_config,
-                                    max_model_len=self.max_model_len,
-                                    prompt_length=int(input_ids.shape[-1]),
-                                    max_output_tokens=self.max_output_tokens,
+                            token_ids, completion_mask = build_hf_completion_mask(
+                                self.actor.generate(
+                                    input_ids=input_ids,
+                                    attention_mask=attention_mask,
+                                    generation_config=self.generation_config,
                                 ),
+                                int(input_ids.shape[-1]),
+                                None,
+                                None,
+                                self.pad_token_id,
                             )
                             token_ids_list.append(token_ids)
-                            completion_masks.append(
-                                build_completion_mask(
-                                    token_ids,
-                                    int(input_ids.shape[-1]),
-                                    self.pad_token_id,
-                                )
-                            )
+                            completion_masks.append(completion_mask)
             else:
                 self._prepare_vllm_for_generation()
                 (
@@ -482,7 +475,7 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
                     completion_masks,
                     sampling_logps,
                 ) = self._generate_with_vllm_colocate(
-                    # ReasoningPrompts is a TypedDict, i.e. a plain dict at
+                    # RolloutPrompt is a TypedDict, i.e. a plain dict at
                     # runtime; the base helper takes untyped prompt dicts.
                     prompts,
                     1,
@@ -685,7 +678,7 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
                         )
                         self._raise_if_loss_not_finite_on_any_rank(total_loss)
                         self._backward_pass(total_loss)
-                        unset_fused_adapter_routing(self._get_unwrapped_actor())
+                        unset_fused_adapter_routing(self.actor)
                         learn_metrics["kl"] += metrics["kl"]
                         learn_metrics["entropy"] += metrics["entropy"]
                         learn_metrics["clipfrac"] += metrics["clipfrac"]
@@ -784,7 +777,7 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
 
                     self._raise_if_loss_not_finite_on_any_rank(total_loss)
                     self._backward_pass(total_loss)
-                    unset_fused_adapter_routing(self._get_unwrapped_actor())
+                    unset_fused_adapter_routing(self.actor)
 
                     learn_metrics["kl"] += kl_loss.item()
                     learn_metrics["entropy"] += masked_entropy.mean().item()
@@ -806,7 +799,6 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
         token_ids_list = experiences[0]
         completion_length = np.mean([c.shape[-1] for c in token_ids_list])
         agg = aggregate_metrics_dict(
-            self.accelerator,
             {
                 "loss": averaged["loss"],
                 "pg_loss": averaged["pg_loss"],
@@ -943,10 +935,10 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
         self.hf_generate_chunk_size = int(
             1 if hf_generate_chunk_size is None else max(1, hf_generate_chunk_size)
         )
-        if self.colocated and hf_generate_chunk_size is not None:
+        if self.use_vllm and hf_generate_chunk_size is not None:
             warnings.warn(
                 "hf_generate_chunk_size is only used for HuggingFace generation "
-                "and is ignored when colocated.",
+                "(use_vllm=False) and will be ignored when use_vllm=True.",
                 stacklevel=3,
             )
         self.generation_config = GenerationConfig(
@@ -1267,11 +1259,8 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
 
         # Identity-patch lm_head so the actor forward outputs the last hidden
         # state (B, T, H) directly instead of computing the full (B, T, V)
-        # logits only to discard them. lm_head_weight is passed separately to
-        # LigerFusedLinearPolicyLossFunction which handles the matmul and its grad.
-        lm_head = self._get_lm_head()
-        lm_head_weight = lm_head.weight
-        lm_head_bias = lm_head.bias
+        # logits only to discard them. The gathered lm_head weight is passed
+        # separately to the fused kernel, which handles the matmul and its grad.
 
         with (
             self._patch_lm_head_to_identity(),
@@ -1288,7 +1277,7 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
         # Token level token-flattens the hidden states so the fused kernel
         # chunks tokens (bounded); turn/sequence keep the batch path. See
         # :func:`apply_fused_policy_loss`.
-        with self._liger_head_gather():
+        with self._liger_head_gather() as (lm_head_weight, lm_head_bias):
             loss_pg_kl, aux = apply_fused_policy_loss(
                 policy_hidden[:, :-1],
                 lm_head_weight,
@@ -1307,7 +1296,7 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
                 full_turn_mask=full_turn_mask,
                 max_turns=max_turns,
                 token_chunk_size=self._resolve_fused_chunk_rows(
-                    getattr(lm_head_weight, "ds_shape", lm_head_weight.shape)[0],
+                    lm_head_weight.shape[0],
                     self.chunk_rows,
                 ),
                 turn_log_ratio_reduction=self.turn_ratio_pooling,

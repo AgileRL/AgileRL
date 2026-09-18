@@ -11,6 +11,7 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeVar, get_args, get_origin
 
+from accelerate import Accelerator
 from pydantic import BaseModel
 from typing_extensions import Never, Self
 
@@ -27,6 +28,7 @@ from agilerl.arena.models import LLMEnvSpec as ArenaLLMEnvSpec
 from agilerl.arena.models import TrainingManifest as ArenaManifest
 from agilerl.arena.models.algorithms.rollout_llm import RolloutLLMSpec
 from agilerl.builders import select_builder
+from agilerl.distributed import get_rank, get_world_size
 from agilerl.hpo.multi_frequency import MultiFrequencySelection
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.models import (
@@ -82,6 +84,7 @@ from agilerl.utils.trainer_utils import (
     build_selection_from_spec,
     create_population_from_spec,
     get_spaces_from_env,
+    resolve_accelerator,
     resolve_deprecated_selection_kwargs,
 )
 
@@ -116,15 +119,11 @@ def _algorithm_with_network(manifest: TrainingManifest) -> AlgoSpec:
 
 if HAS_LLM_DEPENDENCIES:
     from transformers import AutoTokenizer
-
-    from agilerl.utils.llm_utils import create_llm_accelerator
 else:
     AutoTokenizer = None
-    create_llm_accelerator = None
 
 if TYPE_CHECKING:
     import torch
-    from accelerate import Accelerator
     from gymnasium import spaces
     from transformers import PreTrainedTokenizerBase
 
@@ -365,6 +364,10 @@ class Trainer(ABC):
             )
             raise TypeError(msg)
         env_spec = cls._resolve_env_spec(validated_manifest)
+        accelerator = resolve_accelerator(
+            validated_manifest.algorithm,
+            kwargs.pop("accelerator", None),
+        )
         return cls(
             algorithm=_algorithm_with_network(validated_manifest),
             environment=env_spec,
@@ -372,6 +375,7 @@ class Trainer(ABC):
             mutation=validated_manifest.mutation,
             selection_strategy=validated_manifest.selection_strategy,
             replay_buffer=validated_manifest.replay_buffer,
+            accelerator=accelerator,
             **kwargs,
         )
 
@@ -491,26 +495,22 @@ class LocalTrainer(Trainer):
             critic_networks=critic_networks,
         )
 
+        if (
+            isinstance(self.algorithm_spec, LLMAlgorithmSpec)
+            and self.accelerator is not None
+        ):
+            msg = (
+                "LLM training does not use Accelerate. Launch with torchrun, "
+                "not accelerate launch."
+            )
+            raise ValueError(msg)
+
         # If HPO is enabled, use default mutation probabilities, RL hyperparameters
         # to mutate, and, unless a strategy was configured, tournament selection
         if hpo:
             self.mutation_spec = self.mutation_spec or MutationSpec()
             if self.selection_strategy_spec is None:
                 self.selection_strategy_spec = TournamentSelectionSpec()
-
-        # LLM algorithms require a DeepSpeed-aware accelerator
-        if (
-            isinstance(self.algorithm_spec, LLMAlgorithmSpec)
-            and self.accelerator is None
-        ):
-            if create_llm_accelerator is None:
-                msg = "LLM dependencies are not installed. Please install them using: pip install agilerl[llm]"
-                raise ImportError(msg)
-
-            logger.info(
-                "User did not provide an accelerator, creating one with DeepSpeed..."
-            )
-            self.accelerator = create_llm_accelerator()
 
         # For LLM algorithms, load the tokenizer once and share it.
         self.tokenizer = (
@@ -533,7 +533,11 @@ class LocalTrainer(Trainer):
                 else None
             ),
             device=self.device,
-            accelerator=self.accelerator,
+            accelerator=(
+                self.accelerator
+                if not isinstance(self.algorithm_spec, LLMAlgorithmSpec)
+                else None
+            ),
             tokenizer=self.tokenizer,
             resume_from_checkpoint=self._resume_checkpoint,
             load_weights_from=self._load_weights_from,
@@ -542,9 +546,15 @@ class LocalTrainer(Trainer):
             networks=self.networks,
             rollout_mode=self.training_spec.rollout_mode,
         )
-        self.mutations = build_mutations_from_spec(
-            self.mutation_spec, self.device, accelerator=self.accelerator
-        )
+        # Classic RL algorithms keep Accelerate; LLM training uses torch.distributed.
+        if not isinstance(self.algorithm_spec, LLMAlgorithmSpec):
+            self.mutations = build_mutations_from_spec(
+                self.mutation_spec, self.device, accelerator=self.accelerator
+            )
+        else:
+            self.mutations = build_mutations_from_spec(
+                self.mutation_spec, self.device, accelerator=None
+            )
 
         self.selection_strategy = build_selection_from_spec(
             self.selection_strategy_spec,
@@ -865,8 +875,8 @@ class LocalTrainer(Trainer):
                 data_batch_size_per_gpu=self.algorithm_spec.batch_size,
                 max_context_length=self.algorithm_spec.max_model_len,
                 seed=self.algorithm_spec.seed,
-                rank=self.accelerator.process_index if self.accelerator else 0,
-                world_size=self.accelerator.num_processes if self.accelerator else 1,
+                rank=get_rank(),
+                world_size=get_world_size(),
             )
         if isinstance(spec, BanditEnvSpec):
             return make_bandit_env(spec)
@@ -989,7 +999,6 @@ class LocalTrainer(Trainer):
             "tensorboard": tensorboard,
             "tensorboard_log_dir": tensorboard_log_dir,
             "verbose": verbose,
-            "accelerator": self.accelerator,
             "wandb_api_key": wandb_api_key,
             "wandb_kwargs": wandb_kwargs,
         }
@@ -1025,6 +1034,8 @@ class LocalTrainer(Trainer):
                 n_step_memory=self.n_step_memory,
             )
         )
+        if not isinstance(self.algorithm_spec, LLMAlgorithmSpec):
+            kwargs["accelerator"] = self.accelerator
         result = self.train_fn(**kwargs)
         self.population = result[0]
         return result

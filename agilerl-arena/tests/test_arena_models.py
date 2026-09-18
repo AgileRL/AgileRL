@@ -259,17 +259,34 @@ class TestLLMAlgorithmSpecValidators:
         )
         assert spec.use_sequence_packing is True
 
-    def test_deepspeed_activation_checkpointing_is_rejected(self) -> None:
-        with pytest.raises(ValidationError, match="activation_checkpointing"):
+    def test_deepspeed_is_rejected(self) -> None:
+        with pytest.raises(ValidationError, match="do not accept"):
             GRPOSpec(group_size=2, deepspeed={"activation_checkpointing": {}})
 
-    def test_deepspeed_gradient_clipping_is_rejected(self) -> None:
-        with pytest.raises(ValidationError, match="gradient_clipping"):
-            GRPOSpec(group_size=2, deepspeed={"gradient_clipping": 1.0})
+    def test_zero_stage_is_rejected(self) -> None:
+        with pytest.raises(ValidationError, match="do not accept"):
+            GRPOSpec(group_size=2, zero_stage=3)
 
-    def test_deepspeed_overrides_without_ignored_keys(self) -> None:
-        spec = GRPOSpec(group_size=2, deepspeed={"train_batch_size": 8})
-        assert spec.deepspeed == {"train_batch_size": 8}
+    def test_fsdp_true_coerces_to_config(self) -> None:
+        from agilerl.distributed import FSDPConfig
+
+        spec = GRPOSpec(group_size=2, fsdp=True)
+        assert spec.fsdp == FSDPConfig()
+
+    def test_fsdp_empty_dict_coerces_to_config(self) -> None:
+        from agilerl.distributed import FSDPConfig
+
+        spec = GRPOSpec(group_size=2, fsdp={})
+        assert spec.fsdp == FSDPConfig()
+
+    def test_fsdp_dict_coerces_known_fields(self) -> None:
+        spec = GRPOSpec(group_size=2, fsdp={"cpu_offload": True})
+        assert spec.fsdp is not None
+        assert spec.fsdp.cpu_offload is True
+
+    def test_fsdp_unknown_keys_are_rejected(self) -> None:
+        with pytest.raises(ValidationError, match="Unknown fsdp keys"):
+            GRPOSpec(group_size=2, fsdp={"not_a_field": True})
 
     def test_mini_batch_must_be_a_multiple_of_micro_batch(self) -> None:
         with pytest.raises(ValidationError, match="not a multiple"):

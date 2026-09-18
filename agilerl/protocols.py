@@ -96,19 +96,6 @@ class MutationMethodProtocol(Protocol):
 
 
 @runtime_checkable
-class OptimizerLikeClass(Protocol):
-    """Protocol for optimizer-like constructor callables/classes."""
-
-    def __call__(
-        self,
-        params: Any,  # noqa: ANN401 -- accepts any optimizer's params/param-groups argument
-        lr: float,
-        **kwargs: Any,
-    ) -> Optimizer | Any:  # noqa: ANN401 -- some optimizer-like classes return non-Optimizer handles
-        ...
-
-
-@runtime_checkable
 class OptimizerWrapperProtocol(Protocol):
     """Protocol for optimizer wrapper classes that manage optimization.
 
@@ -117,7 +104,7 @@ class OptimizerWrapperProtocol(Protocol):
     """
 
     optimizer: Optimizer | dict[str, Optimizer]
-    optimizer_cls: type[Optimizer] | dict[str, type[Optimizer]] | OptimizerLikeClass
+    optimizer_cls: type[Optimizer] | dict[str, type[Optimizer]]
     lr: Callable[[], float]
     optimizer_kwargs: dict[str, Any]
 

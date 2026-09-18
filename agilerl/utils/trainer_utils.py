@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import os
 import warnings
 from collections.abc import Mapping
 from functools import singledispatch
@@ -38,9 +39,8 @@ from agilerl.models.hpo import (
 )
 from agilerl.models.training import ReplayBufferSpec, TrainingSpec, init_buffer
 from agilerl.protocols import BanditEnvProtocol, SelectionStrategyProtocol
-from agilerl.utils.algo_utils import clone_llm, get_num_envs
+from agilerl.utils.algo_utils import get_num_envs
 from agilerl.utils.env_utils import GymEnvType, PzEnvType
-from agilerl.utils.llm_utils import get_state_dict
 
 if TYPE_CHECKING:
     import torch
@@ -69,6 +69,44 @@ class MultiAgentVectorEnv(Protocol):
     def single_observation_space(self, agent: str) -> spaces.Space: ...
 
     def single_action_space(self, agent: str) -> spaces.Space: ...
+
+
+def started_by_accelerate_launch() -> bool:
+    """Return True if this process was started by ``accelerate launch``."""
+    value = os.environ.get("ACCELERATE_STARTED_BY_LAUNCH", "").strip().lower()
+    return value in frozenset[str]({"true", "1", "yes"})
+
+
+def resolve_accelerator(
+    algorithm: AlgoSpec,
+    accelerator: Accelerator | None,
+) -> Accelerator | None:
+    """Build Accelerator for classic RL under ``accelerate launch``.
+
+    An explicit ``accelerator`` is kept. LLM jobs under launch raise
+    before ``Accelerator()``.
+    """
+    if accelerator is not None:
+        return accelerator
+    if not started_by_accelerate_launch():
+        return None
+
+    world_size = int(os.environ.get("WORLD_SIZE") or 1)
+    if world_size == 1:
+        warnings.warn(
+            "Only one process was detected.",
+            UserWarning,
+            stacklevel=2,
+        )
+
+    if isinstance(algorithm, LLMAlgorithmSpec):
+        msg = (
+            "LLM training does not use Accelerate. Launch with torchrun, "
+            "not accelerate launch."
+        )
+        raise ValueError(msg)
+
+    return Accelerator()
 
 
 def hp_config_from_mutation_spec(spec: MutationSpec) -> HyperparameterConfig | None:
@@ -325,8 +363,6 @@ def create_population_from_spec(
         return single_agent_population
 
     # LLM algorithms — build agent 0 fully, then clone the actor for agents 1..N.
-    # Each agent beyond the first gets a fresh Accelerator to avoid sharing the
-    # same DeepSpeed distributed context.
     if not isinstance(algo_spec, LLMAlgorithmSpec):
         msg = f"{type(algo_spec).__name__} is not an LLMAlgorithmSpec."
         raise TypeError(msg)
@@ -337,7 +373,6 @@ def create_population_from_spec(
         runtime=AlgorithmBuildRuntime(
             index=0,
             device=device,
-            accelerator=accelerator,
             hp_config=hp_config,
             resume_from_checkpoint=resume_from_checkpoint,
             load_weights_from=load_weights_from,
@@ -347,19 +382,10 @@ def create_population_from_spec(
     population: PopulationType = [agent_0]
 
     for i in range(1, population_size):
-        agent_accelerator = Accelerator() if accelerator is not None else None
         if agent_0.actor is None:
             msg = "Agent 0 actor is not initialized"
             raise TypeError(msg)
-        cloned_actor = clone_llm(
-            agent_0.actor,
-            zero_stage=algo_spec.zero_stage,
-            state_dict=(
-                agent_0.actor.state_dict()
-                if accelerator is None
-                else get_state_dict(agent_0.actor)
-            ),
-        )
+        cloned_actor = agent_0._clone_actor_network()
         population.append(
             LLMBuilder.build(
                 algo_spec,
@@ -367,7 +393,6 @@ def create_population_from_spec(
                 runtime=AlgorithmBuildRuntime(
                     index=i,
                     device=device,
-                    accelerator=agent_accelerator,
                     hp_config=hp_config,
                     resume_from_checkpoint=resume_from_checkpoint,
                     load_weights_from=load_weights_from,

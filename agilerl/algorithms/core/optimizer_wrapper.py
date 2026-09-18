@@ -8,6 +8,7 @@ from collections.abc import Sequence
 from typing import Any, Literal, overload
 
 from torch import nn
+from torch.distributed.tensor import DTensor
 from torch.optim import Optimizer
 
 from agilerl.algorithms.core.registry import OptimizerFactory
@@ -23,8 +24,6 @@ def init_from_multiple(
     optimizer_cls: OptimizerFactory,
     lr: float,
     optimizer_kwargs: dict[str, Any] | list[dict[str, Any]],
-    lr_critic: bool = False,
-    use_lora: bool = False,
 ) -> Optimizer:
     """Initialize an optimizer from a list of networks.
 
@@ -60,6 +59,26 @@ def init_from_single(
     return optimizer_cls(network.parameters(), lr=lr, **optimizer_kwargs)
 
 
+def _homogeneous_param_groups(
+    params: list[nn.Parameter], *, lr: float, group: str
+) -> list[dict[str, Any]]:
+    """One Adam group per Tensor kind so foreach kernels stay homogeneous.
+
+    FSDP2 ignored LoRA params stay plain Tensors; sharded LoRA params are
+    DTensors. Mixing them in one group raises in ``_foreach_mul_``.
+    """
+    if not params:
+        return [{"params": params, "lr": lr, "group": group}]
+    sharded = [param for param in params if isinstance(param, DTensor)]
+    replicated = [param for param in params if not isinstance(param, DTensor)]
+    if not sharded or not replicated:
+        return [{"params": params, "lr": lr, "group": group}]
+    return [
+        {"params": sharded, "lr": lr, "group": group},
+        {"params": replicated, "lr": lr, "group": f"{group}_replicated"},
+    ]
+
+
 def init_llm_optimizer(
     network: nn.Module,
     optimizer_cls: OptimizerFactory,
@@ -80,9 +99,9 @@ def init_llm_optimizer(
         for n, p in network.named_parameters()
         if "actor" in n.lower() and "lora" in n.lower() and p.requires_grad
     ]
-    params: list[dict[str, Any]] = [
-        {"params": actor_params, "lr": lr_actor, "group": "actor"},
-    ]
+    groups: list[dict[str, Any]] = _homogeneous_param_groups(
+        actor_params, lr=lr_actor, group="actor"
+    )
     if lr_critic is not None:
         critic_params = [
             p
@@ -92,10 +111,10 @@ def init_llm_optimizer(
                 or ("v_head.summary" in n.lower() and p.requires_grad)
             )
         ]
-        params.append(
-            {"params": critic_params, "lr": lr_critic, "group": "critic"},
+        groups.extend(
+            _homogeneous_param_groups(critic_params, lr=lr_critic, group="critic")
         )
-    return optimizer_cls(params, **optimizer_kwargs)
+    return optimizer_cls(groups, **optimizer_kwargs)
 
 
 class OptimizerWrapper:
@@ -473,15 +492,20 @@ class OptimizerWrapper:
             out[f"{name}_is_llm_optimizer"] = True
         return out
 
-    def zero_grad(self) -> None:
-        """Zero the gradients of the optimizer."""
+    def zero_grad(self, set_to_none: bool = True) -> None:
+        """Zero the gradients of the optimizer.
+
+        ``set_to_none=True`` drops ``.grad`` so the next backward allocates
+        fresh tensors. FSDP accumulation then reduce-scatters into sharded
+        grads instead of holding unsharded zeros.
+        """
         if isinstance(self.optimizer, dict):
             msg = (
                 "Please use the zero_grad() method of the individual optimizer in "
                 "a multi-agent algorithm."
             )
             raise TypeError(msg)
-        self._single_optimizer().zero_grad()
+        self._single_optimizer().zero_grad(set_to_none=set_to_none)
 
     def step(self) -> None:
         """Perform a single optimization step."""

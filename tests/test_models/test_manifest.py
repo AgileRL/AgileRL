@@ -484,11 +484,7 @@ class TestTrainingManifest:
                 CnnSpec,
             ),
             ("lstm", {"hidden_state_size": 64, "num_layers": 1}, LstmSpec),
-            (
-                "simba",
-                {"hidden_size": 128, "num_blocks": 2},
-                SimbaSpec,
-            ),
+            ("simba", {"hidden_size": 128, "num_blocks": 2}, SimbaSpec),
             (
                 "multiinput",
                 {"latent_dim": 32, "mlp_config": {"hidden_size": [32]}},
@@ -1326,10 +1322,6 @@ class TestLocalTrainerLLM:
             patch(
                 "agilerl.training.trainer.create_population_from_spec",
                 return_value=[MagicMock()],
-            ),
-            patch(
-                "agilerl.training.trainer.create_llm_accelerator",
-                return_value=MagicMock(),
             ),
         ):
             yield
