@@ -58,7 +58,7 @@ llm = [
     "openenv>=0.4.1,<0.5",
     "peft==0.20.0",
     "transformers==5.14.1",
-    "vllm>=0.26; sys_platform == 'linux'",
+    "vllm==0.25.1; sys_platform == 'linux'",
 ]
 all = [
     "agilerl[box2d,llm]",
