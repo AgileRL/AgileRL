@@ -181,8 +181,8 @@ requires-dist = [
     { name = "mpe2", specifier = ">=1.1.0" },
     { name = "numpy", specifier = ">=2.0.0,<3.0" },
     { name = "omegaconf", specifier = ">=2.3.0,<2.4" },
-    { name = "openenv", marker = "extra == 'all'", specifier = ">=0.4.1,<0.5" },
-    { name = "openenv", marker = "extra == 'llm'", specifier = ">=0.4.1,<0.5" },
+    { name = "openenv", marker = "extra == 'all'", specifier = ">=0.4.1,<0.6" },
+    { name = "openenv", marker = "extra == 'llm'", specifier = ">=0.4.1,<0.6" },
     { name = "packaging", specifier = ">=20.0" },
     { name = "pandas", specifier = ">=2.2.3" },
     { name = "peft", marker = "extra == 'all'", specifier = "==0.20.0" },
@@ -4634,7 +4634,7 @@ wheels = [
 
 [[package]]
 name = "openenv"
-version = "0.4.1"
+version = "0.5.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "fastapi" },
@@ -4643,6 +4643,7 @@ dependencies = [
     { name = "httpx" },
     { name = "huggingface-hub" },
     { name = "openai" },
+    { name = "packaging" },
     { name = "pydantic" },
     { name = "pyyaml" },
     { name = "requests" },
@@ -4654,9 +4655,9 @@ dependencies = [
     { name = "uvicorn" },
     { name = "websockets" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/0e/38/5552b1b208c8b8971a1895a74f3b9e52f824059d3aa5d08992088931d969/openenv-0.4.1.tar.gz", hash = "sha256:08c7c13455854beee5c8f311f57d95180772e3e9ac9c85278d681864488016a3", size = 201919, upload-time = "2026-07-03T11:37:24.139Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/84/42/31bda8d0968abe82ac3d01e74eab40e91aa7a52340fab163eb2e454b0fd2/openenv-0.5.0.tar.gz", hash = "sha256:8a444422f7e9c459b002ecc67bfdb92d955fd96b5713a94bf21f50807441b97b", size = 472374, upload-time = "2026-09-17T09:49:29.066Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/14/18/787ddb930e29705479fdd0a58b2ca7fa243c9441f8f1ece33629f8d82b8b/openenv-0.4.1-py3-none-any.whl", hash = "sha256:24c46788c80fa322b34b8e1f8b3adfe42fb8ceec7df99a8b96b44eea0a295921", size = 236036, upload-time = "2026-07-03T11:37:22.607Z" },
+    { url = "https://files.pythonhosted.org/packages/f4/e7/9330a4ef253100942f26638a42e6c904e6bf0cdc3f5c512e494a3db534b9/openenv-0.5.0-py3-none-any.whl", hash = "sha256:45345cbb675aed5aafffff465c919b9ee679a124e89a58f124eb7c1386bf56ac", size = 549107, upload-time = "2026-09-17T09:49:27.141Z" },
 ]
 
 [[package]]
