@@ -55,7 +55,7 @@ llm = [
     # 0.19.3+ (#8148) keeps ZeRO-3 frozen params gathered after activation-ckpt recompute.
     "deepspeed==0.19.2; sys_platform == 'linux'",
     "liger-kernel==0.8.2; sys_platform == 'linux'",
-    "openenv>=0.4.1,<0.5",
+    "openenv>=0.4.1,<0.6",
     "peft==0.20.0",
     "transformers==5.14.1",
     "vllm>=0.26; sys_platform == 'linux'",
