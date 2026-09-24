@@ -3,6 +3,7 @@
 
 import json
 import logging
+import math
 import re
 import sys
 import types
@@ -1395,11 +1396,22 @@ def test_get_model_name_or_path_and_align_deepspeed_lr_helpers():
 def test_k3_helper_matches_torch() -> None:
     """K3 estimator helper is the same formula Liger ships."""
     torch.manual_seed(5)
-    log_p = torch.randn(3, 4) * 0.1
-    log_q = torch.randn(3, 4) * 0.1
+    ref = torch.randn(3, 4) * 0.1
+    policy = torch.randn(3, 4) * 0.1
     # Reference: torch implementation of the same formula.
-    ref = torch.exp(log_p - log_q) - (log_p - log_q) - 1.0
-    assert torch.allclose(calculate_k3_kl(log_p, log_q), ref)
+    expected = torch.exp(ref - policy) - (ref - policy) - 1.0
+    assert torch.allclose(calculate_k3_kl(ref, policy), expected)
+
+
+def test_k3_helper_matches_liger_direction() -> None:
+    """Reference-first order estimates KL(policy || reference), not the reverse."""
+    ref = torch.tensor([-1.0, -1.0])
+    policy = torch.tensor([-1.0, -2.0])
+    # diff = [0, 1]: e^0 - 0 - 1 = 0, e^1 - 1 - 1 = e - 2.
+    expected = torch.tensor([0.0, math.e - 2.0])
+    assert torch.allclose(calculate_k3_kl(ref, policy), expected)
+    # Swapped arguments give a different answer: order matters.
+    assert not torch.allclose(calculate_k3_kl(policy, ref), expected)
 
 
 class TestFillOutsideMask:

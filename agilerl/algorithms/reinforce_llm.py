@@ -43,6 +43,9 @@ from agilerl.utils.algo_utils import (
     stack_and_pad_experiences,
 )
 from agilerl.utils.llm_utils import (
+    LLM_RL_COMMON_METRIC_NAMES,
+    REINFORCE_METRIC_NAMES,
+    VLLM_IS_METRIC_NAMES,
     BitsAndBytesConfig,
     aggregate_metrics_dict,
     attention_mask_from_padded_ids,
@@ -352,7 +355,11 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
         if self.wrap:
             self.wrap_models()
 
-        for m in ("loss", "kl", "entropy", "completion_length"):
+        for m in (
+            *LLM_RL_COMMON_METRIC_NAMES,
+            *REINFORCE_METRIC_NAMES,
+            *VLLM_IS_METRIC_NAMES,
+        ):
             self.metrics.register(m)
 
     def get_action(
@@ -696,7 +703,9 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
                 "loss": averaged["loss"],
                 "kl": averaged["kl"],
                 "entropy": averaged["entropy"],
+                "pg_loss": averaged["pg_loss"],
                 "completion_length": completion_length,
+                **is_metrics,
             },
         )
         agg["completion_length"] = int(agg["completion_length"])

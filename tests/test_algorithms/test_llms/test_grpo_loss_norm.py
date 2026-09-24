@@ -221,6 +221,7 @@ class _Stub:
     _warn_if_micro_batches_straddle_optimizer_steps = (
         GRPO._warn_if_micro_batches_straddle_optimizer_steps
     )
+    process_liger_metrics = GRPO.process_liger_metrics
 
     def _get_lm_head(self) -> torch.nn.Linear:
         return self.lm_head
@@ -669,14 +670,14 @@ class TestFusedWindowNormalization:
         )
         old_log_probs = (log_probs - spread).detach()
 
-        fused_loss, _metric = algo._liger_loss(
+        fused_loss, _, _ = algo._liger_loss(
             batch_ids,
             mask,
             advantages,
             old_log_probs,
             None,
         )
-        eager_loss, _kl = algo._compute_policy_loss(
+        eager_loss, _, _ = algo._compute_policy_loss(
             mask,
             _token_log_probs(algo, hidden, batch_ids, width),
             old_log_probs,
@@ -764,7 +765,7 @@ class TestFusedActivationOffload:
     """``activation_offload`` reaches the fused training forward."""
 
     @staticmethod
-    def _call(algo: _Stub) -> tuple[torch.Tensor, torch.Tensor]:
+    def _call(algo: _Stub) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         hidden, batch_ids, mask = _fused_inputs([5, 9], 16, seed=17)
         algo.hidden = hidden
         return algo._liger_loss(
@@ -824,8 +825,8 @@ class TestFusedActivationOffload:
             window_tokens=28,
             lm_head=offloaded.lm_head,
         )
-        offloaded_loss, _ = self._call(offloaded)
-        plain_loss, _ = self._call(plain)
+        offloaded_loss, _, _ = self._call(offloaded)
+        plain_loss, _, _ = self._call(plain)
         assert spy.pin_memory_flags == [True]
         assert offloaded_loss.item() == plain_loss.item()
 

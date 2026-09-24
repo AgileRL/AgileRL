@@ -15,6 +15,9 @@ from agilerl.utils.algo_utils import inherit_init_signature
 class CISPO(GRPO):
     """CISPO loss variant of :class:`agilerl.algorithms.grpo.GRPO`
 
+    Clamps importance weights from above only; ``clip_coef_min`` does not
+    apply to this objective.
+
     Paper: https://arxiv.org/abs/2506.13585
     """
 

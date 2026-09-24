@@ -44,6 +44,9 @@ from agilerl.utils.algo_utils import (
     stack_and_pad_experiences,
 )
 from agilerl.utils.llm_utils import (
+    LLM_RL_COMMON_METRIC_NAMES,
+    PPO_METRIC_NAMES,
+    VLLM_IS_METRIC_NAMES,
     BitsAndBytesConfig,
     aggregate_metrics_dict,
     attention_mask_from_padded_ids,
@@ -397,13 +400,9 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
 
         # Register algorithm metrics
         for m in (
-            "loss",
-            "pg_loss",
-            "vf_loss",
-            "kl",
-            "entropy",
-            "clipfrac",
-            "completion_length",
+            *LLM_RL_COMMON_METRIC_NAMES,
+            *PPO_METRIC_NAMES,
+            *VLLM_IS_METRIC_NAMES,
         ):
             self.metrics.register(m)
 
@@ -703,7 +702,7 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
                     batch_log_probs = torch.masked_fill(
                         batch_log_probs, ~batch_mask_bool, 1.0
                     )
-                    kl = calculate_k3_kl(batch_log_probs, batch_reference_log_probs)
+                    kl = calculate_k3_kl(batch_reference_log_probs, batch_log_probs)
                     masked_entropy = masked_mean(
                         -batch_log_probs.detach(), batch_action_mask
                     )
@@ -815,6 +814,7 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
                 "entropy": averaged["entropy"],
                 "clipfrac": averaged["clipfrac"],
                 "completion_length": completion_length,
+                **is_metrics,
             },
         )
         agg["completion_length"] = int(agg["completion_length"])

@@ -76,6 +76,60 @@ if HAS_DEEPSPEED:
 
 DEPRECATED_LLM_ENV_NAMES = frozenset(("apply_chat_template",))
 
+# Every LLM RL learn (GRPO/PPO/REINFORCE) reports these.
+LLM_RL_COMMON_METRIC_NAMES = (
+    "loss",  # update-averaged objective
+    "entropy",  # policy entropy proxy (mean negative logprob)
+    "completion_length",  # mean token ids per trajectory
+)
+
+# GRPO-only per-learn diagnostics: update-averaged KL and clip fraction plus
+# advantage stats, the end-of-learn snapshot, and averaged grad norms.
+GRPO_METRIC_NAMES = (
+    "kl",  # update-averaged K3 vs reference (NaN on the fused path at beta=0)
+    "clipfrac",  # binding-clip fraction (upper-only for CISPO, like the kernel)
+    "adv_mean",  # mean post-processed advantage
+    "adv_min",  # min post-processed advantage
+    "adv_max",  # max post-processed advantage
+    "adv_zero_frac",  # samples with no contrastive signal
+    "kl_ref",  # end-of-learn K3 vs reference
+    "kl_old",  # end-of-learn K3 vs rollout policy
+    "is_ratio_mean",  # mean pooled importance ratio
+    "is_ratio_p05",  # 5th percentile pooled importance ratio
+    "is_ratio_p50",  # median pooled importance ratio
+    "is_ratio_p95",  # 95th percentile pooled importance ratio
+    "is_frac_below",  # ratios below the lower clip bound
+    "is_frac_above",  # ratios above the upper clip bound
+    "is_frac_clip_pos",  # upper clips binding on positive advantages
+    "is_frac_clip_neg",  # lower clips binding on negative advantages
+    "grad_norm_pre",  # global grad norm before clipping
+    "grad_norm_post",  # global grad norm after clipping
+)
+
+# PPO-only per-learn diagnostics.
+PPO_METRIC_NAMES = (
+    "pg_loss",  # clipped policy-surrogate loss
+    "vf_loss",  # clipped value loss
+    "kl",  # update-averaged K3 vs reference
+    "clipfrac",  # binding-clip fraction
+)
+
+# REINFORCE-only per-learn diagnostics.
+REINFORCE_METRIC_NAMES = (
+    "kl",  # update-averaged K3 vs reference
+    "pg_loss",  # clipped policy-surrogate loss
+)
+
+# Sampling-mismatch diagnostics shared by the GRPO/PPO/REINFORCE ``learn`` methods.
+VLLM_IS_METRIC_NAMES = (
+    "vllm_is_delta_mean",  # mean |trainer - vLLM| logprob gap
+    "vllm_is_delta_max",  # max |trainer - vLLM| logprob gap
+    "vllm_is_ratio_mean",  # mean clamped trainer/vLLM probability ratio
+    "vllm_is_ratio_p95",  # 95th percentile clamped ratio
+    "vllm_is_frac_clamped",  # ratios hitting the upper clamp
+    "vllm_is_rows_skipped",  # rows falling back to ratio 1 on token mismatch
+)
+
 # Accepted spellings per bitsandbytes quantization preset
 BNB_QUANT_NONE_ALIASES = frozenset({"none"})
 BNB_QUANT_INT8_ALIASES = frozenset({"int8"})
@@ -2473,13 +2527,16 @@ def compare_responses(
     print(f"\n{'═' * width}\n")
 
 
-def calculate_k3_kl(log_p: torch.Tensor, log_q: torch.Tensor) -> torch.Tensor:
-    """K3 estimator of ``KL[q || p]`` (Schulman 2020).
+def calculate_k3_kl(
+    reference_log_probs: torch.Tensor, policy_log_probs: torch.Tensor
+) -> torch.Tensor:
+    """Schulman k3 estimator of ``KL(policy || reference)`` from policy samples.
 
-    ``exp(log_p - log_q) - (log_p - log_q) - 1`` — always-positive,
-    lower-variance than the naive ``log_p - log_q`` estimator.
+    ``exp(ref - policy) - (ref - policy) - 1`` — always-positive,
+    lower-variance than the naive log-difference. Same form as the Liger
+    fused kernel and TRL.
     """
-    diff = log_p - log_q
+    diff = reference_log_probs - policy_log_probs
     return torch.exp(diff) - diff - 1.0
 
 

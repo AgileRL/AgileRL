@@ -226,8 +226,8 @@ logger = logging.getLogger(__name__)
 def _is_readonly_property(obj: object, name: str) -> bool:
     """Return True when ``name`` is a property without a setter on ``obj``'s type.
 
-    Derived attributes (e.g. GRPO's ``aux_metric_name``) must not be persisted or
-    restored via ``setattr`` — checkpoint restore would raise
+    Derived read-only properties must not be persisted or restored via
+    ``setattr`` — checkpoint restore would raise
     ``AttributeError: can't set attribute``.
 
     :param obj: Instance whose class MRO is inspected.
@@ -3638,8 +3638,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         algorithm's values are authoritative, and any LoRA-shape reconciliation is done
         inside :meth:`_load_lora_checkpoint`. ``device`` is skipped for the same reason:
         the live agent owns the device its models sit on. Read-only properties are
-        skipped because they are derived (e.g. GRPO's ``aux_metric_name``) and cannot
-        be assigned via ``setattr``.
+        skipped because they are derived and cannot be assigned via ``setattr``.
 
         :param checkpoint: Loaded attribute payload.
         :type checkpoint: dict[str, Any]
@@ -4534,6 +4533,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             sel = ratio[mask]
             metrics = {"vllm_is_delta_mean": delta_mean}
             if sel.numel() > 0:
+                metrics["vllm_is_delta_max"] = log_diff.abs()[mask].max().item()
                 metrics["vllm_is_ratio_mean"] = sel.mean().item()
                 metrics["vllm_is_ratio_p95"] = torch.quantile(sel.float(), 0.95).item()
                 metrics["vllm_is_frac_clamped"] = (
@@ -5602,7 +5602,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             msg = f"Loss is not finite: {loss}"
             raise ValueError(msg)
 
-    def _backward_pass(self, loss: torch.Tensor) -> None:
+    def _backward_pass(self, loss: torch.Tensor) -> tuple[float | None, float | None]:
         """Perform a backward pass and optimizer step.
 
         Non-reentrant checkpointing recomputes the actor forward during
@@ -5611,25 +5611,68 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
 
         :param loss: Combined loss.
         :type loss: torch.Tensor
+        :return: Pre- and post-clip global gradient norms. Both are ``None``
+            on DeepSpeed accumulation steps that do not sync gradients, when
+            no optimizer step ran, or when the engine recorded no norm.
+        :rtype: tuple[float | None, float | None]
         """
         with self._amp_ctx():
             if self._uses_deepspeed:
                 assert self.accelerator is not None  # _uses_deepspeed implies one
                 self.accelerator.backward(loss)
+                synced = self.accelerator.sync_gradients
+                stepped = False
                 if self.lr_scheduler is not None:
                     self.lr_scheduler.step()
                     self.lr = float(self.lr_scheduler.get_last_lr()[0])
-            else:
-                loss.backward()
+                    stepped = True
+                # The engine records the global norm while stepping, so it is
+                # only read after a step ran on a sync boundary.
+                grad_norm_pre = (
+                    self._deepspeed_global_grad_norm() if synced and stepped else None
+                )
+                grad_norm_post = (
+                    min(grad_norm_pre, self.max_grad_norm)
+                    if grad_norm_pre is not None
+                    else None
+                )
+                return grad_norm_pre, grad_norm_post
 
-                for group in self.optimizer.optimizer.param_groups:
-                    clip_grad_norm_(group["params"], self.max_grad_norm)
+            loss.backward()
 
-                self.optimizer.step()
-                self.optimizer.zero_grad()
-                if self.lr_scheduler is not None:
-                    self.lr_scheduler.step()
-                    self.lr = float(self.lr_scheduler.get_last_lr()[0])
+            pre_sq = 0.0
+            post_sq = 0.0
+            for group in self.optimizer.optimizer.param_groups:
+                pre = float(clip_grad_norm_(group["params"], self.max_grad_norm))
+                pre_sq += pre * pre
+                post_sq += min(pre, self.max_grad_norm) ** 2
+
+            self.optimizer.step()
+            self.optimizer.zero_grad()
+            if self.lr_scheduler is not None:
+                self.lr_scheduler.step()
+                self.lr = float(self.lr_scheduler.get_last_lr()[0])
+            return pre_sq**0.5, post_sq**0.5
+
+    def _deepspeed_global_grad_norm(self) -> float | None:
+        """Unscaled global gradient norm recorded by the DeepSpeed engine.
+
+        Call after the optimizer step: the engine computes and caches the
+        norm while stepping (``get_global_grad_norm``), falling back to the
+        optimizer leftover. ``None`` when the engine recorded nothing (e.g.
+        norm computation disabled), in which case the metric stays absent
+        rather than failing the step.
+
+        :return: Global L2 gradient norm before clipping, or ``None``.
+        :rtype: float | None
+        """
+        engine = self.actor
+        getter = getattr(engine, "get_global_grad_norm", None)
+        norm = getter() if callable(getter) else None
+        if norm is None:
+            optimizer = getattr(engine, "optimizer", None)
+            norm = getattr(optimizer, "_global_grad_norm", None)
+        return None if norm is None else float(norm)
 
     @property
     def _peft_model(self) -> Any:  # noqa: ANN401 -- PeftModel lives at a wrapper-specific attribute; concrete type varies
