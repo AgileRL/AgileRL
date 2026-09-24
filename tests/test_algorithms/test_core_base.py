@@ -1646,6 +1646,7 @@ def _make_mock_accelerator(
     type(acc).process_index = PropertyMock(return_value=process_index)
     type(acc).local_process_index = PropertyMock(return_value=process_index)
     type(acc).device = PropertyMock(return_value=torch.device("cpu"))
+    type(acc).sync_gradients = PropertyMock(return_value=False)
 
     plugin = MagicMock()
     plugin.deepspeed_config = ds_config
@@ -5149,8 +5150,129 @@ class TestLLMBackwardPassNonAccelerator:
         param = torch.tensor([1.0], requires_grad=True)
         loss = (param * 2).sum()
         with patch("agilerl.algorithms.core.base.clip_grad_norm_") as mock_clip:
+            mock_clip.return_value = 0.5
             LLMAlgorithm._backward_pass(agent, loss)
         mock_clip.assert_called_once()
+
+
+class TestLLMBackwardPassGradNorms:
+    def test_returns_pre_and_post_clip_norms_when_clipped(self):
+        # Arrange
+        agent = _make_llm_agent(accelerator=None)
+        agent.accelerator = None
+        agent.max_grad_norm = 1.0
+        param = torch.nn.Parameter(torch.tensor([3.0, 4.0]))
+        param.grad = torch.tensor([3.0, 4.0])
+        agent.optimizer.optimizer.param_groups = [{"params": [param]}]
+        loss = MagicMock()
+
+        # Act
+        pre, post = LLMAlgorithm._backward_pass(agent, loss)
+
+        # Assert
+        assert pre == pytest.approx(5.0)
+        assert post == pytest.approx(1.0)
+
+    def test_returns_equal_norms_when_below_max(self):
+        # Arrange
+        agent = _make_llm_agent(accelerator=None)
+        agent.accelerator = None
+        agent.max_grad_norm = 1.0
+        param = torch.nn.Parameter(torch.tensor([0.3, 0.4]))
+        param.grad = torch.tensor([0.3, 0.4])
+        agent.optimizer.optimizer.param_groups = [{"params": [param]}]
+        loss = MagicMock()
+
+        # Act
+        pre, post = LLMAlgorithm._backward_pass(agent, loss)
+
+        # Assert
+        assert pre == pytest.approx(0.5)
+        assert post == pytest.approx(0.5)
+
+    def test_deepspeed_non_sync_step_returns_no_norms(self):
+        # Arrange
+        acc = _make_mock_accelerator()
+        agent = _make_llm_agent(accelerator=acc)
+        agent._uses_deepspeed = True
+        agent.lr_scheduler = None
+
+        # Act
+        pre, post = LLMAlgorithm._backward_pass(agent, MagicMock())
+
+        # Assert
+        assert (pre, post) == (None, None)
+
+    def test_deepspeed_sync_step_returns_global_norm(self):
+        # Arrange
+        acc = _make_mock_accelerator()
+        type(acc).sync_gradients = PropertyMock(return_value=True)
+        agent = _make_llm_agent(accelerator=acc)
+        agent._uses_deepspeed = True
+        agent.zero_stage = 3
+        agent.max_grad_norm = 1.0
+        agent.lr_scheduler = MagicMock()
+        agent.lr_scheduler.get_last_lr.return_value = [1e-4]
+        agent.actor = SimpleNamespace(get_global_grad_norm=lambda: 5.0)
+
+        # Act
+        pre, post = LLMAlgorithm._backward_pass(agent, MagicMock())
+
+        # Assert
+        assert pre == pytest.approx(5.0)
+        assert post == pytest.approx(1.0)
+
+    def test_deepspeed_sync_step_uses_fp16_leftover_when_getter_is_empty(self):
+        # Arrange
+        acc = _make_mock_accelerator()
+        type(acc).sync_gradients = PropertyMock(return_value=True)
+        agent = _make_llm_agent(accelerator=acc)
+        agent._uses_deepspeed = True
+        agent.max_grad_norm = 10.0
+        agent.lr_scheduler = MagicMock()
+        agent.lr_scheduler.get_last_lr.return_value = [1e-4]
+        agent.actor = SimpleNamespace(
+            get_global_grad_norm=lambda: None,
+            optimizer=SimpleNamespace(_global_grad_norm=2.5),
+        )
+
+        # Act
+        pre, post = LLMAlgorithm._backward_pass(agent, MagicMock())
+
+        # Assert
+        assert pre == pytest.approx(2.5)
+        assert post == pytest.approx(2.5)
+
+    def test_deepspeed_sync_step_without_a_recorded_norm_returns_no_norms(self):
+        # Arrange
+        acc = _make_mock_accelerator()
+        type(acc).sync_gradients = PropertyMock(return_value=True)
+        agent = _make_llm_agent(accelerator=acc)
+        agent._uses_deepspeed = True
+        agent.lr_scheduler = MagicMock()
+        agent.lr_scheduler.get_last_lr.return_value = [1e-4]
+        agent.actor = SimpleNamespace(parameters=list)
+
+        # Act
+        pre, post = LLMAlgorithm._backward_pass(agent, MagicMock())
+
+        # Assert
+        assert (pre, post) == (None, None)
+
+    def test_deepspeed_sync_step_without_a_scheduler_returns_no_norms(self):
+        # Arrange: no scheduler step ran, so the engine recorded nothing fresh.
+        acc = _make_mock_accelerator()
+        type(acc).sync_gradients = PropertyMock(return_value=True)
+        agent = _make_llm_agent(accelerator=acc)
+        agent._uses_deepspeed = True
+        agent.lr_scheduler = None
+        agent.actor = SimpleNamespace(get_global_grad_norm=lambda: 5.0)
+
+        # Act
+        pre, post = LLMAlgorithm._backward_pass(agent, MagicMock())
+
+        # Assert
+        assert (pre, post) == (None, None)
 
 
 class TestLLMSaveDistributedActorWithAccelerator:

@@ -1,16 +1,17 @@
 # Copyright 2026 AgileRL
 # SPDX-License-Identifier: Apache-2.0
 
-"""Unit tests for the auxiliary scalar GRPO reports beside its loss.
+"""Unit tests for GRPO's fixed per-update keys and loss-path routing.
 
-The name depends on which loss path an update takes, so it must be fixed by
-configuration rather than by the data a step happens to carry: a key that
-changes between steps of one run cannot be plotted as a series. Pure CPU: the
-loss paths are stubs, only the routing and the reported key are under test.
+``learn`` always reports ``kl`` (except on the fused path at ``beta == 0.0``,
+where the kernel emits no divergence) and ``clipfrac`` on every path. Pure
+CPU: the loss paths are stubs, only the routing and the reported keys are
+under test.
 """
 
 from __future__ import annotations
 
+import math
 import warnings
 from contextlib import nullcontext
 from typing import Any
@@ -23,11 +24,7 @@ pytest.importorskip("transformers", reason="LLM tests require transformers.")
 pytest.importorskip("peft", reason="LLM tests require peft.")
 
 from agilerl.algorithms.core.base import LLMAlgorithm
-from agilerl.algorithms.grpo import (
-    GRPO,
-    LIGER_CLIP_FRACTION_METRIC,
-    REFERENCE_KL_METRIC,
-)
+from agilerl.algorithms.grpo import GRPO
 
 SEQ_LEN = 6
 PAD_TOKEN_ID = 0
@@ -62,17 +59,23 @@ class _Stub:
         vllm_importance_sampling_correction: bool = True,
         filter_zero_adv: bool = False,
         survivors: int | None = None,
-        aux_value: float = 0.25,
+        kl_value: float = 0.25,
+        clipfrac_value: float = 0.1,
     ) -> None:
         self.device = torch.device("cpu")
         self.accelerator = None
         self.beta = beta
+        self.loss_type = "grpo"
         self.use_liger_loss = use_liger_loss
         self.importance_sampling_level = importance_sampling_level
         self._liger_level_supported = liger_level_supported
         self.vllm_importance_sampling_correction = vllm_importance_sampling_correction
         self.vllm_importance_sampling_cap = 2.0
         self.filter_zero_adv = filter_zero_adv
+        self.adv_filter_eps = 0.0
+        self.clip_coef_min = 0.8
+        self.clip_coef_max = 1.2
+        self.use_kl_advantage_shaping = False
         self.loss_norm = "micro_batch"
         self._uses_deepspeed = False
         self.pad_token_id = PAD_TOKEN_ID
@@ -81,17 +84,21 @@ class _Stub:
         self._is_correction_liger_warned = False
         self._liger_non_token_warned = False
         self._survivors = survivors
-        self._aux_value = aux_value
+        self._advantages: torch.Tensor | None = None
+        self._kl_value = kl_value
+        self._clipfrac_value = clipfrac_value
         self.metrics = _MetricsRecorder()
         self.rng = np.random.default_rng(0)
         self.liger_calls = 0
         self.standard_calls = 0
 
-    aux_metric_name = GRPO.aux_metric_name
     learn = GRPO.learn
     _align_sampling_logprobs = GRPO._align_sampling_logprobs
     _aligned_sampling_logprobs_and_metrics = GRPO._aligned_sampling_logprobs_and_metrics
+    _apply_kl_advantage_shaping = GRPO._apply_kl_advantage_shaping
+    _compute_policy_loss = GRPO._compute_policy_loss
     _liger_path_selected = GRPO._liger_path_selected
+    _log_importance_weights = GRPO._log_importance_weights
     _loss = GRPO._loss
     _objective_loss = GRPO._objective_loss
     _prepare_experience_batch = GRPO._prepare_experience_batch
@@ -99,7 +106,10 @@ class _Stub:
         LLMAlgorithm._raise_if_loss_not_finite_on_any_rank
     )
     _record_window_action_tokens = GRPO._record_window_action_tokens
+    _reduce_masked_loss = GRPO._reduce_masked_loss
+    _resolve_loss_window = GRPO._resolve_loss_window
     _sampling_mismatch_metrics = GRPO._sampling_mismatch_metrics
+    _summarize_post_update = GRPO._summarize_post_update
     _use_liger_path = GRPO._use_liger_path
     _warn_if_micro_batches_straddle_optimizer_steps = (
         GRPO._warn_if_micro_batches_straddle_optimizer_steps
@@ -124,29 +134,44 @@ class _Stub:
         """Advantages and the sample indices surviving the advantage filter."""
         rows = rewards.shape[0]
         survivors = rows if self._survivors is None else self._survivors
-        return torch.ones(rows, 1), np.arange(survivors)
+        advantages = (
+            torch.ones(rows, 1) if self._advantages is None else self._advantages
+        )
+        return advantages, np.arange(survivors)
 
     def _fused_forward_no_grad(self, ids: torch.Tensor, _batch_size: int):
         """Reference and old log-probs on the action frame."""
         zeros = torch.zeros(ids.shape[0], ids.shape[1] - 1)
         return zeros, zeros, None
 
-    def _backward_pass(self, _loss: torch.Tensor) -> None:
-        return
+    def _backward_pass(self, _loss: torch.Tensor) -> tuple[None, None]:
+        return None, None
 
     def _liger_loss(self, *_args: Any, **_kwargs: Any):
         """Record that the fused path ran."""
         self.liger_calls += 1
-        return torch.tensor(1.0), torch.tensor(self._aux_value)
+        kl = (
+            torch.tensor(float("nan"))
+            if self.beta == 0.0
+            else torch.tensor(self._kl_value)
+        )
+        return torch.tensor(1.0), kl, torch.tensor(self._clipfrac_value)
 
     def _get_logprobs(self, ids: torch.Tensor, **_kwargs: Any) -> torch.Tensor:
         """Record that the standard path ran."""
-        self.standard_calls += 1
+        # The end-of-learn diagnostics snapshot also reads log-probs, but under
+        # no-grad; only the gradient forward marks the standard loss path.
+        if torch.is_grad_enabled():
+            self.standard_calls += 1
         return torch.zeros(ids.shape[0], ids.shape[1] - 1)
 
     def _loss_fn(self, *_args: Any, **_kwargs: Any):
         """Stand in for the configured standard-path objective."""
-        return torch.tensor(1.0), torch.tensor(self._aux_value)
+        return (
+            torch.tensor(1.0),
+            torch.tensor(self._kl_value),
+            torch.tensor(self._clipfrac_value),
+        )
 
 
 def _experiences(batch_size: int = 2):
@@ -228,78 +253,367 @@ class TestLigerPathSelection:
         assert caught == []
 
 
-class TestAuxMetricName:
-    """The name states what the reported scalar holds."""
+class TestProcessLigerMetrics:
+    """The fused kernel's aux list splits into KL and clip fraction by beta."""
 
-    @pytest.mark.parametrize("beta", [0.0, 0.04])
-    def test_the_standard_path_always_names_a_reference_kl(self, beta: float) -> None:
-        assert _Stub(beta=beta).aux_metric_name == REFERENCE_KL_METRIC
-
-    def test_the_fused_path_at_zero_beta_names_a_clip_fraction(self) -> None:
+    def test_zero_beta_reads_clip_fraction_from_the_first_slot(self) -> None:
         algo = _Stub(beta=0.0, use_liger_loss=True)
-        assert algo.aux_metric_name == LIGER_CLIP_FRACTION_METRIC
+        kl, clipfrac = GRPO.process_liger_metrics(
+            algo, [torch.tensor(0.1), torch.tensor(0.2)]
+        )
 
-    def test_the_fused_path_with_a_kl_coefficient_names_a_reference_kl(self) -> None:
+        assert math.isnan(kl.item())
+        assert clipfrac.item() == pytest.approx(0.1)
+
+    def test_nonzero_beta_reads_kl_then_clip_fraction(self) -> None:
         algo = _Stub(beta=0.04, use_liger_loss=True)
-        assert algo.aux_metric_name == REFERENCE_KL_METRIC
-
-    def test_a_corrected_non_token_run_names_a_reference_kl(self) -> None:
-        algo = _Stub(
-            beta=0.0,
-            use_liger_loss=True,
-            importance_sampling_level="trajectory",
+        kl, clipfrac = GRPO.process_liger_metrics(
+            algo, [torch.tensor(0.25), torch.tensor(0.1)]
         )
-        assert algo.aux_metric_name == REFERENCE_KL_METRIC
 
-    def test_reading_the_name_warns_about_nothing(self) -> None:
-        algo = _Stub(
-            beta=0.0,
-            use_liger_loss=True,
-            importance_sampling_level="trajectory",
-        )
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
-            assert algo.aux_metric_name == REFERENCE_KL_METRIC
-        assert caught == []
-        assert algo._is_correction_liger_warned is False
+        assert kl is not None
+        assert kl.item() == pytest.approx(0.25)
+        assert clipfrac.item() == pytest.approx(0.1)
 
 
-class TestLearnReportsOneKeyPerRun:
-    """Every ``learn`` return of a run carries the same auxiliary key."""
+class TestLearnReportsFixedKeys:
+    """Every ``learn`` return carries ``kl`` and ``clipfrac`` under fixed keys."""
 
-    def test_the_fused_path_reports_the_clip_fraction_alone(self) -> None:
+    def test_the_standard_path_reports_both(self) -> None:
+        metrics = _Stub(beta=0.0).learn(_experiences())
+
+        assert metrics["kl"] == pytest.approx(0.25)
+        assert metrics["clipfrac"] == pytest.approx(0.1)
+
+    def test_the_fused_path_at_zero_beta_reports_nan_kl(self) -> None:
         algo = _Stub(beta=0.0, use_liger_loss=True)
         metrics = algo.learn(_experiences())
-        assert metrics[LIGER_CLIP_FRACTION_METRIC] == pytest.approx(0.25)
-        assert REFERENCE_KL_METRIC not in metrics
 
-    def test_the_standard_path_reports_the_kl_alone(self) -> None:
-        metrics = _Stub(beta=0.0).learn(_experiences())
-        assert metrics[REFERENCE_KL_METRIC] == pytest.approx(0.25)
-        assert LIGER_CLIP_FRACTION_METRIC not in metrics
+        assert math.isnan(metrics["kl"])
+        assert metrics["clipfrac"] == pytest.approx(0.1)
 
-    def test_an_emptied_batch_reports_the_same_key_as_a_full_one(self) -> None:
+    def test_the_fused_path_with_a_kl_coefficient_reports_both(self) -> None:
+        algo = _Stub(beta=0.04, use_liger_loss=True)
+        metrics = algo.learn(_experiences())
+
+        assert metrics["kl"] == pytest.approx(0.25)
+        assert metrics["clipfrac"] == pytest.approx(0.1)
+
+    def test_an_emptied_batch_reports_zeros_under_fixed_keys(self) -> None:
         algo = _Stub(beta=0.0, use_liger_loss=True, filter_zero_adv=True)
-        full = algo.learn(_experiences())
         algo._survivors = 0
         with pytest.warns(UserWarning, match="advantage threshold"):
             emptied = algo.learn(_experiences())
-        assert emptied == {"loss": 0.0, LIGER_CLIP_FRACTION_METRIC: 0.0}
-        assert set(emptied) <= set(full)
 
-    def test_a_batch_carrying_sampling_logprobs_reports_the_same_key(self) -> None:
+        assert emptied["loss"] == pytest.approx(0.0)
+        assert emptied["kl"] == pytest.approx(0.0)
+        assert emptied["clipfrac"] == pytest.approx(0.0)
+        assert emptied["completion_length"] == pytest.approx(SEQ_LEN)
+
+    def test_a_batch_carrying_sampling_logprobs_reports_fixed_keys(self) -> None:
         algo = _Stub(
             beta=0.0, use_liger_loss=True, importance_sampling_level="trajectory"
         )
         with pytest.warns(UserWarning, match="only at token-level"):
             corrected = algo.learn(_experiences(), sampling_logps=_sampling_logps())
         uncorrected = algo.learn(_experiences())
-        assert REFERENCE_KL_METRIC in corrected
-        assert REFERENCE_KL_METRIC in uncorrected
-        assert LIGER_CLIP_FRACTION_METRIC not in corrected | uncorrected
 
-    def test_the_reported_key_is_the_one_init_registers(self) -> None:
-        algo = _Stub(beta=0.0, use_liger_loss=True)
+        for metrics in (corrected, uncorrected):
+            assert metrics["kl"] == pytest.approx(0.25)
+            assert metrics["clipfrac"] == pytest.approx(0.1)
+
+    def test_fixed_keys_reach_the_metrics_tracker(self) -> None:
+        algo = _Stub(beta=0.04, use_liger_loss=True)
+        algo.learn(_experiences())
+
+        assert algo.metrics.logged["kl"] == pytest.approx(0.25)
+        assert algo.metrics.logged["clipfrac"] == pytest.approx(0.1)
+
+
+class TestLearnTelemetryReportsDiagnostics:
+    """Every ``learn`` return carries the per-learn diagnostic scalars."""
+
+    def test_full_learn_reports_advantage_stats(self) -> None:
+        # Arrange: the stub reports all-ones (B, 1) advantages.
+        algo = _Stub(beta=0.0)
+
+        # Act
         metrics = algo.learn(_experiences())
-        assert algo.aux_metric_name in metrics
-        assert algo.metrics.logged[algo.aux_metric_name] == pytest.approx(0.25)
+
+        # Assert
+        assert metrics["adv_mean"] == pytest.approx(1.0)
+        assert metrics["adv_min"] == pytest.approx(1.0)
+        assert metrics["adv_max"] == pytest.approx(1.0)
+        assert metrics["adv_zero_frac"] == pytest.approx(0.0)
+
+    def test_full_learn_reports_snapshot_stats(self) -> None:
+        # Arrange: post/old/reference log-probs are all zeros, so entropy and
+        # both KLs are 0 and every importance ratio is exactly 1.
+        algo = _Stub(beta=0.0)
+
+        # Act
+        metrics = algo.learn(_experiences())
+
+        # Assert
+        assert metrics["entropy"] == pytest.approx(0.0)
+        assert metrics["kl_ref"] == pytest.approx(0.0)
+        assert metrics["kl_old"] == pytest.approx(0.0)
+        assert metrics["is_ratio_mean"] == pytest.approx(1.0)
+        assert metrics["is_ratio_p05"] == pytest.approx(1.0)
+        assert metrics["is_ratio_p50"] == pytest.approx(1.0)
+        assert metrics["is_ratio_p95"] == pytest.approx(1.0)
+        assert metrics["is_frac_below"] == pytest.approx(0.0)
+        assert metrics["is_frac_above"] == pytest.approx(0.0)
+        assert metrics["is_frac_clip_pos"] == pytest.approx(0.0)
+        assert metrics["is_frac_clip_neg"] == pytest.approx(0.0)
+
+    def test_grad_norms_are_absent_when_no_step_synced(self) -> None:
+        # Arrange: the stub backward pass reports no norms (as on DeepSpeed
+        # accumulation steps that do not sync gradients).
+        algo = _Stub(beta=0.0)
+
+        # Act
+        metrics = algo.learn(_experiences())
+
+        # Assert
+        assert "grad_norm_pre" not in metrics
+        assert "grad_norm_post" not in metrics
+
+    def test_telemetry_is_logged_to_the_metrics_tracker(self) -> None:
+        # Arrange
+        algo = _Stub(beta=0.0)
+
+        # Act
+        algo.learn(_experiences())
+
+        # Assert
+        for key in (
+            "adv_mean",
+            "adv_min",
+            "adv_max",
+            "adv_zero_frac",
+            "entropy",
+            "kl_ref",
+            "kl_old",
+            "is_ratio_mean",
+            "is_frac_below",
+            "is_frac_above",
+            "is_frac_clip_pos",
+            "is_frac_clip_neg",
+        ):
+            assert key in algo.metrics.logged
+
+    def test_sampling_logps_surface_vllm_metrics_in_return_and_tracker(self) -> None:
+        # Arrange: old log-probs are 0 and sampling log-probs are -3 on every
+        # action token, so the trainer/vLLM ratio clamps at the cap of 2.0.
+        algo = _Stub(beta=0.0)
+
+        # Act
+        metrics = algo.learn(_experiences(), sampling_logps=_sampling_logps())
+
+        # Assert
+        assert metrics["vllm_is_delta_mean"] == pytest.approx(3.0)
+        assert metrics["vllm_is_delta_max"] == pytest.approx(3.0)
+        assert metrics["vllm_is_ratio_mean"] == pytest.approx(2.0)
+        assert metrics["vllm_is_ratio_p95"] == pytest.approx(2.0)
+        assert metrics["vllm_is_frac_clamped"] == pytest.approx(1.0)
+        assert "vllm_is_rows_skipped" not in metrics
+        assert algo.metrics.logged["vllm_is_delta_mean"] == pytest.approx(3.0)
+        assert algo.metrics.logged["vllm_is_ratio_mean"] == pytest.approx(2.0)
+
+
+class TestLearnAdvantageStats:
+    """Advantage stats count action tokens only."""
+
+    def test_token_shape_ignores_masked_positions(self) -> None:
+        # Arrange
+        algo = _Stub()
+        algo._advantages = torch.tensor([[2.0, -4.0, 0.0]])
+        experiences = (
+            [torch.full((1, 4), PAD_TOKEN_ID + 1, dtype=torch.long)],
+            [torch.tensor([[True, True, False]])],
+            torch.tensor([1.0], dtype=torch.float32),
+        )
+
+        # Act
+        metrics = algo.learn(experiences)
+
+        # Assert
+        assert metrics["adv_mean"] == pytest.approx(-1.0)
+        assert metrics["adv_min"] == pytest.approx(-4.0)
+        assert metrics["adv_max"] == pytest.approx(2.0)
+        assert metrics["adv_zero_frac"] == pytest.approx(0.0)
+
+    def test_zero_fraction_counts_samples_within_filter_eps(self) -> None:
+        # Arrange
+        algo = _Stub()
+        algo.adv_filter_eps = 0.1
+        algo._advantages = torch.tensor([[0.05], [3.0]])
+
+        # Act
+        metrics = algo.learn(_experiences(2))
+
+        # Assert
+        assert metrics["adv_mean"] == pytest.approx(1.525)
+        assert metrics["adv_zero_frac"] == pytest.approx(0.5)
+
+
+class TestSummarizePostUpdate:
+    """End-of-learn entropy, KL and importance-ratio diagnostics."""
+
+    def test_reports_entropy_kl_and_ratio_tails(self) -> None:
+        # Arrange: ratios exp([0, -1, 0.5, -3]) straddle the [0.8, 1.2] clip
+        # band, with a positive advantage so only the upper clip binds.
+        algo = _Stub()
+        post = torch.tensor([[-1.0, -2.0, -0.5, -4.0]])
+        old = torch.tensor([[-1.0, -1.0, -1.0, -1.0]])
+        ref = torch.tensor([[-1.0, -1.0, -1.0, -1.0]])
+        masks = torch.ones(1, 4, dtype=torch.bool)
+        advantages = torch.tensor([[1.0]])
+
+        # Act
+        stats = algo._summarize_post_update(post, old, ref, masks, advantages, None)
+
+        # Assert
+        assert stats["entropy"] == pytest.approx(1.875)
+        assert stats["kl_ref"] == pytest.approx(4.2276, rel=1e-4)
+        assert stats["kl_old"] == pytest.approx(4.2276, rel=1e-4)
+        assert stats["is_ratio_mean"] == pytest.approx(0.7666, rel=1e-4)
+        assert stats["is_ratio_p05"] == pytest.approx(0.0975, rel=1e-3)
+        assert stats["is_ratio_p50"] == pytest.approx(0.6839, rel=1e-3)
+        assert stats["is_ratio_p95"] == pytest.approx(1.5514, rel=1e-3)
+        assert stats["is_frac_below"] == pytest.approx(0.5)
+        assert stats["is_frac_above"] == pytest.approx(0.25)
+        assert stats["is_frac_clip_pos"] == pytest.approx(0.25)
+        assert stats["is_frac_clip_neg"] == pytest.approx(0.0)
+
+    def test_negative_advantage_binds_the_lower_tail(self) -> None:
+        # Arrange
+        algo = _Stub()
+        post = torch.tensor([[-4.0]])
+        old = torch.tensor([[-1.0]])
+        ref = torch.tensor([[-1.0]])
+        masks = torch.ones(1, 1, dtype=torch.bool)
+        advantages = torch.tensor([[-2.0]])
+
+        # Act
+        stats = algo._summarize_post_update(post, old, ref, masks, advantages, None)
+
+        # Assert
+        assert stats["is_frac_below"] == pytest.approx(1.0)
+        assert stats["is_frac_clip_neg"] == pytest.approx(1.0)
+        assert stats["is_frac_clip_pos"] == pytest.approx(0.0)
+
+    def test_cispo_binds_no_lower_tail(self) -> None:
+        # Arrange: CISPO clips from above only, so lower-tail mass never binds.
+        algo = _Stub()
+        algo.loss_type = "cispo"
+        post = torch.tensor([[-4.0]])
+        old = torch.tensor([[-1.0]])
+        ref = torch.tensor([[-1.0]])
+        masks = torch.ones(1, 1, dtype=torch.bool)
+        advantages = torch.tensor([[-2.0]])
+
+        # Act
+        stats = algo._summarize_post_update(post, old, ref, masks, advantages, None)
+
+        # Assert
+        assert stats["is_frac_below"] == pytest.approx(1.0)
+        assert stats["is_frac_clip_neg"] == pytest.approx(0.0)
+
+
+class TestComputePolicyLossClipfrac:
+    """The standard path reports the kernel's binding-clip definition."""
+
+    def test_grpo_counts_both_signed_tails(self) -> None:
+        # Arrange: ratios [0.36, 2.72] against [0.8, 1.2] with advantages
+        # of both signs: lower binds on the negative row only.
+        algo = _Stub()
+        mask = torch.tensor([[True, True], [True, True]])
+        log_probs = torch.tensor([[-1.0, 1.0], [-1.0, 1.0]])
+        old_log_probs = torch.zeros(2, 2)
+        ref_log_probs = torch.zeros(2, 2)
+        advantages = torch.tensor([[1.0], [-1.0]])
+
+        # Act
+        _, _, clipfrac = algo._compute_policy_loss(
+            mask,
+            log_probs,
+            old_log_probs,
+            ref_log_probs,
+            advantages,
+            None,
+            level="token",
+            objective="grpo",
+        )
+
+        # Assert: row 0 binds above, row 1 binds below: 2 of 4 tokens.
+        assert clipfrac.item() == pytest.approx(0.5)
+
+    def test_cispo_counts_upper_clips_only(self) -> None:
+        # Arrange: same ratios; CISPO has no lower bound.
+        algo = _Stub()
+        mask = torch.tensor([[True, True], [True, True]])
+        log_probs = torch.tensor([[-1.0, 1.0], [-1.0, 1.0]])
+        old_log_probs = torch.zeros(2, 2)
+        ref_log_probs = torch.zeros(2, 2)
+        advantages = torch.tensor([[1.0], [-1.0]])
+
+        # Act
+        _, _, clipfrac = algo._compute_policy_loss(
+            mask,
+            log_probs,
+            old_log_probs,
+            ref_log_probs,
+            advantages,
+            None,
+            level="token",
+            objective="cispo",
+        )
+
+        # Assert: only row 0's upper clip binds: 1 of 4 tokens.
+        assert clipfrac.item() == pytest.approx(0.25)
+
+    def test_trajectory_pooling_averages_token_advantages_per_row(self) -> None:
+        # Arrange
+        algo = _Stub(importance_sampling_level="trajectory")
+        post = torch.tensor([[-1.0, -2.0, -0.5, -4.0]])
+        old = torch.tensor([[-1.0, -1.0, -1.0, -1.0]])
+        ref = torch.tensor([[-1.0, -1.0, -1.0, -1.0]])
+        masks = torch.ones(1, 4, dtype=torch.bool)
+        advantages = torch.tensor([[1.0, 1.0, -1.0, -1.0]])
+
+        # Act
+        stats = algo._summarize_post_update(post, old, ref, masks, advantages, None)
+
+        # Assert: pooled ratio exp(mean([0, -1, 0.5, -3])); row-mean
+        # advantage is 0 so neither clip binds.
+        assert stats["is_ratio_mean"] == pytest.approx(0.4169, rel=1e-4)
+        assert stats["is_frac_below"] == pytest.approx(1.0)
+        assert stats["is_frac_clip_pos"] == pytest.approx(0.0)
+        assert stats["is_frac_clip_neg"] == pytest.approx(0.0)
+
+    def test_empty_action_mask_reports_nan_ratio_stats(self) -> None:
+        # Arrange
+        algo = _Stub()
+        post = torch.zeros(1, 2)
+        old = torch.zeros(1, 2)
+        ref = torch.zeros(1, 2)
+        masks = torch.zeros(1, 2, dtype=torch.bool)
+        advantages = torch.tensor([[1.0]])
+
+        # Act
+        stats = algo._summarize_post_update(post, old, ref, masks, advantages, None)
+
+        # Assert
+        for key in (
+            "is_ratio_mean",
+            "is_ratio_p05",
+            "is_ratio_p50",
+            "is_ratio_p95",
+            "is_frac_below",
+            "is_frac_above",
+            "is_frac_clip_pos",
+            "is_frac_clip_neg",
+        ):
+            assert math.isnan(stats[key])

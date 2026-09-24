@@ -4,6 +4,7 @@
 import copy
 import gc
 import inspect
+import math
 import os
 import re
 import tempfile
@@ -39,11 +40,7 @@ from agilerl.algorithms.core.base import (
     LLMAlgorithm,
     OptimizerWrapper,
 )
-from agilerl.algorithms.grpo import (
-    HAS_LIGER_KERNEL,
-    LIGER_CLIP_FRACTION_METRIC,
-    REFERENCE_KL_METRIC,
-)
+from agilerl.algorithms.grpo import HAS_LIGER_KERNEL
 from agilerl.modules.dummy import DummyEvolvable
 from agilerl.utils.algo_utils import CosineLRScheduleConfig, VLLMConfig, clone_llm
 from tests import TINY_LLM_FIXTURE_PATH
@@ -1825,9 +1822,10 @@ class TestGRPOLearnRewardsShape:
                 return_value=(
                     torch.tensor(0.5, dtype=torch.float32),
                     torch.tensor(0.0, dtype=torch.float32),
+                    torch.tensor(0.0, dtype=torch.float32),
                 ),
             ),
-            patch.object(grpo, "_backward_pass", return_value=None),
+            patch.object(grpo, "_backward_pass", return_value=(None, None)),
         ):
             grpo.learn((token_ids, action_masks, rewards))
 
@@ -1986,7 +1984,7 @@ class TestGRPOLigerLossDispatch:
             fake_output.logits = torch.randn(1, 2, 8, requires_grad=True)
             grpo.actor.side_effect = lambda **kwargs: fake_output
 
-            loss, _ = grpo._liger_loss(
+            loss, _, _ = grpo._liger_loss(
                 batch_ids=torch.ones((1, 2), dtype=torch.long),
                 action_mask=torch.ones((1, 1), dtype=torch.bool),
                 advantages=torch.ones(adv_shape, dtype=torch.float32),
@@ -2175,7 +2173,7 @@ class TestGRPOLigerSequencePacking:
                     LLMAlgorithm, "select_adapter", lambda self, name: nullcontext()
                 ),
             ):
-                loss, _ = grpo._liger_loss(
+                loss, _, _ = grpo._liger_loss(
                     batch_ids=batch_ids,
                     action_mask=action_mask,
                     advantages=advantages,
@@ -2672,7 +2670,7 @@ class TestGRPOGrpoLossStandard:
         old_log_probs = log_probs - 0.15
         reference_log_probs = log_probs + 0.05
         advantages = torch.tensor([[0.5], [-0.25]], dtype=torch.float32)
-        loss, kl = stub._grpo_loss_standard(
+        loss, kl, _ = stub._grpo_loss_standard(
             mask,
             log_probs,
             old_log_probs,
@@ -2698,7 +2696,7 @@ class TestGRPOGspoLoss:
         old_log_probs = log_probs - 0.2
         reference_log_probs = log_probs + 0.03
         advantages = torch.tensor([[0.75], [0.25]], dtype=torch.float32)
-        loss, kl = stub._gspo_loss(
+        loss, kl, _ = stub._gspo_loss(
             mask,
             log_probs,
             old_log_probs,
@@ -2751,7 +2749,7 @@ class TestGRPOGspoLoss:
 
         # Naive path: materialize logits, log_softmax, then GSPO loss.
         hid_naive = base_hidden.clone().requires_grad_(True)
-        loss_naive, kl_naive = stub._gspo_loss(
+        loss_naive, kl_naive, _ = stub._gspo_loss(
             mask,
             naive_logps(hid_naive),
             old_log_probs,
@@ -2771,7 +2769,7 @@ class TestGRPOGspoLoss:
             cast_to_fp32=True,
             chunk_rows=5,
         )
-        loss_fused, kl_fused = stub._gspo_loss(
+        loss_fused, kl_fused, _ = stub._gspo_loss(
             mask,
             fused_logps,
             old_log_probs,
@@ -2903,7 +2901,7 @@ class TestGRPOTurnLevel:
         base = torch.randn(B, T, H)
 
         hid_naive = base.clone().requires_grad_(True)
-        loss_naive, _ = loss_fn(
+        loss_naive, _, _ = loss_fn(
             mask, naive_logps(hid_naive), old, ref, advantages, turn_ids
         )
         loss_naive.backward()
@@ -2918,7 +2916,7 @@ class TestGRPOTurnLevel:
             cast_to_fp32=True,
             chunk_rows=5,
         )
-        loss_fused, _ = loss_fn(mask, fused, old, ref, advantages, turn_ids)
+        loss_fused, _, _ = loss_fn(mask, fused, old, ref, advantages, turn_ids)
         loss_fused.backward()
 
         assert torch.allclose(loss_fused, loss_naive, rtol=1e-4, atol=1e-5)
@@ -2984,7 +2982,7 @@ class TestGRPOAdvantageGranularityDecoupling:
         else:
             advantages = stub._calculate_advantage(torch.randn(B))  # (B, 1)
         loss_turn_ids = turn_ids if is_level == "turn" else None
-        loss, kl = stub._grpo_loss_standard(
+        loss, kl, _ = stub._grpo_loss_standard(
             mask, log_probs, old, ref, advantages, loss_turn_ids
         )
         assert torch.isfinite(loss)
@@ -3206,7 +3204,7 @@ class TestGRPOCispoLoss:
         old_log_probs = log_probs - 0.2
         reference_log_probs = log_probs + 0.03
         advantages = torch.tensor([[0.75], [0.25]], dtype=torch.float32)
-        loss, kl = stub._cispo_loss(
+        loss, kl, _ = stub._cispo_loss(
             mask,
             log_probs,
             old_log_probs,
@@ -3216,7 +3214,7 @@ class TestGRPOCispoLoss:
         assert torch.isfinite(loss)
         assert torch.isfinite(kl)
 
-    def test_cispo_loss_clamps_importance_ratio_on_both_sides(self):
+    def test_cispo_loss_clamps_importance_ratio_from_above_only(self):
         stub = _GrpoLossStub(
             clip_coef_min=0.8,
             clip_coef_max=1.2,
@@ -3229,7 +3227,7 @@ class TestGRPOCispoLoss:
         reference_log_probs = log_probs.clone()
         advantages = torch.tensor([[1.0]], dtype=torch.float32)
 
-        loss, kl = stub._cispo_loss(
+        loss, kl, clipfrac = stub._cispo_loss(
             mask,
             log_probs,
             old_log_probs,
@@ -3237,10 +3235,13 @@ class TestGRPOCispoLoss:
             advantages,
         )
 
-        # exp([-1, 1]) -> [0.367..., 2.718...] then clamp to [0.8, 1.2].
-        expected_loss = torch.tensor(-0.2, dtype=torch.float32)
+        # exp([-1, 1]) -> [0.367..., 2.718...]; only the upper side clamps.
+        expected_loss = torch.tensor(
+            -(math.exp(-1) * -1.0 + 1.2 * 1.0) / 2, dtype=torch.float32
+        )
         assert torch.allclose(loss, expected_loss, atol=1e-6)
         assert torch.allclose(kl, torch.tensor(0.0, dtype=torch.float32), atol=1e-6)
+        assert clipfrac.item() == pytest.approx(0.5)
 
 
 class TestGRPOLoss:
@@ -3302,7 +3303,7 @@ class TestGRPOLoss:
         mask = torch.ones_like(log_probs)
         mask[:, -3:] = 0
         mask = mask.to(torch.bool)
-        loss, kl = grpo._loss(
+        loss, kl, _ = grpo._loss(
             batch_size=10,
             minibatch_idxs=torch.arange(10, device=grpo.device),
             token_ids=torch.randint(
@@ -3498,9 +3499,10 @@ class TestGRPOLearn:
                 return_value=(
                     torch.tensor(1.0, dtype=torch.float32),
                     torch.tensor(0.1, dtype=torch.float32),
+                    torch.tensor(0.0, dtype=torch.float32),
                 ),
             ) as mock_grpo_loss,
-            patch.object(grpo, "_backward_pass", return_value=None),
+            patch.object(grpo, "_backward_pass", return_value=(None, None)),
         ):
             metrics = grpo.learn((token_ids, action_masks, rewards))
         processed_advantages = mock_grpo_loss.call_args.args[5]
@@ -3538,9 +3540,10 @@ class TestGRPOLearn:
                 return_value=(
                     torch.tensor(1.0, dtype=torch.float32),
                     torch.tensor(0.1, dtype=torch.float32),
+                    torch.tensor(0.0, dtype=torch.float32),
                 ),
             ),
-            patch.object(grpo, "_backward_pass", return_value=None),
+            patch.object(grpo, "_backward_pass", return_value=(None, None)),
         ):
             grpo.learn((completion_ids, action_masks, rewards))
         # Two of the four samples survive the filter, each with 9 action tokens.
@@ -3577,9 +3580,10 @@ class TestGRPOLearn:
                 return_value=(
                     torch.tensor(1.0, dtype=torch.float32),
                     torch.tensor(0.1, dtype=torch.float32),
+                    torch.tensor(0.0, dtype=torch.float32),
                 ),
             ) as mock_loss,
-            patch.object(grpo, "_backward_pass", return_value=None),
+            patch.object(grpo, "_backward_pass", return_value=(None, None)),
             patch.object(grpo, "_record_window_action_tokens", side_effect=record_spy),
         ):
             grpo.learn((completion_ids, action_masks, rewards))
@@ -3613,9 +3617,10 @@ class TestGRPOLearn:
                 return_value=(
                     torch.tensor(1.0, dtype=torch.float32),
                     torch.tensor(0.1, dtype=torch.float32),
+                    torch.tensor(0.0, dtype=torch.float32),
                 ),
             ),
-            patch.object(grpo, "_backward_pass", return_value=None),
+            patch.object(grpo, "_backward_pass", return_value=(None, None)),
             pytest.warns(UserWarning, match="whole optimizer steps"),
         ):
             grpo.learn((completion_ids, action_masks, rewards))
@@ -3642,7 +3647,19 @@ class TestGRPOLearn:
             ),
         ):
             metrics = grpo.learn((token_ids, action_masks, rewards))
-        assert metrics == {"loss": 0.0, "kl": 0.0}
+        assert metrics["loss"] == 0.0
+        assert metrics["kl"] == 0.0
+        assert metrics["adv_mean"] == pytest.approx(0.0)
+        assert metrics["adv_min"] == pytest.approx(0.0)
+        assert metrics["adv_max"] == pytest.approx(0.0)
+        assert metrics["adv_zero_frac"] == pytest.approx(1.0)
+        assert metrics["entropy"] == 0.0
+        assert metrics["kl_ref"] == 0.0
+        assert metrics["kl_old"] == 0.0
+        assert metrics["is_ratio_mean"] == 0.0
+        assert metrics["grad_norm_pre"] == 0.0
+        assert metrics["grad_norm_post"] == 0.0
+        assert metrics["completion_length"] == pytest.approx(10.0)
         grpo.clean_up()
 
     def test_learn_multiprocess_all_filtered_masks_advantages_and_updates(self):
@@ -3662,6 +3679,7 @@ class TestGRPOLearn:
             return (
                 torch.tensor(0.0, dtype=torch.float32),
                 torch.tensor(0.0, dtype=torch.float32),
+                torch.tensor(0.0, dtype=torch.float32),
             )
 
         with (
@@ -3672,7 +3690,9 @@ class TestGRPOLearn:
                 return_value=torch.zeros(4, 1, dtype=torch.float32),
             ),
             patch.object(grpo, "_loss", side_effect=spy_loss) as mock_loss,
-            patch.object(grpo, "_backward_pass", return_value=None) as mock_backward,
+            patch.object(
+                grpo, "_backward_pass", return_value=(None, None)
+            ) as mock_backward,
         ):
             warnings.filterwarnings(
                 "error", message="All samples were filtered by advantage threshold"
@@ -3697,6 +3717,11 @@ class TestGRPOLearn:
             for _ in range(2)
         ]
         backward_counts = []
+
+        def _backward(loss: torch.Tensor) -> tuple[None, None]:
+            loss.backward()
+            return None, None
+
         for rank, rewards in zip(
             ranks,
             [
@@ -3711,7 +3736,7 @@ class TestGRPOLearn:
             with patch.object(
                 rank,
                 "_backward_pass",
-                side_effect=lambda loss: loss.backward(),
+                side_effect=_backward,
             ) as mock_backward:
                 metrics = rank.learn((completion_ids, action_masks, rewards))
             assert "completion_length" in metrics
@@ -3855,7 +3880,11 @@ class TestGRPOLearn:
         )
 
         def mock_grpo_loss(*args, **kwargs):
-            return torch.tensor(float("nan")), torch.tensor(1.0)
+            return (
+                torch.tensor(float("nan")),
+                torch.tensor(1.0),
+                torch.tensor(0.0),
+            )
 
         with (
             patch.object(grpo, "_loss", side_effect=mock_grpo_loss),
@@ -3888,6 +3917,7 @@ class TestGRPOLearn:
                 "_loss",
                 return_value=(
                     torch.tensor(0.5, dtype=torch.float32),
+                    torch.tensor(0.0, dtype=torch.float32),
                     torch.tensor(0.0, dtype=torch.float32),
                 ),
             ),
@@ -3939,6 +3969,7 @@ class TestGRPOLearn:
                 return_value=(
                     torch.tensor(float("nan"), device=grpo.device),
                     torch.tensor(0.0, device=grpo.device),
+                    torch.tensor(0.0, device=grpo.device),
                 ),
             ),
             pytest.raises(ValueError, match="Loss is not finite"),
@@ -3978,7 +4009,43 @@ class TestGRPOLearn:
         rewards = torch.stack([torch.rand(2, dtype=torch.float32)], dim=0)
 
         metrics = grpo.learn((completions, action_masks, rewards))
-        assert set(metrics.keys()) == {"loss", "kl", "completion_length"}
+        assert set(metrics.keys()) == {
+            "loss",
+            "kl",
+            "clipfrac",
+            "completion_length",
+            "adv_mean",
+            "adv_min",
+            "adv_max",
+            "adv_zero_frac",
+            "entropy",
+            "kl_ref",
+            "kl_old",
+            "is_ratio_mean",
+            "is_ratio_p05",
+            "is_ratio_p50",
+            "is_ratio_p95",
+            "is_frac_below",
+            "is_frac_above",
+            "is_frac_clip_pos",
+            "is_frac_clip_neg",
+            "grad_norm_pre",
+            "grad_norm_post",
+        }
+        assert all(
+            math.isfinite(metrics[key])
+            for key in (
+                "adv_mean",
+                "entropy",
+                "kl",
+                "kl_ref",
+                "kl_old",
+                "clipfrac",
+                "is_ratio_mean",
+                "grad_norm_pre",
+                "grad_norm_post",
+            )
+        )
         grpo.clean_up()
 
     @pytest.mark.gpu
@@ -5946,10 +6013,10 @@ class TestGRPOVLLMSamplingCorrection:
         old = log_probs - 0.1
         ref = log_probs.clone()
         adv = torch.tensor([[1.0], [-1.0]])
-        base, _ = stub._compute_policy_loss(
+        base, _, _ = stub._compute_policy_loss(
             mask, log_probs, old, ref, adv, None, level="token", objective="grpo"
         )
-        corr, _ = stub._compute_policy_loss(
+        corr, _, _ = stub._compute_policy_loss(
             mask,
             log_probs,
             old,
@@ -5975,7 +6042,7 @@ class TestGRPOVLLMSamplingCorrection:
         # Build a sampling tensor whose ratio spans below and above the clamp.
         sampling = old - torch.tensor([[0.3, 0.0, 1.5], [-0.2, 0.9, 0.0]])
 
-        corr, _ = stub._compute_policy_loss(
+        corr, _, _ = stub._compute_policy_loss(
             mask,
             log_probs,
             old,
@@ -6143,13 +6210,14 @@ class TestGRPOVLLMSamplingCorrection:
             patch.object(
                 grpo, "_fused_forward_no_grad", side_effect=fake_fused_forward
             ),
-            patch.object(grpo, "_backward_pass", return_value=None),
+            patch.object(grpo, "_backward_pass", return_value=(None, None)),
             patch.object(
                 grpo,
                 "_liger_loss",
                 return_value=(
                     torch.tensor(0.5, requires_grad=True),
                     torch.tensor(0.1),
+                    torch.tensor(0.0),
                 ),
             ) as mock_liger_loss,
             warnings.catch_warnings(record=True) as caught,
@@ -6209,7 +6277,7 @@ class TestGRPOVLLMSamplingCorrection:
                 grpo, "_fused_forward_no_grad", side_effect=fake_fused_forward
             ),
             patch.object(grpo, "_get_logprobs", side_effect=fake_get_logprobs),
-            patch.object(grpo, "_backward_pass", return_value=None),
+            patch.object(grpo, "_backward_pass", return_value=(None, None)),
             patch.object(grpo, "_liger_loss") as mock_liger_loss,
             pytest.warns(
                 UserWarning,
@@ -6266,7 +6334,7 @@ class TestGRPONonFinitePaddingIsIsolated:
         stub = self._stub()
         mask, log_probs, old, ref, sampling, adv = self._inputs(pad_value)
 
-        loss, kl = stub._compute_policy_loss(
+        loss, kl, clipfrac = stub._compute_policy_loss(
             mask,
             log_probs,
             old,
@@ -6280,6 +6348,7 @@ class TestGRPONonFinitePaddingIsIsolated:
 
         assert torch.isfinite(loss)
         assert torch.isfinite(kl)
+        assert torch.isfinite(clipfrac)
 
     def test_padding_value_does_not_change_the_loss(self):
         stub = self._stub()
@@ -6300,11 +6369,12 @@ class TestGRPONonFinitePaddingIsIsolated:
                 sampling_log_probs=sampling,
             )
 
-        nan_loss, nan_kl = run(nan_args)
-        finite_loss, finite_kl = run(finite_args)
+        nan_loss, nan_kl, nan_clipfrac = run(nan_args)
+        finite_loss, finite_kl, finite_clipfrac = run(finite_args)
 
         assert torch.allclose(nan_loss, finite_loss, atol=1e-7)
         assert torch.allclose(nan_kl, finite_kl, atol=1e-7)
+        assert torch.allclose(nan_clipfrac, finite_clipfrac, atol=1e-7)
 
     def test_reduce_masked_loss_ignores_non_finite_padding(self):
         stub = self._stub()
@@ -6506,7 +6576,7 @@ class TestGRPOTurnAdvantageLearnPath:
                 grpo, "_fused_forward_no_grad", side_effect=fake_fused_forward
             ),
             patch.object(grpo, "_get_logprobs", side_effect=fake_get_logprobs),
-            patch.object(grpo, "_backward_pass", return_value=None),
+            patch.object(grpo, "_backward_pass", return_value=(None, None)),
         )
 
     def test_learn_turn_ids_batch_mismatch_raises(self):
@@ -6590,24 +6660,29 @@ def _liger_available():
         yield
 
 
-class TestGRPOAuxMetricNaming:
-    """Live-tracker registration of the auxiliary scalar beside ``loss``.
+class TestGRPOMetricRegistration:
+    """A real ``GRPO`` registers the fixed kl/clipfrac keys plus telemetry."""
 
-    Naming and ``learn`` key routing are pinned in
-    ``test_grpo_metric_naming.py``; this class only checks what a real
-    ``GRPO`` metrics tracker registers at init.
-    """
-
-    def test_the_fused_path_registers_only_the_clip_fraction(self):
+    @pytest.mark.parametrize("use_liger_loss", [False, True])
+    def test_init_registers_kl_clipfrac_and_telemetry(
+        self, use_liger_loss: bool
+    ) -> None:
         with _liger_available():
-            grpo = _make_cpu_grpo_for_branch_tests(use_liger_loss=True, beta=0.0)
-        assert np.isnan(grpo.metrics.get_mean(LIGER_CLIP_FRACTION_METRIC))
-        with pytest.raises(KeyError):
-            grpo.metrics.get_mean(REFERENCE_KL_METRIC)
-        grpo.clean_up()
-
-    def test_the_standard_path_registers_only_kl(self):
-        grpo = _make_cpu_grpo_for_branch_tests(beta=0.0)
-        with pytest.raises(KeyError):
-            grpo.metrics.get_mean(LIGER_CLIP_FRACTION_METRIC)
+            grpo = _make_cpu_grpo_for_branch_tests(
+                use_liger_loss=use_liger_loss, beta=0.0
+            )
+        for name in (
+            "loss",
+            "kl",
+            "clipfrac",
+            "completion_length",
+            "adv_mean",
+            "entropy",
+            "kl_ref",
+            "is_ratio_mean",
+            "is_frac_below",
+            "grad_norm_pre",
+            "vllm_is_delta_mean",
+        ):
+            assert np.isnan(grpo.metrics.get_mean(name))
         grpo.clean_up()
