@@ -200,7 +200,6 @@ def main(cfg: dict) -> None:
         max_output_tokens=max_new,
         min_output_tokens=min_new,
         max_model_len=max_ctx,
-        accelerator=None,
         vf_coef=float(init_hp["VF_COEF"]),
         gamma=float(init_hp["GAMMA"]),
         gae_lambda=float(init_hp["GAE_LAMBDA"]),

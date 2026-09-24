@@ -849,8 +849,6 @@ class TestLLMAlgorithmSpecBuild:
         mock_tokenizer = MagicMock()
         mock_tokenizer.eos_token_id = 0
         mock_tokenizer.eos_token = "<|endoftext|>"
-        accelerator = MagicMock()
-        accelerator.num_processes = 2
 
         spec = GRPOSpec(
             pretrained_model_name_or_path="gpt2",
@@ -862,9 +860,7 @@ class TestLLMAlgorithmSpecBuild:
         with patch.object(
             select_builder(spec), "algo_class", return_value=mock_algo_cls
         ):
-            build_from_spec(
-                spec, tokenizer=mock_tokenizer, index=0, accelerator=accelerator
-            )
+            build_from_spec(spec, tokenizer=mock_tokenizer, index=0)
         assert mock_algo_cls.call_args.kwargs["micro_batch_size_per_gpu"] == 1
 
         # Unset: the algorithm derives it (e.g. from gradient accumulation),
@@ -876,9 +872,7 @@ class TestLLMAlgorithmSpecBuild:
         with patch.object(
             select_builder(derived), "algo_class", return_value=mock_algo_cls
         ):
-            build_from_spec(
-                derived, tokenizer=mock_tokenizer, index=0, accelerator=accelerator
-            )
+            build_from_spec(derived, tokenizer=mock_tokenizer, index=0)
         assert "micro_batch_size_per_gpu" not in mock_algo_cls.call_args.kwargs
 
     def test_chunk_rows_forwarded_to_constructor(self):
@@ -1111,7 +1105,6 @@ class TestLLMAlgorithmSpecBuild:
             "beta": 0.01,
             "max_grad_norm": 0.1,
             "update_epochs": 1,
-            "reduce_memory_peak": False,
             "use_separate_reference_adapter": False,
             "calc_position_embeddings": True,
             "gradient_checkpointing": True,

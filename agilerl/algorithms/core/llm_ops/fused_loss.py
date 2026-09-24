@@ -615,8 +615,8 @@ def flatten_tokens_for_fused_loss(
 
 def apply_fused_policy_loss(
     policy_hidden: torch.Tensor,
-    lm_head_weight: torch.Tensor,
-    lm_head_bias: torch.Tensor | None,
+    head_w: torch.Tensor,
+    head_b: torch.Tensor | None,
     target_ids: torch.Tensor,
     attention_mask: torch.Tensor,
     advantages: torch.Tensor,
@@ -653,6 +653,10 @@ def apply_fused_policy_loss(
     :param policy_hidden: ``(B, T_act, H)`` hidden states already sliced to the
         action positions (caller does the ``[:, :-1]`` shift).
     :type policy_hidden: torch.Tensor
+    :param head_w: LM head weight ``(vocab, H)``.
+    :type head_w: torch.Tensor
+    :param head_b: LM head bias, or ``None``.
+    :type head_b: torch.Tensor | None
     :param target_ids: ``(B, T_act)`` next-token target ids.
     :type target_ids: torch.Tensor
     :param attention_mask: ``(B, T_act)`` action-token mask.
@@ -660,6 +664,31 @@ def apply_fused_policy_loss(
     :param advantages: token level ``(B, T_act)``; turn ``(B, max_turns)``;
         trajectory ``(B, 1)``.
     :type advantages: torch.Tensor
+    :param ref_per_token_logps: Reference-policy log-probs ``(B, T_act)`` for
+        the KL term, or ``None``.
+    :type ref_per_token_logps: torch.Tensor | None
+    :param old_per_token_logps: Rollout-policy log-probs ``(B, T_act)`` for the
+        importance ratio; ``None`` uses the current policy (ratio 1).
+    :type old_per_token_logps: torch.Tensor | None
+    :param beta: KL penalty coefficient.
+    :type beta: float
+    :param epsilon_low: Lower clip offset for the importance ratio.
+    :type epsilon_low: float
+    :param epsilon_high: Upper clip offset for the importance ratio.
+    :type epsilon_high: float
+    :param temperature: Sampling temperature the logits are divided by.
+    :type temperature: float
+    :param importance_sampling_level: ``"token"``, ``"turn"``, or
+        ``"trajectory"``.
+    :type importance_sampling_level: str
+    :param turn_ids: ``(B, T_act)`` turn index per action token (turn level).
+    :type turn_ids: torch.Tensor | None
+    :param full_turn_mask: ``(B, max_turns)`` mask of turns present (turn level).
+    :type full_turn_mask: torch.Tensor | None
+    :param max_turns: Turn capacity of ``advantages`` (turn level).
+    :type max_turns: int | None
+    :param token_chunk_size: Tokens per fused chunk on the token-level path.
+    :type token_chunk_size: int
     :param vllm_is_ratio: Optional detached, upper-clamped per-token vLLM
         sampling-mismatch ratio ``(B, T_act)`` (token level only). Token-flattened
         and multiplied into the per-token policy loss before the KL term. Turn /
@@ -690,11 +719,11 @@ def apply_fused_policy_loss(
         )
         return LigerFusedLinearPolicyLossFunction.apply(
             hidden_flat,
-            lm_head_weight,
+            head_w,
             target_ids_flat,
             mask_flat,
             advantages.reshape(n_tokens, 1),
-            lm_head_bias,
+            head_b,
             ref_log_probs_flat,
             old_log_probs_flat,
             beta,
@@ -715,11 +744,11 @@ def apply_fused_policy_loss(
         )
     return LigerFusedLinearPolicyLossFunction.apply(
         policy_hidden.contiguous(),
-        lm_head_weight,
+        head_w,
         target_ids,
         attention_mask,
         advantages,
-        lm_head_bias,
+        head_b,
         ref_per_token_logps,
         old_per_token_logps,
         beta,

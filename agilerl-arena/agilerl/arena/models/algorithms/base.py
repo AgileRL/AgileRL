@@ -6,13 +6,23 @@
 from __future__ import annotations
 
 import re
-from typing import Any, ClassVar
+from dataclasses import fields
+from typing import Annotated, Any, ClassVar
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    TypeAdapter,
+    field_validator,
+    model_validator,
+)
+from pydantic.json_schema import WithJsonSchema
 from typing_extensions import Self
 
 from agilerl.arena.models.descriptions import BETA, MICRO_BATCH, MINI_BATCH
 from agilerl.arena.models.env import LLMEnvType
+from agilerl.arena.models.fsdp import FSDPConfig
 from agilerl.arena.models.hpo import RLHyperparameter
 from agilerl.arena.models.networks import LoraConfigDict, NetworkSpec
 from agilerl.arena.models.registry import AgentType
@@ -21,6 +31,15 @@ from agilerl.arena.models.registry import AgentType
 # builds an O(N^2) block-diagonal mask over the packed row instead, so packing
 # under one is silently a padded forward.
 PACKING_ATTN_IMPLEMENTATIONS = frozenset({"flash_attention_2", "flex_attention"})
+
+FSDP_KNOWN_FIELDS = frozenset(field.name for field in fields(FSDPConfig))
+FSDP_JSON_SCHEMA = {
+    "anyOf": [
+        {"type": "null"},
+        {"type": "boolean"},
+        TypeAdapter(FSDPConfig).json_schema(),
+    ]
+}
 
 
 def _range(
@@ -189,6 +208,8 @@ class LLMAlgorithmSpec(AlgorithmSpec):
     algorithm when the manifest is validated.
     """
 
+    model_config = ConfigDict(extra="forbid")
+
     batch_size: int = Field(
         default=16,
         ge=1,
@@ -341,21 +362,11 @@ class LLMAlgorithmSpec(AlgorithmSpec):
             "instead of ending the episode."
         ),
     )
-
-    zero_stage: int = Field(
-        default=2,
-        ge=2,
-        le=3,
-        description=(
-            "DeepSpeed ZeRO stage. 2 shards optimizer state and gradients; 3 "
-            "also shards parameters, which is slower but fits larger models."
-        ),
-    )
-    deepspeed: dict[str, Any] | None = Field(
+    fsdp: Annotated[FSDPConfig | None, WithJsonSchema(FSDP_JSON_SCHEMA)] = Field(
         default=None,
         description=(
-            "Overrides deep-merged onto the ZeRO stage preset. A nested "
-            "zero_optimization.stage is ignored — zero_stage is authoritative."
+            "FSDP2 shard config. True or {} enables defaults; omit for flat "
+            "data parallel."
         ),
     )
     vllm_engine_args: dict[str, Any] = Field(
@@ -398,6 +409,28 @@ class LLMAlgorithmSpec(AlgorithmSpec):
     default_evo_steps: ClassVar[int] = 5
     hpo_ranges: ClassVar[dict[str, RLHyperparameter]] = LLM_HPO_RANGES
     env_type: ClassVar[LLMEnvType]
+
+    @field_validator("fsdp", mode="before")
+    @classmethod
+    def _coerce_fsdp(cls, value: object) -> FSDPConfig | None:
+        """Normalize manifest ``fsdp`` to :class:`FSDPConfig` or ``None``."""
+        if value is None:
+            return None
+        if value is True or value == {}:
+            return FSDPConfig()
+        if isinstance(value, FSDPConfig):
+            return value
+        if isinstance(value, dict):
+            unknown = set(value) - FSDP_KNOWN_FIELDS
+            if unknown:
+                msg = (
+                    f"Unknown fsdp keys {sorted(unknown)}; "
+                    f"valid keys are {sorted(FSDP_KNOWN_FIELDS)}"
+                )
+                raise ValueError(msg)
+            return FSDPConfig(**value)
+        msg = "fsdp must be null, true, a dict, or FSDPConfig"
+        raise TypeError(msg)
 
     @field_validator("answer_pattern")
     @classmethod
@@ -475,27 +508,6 @@ class LLMAlgorithmSpec(AlgorithmSpec):
                 f"{self.attn_implementation!r}: a dense backend builds an O(N^2) "
                 "block-diagonal mask over the packed row, so the packed forward "
                 "is silently dropped in favour of the padded one"
-            )
-            raise ValueError(msg)
-        return self
-
-    @model_validator(mode="after")
-    def _validate_deepspeed_overrides(self) -> Self:
-        """Reject DeepSpeed overrides whose settings the training path ignores."""
-        if not self.deepspeed:
-            return self
-        if "activation_checkpointing" in self.deepspeed:
-            msg = (
-                "algorithm.deepspeed sets activation_checkpointing, which the "
-                "training path never reads: activation checkpointing is configured "
-                "through algorithm.gradient_checkpointing / activation_offload."
-            )
-            raise ValueError(msg)
-        if "gradient_clipping" in self.deepspeed:
-            msg = (
-                "algorithm.deepspeed.gradient_clipping is ignored: the resolved "
-                "config always takes gradient_clipping from "
-                "algorithm.max_grad_norm. Set algorithm.max_grad_norm instead."
             )
             raise ValueError(msg)
         return self

@@ -3,7 +3,6 @@
 
 import re
 
-from accelerate import Accelerator
 from datasets import load_dataset
 from peft import LoraConfig
 from torch.utils.data import Dataset
@@ -108,8 +107,6 @@ def main():
         tokenizer.pad_token = tokenizer.eos_token
     train_dataset, test_dataset = make_dataset(DATASET)
 
-    accelerator = Accelerator()
-
     # Define the conversation template
     conversation_template = [
         {
@@ -169,7 +166,6 @@ def main():
         batch_size=16,
         max_model_len=MAX_CONTEXT_LENGTH,
         group_size=8,
-        accelerator=accelerator,
         vllm_config=VLLMConfig(sleep_mode=True, max_num_seqs=4),
     )
     train_llm_rollout(
@@ -181,7 +177,6 @@ def main():
         save_elite=True,
         elite_path="checkpoints",
         max_reward=2.0,
-        accelerator=accelerator,
     )
 
 

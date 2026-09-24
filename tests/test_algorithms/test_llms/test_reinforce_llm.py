@@ -10,10 +10,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 
-pytest.importorskip("deepspeed", reason="LLM tests require deepspeed.")
 pytest.importorskip("vllm", reason="LLM tests require vllm.")
 
-from accelerate.state import AcceleratorState
 from peft import LoraConfig
 from torch import nn
 from transformers.configuration_utils import PretrainedConfig
@@ -23,6 +21,7 @@ from transformers.modeling_utils import PreTrainedModel
 
 from agilerl.algorithms.core import ActionResult
 from agilerl.algorithms.reinforce_llm import REINFORCE
+from agilerl.distributed import FSDPConfig
 from agilerl.llm_envs import RolloutHarness
 from agilerl.utils.algo_utils import CosineLRScheduleConfig, VLLMConfig
 from tests import TINY_LLM_FIXTURE_PATH
@@ -31,21 +30,6 @@ from tests.utils import (
     assert_vllm_get_action_contract,
     make_mock_vllm_instance,
 )
-
-deepspeed_base_config = {
-    "bf16": {
-        "enabled": True,
-    },
-    "auto_cast": True,
-    "gradient_clipping": 0.5,
-    "gradient_accumulation_steps": 1,
-}
-
-deepspeed_config_stage_2 = deepspeed_base_config | {
-    "zero_optimization": {
-        "stage": 2,
-    },
-}
 
 
 class DummyConfig(PretrainedConfig):
@@ -84,6 +68,15 @@ class DummyCausalInner(PreTrainedModel):
         self.embed = nn.Embedding(vs, hs, device=device)
         self.lin = nn.Linear(hs, hs, device=device)
         self.lm_head = nn.Linear(hs, vs, device=device)
+
+    def get_input_embeddings(self):
+        return self.embed
+
+    def get_output_embeddings(self):
+        return self.lm_head
+
+    def set_output_embeddings(self, new_embeddings):
+        self.lm_head = new_embeddings
 
     def forward(
         self,
@@ -165,7 +158,7 @@ def create_dummy_actor(input_size, max_tokens, vocab_size, device):
 
 
 def _cpu_llmreinforce(**kwargs):
-    """Small CPU REINFORCE for fast unit tests (PEFT dummy actor, no accelerator)."""
+    """Small CPU REINFORCE for fast unit tests (PEFT dummy actor, single device)."""
     device = "cpu"
     vocab_size = 100
     input_size = 10
@@ -186,7 +179,6 @@ def _cpu_llmreinforce(**kwargs):
         "micro_batch_size_per_gpu": 2,
         "max_output_tokens": max_tokens,
         "max_model_len": input_size + max_tokens + 4,
-        "accelerator": None,
         "wrap": False,
         "gradient_checkpointing": False,
         "lr": 1e-3,
@@ -203,21 +195,20 @@ def _cpu_llmreinforce(**kwargs):
 
 
 def generate_reinforce(
-    accelerator_factory,
+    dist_mode_factory,
     model_factory,
-    config,
-    use_deepspeed_optimizer,
+    dist_mode,
     vocab_size,
     input_size,
     max_tokens,
-    colocated=False,
-    pretrained_model_name_or_path=None,
-    micro_batch_size_per_gpu=None,
+    use_vllm,
+    pretrained_model_name_or_path,
+    micro_batch_size_per_gpu,
     lr=1e-5,
     lr_eff=None,
     sleep_mode=False,
     from_name=False,
-    use_memory_efficient_params=False,
+    offload_trainer_during_rollout=False,
     quantization_config=None,
     vllm_config_overrides=None,
     temperature=1.0,
@@ -225,21 +216,16 @@ def generate_reinforce(
     lr_use = lr_eff if lr_eff is not None else lr
     gc.collect()
     torch.cuda.empty_cache()
-    AcceleratorState._reset_state(True)
 
-    accelerator = accelerator_factory(use_deepspeed_optimizer, config)
-    if not use_deepspeed_optimizer and accelerator is not None:
-        accelerator.state.deepspeed_plugin.deepspeed_config.pop("optimizer", None)
+    dist_mode_factory(dist_mode)
 
-    if colocated:
+    if use_vllm:
         lora_config = None
-        # See ``tests/test_algorithms/test_llms/test_grpo.py:generate_grpo``
-        # for the full rationale. tl;dr both settings are required for
-        # parallel vLLM testing: ``kv_cache_memory_bytes`` short-circuits
-        # vLLM's profile-snapshot assertion, and ``gpu_memory_utilization``
-        # has to stay small (here 0.2 → ~2.9 GiB on the 14.58 GiB CI GPU) so
-        # the upfront ``free >= total * utilization`` check in
-        # ``vllm/v1/worker/gpu_worker.py:init_device`` passes when peer
+        # See ``tests/test_algorithms/test_llms/test_grpo.py:generate_grpo``.
+        # ``kv_cache_memory_bytes`` skips vLLM's profile-snapshot assertion,
+        # and ``gpu_memory_utilization`` stays small (here 0.2 → ~2.9 GiB on
+        # the 14.58 GiB CI GPU) so the ``free >= total * utilization`` check
+        # in ``vllm/v1/worker/gpu_worker.py:init_device`` passes when peer
         # workers have already claimed their share.
         vllm_config = VLLMConfig(
             gpu_memory_utilization=0.2,
@@ -300,17 +286,17 @@ def generate_reinforce(
         "pad_token": "<pad>",
         "device": "cuda" if torch.cuda.is_available() else "cpu",
         "lora_config": lora_config,
+        "fsdp_config": FSDPConfig() if dist_mode == "fsdp2" else None,
         "cosine_lr_schedule_config": (
             None
-            if accelerator is not None
+            if dist_mode is not None
             else CosineLRScheduleConfig(num_epochs=10, warmup_proportion=0.05)
         ),
-        "accelerator": accelerator,
         "vllm_config": vllm_config,
         "max_output_tokens": max_tokens,
         "max_model_len": max_tokens + 5,
         "micro_batch_size_per_gpu": micro_batch_size_per_gpu,
-        "use_memory_efficient_params": use_memory_efficient_params,
+        "offload_trainer_during_rollout": offload_trainer_during_rollout,
         "quantization_config": quantization_config,
         "temperature": temperature,
         # Pin so the unfused learn() path is exercised by default
@@ -445,8 +431,7 @@ class TestREINFORCEInit:
         )
         # The vLLM engine is mocked; the dummy actor is the trainer base.
         with pytest.warns(
-            UserWarning,
-            match="hf_generate_chunk_size is only used for HuggingFace generation and is ignored when colocated",
+            UserWarning, match="hf_generate_chunk_size.*ignored when colocated"
         ):
             rf = REINFORCE(
                 actor_network=actor,
@@ -593,12 +578,8 @@ class TestREINFORCEInit:
         rf = _cpu_llmreinforce()
         assert rf.turn_ratio_pooling == "sum"
 
-    def test_init_action_granularity_deprecated_warns_and_overrides(self):
-        """The legacy ``action_granularity`` kwarg warns and is carried over
-        into ``advantage_granularity``.
-        """
-        with pytest.warns(DeprecationWarning, match="action_granularity is deprecated"):
-            rf = _cpu_llmreinforce(action_granularity="turn")
+    def test_init_advantage_granularity_turn(self):
+        rf = _cpu_llmreinforce(advantage_granularity="turn")
         assert rf.advantage_granularity == "turn"
 
     @pytest.mark.parametrize("is_level", ["turn", "trajectory"])
@@ -671,7 +652,7 @@ class TestREINFORCEGetAction:
                 return_value=(mocked_ids, mocked_masks, None),
             ) as mock_generate,
         ):
-            token_ids, action_masks, _ = rf.get_action(prompts, training=False)
+            completion_ids, action_masks, _ = rf.get_action(prompts, training=False)
 
         mock_prepare.assert_called_once()
         mock_move.assert_called_once()
@@ -681,7 +662,7 @@ class TestREINFORCEGetAction:
         rf.llm.wake_up.assert_called_once()
         rf._prepare_vllm_for_training()
         rf.llm.sleep.assert_called_once()
-        assert token_ids == mocked_ids
+        assert completion_ids == mocked_ids
         assert action_masks == mocked_masks
         rf.clean_up()
 
@@ -696,22 +677,27 @@ class TestREINFORCEGetAction:
             for _ in range(3)
         ]
         for training in (True, False):
-            token_ids, action_masks, _ = rf.get_action(prompts, training=training)
-            assert_vllm_get_action_contract(
-                token_ids=token_ids,
-                action_masks=action_masks,
-                batch_size=len(prompts),
-                prompt_len=prompt_len,
-                pad_token_id=rf.pad_token_id,
-            )
+            completion_ids, action_masks, _ = rf.get_action(prompts, training=training)
+            assert len(completion_ids) == len(prompts)
+            assert len(action_masks) == len(prompts)
+            for row_ids, action_mask in zip(completion_ids, action_masks, strict=True):
+                assert row_ids.dim() == 2
+                assert action_mask.dim() == 2
+                assert row_ids.shape[1] > prompt_len
+                assert action_mask.shape[1] == row_ids.shape[1] - 1
         rf.clean_up()
 
     def test_llmreinforce_get_action_hf_path_handles_actor_without_parameters(self):
         rf = _cpu_llmreinforce(max_model_len=128, max_output_tokens=8)
 
+        real_actor = rf.actor
+
         class _NoParamModule:
             def parameters(self):
                 return iter(())
+
+            def __getattr__(self, name):
+                return getattr(real_actor, name)
 
         prompts = [
             {
@@ -720,11 +706,11 @@ class TestREINFORCEGetAction:
             }
         ]
 
-        with patch.object(rf, "_get_unwrapped_actor", return_value=_NoParamModule()):
-            token_ids, action_masks, _ = rf.get_action(prompts, training=True)
+        rf.actor = _NoParamModule()
+        completion_ids, action_masks, _ = rf.get_action(prompts, training=True)
 
         assert_vllm_get_action_contract(
-            token_ids=token_ids,
+            token_ids=completion_ids,
             action_masks=action_masks,
             batch_size=1,
             prompt_len=10,
@@ -859,15 +845,15 @@ class TestREINFORCELearn:
         rewards = torch.tensor([[0.5, -0.5]], dtype=torch.float32)
         rf.learn((completions, action_masks, rewards), turn_ids=turn_ids)
 
-    @pytest.mark.parametrize("colocated", [False, True])
-    def test_llmreinforce_learns_rollout(self, colocated):
-        """Multi-turn learn path updates actor adapters without vLLM/DeepSpeed."""
+    @pytest.mark.parametrize("use_vllm", [False, True])
+    def test_llmreinforce_learns_rollout(self, use_vllm):
+        """Multi-turn learn path updates actor adapters on a single device."""
         torch.manual_seed(0)
         rf = _cpu_llmreinforce(
             lr=0.05,
             update_epochs=2,
         )
-        if colocated:
+        if use_vllm:
             rf.colocated = True
             rf.vllm_config = VLLMConfig(
                 gpu_memory_utilization=0.2,
@@ -917,7 +903,7 @@ class TestREINFORCELearn:
         ):
             rf.learn((completions, action_masks, rewards), turn_ids=turn_ids)
         assert mock_prepare_vllm_for_training.call_count == 1
-        if colocated:
+        if use_vllm:
             rf.llm.sleep.assert_called_once()
         pre_learn_actor_state_dict = {
             name: param.clone().detach() for name, param in rf.actor.named_parameters()
@@ -930,7 +916,7 @@ class TestREINFORCELearn:
         ) as mock_prepare_vllm_for_training:
             metrics = rf.learn((completions, action_masks, rewards), turn_ids=turn_ids)
         assert mock_prepare_vllm_for_training.call_count == 1
-        for key in ("loss", "kl", "entropy"):
+        for key in ("loss", "kl", "pg_loss", "entropy"):
             assert key in metrics
             assert isinstance(metrics[key], float)
             assert torch.isfinite(torch.tensor(metrics[key]))
@@ -975,7 +961,7 @@ class TestREINFORCELearn:
         rf.learn((completions, masks, rewards), turn_ids=turn_ids)
 
     def test_llmreinforce_wrap_true_runs_learn(self):
-        """``wrap=True`` with no accelerator still calls :meth:`wrap_models`."""
+        """``wrap=True`` on a single device still calls :meth:`wrap_models`."""
         actor = create_dummy_actor(10, 8, 100, "cpu")
         lora = LoraConfig(
             r=4,
@@ -993,7 +979,6 @@ class TestREINFORCELearn:
             micro_batch_size_per_gpu=2,
             max_output_tokens=8,
             max_model_len=32,
-            accelerator=None,
             wrap=True,
             gradient_checkpointing=False,
             lr=0.05,
@@ -1107,14 +1092,16 @@ class TestREINFORCETest:
                 return None
 
         rf = _cpu_llmreinforce()
-        acc = MagicMock()
-        rf.accelerator = acc
+        rf.distributed = True
         completion = torch.ones(1, 6, dtype=torch.long)
-        with patch.object(
-            rf, "get_action", return_value=ActionResult([completion], None)
+        with (
+            patch.object(
+                rf, "get_action", return_value=ActionResult([completion], None)
+            ),
+            patch("agilerl.algorithms.core.base.barrier") as mock_barrier,
         ):
             rf.test(DummyRolloutEpisodeEnv(), loop=1)
-        acc.wait_for_everyone.assert_called()
+        mock_barrier.assert_called()
 
     def test_test_method_rollout_continues_when_not_done(self):
         """Cover prompt update when the episode spans turns."""
@@ -1553,8 +1540,9 @@ class TestREINFORCEVllmISCorrection:
         rf = _cpu_llmreinforce(
             importance_sampling_level=is_level, lr=0.05, update_epochs=1
         )
-        # CPU agents are not colocated; keep the flag on so learn() still
-        # applies the reweight path.
+        # use_vllm=False auto-disables the correction in __init__; force it on to
+        # exercise the capture/align/metrics/reweight path that the base class now
+        # shares with GRPO.
         rf.vllm_importance_sampling_correction = True
         rf.vllm_importance_sampling_cap = 2.0
         vocab, inp, mtok = 100, 10, 8

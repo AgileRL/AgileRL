@@ -3,9 +3,8 @@
 
 """Primitives shared by every class-level patch module.
 
-This sits below both :mod:`agilerl.utils.zero3_patches` and
-:mod:`agilerl.architectures` so the generic and per-family patches can share
-resolution and idempotence without importing each other.
+This sits below :mod:`agilerl.architectures` so the generic and per-family
+patches can share resolution and idempotence without importing each other.
 """
 
 from __future__ import annotations

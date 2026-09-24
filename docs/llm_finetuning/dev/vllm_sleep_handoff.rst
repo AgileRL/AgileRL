@@ -29,7 +29,7 @@ Each step
 
 **Rollout** (``_prepare_vllm_for_generation``):
 
-1. If ``use_memory_efficient_params``, move the trainer base to CPU so both
+1. If ``offload_trainer_during_rollout``, move the trainer base to CPU so both
    bases are never on the GPU together.
 2. ``wake_up()`` — vLLM restores its base from host RAM.
 3. ``_move_lora_to_vllm`` — sync the latest adapter (``add_lora``). The
@@ -39,8 +39,8 @@ Each step
 **Training** (``_prepare_vllm_for_training``):
 
 1. ``sleep(level=1)`` — vLLM parks its base and frees the GPU.
-2. ``_memory_efficient_params`` brings the trainer base onto the GPU for
-   the forward/backward, then parks it again. Off under DeepSpeed ZeRO-3,
+2. ``_offload_trainer_for_rollout`` brings the trainer base onto the GPU for
+   the forward/backward, then parks it again. Off under FSDP2 sharding,
    where params are already sharded.
 
 ``torch.cuda.memory_allocated()`` does not track vLLM's allocator. Use

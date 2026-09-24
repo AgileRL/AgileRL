@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 from types import MethodType
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from agilerl import HAS_LIGER_KERNEL, HAS_LLM_DEPENDENCIES
 
@@ -39,22 +39,20 @@ if HAS_LIGER_KERNEL or TYPE_CHECKING:
 
     HAS_LIGER = True
 else:
-    # Keep names resolvable when liger-kernel isn't installed; call sites
-    # guard on HAS_LIGER / modeling_nemotron_h before use.
     HAS_LIGER = False
     MODEL_TYPE_TO_APPLY_LIGER_FN: dict[str, Any] = {}
-    _patch_rms_norm_module = None  # type: ignore[assignment]
-    LigerRMSNorm = None  # type: ignore[assignment]
-    LigerReLUSquared = None  # type: ignore[assignment]
-    liger_rotary_pos_emb = None  # type: ignore[assignment]
-    LigerCrossEntropyLoss = None  # type: ignore[assignment]
-    lce_maybe_trainable_lm_head = None  # type: ignore[assignment]
-    unpack_cross_entropy_result = None  # type: ignore[assignment]
-    LigerCausalLMOutputWithPast = None  # type: ignore[assignment]
+    _patch_rms_norm_module: Any = None
+    LigerRMSNorm: Any = None
+    LigerReLUSquared: Any = None
+    liger_rotary_pos_emb: Any = None
+    LigerCrossEntropyLoss: Any = None
+    lce_maybe_trainable_lm_head: Any = None
+    unpack_cross_entropy_result: Any = None
+    LigerCausalLMOutputWithPast: Any = None
 
 
 def lce_forward(
-    self: Any,  # noqa: ANN401 -- bound as NemotronHForCausalLM.forward via MethodType
+    self: modeling_nemotron_h.NemotronHForCausalLM,
     input_ids: torch.LongTensor | None = None,
     attention_mask: torch.Tensor | None = None,
     position_ids: torch.LongTensor | None = None,
@@ -69,7 +67,7 @@ def lce_forward(
     logits_to_keep: int | torch.Tensor = 0,
     skip_logits: bool | None = None,
     **kwargs: Any,
-) -> tuple[Any, ...] | Any:  # noqa: ANN401 -- mirrors HF CausalLMOutputWithPast / tuple forms
+) -> tuple[Any, ...] | LigerCausalLMOutputWithPast:
     """Fused linear cross-entropy forward for NemotronHForCausalLM."""
     output_attentions = (
         output_attentions
@@ -151,18 +149,18 @@ def lce_forward(
         return output
 
     return LigerCausalLMOutputWithPast(
-        loss=loss,  # ty: ignore[invalid-argument-type]  # unpack/loss_function widen to Tensor|Any; Liger output expects FloatTensor|None
+        loss=cast("torch.FloatTensor | None", loss),
         logits=logits,
         past_key_values=outputs.past_key_values,
         hidden_states=outputs.hidden_states,
         attentions=outputs.attentions,
-        token_accuracy=token_accuracy,  # ty: ignore[invalid-argument-type]  # unpack widens to Tensor|None; Liger output expects FloatTensor|None
-        predicted_tokens=predicted_tokens,  # ty: ignore[invalid-argument-type]  # unpack widens to Tensor|None; Liger output expects LongTensor|None
+        token_accuracy=cast("torch.FloatTensor | None", token_accuracy),
+        predicted_tokens=cast("torch.LongTensor | None", predicted_tokens),
     )
 
 
 def _patch_relu2_mixer(
-    mixer: Any,  # noqa: ANN401 -- HF Nemotron-H MLP/MoE mixer walked via getattr
+    mixer: torch.nn.Module,
     block_type: str | None,
 ) -> None:
     """Set Liger ReLU² on MLP / MoE expert activations; skip Mamba mixers."""
@@ -183,7 +181,7 @@ def apply_liger_kernel_to_nemotron_h(
     rope: bool = True,
     relu_squared: bool = True,
     cross_entropy: bool = False,
-    fused_linear_cross_entropy: bool = True,
+    fused_linear_cross_entropy: bool = False,
     model: PreTrainedModel | None = None,
     **kwargs: Any,
 ) -> None:
@@ -197,7 +195,10 @@ def apply_liger_kernel_to_nemotron_h(
     :type relu_squared: bool
     :param cross_entropy: Use LigerCrossEntropyLoss (mutually exclusive with LCE).
     :type cross_entropy: bool
-    :param fused_linear_cross_entropy: Replace CausalLM forward with fused LCE.
+    :param fused_linear_cross_entropy: Replace CausalLM ``forward`` with fused LCE.
+        Defaults to ``False``: learn identity-patches ``lm_head`` and scores via
+        fused logprobs, and LCE's ``self.model(...)`` call makes the first FSDP
+        hook a nested unit so prefetch hits an empty comm context.
     :type fused_linear_cross_entropy: bool
     :param model: Optional loaded model for instance-level patches.
     :type model: PreTrainedModel | None
@@ -213,32 +214,36 @@ def apply_liger_kernel_to_nemotron_h(
         msg = "cross_entropy and fused_linear_cross_entropy cannot both be True."
         raise ValueError(msg)
 
+    nemotron_mod: Any = modeling_nemotron_h
     if rope:
-        modeling_nemotron_h.apply_rotary_pos_emb = liger_rotary_pos_emb
+        nemotron_mod.apply_rotary_pos_emb = liger_rotary_pos_emb
     if rms_norm:
-        modeling_nemotron_h.NemotronHRMSNorm = LigerRMSNorm  # ty: ignore[invalid-assignment]  # intentional Liger drop-in for HF NemotronHRMSNorm
+        nemotron_mod.NemotronHRMSNorm = LigerRMSNorm
     if relu_squared:
-        modeling_nemotron_h.ACT2FN["relu2"] = LigerReLUSquared
+        nemotron_mod.ACT2FN["relu2"] = LigerReLUSquared
     if cross_entropy:
-        modeling_nemotron_h.CrossEntropyLoss = LigerCrossEntropyLoss  # ty: ignore[unresolved-attribute]  # monkey-patched onto the HF module at apply time
+        nemotron_mod.CrossEntropyLoss = LigerCrossEntropyLoss
     if fused_linear_cross_entropy:
         if model is not None:
             model.forward = MethodType(lce_forward, model)
         else:
-            modeling_nemotron_h.NemotronHForCausalLM.forward = lce_forward
+            nemotron_mod.NemotronHForCausalLM.forward = lce_forward
 
     if model is not None:
         base_model = getattr(model, model.base_model_prefix, model)
         if rms_norm:
             _patch_rms_norm_module(base_model.norm_f)
-        for layer in base_model.layers:  # ty: ignore[not-iterable]  # Nemotron-H layers is a ModuleList at runtime
-            if rms_norm:
-                _patch_rms_norm_module(layer.norm)
-            if relu_squared:
-                _patch_relu2_mixer(
-                    layer.mixer,  # ty: ignore[unresolved-attribute]  # Nemotron-H block mixer; getattr(model) widens layer type
-                    getattr(layer, "block_type", None),
-                )
+        layers = cast("list[Any]", base_model.layers)
+        for layer in layers:
+            inner = list(getattr(layer, "blocks", ())) or [layer]
+            for block in inner:
+                if rms_norm:
+                    _patch_rms_norm_module(block.norm)
+                if relu_squared:
+                    _patch_relu2_mixer(
+                        block.mixer,
+                        getattr(block, "block_type", None),
+                    )
 
 
 def register_nemotron_h_liger() -> bool:
@@ -253,6 +258,7 @@ def register_nemotron_h_liger() -> bool:
         return False
     if REGISTERED["value"]:
         return True
-    MODEL_TYPE_TO_APPLY_LIGER_FN["nemotron_h"] = apply_liger_kernel_to_nemotron_h  # ty: ignore[invalid-assignment]  # extend Liger's closed apply-fn union with nemotron_h
+    apply_fns = cast("dict[str, Any]", MODEL_TYPE_TO_APPLY_LIGER_FN)
+    apply_fns["nemotron_h"] = apply_liger_kernel_to_nemotron_h
     REGISTERED["value"] = True
     return True

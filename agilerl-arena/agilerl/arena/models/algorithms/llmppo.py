@@ -81,7 +81,7 @@ class LLMPPOSpec(RolloutLLMSpec):
             "or the value at the turn's final token."
         ),
     )
-    use_memory_efficient_params: bool = Field(
+    offload_trainer_during_rollout: bool = Field(
         default=True,
         description=(
             "For colocated vLLM, offload the trainer's parameters while the "

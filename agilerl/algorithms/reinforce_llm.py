@@ -8,13 +8,9 @@ from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
 import torch
-from accelerate import Accelerator
 
 from agilerl import HAS_LIGER_KERNEL, HAS_LLM_DEPENDENCIES
 from agilerl.algorithms.core import ActionResult, LLMAlgorithm
-from agilerl.algorithms.core.advantage_granularity import (
-    resolve_batch_advantage_granularity,
-)
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
 
 if TYPE_CHECKING:
@@ -31,6 +27,7 @@ else:
     # tests can patch it. ``_reinforce_loss_liger`` guards against actual use.
     LigerFusedLinearPolicyLossFunction = None  # type: ignore[assignment]
     apply_fused_policy_loss = None  # type: ignore[assignment]
+from agilerl.distributed import FSDPConfig, aggregate_metrics_dict, resolve_device
 from agilerl.protocols import (
     PeftModelProtocol,
     PreTrainedModelProtocol,
@@ -47,16 +44,16 @@ from agilerl.utils.llm_utils import (
     REINFORCE_METRIC_NAMES,
     VLLM_IS_METRIC_NAMES,
     BitsAndBytesConfig,
-    aggregate_metrics_dict,
     attention_mask_from_padded_ids,
     build_completion_mask,
     clipped_is_surrogate,
+    hf_completion_lengths,
     hf_turn_generation_config,
     masked_mean,
     normalize_prompt_batch,
     pool_by_turns,
     prepare_prompt_hf_generate,
-    resolve_llm_device,
+    resolve_batch_advantage_granularity,
     validate_importance_sampling_level,
 )
 
@@ -121,10 +118,9 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
     :param micro_batch_size_per_gpu: Micro-batch size for gradient accumulation.
     :type micro_batch_size_per_gpu: int | None
     :param mini_batch_size: Per-rank trajectories covered by one optimizer
-        step; DeepSpeed's gradient_accumulation_steps is set to
-        ``mini_batch_size / micro_batch_size_per_gpu``. Defaults to None,
-        which resolves to ``micro_batch_size_per_gpu`` (one optimizer step
-        per micro-batch).
+        step. ``None`` uses ``batch_size / world_size``.
+        ``gradient_accumulation_steps`` is derived as
+        ``mini_batch_size / micro_batch_size_per_gpu``.
     :type mini_batch_size: int | None, optional
     :param max_output_tokens: Maximum new tokens per generation.
     :type max_output_tokens: int | None
@@ -135,26 +131,25 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
     :param hf_generate_chunk_size: Number of prompts per HuggingFace generation
         chunk. Ignored when colocated.
     :type hf_generate_chunk_size: int | None, optional
-    :param use_memory_efficient_params: For colocated vLLM, offload the trainer's
+    :param offload_trainer_during_rollout: For colocated vLLM, offload the trainer's
         own base to CPU during rollout (and bring it back for the training step)
         so the rollout engine and the trainer never both hold a base on the GPU.
         Defaults to True; inert without colocated vLLM, and disabled under
-        DeepSpeed ZeRO-3.
-    :type use_memory_efficient_params: bool
+        FSDP2 sharding.
+    :type offload_trainer_during_rollout: bool
     :param lora_config: LoRA adapter configuration.
     :type lora_config: LoraConfig | None
     :param cosine_lr_schedule_config: Cosine LR schedule configuration.
     :type cosine_lr_schedule_config: CosineLRScheduleConfig | None
-    :param accelerator: HuggingFace Accelerator for distributed training.
-    :type accelerator: Accelerator | None
-    :param device: Device to train on. Ignored when an accelerator is given (each rank
-        owns its own GPU); ``None`` auto-detects CUDA/MPS/CPU.
+    :param fsdp_config: FSDP2 sharding settings for distributed runs, defaults to None
+    :type fsdp_config: FSDPConfig | None, optional
+    :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str
     :param wrap: Wrap models for distributed training upon creation.
     :type wrap: bool
     :param clone: Whether this is a clone instantiation.
     :type clone: bool
-    :param vllm_config: Colocated vLLM configuration.
+    :param vllm_config: vLLM configuration.
     :type vllm_config: VLLMConfig | None
     :param seed: Random seed.
     :type seed: int
@@ -163,10 +158,6 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
         token-level advantages, and ``"auto"`` uses token-level only when all
         samples are single-turn.
     :type advantage_granularity: Literal["turn", "token", "auto"]
-    :param action_granularity: Deprecated alias for ``advantage_granularity``;
-        when set it overrides ``advantage_granularity`` and emits a
-        ``DeprecationWarning``.
-    :type action_granularity: str | None, optional
     :param importance_sampling_level: IS / ratio-pooling level for the clipped
         surrogate, orthogonal to ``advantage_granularity``. ``"token"`` (default)
         clips per token; ``"turn"`` pools the ratio per turn (requires
@@ -218,7 +209,7 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
         reference forwards.
     :type activation_offload: bool, optional
     :param vllm_importance_sampling_correction: When ``True`` (default) and
-        ``vllm_config`` is set, correct the rollout/trainer log-prob mismatch by
+        colocated, correct the rollout/trainer log-prob mismatch by
         weighting each training token by ``clamp(exp(trainer - sampling),
         max=vllm_importance_sampling_cap)``. Active only for training rollouts;
         inert on the HuggingFace path and at eval.
@@ -260,7 +251,7 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
         top_p: float = 1.0,
         top_k: int = 50,
         min_p: float = 0.0,
-        use_memory_efficient_params: bool = True,
+        offload_trainer_during_rollout: bool = True,
         use_separate_reference_adapter: bool = True,
         calc_position_embeddings: bool = True,
         micro_batch_size_per_gpu: int | None = None,
@@ -271,14 +262,13 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
         hf_generate_chunk_size: int | None = None,
         lora_config: LoraConfig | None = None,
         cosine_lr_schedule_config: CosineLRScheduleConfig | None = None,
-        accelerator: Accelerator | None = None,
+        fsdp_config: FSDPConfig | None = None,
         device: str | torch.device | None = None,
         wrap: bool = True,
         clone: bool = False,
         vllm_config: VLLMConfig | None = None,
         seed: int = 42,
         advantage_granularity: Literal["turn", "token", "auto"] = "auto",
-        action_granularity: Literal["turn", "token", "auto"] | None = None,
         importance_sampling_level: Literal["token", "turn", "trajectory"] = "token",
         turn_ratio_pooling: Literal["sum", "mean"] = "sum",
         gradient_checkpointing: bool = True,
@@ -294,7 +284,7 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
         vllm_importance_sampling_cap: float = 2.0,
     ) -> None:
 
-        resolved_device = resolve_llm_device(accelerator, device)
+        resolved_device = resolve_device(device)
         super().__init__(
             index=index,
             batch_size=batch_size,
@@ -307,7 +297,7 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
             pad_token=pad_token,
             use_value_head=False,
             use_liger_loss=use_liger_loss,
-            use_memory_efficient_params=use_memory_efficient_params,
+            offload_trainer_during_rollout=offload_trainer_during_rollout,
             lora_config=lora_config,
             use_separate_reference_adapter=use_separate_reference_adapter,
             vllm_config=vllm_config,
@@ -320,7 +310,7 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
             hp_config=hp_config,
             wrap=wrap,
             device=resolved_device,
-            accelerator=accelerator,
+            fsdp_config=fsdp_config,
             name="LLMREINFORCE",
             gradient_checkpointing=gradient_checkpointing,
             torch_compiler=torch_compiler,
@@ -344,7 +334,7 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
         self.top_p = top_p
         self.top_k = top_k
         self.min_p = min_p
-        self._setup_advantage_options(advantage_granularity, action_granularity, gamma)
+        self._setup_advantage_options(advantage_granularity, gamma)
         self._setup_objective(importance_sampling_level, turn_ratio_pooling)
         self._setup_generation(
             max_output_tokens, min_output_tokens, max_model_len, hf_generate_chunk_size
@@ -352,7 +342,7 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
         self._setup_actors(actor_network, clone=clone)
 
         self.register_network_group(NetworkGroup(eval_network=self.actor, policy=True))
-        if self.wrap:
+        if not clone:
             self.wrap_models()
 
         for m in (
@@ -394,12 +384,10 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
         with self.select_adapter("actor"):
             self.actor.eval()
             if not self.colocated:
-                actor_module = self._get_unwrapped_actor()
-                try:
-                    actor_device = next(actor_module.parameters()).device
-                except StopIteration:
-                    actor_device = torch.device(self.device)
-                with torch.inference_mode(), self._amp_ctx():
+                actor_device = self.shard_runtime.actor_compute_device(
+                    self.actor, torch.device(self.device)
+                )
+                with torch.no_grad(), self._amp_ctx():
                     token_ids_list = []
                     completion_masks = []
 
@@ -413,13 +401,14 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
                             prompt = prepare_prompt_hf_generate(prompt, actor_device)
                             input_ids = prompt["input_ids"]
                             attention_mask = prompt["attention_mask"]
+                            prompt_len = int(input_ids.shape[-1])
                             token_ids = self.actor.generate(
                                 input_ids=input_ids,
                                 attention_mask=attention_mask,
                                 generation_config=hf_turn_generation_config(
                                     self.generation_config,
                                     max_model_len=self.max_model_len,
-                                    prompt_length=int(input_ids.shape[-1]),
+                                    prompt_length=prompt_len,
                                     max_output_tokens=self.max_output_tokens,
                                 ),
                             )
@@ -427,8 +416,11 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
                             completion_masks.append(
                                 build_completion_mask(
                                     token_ids,
-                                    int(input_ids.shape[-1]),
+                                    prompt_len,
                                     self.pad_token_id,
+                                    completion_len=hf_completion_lengths(
+                                        token_ids, prompt_len, self.pad_token_id
+                                    ),
                                 )
                             )
             else:
@@ -438,7 +430,7 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
                     completion_masks,
                     sampling_logps,
                 ) = self._generate_with_vllm_colocate(
-                    # ReasoningPrompts is a TypedDict, i.e. a plain dict at
+                    # RolloutPrompt is a TypedDict, i.e. a plain dict at
                     # runtime; the base helper takes untyped prompt dicts.
                     prompts,
                     1,
@@ -478,7 +470,7 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
         """
         self._prepare_vllm_for_training()
 
-        with self.memory_efficient_params_context():
+        with self.trainer_offload_context():
             token_ids, action_masks, rewards = stack_and_pad_experiences(
                 *experiences,
                 padding_values=[self.pad_token_id, False, None],
@@ -698,7 +690,6 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
         token_ids_list = experiences[0]
         completion_length = float(np.mean([c.shape[-1] for c in token_ids_list]))
         agg = aggregate_metrics_dict(
-            self.accelerator,
             {
                 "loss": averaged["loss"],
                 "kl": averaged["kl"],
@@ -749,18 +740,10 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
     def _setup_advantage_options(
         self,
         advantage_granularity: str,
-        action_granularity: str | None,
         gamma: float,
     ) -> None:
         """Validate and store the ReBN advantage options."""
         valid_action_granularities = {"turn", "token", "auto"}
-        if action_granularity is not None:
-            warnings.warn(
-                "action_granularity is deprecated; use advantage_granularity.",
-                DeprecationWarning,
-                stacklevel=3,
-            )
-            advantage_granularity = action_granularity
         if advantage_granularity not in valid_action_granularities:
             msg = (
                 "advantage_granularity must be one of "
@@ -932,11 +915,8 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
 
         # Identity-patch lm_head so the actor forward outputs the last hidden
         # state (B, T, H) directly instead of computing the full (B, T, V)
-        # logits only to discard them. lm_head_weight is passed separately to
-        # LigerFusedLinearPolicyLossFunction which handles the matmul and its grad.
-        lm_head = self._get_lm_head()
-        lm_head_weight = lm_head.weight
-        lm_head_bias = lm_head.bias
+        # logits only to discard them. The gathered lm_head weight is passed
+        # separately to the fused kernel, which handles the matmul and its grad.
 
         attention_mask = attention_mask_from_padded_ids(
             batch_ids, self.pad_token_id
@@ -964,11 +944,11 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
         # hidden[:, :-1]. Token level token-flattens the hidden states so the
         # fused kernel chunks tokens (bounded); turn/sequence keep the batch
         # path. beta=0: KL handled upstream via the ReBN advantage.
-        with self._liger_head_gather():
+        with self._liger_head_gather() as (head_w, head_b):
             loss, aux = apply_fused_policy_loss(
                 policy_hidden[:, :-1],
-                lm_head_weight,
-                lm_head_bias,
+                head_w,
+                head_b,
                 target_ids,
                 mask,
                 advantages,
@@ -983,7 +963,7 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
                 full_turn_mask=full_turn_mask,
                 max_turns=max_turns,
                 token_chunk_size=self._resolve_fused_chunk_rows(
-                    getattr(lm_head_weight, "ds_shape", lm_head_weight.shape)[0],
+                    head_w.shape[0],
                     self.chunk_rows,
                 ),
                 turn_log_ratio_reduction=self.turn_ratio_pooling,

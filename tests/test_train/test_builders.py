@@ -193,8 +193,6 @@ def test_arena_only_fields_are_not_forwarded_to_the_constructor():
         group_size=4,
         attn_implementation="sdpa",
         quantization="nf4",
-        zero_stage=2,
-        deepspeed={"train_batch_size": 1},
         vllm_engine_args={"trust_remote_code": True},
         pretrained_model_name_or_path="Qwen/Qwen2.5-0.5B-Instruct",
     )
@@ -204,13 +202,9 @@ def test_arena_only_fields_are_not_forwarded_to_the_constructor():
 
     assert kwargs["attn_implementation"] == "sdpa"
     assert kwargs["quantization"] == "nf4"
-    assert kwargs["zero_stage"] == 2
-    assert kwargs["deepspeed"] == {"train_batch_size": 1}
     assert kwargs["vllm_engine_args"] == {"trust_remote_code": True}
     assert "attn_implementation" not in filtered
     assert "quantization" not in filtered
-    assert "zero_stage" not in filtered
-    assert "deepspeed" not in filtered
     assert "vllm_engine_args" not in filtered
     assert filtered["group_size"] == 4
 
@@ -384,3 +378,27 @@ class TestLLMBuildGuards:
 
         assert built["index"] == 0
         assert built["device"] == "cpu"
+
+    def test_fsdp_spec_reaches_the_constructor_as_fsdp_config(self, monkeypatch):
+        from agilerl.distributed import FSDPConfig
+
+        spec = GRPOSpec(
+            group_size=2,
+            pretrained_model_name_or_path="stub/model",
+            fsdp=True,
+        )
+        built = _build_llm_with_dummy_algo(spec, monkeypatch)
+
+        assert built["fsdp_config"] == FSDPConfig()
+
+    def test_distributed_splits_batch_size_per_rank(self, monkeypatch):
+        monkeypatch.setattr(llm_builder, "is_distributed", lambda: True)
+        monkeypatch.setattr(llm_builder, "get_world_size", lambda: 2)
+        spec = GRPOSpec(
+            group_size=2,
+            pretrained_model_name_or_path="stub/model",
+            batch_size=8,
+        )
+        built = _build_llm_with_dummy_algo(spec, monkeypatch)
+
+        assert built["micro_batch_size_per_gpu"] == 4

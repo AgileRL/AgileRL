@@ -147,6 +147,84 @@ class TestApplyLigerKernelToNemotronH:
         assert not hasattr(mamba_mixer, "act_fn")
         assert len(relu_calls) == 3
 
+    def test_applies_instance_patches_inside_grouped_layer(self, monkeypatch) -> None:
+        patched_norms: list = []
+
+        def fake_patch_rms_norm(module, **kwargs) -> None:
+            patched_norms.append(module)
+
+        monkeypatch.setattr(liger_nemotron_h, "HAS_LIGER", True)
+        monkeypatch.setattr(
+            liger_nemotron_h,
+            "LigerRMSNorm",
+            MagicMock(name="LigerRMSNorm"),
+        )
+        monkeypatch.setattr(liger_nemotron_h, "LigerReLUSquared", MagicMock())
+        monkeypatch.setattr(liger_nemotron_h, "liger_rotary_pos_emb", MagicMock())
+        monkeypatch.setattr(
+            liger_nemotron_h,
+            "_patch_rms_norm_module",
+            fake_patch_rms_norm,
+        )
+        monkeypatch.setattr(
+            liger_nemotron_h,
+            "modeling_nemotron_h",
+            SimpleNamespace(
+                ACT2FN={"relu2": object()},
+                NemotronHRMSNorm=object(),
+                apply_rotary_pos_emb=object(),
+                NemotronHForCausalLM=SimpleNamespace(forward=object()),
+            ),
+        )
+
+        inner = SimpleNamespace(
+            norm=object(), block_type="mlp", mixer=SimpleNamespace()
+        )
+        group = SimpleNamespace(blocks=[inner])
+        base = SimpleNamespace(norm_f=object(), layers=[group])
+        model = SimpleNamespace(
+            base_model_prefix="model",
+            model=base,
+            forward=object(),
+        )
+
+        liger_nemotron_h.apply_liger_kernel_to_nemotron_h(rms_norm=True, model=model)
+
+        assert patched_norms == [base.norm_f, inner.norm]
+
+    def test_default_does_not_replace_causal_lm_forward(self, monkeypatch) -> None:
+        monkeypatch.setattr(liger_nemotron_h, "HAS_LIGER", True)
+        monkeypatch.setattr(liger_nemotron_h, "LigerRMSNorm", MagicMock())
+        monkeypatch.setattr(liger_nemotron_h, "LigerReLUSquared", MagicMock())
+        monkeypatch.setattr(liger_nemotron_h, "liger_rotary_pos_emb", MagicMock())
+        monkeypatch.setattr(
+            liger_nemotron_h,
+            "_patch_rms_norm_module",
+            MagicMock(),
+        )
+
+        original_instance_forward = object()
+        original_class_forward = object()
+        causal_lm = SimpleNamespace(forward=original_class_forward)
+        modeling = SimpleNamespace(
+            ACT2FN={"relu2": object()},
+            NemotronHRMSNorm=object(),
+            apply_rotary_pos_emb=object(),
+            NemotronHForCausalLM=causal_lm,
+        )
+        monkeypatch.setattr(liger_nemotron_h, "modeling_nemotron_h", modeling)
+        model = SimpleNamespace(
+            base_model_prefix="model",
+            model=SimpleNamespace(norm_f=object(), layers=[]),
+            forward=original_instance_forward,
+        )
+
+        liger_nemotron_h.apply_liger_kernel_to_nemotron_h(model=model)
+
+        assert model.forward is original_instance_forward
+        assert causal_lm.forward is original_class_forward
+        assert causal_lm.forward is not liger_nemotron_h.lce_forward
+
     def test_class_level_lce_when_model_is_none(self, monkeypatch) -> None:
         monkeypatch.setattr(liger_nemotron_h, "HAS_LIGER", True)
         monkeypatch.setattr(liger_nemotron_h, "LigerRMSNorm", MagicMock())

@@ -14,19 +14,28 @@ import re
 import shutil
 import textwrap
 import warnings
-from collections.abc import Callable, Generator, Iterable, Mapping
-from contextlib import contextmanager
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, TypeGuard, TypeVar
+from typing import TYPE_CHECKING, Any, TypeGuard, TypeVar, cast
 
-import numpy as np
-import numpy.typing as npt
 import torch
-from accelerate import Accelerator
 from torch import nn
+from torch.distributed.tensor import DTensor, distribute_tensor
+from torch.optim import AdamW
+from torch.optim.lr_scheduler import SequentialLR
 
-from agilerl import HAS_DEEPSPEED, HAS_LLM_DEPENDENCIES
-from agilerl.architectures import family_runtime
+from agilerl import HAS_LLM_DEPENDENCIES
+from agilerl.architectures import (
+    family_runtime,
+    install_family_patches,
+    pretrained_model_type,
+)
+from agilerl.distributed.fsdp import CPUOffloadOptimizer
+from agilerl.distributed.process import (
+    allreduce_minmax_int,
+    barrier,
+    resolve_device,
+)
 from agilerl.protocols import GenerationConfigProtocol
 from agilerl.typing import (
     JSONValue,
@@ -35,9 +44,12 @@ from agilerl.typing import (
     RolloutPrompt,
     SFTPrompts,
 )
+from agilerl.utils.algo_utils import (
+    create_warmup_cosine_scheduler,
+    stack_and_pad_experiences,
+)
 
 if TYPE_CHECKING:
-    from accelerate.utils import DeepSpeedPlugin
     from peft import LoraConfig, PeftModel
     from torch.nn.attention.flex_attention import BlockMask
     from transformers.tokenization_utils_base import (
@@ -46,7 +58,8 @@ if TYPE_CHECKING:
     )
 
     from agilerl.algorithms.core.base import LLMAlgorithm
-    from agilerl.utils.algo_utils import VLLMConfig
+    from agilerl.algorithms.core.optimizer_wrapper import OptimizerWrapper
+    from agilerl.utils.algo_utils import CosineLRScheduleConfig, VLLMConfig
 else:
     PreTrainedTokenizerBase = object
 
@@ -56,7 +69,16 @@ GenConfigT = TypeVar("GenConfigT", bound=GenerationConfigProtocol)
 
 if HAS_LLM_DEPENDENCIES:
     from datasets import Dataset
-    from transformers import AutoModelForCausalLM, BitsAndBytesConfig
+    from peft import get_peft_model_state_dict
+    from peft.tuners.lora.layer import ParamWrapper
+    from safetensors.torch import load_file as safe_load_file
+    from safetensors.torch import save_file
+    from transformers import (
+        AutoConfig,
+        AutoModelForCausalLM,
+        BitsAndBytesConfig,
+        GenerationConfig,
+    )
     from transformers.modeling_utils import PreTrainedModel
 
     from agilerl.utils.ppo_value_head import AutoModelForCausalLMWithValueHead
@@ -68,13 +90,10 @@ else:
     AutoModelForCausalLM: Any = None
     AutoModelForCausalLMWithValueHead: Any = None
     BitsAndBytesConfig: Any = None
-
-# Sentinel when DeepSpeed is absent; overwritten by the real enum otherwise.
-ZeroParamStatus = None
-if HAS_DEEPSPEED:
-    from deepspeed.runtime.zero.partition_parameters import ZeroParamStatus
-
-DEPRECATED_LLM_ENV_NAMES = frozenset(("apply_chat_template",))
+    ParamWrapper: Any = None
+    get_peft_model_state_dict: Any = None
+    safe_load_file: Any = None
+    save_file: Any = None
 
 # Every LLM RL learn (GRPO/PPO/REINFORCE) reports these.
 LLM_RL_COMMON_METRIC_NAMES = (
@@ -84,7 +103,7 @@ LLM_RL_COMMON_METRIC_NAMES = (
 )
 
 # GRPO-only per-learn diagnostics: update-averaged KL and clip fraction plus
-# advantage stats, the end-of-learn snapshot, and averaged grad norms.
+# advantage stats, update-loop policy diagnostics, and averaged grad norms.
 GRPO_METRIC_NAMES = (
     "kl",  # update-averaged K3 vs reference (NaN on the fused path at beta=0)
     "clipfrac",  # binding-clip fraction (upper-only for CISPO, like the kernel)
@@ -92,8 +111,8 @@ GRPO_METRIC_NAMES = (
     "adv_min",  # min post-processed advantage
     "adv_max",  # max post-processed advantage
     "adv_zero_frac",  # samples with no contrastive signal
-    "kl_ref",  # end-of-learn K3 vs reference
-    "kl_old",  # end-of-learn K3 vs rollout policy
+    "kl_ref",  # K3 vs reference over the update loop
+    "kl_old",  # K3 vs rollout policy over the update loop
     "is_ratio_mean",  # mean pooled importance ratio
     "is_ratio_p05",  # 5th percentile pooled importance ratio
     "is_ratio_p50",  # median pooled importance ratio
@@ -142,7 +161,7 @@ BNB_QUANT_PRESETS = (
 
 # Gemma 4 wraps projections in *ClippableLinear; PEFT must target the inner ``.linear``
 # submodule via regex (see https://github.com/huggingface/peft/issues/3129).
-_CLIPPABLE_LINEAR_WRAPPER_SUFFIX = "ClippableLinear"
+CLIPPABLE_LINEAR_WRAPPER_SUFFIX = "ClippableLinear"
 
 
 def _as_optional_int(value: object | None) -> int | None:
@@ -188,7 +207,6 @@ def _coerce_distinct_pad_id(pad_id: object | None, eos_id: object | None) -> int
 
 def resolve_pad_token_id(
     tokenizer: PreTrainedTokenizerBase,
-    *,
     model_config: object | None = None,
     generation_config: object | None = None,
 ) -> tuple[int, str]:
@@ -293,42 +311,14 @@ def load_pad_token_configs(
     model_config: object | None = None
     generation_config: object | None = None
     try:
-        from transformers import AutoConfig
-
         model_config = AutoConfig.from_pretrained(model_name_or_path)
     except Exception:
         model_config = None
     try:
-        from transformers import GenerationConfig
-
         generation_config = GenerationConfig.from_pretrained(model_name_or_path)
     except Exception:
         generation_config = None
     return model_config, generation_config
-
-
-def __getattr__(name: str) -> Any:  # noqa: ANN401 -- lazy module re-export resolves attributes dynamically
-    """Lazy re-exports from ``llm_envs`` with a deprecation warning."""
-    if name in DEPRECATED_LLM_ENV_NAMES:
-        warnings.warn(
-            (
-                f"Importing {name} from agilerl.utils.llm_utils is deprecated; "
-                "it has moved to agilerl.llm_envs. Import from "
-                "agilerl.llm_envs instead; importing from "
-                "agilerl.utils.llm_utils will be removed in a future release."
-            ),
-            FutureWarning,
-            stacklevel=2,
-        )
-        import agilerl.llm_envs as _llm_envs
-
-        return getattr(_llm_envs, name)
-    msg = f"module {__name__!r} has no attribute {name!r}"
-    raise AttributeError(msg)
-
-
-def __dir__() -> list[str]:
-    return sorted(set(globals()) | set(DEPRECATED_LLM_ENV_NAMES))
 
 
 def generation_tokens_for_turn(
@@ -357,7 +347,6 @@ def generation_tokens_for_turn(
 
 def hf_turn_generation_config(
     generation_config: GenConfigT,
-    *,
     max_model_len: int,
     prompt_length: int,
     max_output_tokens: int | None,
@@ -387,61 +376,95 @@ def hf_turn_generation_config(
     return turn_config
 
 
-def gather_tensor(
-    tensor: torch.Tensor | npt.NDArray | float,
-    accelerator: Accelerator,
-) -> torch.Tensor:
-    """Gather tensors from gpus.
+def is_rollout_prompt(obs: Mapping[str, object]) -> TypeGuard[RolloutPrompt]:
+    """Check whether a mapping is a tokenized rollout prompt.
 
-    :param tensor: Tensor (or array/scalar convertible to one) to gather
-    :type tensor: torch.Tensor | npt.NDArray | float
-    :param accelerator: Accelerator object
-    :type accelerator: accelerate.Accelerator
-    :return: Stacked tensors
-    :rtype: torch.Tensor
+    :param obs: A prompt mapping returned by a rollout env.
+    :type obs: Mapping[str, object]
+    :return: ``True`` when the mapping carries prompt tokens.
+    :rtype: TypeGuard[RolloutPrompt]
     """
-    if not isinstance(tensor, torch.Tensor):
-        tensor = torch.tensor(tensor, device=accelerator.device)
-    tensor = tensor.to(accelerator.device)
-    return accelerator.gather(tensor)
+    return isinstance(obs.get("input_ids"), torch.Tensor)
+
+
+def _split_prompt_value(value: object, batch_size: int) -> Sequence[object]:
+    """Split a batched prompt value per sample; repeat unbatched values."""
+    if (
+        isinstance(value, torch.Tensor)
+        and value.dim() > 0
+        and value.shape[0] == batch_size
+    ):
+        return value.unbind(0) if value.dim() == 1 else value.split(1, dim=0)
+    if isinstance(value, list) and len(value) == batch_size:
+        return value
+    return [value] * batch_size
+
+
+def normalize_prompt_batch(
+    prompts: RolloutPrompt | list[RolloutPrompt],
+) -> list[RolloutPrompt]:
+    """Normalize reasoning prompts into a list-of-dicts per sample.
+
+    Supports list-of-dicts and stacked dict formats where tensor/list
+    values are batched on dimension 0.
+    :param prompts: The prompts to normalize.
+    :type prompts: RolloutPrompt | list[RolloutPrompt]
+    :return: The normalized prompts.
+    :rtype: list[RolloutPrompt]
+    """
+    if isinstance(prompts, list):
+        return prompts
+
+    input_ids = prompts["input_ids"]
+    if not isinstance(input_ids, torch.Tensor) or input_ids.dim() == 1:
+        return [prompts]
+
+    batch_size = int(input_ids.shape[0])
+    if batch_size == 0:
+        return []
+
+    # Inspect each key once and write it into every output dict in one pass.
+    # Keys not declared on ``RolloutPrompt`` (caller-supplied metadata) are
+    # copied through unchanged, which a key-by-key typed construction can't do.
+    samples: list[dict[str, object]] = [{} for _ in range(batch_size)]
+    for key, value in prompts.items():
+        items = _split_prompt_value(value, batch_size)
+        for sample, item in zip(samples, items, strict=True):
+            sample[key] = item
+    # Open dicts preserve undeclared metadata; the closed TypedDict return can't
+    # name those keys, and a TypeGuard pass would only add a Python loop.
+    return cast("list[RolloutPrompt]", samples)
 
 
 def needs_cross_rank_seq_padding(algo: object, *, world_size: int) -> bool:
     """Return whether ranks must sync completion seq lengths before ``learn()``.
 
     Multi-rank Liger token-level losses chunk over ``B * (T - 1)`` and issue one
-    NCCL allreduce per chunk (DAPO/CISPO normaliser). ZeRO-3 parameter gathers
-    also require identical per-rank ``T`` so every rank issues the same NCCL
-    collectives. Divergent per-rank ``T`` after local ``stack_and_pad`` therefore
-    deadlocks.
+    NCCL allreduce per chunk (DAPO/CISPO normaliser). FSDP2 full-shard (and any
+    collective-heavy DP path) also requires identical per-rank ``T`` so every
+    rank issues the same NCCL collectives.
+
+    :param algo: LLM algorithm about to call ``learn``.
+    :type algo: object
+    :param world_size: Number of data-parallel ranks.
+    :type world_size: int
+    :return: ``True`` when completion lengths must match across ranks.
+    :rtype: bool
     """
     if world_size <= 1:
         return False
-    zero_stage = getattr(algo, "zero_stage", 0)
-    if zero_stage == 3 or zero_stage == "3":
+    if getattr(algo, "fsdp_config", None) is not None:
+        return True
+    if getattr(algo, "distributed", False):
         return True
     if not getattr(algo, "use_liger_loss", False):
         return False
     return getattr(algo, "importance_sampling_level", "token") == "token"
 
 
-def allreduce_minmax_int(value: int, accelerator: Accelerator) -> tuple[int, int]:
-    """Return ``(min, max)`` of ``value`` across Accelerate ranks.
-
-    Uses :meth:`Accelerator.gather` so the reduction participates in the same
-    process-group bookkeeping as the rest of the Accelerate/DeepSpeed run
-    (plain ``torch.distributed.all_reduce`` on the default group is easy to
-    desync from DeepSpeed's communicator set).
-    """
-    t = torch.tensor([int(value)], device=accelerator.device, dtype=torch.long)
-    gathered = accelerator.gather(t)
-    return int(gathered.min().item()), int(gathered.max().item())
-
-
 def pad_completion_batch_to_seq_len(
-    token_ids: torch.Tensor,
+    completion_ids: torch.Tensor,
     action_masks: torch.Tensor,
-    *,
     target_seq_len: int,
     pad_token_id: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -449,31 +472,43 @@ def pad_completion_batch_to_seq_len(
 
     Pad positions use ``pad_token_id`` and ``False`` so they contribute nothing
     to the masked CISPO/Liger objective.
+
+    :param completion_ids: ``(B, T)`` token ids.
+    :type completion_ids: torch.Tensor
+    :param action_masks: ``(B, T - 1)`` action masks.
+    :type action_masks: torch.Tensor
+    :param target_seq_len: Sequence length to pad ``completion_ids`` to.
+    :type target_seq_len: int
+    :param pad_token_id: Token id written into padded positions.
+    :type pad_token_id: int
+    :return: Padded ``(completion_ids, action_masks)``.
+    :rtype: tuple[torch.Tensor, torch.Tensor]
     """
     required_dims = 2
-    if token_ids.dim() != required_dims:
-        msg = f"token_ids must be (B, T), got shape {tuple(token_ids.shape)}"
+    if completion_ids.dim() != required_dims:
+        msg = f"completion_ids must be (B, T), got shape {tuple(completion_ids.shape)}"
         raise ValueError(msg)
     if action_masks.dim() != required_dims:
         msg = f"action_masks must be (B, T-1), got shape {tuple(action_masks.shape)}"
         raise ValueError(msg)
 
-    batch, seq_len = token_ids.shape
+    batch, seq_len = completion_ids.shape
     mask_len = action_masks.shape[1]
     if mask_len != seq_len - 1:
         msg = (
-            f"action_masks length ({mask_len}) must be token_ids length ({seq_len}) - 1"
+            f"action_masks length ({mask_len}) must be completion_ids length "
+            f"({seq_len}) - 1"
         )
         raise ValueError(msg)
     if target_seq_len < seq_len:
         msg = f"target_seq_len ({target_seq_len}) must be >= local seq_len ({seq_len})"
         raise ValueError(msg)
     if target_seq_len == seq_len:
-        return token_ids, action_masks
+        return completion_ids, action_masks
 
     pad_t = target_seq_len - seq_len
-    token_ids = torch.nn.functional.pad(
-        token_ids,
+    completion_ids = torch.nn.functional.pad(
+        completion_ids,
         (0, pad_t),
         value=pad_token_id,
     )
@@ -482,9 +517,9 @@ def pad_completion_batch_to_seq_len(
         (0, pad_t),
         value=False,
     )
-    if token_ids.shape != (batch, target_seq_len):
+    if completion_ids.shape != (batch, target_seq_len):
         msg = (
-            f"padded completions shape {tuple(token_ids.shape)} != "
+            f"padded completions shape {tuple(completion_ids.shape)} != "
             f"({batch}, {target_seq_len})"
         )
         raise RuntimeError(msg)
@@ -494,7 +529,7 @@ def pad_completion_batch_to_seq_len(
             f"({batch}, {target_seq_len - 1})"
         )
         raise RuntimeError(msg)
-    return token_ids, action_masks
+    return completion_ids, action_masks
 
 
 def _local_batch_and_seq_len(
@@ -515,28 +550,37 @@ def _local_batch_and_seq_len(
 
 
 def align_completion_batch_shapes_across_ranks(
-    completion_ids: Any,  # noqa: ANN401 -- cross-rank batch of variable-length sequences; element type varies by paradigm
-    action_masks: Any,  # noqa: ANN401 -- see completion_ids
-    rewards: Any,  # noqa: ANN401 -- see completion_ids
-    *,
+    completion_ids: list[torch.Tensor] | torch.Tensor,
+    action_masks: list[torch.Tensor] | torch.Tensor,
+    rewards: list[torch.Tensor] | torch.Tensor,
     pad_token_id: int,
-    accelerator: Accelerator,
     minmax_fn: Callable[[int], tuple[int, int]] | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Sync ``B``/``T`` across ranks before heavy local pad/stack work.
 
     Collective metadata sync happens first; pad/stack follows. A DP barrier runs
-    after pad so no rank enters ZeRO ``learn`` collectives while peers are still
-    padding. Call immediately before ``learn()`` when
+    after pad so no rank enters sharded ``learn`` collectives while peers are
+    still padding. Call immediately before ``learn()`` when
     :func:`needs_cross_rank_seq_padding` is true. Shorter ranks are right-padded
     to the global max ``T`` so Liger token-level chunk collectives stay in
     lockstep.
-    """
-    # Lazy import avoids a circular dependency with algo_utils -> llm_utils.
-    from agilerl.utils.algo_utils import stack_and_pad_experiences
 
+    :param completion_ids: Per-sample or stacked token ids.
+    :type completion_ids: list[torch.Tensor] | torch.Tensor
+    :param action_masks: Per-sample or stacked action masks.
+    :type action_masks: list[torch.Tensor] | torch.Tensor
+    :param rewards: Per-sample or stacked rewards.
+    :type rewards: list[torch.Tensor] | torch.Tensor
+    :param pad_token_id: Token id written into padded positions.
+    :type pad_token_id: int
+    :param minmax_fn: Cross-rank ``(min, max)`` reduction of an int; defaults to
+        :func:`agilerl.distributed.allreduce_minmax_int`.
+    :type minmax_fn: Callable[[int], tuple[int, int]] | None
+    :return: Stacked ``(completion_ids, action_masks, rewards)`` with the global ``T``.
+    :rtype: tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+    """
     local_b, local_t = _local_batch_and_seq_len(completion_ids)
-    reduce_fn = minmax_fn or (lambda value: allreduce_minmax_int(value, accelerator))
+    reduce_fn = minmax_fn or allreduce_minmax_int
 
     min_b, max_b = reduce_fn(local_b)
     if min_b != max_b:
@@ -569,216 +613,172 @@ def align_completion_batch_shapes_across_ranks(
         )
         raise RuntimeError(msg)
 
-    accelerator.wait_for_everyone()
+    barrier()
     return completion_ids, action_masks, rewards
 
 
-def aggregate_metrics_across_gpus(
-    accelerator: Accelerator | None,
-    metric_tensor: torch.Tensor | npt.NDArray | float,
-) -> float:
-    """Aggregate gathered tensors.
+def get_lora_named_params(model: nn.Module) -> list[tuple[str, torch.Tensor]]:
+    """Return ``(name, param)`` adapter pairs for name-keyed gathers/exports.
 
-    :param accelerator: Accelerator object
-    :type accelerator: accelerate.Accelerator | None
-    :param metric_tensor: Metrics
-    :type metric_tensor: torch.Tensor | npt.NDArray | float
-    :return: Mean metric
-    :rtype: float
-    """
-    if accelerator is None:
-        if isinstance(metric_tensor, torch.Tensor):
-            return metric_tensor.float().mean().item()
-        return float(metric_tensor)
-    all_metrics = gather_tensor(metric_tensor, accelerator)
-    return all_metrics.mean().item()
+    Includes LoRA A/B, DoRA magnitude (``lora`` in the name), and PEFT
+    ``modules_to_save`` copies written into the same adapter checkpoint.
 
-
-def safe_aggregate_metrics(
-    accelerator: Accelerator | None,
-    metrics: torch.Tensor | npt.NDArray | float,
-) -> float:
-    """Aggregate metrics generically, handling both when an accelerator is being used and when it isn't.
-
-    :param accelerator: Accelerator object
-    :type accelerator: Accelerator | None
-    :param metrics: Metrics
-    :type metrics: torch.Tensor | npt.NDArray | float
-    :return: Mean metric
-    :rtype: float
-    """
-    if accelerator is None:
-        if isinstance(metrics, (torch.Tensor, np.ndarray)):
-            return float(
-                np.mean(metrics)
-                if isinstance(metrics, np.ndarray)
-                else metrics.float().mean().item()
-            )
-        return float(metrics)
-    return aggregate_metrics_across_gpus(accelerator, metrics)
-
-
-def aggregate_metrics_dict(
-    accelerator: Accelerator | None,
-    metrics: dict[str, torch.Tensor | npt.NDArray | float],
-) -> dict[str, float]:
-    """Aggregate all values in a metrics dict across GPUs (or locally if no accelerator).
-
-    :param accelerator: Accelerator object (or None for single-device).
-    :type accelerator: Accelerator | None
-    :param metrics: Dictionary mapping metric names to raw values.
-    :type metrics: dict[str, torch.Tensor | npt.NDArray | float]
-    :return: Dictionary with all values aggregated to floats.
-    :rtype: dict[str, float]
-    """
-    return {k: safe_aggregate_metrics(accelerator, v) for k, v in metrics.items()}
-
-
-@contextmanager
-def gather_if_zero3(
-    zero_stage: int | None,
-    params: list[torch.Tensor],
-    modifier_rank: int | None = None,
-) -> Generator[None, None, None]:
-    """Conditional context manager for setting the zero stage for the model.
-
-    :param zero_stage: The zero stage
-    :type zero_stage: int | None
-    :param params: The parameters to gather
-    :type params: list[torch.Tensor]
-    :param modifier_rank: The modifier rank
-    :type modifier_rank: int | None
-    """
-    if zero_stage == 3:
-        if not HAS_DEEPSPEED:
-            msg = (
-                "DeepSpeed is required for ZeRO stage 3 parameter gathering, but it "
-                "is not installed."
-            )
-            raise ImportError(msg)
-        # Lazy: deepspeed is an optional dependency and only ZeRO-3 needs it.
-        import deepspeed
-
-        with deepspeed.zero.GatheredParameters(
-            params=params,
-            modifier_rank=modifier_rank,
-        ):
-            yield
-    else:
-        yield
-
-
-@contextmanager
-def zero3_full_shape_views(
-    params: list[torch.Tensor],
-) -> Generator[None, None, None]:
-    """Expose full ``ds_shape`` views on partitioned ZeRO-3 params for shape-only reads.
-
-    Each partitioned param temporarily swaps its placeholder ``data`` for a
-    zero-storage view (a scalar expanded to ``ds_shape``), so shape, dtype and
-    device reads inside the block see the full tensor without an all-gather.
-    Values must not be read inside the block; the placeholder is restored on
-    exit. Params without ``ds_shape``, or already ``AVAILABLE``, pass through
-    untouched.
-
-    :param params: Candidate parameters; only partitioned ZeRO-3 params get views.
-    :type params: list[torch.Tensor]
-    """
-    saved: list[tuple[torch.Tensor, torch.Tensor]] = []
-    seen: set[int] = set()
-    try:
-        for param in params:
-            if id(param) in seen:
-                continue
-            ds_shape = getattr(param, "ds_shape", None)
-            if ds_shape is None:
-                continue
-            status = getattr(param, "ds_status", None)
-            if getattr(status, "name", None) == "AVAILABLE":
-                continue
-            seen.add(id(param))
-            saved.append((param, param.data))
-            param.data = torch.empty((), dtype=param.dtype, device=param.device).expand(
-                tuple(ds_shape)
-            )
-        yield
-    finally:
-        for param, data in saved:
-            param.data = data
-
-
-@contextmanager
-def gather_if_ds_param(
-    *tensors: torch.Tensor | None,
-    modifier_rank: int | None = 0,
-) -> Generator[None, None, None]:
-    """Allgather ZeRO-3 params for the duration of the block.
-
-    No-op when none of ``tensors`` carry a DeepSpeed ``ds_id``, or when every
-    such param is already ``AVAILABLE`` (tied embeddings owned by
-    ``embed_tokens``). Duplicate references are gathered once (by identity).
-    Defaults to ``modifier_rank=0`` so DeepSpeed releases the gathered buffer
-    after the block.
-
-    The gather must wrap only the matmul / fused loss that reads the weight —
-    not a module ``forward`` — because ZeRO-3's post-forward hooks
-    re-partition the param and free the gathered buffer.
-
-    :param tensors: Candidate weight tensors; only those with ``ds_id`` gather.
-    :param modifier_rank: Passed to DeepSpeed ``GatheredParameters``.
-    """
-    seen: set[int] = set()
-    params: list[torch.Tensor] = []
-    for t in tensors:
-        if t is None or not hasattr(t, "ds_id"):
-            continue
-        tid = id(t)
-        if tid in seen:
-            continue
-        seen.add(tid)
-        if (
-            ZeroParamStatus is not None
-            and hasattr(t, "ds_status")
-            and t.ds_status == ZeroParamStatus.AVAILABLE
-        ):
-            continue
-        params.append(t)
-    if not params:
-        yield
-        return
-    with gather_if_zero3(3, params, modifier_rank=modifier_rank):
-        yield
-
-
-def adapter_checkpoint_params(model: nn.Module) -> list[torch.Tensor]:
-    """Return the parameters PEFT's adapter checkpoint I/O reads and writes.
-
-    Scopes ZeRO-3 gathers around ``save_pretrained`` /
-    ``get_peft_model_state_dict`` / ``set_peft_model_state_dict`` so base
-    parameters stay sharded instead of being materialised on every rank.
-
-    :param model: The model to collect adapter checkpoint parameters from.
+    :param model: PEFT model (or a wrapper around one).
     :type model: nn.Module
-    :return: LoRA A/B and DoRA magnitude parameters, plus the
-        ``modules_to_save`` copies PEFT writes into the same checkpoint (an LLM
-        PPO value head).
-    :rtype: list[torch.Tensor]
+    :return: ``(name, param)`` pairs for every adapter parameter.
+    :rtype: list[tuple[str, torch.Tensor]]
     """
     return [
-        p for n, p in model.named_parameters() if "lora" in n or "modules_to_save" in n
+        (n, p)
+        for n, p in model.named_parameters()
+        if "lora" in n or "modules_to_save" in n
     ]
 
 
-def get_state_dict(model: nn.Module) -> dict[str, torch.Tensor]:
-    """Get the state dict of the model for zero3.
+def get_lora_params(model: nn.Module) -> list[torch.Tensor]:
+    """Return adapter parameters for scoped gathers / export.
 
-    :param model: The model to get the state dict of.
+    Pass the result to :func:`agilerl.distributed.gather_params` for adapter-only save, export, or
+    copy so base-model shards stay unmaterialised.
+
+    :param model: PEFT model (or a wrapper around one).
     :type model: nn.Module
-    :return: The state dict of the model.
-    :rtype: dict[str, torch.Tensor]
+    :return: Adapter parameters.
+    :rtype: list[torch.Tensor]
     """
-    with gather_if_zero3(3, list(model.parameters()), modifier_rank=0):
-        return model.state_dict()
+    return [p for _, p in get_lora_named_params(model)]
+
+
+def save_lora_adapters(
+    model: nn.Module,
+    path: str | Path,
+    selected_adapters: Sequence[str],
+    use_value_head: bool = False,
+    is_main: bool = True,
+) -> None:
+    r"""Save LoRA adapter weights and configs in PEFT-compatible format.
+
+    Gathers FSDP2-sharded adapter parameters to CPU *before* handing them to
+    safetensors, avoiding the invalid-storage error that occurs when
+    ``full_tensor()`` results are installed as live GPU ``nn.Parameter``\ s
+    and then serialised via PEFT's ``save_pretrained``.
+
+    All ranks must call this together (``full_tensor()`` is a collective),
+    but only ``is_main`` writes to disk.
+
+    :param model: Actor holding the adapters.
+    :type model: nn.Module
+    :param path: Checkpoint directory; each adapter goes in a subdirectory.
+    :type path: str | Path
+    :param selected_adapters: Adapter names to save.
+    :type selected_adapters: Sequence[str]
+    :param use_value_head: Whether ``model`` wraps the PEFT model with a value
+        head; its weights are saved as ``pytorch_model.bin``.
+    :type use_value_head: bool
+    :param is_main: Whether this rank writes files.
+    :type is_main: bool
+    """
+    base_path = Path(path)
+
+    for adapter_name in selected_adapters:
+        adapter_dir = base_path / adapter_name
+        if is_main:
+            adapter_dir.mkdir(parents=True, exist_ok=True)
+
+        # get_peft_model_state_dict filters by adapter and strips the
+        # adapter-name segment from the keys, producing the exact format
+        # that set_peft_model_state_dict expects on load. Value-head
+        # wrappers keep the PEFT model on ``pretrained_model``.
+        peft_model = (
+            model.pretrained_model
+            if use_value_head and hasattr(model, "pretrained_model")
+            else model
+        )
+        raw_state = get_peft_model_state_dict(peft_model, adapter_name=adapter_name)
+        cpu_state: dict[str, torch.Tensor] = {}
+        for key, value in raw_state.items():
+            if isinstance(value, DTensor):
+                value = value.full_tensor()
+            cpu_state[key] = value.to("cpu").contiguous()
+
+        if is_main:
+            save_file(
+                cpu_state,
+                str(adapter_dir / "adapter_model.safetensors"),
+                metadata={"format": "pt"},
+            )
+            peft_config = getattr(peft_model, "peft_config", None)
+            if isinstance(peft_config, dict) and adapter_name in peft_config:
+                adapter_cfg = peft_config[adapter_name]
+                save_pretrained = getattr(adapter_cfg, "save_pretrained", None)
+                if callable(save_pretrained):
+                    save_pretrained(str(adapter_dir))
+
+        del cpu_state
+        barrier()
+
+    # Save the value head (PPO's v_head Linear) as pytorch_model.bin
+    if use_value_head:
+        v_head_state: dict[str, torch.Tensor] = {}
+        for name, param in model.named_parameters():
+            if "v_head" in name:
+                full = param.full_tensor() if isinstance(param, DTensor) else param
+                v_head_state[name] = full.to("cpu").contiguous()
+        if is_main and v_head_state:
+            torch.save(v_head_state, str(base_path / "pytorch_model.bin"))
+        barrier()
+
+
+def load_lora_adapters(
+    model: nn.Module,
+    path: str | Path,
+    adapter_name: str,
+    device: torch.device | str = "cpu",
+) -> None:
+    """Load LoRA adapter weights from a PEFT-compatible checkpoint directory.
+
+    Handles FSDP2-sharded models by scattering loaded full tensors into DTensor
+    local shards via ``distribute_tensor``. For non-sharded models, falls
+    back to a plain ``copy_``.
+
+    All ranks must call this together (``distribute_tensor`` is a collective).
+
+    :param model: Actor holding the adapters.
+    :type model: nn.Module
+    :param path: Adapter directory written by :func:`save_lora_adapters`.
+    :type path: str | Path
+    :param adapter_name: Adapter to load the weights into.
+    :type adapter_name: str
+    :param device: Device the checkpoint tensors are read onto.
+    :type device: torch.device | str
+    """
+    adapter_path = Path(path) / adapter_name / "adapter_model.safetensors"
+    adapter_state = safe_load_file(str(adapter_path), device=str(device))
+
+    with torch.no_grad():
+        for name, param in model.named_parameters():
+            # Only touch parameters belonging to this adapter.
+            if f".{adapter_name}." not in name:
+                continue
+            # Map model param name → loaded state dict key by removing the
+            # adapter-name segment: ...lora_A.actor.weight → ...lora_A.weight
+            loaded_key = name.replace(f".{adapter_name}.", ".")
+            if loaded_key not in adapter_state:
+                continue
+
+            full_tensor = adapter_state[loaded_key].to(device)
+
+            if isinstance(param, DTensor):
+                # FSDP2 DTensor: scatter the full tensor onto the mesh
+                # and copy the local shard into the parameter's local shard.
+                sharded = distribute_tensor(
+                    full_tensor, param.device_mesh, param.placements
+                )
+                param.to_local().copy_(sharded.to_local())
+            else:
+                param.data.copy_(full_tensor)
+
+    barrier()
 
 
 def build_bnb_quantization_config(
@@ -794,7 +794,7 @@ def build_bnb_quantization_config(
     * ``"int8"`` -- LLM.int8() 8-bit weights.
     * ``"nf4"``, ``"4bit"``, ``"4-bit"``, ``"bnb-4bit"`` or ``"bnb_4bit"`` --
       4-bit NF4 with bf16 compute, bf16 quant storage and double quantisation
-      (the QLoRA recipe, ZeRO-3 / FSDP compatible).
+      (the QLoRA recipe; FSDP compatible).
     * ``dict`` -- forwarded verbatim as ``BitsAndBytesConfig(**spec)`` for full
       control; ``bnb_4bit_compute_dtype`` / ``bnb_4bit_quant_storage`` may be
       given as dtype strings (e.g. ``"bfloat16"``), which transformers resolves.
@@ -843,28 +843,46 @@ def build_bnb_quantization_config(
 
 
 def model_has_clippable_linear_wrappers(model: nn.Module) -> bool:
-    """Return True when the model uses *ClippableLinear projection wrappers."""
+    """Return True when the model uses *ClippableLinear projection wrappers.
+
+    :param model: Model to inspect.
+    :type model: nn.Module
+    :return: Whether any ClippableLinear wrapper is present.
+    :rtype: bool
+    """
     return any(
-        mod.__class__.__name__.endswith(_CLIPPABLE_LINEAR_WRAPPER_SUFFIX)
+        mod.__class__.__name__.endswith(CLIPPABLE_LINEAR_WRAPPER_SUFFIX)
         for mod in model.modules()
     )
 
 
 def discover_clippable_projection_leaf_names(model: nn.Module) -> list[str]:
-    """Return leaf names (e.g. ``q_proj``) of *ClippableLinear wrapper modules."""
+    """Return leaf names (e.g. ``q_proj``) of *ClippableLinear wrapper modules.
+
+    :param model: Model to inspect.
+    :type model: nn.Module
+    :return: Sorted unique leaf names.
+    :rtype: list[str]
+    """
     names: set[str] = set()
     for name, mod in model.named_modules():
-        if mod.__class__.__name__.endswith(_CLIPPABLE_LINEAR_WRAPPER_SUFFIX):
+        if mod.__class__.__name__.endswith(CLIPPABLE_LINEAR_WRAPPER_SUFFIX):
             names.add(name.rsplit(".", 1)[-1])
     return sorted(names)
 
 
 def discover_clippable_inner_linear_module_keys(model: nn.Module) -> list[str]:
-    """Return full ``named_modules`` keys for inner ``.linear`` weights in wrappers."""
+    """Return full ``named_modules`` keys for inner ``.linear`` weights in wrappers.
+
+    :param model: Model to inspect.
+    :type model: nn.Module
+    :return: Module keys ending in ``.linear``.
+    :rtype: list[str]
+    """
     named = dict(model.named_modules())
     keys: list[str] = []
     for name, mod in model.named_modules():
-        if not mod.__class__.__name__.endswith(_CLIPPABLE_LINEAR_WRAPPER_SUFFIX):
+        if not mod.__class__.__name__.endswith(CLIPPABLE_LINEAR_WRAPPER_SUFFIX):
             continue
         inner_key = f"{name}.linear"
         inner = named.get(inner_key)
@@ -914,7 +932,6 @@ def _peft_key_is_excluded(key: str, exclude_modules: list[str] | None) -> bool:
 def list_peft_matched_module_keys(
     model: nn.Module,
     target_modules: str | list[str],
-    *,
     exclude_modules: list[str] | None = None,
 ) -> list[str]:
     """List module keys that PEFT would adapt for the given target spec."""
@@ -1156,7 +1173,6 @@ def _adapt_mamba_lora_config(model: nn.Module, lora_config: LoraConfig) -> LoraC
 def _example_module_keys_for_lora_scope(
     model: nn.Module,
     scope: str,
-    *,
     limit: int = 3,
 ) -> list[str]:
     """Sample ``named_modules`` keys under a scope (for error messages)."""
@@ -1172,7 +1188,6 @@ def _example_module_keys_for_lora_scope(
 def adapt_lora_config_for_model(
     model: nn.Module,
     lora_config: LoraConfig,
-    *,
     lora_target_scope: str | None = None,
 ) -> LoraConfig:
     r"""Rewrite ``LoraConfig.target_modules`` for PEFT (regex or suffix list).
@@ -1293,13 +1308,26 @@ def log_cuda_memory_snapshot(label: str, device_index: int = 0) -> None:
 
 def format_colocated_vllm_oom_hint(
     device_index: int = 0,
-    *,
     kv_cache_memory_bytes: int | None = None,
     gpu_memory_utilization: float | None = None,
     max_model_len: int | None = None,
     trainer_on_gpu: bool = True,
 ) -> str:
-    """Build a human-readable VRAM summary after vLLM ``wake_up`` OOM."""
+    """Build a human-readable VRAM summary after vLLM ``wake_up`` OOM.
+
+    :param device_index: CUDA device to report on.
+    :type device_index: int
+    :param kv_cache_memory_bytes: Configured vLLM KV cache size, if set.
+    :type kv_cache_memory_bytes: int | None
+    :param gpu_memory_utilization: Configured vLLM memory fraction, if set.
+    :type gpu_memory_utilization: float | None
+    :param max_model_len: Configured context length, if set.
+    :type max_model_len: int | None
+    :param trainer_on_gpu: Whether trainer weights were on GPU at ``wake_up``.
+    :type trainer_on_gpu: bool
+    :return: Multi-line summary with suggestions.
+    :rtype: str
+    """
     if not torch.cuda.is_available():
         return "CUDA is not available on this host."
 
@@ -1334,8 +1362,8 @@ def format_colocated_vllm_oom_hint(
         )
     if trainer_on_gpu:
         lines.append(
-            "The DeepSpeed trainer was still on GPU when wake_up ran. With sleep_mode, "
-            "AgileRL moves trainer weights to CPU before wake_up; ZeRO optimizer state "
+            "The trainer was still on GPU when wake_up ran. With sleep_mode, "
+            "AgileRL moves trainer weights to CPU before wake_up; optimizer state "
             "may still remain on GPU."
         )
     lines.append(
@@ -1348,7 +1376,6 @@ def format_colocated_vllm_oom_hint(
 
 def resolve_attn_implementation(
     requested: str | None = None,
-    *,
     model_name_or_path: str | None = None,
 ) -> str:
     """Pick the trainer attention backend.
@@ -1441,11 +1468,13 @@ def patch_flex_attention_kernel_options(options: dict[str, Any] | None = None) -
     :type options: dict[str, Any] | None
     """
     try:
+        # transformers flex-attn is optional; no-op when missing.
         from transformers.integrations.flex_attention import flex_attention_forward
         from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
     except Exception:
         return
-    if getattr(flex_attention_forward, "_agilerl_kernel_opts_patched", False):
+    patched_flag = "_agilerl_kernel_opts_patched"
+    if getattr(flex_attention_forward, patched_flag, False):
         return
 
     # Small blocks exist only to fit pre-SM90 SRAM; Hopper keeps the
@@ -1496,7 +1525,7 @@ def patch_flex_attention_kernel_options(options: dict[str, Any] | None = None) -
 
     # Dynamic marker attribute on the wrapper function (checked via getattr
     # above); function attributes are not statically declarable.
-    _flex_with_opts._agilerl_kernel_opts_patched = True  # ty: ignore[unresolved-attribute]
+    object.__setattr__(_flex_with_opts, patched_flag, True)
     try:
         ALL_ATTENTION_FUNCTIONS["flex_attention"] = _flex_with_opts
     except Exception:
@@ -1507,7 +1536,7 @@ def create_model_from_name_or_path(
     model_name_or_path: str,
     model_config: dict[str, Any] | None = None,
     add_value_head: bool = False,
-    use_accelerator: bool = False,
+    use_distributed: bool = False,
 ) -> PreTrainedModel:
     """Create a model from a name or path.
 
@@ -1519,17 +1548,20 @@ def create_model_from_name_or_path(
         trainer default, then flash/sdpa). Other family trainer keys fill
         via ``setdefault``.
     :type model_config: dict[str, Any ] | None
-    :param use_value_head: Flag to indicate if a value head should be added to the model, defaults to False
-    :type use_value_head: bool, optional
-    :param use_accelerator: Flag to indicate if the model should be created with the accelerator, defaults to False
-    :type use_accelerator: bool, optional
+    :param add_value_head: Flag to indicate if a value head should be added to the model, defaults to False
+    :type add_value_head: bool, optional
+    :param use_distributed: Whether the model is created for a distributed
+        run, defaults to False
+    :type use_distributed: bool, optional
     :return: The created model.
     :rtype: PreTrainedModel
     """
+    # Class-level family patches wrap mixer ``__init__`` and must run
+    # before ``from_pretrained``.
+    install_family_patches(pretrained_model_type(model_name_or_path))
+
     model_config = dict(model_config) if model_config else {}
-    model_config.setdefault(
-        "torch_dtype", torch.bfloat16 if not use_accelerator else torch.float16
-    )
+    model_config.setdefault("torch_dtype", torch.bfloat16)
     for key, value in (
         family_runtime(model_name_or_path).trainer.model_dump(exclude_none=True).items()
     ):
@@ -1543,13 +1575,76 @@ def create_model_from_name_or_path(
     if model_config["attn_implementation"] == "flex_attention":
         patch_flex_attention_kernel_options()
     if add_value_head:
-        return AutoModelForCausalLMWithValueHead.from_pretrained(
+        model = AutoModelForCausalLMWithValueHead.from_pretrained(
             pretrained_model_name_or_path=model_name_or_path,
             **model_config,
         )
-    return AutoModelForCausalLM.from_pretrained(
-        pretrained_model_name_or_path=model_name_or_path,
-        **model_config,
+    else:
+        model = AutoModelForCausalLM.from_pretrained(
+            pretrained_model_name_or_path=model_name_or_path,
+            **model_config,
+        )
+    return model
+
+
+def make_llm_optimizer(
+    actor: nn.Module,
+    lr: float,
+    lr_critic: float | None,
+) -> OptimizerWrapper:
+    """Build an AdamW ``OptimizerWrapper`` with LLM actor/critic param groups.
+
+    :param actor: Placed (dense or FSDP2-sharded) actor module.
+    :type actor: nn.Module
+    :param lr: Actor learning rate.
+    :type lr: float
+    :param lr_critic: Critic/value-head learning rate, or ``None``.
+    :type lr_critic: float | None
+    :return: Optimizer bound to ``actor`` trainable LoRA groups.
+    :rtype: OptimizerWrapper
+    """
+    # OptimizerWrapper lives under algorithms.core; that package imports
+    # llm_utils via base.
+    from agilerl.algorithms.core.optimizer_wrapper import (  # cycle: algorithms.core imports llm_utils via base
+        OptimizerWrapper,
+    )
+
+    return OptimizerWrapper(
+        optimizer_cls=AdamW,
+        networks=[actor],
+        network_names=["actor"],
+        lr=lr,
+        lr_critic=lr_critic,
+        is_llm_optimizer=True,
+        lr_name="lr" if lr_critic is None else ("lr_actor", "lr_critic"),
+    )
+
+
+def make_llm_scheduler(
+    optimizer: OptimizerWrapper,
+    cosine_lr_schedule_config: CosineLRScheduleConfig | None,
+    lr: float,
+) -> SequentialLR | None:
+    """Build a warmup-cosine scheduler, or ``None`` when no config is set.
+
+    :param optimizer: LLM optimizer whose inner AdamW the scheduler steps.
+    :type optimizer: OptimizerWrapper
+    :param cosine_lr_schedule_config: Scheduler config; ``None`` skips creation.
+    :type cosine_lr_schedule_config: CosineLRScheduleConfig | None
+    :param lr: Peak learning rate after warmup.
+    :type lr: float
+    :return: Warmup-cosine scheduler, or ``None``.
+    :rtype: SequentialLR | None
+    """
+    if cosine_lr_schedule_config is None:
+        return None
+    inner = optimizer._single_optimizer()
+    adam = inner.optimizer if isinstance(inner, CPUOffloadOptimizer) else inner
+    return create_warmup_cosine_scheduler(
+        adam,
+        cosine_lr_schedule_config,
+        1e-8,
+        lr,
     )
 
 
@@ -1590,7 +1685,17 @@ def masked_mean(
 def masked_var(
     values: torch.Tensor, mask: torch.Tensor, unbiased: bool = True
 ) -> torch.Tensor:
-    """Compute variance of tensor with masked values."""
+    """Compute variance of tensor with masked values.
+
+    :param values: Values to reduce.
+    :type values: torch.Tensor
+    :param mask: Mask selecting which values count.
+    :type mask: torch.Tensor
+    :param unbiased: Apply Bessel's correction.
+    :type unbiased: bool
+    :return: Scalar masked variance.
+    :rtype: torch.Tensor
+    """
     mean = masked_mean(values, mask)
     centered_values = values - mean
     variance = masked_mean(centered_values**2, mask)
@@ -1599,7 +1704,7 @@ def masked_var(
         if mask_sum <= 1:
             msg = (
                 "Unbiased masked variance requires at least 2 unmasked values; "
-                "increase `mini_batch_size` or `gradient_accumulation_steps`."
+                "increase `mini_batch_size` or `micro_batch_size_per_gpu`."
             )
             raise ValueError(msg)
         bessel_correction = mask_sum / (mask_sum - 1)
@@ -1698,6 +1803,56 @@ def baseline_free_turn_cells(turn_mask: torch.Tensor, group_size: int) -> torch.
     count = turn_mask.reshape(-1, group_size, num_turns).sum(dim=1, keepdim=True)
     lone = (count <= 1).expand(-1, group_size, -1).reshape(batch, num_turns)
     return turn_mask & lone
+
+
+def batch_is_single_turn(turn_ids: torch.Tensor | None) -> bool:
+    """True when every sample has at most one turn, or ``turn_ids`` is missing.
+
+    :param turn_ids: Per-token turn index ``[batch, seq_len]``; ``-1`` for
+        padding. ``None`` is treated as a single-turn batch.
+    :type turn_ids: torch.Tensor | None
+    :return: Whether the batch has no multi-turn structure.
+    :rtype: bool
+    """
+    if turn_ids is None:
+        return True
+    per_sample_num_turns = turn_ids.max(dim=1).values + 1
+    return bool((per_sample_num_turns <= 1).all())
+
+
+def resolve_batch_advantage_granularity(
+    configured: str,
+    turn_ids: torch.Tensor | None,
+    single_turn: str,
+    multi_turn: str,
+    can_use_multi_turn: bool = True,
+) -> str:
+    """Resolve ``"auto"`` from batch turn structure; pass explicit values through.
+
+    PPO and REINFORCE map single-turn batches to ``"token"`` and multi-turn
+    batches to ``"turn"``. GRPO has no token-level advantage, so it maps
+    single-turn batches to ``"trajectory"`` and multi-turn batches to
+    ``"turn"``.
+
+    :param configured: User setting, including ``"auto"``.
+    :type configured: str
+    :param turn_ids: Per-token turn indices, or ``None``.
+    :type turn_ids: torch.Tensor | None
+    :param single_turn: Grain for a single-turn batch.
+    :type single_turn: str
+    :param multi_turn: Grain when any sample has more than one turn.
+    :type multi_turn: str
+    :param can_use_multi_turn: False when the batch cannot support ``multi_turn``
+        (GRPO: no per-turn rewards).
+    :type can_use_multi_turn: bool
+    :return: The effective advantage granularity.
+    :rtype: str
+    """
+    if configured != "auto":
+        return configured
+    if can_use_multi_turn and not batch_is_single_turn(turn_ids):
+        return multi_turn
+    return single_turn
 
 
 def validate_importance_sampling_level(level: str, *, allow_auto: bool) -> None:
@@ -1947,83 +2102,6 @@ def clipped_is_surrogate(
     )
 
 
-def create_llm_accelerator(
-    *,
-    deepspeed_plugin: DeepSpeedPlugin | None = None,
-) -> Accelerator | None:
-    """Create an :class:`Accelerator` for LLM training with DeepSpeed.
-
-    This helper enforces a strict DeepSpeed contract for LLM workloads:
-
-    * **0 GPUs** — returns ``None`` (the ``accelerator=None`` code-path
-      in :class:`~agilerl.algorithms.core.base.LLMAlgorithm` handles
-      CPU-only training).
-    * When ``deepspeed_plugin`` is provided, returns an
-      ``Accelerator(deepspeed_plugin=...)``.
-    * Otherwise, instantiates ``Accelerator()`` and requires that a
-      DeepSpeed plugin is already present (for example via
-      ``accelerate config`` + ``accelerate launch``).
-      If no plugin is detected, raises ``RuntimeError`` with setup
-      instructions.
-
-    :param deepspeed_plugin: Explicit DeepSpeed plugin instance. If
-        omitted, this function expects a launch-configured plugin to be
-        present in ``Accelerator.state``.
-    :type deepspeed_plugin: DeepSpeedPlugin | None
-    :return: A configured ``Accelerator``, or ``None`` when no GPU is
-        available.
-    """
-    num_gpus = torch.cuda.device_count()
-
-    if num_gpus == 0:
-        logger.info("No GPUs detected — returning None (CPU-only path).")
-        return None
-
-    if deepspeed_plugin is not None:
-        return Accelerator(deepspeed_plugin=deepspeed_plugin)
-
-    accelerator = Accelerator()
-    if accelerator.state.deepspeed_plugin is None:
-        msg = (
-            "DeepSpeed is required for create_llm_accelerator(), but no "
-            "DeepSpeed plugin was detected. Use one of: "
-            "(1) run `accelerate config` and launch with `accelerate launch ...`; "
-            "(2) pass `deepspeed_plugin=` explicitly to create_llm_accelerator()."
-        )
-        raise RuntimeError(msg)
-    return accelerator
-
-
-def get_llm_accelerator(
-    base_accelerator: Accelerator | None,
-    idx: int,
-) -> Accelerator | None:
-    """Return a per-agent accelerator from a base accelerator.
-
-    ``idx == 0`` reuses ``base_accelerator``. For additional agents this helper
-    creates a fresh ``Accelerator`` instance so each LLM algorithm owns an
-    independent accelerator/engine reference.
-
-    :param base_accelerator: Accelerator passed into population creation.
-    :type base_accelerator: Accelerator | None
-    :param idx: Agent index in the population.
-    :type idx: int
-    :return: Accelerator for the specific agent, or ``None``.
-    :rtype: Accelerator | None
-    """
-    if idx < 0:
-        msg = f"Population index must be non-negative, got {idx}."
-        raise ValueError(msg)
-
-    if base_accelerator is None:
-        return None
-
-    if idx == 0:
-        return base_accelerator
-
-    return Accelerator()
-
-
 def cuda_tensor_bytes_in_module(module: torch.nn.Module) -> int:
     """Sum nbytes of parameters and buffers still on a CUDA device."""
     total = 0
@@ -2037,7 +2115,7 @@ def collect_trainable_param_stats(pop: PopulationType) -> dict[str, Any]:
     """Best-effort LoRA / trainable-param accounting for a population's first agent.
 
     Recorded once at init so runs can be correlated against LoRA size.
-    Wrapped in a broad except: introspecting peft-wrapped accelerator-managed
+    Wrapped in a broad except: introspecting peft-wrapped sharded
     models can fail in odd ways, and a logging-only field shouldn't fault training.
 
     :param pop: Population of LLM algorithms; only ``pop[0]`` is inspected.
@@ -2052,7 +2130,7 @@ def collect_trainable_param_stats(pop: PopulationType) -> dict[str, Any]:
         actor = getattr(agent, "actor", None)
         if actor is None:
             return out
-        # Unwrap accelerate / peft / DDP layers if present.
+        # Unwrap PEFT / FSDP wrappers if present.
         inner = actor
         for attr in ("module", "model"):
             unwrapped = getattr(inner, attr, None)
@@ -2075,32 +2153,19 @@ def collect_trainable_param_stats(pop: PopulationType) -> dict[str, Any]:
 
 
 def resolve_llm_device(
-    accelerator: Accelerator | None,
     device: str | torch.device | None = None,
 ) -> str:
     """Resolve the training device for an LLM algorithm.
 
-    The accelerator outranks *device*: under ``accelerate``/DeepSpeed each rank
-    must own its own GPU, so a caller passing a bare ``"cuda"`` cannot be allowed
-    to collapse every rank onto device 0.
+    Pins to ``cuda:<local_rank>`` under distributed training via
+    :func:`agilerl.distributed.resolve_device`.
 
-    :param accelerator: Accelerator object, or ``None`` for single-process runs.
-    :type accelerator: accelerate.Accelerator | None
-    :param device: Caller-requested device, or ``None`` to auto-detect.
+    :param device: Requested device, or ``None`` for the default.
     :type device: str | torch.device | None
-    :return: The rank's device under an accelerator, else *device*, else the best
-        locally available device.
+    :return: Resolved device string.
     :rtype: str
     """
-    if accelerator is not None:
-        return f"cuda:{accelerator.process_index}"
-    if device is not None:
-        return str(device)
-    if torch.cuda.is_available():
-        return "cuda"
-    if torch.backends.mps.is_available():
-        return "mps"
-    return "cpu"
+    return resolve_device(device)
 
 
 def offload_colocated_trainer_from_gpu(unwrapped_model: torch.nn.Module) -> int:
@@ -2168,36 +2233,100 @@ def attention_mask_from_padded_ids(
 
 
 def build_completion_mask(
-    token_ids: torch.Tensor,
+    completion_id: torch.Tensor,
     prompt_len: int | None,
     pad_token_id: int,
+    completion_len: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """Build the boolean action mask marking the completion within a token sequence.
+    """Build the boolean action mask for a completion tensor.
 
-    Returns ``True`` at positions that are (a) past the prompt and (b) not
-    pad tokens, dropping the leading position to align with the
+    Returns ``True`` at positions that are part of the generated completion
+    (i.e. past the prompt), dropping the leading position to align with the
     next-token-prediction shift used downstream.
 
-    :param token_ids: Token tensor of shape ``(B, seq_len)`` containing
+    When ``completion_len`` is provided (per-row generated-token counts) the
+    completion span is marked by position — ``positions in
+    [prompt_len, prompt_len + completion_len)`` — so the mask is correct even
+    when ``pad_token_id == eos_token_id`` (a real generated EOS is included, only
+    the trailing padding is excluded). When ``None`` the span is inferred from
+    non-pad tokens, which miscounts a generated EOS when pad aliases eos.
+
+    :param completion_id: Token tensor of shape ``(B, seq_len)`` containing
         the prompt followed by generated tokens.
-    :type token_ids: torch.Tensor
+    :type completion_id: torch.Tensor
     :param prompt_len: Number of leading tokens to mask out (the full
         prompt length). ``None`` means "no prompt prefix" — every non-pad
-        token is part of the completion, so the entire dim is set before
-        pads are zeroed back out.
+        token is part of the completion.
     :type prompt_len: int | None
     :param pad_token_id: Pad token id used to suppress padding positions.
     :type pad_token_id: int
+    :param completion_len: Per-row count of generated tokens. When provided,
+        the completion span is marked by position (correct when
+        ``pad_token_id == eos_token_id``); otherwise it is inferred from
+        non-pad tokens. Shape ``(B,)``, same device as ``completion_id``.
+    :type completion_len: torch.Tensor | None
     :return: Boolean mask of shape ``(B, seq_len - 1)``.
     :rtype: torch.Tensor
     """
-    non_pad = token_ids != pad_token_id
+    if completion_len is not None:
+        if prompt_len is None or prompt_len == 0:
+            msg = "completion_len requires a non-zero prompt_len to locate the span."
+            raise ValueError(msg)
+        positions = torch.arange(completion_id.shape[1], device=completion_id.device)
+        end = prompt_len + completion_len.to(device=completion_id.device)
+        mask = (positions.unsqueeze(0) >= prompt_len) & (
+            positions.unsqueeze(0) < end.unsqueeze(-1)
+        )
+        return mask[:, 1:]
+    non_pad = completion_id != pad_token_id
     if prompt_len is None or prompt_len == 0:
         mask = non_pad
     else:
-        positions = torch.arange(token_ids.shape[1], device=token_ids.device)
+        positions = torch.arange(completion_id.shape[1], device=completion_id.device)
         mask = (positions.unsqueeze(0) >= prompt_len) & non_pad
     return mask[:, 1:]
+
+
+def hf_completion_lengths(
+    completion_id: torch.Tensor,
+    prompt_len: int,
+    pad_token_id: int,
+) -> torch.Tensor:
+    """Recover the true per-row generated-token count from an HF ``generate`` output.
+
+    HF ``generate`` pads finished rows with ``pad_token_id`` up to the batch's
+    longest generation. When ``pad_token_id == eos_token_id`` the padded
+    positions and a real stopping EOS share an id, so a token-id scan can't
+    tell them apart. This helper disambiguates by position: a row's generated
+    region is ``[prompt_len, prompt_len + G)`` where ``G`` is the batch max. The
+    first token equal to ``pad_token_id`` within that region is the stopping
+    EOS (so the row generated ``first_pad - prompt_len + 1`` tokens, EOS
+    included); if no such token exists the row ran to ``G`` (no EOS, hit the
+    cap). At most one EOS can appear because ``generate`` stops a row at its
+    first EOS.
+
+    :param completion_id: ``generate`` output, shape ``(B, prompt_len + G)``.
+    :type completion_id: torch.Tensor
+    :param prompt_len: Number of leading prompt tokens.
+    :type prompt_len: int
+    :param pad_token_id: Pad token id (may equal the eos id).
+    :type pad_token_id: int
+    :return: Per-row generated-token counts, shape ``(B,)``, on
+        ``completion_id``'s device.
+    :rtype: torch.Tensor
+    """
+    B, L = completion_id.shape
+    device = completion_id.device
+    G = L - prompt_len
+    if G <= 0:
+        return torch.zeros(B, dtype=torch.long, device=device)
+    gen_region = completion_id[:, prompt_len:]
+    is_pad = gen_region == pad_token_id
+    has_pad = is_pad.any(dim=1)
+    first_pad = is_pad.int().argmax(dim=1)
+    first_pad = torch.where(has_pad, first_pad, torch.full_like(first_pad, G))
+    gen_len = torch.where(first_pad < G, first_pad + 1, first_pad)
+    return gen_len.to(torch.long)
 
 
 def prepare_prompt_hf_generate(
@@ -2256,117 +2385,24 @@ def get_model_name_or_path(model: PreTrainedModel) -> str:
     raise ValueError(msg)
 
 
-ACTIVATION_CHECKPOINTING_KEY = "activation_checkpointing"
-
-
-def _named_activation_checkpointing_keys(block: Any) -> str:  # noqa: ANN401 -- DeepSpeed config values are untyped
-    """Describe the settings a rejected activation-checkpointing section carries.
-
-    :param block: Value found under the activation-checkpointing key.
-    :type block: Any
-    :return: Human-readable list of the keys, or a description of the value.
-    :rtype: str
-    """
-    if isinstance(block, Mapping):
-        if not block:
-            return "no keys"
-        return ", ".join(sorted(str(key) for key in block))
-    return repr(block)
-
-
-def assert_no_activation_checkpointing_config(
-    deepspeed_config: Any,  # noqa: ANN401 -- DeepSpeed configs arrive as opaque mappings
-    *,
-    source: str,
-) -> None:
-    """Reject a DeepSpeed config carrying an activation-checkpointing section.
-
-    :param deepspeed_config: DeepSpeed config mapping to inspect.
-    :type deepspeed_config: Any
-    :param source: Where the config came from, quoted back in the message.
-    :type source: str
-    :return: None
-    :rtype: None
-    :raises TypeError: If the config is not a mapping and so cannot be checked.
-    :raises RuntimeError: If the activation-checkpointing section is present.
-    """
-    if deepspeed_config is None:
-        return
-    if not isinstance(deepspeed_config, Mapping):
-        msg = (
-            f"DeepSpeed config from {source} is {type(deepspeed_config).__name__}, "
-            f"not a mapping, so its {ACTIVATION_CHECKPOINTING_KEY} section cannot "
-            "be checked."
-        )
-        raise TypeError(msg)
-    if ACTIVATION_CHECKPOINTING_KEY not in deepspeed_config:
-        return
-    block = deepspeed_config[ACTIVATION_CHECKPOINTING_KEY]
-    msg = (
-        f"DeepSpeed config from {source} sets {ACTIVATION_CHECKPOINTING_KEY} "
-        f"({_named_activation_checkpointing_keys(block)}), which is not honoured "
-        "on this training path. DeepSpeed only reads that section for checkpoints "
-        "routed through deepspeed.checkpointing.checkpoint. Gradient checkpointing "
-        "here is enabled through HuggingFace's gradient_checkpointing_enable, which "
-        "binds torch.utils.checkpoint.checkpoint, and that never consults the "
-        "DeepSpeed config. Routing it through DeepSpeed instead is not available "
-        "on this stack: partition_activations shards along the model-parallel "
-        "group, which is size 1 here, so it saves nothing; "
-        "contiguous_memory_optimization requires partition_activations plus a "
-        "fixed layer count; and deepspeed.checkpointing.checkpoint is a reentrant "
-        "autograd Function with no use_reentrant argument, which the LoRA plus "
-        "ZeRO-3 recompute path needs to control. Remove the section rather than "
-        "carry settings that do nothing."
-    )
-    raise RuntimeError(msg)
-
-
-def align_deepspeed_lr(lr: float, accelerator: Accelerator | None) -> float:
-    """Align the learning rate for DeepSpeed.
-
-    :param lr: The learning rate to align.
-    :type lr: float
-    :param accelerator: The accelerator to align the learning rate for.
-    :type accelerator: Accelerator | None
-    :return: The aligned learning rate.
-    :rtype: float
-    """
-    if accelerator is not None:
-        optim_lr = (
-            accelerator.state.deepspeed_plugin.deepspeed_config.get("optimizer", {})
-            .get("params", {})
-            .get("lr", None)
-        )
-        if optim_lr is not None and optim_lr != lr:
-            warnings.warn(
-                f"DeepSpeed learning rate is set to {optim_lr} but the argument 'lr' is set to {lr}. "
-                "Overwriting deepspeed learning rate with the argument 'lr'.",
-                stacklevel=2,
-            )
-            accelerator.state.deepspeed_plugin.deepspeed_config["optimizer"]["params"][
-                "lr"
-            ] = lr
-    return lr
-
-
 def sample_eval_prompts(
-    env: Any,  # noqa: ANN401 -- gym env duck-typed across SFT/Preference/other gyms
+    env: object,
     n: int = 5,
     seed: int = 0,
 ) -> list[tuple[str, str | None, str | None]]:
     """Randomly sample *n* ``(prompt, chosen, rejected)`` triples from
     *env*'s held-out test dataset.
 
-    Columns are resolved automatically per dataset ``objective``:
+    Columns are resolved automatically per gym type:
 
-    * ``objective="sft"`` — ``chosen`` is ``env.response_column``; ``rejected``
+    * :class:`SFTGym` — ``chosen`` is ``env.response_column``; ``rejected``
       is ``None`` (SFT has no negative example).
-    * ``objective="preference"`` — ``chosen`` and ``rejected`` map to the
+    * :class:`PreferenceGym` — ``chosen`` and ``rejected`` map to the
       dataset's ``"chosen"`` / ``"rejected"`` columns.
-    * Any other env — both are ``None``.
+    * Any other gym — both are ``None``.
 
     :param env: AgileRL gym environment with a ``test_dataloader`` attribute.
-    :type env: Any
+    :type env: object
     :param n: Number of samples to draw, defaults to 5.
     :type n: int, optional
     :param seed: Random seed for reproducible sampling, defaults to 0.
@@ -2375,15 +2411,19 @@ def sample_eval_prompts(
         ``None``.
     :rtype: list[tuple[str, str | None, str | None]]
     """
-    dataset = env.test_dataloader.dataset
+    dataloader = getattr(env, "test_dataloader", None)
+    dataset = getattr(dataloader, "dataset", None)
+    if dataset is None:
+        msg = "env.test_dataloader.dataset is required"
+        raise TypeError(msg)
     indices = random.Random(seed).sample(range(len(dataset)), min(n, len(dataset)))
 
     chosen_col: str | None = None
     rejected_col: str | None = None
-    objective = getattr(env, "objective", None)
-    if objective == "sft":
-        chosen_col = env.response_column
-    elif objective == "preference":
+    response_column = getattr(env, "response_column", None)
+    if isinstance(response_column, str):
+        chosen_col = response_column
+    elif "chosen" in getattr(dataset, "features", ()):
         chosen_col = "chosen"
         rejected_col = "rejected"
 
@@ -2399,7 +2439,7 @@ def sample_eval_prompts(
 
 def compare_responses(
     agent: LLMAlgorithm,
-    tokenizer: Any,  # noqa: ANN401 -- HF tokenizer; typed decode() returns str|list[str], which this single-sequence path would have to narrow
+    tokenizer: PreTrainedTokenizerBase,
     samples: list[tuple[str, str | None, str | None]],
     max_new_tokens: int = 200,
     temperature: float = 1.0,
@@ -2423,7 +2463,7 @@ def compare_responses(
         ``agent.device``.
     :type agent: LLMAlgorithm
     :param tokenizer: HuggingFace tokenizer matching the model.
-    :type tokenizer: Any
+    :type tokenizer: object
     :param samples: ``(prompt, chosen, rejected)`` triples as returned by
         :func:`sample_eval_prompts`.  ``None`` fields are silently skipped.
     :type samples: list[tuple[str, str | None, str | None]]
@@ -2472,9 +2512,11 @@ def compare_responses(
             else:
                 output_ids = model.generate(**gen_kwargs)
         new_tokens = output_ids[0][prompt_len:]
-        return tokenizer.decode(
-            new_tokens, skip_special_tokens=skip_special_tokens
-        ).strip()
+        decoded = tokenizer.decode(new_tokens, skip_special_tokens=skip_special_tokens)
+        if not isinstance(decoded, str):
+            msg = "tokenizer.decode must return a string"
+            raise TypeError(msg)
+        return decoded.strip()
 
     def _wrap(text: str, indent: int = 2) -> str:
         prefix = " " * indent
@@ -2580,19 +2622,38 @@ def resolve_vllm_max_num_batched_tokens(
 
 def build_vllm_llm_init_kwargs(
     vllm_config: VLLMConfig,
-    *,
     trainer_model_name_or_path: str,
     max_model_len: int,
     process_index: int = 0,
     lora_rank: int | None = None,
 ) -> dict[str, Any]:
-    """Build kwargs for ``vllm.LLM`` from :class:`~agilerl.utils.algo_utils.VLLMConfig`."""
+    """Build kwargs for ``vllm.LLM`` from :class:`~agilerl.utils.algo_utils.VLLMConfig`.
+
+    :param vllm_config: vLLM settings.
+    :type vllm_config: VLLMConfig
+    :param trainer_model_name_or_path: Base model the engine loads.
+    :type trainer_model_name_or_path: str
+    :param max_model_len: Engine context length.
+    :type max_model_len: int
+    :param process_index: Global rank; seeds each tensor-parallel group.
+    :type process_index: int
+    :param lora_rank: Trainer LoRA rank, used to size ``max_lora_rank``.
+    :type lora_rank: int | None
+    :return: Keyword arguments for ``vllm.LLM``.
+    :rtype: dict[str, Any]
+    """
     vllm_model = (
         vllm_config.vllm_model_name_or_path
         if vllm_config.vllm_model_name_or_path is not None
         else trainer_model_name_or_path
     )
-    family_vllm_kwargs = family_runtime(vllm_model).vllm.model_dump(exclude_none=True)
+    try:
+        family_vllm_kwargs = family_runtime(vllm_model).vllm.model_dump(
+            exclude_none=True
+        )
+    except OSError:
+        # Dummy actors and offline ids have no Hugging Face config.
+        family_vllm_kwargs = {}
     explicit_batched_tokens = getattr(vllm_config, "max_num_batched_tokens", None)
     batched_tokens = (
         explicit_batched_tokens
@@ -2643,13 +2704,25 @@ def build_vllm_llm_init_kwargs(
 
 def build_vllm_rollout_lora_request(
     lora_path: str | Path,
-    *,
     load_inplace: bool = False,
     lora_name: str = "actor",
     lora_int_id: int = 1,
-) -> Any:  # noqa: ANN401 -- returns vllm.LoRARequest (optional Linux-only dependency)
-    """Build a vLLM :class:`~vllm.lora.request.LoRARequest` for rollout."""
-    from vllm.lora.request import LoRARequest  # optional extra: llm
+) -> object:
+    """Build a vLLM :class:`~vllm.lora.request.LoRARequest` for rollout.
+
+    :param lora_path: Adapter directory.
+    :type lora_path: str | Path
+    :param load_inplace: Reload weights into an existing slot with the same id.
+    :type load_inplace: bool
+    :param lora_name: Adapter name reported to vLLM.
+    :type lora_name: str
+    :param lora_int_id: vLLM adapter slot id.
+    :type lora_int_id: int
+    :return: The ``LoRARequest``.
+    :rtype: object
+    """
+    # vLLM is an optional extra this rollout path needs.
+    from vllm.lora.request import LoRARequest
 
     return LoRARequest(
         lora_name=lora_name,
@@ -2681,9 +2754,15 @@ def remap_peft_lora_key_for_vllm(key: str) -> str:
 
 
 def expert_lora_vllm_key_map(peft_model: nn.Module) -> dict[str, str]:
-    """Map packed-experts LoRA module keys to the paths vLLM's fused-MoE loader reads (down on ``<experts>``, gate/up on ``<experts>.base_layer``)."""
-    from peft.tuners.lora.layer import ParamWrapper  # optional extra: llm
+    """Map packed-experts LoRA module keys to the paths vLLM's fused-MoE loader reads.
 
+    Down projections map to ``<experts>``, gate/up to ``<experts>.base_layer``.
+
+    :param peft_model: PEFT model with packed-expert LoRA.
+    :type peft_model: nn.Module
+    :return: PEFT module key to vLLM module path.
+    :rtype: dict[str, str]
+    """
     key_map: dict[str, str] = {}
     unmapped: list[str] = []
     for name, module in peft_model.named_modules():
@@ -2718,7 +2797,6 @@ def expert_lora_vllm_key_map(peft_model: nn.Module) -> dict[str, str]:
 def filter_peft_state_dict_for_vllm_lora(
     state_dict: dict[str, torch.Tensor],
     target_modules: str | list[str] | None,
-    *,
     expert_key_map: dict[str, str] | None = None,
 ) -> dict[str, torch.Tensor]:
     """Keep LoRA tensors whose modules match the trainer ``target_modules`` spec or expert map."""
@@ -2754,7 +2832,6 @@ def save_peft_adapter_for_vllm_rollout(
     peft_model: PeftModel,
     staging_dir: Path | str,
     adapter_name: str,
-    *,
     target_modules: str | list[str] | None,
     expert_key_map: dict[str, str] | None = None,
 ) -> Path:
@@ -2766,13 +2843,24 @@ def save_peft_adapter_for_vllm_rollout(
     ClippableLinear ``.linear`` suffixes in keys for vLLM. ``staging_dir`` must
     be process-private (AgileRL stages per-rank when distributed): every caller
     writes the adapter files.
+
+    :param peft_model: PEFT model holding the adapter.
+    :type peft_model: PeftModel
+    :param staging_dir: Process-private output directory.
+    :type staging_dir: Path | str
+    :param adapter_name: Adapter to export.
+    :type adapter_name: str
+    :param target_modules: PEFT ``target_modules`` spec used in training.
+    :type target_modules: str | list[str] | None
+    :param expert_key_map: Packed-expert key map from
+        :func:`expert_lora_vllm_key_map`.
+    :type expert_key_map: dict[str, str] | None
+    :return: Directory containing the exported adapter.
+    :rtype: Path
     """
     if not HAS_LLM_DEPENDENCIES:
         msg = "save_peft_adapter_for_vllm_rollout requires peft and transformers."
         raise ImportError(msg)
-
-    from peft import get_peft_model_state_dict  # optional extra: llm
-    from safetensors.torch import save_file  # optional extra: llm
 
     adapter_path = Path(staging_dir) / adapter_name
     state = get_peft_model_state_dict(peft_model, adapter_name=adapter_name)
@@ -2797,6 +2885,13 @@ def save_peft_adapter_for_vllm_rollout(
         )
 
     adapter_path.mkdir(parents=True, exist_ok=True)
+    # FSDP2 keeps adapter params as sharded ``DTensor``s; ``gather_params``
+    # may not install dense locals on the module for every param, so
+    # materialise any remaining ``DTensor`` entries here before safetensors
+    # serialisation (which cannot read a DTensor storage pointer).
+    state = {
+        k: (v.full_tensor() if isinstance(v, DTensor) else v) for k, v in state.items()
+    }
     save_file(state, adapter_path / "adapter_model.safetensors")
 
     peft_cfg = peft_model.peft_config[adapter_name]
@@ -2852,7 +2947,6 @@ def apply_chat_template(
 def render_chat_template(
     conversation_template: list[dict[str, str]],
     tokenizer: PreTrainedTokenizerBase,
-    *,
     chat_template_kwargs: dict[str, Any] | None = None,
     **format_kwargs: Any,
 ) -> str:
@@ -2935,65 +3029,6 @@ def validate_llm_context_lengths(
             f"(max_prompt_tokens={max_prompt_tokens_for_model_len(max_model_len)})."
         )
         raise ValueError(msg)
-
-
-def normalize_prompt_batch(
-    prompts: RolloutPrompt | list[RolloutPrompt],
-) -> list[RolloutPrompt]:
-    """Normalize rollout prompts into a list-of-dicts per sample.
-
-    Supports both a list of per-sample dicts and a single stacked dict whose
-    tensor/list values are batched on dimension 0.
-
-    :param prompts: The prompts to normalize.
-    :type prompts: RolloutPrompt | list[RolloutPrompt]
-    :return: One prompt dict per sample.
-    :rtype: list[RolloutPrompt]
-    """
-    if isinstance(prompts, list):
-        return prompts
-
-    input_ids = prompts["input_ids"]
-    if not isinstance(input_ids, torch.Tensor) or input_ids.dim() == 1:
-        return [prompts]
-
-    batch_size = int(input_ids.shape[0])
-    if batch_size == 0:
-        return []
-
-    # Inspect each key once and write it into every output dict in one pass.
-    # Keys not declared on ``RolloutPrompt`` (caller-supplied metadata) are
-    # copied through unchanged, which a key-by-key typed construction can't do.
-    samples: list[dict[str, object]] = [{} for _ in range(batch_size)]
-    for key, value in prompts.items():
-        if (
-            isinstance(value, torch.Tensor)
-            and value.dim() > 0
-            and value.shape[0] == batch_size
-        ):
-            chunks = value.unbind(0) if value.dim() == 1 else value.split(1, dim=0)
-            for sample, chunk in zip(samples, chunks, strict=True):
-                sample[key] = chunk
-        elif isinstance(value, list) and len(value) == batch_size:
-            for sample, item in zip(samples, value, strict=True):
-                sample[key] = item
-        else:
-            for sample in samples:
-                sample[key] = value
-    # Open dicts preserve undeclared metadata; the closed TypedDict return can't
-    # name those keys, and a TypeGuard pass would only add a Python loop.
-    return samples  # ty: ignore[invalid-return-type]
-
-
-def is_rollout_prompt(obs: Mapping[str, object]) -> TypeGuard[RolloutPrompt]:
-    """Check whether a mapping is a tokenized rollout prompt.
-
-    :param obs: A prompt mapping returned by a rollout env.
-    :type obs: Mapping[str, object]
-    :return: ``True`` when the mapping carries prompt tokens.
-    :rtype: TypeGuard[RolloutPrompt]
-    """
-    return isinstance(obs.get("input_ids"), torch.Tensor)
 
 
 def is_preference_prompts(batch: Mapping[str, object]) -> TypeGuard[PreferencePrompts]:

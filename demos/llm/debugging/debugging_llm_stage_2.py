@@ -1,13 +1,21 @@
 # Copyright 2026 AgileRL
 # SPDX-License-Identifier: Apache-2.0
 
-"""Two-digit conditional target probe (``MultiInputConditionalEnv``)."""
+"""Two-digit conditional target probe (``MultiInputConditionalEnv``).
+
+Single process::
+
+    python demos/llm/debugging/debugging_llm_stage_2.py
+
+Multi-GPU distributed training::
+
+    torchrun --nproc_per_node=2 demos/llm/debugging/debugging_llm_stage_2.py
+"""
 
 from __future__ import annotations
 
 import statistics
 from random import Random
-from types import MethodType
 
 from agilerl import HAS_LLM_DEPENDENCIES
 
@@ -23,7 +31,7 @@ from tiny_model import TinyDigitTokenizer, build_tiny_actor_network
 from agilerl.algorithms import GRPO, LLMPPO, LLMREINFORCE
 from agilerl.training.llm import rollout as train_llm
 from agilerl.training.llm import train_llm_rollout
-from agilerl.utils.llm_utils import create_llm_accelerator, masked_whiten
+from agilerl.utils.llm_utils import masked_whiten
 from agilerl.utils.probe_envs_llm import MultiInputConditionalEnv
 from agilerl.utils.utils import create_population
 
@@ -102,55 +110,7 @@ def enable_reinforce_style_advantages(agent: LLMPPO) -> None:
         advantages = masked_whiten(rewards, action_mask)
         return returns, advantages
 
-    def _logprobs_no_critic(
-        self: LLMPPO,
-        ids: torch.Tensor,
-        batch_size: int,
-        use_reference: bool = False,
-        eval_mode: bool = False,
-        attention_mask: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor, None]:
-        with self.select_adapter("reference" if use_reference else "actor"):
-            self.actor.train(mode=not eval_mode)
-            if attention_mask is None:
-                attention_mask = ids != self.pad_token_id
-            if self.calc_position_embeddings:
-                position_ids = attention_mask.long().cumsum(dim=-1) - 1
-                position_ids.masked_fill_(mask=(attention_mask == 0), value=1)
-
-            num_samples = ids.shape[0]
-            log_probs = []
-            for batch_start in range(0, num_samples, batch_size):
-                batch_end = min((batch_start + batch_size), num_samples)
-                batch_ids = ids[batch_start:batch_end, :]
-                batch_attention_mask = attention_mask[batch_start:batch_end, :]
-                model_kwargs = {
-                    "input_ids": batch_ids,
-                    "attention_mask": batch_attention_mask,
-                    "use_cache": False,
-                }
-                if self.calc_position_embeddings:
-                    model_kwargs["position_ids"] = position_ids[
-                        batch_start:batch_end, :
-                    ]
-
-                output = self.actor.pretrained_model.forward(**model_kwargs)
-                logits = output[0] if isinstance(output, tuple) else output.logits
-                log_prob = self._logprobs_from_logits(
-                    logits[:, :-1],
-                    batch_ids[:, 1:],
-                )
-                log_probs.append(log_prob)
-
-            full_log_probs = torch.cat(log_probs, dim=0)
-            zero_values = torch.zeros_like(full_log_probs)
-            return full_log_probs, zero_values, None
-
     agent._compute_gae_returns = _reinforce_like_returns  # type: ignore[method-assign]
-    agent._get_logprobs_and_values = MethodType(  # type: ignore[method-assign]
-        _logprobs_no_critic,
-        agent,
-    )
 
 
 def run_single_seed(cfg: dict, seed: int) -> tuple[float, float]:
@@ -162,7 +122,6 @@ def run_single_seed(cfg: dict, seed: int) -> tuple[float, float]:
     max_ctx = int(dbg["max_context_length"])
     max_new = int(dbg["max_output_tokens"])
 
-    accelerator = create_llm_accelerator()
     torch.manual_seed(seed)
     tokenizer = TinyDigitTokenizer()
 
@@ -179,7 +138,6 @@ def run_single_seed(cfg: dict, seed: int) -> tuple[float, float]:
         net_config=None,
         INIT_HP=init_hp,
         population_size=1,
-        accelerator=accelerator,
         tokenizer=tokenizer,
         model_name=None,
         actor_network=build_tiny_actor_network(

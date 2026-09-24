@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
@@ -255,6 +255,16 @@ class TestPopulationMetrics:
         assert "train/agent_0/score" not in d
         assert "train/agent_0/local_steps" in d
 
+    def test_to_dict_empty_fitnesses(self):
+        """eval fitness keys omitted until an evaluation has produced values."""
+        m = _make_scalar_metrics(fitnesses=[])
+        d = m.to_dict()
+        assert "eval/mean_fitness" not in d
+        assert "eval/best_fitness" not in d
+        assert "eval/agent_0/fitness" not in d
+        assert "train/mean_score" in d
+        assert "train/agent_0/local_steps" in d
+
 
 # ===========================================================================
 # MetricsReport
@@ -320,6 +330,11 @@ class TestMetricsReport:
         m = _make_scalar_metrics()
         rows = MetricsReport(m).eval_rows()
         assert len(rows) == 1
+
+    def test_eval_rows_empty_fitnesses(self):
+        """no fitness row before the first evaluation."""
+        m = _make_scalar_metrics(fitnesses=[])
+        assert MetricsReport(m).eval_rows() == []
 
     def test_train_rows_with_scores_and_metrics(self):
         """score + additional metric rows."""
@@ -662,12 +677,11 @@ class TestCollectFitnesses:
         assert result == [5.0]
 
     def test_empty_fitness(self):
-        """nan for empty fitness."""
+        """no fitness yet -> empty list (omit from logs/tables)."""
         a = _make_mock_agent(fitness=[])
         pop = _make_population([a])
         result = pop._collect_fitnesses()
-        assert len(result) == 1
-        assert np.isnan(result[0])
+        assert result == []
 
     def test_dict_fitness(self):
         """multi-agent dict fitness."""
@@ -901,3 +915,30 @@ class TestGatherMetrics:
         )
         metrics = pop._gather_metrics()
         assert metrics.steps == [100]
+
+    def test_gather_metrics_distributed_main_scales_steps(self):
+        """steps multiplied by world size without an accelerator."""
+        hp_config = MagicMock()
+        hp_config.names.return_value = []
+        a = _make_mock_agent(
+            fitness=[1.0],
+            scores=[5.0],
+            steps=100,
+            additional_metrics=[],
+            nonscalar_metrics=[],
+            hp_config=hp_config,
+            hp_values={},
+        )
+
+        pop = _make_population(
+            [a],
+            additional_metric_names=[],
+            nonscalar_metric_names=[],
+        )
+        with (
+            patch("agilerl.population.is_distributed", return_value=True),
+            patch("agilerl.population.is_main_process", return_value=True),
+            patch("agilerl.population.get_world_size", return_value=4),
+        ):
+            metrics = pop._gather_metrics()
+        assert metrics.steps == [400]

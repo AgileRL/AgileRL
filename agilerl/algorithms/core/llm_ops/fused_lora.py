@@ -43,6 +43,11 @@ def uniform_routed_adapter(layer: LoraLayer) -> str | None:
     Default ``ParamWrapper`` applies a delta to a whole parameter, so mixed
     routings raise. Sorted- and routed-experts wrappers set
     ``_self_routed_lora`` and apply per-token masks in their own forward.
+
+    :param layer: LoRA layer to check.
+    :type layer: LoraLayer
+    :return: The routed adapter name, or ``None``.
+    :rtype: str | None
     """
     routing = ROUTING_STATE.get(layer)
     if routing is None:

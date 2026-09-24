@@ -26,6 +26,7 @@ from agilerl.arena.models import (
 from agilerl.arena.models.algorithms.dqn import DQNSpec
 from agilerl.arena.models.algorithms.grpo import GRPOSpec
 from agilerl.arena.models.env import GymEnvSpec, LLMEnvType
+from agilerl.arena.models.fsdp import FSDPConfig
 from agilerl.arena.models.manifest import _resolve_algorithm
 from agilerl.arena.models.registry import AlgorithmRegistry, register
 from agilerl.arena.models.schema import _package_version
@@ -259,17 +260,57 @@ class TestLLMAlgorithmSpecValidators:
         )
         assert spec.use_sequence_packing is True
 
-    def test_deepspeed_activation_checkpointing_is_rejected(self) -> None:
-        with pytest.raises(ValidationError, match="activation_checkpointing"):
+    def test_deepspeed_is_rejected(self) -> None:
+        with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
             GRPOSpec(group_size=2, deepspeed={"activation_checkpointing": {}})
 
-    def test_deepspeed_gradient_clipping_is_rejected(self) -> None:
-        with pytest.raises(ValidationError, match="gradient_clipping"):
-            GRPOSpec(group_size=2, deepspeed={"gradient_clipping": 1.0})
+    def test_zero_stage_is_rejected(self) -> None:
+        with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+            GRPOSpec(group_size=2, zero_stage=3)
 
-    def test_deepspeed_overrides_without_ignored_keys(self) -> None:
-        spec = GRPOSpec(group_size=2, deepspeed={"train_batch_size": 8})
-        assert spec.deepspeed == {"train_batch_size": 8}
+    def test_fsdp_true_coerces_to_config(self) -> None:
+        from agilerl.distributed import FSDPConfig
+
+        spec = GRPOSpec(group_size=2, fsdp=True)
+        assert spec.fsdp == FSDPConfig()
+
+    def test_fsdp_empty_dict_coerces_to_config(self) -> None:
+        from agilerl.distributed import FSDPConfig
+
+        spec = GRPOSpec(group_size=2, fsdp={})
+        assert spec.fsdp == FSDPConfig()
+
+    def test_fsdp_dict_coerces_known_fields(self) -> None:
+        spec = GRPOSpec(group_size=2, fsdp={"cpu_offload": True})
+        assert spec.fsdp is not None
+        assert spec.fsdp.cpu_offload is True
+
+    def test_fsdp_unknown_keys_are_rejected(self) -> None:
+        with pytest.raises(ValidationError, match="Unknown fsdp keys"):
+            GRPOSpec(group_size=2, fsdp={"not_a_field": True})
+
+    def test_fsdp_none_stays_none(self) -> None:
+        spec = GRPOSpec(group_size=2, fsdp=None)
+        assert spec.fsdp is None
+
+    def test_fsdp_config_passes_through(self) -> None:
+        config = FSDPConfig(wrap_every_n_blocks=2)
+        spec = GRPOSpec(group_size=2, fsdp=config)
+        assert spec.fsdp == config
+
+    def test_fsdp_false_is_rejected(self) -> None:
+        with pytest.raises(TypeError, match="fsdp must be null"):
+            GRPOSpec(group_size=2, fsdp=False)
+
+    def test_fsdp_serializes_dtypes_as_names(self) -> None:
+        spec = GRPOSpec(group_size=2, fsdp=True)
+        dumped = spec.model_dump()["fsdp"]
+        assert dumped["param_dtype"] == "bfloat16"
+        assert dumped["reduce_dtype"] == "float32"
+
+    def test_model_validate_rejects_non_dict(self) -> None:
+        with pytest.raises(ValidationError):
+            GRPOSpec.model_validate(["not", "a", "dict"])
 
     def test_mini_batch_must_be_a_multiple_of_micro_batch(self) -> None:
         with pytest.raises(ValidationError, match="not a multiple"):

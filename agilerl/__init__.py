@@ -55,7 +55,6 @@ def _is_distribution_installed(distribution: str) -> bool:
 HAS_LLM_DEPENDENCIES = all(_is_distribution_installed(pkg) for pkg in LLM_PACKAGES)
 HAS_LIGER_KERNEL = _is_distribution_installed("liger-kernel")
 HAS_VLLM = _is_distribution_installed("vllm")
-HAS_DEEPSPEED = _is_distribution_installed("deepspeed")
 
 # AgentType comes from agilerl-arena, a separate distribution merged into
 # this namespace. lazy.attach must run after extend_path, or a wheel install

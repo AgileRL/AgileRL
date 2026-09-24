@@ -552,7 +552,7 @@ class TestOptimizerWrapper:
         # Now test with a method that actually exists
         wrapper.optimizer.zero_grad = Mock()  # Replace with mock to verify call
         wrapper.zero_grad()
-        wrapper.optimizer.zero_grad.assert_called_once()
+        wrapper.optimizer.zero_grad.assert_called_once_with(set_to_none=True)
 
         # Multi-agent case - attribute delegation should fail
         networks = ModuleDict(
@@ -587,7 +587,10 @@ class TestOptimizerWrapper:
         wrapper.optimizer.zero_grad = Mock()
 
         wrapper.zero_grad()
-        wrapper.optimizer.zero_grad.assert_called_once()
+        wrapper.optimizer.zero_grad.assert_called_once_with(set_to_none=True)
+        wrapper.optimizer.zero_grad.reset_mock()
+        wrapper.zero_grad(set_to_none=False)
+        wrapper.optimizer.zero_grad.assert_called_once_with(set_to_none=False)
 
         # Restore method
         wrapper.optimizer.zero_grad = original_zero_grad
@@ -807,6 +810,34 @@ class TestOptimizerWrapper:
         )
         with pytest.raises(AssertionError, match="single optimizer state dictionary"):
             wrapper.load_state_dict("not a dict")
+
+    def test_state_dict_rejects_non_dict_multi_agent_optimizer(self):
+        networks = ModuleDict({"net_0": MockEvolvableNetwork(name="net_0")})
+        wrapper = OptimizerWrapper(
+            torch.optim.Adam,
+            networks,
+            0.001,
+            network_names=["networks"],
+            lr_name="lr",
+        )
+        wrapper.optimizer = torch.optim.Adam([nn.Parameter(torch.ones(2))], lr=1e-3)
+
+        with pytest.raises(TypeError, match="dictionary of optimizers"):
+            wrapper.state_dict()
+
+    def test_state_dict_rejects_non_optimizer_values(self):
+        networks = ModuleDict({"net_0": MockEvolvableNetwork(name="net_0")})
+        wrapper = OptimizerWrapper(
+            torch.optim.Adam,
+            networks,
+            0.001,
+            network_names=["networks"],
+            lr_name="lr",
+        )
+        wrapper.optimizer = {"net_0": "not-an-optimizer"}
+
+        with pytest.raises(TypeError, match="torch Optimizer per agent"):
+            wrapper.state_dict()
 
     def test_actual_learning(self):
         """Test that the optimizer actually performs gradient descent."""
@@ -1191,6 +1222,9 @@ def test_optimizer_wrapper_importable_without_llm_dependencies():
     finally:
         # Restore original module to avoid affecting other tests
         sys.modules["agilerl.algorithms.core.optimizer_wrapper"] = original_module
+        import agilerl.algorithms.core as _core_pkg
+
+        _core_pkg.optimizer_wrapper = original_module
 
 
 def test_infer_lr_name_multiple_matches_without_lr_keyword_raises():
@@ -1535,6 +1569,28 @@ def test_init_llm_optimizer_enables_lora_actor_and_critic_params():
     assert net.actor_lora_weight.requires_grad is True
     assert net.critic_lora_weight.requires_grad is True
     assert net.other_weight.requires_grad is False
+
+
+def test_init_llm_optimizer_splits_dtensor_and_tensor_actor_groups(monkeypatch):
+    class FakeDTensor(nn.Parameter):
+        pass
+
+    monkeypatch.setattr(
+        "agilerl.algorithms.core.optimizer_wrapper.DTensor", FakeDTensor
+    )
+
+    class _Net(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.actor_lora_sharded = FakeDTensor(torch.ones(2, 2))
+            self.actor_lora_plain = nn.Parameter(torch.ones(2, 2))
+
+    net = _Net()
+    opt = init_llm_optimizer(net, torch.optim.Adam, 0.01, {})
+    by_group = {group["group"]: group for group in opt.param_groups}
+    assert set(by_group) == {"actor", "actor_replicated"}
+    assert net.actor_lora_sharded in by_group["actor"]["params"]
+    assert net.actor_lora_plain in by_group["actor_replicated"]["params"]
 
 
 def test_optimizer_wrapper_infers_parent_container_from_constructor_stack():

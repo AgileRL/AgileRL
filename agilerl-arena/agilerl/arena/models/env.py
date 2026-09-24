@@ -356,6 +356,13 @@ class LLMEnvSpec(EnvSpecBase):
         default=None,
         description="Jinja file whose template replaces the tokenizer's own.",
     )
+    apply_chat_template: bool = Field(
+        default=True,
+        description=(
+            "Render prompts through the tokenizer chat template. Digit-token "
+            "multi-turn probes set this false and encode observations raw."
+        ),
+    )
 
     @property
     def name(self) -> str:

@@ -11,6 +11,16 @@ from unittest.mock import MagicMock, patch
 import agilerl.train as train_mod
 
 
+def _mock_trainer(name: str = "PPO", env: str = "CartPole-v1") -> MagicMock:
+    mock_trainer = MagicMock()
+    mock_trainer.algorithm_spec.name = name
+    mock_trainer.env_spec.name = env
+    mock_trainer.training_spec.pop_size = 6
+    mock_trainer.training_spec.max_steps = 100
+    mock_trainer.train.return_value = ([], [0.5])
+    return mock_trainer
+
+
 class TestParseArgs:
     def test_manifest_positional(self):
         with patch("sys.argv", ["train", "config.yaml"]):
@@ -21,11 +31,6 @@ class TestParseArgs:
         with patch("sys.argv", ["train", "m.yaml", "-d", "cuda:1"]):
             args = train_mod.parse_args()
         assert args.device == "cuda:1"
-
-    def test_use_accelerator_flag(self):
-        with patch("sys.argv", ["train", "m.yaml", "--use-accelerator"]):
-            args = train_mod.parse_args()
-        assert args.use_accelerator is True
 
     def test_wb_flag(self):
         with patch("sys.argv", ["train", "m.yaml", "--wb"]):
@@ -101,7 +106,6 @@ class TestParseArgs:
     def test_defaults(self):
         with patch("sys.argv", ["train", "m.yaml"]):
             args = train_mod.parse_args()
-        assert args.use_accelerator is False
         assert args.wb is False
         assert args.wandb_api_key is None
         assert args.checkpoint_steps is None
@@ -116,25 +120,21 @@ class TestParseArgs:
 
 class TestMain:
     def test_main_calls_from_manifest_and_train(self):
-        mock_trainer = MagicMock()
-        mock_trainer.algorithm_spec.name = "PPO"
-        mock_trainer.env_spec.name = "CartPole-v1"
-        mock_trainer.training_spec.pop_size = 6
-        mock_trainer.training_spec.max_steps = 100
-        mock_trainer.train.return_value = ([], [0.5])
+        mock_trainer = _mock_trainer()
 
-        with patch.object(
-            train_mod.LocalTrainer, "from_manifest", return_value=mock_trainer
-        ) as mock_from:
-            with patch("sys.argv", ["train", "config.yaml", "-d", "cpu"]):
-                train_mod.main()
+        with (
+            patch.object(
+                train_mod.LocalTrainer, "from_manifest", return_value=mock_trainer
+            ) as mock_from,
+            patch("sys.argv", ["train", "config.yaml", "-d", "cpu"]),
+        ):
+            train_mod.main()
 
-            mock_from.assert_called_once_with(
-                manifest=Path("config.yaml"),
-                resume_from_checkpoint=None,
-                device="cpu",
-                accelerator=None,
-            )
+        mock_from.assert_called_once_with(
+            manifest=Path("config.yaml"),
+            resume_from_checkpoint=None,
+            device="cpu",
+        )
         mock_trainer.train.assert_called_once_with(
             wb=False,
             wandb_api_key=None,
@@ -147,28 +147,3 @@ class TestMain:
             elite_path=None,
             verbose=True,
         )
-
-    def test_main_with_accelerator(self):
-        mock_trainer = MagicMock()
-        mock_trainer.algorithm_spec.name = "DQN"
-        mock_trainer.env_spec.name = "LunarLander-v2"
-        mock_trainer.training_spec.pop_size = 4
-        mock_trainer.training_spec.max_steps = 50
-        mock_trainer.train.return_value = ([], [1.0])
-
-        mock_accel_instance = MagicMock()
-
-        with patch.object(
-            train_mod.LocalTrainer, "from_manifest", return_value=mock_trainer
-        ) as mock_from:
-            with patch.object(
-                train_mod, "Accelerator", return_value=mock_accel_instance
-            ) as mock_accel:
-                with patch(
-                    "sys.argv", ["train", "m.yaml", "--use-accelerator", "-d", "cpu"]
-                ):
-                    train_mod.main()
-
-            mock_accel.assert_called_once()
-            call_kwargs = mock_from.call_args[1]
-            assert call_kwargs["accelerator"] is mock_accel_instance
