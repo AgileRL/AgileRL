@@ -1071,6 +1071,15 @@ def _clone_lora_config(lora_config: LoraConfig, **updates: Any) -> LoraConfig:
     return adapted
 
 
+def _zero_lora_dropout_for_target_parameters(lora_config: LoraConfig) -> LoraConfig:
+    """PEFT parameter-level LoRA cannot factor dropout out of the low-rank product."""
+    if not getattr(lora_config, "target_parameters", None):
+        return lora_config
+    if not getattr(lora_config, "lora_dropout", 0.0):
+        return lora_config
+    return _clone_lora_config(lora_config, lora_dropout=0.0)
+
+
 def _clone_lora_config_with_targets(
     lora_config: LoraConfig, target_modules: str | list[str]
 ) -> LoraConfig:
@@ -1203,7 +1212,11 @@ def adapt_lora_config_for_model(
 
     On Mamba-family ``model_type`` values, ``out_proj`` and ``conv1d`` are excluded
     from LoRA inject (PEFT 0.20+ forbids wrapping those fused-kernel modules).
+
+    Packed-expert ``target_parameters`` force ``lora_dropout=0``; PEFT cannot
+    factor dropout out of the parameter-level low-rank product.
     """
+    lora_config = _zero_lora_dropout_for_target_parameters(lora_config)
     lora_config = _adapt_mamba_lora_config(model, lora_config)
     raw_targets = lora_config.target_modules
     projection_names = _projection_names_for_clippable_lora(model, raw_targets)
@@ -1380,23 +1393,22 @@ def resolve_attn_implementation(
 ) -> str:
     """Pick the trainer attention backend.
 
-    Order: explicit ``requested`` (anything other than ``None`` / ``"auto"``) →
-    ``ATTN_IMPLEMENTATION`` / ``AGILERL_ATTN_IMPLEMENTATION`` → family trainer
-    default for ``model_name_or_path`` (Gemma SWA ``flex_attention``) →
-    ``flash_attention_2`` if ``flash_attn`` is installed, else ``sdpa``.
+    Order: ``ATTN_IMPLEMENTATION`` / ``AGILERL_ATTN_IMPLEMENTATION`` → family
+    trainer default for ``model_name_or_path`` (Gemma SWA / gpt-oss
+    ``flex_attention``) → explicit ``requested`` → ``flash_attention_2`` if
+    ``flash_attn`` is installed, else ``sdpa``. Family defaults beat YAML /
+    spec values; env still overrides the catalog.
 
     :param requested: Explicit choice from the caller. ``None`` / ``"auto"``
-        continue to env, family, then the flash/sdpa fallback.
+        continue to the flash/sdpa fallback when env and family are unset.
     :type requested: str | None
     :param model_name_or_path: Checkpoint id used to look up family trainer
-        defaults when nothing more specific is set.
+        defaults.
     :type model_name_or_path: str | None
     :return: The attention implementation string for ``from_pretrained`` /
         ``from_config``.
     :rtype: str
     """
-    if requested is not None and requested != "auto":
-        return requested
     env_attn = os.environ.get("ATTN_IMPLEMENTATION") or os.environ.get(
         "AGILERL_ATTN_IMPLEMENTATION"
     )
@@ -1406,6 +1418,8 @@ def resolve_attn_implementation(
         family_attn = family_runtime(model_name_or_path).trainer.attn_implementation
         if family_attn is not None and family_attn != "auto":
             return family_attn
+    if requested is not None and requested != "auto":
+        return requested
     if importlib.util.find_spec("flash_attn") is not None:
         return "flash_attention_2"
     return "sdpa"
@@ -1544,8 +1558,8 @@ def create_model_from_name_or_path(
     :type model_name_or_path: str
     :param model_config: Extra keyword arguments forwarded to ``from_pretrained``
         (e.g. a ``quantization_config``). ``torch_dtype`` fills if absent, then
-        ``attn_implementation`` is resolved (explicit value, env, family
-        trainer default, then flash/sdpa). Other family trainer keys fill
+        ``attn_implementation`` is resolved (env, family trainer default,
+        explicit value, then flash/sdpa). Other family trainer keys fill
         via ``setdefault``.
     :type model_config: dict[str, Any ] | None
     :param add_value_head: Flag to indicate if a value head should be added to the model, defaults to False

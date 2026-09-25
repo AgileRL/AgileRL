@@ -26,6 +26,10 @@ from agilerl.algorithms.core.llm_ops.moe_lora import (
     moe_expert_target_parameters,
     upgrade_moe_param_wrappers,
 )
+from agilerl.architectures.gptoss.experts import (
+    GptOssExpertsLoraWrapper,
+    gpt_oss_experts_local_forward,
+)
 from agilerl.distributed import fsdp as dmod
 from agilerl.distributed import full_shape_views
 from agilerl.utils.llm_utils import (
@@ -182,6 +186,67 @@ class _UngatedMoeBlock(nn.Module):
         return self.experts(hidden_states, top_k_index, top_k_weights)
 
 
+class _GptOssExperts(nn.Module):
+    """Packed experts matching Hugging Face ``GptOssExperts``.
+
+    ``is_transposed=True`` keeps PEFT's LoRA delta in ``[E, in, out]``, the
+    layout ``x @ W + b`` uses.
+    """
+
+    is_transposed = True
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.num_experts = NUM_EXPERTS
+        self.gate_up_proj = nn.Parameter(
+            torch.randn(NUM_EXPERTS, HIDDEN, 2 * INTERMEDIATE) * 0.1
+        )
+        self.gate_up_proj_bias = nn.Parameter(
+            torch.zeros(NUM_EXPERTS, 2 * INTERMEDIATE)
+        )
+        self.down_proj = nn.Parameter(
+            torch.randn(NUM_EXPERTS, INTERMEDIATE, HIDDEN) * 0.1
+        )
+        self.down_proj_bias = nn.Parameter(torch.zeros(NUM_EXPERTS, HIDDEN))
+        self.alpha = 1.702
+        self.limit = 7.0
+
+    def forward(self, hidden_states, router_indices=None, routing_weights=None):
+        final = torch.zeros_like(hidden_states)
+        expert_mask = F.one_hot(router_indices, num_classes=self.num_experts)
+        expert_mask = expert_mask.permute(2, 1, 0)
+        for expert_idx in range(self.num_experts):
+            top_k_pos, token_idx = torch.where(expert_mask[expert_idx])
+            current = hidden_states[token_idx]
+            gate_up = (
+                current @ self.gate_up_proj[expert_idx]
+                + self.gate_up_proj_bias[expert_idx]
+            )
+            gate, up = gate_up[..., ::2], gate_up[..., 1::2]
+            gate = gate.clamp(max=self.limit)
+            up = up.clamp(min=-self.limit, max=self.limit)
+            gated = (up + 1) * (gate * torch.sigmoid(gate * self.alpha))
+            current = (
+                gated @ self.down_proj[expert_idx] + self.down_proj_bias[expert_idx]
+            )
+            current = current * routing_weights[token_idx, top_k_pos, None]
+            final.index_add_(0, token_idx, current.to(hidden_states.dtype))
+        return final
+
+
+class _GptOssMoeBlock(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.router = nn.Linear(HIDDEN, NUM_EXPERTS, bias=False)
+        self.experts = _GptOssExperts()
+
+    def forward(self, hidden_states):
+        logits = self.router(hidden_states)
+        router_top, router_indices = logits.topk(TOP_K, dim=-1)
+        routing_weights = torch.softmax(router_top, dim=-1).type_as(hidden_states)
+        return self.experts(hidden_states, router_indices, routing_weights)
+
+
 class _FusedRoutedExperts(nn.Module):
     """Packed gated experts with silu fused into the GEMM (no ``act_fn``)."""
 
@@ -244,6 +309,10 @@ def _ungated_pair():
     return _build_pair(_UngatedMoeBlock, ["experts.up_proj", "experts.down_proj"])
 
 
+def _gpt_oss_pair():
+    return _build_pair(_GptOssMoeBlock, ["experts.gate_up_proj", "experts.down_proj"])
+
+
 def _wrappers(model):
     return [m for m in model.modules() if isinstance(m, ParamWrapper)]
 
@@ -266,7 +335,9 @@ def _seed():
     torch.manual_seed(42)
 
 
-@pytest.mark.parametrize("pair_factory", [_sorted_pair, _routed_pair, _ungated_pair])
+@pytest.mark.parametrize(
+    "pair_factory", [_sorted_pair, _routed_pair, _ungated_pair, _gpt_oss_pair]
+)
 def test_split_lora_matches_peft_default(pair_factory):
     reference, upgraded = pair_factory()
     x = torch.randn(12, HIDDEN)
@@ -291,6 +362,9 @@ def test_upgrade_selects_wrapper_classes():
 
     _, ungated_block = _ungated_pair()
     assert RoutedExpertsLoraWrapper in {type(m) for m in _wrappers(ungated_block)}
+
+    _, gpt_oss_block = _gpt_oss_pair()
+    assert GptOssExpertsLoraWrapper in {type(m) for m in _wrappers(gpt_oss_block)}
 
 
 class _OddExperts(nn.Module):
@@ -397,7 +471,9 @@ def test_peft_attach_sizes_lora_from_global_shape_without_gathering():
     assert experts._parameters["down_proj"] is fake_down
 
 
-@pytest.mark.parametrize("pair_factory", [_sorted_pair, _routed_pair, _ungated_pair])
+@pytest.mark.parametrize(
+    "pair_factory", [_sorted_pair, _routed_pair, _ungated_pair, _gpt_oss_pair]
+)
 def test_fused_routing_uniform_and_base(pair_factory):
     _, upgraded = pair_factory()
     patch_lora_for_fused_forward(upgraded)
@@ -520,6 +596,7 @@ def test_actor_reference_expert_lora_wrappers_and_freeze():
         (_RoutedMoeBlock, ["experts.gate_up_proj", "experts.down_proj"]),
         (_UngatedMoeBlock, ["experts.up_proj", "experts.down_proj"]),
         (_SortedMoeBlock, ["input_linear.weight", "output_linear.weight"]),
+        (_GptOssMoeBlock, ["experts.gate_up_proj", "experts.down_proj"]),
     ],
 )
 def test_fused_mixed_actor_reference_matches_uniform_slices(block_cls, targets):
@@ -546,6 +623,7 @@ def test_fused_mixed_actor_reference_matches_uniform_slices(block_cls, targets):
         (_RoutedMoeBlock, ["experts.gate_up_proj", "experts.down_proj"]),
         (_UngatedMoeBlock, ["experts.up_proj", "experts.down_proj"]),
         (_SortedMoeBlock, ["input_linear.weight", "output_linear.weight"]),
+        (_GptOssMoeBlock, ["experts.gate_up_proj", "experts.down_proj"]),
     ],
 )
 def test_fused_mixed_actor_critic_matches_uniform_slices(block_cls, targets):
@@ -576,6 +654,7 @@ def test_fused_mixed_actor_critic_matches_uniform_slices(block_cls, targets):
     [
         (_UngatedMoeBlock, ["experts.up_proj", "experts.down_proj"]),
         (_SortedMoeBlock, ["input_linear.weight", "output_linear.weight"]),
+        (_GptOssMoeBlock, ["experts.gate_up_proj", "experts.down_proj"]),
     ],
 )
 def test_actor_critic_expert_lora_both_trainable(block_cls, targets):
@@ -765,6 +844,12 @@ def test_moe_expert_target_parameters_detects_both_conventions():
         "moe.experts.down_proj",
         "moe.experts.gate_up_proj",
     ]
+    gpt_oss = nn.Sequential()
+    gpt_oss.mlp = _GptOssMoeBlock()
+    assert moe_expert_target_parameters(gpt_oss) == [
+        "mlp.experts.down_proj",
+        "mlp.experts.gate_up_proj",
+    ]
 
 
 def test_expert_lora_vllm_key_map_and_filter():
@@ -802,6 +887,15 @@ def test_expert_lora_vllm_key_map_and_filter():
         if isinstance(module, ParamWrapper) and module.parameter_name == "up_proj"
     )
     assert key_map[up_key] == "experts.base_layer"
+
+    _, gpt_oss_block = _gpt_oss_pair()
+    key_map = expert_lora_vllm_key_map(gpt_oss_block)
+    gate_up_key = next(
+        name
+        for name, module in gpt_oss_block.named_modules()
+        if isinstance(module, ParamWrapper) and module.parameter_name == "gate_up_proj"
+    )
+    assert key_map[gate_up_key] == "experts.base_layer"
 
 
 def test_expert_lora_vllm_key_map_raises_on_unknown_parameter():
@@ -1270,7 +1364,7 @@ def test_resolve_adapters_unmerges_when_disabled(monkeypatch):
     wrapper.merged = True
     monkeypatch.setattr(moe_mod, "uniform_routed_adapter", lambda _w: None)
 
-    assert moe_mod._resolve_adapters(wrapper) == []
+    assert moe_mod.resolve_adapters(wrapper) == []
     wrapper.unmerge.assert_called_once_with()
 
 
@@ -1297,7 +1391,7 @@ def test_split_lora_delta_dtensor_fallback(monkeypatch):
     wrapper.r = {"actor": rank}
     monkeypatch.setattr(moe_mod, "DTensor", FakeDTensor)
 
-    out = moe_mod._split_lora_delta(wrapper, x, [2, 2], "actor", num_experts=experts)
+    out = moe_mod.split_lora_delta(wrapper, x, [2, 2], "actor", num_experts=experts)
 
     assert out.shape == (total, 6)
     lora_a.assert_called_once()
@@ -1327,7 +1421,7 @@ def test_split_lora_delta_stacked_layouts():
         wrapper.scaling = {"actor": 1.0}
         wrapper.r = {"actor": rank}
         wrapper.num_experts = experts
-        return moe_mod._split_lora_delta(wrapper, x, [2, 2], "actor")
+        return moe_mod.split_lora_delta(wrapper, x, [2, 2], "actor")
 
     grouped = run(b_exp_first)
     transposed = run(b_exp_last)
@@ -1356,7 +1450,7 @@ def test_routed_local_forward_resolves_chain_adapters(monkeypatch):
     top_k_index = torch.randint(0, NUM_EXPERTS, (4, TOP_K))
     top_k_weights = torch.rand(4, TOP_K)
     chain = {"gate_up_proj": MagicMock()}
-    monkeypatch.setattr(moe_mod, "_resolve_adapters", lambda _w: [])
+    monkeypatch.setattr(moe_mod, "resolve_adapters", lambda _w: [])
 
     out = moe_mod._routed_experts_local_forward(
         experts, hidden, top_k_index, top_k_weights, chain=chain
@@ -1401,10 +1495,61 @@ def test_routed_wrapper_delegates_when_layout_unknown():
         ParamWrapper, "forward", return_value="peft-default"
     ) as mock_forward:
         with patch(
-            "agilerl.algorithms.core.llm_ops.moe_lora._resolve_adapters",
+            "agilerl.algorithms.core.llm_ops.moe_lora.resolve_adapters",
             return_value=["actor"],
         ):
             out = wrapper(hidden, top_k_index, top_k_weights)
 
     mock_forward.assert_called_once()
     assert out == "peft-default"
+
+
+class TestGptOssExpertsLocalForward:
+    def test_resolves_adapters_from_the_chain(self) -> None:
+        from agilerl.algorithms.core.llm_ops import moe_lora as moe_mod
+
+        _reference, upgraded = _gpt_oss_pair()
+        wrapper = upgraded.experts
+        hidden = torch.randn(4, HIDDEN)
+        indices = torch.zeros(4, TOP_K, dtype=torch.long)
+        weights = torch.full((4, TOP_K), 0.5)
+        chain = moe_mod.wrapper_chain(wrapper)
+
+        direct = gpt_oss_experts_local_forward(
+            wrapper.get_base_layer(),
+            hidden,
+            indices,
+            weights,
+            chain=chain,
+        )
+        via_wrapper = wrapper(hidden, indices, weights)
+
+        assert torch.allclose(direct, via_wrapper)
+
+
+class TestGptOssExpertsLoraWrapperForward:
+    def test_delegates_on_extra_args(self) -> None:
+        _reference, upgraded = _gpt_oss_pair()
+        wrapper = upgraded.experts
+        hidden = torch.randn(4, HIDDEN)
+        indices = torch.zeros(4, TOP_K, dtype=torch.long)
+        weights = torch.ones(4, TOP_K)
+
+        with patch.object(ParamWrapper, "forward", return_value=hidden):
+            out = wrapper(hidden, indices, weights, "extra")
+
+        assert out is hidden
+
+    def test_delegates_when_layout_unknown(self) -> None:
+        _reference, upgraded = _gpt_oss_pair()
+        wrapper = upgraded.experts
+        experts = wrapper.get_base_layer()
+        experts.gate_up_proj = nn.Parameter(torch.zeros(NUM_EXPERTS, HIDDEN))
+        hidden = torch.randn(4, HIDDEN)
+        indices = torch.zeros(4, TOP_K, dtype=torch.long)
+        weights = torch.ones(4, TOP_K)
+
+        with patch.object(ParamWrapper, "forward", return_value=hidden):
+            out = wrapper(hidden, indices, weights)
+
+        assert out is hidden

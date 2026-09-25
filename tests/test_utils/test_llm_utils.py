@@ -1863,6 +1863,18 @@ class TestAdaptLoraConfigForModelMamba:
         assert set(adapted.exclude_modules) == {"conv1d", "out_proj"}
         assert cfg.target_modules == ["in_proj", "out_proj", "conv1d"]
 
+    def test_target_parameters_force_zero_dropout(self):
+        cfg = _PlainLoraConfig(
+            target_modules=["in_proj"],
+            target_parameters=["experts.up_proj"],
+        )
+        cfg.lora_dropout = 0.05
+
+        adapted = adapt_lora_config_for_model(_PlainLinearModel(), cfg)
+
+        assert adapted.lora_dropout == 0.0
+        assert cfg.lora_dropout == 0.05
+
     def test_out_proj_only_raises(self):
         cfg = _PlainLoraConfig(target_modules=["out_proj"])
 
@@ -1997,9 +2009,9 @@ class TestResolveAttnImplementation:
         monkeypatch.setenv("AGILERL_ATTN_IMPLEMENTATION", "eager")
         assert resolve_attn_implementation(None) == "sdpa"
 
-    def test_explicit_beats_env(self, monkeypatch):
+    def test_env_beats_explicit(self, monkeypatch):
         monkeypatch.setenv("ATTN_IMPLEMENTATION", "eager")
-        assert resolve_attn_implementation("flex_attention") == "flex_attention"
+        assert resolve_attn_implementation("flex_attention") == "eager"
 
     def test_family_default_when_unset(self, monkeypatch):
         monkeypatch.setattr(
@@ -2295,7 +2307,7 @@ class TestCreateModelFromNameOrPathDefaults:
         create_model_from_name_or_path("google/gemma-2-9b")
         assert captured["kwargs"]["attn_implementation"] == "flash_attention_2"
 
-    def test_explicit_attn_implementation_not_overwritten(self, monkeypatch):
+    def test_family_catalog_overrides_explicit_attn(self, monkeypatch):
         captured = {}
         monkeypatch.setattr(
             llm_utils_module, "AutoModelForCausalLM", self._fake_loader(captured)
@@ -2303,13 +2315,13 @@ class TestCreateModelFromNameOrPathDefaults:
         monkeypatch.setattr("importlib.util.find_spec", lambda name: object())
         monkeypatch.setattr(
             "transformers.AutoConfig.from_pretrained",
-            lambda *args, **kwargs: SimpleNamespace(model_type="gemma4"),
+            lambda *args, **kwargs: SimpleNamespace(model_type="gpt_oss"),
         )
         create_model_from_name_or_path(
-            "google/gemma-4",
+            "openai/gpt-oss-20b",
             model_config={"attn_implementation": "sdpa"},
         )
-        assert captured["kwargs"]["attn_implementation"] == "sdpa"
+        assert captured["kwargs"]["attn_implementation"] == "flex_attention"
 
     def test_nemotron_defaults_to_flash_attention_2(self, monkeypatch):
         captured = {}

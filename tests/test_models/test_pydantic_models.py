@@ -1063,7 +1063,7 @@ class TestLLMAlgorithmSpecBuild:
         )
 
     @pytest.mark.skipif(not HAS_LLM_DEPENDENCIES, reason="LLM deps not installed")
-    def test_build_algorithm_explicit_attn_wins_over_gemma_default(
+    def test_build_algorithm_family_catalog_overrides_explicit_attn(
         self, monkeypatch: pytest.MonkeyPatch
     ):
         from agilerl.arena.models.algorithms import GRPOSpec
@@ -1094,7 +1094,7 @@ class TestLLMAlgorithmSpecBuild:
             build_from_spec(spec, tokenizer=mock_tokenizer, index=0)
 
         kwargs = mock_algo_cls.call_args.kwargs
-        assert kwargs["model_config"] == {"attn_implementation": "sdpa"}
+        assert kwargs["model_config"] == {"attn_implementation": "flex_attention"}
 
     def test_resume_from_checkpoint(self):
         """build_algorithm with resume_from_checkpoint."""

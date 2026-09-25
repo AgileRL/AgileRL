@@ -141,6 +141,15 @@ class TestFamilyRuntime:
             "attn_implementation": "flex_attention"
         }
 
+    def test_gpt_oss_trainer_dumps_flex_attention(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        stub_auto_config(monkeypatch, "gpt_oss")
+        config = architectures.family_runtime("openai/gpt-oss-20b")
+        assert config.trainer.model_dump(exclude_none=True) == {
+            "attn_implementation": "flex_attention"
+        }
+
     def test_nemotron_trainer_dumps_flash_attention_2(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

@@ -10,7 +10,7 @@ expert weights themselves, per wrapped parameter, per layer. The wrappers here
 keep the low-rank factorization split instead: tokens are grouped per expert
 and pushed through that expert's rank-``r`` slice of ``lora_A``/``lora_B``, so
 the largest adapter intermediate is ``[tokens, r]``. Wrappers on modules
-matching neither supported calling convention stay on PEFT's default path.
+matching none of the supported calling conventions stay on PEFT's default path.
 """
 
 from __future__ import annotations
@@ -33,6 +33,10 @@ from agilerl.algorithms.core.llm_ops.fused_lora import (
     ROUTING_STATE,
     patch_lora_for_fused_forward,
     uniform_routed_adapter,
+)
+from agilerl.architectures.gptoss.experts import (
+    GptOssExpertsLoraWrapper,
+    is_gpt_oss_experts_module,
 )
 
 logger = logging.getLogger(__name__)
@@ -225,8 +229,12 @@ def _is_routed_experts_module(module: nn.Module) -> bool:
 
 
 def _is_packed_experts_module(module: nn.Module) -> bool:
-    """Whether *module* is a packed expert stack (routed or sorted)."""
-    return _is_routed_experts_module(module) or _is_sorted_experts_module(module)
+    """Whether *module* is a packed expert stack (routed, sorted, or gpt-oss)."""
+    return (
+        _is_routed_experts_module(module)
+        or _is_sorted_experts_module(module)
+        or is_gpt_oss_experts_module(module)
+    )
 
 
 def _expert_counts(
@@ -244,12 +252,12 @@ def _expert_counts(
     return counts
 
 
-def _adapters_in_routing(wrapper: ParamWrapper, routing: Sequence[str]) -> list[str]:
+def adapters_in_routing(wrapper: ParamWrapper, routing: Sequence[str]) -> list[str]:
     """Adapter names from *routing* that this wrapper actually hosts."""
     return [name for name in dict.fromkeys(routing) if name in wrapper.lora_A]
 
 
-def _token_adapter_ids(
+def token_adapter_ids(
     routing: Sequence[str], n_rows: int, token_idx: torch.Tensor
 ) -> tuple[torch.Tensor, dict[str, int]]:
     """Expand per-sample fused routing to tokens, then permute into expert-sorted order.
@@ -274,7 +282,7 @@ def _token_adapter_ids(
     return table[token_idx], name_to_id
 
 
-def _resolve_adapters(wrapper: ParamWrapper) -> list[str]:
+def resolve_adapters(wrapper: ParamWrapper) -> list[str]:
     """Adapter names to apply on this forward, honoring fused routing and adapter state."""
     routed = uniform_routed_adapter(wrapper)
     if routed is not None:
@@ -290,7 +298,7 @@ def _resolve_adapters(wrapper: ParamWrapper) -> list[str]:
     ]
 
 
-def _split_lora_delta(
+def split_lora_delta(
     wrapper: ParamWrapper,
     x: torch.Tensor,
     counts: Sequence[int] | torch.Tensor,
@@ -372,7 +380,7 @@ def _routed_experts_local_forward(
     local_e = up_weight.shape[0]
     num_experts = local_e
     if chain is not None and adapters is None:
-        adapters = {name: _resolve_adapters(w) for name, w in chain.items()}
+        adapters = {name: resolve_adapters(w) for name, w in chain.items()}
     adapters = adapters or {}
     chain = chain or {}
 
@@ -386,7 +394,7 @@ def _routed_experts_local_forward(
     row_ids: torch.Tensor | None = None
     id_map: dict[str, int] | None = None
     if routing is not None and len(set(routing)) > 1:
-        row_ids, id_map = _token_adapter_ids(routing, hidden_states.shape[0], token_idx)
+        row_ids, id_map = token_adapter_ids(routing, hidden_states.shape[0], token_idx)
 
     counts_for_gemm = counts
 
@@ -397,7 +405,7 @@ def _routed_experts_local_forward(
     )
     projected = _grouped_linear(x, up_weight, counts_for_gemm, offs)
     for name in adapters.get(up_name, []):
-        delta = _split_lora_delta(
+        delta = split_lora_delta(
             chain[up_name],
             x,
             counts_for_gemm,
@@ -416,7 +424,7 @@ def _routed_experts_local_forward(
         intermediate = act_fn(projected)
     down = _grouped_linear(intermediate, down_weight, counts_for_gemm, offs)
     for name in adapters.get("down_proj", []):
-        delta = _split_lora_delta(
+        delta = split_lora_delta(
             chain["down_proj"],
             intermediate,
             counts_for_gemm,
@@ -434,7 +442,7 @@ def _routed_experts_local_forward(
     return result
 
 
-def _wrapper_chain(wrapper: ParamWrapper) -> dict[str, ParamWrapper]:
+def wrapper_chain(wrapper: ParamWrapper) -> dict[str, ParamWrapper]:
     """Map targeted parameter name to wrapper for a (possibly nested) wrapper chain."""
     chain: dict[str, ParamWrapper] = {}
     module: nn.Module = wrapper
@@ -464,7 +472,7 @@ class SortedExpertsLoraWrapper(ParamWrapper):
         id_map: dict[str, int] | None = None
         if mixed:
             assert routing is not None
-            adapters = _adapters_in_routing(self, routing)
+            adapters = adapters_in_routing(self, routing)
             token_idx = self.token_index
             n_tokens = self.n_tokens
             if token_idx is None or n_tokens is None:
@@ -480,9 +488,9 @@ class SortedExpertsLoraWrapper(ParamWrapper):
                     f"{x.shape[0]}."
                 )
                 raise ValueError(msg)
-            row_ids, id_map = _token_adapter_ids(routing, n_tokens, token_idx)
+            row_ids, id_map = token_adapter_ids(routing, n_tokens, token_idx)
         else:
-            adapters = _resolve_adapters(self)
+            adapters = resolve_adapters(self)
         base = self.base_layer
         result = base(x, expert_size, *args, **kwargs)
         if not adapters:
@@ -490,7 +498,7 @@ class SortedExpertsLoraWrapper(ParamWrapper):
         counts = _expert_counts(expert_size, self.num_experts)
         offs = _group_offsets(counts, x.device) if x.is_cuda else None
         for name in adapters:
-            delta = _split_lora_delta(self, x, counts, name, offs)
+            delta = split_lora_delta(self, x, counts, name, offs)
             if row_ids is not None and id_map is not None:
                 mask = (row_ids == id_map[name]).to(delta.dtype).unsqueeze(-1)
                 delta = delta * mask
@@ -515,18 +523,18 @@ class RoutedExpertsLoraWrapper(ParamWrapper):
             return ParamWrapper.forward(
                 self, hidden_states, top_k_index, top_k_weights, *args, **kwargs
             )
-        chain = _wrapper_chain(self)
+        chain = wrapper_chain(self)
         experts = self.get_base_layer()
         routing = ROUTING_STATE.get(self)
         mixed = routing is not None and len(set(routing)) > 1
         if mixed:
             assert routing is not None
             adapters = {
-                name: _adapters_in_routing(wrapper, routing)
+                name: adapters_in_routing(wrapper, routing)
                 for name, wrapper in chain.items()
             }
         else:
-            adapters = {name: _resolve_adapters(w) for name, w in chain.items()}
+            adapters = {name: resolve_adapters(w) for name, w in chain.items()}
 
         if not any(adapters.values()):
             return experts(hidden_states, top_k_index, top_k_weights)
@@ -551,7 +559,7 @@ def _bind_gate_token_index(model: nn.Module) -> None:
 
     The sibling ``router`` returns ``(index_sorted_experts, batch_index, ...)``.
     Fused routing is in token order; the wrappers permute adapter ids with
-    that index (see ``_token_adapter_ids``).
+    that index (see ``token_adapter_ids``).
     """
     for parent in model.modules():
         router = getattr(parent, "router", None)
@@ -608,7 +616,7 @@ def upgrade_moe_param_wrappers(model: nn.Module) -> int:
             continue
         if type(module) is not ParamWrapper:
             continue
-        chain = _wrapper_chain(module)
+        chain = wrapper_chain(module)
         base = module.get_base_layer()
         projections = _routed_projection_names(base)
         if (
@@ -620,6 +628,12 @@ def upgrade_moe_param_wrappers(model: nn.Module) -> int:
             upgraded += 1
         elif projections is not None and set(chain) <= {projections[0], "down_proj"}:
             module.__class__ = RoutedExpertsLoraWrapper
+            upgraded += 1
+        elif is_gpt_oss_experts_module(base) and set(chain) <= {
+            "gate_up_proj",
+            "down_proj",
+        }:
+            module.__class__ = GptOssExpertsLoraWrapper
             upgraded += 1
         elif module.get_param().ndim == 3:
             fallbacks.append(name)
@@ -668,6 +682,9 @@ def moe_expert_target_parameters(model: nn.Module) -> list[str]:
             suffixes.add(f"{prefix}.weight")
         elif (projections := _routed_projection_names(module)) is not None:
             suffixes.add(f"{prefix}.{projections[0]}")
+            suffixes.add(f"{prefix}.down_proj")
+        elif is_gpt_oss_experts_module(module):
+            suffixes.add(f"{prefix}.gate_up_proj")
             suffixes.add(f"{prefix}.down_proj")
     return sorted(suffixes)
 
