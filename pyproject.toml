@@ -122,6 +122,7 @@ markers = [
 
 [tool.coverage.run]
 source = ["agilerl", "agilerl-arena/agilerl"]
+relative_files = true
 parallel = true
 concurrency = ["multiprocessing", "thread"]
 sigterm = true

@@ -8,7 +8,7 @@ permissions:
     contents: read
 
 jobs:
-    tests:
+    cpu:
         runs-on: gha-runner-scale-set
         strategy:
             fail-fast: false
@@ -20,6 +20,9 @@ jobs:
             UV_PROJECT_ENVIRONMENT: /tmp/agilerl-venv
             HF_HOME: /tmp/hf-cache
             TORCHINDUCTOR_CACHE_DIR: /tmp/inductor-cache
+            CUDA_VISIBLE_DEVICES: ''
+            ACCELERATE_USE_CPU: 'true'
+            PYTEST_XDIST_AUTO_NUM_WORKERS: '8'
 
         steps:
             - uses: actions/checkout@v4
@@ -33,25 +36,180 @@ jobs:
                   path: /tmp/hf-cache
                   key: hf-${{ matrix.python-version }}-${{ hashFiles('pyproject.toml') }}
                   restore-keys: hf-${{ matrix.python-version }}-
-
             - name: Cache torch inductor compilations
               uses: actions/cache@v4
               with:
                   path: /tmp/inductor-cache
                   key: inductor-${{ matrix.python-version }}-${{ hashFiles('pyproject.toml') }}
                   restore-keys: inductor-${{ matrix.python-version }}-
-
             - name: Install dependencies
               run: |
                   uv sync --locked --all-groups --extra all
                   echo "$UV_PROJECT_ENVIRONMENT/bin" >> $GITHUB_PATH
-
-            - name: Run tests
+            - name: Run CPU tests
               run: |
                   rm -f .coverage .coverage.*
-                  bash scripts/run-tests.sh cov --exitfirst --cov-report=xml --durations=0 --durations-min=1.0
-
+                  bash scripts/run-tests.sh cov -m "not gpu and not vllm" --cov-report=xml --durations=0 --durations-min=1.0
             - name: Upload coverage reports to Codecov
               uses: codecov/codecov-action@v3
+              with:
+                  flags: cpu-${{ matrix.python-version }}
               env:
                   CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+            - name: Upload 3.13 coverage data
+              if: matrix.python-version == '3.13'
+              uses: actions/upload-artifact@v4
+              with:
+                  name: cov-3.13-cpu
+                  include-hidden-files: true
+                  path: .coverage
+
+    gpu:
+        runs-on: gha-runner-scale-set
+        strategy:
+            fail-fast: false
+            max-parallel: 4
+            matrix:
+                python-version: ['3.10', '3.11', '3.12', '3.13']
+                shard: [1, 2]
+        env:
+            UV_CACHE_DIR: /tmp/uv-cache
+            UV_PROJECT_ENVIRONMENT: /tmp/agilerl-venv
+            HF_HOME: /tmp/hf-cache
+            TORCHINDUCTOR_CACHE_DIR: /tmp/inductor-cache
+            PYTEST_XDIST_AUTO_NUM_WORKERS: '4'
+            PYTHONPATH: ${{ github.workspace }}/agilerl-arena
+
+        steps:
+            - uses: actions/checkout@v4
+            - uses: astral-sh/setup-uv@v7
+              with:
+                  enable-cache: true
+                  python-version: ${{ matrix.python-version }}
+            - name: Cache HuggingFace models
+              uses: actions/cache@v4
+              with:
+                  path: /tmp/hf-cache
+                  key: hf-${{ matrix.python-version }}-${{ hashFiles('pyproject.toml') }}
+                  restore-keys: hf-${{ matrix.python-version }}-
+            - name: Cache torch inductor compilations
+              uses: actions/cache@v4
+              with:
+                  path: /tmp/inductor-cache
+                  key: inductor-${{ matrix.python-version }}-${{ hashFiles('pyproject.toml') }}
+                  restore-keys: inductor-${{ matrix.python-version }}-
+            - name: Restore GPU test durations
+              uses: actions/cache/restore@v4
+              with:
+                  path: .ci-durations/gpu.json
+                  key: linux-gpu-durations-${{ github.run_id }}
+                  restore-keys: linux-gpu-durations-
+            - name: Install dependencies
+              run: |
+                  uv sync --locked --all-groups --extra all
+                  echo "$UV_PROJECT_ENVIRONMENT/bin" >> $GITHUB_PATH
+            - name: Run GPU shard
+              run: |
+                  rm -f .coverage .coverage.*
+                  uv run python scripts/pytest_shard.py run \
+                    --root tests \
+                    --root agilerl-arena/tests \
+                    --total-shards 2 \
+                    --shard-index ${{ matrix.shard }} \
+                    --durations-file .ci-durations/gpu.json \
+                    -- \
+                    --import-mode=importlib \
+                    --junitxml=junit-gpu.xml \
+                    --timeout=600 --timeout-method=thread \
+                    -m "gpu or vllm" \
+                    -n auto --dist loadgroup \
+                    --durations=15 \
+                    --cov --cov-report=xml
+            - name: Upload coverage reports to Codecov
+              uses: codecov/codecov-action@v3
+              with:
+                  flags: gpu-${{ matrix.python-version }}-${{ matrix.shard }}
+              env:
+                  CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+            - name: Upload 3.13 coverage data
+              if: matrix.python-version == '3.13'
+              uses: actions/upload-artifact@v4
+              with:
+                  name: cov-3.13-gpu-${{ matrix.shard }}
+                  include-hidden-files: true
+                  if-no-files-found: error
+                  path: .coverage
+            - name: Upload 3.13 junit
+              if: matrix.python-version == '3.13'
+              uses: actions/upload-artifact@v4
+              with:
+                  name: junit-gpu-3.13-${{ matrix.shard }}
+                  path: junit-gpu.xml
+
+    coverage:
+        needs: [cpu, gpu]
+        if: success()
+        runs-on: gha-runner-scale-set
+        env:
+            UV_CACHE_DIR: /tmp/uv-cache
+            UV_PROJECT_ENVIRONMENT: /tmp/agilerl-venv
+        steps:
+            - uses: actions/checkout@v4
+            - uses: astral-sh/setup-uv@v7
+              with:
+                  enable-cache: true
+                  python-version: '3.13'
+            - name: Install dependencies
+              run: |
+                  uv sync --locked --all-groups --extra all
+                  echo "$UV_PROJECT_ENVIRONMENT/bin" >> $GITHUB_PATH
+            - name: Download 3.13 coverage data
+              uses: actions/download-artifact@v4
+              with:
+                  pattern: cov-3.13-*
+                  path: coverage-parts
+            - name: Combine 3.13 coverage
+              run: |
+                  set -eu
+                  test -f coverage-parts/cov-3.13-cpu/.coverage
+                  test -f coverage-parts/cov-3.13-gpu-1/.coverage
+                  test -f coverage-parts/cov-3.13-gpu-2/.coverage
+                  index=0
+                  while IFS= read -r part; do
+                    cp "$part" ".coverage.${index}"
+                    index=$((index + 1))
+                  done < <(find coverage-parts -name .coverage -print)
+                  uv run coverage combine
+                  uv run coverage json --rcfile=pyproject.toml -o framework-coverage.json
+            - uses: actions/upload-artifact@v4
+              with:
+                  name: framework-coverage
+                  path: framework-coverage.json
+
+    record-durations:
+        needs: [gpu]
+        if: success()
+        runs-on: ubuntu-latest
+        continue-on-error: true
+        steps:
+            - uses: actions/checkout@v4
+            - uses: actions/setup-python@v5
+              with:
+                  python-version: '3.13'
+            - name: Download 3.13 junit
+              uses: actions/download-artifact@v4
+              with:
+                  pattern: junit-gpu-3.13-*
+                  path: junit-parts
+            - name: Merge durations
+              run: |
+                  set -eu
+                  mkdir -p .ci-durations
+                  python3 scripts/pytest_shard.py merge-junit \
+                    --out .ci-durations/gpu.json \
+                    junit-parts/*/*.xml
+            - name: Save GPU test durations
+              uses: actions/cache/save@v4
+              with:
+                  path: .ci-durations/gpu.json
+                  key: linux-gpu-durations-${{ github.run_id }}
