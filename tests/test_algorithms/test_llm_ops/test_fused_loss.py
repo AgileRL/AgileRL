@@ -1206,8 +1206,8 @@ class TestApplyFusedPolicyLoss:
 
         loss, metrics = apply_fused_policy_loss(
             policy_hidden=hidden,
-            lm_head_weight=weight,
-            lm_head_bias=None,
+            head_w=weight,
+            head_b=None,
             target_ids=ids,
             attention_mask=mask,
             advantages=adv,
@@ -1255,8 +1255,8 @@ class TestApplyFusedPolicyLoss:
 
         loss, _ = apply_fused_policy_loss(
             policy_hidden=hidden,
-            lm_head_weight=weight,
-            lm_head_bias=None,
+            head_w=weight,
+            head_b=None,
             target_ids=ids,
             attention_mask=mask,
             advantages=adv,

@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any
 
 import torch
 
+from agilerl.distributed.process import get_rank, get_world_size
 from agilerl.llm_envs.harness import RolloutHarness
 from agilerl.llm_envs.task_assigner import TaskAssigner, _mix_seed
 from agilerl.utils.llm_utils import is_rollout_prompt
@@ -25,7 +26,12 @@ if TYPE_CHECKING:
 
 
 class RolloutCollector:
-    """Batched in-process collector over ``batch_size * group_size`` :class:`RolloutHarness` slots.
+    """Batched in-process collector over one rank's share of a global batch.
+
+    ``batch_size`` is the world-wide prompt-group count (same meaning as GRPO
+    ``BATCH_SIZE``). This rank allocates
+    ``(batch_size / world_size) * group_size`` :class:`RolloutHarness` slots.
+    ``world_size`` defaults to the process group (``1`` when not distributed).
 
     Driven lock-step (``reset``/``step``/``get_trajectories``, the colocated path,
     single-caller) or per-episode (``reset_episode``/``step_episode``/
@@ -42,17 +48,17 @@ class RolloutCollector:
         batch_size: int,
         group_size: int,
         env_config: dict[str, Any] | None = None,
-        *,
         io_timeout_s: float | None = 600.0,
         base_seed: int | None = None,
         slot_acquire_timeout_s: float | None = 300.0,
-        rank: int = 0,
-        world_size: int = 1,
+        rank: int | None = None,
+        world_size: int | None = None,
     ) -> None:
-        """Create ``batch_size * group_size`` independent env wrappers.
+        """Create ``(batch_size / world_size) * group_size`` env wrappers on this rank.
 
         :param env_factory: Factory that builds one :class:`RolloutHarness`.
-        :param batch_size: Number of logical batch items.
+        :param batch_size: Global prompt-group count; split evenly across
+            data-parallel ranks when distributed.
         :param group_size: Grouped rollouts per batch item.
         :param env_config: Optional kwargs passed to ``env_factory``.
         :param io_timeout_s: Deadline (seconds) for one concurrent round of env round-trips
@@ -62,9 +68,10 @@ class RolloutCollector:
             lock-step path takes its seed per ``reset`` call).
         :param slot_acquire_timeout_s: How long ``reset_episode`` waits for a free slot
             before raising ``TimeoutError``; ``None`` waits forever.
-        :param rank: This process's data-parallel shard index, handed to the
-            :class:`TaskAssigner` (from the runtime, never manifest config).
-        :param world_size: Number of data-parallel shards.
+        :param rank: This process's data-parallel shard index. ``None`` uses
+            :func:`~agilerl.distributed.get_rank`.
+        :param world_size: Number of data-parallel shards. ``None`` uses
+            :func:`~agilerl.distributed.get_world_size`.
         """
         if batch_size <= 0:
             msg = f"batch_size must be > 0, got {batch_size}."
@@ -72,21 +79,35 @@ class RolloutCollector:
         if group_size <= 0:
             msg = f"group_size must be > 0, got {group_size}."
             raise ValueError(msg)
+        world_size = get_world_size() if world_size is None else world_size
+        rank = get_rank() if rank is None else rank
+        if world_size < 1:
+            msg = f"world_size must be >= 1, got {world_size}."
+            raise ValueError(msg)
+        if not 0 <= rank < world_size:
+            msg = f"rank must be in [0, {world_size}), got {rank}."
+            raise ValueError(msg)
+        if batch_size % world_size != 0:
+            msg = (
+                f"Batch size ({batch_size}) must be divisible by the data-parallel "
+                f"size ({world_size})."
+            )
+            raise ValueError(msg)
         if env_config is None:
             env_config = {}
         self.env_factory = env_factory
         self.env_config = env_config
-        self.num_envs = batch_size * group_size
-        self.batch_size = batch_size
+        self.batch_size = batch_size // world_size
         self.group_size = group_size
+        self.num_envs = self.batch_size * group_size
         self._io_timeout_s = io_timeout_s
         self.envs: list[RolloutHarness] = []
         # Hands each group its task (dataset row / seed); built on first reset.
         self._task_assigner: TaskAssigner | None = None
         # Component key set for ``reward_*`` metrics, frozen when the envs are built.
         self.rubric_component_names: tuple[str, ...] = ()
-        self._rank = int(rank)
-        self._world_size = int(world_size)
+        self._rank = rank
+        self._world_size = world_size
         # --- per-episode state (untouched by the lock-step path) ---
         self._base_seed = int(base_seed) if base_seed is not None else None
         self._slot_acquire_timeout_s = slot_acquire_timeout_s
@@ -257,7 +278,6 @@ class RolloutCollector:
     def _map_env_io(
         self,
         thunks: list[Callable[[], Any]],
-        *,
         envs: list[RolloutHarness] | None = None,
     ) -> list[Any]:
         """Run each zero-arg thunk on :attr:`io_executor`, returning results in order.
@@ -376,7 +396,6 @@ class RolloutCollector:
 
     def update_rollout_geometry(
         self,
-        *,
         rollout_batch_size: int,
         group_size: int,
     ) -> None:
@@ -502,7 +521,6 @@ class RolloutCollector:
         self,
         episode_id: str,
         logical_slot: int | None = None,
-        *,
         seed: int | None = None,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         """Acquire a free slot and reset one episode at its window-assigned task.
@@ -610,7 +628,6 @@ class RolloutCollector:
     def finalize_episode(
         self,
         episode_id: str,
-        *,
         missing_ok: bool = True,
     ) -> (
         tuple[

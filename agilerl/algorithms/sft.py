@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import gc
 from typing import TYPE_CHECKING, Any, NoReturn
 
 import numpy as np
@@ -13,19 +12,22 @@ import torch
 from agilerl import HAS_LIGER_KERNEL
 from agilerl.algorithms.core.base import LLMAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
+from agilerl.distributed import (
+    FSDPConfig,
+    aggregate_metrics_dict,
+    barrier,
+    resolve_device,
+)
 from agilerl.typing import (
     MultiAgentObservationType,
     ObservationType,
     SFTPrompts,
 )
 from agilerl.utils.llm_utils import (
-    aggregate_metrics_dict,
     is_sft_prompts,
-    resolve_llm_device,
 )
 
 if TYPE_CHECKING:
-    from accelerate import Accelerator
     from peft import LoraConfig, PeftModel
     from transformers import BitsAndBytesConfig, PreTrainedModel
 
@@ -82,20 +84,18 @@ class SFT(LLMAlgorithm[SFTPrompts]):
     :param micro_batch_size_per_gpu: Micro-batch size for gradient accumulation.
         When None the full batch is used in a single forward pass.
     :type micro_batch_size_per_gpu: int, optional
-    :param mini_batch_size: Per-rank rows covered by one optimizer step;
-        DeepSpeed's gradient_accumulation_steps is set to
-        ``mini_batch_size / micro_batch_size_per_gpu``. Defaults to None,
-        which resolves to the per-rank batch (one optimizer step per
-        batch).
+    :param mini_batch_size: Per-rank samples covered by one optimizer step.
+        ``None`` uses ``batch_size / world_size``.
+        ``gradient_accumulation_steps`` is derived as
+        ``mini_batch_size / micro_batch_size_per_gpu``.
     :type mini_batch_size: int | None, optional
-    :param device: Device to train on. Ignored when an accelerator is given (each rank
-        owns its own GPU); ``None`` auto-detects CUDA/MPS/CPU.
+    :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str, optional
     :param lora_config: LoRA config; when supplied the base model is wrapped with
         PEFT adapters, defaults to None
     :type lora_config: LoraConfig, optional
-    :param accelerator: Accelerate distributed-training handle, defaults to None
-    :type accelerator: accelerate.Accelerator, optional
+    :param fsdp_config: FSDP2 sharding settings for distributed runs, defaults to None
+    :type fsdp_config: FSDPConfig | None, optional
     :param wrap: Wrap models for distributed training on construction, defaults to
         True
     :type wrap: bool, optional
@@ -114,7 +114,7 @@ class SFT(LLMAlgorithm[SFTPrompts]):
         speed/kernel choice. The Liger kernel auto-sizes its own chunk; the
         standard path's chunk is set by ``chunk_rows``.
     :type use_liger_loss: bool, optional
-    :param chunk_rows: Primary chunk-size setting for fused logit tiles. On SFT's
+    :param chunk_rows: Primary chunk-size knob for fused logit tiles. On SFT's
         standard path this controls the fused-logprob chunk rows directly.
     :type chunk_rows: int | None, optional
     :param use_separate_reference_adapter: Also create a ``reference`` LoRA adapter
@@ -157,7 +157,7 @@ class SFT(LLMAlgorithm[SFTPrompts]):
         mini_batch_size: int | None = None,
         device: str | torch.device | None = None,
         lora_config: LoraConfig | None = None,
-        accelerator: Accelerator | None = None,
+        fsdp_config: FSDPConfig | None = None,
         wrap: bool = True,
         clone: bool = False,
         seed: int = 42,
@@ -169,7 +169,7 @@ class SFT(LLMAlgorithm[SFTPrompts]):
         activation_offload: bool = False,
         lora_target_scope: str | None = None,
     ) -> None:
-        resolved_device = resolve_llm_device(accelerator, device)
+        resolved_device = resolve_device(device)
         super().__init__(
             index=index,
             batch_size=batch_size,
@@ -193,7 +193,7 @@ class SFT(LLMAlgorithm[SFTPrompts]):
             hp_config=hp_config,
             wrap=wrap,
             device=resolved_device,
-            accelerator=accelerator,
+            fsdp_config=fsdp_config,
             name="SFT",
             gradient_checkpointing=gradient_checkpointing,
             quantization_config=quantization_config,
@@ -205,7 +205,7 @@ class SFT(LLMAlgorithm[SFTPrompts]):
 
         self._initialize_actors(actor_network, not clone)
         self.register_network_group(NetworkGroup(eval_network=self.actor, policy=True))
-        if self.wrap:
+        if not clone:
             self.wrap_models()
 
         self.metrics.register("loss")
@@ -238,18 +238,13 @@ class SFT(LLMAlgorithm[SFTPrompts]):
             IDs), ``attention_mask``, and ``prompt_lengths`` (number of prompt
             tokens per sample) as produced by a ``objective="sft"``
             :class:`~agilerl.llm_envs.DatasetEnv`.
-        :type experiences: ExperiencesType
+        :type experiences: SFTPrompts
         :param training: When ``False`` the backward pass is skipped (eval mode).
         :type training: bool
         :return: ``(loss, perplexity)`` averaged over all samples in
             the batch.
-        :rtype: dict[str, float]
+        :rtype: tuple[float, float]
         """
-        gc.collect()
-        torch.cuda.empty_cache()
-        if torch.backends.mps.is_available():
-            torch.mps.empty_cache()
-
         input_ids = experiences["input_ids"]
         attention_mask = experiences["attention_mask"]
         # Check first that all tensors have the same max length before calculating the masks
@@ -306,7 +301,7 @@ class SFT(LLMAlgorithm[SFTPrompts]):
             key: value / max(num_updates, 1) for key, value in learn_metrics.items()
         }
 
-        learn_metrics = aggregate_metrics_dict(self.accelerator, averaged_metrics)
+        learn_metrics = aggregate_metrics_dict(averaged_metrics)
 
         if training:
             self.metrics.log("loss", learn_metrics["loss"])
@@ -348,27 +343,30 @@ class SFT(LLMAlgorithm[SFTPrompts]):
         # ``.logits`` is the final hidden state, then compute the loss from the
         # hidden states + lm_head weight without ever materializing the full logits tensor.
         with self._patch_lm_head_to_identity():
-            hidden = self.actor.forward(**model_kwargs).logits  # [B, L, H]
+            # FSDP2 all-gather hooks run on ``Module.__call__``.
+            hidden = self.actor(**model_kwargs).logits  # [B, L, H]
         shift_hidden = hidden[:, :-1, :].contiguous()  # [B, L-1, H]
 
         if self.use_liger_loss:
             # Liger fused-linear CE: loss computed in bounded ``(chunk, V)`` tiles.
             flat_hidden = shift_hidden.view(-1, shift_hidden.size(-1))
-            lm_head = self._get_lm_head()
-            with self._liger_head_gather():
+            with self._liger_head_gather() as (head_w, head_b):
+                head_w = head_w.to(dtype=flat_hidden.dtype)
+                if head_b is not None:
+                    head_b = head_b.to(dtype=flat_hidden.dtype)
                 loss = LigerFusedLinearCrossEntropyLoss(ignore_index=-100)(
-                    lm_head.weight, flat_hidden, labels.view(-1), lm_head.bias
+                    head_w, flat_hidden, labels.view(-1), head_b
                 )
 
         else:
             # Standard path, also token-chunked: per-token target logprobs via the
             # fused-linear-logprob kernel (bounded to ``(chunk_rows, V)``)
-            fused_fn, lm_head_weight, lm_head_bias = self._fused_logprob_fn_and_head()
+            fused_fn, head_w, head_b = self._fused_logprob_fn_and_head()
             ignore = labels == -100
             logps = fused_fn(
                 shift_hidden,
-                lm_head_weight,
-                lm_head_bias,
+                head_w,
+                head_b,
                 labels.masked_fill(ignore, 0),  # safe gather index; masked out below
                 temperature=1.0,
                 cast_to_fp32=self.cast_logprobs_to_fp32,
@@ -408,6 +406,5 @@ class SFT(LLMAlgorithm[SFTPrompts]):
                 losses.append(metrics["loss"])
             mean_fit = -float(np.mean(losses))
         self.metrics.add_fitness(mean_fit)
-        if self.accelerator is not None:
-            self.accelerator.wait_for_everyone()
+        barrier()
         return np.array(mean_fit)

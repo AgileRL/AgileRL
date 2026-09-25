@@ -17,7 +17,6 @@ import logging
 from pathlib import Path
 
 import torch
-from accelerate import Accelerator
 
 from agilerl.training.trainer import LocalTrainer
 
@@ -44,11 +43,6 @@ def parse_args() -> argparse.Namespace:
         type=str,
         default="cuda" if torch.cuda.is_available() else "cpu",
         help="Torch device (default: cuda if available, else cpu).",
-    )
-    parser.add_argument(
-        "--use-accelerator",
-        action="store_true",
-        help="Use Accelerator for training.",
     )
     parser.add_argument(
         "--wb",
@@ -122,14 +116,11 @@ def main() -> None:
 
     logger.info("Loading manifest: %s", args.manifest)
 
-    accelerator = Accelerator() if args.use_accelerator else None
-
     # Load the Trainer from the manifest
     trainer = LocalTrainer.from_manifest(
         manifest=args.manifest,
         resume_from_checkpoint=args.resume_from_checkpoint,
         device=args.device,
-        accelerator=accelerator,
     )
 
     logger.info(

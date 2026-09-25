@@ -179,11 +179,6 @@ class LLMRolloutBufferSpec(BaseModel):
             "evicted. Counts generated groups, not RL transitions."
         ),
     )
-    buffer_occupancy_multiplier: int = Field(
-        default=1,
-        ge=1,
-        description="Headroom the buffer keeps over what the trainer consumes per cycle.",
-    )
     max_rollout_version_lag: int | None = Field(
         default=None,
         ge=0,

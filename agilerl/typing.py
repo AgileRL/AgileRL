@@ -35,12 +35,10 @@ import gymnasium as gym
 import numpy as np
 import numpy.typing as npt
 import torch
-from accelerate.optimizer import AcceleratedOptimizer
 from gymnasium import spaces
 from tensordict import TensorClass, TensorDict
 from torch._dynamo import OptimizedModule
 from torch.nn import Module
-from torch.optim import Optimizer
 from typing_extensions import NotRequired, Self
 
 from agilerl.net_configs import NetConfigType as NetConfigType
@@ -300,15 +298,6 @@ RolloutReturn = tuple[
 ]
 
 
-class HFGeneratePrompts(TypedDict):
-    """Prompt tensors prepared for HuggingFace ``generate``."""
-
-    input_ids: torch.Tensor
-    attention_mask: torch.Tensor
-    stitch_prefix_ids: torch.Tensor | None
-    initial_prompt_len: int | None
-
-
 # The batch type an algorithm's ``learn`` consumes. Each concrete algorithm binds
 # this to the exact shape its buffer/rollout produces (e.g. ``ReplayBatch`` for
 # off-policy value methods, ``PreferencePrompts`` for DPO), so ``learn`` reads its
@@ -431,7 +420,6 @@ EvolvableNetworkType = (
     EvolvableModuleProtocol | ModuleDictProtocol[EvolvableModuleProtocol]
 )
 DeviceType = str | torch.device
-OptimizerType = Optimizer | AcceleratedOptimizer
 
 MultiAgentMutReturn = dict[str, MutationApplyDict]
 MutationReturn = MutationApplyDict | MultiAgentMutReturn

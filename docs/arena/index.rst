@@ -492,6 +492,8 @@ class, which provides a higher-level interface:
 
    - :ref:`trainers` section for more information on the ``ArenaTrainer`` class and its usage.
 
+   - :ref:`llm_distributed` for sizing multi-GPU LLM runs (``fsdp``, ``training_gpus_per_agent``).
+
 Additional Tools
 ^^^^^^^^^^^^^^^^
 

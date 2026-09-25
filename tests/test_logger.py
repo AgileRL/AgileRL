@@ -198,6 +198,17 @@ class TestStdOutLogger:
         logger.write(report)
         pbar.write.assert_called_once_with(str(report))
 
+    def test_write_skips_on_non_main_process_without_accelerator(self):
+        with patch("agilerl.logger._is_notebook", return_value=False):
+            from agilerl.logger import StdOutLogger
+
+            pbar = MagicMock()
+            logger = StdOutLogger(pbar=pbar)
+
+        with patch("agilerl.logger.is_main_process", return_value=False):
+            logger.write(_make_report())
+        pbar.write.assert_not_called()
+
 
 class TestWandbLogger:
     def test_init(self):

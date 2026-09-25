@@ -30,6 +30,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 __all__ = [
+    "block_type_mask_mapping",
     "install_mamba_patches",
     "patch_nemotron_mamba_fused_path",
     "patch_nemotron_mamba_stream_ordering",
@@ -39,6 +40,38 @@ MEM_EFF_ATTR = "use_mem_eff_path"
 
 STREAM_PATCHED_FLAG = "_agilerl_mamba_stream_patched"
 FUSED_PATH_PATCHED_FLAG = "_agilerl_mamba_fused_path_patched"
+
+
+def block_type_mask_mapping(
+    module: object,
+    embeds: torch.Tensor,
+    attention_mask: torch.Tensor | dict[str, object] | None,
+    past_key_values: object | None,
+    position_ids: torch.Tensor | None,
+) -> tuple[dict[str, object], torch.Tensor | None]:
+    """HF keys for ``full_attention`` / ``linear_attention`` masks."""
+    if position_ids is None:
+        get_seq_length = getattr(past_key_values, "get_seq_length", None)
+        past_seen = get_seq_length() if callable(get_seq_length) else 0
+        position_ids = torch.arange(embeds.shape[1], device=embeds.device) + past_seen
+        position_ids = position_ids.unsqueeze(0)
+    masking = try_import("transformers.masking_utils")
+    mask_kwargs = {
+        "config": getattr(module, "config", None),
+        "inputs_embeds": embeds,
+        "attention_mask": attention_mask,
+        "past_key_values": past_key_values,
+        "position_ids": position_ids,
+    }
+    mapping: dict[str, object] = {}
+    if masking is not None:
+        create_causal = getattr(masking, "create_causal_mask", None)
+        create_linear = getattr(masking, "create_recurrent_attention_mask", None)
+        if callable(create_causal):
+            mapping["full_attention"] = create_causal(**mask_kwargs)
+        if callable(create_linear):
+            mapping["linear_attention"] = create_linear(**mask_kwargs)
+    return mapping, position_ids
 
 
 def _resolve_mixer_class(mixer: str) -> type | None:
@@ -126,7 +159,6 @@ def _drop_fused_path_on_instances(
 
 
 def patch_nemotron_mamba_fused_path(
-    *,
     mixer: str,
     enabled: bool = True,
     model: PreTrainedModel | PeftModel | None = None,
@@ -138,15 +170,13 @@ def patch_nemotron_mamba_fused_path(
     training mode. That branch hands ``conv1d.weight``, ``conv1d.bias``,
     ``norm.weight``, ``out_proj.weight`` and ``out_proj.bias`` to
     ``mamba_split_conv1d_scan_combined`` as raw tensors, so those submodules are
-    never called: their ZeRO-3 pre-forward gather hooks do not fire, leaving the
-    parameters to deepspeed's residency-dependent fallback all-gather, which
-    ranks can disagree about and deadlock on; the set of traced submodules also
-    shifts with training mode and per-rank padding; and the LoRA delta on
-    ``out_proj`` is dropped because the kernel reads the base weight. Clearing
-    the attribute on every instance as it is constructed removes the branch, so
-    ``self.norm`` and ``self.out_proj`` run as modules. This wraps ``__init__``,
-    so it only covers mixers built afterwards; pass ``model`` to sweep mixers
-    that already exist.
+    never called: wrap-time parameter-gather hooks on ``norm`` / ``out_proj``
+    do not fire, the set of traced submodules shifts with training mode and
+    per-rank padding, and the LoRA delta on ``out_proj`` is dropped because the
+    kernel reads the base weight. Clearing the attribute on every instance as
+    it is constructed removes the branch, so ``self.norm`` and ``self.out_proj``
+    run as modules. This wraps ``__init__``, so it only covers mixers built
+    afterwards; pass ``model`` to sweep mixers that already exist.
 
     :param mixer: Dotted path of the mixer class to patch.
     :type mixer: str
@@ -279,7 +309,6 @@ def _make_patched_forward(
 
 
 def patch_nemotron_mamba_stream_ordering(
-    *,
     mixer: str,
     enabled: bool = True,
     model: PreTrainedModel | PeftModel | None = None,
@@ -287,9 +316,9 @@ def patch_nemotron_mamba_stream_ordering(
     """Order the Mamba2 mixer's default-stream kernels against its caller.
 
     The mixer's ``forward`` runs the mamba and causal-conv1d kernels inside
-    ``torch.cuda.stream(default_stream)``. A ZeRO-3 parameter all-gather
-    completes on the stream that was current when the fetch was issued, so when
-    that stream is not the default one the kernels carry no dependency on it and
+    ``torch.cuda.stream(default_stream)``. Parameter all-gathers complete
+    on the stream that was current when the fetch was issued, so when that
+    stream is not the default one the kernels carry no dependency on it and
     can read a parameter buffer that is still being filled. The wrapper makes
     the default stream wait on the current stream before the call, which
     transitively covers the all-gather, and makes the current stream wait on the
@@ -340,7 +369,6 @@ def patch_nemotron_mamba_stream_ordering(
 
 def install_mamba_patches(
     patch: PatchRuntimeConfig,
-    *,
     model: PreTrainedModel | PeftModel | None = None,
 ) -> None:
     """Install catalog Mamba2 mixer workarounds.
@@ -348,7 +376,7 @@ def install_mamba_patches(
     ``fused_path`` clears the mixer's fused-path attribute. ``stream_ordering``
     wraps mixer ``forward`` so default-stream scan/conv kernels wait on the
     caller stream. Those kernels launch on the default stream, so a caller on
-    another stream can race regardless of ZeRO stage.
+    another stream can race with a parameter all-gather.
 
     :param patch: Catalog patch config; mamba flags and mixer class path.
     :type patch: PatchRuntimeConfig

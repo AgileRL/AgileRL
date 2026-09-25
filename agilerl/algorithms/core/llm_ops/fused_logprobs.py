@@ -16,39 +16,39 @@ from typing import Any
 
 import torch
 
-from agilerl.utils.llm_utils import gather_if_ds_param as _gather_if_ds_param
+from agilerl.distributed import materialize_dtensors
 
 
 def fp32_lm_head_operands(
-    lm_head_weight: torch.Tensor,
-    lm_head_bias: torch.Tensor | None,
+    head_w: torch.Tensor,
+    head_b: torch.Tensor | None,
     cast_to_fp32: bool,
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
     """Upcast the lm_head for one chunk loop, hoisted out of the loop body.
 
     A ``(V, H)`` fp32 copy is gigabytes at production vocab sizes, so a loop
-    takes at most one, shared by every chunk. Call inside the ZeRO-3 gather, or
-    the copy is taken from an unmaterialized shard.
+    takes at most one, shared by every chunk. Call inside an FSDP/DTensor
+    gather (or with already-dense weights), or the copy is taken from a shard.
 
-    :param lm_head_weight: ``(V, H)``.
-    :type lm_head_weight: torch.Tensor
-    :param lm_head_bias: ``(V,)`` or ``None``.
-    :type lm_head_bias: torch.Tensor | None
+    :param head_w: ``(V, H)``.
+    :type head_w: torch.Tensor
+    :param head_b: ``(V,)`` or ``None``.
+    :type head_b: torch.Tensor | None
     :param cast_to_fp32: whether the loop runs its matmul in fp32.
     :type cast_to_fp32: bool
     :return: The head operands to pass to every chunk.
     :rtype: tuple[torch.Tensor, torch.Tensor | None]
     """
-    if not cast_to_fp32 or lm_head_weight.dtype == torch.float32:
-        return lm_head_weight, lm_head_bias
-    bias = lm_head_bias.float() if lm_head_bias is not None else None
-    return lm_head_weight.float(), bias
+    if not cast_to_fp32 or head_w.dtype == torch.float32:
+        return head_w, head_b
+    bias = head_b.float() if head_b is not None else None
+    return head_w.float(), bias
 
 
 def _fused_logprob_chunk(
     h_chunk: torch.Tensor,
-    lm_head_weight: torch.Tensor,
-    lm_head_bias: torch.Tensor | None,
+    head_w: torch.Tensor,
+    head_b: torch.Tensor | None,
     target_chunk: torch.Tensor,
     temperature: float,
     cast_to_fp32: bool,
@@ -62,10 +62,10 @@ def _fused_logprob_chunk(
 
     :param h_chunk: ``(chunk_rows, H)`` hidden states.
     :type h_chunk: torch.Tensor
-    :param lm_head_weight: ``(V, H)``.
-    :type lm_head_weight: torch.Tensor
-    :param lm_head_bias: ``(V,)`` or ``None``.
-    :type lm_head_bias: torch.Tensor | None
+    :param head_w: ``(V, H)``.
+    :type head_w: torch.Tensor
+    :param head_b: ``(V,)`` or ``None``.
+    :type head_b: torch.Tensor | None
     :param target_chunk: ``(chunk_rows,)`` target token ids.
     :type target_chunk: torch.Tensor
     :param temperature: logits divided by this before log_softmax (skip at 1.0).
@@ -79,16 +79,16 @@ def _fused_logprob_chunk(
     """
     if cast_to_fp32:
         h_chunk = h_chunk.float()
-    if h_chunk.dtype != lm_head_weight.dtype:
+    if h_chunk.dtype != head_w.dtype:
         # Chunk-tiling callers upcast the head once ahead of their loop, so this
         # only fires for a direct call or an fp16 checkpoint under bf16 autocast
         # (fp32 hidden, fp16 head). It copies the whole ``(V, H)`` head.
-        compute_dtype = torch.promote_types(h_chunk.dtype, lm_head_weight.dtype)
+        compute_dtype = torch.promote_types(h_chunk.dtype, head_w.dtype)
         h_chunk = h_chunk.to(compute_dtype)
-        lm_head_weight = lm_head_weight.to(compute_dtype)
-    logits = h_chunk @ lm_head_weight.t()
-    if lm_head_bias is not None:
-        logits = logits + lm_head_bias
+        head_w = head_w.to(compute_dtype)
+    logits = h_chunk @ head_w.t()
+    if head_b is not None:
+        logits = logits + head_b
     if temperature != 1.0:
         logits = logits / temperature
     selected = logits.gather(dim=-1, index=target_chunk.unsqueeze(-1)).squeeze(-1)
@@ -104,8 +104,8 @@ _FUSED_LOGPROB_COMPILE_STATE: dict[str, Any] = {"fn": None, "disabled": False}
 def _fused_logprob_chunk_dispatch(
     device: torch.device,
     h_chunk: torch.Tensor,
-    lm_head_weight: torch.Tensor,
-    lm_head_bias: torch.Tensor | None,
+    head_w: torch.Tensor,
+    head_b: torch.Tensor | None,
     target_chunk: torch.Tensor,
     temperature: float,
     cast_to_fp32: bool,
@@ -114,8 +114,8 @@ def _fused_logprob_chunk_dispatch(
     state = _FUSED_LOGPROB_COMPILE_STATE
     args = (
         h_chunk,
-        lm_head_weight,
-        lm_head_bias,
+        head_w,
+        head_b,
         target_chunk,
         temperature,
         cast_to_fp32,
@@ -134,8 +134,8 @@ def _fused_logprob_chunk_dispatch(
 
 def fused_linear_logprobs_chunked(
     hidden: torch.Tensor,
-    lm_head_weight: torch.Tensor,
-    lm_head_bias: torch.Tensor | None,
+    head_w: torch.Tensor,
+    head_b: torch.Tensor | None,
     target_ids: torch.Tensor,
     temperature: float = 1.0,
     cast_to_fp32: bool = True,
@@ -153,10 +153,10 @@ def fused_linear_logprobs_chunked(
 
     :param hidden: ``(B, T, H)`` last-hidden-state.
     :type hidden: torch.Tensor
-    :param lm_head_weight: ``(V, H)``.
-    :type lm_head_weight: torch.Tensor
-    :param lm_head_bias: ``(V,)`` or ``None``.
-    :type lm_head_bias: torch.Tensor | None
+    :param head_w: ``(V, H)``.
+    :type head_w: torch.Tensor
+    :param head_b: ``(V,)`` or ``None``.
+    :type head_b: torch.Tensor | None
     :param target_ids: ``(B, T)`` sampled token ids (caller does the shift).
     :type target_ids: torch.Tensor
     :param temperature: logits divided by this before log_softmax (skipped at 1.0).
@@ -176,19 +176,17 @@ def fused_linear_logprobs_chunked(
     N = flat_h.shape[0]
     out = torch.empty(N, dtype=orig_dtype, device=hidden.device)
 
-    with _gather_if_ds_param(lm_head_weight, lm_head_bias):
-        head_weight, head_bias = fp32_lm_head_operands(
-            lm_head_weight,
-            lm_head_bias,
-            cast_to_fp32,
+    with materialize_dtensors(head_w, head_b) as (full_weight, full_bias):
+        compute_w, compute_b = fp32_lm_head_operands(
+            full_weight, full_bias, cast_to_fp32
         )
         for s in range(0, N, chunk_rows):
             e = min(s + chunk_rows, N)
             result = _fused_logprob_chunk_dispatch(
                 hidden.device,
                 flat_h[s:e],
-                head_weight,
-                head_bias,
+                compute_w,
+                compute_b,
                 flat_targets[s:e],
                 temperature,
                 cast_to_fp32,
@@ -220,8 +218,8 @@ class FusedLinearLogProbsFunction(torch.autograd.Function):
     def forward(
         ctx: Any,  # noqa: ANN401 -- torch autograd context carries arbitrary attrs
         hidden: torch.Tensor,
-        lm_head_weight: torch.Tensor,
-        lm_head_bias: torch.Tensor | None,
+        head_w: torch.Tensor,
+        head_b: torch.Tensor | None,
         target_ids: torch.Tensor,
         temperature: float,
         cast_to_fp32: bool,
@@ -230,20 +228,20 @@ class FusedLinearLogProbsFunction(torch.autograd.Function):
         with torch.no_grad():
             logps = fused_linear_logprobs_chunked(
                 hidden,
-                lm_head_weight,
-                lm_head_bias,
+                head_w,
+                head_b,
                 target_ids,
                 temperature=temperature,
                 cast_to_fp32=cast_to_fp32,
                 chunk_rows=chunk_rows,
             )
-        ctx.save_for_backward(hidden, lm_head_weight, lm_head_bias, target_ids)
+        ctx.save_for_backward(hidden, head_w, head_b, target_ids)
         ctx.temperature = temperature
         ctx.cast_to_fp32 = cast_to_fp32
         ctx.chunk_rows = chunk_rows
         ctx.needs_hidden_grad = hidden.requires_grad
-        ctx.needs_weight_grad = lm_head_weight.requires_grad
-        ctx.needs_bias_grad = lm_head_bias is not None and lm_head_bias.requires_grad
+        ctx.needs_weight_grad = head_w.requires_grad
+        ctx.needs_bias_grad = head_b is not None and head_b.requires_grad
         return logps
 
     @staticmethod
@@ -252,7 +250,7 @@ class FusedLinearLogProbsFunction(torch.autograd.Function):
         *grad_outputs: torch.Tensor,
     ) -> tuple[torch.Tensor | None, ...]:
         (grad_output,) = grad_outputs
-        hidden, lm_head_weight, lm_head_bias, target_ids = ctx.saved_tensors
+        hidden, head_w, head_b, target_ids = ctx.saved_tensors
         B, T, H = hidden.shape
         flat_h = hidden.reshape(-1, H)
         flat_targets = target_ids.reshape(-1).to(torch.long)
@@ -262,28 +260,23 @@ class FusedLinearLogProbsFunction(torch.autograd.Function):
         temperature = ctx.temperature
         cast_to_fp32 = ctx.cast_to_fp32
 
-        # Re-gather for the recompute: the forward gather has already exited
-        # and ZeRO-3 has re-partitioned ``lm_head_weight`` to a zero-sized
-        # shard. The Parameter object is the same; only ``.data`` was swapped.
-        if ctx.needs_weight_grad and hasattr(lm_head_weight, "ds_id"):
-            msg = (
-                "ZeRO-3 full-finetune of lm_head through the fused-linear "
-                "logprob path is not supported; use LoRA (lm_head frozen) "
-                "or disable ZeRO-3."
-            )
-            raise RuntimeError(msg)
-        with _gather_if_ds_param(lm_head_weight, lm_head_bias):
+        with materialize_dtensors(head_w, head_b) as (
+            full_weight,
+            full_bias,
+        ):
             grad_hidden = torch.zeros_like(flat_h) if ctx.needs_hidden_grad else None
             grad_weight = (
-                torch.zeros_like(lm_head_weight) if ctx.needs_weight_grad else None
+                torch.zeros_like(full_weight) if ctx.needs_weight_grad else None
             )
-            grad_bias = torch.zeros_like(lm_head_bias) if ctx.needs_bias_grad else None
+            grad_bias = (
+                torch.zeros_like(full_bias)
+                if ctx.needs_bias_grad and full_bias is not None
+                else None
+            )
             # Grad buffers above stay in the head's own dtype; the recompute
             # below runs against one hoisted fp32 copy of it.
-            head_weight, head_bias = fp32_lm_head_operands(
-                lm_head_weight,
-                lm_head_bias,
-                cast_to_fp32,
+            compute_w, compute_b = fp32_lm_head_operands(
+                full_weight, full_bias, cast_to_fp32
             )
 
             for s in range(0, N, chunk_rows):
@@ -291,10 +284,10 @@ class FusedLinearLogProbsFunction(torch.autograd.Function):
                 h_chunk = flat_h[s:e].detach()
                 if ctx.needs_hidden_grad:
                     h_chunk.requires_grad_(True)
-                weight = head_weight
+                weight = compute_w
                 if ctx.needs_weight_grad:
                     weight = weight.detach().requires_grad_(True)
-                bias = head_bias
+                bias = compute_b
                 if ctx.needs_bias_grad and bias is not None:
                     bias = bias.detach().requires_grad_(True)
 

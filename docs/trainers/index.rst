@@ -346,6 +346,8 @@ Below is a minimal off-policy manifest to train DQN on LunarLander-v3.
 
          python -m agilerl.train dqn.yaml --wb --verbose
 
+         accelerate launch -m agilerl.train dqn.yaml
+
 .. seealso::
 
    Example manifests for every supported algorithm can be found in the `AgileRL repository <https://github.com/AgileRL/AgileRL/tree/main/configs/training>`_.

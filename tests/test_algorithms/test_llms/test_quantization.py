@@ -340,7 +340,7 @@ class TestVLLMConfigDefaults:
 
 
 # These tests touch the LLMAlgorithm constructor with quantization paths.
-# Real instantiation requires deepspeed/vllm import-time wiring; we exercise
+# Real instantiation requires vllm import-time wiring; we exercise
 # only the bnb-skip-list logic via a stripped-down helper that mirrors the
 # production block in base.py. Keeping the algo constructor out of scope lets
 # these tests run quickly without GPU.
@@ -582,8 +582,6 @@ class TestColocatedInitOrdering:
         agent.colocated = kwargs.get("colocated", True)
         agent.vllm_config = kwargs.get("vllm_config", VLLMConfig(sleep_mode=True))
         agent.quantization_config = kwargs.get("quantization_config")
-        agent.accelerator = kwargs.get("accelerator")
-        agent.zero_stage = kwargs.get("zero_stage")
         return agent
 
     def test_trainer_first_for_fresh_bnb_trainer_under_sleep_mode(self):
@@ -675,10 +673,12 @@ class TestPrepareVllmForGenerationOffload:
         agent = TestColocatedInitOrdering._stub_agent(
             vllm_config=VLLMConfig(sleep_mode=sleep_mode)
         )
-        agent.use_memory_efficient_params = True
+        agent.offload_trainer_during_rollout = True
         agent._vllm_awake = not sleep_mode
         agent._vllm_moved = False
         agent.llm = mock.MagicMock()
+        agent.actor = mock.MagicMock()
+        agent.shard_runtime = mock.MagicMock(is_sharded=False)
         return agent
 
     def test_log_fires_only_when_base_actually_moves(self):
@@ -691,7 +691,6 @@ class TestPrepareVllmForGenerationOffload:
                 "agilerl.algorithms.core.base.log_cuda_memory_snapshot"
             ) as log_snapshot,
             mock.patch("torch.cuda.empty_cache"),
-            mock.patch.object(agent, "_get_unwrapped_actor"),
             mock.patch.object(agent, "_sync_actor_to_vllm"),
         ):
             move_to_cpu.side_effect = [True, False, False]
@@ -718,7 +717,6 @@ class TestPrepareVllmForGenerationOffload:
             mock.patch(
                 "agilerl.algorithms.core.base.log_cuda_memory_snapshot"
             ) as log_snapshot,
-            mock.patch.object(agent, "_get_unwrapped_actor"),
             mock.patch.object(agent, "_sync_actor_to_vllm"),
         ):
             agent._prepare_vllm_for_generation()
@@ -726,6 +724,34 @@ class TestPrepareVllmForGenerationOffload:
         move_to_cpu.assert_called_once()
         assert log_snapshot.call_count == 1
         agent.llm.wake_up.assert_not_called()
+
+    def test_wake_up_oom_is_rewritten_with_colocated_hint(self):
+        agent = self._stub_agent()
+        agent.llm.wake_up.side_effect = RuntimeError("CUDA out of memory")
+        with (
+            mock.patch(
+                "agilerl.algorithms.core.base.move_params_to_cpu",
+                return_value=False,
+            ),
+            mock.patch("torch.cuda.empty_cache"),
+            mock.patch("agilerl.algorithms.core.base.get_local_rank", return_value=0),
+            pytest.raises(RuntimeError, match="vLLM wake_up failed"),
+        ):
+            agent._prepare_vllm_for_generation()
+
+    def test_wake_up_other_runtime_error_is_reraised(self):
+        agent = self._stub_agent()
+        agent.llm.wake_up.side_effect = RuntimeError("engine crashed")
+        with (
+            mock.patch(
+                "agilerl.algorithms.core.base.move_params_to_cpu",
+                return_value=False,
+            ),
+            mock.patch("torch.cuda.empty_cache"),
+            mock.patch("agilerl.algorithms.core.base.get_local_rank", return_value=0),
+            pytest.raises(RuntimeError, match="engine crashed"),
+        ):
+            agent._prepare_vllm_for_generation()
 
 
 class TestAdaptLoraConfigForClippableLinear:
@@ -926,7 +952,7 @@ def _require_bf16_cuda() -> None:
 def _assert_finite_logits_forward(model: torch.nn.Module, vocab_size: int) -> None:
     device = next(model.parameters()).device
     input_ids = torch.randint(0, vocab_size, (2, 8), device=device)
-    with torch.inference_mode():
+    with torch.no_grad():
         logits = model(input_ids=input_ids).logits
     assert logits.shape == (2, 8, vocab_size)
     assert torch.isfinite(logits.float()).all()
@@ -1024,7 +1050,6 @@ class TestReinforceQuantizedInit:
             max_output_tokens=8,
             max_model_len=32,
             use_liger_loss=False,
-            wrap=False,
         )
 
         # __init__ forces lm_head into the bnb skip list (fused logprob paths
@@ -1035,9 +1060,8 @@ class TestReinforceQuantizedInit:
             "Linear8bitLt",
         )
 
-        # The PEFT-wrapped actor sits on a genuinely 4-bit base. NB: the actor
-        # is a DummyEvolvable, whose ``modules()`` is the EvolvableModule
-        # registry API, not torch's recursive walk — use ``named_modules()``.
+        # The PEFT-wrapped actor sits on a genuinely 4-bit base. Use
+        # ``named_modules()`` (torch's recursive walk), not ``modules()``.
         assert any(
             isinstance(m, bnb.nn.Linear4bit) for _, m in agent.actor.named_modules()
         )
@@ -1047,7 +1071,6 @@ class TestReinforceQuantizedInit:
         ]
         assert lora_param_names
         assert all("q_proj" in name or "v_proj" in name for name in lora_param_names)
+        assert next(agent.actor.parameters()).device.type == "cuda"
 
-        _assert_finite_logits_forward(
-            agent.actor, agent._get_unwrapped_actor().config.vocab_size
-        )
+        _assert_finite_logits_forward(agent.actor, agent.actor.config.vocab_size)

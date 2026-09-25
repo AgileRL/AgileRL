@@ -2,15 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import copy
-import json
-import os
-import socket
-import subprocess
-import sys
-import textwrap
-from pathlib import Path
-from types import SimpleNamespace
-from unittest import mock
+from itertools import pairwise
+from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
@@ -19,7 +12,6 @@ from peft import LoraConfig, inject_adapter_in_model
 from peft.tuners.lora.layer import ParamWrapper
 from torch import nn
 
-from agilerl.algorithms.core.llm_ops import moe_lora as moe_lora_module
 from agilerl.algorithms.core.llm_ops.fused_lora import (
     ROUTING_STATE,
     patch_lora_for_fused_forward,
@@ -30,14 +22,12 @@ from agilerl.algorithms.core.llm_ops.fused_lora import (
 from agilerl.algorithms.core.llm_ops.moe_lora import (
     RoutedExpertsLoraWrapper,
     SortedExpertsLoraWrapper,
-    _expert_counts,
-    _forward_param_names,
-    _is_partitioned,
-    _routed_projection_names,
-    _token_adapter_ids,
+    install_packed_expert_grouped_gemm,
     moe_expert_target_parameters,
     upgrade_moe_param_wrappers,
 )
+from agilerl.distributed import fsdp as dmod
+from agilerl.distributed import full_shape_views
 from agilerl.utils.llm_utils import (
     expert_lora_vllm_key_map,
     filter_peft_state_dict_for_vllm_lora,
@@ -50,7 +40,7 @@ INTERMEDIATE = 6
 
 
 class _SortedExperts(nn.Module):
-    """Grouped linear over expert-sorted rows (``forward(inputs, expert_size)``, stacked 3D ``weight``)."""
+    """Grouped linear over expert-sorted rows (GraniteMoe ``ParallelExperts`` convention)."""
 
     def __init__(self, input_size: int, output_size: int) -> None:
         super().__init__()
@@ -190,6 +180,29 @@ class _UngatedMoeBlock(nn.Module):
         logits = self.router(hidden_states)
         top_k_weights, top_k_index = torch.softmax(logits, dim=-1).topk(TOP_K, dim=-1)
         return self.experts(hidden_states, top_k_index, top_k_weights)
+
+
+class _FusedRoutedExperts(nn.Module):
+    """Packed gated experts with silu fused into the GEMM (no ``act_fn``)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.num_experts = NUM_EXPERTS
+        self.gate_up_proj = nn.Parameter(
+            torch.randn(NUM_EXPERTS, 2 * INTERMEDIATE, HIDDEN) * 0.1
+        )
+        self.down_proj = nn.Parameter(
+            torch.randn(NUM_EXPERTS, HIDDEN, INTERMEDIATE) * 0.1
+        )
+
+    def forward(self, hidden_states, top_k_index, top_k_weights):
+        return hidden_states
+
+
+class _FusedRoutedMoeBlock(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.experts = _FusedRoutedExperts()
 
 
 def _lora_config(target_parameters, **overrides):
@@ -338,22 +351,50 @@ def test_merged_adapters_match_split_forward():
     assert torch.allclose(split_out, unmerged_out, atol=1e-5)
 
 
-def test_zero3_partitioned_adapters_use_module_call_path():
-    reference, upgraded = _sorted_pair()
-    for module in _wrappers(upgraded):
-        for adapter in module.lora_A:
-            module.lora_A[adapter].weight.ds_id = 1
-            module.lora_B[adapter].weight.ds_id = 1
-    x = torch.randn(10, HIDDEN)
-    assert torch.allclose(reference(x), upgraded(x), atol=1e-5)
+def test_peft_attach_sizes_lora_from_global_shape_without_gathering():
+    """Packed-expert LoRA ranks from DTensor global shape, never ``full_tensor()``."""
+    block = _RoutedMoeBlock()
+    experts = block.experts
+    global_up = torch.Size([NUM_EXPERTS, 2 * INTERMEDIATE, HIDDEN])
+    global_down = torch.Size([NUM_EXPERTS, HIDDEN, INTERMEDIATE])
 
+    class FakeDTensor:
+        def __init__(self, shape: torch.Size) -> None:
+            self.shape = shape
+            self.dtype = torch.float32
+            self.device = torch.device("cpu")
+            self.requires_grad = True
 
-def test_zero3_partitioned_base_weights_raise_on_routed_convention():
-    _, upgraded = _routed_pair()
-    experts = _wrappers(upgraded)[0].get_base_layer()
-    experts.gate_up_proj.ds_id = 1
-    with pytest.raises(RuntimeError, match="ZeRO-3 partitioned expert weights"):
-        upgraded(torch.randn(10, HIDDEN))
+        def full_tensor(self):
+            msg = "packed experts must not be gathered"
+            raise AssertionError(msg)
+
+    fake_up = FakeDTensor(global_up)
+    fake_down = FakeDTensor(global_down)
+
+    experts._parameters["gate_up_proj"] = fake_up
+    experts._parameters["down_proj"] = fake_down
+
+    with (
+        patch.object(dmod, "DTensor", FakeDTensor),
+        full_shape_views(experts, [fake_up, fake_down]),
+    ):
+        assert experts.gate_up_proj.shape == global_up
+        assert experts.down_proj.shape == global_down
+
+        model = inject_adapter_in_model(
+            _lora_config(["experts.gate_up_proj", "experts.down_proj"]),
+            block,
+            adapter_name="actor",
+        )
+        assert upgrade_moe_param_wrappers(model) > 0
+
+        wrappers = _wrappers(model)
+        assert {wrapper.num_experts for wrapper in wrappers} == {NUM_EXPERTS}
+        assert {wrapper.in_features for wrapper in wrappers} == {HIDDEN, INTERMEDIATE}
+
+    assert experts._parameters["gate_up_proj"] is fake_up
+    assert experts._parameters["down_proj"] is fake_down
 
 
 @pytest.mark.parametrize("pair_factory", [_sorted_pair, _routed_pair, _ungated_pair])
@@ -613,6 +654,24 @@ def test_sorted_mixed_routing_rejects_mismatched_token_index() -> None:
     ROUTING_STATE.pop(wrapper, None)
 
 
+def test_sorted_mixed_routing_rejects_routing_that_does_not_divide_tokens() -> None:
+    _, model = _sorted_pair()
+    wrapper = next(
+        module
+        for module in _wrappers(model)
+        if isinstance(module, SortedExpertsLoraWrapper)
+    )
+    x = torch.randn(8, HIDDEN)
+    wrapper.token_index = torch.arange(8) % 4
+    wrapper.n_tokens = 4
+    ROUTING_STATE[wrapper] = ["actor", "__base__", "actor"]
+
+    with pytest.raises(ValueError, match=r"routing covers 3 rows .* dimension is 4"):
+        wrapper(x, [2, 2, 2, 2])
+
+    ROUTING_STATE.pop(wrapper, None)
+
+
 def test_sorted_gate_copies_batch_index_onto_wrappers() -> None:
     _, model = _sorted_pair()
     x = torch.randn(4, HIDDEN)
@@ -699,6 +758,12 @@ def test_moe_expert_target_parameters_detects_both_conventions():
     assert moe_expert_target_parameters(ungated) == [
         "mixer.experts.down_proj",
         "mixer.experts.up_proj",
+    ]
+    fused = nn.Sequential()
+    fused.moe = _FusedRoutedMoeBlock()
+    assert moe_expert_target_parameters(fused) == [
+        "moe.experts.down_proj",
+        "moe.experts.gate_up_proj",
     ]
 
 
@@ -859,452 +924,487 @@ def test_transformers_integration_parity(build, expected_targets):
         assert vllm_key.endswith((".experts", ".experts.base_layer"))
 
 
-def _delta_wrapper():
-    """A ``SortedExpertsLoraWrapper`` over an ``[experts, out, HIDDEN]`` weight."""
-    _, upgraded = _sorted_pair()
-    wrapper = upgraded.input_linear
-    assert isinstance(wrapper, SortedExpertsLoraWrapper)
-    return wrapper
-
-
-def _reference_delta(wrapper, x, counts, adapter="actor"):
-    """The low-rank delta written out longhand, one expert at a time, in float64.
-
-    ``lora_A`` rows are expert-major (expert ``e`` owns rows ``e * r`` to
-    ``(e + 1) * r``) and ``lora_B`` columns are rank-major over experts.
-    """
-    weight_a = wrapper.lora_A[adapter].weight.detach().double()
-    weight_b = wrapper.lora_B[adapter].weight.detach().double()
-    rank = wrapper.r[adapter]
-    scaling = wrapper.scaling[adapter]
-    b3 = weight_b.view(weight_b.shape[0], rank, wrapper.num_experts)
-    rows = x.double().split(counts)
-    pieces = []
-    for expert in range(wrapper.num_experts):
-        a_e = weight_a[expert * rank : (expert + 1) * rank]
-        b_e = b3[..., expert]
-        pieces.append(rows[expert] @ a_e.T @ b_e.T * scaling)
-    return torch.cat(pieces)
-
-
-def test_split_lora_delta_matches_per_expert_reference():
-    from agilerl.algorithms.core.llm_ops.moe_lora import _split_lora_delta
-
-    wrapper = _delta_wrapper()
-    # An unrouted expert (zero rows) is normal under top-k routing.
-    counts = [5, 0, 4, 3]
-    x = torch.randn(sum(counts), HIDDEN)
-
-    delta = _split_lora_delta(wrapper, x, counts, "actor")
-
-    expected = _reference_delta(wrapper, x, counts)
-    assert delta.shape == expected.shape
-    assert torch.allclose(delta.double(), expected, atol=1e-6)
-
-
-def test_split_lora_delta_runs_the_per_expert_loop():
+@pytest.mark.skipif(
+    not torch.cuda.is_available(), reason="grouped-GEMM path is CUDA-only"
+)
+def test_grouped_mm_fast_path_matches_loop_on_cuda():
     from agilerl.algorithms.core.llm_ops import moe_lora
 
-    wrapper = _delta_wrapper()
-    counts = [4, 4, 2, 2]
-    rank = wrapper.r["actor"]
-    out_features = wrapper.lora_B["actor"].weight.shape[0]
-    real_loop = moe_lora._expert_linear_loop
-    shapes = []
+    torch.manual_seed(0)
+    reference = inject_adapter_in_model(
+        _lora_config(["experts.gate_up_proj", "experts.down_proj"]),
+        _RoutedMoeBlock(),
+        adapter_name="actor",
+    )
+    torch.manual_seed(0)
+    fast = inject_adapter_in_model(
+        _lora_config(["experts.gate_up_proj", "experts.down_proj"]),
+        _RoutedMoeBlock(),
+        adapter_name="actor",
+    )
+    upgrade_moe_param_wrappers(reference)
+    upgrade_moe_param_wrappers(fast)
+    reference.cuda()
+    fast.cuda()
 
-    def _recording_loop(x, weight, loop_counts):
-        shapes.append(tuple(weight.shape))
-        return real_loop(x, weight, loop_counts)
-
+    x = torch.randn(64, HIDDEN, device="cuda")
+    fast_out = fast(x)
+    if not moe_lora._use_grouped_mm(x):
+        pytest.skip("torch._grouped_mm unsupported on this GPU")
     with pytest.MonkeyPatch.context() as mp:
-        mp.setattr(moe_lora, "_expert_linear_loop", _recording_loop)
-        delta = moe_lora._split_lora_delta(
-            wrapper, torch.randn(sum(counts), HIDDEN), counts, "actor"
+        # Force the loop path on the reference copy.
+        mp.setattr(moe_lora, "_use_grouped_mm", lambda _x: False)
+        ref_out = reference(x)
+    assert torch.allclose(ref_out, fast_out, atol=1e-5)
+
+    ref_out.square().mean().backward()
+    fast_out.square().mean().backward()
+    _assert_grad_parity(reference, fast, atol=1e-4)
+
+
+def test_install_packed_expert_grouped_gemm_skips_dense():
+    assert install_packed_expert_grouped_gemm(nn.Linear(HIDDEN, HIDDEN)) == 0
+
+
+def test_install_packed_expert_grouped_gemm_matches_routed_loop():
+    torch.manual_seed(0)
+    reference = _RoutedMoeBlock()
+    patched = copy.deepcopy(reference)
+    assert install_packed_expert_grouped_gemm(patched) == 1
+    assert install_packed_expert_grouped_gemm(patched) == 0
+    x = torch.randn(10, HIDDEN)
+    assert torch.allclose(reference(x), patched(x), atol=1e-5)
+
+
+def test_install_packed_expert_grouped_gemm_matches_sorted_loop():
+    torch.manual_seed(0)
+    reference = _SortedMoeBlock()
+    patched = copy.deepcopy(reference)
+    assert install_packed_expert_grouped_gemm(patched) == 2
+    x = torch.randn(10, HIDDEN)
+    assert torch.allclose(reference(x), patched(x), atol=1e-5)
+
+
+def test_install_packed_expert_grouped_gemm_matches_ungated_loop():
+    torch.manual_seed(0)
+    reference = _UngatedMoeBlock()
+    patched = copy.deepcopy(reference)
+    assert install_packed_expert_grouped_gemm(patched) == 1
+    x = torch.randn(10, HIDDEN)
+    assert torch.allclose(reference(x), patched(x), atol=1e-5)
+
+
+@pytest.mark.parametrize("pair_factory", [_sorted_pair, _routed_pair, _ungated_pair])
+def test_install_packed_grouped_gemm_after_peft_upgrade_matches(pair_factory):
+    reference, upgraded = pair_factory()
+    assert install_packed_expert_grouped_gemm(upgraded) > 0
+    x = torch.randn(12, HIDDEN)
+    assert torch.allclose(reference(x), upgraded(x), atol=1e-6)
+
+    reference.zero_grad()
+    upgraded.zero_grad()
+    reference(x).square().mean().backward()
+    upgraded(x).square().mean().backward()
+    _assert_grad_parity(reference, upgraded, atol=1e-5)
+
+
+def test_grouped_linear_densifies_dtensor_weight(monkeypatch):
+    from agilerl.algorithms.core.llm_ops import moe_lora as moe_mod
+
+    class FakeDTensor:
+        def __init__(self, local: torch.Tensor) -> None:
+            self._local = local
+
+        def to_local(self) -> torch.Tensor:
+            return self._local
+
+    local = torch.randn(NUM_EXPERTS, INTERMEDIATE, HIDDEN)
+    monkeypatch.setattr(moe_mod, "DTensor", FakeDTensor)
+    x = torch.randn(8, HIDDEN)
+    counts = [2, 2, 2, 2]
+    out = moe_mod._grouped_linear(x, FakeDTensor(local), counts)
+    ref = moe_mod._grouped_linear(x, local, counts)
+    assert torch.allclose(out, ref)
+
+
+def _mock_cuda_torch(monkeypatch, grouped_mm):
+    """Route the grouped-mm probe's CUDA tensor factory calls to CPU tensors."""
+    real_randn = torch.randn
+    real_tensor = torch.tensor
+
+    def cpu_randn(*shape, device=None, dtype=None, generator=None):
+        return real_randn(*shape, dtype=dtype or torch.float32)
+
+    def cpu_tensor(data, device=None, dtype=None):
+        return real_tensor(data, dtype=dtype)
+
+    monkeypatch.setattr(torch, "randn", cpu_randn)
+    monkeypatch.setattr(torch, "tensor", cpu_tensor)
+    monkeypatch.setattr(torch, "_grouped_mm", grouped_mm)
+    monkeypatch.setattr(torch, "Generator", MagicMock())
+
+
+def test_grouped_mm_probe_false_without_op(monkeypatch):
+    from agilerl.algorithms.core.llm_ops import moe_lora as moe_mod
+
+    monkeypatch.delattr(torch, "_grouped_mm", raising=False)
+    moe_mod._grouped_mm_supported.cache_clear()
+
+    assert moe_mod._grouped_mm_supported(0, torch.float32) is False
+
+
+def test_grouped_mm_probe_true_when_op_matches_reference(monkeypatch):
+    from agilerl.algorithms.core.llm_ops import moe_lora as moe_mod
+
+    def fake_grouped_mm(x, w_t, offs):
+        bounds = [0, *offs.tolist()]
+        return torch.cat(
+            [x[start:end] @ w_t[i] for i, (start, end) in enumerate(pairwise(bounds))]
         )
 
-    # Down-projection to rank, then up-projection to the output width, both
-    # per expert: the delta never materializes a full-rank per-expert weight.
-    assert shapes == [
-        (NUM_EXPERTS, rank, HIDDEN),
-        (NUM_EXPERTS, out_features, rank),
-    ]
-    assert delta.shape == (sum(counts), out_features)
+    _mock_cuda_torch(monkeypatch, fake_grouped_mm)
+    moe_mod._grouped_mm_supported.cache_clear()
+
+    assert moe_mod._grouped_mm_supported(1, torch.float32) is True
 
 
-def test_split_lora_delta_computes_in_fp32_for_low_precision_activations():
-    from agilerl.algorithms.core.llm_ops.moe_lora import _split_lora_delta
+def test_grouped_mm_probe_false_when_op_mismatches(monkeypatch):
+    from agilerl.algorithms.core.llm_ops import moe_lora as moe_mod
 
-    wrapper = _delta_wrapper()
-    counts = [4, 3, 3, 2]
-    x = torch.randn(sum(counts), HIDDEN).bfloat16()
+    _mock_cuda_torch(monkeypatch, lambda x, w_t, offs: torch.zeros(8, 4))
+    moe_mod._grouped_mm_supported.cache_clear()
 
-    delta = _split_lora_delta(wrapper, x, counts, "actor")
-    fp32_delta = _split_lora_delta(wrapper, x.float(), counts, "actor")
+    assert moe_mod._grouped_mm_supported(2, torch.float32) is False
 
-    # bf16 activations are widened to fp32 for the low-rank GEMMs and only the
-    # result is narrowed back, so the two agree bit for bit after rounding.
-    assert delta.dtype is torch.bfloat16
-    assert fp32_delta.dtype is torch.float32
-    assert torch.equal(delta, fp32_delta.bfloat16())
-    assert torch.allclose(
-        delta.double(), _reference_delta(wrapper, x, counts), atol=5e-3
+
+def test_grouped_mm_probe_false_when_op_raises(monkeypatch):
+    from agilerl.algorithms.core.llm_ops import moe_lora as moe_mod
+
+    def boom(x, w_t, offs):
+        msg = "no grouped mm"
+        raise RuntimeError(msg)
+
+    _mock_cuda_torch(monkeypatch, boom)
+    moe_mod._grouped_mm_supported.cache_clear()
+
+    assert moe_mod._grouped_mm_supported(3, torch.float32) is False
+
+
+def test_use_grouped_mm_consults_probe_for_cuda_tensor(monkeypatch):
+    from agilerl.algorithms.core.llm_ops import moe_lora as moe_mod
+
+    x = MagicMock()
+    x.is_cuda = True
+    x.device.index = 0
+    x.dtype = torch.float32
+    probe = MagicMock(return_value=True)
+    monkeypatch.setattr(moe_mod, "_grouped_mm_supported", probe)
+
+    assert moe_mod._use_grouped_mm(x) is True
+    probe.assert_called_once_with(0, torch.float32)
+
+
+def test_use_grouped_mm_missing_index_uses_current_device(monkeypatch):
+    from agilerl.algorithms.core.llm_ops import moe_lora as moe_mod
+
+    x = MagicMock()
+    x.is_cuda = True
+    x.device.index = None
+    x.dtype = torch.float16
+    probe = MagicMock(return_value=False)
+    monkeypatch.setattr(moe_mod, "_grouped_mm_supported", probe)
+    monkeypatch.setattr(torch.cuda, "current_device", lambda: 3)
+
+    assert moe_mod._use_grouped_mm(x) is False
+    probe.assert_called_once_with(3, torch.float16)
+
+
+def test_counts_tensor_passes_tensors_through():
+    from agilerl.algorithms.core.llm_ops import moe_lora as moe_mod
+
+    counts = torch.tensor([2, 3])
+
+    assert moe_mod._counts_tensor(counts, torch.device("cpu")) is counts
+    out = moe_mod._counts_tensor([2, 3], torch.device("cpu"))
+    assert torch.equal(out, torch.tensor([2, 3]))
+
+
+def test_group_offsets_cumulates_counts():
+    from agilerl.algorithms.core.llm_ops import moe_lora as moe_mod
+
+    out = moe_mod._group_offsets([2, 3], torch.device("cpu"))
+
+    assert out.dtype == torch.int32
+    assert torch.equal(out, torch.tensor([2, 5], dtype=torch.int32))
+
+
+def test_routed_act_fn_falls_back_to_config_hidden_act():
+    from types import SimpleNamespace
+
+    from agilerl.algorithms.core.llm_ops import moe_lora as moe_mod
+
+    experts = nn.Linear(4, 4)
+    experts.config = SimpleNamespace(hidden_act="gelu")
+
+    act_fn = moe_mod._routed_experts_act_fn(experts)
+
+    assert callable(act_fn)
+    assert torch.allclose(act_fn(torch.tensor([0.0])), torch.tensor([0.0]), atol=1e-6)
+
+
+def test_routed_act_fn_raises_without_activation():
+    from agilerl.algorithms.core.llm_ops import moe_lora as moe_mod
+
+    with pytest.raises(RuntimeError, match="activation function"):
+        moe_mod._routed_experts_act_fn(nn.Linear(4, 4))
+
+
+def test_grouped_linear_rejects_non_tensor_module_weight():
+    from agilerl.algorithms.core.llm_ops import moe_lora as moe_mod
+
+    module = nn.Module()
+    module.weight = 123
+
+    with pytest.raises(TypeError, match="must be a Tensor"):
+        moe_mod._grouped_linear(module, torch.ones(4, 4), [4])
+
+
+def test_grouped_linear_rejects_non_tensor_input():
+    from agilerl.algorithms.core.llm_ops import moe_lora as moe_mod
+
+    with pytest.raises(TypeError, match="must be a Tensor"):
+        moe_mod._grouped_linear("nope", torch.ones(4, 4), [4])
+
+
+def test_grouped_linear_fast_path_copies_strided_operand(monkeypatch):
+    from agilerl.algorithms.core.llm_ops import moe_lora as moe_mod
+
+    x = torch.randn(4, 8)
+    weight = torch.randn(2, 4, 8)
+    seen: dict[str, object] = {}
+
+    def fake_grouped_mm(rows, operand, offs):
+        seen["operand"] = operand
+        seen["offs"] = offs
+        return torch.zeros(4, 4)
+
+    monkeypatch.setattr(moe_mod, "_use_grouped_mm", lambda _x: True)
+    monkeypatch.setattr(torch, "_grouped_mm", fake_grouped_mm)
+
+    out = moe_mod._grouped_linear(x, weight, [2, 2], copy_for_gmm=True)
+
+    assert out.shape == (4, 4)
+    assert seen["operand"].is_contiguous()
+    assert torch.equal(seen["offs"], torch.tensor([2, 4], dtype=torch.int32))
+
+
+def test_forward_param_names_empty_when_signature_missing():
+    from agilerl.algorithms.core.llm_ops import moe_lora as moe_mod
+
+    class Broken(nn.Module):
+        forward = None
+
+    assert moe_mod._forward_param_names(Broken()) == []
+
+
+def test_routed_projection_names_rejects_expert_bias():
+    from agilerl.algorithms.core.llm_ops import moe_lora as moe_mod
+
+    experts = _RoutedExperts()
+    experts.down_proj_bias = nn.Parameter(torch.zeros(1))
+
+    assert moe_mod._routed_projection_names(experts) is None
+
+
+def test_routed_projection_names_rejects_wrong_forward():
+    from agilerl.algorithms.core.llm_ops import moe_lora as moe_mod
+
+    class WrongForward(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.down_proj = nn.Parameter(torch.randn(2, 4, 3))
+            self.gate_up_proj = nn.Parameter(torch.randn(2, 6, 3))
+
+        def forward(self, hidden_states):
+            return hidden_states
+
+    assert moe_mod._routed_projection_names(WrongForward()) is None
+
+
+def test_routed_projection_names_skips_biased_up_projection():
+    from agilerl.algorithms.core.llm_ops import moe_lora as moe_mod
+
+    experts = _RoutedExperts()
+    experts.gate_up_proj_bias = nn.Parameter(torch.zeros(1))
+
+    assert moe_mod._routed_projection_names(experts) is None
+
+
+def test_routed_projection_names_rejects_odd_gated_width():
+    from agilerl.algorithms.core.llm_ops import moe_lora as moe_mod
+
+    class OddGate(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.down_proj = nn.Parameter(torch.randn(2, 4, 3))
+            self.gate_up_proj = nn.Parameter(torch.randn(2, 3, 4))
+
+        def forward(self, hidden_states, top_k_index, top_k_weights):
+            return hidden_states
+
+    assert moe_mod._routed_projection_names(OddGate()) is None
+
+
+def test_expert_counts_rejects_wrong_length():
+    from agilerl.algorithms.core.llm_ops import moe_lora as moe_mod
+
+    with pytest.raises(ValueError, match="per-expert counts"):
+        moe_mod._expert_counts([1, 2], 3)
+
+
+def test_resolve_adapters_unmerges_when_disabled(monkeypatch):
+    from agilerl.algorithms.core.llm_ops import moe_lora as moe_mod
+
+    wrapper = MagicMock()
+    wrapper.disable_adapters = True
+    wrapper.merged = True
+    monkeypatch.setattr(moe_mod, "uniform_routed_adapter", lambda _w: None)
+
+    assert moe_mod._resolve_adapters(wrapper) == []
+    wrapper.unmerge.assert_called_once_with()
+
+
+def test_split_lora_delta_dtensor_fallback(monkeypatch):
+    from agilerl.algorithms.core.llm_ops import moe_lora as moe_mod
+
+    class FakeDTensor(nn.Parameter):
+        pass
+
+    experts, rank, total = 2, 2, 4
+    x = torch.randn(total, 8)
+    lora_a = MagicMock()
+    lora_a.weight = FakeDTensor(torch.ones(experts, rank, 8))
+    lora_a.return_value = (
+        torch.arange(total * experts * rank).reshape(total, -1).float()
+    )
+    lora_b = MagicMock()
+    lora_b.weight = FakeDTensor(torch.ones(6, experts * rank))
+    lora_b.side_effect = lambda t: t @ torch.ones(t.shape[1], 6)
+    wrapper = MagicMock()
+    wrapper.lora_A = {"actor": lora_a}
+    wrapper.lora_B = {"actor": lora_b}
+    wrapper.scaling = {"actor": 2.0}
+    wrapper.r = {"actor": rank}
+    monkeypatch.setattr(moe_mod, "DTensor", FakeDTensor)
+
+    out = moe_mod._split_lora_delta(wrapper, x, [2, 2], "actor", num_experts=experts)
+
+    assert out.shape == (total, 6)
+    lora_a.assert_called_once()
+    lora_b.assert_called_once()
+
+
+def test_split_lora_delta_stacked_layouts():
+    from agilerl.algorithms.core.llm_ops import moe_lora as moe_mod
+
+    torch.manual_seed(0)
+    experts, rank, hidden, out_dim = 2, 2, 8, 6
+    x = torch.randn(4, hidden)
+
+    torch.manual_seed(1)
+    a3 = torch.randn(experts, rank, hidden)
+    b_exp_first = torch.randn(experts, out_dim, rank)
+    b_exp_last = b_exp_first.permute(1, 2, 0).contiguous()
+
+    def run(weight_b):
+        lora_a = MagicMock()
+        lora_a.weight = a3
+        lora_b = MagicMock()
+        lora_b.weight = weight_b
+        wrapper = MagicMock()
+        wrapper.lora_A = {"actor": lora_a}
+        wrapper.lora_B = {"actor": lora_b}
+        wrapper.scaling = {"actor": 1.0}
+        wrapper.r = {"actor": rank}
+        wrapper.num_experts = experts
+        return moe_mod._split_lora_delta(wrapper, x, [2, 2], "actor")
+
+    grouped = run(b_exp_first)
+    transposed = run(b_exp_last)
+    assert grouped.shape == (4, out_dim)
+    assert torch.allclose(grouped, transposed)
+
+
+def test_routed_local_forward_rejects_unsupported_layout():
+    from agilerl.algorithms.core.llm_ops import moe_lora as moe_mod
+
+    with pytest.raises(RuntimeError, match="supported packed layout"):
+        moe_mod._routed_experts_local_forward(
+            nn.Linear(4, 4),
+            torch.randn(2, 4),
+            torch.zeros(2, 1, dtype=torch.long),
+            torch.ones(2, 1),
+        )
+
+
+def test_routed_local_forward_resolves_chain_adapters(monkeypatch):
+    from agilerl.algorithms.core.llm_ops import moe_lora as moe_mod
+
+    torch.manual_seed(0)
+    experts = _RoutedExperts()
+    hidden = torch.randn(4, HIDDEN)
+    top_k_index = torch.randint(0, NUM_EXPERTS, (4, TOP_K))
+    top_k_weights = torch.rand(4, TOP_K)
+    chain = {"gate_up_proj": MagicMock()}
+    monkeypatch.setattr(moe_mod, "_resolve_adapters", lambda _w: [])
+
+    out = moe_mod._routed_experts_local_forward(
+        experts, hidden, top_k_index, top_k_weights, chain=chain
     )
 
-
-class _FakeDsStatus:
-    def __init__(self, name: str) -> None:
-        self.name = name
-
-
-def _mark_ds(param, status=None):
-    param.ds_id = 1
-    if status is not None:
-        param.ds_status = _FakeDsStatus(status)
-
-
-def test_zero3_gathered_base_weights_run_split_forward():
-    reference, upgraded = _routed_pair()
-    experts = _wrappers(upgraded)[0].get_base_layer()
-    # Leaf-gathered ZeRO-3 params report AVAILABLE; raw reads see full data.
-    _mark_ds(experts.gate_up_proj, "AVAILABLE")
-    _mark_ds(experts.down_proj, "AVAILABLE")
-    x = torch.randn(10, HIDDEN)
-    assert torch.allclose(reference(x), upgraded(x), atol=1e-5)
-
-
-def test_zero3_gathered_adapters_use_fast_path():
-    reference, upgraded = _sorted_pair()
-    for module in _wrappers(upgraded):
-        for adapter in module.lora_A:
-            _mark_ds(module.lora_A[adapter].weight, "AVAILABLE")
-            _mark_ds(module.lora_B[adapter].weight, "AVAILABLE")
-    x = torch.randn(10, HIDDEN)
-    assert torch.allclose(reference(x), upgraded(x), atol=1e-5)
-
-
-def test_mark_expert_wrappers_as_zero3_leaves():
-    pytest.importorskip("deepspeed")
-    from agilerl.algorithms.core.llm_ops.moe_lora import (
-        mark_expert_wrappers_as_zero3_leaves,
+    ref = moe_mod._routed_experts_local_forward(
+        experts, hidden, top_k_index, top_k_weights
     )
-
-    _, upgraded = _routed_pair()
-    assert mark_expert_wrappers_as_zero3_leaves(upgraded) == 1
-    assert mark_expert_wrappers_as_zero3_leaves(nn.Linear(2, 2)) == 0
+    assert torch.allclose(out, ref)
 
 
-class TestMoeLoraHelpers:
-    def test_expert_counts_wrong_length_raises(self) -> None:
-        with pytest.raises(ValueError, match="Expected 4"):
-            _expert_counts([1, 2], num_experts=4)
+def test_routed_wrapper_delegates_on_extra_args():
+    _reference, upgraded = _routed_pair()
+    wrapper = next(
+        m for m in upgraded.modules() if isinstance(m, RoutedExpertsLoraWrapper)
+    )
+    hidden = torch.randn(4, HIDDEN)
+    top_k_index = torch.zeros(4, TOP_K, dtype=torch.long)
+    top_k_weights = torch.ones(4, TOP_K)
 
-    def test_token_adapter_ids_expands_then_permutes(self) -> None:
-        row_ids, id_map = _token_adapter_ids(
-            ["actor", "reference"],
-            n_rows=4,
-            token_idx=torch.tensor([2, 0, 3, 1]),
-        )
+    with patch.object(
+        ParamWrapper, "forward", return_value="peft-default"
+    ) as mock_forward:
+        out = wrapper(hidden, top_k_index, top_k_weights, "extra")
 
-        assert id_map == {"actor": 0, "reference": 1}
-        assert torch.equal(row_ids, torch.tensor([1, 0, 1, 0]))
-
-    def test_token_adapter_ids_rejects_row_count_that_does_not_divide_routing(
-        self,
-    ) -> None:
-        with pytest.raises(ValueError, match="experts input's leading dimension"):
-            _token_adapter_ids(
-                ["actor", "reference"],
-                n_rows=3,
-                token_idx=torch.tensor([0, 1, 2]),
-            )
-
-    def test_routed_projection_names_rejects_bias(self) -> None:
-        module = _RoutedExperts()
-        module.down_proj_bias = torch.zeros(1)
-
-        assert _routed_projection_names(module) is None
-
-    def test_routed_projection_names_rejects_missing_act_fn(self) -> None:
-        module = _RoutedExperts()
-        delattr(module, "act_fn")
-
-        assert _routed_projection_names(module) is None
-
-    def test_is_partitioned_false_when_available(self) -> None:
-        tensor = torch.randn(2, 2)
-        tensor.ds_id = 1
-        tensor.ds_status = SimpleNamespace(name="AVAILABLE")
-
-        assert _is_partitioned(tensor) is False
-
-    def test_is_partitioned_true_when_not_available(self) -> None:
-        tensor = torch.randn(2, 2)
-        tensor.ds_id = 1
-        tensor.ds_status = SimpleNamespace(name="NOT_AVAILABLE")
-
-        assert _is_partitioned(tensor) is True
-
-    def test_forward_param_names_empty_on_bad_signature(self) -> None:
-        class _Bad(nn.Module):
-            forward = 123  # not a callable signature
-
-        assert _forward_param_names(_Bad()) == []
+    mock_forward.assert_called_once()
+    assert out == "peft-default"
 
 
-class TestMoeLoraFallbackBranches:
-    def test_counts_tensor_returns_tensor_input_unchanged(self) -> None:
-        counts = torch.tensor([3, 1])
-        assert moe_lora_module._counts_tensor(counts, torch.device("cpu")) is counts
+def test_routed_wrapper_delegates_when_layout_unknown():
+    _reference, upgraded = _routed_pair()
+    wrapper = next(
+        m for m in upgraded.modules() if isinstance(m, RoutedExpertsLoraWrapper)
+    )
+    experts = wrapper.get_base_layer()
+    experts.gate_up_proj = nn.Parameter(torch.randn(2 * INTERMEDIATE, HIDDEN))
+    hidden = torch.randn(4, HIDDEN)
+    top_k_index = torch.zeros(4, TOP_K, dtype=torch.long)
+    top_k_weights = torch.ones(4, TOP_K)
 
-    def test_routed_projection_names_rejects_wrong_forward_params(self) -> None:
-        class _WrongForwardNames(nn.Module):
-            def __init__(self) -> None:
-                super().__init__()
-                self.down_proj = nn.Parameter(torch.zeros(2, 4, 3))
-                self.act_fn = F.silu
-
-            def forward(self, hidden, ids):
-                return hidden
-
-        assert moe_lora_module._routed_projection_names(_WrongForwardNames()) is None
-
-    def test_routed_projection_names_rejects_biased_and_odd_up_projections(
-        self,
-    ) -> None:
-        class _Base(nn.Module):
-            def __init__(self) -> None:
-                super().__init__()
-                self.down_proj = nn.Parameter(torch.zeros(2, 4, 3))
-                self.act_fn = F.silu
-
-            def forward(self, hidden_states, top_k_index, top_k_weights):
-                return hidden_states
-
-        biased = _Base()
-        biased.gate_up_proj = nn.Parameter(torch.zeros(2, 6, 4))
-        biased.gate_up_proj_bias = nn.Parameter(torch.zeros(2, 6))
-        assert moe_lora_module._routed_projection_names(biased) is None
-
-        odd = _Base()
-        odd.gate_up_proj = nn.Parameter(torch.zeros(2, 5, 4))
-        assert moe_lora_module._routed_projection_names(odd) is None
-
-    def test_is_routed_experts_module_discriminates(self) -> None:
-        assert moe_lora_module._is_routed_experts_module(_RoutedExperts()) is True
-        assert moe_lora_module._is_routed_experts_module(nn.Linear(2, 2)) is False
-
-    def test_resolve_adapters_unmerges_a_disabled_merged_wrapper(self) -> None:
-        _, upgraded = _routed_pair()
-        wrapper = next(
-            m for m in _wrappers(upgraded) if isinstance(m, RoutedExpertsLoraWrapper)
-        )
-        wrapper.merge()
-        assert wrapper.merged
-        wrapper.enable_adapters(False)
-
-        assert moe_lora_module._resolve_adapters(wrapper) == []
-        assert not wrapper.merged
-
-    def test_routed_lora_residual_requires_a_recognized_layout(self) -> None:
-        with pytest.raises(RuntimeError, match="recognized projection layout"):
-            moe_lora_module._routed_lora_residual(
-                torch.zeros(1, 4),
-                torch.zeros(1, 2, dtype=torch.long),
-                torch.zeros(1, 2),
-                {},
-                nn.Linear(4, 4),
-                {},
-            )
-
-    def test_routed_forward_delegates_nonstandard_calls_to_param_wrapper(self) -> None:
-        _, upgraded = _routed_pair()
-        wrapper = next(
-            m for m in _wrappers(upgraded) if isinstance(m, RoutedExpertsLoraWrapper)
-        )
-        hidden_3d = torch.randn(1, 2, HIDDEN)
-        top_k_index = torch.zeros(2, TOP_K, dtype=torch.long)
-        top_k_weights = torch.full((2, TOP_K), 0.5)
-        sentinel = torch.zeros(1)
-
-        with mock.patch.object(
-            ParamWrapper, "forward", return_value=sentinel
-        ) as base_forward:
-            out = wrapper.forward(hidden_3d, top_k_index, top_k_weights)
-
-        assert out is sentinel
-        base_forward.assert_called_once()
-
-    def test_routed_forward_delegates_when_layout_becomes_unrecognized(
-        self, monkeypatch
-    ) -> None:
-        _, upgraded = _routed_pair()
-        wrapper = next(
-            m for m in _wrappers(upgraded) if isinstance(m, RoutedExpertsLoraWrapper)
-        )
-        hidden = torch.randn(3, HIDDEN)
-        top_k_index = torch.zeros(3, TOP_K, dtype=torch.long)
-        top_k_weights = torch.full((3, TOP_K), 0.5)
-        sentinel = torch.zeros(1)
-        monkeypatch.setattr(
-            moe_lora_module, "_routed_projection_names", lambda _module: None
-        )
-
-        with mock.patch.object(
-            ParamWrapper, "forward", return_value=sentinel
-        ) as base_forward:
-            out = wrapper.forward(hidden, top_k_index, top_k_weights)
-
-        assert out is sentinel
-        base_forward.assert_called_once()
-
-
-@pytest.mark.gpu
-class TestZero3ExpertAttachMemory:
-    """Expert-LoRA attach on a zero.Init model must not gather the experts."""
-
-    # deepspeed.init_distributed and zero.Init leave process-global state (a
-    # default process group, patched module construction), so the scenario
-    # runs in a subprocess to keep it out of other tests' processes.
-    _SCRIPT = textwrap.dedent(
-        """
-        import json
-        import math
-
-        import deepspeed
-        import torch
-        import torch.nn as nn
-        import torch.nn.functional as F
-        from peft import LoraConfig, get_peft_model
-
-        from agilerl.algorithms.core.llm_ops.moe_lora import (
-            upgrade_moe_param_wrappers,
-        )
-        from agilerl.utils.llm_utils import zero3_full_shape_views
-
-        deepspeed.init_distributed(dist_backend="nccl")
-        num_layers, num_experts, hidden, intermediate = 4, 8, 1024, 2816
-
-
-        class BigExperts(nn.Module):
-            def __init__(self):
-                super().__init__()
-                self.num_experts = num_experts
-                self.up_proj = nn.Parameter(
-                    torch.empty(num_experts, intermediate, hidden)
-                )
-                self.down_proj = nn.Parameter(
-                    torch.empty(num_experts, hidden, intermediate)
-                )
-                self.act_fn = F.silu
-
-            def forward(self, hidden_states, top_k_index, top_k_weights):
-                return hidden_states
-
-
-        class BigMoeModel(nn.Module):
-            def __init__(self):
-                super().__init__()
-                self.layers = nn.ModuleList()
-                for _ in range(num_layers):
-                    block = nn.Module()
-                    block.experts = BigExperts()
-                    self.layers.append(block)
-
-
-        # remote_device=cpu keeps the single-rank gather from aliasing the
-        # local shard, so a regression to gathering the packed experts
-        # re-allocates their full summed size on the GPU and trips the bound.
-        with deepspeed.zero.Init(
-            remote_device="cpu",
-            config_dict_or_path={
-                "train_batch_size": 1,
-                "train_micro_batch_size_per_gpu": 1,
-                "zero_optimization": {
-                    "stage": 3,
-                    "offload_param": {"device": "cpu"},
-                },
-            },
+    with patch.object(
+        ParamWrapper, "forward", return_value="peft-default"
+    ) as mock_forward:
+        with patch(
+            "agilerl.algorithms.core.llm_ops.moe_lora._resolve_adapters",
+            return_value=["actor"],
         ):
-            model = BigMoeModel()
+            out = wrapper(hidden, top_k_index, top_k_weights)
 
-        expert_params = [
-            param
-            for name, param in model.named_parameters()
-            if name.endswith(("up_proj", "down_proj"))
-        ]
-        assert len(expert_params) == 2 * num_layers
-        assert all(param.numel() == 0 for param in expert_params)
-        summed = sum(
-            math.prod(param.ds_shape) * param.element_size()
-            for param in expert_params
-        )
-
-        torch.cuda.synchronize()
-        torch.cuda.empty_cache()
-        torch.cuda.reset_peak_memory_stats()
-        base = torch.cuda.memory_allocated()
-
-        config = LoraConfig(
-            r=8,
-            lora_alpha=16,
-            lora_dropout=0.0,
-            target_modules=[],
-            target_parameters=["experts.up_proj", "experts.down_proj"],
-        )
-        with zero3_full_shape_views(expert_params):
-            peft_model = get_peft_model(
-                model, config, adapter_name="actor", autocast_adapter_dtype=False
-            )
-        with zero3_full_shape_views(expert_params):
-            upgraded = upgrade_moe_param_wrappers(peft_model)
-
-        torch.cuda.synchronize()
-        result = {
-            "peak_delta": torch.cuda.max_memory_allocated() - base,
-            "summed": summed,
-            "upgraded": upgraded,
-            "placeholders_empty": all(
-                param.numel() == 0 for param in expert_params
-            ),
-        }
-        print("RESULT " + json.dumps(result))
-        """
-    )
-
-    def test_attach_peak_allocation_far_below_summed_expert_size(self) -> None:
-        if not torch.cuda.is_available():
-            pytest.skip("requires CUDA")
-        pytest.importorskip("deepspeed")
-
-        with socket.socket() as sock:
-            sock.bind(("127.0.0.1", 0))
-            port = sock.getsockname()[1]
-        repo_root = Path(__file__).resolve().parents[3]
-        env = os.environ | {
-            "RANK": "0",
-            "LOCAL_RANK": "0",
-            "WORLD_SIZE": "1",
-            "MASTER_ADDR": "127.0.0.1",
-            "MASTER_PORT": str(port),
-            "PYTHONPATH": os.pathsep.join(
-                [str(repo_root), os.environ.get("PYTHONPATH", "")]
-            ).rstrip(os.pathsep),
-        }
-        proc = subprocess.run(
-            [sys.executable, "-c", self._SCRIPT],
-            env=env,
-            capture_output=True,
-            text=True,
-            timeout=600,
-            check=False,
-        )
-        assert proc.returncode == 0, (
-            f"attach subprocess failed\nstdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
-        )
-        result_line = next(
-            line for line in proc.stdout.splitlines() if line.startswith("RESULT ")
-        )
-        result = json.loads(result_line.removeprefix("RESULT "))
-        assert result["upgraded"] == 4
-        assert result["placeholders_empty"] is True
-        assert result["peak_delta"] < result["summed"] // 10, result
+    mock_forward.assert_called_once()
+    assert out == "peft-default"

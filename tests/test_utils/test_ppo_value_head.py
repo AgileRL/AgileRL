@@ -218,20 +218,28 @@ class TestAutoModelForCausalLMWithValueHeadInit:
 
 
 class TestAutoModelForCausalLMWithValueHeadStateDict:
-    def test_non_peft_includes_backbone_and_v_head(self):
-        model = DummyPretrainedModel()
-        wrapped = AutoModelForCausalLMWithValueHead(model)
-        state_dict = wrapped.state_dict()
-        assert any(key.startswith("v_head.") for key in state_dict)
-        assert any(key.startswith("embed.") for key in state_dict)
+    @pytest.mark.parametrize("is_peft_model", [False, True])
+    def test_keys_match_named_parameters(self, is_peft_model):
+        wrapped = AutoModelForCausalLMWithValueHead(DummyPretrainedModel())
+        wrapped.is_peft_model = is_peft_model
 
-    def test_peft_includes_only_v_head_prefix(self):
-        model = DummyPretrainedModel()
-        wrapped = AutoModelForCausalLMWithValueHead(model)
-        wrapped.is_peft_model = True
         state_dict = wrapped.state_dict()
-        assert len(state_dict) > 0
-        assert all(key.startswith("v_head.") for key in state_dict)
+
+        assert set(state_dict) == {name for name, _ in wrapped.named_parameters()}
+        assert "pretrained_model.embed.weight" in state_dict
+        assert "v_head.summary.weight" in state_dict
+
+    def test_strict_round_trip_restores_weights(self):
+        torch.manual_seed(0)
+        source = AutoModelForCausalLMWithValueHead(DummyPretrainedModel())
+        target = AutoModelForCausalLMWithValueHead(DummyPretrainedModel())
+
+        target.load_state_dict(source.state_dict(), strict=True)
+
+        for (name, expected), (_, actual) in zip(
+            source.named_parameters(), target.named_parameters(), strict=True
+        ):
+            assert torch.equal(expected, actual), name
 
 
 class TestAutoModelForCausalLMWithValueHeadPostInit:
@@ -265,7 +273,8 @@ class TestAutoModelForCausalLMWithValueHeadSavePretrained:
         wrapped = AutoModelForCausalLMWithValueHead(model)
         wrapped.is_peft_model = True
         wrapped.save_pretrained(str(tmp_path))
-        assert (tmp_path / "pytorch_model.bin").exists()
+        saved_bin = torch.load(tmp_path / "pytorch_model.bin", weights_only=True)
+        assert set(saved_bin) == {"v_head.summary.weight", "v_head.summary.bias"}
         assert model._saved_args == (str(tmp_path),)
         assert "state_dict" not in model._saved_kwargs
 

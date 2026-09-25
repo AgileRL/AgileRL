@@ -696,3 +696,45 @@ class TestInstallMambaPatches:
         mamba.install_mamba_patches(PatchRuntimeConfig(), model=object())
 
         assert seen == []
+
+
+class TestBlockTypeMaskMapping:
+    def test_builds_full_and_linear_keys(self, monkeypatch):
+        masking = SimpleNamespace(
+            create_causal_mask=lambda **_kw: "causal",
+            create_recurrent_attention_mask=lambda **_kw: "linear",
+        )
+        monkeypatch.setattr(
+            mamba,
+            "try_import",
+            lambda path: masking if path == "transformers.masking_utils" else None,
+        )
+        embeds = torch.zeros(1, 3, 2)
+
+        mapping, position_ids = mamba.block_type_mask_mapping(
+            SimpleNamespace(config=object()),
+            embeds=embeds,
+            attention_mask=None,
+            past_key_values=None,
+            position_ids=None,
+        )
+
+        assert mapping == {
+            "full_attention": "causal",
+            "linear_attention": "linear",
+        }
+        assert position_ids.shape == (1, 3)
+
+    def test_missing_masking_utils_returns_empty_mapping(self, monkeypatch):
+        monkeypatch.setattr(mamba, "try_import", lambda _path: None)
+
+        mapping, position_ids = mamba.block_type_mask_mapping(
+            SimpleNamespace(config=object()),
+            embeds=torch.zeros(1, 2, 2),
+            attention_mask=None,
+            past_key_values=None,
+            position_ids=None,
+        )
+
+        assert mapping == {}
+        assert position_ids.shape == (1, 2)

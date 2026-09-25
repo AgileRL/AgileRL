@@ -14,6 +14,7 @@ from __future__ import annotations
 import math
 import warnings
 from contextlib import nullcontext
+from types import SimpleNamespace
 from typing import Any
 
 import numpy as np
@@ -63,7 +64,6 @@ class _Stub:
         clipfrac_value: float = 0.1,
     ) -> None:
         self.device = torch.device("cpu")
-        self.accelerator = None
         self.beta = beta
         self.loss_type = "grpo"
         self.use_liger_loss = use_liger_loss
@@ -77,10 +77,10 @@ class _Stub:
         self.clip_coef_max = 1.2
         self.use_kl_advantage_shaping = False
         self.loss_norm = "micro_batch"
-        self._uses_deepspeed = False
         self.pad_token_id = PAD_TOKEN_ID
         self.update_epochs = 1
         self.micro_batch_size_per_gpu = 2
+        self.gradient_accumulation_steps = 1
         self._is_correction_liger_warned = False
         self._liger_non_token_warned = False
         self._survivors = survivors
@@ -91,6 +91,9 @@ class _Stub:
         self.rng = np.random.default_rng(0)
         self.liger_calls = 0
         self.standard_calls = 0
+        self.shard_runtime = SimpleNamespace(
+            timed=lambda _name, **_fields: nullcontext()
+        )
 
     learn = GRPO.learn
     _align_sampling_logprobs = GRPO._align_sampling_logprobs
@@ -109,7 +112,7 @@ class _Stub:
     _reduce_masked_loss = GRPO._reduce_masked_loss
     _resolve_loss_window = GRPO._resolve_loss_window
     _sampling_mismatch_metrics = GRPO._sampling_mismatch_metrics
-    _summarize_post_update = GRPO._summarize_post_update
+    _summarize_update = GRPO._summarize_update
     _use_liger_path = GRPO._use_liger_path
     _warn_if_micro_batches_straddle_optimizer_steps = (
         GRPO._warn_if_micro_batches_straddle_optimizer_steps
@@ -120,7 +123,7 @@ class _Stub:
     def _prepare_vllm_for_training(self) -> None:
         return
 
-    def memory_efficient_params_context(self):
+    def trainer_offload_context(self):
         """Match the context ``learn`` wraps its body in."""
         return nullcontext()
 
@@ -147,7 +150,7 @@ class _Stub:
     def _backward_pass(self, _loss: torch.Tensor) -> tuple[None, None]:
         return None, None
 
-    def _liger_loss(self, *_args: Any, **_kwargs: Any):
+    def _liger_loss(self, batch_ids: torch.Tensor, *_args: Any, **_kwargs: Any):
         """Record that the fused path ran."""
         self.liger_calls += 1
         kl = (
@@ -155,14 +158,12 @@ class _Stub:
             if self.beta == 0.0
             else torch.tensor(self._kl_value)
         )
-        return torch.tensor(1.0), kl, torch.tensor(self._clipfrac_value)
+        log_probs = torch.zeros(batch_ids.shape[0], batch_ids.shape[1] - 1)
+        return torch.tensor(1.0), kl, torch.tensor(self._clipfrac_value), log_probs
 
     def _get_logprobs(self, ids: torch.Tensor, **_kwargs: Any) -> torch.Tensor:
         """Record that the standard path ran."""
-        # The end-of-learn diagnostics snapshot also reads log-probs, but under
-        # no-grad; only the gradient forward marks the standard loss path.
-        if torch.is_grad_enabled():
-            self.standard_calls += 1
+        self.standard_calls += 1
         return torch.zeros(ids.shape[0], ids.shape[1] - 1)
 
     def _loss_fn(self, *_args: Any, **_kwargs: Any):
@@ -472,7 +473,7 @@ class TestSummarizePostUpdate:
         advantages = torch.tensor([[1.0]])
 
         # Act
-        stats = algo._summarize_post_update(post, old, ref, masks, advantages, None)
+        stats = algo._summarize_update(post, old, ref, masks, advantages, None)
 
         # Assert
         assert stats["entropy"] == pytest.approx(1.875)
@@ -497,7 +498,7 @@ class TestSummarizePostUpdate:
         advantages = torch.tensor([[-2.0]])
 
         # Act
-        stats = algo._summarize_post_update(post, old, ref, masks, advantages, None)
+        stats = algo._summarize_update(post, old, ref, masks, advantages, None)
 
         # Assert
         assert stats["is_frac_below"] == pytest.approx(1.0)
@@ -515,7 +516,7 @@ class TestSummarizePostUpdate:
         advantages = torch.tensor([[-2.0]])
 
         # Act
-        stats = algo._summarize_post_update(post, old, ref, masks, advantages, None)
+        stats = algo._summarize_update(post, old, ref, masks, advantages, None)
 
         # Assert
         assert stats["is_frac_below"] == pytest.approx(1.0)
@@ -584,7 +585,7 @@ class TestComputePolicyLossClipfrac:
         advantages = torch.tensor([[1.0, 1.0, -1.0, -1.0]])
 
         # Act
-        stats = algo._summarize_post_update(post, old, ref, masks, advantages, None)
+        stats = algo._summarize_update(post, old, ref, masks, advantages, None)
 
         # Assert: pooled ratio exp(mean([0, -1, 0.5, -3])); row-mean
         # advantage is 0 so neither clip binds.
@@ -603,7 +604,7 @@ class TestComputePolicyLossClipfrac:
         advantages = torch.tensor([[1.0]])
 
         # Act
-        stats = algo._summarize_post_update(post, old, ref, masks, advantages, None)
+        stats = algo._summarize_update(post, old, ref, masks, advantages, None)
 
         # Assert
         for key in (

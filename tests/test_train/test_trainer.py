@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import contextlib
 import importlib
+import os
 import warnings
 from collections import Counter
 from pathlib import Path
@@ -67,6 +68,7 @@ from agilerl.utils.trainer_utils import (
     build_replay_buffer_from_spec,
     build_tournament_from_spec,
     create_population_from_spec,
+    resolve_accelerator,
 )
 from agilerl.utils.utils import run_selection_and_mutation
 from tests.helper_functions import (
@@ -474,6 +476,26 @@ class TestLocalTrainerConstruction:
         assert trainer.selection_strategy_spec is tournament_spec
         assert trainer.replay_buffer_spec is buffer_spec
 
+    @patch("agilerl.training.trainer.create_population_from_spec")
+    @patch("agilerl.training.trainer.build_mutations_from_spec")
+    def test_accepts_accelerator(
+        self, mock_build_mutations, mock_create_pop, env, ppo_spec, training_spec
+    ):
+        mock_create_pop.return_value = [MagicMock()]
+        accelerator = MagicMock()
+        trainer = LocalTrainer(
+            algorithm=ppo_spec,
+            environment=env,
+            training=training_spec,
+            accelerator=accelerator,
+        )
+        assert trainer.accelerator is accelerator
+        _, pop_kwargs = mock_create_pop.call_args
+        assert pop_kwargs["accelerator"] is accelerator
+        mock_build_mutations.assert_called_once()
+        _, mut_kwargs = mock_build_mutations.call_args
+        assert mut_kwargs["accelerator"] is accelerator
+
 
 class TestLocalTrainerFromManifest:
     @patch("agilerl.training.trainer.create_population_from_spec")
@@ -513,6 +535,83 @@ class TestLocalTrainerFromManifest:
         assert trainer.training_spec.max_steps == 50
 
 
+class TestLocalTrainerAccelerateLaunch:
+    def test_explicit_accelerator_is_kept(self):
+        accelerator = MagicMock()
+        assert resolve_accelerator(MagicMock(), accelerator) is accelerator
+
+    def test_no_launch_returns_none(self):
+        with patch.dict(
+            os.environ, {"ACCELERATE_STARTED_BY_LAUNCH": "", "WORLD_SIZE": ""}
+        ):
+            assert resolve_accelerator(MagicMock(), None) is None
+
+    def test_classic_launch_builds_accelerator(self):
+        mock_accel = MagicMock()
+        with (
+            patch.dict(
+                os.environ,
+                {"ACCELERATE_STARTED_BY_LAUNCH": "true", "WORLD_SIZE": "2"},
+            ),
+            patch(
+                "agilerl.utils.trainer_utils.Accelerator", return_value=mock_accel
+            ) as mock_cls,
+        ):
+            result = resolve_accelerator(MagicMock(), None)
+
+        mock_cls.assert_called_once_with()
+        assert result is mock_accel
+
+    def test_one_process_warns_and_builds_accelerator(self):
+        mock_accel = MagicMock()
+        with (
+            patch.dict(
+                os.environ,
+                {"ACCELERATE_STARTED_BY_LAUNCH": "true", "WORLD_SIZE": "1"},
+            ),
+            patch("agilerl.utils.trainer_utils.Accelerator", return_value=mock_accel),
+            pytest.warns(UserWarning, match="(?i)only one process"),
+        ):
+            result = resolve_accelerator(MagicMock(), None)
+
+        assert result is mock_accel
+
+    def test_llm_launch_raises_before_accelerator(self):
+        algorithm = LLMAlgorithmSpec.__new__(LLMAlgorithmSpec)
+        with (
+            patch.dict(
+                os.environ,
+                {"ACCELERATE_STARTED_BY_LAUNCH": "true", "WORLD_SIZE": "2"},
+            ),
+            patch("agilerl.utils.trainer_utils.Accelerator") as mock_cls,
+            pytest.raises(ValueError, match="torchrun"),
+        ):
+            resolve_accelerator(algorithm, None)
+
+        mock_cls.assert_not_called()
+
+    @patch("agilerl.training.trainer.create_population_from_spec")
+    def test_from_manifest_uses_resolved_accelerator(self, mock_create_pop):
+        mock_create_pop.return_value = [MagicMock()]
+        mock_accel = MagicMock()
+        data = {
+            "algorithm": {"name": "PPO", "learn_step": 128},
+            "environment": {"name": "CartPole-v1", "num_envs": 1},
+            "training": {"max_steps": 100, "evo_steps": 10, "pop_size": 2},
+        }
+        with (
+            patch.object(LocalTrainer, "_make_env", return_value=MagicMock()),
+            patch(
+                "agilerl.training.trainer.resolve_accelerator",
+                return_value=mock_accel,
+            ) as mock_resolve,
+        ):
+            trainer = LocalTrainer.from_manifest(data)
+
+        mock_resolve.assert_called_once()
+        assert trainer.accelerator is mock_accel
+
+
 class TestLocalTrainerTrain:
     @patch("agilerl.training.trainer.create_population_from_spec")
     def test_train_delegates_to_fn(
@@ -527,6 +626,7 @@ class TestLocalTrainerTrain:
         mock_create_pop.return_value = mock_pop
         mock_train_fn = MagicMock(return_value=(mock_pop, [[1.0]]))
         mock_env = MagicMock()
+        accelerator = MagicMock()
 
         with (
             patch.object(
@@ -540,11 +640,13 @@ class TestLocalTrainerTrain:
                 algorithm="PPO",
                 environment=env_spec,
                 training=training_spec,
+                accelerator=accelerator,
             )
             result = trainer.train()
 
         mock_train_fn.assert_called_once()
         assert result == (mock_pop, [[1.0]])
+        assert mock_train_fn.call_args[1]["accelerator"] is accelerator
 
     @patch("agilerl.training.trainer.create_population_from_spec")
     def test_train_syncs_population_from_train_fn_result(
@@ -1478,7 +1580,7 @@ class TestLLMBuildAlgorithm:
             )
 
         call_kwargs = mock_algo.call_args[1]
-        assert call_kwargs["accelerator"] is mock_accel
+        assert "accelerator" not in call_kwargs
         # Unset on the spec: the algorithm derives its own micro batch size,
         # matching direct construction.
         assert "micro_batch_size_per_gpu" not in call_kwargs
@@ -1524,10 +1626,6 @@ class TestLLMLocalTrainer:
                 "agilerl.training.trainer.create_population_from_spec",
                 return_value=mock_pop,
             ) as mock_create_pop,
-            patch(
-                "agilerl.training.trainer.create_llm_accelerator",
-                return_value=MagicMock(),
-            ),
         ):
             mock_auto_tok.from_pretrained.return_value = mock_tokenizer
             from agilerl.models.env import LLMEnvSpec, LLMEnvType
@@ -1548,6 +1646,17 @@ class TestLLMLocalTrainer:
         assert create_kwargs["tokenizer"] is mock_tokenizer
         assert create_kwargs["population_size"] == self.POP_SIZE
 
+    def test_rejects_accelerator(self, dpo_spec):
+        # LLM-only. Classic RL still takes accelerator
+        # (TestLocalTrainerConstruction.test_accepts_accelerator).
+        with pytest.raises(ValueError, match="does not use Accelerate"):
+            LocalTrainer(
+                algorithm=dpo_spec,
+                environment=MagicMock(),
+                training=self._training(),
+                accelerator=MagicMock(),
+            )
+
     def test_construction_with_grpo(self, grpo_spec):
         mock_pop = [MagicMock() for _ in range(self.POP_SIZE)]
         mock_env = MagicMock()
@@ -1565,10 +1674,6 @@ class TestLLMLocalTrainer:
             patch(
                 "agilerl.training.trainer.create_population_from_spec",
                 return_value=mock_pop,
-            ),
-            patch(
-                "agilerl.training.trainer.create_llm_accelerator",
-                return_value=MagicMock(),
             ),
         ):
             mock_auto_tok.from_pretrained.return_value = mock_tokenizer
@@ -1603,10 +1708,6 @@ class TestLLMLocalTrainer:
                 return_value=[MagicMock()],
             ),
             patch(
-                "agilerl.training.trainer.create_llm_accelerator",
-                return_value=MagicMock(),
-            ) as mock_create_accel,
-            patch(
                 "agilerl.training.trainer.make_llm_env",
                 return_value=mock_env,
             ) as mock_make_llm_env,
@@ -1618,15 +1719,14 @@ class TestLLMLocalTrainer:
                 training=self._training(),
             )
 
-        mock_accel = mock_create_accel.return_value
         mock_make_llm_env.assert_called_once_with(
             mock_llm_env_spec,
             mock_tokenizer,
             data_batch_size_per_gpu=dpo_spec.batch_size,
             max_context_length=dpo_spec.max_model_len,
             seed=dpo_spec.seed,
-            rank=mock_accel.process_index,
-            world_size=mock_accel.num_processes,
+            rank=0,
+            world_size=1,
         )
         assert trainer.env is mock_env
 
@@ -1644,10 +1744,6 @@ class TestLLMLocalTrainer:
             patch(
                 "agilerl.training.trainer.create_population_from_spec",
                 return_value=[MagicMock()],
-            ),
-            patch(
-                "agilerl.training.trainer.create_llm_accelerator",
-                return_value=MagicMock(),
             ),
             patch(
                 "agilerl.training.trainer.make_rollout_env_factory",
@@ -1684,10 +1780,6 @@ class TestLLMLocalTrainer:
                 "agilerl.training.trainer.create_population_from_spec",
                 return_value=[MagicMock()],
             ),
-            patch(
-                "agilerl.training.trainer.create_llm_accelerator",
-                return_value=MagicMock(),
-            ),
         ):
             mock_auto_tok.from_pretrained.return_value = MagicMock(
                 eos_token_id=0, eos_token="<eos>"
@@ -1722,10 +1814,6 @@ class TestLLMLocalTrainer:
                 LLMDatasetStrategy, "get_training_loop", return_value=mock_train_fn
             ),
             patch.object(LocalTrainer, "to_manifest", return_value={}),
-            patch(
-                "agilerl.training.trainer.create_llm_accelerator",
-                return_value=MagicMock(),
-            ),
         ):
             mock_auto_tok.from_pretrained.return_value = mock_tokenizer
             trainer = LocalTrainer(
@@ -1744,13 +1832,13 @@ class TestLLMLocalTrainer:
         assert result == (mock_pop, [[1.0]])
         assert "tournament" not in call_kwargs
         assert call_kwargs["selection_strategy"] is trainer.selection_strategy
+        assert "accelerator" not in call_kwargs
 
     # -- Missing LLM dependencies raises ImportError -----------------------
 
     def test_missing_llm_deps_raises(self, dpo_spec):
         with (
             patch("agilerl.training.trainer.AutoTokenizer", None),
-            patch("agilerl.training.trainer.create_llm_accelerator", None),
         ):
             with pytest.raises(ImportError, match="LLM dependencies"):
                 LocalTrainer(
@@ -1924,26 +2012,14 @@ class TestLocalTrainerIntegration:
         return mock_tokenizer
 
     @staticmethod
-    def _mock_llm_accelerator() -> MagicMock:
-        """Accelerator stand-in with real DP shard ints for DatasetEnv."""
-        mock_accel = MagicMock()
-        mock_accel.process_index = 0
-        mock_accel.num_processes = 1
-        return mock_accel
-
-    @staticmethod
     @contextlib.contextmanager
     def _llm_trainer_patches(mock_pop: list[MagicMock]):
-        """Patches population, accelerator, and tokenizer loading for LLM tests."""
+        """Patches population and tokenizer loading for LLM tests."""
         mock_tokenizer = TestLocalTrainerIntegration._mock_llm_tokenizer()
         with (
             patch(
                 "agilerl.training.trainer.create_population_from_spec",
                 return_value=mock_pop,
-            ),
-            patch(
-                "agilerl.training.trainer.create_llm_accelerator",
-                return_value=TestLocalTrainerIntegration._mock_llm_accelerator(),
             ),
             patch(
                 "agilerl.training.trainer.AutoTokenizer.from_pretrained",
@@ -2540,10 +2616,6 @@ class TestLocalTrainerToManifestLLM:
                 return_value=mock_tokenizer,
             ),
             patch.object(LocalTrainer, "_make_env", return_value=mock_env),
-            patch(
-                "agilerl.training.trainer.create_llm_accelerator",
-                return_value=MagicMock(),
-            ),
         ):
             trainer = LocalTrainer(
                 algorithm=spec,
@@ -2681,10 +2753,6 @@ class TestLocalTrainerRollout:
                 "agilerl.training.trainer.make_rollout_env_factory",
                 return_value=(MagicMock(), 5),
             ) as mock_factory_method,
-            patch(
-                "agilerl.training.trainer.create_llm_accelerator",
-                return_value=MagicMock(),
-            ),
         ):
             mock_auto_tok.from_pretrained.return_value = mock_tokenizer
             trainer = LocalTrainer(
@@ -2732,10 +2800,6 @@ class TestLocalTrainerRollout:
                 LLMRolloutStrategy, "get_training_loop", return_value=mock_train_fn
             ),
             patch.object(LocalTrainer, "to_manifest", return_value={}),
-            patch(
-                "agilerl.training.trainer.create_llm_accelerator",
-                return_value=MagicMock(),
-            ),
         ):
             mock_auto_tok.from_pretrained.return_value = mock_tokenizer
             trainer = LocalTrainer(
@@ -2786,10 +2850,6 @@ class TestLocalTrainerRollout:
                 LLMRolloutStrategy, "get_training_loop", return_value=mock_train_fn
             ),
             patch.object(LocalTrainer, "to_manifest", return_value={}),
-            patch(
-                "agilerl.training.trainer.create_llm_accelerator",
-                return_value=MagicMock(),
-            ),
         ):
             mock_auto_tok.from_pretrained.return_value = mock_tokenizer
             trainer = LocalTrainer(
@@ -2808,7 +2868,7 @@ class TestImportGuardReload:
     """Module-level fallbacks via importlib reload."""
 
     def test_llm_fallbacks_without_deps(self):
-        """AutoTokenizer and create_llm_accelerator set to None."""
+        """AutoTokenizer is unset when LLM extras are missing."""
         import agilerl.training.trainer as mod
 
         with (
@@ -2817,7 +2877,7 @@ class TestImportGuardReload:
         ):
             importlib.reload(mod)
             assert mod.AutoTokenizer is None
-            assert mod.create_llm_accelerator is None
+            assert not hasattr(mod, "create_llm_accelerator")
 
         importlib.reload(mod)
 
@@ -2834,7 +2894,6 @@ class TestMakeEnvBranches:
         trainer.env_spec.env_type = LLMEnvType.ROLLOUT
         trainer.algorithm_spec = MagicMock()
         trainer.tokenizer = MagicMock()
-        trainer.accelerator = MagicMock()
 
         assert trainer._make_env() is None
 
@@ -2851,9 +2910,6 @@ class TestMakeEnvBranches:
         trainer.algorithm_spec.seed = 42
         trainer.algorithm_spec.batch_size = 8
         trainer.tokenizer = MagicMock()
-        trainer.accelerator = MagicMock()
-        trainer.accelerator.process_index = 0
-        trainer.accelerator.num_processes = 1
 
         with patch(
             "agilerl.training.trainer.make_llm_env",
@@ -3666,7 +3722,6 @@ class TestMakeRolloutFactoryGuards:
         from agilerl.arena.models.algorithms import GRPOSpec
 
         with (
-            patch("agilerl.training.trainer.create_llm_accelerator", MagicMock()),
             patch.object(LocalTrainer, "_make_tokenizer", return_value=None),
             patch("agilerl.training.trainer.create_population_from_spec"),
             patch("agilerl.training.trainer.build_replay_buffer_from_spec"),

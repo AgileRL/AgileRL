@@ -194,18 +194,6 @@ class AutoModelForCausalLMWithValueHead(nn.Module):
         generate_fn: Any = self.pretrained_model.generate
         return generate_fn(*args, **kwargs)
 
-    def state_dict(self, *args: Any, **kwargs: Any) -> dict[str, torch.Tensor]:
-        if not self.is_peft_model:
-            pretrained_model_state_dict = self.pretrained_model.state_dict(
-                *args, **kwargs
-            )
-        else:
-            pretrained_model_state_dict = {}
-        v_head_state_dict = self.v_head.state_dict(*args, **kwargs)
-        for key, tensor in v_head_state_dict.items():
-            pretrained_model_state_dict[f"v_head.{key}"] = tensor
-        return pretrained_model_state_dict
-
     def post_init(self, state_dict: dict[str, Any]) -> None:
         """Load ``v_head.*`` tensors from a checkpoint dict (non-strict)."""
         v_sd = {}
@@ -217,18 +205,22 @@ class AutoModelForCausalLMWithValueHead(nn.Module):
 
     def save_pretrained(self, *args: Any, **kwargs: Any) -> None:
         """Save wrapped model while handling value-head state for PEFT and non-PEFT paths."""
-        state_dict = kwargs.get("state_dict")
-        if state_dict is None:
-            state_dict = self.state_dict()
-            kwargs["state_dict"] = state_dict
+        v_head_state = {
+            f"v_head.{key}": tensor for key, tensor in self.v_head.state_dict().items()
+        }
         if self.is_peft_model:
             save_dir = args[0] if len(args) > 0 else kwargs.get("save_directory")
             if save_dir is None:
                 msg = "save_pretrained requires a save directory via args or save_directory keyword."
                 raise ValueError(msg)
+            state_dict = kwargs.pop("state_dict", None)
             os.makedirs(save_dir, exist_ok=True)
-            torch.save(state_dict, os.path.join(save_dir, "pytorch_model.bin"))
-            kwargs.pop("state_dict", None)
+            torch.save(
+                v_head_state if state_dict is None else state_dict,
+                os.path.join(save_dir, "pytorch_model.bin"),
+            )
+        elif "state_dict" not in kwargs:
+            kwargs["state_dict"] = self.pretrained_model.state_dict() | v_head_state
         return self.pretrained_model.save_pretrained(*args, **kwargs)
 
     @classmethod

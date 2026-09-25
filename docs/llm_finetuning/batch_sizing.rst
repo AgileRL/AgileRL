@@ -45,8 +45,7 @@ The three sizes
      - ``micro_batch_size_per_gpu``
      - How many trajectories go through one **backward pass**, per rank.
 
-They are related by a single rule, which AgileRL applies to the DeepSpeed engine
-for you:
+They are related by a single rule, which AgileRL applies for you:
 
 .. code-block:: text
 
@@ -134,7 +133,6 @@ In Python, pass it to the constructor alongside the micro-batch:
         group_size=5,
         micro_batch_size_per_gpu=1,  # memory
         mini_batch_size=5,           # cadence: one step per rank per update
-        accelerator=accelerator,
     )
 
 Or in the ``algorithm`` section of a training manifest:
@@ -153,4 +151,4 @@ Or in the ``algorithm`` section of a training manifest:
     Under data parallelism every rank derives the same accumulation width and so
     takes the same number of optimizer steps per update. This is required, not
     incidental: ranks that stepped at different times would desynchronise the
-    ZeRO collectives.
+    FSDP2 collectives.
