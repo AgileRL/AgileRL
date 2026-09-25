@@ -30,6 +30,7 @@ if TYPE_CHECKING:
 __all__ = [
     "get_vllm_internal_model",
     "patch_vllm_3d_moe_lora_flag",
+    "patch_vllm_granite_hybrid_layer_types",
     "patch_vllm_lora_keep_resident",
     "patch_vllm_strip_multimodal_towers",
 ]
@@ -152,6 +153,34 @@ def patch_vllm_3d_moe_lora_flag(model_name_or_path: str) -> bool:
     # flag, so plain assignment is a type error.
     setattr(model_cls, "is_3d_moe_weight", True)  # noqa: B010
     return True
+
+
+def patch_vllm_granite_hybrid_layer_types(model_name_or_path: str) -> bool:
+    """Register Transformers 5.13+ ``layer_types`` names on vLLM 0.25.1 granitemoehybrid.
+
+    Call before engine construction. Idempotent. Delete this helper and its call
+    sites when the vLLM pin is 0.26.0+ (upstream ``ALL_DECODER_LAYER_TYPES``).
+    """
+    try:
+        from agilerl.architectures.catalog import pretrained_model_type
+
+        if pretrained_model_type(model_name_or_path) != "granitemoehybrid":
+            return False
+        from vllm.model_executor.models import granitemoehybrid as gm
+    except Exception:
+        return False
+    layer_types = gm.ALL_DECODER_LAYER_TYPES
+    attention = layer_types["attention"]
+    mamba = layer_types["mamba"]
+    added = False
+    for key, layer_cls in (
+        ("full_attention", attention),
+        ("linear_attention", mamba),
+    ):
+        if key not in layer_types:
+            layer_types[key] = layer_cls
+            added = True
+    return added
 
 
 def patch_vllm_lora_keep_resident(llm: Any) -> int:  # noqa: ANN401 -- opaque vLLM engine handle walked via getattr

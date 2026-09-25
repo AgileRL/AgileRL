@@ -6667,6 +6667,35 @@ class TestLLMConfigureVllmAcceleratorPaths:
         flag.assert_called_once()
         assert "stacked-3D MoE LoRA" in caplog.text
 
+    def test_configure_vllm_patches_granite_hybrid_layer_types(self, caplog):
+        acc = _make_mock_accelerator(num_processes=1)
+        agent = _make_llm_agent(accelerator=acc)
+        vllm_config = MagicMock()
+        vllm_config.tensor_parallel_size = 1
+        vllm_config.gpu_memory_utilization = 0.9
+        vllm_config.max_num_seqs = 256
+        vllm_config.sleep_mode = False
+        agent.vllm_config = vllm_config
+        agent.max_model_len = 512
+        agent.pretrained_model_name_or_path = "mock-model"
+
+        with (
+            patch(
+                "agilerl.algorithms.core.base.LLM",
+                return_value=MagicMock(),
+                create=True,
+            ),
+            patch(
+                "agilerl.algorithms.core.base.patch_vllm_granite_hybrid_layer_types",
+                return_value=True,
+            ) as patch_layer_types,
+            caplog.at_level(logging.INFO, logger="agilerl.algorithms.core.base"),
+        ):
+            agent._configure_vllm()
+
+        patch_layer_types.assert_called_once()
+        assert "granitemoehybrid layer_types" in caplog.text
+
     @pytest.mark.parametrize(
         "kv_cache_memory_bytes",
         [None, 32 * 1024 * 1024],

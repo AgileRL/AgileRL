@@ -171,6 +171,7 @@ if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
     )
     from agilerl.algorithms.core.llm_ops.vllm_colocate import (
         patch_vllm_3d_moe_lora_flag,
+        patch_vllm_granite_hybrid_layer_types,
         patch_vllm_lora_keep_resident,
         patch_vllm_strip_multimodal_towers,
     )
@@ -6707,6 +6708,12 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
                 f"(max_num_seqs={self.vllm_config.max_num_seqs} "
                 f"max_model_len={self.max_model_len})",
                 stacklevel=2,
+            )
+
+        if patch_vllm_granite_hybrid_layer_types(llm_kwargs["model"]):
+            logger.info(
+                "Patched vLLM granitemoehybrid layer_types for %s.",
+                llm_kwargs["model"],
             )
 
         if getattr(self.lora_config, "target_parameters", None) and (

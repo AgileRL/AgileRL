@@ -19,7 +19,8 @@ All run on plain module trees with fakes, so no GPU is required.
 
 from __future__ import annotations
 
-from types import SimpleNamespace
+import sys
+from types import ModuleType, SimpleNamespace
 
 import pytest
 import torch
@@ -29,6 +30,7 @@ from agilerl.algorithms.core.llm_ops.vllm_colocate import (
     _StrippedTower,
     get_vllm_internal_model,
     patch_vllm_3d_moe_lora_flag,
+    patch_vllm_granite_hybrid_layer_types,
     patch_vllm_lora_keep_resident,
     patch_vllm_strip_multimodal_towers,
 )
@@ -364,3 +366,59 @@ class TestPatchVllm3dMoeLoraFlag:
         assert patch_vllm_3d_moe_lora_flag("fake/model") is True
         assert _ModelCls.is_3d_moe_weight is True
         assert patch_vllm_3d_moe_lora_flag("fake/model") is False
+
+
+class TestPatchVllmGraniteHybridLayerTypes:
+    def test_returns_false_on_lookup_failure(self) -> None:
+        assert (
+            patch_vllm_granite_hybrid_layer_types(
+                "/definitely/missing/agilerl-granite-hybrid-layer-types-model"
+            )
+            is False
+        )
+
+    def test_returns_false_when_not_granitemoehybrid(self, monkeypatch) -> None:
+        monkeypatch.setattr(
+            "agilerl.architectures.catalog.pretrained_model_type",
+            lambda _path: "llama",
+        )
+        assert patch_vllm_granite_hybrid_layer_types("fake/model") is False
+
+    def test_adds_layer_type_aliases_and_is_idempotent(self, monkeypatch) -> None:
+        attention_cls = object()
+        mamba_cls = object()
+        granitemoehybrid_mod = ModuleType("vllm.model_executor.models.granitemoehybrid")
+        granitemoehybrid_mod.ALL_DECODER_LAYER_TYPES = {
+            "attention": attention_cls,
+            "mamba": mamba_cls,
+        }
+        for name in (
+            "vllm",
+            "vllm.model_executor",
+            "vllm.model_executor.models",
+        ):
+            sys.modules.setdefault(name, ModuleType(name))
+        monkeypatch.setitem(
+            sys.modules,
+            "vllm.model_executor.models.granitemoehybrid",
+            granitemoehybrid_mod,
+        )
+        monkeypatch.setattr(
+            sys.modules["vllm.model_executor.models"],
+            "granitemoehybrid",
+            granitemoehybrid_mod,
+            raising=False,
+        )
+        monkeypatch.setattr(
+            "agilerl.architectures.catalog.pretrained_model_type",
+            lambda _path: "granitemoehybrid",
+        )
+
+        assert patch_vllm_granite_hybrid_layer_types("ibm-granite/granite-4.0-micro")
+        mapping = granitemoehybrid_mod.ALL_DECODER_LAYER_TYPES
+        assert mapping["full_attention"] is attention_cls
+        assert mapping["linear_attention"] is mamba_cls
+        assert (
+            patch_vllm_granite_hybrid_layer_types("ibm-granite/granite-4.0-micro")
+            is False
+        )
