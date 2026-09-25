@@ -10,17 +10,18 @@ import warnings
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from functools import partial
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import torch
 
-from agilerl.llm_envs.env_specs import is_url, spec_to_factory
+from agilerl.llm_envs.env_sources import is_url, spec_to_factory
 from agilerl.llm_envs.observation import (
     DEFAULT_OBSERVATION_ROLE,
     observation_role,
     process_observation,
 )
 from agilerl.protocols import EnvClientProtocol, TextEnvProtocol
+from agilerl.utils.env_utils import construct_entrypoint_env
 from agilerl.utils.llm_utils import max_prompt_tokens_for_model_len
 
 __all__ = ["RolloutHarness"]
@@ -213,23 +214,25 @@ class RolloutHarness:
         env_config: dict[str, Any] | None,
         tokenizer: PreTrainedTokenizerBase,
         max_turns: int = 1,
+        *,
+        factory: str | None = None,
         **kwargs: Any,
     ) -> RolloutHarness:
         """Build a ``RolloutHarness`` from an env ``spec``.
 
         A **URL** is driven remotely; anything else is built with ``env_config``
-        and driven in-process: an **env factory callable** directly, otherwise a
-        ``module:attr`` / ``path.py:attr`` entrypoint naming a callable that
-        returns a text env. For rows + a rubric instead of an env, see
-        :meth:`from_dataset`.
+        and driven in-process. ``factory`` is the optional ``module:attr`` callable
+        that receives the entrypoint as its first argument; when unset, ``spec``
+        itself is the constructor.
 
-        :param spec: A URL, an env factory callable, or a ``module:attr`` /
-            ``path.py:attr`` entrypoint.
-        :param env_config: Kwargs for the factory / entrypoint (ignored for a URL,
-            except ``system_prompt``). ``system_prompt`` is set on the built env
-            and passed to the harness so the chat template renders it.
+        :param spec: A URL, an env constructor callable, or an entrypoint /
+            registry id.
+        :param env_config: Kwargs for the factory / constructor (ignored for a
+            URL, except ``system_prompt``). ``system_prompt`` is set on the built
+            env and passed to the harness so the chat template renders it.
         :param tokenizer: Tokenizer for the token-level loop.
         :param max_turns: Generation turns per episode.
+        :param factory: Optional ``module:attr`` builder that receives ``spec``.
         :param kwargs: Forwarded to :class:`RolloutHarness`.
         :rtype: RolloutHarness
         """
@@ -244,8 +247,17 @@ class RolloutHarness:
             if "system_prompt" not in kwargs:
                 kwargs["system_prompt"] = system_prompt
             return cls(spec, tokenizer, max_turns=max_turns, **kwargs)
-        factory = spec_to_factory(spec) if isinstance(spec, str) else spec
-        env = factory(**config)
+        if factory is not None:
+            if not isinstance(spec, str):
+                msg = "factory requires an entrypoint string, not a callable spec."
+                raise TypeError(msg)
+            env = cast(
+                "TextEnvProtocol",
+                construct_entrypoint_env(spec, config, factory=factory),
+            )
+        else:
+            builder = spec_to_factory(spec) if isinstance(spec, str) else spec
+            env = builder(**config)
         if system_prompt is not None:
             env.system_prompt = system_prompt
         if system_prompt is not None and "system_prompt" not in kwargs:

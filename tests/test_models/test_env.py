@@ -170,6 +170,38 @@ class MyGymEnv:
         env = make_env()
         assert env.value == 7
 
+    def test_make_env_with_library_factory(self, tmp_path):
+        _write_module(
+            tmp_path,
+            "gym_lib_factory",
+            """
+def make(env_id, value=0):
+    class Built:
+        def __init__(self):
+            self.env_id = env_id
+            self.value = value
+    return Built()
+""",
+        )
+        spec = GymEnvSpec(
+            name="MyEnv-v0",
+            num_envs=2,
+            entrypoint="MyEnv-v0",
+            factory="gym_lib_factory:make",
+            path=str(tmp_path),
+            config={"value": 9},
+            sync=True,
+        )
+
+        with patch("agilerl.models.env.make_vect_envs") as make_vect_mock:
+            make_vect_mock.return_value = "factory_vec_env"
+            result = make_gym_env(spec)
+
+        assert result == "factory_vec_env"
+        env = make_vect_mock.call_args.kwargs["make_env"]()
+        assert env.env_id == "MyEnv-v0"
+        assert env.value == 9
+
     def test_make_env_with_gym_env(self):
         spec = GymEnvSpec(name="CartPole-v1", num_envs=1, sync=True)
         env = make_gym_env(spec)
@@ -221,6 +253,38 @@ def build_env(size=0):
         env = constructor()
         assert env.size == 5
         assert env.tag == "wrapped"
+
+    def test_make_env_with_library_factory(self, tmp_path):
+        _write_module(
+            tmp_path,
+            "pz_lib_factory",
+            """
+class DummyPzEnv:
+    def __init__(self, env_id, size=0):
+        self.env_id = env_id
+        self.size = size
+
+def make(env_id, size=0):
+    return DummyPzEnv(env_id, size=size)
+""",
+        )
+        spec = GymEnvSpec(
+            name="MyPz-v0",
+            num_envs=2,
+            entrypoint="MyPz-v0",
+            factory="pz_lib_factory:make",
+            path=str(tmp_path),
+            config={"size": 4},
+        )
+
+        with patch("agilerl.models.env.make_multi_agent_vect_envs") as make_multi_mock:
+            make_multi_mock.return_value = "factory_pz_vec"
+            result = make_pz_env(spec)
+
+        assert result == "factory_pz_vec"
+        env = make_multi_mock.call_args.kwargs["env"]()
+        assert env.env_id == "MyPz-v0"
+        assert env.size == 4
 
     def test_env_without_entrypoint_with_parallel_env_constructor(
         self, tmp_path, monkeypatch
@@ -361,7 +425,7 @@ class TestLLMEnvSpec:
             prompt_template={"role": "user", "content": "{q}"},
         )
         assert spec.num_envs == 1
-        for field in ("name", "custom", "default_type", "sync", "env_wrappers"):
+        for field in ("custom", "default_type", "sync", "env_wrappers"):
             assert field not in type(spec).model_fields
 
     def test_custom_fields(self):
@@ -798,17 +862,29 @@ class TestLLMEnvSpecSFT:
                 rubric_file_path="reward.py",
             )
 
-    def test_dataset_alias_name(self):
-        spec = LLMEnvSpec.model_validate(
-            {
-                "name": "my_dataset",
-                "env_type": "rollout",
-                "rubric_file_path": "r.py",
-                "rubric_name": "fn",
-                "prompt_template": {"role": "user", "content": "{q}"},
-            }
+    def test_name_is_not_a_dataset_source(self):
+        with pytest.raises(ValidationError, match="exactly one source"):
+            LLMEnvSpec.model_validate(
+                {
+                    "name": "my_dataset",
+                    "env_type": "rollout",
+                    "rubric_file_path": "r.py",
+                    "rubric_name": "fn",
+                    "prompt_template": {"role": "user", "content": "{q}"},
+                }
+            )
+
+    def test_name_is_catalog_label(self):
+        spec = LLMEnvSpec(
+            env_type=LLMEnvType.ROLLOUT,
+            dataset="ds",
+            name="countdown",
+            reward_file_path="reward.py",
+            prompt_template={"user_0": "{question}"},
         )
-        assert spec.dataset == "my_dataset"
+        assert spec.dataset == "ds"
+        assert spec.name == "countdown"
+        assert spec.label == "countdown"
 
 
 # ---------------------------------------------------------------------------
@@ -852,6 +928,51 @@ class SingleEnv:
 
         assert mock_make.call_args.kwargs["extra_wrappers"] == ["SomeWrapper"]
 
+    def test_registered_id_rejects_name_entrypoint_mismatch(self):
+        with pytest.raises(ValidationError, match="differ"):
+            GymEnvSpec(name="CartPole-v1", entrypoint="LunarLander-v2")
+
+    def test_factory_without_entrypoint_is_rejected(self):
+        with pytest.raises(ValidationError, match="factory is set but entrypoint"):
+            GymEnvSpec(name="CartPole-v1", factory="gymnasium:make")
+
+    def test_make_single_env_with_factory(self, tmp_path):
+        _write_module(
+            tmp_path,
+            "gym_make_factory",
+            """\
+def make(env_id, val=0):
+    class Built:
+        def __init__(self):
+            self.env_id = env_id
+            self.val = val
+    return Built()
+""",
+        )
+        spec = GymEnvSpec(
+            name="MyEnv-v0",
+            entrypoint="MyEnv-v0",
+            factory="gym_make_factory:make",
+            path=str(tmp_path),
+            config={"val": 3},
+        )
+        env = make_single_env(spec)
+        assert env.env_id == "MyEnv-v0"
+        assert env.val == 3
+
+    def test_make_single_env_gymnasium_make_factory(self):
+        spec = GymEnvSpec(
+            name="CartPole-v1",
+            entrypoint="CartPole-v1",
+            factory="gymnasium:make",
+        )
+        env = make_single_env(spec)
+        try:
+            assert hasattr(env, "reset")
+            assert hasattr(env, "step")
+        finally:
+            env.close()
+
 
 # ---------------------------------------------------------------------------
 # PzEnvSpec - make_single_env + error paths + extra_wrappers
@@ -875,6 +996,30 @@ class PzSingleEnv:
         )
         env = make_single_env(spec, multi_agent=True)
         assert env.size == 7
+
+    def test_make_single_env_with_factory(self, tmp_path):
+        _write_module(
+            tmp_path,
+            "pz_single_factory",
+            """
+def make(env_id, size=0):
+    class Built:
+        def __init__(self):
+            self.env_id = env_id
+            self.size = size
+    return Built()
+""",
+        )
+        spec = GymEnvSpec(
+            name="MyPz-v0",
+            entrypoint="MyPz-v0",
+            factory="pz_single_factory:make",
+            path=str(tmp_path),
+            config={"size": 8},
+        )
+        env = make_single_env(spec, multi_agent=True)
+        assert env.env_id == "MyPz-v0"
+        assert env.size == 8
 
     def test_make_single_env_module_with_parallel_env(self, tmp_path, monkeypatch):
         _write_module(
@@ -1047,18 +1192,19 @@ class TestLLMEnvSpecRollout:
             )
 
     def test_rollout_valid_spec_library_factory(self):
-        # A library's own factory is just an entrypoint; its env id rides in
-        # env_config like any other constructor argument.
         spec = LLMEnvSpec(
             env_type=LLMEnvType.ROLLOUT,
-            entrypoint="gem:make",
-            env_config={"env_id": "game:GuessTheNumber-v0-easy"},
+            factory="gem:make",
+            entrypoint="game:GuessTheNumber-v0-easy",
+            env_config={"difficulty": "easy"},
             max_turns=10,
         )
         assert spec.env_type == LLMEnvType.ROLLOUT
         assert spec.max_turns == 10
-        assert spec.entrypoint == "gem:make"
-        assert spec.name == "gem:make"
+        assert spec.factory == "gem:make"
+        assert spec.entrypoint == "game:GuessTheNumber-v0-easy"
+        assert spec.env_config == {"difficulty": "easy"}
+        assert spec.label == "game:GuessTheNumber-v0-easy"
 
     def test_rollout_valid_spec_entrypoint(self):
         spec = LLMEnvSpec(
@@ -1078,7 +1224,7 @@ class TestLLMEnvSpecRollout:
             max_turns=4,
         )
         assert spec.env_url == "http://env-host:8000"
-        assert spec.name == "http://env-host:8000"
+        assert spec.label == "http://env-host:8000"
         assert spec.max_turns == 4
 
     def test_env_url_requires_max_turns(self):
@@ -1229,7 +1375,7 @@ class TestLLMEnvSpecRollout:
 
         with (
             patch(
-                "agilerl.models.env.resolve_entrypoint_target",
+                "agilerl.utils.env_utils.resolve_entrypoint_target",
                 return_value=mock_constructor,
             ),
             patch("agilerl.models.env.RolloutHarness", mock_rollout_cls),
@@ -1270,7 +1416,7 @@ class TestLLMEnvSpecRollout:
 
         with (
             patch(
-                "agilerl.models.env.resolve_entrypoint_target",
+                "agilerl.utils.env_utils.resolve_entrypoint_target",
                 return_value=mock_constructor,
             ),
             patch("agilerl.models.env.RolloutHarness", mock_rollout_cls),
@@ -1280,6 +1426,35 @@ class TestLLMEnvSpecRollout:
             )[0]()
 
         mock_constructor.assert_called_with(difficulty="easy")
+        assert mock_env.system_prompt == "be terse"
+
+    def test_library_factory_passes_entrypoint_as_first_arg(self):
+        mock_env = MagicMock()
+        mock_factory = MagicMock(return_value=mock_env)
+        mock_tokenizer = MagicMock()
+        mock_tokenizer.pad_token_id = 0
+        mock_rollout_cls = MagicMock()
+
+        spec = LLMEnvSpec(
+            env_type=LLMEnvType.ROLLOUT,
+            factory="gem:make",
+            entrypoint="game:GuessTheNumber-v0-easy",
+            env_config={"difficulty": "easy", "system_prompt": "be terse"},
+            max_turns=5,
+        )
+
+        with (
+            patch(
+                "agilerl.utils.env_utils.resolve_entrypoint_target",
+                return_value=mock_factory,
+            ),
+            patch("agilerl.models.env.RolloutHarness", mock_rollout_cls),
+        ):
+            make_rollout_env_factory(spec, mock_tokenizer)[0]()
+
+        mock_factory.assert_called_with(
+            "game:GuessTheNumber-v0-easy", difficulty="easy"
+        )
         assert mock_env.system_prompt == "be terse"
 
     def test_observation_processor_resolves_and_reaches_the_harness(self, tmp_path):
@@ -1330,7 +1505,7 @@ class TestLLMEnvSpecRollout:
         assert spec.max_turns is None
 
         with patch(
-            "agilerl.models.env.resolve_entrypoint_target",
+            "agilerl.utils.env_utils.resolve_entrypoint_target",
             return_value=mock_constructor,
         ):
             _factory, max_turns = make_rollout_env_factory(spec, mock_tokenizer)
@@ -1378,8 +1553,8 @@ class TestLLMEnvSpecRollout:
     def test_env_packages_rides_along_with_an_entrypoint(self):
         spec = LLMEnvSpec(
             env_type=LLMEnvType.ROLLOUT,
-            entrypoint="gem:make",
-            env_config={"env_id": "game:Sudoku-v0-easy"},
+            factory="gem:make",
+            entrypoint="game:Sudoku-v0-easy",
             env_packages={"uv": ["gem-llm"]},
         )
         assert spec.env_packages == {"uv": ["gem-llm"]}
@@ -1401,8 +1576,25 @@ class TestLLMEnvSpecRollout:
         with pytest.raises(ValueError, match="named no packages"):
             LLMEnvSpec(
                 env_type=LLMEnvType.ROLLOUT,
-                entrypoint="gem:make",
+                factory="gem:make",
+                entrypoint="game:Sudoku-v0-easy",
                 env_packages={"uv": []},
+            )
+
+    def test_env_config_env_id_is_rejected(self):
+        with pytest.raises(ValidationError, match="cannot contain env_id"):
+            LLMEnvSpec(
+                env_type=LLMEnvType.ROLLOUT,
+                factory="gem:make",
+                entrypoint="game:GuessTheNumber-v0-easy",
+                env_config={"env_id": "game:GuessTheNumber-v0-easy"},
+            )
+
+    def test_factory_without_entrypoint_is_rejected(self):
+        with pytest.raises(ValidationError, match="factory is set but entrypoint"):
+            LLMEnvSpec(
+                env_type=LLMEnvType.ROLLOUT,
+                factory="gem:make",
             )
 
 
@@ -1486,7 +1678,6 @@ class TestLLMEnvSpecFactoryGuards:
         spec = LLMEnvSpec(
             env_type=LLMEnvType.ROLLOUT,
             entrypoint="json:__version__",
-            max_turns=2,
         )
         with pytest.raises(TypeError, match="non-callable"):
             make_rollout_env_factory(spec, MagicMock())

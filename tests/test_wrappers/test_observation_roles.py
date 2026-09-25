@@ -284,6 +284,39 @@ def test_from_spec_passes_env_config_system_prompt_to_the_harness() -> None:
     ]
 
 
+def test_from_spec_factory_passes_entrypoint_and_strips_system_prompt(
+    monkeypatch,
+) -> None:
+    env = _PlainTextEnv()
+    captured: dict[str, object] = {}
+
+    def fake_construct(entrypoint, env_config, *, factory=None, path=None):
+        captured["entrypoint"] = entrypoint
+        captured["env_config"] = dict(env_config)
+        captured["factory"] = factory
+        return env
+
+    monkeypatch.setattr(
+        "agilerl.llm_envs.harness.construct_entrypoint_env",
+        fake_construct,
+    )
+    tokenizer = _RoleRecordingTokenizer()
+    harness = RolloutHarness.from_spec(
+        "game:GuessTheNumber-v0-easy",
+        {"difficulty": "easy", "system_prompt": "be terse"},
+        tokenizer,
+        max_turns=2,
+        factory="gem:make",
+    )
+    harness.reset()
+
+    assert captured["entrypoint"] == "game:GuessTheNumber-v0-easy"
+    assert captured["env_config"] == {"difficulty": "easy"}
+    assert captured["factory"] == "gem:make"
+    assert env.system_prompt == "be terse"
+    assert tokenizer.messages[0][0] == {"role": "system", "content": "be terse"}
+
+
 def test_local_reads_system_prompt_from_the_env() -> None:
     tokenizer = _RoleRecordingTokenizer()
     harness = RolloutHarness.local(_EnvWithOwnSystemPrompt(), tokenizer, max_turns=2)

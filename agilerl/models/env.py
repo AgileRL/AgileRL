@@ -9,7 +9,7 @@ from collections.abc import Callable, Mapping, Sequence
 from importlib import import_module
 from itertools import count
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import gymnasium as gym
 import pandas as pd
@@ -25,11 +25,12 @@ from agilerl.arena.models.env import (
 )
 from agilerl.llm_envs import DatasetEnv, RolloutHarness
 from agilerl.llm_envs.env_packages import ensure_importable
-from agilerl.protocols import BanditEnvProtocol
+from agilerl.protocols import BanditEnvProtocol, TextEnvProtocol
 from agilerl.typing import EnvFactory, WrapperSpec
 from agilerl.utils.env_utils import (
     GymEnvType,
     apply_wrappers,
+    construct_entrypoint_env,
     get_rubric_factory,
     make_conversation_template,
     resolve_entrypoint_target,
@@ -42,8 +43,6 @@ from agilerl.wrappers.learning import BanditEnv
 if TYPE_CHECKING:
     from datasets import Dataset
     from transformers.tokenization_utils_base import PreTrainedTokenizerBase
-
-    from agilerl.protocols import TextEnvProtocol
 
 __all__ = [
     "BanditEnvSpec",
@@ -69,15 +68,15 @@ def construct_custom_env_fn(
     path: str | None = None,
     config: dict[str, Any] | None = None,
     wrappers: Sequence[WrapperSpec] | None = None,
+    factory: str | None = None,
 ) -> EnvFactory:
-    """Build a factory for a custom gym environment from an entrypoint."""
+    """Build a factory for a gym environment from an entrypoint."""
 
     def default_make_env() -> gym.Env:
-        constructor = resolve_entrypoint_target(entrypoint, path=path)
-        if not callable(constructor):
-            msg = f"Entrypoint '{entrypoint}' resolved to non-callable object."
-            raise TypeError(msg)
-        env = constructor(**(config or {}))
+        env = cast(
+            "gym.Env",
+            construct_entrypoint_env(entrypoint, config, factory=factory, path=path),
+        )
         return apply_wrappers(env, wrappers, path=path)
 
     return default_make_env
@@ -88,18 +87,26 @@ def construct_custom_pz_env_fn(
     path: str | None = None,
     config: dict[str, Any] | None = None,
     wrappers: Sequence[WrapperSpec] | None = None,
+    factory: str | None = None,
 ) -> Callable[[], ParallelEnv]:
-    """Build a factory for a custom PettingZoo environment from an entrypoint."""
+    """Build a factory for a PettingZoo environment from an entrypoint."""
 
     def default_make_env() -> ParallelEnv:
-        constructor = resolve_entrypoint_target(entrypoint, path=path)
-        if not callable(constructor):
-            msg = f"Entrypoint '{entrypoint}' resolved to non-callable object."
-            raise TypeError(msg)
-        env = constructor(**(config or {}))
+        env = cast(
+            "ParallelEnv",
+            construct_entrypoint_env(entrypoint, config, factory=factory, path=path),
+        )
         return apply_wrappers(env, wrappers, path=path)
 
     return default_make_env
+
+
+def _gym_env_config(spec: GymEnvSpec) -> dict[str, Any]:
+    return dict(spec.env_config) if isinstance(spec.env_config, dict) else {}
+
+
+def _gym_env_id(spec: GymEnvSpec) -> str:
+    return spec.entrypoint or spec.name
 
 
 def make_single_env(
@@ -108,31 +115,47 @@ def make_single_env(
     """Create a single (non-vectorized) environment instance."""
     if multi_agent:
         return _make_single_pz_env(spec)
+    cfg = _gym_env_config(spec)
+    if spec.factory is not None:
+        env = cast(
+            "gym.Env",
+            construct_entrypoint_env(
+                _gym_env_id(spec), cfg, factory=spec.factory, path=spec.path
+            ),
+        )
+        return apply_wrappers(env, spec.env_wrappers, path=spec.path)
     if spec.entrypoint is not None:
         return construct_custom_env_fn(
             spec.entrypoint,
             spec.path,
-            spec.env_config if isinstance(spec.env_config, dict) else {},
+            cfg,
             spec.env_wrappers,
         )()
-    return gym.make(spec.name)
+    return gym.make(spec.name, **cfg)
 
 
 def _make_single_pz_env(spec: GymEnvSpec) -> ParallelEnv:
+    cfg = _gym_env_config(spec)
+    if spec.factory is not None:
+        env = cast(
+            "ParallelEnv",
+            construct_entrypoint_env(
+                _gym_env_id(spec), cfg, factory=spec.factory, path=spec.path
+            ),
+        )
+        return apply_wrappers(env, spec.env_wrappers, path=spec.path)
     if spec.entrypoint is not None:
         return construct_custom_pz_env_fn(
             spec.entrypoint,
             spec.path,
-            spec.env_config if isinstance(spec.env_config, dict) else {},
+            cfg,
             spec.env_wrappers,
         )()
     module = import_module(spec.name)
     if not hasattr(module, "parallel_env"):
         msg = f"PettingZoo module '{spec.name}' has no 'parallel_env' constructor."
         raise AttributeError(msg)
-    env = module.parallel_env(
-        **(spec.env_config if isinstance(spec.env_config, dict) else {})
-    )
+    env = module.parallel_env(**cfg)
     return apply_wrappers(env, spec.env_wrappers, path=spec.path)
 
 
@@ -143,11 +166,20 @@ def make_gym_env(
 ) -> GymEnvType:
     """Instantiate the vectorized gym environment."""
     resolved = wrappers if wrappers is not None else spec.env_wrappers
-    if spec.entrypoint is not None:
+    cfg = _gym_env_config(spec)
+    if spec.factory is not None:
+        make_one: EnvFactory | None = construct_custom_env_fn(
+            _gym_env_id(spec),
+            spec.path,
+            cfg,
+            resolved,
+            factory=spec.factory,
+        )
+    elif spec.entrypoint is not None:
         make_one = construct_custom_env_fn(
             spec.entrypoint,
             spec.path,
-            spec.env_config if isinstance(spec.env_config, dict) else {},
+            cfg,
             resolved,
         )
     else:
@@ -159,6 +191,7 @@ def make_gym_env(
         make_env=make_one,
         should_async_vector=(not spec.sync),
         extra_wrappers=extra_wrappers,
+        **(cfg if make_one is None else {}),
     )
 
 
@@ -169,11 +202,20 @@ def make_pz_env(
 ) -> AsyncPettingZooVecEnv:
     """Instantiate vectorized PettingZoo environments."""
     resolved = wrappers if wrappers is not None else spec.env_wrappers
-    if spec.entrypoint is not None:
+    cfg = _gym_env_config(spec)
+    if spec.factory is not None:
+        make_one = construct_custom_pz_env_fn(
+            _gym_env_id(spec),
+            spec.path,
+            cfg,
+            resolved,
+            factory=spec.factory,
+        )
+    elif spec.entrypoint is not None:
         make_one = construct_custom_pz_env_fn(
             spec.entrypoint,
             spec.path,
-            spec.env_config if isinstance(spec.env_config, dict) else {},
+            cfg,
             resolved,
         )
     else:
@@ -183,9 +225,7 @@ def make_pz_env(
             if not hasattr(module, "parallel_env"):
                 msg = f"PettingZoo module '{spec.name}' has no 'parallel_env' constructor."
                 raise AttributeError(msg)
-            env = module.parallel_env(
-                **(spec.env_config if isinstance(spec.env_config, dict) else {})
-            )
+            env = module.parallel_env(**cfg)
             return apply_wrappers(env, resolved, path=spec.path)
 
     return make_multi_agent_vect_envs(
@@ -587,19 +627,20 @@ def _make_entrypoint_rollout_factory(
     if spec.entrypoint is None:
         msg = "An entrypoint is required for env-backed rollout environments."
         raise ValueError(msg)
+    entrypoint = spec.entrypoint
+    to_import = spec.factory or entrypoint
     if spec.env_packages is not None:
-        ensure_importable(spec.entrypoint, spec.env_packages)
-    constructor = resolve_entrypoint_target(spec.entrypoint)
-    if not callable(constructor):
-        msg = f"Entrypoint '{spec.entrypoint}' resolved to non-callable object."
-        raise TypeError(msg)
+        ensure_importable(to_import, spec.env_packages)
     cfg = dict(spec.env_config or {})
     # Constructors like ``gem.make`` reject a system_prompt kwarg; it is set
     # on the built env as an attribute instead.
     system_prompt = cfg.pop("system_prompt", None)
 
     def _make_raw_env() -> TextEnvProtocol:
-        env = constructor(**cfg)
+        env = cast(
+            "TextEnvProtocol",
+            construct_entrypoint_env(entrypoint, cfg, factory=spec.factory),
+        )
         if system_prompt is not None:
             env.system_prompt = system_prompt
         return env

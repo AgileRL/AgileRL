@@ -16,7 +16,7 @@ import threading
 import time
 from collections.abc import Callable
 from functools import partial
-from typing import TYPE_CHECKING, Any, TypeGuard
+from typing import TYPE_CHECKING, Any, TypeGuard, cast
 
 import uvicorn
 from openenv.core.env_server.http_server import create_app
@@ -26,7 +26,8 @@ from openenv.core.env_server.mcp_types import CallToolAction, CallToolObservatio
 from openenv.core.env_server.types import Action, Observation, State
 from pydantic import Field
 
-from agilerl.llm_envs.env_specs import is_url, spec_to_factory
+from agilerl.llm_envs.env_sources import is_url, spec_to_factory
+from agilerl.utils.env_utils import construct_entrypoint_env
 
 if TYPE_CHECKING:
     from typing import Self
@@ -431,6 +432,7 @@ def resolve_env(
     spec: str,
     env_config: dict[str, Any] | None = None,
     *,
+    factory: str | None = None,
     host: str = "127.0.0.1",
     port: int = 0,
     max_concurrent_envs: int | None = None,
@@ -444,14 +446,19 @@ def resolve_env(
     """
     if is_url(spec):
         return spec, None
-    factory = spec_to_factory(spec)
     config = dict(env_config or {})
     # Matches ``RolloutHarness.from_spec``: a library factory (``gem.make``)
     # rejects ``system_prompt`` as a kwarg, so it is set on the built env.
     system_prompt = config.pop("system_prompt", None)
 
     def target(**factory_config: Any) -> TextEnvProtocol:
-        env = factory(**factory_config)
+        if factory is not None:
+            env = cast(
+                "TextEnvProtocol",
+                construct_entrypoint_env(spec, factory_config, factory=factory),
+            )
+        else:
+            env = spec_to_factory(spec)(**factory_config)
         if system_prompt is not None:
             env.system_prompt = system_prompt
         return env

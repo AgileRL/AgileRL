@@ -260,3 +260,47 @@ class TestLoadModuleFromPath:
         ):
             with pytest.raises(ImportError, match="Could not load module"):
                 env_utils._load_module_from_path("script", script)
+
+
+class TestConstructEntrypointEnv:
+    def test_constructs_entrypoint_with_kwargs(self, tmp_path):
+        module = tmp_path / "ctor.py"
+        module.write_text(
+            "class Env:\n    def __init__(self, n=0):\n        self.n = n\n",
+            encoding="utf-8",
+        )
+
+        env = env_utils.construct_entrypoint_env(
+            f"{module.name}:Env", {"n": 4}, path=str(tmp_path)
+        )
+
+        assert env.n == 4
+
+    def test_factory_receives_entrypoint_as_first_arg(self, tmp_path):
+        module = tmp_path / "lib.py"
+        module.write_text(
+            "def make(env_id, n=0):\n"
+            "    return type('Env', (), {'env_id': env_id, 'n': n})()\n",
+            encoding="utf-8",
+        )
+
+        env = env_utils.construct_entrypoint_env(
+            "game:GuessTheNumber-v0-easy",
+            {"n": 2},
+            factory=f"{module.name}:make",
+            path=str(tmp_path),
+        )
+
+        assert env.env_id == "game:GuessTheNumber-v0-easy"
+        assert env.n == 2
+
+    def test_non_callable_factory_raises(self, tmp_path):
+        module = tmp_path / "lib.py"
+        module.write_text("make = 3\n", encoding="utf-8")
+
+        with pytest.raises(TypeError, match="Factory"):
+            env_utils.construct_entrypoint_env(
+                "game:GuessTheNumber-v0-easy",
+                factory=f"{module.name}:make",
+                path=str(tmp_path),
+            )

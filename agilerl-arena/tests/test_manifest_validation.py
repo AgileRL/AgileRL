@@ -502,8 +502,8 @@ class TestCrossSectionConsistency:
             GRPO,
             environment={
                 "env_type": "rollout",
-                "entrypoint": "gem:make",
-                "env_config": {"env_id": "game:Sudoku-v0"},
+                "factory": "gem:make",
+                "entrypoint": "game:Sudoku-v0",
                 "dataset": None,
                 "reward_file_path": None,
                 "prompt_template": None,
@@ -522,8 +522,8 @@ class TestCrossSectionConsistency:
             GRPO,
             environment={
                 "env_type": "rollout",
-                "entrypoint": "gem:make",
-                "env_config": {"env_id": "game:Sudoku-v0"},
+                "factory": "gem:make",
+                "entrypoint": "game:Sudoku-v0",
                 "dataset": None,
                 "reward_file_path": None,
                 "prompt_template": None,

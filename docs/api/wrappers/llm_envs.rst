@@ -36,15 +36,17 @@ ways, so there are no per-env codecs. See :ref:`llm_environments` for a guide.
   :func:`~agilerl.llm_envs.openenv_server.resolve_env` hosts an entrypoint as a URL
   (``max_concurrent_envs`` gives each session a fresh env);
   :class:`~agilerl.llm_envs.openenv_server.OpenEnvServer` is the server it starts.
-  :func:`~agilerl.llm_envs.env_specs.spec_to_factory` resolves a non-URL spec to an
+  :func:`~agilerl.llm_envs.env_sources.spec_to_factory` resolves a non-URL spec to an
   env factory for the in-process path.
 
 :func:`~agilerl.utils.llm_utils.apply_chat_template` lives in
 :mod:`agilerl.utils.llm_utils` and is re-exported here for convenience.
 
-**Declaring what an env needs.** A manifest's ``entrypoint`` names a callable that
-returns a text env — your own class, or an env library's factory, as in
-``entrypoint: gem:make`` with ``env_config: {env_id: game:Sudoku-v0-easy}``. Add
+**Declaring what an env needs.** A manifest's ``entrypoint`` names the env to
+build — a registry id, or your own ``module:Class``. Optional ``factory`` is the
+``module:attr`` callable that receives that id, as in ``factory: gem:make`` with
+``entrypoint: game:Sudoku-v0-easy``. ``env_config`` is leftover kwargs only.
+Add
 ``env_packages`` (``{"uv": [...]}`` or ``{"pip": [...]}``) to declare what has to be
 installed for that import to work, and the first env build installs it here if it is
 missing. If those requirements cannot resolve alongside the trainer's own, host the
@@ -73,8 +75,8 @@ each in-process. To host the same entrypoint as a URL instead:
    from agilerl.llm_envs.openenv_server import resolve_env
 
    url, server = resolve_env(
-       "gem:make",
-       env_config={"env_id": "game:Sudoku-v0-easy"},
+       "game:Sudoku-v0-easy",
+       factory="gem:make",
        max_concurrent_envs=batch_size * group_size + 1,
    )
    env_factory = lambda: RolloutHarness(url, tok, max_turns=50)
@@ -93,4 +95,4 @@ for the lazily built eval env.
 .. autoclass:: agilerl.llm_envs.openenv.RemoteEnvClient
 .. autoclass:: agilerl.llm_envs.openenv.InProcessEnvClient
 .. autofunction:: agilerl.llm_envs.openenv_server.resolve_env
-.. autofunction:: agilerl.llm_envs.env_specs.spec_to_factory
+.. autofunction:: agilerl.llm_envs.env_sources.spec_to_factory

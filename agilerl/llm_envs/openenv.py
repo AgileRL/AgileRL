@@ -23,7 +23,7 @@ from collections.abc import Callable, Iterator
 from typing import TYPE_CHECKING, Any, TypeVar
 
 from agilerl import HAS_LLM_DEPENDENCIES
-from agilerl.llm_envs.env_specs import redact_url_userinfo
+from agilerl.llm_envs.env_sources import redact_url_userinfo
 from agilerl.llm_envs.openenv_server import OpenEnvWrapper, wire_types
 from agilerl.protocols import TextEnvProtocol
 
