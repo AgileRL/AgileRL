@@ -12,6 +12,32 @@ from pydantic import AliasChoices, BaseModel, ConfigDict, Field, model_validator
 from typing_extensions import Self
 
 
+def reject_legacy_llm_env_spelling(
+    *,
+    entrypoint: str | None,
+    factory: str | None,
+    env_config: dict[str, Any] | None,
+) -> None:
+    """Reject ``env_config.env_id`` and factory without an entrypoint.
+
+    :param entrypoint: The env to build.
+    :param factory: Optional ``module:attr`` callable that receives the entrypoint.
+    :param env_config: Constructor kwargs; must not contain ``env_id``.
+    """
+    if env_config is not None and "env_id" in env_config:
+        msg = (
+            "env_config cannot contain env_id. Put the env to build in "
+            "entrypoint and the callable that builds it in factory."
+        )
+        raise ValueError(msg)
+    if factory is not None and not entrypoint:
+        msg = (
+            "factory is set but entrypoint is missing. factory is the "
+            "callable; entrypoint is the env it builds."
+        )
+        raise ValueError(msg)
+
+
 class LLMEnvType(str, Enum):
     """Type of LLM environment.
 
@@ -73,7 +99,18 @@ class GymEnvSpec(EnvSpecBase):
     )
     entrypoint: str | None = Field(
         default=None,
-        description="Dotted path to a callable returning the environment, for custom environments.",
+        description=(
+            "The env to build: a registered id, or `module:Class` for a custom "
+            "upload. Not the factory callable."
+        ),
+    )
+    factory: str | None = Field(
+        default=None,
+        description=(
+            "Optional `module:attr` callable that receives the entrypoint as "
+            "its first argument, e.g. gymnasium:make. Unset constructs "
+            "entrypoint directly, or uses gymnasium:make for a registered gym."
+        ),
     )
     path: str | None = Field(
         default=None,
@@ -82,7 +119,10 @@ class GymEnvSpec(EnvSpecBase):
     env_config: dict[str, Any] | str | None = Field(
         default=None,
         validation_alias=AliasChoices("env_config", "config"),
-        description="Keyword arguments forwarded to the environment constructor.",
+        description=(
+            "Keyword arguments forwarded to the factory or constructor after "
+            "the env id. Not a place for env_id."
+        ),
     )
     env_wrappers: list[str | tuple[str, dict[str, Any]]] | None = Field(
         default=None,
@@ -96,6 +136,27 @@ class GymEnvSpec(EnvSpecBase):
             "Slower, but avoids gRPC and fork issues."
         ),
     )
+
+    @model_validator(mode="after")
+    def _check_factory_and_id(self) -> Self:
+        if self.factory is not None and not self.entrypoint:
+            msg = (
+                "factory is set but entrypoint is missing. factory is the "
+                "callable; entrypoint is the env it builds."
+            )
+            raise ValueError(msg)
+        if (
+            not self.custom
+            and self.entrypoint is not None
+            and self.entrypoint != self.name
+            and (self.factory is not None or ":" not in self.entrypoint)
+        ):
+            msg = (
+                f"Gym name {self.name!r} and entrypoint {self.entrypoint!r} "
+                "differ; they must be the same registered id, or drop one."
+            )
+            raise ValueError(msg)
+        return self
 
 
 class OfflineEnvSpec(GymEnvSpec):
@@ -178,7 +239,6 @@ class LLMEnvSpec(EnvSpecBase):
 
     dataset: str | None = Field(
         default=None,
-        validation_alias=AliasChoices("dataset", "name"),
         description="HuggingFace dataset id, or a Parquet path, for the dataset sources.",
     )
     dataset_path: str | None = Field(
@@ -234,14 +294,29 @@ class LLMEnvSpec(EnvSpecBase):
     entrypoint: str | None = Field(
         default=None,
         description=(
-            "module:attr path to any callable returning a text env — your own "
-            "class, or an env library's factory (gem:make, with the env id "
-            "passed through env_config)."
+            "The env to build: a registry id, or `module:Class` (or "
+            "`module:attr` constructor) for a custom upload."
+        ),
+    )
+    factory: str | None = Field(
+        default=None,
+        description=(
+            "Optional `module:attr` callable that receives the entrypoint as "
+            "its first argument, e.g. gem:make. Unset constructs entrypoint "
+            "as a class or callable."
         ),
     )
     env_config: dict[str, Any] | None = Field(
         default=None,
-        description="Keyword arguments forwarded to the environment constructor.",
+        description=(
+            "Keyword arguments forwarded to the factory or constructor after "
+            "the env id. Not a place for env_id. system_prompt is reserved "
+            "and set on the built env."
+        ),
+    )
+    name: str | None = Field(
+        default=None,
+        description="Catalog / dataset label only. Not the env id.",
     )
     env_packages: dict[str, Any] | None = Field(
         default=None,
@@ -365,8 +440,10 @@ class LLMEnvSpec(EnvSpecBase):
     )
 
     @property
-    def name(self) -> str:
-        """Human-readable name: dataset, URL, entrypoint, or image."""
+    def label(self) -> str:
+        """Human-readable label: catalog name, dataset, URL, entrypoint, or image."""
+        if self.name is not None:
+            return self.name
         named = self._named_dataset()
         if named is not None:
             return named
@@ -389,6 +466,11 @@ class LLMEnvSpec(EnvSpecBase):
 
     @model_validator(mode="after")
     def _check_rollout(self) -> Self:
+        reject_legacy_llm_env_spelling(
+            entrypoint=self.entrypoint,
+            factory=self.factory,
+            env_config=self.env_config,
+        )
         if self.env_type != "rollout":
             return self
         dataset = self._named_dataset()

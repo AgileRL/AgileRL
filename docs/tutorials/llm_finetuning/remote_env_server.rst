@@ -89,8 +89,8 @@ GEM's coding envs need ``datasets`` as well as ``gem-llm`` — it is not pulled 
     # Linux, for the real sandbox:
     sudo apt-get install -y bubblewrap
 
-Then serve it. ``env_id`` and ``sandbox_type`` are the same ``env_config`` you would
-use in-process; ``resolve_env`` starts the server:
+Then serve it. ``sandbox_type`` is leftover ``env_config``; the env id is the
+``entrypoint``. ``resolve_env`` starts the server:
 
 .. code-block:: python
 
@@ -100,8 +100,9 @@ use in-process; ``resolve_env`` starts the server:
     from agilerl.llm_envs.openenv_server import resolve_env
 
     url, server = resolve_env(
-        "gem:make",
-        env_config={"env_id": "code:Taco8k", "sandbox_type": "bwrap"},
+        "code:Taco8k",
+        factory="gem:make",
+        env_config={"sandbox_type": "bwrap"},
         host="127.0.0.1",        # loopback; exposed to the GPU box via an SSH tunnel below
         port=8000,
         max_concurrent_envs=16,  # >= batch_size * group_size + 1 (eval) on the trainer

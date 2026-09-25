@@ -28,7 +28,7 @@ from agilerl.llm_envs import (
     TaskAssigner,
 )
 from agilerl.llm_envs import openenv_server as openenv_server_module
-from agilerl.llm_envs.env_specs import (
+from agilerl.llm_envs.env_sources import (
     EnvSource,
     is_url,
     redact_url_userinfo,
@@ -1527,6 +1527,16 @@ def test_from_spec_accepts_env_factory_callable() -> None:
     assert env._env_client._backend._inner.target == 3
 
 
+def test_from_spec_factory_rejects_callable_spec() -> None:
+    with pytest.raises(TypeError, match="entrypoint string"):
+        RolloutHarness.from_spec(
+            lambda: _CountingEnv(),
+            None,
+            MiniTokenizer(),
+            factory="gem:make",
+        )
+
+
 def test_from_spec_loads_a_module_entrypoint() -> None:
     """A ``module:Class`` spec is imported and built with ``env_config``."""
     env = RolloutHarness.from_spec(
@@ -1926,6 +1936,43 @@ def test_resolve_env_sets_the_system_prompt_on_the_built_env() -> None:
         },
     )
     try:
+        assert server is not None
+        assert server._env.system_prompt == "be terse"
+    finally:
+        server.stop()
+
+
+def test_resolve_env_factory_passes_entrypoint_and_strips_system_prompt(
+    monkeypatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    class Built:
+        def reset(self, seed=None):
+            return "start", {}
+
+        def step(self, action):
+            return "", 0.0, True, False, {}
+
+    def fake_construct(entrypoint, env_config, *, factory=None, path=None):
+        captured["entrypoint"] = entrypoint
+        captured["env_config"] = dict(env_config)
+        captured["factory"] = factory
+        return Built()
+
+    monkeypatch.setattr(
+        "agilerl.llm_envs.openenv_server.construct_entrypoint_env",
+        fake_construct,
+    )
+    _url, server = resolve_env(
+        "game:GuessTheNumber-v0-easy",
+        {"difficulty": "easy", "system_prompt": "be terse"},
+        factory="gem:make",
+    )
+    try:
+        assert captured["entrypoint"] == "game:GuessTheNumber-v0-easy"
+        assert captured["env_config"] == {"difficulty": "easy"}
+        assert captured["factory"] == "gem:make"
         assert server is not None
         assert server._env.system_prompt == "be terse"
     finally:

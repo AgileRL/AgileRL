@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import os
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from importlib import import_module
 from importlib import util as importlib_util
 from pathlib import Path
@@ -231,6 +231,35 @@ def resolve_entrypoint_target(entrypoint: str, path: str | None = None) -> Any: 
         msg = f"Module '{module_ref}' does not define '{target_name}'."
         raise AttributeError(msg)
     return getattr(module, target_name)
+
+
+def construct_entrypoint_env(
+    entrypoint: str,
+    env_config: Mapping[str, Any] | None = None,
+    *,
+    factory: str | None = None,
+    path: str | None = None,
+) -> object:
+    """Build an env from ``factory(entrypoint, **env_config)`` or ``entrypoint(**env_config)``.
+
+    :param entrypoint: The env to build (registry id or ``module:attr`` constructor).
+    :param env_config: Kwargs after the env id.
+    :param factory: Optional ``module:attr`` callable that receives the entrypoint.
+    :param path: Filesystem path added to sys.path before resolving.
+    :return: The constructed environment.
+    """
+    cfg = dict(env_config or {})
+    if factory is not None:
+        builder = resolve_entrypoint_target(factory, path=path)
+        if not callable(builder):
+            msg = f"Factory '{factory}' resolved to a non-callable object."
+            raise TypeError(msg)
+        return builder(entrypoint, **cfg)
+    constructor = resolve_entrypoint_target(entrypoint, path=path)
+    if not callable(constructor):
+        msg = f"Entrypoint '{entrypoint}' resolved to a non-callable object."
+        raise TypeError(msg)
+    return constructor(**cfg)
 
 
 def _resolve_wrapper(

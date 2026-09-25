@@ -35,9 +35,8 @@ algorithm:
 
 environment:
     env_type: rollout
-    entrypoint: gem:make
-    env_config:
-        env_id: game:Sudoku-v0-easy
+    factory: gem:make
+    entrypoint: game:Sudoku-v0-easy
     env_packages:
         uv: [gem-llm==1.0.0]
     max_turns: 8

@@ -92,11 +92,10 @@ def redact_url_userinfo(url: str) -> str:
 
 
 def spec_to_factory(spec: str) -> Callable[..., TextEnvProtocol]:
-    """Resolve a non-URL env spec to the callable that builds the env.
+    """Resolve a ``module:attr`` constructor path to the callable that builds the env.
 
-    ``spec`` is a ``module:attr`` / ``path.py:attr`` entrypoint naming any
-    callable that returns a text env — a class, or a library's own factory
-    (``gem:make``, say, with the env id passed through ``env_config``).
+    Registry ids (``game:GuessTheNumber-v0-easy``, ``CartPole-v1``) are not
+    constructors; pass those as the entrypoint to a separate ``factory``.
     """
     if ":" not in spec:
         msg = (

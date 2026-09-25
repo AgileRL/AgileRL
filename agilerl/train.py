@@ -18,6 +18,7 @@ from pathlib import Path
 
 import torch
 
+from agilerl.arena.models.env import LLMEnvSpec
 from agilerl.training.trainer import LocalTrainer
 
 logging.basicConfig(
@@ -123,10 +124,11 @@ def main() -> None:
         device=args.device,
     )
 
+    env_spec = trainer.env_spec
     logger.info(
         "Algorithm: %s | Env: %s | Pop size: %d | Steps: %d | Device: %s",
         trainer.algorithm_spec.name,
-        trainer.env_spec.name,
+        env_spec.label if isinstance(env_spec, LLMEnvSpec) else env_spec.name,
         trainer.training_spec.pop_size,
         trainer.training_spec.max_steps,
         args.device,

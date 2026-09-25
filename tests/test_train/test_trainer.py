@@ -2736,8 +2736,8 @@ class TestLocalTrainerRollout:
 
         env_spec = LLMEnvSpec(
             env_type=LLMEnvType.ROLLOUT,
-            entrypoint="gem:make",
-            env_config={"env_id": "game:GuessTheNumber-v0-easy"},
+            factory="gem:make",
+            entrypoint="game:GuessTheNumber-v0-easy",
             max_turns=5,
         )
 

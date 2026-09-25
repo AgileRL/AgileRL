@@ -394,9 +394,10 @@ class TestLLMEnvSpec:
             entrypoint="some.module:Cls",
         )
         with patch(
-            "agilerl.models.env.resolve_entrypoint_target", return_value="not_callable"
+            "agilerl.utils.env_utils.resolve_entrypoint_target",
+            return_value="not_callable",
         ):
-            with pytest.raises(TypeError, match="resolved to non-callable"):
+            with pytest.raises(TypeError, match="resolved to a non-callable"):
                 make_rollout_env_factory(spec, tokenizer=MagicMock())
 
     def test_http_timeout_defaults_to_300s(self):
@@ -460,9 +461,11 @@ class TestGymEnvSpecNonCallable:
 
     def test_non_callable_entrypoint(self):
 
-        with patch("agilerl.models.env.resolve_entrypoint_target", return_value=42):
+        with patch(
+            "agilerl.utils.env_utils.resolve_entrypoint_target", return_value=42
+        ):
             factory = construct_custom_env_fn("some:entry")
-            with pytest.raises(TypeError, match="resolved to non-callable"):
+            with pytest.raises(TypeError, match="resolved to a non-callable"):
                 factory()
 
 
@@ -470,9 +473,11 @@ class TestPzEnvSpecNonCallable:
     """Lines 219-220, 247-248, 275-276 in env.py."""
 
     def test_non_callable_entrypoint(self):
-        with patch("agilerl.models.env.resolve_entrypoint_target", return_value=42):
+        with patch(
+            "agilerl.utils.env_utils.resolve_entrypoint_target", return_value=42
+        ):
             factory = construct_custom_pz_env_fn("some:entry")
-            with pytest.raises(TypeError, match="resolved to non-callable"):
+            with pytest.raises(TypeError, match="resolved to a non-callable"):
                 factory()
 
     def test_make_single_env_no_parallel_env(self):

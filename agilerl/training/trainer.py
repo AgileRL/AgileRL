@@ -1006,7 +1006,7 @@ class LocalTrainer(Trainer):
         if self._rollout_env_spec is not None:
             kwargs["env_factory"] = self.env_factory
             kwargs["max_turns"] = self.rollout_max_turns
-            manifest["env_name"] = self._rollout_env_spec.name
+            manifest["env_name"] = self._rollout_env_spec.label
             if self.training_spec.max_wall_seconds is not None:
                 kwargs["max_wall_seconds"] = self.training_spec.max_wall_seconds
         else:

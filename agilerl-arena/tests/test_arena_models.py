@@ -505,19 +505,30 @@ class TestLLMEnvSpecSurfaces:
             rubric_file_path="rubric.py",
             prompt_template={"user_0": "{q}"},
         )
-        assert dataset.name == "rows"
+        assert dataset.name is None
+        assert dataset.label == "rows"
         assert dataset.dataset_backed_rollout is True
 
         url = LLMEnvSpec(env_type="rollout", env_url="http://env", max_turns=1)
-        assert url.name == "http://env"
+        assert url.label == "http://env"
 
         urls = LLMEnvSpec(
             env_type="rollout", env_url=["http://a", "http://b"], max_turns=1
         )
-        assert urls.name == "http://a"
+        assert urls.label == "http://a"
 
         image = LLMEnvSpec(env_type="rollout", env_image="env:latest")
-        assert image.name == "env:latest"
+        assert image.label == "env:latest"
+
+        named = LLMEnvSpec(
+            env_type="rollout",
+            dataset="rows",
+            name="countdown",
+            rubric_file_path="rubric.py",
+            prompt_template={"user_0": "{q}"},
+        )
+        assert named.name == "countdown"
+        assert named.label == "countdown"
 
     def test_env_hosts_requires_entrypoint_or_image(self) -> None:
         from agilerl.arena.models.env import LLMEnvSpec
@@ -552,6 +563,23 @@ class TestLLMEnvSpecSurfaces:
         _check_env_packages({"pip": ["agilerl"]})
         with pytest.raises(ValueError, match="must be a list"):
             _check_env_packages({"uv": "agilerl"})
+
+    def test_env_config_env_id_is_rejected(self) -> None:
+        from agilerl.arena.models.env import LLMEnvSpec
+
+        with pytest.raises(ValidationError, match="cannot contain env_id"):
+            LLMEnvSpec(
+                env_type="rollout",
+                factory="gem:make",
+                entrypoint="game:GuessTheNumber-v0-easy",
+                env_config={"env_id": "game:GuessTheNumber-v0-easy"},
+            )
+
+    def test_factory_without_entrypoint_is_rejected(self) -> None:
+        from agilerl.arena.models.env import LLMEnvSpec
+
+        with pytest.raises(ValidationError, match="factory is set but entrypoint"):
+            LLMEnvSpec(env_type="rollout", factory="gem:make")
 
 
 class TestManifestHelpers:

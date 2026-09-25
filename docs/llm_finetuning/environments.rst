@@ -142,16 +142,16 @@ manifest (see ``docs/_static/examples/gsm8k-grpo/reward.py``).
 A Python entrypoint
 ~~~~~~~~~~~~~~~~~~~
 
-``entrypoint`` is ``module:attr`` or ``path/to/file.py:attr``, and ``env_config``
-is its keyword arguments — so a library factory works unchanged:
+``entrypoint`` is the env to build (a registry id, or ``module:Class``). Optional
+``factory`` is the ``module:attr`` callable that receives that id as its first
+argument. ``env_config`` is leftover kwargs only — not a place for ``env_id``:
 
 .. code-block:: yaml
 
    environment:
        env_type: rollout
-       entrypoint: gem:make
-       env_config:
-           env_id: game:GuessTheNumber-v0-easy
+       factory: gem:make
+       entrypoint: game:GuessTheNumber-v0-easy
        max_turns: 50
        max_reward: 1.0
 
@@ -171,12 +171,11 @@ here: it is probed off one throwaway env and cached. A remote env cannot be
 probed, which is why ``env_url`` requires it.
 
 Put a system prompt in ``env_config``; ``RolloutHarness`` renders it as a leading
-``system`` message:
+``system`` message. It is set on the built env, not forwarded to ``gem.make``:
 
 .. code-block:: yaml
 
    env_config:
-       env_id: game:GuessTheNumber-v0-easy
        system_prompt: You are playing a guessing game. Reply with one number.
 
 An already-running server
@@ -192,8 +191,9 @@ entrypoint, use :func:`~agilerl.llm_envs.openenv_server.resolve_env` (same
    from agilerl.llm_envs.openenv_server import resolve_env
 
    url, server = resolve_env(
-       "gem:make",
-       env_config={"env_id": "code:Taco8k", "sandbox_type": "bwrap"},
+       "code:Taco8k",
+       factory="gem:make",
+       env_config={"sandbox_type": "bwrap"},
        port=8000,
        max_concurrent_envs=16,
    )
@@ -241,9 +241,8 @@ If the entrypoint's package is not installed, add ``env_packages``:
 
    environment:
        env_type: rollout
-       entrypoint: gem:make
-       env_config:
-           env_id: game:GuessTheNumber-v0-easy
+       factory: gem:make
+       entrypoint: game:GuessTheNumber-v0-easy
        env_packages:
            uv: [gem-llm==1.0.0]
        max_turns: 50
@@ -280,7 +279,10 @@ These are the names this package reads:
      - ``rollout`` or ``dataset``.
    * - ``dataset``
      - ``None``
-     - HuggingFace id or Parquet path. Alias: ``name``.
+     - HuggingFace id or Parquet path.
+   * - ``name``
+     - ``None``
+     - Catalog / dataset label only. Not the env id.
    * - ``columns``
      - ``None``
      - Rename source columns (e.g. ``nums: question``).
@@ -305,11 +307,17 @@ These are the names this package reads:
      - Maximum achievable reward, used for accuracy reporting.
    * - ``entrypoint``
      - ``None``
-     - ``module:attr`` or ``path/to/file.py:attr`` returning a text env.
+     - The env to build: a registry id, or ``module:Class`` /
+       ``path/to/file.py:attr``.
+   * - ``factory``
+     - ``None``
+     - Optional ``module:attr`` callable that receives ``entrypoint`` as its
+       first argument, e.g. ``gem:make``. Unset constructs ``entrypoint``.
    * - ``env_config``
      - ``None``
-     - Keyword arguments for the entrypoint. ``system_prompt`` is set on the
-       env after construction, not passed into the constructor.
+     - Keyword arguments after the env id. Not a place for ``env_id``.
+       ``system_prompt`` is set on the env after construction, not passed into
+       the constructor.
    * - ``env_packages``
      - ``None``
      - ``{uv: [...]}`` or ``{pip: [...]}`` to install before import.
