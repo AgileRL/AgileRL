@@ -142,7 +142,12 @@ class _Stub:
         )
         return advantages, np.arange(survivors)
 
-    def _fused_forward_no_grad(self, ids: torch.Tensor, _batch_size: int):
+    def _fused_forward_no_grad(
+        self,
+        ids: torch.Tensor,
+        _batch_size: int,
+        pixel_values: torch.Tensor | None = None,
+    ):
         """Reference and old log-probs on the action frame."""
         zeros = torch.zeros(ids.shape[0], ids.shape[1] - 1)
         return zeros, zeros, None

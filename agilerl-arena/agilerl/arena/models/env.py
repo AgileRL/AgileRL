@@ -422,6 +422,10 @@ class LLMEnvSpec(EnvSpecBase):
             "the Pod nodeSelector — key=value, or a bare pool name."
         ),
     )
+    env_vars: dict[str, str] = Field(
+        default_factory=dict,
+        description="Container environment for each env_image Pod.",
+    )
 
     chat_template_kwargs: dict[str, Any] = Field(
         default_factory=dict,
@@ -522,6 +526,9 @@ class LLMEnvSpec(EnvSpecBase):
                 "mcp_tool / request_timeout_s configure an env reached over "
                 "HTTP; a rollout over dataset rows has no such env."
             )
+            raise ValueError(msg)
+        if self.env_vars and self.env_image is None:
+            msg = "env_vars set container environment on an env_image Pod."
             raise ValueError(msg)
         if self.action_field != "message" and dataset is not None:
             msg = (

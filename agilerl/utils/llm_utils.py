@@ -30,6 +30,7 @@ from agilerl.architectures import (
     install_family_patches,
     pretrained_model_type,
 )
+from agilerl.architectures.vllm_language import apply_language_tower_engine_kwargs
 from agilerl.distributed.fsdp import CPUOffloadOptimizer
 from agilerl.distributed.process import (
     allreduce_minmax_int,
@@ -308,15 +309,23 @@ def load_pad_token_configs(
     if not HAS_LLM_DEPENDENCIES or not model_name_or_path:
         return None, None
 
-    model_config: object | None = None
-    generation_config: object | None = None
+    trust_remote_code = (
+        family_runtime(model_name_or_path).trainer.trust_remote_code is True
+    )
+    # A checkpoint can omit config.json or generation_config.json.
     try:
-        model_config = AutoConfig.from_pretrained(model_name_or_path)
-    except Exception:
+        model_config = AutoConfig.from_pretrained(
+            model_name_or_path,
+            trust_remote_code=trust_remote_code,
+        )
+    except OSError:
         model_config = None
     try:
-        generation_config = GenerationConfig.from_pretrained(model_name_or_path)
-    except Exception:
+        generation_config = GenerationConfig.from_pretrained(
+            model_name_or_path,
+            trust_remote_code=trust_remote_code,
+        )
+    except OSError:
         generation_config = None
     return model_config, generation_config
 
@@ -384,7 +393,9 @@ def is_rollout_prompt(obs: Mapping[str, object]) -> TypeGuard[RolloutPrompt]:
     :return: ``True`` when the mapping carries prompt tokens.
     :rtype: TypeGuard[RolloutPrompt]
     """
-    return isinstance(obs.get("input_ids"), torch.Tensor)
+    return isinstance(obs.get("input_ids"), torch.Tensor) or (
+        isinstance(obs.get("prompt"), str) and obs.get("image") is not None
+    )
 
 
 def _split_prompt_value(value: object, batch_size: int) -> Sequence[object]:
@@ -994,7 +1005,9 @@ def build_scoped_lora_target_regex(
         raise ValueError(msg)
     alts = "|".join(re.escape(name) for name in sorted(set(projection_names)))
     scope_esc = re.escape(scope.strip("."))
-    return rf".*\.{scope_esc}.*\.(?:{alts})(?:\.linear)?$"
+    # Scope may be the first path component (``language_model.layers.0.q_proj``)
+    # or nested (``model.language_model.layers.0.q_proj``).
+    return rf"(?:.*\.)?{scope_esc}.*\.(?:{alts})(?:\.linear)?$"
 
 
 def _normalize_projection_leaf_name(name: str) -> str:
@@ -1045,7 +1058,14 @@ def _infer_clippable_lora_scope(model: nn.Module) -> str | None:
 # PEFT LoRA inject rejects these module names on Mamba-family model_type values
 # (fused kernels read the raw weights and skip the wrapped forward).
 MAMBA_LORA_MODEL_TYPES = frozenset(
-    {"falcon_h1", "falcon_mamba", "mamba", "mamba2", "nemotron_h"}
+    {
+        "falcon_h1",
+        "falcon_mamba",
+        "mamba",
+        "mamba2",
+        "nemotron_h",
+        "nemotron_h_omni",
+    }
 )
 MAMBA_LORA_FORBIDDEN_MODULES = frozenset({"conv1d", "out_proj"})
 
@@ -2330,24 +2350,31 @@ def hf_completion_lengths(
 
 
 def prepare_prompt_hf_generate(
-    prompt: RolloutPrompt, device: torch.device
+    prompt: RolloutPrompt,
+    device: torch.device,
+    *,
+    group_size: int = 1,
 ) -> dict[str, torch.Tensor]:
     """Turn one rollout prompt into HuggingFace ``generate`` inputs.
 
     ``attention_mask`` is taken from the prompt when present (e.g. a padded
     batch) and derived as all-ones otherwise (a single unpadded row, the
-    ``RolloutHarness`` prompt shape).
+    ``RolloutHarness`` prompt shape). ``pixel_values`` are forwarded when the
+    prompt carries them.
 
     :param prompt: The prompt to prepare.
     :type prompt: RolloutPrompt
     :param device: The device to move the tensors to.
     :type device: torch.device
-    :return: ``input_ids`` / ``attention_mask`` moved to ``device``.
+    :param group_size: Repeat each tensor this many times on the batch dim.
+    :type group_size: int
+    :return: ``input_ids`` / ``attention_mask`` (and ``pixel_values`` when set)
+        moved to ``device``.
     :rtype: dict[str, torch.Tensor]
     """
     input_ids = prompt["input_ids"].to(device)
     attention_mask = prompt.get("attention_mask")
-    return {
+    tensors: dict[str, torch.Tensor] = {
         "input_ids": input_ids,
         "attention_mask": (
             torch.ones_like(input_ids)
@@ -2355,6 +2382,15 @@ def prepare_prompt_hf_generate(
             else attention_mask.to(device)
         ),
     }
+    pixel_values = prompt.get("pixel_values")
+    if pixel_values is not None:
+        tensors["pixel_values"] = pixel_values.to(device)
+    if group_size > 1:
+        tensors = {
+            key: value.repeat(group_size, *([1] * (value.ndim - 1)))
+            for key, value in tensors.items()
+        }
+    return tensors
 
 
 def get_model_name_or_path(model: PreTrainedModel) -> str:
@@ -2648,11 +2684,10 @@ def build_vllm_llm_init_kwargs(
         else trainer_model_name_or_path
     )
     try:
-        family_vllm_kwargs = family_runtime(vllm_model).vllm.model_dump(
-            exclude_none=True
-        )
+        runtime = family_runtime(vllm_model)
+        family_vllm_kwargs = runtime.vllm.model_dump(exclude_none=True)
     except OSError:
-        # Dummy actors and offline ids have no Hugging Face config.
+        runtime = None
         family_vllm_kwargs = {}
     explicit_batched_tokens = getattr(vllm_config, "max_num_batched_tokens", None)
     batched_tokens = (
@@ -2699,6 +2734,14 @@ def build_vllm_llm_init_kwargs(
     kwargs["max_loras"] = vllm_config.max_loras
     for key, value in family_vllm_kwargs.items():
         kwargs.setdefault(key, value)
+    if runtime is not None:
+        if runtime.trainer.trust_remote_code is not None:
+            kwargs.setdefault("trust_remote_code", runtime.trainer.trust_remote_code)
+        apply_language_tower_engine_kwargs(
+            kwargs,
+            strip_multimodal_towers=vllm_config.strip_multimodal_towers,
+            runtime=runtime,
+        )
     return kwargs
 
 
@@ -2745,12 +2788,45 @@ def peft_lora_state_dict_key_to_module_key(key: str) -> str:
     return key
 
 
-def remap_peft_lora_key_for_vllm(key: str) -> str:
-    """Normalize PEFT keys (e.g. ClippableLinear ``.linear.lora_A``) for vLLM."""
+def remap_peft_lora_key_for_vllm(
+    key: str,
+    *,
+    strip_multimodal_towers: bool | list[str] = False,
+) -> str:
+    """Normalize PEFT LoRA keys (ClippableLinear, Nemotron Super VL vision/language/projector) for vLLM.
+
+    :param key: PEFT state-dict key.
+    :type key: str
+    :param strip_multimodal_towers: ``True`` remaps language keys onto the
+        language-tower module (``model.``). Any other value keeps the nested
+        VL prefix (``language_model.model.``).
+    :type strip_multimodal_towers: bool | list[str]
+    :return: Key vLLM's LoRA loader expects.
+    :rtype: str
+    """
     key = key.replace(".linear.lora_A.", ".lora_A.").replace(
         ".linear.lora_B.", ".lora_B."
     )
-    return key.replace(".base_layer.", ".")
+    key = key.replace(".base_layer.", ".")
+    if "language_model.backbone." in key:
+        language_prefix = (
+            "model." if strip_multimodal_towers is True else "language_model.model."
+        )
+        key = key.replace("language_model.backbone.", language_prefix)
+    if "vision_model.encoder.layer." in key:
+        key = key.replace(
+            "vision_model.encoder.layer.", "vision_model.model.encoder.layers."
+        )
+    if "vision_model.model.encoder.layers." in key:
+        key = key.replace(".attention.attention.query", ".attn.query")
+        key = key.replace(".attention.attention.key", ".attn.key")
+        key = key.replace(".attention.attention.value", ".attn.value")
+        key = key.replace(".attention.output.dense", ".attn.proj")
+    if "vision_projector.mlp1.linear1" in key:
+        key = key.replace("vision_projector.mlp1.linear1", "mlp1.1")
+    if "vision_projector.mlp1.linear2" in key:
+        key = key.replace("vision_projector.mlp1.linear2", "mlp1.3")
+    return key
 
 
 def expert_lora_vllm_key_map(peft_model: nn.Module) -> dict[str, str]:
@@ -2798,6 +2874,7 @@ def filter_peft_state_dict_for_vllm_lora(
     state_dict: dict[str, torch.Tensor],
     target_modules: str | list[str] | None,
     expert_key_map: dict[str, str] | None = None,
+    strip_multimodal_towers: bool | list[str] = False,
 ) -> dict[str, torch.Tensor]:
     """Keep LoRA tensors whose modules match the trainer ``target_modules`` spec or expert map."""
     filtered: dict[str, torch.Tensor] = {}
@@ -2811,7 +2888,11 @@ def filter_peft_state_dict_for_vllm_lora(
             module_key, target_modules
         ):
             continue
-        filtered[remap_peft_lora_key_for_vllm(key)] = tensor
+        filtered[
+            remap_peft_lora_key_for_vllm(
+                key, strip_multimodal_towers=strip_multimodal_towers
+            )
+        ] = tensor
     return filtered
 
 
@@ -2834,6 +2915,7 @@ def save_peft_adapter_for_vllm_rollout(
     adapter_name: str,
     target_modules: str | list[str] | None,
     expert_key_map: dict[str, str] | None = None,
+    strip_multimodal_towers: bool | list[str] = False,
 ) -> Path:
     """Export a PEFT adapter checkpoint that vLLM can load for colocated rollout.
 
@@ -2866,7 +2948,10 @@ def save_peft_adapter_for_vllm_rollout(
     state = get_peft_model_state_dict(peft_model, adapter_name=adapter_name)
     n_before = len(state)
     state = filter_peft_state_dict_for_vllm_lora(
-        state, target_modules, expert_key_map=expert_key_map
+        state,
+        target_modules,
+        expert_key_map=expert_key_map,
+        strip_multimodal_towers=strip_multimodal_towers,
     )
     if not state:
         msg = (

@@ -40,6 +40,7 @@ class DummyForwardOutput:
 class DummyMLPPreTrainedModel(PreTrainedModel, GenerationMixin):
     config_class = DummyConfig
     base_model_prefix = "dummy_mlp"
+    supports_gradient_checkpointing = True
 
     def __init__(self, config: DummyConfig, device="cpu"):
         super().__init__(config)

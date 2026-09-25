@@ -24,9 +24,10 @@ from openenv.core.env_server.interfaces import Environment, EnvironmentMetadata
 from openenv.core.env_server.mcp_environment import MCPEnvironment
 from openenv.core.env_server.mcp_types import CallToolAction, CallToolObservation
 from openenv.core.env_server.types import Action, Observation, State
-from pydantic import Field
+from pydantic import ConfigDict, Field
 
 from agilerl.llm_envs.env_sources import is_url, spec_to_factory
+from agilerl.llm_envs.observation import observation_text_and_image
 from agilerl.utils.env_utils import construct_entrypoint_env
 
 if TYPE_CHECKING:
@@ -56,10 +57,18 @@ class TextObservation(Observation):
     terminal step, ``question`` / ``answer`` are set so rubrics can score.
     """
 
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
     prompt: str = ""
     truncated: bool = False
     question: Any = None
     answer: Any = None
+
+
+class VLTextObservation(TextObservation):
+    """Text observation with a single image for vision-language reset turns."""
+
+    image: Any
 
 
 class TextState(State):
@@ -125,15 +134,26 @@ class OpenEnvWrapper(Environment):
         for name in ("row_index", "evaluation"):
             if name in self._reset_params and kwargs.get(name) is not None:
                 call[name] = kwargs[name]
-        prompt, info = _normalize_reset(self._inner.reset(**call))
+        prompt, info, image = _normalize_reset(self._inner.reset(**call))
         metadata = dict(info)
         if "system_prompt" not in metadata:
             inner_prompt = getattr(self._inner, "system_prompt", None)
             if isinstance(inner_prompt, str) and inner_prompt:
                 metadata["system_prompt"] = inner_prompt
         self._state = State(episode_id=episode_id, step_count=0)
+        if image is not None:
+            return VLTextObservation(
+                prompt=prompt,
+                reward=None,
+                done=False,
+                metadata=metadata,
+                image=image,
+            )
         return TextObservation(
-            prompt=prompt, reward=None, done=False, metadata=metadata
+            prompt=prompt,
+            reward=None,
+            done=False,
+            metadata=metadata,
         )
 
     def step(
@@ -178,15 +198,28 @@ class OpenEnvWrapper(Environment):
                 closer()
 
 
-def _normalize_reset(result: object) -> tuple[str, dict[str, Any]]:
-    """Normalise an env ``reset`` return into ``(prompt, info)``."""
+def _normalize_reset(result: object) -> tuple[str, dict[str, Any], Any | None]:
+    """Normalise an env ``reset`` return into ``(prompt, info, image)``."""
+    obs: object
+    info: dict[str, Any]
     if isinstance(result, tuple):
         if len(result) >= 2:
-            info = result[1]
-            return str(result[0]), info if _is_str_keyed_dict(info) else {}
-        if len(result) == 1:
-            return str(result[0]), {}
-    return str(result), {}
+            obs = result[0]
+            raw_info = result[1]
+            info = raw_info if _is_str_keyed_dict(raw_info) else {}
+        elif len(result) == 1:
+            obs = result[0]
+            info = {}
+        else:
+            obs = result
+            info = {}
+    else:
+        obs = result
+        info = {}
+    if _is_str_keyed_dict(obs) and obs.get("image") is not None:
+        text, image = observation_text_and_image(obs)
+        return text, info, image
+    return str(obs), info, None
 
 
 def _normalize_step(result: object) -> tuple[str, Any, bool, bool, dict[str, Any]]:

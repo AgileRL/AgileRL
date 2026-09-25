@@ -8,6 +8,7 @@ import shutil
 import socket
 import sys
 import tempfile
+from pathlib import Path
 
 import gymnasium as gym
 
@@ -658,3 +659,44 @@ def serve_env():
     yield _serve
     for server in servers:
         server.stop()
+
+
+@pytest.fixture(autouse=True)
+def stub_family_config_lookup(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Hub ids skip config download. A local checkout still loads its config.json."""
+    from transformers.configuration_utils import PretrainedConfig
+
+    original = PretrainedConfig.get_config_dict
+    hub_keys = (
+        "cache_dir",
+        "force_download",
+        "proxies",
+        "token",
+        "local_files_only",
+        "revision",
+        "trust_remote_code",
+        "subfolder",
+        "_from_pipeline",
+        "_from_auto",
+        "_commit_hash",
+        "_configuration_file",
+        "code_revision",
+        "gguf_file",
+        "resume_download",
+    )
+
+    def fake_get_config_dict(
+        pretrained_model_name_or_path: object, **kwargs: object
+    ) -> tuple[dict[str, str], dict[str, object]]:
+        local = Path(str(pretrained_model_name_or_path)).expanduser()
+        if local.is_dir() and (local / "config.json").is_file():
+            return original(pretrained_model_name_or_path, **kwargs)
+        unused = dict(kwargs)
+        for key in hub_keys:
+            unused.pop(key, None)
+        return {"model_type": "llama"}, unused
+
+    monkeypatch.setattr(
+        "agilerl.architectures.catalog.PretrainedConfig.get_config_dict",
+        fake_get_config_dict,
+    )

@@ -5,13 +5,16 @@
 
 from __future__ import annotations
 
+import json
 from contextlib import contextmanager
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
+from safetensors.torch import save_file
 from torch import nn
+from torch.distributed.tensor import Replicate, Shard
 
 from agilerl.algorithms.core.base import LLMAlgorithm
 from agilerl.algorithms.grpo import GRPO
@@ -333,7 +336,8 @@ def _patch_hf_generate_path(module_path, captured_devices):
     and return dummy data without moving tensors.
     """
 
-    def capture_prepare(prompt_dict, device):
+    def capture_prepare(prompt_dict, device, group_size=1):
+        del group_size
         captured_devices.append(device)
         return {
             "input_ids": torch.ones(1, 4, dtype=torch.long),
@@ -799,46 +803,315 @@ class TestCloneLlmRejectsFsdp:
             clone_llm(model)
 
 
-class TestMaterializeFsdp2FromCpuState:
-    """``materialize_fsdp2_from_cpu_state`` never densifies on CUDA before shard."""
+class TestFsdpSafetensorsShardHelpers:
+    def test_global_shard_slices_match_torch_chunk_divisible(self):
+        from torch.distributed.tensor.placement_types import Shard
 
-    def test_sequence_meta_shard_empty_load(self):
+        from agilerl.distributed.fsdp import global_shard_slices
+
+        global_shape = (8, 4)
+        placements = (Shard(0),)
+        tensor = torch.arange(32).reshape(8, 4)
+        mesh = MagicMock()
+        mesh.size.return_value = 4
+        for rank in range(4):
+            mesh.get_coordinate.return_value = (rank,)
+            slices = global_shard_slices(global_shape, placements, mesh)
+            expected = torch.chunk(tensor, 4, dim=0)[rank]
+            assert torch.equal(tensor[slices], expected)
+
+    def test_global_shard_slices_match_torch_chunk_remainder(self):
+        from torch.distributed.tensor.placement_types import Shard
+
+        from agilerl.distributed.fsdp import global_shard_slices
+
+        global_shape = (10,)
+        placements = (Shard(0),)
+        tensor = torch.arange(10)
+        mesh = MagicMock()
+        mesh.size.return_value = 3
+        chunks = list(torch.chunk(tensor, 3, dim=0))
+        for rank in range(3):
+            mesh.get_coordinate.return_value = (rank,)
+            slices = global_shard_slices(global_shape, placements, mesh)
+            assert torch.equal(tensor[slices], chunks[rank])
+
+    def test_global_shard_slices_two_dimensional_shard(self):
+        from torch.distributed.tensor.placement_types import Shard
+
+        from agilerl.distributed.fsdp import global_shard_slices
+
+        global_shape = (6, 4)
+        placements = (Shard(0), Shard(1))
+        tensor = torch.arange(24).reshape(6, 4)
+        mesh = MagicMock()
+        mesh.size.return_value = 2
+        for row_rank in range(2):
+            for col_rank in range(2):
+                mesh.get_coordinate.return_value = (row_rank, col_rank)
+                slices = global_shard_slices(global_shape, placements, mesh)
+                row_piece = torch.chunk(tensor, 2, dim=0)[row_rank]
+                expected = torch.chunk(row_piece, 2, dim=1)[col_rank]
+                assert torch.equal(tensor[slices], expected)
+
+    def test_copy_safetensors_local_slice_with_dtype_cast(self, tmp_path):
+        from safetensors import safe_open
+        from safetensors.torch import save_file
+
+        from agilerl.distributed.fsdp import _copy_safetensors_slice
+
+        weights = {"layer.weight": torch.ones(6, 4, dtype=torch.float32)}
+        path = tmp_path / "model.safetensors"
+        save_file(weights, str(path))
+        dest = torch.empty(2, 4, dtype=torch.bfloat16)
+        path_str = str(path)
+        with safe_open(path_str, framework="pt", device="cpu") as handle:
+            _copy_safetensors_slice(
+                handle,
+                "layer.weight",
+                (slice(2, 4), slice(0, 4)),
+                dest,
+            )
+        assert dest.dtype == torch.bfloat16
+        assert torch.all(dest == torch.ones(2, 4, dtype=torch.bfloat16))
+
+    def test_lora_a_seed_stable_and_lora_b_zeros(self):
+        from agilerl.distributed.fsdp import _init_lora_parameter
+
+        param_a = nn.Parameter(torch.empty(2, 3))
+        param_b = nn.Parameter(torch.empty(2, 3))
+        name = "layers.0.q_proj.lora_A.default.weight"
+        _init_lora_parameter(
+            param_a,
+            name,
+            (2, 3),
+            (),
+            None,
+        )
+        _init_lora_parameter(
+            param_b,
+            name.replace("lora_A", "lora_B"),
+            (2, 3),
+            (),
+            None,
+        )
+        param_a_other = nn.Parameter(torch.empty(2, 3))
+        _init_lora_parameter(
+            param_a_other,
+            name,
+            (2, 3),
+            (),
+            None,
+        )
+        assert torch.equal(param_a, param_a_other)
+        assert torch.equal(param_b, torch.zeros_like(param_b))
+
+    def test_checkpoint_key_maps_peft_base_layer(self):
+        from agilerl.distributed.fsdp import checkpoint_key_for_parameter
+
+        live = "base_model.model.layers.0.q_proj.base_layer.weight"
+        assert checkpoint_key_for_parameter(live) == "layers.0.q_proj.weight"
+
+    def test_resolve_checkpoint_directory_outer_module_config(self, tmp_path):
+        from types import SimpleNamespace
+
+        from safetensors.torch import save_file
+        from transformers import GPT2Config, GPT2LMHeadModel
+
+        from agilerl.distributed.fsdp import _resolve_checkpoint_source
+
+        save_file({"w": torch.zeros(1)}, str(tmp_path / "model.safetensors"))
+        causal = GPT2LMHeadModel(
+            GPT2Config(n_layer=1, n_embd=8, n_head=2, vocab_size=16)
+        )
+        object.__setattr__(causal.config, "_name_or_path", str(tmp_path))
+        language = nn.Module()
+        language.config = SimpleNamespace(_name_or_path="")
+        causal.language_model = language
+        shell = nn.Module()
+        shell.base_model = causal
+
+        assert _resolve_checkpoint_source(shell) == str(tmp_path)
+
+    def test_tied_weight_target_missing_from_checkpoint_skips(self, tmp_path):
+        from types import SimpleNamespace
+
+        from safetensors.torch import save_file
+
+        from agilerl.distributed.fsdp import _load_sharded_weights_from_safetensors
+
+        class TinyCausal(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.wte = nn.Embedding(16, 8)
+                self.lm_head = nn.Linear(8, 16, bias=False)
+                self.config = SimpleNamespace(_name_or_path="")
+                self.all_tied_weights_keys = {"lm_head.weight": "wte.weight"}
+
+        model = TinyCausal()
+        source = model.wte.weight.detach().clone()
+        source.fill_(1.5)
+        save_file({"wte.weight": source}, str(tmp_path / "model.safetensors"))
+        model.config._name_or_path = str(tmp_path)
+        head_before = model.lm_head.weight.detach().clone()
+        _load_sharded_weights_from_safetensors(model)
+
+        assert torch.allclose(model.wte.weight, torch.full_like(source, 1.5))
+        assert torch.equal(model.lm_head.weight, head_before)
+
+    def test_missing_non_lora_checkpoint_key_raises(self, tmp_path):
+        from safetensors.torch import save_file
+        from transformers import GPT2Config, GPT2LMHeadModel
+
+        from agilerl.distributed.fsdp import _load_sharded_weights_from_safetensors
+
+        save_file(
+            {"layers.0.weight": torch.zeros(2)}, str(tmp_path / "model.safetensors")
+        )
+        model = GPT2LMHeadModel(
+            GPT2Config(n_layer=1, n_embd=8, n_head=2, vocab_size=16)
+        )
+        model.config._name_or_path = str(tmp_path)
+        with pytest.raises(RuntimeError, match="Missing checkpoint weight"):
+            _load_sharded_weights_from_safetensors(model)
+
+
+class TestMaterializeFsdp2FromCpuState:
+    """``materialize_fsdp2_from_cpu_state`` fills FSDP shards from meta or a dense module."""
+
+    def test_dense_model_scatters_its_parameters(self):
         from agilerl.distributed import materialize_fsdp2_from_cpu_state
 
+        torch.manual_seed(0)
         model = nn.Linear(4, 4)
-        calls: list[str] = []
+        expected = model.weight.detach().cpu().clone()
 
-        def _to_empty(device):
-            calls.append(f"to_empty:{device}")
-            return model
-
-        model.to_empty = MagicMock(side_effect=_to_empty)  # type: ignore[method-assign]
         with (
             patch(
                 "agilerl.distributed.fsdp.apply_fsdp2",
-                side_effect=lambda m, _c, **_k: calls.append("apply_fsdp2") or m,
+                side_effect=lambda module, *_a, **_k: module,
             ),
-            patch(
-                "agilerl.distributed.fsdp.set_full_model_state_dict",
-                side_effect=lambda *_a, **_k: calls.append("load"),
-            ),
-            patch(
-                "agilerl.distributed.fsdp._restore_after_to_empty",
-                side_effect=lambda _m: calls.append("restore"),
-            ),
+            patch("agilerl.distributed.fsdp._restore_after_to_empty"),
+            patch("agilerl.distributed.fsdp._share_fsdp_comm_streams"),
         ):
             out = materialize_fsdp2_from_cpu_state(
-                model, "cuda:0", FSDPConfig(cpu_offload=False)
+                model, "cpu", FSDPConfig(cpu_offload=True)
             )
 
         assert out is model
-        assert calls[0].startswith("to_empty:meta")
-        assert "apply_fsdp2" in calls
-        assert any(c.startswith("to_empty:") and "cuda" in c for c in calls)
-        assert calls.index("apply_fsdp2") < next(
-            i for i, c in enumerate(calls) if c.startswith("to_empty:") and "cuda" in c
+        assert torch.equal(model.weight.detach().cpu(), expected)
+
+    def test_world_size_one_meta_loads_local_safetensors(self, tmp_path):
+        from types import SimpleNamespace
+
+        from safetensors.torch import save_file
+
+        from agilerl.distributed import materialize_fsdp2_from_cpu_state
+
+        expected = torch.arange(4, dtype=torch.float32).reshape(2, 2)
+        save_file({"weight": expected}, str(tmp_path / "model.safetensors"))
+
+        class Tiny(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.weight = nn.Parameter(torch.empty(2, 2))
+                self.config = SimpleNamespace(_name_or_path=str(tmp_path))
+
+        with torch.device("meta"):
+            model = Tiny()
+
+        with (
+            patch(
+                "agilerl.distributed.fsdp.apply_fsdp2",
+                side_effect=lambda module, *_a, **_k: module,
+            ),
+            patch("agilerl.distributed.fsdp._restore_after_to_empty"),
+            patch("agilerl.distributed.fsdp._share_fsdp_comm_streams"),
+        ):
+            out = materialize_fsdp2_from_cpu_state(
+                model, "cpu", FSDPConfig(cpu_offload=True)
+            )
+
+        assert out is model
+        assert torch.equal(model.weight, expected)
+
+    def test_hub_id_resolves_through_cached_file(self, tmp_path):
+        from types import SimpleNamespace
+
+        from safetensors.torch import save_file
+
+        from agilerl.distributed import materialize_fsdp2_from_cpu_state
+
+        hub_id = "org/tiny-checkpoint"
+        expected = torch.full((2, 2), 7.0)
+        weights_path = str(tmp_path / "model.safetensors")
+        save_file({"weight": expected}, weights_path)
+
+        def fake_cached_file(
+            path_or_repo: str,
+            filename: str,
+            **_kwargs: object,
+        ) -> str | None:
+            if path_or_repo != hub_id:
+                return None
+            if filename == "model.safetensors":
+                return weights_path
+            return None
+
+        class Tiny(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.weight = nn.Parameter(torch.empty(2, 2))
+                self.config = SimpleNamespace(_name_or_path=hub_id)
+
+        with torch.device("meta"):
+            model = Tiny()
+
+        with (
+            patch(
+                "agilerl.distributed.fsdp.cached_file",
+                side_effect=fake_cached_file,
+            ),
+            patch(
+                "agilerl.distributed.fsdp.apply_fsdp2",
+                side_effect=lambda module, *_a, **_k: module,
+            ),
+            patch("agilerl.distributed.fsdp._restore_after_to_empty"),
+            patch("agilerl.distributed.fsdp._share_fsdp_comm_streams"),
+        ):
+            materialize_fsdp2_from_cpu_state(model, "cpu", FSDPConfig(cpu_offload=True))
+
+        assert torch.equal(model.weight, expected)
+
+    def test_distributed_meta_model_loads_safetensor_shards(self):
+        from types import SimpleNamespace
+
+        from agilerl.distributed import materialize_fsdp2_from_cpu_state
+
+        with torch.device("meta"):
+            model = nn.Linear(4, 4)
+        object.__setattr__(
+            model,
+            "config",
+            SimpleNamespace(_name_or_path="/unused"),
         )
-        assert "load" in calls
+        loaded: list[str] = []
+        with (
+            patch("agilerl.distributed.fsdp.is_distributed", return_value=True),
+            patch(
+                "agilerl.distributed.fsdp.apply_fsdp2",
+                side_effect=lambda module, *_a, **_k: module,
+            ),
+            patch(
+                "agilerl.distributed.fsdp._load_sharded_weights_from_safetensors",
+                side_effect=lambda *_a, **_k: loaded.append("shard_load"),
+            ),
+            patch("agilerl.distributed.fsdp._restore_after_to_empty"),
+            patch("agilerl.distributed.fsdp._share_fsdp_comm_streams"),
+        ):
+            materialize_fsdp2_from_cpu_state(model, "cpu", FSDPConfig(cpu_offload=True))
+
+        assert loaded == ["shard_load"]
 
 
 class TestLoraConfigsEquivalent:
@@ -862,6 +1135,716 @@ class TestLoraConfigsEquivalent:
         assert not LLMAlgorithm._lora_configs_equivalent(
             LoraConfig(r=4, target_modules=["q_proj"]), loaded
         )
+
+
+class _CoordMesh:
+    """Device mesh stand-in whose coordinate is unset."""
+
+    def get_coordinate(self) -> None:
+        return None
+
+    def size(self, mesh_dim: int) -> int:
+        return 2
+
+    def get_local_rank(self, mesh_dim: int) -> int:
+        return 0
+
+
+class TestSafetensorsShardKeys:
+    """Checkpoint key lookup and the safetensors shard copy."""
+
+    def test_base_layer_bias_maps_to_bias(self):
+        from agilerl.distributed.fsdp import checkpoint_key_for_parameter
+
+        assert checkpoint_key_for_parameter("block.base_layer.bias") == "block.bias"
+
+    def test_language_body_alias_uses_backbone_key(self):
+        from agilerl.distributed.fsdp import checkpoint_key_candidates
+
+        assert checkpoint_key_candidates("language_model.model.embeddings.weight") == (
+            "language_model.model.embeddings.weight",
+            "language_model.backbone.embeddings.weight",
+        )
+
+    def test_shard_slices_when_mesh_coordinate_is_unset(self):
+        from agilerl.distributed.fsdp import global_shard_slices
+
+        slices = global_shard_slices((4, 2), (Replicate(), Shard(0)), _CoordMesh())
+
+        assert slices[0] == slice(0, 2)
+        assert slices[1] == slice(0, 2)
+
+    def test_local_dest_of_a_dtensor(self, monkeypatch: pytest.MonkeyPatch):
+        from agilerl.distributed import fsdp as fsdp_mod
+
+        local = torch.ones(2)
+
+        class FakeDTensor(nn.Parameter):
+            def to_local(self) -> torch.Tensor:
+                return local
+
+        monkeypatch.setattr(fsdp_mod, "DTensor", FakeDTensor)
+        param = FakeDTensor(torch.zeros(2))
+
+        assert fsdp_mod._parameter_dest_local(param) is local
+
+    def test_lora_init_copies_this_ranks_slice(self, monkeypatch: pytest.MonkeyPatch):
+        from agilerl.distributed import fsdp as fsdp_mod
+
+        class FakeDTensor(nn.Parameter):
+            def to_local(self) -> torch.Tensor:
+                return self.data
+
+        monkeypatch.setattr(fsdp_mod, "DTensor", FakeDTensor)
+        param = FakeDTensor(torch.zeros(2, 2))
+
+        fsdp_mod._init_lora_parameter(
+            param,
+            "block.lora_B.weight",
+            (4, 2),
+            (Shard(0),),
+            _CoordMesh(),
+        )
+
+        assert torch.equal(param.data, torch.zeros(2, 2))
+
+    def test_empty_config_path_is_not_a_checkpoint(self):
+        from agilerl.distributed.fsdp import _checkpoint_source_from_config
+
+        assert _checkpoint_source_from_config(SimpleNamespace()) is None
+
+    def test_index_file_is_a_checkpoint_source(self, tmp_path):
+        from agilerl.distributed.fsdp import _checkpoint_source_from_config
+
+        (tmp_path / "model.safetensors.index.json").write_text(
+            '{"weight_map": {}}', encoding="utf-8"
+        )
+
+        assert _checkpoint_source_from_config(
+            SimpleNamespace(_name_or_path=str(tmp_path))
+        ) == str(tmp_path)
+
+    def test_missing_weight_files_are_not_a_checkpoint(self, tmp_path):
+        from agilerl.distributed.fsdp import _checkpoint_source_from_config
+
+        (tmp_path / "config.json").write_text("{}", encoding="utf-8")
+
+        assert (
+            _checkpoint_source_from_config(SimpleNamespace(_name_or_path=str(tmp_path)))
+            is None
+        )
+
+    def test_unwraps_pretrained_base_and_inner_model(self):
+        from agilerl.distributed.fsdp import _next_unwrap_module
+
+        inner = nn.Linear(2, 2)
+        pretrained = nn.Linear(2, 2)
+        shell = nn.Linear(2, 2)
+        shell.pretrained_model = pretrained
+        assert _next_unwrap_module(shell) is pretrained
+
+        class WithBase(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+
+            def get_base_model(self) -> nn.Module:
+                return inner
+
+        assert _next_unwrap_module(WithBase()) is inner
+
+        wrapped = nn.Linear(2, 2)
+        wrapped.base_model = inner
+        assert _next_unwrap_module(wrapped) is inner
+
+        holder = nn.Module()
+        holder.model = inner
+        assert _next_unwrap_module(holder) is inner
+        assert _next_unwrap_module(nn.Linear(2, 2)) is None
+
+    def test_resolve_raises_without_a_checkpoint(self):
+        from agilerl.distributed.fsdp import _resolve_checkpoint_source
+
+        with pytest.raises(RuntimeError, match="FSDP shard load requires"):
+            _resolve_checkpoint_source(nn.Linear(2, 2))
+
+    def test_index_maps_each_key_to_its_shard(self, tmp_path):
+        from agilerl.distributed.fsdp import _build_safetensors_key_files
+
+        shard = tmp_path / "model-00001-of-00001.safetensors"
+        save_file({"weight": torch.ones(2)}, str(shard))
+        (tmp_path / "model.safetensors.index.json").write_text(
+            json.dumps({"weight_map": {"weight": shard.name}}),
+            encoding="utf-8",
+        )
+
+        key_files = _build_safetensors_key_files(str(tmp_path))
+
+        assert key_files == {"weight": str(shard)}
+
+    def test_index_missing_shard_raises(self, tmp_path):
+        from agilerl.distributed.fsdp import _build_safetensors_key_files
+
+        (tmp_path / "model.safetensors.index.json").write_text(
+            json.dumps({"weight_map": {"weight": "missing.safetensors"}}),
+            encoding="utf-8",
+        )
+
+        with pytest.raises(RuntimeError, match="missing shard"):
+            _build_safetensors_key_files(str(tmp_path))
+
+    def test_directory_without_weights_raises(self, tmp_path):
+        from agilerl.distributed.fsdp import _build_safetensors_key_files
+
+        with pytest.raises(RuntimeError, match=r"model\.safetensors"):
+            _build_safetensors_key_files(str(tmp_path))
+
+    def test_loads_backbone_alias_lora_tied_weight_and_buffer(self, tmp_path):
+        from agilerl.distributed.fsdp import _load_sharded_weights_from_safetensors
+
+        expected = torch.arange(4, dtype=torch.float32).reshape(2, 2)
+        save_file(
+            {
+                "language_model.backbone.embeddings.weight": expected,
+                "language_model.scale": torch.tensor([3.0, 4.0]),
+            },
+            str(tmp_path / "model.safetensors"),
+        )
+
+        class Body(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.embeddings = nn.Embedding(2, 2)
+                self.lora_A = nn.Parameter(torch.empty(2, 2))
+
+        class Language(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.model = Body()
+                self.all_tied_weights_keys = {
+                    "language_model.tied": "embeddings.weight"
+                }
+                self.tied = nn.Parameter(torch.ones(2, 2))
+                self.register_buffer("scale", torch.zeros(2))
+                self.register_buffer("unused", torch.ones(2))
+
+        class Root(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.language_model = Language()
+                self.config = SimpleNamespace(_name_or_path=str(tmp_path))
+
+        model = Root()
+        _load_sharded_weights_from_safetensors(model)
+
+        embed = model.language_model.model.embeddings.weight
+        assert torch.equal(embed.detach(), expected)
+        assert torch.equal(model.language_model.scale, torch.tensor([3.0, 4.0]))
+        assert torch.equal(model.language_model.unused, torch.ones(2))
+        assert torch.equal(model.language_model.tied, torch.ones(2, 2))
+        assert torch.isfinite(model.language_model.model.lora_A).all()
+
+    def test_leaves_parameters_outside_the_language_tower(self, tmp_path, caplog):
+        from agilerl.distributed.fsdp import _load_sharded_weights_from_safetensors
+
+        expected = torch.arange(4, dtype=torch.float32).reshape(2, 2)
+        save_file(
+            {"language_model.weight": expected},
+            str(tmp_path / "model.safetensors"),
+        )
+
+        class Root(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.language_model = nn.Linear(2, 2, bias=False)
+                self.vision_model = nn.Linear(2, 2, bias=False)
+                self.config = SimpleNamespace(_name_or_path=str(tmp_path))
+
+        model = Root()
+        with torch.no_grad():
+            model.vision_model.weight.copy_(torch.ones(2, 2))
+        with caplog.at_level("INFO", logger="agilerl.distributed.fsdp"):
+            _load_sharded_weights_from_safetensors(model)
+
+        assert torch.equal(model.language_model.weight.detach(), expected)
+        assert torch.equal(model.vision_model.weight, torch.ones(2, 2))
+        assert "copied 0 vision_model parameters" in caplog.text
+        assert "first vision_model.weight" in caplog.text
+
+    def test_loads_converted_checkpoint_keys_including_a_split_source(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        from transformers.conversion_mapping import (
+            Chunk,
+            WeightConverter,
+            WeightRenaming,
+        )
+
+        from agilerl.distributed.fsdp import _load_sharded_weights_from_safetensors
+
+        position = torch.arange(4, dtype=torch.float32).reshape(1, 4)
+        query = torch.arange(4, dtype=torch.float32).reshape(2, 2)
+        key = query + 10
+        value = query + 20
+        language = torch.arange(4, dtype=torch.float32).reshape(2, 2)
+        save_file(
+            {
+                "language_model.weight": language,
+                "vision_model.radio_model.model.patch_generator.pos_embed": position,
+                "vision_model.radio_model.model.blocks.0.attn.qkv.weight": torch.cat(
+                    [query, key, value], dim=0
+                ),
+            },
+            str(tmp_path / "model.safetensors"),
+        )
+
+        class Embeddings(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.position_embedding = nn.Parameter(torch.zeros(1, 4))
+
+        class Qkv(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.query = nn.Linear(2, 2, bias=False)
+                self.key = nn.Linear(2, 2, bias=False)
+                self.value = nn.Linear(2, 2, bias=False)
+
+        class Attention(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.attention = Qkv()
+
+        class Block(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.attention = Attention()
+
+        class Encoder(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.layer = nn.ModuleList([Block()])
+
+        class Vision(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.embeddings = Embeddings()
+                self.encoder = Encoder()
+
+        class Root(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.language_model = nn.Linear(2, 2, bias=False)
+                self.vision_model = Vision()
+                self.config = SimpleNamespace(_name_or_path=str(tmp_path))
+
+        transforms = [
+            WeightRenaming("radio_model.model.blocks", "encoder.layer"),
+            WeightConverter(
+                source_patterns="attn.qkv",
+                target_patterns=[
+                    "attention.attention.query",
+                    "attention.attention.key",
+                    "attention.attention.value",
+                ],
+                operations=[Chunk(dim=0)],
+            ),
+            WeightRenaming(
+                "radio_model.model.patch_generator.pos_embed",
+                "embeddings.position_embedding",
+            ),
+        ]
+        monkeypatch.setattr(
+            "agilerl.distributed.fsdp._checkpoint_transform_groups",
+            lambda _model: [("", transforms)],
+        )
+        model = Root()
+
+        with caplog.at_level("INFO", logger="agilerl.distributed.fsdp"):
+            _load_sharded_weights_from_safetensors(model)
+
+        vision = model.vision_model
+        assert torch.equal(model.language_model.weight.detach(), language)
+        assert torch.equal(vision.embeddings.position_embedding.detach(), position)
+        qkv = vision.encoder.layer[0].attention.attention
+        assert torch.equal(qkv.query.weight.detach(), query)
+        assert torch.equal(qkv.key.weight.detach(), key)
+        assert torch.equal(qkv.value.weight.detach(), value)
+        assert "copied 4 vision_model parameters" in caplog.text
+        assert "first none" in caplog.text
+
+    def test_loads_keys_from_a_child_module_conversion(self, tmp_path):
+        from transformers.conversion_mapping import (
+            Chunk,
+            WeightConverter,
+            WeightRenaming,
+            register_checkpoint_conversion_mapping,
+        )
+
+        from agilerl.distributed.fsdp import _load_sharded_weights_from_safetensors
+
+        position = torch.arange(4, dtype=torch.float32).reshape(1, 4)
+        query = torch.arange(4, dtype=torch.float32).reshape(2, 2)
+        key = query + 10
+        value = query + 20
+        save_file(
+            {
+                "language_model.weight": torch.zeros(2, 2),
+                "vision_model.radio_model.model.patch_generator.pos_embed": position,
+                "vision_model.radio_model.model.blocks.0.attn.qkv.weight": torch.cat(
+                    [query, key, value], dim=0
+                ),
+            },
+            str(tmp_path / "model.safetensors"),
+        )
+
+        class Embeddings(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.position_embedding = nn.Parameter(torch.zeros(1, 4))
+
+        class Qkv(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.query = nn.Linear(2, 2, bias=False)
+                self.key = nn.Linear(2, 2, bias=False)
+                self.value = nn.Linear(2, 2, bias=False)
+
+        class Attention(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.attention = Qkv()
+
+        class Block(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.attention = Attention()
+
+        class Encoder(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.layer = nn.ModuleList([Block()])
+
+        class AgilerlTestRadioVision(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.embeddings = Embeddings()
+                self.encoder = Encoder()
+                self.unused = nn.Parameter(torch.ones(2))
+                self.config = SimpleNamespace(model_type="agilerl_fsdp_child_vision")
+
+        class Inner(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.vision_model = AgilerlTestRadioVision()
+
+        class BaseModel(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.model = Inner()
+
+        class Root(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.language_model = nn.Linear(2, 2, bias=False)
+                self.base_model = BaseModel()
+                self.other = nn.Parameter(torch.ones(2))
+                self.config = SimpleNamespace(_name_or_path=str(tmp_path))
+
+        register_checkpoint_conversion_mapping(
+            "agilerl_fsdp_child_vision",
+            [
+                WeightRenaming("radio_model.model.blocks", "encoder.layer"),
+                WeightConverter(
+                    source_patterns="attn.qkv",
+                    target_patterns=[
+                        "attention.attention.query",
+                        "attention.attention.key",
+                        "attention.attention.value",
+                    ],
+                    operations=[Chunk(dim=0)],
+                ),
+                WeightRenaming(
+                    "radio_model.model.patch_generator.pos_embed",
+                    "embeddings.position_embedding",
+                ),
+            ],
+            overwrite=True,
+        )
+        model = Root()
+
+        _load_sharded_weights_from_safetensors(model)
+
+        vision = model.base_model.model.vision_model
+        assert torch.equal(vision.embeddings.position_embedding.detach(), position)
+        qkv = vision.encoder.layer[0].attention.attention
+        assert torch.equal(qkv.query.weight.detach(), query)
+        assert torch.equal(qkv.key.weight.detach(), key)
+        assert torch.equal(qkv.value.weight.detach(), value)
+        assert torch.equal(vision.unused.detach(), torch.ones(2))
+        assert torch.equal(model.other.detach(), torch.ones(2))
+
+    def test_inits_missing_keys_the_module_marks_ignorable(self, tmp_path, caplog):
+        from agilerl.distributed.fsdp import _load_sharded_weights_from_safetensors
+
+        save_file(
+            {"language_model.weight": torch.zeros(2, 2)},
+            str(tmp_path / "model.safetensors"),
+        )
+
+        class Scale(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.lambda1 = nn.Parameter(torch.zeros(2))
+
+        class Vision(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.layer_scale1 = Scale()
+                self.extra = nn.Parameter(torch.ones(2))
+                self.config = SimpleNamespace(layerscale_value=1.0)
+                self._keys_to_ignore_on_load_missing = [r"layer_scale\d+\.lambda1"]
+
+            def _init_weights(self, module: nn.Module) -> None:
+                if isinstance(module, Scale):
+                    torch.nn.init.constant_(
+                        module.lambda1, self.config.layerscale_value
+                    )
+
+        class Root(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.language_model = nn.Linear(2, 2, bias=False)
+                self.vision_model = Vision()
+                self.config = SimpleNamespace(_name_or_path=str(tmp_path))
+
+        model = Root()
+
+        with caplog.at_level("INFO", logger="agilerl.distributed.fsdp"):
+            _load_sharded_weights_from_safetensors(model)
+
+        assert torch.equal(
+            model.vision_model.layer_scale1.lambda1.detach(), torch.ones(2)
+        )
+        assert torch.equal(model.vision_model.extra.detach(), torch.ones(2))
+        assert "copied 0 vision_model parameters" in caplog.text
+        assert "first vision_model.extra" in caplog.text
+
+    def test_plain_module_has_no_weight_transforms(self) -> None:
+        from agilerl.distributed.fsdp import _checkpoint_transform_groups
+
+        assert _checkpoint_transform_groups(nn.Linear(2, 2)) == []
+
+    def test_missing_key_raises_without_a_language_tower(self, tmp_path):
+        from agilerl.distributed.fsdp import _load_sharded_weights_from_safetensors
+
+        save_file(
+            {"other.weight": torch.ones(2, 2)},
+            str(tmp_path / "model.safetensors"),
+        )
+
+        class Root(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.block = nn.Linear(2, 2)
+                self.config = SimpleNamespace(_name_or_path=str(tmp_path))
+
+        with pytest.raises(RuntimeError, match="Missing checkpoint weight"):
+            _load_sharded_weights_from_safetensors(Root())
+
+    def test_indexed_keys_skip_a_non_numeric_middle(self):
+        from agilerl.distributed.fsdp import _contiguous_indexed_weight_keys
+
+        assert _contiguous_indexed_weight_keys("up_proj", {}) is None
+        assert _contiguous_indexed_weight_keys(
+            "block.experts.up_proj",
+            {
+                "block.experts.extra.up_proj.weight": "shard-a",
+                "block.experts.0.up_proj.weight": "shard-b",
+            },
+        ) == ["block.experts.0.up_proj.weight"]
+
+    def test_stacks_indexed_expert_weights(self, tmp_path):
+        from agilerl.distributed.fsdp import _load_sharded_weights_from_safetensors
+
+        first = torch.arange(4, dtype=torch.float32).reshape(2, 2)
+        second = torch.arange(4, 8, dtype=torch.float32).reshape(2, 2)
+        save_file(
+            {
+                "language_model.backbone.layers.0.mixer.experts.0.up_proj.weight": first,
+                "language_model.backbone.layers.0.mixer.experts.1.up_proj.weight": second,
+            },
+            str(tmp_path / "model.safetensors"),
+        )
+
+        class Projection(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.up_proj = nn.Parameter(torch.zeros(2, 2, 2))
+
+        class Inner(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.base_layer = Projection()
+
+        class Experts(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.base_layer = Inner()
+
+        class Layer(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.mixer = nn.Module()
+                self.mixer.experts = Experts()
+
+        class Body(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.layers = nn.ModuleList([Layer()])
+
+        class Root(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.language_model = nn.Module()
+                self.language_model.model = Body()
+                self.config = SimpleNamespace(_name_or_path=str(tmp_path))
+
+        model = Root()
+        _load_sharded_weights_from_safetensors(model)
+
+        stacked = model.language_model.model.layers[
+            0
+        ].mixer.experts.base_layer.base_layer.up_proj
+        assert torch.equal(stacked.detach(), torch.stack([first, second]))
+
+    def test_indexed_expert_gap_raises(self, tmp_path):
+        from agilerl.distributed.fsdp import _load_sharded_weights_from_safetensors
+
+        save_file(
+            {
+                "block.experts.0.up_proj.weight": torch.ones(2, 2),
+                "block.experts.2.up_proj.weight": torch.ones(2, 2),
+            },
+            str(tmp_path / "model.safetensors"),
+        )
+
+        class Root(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.block = nn.Module()
+                self.block.experts = nn.Module()
+                self.block.experts.up_proj = nn.Parameter(torch.zeros(2, 2, 2))
+                self.config = SimpleNamespace(_name_or_path=str(tmp_path))
+
+        with pytest.raises(RuntimeError, match="not contiguous"):
+            _load_sharded_weights_from_safetensors(Root())
+
+    def test_stacked_shape_mismatch_raises(self, tmp_path):
+        from agilerl.distributed.fsdp import _load_sharded_weights_from_safetensors
+
+        save_file(
+            {"block.experts.0.up_proj.weight": torch.ones(2, 2)},
+            str(tmp_path / "model.safetensors"),
+        )
+
+        class Root(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.block = nn.Module()
+                self.block.experts = nn.Module()
+                self.block.experts.up_proj = nn.Parameter(torch.zeros(3, 2, 2))
+                self.config = SimpleNamespace(_name_or_path=str(tmp_path))
+
+        with pytest.raises(RuntimeError, match="does not match"):
+            _load_sharded_weights_from_safetensors(Root())
+
+    def test_stacks_indexed_expert_weights_on_a_dtensor(
+        self, tmp_path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from agilerl.distributed import fsdp as fsdp_mod
+
+        class FakeDTensor(nn.Parameter):
+            def to_local(self) -> torch.Tensor:
+                return self.data
+
+        class OneChunkMesh:
+            def get_coordinate(self) -> None:
+                return None
+
+            def size(self, mesh_dim: int) -> int:
+                return 1
+
+            def get_local_rank(self, mesh_dim: int) -> int:
+                return 0
+
+        monkeypatch.setattr(fsdp_mod, "DTensor", FakeDTensor)
+        first = torch.arange(4, dtype=torch.float32).reshape(2, 2)
+        second = first + 4
+        save_file(
+            {
+                "block.experts.0.up_proj.weight": first,
+                "block.experts.1.up_proj.weight": second,
+            },
+            str(tmp_path / "model.safetensors"),
+        )
+
+        class Root(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.block = nn.Module()
+                self.block.experts = nn.Module()
+                self.block.experts.up_proj = FakeDTensor(torch.zeros(2, 2, 2))
+                self.config = SimpleNamespace(_name_or_path=str(tmp_path))
+
+        model = Root()
+        model.block.experts.up_proj.placements = (Shard(0),)
+        model.block.experts.up_proj.device_mesh = OneChunkMesh()
+
+        fsdp_mod._load_sharded_weights_from_safetensors(model)
+
+        assert torch.equal(
+            model.block.experts.up_proj.data, torch.stack([first, second])
+        )
+
+    def test_loads_a_dtensor_shard(self, tmp_path, monkeypatch: pytest.MonkeyPatch):
+        from agilerl.distributed import fsdp as fsdp_mod
+
+        class FakeDTensor(nn.Parameter):
+            def to_local(self) -> torch.Tensor:
+                return self.data
+
+        monkeypatch.setattr(fsdp_mod, "DTensor", FakeDTensor)
+        full = torch.arange(8, dtype=torch.float32).reshape(4, 2)
+        save_file({"weight": full}, str(tmp_path / "model.safetensors"))
+
+        class OneChunkMesh:
+            def get_coordinate(self) -> None:
+                return None
+
+            def size(self, mesh_dim: int) -> int:
+                return 1
+
+            def get_local_rank(self, mesh_dim: int) -> int:
+                return 0
+
+        class Tiny(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.weight = FakeDTensor(torch.zeros(4, 2))
+                self.config = SimpleNamespace(_name_or_path=str(tmp_path))
+
+        model = Tiny()
+        model.weight.placements = (Shard(0),)
+        model.weight.device_mesh = OneChunkMesh()
+
+        fsdp_mod._load_sharded_weights_from_safetensors(model)
+
+        assert torch.equal(model.weight.data, full)
+
+    def test_share_streams_returns_when_nothing_is_sharded(self):
+        from agilerl.distributed.fsdp import _share_fsdp_comm_streams
+
+        _share_fsdp_comm_streams(nn.Linear(2, 2))
 
 
 def _make_llm_agent_for_ckpt() -> MagicMock:

@@ -6,17 +6,26 @@
 from __future__ import annotations
 
 import warnings
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import Any
+
+import numpy as np
+import torch
+from PIL import Image
 
 from agilerl.utils.algo_utils import is_str_keyed_dict
 
 __all__ = [
     "DEFAULT_OBSERVATION_ROLE",
+    "IMAGE_USER_CONTENT_PREFIX",
     "OBSERVATION_ROLES",
+    "encode_image_training_inputs",
     "observation_role",
+    "observation_text_and_image",
     "process_observation",
 ]
+
+IMAGE_USER_CONTENT_PREFIX = "<image>\n"
 
 #: Chat role an env observation speaks as when it does not say.
 DEFAULT_OBSERVATION_ROLE = "user"
@@ -25,6 +34,71 @@ DEFAULT_OBSERVATION_ROLE = "user"
 #: turns are the policy's own generations, and letting an env inject them would
 #: put untrained tokens inside a trained span.
 OBSERVATION_ROLES = frozenset({"user", "tool", "system"})
+
+DEFAULT_SCREENSHOT_PROMPT = "Complete the task shown in the image."
+
+
+def _screenshot_to_pil_rgb(screenshot: object) -> Image.Image:
+    arr = np.asarray(screenshot)
+    if arr.ndim == 2:
+        return Image.fromarray(arr.astype(np.uint8), mode="L").convert("RGB")
+    if arr.ndim == 3 and arr.shape[-1] == 3:
+        return Image.fromarray(arr.astype(np.uint8))
+    msg = f"screenshot must have shape (H, W) or (H, W, 3), got {arr.shape}"
+    raise TypeError(msg)
+
+
+def _prompt_text_for_screenshot_obs(obs: Mapping[str, object]) -> str:
+    goal = obs.get("goal")
+    text = obs.get("text")
+    if isinstance(goal, str) and isinstance(text, str):
+        return f"{goal}\n\n{text}"
+    for key in ("goal", "text", "prompt"):
+        value = obs.get(key)
+        if isinstance(value, str):
+            return value
+    return DEFAULT_SCREENSHOT_PROMPT
+
+
+def observation_text_and_image(obs: object) -> tuple[str, object | None]:
+    """Render observation text and an optional single image for VL rollouts."""
+    if isinstance(obs, str):
+        return obs, None
+    if is_str_keyed_dict(obs) and obs.get("image") is not None:
+        text = obs.get("text")
+        if text is None:
+            text = obs.get("prompt")
+        if not isinstance(text, str):
+            msg = f"VL observation text must be str, got {type(text).__name__}."
+            raise TypeError(msg)
+        if text.startswith(IMAGE_USER_CONTENT_PREFIX):
+            return text, obs["image"]
+        return f"{IMAGE_USER_CONTENT_PREFIX}{text}", obs["image"]
+    if is_str_keyed_dict(obs) and obs.get("screenshot") is not None:
+        text = _prompt_text_for_screenshot_obs(obs)
+        image = _screenshot_to_pil_rgb(obs["screenshot"])
+        if text.startswith(IMAGE_USER_CONTENT_PREFIX):
+            return text, image
+        return f"{IMAGE_USER_CONTENT_PREFIX}{text}", image
+    return process_observation(obs), None
+
+
+def encode_image_training_inputs(
+    *,
+    text: str,
+    image: object,
+    processor: Callable[..., Mapping[str, Any]],
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Run a checkpoint processor on one image turn for trainer ``pixel_values``."""
+    encoded = processor(text=text, images=image, return_tensors="pt")
+    input_ids = encoded["input_ids"]
+    pixel_values = encoded["pixel_values"]
+    if not isinstance(input_ids, torch.Tensor) or not isinstance(
+        pixel_values, torch.Tensor
+    ):
+        msg = "processor must return torch input_ids and pixel_values tensors"
+        raise TypeError(msg)
+    return input_ids, pixel_values
 
 
 def process_observation(obs: object, observation_field: str | None = None) -> str:

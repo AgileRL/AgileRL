@@ -101,14 +101,20 @@ class RolloutEnvDoubleMixin:
 
     def _reset_fetch(
         self, seed: int | None = None, *, row_index: int | None = None
-    ) -> Any:
+    ) -> tuple[Any, None, dict[str, Any]]:
         params = inspect.signature(self.reset).parameters
         kwargs = {"row_index": row_index} if "row_index" in params else {}
         self._pending_reset = self.reset(seed=seed, **kwargs)
-        return self._pending_reset
+        return "", None, {}
 
-    def _reset_apply(self, obs_text: Any, info: Any) -> Any:
-        del obs_text, info
+    def _reset_apply(
+        self,
+        obs_text: Any,
+        info: Any,
+        *,
+        image: object | None = None,
+    ) -> Any:
+        del obs_text, info, image
         return self._pending_reset
 
     def _step_prepare(self, full_completion: Any, sampling_logps: Any = None) -> str:
@@ -227,6 +233,8 @@ def bare_rollout_env() -> RolloutHarness:
     w._boundary_parts = {}
     w._system_prompt = None  # __init__ default, read by the initial-prompt path
     w._special_ids_cache = None  # __init__ default, read by the feedback dedupe
+    w._multimodal_turn = None
+    w._episode_pixel_values = None
     # These tests drive the ChatML fallback deliberately, so they opt out of strict.
     w._strict_chat_template_boundary = False
     return w

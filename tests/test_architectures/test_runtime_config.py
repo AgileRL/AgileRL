@@ -5,8 +5,6 @@
 
 from __future__ import annotations
 
-from types import SimpleNamespace
-
 import pytest
 from pydantic import ValidationError
 
@@ -15,6 +13,9 @@ from agilerl.architectures.catalog import (
     family_runtime,
     pretrained_model_type,
 )
+from agilerl.architectures.nemotron_h.language_tower import (
+    omni_language_tower_hf_override,
+)
 from agilerl.architectures.nemotron_h.mamba import install_mamba_patches
 
 NEMOTRON_VLLM_KWARGS = {
@@ -22,18 +23,29 @@ NEMOTRON_VLLM_KWARGS = {
     "max_num_batched_tokens": 8192,
     "reasoning_parser": "nemotron_v3",
     "enable_prefix_caching": True,
+    "trust_remote_code": True,
 }
 
-NEMOTRON_TRAINER_KWARGS = {"attn_implementation": "flash_attention_2"}
+NEMOTRON_TRAINER_KWARGS = {
+    "attn_implementation": "flash_attention_2",
+    "trust_remote_code": True,
+}
 GEMMA_TRAINER_KWARGS = {"attn_implementation": "flex_attention"}
+EMPTY_TRAINER_KWARGS: dict[str, object] = {}
 
 SWA_MODEL_TYPES = ("gemma3", "gemma3_text", "gemma4", "gemma4_text")
 
 
-def stub_auto_config(monkeypatch: pytest.MonkeyPatch, model_type: str) -> None:
+def stub_config_model_type(monkeypatch: pytest.MonkeyPatch, model_type: str) -> None:
+    @classmethod
+    def fake_get_config_dict(
+        cls, pretrained_model_name_or_path: str, **kwargs: object
+    ) -> tuple[dict[str, object], dict[str, object]]:
+        return ({"model_type": model_type}, {})
+
     monkeypatch.setattr(
-        "transformers.AutoConfig.from_pretrained",
-        lambda *args, **kwargs: SimpleNamespace(model_type=model_type),
+        "agilerl.architectures.catalog.PretrainedConfig.get_config_dict",
+        fake_get_config_dict,
     )
 
 
@@ -41,10 +53,32 @@ class TestFamilyRuntimeConfigs:
     def test_catalog_keys(self) -> None:
         assert set(FAMILY_RUNTIME_CONFIGS) == {
             "nemotron_h",
+            "nemotron_h_omni",
             "gemma3",
             "gemma3_text",
             "gemma4",
             "gemma4_text",
+        }
+
+    def test_nemotron_h_omni_keeps_nemotron_h_runtime_and_adds_language_tower(
+        self,
+    ) -> None:
+        base = FAMILY_RUNTIME_CONFIGS["nemotron_h"]
+        omni = FAMILY_RUNTIME_CONFIGS["nemotron_h_omni"]
+        assert omni.trainer == base.trainer
+        assert omni.vllm == base.vllm
+        assert omni.patch.install is install_mamba_patches
+        assert omni.language_tower.hf_overrides is omni_language_tower_hf_override
+        assert omni.language_tower.model_class_overrides == {
+            "NemotronHOmniLanguageForCausalLM": (
+                "agilerl.architectures.nemotron_h.omni_language:"
+                "NemotronHOmniLanguageForCausalLM"
+            ),
+        }
+        assert base.language_tower.hf_overrides is None
+        assert base.language_tower.model_class_overrides is None
+        assert omni.multimodal_towers_kept_hf_override == {
+            "architectures": ["NemotronH_Super_Omni_Reasoning_V3"],
         }
 
     def test_nemotron_h_lookup(self) -> None:
@@ -81,19 +115,19 @@ class TestFamilyRuntimeConfigs:
 
 
 class TestFamilyRuntime:
+    @pytest.mark.parametrize("model_type", ["nemotron_h", "nemotron_h_omni"])
     def test_nemotron_hub_id_uses_catalog(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch, model_type: str
     ) -> None:
-        stub_auto_config(monkeypatch, "nemotron_h")
+        stub_config_model_type(monkeypatch, model_type)
         config = family_runtime("nvidia/nemotron")
-        assert config.vllm == FAMILY_RUNTIME_CONFIGS["nemotron_h"].vllm
-        assert config.patch.install is install_mamba_patches
+        assert config is FAMILY_RUNTIME_CONFIGS[model_type]
 
     @pytest.mark.parametrize("model_type", SWA_MODEL_TYPES)
     def test_swa_hub_id_uses_catalog(
         self, monkeypatch: pytest.MonkeyPatch, model_type: str
     ) -> None:
-        stub_auto_config(monkeypatch, model_type)
+        stub_config_model_type(monkeypatch, model_type)
         config = family_runtime("google/gemma")
         assert config.trainer == FAMILY_RUNTIME_CONFIGS[model_type].trainer
 
@@ -101,16 +135,20 @@ class TestFamilyRuntime:
     def test_unknown_hub_type_returns_empty_defaults(
         self, monkeypatch: pytest.MonkeyPatch, model_type: str
     ) -> None:
-        stub_auto_config(monkeypatch, model_type)
+        stub_config_model_type(monkeypatch, model_type)
         config = family_runtime("some/model")
         assert config.vllm.model_dump(exclude_none=True) == {}
-        assert config.trainer.model_dump(exclude_none=True) == {}
+        assert config.trainer.model_dump(exclude_none=True) == EMPTY_TRAINER_KWARGS
         assert config.patch.install is None
 
     def test_missing_config_json_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        def raise_missing(*args: object, **kwargs: object) -> None:
+            msg = "missing config"
+            raise OSError(msg)
+
         monkeypatch.setattr(
-            "transformers.AutoConfig.from_pretrained",
-            lambda *args, **kwargs: (_ for _ in ()).throw(OSError("missing config")),
+            "agilerl.architectures.catalog.PretrainedConfig.get_config_dict",
+            raise_missing,
         )
         with pytest.raises(OSError, match="missing config"):
             family_runtime("nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16")
@@ -118,16 +156,20 @@ class TestFamilyRuntime:
 
 class TestPretrainedModelType:
     def test_reads_config_json(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        stub_auto_config(monkeypatch, "nemotron_h")
+        stub_config_model_type(monkeypatch, "nemotron_h")
         assert (
             pretrained_model_type("nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16")
             == "nemotron_h"
         )
 
     def test_missing_config_json_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        def raise_missing(*args: object, **kwargs: object) -> None:
+            msg = "missing config"
+            raise OSError(msg)
+
         monkeypatch.setattr(
-            "transformers.AutoConfig.from_pretrained",
-            lambda *args, **kwargs: (_ for _ in ()).throw(OSError("missing config")),
+            "agilerl.architectures.catalog.PretrainedConfig.get_config_dict",
+            raise_missing,
         )
         with pytest.raises(OSError, match="missing config"):
             pretrained_model_type("nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16")
@@ -136,6 +178,7 @@ class TestPretrainedModelType:
 class TestRuntimeConfigsForbidExtra:
     def test_unknown_fields_are_rejected(self) -> None:
         from agilerl.architectures.runtime import (
+            LanguageTowerRuntimeConfig,
             MambaPatchConfig,
             ModelRuntimeConfig,
             PatchRuntimeConfig,
@@ -148,6 +191,7 @@ class TestRuntimeConfigsForbidExtra:
             (TrainerRuntimeConfig, {}),
             (MambaPatchConfig, {"mixer": "agilerl.architectures.nemotron_h.mamba"}),
             (PatchRuntimeConfig, {}),
+            (LanguageTowerRuntimeConfig, {}),
             (ModelRuntimeConfig, {}),
         )
         for cls, payload in cases:

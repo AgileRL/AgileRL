@@ -1603,6 +1603,8 @@ class TestLoadCheckpointLLMBreak:
 class _MockPeftActor(torch.nn.Module):
     """A torch.nn.Module subclass that quacks like a PeftModel."""
 
+    supports_gradient_checkpointing = True
+
     def __init__(self):
         super().__init__()
         self._dummy_param = torch.nn.Parameter(torch.tensor([1.0]))
@@ -1649,6 +1651,21 @@ class _MockPeftActor(torch.nn.Module):
 def _make_mock_peft_actor():
     """Create a mock PEFT actor model."""
     return _MockPeftActor()
+
+
+class _CheckpointableModule(torch.nn.Module):
+    """Minimal HF-style module that implements activation checkpointing."""
+
+    supports_gradient_checkpointing = True
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.kwargs: dict[str, object] | None = None
+
+    def gradient_checkpointing_enable(
+        self, gradient_checkpointing_kwargs: dict[str, object]
+    ) -> None:
+        self.kwargs = gradient_checkpointing_kwargs
 
 
 class _StubLLMAlgorithm(LLMAlgorithm):
@@ -2243,6 +2260,22 @@ class TestLLMWrapModels:
         original_actor.gradient_checkpointing_enable.assert_called_once_with(
             gradient_checkpointing_kwargs={"use_reentrant": False},
         )
+
+    def test_wrap_models_checkpointing_uses_language_tower(self):
+        agent = _make_llm_agent()
+        agent.gradient_checkpointing = True
+
+        class OmniRoot(torch.nn.Module):
+            supports_gradient_checkpointing = False
+
+            def __init__(self) -> None:
+                super().__init__()
+                self.language_model = _CheckpointableModule()
+
+        root = OmniRoot()
+        agent.actor = root
+        LLMAlgorithm.wrap_models(agent)
+        assert root.language_model.kwargs == {"use_reentrant": False}
 
 
 class TestLLMCleanUp:
@@ -2877,9 +2910,9 @@ class TestFusedLinearLogprobsIntegration:
         hidden_calls: list[int] = []
         orig_hidden = agent._fused_chunk_hidden_and_value
 
-        def counting_hidden(chunk_ids, chunk_mask, chunk_pos):
+        def counting_hidden(chunk_ids, chunk_mask, chunk_pos, chunk_pixel_values=None):
             hidden_calls.append(int(chunk_ids.shape[0]))
-            return orig_hidden(chunk_ids, chunk_mask, chunk_pos)
+            return orig_hidden(chunk_ids, chunk_mask, chunk_pos, chunk_pixel_values)
 
         with (
             patch(
@@ -3161,10 +3194,11 @@ class TestLLMGetLmHead:
     def test_raises_when_no_output_embeddings(self):
         agent = _make_llm_agent()
         actor, _ = self._peft_actor()
-        actor.get_base_model().get_output_embeddings = lambda: None
+        inner = actor.get_base_model()
+        del inner.lm_head
         agent.actor = actor
 
-        with pytest.raises(AttributeError, match="no output embeddings"):
+        with pytest.raises(AttributeError, match="Cannot find lm_head"):
             agent._get_lm_head()
 
     def test_patch_replaces_head_with_identity_then_restores(self):
@@ -3195,12 +3229,29 @@ class TestLLMGetLmHead:
     def test_patch_raises_when_no_output_embeddings(self):
         agent = _make_llm_agent()
         actor, _ = self._peft_actor()
-        actor.get_base_model().get_output_embeddings = lambda: None
+        inner = actor.get_base_model()
+        del inner.lm_head
         agent.actor = actor
 
-        with pytest.raises(AttributeError, match="no output embeddings"):
+        with pytest.raises(AttributeError, match="Cannot find lm_head"):
             with agent._patch_lm_head_to_identity():
                 pass
+
+    def test_finds_lm_head_on_language_tower(self):
+        class _Language(torch.nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.lm_head = torch.nn.Linear(2, 2)
+
+        class _Omni(torch.nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.language_model = _Language()
+
+        agent = _make_llm_agent()
+        omni = _Omni()
+        agent.actor.base_model.model = omni
+        assert agent._get_lm_head() is omni.language_model.lm_head
 
     def test_fused_logprob_fn_and_head_returns_tensors(self):
         agent = _make_llm_agent()
@@ -3849,6 +3900,14 @@ class TestLLMInitMiscPaths:
             _make_llm_agent()
         mock_set_seed.assert_called()
 
+    def test_repeat_pixel_values_returns_same_tensor_or_rejects_misaligned_rows(self):
+        agent = _make_llm_agent()
+        pixels = torch.ones(2, 1, 2, 2)
+
+        assert agent._repeat_pixel_values_for_fused_rows(pixels, 2, 2) is pixels
+        with pytest.raises(ValueError, match="cannot align"):
+            agent._repeat_pixel_values_for_fused_rows(pixels, 3, 2)
+
 
 class TestLLMGenerateWithVllmColocate:
     def test_raises_when_sampling_params_none(self):
@@ -3869,6 +3928,7 @@ def _fake_save_peft_adapter_for_vllm_rollout(
     adapter_name,
     target_modules,
     expert_key_map=None,
+    strip_multimodal_towers=False,
 ):
     from pathlib import Path
 
@@ -5753,6 +5813,93 @@ class TestLLMGenerateWithVllmColocateFullPaths:
         assert sent[0]["prompt_token_ids"] == [1, 2, 3, 9, 9]
         assert len(token_ids) == 1
 
+    def test_generate_with_vllm_colocate_sends_multimodal_request(self):
+        agent = _make_llm_agent()
+        agent.pad_token = "<pad>"
+        agent.pad_token_id = 0
+        agent.max_output_tokens = 20
+        agent.max_model_len = 100
+        agent.repetition_penalty = 1.0
+        agent.temperature = 1.0
+        agent.top_p = 1.0
+        agent.top_k = None
+        agent.min_p = None
+        agent.min_output_tokens = None
+        agent.accelerator = None
+
+        vllm_config = MagicMock()
+        vllm_config.tensor_parallel_size = 1
+        agent.vllm_config = vllm_config
+        agent.device = "cpu"
+
+        image = object()
+        prompts = [
+            {
+                "prompt": "<image> digit 7",
+                "image": image,
+                "prompt_token_len": 4,
+                "input_ids": torch.tensor([[11, 12, 13, 14]]),
+            },
+        ]
+
+        mock_output = MagicMock()
+        mock_output.outputs = [MagicMock(token_ids=list(range(5)))]
+        agent.llm = MagicMock()
+        agent.llm.generate.return_value = [mock_output, mock_output]
+
+        with (
+            patch(
+                "agilerl.algorithms.core.base.SamplingParams",
+                return_value=MagicMock(),
+                create=True,
+            ),
+            patch(
+                "agilerl.algorithms.core.base.stack_and_pad_experiences",
+                return_value=(torch.zeros(2, 5), None),
+            ),
+        ):
+            token_ids, action_masks, _ = agent._generate_with_vllm_colocate(
+                prompts, group_size=2, temperature=0.9
+            )
+
+        sent = agent.llm.generate.call_args[0][0]
+        assert sent[0]["prompt"] == "<image> digit 7"
+        assert sent[0]["multi_modal_data"]["image"] is image
+        assert "prompt_token_ids" not in sent[0]
+        assert sent[1]["prompt"] == sent[0]["prompt"]
+        assert len(token_ids) == 1
+        assert len(action_masks) == 1
+
+    def test_generate_with_vllm_colocate_rejects_non_str_multimodal_prompt(self):
+        agent = _make_llm_agent()
+        agent.pad_token = "<pad>"
+        agent.pad_token_id = 0
+        agent.max_output_tokens = 20
+        agent.max_model_len = 100
+        agent.repetition_penalty = 1.0
+        agent.temperature = 1.0
+        agent.top_p = 1.0
+        agent.top_k = None
+        agent.min_p = None
+        agent.min_output_tokens = None
+        agent.accelerator = None
+        agent.vllm_config = MagicMock(tensor_parallel_size=1)
+        agent.device = "cpu"
+        agent.llm = MagicMock()
+        prompts = [{"prompt": 7, "image": object(), "input_ids": torch.tensor([[1]])}]
+
+        with (
+            patch(
+                "agilerl.algorithms.core.base.SamplingParams",
+                return_value=MagicMock(),
+                create=True,
+            ),
+            pytest.raises(
+                ValueError, match="multimodal generation requires prompt string"
+            ),
+        ):
+            agent._generate_with_vllm_colocate(prompts, group_size=1, temperature=0.9)
+
     def test_generate_with_vllm_colocate_clamps_min_tokens_to_remaining(self):
         agent = _make_llm_agent()
         agent.pad_token = "<pad>"
@@ -5940,6 +6087,61 @@ class TestLLMShardedCheckpointBranches:
 @_LLM_DEPS_SKIP
 class TestLLMInitEdgeCases:
     """Constructor branches not covered by _make_llm_agent defaults."""
+
+    def test_vllm_config_enables_colocated_vllm(self):
+        lora = MagicMock()
+        with (
+            patch.object(LLMAlgorithm, "_initialize_actors"),
+            patch.object(LLMAlgorithm, "_configure_vllm"),
+            patch.object(LLMAlgorithm, "wrap_models"),
+            patch.object(EvolvableAlgorithm, "_registry_init"),
+        ):
+            agent = _StubLLMAlgorithm(
+                index=0,
+                batch_size=4,
+                lr=1e-4,
+                max_grad_norm=0.0,
+                clone=True,
+                calc_position_embeddings=False,
+                seed=42,
+                pad_token_id=0,
+                pad_token="<pad>",
+                use_liger_loss=False,
+                lora_config=lora,
+                actor_network=_make_mock_peft_actor(),
+                device="cpu",
+                model_name="mock-model",
+                vllm_config=VLLMConfig(),
+            )
+
+        assert agent.colocated is True
+
+    def test_colocated_rejects_tensor_parallel_size_not_one(self):
+        lora = MagicMock()
+        with (
+            patch.object(LLMAlgorithm, "_initialize_actors"),
+            patch.object(LLMAlgorithm, "_configure_vllm"),
+            patch.object(LLMAlgorithm, "wrap_models"),
+            patch.object(EvolvableAlgorithm, "_registry_init"),
+            pytest.raises(ValueError, match="tensor_parallel_size==1"),
+        ):
+            _StubLLMAlgorithm(
+                index=0,
+                batch_size=4,
+                lr=1e-4,
+                max_grad_norm=0.0,
+                clone=True,
+                calc_position_embeddings=False,
+                seed=42,
+                pad_token_id=0,
+                pad_token="<pad>",
+                use_liger_loss=False,
+                lora_config=lora,
+                actor_network=_make_mock_peft_actor(),
+                device="cpu",
+                model_name="mock-model",
+                vllm_config=VLLMConfig(tensor_parallel_size=2),
+            )
 
     def test_model_config_strips_lora_target_scope(self):
         lora = MagicMock()
@@ -6501,6 +6703,16 @@ class TestLLMMoveLoraToVllmErrors:
             ),
             pytest.raises(FileNotFoundError, match="PEFT adapter export"),
         ):
+            agent._move_lora_to_vllm()
+
+    def test_raises_when_vllm_config_missing(self):
+        agent = _make_llm_agent()
+        peft_ref = MagicMock()
+        peft_ref.parameters.return_value = [torch.tensor([1.0])]
+        _setup_agent_for_vllm_lora_sync(agent, peft_ref)
+        agent.vllm_config = None
+
+        with pytest.raises(ValueError, match="vllm_config is required"):
             agent._move_lora_to_vllm()
 
     def test_non_main_rank_exports_and_loads_adapter(self, tmp_path):

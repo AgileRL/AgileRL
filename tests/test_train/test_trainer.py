@@ -1503,7 +1503,13 @@ class TestLLMBuildAlgorithm:
     def stub_llama_auto_config(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(
             "transformers.AutoConfig.from_pretrained",
-            lambda *args, **kwargs: SimpleNamespace(model_type="llama"),
+            lambda *args, **kwargs: SimpleNamespace(
+                model_type="llama", pad_token_id=None
+            ),
+        )
+        monkeypatch.setattr(
+            "transformers.GenerationConfig.from_pretrained",
+            lambda *args, **kwargs: SimpleNamespace(pad_token_id=None),
         )
 
     def test_dpo_build_algorithm(self, dpo_spec):
@@ -1600,7 +1606,13 @@ class TestLLMLocalTrainer:
     def stub_llama_auto_config(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(
             "transformers.AutoConfig.from_pretrained",
-            lambda *args, **kwargs: SimpleNamespace(model_type="llama"),
+            lambda *args, **kwargs: SimpleNamespace(
+                model_type="llama", pad_token_id=None
+            ),
+        )
+        monkeypatch.setattr(
+            "transformers.GenerationConfig.from_pretrained",
+            lambda *args, **kwargs: SimpleNamespace(pad_token_id=None),
         )
 
     def _training(self):

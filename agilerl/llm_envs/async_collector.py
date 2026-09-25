@@ -71,6 +71,7 @@ class AsyncBatchCollector:
         self,
         episode_id: str,
         token_ids: torch.Tensor,
+        prompt_token_len: int | None = None,
     ) -> EnvResponse:
         """Advance one episode a turn.
 
@@ -82,6 +83,7 @@ class AsyncBatchCollector:
             self._collector.step_episode,
             episode_id,
             token_ids,
+            prompt_token_len=prompt_token_len,
         )
         return EnvResponse(
             episode_id=episode_id,
@@ -100,8 +102,13 @@ class AsyncBatchCollector:
         torch.Tensor,
         torch.Tensor,
         torch.Tensor | None,
+        torch.Tensor | None,
     ]:
-        """Build one episode's tensors and release its slot."""
+        """Build one episode's tensors and release its slot.
+
+        :return: ``full_ids``, ``action_mask``, ``turn_ids``, ``turn_rewards``,
+            ``sampling_logps``, ``pixel_values``.
+        """
         return await self._offload(self._collector.get_episode_data, episode_id)
 
     async def finalize_episode(
@@ -116,10 +123,15 @@ class AsyncBatchCollector:
             torch.Tensor,
             torch.Tensor,
             torch.Tensor | None,
+            torch.Tensor | None,
         ]
         | None
     ):
-        """Finalize and release one episode slot exactly once (idempotent)."""
+        """Finalize and release one episode slot exactly once (idempotent).
+
+        :return: Same 6-tuple as :meth:`get_episode_data`, or ``None`` when
+            ``missing_ok`` and the episode is absent.
+        """
         return await self._offload(
             self._collector.finalize_episode,
             episode_id,

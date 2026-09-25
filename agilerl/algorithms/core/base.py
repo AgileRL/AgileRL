@@ -3044,17 +3044,16 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         self._vllm_lora_staging_dir: Path | None = None
         self._vllm_lora_staging_dir_is_temp = True
         self._vllm_rollout_lora_request: Any | None = None
-        # Tensor parallelism is not yet available when colocated
-        if self.colocated:
-            tp = getattr(self.vllm_config, "tensor_parallel_size", 1)
-            if tp != 1:
-                msg = (
-                    "Colocated vLLM requires tensor_parallel_size==1 (the "
-                    f"in-process external_launcher engine is single-GPU), got "
-                    f"{tp}. Use a non-colocated / async rollout for "
-                    "tensor-parallel generation (colocated TP support is planned)."
-                )
-                raise ValueError(msg)
+        # Tensor parallelism is not yet available when colocated.
+        # colocated is vllm_config being set.
+        if vllm_config is not None and vllm_config.tensor_parallel_size != 1:
+            msg = (
+                "Colocated vLLM requires tensor_parallel_size==1 (the "
+                f"in-process external_launcher engine is single-GPU), got "
+                f"{vllm_config.tensor_parallel_size}. Use a non-colocated / async rollout for "
+                "tensor-parallel generation (colocated TP support is planned)."
+            )
+            raise ValueError(msg)
         self.rng = np.random.RandomState(seed)
         self.metrics = AgentMetrics()
 
@@ -4644,6 +4643,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         chunk_ids: torch.Tensor,
         chunk_mask: torch.Tensor | None,
         chunk_pos: torch.Tensor | None,
+        chunk_pixel_values: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """Forward one fused chunk; return last hidden state and optional values."""
         model_kwargs: dict = {"input_ids": chunk_ids, "use_cache": False}
@@ -4652,6 +4652,8 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             model_kwargs["position_ids"] = chunk_pos
         elif chunk_mask is not None:
             model_kwargs["attention_mask"] = chunk_mask
+        if chunk_pixel_values is not None:
+            model_kwargs["pixel_values"] = chunk_pixel_values
         with (
             self._patch_lm_head_to_identity(),
             self._amp_ctx(),
@@ -4686,6 +4688,29 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             chunk_rows=self.chunk_rows,
         )
 
+    def _repeat_pixel_values_for_fused_rows(
+        self,
+        pixel_values: torch.Tensor | None,
+        fused_rows: int,
+        sample_rows: int,
+    ) -> torch.Tensor | None:
+        """Repeat per-sample vision tensors across fused adapter rows."""
+        if pixel_values is None:
+            return None
+        if fused_rows == sample_rows:
+            return pixel_values
+        if fused_rows % sample_rows != 0:
+            msg = (
+                f"pixel_values batch {sample_rows} cannot align to "
+                f"{fused_rows} fused rows"
+            )
+            raise ValueError(msg)
+        repeat = fused_rows // sample_rows
+        return pixel_values.repeat(
+            repeat,
+            *([1] * (pixel_values.ndim - 1)),
+        )
+
     def _run_fused_chunk(
         self,
         fused_ids: torch.Tensor,
@@ -4697,16 +4722,23 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         fused_fn: Callable,
         head_w: torch.Tensor,
         head_b: torch.Tensor | None,
+        pixel_values: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """Route, forward, and score one fused micro-batch."""
         set_fused_adapter_routing(self.actor, routing[start:end])
         chunk_ids = fused_ids[start:end]
         chunk_mask = fused_mask[start:end]
         chunk_pos = position_ids[start:end] if position_ids is not None else None
+        chunk_pixel_values = (
+            pixel_values[start:end] if pixel_values is not None else None
+        )
         orig_seq_len = int(chunk_ids.shape[1])
         target_ids = chunk_ids
         hidden, value = self._fused_chunk_hidden_and_value(
-            chunk_ids, chunk_mask, chunk_pos
+            chunk_ids,
+            chunk_mask,
+            chunk_pos,
+            chunk_pixel_values,
         )
         chunk_lp = self._fused_chunk_logprobs(
             hidden, target_ids, fused_fn, head_w, head_b
@@ -4757,6 +4789,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         fused_mask: torch.Tensor,
         routing: list[str],
         batch_size: int | None = None,
+        pixel_values: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """Run the model on a fused batch with per-sample adapter routing.
 
@@ -4771,6 +4804,8 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         # Generate / weight-sync can leave FSDP units unsharded. fused
         # lm_head gemm then full_tensor()s a stale buffer.
         reshard_fsdp_modules(self.actor)
+        if pixel_values is not None:
+            pixel_values = pixel_values.to(self.device)
         total = fused_ids.shape[0]
         seq_len_out = fused_ids.shape[1] - 1
         position_ids = None
@@ -4803,6 +4838,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
                     fused_fn,
                     head_w,
                     head_b,
+                    pixel_values,
                 )
 
             if len(chunks) == 1:
@@ -4814,6 +4850,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         ids: torch.Tensor,
         batch_size: int,
         attention_mask: torch.Tensor | None = None,
+        pixel_values: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """Actor log-probs, and optionally critic values, in one forward.
 
@@ -4851,21 +4888,28 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
 
         # Packed path for the gradient forward only; no-grad passes stay padded.
         if torch.is_grad_enabled() and self._packing_mode() is not None:
-            return self._fused_packed_forward(ids, attention_mask)
+            return self._fused_packed_forward(ids, attention_mask, pixel_values)
 
         if self.use_value_head:
             fused_ids = ids.repeat(2, 1)
             fused_mask = attention_mask.repeat(2, 1)
             routing = ["actor"] * B + ["critic"] * B
+            fused_pixel_values = self._repeat_pixel_values_for_fused_rows(
+                pixel_values,
+                fused_ids.shape[0],
+                B,
+            )
         else:
             fused_ids = ids
             fused_mask = attention_mask
             routing = ["actor"] * B
+            fused_pixel_values = pixel_values
 
         log_probs, values = self._fused_model_pass(
             fused_ids,
             fused_mask,
             routing,
+            pixel_values=fused_pixel_values,
         )
         if self.use_value_head:
             assert values is not None  # value-head models return values
@@ -4876,6 +4920,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         self,
         ids: torch.Tensor,
         attention_mask: torch.Tensor,
+        pixel_values: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """Padding-free packed variant of the gradient :meth:`_fused_forward`.
 
@@ -4909,17 +4954,29 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         set_fused_adapter_routing(self.actor, adapters)
 
         fused_fn, head_w, head_b = self._fused_logprob_fn_and_head()
+        forward_kwargs: dict[str, Any] = {
+            "input_ids": fused_ids,
+            "position_ids": fused_position_ids,
+            "use_cache": False,
+        }
+        if pixel_values is not None:
+            if n_adapters == 1:
+                forward_kwargs["pixel_values"] = pixel_values
+            else:
+                forward_kwargs["pixel_values"] = (
+                    self._repeat_pixel_values_for_fused_rows(
+                        pixel_values,
+                        n_adapters * ids.shape[0],
+                        ids.shape[0],
+                    )
+                )
         with (
             self._patch_lm_head_to_identity(),
             self._amp_ctx(),
             self._activation_offload_ctx(),
         ):
             # FSDP2 all-gather hooks run on ``Module.__call__``.
-            output = self.actor(
-                input_ids=fused_ids,
-                position_ids=fused_position_ids,
-                use_cache=False,
-            )
+            output = self.actor(**forward_kwargs)
 
         if isinstance(output, tuple):
             hidden = output[0]
@@ -4957,6 +5014,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         ids: torch.Tensor,
         batch_size: int,
         attention_mask: torch.Tensor | None = None,
+        pixel_values: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
         """Compute reference log-probs, actor log-probs, and critic values in
         one forward pass (under ``torch.no_grad``).
@@ -5004,11 +5062,17 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             for adapter in adapters:
                 routing.extend([adapter] * B)
 
+            fused_pixel_values = self._repeat_pixel_values_for_fused_rows(
+                pixel_values,
+                fused_ids.shape[0],
+                B,
+            )
             log_probs, values = self._fused_model_pass(
                 fused_ids,
                 fused_mask,
                 routing,
                 batch_size=batch_size,
+                pixel_values=fused_pixel_values,
             )
             unset_fused_adapter_routing(self.actor)
             ref_logprobs = log_probs[:B]
@@ -5069,6 +5133,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         use_reference: bool = False,
         eval_mode: bool = False,
         attention_mask: torch.Tensor | None = None,
+        pixel_values: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Find the log probabilities for a set of previously generated ids.
 
@@ -5098,6 +5163,8 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
                 position_ids = self._position_ids_from_mask(attention_mask)
 
             fused_fn, _head_w, _head_b = self._fused_logprob_fn_and_head()
+            if pixel_values is not None:
+                pixel_values = pixel_values.to(self.device)
             # Pack only the gradient forward (the per-epoch hot path). The
             # no-grad old/reference passes stay padded so they are mutually
             # consistent; the packed-vs-padded gap for the current policy is the
@@ -5110,6 +5177,9 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
                 end_idx = min((batch + batch_size), num_samples)
                 batch_ids = ids[batch:end_idx, :]
                 batch_attention_mask = attention_mask[batch:end_idx, :]
+                batch_pixel_values = (
+                    pixel_values[batch:end_idx] if pixel_values is not None else None
+                )
 
                 packed = None
                 if packing_mode is not None:
@@ -5124,6 +5194,8 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
                         "position_ids": packed.position_ids,
                         "use_cache": False,
                     }
+                    if batch_pixel_values is not None:
+                        batch_model_kwargs["pixel_values"] = batch_pixel_values
                 else:
                     batch_model_kwargs = {
                         "input_ids": batch_ids,
@@ -5134,6 +5206,8 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
                         batch_model_kwargs["position_ids"] = position_ids[
                             batch:end_idx, :
                         ]
+                    if batch_pixel_values is not None:
+                        batch_model_kwargs["pixel_values"] = batch_pixel_values
 
                 with (
                     self._patch_lm_head_to_identity(),
@@ -5327,6 +5401,9 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             if self.lora_config is None:
                 msg = "lora_config is required for vLLM LoRA adapter export."
                 raise ValueError(msg)
+            if self.vllm_config is None:
+                msg = "vllm_config is required for vLLM LoRA adapter export."
+                raise ValueError(msg)
             target_modules = self.lora_config.target_modules
             target_parameters = getattr(self.lora_config, "target_parameters", None)
             if not isinstance(target_parameters, (list, tuple)):
@@ -5346,6 +5423,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
                 self._vllm_rollout_adapter,
                 target_modules=target_modules,
                 expert_key_map=expert_key_map,
+                strip_multimodal_towers=self.vllm_config.strip_multimodal_towers,
             )
         barrier()
         if not adapter_path.is_dir():
@@ -5420,8 +5498,9 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
 
         Each entry in ``prompts`` is repeated ``group_size`` times so vLLM
         receives a flat list of length ``len(prompts) * group_size``
-        (e.g. GRPO groups). Action masks use the full prompt length from
-        ``input_ids``.
+        (e.g. GRPO groups). Action masks use ``prompt_token_len`` when set,
+        otherwise the full prompt length from ``input_ids``. Image prompts are
+        sent as vLLM multimodal requests (``prompt`` + ``multi_modal_data``).
 
         :param prompts: Length-``N`` sequence of prompt mappings for this rank.
         :type prompts: Sequence[RolloutPrompt]
@@ -5440,8 +5519,21 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             "vllm_config must be configured for colocated vLLM generation."
         )
 
-        def _token_prompt_for_vllm(ids: torch.Tensor) -> dict[str, list[int]]:
-            return {"prompt_token_ids": ids.squeeze(0).tolist()}
+        def _vllm_request(prompt: RolloutPrompt) -> dict[str, Any]:
+            image = prompt.get("image")
+            if image is not None:
+                prompt_str = prompt.get("prompt")
+                if not isinstance(prompt_str, str):
+                    msg = "multimodal generation requires prompt string"
+                    raise ValueError(msg)
+                return {"prompt": prompt_str, "multi_modal_data": {"image": image}}
+            return {"prompt_token_ids": prompt["input_ids"].squeeze(0).tolist()}
+
+        def _prompt_token_len(prompt: RolloutPrompt) -> int:
+            token_len = prompt.get("prompt_token_len")
+            if token_len is not None:
+                return int(token_len)
+            return int(prompt["input_ids"].shape[1])
 
         def _vllm_max_new_tokens(model_prompt_len: int) -> int:
             room = self.max_model_len - model_prompt_len
@@ -5460,8 +5552,10 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         # Compute the per-prompt work once per *unique* prompt (N items),
         # then alias by reference across each group (N·G items)
         unique_ids = [prompt["input_ids"] for prompt in prompts]
-        unique_tokens = [_token_prompt_for_vllm(ids) for ids in unique_ids]
-        unique_max = [_vllm_max_new_tokens(int(ids.shape[1])) for ids in unique_ids]
+        unique_tokens = [_vllm_request(prompt) for prompt in prompts]
+        unique_max = [
+            _vllm_max_new_tokens(_prompt_token_len(prompt)) for prompt in prompts
+        ]
 
         # Replicate by reference for the flat vLLM batch. Entries within a
         # group of `group_size` are aliased references to the same tensor / dict
@@ -5609,9 +5703,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             else None
         )
 
-        num_input_tokens = [
-            int(prompts[i]["input_ids"].shape[1]) for i in range(len(prompts))
-        ]
+        num_input_tokens = [_prompt_token_len(prompts[i]) for i in range(len(prompts))]
         # Mark completions by generated length: a generated EOS survives when
         # pad_token_id == eos_token_id.
         completion_masks = [
@@ -6153,7 +6245,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
                 stacklevel=2,
             )
 
-        strip_towers = getattr(self.vllm_config, "strip_multimodal_towers", False)
+        strip_towers = self.vllm_config.strip_multimodal_towers
         if strip_towers:
             # Free unused vision/audio towers on multimodal bases (text-only RL
             # never runs them); see ``patch_vllm_strip_multimodal_towers``.
@@ -6192,29 +6284,46 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         if is_main_process():
             log_cuda_memory_snapshot("vLLM sleep complete")
 
+    def _get_lm_head_parent(self) -> tuple[Any, str]:
+        """Locate the parent module owning ``lm_head`` (or ``embed_out``)."""
+        model = self.actor
+        if self.use_value_head and hasattr(model, "pretrained_model"):
+            model = model.pretrained_model
+        if hasattr(model, "base_model"):
+            model = model.base_model
+        if hasattr(model, "model"):
+            model = model.model
+        modules = [model]
+        if isinstance(model, torch.nn.Module):
+            children = dict(model.named_children())
+            if "language_model" in children:
+                modules.append(children["language_model"])
+        for module in modules:
+            for attr in ("lm_head", "embed_out"):
+                if hasattr(module, attr):
+                    return module, attr
+        err_msg = (
+            f"Cannot find lm_head (or embed_out) in {type(self.actor).__name__}. "
+            "The fused-linear-logprob path needs the output embedding layer to "
+            "compute per-token log-probs without materializing full logits."
+        )
+        raise AttributeError(err_msg)
+
     def _get_lm_head(self) -> torch.nn.Linear:
         """The CausalLM output embedding (``lm_head``)."""
-        peft = self.actor.pretrained_model if self.use_value_head else self.actor
-        head = peft.get_base_model().get_output_embeddings()
-        if head is None:
-            msg = f"{type(self.actor).__name__} has no output embeddings"
-            raise AttributeError(msg)
-        return head
+        parent, attr = self._get_lm_head_parent()
+        return getattr(parent, attr)
 
     @contextmanager
     def _patch_lm_head_to_identity(self) -> Generator[torch.nn.Module, None, None]:
         """Replace ``lm_head`` with ``nn.Identity`` so ``output.logits`` is hidden state."""
-        peft = self.actor.pretrained_model if self.use_value_head else self.actor
-        causal = peft.get_base_model()
-        original = causal.get_output_embeddings()
-        if original is None:
-            msg = f"{type(self.actor).__name__} has no output embeddings"
-            raise AttributeError(msg)
-        causal.set_output_embeddings(torch.nn.Identity())
+        parent, attr = self._get_lm_head_parent()
+        original = getattr(parent, attr)
+        setattr(parent, attr, torch.nn.Identity())
         try:
             yield original
         finally:
-            causal.set_output_embeddings(original)
+            setattr(parent, attr, original)
 
     @contextmanager
     def _offload_trainer_for_rollout(

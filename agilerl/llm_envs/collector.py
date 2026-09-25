@@ -199,8 +199,8 @@ class RolloutCollector:
             envs=window,
         )
         # Phase 2 (sequential — tokenizer): apply each prompt.
-        for env, (obs_text, info) in zip(window, fetches, strict=True):
-            env._reset_apply(obs_text, info)
+        for env, (obs_text, image, info) in zip(window, fetches, strict=True):
+            env._reset_apply(obs_text, info, image=image)
 
         return self._get_prompts()
 
@@ -332,19 +332,22 @@ class RolloutCollector:
         list[torch.Tensor],
         int,
         list[torch.Tensor | None] | None,
+        list[torch.Tensor | None] | None,
     ]:
         """Collect complete episode tensors from all envs, in list order.
 
         :return: ``(token_ids_list, action_masks_list, all_turn_ids, all_rewards,
-            batch_steps, all_sampling_logps)`` where ``batch_steps`` is the summed turn
-            count. ``all_sampling_logps`` is ``None`` when no vLLM logprobs were captured,
-            else one 1-D tensor per env (``None`` for envs that captured none).
+            batch_steps, all_sampling_logps, all_pixel_values)`` where ``batch_steps``
+            is the summed turn count. ``all_sampling_logps`` is ``None`` when no vLLM
+            logprobs were captured, else one 1-D tensor per env (``None`` for envs that
+            captured none). ``all_pixel_values`` follows the same per-env collapse rule.
         """
         token_ids_list: list[torch.Tensor] = []
         action_masks_list: list[torch.Tensor] = []
         all_turn_ids: list[torch.Tensor] = []
         all_rewards: list[torch.Tensor] = []
         all_sampling_logps: list[torch.Tensor | None] = []
+        all_pixel_values: list[torch.Tensor | None] = []
         batch_steps = 0
         for env in self._window_envs():
             (
@@ -353,6 +356,7 @@ class RolloutCollector:
                 turn_ids,
                 turn_rewards_t,
                 sampling_logps,
+                pixel_values,
             ) = env.get_episode_data()
             token_ids_list.append(ep_ids)
             action_masks_list.append(action_mask)
@@ -360,6 +364,7 @@ class RolloutCollector:
             all_rewards.append(turn_rewards_t)
             batch_steps += len(env.turn_boundaries)
             all_sampling_logps.append(sampling_logps)
+            all_pixel_values.append(pixel_values)
 
         return (
             token_ids_list,
@@ -371,6 +376,11 @@ class RolloutCollector:
             (
                 all_sampling_logps
                 if any(logps is not None for logps in all_sampling_logps)
+                else None
+            ),
+            (
+                all_pixel_values
+                if any(pv is not None for pv in all_pixel_values)
                 else None
             ),
         )
@@ -561,9 +571,9 @@ class RolloutCollector:
         acquired = False
         try:
             env = self.envs[slot]
-            obs_text, info = env._reset_fetch(env_seed, row_index=row_index)
+            obs_text, image, info = env._reset_fetch(env_seed, row_index=row_index)
             with self._tokenizer_lock:
-                prompt, info = env._reset_apply(obs_text, info)
+                prompt, info = env._reset_apply(obs_text, info, image=image)
             with self._slot_lock:
                 # Checked under the same lock as the insert, so racing duplicate
                 # ids cannot both claim a slot.
@@ -584,6 +594,7 @@ class RolloutCollector:
         episode_id: str,
         token_ids: torch.Tensor,
         sampling_logps: torch.Tensor | None = None,
+        prompt_token_len: int | None = None,
     ) -> tuple[dict[str, Any], float, bool, bool, dict[str, Any]]:
         """Advance one episode a turn: decode, round-trip its env, apply the result.
 
@@ -602,6 +613,12 @@ class RolloutCollector:
         env = self.envs[slot]
         with self._tokenizer_lock:
             self._require_current(episode_id, slot, activation)
+            if prompt_token_len is not None:
+                prompt_len = int(prompt_token_len)
+                if prompt_len < 1:
+                    msg = f"prompt_token_len must be >= 1, got {prompt_token_len}."
+                    raise ValueError(msg)
+                env._last_full_prompt_token_len = prompt_len
             gen_text = env._step_prepare(token_ids, sampling_logps=sampling_logps)
         env_result = env._step_env(gen_text)
         with self._tokenizer_lock:
@@ -612,12 +629,19 @@ class RolloutCollector:
         self,
         episode_id: str,
     ) -> tuple[
-        torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor | None,
+        torch.Tensor | None,
     ]:
         """Build one episode's tensors and release its slot.
 
         :param episode_id: The episode to finalize; ``KeyError`` when not active.
-        :return: The :meth:`RolloutHarness.get_episode_data` 5-tuple.
+        :return: The :meth:`RolloutHarness.get_episode_data` 6-tuple:
+            ``full_ids``, ``action_mask``, ``turn_ids``, ``turn_rewards``,
+            ``sampling_logps``, ``pixel_values``.
         """
         result = self.finalize_episode(episode_id, missing_ok=False)
         if result is None:
@@ -631,7 +655,12 @@ class RolloutCollector:
         missing_ok: bool = True,
     ) -> (
         tuple[
-            torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None
+            torch.Tensor,
+            torch.Tensor,
+            torch.Tensor,
+            torch.Tensor,
+            torch.Tensor | None,
+            torch.Tensor | None,
         ]
         | None
     ):

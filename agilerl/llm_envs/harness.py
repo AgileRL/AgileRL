@@ -17,7 +17,9 @@ import torch
 from agilerl.llm_envs.env_sources import is_url, spec_to_factory
 from agilerl.llm_envs.observation import (
     DEFAULT_OBSERVATION_ROLE,
+    encode_image_training_inputs,
     observation_role,
+    observation_text_and_image,
     process_observation,
 )
 from agilerl.protocols import EnvClientProtocol, TextEnvProtocol
@@ -63,6 +65,7 @@ class RolloutHarness:
         chat_template_kwargs: dict[str, Any] | None = None,
         max_model_len: int | None = None,
         system_prompt: str | None = None,
+        vision_processor: Callable[..., Mapping[str, Any]] | None = None,
     ) -> None:
         """Drive a text env at the token level over ``env_client`` (a URL or a client object).
 
@@ -95,6 +98,8 @@ class RolloutHarness:
         :param system_prompt: Rendered as a leading ``system`` message ahead of the
             env's first observation. Requires ``apply_chat_template``; a template
             without a system slot raises at reset rather than dropping it silently.
+        :param vision_processor: Callable ``(text=..., images=..., return_tensors='pt')``
+            that returns ``input_ids`` and ``pixel_values`` for image observations.
         :ivar full_ids: Running episode token sequence (prompt + generations + feedback).
         :ivar turn_boundaries: ``(start, end, turn_idx)`` spans of policy-generated tokens.
         :ivar turn_rewards: Per-turn rewards from the env.
@@ -169,6 +174,9 @@ class RolloutHarness:
         self.current_prompt: dict[str, Any] = {}
         self.sampling_logps: list[torch.Tensor] = []
         self._special_ids_cache: frozenset[int] | None = None
+        self._vision_processor = vision_processor
+        self._multimodal_turn: dict[str, Any] | None = None
+        self._episode_pixel_values: torch.Tensor | None = None
 
     @classmethod
     def local(
@@ -328,16 +336,41 @@ class RolloutHarness:
             raise ValueError(msg)
         self._system_prompt = incoming
 
+    def _user_turn_chat_template_inputs(
+        self, obs_text: str
+    ) -> tuple[list[dict[str, str]], dict[str, Any]]:
+        """Messages and kwargs for one user turn through the chat template."""
+        chat_template_kwargs = dict(self.chat_template_kwargs)
+        if self.tools is not None:
+            chat_template_kwargs["tools"] = self.tools
+        messages: list[dict[str, str]] = []
+        if self._system_prompt is not None:
+            messages.append({"role": "system", "content": self._system_prompt})
+        messages.append({"role": "user", "content": obs_text})
+        return messages, chat_template_kwargs
+
+    def _chat_prompt_string(self, obs_text: str) -> str:
+        """Render one user turn (plus optional system) through the chat template."""
+        if not self.apply_chat_template:
+            return obs_text
+        messages, chat_template_kwargs = self._user_turn_chat_template_inputs(obs_text)
+        rendered = self.tokenizer.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=True,
+            **chat_template_kwargs,
+        )
+        if not isinstance(rendered, str):
+            msg = "apply_chat_template(tokenize=False) must return str"
+            raise TypeError(msg)
+        return rendered
+
     def _tokenize_initial_prompt(self, obs_text: str) -> torch.Tensor:
         """Tokenize the initial observation, optionally with chat template."""
         if self.apply_chat_template:
-            chat_template_kwargs = dict(self.chat_template_kwargs)
-            if self.tools is not None:
-                chat_template_kwargs["tools"] = self.tools
-            messages: list[dict[str, str]] = []
-            if self._system_prompt is not None:
-                messages.append({"role": "system", "content": self._system_prompt})
-            messages.append({"role": "user", "content": obs_text})
+            messages, chat_template_kwargs = self._user_turn_chat_template_inputs(
+                obs_text
+            )
             result: Any = self.tokenizer.apply_chat_template(
                 messages,
                 tokenize=True,
@@ -489,12 +522,18 @@ class RolloutHarness:
         return max_prompt_tokens_for_model_len(self._max_model_len)
 
     def _policy_prompt_from_state(self) -> dict[str, Any]:
-        """Build the ``get_action`` prompt dict from the current ``full_ids``."""
+        """Build the ``get_action`` prompt dict from harness state."""
+        if self._multimodal_turn is not None:
+            prompt_len = int(self._multimodal_turn["prompt_token_len"])
+            self._last_full_prompt_token_len = prompt_len
+            prompt: dict[str, Any] = dict(self._multimodal_turn)
+            if self._episode_pixel_values is not None:
+                prompt["pixel_values"] = self._episode_pixel_values
+            return prompt
         if self.full_ids is None:
             msg = "No prompt: reset() was never called"
             raise RuntimeError(msg)
         self._last_full_prompt_token_len = int(self.full_ids.shape[1])
-        # Single unpadded row; HF-generate derives an all-ones mask from ``input_ids``.
         return {"input_ids": self.full_ids}
 
     @property
@@ -549,8 +588,8 @@ class RolloutHarness:
         :param seed: Reset seed forwarded to the env client.
         :param row_index: Dataset row index to serve (dataset-backed envs only).
         """
-        obs_text, info = self._reset_fetch(seed, row_index=row_index)
-        return self._reset_apply(obs_text, info)
+        obs_text, image, info = self._reset_fetch(seed, row_index=row_index)
+        return self._reset_apply(obs_text, info, image=image)
 
     def _render_observation(self, payload: object) -> str:
         """Render one observation payload to prompt text via the processor."""
@@ -565,23 +604,52 @@ class RolloutHarness:
 
     def _reset_fetch(
         self, seed: int | None = None, *, row_index: int | None = None
-    ) -> tuple[str, dict[str, Any]]:
+    ) -> tuple[str, object | None, dict[str, Any]]:
         """Pull and render the initial prompt from the env backend — the parallelizable I/O.
 
         No tokenizer work; touching :attr:`tools` warms its cache to overlap too.
         """
         _ = self.tools
         payload, info = self._env_client.reset(seed=seed, row_index=row_index)
-        return (self._render_observation(payload) or self._instruction), info
+        obs_text, image = observation_text_and_image(payload)
+        if image is None:
+            obs_text = self._render_observation(payload) or self._instruction
+        elif not obs_text:
+            obs_text = self._instruction
+        return obs_text, image, info
 
     def _reset_apply(
         self,
         obs_text: str,
         info: dict[str, Any],
+        *,
+        image: object | None = None,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         """Tokenize the initial prompt and start the episode (truncates at turn 0 if over budget)."""
         self._adopt_system_prompt(info)
-        self.full_ids = self._tokenize_initial_prompt(obs_text)
+        self._multimodal_turn = None
+        self._episode_pixel_values = None
+        if image is not None:
+            if self._vision_processor is None:
+                msg = "Image observations require vision_processor on RolloutHarness"
+                raise RuntimeError(msg)
+            prompt_str = self._chat_prompt_string(obs_text)
+            train_ids, pixel_values = encode_image_training_inputs(
+                text=prompt_str,
+                image=image,
+                processor=self._vision_processor,
+            )
+            prompt_token_len = int(train_ids.shape[-1])
+            self.full_ids = None
+            self._episode_pixel_values = pixel_values
+            self._multimodal_turn = {
+                "prompt": prompt_str,
+                "image": image,
+                "prompt_token_len": prompt_token_len,
+                "input_ids": train_ids,
+            }
+        else:
+            self.full_ids = self._tokenize_initial_prompt(obs_text)
         self.turn_boundaries = []
         self.turn_rewards = []
         self.rubric_score_sums = {}
@@ -592,11 +660,18 @@ class RolloutHarness:
         self.sampling_logps = []
 
         max_pt = self._prompt_budget()
-        if max_pt is not None and int(self.full_ids.shape[1]) > max_pt:
+        if self._multimodal_turn is not None:
+            prompt_len = int(self._multimodal_turn["prompt_token_len"])
+        else:
+            full_ids = self.full_ids
+            if full_ids is None:
+                msg = "reset() left no prompt token ids"
+                raise RuntimeError(msg)
+            prompt_len = int(full_ids.shape[1])
+        if max_pt is not None and prompt_len > max_pt:
             self.done = True
             self.current_prompt = {}
-            # Step slices generation from this episode's tokenized prompt length.
-            self._last_full_prompt_token_len = int(self.full_ids.shape[1])
+            self._last_full_prompt_token_len = prompt_len
             return self.current_prompt, info
 
         self.done = False
@@ -609,12 +684,30 @@ class RolloutHarness:
         sampling_logps: torch.Tensor | None = None,
     ) -> str:
         """Decode and record this turn's generation; return its text (tokenizer phase)."""
-        if self._last_full_prompt_token_len is None or self.full_ids is None:
+        if self._last_full_prompt_token_len is None:
             msg = "step() requires a prior reset() or step() that built a prompt"
             raise RuntimeError(msg)
         prompt_len = self._last_full_prompt_token_len
-        full_ids = self.full_ids
         sequence = token_ids if token_ids.dim() > 1 else token_ids.unsqueeze(0)
+        if self.full_ids is None:
+            full_ids = sequence.detach()
+            self.full_ids = full_ids
+            self._multimodal_turn = None
+            gen_ids = sequence[0, prompt_len:].detach()
+            gen_text = self.tokenizer.decode(
+                gen_ids.tolist(),
+                skip_special_tokens=True,
+            )
+            if not isinstance(gen_text, str):
+                msg = "decode() of one sequence returns str"
+                raise TypeError(msg)
+            if sampling_logps is not None:
+                self.sampling_logps.append(sampling_logps)
+            gen_end = full_ids.shape[1]
+            self.turn_boundaries.append((prompt_len, gen_end, self._turn_idx))
+            self._gen_texts.append(gen_text)
+            return gen_text
+        full_ids = self.full_ids
         # Only the new suffix crosses devices; the prefix is byte-identical to ``full_ids``.
         gen_ids = sequence[0, prompt_len:].detach().to(full_ids.device)
         gen_text = self.tokenizer.decode(
@@ -716,13 +809,22 @@ class RolloutHarness:
     def get_episode_data(
         self,
     ) -> tuple[
-        torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor | None,
+        torch.Tensor | None,
     ]:
-        """Build the episode row ``(full_ids, action_mask, turn_ids, turn_rewards, sampling_logps)``.
+        """Build the episode row for training.
 
-        ``sampling_logps`` is the per-turn vLLM logprobs concatenated, or ``None`` (HF path).
+        :return: ``full_ids``, ``action_mask``, ``turn_ids``, ``turn_rewards``,
+            ``sampling_logps``, ``pixel_values``.
         """
         if self.full_ids is None:
+            if self._multimodal_turn is not None:
+                msg = "No episode data: episode has no completion yet"
+                raise RuntimeError(msg)
             msg = "No episode data: reset() was never called"
             raise RuntimeError(msg)
 
@@ -747,6 +849,7 @@ class RolloutHarness:
             turn_ids,
             torch.tensor(turn_rewards, dtype=torch.float),
             torch.cat(self.sampling_logps) if self.sampling_logps else None,
+            self._episode_pixel_values,
         )
 
     def close(self) -> None:

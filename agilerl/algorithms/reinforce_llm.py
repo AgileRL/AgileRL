@@ -398,13 +398,11 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
                     ):
                         chunk = prompts[start : start + self.hf_generate_chunk_size]
                         for prompt in chunk:
-                            prompt = prepare_prompt_hf_generate(prompt, actor_device)
-                            input_ids = prompt["input_ids"]
-                            attention_mask = prompt["attention_mask"]
+                            hf_inputs = prepare_prompt_hf_generate(prompt, actor_device)
+                            input_ids = hf_inputs["input_ids"]
                             prompt_len = int(input_ids.shape[-1])
                             token_ids = self.actor.generate(
-                                input_ids=input_ids,
-                                attention_mask=attention_mask,
+                                **hf_inputs,
                                 generation_config=hf_turn_generation_config(
                                     self.generation_config,
                                     max_model_len=self.max_model_len,

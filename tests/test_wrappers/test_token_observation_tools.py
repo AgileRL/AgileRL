@@ -71,7 +71,9 @@ def test_action_mask_excludes_appended_feedback() -> None:
     """Tool-result / feedback tokens (appended after each generated span) are
     masked 0 — locks the provenance guarantee that tool results never train.
     """
-    _full, action_mask, _turn_ids, _rewards, _logps = _mask_wrapper().get_episode_data()
+    _full, action_mask, _turn_ids, _rewards, _logps, _pixel_values = (
+        _mask_wrapper().get_episode_data()
+    )
     # Mask is over positions [1 .. seq_len-1]; True only on generated spans.
     assert action_mask[0].tolist() == [False, True, True, False, False, True, True]
 
@@ -80,7 +82,9 @@ def test_turn_ids_track_generation_spans_only() -> None:
     """turn_ids hold the turn index on each generated span and -1 elsewhere
     (prompt, feedback / tool-result, pad).
     """
-    _full, _action_mask, turn_ids, _rewards, _logps = _mask_wrapper().get_episode_data()
+    _full, _action_mask, turn_ids, _rewards, _logps, _pixel_values = (
+        _mask_wrapper().get_episode_data()
+    )
     assert turn_ids[0].tolist() == [-1, 0, 0, -1, -1, 1, 1]
 
 

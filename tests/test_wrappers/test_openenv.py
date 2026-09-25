@@ -20,6 +20,7 @@ import pytest
 import torch
 import websockets.exceptions
 from openenv.core.env_server.interfaces import Action, Environment, Observation
+from PIL import Image
 from pydantic import Field
 
 from agilerl.llm_envs import (
@@ -35,7 +36,11 @@ from agilerl.llm_envs.env_sources import (
     source_of,
     spec_to_factory,
 )
-from agilerl.llm_envs.observation import process_observation
+from agilerl.llm_envs.observation import (
+    encode_image_training_inputs,
+    observation_text_and_image,
+    process_observation,
+)
 from agilerl.llm_envs.openenv import (
     InProcessEnvClient,
     RemoteEnvClient,
@@ -182,12 +187,117 @@ def test_normalize_step_rejects_non_tuple() -> None:
 
 def test_normalize_reset_accepts_bare_observation() -> None:
     """An env returning just an observation gets an empty info dict."""
-    assert _normalize_reset("obs") == ("obs", {})
+    assert _normalize_reset("obs") == ("obs", {}, None)
 
 
 def test_normalize_reset_accepts_singleton_tuple() -> None:
     """A 1-tuple ``(obs,)`` reset return normalizes to empty info."""
-    assert _normalize_reset(("obs",)) == ("obs", {})
+    assert _normalize_reset(("obs",)) == ("obs", {}, None)
+
+
+def test_normalize_reset_empty_tuple_uses_the_tuple_as_observation() -> None:
+    """A 0-tuple reset return is stringified as the observation."""
+    assert _normalize_reset(()) == ("()", {}, None)
+
+
+def test_vl_observation_rejects_non_str_text() -> None:
+    with pytest.raises(TypeError, match="VL observation text must be str"):
+        observation_text_and_image({"text": 1, "image": object()})
+
+
+def test_vl_observation_keeps_existing_image_prefix() -> None:
+    image = object()
+    text = "<image>\nalready"
+
+    out_text, out_image = observation_text_and_image({"text": text, "image": image})
+
+    assert out_text == text
+    assert out_image is image
+
+
+def test_vl_observation_screenshot_rgb_nested_list() -> None:
+    screenshot = [
+        [[255, 0, 0], [0, 255, 0]],
+        [[0, 0, 255], [255, 255, 255]],
+    ]
+    goal = "Read the digit."
+    text = "What do you see?"
+
+    out_text, out_image = observation_text_and_image(
+        {"goal": goal, "text": text, "screenshot": screenshot}
+    )
+
+    assert out_text == f"<image>\n{goal}\n\n{text}"
+    assert isinstance(out_image, Image.Image)
+    assert out_image.mode == "RGB"
+    assert out_image.size == (2, 2)
+
+
+def test_vl_observation_screenshot_rejects_bad_shape() -> None:
+    with pytest.raises(TypeError, match=r"got \(2, 2, 4\)"):
+        observation_text_and_image({"screenshot": [[[0] * 4] * 2] * 2})
+
+
+def test_vl_observation_string_is_text_only() -> None:
+    assert observation_text_and_image("hello") == ("hello", None)
+
+
+def test_encode_image_training_inputs_rejects_non_tensors() -> None:
+    def processor(**_kwargs: object) -> dict[str, list[int]]:
+        return {"input_ids": [1], "pixel_values": [2]}
+
+    with pytest.raises(TypeError, match="processor must return torch"):
+        encode_image_training_inputs(text="x", image=object(), processor=processor)
+
+
+def test_normalize_reset_accepts_text_and_image_dict() -> None:
+    """VL reset with ``text`` and ``image`` matches :func:`observation_text_and_image`."""
+    image = object()
+    payload = {"text": "What digit?", "image": image}
+    info = {"row": 0}
+
+    prompt, out_info, out_image = _normalize_reset((payload, info))
+
+    expected_prompt, expected_image = observation_text_and_image(payload)
+    assert prompt == expected_prompt
+    assert out_image is expected_image
+    assert out_info == info
+
+
+def test_normalize_reset_accepts_prompt_and_image_dict() -> None:
+    """VL reset with ``prompt`` and ``image`` matches :func:`observation_text_and_image`."""
+    image = object()
+    payload = {"prompt": "Describe the scene.", "image": image}
+
+    prompt, out_info, out_image = _normalize_reset(payload)
+
+    expected_prompt, expected_image = observation_text_and_image(payload)
+    assert prompt == expected_prompt
+    assert out_image is expected_image
+    assert out_info == {}
+
+
+def test_openenv_wrapper_reset_forwards_vl_text_and_image() -> None:
+    """``OpenEnvWrapper`` surfaces prefixed prompt text and the image on reset."""
+
+    class _VlResetEnv:
+        def reset(self, seed: int | None = None) -> tuple[dict[str, object], dict]:
+            del seed
+            return (
+                {"text": "Question?", "image": "img-bytes"},
+                {"system_prompt": "Be brief."},
+            )
+
+        def step(self, action: str) -> tuple[str, float, bool, bool, dict]:
+            return "", 0.0, True, False, {}
+
+    obs = OpenEnvWrapper(_VlResetEnv()).reset()
+    expected_prompt, _ = observation_text_and_image(
+        {"text": "Question?", "image": "img-bytes"}
+    )
+    assert obs.prompt == expected_prompt
+    assert obs.image == "img-bytes"
+    assert obs.metadata == {"system_prompt": "Be brief."}
 
 
 def test_normalize_step_rejects_unsupported_tuple_length() -> None:
@@ -1162,7 +1272,7 @@ def test_batch_reset_cleans_up_after_partial_init_failure() -> None:
 # --- gym-tuple normalisation: remaining single-element / bad-length branches --
 def test_normalize_reset_accepts_single_element_tuple() -> None:
     """A 1-tuple ``(obs,)`` normalises to ``(obs, {})``."""
-    assert _normalize_reset(("obs",)) == ("obs", {})
+    assert _normalize_reset(("obs",)) == ("obs", {}, None)
 
 
 def test_normalize_step_rejects_wrong_length_tuple() -> None:
@@ -1799,8 +1909,17 @@ def test_processor_must_return_text() -> None:
         del payload
         return 7
 
+    class _BoardOnlyResetEnv:
+        def reset(self, seed: int | None = None) -> tuple[dict[str, str], dict]:
+            del seed
+            return {"board": "state"}, {}
+
+        def step(self, action: str) -> tuple[str, float, bool, bool, dict]:
+            del action
+            return "", 0.0, True, False, {}
+
     harness = RolloutHarness.local(
-        _CountingEnv(),
+        _BoardOnlyResetEnv(),
         MiniTokenizer(),
         apply_chat_template=False,
         observation_processor=_bad,

@@ -282,6 +282,7 @@ def collect_rollouts_llm(
     int,
     int,
     list[torch.Tensor | None] | None,
+    list[torch.Tensor | None] | None,
 ]:
     """Collect multi-turn rollouts for LLM on-policy algorithms.
 
@@ -296,10 +297,10 @@ def collect_rollouts_llm(
     :param group_seed: Seed for the group of environments.
     :type group_seed: int
     :return: Episode tensors, masks, turn ids, rewards, counted batch steps,
-        updated group seed, and per-trajectory vLLM sampling logprobs (one 1-D
-        tensor of generated-token logprobs each, individual entries possibly
-        ``None``; ``None`` overall when none were captured this rollout).
-    :rtype: tuple[list[torch.Tensor], list[torch.Tensor], list[torch.Tensor], list[torch.Tensor], int, int, list[torch.Tensor | None] | None]
+        updated group seed, per-trajectory vLLM sampling logprobs, and
+        per-trajectory vision ``pixel_values`` (each list uses the same
+        per-env collapse rule as :meth:`RolloutCollector.get_trajectories`).
+    :rtype: tuple[list[torch.Tensor], list[torch.Tensor], list[torch.Tensor], list[torch.Tensor], int, int, list[torch.Tensor | None] | None, list[torch.Tensor | None] | None]
     """
     prompts = env.reset(
         seed=group_seed,
@@ -333,6 +334,7 @@ def collect_rollouts_llm(
         all_rewards,
         batch_steps,
         all_sampling_logps,
+        all_pixel_values,
     ) = env.get_trajectories()
     group_seed = group_seed + batch_size
 
@@ -344,6 +346,7 @@ def collect_rollouts_llm(
         batch_steps,
         group_seed,
         all_sampling_logps,
+        all_pixel_values,
     )
 
 
@@ -355,6 +358,7 @@ def collate_llm_rollouts(
     all_sampling_logps: list[torch.Tensor | None] | None = None,
     *,
     group_size: int,
+    all_pixel_values: list[torch.Tensor | None] | None = None,
 ) -> LLMExperienceBatch:
     """Collate a collected LLM rollout into one grouped experience batch.
 
@@ -377,6 +381,9 @@ def collate_llm_rollouts(
     :type all_sampling_logps: list[torch.Tensor | None] | None
     :param group_size: Number of trajectories per group.
     :type group_size: int
+    :param all_pixel_values: Per-trajectory vision tensors parallel to
+        ``token_ids_list``, or ``None`` when none were captured.
+    :type all_pixel_values: list[torch.Tensor | None] | None
     :return: The collated batch.
     :rtype: LLMExperienceBatch
     """
@@ -385,6 +392,7 @@ def collate_llm_rollouts(
         msg = f"Number of trajectories ({n}) must be divisible by group_size ({group_size})."
         raise ValueError(msg)
     logps = all_sampling_logps if all_sampling_logps is not None else [None] * n
+    pixels = all_pixel_values if all_pixel_values is not None else [None] * n
     groups = [
         RolloutGroup(
             group_size=group_size,
@@ -395,13 +403,22 @@ def collate_llm_rollouts(
                     turn_ids=turn_ids,
                     rewards=rewards,
                     sampling_logps=sampling_logps,
+                    pixel_values=pixel_values,
                 )
-                for token_ids, action_masks, turn_ids, rewards, sampling_logps in zip(
+                for (
+                    token_ids,
+                    action_masks,
+                    turn_ids,
+                    rewards,
+                    sampling_logps,
+                    pixel_values,
+                ) in zip(
                     token_ids_list[sl],
                     action_masks_list[sl],
                     all_turn_ids[sl],
                     all_rewards[sl],
                     logps[sl],
+                    pixels[sl],
                     strict=True,
                 )
             ],
