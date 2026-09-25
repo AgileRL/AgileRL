@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import copy
-import gc
 import inspect
 import logging
 import os
@@ -155,6 +154,7 @@ from agilerl.utils.llm_packing import (
     unpack_values,
 )
 from agilerl.utils.mutation_utils import target_activations
+from agilerl.utils.torch_utils import release_device_memory
 
 if TYPE_CHECKING:
     from torch.optim.lr_scheduler import SequentialLR
@@ -3582,14 +3582,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         self._vllm_lora_staging_dir = None
         self._vllm_lora_loaded = False
         self._vllm_rollout_lora_request = None
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-            if torch.cuda.is_initialized():
-                torch.cuda.synchronize()
-        elif torch.mps.is_available():
-            torch.mps.empty_cache()
-            torch.mps.synchronize()
+        release_device_memory()
 
     def clone(self, index: int | None = None, wrap: bool = True) -> Self:
         """Create a clone of the algorithm.

@@ -5453,43 +5453,15 @@ class TestLLMReinitOptFromConfig:
 
 
 class TestLLMCleanUpCudaPaths:
-    """clean_up clears device caches (CUDA or Apple MPS) when available."""
+    """clean_up delegates device cache release to release_device_memory."""
 
-    def test_clean_up_calls_cuda_empty_cache_when_available(self):
+    def test_clean_up_calls_release_device_memory(self):
         agent = _make_llm_agent()
-        with (
-            patch(
-                "agilerl.algorithms.core.base.torch.cuda.is_available",
-                return_value=True,
-            ),
-            patch("agilerl.algorithms.core.base.torch.cuda.empty_cache") as mock_empty,
-            patch(
-                "agilerl.algorithms.core.base.torch.cuda.is_initialized",
-                return_value=True,
-            ),
-            patch("agilerl.algorithms.core.base.torch.cuda.synchronize") as mock_sync,
-        ):
+        with patch(
+            "agilerl.algorithms.core.base.release_device_memory",
+        ) as mock_release:
             LLMAlgorithm.clean_up(agent)
-        mock_empty.assert_called_once()
-        mock_sync.assert_called_once()
-
-    def test_clean_up_calls_mps_empty_cache_when_available(self):
-        agent = _make_llm_agent()
-        with (
-            patch(
-                "agilerl.algorithms.core.base.torch.cuda.is_available",
-                return_value=False,
-            ),
-            patch(
-                "agilerl.algorithms.core.base.torch.mps.is_available",
-                return_value=True,
-            ),
-            patch("agilerl.algorithms.core.base.torch.mps.empty_cache") as mock_empty,
-            patch("agilerl.algorithms.core.base.torch.mps.synchronize") as mock_sync,
-        ):
-            LLMAlgorithm.clean_up(agent)
-        mock_empty.assert_called_once()
-        mock_sync.assert_called_once()
+        mock_release.assert_called_once()
 
 
 class TestLLMLoadCheckpointLoraOnlyWithRefAdapter:

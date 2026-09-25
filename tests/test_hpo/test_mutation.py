@@ -2381,6 +2381,31 @@ def _replacing_mutations(seed=0):
     return muts
 
 
+class TestMutationReleaseDeviceMemory:
+    @pytest.fixture
+    def release_spy(self, monkeypatch):
+        calls: list[bool] = []
+
+        def track() -> None:
+            calls.append(True)
+
+        monkeypatch.setattr(
+            "agilerl.hpo.mutation.release_device_memory",
+            track,
+        )
+        return calls
+
+    def test_mutation_calls_release_after_pre_training_mut(self, release_spy):
+        muts = Mutations(1, 0, 0, 0, 0, 0, device="cpu")
+        agent = PPO(
+            generate_random_box_space((4,)),
+            generate_discrete_space(2),
+            device="cpu",
+        )
+        muts.mutation([agent], pre_training_mut=True)
+        assert release_spy == [True]
+
+
 class TestMutationsMutationIndices:
     """The indices path of :meth:`Mutations.mutation`, used by MF-PBT."""
 

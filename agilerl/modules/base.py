@@ -386,6 +386,9 @@ class EvolvableModule(nn.Module, metaclass=ModuleMeta):
     def get_init_dict(self) -> dict[str, Any]:
         """Get the dictionary of constructor arguments for the network.
 
+        Tournament selection and ``clone()`` rebuild encoders from this dict when
+        ``encoder_cls`` is set on :class:`~agilerl.networks.base.EvolvableNetwork`.
+
         :return: The dictionary of constructor arguments.
         :rtype: dict[str, Any]
         """

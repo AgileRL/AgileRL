@@ -1,6 +1,7 @@
 # Copyright 2026 AgileRL
 # SPDX-License-Identifier: Apache-2.0
 
+import gc
 import math
 from collections.abc import Callable, Sequence
 from functools import singledispatch
@@ -12,6 +13,18 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from gymnasium import spaces
+
+
+def release_device_memory() -> None:
+    """Collect cycles; flush MPS/CUDA cached memory when those backends are available."""
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        if torch.cuda.is_initialized():
+            torch.cuda.synchronize()
+    elif torch.mps.is_available():
+        torch.mps.empty_cache()
+        torch.mps.synchronize()
 
 
 def map_pytree(
