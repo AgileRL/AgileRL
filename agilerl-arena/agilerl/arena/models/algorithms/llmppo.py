@@ -33,7 +33,7 @@ class LLMPPOSpec(RolloutLLMSpec):
 
     temperature: float = Field(default=1.0, description=TEMPERATURE)
     top_p: float = Field(default=1.0, ge=0.0, le=1.0, description=TOP_P)
-    beta: float = Field(default=0.01, ge=0.0, le=1.0, description=BETA)
+    beta: float = Field(default=0.001, ge=0.0, le=1.0, description=BETA)
     max_grad_norm: float = Field(
         default=1.0,
         ge=0.0,
@@ -55,7 +55,7 @@ class LLMPPOSpec(RolloutLLMSpec):
         description="Discount factor applied across turns.",
     )
     gae_lambda: float = Field(
-        default=1.0,
+        default=0.95,
         ge=0.0,
         le=1.0,
         description=GAE_LAMBDA,

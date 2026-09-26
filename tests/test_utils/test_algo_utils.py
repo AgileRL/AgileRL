@@ -2680,6 +2680,16 @@ class TestInheritInitSignature:
         algo_utils.inherit_init_signature(self._Parent)(Child)
         assert "loss_type" in inspect.signature(Child).parameters
 
+    def test_overrides_inherited_defaults(self):
+        class Child(self._Parent):
+            def __init__(self, *args, **kwargs):
+                kwargs.setdefault("b", 9)
+                super().__init__(*args, **kwargs)
+
+        algo_utils.inherit_init_signature(self._Parent, defaults={"b": 9})(Child)
+        assert inspect.signature(Child.__init__).parameters["b"].default == 9
+        assert inspect.signature(Child).parameters["b"].default == 9
+
     def test_raises_when_subclass_has_no_own_init(self):
         class NoInit(self._Parent):
             pass

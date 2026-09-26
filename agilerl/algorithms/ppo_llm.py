@@ -206,7 +206,7 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
     :param chunk_rows: Primary chunk-size setting for fused logit tiles. Applies
         to both standard and Liger paths.
     :type chunk_rows: int | None, optional
-    :param use_liger_loss: Use the Liger fused policy loss, defaults to ``False``
+    :param use_liger_loss: Use the Liger fused policy loss, defaults to ``True``
         (requires ``liger-kernel``). **Recommended for PPO**: via AgileRL's
         ``LigerFusedLinearPolicyLossFunction`` (not the upstream Liger GRPO
         kernel), it is roughly memory-neutral with a mild speedup that grows with
@@ -258,11 +258,11 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
         hp_config: HyperparameterConfig | None = None,
         index: int = 0,
         batch_size: int = 16,
-        beta: float = 0.01,
+        beta: float = 0.001,
         vf_coef: float = 0.5,
         clip_coef: float = 0.2,
         gamma: float = 1.0,
-        gae_lambda: float = 1.0,
+        gae_lambda: float = 0.95,
         lr_actor: float = 5e-7,
         lr_critic: float | None = 5e-5,
         max_grad_norm: float = 1.0,
@@ -301,7 +301,7 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
         torch_compiler: str | None = None,
         cast_logprobs_to_fp32: bool = True,
         chunk_rows: int | None = None,
-        use_liger_loss: bool = False,
+        use_liger_loss: bool = True,
         quantization_config: BitsAndBytesConfig | None = None,
         activation_offload: bool = False,
         use_sequence_packing: bool = False,

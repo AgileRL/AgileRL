@@ -194,11 +194,19 @@ def constructor_kwargs(
     return {name: value for name, value in kwargs.items() if name in params}
 
 
+# Network contract flags. They are not encoder or actor constructor arguments.
+NETWORK_META_KEYS = ("has_evolvable_encoder",)
+
+
 def _as_plain(value: BaseModel | Mapping[str, Any]) -> dict[str, Any]:
     """Dump a network spec, or a per-group mapping of them, to a plain dict."""
     if isinstance(value, BaseModel):
-        return value.model_dump(mode="python", exclude_unset=True)
-    return {
-        key: _as_plain(item) if isinstance(item, (BaseModel, dict)) else item
-        for key, item in value.items()
-    }
+        dumped = value.model_dump(mode="python", exclude_unset=True)
+    else:
+        dumped = {
+            key: _as_plain(item) if isinstance(item, (BaseModel, dict)) else item
+            for key, item in value.items()
+        }
+    for key in NETWORK_META_KEYS:
+        dumped.pop(key, None)
+    return dumped

@@ -267,7 +267,7 @@ class TestGetTrainingKwargs:
             dqn_spec, training=training_spec, env_spec=gym_env_spec, memory=buffer
         )
         assert kwargs["memory"] is buffer
-        assert "learning_delay" in kwargs
+        assert "learning_delay" not in kwargs
 
     def test_env_name_forwarded(self, training_spec, ppo_spec, gym_env_spec):
         kwargs = select_strategy(ppo_spec).get_trainer_kwargs(
@@ -339,6 +339,16 @@ class TestGetTrainingKwargs:
             spec, training=training, env_spec=gym_env_spec, memory=buffer
         )
         assert kwargs["episode_steps"] == 250
+
+    def test_bandit_episode_steps_omitted_when_none(self, training_spec, gym_env_spec):
+        from agilerl.models import NeuralUCBSpec
+
+        spec = NeuralUCBSpec()
+        buffer = ReplayBuffer(max_size=100, device="cpu")
+        kwargs = select_strategy(spec).get_trainer_kwargs(
+            spec, training=training_spec, env_spec=gym_env_spec, memory=buffer
+        )
+        assert "episode_steps" not in kwargs
 
     def test_multi_agent_sum_scores_forwarded(self, gym_env_spec):
         from agilerl.models import MADDPGSpec
@@ -1834,6 +1844,44 @@ class TestLLMLocalTrainer:
         assert call_kwargs["selection_strategy"] is trainer.selection_strategy
         assert "accelerator" not in call_kwargs
 
+    def test_dataset_train_passes_max_steps_none_when_num_epochs_set(self, dpo_spec):
+        mock_pop = [MagicMock()]
+        mock_env = MagicMock()
+        mock_train_fn = MagicMock(return_value=(mock_pop, [[1.0]]))
+        mock_tokenizer = MagicMock(eos_token_id=0, eos_token="<eos>")
+        env_spec = MagicMock(max_reward=None)
+
+        with (
+            patch(
+                "agilerl.training.trainer.AutoTokenizer", create=True
+            ) as mock_auto_tok,
+            patch.object(LocalTrainer, "_make_env", return_value=mock_env),
+            patch(
+                "agilerl.training.trainer.create_population_from_spec",
+                return_value=mock_pop,
+            ),
+            patch.object(
+                LLMDatasetStrategy, "get_training_loop", return_value=mock_train_fn
+            ),
+            patch.object(LocalTrainer, "to_manifest", return_value={}),
+        ):
+            mock_auto_tok.from_pretrained.return_value = mock_tokenizer
+            trainer = LocalTrainer(
+                algorithm=dpo_spec,
+                environment=env_spec,
+                training=TrainingSpec(
+                    max_steps=1_000_000,
+                    evo_steps=10,
+                    pop_size=self.POP_SIZE,
+                    num_epochs=3,
+                ),
+            )
+            trainer.train()
+
+        call_kwargs = mock_train_fn.call_args[1]
+        assert call_kwargs["max_steps"] is None
+        assert call_kwargs["num_epochs"] == 3
+
     # -- Missing LLM dependencies raises ImportError -----------------------
 
     def test_missing_llm_deps_raises(self, dpo_spec):
@@ -3029,7 +3077,7 @@ def test_from_manifest_wrong_arch_is_overridden_when_omitted(tmp_path):
             {},
             {},
             # MultiInputSpec default (dataclass MultiInputNetConfig would be 16)
-            {"latent_dim": 32},
+            {"latent_dim": 128},
             id="multiinput",
         ),
         pytest.param(

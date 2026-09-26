@@ -282,9 +282,10 @@ def create_population_from_spec(
                     "environment to resolve num_envs."
                 )
                 raise ValueError(msg)
-            # Not every member of the env union exposes ``num_envs``; the algos
-            # that set it always run on a vectorized env that does.
-            setattr(algo_spec, num_envs_arg, get_num_envs(env))
+            if getattr(algo_spec, num_envs_arg, None) is None:
+                # Not every member of the env union exposes ``num_envs``; the algos
+                # that set it always run on a vectorized env that does.
+                setattr(algo_spec, num_envs_arg, get_num_envs(env))
 
     # Classic RL algorithms
     if isinstance(algo_spec, (SingleAgentAlgorithmSpec, MultiAgentAlgorithmSpec)):

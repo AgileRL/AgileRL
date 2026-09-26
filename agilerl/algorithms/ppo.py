@@ -72,7 +72,7 @@ class PPO(SingleAgentAlgorithm[TensorDict]):
     :type batch_size: int, optional
     :param lr: Learning rate for optimizer, defaults to 1e-4
     :type lr: float, optional
-    :param learn_step: Learning frequency, defaults to 2048
+    :param learn_step: Learning frequency, defaults to 4096
     :type learn_step: int, optional
     :param gamma: Discount factor, defaults to 0.99
     :type gamma: float, optional
@@ -80,7 +80,7 @@ class PPO(SingleAgentAlgorithm[TensorDict]):
     :type gae_lambda: float, optional
     :param mut: Most recent mutation to agent, defaults to None
     :type mut: str, optional
-    :param action_std_init: Initial action standard deviation, defaults to 0.0
+    :param action_std_init: Initial action standard deviation, defaults to 0.6
     :type action_std_init: float, optional
     :param clip_coef: Surrogate clipping coefficient, defaults to 0.2
     :type clip_coef: float, optional
@@ -102,7 +102,7 @@ class PPO(SingleAgentAlgorithm[TensorDict]):
     :type critic_network: nn.Module, optional
     :param share_encoders: Flag to share encoder parameters between actor and critic, defaults to False
     :type share_encoders: bool, optional
-    :param num_envs: Number of parallel environments, defaults to 1
+    :param num_envs: Number of parallel environments. Omitted means 1.
     :type num_envs: int, optional
     :param rollout_buffer_config: Extra keyword arguments forwarded to the
         rollout buffer constructor, defaults to None (treated as an empty dict).
@@ -115,7 +115,7 @@ class PPO(SingleAgentAlgorithm[TensorDict]):
     :type accelerator: accelerate.Accelerator(), optional
     :param wrap: Wrap models for distributed training upon creation, defaults to True
     :type wrap: bool, optional
-    :param bptt_sequence_type: Type of sequence for BPTT learning, defaults to BPTTSequenceType.CHUNKED
+    :param bptt_sequence_type: How recurrent rollouts are cut into training sequences. Omitted means chunked.
     :type bptt_sequence_type: BPTTSequenceType, optional
     :param max_seq_len: Maximum sequence length for truncated BPTT, defaults to None, where complete episodes are used as sequences.
     :type max_seq_len: int, optional
@@ -136,11 +136,11 @@ class PPO(SingleAgentAlgorithm[TensorDict]):
         net_config: dict[str, Any] | None = None,
         batch_size: int = 64,
         lr: float = 1e-4,
-        learn_step: int = 2048,
+        learn_step: int = 4096,
         gamma: float = 0.99,
         gae_lambda: float = 0.95,
         mut: str | None = None,
-        action_std_init: float = 0.0,
+        action_std_init: float = 0.6,
         clip_coef: float = 0.2,
         ent_coef: float = 0.01,
         vf_coef: float = 0.5,
@@ -151,13 +151,13 @@ class PPO(SingleAgentAlgorithm[TensorDict]):
         actor_network: EvolvableModule | None = None,
         critic_network: EvolvableModule | None = None,
         share_encoders: bool = True,
-        num_envs: int = 1,
+        num_envs: int | None = None,
         rollout_buffer_config: dict[str, Any] | None = None,
         recurrent: bool = False,
         device: str = "cpu",
         accelerator: Accelerator | None = None,
         wrap: bool = True,
-        bptt_sequence_type: str | BPTTSequenceType = BPTTSequenceType.CHUNKED,
+        bptt_sequence_type: str | BPTTSequenceType | None = None,
         max_seq_len: int | None = None,
     ) -> None:
         super().__init__(
@@ -238,7 +238,11 @@ class PPO(SingleAgentAlgorithm[TensorDict]):
             recurrent,
             bool,
         ), "Has hidden states flag must be boolean value True or False."
-        if isinstance(bptt_sequence_type, str):
+        if num_envs is None:
+            num_envs = 1
+        if bptt_sequence_type is None:
+            bptt_sequence_type = BPTTSequenceType.CHUNKED
+        elif isinstance(bptt_sequence_type, str):
             bptt_sequence_type = BPTTSequenceType(bptt_sequence_type)
 
         self.recurrent = recurrent

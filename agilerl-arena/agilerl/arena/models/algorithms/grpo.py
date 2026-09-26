@@ -25,7 +25,7 @@ from agilerl.arena.models.registry import register
 class GRPOSpec(RolloutLLMSpec):
     """Group Relative Policy Optimization."""
 
-    group_size: int = Field(..., ge=1, description=GROUP_SIZE)
+    group_size: int = Field(default=8, ge=1, description=GROUP_SIZE)
     lr: float = Field(default=5e-7, ge=0.0, description=LR)
     clip_coef: float | list[float] = Field(
         default=0.2,

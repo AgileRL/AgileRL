@@ -564,7 +564,7 @@ class TestTrainingManifest:
         assert isinstance(manifest.training, TrainingSpec)
         assert manifest.training.max_steps == 1_000_000
         assert manifest.training.pop_size == 1
-        assert manifest.training.hpo is True
+        assert manifest.training.hpo is False
 
     def test_environment_is_validated_not_passed_through(self):
         data = _make_manifest(
