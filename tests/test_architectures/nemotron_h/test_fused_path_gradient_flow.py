@@ -150,12 +150,12 @@ def test_fused_kernel_path_starves_out_proj_lora_of_gradients(pristine_mixer_cla
     assert all(value is not None and value > 0 for value in in_proj.values())
 
 
-def test_family_patches_after_build_restore_out_proj_lora_gradients(
+def test_family_patches_keep_the_fused_kernel_and_in_proj_lora_gradients(
     pristine_mixer_class,
 ):
     base = _tiny_nemotron_h()
     install_family_patches(base.config.model_type, base)
-    assert base.model.layers[0].mixer.use_mem_eff_path is False
+    assert base.model.layers[0].mixer.use_mem_eff_path is True
     _force_cuda_kernels_path()
 
     model = _one_backward(base)

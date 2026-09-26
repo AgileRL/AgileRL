@@ -214,21 +214,34 @@ class TestGetValidated:
 
 
 class TestLLMAlgorithmSpecValidators:
-    def test_valid_answer_pattern_compiles(self) -> None:
-        spec = GRPOSpec(group_size=2, answer_pattern=r"<answer>.*</answer>")
-        assert spec.answer_pattern == r"<answer>.*</answer>"
+    def test_valid_constrain_answer_pattern_compiles(self) -> None:
+        spec = GRPOSpec(
+            group_size=2,
+            constrain_answer_pattern=r"<answer>.*</answer>",
+        )
+        assert spec.constrain_answer_pattern == r"<answer>.*</answer>"
 
-    def test_explicit_none_answer_pattern(self) -> None:
-        spec = GRPOSpec.model_validate({"group_size": 2, "answer_pattern": None})
-        assert spec.answer_pattern is None
+    def test_explicit_none_constrain_answer_pattern(self) -> None:
+        spec = GRPOSpec.model_validate(
+            {"group_size": 2, "constrain_answer_pattern": None},
+        )
+        assert spec.constrain_answer_pattern is None
 
-    def test_invalid_answer_pattern_regex(self) -> None:
+    def test_invalid_constrain_answer_pattern_regex(self) -> None:
         with pytest.raises(ValidationError, match="not a valid regular expression"):
-            GRPOSpec(group_size=2, answer_pattern="(")
+            GRPOSpec(group_size=2, constrain_answer_pattern="(")
 
-    def test_answer_continuation_requires_pattern(self) -> None:
+    def test_answer_continuation_requires_constrain_answer_pattern(self) -> None:
         with pytest.raises(ValidationError, match="answer_continuation requires"):
             GRPOSpec(group_size=2, answer_continuation=True)
+
+    def test_constrain_answer_pattern_without_continuation(self) -> None:
+        spec = GRPOSpec(
+            group_size=2,
+            constrain_answer_pattern=r"\\boxed\{\d+\}",
+        )
+        assert spec.constrain_answer_pattern == r"\\boxed\{\d+\}"
+        assert spec.answer_continuation is False
 
     def test_thinking_budget_requires_max_output_tokens(self) -> None:
         with pytest.raises(ValidationError, match="requires max_output_tokens"):

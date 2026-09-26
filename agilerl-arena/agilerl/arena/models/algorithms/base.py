@@ -348,11 +348,11 @@ class LLMAlgorithmSpec(AlgorithmSpec):
             "Unset leaves reasoning length unconstrained."
         ),
     )
-    answer_pattern: str | None = Field(
+    constrain_answer_pattern: str | None = Field(
         default=None,
         description=(
-            "Regex marking the answer span in a completion. Used both to detect "
-            "an answer and to constrain generation."
+            "Regex grammar for vLLM structured outputs on each turn, or on an "
+            "answer continuation when answer_continuation is enabled."
         ),
     )
     answer_continuation: bool = Field(
@@ -432,40 +432,34 @@ class LLMAlgorithmSpec(AlgorithmSpec):
         msg = "fsdp must be null, true, a dict, or FSDPConfig"
         raise TypeError(msg)
 
-    @field_validator("answer_pattern")
+    @field_validator("constrain_answer_pattern")
     @classmethod
-    def _validate_answer_pattern(cls, value: str | None) -> str | None:
-        """An answer pattern has to compile, and it may not be anchored.
-
-        Detection searches a turn's text for the pattern while a
-        structured-output grammar admits only what the whole pattern matches,
-        so an anchored pattern would mean two different things in the two
-        places one pattern has to serve.
-        """
+    def _validate_constrain_answer_pattern(cls, value: str | None) -> str | None:
+        """The answer grammar has to compile, and it may not be anchored."""
         if value is None:
             return value
         if value.startswith("^") or (value.endswith("$") and not value.endswith("\\$")):
             msg = (
-                f"answer_pattern {value!r} carries an anchor: a structured-output "
-                "grammar matches the whole continuation and cannot honour one, so "
-                "drop the leading ^ or trailing $"
+                f"constrain_answer_pattern {value!r} carries an anchor: a "
+                "structured-output grammar matches the whole continuation and "
+                "cannot honour one, so drop the leading ^ or trailing $"
             )
             raise ValueError(msg)
         try:
             re.compile(value)
         except re.error as err:
-            msg = f"answer_pattern is not a valid regular expression: {err}"
+            msg = f"constrain_answer_pattern is not a valid regular expression: {err}"
             raise ValueError(msg) from err
         return value
 
     @model_validator(mode="after")
     def _validate_answer_continuation(self) -> Self:
-        """The continuation's grammar is built from the answer pattern."""
-        if self.answer_continuation and not self.answer_pattern:
+        """The continuation's grammar is built from constrain_answer_pattern."""
+        if self.answer_continuation and not self.constrain_answer_pattern:
             msg = (
-                "answer_continuation requires answer_pattern to be set: the "
-                "continuation constrains its output to that pattern, so there is "
-                "no grammar to generate an answer under without one"
+                "answer_continuation requires constrain_answer_pattern to be set: "
+                "the continuation constrains its output to that pattern, so there "
+                "is no grammar to generate an answer under without one"
             )
             raise ValueError(msg)
         return self

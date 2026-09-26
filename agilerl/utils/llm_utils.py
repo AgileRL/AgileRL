@@ -30,6 +30,7 @@ from agilerl.architectures import (
     install_family_patches,
     pretrained_model_type,
 )
+from agilerl.architectures.vllm_language import apply_language_tower_engine_kwargs
 from agilerl.distributed.fsdp import CPUOffloadOptimizer
 from agilerl.distributed.process import (
     allreduce_minmax_int,
@@ -308,15 +309,23 @@ def load_pad_token_configs(
     if not HAS_LLM_DEPENDENCIES or not model_name_or_path:
         return None, None
 
-    model_config: object | None = None
-    generation_config: object | None = None
+    trust_remote_code = (
+        family_runtime(model_name_or_path).trainer.trust_remote_code is True
+    )
+    # A checkpoint can omit config.json or generation_config.json.
     try:
-        model_config = AutoConfig.from_pretrained(model_name_or_path)
-    except Exception:
+        model_config = AutoConfig.from_pretrained(
+            model_name_or_path,
+            trust_remote_code=trust_remote_code,
+        )
+    except OSError:
         model_config = None
     try:
-        generation_config = GenerationConfig.from_pretrained(model_name_or_path)
-    except Exception:
+        generation_config = GenerationConfig.from_pretrained(
+            model_name_or_path,
+            trust_remote_code=trust_remote_code,
+        )
+    except OSError:
         generation_config = None
     return model_config, generation_config
 
@@ -994,7 +1003,9 @@ def build_scoped_lora_target_regex(
         raise ValueError(msg)
     alts = "|".join(re.escape(name) for name in sorted(set(projection_names)))
     scope_esc = re.escape(scope.strip("."))
-    return rf".*\.{scope_esc}.*\.(?:{alts})(?:\.linear)?$"
+    # Scope may be the first path component (``language_model.layers.0.q_proj``)
+    # or nested (``model.language_model.layers.0.q_proj``).
+    return rf"(?:.*\.)?{scope_esc}.*\.(?:{alts})(?:\.linear)?$"
 
 
 def _normalize_projection_leaf_name(name: str) -> str:
@@ -1045,7 +1056,14 @@ def _infer_clippable_lora_scope(model: nn.Module) -> str | None:
 # PEFT LoRA inject rejects these module names on Mamba-family model_type values
 # (fused kernels read the raw weights and skip the wrapped forward).
 MAMBA_LORA_MODEL_TYPES = frozenset(
-    {"falcon_h1", "falcon_mamba", "mamba", "mamba2", "nemotron_h"}
+    {
+        "falcon_h1",
+        "falcon_mamba",
+        "mamba",
+        "mamba2",
+        "nemotron_h",
+        "nemotron_h_omni",
+    }
 )
 MAMBA_LORA_FORBIDDEN_MODULES = frozenset({"conv1d", "out_proj"})
 
@@ -2648,11 +2666,10 @@ def build_vllm_llm_init_kwargs(
         else trainer_model_name_or_path
     )
     try:
-        family_vllm_kwargs = family_runtime(vllm_model).vllm.model_dump(
-            exclude_none=True
-        )
+        runtime = family_runtime(vllm_model)
+        family_vllm_kwargs = runtime.vllm.model_dump(exclude_none=True)
     except OSError:
-        # Dummy actors and offline ids have no Hugging Face config.
+        runtime = None
         family_vllm_kwargs = {}
     explicit_batched_tokens = getattr(vllm_config, "max_num_batched_tokens", None)
     batched_tokens = (
@@ -2699,6 +2716,14 @@ def build_vllm_llm_init_kwargs(
     kwargs["max_loras"] = vllm_config.max_loras
     for key, value in family_vllm_kwargs.items():
         kwargs.setdefault(key, value)
+    if runtime is not None:
+        if runtime.trainer.trust_remote_code is not None:
+            kwargs.setdefault("trust_remote_code", runtime.trainer.trust_remote_code)
+        apply_language_tower_engine_kwargs(
+            kwargs,
+            strip_multimodal_towers=vllm_config.strip_multimodal_towers,
+            runtime=runtime,
+        )
     return kwargs
 
 

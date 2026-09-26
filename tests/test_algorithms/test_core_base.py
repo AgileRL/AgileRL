@@ -1603,6 +1603,8 @@ class TestLoadCheckpointLLMBreak:
 class _MockPeftActor(torch.nn.Module):
     """A torch.nn.Module subclass that quacks like a PeftModel."""
 
+    supports_gradient_checkpointing = True
+
     def __init__(self):
         super().__init__()
         self._dummy_param = torch.nn.Parameter(torch.tensor([1.0]))
@@ -1649,6 +1651,21 @@ class _MockPeftActor(torch.nn.Module):
 def _make_mock_peft_actor():
     """Create a mock PEFT actor model."""
     return _MockPeftActor()
+
+
+class _CheckpointableModule(torch.nn.Module):
+    """Minimal HF-style module that implements activation checkpointing."""
+
+    supports_gradient_checkpointing = True
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.kwargs: dict[str, object] | None = None
+
+    def gradient_checkpointing_enable(
+        self, gradient_checkpointing_kwargs: dict[str, object]
+    ) -> None:
+        self.kwargs = gradient_checkpointing_kwargs
 
 
 class _StubLLMAlgorithm(LLMAlgorithm):
@@ -2243,6 +2260,22 @@ class TestLLMWrapModels:
         original_actor.gradient_checkpointing_enable.assert_called_once_with(
             gradient_checkpointing_kwargs={"use_reentrant": False},
         )
+
+    def test_wrap_models_checkpointing_uses_language_tower(self):
+        agent = _make_llm_agent()
+        agent.gradient_checkpointing = True
+
+        class OmniRoot(torch.nn.Module):
+            supports_gradient_checkpointing = False
+
+            def __init__(self) -> None:
+                super().__init__()
+                self.language_model = _CheckpointableModule()
+
+        root = OmniRoot()
+        agent.actor = root
+        LLMAlgorithm.wrap_models(agent)
+        assert root.language_model.kwargs == {"use_reentrant": False}
 
 
 class TestLLMCleanUp:
@@ -3161,10 +3194,11 @@ class TestLLMGetLmHead:
     def test_raises_when_no_output_embeddings(self):
         agent = _make_llm_agent()
         actor, _ = self._peft_actor()
-        actor.get_base_model().get_output_embeddings = lambda: None
+        inner = actor.get_base_model()
+        del inner.lm_head
         agent.actor = actor
 
-        with pytest.raises(AttributeError, match="no output embeddings"):
+        with pytest.raises(AttributeError, match="Cannot find lm_head"):
             agent._get_lm_head()
 
     def test_patch_replaces_head_with_identity_then_restores(self):
@@ -3174,7 +3208,11 @@ class TestLLMGetLmHead:
         agent.use_value_head = False
 
         with agent._patch_lm_head_to_identity() as yielded:
-            assert isinstance(agent._get_lm_head(), torch.nn.Identity)
+            head = agent._get_lm_head()
+            assert isinstance(head, torch.nn.Identity)
+            assert head.weight.dtype == original.weight.dtype
+            hidden = torch.ones(2, original.weight.shape[1])
+            assert torch.equal(head(hidden), hidden)
             assert yielded is original
 
         assert agent._get_lm_head() is original
@@ -3195,12 +3233,29 @@ class TestLLMGetLmHead:
     def test_patch_raises_when_no_output_embeddings(self):
         agent = _make_llm_agent()
         actor, _ = self._peft_actor()
-        actor.get_base_model().get_output_embeddings = lambda: None
+        inner = actor.get_base_model()
+        del inner.lm_head
         agent.actor = actor
 
-        with pytest.raises(AttributeError, match="no output embeddings"):
+        with pytest.raises(AttributeError, match="Cannot find lm_head"):
             with agent._patch_lm_head_to_identity():
                 pass
+
+    def test_finds_lm_head_on_language_tower(self):
+        class _Language(torch.nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.lm_head = torch.nn.Linear(2, 2)
+
+        class _Omni(torch.nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.language_model = _Language()
+
+        agent = _make_llm_agent()
+        omni = _Omni()
+        agent.actor.base_model.model = omni
+        assert agent._get_lm_head() is omni.language_model.lm_head
 
     def test_fused_logprob_fn_and_head_returns_tensors(self):
         agent = _make_llm_agent()
@@ -5940,6 +5995,61 @@ class TestLLMShardedCheckpointBranches:
 @_LLM_DEPS_SKIP
 class TestLLMInitEdgeCases:
     """Constructor branches not covered by _make_llm_agent defaults."""
+
+    def test_vllm_config_enables_colocated_vllm(self):
+        lora = MagicMock()
+        with (
+            patch.object(LLMAlgorithm, "_initialize_actors"),
+            patch.object(LLMAlgorithm, "_configure_vllm"),
+            patch.object(LLMAlgorithm, "wrap_models"),
+            patch.object(EvolvableAlgorithm, "_registry_init"),
+        ):
+            agent = _StubLLMAlgorithm(
+                index=0,
+                batch_size=4,
+                lr=1e-4,
+                max_grad_norm=0.0,
+                clone=True,
+                calc_position_embeddings=False,
+                seed=42,
+                pad_token_id=0,
+                pad_token="<pad>",
+                use_liger_loss=False,
+                lora_config=lora,
+                actor_network=_make_mock_peft_actor(),
+                device="cpu",
+                model_name="mock-model",
+                vllm_config=VLLMConfig(),
+            )
+
+        assert agent.colocated is True
+
+    def test_colocated_rejects_tensor_parallel_size_not_one(self):
+        lora = MagicMock()
+        with (
+            patch.object(LLMAlgorithm, "_initialize_actors"),
+            patch.object(LLMAlgorithm, "_configure_vllm"),
+            patch.object(LLMAlgorithm, "wrap_models"),
+            patch.object(EvolvableAlgorithm, "_registry_init"),
+            pytest.raises(ValueError, match="tensor_parallel_size==1"),
+        ):
+            _StubLLMAlgorithm(
+                index=0,
+                batch_size=4,
+                lr=1e-4,
+                max_grad_norm=0.0,
+                clone=True,
+                calc_position_embeddings=False,
+                seed=42,
+                pad_token_id=0,
+                pad_token="<pad>",
+                use_liger_loss=False,
+                lora_config=lora,
+                actor_network=_make_mock_peft_actor(),
+                device="cpu",
+                model_name="mock-model",
+                vllm_config=VLLMConfig(tensor_parallel_size=2),
+            )
 
     def test_model_config_strips_lora_target_scope(self):
         lora = MagicMock()

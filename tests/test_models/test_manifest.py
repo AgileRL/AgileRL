@@ -13,6 +13,7 @@ Test manifests live under ``tests/manifests/`` as YAML files.
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -1313,10 +1314,20 @@ class TestLocalTrainerLLM:
         mock_tokenizer = MagicMock()
         mock_tokenizer.eos_token_id = 0
         mock_tokenizer.eos_token = "<eos>"
+        mock_tokenizer.pad_token_id = None
+        mock_tokenizer.unk_token_id = None
         with (
             patch(
                 "transformers.AutoTokenizer.from_pretrained",
                 return_value=mock_tokenizer,
+            ),
+            patch(
+                "transformers.AutoConfig.from_pretrained",
+                return_value=SimpleNamespace(model_type="llama", pad_token_id=None),
+            ),
+            patch(
+                "transformers.GenerationConfig.from_pretrained",
+                return_value=SimpleNamespace(pad_token_id=None),
             ),
             patch.object(LocalTrainer, "_make_env", return_value=MagicMock()),
             patch(

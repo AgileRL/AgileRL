@@ -58,6 +58,7 @@ class DummyCausalInner(PreTrainedModel):
 
     config_class = DummyConfig
     base_model_prefix = "dummy_inner"
+    supports_gradient_checkpointing = True
 
     def __init__(self, config: DummyConfig, device="cpu"):
         super().__init__(config)

@@ -539,11 +539,10 @@ class TestCrossSectionConsistency:
 
         assert isinstance(validated.replay_buffer, LLMRolloutBufferSpec)
 
-    def test_an_anchored_answer_pattern_is_rejected(self) -> None:
-        # Detection searches for the pattern; a grammar matches the whole
-        # continuation against it. An anchor would mean two different things.
+    def test_an_anchored_constrain_answer_pattern_is_rejected(self) -> None:
         broken = manifest(
-            GRPO, algorithm={"answer_pattern": r"^<answer>[A-D]</answer>$"}
+            GRPO,
+            algorithm={"constrain_answer_pattern": r"^<answer>[A-D]</answer>$"},
         )
         with pytest.raises(ValidationError, match="carries an anchor"):
             TrainingManifest.model_validate(broken)
