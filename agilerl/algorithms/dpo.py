@@ -99,7 +99,7 @@ class DPO(LLMAlgorithm[PreferencePrompts]):
     :param torch_compiler: Torch compile mode (e.g. ``'default'``), defaults to None
     :type torch_compiler: str | None, optional
     :param use_liger_loss: Use Liger kernel for memory-efficient loss
-        computation. Defaults to ``False``. Pass ``True`` to opt in
+        computation. Defaults to ``True``. Pass ``False`` to opt out
         (requires ``liger-kernel`` to be installed; warns and falls back
         to ``False`` otherwise). When ``training=False`` the standard
         path is always used regardless of this flag.
@@ -161,7 +161,7 @@ class DPO(LLMAlgorithm[PreferencePrompts]):
         seed: int = 42,
         gradient_checkpointing: bool = True,
         torch_compiler: str | None = None,
-        use_liger_loss: bool = False,
+        use_liger_loss: bool = True,
         chunk_rows: int | None = None,
         cast_logprobs_to_fp32: bool = True,
         use_separate_reference_adapter: bool = True,

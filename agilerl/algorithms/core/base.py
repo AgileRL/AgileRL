@@ -2693,7 +2693,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
     :type pad_token_id: int
     :param pad_token: The pad token.
     :type pad_token: str
-    :param use_liger_loss: Whether to use Liger loss. Defaults to ``False``.
+    :param use_liger_loss: Whether to use Liger loss. Defaults to ``True``.
         Passing ``True`` without ``liger-kernel`` installed warns and falls
         back to ``False``.
     :type use_liger_loss: bool

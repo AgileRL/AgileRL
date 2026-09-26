@@ -97,7 +97,7 @@ class TestDQNInit:
         assert dqn.scores == []
         assert dqn.fitness == []
         assert dqn.steps == 0
-        assert dqn.double is False
+        assert dqn.double is True
         assert isinstance(dqn.actor.encoder, encoder_cls)
         assert isinstance(dqn.actor_target.encoder, encoder_cls)
         expected_opt_cls = AcceleratedOptimizer if accelerator else optim.Adam
@@ -166,7 +166,7 @@ class TestDQNInit:
         assert dqn.scores == []
         assert dqn.fitness == []
         assert dqn.steps == 0
-        assert dqn.double is False
+        assert dqn.double is True
         assert isinstance(dqn.optimizer.optimizer, optim.Adam)
         assert isinstance(dqn.criterion, nn.MSELoss)
         dqn.clean_up()
@@ -220,7 +220,7 @@ class TestDQNInit:
         assert dqn.scores == []
         assert dqn.fitness == []
         assert dqn.steps == 0
-        assert dqn.double is False
+        assert dqn.double is True
         assert isinstance(dqn.optimizer.optimizer, optim.Adam)
         assert isinstance(dqn.criterion, nn.MSELoss)
         dqn.clean_up()

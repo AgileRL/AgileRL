@@ -108,7 +108,7 @@ class SFT(LLMAlgorithm[SFTPrompts]):
         memory, defaults to True
     :type gradient_checkpointing: bool, optional
     :param use_liger_loss: Use the Liger fused-linear cross-entropy kernel,
-        defaults to ``False`` (requires ``liger-kernel``; warns and falls back
+        defaults to ``True`` (requires ``liger-kernel``; warns and falls back
         otherwise). Both this and the standard path are memory-bounded — the
         full ``(B, L, V)`` logits are never materialized — so this is mainly a
         speed/kernel choice. The Liger kernel auto-sizes its own chunk; the
@@ -162,7 +162,7 @@ class SFT(LLMAlgorithm[SFTPrompts]):
         clone: bool = False,
         seed: int = 42,
         gradient_checkpointing: bool = True,
-        use_liger_loss: bool = False,
+        use_liger_loss: bool = True,
         chunk_rows: int | None = None,
         use_separate_reference_adapter: bool = False,
         quantization_config: BitsAndBytesConfig | None = None,

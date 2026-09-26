@@ -7,7 +7,8 @@ from __future__ import annotations
 
 from typing import Any, ClassVar, Literal
 
-from pydantic import Field
+from pydantic import Field, model_validator
+from typing_extensions import Self
 
 from agilerl.arena.models.algorithms.base import (
     ON_POLICY_HPO_RANGES,
@@ -31,8 +32,6 @@ from agilerl.arena.models.networks import StochasticActorSpec
 from agilerl.arena.models.registry import register
 
 
-@register("Recurrent PPO")
-@register("RecurrentPPO")
 @register()
 class PPOSpec(SingleAgentAlgorithmSpec):
     """Proximal Policy Optimization."""
@@ -45,7 +44,7 @@ class PPOSpec(SingleAgentAlgorithmSpec):
         ),
     )
     learn_step: int = Field(
-        default=2048,
+        default=4096,
         ge=1,
         description="Environment steps collected per rollout, before each update.",
     )
@@ -55,7 +54,7 @@ class PPOSpec(SingleAgentAlgorithmSpec):
         le=1.0,
         description=GAE_LAMBDA,
     )
-    action_std_init: float = Field(default=0.0, ge=0.0, description=ACTION_STD_INIT)
+    action_std_init: float = Field(default=0.6, ge=0.0, description=ACTION_STD_INIT)
     clip_coef: float = Field(default=0.2, ge=0.0, le=1.0, description=CLIP_COEF)
     ent_coef: float = Field(default=0.01, ge=0.0, le=1.0, description=ENT_COEF)
     vf_coef: float = Field(default=0.5, ge=0.0, le=1.0, description=VF_COEF)
@@ -89,14 +88,36 @@ class PPOSpec(SingleAgentAlgorithmSpec):
     lr: float = Field(default=0.0001, ge=0.0, description=LR)
     net_config: StochasticActorSpec | None = Field(default=None, description=NET_CONFIG)
 
-    alias_implies: ClassVar[dict[str, dict[str, Any]]] = {
-        "Recurrent PPO": {"recurrent": True},
-        "RecurrentPPO": {"recurrent": True},
-    }
     hpo_ranges: ClassVar[dict[str, RLHyperparameter]] = ON_POLICY_HPO_RANGES
+
+
+@register("Recurrent PPO")
+@register("RecurrentPPO")
+class RecurrentPPOSpec(PPOSpec):
+    """PPO with a recurrent encoder."""
+
+    schema_name: ClassVar[str | None] = "Recurrent PPO"
+
+    learn_step: int = Field(
+        default=8192,
+        ge=1,
+        description="Environment steps collected per rollout, before each update.",
+    )
+    recurrent: bool = Field(
+        default=True,
+        description=(
+            "Use an LSTM encoder and train through time. Cannot be combined "
+            "with a SimBa encoder."
+        ),
+    )
 
     @property
     def name(self) -> str:
-        """``Recurrent PPO`` when a recurrent encoder is requested, else ``PPO``."""
-        prefix = "Recurrent " if self.recurrent else ""
-        return f"{prefix}{self.__class__.__name__.removesuffix('Spec')}"
+        return "Recurrent PPO"
+
+    @model_validator(mode="after")
+    def _recurrent_must_stay_on(self) -> Self:
+        if not self.recurrent:
+            msg = "Recurrent PPO requires recurrent=True."
+            raise ValueError(msg)
+        return self

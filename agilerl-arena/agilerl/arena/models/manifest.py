@@ -116,6 +116,10 @@ class DeferredNetworkSpec(BaseModel):
         default=False,
         description="Squash actions through tanh into the action space's bounds.",
     )
+    has_evolvable_encoder: bool = Field(
+        default=False,
+        description="Whether the encoder architecture can be mutated during HPO.",
+    )
 
 
 def _resolve_algorithm(data: object) -> object:

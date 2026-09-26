@@ -13,6 +13,7 @@ from tensordict import TensorDict
 from torch import nn, optim
 
 from agilerl.algorithms.ppo import PPO
+from agilerl.algorithms.recurrent_ppo import RecurrentPPO
 from agilerl.components.rollout_buffer import RolloutBuffer
 from agilerl.modules import EvolvableCNN, EvolvableMLP, EvolvableMultiInput
 from agilerl.networks import StochasticActor
@@ -259,7 +260,7 @@ class TestPPOInit:
         assert ppo.gamma == 0.99
         assert ppo.gae_lambda == 0.95
         assert ppo.mut is None
-        assert ppo.action_std_init == 0.0
+        assert ppo.action_std_init == 0.6
         assert ppo.clip_coef == 0.2
         assert ppo.ent_coef == 0.01
         assert ppo.vf_coef == 0.5
@@ -614,6 +615,14 @@ class TestPPOInit:
             "Continuous action spaces should not have action_masks in the buffer"
         )
         ppo.clean_up()
+
+
+class TestRecurrentPPOInit:
+    def test_defaults_recurrent_true(self, vector_space, discrete_space):
+        agent = RecurrentPPO(vector_space, discrete_space)
+
+        assert agent.recurrent is True
+        agent.clean_up()
 
 
 class TestPPOGetAction:

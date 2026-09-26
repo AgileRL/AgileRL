@@ -25,6 +25,7 @@ from agilerl.arena.models import (
 )
 from agilerl.arena.models.algorithms.dqn import DQNSpec
 from agilerl.arena.models.algorithms.grpo import GRPOSpec
+from agilerl.arena.models.algorithms.ppo import PPOSpec, RecurrentPPOSpec
 from agilerl.arena.models.env import GymEnvSpec, LLMEnvType
 from agilerl.arena.models.fsdp import FSDPConfig
 from agilerl.arena.models.manifest import _resolve_algorithm
@@ -45,7 +46,7 @@ def _manifest(**sections) -> dict:
 class TestGymEnvSpec:
     def test_defaults(self) -> None:
         spec = GymEnvSpec(name="CartPole-v1")
-        assert spec.num_envs == 16
+        assert spec.num_envs == 32
         assert spec.version is None
 
 
@@ -73,6 +74,22 @@ class TestTrainingSpecValidators:
             ValueError, match=r"eps_start .* must be greater than or equal to eps_end"
         ):
             TrainingSpec(eps_start=0.1, eps_end=0.9)
+
+
+class TestTrainingSpecDefaults:
+    def test_bare_training_spec_field_defaults(self) -> None:
+        spec = TrainingSpec()
+        assert spec.learning_delay is None
+        assert spec.experience_sharing is None
+        assert spec.hpo is False
+
+
+class TestAlgorithmLearnStepDefaults:
+    def test_ppo_learn_step_default(self) -> None:
+        assert PPOSpec().learn_step == 4096
+
+    def test_recurrent_ppo_learn_step_default(self) -> None:
+        assert RecurrentPPOSpec().learn_step == 8192
 
 
 class TestCheckpointExportSpec:
@@ -135,13 +152,13 @@ class TestAlgorithmRegistry:
         with pytest.raises(KeyError, match="No registry entry for algorithm 'NOPE'"):
             MANIFEST_REGISTRY.get("NOPE")
 
-    def test_create_applies_alias_implies(self) -> None:
+    def test_create_recurrent_ppo_defaults_recurrent(self) -> None:
         spec = MANIFEST_REGISTRY.create("Recurrent PPO")
         assert spec.recurrent is True
         assert spec.name == "Recurrent PPO"
 
-    def test_create_rejects_conflicting_implied_field(self) -> None:
-        with pytest.raises(ValueError, match="implies"):
+    def test_create_rejects_recurrent_ppo_with_recurrent_off(self) -> None:
+        with pytest.raises(ValueError, match="Recurrent PPO requires recurrent=True"):
             MANIFEST_REGISTRY.create("Recurrent PPO", recurrent=False)
 
     def test_override_logs_warning(self) -> None:

@@ -15,6 +15,7 @@ from .matd3 import MATD3
 from .neural_ts_bandit import NeuralTS
 from .neural_ucb_bandit import NeuralUCB
 from .ppo import PPO
+from .recurrent_ppo import RecurrentPPO
 from .td3 import TD3
 
 __all__ = [
@@ -33,6 +34,7 @@ __all__ = [
     "NeuralTS",
     "NeuralUCB",
     "RainbowDQN",
+    "RecurrentPPO",
 ]
 
 if HAS_LLM_DEPENDENCIES:

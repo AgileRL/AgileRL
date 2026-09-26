@@ -52,11 +52,9 @@ def off_policy_trainer_kwargs(
     :returns: The shared keyword arguments.
     :rtype: dict[str, Any]
     """
-    kwargs: dict[str, Any] = {
-        "memory": memory,
-        "learning_delay": training.learning_delay,
-    }
+    kwargs: dict[str, Any] = {"memory": memory}
     maybe_kwargs = {
+        "learning_delay": training.learning_delay,
         "eps_start": training.eps_start,
         "eps_end": training.eps_end,
         "eps_decay": training.eps_decay,

@@ -22,10 +22,20 @@ from agilerl.arena.models import (
     LLMRolloutBufferSpec,
     MultiFrequencySelectionSpec,
     MutationSpec,
+    RainbowDQNSpec,
     ReplayBufferSpec,
     TrainingManifest,
+    TrainingSpec,
     __version__,
     manifest_schema,
+)
+from agilerl.arena.models.algorithms import RolloutLLMSpec
+from agilerl.arena.models.env import LLMEnvType
+from agilerl.arena.models.schema import (
+    algorithm_name_if,
+    dataset_backed_grpo_rollout_if,
+    registered_algorithm_names,
+    training_then,
 )
 
 DQN = {
@@ -80,8 +90,10 @@ class TestAcceptance:
         assert MANIFEST_REGISTRY.get("Rainbow DQN") is MANIFEST_REGISTRY.get(
             "RainbowDQN"
         )
-        assert MANIFEST_REGISTRY.get("Recurrent PPO") is MANIFEST_REGISTRY.get("PPO")
-        assert MANIFEST_REGISTRY.get("RecurrentPPO") is MANIFEST_REGISTRY.get("PPO")
+        from agilerl.arena.models.algorithms.ppo import RecurrentPPOSpec
+
+        assert MANIFEST_REGISTRY.get("Recurrent PPO") is RecurrentPPOSpec
+        assert MANIFEST_REGISTRY.get("RecurrentPPO") is RecurrentPPOSpec
 
     @pytest.mark.parametrize("name", ["LLMPPO", "LLMREINFORCE"])
     def test_llm_policy_gradient_manifests_take_advantage_granularity(
@@ -264,9 +276,9 @@ class TestResolution:
             }
         ).to_payload()
         assert "num_envs" not in payload["algorithm"]
-        assert payload["environment"]["num_envs"] == 16
+        assert payload["environment"]["num_envs"] == 32
         reloaded = TrainingManifest.model_validate(payload)
-        assert reloaded.algorithm.num_envs == 16
+        assert reloaded.algorithm.num_envs == 32
 
     def test_unset_vect_noise_dim_is_omitted_from_the_payload(self) -> None:
         payload = TrainingManifest.model_validate(
@@ -277,9 +289,9 @@ class TestResolution:
             }
         ).to_payload()
         assert "vect_noise_dim" not in payload["algorithm"]
-        assert payload["environment"]["num_envs"] == 16
+        assert payload["environment"]["num_envs"] == 32
         reloaded = TrainingManifest.model_validate(payload)
-        assert reloaded.algorithm.vect_noise_dim == 16
+        assert reloaded.algorithm.vect_noise_dim == 32
 
     def test_empty_mutation_is_a_noop(self) -> None:
         payload = TrainingManifest.model_validate(
@@ -776,8 +788,9 @@ class TestSchema:
     def test_schema_defaults_an_aliased_algorithm_to_its_canonical_name(self) -> None:
         variants = manifest_schema()["properties"]["algorithm"]["oneOf"]
         rainbow = next(v for v in variants if v["title"] == "RainbowDQN")
-        assert rainbow["properties"]["name"]["default"] == "RainbowDQN"
+        assert rainbow["properties"]["name"]["default"] == "Rainbow DQN"
         assert "Rainbow DQN" in rainbow["properties"]["name"]["enum"]
+        assert RainbowDQNSpec().name == "Rainbow DQN"
 
     def test_the_payload_fills_the_sections_the_runtime_indexes_into(self) -> None:
         # Omitted mutation and tournament_selection dump with the keys later
@@ -824,8 +837,7 @@ class TestSchema:
         assert payload["algorithm"]["use_separate_reference_adapter"] is False
 
     def test_recurrent_ppo_stays_recurrent(self) -> None:
-        # "Recurrent PPO" and "PPO" resolve to one spec, so the alias has to
-        # carry the flag or the run silently trains as plain PPO.
+        # Recurrent PPO is its own registered spec with recurrent defaulting on.
         doc = copy.deepcopy(DQN)
         doc["algorithm"] = {"name": "Recurrent PPO"}
         payload = TrainingManifest.model_validate(doc).to_payload()
@@ -989,6 +1001,209 @@ class TestSchema:
             "replay_buffer",
         } <= set(properties)
 
+    def _applied_training_defaults(self, instance: dict) -> dict[str, object]:
+        applied: dict[str, object] = {}
+        for cond in manifest_schema().get("allOf") or []:
+            if_schema = cond.get("if")
+            then = cond.get("then")
+            if not isinstance(if_schema, dict) or not isinstance(then, dict):
+                continue
+            if not Draft202012Validator(if_schema).is_valid(instance):
+                continue
+            training_props = (
+                then.get("properties", {}).get("training", {}).get("properties", {})
+            )
+            for name, field in training_props.items():
+                if "default" in field:
+                    applied[name] = field["default"]
+        return applied
+
+    def test_training_conditionals_hang_off_the_root_schema(self) -> None:
+        schema = manifest_schema()
+        training = schema["properties"]["training"]
+        assert "allOf" not in training
+
+        conditionals = [
+            item
+            for item in schema.get("allOf") or []
+            if isinstance(item, dict) and "if" in item and "then" in item
+        ]
+        assert conditionals
+        for cond in conditionals:
+            if_clause = cond["if"]
+            if "allOf" in if_clause:
+                assert any(
+                    part.get("required") == ["algorithm"] for part in if_clause["allOf"]
+                )
+            else:
+                assert if_clause["required"] == ["algorithm"]
+                assert if_clause["properties"]["algorithm"]["required"] == ["name"]
+            assert "training" in cond["then"]["properties"]
+
+    def test_ppo_does_not_pick_up_llmppo_or_off_policy_defaults(self) -> None:
+        ppo = self._applied_training_defaults({"algorithm": {"name": "PPO"}})
+        assert "max_steps" not in ppo
+        assert "experience_sharing" not in ppo
+        assert "eps_start" not in ppo
+
+        llmppo = self._applied_training_defaults({"algorithm": {"name": "LLMPPO"}})
+        assert llmppo["max_steps"] == 200
+        assert "experience_sharing" not in llmppo
+
+        dqn = self._applied_training_defaults({"algorithm": {"name": "DQN"}})
+        assert dqn["eps_start"] == 1.0
+        assert dqn["experience_sharing"] is True
+        assert "max_steps" not in dqn
+
+        training_only = self._applied_training_defaults({"max_steps": 1_000_000})
+        assert training_only == {}
+
+    def test_training_defaults_follow_spec_types(self) -> None:
+        ddpg = self._applied_training_defaults({"algorithm": {"name": "DDPG"}})
+        assert ddpg["experience_sharing"] is True
+        assert "eps_start" not in ddpg
+
+        rainbow = self._applied_training_defaults(
+            {"algorithm": {"name": "Rainbow DQN"}}
+        )
+        assert rainbow["eps_start"] == 1.0
+        assert rainbow["experience_sharing"] is True
+
+        grpo = self._applied_training_defaults({"algorithm": {"name": "GRPO"}})
+        assert grpo["reporting_interval"] == 1
+        assert grpo["max_steps"] == 200
+        assert "experience_sharing" not in grpo
+
+        sft = self._applied_training_defaults({"algorithm": {"name": "SFT"}})
+        assert sft["num_epochs"] == 1
+        assert sft["reporting_interval"] == 1
+        assert sft["max_steps"] is None
+
+        cqn = self._applied_training_defaults({"algorithm": {"name": "CQN"}})
+        assert "experience_sharing" not in cqn
+        assert "eps_start" not in cqn
+
+    def test_ppo_and_recurrent_ppo_learn_step_schema_defaults(self) -> None:
+        variants = manifest_schema()["properties"]["algorithm"]["oneOf"]
+        ppo = next(v for v in variants if v["title"] == "PPO")
+        recurrent = next(v for v in variants if v["title"] == "RecurrentPPO")
+        assert ppo["properties"]["learn_step"]["default"] == 4096
+        assert recurrent["properties"]["learn_step"]["default"] == 8192
+
+    def test_training_spec_model_defaults_match_schema(self) -> None:
+        spec = TrainingSpec()
+        assert spec.learning_delay is None
+        assert spec.experience_sharing is None
+        assert spec.evaluation_interval is None
+        assert spec.sum_scores is None
+        assert spec.hpo is False
+
+    def test_llm_algorithms_get_evo_steps_ten_from_schema(self) -> None:
+        grpo = self._applied_training_defaults({"algorithm": {"name": "GRPO"}})
+        assert grpo["evo_steps"] == 10
+        assert grpo["reporting_interval"] == 1
+
+        ppo = self._applied_training_defaults({"algorithm": {"name": "PPO"}})
+        assert "evo_steps" not in ppo
+
+    def test_dataset_backed_grpo_rollout_num_epochs_conditional(self) -> None:
+        expected_if = dataset_backed_grpo_rollout_if()
+        conditionals = manifest_schema().get("allOf") or []
+        match = next(
+            c
+            for c in conditionals
+            if c.get("if") == expected_if
+            and c.get("then")
+            == {
+                "properties": {
+                    "training": {"properties": {"num_epochs": {"default": 1}}}
+                }
+            }
+        )
+        assert match is not None
+
+        dataset_rollout = {
+            "algorithm": {"name": "GRPO"},
+            "environment": {
+                "env_type": "rollout",
+                "dataset": "openai/gsm8k",
+                "reward_file_path": "reward.py",
+                "prompt_template": {"user_0": "{question}"},
+            },
+        }
+        applied = self._applied_training_defaults(dataset_rollout)
+        assert applied["num_epochs"] == 1
+        assert applied["evo_steps"] == 10
+
+        generative_rollout = {
+            "algorithm": {"name": "GRPO"},
+            "environment": {
+                "env_type": "rollout",
+                "factory": "my_env:build",
+                "entrypoint": "task",
+            },
+        }
+        generative_defaults = self._applied_training_defaults(generative_rollout)
+        assert "num_epochs" not in generative_defaults
+
+    def test_rollout_llm_max_steps_conditional_covers_grpo_family(self) -> None:
+        def rollout_llm(spec: type) -> bool:
+            return issubclass(spec, RolloutLLMSpec)
+
+        rollout_if = algorithm_name_if(registered_algorithm_names(rollout_llm))
+        conditionals = manifest_schema().get("allOf") or []
+        max_steps_conds = [
+            c
+            for c in conditionals
+            if c.get("then") == training_then({"max_steps": {"default": 200}})
+            and c.get("if") == rollout_if
+        ]
+        assert len(max_steps_conds) == 1
+        for name in ("GRPO", "GSPO", "CISPO", "LLMPPO", "LLMREINFORCE"):
+            applied = self._applied_training_defaults({"algorithm": {"name": name}})
+            assert applied["max_steps"] == 200
+
+    def test_dataset_llm_max_steps_conditional_is_null(self) -> None:
+        def dataset_llm(spec: type) -> bool:
+            return spec.env_type == LLMEnvType.DATASET
+
+        dataset_if = algorithm_name_if(registered_algorithm_names(dataset_llm))
+        conditionals = manifest_schema().get("allOf") or []
+        null_max_steps = [
+            c
+            for c in conditionals
+            if c.get("if") == dataset_if
+            and c.get("then") == training_then({"max_steps": {"default": None}})
+        ]
+        assert len(null_max_steps) == 1
+        for name in ("DPO", "SFT"):
+            applied = self._applied_training_defaults({"algorithm": {"name": name}})
+            assert applied["max_steps"] is None
+
+    def test_llm_evaluation_interval_schema_default(self) -> None:
+        llm = self._applied_training_defaults({"algorithm": {"name": "GRPO"}})
+        assert llm["evaluation_interval"] == 10
+        ppo = self._applied_training_defaults({"algorithm": {"name": "PPO"}})
+        assert "evaluation_interval" not in ppo
+
+    def test_multi_agent_sum_scores_schema_default(self) -> None:
+        maddpg = self._applied_training_defaults({"algorithm": {"name": "MADDPG"}})
+        assert maddpg["sum_scores"] is True
+        ppo = self._applied_training_defaults({"algorithm": {"name": "PPO"}})
+        assert "sum_scores" not in ppo
+
+    def test_grpo_group_size_schema_default(self) -> None:
+        variants = manifest_schema()["properties"]["algorithm"]["oneOf"]
+        grpo = next(v for v in variants if v["title"] == "GRPO")
+        assert grpo["properties"]["group_size"]["default"] == 8
+
+    def test_has_evolvable_encoder_on_classic_not_llm_network_schema(self) -> None:
+        schema = manifest_schema()
+        network_spec = schema["$defs"]["NetworkSpec"]
+        assert network_spec["properties"]["has_evolvable_encoder"]["default"] is False
+        finetuning = schema["$defs"]["FinetuningNetworkSpec"]
+        assert "has_evolvable_encoder" not in finetuning.get("properties", {})
+
 
 class TestClusterSupported:
     def test_cqn_and_bandits_are_local_only(self) -> None:
@@ -1007,6 +1222,7 @@ class TestClusterSupported:
 
 class TestRolloutSamplingFields:
     def test_grpo_defaults_match_the_algorithm_ctor(self) -> None:
+        assert GRPOSpec().group_size == 8
         spec = GRPOSpec.model_construct(group_size=4)
         assert spec.top_p == 0.95
         assert spec.top_k == 50

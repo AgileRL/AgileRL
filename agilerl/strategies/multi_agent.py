@@ -40,7 +40,9 @@ class MultiAgentOnPolicyStrategy(TrainingStrategy):
         n_step_memory: BufferType | None = None,
     ) -> dict[str, Any]:
         kwargs = rl_trainer_kwargs(spec, training=training, env_spec=env_spec)
-        kwargs["sum_scores"] = training.sum_scores
+        kwargs["sum_scores"] = (
+            training.sum_scores if training.sum_scores is not None else True
+        )
         return kwargs
 
 
@@ -66,5 +68,7 @@ class MultiAgentOffPolicyStrategy(TrainingStrategy):
                 training, memory=memory, n_step_memory=n_step_memory
             ),
         }
-        kwargs["sum_scores"] = training.sum_scores
+        kwargs["sum_scores"] = (
+            training.sum_scores if training.sum_scores is not None else True
+        )
         return kwargs

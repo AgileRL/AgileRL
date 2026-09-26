@@ -59,8 +59,11 @@ class LLMStrategy(TrainingStrategy):
         memory: BufferType | None = None,
         n_step_memory: BufferType | None = None,
     ) -> dict[str, Any]:
+        evaluation_interval = training.evaluation_interval
+        if evaluation_interval is None:
+            evaluation_interval = 10
         kwargs: dict[str, Any] = {
-            "evaluation_interval": training.evaluation_interval,
+            "evaluation_interval": evaluation_interval,
         }
         maybe_kwargs: dict[str, Any] = {
             "checkpoint_steps": training.checkpoint_steps,

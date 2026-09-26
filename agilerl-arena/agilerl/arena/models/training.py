@@ -272,10 +272,10 @@ class TrainingSpec(BaseModel):
         ),
     )
     hpo: bool = Field(
-        default=True,
+        default=False,
         description=(
             "Mutate hyperparameters and architecture between evolution rounds. "
-            "Off trains the population without changing it."
+            "When false, the population trains without hyperparameter mutation."
         ),
     )
     target_score: float | None = Field(
@@ -283,8 +283,8 @@ class TrainingSpec(BaseModel):
         description="Stop early once this fitness is reached. Unset trains to max_steps.",
     )
 
-    learning_delay: int = Field(
-        default=0,
+    learning_delay: int | None = Field(
+        default=None,
         ge=0,
         description=(
             "Steps collected before the first learn step, so the buffer holds "
@@ -315,8 +315,8 @@ class TrainingSpec(BaseModel):
         description="Overwrite the previous checkpoint instead of keeping each one.",
     )
 
-    evaluation_interval: int = Field(
-        default=10,
+    evaluation_interval: int | None = Field(
+        default=None,
         ge=1,
         description="Steps between evaluations during LLM fine-tuning.",
     )
@@ -340,11 +340,11 @@ class TrainingSpec(BaseModel):
         description="Wall-clock limit for the run. Unset trains to max_steps.",
     )
 
-    episode_steps: int = Field(
-        default=500, ge=1, description="Steps per episode. Bandits only."
+    episode_steps: int | None = Field(
+        default=None, ge=1, description="Steps per episode. Bandits only."
     )
-    sum_scores: bool = Field(
-        default=True,
+    sum_scores: bool | None = Field(
+        default=None,
         description=(
             "Sum sub-agent scores into one fitness rather than averaging. "
             "Multi-agent only; usually True for cooperative environments."
@@ -354,8 +354,8 @@ class TrainingSpec(BaseModel):
     reporting_interval: int = Field(
         default=1024, ge=1, description="Steps between metric reports."
     )
-    experience_sharing: bool = Field(
-        default=False,
+    experience_sharing: bool | None = Field(
+        default=None,
         description=(
             "Let population members learn from each other's transitions. Not "
             "supported under async rollout."

@@ -5,13 +5,21 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as distribution_version
 from typing import Any, cast, get_args
 
 from pydantic import AliasChoices, BaseModel
 
-from agilerl.arena.models.algorithms.base import AlgoSpec
+from agilerl.arena.models.algorithms import (
+    AlgoSpec,
+    GRPOSpec,
+    LLMAlgorithmSpec,
+    MultiAgentAlgorithmSpec,
+    RolloutLLMSpec,
+)
+from agilerl.arena.models.env import LLMEnvType
 from agilerl.arena.models.manifest import API_VERSION, TrainingManifest, _is_numeric
 from agilerl.arena.models.registry import MANIFEST_REGISTRY
 
@@ -27,6 +35,166 @@ def _package_version() -> str:
 
 
 REF_TEMPLATE = "#/$defs/{model}"
+
+
+def registered_algorithm_names(
+    match: Callable[[type[AlgoSpec]], bool],
+) -> tuple[str, ...]:
+    """Return registry names whose spec class satisfies *match*."""
+    return tuple(
+        name for name, spec_cls in MANIFEST_REGISTRY.items() if match(spec_cls)
+    )
+
+
+def algorithm_name_if(algorithm_names: tuple[str, ...]) -> dict[str, Any]:
+    return {
+        "properties": {
+            "algorithm": {
+                "properties": {"name": {"enum": list(algorithm_names)}},
+                "required": ["name"],
+            }
+        },
+        "required": ["algorithm"],
+    }
+
+
+def training_then(defaults: dict[str, Any]) -> dict[str, Any]:
+    return {"properties": {"training": {"properties": defaults}}}
+
+
+def environment_rollout_type_if() -> dict[str, Any]:
+    return {
+        "properties": {
+            "environment": {
+                "properties": {"env_type": {"const": "rollout"}},
+                "required": ["env_type"],
+            }
+        },
+        "required": ["environment"],
+    }
+
+
+def environment_dataset_identity_if() -> dict[str, Any]:
+    return {
+        "properties": {
+            "environment": {
+                "anyOf": [
+                    {"required": ["dataset"]},
+                    {"required": ["dataset_path"]},
+                    {"required": ["hf_dataset_id"]},
+                    {"required": ["columns"]},
+                    {"required": ["prompt_template"]},
+                ]
+            }
+        },
+        "required": ["environment"],
+    }
+
+
+def environment_without_generative_source_if() -> dict[str, Any]:
+    return {
+        "not": {
+            "properties": {
+                "environment": {
+                    "anyOf": [
+                        {"required": ["env_url"]},
+                        {"required": ["env_image"]},
+                        {"required": ["factory"]},
+                        {"required": ["entrypoint"]},
+                    ]
+                }
+            },
+            "required": ["environment"],
+        }
+    }
+
+
+def dataset_backed_grpo_rollout_if() -> dict[str, Any]:
+    def grpo_family(spec: type[AlgoSpec]) -> bool:
+        return issubclass(spec, GRPOSpec)
+
+    return {
+        "allOf": [
+            algorithm_name_if(registered_algorithm_names(grpo_family)),
+            environment_rollout_type_if(),
+            environment_dataset_identity_if(),
+            environment_without_generative_source_if(),
+        ]
+    }
+
+
+def training_schema_conditionals() -> list[dict[str, Any]]:
+    def epsilon_greedy(spec: type[AlgoSpec]) -> bool:
+        return spec.off_policy and "expl_noise" not in spec.model_fields
+
+    def llm_algorithm(spec: type[AlgoSpec]) -> bool:
+        return issubclass(spec, LLMAlgorithmSpec)
+
+    def rollout_llm(spec: type[AlgoSpec]) -> bool:
+        return issubclass(spec, RolloutLLMSpec)
+
+    def dataset_llm(spec: type[AlgoSpec]) -> bool:
+        return spec.env_type == LLMEnvType.DATASET
+
+    def multi_agent(spec: type[AlgoSpec]) -> bool:
+        return issubclass(spec, MultiAgentAlgorithmSpec)
+
+    def off_policy(spec: type[AlgoSpec]) -> bool:
+        return spec.off_policy
+
+    return [
+        {
+            "if": algorithm_name_if(registered_algorithm_names(epsilon_greedy)),
+            "then": training_then(
+                {
+                    "eps_start": {"default": 1.0},
+                    "eps_end": {"default": 0.01},
+                    "eps_decay": {"default": 0.99999},
+                }
+            ),
+        },
+        {
+            "if": algorithm_name_if(registered_algorithm_names(llm_algorithm)),
+            "then": training_then({"reporting_interval": {"default": 1}}),
+        },
+        {
+            "if": algorithm_name_if(registered_algorithm_names(llm_algorithm)),
+            "then": training_then({"evo_steps": {"default": 10}}),
+        },
+        {
+            "if": algorithm_name_if(registered_algorithm_names(llm_algorithm)),
+            "then": training_then({"evaluation_interval": {"default": 10}}),
+        },
+        {
+            "if": algorithm_name_if(registered_algorithm_names(rollout_llm)),
+            "then": training_then({"max_steps": {"default": 200}}),
+        },
+        {
+            "if": algorithm_name_if(registered_algorithm_names(dataset_llm)),
+            "then": training_then({"num_epochs": {"default": 1}}),
+        },
+        {
+            "if": algorithm_name_if(registered_algorithm_names(dataset_llm)),
+            "then": training_then({"max_steps": {"default": None}}),
+        },
+        {
+            "if": algorithm_name_if(registered_algorithm_names(multi_agent)),
+            "then": training_then({"sum_scores": {"default": True}}),
+        },
+        {
+            "if": algorithm_name_if(registered_algorithm_names(off_policy)),
+            "then": training_then({"experience_sharing": {"default": True}}),
+        },
+        {
+            "if": dataset_backed_grpo_rollout_if(),
+            "then": training_then({"num_epochs": {"default": 1}}),
+        },
+    ]
+
+
+def attach_training_schema_conditionals(schema: dict[str, Any]) -> None:
+    """Append algorithm-conditional training defaults to the root schema."""
+    schema["allOf"] = [*(schema.get("allOf") or []), *training_schema_conditionals()]
 
 
 def algorithm_schema() -> tuple[dict[str, Any], dict[str, Any]]:
@@ -48,16 +216,17 @@ def algorithm_schema() -> tuple[dict[str, Any], dict[str, Any]]:
         # An algorithm registered under an alias is still one choice; the aliases
         # stay valid input, but a form must not offer the same algorithm twice.
         canonical = spec_cls.__name__.removesuffix("Spec")
+        default_name = spec_cls.schema_name or canonical
         accepted = [canonical, *sorted(n for n in names if n != canonical)]
         schema = spec_cls.model_json_schema(ref_template=REF_TEMPLATE)
         defs.update(schema.pop("$defs", {}))
         schema["title"] = canonical
         schema.setdefault("properties", {})["name"] = {
             "type": "string",
-            "enum": accepted,
-            "default": canonical,
+            "enum": sorted(set(accepted)),
+            "default": default_name,
             "title": "Algorithm",
-            "description": f"Selects {canonical}.",
+            "description": f"Selects {default_name}.",
         }
         required = schema.setdefault("required", [])
         if "name" not in required:
@@ -240,6 +409,7 @@ def manifest_schema() -> dict[str, Any]:
             _add_alias_spellings(definition, models[name])
 
     schema = cast("dict[str, Any]", _walk(schema))
+    attach_training_schema_conditionals(schema)
     schema["$id"] = SCHEMA_ID
     schema["x-manifest-version"] = _package_version()
     schema["title"] = "AgileRL training manifest"

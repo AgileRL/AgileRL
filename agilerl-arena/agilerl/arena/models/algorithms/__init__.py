@@ -27,7 +27,7 @@ from agilerl.arena.models.algorithms.maddpg import MADDPGSpec
 from agilerl.arena.models.algorithms.matd3 import MATD3Spec
 from agilerl.arena.models.algorithms.neural_ts import NeuralTSSpec
 from agilerl.arena.models.algorithms.neural_ucb import NeuralUCBSpec
-from agilerl.arena.models.algorithms.ppo import PPOSpec
+from agilerl.arena.models.algorithms.ppo import PPOSpec, RecurrentPPOSpec
 from agilerl.arena.models.algorithms.rainbow_dqn import RainbowDQNSpec
 from agilerl.arena.models.algorithms.rollout_llm import RolloutLLMSpec
 from agilerl.arena.models.algorithms.sft import SFTSpec
@@ -55,6 +55,7 @@ __all__ = [
     "NeuralUCBSpec",
     "PPOSpec",
     "RainbowDQNSpec",
+    "RecurrentPPOSpec",
     "RolloutLLMSpec",
     "SFTSpec",
     "SingleAgentAlgorithmSpec",

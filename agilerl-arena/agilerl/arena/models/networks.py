@@ -316,7 +316,7 @@ class MultiInputSpec(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     latent_dim: int = Field(
-        default=32,
+        default=128,
         gt=0,
         description="Width of the latent each sub-encoder projects into.",
     )
@@ -325,7 +325,7 @@ class MultiInputSpec(BaseModel):
         description="Pass vector observations through an MLP before concatenating, rather than using them raw.",
     )
     min_latent_dim: int = Field(
-        default=8, gt=0, description="Narrowest the latent may be mutated to."
+        default=16, gt=0, description="Narrowest the latent may be mutated to."
     )
     max_latent_dim: int = Field(
         default=128, gt=1, description="Widest the latent may be mutated to."
@@ -508,12 +508,12 @@ class NetworkSpec(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     latent_dim: int = Field(
-        default=32,
+        default=128,
         gt=0,
         description="Width of the latent the encoder produces and the head consumes.",
     )
     min_latent_dim: int = Field(
-        default=8, gt=0, description="Narrowest the latent may be mutated to."
+        default=16, gt=0, description="Narrowest the latent may be mutated to."
     )
     max_latent_dim: int = Field(
         default=128, gt=1, description="Widest the latent may be mutated to."
@@ -534,6 +534,10 @@ class NetworkSpec(BaseModel):
     simba: bool = Field(
         default=False,
         description="Use a SimBa encoder. Set automatically when encoder_config.arch is 'simba'.",
+    )
+    has_evolvable_encoder: bool = Field(
+        default=False,
+        description="Whether the encoder architecture can be mutated during HPO.",
     )
 
     @model_validator(mode="after")

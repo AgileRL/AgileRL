@@ -82,7 +82,7 @@ class GymEnvSpec(EnvSpecBase):
         description="Registered environment id, e.g. LunarLander-v3.",
     )
     num_envs: int = Field(
-        default=16,
+        default=32,
         ge=1,
         description=(
             "Environment copies stepped in parallel. More environments collect "
@@ -222,6 +222,11 @@ class LLMEnvSpec(EnvSpecBase):
     loss.
     """
 
+    num_envs: int = Field(
+        default=1,
+        ge=1,
+        description="Environment copies stepped in parallel.",
+    )
     env_type: Literal["rollout", "dataset"] = Field(
         description=(
             "Which LLM regime drives the run: a generative environment the "

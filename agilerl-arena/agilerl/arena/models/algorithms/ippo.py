@@ -35,7 +35,7 @@ class IPPOSpec(MultiAgentAlgorithmSpec):
     """Independent PPO."""
 
     learn_step: int = Field(
-        default=2048,
+        default=4096,
         ge=1,
         description="Environment steps collected per rollout, before each update.",
     )
@@ -45,7 +45,7 @@ class IPPOSpec(MultiAgentAlgorithmSpec):
         le=1.0,
         description=GAE_LAMBDA,
     )
-    action_std_init: float = Field(default=0.0, description=ACTION_STD_INIT)
+    action_std_init: float = Field(default=0.6, description=ACTION_STD_INIT)
     clip_coef: float = Field(default=0.2, ge=0.0, le=1.0, description=CLIP_COEF)
     ent_coef: float = Field(default=0.01, ge=0.0, le=1.0, description=ENT_COEF)
     vf_coef: float = Field(default=0.5, ge=0.0, le=1.0, description=VF_COEF)

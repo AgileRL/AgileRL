@@ -132,8 +132,9 @@ class TestCnnSpec:
 
 class TestMultiInputSpec:
     def test_valid_construction(self) -> None:
-        spec = MultiInputSpec(latent_dim=32)
-        assert spec.latent_dim == 32
+        spec = MultiInputSpec()
+        assert spec.latent_dim == 128
+        assert spec.min_latent_dim == 16
 
     def test_latent_dim_exceeds_max(self) -> None:
         with pytest.raises(ValueError, match="must be less than or equal to"):

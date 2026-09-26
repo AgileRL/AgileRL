@@ -21,6 +21,8 @@ from agilerl.arena.models.registry import register
 class RainbowDQNSpec(SingleAgentAlgorithmSpec):
     """Rainbow DQN."""
 
+    schema_name: ClassVar[str | None] = "Rainbow DQN"
+
     tau: float = Field(default=0.001, description=TAU)
     beta: float = Field(
         default=0.4,
@@ -45,11 +47,11 @@ class RainbowDQNSpec(SingleAgentAlgorithmSpec):
         ),
     )
     v_min: float = Field(
-        default=0,
+        default=-10,
         description="Lowest return the distributional value support covers.",
     )
     v_max: float = Field(
-        default=200,
+        default=10,
         description="Highest return the distributional value support covers.",
     )
     noise_std: float = Field(
@@ -73,6 +75,10 @@ class RainbowDQNSpec(SingleAgentAlgorithmSpec):
 
     off_policy: ClassVar[bool] = True
     supports_per_buffer: ClassVar[bool] = True
+
+    @property
+    def name(self) -> str:
+        return "Rainbow DQN"
 
     @model_validator(mode="after")
     def _check_v_range(self) -> Self:
