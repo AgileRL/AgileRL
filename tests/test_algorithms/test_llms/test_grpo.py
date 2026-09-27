@@ -1593,7 +1593,7 @@ class TestGRPOLearnRewardsShape:
             # Return per-sample advantages so the rest of learn() can proceed.
             return torch.zeros(_rewards.shape[0], 1, dtype=torch.float32)
 
-        def fake_fused_forward(ids, batch_size):
+        def fake_fused_forward(ids, batch_size, pixel_values=None):
             shape = (ids.shape[0], ids.shape[1] - 1)
             zeros = torch.zeros(shape, dtype=torch.float32, device=ids.device)
             return zeros, zeros, None
@@ -3108,7 +3108,6 @@ class TestGRPOLoss:
         mask[:, -3:] = 0
         mask = mask.to(torch.bool)
         loss, kl, _, _ = grpo._loss(
-            batch_size=10,
             minibatch_idxs=torch.arange(10, device=grpo.device),
             token_ids=torch.randint(
                 0, vocab_size, (10, max_tokens + 1), device=grpo.device
@@ -3304,7 +3303,7 @@ class TestGRPOLearn:
         completion_ids, action_masks = _build_branch_experiences(batch_size=4)
         rewards = torch.tensor([1.0, 0.0, -1.0, 2.0], dtype=torch.float32)
 
-        def fake_fused_forward(ids, batch_size):
+        def fake_fused_forward(ids, batch_size, pixel_values=None):
             shape = (ids.shape[0], ids.shape[1] - 1)
             zeros = torch.zeros(shape, dtype=torch.float32, device=ids.device)
             return zeros, zeros, None
@@ -3346,7 +3345,7 @@ class TestGRPOLearn:
         completion_ids, action_masks = _build_branch_experiences(batch_size=4)
         rewards = torch.tensor([1.0, 0.0, -1.0, 2.0], dtype=torch.float32)
 
-        def fake_fused_forward(ids, batch_size):
+        def fake_fused_forward(ids, batch_size, pixel_values=None):
             shape = (ids.shape[0], ids.shape[1] - 1)
             zeros = torch.zeros(shape, dtype=torch.float32, device=ids.device)
             return zeros, zeros, None
@@ -3381,7 +3380,7 @@ class TestGRPOLearn:
         completion_ids, action_masks = _build_branch_experiences(batch_size=4)
         rewards = torch.tensor([1.0, 0.0, -1.0, 2.0], dtype=torch.float32)
 
-        def fake_fused_forward(ids, batch_size):
+        def fake_fused_forward(ids, batch_size, pixel_values=None):
             shape = (ids.shape[0], ids.shape[1] - 1)
             zeros = torch.zeros(shape, dtype=torch.float32, device=ids.device)
             return zeros, zeros, None
@@ -3425,7 +3424,7 @@ class TestGRPOLearn:
         completion_ids, action_masks = _build_branch_experiences(batch_size=3)
         rewards = torch.tensor([1.0, 0.0, -1.0], dtype=torch.float32)
 
-        def fake_fused_forward(ids, batch_size):
+        def fake_fused_forward(ids, batch_size, pixel_values=None):
             shape = (ids.shape[0], ids.shape[1] - 1)
             zeros = torch.zeros(shape, dtype=torch.float32, device=ids.device)
             return zeros, zeros, None
@@ -3499,7 +3498,7 @@ class TestGRPOLearn:
         rewards = torch.tensor([1.0, 0.0, -1.0, 2.0], dtype=torch.float32)
         seen_advantages: list[torch.Tensor] = []
 
-        def spy_loss(batch_size, minibatch_idxs, ids, masks, advantages, *args, **kw):
+        def spy_loss(minibatch_idxs, ids, masks, advantages, *args, **kw):
             seen_advantages.append(advantages[minibatch_idxs])
             return (
                 torch.tensor(0.0, dtype=torch.float32),
@@ -3653,7 +3652,7 @@ class TestGRPOLearn:
                     return np.array([], dtype=int)
                 return super().__getitem__(item)
 
-        def fake_fused_forward(ids, batch_size):
+        def fake_fused_forward(ids, batch_size, pixel_values=None):
             shape = (ids.shape[0], ids.shape[1] - 1)
             zeros = torch.zeros(shape, dtype=torch.float32, device=ids.device)
             return zeros, zeros, None
@@ -3756,7 +3755,7 @@ class TestGRPOLearn:
         completion_ids, action_masks = _build_branch_experiences(batch_size=2)
         rewards = torch.tensor([1.0, -1.0], dtype=torch.float32)
 
-        def fake_fused_forward(ids, batch_size):
+        def fake_fused_forward(ids, batch_size, pixel_values=None):
             shape = (ids.shape[0], ids.shape[1] - 1)
             zeros = torch.zeros(shape, dtype=torch.float32, device=ids.device)
             return zeros, zeros, None
@@ -5471,7 +5470,7 @@ class TestGRPOVLLMSamplingCorrection:
             torch.full((n_act,), -3.0, dtype=torch.float32) for _ in range(2)
         ]
 
-        def fake_fused_forward(ids, batch_size):
+        def fake_fused_forward(ids, batch_size, pixel_values=None):
             shape = (ids.shape[0], ids.shape[1] - 1)
             zeros = torch.zeros(shape, dtype=torch.float32, device=ids.device)
             return zeros, zeros, None
@@ -5530,12 +5529,14 @@ class TestGRPOVLLMSamplingCorrection:
             torch.full((n_act,), -3.0, dtype=torch.float32) for _ in range(2)
         ]
 
-        def fake_fused_forward(ids, batch_size):
+        def fake_fused_forward(ids, batch_size, pixel_values=None):
             shape = (ids.shape[0], ids.shape[1] - 1)
             zeros = torch.zeros(shape, dtype=torch.float32, device=ids.device)
             return zeros, zeros, None
 
-        def fake_get_logprobs(ids, batch_size, use_reference=False, eval_mode=False):
+        def fake_get_logprobs(
+            ids, batch_size, use_reference=False, eval_mode=False, pixel_values=None
+        ):
             return torch.zeros(
                 ids.shape[0],
                 ids.shape[1] - 1,
@@ -5831,12 +5832,14 @@ class TestGRPOTurnAdvantageLearnPath:
             stub._calculate_turn_advantage(rewards)
 
     def _stubbed_forwards(self, grpo):
-        def fake_fused_forward(ids, batch_size):
+        def fake_fused_forward(ids, batch_size, pixel_values=None):
             shape = (ids.shape[0], ids.shape[1] - 1)
             zeros = torch.zeros(shape, dtype=torch.float32, device=ids.device)
             return zeros, zeros, None
 
-        def fake_get_logprobs(ids, batch_size, use_reference=False, eval_mode=False):
+        def fake_get_logprobs(
+            ids, batch_size, use_reference=False, eval_mode=False, pixel_values=None
+        ):
             return torch.zeros(
                 ids.shape[0], ids.shape[1] - 1, device=ids.device, requires_grad=True
             )

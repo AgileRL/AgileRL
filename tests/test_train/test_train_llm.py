@@ -27,6 +27,7 @@ from agilerl.training.llm import (
     train_llm_dataset,
     train_llm_rollout,
 )
+from agilerl.training.llm.rollout import _stack_batch_pixel_values
 from agilerl.utils.utils import run_selection_and_mutation
 from tests.helper_functions import (
     rank_population_by_subpopulation,
@@ -317,6 +318,7 @@ def _rollout_collect_return(*, batch_steps=3, n_trajectories=1, seq_len=8):
         batch_steps,
         42,
         None,  # all_sampling_logps
+        None,
     )
 
 
@@ -900,6 +902,56 @@ class TestTrainLlmRollout:
         assert mock_init_loggers.call_args.kwargs["algo"] == "GRPO"
         assert mock_init_loggers.call_args.kwargs["env_name"] == "game:Sudoku-v0-hard"
 
+    def test_stack_batch_pixel_values_cats_rows_and_rejects_mixed(self) -> None:
+        assert _stack_batch_pixel_values([]) is None
+        left = torch.ones(1, 3, 2, 2)
+        right = torch.zeros(1, 3, 2, 2)
+
+        stacked = _stack_batch_pixel_values([left, right])
+
+        assert stacked is not None
+        assert stacked.shape == (2, 3, 2, 2)
+        with pytest.raises(ValueError, match="mixed VL and text-only"):
+            _stack_batch_pixel_values([left, None])
+
+    def test_train_llm_rollout_passes_stacked_pixel_values_to_grpo(self) -> None:
+        mock_agent = _make_rollout_mock_agent(spec=GRPO)
+        pixels = torch.ones(1, 3, 2, 2)
+        collected = _rollout_collect_return(batch_steps=3)
+        collected = (*collected[:-1], [pixels])
+
+        with (
+            patch(
+                "agilerl.training.llm.rollout.default_progress_bar",
+                return_value=MagicMock(),
+            ),
+            patch("agilerl.training.llm.rollout.init_loggers", return_value=[]),
+            patch(
+                "agilerl.training.llm.rollout.aggregate_metrics_across_gpus",
+                side_effect=lambda metric: metric,
+            ),
+            patch("agilerl.training.llm.rollout.save_llm_checkpoint"),
+            patch("agilerl.training.llm.rollout.RolloutCollector"),
+            patch("agilerl.training.llm.rollout.collect_rollouts_llm") as mock_collect,
+        ):
+            mock_collect.return_value = collected
+            train_llm_rollout(
+                pop=[mock_agent],
+                env_factory=MagicMock(),
+                max_turns=2,
+                init_hp={"BATCH_SIZE": 1, "ALGO": "GRPO"},
+                max_steps=3,
+                evaluation_interval=100,
+                verbose=False,
+            )
+
+        mock_agent.learn.assert_called_with(
+            ANY,
+            turn_ids=ANY,
+            sampling_logps=ANY,
+            pixel_values=ANY,
+        )
+
     def test_train_llm_rollout_final_checkpoint_needs_a_configured_path(self):
         """The end-of-run checkpoint fires only when a save target is configured."""
         mock_agent = _make_rollout_mock_agent(spec=GRPO)
@@ -989,6 +1041,7 @@ class TestTrainLlmRollout:
             3,  # batch_steps
             123,  # group_seed
             sampling_logps,  # all_sampling_logps (non-None)
+            None,
         )
         with (
             patch(
@@ -1883,7 +1936,8 @@ def test_collect_rollouts_llm_breaks_when_vector_env_has_no_active_prompts():
         [torch.zeros(1, 7, dtype=torch.long)],
         [torch.ones(2, dtype=torch.float32)],
         1,
-        None,  # all_sampling_logps (added to get_trajectories' return)
+        None,
+        None,
     )
 
     _ = collect_rollouts_llm(

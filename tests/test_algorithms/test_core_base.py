@@ -2910,9 +2910,9 @@ class TestFusedLinearLogprobsIntegration:
         hidden_calls: list[int] = []
         orig_hidden = agent._fused_chunk_hidden_and_value
 
-        def counting_hidden(chunk_ids, chunk_mask, chunk_pos):
+        def counting_hidden(chunk_ids, chunk_mask, chunk_pos, chunk_pixel_values=None):
             hidden_calls.append(int(chunk_ids.shape[0]))
-            return orig_hidden(chunk_ids, chunk_mask, chunk_pos)
+            return orig_hidden(chunk_ids, chunk_mask, chunk_pos, chunk_pixel_values)
 
         with (
             patch(
@@ -3904,6 +3904,14 @@ class TestLLMInitMiscPaths:
             _make_llm_agent()
         mock_set_seed.assert_called()
 
+    def test_repeat_pixel_values_returns_same_tensor_or_rejects_misaligned_rows(self):
+        agent = _make_llm_agent()
+        pixels = torch.ones(2, 1, 2, 2)
+
+        assert agent._repeat_pixel_values_for_fused_rows(pixels, 2, 2) is pixels
+        with pytest.raises(ValueError, match="cannot align"):
+            agent._repeat_pixel_values_for_fused_rows(pixels, 3, 2)
+
 
 class TestLLMGenerateWithVllmColocate:
     def test_raises_when_sampling_params_none(self):
@@ -3924,6 +3932,7 @@ def _fake_save_peft_adapter_for_vllm_rollout(
     adapter_name,
     target_modules,
     expert_key_map=None,
+    strip_multimodal_towers=False,
 ):
     from pathlib import Path
 
@@ -5808,6 +5817,93 @@ class TestLLMGenerateWithVllmColocateFullPaths:
         assert sent[0]["prompt_token_ids"] == [1, 2, 3, 9, 9]
         assert len(token_ids) == 1
 
+    def test_generate_with_vllm_colocate_sends_multimodal_request(self):
+        agent = _make_llm_agent()
+        agent.pad_token = "<pad>"
+        agent.pad_token_id = 0
+        agent.max_output_tokens = 20
+        agent.max_model_len = 100
+        agent.repetition_penalty = 1.0
+        agent.temperature = 1.0
+        agent.top_p = 1.0
+        agent.top_k = None
+        agent.min_p = None
+        agent.min_output_tokens = None
+        agent.accelerator = None
+
+        vllm_config = MagicMock()
+        vllm_config.tensor_parallel_size = 1
+        agent.vllm_config = vllm_config
+        agent.device = "cpu"
+
+        image = object()
+        prompts = [
+            {
+                "prompt": "<image> digit 7",
+                "image": image,
+                "prompt_token_len": 4,
+                "input_ids": torch.tensor([[11, 12, 13, 14]]),
+            },
+        ]
+
+        mock_output = MagicMock()
+        mock_output.outputs = [MagicMock(token_ids=list(range(5)))]
+        agent.llm = MagicMock()
+        agent.llm.generate.return_value = [mock_output, mock_output]
+
+        with (
+            patch(
+                "agilerl.algorithms.core.base.SamplingParams",
+                return_value=MagicMock(),
+                create=True,
+            ),
+            patch(
+                "agilerl.algorithms.core.base.stack_and_pad_experiences",
+                return_value=(torch.zeros(2, 5), None),
+            ),
+        ):
+            token_ids, action_masks, _ = agent._generate_with_vllm_colocate(
+                prompts, group_size=2, temperature=0.9
+            )
+
+        sent = agent.llm.generate.call_args[0][0]
+        assert sent[0]["prompt"] == "<image> digit 7"
+        assert sent[0]["multi_modal_data"]["image"] is image
+        assert "prompt_token_ids" not in sent[0]
+        assert sent[1]["prompt"] == sent[0]["prompt"]
+        assert len(token_ids) == 1
+        assert len(action_masks) == 1
+
+    def test_generate_with_vllm_colocate_rejects_non_str_multimodal_prompt(self):
+        agent = _make_llm_agent()
+        agent.pad_token = "<pad>"
+        agent.pad_token_id = 0
+        agent.max_output_tokens = 20
+        agent.max_model_len = 100
+        agent.repetition_penalty = 1.0
+        agent.temperature = 1.0
+        agent.top_p = 1.0
+        agent.top_k = None
+        agent.min_p = None
+        agent.min_output_tokens = None
+        agent.accelerator = None
+        agent.vllm_config = MagicMock(tensor_parallel_size=1)
+        agent.device = "cpu"
+        agent.llm = MagicMock()
+        prompts = [{"prompt": 7, "image": object(), "input_ids": torch.tensor([[1]])}]
+
+        with (
+            patch(
+                "agilerl.algorithms.core.base.SamplingParams",
+                return_value=MagicMock(),
+                create=True,
+            ),
+            pytest.raises(
+                ValueError, match="multimodal generation requires prompt string"
+            ),
+        ):
+            agent._generate_with_vllm_colocate(prompts, group_size=1, temperature=0.9)
+
     def test_generate_with_vllm_colocate_clamps_min_tokens_to_remaining(self):
         agent = _make_llm_agent()
         agent.pad_token = "<pad>"
@@ -6611,6 +6707,16 @@ class TestLLMMoveLoraToVllmErrors:
             ),
             pytest.raises(FileNotFoundError, match="PEFT adapter export"),
         ):
+            agent._move_lora_to_vllm()
+
+    def test_raises_when_vllm_config_missing(self):
+        agent = _make_llm_agent()
+        peft_ref = MagicMock()
+        peft_ref.parameters.return_value = [torch.tensor([1.0])]
+        _setup_agent_for_vllm_lora_sync(agent, peft_ref)
+        agent.vllm_config = None
+
+        with pytest.raises(ValueError, match="vllm_config is required"):
             agent._move_lora_to_vllm()
 
     def test_non_main_rank_exports_and_loads_adapter(self, tmp_path):

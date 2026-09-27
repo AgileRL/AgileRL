@@ -10,6 +10,7 @@ from dataclasses import fields
 from typing import Annotated, Any, ClassVar
 
 from pydantic import (
+    AliasChoices,
     BaseModel,
     ConfigDict,
     Field,
@@ -348,6 +349,7 @@ class LLMAlgorithmSpec(AlgorithmSpec):
     )
     constrain_answer_pattern: str | None = Field(
         default=None,
+        validation_alias=AliasChoices("constrain_answer_pattern", "answer_pattern"),
         description=(
             "Regex grammar for vLLM structured outputs on each turn, or on an "
             "answer continuation when answer_continuation is enabled."

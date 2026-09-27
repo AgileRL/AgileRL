@@ -22,6 +22,22 @@ from agilerl.architectures.vllm_language import (
 )
 
 
+class TestNemotronHOmniLanguageForCausalLM:
+    @pytest.mark.vllm
+    def test_maps_language_prefixes_and_drops_towers(self) -> None:
+        pytest.importorskip("vllm")
+        from agilerl.architectures.nemotron_h.omni_language import (
+            NemotronHOmniLanguageForCausalLM,
+        )
+
+        assert NemotronHOmniLanguageForCausalLM.is_3d_moe_weight is True
+        prefixes = NemotronHOmniLanguageForCausalLM.hf_to_vllm_mapper.orig_to_new_prefix
+        assert prefixes["language_model.backbone."] == "model."
+        assert prefixes["language_model.lm_head."] == "lm_head."
+        assert prefixes["vision_model."] is None
+        assert prefixes["mlp1."] is None
+
+
 class TestNestedLanguageConfig:
     def test_text_config_wins(self) -> None:
         language = SimpleNamespace(architectures=["Qwen2ForCausalLM"])
@@ -121,7 +137,7 @@ class TestApplyLanguageTowerEngineKwargs:
         assert kwargs["hf_overrides"] is nested_language_config
         assert "model_class_overrides" not in kwargs
 
-    def test_language_only_run_is_left_alone(self) -> None:
+    def test_omni_family_sets_vision_override_when_towers_kept(self) -> None:
         kwargs: dict[str, object] = {}
 
         apply_language_tower_engine_kwargs(
@@ -130,10 +146,38 @@ class TestApplyLanguageTowerEngineKwargs:
             runtime=FAMILY_RUNTIME_CONFIGS["nemotron_h_omni"],
         )
 
+        assert kwargs["hf_overrides"] == {
+            "architectures": ["NemotronH_Super_Omni_Reasoning_V3"],
+        }
+        assert "model_class_overrides" not in kwargs
+
+    def test_named_tower_list_keeps_omni_vision_override(self) -> None:
+        kwargs: dict[str, object] = {}
+
+        apply_language_tower_engine_kwargs(
+            kwargs,
+            strip_multimodal_towers=["audio_tower"],
+            runtime=FAMILY_RUNTIME_CONFIGS["nemotron_h_omni"],
+        )
+
+        assert kwargs["hf_overrides"] == {
+            "architectures": ["NemotronH_Super_Omni_Reasoning_V3"],
+        }
+        assert "model_class_overrides" not in kwargs
+
+    def test_kept_towers_without_family_override_leaves_kwargs_alone(self) -> None:
+        kwargs: dict[str, object] = {}
+
+        apply_language_tower_engine_kwargs(
+            kwargs,
+            strip_multimodal_towers=False,
+            runtime=ModelRuntimeConfig(),
+        )
+
         assert kwargs == {}
 
 
-class TestNemotronHOmniLanguageForCausalLM:
+class TestOmniLanguageMapperWithoutVllm:
     def test_class_maps_omni_checkpoint_prefixes(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

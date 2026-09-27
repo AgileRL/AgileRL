@@ -77,6 +77,9 @@ class TestFamilyRuntimeConfigs:
         }
         assert base.language_tower.hf_overrides is None
         assert base.language_tower.model_class_overrides is None
+        assert omni.multimodal_towers_kept_hf_override == {
+            "architectures": ["NemotronH_Super_Omni_Reasoning_V3"],
+        }
 
     def test_nemotron_h_lookup(self) -> None:
         config = FAMILY_RUNTIME_CONFIGS["nemotron_h"]

@@ -219,6 +219,23 @@ class TestSyncTrainerWiring:
         assert batch.sampling_logps[0] is logps[0]
         assert batch.sampling_logps[1] is None
 
+    def test_pixel_values_threaded_through_batch(self):
+        from agilerl.rollouts.on_policy import collate_llm_rollouts
+
+        cids, masks, turns, rewards = self._make_rollout(2, 1, 2, random.Random(7))
+        pixels = [torch.ones(1, 3, 2, 2), torch.zeros(1, 3, 2, 2)]
+        batch = collate_llm_rollouts(
+            cids,
+            masks,
+            turns,
+            rewards,
+            group_size=1,
+            all_pixel_values=pixels,
+        )
+        assert batch.pixel_values is not None
+        assert batch.pixel_values[0] is pixels[0]
+        assert batch.pixel_values[1] is pixels[1]
+
     def test_non_divisible_raises(self):
         from agilerl.rollouts.on_policy import collate_llm_rollouts
 

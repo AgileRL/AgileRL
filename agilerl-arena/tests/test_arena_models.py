@@ -271,6 +271,12 @@ class TestLLMAlgorithmSpecValidators:
         )
         assert spec.constrain_answer_pattern is None
 
+    def test_answer_pattern_alias_populates_constrain_answer_pattern(self) -> None:
+        spec = GRPOSpec.model_validate(
+            {"group_size": 2, "answer_pattern": r"<answer>.*</answer>"},
+        )
+        assert spec.constrain_answer_pattern == r"<answer>.*</answer>"
+
     def test_invalid_constrain_answer_pattern_regex(self) -> None:
         with pytest.raises(ValidationError, match="not a valid regular expression"):
             GRPOSpec(group_size=2, constrain_answer_pattern="(")
@@ -574,8 +580,20 @@ class TestLLMEnvSpecSurfaces:
         )
         assert urls.label == "http://a"
 
-        image = LLMEnvSpec(env_type="rollout", env_image="env:latest")
+        image = LLMEnvSpec(
+            env_type="rollout",
+            env_image="env:latest",
+            env_vars={"BROWSERGYM_BENCHMARK": "miniwob"},
+        )
         assert image.label == "env:latest"
+        assert image.env_vars == {"BROWSERGYM_BENCHMARK": "miniwob"}
+
+        with pytest.raises(ValueError, match="env_vars set container environment"):
+            LLMEnvSpec(
+                env_type="rollout",
+                dataset="rows",
+                env_vars={"BROWSERGYM_BENCHMARK": "miniwob"},
+            )
 
         named = LLMEnvSpec(
             env_type="rollout",
