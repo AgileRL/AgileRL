@@ -2718,7 +2718,9 @@ def _resolve_lr(
 
 
 def inherit_init_signature(
-    parent: type, fixed: set[str] | None = None
+    parent: type,
+    fixed: set[str] | None = None,
+    defaults: dict[str, Any] | None = None,
 ) -> Callable[[type], type]:
     """Class decorator giving a subclass its ``parent``'s ``__init__`` signature.
 
@@ -2735,12 +2737,19 @@ def inherit_init_signature(
     :param fixed: Parameter names the subclass pins internally and therefore must
         not accept (excluded from the inherited signature), defaults to ``None``.
     :type fixed: set[str] | None, optional
+    :param defaults: Inherited parameter defaults to replace on the subclass.
+    :type defaults: dict[str, Any] | None, optional
     :return: A class decorator.
     :rtype: Callable[[type], type]
     """
     fixed = fixed or set()
     parent_sig = inspect.signature(parent.__init__)
     kept = [p for p in parent_sig.parameters.values() if p.name not in fixed]
+    if defaults:
+        kept = [
+            p.replace(default=defaults[p.name]) if p.name in defaults else p
+            for p in kept
+        ]
 
     def decorate(cls: type) -> type:
         if "__init__" not in cls.__dict__:

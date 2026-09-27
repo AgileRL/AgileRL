@@ -82,7 +82,7 @@ class GymEnvSpec(EnvSpecBase):
         description="Registered environment id, e.g. LunarLander-v3.",
     )
     num_envs: int = Field(
-        default=16,
+        default=32,
         ge=1,
         description=(
             "Environment copies stepped in parallel. More environments collect "
@@ -222,6 +222,11 @@ class LLMEnvSpec(EnvSpecBase):
     loss.
     """
 
+    num_envs: int = Field(
+        default=1,
+        ge=1,
+        description="Environment copies stepped in parallel.",
+    )
     env_type: Literal["rollout", "dataset"] = Field(
         description=(
             "Which LLM regime drives the run: a generative environment the "
@@ -403,14 +408,14 @@ class LLMEnvSpec(EnvSpecBase):
             "on env_port (Ray runtime only)."
         ),
     )
-    env_port: int = Field(
-        default=8000,
+    env_port: int | None = Field(
+        default=None,
         ge=1,
         le=65535,
         description="TCP port the env_image server listens on.",
     )
-    cpus_per_env_host: float = Field(
-        default=1.0, gt=0.0, description="CPUs reserved per env host."
+    cpus_per_env_host: float | None = Field(
+        default=None, gt=0.0, description="CPUs reserved per env host."
     )
     env_host_memory_bytes: int | None = Field(
         default=None, gt=0, description="Memory reserved per env host."
@@ -603,6 +608,15 @@ class LLMEnvSpec(EnvSpecBase):
         if self.rubric_file_path is not None:
             msg = "rubric_file_path has been specified, but is not supported for dataset environments."
             raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def _resolve_env_image_host_defaults(self) -> Self:
+        if self.env_image is not None:
+            if self.env_port is None:
+                self.env_port = 8000
+            if self.cpus_per_env_host is None:
+                self.cpus_per_env_host = 1.0
         return self
 
 

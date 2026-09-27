@@ -77,7 +77,7 @@ class IPPO(MultiAgentAlgorithm[tuple[Mapping[str, Any], ...]]):
     :type batch_size: int, optional
     :param lr: Learning rate for optimizer, defaults to 1e-4
     :type lr: float, optional
-    :param learn_step: Learning frequency, defaults to 2048
+    :param learn_step: Learning frequency, defaults to 4096
     :type learn_step: int, optional
     :param gamma: Discount factor, defaults to 0.99
     :type gamma: float, optional
@@ -85,7 +85,7 @@ class IPPO(MultiAgentAlgorithm[tuple[Mapping[str, Any], ...]]):
     :type gae_lambda: float, optional
     :param mut: Most recent mutation to agent, defaults to None
     :type mut: str, optional
-    :param action_std_init: Initial action standard deviation, defaults to 0.0
+    :param action_std_init: Initial action standard deviation, defaults to 0.6
     :type action_std_init: float, optional
     :param clip_coef: Surrogate clipping coefficient, defaults to 0.2
     :type clip_coef: float, optional
@@ -133,11 +133,11 @@ class IPPO(MultiAgentAlgorithm[tuple[Mapping[str, Any], ...]]):
         net_config: dict[str, Any] | None = None,
         batch_size: int = 64,
         lr: float = 1e-4,
-        learn_step: int = 2048,
+        learn_step: int = 4096,
         gamma: float = 0.99,
         gae_lambda: float = 0.95,
         mut: str | None = None,
-        action_std_init: float = 0.0,
+        action_std_init: float = 0.6,
         clip_coef: float = 0.2,
         ent_coef: float = 0.01,
         vf_coef: float = 0.5,

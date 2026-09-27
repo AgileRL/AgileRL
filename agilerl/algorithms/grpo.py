@@ -259,7 +259,7 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
     :type gradient_checkpointing: bool, optional
     :param torch_compiler: Torch compile mode (e.g. ``'default'``), defaults to None
     :type torch_compiler: str | None, optional
-    :param use_liger_loss: Use the Liger fused loss, defaults to ``False``
+    :param use_liger_loss: Use the Liger fused loss, defaults to ``True``
         (requires ``liger-kernel``; warns and falls back otherwise). **Not
         recommended for GRPO/CISPO/GSPO**: the upstream Liger GRPO kernel shows
         no speedup over AgileRL's already memory-bounded standard path and uses
@@ -434,7 +434,7 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
         seed: int = 42,
         gradient_checkpointing: bool = True,
         torch_compiler: str | None = None,
-        use_liger_loss: bool = False,
+        use_liger_loss: bool = True,
         use_kl_advantage_shaping: bool = False,
         adv_norm: str = "mean_std",
         loss_type: Literal["grpo", "gspo", "cispo"] = "grpo",

@@ -67,7 +67,7 @@ class DQN(SingleAgentAlgorithm[TensorDict]):
     :type tau: float, optional
     :param mut: Most recent mutation to agent, defaults to None
     :type mut: str, optional
-    :param double: Use double Q-learning, defaults to False
+    :param double: Use double Q-learning, defaults to True
     :type double: bool, optional
     :param normalize_images: Flag to normalize images, defaults to True
     :type normalize_images: bool, optional
@@ -112,7 +112,7 @@ class DQN(SingleAgentAlgorithm[TensorDict]):
         gamma: float = 0.99,
         tau: float = 1e-3,
         mut: str | None = None,
-        double: bool = False,
+        double: bool = True,
         normalize_images: bool = True,
         actor_network: EvolvableModule | None = None,
         device: str = "cpu",

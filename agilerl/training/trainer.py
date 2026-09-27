@@ -986,10 +986,17 @@ class LocalTrainer(Trainer):
             if self.training_spec.evo_steps is not None
             else self.algorithm_spec.default_evo_steps
         )
+        max_steps = self.training_spec.max_steps
+        if (
+            isinstance(self.algorithm_spec, LLMAlgorithmSpec)
+            and getattr(self.algorithm_spec, "env_type", None) == LLMEnvType.DATASET
+            and self.training_spec.num_epochs is not None
+        ):
+            max_steps = None
         kwargs: dict[str, Any] = {
             "pop": self.population,
             "init_hp": manifest,
-            "max_steps": self.training_spec.max_steps,
+            "max_steps": max_steps,
             "evo_steps": evo_steps,
             "selection_strategy": self.selection_strategy,
             "mutation": self.mutations,

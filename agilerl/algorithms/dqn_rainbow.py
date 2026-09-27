@@ -70,9 +70,9 @@ class RainbowDQN(SingleAgentAlgorithm[TensorDict]):
     :type prior_eps: float, optional
     :param num_atoms: Unit number of support, defaults to 51
     :type num_atoms: int, optional
-    :param v_min: Minimum value of support, defaults to 0
+    :param v_min: Minimum value of support, defaults to -10
     :type v_min: float, optional
-    :param v_max: Maximum value of support, defaults to 200
+    :param v_max: Maximum value of support, defaults to 10
     :type v_max: float, optional
     :param noise_std: Noise standard deviation, defaults to 0.5
     :type noise_std: float, optional
@@ -115,8 +115,8 @@ class RainbowDQN(SingleAgentAlgorithm[TensorDict]):
         beta: float = 0.4,
         prior_eps: float = 1e-6,
         num_atoms: int = 51,
-        v_min: float = 0,
-        v_max: float = 200,
+        v_min: float = -10,
+        v_max: float = 10,
         noise_std: float = 0.5,
         n_step: int = 3,
         mut: str | None = None,

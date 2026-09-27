@@ -65,7 +65,7 @@ class AlgorithmRegistry:
             raise KeyError(msg) from err
 
     def create(self, name: str, /, **fields: Any) -> AlgoSpec:
-        """Build a spec, applying fields the name implies.
+        """Build a spec from the registry name and field values.
 
         :param name: Algorithm name.
         :type name: str
@@ -74,17 +74,7 @@ class AlgorithmRegistry:
         :rtype: AlgoSpec
         :raises KeyError: If *name* is not registered.
         """
-        spec_cls = self.get(name)
-        implied = spec_cls.alias_implies.get(name, {})
-        for field, value in implied.items():
-            if field in fields and fields[field] != value:
-                msg = (
-                    f"algorithm.name {name!r} implies {field}={value!r}, "
-                    f"but the manifest sets {field}={fields[field]!r}."
-                )
-                raise ValueError(msg)
-            fields[field] = value
-        return spec_cls(**fields)
+        return self.get(name)(**fields)
 
     def names(self) -> list[str]:
         """Return every registered algorithm name, sorted.

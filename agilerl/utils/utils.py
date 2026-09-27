@@ -486,7 +486,7 @@ def create_population(
                 learn_step=INIT_HP.get("LEARN_STEP", 5),
                 gamma=INIT_HP.get("GAMMA", 0.99),
                 tau=INIT_HP.get("TAU", 0.001),
-                double=INIT_HP.get("DOUBLE", False),
+                double=INIT_HP.get("DOUBLE", True),
                 cudagraphs=INIT_HP.get("CUDAGRAPHS", False),
                 actor_network=actor_network,
                 device=device,
@@ -511,8 +511,8 @@ def create_population(
                 beta=INIT_HP.get("BETA", 0.4),
                 prior_eps=INIT_HP.get("PRIOR_EPS", 0.00001),
                 num_atoms=INIT_HP.get("NUM_ATOMS", 51),
-                v_min=INIT_HP.get("V_MIN", -100),
-                v_max=INIT_HP.get("V_MAX", 100),
+                v_min=INIT_HP.get("V_MIN", -10),
+                v_max=INIT_HP.get("V_MAX", 10),
                 n_step=INIT_HP.get("N_STEP", 3),
                 actor_network=actor_network,
                 device=device,
@@ -719,7 +719,7 @@ def create_population(
                 learn_step=INIT_HP.get("LEARN_STEP", 2048),
                 gamma=INIT_HP.get("GAMMA", 0.99),
                 gae_lambda=INIT_HP.get("GAE_LAMBDA", 0.95),
-                action_std_init=INIT_HP.get("ACTION_STD_INIT", 0.0),
+                action_std_init=INIT_HP.get("ACTION_STD_INIT", 0.6),
                 clip_coef=INIT_HP.get("CLIP_COEF", 0.2),
                 ent_coef=INIT_HP.get("ENT_COEF", 0.01),
                 vf_coef=INIT_HP.get("VF_COEF", 0.5),
@@ -840,7 +840,7 @@ def create_population(
                 # path (reuse as-is) rather than re-attaching adapters.
                 clone=idx != 0 and act is not None,
                 seed=INIT_HP.get("SEED", 42),
-                use_liger_loss=INIT_HP.get("USE_LIGER_LOSS", False),
+                use_liger_loss=INIT_HP.get("USE_LIGER_LOSS", True),
                 cast_logprobs_to_fp32=INIT_HP.get("CAST_LOGPROBS_TO_FP32", True),
                 use_kl_advantage_shaping=INIT_HP.get("USE_KL_ADVANTAGE_SHAPING", False),
                 adv_norm=INIT_HP.get("ADV_NORM", "mean_std"),
@@ -922,7 +922,7 @@ def create_population(
                 actor_network=act,
                 clone=idx != 0 and act is not None,
                 seed=INIT_HP.get("SEED", 42),
-                use_liger_loss=INIT_HP.get("USE_LIGER_LOSS", False),
+                use_liger_loss=INIT_HP.get("USE_LIGER_LOSS", True),
             )
             if torch_compiler is not None:
                 kw.setdefault("torch_compiler", torch_compiler)
@@ -973,7 +973,7 @@ def create_population(
                 actor_network=act,
                 clone=idx != 0 and act is not None,
                 seed=INIT_HP.get("SEED", 42),
-                use_liger_loss=INIT_HP.get("USE_LIGER_LOSS", False),
+                use_liger_loss=INIT_HP.get("USE_LIGER_LOSS", True),
             )
             if torch_compiler is not None:
                 kw.setdefault("torch_compiler", torch_compiler)
@@ -1016,11 +1016,11 @@ def create_population(
                 hp_config=hp_config,
                 index=idx,
                 batch_size=INIT_HP.get("BATCH_SIZE", 16),
-                beta=INIT_HP.get("BETA", 0.01),
+                beta=INIT_HP.get("BETA", 0.001),
                 vf_coef=INIT_HP.get("VF_COEF", 0.5),
                 clip_coef=INIT_HP.get("CLIP_COEF", 0.2),
                 gamma=INIT_HP.get("GAMMA", 1.0),
-                gae_lambda=INIT_HP.get("GAE_LAMBDA", 1.0),
+                gae_lambda=INIT_HP.get("GAE_LAMBDA", 0.95),
                 advantage_granularity=INIT_HP.get(
                     "ADVANTAGE_GRANULARITY", INIT_HP.get("ACTION_GRANULARITY", "auto")
                 ),
@@ -1049,7 +1049,7 @@ def create_population(
                 actor_network=act,
                 clone=idx != 0 and act is not None,
                 seed=INIT_HP.get("SEED", 42),
-                use_liger_loss=INIT_HP.get("USE_LIGER_LOSS", False),
+                use_liger_loss=INIT_HP.get("USE_LIGER_LOSS", True),
                 cast_logprobs_to_fp32=INIT_HP.get("CAST_LOGPROBS_TO_FP32", True),
                 vllm_importance_sampling_correction=INIT_HP.get(
                     "VLLM_IMPORTANCE_SAMPLING_CORRECTION", True
@@ -1102,7 +1102,7 @@ def create_population(
                 hp_config=hp_config,
                 index=idx,
                 batch_size=INIT_HP.get("BATCH_SIZE", 16),
-                beta=INIT_HP.get("BETA", 0.01),
+                beta=INIT_HP.get("BETA", 0.001),
                 clip_coef=INIT_HP.get("CLIP_COEF", 0.2),
                 gamma=INIT_HP.get("GAMMA", 0.99),
                 advantage_granularity=INIT_HP.get(
@@ -1128,7 +1128,7 @@ def create_population(
                 actor_network=act,
                 clone=idx != 0 and act is not None,
                 seed=INIT_HP.get("SEED", 42),
-                use_liger_loss=INIT_HP.get("USE_LIGER_LOSS", False),
+                use_liger_loss=INIT_HP.get("USE_LIGER_LOSS", True),
                 cast_logprobs_to_fp32=INIT_HP.get("CAST_LOGPROBS_TO_FP32", True),
                 vllm_importance_sampling_correction=INIT_HP.get(
                     "VLLM_IMPORTANCE_SAMPLING_CORRECTION", True

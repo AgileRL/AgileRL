@@ -71,7 +71,7 @@ RL_HPO_RANGES: dict[str, RLHyperparameter] = {
     "learn_step": _range(1, 10, 1.5, 0.75),
 }
 
-# PPO / IPPO default learn_step is 2048. Mutation bounds match
+# PPO / IPPO default learn_step is 4096. Mutation bounds match
 # make_default_hp_config: [value // 4, value * 4] with grow 1.5 / shrink 0.75.
 ON_POLICY_HPO_RANGES: dict[str, RLHyperparameter] = {
     **RL_HPO_RANGES,
@@ -120,11 +120,9 @@ class AlgorithmSpec(BaseModel):
     bandit: ClassVar[bool] = False
     default_evo_steps: ClassVar[int] = 10_000
     hpo_ranges: ClassVar[dict[str, RLHyperparameter]] = {}
-    # Registry names that mean more than which class to build. "Recurrent PPO"
-    # and "PPO" resolve to the same spec, so without this the recurrent variant
-    # would validate into a plain PPO run.
-    alias_implies: ClassVar[dict[str, dict[str, Any]]] = {}
     agent_type: ClassVar[AgentType]
+    # JSON Schema ``algorithm.name`` default when it differs from the class name.
+    schema_name: ClassVar[str | None] = None
     # Fills in environment.env_type when the manifest omits it.
     env_type: ClassVar[str | LLMEnvType] = "gym"
     # Fills in environment.objective the same way: the teacher-forced loss a
@@ -251,7 +249,7 @@ class LLMAlgorithmSpec(AlgorithmSpec):
         ),
     )
     use_liger_loss: bool = Field(
-        default=False,
+        default=True,
         description=(
             "Use the fused Liger loss kernel. Cuts memory on long sequences; "
             "requires liger-kernel, which is Linux-only."
@@ -406,7 +404,7 @@ class LLMAlgorithmSpec(AlgorithmSpec):
     )
 
     agent_type: ClassVar[AgentType] = AgentType.LLMAgent
-    default_evo_steps: ClassVar[int] = 5
+    default_evo_steps: ClassVar[int] = 10
     hpo_ranges: ClassVar[dict[str, RLHyperparameter]] = LLM_HPO_RANGES
     env_type: ClassVar[LLMEnvType]
 

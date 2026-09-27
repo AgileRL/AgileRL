@@ -272,10 +272,10 @@ class TrainingSpec(BaseModel):
         ),
     )
     hpo: bool = Field(
-        default=True,
+        default=False,
         description=(
             "Mutate hyperparameters and architecture between evolution rounds. "
-            "Off trains the population without changing it."
+            "When false, the population trains without hyperparameter mutation."
         ),
     )
     target_score: float | None = Field(
@@ -283,8 +283,8 @@ class TrainingSpec(BaseModel):
         description="Stop early once this fitness is reached. Unset trains to max_steps.",
     )
 
-    learning_delay: int = Field(
-        default=0,
+    learning_delay: int | None = Field(
+        default=None,
         ge=0,
         description=(
             "Steps collected before the first learn step, so the buffer holds "
@@ -315,8 +315,8 @@ class TrainingSpec(BaseModel):
         description="Overwrite the previous checkpoint instead of keeping each one.",
     )
 
-    evaluation_interval: int = Field(
-        default=10,
+    evaluation_interval: int | None = Field(
+        default=None,
         ge=1,
         description="Steps between evaluations during LLM fine-tuning.",
     )
@@ -340,11 +340,11 @@ class TrainingSpec(BaseModel):
         description="Wall-clock limit for the run. Unset trains to max_steps.",
     )
 
-    episode_steps: int = Field(
-        default=500, ge=1, description="Steps per episode. Bandits only."
+    episode_steps: int | None = Field(
+        default=None, ge=1, description="Steps per episode. Bandits only."
     )
-    sum_scores: bool = Field(
-        default=True,
+    sum_scores: bool | None = Field(
+        default=None,
         description=(
             "Sum sub-agent scores into one fitness rather than averaging. "
             "Multi-agent only; usually True for cooperative environments."
@@ -354,8 +354,8 @@ class TrainingSpec(BaseModel):
     reporting_interval: int = Field(
         default=1024, ge=1, description="Steps between metric reports."
     )
-    experience_sharing: bool = Field(
-        default=False,
+    experience_sharing: bool | None = Field(
+        default=None,
         description=(
             "Let population members learn from each other's transitions. Not "
             "supported under async rollout."
@@ -416,8 +416,8 @@ class TrainingSpec(BaseModel):
             "Unset resolves to 1: fresh weights every cycle."
         ),
     )
-    rollout_version_stamp: RolloutVersionStamp = Field(
-        default="oldest_turn",
+    rollout_version_stamp: RolloutVersionStamp | None = Field(
+        default=None,
         description=(
             "Which weight version a published group is fenced by. "
             "'oldest_turn' ages a group by how long it ran, so long episodes "
@@ -425,13 +425,27 @@ class TrainingSpec(BaseModel):
             "of episode duration."
         ),
     )
-    checkpoint_export: CheckpointExportSpec = Field(
-        default_factory=CheckpointExportSpec,
+    checkpoint_export: CheckpointExportSpec | None = Field(
+        default=None,
         description=(
             "Adapter-only save by default, or a merged Hugging Face export "
             "when format is merged and trigger matches."
         ),
     )
+
+    def effective_checkpoint_export(self) -> CheckpointExportSpec:
+        """LLM checkpoint export defaults when the training section omits it."""
+        if self.checkpoint_export is not None:
+            return self.checkpoint_export
+        return CheckpointExportSpec()
+
+    def effective_rollout_version_stamp(self) -> RolloutVersionStamp | None:
+        """Async rollout stamping when the training section omits it."""
+        if self.rollout_version_stamp is not None:
+            return self.rollout_version_stamp
+        if self.rollout_mode == "async":
+            return "oldest_turn"
+        return None
 
     @property
     def async_rollout(self) -> bool:

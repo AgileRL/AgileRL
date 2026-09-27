@@ -33,5 +33,6 @@ class BanditStrategy(TrainingStrategy):
     ) -> dict[str, Any]:
         kwargs = rl_trainer_kwargs(spec, training=training, env_spec=env_spec)
         kwargs["memory"] = memory
-        kwargs["episode_steps"] = training.episode_steps
+        if training.episode_steps is not None:
+            kwargs["episode_steps"] = training.episode_steps
         return kwargs
