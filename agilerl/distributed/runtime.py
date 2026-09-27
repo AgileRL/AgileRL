@@ -9,7 +9,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Callable, Generator
 from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 import torch
 from torch import nn
@@ -45,6 +45,68 @@ class PrepareResult:
     actor: nn.Module
     optimizer: OptimizerWrapper
     lr_scheduler: SequentialLR | None
+
+
+@runtime_checkable
+class PeftBaseModel(Protocol):
+    """PEFT wrapper that exposes the inner pretrained module."""
+
+    def get_base_model(self) -> nn.Module: ...
+
+
+@runtime_checkable
+class GradientCheckpointable(Protocol):
+    """Module that implements activation checkpointing."""
+
+    def gradient_checkpointing_enable(
+        self, gradient_checkpointing_kwargs: dict[str, bool]
+    ) -> None: ...
+
+
+def _supports_gradient_checkpointing(module: nn.Module) -> bool:
+    """True when the class sets Hugging Face's checkpointing flag."""
+    # Class attribute. Absent means the module does not support checkpointing.
+    flag = getattr(type(module), "supports_gradient_checkpointing", False)
+    return flag is True
+
+
+def _checkpointable_module(module: nn.Module) -> GradientCheckpointable | None:
+    """Causal LM, or its ``language_model`` child, when the class opts in."""
+    current = module
+    if isinstance(current, PeftBaseModel):
+        base = current.get_base_model()
+        if isinstance(base, nn.Module):
+            current = base
+    if isinstance(current, GradientCheckpointable) and _supports_gradient_checkpointing(
+        current
+    ):
+        return current
+    language_model = getattr(current, "language_model", None)
+    if isinstance(
+        language_model, GradientCheckpointable
+    ) and _supports_gradient_checkpointing(language_model):
+        return language_model
+    return None
+
+
+def gradient_checkpointing_module(model: nn.Module) -> GradientCheckpointable:
+    """Module that implements ``gradient_checkpointing_enable``."""
+    found = _checkpointable_module(model)
+    if found is not None:
+        return found
+    # Value-head shells keep the causal LM (often PEFT-wrapped) on this attribute.
+    shell = model
+    if isinstance(model, PeftBaseModel):
+        base = model.get_base_model()
+        if isinstance(base, nn.Module):
+            shell = base
+    pretrained = getattr(shell, "pretrained_model", None)
+    if isinstance(pretrained, nn.Module):
+        found = _checkpointable_module(pretrained)
+        if found is not None:
+            return found
+    msg = f"{type(model).__name__} does not support gradient checkpointing"
+    raise TypeError(msg)
 
 
 def _optimizer_state_as_dict(optimizer: OptimizerWrapper) -> dict[str, Any]:
@@ -442,11 +504,10 @@ class DPRuntime(BaseRuntime):
                 raise TypeError(msg)
             placed = moved
         if gradient_checkpointing:
-            enable_ckpt = getattr(placed, "gradient_checkpointing_enable", None)
-            if not callable(enable_ckpt):
-                msg = "actor does not support gradient checkpointing"
-                raise TypeError(msg)
-            enable_ckpt(gradient_checkpointing_kwargs={"use_reentrant": False})
+            checkpoint_module = gradient_checkpointing_module(placed)
+            checkpoint_module.gradient_checkpointing_enable(
+                gradient_checkpointing_kwargs={"use_reentrant": False}
+            )
 
         optimizer = make_llm_optimizer(placed, lr, lr_critic)
         return PrepareResult(

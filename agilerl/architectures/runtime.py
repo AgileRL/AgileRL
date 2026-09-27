@@ -23,6 +23,7 @@ class VllmRuntimeConfig(BaseModel):
     max_num_batched_tokens: int | None = Field(default=None, ge=1)
     reasoning_parser: str | None = Field(default=None, min_length=1)
     enable_prefix_caching: bool | None = Field(default=None)
+    trust_remote_code: bool | None = Field(default=None)
 
 
 class TrainerRuntimeConfig(BaseModel):
@@ -35,6 +36,7 @@ class TrainerRuntimeConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     attn_implementation: str | None = Field(default=None, min_length=1)
+    trust_remote_code: bool | None = Field(default=None)
 
 
 class MambaPatchConfig(BaseModel):
@@ -63,6 +65,19 @@ class PatchRuntimeConfig(BaseModel):
     mamba: MambaPatchConfig | None = Field(default=None)
 
 
+class LanguageTowerRuntimeConfig(BaseModel):
+    """vLLM language-tower mapping that varies by Hugging Face ``model_type``.
+
+    Generic VL serving peels ``text_config`` / ``llm_config``. A family that
+    needs a custom vLLM class sets ``hf_overrides`` and ``model_class_overrides``.
+    """
+
+    model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
+
+    hf_overrides: Callable[[object], object] | None = None
+    model_class_overrides: dict[str, str] | None = None
+
+
 class ModelRuntimeConfig(BaseModel):
     """Per-``model_type`` runtime settings for vLLM, trainer, and patches."""
 
@@ -71,3 +86,6 @@ class ModelRuntimeConfig(BaseModel):
     vllm: VllmRuntimeConfig = Field(default_factory=VllmRuntimeConfig)
     trainer: TrainerRuntimeConfig = Field(default_factory=TrainerRuntimeConfig)
     patch: PatchRuntimeConfig = Field(default_factory=PatchRuntimeConfig)
+    language_tower: LanguageTowerRuntimeConfig = Field(
+        default_factory=LanguageTowerRuntimeConfig
+    )

@@ -21,6 +21,12 @@ from datasets import Dataset as Datasets
 from torch import nn
 from transformers import AutoTokenizer
 
+from agilerl.architectures.nemotron_h.language_tower import (
+    omni_language_tower_hf_override,
+)
+from agilerl.architectures.vllm_language import (
+    nested_language_config,
+)
 from agilerl.distributed import fsdp as dmod
 from agilerl.distributed import gather_params
 from agilerl.llm_envs import DatasetEnv
@@ -93,6 +99,19 @@ DUMMY_CONVERSATION_TEMPLATE = [
         "content": "question: {question}\nanswer: {answer}",
     },
 ]
+
+
+def stub_catalog_model_type(monkeypatch: pytest.MonkeyPatch, model_type: str) -> None:
+    @classmethod
+    def fake_get_config_dict(
+        cls, pretrained_model_name_or_path: str, **kwargs: object
+    ) -> tuple[dict[str, object], dict[str, object]]:
+        return ({"model_type": model_type}, {})
+
+    monkeypatch.setattr(
+        "agilerl.architectures.catalog.PretrainedConfig.get_config_dict",
+        fake_get_config_dict,
+    )
 
 
 class DummyTokenizer:
@@ -1652,7 +1671,10 @@ class TestLoraTargetRegexBuilders:
         regex = build_scoped_lora_target_regex(["q_proj"], "language_model")
         assert re.fullmatch(regex, "model.language_model.layers.0.q_proj")
         assert re.fullmatch(regex, "model.language_model.layers.0.q_proj.linear")
+        assert re.fullmatch(regex, "language_model.model.layers.0.q_proj")
+        assert re.fullmatch(regex, "language_model.q_proj")
         assert not re.fullmatch(regex, "model.vision_tower.layers.0.q_proj")
+        assert not re.fullmatch(regex, "not_language_model.q_proj")
 
     def test_scoped_regex_requires_projection_names(self):
         with pytest.raises(ValueError, match="At least one projection name"):
@@ -1835,6 +1857,16 @@ class TestAdaptLoraConfigForModel:
 
 
 class TestAdaptLoraConfigForModelMamba:
+    def test_nemotron_h_omni_drops_fused_mamba_modules(self):
+        model = _MambaLikeModel()
+        model.config = SimpleNamespace(model_type="nemotron_h_omni")
+        cfg = _PlainLoraConfig(target_modules=["in_proj", "out_proj"])
+
+        adapted = adapt_lora_config_for_model(model, cfg)
+
+        assert adapted.target_modules == ["in_proj"]
+        assert set(adapted.exclude_modules) == {"conv1d", "out_proj"}
+
     def test_non_mamba_model_is_unchanged(self):
         cfg = _PlainLoraConfig(target_modules=["in_proj", "out_proj"])
 
@@ -2006,6 +2038,10 @@ class TestResolveAttnImplementation:
             "transformers.AutoConfig.from_pretrained",
             lambda *args, **kwargs: SimpleNamespace(model_type="gemma4"),
         )
+        monkeypatch.setattr(
+            "agilerl.architectures.catalog.PretrainedConfig.get_config_dict",
+            lambda path, **kwargs: ({"model_type": "gemma4"}, {}),
+        )
         assert (
             resolve_attn_implementation(None, model_name_or_path="google/gemma")
             == "flex_attention"
@@ -2017,6 +2053,10 @@ class TestResolveAttnImplementation:
             "transformers.AutoConfig.from_pretrained",
             lambda *args, **kwargs: SimpleNamespace(model_type="gemma4"),
         )
+        monkeypatch.setattr(
+            "agilerl.architectures.catalog.PretrainedConfig.get_config_dict",
+            lambda path, **kwargs: ({"model_type": "gemma4"}, {}),
+        )
         assert (
             resolve_attn_implementation(None, model_name_or_path="google/gemma")
             == "sdpa"
@@ -2026,6 +2066,10 @@ class TestResolveAttnImplementation:
         monkeypatch.setattr(
             "transformers.AutoConfig.from_pretrained",
             lambda *args, **kwargs: SimpleNamespace(model_type="nemotron_h"),
+        )
+        monkeypatch.setattr(
+            "agilerl.architectures.catalog.PretrainedConfig.get_config_dict",
+            lambda path, **kwargs: ({"model_type": "nemotron_h"}, {}),
         )
         monkeypatch.setattr("importlib.util.find_spec", lambda name: None)
         assert (
@@ -2204,10 +2248,7 @@ class TestFlexDecodeKernelOptions:
 class TestCreateModelFromNameOrPathDefaults:
     @pytest.fixture(autouse=True)
     def stub_llama_model_type(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(
-            "transformers.AutoConfig.from_pretrained",
-            lambda *args, **kwargs: SimpleNamespace(model_type="llama"),
-        )
+        stub_catalog_model_type(monkeypatch, "llama")
 
     @staticmethod
     def _fake_loader(captured):
@@ -2231,6 +2272,7 @@ class TestCreateModelFromNameOrPathDefaults:
         assert captured["name"] == "org/tiny"
         assert captured["kwargs"]["torch_dtype"] is torch.bfloat16
         assert captured["kwargs"]["attn_implementation"] == "sdpa"
+        assert "trust_remote_code" not in captured["kwargs"]
 
     def test_caller_dtype_stays_authoritative(self, monkeypatch):
         captured = {}
@@ -2274,10 +2316,7 @@ class TestCreateModelFromNameOrPathDefaults:
             lambda *a, **k: patch_calls.append(1),
         )
         monkeypatch.setattr("importlib.util.find_spec", lambda name: object())
-        monkeypatch.setattr(
-            "transformers.AutoConfig.from_pretrained",
-            lambda *args, **kwargs: SimpleNamespace(model_type=model_type),
-        )
+        stub_catalog_model_type(monkeypatch, model_type)
         create_model_from_name_or_path("google/gemma")
         assert captured["kwargs"]["attn_implementation"] == "flex_attention"
         assert patch_calls == [1]
@@ -2288,10 +2327,7 @@ class TestCreateModelFromNameOrPathDefaults:
             llm_utils_module, "AutoModelForCausalLM", self._fake_loader(captured)
         )
         monkeypatch.setattr("importlib.util.find_spec", lambda name: object())
-        monkeypatch.setattr(
-            "transformers.AutoConfig.from_pretrained",
-            lambda *args, **kwargs: SimpleNamespace(model_type="gemma2"),
-        )
+        stub_catalog_model_type(monkeypatch, "gemma2")
         create_model_from_name_or_path("google/gemma-2-9b")
         assert captured["kwargs"]["attn_implementation"] == "flash_attention_2"
 
@@ -2301,10 +2337,7 @@ class TestCreateModelFromNameOrPathDefaults:
             llm_utils_module, "AutoModelForCausalLM", self._fake_loader(captured)
         )
         monkeypatch.setattr("importlib.util.find_spec", lambda name: object())
-        monkeypatch.setattr(
-            "transformers.AutoConfig.from_pretrained",
-            lambda *args, **kwargs: SimpleNamespace(model_type="gemma4"),
-        )
+        stub_catalog_model_type(monkeypatch, "gemma4")
         create_model_from_name_or_path(
             "google/gemma-4",
             model_config={"attn_implementation": "sdpa"},
@@ -2317,12 +2350,23 @@ class TestCreateModelFromNameOrPathDefaults:
             llm_utils_module, "AutoModelForCausalLM", self._fake_loader(captured)
         )
         monkeypatch.setattr("importlib.util.find_spec", lambda name: None)
-        monkeypatch.setattr(
-            "transformers.AutoConfig.from_pretrained",
-            lambda *args, **kwargs: SimpleNamespace(model_type="nemotron_h"),
-        )
+        stub_catalog_model_type(monkeypatch, "nemotron_h")
         create_model_from_name_or_path("nvidia/nemotron")
         assert captured["kwargs"]["attn_implementation"] == "flash_attention_2"
+        assert captured["kwargs"]["trust_remote_code"] is True
+
+    def test_caller_trust_remote_code_false_is_not_overwritten(self, monkeypatch):
+        captured = {}
+        monkeypatch.setattr(
+            llm_utils_module, "AutoModelForCausalLM", self._fake_loader(captured)
+        )
+        monkeypatch.setattr("importlib.util.find_spec", lambda name: None)
+        stub_catalog_model_type(monkeypatch, "nemotron_h")
+        create_model_from_name_or_path(
+            "nvidia/nemotron",
+            model_config={"trust_remote_code": False},
+        )
+        assert captured["kwargs"]["trust_remote_code"] is False
 
     def test_family_trainer_non_attn_keys_fill_when_absent(self, monkeypatch):
         captured = {}
@@ -2772,6 +2816,7 @@ def _vllm_config(**overrides):
         "max_lora_rank": 16,
         "max_loras": 1,
         "max_num_batched_tokens": None,
+        "strip_multimodal_towers": False,
     }
     base.update(overrides)
     return SimpleNamespace(**base)
@@ -2780,10 +2825,24 @@ def _vllm_config(**overrides):
 class TestBuildVllmLlmInitKwargs:
     @pytest.fixture(autouse=True)
     def stub_llama_model_type(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(
-            "transformers.AutoConfig.from_pretrained",
-            lambda *args, **kwargs: SimpleNamespace(model_type="llama"),
+        stub_catalog_model_type(monkeypatch, "llama")
+
+    def test_family_lookup_oserror_leaves_vllm_kwargs_empty(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def missing(_path: str) -> None:
+            msg = "config.json"
+            raise OSError(msg)
+
+        monkeypatch.setattr("agilerl.utils.llm_utils.family_runtime", missing)
+
+        kwargs = build_vllm_llm_init_kwargs(
+            _vllm_config(),
+            trainer_model_name_or_path="org/base",
+            max_model_len=128,
         )
+
+        assert kwargs["model"] == "org/base"
 
     def test_defaults_fall_back_to_trainer_model(self):
         kwargs = build_vllm_llm_init_kwargs(
@@ -2805,6 +2864,7 @@ class TestBuildVllmLlmInitKwargs:
         assert kwargs["enable_lora"] is True
         assert kwargs["max_lora_rank"] == 16
         assert kwargs["max_loras"] == 1
+        assert "trust_remote_code" not in kwargs
         for absent in (
             "dtype",
             "quantization",
@@ -2842,10 +2902,7 @@ class TestBuildVllmLlmInitKwargs:
         assert kwargs["max_lora_rank"] == 64  # trainer rank outranks the config
 
     def test_nemotron_family_defaults_fill_unset_engine_kwargs(self, monkeypatch):
-        monkeypatch.setattr(
-            "transformers.AutoConfig.from_pretrained",
-            lambda *args, **kwargs: SimpleNamespace(model_type="nemotron_h"),
-        )
+        stub_catalog_model_type(monkeypatch, "nemotron_h")
         kwargs = build_vllm_llm_init_kwargs(
             _vllm_config(),
             trainer_model_name_or_path="nvidia/nemotron",
@@ -2855,12 +2912,10 @@ class TestBuildVllmLlmInitKwargs:
         assert kwargs["max_num_batched_tokens"] == 8192
         assert kwargs["reasoning_parser"] == "nemotron_v3"
         assert kwargs["enable_prefix_caching"] is True
+        assert kwargs["trust_remote_code"] is True
 
     def test_nemotron_family_default_is_capped_when_context_is_short(self, monkeypatch):
-        monkeypatch.setattr(
-            "transformers.AutoConfig.from_pretrained",
-            lambda *args, **kwargs: SimpleNamespace(model_type="nemotron_h"),
-        )
+        stub_catalog_model_type(monkeypatch, "nemotron_h")
         kwargs = build_vllm_llm_init_kwargs(
             _vllm_config(),
             trainer_model_name_or_path="nvidia/nemotron",
@@ -2870,10 +2925,7 @@ class TestBuildVllmLlmInitKwargs:
         assert kwargs["max_num_batched_tokens"] == 4096
 
     def test_explicit_config_wins_over_nemotron_family_defaults(self, monkeypatch):
-        monkeypatch.setattr(
-            "transformers.AutoConfig.from_pretrained",
-            lambda *args, **kwargs: SimpleNamespace(model_type="nemotron_h"),
-        )
+        stub_catalog_model_type(monkeypatch, "nemotron_h")
         kwargs = build_vllm_llm_init_kwargs(
             _vllm_config(max_num_batched_tokens=4096),
             trainer_model_name_or_path="nvidia/nemotron",
@@ -2885,12 +2937,20 @@ class TestBuildVllmLlmInitKwargs:
         assert kwargs["enable_prefix_caching"] is True
 
     def test_family_defaults_follow_vllm_model_not_trainer_path(self, monkeypatch):
-        def fake_from_pretrained(name, **kwargs):
-            model_type = "nemotron_h" if name == "nvidia/nemotron" else "qwen2"
-            return SimpleNamespace(model_type=model_type)
+        @classmethod
+        def fake_get_config_dict(
+            cls, pretrained_model_name_or_path: str, **kwargs: object
+        ) -> tuple[dict[str, object], dict[str, object]]:
+            model_type = (
+                "nemotron_h"
+                if pretrained_model_name_or_path == "nvidia/nemotron"
+                else "qwen2"
+            )
+            return ({"model_type": model_type}, {})
 
         monkeypatch.setattr(
-            "transformers.AutoConfig.from_pretrained", fake_from_pretrained
+            "agilerl.architectures.catalog.PretrainedConfig.get_config_dict",
+            fake_get_config_dict,
         )
         kwargs = build_vllm_llm_init_kwargs(
             _vllm_config(vllm_model_name_or_path="nvidia/nemotron"),
@@ -2911,6 +2971,36 @@ class TestBuildVllmLlmInitKwargs:
         assert "mamba_cache_mode" not in kwargs
         assert "reasoning_parser" not in kwargs
         assert "enable_prefix_caching" not in kwargs
+        assert "trust_remote_code" not in kwargs
+
+    def test_strip_multimodal_towers_peels_nested_config_for_generic_vl(
+        self, monkeypatch
+    ):
+        stub_catalog_model_type(monkeypatch, "qwen2_vl")
+        kwargs = build_vllm_llm_init_kwargs(
+            _vllm_config(strip_multimodal_towers=True),
+            trainer_model_name_or_path="org/vl-model",
+            max_model_len=32768,
+        )
+
+        assert kwargs["hf_overrides"] is nested_language_config
+        assert "model_class_overrides" not in kwargs
+
+    def test_strip_multimodal_towers_applies_omni_language_tower(self, monkeypatch):
+        stub_catalog_model_type(monkeypatch, "nemotron_h_omni")
+        kwargs = build_vllm_llm_init_kwargs(
+            _vllm_config(strip_multimodal_towers=True),
+            trainer_model_name_or_path="nvidia/nemotron-omni",
+            max_model_len=32768,
+        )
+
+        assert kwargs["hf_overrides"] is omni_language_tower_hf_override
+        assert kwargs["model_class_overrides"] == {
+            "NemotronHOmniLanguageForCausalLM": (
+                "agilerl.architectures.nemotron_h.omni_language:"
+                "NemotronHOmniLanguageForCausalLM"
+            ),
+        }
 
 
 class TestBuildVllmRolloutLoraRequest:
@@ -3658,6 +3748,101 @@ class TestResolvePadTokenId:
 
     def test_load_pad_token_configs_none_returns_nones(self):
         assert llm_utils_module.load_pad_token_configs(None) == (None, None)
+
+    def test_load_pad_token_configs_forwards_catalog_trust(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        captured: list[bool] = []
+
+        def fake_from_pretrained(*args: object, **kwargs: object) -> SimpleNamespace:
+            trust = kwargs.get("trust_remote_code")
+            captured.append(trust is True)
+            return SimpleNamespace()
+
+        monkeypatch.setattr(
+            "agilerl.utils.llm_utils.family_runtime",
+            lambda path: SimpleNamespace(
+                trainer=SimpleNamespace(trust_remote_code=True)
+            ),
+        )
+        monkeypatch.setattr(
+            "transformers.AutoConfig.from_pretrained",
+            fake_from_pretrained,
+        )
+        monkeypatch.setattr(
+            "transformers.GenerationConfig.from_pretrained",
+            fake_from_pretrained,
+        )
+
+        llm_utils_module.load_pad_token_configs("nvidia/nemotron")
+
+        assert captured == [True, True]
+
+    def test_load_pad_token_configs_does_not_trust_unknown_family(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        captured: list[bool] = []
+
+        def fake_from_pretrained(*args: object, **kwargs: object) -> SimpleNamespace:
+            captured.append(bool(kwargs.get("trust_remote_code")))
+            return SimpleNamespace()
+
+        monkeypatch.setattr(
+            "agilerl.utils.llm_utils.family_runtime",
+            lambda path: SimpleNamespace(
+                trainer=SimpleNamespace(trust_remote_code=False)
+            ),
+        )
+        monkeypatch.setattr(
+            "transformers.AutoConfig.from_pretrained",
+            fake_from_pretrained,
+        )
+        monkeypatch.setattr(
+            "transformers.GenerationConfig.from_pretrained",
+            fake_from_pretrained,
+        )
+
+        llm_utils_module.load_pad_token_configs("org/llama")
+
+        assert captured == [False, False]
+
+    def test_load_pad_token_configs_raises_when_catalog_lookup_fails(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def raise_offline(_path: str) -> None:
+            msg = "couldn't connect to huggingface.co"
+            raise OSError(msg)
+
+        monkeypatch.setattr(
+            "agilerl.utils.llm_utils.family_runtime",
+            raise_offline,
+        )
+
+        with pytest.raises(OSError, match="couldn't connect"):
+            llm_utils_module.load_pad_token_configs("test-model")
+
+    def test_load_pad_token_configs_missing_config_json(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            "agilerl.utils.llm_utils.family_runtime",
+            lambda _path: SimpleNamespace(
+                trainer=SimpleNamespace(trust_remote_code=False)
+            ),
+        )
+
+        def missing(_path: str, **_kwargs: object) -> None:
+            msg = "config.json"
+            raise OSError(msg)
+
+        monkeypatch.setattr(
+            "agilerl.utils.llm_utils.AutoConfig.from_pretrained", missing
+        )
+        monkeypatch.setattr(
+            "agilerl.utils.llm_utils.GenerationConfig.from_pretrained", missing
+        )
+
+        assert llm_utils_module.load_pad_token_configs("org/model") == (None, None)
 
 
 class TestNormalizePromptBatch:

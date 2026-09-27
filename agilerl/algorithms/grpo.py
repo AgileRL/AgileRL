@@ -2000,7 +2000,7 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
                     (old_log_probs - sampling_log_probs) * mask_f
                 ).clamp(max=self.vllm_importance_sampling_cap)
             loss = loss * is_ratio
-        if not self.use_kl_advantage_shaping:
+        if not self.use_kl_advantage_shaping and self.beta != 0.0:
             loss = loss + self.beta * kl
         loss = self._reduce_masked_loss(loss, mask)
         # Average the KL metric over action tokens only — masked positions have

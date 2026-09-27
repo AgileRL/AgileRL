@@ -2672,6 +2672,18 @@ def _vllm_sampled_token_logprobs(output: CompletionOutput) -> list[float]:
     return out
 
 
+class HiddenStateHead(torch.nn.Identity):
+    """Identity output head whose ``weight`` carries the replaced layer's dtype."""
+
+    def __init__(self, dtype: torch.dtype) -> None:
+        super().__init__()
+        self._weight_dtype = dtype
+
+    @property
+    def weight(self) -> torch.Tensor:
+        return torch.empty(0, dtype=self._weight_dtype)
+
+
 class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT]):
     """Base object for all LLM algorithms in the AgileRL framework.
 
@@ -3044,17 +3056,16 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         self._vllm_lora_staging_dir: Path | None = None
         self._vllm_lora_staging_dir_is_temp = True
         self._vllm_rollout_lora_request: Any | None = None
-        # Tensor parallelism is not yet available when colocated
-        if self.colocated:
-            tp = getattr(self.vllm_config, "tensor_parallel_size", 1)
-            if tp != 1:
-                msg = (
-                    "Colocated vLLM requires tensor_parallel_size==1 (the "
-                    f"in-process external_launcher engine is single-GPU), got "
-                    f"{tp}. Use a non-colocated / async rollout for "
-                    "tensor-parallel generation (colocated TP support is planned)."
-                )
-                raise ValueError(msg)
+        # Tensor parallelism is not yet available when colocated.
+        # colocated is vllm_config being set.
+        if vllm_config is not None and vllm_config.tensor_parallel_size != 1:
+            msg = (
+                "Colocated vLLM requires tensor_parallel_size==1 (the "
+                f"in-process external_launcher engine is single-GPU), got "
+                f"{vllm_config.tensor_parallel_size}. Use a non-colocated / async rollout for "
+                "tensor-parallel generation (colocated TP support is planned)."
+            )
+            raise ValueError(msg)
         self.rng = np.random.RandomState(seed)
         self.metrics = AgentMetrics()
 
@@ -6153,7 +6164,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
                 stacklevel=2,
             )
 
-        strip_towers = getattr(self.vllm_config, "strip_multimodal_towers", False)
+        strip_towers = self.vllm_config.strip_multimodal_towers
         if strip_towers:
             # Free unused vision/audio towers on multimodal bases (text-only RL
             # never runs them); see ``patch_vllm_strip_multimodal_towers``.
@@ -6192,29 +6203,46 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         if is_main_process():
             log_cuda_memory_snapshot("vLLM sleep complete")
 
+    def _get_lm_head_parent(self) -> tuple[Any, str]:
+        """Locate the parent module owning ``lm_head`` (or ``embed_out``)."""
+        model = self.actor
+        if self.use_value_head and hasattr(model, "pretrained_model"):
+            model = model.pretrained_model
+        if hasattr(model, "base_model"):
+            model = model.base_model
+        if hasattr(model, "model"):
+            model = model.model
+        modules = [model]
+        if isinstance(model, torch.nn.Module):
+            children = dict(model.named_children())
+            if "language_model" in children:
+                modules.append(children["language_model"])
+        for module in modules:
+            for attr in ("lm_head", "embed_out"):
+                if hasattr(module, attr):
+                    return module, attr
+        err_msg = (
+            f"Cannot find lm_head (or embed_out) in {type(self.actor).__name__}. "
+            "The fused-linear-logprob path needs the output embedding layer to "
+            "compute per-token log-probs without materializing full logits."
+        )
+        raise AttributeError(err_msg)
+
     def _get_lm_head(self) -> torch.nn.Linear:
         """The CausalLM output embedding (``lm_head``)."""
-        peft = self.actor.pretrained_model if self.use_value_head else self.actor
-        head = peft.get_base_model().get_output_embeddings()
-        if head is None:
-            msg = f"{type(self.actor).__name__} has no output embeddings"
-            raise AttributeError(msg)
-        return head
+        parent, attr = self._get_lm_head_parent()
+        return getattr(parent, attr)
 
     @contextmanager
     def _patch_lm_head_to_identity(self) -> Generator[torch.nn.Module, None, None]:
         """Replace ``lm_head`` with ``nn.Identity`` so ``output.logits`` is hidden state."""
-        peft = self.actor.pretrained_model if self.use_value_head else self.actor
-        causal = peft.get_base_model()
-        original = causal.get_output_embeddings()
-        if original is None:
-            msg = f"{type(self.actor).__name__} has no output embeddings"
-            raise AttributeError(msg)
-        causal.set_output_embeddings(torch.nn.Identity())
+        parent, attr = self._get_lm_head_parent()
+        original = getattr(parent, attr)
+        setattr(parent, attr, HiddenStateHead(original.weight.dtype))
         try:
             yield original
         finally:
-            causal.set_output_embeddings(original)
+            setattr(parent, attr, original)
 
     @contextmanager
     def _offload_trainer_for_rollout(

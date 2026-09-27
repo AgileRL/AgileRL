@@ -2463,6 +2463,30 @@ class TestGRPOGrpoLossStandard:
         assert torch.isfinite(loss)
         assert torch.isfinite(kl)
 
+    def test_zero_beta_keeps_a_finite_loss_when_kl_is_nan(self):
+        stub = _GrpoLossStub(
+            clip_coef_min=0.8,
+            clip_coef_max=1.2,
+            beta=0.0,
+            use_kl_advantage_shaping=False,
+        )
+        mask = torch.tensor([[True, True]])
+        log_probs = torch.tensor([[-0.2, -0.4]], dtype=torch.float32)
+        old_log_probs = log_probs.clone()
+        reference_log_probs = torch.full_like(log_probs, float("nan"))
+        advantages = torch.tensor([[1.0]], dtype=torch.float32)
+
+        loss, kl, _ = stub._cispo_loss(
+            mask,
+            log_probs,
+            old_log_probs,
+            reference_log_probs,
+            advantages,
+        )
+
+        assert torch.isfinite(loss)
+        assert torch.isnan(kl)
+
 
 class TestGRPOGspoLoss:
     def test_gspo_loss_path(self):
