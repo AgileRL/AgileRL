@@ -30,10 +30,16 @@ def loaded_model(model_type: str) -> SimpleNamespace:
     return SimpleNamespace(config=SimpleNamespace(model_type=model_type))
 
 
-def stub_auto_config(monkeypatch: pytest.MonkeyPatch, model_type: str) -> None:
+def stub_config_model_type(monkeypatch: pytest.MonkeyPatch, model_type: str) -> None:
+    @classmethod
+    def fake_get_config_dict(
+        cls, pretrained_model_name_or_path: str, **kwargs: object
+    ) -> tuple[dict[str, object], dict[str, object]]:
+        return ({"model_type": model_type}, {})
+
     monkeypatch.setattr(
-        "transformers.AutoConfig.from_pretrained",
-        lambda *args, **kwargs: SimpleNamespace(model_type=model_type),
+        "agilerl.architectures.catalog.PretrainedConfig.get_config_dict",
+        fake_get_config_dict,
     )
 
 
@@ -135,7 +141,7 @@ class TestFamilyRuntime:
     def test_gemma4_trainer_dumps_flex_attention(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        stub_auto_config(monkeypatch, "gemma4")
+        stub_config_model_type(monkeypatch, "gemma4")
         config = architectures.family_runtime("google/gemma-4")
         assert config.trainer.model_dump(exclude_none=True) == {
             "attn_implementation": "flex_attention"
@@ -144,14 +150,15 @@ class TestFamilyRuntime:
     def test_nemotron_trainer_dumps_flash_attention_2(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        stub_auto_config(monkeypatch, "nemotron_h")
+        stub_config_model_type(monkeypatch, "nemotron_h")
         config = architectures.family_runtime("nvidia/nemotron")
         assert config.trainer.model_dump(exclude_none=True) == {
-            "attn_implementation": "flash_attention_2"
+            "attn_implementation": "flash_attention_2",
+            "trust_remote_code": True,
         }
 
     def test_llama_trainer_dumps_empty(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        stub_auto_config(monkeypatch, "llama")
+        stub_config_model_type(monkeypatch, "llama")
         assert (
             architectures.family_runtime("meta/llama").trainer.model_dump(
                 exclude_none=True
@@ -162,7 +169,7 @@ class TestFamilyRuntime:
     def test_nemotron_vllm_dumps_engine_kwargs(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        stub_auto_config(monkeypatch, "nemotron_h")
+        stub_config_model_type(monkeypatch, "nemotron_h")
         assert architectures.family_runtime("nvidia/nemotron").vllm.model_dump(
             exclude_none=True
         ) == {
@@ -170,10 +177,11 @@ class TestFamilyRuntime:
             "max_num_batched_tokens": 8192,
             "reasoning_parser": "nemotron_v3",
             "enable_prefix_caching": True,
+            "trust_remote_code": True,
         }
 
     def test_llama_vllm_dumps_empty(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        stub_auto_config(monkeypatch, "llama")
+        stub_config_model_type(monkeypatch, "llama")
         assert (
             architectures.family_runtime("meta/llama").vllm.model_dump(
                 exclude_none=True

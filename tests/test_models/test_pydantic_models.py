@@ -801,7 +801,7 @@ class TestBuildAlgorithmForwardsOnlySetFields:
                 select_builder(spec), "algo_class", return_value=mock_algo_cls
             ),
             patch(
-                "agilerl.utils.llm_utils.load_pad_token_configs",
+                "agilerl.builders.llm.load_pad_token_configs",
                 return_value=(None, None),
             ),
         ):
@@ -844,13 +844,23 @@ class TestLLMAlgorithmSpecBuild:
     def stub_auto_config(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(
             "transformers.AutoConfig.from_pretrained",
-            lambda *_args, **_kwargs: SimpleNamespace(model_type="llama"),
+            lambda *_args, **_kwargs: SimpleNamespace(
+                model_type="llama", pad_token_id=None
+            ),
+        )
+        monkeypatch.setattr(
+            "transformers.GenerationConfig.from_pretrained",
+            lambda *_args, **_kwargs: SimpleNamespace(pad_token_id=None),
         )
 
-    def test_micro_batch_size_per_gpu_forwarded_only_when_set(self):
+    def test_micro_batch_size_per_gpu_forwarded_only_when_set(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
         """Explicit micro batch reaches the constructor; unset leaves the algorithm's default."""
         from agilerl.arena.models.algorithms import GRPOSpec
 
+        # The unset field stays out only outside a distributed launch.
+        monkeypatch.setattr("agilerl.builders.llm.is_distributed", lambda: False)
         mock_tokenizer = MagicMock()
         mock_tokenizer.eos_token_id = 0
         mock_tokenizer.eos_token = "<|endoftext|>"
@@ -922,7 +932,7 @@ class TestLLMAlgorithmSpecBuild:
                 select_builder(spec), "algo_class", return_value=mock_algo_cls
             ),
             patch(
-                "agilerl.utils.llm_utils.load_pad_token_configs",
+                "agilerl.builders.llm.load_pad_token_configs",
                 return_value=(None, None),
             ),
         ):
@@ -1004,6 +1014,10 @@ class TestLLMAlgorithmSpecBuild:
             "transformers.AutoConfig.from_pretrained",
             lambda *_args, **_kwargs: SimpleNamespace(model_type="gemma4"),
         )
+        monkeypatch.setattr(
+            "agilerl.architectures.catalog.PretrainedConfig.get_config_dict",
+            lambda path, **kwargs: ({"model_type": "gemma4"}, {}),
+        )
         spec = GRPOSpec(
             pretrained_model_name_or_path="google/gemma-4",
             group_size=4,
@@ -1036,6 +1050,10 @@ class TestLLMAlgorithmSpecBuild:
         monkeypatch.setattr(
             "transformers.AutoConfig.from_pretrained",
             lambda *_args, **_kwargs: SimpleNamespace(model_type="gemma2"),
+        )
+        monkeypatch.setattr(
+            "agilerl.architectures.catalog.PretrainedConfig.get_config_dict",
+            lambda path, **kwargs: ({"model_type": "gemma2"}, {}),
         )
         spec = GRPOSpec(
             pretrained_model_name_or_path="google/gemma-2-9b",
@@ -1071,6 +1089,10 @@ class TestLLMAlgorithmSpecBuild:
         monkeypatch.setattr(
             "transformers.AutoConfig.from_pretrained",
             lambda *_args, **_kwargs: SimpleNamespace(model_type="gemma4"),
+        )
+        monkeypatch.setattr(
+            "agilerl.architectures.catalog.PretrainedConfig.get_config_dict",
+            lambda path, **kwargs: ({"model_type": "gemma4"}, {}),
         )
         spec = GRPOSpec(
             pretrained_model_name_or_path="google/gemma-4",

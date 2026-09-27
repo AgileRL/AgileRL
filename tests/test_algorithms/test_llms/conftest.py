@@ -61,7 +61,12 @@ def cleanup_after_test(request):
 
     torch._dynamo.reset()
     force_gpu_memory_release()
-    if dist.is_available() and dist.is_initialized():
+    # destroy_process_group requires a live default group.
+    if (
+        dist.is_available()
+        and dist.is_initialized()
+        and getattr(dist.group, "WORLD", None) is not None
+    ):
         dist.destroy_process_group()
 
 

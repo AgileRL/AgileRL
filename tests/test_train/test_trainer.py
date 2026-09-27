@@ -1513,7 +1513,13 @@ class TestLLMBuildAlgorithm:
     def stub_llama_auto_config(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(
             "transformers.AutoConfig.from_pretrained",
-            lambda *args, **kwargs: SimpleNamespace(model_type="llama"),
+            lambda *args, **kwargs: SimpleNamespace(
+                model_type="llama", pad_token_id=None
+            ),
+        )
+        monkeypatch.setattr(
+            "transformers.GenerationConfig.from_pretrained",
+            lambda *args, **kwargs: SimpleNamespace(pad_token_id=None),
         )
 
     def test_dpo_build_algorithm(self, dpo_spec):
@@ -1566,7 +1572,9 @@ class TestLLMBuildAlgorithm:
         assert call_kwargs["index"] == 1
         assert call_kwargs["model_name"] == "gpt2"
 
-    def test_build_algorithm_with_accelerator(self, dpo_spec):
+    def test_build_algorithm_with_accelerator(
+        self, dpo_spec, monkeypatch: pytest.MonkeyPatch
+    ):
         mock_algo = MagicMock()
         mock_tokenizer = MagicMock()
         mock_tokenizer.eos_token_id = 50256
@@ -1575,6 +1583,8 @@ class TestLLMBuildAlgorithm:
         mock_tokenizer.unk_token_id = None
         mock_accel = MagicMock()
         mock_accel.num_processes = 2
+        # The unset field stays out only outside a distributed launch.
+        monkeypatch.setattr("agilerl.builders.llm.is_distributed", lambda: False)
 
         with (
             patch.object(
@@ -1610,7 +1620,13 @@ class TestLLMLocalTrainer:
     def stub_llama_auto_config(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(
             "transformers.AutoConfig.from_pretrained",
-            lambda *args, **kwargs: SimpleNamespace(model_type="llama"),
+            lambda *args, **kwargs: SimpleNamespace(
+                model_type="llama", pad_token_id=None
+            ),
+        )
+        monkeypatch.setattr(
+            "transformers.GenerationConfig.from_pretrained",
+            lambda *args, **kwargs: SimpleNamespace(pad_token_id=None),
         )
 
     def _training(self):

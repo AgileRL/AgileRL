@@ -989,6 +989,37 @@ class TestResolveCausalLm:
 
         assert dmod._resolve_causal_lm(shell) is inner
 
+    def test_returns_language_tower_with_lm_head(self):
+        head = nn.Linear(2, 2)
+        tower = nn.Linear(2, 2)
+        tower.lm_head = head
+        shell = nn.Linear(2, 2)
+        shell.language_model = tower
+
+        assert dmod._resolve_causal_lm(shell) is tower
+
+
+class TestLanguageModel:
+    def test_returns_backbone_under_language_model_tower(self):
+        class Backbone(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.layers = nn.ModuleList([nn.Linear(2, 2)])
+
+        class Tower(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.backbone = Backbone()
+
+        class Omni(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.language_model = Tower()
+
+        omni = Omni()
+        assert dmod._language_model(omni) is omni.language_model.backbone
+        assert dmod._resolve_causal_lm(omni) is omni.language_model
+
 
 class TestLoadModelState:
     def test_dense_loads_plain_state_dict(self):
@@ -1301,6 +1332,8 @@ class TestFSDPPrepareActorOffload:
 class _LoraActor(nn.Module):
     """Tiny module whose trainable param matches ``init_llm_optimizer`` LoRA names."""
 
+    supports_gradient_checkpointing = True
+
     def __init__(self) -> None:
         super().__init__()
         self.actor_lora_A = nn.Parameter(torch.ones(2, 2))
@@ -1355,6 +1388,43 @@ class TestDenseWrap:
             "gradient_checkpointing_kwargs": {"use_reentrant": False},
         }
 
+    def test_enables_checkpointing_on_value_head_pretrained_model(self):
+        inner = _LoraActor()
+
+        class ValueHead(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.pretrained_model = inner
+                self.v_head = nn.Linear(2, 1)
+
+        _prepare_dp_actor(ValueHead(), gradient_checkpointing=True)
+
+        assert inner.checkpointing_kwargs == {
+            "gradient_checkpointing_kwargs": {"use_reentrant": False},
+        }
+
+    def test_enables_checkpointing_through_a_peft_value_head(self):
+        inner = _LoraActor()
+
+        class ValueHead(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.pretrained_model = inner
+
+        class PeftShell(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.base = ValueHead()
+
+            def get_base_model(self) -> nn.Module:
+                return self.base
+
+        _prepare_dp_actor(PeftShell(), gradient_checkpointing=True)
+
+        assert inner.checkpointing_kwargs == {
+            "gradient_checkpointing_kwargs": {"use_reentrant": False},
+        }
+
     def test_builds_cosine_scheduler_when_configured(self):
         actor = _LoraActor()
         config = CosineLRScheduleConfig(num_epochs=10, warmup_proportion=0.1)
@@ -1372,7 +1442,7 @@ class TestDenseWrap:
             _prepare_dp_actor(actor, device="meta")
 
     def test_rejects_gradient_checkpointing_without_support(self):
-        with pytest.raises(TypeError, match="does not support"):
+        with pytest.raises(TypeError, match="does not support gradient checkpointing"):
             _prepare_dp_actor(nn.Linear(2, 2), gradient_checkpointing=True)
 
 
