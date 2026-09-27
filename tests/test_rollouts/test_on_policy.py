@@ -87,14 +87,21 @@ class TestCollectRolloutsLlm:
                 max_output_tokens=8,
             )
 
-        experiences, masks, turns, rewards, steps, next_group_seed, _sampling_logps = (
-            collect_rollouts_llm(
-                agent=agent,
-                env=env,
-                n_steps=1,
-                batch_size=2,
-                group_seed=0,
-            )
+        (
+            experiences,
+            masks,
+            turns,
+            rewards,
+            steps,
+            next_group_seed,
+            _sampling_logps,
+            _pixel_values,
+        ) = collect_rollouts_llm(
+            agent=agent,
+            env=env,
+            n_steps=1,
+            batch_size=2,
+            group_seed=0,
         )
         assert len(experiences) == 2
         assert len(masks) == 2
@@ -161,6 +168,7 @@ class TestCollectRolloutsLlmOrdering:
                 torch.Tensor,
                 torch.Tensor,
                 torch.Tensor | None,
+                torch.Tensor | None,
             ]:
                 """Expose marker token via episode ids and rewards for ordering checks."""
                 token = self._seen_token if self._seen_token is not None else -1
@@ -168,7 +176,7 @@ class TestCollectRolloutsLlmOrdering:
                 action_mask = torch.tensor([[True]], dtype=torch.bool)
                 turn_ids = torch.tensor([[0]], dtype=torch.long)
                 rewards = torch.tensor([float(token)], dtype=torch.float32)
-                return ep_ids, action_mask, turn_ids, rewards, None
+                return ep_ids, action_mask, turn_ids, rewards, None, None
 
             def close(self) -> None:
                 """Provide a close method compatible with vector env cleanup."""
@@ -206,14 +214,21 @@ class TestCollectRolloutsLlmOrdering:
         env = RolloutCollector(env_factory=env_fn, batch_size=4, group_size=2)
         agent = _EchoAgent()
 
-        token_ids_list, _masks, _turns, rewards, steps, next_group_seed, _logps = (
-            collect_rollouts_llm(
-                agent=agent,
-                env=env,
-                n_steps=1,
-                batch_size=4,
-                group_seed=123,
-            )
+        (
+            token_ids_list,
+            _masks,
+            _turns,
+            rewards,
+            steps,
+            next_group_seed,
+            _logps,
+            _pixel_values,
+        ) = collect_rollouts_llm(
+            agent=agent,
+            env=env,
+            n_steps=1,
+            batch_size=4,
+            group_seed=123,
         )
 
         returned_first_tokens = [int(ids[0, 0].item()) for ids in token_ids_list]
@@ -279,6 +294,7 @@ class TestCollectRolloutsLlmGrpo:
             [torch.ones(1, dtype=torch.float32)],
             1,
             None,
+            None,
         )
 
         agent = MagicMock()
@@ -311,6 +327,7 @@ class TestCollectRolloutsLlmGrpo:
             [],
             0,
             None,
+            None,
         )
         agent = MagicMock()
         agent.__class__ = GRPO
@@ -342,6 +359,7 @@ class TestCollectRolloutsLlmGrpo:
             [torch.zeros(1, 1, dtype=torch.long)],
             [torch.ones(1, dtype=torch.float32)],
             1,
+            None,
             None,
         )
 

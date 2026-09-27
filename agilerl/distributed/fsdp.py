@@ -8,6 +8,8 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import logging
+import re
 from collections.abc import Callable, Generator, Iterable, Mapping, Sequence
 from contextlib import _GeneratorContextManager, contextmanager
 from pathlib import Path
@@ -1324,12 +1326,52 @@ def _build_safetensors_key_files(model_path: str) -> dict[str, str]:
         return dict.fromkeys(handle.keys(), weights_file)
 
 
+def _initialize_ignored_missing_parameter(model: nn.Module, live_name: str) -> bool:
+    """Fill a checkpoint-omitted parameter from the module that marks it ignorable.
+
+    :param model: Module being loaded.
+    :type model: nn.Module
+    :param live_name: Parameter name from ``named_parameters``.
+    :type live_name: str
+    :return: True when an ancestor's ``_init_weights`` filled the parameter.
+    :rtype: bool
+    """
+    module_path = live_name.rpartition(".")[0]
+    owner = model.get_submodule(module_path) if module_path else model
+    nodes = [owner]
+    current_path = module_path
+    while current_path:
+        current_path = current_path.rpartition(".")[0]
+        nodes.append(model.get_submodule(current_path) if current_path else model)
+    key = checkpoint_key_for_parameter(live_name)
+    for node in nodes:
+        patterns = getattr(node, "_keys_to_ignore_on_load_missing", None)
+        init_fn = getattr(node, "_init_weights", None)
+        if not patterns or not callable(init_fn):
+            continue
+        matched = False
+        for pattern in patterns:
+            matched = (
+                re.search(pattern, key) is not None
+                or re.search(pattern, live_name) is not None
+            )
+            if matched:
+                break
+        if not matched:
+            continue
+        init_fn(owner)
+        return True
+    return False
+
+
 def _load_sharded_weights_from_safetensors(model: nn.Module) -> None:
     """Copy each rank's parameter shards from on-disk safetensors."""
     model_path = _resolve_checkpoint_source(model)
     key_files = _build_safetensors_key_files(model_path)
     tied_targets = _tied_weight_checkpoint_targets(model)
     transform_groups = _checkpoint_transform_groups(model)
+    vision_parameters_copied = 0
+    unmatched_outside_language: list[str] = []
     # Parameters outside language_model stay empty when no checkpoint key matches.
     has_language_tower = any(
         "language_model." in name for name, _ in model.named_parameters()
@@ -1380,6 +1422,8 @@ def _load_sharded_weights_from_safetensors(model: nn.Module) -> None:
                         _parameter_dest_local(param),
                     )
                 )
+                if "vision_model." in canonical:
+                    vision_parameters_copied += 1
                 continue
             if _is_lora_parameter_name(live_name):
                 mesh = param.device_mesh if isinstance(param, DTensor) else None
@@ -1406,6 +1450,9 @@ def _load_sharded_weights_from_safetensors(model: nn.Module) -> None:
                 )
                 continue
             if has_language_tower and "language_model." not in candidates[0]:
+                if _initialize_ignored_missing_parameter(model, live_name):
+                    continue
+                unmatched_outside_language.append(canonical)
                 continue
             packed = _packed_checkpoint_keys(candidates, key_files)
             if packed is not None:
@@ -1463,6 +1510,16 @@ def _load_sharded_weights_from_safetensors(model: nn.Module) -> None:
                         )
         for keys, global_shape, slices, dest in indexed:
             _copy_indexed_weights(key_files, keys, global_shape, slices, dest)
+    first_unmatched = (
+        unmatched_outside_language[0] if unmatched_outside_language else "none"
+    )
+    logging.getLogger(__name__).info(
+        "FSDP safetensors load copied %d vision_model parameters; "
+        "%d parameters outside language_model had no checkpoint key (first %s)",
+        vision_parameters_copied,
+        len(unmatched_outside_language),
+        first_unmatched,
+    )
 
 
 def materialize_fsdp2_from_cpu_state(

@@ -27,6 +27,7 @@ class Trajectory(BaseModel):
     :param turn_ids: ``(1, T - 1)`` turn index per action token, ``-1`` elsewhere.
     :param rewards: ``(max_turns,)`` or ``(1, max_turns)`` per-turn rewards.
     :param sampling_logps: Optional 1-D generated-token sampling logprobs.
+    :param pixel_values: Optional vision tensor for trainer forward on VL episodes.
     """
 
     token_ids: torch.Tensor
@@ -34,6 +35,7 @@ class Trajectory(BaseModel):
     turn_ids: torch.Tensor
     rewards: torch.Tensor
     sampling_logps: torch.Tensor | None = None
+    pixel_values: torch.Tensor | None = None
 
     model_config = ConfigDict(arbitrary_types_allowed=True, frozen=True, extra="forbid")
 
@@ -91,6 +93,7 @@ class LLMExperienceBatch:
     :param turn_ids: ``(B, T_max - 1)`` tensor padded with ``-1``, or ``None`` when empty.
     :param token_lengths: ``(B,)`` long tensor of per-row sequence lengths.
     :param sampling_logps: Per-row logprob tensors, or ``None`` when none were captured.
+    :param pixel_values: Per-row vision tensors, or ``None`` when none were captured.
     """
 
     token_ids: list[torch.Tensor]
@@ -99,6 +102,7 @@ class LLMExperienceBatch:
     turn_ids: torch.Tensor | None
     token_lengths: torch.Tensor
     sampling_logps: list[torch.Tensor | None] | None = None
+    pixel_values: list[torch.Tensor | None] | None = None
 
     def __len__(self) -> int:
         return len(self.token_ids)
@@ -144,6 +148,7 @@ def collate_rollout_groups(groups: Sequence[RolloutGroup]) -> LLMExperienceBatch
         padding_values=[0.0],
     )
     logps = [traj.sampling_logps for traj in trajectories]
+    pixels = [traj.pixel_values for traj in trajectories]
     return LLMExperienceBatch(
         token_ids=[traj.token_ids for traj in trajectories],
         action_masks=[traj.action_masks for traj in trajectories],
@@ -154,4 +159,5 @@ def collate_rollout_groups(groups: Sequence[RolloutGroup]) -> LLMExperienceBatch
             dtype=torch.long,
         ),
         sampling_logps=logps if any(lp is not None for lp in logps) else None,
+        pixel_values=pixels if any(pv is not None for pv in pixels) else None,
     )

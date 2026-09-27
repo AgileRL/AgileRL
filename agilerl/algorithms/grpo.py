@@ -586,16 +586,15 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
                     ):
                         chunk = prompts[start : start + self.hf_generate_chunk_size]
                         for prompt in chunk:
-                            prompt = prepare_prompt_hf_generate(prompt, actor_device)
-                            input_ids = prompt["input_ids"]
-                            attention_mask = prompt["attention_mask"]
-                            if training and group_size > 1:
-                                input_ids = input_ids.repeat(group_size, 1)
-                                attention_mask = attention_mask.repeat(group_size, 1)
+                            hf_inputs = prepare_prompt_hf_generate(
+                                prompt,
+                                actor_device,
+                                group_size=group_size,
+                            )
+                            input_ids = hf_inputs["input_ids"]
                             prompt_len = int(input_ids.shape[-1])
                             token_ids = self.actor.generate(
-                                input_ids=input_ids,
-                                attention_mask=attention_mask,
+                                **hf_inputs,
                                 generation_config=hf_turn_generation_config(
                                     self.generation_config,
                                     max_model_len=self.max_model_len,
@@ -637,6 +636,7 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
         experiences: LLMRolloutExperiences,
         turn_ids: torch.Tensor | None = None,
         sampling_logps: list[torch.Tensor | None] | None = None,
+        pixel_values: torch.Tensor | None = None,
     ) -> dict[str, float]:
         """Update agent network parameters to learn from experiences.
 
@@ -652,6 +652,9 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
             Parallel to the stacked ``token_ids`` rows. ``None`` disables
             the correction for this update.
         :type sampling_logps: list[torch.Tensor | None] | None
+        :param pixel_values: Optional per-sample vision tensors aligned with
+            the stacked ``token_ids`` batch.
+        :type pixel_values: torch.Tensor | None
         :param turn_ids: ``(batch, seq_len-1)`` turn index per action token
             (``-1`` for non-action tokens), aligned with the action mask.
             Required when the resolved advantage granularity is ``"turn"``
@@ -747,6 +750,7 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
                 reference_log_probs, old_log_probs, _ = self._fused_forward_no_grad(
                     token_ids,
                     batch_size,
+                    pixel_values=pixel_values,
                 )
 
             is_turn_ids = turn_ids if self.importance_sampling_level == "turn" else None
@@ -786,7 +790,6 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
                     for start in range(0, len(window_idxs), batch_size):
                         minibatch_idxs = window_idxs[start : start + batch_size]
                         loss, kl, clipfrac, policy_log_probs = self._loss(
-                            batch_size,
                             minibatch_idxs,
                             token_ids,
                             action_masks,
@@ -795,6 +798,7 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
                             reference_log_probs,
                             turn_ids=is_turn_ids,
                             sampling_log_probs=sampling_log_probs,
+                            pixel_values=pixel_values,
                         )
                         self._raise_if_loss_not_finite_on_any_rank(loss)
 
@@ -1713,7 +1717,6 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
 
     def _loss(
         self,
-        batch_size: int,
         minibatch_idxs: npt.NDArray,
         token_ids: torch.Tensor,
         action_mask: torch.Tensor,
@@ -1722,6 +1725,7 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
         reference_log_probs: torch.Tensor,
         turn_ids: torch.Tensor | None = None,
         sampling_log_probs: torch.Tensor | None = None,
+        pixel_values: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Slice out a minibatch and compute the active objective loss on it.
 
@@ -1755,8 +1759,10 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
             if sampling_log_probs is not None
             else None
         )
+        batch_pixel_values = (
+            pixel_values[minibatch_idxs] if pixel_values is not None else None
+        )
         return self._objective_loss(
-            batch_size,
             batch_ids,
             batch_action_mask,
             batch_advantages,
@@ -1764,6 +1770,7 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
             batch_reference_log_probs,
             batch_turn_ids,
             batch_sampling_log_probs,
+            batch_pixel_values,
         )
 
     @property
@@ -1826,7 +1833,6 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
 
     def _objective_loss(
         self,
-        batch_size: int,
         batch_ids: torch.Tensor,
         action_mask: torch.Tensor,
         advantages: torch.Tensor,
@@ -1834,6 +1840,7 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
         reference_log_probs: torch.Tensor,
         turn_ids: torch.Tensor | None,
         sampling_log_probs: torch.Tensor | None,
+        pixel_values: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Run the configured objective on one minibatch.
 
@@ -1851,12 +1858,14 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
                 old_log_probs,
                 reference_log_probs,
                 sampling_log_probs=sampling_log_probs,
+                pixel_values=pixel_values,
             )
         log_probs = self._get_logprobs(
             batch_ids,
-            batch_size=batch_size,
+            batch_size=batch_ids.shape[0],
             use_reference=False,
             eval_mode=False,
+            pixel_values=pixel_values,
         )
         loss, kl, clipfrac = self._loss_fn(
             action_mask,
@@ -2108,6 +2117,7 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
         old_log_probs: torch.Tensor,
         reference_log_probs: torch.Tensor,
         sampling_log_probs: torch.Tensor | None = None,
+        pixel_values: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Run the fused Liger loss inside the activation-offload context.
 
@@ -2140,6 +2150,7 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
                 old_log_probs,
                 reference_log_probs,
                 sampling_log_probs,
+                pixel_values,
             )
 
     def _fused_kernel_loss(
@@ -2150,6 +2161,7 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
         old_log_probs: torch.Tensor,
         reference_log_probs: torch.Tensor,
         sampling_log_probs: torch.Tensor | None = None,
+        pixel_values: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Calculate the loss using the Liger Triton-fused kernel.
 
@@ -2229,6 +2241,8 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
             epsilon_high = self.clip_coef_max - 1.0
 
         batch_ids = batch_ids.to(self.device)
+        if pixel_values is not None:
+            pixel_values = pixel_values.to(self.device)
         mask = action_mask.to(self.device).contiguous()  # (B, seq_len-1)
         window = self._resolve_loss_window(mask)
         if window is not None:
@@ -2269,6 +2283,8 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
                 "position_ids": packed.position_ids,
                 "use_cache": False,
             }
+            if pixel_values is not None:
+                model_kwargs["pixel_values"] = pixel_values
         else:
             model_kwargs = {
                 "input_ids": batch_ids,
@@ -2279,6 +2295,8 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
                 model_kwargs["position_ids"] = self._position_ids_from_mask(
                     attention_mask
                 )
+            if pixel_values is not None:
+                model_kwargs["pixel_values"] = pixel_values
         # Identity-patch lm_head: the forward yields hidden states; the fused
         # kernel handles the lm_head matmul itself.
         with (

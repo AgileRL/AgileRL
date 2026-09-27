@@ -53,6 +53,9 @@ NEMOTRON_H_OMNI_RUNTIME_CONFIG = NEMOTRON_H_RUNTIME_CONFIG.model_copy(
                 ),
             },
         ),
+        "multimodal_towers_kept_hf_override": {
+            "architectures": ["NemotronH_Super_Omni_Reasoning_V3"],
+        },
     },
 )
 

@@ -67,14 +67,26 @@ class RolloutPrompt(TypedDict):
     output side, carrying a finished episode back to ``learn``.
 
     :param input_ids: ``(1, T)`` initial prompt plus every generation and env
-        observation since — so it grows turn by turn. The only key a
-        ``RolloutHarness`` sets.
+        observation since — so it grows turn by turn. Text-only harness
+        turns send this key alone; a VL first turn also sends ``prompt``,
+        ``image``, and ``prompt_token_len``.
     :param attention_mask: Set only by a caller passing an already-padded batch;
         a single unpadded row implies an all-ones mask.
+    :param prompt: Chat-templated prompt string for a multimodal vLLM turn; still
+        contains the literal ``<image>`` marker.
+    :param image: One PIL image for the current multimodal generation turn.
+    :param prompt_token_len: Expanded or processor token length used for context
+        budgeting when ``input_ids`` is not sent to vLLM.
+    :param pixel_values: Trainer vision tensor aligned with image placeholders in
+        ``input_ids`` after vLLM expands the prompt.
     """
 
-    input_ids: torch.Tensor
+    input_ids: NotRequired[torch.Tensor]
     attention_mask: NotRequired[torch.Tensor]
+    prompt: NotRequired[str]
+    image: NotRequired[Any]
+    prompt_token_len: NotRequired[int]
+    pixel_values: NotRequired[torch.Tensor]
 
 
 class PreferencePrompts(TypedDict):

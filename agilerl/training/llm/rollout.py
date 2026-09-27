@@ -53,6 +53,23 @@ if TYPE_CHECKING:
     SupportedRollout = GRPO | LLMPPO | LLMREINFORCE
 
 
+def _stack_batch_pixel_values(
+    pixel_values_list: list[torch.Tensor | None],
+) -> torch.Tensor | None:
+    """Concatenate per-trajectory vision tensors when every row carries one."""
+    if not pixel_values_list:
+        return None
+    if not any(item is not None for item in pixel_values_list):
+        return None
+    present: list[torch.Tensor] = []
+    for item in pixel_values_list:
+        if item is None:
+            msg = "mixed VL and text-only trajectories in one learn batch"
+            raise ValueError(msg)
+        present.append(item)
+    return torch.cat(present, dim=0)
+
+
 def train_llm_rollout(
     pop: "list[SupportedRollout]",
     max_turns: int,
@@ -264,6 +281,7 @@ def train_llm_rollout(
                     batch_steps,
                     group_seed,
                     all_sampling_logps,
+                    all_pixel_values,
                 ) = collect_rollouts_llm(
                     agent=agent,
                     env=rollout_collector,
@@ -282,6 +300,7 @@ def train_llm_rollout(
                     all_rewards,
                     all_sampling_logps,
                     group_size=group_size,
+                    all_pixel_values=all_pixel_values,
                 )
                 # Empty batches have no trajectories; learn() raises on them.
                 # Skip on every rank if any rank is empty (keeps collectives aligned).
@@ -316,10 +335,19 @@ def train_llm_rollout(
                                 value=-1,
                             )
 
+                    learn_kwargs: dict[str, Any] = {}
+                    if isinstance(agent, GRPO) and batch.pixel_values is not None:
+                        stacked_pixel_values = _stack_batch_pixel_values(
+                            batch.pixel_values,
+                        )
+                        if stacked_pixel_values is not None:
+                            learn_kwargs["pixel_values"] = stacked_pixel_values
+
                     agent.learn(
                         experiences,
                         turn_ids=turn_ids,
                         sampling_logps=batch.sampling_logps,
+                        **learn_kwargs,
                     )
 
                     agg_score = aggregate_metrics_across_gpus(mean_score)

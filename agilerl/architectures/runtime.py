@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -81,7 +81,7 @@ class LanguageTowerRuntimeConfig(BaseModel):
 class ModelRuntimeConfig(BaseModel):
     """Per-``model_type`` runtime settings for vLLM, trainer, and patches."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
 
     vllm: VllmRuntimeConfig = Field(default_factory=VllmRuntimeConfig)
     trainer: TrainerRuntimeConfig = Field(default_factory=TrainerRuntimeConfig)
@@ -89,3 +89,6 @@ class ModelRuntimeConfig(BaseModel):
     language_tower: LanguageTowerRuntimeConfig = Field(
         default_factory=LanguageTowerRuntimeConfig
     )
+    multimodal_towers_kept_hf_override: (
+        Callable[[object], object] | Mapping[str, object] | None
+    ) = None

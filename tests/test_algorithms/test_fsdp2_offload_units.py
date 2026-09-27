@@ -337,7 +337,8 @@ def _patch_hf_generate_path(module_path, captured_devices):
     and return dummy data without moving tensors.
     """
 
-    def capture_prepare(prompt_dict, device):
+    def capture_prepare(prompt_dict, device, group_size=1):
+        del group_size
         captured_devices.append(device)
         return {
             "input_ids": torch.ones(1, 4, dtype=torch.long),
@@ -1691,7 +1692,7 @@ class TestSafetensorsShardKeys:
         assert torch.equal(model.language_model.tied, torch.ones(2, 2))
         assert torch.isfinite(model.language_model.model.lora_A).all()
 
-    def test_leaves_parameters_outside_the_language_tower(self, tmp_path):
+    def test_leaves_parameters_outside_the_language_tower(self, tmp_path, caplog):
         from agilerl.distributed.fsdp import _load_sharded_weights_from_safetensors
 
         expected = torch.arange(4, dtype=torch.float32).reshape(2, 2)
@@ -1712,10 +1713,283 @@ class TestSafetensorsShardKeys:
         model = Root()
         with torch.no_grad():
             model.vision_model.weight.copy_(torch.ones(2, 2))
-        _load_sharded_weights_from_safetensors(model)
+        with caplog.at_level("INFO", logger="agilerl.distributed.fsdp"):
+            _load_sharded_weights_from_safetensors(model)
 
         assert torch.equal(model.language_model.weight.detach(), expected)
         assert torch.equal(model.vision_model.weight, torch.ones(2, 2))
+        assert "copied 0 vision_model parameters" in caplog.text
+        assert "first vision_model.weight" in caplog.text
+
+    def test_loads_converted_checkpoint_keys_including_a_split_source(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        from transformers.conversion_mapping import (
+            Chunk,
+            WeightConverter,
+            WeightRenaming,
+        )
+
+        from agilerl.distributed.fsdp import _load_sharded_weights_from_safetensors
+
+        position = torch.arange(4, dtype=torch.float32).reshape(1, 4)
+        query = torch.arange(4, dtype=torch.float32).reshape(2, 2)
+        key = query + 10
+        value = query + 20
+        language = torch.arange(4, dtype=torch.float32).reshape(2, 2)
+        save_file(
+            {
+                "language_model.weight": language,
+                "vision_model.radio_model.model.patch_generator.pos_embed": position,
+                "vision_model.radio_model.model.blocks.0.attn.qkv.weight": torch.cat(
+                    [query, key, value], dim=0
+                ),
+            },
+            str(tmp_path / "model.safetensors"),
+        )
+
+        class Embeddings(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.position_embedding = nn.Parameter(torch.zeros(1, 4))
+
+        class Qkv(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.query = nn.Linear(2, 2, bias=False)
+                self.key = nn.Linear(2, 2, bias=False)
+                self.value = nn.Linear(2, 2, bias=False)
+
+        class Attention(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.attention = Qkv()
+
+        class Block(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.attention = Attention()
+
+        class Encoder(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.layer = nn.ModuleList([Block()])
+
+        class Vision(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.embeddings = Embeddings()
+                self.encoder = Encoder()
+
+        class Root(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.language_model = nn.Linear(2, 2, bias=False)
+                self.vision_model = Vision()
+                self.config = PretrainedConfig(
+                    tie_word_embeddings=False, name_or_path=str(tmp_path)
+                )
+
+        transforms = [
+            WeightRenaming("radio_model.model.blocks", "encoder.layer"),
+            WeightConverter(
+                source_patterns="attn.qkv",
+                target_patterns=[
+                    "attention.attention.query",
+                    "attention.attention.key",
+                    "attention.attention.value",
+                ],
+                operations=[Chunk(dim=0)],
+            ),
+            WeightRenaming(
+                "radio_model.model.patch_generator.pos_embed",
+                "embeddings.position_embedding",
+            ),
+        ]
+        monkeypatch.setattr(
+            "agilerl.distributed.fsdp._checkpoint_transform_groups",
+            lambda _model: [("", transforms)],
+        )
+        model = Root()
+
+        with caplog.at_level("INFO", logger="agilerl.distributed.fsdp"):
+            _load_sharded_weights_from_safetensors(model)
+
+        vision = model.vision_model
+        assert torch.equal(model.language_model.weight.detach(), language)
+        assert torch.equal(vision.embeddings.position_embedding.detach(), position)
+        qkv = vision.encoder.layer[0].attention.attention
+        assert torch.equal(qkv.query.weight.detach(), query)
+        assert torch.equal(qkv.key.weight.detach(), key)
+        assert torch.equal(qkv.value.weight.detach(), value)
+        assert "copied 4 vision_model parameters" in caplog.text
+        assert "first none" in caplog.text
+
+    def test_loads_keys_from_a_child_module_conversion(self, tmp_path):
+        from transformers.conversion_mapping import (
+            Chunk,
+            WeightConverter,
+            WeightRenaming,
+            register_checkpoint_conversion_mapping,
+        )
+
+        from agilerl.distributed.fsdp import _load_sharded_weights_from_safetensors
+
+        position = torch.arange(4, dtype=torch.float32).reshape(1, 4)
+        query = torch.arange(4, dtype=torch.float32).reshape(2, 2)
+        key = query + 10
+        value = query + 20
+        save_file(
+            {
+                "language_model.weight": torch.zeros(2, 2),
+                "vision_model.radio_model.model.patch_generator.pos_embed": position,
+                "vision_model.radio_model.model.blocks.0.attn.qkv.weight": torch.cat(
+                    [query, key, value], dim=0
+                ),
+            },
+            str(tmp_path / "model.safetensors"),
+        )
+
+        class Embeddings(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.position_embedding = nn.Parameter(torch.zeros(1, 4))
+
+        class Qkv(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.query = nn.Linear(2, 2, bias=False)
+                self.key = nn.Linear(2, 2, bias=False)
+                self.value = nn.Linear(2, 2, bias=False)
+
+        class Attention(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.attention = Qkv()
+
+        class Block(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.attention = Attention()
+
+        class Encoder(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.layer = nn.ModuleList([Block()])
+
+        class AgilerlTestRadioVision(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.embeddings = Embeddings()
+                self.encoder = Encoder()
+                self.unused = nn.Parameter(torch.ones(2))
+                self.config = PretrainedConfig(model_type="agilerl_fsdp_child_vision")
+
+        class Inner(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.vision_model = AgilerlTestRadioVision()
+
+        class BaseModel(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.model = Inner()
+
+        class Root(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.language_model = nn.Linear(2, 2, bias=False)
+                self.base_model = BaseModel()
+                self.other = nn.Parameter(torch.ones(2))
+                self.config = PretrainedConfig(
+                    tie_word_embeddings=False, name_or_path=str(tmp_path)
+                )
+
+        register_checkpoint_conversion_mapping(
+            "agilerl_fsdp_child_vision",
+            [
+                WeightRenaming("radio_model.model.blocks", "encoder.layer"),
+                WeightConverter(
+                    source_patterns="attn.qkv",
+                    target_patterns=[
+                        "attention.attention.query",
+                        "attention.attention.key",
+                        "attention.attention.value",
+                    ],
+                    operations=[Chunk(dim=0)],
+                ),
+                WeightRenaming(
+                    "radio_model.model.patch_generator.pos_embed",
+                    "embeddings.position_embedding",
+                ),
+            ],
+            overwrite=True,
+        )
+        model = Root()
+
+        _load_sharded_weights_from_safetensors(model)
+
+        vision = model.base_model.model.vision_model
+        assert torch.equal(vision.embeddings.position_embedding.detach(), position)
+        qkv = vision.encoder.layer[0].attention.attention
+        assert torch.equal(qkv.query.weight.detach(), query)
+        assert torch.equal(qkv.key.weight.detach(), key)
+        assert torch.equal(qkv.value.weight.detach(), value)
+        assert torch.equal(vision.unused.detach(), torch.ones(2))
+        assert torch.equal(model.other.detach(), torch.ones(2))
+
+    def test_inits_missing_keys_the_module_marks_ignorable(self, tmp_path, caplog):
+        from agilerl.distributed.fsdp import _load_sharded_weights_from_safetensors
+
+        save_file(
+            {"language_model.weight": torch.zeros(2, 2)},
+            str(tmp_path / "model.safetensors"),
+        )
+
+        class Scale(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.lambda1 = nn.Parameter(torch.zeros(2))
+
+        class Vision(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.layer_scale1 = Scale()
+                self.extra = nn.Parameter(torch.ones(2))
+                self.config = SimpleNamespace(layerscale_value=1.0)
+                self._keys_to_ignore_on_load_missing = [r"layer_scale\d+\.lambda1"]
+
+            def _init_weights(self, module: nn.Module) -> None:
+                if isinstance(module, Scale):
+                    torch.nn.init.constant_(
+                        module.lambda1, self.config.layerscale_value
+                    )
+
+        class Root(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.language_model = nn.Linear(2, 2, bias=False)
+                self.vision_model = Vision()
+                self.config = PretrainedConfig(
+                    tie_word_embeddings=False, name_or_path=str(tmp_path)
+                )
+
+        model = Root()
+
+        with caplog.at_level("INFO", logger="agilerl.distributed.fsdp"):
+            _load_sharded_weights_from_safetensors(model)
+
+        assert torch.equal(
+            model.vision_model.layer_scale1.lambda1.detach(), torch.ones(2)
+        )
+        assert torch.equal(model.vision_model.extra.detach(), torch.ones(2))
+        assert "copied 0 vision_model parameters" in caplog.text
+        assert "first vision_model.extra" in caplog.text
+
+    def test_plain_module_has_no_weight_transforms(self) -> None:
+        from agilerl.distributed.fsdp import _checkpoint_transform_groups
+
+        assert _checkpoint_transform_groups(nn.Linear(2, 2)) == []
 
     def test_missing_key_raises_without_a_language_tower(self, tmp_path):
         from agilerl.distributed.fsdp import _load_sharded_weights_from_safetensors

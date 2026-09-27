@@ -78,6 +78,7 @@ from agilerl.utils.llm_utils import (
     peft_target_key_matches,
     pool_by_turns,
     pool_log_ratio_by_level,
+    prepare_prompt_hf_generate,
     remap_peft_lora_key_for_vllm,
     render_chat_template,
     resolve_attn_implementation,
@@ -3060,6 +3061,66 @@ class TestPeftLoraKeyHelpers:
         key = "model.layers.0.q_proj.lora_A.weight"
         assert remap_peft_lora_key_for_vllm(key) == key
 
+    def test_remap_nemotron_super_vl_vision_attention_query(self):
+        hf_key = "vision_model.encoder.layer.0.attention.attention.query.lora_A.weight"
+        assert (
+            remap_peft_lora_key_for_vllm(hf_key)
+            == "vision_model.model.encoder.layers.0.attn.query.lora_A.weight"
+        )
+
+    def test_remap_nemotron_super_vl_vision_attention_output_dense(self):
+        hf_key = "vision_model.encoder.layer.0.attention.output.dense.lora_B.weight"
+        assert (
+            remap_peft_lora_key_for_vllm(hf_key)
+            == "vision_model.model.encoder.layers.0.attn.proj.lora_B.weight"
+        )
+
+    def test_remap_nemotron_super_vl_vision_mlp_fc1(self):
+        hf_key = "vision_model.encoder.layer.3.mlp.fc1.lora_A.weight"
+        assert (
+            remap_peft_lora_key_for_vllm(hf_key)
+            == "vision_model.model.encoder.layers.3.mlp.fc1.lora_A.weight"
+        )
+
+    def test_remap_nemotron_super_vl_vision_projector_linear1(self):
+        assert (
+            remap_peft_lora_key_for_vllm("vision_projector.mlp1.linear1.lora_A.weight")
+            == "mlp1.1.lora_A.weight"
+        )
+
+    def test_remap_nemotron_super_vl_vision_projector_linear2(self):
+        assert (
+            remap_peft_lora_key_for_vllm("vision_projector.mlp1.linear2.lora_B.weight")
+            == "mlp1.3.lora_B.weight"
+        )
+
+    def test_remap_nemotron_super_vl_language_backbone(self):
+        hf_key = "language_model.backbone.layers.0.self_attn.q_proj.lora_A.weight"
+        assert (
+            remap_peft_lora_key_for_vllm(hf_key)
+            == "language_model.model.layers.0.self_attn.q_proj.lora_A.weight"
+        )
+
+    def test_remap_language_backbone_to_language_tower_when_stripping(self):
+        hf_key = "language_model.backbone.layers.0.self_attn.q_proj.lora_A.weight"
+        assert (
+            remap_peft_lora_key_for_vllm(hf_key, strip_multimodal_towers=True)
+            == "model.layers.0.self_attn.q_proj.lora_A.weight"
+        )
+
+    def test_remap_language_backbone_keeps_vl_prefix_for_named_tower_list(self):
+        hf_key = "language_model.backbone.layers.0.self_attn.q_proj.lora_A.weight"
+        assert (
+            remap_peft_lora_key_for_vllm(
+                hf_key, strip_multimodal_towers=["audio_tower"]
+            )
+            == "language_model.model.layers.0.self_attn.q_proj.lora_A.weight"
+        )
+
+    def test_remap_passthrough_language_backbone_without_prefix(self):
+        key = "backbone.layers.0.mixer.in_proj.lora_A.weight"
+        assert remap_peft_lora_key_for_vllm(key) == key
+
 
 class TestFilterPeftStateDictForVllmLora:
     def test_keeps_matching_modules_and_remaps_keys(self):
@@ -3081,6 +3142,29 @@ class TestFilterPeftStateDictForVllmLora:
     def test_no_matches_yields_empty_dict(self):
         state = {"model.layers.0.out_proj.lora_A.weight": torch.zeros(1)}
         assert filter_peft_state_dict_for_vllm_lora(state, ["q_proj"]) == {}
+
+    def test_nemotron_super_vl_vision_query_remaps_filtered_key(self):
+        tensor = torch.zeros(1)
+        hf_key = "vision_model.encoder.layer.0.attention.attention.query.lora_A.weight"
+        out = filter_peft_state_dict_for_vllm_lora({hf_key: tensor}, ["query"])
+        assert list(out) == [
+            "vision_model.model.encoder.layers.0.attn.query.lora_A.weight"
+        ]
+        assert (
+            out["vision_model.model.encoder.layers.0.attn.query.lora_A.weight"]
+            is tensor
+        )
+
+    def test_language_backbone_remaps_to_language_tower_when_stripping(self):
+        tensor = torch.zeros(1)
+        hf_key = "language_model.backbone.layers.0.self_attn.q_proj.lora_A.weight"
+        out = filter_peft_state_dict_for_vllm_lora(
+            {hf_key: tensor},
+            ["q_proj"],
+            strip_multimodal_towers=True,
+        )
+        assert list(out) == ["model.layers.0.self_attn.q_proj.lora_A.weight"]
+        assert out["model.layers.0.self_attn.q_proj.lora_A.weight"] is tensor
 
 
 class TestJsonSafeValue:
@@ -3975,3 +4059,20 @@ class TestResolveLlmDevice:
             assert resolve_llm_device("cuda") == "cuda:1"
 
         mock_resolve.assert_called_once_with("cuda")
+
+
+class TestPreparePromptHfGenerate:
+    def test_forwards_pixel_values_onto_the_generate_device(self) -> None:
+        device = torch.device("cpu")
+        pixel_values = torch.ones(1, 3, 2, 2)
+
+        tensors = prepare_prompt_hf_generate(
+            {
+                "input_ids": torch.tensor([[1, 2]]),
+                "pixel_values": pixel_values,
+            },
+            device,
+        )
+
+        assert torch.equal(tensors["pixel_values"], pixel_values)
+        assert tensors["pixel_values"].device == device

@@ -70,6 +70,7 @@ class StubCollector:
         self,
         episode_id: str,
         token_ids: torch.Tensor,
+        prompt_token_len: int | None = None,
     ) -> tuple[dict[str, str], float, bool, bool, dict[str, str]]:
         self.step_calls.append((episode_id, token_ids))
         return {"text": f"next-{episode_id}"}, 1.5, True, False, {"source": "step"}

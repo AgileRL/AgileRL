@@ -393,7 +393,9 @@ def is_rollout_prompt(obs: Mapping[str, object]) -> TypeGuard[RolloutPrompt]:
     :return: ``True`` when the mapping carries prompt tokens.
     :rtype: TypeGuard[RolloutPrompt]
     """
-    return isinstance(obs.get("input_ids"), torch.Tensor)
+    return isinstance(obs.get("input_ids"), torch.Tensor) or (
+        isinstance(obs.get("prompt"), str) and obs.get("image") is not None
+    )
 
 
 def _split_prompt_value(value: object, batch_size: int) -> Sequence[object]:
@@ -2348,24 +2350,31 @@ def hf_completion_lengths(
 
 
 def prepare_prompt_hf_generate(
-    prompt: RolloutPrompt, device: torch.device
+    prompt: RolloutPrompt,
+    device: torch.device,
+    *,
+    group_size: int = 1,
 ) -> dict[str, torch.Tensor]:
     """Turn one rollout prompt into HuggingFace ``generate`` inputs.
 
     ``attention_mask`` is taken from the prompt when present (e.g. a padded
     batch) and derived as all-ones otherwise (a single unpadded row, the
-    ``RolloutHarness`` prompt shape).
+    ``RolloutHarness`` prompt shape). ``pixel_values`` are forwarded when the
+    prompt carries them.
 
     :param prompt: The prompt to prepare.
     :type prompt: RolloutPrompt
     :param device: The device to move the tensors to.
     :type device: torch.device
-    :return: ``input_ids`` / ``attention_mask`` moved to ``device``.
+    :param group_size: Repeat each tensor this many times on the batch dim.
+    :type group_size: int
+    :return: ``input_ids`` / ``attention_mask`` (and ``pixel_values`` when set)
+        moved to ``device``.
     :rtype: dict[str, torch.Tensor]
     """
     input_ids = prompt["input_ids"].to(device)
     attention_mask = prompt.get("attention_mask")
-    return {
+    tensors: dict[str, torch.Tensor] = {
         "input_ids": input_ids,
         "attention_mask": (
             torch.ones_like(input_ids)
@@ -2373,6 +2382,15 @@ def prepare_prompt_hf_generate(
             else attention_mask.to(device)
         ),
     }
+    pixel_values = prompt.get("pixel_values")
+    if pixel_values is not None:
+        tensors["pixel_values"] = pixel_values.to(device)
+    if group_size > 1:
+        tensors = {
+            key: value.repeat(group_size, *([1] * (value.ndim - 1)))
+            for key, value in tensors.items()
+        }
+    return tensors
 
 
 def get_model_name_or_path(model: PreTrainedModel) -> str:
@@ -2770,12 +2788,45 @@ def peft_lora_state_dict_key_to_module_key(key: str) -> str:
     return key
 
 
-def remap_peft_lora_key_for_vllm(key: str) -> str:
-    """Normalize PEFT keys (e.g. ClippableLinear ``.linear.lora_A``) for vLLM."""
+def remap_peft_lora_key_for_vllm(
+    key: str,
+    *,
+    strip_multimodal_towers: bool | list[str] = False,
+) -> str:
+    """Normalize PEFT LoRA keys (ClippableLinear, Nemotron Super VL vision/language/projector) for vLLM.
+
+    :param key: PEFT state-dict key.
+    :type key: str
+    :param strip_multimodal_towers: ``True`` remaps language keys onto the
+        language-tower module (``model.``). Any other value keeps the nested
+        VL prefix (``language_model.model.``).
+    :type strip_multimodal_towers: bool | list[str]
+    :return: Key vLLM's LoRA loader expects.
+    :rtype: str
+    """
     key = key.replace(".linear.lora_A.", ".lora_A.").replace(
         ".linear.lora_B.", ".lora_B."
     )
-    return key.replace(".base_layer.", ".")
+    key = key.replace(".base_layer.", ".")
+    if "language_model.backbone." in key:
+        language_prefix = (
+            "model." if strip_multimodal_towers is True else "language_model.model."
+        )
+        key = key.replace("language_model.backbone.", language_prefix)
+    if "vision_model.encoder.layer." in key:
+        key = key.replace(
+            "vision_model.encoder.layer.", "vision_model.model.encoder.layers."
+        )
+    if "vision_model.model.encoder.layers." in key:
+        key = key.replace(".attention.attention.query", ".attn.query")
+        key = key.replace(".attention.attention.key", ".attn.key")
+        key = key.replace(".attention.attention.value", ".attn.value")
+        key = key.replace(".attention.output.dense", ".attn.proj")
+    if "vision_projector.mlp1.linear1" in key:
+        key = key.replace("vision_projector.mlp1.linear1", "mlp1.1")
+    if "vision_projector.mlp1.linear2" in key:
+        key = key.replace("vision_projector.mlp1.linear2", "mlp1.3")
+    return key
 
 
 def expert_lora_vllm_key_map(peft_model: nn.Module) -> dict[str, str]:
@@ -2823,6 +2874,7 @@ def filter_peft_state_dict_for_vllm_lora(
     state_dict: dict[str, torch.Tensor],
     target_modules: str | list[str] | None,
     expert_key_map: dict[str, str] | None = None,
+    strip_multimodal_towers: bool | list[str] = False,
 ) -> dict[str, torch.Tensor]:
     """Keep LoRA tensors whose modules match the trainer ``target_modules`` spec or expert map."""
     filtered: dict[str, torch.Tensor] = {}
@@ -2836,7 +2888,11 @@ def filter_peft_state_dict_for_vllm_lora(
             module_key, target_modules
         ):
             continue
-        filtered[remap_peft_lora_key_for_vllm(key)] = tensor
+        filtered[
+            remap_peft_lora_key_for_vllm(
+                key, strip_multimodal_towers=strip_multimodal_towers
+            )
+        ] = tensor
     return filtered
 
 
@@ -2859,6 +2915,7 @@ def save_peft_adapter_for_vllm_rollout(
     adapter_name: str,
     target_modules: str | list[str] | None,
     expert_key_map: dict[str, str] | None = None,
+    strip_multimodal_towers: bool | list[str] = False,
 ) -> Path:
     """Export a PEFT adapter checkpoint that vLLM can load for colocated rollout.
 
@@ -2891,7 +2948,10 @@ def save_peft_adapter_for_vllm_rollout(
     state = get_peft_model_state_dict(peft_model, adapter_name=adapter_name)
     n_before = len(state)
     state = filter_peft_state_dict_for_vllm_lora(
-        state, target_modules, expert_key_map=expert_key_map
+        state,
+        target_modules,
+        expert_key_map=expert_key_map,
+        strip_multimodal_towers=strip_multimodal_towers,
     )
     if not state:
         msg = (

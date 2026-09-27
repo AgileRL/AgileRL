@@ -46,20 +46,25 @@ def apply_language_tower_engine_kwargs(
 
     :param kwargs: vLLM engine kwargs mutated in place.
     :type kwargs: dict[str, Any]
-    :param strip_multimodal_towers: Serve only the language tower on a VL checkpoint.
+    :param strip_multimodal_towers: ``True`` serves the language tower only. A
+        list still loads the multimodal engine; named towers are freed later.
     :type strip_multimodal_towers: bool | list[str]
     :param runtime: Family runtime whose language-tower mapping, if any, is applied.
     :type runtime: ModelRuntimeConfig
     """
-    if not strip_multimodal_towers:
+    if strip_multimodal_towers is True:
+        tower = runtime.language_tower
+        if tower.hf_overrides is not None:
+            kwargs["hf_overrides"] = tower.hf_overrides
+        else:
+            kwargs["hf_overrides"] = nested_language_config
+        if tower.model_class_overrides:
+            kwargs["model_class_overrides"] = {
+                **kwargs.get("model_class_overrides", {}),
+                **tower.model_class_overrides,
+            }
         return
-    tower = runtime.language_tower
-    if tower.hf_overrides is not None:
-        kwargs["hf_overrides"] = tower.hf_overrides
-    else:
-        kwargs["hf_overrides"] = nested_language_config
-    if tower.model_class_overrides:
-        kwargs["model_class_overrides"] = {
-            **kwargs.get("model_class_overrides", {}),
-            **tower.model_class_overrides,
-        }
+
+    kept_override = runtime.multimodal_towers_kept_hf_override
+    if kept_override is not None:
+        kwargs["hf_overrides"] = kept_override

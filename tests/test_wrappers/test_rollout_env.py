@@ -722,6 +722,7 @@ class _SyncStubEnv(RolloutEnvDoubleMixin):
             torch.zeros(1, 3, dtype=torch.long),
             torch.ones(2, dtype=torch.float32),
             torch.cat(self.sampling_logps) if self.sampling_logps else None,
+            None,
         )
 
 
@@ -907,10 +908,11 @@ class TestBatchRolloutEnvStep:
         assert len(vec.envs[0].sampling_logps) == 2
         assert vec.envs[1].sampling_logps == []
 
-        *_parts, sampling = vec.get_trajectories()
+        *_parts, sampling, _pixel_values = vec.get_trajectories()
         assert sampling is not None
         assert torch.equal(sampling[0], torch.tensor([-0.1, -0.2, -0.3]))
         assert sampling[1] is None
+        assert _pixel_values is None
 
     def test_batch_rollout_env_sampling_logps_collapse_to_none_when_uncaptured(
         self,
@@ -931,16 +933,18 @@ class TestBatchRolloutEnvStep:
         ]
         # sampling_logps omitted entirely -> nothing accumulates.
         _ = vec.step(completions)
-        *_parts, sampling = vec.get_trajectories()
+        *_parts, sampling, _pixel_values = vec.get_trajectories()
         assert sampling is None
+        assert _pixel_values is None
 
         # Captured logprobs from one rollout must not leak past a reset.
         _ = vec.step(completions, sampling_logps=[torch.tensor([-0.5]), None])
         assert len(vec.envs[0].sampling_logps) == 1
         _ = vec.reset(seed=1)
         assert vec.envs[0].sampling_logps == []
-        *_parts, sampling = vec.get_trajectories()
+        *_parts, sampling, _pixel_values = vec.get_trajectories()
         assert sampling is None
+        assert _pixel_values is None
 
 
 class TestBatchRolloutEnvClose:
@@ -1073,7 +1077,9 @@ class TestRolloutEnvGetEpisodeData:
         w.full_ids = torch.tensor([[9, 5, 0, 7, 8]], dtype=torch.long)
         w.turn_boundaries = [(1, 3, 0), (3, 5, 1)]
         w.turn_rewards = [1.5]
-        full_ids, action_mask, turn_ids, rewards, _logps = w.get_episode_data()
+        full_ids, action_mask, turn_ids, rewards, _logps, _pixel_values = (
+            w.get_episode_data()
+        )
         assert torch.equal(full_ids, w.full_ids)
         assert action_mask.dtype == torch.bool
         assert turn_ids.dtype == torch.long
@@ -1352,6 +1358,7 @@ class _StepVariantEnv(RolloutEnvDoubleMixin):
             torch.zeros(1, 4, dtype=torch.long),
             torch.ones(2, dtype=torch.float32),
             torch.cat(self.sampling_logps) if self.sampling_logps else None,
+            None,
         )
 
 
@@ -1378,9 +1385,8 @@ class TestBatchRolloutEnvGetTrajectories:
                 torch.tensor([[1, 2, 3]], dtype=torch.long),
             ]
         )
-        # get_trajectories now returns (..., batch_steps, all_sampling_logps);
-        # batch_steps is second-to-last.
-        *_parts, batch_steps, _sampling_logps = vec.get_trajectories()
+        # get_trajectories ends with batch_steps, all_sampling_logps, all_pixel_values.
+        *_parts, batch_steps, _sampling_logps, _pixel_values = vec.get_trajectories()
         assert batch_steps == 1
 
 
@@ -1528,6 +1534,17 @@ class TestBatchRolloutEnvPerEpisode:
         assert rows[2] == rows[3]
         assert rows[0] != rows[2]
         assert all(r is not None and 0 <= r < 4 for r in rows)
+
+    def test_step_episode_rejects_non_positive_prompt_token_len(self) -> None:
+        vec_env = self._collector(batch_size=1, group_size=1)
+        vec_env.reset_episode("ep0", logical_slot=0)
+        completion = torch.ones(1, 5, dtype=torch.long)
+
+        with pytest.raises(ValueError, match="prompt_token_len must be >= 1"):
+            vec_env.step_episode("ep0", completion, prompt_token_len=0)
+
+        vec_env.step_episode("ep0", completion, prompt_token_len=2)
+        assert vec_env.envs[0]._last_full_prompt_token_len == 2
 
     def test_duplicate_episode_id_raises(self) -> None:
         vec_env = self._collector()
