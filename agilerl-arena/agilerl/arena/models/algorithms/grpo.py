@@ -7,12 +7,12 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import Field, field_validator, model_validator
-from typing_extensions import Self
+from pydantic import Field
 
 from agilerl.arena.models.algorithms.rollout_llm import RolloutLLMSpec
 from agilerl.arena.models.descriptions import (
     ADVANTAGE_GRANULARITY,
+    CLIP_COEF,
     GROUP_SIZE,
     IS_LEVEL,
     LR,
@@ -27,43 +27,7 @@ class GRPOSpec(RolloutLLMSpec):
 
     group_size: int = Field(default=8, ge=1, description=GROUP_SIZE)
     lr: float = Field(default=5e-7, ge=0.0, description=LR)
-    clip_coef: float | list[float] = Field(
-        default=0.2,
-        description=(
-            "Surrogate clipping range. A pair gives asymmetric bounds "
-            "[epsilon_low, epsilon_high]."
-        ),
-    )
-
-    @field_validator("clip_coef", mode="before")
-    @classmethod
-    def _coerce_clip_coef(cls, value: object) -> object:
-        """A symmetric scalar, or an explicit ``[low, high]`` pair on the ratio."""
-        if isinstance(value, (int, float)) and not isinstance(value, bool):
-            if value < 0:
-                msg = "clip_coef must be greater than or equal to zero."
-                raise ValueError(msg)
-            return float(value)
-        if isinstance(value, (list, tuple)):
-            if len(value) != 2:
-                msg = "clip_coef list/tuple must contain exactly two values."
-                raise ValueError(msg)
-            try:
-                return [float(value[0]), float(value[1])]
-            except (TypeError, ValueError) as err:
-                msg = "clip_coef list/tuple entries must be floats."
-                raise ValueError(msg) from err
-        # ValueError, not TypeError: only ValueError / AssertionError become a
-        # ValidationError; a TypeError escapes validation as a crash.
-        msg = "clip_coef must be a float or a list/tuple of two floats."
-        raise ValueError(msg)
-
-    @model_validator(mode="after")
-    def _validate_scalar_clip_coef(self) -> Self:
-        if isinstance(self.clip_coef, float) and self.clip_coef > 1.0:
-            msg = "GRPO clip_coef scalar must be <= 1.0."
-            raise ValueError(msg)
-        return self
+    clip_coef: float = Field(default=0.2, ge=0.0, le=1.0, description=CLIP_COEF)
 
     adv_norm: Literal["mean_only", "mean_std"] = Field(
         default="mean_std",

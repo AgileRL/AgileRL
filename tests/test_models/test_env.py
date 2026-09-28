@@ -1607,6 +1607,14 @@ class TestLLMEnvSpecLoadDataset:
         with pytest.raises(ValueError, match="dataset is required to load"):
             _load_llm_dataset(spec)
 
+    def test_load_dataset_requires_train_test_split(self):
+        spec = LLMEnvSpec(
+            env_type=LLMEnvType.DATASET, objective="sft", dataset="ds.parquet"
+        )
+        spec.train_test_split = None
+        with pytest.raises(ValueError, match="train_test_split is required"):
+            _load_llm_dataset(spec)
+
 
 class TestDatasetBackedRolloutRewardFields:
     """Defensive guard for a dataset-backed rollout missing its reward fields."""
@@ -1663,6 +1671,16 @@ class TestLLMEnvSpecFactoryGuards:
         with pytest.raises(ValueError, match="objective is required"):
             make_llm_env(spec, MagicMock())
 
+    def test_make_dataset_env_requires_response_column_even_when_mutated_away(self):
+        spec = LLMEnvSpec(
+            env_type=LLMEnvType.DATASET,
+            dataset="d.parquet",
+            objective="sft",
+        )
+        spec.response_column = None
+        with pytest.raises(ValueError, match="response_column is required"):
+            make_llm_env(spec, MagicMock())
+
     def test_factory_requires_a_source_even_when_mutated_away(self):
         spec = LLMEnvSpec(
             env_type=LLMEnvType.ROLLOUT,
@@ -1699,6 +1717,26 @@ class TestLLMEnvSpecUrlFactoryGuard:
 
         with pytest.raises(RuntimeError, match="env_url is required"):
             _make_url_rollout_factory(spec, MagicMock(), {})
+
+    def test_url_factory_treats_unset_strict_chat_template_boundary_as_true(self):
+        spec = LLMEnvSpec(
+            env_type=LLMEnvType.ROLLOUT,
+            env_url="http://env-host:8000",
+            max_turns=4,
+        )
+        spec.strict_chat_template_boundary = None
+        mock_tokenizer = MagicMock()
+        mock_rollout_cls = MagicMock()
+        mock_session_cls = MagicMock()
+        with (
+            patch("agilerl.models.env.RolloutHarness", mock_rollout_cls),
+            patch("agilerl.llm_envs.openenv.RemoteEnvClient", mock_session_cls),
+        ):
+            make_rollout_env_factory(spec, mock_tokenizer)[0]()
+
+        assert (
+            mock_rollout_cls.call_args.kwargs["strict_chat_template_boundary"] is True
+        )
 
 
 class TestBanditDatasetLoadGuard:

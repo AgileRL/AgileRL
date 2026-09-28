@@ -326,6 +326,21 @@ def _split_seed(seed: int | None) -> int:
     return 42 if seed is None else seed
 
 
+def _dataset_train_test_split(spec: LLMEnvSpec) -> float:
+    """Return the train fraction; dataset loaders cannot split without one."""
+    split = spec.train_test_split
+    if split is None:
+        msg = "train_test_split is required to split a dataset"
+        raise ValueError(msg)
+    return split
+
+
+def _rollout_strict_chat_template_boundary(spec: LLMEnvSpec) -> bool:
+    """Treat an unset boundary as strict so GEM rollouts do not fall back to ChatML."""
+    boundary = spec.strict_chat_template_boundary
+    return True if boundary is None else boundary
+
+
 def _load_llm_dataset(
     spec: LLMEnvSpec, *, seed: int | None = None
 ) -> tuple[Dataset, Dataset]:
@@ -342,28 +357,26 @@ def _load_llm_dataset(
 def _load_dataset_hf(
     spec: LLMEnvSpec, dataset: str, *, seed: int | None = None
 ) -> tuple[Dataset, Dataset]:
+    split = _dataset_train_test_split(spec)
     _, load_dataset = _require_datasets()
     ds = load_dataset(dataset, split="train").shuffle(seed=_split_seed(seed))
     if spec.columns:
         ds = ds.rename_columns(spec.columns)
-    split = ds.train_test_split(
-        test_size=1.0 - spec.train_test_split, seed=_split_seed(seed)
-    )
-    return split["train"], split["test"]
+    split_ds = ds.train_test_split(test_size=1.0 - split, seed=_split_seed(seed))
+    return split_ds["train"], split_ds["test"]
 
 
 def _load_dataset_file(
     spec: LLMEnvSpec, dataset: str, *, seed: int | None = None
 ) -> tuple[Dataset, Dataset]:
+    split = _dataset_train_test_split(spec)
     Dataset, _ = _require_datasets()
     df = pd.read_parquet(dataset)
     if spec.columns:
         df = df.rename(columns=spec.columns)
     ds = Dataset.from_pandas(df)
-    split = ds.train_test_split(
-        test_size=1.0 - spec.train_test_split, seed=_split_seed(seed)
-    )
-    return split["train"], split["test"]
+    split_ds = ds.train_test_split(test_size=1.0 - split, seed=_split_seed(seed))
+    return split_ds["train"], split_ds["test"]
 
 
 def make_llm_env(
@@ -407,6 +420,10 @@ def make_llm_env(
     if spec.objective is None:
         msg = "objective is required for dataset environments."
         raise ValueError(msg)
+    response_column = spec.response_column
+    if response_column is None:
+        msg = "response_column is required for dataset environments."
+        raise ValueError(msg)
 
     train_ds, test_ds = _load_llm_dataset(spec, seed=seed)
     return DatasetEnv(
@@ -414,7 +431,7 @@ def make_llm_env(
         test_dataset=test_ds,
         tokenizer=tokenizer,
         objective=spec.objective,
-        response_column=spec.response_column,
+        response_column=response_column,
         chat_template_kwargs=spec.chat_template_kwargs,
         data_batch_size_per_gpu=data_batch_size_per_gpu,
         max_context_length=max_context_length,
@@ -592,16 +609,20 @@ def _make_url_rollout_factory(
     timeout_s = _http_timeout_s(spec)
     observation_field = spec.observation_field
     observation_processor = _resolved_observation_processor(spec)
-    strict_boundary = spec.strict_chat_template_boundary
+    strict_boundary = _rollout_strict_chat_template_boundary(spec)
+    remote_client_kwargs: dict[str, Any] = {
+        "mcp_tool": mcp_tool,
+        "timeout_s": timeout_s,
+    }
+    if isinstance(action_field, str):
+        remote_client_kwargs["action_field"] = action_field
 
     def _url_factory() -> RolloutHarness:
         # The server's max_concurrent_envs must cover batch*group + the eval env.
         return RolloutHarness(
             RemoteEnvClient(
                 urls[next(next_url) % len(urls)],
-                mcp_tool=mcp_tool,
-                action_field=action_field,
-                timeout_s=timeout_s,
+                **remote_client_kwargs,
             ),
             tokenizer,
             max_turns=url_max_turns,
@@ -656,19 +677,23 @@ def _make_entrypoint_rollout_factory(
     action_field = spec.action_field
     observation_field = spec.observation_field
     observation_processor = _resolved_observation_processor(spec)
-    strict_boundary = spec.strict_chat_template_boundary
+    strict_boundary = _rollout_strict_chat_template_boundary(spec)
+    local_harness_kwargs: dict[str, Any] = {
+        "observation_field": observation_field,
+        "observation_processor": observation_processor,
+        "apply_chat_template": True,
+        "strict_chat_template_boundary": strict_boundary,
+        **harness_kwargs,
+    }
+    if isinstance(action_field, str):
+        local_harness_kwargs["action_field"] = action_field
 
     def _env_factory() -> RolloutHarness:
         return RolloutHarness.local(
             _make_raw_env(),
             tokenizer,
             max_turns=max_turns,
-            action_field=action_field,
-            observation_field=observation_field,
-            observation_processor=observation_processor,
-            apply_chat_template=True,
-            strict_chat_template_boundary=strict_boundary,
-            **harness_kwargs,
+            **local_harness_kwargs,
         )
 
     return _env_factory, max_turns

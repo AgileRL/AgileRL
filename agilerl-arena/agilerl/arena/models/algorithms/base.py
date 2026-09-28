@@ -84,6 +84,7 @@ LLM_HPO_RANGES: dict[str, RLHyperparameter] = {
     "lr": _range(1e-12, 0.01, 1.2, 0.8),
     "lr_actor": _range(1e-7, 1e-5, 1.2, 0.8),
     "lr_critic": _range(1e-7, 1e-5, 1.2, 0.8),
+    "gamma": _range(0.9, 0.9999, 1.001, 0.999),
     "clip_coef": _range(0.05, 0.35, 1.15, 0.85),
     "max_grad_norm": _range(0.35, 0.65, 1.15, 0.85),
     "beta": _range(0.0001, 0.01, 1.2, 0.8),
