@@ -21,6 +21,14 @@ dependencies = [
     "typing-extensions>=4.4",
 ]
 
+
+[project.optional-dependencies]
+# Only `arena memory estimate` needs these, and only to resolve a model id.
+hub = [
+    "huggingface-hub>=0.30",
+    "transformers>=4.40",
+]
+
 [project.scripts]
 arena = "agilerl.arena.cli:main"
 

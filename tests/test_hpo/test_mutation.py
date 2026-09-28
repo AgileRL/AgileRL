@@ -2985,7 +2985,6 @@ class TestMutationsFunctionPreservingLatentEncoders:
 
     @pytest.mark.parametrize("encoder", ["simba", "recurrent", "multi_input"])
     def test_the_policy_output_survives(self, monkeypatch, dict_space, encoder):
-        torch.manual_seed(0)
         _pin_mutation_method(monkeypatch, "add_latent_node")
         monkeypatch.setattr(mutation_utils, "FP_NOISE_SCALE", 0.0)
         agent, observation = {
@@ -3005,9 +3004,8 @@ class TestMutationsFunctionPreservingLatentEncoders:
         agent = _fp_mutations().architecture_mutate(agent)
 
         policy = getattr(agent, agent.registry.policy())
-        # Extra-column float32 GEMM is not bit-identical once weights are O(1).
         torch.testing.assert_close(
-            self._latent(policy, observation), before, rtol=1e-5, atol=1e-6
+            self._latent(policy, observation), before, rtol=0, atol=1e-6
         )
 
     @pytest.mark.parametrize("encoder", ["simba", "recurrent", "multi_input"])

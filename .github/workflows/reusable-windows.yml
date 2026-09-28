@@ -41,11 +41,4 @@ jobs:
                   ATEN_CPU_CAPABILITY: avx2
                   ONEDNN_MAX_CPU_ISA: AVX2
                   MKL_ENABLE_INSTRUCTIONS: AVX2
-              run: bash scripts/run-tests.sh cov junit -m "not llm" --cov-report=term-missing --durations=0 --durations-min=1.0
-            - name: Upload junit
-              if: always()
-              uses: actions/upload-artifact@v4
-              with:
-                  name: junit-windows-${{ matrix.python-version }}
-                  path: junit-*.xml
-                  if-no-files-found: ignore
+              run: bash scripts/run-tests.sh cov --exitfirst -m "not llm" --cov-report=term-missing --durations=0 --durations-min=1.0

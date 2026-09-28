@@ -42,7 +42,6 @@ emit_coverage_reports() {
 flags=("--import-mode=importlib")
 pytest_args=()
 cov_enabled=0
-junit_enabled=0
 explicit_test_target=0
 cov_reports=()
 
@@ -58,9 +57,6 @@ for arg in "$@"; do
       flags+=("--cov")
       cov_enabled=1
       ;;
-    junit)
-      junit_enabled=1
-      ;;
     --cov-report*)
       cov_reports+=("$arg")
       ;;
@@ -74,44 +70,27 @@ for arg in "$@"; do
   esac
 done
 
-junit_for() {
-  junit_flags=()
-  if ((junit_enabled == 0)); then
-    return
-  fi
-  case "$1" in
-    tests) junit_flags=(--junitxml=junit-tests.xml) ;;
-    agilerl-arena/tests) junit_flags=(--junitxml=junit-arena.xml) ;;
-    *) junit_flags=(--junitxml=junit.xml) ;;
-  esac
-}
-
 if ((explicit_test_target)); then
-  junit_for other
   if ((cov_enabled)); then
-    run_pytest "${pytest_args[@]}" "${flags[@]}" --cov-report= "${junit_flags[@]}"
+    run_pytest "${pytest_args[@]}" "${flags[@]}" --cov-report=
     combine_coverage
     emit_coverage_reports "${cov_reports[@]}"
   else
-    run_pytest "${pytest_args[@]}" "${flags[@]}" "${junit_flags[@]}"
+    run_pytest "${pytest_args[@]}" "${flags[@]}"
   fi
   exit $?
 fi
 
 rc=0
 if ((cov_enabled)); then
-  junit_for tests
-  run_pytest tests "${pytest_args[@]}" "${flags[@]}" --cov-report= "${junit_flags[@]}" || rc=$?
+  run_pytest tests "${pytest_args[@]}" "${flags[@]}" --cov-report= || rc=$?
   combine_coverage
   flags+=("--cov-append")
-  junit_for agilerl-arena/tests
-  run_pytest agilerl-arena/tests "${pytest_args[@]}" "${flags[@]}" --cov-report= "${junit_flags[@]}" || rc=$?
+  run_pytest agilerl-arena/tests "${pytest_args[@]}" "${flags[@]}" --cov-report= || rc=$?
   combine_coverage
   emit_coverage_reports "${cov_reports[@]}"
 else
-  junit_for tests
-  run_pytest tests "${pytest_args[@]}" "${flags[@]}" "${junit_flags[@]}" || rc=$?
-  junit_for agilerl-arena/tests
-  run_pytest agilerl-arena/tests "${pytest_args[@]}" "${flags[@]}" "${junit_flags[@]}" || rc=$?
+  run_pytest tests "${pytest_args[@]}" "${flags[@]}" || rc=$?
+  run_pytest agilerl-arena/tests "${pytest_args[@]}" "${flags[@]}" || rc=$?
 fi
 exit $rc
