@@ -130,6 +130,33 @@ def collect_durations(paths: list[Path]) -> dict[str, float]:
     return durations
 
 
+def junit_xml_paths(reports: list[Path]) -> list[Path]:
+    """XML files given directly or found under a download directory."""
+    found: list[Path] = []
+    for report in reports:
+        if report.is_dir():
+            found.extend(
+                sorted(path for path in report.glob("**/*.xml") if path.is_file())
+            )
+            continue
+        if report.is_file():
+            found.append(report)
+    return found
+
+
+def write_durations_json(reports: list[Path], dest: Path) -> None:
+    """Write a non-empty duration map from junit XML files or directories."""
+    paths = junit_xml_paths(reports)
+    if not paths:
+        names = ", ".join(str(report) for report in reports) or "(none)"
+        raise RuntimeError(f"no junit XML in {names}")
+    payload = collect_durations(paths)
+    if not payload:
+        raise RuntimeError("junit XML produced an empty duration map")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_text(json.dumps(payload, indent=0, sort_keys=True) + "\n")
+
+
 def collection_args(pytest_args: list[str]) -> list[str]:
     """Keep the marker and import mode. Drop xdist, coverage, and junit."""
     kept: list[str] = []
@@ -385,9 +412,11 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(sys.argv[1:] if argv is None else argv)
     if args.command == "merge-junit":
-        payload = collect_durations(args.reports)
-        args.out.parent.mkdir(parents=True, exist_ok=True)
-        args.out.write_text(json.dumps(payload, indent=0, sort_keys=True) + "\n")
+        try:
+            write_durations_json(args.reports, args.out)
+        except RuntimeError as error:
+            print(error, file=sys.stderr)
+            return 1
         return 0
     if args.command == "exec":
         nodeid_file = os.environ.get("PYTEST_SHARD_NODEIDS")
