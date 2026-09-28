@@ -28,4 +28,11 @@ jobs:
                   uv sync --locked --all-groups --extra all
 
             - name: Test with pytest
-              run: bash scripts/run-tests.sh cov --exitfirst --cov-report=term-missing --durations=0 --durations-min=1.0
+              run: bash scripts/run-tests.sh cov junit --cov-report=term-missing --durations=0 --durations-min=1.0
+            - name: Upload junit
+              if: always()
+              uses: actions/upload-artifact@v4
+              with:
+                  name: junit-macos-${{ matrix.python-version }}
+                  path: junit-*.xml
+                  if-no-files-found: ignore
