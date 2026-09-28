@@ -33,7 +33,12 @@ from agilerl.arena.models.algorithms import RolloutLLMSpec
 from agilerl.arena.models.env import LLMEnvType
 from agilerl.arena.models.schema import (
     algorithm_name_if,
+    algorithm_schema,
     dataset_backed_grpo_rollout_if,
+    environment_dataset_identity_if,
+    environment_dataset_type_if,
+    environment_rollout_type_if,
+    environment_then,
     registered_algorithm_names,
     training_then,
 )
@@ -171,13 +176,13 @@ class TestMalformedSections:
             TrainingManifest.model_validate({**copy.deepcopy(DQN), "algorithm": "DQN"})
 
     def test_wrong_typed_clip_coef_is_a_validation_error(self) -> None:
-        with pytest.raises(ValidationError, match="float or a list/tuple"):
+        with pytest.raises(ValidationError, match="valid number"):
             TrainingManifest.model_validate(
                 manifest(GRPO, algorithm={"clip_coef": "abc"})
             )
 
     def test_non_numeric_clip_coef_pair_is_a_validation_error(self) -> None:
-        with pytest.raises(ValidationError, match="entries must be floats"):
+        with pytest.raises(ValidationError, match="valid number"):
             TrainingManifest.model_validate(
                 manifest(GRPO, algorithm={"clip_coef": [None, 0.2]})
             )
@@ -880,14 +885,11 @@ class TestSchema:
             TrainingManifest.model_validate(doc)
 
     def test_mutating_a_list_or_scalar_union_is_rejected(self) -> None:
-        # GRPO clip_coef is float | list[float]. A grow factor cannot move a
-        # [low, high] pair between min and max.
         doc = manifest(
             GRPO,
             mutation={"rl_hp_selection": {"clip_coef": {"min": 0.05, "max": 0.35}}},
         )
-        with pytest.raises(ValidationError, match="not a number"):
-            TrainingManifest.model_validate(doc)
+        assert TrainingManifest.model_validate(doc)
 
     def test_an_aliased_spelling_may_be_mutated(self) -> None:
         # Most manifests spell LLMPPO's lr_actor as lr; rejecting the alias
@@ -949,9 +951,96 @@ class TestSchema:
     def test_a_list_or_scalar_union_is_not_offered_for_mutation(self) -> None:
         variants = manifest_schema()["properties"]["algorithm"]["oneOf"]
         grpo = next(v for v in variants if v["title"] == "GRPO")
+        gspo = next(v for v in variants if v["title"] == "GSPO")
+        cispo = next(v for v in variants if v["title"] == "CISPO")
         ppo = next(v for v in variants if v["title"] == "PPO")
-        assert "clip_coef" not in grpo["x-hpo-ranges"]
+        llmppo = next(v for v in variants if v["title"] == "LLMPPO")
+        llmreinforce = next(v for v in variants if v["title"] == "LLMREINFORCE")
+        clip_bounds = {
+            "min": 0.05,
+            "max": 0.35,
+            "grow_factor": 1.15,
+            "shrink_factor": 0.85,
+        }
+        gamma_bounds = {
+            "min": 0.9,
+            "max": 0.9999,
+            "grow_factor": 1.001,
+            "shrink_factor": 0.999,
+        }
+        for variant in (grpo, gspo, cispo):
+            assert variant["x-hpo-ranges"]["clip_coef"] == clip_bounds
+            assert "gamma" not in variant["x-hpo-ranges"]
         assert "clip_coef" in ppo["x-hpo-ranges"]
+        for variant in (llmppo, llmreinforce):
+            assert variant["x-hpo-ranges"]["gamma"] == gamma_bounds
+
+    def test_published_algorithm_hpo_ranges_match_platform_canvas(self) -> None:
+        algorithm, _ = algorithm_schema()
+        by_title = {v["title"]: v for v in algorithm["oneOf"]}
+
+        beta_bounds = {
+            "min": 0.0001,
+            "max": 0.01,
+            "grow_factor": 1.2,
+            "shrink_factor": 0.8,
+        }
+        group_size_bounds = {
+            "min": 4,
+            "max": 16,
+            "grow_factor": 1.5,
+            "shrink_factor": 0.75,
+        }
+        max_grad_norm_bounds = {
+            "min": 0.35,
+            "max": 0.65,
+            "grow_factor": 1.15,
+            "shrink_factor": 0.85,
+        }
+        clip_bounds = {
+            "min": 0.05,
+            "max": 0.35,
+            "grow_factor": 1.15,
+            "shrink_factor": 0.85,
+        }
+        lr_bounds = {
+            "min": 1e-12,
+            "max": 0.01,
+            "grow_factor": 1.2,
+            "shrink_factor": 0.8,
+        }
+        gamma_bounds = {
+            "min": 0.9,
+            "max": 0.9999,
+            "grow_factor": 1.001,
+            "shrink_factor": 0.999,
+        }
+
+        for name in ("GRPO", "GSPO", "CISPO"):
+            hpo = by_title[name]["x-hpo-ranges"]
+            assert hpo["beta"] == beta_bounds
+            assert hpo["group_size"] == group_size_bounds
+            assert hpo["max_grad_norm"] == max_grad_norm_bounds
+            assert hpo["clip_coef"] == clip_bounds
+            assert "gamma" not in hpo
+
+        dpo = by_title["DPO"]["x-hpo-ranges"]
+        assert dpo["beta"] == beta_bounds
+        assert dpo["max_grad_norm"] == max_grad_norm_bounds
+
+        sft = by_title["SFT"]["x-hpo-ranges"]
+        assert sft["lr"] == lr_bounds
+        assert sft["max_grad_norm"] == max_grad_norm_bounds
+        assert "beta" not in sft
+
+        llmppo = by_title["LLMPPO"]["x-hpo-ranges"]
+        assert llmppo["max_grad_norm"] == max_grad_norm_bounds
+        assert llmppo["gamma"] == gamma_bounds
+
+        llmreinforce = by_title["LLMREINFORCE"]["x-hpo-ranges"]
+        assert llmreinforce["lr"] == lr_bounds
+        assert llmreinforce["max_grad_norm"] == max_grad_norm_bounds
+        assert llmreinforce["gamma"] == gamma_bounds
 
     def test_hpo_ranges_are_valid_rl_hyperparameters(self) -> None:
         # They are emitted as plain JSON, but rl_hp_selection has to accept them
@@ -1041,7 +1130,13 @@ class TestSchema:
                     assert if_clause["required"] == ["algorithm"]
                     assert if_clause["properties"]["algorithm"]["required"] == ["name"]
             elif "environment" in then_props:
-                assert if_clause["required"] == ["environment"]
+                if "allOf" in if_clause:
+                    assert any(
+                        part.get("required") == ["environment"]
+                        for part in if_clause["allOf"]
+                    )
+                else:
+                    assert if_clause["required"] == ["environment"]
             else:
                 msg = f"unexpected conditional then keys: {sorted(then_props)}"
                 raise AssertionError(msg)
@@ -1072,7 +1167,7 @@ class TestSchema:
         rainbow = self._applied_training_defaults(
             {"algorithm": {"name": "Rainbow DQN"}}
         )
-        assert rainbow["eps_start"] == 1.0
+        assert "eps_start" not in rainbow
         assert rainbow["experience_sharing"] is True
 
         grpo = self._applied_training_defaults({"algorithm": {"name": "GRPO"}})
@@ -1211,6 +1306,178 @@ class TestSchema:
         assert network_spec["properties"]["has_evolvable_encoder"]["default"] is False
         finetuning = schema["$defs"]["FinetuningNetworkSpec"]
         assert "has_evolvable_encoder" not in finetuning.get("properties", {})
+
+    def _applied_environment_defaults(self, instance: dict) -> dict[str, object]:
+        applied: dict[str, object] = {}
+        for cond in manifest_schema().get("allOf") or []:
+            if_schema = cond.get("if")
+            then = cond.get("then")
+            if not isinstance(if_schema, dict) or not isinstance(then, dict):
+                continue
+            if not Draft202012Validator(if_schema).is_valid(instance):
+                continue
+            env_props = (
+                then.get("properties", {}).get("environment", {}).get("properties", {})
+            )
+            for name, field in env_props.items():
+                if "default" in field:
+                    applied[name] = field["default"]
+        return applied
+
+    def _llm_rollout_branch_properties(self) -> dict:
+        schema = manifest_schema()
+        llm = schema["$defs"]["LLMEnvSpec"]
+        for branch in llm.get("anyOf", llm.get("oneOf", [llm])):
+            props = branch.get("properties", {})
+            env_type = props.get("env_type", {})
+            if (
+                env_type.get("const") == "rollout"
+                or env_type.get("default") == "rollout"
+            ):
+                return props
+        return llm.get("properties", {})
+
+    def test_llm_env_schema_conditionals_publish_dataset_defaults(self) -> None:
+        conditionals = manifest_schema().get("allOf") or []
+        split_cond = next(
+            c
+            for c in conditionals
+            if c.get("if") == environment_dataset_identity_if()
+            and c.get("then")
+            == environment_then({"train_test_split": {"default": 0.9}})
+        )
+        assert split_cond is not None
+
+        rollout_dataset_cond = next(
+            c
+            for c in conditionals
+            if c.get("if")
+            == {
+                "allOf": [
+                    environment_dataset_identity_if(),
+                    environment_rollout_type_if(),
+                ]
+            }
+            and c.get("then")
+            == environment_then({"rubric_name": {"default": "reward_fn"}})
+        )
+        assert rollout_dataset_cond is not None
+
+        response_column_cond = next(
+            c
+            for c in conditionals
+            if c.get("if") == environment_dataset_type_if()
+            and c.get("then")
+            == environment_then({"response_column": {"default": "response"}})
+        )
+        assert response_column_cond is not None
+
+        rollout_cond = next(
+            c
+            for c in conditionals
+            if c.get("if") == environment_rollout_type_if()
+            and c.get("then")
+            == environment_then(
+                {
+                    "num_envs": {"default": 1},
+                    "strict_chat_template_boundary": {"default": True},
+                }
+            )
+        )
+        assert rollout_cond is not None
+
+        gem_rollout = {
+            "environment": {
+                "env_type": "rollout",
+                "entrypoint": "game:Env",
+            }
+        }
+        assert self._applied_environment_defaults(gem_rollout) == {
+            "num_envs": 1,
+            "strict_chat_template_boundary": True,
+        }
+
+        dataset_rollout = {
+            "environment": {
+                "env_type": "rollout",
+                "dataset": "rows",
+                "prompt_template": {"user_0": "{q}"},
+            }
+        }
+        applied = self._applied_environment_defaults(dataset_rollout)
+        assert applied["train_test_split"] == 0.9
+        assert applied["strict_chat_template_boundary"] is True
+        assert "response_column" not in applied
+        assert applied["rubric_name"] == "reward_fn"
+        assert applied["num_envs"] == 1
+
+        dataset_sft = {
+            "environment": {
+                "env_type": "dataset",
+                "objective": "sft",
+                "dataset": "rows",
+            }
+        }
+        applied_sft = self._applied_environment_defaults(dataset_sft)
+        assert applied_sft["train_test_split"] == 0.9
+        assert applied_sft["response_column"] == "response"
+        assert "strict_chat_template_boundary" not in applied_sft
+        assert "rubric_name" not in applied_sft
+        assert "num_envs" not in applied_sft
+
+    def test_gem_shaped_llm_rollout_schema_lacks_dataset_field_defaults(self) -> None:
+        props = self._llm_rollout_branch_properties()
+        for name in (
+            "train_test_split",
+            "response_column",
+            "rubric_name",
+            "strict_chat_template_boundary",
+            "action_field",
+        ):
+            field = props.get(name, {})
+            assert "default" not in field, name
+
+    def test_rainbow_training_conditional_omits_epsilon(self) -> None:
+        rainbow = self._applied_training_defaults(
+            {"algorithm": {"name": "Rainbow DQN"}}
+        )
+        assert "eps_start" not in rainbow
+        assert "eps_end" not in rainbow
+        assert "eps_decay" not in rainbow
+
+        dqn = self._applied_training_defaults({"algorithm": {"name": "DQN"}})
+        assert dqn["eps_start"] == 1.0
+        assert dqn["eps_end"] == 0.01
+        assert dqn["eps_decay"] == 0.99999
+
+    def test_sft_algorithm_schema_omits_beta_dpo_keeps_it(self) -> None:
+        variants = manifest_schema()["properties"]["algorithm"]["oneOf"]
+        sft = next(v for v in variants if v["title"] == "SFT")
+        dpo = next(v for v in variants if v["title"] == "DPO")
+        assert "beta" not in sft.get("properties", {})
+        assert "beta" not in sft.get("x-hpo-ranges", {})
+        assert dpo["properties"]["beta"]["default"] == 0.1
+
+    def test_dataset_llm_algorithm_schema_omits_answer_continuation(self) -> None:
+        variants = manifest_schema()["properties"]["algorithm"]["oneOf"]
+        sft = next(v for v in variants if v["title"] == "SFT")
+        dpo = next(v for v in variants if v["title"] == "DPO")
+        for variant in (sft, dpo):
+            assert "answer_continuation" not in variant.get("properties", {})
+            assert "answer_continuation" not in variant.get("x-hpo-ranges", {})
+
+        grpo = next(v for v in variants if v["title"] == "GRPO")
+        assert grpo["properties"]["answer_continuation"]["default"] is False
+
+    def test_ppo_algorithm_schema_omits_recurrent_only_fields(self) -> None:
+        variants = manifest_schema()["properties"]["algorithm"]["oneOf"]
+        ppo = next(v for v in variants if v["title"] == "PPO")
+        assert "max_seq_len" not in ppo.get("properties", {})
+        assert "bptt_sequence_type" not in ppo.get("properties", {})
+
+        recurrent = next(v for v in variants if v["title"] == "RecurrentPPO")
+        assert "max_seq_len" in recurrent["properties"]
+        assert recurrent["properties"]["bptt_sequence_type"]["default"] == "chunked"
 
 
 class TestClusterSupported:

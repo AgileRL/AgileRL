@@ -19,6 +19,9 @@ from agilerl.arena.models.algorithms import (
     MultiAgentAlgorithmSpec,
     RolloutLLMSpec,
 )
+from agilerl.arena.models.algorithms.ppo import PPOSpec, RecurrentPPOSpec
+from agilerl.arena.models.algorithms.rainbow_dqn import RainbowDQNSpec
+from agilerl.arena.models.algorithms.sft import SFTSpec
 from agilerl.arena.models.env import LLMEnvType
 from agilerl.arena.models.manifest import API_VERSION, TrainingManifest, _is_numeric
 from agilerl.arena.models.registry import MANIFEST_REGISTRY
@@ -67,6 +70,18 @@ def environment_rollout_type_if() -> dict[str, Any]:
         "properties": {
             "environment": {
                 "properties": {"env_type": {"const": "rollout"}},
+                "required": ["env_type"],
+            }
+        },
+        "required": ["environment"],
+    }
+
+
+def environment_dataset_type_if() -> dict[str, Any]:
+    return {
+        "properties": {
+            "environment": {
+                "properties": {"env_type": {"const": "dataset"}},
                 "required": ["env_type"],
             }
         },
@@ -142,6 +157,10 @@ def environment_env_image_then(defaults: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def environment_then(defaults: dict[str, Any]) -> dict[str, Any]:
+    return {"properties": {"environment": {"properties": defaults}}}
+
+
 def async_llm_rollout_if() -> dict[str, Any]:
     def llm_algorithm(spec: type[AlgoSpec]) -> bool:
         return issubclass(spec, LLMAlgorithmSpec)
@@ -164,7 +183,11 @@ def async_llm_rollout_if() -> dict[str, Any]:
 
 def training_schema_conditionals() -> list[dict[str, Any]]:
     def epsilon_greedy(spec: type[AlgoSpec]) -> bool:
-        return spec.off_policy and "expl_noise" not in spec.model_fields
+        return (
+            spec.off_policy
+            and "expl_noise" not in spec.model_fields
+            and spec is not RainbowDQNSpec
+        )
 
     def llm_algorithm(spec: type[AlgoSpec]) -> bool:
         return issubclass(spec, LLMAlgorithmSpec)
@@ -253,12 +276,84 @@ def training_schema_conditionals() -> list[dict[str, Any]]:
                 {"rollout_version_stamp": {"default": "oldest_turn"}}
             ),
         },
+        {
+            "if": environment_dataset_identity_if(),
+            "then": environment_then({"train_test_split": {"default": 0.9}}),
+        },
+        {
+            "if": {
+                "allOf": [
+                    environment_dataset_identity_if(),
+                    environment_rollout_type_if(),
+                ]
+            },
+            "then": environment_then({"rubric_name": {"default": "reward_fn"}}),
+        },
+        {
+            "if": environment_dataset_type_if(),
+            "then": environment_then({"response_column": {"default": "response"}}),
+        },
+        {
+            "if": environment_rollout_type_if(),
+            "then": environment_then(
+                {
+                    "num_envs": {"default": 1},
+                    "strict_chat_template_boundary": {"default": True},
+                }
+            ),
+        },
     ]
 
 
 def attach_training_schema_conditionals(schema: dict[str, Any]) -> None:
     """Append algorithm-conditional training defaults to the root schema."""
     schema["allOf"] = [*(schema.get("allOf") or []), *training_schema_conditionals()]
+
+
+def _strip_non_form_algorithm_fields(
+    schema: dict[str, Any], spec_cls: type[AlgoSpec]
+) -> None:
+    """Drop algorithm fields the manifest form must not expose for *spec_cls*."""
+    if spec_cls is SFTSpec:
+        schema["properties"].pop("beta")
+        schema["x-hpo-ranges"].pop("beta", None)
+    if getattr(spec_cls, "env_type", None) == LLMEnvType.DATASET:
+        for field_name in ("answer_continuation",):
+            schema["properties"].pop(field_name, None)
+            if field_name in schema.get("required", []):
+                schema["required"].remove(field_name)
+            schema.get("x-hpo-ranges", {}).pop(field_name, None)
+    if issubclass(spec_cls, PPOSpec) and spec_cls is not RecurrentPPOSpec:
+        for field_name in ("max_seq_len", "bptt_sequence_type"):
+            schema["properties"].pop(field_name, None)
+            if field_name in schema.get("required", []):
+                schema["required"].remove(field_name)
+            schema.get("x-hpo-ranges", {}).pop(field_name, None)
+
+
+def _algorithm_variant_schema(
+    spec_cls: type[AlgoSpec], names: list[str]
+) -> dict[str, Any]:
+    """Build one ``oneOf`` branch for *spec_cls* and its registry aliases."""
+    canonical = spec_cls.__name__.removesuffix("Spec")
+    default_name = spec_cls.schema_name or canonical
+    accepted = [canonical, *sorted(n for n in names if n != canonical)]
+    schema = spec_cls.model_json_schema(ref_template=REF_TEMPLATE)
+    schema["title"] = canonical
+    schema.setdefault("properties", {})["name"] = {
+        "type": "string",
+        "enum": sorted(set(accepted)),
+        "default": default_name,
+        "title": "Algorithm",
+        "description": f"Selects {default_name}.",
+    }
+    required = schema.setdefault("required", [])
+    if "name" not in required:
+        required.insert(0, "name")
+    _add_alias_spellings(schema, spec_cls)
+    _add_hpo_ranges(schema, spec_cls)
+    _strip_non_form_algorithm_fields(schema, spec_cls)
+    return schema
 
 
 def algorithm_schema() -> tuple[dict[str, Any], dict[str, Any]]:
@@ -277,26 +372,9 @@ def algorithm_schema() -> tuple[dict[str, Any], dict[str, Any]]:
     variants: list[dict[str, Any]] = []
     defs: dict[str, Any] = {}
     for spec_cls, names in names_by_class.items():
-        # An algorithm registered under an alias is still one choice; the aliases
-        # stay valid input, but a form must not offer the same algorithm twice.
-        canonical = spec_cls.__name__.removesuffix("Spec")
-        default_name = spec_cls.schema_name or canonical
-        accepted = [canonical, *sorted(n for n in names if n != canonical)]
-        schema = spec_cls.model_json_schema(ref_template=REF_TEMPLATE)
-        defs.update(schema.pop("$defs", {}))
-        schema["title"] = canonical
-        schema.setdefault("properties", {})["name"] = {
-            "type": "string",
-            "enum": sorted(set(accepted)),
-            "default": default_name,
-            "title": "Algorithm",
-            "description": f"Selects {default_name}.",
-        }
-        required = schema.setdefault("required", [])
-        if "name" not in required:
-            required.insert(0, "name")
-        _add_alias_spellings(schema, spec_cls)
-        _add_hpo_ranges(schema, spec_cls)
+        schema = _algorithm_variant_schema(spec_cls, names)
+        variant_defs = schema.pop("$defs", {})
+        defs.update(variant_defs)
         variants.append(schema)
 
     variants.sort(key=lambda v: v["title"])
@@ -428,6 +506,23 @@ def _annotate_free_form(node: dict[str, Any]) -> dict[str, Any]:
     return node
 
 
+LLM_ENV_SCHEMA_DEFAULT_FIELDS = (
+    "train_test_split",
+    "response_column",
+    "rubric_name",
+    "strict_chat_template_boundary",
+    "num_envs",
+    "action_field",
+)
+
+
+def _strip_llm_env_schema_defaults(schema: dict[str, Any]) -> None:
+    """Null is not a property default. Root conditionals set these fields."""
+    properties = schema["$defs"]["LLMEnvSpec"]["properties"]
+    for name in LLM_ENV_SCHEMA_DEFAULT_FIELDS:
+        properties[name].pop("default", None)
+
+
 def _relax_discriminated_union(node: dict[str, Any]) -> dict[str, Any]:
     """Turn a discriminated ``oneOf`` into ``anyOf``.
 
@@ -473,6 +568,7 @@ def manifest_schema() -> dict[str, Any]:
             _add_alias_spellings(definition, models[name])
 
     schema = cast("dict[str, Any]", _walk(schema))
+    _strip_llm_env_schema_defaults(schema)
     attach_training_schema_conditionals(schema)
     schema["$id"] = SCHEMA_ID
     schema["x-manifest-version"] = _package_version()

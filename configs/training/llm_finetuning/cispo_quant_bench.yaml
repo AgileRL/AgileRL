@@ -11,7 +11,7 @@ algorithm:
     batch_size: 2
     beta: 0.0
     lr: 0.00002
-    clip_coef: [0.8, 2.0]
+    clip_coef: 0.2
     max_grad_norm: 1
     update_epochs: 1
     group_size: 4

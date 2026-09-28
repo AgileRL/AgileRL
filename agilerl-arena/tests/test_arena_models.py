@@ -386,23 +386,19 @@ class TestLLMAlgorithmSpecValidators:
 
 class TestGRPOClipCoef:
     def test_rejects_negative_scalar(self) -> None:
-        with pytest.raises(ValidationError, match="greater than or equal to zero"):
+        with pytest.raises(ValidationError, match="greater than or equal to 0"):
             GRPOSpec(group_size=2, clip_coef=-0.1)
 
-    def test_rejects_pair_of_wrong_length(self) -> None:
-        with pytest.raises(ValidationError, match="exactly two values"):
-            GRPOSpec(group_size=2, clip_coef=[0.1])
-
-    def test_rejects_non_numeric_pair(self) -> None:
-        with pytest.raises(ValidationError, match="must be floats"):
-            GRPOSpec(group_size=2, clip_coef=["a", "b"])
+    def test_rejects_clip_coef_list(self) -> None:
+        with pytest.raises(ValidationError, match="valid number"):
+            GRPOSpec(group_size=2, clip_coef=[0.1, 0.2])
 
     def test_rejects_scalar_above_one(self) -> None:
-        with pytest.raises(ValidationError, match=r"must be <= 1\.0"):
+        with pytest.raises(ValidationError, match=r"less than or equal to 1"):
             GRPOSpec(group_size=2, clip_coef=1.5)
 
     def test_rejects_non_numeric_clip_coef(self) -> None:
-        with pytest.raises(ValidationError, match="float or a list/tuple"):
+        with pytest.raises(ValidationError, match="valid number"):
             GRPOSpec(group_size=2, clip_coef="wide")
 
 
@@ -655,6 +651,52 @@ class TestLLMEnvSpecSurfaces:
 
         with pytest.raises(ValidationError, match="factory is set but entrypoint"):
             LLMEnvSpec(env_type="rollout", factory="gem:make")
+
+    def test_gem_rollout_sets_rollout_defaults_leaves_dataset_fields_none(self) -> None:
+        from agilerl.arena.models.env import LLMEnvSpec
+
+        gem = LLMEnvSpec(
+            env_type="rollout",
+            entrypoint="game:GuessTheNumber-v0-easy",
+            factory="gem:make",
+        )
+        assert gem.train_test_split is None
+        assert gem.response_column is None
+        assert gem.rubric_name is None
+        assert gem.strict_chat_template_boundary is True
+        assert gem.num_envs == 1
+        assert gem.action_field == "message"
+
+    def test_dataset_backed_rollout_fills_conditional_defaults(self) -> None:
+        from agilerl.arena.models.env import LLMEnvSpec
+
+        rollout = LLMEnvSpec(
+            env_type="rollout",
+            dataset="rows",
+            rubric_file_path="rubric.py",
+            prompt_template={"user_0": "{q}"},
+        )
+        assert rollout.train_test_split == 0.9
+        assert rollout.response_column is None
+        assert rollout.rubric_name == "reward_fn"
+        assert rollout.strict_chat_template_boundary is True
+        assert rollout.num_envs == 1
+        assert rollout.action_field is None
+
+    def test_dataset_env_type_fills_split_and_response_column(self) -> None:
+        from agilerl.arena.models.env import LLMEnvSpec
+
+        dataset = LLMEnvSpec(
+            env_type="dataset",
+            objective="sft",
+            dataset="rows",
+        )
+        assert dataset.train_test_split == 0.9
+        assert dataset.response_column == "response"
+        assert dataset.strict_chat_template_boundary is None
+        assert dataset.rubric_name is None
+        assert dataset.num_envs is None
+        assert dataset.action_field is None
 
 
 class TestManifestHelpers:

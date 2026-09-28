@@ -222,8 +222,8 @@ class LLMEnvSpec(EnvSpecBase):
     loss.
     """
 
-    num_envs: int = Field(
-        default=1,
+    num_envs: int | None = Field(
+        default=None,
         ge=1,
         description="Environment copies stepped in parallel.",
     )
@@ -260,8 +260,9 @@ class LLMEnvSpec(EnvSpecBase):
             "(question, answer). Unset assumes they already match."
         ),
     )
-    response_column: str = Field(
-        default="response", description="Column holding the target response. SFT only."
+    response_column: str | None = Field(
+        default=None,
+        description="Column holding the target response. SFT only.",
     )
     prompt_template: dict[str, Any] | None = Field(
         default=None,
@@ -279,8 +280,8 @@ class LLMEnvSpec(EnvSpecBase):
             "that scores a rollout over dataset rows."
         ),
     )
-    rubric_name: str = Field(
-        default="reward_fn",
+    rubric_name: str | None = Field(
+        default=None,
         min_length=1,
         validation_alias=AliasChoices("rubric_name", "reward_fn_name"),
         description="Name of the rubric (or reward callable) to import from that module.",
@@ -289,8 +290,8 @@ class LLMEnvSpec(EnvSpecBase):
         default=None,
         description="Reward at which a rollout counts as solved, used for the success metric.",
     )
-    train_test_split: float = Field(
-        default=0.9,
+    train_test_split: float | None = Field(
+        default=None,
         ge=0.0,
         le=1.0,
         description="Fraction of the dataset used for training; the rest is held out for evaluation.",
@@ -339,8 +340,8 @@ class LLMEnvSpec(EnvSpecBase):
             "required with env_url, where it cannot be probed."
         ),
     )
-    strict_chat_template_boundary: bool = Field(
-        default=True,
+    strict_chat_template_boundary: bool | None = Field(
+        default=None,
         description=(
             "Fail when the chat template cannot render a clean multi-turn "
             "boundary, rather than falling back to ChatML markers."
@@ -375,8 +376,8 @@ class LLMEnvSpec(EnvSpecBase):
         default=None,
         description="For an MCP-backed env, the tool the model's text is sent to.",
     )
-    action_field: str = Field(
-        default="message",
+    action_field: str | None = Field(
+        default=None,
         description=(
             "The action field an env receives the model's text in — message by "
             "default, but code or action_str elsewhere; for an MCP tool it is "
@@ -473,6 +474,18 @@ class LLMEnvSpec(EnvSpecBase):
                 return str(value)
         return None
 
+    def _dataset_identity_backed(self) -> bool:
+        return any(
+            value is not None
+            for value in (
+                self.dataset,
+                self.dataset_path,
+                self.hf_dataset_id,
+                self.columns,
+                self.prompt_template,
+            )
+        )
+
     @model_validator(mode="after")
     def _check_rollout(self) -> Self:
         reject_legacy_llm_env_spelling(
@@ -535,7 +548,11 @@ class LLMEnvSpec(EnvSpecBase):
         if self.env_vars and self.env_image is None:
             msg = "env_vars set container environment on an env_image Pod."
             raise ValueError(msg)
-        if self.action_field != "message" and dataset is not None:
+        if (
+            self.action_field is not None
+            and self.action_field != "message"
+            and dataset is not None
+        ):
             msg = (
                 "action_field names the field an env receives the model's text "
                 "in; a dataset-backed rollout has no such env."
@@ -624,6 +641,29 @@ class LLMEnvSpec(EnvSpecBase):
                 self.env_port = 8000
             if self.cpus_per_env_host is None:
                 self.cpus_per_env_host = 1.0
+        return self
+
+    @model_validator(mode="after")
+    def _apply_conditional_defaults(self) -> Self:
+        if self._dataset_identity_backed():
+            if self.train_test_split is None:
+                self.train_test_split = 0.9
+            if self.env_type == "rollout" and self.rubric_name is None:
+                self.rubric_name = "reward_fn"
+        if self.env_type == "dataset" and self.response_column is None:
+            self.response_column = "response"
+        if self.env_type == "rollout":
+            if self.num_envs is None:
+                self.num_envs = 1
+            if self.strict_chat_template_boundary is None:
+                self.strict_chat_template_boundary = True
+            env_backed = (
+                self.entrypoint is not None
+                or self.env_url is not None
+                or self.env_image is not None
+            )
+            if env_backed and self.action_field is None:
+                self.action_field = "message"
         return self
 
 
