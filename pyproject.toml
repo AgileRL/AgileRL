@@ -54,7 +54,7 @@ llm = [
     "datasets==5.0.1",
     "liger-kernel==0.8.2; sys_platform == 'linux'",
     "openenv>=0.4.1,<0.5",
-    "peft==0.20.0",
+    "peft==0.21.0",
     "transformers==5.14.1",
     "vllm==0.25.1; sys_platform == 'linux'",
 ]
