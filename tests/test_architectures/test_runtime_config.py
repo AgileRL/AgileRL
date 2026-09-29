@@ -32,6 +32,7 @@ NEMOTRON_TRAINER_KWARGS = {
 }
 GEMMA_TRAINER_KWARGS = {"attn_implementation": "flex_attention"}
 EMPTY_TRAINER_KWARGS: dict[str, object] = {}
+FLEX_TRAINER_KWARGS = GEMMA_TRAINER_KWARGS
 
 SWA_MODEL_TYPES = ("gemma3", "gemma3_text", "gemma4", "gemma4_text")
 
@@ -58,6 +59,7 @@ class TestFamilyRuntimeConfigs:
             "gemma3_text",
             "gemma4",
             "gemma4_text",
+            "gpt_oss",
         }
 
     def test_nemotron_h_omni_keeps_nemotron_h_runtime_and_adds_language_tower(
@@ -94,7 +96,13 @@ class TestFamilyRuntimeConfigs:
     def test_swa_lookup(self, model_type: str) -> None:
         assert (
             FAMILY_RUNTIME_CONFIGS[model_type].trainer.model_dump(exclude_none=True)
-            == GEMMA_TRAINER_KWARGS
+            == FLEX_TRAINER_KWARGS
+        )
+
+    def test_gpt_oss_lookup(self) -> None:
+        assert (
+            FAMILY_RUNTIME_CONFIGS["gpt_oss"].trainer.model_dump(exclude_none=True)
+            == FLEX_TRAINER_KWARGS
         )
 
     def test_catalog_excludes_gemma_and_gemma2(self) -> None:
@@ -130,6 +138,11 @@ class TestFamilyRuntime:
         stub_config_model_type(monkeypatch, model_type)
         config = family_runtime("google/gemma")
         assert config.trainer == FAMILY_RUNTIME_CONFIGS[model_type].trainer
+
+    def test_gpt_oss_hub_id_uses_catalog(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        stub_config_model_type(monkeypatch, "gpt_oss")
+        config = family_runtime("openai/gpt-oss-20b")
+        assert config.trainer == FAMILY_RUNTIME_CONFIGS["gpt_oss"].trainer
 
     @pytest.mark.parametrize("model_type", ["gemma", "gemma2", "qwen2", "llama"])
     def test_unknown_hub_type_returns_empty_defaults(

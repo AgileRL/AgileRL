@@ -63,6 +63,10 @@ GEMMA_SWA_RUNTIME_CONFIG = ModelRuntimeConfig(
     trainer=TrainerRuntimeConfig(attn_implementation="flex_attention"),
 )
 
+GPT_OSS_RUNTIME_CONFIG = ModelRuntimeConfig(
+    trainer=TrainerRuntimeConfig(attn_implementation="flex_attention"),
+)
+
 FAMILY_RUNTIME_CONFIGS: Mapping[str, ModelRuntimeConfig] = {
     "nemotron_h": NEMOTRON_H_RUNTIME_CONFIG,
     "nemotron_h_omni": NEMOTRON_H_OMNI_RUNTIME_CONFIG,
@@ -70,6 +74,7 @@ FAMILY_RUNTIME_CONFIGS: Mapping[str, ModelRuntimeConfig] = {
     "gemma3_text": GEMMA_SWA_RUNTIME_CONFIG,
     "gemma4": GEMMA_SWA_RUNTIME_CONFIG,
     "gemma4_text": GEMMA_SWA_RUNTIME_CONFIG,
+    "gpt_oss": GPT_OSS_RUNTIME_CONFIG,
 }
 
 
