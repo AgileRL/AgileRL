@@ -621,6 +621,12 @@ class TrainingManifest(BaseModel):
             and "training" in payload
         ):
             payload["training"].pop("rollout_mode", None)
+        if "training" in payload:
+            training = payload["training"]
+            if not isinstance(self.algorithm, LLMAlgorithmSpec) or (
+                "training_gpus_per_agent" not in self.training.model_fields_set
+            ):
+                training.pop("training_gpus_per_agent", None)
         algorithm = payload.get("algorithm")
         if isinstance(algorithm, dict):
             if "num_envs" not in self.algorithm.model_fields_set:
