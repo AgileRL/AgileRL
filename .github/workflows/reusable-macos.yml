@@ -9,20 +9,13 @@ permissions:
 
 jobs:
     tests:
-        runs-on: ${{ matrix.os }}
-        strategy:
-            fail-fast: false
-            max-parallel: 4
-            matrix:
-                os: [macos-26]
-                python-version: ['3.10', '3.11', '3.12', '3.13']
-
+        runs-on: macos-26
         steps:
             - uses: actions/checkout@v4
             - uses: astral-sh/setup-uv@v7
               with:
                   enable-cache: true
-                  python-version: ${{ matrix.python-version }}
+                  python-version: '3.13'
             - name: Install dependencies
               run: |
                   uv sync --locked --all-groups --extra all
@@ -33,6 +26,6 @@ jobs:
               if: always()
               uses: actions/upload-artifact@v4
               with:
-                  name: junit-macos-${{ matrix.python-version }}
+                  name: junit-macos-3.13
                   path: junit-*.xml
                   if-no-files-found: ignore
