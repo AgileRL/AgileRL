@@ -49,6 +49,10 @@ box2d = [
     "swig>=4.4.1; sys_platform != 'win32'",
     "gymnasium[box2d]>=1.0.0; sys_platform != 'win32'",
 ]
+cpu = [
+    # Same 2.11 line as the default Linux CUDA wheel; the CPU index also publishes newer torch.
+    "torch>=2.11.0,<2.12",
+]
 llm = [
     "bitsandbytes==0.49.2; sys_platform == 'linux'",
     "datasets==5.0.1",
@@ -56,10 +60,12 @@ llm = [
     "openenv>=0.4.1,<0.5",
     "peft==0.20.0",
     "transformers==5.14.1",
+]
+vllm = [
     "vllm==0.25.1; sys_platform == 'linux'",
 ]
 all = [
-    "agilerl[box2d,llm]",
+    "agilerl[box2d,llm,vllm]",
 ]
 
 [dependency-groups]
@@ -91,6 +97,14 @@ members = ["agilerl-arena"]
 
 [tool.uv.sources]
 agilerl-arena = { workspace = true }
+torch = [
+    { index = "pytorch-cpu", extra = "cpu" },
+]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
 
 [tool.pytest.ini_options]
 addopts = [
@@ -116,7 +130,7 @@ filterwarnings = [
     "ignore::pyparsing.exceptions.PyparsingDeprecationWarning",
 ]
 markers = [
-    "vllm: tests that actually instantiate vllm.LLM (exclude with -m 'not vllm'). Pinned to a single xdist worker because vLLM's GPU memory profiling fails when peer workers free memory mid-init.",
+    "vllm: needs the vllm extra (import or real engine). Hosted Linux CPU excludes these; the GPU job runs them. Real vLLM init is loadgroup-pinned because GPU memory profiling fails when peer workers free memory mid-init.",
     "gpu: tests that use a GPU (CUDA, etc.) but do NOT initialise real vLLM (exclude with -m 'not gpu'). Safe to fan out across multiple xdist workers.",
 ]
 
@@ -158,6 +172,12 @@ git_describe_command = [
 ]
 
 [tool.uv]
+conflicts = [
+    [
+        { extra = "cpu" },
+        { extra = "vllm" },
+    ],
+]
 # box2d has a bug where it doesn't declare swig as a build dependency.
 # This workaround tells uv to build box2d-py using the project environment directly
 # (not an isolated one), where it can see system PATH and find swig, which is already installed as a dependency
@@ -201,9 +221,9 @@ python-version = "3.13"
 [tool.ty.src]
 include = ["agilerl", "agilerl/arena"]
 
-# Imports that only resolve on some platforms/extras: vllm and liger_kernel are
-# Linux-only; Box2D needs the box2d extra. CI (Linux,
-# --extra all) resolves them; macOS/Windows checkouts cannot.
+# Imports that only resolve on some platforms/extras: vllm is Linux-only and
+# conflicts with cpu. Box2D needs the box2d extra. GPU Linux (`--extra all`)
+# resolves vllm; GitHub-hosted CPU Linux (`--extra cpu`) and macOS/Windows cannot.
 [[tool.ty.overrides]]
 include = [
     "agilerl/algorithms/core/base.py",

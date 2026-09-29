@@ -31,6 +31,8 @@ from tests.utils import (
     make_mock_vllm_instance,
 )
 
+pytestmark = pytest.mark.vllm
+
 
 class DummyConfig(PretrainedConfig):
     def __init__(

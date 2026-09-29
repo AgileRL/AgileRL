@@ -1,7 +1,7 @@
 # Copyright 2026 AgileRL
 # SPDX-License-Identifier: Apache-2.0
 
-"""Ensure the agilerl-arena requirement is a compatible range (or a build-time exact pin), and ``all`` unions every extra.
+"""Ensure the agilerl-arena requirement is a compatible range (or a build-time exact pin), and ``all`` unions every extra except accelerator extras.
 
 agilerl-arena is a base dependency, not an extra: the manifest contract lives there.
 """
@@ -34,6 +34,8 @@ _RANGE_RE = re.compile(
 )
 _SELF_RE = re.compile(r"^agilerl\[([^\]]+)\]$")
 PUBLIC_VERSION_MIN_PARTS = 2
+# Accelerator extras pick a torch index and conflict with GPU extras.
+ACCELERATOR_EXTRAS = frozenset({"cpu"})
 
 
 def _fail(message: str) -> NoReturn:
@@ -234,11 +236,13 @@ def _check_arena_requirement(
 
 
 def _check_all_extra(extras: dict[str, list[str]]) -> None:
-    """Fail unless ``all`` resolves to exactly what every other extra asks for."""
+    """Fail unless ``all`` resolves to every extra except accelerator extras."""
     if "all" not in extras:
         _fail(f"Missing [project.optional-dependencies].all in {PARENT_PYPROJECT}")
 
-    parts = sorted(name for name in extras if name != "all")
+    parts = sorted(
+        name for name in extras if name != "all" and name not in ACCELERATOR_EXTRAS
+    )
     expected: set[str] = set()
     for name in parts:
         expected |= _requirements(name, extras, seen=set())
@@ -271,7 +275,9 @@ def main(argv: list[str] | None = None) -> None:
         _arena_requirements(PARENT_PYPROJECT), require_tags=args.require_tags
     )
     _check_all_extra(extras)
-    print(f"OK: agilerl-arena {spec}; all unions every extra")
+    print(
+        f"OK: agilerl-arena {spec}; all unions every extra except {sorted(ACCELERATOR_EXTRAS)}"
+    )
 
 
 if __name__ == "__main__":
