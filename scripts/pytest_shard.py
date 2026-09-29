@@ -118,7 +118,11 @@ def collect_durations(paths: list[Path]) -> dict[str, float]:
     """Take the slower time when the same node id appears twice."""
     durations: dict[str, float] = {}
     for path in paths:
-        for case in ET.parse(path).getroot().iter("testcase"):
+        try:
+            root = ET.parse(path).getroot()
+        except ET.ParseError as error:
+            raise RuntimeError(f"invalid junit XML {path}: {error}") from error
+        for case in root.iter("testcase"):
             nodeid = nodeid_from_junit(
                 case.get("classname") or "",
                 case.get("name") or "",
@@ -219,20 +223,6 @@ def coverage_enabled(pytest_args: list[str]) -> bool:
     return any(arg == "--cov" or arg.startswith("--cov=") for arg in pytest_args)
 
 
-def junit_inner(text: str) -> str:
-    """Return ``<testsuite>`` bodies from a pytest junit XML document."""
-    start = text.find("<testsuite")
-    if start < 0:
-        return ""
-    close_suites = text.rfind("</testsuites>")
-    if close_suites >= 0:
-        return text[start:close_suites].strip()
-    close_suite = text.rfind("</testsuite>")
-    if close_suite >= 0:
-        return text[start : close_suite + len("</testsuite>")].strip()
-    return text[start:].strip()
-
-
 def merge_junit_xml(sources: list[Path], dest: Path) -> None:
     """Write one ``<testsuites>`` document from per-root pytest reports."""
     present = [path for path in sources if path.is_file()]
@@ -242,17 +232,16 @@ def merge_junit_xml(sources: list[Path], dest: Path) -> None:
         if present[0] != dest:
             dest.write_bytes(present[0].read_bytes())
         return
-    inner = [
-        chunk
-        for chunk in (junit_inner(path.read_text(encoding="utf-8")) for path in present)
-        if chunk
-    ]
-    dest.write_text(
-        '<?xml version="1.0" encoding="utf-8"?>\n<testsuites>\n'
-        + "\n".join(inner)
-        + "\n</testsuites>\n",
-        encoding="utf-8",
-    )
+    wrapper = ET.Element("testsuites")
+    for path in present:
+        root = ET.parse(path).getroot()
+        if root.tag == "testsuite":
+            wrapper.append(root)
+        else:
+            wrapper.extend(suite for suite in root if suite.tag == "testsuite")
+    if len(wrapper) == 0:
+        return
+    ET.ElementTree(wrapper).write(dest, encoding="utf-8", xml_declaration=True)
 
 
 def combine_coverage() -> None:

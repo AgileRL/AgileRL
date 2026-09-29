@@ -16,12 +16,14 @@ from pydantic import ValidationError
 
 from agilerl.arena.models import (
     MANIFEST_REGISTRY,
+    DPOSpec,
     GRPOSpec,
     GymEnvSpec,
     LLMEnvSpec,
     LLMRolloutBufferSpec,
     MultiFrequencySelectionSpec,
     MutationSpec,
+    PPOSpec,
     RainbowDQNSpec,
     ReplayBufferSpec,
     TrainingManifest,
@@ -32,6 +34,7 @@ from agilerl.arena.models import (
 from agilerl.arena.models.algorithms import RolloutLLMSpec
 from agilerl.arena.models.env import LLMEnvType
 from agilerl.arena.models.schema import (
+    _strip_non_form_algorithm_fields,
     algorithm_name_if,
     algorithm_schema,
     dataset_backed_grpo_rollout_if,
@@ -1478,6 +1481,43 @@ class TestSchema:
         recurrent = next(v for v in variants if v["title"] == "RecurrentPPO")
         assert "max_seq_len" in recurrent["properties"]
         assert recurrent["properties"]["bptt_sequence_type"]["default"] == "chunked"
+
+
+class TestStripNonFormAlgorithmFields:
+    def test_removes_answer_continuation_from_required_on_dataset_specs(self) -> None:
+        schema = {
+            "properties": {"answer_continuation": {"type": "boolean"}},
+            "required": ["name", "answer_continuation"],
+            "x-hpo-ranges": {"answer_continuation": {}},
+        }
+
+        _strip_non_form_algorithm_fields(schema, DPOSpec)
+
+        assert "answer_continuation" not in schema["properties"]
+        assert "answer_continuation" not in schema["required"]
+        assert "answer_continuation" not in schema["x-hpo-ranges"]
+
+    def test_removes_recurrent_fields_from_required_on_ppo(self) -> None:
+        schema = {
+            "properties": {
+                "max_seq_len": {"type": "integer"},
+                "bptt_sequence_type": {"type": "string"},
+            },
+            "required": ["name", "max_seq_len", "bptt_sequence_type"],
+            "x-hpo-ranges": {
+                "max_seq_len": {},
+                "bptt_sequence_type": {},
+            },
+        }
+
+        _strip_non_form_algorithm_fields(schema, PPOSpec)
+
+        assert "max_seq_len" not in schema["properties"]
+        assert "bptt_sequence_type" not in schema["properties"]
+        assert "max_seq_len" not in schema["required"]
+        assert "bptt_sequence_type" not in schema["required"]
+        assert "max_seq_len" not in schema["x-hpo-ranges"]
+        assert "bptt_sequence_type" not in schema["x-hpo-ranges"]
 
 
 class TestClusterSupported:
