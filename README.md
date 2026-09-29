@@ -84,8 +84,10 @@ AgileRL ships optional dependency groups that you can install as needed:
 |-------|--------------|
 | `agilerl[box2d]` | Box2D physics engine for Gymnasium environments |
 | `agilerl-arena` | [Arena](https://arena.agilerl.com) SDK & CLI. Validate custom environments, and train & deploy agents on managed cloud infrastructure. |
-| `agilerl[llm]` | LLM reinforcement fine-tuning. |
-| `agilerl[all]` | Cover all functionalities of AgileRL. |
+| `agilerl[llm]` | Hugging Face transformers, PEFT, datasets, plus Liger and bitsandbytes (Linux). |
+| `agilerl[vllm]` | vLLM (Linux). |
+| `agilerl[cpu]` | CPU-only PyTorch wheels (no NVIDIA stack). |
+| `agilerl[all]` | Box2D, LLM, and vLLM extras. |
 
 In development mode:
 ```bash

@@ -9,7 +9,7 @@ permissions:
 
 jobs:
     cpu:
-        runs-on: gha-runner-scale-set
+        runs-on: ubuntu-24.04
         strategy:
             fail-fast: false
             max-parallel: 8
@@ -23,7 +23,6 @@ jobs:
             TORCHINDUCTOR_CACHE_DIR: /tmp/inductor-cache
             CUDA_VISIBLE_DEVICES: ''
             ACCELERATE_USE_CPU: 'true'
-            PYTEST_XDIST_AUTO_NUM_WORKERS: '8'
             PYTHONPATH: ${{ github.workspace }}/agilerl-arena
 
         steps:
@@ -52,7 +51,7 @@ jobs:
                   restore-keys: linux-cpu-durations-
             - name: Install dependencies
               run: |
-                  uv sync --locked --all-groups --extra all
+                  uv sync --locked --group dev --extra box2d --extra llm --extra cpu
                   echo "$UV_PROJECT_ENVIRONMENT/bin" >> $GITHUB_PATH
             - name: Run CPU shard
               run: |
@@ -178,7 +177,7 @@ jobs:
     coverage:
         needs: [cpu, gpu]
         if: success()
-        runs-on: gha-runner-scale-set
+        runs-on: ubuntu-24.04
         env:
             UV_CACHE_DIR: /tmp/uv-cache
             UV_PROJECT_ENVIRONMENT: /tmp/agilerl-venv
@@ -190,7 +189,7 @@ jobs:
                   python-version: '3.13'
             - name: Install dependencies
               run: |
-                  uv sync --locked --all-groups --extra all
+                  uv sync --locked --only-group dev --no-install-project
                   echo "$UV_PROJECT_ENVIRONMENT/bin" >> $GITHUB_PATH
             - name: Download 3.13 coverage data
               uses: actions/download-artifact@v4
@@ -209,8 +208,8 @@ jobs:
                     cp "$part" ".coverage.${index}"
                     index=$((index + 1))
                   done < <(find coverage-parts -name .coverage -print)
-                  uv run coverage combine
-                  uv run coverage json --rcfile=pyproject.toml -o framework-coverage.json
+                  uv run --no-sync coverage combine
+                  uv run --no-sync coverage json --rcfile=pyproject.toml -o framework-coverage.json
             - uses: actions/upload-artifact@v4
               with:
                   name: framework-coverage

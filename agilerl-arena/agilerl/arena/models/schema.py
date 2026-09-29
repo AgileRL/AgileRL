@@ -308,7 +308,7 @@ def training_schema_conditionals() -> list[dict[str, Any]]:
     ]
 
 
-def _strip_non_form_algorithm_fields(
+def strip_non_form_algorithm_fields(
     schema: dict[str, Any], spec_cls: type[AlgoSpec]
 ) -> None:
     """Drop algorithm fields the manifest form must not expose for *spec_cls*."""
@@ -350,7 +350,7 @@ def _algorithm_variant_schema(
         required.insert(0, "name")
     _add_alias_spellings(schema, spec_cls)
     _add_hpo_ranges(schema, spec_cls)
-    _strip_non_form_algorithm_fields(schema, spec_cls)
+    strip_non_form_algorithm_fields(schema, spec_cls)
     return schema
 
 

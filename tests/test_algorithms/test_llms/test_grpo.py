@@ -51,6 +51,8 @@ from tests.utils import (
     spawn_new_process_for_each_test,
 )
 
+pytestmark = pytest.mark.vllm
+
 
 class DummyConfig(PretrainedConfig):
     def __init__(

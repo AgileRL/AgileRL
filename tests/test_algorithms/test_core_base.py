@@ -3920,7 +3920,7 @@ class TestLLMGenerateWithVllmColocate:
             with pytest.raises(
                 ImportError,
                 match=re.escape(
-                    "vLLM is required for colocated generation. Install AgileRL with vLLM support for this platform: `pip install agilerl[llm]`."
+                    "vLLM is required for colocated generation. Install AgileRL with vLLM support for this platform: `pip install agilerl[vllm]`."
                 ),
             ):
                 agent._generate_with_vllm_colocate([], 1, 0.9)

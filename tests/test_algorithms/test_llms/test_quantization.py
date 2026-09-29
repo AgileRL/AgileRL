@@ -527,6 +527,7 @@ class TestConfigureVllmKwargs:
 
 
 class TestBuildVllmRolloutLoraRequest:
+    @pytest.mark.vllm
     def test_builds_request_with_path(self, tmp_path):
         pytest.importorskip("vllm", reason="requires vllm")
         req = build_vllm_rollout_lora_request(tmp_path, load_inplace=True)

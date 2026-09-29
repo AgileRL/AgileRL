@@ -325,6 +325,22 @@ def test_all_extra_unions_parts(check_extras: ModuleType, tmp_path: Path) -> Non
     check_extras._check_all_extra(extras)
 
 
+def test_all_extra_excludes_accelerator_cpu(
+    check_extras: ModuleType, tmp_path: Path
+) -> None:
+    pyproject = _write_pyproject(
+        tmp_path,
+        extras={
+            "box2d": ["box2d-py"],
+            "cpu": ["torch>=2.11.0"],
+            "all": ["agilerl[box2d]"],
+        },
+    )
+    _bind_repo(check_extras, tmp_path, pyproject)
+    extras = check_extras._extras(pyproject)
+    check_extras._check_all_extra(extras)
+
+
 def test_all_extra_drift_fails(
     check_extras: ModuleType, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
