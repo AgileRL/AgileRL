@@ -16,12 +16,14 @@ from pydantic import ValidationError
 
 from agilerl.arena.models import (
     MANIFEST_REGISTRY,
+    DPOSpec,
     GRPOSpec,
     GymEnvSpec,
     LLMEnvSpec,
     LLMRolloutBufferSpec,
     MultiFrequencySelectionSpec,
     MutationSpec,
+    PPOSpec,
     RainbowDQNSpec,
     ReplayBufferSpec,
     TrainingManifest,
@@ -32,6 +34,7 @@ from agilerl.arena.models import (
 from agilerl.arena.models.algorithms import RolloutLLMSpec
 from agilerl.arena.models.env import LLMEnvType
 from agilerl.arena.models.schema import (
+    _strip_non_form_algorithm_fields,
     algorithm_name_if,
     algorithm_schema,
     dataset_backed_grpo_rollout_if,
@@ -1450,6 +1453,76 @@ class TestSchema:
         assert dqn["eps_end"] == 0.01
         assert dqn["eps_decay"] == 0.99999
 
+    def test_classic_training_schema_omits_training_gpus_per_agent(self) -> None:
+        schema = manifest_schema()
+        training = schema["properties"]["training"]
+        assert "anyOf" not in training
+        assert training["$ref"] == "#/$defs/TrainingSpecLLM"
+
+        training_spec = schema["$defs"]["TrainingSpec"]["properties"]
+        assert "training_gpus_per_agent" not in training_spec
+
+        ppo = self._applied_training_defaults({"algorithm": {"name": "PPO"}})
+        assert "training_gpus_per_agent" not in ppo
+
+        maddpg = self._applied_training_defaults({"algorithm": {"name": "MADDPG"}})
+        assert "training_gpus_per_agent" not in maddpg
+
+    def test_llm_training_gpus_per_agent_schema_default(self) -> None:
+        schema = manifest_schema()
+        llm_training = schema["$defs"]["TrainingSpecLLM"]["properties"]
+        assert llm_training["training_gpus_per_agent"]["default"] == 1
+
+        for name in ("GRPO", "SFT", "DPO", "CISPO"):
+            applied = self._applied_training_defaults({"algorithm": {"name": name}})
+            assert "training_gpus_per_agent" not in applied
+
+    def test_classic_payload_omits_training_gpus_per_agent_even_when_set(self) -> None:
+        spec = TrainingManifest.model_validate(
+            {
+                "algorithm": {"name": "PPO"},
+                "environment": {"name": "CartPole-v1"},
+                "training": {
+                    "max_steps": 100,
+                    "pop_size": 2,
+                    "training_gpus_per_agent": 2,
+                },
+            }
+        )
+        payload = spec.to_payload()
+        assert "training_gpus_per_agent" not in payload["training"]
+
+    def test_unset_llm_training_gpus_per_agent_is_omitted_from_the_payload(
+        self,
+    ) -> None:
+        payload = TrainingManifest.model_validate(GRPO).to_payload()
+        assert "training_gpus_per_agent" not in payload["training"]
+
+    def test_explicit_llm_training_gpus_per_agent_is_kept_in_the_payload(self) -> None:
+        payload = TrainingManifest.model_validate(
+            manifest(GRPO, training={"training_gpus_per_agent": 2})
+        ).to_payload()
+        assert payload["training"]["training_gpus_per_agent"] == 2
+
+    @pytest.mark.parametrize(
+        "algorithm",
+        ["PPO", "MADDPG"],
+    )
+    def test_published_schema_rejects_training_gpus_per_agent_on_classic(
+        self, algorithm: str
+    ) -> None:
+        payload = TrainingManifest.model_validate(
+            {
+                "algorithm": {"name": algorithm},
+                "environment": {"name": "CartPole-v1", "num_envs": 4},
+                "training": {"max_steps": 100, "pop_size": 2},
+            }
+        ).to_payload()
+        payload["training"]["training_gpus_per_agent"] = 1
+        errors = list(Draft202012Validator(manifest_schema()).iter_errors(payload))
+        assert errors
+        assert any("training_gpus_per_agent" in e.message for e in errors)
+
     def test_sft_algorithm_schema_omits_beta_dpo_keeps_it(self) -> None:
         variants = manifest_schema()["properties"]["algorithm"]["oneOf"]
         sft = next(v for v in variants if v["title"] == "SFT")
@@ -1478,6 +1551,43 @@ class TestSchema:
         recurrent = next(v for v in variants if v["title"] == "RecurrentPPO")
         assert "max_seq_len" in recurrent["properties"]
         assert recurrent["properties"]["bptt_sequence_type"]["default"] == "chunked"
+
+
+class TestStripNonFormAlgorithmFields:
+    def test_removes_answer_continuation_from_required_on_dataset_specs(self) -> None:
+        schema = {
+            "properties": {"answer_continuation": {"type": "boolean"}},
+            "required": ["name", "answer_continuation"],
+            "x-hpo-ranges": {"answer_continuation": {}},
+        }
+
+        _strip_non_form_algorithm_fields(schema, DPOSpec)
+
+        assert "answer_continuation" not in schema["properties"]
+        assert "answer_continuation" not in schema["required"]
+        assert "answer_continuation" not in schema["x-hpo-ranges"]
+
+    def test_removes_recurrent_fields_from_required_on_ppo(self) -> None:
+        schema = {
+            "properties": {
+                "max_seq_len": {"type": "integer"},
+                "bptt_sequence_type": {"type": "string"},
+            },
+            "required": ["name", "max_seq_len", "bptt_sequence_type"],
+            "x-hpo-ranges": {
+                "max_seq_len": {},
+                "bptt_sequence_type": {},
+            },
+        }
+
+        _strip_non_form_algorithm_fields(schema, PPOSpec)
+
+        assert "max_seq_len" not in schema["properties"]
+        assert "bptt_sequence_type" not in schema["properties"]
+        assert "max_seq_len" not in schema["required"]
+        assert "bptt_sequence_type" not in schema["required"]
+        assert "max_seq_len" not in schema["x-hpo-ranges"]
+        assert "bptt_sequence_type" not in schema["x-hpo-ranges"]
 
 
 class TestClusterSupported:

@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import copy
 from collections.abc import Callable
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as distribution_version
@@ -49,6 +50,10 @@ def registered_algorithm_names(
     )
 
 
+def _llm_algorithm(spec: type[AlgoSpec]) -> bool:
+    return issubclass(spec, LLMAlgorithmSpec)
+
+
 def algorithm_name_if(algorithm_names: tuple[str, ...]) -> dict[str, Any]:
     return {
         "properties": {
@@ -63,6 +68,10 @@ def algorithm_name_if(algorithm_names: tuple[str, ...]) -> dict[str, Any]:
 
 def training_then(defaults: dict[str, Any]) -> dict[str, Any]:
     return {"properties": {"training": {"properties": defaults}}}
+
+
+def training_spec_ref(def_name: str) -> dict[str, Any]:
+    return {"properties": {"training": {"$ref": f"#/$defs/{def_name}"}}}
 
 
 def environment_rollout_type_if() -> dict[str, Any]:
@@ -162,12 +171,9 @@ def environment_then(defaults: dict[str, Any]) -> dict[str, Any]:
 
 
 def async_llm_rollout_if() -> dict[str, Any]:
-    def llm_algorithm(spec: type[AlgoSpec]) -> bool:
-        return issubclass(spec, LLMAlgorithmSpec)
-
     return {
         "allOf": [
-            algorithm_name_if(registered_algorithm_names(llm_algorithm)),
+            algorithm_name_if(registered_algorithm_names(_llm_algorithm)),
             {
                 "properties": {
                     "training": {
@@ -188,9 +194,6 @@ def training_schema_conditionals() -> list[dict[str, Any]]:
             and "expl_noise" not in spec.model_fields
             and spec is not RainbowDQNSpec
         )
-
-    def llm_algorithm(spec: type[AlgoSpec]) -> bool:
-        return issubclass(spec, LLMAlgorithmSpec)
 
     def rollout_llm(spec: type[AlgoSpec]) -> bool:
         return issubclass(spec, RolloutLLMSpec)
@@ -216,15 +219,15 @@ def training_schema_conditionals() -> list[dict[str, Any]]:
             ),
         },
         {
-            "if": algorithm_name_if(registered_algorithm_names(llm_algorithm)),
+            "if": algorithm_name_if(registered_algorithm_names(_llm_algorithm)),
             "then": training_then({"reporting_interval": {"default": 1}}),
         },
         {
-            "if": algorithm_name_if(registered_algorithm_names(llm_algorithm)),
+            "if": algorithm_name_if(registered_algorithm_names(_llm_algorithm)),
             "then": training_then({"evo_steps": {"default": 10}}),
         },
         {
-            "if": algorithm_name_if(registered_algorithm_names(llm_algorithm)),
+            "if": algorithm_name_if(registered_algorithm_names(_llm_algorithm)),
             "then": training_then({"evaluation_interval": {"default": 10}}),
         },
         {
@@ -261,7 +264,7 @@ def training_schema_conditionals() -> list[dict[str, Any]]:
             ),
         },
         {
-            "if": algorithm_name_if(registered_algorithm_names(llm_algorithm)),
+            "if": algorithm_name_if(registered_algorithm_names(_llm_algorithm)),
             "then": training_then(
                 {
                     "checkpoint_export": {
@@ -303,11 +306,6 @@ def training_schema_conditionals() -> list[dict[str, Any]]:
             ),
         },
     ]
-
-
-def attach_training_schema_conditionals(schema: dict[str, Any]) -> None:
-    """Append algorithm-conditional training defaults to the root schema."""
-    schema["allOf"] = [*(schema.get("allOf") or []), *training_schema_conditionals()]
 
 
 def _strip_non_form_algorithm_fields(
@@ -515,6 +513,32 @@ LLM_ENV_SCHEMA_DEFAULT_FIELDS = (
     "action_field",
 )
 
+LLM_ONLY_TRAINING_SCHEMA_FIELDS = ("training_gpus_per_agent",)
+
+
+def attach_training_schema(schema: dict[str, Any]) -> None:
+    """Split classic vs LLM training defs and attach algorithm training defaults."""
+    training_def = schema["$defs"]["TrainingSpec"]
+    schema["$defs"]["TrainingSpecLLM"] = copy.deepcopy(training_def)
+    for name in LLM_ONLY_TRAINING_SCHEMA_FIELDS:
+        training_def["properties"].pop(name, None)
+
+    training_section = schema["properties"]["training"]
+    training_description = training_section.get("description")
+    schema["properties"]["training"] = {"$ref": "#/$defs/TrainingSpecLLM"}
+    if training_description is not None:
+        schema["properties"]["training"]["description"] = training_description
+
+    schema["allOf"] = [
+        {
+            "if": algorithm_name_if(registered_algorithm_names(_llm_algorithm)),
+            "then": training_spec_ref("TrainingSpecLLM"),
+            "else": training_spec_ref("TrainingSpec"),
+        },
+        *(schema.get("allOf") or []),
+        *training_schema_conditionals(),
+    ]
+
 
 def _strip_llm_env_schema_defaults(schema: dict[str, Any]) -> None:
     """Null is not a property default. Root conditionals set these fields."""
@@ -569,7 +593,7 @@ def manifest_schema() -> dict[str, Any]:
 
     schema = cast("dict[str, Any]", _walk(schema))
     _strip_llm_env_schema_defaults(schema)
-    attach_training_schema_conditionals(schema)
+    attach_training_schema(schema)
     schema["$id"] = SCHEMA_ID
     schema["x-manifest-version"] = _package_version()
     schema["title"] = "AgileRL training manifest"
