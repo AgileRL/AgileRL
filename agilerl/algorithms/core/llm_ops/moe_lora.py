@@ -10,7 +10,7 @@ expert weights themselves, per wrapped parameter, per layer. The wrappers here
 keep the low-rank factorization split instead: tokens are grouped per expert
 and pushed through that expert's rank-``r`` slice of ``lora_A``/``lora_B``, so
 the largest adapter intermediate is ``[tokens, r]``. Wrappers on modules
-matching neither supported calling convention stay on PEFT's default path.
+matching none of the supported calling conventions stay on PEFT's default path.
 """
 
 from __future__ import annotations
@@ -34,6 +34,12 @@ from agilerl.algorithms.core.llm_ops.fused_lora import (
     patch_lora_for_fused_forward,
     uniform_routed_adapter,
 )
+from agilerl.architectures.gptoss import experts as gptoss_experts
+
+is_transposed_experts_module = gptoss_experts.is_gpt_oss_experts_module
+transposed_expert_params = gptoss_experts.gpt_oss_expert_params
+apply_transposed_experts_gate = gptoss_experts.apply_gpt_oss_gate
+expert_matmul_loop = gptoss_experts.expert_matmul_loop
 
 logger = logging.getLogger(__name__)
 
@@ -43,23 +49,30 @@ def _grouped_mm_supported(device_index: int, dtype: torch.dtype) -> bool:
     """Whether ``torch._grouped_mm`` computes correct results (fwd and bwd, transposed views) here."""
     if not hasattr(torch, "_grouped_mm"):
         return False
-    try:
-        device = torch.device("cuda", device_index)
-        generator = torch.Generator(device=device).manual_seed(0)
-        x = torch.randn(8, 16, device=device, dtype=dtype, generator=generator)
-        w = torch.randn(2, 4, 16, device=device, dtype=dtype, generator=generator)
-        x = x.requires_grad_(True)
-        w = w.requires_grad_(True)
-        offs = torch.tensor([5, 8], device=device, dtype=torch.int32)
-        out = torch._grouped_mm(x, w.transpose(-2, -1), offs=offs)
-        reference = torch.cat([x[:5] @ w[0].mT, x[5:] @ w[1].mT])
-        if not torch.allclose(out.float(), reference.float(), atol=1e-2):
+    # The first call can run inside a checkpointed or no_grad forward. The
+    # probe needs its own backward: grad on, and identity hooks keep its saved
+    # tensors out of the checkpoint so recompute matches.
+    with (
+        torch.enable_grad(),
+        torch.autograd.graph.saved_tensors_hooks(lambda t: t, lambda t: t),
+    ):
+        try:
+            device = torch.device("cuda", device_index)
+            generator = torch.Generator(device=device).manual_seed(0)
+            x = torch.randn(8, 16, device=device, dtype=dtype, generator=generator)
+            w = torch.randn(2, 4, 16, device=device, dtype=dtype, generator=generator)
+            x = x.requires_grad_(True)
+            w = w.requires_grad_(True)
+            offs = torch.tensor([5, 8], device=device, dtype=torch.int32)
+            out = torch._grouped_mm(x, w.transpose(-2, -1), offs=offs)
+            reference = torch.cat([x[:5] @ w[0].mT, x[5:] @ w[1].mT])
+            if not torch.allclose(out.float(), reference.float(), atol=1e-2):
+                return False
+            # square() materializes the incoming gradient; the op's backward
+            # rejects the zero-stride expanded grad a bare sum() would feed it.
+            out.square().sum().backward()
+        except Exception:
             return False
-        # square() materializes the incoming gradient; the op's backward
-        # rejects the zero-stride expanded grad a bare sum() would feed it.
-        out.square().sum().backward()
-    except Exception:
-        return False
     return x.grad is not None and w.grad is not None
 
 
@@ -225,8 +238,12 @@ def _is_routed_experts_module(module: nn.Module) -> bool:
 
 
 def _is_packed_experts_module(module: nn.Module) -> bool:
-    """Whether *module* is a packed expert stack (routed or sorted)."""
-    return _is_routed_experts_module(module) or _is_sorted_experts_module(module)
+    """Whether *module* is a packed expert stack (routed, sorted, or transposed)."""
+    return (
+        _is_routed_experts_module(module)
+        or _is_sorted_experts_module(module)
+        or is_transposed_experts_module(module)
+    )
 
 
 def _expert_counts(
@@ -244,12 +261,12 @@ def _expert_counts(
     return counts
 
 
-def _adapters_in_routing(wrapper: ParamWrapper, routing: Sequence[str]) -> list[str]:
+def adapters_in_routing(wrapper: ParamWrapper, routing: Sequence[str]) -> list[str]:
     """Adapter names from *routing* that this wrapper actually hosts."""
     return [name for name in dict.fromkeys(routing) if name in wrapper.lora_A]
 
 
-def _token_adapter_ids(
+def token_adapter_ids(
     routing: Sequence[str], n_rows: int, token_idx: torch.Tensor
 ) -> tuple[torch.Tensor, dict[str, int]]:
     """Expand per-sample fused routing to tokens, then permute into expert-sorted order.
@@ -274,7 +291,7 @@ def _token_adapter_ids(
     return table[token_idx], name_to_id
 
 
-def _resolve_adapters(wrapper: ParamWrapper) -> list[str]:
+def resolve_adapters(wrapper: ParamWrapper) -> list[str]:
     """Adapter names to apply on this forward, honoring fused routing and adapter state."""
     routed = uniform_routed_adapter(wrapper)
     if routed is not None:
@@ -290,7 +307,7 @@ def _resolve_adapters(wrapper: ParamWrapper) -> list[str]:
     ]
 
 
-def _split_lora_delta(
+def split_lora_delta(
     wrapper: ParamWrapper,
     x: torch.Tensor,
     counts: Sequence[int] | torch.Tensor,
@@ -372,7 +389,7 @@ def _routed_experts_local_forward(
     local_e = up_weight.shape[0]
     num_experts = local_e
     if chain is not None and adapters is None:
-        adapters = {name: _resolve_adapters(w) for name, w in chain.items()}
+        adapters = {name: resolve_adapters(w) for name, w in chain.items()}
     adapters = adapters or {}
     chain = chain or {}
 
@@ -386,7 +403,7 @@ def _routed_experts_local_forward(
     row_ids: torch.Tensor | None = None
     id_map: dict[str, int] | None = None
     if routing is not None and len(set(routing)) > 1:
-        row_ids, id_map = _token_adapter_ids(routing, hidden_states.shape[0], token_idx)
+        row_ids, id_map = token_adapter_ids(routing, hidden_states.shape[0], token_idx)
 
     counts_for_gemm = counts
 
@@ -397,7 +414,7 @@ def _routed_experts_local_forward(
     )
     projected = _grouped_linear(x, up_weight, counts_for_gemm, offs)
     for name in adapters.get(up_name, []):
-        delta = _split_lora_delta(
+        delta = split_lora_delta(
             chain[up_name],
             x,
             counts_for_gemm,
@@ -416,7 +433,7 @@ def _routed_experts_local_forward(
         intermediate = act_fn(projected)
     down = _grouped_linear(intermediate, down_weight, counts_for_gemm, offs)
     for name in adapters.get("down_proj", []):
-        delta = _split_lora_delta(
+        delta = split_lora_delta(
             chain["down_proj"],
             intermediate,
             counts_for_gemm,
@@ -434,7 +451,7 @@ def _routed_experts_local_forward(
     return result
 
 
-def _wrapper_chain(wrapper: ParamWrapper) -> dict[str, ParamWrapper]:
+def wrapper_chain(wrapper: ParamWrapper) -> dict[str, ParamWrapper]:
     """Map targeted parameter name to wrapper for a (possibly nested) wrapper chain."""
     chain: dict[str, ParamWrapper] = {}
     module: nn.Module = wrapper
@@ -464,7 +481,7 @@ class SortedExpertsLoraWrapper(ParamWrapper):
         id_map: dict[str, int] | None = None
         if mixed:
             assert routing is not None
-            adapters = _adapters_in_routing(self, routing)
+            adapters = adapters_in_routing(self, routing)
             token_idx = self.token_index
             n_tokens = self.n_tokens
             if token_idx is None or n_tokens is None:
@@ -480,9 +497,9 @@ class SortedExpertsLoraWrapper(ParamWrapper):
                     f"{x.shape[0]}."
                 )
                 raise ValueError(msg)
-            row_ids, id_map = _token_adapter_ids(routing, n_tokens, token_idx)
+            row_ids, id_map = token_adapter_ids(routing, n_tokens, token_idx)
         else:
-            adapters = _resolve_adapters(self)
+            adapters = resolve_adapters(self)
         base = self.base_layer
         result = base(x, expert_size, *args, **kwargs)
         if not adapters:
@@ -490,7 +507,7 @@ class SortedExpertsLoraWrapper(ParamWrapper):
         counts = _expert_counts(expert_size, self.num_experts)
         offs = _group_offsets(counts, x.device) if x.is_cuda else None
         for name in adapters:
-            delta = _split_lora_delta(self, x, counts, name, offs)
+            delta = split_lora_delta(self, x, counts, name, offs)
             if row_ids is not None and id_map is not None:
                 mask = (row_ids == id_map[name]).to(delta.dtype).unsqueeze(-1)
                 delta = delta * mask
@@ -515,18 +532,18 @@ class RoutedExpertsLoraWrapper(ParamWrapper):
             return ParamWrapper.forward(
                 self, hidden_states, top_k_index, top_k_weights, *args, **kwargs
             )
-        chain = _wrapper_chain(self)
+        chain = wrapper_chain(self)
         experts = self.get_base_layer()
         routing = ROUTING_STATE.get(self)
         mixed = routing is not None and len(set(routing)) > 1
         if mixed:
             assert routing is not None
             adapters = {
-                name: _adapters_in_routing(wrapper, routing)
+                name: adapters_in_routing(wrapper, routing)
                 for name, wrapper in chain.items()
             }
         else:
-            adapters = {name: _resolve_adapters(w) for name, w in chain.items()}
+            adapters = {name: resolve_adapters(w) for name, w in chain.items()}
 
         if not any(adapters.values()):
             return experts(hidden_states, top_k_index, top_k_weights)
@@ -546,12 +563,128 @@ class RoutedExpertsLoraWrapper(ParamWrapper):
         )
 
 
+def transposed_experts_local_forward(
+    experts: nn.Module,
+    hidden_states: torch.Tensor,
+    router_indices: torch.Tensor,
+    routing_weights: torch.Tensor,
+    chain: dict[str, ParamWrapper] | None = None,
+    adapters: dict[str, list[str]] | None = None,
+    routing: Sequence[str] | None = None,
+) -> torch.Tensor:
+    """Transposed packed-experts forward with split-LoRA deltas on the matmul layout."""
+    params = transposed_expert_params(experts)
+    if params is None:
+        msg = "Transposed experts LoRA requires a transposed packed-experts layout."
+        raise RuntimeError(msg)
+    if chain is not None and adapters is None:
+        adapters = {name: resolve_adapters(wrapper) for name, wrapper in chain.items()}
+    adapters = adapters or {}
+    chain = chain or {}
+
+    local_e = params.gate_up_proj.shape[0]
+    top_k = router_indices.shape[-1]
+    flat_experts = router_indices.reshape(-1)
+    order = torch.argsort(flat_experts, stable=True)
+    counts = torch.bincount(flat_experts, minlength=local_e)
+    token_idx = torch.div(order, top_k, rounding_mode="floor")
+    x = hidden_states[token_idx]
+    routed_weights = routing_weights.reshape(-1)[order].unsqueeze(-1)
+    row_ids: torch.Tensor | None = None
+    id_map: dict[str, int] | None = None
+    if routing is not None and len(set(routing)) > 1:
+        row_ids, id_map = token_adapter_ids(routing, hidden_states.shape[0], token_idx)
+
+    offs = torch.cumsum(counts, dim=0).to(torch.int32) if x.is_cuda else None
+    projected = expert_matmul_loop(
+        x, params.gate_up_proj, counts, params.gate_up_proj_bias
+    )
+    for name in adapters.get("gate_up_proj", []):
+        delta = split_lora_delta(
+            chain["gate_up_proj"], x, counts, name, offs, num_experts=local_e
+        )
+        if row_ids is not None and id_map is not None:
+            mask = (row_ids == id_map[name]).to(delta.dtype).unsqueeze(-1)
+            delta = delta * mask
+        projected = projected + delta.to(projected.dtype)
+    intermediate = apply_transposed_experts_gate(projected, params.alpha, params.limit)
+    down = expert_matmul_loop(
+        intermediate, params.down_proj, counts, params.down_proj_bias
+    )
+    for name in adapters.get("down_proj", []):
+        delta = split_lora_delta(
+            chain["down_proj"], intermediate, counts, name, offs, num_experts=local_e
+        )
+        if row_ids is not None and id_map is not None:
+            mask = (row_ids == id_map[name]).to(delta.dtype).unsqueeze(-1)
+            delta = delta * mask
+        down = down + delta.to(down.dtype)
+
+    result = torch.zeros_like(hidden_states)
+    result.index_add_(0, token_idx, (down * routed_weights).to(result.dtype))
+    return result
+
+
+class TransposedExpertsLoraWrapper(ParamWrapper):
+    """Split-LoRA ``ParamWrapper`` for transposed packed-experts blocks."""
+
+    _self_routed_lora = True
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        router_indices: torch.Tensor | None = None,
+        routing_weights: torch.Tensor | None = None,
+        *args: Any,
+        **kwargs: Any,
+    ) -> torch.Tensor:
+        if (
+            args
+            or kwargs
+            or router_indices is None
+            or routing_weights is None
+            or hidden_states.dim() != 2
+        ):
+            return ParamWrapper.forward(
+                self, hidden_states, router_indices, routing_weights, *args, **kwargs
+            )
+        chain = wrapper_chain(self)
+        experts = self.get_base_layer()
+        routing = ROUTING_STATE.get(self)
+        if routing is not None and len(set(routing)) > 1:
+            adapters = {
+                name: adapters_in_routing(wrapper, routing)
+                for name, wrapper in chain.items()
+            }
+            mixed_routing: Sequence[str] | None = routing
+        else:
+            adapters = {
+                name: resolve_adapters(wrapper) for name, wrapper in chain.items()
+            }
+            mixed_routing = None
+        if not any(adapters.values()):
+            return experts(hidden_states, router_indices, routing_weights)
+        if not is_transposed_experts_module(experts):
+            return ParamWrapper.forward(
+                self, hidden_states, router_indices, routing_weights
+            )
+        return transposed_experts_local_forward(
+            experts,
+            hidden_states,
+            router_indices,
+            routing_weights,
+            chain=chain,
+            adapters=adapters,
+            routing=mixed_routing,
+        )
+
+
 def _bind_gate_token_index(model: nn.Module) -> None:
     """Copy each sorted-MoE gate's ``batch_index`` onto sibling expert wrappers.
 
     The sibling ``router`` returns ``(index_sorted_experts, batch_index, ...)``.
     Fused routing is in token order; the wrappers permute adapter ids with
-    that index (see ``_token_adapter_ids``).
+    that index (see ``token_adapter_ids``).
     """
     for parent in model.modules():
         router = getattr(parent, "router", None)
@@ -608,7 +741,7 @@ def upgrade_moe_param_wrappers(model: nn.Module) -> int:
             continue
         if type(module) is not ParamWrapper:
             continue
-        chain = _wrapper_chain(module)
+        chain = wrapper_chain(module)
         base = module.get_base_layer()
         projections = _routed_projection_names(base)
         if (
@@ -620,6 +753,12 @@ def upgrade_moe_param_wrappers(model: nn.Module) -> int:
             upgraded += 1
         elif projections is not None and set(chain) <= {projections[0], "down_proj"}:
             module.__class__ = RoutedExpertsLoraWrapper
+            upgraded += 1
+        elif is_transposed_experts_module(base) and set(chain) <= {
+            "gate_up_proj",
+            "down_proj",
+        }:
+            module.__class__ = TransposedExpertsLoraWrapper
             upgraded += 1
         elif module.get_param().ndim == 3:
             fallbacks.append(name)
@@ -668,6 +807,9 @@ def moe_expert_target_parameters(model: nn.Module) -> list[str]:
             suffixes.add(f"{prefix}.weight")
         elif (projections := _routed_projection_names(module)) is not None:
             suffixes.add(f"{prefix}.{projections[0]}")
+            suffixes.add(f"{prefix}.down_proj")
+        elif is_transposed_experts_module(module):
+            suffixes.add(f"{prefix}.gate_up_proj")
             suffixes.add(f"{prefix}.down_proj")
     return sorted(suffixes)
 
