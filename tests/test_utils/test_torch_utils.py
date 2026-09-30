@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import math
+from unittest.mock import patch
 
 import numpy as np
 import pytest
@@ -16,6 +17,7 @@ from agilerl.utils.torch_utils import (
     log_prob_from_space,
     map_pytree,
     parameter_norm,
+    release_device_memory,
     sample_from_space,
     to_decorator,
 )
@@ -321,3 +323,39 @@ class TestLogProbDiscrete:
         action = torch.randint(0, 5, (2, 4, 1))
         with pytest.raises(ValueError, match="not compatible with logits ndim"):
             log_prob_discrete(logits, action)
+
+
+class TestReleaseDeviceMemory:
+    @pytest.mark.parametrize(
+        ("cuda_available", "mps_available", "empty_attr", "sync_attr"),
+        [
+            pytest.param(True, False, "cuda", "cuda", id="cuda"),
+            pytest.param(False, True, "mps", "mps", id="mps"),
+        ],
+    )
+    def test_release_flushes_device_cache(
+        self, cuda_available, mps_available, empty_attr, sync_attr
+    ):
+        empty_patch = f"agilerl.utils.torch_utils.torch.{empty_attr}.empty_cache"
+        sync_patch = f"agilerl.utils.torch_utils.torch.{sync_attr}.synchronize"
+        with (
+            patch(
+                "agilerl.utils.torch_utils.torch.cuda.is_available",
+                return_value=cuda_available,
+            ),
+            patch(
+                "agilerl.utils.torch_utils.torch.mps.is_available",
+                return_value=mps_available,
+            ),
+            patch(
+                "agilerl.utils.torch_utils.torch.cuda.is_initialized",
+                return_value=cuda_available,
+            ),
+            patch(empty_patch) as mock_empty,
+            patch(sync_patch) as mock_sync,
+            patch("agilerl.utils.torch_utils.gc.collect") as mock_gc,
+        ):
+            release_device_memory()
+        mock_gc.assert_called_once()
+        mock_empty.assert_called_once()
+        mock_sync.assert_called_once()

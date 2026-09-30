@@ -201,6 +201,32 @@ Identity).
 When these conditions are not met, function preservation cannot be guaranteed, and the new capacity is
 initialised randomly.
 
+Memory
+~~~~~~
+
+Architecture mutations change layer shapes in place. On CPU that can fragment the
+PyTorch / malloc heap: Python object counts stay flat while process RSS climbs via
+large cached blocks, and PyTorch exposes no CPU ``empty_cache``. :func:`Mutations.mutation
+<agilerl.hpo.mutation.Mutations.mutation>` runs :func:`release_device_memory
+<agilerl.utils.torch_utils.release_device_memory>` after each mutation batch
+(GC plus MPS/CUDA cache flush when available), which helps Apple Silicon and CUDA
+but does not fully fix CPU RSS growth.
+
+Until composite encoders (for example CNN→LSTM stacks) support architecture
+mutation, set ``architecture=0`` and ``new_layer_prob=0`` on long image or recurrent
+runs where RSS matters.
+
+Custom encoders
+~~~~~~~~~~~~~~~
+
+When you pass ``encoder_cls`` to an :class:`~agilerl.networks.base.EvolvableNetwork`,
+tournament ``clone()`` round-trips the encoder through :meth:`~agilerl.modules.base.EvolvableModule.get_init_dict`.
+Every ``__init__`` parameter must be stored as ``self.<name>``; do not use ``*args`` or
+``**kwargs``. Missing attributes raise :class:`AttributeError` from ``get_init_dict``,
+which can surface later as a missing ``encoder_config`` on the actor. Do not wrap
+:func:`Mutations.mutation <agilerl.hpo.mutation.Mutations.mutation>` without forwarding
+``*args`` and ``**kwargs`` — pre-training calls pass ``pre_training_mut=True``.
+
 
 RL Hyperparameter Mutations
 ---------------------------
