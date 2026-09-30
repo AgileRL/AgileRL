@@ -24,7 +24,7 @@ jobs:
         # actions/cache versions by compressor; this must match linux / ${{ matrix.family }}.
         runs-on: ${{ matrix.runner }}
         steps:
-            - uses: actions/checkout@v4
+            - uses: actions/checkout@v5
             - name: Download 3.13 ${{ matrix.family }} junit
               uses: actions/download-artifact@v4
               with:

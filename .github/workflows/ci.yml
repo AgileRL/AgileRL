@@ -31,7 +31,7 @@ jobs:
     ty:
         uses: ./.github/workflows/reusable-type-checks.yml
     codeql:
-        uses: ./.github/workflows/reusable-codeql.yml
+        uses: ./.github/workflows/codeql.yml
         permissions:
             contents: read
             actions: read

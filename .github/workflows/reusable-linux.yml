@@ -26,7 +26,7 @@ jobs:
             PYTHONPATH: ${{ github.workspace }}/agilerl-arena
 
         steps:
-            - uses: actions/checkout@v4
+            - uses: actions/checkout@v5
             - uses: astral-sh/setup-uv@v7
               with:
                   enable-cache: true
@@ -108,7 +108,7 @@ jobs:
             PYTHONPATH: ${{ github.workspace }}/agilerl-arena
 
         steps:
-            - uses: actions/checkout@v4
+            - uses: actions/checkout@v5
             - uses: astral-sh/setup-uv@v7
               with:
                   enable-cache: true
@@ -182,7 +182,7 @@ jobs:
             UV_CACHE_DIR: /tmp/uv-cache
             UV_PROJECT_ENVIRONMENT: /tmp/agilerl-venv
         steps:
-            - uses: actions/checkout@v4
+            - uses: actions/checkout@v5
             - uses: astral-sh/setup-uv@v7
               with:
                   enable-cache: true

@@ -2,6 +2,7 @@
 name: CodeQL Advanced
 
 on:
+    workflow_call:
     push:
         branches: [main]
     schedule:
@@ -9,12 +10,36 @@ on:
 
 permissions:
     contents: read
+    actions: read
+    packages: read
+    security-events: write
 
 jobs:
-    codeql:
-        uses: ./.github/workflows/reusable-codeql.yml
+    analyze:
+        name: Analyze (${{ matrix.language }})
+        runs-on: ${{ (matrix.language == 'swift' && 'macos-latest') || 'ubuntu-latest' }}
         permissions:
-            contents: read
-            actions: read
-            packages: read
             security-events: write
+            packages: read
+            actions: read
+            contents: read
+        strategy:
+            fail-fast: false
+            matrix:
+                include:
+                    - language: actions
+                      build-mode: none
+                    - language: python
+                      build-mode: none
+        steps:
+            - name: Checkout repository
+              uses: actions/checkout@v5
+            - name: Initialize CodeQL
+              uses: github/codeql-action/init@v4
+              with:
+                  languages: ${{ matrix.language }}
+                  build-mode: ${{ matrix.build-mode }}
+            - name: Perform CodeQL Analysis
+              uses: github/codeql-action/analyze@v4
+              with:
+                  category: /language:${{matrix.language}}
