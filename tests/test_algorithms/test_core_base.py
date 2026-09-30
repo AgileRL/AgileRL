@@ -6254,7 +6254,9 @@ class TestLLMInitializeActorsStrayAdapter:
         class _InnerModel(torch.nn.Module):
             pass
 
-        peft_actor.base_model.model = _InnerModel()
+        inner = _InnerModel()
+        peft_actor.base_model.model = torch.nn.Linear(1, 1)
+        peft_actor.get_base_model = lambda: inner
         base_model = torch.nn.Module()
         apply = MagicMock()
 
@@ -6285,7 +6287,52 @@ class TestLLMInitializeActorsStrayAdapter:
 
         apply.assert_called_once()
         assert apply.call_args.kwargs["fused_linear_cross_entropy"] is False
-        assert apply.call_args.kwargs["model"] is peft_actor.base_model.model
+        assert apply.call_args.kwargs["model"] is inner
+        assert inner._agilerl_liger_patched is True
+
+    def test_initialize_actors_applies_liger_to_plain_module_when_not_peft_protocol(
+        self,
+    ):
+        agent = _make_llm_agent()
+        agent.selected_adapters = ("actor",)
+
+        class _PlainTarget(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.peft_config = {"actor": MagicMock()}
+                self.add_adapter = MagicMock()
+                self.delete_adapter = MagicMock()
+
+        target = _PlainTarget()
+        apply = MagicMock()
+        base_model = torch.nn.Module()
+
+        with (
+            patch(
+                "agilerl.algorithms.core.base.adapt_lora_config_for_model",
+                side_effect=lambda _model, cfg, **kw: cfg,
+            ),
+            patch("agilerl.algorithms.core.base.get_peft_model", return_value=target),
+            patch(
+                "agilerl.algorithms.core.base.patch_lora_for_fused_forward", create=True
+            ),
+            patch("agilerl.algorithms.core.base.HAS_LIGER_KERNEL", True),
+            patch(
+                "agilerl.algorithms.core.base.register_nemotron_h_liger",
+                return_value=True,
+            ),
+            patch(
+                "agilerl.algorithms.core.base._apply_liger_kernel_to_instance",
+                apply,
+                create=True,
+            ),
+            patch.object(agent, "use_adapter"),
+        ):
+            LLMAlgorithm._initialize_actors(agent, base_model, add_adapters=True)
+
+        apply.assert_called_once()
+        assert apply.call_args.kwargs["model"] is target
+        assert target._agilerl_liger_patched is True
 
     def test_initialize_actors_installs_packed_expert_grouped_gemm(self):
         agent = _make_llm_agent()
