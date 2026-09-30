@@ -10,22 +10,49 @@ permissions:
 jobs:
     tests:
         runs-on: macos-26
+        strategy:
+            fail-fast: false
+            max-parallel: 3
+            matrix:
+                shard: [1, 2, 3]
+        env:
+            PYTHONPATH: ${{ github.workspace }}/agilerl-arena
+
         steps:
             - uses: actions/checkout@v5
             - uses: astral-sh/setup-uv@v7
               with:
                   enable-cache: true
                   python-version: '3.13'
+            - name: Restore macOS test durations
+              uses: actions/cache/restore@v4
+              with:
+                  path: .ci-durations/macos.json
+                  key: macos-cpu-durations-${{ github.run_id }}
+                  restore-keys: macos-cpu-durations-
             - name: Install dependencies
               run: |
                   uv sync --locked --all-groups --extra all
-
-            - name: Test with pytest
-              run: bash scripts/run-tests.sh cov junit --cov-report=term-missing --durations=0 --durations-min=1.0
+            - name: Run macOS shard
+              run: |
+                  rm -f .coverage .coverage.*
+                  uv run python scripts/pytest_shard.py run \
+                    --root tests \
+                    --root agilerl-arena/tests \
+                    --total-shards 3 \
+                    --shard-index ${{ matrix.shard }} \
+                    --durations-file .ci-durations/macos.json \
+                    -- \
+                    --import-mode=importlib \
+                    --junitxml=junit-macos.xml \
+                    -m "not gpu and not vllm" \
+                    -n auto --dist loadgroup \
+                    --durations=15 \
+                    --cov --cov-report=term-missing
             - name: Upload junit
               if: always()
               uses: actions/upload-artifact@v4
               with:
-                  name: junit-macos-3.13
-                  path: junit-*.xml
+                  name: junit-macos-3.13-${{ matrix.shard }}
+                  path: junit-macos.xml
                   if-no-files-found: ignore

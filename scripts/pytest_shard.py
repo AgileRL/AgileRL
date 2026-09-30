@@ -2,8 +2,9 @@
 """Run one duration-balanced shard of the oss/agilerl pytest suite.
 
 Node ids stay in-process (and on a file between roots) so a large suite does
-not hit the OS argument limit. With no durations file, shards are equal
-contiguous slices. With one, each test is packed onto the lightest shard.
+not hit the OS argument limit. Every run packs tests onto the lightest shard
+(LPT). A durations file supplies per-test seconds; without one, every test
+weighs 1 so collection-order slices cannot dump one file onto a single shard.
 """
 
 from __future__ import annotations
@@ -21,6 +22,20 @@ from pathlib import Path
 DEFAULT_ROOTS = ("tests", "agilerl-arena/tests")
 
 
+def prepend_cwd_to_pythonpath(env: dict[str, str] | None = None) -> dict[str, str]:
+    """Put the repo root first on ``PYTHONPATH`` so spawn children can import tests.
+
+    :param env: Base environment; defaults to ``os.environ``
+    :return: Copy of *env* with cwd prepended to ``PYTHONPATH``
+    """
+    merged = dict(os.environ if env is None else env)
+    cwd = str(Path.cwd())
+    parts = [part for part in merged.get("PYTHONPATH", "").split(os.pathsep) if part]
+    if cwd not in parts:
+        merged["PYTHONPATH"] = os.pathsep.join([cwd, *parts])
+    return merged
+
+
 def shard_nodeids(
     nodeids: list[str],
     total_shards: int,
@@ -32,25 +47,20 @@ def shard_nodeids(
     if count == 0:
         return []
 
-    if not durations:
-        base_size, extra_shards = divmod(count, total_shards)
-        shard_zero_based = shard_index_one_based - 1
-        start = shard_zero_based * base_size + min(shard_zero_based, extra_shards)
-        size = base_size + (1 if shard_zero_based < extra_shards else 0)
-        return nodeids[start : start + size]
+    weights = durations if durations else dict.fromkeys(nodeids, 1.0)
 
-    known = [duration for duration in durations.values() if duration >= 0]
+    known = [duration for duration in weights.values() if duration >= 0]
     global_default = statistics.median(known) if known else 1.0
     file_totals: dict[str, list[float]] = {}
-    for nodeid, duration in durations.items():
+    for nodeid, duration in weights.items():
         file_totals.setdefault(nodeid.partition("::")[0], []).append(duration)
     file_default = {
         path: sum(values) / len(values) for path, values in file_totals.items()
     }
 
     def weight(nodeid: str) -> float:
-        if nodeid in durations:
-            return max(durations[nodeid], 0.0)
+        if nodeid in weights:
+            return max(weights[nodeid], 0.0)
         return file_default.get(nodeid.partition("::")[0], global_default)
 
     order = sorted(
@@ -69,7 +79,7 @@ def shard_nodeids(
 
 
 def load_durations(path: Path | None) -> dict[str, float]:
-    """Read ``{node id: seconds}``. A missing or broken file means count split."""
+    """Read ``{node id: seconds}``. A missing or broken file means equal-weight LPT."""
     if path is None or not path.is_file():
         return {}
     try:
@@ -303,6 +313,7 @@ def exec_nodeids(pytest_args: list[str], nodeid_file: Path) -> int:
     # lazy import: pytest is only used to execute a shard
     import pytest
 
+    os.environ["PYTHONPATH"] = prepend_cwd_to_pythonpath()["PYTHONPATH"]
     nodeids = [
         line for line in nodeid_file.read_text(encoding="utf-8").splitlines() if line
     ]
@@ -365,7 +376,10 @@ def run_shard(
                 *session_args,
             ],
             check=False,
-            env={**os.environ, "PYTEST_SHARD_NODEIDS": str(nodeid_file)},
+            env={
+                **prepend_cwd_to_pythonpath(),
+                "PYTEST_SHARD_NODEIDS": str(nodeid_file),
+            },
         )
         nodeid_file.unlink(missing_ok=True)
         worst = max(worst, completed.returncode)
