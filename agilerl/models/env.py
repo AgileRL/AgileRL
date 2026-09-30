@@ -23,6 +23,7 @@ from agilerl.arena.models.env import (
     LLMEnvType,
     OfflineEnvSpec,
 )
+from agilerl.data.parquet import load_parquet_dataset
 from agilerl.llm_envs import DatasetEnv, RolloutHarness
 from agilerl.llm_envs.env_packages import ensure_importable
 from agilerl.protocols import BanditEnvProtocol, TextEnvProtocol
@@ -349,9 +350,16 @@ def _load_llm_dataset(
     if dataset is None:
         msg = "dataset is required to load rollout/preference/sft data"
         raise ValueError(msg)
-    if dataset.endswith((".parquet", ".pq")):
-        return _load_dataset_file(spec, dataset, seed=seed)
-    return _load_dataset_hf(spec, dataset, seed=seed)
+    path = Path(dataset)
+    if not (
+        dataset.endswith((".parquet", ".pq"))
+        or (path.is_dir() and any(path.glob("*.parquet")))
+    ):
+        return _load_dataset_hf(spec, dataset, seed=seed)
+    split = _dataset_train_test_split(spec)
+    ds = load_parquet_dataset(dataset, column_rename=spec.columns)
+    split_ds = ds.train_test_split(test_size=1.0 - split, seed=_split_seed(seed))
+    return split_ds["train"], split_ds["test"]
 
 
 def _load_dataset_hf(
@@ -362,19 +370,6 @@ def _load_dataset_hf(
     ds = load_dataset(dataset, split="train").shuffle(seed=_split_seed(seed))
     if spec.columns:
         ds = ds.rename_columns(spec.columns)
-    split_ds = ds.train_test_split(test_size=1.0 - split, seed=_split_seed(seed))
-    return split_ds["train"], split_ds["test"]
-
-
-def _load_dataset_file(
-    spec: LLMEnvSpec, dataset: str, *, seed: int | None = None
-) -> tuple[Dataset, Dataset]:
-    split = _dataset_train_test_split(spec)
-    Dataset, _ = _require_datasets()
-    df = pd.read_parquet(dataset)
-    if spec.columns:
-        df = df.rename(columns=spec.columns)
-    ds = Dataset.from_pandas(df)
     split_ds = ds.train_test_split(test_size=1.0 - split, seed=_split_seed(seed))
     return split_ds["train"], split_ds["test"]
 

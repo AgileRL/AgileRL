@@ -11,7 +11,7 @@ jobs:
     tests:
         runs-on: macos-26
         steps:
-            - uses: actions/checkout@v4
+            - uses: actions/checkout@v5
             - uses: astral-sh/setup-uv@v7
               with:
                   enable-cache: true
