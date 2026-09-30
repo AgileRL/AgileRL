@@ -31,6 +31,15 @@ from agilerl.hpo.tournament import TournamentSelection
 from agilerl.population import Population
 from agilerl.protocols import SelectionStrategyProtocol
 from agilerl.training.llm.common import _validate_finetune_args
+from agilerl.training.llm.completion_logging import (
+    CompletionLogger,
+    CompletionLoggingConfig,
+    CompletionRecord,
+    CompletionWriter,
+    ConsoleCompletionWriter,
+    JsonlCompletionWriter,
+    WandbCompletionWriter,
+)
 from agilerl.utils.llm_utils import (
     align_completion_batch_shapes_across_ranks,
     needs_cross_rank_seq_padding,
@@ -70,6 +79,24 @@ def _stack_batch_pixel_values(
     return torch.cat(present, dim=0)
 
 
+def _build_completion_logger(
+    config: CompletionLoggingConfig,
+    *,
+    verbose: bool,
+    wb: bool,
+) -> CompletionLogger:
+    """Completion logger with writers on the main process only; other ranks keep history."""
+    writers: list[CompletionWriter] = []
+    if is_main_process():
+        if verbose:
+            writers.append(ConsoleCompletionWriter())
+        if wb:
+            writers.append(WandbCompletionWriter())
+        if config.jsonl_path is not None:
+            writers.append(JsonlCompletionWriter(config.jsonl_path))
+    return CompletionLogger(config, writers)
+
+
 def train_llm_rollout(
     pop: "list[SupportedRollout]",
     max_turns: int,
@@ -97,6 +124,7 @@ def train_llm_rollout(
     verbose: bool = True,
     max_wall_seconds: float | None = None,
     io_timeout_s: float | None = 600.0,
+    completion_logging: CompletionLoggingConfig | None = None,
 ) -> "tuple[list[SupportedRollout], Any]":
     """Train a population of LLM agents over rollout (generate-and-score) environments.
 
@@ -165,6 +193,12 @@ def train_llm_rollout(
         rather than blocking the batch forever. Defaults to 600 s; ``None``
         disables it. Forwarded to :class:`RolloutCollector`.
     :type io_timeout_s: float | None
+    :param completion_logging: Sample decoded prompts, completions and rewards
+        each iteration. Written every ``interval`` iterations to the console
+        (``verbose``), a W&B ``completions`` table (``wb``) and ``jsonl_path``.
+        One write per interval step includes every population member. The latest
+        samples are logged at error level if training raises. ``None`` disables it.
+    :type completion_logging: CompletionLoggingConfig | None
     :return: The finetuned population and its last recorded fitnesses.
     :rtype: tuple[list[SupportedRollout], Any]
     """
@@ -250,6 +284,11 @@ def train_llm_rollout(
         world_size=data_increment,
     )
     test_env: RolloutHarness | None = None
+    completion_logger = (
+        _build_completion_logger(completion_logging, verbose=verbose, wb=wb)
+        if completion_logging is not None
+        else None
+    )
     try:
         wall_deadline = (
             time.monotonic() + max_wall_seconds
@@ -267,7 +306,8 @@ def train_llm_rollout(
                 break
 
             iteration_steps = 0
-            for agent in population.agents:
+            step_records: list[CompletionRecord] = []
+            for agent_index, agent in enumerate(population.agents):
                 # Refresh the KL reference once per completed pass over the dataset
                 # rows; a non-dataset env keeps ``num_epochs == 0``, leaving the
                 # anchor at the initial policy.
@@ -289,6 +329,18 @@ def train_llm_rollout(
                     batch_size=rollout_collector.batch_size,
                     group_seed=group_seed,
                 )
+                if completion_logger is not None:
+                    step_records.extend(
+                        completion_logger.sample_groups(
+                            step=i,
+                            agent_index=agent_index,
+                            tokenizer=rollout_collector.envs[0].tokenizer,
+                            token_ids=token_ids_list,
+                            action_masks=action_masks_list,
+                            rewards=all_rewards,
+                            group_size=group_size,
+                        )
+                    )
 
                 # Collated a prompt group at a time, so the group-divisibility the
                 # algorithms rely on holds by construction, and a misaligned
@@ -393,6 +445,10 @@ def train_llm_rollout(
                     agent.test(test_env, loop=eval_loop)
                     barrier()
 
+            if completion_logger is not None:
+                # W&B keeps one ``completions`` table per commit; one write includes every agent.
+                completion_logger.write_if_due(i, step_records)
+
             # ``total_steps`` only advances by ``batch_steps``; an iteration where
             # every agent's rollout yielded no turns leaves it unchanged, so a
             # rollout that always yields nothing would loop forever. Tolerate a few
@@ -493,6 +549,10 @@ def train_llm_rollout(
                 key=lambda agent: agent.fitness[-1] if agent.fitness else float("-inf"),
             )
             save_llm_checkpoint(elite, elite_path)
+    except Exception:
+        if completion_logger is not None:
+            completion_logger.dump_recent()
+        raise
     finally:
         # Release the rollout envs (and any per-rollout OpenEnv servers they own)
         # plus the test env, including on error.
@@ -501,6 +561,8 @@ def train_llm_rollout(
         finally:
             if test_env is not None:
                 test_env.close()
+            if completion_logger is not None:
+                completion_logger.close()
 
     population.finish()
     pbar.close()
