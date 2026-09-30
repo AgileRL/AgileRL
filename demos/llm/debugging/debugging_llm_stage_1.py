@@ -44,13 +44,13 @@ def evaluate_accuracy(
     num_episodes: int,
     greedy: bool = False,
 ) -> tuple[float, dict[int, float]]:
-    original_temp = agent.generation_config.temperature
-    original_top_k = agent.generation_config.top_k
-    original_top_p = agent.generation_config.top_p
+    original_temp = agent.temperature
+    original_top_k = agent.top_k
+    original_top_p = agent.top_p
     if greedy:
-        agent.generation_config.temperature = 1e-3
-        agent.generation_config.top_k = 1
-        agent.generation_config.top_p = 1.0
+        agent.temperature = 1e-3
+        agent.top_k = 1
+        agent.top_p = 1.0
 
     total = 0
     correct = 0
@@ -94,9 +94,9 @@ def evaluate_accuracy(
                     correct += 1
                     class_correct[input_digit] += 1
     finally:
-        agent.generation_config.temperature = original_temp
-        agent.generation_config.top_k = original_top_k
-        agent.generation_config.top_p = original_top_p
+        agent.temperature = original_temp
+        agent.top_k = original_top_k
+        agent.top_p = original_top_p
 
     per_class = {t: class_correct[t] / max(class_total[t], 1) for t in TARGET_TOKEN_IDS}
     return correct / max(total, 1), per_class
@@ -137,7 +137,6 @@ def run_single_seed(cfg: dict, seed: int) -> tuple[float, float]:
     tokenizer = TinyDigitTokenizer()
 
     init_hp.setdefault("ALGO", "LLMPPO")
-    init_hp.setdefault("USE_VLLM", False)
     init_hp.setdefault("MAX_MODEL_LEN", max_ctx)
     init_hp.setdefault("MAX_OUTPUT_TOKENS", max_new)
     init_hp.setdefault("SEED", seed)

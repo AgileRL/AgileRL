@@ -58,14 +58,14 @@ def evaluate_accuracy(
     greedy: bool = False,
 ) -> float:
 
-    original_temp = agent.generation_config.temperature
-    original_top_k = agent.generation_config.top_k
-    original_top_p = agent.generation_config.top_p
+    original_temp = agent.temperature
+    original_top_k = agent.top_k
+    original_top_p = agent.top_p
 
     if greedy:
-        agent.generation_config.temperature = 1e-3
-        agent.generation_config.top_k = 1
-        agent.generation_config.top_p = 1.0
+        agent.temperature = 1e-3
+        agent.top_k = 1
+        agent.top_p = 1.0
 
     correct = 0
     total = 0
@@ -125,9 +125,9 @@ def evaluate_accuracy(
                 else:
                     total += 1
     finally:
-        agent.generation_config.temperature = original_temp
-        agent.generation_config.top_k = original_top_k
-        agent.generation_config.top_p = original_top_p
+        agent.temperature = original_temp
+        agent.top_k = original_top_k
+        agent.top_p = original_top_p
 
     return correct / max(total, 1)
 
@@ -139,12 +139,12 @@ def detailed_eval(
     max_turns: int,
 ) -> float:
 
-    orig_temp = agent.generation_config.temperature
-    orig_top_k = agent.generation_config.top_k
-    orig_top_p = agent.generation_config.top_p
-    agent.generation_config.temperature = 1e-3
-    agent.generation_config.top_k = 1
-    agent.generation_config.top_p = 1.0
+    orig_temp = agent.temperature
+    orig_top_k = agent.top_k
+    orig_top_p = agent.top_p
+    agent.temperature = 1e-3
+    agent.top_k = 1
+    agent.top_p = 1.0
 
     action_names = {"1": "L", "2": "S", "3": "R"}
     results: dict[tuple[int, int], bool] = {}
@@ -223,9 +223,9 @@ def detailed_eval(
                         f"actions=[{','.join(actions)}]  {tag}"
                     )
     finally:
-        agent.generation_config.temperature = orig_temp
-        agent.generation_config.top_k = orig_top_k
-        agent.generation_config.top_p = orig_top_p
+        agent.temperature = orig_temp
+        agent.top_k = orig_top_k
+        agent.top_p = orig_top_p
 
     n_ok = sum(results.values())
     n_total = len(results)
@@ -269,20 +269,19 @@ def run_single_seed(cfg: dict, seed: int) -> tuple[float, float]:
     else:
         tokenizer = TinyDigitTokenizer()
         actor_network = build_tiny_actor_network(
-            use_value_head=(init_hp["ALGO"] == "LLMPPO"),
+            use_value_head=(init_hp.get("ALGO", "LLMPPO") == "LLMPPO"),
         )
 
     rng = Random(seed)
 
     init_hp.setdefault("ALGO", "LLMPPO")
-    init_hp.setdefault("USE_VLLM", False)
     init_hp.setdefault("MAX_MODEL_LEN", max_ctx)
     init_hp.setdefault("MAX_OUTPUT_TOKENS", max_new)
     init_hp.setdefault("SEED", seed)
     if "LR" not in init_hp and "LR_ACTOR" in init_hp:
         init_hp["LR"] = init_hp["LR_ACTOR"]
 
-    if init_hp["USE_VLLM"]:
+    if init_hp.get("USE_VLLM"):
         init_hp.setdefault(
             "VLLM_CONFIG",
             {
@@ -312,10 +311,6 @@ def run_single_seed(cfg: dict, seed: int) -> tuple[float, float]:
         vllm_config=vllm_cfg,
     )
     agent = pop[0]
-
-    suppress = dbg.get("suppress_tokens")
-    if suppress is not None:
-        agent.generation_config.suppress_tokens = list(suppress)
 
     try:
         pre_acc = evaluate_accuracy(

@@ -164,15 +164,11 @@ def main() -> None:
             max_model_len=init_hp.get("MAX_MODEL_LEN"),
         )
 
-    vllm_config = (
-        VLLMConfig(
-            tensor_parallel_size=1,
-            gpu_memory_utilization=0.85,
-            max_num_seqs=16,
-            sleep_mode=True,
-        )
-        if init_hp.get("USE_VLLM", True)
-        else None
+    vllm_config = VLLMConfig(
+        tensor_parallel_size=1,
+        gpu_memory_utilization=0.85,
+        max_num_seqs=16,
+        sleep_mode=True,
     )
 
     algo_cls = ALGO_MAP[args.algo]
@@ -182,9 +178,8 @@ def main() -> None:
         "model_name": args.model_path,
         "pad_token_id": tokenizer.pad_token_id,
         "pad_token": tokenizer.pad_token,
+        "vllm_config": vllm_config,
     }
-    if vllm_config is not None:
-        algo_kwargs["vllm_config"] = vllm_config
 
     # Forward numeric/string hyperparams from the YAML config
     _hp_key_map = {

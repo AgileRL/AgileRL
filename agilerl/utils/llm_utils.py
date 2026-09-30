@@ -16,7 +16,7 @@ import textwrap
 import warnings
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, TypeGuard, TypeVar, cast
+from typing import TYPE_CHECKING, Any, TypeGuard, cast
 
 import torch
 from torch import nn
@@ -37,7 +37,6 @@ from agilerl.distributed.process import (
     barrier,
     resolve_device,
 )
-from agilerl.protocols import GenerationConfigProtocol
 from agilerl.typing import (
     JSONValue,
     PopulationType,
@@ -65,8 +64,6 @@ else:
     PreTrainedTokenizerBase = object
 
 logger = logging.getLogger(__name__)
-
-GenConfigT = TypeVar("GenConfigT", bound=GenerationConfigProtocol)
 
 if HAS_LLM_DEPENDENCIES:
     from datasets import Dataset
@@ -352,37 +349,6 @@ def generation_tokens_for_turn(
     if max_output_tokens is None:
         return remaining
     return min(int(max_output_tokens), remaining)
-
-
-def hf_turn_generation_config(
-    generation_config: GenConfigT,
-    max_model_len: int,
-    prompt_length: int,
-    max_output_tokens: int | None,
-) -> GenConfigT:
-    """Copy of ``generation_config`` with this turn's token budget.
-
-    :param generation_config: Shared HuggingFace generation config.
-    :type generation_config: GenConfigT
-    :param max_model_len: Model context window (prompt + completion).
-    :type max_model_len: int
-    :param prompt_length: Token length of this turn's prompt.
-    :type prompt_length: int
-    :param max_output_tokens: Configured per-turn cap; ``None`` uses remaining context.
-    :type max_output_tokens: int | None
-    :return: Per-turn config; the original object is unchanged.
-    :rtype: GenConfigT
-    """
-    turn_config = copy.copy(generation_config)
-    turn_config.max_new_tokens = generation_tokens_for_turn(
-        max_model_len,
-        prompt_length,
-        max_output_tokens,
-    )
-    min_new_tokens = turn_config.min_new_tokens
-    if min_new_tokens is not None and min_new_tokens > turn_config.max_new_tokens:
-        turn_config.min_new_tokens = turn_config.max_new_tokens
-    return turn_config
 
 
 def is_rollout_prompt(obs: Mapping[str, object]) -> TypeGuard[RolloutPrompt]:
@@ -2319,92 +2285,6 @@ def build_completion_mask(
         positions = torch.arange(completion_id.shape[1], device=completion_id.device)
         mask = (positions.unsqueeze(0) >= prompt_len) & non_pad
     return mask[:, 1:]
-
-
-def hf_completion_lengths(
-    completion_id: torch.Tensor,
-    prompt_len: int,
-    pad_token_id: int,
-) -> torch.Tensor:
-    """Recover the true per-row generated-token count from an HF ``generate`` output.
-
-    HF ``generate`` pads finished rows with ``pad_token_id`` up to the batch's
-    longest generation. When ``pad_token_id == eos_token_id`` the padded
-    positions and a real stopping EOS share an id, so a token-id scan can't
-    tell them apart. This helper disambiguates by position: a row's generated
-    region is ``[prompt_len, prompt_len + G)`` where ``G`` is the batch max. The
-    first token equal to ``pad_token_id`` within that region is the stopping
-    EOS (so the row generated ``first_pad - prompt_len + 1`` tokens, EOS
-    included); if no such token exists the row ran to ``G`` (no EOS, hit the
-    cap). At most one EOS can appear because ``generate`` stops a row at its
-    first EOS.
-
-    :param completion_id: ``generate`` output, shape ``(B, prompt_len + G)``.
-    :type completion_id: torch.Tensor
-    :param prompt_len: Number of leading prompt tokens.
-    :type prompt_len: int
-    :param pad_token_id: Pad token id (may equal the eos id).
-    :type pad_token_id: int
-    :return: Per-row generated-token counts, shape ``(B,)``, on
-        ``completion_id``'s device.
-    :rtype: torch.Tensor
-    """
-    B, L = completion_id.shape
-    device = completion_id.device
-    G = L - prompt_len
-    if G <= 0:
-        return torch.zeros(B, dtype=torch.long, device=device)
-    gen_region = completion_id[:, prompt_len:]
-    is_pad = gen_region == pad_token_id
-    has_pad = is_pad.any(dim=1)
-    first_pad = is_pad.int().argmax(dim=1)
-    first_pad = torch.where(has_pad, first_pad, torch.full_like(first_pad, G))
-    gen_len = torch.where(first_pad < G, first_pad + 1, first_pad)
-    return gen_len.to(torch.long)
-
-
-def prepare_prompt_hf_generate(
-    prompt: RolloutPrompt,
-    device: torch.device,
-    *,
-    group_size: int = 1,
-) -> dict[str, torch.Tensor]:
-    """Turn one rollout prompt into HuggingFace ``generate`` inputs.
-
-    ``attention_mask`` is taken from the prompt when present (e.g. a padded
-    batch) and derived as all-ones otherwise (a single unpadded row, the
-    ``RolloutHarness`` prompt shape). ``pixel_values`` are forwarded when the
-    prompt carries them.
-
-    :param prompt: The prompt to prepare.
-    :type prompt: RolloutPrompt
-    :param device: The device to move the tensors to.
-    :type device: torch.device
-    :param group_size: Repeat each tensor this many times on the batch dim.
-    :type group_size: int
-    :return: ``input_ids`` / ``attention_mask`` (and ``pixel_values`` when set)
-        moved to ``device``.
-    :rtype: dict[str, torch.Tensor]
-    """
-    input_ids = prompt["input_ids"].to(device)
-    attention_mask = prompt.get("attention_mask")
-    tensors: dict[str, torch.Tensor] = {
-        "input_ids": input_ids,
-        "attention_mask": (
-            torch.ones_like(input_ids)
-            if attention_mask is None
-            else attention_mask.to(device)
-        ),
-    }
-    pixel_values = prompt.get("pixel_values")
-    if pixel_values is not None:
-        tensors["pixel_values"] = pixel_values.to(device)
-    if group_size > 1:
-        tensors = {
-            key: value.repeat(group_size, *([1] * (value.ndim - 1)))
-            for key, value in tensors.items()
-        }
-    return tensors
 
 
 def get_model_name_or_path(model: PreTrainedModel) -> str:

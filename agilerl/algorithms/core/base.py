@@ -2721,8 +2721,9 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
     :type lr_critic: float | None, optional
     :param use_value_head: Whether to use a separate value head.
     :type use_value_head: bool
-    :param vllm_config: Colocated vLLM runtime configuration. ``None`` generates
-        with HuggingFace ``generate``.
+    :param vllm_config: Colocated vLLM runtime configuration. ``None`` leaves
+        colocated generation unset until a rollout algorithm starts vLLM
+        (``VLLMConfig()`` defaults). Dataset algorithms (SFT, DPO) never generate.
     :type vllm_config: VLLMConfig | None, optional
     :param model_name: The name of the model.
     :type model_name: str | None
@@ -2769,7 +2770,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         colocated, correct the rollout/trainer log-prob mismatch by
         weighting each training token by ``clamp(exp(trainer - sampling),
         max=vllm_importance_sampling_cap)``. Active only for training rollouts;
-        inert on the HuggingFace path and at eval.
+        inert at eval.
     :type vllm_importance_sampling_correction: bool, optional
     :param vllm_importance_sampling_cap: Upper clamp on the vLLM
         importance-sampling ratio (default ``2.0``), bounding the correction
@@ -2923,10 +2924,11 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             torch_compiler=torch_compiler,
             name=name,
         )
-        if fsdp_config is not None or colocated:
-            # FSDP and the vLLM PyNccl / external_launcher group must use the
-            # same cuMem setting or ncclCommInitRank fails.
-            os.environ.setdefault("NCCL_CUMEM_ENABLE", "0")
+        # FSDP and vLLM PyNccl / external_launcher must use the same cuMem
+        # setting or ncclCommInitRank fails. Set before the process group is
+        # created. Generation always starts colocated vLLM, including when
+        # vllm_config is still None at construct.
+        os.environ.setdefault("NCCL_CUMEM_ENABLE", "0")
         self.distributed = init_distributed()
         self.fsdp_config = fsdp_config
         if fsdp_config is not None and not self.distributed:
@@ -3011,11 +3013,6 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         self.vllm_config = vllm_config
         self.max_grad_norm = max_grad_norm
         self.offload_trainer_during_rollout = offload_trainer_during_rollout
-        self.trainer_offload_context = (
-            self._offload_trainer_for_rollout
-            if offload_trainer_during_rollout
-            else nullcontext
-        )
         self.wrap = wrap
         self.use_separate_reference_adapter = use_separate_reference_adapter
         self.cast_logprobs_to_fp32 = cast_logprobs_to_fp32
@@ -3030,7 +3027,6 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             vllm_importance_sampling_correction
         )
         self.vllm_importance_sampling_cap = float(vllm_importance_sampling_cap)
-        # Kept on when not colocated: rollout engines still sample from vLLM.
         self._is_correction_liger_warned = False
         # Warn-once flag for the canonical Liger + non-token importance-sampling
         # "not memory-bounded" warning (see :meth:`_warn_liger_non_token_is`).
@@ -3051,6 +3047,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         self._vllm_awake = self.colocated and not (
             self.vllm_config is not None and self.vllm_config.sleep_mode
         )
+        self.llm = None
         self._vllm_moved = False
         self._vllm_lora_loaded = False
         self._vllm_lora_staging_dir: Path | None = None
@@ -3579,8 +3576,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             None,
         )
         barrier()
-        if hasattr(self, "llm") and self.llm is not None:
-            del self.llm
+        self.llm = None
         staging_dir = getattr(self, "_vllm_lora_staging_dir", None)
         if (
             staging_dir is not None
@@ -4525,11 +4521,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             if model_config is None:
                 model_config = {}
             model_config.setdefault("device_map", "cpu")
-            if (
-                self.colocated
-                and getattr(self, "llm", None) is not None
-                and torch.cuda.is_available()
-            ):
+            if self.colocated and self.llm is not None and torch.cuda.is_available():
                 torch.cuda.empty_cache()
                 if torch.cuda.is_initialized():
                     torch.cuda.synchronize()
@@ -5480,6 +5472,31 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         self.llm.reset_prefix_cache()
         self._vllm_moved = True
 
+    def _ensure_vllm_for_generation(self) -> None:
+        """Start colocated vLLM; offload a live trainer before ``LLM()``."""
+        if self.vllm_config is None:
+            warnings.warn(
+                "vllm_config was not set; using VLLMConfig() defaults for "
+                "colocated generation.",
+                stacklevel=2,
+            )
+            self.vllm_config = VLLMConfig()
+        if not self.colocated:
+            if self.vllm_config.tensor_parallel_size != 1:
+                msg = (
+                    "Colocated vLLM requires tensor_parallel_size==1 (the "
+                    "in-process external_launcher engine is single-GPU), got "
+                    f"{self.vllm_config.tensor_parallel_size}."
+                )
+                raise ValueError(msg)
+            self.colocated = True
+            if not self.shard_runtime.is_sharded:
+                self.offload_trainer_during_rollout = True
+            self._vllm_awake = not self.vllm_config.sleep_mode
+        if self.llm is None:
+            self._offload_trainer_to_cpu_for_colocated_vllm()
+            self._configure_vllm()
+
     def _generate_with_vllm_colocate(
         self,
         prompts: Sequence[RolloutPrompt],
@@ -6141,7 +6158,8 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             raise ImportError(msg)
         if self.vllm_config is None:
             warnings.warn(
-                "No VLLM config provided. Using default VLLM configuration for generation.",
+                "vllm_config was not set; using VLLMConfig() defaults for "
+                "colocated generation.",
                 stacklevel=2,
             )
             self.vllm_config = VLLMConfig()
@@ -6319,6 +6337,12 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             yield original
         finally:
             setattr(parent, attr, original)
+
+    def trainer_offload_context(self) -> AbstractContextManager[None]:
+        """Context manager that holds the trainer on GPU only for the training step."""
+        if self.offload_trainer_during_rollout:
+            return self._offload_trainer_for_rollout()
+        return nullcontext()
 
     @contextmanager
     def _offload_trainer_for_rollout(

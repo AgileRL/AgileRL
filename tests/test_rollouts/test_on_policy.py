@@ -57,11 +57,8 @@ class _SingleTurnTextEnv:
 
 @_LLM_ROLLOUTS
 class TestCollectRolloutsLlm:
-    @pytest.mark.parametrize("hf_generate_chunk_size", [1, 2, 4])
     @pytest.mark.parametrize("algo_name", ["ppo", "reinforce"])
-    def test_collect_rollouts_llm_hf_chunk_sizes_in_process(
-        self, hf_generate_chunk_size: int, algo_name: str
-    ):
+    def test_collect_rollouts_llm_in_process(self, algo_name: str):
         tokenizer = TinyTokenizer()
 
         def env_fn():
@@ -76,33 +73,44 @@ class TestCollectRolloutsLlm:
         env = RolloutCollector(env_factory=env_fn, batch_size=2, group_size=1)
         if algo_name == "ppo":
             agent = _cpu_llmppo(
-                hf_generate_chunk_size=hf_generate_chunk_size,
                 max_model_len=128,
                 max_output_tokens=8,
             )
         else:
             agent = _cpu_llmreinforce(
-                hf_generate_chunk_size=hf_generate_chunk_size,
                 max_model_len=128,
                 max_output_tokens=8,
             )
 
-        (
-            experiences,
-            masks,
-            turns,
-            rewards,
-            steps,
-            next_group_seed,
-            _sampling_logps,
-            _pixel_values,
-        ) = collect_rollouts_llm(
-            agent=agent,
-            env=env,
-            n_steps=1,
-            batch_size=2,
-            group_seed=0,
-        )
+        def fake_generate(obs, group_size, temperature, capture_sampling_logps=False):
+            del temperature, capture_sampling_logps
+            ids = [torch.ones(group_size, 10, dtype=torch.long) for _ in obs]
+            masks = [torch.ones(group_size, 9, dtype=torch.bool) for _ in obs]
+            return ids, masks, None
+
+        with (
+            patch.object(agent, "_ensure_vllm_for_generation"),
+            patch.object(agent, "_prepare_vllm_for_generation"),
+            patch.object(
+                agent, "_generate_with_vllm_colocate", side_effect=fake_generate
+            ),
+        ):
+            (
+                experiences,
+                masks,
+                turns,
+                rewards,
+                steps,
+                next_group_seed,
+                _sampling_logps,
+                _pixel_values,
+            ) = collect_rollouts_llm(
+                agent=agent,
+                env=env,
+                n_steps=1,
+                batch_size=2,
+                group_seed=0,
+            )
         assert len(experiences) == 2
         assert len(masks) == 2
         assert len(rewards) == 2

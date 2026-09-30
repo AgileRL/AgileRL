@@ -19,8 +19,7 @@ DEBUG:
     max_sample_steps: 32768
     evaluation_interval: 50
     seeds: [0]
-    suppress_tokens: [0, 4, 5, 6]
     lora:
         r: 8
         lora_alpha: 32
-        target_modules: [c_attn, c_proj, c_fc]
+        target_modules: [q_proj, v_proj]

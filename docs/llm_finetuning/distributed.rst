@@ -141,7 +141,8 @@ usual production settings for LoRA / QLoRA.
      - ``False``
      - Offload sharded parameters and gradients to CPU
        (``CPUOffloadPolicy``). Requires colocated vLLM (``vllm_config``);
-       HuggingFace generate assumes weights stay on the compute device.
+       generation reads from the colocated engine, not trainer params on the
+       compute device.
    * - ``defer_grad_sync``
      - ``True``
      - Skip reduce-scatter until the last micro-batch of an optimizer step

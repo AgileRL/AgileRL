@@ -22,4 +22,4 @@ DEBUG:
     lora:
         r: 8
         lora_alpha: 16
-        target_modules: [c_attn, c_proj, c_fc]
+        target_modules: [q_proj, v_proj]

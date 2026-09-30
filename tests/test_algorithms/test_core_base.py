@@ -2181,10 +2181,10 @@ class TestLLMDistributedValidation:
             _make_llm_agent(fsdp_config=FSDPConfig())
         assert os.environ["NCCL_CUMEM_ENABLE"] == "0"
 
-    def test_without_fsdp_leaves_nccl_cumem_unset(self, monkeypatch):
+    def test_sets_nccl_cumem_for_vllm_pynccl(self, monkeypatch):
         monkeypatch.delenv("NCCL_CUMEM_ENABLE", raising=False)
         _make_llm_agent()
-        assert "NCCL_CUMEM_ENABLE" not in os.environ
+        assert os.environ["NCCL_CUMEM_ENABLE"] == "0"
 
 
 class TestLLMUpdateLr:
@@ -2297,7 +2297,7 @@ class TestLLMCleanUp:
         agent.llm = MagicMock()
         agent.llm.llm_engine = MagicMock()
         LLMAlgorithm.clean_up(agent)
-        assert not hasattr(agent, "llm") or agent.llm is None
+        assert agent.llm is None
 
 
 class TestLLMBackwardPass:
@@ -3303,7 +3303,7 @@ class TestLLMConfigureVllm:
         with (
             patch.dict(os.environ, {}),  # _configure_vllm writes rendezvous vars
             patch("agilerl.algorithms.core.base.LLM", mock_llm_cls, create=True),
-            pytest.warns(UserWarning, match="No VLLM config"),
+            pytest.warns(UserWarning, match="using VLLMConfig\\(\\) defaults"),
         ):
             agent._configure_vllm()
         assert isinstance(agent.vllm_config, VLLMConfig)
@@ -3319,6 +3319,126 @@ class TestLLMConfigureVllm:
         ):
             with pytest.raises(ValueError, match="Tensor parallel size"):
                 agent._configure_vllm()
+
+
+class TestEnsureVllmForGeneration:
+    def test_defaults_config_and_starts_engine_when_unset(self):
+        agent = _make_llm_agent()
+        agent.vllm_config = None
+        agent.colocated = False
+
+        assert agent.llm is None
+
+        with (
+            patch.object(
+                agent, "_offload_trainer_to_cpu_for_colocated_vllm"
+            ) as offload,
+            patch.object(agent, "_configure_vllm") as configure,
+            pytest.warns(UserWarning, match="using VLLMConfig\\(\\) defaults"),
+        ):
+            agent._ensure_vllm_for_generation()
+
+        assert isinstance(agent.vllm_config, VLLMConfig)
+        assert agent.colocated is True
+        offload.assert_called_once()
+        configure.assert_called_once()
+
+    def test_enables_trainer_offload_flag_without_rebinding_context(self):
+        agent = _make_llm_agent()
+        agent.vllm_config = None
+        agent.colocated = False
+        agent.offload_trainer_during_rollout = False
+
+        with (
+            patch.object(agent, "_offload_trainer_to_cpu_for_colocated_vllm"),
+            patch.object(agent, "_configure_vllm"),
+            pytest.warns(UserWarning, match="using VLLMConfig\\(\\) defaults"),
+        ):
+            agent._ensure_vllm_for_generation()
+
+        assert agent.offload_trainer_during_rollout is True
+        assert "trainer_offload_context" not in vars(agent)
+
+    def test_offloads_live_actor_before_starting_engine(self):
+        agent = _make_llm_agent()
+        agent.vllm_config = None
+        agent.colocated = False
+        call_order: list[str] = []
+
+        def offload() -> None:
+            call_order.append("offload")
+
+        def configure() -> None:
+            call_order.append("configure")
+
+        with (
+            patch.object(
+                agent,
+                "_offload_trainer_to_cpu_for_colocated_vllm",
+                side_effect=offload,
+            ),
+            patch.object(agent, "_configure_vllm", side_effect=configure),
+            pytest.warns(UserWarning, match="using VLLMConfig\\(\\) defaults"),
+        ):
+            agent._ensure_vllm_for_generation()
+
+        assert call_order == ["offload", "configure"]
+
+    def test_skips_configure_when_engine_already_present(self):
+        agent = _make_llm_agent()
+        agent.vllm_config = VLLMConfig()
+        agent.colocated = True
+        agent.llm = object()
+
+        with (
+            patch.object(
+                agent, "_offload_trainer_to_cpu_for_colocated_vllm"
+            ) as offload,
+            patch.object(agent, "_configure_vllm") as configure,
+        ):
+            agent._ensure_vllm_for_generation()
+
+        offload.assert_not_called()
+        configure.assert_not_called()
+
+    def test_rejects_tensor_parallel_size_when_enabling_colocate(self):
+        agent = _make_llm_agent()
+        agent.vllm_config = VLLMConfig(tensor_parallel_size=2)
+        agent.colocated = False
+
+        with (
+            patch.object(
+                agent, "_offload_trainer_to_cpu_for_colocated_vllm"
+            ) as offload,
+            pytest.raises(ValueError, match="tensor_parallel_size==1"),
+        ):
+            agent._ensure_vllm_for_generation()
+
+        offload.assert_not_called()
+
+
+class TestTrainerOffloadContext:
+    def test_is_a_noop_when_offload_is_disabled(self):
+        agent = _make_llm_agent()
+        agent.offload_trainer_during_rollout = False
+
+        ctx = agent.trainer_offload_context()
+
+        assert isinstance(ctx, nullcontext)
+        with ctx:
+            pass
+
+    def test_uses_rollout_offload_when_enabled(self):
+        agent = _make_llm_agent()
+        agent.offload_trainer_during_rollout = True
+
+        with patch.object(
+            agent, "_offload_trainer_for_rollout", return_value=nullcontext()
+        ) as offload:
+            with agent.trainer_offload_context():
+                pass
+
+        offload.assert_called_once()
 
 
 class TestLLMSetReferencePolicy:

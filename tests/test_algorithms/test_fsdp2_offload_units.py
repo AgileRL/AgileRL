@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import json
-from contextlib import contextmanager
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -18,9 +17,6 @@ from torch.distributed.tensor import Replicate, Shard
 from transformers import PretrainedConfig
 
 from agilerl.algorithms.core.base import LLMAlgorithm
-from agilerl.algorithms.grpo import GRPO
-from agilerl.algorithms.ppo_llm import PPO
-from agilerl.algorithms.reinforce_llm import REINFORCE
 from agilerl.distributed import CPUOffloadOptimizer, FSDPConfig
 from agilerl.distributed.runtime import DPRuntime, FSDPRuntime
 
@@ -293,130 +289,6 @@ def _fake_materialize(tensors):
         yield list(tensors)
 
     return _ctx()
-
-
-# ---------------------------------------------------------------------------
-# 3. actor_device guard in get_action (GRPO / PPO / REINFORCE)
-# ---------------------------------------------------------------------------
-
-
-def _make_actor_agent(shard_runtime=None, device="cuda:0"):
-    """MagicMock agent for ``get_action`` HF-generate path tests.
-
-    ``device`` is set to a CUDA string even on CPU-only hosts so the FSDP2
-    branch (``fallback`` = ``self.device``) and the dense branch
-    (param device = CPU) produce distinguishable devices.
-    ``prepare_prompt_hf_generate`` is patched by the caller to capture the
-    device without actually moving tensors.
-    """
-    agent = MagicMock()
-    agent.colocated = False
-    agent.device = device
-    agent.shard_runtime = shard_runtime or DPRuntime()
-    agent.hf_generate_chunk_size = 1
-    agent.group_size = 1
-    agent.pad_token_id = 0
-    agent.vllm_importance_sampling_correction = False
-    agent.actor = nn.Linear(2, 2)
-    agent.actor.generate = MagicMock(return_value=torch.ones(1, 8, dtype=torch.long))
-    return agent
-
-
-def _dummy_prompts():
-    return [
-        {
-            "input_ids": torch.ones(1, 4, dtype=torch.long),
-            "attention_mask": torch.ones(1, 4, dtype=torch.long),
-        }
-    ]
-
-
-@contextmanager
-def _patch_hf_generate_path(module_path, captured_devices):
-    """Patch the HF-generate helpers to capture ``actor_device``
-    and return dummy data without moving tensors.
-    """
-
-    def capture_prepare(prompt_dict, device, group_size=1):
-        del group_size
-        captured_devices.append(device)
-        return {
-            "input_ids": torch.ones(1, 4, dtype=torch.long),
-            "attention_mask": torch.ones(1, 4, dtype=torch.long),
-        }
-
-    with (
-        patch(f"{module_path}.prepare_prompt_hf_generate", side_effect=capture_prepare),
-        patch(f"{module_path}.hf_turn_generation_config"),
-        patch(f"{module_path}.hf_completion_lengths"),
-        patch(
-            f"{module_path}.build_completion_mask",
-            return_value=torch.ones(1, 8, dtype=torch.bool),
-        ),
-    ):
-        yield
-
-
-class TestGRPOGetActionActorDevice:
-    """``actor_device`` guard: FSDP2 uses ``self.device``, non-FSDP2 probes params."""
-
-    def test_uses_self_device_when_fsdp_runtime(self):
-        # Arrange — FSDP2 branch: actor_device = fallback (self.device)
-        agent = _make_actor_agent(
-            shard_runtime=FSDPRuntime(FSDPConfig()), device="cuda:0"
-        )
-        captured: list = []
-
-        # Act
-        with _patch_hf_generate_path("agilerl.algorithms.grpo", captured):
-            GRPO.get_action(agent, _dummy_prompts(), training=False)
-
-        # Assert — prompts sent to self.device, not the CPU param device
-        assert captured[0] == torch.device("cuda:0")
-
-    def test_uses_param_device_when_dense_runtime(self):
-        # Arrange — dense branch: actor_device = next(params).device
-        agent = _make_actor_agent(device="cuda:0")
-        captured: list = []
-
-        # Act
-        with _patch_hf_generate_path("agilerl.algorithms.grpo", captured):
-            GRPO.get_action(agent, _dummy_prompts(), training=False)
-
-        # Assert — prompts sent to the param device (CPU), not self.device
-        assert captured[0] == torch.device("cpu")
-
-
-class TestPPOGetActionActorDevice:
-    def test_uses_self_device_when_fsdp_runtime(self):
-        # Arrange
-        agent = _make_actor_agent(
-            shard_runtime=FSDPRuntime(FSDPConfig()), device="cuda:0"
-        )
-        captured: list = []
-
-        # Act
-        with _patch_hf_generate_path("agilerl.algorithms.ppo_llm", captured):
-            PPO.get_action(agent, _dummy_prompts(), training=False)
-
-        # Assert
-        assert captured[0] == torch.device("cuda:0")
-
-
-class TestREINFORCEGetActionActorDevice:
-    def test_uses_self_device_when_fsdp_runtime(self):
-        # Arrange
-        agent = _make_actor_agent(
-            shard_runtime=FSDPRuntime(FSDPConfig()), device="cuda:0"
-        )
-        captured: list = []
-
-        # Act
-        with _patch_hf_generate_path("agilerl.algorithms.reinforce_llm", captured):
-            REINFORCE.get_action(agent, _dummy_prompts(), training=False)
-
-        # Assert
-        assert captured[0] == torch.device("cuda:0")
 
 
 # ---------------------------------------------------------------------------

@@ -26,7 +26,7 @@ DEBUG:
     lora:
         r: 8
         lora_alpha: 32
-        target_modules: [c_attn, c_proj, c_fc]
+        target_modules: [q_proj, v_proj]
     agent:
         calc_position_embeddings: false
         torch_compiler: default

@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any, Literal
 import numpy as np
 import torch
 
-from agilerl import HAS_LIGER_KERNEL, HAS_LLM_DEPENDENCIES
+from agilerl import HAS_LIGER_KERNEL
 from agilerl.algorithms.core import ActionResult, LLMAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
 
@@ -45,20 +45,13 @@ from agilerl.utils.llm_utils import (
     VLLM_IS_METRIC_NAMES,
     BitsAndBytesConfig,
     attention_mask_from_padded_ids,
-    build_completion_mask,
     clipped_is_surrogate,
-    hf_completion_lengths,
-    hf_turn_generation_config,
     masked_mean,
     normalize_prompt_batch,
     pool_by_turns,
-    prepare_prompt_hf_generate,
     resolve_batch_advantage_granularity,
     validate_importance_sampling_level,
 )
-
-if HAS_LLM_DEPENDENCIES:
-    from transformers import GenerationConfig
 
 
 class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
@@ -128,9 +121,6 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
     :type min_output_tokens: int | None
     :param max_model_len: Maximum context window length.
     :type max_model_len: int
-    :param hf_generate_chunk_size: Number of prompts per HuggingFace generation
-        chunk. Ignored when colocated.
-    :type hf_generate_chunk_size: int | None, optional
     :param offload_trainer_during_rollout: For colocated vLLM, offload the trainer's
         own base to CPU during rollout (and bring it back for the training step)
         so the rollout engine and the trainer never both hold a base on the GPU.
@@ -149,7 +139,8 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
     :type wrap: bool
     :param clone: Whether this is a clone instantiation.
     :type clone: bool
-    :param vllm_config: vLLM configuration.
+    :param vllm_config: Colocated vLLM runtime configuration. ``None`` uses
+        :class:`VLLMConfig` defaults on generate.
     :type vllm_config: VLLMConfig | None
     :param seed: Random seed.
     :type seed: int
@@ -212,7 +203,7 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
         colocated, correct the rollout/trainer log-prob mismatch by
         weighting each training token by ``clamp(exp(trainer - sampling),
         max=vllm_importance_sampling_cap)``. Active only for training rollouts;
-        inert on the HuggingFace path and at eval.
+        inert at eval.
     :type vllm_importance_sampling_correction: bool, optional
     :param vllm_importance_sampling_cap: Upper clamp on the vLLM
         importance-sampling ratio (default ``2.0``), bounding the correction
@@ -259,7 +250,6 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
         max_output_tokens: int | None = None,
         min_output_tokens: int | None = None,
         max_model_len: int = 1024,
-        hf_generate_chunk_size: int | None = None,
         lora_config: LoraConfig | None = None,
         cosine_lr_schedule_config: CosineLRScheduleConfig | None = None,
         fsdp_config: FSDPConfig | None = None,
@@ -336,9 +326,11 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
         self.min_p = min_p
         self._setup_advantage_options(advantage_granularity, gamma)
         self._setup_objective(importance_sampling_level, turn_ratio_pooling)
-        self._setup_generation(
-            max_output_tokens, min_output_tokens, max_model_len, hf_generate_chunk_size
+        self.max_output_tokens = (
+            max_output_tokens if max_output_tokens is not None else max_model_len
         )
+        self.min_output_tokens = min_output_tokens
+        self.max_model_len = max_model_len
         self._setup_actors(actor_network, clone=clone)
 
         self.register_network_group(NetworkGroup(eval_network=self.actor, policy=True))
@@ -369,74 +361,28 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
         :type kwargs: Any
         :return: An :class:`ActionResult` of per-prompt completion token IDs and
             masks. When the vLLM sampling-mismatch correction is enabled
-            (training rollouts on the vLLM path), ``sampling_logps`` carries
-            the captured per-row sampling logprobs; otherwise it is ``None``.
+            (training rollouts), ``sampling_logps`` carries the captured
+            per-row sampling logprobs; otherwise it is ``None``.
         :rtype: ActionResult
         """
         prompts = normalize_prompt_batch(obs)
-        # Capture vLLM sampling logprobs only for training rollouts when the
-        # mismatch correction is enabled; ``None`` on the HF path / eval.
+        self._ensure_vllm_for_generation()
+        capture_sampling_logps = training and self.vllm_importance_sampling_correction
         sampling_logps: list[torch.Tensor | None] | None = None
-        capture_sampling_logps = (
-            training and self.colocated and self.vllm_importance_sampling_correction
-        )
 
         with self.select_adapter("actor"):
             self.actor.eval()
-            if not self.colocated:
-                actor_device = self.shard_runtime.actor_compute_device(
-                    self.actor, torch.device(self.device)
-                )
-                with torch.no_grad(), self._amp_ctx():
-                    token_ids_list = []
-                    completion_masks = []
-
-                    for start in range(
-                        0,
-                        len(prompts),
-                        self.hf_generate_chunk_size,
-                    ):
-                        chunk = prompts[start : start + self.hf_generate_chunk_size]
-                        for prompt in chunk:
-                            hf_inputs = prepare_prompt_hf_generate(prompt, actor_device)
-                            input_ids = hf_inputs["input_ids"]
-                            prompt_len = int(input_ids.shape[-1])
-                            token_ids = self.actor.generate(
-                                **hf_inputs,
-                                generation_config=hf_turn_generation_config(
-                                    self.generation_config,
-                                    max_model_len=self.max_model_len,
-                                    prompt_length=prompt_len,
-                                    max_output_tokens=self.max_output_tokens,
-                                ),
-                            )
-                            token_ids_list.append(token_ids)
-                            completion_masks.append(
-                                build_completion_mask(
-                                    token_ids,
-                                    prompt_len,
-                                    self.pad_token_id,
-                                    completion_len=hf_completion_lengths(
-                                        token_ids, prompt_len, self.pad_token_id
-                                    ),
-                                )
-                            )
-            else:
-                self._prepare_vllm_for_generation()
-                (
-                    token_ids_list,
-                    completion_masks,
-                    sampling_logps,
-                ) = self._generate_with_vllm_colocate(
-                    # RolloutPrompt is a TypedDict, i.e. a plain dict at
-                    # runtime; the base helper takes untyped prompt dicts.
-                    prompts,
-                    1,
-                    temperature=self.temperature
-                    if training
-                    else 0.01,  # Almost deterministic for evaluation
-                    capture_sampling_logps=capture_sampling_logps,
-                )
+            self._prepare_vllm_for_generation()
+            (
+                token_ids_list,
+                completion_masks,
+                sampling_logps,
+            ) = self._generate_with_vllm_colocate(
+                prompts,
+                1,
+                temperature=self.temperature if training else 0.01,
+                capture_sampling_logps=capture_sampling_logps,
+            )
 
         return ActionResult(token_ids_list, completion_masks, sampling_logps)
 
@@ -784,41 +730,6 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
                 "REINFORCE",
                 once_attr="_reinforce_liger_mem_warned",
             )
-
-    def _setup_generation(
-        self,
-        max_output_tokens: int | None,
-        min_output_tokens: int | None,
-        max_model_len: int,
-        hf_generate_chunk_size: int | None,
-    ) -> None:
-        """Build the HF generation config."""
-        self.max_output_tokens = (
-            max_output_tokens if max_output_tokens is not None else max_model_len
-        )
-        self.min_output_tokens = min_output_tokens
-        self.max_model_len = max_model_len
-        self.hf_generate_chunk_size = int(
-            1 if hf_generate_chunk_size is None else max(1, hf_generate_chunk_size)
-        )
-        if self.colocated and hf_generate_chunk_size is not None:
-            warnings.warn(
-                "hf_generate_chunk_size is only used for HuggingFace generation "
-                "and is ignored when colocated.",
-                stacklevel=3,
-            )
-        self.generation_config = GenerationConfig(
-            do_sample=True,
-            temperature=self.temperature,
-            max_length=self.max_model_len,
-            max_new_tokens=max_output_tokens,
-            min_new_tokens=min_output_tokens,
-            pad_token_id=self.pad_token_id,
-            repetition_penalty=self.repetition_penalty,
-            top_p=self.top_p,
-            top_k=self.top_k,
-            min_p=self.min_p,
-        )
 
     def _reinforce_loss_liger(
         self,

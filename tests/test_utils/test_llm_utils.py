@@ -58,7 +58,6 @@ from agilerl.utils.llm_utils import (
     format_colocated_vllm_oom_hint,
     get_lora_params,
     get_model_name_or_path,
-    hf_completion_lengths,
     list_peft_matched_module_keys,
     load_lora_adapters,
     log_cuda_memory_snapshot,
@@ -78,7 +77,6 @@ from agilerl.utils.llm_utils import (
     peft_target_key_matches,
     pool_by_turns,
     pool_log_ratio_by_level,
-    prepare_prompt_hf_generate,
     remap_peft_lora_key_for_vllm,
     render_chat_template,
     resolve_attn_implementation,
@@ -833,74 +831,6 @@ class TestValidateLlmContextLengths:
 
         with pytest.raises(ValueError, match="max_prompt_tokens=63"):
             validate_llm_context_lengths(64, 256)
-
-
-class TestHfTurnGenerationConfig:
-    def test_copies_config_and_sets_per_turn_max_new_tokens(self):
-        from agilerl.utils.llm_utils import hf_turn_generation_config
-
-        original = SimpleNamespace(
-            max_new_tokens=64, min_new_tokens=None, temperature=0.9
-        )
-
-        turn_config = hf_turn_generation_config(
-            original,
-            max_model_len=20,
-            prompt_length=15,
-            max_output_tokens=64,
-        )
-
-        assert turn_config is not original
-        assert turn_config.max_new_tokens == 5
-        assert original.max_new_tokens == 64
-        assert turn_config.temperature == 0.9
-
-    def test_unset_cap_uses_remaining_context(self):
-        from agilerl.utils.llm_utils import hf_turn_generation_config
-
-        original = SimpleNamespace(max_new_tokens=None, min_new_tokens=None)
-
-        turn_config = hf_turn_generation_config(
-            original,
-            max_model_len=32,
-            prompt_length=10,
-            max_output_tokens=None,
-        )
-
-        assert turn_config.max_new_tokens == 22
-        assert original.max_new_tokens is None
-
-    def test_clamps_min_new_tokens_to_per_turn_budget(self):
-        from agilerl.utils.llm_utils import hf_turn_generation_config
-
-        original = SimpleNamespace(max_new_tokens=64, min_new_tokens=16)
-
-        turn_config = hf_turn_generation_config(
-            original,
-            max_model_len=20,
-            prompt_length=15,
-            max_output_tokens=64,
-        )
-
-        assert turn_config.max_new_tokens == 5
-        assert turn_config.min_new_tokens == 5
-        assert original.min_new_tokens == 16
-
-    def test_leaves_min_new_tokens_when_it_fits(self):
-        from agilerl.utils.llm_utils import hf_turn_generation_config
-
-        original = SimpleNamespace(max_new_tokens=64, min_new_tokens=4)
-
-        turn_config = hf_turn_generation_config(
-            original,
-            max_model_len=20,
-            prompt_length=15,
-            max_output_tokens=64,
-        )
-
-        assert turn_config.max_new_tokens == 5
-        assert turn_config.min_new_tokens == 4
-        assert original.min_new_tokens == 4
 
 
 def test_move_params_helpers_call_model_move_and_cuda_sync():
@@ -2651,26 +2581,6 @@ class TestBuildCompletionMask:
             )
 
 
-class TestHfCompletionLengths:
-    def test_recovers_gen_len_including_stopping_eos_when_pad_aliases_eos(self):
-        # pad == eos == 0. Row0 stops on EOS after 3 gen tokens; row1 after 1.
-        out = torch.tensor([[10, 11, 12, 21, 22, 23, 0], [10, 11, 12, 31, 0, 0, 0]])
-        lens = hf_completion_lengths(out, prompt_len=3, pad_token_id=0)
-        assert lens.tolist() == [4, 2]
-
-    def test_row_that_hits_cap_has_no_pad_in_gen_region(self):
-        out = torch.tensor([[10, 11, 12, 41, 42, 43, 44], [10, 11, 12, 31, 0, 0, 0]])
-        lens = hf_completion_lengths(out, prompt_len=3, pad_token_id=0)
-        assert lens.tolist() == [4, 2]
-
-    def test_empty_gen_region_returns_zeros(self):
-        out = torch.tensor([[10, 11, 12, 13], [10, 11, 12, 13]])
-
-        lens = hf_completion_lengths(out, prompt_len=4, pad_token_id=0)
-
-        assert lens.tolist() == [0, 0]
-
-
 class TestCudaTensorBytesInModule:
     def test_cpu_module_reports_zero(self):
         assert cuda_tensor_bytes_in_module(nn.Linear(4, 4)) == 0
@@ -4071,20 +3981,3 @@ class TestResolveLlmDevice:
             assert resolve_llm_device("cuda") == "cuda:1"
 
         mock_resolve.assert_called_once_with("cuda")
-
-
-class TestPreparePromptHfGenerate:
-    def test_forwards_pixel_values_onto_the_generate_device(self) -> None:
-        device = torch.device("cpu")
-        pixel_values = torch.ones(1, 3, 2, 2)
-
-        tensors = prepare_prompt_hf_generate(
-            {
-                "input_ids": torch.tensor([[1, 2]]),
-                "pixel_values": pixel_values,
-            },
-            device,
-        )
-
-        assert torch.equal(tensors["pixel_values"], pixel_values)
-        assert tensors["pixel_values"].device == device

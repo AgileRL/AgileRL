@@ -331,15 +331,6 @@ class LLMAlgorithmSpec(AlgorithmSpec):
         default=None, ge=1, description=MICRO_BATCH
     )
     mini_batch_size: int | None = Field(default=None, ge=1, description=MINI_BATCH)
-    hf_generate_chunk_size: int | None = Field(
-        default=None,
-        ge=1,
-        description=(
-            "Sequences generated per call when generating through transformers "
-            "rather than vLLM."
-        ),
-    )
-
     thinking_token_budget: int | None = Field(
         default=None,
         ge=0,

@@ -1446,23 +1446,6 @@ class TestDenseWrap:
             _prepare_dp_actor(nn.Linear(2, 2), gradient_checkpointing=True)
 
 
-class TestActorComputeDevice:
-    def test_dense_uses_param_device(self):
-        actor = nn.Linear(2, 2)
-        fallback = torch.device("cuda:0")
-        assert DPRuntime().actor_compute_device(actor, fallback) == torch.device("cpu")
-
-    def test_dense_empty_actor_uses_fallback(self):
-        fallback = torch.device("cpu")
-        assert DPRuntime().actor_compute_device(nn.Sequential(), fallback) is fallback
-
-    def test_fsdp2_uses_fallback(self):
-        actor = nn.Linear(2, 2)
-        fallback = torch.device("cuda:0")
-        runtime = FSDPRuntime(FSDPConfig())
-        assert runtime.actor_compute_device(actor, fallback) is fallback
-
-
 class TestIsSharded:
     def test_dense_is_not_sharded(self):
         assert DPRuntime().is_sharded is False

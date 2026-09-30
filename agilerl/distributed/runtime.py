@@ -424,20 +424,6 @@ class BaseRuntime(ABC):
         """
 
     @abstractmethod
-    def actor_compute_device(
-        self, actor: nn.Module, fallback: torch.device
-    ) -> torch.device:
-        """Device for HF generate inputs.
-
-        :param actor: Actor module (dense or FSDP2-sharded).
-        :type actor: nn.Module
-        :param fallback: Device used when the actor has no parameters or is sharded.
-        :type fallback: torch.device
-        :return: Device for generate inputs.
-        :rtype: torch.device
-        """
-
-    @abstractmethod
     def backward(
         self,
         loss: torch.Tensor,
@@ -578,12 +564,6 @@ class DPRuntime(BaseRuntime):
                 peft_model, adapter_state, adapter_name=adapter_name
             )
 
-    def actor_compute_device(
-        self, actor: nn.Module, fallback: torch.device
-    ) -> torch.device:
-        param = next(actor.parameters(), None)
-        return fallback if param is None else param.device
-
     def backward(
         self,
         loss: torch.Tensor,
@@ -653,10 +633,10 @@ class FSDPRuntime(BaseRuntime):
         if self.config.cpu_offload and not colocated:
             msg = (
                 "FSDP2 full cpu_offload requires colocated vLLM generation "
-                "(vllm_config set). HuggingFace generate is not supported "
-                "with CPUOffloadPolicy because it assumes model params live "
-                "on the compute device. Set vllm_config or use "
-                "optim_cpu_offload instead (params stay on GPU)."
+                "(vllm_config set). CPUOffloadPolicy assumes generation does "
+                "not read trainer params from the compute device. Set "
+                "vllm_config or use optim_cpu_offload instead (params stay "
+                "on GPU)."
             )
             raise ValueError(msg)
 
@@ -797,11 +777,6 @@ class FSDPRuntime(BaseRuntime):
 
         device = str(next(actor.parameters()).device)
         load_lora_adapters(actor, checkpoint_dir, adapter_name, device=device)
-
-    def actor_compute_device(
-        self, actor: nn.Module, fallback: torch.device
-    ) -> torch.device:
-        return fallback
 
     def backward(
         self,

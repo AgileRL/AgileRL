@@ -14,7 +14,7 @@ import numpy as np
 import numpy.typing as npt
 import torch
 
-from agilerl import HAS_LIGER_KERNEL, HAS_LLM_DEPENDENCIES
+from agilerl import HAS_LIGER_KERNEL
 
 if TYPE_CHECKING:
     from peft import LoraConfig, PeftModel
@@ -35,7 +35,6 @@ from agilerl.distributed import (
     allreduce_minmax_int,
     barrier,
     get_world_size,
-    reshard_fsdp_modules,
     resolve_device,
 )
 from agilerl.protocols import (
@@ -59,23 +58,16 @@ from agilerl.utils.llm_utils import (
     VLLM_IS_METRIC_NAMES,
     attention_mask_from_padded_ids,
     baseline_free_turn_cells,
-    build_completion_mask,
     calculate_k3_kl,
     fill_outside_mask,
-    hf_completion_lengths,
-    hf_turn_generation_config,
     masked_mean,
     masked_whiten,
     needs_cross_rank_seq_padding,
     normalize_prompt_batch,
     pool_log_ratio_by_level,
-    prepare_prompt_hf_generate,
     resolve_batch_advantage_granularity,
     validate_importance_sampling_level,
 )
-
-if HAS_LLM_DEPENDENCIES or TYPE_CHECKING:
-    from transformers import GenerationConfig
 
 NUM_ITEMS_PARAM = "num_items_in_batch"
 
@@ -230,9 +222,6 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
     :type min_output_tokens: int, optional
     :param max_model_len: Maximum context window length, defaults to 1024
     :type max_model_len: int, optional
-    :param hf_generate_chunk_size: Number of prompts per HuggingFace generation
-        chunk. Ignored when colocated.
-    :type hf_generate_chunk_size: int | None, optional
     :param lora_config: Config for LoRA, defaults to None
     :type lora_config: LoraConfig, optional
     :param cosine_lr_schedule_config: Config for cosine lr scheduling, defaults to None
@@ -251,8 +240,9 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
     :type wrap: bool, optional
     :param clone: Flag to indicate if the instantiation is a cloning, defaults to False
     :type clone: bool, optional
-    :param vllm_config: Config for VLLM generation, defaults to None
-    :type vllm_config: VLLMConfig, optional
+    :param vllm_config: Colocated vLLM runtime configuration. ``None`` uses
+        :class:`VLLMConfig` defaults on generate.
+    :type vllm_config: VLLMConfig | None, optional
     :param seed: Seed for the random number generator, defaults to 42
     :type seed: int, optional
     :param gradient_checkpointing: Flag to indicate if gradient checkpointing should be used, defaults to True
@@ -368,7 +358,7 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
         colocated, correct the rollout/trainer log-prob mismatch by
         weighting each training token by ``clamp(exp(trainer - sampling),
         max=vllm_importance_sampling_cap)``. Active only for training rollouts;
-        inert on the HuggingFace path and at eval.
+        inert at eval.
     :type vllm_importance_sampling_correction: bool, optional
     :param vllm_importance_sampling_cap: Upper clamp on the vLLM
         importance-sampling ratio (default ``2.0``), bounding the correction
@@ -423,7 +413,6 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
         max_output_tokens: int | None = None,
         min_output_tokens: int | None = None,
         max_model_len: int | None = 1024,
-        hf_generate_chunk_size: int | None = None,
         lora_config: LoraConfig | None = None,
         cosine_lr_schedule_config: CosineLRScheduleConfig | None = None,
         fsdp_config: FSDPConfig | None = None,
@@ -520,9 +509,18 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
         self._setup_objective(
             loss_type, importance_sampling_level, use_kl_advantage_shaping
         )
-        self._setup_generation(
-            max_output_tokens, min_output_tokens, max_model_len, hf_generate_chunk_size
-        )
+        if max_output_tokens is None:
+            if max_model_len is None:
+                msg = "Either max_output_tokens or max_model_len must be specified"
+                raise ValueError(
+                    msg,
+                )
+            max_output_tokens = max_model_len
+        elif max_model_len is None:
+            max_model_len = max_output_tokens
+        self.max_output_tokens = max_output_tokens
+        self.min_output_tokens = min_output_tokens
+        self.max_model_len = max_model_len
 
         self._setup_actors(actor_network, clone=clone)
         # Register network groups for mutations
@@ -563,71 +561,22 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
         """
         prompts = normalize_prompt_batch(obs)
         group_size = self.group_size if training and repeat_prompts else 1
-        # Capture vLLM sampling logprobs only for training rollouts when the
-        # mismatch correction is enabled; ``None`` on the HF path / eval.
+        self._ensure_vllm_for_generation()
+        capture_sampling_logps = training and self.vllm_importance_sampling_correction
         sampling_logps: list[torch.Tensor | None] | None = None
-        capture_sampling_logps = (
-            training and self.colocated and self.vllm_importance_sampling_correction
-        )
         with self.select_adapter("actor"):
             self.actor.eval()
-            if not self.colocated:
-                actor_device = self.shard_runtime.actor_compute_device(
-                    self.actor, torch.device(self.device)
-                )
-                with torch.no_grad(), self._amp_ctx():
-                    token_ids_list = []
-                    completion_masks = []
-
-                    for start in range(
-                        0,
-                        len(prompts),
-                        self.hf_generate_chunk_size,
-                    ):
-                        chunk = prompts[start : start + self.hf_generate_chunk_size]
-                        for prompt in chunk:
-                            hf_inputs = prepare_prompt_hf_generate(
-                                prompt,
-                                actor_device,
-                                group_size=group_size,
-                            )
-                            input_ids = hf_inputs["input_ids"]
-                            prompt_len = int(input_ids.shape[-1])
-                            token_ids = self.actor.generate(
-                                **hf_inputs,
-                                generation_config=hf_turn_generation_config(
-                                    self.generation_config,
-                                    max_model_len=self.max_model_len,
-                                    prompt_length=prompt_len,
-                                    max_output_tokens=self.max_output_tokens,
-                                ),
-                            )
-                            token_ids_list.append(token_ids)
-                            completion_masks.append(
-                                build_completion_mask(
-                                    token_ids,
-                                    prompt_len,
-                                    self.pad_token_id,
-                                    completion_len=hf_completion_lengths(
-                                        token_ids, prompt_len, self.pad_token_id
-                                    ),
-                                )
-                            )
-                reshard_fsdp_modules(self.actor)
-            else:
-                self._prepare_vllm_for_generation()
-                (
-                    token_ids_list,
-                    completion_masks,
-                    sampling_logps,
-                ) = self._generate_with_vllm_colocate(
-                    prompts,
-                    group_size,
-                    temperature=self.temperature
-                    if training
-                    else 0.01,  # Almost deterministic for evaluation
-                    capture_sampling_logps=capture_sampling_logps,
-                )
+            self._prepare_vllm_for_generation()
+            (
+                token_ids_list,
+                completion_masks,
+                sampling_logps,
+            ) = self._generate_with_vllm_colocate(
+                prompts,
+                group_size,
+                temperature=self.temperature if training else 0.01,
+                capture_sampling_logps=capture_sampling_logps,
+            )
 
         return ActionResult(token_ids_list, completion_masks, sampling_logps)
 
@@ -1142,51 +1091,6 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
             use_kl_advantage_shaping = False
         self.use_kl_advantage_shaping = use_kl_advantage_shaping
         self._loss_fn = self._resolve_standard_loss_fn()
-
-    def _setup_generation(
-        self,
-        max_output_tokens: int | None,
-        min_output_tokens: int | None,
-        max_model_len: int | None,
-        hf_generate_chunk_size: int | None,
-    ) -> None:
-        """Build the HF generation config."""
-        if max_output_tokens is None and max_model_len is None:
-            msg = "Either max_output_tokens or max_model_len must be specified"
-            raise ValueError(
-                msg,
-            )
-        self.max_output_tokens = (
-            max_output_tokens if max_output_tokens is not None else max_model_len
-        )
-        self.min_output_tokens = min_output_tokens
-        resolved_max_model_len = (
-            max_model_len if max_model_len is not None else max_output_tokens
-        )
-        # One of the two is non-None (guarded above).
-        assert resolved_max_model_len is not None
-        self.max_model_len = resolved_max_model_len
-        self.hf_generate_chunk_size = int(
-            1 if hf_generate_chunk_size is None else max(1, hf_generate_chunk_size)
-        )
-        if self.colocated and hf_generate_chunk_size is not None:
-            warnings.warn(
-                "hf_generate_chunk_size is only used for HuggingFace generation "
-                "and is ignored when colocated.",
-                stacklevel=3,
-            )
-        self.generation_config = GenerationConfig(
-            do_sample=True,
-            temperature=self.temperature,
-            max_length=self.max_model_len,
-            max_new_tokens=max_output_tokens,
-            min_new_tokens=min_output_tokens,
-            pad_token_id=self.pad_token_id,
-            repetition_penalty=self.repetition_penalty,
-            top_p=self.top_p,
-            top_k=self.top_k,
-            min_p=self.min_p,
-        )
 
     def _prepare_experience_batch(
         self,

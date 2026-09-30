@@ -167,7 +167,6 @@ def build_init_hp(
         "ALGO": algo,
         "BATCH_SIZE": batch_size,
         "UPDATE_EPOCHS": 1,
-        "USE_VLLM": False,
         "GRADIENT_CHECKPOINTING": False,
         "MAX_MODEL_LEN": max_model_len,
         "MAX_OUTPUT_TOKENS": max_output_tokens,
@@ -232,7 +231,7 @@ def build_population(
                 {
                     "r": 4,
                     "lora_alpha": 8,
-                    "target_modules": ["c_attn", "c_proj", "c_fc"],
+                    "target_modules": ["q_proj", "v_proj"],
                 }
             ),
         )
