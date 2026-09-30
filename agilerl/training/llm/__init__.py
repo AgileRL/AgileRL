@@ -11,7 +11,8 @@ Two loops, matching the LLM env taxonomy:
   ``DatasetEnv`` (preference / SFT).
 """
 
+from agilerl.training.llm.completion_logging import CompletionLoggingConfig
 from agilerl.training.llm.dataset import train_llm_dataset
 from agilerl.training.llm.rollout import train_llm_rollout
 
-__all__ = ["train_llm_dataset", "train_llm_rollout"]
+__all__ = ["CompletionLoggingConfig", "train_llm_dataset", "train_llm_rollout"]

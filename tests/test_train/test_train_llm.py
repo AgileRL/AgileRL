@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import itertools
+import json
+import logging
 from collections import Counter
 from contextlib import contextmanager
 from types import SimpleNamespace
@@ -24,6 +26,7 @@ from agilerl.hpo.mutation import Mutations
 from agilerl.population import Population
 from agilerl.rollouts.on_policy import collect_rollouts_llm
 from agilerl.training.llm import (
+    CompletionLoggingConfig,
     train_llm_dataset,
     train_llm_rollout,
 )
@@ -1987,6 +1990,145 @@ def test_train_llm_rollout_closes_envs_on_teardown():
 
     rollout_env.close.assert_called_once()
     test_env.close.assert_called_once()
+
+
+class _LetterTokenizer:
+    """Token ``i`` decodes to the ``i``-th lowercase letter."""
+
+    def decode(self, ids, skip_special_tokens=False):
+        return "".join(chr(ord("a") + i - 1) for i in ids)
+
+
+class TestTrainLlmRolloutCompletionLogging:
+    @staticmethod
+    def _run(mock_agent, completion_logging, verbose=False):
+        with (
+            patch(
+                "agilerl.training.llm.rollout.default_progress_bar",
+                return_value=MagicMock(),
+            ),
+            patch("agilerl.training.llm.rollout.init_loggers", return_value=[]),
+            patch(
+                "agilerl.training.llm.rollout.aggregate_metrics_across_gpus",
+                return_value=0.5,
+            ),
+            patch("agilerl.training.llm.rollout.save_llm_checkpoint"),
+            patch("agilerl.training.llm.rollout.RolloutCollector") as mock_collector,
+            patch(
+                "agilerl.training.llm.rollout.collect_rollouts_llm",
+                return_value=_rollout_collect_return(batch_steps=3, seq_len=4),
+            ),
+        ):
+            mock_collector.return_value.envs = [
+                SimpleNamespace(tokenizer=_LetterTokenizer())
+            ]
+            train_llm_rollout(
+                pop=[mock_agent],
+                env_factory=MagicMock(),
+                max_turns=2,
+                init_hp={"BATCH_SIZE": 1, "ALGO": mock_agent.algo},
+                max_steps=6,
+                evaluation_interval=100,
+                verbose=verbose,
+                completion_logging=completion_logging,
+            )
+
+    def test_console_writer_prints_sampled_record(self, capsys):
+        self._run(
+            _make_rollout_mock_agent(spec=GRPO),
+            CompletionLoggingConfig(interval=1),
+            verbose=True,
+        )
+
+        out = capsys.readouterr().out
+        assert "--- completion ---\naaa" in out
+
+    def test_writes_sampled_completions_to_jsonl(self, tmp_path):
+        # Arrange
+        mock_agent = _make_rollout_mock_agent(spec=GRPO)
+        path = tmp_path / "completions.jsonl"
+
+        # Act
+        self._run(
+            mock_agent,
+            CompletionLoggingConfig(interval=1, jsonl_path=str(path)),
+        )
+
+        # Assert
+        lines = [json.loads(line) for line in path.read_text().splitlines()]
+        assert [line["step"] for line in lines] == [0, 1]
+        assert lines[0] == {
+            "step": 0,
+            "agent_index": 0,
+            "group_index": 0,
+            "sample_index": 0,
+            "reward": 2.0,
+            "num_turns": 1,
+            "completion_tokens": 3,
+            "prompt": "a",
+            "completion": "aaa",
+        }
+
+    def test_dumps_recent_completions_when_training_raises(self, caplog):
+        mock_agent = _make_rollout_mock_agent(spec=GRPO)
+        mock_agent.learn.side_effect = RuntimeError("learn exploded")
+
+        with (
+            caplog.at_level(logging.ERROR),
+            pytest.raises(RuntimeError, match="learn exploded"),
+        ):
+            self._run(mock_agent, CompletionLoggingConfig(interval=100))
+
+        assert "Last 1 sampled completions before failure" in caplog.text
+        assert "--- completion ---\naaa" in caplog.text
+
+    def test_wandb_completions_table_includes_every_agent(self):
+        agents = [_make_rollout_mock_agent(spec=GRPO) for _ in range(2)]
+
+        with (
+            patch(
+                "agilerl.training.llm.rollout.default_progress_bar",
+                return_value=MagicMock(),
+            ),
+            patch("agilerl.training.llm.rollout.init_loggers", return_value=[]),
+            patch(
+                "agilerl.training.llm.rollout.aggregate_metrics_across_gpus",
+                return_value=0.5,
+            ),
+            patch("agilerl.training.llm.rollout.save_llm_checkpoint"),
+            patch("agilerl.training.llm.rollout.RolloutCollector") as mock_collector,
+            patch(
+                "agilerl.training.llm.rollout.collect_rollouts_llm",
+                return_value=_rollout_collect_return(batch_steps=3, seq_len=4),
+            ),
+            patch(
+                "agilerl.training.llm.completion_logging.wandb.log"
+            ) as mock_wandb_log,
+            _population_init_skip_per_mock_class(),
+        ):
+            mock_collector.return_value.envs = [
+                SimpleNamespace(tokenizer=_LetterTokenizer())
+            ]
+            train_llm_rollout(
+                pop=agents,
+                env_factory=MagicMock(),
+                max_turns=2,
+                init_hp={"BATCH_SIZE": 1, "ALGO": "GRPO"},
+                max_steps=6,
+                evaluation_interval=100,
+                verbose=False,
+                wb=True,
+                completion_logging=CompletionLoggingConfig(interval=1),
+            )
+
+        completion_calls = [
+            call_args
+            for call_args in mock_wandb_log.call_args_list
+            if call_args.args and "completions" in call_args.args[0]
+        ]
+        assert len(completion_calls) == 1
+        table = completion_calls[0].args[0]["completions"]
+        assert [row[1] for row in table.data] == [0, 1]
 
 
 def test_validate_finetune_args_warns_when_checkpoint_steps_ignored():
