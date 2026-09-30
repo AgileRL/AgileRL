@@ -19,20 +19,36 @@ jobs:
                 include:
                     - family: cpu
                       runner: ubuntu-24.04
+                      junit_pattern: junit-linux-cpu-3.13-*
+                      cache_prefix: linux-cpu-durations
                     - family: gpu
                       runner: gha-runner-scale-set
-        # actions/cache versions by compressor; this must match linux / ${{ matrix.family }}.
+                      junit_pattern: junit-linux-gpu-3.13-*
+                      cache_prefix: linux-gpu-durations
+                    - family: macos
+                      runner: macos-26
+                      junit_pattern: junit-macos-3.13-*
+                      cache_prefix: macos-cpu-durations
+                    - family: windows
+                      runner: windows-2025
+                      junit_pattern: junit-windows-3.13-*
+                      cache_prefix: windows-cpu-durations
+        # actions/cache versions by compressor; this must match the consumer job.
         runs-on: ${{ matrix.runner }}
         steps:
             - uses: actions/checkout@v5
+            - uses: actions/setup-python@v5
+              with:
+                  python-version: '3.13'
             - name: Download 3.13 ${{ matrix.family }} junit
               uses: actions/download-artifact@v4
               with:
-                  pattern: junit-linux-${{ matrix.family }}-3.13-*
+                  pattern: ${{ matrix.junit_pattern }}
                   path: junit-${{ matrix.family }}
                   run-id: ${{ github.event.workflow_run.id }}
                   github-token: ${{ github.token }}
             - name: Merge ${{ matrix.family }} durations
+              shell: bash
               run: |
                   python3 scripts/pytest_shard.py merge-junit \
                     --out .ci-durations/${{ matrix.family }}.json \
@@ -41,4 +57,4 @@ jobs:
               uses: actions/cache/save@v4
               with:
                   path: .ci-durations/${{ matrix.family }}.json
-                  key: linux-${{ matrix.family }}-durations-${{ github.event.workflow_run.id }}
+                  key: ${{ matrix.cache_prefix }}-${{ github.event.workflow_run.id }}

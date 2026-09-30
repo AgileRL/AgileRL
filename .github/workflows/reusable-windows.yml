@@ -9,13 +9,15 @@ permissions:
 
 jobs:
     tests:
-        runs-on: ${{ matrix.os }}
+        runs-on: windows-2025
         strategy:
             fail-fast: false
-            max-parallel: 4
+            max-parallel: 8
             matrix:
-                os: [windows-2025]
                 python-version: ['3.10', '3.11', '3.12', '3.13']
+                shard: [1, 2]
+        env:
+            PYTHONPATH: ${{ github.workspace }}/agilerl-arena
 
         steps:
             - uses: actions/checkout@v5
@@ -23,6 +25,12 @@ jobs:
               with:
                   enable-cache: true
                   python-version: ${{ matrix.python-version }}
+            - name: Restore Windows test durations
+              uses: actions/cache/restore@v4
+              with:
+                  path: .ci-durations/windows.json
+                  key: windows-cpu-durations-${{ github.run_id }}
+                  restore-keys: windows-cpu-durations-
             - name: Install dependencies
               run: |
                   pip install uv
@@ -31,7 +39,7 @@ jobs:
             - name: Show runner CPU
               run: Get-CimInstance Win32_Processor | Select-Object Name, Manufacturer | Format-List
 
-            - name: Test with pytest
+            - name: Run Windows shard
               shell: bash
               # Cap CPU-ISA dispatch at AVX2: part of the heterogeneous Azure fleet
               # behind windows-2025 runners faults (0xc000001d, illegal instruction)
@@ -41,11 +49,25 @@ jobs:
                   ATEN_CPU_CAPABILITY: avx2
                   ONEDNN_MAX_CPU_ISA: AVX2
                   MKL_ENABLE_INSTRUCTIONS: AVX2
-              run: bash scripts/run-tests.sh cov junit -m "not llm" --cov-report=term-missing --durations=0 --durations-min=1.0
+              run: |
+                  rm -f .coverage .coverage.*
+                  uv run python scripts/pytest_shard.py run \
+                    --root tests \
+                    --root agilerl-arena/tests \
+                    --total-shards 2 \
+                    --shard-index ${{ matrix.shard }} \
+                    --durations-file .ci-durations/windows.json \
+                    -- \
+                    --import-mode=importlib \
+                    --junitxml=junit-windows.xml \
+                    -m "not llm and not gpu and not vllm" \
+                    -n auto --dist loadgroup \
+                    --durations=15 \
+                    --cov --cov-report=term-missing
             - name: Upload junit
               if: always()
               uses: actions/upload-artifact@v4
               with:
-                  name: junit-windows-${{ matrix.python-version }}
-                  path: junit-*.xml
+                  name: junit-windows-${{ matrix.python-version }}-${{ matrix.shard }}
+                  path: junit-windows.xml
                   if-no-files-found: ignore

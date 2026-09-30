@@ -12,6 +12,8 @@ from pathlib import Path
 
 import gymnasium as gym
 
+from tests.xdist_async_vec import ASYNC_VEC_XDIST_GROUP, nodeid_spawns_async_vector_env
+
 # Register lightweight test environments
 gym.register(
     id="DummyImage-v0",
@@ -168,6 +170,10 @@ def pytest_collection_modifyitems(config, items):
       MASTER_PORT is still per-test (``get_free_port``) to avoid
       ``EADDRINUSE`` on concurrent inits.
     - ``test_minari_utils``: tests create/delete shared Minari datasets on disk.
+    - Tests that construct ``AsyncPettingZooVecEnv`` or gymnasium
+      ``AsyncVectorEnv`` spawn subprocesses. One ``async_vec`` loadgroup so
+      they never run concurrently under xdist (spawn start methods EOFError
+      the pipes otherwise).
 
     Uses ``tryfirst=True`` so the ``xdist_group`` markers below are attached
     before xdist's own ``pytest_collection_modifyitems`` (in ``xdist/remote.py``)
@@ -192,6 +198,7 @@ def pytest_collection_modifyitems(config, items):
     # regardless of -n auto's worker count. See docstring above.
     gputest_groups = [pytest.mark.xdist_group(f"gputest{i}") for i in range(4)]
     minari_group = pytest.mark.xdist_group("minari")
+    async_vec_group = pytest.mark.xdist_group(ASYNC_VEC_XDIST_GROUP)
     # ``gpu``/``vllm``-marked tests need a usable CUDA device (FSDP wrap,
     # a live vLLM engine). Skip them when CUDA is unavailable — a CPU-only
     # runner, or a GPU whose driver is too old for the installed torch (the GPU
@@ -210,6 +217,8 @@ def pytest_collection_modifyitems(config, items):
                 item.add_marker(skip_no_cuda)
         elif "test_minari_utils" in item.nodeid:
             item.add_marker(minari_group)
+        elif nodeid_spawns_async_vector_env(item.nodeid):
+            item.add_marker(async_vec_group)
 
 
 # Only clear CUDA cache when actually needed
