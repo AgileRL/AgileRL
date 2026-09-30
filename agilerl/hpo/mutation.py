@@ -35,6 +35,7 @@ from agilerl.utils.mutation_utils import (
     set_global_seed,
     shared_encoder_heads,
 )
+from agilerl.utils.torch_utils import release_device_memory
 from agilerl.wrappers.agent import AgentWrapper
 
 AgentT = TypeVar("AgentT", bound=EvolvableAlgorithmProtocol)
@@ -245,9 +246,11 @@ class Mutations:
         )
 
         if indices is not None:
-            return self._mutate_selected(
+            mutated = self._mutate_selected(
                 population, mutation_options, mutation_proba, indices
             )
+            release_device_memory()
+            return mutated
 
         # Randomly choose mutation for each agent in population from options with
         # relative probabilities
@@ -265,10 +268,12 @@ class Mutations:
         if not self.mutate_elite:
             mutation_choice[0] = self.no_mutation
 
-        return [
+        mutated = [
             self._apply_mutation(individual, mutation)
             for mutation, individual in zip(mutation_choice, population, strict=False)
         ]
+        release_device_memory()
+        return mutated
 
     def _mutate_selected(
         self,
