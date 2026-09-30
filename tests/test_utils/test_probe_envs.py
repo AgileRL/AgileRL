@@ -458,6 +458,20 @@ def test_continuous_actions_policy_envs(
             state, _ = env.reset()
 
 
+class TestPolicyContActionsDictEnvStep:
+    def test_ones_observation_uses_zero_one_policy_reward(self):
+        env = PolicyContActionsDictEnv()
+        env.last_obs = {"discrete": 1, "box": np.ones((1, 3, 3))}
+        action = np.array([0.25, 0.75])
+
+        _, reward, terminated, truncated, info = env.step(action)
+
+        assert reward == -((0 - action[0]) ** 2) - (1 - action[1]) ** 2
+        assert terminated is True
+        assert truncated is False
+        assert info == {}
+
+
 @pytest.mark.parametrize(
     (
         "env_class",

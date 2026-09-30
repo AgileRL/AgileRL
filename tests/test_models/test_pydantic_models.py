@@ -9,9 +9,11 @@ algorithm-specific training function resolution.
 
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pandas as pd
 import pytest
 from pydantic import ValidationError
 
@@ -25,7 +27,6 @@ from agilerl.models.env import (
     LLMEnvType,
     _http_timeout_s,
     _load_dataframe,
-    _load_dataset_file,
     _load_dataset_hf,
     _load_llm_dataset,
     construct_custom_env_fn,
@@ -319,27 +320,23 @@ class TestLLMEnvSpec:
         assert train == "train_split"
         assert test == "test_split"
 
-    def test_load_dataset_file_with_columns(self):
-        """_load_dataset_file with columns rename."""
+    def test_load_dataset_file_with_columns(self, tmp_path: Path):
+        """Parquet load with columns rename."""
+        path = tmp_path / "data.parquet"
+        pd.DataFrame({"old": ["a", "b"], "keep": [1, 2]}).to_parquet(path)
         spec = LLMEnvSpec(
             env_type=LLMEnvType.DATASET,
             objective="sft",
-            dataset="data.parquet",
+            dataset=str(path),
             columns={"old": "new"},
         )
-        mock_df = MagicMock()
-        mock_df.rename.return_value = mock_df
-        mock_split = {"train": "train_split", "test": "test_split"}
-        mock_hf_ds = MagicMock()
-        mock_hf_ds.train_test_split.return_value = mock_split
 
-        with (
-            patch("agilerl.models.env.pd.read_parquet", return_value=mock_df),
-            patch("datasets.Dataset.from_pandas", return_value=mock_hf_ds),
-        ):
-            _train, _test = _load_dataset_file(spec, spec.dataset)
+        train, test = _load_llm_dataset(spec)
 
-        mock_df.rename.assert_called_once_with(columns={"old": "new"})
+        assert "new" in train.column_names
+        assert "old" not in train.column_names
+        assert "keep" in train.column_names
+        assert len(train) + len(test) == 2
 
     def test_load_dataset_dispatches_hf(self):
         """_load_dataset dispatches to HF path for non-parquet."""
@@ -353,15 +350,55 @@ class TestLLMEnvSpec:
         m.assert_called_once()
 
     def test_load_dataset_dispatches_parquet(self):
-        """_load_dataset dispatches to the parquet loader for .parquet paths."""
+        """_load_llm_dataset uses the parquet loader for .parquet paths."""
         spec = LLMEnvSpec(
             env_type=LLMEnvType.DATASET,
             objective="sft",
             dataset="data/train.parquet",
         )
+        mock_ds = MagicMock()
+        mock_ds.train_test_split.return_value = {"train": "t", "test": "v"}
         with patch(
-            "agilerl.models.env._load_dataset_file", return_value=("t", "v")
+            "agilerl.models.env.load_parquet_dataset", return_value=mock_ds
         ) as m:
+            train, test = _load_llm_dataset(spec)
+        m.assert_called_once_with("data/train.parquet", column_rename=spec.columns)
+        assert train == "t"
+        assert test == "v"
+
+    def test_load_dataset_dispatches_directory(self, tmp_path: Path):
+        """A directory of parquet shards is a parquet source, not a Hugging Face id."""
+        shard_dir = tmp_path / "shards"
+        shard_dir.mkdir()
+        pd.DataFrame({"q": ["a"]}).to_parquet(shard_dir / "00000.parquet")
+        spec = LLMEnvSpec(
+            env_type=LLMEnvType.DATASET,
+            objective="sft",
+            dataset=str(shard_dir),
+        )
+        mock_ds = MagicMock()
+        mock_ds.train_test_split.return_value = {"train": "t", "test": "v"}
+        with patch(
+            "agilerl.models.env.load_parquet_dataset", return_value=mock_ds
+        ) as m:
+            train, test = _load_llm_dataset(spec)
+        m.assert_called_once_with(str(shard_dir), column_rename=spec.columns)
+        assert train == "t"
+        assert test == "v"
+
+    def test_load_dataset_dispatches_hf_for_directory_without_parquet(
+        self, tmp_path: Path
+    ):
+        """A local HF layout with no parquet files still loads through Hugging Face."""
+        hf_dir = tmp_path / "saved"
+        hf_dir.mkdir()
+        (hf_dir / "dataset_info.json").write_text("{}")
+        spec = LLMEnvSpec(
+            env_type=LLMEnvType.DATASET,
+            objective="sft",
+            dataset=str(hf_dir),
+        )
+        with patch("agilerl.models.env._load_dataset_hf", return_value=("t", "v")) as m:
             _train, _test = _load_llm_dataset(spec)
         m.assert_called_once()
 
