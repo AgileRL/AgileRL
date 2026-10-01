@@ -1669,6 +1669,7 @@ class TestSchema:
         dpo = next(v for v in variants if v["title"] == "DPO")
         for variant in (sft, dpo):
             assert "answer_continuation" not in variant.get("properties", {})
+            assert "answer_continuation" not in variant.get("required", [])
             assert "answer_continuation" not in variant.get("x-hpo-ranges", {})
 
         grpo = next(v for v in variants if v["title"] == "GRPO")
@@ -1681,6 +1682,8 @@ class TestSchema:
         ppo = next(v for v in variants if v["title"] == "PPO")
         assert "max_seq_len" not in ppo.get("properties", {})
         assert "bptt_sequence_type" not in ppo.get("properties", {})
+        assert "max_seq_len" not in ppo.get("required", [])
+        assert "bptt_sequence_type" not in ppo.get("required", [])
 
         recurrent = next(v for v in variants if v["title"] == "RecurrentPPO")
         assert "max_seq_len" in recurrent["properties"]
@@ -1718,26 +1721,23 @@ class TestSchema:
 
 
 class TestStripNonFormAlgorithmFields:
-    def test_removes_answer_continuation_from_required_on_dataset_specs(self) -> None:
+    def test_removes_answer_continuation_from_dataset_specs(self) -> None:
         schema = {
             "properties": {"answer_continuation": {"type": "boolean"}},
-            "required": ["name", "answer_continuation"],
             "x-hpo-ranges": {"answer_continuation": {}},
         }
 
         strip_non_form_algorithm_fields(schema, DPOSpec)
 
         assert "answer_continuation" not in schema["properties"]
-        assert "answer_continuation" not in schema["required"]
         assert "answer_continuation" not in schema["x-hpo-ranges"]
 
-    def test_removes_recurrent_fields_from_required_on_ppo(self) -> None:
+    def test_removes_recurrent_fields_from_ppo(self) -> None:
         schema = {
             "properties": {
                 "max_seq_len": {"type": "integer"},
                 "bptt_sequence_type": {"type": "string"},
             },
-            "required": ["name", "max_seq_len", "bptt_sequence_type"],
             "x-hpo-ranges": {
                 "max_seq_len": {},
                 "bptt_sequence_type": {},
@@ -1748,8 +1748,6 @@ class TestStripNonFormAlgorithmFields:
 
         assert "max_seq_len" not in schema["properties"]
         assert "bptt_sequence_type" not in schema["properties"]
-        assert "max_seq_len" not in schema["required"]
-        assert "bptt_sequence_type" not in schema["required"]
         assert "max_seq_len" not in schema["x-hpo-ranges"]
         assert "bptt_sequence_type" not in schema["x-hpo-ranges"]
 

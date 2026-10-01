@@ -365,14 +365,10 @@ def strip_non_form_algorithm_fields(
     if getattr(spec_cls, "env_type", None) == LLMEnvType.DATASET:
         for field_name in ("answer_continuation",):
             schema["properties"].pop(field_name, None)
-            if field_name in schema.get("required", []):
-                schema["required"].remove(field_name)
             schema.get("x-hpo-ranges", {}).pop(field_name, None)
     if issubclass(spec_cls, PPOSpec) and spec_cls is not RecurrentPPOSpec:
         for field_name in ("max_seq_len", "bptt_sequence_type"):
             schema["properties"].pop(field_name, None)
-            if field_name in schema.get("required", []):
-                schema["required"].remove(field_name)
             schema.get("x-hpo-ranges", {}).pop(field_name, None)
 
 
