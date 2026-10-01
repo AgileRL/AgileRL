@@ -35,6 +35,8 @@ from agilerl.arena.models import (
 from agilerl.arena.models.algorithms import RolloutLLMSpec
 from agilerl.arena.models.env import LLMEnvType
 from agilerl.arena.models.schema import (
+    LORA_CONFIG_REF,
+    _inline_lora_config_inplace,
     algorithm_name_if,
     algorithm_schema,
     dataset_backed_grpo_rollout_if,
@@ -1205,13 +1207,37 @@ class TestSchema:
         assert spec.checkpoint_export is None
         assert spec.rollout_version_stamp is None
 
-    def test_llm_algorithms_get_evo_steps_ten_from_schema(self) -> None:
+    def test_llm_algorithms_get_evo_steps_twenty_from_schema(self) -> None:
         grpo = self._applied_training_defaults({"algorithm": {"name": "GRPO"}})
-        assert grpo["evo_steps"] == 10
+        assert grpo["evo_steps"] == 20
         assert grpo["reporting_interval"] == 1
 
         ppo = self._applied_training_defaults({"algorithm": {"name": "PPO"}})
-        assert "evo_steps" not in ppo
+        assert ppo["evo_steps"] == 160000
+
+    def test_classic_cnn_and_multiinput_get_longer_evo_steps(self) -> None:
+        mlp = self._applied_training_defaults(
+            {"algorithm": {"name": "PPO"}, "network": {"arch": "mlp"}}
+        )
+        assert mlp["evo_steps"] == 160000
+
+        cnn = self._applied_training_defaults(
+            {"algorithm": {"name": "PPO"}, "network": {"arch": "cnn"}}
+        )
+        assert cnn["evo_steps"] == 320000
+
+        nested = self._applied_training_defaults(
+            {
+                "algorithm": {"name": "DQN"},
+                "network": {"encoder_config": {"arch": "multiinput"}},
+            }
+        )
+        assert nested["evo_steps"] == 320000
+
+        llm_cnn = self._applied_training_defaults(
+            {"algorithm": {"name": "GRPO"}, "network": {"arch": "cnn"}}
+        )
+        assert llm_cnn["evo_steps"] == 20
 
     def test_dataset_backed_grpo_rollout_num_epochs_conditional(self) -> None:
         expected_if = dataset_backed_grpo_rollout_if()
@@ -1240,7 +1266,7 @@ class TestSchema:
         }
         applied = self._applied_training_defaults(dataset_rollout)
         assert applied["num_epochs"] == 1
-        assert applied["evo_steps"] == 10
+        assert applied["evo_steps"] == 20
 
         generative_rollout = {
             "algorithm": {"name": "GRPO"},
@@ -1478,6 +1504,111 @@ class TestSchema:
             applied = self._applied_training_defaults({"algorithm": {"name": name}})
             assert "training_gpus_per_agent" not in applied
 
+    def test_on_policy_training_schema_omits_learning_delay(self) -> None:
+        schema = manifest_schema()
+        on_policy = schema["$defs"]["TrainingSpecOnPolicy"]["properties"]
+        llm = schema["$defs"]["TrainingSpecLLM"]["properties"]
+        off_policy = schema["$defs"]["TrainingSpec"]["properties"]
+        assert "learning_delay" not in on_policy
+        assert "learning_delay" in llm
+        assert "learning_delay" in off_policy
+
+        ppo_payload = TrainingManifest.model_validate(
+            {
+                "algorithm": {"name": "PPO"},
+                "environment": {"name": "CartPole-v1"},
+                "training": {"max_steps": 100, "pop_size": 2},
+            }
+        ).to_payload()
+        ppo_payload["training"]["learning_delay"] = 1000
+        errors = list(Draft202012Validator(manifest_schema()).iter_errors(ppo_payload))
+        assert errors
+        assert any("learning_delay" in e.message for e in errors)
+
+        dqn_payload = TrainingManifest.model_validate(
+            {
+                "algorithm": {"name": "DQN"},
+                "environment": {"name": "CartPole-v1"},
+                "training": {"max_steps": 100, "learning_delay": 500},
+            }
+        ).to_payload()
+        errors = list(Draft202012Validator(manifest_schema()).iter_errors(dqn_payload))
+        assert not any("learning_delay" in e.message for e in errors)
+
+    def test_served_lora_config_inlines_rank_alpha_dropout(self) -> None:
+        schema = manifest_schema()
+        network_lora = schema["$defs"]["FinetuningNetworkSpec"]["properties"][
+            "lora_config"
+        ]
+        assert "$ref" not in network_lora
+        properties = network_lora["properties"]
+        assert properties["lora_r"]["default"] == 1
+        assert properties["lora_r"]["title"] == "Rank"
+        assert properties["lora_alpha"]["default"] == 32
+        assert properties["lora_dropout"]["default"] == 0.05
+
+        grpo = next(
+            v
+            for v in schema["properties"]["algorithm"]["oneOf"]
+            if v["title"] == "GRPO"
+        )
+        algo_lora = grpo["properties"]["lora_config"]
+        assert algo_lora["properties"]["lora_r"]["default"] == 1
+        assert "lora_alpha" in algo_lora["properties"]
+        assert "lora_dropout" in algo_lora["properties"]
+
+    def test_inlines_lora_config_when_field_is_a_bare_ref(self) -> None:
+        schema = {
+            "properties": {
+                "lora_config": {
+                    "$ref": LORA_CONFIG_REF,
+                    "description": "LoRA",
+                }
+            }
+        }
+        lora_def = {
+            "properties": {"lora_r": {"type": "integer"}},
+            "additionalProperties": False,
+            "required": ["lora_r"],
+        }
+
+        _inline_lora_config_inplace(schema, lora_def)
+
+        field = schema["properties"]["lora_config"]
+        assert field["properties"]["lora_r"] == {"type": "integer"}
+        assert field["required"] == ["lora_r"]
+        assert field["additionalProperties"] is False
+        assert field["description"] == "LoRA"
+        assert "$ref" not in field
+
+    def test_leaves_non_ref_lora_config_unchanged(self) -> None:
+        original = {"type": "object", "properties": {"lora_r": {"type": "integer"}}}
+        schema = {"properties": {"lora_config": original}}
+
+        _inline_lora_config_inplace(schema, {"properties": {}})
+
+        assert schema["properties"]["lora_config"] is original
+
+    def test_ou_noise_schema_gates_theta_and_dt(self) -> None:
+        variants = manifest_schema()["properties"]["algorithm"]["oneOf"]
+        ddpg = next(v for v in variants if v["title"] == "DDPG")
+        ou = next(
+            clause
+            for clause in ddpg.get("allOf", [])
+            if clause.get("if", {}).get("properties", {}).get("O_U_noise")
+            == {"const": True}
+        )
+        then_props = ou["then"]["properties"]
+        assert then_props["theta"]["default"] == 0.15
+        assert then_props["dt"]["default"] == 0.01
+        assert then_props["mean_noise"]["default"] == 0.0
+
+        ppo = next(v for v in variants if v["title"] == "PPO")
+        assert not any(
+            clause.get("if", {}).get("properties", {}).get("O_U_noise")
+            for clause in ppo.get("allOf", [])
+        )
+
     def test_classic_payload_omits_training_gpus_per_agent_even_when_set(self) -> None:
         spec = TrainingManifest.model_validate(
             {
@@ -1542,6 +1673,8 @@ class TestSchema:
 
         grpo = next(v for v in variants if v["title"] == "GRPO")
         assert grpo["properties"]["answer_continuation"]["default"] is False
+        assert "answer_pattern" not in grpo.get("properties", {})
+        assert "constrain_answer_pattern" in grpo["properties"]
 
     def test_ppo_algorithm_schema_omits_recurrent_only_fields(self) -> None:
         variants = manifest_schema()["properties"]["algorithm"]["oneOf"]
@@ -1619,6 +1752,23 @@ class TestStripNonFormAlgorithmFields:
         assert "bptt_sequence_type" not in schema["required"]
         assert "max_seq_len" not in schema["x-hpo-ranges"]
         assert "bptt_sequence_type" not in schema["x-hpo-ranges"]
+
+    def test_removes_answer_pattern_alias_from_the_form(self) -> None:
+        schema = {
+            "properties": {
+                "constrain_answer_pattern": {"type": "string"},
+                "answer_pattern": {"x-ui-alias-of": "constrain_answer_pattern"},
+            },
+            "required": ["name", "answer_pattern"],
+            "x-hpo-ranges": {"answer_pattern": {}},
+        }
+
+        strip_non_form_algorithm_fields(schema, GRPOSpec)
+
+        assert "answer_pattern" not in schema["properties"]
+        assert "answer_pattern" not in schema["required"]
+        assert "answer_pattern" not in schema["x-hpo-ranges"]
+        assert "constrain_answer_pattern" in schema["properties"]
 
 
 class TestClusterSupported:
