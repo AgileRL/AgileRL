@@ -593,11 +593,13 @@ class LoraConfigDict(BaseModel):
     lora_r: int = Field(
         default=16,
         ge=1,
+        title="Rank",
         description="LoRA rank. Higher adapts more of the model, at proportional memory cost.",
     )
     lora_alpha: int = Field(
         default=32,
         ge=1,
+        title="Alpha",
         description="LoRA scaling. Conventionally set to twice the rank.",
     )
     target_modules: list[str] | str | set[str] = Field(
@@ -624,6 +626,7 @@ class LoraConfigDict(BaseModel):
         default=0.05,
         ge=0.0,
         le=1.0,
+        title="Dropout",
         description="Dropout on the adapter. Must be 0 when target_parameters is set.",
     )
 

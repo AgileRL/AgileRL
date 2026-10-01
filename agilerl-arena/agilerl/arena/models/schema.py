@@ -170,6 +170,30 @@ def environment_then(defaults: dict[str, Any]) -> dict[str, Any]:
     return {"properties": {"environment": {"properties": defaults}}}
 
 
+def network_encoder_arch_if(archs: tuple[str, ...]) -> dict[str, Any]:
+    """Match a classic network whose encoder arch is one of *archs*."""
+    arch_enum = {"enum": list(archs)}
+    return {
+        "properties": {
+            "network": {
+                "anyOf": [
+                    {"properties": {"arch": arch_enum}, "required": ["arch"]},
+                    {
+                        "properties": {
+                            "encoder_config": {
+                                "properties": {"arch": arch_enum},
+                                "required": ["arch"],
+                            }
+                        },
+                        "required": ["encoder_config"],
+                    },
+                ]
+            }
+        },
+        "required": ["network"],
+    }
+
+
 def async_llm_rollout_if() -> dict[str, Any]:
     return {
         "allOf": [
@@ -207,6 +231,12 @@ def training_schema_conditionals() -> list[dict[str, Any]]:
     def off_policy(spec: type[AlgoSpec]) -> bool:
         return spec.off_policy
 
+    def classic(spec: type[AlgoSpec]) -> bool:
+        return not issubclass(spec, LLMAlgorithmSpec)
+
+    classic_names = registered_algorithm_names(classic)
+    cnn_or_multiinput = ("cnn", "multiinput")
+
     return [
         {
             "if": algorithm_name_if(registered_algorithm_names(epsilon_greedy)),
@@ -223,8 +253,21 @@ def training_schema_conditionals() -> list[dict[str, Any]]:
             "then": training_then({"reporting_interval": {"default": 1}}),
         },
         {
+            "if": algorithm_name_if(classic_names),
+            "then": training_then({"evo_steps": {"default": 160000}}),
+        },
+        {
+            "if": {
+                "allOf": [
+                    algorithm_name_if(classic_names),
+                    network_encoder_arch_if(cnn_or_multiinput),
+                ]
+            },
+            "then": training_then({"evo_steps": {"default": 320000}}),
+        },
+        {
             "if": algorithm_name_if(registered_algorithm_names(_llm_algorithm)),
-            "then": training_then({"evo_steps": {"default": 10}}),
+            "then": training_then({"evo_steps": {"default": 20}}),
         },
         {
             "if": algorithm_name_if(registered_algorithm_names(_llm_algorithm)),
@@ -312,6 +355,10 @@ def strip_non_form_algorithm_fields(
     schema: dict[str, Any], spec_cls: type[AlgoSpec]
 ) -> None:
     """Drop algorithm fields the manifest form must not expose for *spec_cls*."""
+    schema["properties"].pop("answer_pattern", None)
+    if "answer_pattern" in schema.get("required", []):
+        schema["required"].remove("answer_pattern")
+    schema.get("x-hpo-ranges", {}).pop("answer_pattern", None)
     if spec_cls is SFTSpec:
         schema["properties"].pop("beta")
         schema["x-hpo-ranges"].pop("beta", None)
@@ -351,7 +398,33 @@ def _algorithm_variant_schema(
     _add_alias_spellings(schema, spec_cls)
     _add_hpo_ranges(schema, spec_cls)
     strip_non_form_algorithm_fields(schema, spec_cls)
+    _attach_ou_schema_dependencies(schema, spec_cls)
     return schema
+
+
+def _attach_ou_schema_dependencies(
+    schema: dict[str, Any], spec_cls: type[AlgoSpec]
+) -> None:
+    """Gate OU theta / dt / mean_noise on O_U_noise in the served schema."""
+    if "O_U_noise" not in spec_cls.model_fields:
+        return
+    schema.setdefault("allOf", []).append(
+        {
+            "if": {
+                "properties": {"O_U_noise": {"const": True}},
+                "required": ["O_U_noise"],
+            },
+            "then": {
+                "properties": {
+                    "theta": {"default": spec_cls.model_fields["theta"].default},
+                    "dt": {"default": spec_cls.model_fields["dt"].default},
+                    "mean_noise": {
+                        "default": spec_cls.model_fields["mean_noise"].default
+                    },
+                }
+            },
+        }
+    )
 
 
 def algorithm_schema() -> tuple[dict[str, Any], dict[str, Any]]:
@@ -520,8 +593,11 @@ def attach_training_schema(schema: dict[str, Any]) -> None:
     """Split classic vs LLM training defs and attach algorithm training defaults."""
     training_def = schema["$defs"]["TrainingSpec"]
     schema["$defs"]["TrainingSpecLLM"] = copy.deepcopy(training_def)
+    schema["$defs"]["TrainingSpecOnPolicy"] = copy.deepcopy(training_def)
     for name in LLM_ONLY_TRAINING_SCHEMA_FIELDS:
         training_def["properties"].pop(name, None)
+        schema["$defs"]["TrainingSpecOnPolicy"]["properties"].pop(name, None)
+    schema["$defs"]["TrainingSpecOnPolicy"]["properties"].pop("learning_delay", None)
 
     training_section = schema["properties"]["training"]
     training_description = training_section.get("description")
@@ -529,11 +605,18 @@ def attach_training_schema(schema: dict[str, Any]) -> None:
     if training_description is not None:
         schema["properties"]["training"]["description"] = training_description
 
+    def off_policy(spec: type[AlgoSpec]) -> bool:
+        return spec.off_policy
+
     schema["allOf"] = [
         {
             "if": algorithm_name_if(registered_algorithm_names(_llm_algorithm)),
             "then": training_spec_ref("TrainingSpecLLM"),
-            "else": training_spec_ref("TrainingSpec"),
+            "else": {
+                "if": algorithm_name_if(registered_algorithm_names(off_policy)),
+                "then": training_spec_ref("TrainingSpec"),
+                "else": training_spec_ref("TrainingSpecOnPolicy"),
+            },
         },
         *(schema.get("allOf") or []),
         *training_schema_conditionals(),
@@ -545,6 +628,66 @@ def _strip_llm_env_schema_defaults(schema: dict[str, Any]) -> None:
     properties = schema["$defs"]["LLMEnvSpec"]["properties"]
     for name in LLM_ENV_SCHEMA_DEFAULT_FIELDS:
         properties[name].pop("default", None)
+
+
+LORA_CONFIG_REF = "#/$defs/LoraConfigDict"
+
+
+def _is_optional_lora_ref(node: dict[str, Any]) -> bool:
+    if node.get("$ref") == LORA_CONFIG_REF:
+        return True
+    branches = node.get("anyOf")
+    if not isinstance(branches, list):
+        return False
+    refs = [
+        branch
+        for branch in branches
+        if isinstance(branch, dict) and branch.get("$ref") == LORA_CONFIG_REF
+    ]
+    nulls = [branch for branch in branches if branch == {"type": "null"}]
+    return len(refs) == 1 and len(nulls) >= 1
+
+
+def _inlined_optional_lora(
+    node: dict[str, Any], lora_def: dict[str, Any]
+) -> dict[str, Any]:
+    """Copy LoRA properties onto the field so the form does not have to follow $ref."""
+    inlined = {
+        key: value for key, value in node.items() if key not in {"anyOf", "$ref"}
+    }
+    inlined["type"] = ["object", "null"]
+    inlined["properties"] = copy.deepcopy(lora_def["properties"])
+    if "additionalProperties" in lora_def:
+        inlined["additionalProperties"] = lora_def["additionalProperties"]
+    required = lora_def.get("required")
+    if required:
+        inlined["required"] = list(required)
+    return inlined
+
+
+def _inline_lora_config_inplace(node: object, lora_def: dict[str, Any]) -> None:
+    if isinstance(node, list):
+        for item in node:
+            _inline_lora_config_inplace(item, lora_def)
+        return
+    if not isinstance(node, dict):
+        return
+    properties = node.get("properties")
+    if isinstance(properties, dict):
+        field = properties.get("lora_config")
+        if isinstance(field, dict) and _is_optional_lora_ref(field):
+            properties["lora_config"] = _inlined_optional_lora(field, lora_def)
+    for value in node.values():
+        _inline_lora_config_inplace(value, lora_def)
+
+
+def _publish_lora_config_schema(schema: dict[str, Any]) -> None:
+    """Put LoRA rank / alpha / dropout on the served object the wizard reads."""
+    lora_def = schema["$defs"]["LoraConfigDict"]
+    lora_r = lora_def["properties"]["lora_r"]
+    lora_r["default"] = 1
+    lora_r["title"] = "Rank"
+    _inline_lora_config_inplace(schema, lora_def)
 
 
 def _relax_discriminated_union(node: dict[str, Any]) -> dict[str, Any]:
@@ -594,6 +737,7 @@ def manifest_schema() -> dict[str, Any]:
     schema = cast("dict[str, Any]", _walk(schema))
     _strip_llm_env_schema_defaults(schema)
     attach_training_schema(schema)
+    _publish_lora_config_schema(schema)
     schema["$id"] = SCHEMA_ID
     schema["x-manifest-version"] = _package_version()
     schema["title"] = "AgileRL training manifest"
