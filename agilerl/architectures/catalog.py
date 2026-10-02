@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from typing import Any
 
 from transformers.configuration_utils import PretrainedConfig
 
@@ -21,6 +22,7 @@ from agilerl.architectures.runtime import (
     TrainerRuntimeConfig,
     VllmRuntimeConfig,
 )
+from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
 
 NEMOTRON_H_RUNTIME_CONFIG = ModelRuntimeConfig(
     trainer=TrainerRuntimeConfig(
@@ -78,15 +80,42 @@ FAMILY_RUNTIME_CONFIGS: Mapping[str, ModelRuntimeConfig] = {
 }
 
 
-def pretrained_model_type(model_name_or_path: str) -> str:
-    """Return Hugging Face ``model_type`` from a checkpoint id or local path."""
+def _checkpoint_config_dict(model_name_or_path: str) -> dict[str, Any]:
+    """Bundled config for supported Hub ids, else the transformers lookup."""
+    entry = SUPPORTED_MODEL_INFO.get(model_name_or_path)
+    if entry is not None:
+        return entry.config
     config_dict, _ = PretrainedConfig.get_config_dict(model_name_or_path)
-    return config_dict["model_type"]
+    return config_dict
+
+
+def pretrained_model_type(model_name_or_path: str) -> str:
+    """Return Hugging Face ``model_type`` from a checkpoint id or local path.
+
+    Supported ids read the bundled config instead of the Hub.
+    """
+    return _checkpoint_config_dict(model_name_or_path)["model_type"]
 
 
 def family_runtime(model_name_or_path: str) -> ModelRuntimeConfig:
-    """Return catalog runtime for a checkpoint id or local path."""
-    return FAMILY_RUNTIME_CONFIGS.get(
-        pretrained_model_type(model_name_or_path),
+    """Return catalog runtime for a checkpoint id or local path.
+
+    Supported ids read the bundled config instead of the Hub.
+    Remote-modeling snapshots (``auto_map``) predate transformers'
+    attention dispatch flags, so a non-eager family backend becomes ``eager``.
+    """
+    config_dict = _checkpoint_config_dict(model_name_or_path)
+    runtime = FAMILY_RUNTIME_CONFIGS.get(
+        config_dict["model_type"],
         ModelRuntimeConfig(),
     )
+    attn = runtime.trainer.attn_implementation
+    if config_dict.get("auto_map") and attn is not None and attn != "eager":
+        runtime = runtime.model_copy(
+            update={
+                "trainer": runtime.trainer.model_copy(
+                    update={"attn_implementation": "eager"}
+                )
+            }
+        )
+    return runtime

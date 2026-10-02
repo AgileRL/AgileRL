@@ -1,0 +1,65 @@
+{
+  "num_params": 3402836480,
+  "lora_info": {
+    "input_linear": [
+      {
+        "kind": "module",
+        "scope": "model.layers.shared_mlp",
+        "type": "Linear",
+        "in_features": 2560,
+        "out_features": 16384,
+        "count": 40
+      }
+    ],
+    "k_proj": [
+      {
+        "kind": "module",
+        "scope": "model.layers.self_attn",
+        "type": "Linear",
+        "in_features": 2560,
+        "out_features": 512,
+        "count": 40
+      }
+    ],
+    "o_proj": [
+      {
+        "kind": "module",
+        "scope": "model.layers.self_attn",
+        "type": "Linear",
+        "in_features": 2560,
+        "out_features": 2560,
+        "count": 40
+      }
+    ],
+    "output_linear": [
+      {
+        "kind": "module",
+        "scope": "model.layers.shared_mlp",
+        "type": "Linear",
+        "in_features": 8192,
+        "out_features": 2560,
+        "count": 40
+      }
+    ],
+    "q_proj": [
+      {
+        "kind": "module",
+        "scope": "model.layers.self_attn",
+        "type": "Linear",
+        "in_features": 2560,
+        "out_features": 2560,
+        "count": 40
+      }
+    ],
+    "v_proj": [
+      {
+        "kind": "module",
+        "scope": "model.layers.self_attn",
+        "type": "Linear",
+        "in_features": 2560,
+        "out_features": 512,
+        "count": 40
+      }
+    ]
+  }
+}

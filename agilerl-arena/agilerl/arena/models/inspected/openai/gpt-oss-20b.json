@@ -1,0 +1,67 @@
+{
+  "num_params": 20914757184,
+  "lora_info": {
+    "k_proj": [
+      {
+        "kind": "module",
+        "scope": "model.layers.self_attn",
+        "type": "Linear",
+        "in_features": 2880,
+        "out_features": 512,
+        "count": 24
+      }
+    ],
+    "mlp.experts.down_proj": [
+      {
+        "kind": "parameter",
+        "scope": "model.layers.mlp.experts",
+        "type": "PackedParameter",
+        "num_experts": 32,
+        "in_features": 2880,
+        "out_features": 2880,
+        "count": 24
+      }
+    ],
+    "mlp.experts.gate_up_proj": [
+      {
+        "kind": "parameter",
+        "scope": "model.layers.mlp.experts",
+        "type": "PackedParameter",
+        "num_experts": 32,
+        "in_features": 2880,
+        "out_features": 5760,
+        "count": 24
+      }
+    ],
+    "o_proj": [
+      {
+        "kind": "module",
+        "scope": "model.layers.self_attn",
+        "type": "Linear",
+        "in_features": 4096,
+        "out_features": 2880,
+        "count": 24
+      }
+    ],
+    "q_proj": [
+      {
+        "kind": "module",
+        "scope": "model.layers.self_attn",
+        "type": "Linear",
+        "in_features": 2880,
+        "out_features": 4096,
+        "count": 24
+      }
+    ],
+    "v_proj": [
+      {
+        "kind": "module",
+        "scope": "model.layers.self_attn",
+        "type": "Linear",
+        "in_features": 2880,
+        "out_features": 512,
+        "count": 24
+      }
+    ]
+  }
+}

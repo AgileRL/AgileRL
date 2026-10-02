@@ -472,6 +472,24 @@ class TrainingManifest(BaseModel):
                 self.network.lora_config,
                 source_set="lora_config" in self.network.model_fields_set,
             )
+            lora = self.network.lora_config
+            if (
+                isinstance(self.algorithm, LLMAlgorithmSpec)
+                and lora is not None
+                and lora.target_parameters
+            ):
+                # Expert LoRA (PEFT ParamWrapper) supports a single adapter.
+                if (
+                    "use_separate_reference_adapter" in self.algorithm.model_fields_set
+                    and self.algorithm.use_separate_reference_adapter
+                ):
+                    msg = (
+                        "Expert LoRA (network.lora_config.target_parameters) needs "
+                        "algorithm.use_separate_reference_adapter: false. Set it, "
+                        "or set target_parameters: [] to train without experts."
+                    )
+                    raise ValueError(msg)
+                self.algorithm.use_separate_reference_adapter = False
 
         if (
             isinstance(self.algorithm, RolloutLLMSpec)

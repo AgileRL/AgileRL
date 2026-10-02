@@ -18,6 +18,8 @@ from pydantic import (
 )
 from typing_extensions import Self
 
+from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
+
 T = TypeVar("T", bound=BaseModel)
 
 MlpActivation = Literal[
@@ -593,13 +595,11 @@ class LoraConfigDict(BaseModel):
     lora_r: int = Field(
         default=16,
         ge=1,
-        title="Rank",
         description="LoRA rank. Higher adapts more of the model, at proportional memory cost.",
     )
     lora_alpha: int = Field(
         default=32,
         ge=1,
-        title="Alpha",
         description="LoRA scaling. Conventionally set to twice the rank.",
     )
     target_modules: list[str] | str | set[str] = Field(
@@ -626,7 +626,6 @@ class LoraConfigDict(BaseModel):
         default=0.05,
         ge=0.0,
         le=1.0,
-        title="Dropout",
         description="Dropout on the adapter. Must be 0 when target_parameters is set.",
     )
 
@@ -804,3 +803,52 @@ class FinetuningNetworkSpec(BaseModel):
         default=None,
         description="LoRA adapter configuration. Unset fine-tunes without adapters.",
     )
+
+    @model_validator(mode="after")
+    def _check_lora_config_supported(self) -> Self:
+        """Reject a LoRA rank or targets a tracked Hub id cannot train with.
+
+        Ranks below the cap pass; the vLLM engine rounds ``max_lora_rank`` up
+        to a value it accepts. ``target_modules`` is ``all-linear`` or a list
+        of stored module names, and ``target_parameters`` a list of stored
+        paths; both match exactly. Unset ``target_parameters`` on a packed-MoE
+        model adapts every expert path; ``[]`` adapts none.
+        """
+        hub_id = self.pretrained_model_name_or_path
+        entry = SUPPORTED_MODEL_INFO.get(hub_id)
+        lora = self.lora_config
+        if entry is None or lora is None:
+            return self
+        if lora.target_parameters is None and entry.parameters:
+            lora.target_parameters = sorted(entry.parameters)
+            if "lora_dropout" not in lora.model_fields_set:
+                lora.lora_dropout = 0.0
+        if entry.lora_ranks is not None and lora.lora_r > max(entry.lora_ranks):
+            msg = (
+                f"LoRA rank {lora.lora_r} is above the largest rank vLLM serves "
+                f"for {hub_id} ({max(entry.lora_ranks)})"
+            )
+            raise ValueError(msg)
+        valid_modules = ", ".join(sorted(entry.modules))
+        if isinstance(lora.target_modules, str):
+            if lora.target_modules != "all-linear":
+                msg = (
+                    f"LoRA target_modules for {hub_id} must be 'all-linear' or a "
+                    f"list of module names, got {lora.target_modules!r}; "
+                    f"valid modules: {valid_modules}"
+                )
+                raise ValueError(msg)
+        elif unknown := sorted(set(lora.target_modules) - entry.modules):
+            msg = (
+                f"Unknown LoRA target_modules {unknown} for {hub_id}; "
+                f"valid modules: {valid_modules}"
+            )
+            raise ValueError(msg)
+        if unknown := sorted(set(lora.target_parameters or ()) - entry.parameters):
+            valid = ", ".join(sorted(entry.parameters)) or "none"
+            msg = (
+                f"Unknown LoRA target_parameters {unknown} for {hub_id}; "
+                f"valid parameters: {valid}"
+            )
+            raise ValueError(msg)
+        return self

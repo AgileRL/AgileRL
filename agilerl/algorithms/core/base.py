@@ -4457,8 +4457,8 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
 
         if HAS_LIGER_KERNEL:
             inner_model = (
-                peft_target.get_base_model()
-                if isinstance(peft_target, PeftModelProtocol)
+                peft_target.base_model.model
+                if hasattr(peft_target, "base_model")
                 else peft_target
             )
             already_patched = getattr(
@@ -4479,8 +4479,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
                         model=inner_model,
                         fused_linear_cross_entropy=False,
                     )
-                    # Boolean marker, not a Parameter or child module.
-                    object.__setattr__(inner_model, "_agilerl_liger_patched", True)
+                    inner_model._agilerl_liger_patched = True
                     logger.info(
                         "Liger Kernel instance-level patches applied to %s.",
                         type(inner_model).__name__,

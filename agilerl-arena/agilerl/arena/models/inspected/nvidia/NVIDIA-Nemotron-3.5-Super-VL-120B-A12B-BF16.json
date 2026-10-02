@@ -1,0 +1,95 @@
+{
+  "num_params": null,
+  "lora_info": {
+    "dense": [
+      {
+        "kind": "module"
+      }
+    ],
+    "down_proj": [
+      {
+        "kind": "module"
+      }
+    ],
+    "fc1": [
+      {
+        "kind": "module"
+      }
+    ],
+    "fc2": [
+      {
+        "kind": "module"
+      }
+    ],
+    "in_proj": [
+      {
+        "kind": "module"
+      }
+    ],
+    "k_proj": [
+      {
+        "kind": "module"
+      }
+    ],
+    "key": [
+      {
+        "kind": "module"
+      }
+    ],
+    "linear1": [
+      {
+        "kind": "module"
+      }
+    ],
+    "linear2": [
+      {
+        "kind": "module"
+      }
+    ],
+    "mixer.experts.down_proj": [
+      {
+        "kind": "parameter"
+      }
+    ],
+    "mixer.experts.up_proj": [
+      {
+        "kind": "parameter"
+      }
+    ],
+    "o_proj": [
+      {
+        "kind": "module"
+      }
+    ],
+    "out_proj": [
+      {
+        "kind": "module"
+      }
+    ],
+    "q_proj": [
+      {
+        "kind": "module"
+      }
+    ],
+    "query": [
+      {
+        "kind": "module"
+      }
+    ],
+    "up_proj": [
+      {
+        "kind": "module"
+      }
+    ],
+    "v_proj": [
+      {
+        "kind": "module"
+      }
+    ],
+    "value": [
+      {
+        "kind": "module"
+      }
+    ]
+  }
+}

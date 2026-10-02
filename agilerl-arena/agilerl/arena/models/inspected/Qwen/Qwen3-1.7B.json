@@ -1,0 +1,75 @@
+{
+  "num_params": 1720574976,
+  "lora_info": {
+    "down_proj": [
+      {
+        "kind": "module",
+        "scope": "model.layers.mlp",
+        "type": "Linear",
+        "in_features": 6144,
+        "out_features": 2048,
+        "count": 28
+      }
+    ],
+    "gate_proj": [
+      {
+        "kind": "module",
+        "scope": "model.layers.mlp",
+        "type": "Linear",
+        "in_features": 2048,
+        "out_features": 6144,
+        "count": 28
+      }
+    ],
+    "k_proj": [
+      {
+        "kind": "module",
+        "scope": "model.layers.self_attn",
+        "type": "Linear",
+        "in_features": 2048,
+        "out_features": 1024,
+        "count": 28
+      }
+    ],
+    "o_proj": [
+      {
+        "kind": "module",
+        "scope": "model.layers.self_attn",
+        "type": "Linear",
+        "in_features": 2048,
+        "out_features": 2048,
+        "count": 28
+      }
+    ],
+    "q_proj": [
+      {
+        "kind": "module",
+        "scope": "model.layers.self_attn",
+        "type": "Linear",
+        "in_features": 2048,
+        "out_features": 2048,
+        "count": 28
+      }
+    ],
+    "up_proj": [
+      {
+        "kind": "module",
+        "scope": "model.layers.mlp",
+        "type": "Linear",
+        "in_features": 2048,
+        "out_features": 6144,
+        "count": 28
+      }
+    ],
+    "v_proj": [
+      {
+        "kind": "module",
+        "scope": "model.layers.self_attn",
+        "type": "Linear",
+        "in_features": 2048,
+        "out_features": 1024,
+        "count": 28
+      }
+    ]
+  }
+}

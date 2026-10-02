@@ -2090,6 +2090,31 @@ class TestResolveAttnImplementation:
             == "flash_attention_2"
         )
 
+    def test_nemotron_remote_modeling_resolves_eager(self, monkeypatch):
+        monkeypatch.setattr(
+            "transformers.AutoConfig.from_pretrained",
+            lambda *args, **kwargs: SimpleNamespace(model_type="nemotron_h"),
+        )
+        monkeypatch.setattr(
+            "agilerl.architectures.catalog.PretrainedConfig.get_config_dict",
+            lambda path, **kwargs: (
+                {
+                    "model_type": "nemotron_h",
+                    "auto_map": {
+                        "AutoModelForCausalLM": (
+                            "modeling_nemotron_h.NemotronHForCausalLM"
+                        )
+                    },
+                },
+                {},
+            ),
+        )
+        monkeypatch.setattr("importlib.util.find_spec", lambda name: None)
+        assert (
+            resolve_attn_implementation(None, model_name_or_path="nvidia/nemotron")
+            == "eager"
+        )
+
 
 class _RegisterOnlyRegistry:
     """Attention-function registry that rejects item assignment."""

@@ -407,7 +407,7 @@ class LLMAlgorithmSpec(AlgorithmSpec):
     )
 
     agent_type: ClassVar[AgentType] = AgentType.LLMAgent
-    default_evo_steps: ClassVar[int] = 20
+    default_evo_steps: ClassVar[int] = 10
     hpo_ranges: ClassVar[dict[str, RLHyperparameter]] = LLM_HPO_RANGES
     env_type: ClassVar[LLMEnvType]
 

@@ -37,12 +37,20 @@ FLEX_TRAINER_KWARGS = GEMMA_TRAINER_KWARGS
 SWA_MODEL_TYPES = ("gemma3", "gemma3_text", "gemma4", "gemma4_text")
 
 
-def stub_config_model_type(monkeypatch: pytest.MonkeyPatch, model_type: str) -> None:
+def stub_config_model_type(
+    monkeypatch: pytest.MonkeyPatch,
+    model_type: str,
+    auto_map: dict[str, str] | None = None,
+) -> None:
+    config: dict[str, object] = {"model_type": model_type}
+    if auto_map is not None:
+        config["auto_map"] = auto_map
+
     @classmethod
     def fake_get_config_dict(
         cls, pretrained_model_name_or_path: str, **kwargs: object
     ) -> tuple[dict[str, object], dict[str, object]]:
-        return ({"model_type": model_type}, {})
+        return (config, {})
 
     monkeypatch.setattr(
         "agilerl.architectures.catalog.PretrainedConfig.get_config_dict",
@@ -164,16 +172,93 @@ class TestFamilyRuntime:
             raise_missing,
         )
         with pytest.raises(OSError, match="missing config"):
-            family_runtime("nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16")
+            family_runtime("nvidia/unlisted-model")
+
+    @pytest.mark.parametrize("model_type", ["nemotron_h", "nemotron_h_omni"])
+    def test_remote_modeling_downgrades_flash_attention_2_to_eager(
+        self, monkeypatch: pytest.MonkeyPatch, model_type: str
+    ) -> None:
+        stub_config_model_type(
+            monkeypatch,
+            model_type,
+            auto_map={
+                "AutoModelForCausalLM": "modeling_nemotron_h.NemotronHForCausalLM"
+            },
+        )
+
+        config = family_runtime("nvidia/nemotron")
+
+        assert config.trainer.attn_implementation == "eager"
+        assert config.trainer.trust_remote_code is True
+        assert (
+            FAMILY_RUNTIME_CONFIGS[model_type].trainer.attn_implementation
+            == "flash_attention_2"
+        )
+
+    def test_remote_modeling_downgrades_flex_attention_to_eager(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        stub_config_model_type(
+            monkeypatch,
+            "gemma4",
+            auto_map={"AutoModelForCausalLM": "modeling_gemma4.Gemma4ForCausalLM"},
+        )
+
+        config = family_runtime("google/gemma")
+
+        assert config.trainer.attn_implementation == "eager"
+
+    def test_remote_modeling_without_family_attn_stays_empty(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        stub_config_model_type(
+            monkeypatch,
+            "llama",
+            auto_map={"AutoModelForCausalLM": "modeling_llama.LlamaForCausalLM"},
+        )
+
+        config = family_runtime("meta/llama")
+
+        assert config.trainer.model_dump(exclude_none=True) == EMPTY_TRAINER_KWARGS
+
+    def test_supported_remote_id_skips_hub_lookup(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def raise_if_called(*args: object, **kwargs: object) -> None:
+            msg = "hub lookup"
+            raise AssertionError(msg)
+
+        monkeypatch.setattr(
+            "agilerl.architectures.catalog.PretrainedConfig.get_config_dict",
+            raise_if_called,
+        )
+
+        config = family_runtime("nvidia/NVIDIA-Nemotron-3-Nano-4B-BF16")
+
+        assert config.trainer.attn_implementation == "eager"
+        assert config.trainer.trust_remote_code is True
+
+    def test_supported_stock_id_skips_hub_lookup(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def raise_if_called(*args: object, **kwargs: object) -> None:
+            msg = "hub lookup"
+            raise AssertionError(msg)
+
+        monkeypatch.setattr(
+            "agilerl.architectures.catalog.PretrainedConfig.get_config_dict",
+            raise_if_called,
+        )
+
+        config = family_runtime("nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16")
+
+        assert config.trainer.attn_implementation == "flash_attention_2"
 
 
 class TestPretrainedModelType:
     def test_reads_config_json(self, monkeypatch: pytest.MonkeyPatch) -> None:
         stub_config_model_type(monkeypatch, "nemotron_h")
-        assert (
-            pretrained_model_type("nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16")
-            == "nemotron_h"
-        )
+        assert pretrained_model_type("nvidia/unlisted-model") == "nemotron_h"
 
     def test_missing_config_json_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
         def raise_missing(*args: object, **kwargs: object) -> None:
@@ -185,7 +270,21 @@ class TestPretrainedModelType:
             raise_missing,
         )
         with pytest.raises(OSError, match="missing config"):
-            pretrained_model_type("nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16")
+            pretrained_model_type("nvidia/unlisted-model")
+
+    def test_supported_id_reads_bundled_config(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def raise_if_called(*args: object, **kwargs: object) -> None:
+            msg = "hub lookup"
+            raise AssertionError(msg)
+
+        monkeypatch.setattr(
+            "agilerl.architectures.catalog.PretrainedConfig.get_config_dict",
+            raise_if_called,
+        )
+
+        assert pretrained_model_type("google/gemma-4-E4B-it") == "gemma4"
 
 
 class TestRuntimeConfigsForbidExtra:

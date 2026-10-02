@@ -1,0 +1,107 @@
+{
+  "num_params": 31577937344,
+  "lora_info": {
+    "down_proj": [
+      {
+        "kind": "module",
+        "scope": "model.layers.mixer.shared_experts",
+        "type": "Linear",
+        "in_features": 3712,
+        "out_features": 2688,
+        "count": 23
+      }
+    ],
+    "in_proj": [
+      {
+        "kind": "module",
+        "scope": "model.layers.mixer",
+        "type": "Linear",
+        "in_features": 2688,
+        "out_features": 10304,
+        "count": 23
+      }
+    ],
+    "k_proj": [
+      {
+        "kind": "module",
+        "scope": "model.layers.mixer",
+        "type": "Linear",
+        "in_features": 2688,
+        "out_features": 256,
+        "count": 6
+      }
+    ],
+    "mixer.experts.down_proj": [
+      {
+        "kind": "parameter",
+        "scope": "model.layers.mixer.experts",
+        "type": "PackedParameter",
+        "num_experts": 128,
+        "in_features": 2688,
+        "out_features": 1856,
+        "count": 23
+      }
+    ],
+    "mixer.experts.up_proj": [
+      {
+        "kind": "parameter",
+        "scope": "model.layers.mixer.experts",
+        "type": "PackedParameter",
+        "num_experts": 128,
+        "in_features": 1856,
+        "out_features": 2688,
+        "count": 23
+      }
+    ],
+    "o_proj": [
+      {
+        "kind": "module",
+        "scope": "model.layers.mixer",
+        "type": "Linear",
+        "in_features": 4096,
+        "out_features": 2688,
+        "count": 6
+      }
+    ],
+    "out_proj": [
+      {
+        "kind": "module",
+        "scope": "model.layers.mixer",
+        "type": "Linear",
+        "in_features": 4096,
+        "out_features": 2688,
+        "count": 23
+      }
+    ],
+    "q_proj": [
+      {
+        "kind": "module",
+        "scope": "model.layers.mixer",
+        "type": "Linear",
+        "in_features": 2688,
+        "out_features": 4096,
+        "count": 6
+      }
+    ],
+    "up_proj": [
+      {
+        "kind": "module",
+        "scope": "model.layers.mixer.shared_experts",
+        "type": "Linear",
+        "in_features": 2688,
+        "out_features": 3712,
+        "count": 23
+      }
+    ],
+    "v_proj": [
+      {
+        "kind": "module",
+        "scope": "model.layers.mixer",
+        "type": "Linear",
+        "in_features": 2688,
+        "out_features": 256,
+        "count": 6
+      }
+    ]
+  }
+}

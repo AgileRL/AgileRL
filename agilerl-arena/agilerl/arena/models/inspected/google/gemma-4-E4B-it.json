@@ -1,0 +1,333 @@
+{
+  "num_params": 7941100832,
+  "lora_info": {
+    "down_proj": [
+      {
+        "kind": "module",
+        "scope": "model.language_model.layers.mlp",
+        "type": "Linear",
+        "in_features": 10240,
+        "out_features": 2560,
+        "count": 42
+      }
+    ],
+    "embedding_projection": [
+      {
+        "kind": "module",
+        "scope": "model.embed_audio",
+        "type": "Linear",
+        "in_features": 1536,
+        "out_features": 2560,
+        "count": 1
+      },
+      {
+        "kind": "module",
+        "scope": "model.embed_vision",
+        "type": "Linear",
+        "in_features": 768,
+        "out_features": 2560,
+        "count": 1
+      }
+    ],
+    "gate_proj": [
+      {
+        "kind": "module",
+        "scope": "model.language_model.layers.mlp",
+        "type": "Linear",
+        "in_features": 2560,
+        "out_features": 10240,
+        "count": 42
+      }
+    ],
+    "input_proj": [
+      {
+        "kind": "module",
+        "scope": "model.vision_tower.patch_embedder",
+        "type": "Linear",
+        "in_features": 768,
+        "out_features": 768,
+        "count": 1
+      }
+    ],
+    "input_proj_linear": [
+      {
+        "kind": "module",
+        "scope": "model.audio_tower.subsample_conv_projection",
+        "type": "Linear",
+        "in_features": 1024,
+        "out_features": 1024,
+        "count": 1
+      }
+    ],
+    "k_proj": [
+      {
+        "kind": "module",
+        "scope": "model.language_model.layers.self_attn",
+        "type": "Linear",
+        "in_features": 2560,
+        "out_features": 512,
+        "count": 20
+      },
+      {
+        "kind": "module",
+        "scope": "model.language_model.layers.self_attn",
+        "type": "Linear",
+        "in_features": 2560,
+        "out_features": 1024,
+        "count": 4
+      }
+    ],
+    "linear": [
+      {
+        "kind": "module",
+        "scope": "model.audio_tower.layers.feed_forward1.ffw_layer_1",
+        "type": "Linear",
+        "in_features": 1024,
+        "out_features": 4096,
+        "count": 12
+      },
+      {
+        "kind": "module",
+        "scope": "model.audio_tower.layers.feed_forward1.ffw_layer_2",
+        "type": "Linear",
+        "in_features": 4096,
+        "out_features": 1024,
+        "count": 12
+      },
+      {
+        "kind": "module",
+        "scope": "model.audio_tower.layers.feed_forward2.ffw_layer_1",
+        "type": "Linear",
+        "in_features": 1024,
+        "out_features": 4096,
+        "count": 12
+      },
+      {
+        "kind": "module",
+        "scope": "model.audio_tower.layers.feed_forward2.ffw_layer_2",
+        "type": "Linear",
+        "in_features": 4096,
+        "out_features": 1024,
+        "count": 12
+      },
+      {
+        "kind": "module",
+        "scope": "model.audio_tower.layers.lconv1d.linear_end",
+        "type": "Linear",
+        "in_features": 1024,
+        "out_features": 1024,
+        "count": 12
+      },
+      {
+        "kind": "module",
+        "scope": "model.audio_tower.layers.lconv1d.linear_start",
+        "type": "Linear",
+        "in_features": 1024,
+        "out_features": 2048,
+        "count": 12
+      },
+      {
+        "kind": "module",
+        "scope": "model.audio_tower.layers.self_attn.k_proj",
+        "type": "Linear",
+        "in_features": 1024,
+        "out_features": 1024,
+        "count": 12
+      },
+      {
+        "kind": "module",
+        "scope": "model.audio_tower.layers.self_attn.post",
+        "type": "Linear",
+        "in_features": 1024,
+        "out_features": 1024,
+        "count": 12
+      },
+      {
+        "kind": "module",
+        "scope": "model.audio_tower.layers.self_attn.q_proj",
+        "type": "Linear",
+        "in_features": 1024,
+        "out_features": 1024,
+        "count": 12
+      },
+      {
+        "kind": "module",
+        "scope": "model.audio_tower.layers.self_attn.v_proj",
+        "type": "Linear",
+        "in_features": 1024,
+        "out_features": 1024,
+        "count": 12
+      },
+      {
+        "kind": "module",
+        "scope": "model.vision_tower.encoder.layers.mlp.down_proj",
+        "type": "Linear",
+        "in_features": 3072,
+        "out_features": 768,
+        "count": 16
+      },
+      {
+        "kind": "module",
+        "scope": "model.vision_tower.encoder.layers.mlp.gate_proj",
+        "type": "Linear",
+        "in_features": 768,
+        "out_features": 3072,
+        "count": 16
+      },
+      {
+        "kind": "module",
+        "scope": "model.vision_tower.encoder.layers.mlp.up_proj",
+        "type": "Linear",
+        "in_features": 768,
+        "out_features": 3072,
+        "count": 16
+      },
+      {
+        "kind": "module",
+        "scope": "model.vision_tower.encoder.layers.self_attn.k_proj",
+        "type": "Linear",
+        "in_features": 768,
+        "out_features": 768,
+        "count": 16
+      },
+      {
+        "kind": "module",
+        "scope": "model.vision_tower.encoder.layers.self_attn.o_proj",
+        "type": "Linear",
+        "in_features": 768,
+        "out_features": 768,
+        "count": 16
+      },
+      {
+        "kind": "module",
+        "scope": "model.vision_tower.encoder.layers.self_attn.q_proj",
+        "type": "Linear",
+        "in_features": 768,
+        "out_features": 768,
+        "count": 16
+      },
+      {
+        "kind": "module",
+        "scope": "model.vision_tower.encoder.layers.self_attn.v_proj",
+        "type": "Linear",
+        "in_features": 768,
+        "out_features": 768,
+        "count": 16
+      }
+    ],
+    "o_proj": [
+      {
+        "kind": "module",
+        "scope": "model.language_model.layers.self_attn",
+        "type": "Linear",
+        "in_features": 2048,
+        "out_features": 2560,
+        "count": 35
+      },
+      {
+        "kind": "module",
+        "scope": "model.language_model.layers.self_attn",
+        "type": "Linear",
+        "in_features": 4096,
+        "out_features": 2560,
+        "count": 7
+      }
+    ],
+    "output_proj": [
+      {
+        "kind": "module",
+        "scope": "model.audio_tower",
+        "type": "Linear",
+        "in_features": 1024,
+        "out_features": 1536,
+        "count": 1
+      }
+    ],
+    "per_layer_input_gate": [
+      {
+        "kind": "module",
+        "scope": "model.language_model.layers",
+        "type": "Linear",
+        "in_features": 2560,
+        "out_features": 256,
+        "count": 42
+      }
+    ],
+    "per_layer_model_projection": [
+      {
+        "kind": "module",
+        "scope": "model.language_model",
+        "type": "Linear",
+        "in_features": 2560,
+        "out_features": 10752,
+        "count": 1
+      }
+    ],
+    "per_layer_projection": [
+      {
+        "kind": "module",
+        "scope": "model.language_model.layers",
+        "type": "Linear",
+        "in_features": 256,
+        "out_features": 2560,
+        "count": 42
+      }
+    ],
+    "q_proj": [
+      {
+        "kind": "module",
+        "scope": "model.language_model.layers.self_attn",
+        "type": "Linear",
+        "in_features": 2560,
+        "out_features": 2048,
+        "count": 35
+      },
+      {
+        "kind": "module",
+        "scope": "model.language_model.layers.self_attn",
+        "type": "Linear",
+        "in_features": 2560,
+        "out_features": 4096,
+        "count": 7
+      }
+    ],
+    "relative_k_proj": [
+      {
+        "kind": "module",
+        "scope": "model.audio_tower.layers.self_attn",
+        "type": "Linear",
+        "in_features": 1024,
+        "out_features": 1024,
+        "count": 12
+      }
+    ],
+    "up_proj": [
+      {
+        "kind": "module",
+        "scope": "model.language_model.layers.mlp",
+        "type": "Linear",
+        "in_features": 2560,
+        "out_features": 10240,
+        "count": 42
+      }
+    ],
+    "v_proj": [
+      {
+        "kind": "module",
+        "scope": "model.language_model.layers.self_attn",
+        "type": "Linear",
+        "in_features": 2560,
+        "out_features": 512,
+        "count": 20
+      },
+      {
+        "kind": "module",
+        "scope": "model.language_model.layers.self_attn",
+        "type": "Linear",
+        "in_features": 2560,
+        "out_features": 1024,
+        "count": 4
+      }
+    ]
+  }
+}

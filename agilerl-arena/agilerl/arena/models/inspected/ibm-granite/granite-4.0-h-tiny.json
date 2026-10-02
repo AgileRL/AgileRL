@@ -1,0 +1,107 @@
+{
+  "num_params": 6939037248,
+  "lora_info": {
+    "block_sparse_moe.experts.down_proj": [
+      {
+        "kind": "parameter",
+        "scope": "model.layers.block_sparse_moe.experts",
+        "type": "PackedParameter",
+        "num_experts": 64,
+        "in_features": 1536,
+        "out_features": 512,
+        "count": 40
+      }
+    ],
+    "block_sparse_moe.experts.gate_up_proj": [
+      {
+        "kind": "parameter",
+        "scope": "model.layers.block_sparse_moe.experts",
+        "type": "PackedParameter",
+        "num_experts": 64,
+        "in_features": 1024,
+        "out_features": 1536,
+        "count": 40
+      }
+    ],
+    "in_proj": [
+      {
+        "kind": "module",
+        "scope": "model.layers.mamba",
+        "type": "Linear",
+        "in_features": 1536,
+        "out_features": 6448,
+        "count": 36
+      }
+    ],
+    "input_linear": [
+      {
+        "kind": "module",
+        "scope": "model.layers.shared_mlp",
+        "type": "Linear",
+        "in_features": 1536,
+        "out_features": 2048,
+        "count": 40
+      }
+    ],
+    "k_proj": [
+      {
+        "kind": "module",
+        "scope": "model.layers.self_attn",
+        "type": "Linear",
+        "in_features": 1536,
+        "out_features": 512,
+        "count": 4
+      }
+    ],
+    "o_proj": [
+      {
+        "kind": "module",
+        "scope": "model.layers.self_attn",
+        "type": "Linear",
+        "in_features": 1536,
+        "out_features": 1536,
+        "count": 4
+      }
+    ],
+    "out_proj": [
+      {
+        "kind": "module",
+        "scope": "model.layers.mamba",
+        "type": "Linear",
+        "in_features": 3072,
+        "out_features": 1536,
+        "count": 36
+      }
+    ],
+    "output_linear": [
+      {
+        "kind": "module",
+        "scope": "model.layers.shared_mlp",
+        "type": "Linear",
+        "in_features": 1024,
+        "out_features": 1536,
+        "count": 40
+      }
+    ],
+    "q_proj": [
+      {
+        "kind": "module",
+        "scope": "model.layers.self_attn",
+        "type": "Linear",
+        "in_features": 1536,
+        "out_features": 1536,
+        "count": 4
+      }
+    ],
+    "v_proj": [
+      {
+        "kind": "module",
+        "scope": "model.layers.self_attn",
+        "type": "Linear",
+        "in_features": 1536,
+        "out_features": 512,
+        "count": 4
+      }
+    ]
+  }
+}

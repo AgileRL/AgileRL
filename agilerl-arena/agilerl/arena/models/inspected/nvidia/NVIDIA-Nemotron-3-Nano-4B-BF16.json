@@ -1,0 +1,85 @@
+{
+  "num_params": 3973556832,
+  "lora_info": {
+    "down_proj": [
+      {
+        "kind": "module",
+        "scope": "model.layers.mixer",
+        "type": "Linear",
+        "in_features": 12544,
+        "out_features": 3136,
+        "count": 17
+      }
+    ],
+    "in_proj": [
+      {
+        "kind": "module",
+        "scope": "model.layers.mixer",
+        "type": "Linear",
+        "in_features": 3136,
+        "out_features": 17504,
+        "count": 21
+      }
+    ],
+    "k_proj": [
+      {
+        "kind": "module",
+        "scope": "model.layers.mixer",
+        "type": "Linear",
+        "in_features": 3136,
+        "out_features": 1024,
+        "count": 4
+      }
+    ],
+    "o_proj": [
+      {
+        "kind": "module",
+        "scope": "model.layers.mixer",
+        "type": "Linear",
+        "in_features": 5120,
+        "out_features": 3136,
+        "count": 4
+      }
+    ],
+    "out_proj": [
+      {
+        "kind": "module",
+        "scope": "model.layers.mixer",
+        "type": "Linear",
+        "in_features": 7680,
+        "out_features": 3136,
+        "count": 21
+      }
+    ],
+    "q_proj": [
+      {
+        "kind": "module",
+        "scope": "model.layers.mixer",
+        "type": "Linear",
+        "in_features": 3136,
+        "out_features": 5120,
+        "count": 4
+      }
+    ],
+    "up_proj": [
+      {
+        "kind": "module",
+        "scope": "model.layers.mixer",
+        "type": "Linear",
+        "in_features": 3136,
+        "out_features": 12544,
+        "count": 17
+      }
+    ],
+    "v_proj": [
+      {
+        "kind": "module",
+        "scope": "model.layers.mixer",
+        "type": "Linear",
+        "in_features": 3136,
+        "out_features": 1024,
+        "count": 4
+      }
+    ]
+  }
+}

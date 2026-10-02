@@ -29,6 +29,7 @@ from agilerl.arena.inference.cache import (
     save_active_session,
 )
 from agilerl.arena.models import verdict as manifest_verdict
+from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
 from agilerl.arena.models.schema import manifest_schema
 from agilerl.arena.on_prem import ArenaRootGroup, register_on_prem_manifest_group
 from agilerl.arena.output import (
@@ -616,6 +617,16 @@ def models_list(config: CommandConfig) -> None:
     """List HuggingFace models in the Arena catalog."""
     with arena_client(config) as client:
         emit_result(client.list_models())
+
+
+@models_group.command("supported")
+def models_supported() -> None:
+    """Print every supported model's static info as JSON (no server call)."""
+    click.echo(
+        json.dumps(
+            [info.model_dump(mode="json") for info in SUPPORTED_MODEL_INFO.values()]
+        )
+    )
 
 
 @models_group.command("info")

@@ -1,0 +1,67 @@
+{
+  "num_params": 3298793472,
+  "lora_info": {
+    "block_sparse_moe.experts.down_proj": [
+      {
+        "kind": "parameter",
+        "scope": "model.layers.block_sparse_moe.experts",
+        "type": "PackedParameter",
+        "num_experts": 40,
+        "in_features": 1536,
+        "out_features": 512,
+        "count": 32
+      }
+    ],
+    "block_sparse_moe.experts.gate_up_proj": [
+      {
+        "kind": "parameter",
+        "scope": "model.layers.block_sparse_moe.experts",
+        "type": "PackedParameter",
+        "num_experts": 40,
+        "in_features": 1024,
+        "out_features": 1536,
+        "count": 32
+      }
+    ],
+    "k_proj": [
+      {
+        "kind": "module",
+        "scope": "model.layers.self_attn",
+        "type": "Linear",
+        "in_features": 1536,
+        "out_features": 512,
+        "count": 32
+      }
+    ],
+    "o_proj": [
+      {
+        "kind": "module",
+        "scope": "model.layers.self_attn",
+        "type": "Linear",
+        "in_features": 1536,
+        "out_features": 1536,
+        "count": 32
+      }
+    ],
+    "q_proj": [
+      {
+        "kind": "module",
+        "scope": "model.layers.self_attn",
+        "type": "Linear",
+        "in_features": 1536,
+        "out_features": 1536,
+        "count": 32
+      }
+    ],
+    "v_proj": [
+      {
+        "kind": "module",
+        "scope": "model.layers.self_attn",
+        "type": "Linear",
+        "in_features": 1536,
+        "out_features": 512,
+        "count": 32
+      }
+    ]
+  }
+}

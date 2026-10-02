@@ -80,8 +80,7 @@ class TestCompletionLoggingConfig:
         assert config.jsonl_path is None
 
     @pytest.mark.parametrize(
-        "field",
-        ["interval", "num_groups", "samples_per_group", "max_chars", "history_size"],
+        "field", ["interval", "num_groups", "max_chars", "history_size"]
     )
     def test_rejects_non_positive_counts(self, field):
         with pytest.raises(ValueError, match=f"{field} must be >= 1, got 0"):
@@ -93,10 +92,10 @@ class TestTruncateMiddle:
         assert truncate_middle("abcdef", 6) == "abcdef"
 
     def test_long_text_keeps_head_and_tail(self):
-        assert truncate_middle("abcdefghij", 4) == "ab\n<LOG TRUNCATED: 6 chars>\nij"
+        assert truncate_middle("abcdefghij", 4) == "ab\n[... 6 chars truncated ...]\nij"
 
     def test_one_char_cap_keeps_the_last_char(self):
-        assert truncate_middle("abc", 1) == "\n<LOG TRUNCATED: 2 chars>\nc"
+        assert truncate_middle("abc", 1) == "\n[... 2 chars truncated ...]\nc"
 
 
 class TestBuildCompletionRecord:
@@ -184,7 +183,7 @@ class TestBuildCompletionRecord:
         )
 
         assert record.prompt == "ab"
-        assert record.completion == "cd\n<LOG TRUNCATED: 2 chars>\ngh"
+        assert record.completion == "cd\n[... 2 chars truncated ...]\ngh"
 
     def test_rejects_a_tokenizer_that_decodes_to_non_text(self):
         class NonTextTokenizer:
@@ -305,50 +304,6 @@ class TestCompletionLoggerLog:
         )
 
         assert [r.group_index for r in writer.writes[0]] == [0, 0, 1, 1]
-
-    def test_samples_per_group_logs_one_trajectory(self):
-        # Arrange
-        writer = ListWriter()
-        completion_logger = CompletionLogger(
-            CompletionLoggingConfig(interval=1, num_groups=1, samples_per_group=1),
-            [writer],
-        )
-        token_ids, action_masks, rewards = _batch(6)
-
-        # Act
-        completion_logger.log(
-            step=0,
-            agent_index=0,
-            tokenizer=LetterTokenizer(),
-            token_ids=token_ids,
-            action_masks=action_masks,
-            rewards=rewards,
-            group_size=2,
-        )
-
-        # Assert
-        (record,) = writer.writes[0]
-        assert record.reward == float(record.group_index * 2 + record.sample_index)
-
-    def test_samples_per_group_above_group_size_logs_the_whole_group(self):
-        writer = ListWriter()
-        completion_logger = CompletionLogger(
-            CompletionLoggingConfig(interval=1, num_groups=1, samples_per_group=5),
-            [writer],
-        )
-        token_ids, action_masks, rewards = _batch(4)
-
-        completion_logger.log(
-            step=0,
-            agent_index=0,
-            tokenizer=LetterTokenizer(),
-            token_ids=token_ids,
-            action_masks=action_masks,
-            rewards=rewards,
-            group_size=2,
-        )
-
-        assert [r.sample_index for r in writer.writes[0]] == [0, 1]
 
     def test_empty_batch_writes_nothing(self):
         writer = ListWriter()

@@ -47,7 +47,6 @@ class CompletionLoggingConfig:
 
     :param interval: Training steps between writes to the writers.
     :param num_groups: Prompt groups sampled per step.
-    :param samples_per_group: Trajectories logged per sampled group; unset logs the whole group.
     :param max_chars: Character cap per text field; longer text keeps its head and tail.
     :param history_size: Latest records kept for :meth:`CompletionLogger.dump_recent`.
     :param jsonl_path: File the training loop appends written records to, as JSON lines.
@@ -56,7 +55,6 @@ class CompletionLoggingConfig:
 
     interval: int = 10
     num_groups: int = 1
-    samples_per_group: int | None = None
     max_chars: int = 2000
     history_size: int = 8
     jsonl_path: str | None = None
@@ -65,9 +63,7 @@ class CompletionLoggingConfig:
     def __post_init__(self) -> None:
         """Reject non-positive counts."""
         for name, value in self.__dict__.items():
-            if name in ("seed", "jsonl_path") or value is None:
-                continue
-            if value < 1:
+            if name not in ("seed", "jsonl_path") and value < 1:
                 msg = f"{name} must be >= 1, got {value}"
                 raise ValueError(msg)
 
@@ -110,7 +106,7 @@ def truncate_middle(text: str, max_chars: int) -> str:
     head = max_chars // 2
     tail = max_chars - head
     dropped = len(text) - max_chars
-    return f"{text[:head]}\n<LOG TRUNCATED: {dropped} chars>\n{text[-tail:]}"
+    return f"{text[:head]}\n[... {dropped} chars truncated ...]\n{text[-tail:]}"
 
 
 def _decode_str(tokenizer: PreTrainedTokenizerBase, token_ids: list[int]) -> str:
@@ -281,16 +277,7 @@ class CompletionLogger:
         )
         records: list[CompletionRecord] = []
         for group_index in sorted(sampled):
-            if self.config.samples_per_group is None:
-                sample_indices: Sequence[int] = range(group_size)
-            else:
-                sample_indices = sorted(
-                    self._rng.sample(
-                        range(group_size),
-                        min(self.config.samples_per_group, group_size),
-                    )
-                )
-            for sample_index in sample_indices:
+            for sample_index in range(group_size):
                 row = group_index * group_size + sample_index
                 records.append(
                     build_completion_record(
