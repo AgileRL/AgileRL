@@ -10,10 +10,10 @@ import hashlib
 import json
 import logging
 import re
-from collections.abc import Callable, Generator, Iterable, Mapping, Sequence
+from collections.abc import Callable, Generator, Iterable, Sequence
 from contextlib import _GeneratorContextManager, contextmanager
 from pathlib import Path
-from typing import Any, Protocol, cast, overload, runtime_checkable
+from typing import Any, Protocol, cast, overload
 
 import torch
 import torch.nn.init as init
@@ -42,15 +42,15 @@ from transformers.conversion_mapping import (
 from transformers.utils import SAFE_WEIGHTS_INDEX_NAME, SAFE_WEIGHTS_NAME, cached_file
 
 from agilerl.arena.models.fsdp import FSDPConfig
+from agilerl.distributed.fsdp_meta import (
+    ModelWithTiedWeightKeys,
+    init_rope_buffers,
+    restore_after_to_empty,
+)
 from agilerl.distributed.process import is_distributed
 from agilerl.utils.patching import class_is_patched
 
 CHECKPOINT_FQN_PART = "_checkpoint_wrapped_module"
-
-
-@runtime_checkable
-class ModelWithTiedWeightKeys(Protocol):
-    all_tied_weights_keys: Mapping[str, str]
 
 
 def _module_pretrained_config(module: nn.Module) -> PretrainedConfig | None:
@@ -524,9 +524,15 @@ def _embed_params(model: nn.Module) -> set[nn.Parameter]:
     config = getattr(causal, "config", None)
     if config is None or not bool(getattr(config, "tie_word_embeddings", False)):
         return ignored
-    lm_head = getattr(causal, "lm_head", None) or getattr(causal, "embed_out", None)
-    if lm_head is not None:
-        ignored.update(lm_head.parameters())
+    for module in nn.Module.modules(model):
+        # PEFT __getattr__ forwards lm_head; ownership is the registered child.
+        children = dict(module.named_children())
+        head = children.get("lm_head")
+        if not isinstance(head, nn.Module):
+            head = children.get("embed_out")
+        if isinstance(head, nn.Module):
+            ignored.update(head.parameters())
+            break
     return ignored
 
 
@@ -875,16 +881,6 @@ def _restore_nonpersistent_buffers(
             dest.copy_(value.to(device=dest.device, dtype=dest.dtype))
             restored += 1
     return restored
-
-
-def _restore_after_to_empty(model: nn.Module) -> None:
-    """Re-tie input/output embeddings, which ``to_empty`` unties.
-
-    HuggingFace ``tie_weights`` on the causal LM also ties its submodules.
-    """
-    tie = getattr(_resolve_causal_lm(model), "tie_weights", None)
-    if callable(tie):
-        tie()
 
 
 PRETRAINED_MODEL_PREFIX = "pretrained_model."
@@ -1574,9 +1570,10 @@ def materialize_fsdp2_from_cpu_state(
     )
     target = torch.device("cpu") if config.cpu_offload else torch.device(device)
     model.to_empty(device=target)
-    _restore_after_to_empty(model)
+    restore_after_to_empty(model)
     if cpu_state is None:
         _load_sharded_weights_from_safetensors(model)
+        init_rope_buffers(model)
     else:
         set_full_model_state_dict(model, cpu_state, strict=True)
         _restore_nonpersistent_buffers(model, cpu_buffers or {})
