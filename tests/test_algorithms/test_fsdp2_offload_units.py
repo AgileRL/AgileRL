@@ -1472,6 +1472,99 @@ class TestSafetensorsShardKeys:
         assert torch.equal(model.attention.value.weight.detach(), value)
         assert torch.equal(model.scale.detach(), scale)
 
+    def test_loads_nemotron_h_backbone_keys_that_only_need_some_renames(self, tmp_path):
+        from agilerl.distributed.fsdp import _load_sharded_weights_from_safetensors
+
+        # Arrange
+        embeddings = torch.arange(8, dtype=torch.float32).reshape(4, 2)
+        norm = torch.tensor([3.0, 4.0])
+
+        class Body(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.embeddings = nn.Embedding(4, 2)
+                self.norm_f = nn.LayerNorm(2, bias=False)
+
+        class HFModel(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.model = Body()
+                self.config = PretrainedConfig(
+                    tie_word_embeddings=False,
+                    model_type="nemotron_h",
+                    name_or_path=str(tmp_path),
+                )
+
+        # The checkpoint needs nemotron_h's backbone -> model rename but not
+        # its embedding -> embeddings rename.
+        save_file(
+            {
+                "backbone.embeddings.weight": embeddings,
+                "backbone.norm_f.weight": norm,
+            },
+            str(tmp_path / "model.safetensors"),
+        )
+        model = HFModel()
+
+        # Act
+        _load_sharded_weights_from_safetensors(model)
+
+        # Assert
+        assert torch.equal(model.model.embeddings.weight.detach(), embeddings)
+        assert torch.equal(model.model.norm_f.weight.detach(), norm)
+
+    def test_loads_nemotron_h_packed_experts_from_renamed_backbone_keys(self, tmp_path):
+        from agilerl.distributed.fsdp import _load_sharded_weights_from_safetensors
+
+        # Arrange
+        experts = [torch.full((2, 3), float(index)) for index in range(3)]
+
+        class Experts(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.up_proj = nn.Parameter(torch.zeros(3, 2, 3))
+
+        class Mixer(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.experts = Experts()
+
+        class Layer(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.mixer = Mixer()
+
+        class Body(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.layers = nn.ModuleList([Layer()])
+
+        class HFModel(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.model = Body()
+                self.config = PretrainedConfig(
+                    tie_word_embeddings=False,
+                    model_type="nemotron_h",
+                    name_or_path=str(tmp_path),
+                )
+
+        save_file(
+            {
+                f"backbone.layers.0.mixer.experts.{index}.up_proj.weight": weight
+                for index, weight in enumerate(experts)
+            },
+            str(tmp_path / "model.safetensors"),
+        )
+        model = HFModel()
+
+        # Act
+        _load_sharded_weights_from_safetensors(model)
+
+        # Assert
+        loaded = model.model.layers[0].mixer.experts.up_proj.detach()
+        assert torch.equal(loaded, torch.stack(experts))
+
     def test_language_body_alias_uses_backbone_key(self):
         from agilerl.distributed.fsdp import checkpoint_key_candidates
 
