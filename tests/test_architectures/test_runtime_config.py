@@ -13,6 +13,7 @@ from agilerl.architectures.catalog import (
     family_runtime,
     pretrained_model_type,
 )
+from agilerl.architectures.gemma4 import gemma4_language_tower_hf_override
 from agilerl.architectures.nemotron_h.language_tower import (
     omni_language_tower_hf_override,
 )
@@ -82,6 +83,20 @@ class TestFamilyRuntimeConfigs:
         assert omni.multimodal_towers_kept_hf_override == {
             "architectures": ["NemotronH_Super_Omni_Reasoning_V3"],
         }
+        assert omni.enable_tower_connector_lora is True
+        assert base.enable_tower_connector_lora is False
+
+    def test_gemma4_adds_language_tower_without_tower_lora(self) -> None:
+        gemma4 = FAMILY_RUNTIME_CONFIGS["gemma4"]
+        gemma3 = FAMILY_RUNTIME_CONFIGS["gemma3"]
+        assert gemma4.trainer == gemma3.trainer
+        assert gemma4.language_tower.hf_overrides is gemma4_language_tower_hf_override
+        assert gemma4.language_tower.model_class_overrides is None
+        assert gemma4.enable_tower_connector_lora is False
+        assert gemma3.language_tower.hf_overrides is None
+        assert FAMILY_RUNTIME_CONFIGS["gemma4_text"].language_tower.hf_overrides is (
+            gemma4_language_tower_hf_override
+        )
 
     def test_nemotron_h_lookup(self) -> None:
         config = FAMILY_RUNTIME_CONFIGS["nemotron_h"]

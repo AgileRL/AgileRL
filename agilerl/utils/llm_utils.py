@@ -1491,10 +1491,11 @@ def patch_flex_attention_kernel_options(options: dict[str, Any] | None = None) -
     ``"flex_attention"`` entry that supplies safe defaults when the caller
     passes none. Idempotent; no-op if transformers/flex is unavailable.
 
-    **Auto-detect**: when ``options`` is ``None``, A100 (SM80) and earlier get
-    the SRAM-safe small blocks; Hopper (SM90+) fits the stock tiles, so only
-    short-query forwards get a ``BLOCK_M`` there (see
-    :func:`flex_decode_kernel_options`) and the autotuner keeps everything else.
+    **Auto-detect**: when ``options`` is ``None``, Hopper (SM90+) fits the
+    stock tiles, so only short-query forwards get a ``BLOCK_M`` there (see
+    :func:`flex_decode_kernel_options`) and the autotuner keeps everything
+    else. A100 (SM80) gets SRAM-safe small blocks; other pre-Hopper GPUs
+    (L4/A10, ~99 KB shared memory) get smaller backward tiles.
 
     :param options: Override the default kernel options (forward + backward
         block sizes, ``num_warps``, ``num_stages``). Installed unconditionally
@@ -1514,12 +1515,16 @@ def patch_flex_attention_kernel_options(options: dict[str, Any] | None = None) -
     # Small blocks exist only to fit pre-SM90 SRAM; Hopper keeps the
     # autotuner's blocks and gets a decode-safe BLOCK_M per call instead.
     needs_sram_safe_blocks = True
+    needs_tiny_blocks = False
     if options is None and torch.cuda.is_available():
         try:
             capability = torch.cuda.get_device_capability()
         except Exception:
             capability = (0, 0)
         needs_sram_safe_blocks = capability < (9, 0)
+        # A100 has ~163 KB of shared memory; other pre-Hopper GPUs (L4/A10:
+        # ~99 KB) need smaller backward tiles to stay under their limit.
+        needs_tiny_blocks = needs_sram_safe_blocks and capability != (8, 0)
 
     # head_dim=256 makes the Q/K/V tiles (BLOCK x head_dim) the dominant SRAM
     # cost, so use small 32-wide blocks to fit the A100's ~163 KB shared memory.
@@ -1537,6 +1542,9 @@ def patch_flex_attention_kernel_options(options: dict[str, Any] | None = None) -
             "num_warps": 4,
             "num_stages": 2,
         }
+        if needs_tiny_blocks:
+            opts["BLOCK_N1"] = 16
+            opts["BLOCK_M2"] = 16
 
     def _flex_with_opts(
         module: torch.nn.Module,
