@@ -140,12 +140,29 @@ def process_observation(obs: object, observation_field: str | None = None) -> st
         data = result.get("data")
         if isinstance(data, str):
             return data
+    elif result is not None:
+        content = getattr(result, "content", None)
+        if isinstance(content, list):
+            texts = [
+                block.text
+                for block in content
+                if isinstance(getattr(block, "text", None), str)
+            ]
+            if texts:
+                return "\n".join(texts)
+        data = getattr(result, "data", None)
+        if isinstance(data, str):
+            return data
     prompt = obs.get("prompt")
     if isinstance(prompt, str):
         return prompt
     error = obs.get("error")
     if error:
-        return f"Error: {error}"
+        if isinstance(error, dict):
+            message = error.get("message", error)
+            return f"Error: {message}"
+        message = getattr(error, "message", error)
+        return f"Error: {message}"
     asked = (
         f" No '{observation_field}' either, which the manifest named."
         if observation_field is not None

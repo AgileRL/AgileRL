@@ -229,6 +229,9 @@ def bare_rollout_env() -> RolloutHarness:
     w.tools = None  # optional config; __init__ default, read by the tokenize paths
     w.chat_template_kwargs = {}  # __init__ default, read by the tokenize paths
     w.sampling_logps = []  # read by get_episode_data
+    w._tool_parser = None  # __init__ default, read by the step phases
+    w._pending_tool_action = None  # __init__ default, read by the step phases
+    w._pending_tool_error = None  # __init__ default, read by the step phases
     # per-role boundary-frame cache; __init__ default, read by the feedback tokenize path
     w._boundary_parts = {}
     w._system_prompt = None  # __init__ default, read by the initial-prompt path

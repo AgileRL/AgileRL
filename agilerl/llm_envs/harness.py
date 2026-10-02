@@ -22,6 +22,11 @@ from agilerl.llm_envs.observation import (
     observation_text_and_image,
     process_observation,
 )
+from agilerl.llm_envs.tool_parsers import (
+    ParsedToolCall,
+    ToolCallParseStatus,
+    detect_tool_parser,
+)
 from agilerl.protocols import EnvClientProtocol, TextEnvProtocol
 from agilerl.utils.env_utils import construct_entrypoint_env
 from agilerl.utils.llm_utils import max_prompt_tokens_for_model_len
@@ -39,6 +44,19 @@ def _coerced_system_prompt(value: object) -> str | None:
     if isinstance(value, str) and value:
         return value
     return None
+
+
+def _parse_error_message(call: ParsedToolCall) -> str:
+    """Model-facing feedback for one malformed tool call."""
+    if call.status is ToolCallParseStatus.INVALID_JSON:
+        return "Tool call arguments are not valid JSON. Emit one valid tool call."
+    if call.status is ToolCallParseStatus.UNCLOSED_BLOCK:
+        return "Unclosed tool call block. Emit one complete tool call."
+    if call.status is ToolCallParseStatus.MISSING_NAME:
+        return "Tool call is missing its name. Emit one valid tool call."
+    if call.status is ToolCallParseStatus.UNKNOWN_TOOL:
+        return f"Unknown tool {call.name!r}. Call a listed tool."
+    return "Malformed tool call. Emit one valid tool call."
 
 
 class RolloutHarness:
@@ -143,7 +161,12 @@ class RolloutHarness:
                 mcp_tool=mcp_tool,
                 action_field=action_field,
             )
+        # mcp_tool wraps the generation as one fixed-tool call; native parsing stays off.
+        self._mcp_tool = mcp_tool or getattr(self._env_client, "mcp_tool", None)
         self.tokenizer = tokenizer
+        self._tool_parser = detect_tool_parser(tokenizer)
+        self._pending_tool_action: ParsedToolCall | None = None
+        self._pending_tool_error: str | None = None
         self.apply_chat_template = apply_chat_template
         self.chat_template_kwargs: dict[str, Any] = dict(chat_template_kwargs or {})
         # Tool schemas fetched lazily on first use (see :attr:`tools`).
@@ -694,8 +717,9 @@ class RolloutHarness:
             self.full_ids = full_ids
             self._multimodal_turn = None
             gen_ids = sequence[0, prompt_len:].detach()
+            gen_list = gen_ids.tolist()
             gen_text = self.tokenizer.decode(
-                gen_ids.tolist(),
+                gen_list,
                 skip_special_tokens=True,
             )
             if not isinstance(gen_text, str):
@@ -706,12 +730,14 @@ class RolloutHarness:
             gen_end = full_ids.shape[1]
             self.turn_boundaries.append((prompt_len, gen_end, self._turn_idx))
             self._gen_texts.append(gen_text)
+            self._decide_tool_action(gen_list)
             return gen_text
         full_ids = self.full_ids
         # Only the new suffix crosses devices; the prefix is byte-identical to ``full_ids``.
         gen_ids = sequence[0, prompt_len:].detach().to(full_ids.device)
+        gen_list = gen_ids.tolist()
         gen_text = self.tokenizer.decode(
-            gen_ids.tolist(),
+            gen_list,
             skip_special_tokens=True,
         )
         if not isinstance(gen_text, str):
@@ -723,7 +749,38 @@ class RolloutHarness:
         gen_end = self.full_ids.shape[1]
         self.turn_boundaries.append((prompt_len, gen_end, self._turn_idx))
         self._gen_texts.append(gen_text)
+        self._decide_tool_action(gen_list)
         return gen_text
+
+    def _decide_tool_action(self, gen_ids: list[int]) -> None:
+        """Decide this turn's env input: a parsed call, an error, or text.
+
+        Native parsing runs when a grammar matched, the env advertises tools,
+        and ``mcp_tool`` is unset. ``mcp_tool`` wraps the generation as one
+        fixed-tool call. A tool env with no grammar returns retry feedback
+        instead of stepping with text.
+        """
+        self._pending_tool_action = None
+        self._pending_tool_error = None
+        if self._mcp_tool or not self.tools:
+            return
+        if self._tool_parser is None:
+            self._pending_tool_error = (
+                "No tool-call grammar for this tokenizer. Emit one tool call."
+            )
+            return
+        _, calls = self._tool_parser.extract(gen_ids, self.tools)
+        for call in calls:
+            if call.status is not ToolCallParseStatus.OK:
+                self._pending_tool_error = _parse_error_message(call)
+                return
+        if not calls:
+            self._pending_tool_error = "No tool call found. Emit one tool call."
+            return
+        if len(calls) > 1:
+            self._pending_tool_error = "Emit one tool call per turn; got several."
+            return
+        self._pending_tool_action = calls[0]
 
     def _step_env(
         self, gen_text: str
@@ -732,8 +789,24 @@ class RolloutHarness:
 
         Carries the observation's chat role alongside its text so :meth:`_step_apply`
         frames a tool result as a tool turn rather than as something the user said.
+        A pending parse error answers without I/O; a pending call steps instead
+        of ``gen_text``. Pending state consumes once, so a repeated call can
+        never double-execute a tool.
         """
-        payload, reward, terminated, truncated, info = self._env_client.step(gen_text)
+        error, self._pending_tool_error = self._pending_tool_error, None
+        if error is not None:
+            return (
+                f"Error: {error}",
+                "tool",
+                0.0,
+                False,
+                False,
+                {"role": "tool"},
+            )
+        action, self._pending_tool_action = self._pending_tool_action, None
+        payload, reward, terminated, truncated, info = self._env_client.step(
+            action if action is not None else gen_text
+        )
         return (
             self._render_observation(payload),
             observation_role(payload, info),
