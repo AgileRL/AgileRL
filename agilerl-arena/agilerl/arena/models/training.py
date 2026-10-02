@@ -22,6 +22,7 @@ from typing_extensions import Self
 
 RolloutMode = Literal["colocated", "async"]
 RolloutVersionStamp = Literal["publish", "oldest_turn"]
+WeightSyncMode = Literal["drain", "inflight"]
 CheckpointExportFormat = Literal["adapter", "merged"]
 CheckpointExportTrigger = Literal["final", "best", "on_demand", "every"]
 
@@ -425,6 +426,16 @@ class TrainingSpec(BaseModel):
             "of episode duration."
         ),
     )
+    weight_sync_mode: WeightSyncMode | None = Field(
+        default=None,
+        description=(
+            "How rollout engines apply weight syncs. 'drain' quiesces "
+            "generation at turn boundaries before swapping adapters; "
+            "'inflight' swaps double-buffered adapter slots without draining, "
+            "so episodes run to completion across syncs. Only applies under "
+            "async rollout; 'inflight' requires 'oldest_turn' stamping."
+        ),
+    )
     checkpoint_export: CheckpointExportSpec | None = Field(
         default=None,
         description=(
@@ -504,6 +515,19 @@ class TrainingSpec(BaseModel):
             self.rollout_batch_size = 1
         if self.weight_sync_interval is None:
             self.weight_sync_interval = 1
+        if self.weight_sync_mode is None:
+            self.weight_sync_mode = "drain"
+        if (
+            self.weight_sync_mode == "inflight"
+            and self.rollout_version_stamp == "publish"
+        ):
+            msg = (
+                "training.weight_sync_mode 'inflight' requires "
+                "training.rollout_version_stamp 'oldest_turn': mixed-version "
+                "episodes must be fenced by their oldest turn, not their "
+                "publish version."
+            )
+            raise ValueError(msg)
 
         # An engine publishes group_index in [0, rollout_batch_size) and the
         # buffer shards on group_index % trainers, so a remainder leaves the

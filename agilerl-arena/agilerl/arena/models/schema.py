@@ -319,7 +319,10 @@ def training_schema_conditionals() -> list[dict[str, Any]]:
         {
             "if": async_llm_rollout_if(),
             "then": training_then(
-                {"rollout_version_stamp": {"default": "oldest_turn"}}
+                {
+                    "rollout_version_stamp": {"default": "oldest_turn"},
+                    "weight_sync_mode": {"default": "drain"},
+                }
             ),
         },
         {
