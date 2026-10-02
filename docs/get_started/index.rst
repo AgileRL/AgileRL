@@ -33,14 +33,16 @@ AgileRL ships optional dependency groups that you can install as needed:
        environment validation, cloud training and deployment without the
        framework. ``pip install agilerl`` includes it either way.
    * - ``agilerl[llm]``
-     - Hugging Face transformers, PEFT, datasets, plus Liger and
-       bitsandbytes (Linux).
-   * - ``agilerl[vllm]``
-     - vLLM (Linux).
+     - Hugging Face transformers, PEFT, datasets, Liger,
+       bitsandbytes, and vLLM (Linux).
+   * - ``agilerl[cpu-llm]``
+     - Same Hugging Face stack as ``[llm]``, without vLLM.
+       Use this when you do not need the vLLM engine (for
+       example with ``[cpu]``).
    * - ``agilerl[cpu]``
      - CPU-only PyTorch wheels (no NVIDIA stack).
    * - ``agilerl[all]``
-     - Box2D, LLM, and vLLM extras.
+     - Box2D and LLM extras.
 
 In development mode, quote the extras - for example:
 

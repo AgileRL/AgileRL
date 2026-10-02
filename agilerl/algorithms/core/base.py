@@ -5508,7 +5508,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         :rtype: tuple[list[torch.Tensor], list[torch.Tensor]]
         """
         if SamplingParams is None:
-            msg = "vLLM is required for colocated generation. Install AgileRL with vLLM support for this platform: `pip install agilerl[vllm]`."
+            msg = "vLLM is required for colocated generation. Install AgileRL with vLLM support for this platform: `pip install agilerl[llm]`."
             raise ImportError(msg)
         vllm_config = self.vllm_config
         assert vllm_config is not None, (
@@ -6138,7 +6138,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
     def _configure_vllm(self) -> None:
         """Configure vLLM for efficient inference during generation in 'get_action'."""
         if LLM is None:
-            msg = "vLLM is required for colocated generation. Install AgileRL with vLLM support for this platform: `pip install agilerl[vllm]`."
+            msg = "vLLM is required for colocated generation. Install AgileRL with vLLM support for this platform: `pip install agilerl[llm]`."
             raise ImportError(msg)
         if self.vllm_config is None:
             warnings.warn(

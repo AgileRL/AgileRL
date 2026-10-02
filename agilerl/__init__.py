@@ -40,7 +40,8 @@ def get_extra_dependencies(package: str, extra: str) -> list[str]:
     return deps
 
 
-LLM_PACKAGES = get_extra_dependencies("agilerl", "llm")
+# Hugging Face / PEFT / datasets stack. vLLM is HAS_VLLM.
+LLM_PACKAGES = get_extra_dependencies("agilerl", "cpu-llm")
 
 
 def _is_distribution_installed(distribution: str) -> bool:
