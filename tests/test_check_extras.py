@@ -318,6 +318,16 @@ def test_arena_pin_override_requires_exact(
     )
 
 
+def test_llm_extra_composes_cpu_llm_and_vllm(check_extras: ModuleType) -> None:
+    extras = check_extras._extras(check_extras.PARENT_PYPROJECT)
+
+    assert extras["llm"] == ["agilerl[cpu-llm,vllm]"]
+    assert check_extras._requirements("llm", extras, set()) == (
+        check_extras._requirements("cpu-llm", extras, set())
+        | check_extras._requirements("vllm", extras, set())
+    )
+
+
 def test_all_extra_unions_parts(check_extras: ModuleType, tmp_path: Path) -> None:
     pyproject = _write_pyproject(tmp_path)
     _bind_repo(check_extras, tmp_path, pyproject)
