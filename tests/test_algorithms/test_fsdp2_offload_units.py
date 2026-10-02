@@ -12,16 +12,22 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
+from peft import LoraConfig, get_peft_model
 from safetensors.torch import save_file
 from torch import nn
+from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.tensor import Replicate, Shard
-from transformers import PretrainedConfig
+from transformers import AutoConfig, AutoModelForCausalLM, PretrainedConfig, Qwen3Config
 
 from agilerl.algorithms.core.base import LLMAlgorithm
 from agilerl.algorithms.grpo import GRPO
 from agilerl.algorithms.ppo_llm import PPO
 from agilerl.algorithms.reinforce_llm import REINFORCE
-from agilerl.distributed import CPUOffloadOptimizer, FSDPConfig
+from agilerl.distributed import (
+    CPUOffloadOptimizer,
+    FSDPConfig,
+    materialize_fsdp2_from_cpu_state,
+)
 from agilerl.distributed.runtime import DPRuntime, FSDPRuntime
 
 cuda_required = pytest.mark.skipif(
@@ -1061,7 +1067,7 @@ class TestMaterializeFsdp2FromCpuState:
                 "agilerl.distributed.fsdp.apply_fsdp2",
                 side_effect=lambda module, *_a, **_k: module,
             ),
-            patch("agilerl.distributed.fsdp._restore_after_to_empty"),
+            patch("agilerl.distributed.fsdp.restore_after_to_empty"),
             patch("agilerl.distributed.fsdp._share_fsdp_comm_streams"),
         ):
             out = materialize_fsdp2_from_cpu_state(
@@ -1096,7 +1102,7 @@ class TestMaterializeFsdp2FromCpuState:
                 "agilerl.distributed.fsdp.apply_fsdp2",
                 side_effect=lambda module, *_a, **_k: module,
             ),
-            patch("agilerl.distributed.fsdp._restore_after_to_empty"),
+            patch("agilerl.distributed.fsdp.restore_after_to_empty"),
             patch("agilerl.distributed.fsdp._share_fsdp_comm_streams"),
         ):
             out = materialize_fsdp2_from_cpu_state(
@@ -1148,7 +1154,7 @@ class TestMaterializeFsdp2FromCpuState:
                 "agilerl.distributed.fsdp.apply_fsdp2",
                 side_effect=lambda module, *_a, **_k: module,
             ),
-            patch("agilerl.distributed.fsdp._restore_after_to_empty"),
+            patch("agilerl.distributed.fsdp.restore_after_to_empty"),
             patch("agilerl.distributed.fsdp._share_fsdp_comm_streams"),
         ):
             materialize_fsdp2_from_cpu_state(model, "cpu", FSDPConfig(cpu_offload=True))
@@ -1177,12 +1183,164 @@ class TestMaterializeFsdp2FromCpuState:
                 "agilerl.distributed.fsdp._load_sharded_weights_from_safetensors",
                 side_effect=lambda *_a, **_k: loaded.append("shard_load"),
             ),
-            patch("agilerl.distributed.fsdp._restore_after_to_empty"),
+            patch("agilerl.distributed.fsdp.restore_after_to_empty"),
             patch("agilerl.distributed.fsdp._share_fsdp_comm_streams"),
         ):
             materialize_fsdp2_from_cpu_state(model, "cpu", FSDPConfig(cpu_offload=True))
 
         assert loaded == ["shard_load"]
+
+    def test_meta_peft_tied_model_matches_dense_and_trains_lora(
+        self, tmp_path, gloo_process_group
+    ):
+        # Arrange
+        torch.manual_seed(0)
+        config = Qwen3Config(
+            vocab_size=64,
+            hidden_size=32,
+            intermediate_size=64,
+            num_hidden_layers=2,
+            num_attention_heads=4,
+            num_key_value_heads=2,
+            head_dim=8,
+            tie_word_embeddings=True,
+        )
+        AutoModelForCausalLM.from_config(config).save_pretrained(tmp_path)
+        dense = AutoModelForCausalLM.from_pretrained(tmp_path)
+        with torch.device("meta"):
+            meta = AutoModelForCausalLM.from_config(
+                AutoConfig.from_pretrained(tmp_path)
+            )
+        meta.config.name_or_path = str(tmp_path)
+        lora = LoraConfig(r=4, target_modules=["q_proj", "v_proj"])
+        model = get_peft_model(meta, lora, adapter_name="actor")
+        ids = torch.randint(0, 64, (2, 6))
+
+        # Act
+        materialize_fsdp2_from_cpu_state(
+            model,
+            "cpu",
+            FSDPConfig(param_dtype="float32", reduce_dtype="float32"),
+            mesh=init_device_mesh("cpu", (1,)),
+            gradient_checkpointing=True,
+        )
+        logits = model(input_ids=ids).logits
+        logits.log_softmax(-1).mean().backward()
+
+        # Assert
+        causal = model.get_base_model()
+        assert causal.lm_head.weight is causal.model.embed_tokens.weight
+        torch.testing.assert_close(
+            logits.detach(), dense(input_ids=ids).logits.detach(), rtol=0, atol=0
+        )
+        lora_b_grads = [
+            param.grad
+            for name, param in model.named_parameters()
+            if "lora_B.actor" in name
+        ]
+        assert lora_b_grads
+        assert all(grad is not None and grad.abs().max() > 0 for grad in lora_b_grads)
+
+
+class TestRestoreAfterToEmpty:
+    """Re-tie through PEFT getattr forwarding; raise if a tied key stays separate."""
+
+    def test_ties_inner_head_when_peft_shell_has_noop_tie_weights(self):
+        from agilerl.distributed.fsdp import restore_after_to_empty
+
+        class Causal(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.model = nn.Module()
+                self.model.embed_tokens = nn.Embedding(4, 2)
+                self.lm_head = nn.Linear(2, 4, bias=False)
+                self.all_tied_weights_keys = {
+                    "lm_head.weight": "model.embed_tokens.weight"
+                }
+
+            def tie_weights(self) -> None:
+                self.lm_head.weight = self.model.embed_tokens.weight
+
+        class PeftShell(nn.Module):
+            def __init__(self, inner: nn.Module) -> None:
+                super().__init__()
+                self.base_model = inner
+
+            def tie_weights(self) -> None:
+                return
+
+            def __getattr__(self, name: str):
+                try:
+                    return super().__getattr__(name)
+                except AttributeError:
+                    return getattr(self.base_model, name)
+
+        inner = Causal()
+        model = PeftShell(inner)
+
+        restore_after_to_empty(model)
+
+        assert inner.lm_head.weight is inner.model.embed_tokens.weight
+
+    def test_raises_when_peft_forwards_head_and_inner_stays_untied(self):
+        from agilerl.distributed.fsdp import restore_after_to_empty
+
+        class Causal(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.model = nn.Module()
+                self.model.embed_tokens = nn.Embedding(4, 2)
+                self.lm_head = nn.Linear(2, 4, bias=False)
+                self.all_tied_weights_keys = {
+                    "lm_head.weight": "model.embed_tokens.weight"
+                }
+
+            def tie_weights(self) -> None:
+                return
+
+        class PeftShell(nn.Module):
+            def __init__(self, inner: nn.Module) -> None:
+                super().__init__()
+                self.base_model = inner
+
+            def __getattr__(self, name: str):
+                try:
+                    return super().__getattr__(name)
+                except AttributeError:
+                    return getattr(self.base_model, name)
+
+        model = PeftShell(Causal())
+
+        with pytest.raises(RuntimeError, match="is not tied to"):
+            restore_after_to_empty(model)
+
+    def test_returns_when_model_has_no_output_head(self):
+        from agilerl.distributed.fsdp import restore_after_to_empty
+
+        model = nn.Linear(2, 4)
+        weight = model.weight
+
+        restore_after_to_empty(model)
+
+        assert model.weight is weight
+
+    def test_ties_head_when_owner_has_no_tied_weight_keys(self):
+        from agilerl.distributed.fsdp import restore_after_to_empty
+
+        class Owner(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.embed_tokens = nn.Embedding(4, 2)
+                self.lm_head = nn.Linear(2, 4, bias=False)
+
+            def tie_weights(self) -> None:
+                self.lm_head.weight = self.embed_tokens.weight
+
+        model = Owner()
+
+        restore_after_to_empty(model)
+
+        assert model.lm_head.weight is model.embed_tokens.weight
 
 
 class TestLoraConfigsEquivalent:

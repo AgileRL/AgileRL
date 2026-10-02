@@ -24,6 +24,7 @@ jobs:
             CUDA_VISIBLE_DEVICES: ''
             ACCELERATE_USE_CPU: 'true'
             PYTHONPATH: ${{ github.workspace }}/agilerl-arena
+            COVERAGE_FILE: ${{ github.workspace }}/.coverage
 
         steps:
             - uses: actions/checkout@v5
@@ -89,7 +90,7 @@ jobs:
                   name: cov-3.13-cpu-${{ matrix.shard }}
                   include-hidden-files: true
                   if-no-files-found: error
-                  path: .coverage
+                  path: .coverage*
 
     gpu:
         runs-on: gha-runner-scale-set
@@ -106,6 +107,7 @@ jobs:
             TORCHINDUCTOR_CACHE_DIR: /tmp/inductor-cache
             PYTEST_XDIST_AUTO_NUM_WORKERS: '4'
             PYTHONPATH: ${{ github.workspace }}/agilerl-arena
+            COVERAGE_FILE: ${{ github.workspace }}/.coverage
 
         steps:
             - uses: actions/checkout@v5
@@ -165,7 +167,7 @@ jobs:
                   name: cov-3.13-gpu-${{ matrix.shard }}
                   include-hidden-files: true
                   if-no-files-found: error
-                  path: .coverage
+                  path: .coverage*
             - name: Upload junit
               if: always()
               uses: actions/upload-artifact@v4
@@ -199,15 +201,19 @@ jobs:
             - name: Combine 3.13 coverage
               run: |
                   set -eu
-                  test -f coverage-parts/cov-3.13-cpu-1/.coverage
-                  test -f coverage-parts/cov-3.13-cpu-2/.coverage
-                  test -f coverage-parts/cov-3.13-gpu-1/.coverage
-                  test -f coverage-parts/cov-3.13-gpu-2/.coverage
                   index=0
-                  while IFS= read -r part; do
-                    cp "$part" ".coverage.${index}"
-                    index=$((index + 1))
-                  done < <(find coverage-parts -name .coverage -print)
+                  for shard in cov-3.13-cpu-1 cov-3.13-cpu-2 cov-3.13-gpu-1 cov-3.13-gpu-2; do
+                    dir="coverage-parts/${shard}"
+                    test -d "$dir"
+                    shard_files=0
+                    while IFS= read -r part; do
+                      cp "$part" ".coverage.${index}"
+                      index=$((index + 1))
+                      shard_files=$((shard_files + 1))
+                    done < <(find "$dir" \( -name '.coverage' -o -name '.coverage.*' \) -print)
+                    test "$shard_files" -ge 1
+                  done
+                  test "$index" -ge 4
                   uv run --no-sync coverage combine
                   uv run --no-sync coverage json --rcfile=pyproject.toml -o framework-coverage.json
             - uses: actions/upload-artifact@v4
