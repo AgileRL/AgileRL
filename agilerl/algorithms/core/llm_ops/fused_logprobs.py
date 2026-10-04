@@ -132,6 +132,23 @@ def _fused_logprob_chunk_dispatch(
         return _fused_logprob_chunk(*args)
 
 
+def scored_position_index(score_mask: torch.Tensor) -> torch.Tensor:
+    """Column index of each row's scored positions, left-aligned in order.
+
+    Every row is padded to the longest row's count (at least one column) with
+    its unscored positions, so the index never repeats a column within a row.
+
+    :param score_mask: ``(B, T)`` mask of the positions to score.
+    :type score_mask: torch.Tensor
+    :return: ``(B, L)`` long column indices into ``score_mask``.
+    :rtype: torch.Tensor
+    """
+    keep = score_mask.to(torch.bool)
+    width = max(int(keep.sum(dim=-1).max().item()), 1)
+    order = torch.argsort((~keep).to(torch.int32), dim=-1, stable=True)
+    return order[:, :width]
+
+
 def fused_linear_logprobs_chunked(
     hidden: torch.Tensor,
     head_w: torch.Tensor,

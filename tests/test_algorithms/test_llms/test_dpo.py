@@ -367,6 +367,77 @@ class TestDPOLearn:
         )
         dpo.clean_up()
 
+    @pytest.mark.parametrize("dist_mode", ["dist"])
+    @pytest.mark.parametrize("vocab_size", [100])
+    @pytest.mark.parametrize("input_size", [10])
+    @pytest.mark.parametrize("max_tokens", [20])
+    @pytest.mark.parametrize(
+        "pretrained_model_name_or_path",
+        [
+            TINY_LLM_FIXTURE_PATH,
+        ],
+    )
+    @pytest.mark.gpu
+    @pytest.mark.parametrize("data_batch_size", [2])
+    def test_dpo_learn_loss_falls_and_margin_rises_on_fixed_batch(
+        self,
+        dpo_factory,
+        dist_mode_factory,
+        model_factory,
+        dist_mode,
+        vocab_size,
+        input_size,
+        max_tokens,
+        pretrained_model_name_or_path,
+        data_batch_size,
+    ):
+        """Repeated steps on fixed pairs must lower loss and widen margin."""
+        torch.manual_seed(0)
+        dpo = dpo_factory(
+            dist_mode_factory,
+            model_factory,
+            dist_mode,
+            vocab_size,
+            input_size,
+            max_tokens,
+            False,
+            pretrained_model_name_or_path,
+            None,
+            use_liger_loss=False,
+        )
+        for group in dpo.optimizer.optimizer.param_groups:
+            group["lr"] = 1e-3
+        num_samples = 4
+        dataset = Dataset.from_dict(
+            {
+                "prompt": [f"Prompt {i}" for i in range(num_samples)],
+                "chosen": [f"good response {i}" for i in range(num_samples)],
+                "rejected": [f"REALLY BAD {i}" for i in range(num_samples)],
+            }
+        )
+        tokenizer = AutoTokenizer.from_pretrained(pretrained_model_name_or_path)
+        env = DatasetEnv(
+            train_dataset=dataset,
+            test_dataset=dataset,
+            tokenizer=tokenizer,
+            objective="preference",
+            data_batch_size_per_gpu=data_batch_size,
+        )
+        for name, param in dpo.actor.named_parameters():
+            if ("lora_A" in name or "lora_B" in name) and param is not None:
+                param.data.normal_(mean=0, std=1.0)
+        prompts = env.reset()
+        history = [dpo.learn(prompts) for _ in range(30)]
+        losses = [m["loss"] for m in history]
+        margins = [m["chosen_reward"] - m["rejected_reward"] for m in history]
+        print(f"\nDPO-TREND loss first={losses[0]} last={losses[-1]}")
+        print(f"DPO-TREND margin first={margins[0]} last={margins[-1]}")
+        assert losses[-1] < losses[0], f"loss did not fall: {losses[0]} -> {losses[-1]}"
+        assert margins[-1] > margins[0], (
+            f"margin did not rise: {margins[0]} -> {margins[-1]}"
+        )
+        dpo.clean_up()
+
 
 class TestDPOTest:
     @pytest.mark.parametrize("dist_mode", ["dist"])

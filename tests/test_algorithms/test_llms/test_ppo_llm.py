@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import gc
+import math
 import warnings
 from contextlib import contextmanager, nullcontext
 from types import SimpleNamespace
@@ -1055,6 +1056,46 @@ class TestPPOLearn:
         masks = [torch.ones(1, seq_len - 1, dtype=torch.bool) for _ in range(2)]
         rewards = torch.tensor([[1.0], [-1.0]], dtype=torch.float32)
         ppo.learn((completions, masks, rewards))
+
+    def test_llmppo_learn_loss_falls_on_fixed_batch(self):
+        """Repeated steps on one fixed batch must lower the loss (learning)."""
+        actor = create_module(10, 8, 100, "cpu")
+        lora = LoraConfig(
+            r=4,
+            lora_alpha=16,
+            target_modules=["lin"],
+            task_type="CAUSAL_LM",
+            lora_dropout=0.05,
+            modules_to_save=["summary"],
+        )
+        ppo = LLMPPO(
+            actor_network=actor,
+            pad_token_id=99,
+            pad_token="<pad>",
+            lora_config=lora,
+            batch_size=2,
+            micro_batch_size_per_gpu=2,
+            max_output_tokens=8,
+            max_model_len=32,
+            wrap=True,
+            gradient_checkpointing=False,
+            lr_actor=0.05,
+            lr_critic=0.05,
+            update_epochs=1,
+            device="cpu",
+            seed=0,
+        )
+        vocab, inp, mtok = 100, 10, 8
+        seq_len = inp + mtok
+        torch.manual_seed(7)
+        completions = [torch.randint(0, vocab, (1, seq_len)) for _ in range(2)]
+        masks = [torch.ones(1, seq_len - 1, dtype=torch.bool) for _ in range(2)]
+        rewards = torch.tensor([[1.0], [-1.0]], dtype=torch.float32)
+        batch = (completions, masks, rewards)
+        losses = [ppo.learn(batch)["loss"] for _ in range(10)]
+        assert all(math.isfinite(v) for v in losses), losses
+        print(f"\nPPO-TREND first={losses[0]} last={losses[-1]}")
+        assert losses[-1] < losses[0], f"loss did not fall: {losses[0]} -> {losses[-1]}"
 
 
 class TestPPOFusedNoGradBaseRoutedReference:

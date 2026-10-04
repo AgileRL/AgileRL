@@ -9,10 +9,13 @@ from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import numpy as np
+import pytest
 import torch
 
 from agilerl.algorithms import GRPO
 from agilerl.algorithms.core.base import LLMAlgorithm
+from agilerl.algorithms.grpo import pixel_values_for_minibatch
 from tests.test_algorithms.test_core_base import _LLM_DEPS_SKIP, _make_llm_agent
 from tests.test_algorithms.test_llms.llm_helpers import create_module
 
@@ -434,3 +437,102 @@ class TestFusedKernelLossPixelValues:
         assert forwarded.shape[0] == batch_size
         assert forwarded.device == grpo.device
         assert torch.equal(forwarded, pixel_values)
+
+
+class TestPixelValuesForMinibatch:
+    def test_indexes_when_leading_dim_is_the_sample_batch(self) -> None:
+        pixel_values = torch.arange(8).reshape(4, 2)
+
+        selected = pixel_values_for_minibatch(
+            pixel_values,
+            np.array([1, 3]),
+            sample_rows=4,
+        )
+
+        assert torch.equal(selected, pixel_values[[1, 3]])
+
+    def test_keeps_every_image_for_a_single_sample(self) -> None:
+        pixel_values = torch.ones(4, 3, 2, 2)
+
+        selected = pixel_values_for_minibatch(
+            pixel_values,
+            np.array([0]),
+            sample_rows=1,
+        )
+
+        assert torch.equal(selected, pixel_values)
+
+    def test_keeps_each_samples_image_block(self) -> None:
+        pixel_values = torch.arange(8).reshape(8, 1, 1, 1)
+
+        selected = pixel_values_for_minibatch(
+            pixel_values,
+            np.array([1, 0]),
+            sample_rows=2,
+        )
+
+        assert torch.equal(selected, torch.cat([pixel_values[4:], pixel_values[:4]]))
+
+    def test_rejects_a_leading_dim_that_does_not_divide_the_rows(self) -> None:
+        pixel_values = torch.ones(5, 3, 2, 2)
+
+        with pytest.raises(ValueError, match="leading dim 5"):
+            pixel_values_for_minibatch(
+                pixel_values,
+                np.array([0]),
+                sample_rows=2,
+            )
+
+    def test_slices_unequal_image_counts(self) -> None:
+        pixel_values = torch.arange(7).reshape(7, 1, 1, 1)
+
+        selected = pixel_values_for_minibatch(
+            pixel_values,
+            np.array([1]),
+            sample_rows=2,
+            image_counts=[3, 4],
+        )
+
+        assert torch.equal(selected, pixel_values[3:])
+
+
+@_LLM_DEPS_SKIP
+class TestPixelValuesForFusedSlice:
+    def test_keeps_every_image_in_one_fused_row(self) -> None:
+        agent = _make_llm_agent()
+        pixels = torch.arange(8).reshape(8, 1, 1, 1)
+
+        first = agent._pixel_values_for_fused_slice(pixels, 0, 1, 2)
+        second = agent._pixel_values_for_fused_slice(pixels, 1, 2, 2)
+
+        assert torch.equal(first, pixels[:4])
+        assert torch.equal(second, pixels[4:])
+
+    def test_slices_one_image_per_fused_row(self) -> None:
+        agent = _make_llm_agent()
+        pixels = torch.arange(2).reshape(2, 1, 1, 1)
+
+        selected = agent._pixel_values_for_fused_slice(pixels, 0, 1, 2)
+
+        assert torch.equal(selected, pixels[:1])
+
+    def test_rejects_a_leading_dim_that_does_not_divide_the_rows(self) -> None:
+        agent = _make_llm_agent()
+        pixels = torch.ones(3, 1, 1, 1)
+
+        with pytest.raises(ValueError, match="does not divide"):
+            agent._pixel_values_for_fused_slice(pixels, 0, 1, 2)
+
+    def test_slices_unequal_image_counts(self) -> None:
+        agent = _make_llm_agent()
+        pixels = torch.arange(7).reshape(7, 1, 1, 1)
+
+        first = agent._pixel_values_for_fused_slice(
+            pixels, 0, 1, 2, image_counts=[3, 4]
+        )
+        second = agent._pixel_values_for_fused_slice(
+            pixels, 1, 2, 2, image_counts=[3, 4]
+        )
+
+        assert torch.equal(first, pixels[:3])
+        assert torch.equal(second, pixels[3:])

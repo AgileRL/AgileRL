@@ -20,9 +20,9 @@ jobs:
                   enable-cache: true
                   python-version: '3.13'
 
-            # CPU torch + cpu-llm. vLLM and CUDA wheels do not fit hosted disk.
+            # CPU torch + llm extras. vllm and CUDA wheels do not fit hosted disk.
             - name: Install dependencies
-              run: uv sync --locked --group dev --extra box2d --extra cpu-llm --extra cpu
+              run: uv sync --locked --group dev --extra box2d --extra llm --extra cpu
 
             # agilerl.arena is a pkgutil-style namespace portion shipped by
             # agilerl-arena; static checkers need the dev symlink to see it.

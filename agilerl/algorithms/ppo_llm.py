@@ -224,6 +224,10 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
         memory (the win grows with sequence length); a no-op during rollout /
         reference forwards.
     :type activation_offload: bool, optional
+    :param moe_lora_recompute: Recompute routed-expert LoRA activations in
+        backward on frozen packed base weights. ``None`` (default) recomputes
+        only outside activation-checkpointed blocks.
+    :type moe_lora_recompute: bool | None, optional
     :param vllm_importance_sampling_correction: When ``True`` (default) and
         colocated, correct the rollout/trainer log-prob mismatch by
         weighting each training token by ``clamp(exp(trainer - sampling),
@@ -234,6 +238,14 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
         importance-sampling ratio (default ``2.0``), bounding the correction
         weight to limit variance from outlier tokens. Must be > 0.
     :type vllm_importance_sampling_cap: float, optional
+    :param vllm_max_logprob_gap: Log a warning when a learn step's mean
+        ``|trainer - vLLM|`` per-token log-prob gap exceeds this, in nats
+        (default ``0.1``). bf16 engines usually sit near 0.01-0.03.
+    :type vllm_max_logprob_gap: float, optional
+    :param vllm_max_clip_fraction: Log a warning when the fraction of action
+        tokens whose trainer/vLLM ratio reaches ``vllm_importance_sampling_cap``
+        exceeds this (default ``0.02``). bf16 engines usually stay under 0.01.
+    :type vllm_max_clip_fraction: float, optional
     :param use_sequence_packing: Opt in to padding-free sequence packing for the
         gradient forward (actor and critic share ids and pack into one varlen /
         blockmask pass). Only honoured under a FlashAttention-2 / FlexAttention
@@ -304,10 +316,13 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
         use_liger_loss: bool = True,
         quantization_config: BitsAndBytesConfig | None = None,
         activation_offload: bool = False,
+        moe_lora_recompute: bool | None = None,
         use_sequence_packing: bool = False,
         lora_target_scope: str | None = None,
         vllm_importance_sampling_correction: bool = True,
         vllm_importance_sampling_cap: float = 2.0,
+        vllm_max_logprob_gap: float = 0.1,
+        vllm_max_clip_fraction: float = 0.02,
     ) -> None:
 
         resolved_device = resolve_device(device)
@@ -345,10 +360,13 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
             chunk_rows=chunk_rows,
             quantization_config=quantization_config,
             activation_offload=activation_offload,
+            moe_lora_recompute=moe_lora_recompute,
             use_sequence_packing=use_sequence_packing,
             lora_target_scope=lora_target_scope,
             vllm_importance_sampling_correction=vllm_importance_sampling_correction,
             vllm_importance_sampling_cap=vllm_importance_sampling_cap,
+            vllm_max_logprob_gap=vllm_max_logprob_gap,
+            vllm_max_clip_fraction=vllm_max_clip_fraction,
         )
         self._validate_core_args(
             batch_size, lr_actor, clip_coef, update_epochs, actor_network, clone

@@ -10,7 +10,9 @@ from collections.abc import Callable, Mapping
 from functools import partial
 from typing import TYPE_CHECKING, Any, TypeVar
 
+from agilerl.components.llm_rollout_data import EpisodeSegments
 from agilerl.llm_envs.env_response import EnvResponse
+from agilerl.llm_envs.task_assigner import TaskRowOutcome, TaskRowStats
 from agilerl.utils.llm_utils import is_rollout_prompt
 
 T = TypeVar("T")
@@ -43,20 +45,63 @@ class AsyncBatchCollector:
             partial(fn, *args, **kwargs),
         )
 
+    async def assign_group_task(self, group_seed: int) -> tuple[int | None, int | None]:
+        """Draw one group's ``(seed, row_index)``; offloaded since the first call builds the envs."""
+        return await self._offload(self._collector.assign_group_task, group_seed)
+
+    @property
+    def adaptive_task_sampling(self) -> bool:
+        """Whether groups draw their row by recent informative-group rate."""
+        return self._collector.adaptive_task_sampling
+
+    def record_group_outcome(self, row_index: int, *, informative: bool) -> None:
+        """Feed one finished group's outcome on ``row_index`` back to the task assigner."""
+        self._collector.record_group_outcome(row_index, informative=informative)
+
+    def task_row_stats(self) -> list[TaskRowStats]:
+        """Per-row outcomes and sampling weights of the collector's shard."""
+        return self._collector.task_row_stats()
+
+    def task_sampler_state(self) -> list[TaskRowOutcome]:
+        """Decayed outcome counts of the collector's observed rows, for a checkpoint."""
+        return self._collector.task_sampler_state()
+
+    def load_task_sampler_state(self, state: list[TaskRowOutcome]) -> None:
+        """Restore the collector's outcome counts from a checkpoint; builds its envs first."""
+        self._collector.load_task_sampler_state(state)
+
     async def reset(
         self,
         episode_id: str,
         logical_slot_idx: int | None = None,
         *,
-        seed: int | None = None,
+        task: tuple[int | None, int | None] | None = None,
     ) -> EnvResponse:
         """Acquire a slot and reset one episode; ``done`` when there is no policy prompt."""
         prompt, info = await self._offload(
             self._collector.reset_episode,
             episode_id,
             logical_slot_idx,
-            seed=seed,
+            task=task,
         )
+        return self._reset_response(episode_id, prompt, info)
+
+    async def reset_eval(self, episode_id: str, row_index: int | None) -> EnvResponse:
+        """Acquire a slot and reset one episode on the held-out split at ``row_index``."""
+        prompt, info = await self._offload(
+            self._collector.reset_eval_episode,
+            episode_id,
+            row_index,
+        )
+        return self._reset_response(episode_id, prompt, info)
+
+    @staticmethod
+    def _reset_response(
+        episode_id: str,
+        prompt: dict[str, Any],
+        info: dict[str, Any],
+    ) -> EnvResponse:
+        """Wrap a reset's ``(prompt, info)``; ``done`` when there is no policy prompt."""
         # Empty / non-prompt observations (turn-0 overflow) must not be generated from.
         done = not (isinstance(prompt, Mapping) and is_rollout_prompt(prompt))
         return EnvResponse(
@@ -103,11 +148,12 @@ class AsyncBatchCollector:
         torch.Tensor,
         torch.Tensor | None,
         torch.Tensor | None,
+        EpisodeSegments | None,
     ]:
         """Build one episode's tensors and release its slot.
 
         :return: ``full_ids``, ``action_mask``, ``turn_ids``, ``turn_rewards``,
-            ``sampling_logps``, ``pixel_values``.
+            ``sampling_logps``, ``pixel_values``, ``segments``.
         """
         return await self._offload(self._collector.get_episode_data, episode_id)
 
@@ -124,12 +170,13 @@ class AsyncBatchCollector:
             torch.Tensor,
             torch.Tensor | None,
             torch.Tensor | None,
+            EpisodeSegments | None,
         ]
         | None
     ):
         """Finalize and release one episode slot exactly once (idempotent).
 
-        :return: Same 6-tuple as :meth:`get_episode_data`, or ``None`` when
+        :return: Same 7-tuple as :meth:`get_episode_data`, or ``None`` when
             ``missing_ok`` and the episode is absent.
         """
         return await self._offload(

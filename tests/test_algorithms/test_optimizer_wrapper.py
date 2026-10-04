@@ -8,6 +8,9 @@ import pytest
 import torch
 from gymnasium import spaces
 from torch import nn
+from torch.distributed.device_mesh import init_device_mesh
+from torch.distributed.tensor import DTensor, Shard, distribute_tensor
+from torch.nn.utils import clip_grad_norm_
 
 from agilerl.algorithms.core import (
     MultiAgentAlgorithm,
@@ -17,6 +20,10 @@ from agilerl.algorithms.core import (
 from agilerl.algorithms.core.base import LLMAlgorithm
 from agilerl.algorithms.core.optimizer_wrapper import init_llm_optimizer
 from agilerl.algorithms.core.registry import NetworkGroup
+from agilerl.distributed.runtime import (
+    clip_param_group_grad_norm_,
+    clip_param_groups,
+)
 from agilerl.modules import EvolvableModule, ModuleDict
 
 
@@ -1571,26 +1578,148 @@ def test_init_llm_optimizer_enables_lora_actor_and_critic_params():
     assert net.other_weight.requires_grad is False
 
 
-def test_init_llm_optimizer_splits_dtensor_and_tensor_actor_groups(monkeypatch):
-    class FakeDTensor(nn.Parameter):
-        pass
+class MixedMeshLoraNet(nn.Module):
+    """Actor LoRA params on an FSDP mesh, an expert-parallel sub-mesh, and plain."""
 
-    monkeypatch.setattr(
-        "agilerl.algorithms.core.optimizer_wrapper.DTensor", FakeDTensor
-    )
+    def __init__(self) -> None:
+        super().__init__()
+        fsdp_mesh = init_device_mesh("cpu", (1,), mesh_dim_names=("hsdp",))
+        ep_mesh = init_device_mesh("cpu", (1, 1), mesh_dim_names=("dp", "ep"))["ep"]
+        self.actor_lora_fsdp = nn.Parameter(
+            distribute_tensor(torch.zeros(4, 3), fsdp_mesh, [Shard(0)])
+        )
+        self.actor_lora_ep = nn.Parameter(
+            distribute_tensor(torch.zeros(2, 3), ep_mesh, [Shard(0)])
+        )
+        self.actor_lora_plain = nn.Parameter(torch.zeros(5))
 
-    class _Net(nn.Module):
-        def __init__(self) -> None:
-            super().__init__()
-            self.actor_lora_sharded = FakeDTensor(torch.ones(2, 2))
-            self.actor_lora_plain = nn.Parameter(torch.ones(2, 2))
+    def set_grads(self, scale: float) -> torch.Tensor:
+        """Write seeded grads and return them concatenated as plain tensors."""
+        torch.manual_seed(0)
+        full_grads = []
+        for param in self.parameters():
+            grad = torch.randn(param.shape) * scale
+            full_grads.append(grad.flatten())
+            if isinstance(param, DTensor):
+                param.grad = distribute_tensor(
+                    grad, param.device_mesh, param.placements
+                )
+            else:
+                param.grad = grad
+        return torch.cat(full_grads)
 
-    net = _Net()
-    opt = init_llm_optimizer(net, torch.optim.Adam, 0.01, {})
-    by_group = {group["group"]: group for group in opt.param_groups}
-    assert set(by_group) == {"actor", "actor_replicated"}
-    assert net.actor_lora_sharded in by_group["actor"]["params"]
-    assert net.actor_lora_plain in by_group["actor_replicated"]["params"]
+    def full_grads(self) -> torch.Tensor:
+        return torch.cat(
+            [
+                (
+                    param.grad.full_tensor()
+                    if isinstance(param.grad, DTensor)
+                    else param.grad
+                ).flatten()
+                for param in self.parameters()
+            ]
+        )
+
+
+class TestInitLlmOptimizerMeshGroups:
+    def test_one_group_per_mesh_plus_plain(self, gloo_process_group):
+        # Arrange
+        net = MixedMeshLoraNet()
+
+        # Act
+        opt = init_llm_optimizer(net, torch.optim.Adam, 0.01, {})
+
+        # Assert
+        groups = [(group["group"], group["params"]) for group in opt.param_groups]
+        assert groups == [
+            ("actor", [net.actor_lora_fsdp]),
+            ("actor", [net.actor_lora_ep]),
+            ("actor_replicated", [net.actor_lora_plain]),
+        ]
+
+    def test_clip_norm_across_meshes_equals_unsharded_norm(self, gloo_process_group):
+        # Arrange
+        net = MixedMeshLoraNet()
+        opt = init_llm_optimizer(net, torch.optim.Adam, 0.01, {})
+        full = net.set_grads(scale=10.0)
+        reference = nn.Parameter(torch.zeros_like(full))
+        reference.grad = full.clone()
+        reference_norm = clip_grad_norm_([reference], max_norm=1.0)
+
+        # Act
+        pre, post = clip_param_groups(
+            opt.param_groups, 1.0, clip_param_group_grad_norm_
+        )
+
+        # Assert
+        assert pre == pytest.approx(reference_norm.item(), rel=1e-6)
+        assert post == pytest.approx(1.0, rel=1e-5)
+        # rtol covers the float64 vs float32 clip coefficient
+        assert torch.allclose(net.full_grads(), reference.grad, rtol=1e-6, atol=0)
+
+    def test_no_clip_leaves_grads_unchanged(self, gloo_process_group):
+        # Arrange
+        net = MixedMeshLoraNet()
+        opt = init_llm_optimizer(net, torch.optim.Adam, 0.01, {})
+        full = net.set_grads(scale=1e-3)
+
+        # Act
+        pre, post = clip_param_groups(
+            opt.param_groups, 1.0, clip_param_group_grad_norm_
+        )
+
+        # Assert
+        expected = torch.linalg.vector_norm(full).item()
+        assert pre == pytest.approx(expected, rel=1e-6)
+        assert post == pytest.approx(expected, rel=1e-6)
+        assert torch.equal(net.full_grads(), full)
+
+    def test_update_lr_reaches_every_mesh_group(self, gloo_process_group):
+        # Arrange
+        net = MixedMeshLoraNet()
+        net.critic_lora_ep = nn.Parameter(
+            distribute_tensor(
+                torch.zeros(2, 3), net.actor_lora_ep.device_mesh, [Shard(0)]
+            )
+        )
+        net.critic_lora_plain = nn.Parameter(torch.zeros(5))
+        opt = init_llm_optimizer(net, torch.optim.Adam, 0.1, {}, lr_critic=0.2)
+
+        # Act
+        LLMAlgorithm.update_lr(opt, lr=(0.3, 0.4))
+
+        # Assert
+        lrs = [(group["group"], group["lr"]) for group in opt.param_groups]
+        assert lrs == [
+            ("actor", 0.3),
+            ("actor", 0.3),
+            ("actor_replicated", 0.3),
+            ("critic", 0.4),
+            ("critic_replicated", 0.4),
+        ]
+
+    def test_single_mesh_keeps_one_sharded_group(self, gloo_process_group):
+        # Arrange
+        mesh = init_device_mesh("cpu", (1,), mesh_dim_names=("hsdp",))
+
+        class SingleMeshNet(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.actor_lora_a = nn.Parameter(
+                    distribute_tensor(torch.zeros(2, 2), mesh, [Shard(0)])
+                )
+                self.actor_lora_b = nn.Parameter(
+                    distribute_tensor(torch.zeros(2, 2), mesh, [Shard(0)])
+                )
+
+        net = SingleMeshNet()
+
+        # Act
+        opt = init_llm_optimizer(net, torch.optim.Adam, 0.01, {})
+
+        # Assert
+        groups = [(group["group"], group["params"]) for group in opt.param_groups]
+        assert groups == [("actor", [net.actor_lora_a, net.actor_lora_b])]
 
 
 def test_optimizer_wrapper_infers_parent_container_from_constructor_stack():

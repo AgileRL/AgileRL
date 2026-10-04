@@ -1739,6 +1739,53 @@ class TestLLMEnvSpecUrlFactoryGuard:
         )
 
 
+class TestMakeRolloutEnvFactorySegmentPromptTokens:
+    @pytest.mark.parametrize(
+        "source",
+        [
+            {"env_url": "http://env-host:8000"},
+            {"entrypoint": "tests.test_models.test_env:_StubTextEnv"},
+        ],
+    )
+    @pytest.mark.parametrize(
+        "segment_kwargs",
+        [{"segment_prompt_tokens": 20000}, {"segment_max_images": 4}],
+    )
+    def test_rejects_segment_restarts(
+        self, source: dict[str, str], segment_kwargs: dict[str, int]
+    ):
+        spec = LLMEnvSpec(
+            env_type=LLMEnvType.ROLLOUT,
+            max_turns=10,
+            **segment_kwargs,
+            **source,
+        )
+
+        with pytest.raises(
+            ValueError,
+            match="segment_max_images need the async per-episode rollout path",
+        ):
+            make_rollout_env_factory(spec, MagicMock())
+
+    def test_builds_without_segment_prompt_tokens(self):
+        # Arrange
+        spec = LLMEnvSpec(
+            env_type=LLMEnvType.ROLLOUT,
+            entrypoint="tests.test_models.test_env:_StubTextEnv",
+            max_turns=10,
+        )
+        mock_rollout_cls = MagicMock()
+
+        # Act
+        with patch("agilerl.models.env.RolloutHarness", mock_rollout_cls):
+            factory, max_turns = make_rollout_env_factory(spec, MagicMock())
+            harness = factory()
+
+        # Assert
+        assert max_turns == 10
+        assert harness is mock_rollout_cls.local.return_value
+
+
 class TestBanditDatasetLoadGuard:
     def test_an_unloadable_dataset_is_rejected(self, monkeypatch):
         import agilerl.models.env as env_module

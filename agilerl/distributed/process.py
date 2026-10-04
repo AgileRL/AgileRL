@@ -24,6 +24,7 @@ import numpy as np
 import torch
 import torch.distributed as dist
 from torch import nn
+from torch.distributed.tensor import DTensor
 
 
 def distributed_env_present() -> bool:
@@ -209,14 +210,28 @@ def aggregate_metrics_across_gpus(
 def aggregate_metrics_dict(
     metrics: dict[str, torch.Tensor | np.ndarray | float],
 ) -> dict[str, float]:
-    """Aggregate all values in a metrics dict across GPUs (or locally).
+    """Average every metric across ranks in one all-reduce (local mean on a single device).
+
+    Every rank must pass the same keys in the same order.
 
     :param metrics: Metric values on this rank, by name.
     :type metrics: dict[str, torch.Tensor | np.ndarray | float]
     :return: Mean of each metric across ranks.
     :rtype: dict[str, float]
     """
-    return {k: aggregate_metrics_across_gpus(v) for k, v in metrics.items()}
+    if not metrics:
+        return {}
+    distributed = is_distributed() and dist.get_world_size() > 1
+    device = resolve_device() if distributed else "cpu"
+    local_means = torch.stack(
+        [
+            torch.as_tensor(value).detach().float().mean().to(device)
+            for value in metrics.values()
+        ]
+    )
+    if distributed:
+        dist.all_reduce(local_means, op=dist.ReduceOp.AVG)
+    return dict(zip(metrics, local_means.tolist(), strict=True))
 
 
 class raise_on_any_rank(ContextDecorator):
@@ -240,6 +255,7 @@ class raise_on_any_rank(ContextDecorator):
         if not is_distributed() or dist.get_world_size() == 1:
             return False
         failed = torch.tensor([int(exc is not None)], dtype=torch.int64)
+        failed = failed.to(resolve_device())
         dist.all_reduce(failed, op=dist.ReduceOp.MAX)
         if exc is None and failed.item():
             msg = "Peer rank failed in shard runtime collective"
@@ -260,15 +276,41 @@ def sync_grads(params: Sequence[nn.Parameter]) -> None:
     if not params or not is_distributed() or dist.get_world_size() == 1:
         return
 
-    grads = [param.grad for param in params if param.grad is not None]
+    all_reduce_grads(params, divisor=dist.get_world_size())
+
+
+def all_reduce_grads(
+    params: Sequence[nn.Parameter],
+    *,
+    divisor: int,
+    group: dist.ProcessGroup | None = None,
+    reduce_dtype: torch.dtype | None = None,
+) -> None:
+    """SUM-all-reduce every ``.grad`` in one flat buffer, then divide by ``divisor``.
+
+    ``DTensor`` grads reduce their local shard. If any rank is missing a
+    grad, every rank raises so NCCL cannot hang on mismatched flatten sizes.
+
+    :param params: Parameters whose ``.grad`` to reduce.
+    :param divisor: Value each summed grad is divided by.
+    :param group: Process group to reduce over; ``None`` is the world.
+    :param reduce_dtype: Dtype of the reduce buffer; ``None`` keeps the grad dtype.
+    """
+    grads = [
+        param.grad.to_local() if isinstance(param.grad, DTensor) else param.grad
+        for param in params
+        if param.grad is not None
+    ]
     missing = len(params) - len(grads)
     if any_rank(missing > 0):
         msg = f"sync_grads: {missing} params have no grad on rank {get_rank()}"
         raise RuntimeError(msg)
 
     flat = torch._utils._flatten_dense_tensors(grads)
-    dist.all_reduce(flat, op=dist.ReduceOp.SUM)
-    flat /= dist.get_world_size()
+    if reduce_dtype is not None:
+        flat = flat.to(reduce_dtype)
+    dist.all_reduce(flat, op=dist.ReduceOp.SUM, group=group)
+    flat /= divisor
     for g, synced in zip(
         grads, torch._utils._unflatten_dense_tensors(flat, grads), strict=True
     ):

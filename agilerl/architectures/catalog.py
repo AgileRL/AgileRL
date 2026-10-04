@@ -38,6 +38,7 @@ NEMOTRON_H_RUNTIME_CONFIG = ModelRuntimeConfig(
         install=install_mamba_patches,
         mamba=MambaPatchConfig(
             mixer="transformers.models.nemotron_h.modeling_nemotron_h.NemotronHMamba2Mixer",
+            block="transformers.models.nemotron_h.modeling_nemotron_h.NemotronHBlock",
         ),
     ),
 )
@@ -80,7 +81,10 @@ FAMILY_RUNTIME_CONFIGS: Mapping[str, ModelRuntimeConfig] = {
 
 def pretrained_model_type(model_name_or_path: str) -> str:
     """Return Hugging Face ``model_type`` from a checkpoint id or local path."""
-    config_dict, _ = PretrainedConfig.get_config_dict(model_name_or_path)
+    config_dict, _ = PretrainedConfig.get_config_dict(
+        model_name_or_path,
+        trust_remote_code=True,
+    )
     return config_dict["model_type"]
 
 

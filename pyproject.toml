@@ -53,8 +53,7 @@ cpu = [
     # Same 2.11 line as the default Linux CUDA wheel; the CPU index also publishes newer torch.
     "torch>=2.11.0,<2.12",
 ]
-# LLM Python stack without vLLM. Hosted CPU CI uses this with the cpu extra.
-cpu-llm = [
+llm = [
     "bitsandbytes==0.49.2; sys_platform == 'linux'",
     "datasets==5.0.1",
     "liger-kernel==0.8.2; sys_platform == 'linux'",
@@ -65,11 +64,8 @@ cpu-llm = [
 vllm = [
     "vllm==0.25.1; sys_platform == 'linux'",
 ]
-llm = [
-    "agilerl[cpu-llm,vllm]",
-]
 all = [
-    "agilerl[box2d,llm]",
+    "agilerl[box2d,llm,vllm]",
 ]
 
 [dependency-groups]
@@ -134,7 +130,7 @@ filterwarnings = [
     "ignore::pyparsing.exceptions.PyparsingDeprecationWarning",
 ]
 markers = [
-    "vllm: needs vLLM (import or real engine). Hosted Linux CPU excludes these; the GPU job runs them. Real vLLM init is loadgroup-pinned because GPU memory profiling fails when peer workers free memory mid-init.",
+    "vllm: needs the vllm extra (import or real engine). Hosted Linux CPU excludes these; the GPU job runs them. Real vLLM init is loadgroup-pinned because GPU memory profiling fails when peer workers free memory mid-init.",
     "gpu: tests that use a GPU (CUDA, etc.) but do NOT initialise real vLLM (exclude with -m 'not gpu'). Safe to fan out across multiple xdist workers.",
 ]
 
@@ -180,10 +176,6 @@ conflicts = [
     [
         { extra = "cpu" },
         { extra = "vllm" },
-    ],
-    [
-        { extra = "cpu" },
-        { extra = "llm" },
     ],
 ]
 # box2d has a bug where it doesn't declare swig as a build dependency.
@@ -231,8 +223,7 @@ include = ["agilerl", "agilerl/arena"]
 
 # Imports that only resolve on some platforms/extras: vllm is Linux-only and
 # conflicts with cpu. Box2D needs the box2d extra. GPU Linux (`--extra all`)
-# resolves vllm; GitHub-hosted CPU Linux (`--extra cpu --extra cpu-llm`) and
-# macOS/Windows cannot.
+# resolves vllm; GitHub-hosted CPU Linux (`--extra cpu`) and macOS/Windows cannot.
 [[tool.ty.overrides]]
 include = [
     "agilerl/algorithms/core/base.py",

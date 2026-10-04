@@ -42,6 +42,7 @@ import logging
 import os
 import re
 import shutil
+import socket
 import sys
 import warnings
 from contextlib import contextmanager, nullcontext
@@ -53,11 +54,15 @@ import dill
 import numpy as np
 import pytest
 import torch
+import torch.distributed as dist
+import torch.multiprocessing as mp
 import torch.nn.functional as F
 from accelerate import Accelerator
 from accelerate.state import AcceleratorState
 from gymnasium import spaces
 from torch import nn, optim
+from torch.distributed.tensor import distribute_tensor
+from torch.distributed.tensor.placement_types import Shard
 
 from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.algorithms import DQN, IPPO, PPO
@@ -74,6 +79,7 @@ from agilerl.algorithms.core.optimizer_wrapper import OptimizerWrapper
 from agilerl.algorithms.core.registry import NetworkGroup
 from agilerl.algorithms.grpo import GRPO
 from agilerl.distributed import FSDPConfig
+from agilerl.distributed.expert_parallel import build_parallel_mesh
 from agilerl.distributed.runtime import DPRuntime, FSDPRuntime
 from agilerl.modules import EvolvableMLP
 from agilerl.utils.algo_utils import VLLMConfig
@@ -88,6 +94,7 @@ pytest.importorskip("transformers", reason="LLM checkpoint tests require transfo
 
 if HAS_LLM_DEPENDENCIES or TYPE_CHECKING:
     from peft import LoraConfig
+    from transformers import LlamaConfig
 
 _LLM_DEPS_SKIP = pytest.mark.skipif(
     not HAS_LLM_DEPENDENCIES,
@@ -1635,7 +1642,7 @@ class _MockPeftActor(torch.nn.Module):
         self.prefix = "model"
         self.generate = MagicMock()
         self.from_pretrained = MagicMock()
-        self.config = SimpleNamespace(_attn_implementation=None)
+        self.config = LlamaConfig()
 
     def get_base_model(self):
         return self.base_model.model
@@ -2240,6 +2247,7 @@ class TestLLMWrapModels:
             original_actor,
             agent.device,
             agent.fsdp_config,
+            parallel_mesh=None,
             gradient_checkpointing=True,
         )
         original_actor.gradient_checkpointing_enable.assert_not_called()
@@ -2682,7 +2690,7 @@ class _TinyPeftWrapper(torch.nn.Module):
         super().__init__()
         self.base_model = torch.nn.Module()
         self.base_model.model = inner
-        self.config = SimpleNamespace(_attn_implementation=None)
+        self.config = LlamaConfig()
 
     def get_base_model(self) -> _TinyCausalLM:
         return self.base_model.model
@@ -2952,6 +2960,92 @@ class TestFusedLinearLogprobsIntegration:
         assert chunked.shape == per_row.shape == (2 * B, T - 1)
         assert not torch.allclose(chunked[:B], chunked[B:], atol=1e-4)
         assert torch.allclose(chunked, per_row, rtol=1e-5, atol=1e-5)
+
+    def test_no_grad_pass_cuts_shared_trailing_padding(self) -> None:
+        # Arrange: rows hold 5 and 3 real tokens, so the last 2 of 7 columns
+        # are padding in every row. The body mixes positions causally.
+        torch.manual_seed(9)
+        B, T, H, V = 2, 7, 8, 64
+        agent, actor = self._build_agent(V, H)
+        actor.base_model.model = _CumsumCausalLM(V, H)
+        fused_ids = torch.randint(1, V, (B, T))
+        fused_mask = torch.zeros(B, T, dtype=torch.long)
+        fused_mask[0, :5] = 1
+        fused_mask[1, :3] = 1
+        fused_ids[fused_mask == 0] = agent.pad_token_id
+        forward_lengths: list[int] = []
+        orig_hidden = agent._fused_chunk_hidden_and_value
+
+        def recording_hidden(chunk_ids, chunk_mask, chunk_pos, chunk_pixel_values=None):
+            forward_lengths.append(int(chunk_ids.shape[1]))
+            return orig_hidden(chunk_ids, chunk_mask, chunk_pos, chunk_pixel_values)
+
+        # Act
+        with (
+            patch(
+                "agilerl.algorithms.core.base.set_fused_adapter_routing",
+                lambda *_a, **_kw: None,
+            ),
+            patch.object(agent, "_fused_chunk_hidden_and_value", recording_hidden),
+            torch.no_grad(),
+        ):
+            log_probs, _ = agent._fused_model_pass(
+                fused_ids, fused_mask, ["actor"] * B, batch_size=B
+            )
+            full_logits = actor(input_ids=fused_ids).logits / agent.temperature
+            reference = (
+                F.log_softmax(full_logits[:, :-1].float(), dim=-1)
+                .gather(dim=-1, index=fused_ids[:, 1:].unsqueeze(-1))
+                .squeeze(-1)
+            )
+
+        # Assert
+        assert forward_lengths == [5]
+        assert log_probs.shape == (B, T - 1)
+        assert torch.allclose(log_probs[:, :4], reference[:, :4], rtol=1e-5, atol=1e-6)
+        assert torch.equal(log_probs[:, 4:], torch.zeros(B, 2))
+
+    def test_grad_pass_keeps_the_padded_width(self) -> None:
+        # Arrange
+        torch.manual_seed(10)
+        B, T, H, V = 2, 6, 8, 64
+        agent, _ = self._build_agent(V, H)
+        fused_ids = torch.randint(1, V, (B, T))
+        fused_mask = torch.ones_like(fused_ids)
+        fused_mask[:, 4:] = 0
+        forward_lengths: list[int] = []
+        orig_hidden = agent._fused_chunk_hidden_and_value
+
+        def recording_hidden(chunk_ids, chunk_mask, chunk_pos, chunk_pixel_values=None):
+            forward_lengths.append(int(chunk_ids.shape[1]))
+            return orig_hidden(chunk_ids, chunk_mask, chunk_pos, chunk_pixel_values)
+
+        # Act
+        with (
+            patch(
+                "agilerl.algorithms.core.base.set_fused_adapter_routing",
+                lambda *_a, **_kw: None,
+            ),
+            patch.object(agent, "_fused_chunk_hidden_and_value", recording_hidden),
+        ):
+            log_probs, _ = agent._fused_model_pass(fused_ids, fused_mask, ["actor"] * B)
+
+        # Assert
+        assert forward_lengths == [T]
+        assert log_probs.shape == (B, T - 1)
+
+
+class _CumsumCausalLM(_TinyCausalLM):
+    """Tiny LM whose hidden state at each position sums all earlier positions."""
+
+    def forward(
+        self,
+        input_ids: torch.Tensor | None = None,
+        attention_mask: torch.Tensor | None = None,
+        **_: object,
+    ) -> SimpleNamespace:
+        x = self.body(self.embed(input_ids)).cumsum(dim=1)
+        return SimpleNamespace(logits=self.lm_head(x))
 
 
 class TestLLMCreatePromptMasks:
@@ -3920,7 +4014,7 @@ class TestLLMGenerateWithVllmColocate:
             with pytest.raises(
                 ImportError,
                 match=re.escape(
-                    "vLLM is required for colocated generation. Install AgileRL with vLLM support for this platform: `pip install agilerl[llm]`."
+                    "vLLM is required for colocated generation. Install AgileRL with vLLM support for this platform: `pip install agilerl[vllm]`."
                 ),
             ):
                 agent._generate_with_vllm_colocate([], 1, 0.9)
@@ -4850,6 +4944,7 @@ class TestLLMInitializeActors:
             patch(
                 "agilerl.algorithms.core.base.get_peft_model", return_value=peft_actor
             ),
+            patch("agilerl.algorithms.core.base.HAS_LIGER_KERNEL", False),
             patch.object(
                 agent, "use_adapter", wraps=agent.use_adapter
             ) as mock_use_adapter,
@@ -4879,6 +4974,7 @@ class TestLLMInitializeActors:
             patch(
                 "agilerl.algorithms.core.base.get_peft_model", return_value=peft_actor
             ),
+            patch("agilerl.algorithms.core.base.HAS_LIGER_KERNEL", False),
         ):
             LLMAlgorithm._initialize_actors(agent, None, add_adapters=True)
         mock_create.assert_called_once_with(
@@ -4913,6 +5009,7 @@ class TestLLMInitializeActors:
             patch(
                 "agilerl.algorithms.core.base.get_peft_model", return_value=peft_actor
             ),
+            patch("agilerl.algorithms.core.base.HAS_LIGER_KERNEL", False),
         ):
             LLMAlgorithm._initialize_actors(
                 agent, MagicMock(spec=[]), add_adapters=True
@@ -4962,6 +5059,7 @@ class TestLLMInitializeActors:
             patch(
                 "agilerl.algorithms.core.base.patch_lora_for_fused_forward", create=True
             ),
+            patch("agilerl.algorithms.core.base.HAS_LIGER_KERNEL", False),
             patch.object(
                 agent, "use_adapter", wraps=agent.use_adapter
             ) as mock_use_adapter,
@@ -5812,6 +5910,7 @@ class TestLLMGenerateWithVllmColocateFullPaths:
         prompts = [
             {
                 "prompt": "<image> digit 7",
+                "prompt_token_ids": torch.tensor([[5, 6, 7]]),
                 "image": image,
                 "prompt_token_len": 4,
                 "input_ids": torch.tensor([[11, 12, 13, 14]]),
@@ -5839,42 +5938,13 @@ class TestLLMGenerateWithVllmColocateFullPaths:
             )
 
         sent = agent.llm.generate.call_args[0][0]
-        assert sent[0]["prompt"] == "<image> digit 7"
-        assert sent[0]["multi_modal_data"]["image"] is image
-        assert "prompt_token_ids" not in sent[0]
-        assert sent[1]["prompt"] == sent[0]["prompt"]
+        assert sent[0] == {
+            "prompt_token_ids": [5, 6, 7],
+            "multi_modal_data": {"image": image},
+        }
+        assert sent[1] == sent[0]
         assert len(token_ids) == 1
         assert len(action_masks) == 1
-
-    def test_generate_with_vllm_colocate_rejects_non_str_multimodal_prompt(self):
-        agent = _make_llm_agent()
-        agent.pad_token = "<pad>"
-        agent.pad_token_id = 0
-        agent.max_output_tokens = 20
-        agent.max_model_len = 100
-        agent.repetition_penalty = 1.0
-        agent.temperature = 1.0
-        agent.top_p = 1.0
-        agent.top_k = None
-        agent.min_p = None
-        agent.min_output_tokens = None
-        agent.accelerator = None
-        agent.vllm_config = MagicMock(tensor_parallel_size=1)
-        agent.device = "cpu"
-        agent.llm = MagicMock()
-        prompts = [{"prompt": 7, "image": object(), "input_ids": torch.tensor([[1]])}]
-
-        with (
-            patch(
-                "agilerl.algorithms.core.base.SamplingParams",
-                return_value=MagicMock(),
-                create=True,
-            ),
-            pytest.raises(
-                ValueError, match="multimodal generation requires prompt string"
-            ),
-        ):
-            agent._generate_with_vllm_colocate(prompts, group_size=1, temperature=0.9)
 
     def test_generate_with_vllm_colocate_clamps_min_tokens_to_remaining(self):
         agent = _make_llm_agent()
@@ -6058,6 +6128,108 @@ class TestLLMShardedCheckpointBranches:
                 grpo.load_checkpoint(str(tmp_path))
         finally:
             grpo.clean_up()
+
+
+def _spawn_ranks(
+    worker, world_size: int, *args: object, timeout: float = 120.0
+) -> None:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        port = int(sock.getsockname()[1])
+    ctx = mp.get_context("spawn")
+    result_queue = ctx.Queue()
+    procs = [
+        ctx.Process(target=worker, args=(rank, world_size, port, *args, result_queue))
+        for rank in range(world_size)
+    ]
+    for proc in procs:
+        proc.start()
+    try:
+        for _ in procs:
+            rank, error = result_queue.get(timeout=timeout)
+            assert error is None, f"rank {rank}: {error}"
+    finally:
+        # A rank whose peer failed can sit in a collective forever.
+        for proc in procs:
+            proc.join(timeout=10)
+            if proc.is_alive():
+                proc.kill()
+
+
+def _resume_ep_mesh_worker(
+    rank: int,
+    world_size: int,
+    port: int,
+    checkpoint_dir: str,
+    result_queue: mp.Queue,
+) -> None:
+    try:
+        os.environ.update(
+            RANK=str(rank),
+            LOCAL_RANK=str(rank),
+            WORLD_SIZE=str(world_size),
+            MASTER_ADDR="127.0.0.1",
+            MASTER_PORT=str(port),
+        )
+        dist.init_process_group("gloo", rank=rank, world_size=world_size)
+        agent = generate_tiny_grpo()
+        agent.shard_runtime = FSDPRuntime(FSDPConfig(ep=world_size))
+        agent.shard_runtime.parallel_mesh = build_parallel_mesh(
+            ep=world_size, device_type="cpu"
+        )
+        ep_mesh = agent.shard_runtime.parallel_mesh.ep
+        expert = nn.Parameter(
+            distribute_tensor(torch.zeros(world_size, 2), ep_mesh, [Shard(0)])
+        )
+        expert.grad = distribute_tensor(torch.ones(world_size, 2), ep_mesh, [Shard(0)])
+
+        agent.save_checkpoint(checkpoint_dir, lora_only=True)
+        agent.load_checkpoint(checkpoint_dir)
+        agent.shard_runtime.parallel_mesh.sync_grads([expert], torch.float32)
+
+        # Each rank owns one expert row; EP grads divide by the world size.
+        assert torch.equal(expert.grad.to_local(), torch.full((1, 2), 0.5))
+        result_queue.put((rank, None))
+    except Exception as exc:
+        result_queue.put((rank, repr(exc)))
+    finally:
+        dist.destroy_process_group()
+
+
+class TestLLMCheckpointShardRuntime:
+    """The shard runtime holds process groups, so a checkpoint never restores it."""
+
+    def test_save_checkpoint_omits_shard_runtime(self, tmp_path):
+        grpo = generate_tiny_grpo()
+        try:
+            grpo.save_checkpoint(str(tmp_path), lora_only=True)
+
+            checkpoint = load_attributes_checkpoint(tmp_path)
+
+            assert "shard_runtime" not in checkpoint
+        finally:
+            grpo.clean_up()
+
+    def test_load_checkpoint_keeps_live_shard_runtime(self, tmp_path):
+        # Arrange
+        grpo = generate_tiny_grpo()
+        live_runtime = grpo.shard_runtime
+        grpo.save_checkpoint(str(tmp_path), lora_only=True)
+        checkpoint = load_attributes_checkpoint(tmp_path)
+        checkpoint["shard_runtime"] = FSDPRuntime(FSDPConfig(ep=2))
+        torch.save(checkpoint, str(tmp_path / "attributes.pt"), pickle_module=dill)
+
+        try:
+            # Act
+            grpo.load_checkpoint(str(tmp_path))
+
+            # Assert
+            assert grpo.shard_runtime is live_runtime
+        finally:
+            grpo.clean_up()
+
+    def test_resumed_ep_mesh_syncs_expert_grads_on_every_rank(self, tmp_path):
+        _spawn_ranks(_resume_ep_mesh_worker, 2, str(tmp_path))
 
 
 @_LLM_DEPS_SKIP
@@ -6250,13 +6422,6 @@ class TestLLMInitializeActorsStrayAdapter:
         agent.selected_adapters = ("actor",)
         peft_actor = _make_mock_peft_actor()
         peft_actor.peft_config = {"actor": MagicMock()}
-
-        class _InnerModel(torch.nn.Module):
-            pass
-
-        inner = _InnerModel()
-        peft_actor.base_model.model = torch.nn.Linear(1, 1)
-        peft_actor.get_base_model = lambda: inner
         base_model = torch.nn.Module()
         apply = MagicMock()
 
@@ -6287,52 +6452,7 @@ class TestLLMInitializeActorsStrayAdapter:
 
         apply.assert_called_once()
         assert apply.call_args.kwargs["fused_linear_cross_entropy"] is False
-        assert apply.call_args.kwargs["model"] is inner
-        assert inner._agilerl_liger_patched is True
-
-    def test_initialize_actors_applies_liger_to_plain_module_when_not_peft_protocol(
-        self,
-    ):
-        agent = _make_llm_agent()
-        agent.selected_adapters = ("actor",)
-
-        class _PlainTarget(torch.nn.Module):
-            def __init__(self):
-                super().__init__()
-                self.peft_config = {"actor": MagicMock()}
-                self.add_adapter = MagicMock()
-                self.delete_adapter = MagicMock()
-
-        target = _PlainTarget()
-        apply = MagicMock()
-        base_model = torch.nn.Module()
-
-        with (
-            patch(
-                "agilerl.algorithms.core.base.adapt_lora_config_for_model",
-                side_effect=lambda _model, cfg, **kw: cfg,
-            ),
-            patch("agilerl.algorithms.core.base.get_peft_model", return_value=target),
-            patch(
-                "agilerl.algorithms.core.base.patch_lora_for_fused_forward", create=True
-            ),
-            patch("agilerl.algorithms.core.base.HAS_LIGER_KERNEL", True),
-            patch(
-                "agilerl.algorithms.core.base.register_nemotron_h_liger",
-                return_value=True,
-            ),
-            patch(
-                "agilerl.algorithms.core.base._apply_liger_kernel_to_instance",
-                apply,
-                create=True,
-            ),
-            patch.object(agent, "use_adapter"),
-        ):
-            LLMAlgorithm._initialize_actors(agent, base_model, add_adapters=True)
-
-        apply.assert_called_once()
-        assert apply.call_args.kwargs["model"] is target
-        assert target._agilerl_liger_patched is True
+        assert apply.call_args.kwargs["model"] is base_model
 
     def test_initialize_actors_installs_packed_expert_grouped_gemm(self):
         agent = _make_llm_agent()
@@ -6581,6 +6701,29 @@ class TestLLMFusedForwardPaths:
         assert kwargs["batch_size"] == 1
         assert routing == ["__base__"] * B + ["actor"] * B
 
+    def test_fused_forward_no_grad_skips_reference_rows(self):
+        agent = _make_llm_agent()
+        agent.use_value_head = False
+        agent.use_separate_reference_adapter = False
+        B, T = 2, 5
+        ids = torch.randint(1, 32, (B, T))
+        actor_logprobs = torch.ones(B, T - 1)
+        agent._fused_model_pass = MagicMock(return_value=(actor_logprobs, None))
+
+        ref_logprobs, got_actor, values = agent._fused_forward_no_grad(
+            ids,
+            batch_size=1,
+            include_reference=False,
+        )
+
+        routing = agent._fused_model_pass.call_args.args[2]
+        fused_ids = agent._fused_model_pass.call_args.args[0]
+        assert fused_ids.shape[0] == B
+        assert routing == ["actor"] * B
+        assert torch.equal(got_actor, actor_logprobs)
+        assert torch.isnan(ref_logprobs).all()
+        assert values is None
+
     def test_fused_forward_with_value_head(self):
         agent = _make_llm_agent()
         agent.use_value_head = True
@@ -6617,6 +6760,31 @@ class TestLLMFusedForwardPaths:
 
         packed_fwd.assert_called_once()
         assert values is None
+
+    def test_fused_forward_value_head_stays_padded_under_varlen(self):
+        # Arrange: the critic row would share the varlen row with the actor.
+        agent = _make_llm_agent()
+        agent.use_value_head = True
+        agent.use_sequence_packing = True
+        agent.actor.config._attn_implementation = "flash_attention_2"
+        B, T = 2, 5
+        ids = torch.randint(1, 32, (B, T))
+        values = torch.full((2 * B, T - 1), 3.0)
+        agent._fused_model_pass = MagicMock(
+            return_value=(torch.zeros(2 * B, T - 1), values)
+        )
+
+        # Act
+        with (
+            patch.object(agent, "_fused_packed_forward") as packed_fwd,
+            torch.enable_grad(),
+        ):
+            log_probs, got_values = agent._fused_forward(ids, batch_size=B)
+
+        # Assert
+        packed_fwd.assert_not_called()
+        assert log_probs.shape == (B, T - 1)
+        assert torch.equal(got_values, torch.full((B, T - 1), 3.0))
 
     def test_fused_packed_forward_object_output(self):
         from contextlib import nullcontext
@@ -6686,6 +6854,49 @@ class TestLLMGetLogprobsPacked:
             )
 
         assert lp.shape == (B, T - 1)
+
+    def test_whole_batch_chunk_keeps_every_image_tile(self):
+        # Arrange: two samples carry five tiles between them.
+        torch.manual_seed(0)
+        B, T, H, V = 2, 6, 8, 32
+        agent = _make_llm_agent()
+        agent.use_sequence_packing = True
+        agent.calc_position_embeddings = False
+        agent.temperature = 1.0
+        agent.cast_logprobs_to_fp32 = True
+        agent.pad_token_id = 0
+        inner = _TinyCausalLM(V, H)
+        seen_pixel_values = []
+        forward = inner.forward
+
+        def recording_forward(*args, pixel_values=None, **kwargs):
+            seen_pixel_values.append(pixel_values)
+            return forward(*args, **kwargs)
+
+        inner.forward = recording_forward
+        actor = _TinyPeftWrapper(inner)
+        actor.config._attn_implementation = "flash_attention_2"
+        agent.actor = actor
+
+        from contextlib import nullcontext
+
+        agent.select_adapter = lambda _name: nullcontext()
+        ids = torch.randint(1, V, (B, T))
+        pixel_values = torch.randn(5, 3, 4, 4)
+
+        # Act
+        with torch.enable_grad():
+            agent._get_logprobs(
+                ids,
+                batch_size=B,
+                use_reference=False,
+                eval_mode=False,
+                pixel_values=pixel_values,
+            )
+
+        # Assert
+        assert len(seen_pixel_values) == 1
+        assert torch.equal(seen_pixel_values[0], pixel_values)
 
 
 @_LLM_DEPS_SKIP

@@ -122,8 +122,10 @@ def _routed_forward(
     # Layers that flatten (batch, seq, hidden) -> (batch * seq, hidden) before
     # their linears (OPT's MLP, MoE experts) show seq rows per routed sample.
     # The flatten is row-major, so each run just covers ``factor`` times as
-    # many contiguous rows.
-    factor, remainder = divmod(x.shape[0], len(routing))
+    # many contiguous rows. divmod graph-breaks torch.compile on a symbolic
+    # batch size.
+    factor = x.shape[0] // len(routing)
+    remainder = x.shape[0] % len(routing)
     if remainder:
         msg = (
             f"Fused adapter routing covers {len(routing)} rows but the layer "

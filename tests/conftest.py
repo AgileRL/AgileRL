@@ -12,12 +12,6 @@ from pathlib import Path
 
 import gymnasium as gym
 
-# Must be absolute before isolate_working_directory chdirs. A relative
-# COVERAGE_FILE follows that chdir and the shard never uploads those hits.
-os.environ["COVERAGE_FILE"] = os.path.abspath(
-    os.environ.get("COVERAGE_FILE", ".coverage")
-)
-
 from tests.xdist_async_vec import ASYNC_VEC_XDIST_GROUP, nodeid_spawns_async_vector_env
 
 # Register lightweight test environments

@@ -18,8 +18,10 @@ import asyncio
 import contextlib
 import random
 import re
+import threading
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
+from functools import partial
 from typing import TYPE_CHECKING, Any, TypeVar
 
 from agilerl import HAS_LLM_DEPENDENCIES
@@ -34,11 +36,51 @@ if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
     from openenv.core.env_server.mcp_types import CallToolAction
 
 __all__ = [
+    "SESSION_LOOP",
     "InProcessEnvClient",
     "RemoteEnvClient",
+    "SessionLoop",
 ]
 
 TransportT = TypeVar("TransportT")
+
+
+class SessionLoop:
+    """One background event loop that every :class:`RemoteEnvClient` session runs on.
+
+    A session then costs one socket. A loop per session would add a thread and the
+    loop's own descriptors (epoll, wakeup pipe) for every concurrent episode.
+    """
+
+    def __init__(self) -> None:
+        """Defer starting the loop thread to the first call."""
+        self._lock = threading.Lock()
+        self._loop: asyncio.AbstractEventLoop | None = None
+
+    def run(self, call: Callable[[], Awaitable[TransportT]]) -> TransportT:
+        """Await ``call()`` on the loop and block the calling thread for its result."""
+
+        # OpenEnv clients pick sync or async dispatch from the running loop of the
+        # thread that calls them, so ``call`` itself runs on the loop thread.
+        async def invoke() -> TransportT:
+            return await call()
+
+        return asyncio.run_coroutine_threadsafe(invoke(), self._started()).result()
+
+    def _started(self) -> asyncio.AbstractEventLoop:
+        """The loop, starting its thread on first use."""
+        with self._lock:
+            if self._loop is None:
+                self._loop = asyncio.new_event_loop()
+                threading.Thread(
+                    target=self._loop.run_forever,
+                    name="openenv-sessions",
+                    daemon=True,
+                ).start()
+            return self._loop
+
+
+SESSION_LOOP = SessionLoop()
 
 
 class InProcessEnvClient:
@@ -153,12 +195,17 @@ class RemoteEnvClient:
     nothing had changed. Reconnection therefore happens only at the next
     ``reset``, where a new environment is what the caller wanted anyway.
 
+    Calls block the calling thread while the session's I/O runs on
+    :data:`SESSION_LOOP`, shared by every session in the process.
+
     :param base_url: Root URL of the env server, or a zero-arg callable returning
         it — called again on every reconnect, so a host that moved is found again.
     :param timeout_s: Per-message timeout; ``None`` (default) is unbounded.
     :param connect_timeout_s: Timeout for establishing the session.
     :param mcp_tool: If set, send text as ``call_tool(mcp_tool, {arg: text})`` for MCP servers.
     :param action_field: Action field (or MCP argument name) carrying the text.
+    :param tasks: Per-row reset kwargs; ``row_index`` selects the entry merged into ``reset``.
+    :param eval_tasks: Held-out per-row reset kwargs used in :meth:`eval_mode` when set.
     """
 
     def __init__(
@@ -169,10 +216,18 @@ class RemoteEnvClient:
         connect_timeout_s: float = 30.0,
         mcp_tool: str | None = None,
         action_field: str = "message",
+        tasks: Sequence[Mapping[str, Any]] | None = None,
+        eval_tasks: Sequence[Mapping[str, Any]] | None = None,
     ) -> None:
         """Prepare a session against the OpenEnv server at ``base_url`` (dialled lazily)."""
         if not base_url:
             msg = "RemoteEnvClient requires a base_url"
+            raise ValueError(msg)
+        if tasks is not None and len(tasks) == 0:
+            msg = "tasks must not be empty"
+            raise ValueError(msg)
+        if eval_tasks is not None and len(eval_tasks) == 0:
+            msg = "eval_tasks must not be empty"
             raise ValueError(msg)
         if isinstance(base_url, str):
             self._url_provider: Callable[[], str] = lambda url=base_url: url
@@ -180,27 +235,34 @@ class RemoteEnvClient:
             self._url_provider = base_url
         self._timeout_s = timeout_s
         self._connect_timeout_s = connect_timeout_s
-        self._sync: Any = None
+        self._session: GenericEnvClient | None = None
         self._mcp_tool = mcp_tool
         self._action_field = action_field
+        self._tasks = _copy_task_rows(tasks) if tasks is not None else None
+        self._eval_tasks = (
+            _copy_task_rows(eval_tasks) if eval_tasks is not None else None
+        )
         self._evaluation_mode = False
         self._state: dict[str, Any] | None = None
         self._connected = False
         self._broken = False
         self._redials = 0
 
-    def _build_session(self) -> Any:  # noqa: ANN401 -- OpenEnv's sync client has no public type
-        """Build a fresh (unconnected) sync session against the provider's current URL."""
+    def _build_session(self) -> GenericEnvClient:
+        """Build a fresh (unconnected) session against the provider's current URL."""
         return GenericEnvClient(
             base_url=self._url_provider(),
             connect_timeout_s=self._connect_timeout_s,
             # None -> unbounded; OpenEnv's annotation omits it but forwards
             # straight to asyncio.wait_for, where None means no timeout.
             message_timeout_s=self._timeout_s,  # ty: ignore[invalid-argument-type]
-        ).sync()
+            # A ping while the observation is written closes the socket.
+            websocket_ping_interval_s=None,
+            websocket_ping_timeout_s=None,
+        )
 
-    def _transport(self, call: Callable[[], TransportT]) -> TransportT:
-        """Run one session round-trip; mark the session broken on transport failure."""
+    def _transport(self, call: Callable[[], Awaitable[TransportT]]) -> TransportT:
+        """Run one session round-trip on :data:`SESSION_LOOP`; mark the session broken on transport failure."""
         if self._broken:
             msg = (
                 "RemoteEnvClient session is broken after a transport error; "
@@ -209,47 +271,65 @@ class RemoteEnvClient:
             )
             raise RuntimeError(msg)
         try:
-            return call()
+            return SESSION_LOOP.run(call)
         except Exception as exc:
             if _is_transport_error(exc):
                 self._broken = True
             _strip_url_userinfo_from_exc(exc)
             raise
 
-    def _connect(self) -> None:
+    def _connect(self) -> GenericEnvClient:
         """Open the session on first use (idempotent), so construction is cheap."""
-        if self._sync is None:
-            self._sync = self._build_session()
+        if self._session is None:
+            self._session = self._build_session()
+        session = self._session
         if not self._connected:
-            self._transport(self._sync.connect)
+            self._transport(session.connect)
             self._connected = True
+        return session
 
     def _drop_session(self) -> None:
         """Close the live session (if any) and clear flags so the next dial is fresh."""
         with contextlib.suppress(Exception):
-            if self._sync is not None:
-                self._sync.close()
-        self._sync = None
+            if self._session is not None:
+                SESSION_LOOP.run(self._session.close)
+        self._session = None
         self._connected = False
         self._broken = False
         self._state = None
 
-    def _redial(self) -> None:
+    def _redial(self, attempt: int) -> None:
         """Replace a broken session with a fresh one, at an episode boundary only.
 
-        Jittered backoff so a host restart does not stampede every slot's reconnect
-        into the server's capacity limit at once.
+        Jittered backoff, doubling with ``attempt``, so a host restart does not
+        stampede every slot's reconnect into the server's capacity limit at once.
         """
         self._redials += 1
         # Drop before backoff so a CAPACITY_REACHED host is not held during jitter.
         self._drop_session()
-        time.sleep(random.uniform(0.05, 0.35))
+        time.sleep(random.uniform(0.05, 0.35) * 2**attempt)
 
-    def _retry_on_fresh_session(self, call: Callable[[], TransportT]) -> TransportT:
-        """Re-dial once and re-run ``call`` — boundary-only recovery."""
-        self._redial()
-        self._connect()
-        return self._transport(call)
+    def _at_boundary(
+        self, call: Callable[[GenericEnvClient], Awaitable[TransportT]]
+    ) -> TransportT:
+        """Run ``call`` on a live session between episodes, re-dialling on transport failure.
+
+        No episode is in flight, so a failed dial or round-trip is retried on a
+        fresh session; the fourth transport failure propagates. Application
+        errors propagate at once.
+        """
+        attempts = 4
+        attempt = 0
+        while True:
+            if self._broken:
+                self._redial(attempt)
+            try:
+                session = self._connect()
+                return self._transport(partial(call, session))
+            except Exception as exc:
+                attempt += 1
+                if not _is_transport_error(exc) or attempt == attempts:
+                    raise
 
     @contextlib.contextmanager
     def eval_mode(self) -> Iterator[None]:
@@ -261,6 +341,14 @@ class RemoteEnvClient:
         finally:
             self._evaluation_mode = previous
 
+    def _active_tasks(self) -> tuple[dict[str, Any], ...] | None:
+        """Per-row reset kwargs for the current mode, or ``None`` when unset."""
+        if self._tasks is None:
+            return None
+        if self._evaluation_mode and self._eval_tasks is not None:
+            return self._eval_tasks
+        return self._tasks
+
     def reset(
         self,
         seed: int | None = None,
@@ -269,33 +357,34 @@ class RemoteEnvClient:
     ) -> tuple[object, dict[str, Any]]:
         """Reset the session's env and return ``(payload, info)`` — the observation as sent.
 
-        ``seed`` / ``row_index`` travel to the server so a group resets to the same
-        prompt. A broken or server-reaped session is re-dialled here, the episode
-        boundary: one retry, then errors propagate.
+        ``seed`` is sent when it is >= 0. A ``tasks`` list supplies per-row reset
+        kwargs merged when ``row_index`` is set. ``evaluation`` is sent in eval mode.
+        A broken, unreachable or server-reaped session is re-dialled here, the
+        episode boundary (see :meth:`_at_boundary`).
         """
-        if self._broken:
-            self._redial()
         kwargs: dict[str, Any] = {}
         if seed is not None and int(seed) >= 0:
             kwargs["seed"] = int(seed)
-        if row_index is not None:
+        active_tasks = self._active_tasks()
+        if active_tasks is not None:
+            if row_index is not None:
+                idx = int(row_index)
+                if idx < 0 or idx >= len(active_tasks):
+                    msg = f"row_index {idx} out of range for {len(active_tasks)} tasks"
+                    raise IndexError(msg)
+                kwargs.update(active_tasks[idx])
+        elif row_index is not None:
             kwargs["row_index"] = int(row_index)
         if self._evaluation_mode:
             kwargs["evaluation"] = True
-        try:
-            self._connect()
-            result = self._transport(lambda: self._sync.reset(**kwargs))
-        except Exception as exc:
-            if not _is_transport_error(exc):
-                raise
-            result = self._retry_on_fresh_session(lambda: self._sync.reset(**kwargs))
+        result = self._at_boundary(lambda session: session.reset(**kwargs))
         raw_meta = getattr(result, "metadata", None)
         info = dict(raw_meta) if isinstance(raw_meta, dict) else {}
         return result.observation, info
 
     def step(self, action: object) -> tuple[object, float, bool, bool, dict[str, Any]]:
         """Send one action (model text) over the session and return the Gym 5-tuple."""
-        self._connect()
+        session = self._connect()
         text = action if isinstance(action, str) else str(action)
         if self._mcp_tool:
             # The session client transports plain dicts, so serialize the MCP action.
@@ -305,7 +394,7 @@ class RemoteEnvClient:
             ).model_dump()
         else:
             act = {self._action_field: text}
-        result = self._transport(lambda: self._sync.step(act))
+        result = self._transport(lambda: session.step(act))
         obs = result.observation
         reward = result.reward
         # A server that omits ``truncated`` reports every end as a termination.
@@ -333,12 +422,15 @@ class RemoteEnvClient:
         )
 
     def close(self) -> None:
-        """End the session and stop the client's background event loop."""
+        """End the session."""
         self._drop_session()
 
     @property
     def dataset_size(self) -> int:
-        """Dataset rows the env serves, from its ``state`` (``0`` if not dataset-backed)."""
+        """Row count: ``len`` of the active task list when ``tasks`` is set, else env ``state``."""
+        active_tasks = self._active_tasks()
+        if active_tasks is not None:
+            return len(active_tasks)
         return int(self._fetch_state().get("dataset_size", 0) or 0)
 
     @property
@@ -361,20 +453,27 @@ class RemoteEnvClient:
         on the ``step`` observation instead. :meth:`_drop_session` clears the cache,
         so a re-dial (including one onto a host that moved) reads them again.
 
-        Transport failures retry once on a fresh session, then propagate.
-        Application-level ``state`` errors propagate without retry.
+        State is only read between episodes, so transport failures re-dial as
+        at a reset (:meth:`_at_boundary`). Application-level ``state`` errors
+        propagate without retry.
         """
         if self._state is None:
-            try:
-                self._connect()
-                state = self._transport(self._sync.state)
-            except Exception as exc:
-                if not _is_transport_error(exc):
-                    raise
-                # State is only read between episodes, so this is a boundary.
-                state = self._retry_on_fresh_session(lambda: self._sync.state())
+            state = self._at_boundary(lambda session: session.state())
             self._state = state if isinstance(state, dict) else {}
         return self._state
+
+
+def _copy_task_rows(
+    tasks: Sequence[Mapping[str, Any]],
+) -> tuple[dict[str, Any], ...]:
+    """Store independent dict copies of each row's reset kwargs."""
+    copied: list[dict[str, Any]] = []
+    for entry in tasks:
+        if not isinstance(entry, Mapping):
+            msg = "each tasks entry must be a mapping"
+            raise TypeError(msg)
+        copied.append(dict(entry))
+    return tuple(copied)
 
 
 HTTP_URL_RE = re.compile(r"https?://[^\s]+", re.IGNORECASE)

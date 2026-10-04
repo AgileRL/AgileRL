@@ -42,13 +42,16 @@ class TrainerRuntimeConfig(BaseModel):
 class MambaPatchConfig(BaseModel):
     """Mamba2 mixer patches that vary by Hugging Face ``model_type``.
 
-    ``mixer`` is a dotted path resolved when the patch runs; the transformers
-    class may be absent at import time.
+    ``mixer`` and ``block`` are dotted paths resolved when the patch runs; the
+    transformers classes may be absent at import time. ``block`` is the decoder
+    block that calls ``mixer``; when set, packed rows reset the mixer's scan and
+    conv state at every document boundary.
     """
 
     model_config = ConfigDict(extra="forbid")
 
     mixer: str = Field(min_length=1)
+    block: str | None = Field(default=None, min_length=1)
     fused_path: bool = True
     stream_ordering: bool = True
 

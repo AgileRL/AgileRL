@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import ast
+import re
 import uuid
 import warnings
 from collections.abc import Callable, Iterator, Mapping, Sequence
@@ -14,19 +16,82 @@ from typing import TYPE_CHECKING, Any, cast
 
 import torch
 
+from agilerl.components.llm_rollout_data import (
+    EpisodeSegments,
+    validate_episode_segments,
+)
 from agilerl.llm_envs.env_sources import is_url, spec_to_factory
 from agilerl.llm_envs.observation import (
     DEFAULT_OBSERVATION_ROLE,
+    ESCAPED_IMAGE_PLACEHOLDER,
+    IMAGE_PLACEHOLDER,
+    IMAGE_USER_CONTENT_PREFIX,
+    QUESTION_AFTER_PAGE,
     encode_image_training_inputs,
     observation_role,
     observation_text_and_image,
     process_observation,
 )
 from agilerl.protocols import EnvClientProtocol, TextEnvProtocol
+from agilerl.utils.algo_utils import is_str_keyed_dict
 from agilerl.utils.env_utils import construct_entrypoint_env
 from agilerl.utils.llm_utils import max_prompt_tokens_for_model_len
 
-__all__ = ["RolloutHarness"]
+__all__ = ["RolloutHarness", "TranscriptContinuityError", "env_action_text"]
+
+# Every restart prompt repeats each entry; an unclosed reasoning block is the whole generation.
+ACTION_HISTORY_MAX_CHARS = 300
+
+
+class TranscriptContinuityError(RuntimeError):
+    """A turn was sampled from a context that does not extend the tokens sampled so far."""
+
+
+def env_action_text(gen_text: str) -> str:
+    """Text the env executes: what follows the first ``</think>``, else the whole text.
+
+    A template that prefills an open ``<think>`` yields ``reasoning</think>action``
+    with no opening tag. A reasoning block that never closes passes through whole.
+    """
+    _reasoning, closed, action = gen_text.partition("</think>")
+    if not closed:
+        return _quote_unparsed_call(gen_text)
+    return _quote_unparsed_call(action.strip())
+
+
+def _quote_unparsed_call(text: str) -> str:
+    """Wrap the payload of a call the env cannot parse as a string argument."""
+    raw = text.strip()
+    matched = re.match(r"\A([A-Za-z_][A-Za-z0-9_]*)\b(.*)\Z", raw, re.DOTALL)
+    if matched is None:
+        return text
+    name, rest = matched.group(1), matched.group(2).strip()
+    # A tag after the call is not a payload to quote.
+    if not rest or rest[0] not in "({:" or "<" in raw:
+        return text
+    try:
+        tree = ast.parse(raw)
+    except SyntaxError:
+        tree = None
+    if (
+        tree is not None
+        and len(tree.body) == 1
+        and isinstance(tree.body[0], ast.Expr)
+        and isinstance(tree.body[0].value, ast.Call)
+    ):
+        return raw
+    payload = rest
+    while payload and payload[0] in ":{( ":
+        payload = payload[1:]
+    while payload and payload[-1] in ")} ":
+        payload = payload[:-1]
+    if len(payload) >= 2 and payload[0] == payload[-1] and payload[0] in "'\"":
+        payload = payload[1:-1]
+    if not payload:
+        return text
+    escaped = payload.replace("\\", "\\\\").replace("'", "\\'")
+    return f"{name}('{escaped}')"
+
 
 if TYPE_CHECKING:
     from openenv.core.env_server.interfaces import Environment
@@ -66,6 +131,10 @@ class RolloutHarness:
         max_model_len: int | None = None,
         system_prompt: str | None = None,
         vision_processor: Callable[..., Mapping[str, Any]] | None = None,
+        tasks: Sequence[Mapping[str, Any]] | None = None,
+        eval_tasks: Sequence[Mapping[str, Any]] | None = None,
+        segment_prompt_tokens: int | None = None,
+        segment_max_images: int | None = None,
     ) -> None:
         """Drive a text env at the token level over ``env_client`` (a URL or a client object).
 
@@ -100,14 +169,51 @@ class RolloutHarness:
             without a system slot raises at reset rather than dropping it silently.
         :param vision_processor: Callable ``(text=..., images=..., return_tensors='pt')``
             that returns ``input_ids`` and ``pixel_values`` for image observations.
-        :ivar full_ids: Running episode token sequence (prompt + generations + feedback).
-        :ivar turn_boundaries: ``(start, end, turn_idx)`` spans of policy-generated tokens.
+            Each image turn's new text is processed alone with that turn's image;
+            ``pixel_values`` concatenate along dim 0 across turns.
+        :param tasks: Per-row reset kwargs forwarded to a URL-backed client.
+        :param eval_tasks: Held-out per-row reset kwargs for eval mode on a URL-backed client.
+        :param segment_prompt_tokens: Restart the episode's context when the next
+            prompt would exceed this many tokens. The restarted prompt holds the
+            system prompt, the actions taken so far and the latest observation;
+            :meth:`get_episode_data` returns every segment. When that prompt is
+            over the model budget the context continues unrestarted while it
+            fits. ``None`` never restarts.
+        :param segment_max_images: Restart the episode's context when the next
+            prompt would carry more than this many images (match the engine's
+            ``limit_mm_per_prompt``). A restarted prompt carries one image.
+            ``None`` puts no image limit on a segment.
+        :ivar full_ids: Running token sequence of the current segment (prompt +
+            generations + feedback).
+        :ivar turn_boundaries: ``(start, end, turn_idx)`` spans of policy-generated
+            tokens in the current segment.
         :ivar turn_rewards: Per-turn rewards from the env.
         :ivar done: Whether the episode has terminated.
         :ivar current_prompt: Latest policy-ready prompt; ``{}`` once done.
         :ivar sampling_logps: Per-turn vLLM sampling logprobs (empty on the HF path).
         """
         self.max_turns = max_turns
+        if segment_prompt_tokens is not None and segment_prompt_tokens < 1:
+            msg = (
+                "segment_prompt_tokens must be a positive int or None, "
+                f"got {segment_prompt_tokens}."
+            )
+            raise ValueError(msg)
+        self._segment_prompt_tokens = segment_prompt_tokens
+        if segment_max_images is not None and segment_max_images < 1:
+            msg = (
+                "segment_max_images must be a positive int or None, "
+                f"got {segment_max_images}."
+            )
+            raise ValueError(msg)
+        self._segment_max_images = segment_max_images
+        # Finished segments of the episode: ids through the last generation,
+        # segment-relative turn boundaries, and the segment's pixel rows.
+        self._segments: list[
+            tuple[torch.Tensor, list[tuple[int, int, int]], torch.Tensor | None]
+        ] = []
+        # Text the env executed on each turn, capped; empty when restarts are off.
+        self._action_history: list[str] = []
         if observation_field is not None and observation_processor is not None:
             msg = (
                 "observation_field names the field the default observation "
@@ -126,11 +232,13 @@ class RolloutHarness:
                 timeout_s is not None
                 or mcp_tool is not None
                 or action_field != "message"
+                or tasks is not None
+                or eval_tasks is not None
             ):
                 msg = (
-                    "timeout_s / mcp_tool / action_field configure the transport "
-                    "and have no effect on an already-built env client; set them "
-                    "on the client instead."
+                    "timeout_s / mcp_tool / action_field / tasks / "
+                    "eval_tasks configure the transport and have no effect "
+                    "on an already-built env client; set them on the client instead."
                 )
                 raise ValueError(msg)
             self._env_client: EnvClientProtocol = env_client
@@ -142,6 +250,8 @@ class RolloutHarness:
                 timeout_s=timeout_s,
                 mcp_tool=mcp_tool,
                 action_field=action_field,
+                tasks=tasks,
+                eval_tasks=eval_tasks,
             )
         self.tokenizer = tokenizer
         self.apply_chat_template = apply_chat_template
@@ -156,8 +266,12 @@ class RolloutHarness:
         self.rubric_score_sums: dict[str, float] = {}
         self._turn_idx = 0
         self._prompt_text: str = ""
-        self._gen_texts: list[str] = []
-        self._feedback_texts: list[str] = []
+        # Image episodes: the last prompt plus its sampled tokens, as text and as
+        # the ids vLLM generates from (image placeholders unexpanded).
+        self._transcript: tuple[str, torch.Tensor] | None = None
+        # Image episodes: the last turn's sampled sequence, as the engine returned it.
+        self._sampled_ids: torch.Tensor | None = None
+        self._episode_images: list[object] = []
         self._last_full_prompt_token_len: int | None = None
         # Cached chat-template frame around a feedback turn, per observation role
         # (rendered once each): a tool result and a user message get different frames.
@@ -346,8 +460,19 @@ class RolloutHarness:
         messages: list[dict[str, str]] = []
         if self._system_prompt is not None:
             messages.append({"role": "system", "content": self._system_prompt})
-        messages.append({"role": "user", "content": obs_text})
+        messages.append(
+            {"role": "user", "content": self._with_trailing_instruction(obs_text)}
+        )
         return messages, chat_template_kwargs
+
+    def _with_trailing_instruction(self, content: str) -> str:
+        """Put the instruction after the page and leave the question last."""
+        if self._system_prompt is None:
+            return content
+        if QUESTION_AFTER_PAGE in content:
+            page, question = content.rsplit(QUESTION_AFTER_PAGE, 1)
+            return f"{page}\n{self._system_prompt}{QUESTION_AFTER_PAGE}{question}"
+        return f"{content}\n{self._system_prompt}"
 
     def _chat_prompt_string(self, obs_text: str) -> str:
         """Render one user turn (plus optional system) through the chat template."""
@@ -364,6 +489,73 @@ class RolloutHarness:
             msg = "apply_chat_template(tokenize=False) must return str"
             raise TypeError(msg)
         return rendered
+
+    def _image_feedback_turn_text(
+        self, feedback_text: str, role: str, last_token_id: int
+    ) -> str:
+        """Text that extends the image transcript by one feedback turn.
+
+        The instruction follows every observation and stays in history, so each
+        prompt extends the previous one verbatim.
+
+        :param feedback_text: The env's rendered observation for this turn.
+        :param role: Chat role the observation speaks as.
+        :param last_token_id: Last token of the transcript being extended.
+        """
+        content = self._with_trailing_instruction(feedback_text)
+        if not self.apply_chat_template:
+            return content
+        parts = self._feedback_boundary_parts(role)
+        if parts is None:
+            msg = (
+                f"The tokenizer's chat template could not render a {role!r} "
+                "feedback turn boundary for the image transcript."
+            )
+            raise RuntimeError(msg)
+        prefix, suffix = parts
+        # A sampled end-of-turn token already closes the transcript.
+        if last_token_id in self._special_ids():
+            end_text = self.tokenizer.decode([last_token_id], skip_special_tokens=False)
+            prefix = prefix.removeprefix(end_text)
+        return prefix + content + suffix
+
+    def _require_transcript_continues(
+        self, transcript_ids: torch.Tensor, prompt_ids: torch.Tensor
+    ) -> None:
+        """Raise unless ``prompt_ids`` starts with ``transcript_ids``, token for token.
+
+        The trainer scores every earlier turn inside the last prompt, so each
+        turn must be sampled from the exact tokens sampled before it.
+        """
+        expected = transcript_ids[0].tolist()
+        head = prompt_ids[0, : len(expected)].tolist()
+        if head == expected:
+            return
+        diverged = next(
+            (
+                idx
+                for idx, (a, b) in enumerate(zip(head, expected, strict=False))
+                if a != b
+            ),
+            len(head),
+        )
+        msg = (
+            f"Turn {self._turn_idx} prompt does not extend the sampled transcript: "
+            f"tokens diverge at position {diverged} of {len(expected)}."
+        )
+        raise TranscriptContinuityError(msg)
+
+    def _engine_ids(self, text: str) -> torch.Tensor:
+        """``(1, T)`` ids of ``text`` with each image placeholder left unexpanded."""
+        return torch.tensor(
+            [self.tokenizer.encode(text, add_special_tokens=False)], dtype=torch.long
+        )
+
+    def _prompt_image_payload(self) -> object | list[object]:
+        """``prompt['image']`` value for the current episode screenshots."""
+        if len(self._episode_images) == 1:
+            return self._episode_images[0]
+        return self._episode_images
 
     def _tokenize_initial_prompt(self, obs_text: str) -> torch.Tensor:
         """Tokenize the initial observation, optionally with chat template."""
@@ -629,6 +821,7 @@ class RolloutHarness:
         self._adopt_system_prompt(info)
         self._multimodal_turn = None
         self._episode_pixel_values = None
+        self._episode_images = [image] if image is not None else []
         if image is not None:
             if self._vision_processor is None:
                 msg = "Image observations require vision_processor on RolloutHarness"
@@ -647,6 +840,7 @@ class RolloutHarness:
                 "image": image,
                 "prompt_token_len": prompt_token_len,
                 "input_ids": train_ids,
+                "prompt_token_ids": self._engine_ids(prompt_str),
             }
         else:
             self.full_ids = self._tokenize_initial_prompt(obs_text)
@@ -655,9 +849,11 @@ class RolloutHarness:
         self.rubric_score_sums = {}
         self._turn_idx = 0
         self._prompt_text = obs_text
-        self._gen_texts = []
-        self._feedback_texts = []
+        self._transcript = None
+        self._sampled_ids = None
         self.sampling_logps = []
+        self._segments = []
+        self._action_history = []
 
         max_pt = self._prompt_budget()
         if self._multimodal_turn is not None:
@@ -690,9 +886,9 @@ class RolloutHarness:
         prompt_len = self._last_full_prompt_token_len
         sequence = token_ids if token_ids.dim() > 1 else token_ids.unsqueeze(0)
         if self.full_ids is None:
-            full_ids = sequence.detach()
-            self.full_ids = full_ids
-            self._multimodal_turn = None
+            if self._sampled_ids is not None:
+                self._require_transcript_continues(self._sampled_ids, sequence)
+            self._sampled_ids = sequence.detach()
             gen_ids = sequence[0, prompt_len:].detach()
             gen_text = self.tokenizer.decode(
                 gen_ids.tolist(),
@@ -703,9 +899,43 @@ class RolloutHarness:
                 raise TypeError(msg)
             if sampling_logps is not None:
                 self.sampling_logps.append(sampling_logps)
-            gen_end = full_ids.shape[1]
-            self.turn_boundaries.append((prompt_len, gen_end, self._turn_idx))
-            self._gen_texts.append(gen_text)
+            processor_ids: torch.Tensor | None = None
+            turn = self._multimodal_turn
+            if turn is not None:
+                raw_ids = turn.get("input_ids")
+                if isinstance(raw_ids, torch.Tensor):
+                    processor_ids = raw_ids.detach()
+                    if processor_ids.dim() == 1:
+                        processor_ids = processor_ids.unsqueeze(0)
+                sampled_text = self.tokenizer.decode(
+                    gen_ids.tolist(),
+                    skip_special_tokens=False,
+                )
+                if not isinstance(sampled_text, str):
+                    msg = "decode() of one sequence returns str"
+                    raise TypeError(msg)
+                engine_ids = turn["prompt_token_ids"]
+                self._transcript = (
+                    turn["prompt"] + sampled_text,
+                    torch.cat(
+                        [engine_ids, gen_ids.unsqueeze(0).to(engine_ids.device)], dim=1
+                    ),
+                )
+            self._multimodal_turn = None
+            # pixel_values was built from the processor ids. The image-token
+            # count in the training sequence has to match that tensor.
+            if processor_ids is not None:
+                self.full_ids = torch.cat(
+                    [processor_ids.to(gen_ids.device), gen_ids.unsqueeze(0)],
+                    dim=1,
+                )
+                train_prompt_len = int(processor_ids.shape[1])
+            else:
+                self.full_ids = sequence.detach()
+                train_prompt_len = prompt_len
+            gen_end = int(self.full_ids.shape[1])
+            self.turn_boundaries.append((train_prompt_len, gen_end, self._turn_idx))
+            self._record_action(gen_text)
             return gen_text
         full_ids = self.full_ids
         # Only the new suffix crosses devices; the prefix is byte-identical to ``full_ids``.
@@ -722,21 +952,40 @@ class RolloutHarness:
         self.full_ids = torch.cat([full_ids, gen_ids.unsqueeze(0)], dim=1)
         gen_end = self.full_ids.shape[1]
         self.turn_boundaries.append((prompt_len, gen_end, self._turn_idx))
-        self._gen_texts.append(gen_text)
+        self._record_action(gen_text)
         return gen_text
+
+    def _record_action(self, gen_text: str) -> None:
+        """Add this turn's env action to the restart history, capped in length."""
+        if self._segment_prompt_tokens is None and self._segment_max_images is None:
+            return
+        action = env_action_text(gen_text)
+        if len(action) > ACTION_HISTORY_MAX_CHARS:
+            action = action[:ACTION_HISTORY_MAX_CHARS] + "…"
+        self._action_history.append(action)
 
     def _step_env(
         self, gen_text: str
-    ) -> tuple[str, str, float, bool, bool, dict[str, Any]]:
+    ) -> tuple[str, str, object | None, float, bool, bool, dict[str, Any]]:
         """Round-trip the env backend and render its observation — the parallelizable phase.
 
         Carries the observation's chat role alongside its text so :meth:`_step_apply`
         frames a tool result as a tool turn rather than as something the user said.
         """
-        payload, reward, terminated, truncated, info = self._env_client.step(gen_text)
+        payload, reward, terminated, truncated, info = self._env_client.step(
+            env_action_text(gen_text)
+        )
+        if is_str_keyed_dict(payload) and (
+            payload.get("image") is not None or payload.get("screenshot") is not None
+        ):
+            obs_text, image = observation_text_and_image(payload)
+        else:
+            image = None
+            obs_text = self._render_observation(payload)
         return (
-            self._render_observation(payload),
+            obs_text,
             observation_role(payload, info),
+            image,
             reward,
             terminated,
             truncated,
@@ -745,10 +994,12 @@ class RolloutHarness:
 
     def _step_apply(
         self,
-        env_result: tuple[str, str, float, bool, bool, dict[str, Any]],
+        env_result: tuple[str, str, object | None, float, bool, bool, dict[str, Any]],
     ) -> tuple[dict[str, Any], float, bool, bool, dict[str, Any]]:
         """Apply the env round-trip result: rewards, truncation, feedback tokens."""
-        next_obs, next_role, reward, terminated, truncated, info = env_result
+        next_obs, next_role, next_image, reward, terminated, truncated, info = (
+            env_result
+        )
         self.turn_rewards.append(float(reward))
         for name, value in (info.get("rubric_scores") or {}).items():
             self.rubric_score_sums[name] = self.rubric_score_sums.get(
@@ -766,24 +1017,116 @@ class RolloutHarness:
                 msg = "reset() must run before step()"
                 raise RuntimeError(msg)
             feedback_text = next_obs
-            self._feedback_texts.append(feedback_text)
-            feedback_ids = self._tokenize_feedback(feedback_text, next_role).to(
-                full_ids.device
-            )
-            # The transcript keeps the sampled end-of-turn token (it is trained),
-            # so drop the boundary frame's duplicate terminator when both are
-            # present; a turn truncated at max_tokens still gets the frame's one.
-            if (
-                feedback_ids.shape[1] > 1
-                and int(full_ids[0, -1]) == int(feedback_ids[0, 0])
-                and int(feedback_ids[0, 0]) in self._special_ids()
-            ):
-                feedback_ids = feedback_ids[:, 1:]
-            self.full_ids = torch.cat([full_ids, feedback_ids], dim=1)
+            if next_image is not None:
+                if self._vision_processor is None:
+                    msg = (
+                        "Image observations require vision_processor on RolloutHarness"
+                    )
+                    raise RuntimeError(msg)
+                if self._transcript is None:
+                    # Text-only so far: the ids hold no expanded image tokens.
+                    transcript_text = self.tokenizer.decode(
+                        full_ids[0].tolist(), skip_special_tokens=False
+                    )
+                    transcript_engine_ids = full_ids
+                else:
+                    transcript_text, transcript_engine_ids = self._transcript
+                # A sampled turn that spells the placeholder would be expanded as
+                # another image, and its trained ids cannot change: end here.
+                if transcript_text.count(IMAGE_PLACEHOLDER) != len(
+                    self._episode_images
+                ):
+                    truncated = True
+                else:
+                    turn_text = self._image_feedback_turn_text(
+                        feedback_text, next_role, int(full_ids[0, -1])
+                    )
+                    # Only the new turn is tokenized: decode/encode does not
+                    # round-trip every id sequence the model samples.
+                    turn_ids, turn_pixel_values = encode_image_training_inputs(
+                        text=turn_text,
+                        image=next_image,
+                        processor=self._vision_processor,
+                    )
+                    train_ids = torch.cat(
+                        [full_ids, turn_ids.to(full_ids.device)], dim=1
+                    )
+                    engine_ids = torch.cat(
+                        [
+                            transcript_engine_ids,
+                            self._engine_ids(turn_text).to(
+                                transcript_engine_ids.device
+                            ),
+                        ],
+                        dim=1,
+                    )
+                    prompt_token_len = int(train_ids.shape[-1])
+                    max_pt = self._prompt_budget()
+                    over_images = (
+                        self._segment_max_images is not None
+                        and len(self._episode_images) + 1 > self._segment_max_images
+                    )
+                    restarted = (
+                        self._over_segment_tokens(prompt_token_len) or over_images
+                    ) and self._restart_context(full_ids, feedback_text, next_image)
+                    if restarted:
+                        pass
+                    elif over_images:
+                        msg = (
+                            f"Turn {self._turn_idx} needs a context restart to stay "
+                            f"within segment_max_images={self._segment_max_images}, "
+                            "but the restarted prompt is over the prompt budget."
+                        )
+                        raise RuntimeError(msg)
+                    elif max_pt is not None and prompt_token_len > max_pt:
+                        truncated = True
+                    else:
+                        self._episode_images.append(next_image)
+                        if self._episode_pixel_values is not None:
+                            turn_pixel_values = torch.cat(
+                                [
+                                    self._episode_pixel_values,
+                                    turn_pixel_values.to(
+                                        self._episode_pixel_values.device
+                                    ),
+                                ],
+                                dim=0,
+                            )
+                        self._episode_pixel_values = turn_pixel_values
+                        self._multimodal_turn = {
+                            "prompt": transcript_text + turn_text,
+                            "image": self._prompt_image_payload(),
+                            "prompt_token_len": prompt_token_len,
+                            "input_ids": train_ids,
+                            "prompt_token_ids": engine_ids,
+                        }
+                        self.full_ids = None
+            else:
+                self._transcript = None
+                self._sampled_ids = None
+                feedback_ids = self._tokenize_feedback(feedback_text, next_role).to(
+                    full_ids.device
+                )
+                # The transcript keeps the sampled end-of-turn token (it is trained),
+                # so drop the boundary frame's duplicate terminator when both are
+                # present; a turn truncated at max_tokens still gets the frame's one.
+                if (
+                    feedback_ids.shape[1] > 1
+                    and int(full_ids[0, -1]) == int(feedback_ids[0, 0])
+                    and int(feedback_ids[0, 0]) in self._special_ids()
+                ):
+                    feedback_ids = feedback_ids[:, 1:]
+                self.full_ids = torch.cat([full_ids, feedback_ids], dim=1)
 
-            if (max_pt := self._prompt_budget()) is not None:
                 prompt_len = int(self.full_ids.shape[1])
-                if prompt_len > max_pt:
+                restarted = self._over_segment_tokens(
+                    prompt_len
+                ) and self._restart_context(full_ids, feedback_text, None)
+                if (
+                    not restarted
+                    and (max_pt := self._prompt_budget()) is not None
+                    and prompt_len > max_pt
+                ):
                     truncated = True
 
             if not truncated:
@@ -792,6 +1135,70 @@ class RolloutHarness:
         self.done = bool(terminated or truncated)
         self.current_prompt = prompt
         return prompt, reward, terminated, truncated, info
+
+    def _over_segment_tokens(self, prompt_len: int) -> bool:
+        """Whether a ``prompt_len``-token prompt restarts the context."""
+        return (
+            self._segment_prompt_tokens is not None
+            and prompt_len > self._segment_prompt_tokens
+        )
+
+    def _restart_context(
+        self, segment_ids: torch.Tensor, obs_text: str, image: object | None
+    ) -> bool:
+        """Close the current segment and start a fresh prompt from the action history.
+
+        :param segment_ids: The current segment's ids through its last generation.
+        :param obs_text: The env's rendered observation that opens the new segment.
+        :param image: That observation's image, or ``None``.
+        :return: ``False``, with no state changed, when the new prompt is over budget.
+        """
+        body = obs_text.removeprefix(IMAGE_USER_CONTENT_PREFIX)
+        # A spelled placeholder in an action would be expanded as another image.
+        actions = "\n".join(
+            f"{index}. {action.replace(IMAGE_PLACEHOLDER, ESCAPED_IMAGE_PLACEHOLDER)}"
+            for index, action in enumerate(self._action_history, start=1)
+        )
+        restart_text = (
+            f"{obs_text[: len(obs_text) - len(body)]}"
+            f"Previous actions:\n{actions}\n\n{body}"
+        )
+        multimodal_turn: dict[str, Any] | None = None
+        pixel_values: torch.Tensor | None = None
+        if image is None:
+            prompt_ids = self._tokenize_initial_prompt(restart_text)
+        else:
+            if self._vision_processor is None:
+                msg = "Image observations require vision_processor on RolloutHarness"
+                raise RuntimeError(msg)
+            prompt_str = self._chat_prompt_string(restart_text)
+            prompt_ids, pixel_values = encode_image_training_inputs(
+                text=prompt_str,
+                image=image,
+                processor=self._vision_processor,
+            )
+            multimodal_turn = {
+                "prompt": prompt_str,
+                "image": image,
+                "prompt_token_len": int(prompt_ids.shape[-1]),
+                "input_ids": prompt_ids,
+                "prompt_token_ids": self._engine_ids(prompt_str),
+            }
+        max_pt = self._prompt_budget()
+        if max_pt is not None and int(prompt_ids.shape[-1]) > max_pt:
+            return False
+
+        self._segments.append(
+            (segment_ids, self.turn_boundaries, self._episode_pixel_values)
+        )
+        self.turn_boundaries = []
+        self._transcript = None
+        self._sampled_ids = None
+        self._episode_images = [image] if image is not None else []
+        self._episode_pixel_values = pixel_values
+        self._multimodal_turn = multimodal_turn
+        self.full_ids = prompt_ids if multimodal_turn is None else None
+        return True
 
     def step(
         self,
@@ -815,11 +1222,15 @@ class RolloutHarness:
         torch.Tensor,
         torch.Tensor | None,
         torch.Tensor | None,
+        EpisodeSegments | None,
     ]:
-        """Build the episode row for training.
+        """Build the episode row for training, its segments back to back.
+
+        The position predicting each later segment's first token is masked out.
 
         :return: ``full_ids``, ``action_mask``, ``turn_ids``, ``turn_rewards``,
-            ``sampling_logps``, ``pixel_values``.
+            ``sampling_logps``, ``pixel_values``, and ``segments`` (``None``
+            unless the context restarted).
         """
         if self.full_ids is None:
             if self._multimodal_turn is not None:
@@ -828,28 +1239,64 @@ class RolloutHarness:
             msg = "No episode data: reset() was never called"
             raise RuntimeError(msg)
 
-        seq_len = self.full_ids.shape[1]
+        segments = [
+            *self._segments,
+            (self.full_ids, self.turn_boundaries, self._episode_pixel_values),
+        ]
+        full_ids = (
+            self.full_ids
+            if len(segments) == 1
+            else torch.cat([ids for ids, _bounds, _pixels in segments], dim=1)
+        )
+        seq_len = full_ids.shape[1]
         action_mask = torch.zeros(1, seq_len - 1, dtype=torch.bool)
         turn_ids = torch.full((1, seq_len - 1), -1, dtype=torch.long)
 
-        for gen_start, gen_end, tidx in self.turn_boundaries:
-            mask_start = gen_start - 1
-            mask_end = gen_end - 1
-            if mask_start >= 0 and mask_end <= seq_len - 1:
-                action_mask[0, mask_start:mask_end] = True
-                turn_ids[0, mask_start:mask_end] = tidx
+        offset = 0
+        for ids, boundaries, _pixels in segments:
+            for gen_start, gen_end, tidx in boundaries:
+                mask_start = offset + gen_start - 1
+                mask_end = offset + gen_end - 1
+                if mask_start >= 0 and mask_end <= seq_len - 1:
+                    action_mask[0, mask_start:mask_end] = True
+                    turn_ids[0, mask_start:mask_end] = tidx
+            offset += int(ids.shape[1])
 
         turn_rewards = list(self.turn_rewards)
         while len(turn_rewards) < self.max_turns:
             turn_rewards.append(0.0)
 
+        pixel_values = self._episode_pixel_values
+        layout: EpisodeSegments | None = None
+        if len(segments) > 1:
+            pixel_parts = [pixels for _ids, _bounds, pixels in segments]
+            present = [pixels for pixels in pixel_parts if pixels is not None]
+            pixel_values = torch.cat(present, dim=0) if present else None
+            layout = EpisodeSegments(
+                token_lengths=torch.tensor(
+                    [int(ids.shape[1]) for ids, _bounds, _pixels in segments],
+                    dtype=torch.long,
+                ),
+                pixel_rows=None
+                if pixel_values is None
+                else torch.tensor(
+                    [
+                        0 if pixels is None else int(pixels.shape[0])
+                        for pixels in pixel_parts
+                    ],
+                    dtype=torch.long,
+                ),
+            )
+            validate_episode_segments(layout, int(seq_len), pixel_values)
+
         return (
-            self.full_ids,
+            full_ids,
             action_mask,
             turn_ids,
             torch.tensor(turn_rewards, dtype=torch.float),
             torch.cat(self.sampling_logps) if self.sampling_logps else None,
-            self._episode_pixel_values,
+            pixel_values,
+            layout,
         )
 
     def close(self) -> None:

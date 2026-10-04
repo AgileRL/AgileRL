@@ -187,6 +187,15 @@ class LLMRolloutBufferSpec(BaseModel):
             "as too off-policy. Unset keeps every queued group."
         ),
     )
+    drop_uninformative_groups: bool = Field(
+        default=False,
+        description=(
+            "Discard groups whose completions all got identical rewards before "
+            "they reach a learner, and wait until each learner's batch is full "
+            "of groups whose rewards differ. Tied groups have zero advantage, so "
+            "training on them only costs compute. No effect when group_size is 1."
+        ),
+    )
 
     @model_serializer(mode="wrap")
     def _dump_kind_tag(
@@ -319,6 +328,32 @@ class TrainingSpec(BaseModel):
         default=None,
         ge=1,
         description="Steps between evaluations during LLM fine-tuning.",
+    )
+    eval_samples_per_task: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "Held-out episodes per task sampled at the algorithm's temperature "
+            "and top_p under async rollout. Their mean is eval_score and "
+            "eval_accuracy. 0 reports the near-greedy pass there instead."
+        ),
+    )
+    eval_greedy: bool = Field(
+        default=True,
+        description=(
+            "Also run eval_loop near-greedy passes over the held-out tasks "
+            "under async rollout. With eval_samples_per_task set they report "
+            "as eval_score_greedy and eval_accuracy_greedy."
+        ),
+    )
+    eval_max_concurrent_episodes: int | None = Field(
+        default=None,
+        ge=1,
+        description=(
+            "Held-out episodes one rollout engine runs at once; the rest wait "
+            "in a queue. They share the engine's episode slots with training. "
+            "Unset lets them take every free slot."
+        ),
     )
     num_epochs: int | None = Field(
         default=None,
@@ -482,6 +517,12 @@ class TrainingSpec(BaseModel):
             and self.eps_start < self.eps_end
         ):
             msg = f"eps_start ({self.eps_start}) must be greater than or equal to eps_end ({self.eps_end})."
+            raise ValueError(msg)
+        if not self.eval_greedy and self.eval_samples_per_task == 0:
+            msg = (
+                "training.eval_greedy false needs training.eval_samples_per_task "
+                ">= 1; otherwise held-out eval runs no episodes."
+            )
             raise ValueError(msg)
         return self
 

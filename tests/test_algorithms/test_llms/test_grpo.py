@@ -41,10 +41,7 @@ from agilerl.distributed import CPUOffloadOptimizer, FSDPConfig, resolve_device
 from agilerl.utils.algo_utils import CosineLRScheduleConfig, VLLMConfig, clone_llm
 from tests import TINY_LLM_FIXTURE_PATH
 from tests.helpers.rollout_doubles import FakeEnvClient, RolloutHarnessDouble
-from tests.test_algorithms.test_llms.llm_helpers import (
-    _patch_mps_learn_hooks,
-    create_module,
-)
+from tests.test_algorithms.test_llms.llm_helpers import create_module
 from tests.utils import (
     assert_vllm_get_action_contract,
     make_mock_vllm_instance,
@@ -477,6 +474,8 @@ class _GrpoLossStub:
         self.adv_norm = adv_norm
         self.advantage_granularity = advantage_granularity
         self.vllm_importance_sampling_cap = vllm_importance_sampling_cap
+        self.vllm_max_logprob_gap = 0.1
+        self.vllm_max_clip_fraction = 0.02
         self.turn_advantage_trajectory_fallback = turn_advantage_trajectory_fallback
         self.device = device
         self._window_action_tokens = None
@@ -495,6 +494,7 @@ class _GrpoLossStub:
     _align_sampling_logprobs = GRPO._align_sampling_logprobs
     _sampling_mismatch_metrics = GRPO._sampling_mismatch_metrics
     _aligned_sampling_logprobs_and_metrics = GRPO._aligned_sampling_logprobs_and_metrics
+    _warn_on_sampling_mismatch = GRPO._warn_on_sampling_mismatch
     _assert_batch_divisible_by_group = GRPO._assert_batch_divisible_by_group
     _turn_broadcast_advantages = GRPO._turn_broadcast_advantages
     _trajectory_advantages = GRPO._trajectory_advantages
@@ -1595,7 +1595,7 @@ class TestGRPOLearnRewardsShape:
             # Return per-sample advantages so the rest of learn() can proceed.
             return torch.zeros(_rewards.shape[0], 1, dtype=torch.float32)
 
-        def fake_fused_forward(ids, batch_size, pixel_values=None):
+        def fake_fused_forward(ids, batch_size, **_kwargs):
             shape = (ids.shape[0], ids.shape[1] - 1)
             zeros = torch.zeros(shape, dtype=torch.float32, device=ids.device)
             return zeros, zeros, None
@@ -2888,6 +2888,48 @@ class TestGRPOTrajectoryAdvantages:
         out = stub._trajectory_advantages(rewards, 2, completion_ids)
         assert torch.allclose(out, torch.tensor([[-1.5], [1.5]]), atol=1e-6)
 
+    def test_terminal_rewards_padded_to_max_turns_share_the_return_advantage(self):
+        # Arrange
+        stub = _GrpoLossStub(
+            clip_coef_min=0.8,
+            clip_coef_max=1.2,
+            beta=0.0,
+            use_kl_advantage_shaping=False,
+            group_size=4,
+            advantage_granularity="trajectory",
+        )
+        # A succeeds at turn 1, B at turn 2, C fails after 4 turns, D answers
+        # wrong at turn 0; rewards are padded to max_turns=4.
+        rewards = torch.tensor(
+            [
+                [0.0, 1.0, 0.0, 0.0],
+                [0.0, 0.0, 1.0, 0.0],
+                [0.0, 0.0, 0.0, 0.0],
+                [0.0, 0.0, 0.0, 0.0],
+            ]
+        )
+        turn_ids = torch.tensor(
+            [
+                [0, 1, -1, -1],
+                [0, 1, 2, -1],
+                [0, 1, 2, 3],
+                [0, -1, -1, -1],
+            ]
+        )
+        completion_ids = torch.zeros(4, 5, dtype=torch.long)
+
+        # Act
+        granularity = stub._resolve_advantage_granularity(turn_ids, rewards)
+        out = stub._trajectory_advantages(rewards, 4, completion_ids)
+
+        # Assert
+        half_sqrt3 = 3**0.5 / 2
+        expected = torch.tensor(
+            [[half_sqrt3], [half_sqrt3], [-half_sqrt3], [-half_sqrt3]]
+        )
+        assert granularity == "trajectory"
+        assert torch.allclose(out, expected, atol=1e-6)
+
     def test_accepts_flat_per_trajectory_rewards(self):
         stub = _adv_stub()
         completion_ids = torch.zeros(2, 5, dtype=torch.long)
@@ -3305,7 +3347,7 @@ class TestGRPOLearn:
         completion_ids, action_masks = _build_branch_experiences(batch_size=4)
         rewards = torch.tensor([1.0, 0.0, -1.0, 2.0], dtype=torch.float32)
 
-        def fake_fused_forward(ids, batch_size, pixel_values=None):
+        def fake_fused_forward(ids, batch_size, **_kwargs):
             shape = (ids.shape[0], ids.shape[1] - 1)
             zeros = torch.zeros(shape, dtype=torch.float32, device=ids.device)
             return zeros, zeros, None
@@ -3347,7 +3389,7 @@ class TestGRPOLearn:
         completion_ids, action_masks = _build_branch_experiences(batch_size=4)
         rewards = torch.tensor([1.0, 0.0, -1.0, 2.0], dtype=torch.float32)
 
-        def fake_fused_forward(ids, batch_size, pixel_values=None):
+        def fake_fused_forward(ids, batch_size, **_kwargs):
             shape = (ids.shape[0], ids.shape[1] - 1)
             zeros = torch.zeros(shape, dtype=torch.float32, device=ids.device)
             return zeros, zeros, None
@@ -3382,7 +3424,7 @@ class TestGRPOLearn:
         completion_ids, action_masks = _build_branch_experiences(batch_size=4)
         rewards = torch.tensor([1.0, 0.0, -1.0, 2.0], dtype=torch.float32)
 
-        def fake_fused_forward(ids, batch_size, pixel_values=None):
+        def fake_fused_forward(ids, batch_size, **_kwargs):
             shape = (ids.shape[0], ids.shape[1] - 1)
             zeros = torch.zeros(shape, dtype=torch.float32, device=ids.device)
             return zeros, zeros, None
@@ -3426,7 +3468,7 @@ class TestGRPOLearn:
         completion_ids, action_masks = _build_branch_experiences(batch_size=3)
         rewards = torch.tensor([1.0, 0.0, -1.0], dtype=torch.float32)
 
-        def fake_fused_forward(ids, batch_size, pixel_values=None):
+        def fake_fused_forward(ids, batch_size, **_kwargs):
             shape = (ids.shape[0], ids.shape[1] - 1)
             zeros = torch.zeros(shape, dtype=torch.float32, device=ids.device)
             return zeros, zeros, None
@@ -3654,7 +3696,7 @@ class TestGRPOLearn:
                     return np.array([], dtype=int)
                 return super().__getitem__(item)
 
-        def fake_fused_forward(ids, batch_size, pixel_values=None):
+        def fake_fused_forward(ids, batch_size, **_kwargs):
             shape = (ids.shape[0], ids.shape[1] - 1)
             zeros = torch.zeros(shape, dtype=torch.float32, device=ids.device)
             return zeros, zeros, None
@@ -3757,7 +3799,7 @@ class TestGRPOLearn:
         completion_ids, action_masks = _build_branch_experiences(batch_size=2)
         rewards = torch.tensor([1.0, -1.0], dtype=torch.float32)
 
-        def fake_fused_forward(ids, batch_size, pixel_values=None):
+        def fake_fused_forward(ids, batch_size, **_kwargs):
             shape = (ids.shape[0], ids.shape[1] - 1)
             zeros = torch.zeros(shape, dtype=torch.float32, device=ids.device)
             return zeros, zeros, None
@@ -3881,6 +3923,8 @@ class TestGRPOLearn:
             "adv_min",
             "adv_max",
             "adv_zero_frac",
+            "padding_frac_before_packing",
+            "padding_frac_after_packing",
             "entropy",
             "kl_ref",
             "kl_old",
@@ -3892,6 +3936,7 @@ class TestGRPOLearn:
             "is_frac_above",
             "is_frac_clip_pos",
             "is_frac_clip_neg",
+            "old_logprobs_trainer_rows",
             "grad_norm_pre",
             "grad_norm_post",
         }
@@ -3965,13 +4010,14 @@ class TestGRPOLearn:
         assert np.isfinite(metrics["kl"])
         grpo.clean_up()
 
-    def test_grpo_learn_calls_mps_empty_cache(
+    def test_grpo_learn_keeps_device_cache(
         self,
         monkeypatch: pytest.MonkeyPatch,
         dist_mode_factory,
         model_factory,
     ) -> None:
-        """Patch MPS on CI so ``torch.mps.empty_cache()`` in ``learn()`` is exercised."""
+        """``learn()`` never flushes the CUDA or MPS caching allocator."""
+        # Arrange
         grpo = generate_grpo(
             dist_mode_factory,
             model_factory,
@@ -3986,10 +4032,9 @@ class TestGRPOLearn:
             micro_batch_size_per_gpu=None,
             from_name=False,
         )
-        # Patch MPS only *after* the agent is built: patching is_available()
-        # before construction makes the device resolve to "mps", and the dummy
-        # actor's ``.to("mps")`` then crashes on a non-MPS (Linux/CI) torch build.
-        empty = _patch_mps_learn_hooks(monkeypatch, "agilerl.algorithms.grpo")
+        flushes: list[str] = []
+        monkeypatch.setattr("torch.cuda.empty_cache", lambda: flushes.append("cuda"))
+        monkeypatch.setattr("torch.mps.empty_cache", lambda: flushes.append("mps"))
         for name, param in grpo.actor.named_parameters():
             if ("lora_A" in name or "lora_B" in name) and param is not None:
                 param.data.normal_(mean=0, std=0.01)
@@ -4009,8 +4054,12 @@ class TestGRPOLearn:
             [torch.rand(2, dtype=torch.float32) for _ in range(1)], dim=0
         )
 
-        grpo.learn((completions, action_masks, rewards))
-        empty.assert_called()
+        # Act
+        metrics = grpo.learn((completions, action_masks, rewards))
+
+        # Assert
+        assert np.isfinite(metrics["loss"])
+        assert flushes == []
         grpo.clean_up()
 
 
@@ -5431,7 +5480,7 @@ class TestGRPOVLLMSamplingCorrection:
             torch.exp(torch.tensor(0.5)).item(), rel=1e-6
         )
         assert metrics["vllm_is_frac_clamped"] == pytest.approx(0.0)
-        assert "vllm_is_rows_skipped" not in metrics
+        assert metrics["vllm_is_rows_skipped"] == 0.0
         assert not any("token-count mismatch" in str(w.message) for w in caught)
 
     def test_aligned_and_metrics_skipped_rows_warns_and_sets_metric(self):
@@ -5472,7 +5521,7 @@ class TestGRPOVLLMSamplingCorrection:
             torch.full((n_act,), -3.0, dtype=torch.float32) for _ in range(2)
         ]
 
-        def fake_fused_forward(ids, batch_size, pixel_values=None):
+        def fake_fused_forward(ids, batch_size, **_kwargs):
             shape = (ids.shape[0], ids.shape[1] - 1)
             zeros = torch.zeros(shape, dtype=torch.float32, device=ids.device)
             return zeros, zeros, None
@@ -5531,13 +5580,13 @@ class TestGRPOVLLMSamplingCorrection:
             torch.full((n_act,), -3.0, dtype=torch.float32) for _ in range(2)
         ]
 
-        def fake_fused_forward(ids, batch_size, pixel_values=None):
+        def fake_fused_forward(ids, batch_size, **_kwargs):
             shape = (ids.shape[0], ids.shape[1] - 1)
             zeros = torch.zeros(shape, dtype=torch.float32, device=ids.device)
             return zeros, zeros, None
 
         def fake_get_logprobs(
-            ids, batch_size, use_reference=False, eval_mode=False, pixel_values=None
+            ids, batch_size, use_reference=False, eval_mode=False, **_kwargs
         ):
             return torch.zeros(
                 ids.shape[0],
@@ -5834,13 +5883,13 @@ class TestGRPOTurnAdvantageLearnPath:
             stub._calculate_turn_advantage(rewards)
 
     def _stubbed_forwards(self, grpo):
-        def fake_fused_forward(ids, batch_size, pixel_values=None):
+        def fake_fused_forward(ids, batch_size, **_kwargs):
             shape = (ids.shape[0], ids.shape[1] - 1)
             zeros = torch.zeros(shape, dtype=torch.float32, device=ids.device)
             return zeros, zeros, None
 
         def fake_get_logprobs(
-            ids, batch_size, use_reference=False, eval_mode=False, pixel_values=None
+            ids, batch_size, use_reference=False, eval_mode=False, **_kwargs
         ):
             return torch.zeros(
                 ids.shape[0], ids.shape[1] - 1, device=ids.device, requires_grad=True

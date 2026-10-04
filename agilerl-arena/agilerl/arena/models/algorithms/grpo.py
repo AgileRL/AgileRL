@@ -18,6 +18,7 @@ from agilerl.arena.models.descriptions import (
     LR,
     WHITEN_ADVANTAGES,
 )
+from agilerl.arena.models.profiling import ProfilingConfig
 from agilerl.arena.models.registry import register
 
 
@@ -91,9 +92,26 @@ class GRPOSpec(RolloutLLMSpec):
             "choice when micro-batches have uneven lengths."
         ),
     )
+    old_logprobs_source: Literal["trainer", "rollout"] = Field(
+        default="trainer",
+        description=(
+            "Old policy for the clipped ratio. 'trainer' scores the learn-start "
+            "policy, skipping the extra forward for micro-batches before the "
+            "first optimizer step. 'rollout' uses the inference engine's "
+            "sampling log-probs and runs the extra forward only for completions "
+            "missing some of them, e.g. after env truncation."
+        ),
+    )
     loss_type: Literal["grpo", "gspo", "cispo"] = Field(
         default="grpo",
         description=(
             "Policy-gradient loss variant. GSPO and CISPO pin this on their own specs."
+        ),
+    )
+    profiling_config: ProfilingConfig | None = Field(
+        default=None,
+        description=(
+            "Opt-in learn profiling: CUDA memory snapshot on OOM and a "
+            "torch.profiler trace of one micro-batch. Unset profiles nothing."
         ),
     )

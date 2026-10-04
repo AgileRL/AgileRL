@@ -11,18 +11,32 @@ validated on GPU.
 """
 
 import warnings
-from types import SimpleNamespace
 
 import pytest
 import torch
+from torch import nn
 
+from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.utils.llm_packing import (
+    RESETS_AT_DOCUMENT_BOUNDARY,
     PackedBatch,
+    mixers_without_boundary_reset,
     pack_padded_batch,
+    packed_seq_idx,
     unpack_hidden_states,
     unpack_logprobs,
     unpack_values,
 )
+
+if HAS_LLM_DEPENDENCIES:
+    from transformers import (
+        AutoModelForCausalLM,
+        CLIPVisionConfig,
+        LlamaConfig,
+        LlavaConfig,
+        LlavaForConditionalGeneration,
+        Mamba2Config,
+    )
 
 
 def _make_batch(lengths, pad=0, vocab=64, seed=0):
@@ -322,6 +336,119 @@ class TestUnpackHiddenStates:
             assert torch.allclose(unpacked[b, :length], dense_hidden[b, :length])
 
 
+def _tiny_llama_config():
+    return LlamaConfig(
+        vocab_size=32,
+        hidden_size=16,
+        intermediate_size=32,
+        num_hidden_layers=1,
+        num_attention_heads=2,
+        num_key_value_heads=1,
+    )
+
+
+def _tiny_mamba2_config():
+    return Mamba2Config(
+        vocab_size=32,
+        hidden_size=16,
+        num_hidden_layers=1,
+        num_heads=4,
+        head_dim=8,
+        n_groups=1,
+        state_size=8,
+        conv_kernel=4,
+        chunk_size=4,
+    )
+
+
+class ScanMixer(nn.Module):
+    """Mixer owning a state-decay parameter."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.A_log = nn.Parameter(torch.zeros(2))
+
+
+class ResettingScanMixer(ScanMixer):
+    """Scan mixer whose class declares a reset at document boundaries."""
+
+
+setattr(ResettingScanMixer, RESETS_AT_DOCUMENT_BOUNDARY, True)
+
+
+class CausalConvMixer(nn.Module):
+    """Mixer with a depthwise causal short convolution."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.conv1d = nn.Conv1d(4, 4, kernel_size=3, groups=4, padding=2)
+
+
+class SymmetricConvMixer(nn.Module):
+    """Mixer with a same-padded convolution, which looks both ways."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.conv1d = nn.Conv1d(4, 4, kernel_size=3, groups=4, padding=1)
+
+
+class TestPackedSeqIdx:
+    def test_numbers_documents_where_positions_restart(self):
+        # Arrange
+        positions = torch.tensor([[0, 1, 2, 0, 1, 0]])
+
+        # Act
+        seq_idx = packed_seq_idx(positions)
+
+        # Assert
+        assert seq_idx.dtype == torch.int32
+        assert seq_idx.tolist() == [[0, 0, 0, 1, 1, 2]]
+
+    def test_numbers_each_row_on_its_own(self):
+        positions = torch.tensor([[0, 1, 0, 1], [0, 1, 2, 3]])
+
+        seq_idx = packed_seq_idx(positions)
+
+        assert seq_idx.tolist() == [[0, 0, 1, 1], [0, 0, 0, 0]]
+
+    @pytest.mark.parametrize("positions", [[[0, 1, 2, 3]], [[5, 6, 7]]])
+    def test_rows_holding_one_document_return_none(self, positions):
+        assert packed_seq_idx(torch.tensor(positions)) is None
+
+
+class TestMixersWithoutBoundaryReset:
+    @pytest.mark.skipif(
+        not HAS_LLM_DEPENDENCIES, reason="LLM dependencies not installed"
+    )
+    def test_lists_mamba2_mixers(self):
+        model = AutoModelForCausalLM.from_config(_tiny_mamba2_config())
+
+        assert mixers_without_boundary_reset(model) == ["Mamba2Mixer"]
+
+    @pytest.mark.skipif(
+        not HAS_LLM_DEPENDENCIES, reason="LLM dependencies not installed"
+    )
+    def test_attention_only_model_has_none(self):
+        model = AutoModelForCausalLM.from_config(_tiny_llama_config())
+
+        assert mixers_without_boundary_reset(model) == []
+
+    def test_lists_scan_and_causal_conv_mixers_by_class(self):
+        model = nn.Sequential(ScanMixer(), ScanMixer(), CausalConvMixer())
+
+        assert mixers_without_boundary_reset(model) == ["CausalConvMixer", "ScanMixer"]
+
+    def test_skips_mixers_marked_as_resetting(self):
+        model = nn.Sequential(ResettingScanMixer())
+
+        assert mixers_without_boundary_reset(model) == []
+
+    def test_skips_convolutions_that_are_not_causal(self):
+        model = nn.Sequential(SymmetricConvMixer())
+
+        assert mixers_without_boundary_reset(model) == []
+
+
 class _PackingGateStub:
     """Minimal stand-in to exercise LLMAlgorithm's packing gate in isolation."""
 
@@ -331,12 +458,42 @@ class _PackingGateStub:
 
     def __init__(self, use_sequence_packing, attn_impl):
         self.use_sequence_packing = use_sequence_packing
-        self.actor = SimpleNamespace(
-            config=SimpleNamespace(_attn_implementation=attn_impl)
+        self.actor = AutoModelForCausalLM.from_config(
+            _tiny_llama_config(), attn_implementation="eager"
         )
+        self.actor.config._attn_implementation = attn_impl
 
 
+@pytest.mark.skipif(not HAS_LLM_DEPENDENCIES, reason="LLM dependencies not installed")
 class TestSequencePackingGate:
+    def test_follows_language_model_config_not_top_level(self):
+        # Arrange
+        stub = _PackingGateStub(True, "sdpa")
+        stub.actor = LlavaForConditionalGeneration._from_config(
+            LlavaConfig(
+                text_config=_tiny_llama_config(),
+                vision_config=CLIPVisionConfig(
+                    hidden_size=16,
+                    intermediate_size=32,
+                    num_hidden_layers=1,
+                    num_attention_heads=2,
+                    image_size=8,
+                    patch_size=4,
+                    projection_dim=16,
+                ),
+                image_token_index=31,
+            ),
+            attn_implementation="sdpa",
+        )
+        stub.actor.config.text_config._attn_implementation = "flash_attention_2"
+
+        # Act
+        mode = stub._packing_mode()
+
+        # Assert
+        assert stub.actor.config._attn_implementation == "sdpa"
+        assert mode == "varlen"
+
     def test_disabled_when_flag_off(self):
         stub = _PackingGateStub(False, "flash_attention_2")
         assert stub._packing_mode() is None
@@ -348,6 +505,19 @@ class TestSequencePackingGate:
     def test_flex_uses_blockmask(self):
         stub = _PackingGateStub(True, "flex_attention")
         assert stub._packing_mode() == "blockmask"
+
+    @pytest.mark.parametrize("impl", ["flash_attention_2", "flex_attention"])
+    def test_refuses_recurrent_mixers_that_do_not_reset(self, impl):
+        # Arrange
+        stub = _PackingGateStub(True, impl)
+        stub.actor = AutoModelForCausalLM.from_config(_tiny_mamba2_config())
+        stub.actor.config._attn_implementation = impl
+
+        # Act / Assert
+        with pytest.raises(
+            ValueError, match=r"Mamba2Mixer.*use_sequence_packing=False"
+        ):
+            stub._packing_mode()
 
     @pytest.mark.parametrize("impl", ["sdpa", "eager", "something_weird"])
     def test_unsupported_backends_disable_and_warn_once(self, impl):

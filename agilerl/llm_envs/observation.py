@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import base64
+import io
 import warnings
 from collections.abc import Callable, Mapping
 from typing import Any
@@ -17,15 +19,27 @@ from agilerl.utils.algo_utils import is_str_keyed_dict
 
 __all__ = [
     "DEFAULT_OBSERVATION_ROLE",
+    "ESCAPED_IMAGE_PLACEHOLDER",
+    "IMAGE_PLACEHOLDER",
     "IMAGE_USER_CONTENT_PREFIX",
     "OBSERVATION_ROLES",
+    "QUESTION_AFTER_PAGE",
     "encode_image_training_inputs",
     "observation_role",
     "observation_text_and_image",
     "process_observation",
 ]
 
-IMAGE_USER_CONTENT_PREFIX = "<image>\n"
+#: Prompt text the vision processor (and vLLM) expands into one image's tokens.
+IMAGE_PLACEHOLDER = "<image>"
+
+IMAGE_USER_CONTENT_PREFIX = f"{IMAGE_PLACEHOLDER}\n"
+
+#: Env text that spells the placeholder would be expanded as an extra image.
+ESCAPED_IMAGE_PLACEHOLDER = "&lt;image&gt;"
+
+# Splits a long page from the question so the instruction can sit between them.
+QUESTION_AFTER_PAGE = "\n\nQuestion:\n"
 
 #: Chat role an env observation speaks as when it does not say.
 DEFAULT_OBSERVATION_ROLE = "user"
@@ -39,6 +53,10 @@ DEFAULT_SCREENSHOT_PROMPT = "Complete the task shown in the image."
 
 
 def _screenshot_to_pil_rgb(screenshot: object) -> Image.Image:
+    """Decode a screenshot sent as base64 image bytes or a nested pixel list."""
+    if isinstance(screenshot, str):
+        with Image.open(io.BytesIO(base64.b64decode(screenshot))) as image:
+            return image.convert("RGB")
     arr = np.asarray(screenshot)
     if arr.ndim == 2:
         return Image.fromarray(arr.astype(np.uint8), mode="L").convert("RGB")
@@ -52,6 +70,8 @@ def _prompt_text_for_screenshot_obs(obs: Mapping[str, object]) -> str:
     goal = obs.get("goal")
     text = obs.get("text")
     if isinstance(goal, str) and isinstance(text, str):
+        if goal:
+            return f"{goal}\n\n{text}{QUESTION_AFTER_PAGE}{goal}"
         return f"{goal}\n\n{text}"
     for key in ("goal", "text", "prompt"):
         value = obs.get(key)
@@ -71,26 +91,32 @@ def observation_text_and_image(obs: object) -> tuple[str, object | None]:
         if not isinstance(text, str):
             msg = f"VL observation text must be str, got {type(text).__name__}."
             raise TypeError(msg)
-        if text.startswith(IMAGE_USER_CONTENT_PREFIX):
-            return text, obs["image"]
-        return f"{IMAGE_USER_CONTENT_PREFIX}{text}", obs["image"]
+        return _image_turn_text(text), obs["image"]
     if is_str_keyed_dict(obs) and obs.get("screenshot") is not None:
         text = _prompt_text_for_screenshot_obs(obs)
-        image = _screenshot_to_pil_rgb(obs["screenshot"])
-        if text.startswith(IMAGE_USER_CONTENT_PREFIX):
-            return text, image
-        return f"{IMAGE_USER_CONTENT_PREFIX}{text}", image
+        return _image_turn_text(text), _screenshot_to_pil_rgb(obs["screenshot"])
     return process_observation(obs), None
+
+
+def _image_turn_text(text: str) -> str:
+    """Lead with exactly one image placeholder; escape any the env text spells."""
+    body = text.removeprefix(IMAGE_USER_CONTENT_PREFIX)
+    escaped = body.replace(IMAGE_PLACEHOLDER, ESCAPED_IMAGE_PLACEHOLDER)
+    return f"{IMAGE_USER_CONTENT_PREFIX}{escaped}"
 
 
 def encode_image_training_inputs(
     *,
     text: str,
-    image: object,
+    image: object | list[object],
     processor: Callable[..., Mapping[str, Any]],
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Run a checkpoint processor on one image turn for trainer ``pixel_values``."""
-    encoded = processor(text=text, images=image, return_tensors="pt")
+    """Run a checkpoint processor on one or more images for trainer ``pixel_values``."""
+    if isinstance(image, list):
+        images = image[0] if len(image) == 1 else image
+    else:
+        images = image
+    encoded = processor(text=text, images=images, return_tensors="pt")
     input_ids = encoded["input_ids"]
     pixel_values = encoded["pixel_values"]
     if not isinstance(input_ids, torch.Tensor) or not isinstance(

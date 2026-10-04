@@ -3,11 +3,10 @@
 
 """Class-level workarounds for a catalog Mamba2 mixer.
 
-Both patches install once at the class level, are idempotent, and take
-``enabled`` so a caller can turn them off. The mixer class is resolved from a
-dotted path when a patch runs, not when this module is imported: an absent
-target is a no-op with a warning, and a present class with the wrong shape
-raises.
+Every patch installs once at the class level and is idempotent. The mixer
+class is resolved from a dotted path when a patch runs, not when this module
+is imported: an absent target is a no-op with a warning, and a present class
+with the wrong shape raises.
 """
 
 from __future__ import annotations
@@ -22,6 +21,7 @@ import torch.utils.checkpoint
 from torch.distributed.tensor import DTensor
 
 from agilerl.architectures.runtime import PatchRuntimeConfig
+from agilerl.utils.llm_packing import RESETS_AT_DOCUMENT_BOUNDARY, packed_seq_idx
 from agilerl.utils.patching import class_is_patched, try_import
 
 if TYPE_CHECKING:
@@ -36,6 +36,7 @@ __all__ = [
     "block_type_mask_mapping",
     "install_mamba_patches",
     "patch_nemotron_mamba_fused_path",
+    "patch_nemotron_mamba_packed_sequences",
     "patch_nemotron_mamba_stream_ordering",
 ]
 
@@ -45,6 +46,7 @@ EAGER_SCAN_CHUNK = 64
 STREAM_PATCHED_FLAG = "_agilerl_mamba_stream_patched"
 FUSED_PATH_PATCHED_FLAG = "_agilerl_mamba_fused_path_patched"
 KERNEL_FULL_TENSOR_FLAG = "_agilerl_kernel_full_tensor"
+MAMBA_TP_SHARD_ATTR = "agilerl_mamba_tp_shard"
 SDPA_NAN_PATCHED_FLAG = "_agilerl_sdpa_nan_patched"
 SDPA_NAME = "scaled_dot_product_attention"
 RMSNORM_FN = "rmsnorm_fn"
@@ -337,9 +339,22 @@ def _class_calls_fused_scan(module_cls: type) -> bool:
     return False
 
 
+def mark_mamba_tp_shard(param: torch.Tensor) -> None:
+    """Mark a tensor-parallel mixer parameter so SSM kernels read its local shard.
+
+    :param param: Mixer parameter placed on the expert-parallel mesh.
+    :type param: torch.Tensor
+    :return: None
+    :rtype: None
+    """
+    setattr(param, MAMBA_TP_SHARD_ATTR, True)
+
+
 def _full_parameter_tensor(value: object) -> object:
-    """Return the gathered tensor when *value* is an FSDP ``DTensor``."""
+    """Local tensor for a tensor-parallel mixer shard; gathered tensor otherwise."""
     if isinstance(value, DTensor):
+        if getattr(value, MAMBA_TP_SHARD_ATTR, False):
+            return value.to_local()
         return value.full_tensor()
     return value
 
@@ -749,12 +764,223 @@ def _patch_stream_class(mixer_cls: type) -> None:
     )
 
 
+def _per_document(
+    run: Callable[[torch.Tensor], torch.Tensor],
+    hidden_states: torch.Tensor,
+    seq_idx: torch.Tensor,
+) -> torch.Tensor:
+    """Run *run* on each packed document of each row on its own and rejoin the rows.
+
+    :param run: Mixer forward over one ``(1, L_doc, H)`` document.
+    :type run: Callable[[torch.Tensor], torch.Tensor]
+    :param hidden_states: ``(B, L, H)`` packed rows.
+    :type hidden_states: torch.Tensor
+    :param seq_idx: ``(B, L)`` document index per token.
+    :type seq_idx: torch.Tensor
+    :return: ``(B, L, H)`` outputs.
+    :rtype: torch.Tensor
+    """
+    rows = []
+    for row, row_seq_idx in zip(hidden_states.split(1), seq_idx, strict=True):
+        lengths = torch.unique_consecutive(row_seq_idx, return_counts=True)[1]
+        documents = row.split(lengths.tolist(), dim=1)
+        rows.append(torch.cat([run(document) for document in documents], dim=1))
+    return torch.cat(rows)
+
+
+def _packed_split_scan(
+    mixer: torch.nn.Module,
+    kernel: Callable[..., torch.Tensor],
+    hidden_states: torch.Tensor,
+    seq_idx: torch.Tensor,
+) -> torch.Tensor:
+    """Fused Mamba2 forward whose conv and scan restart wherever ``seq_idx`` changes.
+
+    :param mixer: Mamba2 mixer.
+    :type mixer: torch.nn.Module
+    :param kernel: ``mamba_split_conv1d_scan_combined`` from the mixer's module.
+    :type kernel: Callable[..., torch.Tensor]
+    :param hidden_states: ``(B, L, H)`` packed rows.
+    :type hidden_states: torch.Tensor
+    :param seq_idx: ``(B, L)`` int32 document index per token.
+    :type seq_idx: torch.Tensor
+    :return: ``(B, L, H)`` mixer output.
+    :rtype: torch.Tensor
+    """
+    module: Any = mixer
+    limit = module.time_step_limit
+    dt_limit = {} if limit is None else {"dt_limit": limit}
+    return kernel(
+        module.in_proj(hidden_states),
+        module.conv1d.weight.squeeze(1),
+        module.conv1d.bias,
+        module.dt_bias,
+        -torch.exp(module.A_log.float()),
+        D=module.D,
+        chunk_size=module.chunk_size,
+        seq_idx=seq_idx,
+        activation=module.activation,
+        rmsnorm_weight=module.norm.weight,
+        rmsnorm_eps=module.norm.variance_epsilon,
+        outproj_weight=module.out_proj.weight,
+        outproj_bias=module.out_proj.bias,
+        headdim=module.head_dim,
+        ngroups=module.n_groups,
+        norm_before_gate=False,
+        **dt_limit,
+    )
+
+
+def _install_packed_mixer(mixer_cls: type) -> None:
+    """Give this mixer's forward a ``seq_idx`` argument that resets state per document."""
+    cls: Any = mixer_cls
+    forward = cls.__dict__["forward"]
+    torch_forward = cls.__dict__["torch_forward"]
+    cuda_kernels_forward = cls.__dict__["cuda_kernels_forward"]
+    # Mixer ``__init__`` assigns these module globals, so read them per call.
+    kernels = vars(sys.modules[mixer_cls.__module__])
+
+    @functools.wraps(torch_forward)
+    def packed_torch_forward(
+        self: torch.nn.Module,
+        input_states: torch.Tensor,
+        cache_params: object | None = None,
+        attention_mask: torch.Tensor | None = None,
+        seq_idx: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if seq_idx is None:
+            return torch_forward(self, input_states, cache_params, attention_mask)
+        return _per_document(
+            lambda document: torch_forward(self, document), input_states, seq_idx
+        )
+
+    @functools.wraps(cuda_kernels_forward)
+    def packed_cuda_kernels_forward(
+        self: torch.nn.Module,
+        hidden_states: torch.Tensor,
+        cache_params: object | None = None,
+        attention_mask: torch.Tensor | None = None,
+        seq_idx: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if seq_idx is None:
+            return cuda_kernels_forward(
+                self, hidden_states, cache_params, attention_mask
+            )
+        kernel = kernels["mamba_split_conv1d_scan_combined"]
+        return _packed_split_scan(self, kernel, hidden_states, seq_idx)
+
+    @functools.wraps(forward)
+    def packed_forward(
+        self: torch.nn.Module,
+        hidden_states: torch.Tensor,
+        cache_params: object | None = None,
+        attention_mask: torch.Tensor | None = None,
+        seq_idx: torch.Tensor | None = None,
+        **kwargs: Any,
+    ) -> torch.Tensor:
+        if seq_idx is None:
+            return forward(self, hidden_states, cache_params, attention_mask, **kwargs)
+        mixer: Any = self
+        if (
+            kernels["is_fast_path_available"]
+            and mixer.in_proj.weight.device.type == "cuda"
+            and not torch.compiler.is_compiling()
+        ):
+            with torch.cuda.stream(torch.cuda.default_stream(hidden_states.device)):
+                return mixer.cuda_kernels_forward(hidden_states, seq_idx=seq_idx)
+        return mixer.torch_forward(hidden_states, seq_idx=seq_idx)
+
+    cls.torch_forward = packed_torch_forward
+    cls.cuda_kernels_forward = packed_cuda_kernels_forward
+    cls.forward = packed_forward
+
+
+def _install_packed_block(block_cls: type, mixer_cls: type) -> None:
+    """Pass a packed row's ``seq_idx`` from this block's ``position_ids`` to its mixer."""
+    cls: Any = block_cls
+    forward = cls.__dict__["forward"]
+
+    @functools.wraps(forward)
+    def packed_block_forward(
+        self: torch.nn.Module,
+        hidden_states: torch.Tensor,
+        past_key_values: object | None = None,
+        attention_mask: torch.Tensor | None = None,
+        position_ids: torch.Tensor | None = None,
+        use_cache: bool | None = False,
+        **kwargs: Any,
+    ) -> torch.Tensor:
+        block: Any = self
+        seq_idx = None
+        # A padding mask or a cache means the row is not packed.
+        if (
+            isinstance(block.mixer, mixer_cls)
+            and attention_mask is None
+            and past_key_values is None
+            and position_ids is not None
+        ):
+            seq_idx = packed_seq_idx(position_ids)
+        if seq_idx is None:
+            return forward(
+                self,
+                hidden_states,
+                past_key_values=past_key_values,
+                attention_mask=attention_mask,
+                position_ids=position_ids,
+                use_cache=use_cache,
+                **kwargs,
+            )
+        residual = hidden_states
+        normed = block.norm(hidden_states.to(dtype=block.norm.weight.dtype))
+        return residual + block.mixer(normed, seq_idx=seq_idx)
+
+    cls.forward = packed_block_forward
+
+
+def patch_nemotron_mamba_packed_sequences(mixer: str, block: str) -> None:
+    """Reset the mixer's conv and scan state at every packed-document boundary.
+
+    The block derives ``seq_idx`` from ``position_ids`` (a document starts
+    wherever positions do not step by one) and passes it to its mixer. On CUDA
+    the fused kernel takes ``seq_idx`` directly; ``torch_forward`` runs each
+    document on its own. Unpacked rows take the unpatched path. The mixer class
+    is then marked with
+    :data:`~agilerl.utils.llm_packing.RESETS_AT_DOCUMENT_BOUNDARY`.
+
+    :param mixer: Dotted path of the mixer class.
+    :type mixer: str
+    :param block: Dotted path of the decoder block class that calls the mixer.
+    :type block: str
+    :return: None
+    :rtype: None
+    """
+    mixer_cls = _resolve_mixer_class(mixer)
+    block_cls = _resolve_mixer_class(block)
+    if mixer_cls is None or block_cls is None:
+        logger.warning(
+            "[mamba-packed] %s unavailable; packed rows are not supported",
+            mixer.rpartition(".")[2],
+        )
+        return
+    if class_is_patched(mixer_cls, RESETS_AT_DOCUMENT_BOUNDARY):
+        return
+    _install_packed_mixer(mixer_cls)
+    _install_packed_block(block_cls, mixer_cls)
+    setattr(mixer_cls, RESETS_AT_DOCUMENT_BOUNDARY, True)
+    logger.debug(
+        "[mamba-packed] %s resets state at packed-document boundaries",
+        mixer_cls.__name__,
+    )
+
+
 def install_mamba_patches(
     patch: PatchRuntimeConfig,
     model: PreTrainedModel | PeftModel | None = None,
 ) -> None:
     """Install catalog Mamba2 mixer workarounds.
 
+    ``block`` routes packed-row ``seq_idx`` into the mixer so its state resets
+    at each document boundary.
     ``fused_path`` gathers SSM kernel parameters and clamps an open dt limit.
     ``stream_ordering``
     wraps mixer ``forward`` so default-stream scan/conv kernels wait on the
@@ -772,6 +998,11 @@ def install_mamba_patches(
     """
     if patch.mamba is None:
         return
+    # Installed first so the fused-path and stream wrappers wrap the packed forward.
+    if patch.mamba.block is not None:
+        patch_nemotron_mamba_packed_sequences(
+            mixer=patch.mamba.mixer, block=patch.mamba.block
+        )
     if patch.mamba.fused_path:
         patch_nemotron_mamba_fused_path(mixer=patch.mamba.mixer, model=model)
     if patch.mamba.stream_ordering:

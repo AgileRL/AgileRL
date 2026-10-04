@@ -18,9 +18,28 @@ import torch
 pytest.importorskip("datasets", reason="LLM dependencies not installed")
 
 from datasets import Dataset as Datasets
+from peft import LoraConfig, get_peft_model
+from safetensors.torch import load_file
 from torch import nn
-from transformers import AutoTokenizer
+from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
+    checkpoint_wrapper,
+)
+from transformers import (
+    AutoTokenizer,
+    LlamaConfig,
+    LlamaForCausalLM,
+    LlamaPreTrainedModel,
+    Mamba2Config,
+    Mamba2ForCausalLM,
+    NemotronHConfig,
+    NemotronHForCausalLM,
+    PretrainedConfig,
+    PreTrainedModel,
+    SiglipVisionConfig,
+    SiglipVisionModel,
+)
 
+from agilerl.algorithms.core.llm_ops import moe_lora as moe_lora_module
 from agilerl.architectures.nemotron_h.language_tower import (
     omni_language_tower_hf_override,
 )
@@ -45,6 +64,7 @@ from agilerl.utils.llm_utils import (
     build_vllm_llm_init_kwargs,
     build_vllm_rollout_lora_request,
     calculate_k3_kl,
+    check_vllm_lora_export_complete,
     clipped_is_surrogate,
     collect_trainable_param_stats,
     compare_responses,
@@ -52,6 +72,7 @@ from agilerl.utils.llm_utils import (
     cuda_tensor_bytes_in_module,
     discover_clippable_inner_linear_module_keys,
     discover_clippable_projection_leaf_names,
+    expert_lora_vllm_key_map,
     fill_outside_mask,
     filter_peft_state_dict_for_vllm_lora,
     flex_decode_kernel_options,
@@ -59,6 +80,7 @@ from agilerl.utils.llm_utils import (
     get_lora_params,
     get_model_name_or_path,
     hf_completion_lengths,
+    language_model_attn_implementation,
     list_peft_matched_module_keys,
     load_lora_adapters,
     log_cuda_memory_snapshot,
@@ -81,6 +103,7 @@ from agilerl.utils.llm_utils import (
     prepare_prompt_hf_generate,
     remap_peft_lora_key_for_vllm,
     render_chat_template,
+    report_model_kernels,
     resolve_attn_implementation,
     resolve_batch_advantage_granularity,
     resolve_llm_device,
@@ -90,6 +113,7 @@ from agilerl.utils.llm_utils import (
     sample_eval_prompts,
     save_lora_adapters,
     save_peft_adapter_for_vllm_rollout,
+    set_sub_model_attn_implementation,
     validate_importance_sampling_level,
 )
 from tests import TINY_LLM_FIXTURE_PATH
@@ -2091,6 +2115,215 @@ class TestResolveAttnImplementation:
         )
 
 
+class TinyVLConfig(PretrainedConfig):
+    """Composite config that nests its sub-configs without declaring ``sub_configs``."""
+
+    model_type = "tiny_vl"
+
+    def __init__(self, llm_config=None, vision_config=None, **kwargs):
+        self.llm_config = llm_config
+        self.vision_config = vision_config
+        super().__init__(**kwargs)
+
+
+class TinyVLModel(PreTrainedModel):
+    config_class = TinyVLConfig
+    _supports_sdpa = True
+    _supports_flex_attn = True
+
+    def __init__(self, config, vision_model_cls=SiglipVisionModel):
+        super().__init__(config)
+        self.language_model = LlamaForCausalLM(config.llm_config)
+        self.vision_model = vision_model_cls(config.vision_config)
+
+
+class NoFlexSiglipVisionModel(SiglipVisionModel):
+    _supports_flex_attn = False
+
+
+def tiny_llama_config() -> LlamaConfig:
+    return LlamaConfig(
+        vocab_size=32,
+        hidden_size=16,
+        intermediate_size=32,
+        num_hidden_layers=1,
+        num_attention_heads=2,
+        num_key_value_heads=1,
+    )
+
+
+def tiny_vl_model(
+    attn_implementation: str,
+    vision_model_cls=SiglipVisionModel,
+) -> TinyVLModel:
+    """Composite whose top-level config holds *attn_implementation* and sub-models keep ``sdpa``."""
+    config = TinyVLConfig(
+        llm_config=tiny_llama_config(),
+        vision_config=SiglipVisionConfig(
+            hidden_size=16,
+            intermediate_size=32,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            image_size=8,
+            patch_size=4,
+        ),
+        attn_implementation=attn_implementation,
+    )
+    return TinyVLModel(config, vision_model_cls)
+
+
+class TestSetSubModelAttnImplementation:
+    def test_sets_every_sub_model(self):
+        # Arrange
+        model = tiny_vl_model("eager")
+        assert model.language_model.config._attn_implementation == "sdpa"
+        assert model.vision_model.config._attn_implementation == "sdpa"
+
+        # Act
+        set_sub_model_attn_implementation(model, "eager")
+
+        # Assert
+        assert model.config._attn_implementation == "eager"
+        assert model.language_model.config._attn_implementation == "eager"
+        assert model.language_model.model.config._attn_implementation == "eager"
+        assert model.vision_model.config._attn_implementation == "eager"
+
+    def test_leaves_unsupporting_sub_model_and_logs_it(self, caplog):
+        # Arrange
+        model = tiny_vl_model("sdpa", vision_model_cls=NoFlexSiglipVisionModel)
+
+        # Act
+        with caplog.at_level(logging.WARNING, logger=llm_utils_module.__name__):
+            set_sub_model_attn_implementation(model, "flex_attention")
+
+        # Assert
+        assert model.language_model.config._attn_implementation == "flex_attention"
+        assert model.vision_model.config._attn_implementation == "sdpa"
+        assert (
+            "Cannot set flex_attention attention on NoFlexSiglipVisionModel"
+            in caplog.text
+        )
+
+
+class TestLanguageModelAttnImplementation:
+    def test_reads_language_sub_model_not_top_level_config(self):
+        model = tiny_vl_model("eager")
+
+        assert language_model_attn_implementation(model) == "sdpa"
+
+    def test_reads_plain_causal_lm_config(self):
+        model = LlamaForCausalLM._from_config(
+            tiny_llama_config(),
+            attn_implementation="eager",
+        )
+
+        assert language_model_attn_implementation(model) == "eager"
+
+    def test_raises_when_config_has_no_attention_implementation(self):
+        module = nn.Linear(2, 2)
+        module.config = SimpleNamespace(model_type="tiny")
+
+        with pytest.raises(
+            TypeError, match="SimpleNamespace has no attention implementation"
+        ):
+            language_model_attn_implementation(module)
+
+
+class TestReportModelKernels:
+    def test_logs_attention_per_sub_model(self, caplog):
+        # Arrange
+        model = tiny_vl_model("eager")
+        set_sub_model_attn_implementation(model, "eager")
+
+        # Act
+        with caplog.at_level(logging.INFO, logger=llm_utils_module.__name__):
+            report_model_kernels(model, "eager")
+
+        # Assert
+        assert "attention <root> (TinyVLModel): eager" in caplog.text
+        assert "attention language_model (LlamaForCausalLM): eager" in caplog.text
+        assert "attention vision_model (SiglipVisionModel): eager" in caplog.text
+        assert "mamba fast path" not in caplog.text
+
+    def test_logs_mamba_fast_path(self, caplog):
+        # Arrange
+        model = Mamba2ForCausalLM(
+            Mamba2Config(
+                vocab_size=32,
+                hidden_size=16,
+                num_hidden_layers=1,
+                state_size=8,
+                expand=2,
+                n_groups=1,
+                num_heads=4,
+                head_dim=8,
+                chunk_size=16,
+            ),
+        )
+        mixer_namespace = type(model.backbone.layers[0].mixer).__module__
+        fast_path = sys.modules[mixer_namespace].is_fast_path_available
+
+        # Act
+        with caplog.at_level(logging.INFO, logger=llm_utils_module.__name__):
+            report_model_kernels(model, model.config._attn_implementation)
+
+        # Assert
+        assert f"mamba fast path {mixer_namespace}: {fast_path}" in caplog.text
+
+    def test_logs_grouped_mm_probe_when_cuda_present(self, monkeypatch, caplog):
+        # Arrange
+        model = LlamaForCausalLM._from_config(
+            tiny_llama_config(), attn_implementation="eager"
+        )
+        probed = []
+
+        def probe(device_index, dtype):
+            probed.append((device_index, dtype))
+            return True
+
+        monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+        monkeypatch.setattr(torch.cuda, "current_device", lambda: 3)
+        monkeypatch.setattr(moe_lora_module, "grouped_mm_supported", probe)
+
+        # Act
+        with caplog.at_level(logging.INFO, logger=llm_utils_module.__name__):
+            report_model_kernels(model, "eager")
+
+        # Assert
+        assert probed == [(3, torch.float32)]
+        assert "grouped_mm torch.float32: True" in caplog.text
+
+    def test_omits_grouped_mm_probe_without_cuda(self, monkeypatch, caplog):
+        model = LlamaForCausalLM._from_config(
+            tiny_llama_config(), attn_implementation="eager"
+        )
+        monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+
+        with caplog.at_level(logging.INFO, logger=llm_utils_module.__name__):
+            report_model_kernels(model, "eager")
+
+        assert "grouped_mm" not in caplog.text
+
+    def test_raises_when_language_model_ignores_request(self, monkeypatch):
+        monkeypatch.setattr(LlamaPreTrainedModel, "_supports_flex_attn", False)
+        model = tiny_vl_model("sdpa")
+        set_sub_model_attn_implementation(model, "flex_attention")
+
+        with pytest.raises(
+            RuntimeError,
+            match="Language model uses 'sdpa' attention; 'flex_attention' was requested",
+        ):
+            report_model_kernels(model, "flex_attention")
+
+    def test_vision_mismatch_does_not_raise(self):
+        model = tiny_vl_model("sdpa", vision_model_cls=NoFlexSiglipVisionModel)
+        set_sub_model_attn_implementation(model, "flex_attention")
+
+        report_model_kernels(model, "flex_attention")
+
+        assert model.vision_model.config._attn_implementation == "sdpa"
+
+
 class _RegisterOnlyRegistry:
     """Attention-function registry that rejects item assignment."""
 
@@ -2998,6 +3231,17 @@ class TestBuildVllmLlmInitKwargs:
 
         assert kwargs["hf_overrides"] is nested_language_config
         assert "model_class_overrides" not in kwargs
+        assert "enable_tower_connector_lora" not in kwargs
+
+    def test_kept_multimodal_towers_enable_tower_connector_lora(self, monkeypatch):
+        stub_catalog_model_type(monkeypatch, "qwen2_vl")
+        kwargs = build_vllm_llm_init_kwargs(
+            _vllm_config(strip_multimodal_towers=False),
+            trainer_model_name_or_path="org/vl-model",
+            max_model_len=32768,
+        )
+
+        assert kwargs["enable_tower_connector_lora"] is True
 
     def test_strip_multimodal_towers_applies_omni_language_tower(self, monkeypatch):
         stub_catalog_model_type(monkeypatch, "nemotron_h_omni")
@@ -3215,7 +3459,7 @@ class TestSavePeftAdapterForVllmRollout:
         """Install fake peft/safetensors modules and return the call recorder."""
         calls = {}
 
-        def fake_get_state(model, adapter_name):
+        def fake_get_state(model, state_dict, adapter_name):
             calls["adapter_name"] = adapter_name
             return dict(state)
 
@@ -3232,7 +3476,9 @@ class TestSavePeftAdapterForVllmRollout:
         return calls
 
     def _peft_model(self):
-        return SimpleNamespace(peft_config={"actor": self._FakePeftConfig()})
+        return SimpleNamespace(
+            peft_config={"actor": self._FakePeftConfig()}, named_parameters=list
+        )
 
     def test_requires_llm_dependencies(self, monkeypatch, tmp_path):
         monkeypatch.setattr(llm_utils_module, "HAS_LLM_DEPENDENCIES", False)
@@ -3343,6 +3589,159 @@ class TestSavePeftAdapterForVllmRollout:
         # Assert — both plain tensors saved as-is
         assert calls["saved_tensors"]["model.layers.0.q_proj.lora_A.weight"] is plain_a
         assert calls["saved_tensors"]["model.layers.0.q_proj.lora_B.weight"] is plain_b
+
+    @pytest.mark.parametrize("wrap_blocks", [False, True], ids=["plain", "wrapped"])
+    def test_exports_every_expert_lora_tensor_in_vllm_layout(
+        self, tmp_path, wrap_blocks
+    ):
+        # Arrange
+        peft_model = _tiny_nemotron_h_expert_lora(wrap_blocks=wrap_blocks)
+        experts_module = peft_model.base_model.model.model.layers[1].mixer.experts
+        experts = "base_model.model.model.layers.1.mixer.experts"
+
+        # Act
+        out = save_peft_adapter_for_vllm_rollout(
+            peft_model,
+            tmp_path,
+            "actor",
+            target_modules=peft_model.peft_config["actor"].target_modules,
+            expert_key_map=expert_lora_vllm_key_map(peft_model),
+        )
+
+        # Assert
+        saved = load_file(out / "adapter_model.safetensors")
+        assert len(saved) == 12
+        assert {key for key in saved if ".experts." in key} == {
+            f"{experts}.lora_A.weight",
+            f"{experts}.lora_B.weight",
+            f"{experts}.base_layer.lora_A.weight",
+            f"{experts}.base_layer.lora_B.weight",
+        }
+        assert experts_module.base_layer.parameter_name == "up_proj"
+        assert torch.equal(
+            saved[f"{experts}.base_layer.lora_B.weight"],
+            experts_module.base_layer.lora_B["actor"].weight,
+        )
+
+    def test_raises_when_trainable_lora_has_no_exported_tensor(self, tmp_path):
+        # Arrange
+        peft_model = _tiny_nemotron_h_expert_lora(wrap_blocks=True)
+
+        # Act / Assert
+        with pytest.raises(
+            ValueError,
+            match=r"6 trainable LoRA parameters of adapter 'actor' have no tensor "
+            r"in the vLLM export, e\.g\. \[.*k_proj",
+        ):
+            save_peft_adapter_for_vllm_rollout(
+                peft_model,
+                tmp_path,
+                "actor",
+                target_modules=["q_proj"],
+                expert_key_map=expert_lora_vllm_key_map(peft_model),
+            )
+
+
+def _tiny_nemotron_h_expert_lora(*, wrap_blocks: bool):
+    """Two-layer NemotronH (attention + MoE) with attention and packed-expert LoRA."""
+    torch.manual_seed(0)
+    config = NemotronHConfig(
+        vocab_size=64,
+        hidden_size=32,
+        num_hidden_layers=2,
+        layers_block_type=["attention", "moe"],
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=8,
+        n_routed_experts=4,
+        num_experts_per_tok=2,
+        moe_intermediate_size=16,
+        moe_shared_expert_intermediate_size=16,
+        n_group=1,
+        topk_group=1,
+    )
+    peft_model = get_peft_model(
+        NemotronHForCausalLM(config),
+        LoraConfig(
+            r=2,
+            target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],
+            target_parameters=["mixer.experts.up_proj", "mixer.experts.down_proj"],
+            lora_dropout=0.0,
+            init_lora_weights=False,
+        ),
+        adapter_name="actor",
+    )
+    if wrap_blocks:
+        layers = peft_model.base_model.model.model.layers
+        for index, block in enumerate(layers):
+            layers[index] = checkpoint_wrapper(block)
+    return peft_model
+
+
+class TestCheckVllmLoraExportComplete:
+    def test_accepts_export_of_every_trainable_lora_tensor(self):
+        # Arrange
+        peft_model = _tiny_nemotron_h_expert_lora(wrap_blocks=True)
+        live_state = dict(peft_model.named_parameters())
+        exported = {
+            name: tensor for name, tensor in live_state.items() if ".lora_" in name
+        }
+
+        # Act / Assert
+        check_vllm_lora_export_complete(peft_model, "actor", live_state, exported)
+
+    def test_ignores_frozen_lora_parameters(self):
+        # Arrange
+        peft_model = _tiny_nemotron_h_expert_lora(wrap_blocks=True)
+        live_state = dict(peft_model.named_parameters())
+        for name, param in live_state.items():
+            if "v_proj.lora_" in name:
+                param.requires_grad_(False)
+        exported = {
+            name: tensor
+            for name, tensor in live_state.items()
+            if ".lora_" in name and "v_proj" not in name
+        }
+
+        # Act / Assert
+        check_vllm_lora_export_complete(peft_model, "actor", live_state, exported)
+
+    def test_raises_when_target_parameters_export_has_no_expert_tensor(self):
+        # Arrange
+        peft_model = _tiny_nemotron_h_expert_lora(wrap_blocks=True)
+        live_state = dict(peft_model.named_parameters())
+        exported = {
+            name: tensor
+            for name, tensor in live_state.items()
+            if ".lora_" in name and ".experts." not in name
+        }
+
+        # Act / Assert
+        with pytest.raises(
+            ValueError,
+            match=r"has target_parameters=.* but the vLLM export holds no expert "
+            r"LoRA tensors \(8 exported\)",
+        ):
+            check_vllm_lora_export_complete(peft_model, "actor", live_state, exported)
+
+    def test_raises_listing_trainable_lora_missing_from_export(self):
+        # Arrange
+        peft_model = _tiny_nemotron_h_expert_lora(wrap_blocks=True)
+        live_state = dict(peft_model.named_parameters())
+        exported = {
+            name: tensor
+            for name, tensor in live_state.items()
+            if ".lora_" in name and "o_proj" not in name
+        }
+
+        # Act / Assert
+        with pytest.raises(
+            ValueError,
+            match=r"2 trainable LoRA parameters of adapter 'actor' have no tensor "
+            r"in the vLLM export, e\.g\. \['base_model\.model\.model\.layers\.0\."
+            r"_checkpoint_wrapped_module\.mixer\.o_proj\.lora_A\.actor\.weight'",
+        ):
+            check_vllm_lora_export_complete(peft_model, "actor", live_state, exported)
 
 
 class TestCrossRankLigerAlign:
@@ -4035,18 +4434,54 @@ class TestLoadLoraAdapters:
         adapter_dir.mkdir(parents=True)
         save_file(state, str(adapter_dir / "adapter_model.safetensors"))
 
-    def test_loads_present_keys_and_skips_missing(self, tmp_path):
+    def test_loads_every_adapter_tensor(self, tmp_path):
         actor = self._actor()
-        self._write_adapter(tmp_path, {"block.lora_A": torch.ones(2, 2)})
+        self._write_adapter(
+            tmp_path,
+            {"block.lora_A": torch.ones(2, 2), "block.lora_B": torch.full((2, 2), 2.0)},
+        )
 
         load_lora_adapters(actor, tmp_path, "actor")
 
         assert torch.equal(actor.block.actor.lora_A.data, torch.ones(2, 2))
-        assert torch.equal(actor.block.actor.lora_B.data, torch.zeros(2, 2))
+        assert torch.equal(actor.block.actor.lora_B.data, torch.full((2, 2), 2.0))
+
+    def test_loads_into_checkpoint_wrapped_block(self, tmp_path):
+        # Arrange: the wrapper adds ``_checkpoint_wrapped_module`` to live names only.
+        actor = self._actor()
+        actor.block = checkpoint_wrapper(actor.block)
+        assert [name for name, _ in actor.named_parameters()] == [
+            "block._checkpoint_wrapped_module.actor.lora_A",
+            "block._checkpoint_wrapped_module.actor.lora_B",
+        ]
+        self._write_adapter(
+            tmp_path,
+            {"block.lora_A": torch.ones(2, 2), "block.lora_B": torch.full((2, 2), 2.0)},
+        )
+
+        # Act
+        load_lora_adapters(actor, tmp_path, "actor")
+
+        # Assert
+        inner = actor.block._checkpoint_wrapped_module.actor
+        assert torch.equal(inner.lora_A.data, torch.ones(2, 2))
+        assert torch.equal(inner.lora_B.data, torch.full((2, 2), 2.0))
+
+    def test_missing_adapter_tensor_raises(self, tmp_path):
+        actor = self._actor()
+        self._write_adapter(tmp_path, {"block.lora_A": torch.ones(2, 2)})
+
+        with pytest.raises(
+            ValueError, match=r"no tensor for 1 live parameters: block\.lora_B"
+        ):
+            load_lora_adapters(actor, tmp_path, "actor")
 
     def test_load_joins_barrier(self, tmp_path):
         actor = self._actor()
-        self._write_adapter(tmp_path, {"block.lora_A": torch.ones(2, 2)})
+        self._write_adapter(
+            tmp_path,
+            {"block.lora_A": torch.ones(2, 2), "block.lora_B": torch.ones(2, 2)},
+        )
 
         with patch("agilerl.utils.llm_utils.barrier") as mock_barrier:
             load_lora_adapters(actor, tmp_path, "actor")

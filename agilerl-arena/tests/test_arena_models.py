@@ -26,7 +26,7 @@ from agilerl.arena.models import (
 from agilerl.arena.models.algorithms.dqn import DQNSpec
 from agilerl.arena.models.algorithms.grpo import GRPOSpec
 from agilerl.arena.models.algorithms.ppo import PPOSpec, RecurrentPPOSpec
-from agilerl.arena.models.env import GymEnvSpec, LLMEnvType
+from agilerl.arena.models.env import GymEnvSpec, LLMEnvSpec, LLMEnvType
 from agilerl.arena.models.fsdp import FSDPConfig
 from agilerl.arena.models.manifest import _resolve_algorithm
 from agilerl.arena.models.registry import AlgorithmRegistry, register
@@ -75,6 +75,18 @@ class TestTrainingSpecValidators:
         ):
             TrainingSpec(eps_start=0.1, eps_end=0.9)
 
+    def test_rejects_held_out_eval_with_no_pass(self) -> None:
+        with pytest.raises(
+            ValueError, match=r"eval_greedy false needs .*eval_samples_per_task >= 1"
+        ):
+            TrainingSpec(eval_greedy=False)
+
+    def test_accepts_a_sampled_only_held_out_eval(self) -> None:
+        spec = TrainingSpec(eval_samples_per_task=4, eval_greedy=False)
+
+        assert spec.eval_samples_per_task == 4
+        assert spec.eval_greedy is False
+
 
 class TestTrainingSpecDefaults:
     def test_bare_training_spec_field_defaults(self) -> None:
@@ -84,6 +96,14 @@ class TestTrainingSpecDefaults:
         assert spec.hpo is False
         assert spec.checkpoint_export is None
         assert spec.rollout_version_stamp is None
+
+    def test_held_out_eval_defaults_to_one_uncapped_greedy_pass(self) -> None:
+        spec = TrainingSpec()
+
+        assert spec.eval_samples_per_task == 0
+        assert spec.eval_greedy is True
+        assert spec.eval_loop == 1
+        assert spec.eval_max_concurrent_episodes is None
 
 
 class TestAlgorithmLearnStepDefaults:
@@ -697,6 +717,60 @@ class TestLLMEnvSpecSurfaces:
         assert dataset.rubric_name is None
         assert dataset.num_envs is None
         assert dataset.action_field is None
+
+
+class TestLLMEnvSpecSegmentPromptTokens:
+    def test_defaults_to_none(self) -> None:
+        spec = LLMEnvSpec(env_type="rollout", env_url="http://env", max_turns=10)
+
+        assert spec.segment_prompt_tokens is None
+
+    def test_accepts_a_positive_token_count(self) -> None:
+        spec = LLMEnvSpec(
+            env_type="rollout",
+            env_url="http://env",
+            max_turns=10,
+            segment_prompt_tokens=20000,
+        )
+
+        assert spec.segment_prompt_tokens == 20000
+
+    @pytest.mark.parametrize("tokens", [0, -1])
+    def test_rejects_a_non_positive_token_count(self, tokens: int) -> None:
+        with pytest.raises(ValidationError, match="segment_prompt_tokens"):
+            LLMEnvSpec(
+                env_type="rollout",
+                env_url="http://env",
+                max_turns=10,
+                segment_prompt_tokens=tokens,
+            )
+
+
+class TestLLMEnvSpecSegmentMaxImages:
+    def test_accepts_a_positive_image_count(self) -> None:
+        spec = LLMEnvSpec(
+            env_type="rollout",
+            env_url="http://env",
+            max_turns=10,
+            segment_max_images=4,
+        )
+
+        assert spec.segment_max_images == 4
+
+    def test_defaults_to_none(self) -> None:
+        spec = LLMEnvSpec(env_type="rollout", env_url="http://env", max_turns=10)
+
+        assert spec.segment_max_images is None
+
+    @pytest.mark.parametrize("images", [0, -1])
+    def test_rejects_a_non_positive_image_count(self, images: int) -> None:
+        with pytest.raises(ValidationError, match="segment_max_images"):
+            LLMEnvSpec(
+                env_type="rollout",
+                env_url="http://env",
+                max_turns=10,
+                segment_max_images=images,
+            )
 
 
 class TestManifestHelpers:

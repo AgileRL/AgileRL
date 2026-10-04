@@ -5,9 +5,46 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+from typing import TypedDict
+
 import torch
 
-__all__ = ["TaskAssigner"]
+__all__ = ["TaskAssigner", "TaskRowOutcome", "TaskRowStats"]
+
+# A row's outcome counts halve after this many newer outcomes of that row.
+TASK_OUTCOME_HALF_LIFE = 8
+# Decayed counts stay below 1 / (1 - decay) ~= 12, so a row's weight stays above ~0.07.
+TASK_OUTCOME_DECAY = 0.5 ** (1 / TASK_OUTCOME_HALF_LIFE)
+
+
+@dataclass(frozen=True)
+class TaskRowStats:
+    """Decayed group outcomes of one dataset row and the sampling weight they give it.
+
+    :param row: Dataset row index.
+    :param informative: Decayed count of groups whose rewards differed.
+    :param observed: Decayed count of finished groups.
+    :param weight: ``(informative + 1) / (observed + 2)``; ``0.5`` for an unseen row.
+    """
+
+    row: int
+    informative: float
+    observed: float
+    weight: float
+
+
+class TaskRowOutcome(TypedDict):
+    """Decayed group outcomes of one dataset row, in the JSON-able form a checkpoint stores.
+
+    :param row: Dataset row index.
+    :param informative: Decayed count of groups whose rewards differed.
+    :param observed: Decayed count of finished groups.
+    """
+
+    row: int
+    informative: float
+    observed: float
 
 
 def _mix_seed(value: int) -> int:
@@ -29,11 +66,14 @@ class TaskAssigner:
 
     Dataset rows are reshuffled each epoch and split into one equal shard per
     data-parallel rank; a procedural env has no rows and is seeded instead.
+    With ``adaptive``, each row is instead drawn from the shard with probability
+    proportional to its :class:`TaskRowStats` weight, fed by :meth:`record_outcome`.
 
     :param dataset_size: Rows in the env's dataset; ``0`` for a procedural env.
-    :param seed: Seed for the per-epoch shuffle (``None`` -> a fixed default).
+    :param seed: Seed for the per-epoch shuffle or weighted draw (``None`` -> a fixed default).
     :param rank: This process's shard index in ``[0, world_size)``.
     :param world_size: Number of data-parallel shards (``1`` = no sharding).
+    :param adaptive: Draw rows by recent informative-group rate instead of the epoch cycle.
     """
 
     def __init__(
@@ -43,6 +83,7 @@ class TaskAssigner:
         seed: int | None = None,
         rank: int = 0,
         world_size: int = 1,
+        adaptive: bool = False,
     ) -> None:
         """Build an assigner over this rank's shard with a seeded per-epoch shuffle."""
         if world_size < 1:
@@ -62,16 +103,31 @@ class TaskAssigner:
                 f"{dataset_size}-row dataset; reduce world_size."
             )
             raise ValueError(msg)
-        #: Completed full passes over this rank's shard of the dataset rows.
+        self.adaptive = adaptive
+        #: Completed full passes over this rank's shard (shard-sized draws when adaptive).
         self.num_epochs = 0
         self._generator = torch.Generator().manual_seed(
             seed if seed is not None else 42
         )
         self._epoch_order: list[int] = []
         self._pos = 0
+        self._draws = 0
+        self._informative = torch.zeros(self._shard_size, dtype=torch.float64)
+        self._observed = torch.zeros(self._shard_size, dtype=torch.float64)
+
+    def _row_weights(self) -> torch.Tensor:
+        """Smoothed informative rate of each shard row, in shard order."""
+        return (self._informative + 1.0) / (self._observed + 2.0)
 
     def next_row(self) -> int:
-        """Next row from the epoch-reshuffled shard stream (bumps :attr:`num_epochs`)."""
+        """Next row from the shard: the epoch-reshuffled stream, or a weighted draw when adaptive."""
+        if self.adaptive:
+            index = int(
+                torch.multinomial(self._row_weights(), 1, generator=self._generator)
+            )
+            self._draws += 1
+            self.num_epochs = self._draws // self._shard_size
+            return index + self._shard_start
         if self._pos >= len(self._epoch_order):  # epoch boundary (and first call)
             if self._epoch_order:
                 self.num_epochs += 1
@@ -83,6 +139,82 @@ class TaskAssigner:
         row = self._epoch_order[self._pos]
         self._pos += 1
         return row
+
+    def record_outcome(self, row: int, *, informative: bool) -> None:
+        """Fold one finished group's outcome on ``row`` into that row's decayed counts.
+
+        :param row: Dataset row the group ran on; must be in this rank's shard.
+        :param informative: Whether the group's rewards differed across members.
+        :raises ValueError: If ``row`` is outside this rank's shard.
+        """
+        index = int(row) - self._shard_start
+        if not 0 <= index < self._shard_size:
+            msg = (
+                f"row {row} is outside this shard "
+                f"[{self._shard_start}, {self._shard_start + self._shard_size})."
+            )
+            raise ValueError(msg)
+        self._informative[index] *= TASK_OUTCOME_DECAY
+        self._informative[index] += float(informative)
+        self._observed[index] *= TASK_OUTCOME_DECAY
+        self._observed[index] += 1.0
+
+    def row_stats(self) -> list[TaskRowStats]:
+        """Decayed outcomes and sampling weight of every row in this rank's shard."""
+        weights = self._row_weights().tolist()
+        return [
+            TaskRowStats(
+                row=self._shard_start + index,
+                informative=float(self._informative[index]),
+                observed=float(self._observed[index]),
+                weight=float(weights[index]),
+            )
+            for index in range(self._shard_size)
+        ]
+
+    def state_dict(self) -> list[TaskRowOutcome]:
+        """Decayed outcome counts of every row in this rank's shard that has finished a group."""
+        return [
+            TaskRowOutcome(
+                row=self._shard_start + index,
+                informative=float(self._informative[index]),
+                observed=float(self._observed[index]),
+            )
+            for index in torch.nonzero(self._observed).flatten().tolist()
+        ]
+
+    def load_state_dict(self, state: list[TaskRowOutcome]) -> None:
+        """Replace this shard's outcome counts with ``state``; rows not in ``state`` reset to unseen.
+
+        Rows outside this rank's shard are skipped, so ``state`` may hold every
+        rank's rows at once.
+
+        :param state: Outcomes from :meth:`state_dict`, from one or more shards.
+        """
+        self._informative.zero_()
+        self._observed.zero_()
+        for outcome in state:
+            index = int(outcome["row"]) - self._shard_start
+            if 0 <= index < self._shard_size:
+                self._informative[index] = float(outcome["informative"])
+                self._observed[index] = float(outcome["observed"])
+
+    def next_task(
+        self,
+        base_seed: int | None,
+        seed_offset: int,
+    ) -> tuple[int | None, int | None]:
+        """One group's ``(seed, row_index)``: the mixed seed and the next shard row.
+
+        :param base_seed: Run base seed; ``None`` leaves the env unseeded.
+        :param seed_offset: Group offset added to ``base_seed`` before mixing.
+        :return: ``(seed, row_index)``; ``row_index`` is ``None`` for a procedural env.
+        """
+        seed = (
+            None if base_seed is None else _mix_seed(int(base_seed) + int(seed_offset))
+        )
+        row = self.next_row() if self.dataset_size > 0 else None
+        return seed, row
 
     def assign(
         self,
@@ -104,11 +236,7 @@ class TaskAssigner:
         """
         out: list[tuple[int | None, int | None]] = []
         for item in range(batch_size):
-            seed = (
-                None
-                if base_seed is None
-                else _mix_seed(int(base_seed) + int(seed_offset) + item)
+            out.extend(
+                [self.next_task(base_seed, int(seed_offset) + item)] * group_size
             )
-            row = self.next_row() if self.dataset_size > 0 else None
-            out.extend([(seed, row)] * group_size)
         return out

@@ -13,7 +13,39 @@ from agilerl.algorithms.core.llm_ops.fused_logprobs import (
     FusedLinearLogProbsFunction,
     _fused_logprob_chunk,
     _fused_logprob_chunk_dispatch,
+    scored_position_index,
 )
+
+
+class TestScoredPositionIndex:
+    def test_left_aligns_each_rows_scored_columns_in_order(self) -> None:
+        mask = torch.tensor(
+            [
+                [0, 1, 1, 0, 1],
+                [0, 0, 1, 0, 0],
+            ],
+            dtype=torch.bool,
+        )
+
+        index = scored_position_index(mask)
+
+        assert torch.equal(index, torch.tensor([[1, 2, 4], [2, 0, 1]]))
+
+    def test_pads_with_distinct_unscored_columns(self) -> None:
+        mask = torch.tensor([[1, 1, 1, 1], [0, 1, 0, 0]], dtype=torch.bool)
+
+        index = scored_position_index(mask)
+
+        assert index.shape == (2, 4)
+        assert torch.equal(index[1].sort().values, torch.arange(4))
+        assert mask.gather(1, index).sum(dim=-1).tolist() == [4, 1]
+
+    def test_an_empty_mask_keeps_one_column(self) -> None:
+        mask = torch.zeros(2, 3, dtype=torch.bool)
+
+        index = scored_position_index(mask)
+
+        assert torch.equal(index, torch.zeros(2, 1, dtype=torch.long))
 
 
 @pytest.fixture(autouse=True)

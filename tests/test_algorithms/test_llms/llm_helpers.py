@@ -7,9 +7,6 @@ SFT/DPO tests import these without pulling in ``test_grpo``'s vLLM
 ``importorskip``, which is unavailable on macOS/Windows.
 """
 
-from unittest.mock import MagicMock
-
-import pytest
 import torch
 from torch import nn
 from transformers.configuration_utils import PretrainedConfig
@@ -130,11 +127,3 @@ def create_module(input_size, max_tokens, vocab_size, device):
         ),
         device=device,
     )
-
-
-def _patch_mps_learn_hooks(monkeypatch: pytest.MonkeyPatch, module: str) -> MagicMock:
-    """Make ``learn`` think MPS is available and record ``torch.mps.empty_cache`` calls."""
-    mock_empty = MagicMock()
-    monkeypatch.setattr(f"{module}.torch.backends.mps.is_available", lambda: True)
-    monkeypatch.setattr(f"{module}.torch.mps.empty_cache", mock_empty)
-    return mock_empty

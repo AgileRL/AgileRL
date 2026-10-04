@@ -394,6 +394,11 @@ def train_llm_rollout(
                         )
                         if stacked_pixel_values is not None:
                             learn_kwargs["pixel_values"] = stacked_pixel_values
+                            learn_kwargs["pixel_image_counts"] = [
+                                int(item.shape[0])
+                                for item in batch.pixel_values
+                                if item is not None
+                            ]
 
                     agent.learn(
                         experiences,

@@ -14,9 +14,10 @@ from typing import TYPE_CHECKING, Any
 
 import torch
 
+from agilerl.components.llm_rollout_data import EpisodeSegments
 from agilerl.distributed.process import get_rank, get_world_size
 from agilerl.llm_envs.harness import RolloutHarness
-from agilerl.llm_envs.task_assigner import TaskAssigner, _mix_seed
+from agilerl.llm_envs.task_assigner import TaskAssigner, TaskRowOutcome, TaskRowStats
 from agilerl.utils.llm_utils import is_rollout_prompt
 
 __all__ = ["RolloutCollector"]
@@ -53,6 +54,7 @@ class RolloutCollector:
         slot_acquire_timeout_s: float | None = 300.0,
         rank: int | None = None,
         world_size: int | None = None,
+        adaptive_task_sampling: bool = False,
     ) -> None:
         """Create ``(batch_size / world_size) * group_size`` env wrappers on this rank.
 
@@ -72,6 +74,9 @@ class RolloutCollector:
             :func:`~agilerl.distributed.get_rank`.
         :param world_size: Number of data-parallel shards. ``None`` uses
             :func:`~agilerl.distributed.get_world_size`.
+        :param adaptive_task_sampling: Draw each group's dataset row by its recent
+            informative-group rate (see :meth:`record_group_outcome`) instead of
+            the epoch cycle.
         """
         if batch_size <= 0:
             msg = f"batch_size must be > 0, got {batch_size}."
@@ -108,6 +113,7 @@ class RolloutCollector:
         self.rubric_component_names: tuple[str, ...] = ()
         self._rank = rank
         self._world_size = world_size
+        self.adaptive_task_sampling = adaptive_task_sampling
         # --- per-episode state (untouched by the lock-step path) ---
         self._base_seed = int(base_seed) if base_seed is not None else None
         self._slot_acquire_timeout_s = slot_acquire_timeout_s
@@ -341,6 +347,7 @@ class RolloutCollector:
             is the summed turn count. ``all_sampling_logps`` is ``None`` when no vLLM
             logprobs were captured, else one 1-D tensor per env (``None`` for envs that
             captured none). ``all_pixel_values`` follows the same per-env collapse rule.
+        :raises ValueError: If an episode's context restarted into segments.
         """
         token_ids_list: list[torch.Tensor] = []
         action_masks_list: list[torch.Tensor] = []
@@ -357,7 +364,15 @@ class RolloutCollector:
                 turn_rewards_t,
                 sampling_logps,
                 pixel_values,
+                segments,
             ) = env.get_episode_data()
+            if segments is not None:
+                msg = (
+                    "An episode's context restarted into segments; segmented "
+                    "episodes are returned by the per-episode API "
+                    "(get_episode_data / finalize_episode) only."
+                )
+                raise ValueError(msg)
             token_ids_list.append(ep_ids)
             action_masks_list.append(action_mask)
             all_turn_ids.append(turn_ids)
@@ -392,8 +407,8 @@ class RolloutCollector:
 
         Group seeds must stay unique across windows; the caller advances
         ``group_seed`` between windows while :attr:`_base_seed` stays fixed
-        (see :meth:`TaskAssigner.assign`). Overlapping async groups pass
-        ``seed`` on :meth:`reset_episode` instead.
+        (see :meth:`TaskAssigner.assign`). Groups started while others run
+        take their task from :meth:`assign_group_task` instead.
 
         :param group_seed: Offset mixed into each episode's env seed.
         """
@@ -465,6 +480,7 @@ class RolloutCollector:
                 seed=seed,
                 rank=self._rank,
                 world_size=self._world_size,
+                adaptive=self.adaptive_task_sampling,
             )
             self.rubric_component_names = tuple(self.envs[0].rubric_components)
 
@@ -505,6 +521,63 @@ class RolloutCollector:
                 raise IndexError(msg)
             return self._assignment[int(logical_slot)]
 
+    def assign_group_task(self, group_seed: int) -> tuple[int | None, int | None]:
+        """Draw one group's ``(seed, row_index)``, independent of the episodes running.
+
+        Each call takes the next row of this rank's epoch-reshuffled shard, so
+        groups started while others are live still cover the rows evenly. Every
+        member of the group resets at the returned task via :meth:`reset_episode`.
+
+        :param group_seed: Group-seed offset mixed into the env seed.
+        :return: ``(seed, row_index)``; ``seed`` is ``None`` without a base seed,
+            ``row_index`` is ``None`` for a procedural env.
+        """
+        self._ensure_slots()
+        with self._slot_lock:
+            if self._task_assigner is None:
+                msg = "_ensure_slots builds the assigner"
+                raise RuntimeError(msg)
+            return self._task_assigner.next_task(self._base_seed, group_seed)
+
+    def record_group_outcome(self, row_index: int, *, informative: bool) -> None:
+        """Feed one finished group's outcome on ``row_index`` back to the task assigner (thread-safe).
+
+        :param row_index: Dataset row the group ran on, from :meth:`assign_group_task`.
+        :param informative: Whether the group's rewards differed across members.
+        """
+        with self._slot_lock:
+            if self._task_assigner is None:
+                msg = "a finished group implies assign_group_task built the assigner"
+                raise RuntimeError(msg)
+            self._task_assigner.record_outcome(row_index, informative=informative)
+
+    def task_row_stats(self) -> list[TaskRowStats]:
+        """Per-row outcomes and sampling weights of this rank's shard; empty before the first reset."""
+        with self._slot_lock:
+            if self._task_assigner is None:
+                return []
+            return self._task_assigner.row_stats()
+
+    def task_sampler_state(self) -> list[TaskRowOutcome]:
+        """Decayed outcome counts of this rank's observed rows; empty before the first reset."""
+        with self._slot_lock:
+            if self._task_assigner is None:
+                return []
+            return self._task_assigner.state_dict()
+
+    def load_task_sampler_state(self, state: list[TaskRowOutcome]) -> None:
+        """Restore outcome counts from :meth:`task_sampler_state`, building the slots first (thread-safe).
+
+        :param state: Saved outcomes; rows outside this rank's shard are skipped,
+            so ``state`` may hold every rank's rows.
+        """
+        self._ensure_slots()
+        with self._slot_lock:
+            if self._task_assigner is None:
+                msg = "_ensure_slots builds the assigner"
+                raise RuntimeError(msg)
+            self._task_assigner.load_state_dict(state)
+
     def _slot_and_activation(self, episode_id: str) -> tuple[int, int]:
         """The ``(slot, activation)`` ``episode_id`` holds; ``KeyError`` when it is not active."""
         with self._slot_lock:
@@ -531,34 +604,88 @@ class RolloutCollector:
         self,
         episode_id: str,
         logical_slot: int | None = None,
-        seed: int | None = None,
+        *,
+        task: tuple[int | None, int | None] | None = None,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
-        """Acquire a free slot and reset one episode at its window-assigned task.
+        """Acquire a free slot and reset one episode at its group's task.
 
         Blocking and thread-safe — the offload target for an asyncio caller. The slot
         is held until :meth:`get_episode_data` / :meth:`finalize_episode`. ``logical_slot``
-        indexes the window's group-contiguous ``(seed, row_index)`` assignment; ``None``
-        leaves the task unpinned.
+        indexes the window's group-contiguous ``(seed, row_index)`` assignment;
+        ``task`` is a group's draw from :meth:`assign_group_task`. Neither leaves the
+        task unpinned.
 
         :param episode_id: Caller-unique id naming this episode in later calls.
         :param logical_slot: Position in the rollout window, pinning the group task.
-        :param seed: Group-seed offset mixed into this episode's env seed; ``None``
-            uses the window assignment from :meth:`set_group_seed`.
+        :param task: ``(seed, row_index)`` shared by every member of one group.
         :return: ``(prompt, info)`` — the policy-ready prompt (empty when the
             episode truncated at turn 0).
+        :raises ValueError: If both ``logical_slot`` and ``task`` are given.
+        """
+        if task is not None and logical_slot is not None:
+            msg = "reset_episode takes logical_slot or task, not both"
+            raise ValueError(msg)
+        self._ensure_slots()
+        env_seed, row_index = (
+            self._episode_assignment(logical_slot) if task is None else task
+        )
+        return self._reset_on_free_slot(
+            episode_id,
+            env_seed=env_seed,
+            row_index=row_index,
+            evaluation=False,
+        )
+
+    def reset_eval_episode(
+        self,
+        episode_id: str,
+        row_index: int | None,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Acquire a free slot and reset one episode on the held-out split.
+
+        Same slot contract as :meth:`reset_episode`; only the reset itself runs
+        under the env's :meth:`~RolloutHarness.eval_mode`, so concurrent training
+        episodes on other slots keep their split.
+
+        :param episode_id: Caller-unique id naming this episode in later calls.
+        :param row_index: Held-out row to reset at; ``None`` for a procedural env.
+        :return: ``(prompt, info)``, as :meth:`reset_episode`.
         """
         self._ensure_slots()
+        return self._reset_on_free_slot(
+            episode_id,
+            env_seed=None,
+            row_index=row_index,
+            evaluation=True,
+        )
+
+    def eval_task_count(self) -> int:
+        """Rows in the held-out split (``0`` for a procedural env).
+
+        :raises RuntimeError: If any episode is active, since eval mode is
+            per-env-client state shared with that episode's slot.
+        """
+        self._ensure_slots()
+        with self._slot_lock:
+            if self._episode_to_slot:
+                msg = "cannot read the held-out split while episodes are still active"
+                raise RuntimeError(msg)
+            env = self.envs[0]
+            with env.eval_mode():
+                return env.dataset_size
+
+    def _reset_on_free_slot(
+        self,
+        episode_id: str,
+        *,
+        env_seed: int | None,
+        row_index: int | None,
+        evaluation: bool,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Take a free slot, reset its env, and bind ``episode_id`` to it."""
         if self._free_slots is None:
             msg = "an active episode implies slots exist"
             raise RuntimeError(msg)
-        assigned_seed, row_index = self._episode_assignment(logical_slot)
-        if seed is None:
-            env_seed = assigned_seed
-        elif self._base_seed is None:
-            env_seed = None
-        else:
-            item = 0 if logical_slot is None else int(logical_slot) // self.group_size
-            env_seed = _mix_seed(int(self._base_seed) + int(seed) + item)
         try:
             slot = self._free_slots.get(timeout=self._slot_acquire_timeout_s)
         except queue.Empty:
@@ -571,7 +698,13 @@ class RolloutCollector:
         acquired = False
         try:
             env = self.envs[slot]
-            obs_text, image, info = env._reset_fetch(env_seed, row_index=row_index)
+            if evaluation:
+                with env.eval_mode():
+                    obs_text, image, info = env._reset_fetch(
+                        env_seed, row_index=row_index
+                    )
+            else:
+                obs_text, image, info = env._reset_fetch(env_seed, row_index=row_index)
             with self._tokenizer_lock:
                 prompt, info = env._reset_apply(obs_text, info, image=image)
             with self._slot_lock:
@@ -635,13 +768,14 @@ class RolloutCollector:
         torch.Tensor,
         torch.Tensor | None,
         torch.Tensor | None,
+        EpisodeSegments | None,
     ]:
         """Build one episode's tensors and release its slot.
 
         :param episode_id: The episode to finalize; ``KeyError`` when not active.
-        :return: The :meth:`RolloutHarness.get_episode_data` 6-tuple:
+        :return: The :meth:`RolloutHarness.get_episode_data` 7-tuple:
             ``full_ids``, ``action_mask``, ``turn_ids``, ``turn_rewards``,
-            ``sampling_logps``, ``pixel_values``.
+            ``sampling_logps``, ``pixel_values``, ``segments``.
         """
         result = self.finalize_episode(episode_id, missing_ok=False)
         if result is None:
@@ -661,6 +795,7 @@ class RolloutCollector:
             torch.Tensor,
             torch.Tensor | None,
             torch.Tensor | None,
+            EpisodeSegments | None,
         ]
         | None
     ):
@@ -668,6 +803,9 @@ class RolloutCollector:
 
         Idempotent when ``missing_ok`` — safe for cancellation cleanup paths that may
         race with normal finalize.
+
+        :return: The :meth:`get_episode_data` 7-tuple, or ``None`` when
+            ``missing_ok`` and the episode is absent.
         """
         with self._slot_lock:
             slot = self._episode_to_slot.pop(episode_id, None)

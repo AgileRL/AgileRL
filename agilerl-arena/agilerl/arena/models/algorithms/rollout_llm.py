@@ -25,6 +25,8 @@ from agilerl.arena.models.descriptions import (
     TOP_K,
     TOP_P,
     VLLM_CONFIG,
+    VLLM_MAX_CLIP_FRACTION,
+    VLLM_MAX_LOGPROB_GAP,
 )
 from agilerl.arena.models.env import LLMEnvType
 from agilerl.arena.models.networks import CosineLRScheduleConfig, VLLMConfig
@@ -57,6 +59,12 @@ class RolloutLLMSpec(LLMAlgorithmSpec):
         default=True, description=IS_CORRECTION
     )
     vllm_importance_sampling_cap: float = Field(default=2.0, ge=0.0, description=IS_CAP)
+    vllm_max_logprob_gap: float = Field(
+        default=0.1, ge=0.0, description=VLLM_MAX_LOGPROB_GAP
+    )
+    vllm_max_clip_fraction: float = Field(
+        default=0.02, ge=0.0, le=1.0, description=VLLM_MAX_CLIP_FRACTION
+    )
 
     env_type: ClassVar[LLMEnvType] = LLMEnvType.ROLLOUT
 
