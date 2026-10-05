@@ -27,7 +27,8 @@ NEMOTRON_VLLM_KWARGS = {
     "trust_remote_code": True,
 }
 
-NEMOTRON_TRAINER_KWARGS = {
+NEMOTRON_TRAINER_KWARGS = {"attn_implementation": "flash_attention_2"}
+NEMOTRON_OMNI_TRAINER_KWARGS = {
     "attn_implementation": "flash_attention_2",
     "trust_remote_code": True,
 }
@@ -68,7 +69,6 @@ class TestFamilyRuntimeConfigs:
     ) -> None:
         base = FAMILY_RUNTIME_CONFIGS["nemotron_h"]
         omni = FAMILY_RUNTIME_CONFIGS["nemotron_h_omni"]
-        assert omni.trainer == base.trainer
         assert omni.vllm == base.vllm
         assert omni.patch.install is install_mamba_patches
         assert omni.language_tower.hf_overrides is omni_language_tower_hf_override
@@ -103,6 +103,14 @@ class TestFamilyRuntimeConfigs:
         assert config.vllm.model_dump(exclude_none=True) == NEMOTRON_VLLM_KWARGS
         assert config.trainer.model_dump(exclude_none=True) == NEMOTRON_TRAINER_KWARGS
         assert config.patch.install is install_mamba_patches
+
+    def test_only_nemotron_h_omni_trainer_loads_checkpoint_code(self) -> None:
+        omni = FAMILY_RUNTIME_CONFIGS["nemotron_h_omni"]
+
+        assert omni.trainer.model_dump(exclude_none=True) == (
+            NEMOTRON_OMNI_TRAINER_KWARGS
+        )
+        assert FAMILY_RUNTIME_CONFIGS["nemotron_h"].trainer.trust_remote_code is None
 
     def test_nemotron_h_enables_prefix_caching(self) -> None:
         assert FAMILY_RUNTIME_CONFIGS["nemotron_h"].vllm.enable_prefix_caching is True

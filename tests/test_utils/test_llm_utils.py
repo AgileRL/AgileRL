@@ -2395,6 +2395,17 @@ class TestCreateModelFromNameOrPathDefaults:
         stub_catalog_model_type(monkeypatch, "nemotron_h")
         create_model_from_name_or_path("nvidia/nemotron")
         assert captured["kwargs"]["attn_implementation"] == "flash_attention_2"
+        assert "trust_remote_code" not in captured["kwargs"]
+
+    def test_nemotron_h_omni_forwards_trust_remote_code(self, monkeypatch):
+        captured = {}
+        monkeypatch.setattr(
+            llm_utils_module, "AutoModelForCausalLM", self._fake_loader(captured)
+        )
+        monkeypatch.setattr("importlib.util.find_spec", lambda name: None)
+        stub_catalog_model_type(monkeypatch, "nemotron_h_omni")
+        create_model_from_name_or_path("nvidia/nemotron-omni")
+        assert captured["kwargs"]["attn_implementation"] == "flash_attention_2"
         assert captured["kwargs"]["trust_remote_code"] is True
 
     def test_caller_trust_remote_code_false_is_not_overwritten(self, monkeypatch):

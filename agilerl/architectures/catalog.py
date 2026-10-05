@@ -23,11 +23,10 @@ from agilerl.architectures.runtime import (
     VllmRuntimeConfig,
 )
 
+# Trainer uses transformers' nemotron_h class; the checkpoint's auto_map code
+# supports only eager attention.
 NEMOTRON_H_RUNTIME_CONFIG = ModelRuntimeConfig(
-    trainer=TrainerRuntimeConfig(
-        attn_implementation="flash_attention_2",
-        trust_remote_code=True,
-    ),
+    trainer=TrainerRuntimeConfig(attn_implementation="flash_attention_2"),
     vllm=VllmRuntimeConfig(
         mamba_cache_mode="align",
         max_num_batched_tokens=8192,
@@ -45,6 +44,11 @@ NEMOTRON_H_RUNTIME_CONFIG = ModelRuntimeConfig(
 
 NEMOTRON_H_OMNI_RUNTIME_CONFIG = NEMOTRON_H_RUNTIME_CONFIG.model_copy(
     update={
+        # nemotron_h_omni is not a transformers model type; its config needs checkpoint code.
+        "trainer": TrainerRuntimeConfig(
+            attn_implementation="flash_attention_2",
+            trust_remote_code=True,
+        ),
         "language_tower": LanguageTowerRuntimeConfig(
             hf_overrides=omni_language_tower_hf_override,
             model_class_overrides={
