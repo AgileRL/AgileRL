@@ -894,6 +894,7 @@ class SafetensorsSliceView(Protocol):
 
 class SafetensorsFileHandle(Protocol):
     def get_slice(self, key: str) -> SafetensorsSliceView: ...
+    def get_tensor(self, key: str) -> torch.Tensor: ...
 
 
 def checkpoint_key_for_parameter(live_name: str) -> str:
@@ -1067,10 +1068,7 @@ def _copy_indexed_weights(
     loaded: list[tuple[int, torch.Tensor]] = []
     for path, path_keys in by_path.items():
         with safe_open(path, framework="pt", device="cpu") as handle:
-            # get_slice is a view of the open file.
-            loaded.extend(
-                (order[key], handle.get_slice(key)[:].clone()) for key in path_keys
-            )
+            loaded.extend((order[key], handle.get_tensor(key)) for key in path_keys)
     loaded.sort()
     stacked = torch.stack([tensor for _, tensor in loaded], dim=0)
     if tuple(stacked.shape) != global_shape:
@@ -1495,7 +1493,7 @@ def _load_sharded_weights_from_safetensors(model: nn.Module) -> None:
             with safe_open(path, framework="pt", device="cpu") as handle:
                 for checkpoint_key, index_slices, dest in copies_by_path[path]:
                     if index_slices is None:
-                        full = handle.get_slice(checkpoint_key)[:]
+                        full = handle.get_tensor(checkpoint_key)
                         dest.copy_(full.to(device=dest.device, dtype=dest.dtype))
                     else:
                         _copy_safetensors_slice(

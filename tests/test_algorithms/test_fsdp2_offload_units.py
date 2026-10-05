@@ -1630,6 +1630,35 @@ class TestSafetensorsShardKeys:
         assert torch.equal(model.attention.value.weight.detach(), value)
         assert torch.equal(model.scale.detach(), scale)
 
+    def test_loads_scalar_buffer(self, tmp_path):
+        from agilerl.distributed.fsdp import _load_sharded_weights_from_safetensors
+
+        # Arrange
+        weight = torch.ones(2, 2)
+        floor = torch.tensor(-1.5)
+        save_file(
+            {"linear.weight": weight, "input_min": floor},
+            str(tmp_path / "model.safetensors"),
+        )
+
+        class Clipped(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.linear = nn.Linear(2, 2, bias=False)
+                self.register_buffer("input_min", torch.tensor(float("inf")))
+                self.config = PretrainedConfig(
+                    tie_word_embeddings=False, name_or_path=str(tmp_path)
+                )
+
+        model = Clipped()
+
+        # Act
+        _load_sharded_weights_from_safetensors(model)
+
+        # Assert
+        assert torch.equal(model.linear.weight.detach(), weight)
+        assert torch.equal(model.input_min.detach(), floor)
+
     def test_language_body_alias_uses_backbone_key(self):
         from agilerl.distributed.fsdp import checkpoint_key_candidates
 
