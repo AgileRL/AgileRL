@@ -146,7 +146,7 @@ class ArenaOAuth2:
     CREDENTIALS_DIR = Path.home() / ".arena"
     CREDENTIALS_FILE = CREDENTIALS_DIR / "credentials.json"
 
-    KEYCLOAK_URL = "https://auth.arena.agilerl.com"
+    KEYCLOAK_URL = "https://arena-auth.agilerl.com"
     REALM = "arena"
     CLIENT_ID = "arena-cli"
 
