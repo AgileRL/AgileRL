@@ -187,6 +187,7 @@ SUPPORTED_MODEL_INFO: Mapping[str, ModelInfo] = {
         ModelInfo(hub_id="Qwen/Qwen2.5-0.5B-Instruct"),
         ModelInfo(hub_id="Qwen/Qwen3-1.7B"),
         ModelInfo(hub_id="Qwen/Qwen3-4B"),
+        ModelInfo(hub_id="Qwen/Qwen3.8-27B", architecture=ARCH_HYBRID),
         ModelInfo(hub_id="ibm-granite/granite-4.0-micro"),
         ModelInfo(hub_id="ibm-granite/granite-4.0-micro-base"),
         ModelInfo(hub_id="ibm-granite/granite-4.0-h-tiny", architecture=ARCH_HYBRID),
