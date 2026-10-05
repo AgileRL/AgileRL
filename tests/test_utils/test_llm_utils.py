@@ -21,6 +21,11 @@ from datasets import Dataset as Datasets
 from torch import nn
 from transformers import AutoTokenizer
 
+from agilerl.architectures.flex_attention import (
+    flex_decode_kernel_options,
+    patch_flex_attention_kernel_options,
+)
+from agilerl.architectures.gemma4 import gemma4_language_tower_hf_override
 from agilerl.architectures.nemotron_h.language_tower import (
     omni_language_tower_hf_override,
 )
@@ -54,7 +59,6 @@ from agilerl.utils.llm_utils import (
     discover_clippable_projection_leaf_names,
     fill_outside_mask,
     filter_peft_state_dict_for_vllm_lora,
-    flex_decode_kernel_options,
     format_colocated_vllm_oom_hint,
     get_lora_params,
     get_model_name_or_path,
@@ -73,7 +77,6 @@ from agilerl.utils.llm_utils import (
     move_params_to_gpu,
     normalize_prompt_batch,
     offload_colocated_trainer_from_gpu,
-    patch_flex_attention_kernel_options,
     peft_lora_state_dict_key_to_module_key,
     peft_target_key_matches,
     pool_by_turns,
@@ -2169,6 +2172,32 @@ class TestPatchFlexAttentionKernelOptions:
         wrapper(None, self._query(111), "k", "v", None)
         assert calls[0]["kernel_options"] == {"BLOCK_M": 128}
 
+    def test_a100_keeps_wider_backward_blocks(self, monkeypatch):
+        registry, calls = self._install_fake_flex(monkeypatch)
+        monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+        monkeypatch.setattr(torch.cuda, "get_device_capability", lambda: (8, 0))
+        patch_flex_attention_kernel_options()
+        wrapper = registry["flex_attention"]
+        wrapper(None, self._query(512), "k", "v", None)
+        opts = calls[0]["kernel_options"]
+        assert opts["BLOCK_N1"] == 32
+        assert opts["BLOCK_M2"] == 32
+
+    def test_l4_gets_smaller_backward_blocks(self, monkeypatch):
+        registry, calls = self._install_fake_flex(monkeypatch)
+        monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+        monkeypatch.setattr(torch.cuda, "get_device_capability", lambda: (8, 9))
+        patch_flex_attention_kernel_options()
+        wrapper = registry["flex_attention"]
+        wrapper(None, self._query(512), "k", "v", None)
+        opts = calls[0]["kernel_options"]
+        assert opts["BLOCK_M"] == 32
+        assert opts["BLOCK_N"] == 32
+        assert opts["BLOCK_M1"] == 16
+        assert opts["BLOCK_N1"] == 16
+        assert opts["BLOCK_M2"] == 16
+        assert opts["BLOCK_N2"] == 16
+
     def test_installs_sram_safe_defaults_without_cuda(self, monkeypatch):
         registry, calls = self._install_fake_flex(monkeypatch)
         monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
@@ -3014,6 +3043,17 @@ class TestBuildVllmLlmInitKwargs:
                 "NemotronHOmniLanguageForCausalLM"
             ),
         }
+
+    def test_strip_multimodal_towers_applies_gemma4_language_tower(self, monkeypatch):
+        stub_catalog_model_type(monkeypatch, "gemma4")
+        kwargs = build_vllm_llm_init_kwargs(
+            _vllm_config(strip_multimodal_towers=True),
+            trainer_model_name_or_path="google/gemma-4-E4B-it",
+            max_model_len=32768,
+        )
+
+        assert kwargs["hf_overrides"] is gemma4_language_tower_hf_override
+        assert "model_class_overrides" not in kwargs
 
 
 class TestBuildVllmRolloutLoraRequest:

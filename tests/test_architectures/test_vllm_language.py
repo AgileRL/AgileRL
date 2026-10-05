@@ -12,6 +12,10 @@ from types import ModuleType, SimpleNamespace
 import pytest
 
 from agilerl.architectures.catalog import FAMILY_RUNTIME_CONFIGS
+from agilerl.architectures.gemma4 import (
+    GEMMA4_LANGUAGE_ARCHITECTURE,
+    gemma4_language_tower_hf_override,
+)
 from agilerl.architectures.nemotron_h.language_tower import (
     omni_language_tower_hf_override,
 )
@@ -95,6 +99,25 @@ class TestOmniLanguageTowerHfOverride:
             omni_language_tower_hf_override(omni)
 
 
+class TestGemma4LanguageTowerHfOverride:
+    def test_sets_causal_lm_architecture_on_text_config(self) -> None:
+        language = SimpleNamespace()
+        config = SimpleNamespace(text_config=language)
+
+        resolved = gemma4_language_tower_hf_override(config)
+
+        assert resolved is language
+        assert language.architectures == [GEMMA4_LANGUAGE_ARCHITECTURE]
+
+    def test_sets_causal_lm_architecture_on_language_only_config(self) -> None:
+        config = SimpleNamespace(model_type="gemma4_text")
+
+        resolved = gemma4_language_tower_hf_override(config)
+
+        assert resolved is config
+        assert config.architectures == [GEMMA4_LANGUAGE_ARCHITECTURE]
+
+
 class TestApplyLanguageTowerEngineKwargs:
     def test_omni_family_sets_overrides_when_stripping(self) -> None:
         kwargs: dict[str, object] = {}
@@ -124,6 +147,29 @@ class TestApplyLanguageTowerEngineKwargs:
 
         assert kwargs["hf_overrides"] is nested_language_config
         assert "model_class_overrides" not in kwargs
+
+    def test_gemma4_strip_sets_language_tower_override(self) -> None:
+        kwargs: dict[str, object] = {}
+
+        apply_language_tower_engine_kwargs(
+            kwargs,
+            strip_multimodal_towers=True,
+            runtime=FAMILY_RUNTIME_CONFIGS["gemma4"],
+        )
+
+        assert kwargs["hf_overrides"] is gemma4_language_tower_hf_override
+        assert "model_class_overrides" not in kwargs
+
+    def test_gemma4_kept_towers_leave_kwargs_alone(self) -> None:
+        kwargs: dict[str, object] = {}
+
+        apply_language_tower_engine_kwargs(
+            kwargs,
+            strip_multimodal_towers=False,
+            runtime=FAMILY_RUNTIME_CONFIGS["gemma4"],
+        )
+
+        assert kwargs == {}
 
     def test_nemotron_h_strip_does_not_register_omni_class(self) -> None:
         kwargs: dict[str, object] = {}
