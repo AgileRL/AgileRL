@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import uuid
 from contextlib import contextmanager
@@ -23,6 +24,7 @@ from agilerl.arena.config import CommandConfig, build_client
 from agilerl.arena.exceptions import ArenaAPIError
 from agilerl.arena.inference import SessionDetail, SessionInfo, SessionMessage
 from agilerl.arena.inference.cache import load_active_session, save_active_session
+from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
 
 
 @pytest.fixture
@@ -762,6 +764,20 @@ class TestModelsListCommand:
         assert result.exit_code == 0
         mock_client.list_models.assert_called_once_with()
         assert "ibm-granite/granite-3.3-2b-instruct" in result.output
+
+
+class TestModelsSupportedCommand:
+    def test_prints_every_supported_model_without_a_server(self, runner) -> None:
+        result = runner.invoke(main, ["models", "supported"])
+
+        assert result.exit_code == 0
+        models = {row["hub_id"]: row for row in json.loads(result.output)}
+        assert set(models) == set(SUPPORTED_MODEL_INFO)
+        qwen = models["Qwen/Qwen3-4B"]
+        assert qwen["architecture"] == "dense"
+        assert qwen["max_context_length"] == 40960
+        assert qwen["lora_ranks"] == [1, 8, 16, 32, 64, 128, 256, 320, 512]
+        assert "_gram_estimate" in qwen["lora_info"]
 
 
 class TestModelsInfoCommand:

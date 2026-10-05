@@ -232,8 +232,7 @@ class LLMAlgorithmSpec(AlgorithmSpec):
         default=True,
         description=(
             "Hold the reference policy in its own frozen LoRA adapter rather "
-            "than the base weights. Incompatible with expert LoRA "
-            "(lora_config.target_parameters), which needs a single adapter."
+            "than the base weights."
         ),
     )
     calc_position_embeddings: bool = Field(
