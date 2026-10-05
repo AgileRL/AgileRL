@@ -86,7 +86,7 @@ docs = [
     # models carry their documentation on the fields, not in the docstring.
     "autodoc-pydantic>=2.2",
     "furo>=2025.12.19",
-    "sphinx>=7,<9",
+    "sphinx>=7,<10",
     "sphinx-autobuild>=2024.10.3",
     "sphinx-copybutton>=0.5",
     "sphinx-design>=0.6",
