@@ -163,7 +163,6 @@ class TestFamilyRuntime:
         config = architectures.family_runtime("nvidia/nemotron")
         assert config.trainer.model_dump(exclude_none=True) == {
             "attn_implementation": "flash_attention_2",
-            "trust_remote_code": True,
         }
 
     def test_llama_trainer_dumps_empty(self, monkeypatch: pytest.MonkeyPatch) -> None:
