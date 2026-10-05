@@ -1809,3 +1809,46 @@ class TestRolloutSamplingFields:
         assert CISPOSpec.model_construct(group_size=4).loss_type == "cispo"
         with pytest.raises(ValidationError):
             GSPOSpec(group_size=4, loss_type="grpo")
+
+
+class TestExpertLoraReferenceAdapter:
+    def test_expert_lora_keeps_the_reference_adapter(self) -> None:
+        moe = manifest(
+            GRPO,
+            network={
+                "pretrained_model_name_or_path": "openai/gpt-oss-20b",
+                "lora_config": {},
+            },
+        )
+
+        validated = TrainingManifest.model_validate(moe)
+
+        assert validated.algorithm.lora_config.target_parameters
+        assert validated.algorithm.use_separate_reference_adapter is True
+
+    def test_explicit_reference_adapter_with_experts_validates(self) -> None:
+        moe = manifest(
+            GRPO,
+            algorithm={"use_separate_reference_adapter": True},
+            network={
+                "pretrained_model_name_or_path": "openai/gpt-oss-20b",
+                "lora_config": {},
+            },
+        )
+
+        validated = TrainingManifest.model_validate(moe)
+
+        assert validated.algorithm.use_separate_reference_adapter is True
+
+    def test_no_experts_keeps_the_reference_adapter(self) -> None:
+        moe = manifest(
+            GRPO,
+            network={
+                "pretrained_model_name_or_path": "openai/gpt-oss-20b",
+                "lora_config": {"target_parameters": []},
+            },
+        )
+
+        validated = TrainingManifest.model_validate(moe)
+
+        assert validated.algorithm.use_separate_reference_adapter is True

@@ -187,16 +187,37 @@ class TestFamilyRuntime:
             raise_missing,
         )
         with pytest.raises(OSError, match="missing config"):
-            family_runtime("nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16")
+            family_runtime("nvidia/unlisted-model")
+
+    @pytest.mark.parametrize(
+        ("hub_id", "model_type"),
+        [
+            ("nvidia/NVIDIA-Nemotron-3-Nano-4B-BF16", "nemotron_h"),
+            ("nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16", "nemotron_h"),
+            ("nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16", "nemotron_h_omni"),
+        ],
+    )
+    def test_supported_id_resolves_from_bundle_without_hub(
+        self, monkeypatch: pytest.MonkeyPatch, hub_id: str, model_type: str
+    ) -> None:
+        def raise_if_called(*args: object, **kwargs: object) -> None:
+            msg = "hub lookup"
+            raise AssertionError(msg)
+
+        monkeypatch.setattr(
+            "agilerl.architectures.catalog.PretrainedConfig.get_config_dict",
+            raise_if_called,
+        )
+
+        config = family_runtime(hub_id)
+
+        assert config is FAMILY_RUNTIME_CONFIGS[model_type]
 
 
 class TestPretrainedModelType:
     def test_reads_config_json(self, monkeypatch: pytest.MonkeyPatch) -> None:
         stub_config_model_type(monkeypatch, "nemotron_h")
-        assert (
-            pretrained_model_type("nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16")
-            == "nemotron_h"
-        )
+        assert pretrained_model_type("nvidia/unlisted-model") == "nemotron_h"
 
     def test_missing_config_json_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
         def raise_missing(*args: object, **kwargs: object) -> None:
@@ -208,7 +229,21 @@ class TestPretrainedModelType:
             raise_missing,
         )
         with pytest.raises(OSError, match="missing config"):
-            pretrained_model_type("nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16")
+            pretrained_model_type("nvidia/unlisted-model")
+
+    def test_supported_id_reads_bundled_config(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def raise_if_called(*args: object, **kwargs: object) -> None:
+            msg = "hub lookup"
+            raise AssertionError(msg)
+
+        monkeypatch.setattr(
+            "agilerl.architectures.catalog.PretrainedConfig.get_config_dict",
+            raise_if_called,
+        )
+
+        assert pretrained_model_type("google/gemma-4-E4B-it") == "gemma4"
 
 
 class TestRuntimeConfigsForbidExtra:

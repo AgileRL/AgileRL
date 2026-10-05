@@ -22,6 +22,7 @@ from agilerl.architectures.runtime import (
     TrainerRuntimeConfig,
     VllmRuntimeConfig,
 )
+from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
 
 # Trainer uses transformers' nemotron_h class; the checkpoint's auto_map code
 # supports only eager attention.
@@ -93,7 +94,13 @@ FAMILY_RUNTIME_CONFIGS: Mapping[str, ModelRuntimeConfig] = {
 
 
 def pretrained_model_type(model_name_or_path: str) -> str:
-    """Return Hugging Face ``model_type`` from a checkpoint id or local path."""
+    """Return Hugging Face ``model_type`` from a checkpoint id or local path.
+
+    Supported ids read the bundled config instead of the Hub.
+    """
+    entry = SUPPORTED_MODEL_INFO.get(model_name_or_path)
+    if entry is not None:
+        return entry.config["model_type"]
     config_dict, _ = PretrainedConfig.get_config_dict(model_name_or_path)
     return config_dict["model_type"]
 

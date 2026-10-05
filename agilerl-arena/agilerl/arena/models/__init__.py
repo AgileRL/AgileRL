@@ -61,6 +61,11 @@ from agilerl.arena.models.manifest import (
     TrainingManifest,
     normalize_network_section,
 )
+from agilerl.arena.models.model_info import (
+    SUPPORTED_MODEL_INFO,
+    ModelArchitecture,
+    ModelInfo,
+)
 from agilerl.arena.models.networks import (
     CnnSpec,
     ContinuousQNetworkSpec,
@@ -108,6 +113,7 @@ __all__ = [
     "API_VERSION",
     "MANIFEST_REGISTRY",
     "SCHEMA_ID",
+    "SUPPORTED_MODEL_INFO",
     "AgentType",
     "AlgoSpec",
     "AlgorithmSpec",
@@ -143,6 +149,8 @@ __all__ = [
     "MADDPGSpec",
     "MATD3Spec",
     "MlpSpec",
+    "ModelArchitecture",
+    "ModelInfo",
     "MultiAgentAlgorithmSpec",
     "MultiFrequencySelectionSpec",
     "MultiInputSpec",
