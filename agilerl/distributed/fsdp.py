@@ -35,16 +35,16 @@ from torch.distributed.fsdp import (
 from torch.distributed.tensor import DTensor, distribute_tensor
 from torch.distributed.tensor.placement_types import Shard
 from transformers import PretrainedConfig, PreTrainedModel
-from transformers.conversion_mapping import (
-    WeightConverter,
-    get_checkpoint_conversion_mapping,
-)
+from transformers.conversion_mapping import get_checkpoint_conversion_mapping
+from transformers.core_model_loading import WeightTransform
 from transformers.utils import SAFE_WEIGHTS_INDEX_NAME, SAFE_WEIGHTS_NAME, cached_file
 
 from agilerl.arena.models.fsdp import FSDPConfig
 from agilerl.distributed.fsdp_meta import (
     ModelWithTiedWeightKeys,
     init_rope_buffers,
+    match_checkpoint_key,
+    renamed_checkpoint_keys,
     restore_after_to_empty,
 )
 from agilerl.distributed.process import is_distributed
@@ -922,12 +922,12 @@ def checkpoint_key_candidates(live_name: str) -> tuple[str, ...]:
 
 def _checkpoint_transform_groups(
     model: nn.Module,
-) -> list[tuple[str, list[Any]]]:
+) -> list[tuple[str, list[WeightTransform]]]:
     """Conversions registered for a module class or model type, under that module path.
 
     Longer paths come first so a nested module's mapping wins over its parent.
     """
-    groups: list[tuple[str, list[Any]]] = []
+    groups: list[tuple[str, list[WeightTransform]]] = []
     for name, module in model.named_modules():
         config = _module_pretrained_config(module)
         if config is None:
@@ -942,56 +942,6 @@ def _checkpoint_transform_groups(
         groups.append((prefix, list(conversions)))
     groups.sort(key=lambda item: len(item[0]), reverse=True)
     return groups
-
-
-def converted_checkpoint_key(
-    key: str,
-    transforms: Sequence[Any],
-) -> tuple[str, int | None]:
-    """Map a live parameter name back to the checkpoint key it was saved under.
-
-    A transform that splits one source tensor records which piece this name is.
-
-    :param key: Live parameter name.
-    :type key: str
-    :param transforms: Conversions registered for one module.
-    :type transforms: Sequence[Any]
-    :return: Checkpoint key, and the split index when one source feeds several
-        parameters.
-    :rtype: tuple[str, int | None]
-    """
-    current = key
-    split_index: int | None = None
-    for transform in reversed(transforms):
-        renamed, pattern = transform.reverse_transform().rename_source_key(current)
-        if pattern is None:
-            continue
-        if isinstance(transform, WeightConverter):
-            operations = transform.operations
-            if any(type(operation).__name__ == "Chunk" for operation in operations):
-                split_index = list(transform.target_patterns).index(pattern)
-        current = renamed
-    return current, split_index
-
-
-def _iter_converted_checkpoint_keys(
-    key: str,
-    groups: Sequence[tuple[str, Sequence[Any]]],
-) -> Iterable[tuple[str, int | None]]:
-    """Yield checkpoint keys produced by applying each group under its module path."""
-    for prefix, transforms in groups:
-        if prefix:
-            head = f"{prefix}."
-            if not key.startswith(head):
-                continue
-            relative = key[len(head) :]
-        else:
-            relative = key
-        converted, split_index = converted_checkpoint_key(relative, transforms)
-        if converted == relative:
-            continue
-        full = f"{prefix}.{converted}" if prefix else converted
-        yield full, split_index
 
 
 def _shift_slices_for_split(
@@ -1364,6 +1314,7 @@ def _load_sharded_weights_from_safetensors(model: nn.Module) -> None:
     key_files = _build_safetensors_key_files(model_path)
     tied_targets = _tied_weight_checkpoint_targets(model)
     transform_groups = _checkpoint_transform_groups(model)
+    renamed_keys = renamed_checkpoint_keys(key_files, transform_groups)
     vision_parameters_copied = 0
     unmatched_outside_language: list[str] = []
     # Parameters outside language_model stay empty when no checkpoint key matches.
@@ -1380,19 +1331,9 @@ def _load_sharded_weights_from_safetensors(model: nn.Module) -> None:
         for live_name, param in model.named_parameters():
             canonical = canonical_fsdp_param_fqn(live_name)
             candidates = checkpoint_key_candidates(live_name)
-            checkpoint_key = next((key for key in candidates if key in key_files), None)
-            split_index: int | None = None
-            if checkpoint_key is None:
-                for candidate in candidates:
-                    for converted, split in _iter_converted_checkpoint_keys(
-                        candidate, transform_groups
-                    ):
-                        if converted in key_files and converted != candidate:
-                            checkpoint_key = converted
-                            split_index = split
-                            break
-                    if checkpoint_key is not None:
-                        break
+            checkpoint_key, split_index = match_checkpoint_key(
+                candidates, key_files, renamed_keys, transform_groups
+            )
             if checkpoint_key is not None:
                 path = key_files[checkpoint_key]
                 if isinstance(param, DTensor):
@@ -1449,6 +1390,10 @@ def _load_sharded_weights_from_safetensors(model: nn.Module) -> None:
                 unmatched_outside_language.append(canonical)
                 continue
             packed = _packed_checkpoint_keys(candidates, key_files)
+            if packed is None:
+                renamed_packed = _packed_checkpoint_keys(candidates, renamed_keys)
+                if renamed_packed is not None:
+                    packed = [renamed_keys[key] for key in renamed_packed]
             if packed is not None:
                 global_shape = tuple(int(size) for size in param.shape)
                 slices = (
@@ -1468,21 +1413,12 @@ def _load_sharded_weights_from_safetensors(model: nn.Module) -> None:
             )
             raise RuntimeError(msg)
         for live_name, buf in model.named_buffers():
-            buffer_candidates = checkpoint_key_candidates(live_name)
-            checkpoint_key = next(
-                (key for key in buffer_candidates if key in key_files),
-                None,
+            checkpoint_key, _ = match_checkpoint_key(
+                checkpoint_key_candidates(live_name),
+                key_files,
+                renamed_keys,
+                transform_groups,
             )
-            if checkpoint_key is None:
-                for candidate in buffer_candidates:
-                    for converted, _split in _iter_converted_checkpoint_keys(
-                        candidate, transform_groups
-                    ):
-                        if converted in key_files and converted != candidate:
-                            checkpoint_key = converted
-                            break
-                    if checkpoint_key is not None:
-                        break
             if checkpoint_key is None:
                 continue
             path = key_files[checkpoint_key]

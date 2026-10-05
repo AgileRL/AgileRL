@@ -1659,6 +1659,143 @@ class TestSafetensorsShardKeys:
         assert torch.equal(model.linear.weight.detach(), weight)
         assert torch.equal(model.input_min.detach(), floor)
 
+    def test_loads_a_converted_buffer_that_is_not_a_one_to_one_rename(
+        self, tmp_path, monkeypatch
+    ):
+        from transformers.conversion_mapping import Transpose, WeightConverter
+
+        from agilerl.distributed import fsdp as fsdp_mod
+
+        scale = torch.tensor([3.0, 4.0])
+        save_file(
+            {"old_scale": scale},
+            str(tmp_path / "model.safetensors"),
+        )
+
+        class Root(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.register_buffer("scale", torch.zeros(2))
+                self.config = PretrainedConfig(
+                    tie_word_embeddings=False, name_or_path=str(tmp_path)
+                )
+
+        monkeypatch.setattr(
+            fsdp_mod,
+            "_checkpoint_transform_groups",
+            lambda _model: [
+                (
+                    "",
+                    [
+                        # WeightConverter is not a one-to-one rename.
+                        WeightConverter(
+                            source_patterns="old_scale",
+                            target_patterns=["scale"],
+                            operations=[Transpose(0, 0)],
+                        )
+                    ],
+                )
+            ],
+        )
+        model = Root()
+
+        fsdp_mod._load_sharded_weights_from_safetensors(model)
+
+        assert torch.equal(model.scale.detach(), scale)
+
+    def test_loads_nemotron_h_backbone_keys_that_only_need_some_renames(self, tmp_path):
+        from agilerl.distributed.fsdp import _load_sharded_weights_from_safetensors
+
+        # Arrange
+        embeddings = torch.arange(8, dtype=torch.float32).reshape(4, 2)
+        norm = torch.tensor([3.0, 4.0])
+
+        class Body(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.embeddings = nn.Embedding(4, 2)
+                self.norm_f = nn.LayerNorm(2, bias=False)
+
+        class HFModel(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.model = Body()
+                self.config = PretrainedConfig(
+                    tie_word_embeddings=False,
+                    model_type="nemotron_h",
+                    name_or_path=str(tmp_path),
+                )
+
+        # The checkpoint needs nemotron_h's backbone -> model rename but not
+        # its embedding -> embeddings rename.
+        save_file(
+            {
+                "backbone.embeddings.weight": embeddings,
+                "backbone.norm_f.weight": norm,
+            },
+            str(tmp_path / "model.safetensors"),
+        )
+        model = HFModel()
+
+        # Act
+        _load_sharded_weights_from_safetensors(model)
+
+        # Assert
+        assert torch.equal(model.model.embeddings.weight.detach(), embeddings)
+        assert torch.equal(model.model.norm_f.weight.detach(), norm)
+
+    def test_loads_nemotron_h_packed_experts_from_renamed_backbone_keys(self, tmp_path):
+        from agilerl.distributed.fsdp import _load_sharded_weights_from_safetensors
+
+        # Arrange
+        experts = [torch.full((2, 3), float(index)) for index in range(3)]
+
+        class Experts(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.up_proj = nn.Parameter(torch.zeros(3, 2, 3))
+
+        class Mixer(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.experts = Experts()
+
+        class Layer(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.mixer = Mixer()
+
+        class Body(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.layers = nn.ModuleList([Layer()])
+
+        class HFModel(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.model = Body()
+                self.config = PretrainedConfig(
+                    tie_word_embeddings=False,
+                    model_type="nemotron_h",
+                    name_or_path=str(tmp_path),
+                )
+
+        save_file(
+            {
+                f"backbone.layers.0.mixer.experts.{index}.up_proj.weight": weight
+                for index, weight in enumerate(experts)
+            },
+            str(tmp_path / "model.safetensors"),
+        )
+        model = HFModel()
+
+        # Act
+        _load_sharded_weights_from_safetensors(model)
+
+        # Assert
+        loaded = model.model.layers[0].mixer.experts.up_proj.detach()
+        assert torch.equal(loaded, torch.stack(experts))
+
     def test_language_body_alias_uses_backbone_key(self):
         from agilerl.distributed.fsdp import checkpoint_key_candidates
 
@@ -2401,6 +2538,197 @@ class TestSafetensorsShardKeys:
         from agilerl.distributed.fsdp import _share_fsdp_comm_streams
 
         _share_fsdp_comm_streams(nn.Linear(2, 2))
+
+
+class TestMatchCheckpointKey:
+    def test_returns_a_direct_stored_key(self):
+        from agilerl.distributed.fsdp_meta import match_checkpoint_key
+
+        key, split = match_checkpoint_key(
+            ("scale", "alias.scale"),
+            {"scale": "shard.safetensors"},
+            {"scale": "old_scale"},
+            [],
+        )
+
+        assert key == "scale"
+        assert split is None
+
+    def test_returns_a_one_to_one_rename(self):
+        from agilerl.distributed.fsdp_meta import match_checkpoint_key
+
+        key, split = match_checkpoint_key(
+            ("scale",),
+            {"old_scale": "shard.safetensors"},
+            {"scale": "old_scale"},
+            [],
+        )
+
+        assert key == "old_scale"
+        assert split is None
+
+    def test_returns_a_converted_key_and_split_index(self):
+        from transformers.conversion_mapping import Chunk, WeightConverter
+
+        from agilerl.distributed.fsdp_meta import match_checkpoint_key
+
+        converter = WeightConverter(
+            source_patterns="qkv",
+            target_patterns=["query", "key", "value"],
+            operations=[Chunk(dim=0)],
+        )
+
+        key, split = match_checkpoint_key(
+            ("query",),
+            {"qkv": "shard.safetensors"},
+            {},
+            [("", [converter])],
+        )
+
+        assert key == "qkv"
+        assert split == 0
+
+    def test_converted_key_under_a_module_prefix(self):
+        from transformers.conversion_mapping import Chunk, WeightConverter
+
+        from agilerl.distributed.fsdp_meta import match_checkpoint_key
+
+        converter = WeightConverter(
+            source_patterns="qkv",
+            target_patterns=["query", "key", "value"],
+            operations=[Chunk(dim=0)],
+        )
+
+        key, split = match_checkpoint_key(
+            ("attention.query",),
+            {"attention.qkv": "shard.safetensors"},
+            {},
+            [("attention", [converter])],
+        )
+
+        assert key == "attention.qkv"
+        assert split == 0
+
+    def test_ignores_converters_under_a_different_prefix(self):
+        from transformers.conversion_mapping import Chunk, WeightConverter
+
+        from agilerl.distributed.fsdp_meta import match_checkpoint_key
+
+        converter = WeightConverter(
+            source_patterns="qkv",
+            target_patterns=["query", "key", "value"],
+            operations=[Chunk(dim=0)],
+        )
+
+        key, split = match_checkpoint_key(
+            ("query",),
+            {"qkv": "shard.safetensors"},
+            {},
+            [("attention", [converter])],
+        )
+
+        assert key is None
+        assert split is None
+
+    def test_skips_a_converter_that_does_not_rename_the_live_key(self):
+        from transformers.conversion_mapping import Chunk, WeightConverter
+
+        from agilerl.distributed.fsdp_meta import match_checkpoint_key
+
+        converter = WeightConverter(
+            source_patterns="qkv",
+            target_patterns=["query", "key", "value"],
+            operations=[Chunk(dim=0)],
+        )
+
+        key, split = match_checkpoint_key(
+            ("unrelated",),
+            {"qkv": "shard.safetensors"},
+            {},
+            [("", [converter])],
+        )
+
+        assert key is None
+        assert split is None
+
+    def test_returns_none_when_no_candidate_matches(self):
+        from agilerl.distributed.fsdp_meta import match_checkpoint_key
+
+        key, split = match_checkpoint_key(("scale",), {}, {}, [])
+
+        assert key is None
+        assert split is None
+
+
+class TestRenamedCheckpointKeys:
+    def test_maps_live_names_through_matching_renames(self):
+        from transformers.conversion_mapping import WeightRenaming
+
+        from agilerl.distributed.fsdp_meta import renamed_checkpoint_keys
+
+        mapped = renamed_checkpoint_keys(
+            ["backbone.embeddings.weight", "backbone.norm.weight"],
+            [("", [WeightRenaming("backbone", "model")])],
+        )
+
+        assert mapped == {
+            "model.embeddings.weight": "backbone.embeddings.weight",
+            "model.norm.weight": "backbone.norm.weight",
+        }
+
+    def test_applies_renames_under_a_module_prefix(self):
+        from transformers.conversion_mapping import WeightRenaming
+
+        from agilerl.distributed.fsdp_meta import renamed_checkpoint_keys
+
+        mapped = renamed_checkpoint_keys(
+            ["vision.backbone.w", "language.w"],
+            [("vision", [WeightRenaming("backbone", "model")])],
+        )
+
+        assert mapped == {"vision.model.w": "vision.backbone.w"}
+
+    def test_skips_packing_converters(self):
+        from transformers.conversion_mapping import Chunk, WeightConverter
+
+        from agilerl.distributed.fsdp_meta import renamed_checkpoint_keys
+
+        mapped = renamed_checkpoint_keys(
+            ["qkv.weight"],
+            [
+                (
+                    "",
+                    [
+                        WeightConverter(
+                            source_patterns="qkv",
+                            target_patterns=["query", "key", "value"],
+                            operations=[Chunk(dim=0)],
+                        )
+                    ],
+                )
+            ],
+        )
+
+        assert mapped == {}
+
+    def test_two_stored_keys_renaming_to_one_live_name_raise(self):
+        from transformers.conversion_mapping import WeightRenaming
+
+        from agilerl.distributed.fsdp_meta import renamed_checkpoint_keys
+
+        with pytest.raises(ValueError, match=r"both rename to 'model\.norm\.weight'"):
+            renamed_checkpoint_keys(
+                ["backbone.norm.weight", "trunk.norm.weight"],
+                [
+                    (
+                        "",
+                        [
+                            WeightRenaming("backbone", "model"),
+                            WeightRenaming("trunk", "model"),
+                        ],
+                    )
+                ],
+            )
 
 
 def _make_llm_agent_for_ckpt() -> MagicMock:
