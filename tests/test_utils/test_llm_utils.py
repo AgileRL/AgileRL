@@ -3180,6 +3180,38 @@ class TestPeftLoraKeyHelpers:
             == "language_model.model.layers.0.self_attn.q_proj.lora_A.weight"
         )
 
+    def test_remap_qwen_flat_language_layers_to_vllm_nesting(self):
+        assert (
+            remap_peft_lora_key_for_vllm(
+                "model.layers.0.self_attn.q_proj.lora_A.weight",
+                model_type="qwen3_5_text",
+            )
+            == "model.language_model.model.layers.0.self_attn.q_proj.lora_A.weight"
+        )
+
+    def test_remap_qwen_nested_language_layers_to_vllm_nesting(self):
+        assert (
+            remap_peft_lora_key_for_vllm(
+                "model.language_model.layers.0.mlp.down_proj.lora_B.weight",
+                model_type="qwen3_5",
+            )
+            == "model.language_model.model.layers.0.mlp.down_proj.lora_B.weight"
+        )
+
+    def test_remap_qwen_nesting_skipped_for_other_families(self):
+        key = "model.layers.0.self_attn.q_proj.lora_A.weight"
+        assert remap_peft_lora_key_for_vllm(key, model_type="llama") == key
+        assert remap_peft_lora_key_for_vllm(key) == key
+
+    def test_remap_qwen_nesting_skipped_when_stripping(self):
+        key = "model.layers.0.self_attn.q_proj.lora_A.weight"
+        assert (
+            remap_peft_lora_key_for_vllm(
+                key, strip_multimodal_towers=True, model_type="qwen3_5"
+            )
+            == key
+        )
+
     def test_remap_passthrough_language_backbone_without_prefix(self):
         key = "backbone.layers.0.mixer.in_proj.lora_A.weight"
         assert remap_peft_lora_key_for_vllm(key) == key

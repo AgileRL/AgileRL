@@ -62,6 +62,10 @@ class TestFamilyRuntimeConfigs:
             "gemma4",
             "gemma4_text",
             "gpt_oss",
+            "qwen3_5",
+            "qwen3_5_text",
+            "qwen3_5_moe",
+            "qwen3_5_moe_text",
         }
 
     def test_nemotron_h_omni_keeps_nemotron_h_runtime_and_adds_language_tower(
@@ -126,6 +130,12 @@ class TestFamilyRuntimeConfigs:
         assert (
             FAMILY_RUNTIME_CONFIGS["gpt_oss"].trainer.model_dump(exclude_none=True)
             == FLEX_TRAINER_KWARGS
+        )
+
+    def test_qwen3_5_lookup(self) -> None:
+        assert (
+            FAMILY_RUNTIME_CONFIGS["qwen3_5"].language_tower.lora_key_prefix
+            == "model.language_model.model."
         )
 
     def test_catalog_excludes_gemma_and_gemma2(self) -> None:
