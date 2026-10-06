@@ -32,6 +32,7 @@ from agilerl.distributed.fsdp import (
     set_full_model_state_dict,
 )
 from agilerl.distributed.process import raise_on_any_rank, sync_grads
+from agilerl.utils.phase_timer import PhaseTimer
 
 if TYPE_CHECKING:
     from agilerl.algorithms.core.optimizer_wrapper import OptimizerWrapper
@@ -274,7 +275,26 @@ def _step_result(
 class BaseRuntime(ABC):
     """Behaviors that differ between unsharded and FSDP2-sharded actors."""
 
-    _micro_batch_count: int = 0
+    # Backward calls since the last optimizer step.
+    _pending_micro_batches: int = 0
+
+    def __init__(self) -> None:
+        """Create the phase timer :meth:`backward` marks while a learn window is open."""
+        self.phase_timer = PhaseTimer()
+
+    def _count_micro_batch(self, gradient_accumulation_steps: int) -> bool:
+        """Count one backward call; return whether it steps the optimizer.
+
+        :param gradient_accumulation_steps: Micro-batches per optimizer step.
+        :type gradient_accumulation_steps: int
+        :return: Whether this micro-batch closes the accumulation window.
+        :rtype: bool
+        """
+        self._pending_micro_batches += 1
+        if self._pending_micro_batches < gradient_accumulation_steps:
+            return False
+        self._pending_micro_batches = 0
+        return True
 
     @property
     @abstractmethod
@@ -594,20 +614,23 @@ class DPRuntime(BaseRuntime):
         lr_scheduler: SequentialLR | None = None,
     ) -> OptimizerStep | None:
         """Average LoRA grads across ranks when unsharded."""
-        self._micro_batch_count += 1
+        is_step_boundary = self._count_micro_batch(gradient_accumulation_steps)
         if gradient_accumulation_steps > 1:
             loss = loss / gradient_accumulation_steps
         loss.backward()
-        if self._micro_batch_count % gradient_accumulation_steps != 0:
+        self.phase_timer.mark("backward")
+        if not is_step_boundary:
             return None
 
         inner = optimizer._single_optimizer()
         sync_grads([param for group in inner.param_groups for param in group["params"]])
+        self.phase_timer.mark("grad_sync")
         grad_norm_pre, grad_norm_post = clip_param_groups(
             inner.param_groups, max_grad_norm, clip_grad_norm_
         )
         optimizer.step()
         optimizer.zero_grad()
+        self.phase_timer.mark("optim")
         return _step_result(grad_norm_pre, grad_norm_post, lr_scheduler)
 
 
@@ -619,6 +642,7 @@ class FSDPRuntime(BaseRuntime):
 
         :param config: The FSDP configuration.
         """
+        super().__init__()
         self.config = config
 
     @property
@@ -817,8 +841,7 @@ class FSDPRuntime(BaseRuntime):
         FSDP2 reduce-scatters sharded DTensors. Replicated params
         (``ignored_params``, LoRA) need an explicit all-reduce.
         """
-        self._micro_batch_count += 1
-        is_step_boundary = self._micro_batch_count % gradient_accumulation_steps == 0
+        is_step_boundary = self._count_micro_batch(gradient_accumulation_steps)
 
         if self.config.defer_grad_sync:
             if not isinstance(actor, FSDPModule):
@@ -829,6 +852,7 @@ class FSDPRuntime(BaseRuntime):
         if gradient_accumulation_steps > 1:
             loss = loss / gradient_accumulation_steps
         loss.backward()
+        self.phase_timer.mark("backward")
         if not is_step_boundary:
             return None
 
@@ -841,9 +865,11 @@ class FSDPRuntime(BaseRuntime):
                 if not isinstance(param, DTensor)
             ]
         )
+        self.phase_timer.mark("grad_sync")
         grad_norm_pre, grad_norm_post = clip_param_groups(
             inner.param_groups, max_grad_norm, clip_param_group_grad_norm_
         )
         optimizer.step()
         optimizer.zero_grad()
+        self.phase_timer.mark("optim")
         return _step_result(grad_norm_pre, grad_norm_post, lr_scheduler)

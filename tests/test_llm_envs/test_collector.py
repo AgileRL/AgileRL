@@ -6,12 +6,17 @@
 from __future__ import annotations
 
 import threading
+from collections import Counter
 from collections.abc import Iterator
+from contextlib import contextmanager
+from functools import partial
 
 import pytest
 import torch
 
+from agilerl.components.llm_rollout_data import EpisodeSegments
 from agilerl.llm_envs import RolloutCollector
+from agilerl.llm_envs.task_assigner import _mix_seed
 from tests.helpers.rollout_doubles import RolloutEnvDoubleMixin
 
 
@@ -231,6 +236,8 @@ class _PlainEnv(RolloutEnvDoubleMixin):
             torch.zeros(1, 2, dtype=torch.long),
             torch.ones(1, dtype=torch.float32),
             None,
+            None,
+            None,
         )
 
     def reset(self, seed: int | None = None, *, row_index: int | None = None):
@@ -347,8 +354,57 @@ class TestCollectorInvariantGuards:
             collector.close()
 
 
+def _segmented_episode_data() -> tuple[
+    torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, None, None, EpisodeSegments
+]:
+    """A two-segment episode row: segments of 3 and 2 tokens."""
+    return (
+        torch.ones(1, 5, dtype=torch.long),
+        torch.tensor([[True, True, False, True]]),
+        torch.tensor([[0, 0, -1, 1]]),
+        torch.ones(2, dtype=torch.float32),
+        None,
+        None,
+        EpisodeSegments(token_lengths=torch.tensor([3, 2])),
+    )
+
+
+class TestRolloutCollectorGetTrajectories:
+    def test_rejects_an_episode_whose_context_restarted(self) -> None:
+        # Arrange
+        collector = _plain_collector()
+        try:
+            collector.reset()
+            collector.envs[0].episode_data = _segmented_episode_data()
+
+            # Act / Assert
+            with pytest.raises(ValueError, match="per-episode API"):
+                collector.get_trajectories()
+        finally:
+            collector.close()
+
+
+class TestRolloutCollectorGetEpisodeData:
+    def test_returns_the_segment_layout_and_releases_the_slot(self) -> None:
+        # Arrange
+        collector = _plain_collector()
+        try:
+            collector.reset_episode("ep-1")
+            collector.envs[0].episode_data = _segmented_episode_data()
+
+            # Act
+            *_tensors, segments = collector.get_episode_data("ep-1")
+
+            # Assert
+            assert segments is not None
+            assert segments.token_lengths.tolist() == [3, 2]
+            assert collector.active_episode_count() == 0
+        finally:
+            collector.close()
+
+
 class TestEpisodeSeeding:
-    def test_an_explicit_seed_without_a_base_seed_leaves_the_env_unseeded(
+    def test_a_group_seed_without_a_base_seed_leaves_the_env_unseeded(
         self,
     ) -> None:
         """No base seed means no reproducible stream to offset into.
@@ -358,18 +414,286 @@ class TestEpisodeSeeding:
         """
         collector = _plain_collector(base_seed=None)
         try:
-            collector.reset_episode("ep-1", 0, seed=7)
+            task = collector.assign_group_task(7)
+            collector.reset_episode("ep-1", task=task)
 
+            assert task == (None, None)
             assert collector.envs[0].seen_seed is None
         finally:
             collector.close()
 
-    def test_an_explicit_seed_with_a_base_seed_mixes_both(self) -> None:
+    def test_a_group_seed_with_a_base_seed_mixes_both(self) -> None:
         collector = _plain_collector(base_seed=100)
         try:
-            collector.reset_episode("ep-1", 0, seed=7)
+            collector.reset_episode("ep-1", task=collector.assign_group_task(7))
 
-            assert collector.envs[0].seen_seed is not None
+            assert collector.envs[0].seen_seed == _mix_seed(107)
+        finally:
+            collector.close()
+
+
+class _RowEnv(_PlainEnv):
+    """Slot env over an 8-row task list; every slot logs its reset rows to ``resets``."""
+
+    dataset_size = 8
+
+    def __init__(self, resets: list[int | None]) -> None:
+        super().__init__()
+        self.resets = resets
+
+    def reset(self, seed: int | None = None, *, row_index: int | None = None):
+        self.resets.append(row_index)
+        return super().reset(seed, row_index=row_index)
+
+
+def _start_group(collector: RolloutCollector, group_seed: int) -> list[str]:
+    """Reset both members of one group at a fresh task; return their episode ids."""
+    task = collector.assign_group_task(group_seed)
+    episode_ids = [f"g{group_seed}-m{member}" for member in range(2)]
+    for episode_id in episode_ids:
+        collector.reset_episode(episode_id, task=task)
+    return episode_ids
+
+
+class TestRolloutCollectorAssignGroupTask:
+    def test_overlapping_groups_cover_every_row_once_per_cycle(self) -> None:
+        # Arrange
+        resets: list[int | None] = []
+        collector = RolloutCollector(
+            env_factory=partial(_RowEnv, resets),
+            batch_size=8,
+            group_size=2,
+            base_seed=3,
+        )
+        try:
+            # Act: each group starts while every earlier group is still live.
+            first_cycle = [_start_group(collector, seed) for seed in range(8)]
+            live_after_first_cycle = collector.active_episode_count()
+            for episode_ids in first_cycle:
+                for episode_id in episode_ids:
+                    collector.finalize_episode(episode_id)
+            for seed in range(8, 16):
+                _start_group(collector, seed)
+
+            # Assert
+            member_rows = [resets[i : i + 2] for i in range(0, len(resets), 2)]
+            group_rows = [rows[0] for rows in member_rows]
+            assert live_after_first_cycle == 16
+            assert len(member_rows) == 16
+            assert all(rows[0] == rows[1] for rows in member_rows)
+            assert sorted(group_rows[:8]) == list(range(8))
+            assert sorted(group_rows[8:]) == list(range(8))
+        finally:
+            collector.close()
+
+    def test_adaptive_sampling_favours_rows_whose_groups_were_informative(
+        self,
+    ) -> None:
+        # Arrange
+        resets: list[int | None] = []
+        collector = RolloutCollector(
+            env_factory=partial(_RowEnv, resets),
+            batch_size=8,
+            group_size=2,
+            base_seed=3,
+            adaptive_task_sampling=True,
+        )
+        try:
+            for seed in range(8):
+                for episode_id in _start_group(collector, seed):
+                    collector.finalize_episode(episode_id)
+            for row in range(8):
+                for _ in range(20):
+                    collector.record_group_outcome(row, informative=row == 5)
+
+            # Act
+            rows = Counter(
+                collector.assign_group_task(seed)[1] for seed in range(8, 808)
+            )
+
+            # Assert
+            weights = {stats.row: stats.weight for stats in collector.task_row_stats()}
+            assert rows[5] > 400
+            assert all(0 < rows[row] < 80 for row in range(8) if row != 5)
+            assert weights[5] > 0.9
+            assert all(weights[row] < 0.09 for row in range(8) if row != 5)
+        finally:
+            collector.close()
+
+    def test_task_row_stats_is_empty_before_the_first_reset(self) -> None:
+        collector = RolloutCollector(
+            env_factory=partial(_RowEnv, []),
+            batch_size=1,
+            group_size=1,
+            adaptive_task_sampling=True,
+        )
+
+        assert collector.task_row_stats() == []
+
+    def test_returns_the_mixed_seed_and_no_row_for_a_procedural_env(self) -> None:
+        collector = _plain_collector(base_seed=100)
+        try:
+            task = collector.assign_group_task(7)
+
+            assert task == (_mix_seed(107), None)
+        finally:
+            collector.close()
+
+    def test_reset_episode_rejects_a_logical_slot_with_a_task(self) -> None:
+        collector = _plain_collector(base_seed=100)
+        try:
+            task = collector.assign_group_task(7)
+
+            with pytest.raises(ValueError, match="logical_slot or task, not both"):
+                collector.reset_episode("ep-1", 0, task=task)
+            assert collector.active_episode_count() == 0
+        finally:
+            collector.close()
+
+
+def _adaptive_row_collector() -> RolloutCollector:
+    return RolloutCollector(
+        env_factory=partial(_RowEnv, []),
+        batch_size=1,
+        group_size=1,
+        base_seed=3,
+        adaptive_task_sampling=True,
+    )
+
+
+class TestRolloutCollectorRecordGroupOutcome:
+    def test_before_any_group_task_raises(self) -> None:
+        collector = _adaptive_row_collector()
+        try:
+            with pytest.raises(
+                RuntimeError,
+                match="a finished group implies assign_group_task built the assigner",
+            ):
+                collector.record_group_outcome(0, informative=True)
+        finally:
+            collector.close()
+
+
+class TestRolloutCollectorTaskSamplerState:
+    def test_reports_the_outcomes_fed_back_by_finished_groups(self) -> None:
+        # Arrange
+        collector = _adaptive_row_collector()
+        try:
+            collector.assign_group_task(0)
+
+            # Act
+            collector.record_group_outcome(5, informative=True)
+
+            # Assert
+            assert collector.task_sampler_state() == [
+                {"row": 5, "informative": 1.0, "observed": 1.0}
+            ]
+        finally:
+            collector.close()
+
+    def test_is_empty_before_the_first_reset(self) -> None:
+        assert _adaptive_row_collector().task_sampler_state() == []
+
+
+class TestRolloutCollectorLoadTaskSamplerState:
+    def test_restores_counts_before_the_first_reset(self) -> None:
+        # Arrange
+        state = [
+            {"row": 2, "informative": 0.0, "observed": 6.0},
+            {"row": 5, "informative": 6.0, "observed": 6.0},
+        ]
+        collector = _adaptive_row_collector()
+        try:
+            # Act
+            collector.load_task_sampler_state(state)
+
+            # Assert
+            weights = {stats.row: stats.weight for stats in collector.task_row_stats()}
+            rows = Counter(collector.assign_group_task(seed)[1] for seed in range(400))
+            assert collector.task_sampler_state() == state
+            assert weights[2] == 1 / 8
+            assert weights[5] == 7 / 8
+            assert rows[5] > 3 * rows[2]
+        finally:
+            collector.close()
+
+
+class _SplitEnv(_PlainEnv):
+    """Slot env with a 10-row training split and a 4-row held-out split."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.in_eval = False
+        self.resets: list[tuple[int | None, int | None, bool]] = []
+
+    @property
+    def dataset_size(self) -> int:
+        return 4 if self.in_eval else 10
+
+    @contextmanager
+    def eval_mode(self) -> Iterator[None]:
+        self.in_eval = True
+        try:
+            yield
+        finally:
+            self.in_eval = False
+
+    def reset(self, seed: int | None = None, *, row_index: int | None = None):
+        self.resets.append((seed, row_index, self.in_eval))
+        return super().reset(seed, row_index=row_index)
+
+
+def _split_collector() -> RolloutCollector:
+    return RolloutCollector(env_factory=_SplitEnv, batch_size=1, group_size=1)
+
+
+class TestRolloutCollectorResetEvalEpisode:
+    def test_resets_the_held_out_row_in_eval_mode(self) -> None:
+        collector = _split_collector()
+        try:
+            prompt, _info = collector.reset_eval_episode("eval-1", 2)
+
+            assert collector.envs[0].resets == [(None, 2, True)]
+            assert torch.equal(prompt["input_ids"], torch.ones(1, 3, dtype=torch.long))
+            assert collector.active_episode_ids() == ["eval-1"]
+        finally:
+            collector.close()
+
+    def test_a_later_training_reset_uses_the_training_split(self) -> None:
+        collector = _split_collector()
+        try:
+            collector.reset_eval_episode("eval-1", 0)
+            collector.finalize_episode("eval-1")
+
+            collector.reset_episode("ep-1", 0)
+
+            assert [in_eval for _, _, in_eval in collector.envs[0].resets] == [
+                True,
+                False,
+            ]
+            assert collector.envs[0].dataset_size == 10
+        finally:
+            collector.close()
+
+
+class TestRolloutCollectorEvalTaskCount:
+    def test_reports_the_held_out_row_count(self) -> None:
+        collector = _split_collector()
+        try:
+            count = collector.eval_task_count()
+
+            assert count == 4
+            assert collector.envs[0].dataset_size == 10
+        finally:
+            collector.close()
+
+    def test_rejects_while_an_episode_is_active(self) -> None:
+        collector = _split_collector()
+        try:
+            collector.reset_episode("ep-1", 0)
+
+            with pytest.raises(RuntimeError, match="episodes are still active"):
+                collector.eval_task_count()
         finally:
             collector.close()
 

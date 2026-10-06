@@ -148,7 +148,7 @@ def test_step_env_carries_the_role_alongside_the_text() -> None:
         apply_chat_template=False,
     )
     harness.reset()
-    text, role, reward, terminated, truncated, _info = harness._step_env("go")
+    text, role, _image, reward, terminated, truncated, _info = harness._step_env("go")
     assert (text, role, reward, terminated, truncated) == (
         "tool said 42",
         "tool",
@@ -226,7 +226,7 @@ def test_system_prompt_leads_the_initial_prompt() -> None:
     harness.reset()
     assert tokenizer.messages[0] == [
         {"role": "system", "content": "be terse"},
-        {"role": "user", "content": "start"},
+        {"role": "user", "content": "start\nbe terse"},
     ]
 
 
@@ -280,7 +280,7 @@ def test_from_spec_passes_env_config_system_prompt_to_the_harness() -> None:
     harness.reset()
     assert tokenizer.messages[0] == [
         {"role": "system", "content": "be terse"},
-        {"role": "user", "content": "start"},
+        {"role": "user", "content": "start\nbe terse"},
     ]
 
 
@@ -337,5 +337,5 @@ def test_reset_info_system_prompt_is_adopted_when_the_harness_has_none() -> None
     harness.reset()
     assert tokenizer.messages[0] == [
         {"role": "system", "content": "from info"},
-        {"role": "user", "content": "start"},
+        {"role": "user", "content": "start\nfrom info"},
     ]

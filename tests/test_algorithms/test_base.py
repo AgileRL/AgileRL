@@ -1169,6 +1169,27 @@ class TestRLAlgorithmLoadCheckpoint:
         new_agent.load_checkpoint(checkpoint_path)
         assert new_agent.device == "cpu"
 
+    def test_load_checkpoint_keeps_live_metrics_tracker(
+        self, tmpdir, vector_space, discrete_space
+    ):
+        # Arrange
+        agent = DummyRLAlgorithm(vector_space, discrete_space, index=0)
+        agent.steps = 42
+        checkpoint_path = Path(tmpdir) / "checkpoint.pth"
+        agent.save_checkpoint(checkpoint_path)
+        new_agent = DummyRLAlgorithm(vector_space, discrete_space, index=0)
+        tracker = new_agent.metrics
+        new_agent.metrics.register("added_metric")
+
+        # Act
+        new_agent.load_checkpoint(checkpoint_path)
+        new_agent.metrics.log("added_metric", 1.0)
+
+        # Assert
+        assert new_agent.metrics is tracker
+        assert new_agent.metrics.get_mean("added_metric") == 1.0
+        assert new_agent.steps == 42
+
     def test_load_pre_v2_8_checkpoint_with_list_steps(
         self, tmpdir, vector_space, discrete_space
     ):
@@ -1478,6 +1499,24 @@ print("SUCCESS: GPU-saved multi-agent checkpoint loaded via load_checkpoint in n
 
 
 class TestRLAlgorithmLoad:
+    def test_load_builds_a_fresh_metrics_tracker(
+        self, tmpdir, vector_space, discrete_space
+    ):
+        # Arrange
+        agent = DummyRLAlgorithm(vector_space, discrete_space, index=0)
+        agent.metrics.register("checkpoint_only_metric")
+        agent.steps = 42
+        checkpoint_path = Path(tmpdir) / "checkpoint.pth"
+        agent.save_checkpoint(checkpoint_path)
+
+        # Act
+        new_agent = DummyRLAlgorithm.load(checkpoint_path, device="cpu")
+
+        # Assert
+        assert new_agent.steps == 42
+        with pytest.raises(KeyError, match="checkpoint_only_metric"):
+            new_agent.metrics.log("checkpoint_only_metric", 1.0)
+
     @pytest.mark.parametrize(
         ("device", "with_hp_config"), [("cpu", False), ("cpu", True)]
     )

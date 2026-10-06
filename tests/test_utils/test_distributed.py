@@ -33,6 +33,7 @@ from agilerl.distributed import (
     aggregate_metrics_dict,
     all_ranks,
     allreduce_minmax_int,
+    allreduce_sum_ints,
     any_rank,
     apply_fsdp2,
     barrier,
@@ -457,6 +458,29 @@ class TestAllreduceMinmaxInt:
 
         # Assert
         assert bounds == (3, 9)
+
+
+class TestAllreduceSumInts:
+    def test_identity_without_process_group(self):
+        assert allreduce_sum_ints([3, 0, 2]) == [3, 0, 2]
+
+    def test_sums_each_value_across_ranks(self):
+        # Arrange — a peer holds [4, 1]
+        def fake_sum(t: torch.Tensor, op: object) -> None:
+            assert op == dist.ReduceOp.SUM
+            t.add_(torch.tensor([4, 1]))
+
+        # Act
+        with (
+            patch("agilerl.distributed.process.is_distributed", return_value=True),
+            patch("agilerl.distributed.process.dist.get_world_size", return_value=2),
+            patch("agilerl.distributed.process.resolve_device", return_value="cpu"),
+            patch("agilerl.distributed.process.dist.all_reduce", side_effect=fake_sum),
+        ):
+            sums = allreduce_sum_ints([2, 3])
+
+        # Assert
+        assert sums == [6, 4]
 
 
 class TestAnyRank:
@@ -1504,6 +1528,46 @@ class TestDPRuntimeBackward:
             lr=pytest.approx(0.05),
         )
         assert model.weight.grad is None
+
+    def test_open_phase_timer_records_backward_sync_and_optim_phases(self):
+        # Arrange
+        model = nn.Linear(2, 1, bias=False)
+        inner = torch.optim.SGD(model.parameters(), lr=0.1)
+        optimizer = MagicMock()
+        optimizer._single_optimizer.return_value = inner
+        runtime = DPRuntime()
+        x = torch.ones(1, 2)
+
+        # Act
+        runtime.phase_timer.start("cpu")
+        runtime.backward(model(x).sum(), optimizer, 2, model)
+        accumulate_only = set(runtime.phase_timer.stop())
+        runtime.phase_timer.start("cpu")
+        runtime.backward(model(x).sum(), optimizer, 2, model)
+        stepped = runtime.phase_timer.stop()
+
+        # Assert
+        assert accumulate_only == {"backward"}
+        assert set(stepped) == {"backward", "grad_sync", "optim"}
+        assert all(seconds >= 0.0 for seconds in stepped.values())
+
+    def test_each_window_counts_its_own_accumulation_steps(self):
+        # Arrange: one 3-step window, then 2-step windows.
+        model = nn.Linear(2, 1, bias=False)
+        inner = torch.optim.SGD(model.parameters(), lr=0.1)
+        optimizer = MagicMock()
+        optimizer._single_optimizer.return_value = inner
+        runtime = DPRuntime()
+        x = torch.ones(1, 2)
+
+        # Act
+        stepped = [
+            runtime.backward(model(x).sum(), optimizer, steps, model) is not None
+            for steps in (3, 3, 3, 2, 2, 2, 2)
+        ]
+
+        # Assert
+        assert stepped == [False, False, True, False, True, False, True]
 
 
 class TestFSDPRuntimeBackward:

@@ -255,9 +255,11 @@ class DPO(LLMAlgorithm[PreferencePrompts]):
         :type experiences: PreferencePrompts
         :param training: Whether the agent is training or not
         :type training: bool
-        :return: Dict with keys ``loss``, ``chosen_reward``, ``rejected_reward``.
+        :return: Dict with keys ``loss``, ``chosen_reward``, ``rejected_reward``
+            and ``learn_phase_<phase>_s`` wall seconds.
         :rtype: dict[str, float]
         """
+        phase_timer = self._start_learn_phases()
         gc.collect()
         torch.cuda.empty_cache()
         if torch.backends.mps.is_available():
@@ -299,6 +301,7 @@ class DPO(LLMAlgorithm[PreferencePrompts]):
             "rejected_reward": 0.0,
         }
         ref_rejected_log_probs, ref_chosen_log_probs = None, None
+        phase_timer.mark("prepare")
         if not self.use_liger_loss:
             with torch.no_grad():
                 ref_rejected_log_probs = self._get_logprobs(
@@ -315,12 +318,14 @@ class DPO(LLMAlgorithm[PreferencePrompts]):
                     eval_mode=True,
                     attention_mask=chosen_attention_mask,
                 )
+            phase_timer.mark("no_grad_forward")
 
         for _ in range(self.update_epochs):
             for start in range(0, num_samples, batch_size):
                 minibatch_idxs = batch_idxs[
                     start : min((start + batch_size), num_samples)
                 ]
+                phase_timer.mark("other")
                 loss, chosen_reward, rejected_reward = self._dpo_loss(
                     batch_size,
                     minibatch_idxs,
@@ -334,6 +339,7 @@ class DPO(LLMAlgorithm[PreferencePrompts]):
                     ref_chosen_log_probs,
                     training,
                 )
+                phase_timer.mark("forward")
                 if training:
                     self._raise_if_loss_not_finite_on_any_rank(loss)
                     self._backward_pass(loss)
@@ -359,7 +365,11 @@ class DPO(LLMAlgorithm[PreferencePrompts]):
                 "reward_margin", agg["chosen_reward"] - agg["rejected_reward"]
             )
 
-        return learn_metrics
+        phase_seconds = self._learn_phase_seconds()
+        if training:
+            for key, value in phase_seconds.items():
+                self.metrics.log(key, value)
+        return {**learn_metrics, **phase_seconds}
 
     def _dpo_loss(
         self,

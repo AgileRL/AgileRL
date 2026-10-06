@@ -195,6 +195,7 @@ class _Stub:
         self.activation_offload = activation_offload
         self.gradient_accumulation_steps = accumulation_steps
         self._window_action_tokens = window_tokens
+        self._segment_accumulation_steps = None
         self.lm_head = lm_head or torch.nn.Linear(HIDDEN, VOCAB, bias=False)
         self.hidden: torch.Tensor | None = None
         self.actor: Any = _CallableActor(self)
@@ -471,17 +472,21 @@ class TestWindowNormalizedReduction:
         with pytest.raises(RuntimeError, match="no recorded window action-token"):
             algo._reduce_masked_loss(torch.zeros(mask.shape), mask)
 
-    def test_zero_window_token_count_raises(self) -> None:
-        mask = _mask_of_lengths([4], 8)
+    def test_window_without_action_tokens_gives_zero_shares(self) -> None:
+        mask = torch.zeros(2, 8)
         algo = _Stub(accumulation_steps=4, window_tokens=0)
-        with pytest.raises(RuntimeError, match="non-positive count"):
-            algo._reduce_masked_loss(torch.zeros(mask.shape), mask)
 
-    def test_empty_micro_batch_without_accumulation_raises(self) -> None:
+        shares = algo._reduce_masked_loss(torch.ones(mask.shape), mask)
+
+        assert shares.tolist() == [0.0, 0.0]
+
+    def test_empty_micro_batch_without_accumulation_gives_zero_shares(self) -> None:
         mask = torch.zeros(1, 8)
         algo = _Stub(accumulation_steps=1)
-        with pytest.raises(RuntimeError, match="action-token count is zero"):
-            algo._reduce_masked_loss(torch.zeros(mask.shape), mask)
+
+        shares = algo._reduce_masked_loss(torch.ones(mask.shape), mask)
+
+        assert shares.tolist() == [0.0]
 
 
 class TestAccumulationSteps:

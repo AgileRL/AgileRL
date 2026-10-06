@@ -241,10 +241,11 @@ class SFT(LLMAlgorithm[SFTPrompts]):
         :type experiences: SFTPrompts
         :param training: When ``False`` the backward pass is skipped (eval mode).
         :type training: bool
-        :return: ``(loss, perplexity)`` averaged over all samples in
-            the batch.
-        :rtype: tuple[float, float]
+        :return: ``loss`` and ``perplexity`` averaged over all samples in
+            the batch, and ``learn_phase_<phase>_s`` wall seconds.
+        :rtype: dict[str, float]
         """
+        phase_timer = self._start_learn_phases()
         input_ids = experiences["input_ids"]
         attention_mask = experiences["attention_mask"]
         # Check first that all tensors have the same max length before calculating the masks
@@ -277,16 +278,19 @@ class SFT(LLMAlgorithm[SFTPrompts]):
             "perplexity": 0.0,
         }
 
+        phase_timer.mark("prepare")
         for _ in range(self.update_epochs):
             for start in range(0, num_samples, micro_bs):
                 end = min(start + micro_bs, num_samples)
                 idxs = batch_idxs[start:end]
+                phase_timer.mark("other")
                 loss = self._sft_loss(
                     input_ids[idxs].to(self.device),
                     attention_mask[idxs].to(self.device),
                     labels[idxs].to(self.device),
                     training=training,
                 )
+                phase_timer.mark("forward")
                 if training:
                     self._raise_if_loss_not_finite_on_any_rank(loss)
                     self._backward_pass(loss)
@@ -303,11 +307,14 @@ class SFT(LLMAlgorithm[SFTPrompts]):
 
         learn_metrics = aggregate_metrics_dict(averaged_metrics)
 
+        phase_seconds = self._learn_phase_seconds()
         if training:
             self.metrics.log("loss", learn_metrics["loss"])
             self.metrics.log("perplexity", learn_metrics["perplexity"])
+            for key, value in phase_seconds.items():
+                self.metrics.log(key, value)
 
-        return learn_metrics
+        return {**learn_metrics, **phase_seconds}
 
     def _sft_loss(
         self,

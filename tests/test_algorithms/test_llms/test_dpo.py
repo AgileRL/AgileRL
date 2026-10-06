@@ -24,6 +24,7 @@ from agilerl.algorithms.core.base import (
 from agilerl.algorithms.dpo import DPO
 from agilerl.distributed import FSDPConfig, resolve_device
 from agilerl.llm_envs import DatasetEnv
+from agilerl.utils.llm_utils import LEARN_PHASE_METRIC_NAMES
 from tests import TINY_LLM_FIXTURE_PATH
 from tests.test_algorithms.test_llms.llm_helpers import create_module
 
@@ -934,4 +935,31 @@ class TestDPOLearnMpsCacheClear:
                 mock_empty_cache.assert_called()
         finally:
             dpo.clean_up()
+        dpo.clean_up()
+
+
+class TestDPOLearnPhaseTimings:
+    def test_reports_and_logs_every_learn_phase(self) -> None:
+        # Arrange
+        dpo = _make_cpu_dpo_for_branch_tests()
+        generator = torch.Generator().manual_seed(0)
+        experiences = {
+            "chosen_input_ids": torch.randint(0, 99, (4, 6), generator=generator),
+            "rejected_input_ids": torch.randint(0, 99, (4, 6), generator=generator),
+            "chosen_attention_mask": torch.ones(4, 6, dtype=torch.long),
+            "rejected_attention_mask": torch.ones(4, 6, dtype=torch.long),
+            "prompt_lengths": [2, 2, 2, 2],
+        }
+
+        # Act
+        metrics = dpo.learn(experiences)
+
+        # Assert
+        assert set(LEARN_PHASE_METRIC_NAMES) <= set(metrics)
+        assert metrics["learn_phase_no_grad_forward_s"] > 0.0
+        assert metrics["learn_phase_forward_s"] > 0.0
+        assert dpo.metrics.get_mean("learn_phase_forward_s") == pytest.approx(
+            metrics["learn_phase_forward_s"]
+        )
+        assert dpo.shard_runtime.phase_timer.marks is None
         dpo.clean_up()

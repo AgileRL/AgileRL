@@ -71,7 +71,11 @@ from agilerl.algorithms.core.base import (
     get_optimizer_cls,
 )
 from agilerl.algorithms.core.optimizer_wrapper import OptimizerWrapper
-from agilerl.algorithms.core.registry import NetworkGroup
+from agilerl.algorithms.core.registry import (
+    HyperparameterConfig,
+    NetworkGroup,
+    RLParameter,
+)
 from agilerl.algorithms.grpo import GRPO
 from agilerl.distributed import FSDPConfig
 from agilerl.distributed.runtime import DPRuntime, FSDPRuntime
@@ -225,6 +229,8 @@ class TestReadonlyCheckpointAttributes:
         LLMAlgorithm._restore_checkpoint_attributes(
             stub,
             {"aux_metric_name": "kl", "beta": 0.0, "lora_config": "skip-me"},
+            restore_config=True,
+            restore_hyperparameters=True,
         )
         assert stub.beta == 0.0
         assert stub.aux_metric_name == "liger_clip_fraction"
@@ -3865,6 +3871,65 @@ class TestStrictLoraConfigLoading:
         assert loader.lora_config.r == 4
 
 
+def _build_tunable_grpo(*, lr: float, beta: float) -> GRPO:
+    """Tiny GRPO whose ``lr`` is a registry hyperparameter."""
+    actor = create_module(input_size=6, max_tokens=4, vocab_size=64, device="cpu")
+    return GRPO(
+        actor_network=actor,
+        pad_token_id=63,
+        pad_token="<pad>",
+        batch_size=4,
+        group_size=2,
+        lr=lr,
+        beta=beta,
+        hp_config=HyperparameterConfig(lr=RLParameter(min=1e-6, max=1.0)),
+        max_output_tokens=4,
+        max_model_len=12,
+        lora_config=get_lora_config(r=4, target_modules=("linear_1",)),
+        wrap=False,
+        gradient_checkpointing=False,
+        device="cpu",
+        use_separate_reference_adapter=True,
+    )
+
+
+class TestLLMAlgorithmLoadCheckpointRestoreFlags:
+    @pytest.fixture
+    def saved_path(self, tmp_path) -> str:
+        saver = _build_tunable_grpo(lr=0.01, beta=0.5)
+        saver.steps = 9
+        saver.save_checkpoint(str(tmp_path), lora_only=True, save_optimizer=False)
+        return str(tmp_path)
+
+    def test_without_restore_config_keeps_settings_and_restores_training_state(
+        self, saved_path: str
+    ) -> None:
+        # Arrange
+        loader = _build_tunable_grpo(lr=0.02, beta=0.1)
+
+        # Act
+        loader.load_checkpoint(saved_path, restore_config=False)
+
+        # Assert
+        assert loader.beta == 0.1
+        assert loader.lr == 0.01
+        assert loader.steps == 9
+
+    def test_without_restore_hyperparameters_keeps_hyperparameters(
+        self, saved_path: str
+    ) -> None:
+        # Arrange
+        loader = _build_tunable_grpo(lr=0.02, beta=0.1)
+
+        # Act
+        loader.load_checkpoint(saved_path, restore_hyperparameters=False)
+
+        # Assert
+        assert loader.lr == 0.02
+        assert loader.beta == 0.5
+        assert loader.steps == 9
+
+
 class TestLLMClone:
     """LLMAlgorithm.clone requires full model infrastructure (real model
     weights etc.), so we test it indirectly via `_configure_batch_size`
@@ -5812,6 +5877,7 @@ class TestLLMGenerateWithVllmColocateFullPaths:
         prompts = [
             {
                 "prompt": "<image> digit 7",
+                "prompt_token_ids": torch.tensor([[5, 6, 7]]),
                 "image": image,
                 "prompt_token_len": 4,
                 "input_ids": torch.tensor([[11, 12, 13, 14]]),
@@ -5839,42 +5905,13 @@ class TestLLMGenerateWithVllmColocateFullPaths:
             )
 
         sent = agent.llm.generate.call_args[0][0]
-        assert sent[0]["prompt"] == "<image> digit 7"
-        assert sent[0]["multi_modal_data"]["image"] is image
-        assert "prompt_token_ids" not in sent[0]
-        assert sent[1]["prompt"] == sent[0]["prompt"]
+        assert sent[0] == {
+            "prompt_token_ids": [5, 6, 7],
+            "multi_modal_data": {"image": image},
+        }
+        assert sent[1] == sent[0]
         assert len(token_ids) == 1
         assert len(action_masks) == 1
-
-    def test_generate_with_vllm_colocate_rejects_non_str_multimodal_prompt(self):
-        agent = _make_llm_agent()
-        agent.pad_token = "<pad>"
-        agent.pad_token_id = 0
-        agent.max_output_tokens = 20
-        agent.max_model_len = 100
-        agent.repetition_penalty = 1.0
-        agent.temperature = 1.0
-        agent.top_p = 1.0
-        agent.top_k = None
-        agent.min_p = None
-        agent.min_output_tokens = None
-        agent.accelerator = None
-        agent.vllm_config = MagicMock(tensor_parallel_size=1)
-        agent.device = "cpu"
-        agent.llm = MagicMock()
-        prompts = [{"prompt": 7, "image": object(), "input_ids": torch.tensor([[1]])}]
-
-        with (
-            patch(
-                "agilerl.algorithms.core.base.SamplingParams",
-                return_value=MagicMock(),
-                create=True,
-            ),
-            pytest.raises(
-                ValueError, match="multimodal generation requires prompt string"
-            ),
-        ):
-            agent._generate_with_vllm_colocate(prompts, group_size=1, temperature=0.9)
 
     def test_generate_with_vllm_colocate_clamps_min_tokens_to_remaining(self):
         agent = _make_llm_agent()
@@ -6686,6 +6723,47 @@ class TestLLMGetLogprobsPacked:
             )
 
         assert lp.shape == (B, T - 1)
+
+    def test_whole_batch_chunk_keeps_every_image_tile(self):
+        # Arrange: two samples carry five tiles between them.
+        torch.manual_seed(0)
+        B, T, H, V = 2, 6, 8, 32
+        agent = _make_llm_agent()
+        agent.use_sequence_packing = True
+        agent.calc_position_embeddings = False
+        agent.temperature = 1.0
+        agent.cast_logprobs_to_fp32 = True
+        agent.pad_token_id = 0
+        inner = _TinyCausalLM(V, H)
+        seen_pixel_values = []
+        forward = inner.forward
+
+        def recording_forward(*args, pixel_values=None, **kwargs):
+            seen_pixel_values.append(pixel_values)
+            return forward(*args, **kwargs)
+
+        inner.forward = recording_forward
+        actor = _TinyPeftWrapper(inner)
+        actor.config._attn_implementation = "flash_attention_2"
+        agent.actor = actor
+
+        agent.select_adapter = lambda _name: nullcontext()
+        ids = torch.randint(1, V, (B, T))
+        pixel_values = torch.randn(5, 3, 4, 4)
+
+        # Act
+        with torch.enable_grad():
+            agent._get_logprobs(
+                ids,
+                batch_size=B,
+                use_reference=False,
+                eval_mode=False,
+                pixel_values=pixel_values,
+            )
+
+        # Assert
+        assert len(seen_pixel_values) == 1
+        assert torch.equal(seen_pixel_values[0], pixel_values)
 
 
 @_LLM_DEPS_SKIP

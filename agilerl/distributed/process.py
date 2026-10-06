@@ -164,6 +164,22 @@ def allreduce_minmax_int(value: int) -> tuple[int, int]:
     return -neg_min_value, max_value
 
 
+def allreduce_sum_ints(values: Sequence[int]) -> list[int]:
+    """Sum each of ``values`` across ranks (``values`` locally).
+
+    :param values: This rank's values, the same count on every rank.
+    :type values: Sequence[int]
+    :return: Per-position sums across ranks.
+    :rtype: list[int]
+    """
+    values = [int(value) for value in values]
+    if not is_distributed() or dist.get_world_size() == 1:
+        return values
+    sums = torch.tensor(values, device=resolve_device(), dtype=torch.long)
+    dist.all_reduce(sums, op=dist.ReduceOp.SUM)
+    return sums.tolist()
+
+
 def any_rank(flag: bool) -> bool:
     """True if any data-parallel rank has ``flag`` set.
 

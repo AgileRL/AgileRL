@@ -549,6 +549,25 @@ class LLMEnvSpec(EnvSpecBase):
             "required with env_url, where it cannot be probed."
         ),
     )
+    segment_prompt_tokens: int | None = Field(
+        default=None,
+        ge=1,
+        description=(
+            "Restart the episode's context when the next prompt would exceed "
+            "this many tokens; each segment trains as its own row. Unset keeps "
+            "one row per episode."
+        ),
+    )
+    segment_max_images: int | None = Field(
+        default=None,
+        ge=1,
+        description=(
+            "Restart the episode's context when the next prompt would carry "
+            "more than this many images; set it to the engine's "
+            "limit_mm_per_prompt image count. Unset puts no image limit on a "
+            "segment."
+        ),
+    )
     strict_chat_template_boundary: bool | None = Field(
         default=None,
         description=(
@@ -599,6 +618,24 @@ class LLMEnvSpec(EnvSpecBase):
         description=(
             "Per-message client timeout in seconds for an env reached over "
             "HTTP. Unset applies a 300 s bound; 0 disables the bound."
+        ),
+    )
+    max_concurrent_resets: int | None = Field(
+        default=None,
+        ge=1,
+        description=(
+            "Env resets one rollout engine runs at once (Ray runtime only). "
+            "Unset runs every reset at once; set it to what the env's backing "
+            "services can serve."
+        ),
+    )
+    adaptive_task_sampling: bool = Field(
+        default=False,
+        description=(
+            "Draw each group's task row in proportion to how often that row's "
+            "recent groups had differing rewards, so tasks that keep giving tied "
+            "groups are drawn less (Ray async rollouts only). Unset keeps the "
+            "per-epoch shuffle."
         ),
     )
 

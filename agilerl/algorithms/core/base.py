@@ -16,7 +16,7 @@ from collections.abc import Callable, Generator, Iterable, Mapping, Sequence
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from dataclasses import asdict
 from importlib.metadata import version
-from itertools import chain
+from itertools import accumulate, chain, groupby, pairwise
 from pathlib import Path
 from typing import (
     TYPE_CHECKING,
@@ -60,12 +60,15 @@ from agilerl.algorithms.core.registry import (
 )
 from agilerl.architectures import install_family_patches
 from agilerl.architectures.nemotron_h import register_nemotron_h_liger
+from agilerl.components.llm_rollout_data import EpisodeSegments
 from agilerl.distributed import (
     BaseRuntime,
     DPRuntime,
     FSDPConfig,
     FSDPRuntime,
     allreduce_minmax_int,
+    allreduce_sum_ints,
+    any_rank,
     barrier,
     broadcast_object_list,
     full_shape_views,
@@ -154,6 +157,7 @@ from agilerl.utils.llm_packing import (
     unpack_values,
 )
 from agilerl.utils.mutation_utils import target_activations
+from agilerl.utils.phase_timer import PhaseTimer
 from agilerl.utils.torch_utils import release_device_memory
 
 if TYPE_CHECKING:
@@ -186,11 +190,14 @@ if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
     )
     from agilerl.utils.algo_utils import clone_llm
     from agilerl.utils.llm_utils import (
+        LEARN_PHASE_METRIC_NAMES,
+        LEARN_PHASES,
         adapt_lora_config_for_model,
         attention_mask_from_padded_ids,
         build_completion_mask,
         build_vllm_llm_init_kwargs,
         build_vllm_rollout_lora_request,
+        calculate_k3_kl,
         create_model_from_name_or_path,
         expert_lora_vllm_key_map,
         fill_outside_mask,
@@ -202,9 +209,17 @@ if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
         log_cuda_memory_snapshot,
         move_params_to_cpu,
         move_params_to_gpu,
+        needs_cross_rank_seq_padding,
         offload_colocated_trainer_from_gpu,
         save_lora_adapters,
         save_peft_adapter_for_vllm_rollout,
+    )
+    from agilerl.utils.segment_rows import (
+        SegmentRows,
+        filler_token_frac,
+        pad_segment_rows,
+        segment_window_layout,
+        split_episode_segments,
     )
 
 
@@ -330,6 +345,9 @@ class RegistryMeta(ABCMeta):
 
 
 DISPLAY_OMIT_ATTRIBUTES = ("grama_scores",)
+
+# Built in ``__init__`` with the current code's metric names; loading never overwrites it.
+NEVER_RESTORED_ATTRIBUTES = ("metrics",)
 
 
 def get_checkpoint_dict(
@@ -1515,7 +1533,7 @@ class EvolvableAlgorithm(ABC, Generic[ExperiencesT], metaclass=RegistryMeta):
             checkpoint["steps"] = int(legacy_steps[-1]) if len(legacy_steps) else 0
         for attribute, value in checkpoint.items():
             # Checkpoint records the writer's device; keep the live agent's.
-            if attribute == "device":
+            if attribute == "device" or attribute in NEVER_RESTORED_ATTRIBUTES:
                 continue
             if _is_readonly_property(self, attribute):
                 continue
@@ -1676,7 +1694,7 @@ class EvolvableAlgorithm(ABC, Generic[ExperiencesT], metaclass=RegistryMeta):
             setattr(self, name, optimizer)
 
         for attribute in EvolvableAlgorithm.inspect_attributes(
-            self, exclude=("grama_scores",)
+            self, exclude=("grama_scores", *NEVER_RESTORED_ATTRIBUTES)
         ):
             if attribute not in checkpoint:
                 warnings.warn(
@@ -2775,6 +2793,14 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         importance-sampling ratio (default ``2.0``), bounding the correction
         weight to limit variance from outlier tokens. Must be > 0.
     :type vllm_importance_sampling_cap: float, optional
+    :param vllm_max_logprob_gap: Log a warning when a learn step's mean
+        ``|trainer - vLLM|`` per-token log-prob gap exceeds this, in nats
+        (default ``0.1``). bf16 engines usually sit near 0.01-0.03.
+    :type vllm_max_logprob_gap: float, optional
+    :param vllm_max_clip_fraction: Log a warning when the fraction of action
+        tokens whose trainer/vLLM ratio reaches ``vllm_importance_sampling_cap``
+        exceeds this (default ``0.02``). bf16 engines usually stay under 0.01.
+    :type vllm_max_clip_fraction: float, optional
     :param gradient_checkpointing: Whether to use gradient checkpointing.
     :type gradient_checkpointing: bool
     :param torch_compiler: The torch compiler mode to use ('default',
@@ -2866,6 +2892,8 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         chunk_rows: int | None = None,
         vllm_importance_sampling_correction: bool = True,
         vllm_importance_sampling_cap: float = 2.0,
+        vllm_max_logprob_gap: float = 0.1,
+        vllm_max_clip_fraction: float = 0.02,
     ) -> None:
         if not HAS_LLM_DEPENDENCIES:
             msg = "LLM dependencies are not installed. Please install them using `pip install agilerl[llm]`."
@@ -3030,6 +3058,8 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             vllm_importance_sampling_correction
         )
         self.vllm_importance_sampling_cap = float(vllm_importance_sampling_cap)
+        self.vllm_max_logprob_gap = float(vllm_max_logprob_gap)
+        self.vllm_max_clip_fraction = float(vllm_max_clip_fraction)
         # Kept on when not colocated: rollout engines still sample from vLLM.
         self._is_correction_liger_warned = False
         # Warn-once flag for the canonical Liger + non-token importance-sampling
@@ -3068,6 +3098,8 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             raise ValueError(msg)
         self.rng = np.random.RandomState(seed)
         self.metrics = AgentMetrics()
+        for name in LEARN_PHASE_METRIC_NAMES:
+            self.metrics.register(name)
 
     def preprocess_observation(self, observation: TorchObsType) -> TorchObsType:
         """Preprocess observations (dummy) for forward pass through neural network.
@@ -3255,6 +3287,8 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         load_optimizer: bool = False,
         overwrite_reference_adapter: bool | None = None,
         overwrite_critic_adapter: bool = False,
+        restore_config: bool = True,
+        restore_hyperparameters: bool = True,
     ) -> None:
         """Load adapter weights and algorithm state from a checkpoint directory.
 
@@ -3283,7 +3317,8 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         restored from ``attributes.pt``; if the checkpoint contains no
         optimizer state (saved with ``save_optimizer=False``), a
         ``UserWarning`` is emitted and a freshly-initialised optimizer is
-        used.
+        used. Without an LR scheduler, the optimizer's learning rates are set
+        to the loaded ``lr`` / ``lr_critic``.
 
         :param path: Directory containing a checkpoint written by
             :meth:`save_checkpoint`.
@@ -3298,6 +3333,16 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         :param overwrite_critic_adapter: Seed ``critic`` from the checkpoint's
             ``actor``.
         :type overwrite_critic_adapter: bool
+        :param restore_config: If ``False``, keep this instance's algorithm
+            settings and restore only training state: step count, scores,
+            fitness, ``reference_update_tracker``, ``rng`` and, with
+            ``restore_hyperparameters``, the registry's mutable
+            hyperparameters.
+        :type restore_config: bool
+        :param restore_hyperparameters: If ``False``, keep this instance's
+            values for the registry's mutable hyperparameters (e.g. ``lr``).
+            Only a run that mutates them needs the checkpoint's values.
+        :type restore_hyperparameters: bool
         """
         checkpoint = torch.load(
             str(Path(path) / "attributes.pt"),
@@ -3365,10 +3410,16 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
                     stacklevel=2,
                 )
 
-        self._restore_checkpoint_attributes(checkpoint)
+        self._restore_checkpoint_attributes(
+            checkpoint, restore_config, restore_hyperparameters
+        )
 
-        if "lr_scheduler" in checkpoint and self.lr_scheduler is not None:
-            self.lr_scheduler.load_state_dict(checkpoint["lr_scheduler"])
+        if self.lr_scheduler is not None:
+            if "lr_scheduler" in checkpoint:
+                self.lr_scheduler.load_state_dict(checkpoint["lr_scheduler"])
+        # Unwrapped clones have no optimizer until ``wrap_models``.
+        elif self.optimizer is not None:
+            LLMAlgorithm.update_lr(self.optimizer, lr=(self.lr, self.lr_critic))
 
     def load_weights(
         self,
@@ -3487,7 +3538,12 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             ):
                 self.actor.post_init(state_dict)
 
-    def _restore_checkpoint_attributes(self, checkpoint: dict[str, Any]) -> None:
+    def _restore_checkpoint_attributes(
+        self,
+        checkpoint: dict[str, Any],
+        restore_config: bool,
+        restore_hyperparameters: bool,
+    ) -> None:
         """Restore algorithm attributes from payload.
 
         ``lora_config`` and ``selected_adapters`` are intentionally skipped \u2014 the current
@@ -3498,8 +3554,28 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
 
         :param checkpoint: Loaded attribute payload.
         :type checkpoint: dict[str, Any]
+        :param restore_config: See :meth:`load_checkpoint`.
+        :type restore_config: bool
+        :param restore_hyperparameters: See :meth:`load_checkpoint`.
+        :type restore_hyperparameters: bool
         """
+        if not restore_config:
+            training_state = {
+                "steps",
+                "scores",
+                "fitness",
+                "reference_update_tracker",
+                "rng",
+                *self.hp_config.names(),
+            }
+            checkpoint = {k: v for k, v in checkpoint.items() if k in training_state}
+        if not restore_hyperparameters:
+            hyperparameters = set(self.hp_config.names())
+            checkpoint = {
+                k: v for k, v in checkpoint.items() if k not in hyperparameters
+            }
         skip_attrs = {
+            *NEVER_RESTORED_ATTRIBUTES,
             "lr_scheduler",
             "lora_config",
             "selected_adapters",
@@ -3880,15 +3956,15 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
     @staticmethod
     def update_lr(
         optimizer: torch.optim.Optimizer,
-        lr: float | tuple[float, float],
+        lr: float | tuple[float, float | None],
         scheduler_config: CosineLRScheduleConfig | None = None,
     ) -> SequentialLR | None:
         """Update the learning rate of the optimizer.
 
         :param optimizer: Optimizer
         :type optimizer: Optimizer
-        :param lr: Learning rate value, or actor/critic pair.
-        :type lr: float | tuple[float, float]
+        :param lr: Learning rate value, or actor/critic pair; a ``None`` critic uses the actor rate.
+        :type lr: float | tuple[float, float | None]
         :param scheduler_config: Scheduler configuration
         :type scheduler_config: CosineLRScheduleConfig | None
 
@@ -4134,10 +4210,12 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
     ) -> dict[str, float]:
         """Summarise the vLLM-vs-trainer logprob divergence over action tokens.
 
-        ``vllm_is_delta_mean`` is ``mean|old - sampling|``; the ratio stats
-        describe ``clamp(exp(old - sampling), max=cap)`` (mean, p95, and the
-        fraction hitting the clamp). All are detached batch-level diagnostics,
-        computed regardless of whether the correction is applied to the loss.
+        ``vllm_is_delta_mean`` is ``mean|old - sampling|``; ``vllm_mismatch_kl``
+        is the k3 estimate of ``KL(vLLM || trainer)`` from the vLLM-sampled
+        tokens; the ratio stats describe ``clamp(exp(old - sampling), max=cap)``
+        (mean, std, p95, and the fraction hitting the clamp). All are detached
+        batch-level diagnostics, computed regardless of whether the correction
+        is applied to the loss.
         """
         with torch.no_grad():
             mask = action_masks.to(torch.bool)
@@ -4147,17 +4225,65 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
                 mask,
             )
             delta_mean = (log_diff.abs().sum() / denom).item()
+            mismatch_kl = fill_outside_mask(
+                calculate_k3_kl(
+                    old_log_probs.to(torch.float32),
+                    sampling_log_probs.to(torch.float32),
+                ),
+                mask,
+            )
             ratio = torch.exp(log_diff).clamp(max=self.vllm_importance_sampling_cap)
             sel = ratio[mask]
-            metrics = {"vllm_is_delta_mean": delta_mean}
-            if sel.numel() > 0:
-                metrics["vllm_is_delta_max"] = log_diff.abs()[mask].max().item()
-                metrics["vllm_is_ratio_mean"] = sel.mean().item()
-                metrics["vllm_is_ratio_p95"] = torch.quantile(sel.float(), 0.95).item()
-                metrics["vllm_is_frac_clamped"] = (
-                    (sel >= self.vllm_importance_sampling_cap).float().mean().item()
+            metrics = {
+                "vllm_is_delta_mean": delta_mean,
+                "vllm_mismatch_kl": (mismatch_kl.sum() / denom).item(),
+            }
+            # Every rank must report the same keys for the cross-rank all-reduce.
+            if sel.numel() == 0:
+                metrics.update(
+                    {
+                        "vllm_is_delta_max": 0.0,
+                        "vllm_is_ratio_mean": 1.0,
+                        "vllm_is_ratio_std": 0.0,
+                        "vllm_is_ratio_p95": 1.0,
+                        "vllm_is_frac_clamped": 0.0,
+                    }
                 )
+                return metrics
+            metrics["vllm_is_delta_max"] = log_diff.abs()[mask].max().item()
+            metrics["vllm_is_ratio_mean"] = sel.mean().item()
+            metrics["vllm_is_ratio_std"] = sel.float().std(correction=0).item()
+            metrics["vllm_is_ratio_p95"] = torch.quantile(sel.float(), 0.95).item()
+            metrics["vllm_is_frac_clamped"] = (
+                (sel >= self.vllm_importance_sampling_cap).float().mean().item()
+            )
             return metrics
+
+    def _warn_on_sampling_mismatch(self, metrics: dict[str, float]) -> None:
+        """Log a warning when the vLLM-vs-trainer mismatch exceeds its thresholds.
+
+        :param metrics: Output of :meth:`_sampling_mismatch_metrics`.
+        :type metrics: dict[str, float]
+        """
+        gap = metrics["vllm_is_delta_mean"]
+        clip_fraction = metrics["vllm_is_frac_clamped"]
+        if (
+            gap <= self.vllm_max_logprob_gap
+            and clip_fraction <= self.vllm_max_clip_fraction
+        ):
+            return
+        logger.warning(
+            "Rollout engine and trainer log-probs diverge: mean |gap| %.4f "
+            "(max %.4f), ratio mean %.4f std %.4f, clip fraction %.4f (max %.4f) "
+            "at cap %.2f.",
+            gap,
+            self.vllm_max_logprob_gap,
+            metrics["vllm_is_ratio_mean"],
+            metrics["vllm_is_ratio_std"],
+            clip_fraction,
+            self.vllm_max_clip_fraction,
+            self.vllm_importance_sampling_cap,
+        )
 
     def _aligned_sampling_logprobs_and_metrics(
         self,
@@ -4192,8 +4318,9 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             is_metrics = self._sampling_mismatch_metrics(
                 old_log_probs, sampling_log_probs, action_masks
             )
+            self._warn_on_sampling_mismatch(is_metrics)
+            is_metrics["vllm_is_rows_skipped"] = float(n_skipped)
             if n_skipped:
-                is_metrics["vllm_is_rows_skipped"] = float(n_skipped)
                 warnings.warn(
                     f"{n_skipped}/{action_masks.shape[0]} rows had a token-count "
                     "mismatch between captured vLLM logprobs and the action "
@@ -4717,6 +4844,47 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             *([1] * (pixel_values.ndim - 1)),
         )
 
+    def _pixel_values_for_fused_slice(
+        self,
+        pixel_values: torch.Tensor | None,
+        start: int,
+        end: int,
+        fused_rows: int,
+        image_counts: Sequence[int] | None = None,
+    ) -> torch.Tensor | None:
+        """Vision rows for fused rows ``[start, end)``.
+
+        Dim 0 matches the fused batch when each row has one image. A repeated
+        multi-image sample keeps every image for that row in one contiguous block.
+        ``image_counts`` is the image count of each fused row when those counts differ.
+        A slice over every fused row keeps every vision row.
+        """
+        if pixel_values is None:
+            return None
+        leading = int(pixel_values.shape[0])
+        if image_counts is not None:
+            offset = sum(int(count) for count in image_counts[:start])
+            length = sum(int(count) for count in image_counts[start:end])
+            if sum(int(count) for count in image_counts) != leading:
+                msg = (
+                    f"pixel_values leading dim {leading} does not match "
+                    "the fused image counts"
+                )
+                raise ValueError(msg)
+            return pixel_values[offset : offset + length]
+        if start == 0 and end == fused_rows:
+            return pixel_values
+        if leading == fused_rows:
+            return pixel_values[start:end]
+        if fused_rows == 0 or leading % fused_rows != 0:
+            msg = (
+                f"pixel_values leading dim {leading} does not divide "
+                f"the {fused_rows} fused rows"
+            )
+            raise ValueError(msg)
+        images_per_row = leading // fused_rows
+        return pixel_values[start * images_per_row : end * images_per_row]
+
     def _run_fused_chunk(
         self,
         chunk_ids: torch.Tensor,
@@ -4788,13 +4956,15 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         routing: list[str],
         batch_size: int | None = None,
         pixel_values: torch.Tensor | None = None,
+        pixel_image_counts: Sequence[int] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """Run the model on a fused batch with per-sample adapter routing.
 
         When *batch_size* is ``None`` the full batch is one forward (needed
         for gradient-checkpoint recomputation). Otherwise micro-batch under
         ``no_grad``. Fused LoRA routes adapters per row, so a micro-batch may
-        mix adapters.
+        mix adapters; with *pixel_values* each micro-batch stays within one
+        adapter run.
 
         :return: ``(log_probs, values)``; log_probs is ``(B, seq_len - 1)``.
         :rtype: tuple[torch.Tensor, torch.Tensor | None]
@@ -4809,14 +4979,22 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         position_ids = None
         if self.calc_position_embeddings:
             position_ids = self._position_ids_from_mask(fused_mask)
-        chunks = (
-            [(0, total)]
-            if batch_size is None
-            else [
-                (start, min(start + batch_size, total))
-                for start in range(0, total, batch_size)
+        if batch_size is None:
+            chunks = [(0, total)]
+        else:
+            # Vision-tower LoRA layers see image rows, which a chunk can only
+            # route correctly when all its rows share one adapter.
+            runs = (
+                [len(list(run)) for _, run in groupby(routing)]
+                if pixel_values is not None
+                else [total]
+            )
+            run_starts = [0, *accumulate(runs)]
+            chunks = [
+                (start, min(start + batch_size, run_end))
+                for run_start, run_end in pairwise(run_starts)
+                for start in range(run_start, run_end, batch_size)
             ]
-        )
         fused_fn, _, _ = self._fused_logprob_fn_and_head()
         # One lm_head all-gather for the whole pass; chunks only differ in hidden.
         with self.shard_runtime.gather_layer(
@@ -4834,7 +5012,13 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
                     fused_fn,
                     head_w,
                     head_b,
-                    pixel_values[start:end] if pixel_values is not None else None,
+                    self._pixel_values_for_fused_slice(
+                        pixel_values,
+                        start,
+                        end,
+                        total,
+                        image_counts=pixel_image_counts,
+                    ),
                 )
 
             if len(chunks) == 1:
@@ -5011,6 +5195,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         batch_size: int,
         attention_mask: torch.Tensor | None = None,
         pixel_values: torch.Tensor | None = None,
+        pixel_image_counts: Sequence[int] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
         """Compute reference log-probs, actor log-probs, and critic values in
         one forward pass (under ``torch.no_grad``).
@@ -5063,12 +5248,16 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
                 fused_ids.shape[0],
                 B,
             )
+            fused_image_counts = None
+            if pixel_image_counts is not None:
+                fused_image_counts = list(pixel_image_counts) * N
             log_probs, values = self._fused_model_pass(
                 fused_ids,
                 fused_mask,
                 routing,
                 batch_size=batch_size,
                 pixel_values=fused_pixel_values,
+                pixel_image_counts=fused_image_counts,
             )
             unset_fused_adapter_routing(self.actor)
             ref_logprobs = log_probs[:B]
@@ -5173,8 +5362,13 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
                 end_idx = min((batch + batch_size), num_samples)
                 batch_ids = ids[batch:end_idx, :]
                 batch_attention_mask = attention_mask[batch:end_idx, :]
+                # A chunk spanning the whole batch keeps every image tile.
                 batch_pixel_values = (
-                    pixel_values[batch:end_idx] if pixel_values is not None else None
+                    pixel_values
+                    if end_idx - batch == num_samples
+                    else self._pixel_values_for_fused_slice(
+                        pixel_values, batch, end_idx, num_samples
+                    )
                 )
 
                 packed = None
@@ -5280,7 +5474,9 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             msg = f"Loss is not finite: {loss}"
             raise ValueError(msg)
 
-    def _backward_pass(self, loss: torch.Tensor) -> tuple[float | None, float | None]:
+    def _backward_pass(
+        self, loss: torch.Tensor, accumulation_steps: int | None = None
+    ) -> tuple[float | None, float | None]:
         """Perform a backward pass, accumulating gradients over micro-batches.
 
         Each call corresponds to one micro-batch. Gradients are accumulated
@@ -5294,6 +5490,9 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
 
         :param loss: Combined loss for the current micro-batch.
         :type loss: torch.Tensor
+        :param accumulation_steps: Micro-batches per optimizer step for this
+            call; ``None`` uses :attr:`gradient_accumulation_steps`.
+        :type accumulation_steps: int | None
         :return: Pre- and post-clip global gradient norms, or ``(None, None)``
             on micro-batches that only accumulate.
         :rtype: tuple[float | None, float | None]
@@ -5302,7 +5501,11 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             step = self.shard_runtime.backward(
                 loss,
                 self.optimizer,
-                self.gradient_accumulation_steps,
+                (
+                    self.gradient_accumulation_steps
+                    if accumulation_steps is None
+                    else accumulation_steps
+                ),
                 self.actor,
                 self.max_grad_norm,
                 lr_scheduler=self.lr_scheduler,
@@ -5312,6 +5515,214 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         if step.lr is not None:
             self.lr = step.lr
         return step.grad_norm_pre, step.grad_norm_post
+
+    def _start_learn_phases(self) -> PhaseTimer:
+        """Open the timing window of one ``learn`` on this agent's device.
+
+        :return: Timer whose marks charge time to :data:`LEARN_PHASES`.
+        :rtype: PhaseTimer
+        """
+        phase_timer = self.shard_runtime.phase_timer
+        phase_timer.start(self.device)
+        return phase_timer
+
+    def _learn_phase_seconds(self) -> dict[str, float]:
+        """Close the timing window opened by :meth:`_start_learn_phases`.
+
+        :return: ``learn_phase_<phase>_s`` for every phase in :data:`LEARN_PHASES`.
+        :rtype: dict[str, float]
+        """
+        phase_timer = self.shard_runtime.phase_timer
+        phase_timer.mark("other")
+        seconds = phase_timer.stop()
+        return {
+            f"learn_phase_{phase}_s": seconds.get(phase, 0.0) for phase in LEARN_PHASES
+        }
+
+    def _has_episode_segments(
+        self,
+        episode_segments: Sequence[EpisodeSegments | None] | None,
+        num_episodes: int,
+    ) -> bool:
+        """Whether any rank's batch holds a segmented episode.
+
+        Every rank splits rows when any rank has segments, so all ranks run the
+        same row-count collectives.
+
+        :param episode_segments: Segment layout per episode, or ``None``.
+        :type episode_segments: Sequence[EpisodeSegments | None] | None
+        :param num_episodes: Episodes in this rank's batch.
+        :type num_episodes: int
+        :return: ``True`` when the learn trains segment rows.
+        :rtype: bool
+        :raises ValueError: If ``episode_segments`` does not have one entry
+            per episode.
+        """
+        if episode_segments is not None and len(episode_segments) != num_episodes:
+            msg = (
+                f"episode_segments has {len(episode_segments)} entries for "
+                f"{num_episodes} episodes; pass one entry per episode."
+            )
+            raise ValueError(msg)
+        return any_rank(
+            episode_segments is not None
+            and any(segments is not None for segments in episode_segments)
+        )
+
+    @staticmethod
+    def _check_segments_supported(importance_sampling_level: str) -> None:
+        """Reject importance sampling that cannot treat segment rows as parts of one episode.
+
+        :param importance_sampling_level: Level the importance ratio pools at.
+        :type importance_sampling_level: str
+        :raises ValueError: If the importance ratio pools per trajectory.
+        """
+        if importance_sampling_level == "trajectory":
+            msg = (
+                "episode_segments needs importance_sampling_level='token' or "
+                "'turn': trajectory-level importance sampling pools one ratio per "
+                "segment row, not per episode. Set importance_sampling_level="
+                "'token' or 'turn'."
+            )
+            raise ValueError(msg)
+
+    def _segment_rows(
+        self,
+        token_ids: torch.Tensor,
+        action_masks: torch.Tensor,
+        episode_segments: Sequence[EpisodeSegments | None] | None,
+        episode_idxs: npt.NDArray[np.intp],
+        turn_ids: torch.Tensor | None = None,
+        sampling_logps: Sequence[torch.Tensor | None] | None = None,
+        pixel_values: torch.Tensor | None = None,
+        pixel_image_counts: Sequence[int] | None = None,
+        image_token_id: int | None = None,
+    ) -> tuple[SegmentRows, int]:
+        """Split segmented episodes into rows padded so every rank runs the same micro-batches.
+
+        The update keeps the optimizer steps of the unsegmented episodes: each
+        step accumulates a window of rows, and filler rows make every rank's
+        windows equally long.
+
+        :param token_ids: ``(B, T)`` right-padded episode token ids.
+        :type token_ids: torch.Tensor
+        :param action_masks: ``(B, T - 1)`` action-token mask.
+        :type action_masks: torch.Tensor
+        :param episode_segments: Segment layout per episode, or ``None`` on a
+            rank whose episodes are all unsegmented.
+        :type episode_segments: Sequence[EpisodeSegments | None] | None
+        :param episode_idxs: Episodes the update trains.
+        :type episode_idxs: npt.NDArray[np.intp]
+        :param turn_ids: ``(B, T - 1)`` turn index per token, or ``None``.
+        :type turn_ids: torch.Tensor | None
+        :param sampling_logps: Per-episode flat sampling log-probs, or ``None``.
+        :type sampling_logps: Sequence[torch.Tensor | None] | None
+        :param pixel_values: Vision rows of every episode in batch order, or ``None``.
+        :type pixel_values: torch.Tensor | None
+        :param pixel_image_counts: Vision rows per episode; required with ``pixel_values``.
+        :type pixel_image_counts: Sequence[int] | None
+        :param image_token_id: Token id the VL forward scatters one image
+            feature row into; required with ``pixel_values``.
+        :type image_token_id: int | None
+        :return: The padded rows, and the micro-batches each optimizer step accumulates.
+        :rtype: tuple[SegmentRows, int]
+        """
+        optimizer_steps = -(
+            -len(episode_idxs)
+            // (self.micro_batch_size_per_gpu * self.gradient_accumulation_steps)
+        )
+        rows = split_episode_segments(
+            token_ids,
+            action_masks,
+            episode_segments or [None] * int(token_ids.shape[0]),
+            self.pad_token_id,
+            turn_ids=turn_ids,
+            sampling_logps=sampling_logps,
+            pixel_values=pixel_values,
+            pixel_image_counts=pixel_image_counts,
+        )
+        num_rows = len(rows.training_rows(episode_idxs))
+        filtered_rows = int(rows.token_ids.shape[0]) - num_rows
+        width = int(rows.token_ids.shape[1])
+        world_size = get_world_size()
+        if world_size > 1:
+            _, num_rows = allreduce_minmax_int(num_rows)
+            _, optimizer_steps = allreduce_minmax_int(optimizer_steps)
+            if needs_cross_rank_seq_padding(self, world_size=world_size):
+                _, width = allreduce_minmax_int(width)
+        num_rows, accumulation_steps = segment_window_layout(
+            num_rows, optimizer_steps, self.micro_batch_size_per_gpu
+        )
+        rows = pad_segment_rows(
+            rows,
+            num_rows + filtered_rows,
+            width,
+            self.pad_token_id,
+            image_token_id,
+        )
+        return rows, accumulation_steps
+
+    @staticmethod
+    def _segment_loss_scales(
+        filler_micro_batches: npt.NDArray[np.bool_], accumulation_steps: int
+    ) -> npt.NDArray[np.float64]:
+        """Loss scale per micro-batch that averages each optimizer step over its real micro-batches.
+
+        The backward divides by ``accumulation_steps`` and gradients average
+        over ranks, so a real micro-batch scaled by ``world_size *
+        accumulation_steps / real`` (``real`` counts the step's real
+        micro-batches on every rank) leaves the step's gradient the mean of its
+        real micro-batches. Filler micro-batches get ``0``.
+
+        :param filler_micro_batches: ``(M,)`` whether each micro-batch of the
+            epoch, in run order, holds only filler rows. ``M`` is a multiple
+            of ``accumulation_steps``.
+        :type filler_micro_batches: npt.NDArray[np.bool_]
+        :param accumulation_steps: Micro-batches per optimizer step.
+        :type accumulation_steps: int
+        :return: ``(M,)`` loss scales.
+        :rtype: npt.NDArray[np.float64]
+        """
+        steps = filler_micro_batches.reshape(-1, accumulation_steps)
+        real = np.array(allreduce_sum_ints((~steps).sum(axis=1).tolist()))
+        scales = get_world_size() * accumulation_steps / np.maximum(real, 1)
+        return np.where(steps, 0.0, scales[:, None]).reshape(-1)
+
+    def _row_padding_stats(
+        self,
+        token_ids: torch.Tensor,
+        row_episodes: npt.NDArray[np.intp],
+        train_rows: npt.NDArray[np.intp],
+    ) -> dict[str, float]:
+        """Padding and filler shares of the rows one ``learn`` trains.
+
+        :param token_ids: ``(R, W)`` right-padded training rows.
+        :type token_ids: torch.Tensor
+        :param row_episodes: ``(R,)`` source episode of each row, ``-1`` on filler rows.
+        :type row_episodes: npt.NDArray[np.intp]
+        :param train_rows: Rows the update runs each epoch.
+        :type train_rows: npt.NDArray[np.intp]
+        :return: Values for :data:`ROW_PADDING_METRIC_NAMES`.
+        :rtype: dict[str, float]
+        """
+        real_rows = torch.as_tensor(row_episodes >= 0, device=token_ids.device)
+        real_tokens = attention_mask_from_padded_ids(
+            token_ids[real_rows], self.pad_token_id
+        )
+        padding_frac = 1.0 - float(real_tokens.float().mean().item())
+        # The gradient forward on a packed row runs real tokens only.
+        packed = self._packing_mode() is not None
+        return {
+            "padding_frac_before_packing": padding_frac,
+            "padding_frac_after_packing": 0.0 if packed else padding_frac,
+            "train_rows_padded": float(len(train_rows)),
+            "filler_token_frac": filler_token_frac(
+                token_ids[torch.as_tensor(train_rows, device=token_ids.device)],
+                row_episodes[train_rows] < 0,
+                self.pad_token_id,
+                packed=packed,
+            ),
+        }
 
     def _restore_adapter_trainability(self, selected_adapters: list[str]) -> None:
         """Restore requires_grad=True for all trainable parameters of specified adapters.
@@ -5496,7 +5907,8 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         receives a flat list of length ``len(prompts) * group_size``
         (e.g. GRPO groups). Action masks use ``prompt_token_len`` when set,
         otherwise the full prompt length from ``input_ids``. Image prompts are
-        sent as vLLM multimodal requests (``prompt`` + ``multi_modal_data``).
+        sent as vLLM multimodal requests (``prompt_token_ids`` +
+        ``multi_modal_data``).
 
         :param prompts: Length-``N`` sequence of prompt mappings for this rank.
         :type prompts: Sequence[RolloutPrompt]
@@ -5518,11 +5930,10 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         def _vllm_request(prompt: RolloutPrompt) -> dict[str, Any]:
             image = prompt.get("image")
             if image is not None:
-                prompt_str = prompt.get("prompt")
-                if not isinstance(prompt_str, str):
-                    msg = "multimodal generation requires prompt string"
-                    raise ValueError(msg)
-                return {"prompt": prompt_str, "multi_modal_data": {"image": image}}
+                return {
+                    "prompt_token_ids": prompt["prompt_token_ids"].squeeze(0).tolist(),
+                    "multi_modal_data": {"image": image},
+                }
             return {"prompt_token_ids": prompt["input_ids"].squeeze(0).tolist()}
 
         def _prompt_token_len(prompt: RolloutPrompt) -> int:
