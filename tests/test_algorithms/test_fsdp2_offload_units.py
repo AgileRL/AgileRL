@@ -144,7 +144,7 @@ class TestUntiedLmHeadNoReshard:
     """Untied ``lm_head`` is its own FSDP unit and stays gathered after forward."""
 
     def test_untied_lm_head_fully_shard_disables_reshard_after_forward(self):
-        from agilerl.distributed.fsdp import _shard_embed_and_lm_head
+        from agilerl.distributed.wrap import _shard_embed_and_lm_head
 
         class LanguageModel(nn.Module):
             def __init__(self):
@@ -166,7 +166,7 @@ class TestUntiedLmHeadNoReshard:
             seen.append((module, kwargs))
             return module
 
-        with patch("agilerl.distributed.fsdp.fully_shard", side_effect=_record):
+        with patch("agilerl.distributed.wrap.fully_shard", side_effect=_record):
             _shard_embed_and_lm_head(
                 model, {"reshard_after_forward": True}, persistence_threshold=0
             )
@@ -814,7 +814,7 @@ class TestFsdpSafetensorsShardHelpers:
     def test_global_shard_slices_match_torch_chunk_divisible(self):
         from torch.distributed.tensor.placement_types import Shard
 
-        from agilerl.distributed.fsdp import global_shard_slices
+        from agilerl.distributed.checkpoint import global_shard_slices
 
         global_shape = (8, 4)
         placements = (Shard(0),)
@@ -830,7 +830,7 @@ class TestFsdpSafetensorsShardHelpers:
     def test_global_shard_slices_match_torch_chunk_remainder(self):
         from torch.distributed.tensor.placement_types import Shard
 
-        from agilerl.distributed.fsdp import global_shard_slices
+        from agilerl.distributed.checkpoint import global_shard_slices
 
         global_shape = (10,)
         placements = (Shard(0),)
@@ -846,7 +846,7 @@ class TestFsdpSafetensorsShardHelpers:
     def test_global_shard_slices_two_dimensional_shard(self):
         from torch.distributed.tensor.placement_types import Shard
 
-        from agilerl.distributed.fsdp import global_shard_slices
+        from agilerl.distributed.checkpoint import global_shard_slices
 
         global_shape = (6, 4)
         placements = (Shard(0), Shard(1))
@@ -865,7 +865,7 @@ class TestFsdpSafetensorsShardHelpers:
         from safetensors import safe_open
         from safetensors.torch import save_file
 
-        from agilerl.distributed.fsdp import _copy_safetensors_slice
+        from agilerl.distributed.checkpoint import _copy_safetensors_slice
 
         weights = {"layer.weight": torch.ones(6, 4, dtype=torch.float32)}
         path = tmp_path / "model.safetensors"
@@ -883,7 +883,7 @@ class TestFsdpSafetensorsShardHelpers:
         assert torch.all(dest == torch.ones(2, 4, dtype=torch.bfloat16))
 
     def test_lora_a_seed_stable_and_lora_b_zeros(self):
-        from agilerl.distributed.fsdp import _init_lora_parameter
+        from agilerl.distributed.checkpoint import _init_lora_parameter
 
         param_a = nn.Parameter(torch.empty(2, 3))
         param_b = nn.Parameter(torch.empty(2, 3))
@@ -914,7 +914,7 @@ class TestFsdpSafetensorsShardHelpers:
         assert torch.equal(param_b, torch.zeros_like(param_b))
 
     def test_checkpoint_key_maps_peft_base_layer(self):
-        from agilerl.distributed.fsdp import checkpoint_key_for_parameter
+        from agilerl.distributed.checkpoint import checkpoint_key_for_parameter
 
         live = "base_model.model.layers.0.q_proj.base_layer.weight"
         assert checkpoint_key_for_parameter(live) == "layers.0.q_proj.weight"
@@ -924,7 +924,7 @@ class TestFsdpSafetensorsShardHelpers:
         from safetensors.torch import save_file
         from transformers import GPT2Config, GPT2LMHeadModel
 
-        from agilerl.distributed.fsdp import _resolve_checkpoint_source
+        from agilerl.distributed.checkpoint import _resolve_checkpoint_source
 
         save_file({"w": torch.zeros(1)}, str(tmp_path / "model.safetensors"))
         causal = GPT2LMHeadModel(
@@ -943,7 +943,9 @@ class TestFsdpSafetensorsShardHelpers:
 
         from safetensors.torch import save_file
 
-        from agilerl.distributed.fsdp import _load_sharded_weights_from_safetensors
+        from agilerl.distributed.checkpoint import (
+            _load_sharded_weights_from_safetensors,
+        )
 
         class TinyCausal(nn.Module):
             def __init__(self) -> None:
@@ -968,7 +970,9 @@ class TestFsdpSafetensorsShardHelpers:
 
         from safetensors.torch import save_file
 
-        from agilerl.distributed.fsdp import _load_sharded_weights_from_safetensors
+        from agilerl.distributed.checkpoint import (
+            _load_sharded_weights_from_safetensors,
+        )
 
         class TinyCausal(nn.Module):
             def __init__(self) -> None:
@@ -992,7 +996,7 @@ class TestFsdpSafetensorsShardHelpers:
         assert torch.equal(model.lm_head.weight.detach(), head_before)
 
     def test_non_mapping_tied_keys_yield_no_targets(self):
-        from agilerl.distributed.fsdp import _tied_weight_checkpoint_targets
+        from agilerl.distributed.checkpoint import _tied_weight_checkpoint_targets
 
         model = nn.Module()
         model.all_tied_weights_keys = ["lm_head.weight"]
@@ -1003,7 +1007,9 @@ class TestFsdpSafetensorsShardHelpers:
 
         from safetensors.torch import save_file
 
-        from agilerl.distributed.fsdp import _load_sharded_weights_from_safetensors
+        from agilerl.distributed.checkpoint import (
+            _load_sharded_weights_from_safetensors,
+        )
 
         class Summary(nn.Module):
             def __init__(self) -> None:
@@ -1039,7 +1045,9 @@ class TestFsdpSafetensorsShardHelpers:
         from safetensors.torch import save_file
         from transformers import GPT2Config, GPT2LMHeadModel
 
-        from agilerl.distributed.fsdp import _load_sharded_weights_from_safetensors
+        from agilerl.distributed.checkpoint import (
+            _load_sharded_weights_from_safetensors,
+        )
 
         save_file(
             {"layers.0.weight": torch.zeros(2)}, str(tmp_path / "model.safetensors")
@@ -1064,11 +1072,11 @@ class TestMaterializeFsdp2FromCpuState:
 
         with (
             patch(
-                "agilerl.distributed.fsdp.apply_fsdp2",
+                "agilerl.distributed.materialize.apply_fsdp2",
                 side_effect=lambda module, *_a, **_k: module,
             ),
-            patch("agilerl.distributed.fsdp.restore_after_to_empty"),
-            patch("agilerl.distributed.fsdp._share_fsdp_comm_streams"),
+            patch("agilerl.distributed.materialize.restore_after_to_empty"),
+            patch("agilerl.distributed.materialize._share_fsdp_comm_streams"),
         ):
             out = materialize_fsdp2_from_cpu_state(
                 model, "cpu", FSDPConfig(cpu_offload=True)
@@ -1099,11 +1107,11 @@ class TestMaterializeFsdp2FromCpuState:
 
         with (
             patch(
-                "agilerl.distributed.fsdp.apply_fsdp2",
+                "agilerl.distributed.materialize.apply_fsdp2",
                 side_effect=lambda module, *_a, **_k: module,
             ),
-            patch("agilerl.distributed.fsdp.restore_after_to_empty"),
-            patch("agilerl.distributed.fsdp._share_fsdp_comm_streams"),
+            patch("agilerl.distributed.materialize.restore_after_to_empty"),
+            patch("agilerl.distributed.materialize._share_fsdp_comm_streams"),
         ):
             out = materialize_fsdp2_from_cpu_state(
                 model, "cpu", FSDPConfig(cpu_offload=True)
@@ -1147,15 +1155,15 @@ class TestMaterializeFsdp2FromCpuState:
 
         with (
             patch(
-                "agilerl.distributed.fsdp.cached_file",
+                "agilerl.distributed.checkpoint.cached_file",
                 side_effect=fake_cached_file,
             ),
             patch(
-                "agilerl.distributed.fsdp.apply_fsdp2",
+                "agilerl.distributed.materialize.apply_fsdp2",
                 side_effect=lambda module, *_a, **_k: module,
             ),
-            patch("agilerl.distributed.fsdp.restore_after_to_empty"),
-            patch("agilerl.distributed.fsdp._share_fsdp_comm_streams"),
+            patch("agilerl.distributed.materialize.restore_after_to_empty"),
+            patch("agilerl.distributed.materialize._share_fsdp_comm_streams"),
         ):
             materialize_fsdp2_from_cpu_state(model, "cpu", FSDPConfig(cpu_offload=True))
 
@@ -1174,17 +1182,17 @@ class TestMaterializeFsdp2FromCpuState:
         )
         loaded: list[str] = []
         with (
-            patch("agilerl.distributed.fsdp.is_distributed", return_value=True),
+            patch("agilerl.distributed.wrap.is_distributed", return_value=True),
             patch(
-                "agilerl.distributed.fsdp.apply_fsdp2",
+                "agilerl.distributed.materialize.apply_fsdp2",
                 side_effect=lambda module, *_a, **_k: module,
             ),
             patch(
-                "agilerl.distributed.fsdp._load_sharded_weights_from_safetensors",
+                "agilerl.distributed.materialize._load_sharded_weights_from_safetensors",
                 side_effect=lambda *_a, **_k: loaded.append("shard_load"),
             ),
-            patch("agilerl.distributed.fsdp.restore_after_to_empty"),
-            patch("agilerl.distributed.fsdp._share_fsdp_comm_streams"),
+            patch("agilerl.distributed.materialize.restore_after_to_empty"),
+            patch("agilerl.distributed.materialize._share_fsdp_comm_streams"),
         ):
             materialize_fsdp2_from_cpu_state(model, "cpu", FSDPConfig(cpu_offload=True))
 
@@ -1246,7 +1254,7 @@ class TestRestoreAfterToEmpty:
     """Re-tie through PEFT getattr forwarding; raise if a tied key stays separate."""
 
     def test_ties_inner_head_when_peft_shell_has_noop_tie_weights(self):
-        from agilerl.distributed.fsdp import restore_after_to_empty
+        from agilerl.distributed.materialize import restore_after_to_empty
 
         class Causal(nn.Module):
             def __init__(self) -> None:
@@ -1283,7 +1291,7 @@ class TestRestoreAfterToEmpty:
         assert inner.lm_head.weight is inner.model.embed_tokens.weight
 
     def test_raises_when_peft_forwards_head_and_inner_stays_untied(self):
-        from agilerl.distributed.fsdp import restore_after_to_empty
+        from agilerl.distributed.materialize import restore_after_to_empty
 
         class Causal(nn.Module):
             def __init__(self) -> None:
@@ -1315,7 +1323,7 @@ class TestRestoreAfterToEmpty:
             restore_after_to_empty(model)
 
     def test_returns_when_model_has_no_output_head(self):
-        from agilerl.distributed.fsdp import restore_after_to_empty
+        from agilerl.distributed.materialize import restore_after_to_empty
 
         model = nn.Linear(2, 4)
         weight = model.weight
@@ -1325,7 +1333,7 @@ class TestRestoreAfterToEmpty:
         assert model.weight is weight
 
     def test_ties_head_when_owner_has_no_tied_weight_keys(self):
-        from agilerl.distributed.fsdp import restore_after_to_empty
+        from agilerl.distributed.materialize import restore_after_to_empty
 
         class Owner(nn.Module):
             def __init__(self) -> None:
@@ -1383,12 +1391,12 @@ class TestSafetensorsShardKeys:
     """Checkpoint key lookup and the safetensors shard copy."""
 
     def test_base_layer_bias_maps_to_bias(self):
-        from agilerl.distributed.fsdp import checkpoint_key_for_parameter
+        from agilerl.distributed.checkpoint import checkpoint_key_for_parameter
 
         assert checkpoint_key_for_parameter("block.base_layer.bias") == "block.bias"
 
     def test_nested_base_layer_modules_drop_out_of_the_checkpoint_key(self):
-        from agilerl.distributed.fsdp import checkpoint_key_for_parameter
+        from agilerl.distributed.checkpoint import checkpoint_key_for_parameter
 
         live = (
             "model.layers.0.block_sparse_moe.experts.base_layer.base_layer.gate_up_proj"
@@ -1398,7 +1406,7 @@ class TestSafetensorsShardKeys:
         )
 
     def test_value_head_peft_fqn_maps_to_hf_embed_key(self):
-        from agilerl.distributed.fsdp import checkpoint_key_for_parameter
+        from agilerl.distributed.checkpoint import checkpoint_key_for_parameter
 
         live = "pretrained_model.base_model.model.model.embed_tokens.weight"
         assert checkpoint_key_for_parameter(live) == "model.embed_tokens.weight"
@@ -1407,7 +1415,9 @@ class TestSafetensorsShardKeys:
 
         from safetensors.torch import save_file
 
-        from agilerl.distributed.fsdp import _load_sharded_weights_from_safetensors
+        from agilerl.distributed.checkpoint import (
+            _load_sharded_weights_from_safetensors,
+        )
 
         expected = torch.arange(8, dtype=torch.float32).reshape(4, 2)
 
@@ -1453,7 +1463,9 @@ class TestSafetensorsShardKeys:
 
         from safetensors.torch import save_file
 
-        from agilerl.distributed.fsdp import _load_sharded_weights_from_safetensors
+        from agilerl.distributed.checkpoint import (
+            _load_sharded_weights_from_safetensors,
+        )
 
         expected = torch.arange(4, dtype=torch.float32).reshape(2, 2)
 
@@ -1521,7 +1533,9 @@ class TestSafetensorsShardKeys:
 
         from safetensors.torch import save_file
 
-        from agilerl.distributed.fsdp import _load_sharded_weights_from_safetensors
+        from agilerl.distributed.checkpoint import (
+            _load_sharded_weights_from_safetensors,
+        )
 
         expected = torch.arange(8, dtype=torch.float32).reshape(2, 2, 2)
 
@@ -1568,7 +1582,7 @@ class TestSafetensorsShardKeys:
             WeightRenaming,
         )
 
-        from agilerl.distributed import fsdp as fsdp_mod
+        from agilerl.distributed import checkpoint as fsdp_mod
 
         query = torch.arange(4, dtype=torch.float32).reshape(2, 2)
         key = query + 10
@@ -1631,7 +1645,9 @@ class TestSafetensorsShardKeys:
         assert torch.equal(model.scale.detach(), scale)
 
     def test_loads_scalar_buffer(self, tmp_path):
-        from agilerl.distributed.fsdp import _load_sharded_weights_from_safetensors
+        from agilerl.distributed.checkpoint import (
+            _load_sharded_weights_from_safetensors,
+        )
 
         # Arrange
         weight = torch.ones(2, 2)
@@ -1664,7 +1680,7 @@ class TestSafetensorsShardKeys:
     ):
         from transformers.conversion_mapping import Transpose, WeightConverter
 
-        from agilerl.distributed import fsdp as fsdp_mod
+        from agilerl.distributed import checkpoint as fsdp_mod
 
         scale = torch.tensor([3.0, 4.0])
         save_file(
@@ -1704,7 +1720,9 @@ class TestSafetensorsShardKeys:
         assert torch.equal(model.scale.detach(), scale)
 
     def test_loads_nemotron_h_backbone_keys_that_only_need_some_renames(self, tmp_path):
-        from agilerl.distributed.fsdp import _load_sharded_weights_from_safetensors
+        from agilerl.distributed.checkpoint import (
+            _load_sharded_weights_from_safetensors,
+        )
 
         # Arrange
         embeddings = torch.arange(8, dtype=torch.float32).reshape(4, 2)
@@ -1745,7 +1763,9 @@ class TestSafetensorsShardKeys:
         assert torch.equal(model.model.norm_f.weight.detach(), norm)
 
     def test_loads_nemotron_h_packed_experts_from_renamed_backbone_keys(self, tmp_path):
-        from agilerl.distributed.fsdp import _load_sharded_weights_from_safetensors
+        from agilerl.distributed.checkpoint import (
+            _load_sharded_weights_from_safetensors,
+        )
 
         # Arrange
         experts = [torch.full((2, 3), float(index)) for index in range(3)]
@@ -1797,7 +1817,7 @@ class TestSafetensorsShardKeys:
         assert torch.equal(loaded, torch.stack(experts))
 
     def test_language_body_alias_uses_backbone_key(self):
-        from agilerl.distributed.fsdp import checkpoint_key_candidates
+        from agilerl.distributed.checkpoint import checkpoint_key_candidates
 
         assert checkpoint_key_candidates("language_model.model.embeddings.weight") == (
             "language_model.model.embeddings.weight",
@@ -1805,7 +1825,7 @@ class TestSafetensorsShardKeys:
         )
 
     def test_shard_slices_when_mesh_coordinate_is_unset(self):
-        from agilerl.distributed.fsdp import global_shard_slices
+        from agilerl.distributed.checkpoint import global_shard_slices
 
         slices = global_shard_slices((4, 2), (Replicate(), Shard(0)), _CoordMesh())
 
@@ -1813,7 +1833,7 @@ class TestSafetensorsShardKeys:
         assert slices[1] == slice(0, 2)
 
     def test_local_dest_of_a_dtensor(self, monkeypatch: pytest.MonkeyPatch):
-        from agilerl.distributed import fsdp as fsdp_mod
+        from agilerl.distributed import checkpoint as fsdp_mod
 
         local = torch.ones(2)
 
@@ -1827,7 +1847,7 @@ class TestSafetensorsShardKeys:
         assert fsdp_mod._parameter_dest_local(param) is local
 
     def test_lora_init_copies_this_ranks_slice(self, monkeypatch: pytest.MonkeyPatch):
-        from agilerl.distributed import fsdp as fsdp_mod
+        from agilerl.distributed import checkpoint as fsdp_mod
 
         class FakeDTensor(nn.Parameter):
             def to_local(self) -> torch.Tensor:
@@ -1849,7 +1869,7 @@ class TestSafetensorsShardKeys:
     def test_value_head_init_copies_this_ranks_slice(
         self, monkeypatch: pytest.MonkeyPatch
     ):
-        from agilerl.distributed import fsdp as fsdp_mod
+        from agilerl.distributed import checkpoint as fsdp_mod
 
         class FakeDTensor(nn.Parameter):
             def to_local(self) -> torch.Tensor:
@@ -1871,7 +1891,7 @@ class TestSafetensorsShardKeys:
     def test_empty_config_path_is_not_a_checkpoint(self):
         from transformers import PretrainedConfig
 
-        from agilerl.distributed.fsdp import _checkpoint_source_from_config
+        from agilerl.distributed.checkpoint import _checkpoint_source_from_config
 
         assert (
             _checkpoint_source_from_config(PretrainedConfig(tie_word_embeddings=False))
@@ -1881,7 +1901,7 @@ class TestSafetensorsShardKeys:
     def test_index_file_is_a_checkpoint_source(self, tmp_path):
         from transformers import PretrainedConfig
 
-        from agilerl.distributed.fsdp import _checkpoint_source_from_config
+        from agilerl.distributed.checkpoint import _checkpoint_source_from_config
 
         (tmp_path / "model.safetensors.index.json").write_text(
             '{"weight_map": {}}', encoding="utf-8"
@@ -1894,7 +1914,7 @@ class TestSafetensorsShardKeys:
     def test_missing_weight_files_are_not_a_checkpoint(self, tmp_path):
         from transformers import PretrainedConfig
 
-        from agilerl.distributed.fsdp import _checkpoint_source_from_config
+        from agilerl.distributed.checkpoint import _checkpoint_source_from_config
 
         (tmp_path / "config.json").write_text("{}", encoding="utf-8")
 
@@ -1906,7 +1926,7 @@ class TestSafetensorsShardKeys:
         )
 
     def test_unwraps_pretrained_base_and_inner_model(self):
-        from agilerl.distributed.fsdp import _next_unwrap_module
+        from agilerl.distributed.checkpoint import _next_unwrap_module
 
         inner = nn.Linear(2, 2)
         pretrained = nn.Linear(2, 2)
@@ -1933,13 +1953,13 @@ class TestSafetensorsShardKeys:
         assert _next_unwrap_module(nn.Linear(2, 2)) is None
 
     def test_resolve_raises_without_a_checkpoint(self):
-        from agilerl.distributed.fsdp import _resolve_checkpoint_source
+        from agilerl.distributed.checkpoint import _resolve_checkpoint_source
 
         with pytest.raises(RuntimeError, match="FSDP shard load requires"):
             _resolve_checkpoint_source(nn.Linear(2, 2))
 
     def test_index_maps_each_key_to_its_shard(self, tmp_path):
-        from agilerl.distributed.fsdp import _build_safetensors_key_files
+        from agilerl.distributed.checkpoint import _build_safetensors_key_files
 
         shard = tmp_path / "model-00001-of-00001.safetensors"
         save_file({"weight": torch.ones(2)}, str(shard))
@@ -1953,7 +1973,7 @@ class TestSafetensorsShardKeys:
         assert key_files == {"weight": str(shard)}
 
     def test_index_missing_shard_raises(self, tmp_path):
-        from agilerl.distributed.fsdp import _build_safetensors_key_files
+        from agilerl.distributed.checkpoint import _build_safetensors_key_files
 
         (tmp_path / "model.safetensors.index.json").write_text(
             json.dumps({"weight_map": {"weight": "missing.safetensors"}}),
@@ -1964,13 +1984,15 @@ class TestSafetensorsShardKeys:
             _build_safetensors_key_files(str(tmp_path))
 
     def test_directory_without_weights_raises(self, tmp_path):
-        from agilerl.distributed.fsdp import _build_safetensors_key_files
+        from agilerl.distributed.checkpoint import _build_safetensors_key_files
 
         with pytest.raises(RuntimeError, match=r"model\.safetensors"):
             _build_safetensors_key_files(str(tmp_path))
 
     def test_loads_backbone_alias_lora_tied_weight_and_buffer(self, tmp_path):
-        from agilerl.distributed.fsdp import _load_sharded_weights_from_safetensors
+        from agilerl.distributed.checkpoint import (
+            _load_sharded_weights_from_safetensors,
+        )
 
         expected = torch.arange(4, dtype=torch.float32).reshape(2, 2)
         save_file(
@@ -2017,7 +2039,9 @@ class TestSafetensorsShardKeys:
         assert torch.isfinite(model.language_model.model.lora_A).all()
 
     def test_leaves_parameters_outside_the_language_tower(self, tmp_path, caplog):
-        from agilerl.distributed.fsdp import _load_sharded_weights_from_safetensors
+        from agilerl.distributed.checkpoint import (
+            _load_sharded_weights_from_safetensors,
+        )
 
         expected = torch.arange(4, dtype=torch.float32).reshape(2, 2)
         save_file(
@@ -2037,7 +2061,7 @@ class TestSafetensorsShardKeys:
         model = Root()
         with torch.no_grad():
             model.vision_model.weight.copy_(torch.ones(2, 2))
-        with caplog.at_level("INFO", logger="agilerl.distributed.fsdp"):
+        with caplog.at_level("INFO", logger="agilerl.distributed.checkpoint"):
             _load_sharded_weights_from_safetensors(model)
 
         assert torch.equal(model.language_model.weight.detach(), expected)
@@ -2054,7 +2078,9 @@ class TestSafetensorsShardKeys:
             WeightRenaming,
         )
 
-        from agilerl.distributed.fsdp import _load_sharded_weights_from_safetensors
+        from agilerl.distributed.checkpoint import (
+            _load_sharded_weights_from_safetensors,
+        )
 
         position = torch.arange(4, dtype=torch.float32).reshape(1, 4)
         query = torch.arange(4, dtype=torch.float32).reshape(2, 2)
@@ -2131,12 +2157,12 @@ class TestSafetensorsShardKeys:
             ),
         ]
         monkeypatch.setattr(
-            "agilerl.distributed.fsdp._checkpoint_transform_groups",
+            "agilerl.distributed.checkpoint._checkpoint_transform_groups",
             lambda _model: [("", transforms)],
         )
         model = Root()
 
-        with caplog.at_level("INFO", logger="agilerl.distributed.fsdp"):
+        with caplog.at_level("INFO", logger="agilerl.distributed.checkpoint"):
             _load_sharded_weights_from_safetensors(model)
 
         vision = model.vision_model
@@ -2157,7 +2183,9 @@ class TestSafetensorsShardKeys:
             register_checkpoint_conversion_mapping,
         )
 
-        from agilerl.distributed.fsdp import _load_sharded_weights_from_safetensors
+        from agilerl.distributed.checkpoint import (
+            _load_sharded_weights_from_safetensors,
+        )
 
         position = torch.arange(4, dtype=torch.float32).reshape(1, 4)
         query = torch.arange(4, dtype=torch.float32).reshape(2, 2)
@@ -2263,7 +2291,9 @@ class TestSafetensorsShardKeys:
         assert torch.equal(model.other.detach(), torch.ones(2))
 
     def test_inits_missing_keys_the_module_marks_ignorable(self, tmp_path, caplog):
-        from agilerl.distributed.fsdp import _load_sharded_weights_from_safetensors
+        from agilerl.distributed.checkpoint import (
+            _load_sharded_weights_from_safetensors,
+        )
 
         save_file(
             {"language_model.weight": torch.zeros(2, 2)},
@@ -2300,7 +2330,7 @@ class TestSafetensorsShardKeys:
 
         model = Root()
 
-        with caplog.at_level("INFO", logger="agilerl.distributed.fsdp"):
+        with caplog.at_level("INFO", logger="agilerl.distributed.checkpoint"):
             _load_sharded_weights_from_safetensors(model)
 
         assert torch.equal(
@@ -2311,12 +2341,14 @@ class TestSafetensorsShardKeys:
         assert "first vision_model.extra" in caplog.text
 
     def test_plain_module_has_no_weight_transforms(self) -> None:
-        from agilerl.distributed.fsdp import _checkpoint_transform_groups
+        from agilerl.distributed.checkpoint import _checkpoint_transform_groups
 
         assert _checkpoint_transform_groups(nn.Linear(2, 2)) == []
 
     def test_missing_key_raises_without_a_language_tower(self, tmp_path):
-        from agilerl.distributed.fsdp import _load_sharded_weights_from_safetensors
+        from agilerl.distributed.checkpoint import (
+            _load_sharded_weights_from_safetensors,
+        )
 
         save_file(
             {"other.weight": torch.ones(2, 2)},
@@ -2335,7 +2367,7 @@ class TestSafetensorsShardKeys:
             _load_sharded_weights_from_safetensors(Root())
 
     def test_indexed_keys_skip_a_non_numeric_middle(self):
-        from agilerl.distributed.fsdp import _contiguous_indexed_weight_keys
+        from agilerl.distributed.checkpoint import _contiguous_indexed_weight_keys
 
         assert _contiguous_indexed_weight_keys("up_proj", {}) is None
         assert _contiguous_indexed_weight_keys(
@@ -2347,7 +2379,9 @@ class TestSafetensorsShardKeys:
         ) == ["block.experts.0.up_proj.weight"]
 
     def test_stacks_indexed_expert_weights(self, tmp_path):
-        from agilerl.distributed.fsdp import _load_sharded_weights_from_safetensors
+        from agilerl.distributed.checkpoint import (
+            _load_sharded_weights_from_safetensors,
+        )
 
         first = torch.arange(4, dtype=torch.float32).reshape(2, 2)
         second = torch.arange(4, 8, dtype=torch.float32).reshape(2, 2)
@@ -2403,7 +2437,9 @@ class TestSafetensorsShardKeys:
         assert torch.equal(stacked.detach(), torch.stack([first, second]))
 
     def test_indexed_expert_gap_raises(self, tmp_path):
-        from agilerl.distributed.fsdp import _load_sharded_weights_from_safetensors
+        from agilerl.distributed.checkpoint import (
+            _load_sharded_weights_from_safetensors,
+        )
 
         save_file(
             {
@@ -2427,7 +2463,9 @@ class TestSafetensorsShardKeys:
             _load_sharded_weights_from_safetensors(Root())
 
     def test_stacked_shape_mismatch_raises(self, tmp_path):
-        from agilerl.distributed.fsdp import _load_sharded_weights_from_safetensors
+        from agilerl.distributed.checkpoint import (
+            _load_sharded_weights_from_safetensors,
+        )
 
         save_file(
             {"block.experts.0.up_proj.weight": torch.ones(2, 2)},
@@ -2450,7 +2488,7 @@ class TestSafetensorsShardKeys:
     def test_stacks_indexed_expert_weights_on_a_dtensor(
         self, tmp_path, monkeypatch: pytest.MonkeyPatch
     ):
-        from agilerl.distributed import fsdp as fsdp_mod
+        from agilerl.distributed import checkpoint as fsdp_mod
 
         class FakeDTensor(nn.Parameter):
             def to_local(self) -> torch.Tensor:
@@ -2498,7 +2536,7 @@ class TestSafetensorsShardKeys:
         )
 
     def test_loads_a_dtensor_shard(self, tmp_path, monkeypatch: pytest.MonkeyPatch):
-        from agilerl.distributed import fsdp as fsdp_mod
+        from agilerl.distributed import checkpoint as fsdp_mod
 
         class FakeDTensor(nn.Parameter):
             def to_local(self) -> torch.Tensor:
@@ -2535,14 +2573,14 @@ class TestSafetensorsShardKeys:
         assert torch.equal(model.weight.data, full)
 
     def test_share_streams_returns_when_nothing_is_sharded(self):
-        from agilerl.distributed.fsdp import _share_fsdp_comm_streams
+        from agilerl.distributed.materialize import _share_fsdp_comm_streams
 
         _share_fsdp_comm_streams(nn.Linear(2, 2))
 
 
 class TestMatchCheckpointKey:
     def test_returns_a_direct_stored_key(self):
-        from agilerl.distributed.fsdp_meta import match_checkpoint_key
+        from agilerl.distributed.meta import match_checkpoint_key
 
         key, split = match_checkpoint_key(
             ("scale", "alias.scale"),
@@ -2555,7 +2593,7 @@ class TestMatchCheckpointKey:
         assert split is None
 
     def test_returns_a_one_to_one_rename(self):
-        from agilerl.distributed.fsdp_meta import match_checkpoint_key
+        from agilerl.distributed.meta import match_checkpoint_key
 
         key, split = match_checkpoint_key(
             ("scale",),
@@ -2570,7 +2608,7 @@ class TestMatchCheckpointKey:
     def test_returns_a_converted_key_and_split_index(self):
         from transformers.conversion_mapping import Chunk, WeightConverter
 
-        from agilerl.distributed.fsdp_meta import match_checkpoint_key
+        from agilerl.distributed.meta import match_checkpoint_key
 
         converter = WeightConverter(
             source_patterns="qkv",
@@ -2591,7 +2629,7 @@ class TestMatchCheckpointKey:
     def test_converted_key_under_a_module_prefix(self):
         from transformers.conversion_mapping import Chunk, WeightConverter
 
-        from agilerl.distributed.fsdp_meta import match_checkpoint_key
+        from agilerl.distributed.meta import match_checkpoint_key
 
         converter = WeightConverter(
             source_patterns="qkv",
@@ -2612,7 +2650,7 @@ class TestMatchCheckpointKey:
     def test_ignores_converters_under_a_different_prefix(self):
         from transformers.conversion_mapping import Chunk, WeightConverter
 
-        from agilerl.distributed.fsdp_meta import match_checkpoint_key
+        from agilerl.distributed.meta import match_checkpoint_key
 
         converter = WeightConverter(
             source_patterns="qkv",
@@ -2633,7 +2671,7 @@ class TestMatchCheckpointKey:
     def test_skips_a_converter_that_does_not_rename_the_live_key(self):
         from transformers.conversion_mapping import Chunk, WeightConverter
 
-        from agilerl.distributed.fsdp_meta import match_checkpoint_key
+        from agilerl.distributed.meta import match_checkpoint_key
 
         converter = WeightConverter(
             source_patterns="qkv",
@@ -2652,7 +2690,7 @@ class TestMatchCheckpointKey:
         assert split is None
 
     def test_returns_none_when_no_candidate_matches(self):
-        from agilerl.distributed.fsdp_meta import match_checkpoint_key
+        from agilerl.distributed.meta import match_checkpoint_key
 
         key, split = match_checkpoint_key(("scale",), {}, {}, [])
 
@@ -2664,7 +2702,7 @@ class TestRenamedCheckpointKeys:
     def test_maps_live_names_through_matching_renames(self):
         from transformers.conversion_mapping import WeightRenaming
 
-        from agilerl.distributed.fsdp_meta import renamed_checkpoint_keys
+        from agilerl.distributed.meta import renamed_checkpoint_keys
 
         mapped = renamed_checkpoint_keys(
             ["backbone.embeddings.weight", "backbone.norm.weight"],
@@ -2679,7 +2717,7 @@ class TestRenamedCheckpointKeys:
     def test_applies_renames_under_a_module_prefix(self):
         from transformers.conversion_mapping import WeightRenaming
 
-        from agilerl.distributed.fsdp_meta import renamed_checkpoint_keys
+        from agilerl.distributed.meta import renamed_checkpoint_keys
 
         mapped = renamed_checkpoint_keys(
             ["vision.backbone.w", "language.w"],
@@ -2691,7 +2729,7 @@ class TestRenamedCheckpointKeys:
     def test_skips_packing_converters(self):
         from transformers.conversion_mapping import Chunk, WeightConverter
 
-        from agilerl.distributed.fsdp_meta import renamed_checkpoint_keys
+        from agilerl.distributed.meta import renamed_checkpoint_keys
 
         mapped = renamed_checkpoint_keys(
             ["qkv.weight"],
@@ -2714,7 +2752,7 @@ class TestRenamedCheckpointKeys:
     def test_two_stored_keys_renaming_to_one_live_name_raise(self):
         from transformers.conversion_mapping import WeightRenaming
 
-        from agilerl.distributed.fsdp_meta import renamed_checkpoint_keys
+        from agilerl.distributed.meta import renamed_checkpoint_keys
 
         with pytest.raises(ValueError, match=r"both rename to 'model\.norm\.weight'"):
             renamed_checkpoint_keys(

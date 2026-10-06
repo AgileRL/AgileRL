@@ -32,8 +32,8 @@ from agilerl.architectures.nemotron_h.language_tower import (
 from agilerl.architectures.vllm_language import (
     nested_language_config,
 )
-from agilerl.distributed import fsdp as dmod
 from agilerl.distributed import gather_params
+from agilerl.distributed import state as dmod
 from agilerl.llm_envs import DatasetEnv
 from agilerl.utils import llm_utils as llm_utils_module
 from agilerl.utils.llm_utils import (

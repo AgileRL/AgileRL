@@ -53,9 +53,12 @@ from agilerl.distributed import (
     set_seed,
     sync_grads,
 )
-from agilerl.distributed import fsdp as dmod
+from agilerl.distributed import materialize as fsdp_materialize
+from agilerl.distributed import offload as fsdp_offload
 from agilerl.distributed import process as pmod
 from agilerl.distributed import runtime as rmod
+from agilerl.distributed import state as fsdp_state
+from agilerl.distributed import wrap as dmod
 from agilerl.distributed.fsdp import (
     reshard_fsdp_modules,
     set_full_model_state_dict,
@@ -682,7 +685,7 @@ class TestMaterializeDtensors:
 
         fake = FakeDTensor()
         linear._parameters["weight"] = fake
-        with patch.object(dmod, "DTensor", FakeDTensor):
+        with patch.object(fsdp_state, "DTensor", FakeDTensor):
             with materialize_dtensors(fake, None) as gathered:
                 assert gathered[0] is full
                 assert gathered[1] is None
@@ -722,7 +725,7 @@ class TestFullShapeViews:
                 raise AssertionError(msg)
 
         fake_dtensor = FakeDTensor()
-        with patch.object(dmod, "DTensor", FakeDTensor):
+        with patch.object(fsdp_state, "DTensor", FakeDTensor):
             linear._parameters["weight"] = fake_dtensor
 
             with full_shape_views(linear, [fake_dtensor, fake_dtensor, None]):
@@ -742,7 +745,7 @@ class TestFullShapeViews:
 
         fake_dtensor = FakeDTensor()
         with (
-            patch.object(dmod, "DTensor", FakeDTensor),
+            patch.object(fsdp_state, "DTensor", FakeDTensor),
             full_shape_views(nn.Linear(2, 2), [fake_dtensor]),
         ):
             pass
@@ -757,7 +760,7 @@ class TestFullShapeViews:
             device = torch.device("cpu")
 
         fake_dtensor = FakeDTensor()
-        with patch.object(dmod, "DTensor", FakeDTensor):
+        with patch.object(fsdp_state, "DTensor", FakeDTensor):
             linear._parameters["weight"] = fake_dtensor
 
             boom = RuntimeError("boom")
@@ -795,7 +798,7 @@ class TestSetFullModelStateDict:
             def to_local(self):
                 return self._tensor
 
-        monkeypatch.setattr("agilerl.distributed.fsdp.DTensor", FakeDTensor)
+        monkeypatch.setattr("agilerl.distributed.state.DTensor", FakeDTensor)
 
         class Tiny(nn.Module):
             def __init__(self):
@@ -816,7 +819,7 @@ class TestSetFullModelStateDict:
             return FakeSharded(torch.ones(2, 2))
 
         monkeypatch.setattr(
-            "agilerl.distributed.fsdp.distribute_tensor", fake_distribute
+            "agilerl.distributed.state.distribute_tensor", fake_distribute
         )
         source = torch.full((2, 2), 7.0)
         bias = torch.full((2,), 3.0)
@@ -894,7 +897,7 @@ class TestReshardFsdpModules:
 
         model = ShardUnit()
 
-        with patch("agilerl.distributed.fsdp.FSDPModule", ShardUnit):
+        with patch("agilerl.distributed.state.FSDPModule", ShardUnit):
             reshard_fsdp_modules(model)
 
         model.reshard.assert_called_once_with()
@@ -906,7 +909,7 @@ class TestParameterOwners:
         model = nn.Sequential(nn.Linear(2, 2), nn.Linear(2, 2))
 
         # Act
-        owners = dmod.parameter_owners(
+        owners = fsdp_state.parameter_owners(
             model, [model[0].weight, model[0].bias, model[1].weight]
         )
 
@@ -918,7 +921,7 @@ class TestParameterOwners:
         }
 
     def test_empty_input_returns_empty_map(self):
-        assert dmod.parameter_owners(nn.Linear(2, 2), []) == {}
+        assert fsdp_state.parameter_owners(nn.Linear(2, 2), []) == {}
 
     def test_omits_tensors_held_outside_modules(self):
         # Arrange
@@ -928,7 +931,7 @@ class TestParameterOwners:
         holder = {"tensor": torch.tensor([1.0])}
 
         # Act
-        owners = dmod.parameter_owners(
+        owners = fsdp_state.parameter_owners(
             nn.Linear(2, 2), [listed[0], keyed_tensor, holder["tensor"]]
         )
 
@@ -945,8 +948,8 @@ class TestGatherParamsOwnerless:
 
         fake = FakeDTensor()
         with (
-            patch.object(dmod, "DTensor", FakeDTensor),
-            dmod.gather_params(nn.Linear(2, 2), [fake, None]) as out,
+            patch.object(fsdp_state, "DTensor", FakeDTensor),
+            fsdp_state.gather_params(nn.Linear(2, 2), [fake, None]) as out,
         ):
             assert torch.equal(out[0], torch.ones(2, 2))
             assert out[1] is None
@@ -2593,7 +2596,7 @@ class TestRestoreNonpersistentBuffers:
 
         model = Tiny()
 
-        restored = dmod._restore_nonpersistent_buffers(
+        restored = fsdp_materialize._restore_nonpersistent_buffers(
             model, {"running": torch.ones(2)}
         )
 
@@ -2604,7 +2607,7 @@ class TestRestoreNonpersistentBuffers:
         model = nn.Linear(2, 2)
         model.register_buffer("running", torch.zeros(2))
 
-        restored = dmod._restore_nonpersistent_buffers(model, {})
+        restored = fsdp_materialize._restore_nonpersistent_buffers(model, {})
 
         assert restored == 0
         assert torch.equal(model.running, torch.zeros(2))
@@ -2619,8 +2622,8 @@ class TestShareFsdpCommStreams:
 
         model = FakeUnit()
 
-        with patch.object(dmod, "FSDPModule", FakeUnit):
-            dmod._share_fsdp_comm_streams(model)
+        with patch.object(fsdp_materialize, "FSDPModule", FakeUnit):
+            fsdp_materialize._share_fsdp_comm_streams(model)
 
     def test_lazy_inits_dtensor_param_groups(self):
         class FakeUnit(nn.Module):
@@ -2653,11 +2656,11 @@ class TestShareFsdpCommStreams:
         model = Model()
 
         with (
-            patch.object(dmod, "FSDPModule", FakeUnit),
-            patch.object(dmod, "DTensor", _FakeDTensor),
-            patch.object(dmod, "share_comm_ctx") as mock_share,
+            patch.object(fsdp_materialize, "FSDPModule", FakeUnit),
+            patch.object(fsdp_materialize, "DTensor", _FakeDTensor),
+            patch.object(fsdp_materialize, "share_comm_ctx") as mock_share,
         ):
-            dmod._share_fsdp_comm_streams(model)
+            fsdp_materialize._share_fsdp_comm_streams(model)
 
         mock_share.assert_called_once()
         mixed_group.lazy_init.assert_not_called()
@@ -2893,8 +2896,8 @@ class TestCPUOffloadOptimizer:
                 assert v.device.type == "cpu"
 
     def test_move_states_handles_dtensor_local_tensor(self, monkeypatch):
-        # Arrange — point dmod.DTensor at our stub so isinstance() passes
-        monkeypatch.setattr(dmod, "DTensor", _FakeDTensor)
+        # Arrange — point offload.DTensor at our stub so isinstance() passes
+        monkeypatch.setattr(fsdp_offload, "DTensor", _FakeDTensor)
         model, opt = self._make_optimizer("cpu")
         offload = CPUOffloadOptimizer(opt, pin_memory=False)
 

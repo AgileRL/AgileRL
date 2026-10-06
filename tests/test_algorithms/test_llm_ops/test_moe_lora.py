@@ -30,8 +30,8 @@ from agilerl.algorithms.core.llm_ops.moe_lora import (
     transposed_experts_local_forward,
     upgrade_moe_param_wrappers,
 )
-from agilerl.distributed import fsdp as dmod
 from agilerl.distributed import full_shape_views
+from agilerl.distributed import state as dmod
 from agilerl.utils.llm_utils import (
     expert_lora_vllm_key_map,
     filter_peft_state_dict_for_vllm_lora,
