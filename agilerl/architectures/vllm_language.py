@@ -68,3 +68,21 @@ def apply_language_tower_engine_kwargs(
     kept_override = runtime.multimodal_towers_kept_hf_override
     if kept_override is not None:
         kwargs["hf_overrides"] = kept_override
+
+
+def apply_tower_connector_lora_engine_kwargs(
+    kwargs: dict[str, Any],
+    strip_multimodal_towers: bool | list[str],
+    runtime: ModelRuntimeConfig,
+) -> None:
+    """Enable vLLM LoRA on multimodal towers and connectors when the engine loads them.
+
+    :param kwargs: vLLM engine kwargs mutated in place.
+    :type kwargs: dict[str, Any]
+    :param strip_multimodal_towers: ``True`` serves the language tower only.
+    :type strip_multimodal_towers: bool | list[str]
+    :param runtime: Family runtime; only families whose vLLM towers support LoRA enable it.
+    :type runtime: ModelRuntimeConfig
+    """
+    if strip_multimodal_towers is not True and runtime.enable_tower_connector_lora:
+        kwargs["enable_tower_connector_lora"] = True

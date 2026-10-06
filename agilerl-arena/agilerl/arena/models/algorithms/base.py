@@ -296,6 +296,16 @@ class LLMAlgorithmSpec(AlgorithmSpec):
             "Saves GPU memory at the cost of PCIe traffic."
         ),
     )
+    moe_lora_recompute: bool | None = Field(
+        default=None,
+        description=(
+            "For LoRA on frozen mixture-of-experts weights, keep only the expert "
+            "input rows for backward and recompute the expert up-projection "
+            "there. Much less activation memory for a little extra compute. "
+            "Unset recomputes only in layers without gradient checkpointing, "
+            "which already rerun the forward in backward."
+        ),
+    )
     use_sequence_packing: bool = Field(
         default=False,
         description=(

@@ -8,6 +8,7 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
+from agilerl.architectures import family_tensor_parallel_plans
 from agilerl.architectures.catalog import (
     FAMILY_RUNTIME_CONFIGS,
     family_runtime,
@@ -18,6 +19,10 @@ from agilerl.architectures.nemotron_h.language_tower import (
     omni_language_tower_hf_override,
 )
 from agilerl.architectures.nemotron_h.mamba import install_mamba_patches
+from agilerl.architectures.nemotron_h.tensor_parallel import (
+    NEMOTRON_H_TENSOR_PARALLEL_PLAN,
+)
+from agilerl.architectures.runtime import ModelRuntimeConfig
 
 NEMOTRON_VLLM_KWARGS = {
     "mamba_cache_mode": "align",
@@ -155,6 +160,23 @@ class TestFamilyRuntimeConfigs:
         assert mamba.stream_ordering is True
 
 
+class TestFamilyTensorParallelPlans:
+    def test_resolves_shared_nemotron_h_plan_once(self) -> None:
+        plans = family_tensor_parallel_plans()
+
+        assert plans == [NEMOTRON_H_TENSOR_PARALLEL_PLAN]
+
+    def test_missing_plan_module_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setitem(
+            FAMILY_RUNTIME_CONFIGS,
+            "missing_family",
+            ModelRuntimeConfig(tensor_parallel_plan="agilerl.no_such_module:PLAN"),
+        )
+
+        with pytest.raises(ModuleNotFoundError, match=r"agilerl\.no_such_module"):
+            family_tensor_parallel_plans()
+
+
 class TestFamilyRuntime:
     @pytest.mark.parametrize("model_type", ["nemotron_h", "nemotron_h_omni"])
     def test_nemotron_hub_id_uses_catalog(
@@ -226,8 +248,21 @@ class TestFamilyRuntime:
 
 class TestPretrainedModelType:
     def test_reads_config_json(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        stub_config_model_type(monkeypatch, "nemotron_h")
+        seen: dict[str, object] = {}
+
+        @classmethod
+        def fake_get_config_dict(
+            cls, pretrained_model_name_or_path: str, **kwargs: object
+        ) -> tuple[dict[str, object], dict[str, object]]:
+            seen.update(kwargs)
+            return ({"model_type": "nemotron_h"}, {})
+
+        monkeypatch.setattr(
+            "agilerl.architectures.catalog.PretrainedConfig.get_config_dict",
+            fake_get_config_dict,
+        )
         assert pretrained_model_type("nvidia/unlisted-model") == "nemotron_h"
+        assert seen["trust_remote_code"] is True
 
     def test_missing_config_json_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
         def raise_missing(*args: object, **kwargs: object) -> None:

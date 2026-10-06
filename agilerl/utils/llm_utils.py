@@ -12,11 +12,20 @@ import os
 import random
 import re
 import shutil
+import sys
 import textwrap
 import warnings
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, TypeGuard, TypeVar, cast
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Protocol,
+    TypeGuard,
+    TypeVar,
+    cast,
+    runtime_checkable,
+)
 
 import torch
 from torch import nn
@@ -32,11 +41,16 @@ from agilerl.architectures import (
     pretrained_model_type,
 )
 from agilerl.architectures.flex_attention import patch_flex_attention_kernel_options
-from agilerl.architectures.vllm_language import apply_language_tower_engine_kwargs
-from agilerl.distributed.fsdp import CPUOffloadOptimizer
+from agilerl.architectures.vllm_language import (
+    apply_language_tower_engine_kwargs,
+    apply_tower_connector_lora_engine_kwargs,
+    nested_language_config,
+)
+from agilerl.distributed.fsdp import CPUOffloadOptimizer, canonical_fsdp_param_fqn
 from agilerl.distributed.process import (
     allreduce_minmax_int,
     barrier,
+    is_main_process,
     resolve_device,
 )
 from agilerl.protocols import GenerationConfigProtocol
@@ -83,6 +97,7 @@ if HAS_LLM_DEPENDENCIES:
     )
     from transformers.modeling_utils import PreTrainedModel
 
+    from agilerl.lora.moe import grouped_mm_supported
     from agilerl.utils.ppo_value_head import AutoModelForCausalLMWithValueHead
 else:
     # Sentinels for missing optional LLM dependencies. All uses are gated on
@@ -121,7 +136,7 @@ LEARN_PHASES = (
     "backward",  # loss.backward, including FSDP reduce-scatter
     "grad_sync",  # explicit grad all-reduces at the optimizer step
     "optim",  # grad clip, optimizer step and zero_grad
-    "other",  # host reads and the update summary
+    "other",  # host reads, profiler export and the update summary
 )
 
 LEARN_PHASE_METRIC_NAMES = tuple(f"learn_phase_{phase}_s" for phase in LEARN_PHASES)
@@ -145,6 +160,7 @@ GRPO_METRIC_NAMES = (
     "is_frac_above",  # ratios above the upper clip bound
     "is_frac_clip_pos",  # upper clips binding on positive advantages
     "is_frac_clip_neg",  # lower clips binding on negative advantages
+    "old_logprobs_trainer_rows",  # rows whose old log-probs the trainer scored
     "grad_norm_pre",  # global grad norm before clipping
     "grad_norm_post",  # global grad norm after clipping
 )
@@ -787,19 +803,25 @@ def load_lora_adapters(
     :type adapter_name: str
     :param device: Device the checkpoint tensors are read onto.
     :type device: torch.device | str
+    :raises ValueError: If a live adapter parameter has no tensor in the checkpoint.
     """
     adapter_path = Path(path) / adapter_name / "adapter_model.safetensors"
     adapter_state = safe_load_file(str(adapter_path), device=str(device))
 
+    missing: list[str] = []
     with torch.no_grad():
         for name, param in model.named_parameters():
             # Only touch parameters belonging to this adapter.
             if f".{adapter_name}." not in name:
                 continue
             # Map model param name → loaded state dict key by removing the
-            # adapter-name segment: ...lora_A.actor.weight → ...lora_A.weight
-            loaded_key = name.replace(f".{adapter_name}.", ".")
+            # adapter-name segment (...lora_A.actor.weight → ...lora_A.weight)
+            # and the activation-checkpoint infix that state_dict() drops.
+            loaded_key = canonical_fsdp_param_fqn(
+                name.replace(f".{adapter_name}.", ".")
+            )
             if loaded_key not in adapter_state:
+                missing.append(loaded_key)
                 continue
 
             full_tensor = adapter_state[loaded_key].to(device)
@@ -814,6 +836,14 @@ def load_lora_adapters(
             else:
                 param.data.copy_(full_tensor)
 
+    # Every rank sees the same parameter names and file, so all raise together.
+    if missing:
+        preview = ", ".join(missing[:5])
+        msg = (
+            f"Adapter {adapter_name!r} at {adapter_path} has no tensor for "
+            f"{len(missing)} live parameters: {preview}"
+        )
+        raise ValueError(msg)
     barrier()
 
 
@@ -1468,6 +1498,102 @@ def resolve_attn_implementation(
     if importlib.util.find_spec("flash_attn") is not None:
         return "flash_attention_2"
     return "sdpa"
+
+
+@runtime_checkable
+class AttnImplementationConfig(Protocol):
+    """Hugging Face config carrying the attention backend its layers dispatch on."""
+
+    _attn_implementation: str | None
+
+
+def set_sub_model_attn_implementation(
+    model: nn.Module,
+    attn_implementation: str,
+) -> None:
+    """Set *attn_implementation* on every ``PreTrainedModel`` in *model* that supports it.
+
+    :param model: Built or loaded model.
+    :type model: nn.Module
+    :param attn_implementation: Attention backend requested at load.
+    :type attn_implementation: str
+    """
+    for module in model.modules():
+        if not isinstance(module, PreTrainedModel):
+            continue
+        pretrained = cast("PreTrainedModel", module)
+        if pretrained.config._attn_implementation == attn_implementation:
+            continue
+        try:
+            pretrained.set_attn_implementation(attn_implementation)
+        except (ValueError, ImportError) as error:
+            logger.warning(
+                "Cannot set %s attention on %s: %s",
+                attn_implementation,
+                type(module).__name__,
+                error,
+            )
+
+
+def language_model_attn_implementation(model: nn.Module) -> str | None:
+    """Return the attention backend the language model's own config dispatches on.
+
+    :param model: Causal LM, VL model, or a PEFT / value-head wrapper of one.
+    :type model: nn.Module
+    :return: The language config's attention implementation.
+    :rtype: str | None
+    :raises TypeError: If the language config carries no attention implementation.
+    """
+    language_config = nested_language_config(model.config)
+    if not isinstance(language_config, AttnImplementationConfig):
+        msg = f"{type(language_config).__name__} has no attention implementation"
+        raise TypeError(msg)
+    return language_config._attn_implementation
+
+
+def report_model_kernels(model: nn.Module, attn_implementation: str) -> None:
+    """Log the kernel each layer type uses on rank 0; raise if the language model ignores *attn_implementation*.
+
+    :param model: Built or loaded model.
+    :type model: nn.Module
+    :param attn_implementation: Attention backend requested at load.
+    :type attn_implementation: str
+    :raises RuntimeError: If the language model uses another attention backend.
+    """
+    lines: list[str] = []
+    configs_seen: set[int] = set()
+    namespaces_seen: set[str] = set()
+    for name, module in model.named_modules():
+        if (
+            isinstance(module, PreTrainedModel)
+            and id(module.config) not in configs_seen
+        ):
+            configs_seen.add(id(module.config))
+            lines.append(
+                f"attention {name or '<root>'} ({type(module).__name__}): "
+                f"{module.config._attn_implementation}",
+            )
+        namespace_name = type(module).__module__
+        # Mamba-style modeling modules expose a module-level fast-path flag.
+        fast_path = getattr(
+            sys.modules.get(namespace_name), "is_fast_path_available", None
+        )
+        if fast_path is not None and namespace_name not in namespaces_seen:
+            namespaces_seen.add(namespace_name)
+            lines.append(f"mamba fast path {namespace_name}: {fast_path}")
+    if torch.cuda.is_available():
+        dtype = next(model.parameters()).dtype
+        supported = grouped_mm_supported(torch.cuda.current_device(), dtype)
+        lines.append(f"grouped_mm {dtype}: {supported}")
+    language_attn = language_model_attn_implementation(model)
+    if is_main_process():
+        logger.debug("Model kernels:\n  %s", "\n  ".join(lines))
+    if language_attn != attn_implementation:
+        msg = (
+            f"Language model uses {language_attn!r} attention; "
+            f"{attn_implementation!r} was requested"
+        )
+        raise RuntimeError(msg)
 
 
 def create_model_from_name_or_path(
@@ -2655,6 +2781,11 @@ def build_vllm_llm_init_kwargs(
     if runtime is not None:
         if runtime.trainer.trust_remote_code is not None:
             kwargs.setdefault("trust_remote_code", runtime.trainer.trust_remote_code)
+        apply_tower_connector_lora_engine_kwargs(
+            kwargs,
+            strip_multimodal_towers=vllm_config.strip_multimodal_towers,
+            runtime=runtime,
+        )
         apply_language_tower_engine_kwargs(
             kwargs,
             strip_multimodal_towers=vllm_config.strip_multimodal_towers,
@@ -2776,6 +2907,8 @@ def expert_lora_vllm_key_map(peft_model: nn.Module) -> dict[str, str]:
     """Map packed-experts LoRA module keys to the paths vLLM's fused-MoE loader reads.
 
     Down projections map to ``<experts>``, gate/up to ``<experts>.base_layer``.
+    Keys and paths drop activation-checkpoint / FSDP1 wrapper segments, so they
+    match PEFT state-dict keys.
 
     :param peft_model: PEFT model with packed-expert LoRA.
     :type peft_model: nn.Module
@@ -2784,9 +2917,10 @@ def expert_lora_vllm_key_map(peft_model: nn.Module) -> dict[str, str]:
     """
     key_map: dict[str, str] = {}
     unmapped: list[str] = []
-    for name, module in peft_model.named_modules():
+    for live_name, module in peft_model.named_modules():
         if not isinstance(module, ParamWrapper):
             continue
+        name = canonical_fsdp_param_fqn(live_name)
         experts_path = name
         while experts_path.endswith(".base_layer"):
             experts_path = experts_path.removesuffix(".base_layer")
@@ -2842,6 +2976,60 @@ def filter_peft_state_dict_for_vllm_lora(
     return filtered
 
 
+def is_expert_lora_key(key: str) -> bool:
+    """Return True when ``key`` names a packed-MoE expert LoRA tensor."""
+    return ".experts." in key or key.startswith("experts.")
+
+
+def check_vllm_lora_export_complete(
+    peft_model: PeftModel,
+    adapter_name: str,
+    live_state: Mapping[str, torch.Tensor],
+    exported: Mapping[str, torch.Tensor],
+) -> None:
+    """Raise if a vLLM LoRA export dropped a trainable LoRA tensor of the adapter.
+
+    Matches by tensor identity: ``exported`` must hold the ``live_state``
+    tensors themselves, not copies.
+
+    :param peft_model: PEFT model holding the adapter.
+    :type peft_model: PeftModel
+    :param adapter_name: Exported adapter.
+    :type adapter_name: str
+    :param live_state: Tensors the export read, keyed by ``named_parameters`` name.
+    :type live_state: Mapping[str, torch.Tensor]
+    :param exported: Export keyed for vLLM.
+    :type exported: Mapping[str, torch.Tensor]
+    :raises ValueError: If the adapter has ``target_parameters`` but no expert
+        tensor was exported, or a trainable LoRA parameter has no exported tensor.
+    """
+    target_parameters = getattr(
+        peft_model.peft_config[adapter_name], "target_parameters", None
+    )
+    if target_parameters and not any(is_expert_lora_key(key) for key in exported):
+        msg = (
+            f"Adapter {adapter_name!r} has target_parameters="
+            f"{target_parameters!r} but the vLLM export holds no expert "
+            f"LoRA tensors ({len(exported)} exported)"
+        )
+        raise ValueError(msg)
+    exported_ids = {id(tensor) for tensor in exported.values()}
+    missing = [
+        name
+        for name, param in peft_model.named_parameters()
+        if param.requires_grad
+        and ".lora_" in name
+        and adapter_name in name.split(".")
+        and id(live_state[name]) not in exported_ids
+    ]
+    if missing:
+        msg = (
+            f"{len(missing)} trainable LoRA parameters of adapter {adapter_name!r} "
+            f"have no tensor in the vLLM export, e.g. {missing[:5]}"
+        )
+        raise ValueError(msg)
+
+
 def _json_safe_value(obj: object) -> JSONValue:
     """Recursively convert PEFT config values to JSON-serializable types."""
     if obj is None or isinstance(obj, (str, int, float, bool)):
@@ -2891,7 +3079,15 @@ def save_peft_adapter_for_vllm_rollout(
         raise ImportError(msg)
 
     adapter_path = Path(staging_dir) / adapter_name
-    state = get_peft_model_state_dict(peft_model, adapter_name=adapter_name)
+    # Keyed like named_modules(): PEFT >= 0.21 selects adapter keys from module
+    # names, which keep the wrapper segments that state_dict() drops.
+    live_state = dict(peft_model.named_parameters())
+    state = {
+        canonical_fsdp_param_fqn(key): tensor
+        for key, tensor in get_peft_model_state_dict(
+            peft_model, state_dict=live_state, adapter_name=adapter_name
+        ).items()
+    }
     n_before = len(state)
     model_type = getattr(getattr(peft_model, "config", None), "model_type", None)
     state = filter_peft_state_dict_for_vllm_lora(
@@ -2909,6 +3105,7 @@ def save_peft_adapter_for_vllm_rollout(
             "LORA_TARGET_SCOPE before training."
         )
         raise ValueError(msg)
+    check_vllm_lora_export_complete(peft_model, adapter_name, live_state, state)
     if n_before != len(state):
         logger.info(
             "vLLM LoRA export: kept %d / %d tensors (target_modules=%r)",

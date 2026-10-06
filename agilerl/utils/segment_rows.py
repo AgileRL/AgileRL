@@ -11,7 +11,7 @@ segment trains as its own row; unsegmented episodes stay one row.
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import numpy as np
 import numpy.typing as npt
@@ -20,7 +20,7 @@ import torch
 from agilerl.components.llm_rollout_data import EpisodeSegments
 from agilerl.utils.algo_utils import stack_and_pad_experiences
 from agilerl.utils.llm_utils import attention_mask_from_padded_ids
-from agilerl.utils.vision_rows import append_vision_filler_rows
+from agilerl.utils.vision_rows import append_vision_filler_rows, vision_filler_row
 
 TEXT_FILLER_TOKENS = 16
 """Most tokens a text filler row keeps from the shortest segment row."""
@@ -253,6 +253,58 @@ def _segment_image_counts(
         else:
             row_image_counts.extend(segments.pixel_rows.tolist())
     return row_image_counts
+
+
+def append_vision_tails(
+    rows: SegmentRows, pad_token_id: int, image_token_id: int
+) -> SegmentRows:
+    """Append a vision filler row after the real tokens of each row with no vision rows.
+
+    FSDP shards the vision tower's blocks, so every forward on every rank
+    must run it, as filler rows do. A causal forward keeps the outputs of the
+    real tokens before the tail exact, and the tail holds no action tokens.
+
+    :param rows: Split rows, before filler rows are added.
+    :param pad_token_id: Token id that pads rows to a common width.
+    :param image_token_id: Token id the VL forward scatters one image feature
+        row into.
+    :return: The rows, each with at least one vision row.
+    """
+    counts = rows.pixel_image_counts
+    if rows.pixel_values is None or counts is None or all(counts):
+        return rows
+    tail_ids, tail_pixels = vision_filler_row(
+        rows.token_ids, rows.pixel_values, counts, image_token_id
+    )
+    tail_len = int(tail_ids.shape[0])
+    lengths = (rows.row_ends - rows.row_starts).tolist()
+    bare = [row for row, count in enumerate(counts) if count == 0]
+    width = max(
+        int(rows.token_ids.shape[1]), *(lengths[row] + tail_len for row in bare)
+    )
+    widen = (0, width - int(rows.token_ids.shape[1]))
+    pad = torch.nn.functional.pad
+    token_ids = pad(rows.token_ids, widen, value=pad_token_id)
+    for row in bare:
+        token_ids[row, lengths[row] : lengths[row] + tail_len] = tail_ids
+    pixel_values = torch.cat(
+        [
+            block if count else tail_pixels
+            for block, count in zip(
+                rows.pixel_values.split(counts), counts, strict=True
+            )
+        ]
+    )
+    return replace(
+        rows,
+        token_ids=token_ids,
+        action_masks=pad(rows.action_masks, widen, value=False),
+        turn_ids=pad(rows.turn_ids, widen, value=-1)
+        if rows.turn_ids is not None
+        else None,
+        pixel_values=pixel_values,
+        pixel_image_counts=[max(count, 1) for count in counts],
+    )
 
 
 def segment_window_layout(

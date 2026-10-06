@@ -23,6 +23,7 @@ from agilerl.utils.llm_utils import is_rollout_prompt
 __all__ = ["RolloutCollector"]
 
 if TYPE_CHECKING:
+    from agilerl.llm_envs.observation import ImageProcessorCall
     from agilerl.typing import RolloutPrompt
 
 
@@ -754,6 +755,16 @@ class RolloutCollector:
         with self._tokenizer_lock:
             self._require_current(episode_id, slot, activation)
             return env._step_apply(env_result)
+
+    def episode_image_calls(self, episode_id: str) -> list[ImageProcessorCall]:
+        """Processor calls behind one active episode's ``pixel_values``.
+
+        :param episode_id: An active episode; ``KeyError`` when not active.
+        :return: See :meth:`RolloutHarness.episode_image_calls`.
+        """
+        with self._slot_lock:
+            slot = self._episode_to_slot[episode_id]
+        return self.envs[slot].episode_image_calls()
 
     def get_episode_data(
         self,

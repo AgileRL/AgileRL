@@ -27,6 +27,7 @@ from agilerl.llm_envs.observation import (
     IMAGE_PLACEHOLDER,
     IMAGE_USER_CONTENT_PREFIX,
     QUESTION_AFTER_CONTEXT,
+    ImageProcessorCall,
     encode_image_training_inputs,
     observation_role,
     observation_text_and_image,
@@ -298,6 +299,8 @@ class RolloutHarness:
         )
         self._multimodal_turn: dict[str, Any] | None = None
         self._episode_pixel_values: torch.Tensor | None = None
+        # One entry per processor call whose pixel rows the episode kept, in row order.
+        self._episode_image_calls: list[ImageProcessorCall] = []
 
     @classmethod
     def local(
@@ -843,6 +846,7 @@ class RolloutHarness:
         self._adopt_system_prompt(info)
         self._multimodal_turn = None
         self._episode_pixel_values = None
+        self._episode_image_calls = []
         self._episode_images = [image] if image is not None else []
         if image is not None:
             processor = self._require_vision_processor()
@@ -855,6 +859,9 @@ class RolloutHarness:
             prompt_token_len = int(train_ids.shape[-1])
             self.full_ids = None
             self._episode_pixel_values = pixel_values
+            self._episode_image_calls.append(
+                ImageProcessorCall.from_inputs(text=prompt_str, image=image)
+            )
             self._multimodal_turn = {
                 "prompt": prompt_str,
                 "image": image,
@@ -1106,6 +1113,11 @@ class RolloutHarness:
                                 dim=0,
                             )
                         self._episode_pixel_values = turn_pixel_values
+                        self._episode_image_calls.append(
+                            ImageProcessorCall.from_inputs(
+                                text=turn_text, image=next_image
+                            )
+                        )
                         self._multimodal_turn = {
                             "prompt": transcript_text + turn_text,
                             "image": self._prompt_image_payload(),
@@ -1206,6 +1218,12 @@ class RolloutHarness:
         self._sampled_ids = None
         self._episode_images = [image] if image is not None else []
         self._episode_pixel_values = pixel_values
+        if multimodal_turn is not None:
+            self._episode_image_calls.append(
+                ImageProcessorCall.from_inputs(
+                    text=multimodal_turn["prompt"], image=image
+                )
+            )
         self._multimodal_turn = multimodal_turn
         self.full_ids = prompt_ids if multimodal_turn is None else None
         return True
@@ -1222,6 +1240,15 @@ class RolloutHarness:
         """
         gen_text = self._step_prepare(token_ids, sampling_logps)
         return self._step_apply(self._step_env(gen_text))
+
+    def episode_image_calls(self) -> list[ImageProcessorCall]:
+        """Processor calls behind the episode's ``pixel_values``, in row order.
+
+        Rerunning :func:`encode_image_training_inputs` on each call and
+        concatenating the pixel rows rebuilds the ``pixel_values`` that
+        :meth:`get_episode_data` returns.
+        """
+        return list(self._episode_image_calls)
 
     def get_episode_data(
         self,

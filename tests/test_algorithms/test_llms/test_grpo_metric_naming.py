@@ -12,6 +12,7 @@ under test.
 from __future__ import annotations
 
 import math
+import time
 import warnings
 from contextlib import nullcontext
 from types import SimpleNamespace
@@ -26,6 +27,7 @@ pytest.importorskip("peft", reason="LLM tests require peft.")
 
 from agilerl.algorithms.core.base import LLMAlgorithm
 from agilerl.algorithms.grpo import GRPO
+from agilerl.utils.learn_profiler import LearnProfiler
 from agilerl.utils.llm_utils import LEARN_PHASES
 from agilerl.utils.phase_timer import PhaseTimer
 
@@ -93,12 +95,18 @@ class _Stub:
         self._kl_value = kl_value
         self._clipfrac_value = clipfrac_value
         self.metrics = _MetricsRecorder()
+        self.learn_profiler = LearnProfiler(
+            None, rank=0, world_size=1, shard_group_size=None
+        )
         self.packing_mode: str | None = None
         self.rng = np.random.default_rng(0)
         self.liger_calls = 0
         self.standard_calls = 0
+        self.old_logprobs_source = "trainer"
+        self.no_grad_forwards: list[tuple[int, bool, bool]] = []
         self.shard_runtime = SimpleNamespace(
             timed=lambda _name, **_fields: nullcontext(),
+            micro_batches_until_step=lambda steps: steps,
             phase_timer=PhaseTimer(),
         )
 
@@ -107,6 +115,7 @@ class _Stub:
     _aligned_sampling_logprobs_and_metrics = GRPO._aligned_sampling_logprobs_and_metrics
     _apply_kl_advantage_shaping = GRPO._apply_kl_advantage_shaping
     _compute_policy_loss = GRPO._compute_policy_loss
+    _learn_start_log_probs = GRPO._learn_start_log_probs
     _liger_path_selected = GRPO._liger_path_selected
     _check_segments_supported = LLMAlgorithm._check_segments_supported
     _has_episode_segments = LLMAlgorithm._has_episode_segments
@@ -124,7 +133,12 @@ class _Stub:
     _record_window_action_tokens = GRPO._record_window_action_tokens
     _reduce_masked_loss = GRPO._reduce_masked_loss
     _resolve_loss_window = GRPO._resolve_loss_window
+    _rollout_old_log_probs = GRPO._rollout_old_log_probs
+    _rows_with_full_sampling_logprobs = staticmethod(
+        GRPO._rows_with_full_sampling_logprobs
+    )
     _sampling_mismatch_metrics = GRPO._sampling_mismatch_metrics
+    _self_scored_micro_batches = GRPO._self_scored_micro_batches
     _summarize_update = GRPO._summarize_update
     _use_liger_path = GRPO._use_liger_path
     _warn_if_micro_batches_straddle_optimizer_steps = (
@@ -164,9 +178,13 @@ class _Stub:
         self,
         ids: torch.Tensor,
         _batch_size: int,
+        *,
+        include_reference: bool = True,
+        include_actor: bool = True,
         **_kwargs: Any,
     ):
-        """Reference and old log-probs on the action frame."""
+        """Reference and old log-probs on the action frame, recording each call."""
+        self.no_grad_forwards.append((ids.shape[0], include_reference, include_actor))
         zeros = torch.zeros(ids.shape[0], ids.shape[1] - 1)
         return zeros, zeros, None
 
@@ -374,8 +392,9 @@ class TestLearnTelemetryReportsDiagnostics:
 
     def test_full_learn_reports_snapshot_stats(self) -> None:
         # Arrange: post/old/reference log-probs are all zeros, so entropy and
-        # both KLs are 0 and every importance ratio is exactly 1.
-        algo = _Stub(beta=0.0)
+        # both KLs are 0 and every importance ratio is exactly 1. A KL
+        # coefficient makes learn score reference log-probs.
+        algo = _Stub(beta=0.04)
 
         # Act
         metrics = algo.learn(_experiences())
@@ -451,6 +470,14 @@ class TestLearnTelemetryReportsDiagnostics:
 PHASE_KEYS = {f"learn_phase_{phase}_s" for phase in LEARN_PHASES}
 
 
+class _SlowOldLogprobsStub(_Stub):
+    """Stub whose no-grad old log-prob forward takes a known wall time."""
+
+    def _fused_forward_no_grad(self, ids: torch.Tensor, _batch_size: int, **kwargs):
+        time.sleep(0.05)
+        return super()._fused_forward_no_grad(ids, _batch_size, **kwargs)
+
+
 class TestLearnPhaseTimings:
     """Every ``learn`` return carries wall seconds per learn phase."""
 
@@ -466,6 +493,21 @@ class TestLearnPhaseTimings:
         assert all(metrics[key] >= 0.0 for key in PHASE_KEYS)
         assert PHASE_KEYS <= set(algo.metrics.logged)
         assert algo.shard_runtime.phase_timer.marks is None
+
+    def test_old_logprob_forward_time_lands_in_its_phase(self) -> None:
+        # Arrange: one-row micro-batches leave the second row for the no-grad
+        # forward. The stub backward pass marks nothing.
+        algo = _SlowOldLogprobsStub(beta=0.0)
+        algo.micro_batch_size_per_gpu = 1
+
+        # Act
+        metrics = algo.learn(_experiences())
+
+        # Assert
+        assert algo.no_grad_forwards == [(1, False, True)]
+        assert metrics["learn_phase_no_grad_forward_s"] >= 0.05
+        assert metrics["learn_phase_forward_s"] < 0.05
+        assert metrics["learn_phase_backward_s"] == 0.0
 
     def test_an_emptied_batch_reports_every_phase_and_closes_the_timer(self) -> None:
         # Arrange

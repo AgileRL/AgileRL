@@ -8,6 +8,7 @@ from collections.abc import Sequence
 from typing import Any, Literal, overload
 
 from torch import nn
+from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor
 from torch.optim import Optimizer
 
@@ -19,6 +20,7 @@ from agilerl.typing import LrNameType, StateDict
 
 ModuleList = list[EvolvableModule]
 OptimizerLike = Optimizer | CPUOffloadOptimizer
+REPLICATED_GROUP_SUFFIX = "_replicated"
 
 
 def init_from_multiple(
@@ -64,21 +66,30 @@ def init_from_single(
 def _homogeneous_param_groups(
     params: list[nn.Parameter], lr: float, group: str
 ) -> list[dict[str, Any]]:
-    """One Adam group per Tensor kind so foreach kernels stay homogeneous.
+    """One Adam group per DTensor mesh, plus one for plain Tensors.
 
     FSDP2 ignored LoRA params stay plain Tensors; sharded LoRA params are
-    DTensors. Mixing them in one group raises in ``_foreach_mul_``.
+    DTensors, on the FSDP mesh or an expert / tensor parallel mesh. Mixing
+    kinds in one group raises in ``_foreach_mul_``; mixing meshes raises in
+    ``clip_grad_norm_``.
     """
     if not params:
         return [{"params": params, "lr": lr, "group": group}]
-    sharded = [param for param in params if isinstance(param, DTensor)]
-    replicated = [param for param in params if not isinstance(param, DTensor)]
-    if not sharded or not replicated:
-        return [{"params": params, "lr": lr, "group": group}]
-    return [
-        {"params": sharded, "lr": lr, "group": group},
-        {"params": replicated, "lr": lr, "group": f"{group}_replicated"},
+    sharded_by_mesh: dict[DeviceMesh, list[nn.Parameter]] = {}
+    replicated = []
+    for param in params:
+        if isinstance(param, DTensor):
+            sharded_by_mesh.setdefault(param.device_mesh, []).append(param)
+        else:
+            replicated.append(param)
+    groups = [
+        {"params": sharded, "lr": lr, "group": group}
+        for sharded in sharded_by_mesh.values()
     ]
+    if replicated:
+        name = f"{group}{REPLICATED_GROUP_SUFFIX}" if groups else group
+        groups.append({"params": replicated, "lr": lr, "group": name})
+    return groups
 
 
 def init_llm_optimizer(

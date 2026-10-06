@@ -39,12 +39,18 @@ class TestFSDPConfig:
         ("field", "value", "match"),
         [
             ("prefetch_units", 0, "prefetch_units must be >= 1"),
+            ("backward_prefetch_units", 0, "backward_prefetch_units must be >= 1"),
+            ("checkpoint_every_n_blocks", 0, "checkpoint_every_n_blocks must be >= 1"),
             ("wrap_every_n_blocks", 0, "wrap_every_n_blocks must be >= 1"),
             (
                 "param_persistence_threshold",
                 -1,
                 "param_persistence_threshold must be >= 0",
             ),
+            ("ep", 0, "FSDPConfig.ep must be >= 1"),
+            ("ep_token_blocks", 0, "FSDPConfig.ep_token_blocks must be >= 1"),
+            ("tp", 0, "FSDPConfig.tp must be >= 1"),
+            ("shard_group_size", 0, "FSDPConfig.shard_group_size must be >= 1"),
         ],
     )
     def test_rejects_out_of_range_values(
@@ -52,6 +58,57 @@ class TestFSDPConfig:
     ) -> None:
         with pytest.raises(ValueError, match=match):
             FSDPConfig(**{field: value})
+
+    def test_ep_defaults_to_one(self) -> None:
+        assert FSDPConfig().ep == 1
+        assert FSDPConfig(ep=4).ep == 4
+
+    def test_ep_token_blocks_defaults_to_one(self) -> None:
+        assert FSDPConfig().ep_token_blocks == 1
+        assert FSDPConfig(ep=8, ep_token_blocks=4).ep_token_blocks == 4
+
+    def test_tp_and_shard_group_default_to_unset(self) -> None:
+        config = FSDPConfig()
+
+        assert config.tp == 1
+        assert config.shard_group_size is None
+
+    def test_compile_blocks_defaults_off_with_inductor(self) -> None:
+        config = FSDPConfig()
+
+        assert config.compile_blocks is False
+        assert config.compile_backend == "inductor"
+
+    def test_accepts_shard_group_divisible_by_ep_and_tp(self) -> None:
+        config = FSDPConfig(ep=8, tp=2, shard_group_size=8)
+
+        assert config.shard_group_size == 8
+
+    @pytest.mark.parametrize(
+        ("ep", "tp", "match"),
+        [
+            (3, 1, "shard_group_size=8 must be divisible by ep=3"),
+            (1, 3, "shard_group_size=8 must be divisible by tp=3"),
+        ],
+    )
+    def test_rejects_shard_group_not_divisible(
+        self, ep: int, tp: int, match: str
+    ) -> None:
+        with pytest.raises(ValueError, match=match):
+            FSDPConfig(ep=ep, tp=tp, shard_group_size=8)
+
+    def test_prefetch_and_checkpoint_policy_defaults(self) -> None:
+        config = FSDPConfig()
+
+        assert config.prefetch_units == 1
+        assert config.backward_prefetch_units == 1
+        assert config.checkpoint_skip_layer_types == ()
+        assert config.checkpoint_every_n_blocks == 1
+
+    def test_stores_checkpoint_skip_list_as_tuple(self) -> None:
+        config = FSDPConfig(checkpoint_skip_layer_types=["attention", "mlp"])
+
+        assert config.checkpoint_skip_layer_types == ("attention", "mlp")
 
 
 class TestFSDPJsonSchema:
@@ -72,4 +129,6 @@ class TestFSDPJsonSchema:
 
         assert properties["prefetch_units"]["minimum"] == 1
         assert properties["wrap_every_n_blocks"]["minimum"] == 1
+        assert properties["backward_prefetch_units"]["minimum"] == 1
+        assert properties["checkpoint_every_n_blocks"]["minimum"] == 1
         assert properties["param_persistence_threshold"]["minimum"] == 0

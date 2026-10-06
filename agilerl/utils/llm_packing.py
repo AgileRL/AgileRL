@@ -22,6 +22,11 @@ fused-logprob, PPO value-head, and fused-loss paths); all are differentiable.
    sparse: FlashAttention-2 varlen or FlexAttention. Dense backends (SDPA/eager)
    would materialize an ``O(N^2)`` mask, so callers must gate packing on a
    supported backend; see :meth:`LLMAlgorithm._packing_mode`.
+
+Recurrent mixers (Mamba scan and causal conv1d) carry state from token to
+token, so a packed row is only correct when they reset at each document start.
+:func:`packed_seq_idx` gives the per-token document index those kernels take,
+and :func:`mixers_without_boundary_reset` lists mixers that would leak state.
 """
 
 from __future__ import annotations
@@ -30,6 +35,11 @@ from typing import NamedTuple
 
 import torch
 import torch.nn.functional as F
+from torch import nn
+
+# Class attribute set to True on a mixer whose forward resets its recurrent
+# state at every packed-document boundary.
+RESETS_AT_DOCUMENT_BOUNDARY = "agilerl_resets_at_document_boundary"
 
 
 class PackedBatch(NamedTuple):
@@ -106,6 +116,67 @@ def pack_padded_batch(
         max_seqlen=max_seqlen,
         batch_size=batch_size,
         padded_seq_len=padded_seq_len,
+    )
+
+
+def packed_seq_idx(position_ids: torch.Tensor) -> torch.Tensor | None:
+    """Per-token document index of packed rows, or None when no row is packed.
+
+    A document starts wherever ``position_ids`` does not step by one, the same
+    rule transformers uses to detect packed rows for attention masks.
+
+    :param position_ids: ``(B, L)`` positions; each packed document restarts at 0.
+    :type position_ids: torch.Tensor
+    :return: ``(B, L)`` int32 index, 0 for each row's first document, or None
+        when every row holds a single document.
+    :rtype: torch.Tensor | None
+    """
+    first = position_ids[:, :1] - 1
+    starts = torch.diff(position_ids, prepend=first, dim=-1) != 1
+    seq_idx = starts.cumsum(-1, dtype=torch.int32)
+    if not bool(seq_idx[:, -1].any()):
+        return None
+    return seq_idx
+
+
+def is_recurrent_mixer(module: nn.Module) -> bool:
+    """Whether *module* carries state across tokens.
+
+    True for a module that owns an ``A_log`` state-decay parameter (Mamba,
+    gated delta-net) or a depthwise causal ``nn.Conv1d`` child (short conv).
+
+    :param module: Module to check.
+    :type module: nn.Module
+    :return: True for a recurrent sequence mixer.
+    :rtype: bool
+    """
+    if any(name == "A_log" for name, _ in module.named_parameters(recurse=False)):
+        return True
+    return any(
+        isinstance(child, nn.Conv1d)
+        and child.kernel_size[0] > 1
+        and child.groups == child.in_channels
+        and child.padding == (child.kernel_size[0] - 1,)
+        for child in module.children()
+    )
+
+
+def mixers_without_boundary_reset(model: nn.Module) -> list[str]:
+    """Class names of recurrent mixers in *model* that would leak state across packed documents.
+
+    :param model: Model to scan.
+    :type model: nn.Module
+    :return: Sorted class names of recurrent mixers whose class does not set
+        :data:`RESETS_AT_DOCUMENT_BOUNDARY`.
+    :rtype: list[str]
+    """
+    return sorted(
+        {
+            type(module).__name__
+            for module in model.modules()
+            if is_recurrent_mixer(module)
+            and not getattr(type(module), RESETS_AT_DOCUMENT_BOUNDARY, False)
+        }
     )
 
 

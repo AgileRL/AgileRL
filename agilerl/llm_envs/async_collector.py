@@ -21,6 +21,7 @@ if TYPE_CHECKING:
     import torch
 
     from agilerl.llm_envs.collector import RolloutCollector
+    from agilerl.llm_envs.observation import ImageProcessorCall
 
 
 class AsyncBatchCollector:
@@ -137,6 +138,10 @@ class AsyncBatchCollector:
             done=bool(terminated or truncated),
             info=info if isinstance(info, dict) else {},
         )
+
+    def episode_image_calls(self, episode_id: str) -> list[ImageProcessorCall]:
+        """Processor calls behind one active episode's ``pixel_values``."""
+        return self._collector.episode_image_calls(episode_id)
 
     async def get_episode_data(
         self,

@@ -71,6 +71,8 @@ if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
     from peft import PeftConfig, PeftModel, get_peft_model
     from transformers import PreTrainedModel
 
+    from agilerl.lora.moe import bind_routed_experts_config, upgrade_moe_param_wrappers
+
     PreTrainedModelType = PeftModel | PreTrainedModel
 else:
     # Annotations referencing PreTrainedModelType are evaluated at function
@@ -2557,12 +2559,6 @@ def clone_llm(
     :type state_dict: dict[str, torch.Tensor] | None, optional
     :return: Cloned model
     """
-    # circular import with agilerl.algorithms
-    from agilerl.algorithms.core.llm_ops.moe_lora import (
-        bind_routed_experts_config,
-        upgrade_moe_param_wrappers,
-    )
-
     match original_model:
         case PeftModel() | PreTrainedModel():
             source_model = original_model

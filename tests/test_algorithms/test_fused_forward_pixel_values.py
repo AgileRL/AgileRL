@@ -10,13 +10,25 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, patch
 
+import numpy as np
 import pytest
 import torch
+from peft import LoraConfig
 
 from agilerl.algorithms import GRPO
 from agilerl.algorithms.core.base import LLMAlgorithm
+from agilerl.components.llm_rollout_data import EpisodeSegments
+from agilerl.utils.segment_rows import SegmentRows
 from tests.test_algorithms.test_core_base import _LLM_DEPS_SKIP, _make_llm_agent
 from tests.test_algorithms.test_llms.llm_helpers import create_module
+from tests.test_algorithms.test_llms.vision_helpers import (
+    IMAGE_TOKEN_ID,
+    PAD_TOKEN_ID,
+    PIXEL_DIM,
+    VisionHiddenStatesModel,
+    vision_config,
+    vision_model,
+)
 
 
 def _make_cpu_grpo_for_kernel_tests(**kwargs: object) -> GRPO:
@@ -417,7 +429,7 @@ class TestFusedKernelLossPixelValues:
         with (
             patch("agilerl.algorithms.grpo.HAS_LIGER_KERNEL", True),
             patch(
-                "agilerl.algorithms.grpo.unpack_hidden_states",
+                "agilerl.algorithms.core.base.unpack_hidden_states",
                 return_value=padded_hidden,
             ),
             patch("agilerl.algorithms.grpo.LigerFusedLinearGRPOFunction", mock_liger),
@@ -529,3 +541,101 @@ class TestLLMAlgorithmFusedForwardNoGrad:
 
         # Assert
         assert seen == [[0.0], [1.0, 2.0], [0.0], [1.0, 2.0]]
+
+
+@_LLM_DEPS_SKIP
+class TestLLMAlgorithmSegmentRows:
+    @staticmethod
+    def _text_segment_rows() -> tuple[GRPO, SegmentRows, torch.Tensor, torch.Tensor]:
+        """Segment rows of a batch whose episode 0 restarts into a segment with no image.
+
+        Episode 0 splits ``[5, 5]`` with one image in segment 0 only; episode 1
+        is unsegmented with one image. One row per micro-batch puts the
+        text-only segment in a forward of its own.
+
+        :return: The agent, its padded segment rows, and the text-only
+            segment's token ids and action mask.
+        """
+        torch.manual_seed(0)
+        agent = _make_cpu_grpo_for_kernel_tests(
+            actor_network=VisionHiddenStatesModel(vision_config()),
+            micro_batch_size_per_gpu=1,
+            calc_position_embeddings=False,
+            lora_config=LoraConfig(
+                r=4,
+                lora_alpha=8,
+                target_modules=["linear_1"],
+                task_type="CAUSAL_LM",
+                lora_dropout=0.0,
+            ),
+        )
+        ids = torch.randint(0, IMAGE_TOKEN_ID, (2, 10))
+        ids[:, 0] = IMAGE_TOKEN_ID
+        ids[1, 8:] = PAD_TOKEN_ID
+        mask = torch.zeros(2, 9, dtype=torch.bool)
+        mask[0, 1:4] = True
+        mask[0, 6:9] = True
+        mask[1, 1:7] = True
+        segments = [
+            EpisodeSegments(
+                token_lengths=torch.tensor([5, 5]), pixel_rows=torch.tensor([1, 0])
+            ),
+            None,
+        ]
+        pixel_values = torch.arange(2.0).unsqueeze(-1).expand(2, PIXEL_DIM).contiguous()
+        rows, _accumulation_steps = agent._segment_rows(
+            ids,
+            mask,
+            segments,
+            np.arange(2),
+            pixel_values=pixel_values,
+            pixel_image_counts=[1, 1],
+            image_token_id=IMAGE_TOKEN_ID,
+        )
+        return agent, rows, ids[0:1, 5:], mask[0:1, 5:]
+
+    def test_every_one_row_forward_runs_the_vision_tower(self) -> None:
+        # Arrange
+        agent, rows, _text_ids, _text_mask = self._text_segment_rows()
+        model = vision_model(agent)
+
+        # Act
+        agent._fused_forward_no_grad(
+            rows.token_ids,
+            1,
+            pixel_values=rows.pixel_values,
+            pixel_image_counts=rows.pixel_image_counts,
+            score_mask=rows.action_masks,
+        )
+
+        # Assert: the model records only forwards that carry vision rows, and
+        # the reference and actor pass each forward every row on its own.
+        assert len(model.forwards) == 2 * int(rows.token_ids.shape[0])
+        assert all(forward["pixel_values"].shape[0] == 1 for forward in model.forwards)
+
+    def test_text_segment_keeps_its_text_only_log_probs(self) -> None:
+        # Arrange: row 1 is episode 0's text-only segment.
+        agent, rows, text_ids, text_mask = self._text_segment_rows()
+        text_positions = int(text_mask.shape[1])
+        expected_ref, expected_actor, _ = agent._fused_forward_no_grad(
+            text_ids, 1, score_mask=text_mask
+        )
+
+        # Act
+        ref, actor, _ = agent._fused_forward_no_grad(
+            rows.token_ids,
+            1,
+            pixel_values=rows.pixel_values,
+            pixel_image_counts=rows.pixel_image_counts,
+            score_mask=rows.action_masks,
+        )
+
+        # Assert: fp32 GEMMs over a wider row may round differently in the last bits.
+        assert torch.equal(rows.token_ids[1, :5], text_ids[0])
+        assert torch.allclose(
+            ref[1:2, :text_positions], expected_ref, rtol=0.0, atol=1e-6
+        )
+        assert torch.allclose(
+            actor[1:2, :text_positions], expected_actor, rtol=0.0, atol=1e-6
+        )
+        assert not actor[1, text_positions:].any()

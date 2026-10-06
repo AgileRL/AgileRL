@@ -129,6 +129,10 @@ class DPO(LLMAlgorithm[PreferencePrompts]):
         memory (the win grows with sequence length); a no-op during rollout /
         reference forwards.
     :type activation_offload: bool, optional
+    :param moe_lora_recompute: Recompute routed-expert LoRA activations in
+        backward on frozen packed base weights. ``None`` (default) recomputes
+        only outside activation-checkpointed blocks.
+    :type moe_lora_recompute: bool | None, optional
     :param lora_target_scope: Optional PEFT LoRA path scope for multimodal models
         (e.g. ``"language_model"``). Passed to
         :func:`adapt_lora_config_for_model`.
@@ -167,6 +171,7 @@ class DPO(LLMAlgorithm[PreferencePrompts]):
         use_separate_reference_adapter: bool = True,
         quantization_config: BitsAndBytesConfig | None = None,
         activation_offload: bool = False,
+        moe_lora_recompute: bool | None = None,
         lora_target_scope: str | None = None,
     ) -> None:
         resolved_device = resolve_device(device)
@@ -200,6 +205,7 @@ class DPO(LLMAlgorithm[PreferencePrompts]):
             use_separate_reference_adapter=use_separate_reference_adapter,
             quantization_config=quantization_config,
             activation_offload=activation_offload,
+            moe_lora_recompute=moe_lora_recompute,
             lora_target_scope=lora_target_scope,
         )
         self.beta = beta

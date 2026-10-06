@@ -28,6 +28,7 @@ from agilerl.distributed import (
     FSDPConfig,
     materialize_fsdp2_from_cpu_state,
 )
+from agilerl.distributed.expert_parallel import ParallelMesh
 from agilerl.distributed.runtime import DPRuntime, FSDPRuntime
 
 cuda_required = pytest.mark.skipif(
@@ -144,7 +145,7 @@ class TestUntiedLmHeadNoReshard:
     """Untied ``lm_head`` is its own FSDP unit and stays gathered after forward."""
 
     def test_untied_lm_head_fully_shard_disables_reshard_after_forward(self):
-        from agilerl.distributed.fsdp import _shard_embed_and_lm_head
+        from agilerl.distributed.fsdp_blocks import _shard_embed_and_lm_head
 
         class LanguageModel(nn.Module):
             def __init__(self):
@@ -166,7 +167,7 @@ class TestUntiedLmHeadNoReshard:
             seen.append((module, kwargs))
             return module
 
-        with patch("agilerl.distributed.fsdp.fully_shard", side_effect=_record):
+        with patch("agilerl.distributed.fsdp_blocks.fully_shard", side_effect=_record):
             _shard_embed_and_lm_head(
                 model, {"reshard_after_forward": True}, persistence_threshold=0
             )
@@ -740,6 +741,7 @@ class TestFsdpResidencyGuards:
             agent.actor,
             "cuda:0",
             agent.fsdp_config,
+            parallel_mesh=None,
             gradient_checkpointing=False,
         )
 
@@ -1174,7 +1176,6 @@ class TestMaterializeFsdp2FromCpuState:
         )
         loaded: list[str] = []
         with (
-            patch("agilerl.distributed.fsdp.is_distributed", return_value=True),
             patch(
                 "agilerl.distributed.fsdp.apply_fsdp2",
                 side_effect=lambda module, *_a, **_k: module,
@@ -1215,13 +1216,14 @@ class TestMaterializeFsdp2FromCpuState:
         lora = LoraConfig(r=4, target_modules=["q_proj", "v_proj"])
         model = get_peft_model(meta, lora, adapter_name="actor")
         ids = torch.randint(0, 64, (2, 6))
+        world = init_device_mesh("cpu", (1, 1), mesh_dim_names=("replicate", "shard"))
 
         # Act
         materialize_fsdp2_from_cpu_state(
             model,
             "cpu",
             FSDPConfig(param_dtype="float32", reduce_dtype="float32"),
-            mesh=init_device_mesh("cpu", (1,)),
+            parallel_mesh=ParallelMesh(world=world, hsdp=world["shard"]),
             gradient_checkpointing=True,
         )
         logits = model(input_ids=ids).logits

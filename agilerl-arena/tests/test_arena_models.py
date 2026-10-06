@@ -558,6 +558,16 @@ class TestTrainingSpec:
                 training_gpus_per_agent=2,
             )
 
+    def test_async_rollout_accepts_batch_not_multiple_of_engines(self) -> None:
+        spec = TrainingSpec(
+            rollout_mode="async",
+            rollout_engines_per_agent=2,
+            rollout_batch_size=3,
+            training_gpus_per_agent=1,
+        )
+
+        assert spec.rollout_batch_size == 3
+
     def test_async_rollout_rejects_experience_sharing(self) -> None:
         with pytest.raises(ValidationError, match="experience_sharing"):
             TrainingSpec(
