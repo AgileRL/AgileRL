@@ -50,6 +50,24 @@ def _mock_ndjson_stream(result: dict | None = None) -> MagicMock:
     return mock
 
 
+def _grpo_manifest(hub_id: str) -> dict:
+    """A minimal GRPO manifest fine-tuning ``hub_id``."""
+    return {
+        "algorithm": {"name": "GRPO", "group_size": 4, "batch_size": 2},
+        "environment": {
+            "env_type": "rollout",
+            "dataset": "openai/gsm8k",
+            "reward_file_path": "reward.py",
+            "prompt_template": {"user_0": "{question}"},
+        },
+        "network": {
+            "pretrained_model_name_or_path": hub_id,
+            "max_context_length": 512,
+        },
+        "training": {"max_steps": 100},
+    }
+
+
 class TestTokenStore:
     def test_defaults_are_none(self):
         store = _TokenStore()
@@ -1463,7 +1481,7 @@ class TestExperimentMethods:
 
     @patch("agilerl.arena.client.TrainingManifest.get_validated")
     def test_submit_experiment(self, mock_validated, api_key_client):
-        mock_validated.return_value = {"algorithm": "PPO"}
+        mock_validated.return_value.to_payload.return_value = {"algorithm": "PPO"}
         mock_stream = _mock_ndjson_stream({"job_id": 1})
         api_key_client._open_stream = MagicMock(return_value=mock_stream)
 
@@ -1486,10 +1504,11 @@ class TestExperimentMethods:
     def test_submit_experiment_with_reward_file(
         self, mock_validated, api_key_client, tmp_path
     ):
-        mock_validated.return_value = {
+        payload = {
             "algorithm": {"name": "GRPO"},
             "environment": {"name": "ds", "num_envs": 16},
         }
+        mock_validated.return_value.to_payload.return_value = payload
         reward_path = tmp_path / "reward.py"
         reward_path.write_text(
             "def reward(question, answer, completion):\n    return 1.0\n",
@@ -1511,13 +1530,58 @@ class TestExperimentMethods:
         call_kwargs = api_key_client._open_stream.call_args[1]
         assert "json" not in call_kwargs
         files = call_kwargs["files"]
-        assert json.loads(files["manifest"][1]) == mock_validated.return_value
+        assert json.loads(files["manifest"][1]) == payload
         assert files["project"] == (None, "proj")
         assert files["resource_id"] == (None, "arena-medium")
         assert files["num_nodes"] == (None, "2")
         assert files["experiment_name"] == (None, "exp-reasoning")
         assert files["completion"] == (None, "wrong answer")
         assert files["reward_file"][0] == "reward.py"
+
+    @pytest.mark.parametrize(
+        ("hub_id", "warned"),
+        [
+            ("Qwen/Qwen3-4B", False),
+            ("Qwen/Qwen2.5-0.5B-Instruct", True),
+        ],
+    )
+    def test_submit_experiment_warns_on_deprecated_model(
+        self, api_key_client, caplog, hub_id, warned
+    ):
+        api_key_client._open_stream = MagicMock(
+            return_value=_mock_ndjson_stream({"job_id": 3})
+        )
+
+        with caplog.at_level(logging.WARNING, logger="agilerl.arena.client"):
+            result = api_key_client.submit_experiment(
+                manifest=_grpo_manifest(hub_id), project="proj"
+            )
+
+        assert result == {"job_id": 3}
+        assert (f"Model {hub_id} is deprecated" in caplog.text) is warned
+
+    def test_submit_experiment_rejects_preview_model(self, api_key_client):
+        api_key_client._open_stream = MagicMock()
+        hub_id = "nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16"
+
+        with pytest.raises(ArenaValidationError, match="is in preview"):
+            api_key_client.submit_experiment(
+                manifest=_grpo_manifest(hub_id), project="proj"
+            )
+        api_key_client._open_stream.assert_not_called()
+
+    def test_submit_experiment_allows_untracked_model(self, api_key_client, caplog):
+        api_key_client._open_stream = MagicMock(
+            return_value=_mock_ndjson_stream({"job_id": 3})
+        )
+
+        with caplog.at_level(logging.WARNING, logger="agilerl.arena.client"):
+            result = api_key_client.submit_experiment(
+                manifest=_grpo_manifest("org/untracked-model"), project="proj"
+            )
+
+        assert result == {"job_id": 3}
+        assert "is deprecated" not in caplog.text
 
     def test_resume_experiment(self, api_key_client):
         api_key_client._request = MagicMock(return_value={"resumed": True})
