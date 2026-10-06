@@ -5,44 +5,48 @@
 
 from __future__ import annotations
 
-import time
-
 import pytest
 
 from agilerl.utils.phase_timer import PhaseTimer
 
 
+def _drive_clock(monkeypatch: pytest.MonkeyPatch, ticks: list[float]) -> None:
+    clock = iter(ticks)
+    monkeypatch.setattr(
+        "agilerl.utils.phase_timer.time.perf_counter",
+        lambda: next(clock),
+    )
+
+
 class TestPhaseTimerStop:
-    def test_charges_each_gap_to_the_mark_that_ends_it(self):
+    def test_charges_each_gap_to_the_mark_that_ends_it(self, monkeypatch):
         # Arrange
+        _drive_clock(monkeypatch, [10.0, 12.0, 12.5])
         timer = PhaseTimer()
 
         # Act
         timer.start("cpu")
-        time.sleep(0.02)
         timer.mark("slow")
         timer.mark("fast")
         seconds = timer.stop()
 
         # Assert
-        assert set(seconds) == {"slow", "fast"}
-        assert seconds["slow"] >= 0.02
-        assert seconds["fast"] < seconds["slow"]
+        assert seconds == {"slow": 2.0, "fast": 0.5}
 
-    def test_sums_repeated_phases(self):
+    def test_sums_repeated_phases(self, monkeypatch):
         # Arrange
+        _drive_clock(monkeypatch, [0.0, 1.0, 1.25, 2.25, 2.5])
         timer = PhaseTimer()
 
         # Act
         timer.start("cpu")
         for _ in range(2):
-            time.sleep(0.01)
             timer.mark("step")
             timer.mark("other")
         seconds = timer.stop()
 
         # Assert
-        assert seconds["step"] >= 0.02
+        assert seconds == {"step": 2.0, "other": 0.5}
 
     def test_marks_outside_a_window_are_ignored(self):
         # Arrange
