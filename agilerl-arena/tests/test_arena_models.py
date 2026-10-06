@@ -26,7 +26,7 @@ from agilerl.arena.models import (
 from agilerl.arena.models.algorithms.dqn import DQNSpec
 from agilerl.arena.models.algorithms.grpo import GRPOSpec
 from agilerl.arena.models.algorithms.ppo import PPOSpec, RecurrentPPOSpec
-from agilerl.arena.models.env import GymEnvSpec, LLMEnvType
+from agilerl.arena.models.env import GymEnvSpec, LLMEnvSpec, LLMEnvType
 from agilerl.arena.models.fsdp import FSDPConfig
 from agilerl.arena.models.manifest import _resolve_algorithm
 from agilerl.arena.models.registry import AlgorithmRegistry, register
@@ -552,6 +552,156 @@ class TestTrainingSpec:
 
         assert NStepBufferArgs.model_validate({"n_step": None}).n_step == 3
         assert PerBufferArgs.model_validate({"alpha": None}).alpha == 0.5
+
+
+CLASSIFIEDS_SERVICE = {
+    "name": "classifieds",
+    "port": 9980,
+    "url_env": "VWA_CLASSIFIEDS",
+    "containers": [
+        {"name": "db", "image": "classifieds-db:1"},
+        {"name": "web", "image": "classifieds-web:1", "port": 9980},
+    ],
+}
+
+
+class TestLLMEnvSpecEnvPods:
+    def test_image_defaults_and_services_parse(self) -> None:
+        from agilerl.arena.models.env import EnvServiceSpec
+
+        spec = LLMEnvSpec(
+            env_type="rollout",
+            env_image="browser:1",
+            env_sessions_per_host=4,
+            env_session_ports={"BROWSERGYM_PORT": 8000},
+            env_services=[CLASSIFIEDS_SERVICE],
+        )
+
+        assert spec.env_port == 8000
+        assert spec.cpus_per_env_host == 0.01
+        assert spec.env_host_ready_timeout_s == 600.0
+        assert spec.env_services == [EnvServiceSpec.model_validate(CLASSIFIEDS_SERVICE)]
+        assert spec.env_services[0].ready_timeout_s == 600.0
+        assert spec.env_services[0].containers[0].cpu == "10m"
+
+    @pytest.mark.parametrize(
+        "field",
+        [
+            {"env_sessions_per_host": 2},
+            {"env_session_ports": {"BROWSERGYM_PORT": 8000}},
+            {"env_host_memory_limit_bytes": 1024},
+            {"env_host_ready_timeout_s": 900},
+            {"env_services": [CLASSIFIEDS_SERVICE]},
+        ],
+    )
+    def test_pod_fields_need_an_image(self, field: dict) -> None:
+        with pytest.raises(ValidationError, match="configure env_image Pods"):
+            LLMEnvSpec(env_type="rollout", entrypoint="pkg.mod:Env", **field)
+
+    def test_image_resolves_one_session_per_pod(self) -> None:
+        spec = LLMEnvSpec(env_type="rollout", env_image="browser:1")
+
+        assert spec.env_sessions_per_host == 1
+        assert spec.model_dump(mode="json")["env_sessions_per_host"] == 1
+
+    def test_env_host_ready_timeout_s_is_kept(self) -> None:
+        spec = LLMEnvSpec(
+            env_type="rollout",
+            env_image="browser:1",
+            env_host_ready_timeout_s=1800,
+        )
+
+        assert spec.env_host_ready_timeout_s == 1800.0
+
+    def test_sessions_sharing_a_pod_need_session_ports(self) -> None:
+        with pytest.raises(
+            ValidationError,
+            match="env_sessions_per_host=4 needs env_session_ports",
+        ):
+            LLMEnvSpec(
+                env_type="rollout",
+                env_image="browser:1",
+                env_sessions_per_host=4,
+            )
+
+    @pytest.mark.parametrize(
+        ("field", "name"),
+        [
+            ({"env_vars": {"A": "1"}}, "env_vars"),
+            ({"env_sessions_per_host": 2}, "env_sessions_per_host"),
+            ({"env_session_ports": {"PORT": 8000}}, "env_session_ports"),
+            ({"env_host_memory_limit_bytes": 1024}, "env_host_memory_limit_bytes"),
+            ({"env_host_ready_timeout_s": 900}, "env_host_ready_timeout_s"),
+            ({"env_services": [CLASSIFIEDS_SERVICE]}, "env_services"),
+        ],
+    )
+    def test_dataset_env_rejects_pod_fields(self, field: dict, name: str) -> None:
+        with pytest.raises(
+            ValidationError,
+            match=f"{name} configure env_image Pods; a dataset environment",
+        ):
+            LLMEnvSpec(env_type="dataset", objective="sft", dataset="rows", **field)
+
+    def test_rejects_a_repeated_service_name(self) -> None:
+        with pytest.raises(ValidationError, match="repeats a service name"):
+            LLMEnvSpec(
+                env_type="rollout",
+                env_image="browser:1",
+                env_services=[CLASSIFIEDS_SERVICE, CLASSIFIEDS_SERVICE],
+            )
+
+    def test_rejects_an_env_name_set_twice(self) -> None:
+        with pytest.raises(ValidationError, match=r"\['VWA_CLASSIFIEDS'\] set more"):
+            LLMEnvSpec(
+                env_type="rollout",
+                env_image="browser:1",
+                env_vars={"VWA_CLASSIFIEDS": "http://elsewhere"},
+                env_services=[CLASSIFIEDS_SERVICE],
+            )
+
+    @pytest.mark.parametrize(
+        ("change", "match"),
+        [
+            ({"name": "Classifieds"}, "string_pattern_mismatch|should match pattern"),
+            ({"url_env": "1BAD"}, "should match pattern"),
+            ({"replicas": 2}, "Extra inputs are not permitted"),
+            (
+                {"containers": [{"name": "db", "image": "db:1"}]},
+                "exactly one container with a port",
+            ),
+            (
+                {
+                    "containers": [
+                        {"name": "web", "image": "a:1", "port": 80},
+                        {"name": "web", "image": "b:1"},
+                    ],
+                },
+                "repeats a container name",
+            ),
+        ],
+    )
+    def test_service_spec_errors(self, change: dict, match: str) -> None:
+        from agilerl.arena.models.env import EnvServiceSpec
+
+        with pytest.raises(ValidationError, match=match):
+            EnvServiceSpec.model_validate({**CLASSIFIEDS_SERVICE, **change})
+
+    @pytest.mark.parametrize(
+        ("change", "match"),
+        [
+            (
+                {"port": 80, "readiness_command": ["true"], "readiness_path": "/"},
+                "one readiness probe",
+            ),
+            ({"readiness_path": "/"}, "readiness_path probes port; set port"),
+            ({"memory_rootfs": "100Gi"}, "without its ENTRYPOINT; set command"),
+        ],
+    )
+    def test_container_spec_errors(self, change: dict, match: str) -> None:
+        from agilerl.arena.models.env import EnvContainerSpec
+
+        with pytest.raises(ValidationError, match=match):
+            EnvContainerSpec.model_validate({"name": "web", "image": "a:1", **change})
 
 
 class TestLLMEnvSpecSurfaces:

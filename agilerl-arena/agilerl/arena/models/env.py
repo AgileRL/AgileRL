@@ -38,6 +38,215 @@ def reject_legacy_llm_env_spelling(
         raise ValueError(msg)
 
 
+DNS_LABEL_PATTERN = r"^[a-z]([-a-z0-9]*[a-z0-9])?$"
+ENV_VAR_NAME_PATTERN = r"^[A-Za-z_][A-Za-z0-9_]*$"
+# Env Pods are I/O-bound; this fits beside Ray workers that request a node's CPUs.
+ENV_POD_DEFAULT_CPUS = 0.01
+# A multi-GB env image cold-pulls in minutes.
+ENV_POD_READY_TIMEOUT_S = 600.0
+
+
+class EnvContainerSpec(BaseModel):
+    """One container of an ``env_services`` Pod."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(
+        pattern=DNS_LABEL_PATTERN,
+        max_length=40,
+        description="Container name, unique within its service.",
+    )
+    image: str = Field(description="Container image.")
+    command: list[str] | None = Field(
+        default=None,
+        description="Replaces the image ENTRYPOINT. Required with memory_rootfs.",
+    )
+    env: dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "Container environment, in order. A value may reference an earlier "
+            "variable or any service's url_env as $(NAME)."
+        ),
+    )
+    port: int | None = Field(
+        default=None,
+        ge=1,
+        le=65535,
+        description=(
+            "Port this container serves the service on. Exactly one container "
+            "of a service sets it."
+        ),
+    )
+    setup_command: list[str] | None = Field(
+        default=None,
+        description=(
+            "Runs once the container starts; the service is not ready until it "
+            "exits 0, and a failure restarts the container. Output goes to the "
+            "container log."
+        ),
+    )
+    readiness_command: list[str] | None = Field(
+        default=None,
+        description="Exec readiness probe. Unset probes TCP on port, if set.",
+    )
+    readiness_path: str | None = Field(
+        default=None,
+        description="HTTP GET readiness probe on port.",
+    )
+    cpu: str = Field(
+        default="10m",
+        description="CPU request, as a Kubernetes quantity. No CPU limit is set.",
+    )
+    memory: str | None = Field(default=None, description="Memory request.")
+    memory_limit: str | None = Field(default=None, description="Memory limit.")
+    ephemeral_storage: str | None = Field(
+        default=None,
+        description=(
+            "Ephemeral-storage request, so the Pod lands on a node with room "
+            "for a large image."
+        ),
+    )
+    memory_rootfs: str | None = Field(
+        default=None,
+        description=(
+            "Size of a memory-backed volume the image is unpacked into, for an "
+            "image larger than a node's disk. The container then runs command "
+            "under chroot in a privileged container: the image's ENTRYPOINT, "
+            "ENV and WORKDIR do not apply, so set command and env. The image "
+            "must pull without credentials."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _check_container(self) -> Self:
+        if self.readiness_command is not None and self.readiness_path is not None:
+            msg = (
+                f"Container {self.name!r} sets readiness_command and "
+                "readiness_path; a container has one readiness probe."
+            )
+            raise ValueError(msg)
+        if self.readiness_path is not None and self.port is None:
+            msg = f"Container {self.name!r}: readiness_path probes port; set port."
+            raise ValueError(msg)
+        if self.memory_rootfs is not None and self.command is None:
+            msg = (
+                f"Container {self.name!r}: memory_rootfs runs the unpacked image "
+                "without its ENTRYPOINT; set command."
+            )
+            raise ValueError(msg)
+        return self
+
+
+class EnvServiceSpec(BaseModel):
+    """A backing service the env sessions share: one Pod behind a stable DNS name."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(
+        pattern=DNS_LABEL_PATTERN,
+        max_length=30,
+        description="Service name, unique within the environment.",
+    )
+    port: int = Field(
+        ge=1,
+        le=65535,
+        description="Port clients dial; the service URL is http://<host>:<port>.",
+    )
+    url_env: str = Field(
+        pattern=ENV_VAR_NAME_PATTERN,
+        description=(
+            "Environment variable carrying the service URL into every env "
+            "session and service container."
+        ),
+    )
+    containers: list[EnvContainerSpec] = Field(
+        min_length=1,
+        description="Containers of the service Pod; they share its network.",
+    )
+    ready_timeout_s: float = Field(
+        default=600.0,
+        gt=0.0,
+        description="How long the service may take to become ready.",
+    )
+
+    @model_validator(mode="after")
+    def _check_service(self) -> Self:
+        names = [container.name for container in self.containers]
+        if len(set(names)) != len(names):
+            msg = f"Service {self.name!r} repeats a container name: {names}."
+            raise ValueError(msg)
+        serving = [c.name for c in self.containers if c.port is not None]
+        if len(serving) != 1:
+            msg = (
+                f"Service {self.name!r} needs exactly one container with a port "
+                f"to serve on; got {serving or 'none'}."
+            )
+            raise ValueError(msg)
+        return self
+
+
+def check_env_pod_fields(
+    *,
+    env_image: str | None,
+    env_vars: dict[str, str],
+    env_sessions_per_host: int | None,
+    env_session_ports: dict[str, int],
+    env_host_memory_limit_bytes: int | None,
+    env_host_ready_timeout_s: float | None,
+    env_services: list[EnvServiceSpec],
+) -> None:
+    """Reject ``env_image`` Pod settings without an image, unbindable sessions, and colliding env names.
+
+    :param env_image: The env image, or ``None``.
+    :param env_vars: Container environment of each session.
+    :param env_sessions_per_host: Sessions per Pod.
+    :param env_session_ports: Per-session port variables.
+    :param env_host_memory_limit_bytes: Memory limit per Pod.
+    :param env_host_ready_timeout_s: Readiness timeout of each session Pod.
+    :param env_services: Backing services.
+    """
+    if env_image is None:
+        if env_vars:
+            msg = "env_vars set container environment on an env_image Pod."
+            raise ValueError(msg)
+        if (
+            env_sessions_per_host is not None
+            or env_session_ports
+            or env_host_memory_limit_bytes is not None
+            or env_host_ready_timeout_s is not None
+            or env_services
+        ):
+            msg = (
+                "env_sessions_per_host, env_session_ports, "
+                "env_host_memory_limit_bytes, env_host_ready_timeout_s and "
+                "env_services configure env_image Pods; set env_image."
+            )
+            raise ValueError(msg)
+        return
+    # Sessions share the Pod's network; only env_session_ports tells each its port.
+    if (env_sessions_per_host or 1) > 1 and not env_session_ports:
+        msg = (
+            f"env_sessions_per_host={env_sessions_per_host} needs "
+            "env_session_ports: sessions share one Pod network, so each "
+            "container must be told its own port (e.g. {PORT: 8000} gives "
+            "session s PORT=8000+s)."
+        )
+        raise ValueError(msg)
+    service_names = [service.name for service in env_services]
+    if len(set(service_names)) != len(service_names):
+        msg = f"env_services repeats a service name: {service_names}."
+        raise ValueError(msg)
+    names = [service.url_env for service in env_services]
+    names += list(env_vars) + list(env_session_ports)
+    repeated = sorted({name for name in names if names.count(name) > 1})
+    if repeated:
+        msg = (
+            f"{repeated} set more than once across env_vars, env_session_ports "
+            "and env_services url_env."
+        )
+        raise ValueError(msg)
+
+
 class LLMEnvType(str, Enum):
     """Type of LLM environment.
 
@@ -415,11 +624,52 @@ class LLMEnvSpec(EnvSpecBase):
         le=65535,
         description="TCP port the env_image server listens on.",
     )
+    env_sessions_per_host: int | None = Field(
+        default=None,
+        ge=1,
+        description=(
+            "Sessions per env_image Pod: one container each, serving on "
+            "env_port, env_port + 1, ... Unset is 1. More than 1 needs "
+            "env_session_ports."
+        ),
+    )
+    env_session_ports: dict[str, int] = Field(
+        default_factory=dict,
+        description=(
+            "Container environment set to base + session index in each session "
+            "container, so sessions sharing a Pod bind distinct ports."
+        ),
+    )
     cpus_per_env_host: float | None = Field(
-        default=None, gt=0.0, description="CPUs reserved per env host."
+        default=None,
+        gt=0.0,
+        description=(
+            "CPUs reserved per env host; an env_image Pod requests them with no "
+            "CPU limit."
+        ),
     )
     env_host_memory_bytes: int | None = Field(
         default=None, gt=0, description="Memory reserved per env host."
+    )
+    env_host_memory_limit_bytes: int | None = Field(
+        default=None,
+        gt=0,
+        description="Memory limit per env_image Pod. Unset sets no limit.",
+    )
+    env_host_ready_timeout_s: float | None = Field(
+        default=None,
+        gt=0.0,
+        description=(
+            "Seconds each env_image session Pod may take to become ready, "
+            "image pull included. Unset is 600."
+        ),
+    )
+    env_services: list[EnvServiceSpec] = Field(
+        default_factory=list,
+        description=(
+            "Backing services the env_image sessions share, started with the "
+            "job and deleted with it (Ray runtime on Kubernetes only)."
+        ),
     )
     env_host_resource: str | None = Field(
         default=None,
@@ -545,9 +795,15 @@ class LLMEnvSpec(EnvSpecBase):
                 "HTTP; a rollout over dataset rows has no such env."
             )
             raise ValueError(msg)
-        if self.env_vars and self.env_image is None:
-            msg = "env_vars set container environment on an env_image Pod."
-            raise ValueError(msg)
+        check_env_pod_fields(
+            env_image=self.env_image,
+            env_vars=self.env_vars,
+            env_sessions_per_host=self.env_sessions_per_host,
+            env_session_ports=self.env_session_ports,
+            env_host_memory_limit_bytes=self.env_host_memory_limit_bytes,
+            env_host_ready_timeout_s=self.env_host_ready_timeout_s,
+            env_services=self.env_services,
+        )
         if (
             self.action_field is not None
             and self.action_field != "message"
@@ -629,6 +885,24 @@ class LLMEnvSpec(EnvSpecBase):
                 "the env."
             )
             raise ValueError(msg)
+        pod_fields = [
+            field
+            for field, value in (
+                ("env_vars", self.env_vars),
+                ("env_sessions_per_host", self.env_sessions_per_host),
+                ("env_session_ports", self.env_session_ports),
+                ("env_host_memory_limit_bytes", self.env_host_memory_limit_bytes),
+                ("env_host_ready_timeout_s", self.env_host_ready_timeout_s),
+                ("env_services", self.env_services),
+            )
+            if value
+        ]
+        if pod_fields:
+            msg = (
+                f"{', '.join(pod_fields)} configure env_image Pods; a dataset "
+                "environment runs no env, so drop them."
+            )
+            raise ValueError(msg)
         if self.rubric_file_path is not None:
             msg = "rubric_file_path has been specified, but is not supported for dataset environments."
             raise ValueError(msg)
@@ -640,7 +914,11 @@ class LLMEnvSpec(EnvSpecBase):
             if self.env_port is None:
                 self.env_port = 8000
             if self.cpus_per_env_host is None:
-                self.cpus_per_env_host = 1.0
+                self.cpus_per_env_host = ENV_POD_DEFAULT_CPUS
+            if self.env_sessions_per_host is None:
+                self.env_sessions_per_host = 1
+            if self.env_host_ready_timeout_s is None:
+                self.env_host_ready_timeout_s = ENV_POD_READY_TIMEOUT_S
         return self
 
     @model_validator(mode="after")

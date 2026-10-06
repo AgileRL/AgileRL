@@ -37,6 +37,8 @@ from agilerl.arena.models.algorithms import (
 )
 from agilerl.arena.models.env import (
     BanditEnvSpec,
+    EnvContainerSpec,
+    EnvServiceSpec,
     EnvSpec,
     GymEnvSpec,
     LLMEnvSpec,
@@ -132,6 +134,8 @@ __all__ = [
     "DeferredNetworkSpec",
     "DeterministicActorSpec",
     "EncoderType",
+    "EnvContainerSpec",
+    "EnvServiceSpec",
     "EnvSpec",
     "FinetuningNetworkSpec",
     "GRPOSpec",
