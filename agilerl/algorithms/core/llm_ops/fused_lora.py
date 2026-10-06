@@ -119,12 +119,20 @@ def _routed_forward(
     if routing is None:
         return original_forward(layer, x, *forward_args, **forward_kwargs)
 
+    runs = [(name, sum(1 for _ in run)) for name, run in itertools.groupby(routing)]
     # Layers that flatten (batch, seq, hidden) -> (batch * seq, hidden) before
     # their linears (OPT's MLP, MoE experts) show seq rows per routed sample.
     # The flatten is row-major, so each run just covers ``factor`` times as
     # many contiguous rows.
     factor, remainder = divmod(x.shape[0], len(routing))
-    if remainder:
+    if not remainder:
+        spans = [(name, length * factor) for name, length in runs]
+    elif len({length for _, length in runs}) == 1 and x.shape[0] % len(runs) == 0:
+        # Vision-tower layers see image rows, not sample rows. Equal-length
+        # runs repeat the same samples, so each run owns an equal image share.
+        share = x.shape[0] // len(runs)
+        spans = [(name, share) for name, _ in runs]
+    else:
         msg = (
             f"Fused adapter routing covers {len(routing)} rows but the layer "
             f"input's leading dimension is {x.shape[0]}."
@@ -132,7 +140,7 @@ def _routed_forward(
         raise ValueError(msg)
 
     if _needs_peft_mixed_forward(layer, routing):
-        names = [name for name in routing for _ in range(factor)]
+        names = [name for name, n in spans for _ in range(n)]
         return layer._mixed_batch_forward(
             x, *forward_args, adapter_names=names, **forward_kwargs
         )
@@ -141,8 +149,7 @@ def _routed_forward(
 
     pieces = []
     start = 0
-    for name, run in itertools.groupby(routing):
-        n = sum(1 for _ in run) * factor
+    for name, n in spans:
         rows = base_out.narrow(0, start, n)
         if name != "__base__" and name in layer.lora_A:
             rows = rows + _lora_delta(layer, name, x.narrow(0, start, n)).to(rows.dtype)
@@ -304,7 +311,9 @@ def set_fused_adapter_routing(model: nn.Module, routing: Sequence[str]) -> None:
     :param model: The patched model whose LoRA layers should route rows.
     :param routing: Adapter name per batch row, e.g. ``["actor"] * B +
         ["critic"] * B``. ``"__base__"`` runs a row through the frozen base
-        weights with no delta.
+        weights with no delta. A mixed routing over image inputs must repeat
+        the same samples in equal-length runs, so each run's images are an
+        equal share of the vision batch.
     :raises RuntimeError: If LoRA layers are unpatched (the routing would be
         silently ignored) or have adapters merged into the base weights.
     :raises ValueError: If *routing* is empty, names an unknown adapter, or

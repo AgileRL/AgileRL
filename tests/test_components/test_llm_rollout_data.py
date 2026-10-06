@@ -11,10 +11,12 @@ import torch
 from pydantic import ValidationError
 
 from agilerl.components.llm_rollout_data import (
+    EpisodeSegments,
     LLMExperienceBatch,
     RolloutGroup,
     Trajectory,
     collate_rollout_groups,
+    validate_episode_segments,
 )
 
 
@@ -85,6 +87,54 @@ class TestTrajectory:
                 turn_ids=torch.zeros(1, 7, dtype=torch.long),
                 rewards=torch.ones(2),
                 bogus=True,
+            )
+
+
+class TestValidateEpisodeSegments:
+    def test_accepts_a_text_layout_that_tiles_the_row(self):
+        segments = EpisodeSegments(token_lengths=torch.tensor([3, 5]))
+
+        validate_episode_segments(segments, 8)
+
+    @pytest.mark.parametrize(
+        ("segments", "token_count", "message"),
+        [
+            (
+                EpisodeSegments(token_lengths=torch.tensor([8])),
+                8,
+                "at least 2 segments",
+            ),
+            (
+                EpisodeSegments(token_lengths=torch.tensor([[3, 5]])),
+                8,
+                "at least 2 segments",
+            ),
+            (
+                EpisodeSegments(token_lengths=torch.tensor([7, 1])),
+                8,
+                "at least 2 tokens",
+            ),
+            (
+                EpisodeSegments(token_lengths=torch.tensor([3, 4])),
+                8,
+                "sum to 7, episode has 8 tokens",
+            ),
+        ],
+    )
+    def test_rejects_a_layout_that_does_not_tile_the_row(
+        self, segments, token_count, message
+    ):
+        with pytest.raises(ValueError, match=message):
+            validate_episode_segments(segments, token_count)
+
+    def test_trajectory_rejects_segments_that_do_not_tile_its_tokens(self):
+        with pytest.raises(ValueError, match="episode has 8 tokens"):
+            Trajectory(
+                token_ids=torch.ones(1, 8, dtype=torch.long),
+                action_masks=torch.ones(1, 7, dtype=torch.bool),
+                turn_ids=torch.zeros(1, 7, dtype=torch.long),
+                rewards=torch.ones(2),
+                segments=EpisodeSegments(token_lengths=torch.tensor([3, 4])),
             )
 
 

@@ -8,7 +8,7 @@ from __future__ import annotations
 import itertools
 import re
 import threading
-from typing import ClassVar
+from typing import Any, ClassVar
 
 import pytest
 import torch
@@ -17,6 +17,7 @@ from agilerl.llm_envs import (
     RolloutCollector,
     RolloutHarness,
 )
+from agilerl.llm_envs.harness import ACTION_HISTORY_MAX_CHARS
 from agilerl.llm_envs.rubrics import reward_fn_to_rubric
 from agilerl.llm_envs.task_assigner import _mix_seed
 from tests.helpers.rollout_doubles import (
@@ -235,8 +236,8 @@ class TestRolloutEnvStep:
         assert not terminated
         assert not truncated
         assert env.last_gen == "7|8"
-        assert next_obs["input_ids"].shape[1] > completion.shape[1]
-        assert w._feedback_texts[-1] == "F:feedback\nT"
+        feedback_ids = next_obs["input_ids"][0, completion.shape[1] :].tolist()
+        assert "F:feedback\nT" in "".join(chr(i) for i in feedback_ids)
 
     def test_non_chat_feedback_tokenization_path(self, serve_env) -> None:
         env = _NonTerminalEnv()
@@ -723,6 +724,7 @@ class _SyncStubEnv(RolloutEnvDoubleMixin):
             torch.ones(2, dtype=torch.float32),
             torch.cat(self.sampling_logps) if self.sampling_logps else None,
             None,
+            None,
         )
 
 
@@ -1077,9 +1079,10 @@ class TestRolloutEnvGetEpisodeData:
         w.full_ids = torch.tensor([[9, 5, 0, 7, 8]], dtype=torch.long)
         w.turn_boundaries = [(1, 3, 0), (3, 5, 1)]
         w.turn_rewards = [1.5]
-        full_ids, action_mask, turn_ids, rewards, _logps, _pixel_values = (
+        full_ids, action_mask, turn_ids, rewards, _logps, _pixel_values, segments = (
             w.get_episode_data()
         )
+        assert segments is None
         assert torch.equal(full_ids, w.full_ids)
         assert action_mask.dtype == torch.bool
         assert turn_ids.dtype == torch.long
@@ -1092,6 +1095,206 @@ class TestRolloutEnvGetEpisodeData:
         w.full_ids = None
         with pytest.raises(RuntimeError, match="No episode data"):
             w.get_episode_data()
+
+
+# Long reasoning, one-character action: the restart history stays short.
+REASONED_ACTION = "r" * 30 + "</think>a"
+
+
+def _segmented_text_harness(
+    *, terminate_after: int | None = 4, **kwargs: Any
+) -> RolloutHarness:
+    """Char-token harness over ``FakeEnvClient`` (``prompt`` / ``feedback`` pages)."""
+    return RolloutHarness(
+        FakeEnvClient(terminate_after=terminate_after),
+        _ChrTokenizer(),
+        max_turns=8,
+        apply_chat_template=False,
+        **kwargs,
+    )
+
+
+def _run_text_episode(
+    harness: RolloutHarness, generation: str = REASONED_ACTION
+) -> list[dict]:
+    """Answer every turn with ``generation``; return the prompts the policy saw."""
+    gen = torch.tensor([[ord(c) for c in generation]], dtype=torch.long)
+    prompt, _info = harness.reset()
+    prompts = []
+    while not harness.done:
+        prompts.append(prompt)
+        prompt, *_ = harness.step(
+            torch.cat([prompt["input_ids"], gen], dim=1),
+            sampling_logps=torch.zeros(gen.shape[1]),
+        )
+    return prompts
+
+
+def _chr_text(ids: torch.Tensor) -> str:
+    return "".join(chr(int(token)) for token in ids[0].tolist())
+
+
+class TestRolloutHarnessSegmentRestart:
+    def test_segments_tile_the_episode_row(self) -> None:
+        # Arrange
+        harness = _segmented_text_harness(segment_prompt_tokens=60)
+        gen_len = len(REASONED_ACTION)
+
+        # Act
+        _run_text_episode(harness)
+        full_ids, mask, turn_ids, rewards, logps, pixel_values, segments = (
+            harness.get_episode_data()
+        )
+
+        # Assert
+        assert segments is not None
+        # prompt(6) + gen + feedback(8) + gen; then restart prompt + gen, twice.
+        assert segments.token_lengths.tolist() == [92, 76, 81]
+        assert int(segments.token_lengths.sum()) == full_ids.shape[1]
+        assert segments.pixel_rows is None
+        assert pixel_values is None
+        segment_starts = segments.token_lengths.cumsum(0)[:-1]
+        assert not mask[0, segment_starts - 1].any()
+        assert (turn_ids[0, segment_starts - 1] == -1).all()
+        assert int(mask.sum()) == 4 * gen_len
+        assert logps is not None
+        assert logps.numel() == 4 * gen_len
+        assert [int((turn_ids[0] == turn).sum()) for turn in range(4)] == [gen_len] * 4
+        assert rewards.tolist() == [1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0]
+
+    def test_each_segment_trains_the_tokens_it_sampled(self) -> None:
+        # Arrange
+        harness = _segmented_text_harness(segment_prompt_tokens=60)
+        gen = [ord(c) for c in REASONED_ACTION]
+
+        # Act
+        _run_text_episode(harness)
+        full_ids, mask, *_ = harness.get_episode_data()
+
+        # Assert
+        trained = full_ids[0, 1:][mask[0]].tolist()
+        assert trained == gen * 4
+
+    def test_restarted_prompt_lists_the_previous_actions(self) -> None:
+        # Arrange
+        harness = _segmented_text_harness(segment_prompt_tokens=60)
+
+        # Act
+        prompts = _run_text_episode(harness)
+
+        # Assert
+        texts = [_chr_text(prompt["input_ids"]) for prompt in prompts]
+        assert texts[2] == "Previous actions:\n1. a\n2. a\n\nfeedback"
+        assert texts[3] == "Previous actions:\n1. a\n2. a\n3. a\n\nfeedback"
+        assert [len(text) for text in texts] == [6, 53, 37, 42]
+
+    @pytest.mark.parametrize("segment_prompt_tokens", [None, 10_000])
+    def test_without_a_reachable_threshold_matches_an_unsegmented_run(
+        self, segment_prompt_tokens: int | None
+    ) -> None:
+        # Arrange
+        baseline = _segmented_text_harness()
+        harness = _segmented_text_harness(segment_prompt_tokens=segment_prompt_tokens)
+
+        # Act
+        _run_text_episode(baseline)
+        _run_text_episode(harness)
+        expected = baseline.get_episode_data()
+        got = harness.get_episode_data()
+
+        # Assert
+        assert got[6] is None
+        assert expected[6] is None
+        for want, have in zip(expected[:5], got[:5], strict=True):
+            assert torch.equal(have, want)
+        assert got[5] is None
+
+    def test_restart_prompt_over_budget_truncates_without_an_empty_segment(
+        self,
+    ) -> None:
+        # Arrange
+        harness = _segmented_text_harness(
+            terminate_after=None, segment_prompt_tokens=40, max_model_len=37
+        )
+
+        # Act
+        prompts = _run_text_episode(harness)
+        full_ids, mask, *_rest, segments = harness.get_episode_data()
+
+        # Assert
+        assert harness.done
+        assert len(prompts) == 2
+        assert segments is not None
+        # The first restart fits the 36-token budget; the second (37) does not.
+        assert segments.token_lengths.tolist() == [45, 79]
+        assert int(segments.token_lengths.sum()) == full_ids.shape[1]
+        assert int(mask.sum()) == 2 * len(REASONED_ACTION)
+
+    def test_restart_prompt_over_budget_continues_while_the_context_fits(
+        self,
+    ) -> None:
+        # Arrange
+        # No </think>: the history repeats the whole 30-char turn, so the
+        # 61-token restart prompt outgrows the 44-token continued one.
+        generation = "x" * 30
+        harness = _segmented_text_harness(
+            terminate_after=None, segment_prompt_tokens=40, max_model_len=51
+        )
+
+        # Act
+        prompts = _run_text_episode(harness, generation)
+        full_ids, mask, *_rest, segments = harness.get_episode_data()
+
+        # Assert
+        texts = [_chr_text(prompt["input_ids"]) for prompt in prompts]
+        assert texts == ["prompt", "prompt" + generation + "feedback"]
+        assert harness.done
+        assert segments is None
+        # One row: continued prompt, second turn, and the feedback that truncated it.
+        assert full_ids.shape[1] == 44 + 30 + 8
+        assert int(mask.sum()) == 2 * 30
+
+    def test_restart_history_caps_a_long_unclosed_reasoning_turn(self) -> None:
+        # Arrange
+        generation = "r" * 400
+        harness = _segmented_text_harness(segment_prompt_tokens=60)
+
+        # Act
+        prompts = _run_text_episode(harness, generation)
+
+        # Assert
+        restarted = _chr_text(prompts[1]["input_ids"])
+        capped = "r" * ACTION_HISTORY_MAX_CHARS + "…"
+        assert restarted == f"Previous actions:\n1. {capped}\n\nfeedback"
+
+    @pytest.mark.parametrize("segment_prompt_tokens", [0, -5])
+    def test_rejects_a_non_positive_threshold(self, segment_prompt_tokens: int) -> None:
+        with pytest.raises(
+            ValueError,
+            match=f"segment_prompt_tokens must be a positive int or None, got {segment_prompt_tokens}",
+        ):
+            _segmented_text_harness(segment_prompt_tokens=segment_prompt_tokens)
+
+    def test_lock_step_trajectories_reject_a_restarted_episode(self) -> None:
+        # Arrange
+        collector = RolloutCollector(
+            env_factory=lambda: _segmented_text_harness(segment_prompt_tokens=60),
+            batch_size=1,
+            group_size=1,
+        )
+        gen = torch.tensor([[ord(c) for c in REASONED_ACTION]], dtype=torch.long)
+        try:
+            prompts = collector.reset()
+            while prompts:
+                prompts = collector.step(
+                    [torch.cat([p["input_ids"], gen], dim=1) for p in prompts]
+                )
+
+            # Act / Assert
+            with pytest.raises(ValueError, match="per-episode API"):
+                collector.get_trajectories()
+        finally:
+            collector.close()
 
 
 class _TerminatorTokenizer:
@@ -1122,8 +1325,6 @@ class TestFeedbackTerminatorDedupe:
         w._max_model_len = None
         w._turn_idx = 0
         w.turn_rewards = []
-        w._feedback_texts = []
-        w._gen_texts = []
         w.turn_boundaries = []
         # Frame whose prefix begins with the terminator (chr(7) encodes to id 7).
         w._boundary_parts = {"user": ("\x07U:", ":A")}
@@ -1132,14 +1333,14 @@ class TestFeedbackTerminatorDedupe:
     def test_sampled_terminator_is_not_doubled(self) -> None:
         w = self._env(_TerminatorTokenizer())
         w.full_ids = torch.tensor([[65, 66, 7]], dtype=torch.long)  # ends with EOS
-        w._step_apply(("fb", "user", 0.5, False, False, {}))
+        w._step_apply(("fb", "user", None, 0.5, False, False, {}))
         # One terminator total: the sampled one; the frame's duplicate is dropped.
         assert w.full_ids[0].tolist().count(7) == 1
 
     def test_truncated_turn_still_gets_the_frame_terminator(self) -> None:
         w = self._env(_TerminatorTokenizer())
         w.full_ids = torch.tensor([[65, 66, 67]], dtype=torch.long)  # no EOS sampled
-        w._step_apply(("fb", "user", 0.5, False, False, {}))
+        w._step_apply(("fb", "user", None, 0.5, False, False, {}))
         assert w.full_ids[0].tolist().count(7) == 1
 
     def test_non_special_equal_token_is_kept(self) -> None:
@@ -1147,7 +1348,7 @@ class TestFeedbackTerminatorDedupe:
         tokenizer.all_special_ids = []
         w = self._env(tokenizer)
         w.full_ids = torch.tensor([[65, 66, 7]], dtype=torch.long)
-        w._step_apply(("fb", "user", 0.5, False, False, {}))
+        w._step_apply(("fb", "user", None, 0.5, False, False, {}))
         # id 7 is ordinary content here; nothing may be silently dropped.
         assert w.full_ids[0].tolist().count(7) == 2
 
@@ -1358,6 +1559,7 @@ class _StepVariantEnv(RolloutEnvDoubleMixin):
             torch.zeros(1, 4, dtype=torch.long),
             torch.ones(2, dtype=torch.float32),
             torch.cat(self.sampling_logps) if self.sampling_logps else None,
+            None,
             None,
         )
 
@@ -1619,11 +1821,12 @@ class TestBatchRolloutEnvPerEpisode:
         vec_env.reset_episode("ep1", logical_slot=0)
         assert vec_env.active_episode_count() == 1
 
-    def test_reset_episode_seed_works_while_other_episodes_are_live(self) -> None:
+    def test_group_task_works_while_other_episodes_are_live(self) -> None:
         vec_env = self._collector()
         vec_env.reset_episode("live", logical_slot=0)
-        vec_env.reset_episode("g2-a", logical_slot=0, seed=2)
-        vec_env.reset_episode("g2-b", logical_slot=1, seed=2)
+        task = vec_env.assign_group_task(2)
+        vec_env.reset_episode("g2-a", task=task)
+        vec_env.reset_episode("g2-b", task=task)
         seen = sorted(env.reset_calls[-1] for env in vec_env.envs if env.reset_calls)
         assert seen == sorted([_mix_seed(10), _mix_seed(12), _mix_seed(12)])
         with pytest.raises(RuntimeError, match="still active"):
@@ -1793,7 +1996,6 @@ class TestRolloutEnvPhaseGuards:
         w.full_ids = torch.tensor([[65, 66]], dtype=torch.long)
         w._last_full_prompt_token_len = 1
         w.turn_boundaries = []
-        w._gen_texts = []
         w._turn_idx = 0
 
         with pytest.raises(TypeError, match="returns str"):
@@ -1808,8 +2010,7 @@ class TestRolloutEnvPhaseGuards:
         w._turn_idx = 0
         w.turn_rewards = []
         w.rubric_score_sums = {}
-        w._feedback_texts = []
         w.full_ids = None  # no reset() ran, so there is no transcript to append to
 
         with pytest.raises(RuntimeError, match="reset\\(\\) must run before step"):
-            w._step_apply(("fb", "user", 0.5, False, False, {}))
+            w._step_apply(("fb", "user", None, 0.5, False, False, {}))

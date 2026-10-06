@@ -169,6 +169,7 @@ class TestCollectRolloutsLlmOrdering:
                 torch.Tensor,
                 torch.Tensor | None,
                 torch.Tensor | None,
+                None,
             ]:
                 """Expose marker token via episode ids and rewards for ordering checks."""
                 token = self._seen_token if self._seen_token is not None else -1
@@ -176,7 +177,7 @@ class TestCollectRolloutsLlmOrdering:
                 action_mask = torch.tensor([[True]], dtype=torch.bool)
                 turn_ids = torch.tensor([[0]], dtype=torch.long)
                 rewards = torch.tensor([float(token)], dtype=torch.float32)
-                return ep_ids, action_mask, turn_ids, rewards, None, None
+                return ep_ids, action_mask, turn_ids, rewards, None, None, None
 
             def close(self) -> None:
                 """Provide a close method compatible with vector env cleanup."""

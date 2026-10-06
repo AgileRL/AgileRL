@@ -7,8 +7,10 @@ from __future__ import annotations
 
 from contextlib import nullcontext
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import MagicMock, patch
 
+import pytest
 import torch
 
 from agilerl.algorithms import GRPO
@@ -434,3 +436,96 @@ class TestFusedKernelLossPixelValues:
         assert forwarded.shape[0] == batch_size
         assert forwarded.device == grpo.device
         assert torch.equal(forwarded, pixel_values)
+
+
+@_LLM_DEPS_SKIP
+class TestPixelValuesForFusedSlice:
+    def test_keeps_every_image_in_one_fused_row(self) -> None:
+        agent = _make_llm_agent()
+        pixels = torch.arange(8).reshape(8, 1, 1, 1)
+
+        first = agent._pixel_values_for_fused_slice(pixels, 0, 1, 2)
+        second = agent._pixel_values_for_fused_slice(pixels, 1, 2, 2)
+
+        assert torch.equal(first, pixels[:4])
+        assert torch.equal(second, pixels[4:])
+
+    def test_slices_one_image_per_fused_row(self) -> None:
+        agent = _make_llm_agent()
+        pixels = torch.arange(2).reshape(2, 1, 1, 1)
+
+        selected = agent._pixel_values_for_fused_slice(pixels, 0, 1, 2)
+
+        assert torch.equal(selected, pixels[:1])
+
+    def test_keeps_every_image_when_the_slice_spans_every_fused_row(self) -> None:
+        agent = _make_llm_agent()
+        pixels = torch.arange(6).reshape(6, 1, 1, 1)
+
+        selected = agent._pixel_values_for_fused_slice(pixels, 0, 4, 4)
+
+        assert torch.equal(selected, pixels)
+
+    def test_rejects_a_leading_dim_that_does_not_divide_the_rows(self) -> None:
+        agent = _make_llm_agent()
+        pixels = torch.ones(3, 1, 1, 1)
+
+        with pytest.raises(ValueError, match="does not divide"):
+            agent._pixel_values_for_fused_slice(pixels, 0, 1, 2)
+
+    def test_slices_unequal_image_counts(self) -> None:
+        agent = _make_llm_agent()
+        pixels = torch.arange(7).reshape(7, 1, 1, 1)
+
+        first = agent._pixel_values_for_fused_slice(
+            pixels, 0, 1, 2, image_counts=[3, 4]
+        )
+        second = agent._pixel_values_for_fused_slice(
+            pixels, 1, 2, 2, image_counts=[3, 4]
+        )
+
+        assert torch.equal(first, pixels[:3])
+        assert torch.equal(second, pixels[3:])
+
+    def test_rejects_image_counts_that_do_not_sum_to_the_pixel_rows(self) -> None:
+        agent = _make_llm_agent()
+        pixels = torch.ones(5, 1, 1, 1)
+
+        with pytest.raises(
+            ValueError,
+            match="pixel_values leading dim 5 does not match the fused image counts",
+        ):
+            agent._pixel_values_for_fused_slice(pixels, 0, 1, 2, image_counts=[3, 4])
+
+
+@_LLM_DEPS_SKIP
+class TestLLMAlgorithmFusedForwardNoGrad:
+    def test_each_fused_row_gets_its_own_sample_images(self) -> None:
+        # Arrange: sample 0 has one image, sample 1 has two; the reference and
+        # actor rows of each sample run one row per forward.
+        agent = _make_cpu_grpo_for_kernel_tests()
+        ids = torch.randint(1, 32, (2, 5))
+        pixel_values = torch.arange(3.0).reshape(3, 1)
+        seen: list[list[float]] = []
+
+        def record_pixel_values(
+            _module: torch.nn.Module,
+            _args: tuple[Any, ...],
+            kwargs: dict[str, Any],
+        ) -> None:
+            seen.append(kwargs["pixel_values"].flatten().tolist())
+
+        handle = agent.actor.get_base_model().register_forward_pre_hook(
+            record_pixel_values, with_kwargs=True
+        )
+
+        # Act
+        try:
+            agent._fused_forward_no_grad(
+                ids, 1, pixel_values=pixel_values, pixel_image_counts=[1, 2]
+            )
+        finally:
+            handle.remove()
+
+        # Assert
+        assert seen == [[0.0], [1.0, 2.0], [0.0], [1.0, 2.0]]

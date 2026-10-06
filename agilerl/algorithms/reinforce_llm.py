@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import warnings
+from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
@@ -27,6 +28,7 @@ else:
     # tests can patch it. ``_reinforce_loss_liger`` guards against actual use.
     LigerFusedLinearPolicyLossFunction = None  # type: ignore[assignment]
     apply_fused_policy_loss = None  # type: ignore[assignment]
+from agilerl.components.llm_rollout_data import EpisodeSegments
 from agilerl.distributed import FSDPConfig, aggregate_metrics_dict, resolve_device
 from agilerl.protocols import (
     PeftModelProtocol,
@@ -56,6 +58,8 @@ from agilerl.utils.llm_utils import (
     resolve_batch_advantage_granularity,
     validate_importance_sampling_level,
 )
+from agilerl.utils.segment_rows import filler_stand_in
+from agilerl.utils.vision_rows import VisionRows
 
 if HAS_LLM_DEPENDENCIES:
     from transformers import GenerationConfig
@@ -218,6 +222,14 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
         importance-sampling ratio (default ``2.0``), bounding the correction
         weight to limit variance from outlier tokens. Must be > 0.
     :type vllm_importance_sampling_cap: float, optional
+    :param vllm_max_logprob_gap: Log a warning when a learn step's mean
+        ``|trainer - vLLM|`` per-token log-prob gap exceeds this, in nats
+        (default ``0.1``). bf16 engines usually sit near 0.01-0.03.
+    :type vllm_max_logprob_gap: float, optional
+    :param vllm_max_clip_fraction: Log a warning when the fraction of action
+        tokens whose trainer/vLLM ratio reaches ``vllm_importance_sampling_cap``
+        exceeds this (default ``0.02``). bf16 engines usually stay under 0.01.
+    :type vllm_max_clip_fraction: float, optional
     :param use_sequence_packing: Opt in to padding-free sequence packing for the
         gradient forward pass. Only honoured under a FlashAttention-2 backend;
         otherwise inert.
@@ -282,6 +294,8 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
         lora_target_scope: str | None = None,
         vllm_importance_sampling_correction: bool = True,
         vllm_importance_sampling_cap: float = 2.0,
+        vllm_max_logprob_gap: float = 0.1,
+        vllm_max_clip_fraction: float = 0.02,
     ) -> None:
 
         resolved_device = resolve_device(device)
@@ -322,6 +336,8 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
             lora_target_scope=lora_target_scope,
             vllm_importance_sampling_correction=vllm_importance_sampling_correction,
             vllm_importance_sampling_cap=vllm_importance_sampling_cap,
+            vllm_max_logprob_gap=vllm_max_logprob_gap,
+            vllm_max_clip_fraction=vllm_max_clip_fraction,
         )
         self._validate_core_args(
             batch_size, lr, clip_coef, update_epochs, actor_network, clone
@@ -445,6 +461,10 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
         experiences: LLMRolloutExperiences,
         turn_ids: torch.Tensor | None = None,
         sampling_logps: list[torch.Tensor | None] | None = None,
+        episode_segments: list[EpisodeSegments | None] | None = None,
+        pixel_values: torch.Tensor | None = None,
+        pixel_image_counts: Sequence[int] | None = None,
+        image_token_id: int | None = None,
     ) -> dict[str, float]:
         """Update actor using REINFORCE with Return Batch Normalization.
 
@@ -462,10 +482,31 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
             Parallel to the stacked ``token_ids`` rows. ``None`` disables
             the correction for this update.
         :type sampling_logps: list[torch.Tensor | None] | None
+        :param episode_segments: Optional segment layout per trajectory,
+            parallel to the stacked ``token_ids`` rows (``None`` for an
+            unsegmented trajectory). Each segment runs its forwards as its own
+            row; returns and advantages span the whole episode. The update
+            keeps the optimizer steps of the unsegmented batch: each step
+            accumulates a window of segment rows, padded so every rank runs the
+            same micro-batches.
+        :type episode_segments: list[EpisodeSegments | None] | None
+        :param pixel_values: Optional vision rows of every trajectory, stacked
+            in ``token_ids`` row order. The reference and actor forwards each
+            see the vision rows of the rows they run.
+        :type pixel_values: torch.Tensor | None
+        :param pixel_image_counts: Optional vision rows per trajectory, needed
+            when trajectories hold different numbers of images.
+        :type pixel_image_counts: Sequence[int] | None
+        :param image_token_id: Token id the VL forward scatters one image
+            feature row into. Required with ``pixel_values`` and
+            ``episode_segments``, to cut the filler rows down to one image.
+        :type image_token_id: int | None
         :return: Dict with keys ``loss``, ``kl``, ``pg_loss``,
-            ``entropy``, averaged over all minibatch updates.
+            ``entropy``, averaged over all minibatch updates, plus row padding
+            stats and ``learn_phase_<phase>_s`` wall seconds.
         :rtype: dict[str, float]
         """
+        phase_timer = self._start_learn_phases()
         self._prepare_vllm_for_training()
 
         with self.trainer_offload_context():
@@ -494,7 +535,6 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
 
             del rewards
 
-            batch_idxs = np.arange(num_samples)
             batch_size = (
                 min(num_samples, self.micro_batch_size_per_gpu)
                 if hasattr(self, "micro_batch_size_per_gpu")
@@ -508,10 +548,36 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
             }
             updates = 0
 
+            has_segments = self._has_episode_segments(episode_segments, num_samples)
+            rows = None
+            accumulation_steps = None
+            if has_segments:
+                self._check_segments_supported(self.importance_sampling_level)
+                rows, accumulation_steps = self._segment_rows(
+                    token_ids,
+                    action_masks,
+                    episode_segments,
+                    np.arange(num_samples),
+                    pixel_values=pixel_values,
+                    pixel_image_counts=pixel_image_counts,
+                    image_token_id=image_token_id,
+                )
+                pixel_values = rows.pixel_values
+                pixel_image_counts = rows.pixel_image_counts
+                batch_size = self.micro_batch_size_per_gpu
+            phase_timer.mark("prepare")
             reference_log_probs, old_log_probs, _ = self._fused_forward_no_grad(
-                token_ids,
+                token_ids if rows is None else rows.token_ids,
                 batch_size,
+                pixel_values=pixel_values,
+                pixel_image_counts=pixel_image_counts,
             )
+            phase_timer.mark("no_grad_forward")
+            if rows is not None:
+                # Returns and advantages run over whole episodes.
+                frame = (num_samples, int(action_masks.shape[1]))
+                reference_log_probs = rows.merge_frame(reference_log_probs, *frame, 1.0)
+                old_log_probs = rows.merge_frame(old_log_probs, *frame, 1.0)
             token_rewards = self._compute_token_rewards(
                 action_masks, rewards_2d, turn_ids
             )
@@ -540,13 +606,54 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
                 )
             )
 
+            row_episodes = np.arange(num_samples)
+            if rows is not None:
+                token_ids = rows.token_ids
+                action_masks = rows.action_masks
+                turn_ids = rows.split_frame(turn_ids, -1)
+                old_log_probs = rows.split_frame(old_log_probs, 1.0)
+                reference_log_probs = rows.split_frame(reference_log_probs, 1.0)
+                advantages = rows.split_frame(advantages, 0.0)
+                if sampling_log_probs is not None:
+                    sampling_log_probs = rows.split_frame(sampling_log_probs, 0.0)
+                row_episodes = rows.row_episodes
+                num_samples = int(token_ids.shape[0])
+            batch_idxs = np.arange(num_samples)
+            filler_rows = row_episodes < 0
+            padding_stats = self._row_padding_stats(token_ids, row_episodes, batch_idxs)
+            vision_rows = (
+                VisionRows(pixel_values, pixel_image_counts)
+                if pixel_values is not None
+                else None
+            )
+            phase_timer.mark("prepare")
+
             self.actor.train()
             for _epoch_idx in range(self.update_epochs):
                 self.rng.shuffle(batch_idxs)
+                loss_scales = None
+                if accumulation_steps is not None:
+                    loss_scales = self._segment_loss_scales(
+                        np.array(
+                            [
+                                filler_rows[
+                                    batch_idxs[start : start + batch_size]
+                                ].all()
+                                for start in range(0, num_samples, batch_size)
+                            ]
+                        ),
+                        accumulation_steps,
+                    )
                 for start in range(0, num_samples, batch_size):
                     minibatch_idxs = batch_idxs[
                         start : min((start + batch_size), num_samples)
                     ]
+                    phase_timer.mark("other")
+                    loss_scale = (
+                        1.0
+                        if loss_scales is None
+                        else float(loss_scales[start // batch_size])
+                    )
                     # ``get_experiences_samples`` indexes each input
                     # positionally: Tensor in -> Tensor out, so the tuple
                     # mirrors the all-Tensor inputs.
@@ -566,8 +673,18 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
                         advantages,
                         turn_ids,
                     )
+                    is_filler = bool(filler_rows[minibatch_idxs].all())
+                    if is_filler:
+                        batch_action_mask, batch_turn_ids = filler_stand_in(
+                            batch_action_mask, batch_turn_ids
+                        )
 
                     batch_mask_bool = batch_action_mask.bool()
+                    batch_pixel_values = (
+                        vision_rows.for_minibatch(minibatch_idxs, num_samples)
+                        if vision_rows is not None
+                        else None
+                    )
 
                     # Slice the aligned vLLM sampling logprobs for this
                     # minibatch; ``None`` when the correction is off / no
@@ -613,9 +730,13 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
                             batch_advantages,
                             batch_turn_ids,
                             batch_sampling_log_probs,
+                            batch_pixel_values,
                         )
                         self._raise_if_loss_not_finite_on_any_rank(pg_loss)
-                        self._backward_pass(pg_loss)
+                        phase_timer.mark("forward")
+                        self._backward_pass(pg_loss * loss_scale, accumulation_steps)
+                        if is_filler:
+                            continue
                         learn_metrics["kl"] += metrics["kl"]
                         learn_metrics["entropy"] += metrics["entropy"]
                         learn_metrics["pg_loss"] += metrics["pg_loss"]
@@ -629,6 +750,7 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
                             batch_size=batch_size,
                             use_reference=False,
                             eval_mode=False,
+                            pixel_values=batch_pixel_values,
                         )
                     batch_log_probs = torch.masked_fill(
                         batch_log_probs, ~batch_mask_bool, 1.0
@@ -667,7 +789,10 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
                     )
 
                     self._raise_if_loss_not_finite_on_any_rank(pg_loss)
-                    self._backward_pass(pg_loss)
+                    phase_timer.mark("forward")
+                    self._backward_pass(pg_loss * loss_scale, accumulation_steps)
+                    if is_filler:
+                        continue
 
                     learn_metrics["kl"] += masked_mean(kl, batch_action_mask).item()
                     learn_metrics["entropy"] += masked_entropy.item()
@@ -682,6 +807,9 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
         # Sampling-mismatch metrics are computed once over the full batch, so
         # they bypass the per-update averaging above.
         result.update(is_metrics)
+        result.update(padding_stats)
+        phase_seconds = self._learn_phase_seconds()
+        result.update(phase_seconds)
 
         # Wire averaged metrics into the metrics tracker; position 0 is the
         # per-trajectory completion-id batch.
@@ -695,6 +823,8 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
                 "pg_loss": averaged["pg_loss"],
                 "completion_length": completion_length,
                 **is_metrics,
+                **padding_stats,
+                **phase_seconds,
             },
         )
         agg["completion_length"] = int(agg["completion_length"])
@@ -829,6 +959,7 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
         batch_advantages: torch.Tensor,
         turn_ids: torch.Tensor | None = None,
         sampling_log_probs: torch.Tensor | None = None,
+        pixel_values: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, dict[str, float]]:
         """REINFORCE clipped policy loss via the fused-linear PPO Function.
 
@@ -852,6 +983,9 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
         :type batch_reference_log_probs: torch.Tensor
         :param batch_advantages: ``(B, seq_len-1)`` per-token advantages.
         :type batch_advantages: torch.Tensor
+        :param pixel_values: Vision rows of the minibatch's token rows, or
+            ``None`` for text.
+        :type pixel_values: torch.Tensor | None
         :return: ``(pg_loss, metrics)`` where ``metrics`` carries
             ``kl``, ``pg_loss``, ``entropy``, ``clipfrac`` Python floats.
         :rtype: tuple[torch.Tensor, dict[str, float]]
@@ -926,6 +1060,8 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
         }
         if self.calc_position_embeddings:
             kwargs["position_ids"] = self._position_ids_from_mask(attention_mask)
+        if pixel_values is not None:
+            kwargs["pixel_values"] = pixel_values.to(self.device)
 
         with (
             self._patch_lm_head_to_identity(),

@@ -97,12 +97,34 @@ else:
     safe_load_file: Any = None
     save_file: Any = None
 
+# Padding of the rows an LLM RL learn trains, filler rows of segmented batches included.
+ROW_PADDING_METRIC_NAMES = (
+    "padding_frac_before_packing",  # pad share of the padded training rows
+    "padding_frac_after_packing",  # pad share of the gradient forward's tokens
+    "train_rows_padded",  # rows the update runs per epoch, filler rows included
+    "filler_token_frac",  # filler-row share of the gradient forward's tokens
+)
+
 # Every LLM RL learn (GRPO/PPO/REINFORCE) reports these.
 LLM_RL_COMMON_METRIC_NAMES = (
     "loss",  # update-averaged objective
     "entropy",  # policy entropy proxy (mean negative logprob)
     "completion_length",  # mean token ids per trajectory
+    *ROW_PADDING_METRIC_NAMES,
 )
+
+# Timed phases of every LLM learn, reported as ``learn_phase_<phase>_s``.
+LEARN_PHASES = (
+    "prepare",  # batch prep, advantages and batch stats
+    "no_grad_forward",  # no-grad old / reference log-prob and value forward
+    "forward",  # gradient forward and loss
+    "backward",  # loss.backward, including FSDP reduce-scatter
+    "grad_sync",  # explicit grad all-reduces at the optimizer step
+    "optim",  # grad clip, optimizer step and zero_grad
+    "other",  # host reads and the update summary
+)
+
+LEARN_PHASE_METRIC_NAMES = tuple(f"learn_phase_{phase}_s" for phase in LEARN_PHASES)
 
 # GRPO-only per-learn diagnostics: update-averaged KL and clip fraction plus
 # advantage stats, update-loop policy diagnostics, and averaged grad norms.
@@ -145,7 +167,9 @@ REINFORCE_METRIC_NAMES = (
 VLLM_IS_METRIC_NAMES = (
     "vllm_is_delta_mean",  # mean |trainer - vLLM| logprob gap
     "vllm_is_delta_max",  # max |trainer - vLLM| logprob gap
+    "vllm_mismatch_kl",  # k3 KL(vLLM || trainer) over action tokens
     "vllm_is_ratio_mean",  # mean clamped trainer/vLLM probability ratio
+    "vllm_is_ratio_std",  # std of the clamped ratio
     "vllm_is_ratio_p95",  # 95th percentile clamped ratio
     "vllm_is_frac_clamped",  # ratios hitting the upper clamp
     "vllm_is_rows_skipped",  # rows falling back to ratio 1 on token mismatch

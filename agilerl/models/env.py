@@ -483,6 +483,13 @@ def make_rollout_env_factory(
             "env_url rollouts."
         )
         raise ValueError(msg)
+    if spec.segment_prompt_tokens is not None or spec.segment_max_images is not None:
+        msg = (
+            "segment_prompt_tokens and segment_max_images need the async per-episode rollout path "
+            "(e.g. agilerl-ray's rollout engine); framework training collects "
+            "rollouts in sync batches, which cannot hold restarted episodes."
+        )
+        raise ValueError(msg)
 
     # max_output_tokens >= max_model_len zeroes the prompt budget: every episode
     # truncates at reset and training silently never advances. Fail at setup.

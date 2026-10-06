@@ -673,12 +673,15 @@ class VLLMConfig(BaseModel):
             "the trainer."
         ),
     )
-    max_num_seqs: int = Field(
-        default=8,
+    max_num_seqs: int | None = Field(
+        default=None,
         ge=1,
         description=(
             "Sequences vLLM decodes concurrently. Set it to at least "
-            "group_size so a GRPO group does not queue."
+            "group_size so a GRPO group does not queue. Unset gives colocated "
+            "generation 8 and each rollout engine one sequence per episode it "
+            "runs at once (rollout_batch_size / rollout_engines_per_agent x "
+            "group_size)."
         ),
     )
     max_num_batched_tokens: int | None = Field(

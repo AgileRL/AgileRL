@@ -104,6 +104,14 @@ IS_CORRECTION = (
     "the trainer's recomputed ones."
 )
 IS_CAP = "Upper bound applied to the vLLM importance-sampling correction ratio."
+VLLM_MAX_LOGPROB_GAP = (
+    "Warn when the mean per-token log-prob gap between vLLM and the trainer "
+    "exceeds this, in nats. bf16 engines usually sit near 0.01-0.03."
+)
+VLLM_MAX_CLIP_FRACTION = (
+    "Warn when the share of tokens whose trainer/vLLM ratio reaches the "
+    "importance-sampling cap exceeds this. bf16 engines usually stay under 0.01."
+)
 ADVANTAGE_GRANULARITY = (
     "Level the advantage is computed at. 'auto' follows the environment: "
     "per-turn for multi-turn, per-trajectory otherwise."

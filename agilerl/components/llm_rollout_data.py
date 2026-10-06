@@ -19,6 +19,23 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from agilerl.utils.algo_utils import stack_and_pad_experiences
 
 
+@dataclass(frozen=True)
+class EpisodeSegments:
+    """Layout of an episode whose context restarted, stored as consecutive segments.
+
+    Each segment is its own self-contained sequence. In the episode row they sit
+    back to back; the action mask is ``False`` at the position that predicts a
+    segment's first token.
+
+    :param token_lengths: ``(S,)`` long tensor of segment token counts, ``S >= 2``.
+    :param pixel_rows: ``(S,)`` long tensor of each segment's ``pixel_values``
+        rows, or ``None`` for text-only episodes.
+    """
+
+    token_lengths: torch.Tensor
+    pixel_rows: torch.Tensor | None = None
+
+
 class Trajectory(BaseModel):
     """One completed LLM trajectory.
 
@@ -28,6 +45,7 @@ class Trajectory(BaseModel):
     :param rewards: ``(max_turns,)`` or ``(1, max_turns)`` per-turn rewards.
     :param sampling_logps: Optional 1-D generated-token sampling logprobs.
     :param pixel_values: Optional vision tensor for trainer forward on VL episodes.
+    :param segments: Segment layout when the episode context restarted, else ``None``.
     """
 
     token_ids: torch.Tensor
@@ -36,6 +54,7 @@ class Trajectory(BaseModel):
     rewards: torch.Tensor
     sampling_logps: torch.Tensor | None = None
     pixel_values: torch.Tensor | None = None
+    segments: EpisodeSegments | None = None
 
     model_config = ConfigDict(arbitrary_types_allowed=True, frozen=True, extra="forbid")
 
@@ -53,7 +72,28 @@ class Trajectory(BaseModel):
                     f"got {int(tensor.shape[-1])}."
                 )
                 raise ValueError(msg)
+        if self.segments is not None:
+            validate_episode_segments(self.segments, int(self.token_ids.shape[-1]))
         return self
+
+
+def validate_episode_segments(segments: EpisodeSegments, token_count: int) -> None:
+    """Check a segment layout against the episode row it describes.
+
+    :param segments: Segment layout to check.
+    :param token_count: Token count of the episode row.
+    :raises ValueError: If the layout does not tile the row.
+    """
+    lengths = segments.token_lengths
+    if lengths.dim() != 1 or int(lengths.numel()) < 2:
+        msg = f"segments.token_lengths must be 1-D with at least 2 segments, got shape {tuple(lengths.shape)}."
+        raise ValueError(msg)
+    if int(lengths.min()) < 2:
+        msg = "Every segment needs at least 2 tokens."
+        raise ValueError(msg)
+    if int(lengths.sum()) != token_count:
+        msg = f"segments.token_lengths sum to {int(lengths.sum())}, episode has {token_count} tokens."
+        raise ValueError(msg)
 
 
 class RolloutGroup(BaseModel):
@@ -94,6 +134,7 @@ class LLMExperienceBatch:
     :param token_lengths: ``(B,)`` long tensor of per-row sequence lengths.
     :param sampling_logps: Per-row logprob tensors, or ``None`` when none were captured.
     :param pixel_values: Per-row vision tensors, or ``None`` when none were captured.
+    :param segments: Per-row segment layouts, or ``None`` when no row restarted.
     """
 
     token_ids: list[torch.Tensor]
@@ -103,6 +144,7 @@ class LLMExperienceBatch:
     token_lengths: torch.Tensor
     sampling_logps: list[torch.Tensor | None] | None = None
     pixel_values: list[torch.Tensor | None] | None = None
+    segments: list[EpisodeSegments | None] | None = None
 
     def __len__(self) -> int:
         return len(self.token_ids)
@@ -149,6 +191,7 @@ def collate_rollout_groups(groups: Sequence[RolloutGroup]) -> LLMExperienceBatch
     )
     logps = [traj.sampling_logps for traj in trajectories]
     pixels = [traj.pixel_values for traj in trajectories]
+    segments = [traj.segments for traj in trajectories]
     return LLMExperienceBatch(
         token_ids=[traj.token_ids for traj in trajectories],
         action_masks=[traj.action_masks for traj in trajectories],
@@ -160,4 +203,5 @@ def collate_rollout_groups(groups: Sequence[RolloutGroup]) -> LLMExperienceBatch
         ),
         sampling_logps=logps if any(lp is not None for lp in logps) else None,
         pixel_values=pixels if any(pv is not None for pv in pixels) else None,
+        segments=segments if any(seg is not None for seg in segments) else None,
     )

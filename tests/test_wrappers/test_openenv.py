@@ -10,17 +10,21 @@ OpenEnv protocol. These cover both halves (``OpenEnvServer`` host +
 
 from __future__ import annotations
 
+import base64
+import concurrent.futures
+import io
 import socket
 import threading
 import time
 from types import SimpleNamespace
 from typing import Any
 
+import numpy as np
 import pytest
 import torch
 import websockets.exceptions
 from openenv.core.env_server.interfaces import Action, Environment, Observation
-from PIL import Image
+from PIL import Image, UnidentifiedImageError
 from pydantic import Field
 
 from agilerl.llm_envs import (
@@ -42,6 +46,7 @@ from agilerl.llm_envs.observation import (
     process_observation,
 )
 from agilerl.llm_envs.openenv import (
+    SESSION_LOOP,
     InProcessEnvClient,
     RemoteEnvClient,
 )
@@ -168,6 +173,24 @@ def test_base_url_required() -> None:
         RemoteEnvClient("")
 
 
+class TestRemoteEnvClientInit:
+    def test_rejects_empty_tasks(self) -> None:
+        with pytest.raises(ValueError, match="tasks must not be empty"):
+            RemoteEnvClient("http://stub.invalid", tasks=[])
+
+    def test_rejects_empty_eval_tasks(self) -> None:
+        with pytest.raises(ValueError, match="eval_tasks must not be empty"):
+            RemoteEnvClient("http://stub.invalid", eval_tasks=[])
+
+
+class TestRemoteEnvClientReset:
+    def test_rejects_a_row_index_outside_the_tasks(self) -> None:
+        client = RemoteEnvClient("http://stub.invalid", tasks=[{"task_id": 0}])
+
+        with pytest.raises(IndexError, match="row_index 1 out of range for 1 tasks"):
+            client.reset(row_index=1)
+
+
 # --- gym-tuple normalisation -----------------------------------------------
 def test_normalize_step_accepts_four_tuple() -> None:
     """A 4-tuple ``(obs, reward, done, info)`` fills ``truncated=False``."""
@@ -227,10 +250,21 @@ def test_vl_observation_screenshot_rgb_nested_list() -> None:
         {"goal": goal, "text": text, "screenshot": screenshot}
     )
 
-    assert out_text == f"<image>\n{goal}\n\n{text}"
+    assert out_text == f"<image>\n{goal}\n\n{text}\n\nQuestion:\n{goal}"
     assert isinstance(out_image, Image.Image)
     assert out_image.mode == "RGB"
     assert out_image.size == (2, 2)
+
+
+def test_vl_observation_screenshot_empty_goal_is_not_repeated() -> None:
+    screenshot = [[[0, 0, 0]]]
+    text = "page"
+
+    out_text, _out_image = observation_text_and_image(
+        {"goal": "", "text": text, "screenshot": screenshot}
+    )
+
+    assert out_text == f"<image>\n\n\n{text}"
 
 
 def test_vl_observation_screenshot_grayscale_becomes_rgb() -> None:
@@ -269,6 +303,45 @@ def test_vl_observation_screenshot_rejects_bad_shape() -> None:
         observation_text_and_image({"screenshot": [[[0] * 4] * 2] * 2})
 
 
+class TestObservationTextAndImageBase64Screenshot:
+    def test_png_decodes_to_the_same_pixels_as_the_nested_list(self) -> None:
+        # Arrange
+        rng = np.random.default_rng(0)
+        pixels = rng.integers(0, 256, size=(72, 128, 3), dtype=np.uint8)
+        buffer = io.BytesIO()
+        Image.fromarray(pixels).save(buffer, format="PNG", compress_level=1)
+        encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
+        obs = {"goal": "Find it.", "text": "[12] link 'Home'"}
+
+        # Act
+        png_text, png_image = observation_text_and_image({**obs, "screenshot": encoded})
+        list_text, list_image = observation_text_and_image(
+            {**obs, "screenshot": pixels.tolist()}
+        )
+
+        # Assert
+        assert png_text == list_text
+        assert png_image.mode == "RGB"
+        np.testing.assert_array_equal(np.asarray(png_image), pixels)
+        np.testing.assert_array_equal(np.asarray(png_image), np.asarray(list_image))
+
+    def test_rgba_png_becomes_rgb(self) -> None:
+        buffer = io.BytesIO()
+        Image.new("RGBA", (3, 2), (10, 20, 30, 255)).save(buffer, format="PNG")
+        encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
+
+        _text, image = observation_text_and_image({"screenshot": encoded})
+
+        assert image.mode == "RGB"
+        assert image.getpixel((0, 0)) == (10, 20, 30)
+
+    def test_rejects_a_string_that_is_not_an_image(self) -> None:
+        encoded = base64.b64encode(b"not an image").decode("ascii")
+
+        with pytest.raises(UnidentifiedImageError, match="cannot identify image file"):
+            observation_text_and_image({"screenshot": encoded})
+
+
 def test_vl_observation_string_is_text_only() -> None:
     assert observation_text_and_image("hello") == ("hello", None)
 
@@ -279,6 +352,26 @@ def test_encode_image_training_inputs_rejects_non_tensors() -> None:
 
     with pytest.raises(TypeError, match="processor must return torch"):
         encode_image_training_inputs(text="x", image=object(), processor=processor)
+
+
+class TestEncodeImageTrainingInputs:
+    def test_unwraps_a_one_image_list(self) -> None:
+        # Arrange
+        image = object()
+        seen: list[object] = []
+
+        def processor(
+            *, text: str, images: object, return_tensors: str
+        ) -> dict[str, torch.Tensor]:
+            del text, return_tensors
+            seen.append(images)
+            return {"input_ids": torch.tensor([[1]]), "pixel_values": torch.ones(1)}
+
+        # Act
+        encode_image_training_inputs(text="x", image=[image], processor=processor)
+
+        # Assert
+        assert seen == [image]
 
 
 def test_normalize_reset_accepts_text_and_image_dict() -> None:
@@ -699,9 +792,31 @@ class TestTaskAssigner:
             TaskAssigner(4, seed=0, rank=4, world_size=4)
 
 
+class TestTaskAssignerNextTask:
+    def test_successive_groups_cover_every_row_once_per_epoch(self) -> None:
+        assigner = TaskAssigner(8, seed=0)
+
+        tasks = [assigner.next_task(100, offset) for offset in range(16)]
+
+        rows = [row for _seed, row in tasks]
+        assert sorted(rows[:8]) == list(range(8))
+        assert sorted(rows[8:]) == list(range(8))
+        assert len({seed for seed, _row in tasks}) == 16
+
+    def test_matches_the_window_assignment_for_the_same_offset(self) -> None:
+        window = TaskAssigner(4, seed=0).assign(1, 2, base_seed=100, seed_offset=3)
+
+        task = TaskAssigner(4, seed=0).next_task(100, 3)
+
+        assert window == [task, task]
+
+    def test_no_base_seed_and_no_rows_yield_an_empty_task(self) -> None:
+        assert TaskAssigner(0).next_task(None, 5) == (None, None)
+
+
 # --- /state strictness + MCP tools/list fallback ----------------------------
-class _StubSync:
-    """Stand-in for OpenEnv's ``SyncEnvClient`` — records reset/step, scripts errors."""
+class _StubSession:
+    """Stand-in for OpenEnv's async ``GenericEnvClient`` — records reset/step, scripts errors."""
 
     def __init__(
         self,
@@ -718,34 +833,34 @@ class _StubSync:
         self._reset_errors = list(reset_errors or [])
         self.closed = False
 
-    def connect(self) -> None:
+    async def connect(self) -> None:
         return None
 
-    def close(self) -> None:
+    async def close(self) -> None:
         self.closed = True
 
-    def reset(self, **kwargs: Any) -> Any:
+    async def reset(self, **kwargs: Any) -> Any:
         if self._reset_errors:
             raise self._reset_errors.pop(0)
         self.reset_calls.append(kwargs)
         return SimpleNamespace(observation="prompt", reward=None, done=False)
 
-    def step(self, action: Any) -> Any:
+    async def step(self, action: Any) -> Any:
         self.step_calls.append(action)
         if self._step_errors:
             raise self._step_errors.pop(0)
         return SimpleNamespace(observation="hi", reward=1.0, done=True)
 
-    def state(self) -> Any:
+    async def state(self) -> Any:
         if self._state_error is not None:
             raise self._state_error
         return self._state
 
 
 def _session_client(**stub_kwargs: Any) -> RemoteEnvClient:
-    """A session client whose transport is a :class:`_StubSync` (lazy connect: no I/O)."""
+    """A session client whose transport is a :class:`_StubSession` (lazy connect: no I/O)."""
     client = RemoteEnvClient("http://stub.invalid")
-    client._sync = _StubSync(**stub_kwargs)
+    client._session = _StubSession(**stub_kwargs)
     return client
 
 
@@ -753,17 +868,17 @@ def test_close_drops_the_session_so_the_next_connect_redials() -> None:
     """``close`` must clear the live-session flags; otherwise ``_connect`` skips redial."""
     client = _session_client()
     client._connect()
-    first = client._sync
+    first = client._session
     client.close()
     assert first.closed is True
-    assert client._sync is None
+    assert client._session is None
     assert client._connected is False
     assert client._broken is False
     assert client._state is None
-    fresh = _StubSync()
+    fresh = _StubSession()
     client._build_session = lambda: fresh  # type: ignore[method-assign]
     client._connect()
-    assert client._sync is fresh
+    assert client._session is fresh
     assert client._connected is True
 
 
@@ -772,14 +887,14 @@ def test_connect_error_strips_url_userinfo() -> None:
     client = RemoteEnvClient(url)
 
     class _Boom:
-        def connect(self) -> None:
+        async def connect(self) -> None:
             msg = f"failed to connect to {url}"
             raise ConnectionError(msg)
 
-        def close(self) -> None:
+        async def close(self) -> None:
             return None
 
-    client._sync = _Boom()
+    client._session = _Boom()
     with pytest.raises(ConnectionError) as excinfo:
         client._connect()
 
@@ -793,9 +908,9 @@ def test_redial_clears_cached_state_from_the_previous_host() -> None:
     client = _session_client(state={"dataset_size": 7, "tools": [{"name": "old"}]})
     assert client.dataset_size == 7
     assert client.tools == [{"name": "old"}]
-    fresh = _StubSync(state={"dataset_size": 2, "tools": [{"name": "new"}]})
+    fresh = _StubSession(state={"dataset_size": 2, "tools": [{"name": "new"}]})
     client._build_session = lambda: fresh  # type: ignore[method-assign]
-    client._redial()
+    client._redial(0)
     assert client._state is None
     assert client.dataset_size == 2
     assert client.tools == [{"name": "new"}]
@@ -807,10 +922,10 @@ def test_redial_drops_the_session_before_sleeping(
     """Backoff must not hold the live session (CAPACITY_REACHED keeps that slot)."""
     client = _session_client()
     client._connect()
-    session = client._sync
+    session = client._session
     order: list[str] = []
 
-    def close() -> None:
+    async def close() -> None:
         order.append("close")
         session.closed = True
 
@@ -820,11 +935,11 @@ def test_redial_drops_the_session_before_sleeping(
     monkeypatch.setattr(session, "close", close)
     monkeypatch.setattr("agilerl.llm_envs.openenv.time.sleep", sleep)
 
-    client._redial()
+    client._redial(0)
 
     assert order == ["close", "sleep"]
     assert session.closed is True
-    assert client._sync is None
+    assert client._session is None
 
 
 def test_session_reset_forwards_eval_and_positive_seed_only() -> None:
@@ -834,10 +949,64 @@ def test_session_reset_forwards_eval_and_positive_seed_only() -> None:
         prompt, info = client.reset(seed=-2, row_index=3)
     assert prompt == "prompt"
     assert info == {}
-    assert client._sync.reset_calls[-1] == {"row_index": 3, "evaluation": True}
+    assert client._session.reset_calls[-1] == {"row_index": 3, "evaluation": True}
 
     client.reset(seed=5)
-    assert client._sync.reset_calls[-1] == {"seed": 5}
+    assert client._session.reset_calls[-1] == {"seed": 5}
+
+
+class TestRemoteEnvClientEvalTasks:
+    @staticmethod
+    def _eval_only_client() -> RemoteEnvClient:
+        client = RemoteEnvClient(
+            "http://stub.invalid",
+            eval_tasks=[
+                {"split": "test", "task_id": 0},
+                {"split": "test", "task_id": 1},
+            ],
+        )
+        client._session = _StubSession(state={"dataset_size": 9})
+        return client
+
+    def test_eval_mode_resets_merge_the_eval_row_without_train_tasks(self) -> None:
+        # Arrange
+        client = self._eval_only_client()
+
+        # Act
+        with client.eval_mode():
+            client.reset(row_index=1)
+
+        # Assert
+        assert client._session.reset_calls[-1] == {
+            "split": "test",
+            "task_id": 1,
+            "evaluation": True,
+        }
+
+    def test_eval_mode_dataset_size_counts_eval_tasks_without_train_tasks(
+        self,
+    ) -> None:
+        # Arrange
+        client = self._eval_only_client()
+
+        # Act
+        with client.eval_mode():
+            eval_size = client.dataset_size
+        train_size = client.dataset_size
+
+        # Assert
+        assert eval_size == 2
+        assert train_size == 9
+
+    def test_training_resets_forward_the_row_index_without_train_tasks(self) -> None:
+        # Arrange
+        client = self._eval_only_client()
+
+        # Act
+        client.reset(row_index=4)
+
+        # Assert
+        assert client._session.reset_calls[-1] == {"row_index": 4}
 
 
 def test_session_state_application_error_propagates() -> None:
@@ -865,7 +1034,7 @@ def test_session_step_forwards_metadata_and_obs_rubric_scores() -> None:
     """Result metadata merges into info; obs-level rubric_scores fill gaps."""
     client = _session_client()
 
-    def _step(action: Any) -> Any:
+    async def _step(action: Any) -> Any:
         del action
         return SimpleNamespace(
             observation={
@@ -878,7 +1047,7 @@ def test_session_step_forwards_metadata_and_obs_rubric_scores() -> None:
             metadata={"from_result": True},
         )
 
-    client._sync.step = _step  # type: ignore[method-assign]
+    client._session.step = _step  # type: ignore[method-assign]
     _obs, _reward, _term, _trunc, info = client.step("go")
     assert info["from_result"] is True
     assert info["extra"] == 2
@@ -895,11 +1064,11 @@ def test_websocket_error_breaks_the_episode_and_reset_redials() -> None:
         client.step("go")
     with pytest.raises(RuntimeError, match="broken"):
         client.step("go")
-    fresh = _StubSync()
+    fresh = _StubSession()
     client._build_session = lambda: fresh  # type: ignore[method-assign]
     prompt, _info = client.reset()
     assert prompt == "prompt"
-    assert client._sync is fresh
+    assert client._session is fresh
     assert client._redials == 1
 
 
@@ -910,7 +1079,7 @@ def test_timeout_breaks_the_episode_and_reset_redials() -> None:
         client.step("go")
     with pytest.raises(RuntimeError, match="broken"):
         client.step("go")
-    client._build_session = lambda: _StubSync()  # type: ignore[method-assign]
+    client._build_session = lambda: _StubSession()  # type: ignore[method-assign]
     prompt, _info = client.reset()
     assert prompt == "prompt"
 
@@ -922,21 +1091,19 @@ def test_redial_resolves_the_url_provider_again(
     urls = iter(["http://host-a:1", "http://host-b:2"])
     dialled: list[str] = []
     stubs = [
-        _StubSync(step_errors=[websockets.exceptions.WebSocketException("dropped")]),
-        _StubSync(),
+        _StubSession(step_errors=[websockets.exceptions.WebSocketException("dropped")]),
+        _StubSession(),
     ]
 
-    class _CapturingClient:
-        def __init__(self, **kwargs: Any) -> None:
-            dialled.append(kwargs["base_url"])
-
-        def sync(self) -> Any:
-            return stubs[len(dialled) - 1]
+    def _capturing_client(**kwargs: Any) -> _StubSession:
+        dialled.append(kwargs["base_url"])
+        return stubs[len(dialled) - 1]
 
     monkeypatch.setattr(
         "agilerl.llm_envs.openenv.GenericEnvClient",
-        _CapturingClient,
+        _capturing_client,
     )
+    monkeypatch.setattr("agilerl.llm_envs.openenv.time.sleep", lambda _s: None)
     client = RemoteEnvClient(lambda: next(urls))
     client.reset()
     with pytest.raises(websockets.exceptions.WebSocketException):
@@ -958,12 +1125,15 @@ def test_server_error_frame_leaves_the_session_usable() -> None:
 
 
 # --- _fetch_state: transport errors retry then raise; app errors propagate ---
-def test_state_transport_error_redials_once_then_propagates() -> None:
-    """A transport error on ``state`` re-dials once (pre-episode); twice propagates."""
+def test_state_transport_error_redials_then_propagates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A transport error on ``state`` re-dials (pre-episode); the fourth propagates."""
+    monkeypatch.setattr("agilerl.llm_envs.openenv.time.sleep", lambda _s: None)
     client = _session_client(
         state_error=RuntimeError("Server error: capacity (code: CAPACITY_REACHED)")
     )
-    fresh = _StubSync(state={"dataset_size": 3})
+    fresh = _StubSession(state={"dataset_size": 3})
     client._build_session = lambda: fresh  # type: ignore[method-assign]
     assert client.dataset_size == 3
     assert client._redials == 1
@@ -971,11 +1141,92 @@ def test_state_transport_error_redials_once_then_propagates() -> None:
     stubborn = _session_client(
         state_error=RuntimeError("Server error: capacity (code: CAPACITY_REACHED)")
     )
-    stubborn._build_session = lambda: _StubSync(  # type: ignore[method-assign]
+    stubborn._build_session = lambda: _StubSession(  # type: ignore[method-assign]
         state_error=RuntimeError("Server error: capacity (code: CAPACITY_REACHED)")
     )
     with pytest.raises(RuntimeError, match="CAPACITY_REACHED"):
         _ = stubborn.tools
+    assert stubborn._redials == 3
+
+
+class TestRemoteEnvClientResetRedial:
+    def test_reset_redials_until_a_session_opens(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A dial that fails at reset is retried on fresh sessions, not raised."""
+        # Arrange
+        sleeps: list[float] = []
+        monkeypatch.setattr("agilerl.llm_envs.openenv.time.sleep", sleeps.append)
+
+        class _Unreachable(_StubSession):
+            async def connect(self) -> None:
+                msg = "Failed to connect to ws://stub.invalid/ws: [Errno 24]"
+                raise ConnectionError(msg)
+
+        sessions = iter([_Unreachable(), _Unreachable(), _StubSession()])
+        client = RemoteEnvClient("http://stub.invalid")
+        client._build_session = lambda: next(sessions)  # type: ignore[method-assign]
+
+        # Act
+        prompt, _info = client.reset(seed=1)
+
+        # Assert
+        assert prompt == "prompt"
+        assert client._redials == 2
+        assert 0.1 <= sleeps[0] <= 0.7
+        assert 0.2 <= sleeps[1] <= 1.4
+
+    def test_reset_raises_after_four_failed_dials(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr("agilerl.llm_envs.openenv.time.sleep", lambda _s: None)
+
+        class _Unreachable(_StubSession):
+            async def connect(self) -> None:
+                msg = "Failed to connect to ws://stub.invalid/ws"
+                raise ConnectionError(msg)
+
+        client = RemoteEnvClient("http://stub.invalid")
+        client._build_session = _Unreachable  # type: ignore[method-assign]
+
+        with pytest.raises(ConnectionError, match="Failed to connect"):
+            client.reset()
+        assert client._redials == 3
+
+
+class TestSessionLoopRun:
+    def test_every_session_runs_on_one_shared_loop_thread(self) -> None:
+        """Sessions driven from many threads all do their I/O on the one loop thread."""
+        # Arrange
+        loop_threads: list[str] = []
+
+        class _Recording(_StubSession):
+            async def reset(self, **kwargs: Any) -> Any:
+                loop_threads.append(threading.current_thread().name)
+                return await super().reset(**kwargs)
+
+        clients = [RemoteEnvClient("http://stub.invalid") for _ in range(8)]
+        for client in clients:
+            client._session = _Recording()
+
+        # Act
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+            prompts = [
+                prompt
+                for prompt, _info in pool.map(lambda client: client.reset(), clients)
+            ]
+
+        # Assert
+        assert prompts == ["prompt"] * 8
+        assert loop_threads == ["openenv-sessions"] * 8
+
+    def test_errors_propagate_to_the_calling_thread(self) -> None:
+        async def fail() -> None:
+            msg = "boom"
+            raise ValueError(msg)
+
+        with pytest.raises(ValueError, match="boom"):
+            SESSION_LOOP.run(fail)
 
 
 def test_state_server_error_propagates() -> None:
@@ -995,16 +1246,13 @@ def test_timeout_passes_through_to_the_openenv_client(
     """``timeout_s`` reaches ``GenericEnvClient`` verbatim; ``None`` stays unbounded."""
     captured: list[dict[str, Any]] = []
 
-    class _CapturingClient:
-        def __init__(self, **kwargs: Any) -> None:
-            captured.append(kwargs)
-
-        def sync(self) -> Any:
-            return _StubSync()
+    def _capturing_client(**kwargs: Any) -> _StubSession:
+        captured.append(kwargs)
+        return _StubSession()
 
     monkeypatch.setattr(
         "agilerl.llm_envs.openenv.GenericEnvClient",
-        _CapturingClient,
+        _capturing_client,
     )
     # The session dials lazily, so the client is only built on first use.
     RemoteEnvClient("http://stub.invalid", timeout_s=None).reset()
@@ -1349,12 +1597,12 @@ def test_step_encodes_mcp_call_tool_action() -> None:
     client = RemoteEnvClient(
         "http://stub.invalid", mcp_tool="echo", action_field="text"
     )
-    client._sync = _StubSync()
+    client._session = _StubSession()
     obs, reward, terminated, _truncated, _info = client.step("hello")
     assert obs == "hi"
     assert reward == 1.0
     assert terminated is True
-    assert client._sync.step_calls[-1] == {
+    assert client._session.step_calls[-1] == {
         "type": "call_tool",
         "tool_name": "echo",
         "arguments": {"text": "hello"},
@@ -1695,11 +1943,11 @@ def test_reset_retries_once_when_the_server_closed_an_idle_session() -> None:
     client = _session_client(
         reset_errors=[websockets.exceptions.ConnectionClosedOK(None, None)]
     )
-    fresh = _StubSync()
+    fresh = _StubSession()
     client._build_session = lambda: fresh  # type: ignore[method-assign]
     prompt, _info = client.reset()
     assert prompt == "prompt"
-    assert client._sync is fresh
+    assert client._session is fresh
     assert client._redials == 1
 
 
@@ -1722,15 +1970,15 @@ def test_reset_reraises_application_errors_without_redial() -> None:
     """A non-transport error during reset propagates; no fresh-session retry."""
     client = RemoteEnvClient("http://env:1")
 
-    class _Sync:
-        def connect(self):
+    class _Session:
+        async def connect(self):
             return None
 
-        def reset(self, **kwargs):
+        async def reset(self, **kwargs):
             msg = "application error"
             raise RuntimeError(msg)
 
-    client._sync = _Sync()
+    client._session = _Session()
     client._connected = True
     with pytest.raises(RuntimeError, match="application error"):
         client.reset()
@@ -1744,20 +1992,20 @@ def test_observation_text_skips_non_mapping_blocks() -> None:
 def test_step_uses_the_envs_own_action_field_without_mcp() -> None:
     """Hub envs name the action field themselves (``code``, ``action_str``), not ``message``."""
     client = RemoteEnvClient("http://stub.invalid", action_field="code")
-    client._sync = _StubSync()
+    client._session = _StubSession()
 
     client.step("print('hi')")
 
-    assert client._sync.step_calls[-1] == {"code": "print('hi')"}
+    assert client._session.step_calls[-1] == {"code": "print('hi')"}
 
 
 def test_step_defaults_to_message_when_no_action_field_is_named() -> None:
     client = RemoteEnvClient("http://stub.invalid")
-    client._sync = _StubSync()
+    client._session = _StubSession()
 
     client.step("hello")
 
-    assert client._sync.step_calls[-1] == {"message": "hello"}
+    assert client._session.step_calls[-1] == {"message": "hello"}
 
 
 # --- OpenEnvServer: the wire contract follows the env ----------------------
@@ -1894,7 +2142,15 @@ def test_custom_processor_renders_an_in_process_observation() -> None:
     )
     harness.reset()
     assert harness._prompt_text == "board: 1,2,3"
-    assert harness._step_env("go") == ("board: 4,5", "user", 1.0, True, False, {})
+    assert harness._step_env("go") == (
+        "board: 4,5",
+        "user",
+        None,
+        1.0,
+        True,
+        False,
+        {},
+    )
     harness.close()
 
 

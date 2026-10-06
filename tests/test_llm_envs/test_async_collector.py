@@ -14,6 +14,7 @@ from typing import Any
 import pytest
 import torch
 
+from agilerl.components.llm_rollout_data import EpisodeSegments
 from agilerl.llm_envs import (
     AsyncBatchCollector,
     EnvResponse,
@@ -28,6 +29,8 @@ EpisodeTensors = tuple[
     torch.Tensor,
     torch.Tensor,
     torch.Tensor | None,
+    torch.Tensor | None,
+    EpisodeSegments | None,
 ]
 
 
@@ -36,7 +39,7 @@ def _episode_tensors() -> EpisodeTensors:
     mask = torch.ones_like(ids)
     turns = torch.zeros_like(ids)
     rewards = torch.tensor([1.0])
-    return ids, mask, turns, rewards, None
+    return ids, mask, turns, rewards, None, None, None
 
 
 class StubCollector:
@@ -48,7 +51,10 @@ class StubCollector:
         self.io_executor = ThreadPoolExecutor(
             max_workers=2, thread_name_prefix="env-io"
         )
-        self.reset_calls: list[tuple[str, int | None, int | None]] = []
+        self.reset_calls: list[
+            tuple[str, int | None, tuple[int | None, int | None] | None]
+        ] = []
+        self.eval_reset_calls: list[tuple[str, int | None]] = []
         self.step_calls: list[tuple[str, torch.Tensor]] = []
         self.finalize_calls: list[tuple[str, bool]] = []
         self.closed = False
@@ -58,12 +64,23 @@ class StubCollector:
         episode_id: str,
         logical_slot: int | None = None,
         *,
-        seed: int | None = None,
+        task: tuple[int | None, int | None] | None = None,
     ) -> tuple[dict[str, str], dict[str, int | None]]:
-        self.reset_calls.append((episode_id, logical_slot, seed))
+        self.reset_calls.append((episode_id, logical_slot, task))
         return (
             {"input_ids": torch.tensor([[1, 2]], dtype=torch.long)},
             {"logical_slot": logical_slot},
+        )
+
+    def reset_eval_episode(
+        self,
+        episode_id: str,
+        row_index: int | None,
+    ) -> tuple[dict[str, str], dict[str, int | None]]:
+        self.eval_reset_calls.append((episode_id, row_index))
+        return (
+            {"input_ids": torch.tensor([[3, 4]], dtype=torch.long)},
+            {"row_index": row_index},
         )
 
     def step_episode(
@@ -124,19 +141,35 @@ class TestAsyncBatchCollectorReset:
         assert response.done is False
         assert response.info == {"logical_slot": 3}
 
-    def test_reset_forwards_seed_to_reset_episode(self) -> None:
+    def test_reset_forwards_task_to_reset_episode(self) -> None:
         inner = StubCollector()
         collector = AsyncBatchCollector(inner)
 
         try:
-            response = asyncio.run(
-                collector.reset("ep-seed", logical_slot_idx=1, seed=42),
-            )
+            response = asyncio.run(collector.reset("ep-task", task=(42, 3)))
         finally:
             collector.close()
 
-        assert response.episode_id == "ep-seed"
-        assert inner.reset_calls == [("ep-seed", 1, 42)]
+        assert response.episode_id == "ep-task"
+        assert inner.reset_calls == [("ep-task", None, (42, 3))]
+
+
+class TestAsyncBatchCollectorResetEval:
+    def test_reset_eval_returns_the_held_out_reset(self) -> None:
+        inner = StubCollector()
+        collector = AsyncBatchCollector(inner)
+
+        try:
+            response = asyncio.run(collector.reset_eval("eval-1", 3))
+        finally:
+            collector.close()
+
+        assert inner.eval_reset_calls == [("eval-1", 3)]
+        assert inner.reset_calls == []
+        assert response.episode_id == "eval-1"
+        assert torch.equal(response.observation["input_ids"], torch.tensor([[3, 4]]))
+        assert response.done is False
+        assert response.info == {"row_index": 3}
 
 
 class TestAsyncBatchCollectorStep:
@@ -225,11 +258,11 @@ class TestAsyncBatchCollectorClose:
                 episode_id: str,
                 logical_slot: int | None = None,
                 *,
-                seed: int | None = None,
+                task: tuple[int | None, int | None] | None = None,
             ) -> tuple[dict[str, str], dict[str, Any]]:
                 started.set()
                 release.wait(timeout=30)
-                return {"text": f"hung-{episode_id}-{logical_slot}-{seed}"}, {}
+                return {"text": f"hung-{episode_id}-{logical_slot}-{task}"}, {}
 
             def close(self) -> None:
                 return None
@@ -316,6 +349,124 @@ class TestAsyncBatchCollectorResetOverflow:
         assert client.step_calls == 0
 
 
+class _RowClient(FakeEnvClient):
+    """Fake client over an 8-row task list recording each reset's ``(seed, row)``."""
+
+    def __init__(self) -> None:
+        super().__init__(dataset_size=8)
+        self.resets: list[tuple[int | None, int | None]] = []
+
+    def reset(
+        self, seed: int | None = None, *, row_index: int | None = None
+    ) -> tuple[str, dict[str, Any]]:
+        self.resets.append((seed, row_index))
+        return super().reset(seed, row_index=row_index)
+
+
+class TestAsyncBatchCollectorAssignGroupTask:
+    def test_concurrent_groups_draw_distinct_rows_shared_by_members(self) -> None:
+        # Arrange
+        client = _RowClient()
+        inner = RolloutCollector(
+            env_factory=_harness_factory(client, max_turns=2),
+            batch_size=8,
+            group_size=2,
+            base_seed=0,
+        )
+        collector = AsyncBatchCollector(inner)
+
+        async def start_group(group_seed: int) -> None:
+            task = await collector.assign_group_task(group_seed)
+            await asyncio.gather(
+                *(
+                    collector.reset(f"g{group_seed}-m{member}", task=task)
+                    for member in range(2)
+                ),
+            )
+
+        async def start_overlapping_groups() -> int:
+            await asyncio.gather(*(start_group(seed) for seed in range(8)))
+            return collector.active_episode_count()
+
+        # Act
+        try:
+            live = asyncio.run(start_overlapping_groups())
+        finally:
+            collector.close()
+
+        # Assert
+        group_tasks = set(client.resets)
+        assert live == 16
+        assert len(client.resets) == 16
+        assert all(client.resets.count(task) == 2 for task in group_tasks)
+        assert len({seed for seed, _row in group_tasks}) == 8
+        assert sorted(row for _seed, row in group_tasks) == list(range(8))
+
+
+class TestAsyncBatchCollectorRecordGroupOutcome:
+    def test_outcomes_reach_the_collectors_row_weights(self) -> None:
+        # Arrange
+        inner = RolloutCollector(
+            env_factory=_harness_factory(_RowClient(), max_turns=2),
+            batch_size=1,
+            group_size=1,
+            base_seed=0,
+            adaptive_task_sampling=True,
+        )
+        collector = AsyncBatchCollector(inner)
+
+        # Act
+        try:
+            asyncio.run(collector.assign_group_task(0))
+            collector.record_group_outcome(2, informative=True)
+            collector.record_group_outcome(6, informative=False)
+            stats = collector.task_row_stats()
+        finally:
+            collector.close()
+
+        # Assert
+        weights = {row.row: row.weight for row in stats}
+        assert collector.adaptive_task_sampling is True
+        assert weights[2] == pytest.approx(2 / 3)
+        assert weights[6] == pytest.approx(1 / 3)
+        assert weights[0] == 0.5
+
+
+class TestAsyncBatchCollectorLoadTaskSamplerState:
+    def test_a_fresh_collector_restores_another_collectors_outcomes(self) -> None:
+        # Arrange
+        def make_collector() -> AsyncBatchCollector:
+            return AsyncBatchCollector(
+                RolloutCollector(
+                    env_factory=_harness_factory(_RowClient(), max_turns=2),
+                    batch_size=1,
+                    group_size=1,
+                    base_seed=0,
+                    adaptive_task_sampling=True,
+                )
+            )
+
+        saved = make_collector()
+        restored = make_collector()
+        try:
+            asyncio.run(saved.assign_group_task(0))
+            saved.record_group_outcome(2, informative=True)
+            saved.record_group_outcome(6, informative=False)
+
+            # Act
+            restored.load_task_sampler_state(saved.task_sampler_state())
+
+            # Assert
+            assert restored.task_row_stats() == saved.task_row_stats()
+            assert restored.task_sampler_state() == [
+                {"row": 2, "informative": 1.0, "observed": 1.0},
+                {"row": 6, "informative": 0.0, "observed": 1.0},
+            ]
+        finally:
+            saved.close()
+            restored.close()
+
+
 class TestAsyncBatchCollectorMultiTurn:
     def test_two_non_terminal_steps_then_terminal_accumulate_tokens(self) -> None:
         client = FakeEnvClient(terminate_after=3)
@@ -362,6 +513,44 @@ class TestAsyncBatchCollectorMultiTurn:
         assert int(mask.sum()) == 3 * gen_len
         true_spans = _true_spans(mask[0])
         assert true_spans == [gen_len, gen_len, gen_len]
+
+
+class TestAsyncBatchCollectorGetEpisodeData:
+    def test_returns_the_segments_of_a_restarted_episode(self) -> None:
+        # Arrange
+        inner = RolloutCollector(
+            env_factory=_harness_factory(
+                FakeEnvClient(terminate_after=3), max_turns=5, segment_prompt_tokens=20
+            ),
+            batch_size=1,
+            group_size=1,
+        )
+        collector = AsyncBatchCollector(inner)
+        gen = torch.tensor([[ord("a"), ord("b")]], dtype=torch.long)
+
+        async def _run() -> EpisodeTensors:
+            response = await collector.reset("ep-seg")
+            while not response.done:
+                response = await collector.step(
+                    "ep-seg",
+                    token_ids=torch.cat(
+                        [response.observation["input_ids"], gen], dim=1
+                    ),
+                )
+            return await collector.get_episode_data("ep-seg")
+
+        # Act
+        try:
+            ids, mask, *_rest, segments = asyncio.run(_run())
+        finally:
+            collector.close()
+
+        # Assert
+        assert segments is not None
+        # prompt(6) + ab + feedback(8) + ab; then the 39-char restart prompt + ab.
+        assert segments.token_lengths.tolist() == [18, 41]
+        assert int(segments.token_lengths.sum()) == ids.shape[-1]
+        assert _true_spans(mask[0]) == [2, 2, 2]
 
 
 def _true_spans(mask: torch.Tensor) -> list[int]:

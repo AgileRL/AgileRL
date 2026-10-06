@@ -152,6 +152,9 @@ class MiniTokenizer:
         del text
         return [7, 7]
 
+    def get_vocab(self) -> dict[str, int]:
+        return {}
+
 
 class RolloutHarnessDouble(RolloutHarness):
     """``RolloutHarness`` with an in-memory client and tokenizer.
@@ -229,12 +232,15 @@ def bare_rollout_env() -> RolloutHarness:
     w.tools = None  # optional config; __init__ default, read by the tokenize paths
     w.chat_template_kwargs = {}  # __init__ default, read by the tokenize paths
     w.sampling_logps = []  # read by get_episode_data
+    w._segments = []  # read by get_episode_data
+    w._segment_prompt_tokens = None  # __init__ default, read by the feedback path
     # per-role boundary-frame cache; __init__ default, read by the feedback tokenize path
     w._boundary_parts = {}
     w._system_prompt = None  # __init__ default, read by the initial-prompt path
     w._special_ids_cache = None  # __init__ default, read by the feedback dedupe
     w._multimodal_turn = None
     w._episode_pixel_values = None
+    w._image_placeholder_id = None  # __init__ default for a text-only harness
     # These tests drive the ChatML fallback deliberately, so they opt out of strict.
     w._strict_chat_template_boundary = False
     return w

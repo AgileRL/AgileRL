@@ -26,6 +26,8 @@ pytest.importorskip("peft", reason="LLM tests require peft.")
 
 from agilerl.algorithms.core.base import LLMAlgorithm
 from agilerl.algorithms.grpo import GRPO
+from agilerl.utils.llm_utils import LEARN_PHASES
+from agilerl.utils.phase_timer import PhaseTimer
 
 SEQ_LEN = 6
 PAD_TOKEN_ID = 0
@@ -71,12 +73,15 @@ class _Stub:
         self._liger_level_supported = liger_level_supported
         self.vllm_importance_sampling_correction = vllm_importance_sampling_correction
         self.vllm_importance_sampling_cap = 2.0
+        self.vllm_max_logprob_gap = 0.1
+        self.vllm_max_clip_fraction = 0.02
         self.filter_zero_adv = filter_zero_adv
         self.adv_filter_eps = 0.0
         self.clip_coef_min = 0.8
         self.clip_coef_max = 1.2
         self.use_kl_advantage_shaping = False
         self.loss_norm = "micro_batch"
+        self._segment_accumulation_steps = None
         self.pad_token_id = PAD_TOKEN_ID
         self.update_epochs = 1
         self.micro_batch_size_per_gpu = 2
@@ -88,11 +93,13 @@ class _Stub:
         self._kl_value = kl_value
         self._clipfrac_value = clipfrac_value
         self.metrics = _MetricsRecorder()
+        self.packing_mode: str | None = None
         self.rng = np.random.default_rng(0)
         self.liger_calls = 0
         self.standard_calls = 0
         self.shard_runtime = SimpleNamespace(
-            timed=lambda _name, **_fields: nullcontext()
+            timed=lambda _name, **_fields: nullcontext(),
+            phase_timer=PhaseTimer(),
         )
 
     learn = GRPO.learn
@@ -101,6 +108,12 @@ class _Stub:
     _apply_kl_advantage_shaping = GRPO._apply_kl_advantage_shaping
     _compute_policy_loss = GRPO._compute_policy_loss
     _liger_path_selected = GRPO._liger_path_selected
+    _check_segments_supported = LLMAlgorithm._check_segments_supported
+    _has_episode_segments = LLMAlgorithm._has_episode_segments
+    _learn_phase_seconds = LLMAlgorithm._learn_phase_seconds
+    _row_padding_stats = LLMAlgorithm._row_padding_stats
+    _segment_rows = LLMAlgorithm._segment_rows
+    _start_learn_phases = LLMAlgorithm._start_learn_phases
     _log_importance_weights = GRPO._log_importance_weights
     _loss = GRPO._loss
     _objective_loss = GRPO._objective_loss
@@ -119,9 +132,14 @@ class _Stub:
     )
     _warn_liger_non_token_is = LLMAlgorithm._warn_liger_non_token_is
     _warn_liger_path_bypassed = GRPO._warn_liger_path_bypassed
+    _warn_on_sampling_mismatch = GRPO._warn_on_sampling_mismatch
 
     def _prepare_vllm_for_training(self) -> None:
         return
+
+    def _packing_mode(self) -> str | None:
+        """Packing mode of the gradient forward."""
+        return self.packing_mode
 
     def trainer_offload_context(self):
         """Match the context ``learn`` wraps its body in."""
@@ -146,13 +164,15 @@ class _Stub:
         self,
         ids: torch.Tensor,
         _batch_size: int,
-        pixel_values: torch.Tensor | None = None,
+        **_kwargs: Any,
     ):
         """Reference and old log-probs on the action frame."""
         zeros = torch.zeros(ids.shape[0], ids.shape[1] - 1)
         return zeros, zeros, None
 
-    def _backward_pass(self, _loss: torch.Tensor) -> tuple[None, None]:
+    def _backward_pass(
+        self, _loss: torch.Tensor, _accumulation_steps: int | None = None
+    ) -> tuple[None, None]:
         return None, None
 
     def _liger_loss(self, batch_ids: torch.Tensor, *_args: Any, **_kwargs: Any):
@@ -423,9 +443,42 @@ class TestLearnTelemetryReportsDiagnostics:
         assert metrics["vllm_is_ratio_mean"] == pytest.approx(2.0)
         assert metrics["vllm_is_ratio_p95"] == pytest.approx(2.0)
         assert metrics["vllm_is_frac_clamped"] == pytest.approx(1.0)
-        assert "vllm_is_rows_skipped" not in metrics
+        assert metrics["vllm_is_rows_skipped"] == 0.0
         assert algo.metrics.logged["vllm_is_delta_mean"] == pytest.approx(3.0)
         assert algo.metrics.logged["vllm_is_ratio_mean"] == pytest.approx(2.0)
+
+
+PHASE_KEYS = {f"learn_phase_{phase}_s" for phase in LEARN_PHASES}
+
+
+class TestLearnPhaseTimings:
+    """Every ``learn`` return carries wall seconds per learn phase."""
+
+    def test_full_learn_reports_and_logs_every_phase(self) -> None:
+        # Arrange
+        algo = _Stub(beta=0.0)
+
+        # Act
+        metrics = algo.learn(_experiences())
+
+        # Assert
+        assert PHASE_KEYS <= set(metrics)
+        assert all(metrics[key] >= 0.0 for key in PHASE_KEYS)
+        assert PHASE_KEYS <= set(algo.metrics.logged)
+        assert algo.shard_runtime.phase_timer.marks is None
+
+    def test_an_emptied_batch_reports_every_phase_and_closes_the_timer(self) -> None:
+        # Arrange
+        algo = _Stub(survivors=0)
+
+        # Act
+        with pytest.warns(UserWarning, match="advantage threshold"):
+            metrics = algo.learn(_experiences())
+
+        # Assert
+        assert PHASE_KEYS <= set(metrics)
+        assert metrics["learn_phase_forward_s"] == 0.0
+        assert algo.shard_runtime.phase_timer.marks is None
 
 
 class TestLearnAdvantageStats:
@@ -462,6 +515,71 @@ class TestLearnAdvantageStats:
         # Assert
         assert metrics["adv_mean"] == pytest.approx(1.525)
         assert metrics["adv_zero_frac"] == pytest.approx(0.5)
+
+
+def _ragged_experiences():
+    """One full-length row and one half-length row: a quarter of the batch pads."""
+    half = SEQ_LEN // 2
+    completion_ids = [
+        torch.full((1, SEQ_LEN), PAD_TOKEN_ID + 1, dtype=torch.long),
+        torch.full((1, half), PAD_TOKEN_ID + 1, dtype=torch.long),
+    ]
+    action_masks = [
+        torch.ones(1, SEQ_LEN - 1, dtype=torch.bool),
+        torch.ones(1, half - 1, dtype=torch.bool),
+    ]
+    rewards = torch.tensor([1.0, -1.0], dtype=torch.float32)
+    return completion_ids, action_masks, rewards
+
+
+class TestLearnPaddingStats:
+    """Padding share of the batch before and after sequence packing."""
+
+    def test_unpacked_forward_keeps_the_batch_padding(self) -> None:
+        # Arrange
+        algo = _Stub()
+
+        # Act
+        metrics = algo.learn(_ragged_experiences())
+
+        # Assert
+        assert metrics["padding_frac_before_packing"] == pytest.approx(0.25)
+        assert metrics["padding_frac_after_packing"] == pytest.approx(0.25)
+        assert algo.metrics.logged["padding_frac_after_packing"] == pytest.approx(0.25)
+
+    def test_packed_forward_runs_without_padding(self) -> None:
+        # Arrange
+        algo = _Stub()
+        algo.packing_mode = "varlen"
+
+        # Act
+        metrics = algo.learn(_ragged_experiences())
+
+        # Assert
+        assert metrics["padding_frac_before_packing"] == pytest.approx(0.25)
+        assert metrics["padding_frac_after_packing"] == pytest.approx(0.0)
+
+    def test_filtered_out_batch_still_reports_padding(self) -> None:
+        # Arrange
+        algo = _Stub(survivors=0)
+
+        # Act
+        metrics = algo.learn(_ragged_experiences())
+
+        # Assert
+        assert metrics["padding_frac_before_packing"] == pytest.approx(0.25)
+
+    def test_unsegmented_batch_runs_every_row_and_no_filler(self) -> None:
+        # Arrange
+        algo = _Stub()
+
+        # Act
+        metrics = algo.learn(_ragged_experiences())
+
+        # Assert
+        assert metrics["train_rows_padded"] == pytest.approx(2.0)
+        assert metrics["filler_token_frac"] == pytest.approx(0.0)
+        assert algo.metrics.logged["train_rows_padded"] == pytest.approx(2.0)
 
 
 class TestSummarizePostUpdate:
