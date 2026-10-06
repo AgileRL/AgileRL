@@ -23,7 +23,7 @@ from agilerl.arena.models.algorithms import (
 from agilerl.arena.models.algorithms.ppo import PPOSpec, RecurrentPPOSpec
 from agilerl.arena.models.algorithms.rainbow_dqn import RainbowDQNSpec
 from agilerl.arena.models.algorithms.sft import SFTSpec
-from agilerl.arena.models.env import LLMEnvType
+from agilerl.arena.models.env import ENV_POD_DEFAULT_CPUS, LLMEnvType
 from agilerl.arena.models.manifest import API_VERSION, TrainingManifest, _is_numeric
 from agilerl.arena.models.registry import MANIFEST_REGISTRY
 
@@ -302,7 +302,7 @@ def training_schema_conditionals() -> list[dict[str, Any]]:
             "then": environment_env_image_then(
                 {
                     "env_port": {"default": 8000},
-                    "cpus_per_env_host": {"default": 1.0},
+                    "cpus_per_env_host": {"default": ENV_POD_DEFAULT_CPUS},
                 }
             ),
         },
