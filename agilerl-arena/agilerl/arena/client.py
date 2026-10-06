@@ -37,7 +37,12 @@ from agilerl.arena.inference.cache import (
     normalized_deployment_name,
     save_binding,
 )
-from agilerl.arena.models import TrainingManifest
+from agilerl.arena.models import LLMAlgorithmSpec, TrainingManifest
+from agilerl.arena.models.model_info import (
+    STATUS_DEPRECATED,
+    STATUS_PREVIEW,
+    SUPPORTED_MODEL_INFO,
+)
 from agilerl.arena.output import StreamRichRenderer
 from agilerl.arena.stream import NDJsonStream, StreamEvent
 from agilerl.arena.typing import JSONValue
@@ -1124,7 +1129,9 @@ class ArenaClient:
             dataset row.
         :type completion: str | None
         """
-        validated = TrainingManifest.get_validated(manifest, mode="json")
+        training_manifest = TrainingManifest.get_validated(manifest, mode="python")
+        self._check_model_status(training_manifest)
+        validated = training_manifest.to_payload()
         resolved_project = self._resolve_project(project)
 
         if reward_file is not None:
@@ -1160,6 +1167,22 @@ class ArenaClient:
             json=payload,
             timeout=self._upload_timeout,
         ).collect()
+
+    @staticmethod
+    def _check_model_status(manifest: TrainingManifest) -> None:
+        """Warn on a deprecated pretrained model; reject a preview one."""
+        algorithm = manifest.algorithm
+        if not isinstance(algorithm, LLMAlgorithmSpec):
+            return
+        hub_id = algorithm.pretrained_model_name_or_path
+        entry = SUPPORTED_MODEL_INFO.get(hub_id) if hub_id else None
+        if entry is None:
+            return
+        if entry.status == STATUS_PREVIEW:
+            msg = f"Model {hub_id} is in preview and cannot be submitted yet."
+            raise ArenaValidationError(msg)
+        if entry.status == STATUS_DEPRECATED:
+            logger.warning("Model %s is deprecated and will be removed.", hub_id)
 
     @staticmethod
     def _build_submit_experiment_multipart(

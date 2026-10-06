@@ -775,6 +775,12 @@ class TestModelsSupportedCommand:
         assert set(models) == set(SUPPORTED_MODEL_INFO)
         qwen = models["Qwen/Qwen3-4B"]
         assert qwen["architecture"] == "dense"
+        assert qwen["status"] == "live"
+        assert models["Qwen/Qwen2.5-0.5B-Instruct"]["status"] == "deprecated"
+        assert (
+            models["nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16"]["status"]
+            == "preview"
+        )
         assert qwen["max_context_length"] == 40960
         assert qwen["lora_ranks"] == [1, 8, 16, 32, 64, 128, 256, 320, 512]
         assert "_gram_estimate" in qwen["lora_info"]
