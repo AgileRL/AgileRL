@@ -318,6 +318,57 @@ class TestSFTLearn:
 
         sft.clean_up()
 
+    @pytest.mark.parametrize("dist_mode", ["dist"])
+    @pytest.mark.parametrize("vocab_size", [100])
+    @pytest.mark.parametrize("input_size", [10])
+    @pytest.mark.parametrize("max_tokens", [20])
+    @pytest.mark.parametrize(
+        "pretrained_model_name_or_path",
+        [
+            TINY_LLM_FIXTURE_PATH,
+        ],
+    )
+    @pytest.mark.gpu
+    def test_sft_learn_loss_falls_on_fixed_batch(
+        self,
+        sft_factory,
+        dist_mode_factory,
+        model_factory,
+        dist_mode,
+        vocab_size,
+        input_size,
+        max_tokens,
+        pretrained_model_name_or_path,
+    ):
+        """Repeated steps on one tiny batch must lower the loss (learning)."""
+        torch.manual_seed(0)
+        sft = sft_factory(
+            dist_mode_factory,
+            model_factory,
+            dist_mode,
+            vocab_size,
+            input_size,
+            max_tokens,
+            pretrained_model_name_or_path,
+            None,
+        )
+        for group in sft.optimizer.optimizer.param_groups:
+            group["lr"] = 1e-3
+        tokenizer = AutoTokenizer.from_pretrained(pretrained_model_name_or_path)
+        env = make_sft_gym(
+            num_samples=4,
+            tokenizer=tokenizer,
+            data_batch_size_per_gpu=4,
+        )
+        for name, param in sft.actor.named_parameters():
+            if ("lora_A" in name or "lora_B" in name) and param is not None:
+                param.data.normal_(mean=0, std=1.0)
+        prompts = env.reset()
+        losses = [sft.learn(prompts)["loss"] for _ in range(30)]
+        print(f"\nSFT-TREND first={losses[0]} last={losses[-1]}")
+        assert losses[-1] < losses[0], f"loss did not fall: {losses[0]} -> {losses[-1]}"
+        sft.clean_up()
+
 
 class TestSFTTest:
     @pytest.mark.parametrize("dist_mode", ["dist"])
@@ -611,6 +662,7 @@ class TestSFTSaveLoadCheckpoint:
                 # adds ``exclude_modules=["lm_head"]``).
                 use_liger_loss=sft.use_liger_loss,
             )
+            own_profiler = new_sft.learn_profiler
             new_sft.load_checkpoint(tmpdir)
 
             for attr in EvolvableAlgorithm.inspect_attributes(sft):
@@ -645,6 +697,8 @@ class TestSFTSaveLoadCheckpoint:
                         getattr(new_sft, attr).is_sharded
                         == getattr(sft, attr).is_sharded
                     )
+                elif attr == "learn_profiler":
+                    assert new_sft.learn_profiler is own_profiler
                 elif attr == "lora_config":
                     assert getattr(new_sft, attr) is not None
                     assert getattr(sft, attr) is not None

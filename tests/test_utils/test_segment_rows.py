@@ -15,6 +15,7 @@ from agilerl.components.llm_rollout_data import EpisodeSegments
 from agilerl.utils.segment_rows import (
     TEXT_FILLER_TOKENS,
     SegmentRows,
+    append_vision_tails,
     filler_stand_in,
     filler_token_frac,
     pad_segment_rows,
@@ -507,6 +508,78 @@ class TestPadSegmentRows:
         padded = pad_segment_rows(rows, num_rows=4, width=6, pad_token_id=PAD)
 
         assert padded.sampling_logps is None
+
+
+class TestAppendVisionTails:
+    @staticmethod
+    def rows_with_a_text_row() -> SegmentRows:
+        """Rows with 2, 0 and 1 vision rows; row 1's last real token is the pad id."""
+        return SegmentRows(
+            token_ids=torch.tensor(
+                [
+                    [1, IMG, IMG, 2, IMG, IMG, 3],
+                    [4, 5, 6, 7, PAD, PAD, PAD],
+                    [8, IMG, IMG, 2, 3, PAD, PAD],
+                ]
+            ),
+            action_masks=torch.tensor(
+                [
+                    [False, False, True, False, False, True],
+                    [False, True, True, True, False, False],
+                    [False, False, True, True, False, False],
+                ]
+            ),
+            row_episodes=np.array([0, 1, 2], dtype=np.intp),
+            row_starts=np.array([0, 0, 0], dtype=np.intp),
+            row_ends=np.array([7, 5, 5], dtype=np.intp),
+            turn_ids=torch.tensor(
+                [
+                    [-1, -1, 0, -1, -1, 1],
+                    [-1, 0, 0, 0, -1, -1],
+                    [-1, -1, 0, 0, -1, -1],
+                ]
+            ),
+            pixel_values=torch.arange(6.0).reshape(3, 2),
+            pixel_image_counts=[2, 0, 1],
+        )
+
+    def test_text_row_gets_one_vision_row_after_its_real_tokens(self) -> None:
+        # Arrange
+        rows = self.rows_with_a_text_row()
+
+        # Act
+        tailed = append_vision_tails(rows, PAD, IMG)
+
+        # Assert: the tail is row 0's prefix up to its first vision row.
+        assert tailed.token_ids.tolist() == [
+            [1, IMG, IMG, 2, IMG, IMG, 3, PAD],
+            [4, 5, 6, 7, PAD, 1, IMG, IMG],
+            [8, IMG, IMG, 2, 3, PAD, PAD, PAD],
+        ]
+        assert tailed.pixel_image_counts == [2, 1, 1]
+        assert tailed.pixel_values is not None
+        assert torch.equal(
+            tailed.pixel_values,
+            torch.tensor([[0.0, 1.0], [2.0, 3.0], [0.0, 1.0], [4.0, 5.0]]),
+        )
+
+    def test_tail_positions_hold_no_actions(self) -> None:
+        # Arrange
+        rows = self.rows_with_a_text_row()
+
+        # Act
+        tailed = append_vision_tails(rows, PAD, IMG)
+
+        # Assert
+        assert tailed.turn_ids is not None
+        assert torch.equal(tailed.action_masks[:, :6], rows.action_masks)
+        assert not tailed.action_masks[:, 6].any()
+        assert tailed.turn_ids[:, 6].tolist() == [-1, -1, -1]
+
+    def test_rows_that_all_have_vision_rows_are_unchanged(self) -> None:
+        rows = vision_rows()
+
+        assert append_vision_tails(rows, PAD, IMG) is rows
 
 
 class TestFillerTokenFrac:

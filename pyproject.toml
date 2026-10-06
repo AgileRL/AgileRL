@@ -240,7 +240,6 @@ include = [
     "agilerl/architectures/nemotron_h/liger.py",
     "agilerl/architectures/nemotron_h/omni_language.py",
     "agilerl/architectures/vllm_language.py",
-    "agilerl/algorithms/core/llm_ops/moe_lora.py",
     "agilerl/algorithms/core/llm_ops/vllm_colocate.py",
     "agilerl/algorithms/grpo.py",
     "agilerl/algorithms/sft.py",

@@ -34,6 +34,10 @@ class TestRegisterNemotronHLiger:
         assert (
             registry["nemotron_h"] is liger_nemotron_h.apply_liger_kernel_to_nemotron_h
         )
+        assert (
+            registry["nemotron_h_omni"]
+            is liger_nemotron_h.apply_liger_kernel_to_nemotron_h
+        )
 
     def test_register_is_idempotent(self, monkeypatch) -> None:
         registry: dict = {}
@@ -47,7 +51,7 @@ class TestRegisterNemotronHLiger:
 
         assert liger_nemotron_h.register_nemotron_h_liger() is True
         assert liger_nemotron_h.register_nemotron_h_liger() is True
-        assert list(registry.keys()) == ["nemotron_h"]
+        assert list(registry.keys()) == ["nemotron_h", "nemotron_h_omni"]
 
 
 class TestApplyLigerKernelToNemotronH:
@@ -191,6 +195,61 @@ class TestApplyLigerKernelToNemotronH:
         liger_nemotron_h.apply_liger_kernel_to_nemotron_h(rms_norm=True, model=model)
 
         assert patched_norms == [base.norm_f, inner.norm]
+
+    def test_patches_language_tower_layers(self, monkeypatch) -> None:
+        patched_norms: list = []
+
+        def fake_patch_rms_norm(module, **kwargs) -> None:
+            patched_norms.append(module)
+
+        monkeypatch.setattr(liger_nemotron_h, "HAS_LIGER", True)
+        monkeypatch.setattr(liger_nemotron_h, "LigerRMSNorm", MagicMock())
+        monkeypatch.setattr(liger_nemotron_h, "LigerReLUSquared", MagicMock())
+        monkeypatch.setattr(liger_nemotron_h, "liger_rotary_pos_emb", MagicMock())
+        monkeypatch.setattr(
+            liger_nemotron_h,
+            "_patch_rms_norm_module",
+            fake_patch_rms_norm,
+        )
+        monkeypatch.setattr(
+            liger_nemotron_h,
+            "modeling_nemotron_h",
+            SimpleNamespace(
+                ACT2FN={"relu2": object()},
+                NemotronHRMSNorm=object(),
+                apply_rotary_pos_emb=object(),
+                NemotronHForCausalLM=SimpleNamespace(forward=object()),
+            ),
+        )
+
+        tower_norm = object()
+        block_norm = object()
+        tower = SimpleNamespace(
+            base_model_prefix="model",
+            model=SimpleNamespace(
+                norm_f=tower_norm,
+                layers=[
+                    SimpleNamespace(
+                        blocks=[
+                            SimpleNamespace(
+                                norm=block_norm,
+                                block_type="mlp",
+                                mixer=SimpleNamespace(),
+                            )
+                        ]
+                    )
+                ],
+            ),
+        )
+        model = SimpleNamespace(
+            language_model=tower,
+            base_model_prefix="model",
+            model=SimpleNamespace(norm_f=object(), layers=[]),
+        )
+
+        liger_nemotron_h.apply_liger_kernel_to_nemotron_h(rms_norm=True, model=model)
+
+        assert patched_norms == [tower_norm, block_norm]
 
     def test_default_does_not_replace_causal_lm_forward(self, monkeypatch) -> None:
         monkeypatch.setattr(liger_nemotron_h, "HAS_LIGER", True)
@@ -517,3 +576,16 @@ class TestImportFallbacks:
         finally:
             monkeypatch.undo()
             importlib.reload(liger_nemotron_h)
+
+
+class TestLigerBackbone:
+    def test_returns_root_when_layers_live_on_the_root(self):
+        root = SimpleNamespace(layers=[object()], base_model_prefix="model")
+
+        assert liger_nemotron_h._liger_backbone(root) is root
+
+    def test_falls_back_to_the_model_prefix_when_layers_are_missing(self):
+        inner = object()
+        model = SimpleNamespace(base_model_prefix="model", model=inner)
+
+        assert liger_nemotron_h._liger_backbone(model) is inner

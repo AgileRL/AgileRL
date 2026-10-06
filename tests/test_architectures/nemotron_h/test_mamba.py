@@ -1375,3 +1375,80 @@ class TestBlockTypeMaskMapping:
 
         assert mapping == {}
         assert position_ids.shape == (1, 2)
+
+
+class TestPackedMixerCudaFastPath:
+    def test_runs_cuda_kernels_forward_on_the_default_stream(self, monkeypatch):
+        fake_mod = ModuleType("agilerl_test_packed_mixer")
+        fake_mod.is_fast_path_available = True
+        sys.modules["agilerl_test_packed_mixer"] = fake_mod
+
+        class Mixer(torch.nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.in_proj = SimpleNamespace(
+                    weight=SimpleNamespace(device=SimpleNamespace(type="cuda"))
+                )
+                self.seen = None
+
+            def torch_forward(
+                self,
+                hidden_states,
+                cache_params=None,
+                attention_mask=None,
+                seq_idx=None,
+            ):
+                return hidden_states * 0
+
+            def cuda_kernels_forward(
+                self,
+                hidden_states,
+                cache_params=None,
+                attention_mask=None,
+                seq_idx=None,
+            ):
+                self.seen = seq_idx
+                return hidden_states + 1
+
+            def forward(
+                self,
+                hidden_states,
+                cache_params=None,
+                attention_mask=None,
+                seq_idx=None,
+                **kwargs,
+            ):
+                return self.torch_forward(
+                    hidden_states, cache_params, attention_mask, seq_idx
+                )
+
+        Mixer.__module__ = "agilerl_test_packed_mixer"
+        mamba._install_packed_mixer(Mixer)
+
+        def fake_cuda(self, hidden_states, seq_idx=None, **_kwargs):
+            self.seen = seq_idx
+            return hidden_states + 1
+
+        Mixer.cuda_kernels_forward = fake_cuda
+        mixer = Mixer()
+        entered = []
+
+        class _StreamCtx:
+            def __enter__(self):
+                entered.append(True)
+                return self
+
+            def __exit__(self, *_exc):
+                return False
+
+        monkeypatch.setattr(torch.cuda, "default_stream", lambda _dev: "side")
+        monkeypatch.setattr(torch.cuda, "stream", lambda _stream: _StreamCtx())
+        monkeypatch.setattr(torch.compiler, "is_compiling", lambda: False)
+        hidden = torch.ones(2, 2)
+        seq_idx = torch.zeros(2, 2, dtype=torch.int32)
+
+        out = mixer(hidden, seq_idx=seq_idx)
+
+        assert torch.equal(out, hidden + 1)
+        assert mixer.seen is seq_idx
+        assert entered == [True]

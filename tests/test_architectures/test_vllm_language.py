@@ -22,6 +22,7 @@ from agilerl.architectures.nemotron_h.language_tower import (
 from agilerl.architectures.runtime import ModelRuntimeConfig
 from agilerl.architectures.vllm_language import (
     apply_language_tower_engine_kwargs,
+    apply_tower_connector_lora_engine_kwargs,
     nested_language_config,
 )
 
@@ -116,6 +117,44 @@ class TestGemma4LanguageTowerHfOverride:
 
         assert resolved is config
         assert config.architectures == [GEMMA4_LANGUAGE_ARCHITECTURE]
+
+
+class TestApplyTowerConnectorLoraEngineKwargs:
+    @pytest.mark.parametrize("strip_multimodal_towers", [False, [], ["audio_tower"]])
+    def test_enables_when_family_supports_it_and_towers_load(
+        self, strip_multimodal_towers: bool | list[str]
+    ) -> None:
+        kwargs: dict[str, object] = {}
+
+        apply_tower_connector_lora_engine_kwargs(
+            kwargs,
+            strip_multimodal_towers,
+            runtime=FAMILY_RUNTIME_CONFIGS["nemotron_h_omni"],
+        )
+
+        assert kwargs == {"enable_tower_connector_lora": True}
+
+    def test_leaves_kwargs_when_serving_language_tower_only(self) -> None:
+        kwargs: dict[str, object] = {}
+
+        apply_tower_connector_lora_engine_kwargs(
+            kwargs,
+            strip_multimodal_towers=True,
+            runtime=FAMILY_RUNTIME_CONFIGS["nemotron_h_omni"],
+        )
+
+        assert kwargs == {}
+
+    def test_leaves_kwargs_when_family_towers_lack_lora(self) -> None:
+        kwargs: dict[str, object] = {}
+
+        apply_tower_connector_lora_engine_kwargs(
+            kwargs,
+            strip_multimodal_towers=False,
+            runtime=FAMILY_RUNTIME_CONFIGS["gemma4"],
+        )
+
+        assert kwargs == {}
 
 
 class TestApplyLanguageTowerEngineKwargs:

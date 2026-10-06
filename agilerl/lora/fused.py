@@ -34,7 +34,9 @@ LORA_LAYER_CACHE: WeakKeyDictionary[nn.Module, list[LoraLayer]] = WeakKeyDiction
 
 # Which adapter each layer currently routes to (kept off the layer so it stays typed).
 # Weak keys: tracking a layer here never stops it being garbage-collected.
-ROUTING_STATE: WeakKeyDictionary[LoraLayer, list[str] | None] = WeakKeyDictionary()
+ROUTING_STATE: WeakKeyDictionary[nn.Module | LoraLayer, list[str] | None] = (
+    WeakKeyDictionary()
+)
 
 
 def uniform_routed_adapter(layer: LoraLayer) -> str | None:
@@ -123,8 +125,10 @@ def _routed_forward(
     # Layers that flatten (batch, seq, hidden) -> (batch * seq, hidden) before
     # their linears (OPT's MLP, MoE experts) show seq rows per routed sample.
     # The flatten is row-major, so each run just covers ``factor`` times as
-    # many contiguous rows.
-    factor, remainder = divmod(x.shape[0], len(routing))
+    # many contiguous rows. divmod graph-breaks torch.compile on a symbolic
+    # batch size.
+    factor = x.shape[0] // len(routing)
+    remainder = x.shape[0] % len(routing)
     if not remainder:
         spans = [(name, length * factor) for name, length in runs]
     elif len({length for _, length in runs}) == 1 and x.shape[0] % len(runs) == 0:

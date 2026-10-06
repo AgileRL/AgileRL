@@ -2583,10 +2583,7 @@ class TestCloneLlm:
 
         monkeypatch.setattr(algo_utils, "PeftModel", FakePeftModel)
         monkeypatch.setattr(algo_utils, "get_peft_model", fake_get_peft_model)
-        monkeypatch.setattr(
-            "agilerl.algorithms.core.llm_ops.moe_lora.upgrade_moe_param_wrappers",
-            fake_upgrade,
-        )
+        monkeypatch.setattr(algo_utils, "upgrade_moe_param_wrappers", fake_upgrade)
 
         cloned = clone_llm(original_model=FakePeftModel())
 

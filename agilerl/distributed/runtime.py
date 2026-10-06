@@ -23,15 +23,28 @@ from torch.distributed.tensor import DTensor, distribute_tensor
 from torch.nn.utils import clip_grad_norm_
 from torch.optim.lr_scheduler import SequentialLR
 
+from agilerl.distributed.expert_parallel import (
+    ParallelMesh,
+    build_parallel_mesh,
+    iter_packed_expert_modules,
+    tp_data_parallel_size,
+    validate_actor_ep,
+)
 from agilerl.distributed.fsdp import (
     CPUOffloadOptimizer,
     FSDPConfig,
+    _ep_expert_live_keys,
+    _scatter_ep_expert_slices,
     canonical_fsdp_param_fqn,
     materialize_dtensors,
     materialize_fsdp2_from_cpu_state,
     set_full_model_state_dict,
 )
-from agilerl.distributed.process import raise_on_any_rank, sync_grads
+from agilerl.distributed.process import (
+    get_world_size,
+    raise_on_any_rank,
+    sync_grads,
+)
 from agilerl.utils.phase_timer import PhaseTimer
 
 if TYPE_CHECKING:
@@ -238,25 +251,36 @@ def clip_param_groups(
     max_grad_norm: float | None,
     clip_fn: Callable[[list[nn.Parameter], float], torch.Tensor],
 ) -> tuple[float, float]:
-    """Clip each optimizer group and return the global pre/post-clip norms.
+    """Clip every group by one coefficient from the L2 norm over all groups.
+
+    Matches ``torch.nn.utils.clip_grad_norm_`` over the union of all grads.
+    Groups may sit on different DTensor meshes, so each is measured on its own.
 
     :param param_groups: Optimizer param groups.
     :type param_groups: list[dict[str, Any]]
-    :param max_grad_norm: Per-group clip threshold, or ``None`` to only measure.
+    :param max_grad_norm: Clip threshold for the total norm, or ``None`` to
+        only measure.
     :type max_grad_norm: float | None
-    :param clip_fn: Clips one group in place and returns its pre-clip norm.
+    :param clip_fn: Clips one group in place and returns its pre-clip norm;
+        called with ``max_norm=inf`` so it only measures.
     :type clip_fn: Callable[[list[nn.Parameter], float], torch.Tensor]
     :return: ``(pre, post)`` L2 norms over every group.
     :rtype: tuple[float, float]
     """
-    max_norm = float("inf") if max_grad_norm is None else max_grad_norm
-    pre_sq = 0.0
-    post_sq = 0.0
+    group_norms = [
+        float(_scalar_grad_norm(clip_fn(group["params"], float("inf"))))
+        for group in param_groups
+    ]
+    total = sum(norm * norm for norm in group_norms) ** 0.5
+    if max_grad_norm is None:
+        return total, total
+    # min(nan, 1.0) is nan, so a non-finite total reaches the grads as in torch.
+    clip_coef = min(max_grad_norm / (total + 1e-6), 1.0)
     for group in param_groups:
-        pre = float(_scalar_grad_norm(clip_fn(group["params"], max_norm)))
-        pre_sq += pre * pre
-        post_sq += min(pre, max_norm) ** 2
-    return pre_sq**0.5, post_sq**0.5
+        for param in group["params"]:
+            if param.grad is not None:
+                param.grad.mul_(clip_coef)
+    return total, total * clip_coef
 
 
 def _step_result(
@@ -282,6 +306,16 @@ class BaseRuntime(ABC):
         """Create the phase timer :meth:`backward` marks while a learn window is open."""
         self.phase_timer = PhaseTimer()
 
+    def micro_batches_until_step(self, gradient_accumulation_steps: int) -> int:
+        """Backward calls up to and including the one that steps the optimizer.
+
+        :param gradient_accumulation_steps: Micro-batches per optimizer step.
+        :type gradient_accumulation_steps: int
+        :return: Micro-batches the next optimizer step still waits for.
+        :rtype: int
+        """
+        return max(gradient_accumulation_steps - self._pending_micro_batches, 1)
+
     def _count_micro_batch(self, gradient_accumulation_steps: int) -> bool:
         """Count one backward call; return whether it steps the optimizer.
 
@@ -300,6 +334,14 @@ class BaseRuntime(ABC):
     @abstractmethod
     def is_sharded(self) -> bool:
         """Whether this runtime shards actor parameters."""
+
+    def data_parallel_world(self, process_world_size: int) -> int:
+        """Data-parallel replica count for a process-group world of this size."""
+        return process_world_size
+
+    def data_parallel_rank(self, process_rank: int) -> int:
+        """Data-parallel rank for this process rank."""
+        return process_rank
 
     @abstractmethod
     def prepare_actor(
@@ -644,6 +686,13 @@ class FSDPRuntime(BaseRuntime):
         """
         super().__init__()
         self.config = config
+        self.parallel_mesh: ParallelMesh | None = None
+
+    def data_parallel_world(self, process_world_size: int) -> int:
+        return tp_data_parallel_size(process_world_size, self.config.tp)
+
+    def data_parallel_rank(self, process_rank: int) -> int:
+        return process_rank // self.config.tp
 
     @property
     def is_sharded(self) -> bool:
@@ -685,10 +734,19 @@ class FSDPRuntime(BaseRuntime):
             raise ValueError(msg)
 
         restore_adapter_trainability(["actor", "critic"])
+        if self.config.ep > 1:
+            validate_actor_ep(actor, self.config.ep, get_world_size())
+        self.parallel_mesh = build_parallel_mesh(
+            ep=self.config.ep,
+            tp=self.config.tp,
+            shard_group_size=self.config.shard_group_size,
+            device_type=torch.device(device).type,
+        )
         wrapped = materialize_fsdp2_from_cpu_state(
             actor,
             device,
             self.config,
+            parallel_mesh=self.parallel_mesh,
             gradient_checkpointing=gradient_checkpointing,
         )
 
@@ -716,7 +774,11 @@ class FSDPRuntime(BaseRuntime):
     def import_model_state(
         self, model: nn.Module, state: dict[str, Any], strict: bool = False
     ) -> None:
-        set_full_model_state_dict(model, state, strict=strict)
+        packed = list(iter_packed_expert_modules(model))
+        expert_keys = _ep_expert_live_keys(model, packed) if packed else frozenset()
+        if expert_keys:
+            _scatter_ep_expert_slices(model, state, expert_keys)
+        set_full_model_state_dict(model, state, strict=strict, skip=expert_keys)
 
     @raise_on_any_rank()
     def export_optimizer_state(
@@ -838,8 +900,9 @@ class FSDPRuntime(BaseRuntime):
     ) -> OptimizerStep | None:
         """Accumulate, clip, and step.
 
-        FSDP2 reduce-scatters sharded DTensors. Replicated params
-        (``ignored_params``, LoRA) need an explicit all-reduce.
+        FSDP2 reduce-scatters its own DTensors. Replicated params
+        (``ignored_params``, LoRA) and EP / TP shards outside FSDP need an
+        explicit all-reduce.
         """
         is_step_boundary = self._count_micro_batch(gradient_accumulation_steps)
 
@@ -857,14 +920,12 @@ class FSDPRuntime(BaseRuntime):
             return None
 
         inner = optimizer._single_optimizer()
-        sync_grads(
-            [
-                param
-                for group in inner.param_groups
-                for param in group["params"]
-                if not isinstance(param, DTensor)
-            ]
-        )
+        params = [param for group in inner.param_groups for param in group["params"]]
+        sync_grads([param for param in params if not isinstance(param, DTensor)])
+        if self.parallel_mesh is not None:
+            self.parallel_mesh.sync_grads(
+                params, getattr(torch, self.config.reduce_dtype)
+            )
         self.phase_timer.mark("grad_sync")
         grad_norm_pre, grad_norm_post = clip_param_groups(
             inner.param_groups, max_grad_norm, clip_param_group_grad_norm_

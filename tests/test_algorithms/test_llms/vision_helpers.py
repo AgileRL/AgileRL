@@ -4,7 +4,8 @@
 """Vision-language episodes and a tiny VL model shared by the LLM ``learn`` vision tests.
 
 The model adds one vision row to each image placeholder embedding, in row
-order, and raises when the counts differ, as a VL forward does.
+order, and raises when the counts differ or ``pixel_values`` has no rows, as a
+VL forward does.
 """
 
 from __future__ import annotations
@@ -16,8 +17,8 @@ from torch import nn
 from transformers.modeling_outputs import CausalLMOutputWithPast
 
 from agilerl.algorithms.core import LLMAlgorithm
-from agilerl.algorithms.core.llm_ops.fused_lora import ROUTING_STATE
 from agilerl.components.llm_rollout_data import EpisodeSegments
+from agilerl.lora.fused import ROUTING_STATE
 from tests.test_algorithms.test_llms.llm_helpers import (
     DummyConfig,
     DummyHiddenStatesModel,
@@ -66,6 +67,9 @@ class VisionHiddenStatesModel(DummyHiddenStatesModel):
         **kwargs: Any,
     ) -> CausalLMOutputWithPast:
         placeholders = input_ids == IMAGE_TOKEN_ID
+        if pixel_values is not None and pixel_values.shape[0] == 0:
+            msg = "cannot run the vision tower on 0 vision rows"
+            raise ValueError(msg)
         vision_rows = 0 if pixel_values is None else int(pixel_values.shape[0])
         if int(placeholders.sum()) != vision_rows:
             msg = (

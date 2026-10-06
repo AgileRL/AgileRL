@@ -39,7 +39,12 @@ NEMOTRON_H_RUNTIME_CONFIG = ModelRuntimeConfig(
         install=install_mamba_patches,
         mamba=MambaPatchConfig(
             mixer="transformers.models.nemotron_h.modeling_nemotron_h.NemotronHMamba2Mixer",
+            block="transformers.models.nemotron_h.modeling_nemotron_h.NemotronHBlock",
         ),
+    ),
+    tensor_parallel_plan=(
+        "agilerl.architectures.nemotron_h.tensor_parallel:"
+        "NEMOTRON_H_TENSOR_PARALLEL_PLAN"
     ),
 )
 
@@ -113,7 +118,10 @@ def pretrained_model_type(model_name_or_path: str) -> str:
     entry = SUPPORTED_MODEL_INFO.get(model_name_or_path)
     if entry is not None:
         return entry.config["model_type"]
-    config_dict, _ = PretrainedConfig.get_config_dict(model_name_or_path)
+    config_dict, _ = PretrainedConfig.get_config_dict(
+        model_name_or_path,
+        trust_remote_code=True,
+    )
     return config_dict["model_type"]
 
 

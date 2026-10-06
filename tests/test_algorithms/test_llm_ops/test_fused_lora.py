@@ -8,7 +8,7 @@ import torch
 from peft import LoraConfig, inject_adapter_in_model
 from torch import nn
 
-from agilerl.algorithms.core.llm_ops.fused_lora import (
+from agilerl.lora.fused import (
     LORA_LAYER_CACHE,
     ROUTING_STATE,
     _is_routed_layer,

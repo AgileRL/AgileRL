@@ -74,8 +74,40 @@ class FSDPConfig:
         Field(
             ge=1,
             description=(
-                "Neighbouring FSDP units to all-gather ahead during forward and "
-                "backward. 1 gathers unit i+1 while unit i runs."
+                "Neighbouring FSDP units to all-gather ahead during forward. "
+                "1 gathers unit i+1 while unit i runs."
+            ),
+        ),
+    ] = 1
+    backward_prefetch_units: Annotated[
+        int,
+        Field(
+            ge=1,
+            description=(
+                "Neighbouring FSDP units to all-gather ahead during backward. "
+                "1 gathers unit i-1 while unit i runs backward."
+            ),
+        ),
+    ] = 1
+    checkpoint_skip_layer_types: Annotated[
+        tuple[str, ...],
+        Field(
+            description=(
+                "Transformer block kinds left out of activation checkpointing. "
+                "A block's kind is its block_type (hybrid models, e.g. "
+                "'linear_attention', 'full_attention', 'moe') or else its class "
+                "name. Empty checkpoints every block. Applies when "
+                "gradient_checkpointing is on."
+            ),
+        ),
+    ] = ()
+    checkpoint_every_n_blocks: Annotated[
+        int,
+        Field(
+            ge=1,
+            description=(
+                "Checkpoint one in every n blocks not skipped by "
+                "checkpoint_skip_layer_types. 1 checkpoints all of them."
             ),
         ),
     ] = 1
@@ -99,12 +131,77 @@ class FSDPConfig:
             ),
         ),
     ] = 100_000
+    ep: Annotated[
+        int,
+        Field(
+            ge=1,
+            description=(
+                "Expert-parallel degree: packed MoE experts per layer are "
+                "split across this many GPUs. 1 keeps data parallel plus "
+                "FSDP sharding with no expert split."
+            ),
+        ),
+    ] = 1
+    ep_token_blocks: Annotated[
+        int,
+        Field(
+            ge=1,
+            description=(
+                "Token blocks per routed MoE layer under expert parallel. "
+                "Each block runs dispatch, experts, and combine; on GPU the "
+                "next block's all-to-all overlaps this block's experts. 1 "
+                "moves every token in one all-to-all."
+            ),
+        ),
+    ] = 1
+    tp: Annotated[
+        int,
+        Field(
+            ge=1,
+            description=(
+                "Tensor-parallel degree for dense layers. Ranks in one TP "
+                "group share a batch shard. 1 gives every rank its own batch."
+            ),
+        ),
+    ] = 1
+    shard_group_size: Annotated[
+        int | None,
+        Field(
+            ge=1,
+            description=(
+                "Ranks that shard weights between them; groups replicate "
+                "(HSDP). Set to GPUs per node so weight gathers stay "
+                "inside a node. None shards across all trainer ranks."
+            ),
+        ),
+    ] = None
+    compile_blocks: Annotated[
+        bool,
+        Field(
+            description=(
+                "torch.compile the dense submodules of each transformer block "
+                "(norms, MLPs) in place. MoE experts, routers, attention and "
+                "Mamba mixers stay eager."
+            ),
+        ),
+    ] = False
+    compile_backend: Annotated[
+        str,
+        Field(description="torch.compile backend for compile_blocks."),
+    ] = "inductor"
 
     def __post_init__(self) -> None:
         self.param_dtype = _dtype_name(self.param_dtype)
         self.reduce_dtype = _dtype_name(self.reduce_dtype)
+        self.checkpoint_skip_layer_types = tuple(self.checkpoint_skip_layer_types)
         if self.prefetch_units < 1:
             msg = "FSDPConfig.prefetch_units must be >= 1"
+            raise ValueError(msg)
+        if self.backward_prefetch_units < 1:
+            msg = "FSDPConfig.backward_prefetch_units must be >= 1"
+            raise ValueError(msg)
+        if self.checkpoint_every_n_blocks < 1:
+            msg = "FSDPConfig.checkpoint_every_n_blocks must be >= 1"
             raise ValueError(msg)
         if self.wrap_every_n_blocks < 1:
             msg = "FSDPConfig.wrap_every_n_blocks must be >= 1"
@@ -112,6 +209,26 @@ class FSDPConfig:
         if self.param_persistence_threshold < 0:
             msg = "FSDPConfig.param_persistence_threshold must be >= 0"
             raise ValueError(msg)
+        if self.ep < 1:
+            msg = "FSDPConfig.ep must be >= 1"
+            raise ValueError(msg)
+        if self.ep_token_blocks < 1:
+            msg = "FSDPConfig.ep_token_blocks must be >= 1"
+            raise ValueError(msg)
+        if self.tp < 1:
+            msg = "FSDPConfig.tp must be >= 1"
+            raise ValueError(msg)
+        if self.shard_group_size is not None:
+            if self.shard_group_size < 1:
+                msg = "FSDPConfig.shard_group_size must be >= 1"
+                raise ValueError(msg)
+            for name, degree in (("ep", self.ep), ("tp", self.tp)):
+                if self.shard_group_size % degree:
+                    msg = (
+                        f"FSDPConfig.shard_group_size={self.shard_group_size} "
+                        f"must be divisible by {name}={degree}"
+                    )
+                    raise ValueError(msg)
 
 
 def _dtype_name(value: object) -> str:

@@ -19,36 +19,7 @@ from transformers.models.nemotron_h.modeling_nemotron_h import (
 )
 
 from agilerl.architectures import install_family_patches
-from agilerl.architectures.nemotron_h.mamba import (
-    FUSED_PATH_PATCHED_FLAG,
-    STREAM_PATCHED_FLAG,
-)
 from agilerl.utils.llm_utils import adapt_lora_config_for_model
-
-KERNEL_GLOBALS = ("mamba_split_conv1d_scan_combined", "mamba_chunk_scan_combined")
-
-
-@pytest.fixture
-def pristine_mixer_class():
-    """Restore the mixer class and kernel globals (absent until a mixer builds)."""
-    saved_init = NemotronHMamba2Mixer.__init__
-    saved_forward = NemotronHMamba2Mixer.forward
-    saved_kernels = {
-        name: getattr(modeling_nemotron_h, name)
-        for name in KERNEL_GLOBALS
-        if hasattr(modeling_nemotron_h, name)
-    }
-    yield
-    NemotronHMamba2Mixer.__init__ = saved_init
-    NemotronHMamba2Mixer.forward = saved_forward
-    for name in KERNEL_GLOBALS:
-        if name in saved_kernels:
-            setattr(modeling_nemotron_h, name, saved_kernels[name])
-        elif hasattr(modeling_nemotron_h, name):
-            delattr(modeling_nemotron_h, name)
-    for flag in (FUSED_PATH_PATCHED_FLAG, STREAM_PATCHED_FLAG):
-        if flag in vars(NemotronHMamba2Mixer):
-            delattr(NemotronHMamba2Mixer, flag)
 
 
 def _tiny_nemotron_h():
@@ -135,7 +106,9 @@ def _one_backward(base):
     return model
 
 
-def test_fused_kernel_path_starves_out_proj_lora_of_gradients(pristine_mixer_class):
+def test_fused_kernel_path_starves_out_proj_lora_of_gradients(
+    pristine_nemotron_classes,
+):
     base = _tiny_nemotron_h()
     mixer = base.model.layers[0].mixer
     assert mixer.use_mem_eff_path is True
@@ -151,7 +124,7 @@ def test_fused_kernel_path_starves_out_proj_lora_of_gradients(pristine_mixer_cla
 
 
 def test_family_patches_keep_the_fused_kernel_and_in_proj_lora_gradients(
-    pristine_mixer_class,
+    pristine_nemotron_classes,
 ):
     base = _tiny_nemotron_h()
     install_family_patches(base.config.model_type, base)
@@ -166,7 +139,7 @@ def test_family_patches_keep_the_fused_kernel_and_in_proj_lora_gradients(
     assert _lora_grad_sums(model, "out_proj") == {}
 
 
-def test_raw_peft_rejects_out_proj_on_mamba_mixer(pristine_mixer_class):
+def test_raw_peft_rejects_out_proj_on_mamba_mixer(pristine_nemotron_classes):
     """Raw PEFT refuses mixer.out_proj on Nemotron-H; use adapt_lora_config_for_model."""
     base = _tiny_nemotron_h()
     lora_config = LoraConfig(
@@ -182,7 +155,7 @@ def test_raw_peft_rejects_out_proj_on_mamba_mixer(pristine_mixer_class):
         get_peft_model(base, lora_config, adapter_name="actor")
 
 
-def test_adapted_lora_config_drops_out_proj_and_attaches(pristine_mixer_class):
+def test_adapted_lora_config_drops_out_proj_and_attaches(pristine_nemotron_classes):
     base = _tiny_nemotron_h()
     lora_config = LoraConfig(
         r=4,
@@ -203,7 +176,7 @@ def test_adapted_lora_config_drops_out_proj_and_attaches(pristine_mixer_class):
     assert not any("out_proj" in name and "lora_A" in name for name in names)
 
 
-def test_all_linear_adapts_and_attaches(pristine_mixer_class):
+def test_all_linear_adapts_and_attaches(pristine_nemotron_classes):
     base = _tiny_nemotron_h()
     lora_config = LoraConfig(
         r=4,

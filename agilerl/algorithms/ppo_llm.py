@@ -12,8 +12,8 @@ import torch
 
 from agilerl import HAS_LIGER_KERNEL, HAS_LLM_DEPENDENCIES
 from agilerl.algorithms.core import ActionResult, LLMAlgorithm
-from agilerl.algorithms.core.llm_ops.fused_lora import unset_fused_adapter_routing
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
+from agilerl.lora.fused import unset_fused_adapter_routing
 
 if TYPE_CHECKING:
     from peft import LoraConfig, PeftModel
@@ -228,6 +228,10 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
         memory (the win grows with sequence length); a no-op during rollout /
         reference forwards.
     :type activation_offload: bool, optional
+    :param moe_lora_recompute: Recompute routed-expert LoRA activations in
+        backward on frozen packed base weights. ``None`` (default) recomputes
+        only outside activation-checkpointed blocks.
+    :type moe_lora_recompute: bool | None, optional
     :param vllm_importance_sampling_correction: When ``True`` (default) and
         colocated, correct the rollout/trainer log-prob mismatch by
         weighting each training token by ``clamp(exp(trainer - sampling),
@@ -316,6 +320,7 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
         use_liger_loss: bool = True,
         quantization_config: BitsAndBytesConfig | None = None,
         activation_offload: bool = False,
+        moe_lora_recompute: bool | None = None,
         use_sequence_packing: bool = False,
         lora_target_scope: str | None = None,
         vllm_importance_sampling_correction: bool = True,
@@ -359,6 +364,7 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
             chunk_rows=chunk_rows,
             quantization_config=quantization_config,
             activation_offload=activation_offload,
+            moe_lora_recompute=moe_lora_recompute,
             use_sequence_packing=use_sequence_packing,
             lora_target_scope=lora_target_scope,
             vllm_importance_sampling_correction=vllm_importance_sampling_correction,

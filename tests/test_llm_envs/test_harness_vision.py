@@ -19,6 +19,8 @@ from agilerl.llm_envs.observation import (
     ESCAPED_IMAGE_PLACEHOLDER,
     IMAGE_PLACEHOLDER,
     IMAGE_USER_CONTENT_PREFIX,
+    ImageProcessorCall,
+    encode_image_training_inputs,
 )
 from tests import TINY_LLM_FIXTURE_PATH
 from tests.helpers.rollout_doubles import FakeEnvClient, MiniTokenizer
@@ -1417,3 +1419,158 @@ class TestRolloutHarnessSegmentRestart:
         assert got[6] is None
         for want, have in zip(expected[:6], got[:6], strict=True):
             assert torch.equal(have, want)
+
+
+def rebuilt_pixel_values(
+    calls: list[ImageProcessorCall],
+    processor: Callable[..., dict[str, torch.Tensor]],
+) -> torch.Tensor:
+    """Rerun each recorded call through the processor, rows in call order."""
+    return torch.cat(
+        [
+            encode_image_training_inputs(
+                text=call.text, image=list(call.images), processor=processor
+            )[1]
+            for call in calls
+        ]
+    )
+
+
+class TestRolloutHarnessEpisodeImageCalls:
+    def test_calls_rebuild_the_pixel_values_of_every_turn(
+        self, image_token_tokenizer: PreTrainedTokenizerBase
+    ) -> None:
+        # Arrange
+        tokenizer = image_token_tokenizer
+        end = tokenizer.convert_tokens_to_ids("<|im_end|>")
+        sampled = [*newline_first_tokens(tokenizer, "ok</think>noop()"), end]
+        harness = numbered_screen_harness(tokenizer)
+        processor = context_token_processor(tokenizer, tokens_per_image=3)
+        run_image_episode(harness, sampled)
+
+        # Act
+        calls = harness.episode_image_calls()
+
+        # Assert
+        pixel_values = harness.get_episode_data()[5]
+        assert pixel_values is not None
+        assert [len(call.images) for call in calls] == [1, 1, 1]
+        assert torch.equal(rebuilt_pixel_values(calls, processor), pixel_values)
+
+    def test_calls_rebuild_the_pixel_rows_across_restarted_segments(
+        self, image_token_tokenizer: PreTrainedTokenizerBase
+    ) -> None:
+        # Arrange
+        tokenizer = image_token_tokenizer
+        end = tokenizer.convert_tokens_to_ids("<|im_end|>")
+        sampled = [*newline_first_tokens(tokenizer, "ok</think>noop()"), end]
+        reference = run_image_episode(numbered_screen_harness(tokenizer), sampled)
+        harness = numbered_screen_harness(
+            tokenizer, segment_prompt_tokens=reference[1]["prompt_token_len"] - 1
+        )
+        processor = context_token_processor(tokenizer, tokens_per_image=3)
+        run_image_episode(harness, sampled)
+
+        # Act
+        calls = harness.episode_image_calls()
+
+        # Assert
+        _ids, _mask, _turns, _rewards, _logps, pixel_values, segments = (
+            harness.get_episode_data()
+        )
+        assert segments is not None
+        assert segments.pixel_rows is not None
+        assert pixel_values is not None
+        assert segments.pixel_rows.tolist() == [1, 1, 1]
+        assert all("Previous actions:" in call.text for call in calls[1:])
+        assert torch.equal(rebuilt_pixel_values(calls, processor), pixel_values)
+
+    def test_reset_starts_a_new_call_list(
+        self, image_token_tokenizer: PreTrainedTokenizerBase
+    ) -> None:
+        # Arrange
+        tokenizer = image_token_tokenizer
+        end = tokenizer.convert_tokens_to_ids("<|im_end|>")
+        sampled = [*newline_first_tokens(tokenizer, "ok</think>noop()"), end]
+        harness = numbered_screen_harness(tokenizer)
+        run_image_episode(harness, sampled)
+
+        # Act
+        harness.reset()
+
+        # Assert
+        calls = harness.episode_image_calls()
+        assert len(calls) == 1
+        assert torch.equal(calls[0].images[0], torch.full((2,), 0.0))
+
+    def test_text_episode_has_no_calls(
+        self, thinking_tokenizer: PreTrainedTokenizerBase
+    ) -> None:
+        # Arrange
+        harness = chat_text_harness(thinking_tokenizer)
+        end = thinking_tokenizer.convert_tokens_to_ids("<|im_end|>")
+        sampled = [*newline_first_tokens(thinking_tokenizer, "ok"), end]
+
+        # Act
+        run_text_episode(harness, sampled)
+
+        # Assert
+        assert harness.episode_image_calls() == []
+
+
+class TestImageProcessorCallFromInputs:
+    def test_wraps_one_image(self) -> None:
+        image = torch.zeros(2)
+
+        call = ImageProcessorCall.from_inputs(text="t", image=image)
+
+        assert call.text == "t"
+        assert call.images == (image,)
+
+    def test_keeps_every_image_of_a_list(self) -> None:
+        first, second = torch.zeros(2), torch.ones(2)
+
+        call = ImageProcessorCall.from_inputs(text="t", image=[first, second])
+
+        assert call.images == (first, second)
+
+
+class TestRolloutCollectorEpisodeImageCalls:
+    def test_returns_the_active_episode_calls_until_finalize(self) -> None:
+        # Arrange
+        def fake_processor(
+            *, text: str, images: object, return_tensors: str
+        ) -> dict[str, torch.Tensor]:
+            del text, images, return_tensors
+            return {
+                "input_ids": torch.tensor([[1, 2, 3, 4]]),
+                "pixel_values": torch.ones(1, 3, 2, 2),
+            }
+
+        def env_factory() -> RolloutHarness:
+            return RolloutHarness(
+                ImageResetClient(),
+                MiniTokenizer(),
+                max_turns=1,
+                apply_chat_template=False,
+                vision_processor=fake_processor,
+            )
+
+        collector = RolloutCollector(env_factory, batch_size=1, group_size=1)
+        episode_id = "ep-vision"
+        collector.reset_episode(episode_id, task=collector.assign_group_task(0))
+        collector.step_episode(
+            episode_id,
+            torch.arange(14, dtype=torch.long).unsqueeze(0),
+            prompt_token_len=10,
+        )
+
+        # Act
+        calls = collector.episode_image_calls(episode_id)
+        collector.finalize_episode(episode_id)
+
+        # Assert
+        assert len(calls) == 1
+        assert len(calls[0].images) == 1
+        with pytest.raises(KeyError, match="ep-vision"):
+            collector.episode_image_calls(episode_id)

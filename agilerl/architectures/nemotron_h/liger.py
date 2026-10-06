@@ -230,7 +230,7 @@ def apply_liger_kernel_to_nemotron_h(
             nemotron_mod.NemotronHForCausalLM.forward = lce_forward
 
     if model is not None:
-        base_model = getattr(model, model.base_model_prefix, model)
+        base_model = _liger_backbone(model)
         if rms_norm:
             _patch_rms_norm_module(base_model.norm_f)
         layers = cast("list[Any]", base_model.layers)
@@ -246,12 +246,25 @@ def apply_liger_kernel_to_nemotron_h(
                     )
 
 
+def _liger_backbone(model: PreTrainedModel) -> torch.nn.Module:
+    """Return the module whose ``layers`` receive RMSNorm and ReLU² patches."""
+    language = getattr(model, "language_model", None)
+    root = language if language is not None else model
+    prefix = getattr(root, "base_model_prefix", "model")
+    inner = getattr(root, prefix, None)
+    if inner is not None and hasattr(inner, "layers"):
+        return inner
+    if hasattr(root, "layers"):
+        return root
+    return getattr(model, getattr(model, "base_model_prefix", "model"), model)
+
+
 def register_nemotron_h_liger() -> bool:
-    """Register ``nemotron_h`` with Liger's AutoLiger apply map.
+    """Register Nemotron-H model types with Liger's AutoLiger apply map.
 
     Idempotent. Returns False when liger-kernel or LLM deps are unavailable.
 
-    :return: Whether ``nemotron_h`` is registered for AutoLiger.
+    :return: Whether the model types are registered for AutoLiger.
     :rtype: bool
     """
     if not HAS_LIGER or modeling_nemotron_h is None:
@@ -260,5 +273,6 @@ def register_nemotron_h_liger() -> bool:
         return True
     apply_fns = cast("dict[str, Any]", MODEL_TYPE_TO_APPLY_LIGER_FN)
     apply_fns["nemotron_h"] = apply_liger_kernel_to_nemotron_h
+    apply_fns["nemotron_h_omni"] = apply_liger_kernel_to_nemotron_h
     REGISTERED["value"] = True
     return True

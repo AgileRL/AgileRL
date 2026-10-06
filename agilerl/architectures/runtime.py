@@ -6,8 +6,11 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 
 from pydantic import BaseModel, ConfigDict, Field
+from torch import nn
+from torch.distributed.device_mesh import DeviceMesh
 
 
 class VllmRuntimeConfig(BaseModel):
@@ -42,13 +45,16 @@ class TrainerRuntimeConfig(BaseModel):
 class MambaPatchConfig(BaseModel):
     """Mamba2 mixer patches that vary by Hugging Face ``model_type``.
 
-    ``mixer`` is a dotted path resolved when the patch runs; the transformers
-    class may be absent at import time.
+    ``mixer`` and ``block`` are dotted paths resolved when the patch runs; the
+    transformers classes may be absent at import time. ``block`` is the decoder
+    block that calls ``mixer``; when set, packed rows reset the mixer's scan and
+    conv state at every document boundary.
     """
 
     model_config = ConfigDict(extra="forbid")
 
     mixer: str = Field(min_length=1)
+    block: str | None = Field(default=None, min_length=1)
     fused_path: bool = True
     stream_ordering: bool = True
 
@@ -86,8 +92,26 @@ class LanguageTowerRuntimeConfig(BaseModel):
     )
 
 
+@dataclass(frozen=True)
+class TensorParallelPlan:
+    """Tensor-parallel hooks for the module classes one family defines.
+
+    ``shard`` runs before FSDP wraps the model and returns how many modules it
+    sharded. ``restore`` runs once weights are loaded into the shards. Both
+    leave modules of other families untouched.
+    """
+
+    shard: Callable[[nn.Module, DeviceMesh], int]
+    restore: Callable[[nn.Module, DeviceMesh], None]
+
+
 class ModelRuntimeConfig(BaseModel):
-    """Per-``model_type`` runtime settings for vLLM, trainer, and patches."""
+    """Per-``model_type`` runtime settings for vLLM, trainer, patches, and TP.
+
+    ``tensor_parallel_plan`` is a ``module:attribute`` path to a
+    :class:`TensorParallelPlan`, resolved when sharding runs: plan modules
+    import :mod:`agilerl.distributed`, which imports this package.
+    """
 
     model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
 
@@ -102,3 +126,4 @@ class ModelRuntimeConfig(BaseModel):
     ) = None
     # vLLM tower LoRA needs get_num_mm_encoder_tokens; stock stubs return None.
     enable_tower_connector_lora: bool = False
+    tensor_parallel_plan: str | None = Field(default=None, min_length=1)

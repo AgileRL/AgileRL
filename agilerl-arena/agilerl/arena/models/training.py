@@ -416,8 +416,10 @@ class TrainingSpec(BaseModel):
         default=None,
         ge=1,
         description=(
-            "Rollout groups the trainer consumes per cycle. Must divide evenly "
-            "by training_gpus_per_agent so every learner shard gets data."
+            "Rollout groups per cycle, in total across all of a member's "
+            "rollout engines, rounded up to a multiple of the engine count; "
+            "each engine runs an equal share. Must divide evenly by "
+            "training_gpus_per_agent so every learner shard gets data."
         ),
     )
     rollout_engines_per_agent: int | Literal["auto"] = Field(
@@ -546,9 +548,8 @@ class TrainingSpec(BaseModel):
         if self.weight_sync_interval is None:
             self.weight_sync_interval = 1
 
-        # An engine publishes group_index in [0, rollout_batch_size) and the
-        # buffer shards on group_index % trainers, so a remainder leaves the
-        # trailing learner shards permanently empty.
+        # The buffer deals each group to the emptiest learner shard, so a cycle
+        # fills every shard evenly only when the trainer count divides it.
         if self.rollout_batch_size % self.training_gpus_per_agent:
             msg = (
                 "async rollout requires training.rollout_batch_size to be a "

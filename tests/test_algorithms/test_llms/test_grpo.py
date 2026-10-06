@@ -42,10 +42,7 @@ from agilerl.utils.algo_utils import CosineLRScheduleConfig, VLLMConfig, clone_l
 from agilerl.utils.llm_utils import LEARN_PHASE_METRIC_NAMES
 from tests import TINY_LLM_FIXTURE_PATH
 from tests.helpers.rollout_doubles import FakeEnvClient, RolloutHarnessDouble
-from tests.test_algorithms.test_llms.llm_helpers import (
-    _patch_mps_learn_hooks,
-    create_module,
-)
+from tests.test_algorithms.test_llms.llm_helpers import create_module
 from tests.utils import (
     assert_vllm_get_action_contract,
     make_mock_vllm_instance,
@@ -1682,6 +1679,7 @@ class TestGRPOLigerLossDispatch:
                 lambda self, name: nullcontext(),
             ),
         ):
+            mock_fn.forward = _DummyLigerFn.forward
             mock_fn.apply.return_value = (fake_loss, fake_aux)
             # With ``lm_head`` identity-patched, ``actor_output.logits`` *is*
             # the hidden-state tensor — return a stub whose ``.logits``
@@ -1778,6 +1776,7 @@ class TestGRPOLigerLossDispatch:
                 LLMAlgorithm, "select_adapter", lambda self, name: nullcontext()
             ),
         ):
+            mock_fn.forward = _DummyLigerFn.forward
             mock_fn.apply.return_value = (fake_loss, fake_aux)
             fake_output = MagicMock()
             fake_output.logits = torch.randn(1, 2, 8, requires_grad=True)
@@ -1903,18 +1902,57 @@ class _DummyLigerFn:
     summed over masked-in (action) tokens and ignores everything else. The real
     kernel consumes ``hidden[:, :n_act]`` for the next-token shift, so we slice
     the hidden seq dim down to the mask's action length before reducing.
+    ``forward`` carries liger's signature, which ``GRPO`` reads to place
+    ``num_items_in_batch``.
     """
 
-    @staticmethod
-    def apply(*args):
-        policy_hidden = args[0]
-        mask = args[3]
-        h = policy_hidden
+    @classmethod
+    def forward(
+        cls,
+        ctx,
+        _input,
+        weight,
+        selected_token_ids,
+        attention_mask,
+        advantages,
+        bias=None,
+        ref_per_token_logps=None,
+        old_per_token_logps=None,
+        ref_input=None,
+        ref_weight=None,
+        ref_bias=None,
+        beta=0.04,
+        epsilon_low=0.2,
+        epsilon_high=0.2,
+        loss_type="dapo",
+        max_completion_length=None,
+        importance_sampling_level="token",
+        sapo_temperature_pos=1.0,
+        sapo_temperature_neg=1.05,
+        temperature=1.0,
+        compiled=True,
+        use_ref_model=True,
+        chunk_size=1,
+        vllm_is_ratio=None,
+        delta=None,
+        use_bias_correction_kl=False,
+        vespo_k_pos=2.0,
+        vespo_lambda_pos=3.0,
+        vespo_k_neg=3.0,
+        vespo_lambda_neg=2.0,
+        num_items_in_batch=None,
+    ):
+        h = _input
+        mask = attention_mask
         if h.dim() == 3 and h.shape[1] != mask.shape[1]:
             h = h[:, : mask.shape[1], :]
         per_token = h.reshape(*mask.shape, -1).sum(-1)
         loss = (per_token * mask.to(per_token.dtype)).sum()
         return loss, [torch.zeros((), dtype=per_token.dtype)]
+
+    @classmethod
+    def apply(cls, *args):
+        return cls.forward(None, *args)
 
 
 class TestGRPOLigerSequencePacking:
@@ -3945,6 +3983,7 @@ class TestGRPOLearn:
             "is_frac_above",
             "is_frac_clip_pos",
             "is_frac_clip_neg",
+            "old_logprobs_trainer_rows",
             "grad_norm_pre",
             "grad_norm_post",
             *LEARN_PHASE_METRIC_NAMES,
@@ -4019,13 +4058,14 @@ class TestGRPOLearn:
         assert np.isfinite(metrics["kl"])
         grpo.clean_up()
 
-    def test_grpo_learn_calls_mps_empty_cache(
+    def test_grpo_learn_keeps_device_cache(
         self,
         monkeypatch: pytest.MonkeyPatch,
         dist_mode_factory,
         model_factory,
     ) -> None:
-        """Patch MPS on CI so ``torch.mps.empty_cache()`` in ``learn()`` is exercised."""
+        """``learn()`` never flushes the CUDA or MPS caching allocator."""
+        # Arrange
         grpo = generate_grpo(
             dist_mode_factory,
             model_factory,
@@ -4040,10 +4080,9 @@ class TestGRPOLearn:
             micro_batch_size_per_gpu=None,
             from_name=False,
         )
-        # Patch MPS only *after* the agent is built: patching is_available()
-        # before construction makes the device resolve to "mps", and the dummy
-        # actor's ``.to("mps")`` then crashes on a non-MPS (Linux/CI) torch build.
-        empty = _patch_mps_learn_hooks(monkeypatch, "agilerl.algorithms.grpo")
+        flushes: list[str] = []
+        monkeypatch.setattr("torch.cuda.empty_cache", lambda: flushes.append("cuda"))
+        monkeypatch.setattr("torch.mps.empty_cache", lambda: flushes.append("mps"))
         for name, param in grpo.actor.named_parameters():
             if ("lora_A" in name or "lora_B" in name) and param is not None:
                 param.data.normal_(mean=0, std=0.01)
@@ -4063,8 +4102,12 @@ class TestGRPOLearn:
             [torch.rand(2, dtype=torch.float32) for _ in range(1)], dim=0
         )
 
-        grpo.learn((completions, action_masks, rewards))
-        empty.assert_called()
+        # Act
+        metrics = grpo.learn((completions, action_masks, rewards))
+
+        # Assert
+        assert np.isfinite(metrics["loss"])
+        assert flushes == []
         grpo.clean_up()
 
 
@@ -4245,6 +4288,7 @@ class TestGRPOSaveLoadCheckpoint:
                 # adds ``exclude_modules=["lm_head"]``).
                 use_liger_loss=grpo.use_liger_loss,
             )
+            own_profiler = new_grpo.learn_profiler
             new_grpo.load_checkpoint(tmpdir)
 
             for attr in EvolvableAlgorithm.inspect_attributes(grpo):
@@ -4296,6 +4340,8 @@ class TestGRPOSaveLoadCheckpoint:
                             getattr(new_grpo, attr).is_sharded
                             == getattr(grpo, attr).is_sharded
                         )
+                    elif attr == "learn_profiler":
+                        assert new_grpo.learn_profiler is own_profiler
                     elif not isinstance(getattr(grpo, attr), torch.Tensor):
                         assert getattr(new_grpo, attr) == getattr(
                             grpo,
@@ -5745,6 +5791,7 @@ class TestGRPONonFinitePaddingIsIsolated:
                 LLMAlgorithm, "select_adapter", lambda self, name: nullcontext()
             ),
         ):
+            mock_fn.forward = _DummyLigerFn.forward
             mock_fn.apply.return_value = (
                 torch.tensor(0.5, requires_grad=True),
                 (torch.tensor(0.1), torch.tensor(0.0)),
@@ -5775,9 +5822,10 @@ class TestGRPONonFinitePaddingIsIsolated:
             ("vllm_is_ratio", ratio_arg),
         ):
             assert torch.isfinite(tensor).all(), name
-        # The in-mask token keeps its own values; only padding was filled.
+        # Only the in-mask token reaches the kernel, with its own values.
+        assert ratio_arg.shape == (1, 1)
         assert old_arg[0].item() == pytest.approx(-0.7)
-        assert ratio_arg[1].item() == pytest.approx(1.0)
+        assert ratio_arg[0].item() == pytest.approx(math.exp(-0.7 - -0.9))
         grpo.clean_up()
 
 

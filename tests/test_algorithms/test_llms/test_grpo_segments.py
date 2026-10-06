@@ -19,11 +19,9 @@ import torch
 pytest.importorskip("transformers", reason="LLM tests require transformers.")
 pytest.importorskip("peft", reason="LLM tests require peft.")
 
-from peft import LoraConfig
-
 from agilerl.algorithms.grpo import GRPO, _liger_global_token_count
+from agilerl.utils.segment_rows import split_episode_segments
 from agilerl.utils.vision_rows import VisionRows
-from tests.test_algorithms.test_llms.llm_helpers import create_module
 from tests.test_algorithms.test_llms.segment_helpers import (
     EPISODE_SEGMENTS,
     NUM_SEGMENT_ROWS,
@@ -34,49 +32,30 @@ from tests.test_algorithms.test_llms.segment_helpers import (
     record_step_gradients,
     segment_experiences,
 )
-
-PAD_TOKEN_ID = 63
-VOCAB = 64
-
-
-def _make_grpo(**overrides: Any) -> GRPO:
-    """Tiny fp32 GRPO on CPU: 2 prompts x 2 completions, one micro-batch of 2 rows."""
-    torch.manual_seed(0)
-    kwargs: dict[str, Any] = {
-        "actor_network": create_module(
-            input_size=6, max_tokens=4, vocab_size=VOCAB, device="cpu"
-        ),
-        "pad_token_id": PAD_TOKEN_ID,
-        "pad_token": "<pad>",
-        "batch_size": 2,
-        "group_size": 2,
-        "beta": 0.0,
-        "lr": 1e-2,
-        "max_grad_norm": None,
-        "max_output_tokens": 4,
-        "max_model_len": 12,
-        "micro_batch_size_per_gpu": 2,
-        "mini_batch_size": 4,
-        "wrap": False,
-        "gradient_checkpointing": False,
-        "calc_position_embeddings": False,
-        "device": "cpu",
-        "use_liger_loss": False,
-        "advantage_granularity": "trajectory",
-        "lora_config": LoraConfig(
-            r=4,
-            lora_alpha=8,
-            target_modules=["linear_1"],
-            task_type="CAUSAL_LM",
-            lora_dropout=0.0,
-        ),
-        **overrides,
-    }
-    return GRPO(**kwargs)
+from tests.test_algorithms.test_llms.test_grpo_old_logprobs import (
+    PAD_TOKEN_ID,
+    _make_grpo,
+)
 
 
 def _experiences() -> tuple[list[torch.Tensor], list[torch.Tensor], torch.Tensor]:
     return segment_experiences(PAD_TOKEN_ID)
+
+
+def _rollout_sampling_logps(agent: GRPO) -> list[torch.Tensor]:
+    """Per-episode flat log-probs of the learn-start policy on the segment rows."""
+    ids, mask = episode_batch(PAD_TOKEN_ID)
+    rows = split_episode_segments(ids, mask, EPISODE_SEGMENTS, PAD_TOKEN_ID)
+    _, row_log_probs, _ = agent._fused_forward_no_grad(
+        rows.token_ids, NUM_SEGMENT_ROWS, include_reference=False
+    )
+    per_row = [
+        row_log_probs[row][rows.action_masks[row]] for row in range(NUM_SEGMENT_ROWS)
+    ]
+    return [
+        torch.cat([per_row[row] for row in np.flatnonzero(rows.row_episodes == ep)])
+        for ep in range(4)
+    ]
 
 
 class TestLigerGlobalTokenCount:
@@ -199,6 +178,37 @@ class TestGRPOLearnEpisodeSegments:
         assert math.isfinite(metrics["entropy"])
         after = lora_weights(agent)
         assert any(not torch.equal(after[name], before[name]) for name in before)
+
+    def test_padding_rows_count_as_rollout_rows(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Arrange: another rank has 8 rows, so this rank pads its 6 with 2.
+        torch.manual_seed(0)
+        agent = _make_grpo(old_logprobs_source="rollout")
+        sampling_logps = _rollout_sampling_logps(agent)
+        pad_to_eight_rows(monkeypatch)
+
+        # Act
+        metrics = agent.learn(
+            _experiences(),
+            sampling_logps=sampling_logps,
+            episode_segments=EPISODE_SEGMENTS,
+        )
+
+        # Assert
+        assert metrics["old_logprobs_trainer_rows"] == 0.0
+        assert math.isfinite(metrics["loss"])
+
+    def test_rows_fill_whole_optimizer_steps(self) -> None:
+        # Arrange: 6 rows, 2-row micro-batches, 2 micro-batches per step.
+        torch.manual_seed(0)
+        agent = _make_grpo()
+
+        # Act
+        agent.learn(_experiences(), episode_segments=EPISODE_SEGMENTS)
+
+        # Assert: no micro-batch waits for the next learn's optimizer step.
+        assert agent.shard_runtime.micro_batches_until_step(2) == 2
 
     @pytest.mark.parametrize(
         ("other_rank_rows", "micro_batches"), [(13, 16), (2, 8), (6, 8)]

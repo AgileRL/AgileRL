@@ -642,3 +642,18 @@ class TestAsyncBatchCollectorWindowControls:
             collector.close()
 
         assert inner.active_ids_limits == [3]
+
+
+class TestAsyncBatchCollectorEpisodeImageCalls:
+    def test_forwards_to_the_inner_collector(self) -> None:
+        class _VisionStub(StubCollector):
+            def episode_image_calls(self, episode_id: str):
+                return [episode_id]
+
+        inner = _VisionStub()
+        collector = AsyncBatchCollector(inner)
+
+        try:
+            assert collector.episode_image_calls("ep-7") == ["ep-7"]
+        finally:
+            collector.close()

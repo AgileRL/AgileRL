@@ -12,6 +12,7 @@ from agilerl.architectures.nemotron_h.liger import (
 from agilerl.architectures.nemotron_h.mamba import (
     install_mamba_patches,
     patch_nemotron_mamba_fused_path,
+    patch_nemotron_mamba_packed_sequences,
     patch_nemotron_mamba_stream_ordering,
 )
 
@@ -19,6 +20,7 @@ __all__ = [
     "apply_liger_kernel_to_nemotron_h",
     "install_mamba_patches",
     "patch_nemotron_mamba_fused_path",
+    "patch_nemotron_mamba_packed_sequences",
     "patch_nemotron_mamba_stream_ordering",
     "register_nemotron_h_liger",
 ]
