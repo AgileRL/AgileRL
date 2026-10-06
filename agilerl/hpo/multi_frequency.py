@@ -445,6 +445,18 @@ class MultiFrequencySelection:
             return self._select_llm_agents(population)
         return self._select_standard_agents(population)
 
+    def plan_evolution(self, population: PopulationType) -> dict[str, Any]:
+        """Decide one MF-PBT generation as an index plan, without cloning agents.
+
+        :param population: The whole population. Untagged members are assigned a
+            subpopulation from their slot.
+        :type population: PopulationType
+        :return: A plan {"ops", "elite_index", "indices_to_mutate"}.
+        :rtype: dict[str, Any]
+        """
+        self._assign_initial_subpopulations(population)
+        return self._plan_generation(population)
+
     def _select_standard_agents(
         self, population: PopulationType
     ) -> tuple[EvolvableAlgorithmProtocol, PopulationType, list[int]]:
@@ -496,7 +508,7 @@ class MultiFrequencySelection:
         """
         plan: dict[str, Any] | None = None
         if is_main_process():
-            plan = self._plan_llm_evolution(population)
+            plan = self._plan_generation(population)
 
         barrier()
         plan = broadcast_object_list([plan], src=0)[0]
@@ -513,7 +525,7 @@ class MultiFrequencySelection:
         elite = next(a for a in new_population if a.index == plan["elite_index"])
         return elite, new_population, plan["indices_to_mutate"]
 
-    def _plan_llm_evolution(self, population: PopulationType) -> dict[str, Any]:
+    def _plan_generation(self, population: PopulationType) -> dict[str, Any]:
         """Decide a whole MF-PBT generation as a serializable, index-based plan.
 
         :param population: The whole population.
@@ -590,7 +602,7 @@ class MultiFrequencySelection:
 
         :param population: The pre-evolution population.
         :type population: PopulationType
-        :param plan: The plan produced by :meth:`_plan_llm_evolution`.
+        :param plan: The plan produced by :meth:`plan_evolution`.
         :type plan: dict
         :return: The evolved population, aligned to population's slot order.
         :rtype: PopulationType
@@ -629,7 +641,7 @@ class MultiFrequencySelection:
             clone = self._collective_clone(source, new_index)
             clone.subpopulation_id = subpop
             if op[0] is MultiFrequencyOp.MIGRATE_WEIGHTS:
-                self._apply_hp_reset(clone, op[4])
+                self.apply_hp_reset(clone, op[4])
             new_population.append(clone)
             # A non-kept source is freed after its last use
             if src not in kept_indices and last_use[src] == i:
@@ -834,7 +846,7 @@ class MultiFrequencySelection:
         :rtype: ~agilerl.protocols.EvolvableAlgorithmProtocol
         """
         migrant = external.clone(index=self._next_index(), wrap=False)
-        self._apply_hp_reset(migrant, self._elite_hp_values(elite))
+        self.apply_hp_reset(migrant, self._elite_hp_values(elite))
         migrant.subpopulation_id = subpop
         return migrant
 
@@ -854,8 +866,9 @@ class MultiFrequencySelection:
 
         return {name: copy.deepcopy(getattr(elite, name)) for name in hp_config}
 
-    def _apply_hp_reset(
-        self, migrant: EvolvableAlgorithmProtocol, hp_values: dict[str, Any]
+    @staticmethod
+    def apply_hp_reset(
+        migrant: EvolvableAlgorithmProtocol, hp_values: dict[str, Any]
     ) -> None:
         """Reset a migrant's mutable hyperparameters, rebuilding any LR optimizer.
 
