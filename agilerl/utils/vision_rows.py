@@ -10,40 +10,10 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass
 
 import numpy as np
 import numpy.typing as npt
 import torch
-
-
-@dataclass(frozen=True)
-class VisionRows:
-    """Vision rows of a batch's token rows, stacked in row order.
-
-    :param pixel_values: Vision tensor for the local batch.
-    :param image_counts: Vision rows per token row, or ``None`` when every row
-        has the same number.
-    """
-
-    pixel_values: torch.Tensor
-    image_counts: Sequence[int] | None = None
-
-    def for_minibatch(
-        self, minibatch_idxs: npt.NDArray[np.intp], sample_rows: int
-    ) -> torch.Tensor:
-        """Vision rows of the token rows ``minibatch_idxs``.
-
-        :param minibatch_idxs: Sample rows included in the minibatch.
-        :param sample_rows: Local batch size (``token_ids.shape[0]``).
-        :return: Vision tensor passed to the model for this minibatch.
-        """
-        return pixel_values_for_minibatch(
-            self.pixel_values,
-            minibatch_idxs,
-            sample_rows=sample_rows,
-            image_counts=self.image_counts,
-        )
 
 
 def pixel_values_for_minibatch(
@@ -98,6 +68,34 @@ def pixel_values_for_minibatch(
         return torch.cat(blocks, dim=0)
     msg = f"pixel_values leading dim {leading} does not match the {rows} sample rows"
     raise ValueError(msg)
+
+
+def select_vision_rows(
+    pixel_values: torch.Tensor | None,
+    image_counts: Sequence[int] | None,
+    rows: npt.NDArray[np.intp],
+    sample_rows: int,
+) -> tuple[torch.Tensor | None, list[int] | None]:
+    """Vision rows and image counts of the token rows ``rows``.
+
+    :param pixel_values: Vision tensor for the local batch, or ``None`` for text.
+    :param image_counts: Vision rows per sample row, or ``None``.
+    :param rows: Sample rows to keep, in order.
+    :param sample_rows: Local batch size (``token_ids.shape[0]``).
+    :return: The kept rows' vision tensor and image counts; each ``None`` when
+        its input is ``None``.
+    """
+    selected_pixels = (
+        pixel_values_for_minibatch(
+            pixel_values, rows, sample_rows=sample_rows, image_counts=image_counts
+        )
+        if pixel_values is not None
+        else None
+    )
+    selected_counts = (
+        [image_counts[row] for row in rows] if image_counts is not None else None
+    )
+    return selected_pixels, selected_counts
 
 
 def vision_filler_row(

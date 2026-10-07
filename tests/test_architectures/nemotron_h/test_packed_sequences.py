@@ -198,20 +198,6 @@ class TestPatchNemotronMambaPackedSequences:
         assert unmarked == ["NemotronHMamba2Mixer"]
         assert mixers_without_boundary_reset(model) == []
 
-    def test_apply_is_idempotent(self, pristine_nemotron_classes):
-        # Arrange
-        patch_nemotron_mamba_packed_sequences(mixer=MIXER_PATH, block=BLOCK_PATH)
-        mixer_forward = NemotronHMamba2Mixer.forward
-        block_forward = modeling_nemotron_h.NemotronHBlock.forward
-
-        # Act
-        patch_nemotron_mamba_packed_sequences(mixer=MIXER_PATH, block=BLOCK_PATH)
-
-        # Assert
-        assert NemotronHMamba2Mixer.forward is mixer_forward
-        assert modeling_nemotron_h.NemotronHBlock.forward is block_forward
-        assert getattr(NemotronHMamba2Mixer, RESETS_AT_DOCUMENT_BOUNDARY) is True
-
     def test_absent_block_module_warns_and_leaves_the_mixer_unmarked(
         self, pristine_nemotron_classes, caplog
     ):

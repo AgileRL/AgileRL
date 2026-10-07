@@ -561,19 +561,6 @@ def _adaptive_row_collector() -> RolloutCollector:
     )
 
 
-class TestRolloutCollectorRecordGroupOutcome:
-    def test_before_any_group_task_raises(self) -> None:
-        collector = _adaptive_row_collector()
-        try:
-            with pytest.raises(
-                RuntimeError,
-                match="a finished group implies assign_group_task built the assigner",
-            ):
-                collector.record_group_outcome(0, informative=True)
-        finally:
-            collector.close()
-
-
 class TestRolloutCollectorTaskSamplerState:
     def test_reports_the_outcomes_fed_back_by_finished_groups(self) -> None:
         # Arrange

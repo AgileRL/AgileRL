@@ -11,10 +11,7 @@ import torch
 from torch import nn
 from transformers.configuration_utils import PretrainedConfig
 from transformers.generation.utils import GenerationMixin
-from transformers.modeling_outputs import CausalLMOutputWithPast
 from transformers.modeling_utils import PreTrainedModel
-
-from agilerl.utils.ppo_value_head import AutoModelForCausalLMWithValueHead
 
 
 class DummyConfig(PretrainedConfig):
@@ -129,34 +126,4 @@ def create_module(input_size, max_tokens, vocab_size, device):
             vocab_size=vocab_size,
         ),
         device=device,
-    )
-
-
-class DummyHiddenStatesModel(DummyMLPPreTrainedModel):
-    """Dummy causal LM that returns hidden states for a value head."""
-
-    def forward(
-        self,
-        input_ids: torch.Tensor | None = None,
-        *args,
-        **kwargs,
-    ) -> CausalLMOutputWithPast:
-        hidden = self.linear_1(self.embed(input_ids.long()))
-        return CausalLMOutputWithPast(
-            logits=self.lm_head(hidden), hidden_states=(hidden,)
-        )
-
-
-def create_value_head_module(
-    input_size: int, max_tokens: int, vocab_size: int, device: str
-) -> AutoModelForCausalLMWithValueHead:
-    """Dummy causal LM wrapped with a value head, as PPO trains it."""
-    config = DummyConfig(
-        input_size=input_size,
-        max_tokens=max_tokens,
-        vocab_size=vocab_size,
-        hidden_size=32,
-    )
-    return AutoModelForCausalLMWithValueHead(
-        DummyHiddenStatesModel(config=config, device=device)
     )

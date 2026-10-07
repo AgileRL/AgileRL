@@ -13,7 +13,6 @@ import traceback
 from functools import partial
 from types import SimpleNamespace
 from typing import Any, ClassVar
-from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
@@ -31,18 +30,16 @@ from transformers.models.nemotron_h.modeling_nemotron_h import (
 )
 
 from agilerl.distributed import FSDPConfig
-from agilerl.distributed import tensor_parallel as tp_mod
 from agilerl.distributed.expert_parallel import build_parallel_mesh
 from agilerl.distributed.fsdp import (
+    apply_fsdp2,
     materialize_dtensors,
     materialize_fsdp2_from_cpu_state,
 )
-from agilerl.distributed.fsdp_blocks import apply_fsdp2
 from agilerl.distributed.process import sync_grads
 from agilerl.distributed.tensor_parallel import (
     SharedSeedDropout,
     apply_tensor_parallel,
-    copy_input_to_region,
 )
 from agilerl.utils.llm_utils import get_lora_named_params
 
@@ -123,10 +120,7 @@ def _assert_close(actual: torch.Tensor, expected: torch.Tensor) -> None:
 
 
 def _assert_exact(actual: torch.Tensor, expected: torch.Tensor, label: str) -> None:
-    # Sharded fp32 sums reduce in another order, so a near-zero element can be
-    # off by a few ulps of the tensor's largest element.
-    scale = max(expected.abs().max().item(), 1.0)
-    if not torch.allclose(actual, expected, atol=1e-5 * scale, rtol=1e-5):
+    if not torch.allclose(actual, expected, atol=1e-5, rtol=1e-5):
         diff = (actual - expected).abs().max().item()
         msg = f"{label}: max abs diff {diff}"
         raise AssertionError(msg)
@@ -910,249 +904,3 @@ class TestApplyTensorParallel:
 
     def test_fsdp_leaves_lm_head_on_tp_mesh(self):
         _spawn_ranks(_lm_head_fsdp_worker)
-
-
-class TestTensorParallelGuards:
-    def test_base_linear_reads_a_base_layer_attribute(self):
-        class Wrap(nn.Module):
-            def __init__(self):
-                super().__init__()
-                self.base_layer = nn.Linear(2, 3)
-
-        wrap = Wrap()
-
-        assert tp_mod._base_linear(wrap) is wrap.base_layer
-
-    def test_shard_weight_returns_when_the_weight_is_missing(self):
-        tp_mod._shard_weight(nn.Module(), MagicMock(), tp_mod.Shard(0))
-
-    def test_lora_linears_reads_a_plain_dict_bank(self):
-        linear = nn.Linear(2, 2)
-        wrapper = nn.Module()
-        wrapper.lora_A = {"actor": linear, "skip": "nope"}
-
-        assert tp_mod._lora_linears(wrapper, "lora_A") == [linear]
-
-    def test_shared_seed_dropout_is_identity_in_eval(self):
-        drop = SharedSeedDropout(0.5, seed=0)
-        drop.eval()
-        x = torch.ones(3, 3)
-
-        assert drop(x) is x
-
-    def test_validate_gqa_rejects_heads_that_do_not_divide_kv(self):
-        with pytest.raises(ValueError, match="must be divisible by"):
-            tp_mod._validate_gqa(4, 3, tp=1)
-
-    def test_validate_gqa_rejects_a_query_span_that_crosses_a_kv_group(self):
-        with pytest.raises(ValueError, match="cross a key-value group"):
-            tp_mod._validate_gqa(12, 4, tp=3)
-
-    def test_shard_kv_returns_when_the_weight_is_already_a_dtensor(self):
-        linear = nn.Linear(4, 4)
-        with patch("agilerl.distributed.tensor_parallel.DTensor", nn.Parameter):
-            tp_mod._shard_kv(linear, MagicMock(), num_q=4, num_kv=2, head_dim=2)
-
-    def test_shard_kv_rejects_row_count_that_does_not_match_kv_heads(self):
-        linear = nn.Linear(4, 8)
-        mesh = MagicMock()
-        mesh.size.return_value = 4
-
-        with pytest.raises(ValueError, match="do not match"):
-            tp_mod._shard_kv(linear, mesh, num_q=8, num_kv=2, head_dim=2)
-
-    def test_copy_input_to_region_rewrites_hidden_states_kwarg(self):
-        hidden = torch.ones(2, 2)
-        with patch.object(
-            tp_mod.CopyToTPRegion, "apply", side_effect=lambda tensor, _group: tensor
-        ):
-            args, kwargs = copy_input_to_region((), {"hidden_states": hidden}, object())
-
-        assert args == ()
-        assert kwargs["hidden_states"] is hidden
-
-    def test_live_row_bias_is_none_without_a_plain_bias(self):
-        linear = nn.Linear(2, 2, bias=False)
-
-        assert tp_mod._live_row_bias(None) is None
-        assert tp_mod._live_row_bias(linear) is None
-
-    def test_tp_group_raises_without_a_process_group(self):
-        with pytest.raises(RuntimeError, match="no process group"):
-            tp_mod._tp_group(nn.Linear(2, 2))
-
-    def test_all_reduce_hidden_adds_bias_to_a_tuple_output(self):
-        hidden = torch.ones(2, 2)
-        extra = object()
-        bias = nn.Parameter(torch.full((2,), 3.0))
-        with patch.object(
-            tp_mod.ReduceFromTPRegion,
-            "apply",
-            side_effect=lambda tensor, _group: tensor,
-        ):
-            out = tp_mod._all_reduce_hidden((hidden, extra), object(), bias)
-
-        assert torch.equal(out[0], hidden + 3)
-        assert out[1] is extra
-
-    def test_all_reduce_hidden_rejects_a_non_tensor_tuple(self):
-        with pytest.raises(TypeError, match="did not return a tensor"):
-            tp_mod._all_reduce_hidden((object(),), object(), None)
-
-    def test_all_reduce_hidden_rejects_a_non_tensor_output(self):
-        with pytest.raises(TypeError, match="did not return a tensor"):
-            tp_mod._all_reduce_hidden("nope", object(), None)
-
-    def test_install_forwards_are_idempotent(self):
-        module = nn.Linear(2, 2)
-        object.__setattr__(module, "_agilerl_dense_tp", True)
-
-        tp_mod._install_block_forward(module, None)
-        tp_mod.install_reduce_forward(module, None)
-        tp_mod._install_gather_forward(module)
-        tp_mod._install_split_forward(module, None)
-
-        assert "forward" not in module.__dict__
-
-    def test_gather_forward_rejects_a_non_tensor_output(self):
-        linear = nn.Linear(2, 2)
-        object.__setattr__(linear, "_tp_group", MagicMock(spec=dist.ProcessGroup))
-        object.__setattr__(linear, "_tp_mesh", MagicMock(get_local_rank=lambda: 0))
-        tp_mod._install_gather_forward(linear)
-        with (
-            patch(
-                "agilerl.distributed.tensor_parallel.copy_input_to_region",
-                return_value=((torch.ones(2),), {}),
-            ),
-            patch(
-                "agilerl.distributed.tensor_parallel._call_local_forward",
-                return_value="nope",
-            ),
-        ):
-            with pytest.raises(TypeError, match="column-parallel gather"):
-                linear(torch.ones(2))
-
-    def test_split_forward_rejects_a_non_tensor_input(self):
-        linear = nn.Linear(2, 2)
-        object.__setattr__(linear, "_tp_group", MagicMock(spec=dist.ProcessGroup))
-        object.__setattr__(linear, "_tp_mesh", MagicMock(get_local_rank=lambda: 0))
-        object.__setattr__(linear, "_tp_degree", 2)
-        tp_mod._install_split_forward(linear, None)
-
-        with pytest.raises(TypeError, match="expected a tensor input"):
-            linear("nope")
-
-    def test_split_forward_rejects_a_non_tensor_output(self):
-        linear = nn.Linear(2, 2)
-        object.__setattr__(linear, "_tp_group", MagicMock(spec=dist.ProcessGroup))
-        object.__setattr__(linear, "_tp_mesh", MagicMock(get_local_rank=lambda: 0))
-        object.__setattr__(linear, "_tp_degree", 2)
-        tp_mod._install_split_forward(linear, None)
-        with (
-            patch(
-                "agilerl.distributed.tensor_parallel._slice_last_dim",
-                side_effect=lambda tensor, *_rest: tensor,
-            ),
-            patch(
-                "agilerl.distributed.tensor_parallel._call_local_forward",
-                return_value="nope",
-            ),
-        ):
-            with pytest.raises(
-                TypeError, match="row-parallel linear expected a tensor"
-            ):
-                linear(torch.ones(2, 2))
-
-    def test_vision_head_count_raises_without_heads(self):
-        with pytest.raises(ValueError, match="has no num_heads"):
-            tp_mod._vision_head_count(nn.Linear(2, 2))
-
-    def test_shard_vision_attention_rejects_query_rows_that_do_not_divide(self):
-        class Attn(nn.Module):
-            def __init__(self):
-                super().__init__()
-                self.query = nn.Linear(4, 6)
-
-        attn = Attn()
-        attn.__dict__["num_heads"] = 4
-        with pytest.raises(ValueError, match="must be divisible by num_heads"):
-            tp_mod._shard_vision_attention(attn, MagicMock())
-
-    def test_shard_latent_returns_false_when_projections_are_not_linear(self):
-        class Latent(nn.Module):
-            def __init__(self):
-                super().__init__()
-                self.fc1_latent_proj = nn.Identity()
-                self.fc2_latent_proj = nn.Identity()
-
-        assert tp_mod._shard_latent(Latent(), MagicMock()) is False
-
-    def test_weight_is_embedding_finds_a_tied_embedding(self):
-        class Model(nn.Module):
-            def __init__(self):
-                super().__init__()
-                self.embed = nn.Embedding(8, 4)
-                self.lm_head = nn.Linear(4, 8, bias=False)
-                self.lm_head.weight = self.embed.weight
-
-        model = Model()
-
-        assert tp_mod._weight_is_embedding(model, model.lm_head.weight) is True
-
-    def test_iter_lm_heads_finds_a_nested_linear_head(self):
-        class Inner(nn.Module):
-            def __init__(self):
-                super().__init__()
-                self.lm_head = nn.Linear(4, 8)
-
-        class Model(nn.Module):
-            def __init__(self):
-                super().__init__()
-                self.decoder = Inner()
-
-        found = tp_mod._iter_lm_heads(Model())
-
-        assert [name for name, _module in found] == ["decoder.lm_head"]
-
-    def test_lm_head_is_tied_when_the_parent_config_ties_embeddings(self):
-        class Parent(nn.Module):
-            def __init__(self):
-                super().__init__()
-                self.lm_head = nn.Linear(4, 8)
-                self.config = SimpleNamespace(tie_word_embeddings=True)
-
-        class Model(nn.Module):
-            def __init__(self):
-                super().__init__()
-                self.decoder = Parent()
-                self.config = SimpleNamespace(tie_word_embeddings=False)
-
-        model = Model()
-
-        assert tp_mod._lm_head_is_tied(model, "decoder.lm_head", model.decoder.lm_head)
-
-    def test_shard_lm_heads_installs_gather_on_an_already_sharded_head(self):
-        class Model(nn.Module):
-            def __init__(self):
-                super().__init__()
-                self.lm_head = nn.Linear(4, 8)
-                self.config = SimpleNamespace(tie_word_embeddings=False)
-
-        model = Model()
-        mesh = MagicMock()
-        mesh.size.return_value = 2
-        mesh.get_group.return_value = object()
-        with patch("agilerl.distributed.tensor_parallel.DTensor", nn.Parameter):
-            count = tp_mod._shard_lm_heads(model, mesh)
-
-        assert count == 1
-        assert getattr(model.lm_head, "_agilerl_dense_tp", False)
-
-    def test_apply_tensor_parallel_is_a_no_op_without_a_mesh(self):
-        assert apply_tensor_parallel(nn.Linear(2, 2), None) == 0
-
-    def test_apply_tensor_parallel_is_a_no_op_when_tp_is_one(self):
-        mesh = MagicMock()
-        mesh.size.return_value = 1
-
-        assert apply_tensor_parallel(nn.Linear(2, 2), mesh) == 0

@@ -23,11 +23,7 @@ from agilerl.arena.models.env import (
     LLMEnvType,
     OfflineEnvSpec,
 )
-from agilerl.data.parquet import (
-    is_local_parquet_dataset,
-    load_parquet_dataset,
-    load_train_eval_from_splits,
-)
+from agilerl.data.parquet import load_parquet_dataset
 from agilerl.llm_envs import DatasetEnv, RolloutHarness
 from agilerl.llm_envs.env_packages import ensure_importable
 from agilerl.protocols import BanditEnvProtocol, TextEnvProtocol
@@ -349,22 +345,17 @@ def _rollout_strict_chat_template_boundary(spec: LLMEnvSpec) -> bool:
 def _load_llm_dataset(
     spec: LLMEnvSpec, *, seed: int | None = None
 ) -> tuple[Dataset, Dataset]:
-    """Load the spec's dataset and split it into train and test.
-
-    A directory with a train split and at least one other split uses every
-    train row for training and every other split's rows for eval. A flat
-    parquet source, a train-only directory, or split directories with no
-    train directory are divided with ``train_test_split``.
-    """
+    """Load the spec's dataset and split it into train and test."""
     dataset = spec.dataset
     if dataset is None:
         msg = "dataset is required to load rollout/preference/sft data"
         raise ValueError(msg)
-    if not is_local_parquet_dataset(dataset):
+    path = Path(dataset)
+    if not (
+        dataset.endswith((".parquet", ".pq"))
+        or (path.is_dir() and any(path.glob("*.parquet")))
+    ):
         return _load_dataset_hf(spec, dataset, seed=seed)
-    separated = load_train_eval_from_splits(dataset, column_rename=spec.columns)
-    if separated is not None:
-        return separated
     split = _dataset_train_test_split(spec)
     ds = load_parquet_dataset(dataset, column_rename=spec.columns)
     split_ds = ds.train_test_split(test_size=1.0 - split, seed=_split_seed(seed))

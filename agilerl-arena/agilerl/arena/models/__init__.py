@@ -67,7 +67,6 @@ from agilerl.arena.models.model_info import (
     SUPPORTED_MODEL_INFO,
     ModelArchitecture,
     ModelInfo,
-    ModelStatus,
 )
 from agilerl.arena.models.networks import (
     CnnSpec,
@@ -156,7 +155,6 @@ __all__ = [
     "MlpSpec",
     "ModelArchitecture",
     "ModelInfo",
-    "ModelStatus",
     "MultiAgentAlgorithmSpec",
     "MultiFrequencySelectionSpec",
     "MultiInputSpec",

@@ -1,7 +1,6 @@
 # Copyright 2026 AgileRL
 # SPDX-License-Identifier: Apache-2.0
 
-import math
 import sys
 from unittest.mock import MagicMock, Mock, patch
 
@@ -1648,13 +1647,13 @@ class TestInitLlmOptimizerMeshGroups:
         reference_norm = clip_grad_norm_([reference], max_norm=1.0)
 
         # Act
-        norms, clip_coef = clip_param_groups(
+        pre, post = clip_param_groups(
             opt.param_groups, 1.0, clip_param_group_grad_norm_
         )
 
         # Assert
-        assert math.hypot(*norms) == pytest.approx(reference_norm.item(), rel=1e-6)
-        assert math.hypot(*norms) * clip_coef == pytest.approx(1.0, rel=1e-5)
+        assert pre == pytest.approx(reference_norm.item(), rel=1e-6)
+        assert post == pytest.approx(1.0, rel=1e-5)
         # rtol covers the float64 vs float32 clip coefficient
         assert torch.allclose(net.full_grads(), reference.grad, rtol=1e-6, atol=0)
 
@@ -1665,14 +1664,14 @@ class TestInitLlmOptimizerMeshGroups:
         full = net.set_grads(scale=1e-3)
 
         # Act
-        norms, clip_coef = clip_param_groups(
+        pre, post = clip_param_groups(
             opt.param_groups, 1.0, clip_param_group_grad_norm_
         )
 
         # Assert
         expected = torch.linalg.vector_norm(full).item()
-        assert math.hypot(*norms) == pytest.approx(expected, rel=1e-6)
-        assert clip_coef == 1.0
+        assert pre == pytest.approx(expected, rel=1e-6)
+        assert post == pytest.approx(expected, rel=1e-6)
         assert torch.equal(net.full_grads(), full)
 
     def test_update_lr_reaches_every_mesh_group(self, gloo_process_group):

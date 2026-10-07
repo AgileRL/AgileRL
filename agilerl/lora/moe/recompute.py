@@ -26,18 +26,6 @@ class AdapterSlot:
     row_id: int | None
 
 
-@dataclass(frozen=True)
-class LoraExpertsConfig:
-    """Non-tensor inputs of :class:`LoraExpertsFunction`."""
-
-    act_fn: Callable[[torch.Tensor], torch.Tensor]
-    gated: bool
-    # ``(start_row, taken, counts, start_expert, end_expert)`` per row chunk.
-    plan: list[tuple[int, int, list[int], int, int]]
-    up_slots: tuple[AdapterSlot, ...]
-    down_slots: tuple[AdapterSlot, ...]
-
-
 def _slot_factors(
     factors: Sequence[torch.Tensor],
     slots: Sequence[AdapterSlot],
@@ -75,7 +63,11 @@ def _adapter_delta(
 class LoraExpertsCtx(Protocol):
     saved_tensors: tuple[torch.Tensor, ...]
     needs_input_grad: tuple[bool, ...]
-    config: LoraExpertsConfig
+    act_fn: Callable[[torch.Tensor], torch.Tensor]
+    gated: bool
+    plan: list[tuple[int, int, list[int], int, int]]
+    up_slots: tuple[AdapterSlot, ...]
+    down_slots: tuple[AdapterSlot, ...]
 
     def save_for_backward(self, *tensors: torch.Tensor | None) -> None: ...
 
@@ -98,13 +90,17 @@ class LoraExpertsFunction(torch.autograd.Function):
         row_ids: torch.Tensor | None,
         up_weight: torch.Tensor,
         down_weight: torch.Tensor,
-        config: LoraExpertsConfig,
+        act_fn: Callable[[torch.Tensor], torch.Tensor],
+        gated: bool,
+        plan: list[tuple[int, int, list[int], int, int]],
+        up_slots: tuple[AdapterSlot, ...],
+        down_slots: tuple[AdapterSlot, ...],
         *factors: torch.Tensor,
     ) -> torch.Tensor:
-        up_factors = factors[: 2 * len(config.up_slots)]
-        down_factors = factors[2 * len(config.up_slots) :]
+        up_factors = factors[: 2 * len(up_slots)]
+        down_factors = factors[2 * len(up_slots) :]
         result = torch.zeros_like(hidden_states, dtype=torch.float32)
-        for start_row, taken, counts, start_expert, end_expert in config.plan:
+        for start_row, taken, counts, start_expert, end_expert in plan:
             stop = start_row + taken
             experts = slice(start_expert, end_expert)
             offs = chunk_offsets(group_ends, experts, start_row, stop)
@@ -114,21 +110,17 @@ class LoraExpertsFunction(torch.autograd.Function):
             projected = grouped_linear(rows, up_weight[experts], counts, offs)
             up_delta = _adapter_delta(
                 rows,
-                _slot_factors(
-                    up_factors, config.up_slots, experts, chunk_ids, rows.dtype
-                ),
+                _slot_factors(up_factors, up_slots, experts, chunk_ids, rows.dtype),
                 counts,
                 offs,
             )
             if up_delta is not None:
                 projected.add_(up_delta)
-            intermediate = expert_activation(projected, config.act_fn, config.gated)
+            intermediate = expert_activation(projected, act_fn, gated)
             out = grouped_linear(intermediate, down_weight[experts], counts, offs)
             down_delta = _adapter_delta(
                 intermediate,
-                _slot_factors(
-                    down_factors, config.down_slots, experts, chunk_ids, rows.dtype
-                ),
+                _slot_factors(down_factors, down_slots, experts, chunk_ids, rows.dtype),
                 counts,
                 offs,
             )
@@ -146,7 +138,11 @@ class LoraExpertsFunction(torch.autograd.Function):
             down_weight,
             *factors,
         )
-        ctx.config = config
+        ctx.act_fn = act_fn
+        ctx.gated = gated
+        ctx.plan = plan
+        ctx.up_slots = up_slots
+        ctx.down_slots = down_slots
         return result.to(hidden_states.dtype)
 
     @staticmethod
@@ -165,13 +161,12 @@ class LoraExpertsFunction(torch.autograd.Function):
             down_weight,
             *factors,
         ) = ctx.saved_tensors
-        config = ctx.config
         # Forward inputs ahead of ``*factors``.
-        n_fixed = 8
+        n_fixed = 12
         needs_rows = ctx.needs_input_grad[0]
         needs_weights = ctx.needs_input_grad[2]
         needs_factors = ctx.needs_input_grad[n_fixed:]
-        n_up = 2 * len(config.up_slots)
+        n_up = 2 * len(ctx.up_slots)
         grad_hidden = (
             torch.zeros_like(hidden_states, dtype=torch.float32) if needs_rows else None
         )
@@ -180,7 +175,7 @@ class LoraExpertsFunction(torch.autograd.Function):
             torch.zeros_like(factor, dtype=torch.float32) if needs else None
             for factor, needs in zip(factors, needs_factors, strict=True)
         ]
-        for start_row, taken, counts, start_expert, end_expert in config.plan:
+        for start_row, taken, counts, start_expert, end_expert in ctx.plan:
             stop = start_row + taken
             experts = slice(start_expert, end_expert)
             offs = chunk_offsets(group_ends, experts, start_row, stop)
@@ -202,18 +197,18 @@ class LoraExpertsFunction(torch.autograd.Function):
                 up_delta = _adapter_delta(
                     rows,
                     _slot_factors(
-                        leaves[:n_up], config.up_slots, whole, chunk_ids, rows.dtype
+                        leaves[:n_up], ctx.up_slots, whole, chunk_ids, rows.dtype
                     ),
                     counts,
                     offs,
                 )
                 if up_delta is not None:
                     projected = projected + up_delta
-                intermediate = expert_activation(projected, config.act_fn, config.gated)
+                intermediate = expert_activation(projected, ctx.act_fn, ctx.gated)
                 down_delta = _adapter_delta(
                     intermediate,
                     _slot_factors(
-                        leaves[n_up:], config.down_slots, whole, chunk_ids, rows.dtype
+                        leaves[n_up:], ctx.down_slots, whole, chunk_ids, rows.dtype
                     ),
                     counts,
                     offs,

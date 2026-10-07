@@ -576,16 +576,3 @@ class TestImportFallbacks:
         finally:
             monkeypatch.undo()
             importlib.reload(liger_nemotron_h)
-
-
-class TestLigerBackbone:
-    def test_returns_root_when_layers_live_on_the_root(self):
-        root = SimpleNamespace(layers=[object()], base_model_prefix="model")
-
-        assert liger_nemotron_h._liger_backbone(root) is root
-
-    def test_falls_back_to_the_model_prefix_when_layers_are_missing(self):
-        inner = object()
-        model = SimpleNamespace(base_model_prefix="model", model=inner)
-
-        assert liger_nemotron_h._liger_backbone(model) is inner

@@ -97,7 +97,8 @@ if HAS_LLM_DEPENDENCIES:
     )
     from transformers.modeling_utils import PreTrainedModel
 
-    from agilerl.lora.moe import grouped_mm_supported
+    from agilerl.lora.moe import grouped_mm_supported, moe_expert_target_parameters
+    from agilerl.lora.moe.layouts import is_packed_experts_module
     from agilerl.utils.ppo_value_head import AutoModelForCausalLMWithValueHead
 else:
     # Sentinels for missing optional LLM dependencies. All uses are gated on
@@ -112,34 +113,23 @@ else:
     safe_load_file: Any = None
     save_file: Any = None
 
-# Padding of the rows an LLM RL learn trains, filler rows of segmented batches included.
-ROW_PADDING_METRIC_NAMES = (
-    "padding_frac_before_packing",  # pad share of the padded training rows
-    "padding_frac_after_packing",  # pad share of the gradient forward's tokens
-    "train_rows_padded",  # rows the update runs per epoch, filler rows included
-    "filler_token_frac",  # filler-row share of the gradient forward's tokens
-)
-
 # Every LLM RL learn (GRPO/PPO/REINFORCE) reports these.
 LLM_RL_COMMON_METRIC_NAMES = (
     "loss",  # update-averaged objective
     "entropy",  # policy entropy proxy (mean negative logprob)
     "completion_length",  # mean token ids per trajectory
-    *ROW_PADDING_METRIC_NAMES,
 )
 
-# Timed phases of every LLM learn, reported as ``learn_phase_<phase>_s``.
-LEARN_PHASES = (
+# Timed phases of one GRPO learn, reported as ``learn_phase_<phase>_s``.
+GRPO_LEARN_PHASES = (
     "prepare",  # batch prep, advantages and batch stats
-    "no_grad_forward",  # no-grad old / reference log-prob and value forward
+    "old_logprobs",  # no-grad old / reference log-prob forward
     "forward",  # gradient forward and loss
     "backward",  # loss.backward, including FSDP reduce-scatter
     "grad_sync",  # explicit grad all-reduces at the optimizer step
     "optim",  # grad clip, optimizer step and zero_grad
     "other",  # host reads, profiler export and the update summary
 )
-
-LEARN_PHASE_METRIC_NAMES = tuple(f"learn_phase_{phase}_s" for phase in LEARN_PHASES)
 
 # GRPO-only per-learn diagnostics: update-averaged KL and clip fraction plus
 # advantage stats, update-loop policy diagnostics, and averaged grad norms.
@@ -150,6 +140,10 @@ GRPO_METRIC_NAMES = (
     "adv_min",  # min post-processed advantage
     "adv_max",  # max post-processed advantage
     "adv_zero_frac",  # samples with no contrastive signal
+    "padding_frac_before_packing",  # pad share of the padded (B, T) batch
+    "padding_frac_after_packing",  # pad share of the gradient forward's tokens
+    "train_rows_padded",  # rows the update runs per epoch, filler rows included
+    "filler_token_frac",  # filler-row share of the gradient forward's tokens
     "kl_ref",  # K3 vs reference over the update loop
     "kl_old",  # K3 vs rollout policy over the update loop
     "is_ratio_mean",  # mean pooled importance ratio
@@ -163,6 +157,7 @@ GRPO_METRIC_NAMES = (
     "old_logprobs_trainer_rows",  # rows whose old log-probs the trainer scored
     "grad_norm_pre",  # global grad norm before clipping
     "grad_norm_post",  # global grad norm after clipping
+    *(f"learn_phase_{phase}_s" for phase in GRPO_LEARN_PHASES),
 )
 
 # PPO-only per-learn diagnostics.
@@ -171,10 +166,6 @@ PPO_METRIC_NAMES = (
     "vf_loss",  # clipped value loss
     "kl",  # update-averaged K3 vs reference
     "clipfrac",  # binding-clip fraction
-    "grad_norm_pre",  # actor LoRA grad norm before clipping
-    "grad_norm_post",  # actor LoRA grad norm after clipping
-    "critic_grad_norm_pre",  # critic LoRA + value head grad norm before clipping
-    "critic_grad_norm_post",  # critic LoRA + value head grad norm after clipping
 )
 
 # REINFORCE-only per-learn diagnostics.
@@ -1159,6 +1150,72 @@ def _zero_lora_dropout_for_target_parameters(lora_config: LoraConfig) -> LoraCon
     return _clone_lora_config(lora_config, lora_dropout=0.0)
 
 
+def _drop_moe_router_lora_targets(
+    model: nn.Module, lora_config: LoraConfig
+) -> LoraConfig:
+    """Keep LoRA off MoE routers; ``all-linear`` becomes explicit linear and expert targets.
+
+    PEFT resolves ``all-linear`` on a packed-expert model to include the router
+    weight, which has no per-token adapter masks for fused multi-adapter routing.
+    """
+    routers = {
+        f"{name.rpartition('.')[0]}.{leaf}".lstrip(".")
+        for name, module in model.named_modules()
+        if is_packed_experts_module(module)
+        for leaf in ("gate", "router")
+    }
+    if not routers:
+        return lora_config
+    router_leaves = {name.rsplit(".", 1)[-1] for name in routers}
+
+    targets = lora_config.target_modules
+    if isinstance(targets, str) and targets.lower() == "all-linear":
+        get_output_embeddings = getattr(model, "get_output_embeddings", None)
+        output = get_output_embeddings() if callable(get_output_embeddings) else None
+        targets = sorted(
+            {
+                name.rsplit(".", 1)[-1]
+                for name, module in model.named_modules()
+                if isinstance(module, nn.Linear)
+                and module is not output
+                and name not in routers
+            }
+            - router_leaves
+        )
+        parameters = sorted(
+            set(lora_config.target_parameters or [])
+            | set(moe_expert_target_parameters(model))
+        )
+    else:
+        if targets is not None and not isinstance(targets, str):
+            kept = [t for t in targets if t.rsplit(".", 1)[-1] not in router_leaves]
+            if len(kept) != len(targets):
+                targets = kept
+        parameters = lora_config.target_parameters
+    if parameters:
+        kept_parameters = [
+            p
+            for p in parameters
+            if str(p).rpartition(".")[0].rsplit(".", 1)[-1] not in router_leaves
+        ]
+        if len(kept_parameters) != len(parameters):
+            parameters = kept_parameters or None
+
+    if (
+        targets == lora_config.target_modules
+        and parameters == lora_config.target_parameters
+    ):
+        return lora_config
+    logger.info(
+        "LoRA kept off MoE routers: target_modules=%s target_parameters=%s",
+        targets,
+        parameters,
+    )
+    return _clone_lora_config(
+        lora_config, target_modules=targets, target_parameters=parameters
+    )
+
+
 def _clone_lora_config_with_targets(
     lora_config: LoraConfig, target_modules: str | list[str]
 ) -> LoraConfig:
@@ -1294,7 +1351,10 @@ def adapt_lora_config_for_model(
 
     Packed-expert ``target_parameters`` force ``lora_dropout=0``; PEFT cannot
     factor dropout out of the parameter-level low-rank product.
+
+    On packed-expert models the MoE router is never a LoRA target.
     """
+    lora_config = _drop_moe_router_lora_targets(model, lora_config)
     lora_config = _zero_lora_dropout_for_target_parameters(lora_config)
     lora_config = _adapt_mamba_lora_config(model, lora_config)
     raw_targets = lora_config.target_modules

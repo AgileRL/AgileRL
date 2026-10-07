@@ -27,7 +27,6 @@ from agilerl.llm_envs.observation import (
     IMAGE_PLACEHOLDER,
     IMAGE_USER_CONTENT_PREFIX,
     QUESTION_AFTER_CONTEXT,
-    ImageProcessorCall,
     encode_image_training_inputs,
     observation_role,
     observation_text_and_image,
@@ -299,8 +298,6 @@ class RolloutHarness:
         )
         self._multimodal_turn: dict[str, Any] | None = None
         self._episode_pixel_values: torch.Tensor | None = None
-        # One entry per processor call whose pixel rows the episode kept, in row order.
-        self._episode_image_calls: list[ImageProcessorCall] = []
 
     @classmethod
     def local(
@@ -525,7 +522,10 @@ class RolloutHarness:
         prefix, suffix = parts
         # A sampled end-of-turn token already closes the transcript.
         if last_token_id in self._special_ids():
-            end_text = self._decode([last_token_id], skip_special_tokens=False)
+            end_text = self.tokenizer.decode([last_token_id], skip_special_tokens=False)
+            if not isinstance(end_text, str):
+                msg = "decode() of one sequence returns str"
+                raise TypeError(msg)
             prefix = prefix.removeprefix(end_text)
         return prefix + content + suffix
 
@@ -560,21 +560,6 @@ class RolloutHarness:
         return torch.tensor(
             [self.tokenizer.encode(text, add_special_tokens=False)], dtype=torch.long
         )
-
-    def _decode(self, ids: list[int], *, skip_special_tokens: bool) -> str:
-        """Text of one id sequence."""
-        text = self.tokenizer.decode(ids, skip_special_tokens=skip_special_tokens)
-        if not isinstance(text, str):
-            msg = "decode() of one sequence returns str"
-            raise TypeError(msg)
-        return text
-
-    def _require_vision_processor(self) -> Callable[..., Mapping[str, Any]]:
-        """The vision processor; raises when the harness has none."""
-        if self._vision_processor is None:
-            msg = "Image observations require vision_processor on RolloutHarness"
-            raise RuntimeError(msg)
-        return self._vision_processor
 
     def _prompt_image_payload(self) -> object | list[object]:
         """``prompt['image']`` value for the current episode images."""
@@ -846,22 +831,20 @@ class RolloutHarness:
         self._adopt_system_prompt(info)
         self._multimodal_turn = None
         self._episode_pixel_values = None
-        self._episode_image_calls = []
         self._episode_images = [image] if image is not None else []
         if image is not None:
-            processor = self._require_vision_processor()
+            if self._vision_processor is None:
+                msg = "Image observations require vision_processor on RolloutHarness"
+                raise RuntimeError(msg)
             prompt_str = self._chat_prompt_string(obs_text)
             train_ids, pixel_values = encode_image_training_inputs(
                 text=prompt_str,
                 image=image,
-                processor=processor,
+                processor=self._vision_processor,
             )
             prompt_token_len = int(train_ids.shape[-1])
             self.full_ids = None
             self._episode_pixel_values = pixel_values
-            self._episode_image_calls.append(
-                ImageProcessorCall.from_inputs(text=prompt_str, image=image)
-            )
             self._multimodal_turn = {
                 "prompt": prompt_str,
                 "image": image,
@@ -912,46 +895,70 @@ class RolloutHarness:
             raise RuntimeError(msg)
         prompt_len = self._last_full_prompt_token_len
         sequence = token_ids if token_ids.dim() > 1 else token_ids.unsqueeze(0)
-        turn = self._multimodal_turn
-        if turn is not None:
+        if self.full_ids is None:
             if self._sampled_ids is not None:
                 self._require_transcript_continues(self._sampled_ids, sequence)
             self._sampled_ids = sequence.detach()
             gen_ids = sequence[0, prompt_len:].detach()
             self._reject_image_placeholder_ids(gen_ids)
-            gen_text = self._decode(gen_ids.tolist(), skip_special_tokens=True)
+            gen_text = self.tokenizer.decode(
+                gen_ids.tolist(),
+                skip_special_tokens=True,
+            )
+            if not isinstance(gen_text, str):
+                msg = "decode() of one sequence returns str"
+                raise TypeError(msg)
             if sampling_logps is not None:
                 self.sampling_logps.append(sampling_logps)
-            sampled_text = self._decode(gen_ids.tolist(), skip_special_tokens=False)
-            engine_ids = turn["prompt_token_ids"]
-            self._transcript = (
-                turn["prompt"] + sampled_text,
-                torch.cat(
-                    [engine_ids, gen_ids.unsqueeze(0).to(engine_ids.device)], dim=1
-                ),
-            )
+            processor_ids: torch.Tensor | None = None
+            turn = self._multimodal_turn
+            if turn is not None:
+                raw_ids = turn.get("input_ids")
+                if isinstance(raw_ids, torch.Tensor):
+                    processor_ids = raw_ids.detach()
+                    if processor_ids.dim() == 1:
+                        processor_ids = processor_ids.unsqueeze(0)
+                sampled_text = self.tokenizer.decode(
+                    gen_ids.tolist(),
+                    skip_special_tokens=False,
+                )
+                if not isinstance(sampled_text, str):
+                    msg = "decode() of one sequence returns str"
+                    raise TypeError(msg)
+                engine_ids = turn["prompt_token_ids"]
+                self._transcript = (
+                    turn["prompt"] + sampled_text,
+                    torch.cat(
+                        [engine_ids, gen_ids.unsqueeze(0).to(engine_ids.device)], dim=1
+                    ),
+                )
             self._multimodal_turn = None
             # pixel_values was built from the processor ids. The image-token
             # count in the training sequence has to match that tensor.
-            processor_ids = turn["input_ids"].detach()
-            self.full_ids = torch.cat(
-                [processor_ids.to(gen_ids.device), gen_ids.unsqueeze(0)],
-                dim=1,
-            )
+            if processor_ids is not None:
+                self.full_ids = torch.cat(
+                    [processor_ids.to(gen_ids.device), gen_ids.unsqueeze(0)],
+                    dim=1,
+                )
+                train_prompt_len = int(processor_ids.shape[1])
+            else:
+                self.full_ids = sequence.detach()
+                train_prompt_len = prompt_len
             gen_end = int(self.full_ids.shape[1])
-            self.turn_boundaries.append(
-                (int(processor_ids.shape[1]), gen_end, self._turn_idx)
-            )
+            self.turn_boundaries.append((train_prompt_len, gen_end, self._turn_idx))
             self._record_action(gen_text)
             return gen_text
         full_ids = self.full_ids
-        if full_ids is None:
-            msg = "step() requires a prior reset() or step() that built a prompt"
-            raise RuntimeError(msg)
         # Only the new suffix crosses devices; the prefix is byte-identical to ``full_ids``.
         gen_ids = sequence[0, prompt_len:].detach().to(full_ids.device)
         self._reject_image_placeholder_ids(gen_ids)
-        gen_text = self._decode(gen_ids.tolist(), skip_special_tokens=True)
+        gen_text = self.tokenizer.decode(
+            gen_ids.tolist(),
+            skip_special_tokens=True,
+        )
+        if not isinstance(gen_text, str):
+            msg = "decode() of one sequence returns str"
+            raise TypeError(msg)
         if sampling_logps is not None:
             self.sampling_logps.append(sampling_logps)
         self.full_ids = torch.cat([full_ids, gen_ids.unsqueeze(0)], dim=1)
@@ -1042,12 +1049,19 @@ class RolloutHarness:
                 raise RuntimeError(msg)
             feedback_text = next_obs
             if next_image is not None:
-                processor = self._require_vision_processor()
+                if self._vision_processor is None:
+                    msg = (
+                        "Image observations require vision_processor on RolloutHarness"
+                    )
+                    raise RuntimeError(msg)
                 if self._transcript is None:
                     # Text-only so far: the ids hold no expanded image tokens.
-                    transcript_text = self._decode(
+                    transcript_text = self.tokenizer.decode(
                         full_ids[0].tolist(), skip_special_tokens=False
                     )
+                    if not isinstance(transcript_text, str):
+                        msg = "decode() of one sequence returns str"
+                        raise TypeError(msg)
                     transcript_engine_ids = full_ids
                 else:
                     transcript_text, transcript_engine_ids = self._transcript
@@ -1066,7 +1080,7 @@ class RolloutHarness:
                     turn_ids, turn_pixel_values = encode_image_training_inputs(
                         text=turn_text,
                         image=next_image,
-                        processor=processor,
+                        processor=self._vision_processor,
                     )
                     train_ids = torch.cat(
                         [full_ids, turn_ids.to(full_ids.device)], dim=1
@@ -1113,11 +1127,6 @@ class RolloutHarness:
                                 dim=0,
                             )
                         self._episode_pixel_values = turn_pixel_values
-                        self._episode_image_calls.append(
-                            ImageProcessorCall.from_inputs(
-                                text=turn_text, image=next_image
-                            )
-                        )
                         self._multimodal_turn = {
                             "prompt": transcript_text + turn_text,
                             "image": self._prompt_image_payload(),
@@ -1193,11 +1202,14 @@ class RolloutHarness:
         if image is None:
             prompt_ids = self._tokenize_initial_prompt(restart_text)
         else:
+            if self._vision_processor is None:
+                msg = "Image observations require vision_processor on RolloutHarness"
+                raise RuntimeError(msg)
             prompt_str = self._chat_prompt_string(restart_text)
             prompt_ids, pixel_values = encode_image_training_inputs(
                 text=prompt_str,
                 image=image,
-                processor=self._require_vision_processor(),
+                processor=self._vision_processor,
             )
             multimodal_turn = {
                 "prompt": prompt_str,
@@ -1218,12 +1230,6 @@ class RolloutHarness:
         self._sampled_ids = None
         self._episode_images = [image] if image is not None else []
         self._episode_pixel_values = pixel_values
-        if multimodal_turn is not None:
-            self._episode_image_calls.append(
-                ImageProcessorCall.from_inputs(
-                    text=multimodal_turn["prompt"], image=image
-                )
-            )
         self._multimodal_turn = multimodal_turn
         self.full_ids = prompt_ids if multimodal_turn is None else None
         return True
@@ -1240,15 +1246,6 @@ class RolloutHarness:
         """
         gen_text = self._step_prepare(token_ids, sampling_logps)
         return self._step_apply(self._step_env(gen_text))
-
-    def episode_image_calls(self) -> list[ImageProcessorCall]:
-        """Processor calls behind the episode's ``pixel_values``, in row order.
-
-        Rerunning :func:`encode_image_training_inputs` on each call and
-        concatenating the pixel rows rebuilds the ``pixel_values`` that
-        :meth:`get_episode_data` returns.
-        """
-        return list(self._episode_image_calls)
 
     def get_episode_data(
         self,

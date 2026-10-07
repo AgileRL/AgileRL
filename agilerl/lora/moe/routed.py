@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
 from typing import Protocol
 
 import torch
@@ -32,30 +31,12 @@ from agilerl.lora.moe.layouts import (
     routed_experts_act_fn,
     routed_projection_names,
 )
-from agilerl.lora.moe.recompute import (
-    AdapterSlot,
-    LoraExpertsConfig,
-    LoraExpertsFunction,
-)
+from agilerl.lora.moe.recompute import AdapterSlot, LoraExpertsFunction
 
 # Widest [rows, features] activation of one routed-expert row chunk. A chunk's
 # backward holds about a dozen buffers that size (peak near 0.8 GiB). Each
 # chunk adds a fixed set of small kernel launches that bound the step on the host.
 ROUTED_EXPERT_CHUNK_BYTES = 64 * 1024 * 1024
-
-
-@dataclass(frozen=True)
-class RoutedRows:
-    """Expert-sorted ``tokens * top_k`` rows: where each comes from and how it is weighted."""
-
-    # Rows per expert.
-    counts: torch.Tensor
-    # Source token of each row.
-    token_idx: torch.Tensor
-    # ``[rows, 1]`` router weight of each row.
-    routed_weights: torch.Tensor
-    # Adapter id of each row under mixed routing, else ``None``.
-    row_ids: torch.Tensor | None
 
 
 def _add_expert_loras(
@@ -134,9 +115,12 @@ def _scatter_routed_expert_chunks(
     down_weight: torch.Tensor,
     act_fn: Callable[[torch.Tensor], torch.Tensor],
     gated: bool,
-    routing: RoutedRows,
+    counts: torch.Tensor,
+    token_idx: torch.Tensor,
+    routed_weights: torch.Tensor,
     up_loras: Sequence[ExpertLora],
     down_loras: Sequence[ExpertLora],
+    row_ids: torch.Tensor | None,
 ) -> torch.Tensor:
     """Run the routed expert forward in row chunks and scatter into the layer output.
 
@@ -147,12 +131,12 @@ def _scatter_routed_expert_chunks(
     num_experts = up_weight.shape[0]
     row_bytes = max(up_weight.shape[1], down_weight.shape[1]) * x.element_size()
     max_rows = max(1, ROUTED_EXPERT_CHUNK_BYTES // max(row_bytes, 1))
-    plan = list(iter_expert_row_chunks(routing.counts, max_rows))
+    plan = list(iter_expert_row_chunks(counts, max_rows))
     sizes = [taken for _, taken, _, _, _ in plan]
     # Chunk offsets stay on device so the loop issues no host sync.
-    group_ends = torch.cumsum(routing.counts, dim=0)
+    group_ends = torch.cumsum(counts, dim=0)
     # Split once so backward concatenates the chunk grads into one buffer.
-    chunks = zip(plan, x.split(sizes), routing.routed_weights.split(sizes), strict=True)
+    chunks = zip(plan, x.split(sizes), routed_weights.split(sizes), strict=True)
     for (
         start_row,
         taken,
@@ -163,7 +147,7 @@ def _scatter_routed_expert_chunks(
         stop = start_row + taken
         experts = slice(start_expert, end_expert)
         offs = chunk_offsets(group_ends, experts, start_row, stop)
-        chunk_ids = None if routing.row_ids is None else routing.row_ids[start_row:stop]
+        chunk_ids = None if row_ids is None else row_ids[start_row:stop]
         projected = grouped_linear(rows, up_weight[experts], local_counts, offs)
         _add_expert_loras(
             projected,
@@ -192,7 +176,7 @@ def _scatter_routed_expert_chunks(
         down.mul_(weights)
         if down.dtype != result.dtype:
             down = down.to(dtype=result.dtype)
-        result = ScatterRows.apply(result, routing.token_idx[start_row:stop], down)
+        result = ScatterRows.apply(result, token_idx[start_row:stop], down)
     return result
 
 
@@ -202,9 +186,12 @@ def _recompute_routed_experts(
     down_weight: torch.Tensor,
     act_fn: Callable[[torch.Tensor], torch.Tensor],
     gated: bool,
-    routing: RoutedRows,
+    counts: torch.Tensor,
+    token_idx: torch.Tensor,
+    routed_weights: torch.Tensor,
     up_loras: Sequence[ExpertLora],
     down_loras: Sequence[ExpertLora],
+    row_ids: torch.Tensor | None,
 ) -> torch.Tensor:
     """Run :class:`LoraExpertsFunction` over the routed rows with stacked LoRA factors."""
     if isinstance(up_weight, DTensor):
@@ -215,10 +202,22 @@ def _recompute_routed_experts(
         max(up_weight.shape[1], down_weight.shape[1]) * hidden_states.element_size()
     )
     max_rows = max(1, ROUTED_EXPERT_CHUNK_BYTES // row_bytes)
-    config = LoraExpertsConfig(
+    plan = list(iter_expert_row_chunks(counts, max_rows))
+    factors = []
+    for lora in (*up_loras, *down_loras):
+        assert lora.stacked is not None
+        factors.extend(lora.stacked)
+    return LoraExpertsFunction.apply(
+        hidden_states,
+        token_idx,
+        routed_weights,
+        torch.cumsum(counts, dim=0),
+        row_ids,
+        up_weight,
+        down_weight,
         act_fn,
         gated,
-        list(iter_expert_row_chunks(routing.counts, max_rows)),
+        plan,
         tuple(
             AdapterSlot(lora.wrapper.scaling[lora.adapter], lora.row_id)
             for lora in up_loras
@@ -227,20 +226,6 @@ def _recompute_routed_experts(
             AdapterSlot(lora.wrapper.scaling[lora.adapter], lora.row_id)
             for lora in down_loras
         ),
-    )
-    factors = []
-    for lora in (*up_loras, *down_loras):
-        assert lora.stacked is not None
-        factors.extend(lora.stacked)
-    return LoraExpertsFunction.apply(
-        hidden_states,
-        routing.token_idx,
-        routing.routed_weights,
-        torch.cumsum(routing.counts, dim=0),
-        routing.row_ids,
-        up_weight,
-        down_weight,
-        config,
         *factors,
     )
 
@@ -320,7 +305,6 @@ def routed_experts_local_forward(
 
     up_loras = expert_loras(up_name)
     down_loras = expert_loras("down_proj")
-    routed_rows = RoutedRows(counts, token_idx, routed_weights, row_ids)
     if (
         recompute
         and not up_weight.requires_grad
@@ -333,9 +317,12 @@ def routed_experts_local_forward(
             down_weight,
             act_fn,
             gated,
-            routed_rows,
+            counts,
+            token_idx,
+            routed_weights,
             up_loras,
             down_loras,
+            row_ids,
         )
     x = hidden_states if already_grouped else hidden_states[token_idx]
     return _scatter_routed_expert_chunks(
@@ -345,7 +332,10 @@ def routed_experts_local_forward(
         down_weight,
         act_fn,
         gated,
-        routed_rows,
+        counts,
+        token_idx,
+        routed_weights,
         up_loras,
         down_loras,
+        row_ids,
     )

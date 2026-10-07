@@ -269,18 +269,12 @@
     "lora_info": {
       "dense": [
         {
-          "kind": "module",
-          "scope": "vision_model.encoder.layer.attention.output"
+          "kind": "module"
         }
       ],
       "down_proj": [
         {
-          "kind": "module",
-          "scope": "language_model.backbone.layers.mixer.shared_experts",
-          "type": "Linear",
-          "in_features": 5376,
-          "out_features": 4096,
-          "count": 40
+          "kind": "module"
         }
       ],
       "fc1": [
@@ -295,124 +289,72 @@
       ],
       "in_proj": [
         {
-          "kind": "module",
-          "scope": "language_model.backbone.layers.mixer",
-          "type": "Linear",
-          "in_features": 4096,
-          "out_features": 18560,
-          "count": 40
+          "kind": "module"
         }
       ],
       "k_proj": [
         {
-          "kind": "module",
-          "scope": "language_model.backbone.layers.mixer",
-          "type": "Linear",
-          "in_features": 4096,
-          "out_features": 256,
-          "count": 8
+          "kind": "module"
         }
       ],
       "key": [
         {
-          "kind": "module",
-          "scope": "vision_model.encoder.layer.attention.attention"
+          "kind": "module"
         }
       ],
       "linear1": [
         {
-          "kind": "module",
-          "scope": "vision_projector.mlp1"
+          "kind": "module"
         }
       ],
       "linear2": [
         {
-          "kind": "module",
-          "scope": "vision_projector.mlp1"
+          "kind": "module"
         }
       ],
       "mixer.experts.down_proj": [
         {
-          "kind": "parameter",
-          "scope": "language_model.backbone.layers.mixer.experts",
-          "type": "PackedParameter",
-          "num_experts": 512,
-          "in_features": 1024,
-          "out_features": 2688,
-          "count": 40
+          "kind": "parameter"
         }
       ],
       "mixer.experts.up_proj": [
         {
-          "kind": "parameter",
-          "scope": "language_model.backbone.layers.mixer.experts",
-          "type": "PackedParameter",
-          "num_experts": 512,
-          "in_features": 2688,
-          "out_features": 1024,
-          "count": 40
+          "kind": "parameter"
         }
       ],
       "o_proj": [
         {
-          "kind": "module",
-          "scope": "language_model.backbone.layers.mixer",
-          "type": "Linear",
-          "in_features": 4096,
-          "out_features": 4096,
-          "count": 8
+          "kind": "module"
         }
       ],
       "out_proj": [
         {
-          "kind": "module",
-          "scope": "language_model.backbone.layers.mixer",
-          "type": "Linear",
-          "in_features": 8192,
-          "out_features": 4096,
-          "count": 40
+          "kind": "module"
         }
       ],
       "q_proj": [
         {
-          "kind": "module",
-          "scope": "language_model.backbone.layers.mixer",
-          "type": "Linear",
-          "in_features": 4096,
-          "out_features": 4096,
-          "count": 8
+          "kind": "module"
         }
       ],
       "query": [
         {
-          "kind": "module",
-          "scope": "vision_model.encoder.layer.attention.attention"
+          "kind": "module"
         }
       ],
       "up_proj": [
         {
-          "kind": "module",
-          "scope": "language_model.backbone.layers.mixer.shared_experts",
-          "type": "Linear",
-          "in_features": 4096,
-          "out_features": 5376,
-          "count": 40
+          "kind": "module"
         }
       ],
       "v_proj": [
         {
-          "kind": "module",
-          "scope": "language_model.backbone.layers.mixer",
-          "type": "Linear",
-          "in_features": 4096,
-          "out_features": 256,
-          "count": 8
+          "kind": "module"
         }
       ],
       "value": [
         {
-          "kind": "module",
-          "scope": "vision_model.encoder.layer.attention.attention"
+          "kind": "module"
         }
       ]
     }

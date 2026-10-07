@@ -9,7 +9,6 @@ import base64
 import io
 import warnings
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
@@ -25,7 +24,6 @@ __all__ = [
     "IMAGE_USER_CONTENT_PREFIX",
     "OBSERVATION_ROLES",
     "QUESTION_AFTER_CONTEXT",
-    "ImageProcessorCall",
     "encode_image_training_inputs",
     "observation_role",
     "observation_text_and_image",
@@ -128,22 +126,6 @@ def encode_image_training_inputs(
         msg = "processor must return torch input_ids and pixel_values tensors"
         raise TypeError(msg)
     return input_ids, pixel_values
-
-
-@dataclass(frozen=True)
-class ImageProcessorCall:
-    """Inputs of one :func:`encode_image_training_inputs` call whose pixels an episode kept."""
-
-    text: str
-    images: tuple[object, ...]
-
-    @classmethod
-    def from_inputs(
-        cls, *, text: str, image: object | list[object]
-    ) -> ImageProcessorCall:
-        """Record the ``text`` and ``image`` arguments of one processor call."""
-        images = tuple(image) if isinstance(image, list) else (image,)
-        return cls(text=text, images=images)
 
 
 def process_observation(obs: object, observation_field: str | None = None) -> str:

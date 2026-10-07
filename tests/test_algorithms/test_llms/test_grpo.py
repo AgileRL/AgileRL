@@ -39,7 +39,6 @@ from agilerl.algorithms.core.base import (
 from agilerl.algorithms.grpo import HAS_LIGER_KERNEL
 from agilerl.distributed import CPUOffloadOptimizer, FSDPConfig, resolve_device
 from agilerl.utils.algo_utils import CosineLRScheduleConfig, VLLMConfig, clone_llm
-from agilerl.utils.llm_utils import LEARN_PHASE_METRIC_NAMES
 from tests import TINY_LLM_FIXTURE_PATH
 from tests.helpers.rollout_doubles import FakeEnvClient, RolloutHarnessDouble
 from tests.test_algorithms.test_llms.llm_helpers import create_module
@@ -480,7 +479,6 @@ class _GrpoLossStub:
         self.turn_advantage_trajectory_fallback = turn_advantage_trajectory_fallback
         self.device = device
         self._window_action_tokens = None
-        self._segment_accumulation_steps = None
 
     _apply_kl_advantage_shaping = GRPO._apply_kl_advantage_shaping
     _reduce_masked_loss = GRPO._reduce_masked_loss
@@ -1621,7 +1619,7 @@ class TestGRPOLearnRewardsShape:
                     torch.tensor(0.0),
                 ),
             ),
-            patch.object(grpo, "_backward_pass", return_value=None),
+            patch.object(grpo, "_backward_pass", return_value=(None, None)),
         ):
             grpo.learn((completion_ids, action_masks, rewards))
 
@@ -1650,7 +1648,7 @@ class TestGRPOLigerLossDispatch:
         ),
         [
             ("cispo", "cispo", "token", "clip_coef_max"),
-            ("gspo", "grpo", "trajectory", "clip_coef_max - 1.0"),
+            ("gspo", "grpo", "sequence", "clip_coef_max - 1.0"),
         ],
     )
     def test_liger_loss_dispatches_per_loss_type(
@@ -1679,7 +1677,6 @@ class TestGRPOLigerLossDispatch:
                 lambda self, name: nullcontext(),
             ),
         ):
-            mock_fn.forward = _DummyLigerFn.forward
             mock_fn.apply.return_value = (fake_loss, fake_aux)
             # With ``lm_head`` identity-patched, ``actor_output.logits`` *is*
             # the hidden-state tensor — return a stub whose ``.logits``
@@ -1776,7 +1773,6 @@ class TestGRPOLigerLossDispatch:
                 LLMAlgorithm, "select_adapter", lambda self, name: nullcontext()
             ),
         ):
-            mock_fn.forward = _DummyLigerFn.forward
             mock_fn.apply.return_value = (fake_loss, fake_aux)
             fake_output = MagicMock()
             fake_output.logits = torch.randn(1, 2, 8, requires_grad=True)
@@ -1902,57 +1898,18 @@ class _DummyLigerFn:
     summed over masked-in (action) tokens and ignores everything else. The real
     kernel consumes ``hidden[:, :n_act]`` for the next-token shift, so we slice
     the hidden seq dim down to the mask's action length before reducing.
-    ``forward`` carries liger's signature, which ``GRPO`` reads to place
-    ``num_items_in_batch``.
     """
 
-    @classmethod
-    def forward(
-        cls,
-        ctx,
-        _input,
-        weight,
-        selected_token_ids,
-        attention_mask,
-        advantages,
-        bias=None,
-        ref_per_token_logps=None,
-        old_per_token_logps=None,
-        ref_input=None,
-        ref_weight=None,
-        ref_bias=None,
-        beta=0.04,
-        epsilon_low=0.2,
-        epsilon_high=0.2,
-        loss_type="dapo",
-        max_completion_length=None,
-        importance_sampling_level="token",
-        sapo_temperature_pos=1.0,
-        sapo_temperature_neg=1.05,
-        temperature=1.0,
-        compiled=True,
-        use_ref_model=True,
-        chunk_size=1,
-        vllm_is_ratio=None,
-        delta=None,
-        use_bias_correction_kl=False,
-        vespo_k_pos=2.0,
-        vespo_lambda_pos=3.0,
-        vespo_k_neg=3.0,
-        vespo_lambda_neg=2.0,
-        num_items_in_batch=None,
-    ):
-        h = _input
-        mask = attention_mask
+    @staticmethod
+    def apply(*args):
+        policy_hidden = args[0]
+        mask = args[3]
+        h = policy_hidden
         if h.dim() == 3 and h.shape[1] != mask.shape[1]:
             h = h[:, : mask.shape[1], :]
         per_token = h.reshape(*mask.shape, -1).sum(-1)
         loss = (per_token * mask.to(per_token.dtype)).sum()
         return loss, [torch.zeros((), dtype=per_token.dtype)]
-
-    @classmethod
-    def apply(cls, *args):
-        return cls.forward(None, *args)
 
 
 class TestGRPOLigerSequencePacking:
@@ -3413,7 +3370,7 @@ class TestGRPOLearn:
                     torch.tensor(0.0),
                 ),
             ) as mock_grpo_loss,
-            patch.object(grpo, "_backward_pass", return_value=None),
+            patch.object(grpo, "_backward_pass", return_value=(None, None)),
         ):
             metrics = grpo.learn((completion_ids, action_masks, rewards))
         processed_advantages = mock_grpo_loss.call_args.args[5]
@@ -3455,7 +3412,7 @@ class TestGRPOLearn:
                     torch.tensor(0.0),
                 ),
             ),
-            patch.object(grpo, "_backward_pass", return_value=None),
+            patch.object(grpo, "_backward_pass", return_value=(None, None)),
         ):
             grpo.learn((completion_ids, action_masks, rewards))
         # Two of the four samples survive the filter, each with 9 action tokens.
@@ -3495,7 +3452,7 @@ class TestGRPOLearn:
                     torch.tensor(0.0),
                 ),
             ) as mock_loss,
-            patch.object(grpo, "_backward_pass", return_value=None),
+            patch.object(grpo, "_backward_pass", return_value=(None, None)),
             patch.object(grpo, "_record_window_action_tokens", side_effect=record_spy),
         ):
             grpo.learn((completion_ids, action_masks, rewards))
@@ -3532,7 +3489,7 @@ class TestGRPOLearn:
                     torch.tensor(0.0),
                 ),
             ),
-            patch.object(grpo, "_backward_pass", return_value=None),
+            patch.object(grpo, "_backward_pass", return_value=(None, None)),
             pytest.warns(UserWarning, match="whole optimizer steps"),
         ):
             grpo.learn((completion_ids, action_masks, rewards))
@@ -3607,7 +3564,9 @@ class TestGRPOLearn:
                 return_value=torch.zeros(4, 1, dtype=torch.float32),
             ),
             patch.object(grpo, "_loss", side_effect=spy_loss) as mock_loss,
-            patch.object(grpo, "_backward_pass", return_value=None) as mock_backward,
+            patch.object(
+                grpo, "_backward_pass", return_value=(None, None)
+            ) as mock_backward,
         ):
             warnings.filterwarnings(
                 "error", message="All samples were filtered by advantage threshold"
@@ -3634,8 +3593,9 @@ class TestGRPOLearn:
         ]
         backward_counts = []
 
-        def _backward(loss: torch.Tensor, _accumulation_steps: int | None) -> None:
+        def _backward(loss: torch.Tensor) -> tuple[None, None]:
             loss.backward()
+            return None, None
 
         for rank, rewards in zip(
             ranks,
@@ -3709,7 +3669,7 @@ class TestGRPOLearn:
         with (
             patch("agilerl.algorithms.grpo.get_world_size", return_value=2),
             patch("agilerl.algorithms.grpo.barrier") as mock_barrier,
-            _patch_surviving_sample_idxs(grpo, np.array([], dtype=np.intp)),
+            _patch_surviving_sample_idxs(grpo, []),
             pytest.warns(UserWarning, match="All samples were filtered"),
         ):
             metrics = grpo.learn((completion_ids, action_masks, rewards))
@@ -3981,7 +3941,6 @@ class TestGRPOLearn:
             "old_logprobs_trainer_rows",
             "grad_norm_pre",
             "grad_norm_post",
-            *LEARN_PHASE_METRIC_NAMES,
         }
         assert all(
             math.isfinite(metrics[key])
@@ -4283,7 +4242,6 @@ class TestGRPOSaveLoadCheckpoint:
                 # adds ``exclude_modules=["lm_head"]``).
                 use_liger_loss=grpo.use_liger_loss,
             )
-            own_profiler = new_grpo.learn_profiler
             new_grpo.load_checkpoint(tmpdir)
 
             for attr in EvolvableAlgorithm.inspect_attributes(grpo):
@@ -4335,8 +4293,12 @@ class TestGRPOSaveLoadCheckpoint:
                             getattr(new_grpo, attr).is_sharded
                             == getattr(grpo, attr).is_sharded
                         )
-                    elif attr == "learn_profiler":
-                        assert new_grpo.learn_profiler is own_profiler
+                    elif attr == "sequence_layout":
+                        old_layout = getattr(grpo, attr)
+                        new_layout = getattr(new_grpo, attr)
+                        assert old_layout.packing == new_layout.packing
+                        assert old_layout.cp == new_layout.cp
+                        assert old_layout.pad_token_id == new_layout.pad_token_id
                     elif not isinstance(getattr(grpo, attr), torch.Tensor):
                         assert getattr(new_grpo, attr) == getattr(
                             grpo,
@@ -5576,7 +5538,7 @@ class TestGRPOVLLMSamplingCorrection:
             patch.object(
                 grpo, "_fused_forward_no_grad", side_effect=fake_fused_forward
             ),
-            patch.object(grpo, "_backward_pass", return_value=None),
+            patch.object(grpo, "_backward_pass", return_value=(None, None)),
             patch.object(
                 grpo,
                 "_liger_loss",
@@ -5646,7 +5608,7 @@ class TestGRPOVLLMSamplingCorrection:
                 grpo, "_fused_forward_no_grad", side_effect=fake_fused_forward
             ),
             patch.object(grpo, "_get_logprobs", side_effect=fake_get_logprobs),
-            patch.object(grpo, "_backward_pass", return_value=None),
+            patch.object(grpo, "_backward_pass", return_value=(None, None)),
             patch.object(grpo, "_liger_loss") as mock_liger_loss,
             pytest.warns(
                 UserWarning,
@@ -5786,7 +5748,6 @@ class TestGRPONonFinitePaddingIsIsolated:
                 LLMAlgorithm, "select_adapter", lambda self, name: nullcontext()
             ),
         ):
-            mock_fn.forward = _DummyLigerFn.forward
             mock_fn.apply.return_value = (
                 torch.tensor(0.5, requires_grad=True),
                 (torch.tensor(0.1), torch.tensor(0.0)),
@@ -5817,10 +5778,9 @@ class TestGRPONonFinitePaddingIsIsolated:
             ("vllm_is_ratio", ratio_arg),
         ):
             assert torch.isfinite(tensor).all(), name
-        # Only the in-mask token reaches the kernel, with its own values.
-        assert ratio_arg.shape == (1, 1)
+        # The in-mask token keeps its own values; only padding was filled.
         assert old_arg[0].item() == pytest.approx(-0.7)
-        assert ratio_arg[0].item() == pytest.approx(math.exp(-0.7 - -0.9))
+        assert ratio_arg[1].item() == pytest.approx(1.0)
         grpo.clean_up()
 
 
@@ -5948,7 +5908,7 @@ class TestGRPOTurnAdvantageLearnPath:
                 grpo, "_fused_forward_no_grad", side_effect=fake_fused_forward
             ),
             patch.object(grpo, "_get_logprobs", side_effect=fake_get_logprobs),
-            patch.object(grpo, "_backward_pass", return_value=None),
+            patch.object(grpo, "_backward_pass", return_value=(None, None)),
         )
 
     def test_learn_turn_ids_batch_mismatch_raises(self):

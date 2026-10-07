@@ -20,7 +20,6 @@ from agilerl.algorithms.core.base import EvolvableAlgorithm, OptimizerWrapper
 from agilerl.algorithms.sft import SFT
 from agilerl.distributed import FSDPConfig, resolve_device
 from agilerl.llm_envs import DatasetEnv
-from agilerl.utils.llm_utils import LEARN_PHASE_METRIC_NAMES
 from tests import TINY_LLM_FIXTURE_PATH
 from tests.test_algorithms.test_llms.llm_helpers import create_module
 
@@ -662,7 +661,6 @@ class TestSFTSaveLoadCheckpoint:
                 # adds ``exclude_modules=["lm_head"]``).
                 use_liger_loss=sft.use_liger_loss,
             )
-            own_profiler = new_sft.learn_profiler
             new_sft.load_checkpoint(tmpdir)
 
             for attr in EvolvableAlgorithm.inspect_attributes(sft):
@@ -697,8 +695,12 @@ class TestSFTSaveLoadCheckpoint:
                         getattr(new_sft, attr).is_sharded
                         == getattr(sft, attr).is_sharded
                     )
-                elif attr == "learn_profiler":
-                    assert new_sft.learn_profiler is own_profiler
+                elif attr == "sequence_layout":
+                    old_layout = getattr(sft, attr)
+                    new_layout = getattr(new_sft, attr)
+                    assert old_layout.packing == new_layout.packing
+                    assert old_layout.cp == new_layout.cp
+                    assert old_layout.pad_token_id == new_layout.pad_token_id
                 elif attr == "lora_config":
                     assert getattr(new_sft, attr) is not None
                     assert getattr(sft, attr) is not None
@@ -907,48 +909,4 @@ class TestSFTPreprocessObservation:
             orig_obs := torch.tensor([0, 1, 2, 3, 4, 5, 6, 7, 8, 9]),
         )
         assert torch.equal(obs, orig_obs)
-        sft.clean_up()
-
-
-class TestSFTLearnPhaseTimings:
-    def test_reports_and_logs_every_learn_phase(self) -> None:
-        # Arrange
-        sft = SFT(
-            actor_network=create_module(
-                input_size=10, max_tokens=20, vocab_size=100, device="cpu"
-            ),
-            pad_token_id=99,
-            pad_token="<pad>",
-            lora_config=LoraConfig(
-                r=4,
-                lora_alpha=16,
-                target_modules=["linear_1"],
-                task_type="CAUSAL_LM",
-                lora_dropout=0.0,
-            ),
-            batch_size=4,
-            micro_batch_size_per_gpu=2,
-            wrap=False,
-            gradient_checkpointing=False,
-            device="cpu",
-            use_liger_loss=False,
-        )
-        experiences = {
-            "input_ids": torch.randint(
-                0, 99, (4, 6), generator=torch.Generator().manual_seed(0)
-            ),
-            "attention_mask": torch.ones(4, 6, dtype=torch.long),
-            "prompt_lengths": [2, 2, 2, 2],
-        }
-
-        # Act
-        metrics = sft.learn(experiences)
-
-        # Assert
-        assert set(LEARN_PHASE_METRIC_NAMES) <= set(metrics)
-        assert metrics["learn_phase_forward_s"] > 0.0
-        assert sft.metrics.get_mean("learn_phase_forward_s") == pytest.approx(
-            metrics["learn_phase_forward_s"]
-        )
-        assert sft.shard_runtime.phase_timer.marks is None
         sft.clean_up()

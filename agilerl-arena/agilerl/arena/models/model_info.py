@@ -34,11 +34,6 @@ ARCH_HYBRID: ModelArchitecture = "hybrid"
 ARCH_MOE: ModelArchitecture = "moe"
 ARCH_HYBRID_MOE: ModelArchitecture = "hybrid_moe"
 
-ModelStatus = Literal["live", "deprecated", "preview"]
-STATUS_LIVE: ModelStatus = "live"
-STATUS_DEPRECATED: ModelStatus = "deprecated"
-STATUS_PREVIEW: ModelStatus = "preview"
-
 # vLLM ``LoRAConfig.max_lora_rank`` values.
 VLLM_LORA_RANKS = (1, 8, 16, 32, 64, 128, 256, 320, 512)
 # vLLM fused MoE LoRA rejects ranks above this.
@@ -64,13 +59,6 @@ class ModelInfo(BaseModel):
     architecture: ModelArchitecture = Field(
         default=ARCH_DENSE,
         description="Layer layout: dense, hybrid (Mamba), MoE, or hybrid MoE.",
-    )
-    status: ModelStatus = Field(
-        default=STATUS_LIVE,
-        description=(
-            "Release status: live, deprecated (submits with a warning), or "
-            "preview (submission rejected)."
-        ),
     )
 
     @cached_property
@@ -196,23 +184,15 @@ class ModelInfo(BaseModel):
 SUPPORTED_MODEL_INFO: Mapping[str, ModelInfo] = {
     info.hub_id: info
     for info in (
-        ModelInfo(hub_id="Qwen/Qwen2.5-0.5B-Instruct", status=STATUS_DEPRECATED),
+        ModelInfo(hub_id="Qwen/Qwen2.5-0.5B-Instruct"),
         ModelInfo(hub_id="Qwen/Qwen3-1.7B"),
         ModelInfo(hub_id="Qwen/Qwen3-4B"),
         ModelInfo(hub_id="Qwen/Qwen3.8-27B", architecture=ARCH_HYBRID),
-        ModelInfo(hub_id="ibm-granite/granite-4.0-micro", status=STATUS_DEPRECATED),
+        ModelInfo(hub_id="ibm-granite/granite-4.0-micro"),
+        ModelInfo(hub_id="ibm-granite/granite-4.0-micro-base"),
+        ModelInfo(hub_id="ibm-granite/granite-4.0-h-tiny", architecture=ARCH_HYBRID),
         ModelInfo(
-            hub_id="ibm-granite/granite-4.0-micro-base", status=STATUS_DEPRECATED
-        ),
-        ModelInfo(
-            hub_id="ibm-granite/granite-4.0-h-tiny",
-            architecture=ARCH_HYBRID,
-            status=STATUS_DEPRECATED,
-        ),
-        ModelInfo(
-            hub_id="ibm-granite/granite-3.1-3b-a800m-instruct",
-            architecture=ARCH_MOE,
-            status=STATUS_DEPRECATED,
+            hub_id="ibm-granite/granite-3.1-3b-a800m-instruct", architecture=ARCH_MOE
         ),
         ModelInfo(hub_id="google/gemma-4-E4B-it"),
         ModelInfo(
@@ -225,7 +205,6 @@ SUPPORTED_MODEL_INFO: Mapping[str, ModelInfo] = {
         ModelInfo(
             hub_id="nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16",
             architecture=ARCH_HYBRID_MOE,
-            status=STATUS_PREVIEW,
         ),
         ModelInfo(hub_id="openai/gpt-oss-20b", architecture=ARCH_MOE),
     )

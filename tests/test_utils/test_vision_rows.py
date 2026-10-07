@@ -10,9 +10,9 @@ import pytest
 import torch
 
 from agilerl.utils.vision_rows import (
-    VisionRows,
     append_vision_filler_rows,
     pixel_values_for_minibatch,
+    select_vision_rows,
     vision_filler_row,
 )
 
@@ -89,32 +89,26 @@ class TestPixelValuesForMinibatch:
         assert torch.equal(selected, pixel_values[3:])
 
 
-class TestVisionRowsForMinibatch:
-    def test_selects_the_vision_rows_of_the_kept_rows(self) -> None:
+class TestSelectVisionRows:
+    def test_selects_the_vision_rows_and_counts_of_the_kept_rows(self) -> None:
         # Arrange
         pixel_values = torch.arange(7).reshape(7, 1)
-        vision_rows = VisionRows(pixel_values, image_counts=[3, 4])
 
         # Act
-        selected = vision_rows.for_minibatch(np.array([1, 0]), sample_rows=2)
-
-        # Assert
-        assert torch.equal(selected, torch.cat([pixel_values[3:], pixel_values[:3]]))
-
-    def test_indexes_the_sample_axis_without_image_counts(self) -> None:
-        pixel_values = torch.arange(8).reshape(4, 2)
-
-        selected = VisionRows(pixel_values).for_minibatch(
-            np.array([2, 0]), sample_rows=4
+        selected, counts = select_vision_rows(
+            pixel_values, [3, 4], np.array([1]), sample_rows=2
         )
 
-        assert torch.equal(selected, pixel_values[[2, 0]])
+        # Assert
+        assert selected is not None
+        assert torch.equal(selected, pixel_values[3:])
+        assert counts == [4]
 
-    def test_rejects_image_counts_that_do_not_cover_the_vision_rows(self) -> None:
-        vision_rows = VisionRows(torch.zeros(5, 1), image_counts=[3, 1])
-
-        with pytest.raises(ValueError, match="image counts summing to 4"):
-            vision_rows.for_minibatch(np.array([0]), sample_rows=2)
+    def test_text_batch_has_no_vision_rows(self) -> None:
+        assert select_vision_rows(None, None, np.array([0, 1]), sample_rows=2) == (
+            None,
+            None,
+        )
 
 
 class TestVisionFillerRow:

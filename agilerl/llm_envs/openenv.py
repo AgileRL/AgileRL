@@ -343,6 +343,8 @@ class RemoteEnvClient:
 
     def _active_tasks(self) -> tuple[dict[str, Any], ...] | None:
         """Per-row reset kwargs for the current mode, or ``None`` when unset."""
+        if self._tasks is None:
+            return None
         if self._evaluation_mode and self._eval_tasks is not None:
             return self._eval_tasks
         return self._tasks
@@ -465,7 +467,13 @@ def _copy_task_rows(
     tasks: Sequence[Mapping[str, Any]],
 ) -> tuple[dict[str, Any], ...]:
     """Store independent dict copies of each row's reset kwargs."""
-    return tuple(dict(entry) for entry in tasks)
+    copied: list[dict[str, Any]] = []
+    for entry in tasks:
+        if not isinstance(entry, Mapping):
+            msg = "each tasks entry must be a mapping"
+            raise TypeError(msg)
+        copied.append(dict(entry))
+    return tuple(copied)
 
 
 HTTP_URL_RE = re.compile(r"https?://[^\s]+", re.IGNORECASE)

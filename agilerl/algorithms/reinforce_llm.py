@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import warnings
-from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
@@ -28,8 +27,11 @@ else:
     # tests can patch it. ``_reinforce_loss_liger`` guards against actual use.
     LigerFusedLinearPolicyLossFunction = None  # type: ignore[assignment]
     apply_fused_policy_loss = None  # type: ignore[assignment]
-from agilerl.components.llm_rollout_data import EpisodeSegments
-from agilerl.distributed import FSDPConfig, aggregate_metrics_dict, resolve_device
+from agilerl.distributed import (
+    FSDPConfig,
+    aggregate_metrics_dict,
+    resolve_device,
+)
 from agilerl.protocols import (
     PeftModelProtocol,
     PreTrainedModelProtocol,
@@ -39,6 +41,7 @@ from agilerl.utils.algo_utils import (
     CosineLRScheduleConfig,
     VLLMConfig,
     get_experiences_samples,
+    stack_and_pad_experiences,
 )
 from agilerl.utils.llm_utils import (
     LLM_RL_COMMON_METRIC_NAMES,
@@ -46,15 +49,17 @@ from agilerl.utils.llm_utils import (
     VLLM_IS_METRIC_NAMES,
     BitsAndBytesConfig,
     attention_mask_from_padded_ids,
+    build_completion_mask,
     clipped_is_surrogate,
+    hf_completion_lengths,
+    hf_turn_generation_config,
     masked_mean,
     normalize_prompt_batch,
     pool_by_turns,
+    prepare_prompt_hf_generate,
     resolve_batch_advantage_granularity,
     validate_importance_sampling_level,
 )
-from agilerl.utils.segment_rows import filler_stand_in
-from agilerl.utils.vision_rows import VisionRows
 
 if HAS_LLM_DEPENDENCIES:
     from transformers import GenerationConfig
@@ -240,6 +245,7 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
     """
 
     _mini_batch_size_default = "micro_batch"
+    _cp_supported = True
 
     def __init__(
         self,
@@ -339,6 +345,11 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
             vllm_importance_sampling_cap=vllm_importance_sampling_cap,
             vllm_max_logprob_gap=vllm_max_logprob_gap,
             vllm_max_clip_fraction=vllm_max_clip_fraction,
+            liger_cp_level=(
+                importance_sampling_level
+                if importance_sampling_level in {"token", "turn", "trajectory"}
+                else "token"
+            ),
         )
         self._validate_core_args(
             batch_size, lr, clip_coef, update_epochs, actor_network, clone
@@ -401,7 +412,43 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
         with self.select_adapter("actor"):
             self.actor.eval()
             if not self.colocated:
-                token_ids_list, completion_masks = self._generate_with_hf(prompts)
+                actor_device = self.shard_runtime.actor_compute_device(
+                    self.actor, torch.device(self.device)
+                )
+                with torch.no_grad(), self._amp_ctx():
+                    token_ids_list = []
+                    completion_masks = []
+
+                    for start in range(
+                        0,
+                        len(prompts),
+                        self.hf_generate_chunk_size,
+                    ):
+                        chunk = prompts[start : start + self.hf_generate_chunk_size]
+                        for prompt in chunk:
+                            hf_inputs = prepare_prompt_hf_generate(prompt, actor_device)
+                            input_ids = hf_inputs["input_ids"]
+                            prompt_len = int(input_ids.shape[-1])
+                            token_ids = self.actor.generate(
+                                **hf_inputs,
+                                generation_config=hf_turn_generation_config(
+                                    self.generation_config,
+                                    max_model_len=self.max_model_len,
+                                    prompt_length=prompt_len,
+                                    max_output_tokens=self.max_output_tokens,
+                                ),
+                            )
+                            token_ids_list.append(token_ids)
+                            completion_masks.append(
+                                build_completion_mask(
+                                    token_ids,
+                                    prompt_len,
+                                    self.pad_token_id,
+                                    completion_len=hf_completion_lengths(
+                                        token_ids, prompt_len, self.pad_token_id
+                                    ),
+                                )
+                            )
             else:
                 self._prepare_vllm_for_generation()
                 (
@@ -426,10 +473,6 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
         experiences: LLMRolloutExperiences,
         turn_ids: torch.Tensor | None = None,
         sampling_logps: list[torch.Tensor | None] | None = None,
-        episode_segments: list[EpisodeSegments | None] | None = None,
-        pixel_values: torch.Tensor | None = None,
-        pixel_image_counts: Sequence[int] | None = None,
-        image_token_id: int | None = None,
     ) -> dict[str, float]:
         """Update actor using REINFORCE with Return Batch Normalization.
 
@@ -447,41 +490,39 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
             Parallel to the stacked ``token_ids`` rows. ``None`` disables
             the correction for this update.
         :type sampling_logps: list[torch.Tensor | None] | None
-        :param episode_segments: Optional segment layout per trajectory,
-            parallel to the stacked ``token_ids`` rows (``None`` for an
-            unsegmented trajectory). Each segment runs its forwards as its own
-            row; returns and advantages span the whole episode. The update
-            keeps the optimizer steps of the unsegmented batch: each step
-            accumulates a window of segment rows, padded so every rank runs the
-            same micro-batches.
-        :type episode_segments: list[EpisodeSegments | None] | None
-        :param pixel_values: Optional vision rows of every trajectory, stacked
-            in ``token_ids`` row order. The reference and actor forwards each
-            see the vision rows of the rows they run.
-        :type pixel_values: torch.Tensor | None
-        :param pixel_image_counts: Optional vision rows per trajectory, needed
-            when trajectories hold different numbers of images.
-        :type pixel_image_counts: Sequence[int] | None
-        :param image_token_id: Token id the VL forward scatters one image
-            feature row into. Required with ``pixel_values`` and
-            ``episode_segments``, to cut the filler rows down to one image.
-        :type image_token_id: int | None
         :return: Dict with keys ``loss``, ``kl``, ``pg_loss``,
-            ``entropy``, averaged over all minibatch updates, plus row padding
-            stats and ``learn_phase_<phase>_s`` wall seconds.
+            ``entropy``, averaged over all minibatch updates.
         :rtype: dict[str, float]
         """
-        phase_timer = self._start_learn_phases()
         self._prepare_vllm_for_training()
 
         with self.trainer_offload_context():
-            token_ids, action_masks, turn_ids, rewards_2d = self._stack_rollout_batch(
-                experiences, turn_ids
+            token_ids, action_masks, rewards = stack_and_pad_experiences(
+                *experiences,
+                padding_values=[self.pad_token_id, False, None],
             )
+            token_ids = token_ids.to(self.device)
+            action_masks = action_masks.to(self.device)
             action_mask_bool = action_masks.bool()
             num_samples = token_ids.shape[0]
+
+            if turn_ids is None:
+                turn_ids = torch.where(
+                    action_mask_bool,
+                    torch.zeros_like(action_masks, dtype=torch.long),
+                    torch.full_like(action_masks, -1, dtype=torch.long),
+                )
+                rewards_2d = rewards.flatten().to(self.device).float().unsqueeze(-1)
+            else:
+                turn_ids = turn_ids.to(self.device)
+                rewards_2d = rewards.to(self.device).float()
+                if rewards_2d.dim() == 1:
+                    rewards_2d = rewards_2d.unsqueeze(-1)
             policy_granularity = self._resolve_advantage_granularity(turn_ids)
 
+            del rewards
+
+            batch_idxs = np.arange(num_samples)
             batch_size = (
                 min(num_samples, self.micro_batch_size_per_gpu)
                 if hasattr(self, "micro_batch_size_per_gpu")
@@ -495,36 +536,10 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
             }
             updates = 0
 
-            has_segments = self._has_episode_segments(episode_segments, num_samples)
-            rows = None
-            accumulation_steps = None
-            if has_segments:
-                self._check_segments_supported(self.importance_sampling_level)
-                rows, accumulation_steps = self._segment_rows(
-                    token_ids,
-                    action_masks,
-                    episode_segments,
-                    np.arange(num_samples),
-                    pixel_values=pixel_values,
-                    pixel_image_counts=pixel_image_counts,
-                    image_token_id=image_token_id,
-                )
-                pixel_values = rows.pixel_values
-                pixel_image_counts = rows.pixel_image_counts
-                batch_size = self.micro_batch_size_per_gpu
-            phase_timer.mark("prepare")
             reference_log_probs, old_log_probs, _ = self._fused_forward_no_grad(
-                token_ids if rows is None else rows.token_ids,
+                token_ids,
                 batch_size,
-                pixel_values=pixel_values,
-                pixel_image_counts=pixel_image_counts,
             )
-            phase_timer.mark("no_grad_forward")
-            if rows is not None:
-                # Returns and advantages run over whole episodes.
-                frame = (num_samples, int(action_masks.shape[1]))
-                reference_log_probs = rows.merge_frame(reference_log_probs, *frame, 1.0)
-                old_log_probs = rows.merge_frame(old_log_probs, *frame, 1.0)
             token_rewards = self._compute_token_rewards(
                 action_masks, rewards_2d, turn_ids
             )
@@ -553,54 +568,13 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
                 )
             )
 
-            row_episodes = np.arange(num_samples)
-            if rows is not None:
-                token_ids = rows.token_ids
-                action_masks = rows.action_masks
-                turn_ids = rows.split_frame(turn_ids, -1)
-                old_log_probs = rows.split_frame(old_log_probs, 1.0)
-                reference_log_probs = rows.split_frame(reference_log_probs, 1.0)
-                advantages = rows.split_frame(advantages, 0.0)
-                if sampling_log_probs is not None:
-                    sampling_log_probs = rows.split_frame(sampling_log_probs, 0.0)
-                row_episodes = rows.row_episodes
-                num_samples = int(token_ids.shape[0])
-            batch_idxs = np.arange(num_samples)
-            filler_rows = row_episodes < 0
-            padding_stats = self._row_padding_stats(token_ids, row_episodes, batch_idxs)
-            vision_rows = (
-                VisionRows(pixel_values, pixel_image_counts)
-                if pixel_values is not None
-                else None
-            )
-            phase_timer.mark("prepare")
-
             self.actor.train()
             for _epoch_idx in range(self.update_epochs):
                 self.rng.shuffle(batch_idxs)
-                loss_scales = None
-                if accumulation_steps is not None:
-                    loss_scales = self._segment_loss_scales(
-                        np.array(
-                            [
-                                filler_rows[
-                                    batch_idxs[start : start + batch_size]
-                                ].all()
-                                for start in range(0, num_samples, batch_size)
-                            ]
-                        ),
-                        accumulation_steps,
-                    )
                 for start in range(0, num_samples, batch_size):
                     minibatch_idxs = batch_idxs[
                         start : min((start + batch_size), num_samples)
                     ]
-                    phase_timer.mark("other")
-                    loss_scale = (
-                        1.0
-                        if loss_scales is None
-                        else float(loss_scales[start // batch_size])
-                    )
                     # ``get_experiences_samples`` indexes each input
                     # positionally: Tensor in -> Tensor out, so the tuple
                     # mirrors the all-Tensor inputs.
@@ -620,18 +594,8 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
                         advantages,
                         turn_ids,
                     )
-                    is_filler = bool(filler_rows[minibatch_idxs].all())
-                    if is_filler:
-                        batch_action_mask, batch_turn_ids = filler_stand_in(
-                            batch_action_mask, batch_turn_ids
-                        )
 
                     batch_mask_bool = batch_action_mask.bool()
-                    batch_pixel_values = (
-                        vision_rows.for_minibatch(minibatch_idxs, num_samples)
-                        if vision_rows is not None
-                        else None
-                    )
 
                     # Slice the aligned vLLM sampling logprobs for this
                     # minibatch; ``None`` when the correction is off / no
@@ -677,13 +641,9 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
                             batch_advantages,
                             batch_turn_ids,
                             batch_sampling_log_probs,
-                            batch_pixel_values,
                         )
                         self._raise_if_loss_not_finite_on_any_rank(pg_loss)
-                        phase_timer.mark("forward")
-                        self._backward_pass(pg_loss * loss_scale, accumulation_steps)
-                        if is_filler:
-                            continue
+                        self._backward_pass(pg_loss)
                         learn_metrics["kl"] += metrics["kl"]
                         learn_metrics["entropy"] += metrics["entropy"]
                         learn_metrics["pg_loss"] += metrics["pg_loss"]
@@ -697,7 +657,6 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
                             batch_size=batch_size,
                             use_reference=False,
                             eval_mode=False,
-                            pixel_values=batch_pixel_values,
                         )
                     batch_log_probs = torch.masked_fill(
                         batch_log_probs, ~batch_mask_bool, 1.0
@@ -736,10 +695,7 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
                     )
 
                     self._raise_if_loss_not_finite_on_any_rank(pg_loss)
-                    phase_timer.mark("forward")
-                    self._backward_pass(pg_loss * loss_scale, accumulation_steps)
-                    if is_filler:
-                        continue
+                    self._backward_pass(pg_loss)
 
                     learn_metrics["kl"] += masked_mean(kl, batch_action_mask).item()
                     learn_metrics["entropy"] += masked_entropy.item()
@@ -754,9 +710,6 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
         # Sampling-mismatch metrics are computed once over the full batch, so
         # they bypass the per-update averaging above.
         result.update(is_metrics)
-        result.update(padding_stats)
-        phase_seconds = self._learn_phase_seconds()
-        result.update(phase_seconds)
 
         # Wire averaged metrics into the metrics tracker; position 0 is the
         # per-trajectory completion-id batch.
@@ -770,8 +723,6 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
                 "pg_loss": averaged["pg_loss"],
                 "completion_length": completion_length,
                 **is_metrics,
-                **padding_stats,
-                **phase_seconds,
             },
         )
         agg["completion_length"] = int(agg["completion_length"])
@@ -906,7 +857,6 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
         batch_advantages: torch.Tensor,
         turn_ids: torch.Tensor | None = None,
         sampling_log_probs: torch.Tensor | None = None,
-        pixel_values: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, dict[str, float]]:
         """REINFORCE clipped policy loss via the fused-linear PPO Function.
 
@@ -930,9 +880,6 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
         :type batch_reference_log_probs: torch.Tensor
         :param batch_advantages: ``(B, seq_len-1)`` per-token advantages.
         :type batch_advantages: torch.Tensor
-        :param pixel_values: Vision rows of the minibatch's token rows, or
-            ``None`` for text.
-        :type pixel_values: torch.Tensor | None
         :return: ``(pg_loss, metrics)`` where ``metrics`` carries
             ``kl``, ``pg_loss``, ``entropy``, ``clipfrac`` Python floats.
         :rtype: tuple[torch.Tensor, dict[str, float]]
@@ -997,29 +944,32 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
         # logits only to discard them. The gathered lm_head weight is passed
         # separately to the fused kernel, which handles the matmul and its grad.
 
-        attention_mask = attention_mask_from_padded_ids(
-            batch_ids, self.pad_token_id
-        ).long()
-        kwargs: dict[str, Any] = {
-            "input_ids": batch_ids,
-            "attention_mask": attention_mask,
-            "use_cache": False,
-        }
-        if self.calc_position_embeddings:
-            kwargs["position_ids"] = self._position_ids_from_mask(attention_mask)
-        if pixel_values is not None:
-            kwargs["pixel_values"] = pixel_values.to(self.device)
+        if self.fsdp_config is not None and self.fsdp_config.cp > 1:
+            policy_hidden = self._actor_hidden_states(batch_ids)
+        else:
+            attention_mask = attention_mask_from_padded_ids(
+                batch_ids, self.pad_token_id
+            ).long()
+            kwargs: dict[str, Any] = {
+                "input_ids": batch_ids,
+                "attention_mask": attention_mask,
+                "use_cache": False,
+            }
+            if self.calc_position_embeddings:
+                kwargs["position_ids"] = self._position_ids_from_mask(attention_mask)
 
-        with (
-            self._patch_lm_head_to_identity(),
-            self.select_adapter("actor"),
-            self._amp_ctx(),
-        ):
-            self.actor.train()
-            actor_output = self.actor(**kwargs)
-        policy_hidden = (
-            actor_output[0] if isinstance(actor_output, tuple) else actor_output.logits
-        )  # (B, T, H)
+            with (
+                self._patch_lm_head_to_identity(),
+                self.select_adapter("actor"),
+                self._amp_ctx(),
+            ):
+                self.actor.train()
+                actor_output = self.actor(**kwargs)
+            policy_hidden = (
+                actor_output[0]
+                if isinstance(actor_output, tuple)
+                else actor_output.logits
+            )  # (B, T, H)
         target_ids = batch_ids[:, 1:].contiguous()  # (B, T-1)
         # Hidden states are aligned with target ids: predict ids[:, 1:] from
         # hidden[:, :-1]. Token level token-flattens the hidden states so the

@@ -248,6 +248,12 @@ class TestFamilyRuntime:
 
 class TestPretrainedModelType:
     def test_reads_config_json(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        stub_config_model_type(monkeypatch, "nemotron_h")
+        assert pretrained_model_type("nvidia/unlisted-model") == "nemotron_h"
+
+    def test_hub_fallback_sets_trust_remote_code(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         seen: dict[str, object] = {}
 
         @classmethod
@@ -261,7 +267,14 @@ class TestPretrainedModelType:
             "agilerl.architectures.catalog.PretrainedConfig.get_config_dict",
             fake_get_config_dict,
         )
-        assert pretrained_model_type("nvidia/unlisted-model") == "nemotron_h"
+        monkeypatch.setattr(
+            "agilerl.architectures.catalog.SUPPORTED_MODEL_INFO",
+            {},
+        )
+        assert (
+            pretrained_model_type("nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16")
+            == "nemotron_h"
+        )
         assert seen["trust_remote_code"] is True
 
     def test_missing_config_json_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:

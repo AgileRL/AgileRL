@@ -32,7 +32,6 @@ from agilerl.lora.moe import (
     SortedExpertsLoraWrapper,
     TransposedExpertsLoraWrapper,
     install_packed_expert_grouped_gemm,
-    materializes_expert_lora,
     moe_expert_target_parameters,
     set_routed_experts_recompute,
     transposed_experts_local_forward,
@@ -42,7 +41,6 @@ from agilerl.lora.moe import adapters as moe_adapters
 from agilerl.lora.moe import grouped_gemm as moe_gemm
 from agilerl.lora.moe import layouts as moe_layouts
 from agilerl.lora.moe import routed as moe_routed
-from agilerl.lora.moe.recompute import LoraExpertsConfig, LoraExpertsFunction
 from agilerl.utils.llm_utils import (
     expert_lora_vllm_key_map,
     filter_peft_state_dict_for_vllm_lora,
@@ -412,29 +410,6 @@ def test_upgrade_is_idempotent_and_skips_unknown_conventions():
 
     _, upgraded = _sorted_pair()
     assert upgrade_moe_param_wrappers(upgraded) == 0
-
-
-class TestMaterializesExpertLora:
-    @pytest.mark.parametrize(
-        "pair_factory", [_sorted_pair, _routed_pair, _ungated_pair, _transposed_pair]
-    )
-    def test_upgraded_wrappers_run_contracted(self, pair_factory):
-        reference, upgraded = pair_factory()
-
-        assert materializes_expert_lora(upgraded) is False
-        assert materializes_expert_lora(reference) is True
-
-    def test_unrecognized_convention_stays_materialized(self):
-        model = inject_adapter_in_model(
-            _lora_config(["odd.weight"]), _odd_model(), adapter_name="actor"
-        )
-        with pytest.warns(UserWarning, match="unrecognized module conventions"):
-            upgrade_moe_param_wrappers(model)
-
-        assert materializes_expert_lora(model) is True
-
-    def test_dense_model_has_no_materialized_expert_lora(self):
-        assert materializes_expert_lora(_odd_model()) is False
 
 
 def test_disabled_adapters_match_base():
@@ -1714,6 +1689,46 @@ def test_routed_wrapper_delegates_when_layout_unknown():
     assert out == "peft-default"
 
 
+@pytest.mark.parametrize(
+    ("block_cls", "targets"),
+    [
+        (_RoutedMoeBlock, ["experts.gate_up_proj", "experts.down_proj"]),
+        (_UngatedMoeBlock, ["experts.up_proj", "experts.down_proj"]),
+    ],
+    ids=["gated", "ungated"],
+)
+def test_routed_wrapper_uses_its_own_routing_over_inner_links(block_cls, targets):
+    # Arrange
+    model = _expert_lora_model(
+        block_cls, targets, ("actor", "critic"), trainable=("actor", "critic")
+    )
+    patch_lora_for_fused_forward(model)
+    wrapper = model.experts
+    assert isinstance(wrapper, RoutedExpertsLoraWrapper)
+    torch.manual_seed(0)
+    hidden = torch.randn(6, HIDDEN)
+    top_k_index = torch.randint(0, NUM_EXPERTS, (6, TOP_K))
+    top_k_weights = torch.rand(6, TOP_K)
+    with torch.no_grad():
+        set_fused_adapter_routing(model, ["actor"] * 6)
+        actor_out = wrapper(hidden, top_k_index, top_k_weights)
+        set_fused_adapter_routing(model, ["critic"] * 6)
+        critic_out = wrapper(hidden, top_k_index, top_k_weights)
+        # Inner links hold a mixed batch routing; the outer wrapper's rows are all critic.
+        set_fused_adapter_routing(model, ["actor"] * 6 + ["critic"] * 6)
+        ROUTING_STATE[wrapper] = ["critic"] * 6
+
+        # Act
+        out = wrapper(hidden, top_k_index, top_k_weights)
+
+    unset_fused_adapter_routing(model)
+    unpatch_lora_for_fused_forward(model)
+
+    # Assert
+    assert not torch.allclose(actor_out, critic_out)
+    assert torch.allclose(out, critic_out, rtol=1e-5, atol=1e-6)
+
+
 class TestTransposedExpertsLocalForward:
     def test_rejects_other_layouts(self) -> None:
         with pytest.raises(RuntimeError, match="transposed packed-experts layout"):
@@ -2330,334 +2345,3 @@ class TestScatterRows:
             lambda b, s: moe_routed.ScatterRows.apply(b.clone(), index, s),
             (base, source),
         )
-
-
-class TestGroupedGemmCoverage:
-    def test_probe_returns_false_when_the_op_disagrees_on_values(self, monkeypatch):
-        def wrong(x, w_t, offs):
-            return torch.zeros_like(x)
-
-        _mock_cuda_torch(monkeypatch, wrong)
-        moe_gemm.grouped_mm_supported.cache_clear()
-
-        assert moe_gemm.grouped_mm_supported(6, torch.float32) is False
-
-    def test_operand_ready_rejects_a_matrix_that_is_not_3d(self):
-        assert moe_gemm._grouped_mm_operand_ready(torch.ones(4, 4)) is False
-
-    def test_operand_ready_rejects_a_misaligned_cuda_operand(self):
-        mat = MagicMock()
-        mat.dim.return_value = 3
-        mat.element_size.return_value = 2
-        mat.is_cuda = True
-        mat.data_ptr.return_value = 1
-        mat.stride.return_value = 1
-
-        assert moe_gemm._grouped_mm_operand_ready(mat) is False
-
-    def test_grouped_linear_returns_empty_when_every_expert_is_empty(self):
-        x = torch.zeros(0, 5)
-        weight = torch.randn(2, 4, 5)
-
-        out = moe_gemm.grouped_linear(x, weight, [0, 0])
-
-        assert out.shape == (0, 4)
-
-    def test_grouped_matmul_uses_grouped_mm_when_the_operand_is_ready(
-        self, monkeypatch
-    ):
-        x = torch.randn(4, 8)
-        weight = torch.randn(2, 8, 4)
-        offs = torch.tensor([2, 4], dtype=torch.int32)
-        monkeypatch.setattr(moe_gemm, "_use_grouped_mm", lambda _x: True)
-        monkeypatch.setattr(moe_gemm, "_grouped_mm_operand_ready", lambda _w: True)
-        monkeypatch.setattr(
-            torch, "_grouped_mm", lambda rows, w, offs: torch.ones(4, 4)
-        )
-
-        out = moe_gemm.grouped_matmul(x, weight, [2, 2], offs)
-
-        assert torch.equal(out, torch.ones(4, 4))
-
-    def test_grouped_matmul_returns_empty_when_every_expert_is_empty(self):
-        x = torch.zeros(0, 4)
-        weight = torch.randn(2, 4, 5)
-
-        out = moe_gemm.grouped_matmul(
-            x, weight, [0, 0], torch.tensor([0, 0], dtype=torch.int32)
-        )
-
-        assert out.shape == (0, 5)
-
-    def test_iter_expert_row_chunks_stops_when_no_rows_are_taken(self):
-        assert list(moe_gemm.iter_expert_row_chunks([2, 3], max_rows=0)) == []
-
-    def test_add_grouped_linear_returns_when_x_is_empty(self):
-        destination = torch.ones(0, 4)
-        moe_gemm.add_grouped_linear(
-            destination, torch.zeros(0, 5), torch.randn(1, 4, 5), [0], 1.0
-        )
-
-        assert destination.shape == (0, 4)
-
-    def test_add_grouped_linear_casts_a_chunk_to_the_destination_dtype(self):
-        destination = torch.zeros(2, 4, dtype=torch.float16)
-        x = torch.ones(2, 5)
-        weight = torch.ones(1, 4, 5)
-
-        moe_gemm.add_grouped_linear(destination, x, weight, [2], 1.0)
-
-        assert destination.dtype == torch.float16
-        assert torch.allclose(destination.float(), torch.full((2, 4), 5.0))
-
-
-def test_split_lora_delta_dtensor_fallback_adds_into_a_narrower_destination(
-    monkeypatch,
-):
-    class FakeDTensor(nn.Parameter):
-        pass
-
-    experts, rank, total = 2, 2, 4
-    x = torch.randn(total, 8)
-    lora_a = MagicMock()
-    lora_a.weight = FakeDTensor(torch.ones(experts, rank, 8))
-    lora_a.return_value = (
-        torch.arange(total * experts * rank).reshape(total, -1).float()
-    )
-    lora_b = MagicMock()
-    lora_b.weight = FakeDTensor(torch.ones(6, experts * rank))
-    lora_b.side_effect = lambda t: t @ torch.ones(t.shape[1], 6)
-    wrapper = MagicMock()
-    wrapper.lora_A = {"actor": lora_a}
-    wrapper.lora_B = {"actor": lora_b}
-    wrapper.scaling = {"actor": 2.0}
-    wrapper.r = {"actor": rank}
-    monkeypatch.setattr(moe_adapters, "DTensor", FakeDTensor)
-    destination = torch.zeros(total, 6, dtype=torch.float16)
-
-    out = moe_adapters.split_lora_delta(
-        wrapper,
-        x,
-        [2, 2],
-        "actor",
-        num_experts=experts,
-        destination=destination,
-    )
-
-    assert out is destination
-    assert out.dtype == torch.float16
-
-
-class TestSortedExpertsLoraWrapperDtype:
-    def test_casts_a_mixed_routing_delta_to_the_result_dtype(self):
-        _reference, upgraded = _sorted_pair()
-        wrapper = upgraded.input_linear
-        x = torch.randn(4, HIDDEN)
-        expert_size = [1, 1, 1, 1]
-        delta = torch.ones(4, 2 * INTERMEDIATE)
-        ids = torch.tensor([0, 1, 0, 1])
-        wrapper.token_index = torch.arange(4)
-        wrapper.n_tokens = 4
-        with (
-            patch(
-                "agilerl.lora.moe.wrappers.mixed_routing",
-                return_value=["actor", "critic", "actor", "critic"],
-            ),
-            patch(
-                "agilerl.lora.moe.wrappers.adapters_in_routing",
-                return_value=["actor"],
-            ),
-            patch(
-                "agilerl.lora.moe.wrappers.token_adapter_ids",
-                return_value=(ids, {"actor": 0, "critic": 1}),
-            ),
-            patch.object(
-                wrapper.get_base_layer(),
-                "forward",
-                return_value=torch.zeros(4, 2 * INTERMEDIATE, dtype=torch.float16),
-            ),
-            patch(
-                "agilerl.lora.moe.wrappers.split_lora_delta",
-                return_value=delta,
-            ),
-        ):
-            out = wrapper(x, expert_size)
-
-        assert out.dtype == torch.float16
-
-
-class TestRoutedExpertDtypeAndDTensor:
-    def test_add_expert_loras_casts_delta_to_the_destination_dtype(self):
-        wrapper = MagicMock()
-        wrapper.scaling = {"actor": 1.0}
-        lora = moe_adapters.ExpertLora(
-            wrapper=wrapper,
-            adapter="actor",
-            stacked=(torch.ones(1, 2, 4), torch.ones(1, 3, 2)),
-            row_id=None,
-        )
-        destination = torch.zeros(2, 3, dtype=torch.float16)
-        rows = torch.ones(2, 4)
-
-        moe_routed._add_expert_loras(
-            destination,
-            rows,
-            [lora],
-            [2],
-            offs=None,
-            experts=slice(0, 1),
-            num_experts=1,
-            row_ids=None,
-        )
-
-        assert destination.dtype == torch.float16
-        assert destination.abs().sum() > 0
-
-    def test_scatter_chunks_cast_down_rows_to_the_result_dtype(self, monkeypatch):
-        hidden = torch.zeros(2, 4, dtype=torch.float16)
-        rows = torch.ones(2, 4)
-        up_weight = torch.ones(1, 6, 4)
-        down_weight = torch.ones(1, 4, 6)
-        routing = moe_routed.RoutedRows(
-            counts=torch.tensor([2]),
-            token_idx=torch.tensor([0, 1]),
-            routed_weights=torch.ones(2, 1),
-            row_ids=None,
-        )
-        calls = {"n": 0}
-
-        def fake_linear(x, weight, counts, offs=None):
-            calls["n"] += 1
-            return torch.ones(x.shape[0], weight.shape[1])
-
-        monkeypatch.setattr(moe_routed, "grouped_linear", fake_linear)
-
-        out = moe_routed._scatter_routed_expert_chunks(
-            hidden,
-            rows,
-            up_weight,
-            down_weight,
-            act_fn=torch.nn.functional.silu,
-            gated=False,
-            routing=routing,
-            up_loras=(),
-            down_loras=(),
-        )
-
-        assert out.dtype == hidden.dtype
-
-    def test_recompute_unwraps_dtensor_weights(self, monkeypatch):
-        class FakeDTensor(nn.Parameter):
-            def to_local(self):
-                return torch.ones(1, 4, 4)
-
-        routing = moe_routed.RoutedRows(
-            counts=torch.tensor([1]),
-            token_idx=torch.tensor([0]),
-            routed_weights=torch.ones(1, 1),
-            row_ids=None,
-        )
-        captured = {}
-
-        def fake_apply(*args, **_kwargs):
-            captured["up"] = args[5]
-            captured["down"] = args[6]
-            return torch.zeros(1, 4)
-
-        monkeypatch.setattr(moe_routed, "DTensor", FakeDTensor)
-        monkeypatch.setattr(moe_routed.LoraExpertsFunction, "apply", fake_apply)
-
-        out = moe_routed._recompute_routed_experts(
-            torch.zeros(1, 4),
-            FakeDTensor(torch.ones(1, 4, 4)),
-            FakeDTensor(torch.ones(1, 4, 4)),
-            act_fn=lambda t: t,
-            gated=False,
-            routing=routing,
-            up_loras=(),
-            down_loras=(),
-        )
-
-        assert out.shape == (1, 4)
-        assert not isinstance(captured["up"], FakeDTensor)
-        assert not isinstance(captured["down"], FakeDTensor)
-
-
-class TestLoraExpertsRecomputeGuards:
-    def test_skips_a_chunk_when_nothing_requires_grad(self, monkeypatch):
-        hidden = torch.ones(1, 4, requires_grad=True)
-        token_idx = torch.tensor([0])
-        weights = torch.ones(1, 1)
-        group_ends = torch.tensor([1])
-        up_weight = torch.ones(1, 4, 4)
-        down_weight = torch.ones(1, 4, 4)
-        config = LoraExpertsConfig(
-            act_fn=lambda t: t,
-            gated=False,
-            plan=[(0, 1, [1], 0, 1)],
-            up_slots=(),
-            down_slots=(),
-        )
-        monkeypatch.setattr(
-            "agilerl.lora.moe.recompute.grouped_linear",
-            lambda *_a, **_k: torch.ones(1, 4),
-        )
-        monkeypatch.setattr(
-            "agilerl.lora.moe.recompute.grouped_matmul",
-            lambda *_a, **_k: torch.ones(1, 4),
-        )
-
-        out = LoraExpertsFunction.apply(
-            hidden,
-            token_idx,
-            weights,
-            group_ends,
-            None,
-            up_weight,
-            down_weight,
-            config,
-        )
-        out.sum().backward()
-
-        assert torch.equal(hidden.grad, torch.zeros_like(hidden))
-
-    def test_skips_an_unused_leaf_grad(self, monkeypatch):
-        hidden = torch.ones(1, 4, requires_grad=True)
-        token_idx = torch.tensor([0])
-        weights = torch.ones(1, 1)
-        group_ends = torch.tensor([1])
-        up_weight = torch.ones(1, 4, 4)
-        down_weight = torch.ones(1, 4, 4)
-        config = LoraExpertsConfig(
-            act_fn=lambda t: t,
-            gated=False,
-            plan=[(0, 1, [1], 0, 1)],
-            up_slots=(),
-            down_slots=(),
-        )
-
-        def _grad(outputs, inputs, grad_outputs, allow_unused=False):
-            return tuple(None for _ in inputs)
-
-        monkeypatch.setattr(
-            "agilerl.lora.moe.recompute.grouped_linear",
-            lambda *_a, **_k: torch.ones(1, 4, requires_grad=True),
-        )
-        monkeypatch.setattr(
-            "agilerl.lora.moe.recompute.grouped_matmul",
-            lambda *_a, **_k: torch.ones(1, 4),
-        )
-        monkeypatch.setattr(torch.autograd, "grad", _grad)
-        out = LoraExpertsFunction.apply(
-            hidden,
-            token_idx,
-            weights,
-            group_ends,
-            None,
-            up_weight,
-            down_weight,
-            config,
-        )
-        out.sum().backward()
-
-        assert torch.equal(hidden.grad, torch.zeros_like(hidden))

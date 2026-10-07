@@ -24,7 +24,6 @@ from agilerl.algorithms.core.base import (
 from agilerl.algorithms.dpo import DPO
 from agilerl.distributed import FSDPConfig, resolve_device
 from agilerl.llm_envs import DatasetEnv
-from agilerl.utils.llm_utils import LEARN_PHASE_METRIC_NAMES
 from tests import TINY_LLM_FIXTURE_PATH
 from tests.test_algorithms.test_llms.llm_helpers import create_module
 
@@ -771,7 +770,6 @@ class TestDPOSaveLoadCheckpoint:
                 # adds ``exclude_modules=["lm_head"]``).
                 use_liger_loss=dpo.use_liger_loss,
             )
-            own_profiler = new_dpo.learn_profiler
             new_dpo.load_checkpoint(tmpdir)
 
             for attr in EvolvableAlgorithm.inspect_attributes(dpo):
@@ -821,8 +819,12 @@ class TestDPOSaveLoadCheckpoint:
                         getattr(new_dpo, attr).is_sharded
                         == getattr(dpo, attr).is_sharded
                     )
-                elif attr == "learn_profiler":
-                    assert new_dpo.learn_profiler is own_profiler
+                elif attr == "sequence_layout":
+                    old_layout = getattr(dpo, attr)
+                    new_layout = getattr(new_dpo, attr)
+                    assert old_layout.packing == new_layout.packing
+                    assert old_layout.cp == new_layout.cp
+                    assert old_layout.pad_token_id == new_layout.pad_token_id
                 elif not isinstance(getattr(dpo, attr), torch.Tensor):
                     assert getattr(new_dpo, attr) == getattr(dpo, attr), (
                         f"Attribute {attr} is not equal"
@@ -1009,31 +1011,4 @@ class TestDPOLearnMpsCacheClear:
                 mock_empty_cache.assert_called()
         finally:
             dpo.clean_up()
-        dpo.clean_up()
-
-
-class TestDPOLearnPhaseTimings:
-    def test_reports_and_logs_every_learn_phase(self) -> None:
-        # Arrange
-        dpo = _make_cpu_dpo_for_branch_tests()
-        generator = torch.Generator().manual_seed(0)
-        experiences = {
-            "chosen_input_ids": torch.randint(0, 99, (4, 6), generator=generator),
-            "rejected_input_ids": torch.randint(0, 99, (4, 6), generator=generator),
-            "chosen_attention_mask": torch.ones(4, 6, dtype=torch.long),
-            "rejected_attention_mask": torch.ones(4, 6, dtype=torch.long),
-            "prompt_lengths": [2, 2, 2, 2],
-        }
-
-        # Act
-        metrics = dpo.learn(experiences)
-
-        # Assert
-        assert set(LEARN_PHASE_METRIC_NAMES) <= set(metrics)
-        assert metrics["learn_phase_no_grad_forward_s"] > 0.0
-        assert metrics["learn_phase_forward_s"] > 0.0
-        assert dpo.metrics.get_mean("learn_phase_forward_s") == pytest.approx(
-            metrics["learn_phase_forward_s"]
-        )
-        assert dpo.shard_runtime.phase_timer.marks is None
         dpo.clean_up()

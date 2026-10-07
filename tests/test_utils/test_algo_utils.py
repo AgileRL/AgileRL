@@ -2590,47 +2590,6 @@ class TestCloneLlm:
         assert upgraded == [cloned]
         assert cloned.disabled is True
 
-    def test_clone_llm_sets_config_on_act_fn_free_experts(self, monkeypatch) -> None:
-        from peft import LoraConfig
-
-        class FakeExperts(torch.nn.Module):
-            def __init__(self):
-                super().__init__()
-                self.gate_up_proj = torch.nn.Parameter(torch.randn(2, 4, 2))
-                self.down_proj = torch.nn.Parameter(torch.randn(2, 2, 2))
-
-            def forward(self, hidden_states, top_k_index, top_k_weights):
-                return hidden_states
-
-        class FakeBaseModel(torch.nn.Module):
-            def __init__(self, config):
-                super().__init__()
-                self.config = config
-                self.experts = FakeExperts()
-                self.disabled = False
-
-            def disable_adapter(self):
-                self.disabled = True
-
-        class FakePeftModel:
-            def __init__(self):
-                self.config = SimpleNamespace()
-                self.model = FakeBaseModel(SimpleNamespace())
-                self.peft_config = {"default": LoraConfig(r=1)}
-
-            def parameters(self):
-                return [torch.nn.Parameter(torch.tensor([1.0]))]
-
-        def fake_get_peft_model(model, first_config, adapter_name="actor", **kwargs):
-            return model
-
-        monkeypatch.setattr(algo_utils, "PeftModel", FakePeftModel)
-        monkeypatch.setattr(algo_utils, "get_peft_model", fake_get_peft_model)
-
-        cloned = clone_llm(original_model=FakePeftModel())
-
-        assert cloned.experts.config is cloned.config
-
 
 class TestResolveLr:
     def test_returns_single_attr_when_lr_is_string(self):

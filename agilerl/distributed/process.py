@@ -165,22 +165,6 @@ def allreduce_minmax_int(value: int) -> tuple[int, int]:
     return -neg_min_value, max_value
 
 
-def allreduce_sum_ints(values: Sequence[int]) -> list[int]:
-    """Sum each of ``values`` across ranks (``values`` locally).
-
-    :param values: This rank's values, the same count on every rank.
-    :type values: Sequence[int]
-    :return: Per-position sums across ranks.
-    :rtype: list[int]
-    """
-    values = [int(value) for value in values]
-    if not is_distributed() or dist.get_world_size() == 1:
-        return values
-    sums = torch.tensor(values, device=resolve_device(), dtype=torch.long)
-    dist.all_reduce(sums, op=dist.ReduceOp.SUM)
-    return sums.tolist()
-
-
 def any_rank(flag: bool) -> bool:
     """True if any data-parallel rank has ``flag`` set.
 
@@ -279,20 +263,24 @@ class raise_on_any_rank(ContextDecorator):
         return False
 
 
-def sync_grads(params: Sequence[nn.Parameter]) -> None:
+def sync_grads(
+    params: Sequence[nn.Parameter], *, divide_factor: int | None = None
+) -> None:
     """Average gradients across data-parallel ranks.
 
     One coalesced all-reduce of every ``.grad`` in ``params`` (SUM, then
-    divide by world size so Gloo works). If any rank is missing a grad,
-    every rank raises so NCCL cannot hang on mismatched flatten sizes.
-    No-op on a single device.
+    divide by ``divide_factor`` or the world size so Gloo works). If any
+    rank is missing a grad, every rank raises so NCCL cannot hang on
+    mismatched flatten sizes. No-op on a single device.
 
     :param params: Optimizer parameters whose ``.grad`` should be averaged.
+    :param divide_factor: Divisor after the SUM. The world size when omitted.
     """
     if not params or not is_distributed() or dist.get_world_size() == 1:
         return
 
-    all_reduce_grads(params, divisor=dist.get_world_size())
+    divisor = dist.get_world_size() if divide_factor is None else divide_factor
+    all_reduce_grads(params, divisor=divisor)
 
 
 def all_reduce_grads(

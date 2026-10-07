@@ -135,11 +135,13 @@ class ParallelMesh:
     """DeviceMesh views for HSDP with expert and tensor parallel.
 
     ``world`` is ``(replicate, shard)``. Weights shard inside one ``shard``
-    group and replicate across groups. ``ep`` and ``tp`` split a shard group
+    group and replicate across groups.     ``ep`` and ``tp`` split a shard group
     into consecutive ranks; ``*_replicas`` join the ranks holding the same
-    EP or TP shard. EP views are ``None`` at ``ep == 1`` and TP views at
-    ``tp == 1``. ``dp_mod_ep`` and ``fsdp_experts`` are ``None`` unless
-    experts also FSDP-shard (``ep`` smaller than the shard group).
+    EP or TP shard. ``cp`` is the innermost split of that shard group, so
+    context-parallel peers are consecutive and sit inside one expert group.
+    EP views are ``None`` at ``ep == 1``, TP views at ``tp == 1``, and the
+    CP view at ``cp == 1``. ``dp_mod_ep`` and ``fsdp_experts`` are ``None``
+    unless experts also FSDP-shard (``ep`` smaller than the shard group).
     """
 
     world: DeviceMesh
@@ -150,12 +152,21 @@ class ParallelMesh:
     fsdp_experts: DeviceMesh | None = None
     tp: DeviceMesh | None = None
     tp_replicas: DeviceMesh | None = None
+    cp: DeviceMesh | None = None
 
     @property
     def leftover_dp(self) -> int:
         """Ranks per shard group that hold the same experts."""
         ep = 1 if self.ep is None else int(self.ep.size())
         return int(self.world.size(1)) // ep
+
+    @property
+    def cp_group(self) -> dist.ProcessGroup:
+        """Process group over the context-parallel ranks."""
+        if self.cp is None:
+            msg = "ParallelMesh has no 'cp' axis at cp == 1"
+            raise ValueError(msg)
+        return self.cp.get_group()
 
     def sync_grads(
         self, params: Sequence[nn.Parameter], reduce_dtype: torch.dtype
@@ -210,24 +221,49 @@ class ParallelMesh:
                 )
 
 
+def validate_cp_degree(cp: int) -> None:
+    """Reject a non-positive or non-integer context-parallel degree."""
+    if not isinstance(cp, int) or isinstance(cp, bool):
+        msg = f"cp must be an int, got {type(cp).__name__}"
+        raise TypeError(msg)
+    if cp < 1:
+        msg = f"cp must be >= 1, got {cp}"
+        raise ValueError(msg)
+
+
 def build_parallel_mesh(
     world_size: int | None = None,
     ep: int = 1,
     tp: int = 1,
+    cp: int = 1,
     shard_group_size: int | None = None,
     device_type: str | None = None,
 ) -> ParallelMesh | None:
-    """Build HSDP / EP / TP mesh views, or ``None`` for plain FSDP over the world.
+    """Build HSDP / EP / TP / CP mesh views, or ``None`` for plain FSDP.
 
     :param world_size: Trainer ranks; defaults to the process-group world.
     :param ep: Expert-parallel degree.
     :param tp: Tensor-parallel degree.
+    :param cp: Context-parallel degree. Peers are the innermost consecutive
+        ranks of a shard group and share one data shard.
     :param shard_group_size: Ranks per weight-shard group; ``None`` is the world.
     :param device_type: Mesh device type; defaults to CUDA when available.
-    :return: Mesh views, or ``None`` for ``ep == tp == 1`` with one shard
-        group spanning the world.
+    :return: Mesh views, or ``None`` for ``ep == tp == cp == 1`` with one
+        shard group spanning the world.
+    :raises ValueError: ``cp > 1`` combined with ``tp > 1``, or ``ep`` not
+        divisible by ``cp``.
     """
-    if ep == 1 and tp == 1 and shard_group_size is None:
+    validate_cp_degree(cp)
+    if cp > 1 and tp > 1:
+        msg = f"cp={cp} is not composed with tp={tp}"
+        raise ValueError(msg)
+    if ep > 1 and ep % cp != 0:
+        msg = (
+            f"ep={ep} is not divisible by cp={cp}: the expert group must "
+            "contain a whole number of context-parallel ranks."
+        )
+        raise ValueError(msg)
+    if ep == 1 and tp == 1 and cp == 1 and shard_group_size is None:
         return None
     if not dist.is_available() or not dist.is_initialized():
         msg = (
@@ -247,7 +283,7 @@ def build_parallel_mesh(
     leftover_dp = ep_data_parallel_size(shard, ep)
     tp_groups = tp_data_parallel_size(shard, tp)
     replicate = world_size // shard
-    if replicate == 1 and ep == 1 and tp == 1:
+    if replicate == 1 and ep == 1 and tp == 1 and cp == 1:
         return None
     if device_type is None:
         device_type = "cuda" if torch.cuda.is_available() else "cpu"
@@ -258,7 +294,9 @@ def build_parallel_mesh(
     mesh = ParallelMesh(world=world, hsdp=world if replicate > 1 else world["shard"])
     # Each unflatten / flatten creates process groups on every rank, so every
     # rank must take the same branches in the same order.
-    if ep > 1:
+    if cp > 1:
+        _attach_context_parallel(mesh, world, shard, ep, cp)
+    elif ep > 1:
         mesh.ep, mesh.dp_mod_ep, mesh.ep_replicas = _split_shard_axis(
             world, leftover_dp, ep, ("dp", "ep")
         )
@@ -296,6 +334,60 @@ def _split_shard_axis(
         return split[inner_name], split[outer_name], split[outer_name]
     outer_mesh = split["replicate", outer_name]
     return split[inner_name], outer_mesh, outer_mesh._flatten(f"{inner_name}_replicas")
+
+
+def _attach_context_parallel(
+    mesh: ParallelMesh, world: DeviceMesh, shard: int, ep: int, cp: int
+) -> None:
+    """Put ``cp`` innermost in the shard group, inside the expert group.
+
+    Context-parallel peers stay consecutive, so they share one HSDP replica
+    and one data shard. When ``ep > 1`` the expert group is that ``cp`` axis
+    plus ``ep / cp`` expert owners. ``ep == cp`` makes the two groups the
+    same ranks.
+
+    :param mesh: Mesh being built. CP and, when ``ep > 1``, EP views are set.
+    :param world: ``(replicate, shard)`` root mesh.
+    :param shard: Ranks in one weight-shard group.
+    :param ep: Expert-parallel degree.
+    :param cp: Context-parallel degree.
+    :raises ValueError: The shard group does not divide by ``cp``.
+    """
+    if shard % cp != 0:
+        msg = f"shard group ({shard}) must be divisible by cp ({cp})"
+        raise ValueError(msg)
+    if ep <= 1:
+        mesh.cp, _, _ = _split_shard_axis(world, shard // cp, cp, ("dp", "cp"))
+        return
+    dp_in_ep = ep // cp
+    dp_mod_ep = shard // ep
+    if dp_in_ep == 1:
+        mesh.cp, mesh.dp_mod_ep, mesh.ep_replicas = _split_shard_axis(
+            world, dp_mod_ep, cp, ("dp", "cp")
+        )
+        mesh.ep = mesh.cp
+        if mesh.dp_mod_ep is not None:
+            mesh.fsdp_experts = DeviceMesh._concatenate([mesh.dp_mod_ep, mesh.ep])
+        return
+    if dp_mod_ep == 1:
+        split = world._unflatten(1, (dp_in_ep, cp), ("dp_in_ep", "cp"))
+        mesh.cp = split["cp"]
+        mesh.ep = split["dp_in_ep", "cp"]._flatten("ep")
+        mesh.ep_replicas = world["replicate"]
+        return
+    split = world._unflatten(
+        1, (dp_mod_ep, dp_in_ep, cp), ("dp_mod_ep", "dp_in_ep", "cp")
+    )
+    mesh.cp = split["cp"]
+    mesh.ep = split["dp_in_ep", "cp"]._flatten("ep")
+    if world.size(0) == 1:
+        mesh.dp_mod_ep = split["dp_mod_ep"]
+        mesh.ep_replicas = split["dp_mod_ep"]
+    else:
+        outer = split["replicate", "dp_mod_ep"]
+        mesh.dp_mod_ep = outer
+        mesh.ep_replicas = outer._flatten("ep_replicas")
+    mesh.fsdp_experts = DeviceMesh._concatenate([mesh.dp_mod_ep, mesh.ep])
 
 
 def _stash_ep(module: nn.Module, device_mesh: DeviceMesh) -> None:
@@ -402,7 +494,7 @@ class AllToAllCtx(Protocol):
     group: dist.ProcessGroup
 
 
-class AllToAllVar(torch.autograd.Function):
+class _AllToAllVar(torch.autograd.Function):
     """Variable-split all-to-all with autograd."""
 
     @staticmethod
@@ -446,7 +538,7 @@ def all_to_all_single_autograd(
     group: dist.ProcessGroup,
 ) -> torch.Tensor:
     """Autograd-aware variable-split all-to-all over ``group``."""
-    return AllToAllVar.apply(input, output_splits, input_splits, group)
+    return _AllToAllVar.apply(input, output_splits, input_splits, group)
 
 
 def exchange_expert_counts(
@@ -1015,17 +1107,6 @@ class LocalExperts:
     kwargs: dict[str, Any]
 
 
-@dataclass(frozen=True)
-class TokenExchange:
-    """How routed tokens move between EP ranks in one forward."""
-
-    ep_group: dist.ProcessGroup
-    ep_degree: int
-    token_blocks: int
-    # Side stream for the token all-to-alls, or ``None`` to run them in order.
-    comm: torch.cuda.Stream | None
-
-
 def _base_experts(module: nn.Module) -> nn.Module:
     """The packed-experts module under a PEFT wrapper, or ``module`` itself."""
     get_base = getattr(module, "get_base_layer", None)
@@ -1164,15 +1245,18 @@ def _routed_ep_blocks(
     top_k_index: torch.Tensor,
     top_k_weights: torch.Tensor,
     adapter_ids: TokenAdapterIds | None,
-    exchange: TokenExchange,
+    ep_group: dist.ProcessGroup,
+    ep_degree: int,
+    token_blocks: int,
     expert_kwargs: dict[str, Any],
+    comm: torch.cuda.Stream | None,
 ) -> torch.Tensor:
     """Dispatch, run local experts, and combine ``hidden_states`` in token blocks.
 
     One all-to-all swaps every block's expert counts. Block ``b + 1``'s
-    dispatch runs on ``exchange.comm`` while block ``b``'s experts run on the
-    current stream, and block ``b - 1`` scatters while block ``b``'s combine is
-    in flight. With ``exchange.comm=None`` every step runs in order.
+    dispatch runs on ``comm`` while block ``b``'s experts run on the current
+    stream, and block ``b - 1`` scatters while block ``b``'s combine is in
+    flight. With ``comm=None`` every step runs in order.
 
     :param module: EP-sharded routed experts, or their outer LoRA wrapper.
     :param inner: The module's own forward, run on this rank's expert rows.
@@ -1180,20 +1264,20 @@ def _routed_ep_blocks(
     :param top_k_index: ``[tokens, top_k]`` global expert ids.
     :param top_k_weights: ``[tokens, top_k]`` router weights.
     :param adapter_ids: Adapter names and per-token ids under mixed fused routing.
-    :param exchange: EP group, its size, token blocks per call, and side stream.
+    :param ep_group: Expert-parallel process group.
+    :param ep_degree: Ranks in ``ep_group``.
+    :param token_blocks: Token blocks per call.
     :param expert_kwargs: Extra keyword arguments for ``inner``.
+    :param comm: Side stream for the token all-to-alls, or ``None``.
     :return: ``[tokens, hidden]`` routed expert output.
     """
     with _gathered_expert_block(module) as gathered:
         local_e = expert_local_tensor(_routed_up_weight(module)).shape[0]
         top_k = top_k_index.shape[-1]
         orders, send = _sort_token_blocks(
-            top_k_index,
-            hidden_states.shape[0],
-            exchange.token_blocks,
-            local_e * exchange.ep_degree,
+            top_k_index, hidden_states.shape[0], token_blocks, local_e * ep_degree
         )
-        received = exchange_expert_counts(send, exchange.ep_group, exchange.ep_degree)
+        received = exchange_expert_counts(send, ep_group, ep_degree)
         send_lists, received_lists = torch.stack((send, received)).tolist()
         experts = LocalExperts(
             module, inner, _local_param_dict(module, gathered), expert_kwargs
@@ -1208,19 +1292,19 @@ def _routed_ep_blocks(
                 received[block],
                 send_lists[block],
                 received_lists[block],
-                exchange.ep_group,
-                exchange.ep_degree,
+                ep_group,
+                ep_degree,
                 local_e,
             )
             return _dispatch_block(
-                hidden_states, orders[block], top_k, state, token_ids, exchange.comm
+                hidden_states, orders[block], top_k, state, token_ids, comm
             )
 
         pending = dispatch(0)
         previous: CombinedBlock | None = None
-        for block in range(exchange.token_blocks):
+        for block in range(token_blocks):
             token_idx, state, rows, local_ids, arrived = pending
-            if block + 1 < exchange.token_blocks:
+            if block + 1 < token_blocks:
                 pending = dispatch(block + 1)
             _wait_for(arrived)
             expert_out = _run_local_experts(
@@ -1231,14 +1315,11 @@ def _routed_ep_blocks(
                 expert_out, state.permute_indices, sum(state.output_splits)
             )
             del expert_out
-            with _on_comm_stream(exchange.comm):
+            with _on_comm_stream(comm):
                 combined = all_to_all_single_autograd(
-                    unpermuted,
-                    state.input_splits,
-                    state.output_splits,
-                    exchange.ep_group,
+                    unpermuted, state.input_splits, state.output_splits, ep_group
                 )
-            returned = _hand_over(exchange.comm, [unpermuted], [combined])
+            returned = _hand_over(comm, [unpermuted], [combined])
             del unpermuted
             if previous is not None:
                 _scatter_block(result, previous, flat_weights)
@@ -1334,8 +1415,11 @@ def _install_routed_ep_forward(
             _routed_ep_blocks,
             self,
             inner,
-            exchange=TokenExchange(ep_group, ep_degree, token_blocks, comm),
+            ep_group=ep_group,
+            ep_degree=ep_degree,
+            token_blocks=token_blocks,
             expert_kwargs=expert_kwargs,
+            comm=comm,
         )
         if tp_group is None:
             return run_blocks(hidden_states, top_k_index, top_k_weights, adapter_ids)
@@ -1347,34 +1431,29 @@ def _install_routed_ep_forward(
     object.__setattr__(module, "_agilerl_ep_forward", True)
 
 
-def _span_expert_counts(counts: torch.Tensor, start: int, stop: int) -> torch.Tensor:
-    """Per-expert row counts of the expert-sorted rows ``[start, stop)``."""
-    ends = counts.cumsum(0)
-    return ends.clamp(start, stop) - (ends - counts).clamp(start, stop)
-
-
-def _install_sorted_ep_forward(
-    module: nn.Module, tp_group: dist.ProcessGroup | None
-) -> None:
-    """Dispatch sorted rows → existing grouped kernel with local counts → combine.
-
-    :param module: Sorted experts module, or its outer LoRA wrapper.
-    :param tp_group: Ranks holding the same rows, or ``None``. Each dispatches
-        only its :func:`replicated_row_span` and the outputs are all-gathered.
-    """
+def _install_sorted_ep_forward(module: nn.Module) -> None:
+    """Dispatch sorted rows → existing grouped kernel with local counts → combine."""
     if getattr(module, "_agilerl_ep_forward", False):
         return
     inner = module.forward
 
-    def dispatch_rows(
+    def ep_forward(
         self: nn.Module,
         inputs: torch.Tensor,
-        counts: torch.Tensor,
-        ep_group: dist.ProcessGroup,
-        ep_degree: int,
+        expert_size: Sequence[int] | torch.Tensor,
+        *args: Any,
+        **kwargs: Any,
     ) -> torch.Tensor:
+        ep_degree = module_ep_degree(self)
+        ep_group = getattr(self, "_ep_group", None)
+        if ep_degree <= 1 or ep_group is None:
+            return inner(inputs, expert_size, *args, **kwargs)
         with _gathered_expert_block(self) as gathered:
             local_e = expert_local_tensor(_sorted_weight(self)).shape[0]
+            if isinstance(expert_size, torch.Tensor):
+                counts = expert_size.to(dtype=torch.long)
+            else:
+                counts = torch.as_tensor(list(expert_size), dtype=torch.long)
             local_rows, local_counts, state = token_dispatch(
                 inputs,
                 counts,
@@ -1388,34 +1467,6 @@ def _install_sorted_ep_forward(
                 state,
             )
 
-    def ep_forward(
-        self: nn.Module,
-        inputs: torch.Tensor,
-        expert_size: Sequence[int] | torch.Tensor,
-        *args: Any,
-        **kwargs: Any,
-    ) -> torch.Tensor:
-        ep_degree = module_ep_degree(self)
-        ep_group = getattr(self, "_ep_group", None)
-        if ep_degree <= 1 or ep_group is None:
-            return inner(inputs, expert_size, *args, **kwargs)
-        if isinstance(expert_size, torch.Tensor):
-            counts = expert_size.to(dtype=torch.long)
-        else:
-            counts = torch.as_tensor(list(expert_size), dtype=torch.long)
-        if tp_group is None:
-            return dispatch_rows(self, inputs, counts, ep_group, ep_degree)
-        n_rows = inputs.shape[0]
-        start, stop = replicated_row_span(n_rows, tp_group)
-        part = dispatch_rows(
-            self,
-            SliceReplicatedRows.apply(inputs, tp_group),
-            _span_expert_counts(counts, start, stop),
-            ep_group,
-            ep_degree,
-        )
-        return GatherReplicatedRows.apply(part, n_rows, tp_group)
-
     module.forward = MethodType(ep_forward, module)
     object.__setattr__(module, "_agilerl_ep_forward", True)
 
@@ -1427,7 +1478,7 @@ def _install_ep_forward(
     if is_routed_experts_module(experts):
         _install_routed_ep_forward(module, token_blocks, tp_group)
     elif is_sorted_experts_module(experts):
-        _install_sorted_ep_forward(module, tp_group)
+        _install_sorted_ep_forward(module)
 
 
 def _chain_links(wrapper: nn.Module) -> list[nn.Module]:
@@ -1481,8 +1532,7 @@ def apply_expert_parallel(
     :param model: Model holding packed-expert modules.
     :param ep_mesh: Expert-parallel mesh; ``None`` changes nothing.
     :param tp_mesh: Tensor-parallel mesh whose ranks hold the same tokens.
-        Routed and sorted experts then dispatch each token from one of those
-        ranks.
+        Routed experts then dispatch each token from one of those ranks.
     :param token_blocks: Token blocks per routed MoE call; block ``b + 1``'s
         all-to-all overlaps block ``b``'s experts on CUDA.
     :return: How many packed-expert base modules were parallelized.

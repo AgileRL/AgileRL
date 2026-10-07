@@ -84,15 +84,12 @@ class GRPOSpec(RolloutLLMSpec):
             "cannot be assigned."
         ),
     )
-    loss_norm: Literal["micro_batch", "accumulation_window", "episode"] = Field(
+    loss_norm: Literal["micro_batch", "accumulation_window"] = Field(
         default="micro_batch",
         description=(
             "Token count the loss is averaged over: each micro-batch on its "
             "own, or the whole accumulation window. The window is the unbiased "
-            "choice when micro-batches have uneven lengths. 'episode' gives "
-            "every episode of the window the same total policy weight, "
-            "averaging tokens within an episode, so long episodes do not "
-            "outweigh short ones."
+            "choice when micro-batches have uneven lengths."
         ),
     )
     old_logprobs_source: Literal["trainer", "rollout"] = Field(

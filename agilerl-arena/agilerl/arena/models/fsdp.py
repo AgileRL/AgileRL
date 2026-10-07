@@ -164,6 +164,17 @@ class FSDPConfig:
             ),
         ),
     ] = 1
+    cp: Annotated[
+        int,
+        Field(
+            ge=1,
+            description=(
+                "Context-parallel degree. Consecutive ranks hold the same "
+                "batch rows and one slice of each sequence. 1 keeps full "
+                "sequences on every rank. Not combined with tp greater than 1."
+            ),
+        ),
+    ] = 1
     shard_group_size: Annotated[
         int | None,
         Field(
@@ -218,11 +229,23 @@ class FSDPConfig:
         if self.tp < 1:
             msg = "FSDPConfig.tp must be >= 1"
             raise ValueError(msg)
+        if self.cp < 1:
+            msg = "FSDPConfig.cp must be >= 1"
+            raise ValueError(msg)
+        if self.cp > 1 and self.tp > 1:
+            msg = f"FSDPConfig.cp={self.cp} is not composed with tp={self.tp}"
+            raise ValueError(msg)
+        if self.ep > 1 and self.ep % self.cp != 0:
+            msg = (
+                f"FSDPConfig.ep={self.ep} must be divisible by cp={self.cp}: "
+                "the expert group contains the context-parallel ranks."
+            )
+            raise ValueError(msg)
         if self.shard_group_size is not None:
             if self.shard_group_size < 1:
                 msg = "FSDPConfig.shard_group_size must be >= 1"
                 raise ValueError(msg)
-            for name, degree in (("ep", self.ep), ("tp", self.tp)):
+            for name, degree in (("ep", self.ep), ("tp", self.tp), ("cp", self.cp)):
                 if self.shard_group_size % degree:
                     msg = (
                         f"FSDPConfig.shard_group_size={self.shard_group_size} "

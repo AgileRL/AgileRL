@@ -173,24 +173,6 @@ def test_base_url_required() -> None:
         RemoteEnvClient("")
 
 
-class TestRemoteEnvClientInit:
-    def test_rejects_empty_tasks(self) -> None:
-        with pytest.raises(ValueError, match="tasks must not be empty"):
-            RemoteEnvClient("http://stub.invalid", tasks=[])
-
-    def test_rejects_empty_eval_tasks(self) -> None:
-        with pytest.raises(ValueError, match="eval_tasks must not be empty"):
-            RemoteEnvClient("http://stub.invalid", eval_tasks=[])
-
-
-class TestRemoteEnvClientReset:
-    def test_rejects_a_row_index_outside_the_tasks(self) -> None:
-        client = RemoteEnvClient("http://stub.invalid", tasks=[{"task_id": 0}])
-
-        with pytest.raises(IndexError, match="row_index 1 out of range for 1 tasks"):
-            client.reset(row_index=1)
-
-
 # --- gym-tuple normalisation -----------------------------------------------
 def test_normalize_step_accepts_four_tuple() -> None:
     """A 4-tuple ``(obs, reward, done, info)`` fills ``truncated=False``."""
@@ -352,26 +334,6 @@ def test_encode_image_training_inputs_rejects_non_tensors() -> None:
 
     with pytest.raises(TypeError, match="processor must return torch"):
         encode_image_training_inputs(text="x", image=object(), processor=processor)
-
-
-class TestEncodeImageTrainingInputs:
-    def test_unwraps_a_one_image_list(self) -> None:
-        # Arrange
-        image = object()
-        seen: list[object] = []
-
-        def processor(
-            *, text: str, images: object, return_tensors: str
-        ) -> dict[str, torch.Tensor]:
-            del text, return_tensors
-            seen.append(images)
-            return {"input_ids": torch.tensor([[1]]), "pixel_values": torch.ones(1)}
-
-        # Act
-        encode_image_training_inputs(text="x", image=[image], processor=processor)
-
-        # Assert
-        assert seen == [image]
 
 
 def test_normalize_reset_accepts_text_and_image_dict() -> None:
@@ -953,60 +915,6 @@ def test_session_reset_forwards_eval_and_positive_seed_only() -> None:
 
     client.reset(seed=5)
     assert client._session.reset_calls[-1] == {"seed": 5}
-
-
-class TestRemoteEnvClientEvalTasks:
-    @staticmethod
-    def _eval_only_client() -> RemoteEnvClient:
-        client = RemoteEnvClient(
-            "http://stub.invalid",
-            eval_tasks=[
-                {"split": "test", "task_id": 0},
-                {"split": "test", "task_id": 1},
-            ],
-        )
-        client._session = _StubSession(state={"dataset_size": 9})
-        return client
-
-    def test_eval_mode_resets_merge_the_eval_row_without_train_tasks(self) -> None:
-        # Arrange
-        client = self._eval_only_client()
-
-        # Act
-        with client.eval_mode():
-            client.reset(row_index=1)
-
-        # Assert
-        assert client._session.reset_calls[-1] == {
-            "split": "test",
-            "task_id": 1,
-            "evaluation": True,
-        }
-
-    def test_eval_mode_dataset_size_counts_eval_tasks_without_train_tasks(
-        self,
-    ) -> None:
-        # Arrange
-        client = self._eval_only_client()
-
-        # Act
-        with client.eval_mode():
-            eval_size = client.dataset_size
-        train_size = client.dataset_size
-
-        # Assert
-        assert eval_size == 2
-        assert train_size == 9
-
-    def test_training_resets_forward_the_row_index_without_train_tasks(self) -> None:
-        # Arrange
-        client = self._eval_only_client()
-
-        # Act
-        client.reset(row_index=4)
-
-        # Assert
-        assert client._session.reset_calls[-1] == {"row_index": 4}
 
 
 def test_session_state_application_error_propagates() -> None:

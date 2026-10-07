@@ -11,7 +11,6 @@ from pathlib import Path
 
 import pytest
 import torch
-from torch.profiler import ProfilerActivity
 
 from agilerl.arena.models.profiling import ProfilingConfig
 from agilerl.utils.learn_profiler import LearnProfiler, default_profile_ranks
@@ -185,38 +184,3 @@ class TestLearnProfilerMicroBatch:
 
         assert profiler.learn_calls == 2
         assert list(tmp_path.iterdir()) == []
-
-    def test_records_cuda_activity_when_cuda_is_available(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
-        monkeypatch.setattr(torch.cuda, "synchronize", lambda: None)
-        seen = {}
-
-        class FakeProf:
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *_exc):
-                return False
-
-            def key_averages(self):
-                class _Avg:
-                    def table(self, **_kwargs):
-                        return "aten::mm"
-
-                return _Avg()
-
-            def export_chrome_trace(self, path: str) -> None:
-                Path(path).write_text('{"traceEvents": []}')
-
-        def fake_profile(*_args, **kwargs):
-            seen["activities"] = list(kwargs["activities"])
-            return FakeProf()
-
-        monkeypatch.setattr("agilerl.utils.learn_profiler.profile", fake_profile)
-        config = ProfilingConfig(output_dir=str(tmp_path), torch_profile_step=1)
-        profiler = LearnProfiler(config, rank=0, world_size=1, shard_group_size=None)
-
-        run_learn_calls(profiler, calls=1, micro_batches=1)
-
-        assert ProfilerActivity.CUDA in seen["activities"]
-        assert (tmp_path / "rank0_learn1_trace.json").is_file()

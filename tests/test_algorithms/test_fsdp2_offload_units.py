@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import json
 from contextlib import contextmanager
-from types import MethodType, SimpleNamespace
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -48,8 +48,6 @@ def _make_wrap_stub(**overrides) -> MagicMock:
     agent.distributed = True
     agent.fsdp_config = FSDPConfig()
     agent.colocated = False
-    agent.ep = 1
-    agent.cp = 1
     agent.gradient_checkpointing = False
     agent.cosine_lr_schedule_config = None
     agent.lr = 1e-4
@@ -145,7 +143,7 @@ class TestUntiedLmHeadNoReshard:
     """Untied ``lm_head`` is its own FSDP unit and stays gathered after forward."""
 
     def test_untied_lm_head_fully_shard_disables_reshard_after_forward(self):
-        from agilerl.distributed.fsdp_blocks import _shard_embed_and_lm_head
+        from agilerl.distributed.fsdp import _shard_embed_and_lm_head
 
         class LanguageModel(nn.Module):
             def __init__(self):
@@ -167,7 +165,7 @@ class TestUntiedLmHeadNoReshard:
             seen.append((module, kwargs))
             return module
 
-        with patch("agilerl.distributed.fsdp_blocks.fully_shard", side_effect=_record):
+        with patch("agilerl.distributed.fsdp.fully_shard", side_effect=_record):
             _shard_embed_and_lm_head(
                 model, {"reshard_after_forward": True}, persistence_threshold=0
             )
@@ -403,8 +401,7 @@ class TestPPOGetActionActorDevice:
         captured: list = []
 
         # Act
-        agent._generate_with_hf = MethodType(LLMAlgorithm._generate_with_hf, agent)
-        with _patch_hf_generate_path("agilerl.algorithms.core.base", captured):
+        with _patch_hf_generate_path("agilerl.algorithms.ppo_llm", captured):
             PPO.get_action(agent, _dummy_prompts(), training=False)
 
         # Assert
@@ -420,8 +417,7 @@ class TestREINFORCEGetActionActorDevice:
         captured: list = []
 
         # Act
-        agent._generate_with_hf = MethodType(LLMAlgorithm._generate_with_hf, agent)
-        with _patch_hf_generate_path("agilerl.algorithms.core.base", captured):
+        with _patch_hf_generate_path("agilerl.algorithms.reinforce_llm", captured):
             REINFORCE.get_action(agent, _dummy_prompts(), training=False)
 
         # Assert
@@ -886,6 +882,34 @@ class TestFsdpSafetensorsShardHelpers:
         assert dest.dtype == torch.bfloat16
         assert torch.all(dest == torch.ones(2, 4, dtype=torch.bfloat16))
 
+    def test_copy_safetensors_slice_takes_leftover_dp_half_of_ep_block(
+        self, tmp_path, monkeypatch
+    ):
+        from safetensors import safe_open
+        from safetensors.torch import save_file
+
+        from agilerl.distributed.fsdp import _copy_safetensors_slice
+
+        # Arrange
+        monkeypatch.setattr("torch.distributed.get_rank", lambda: 2)
+        weights = {"experts.up_proj": torch.arange(4).reshape(4, 1, 1).float()}
+        path = tmp_path / "model.safetensors"
+        save_file(weights, str(path))
+        dest = torch.empty(1, 1, 1)
+
+        # Act
+        with safe_open(str(path), framework="pt", device="cpu") as handle:
+            _copy_safetensors_slice(
+                handle,
+                "experts.up_proj",
+                (slice(0, 2), slice(0, 1), slice(0, 1)),
+                dest,
+                global_dim0=4,
+            )
+
+        # Assert
+        assert dest.item() == 1.0
+
     def test_lora_a_seed_stable_and_lora_b_zeros(self):
         from agilerl.distributed.fsdp import _init_lora_parameter
 
@@ -1178,6 +1202,7 @@ class TestMaterializeFsdp2FromCpuState:
         )
         loaded: list[str] = []
         with (
+            patch("agilerl.distributed.fsdp.is_distributed", return_value=True),
             patch(
                 "agilerl.distributed.fsdp.apply_fsdp2",
                 side_effect=lambda module, *_a, **_k: module,

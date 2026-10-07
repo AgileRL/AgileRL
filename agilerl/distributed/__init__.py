@@ -7,13 +7,29 @@ Import from this package:
 
 ``from agilerl.distributed import FSDPConfig, FSDPRuntime``
 
-``process.py`` is rank / process group / collectives. ``fsdp_blocks.py`` is
-``apply_fsdp2``; ``fsdp.py`` is ``CPUOffloadOptimizer`` and FSDP2 state
-loading. ``FSDPConfig`` is defined torch-free in ``agilerl.arena.models.fsdp``
-and re-exported here.
+``process.py`` is rank / process group / collectives. ``fsdp.py`` is
+``apply_fsdp2`` / ``CPUOffloadOptimizer``; ``FSDPConfig`` is defined
+torch-free in ``agilerl.arena.models.fsdp`` and re-exported here.
 ``runtime.py`` is ``BaseRuntime``.
 """
 
+from .context_parallel import (
+    CP_STYLE,
+    CP_STYLES,
+    CP_SUPPORTED_ALGOS,
+    TrainingShardBundle,
+    gather_for_cp,
+    gather_for_cp_sum_grad,
+    gather_for_cp_wo_grad,
+    reject_unsupported_cp,
+    shard_for_cp,
+    shard_training_bundle,
+    validate_cp_config,
+    validate_cp_ep_mix,
+    validate_cp_heads,
+    validate_cp_seq_len,
+    validate_cp_style,
+)
 from .expert_parallel import (
     ParallelMesh,
     apply_expert_parallel,
@@ -25,24 +41,24 @@ from .expert_parallel import (
     token_dispatch,
     tp_data_parallel_size,
     validate_actor_ep,
+    validate_cp_degree,
     validate_ep_degree,
 )
 from .fsdp import (
     CPUOffloadOptimizer,
     FSDPConfig,
+    apply_fsdp2,
     full_shape_views,
     gather_params,
     materialize_dtensors,
     materialize_fsdp2_from_cpu_state,
     reshard_fsdp_modules,
 )
-from .fsdp_blocks import apply_fsdp2
 from .process import (
     aggregate_metrics_across_gpus,
     aggregate_metrics_dict,
     all_ranks,
     allreduce_minmax_int,
-    allreduce_sum_ints,
     any_rank,
     barrier,
     broadcast_object_list,
@@ -68,6 +84,9 @@ from .runtime import (
 )
 
 __all__ = [
+    "CP_STYLE",
+    "CP_STYLES",
+    "CP_SUPPORTED_ALGOS",
     "BaseRuntime",
     "CPUOffloadOptimizer",
     "DPRuntime",
@@ -75,11 +94,11 @@ __all__ = [
     "FSDPRuntime",
     "ParallelMesh",
     "PrepareResult",
+    "TrainingShardBundle",
     "aggregate_metrics_across_gpus",
     "aggregate_metrics_dict",
     "all_ranks",
     "allreduce_minmax_int",
-    "allreduce_sum_ints",
     "any_rank",
     "apply_expert_parallel",
     "apply_fsdp2",
@@ -89,6 +108,9 @@ __all__ = [
     "distributed_env_present",
     "ep_data_parallel_size",
     "full_shape_views",
+    "gather_for_cp",
+    "gather_for_cp_sum_grad",
+    "gather_for_cp_wo_grad",
     "gather_objects",
     "gather_params",
     "gather_tensor",
@@ -103,13 +125,22 @@ __all__ = [
     "packed_expert_counts",
     "raise_on_any_rank",
     "reference_dispatch_combine",
+    "reject_unsupported_cp",
     "reshard_fsdp_modules",
     "resolve_device",
     "set_seed",
+    "shard_for_cp",
+    "shard_training_bundle",
     "sync_grads",
     "token_combine",
     "token_dispatch",
     "tp_data_parallel_size",
     "validate_actor_ep",
+    "validate_cp_config",
+    "validate_cp_degree",
+    "validate_cp_ep_mix",
+    "validate_cp_heads",
+    "validate_cp_seq_len",
+    "validate_cp_style",
     "validate_ep_degree",
 ]

@@ -173,43 +173,9 @@ class TestRoutedForward:
     def test_routing_and_batch_size_mismatch_raises(self):
         model = _build_model()
         patch_lora_for_fused_forward(model)
-        set_fused_adapter_routing(model, ["actor", "actor", "critic"])
+        set_fused_adapter_routing(model, ["actor"] * 3)
         with pytest.raises(ValueError, match="covers 3 rows"):
             model(torch.randn(4, 8))
-
-    def test_equal_runs_split_image_rows_evenly(self):
-        # Arrange: two samples with three images between them, repeated for
-        # actor then critic, as a vision tower sees the doubled batch.
-        model = _build_model()
-        x = torch.randn(6, 8)
-        model.proj.set_adapter("actor")
-        ref_actor = model(x)
-        model.proj.set_adapter("critic")
-        ref_critic = model(x)
-        patch_lora_for_fused_forward(model)
-        set_fused_adapter_routing(model, ["actor"] * 2 + ["critic"] * 2)
-
-        # Act
-        out = model(x)
-
-        # Assert
-        assert torch.allclose(out[:3], ref_actor[:3], atol=1e-6)
-        assert torch.allclose(out[3:], ref_critic[3:], atol=1e-6)
-
-    def test_single_run_covers_any_number_of_image_rows(self):
-        # Arrange
-        model = _build_model()
-        x = torch.randn(3, 8)
-        model.proj.set_adapter("critic")
-        ref_critic = model(x)
-        patch_lora_for_fused_forward(model)
-        set_fused_adapter_routing(model, ["critic"] * 2)
-
-        # Act
-        out = model(x)
-
-        # Assert
-        assert torch.allclose(out, ref_critic, atol=1e-6)
 
     def test_layer_that_flattens_batch_and_seq_scales_the_routing(self):
         model = _build_model(module_cls=_TinyFlatten)

@@ -10,15 +10,11 @@ import json
 import pytest
 from pydantic import ValidationError
 
-from agilerl.arena.models import model_info
 from agilerl.arena.models.model_info import (
     ARCH_DENSE,
     ARCH_HYBRID,
     ARCH_HYBRID_MOE,
     ARCH_MOE,
-    STATUS_DEPRECATED,
-    STATUS_LIVE,
-    STATUS_PREVIEW,
     SUPPORTED_MODEL_INFO,
     ModelInfo,
     supported_path,
@@ -45,23 +41,6 @@ def finetuning_network(
     )
 
 
-@pytest.fixture
-def no_dims_entry(monkeypatch: pytest.MonkeyPatch) -> ModelInfo:
-    """Entry whose bundled ``lora_info`` names targets without dims."""
-    bundled = {
-        "config": {"model_type": "nemotron_h"},
-        "inspected": {
-            "num_params": None,
-            "lora_info": {
-                "q_proj": [{"kind": "module"}],
-                "mixer.experts.up_proj": [{"kind": "parameter"}],
-            },
-        },
-    }
-    monkeypatch.setattr(model_info, "_bundled", lambda hub_id: bundled)
-    return ModelInfo(hub_id="org/no-dims", architecture=ARCH_HYBRID_MOE)
-
-
 class TestSupportedModelInfo:
     def test_nemotron_nano_sizing_matches_catalog(self) -> None:
         entry = SUPPORTED_MODEL_INFO["nvidia/NVIDIA-Nemotron-3-Nano-4B-BF16"]
@@ -83,62 +62,15 @@ class TestSupportedModelInfo:
         assert "gate_proj" not in entry.modules
         assert {"up_proj", "in_proj"} <= entry.modules
 
-    def test_super_vl_language_targets_carry_language_model_scope(self) -> None:
+    def test_super_vl_lists_vision_and_experts(self) -> None:
         entry = SUPPORTED_MODEL_INFO[
             "nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16"
         ]
-        language_targets = {
-            key
-            for key, group in entry.inspected["lora_info"].items()
-            if group[0].get("scope", "").startswith("language_model.backbone.layers")
-        }
 
-        assert language_targets == {
-            "down_proj",
-            "in_proj",
-            "k_proj",
-            "mixer.experts.down_proj",
-            "mixer.experts.up_proj",
-            "o_proj",
-            "out_proj",
-            "q_proj",
-            "up_proj",
-            "v_proj",
-        }
-        assert entry.parameters == frozenset(
-            {"mixer.experts.down_proj", "mixer.experts.up_proj"}
-        )
+        assert {"query", "fc1", "linear1"} <= entry.modules
+        assert "mixer.experts.up_proj" in entry.parameters
         assert entry.num_params is None
-        assert entry.lora_ranks == (1, 8, 16, 32, 64, 128)
-
-    def test_super_vl_vision_and_projector_targets_have_no_dims(self) -> None:
-        entry = SUPPORTED_MODEL_INFO[
-            "nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16"
-        ]
-        vision_targets = {
-            "query",
-            "key",
-            "value",
-            "dense",
-            "fc1",
-            "fc2",
-            "linear1",
-            "linear2",
-        }
-
-        assert vision_targets <= entry.modules
-        for key in vision_targets:
-            (target,) = entry.inspected["lora_info"][key]
-            assert "language_model" not in target.get("scope", "")
-            assert "in_features" not in target
-            assert "out_features" not in target
-
-    def test_super_vl_excludes_latent_projections(self) -> None:
-        entry = SUPPORTED_MODEL_INFO[
-            "nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16"
-        ]
-
-        assert not {"fc1_latent_proj", "fc2_latent_proj"} & entry.modules
+        assert entry.lora_ranks is None
 
     def test_granite_micro_has_no_mamba_or_experts(self) -> None:
         entry = SUPPORTED_MODEL_INFO["ibm-granite/granite-4.0-micro"]
@@ -224,26 +156,14 @@ class TestModelInfoInspected:
             }
         ]
 
-    def test_super_vl_in_proj_carries_language_dims(self) -> None:
+    def test_entry_without_dims_has_no_ranks(self) -> None:
         entry = SUPPORTED_MODEL_INFO[
             "nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16"
         ]
 
-        assert entry.lora_info["in_proj"] == [
-            {
-                "kind": "module",
-                "scope": "language_model.backbone.layers.mixer",
-                "type": "Linear",
-                "in_features": 4096,
-                "out_features": 18560,
-                "count": 40,
-            }
-        ]
-
-    def test_entry_without_dims_has_no_ranks(self, no_dims_entry: ModelInfo) -> None:
-        assert no_dims_entry.lora_ranks is None
-        assert no_dims_entry.num_params is None
-        assert "mixer.experts.up_proj" in no_dims_entry.parameters
+        assert entry.lora_ranks is None
+        assert entry.num_params is None
+        assert "mixer.experts.up_proj" in entry.parameters
 
     def test_dump_sorts_target_names(self) -> None:
         dumped = SUPPORTED_MODEL_INFO["openai/gpt-oss-20b"].model_dump(mode="json")
@@ -274,42 +194,6 @@ class TestModelInfoArchitecture:
     def test_rejects_unknown_architecture(self) -> None:
         with pytest.raises(ValidationError, match="architecture"):
             ModelInfo.model_validate({"hub_id": "org/x", "architecture": "sparse"})
-
-
-class TestModelInfoStatus:
-    def test_listed_statuses(self) -> None:
-        statuses = {
-            hub_id: entry.status for hub_id, entry in SUPPORTED_MODEL_INFO.items()
-        }
-        deprecated = {
-            "Qwen/Qwen2.5-0.5B-Instruct",
-            "ibm-granite/granite-4.0-micro",
-            "ibm-granite/granite-4.0-micro-base",
-            "ibm-granite/granite-4.0-h-tiny",
-            "ibm-granite/granite-3.1-3b-a800m-instruct",
-        }
-        preview = {"nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16"}
-
-        for hub_id, status in statuses.items():
-            if hub_id in deprecated:
-                assert status == STATUS_DEPRECATED, hub_id
-            elif hub_id in preview:
-                assert status == STATUS_PREVIEW, hub_id
-            else:
-                assert status == STATUS_LIVE, hub_id
-
-    def test_defaults_to_live(self) -> None:
-        assert ModelInfo(hub_id="org/x").status == STATUS_LIVE
-
-    def test_serializes_as_lowercase_string(self) -> None:
-        entry = SUPPORTED_MODEL_INFO[
-            "nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16"
-        ]
-        assert entry.model_dump(mode="json")["status"] == "preview"
-
-    def test_rejects_unknown_status(self) -> None:
-        with pytest.raises(ValidationError, match="status"):
-            ModelInfo.model_validate({"hub_id": "org/x", "status": "beta"})
 
 
 class TestFinetuningNetworkSpecLoraTargets:
@@ -364,32 +248,12 @@ class TestFinetuningNetworkSpecLoraTargets:
         ):
             finetuning_network("Qwen/Qwen2.5-0.5B-Instruct", lora_r=256)
 
-    def test_unverified_ranks_skip_rank_check(
-        self, monkeypatch: pytest.MonkeyPatch, no_dims_entry: ModelInfo
-    ) -> None:
-        monkeypatch.setitem(SUPPORTED_MODEL_INFO, no_dims_entry.hub_id, no_dims_entry)
-
-        spec = finetuning_network(no_dims_entry.hub_id, lora_r=1024)
-
-        assert spec.lora_config is not None
-
-    def test_super_vl_accepts_vision_modules(self) -> None:
+    def test_unverified_ranks_skip_rank_check(self) -> None:
         spec = finetuning_network(
-            "nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16",
-            ("q_proj", "query", "linear1"),
-            lora_r=128,
+            "nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16", lora_r=1024
         )
 
         assert spec.lora_config is not None
-
-    def test_super_vl_rejects_latent_projections(self) -> None:
-        with pytest.raises(
-            ValidationError, match=r"Unknown LoRA target_modules \['fc1_latent_proj'\]"
-        ):
-            finetuning_network(
-                "nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16",
-                ("q_proj", "fc1_latent_proj"),
-            )
 
     def test_all_linear_in_a_list_is_a_module_name(self) -> None:
         with pytest.raises(ValidationError, match="all-linear"):

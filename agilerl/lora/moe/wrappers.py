@@ -11,6 +11,7 @@ from typing import Any
 import torch
 from peft.tuners.lora.layer import ParamWrapper
 
+from agilerl.lora.fused import ROUTING_STATE
 from agilerl.lora.moe.adapters import (
     adapters_in_routing,
     expert_counts,
@@ -27,6 +28,20 @@ from agilerl.lora.moe.layouts import (
 )
 from agilerl.lora.moe.routed import routed_experts_local_forward
 from agilerl.lora.moe.transposed import transposed_experts_local_forward
+
+
+def _chain_adapters(
+    outer: ParamWrapper, chain: dict[str, ParamWrapper]
+) -> dict[str, list[str]]:
+    """Adapters each chain link applies, routed by the outer wrapper when it has routing."""
+    # Under EP the outer wrapper's routing covers this rank's rows only; inner
+    # links still hold the whole batch's routing.
+    routing = ROUTING_STATE.get(outer)
+    if routing:
+        return {
+            name: adapters_in_routing(link, routing) for name, link in chain.items()
+        }
+    return {name: resolve_adapters(link) for name, link in chain.items()}
 
 
 class SortedExpertsLoraWrapper(ParamWrapper):
@@ -108,13 +123,7 @@ class RoutedExpertsLoraWrapper(ParamWrapper):
         chain = wrapper_chain(self)
         experts = self.get_base_layer()
         routing = mixed_routing(self)
-        if routing is not None:
-            adapters = {
-                name: adapters_in_routing(wrapper, routing)
-                for name, wrapper in chain.items()
-            }
-        else:
-            adapters = {name: resolve_adapters(w) for name, w in chain.items()}
+        adapters = _chain_adapters(self, chain)
 
         if not any(adapters.values()):
             return experts(hidden_states, top_k_index, top_k_weights)
@@ -161,15 +170,7 @@ class TransposedExpertsLoraWrapper(ParamWrapper):
         chain = wrapper_chain(self)
         experts = self.get_base_layer()
         routing = mixed_routing(self)
-        if routing is not None:
-            adapters = {
-                name: adapters_in_routing(wrapper, routing)
-                for name, wrapper in chain.items()
-            }
-        else:
-            adapters = {
-                name: resolve_adapters(wrapper) for name, wrapper in chain.items()
-            }
+        adapters = _chain_adapters(self, chain)
         if not any(adapters.values()):
             return experts(hidden_states, router_indices, routing_weights)
         if not is_transposed_experts_module(experts):

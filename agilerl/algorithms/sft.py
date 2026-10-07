@@ -16,6 +16,8 @@ from agilerl.distributed import (
     FSDPConfig,
     aggregate_metrics_dict,
     barrier,
+    gather_for_cp,
+    gather_for_cp_wo_grad,
     resolve_device,
 )
 from agilerl.typing import (
@@ -24,6 +26,8 @@ from agilerl.typing import (
     SFTPrompts,
 )
 from agilerl.utils.llm_utils import (
+    attention_mask_from_padded_ids,
+    fill_outside_mask,
     is_sft_prompts,
 )
 
@@ -143,6 +147,8 @@ class SFT(LLMAlgorithm[SFTPrompts]):
     :type lora_target_scope: str | None, optional
     """
 
+    _cp_supported = True
+
     def __init__(
         self,
         pad_token_id: int,
@@ -205,6 +211,7 @@ class SFT(LLMAlgorithm[SFTPrompts]):
             activation_offload=activation_offload,
             moe_lora_recompute=moe_lora_recompute,
             lora_target_scope=lora_target_scope,
+            liger_cp_level="token",
         )
         self.temperature = 0
         self.update_epochs = update_epochs
@@ -247,11 +254,10 @@ class SFT(LLMAlgorithm[SFTPrompts]):
         :type experiences: SFTPrompts
         :param training: When ``False`` the backward pass is skipped (eval mode).
         :type training: bool
-        :return: ``loss`` and ``perplexity`` averaged over all samples in
-            the batch, and ``learn_phase_<phase>_s`` wall seconds.
-        :rtype: dict[str, float]
+        :return: ``(loss, perplexity)`` averaged over all samples in
+            the batch.
+        :rtype: tuple[float, float]
         """
-        phase_timer = self._start_learn_phases()
         input_ids = experiences["input_ids"]
         attention_mask = experiences["attention_mask"]
         # Check first that all tensors have the same max length before calculating the masks
@@ -284,19 +290,16 @@ class SFT(LLMAlgorithm[SFTPrompts]):
             "perplexity": 0.0,
         }
 
-        phase_timer.mark("prepare")
         for _ in range(self.update_epochs):
             for start in range(0, num_samples, micro_bs):
                 end = min(start + micro_bs, num_samples)
                 idxs = batch_idxs[start:end]
-                phase_timer.mark("other")
                 loss = self._sft_loss(
                     input_ids[idxs].to(self.device),
                     attention_mask[idxs].to(self.device),
                     labels[idxs].to(self.device),
                     training=training,
                 )
-                phase_timer.mark("forward")
                 if training:
                     self._raise_if_loss_not_finite_on_any_rank(loss)
                     self._backward_pass(loss)
@@ -313,14 +316,11 @@ class SFT(LLMAlgorithm[SFTPrompts]):
 
         learn_metrics = aggregate_metrics_dict(averaged_metrics)
 
-        phase_seconds = self._learn_phase_seconds()
         if training:
             self.metrics.log("loss", learn_metrics["loss"])
             self.metrics.log("perplexity", learn_metrics["perplexity"])
-            for key, value in phase_seconds.items():
-                self.metrics.log(key, value)
 
-        return {**learn_metrics, **phase_seconds}
+        return learn_metrics
 
     def _sft_loss(
         self,
@@ -342,6 +342,8 @@ class SFT(LLMAlgorithm[SFTPrompts]):
         :return: Scalar cross-entropy loss
         :rtype: torch.Tensor
         """
+        if self.fsdp_config is not None and self.fsdp_config.cp > 1:
+            return self._sft_cp_loss(input_ids, labels, training)
         self.actor.train(mode=training)
 
         model_kwargs: dict[str, Any] = {
@@ -388,6 +390,120 @@ class SFT(LLMAlgorithm[SFTPrompts]):
             token_mask = (~ignore).to(logps.dtype)
             loss = -(logps * token_mask).sum() / token_mask.sum().clamp_min(1.0)
         return loss
+
+    def _sft_cp_loss(
+        self,
+        input_ids: torch.Tensor,
+        labels: torch.Tensor,
+        training: bool = True,
+    ) -> torch.Tensor:
+        """Dispatch the context-parallel SFT loss to the fused or unfused path."""
+        self.actor.train(mode=training)
+        if self.use_liger_loss:
+            return self._fused_cp_sft_loss(input_ids, labels, requires_grad=training)
+        return self._unfused_cp_sft_loss(input_ids, labels, requires_grad=training)
+
+    def _sft_cp_shard(
+        self,
+        batch_ids: torch.Tensor,
+        labels: torch.Tensor,
+        *,
+        requires_grad: bool,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Shard the SFT sequence, run the actor, and return shard hidden states."""
+        layout = self._ensure_sequence_layout()
+        batch_ids = batch_ids.to(self.device)
+        labels = labels.to(self.device)
+        attention_mask = attention_mask_from_padded_ids(batch_ids, self.pad_token_id)
+        prepared = layout.prepare(
+            batch_ids, attention_mask, requires_grad=requires_grad
+        )
+        with layout.ulysses(prepared), self._patch_lm_head_to_identity():
+            output = self.actor(**layout.actor_kwargs(prepared))
+        hidden_shard = output[0] if isinstance(output, tuple) else output.logits
+        shard_labels = layout.shard_action_frame(labels)
+        shard_mask = shard_labels != -100
+        hidden_shard = fill_outside_mask(hidden_shard, shard_mask.unsqueeze(-1))
+        return hidden_shard, shard_labels, shard_mask
+
+    def _fused_cp_sft_loss(
+        self,
+        input_ids: torch.Tensor,
+        labels: torch.Tensor,
+        *,
+        requires_grad: bool,
+    ) -> torch.Tensor:
+        """Sharded fused SFT loss with a CP-global denominator."""
+        if not HAS_LIGER_KERNEL:
+            msg = (
+                "Liger loss was requested but `liger-kernel` is not available. "
+                "Set use_liger_loss=False."
+            )
+            raise ImportError(msg)
+        cp_group, _ = self._cp_group_and_rank()
+        hidden_shard, shard_labels, shard_mask = self._sft_cp_shard(
+            input_ids, labels, requires_grad=requires_grad
+        )
+        c_local = float(shard_mask.sum().item())
+        count = torch.tensor([c_local], device=hidden_shard.device)
+        torch.distributed.all_reduce(
+            count, op=torch.distributed.ReduceOp.SUM, group=cp_group
+        )
+        c_global = float(count[0])
+        flat_hidden = hidden_shard.reshape(-1, hidden_shard.size(-1))
+        flat_labels = shard_labels.reshape(-1)
+        safe_labels = torch.where(
+            shard_mask.reshape(-1),
+            flat_labels,
+            torch.tensor(-100, device=flat_labels.device, dtype=flat_labels.dtype),
+        )
+        with self._liger_head_gather() as (head_w, head_b):
+            head_w = head_w.to(dtype=flat_hidden.dtype)
+            if head_b is not None:
+                head_b = head_b.to(dtype=flat_hidden.dtype)
+            loss_local = LigerFusedLinearCrossEntropyLoss(ignore_index=-100)(
+                head_w, flat_hidden, safe_labels, head_b
+            )
+        loss_local = loss_local.mean()
+        scale = c_local / c_global if c_global > 0 else 0.0
+        partial = loss_local * scale
+        reduced = partial.detach().clone()
+        torch.distributed.all_reduce(
+            reduced, op=torch.distributed.ReduceOp.SUM, group=cp_group
+        )
+        return partial + (reduced - partial.detach())
+
+    def _unfused_cp_sft_loss(
+        self,
+        input_ids: torch.Tensor,
+        labels: torch.Tensor,
+        *,
+        requires_grad: bool,
+    ) -> torch.Tensor:
+        """Sharded unfused SFT loss over gathered per-token scalars."""
+        cp_group, _ = self._cp_group_and_rank()
+        hidden_shard, shard_labels, shard_mask = self._sft_cp_shard(
+            input_ids, labels, requires_grad=requires_grad
+        )
+        fused_fn, head_w, head_b = self._fused_logprob_fn_and_head()
+        valid = shard_mask
+        shard_lp = fused_fn(
+            hidden_shard,
+            head_w,
+            head_b,
+            shard_labels.masked_fill(~valid, 0),
+            temperature=1.0,
+            cast_to_fp32=self.cast_logprobs_to_fp32,
+            chunk_rows=self.chunk_rows,
+        )
+        if requires_grad:
+            gathered = gather_for_cp(shard_lp, cp_group)
+        else:
+            gathered = gather_for_cp_wo_grad(
+                shard_lp, self._ensure_sequence_layout().cp, cp_group
+            )
+        token_mask = (labels.to(gathered.device) != -100).to(gathered.dtype)
+        return -(gathered * token_mask).sum() / token_mask.sum().clamp_min(1.0)
 
     def test(
         self,

@@ -167,31 +167,21 @@ class AutoModelForCausalLMWithValueHead(nn.Module):
             for k, v in kwargs.items()
             if k not in {"return_dict", "output_hidden_states"}
         }
-        # The output head's input is the last hidden state; capturing it keeps
-        # the base model from holding every layer's hidden states.
-        head_inputs: list[torch.Tensor] = []
-        hook = self._output_head().register_forward_pre_hook(
-            lambda _module, args: head_inputs.append(args[0])
+        base_out = self.pretrained_model(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            return_dict=True,
+            output_hidden_states=True,
+            **inner_kw,
         )
-        try:
-            base_out = self.pretrained_model(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                return_dict=True,
-                output_hidden_states=False,
-                **inner_kw,
-            )
-        finally:
-            hook.remove()
         lm_logits = base_out.logits
         loss = getattr(base_out, "loss", None)
-        if len(head_inputs) != 1:
-            msg = (
-                "Base model must call its output head exactly once per forward; "
-                f"it was called {len(head_inputs)} times."
-            )
+        if base_out.hidden_states is None:
+            msg = "Base model did not return hidden_states (output_hidden_states must be True)."
             raise RuntimeError(msg)
-        last_hidden_state = head_inputs[0]
+        last_hidden_state = self._hidden_for_value(
+            lm_logits, base_out.hidden_states[-1]
+        )
         head_dtype = self.v_head.summary.weight.dtype
         if last_hidden_state.dtype != head_dtype:
             last_hidden_state = last_hidden_state.to(head_dtype)
@@ -199,15 +189,36 @@ class AutoModelForCausalLMWithValueHead(nn.Module):
 
         return (lm_logits, loss, value)
 
-    def _output_head(self) -> nn.Module:
-        """The outermost ``lm_head`` / ``embed_out`` the base model calls on its last hidden state."""
-        for module in self.pretrained_model.modules():
-            for attr in ("lm_head", "embed_out"):
-                head = getattr(module, attr, None)
-                if isinstance(head, nn.Module):
-                    return head
-        msg = f"Cannot find lm_head (or embed_out) in {type(self.pretrained_model).__name__}."
-        raise AttributeError(msg)
+    def _output_embeddings(self) -> nn.Module | None:
+        """The module currently installed as the causal LM output embedding."""
+        model: Any = self.pretrained_model
+        get_base = getattr(model, "get_base_model", None)
+        if callable(get_base):
+            model = get_base()
+        getter = getattr(model, "get_output_embeddings", None)
+        if callable(getter):
+            embeddings = getter()
+            if isinstance(embeddings, nn.Module):
+                return embeddings
+        lm_head = getattr(model, "lm_head", None)
+        return lm_head if isinstance(lm_head, nn.Module) else None
+
+    def _hidden_for_value(
+        self, logits: torch.Tensor, last_hidden_state: torch.Tensor
+    ) -> torch.Tensor:
+        """Body hidden state, recovered from identity-head logits when those are live."""
+        # Captured hidden_states can leave the autograd graph under activation
+        # checkpointing. Identity-head logits are that hidden state divided by
+        # logits_scaling, and they stay attached.
+        embeddings = self._output_embeddings()
+        if not isinstance(embeddings, nn.Identity):
+            return last_hidden_state
+        if logits.shape[-1] != last_hidden_state.shape[-1]:
+            return last_hidden_state
+        scale = getattr(self.config, "logits_scaling", 1.0)
+        if scale == 1:
+            return logits
+        return logits * scale
 
     def generate(self, *args: Any, **kwargs: Any) -> torch.Tensor | GenerateOutput:
         # ``generate`` is provided by GenerationMixin but resolves through

@@ -23,6 +23,7 @@ from torch.distributed.tensor import DTensor, distribute_tensor
 from torch.nn.utils import clip_grad_norm_
 from torch.optim.lr_scheduler import SequentialLR
 
+from agilerl.distributed.context_parallel import validate_cp_heads
 from agilerl.distributed.expert_parallel import (
     ParallelMesh,
     build_parallel_mesh,
@@ -239,33 +240,18 @@ def clip_param_group_grad_norm_(
 
 @dataclass(frozen=True)
 class OptimizerStep:
-    """Gradient norms and learning rate from one optimizer step.
+    """Global gradient norms and learning rate from one optimizer step."""
 
-    Every grad is scaled by ``clip_coef``, so a group's post-clip norm is its
-    pre-clip norm times ``clip_coef``.
-    """
-
-    # Pre-clip L2 norm of each optimizer param group, in group order.
-    group_grad_norms: tuple[float, ...]
-    clip_coef: float
+    grad_norm_pre: float
+    grad_norm_post: float
     lr: float | None
-
-    @property
-    def grad_norm_pre(self) -> float:
-        """Pre-clip L2 norm over every param group."""
-        return sum(norm * norm for norm in self.group_grad_norms) ** 0.5
-
-    @property
-    def grad_norm_post(self) -> float:
-        """Post-clip L2 norm over every param group."""
-        return self.grad_norm_pre * self.clip_coef
 
 
 def clip_param_groups(
     param_groups: list[dict[str, Any]],
     max_grad_norm: float | None,
     clip_fn: Callable[[list[nn.Parameter], float], torch.Tensor],
-) -> tuple[tuple[float, ...], float]:
+) -> tuple[float, float]:
     """Clip every group by one coefficient from the L2 norm over all groups.
 
     Matches ``torch.nn.utils.clip_grad_norm_`` over the union of all grads.
@@ -279,36 +265,35 @@ def clip_param_groups(
     :param clip_fn: Clips one group in place and returns its pre-clip norm;
         called with ``max_norm=inf`` so it only measures.
     :type clip_fn: Callable[[list[nn.Parameter], float], torch.Tensor]
-    :return: Pre-clip L2 norm of each group, and the coefficient every grad
-        was scaled by.
-    :rtype: tuple[tuple[float, ...], float]
+    :return: ``(pre, post)`` L2 norms over every group.
+    :rtype: tuple[float, float]
     """
-    group_norms = tuple(
+    group_norms = [
         float(_scalar_grad_norm(clip_fn(group["params"], float("inf"))))
         for group in param_groups
-    )
-    if max_grad_norm is None:
-        return group_norms, 1.0
+    ]
     total = sum(norm * norm for norm in group_norms) ** 0.5
+    if max_grad_norm is None:
+        return total, total
     # min(nan, 1.0) is nan, so a non-finite total reaches the grads as in torch.
     clip_coef = min(max_grad_norm / (total + 1e-6), 1.0)
     for group in param_groups:
         for param in group["params"]:
             if param.grad is not None:
                 param.grad.mul_(clip_coef)
-    return group_norms, clip_coef
+    return total, total * clip_coef
 
 
 def _step_result(
-    group_grad_norms: tuple[float, ...],
-    clip_coef: float,
+    grad_norm_pre: float,
+    grad_norm_post: float,
     lr_scheduler: SequentialLR | None,
 ) -> OptimizerStep:
     if lr_scheduler is None:
-        return OptimizerStep(group_grad_norms, clip_coef, lr=None)
+        return OptimizerStep(grad_norm_pre, grad_norm_post, lr=None)
     lr_scheduler.step()
     return OptimizerStep(
-        group_grad_norms, clip_coef, lr=float(lr_scheduler.get_last_lr()[0])
+        grad_norm_pre, grad_norm_post, lr=float(lr_scheduler.get_last_lr()[0])
     )
 
 
@@ -683,13 +668,13 @@ class DPRuntime(BaseRuntime):
         inner = optimizer._single_optimizer()
         sync_grads([param for group in inner.param_groups for param in group["params"]])
         self.phase_timer.mark("grad_sync")
-        group_grad_norms, clip_coef = clip_param_groups(
+        grad_norm_pre, grad_norm_post = clip_param_groups(
             inner.param_groups, max_grad_norm, clip_grad_norm_
         )
         optimizer.step()
         optimizer.zero_grad()
         self.phase_timer.mark("optim")
-        return _step_result(group_grad_norms, clip_coef, lr_scheduler)
+        return _step_result(grad_norm_pre, grad_norm_post, lr_scheduler)
 
 
 class FSDPRuntime(BaseRuntime):
@@ -705,10 +690,20 @@ class FSDPRuntime(BaseRuntime):
         self.parallel_mesh: ParallelMesh | None = None
 
     def data_parallel_world(self, process_world_size: int) -> int:
-        return tp_data_parallel_size(process_world_size, self.config.tp)
+        folded = tp_data_parallel_size(process_world_size, self.config.tp)
+        cp = self.config.cp
+        if cp == 1:
+            return folded
+        if folded % cp != 0:
+            msg = (
+                f"world_size ({process_world_size}) must be divisible by "
+                f"cp ({cp}) for context parallel."
+            )
+            raise ValueError(msg)
+        return folded // cp
 
     def data_parallel_rank(self, process_rank: int) -> int:
-        return process_rank // self.config.tp
+        return process_rank // (self.config.tp * self.config.cp)
 
     @property
     def is_sharded(self) -> bool:
@@ -752,9 +747,26 @@ class FSDPRuntime(BaseRuntime):
         restore_adapter_trainability(["actor", "critic"])
         if self.config.ep > 1:
             validate_actor_ep(actor, self.config.ep, get_world_size())
+        if self.config.cp > 1:
+            from agilerl.algorithms.core.llm_ops.ulysses_attn import (  # cycle: algorithms.core imports this module via base
+                attention_head_counts,
+                model_attention_backend,
+            )
+
+            heads, kv_heads = attention_head_counts(actor)
+            validate_cp_heads(heads, kv_heads, self.config.cp)
+            backend = model_attention_backend(actor)
+            if backend != "flash_attention_2":
+                msg = (
+                    f"cp={self.config.cp} requires the actor's attention backend "
+                    f"to be 'flash_attention_2', got {backend!r}: the Ulysses "
+                    "substitution patches the flash-attention-2 forward."
+                )
+                raise ValueError(msg)
         self.parallel_mesh = build_parallel_mesh(
             ep=self.config.ep,
             tp=self.config.tp,
+            cp=self.config.cp,
             shard_group_size=self.config.shard_group_size,
             device_type=torch.device(device).type,
         )
@@ -765,6 +777,17 @@ class FSDPRuntime(BaseRuntime):
             parallel_mesh=self.parallel_mesh,
             gradient_checkpointing=gradient_checkpointing,
         )
+        if self.parallel_mesh is not None:
+            object.__setattr__(wrapped, "_agilerl_parallel_mesh", self.parallel_mesh)
+        if self.config.cp > 1:
+            from agilerl.algorithms.core.llm_ops.ulysses_attn import (  # cycle: algorithms.core imports this module via base
+                substitute_hf_ulysses_attn,
+            )
+
+            if self.parallel_mesh is None or self.parallel_mesh.cp is None:
+                msg = f"cp={self.config.cp} built no context-parallel mesh."
+                raise RuntimeError(msg)
+            substitute_hf_ulysses_attn(self.parallel_mesh.cp_group)
 
         optimizer = make_llm_optimizer(wrapped, lr, lr_critic)
         if self.config.optim_cpu_offload:
@@ -918,7 +941,9 @@ class FSDPRuntime(BaseRuntime):
 
         FSDP2 reduce-scatters its own DTensors. Replicated params
         (``ignored_params``, LoRA) and EP / TP shards outside FSDP need an
-        explicit all-reduce.
+        explicit all-reduce. Under ``cp > 1`` those replicated grads sum
+        across the context-parallel group, then divide by the data-parallel
+        size (world / cp).
         """
         is_step_boundary = self._count_micro_batch(gradient_accumulation_steps)
 
@@ -937,16 +962,23 @@ class FSDPRuntime(BaseRuntime):
 
         inner = optimizer._single_optimizer()
         params = [param for group in inner.param_groups for param in group["params"]]
-        sync_grads([param for param in params if not isinstance(param, DTensor)])
+        replicated = [param for param in params if not isinstance(param, DTensor)]
+        if self.config.cp > 1:
+            sync_grads(
+                replicated,
+                divide_factor=self.data_parallel_world(get_world_size()),
+            )
+        else:
+            sync_grads(replicated)
         if self.parallel_mesh is not None:
             self.parallel_mesh.sync_grads(
                 params, getattr(torch, self.config.reduce_dtype)
             )
         self.phase_timer.mark("grad_sync")
-        group_grad_norms, clip_coef = clip_param_groups(
+        grad_norm_pre, grad_norm_post = clip_param_groups(
             inner.param_groups, max_grad_norm, clip_param_group_grad_norm_
         )
         optimizer.step()
         optimizer.zero_grad()
         self.phase_timer.mark("optim")
-        return _step_result(group_grad_norms, clip_coef, lr_scheduler)
+        return _step_result(grad_norm_pre, grad_norm_post, lr_scheduler)

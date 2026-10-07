@@ -23,7 +23,6 @@ from agilerl.utils.llm_utils import is_rollout_prompt
 __all__ = ["RolloutCollector"]
 
 if TYPE_CHECKING:
-    from agilerl.llm_envs.observation import ImageProcessorCall
     from agilerl.typing import RolloutPrompt
 
 
@@ -504,9 +503,11 @@ class RolloutCollector:
         if logical_slot is None:
             return None, None
         with self._slot_lock:
-            task_assigner = self._require_task_assigner()
+            if self._task_assigner is None:
+                msg = "_ensure_slots builds the assigner"
+                raise RuntimeError(msg)
             if self._assignment is None:
-                self._assignment = task_assigner.assign(
+                self._assignment = self._task_assigner.assign(
                     self.batch_size,
                     self.group_size,
                     base_seed=self._base_seed,
@@ -533,7 +534,10 @@ class RolloutCollector:
         """
         self._ensure_slots()
         with self._slot_lock:
-            return self._require_task_assigner().next_task(self._base_seed, group_seed)
+            if self._task_assigner is None:
+                msg = "_ensure_slots builds the assigner"
+                raise RuntimeError(msg)
+            return self._task_assigner.next_task(self._base_seed, group_seed)
 
     def record_group_outcome(self, row_index: int, informative: bool) -> None:
         """Feed one finished group's outcome on ``row_index`` back to the task assigner (thread-safe).
@@ -569,14 +573,10 @@ class RolloutCollector:
         """
         self._ensure_slots()
         with self._slot_lock:
-            self._require_task_assigner().load_state_dict(state)
-
-    def _require_task_assigner(self) -> TaskAssigner:
-        """The task assigner :meth:`_ensure_slots` builds; call under ``_slot_lock``."""
-        if self._task_assigner is None:
-            msg = "_ensure_slots builds the assigner"
-            raise RuntimeError(msg)
-        return self._task_assigner
+            if self._task_assigner is None:
+                msg = "_ensure_slots builds the assigner"
+                raise RuntimeError(msg)
+            self._task_assigner.load_state_dict(state)
 
     def _slot_and_activation(self, episode_id: str) -> tuple[int, int]:
         """The ``(slot, activation)`` ``episode_id`` holds; ``KeyError`` when it is not active."""
@@ -755,16 +755,6 @@ class RolloutCollector:
         with self._tokenizer_lock:
             self._require_current(episode_id, slot, activation)
             return env._step_apply(env_result)
-
-    def episode_image_calls(self, episode_id: str) -> list[ImageProcessorCall]:
-        """Processor calls behind one active episode's ``pixel_values``.
-
-        :param episode_id: An active episode; ``KeyError`` when not active.
-        :return: See :meth:`RolloutHarness.episode_image_calls`.
-        """
-        with self._slot_lock:
-            slot = self._episode_to_slot[episode_id]
-        return self.envs[slot].episode_image_calls()
 
     def get_episode_data(
         self,

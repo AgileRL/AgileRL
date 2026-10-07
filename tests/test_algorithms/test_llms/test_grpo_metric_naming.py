@@ -28,7 +28,7 @@ pytest.importorskip("peft", reason="LLM tests require peft.")
 from agilerl.algorithms.core.base import LLMAlgorithm
 from agilerl.algorithms.grpo import GRPO
 from agilerl.utils.learn_profiler import LearnProfiler
-from agilerl.utils.llm_utils import LEARN_PHASES
+from agilerl.utils.llm_utils import GRPO_LEARN_PHASES
 from agilerl.utils.phase_timer import PhaseTimer
 
 SEQ_LEN = 6
@@ -117,12 +117,6 @@ class _Stub:
     _compute_policy_loss = GRPO._compute_policy_loss
     _learn_start_log_probs = GRPO._learn_start_log_probs
     _liger_path_selected = GRPO._liger_path_selected
-    _check_segments_supported = LLMAlgorithm._check_segments_supported
-    _has_episode_segments = LLMAlgorithm._has_episode_segments
-    _learn_phase_seconds = LLMAlgorithm._learn_phase_seconds
-    _row_padding_stats = LLMAlgorithm._row_padding_stats
-    _segment_rows = LLMAlgorithm._segment_rows
-    _start_learn_phases = LLMAlgorithm._start_learn_phases
     _log_importance_weights = GRPO._log_importance_weights
     _loss = GRPO._loss
     _objective_loss = GRPO._objective_loss
@@ -190,8 +184,8 @@ class _Stub:
 
     def _backward_pass(
         self, _loss: torch.Tensor, _accumulation_steps: int | None = None
-    ) -> None:
-        return None
+    ) -> tuple[None, None]:
+        return None, None
 
     def _liger_loss(self, batch_ids: torch.Tensor, *_args: Any, **_kwargs: Any):
         """Record that the fused path ran."""
@@ -467,7 +461,7 @@ class TestLearnTelemetryReportsDiagnostics:
         assert algo.metrics.logged["vllm_is_ratio_mean"] == pytest.approx(2.0)
 
 
-PHASE_KEYS = {f"learn_phase_{phase}_s" for phase in LEARN_PHASES}
+PHASE_KEYS = {f"learn_phase_{phase}_s" for phase in GRPO_LEARN_PHASES}
 
 
 class _SlowOldLogprobsStub(_Stub):
@@ -505,7 +499,7 @@ class TestLearnPhaseTimings:
 
         # Assert
         assert algo.no_grad_forwards == [(1, False, True)]
-        assert metrics["learn_phase_no_grad_forward_s"] >= 0.05
+        assert metrics["learn_phase_old_logprobs_s"] >= 0.05
         assert metrics["learn_phase_forward_s"] < 0.05
         assert metrics["learn_phase_backward_s"] == 0.0
 

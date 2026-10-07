@@ -917,15 +917,11 @@ class TestTrainLlmRollout:
         with pytest.raises(ValueError, match="mixed VL and text-only"):
             _stack_batch_pixel_values([left, None])
 
-    @pytest.mark.parametrize("agent_spec", [GRPO, LLMPPO, LLMREINFORCE])
-    def test_train_llm_rollout_passes_stacked_pixel_values_to_the_learner(
-        self, agent_spec: type
-    ) -> None:
-        # Arrange
-        mock_agent = _make_rollout_mock_agent(spec=agent_spec)
-        pixel_rows = [torch.zeros(1, 3, 2, 2), torch.ones(2, 3, 2, 2)]
-        collected = _rollout_collect_return(batch_steps=3, n_trajectories=2)
-        collected = (*collected[:-1], pixel_rows)
+    def test_train_llm_rollout_passes_stacked_pixel_values_to_grpo(self) -> None:
+        mock_agent = _make_rollout_mock_agent(spec=GRPO)
+        pixels = torch.ones(1, 3, 2, 2)
+        collected = _rollout_collect_return(batch_steps=3)
+        collected = (*collected[:-1], [pixels])
 
         with (
             patch(
@@ -942,22 +938,22 @@ class TestTrainLlmRollout:
             patch("agilerl.training.llm.rollout.collect_rollouts_llm") as mock_collect,
         ):
             mock_collect.return_value = collected
-
-            # Act
             train_llm_rollout(
                 pop=[mock_agent],
                 env_factory=MagicMock(),
                 max_turns=2,
-                init_hp={"BATCH_SIZE": 1, "ALGO": mock_agent.algo},
+                init_hp={"BATCH_SIZE": 1, "ALGO": "GRPO"},
                 max_steps=3,
                 evaluation_interval=100,
                 verbose=False,
             )
 
-        # Assert
-        learn_kwargs = mock_agent.learn.call_args.kwargs
-        assert learn_kwargs["pixel_image_counts"] == [1, 2]
-        assert torch.equal(learn_kwargs["pixel_values"], torch.cat(pixel_rows))
+        mock_agent.learn.assert_called_with(
+            ANY,
+            turn_ids=ANY,
+            sampling_logps=ANY,
+            pixel_values=ANY,
+        )
 
     def test_train_llm_rollout_final_checkpoint_needs_a_configured_path(self):
         """The end-of-run checkpoint fires only when a save target is configured."""

@@ -35,6 +35,8 @@ from transformers import (
     NemotronHForCausalLM,
     PretrainedConfig,
     PreTrainedModel,
+    Qwen3MoeConfig,
+    Qwen3MoeForCausalLM,
     SiglipVisionConfig,
     SiglipVisionModel,
 )
@@ -1881,6 +1883,75 @@ class TestAdaptLoraConfigForModel:
         ) as exc_info:
             adapt_lora_config_for_model(model, cfg)
         assert "LORA_TARGET_SCOPE" in str(exc_info.value)
+
+
+def _tiny_qwen3_moe() -> nn.Module:
+    torch.manual_seed(0)
+    config = Qwen3MoeConfig(
+        vocab_size=64,
+        hidden_size=32,
+        intermediate_size=32,
+        moe_intermediate_size=16,
+        num_hidden_layers=1,
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        num_experts=4,
+        num_experts_per_tok=2,
+        decoder_sparse_step=1,
+        max_position_embeddings=64,
+        head_dim=16,
+    )
+    return Qwen3MoeForCausalLM(config)
+
+
+class TestAdaptLoraConfigForModelMoeRouter:
+    def test_all_linear_targets_attention_and_experts_but_not_router(self):
+        # Arrange
+        model = _tiny_qwen3_moe()
+        cfg = LoraConfig(r=4, target_modules="all-linear", task_type="CAUSAL_LM")
+
+        # Act
+        adapted = adapt_lora_config_for_model(model, cfg)
+        peft_model = get_peft_model(model, adapted, adapter_name="actor")
+
+        # Assert
+        assert set(adapted.target_modules) == {"q_proj", "k_proj", "v_proj", "o_proj"}
+        assert set(adapted.target_parameters) == {
+            "mlp.experts.down_proj",
+            "mlp.experts.gate_up_proj",
+        }
+        layer = peft_model.base_model.model.model.layers[0]
+        assert type(layer.mlp.gate).__name__ == "Qwen3MoeTopKRouter"
+        assert "actor" in layer.mlp.experts.lora_A
+        assert "actor" in layer.self_attn.q_proj.lora_A
+
+    def test_explicit_router_targets_are_dropped(self):
+        cfg = LoraConfig(
+            r=4,
+            target_modules=["q_proj", "gate"],
+            target_parameters=["mlp.gate.weight", "mlp.experts.down_proj"],
+            task_type="CAUSAL_LM",
+        )
+
+        adapted = adapt_lora_config_for_model(_tiny_qwen3_moe(), cfg)
+
+        assert set(adapted.target_modules) == {"q_proj"}
+        assert list(adapted.target_parameters) == ["mlp.experts.down_proj"]
+
+    def test_router_free_targets_are_unchanged(self):
+        cfg = LoraConfig(
+            r=4,
+            target_modules=["q_proj"],
+            target_parameters=["mlp.experts.down_proj"],
+            task_type="CAUSAL_LM",
+        )
+
+        assert adapt_lora_config_for_model(_tiny_qwen3_moe(), cfg) is cfg
+
+    def test_model_without_packed_experts_is_unchanged(self):
+        cfg = _PlainLoraConfig(target_modules="all-linear")
+
+        assert adapt_lora_config_for_model(_PlainLinearModel(), cfg) is cfg
 
 
 class TestAdaptLoraConfigForModelMamba:

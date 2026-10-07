@@ -676,45 +676,6 @@ class TestSelect:
             assert len({a.index for a in pop}) == len(pop)
 
 
-class TestPlanEvolution:
-    def test_returns_an_index_plan_without_cloning(self):
-        strategy = make_multi_frequency_selection(
-            n_subpop=2, population_size=8, ratios=[1, 2]
-        )
-        pop = make_fake_selection_population(
-            {0: [4.0, 3.0, 2.0, 1.0], 1: [8.0, 7.0, 6.0, 5.0]}
-        )
-        original = list(pop)
-
-        plan = strategy.plan_evolution(pop)
-
-        assert pop == original
-        assert set(plan) == {"ops", "elite_index", "indices_to_mutate"}
-        assert len(plan["ops"]) == len(pop)
-        assert plan["elite_index"] == 4
-        assert len(plan["indices_to_mutate"]) == 1
-        assert plan["ops"][3][0] is MultiFrequencyOp.CLONE
-        assert plan["ops"][3][1] == 0
-
-    def test_tags_untagged_agents_by_slot(self):
-        strategy = make_multi_frequency_selection(
-            n_subpop=2, population_size=8, ratios=[1, 2]
-        )
-        pop = [FakeSelectionAgent(i, None, fitness=float(8 - i)) for i in range(8)]
-
-        plan = strategy.plan_evolution(pop)
-
-        assert [a.subpopulation_id for a in pop] == [0, 0, 0, 0, 1, 1, 1, 1]
-        assert plan["elite_index"] == 0
-
-    def test_rejects_wrong_population_size(self):
-        strategy = make_multi_frequency_selection(n_subpop=2, population_size=8)
-        pop = [FakeSelectionAgent(i, None, fitness=0.0) for i in range(6)]
-
-        with pytest.raises(ValueError, match="6 agents, expected 8"):
-            strategy.plan_evolution(pop)
-
-
 class TestDeltaOf:
     def test_delta_of_returns_the_frequency_of_the_agents_subpopulation(self):
         strategy = make_multi_frequency_selection(
@@ -1059,7 +1020,7 @@ class TestApplyHpReset:
         strategy = make_multi_frequency_selection(n_subpop=2, population_size=8)
         agent = FakeLLMAgent(0, 0, 1.0, lr=0.5)
 
-        strategy.apply_hp_reset(agent, {"lr": 0.001, "batch_size": 32})
+        strategy._apply_hp_reset(agent, {"lr": 0.001, "batch_size": 32})
 
         assert agent.lr == 0.001
         assert agent.batch_size == 32
@@ -1073,7 +1034,7 @@ class TestApplyHpReset:
         strategy = make_multi_frequency_selection(n_subpop=2, population_size=8)
         agent = FakeLLMAgent(0, 0, 1.0, lr=0.5)
 
-        strategy.apply_hp_reset(agent, {"batch_size": 32})
+        strategy._apply_hp_reset(agent, {"batch_size": 32})
 
         assert agent.batch_size == 32
         assert agent.reinit_called is False

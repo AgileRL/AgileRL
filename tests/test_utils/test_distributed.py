@@ -12,7 +12,6 @@ sharded and which config policies were requested, not call counts.
 from __future__ import annotations
 
 import copy
-import math
 import os
 import subprocess
 import sys
@@ -43,7 +42,6 @@ from agilerl.distributed import (
     aggregate_metrics_dict,
     all_ranks,
     allreduce_minmax_int,
-    allreduce_sum_ints,
     any_rank,
     apply_fsdp2,
     barrier,
@@ -69,7 +67,6 @@ from agilerl.distributed import (
     validate_ep_degree,
 )
 from agilerl.distributed import fsdp as dmod
-from agilerl.distributed import fsdp_blocks as bmod
 from agilerl.distributed import process as pmod
 from agilerl.distributed import runtime as rmod
 from agilerl.distributed.fsdp import (
@@ -198,18 +195,11 @@ class TestClipParamGroups:
         reference_norm = clip_grad_norm_([reference], max_norm=1.0)
 
         # Act
-        norms, clip_coef = clip_param_groups(groups, 1.0, clip_param_group_grad_norm_)
+        pre, post = clip_param_groups(groups, 1.0, clip_param_group_grad_norm_)
 
         # Assert
-        assert norms == pytest.approx(
-            (
-                torch.linalg.vector_norm(first_grad).item(),
-                torch.linalg.vector_norm(second_grad).item(),
-            ),
-            rel=1e-6,
-        )
-        assert math.hypot(*norms) == pytest.approx(reference_norm.item(), rel=1e-6)
-        assert math.hypot(*norms) * clip_coef == pytest.approx(1.0, rel=1e-5)
+        assert pre == pytest.approx(reference_norm.item(), rel=1e-6)
+        assert post == pytest.approx(1.0, rel=1e-5)
         # rtol covers the float64 vs float32 clip coefficient
         assert torch.allclose(
             torch.cat([first.grad, second.grad]), reference.grad, rtol=1e-6, atol=0
@@ -220,11 +210,11 @@ class TestClipParamGroups:
         groups, first, second = self.two_groups(torch.full((2,), 0.1), torch.zeros(2))
 
         # Act
-        norms, clip_coef = clip_param_groups(groups, 1.0, clip_param_group_grad_norm_)
+        pre, post = clip_param_groups(groups, 1.0, clip_param_group_grad_norm_)
 
         # Assert
-        assert norms == pytest.approx((0.02**0.5, 0.0))
-        assert clip_coef == 1.0
+        assert pre == pytest.approx(0.02**0.5)
+        assert post == pytest.approx(0.02**0.5)
         assert torch.equal(first.grad, torch.full((2,), 0.1))
         assert torch.equal(second.grad, torch.zeros(2))
 
@@ -233,11 +223,11 @@ class TestClipParamGroups:
         groups, first, second = self.two_groups(torch.full((2,), 10.0), torch.ones(2))
 
         # Act
-        norms, clip_coef = clip_param_groups(groups, None, clip_param_group_grad_norm_)
+        pre, post = clip_param_groups(groups, None, clip_param_group_grad_norm_)
 
         # Assert
-        assert norms == pytest.approx((200**0.5, 2**0.5))
-        assert clip_coef == 1.0
+        assert pre == pytest.approx(202**0.5)
+        assert post == pytest.approx(202**0.5)
         assert torch.equal(first.grad, torch.full((2,), 10.0))
         assert torch.equal(second.grad, torch.ones(2))
 
@@ -248,39 +238,13 @@ class TestClipParamGroups:
         )
 
         # Act
-        norms, clip_coef = clip_param_groups(groups, 1.0, clip_param_group_grad_norm_)
-
-        # Assert
-        assert np.isnan(norms[0])
-        assert np.isnan(clip_coef)
-        assert torch.isnan(first.grad).all()
-        assert torch.isnan(second.grad).all()
-
-
-class TestOptimizerStepGradNormProperties:
-    def test_totals_span_every_group_and_share_the_clip_coefficient(self):
-        # Arrange
-        step = OptimizerStep(group_grad_norms=(3.0, 4.0), clip_coef=0.2, lr=None)
-
-        # Act
-        pre, post = step.grad_norm_pre, step.grad_norm_post
-
-        # Assert
-        assert pre == pytest.approx(5.0)
-        assert post == pytest.approx(1.0)
-
-    def test_nan_group_norm_makes_both_totals_nan(self):
-        # Arrange
-        step = OptimizerStep(
-            group_grad_norms=(float("nan"), 1.0), clip_coef=float("nan"), lr=None
-        )
-
-        # Act
-        pre, post = step.grad_norm_pre, step.grad_norm_post
+        pre, post = clip_param_groups(groups, 1.0, clip_param_group_grad_norm_)
 
         # Assert
         assert np.isnan(pre)
         assert np.isnan(post)
+        assert torch.isnan(first.grad).all()
+        assert torch.isnan(second.grad).all()
 
 
 class _FakeDTensor:
@@ -580,29 +544,6 @@ class TestAllreduceMinmaxInt:
 
         # Assert
         assert bounds == (3, 9)
-
-
-class TestAllreduceSumInts:
-    def test_identity_without_process_group(self):
-        assert allreduce_sum_ints([3, 0, 2]) == [3, 0, 2]
-
-    def test_sums_each_value_across_ranks(self):
-        # Arrange — a peer holds [4, 1]
-        def fake_sum(t: torch.Tensor, op: object) -> None:
-            assert op == dist.ReduceOp.SUM
-            t.add_(torch.tensor([4, 1]))
-
-        # Act
-        with (
-            patch("agilerl.distributed.process.is_distributed", return_value=True),
-            patch("agilerl.distributed.process.dist.get_world_size", return_value=2),
-            patch("agilerl.distributed.process.resolve_device", return_value="cpu"),
-            patch("agilerl.distributed.process.dist.all_reduce", side_effect=fake_sum),
-        ):
-            sums = allreduce_sum_ints([2, 3])
-
-        # Assert
-        assert sums == [6, 4]
 
 
 class TestAnyRank:
@@ -1115,13 +1056,13 @@ class TestGatherParamsOwnerless:
 class TestReplaceConsecutiveBlocks:
     def test_rejects_empty_blocks(self):
         with pytest.raises(ValueError, match="non-empty"):
-            bmod._replace_consecutive_blocks(nn.Sequential(nn.Linear(2, 2)), [])
+            dmod._replace_consecutive_blocks(nn.Sequential(nn.Linear(2, 2)), [])
 
     def test_raises_when_span_not_found(self):
         model = nn.Sequential(nn.Linear(2, 2))
 
         with pytest.raises(RuntimeError, match="consecutive ModuleList span"):
-            bmod._replace_consecutive_blocks(model, [nn.Linear(2, 2)])
+            dmod._replace_consecutive_blocks(model, [nn.Linear(2, 2)])
 
 
 class TestGroupTransformerUnits:
@@ -1129,13 +1070,13 @@ class TestGroupTransformerUnits:
         model = nn.Sequential(nn.Linear(2, 2))
         units = [nn.Linear(2, 2)]
 
-        assert bmod._group_transformer_units(model, units, 2) == units
+        assert dmod._group_transformer_units(model, units, 2) == units
 
     def test_trailing_single_chunk_stays_ungrouped(self):
         first, second, third = nn.Linear(2, 2), nn.Linear(2, 2), nn.Linear(2, 2)
         model = nn.Sequential(nn.ModuleList([first, second, third]))
 
-        grouped = bmod._group_transformer_units(model, [first, second, third], 2)
+        grouped = dmod._group_transformer_units(model, [first, second, third], 2)
 
         assert len(grouped) == 2
         assert grouped[1] is third
@@ -1146,7 +1087,7 @@ class TestReplaceChild:
         model = nn.Sequential(nn.Linear(2, 2))
 
         with pytest.raises(RuntimeError, match="Could not find parent"):
-            bmod._replace_child(model, nn.Linear(2, 2), nn.Linear(2, 2))
+            dmod._replace_child(model, nn.Linear(2, 2), nn.Linear(2, 2))
 
 
 class TestResolveCausalLm:
@@ -1155,14 +1096,14 @@ class TestResolveCausalLm:
         shell = nn.Linear(2, 2)
         shell.pretrained_model = inner
 
-        assert bmod.resolve_causal_lm(shell) is inner
+        assert dmod._resolve_causal_lm(shell) is inner
 
     def test_unwraps_base_model_shell(self):
         inner = nn.Linear(2, 2)
         shell = nn.Linear(2, 2)
         shell.base_model = inner
 
-        assert bmod.resolve_causal_lm(shell) is inner
+        assert dmod._resolve_causal_lm(shell) is inner
 
     def test_returns_inner_model_with_lm_head(self):
         head = nn.Linear(2, 2)
@@ -1171,7 +1112,7 @@ class TestResolveCausalLm:
         shell = nn.Linear(2, 2)
         shell.model = inner
 
-        assert bmod.resolve_causal_lm(shell) is inner
+        assert dmod._resolve_causal_lm(shell) is inner
 
     def test_returns_language_tower_with_lm_head(self):
         head = nn.Linear(2, 2)
@@ -1180,7 +1121,7 @@ class TestResolveCausalLm:
         shell = nn.Linear(2, 2)
         shell.language_model = tower
 
-        assert bmod.resolve_causal_lm(shell) is tower
+        assert dmod._resolve_causal_lm(shell) is tower
 
 
 class TestLanguageModel:
@@ -1201,8 +1142,8 @@ class TestLanguageModel:
                 self.language_model = Tower()
 
         omni = Omni()
-        assert bmod._language_model(omni) is omni.language_model.backbone
-        assert bmod.resolve_causal_lm(omni) is omni.language_model
+        assert dmod._language_model(omni) is omni.language_model.backbone
+        assert dmod._resolve_causal_lm(omni) is omni.language_model
 
 
 class TestLoadModelState:
@@ -1683,8 +1624,8 @@ class TestDPRuntimeBackward:
         assert torch.equal(weight_mid_window, torch.zeros(1, 2))
         assert torch.allclose(model.weight, torch.full((1, 2), -0.1))
         assert second == OptimizerStep(
-            group_grad_norms=(pytest.approx(2**0.5),),
-            clip_coef=1.0,
+            grad_norm_pre=pytest.approx(2**0.5),
+            grad_norm_post=pytest.approx(2**0.5),
             lr=pytest.approx(0.05),
         )
         assert model.weight.grad is None
@@ -1802,9 +1743,11 @@ class TestFSDPRuntimeBackward:
         )
 
         assert torch.linalg.vector_norm(param.grad).item() == pytest.approx(1.0)
-        assert step.group_grad_norms == pytest.approx((200**0.5,))
-        assert step.grad_norm_post == pytest.approx(1.0)
-        assert step.lr == 0.5
+        assert step == OptimizerStep(
+            grad_norm_pre=pytest.approx(200**0.5),
+            grad_norm_post=pytest.approx(1.0),
+            lr=0.5,
+        )
         scheduler.step.assert_called_once_with()
         optimizer.step.assert_called_once_with()
         optimizer.zero_grad.assert_called_once_with()
@@ -1967,7 +1910,7 @@ class TestFSDPBlockGroup:
 
         mamba = Block("linear_attention")
         moe = Block("moe")
-        group = bmod.FSDPBlockGroup([mamba, moe])
+        group = dmod.FSDPBlockGroup([mamba, moe])
         hidden = torch.zeros(1, 2)
 
         out = group(
@@ -2033,8 +1976,8 @@ class TestSetPrefetch:
         head = model.lm_head
 
         # Act
-        with patch.object(bmod, "FSDPModule", PrefetchUnit):
-            bmod._set_prefetch(model, [first, second])
+        with patch.object(dmod, "FSDPModule", PrefetchUnit):
+            dmod._set_prefetch(model, [first, second])
 
         # Assert
         assert embed.forward_prefetch == [first]
@@ -2052,8 +1995,8 @@ class TestSetPrefetch:
         vision_blocks = list(model.vision.blocks)
 
         # Act
-        with patch.object(bmod, "FSDPModule", PrefetchUnit):
-            bmod._set_prefetch(model, language_blocks + vision_blocks)
+        with patch.object(dmod, "FSDPModule", PrefetchUnit):
+            dmod._set_prefetch(model, language_blocks + vision_blocks)
 
         # Assert
         assert language_blocks[1].forward_prefetch == [model.lm_head]
@@ -2072,8 +2015,8 @@ class TestSetPrefetch:
         blocks = list(model.model.layers)
 
         # Act
-        with patch.object(bmod, "FSDPModule", PrefetchUnit):
-            bmod._set_prefetch(model, blocks, forward_units=2, backward_units=1)
+        with patch.object(dmod, "FSDPModule", PrefetchUnit):
+            dmod._set_prefetch(model, blocks, forward_units=2, backward_units=1)
 
         # Assert
         assert embed.forward_prefetch == [blocks[0], blocks[1]]
@@ -2108,7 +2051,7 @@ class HybridStack(nn.Module):
 def checkpointed_kinds(body: nn.Module) -> list[str]:
     """``block_type`` of each checkpoint-wrapped entry in ``body.layers``."""
     return [
-        bmod._unwrap_checkpoint(layer).block_type
+        dmod._unwrap_checkpoint(layer).block_type
         for layer in body.layers
         if isinstance(layer, CheckpointWrapper)
     ]
@@ -2175,7 +2118,7 @@ class TestApplyFsdp2:
             return module
 
         # Act
-        with patch.object(bmod, "fully_shard", side_effect=_record):
+        with patch.object(dmod, "fully_shard", side_effect=_record):
             out = apply_fsdp2(model, self.per_block)
 
         # Assert — same object; each block and the root are sharded
@@ -2217,7 +2160,7 @@ class TestApplyFsdp2:
             return module
 
         # Act
-        with patch.object(bmod, "fully_shard", side_effect=_record):
+        with patch.object(dmod, "fully_shard", side_effect=_record):
             apply_fsdp2(untied, self.per_block)
 
         # Assert — embeddings stay replicated; untied lm_head is its own unit
@@ -2242,7 +2185,7 @@ class TestApplyFsdp2:
         tied = CausalLM(tie=True)
         sharded.clear()
         shard_kwargs.clear()
-        with patch.object(bmod, "fully_shard", side_effect=_record):
+        with patch.object(dmod, "fully_shard", side_effect=_record):
             apply_fsdp2(tied, self.per_block)
 
         # Assert
@@ -2284,8 +2227,8 @@ class TestApplyFsdp2:
             captured_blocks.extend(block_units)
 
         with (
-            patch.object(bmod, "fully_shard", side_effect=_record),
-            patch.object(bmod, "_set_prefetch", side_effect=_capture),
+            patch.object(dmod, "fully_shard", side_effect=_record),
+            patch.object(dmod, "_set_prefetch", side_effect=_capture),
         ):
             apply_fsdp2(model, self.per_block, gradient_checkpointing=True)
 
@@ -2304,7 +2247,7 @@ class TestApplyFsdp2:
         model = HybridStack(["mamba", "attention", "moe", "attention"])
 
         # Act
-        with patch.object(bmod, "fully_shard", side_effect=lambda m, **_kw: m):
+        with patch.object(dmod, "fully_shard", side_effect=lambda m, **_kw: m):
             apply_fsdp2(
                 model,
                 FSDPConfig(checkpoint_skip_layer_types=["attention"]),
@@ -2314,7 +2257,7 @@ class TestApplyFsdp2:
         # Assert
         assert checkpointed_kinds(model) == ["mamba", "moe"]
         assert [
-            bmod._unwrap_checkpoint(layer).block_type for layer in model.layers
+            dmod._unwrap_checkpoint(layer).block_type for layer in model.layers
         ] == [
             "mamba",
             "attention",
@@ -2330,7 +2273,7 @@ class TestApplyFsdp2:
         )
 
         # Act
-        with patch.object(bmod, "fully_shard", side_effect=lambda m, **_kw: m):
+        with patch.object(dmod, "fully_shard", side_effect=lambda m, **_kw: m):
             apply_fsdp2(model, config, gradient_checkpointing=True)
 
         # Assert
@@ -2343,7 +2286,7 @@ class TestApplyFsdp2:
         model.layers.append(PlainBlock())
 
         # Act
-        with patch.object(bmod, "fully_shard", side_effect=lambda m, **_kw: m):
+        with patch.object(dmod, "fully_shard", side_effect=lambda m, **_kw: m):
             apply_fsdp2(
                 model,
                 FSDPConfig(checkpoint_skip_layer_types=("PlainBlock",)),
@@ -2359,7 +2302,7 @@ class TestApplyFsdp2:
     ):
         model = HybridStack(["mamba", "moe"])
 
-        with patch.object(bmod, "fully_shard", side_effect=lambda m, **_kw: m):
+        with patch.object(dmod, "fully_shard", side_effect=lambda m, **_kw: m):
             apply_fsdp2(model, FSDPConfig(checkpoint_skip_layer_types=("moe",)))
 
         assert checkpointed_kinds(model) == []
@@ -2368,7 +2311,7 @@ class TestApplyFsdp2:
         model = HybridStack(["mamba", "moe"])
 
         with (
-            patch.object(bmod, "fully_shard", side_effect=lambda m, **_kw: m),
+            patch.object(dmod, "fully_shard", side_effect=lambda m, **_kw: m),
             pytest.raises(ValueError, match=r"\['attention'\] match no transformer"),
         ):
             apply_fsdp2(
@@ -2451,8 +2394,8 @@ class TestApplyFsdp2:
         blocks = list(model.layers)
 
         with (
-            patch.object(bmod, "fully_shard", side_effect=lambda m, **_kw: m),
-            patch.object(bmod, "FSDPModule", PrefetchBlock),
+            patch.object(dmod, "fully_shard", side_effect=lambda m, **_kw: m),
+            patch.object(dmod, "FSDPModule", PrefetchBlock),
         ):
             apply_fsdp2(model, self.per_block)
 
@@ -2494,8 +2437,8 @@ class TestApplyFsdp2:
         blocks = list(model.layers)
 
         with (
-            patch.object(bmod, "fully_shard", side_effect=lambda m, **_kw: m),
-            patch.object(bmod, "FSDPModule", PrefetchBlock),
+            patch.object(dmod, "fully_shard", side_effect=lambda m, **_kw: m),
+            patch.object(dmod, "FSDPModule", PrefetchBlock),
         ):
             apply_fsdp2(
                 model,
@@ -2524,7 +2467,7 @@ class TestApplyFsdp2:
             seen[id(module)] = kwargs
             return module
 
-        with patch.object(bmod, "fully_shard", side_effect=_record):
+        with patch.object(dmod, "fully_shard", side_effect=_record):
             apply_fsdp2(model, self.per_block, mesh=mesh)
 
         assert seen[id(model)]["mesh"] is mesh
@@ -2551,7 +2494,7 @@ class TestApplyFsdp2:
         sharded: list[nn.Module] = []
 
         with patch.object(
-            bmod, "fully_shard", side_effect=lambda m, **_kw: sharded.append(m) or m
+            dmod, "fully_shard", side_effect=lambda m, **_kw: sharded.append(m) or m
         ):
             apply_fsdp2(model, self.per_block)
 
@@ -2580,7 +2523,7 @@ class TestApplyFsdp2:
             seen[id(module)] = kwargs
             return module
 
-        with patch.object(bmod, "fully_shard", side_effect=_record):
+        with patch.object(dmod, "fully_shard", side_effect=_record):
             apply_fsdp2(
                 model,
                 FSDPConfig(
@@ -2613,7 +2556,7 @@ class TestApplyFsdp2:
         block = model.layers[0]
         assert block.norm.weight.dtype == torch.float32
 
-        with patch.object(bmod, "fully_shard", side_effect=lambda m, **_kw: m):
+        with patch.object(dmod, "fully_shard", side_effect=lambda m, **_kw: m):
             apply_fsdp2(
                 model,
                 FSDPConfig(
@@ -2632,7 +2575,7 @@ class TestApplyFsdp2:
         seen_kwargs: list[dict] = []
 
         with patch.object(
-            bmod,
+            dmod,
             "fully_shard",
             side_effect=lambda m, **kw: seen_kwargs.append(kw) or m,
         ):
@@ -2648,7 +2591,7 @@ class TestApplyFsdp2:
 
         # Act
         with patch.object(
-            bmod, "fully_shard", side_effect=lambda m, **_kw: sharded.append(m) or m
+            dmod, "fully_shard", side_effect=lambda m, **_kw: sharded.append(m) or m
         ):
             out = apply_fsdp2(model)
 
@@ -2663,7 +2606,7 @@ class TestApplyFsdp2:
 
         # Act
         with patch.object(
-            bmod,
+            dmod,
             "fully_shard",
             side_effect=lambda m, **kw: seen_kwargs.append(kw) or m,
         ):
@@ -2680,7 +2623,7 @@ class TestApplyFsdp2:
 
         # Act
         with patch.object(
-            bmod,
+            dmod,
             "fully_shard",
             side_effect=lambda m, **kw: seen_kwargs.append(kw) or m,
         ):
@@ -2697,7 +2640,7 @@ class TestApplyFsdp2:
         seen_kwargs: list[dict] = []
 
         with patch.object(
-            bmod,
+            dmod,
             "fully_shard",
             side_effect=lambda m, **kw: seen_kwargs.append(kw) or m,
         ):
@@ -2727,9 +2670,9 @@ class TestApplyFsdp2:
 
         # Act
         with (
-            patch.object(bmod, "fully_shard", side_effect=lambda m, **_kw: m),
+            patch.object(dmod, "fully_shard", side_effect=lambda m, **_kw: m),
             patch.object(
-                bmod,
+                dmod,
                 "register_fsdp_forward_method",
                 side_effect=lambda m, name: registered.append((m, name)),
             ),
@@ -2768,7 +2711,7 @@ class TestApplyFsdp2:
         sharded: list[nn.Module] = []
 
         with patch.object(
-            bmod, "fully_shard", side_effect=lambda m, **_kw: sharded.append(m) or m
+            dmod, "fully_shard", side_effect=lambda m, **_kw: sharded.append(m) or m
         ):
             apply_fsdp2(model, self.per_block)
 
@@ -2801,7 +2744,7 @@ class TestApplyFsdp2:
         sharded: list[nn.Module] = []
 
         with patch.object(
-            bmod, "fully_shard", side_effect=lambda m, **_kw: sharded.append(m) or m
+            dmod, "fully_shard", side_effect=lambda m, **_kw: sharded.append(m) or m
         ):
             apply_fsdp2(model, self.per_block)
 
@@ -2872,18 +2815,18 @@ class TestApplyFsdp2:
                 kwargs.get("position_ids"),
             )
 
-        monkeypatch.setattr(bmod, "block_type_mask_mapping", fake_mapping)
+        monkeypatch.setattr(dmod, "block_type_mask_mapping", fake_mapping)
         model = Model()
         mamba = model.model.layers[0]
         moe = model.model.layers[1]
 
-        with patch.object(bmod, "fully_shard", side_effect=lambda m, **_kw: m):
+        with patch.object(dmod, "fully_shard", side_effect=lambda m, **_kw: m):
             apply_fsdp2(model, FSDPConfig(wrap_every_n_blocks=2, prefetch_units=1))
 
         hidden = model.model(input_ids=torch.zeros(1, 2, dtype=torch.long))
         group = model.model.layers[0]
 
-        assert isinstance(group, bmod.FSDPBlockGroup)
+        assert isinstance(group, dmod.FSDPBlockGroup)
         assert hidden.shape == (1, 2, 2)
         assert mamba.seen == ["linear"]
         assert moe.seen == [None]
@@ -2915,7 +2858,7 @@ class TestApplyFsdp2:
         model = Model()
         original = type(model.model).forward
 
-        with patch.object(bmod, "fully_shard", side_effect=lambda m, **_kw: m):
+        with patch.object(dmod, "fully_shard", side_effect=lambda m, **_kw: m):
             apply_fsdp2(model, FSDPConfig(wrap_every_n_blocks=2, prefetch_units=1))
 
         assert type(model.model).forward is original
@@ -2926,9 +2869,9 @@ class TestApplyFsdp2:
                 return kwargs
 
         language = Language()
-        bmod._install_grouped_mask_forward(language)
+        dmod._install_grouped_mask_forward(language)
         first = type(language).forward
-        bmod._install_grouped_mask_forward(language)
+        dmod._install_grouped_mask_forward(language)
 
         assert type(language).forward is first
 
@@ -2953,13 +2896,13 @@ class TestApplyFsdp2:
         sharded: list[nn.Module] = []
 
         with patch.object(
-            bmod, "fully_shard", side_effect=lambda m, **_kw: sharded.append(m) or m
+            dmod, "fully_shard", side_effect=lambda m, **_kw: sharded.append(m) or m
         ):
             apply_fsdp2(model, FSDPConfig(wrap_every_n_blocks=2, prefetch_units=1))
 
         assert len(model.layers) == 2
-        assert isinstance(model.layers[0], bmod.FSDPBlockGroup)
-        assert isinstance(model.layers[1], bmod.FSDPBlockGroup)
+        assert isinstance(model.layers[0], dmod.FSDPBlockGroup)
+        assert isinstance(model.layers[1], dmod.FSDPBlockGroup)
         assert list(model.layers[0].blocks) == raw[:2]
         assert list(model.layers[1].blocks) == raw[2:]
         assert sharded[0] is model.layers[0]
@@ -2986,7 +2929,7 @@ class TestApplyFsdp2:
         sharded: list[nn.Module] = []
 
         with patch.object(
-            bmod, "fully_shard", side_effect=lambda m, **_kw: sharded.append(m) or m
+            dmod, "fully_shard", side_effect=lambda m, **_kw: sharded.append(m) or m
         ):
             apply_fsdp2(model)
 
@@ -3556,35 +3499,3 @@ class TestReferenceDispatchCombine:
         # Act / Assert
         with pytest.raises(ValueError, match="must be divisible by ep"):
             reference_dispatch_combine(tokens, expert_ids, ep_degree=2, num_experts=3)
-
-
-class TestFSDPPrepareActorExpertParallel:
-    def test_validates_packed_experts_when_ep_is_above_one(self):
-        actor = nn.Linear(2, 2)
-        restore = MagicMock()
-        with (
-            patch("agilerl.distributed.runtime.validate_actor_ep") as validate,
-            patch("agilerl.distributed.runtime.build_parallel_mesh", return_value=None),
-            patch(
-                "agilerl.distributed.runtime.materialize_fsdp2_from_cpu_state",
-                return_value=actor,
-            ),
-            patch("agilerl.distributed.runtime.get_world_size", return_value=2),
-            patch(
-                "agilerl.utils.llm_utils.make_llm_optimizer",
-                return_value=MagicMock(),
-            ),
-            patch("agilerl.utils.llm_utils.make_llm_scheduler", return_value=None),
-        ):
-            FSDPRuntime(FSDPConfig(ep=2)).prepare_actor(
-                actor,
-                device="cpu",
-                colocated=False,
-                cosine_lr_schedule_config=None,
-                lr=1e-4,
-                lr_critic=None,
-                restore_adapter_trainability=restore,
-            )
-
-        restore.assert_called_once_with(["actor", "critic"])
-        validate.assert_called_once_with(actor, 2, 2)

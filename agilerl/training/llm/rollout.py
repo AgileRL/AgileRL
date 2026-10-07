@@ -388,7 +388,7 @@ def train_llm_rollout(
                             )
 
                     learn_kwargs: dict[str, Any] = {}
-                    if batch.pixel_values is not None:
+                    if isinstance(agent, GRPO) and batch.pixel_values is not None:
                         stacked_pixel_values = _stack_batch_pixel_values(
                             batch.pixel_values,
                         )

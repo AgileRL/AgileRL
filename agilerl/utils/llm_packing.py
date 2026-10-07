@@ -119,6 +119,80 @@ def pack_padded_batch(
     )
 
 
+class PaddedPackedRow(NamedTuple):
+    """Packed row padded so its length is a multiple of the CP degree.
+
+    :param input_ids: ``(1, N_pad)`` packed tokens plus a tail pad.
+    :param position_ids: ``(1, N_pad)`` positions; the tail is zeros.
+    :param cu_seqlens: Cumulative lengths including the tail as its own segment.
+    :param max_seqlen: Longest segment, including the tail when it is longer.
+    """
+
+    input_ids: torch.Tensor
+    position_ids: torch.Tensor
+    cu_seqlens: torch.Tensor
+    max_seqlen: int
+
+
+def pad_packed_row_for_cp(
+    packed: PackedBatch,
+    pad_token_id: int,
+    cp: int,
+) -> PaddedPackedRow:
+    """Pad a packed row so its length is a multiple of ``cp``.
+
+    The tail is its own ``cu_seqlens`` segment. Callers drop it when they
+    unpack. ``cp <= 1`` returns the packed row unchanged.
+
+    :param packed: Packed batch to pad.
+    :param pad_token_id: Token id written into the tail.
+    :param cp: Context-parallel degree.
+    :return: Padded ids, positions, cumulative lengths, and max segment length.
+    """
+    if cp <= 1:
+        return PaddedPackedRow(
+            input_ids=packed.input_ids,
+            position_ids=packed.position_ids,
+            cu_seqlens=packed.cu_seqlens,
+            max_seqlen=packed.max_seqlen,
+        )
+    tail = (-packed.input_ids.shape[1]) % cp
+    if not tail:
+        return PaddedPackedRow(
+            input_ids=packed.input_ids,
+            position_ids=packed.position_ids,
+            cu_seqlens=packed.cu_seqlens,
+            max_seqlen=packed.max_seqlen,
+        )
+    pad = torch.full(
+        (1, tail),
+        pad_token_id,
+        dtype=packed.input_ids.dtype,
+        device=packed.input_ids.device,
+    )
+    input_ids = torch.cat([packed.input_ids, pad], dim=1)
+    position_ids = torch.cat(
+        [
+            packed.position_ids,
+            torch.zeros(
+                (1, tail),
+                dtype=packed.position_ids.dtype,
+                device=packed.position_ids.device,
+            ),
+        ],
+        dim=1,
+    )
+    cu_seqlens = torch.cat([packed.cu_seqlens, packed.cu_seqlens[-1:] + tail]).to(
+        torch.int32
+    )
+    return PaddedPackedRow(
+        input_ids=input_ids,
+        position_ids=position_ids,
+        cu_seqlens=cu_seqlens,
+        max_seqlen=max(packed.max_seqlen, tail),
+    )
+
+
 def packed_seq_idx(position_ids: torch.Tensor) -> torch.Tensor | None:
     """Per-token document index of packed rows, or None when no row is packed.
 

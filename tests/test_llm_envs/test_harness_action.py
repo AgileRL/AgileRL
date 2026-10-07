@@ -54,15 +54,6 @@ class TestEnvActionText:
             == "send_msg_to_user('$14.47-$23.50')"
         )
 
-    def test_unquotes_a_quoted_colon_payload(self) -> None:
-        assert (
-            env_action_text('send_msg_to_user: "$5 off"')
-            == "send_msg_to_user('$5 off')"
-        )
-
-    def test_passes_a_call_with_no_payload_through(self) -> None:
-        assert env_action_text("noop(") == "noop("
-
     def test_keeps_a_parsed_call(self) -> None:
         assert env_action_text("fill('55', 'red')") == "fill('55', 'red')"
 

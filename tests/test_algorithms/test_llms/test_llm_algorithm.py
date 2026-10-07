@@ -130,40 +130,6 @@ class TestCreatePromptMasks:
         ]
 
 
-class TestLLMAlgorithmSegmentLossScales:
-    def test_single_rank_steps_average_their_real_micro_batches(self) -> None:
-        # Arrange: two 4-micro-batch steps with 3 and 4 real micro-batches.
-        filler = np.array([False, True, False, False, False, False, False, False])
-
-        # Act
-        scales = LLMAlgorithm._segment_loss_scales(filler, 4)
-
-        # Assert
-        assert scales.tolist() == pytest.approx([4 / 3, 0.0, 4 / 3, 4 / 3, 1, 1, 1, 1])
-
-    def test_steps_average_the_real_micro_batches_of_every_rank(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        # Arrange: the other rank's two steps hold 1 and 2 real micro-batches.
-        monkeypatch.setattr("agilerl.algorithms.core.base.get_world_size", lambda: 2)
-        monkeypatch.setattr(
-            "agilerl.algorithms.core.base.allreduce_sum_ints",
-            lambda values: [values[0] + 1, values[1] + 2],
-        )
-        filler = np.array([False, True, True, False])
-
-        # Act
-        scales = LLMAlgorithm._segment_loss_scales(filler, 2)
-
-        # Assert
-        assert scales.tolist() == pytest.approx([2.0, 0.0, 0.0, 4 / 3])
-
-    def test_a_step_of_filler_on_every_rank_has_zero_scales(self) -> None:
-        scales = LLMAlgorithm._segment_loss_scales(np.array([True, True]), 2)
-
-        assert scales.tolist() == [0.0, 0.0]
-
-
 class TestLLMAlgorithmTestPromptGuard:
     def test_a_non_terminal_env_holding_no_prompt_is_rejected(self):
         """``done`` and ``current_prompt`` must agree, or get_action sees nothing.

@@ -71,7 +71,7 @@ if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
     from peft import PeftConfig, PeftModel, get_peft_model
     from transformers import PreTrainedModel
 
-    from agilerl.lora.moe import bind_routed_experts_config, upgrade_moe_param_wrappers
+    from agilerl.lora.moe import upgrade_moe_param_wrappers
 
     PreTrainedModelType = PeftModel | PreTrainedModel
 else:
@@ -2609,7 +2609,6 @@ def clone_llm(
         if getattr(peft_configs[first_adapter], "target_parameters", None):
             upgrade_moe_param_wrappers(model)
         model.disable_adapter()
-        bind_routed_experts_config(model)
 
     model = model.to(dtype=next(p.dtype for p in source_model.parameters()))
 

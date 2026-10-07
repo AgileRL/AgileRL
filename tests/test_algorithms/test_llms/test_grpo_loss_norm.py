@@ -217,7 +217,6 @@ class _Stub:
     _apply_kl_advantage_shaping = GRPO._apply_kl_advantage_shaping
     _compute_policy_loss = GRPO._compute_policy_loss
     _fused_kernel_loss = GRPO._fused_kernel_loss
-    _gradient_forward_inputs = GRPO._gradient_forward_inputs
     _liger_loss = GRPO._liger_loss
     _log_importance_weights = GRPO._log_importance_weights
     _logprobs_from_hidden_fused = staticmethod(GRPO._logprobs_from_hidden_fused)
@@ -367,9 +366,7 @@ def fused_kernel(monkeypatch: pytest.MonkeyPatch) -> type[_FakeFusedKernel]:
 class TestGRPOLossNormConfig:
     """The mode is validated at construction and defaults to the micro-batch."""
 
-    @pytest.mark.parametrize(
-        "loss_norm", ["micro_batch", "accumulation_window", "episode"]
-    )
+    @pytest.mark.parametrize("loss_norm", ["micro_batch", "accumulation_window"])
     def test_supported_modes_are_accepted(self, loss_norm: str) -> None:
         assert _Stub()._resolve_loss_norm(loss_norm) == loss_norm
 

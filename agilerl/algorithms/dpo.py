@@ -139,6 +139,8 @@ class DPO(LLMAlgorithm[PreferencePrompts]):
     :type lora_target_scope: str | None, optional
     """
 
+    _cp_supported = True
+
     def __init__(
         self,
         pad_token_id: int,
@@ -207,6 +209,7 @@ class DPO(LLMAlgorithm[PreferencePrompts]):
             activation_offload=activation_offload,
             moe_lora_recompute=moe_lora_recompute,
             lora_target_scope=lora_target_scope,
+            liger_cp_level="token",
         )
         self.beta = beta
         self.nll_alpha = nll_alpha
@@ -261,11 +264,9 @@ class DPO(LLMAlgorithm[PreferencePrompts]):
         :type experiences: PreferencePrompts
         :param training: Whether the agent is training or not
         :type training: bool
-        :return: Dict with keys ``loss``, ``chosen_reward``, ``rejected_reward``
-            and ``learn_phase_<phase>_s`` wall seconds.
+        :return: Dict with keys ``loss``, ``chosen_reward``, ``rejected_reward``.
         :rtype: dict[str, float]
         """
-        phase_timer = self._start_learn_phases()
         gc.collect()
         torch.cuda.empty_cache()
         if torch.backends.mps.is_available():
@@ -307,7 +308,6 @@ class DPO(LLMAlgorithm[PreferencePrompts]):
             "rejected_reward": 0.0,
         }
         ref_rejected_log_probs, ref_chosen_log_probs = None, None
-        phase_timer.mark("prepare")
         if not self.use_liger_loss:
             with torch.no_grad():
                 ref_rejected_log_probs = self._get_logprobs(
@@ -324,14 +324,12 @@ class DPO(LLMAlgorithm[PreferencePrompts]):
                     eval_mode=True,
                     attention_mask=chosen_attention_mask,
                 )
-            phase_timer.mark("no_grad_forward")
 
         for _ in range(self.update_epochs):
             for start in range(0, num_samples, batch_size):
                 minibatch_idxs = batch_idxs[
                     start : min((start + batch_size), num_samples)
                 ]
-                phase_timer.mark("other")
                 loss, chosen_reward, rejected_reward = self._dpo_loss(
                     batch_size,
                     minibatch_idxs,
@@ -345,7 +343,6 @@ class DPO(LLMAlgorithm[PreferencePrompts]):
                     ref_chosen_log_probs,
                     training,
                 )
-                phase_timer.mark("forward")
                 if training:
                     self._raise_if_loss_not_finite_on_any_rank(loss)
                     self._backward_pass(loss)
@@ -371,11 +368,7 @@ class DPO(LLMAlgorithm[PreferencePrompts]):
                 "reward_margin", agg["chosen_reward"] - agg["rejected_reward"]
             )
 
-        phase_seconds = self._learn_phase_seconds()
-        if training:
-            for key, value in phase_seconds.items():
-                self.metrics.log(key, value)
-        return {**learn_metrics, **phase_seconds}
+        return learn_metrics
 
     def _dpo_loss(
         self,
@@ -562,16 +555,26 @@ class DPO(LLMAlgorithm[PreferencePrompts]):
             )
             raise ImportError(msg)
 
-        def _get_hidden(ids: torch.Tensor, attn_mask: torch.Tensor) -> torch.Tensor:
+        def _get_hidden(
+            ids: torch.Tensor, attn_mask: torch.Tensor, *, requires_grad: bool
+        ) -> torch.Tensor:
             """Run a forward pass and return hidden states fed into the language-model head.
 
             :param ids: Token IDs ``[batch, seq_len]``.
             :type ids: torch.Tensor
             :param attn_mask: Attention mask ``[batch, seq_len]``.
             :type attn_mask: torch.Tensor
+            :param requires_grad: True on the policy forward; False for reference.
             :return: Hidden states before the LM head ``[batch, seq_len, hidden]``.
             :rtype: torch.Tensor
             """
+            if self.fsdp_config is not None and self.fsdp_config.cp > 1:
+                hidden, _ = self._layout_hidden_and_value(
+                    ids,
+                    attn_mask,
+                    requires_grad=requires_grad,
+                )
+                return hidden
             with self._patch_lm_head_to_identity():
                 output = self.actor(
                     input_ids=ids, attention_mask=attn_mask, use_cache=False
@@ -590,10 +593,10 @@ class DPO(LLMAlgorithm[PreferencePrompts]):
             with self.select_adapter("reference"):
                 self.actor.eval()
                 ref_chosen_hidden = _get_hidden(
-                    chosen_ids, chosen_attn
+                    chosen_ids, chosen_attn, requires_grad=False
                 )  # (B, seq_len, H)
                 ref_rejected_hidden = _get_hidden(
-                    rejected_ids, rejected_attn
+                    rejected_ids, rejected_attn, requires_grad=False
                 )  # (B, seq_len, H)
         ref_hidden = torch.cat(
             [ref_chosen_hidden, ref_rejected_hidden], dim=0
@@ -603,10 +606,10 @@ class DPO(LLMAlgorithm[PreferencePrompts]):
         with self.select_adapter("actor"):
             self.actor.train()
             policy_chosen_hidden = _get_hidden(
-                chosen_ids, chosen_attn
+                chosen_ids, chosen_attn, requires_grad=True
             )  # (B, seq_len, H)
             policy_rejected_hidden = _get_hidden(
-                rejected_ids, rejected_attn
+                rejected_ids, rejected_attn, requires_grad=True
             )  # (B, seq_len, H)
         policy_hidden = torch.cat(
             [policy_chosen_hidden, policy_rejected_hidden], dim=0
